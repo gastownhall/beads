@@ -3347,6 +3347,33 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 // runs the embedded variants race like the jobs' binaries, with the jobs'
 // parallelism; each shard variant runs its job's shard script with the job's
 // shard total, and the conformance variants pass the jobs' exact selectors.
+// bazel-embedded's test step, exactly (review F4).
+const bazelEmbeddedTestRun = `set -o pipefail
+start=$(date +%s)
+rc=0
+bazel test //... --config=embedded \
+  --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+  2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
+echo "bazel test --config=embedded: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
+exit "$rc"`
+
+// .bazelrc's --config=embedded, exactly and in order (review F4): no
+// --test_filter, no -test.short/-test.run/-test.skip, no retries, no
+// result caching. The conformance targets' own -test.run/-test.skip args
+// (the legacy jobs' partition) are checked against pr-risk.yml below.
+var bazelEmbeddedRCLines = []string{
+	"test:embedded --@rules_go//go/config:race",
+	"test:embedded --test_tag_filters=embedded",
+	"test:embedded --build_tests_only",
+	"test:embedded --keep_going",
+	"test:embedded --test_summary=terse",
+	"test:embedded --test_timeout=-1,-1,-1,1200",
+	"test:embedded --test_arg=-test.parallel=4",
+	"test:embedded --test_env=GO_TEST_WRAP_TESTV=1",
+	"test:embedded --remote_download_regex=.*/test\\.xml$",
+	"test:embedded --nocache_test_results",
+}
+
 func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelEmbedJobName)
 	test := job.step(t, "bazel test //... --config=embedded")
@@ -3357,6 +3384,13 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		t.Errorf("embedded step selects remote-exec itself; setup-bazel's rc does that only when secrets are present")
 	}
 	assertTestStepKeepsExitStatus(t, test)
+	// Review F4: the exact command line. Since D2 step 1 this lane is the
+	// tier's only pre-merge run on same-repo PRs, so an extra flag (a
+	// --test_filter, a --test_arg=-test.short/-test.run/-test.skip) that
+	// quietly narrows it must be a reviewed edit of this test too.
+	if strings.TrimSpace(test.Run) != bazelEmbeddedTestRun {
+		t.Errorf("embedded step run changed; want exactly:\n%s\ngot:\n%s", bazelEmbeddedTestRun, test.Run)
+	}
 	// A shard with no tests assigned, or a selector that matches nothing,
 	// exits 0; the job fails on any target or shard whose test.xml lists none.
 	if !strings.Contains(test.Run, `--build_event_json_file="$RUNNER_TEMP/bazel-bep.json"`) {
@@ -3385,6 +3419,28 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		if !rc[want] {
 			t.Errorf(".bazelrc lacks %q", want)
 		}
+	}
+	// Review F4: --config=embedded is exactly these lines, in this order, and
+	// no unconfigured common/build/test line (which applies to every config)
+	// selects or narrows tests.
+	var embeddedLines []string
+	narrow := regexp.MustCompile(`test_filter|test_arg|-test\.(short|run|skip)|test_tag_filters|test_lang_filters|test_size_filters|test_timeout_filters`)
+	for _, line := range strings.Split(readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc"), "\n") {
+		line = strings.TrimSpace(line)
+		cmd, _, _ := strings.Cut(line, " ")
+		if strings.HasSuffix(cmd, ":embedded") {
+			embeddedLines = append(embeddedLines, line)
+		}
+		if (cmd == "common" || cmd == "build" || cmd == "test") && narrow.MatchString(line) {
+			t.Errorf(".bazelrc %q narrows every config's tests, including --config=embedded", line)
+		}
+	}
+	if !reflect.DeepEqual(embeddedLines, bazelEmbeddedRCLines) {
+		t.Errorf(".bazelrc --config=embedded lines changed; want exactly:\n%s\ngot:\n%s",
+			strings.Join(bazelEmbeddedRCLines, "\n"), strings.Join(embeddedLines, "\n"))
+	}
+	if gen := readPolicyFile(t, sourceRepoRoot(t), setupBazelActionDir+"/write-bazelrc.sh"); narrow.MatchString(gen) {
+		t.Errorf("setup-bazel's generated rc selects or narrows tests; it may only configure remote execution")
 	}
 	for line := range rc {
 		// Nothing turns result caching back on for the embedded lane (a
