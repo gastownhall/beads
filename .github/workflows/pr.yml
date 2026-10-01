@@ -1760,7 +1760,10 @@ jobs:
   # The Bazel lane (bazel.yml), gated alongside the legacy jobs it mirrors
   # (PR Core, build-artifacts, the pure-Go/js-wasm check, domain+uow and
   # contract corpus, and pr-risk.yml's embedded-Dolt, proxied-server and
-  # server-Dolt storage tiers), all of which stay required. bazel.yml has no pull_request/merge_group trigger of its own:
+  # server-Dolt storage tiers), all of which stay required, except that
+  # pr-risk.yml's embedded-Dolt test jobs stand down on the same-repo PRs
+  # where this call runs remotely (its bazel-embedded-coverage job; D2 step
+  # 1). bazel.yml has no pull_request/merge_group trigger of its own:
   # this call is its only PR run. It gets the four RBE secrets and nothing
   # else; its rbe job decides remote, local (forks, Dependabot: no
   # remote-only lanes) or skip, and exports that for ci-gate. Its

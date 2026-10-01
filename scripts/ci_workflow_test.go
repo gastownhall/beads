@@ -2101,7 +2101,9 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 		}
 	}
 
-	// Legacy jobs stay required: D1 adds, D2 removes.
+	// Legacy jobs stay required: D1 adds, D2 removes. (D2 step 1 lets
+	// pr-risk.yml's embedded test jobs skip where this lane runs remotely,
+	// but they stay required ids: TestPRRiskLegacyEmbeddedTierDefersToBazelLane.)
 	for id, job := range map[string]string{
 		"BUILD_ARTIFACTS":            "build-artifacts",
 		"PR_CORE_WRAPPER":            "pr-core-wrapper",
