@@ -14,7 +14,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
@@ -69,11 +68,10 @@ func TestServeAnswersFromTheStoreTheRootCommandOpened(t *testing.T) {
 	restoreServeGlobals(t)
 	t.Chdir(dir)
 	t.Setenv("BEADS_DIR", beadsDir)
-	// The workspace snapshot is resolved once per process and cached, so a test
-	// that chdirs into its own workspace has to clear it going in and coming
-	// out.
-	beads.ResetCaches()
-	t.Cleanup(beads.ResetCaches)
+	// The workspace snapshot and Git discovery are each resolved once per
+	// process and cached, so a test that chdirs into its own workspace has to
+	// clear both going in and coming out.
+	resetRepoCachesForTest(t)
 
 	// Stand in for PersistentPreRunE, which opens the workspace through exactly
 	// this dispatch and leaves it in `store`. This is the store bd already
