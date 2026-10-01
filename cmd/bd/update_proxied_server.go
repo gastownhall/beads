@@ -112,6 +112,12 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("updating: %v", err)}, nil
 	}
 	notesOverwritten := replacesExistingNotes(before.Notes, in.fields)
+	// Refused before the mutation, as on the embedded path.
+	if notesOverwritten && !in.replaceNotes {
+		refusal := errNotesOverwrite()
+		fmt.Fprintf(os.Stderr, "%s: %v\n", id, refusal)
+		return nil, &updateIDFailure{ID: id, Error: refusal.Error()}, nil
+	}
 
 	var expectedStatus *issueops.Status
 	if in.ifStatus != nil {

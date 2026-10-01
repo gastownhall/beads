@@ -67,11 +67,23 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 	})
 
-	t.Run("notes_overwrite_warns_on_stderr", func(t *testing.T) {
+	t.Run("notes_overwrite_refused_before_write", func(t *testing.T) {
 		p := bdProxiedInit(t, bd, "unw")
 		issue := bdProxiedCreate(t, bd, p.dir, "Notes overwrite", "--notes", "original notes")
 		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
 			"update", "--json", issue.ID, "--notes", "replacement notes")
+		if err == nil {
+			t.Fatalf("expected the overwrite to be refused\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if !strings.Contains(stderr, "--append-notes") {
+			t.Errorf("refusal must name --append-notes, got: %s", stderr)
+		}
+		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Notes != "original notes" {
+			t.Errorf("refused update still changed notes: %q", got.Notes)
+		}
+
+		stdout, stderr, err = bdProxiedRunBuffers(t, bd, p.dir,
+			"update", "--json", issue.ID, "--notes", "replacement notes", "--replace-notes")
 		if err != nil {
 			t.Fatalf("overwrite notes: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 		}
