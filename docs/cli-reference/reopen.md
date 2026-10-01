@@ -1,6 +1,6 @@
 ---
 title: "bd reopen"
-description: "Reopen closed issues by setting status to 'open' and clearing the closed_at timestamp."
+description: "Reopen one or more closed issues"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

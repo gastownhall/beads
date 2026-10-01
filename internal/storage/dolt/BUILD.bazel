@@ -157,6 +157,7 @@ go_test(
         "cli_transfer_timeout_test.go",
         "close_issue_checked_test.go",
         "close_policy_gate_test.go",
+        "close_recheck_blocked_regression_test.go",
         "close_recheck_blocked_test.go",
         "commenter_contract_test.go",
         "commenter_persistence_test.go",

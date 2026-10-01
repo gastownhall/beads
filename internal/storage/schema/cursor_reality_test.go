@@ -46,11 +46,29 @@ func stubSentinelColumns(t *testing.T, present map[string]bool, probeErr error) 
 }
 
 // allSentinelTables is the "everything the table sentinels ask for is present"
-// shape, so column-sentinel cases can say so without repeating the list.
+// shape, so column-sentinel cases can say so without repeating the list. Both
+// the unconditional-floor-0 tables and the floored tables share the same
+// sentinelTableExists probe, so both must be marked present here or a case
+// meant to isolate one sentinel would spuriously trip another.
 func allSentinelTables() map[string]bool {
-	present := make(map[string]bool, len(ignoredSource.sentinelTables))
+	present := make(map[string]bool, len(ignoredSource.sentinelTables)+len(ignoredSource.sentinelFlooredTables))
 	for _, table := range ignoredSource.sentinelTables {
 		present[table] = true
+	}
+	for _, st := range ignoredSource.sentinelFlooredTables {
+		present[st.table] = true
+	}
+	return present
+}
+
+// allSentinelTablesExcept is allSentinelTables with the named tables absent,
+// for cases that need every sentinel healthy except the one(s) under test.
+// Variadic so a case can contradict two sentinels of the same kind at once,
+// which is what pins the minimum a single loop accumulates.
+func allSentinelTablesExcept(tables ...string) map[string]bool {
+	present := allSentinelTables()
+	for _, table := range tables {
+		delete(present, table)
 	}
 	return present
 }
@@ -138,6 +156,55 @@ func TestCursorRealityFloor(t *testing.T) {
 			columns:     map[string]bool{"leases.granted_node": true},
 			wantFloor:   0,
 			wantLimited: false,
+		},
+		{
+			name:        "events absent",
+			present:     allSentinelTablesExcept("events"),
+			columns:     map[string]bool{"leases.granted_node": true},
+			wantFloor:   18,
+			wantLimited: true,
+		},
+		{
+			name:        "bd_events_journal absent",
+			present:     allSentinelTablesExcept("bd_events_journal"),
+			columns:     map[string]bool{"leases.granted_node": true},
+			wantFloor:   21,
+			wantLimited: true,
+		},
+		{
+			name:        "bd_events_seq absent",
+			present:     allSentinelTablesExcept("bd_events_seq"),
+			columns:     map[string]bool{"leases.granted_node": true},
+			wantFloor:   21,
+			wantLimited: true,
+		},
+		{
+			// Two floored sentinels contradicted at once: the minimum must win
+			// WITHIN the floored loop, not only across loops. Without this
+			// case every case removes exactly one floored table, so the loop
+			// only ever reaches its !limited arm and `st.replayFloor < floor`
+			// is never evaluated against a floor an earlier absent sentinel
+			// already set — inverting it to `>` leaves the package green. The
+			// floors happen to ascend in slice order (18, 21, 21) today, so
+			// this is what keeps a future reordering or lower-floored addition
+			// from silently regressing to "last absent sentinel wins".
+			name:        "events and bd_events_journal both absent",
+			present:     allSentinelTablesExcept("events", "bd_events_journal"),
+			columns:     map[string]bool{"leases.granted_node": true},
+			wantFloor:   18,
+			wantLimited: true,
+		},
+		{
+			// Combined contradiction across two different sentinel kinds: the
+			// true minimum (11, from the column) must win over the higher
+			// floored-table floor (18) the table loop finds first, proving the
+			// accumulator takes the minimum across both loops rather than
+			// whichever ran first.
+			name:        "events absent and leases granted_node absent",
+			present:     allSentinelTablesExcept("events"),
+			columns:     map[string]bool{},
+			wantFloor:   11,
+			wantLimited: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -254,6 +321,37 @@ func TestCurrentVersionClampsToSentinelFloor(t *testing.T) {
 			present: allSentinelTables(),
 			columns: map[string]bool{"leases.granted_node": true},
 			want:    latest,
+		},
+		{
+			name:    "events absent, at-latest cursor",
+			raw:     latest,
+			present: allSentinelTablesExcept("events"),
+			columns: map[string]bool{"leases.granted_node": true},
+			want:    18,
+		},
+		{
+			name:    "bd_events_journal absent, at-latest cursor",
+			raw:     latest,
+			present: allSentinelTablesExcept("bd_events_journal"),
+			columns: map[string]bool{"leases.granted_node": true},
+			want:    21,
+		},
+		{
+			name:    "bd_events_seq absent, at-latest cursor",
+			raw:     latest,
+			present: allSentinelTablesExcept("bd_events_seq"),
+			columns: map[string]bool{"leases.granted_node": true},
+			want:    21,
+		},
+		{
+			// Combined contradiction across two different sentinel kinds: the
+			// true minimum (11, from the column) must win over the higher
+			// floored-table floor (18).
+			name:    "events absent and leases column absent, at-latest cursor",
+			raw:     latest,
+			present: allSentinelTablesExcept("events"),
+			columns: map[string]bool{},
+			want:    11,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -437,6 +535,84 @@ func TestSentinelColumnsAreCreatedByTheSeries(t *testing.T) {
 	}
 }
 
+// TestSentinelFlooredTablesAreCreatedByTheSeries is the floored-table
+// analogue of TestSentinelColumnsAreCreatedByTheSeries: every sentinel in
+// sentinelFlooredTables must be created by the series, strictly above its own
+// replayFloor, and that floor must exclude ignored/0007's unguarded restamp
+// the same way the column floor does.
+//
+// events does not use the __temp__<table> + RENAME pattern the other
+// creators do: it carries the named, database-unique constraint
+// fk_events_issue, so a temp twin errors "duplicate foreign key constraint
+// name" on Dolt 2.2.2 (see ignored/0019's own comment). Its creator guards a
+// plain CREATE TABLE behind a PREPAREd conditional on an INFORMATION_SCHEMA
+// existence probe instead, so both creation shapes are detected here.
+func TestSentinelFlooredTablesAreCreatedByTheSeries(t *testing.T) {
+	if len(ignoredSource.sentinelFlooredTables) == 0 {
+		t.Fatal("ignoredSource has no sentinel floored tables; the events/bd_events_journal/bd_events_seq guard is inert")
+	}
+
+	bodies := make(map[int]string)
+	for _, mf := range ignoredSource.list() {
+		blob, err := ignoredSource.files.ReadFile(ignoredSource.dir + "/" + mf.name)
+		if err != nil {
+			t.Fatalf("read %s: %v", mf.name, err)
+		}
+		bodies[mf.version] = string(blob)
+	}
+
+	// findVersion returns the lowest migration version whose body matches, or
+	// 0 when nothing does.
+	findVersion := func(re *regexp.Regexp) int {
+		found := 0
+		for version, body := range bodies {
+			if !re.MatchString(body) {
+				continue
+			}
+			if found == 0 || version < found {
+				found = version
+			}
+		}
+		return found
+	}
+
+	unguarded := findVersion(regexp.MustCompile(`(?i)UPDATE\s+wisps\s+SET\s+is_blocked\s*=\s*0\s*;`))
+	if unguarded == 0 {
+		t.Fatal("the unguarded `UPDATE wisps SET is_blocked = 0` the replay floor exists to exclude is gone; re-derive the floor")
+	}
+
+	for _, st := range ignoredSource.sentinelFlooredTables {
+		// Detect both creation shapes and accept whichever the series actually
+		// uses, rather than keying on the table's name: the PREPAREd
+		// conditional CREATE is required of any creator whose table carries a
+		// named, database-unique constraint (ignored/0019's own comment), so a
+		// future floored sentinel can legitimately arrive in either shape and
+		// must not fall through to the misleading "never created" failure.
+		// findVersion already returns the lowest match, so take the earlier of
+		// the two shapes if a table somehow uses both.
+		prepared := findVersion(regexp.MustCompile(
+			`(?i)IF\(@\w+\s*=\s*0,\s*'CREATE TABLE ` + regexp.QuoteMeta(st.table) + `\s*\(`))
+		temp := findVersion(regexp.MustCompile(regexp.QuoteMeta("__temp__" + st.table)))
+		creator := prepared
+		if creator == 0 || (temp != 0 && temp < creator) {
+			creator = temp
+		}
+		if creator == 0 {
+			t.Errorf("sentinel floored table %q is never created by the %s series; re-running it could not repair that table",
+				st.table, ignoredSource.dir)
+			continue
+		}
+		if creator <= st.replayFloor {
+			t.Errorf("sentinel floored table %q is created by ignored/%04d, at or below its replayFloor %d; the clamped replay would skip the migration that heals it",
+				st.table, creator, st.replayFloor)
+		}
+		if st.replayFloor < unguarded {
+			t.Errorf("sentinel floored table %q replayFloor %d does not exclude ignored/%04d, whose unguarded UPDATE restamps wisps.updated_at",
+				st.table, st.replayFloor, unguarded)
+		}
+	}
+}
+
 // TestMigrationWorkNeededWhenWispTablesAbsent is gh 5033 end to end, through
 // the real short-circuit that caused it. Both cursors read at-latest, so
 // before this change migrationWorkNeeded returned false, MigrateUp did
@@ -488,6 +664,12 @@ func TestMigrationWorkNeededWhenLeaseGrantedNodeAbsent(t *testing.T) {
 	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
 	for range ignoredSource.sentinelTables {
+		mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	}
+	// The floored-table sentinels probe the same way and must all corroborate
+	// too, ahead of the column probe below.
+	for range ignoredSource.sentinelFlooredTables {
 		mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	}
@@ -587,6 +769,12 @@ func TestMigrateStartsAboveTheFloorUnderColumnContradiction(t *testing.T) {
 	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
 	for range ignoredSource.sentinelTables {
+		mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	}
+	// The floored-table sentinels probe the same way and must all corroborate
+	// too, ahead of the column probe below.
+	for range ignoredSource.sentinelFlooredTables {
 		mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	}

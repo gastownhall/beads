@@ -1,6 +1,6 @@
 ---
 title: "bd gate"
-description: "Gates are async wait conditions that block workflow steps."
+description: "Manage async coordination gates"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -17,9 +17,11 @@ Gate types:
   timer   - Expires after timeout (Phase 2)
   gh:run  - Waits for GitHub workflow (Phase 3)
   gh:pr   - Waits for PR merge (Phase 3)
-  bead    - Waits for cross-rig bead to close (Phase 4)
+  bead    - Waits for another bead to close (Phase 4)
 
-For bead gates, await_id format is &lt;rig&gt;:&lt;bead-id&gt; (e.g., "other-project:op-abc123").
+For bead gates, await_id may be a bead ID in this rig's database (e.g.,
+"bd-abc123") or the historical cross-rig form &lt;rig&gt;:&lt;bead-id&gt;. Cross-rig
+targets resolve through the bead ID's prefix route in routes.jsonl.
 
 Examples:
   bd gate list           # Show all open gates
@@ -29,7 +31,7 @@ Examples:
   bd gate resolve &lt;id&gt;   # Close a gate manually
 
 ```
-bd gate [flags]
+bd gate [command]
 ```
 
 ## bd gate add-waiter
@@ -113,6 +115,7 @@ Examples:
   bd gate create --type=human --blocks bd-abc --reason="Need design review"
   bd gate create --type=timer --blocks bd-abc --timeout=2h
   bd gate create --type=gh:pr --blocks bd-abc --await-id=42
+  bd gate create --blocks bd-abc --title="Gate: awaiting owner sign-off"
 
 ```
 bd gate create [flags]
@@ -125,6 +128,7 @@ bd gate create [flags]
       --blocks string     Issue ID to block (required)
   -r, --reason string     Reason for the gate
       --timeout string    Timeout duration (e.g., 2h, 30m)
+      --title string      Custom gate title (default: "Gate: <type>")
   -t, --type string       Gate type (human, timer, gh:run, gh:pr) (default "human")
 ```
 
@@ -140,6 +144,10 @@ queries recent GitHub workflow runs, and matches them using heuristics:
 
 Once matched, the gate's await_id is updated with the GitHub run ID, enabling
 subsequent polling to check the run's status.
+
+A gate whose metadata.repo targets another repository is only matched
+against runs queried from that repository, never against the current
+repository's runs of a same-named workflow.
 
 Examples:
   bd gate discover           # Auto-discover run IDs for all matching gates
@@ -161,12 +169,16 @@ bd gate discover [flags]
 
 ## bd gate list
 
-List all gate issues in the current beads database.
+List gate issues.
+
+With no argument, lists all gate issues in the current beads database.
+With an [issue-id] argument, lists ONLY the gates that block that issue
+(its own dependency gates) — not every gate in the database.
 
 By default, shows only open gates. Use --all to include closed gates.
 
 ```
-bd gate list [flags]
+bd gate list [issue-id] [flags]
 ```
 
 **Flags:**
