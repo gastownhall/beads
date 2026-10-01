@@ -51,9 +51,9 @@ Current PR-related workflow names:
   call's result (`BAZEL`) and `BAZEL_TEST`, `BAZEL_PURE`, `BAZEL_EMBEDDED`,
   `BAZEL_INTEGRATION`, `BAZEL_DOLTSERVER`, `BAZEL_PROXIED` and
   `BAZEL_SERVER_STORAGE`. The legacy jobs these mirror stay required in
-  `pr.yml` and `pr-risk.yml`, except where `BAZEL_EMBEDDED` runs in their
-  place (see
-  [Legacy Embedded Tier Retirement](#legacy-embedded-tier-retirement-d2-step-1)).
+  `pr.yml` and `pr-risk.yml`, except where `BAZEL_EMBEDDED`, or
+  `BAZEL_PROXIED` and `BAZEL_SERVER_STORAGE`, run in their place (see
+  [Legacy Tier Retirement](#legacy-tier-retirement-d2)).
   `.github/scripts/bazel-gate.sh` reads the exported mode, never the variable
   or the fork flag: mode `skip` allows every Bazel id to skip, modes `local`
   and `cache` allow only the remote-only `BAZEL_EMBEDDED`, `BAZEL_INTEGRATION`,
@@ -82,15 +82,16 @@ Current PR-related workflow names:
   farm is down, or the beads CI RBE client certificate expires (about
   2027-09-27; a partial secret set also fails every same-repo run), fix
   `main` (`make bazel-sync`) or renew the secrets. To turn remote execution
-  off instead, first commit `BAZEL_RETIRES_LEGACY_EMBEDDED: "false"` in both
+  off instead, first commit `BAZEL_RETIRES_LEGACY_EMBEDDED: "false"` and
+  `BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS: "false"` in both
   `pr.yml` and `pr-risk.yml` (see
-  [Legacy Embedded Tier Retirement](#legacy-embedded-tier-retirement-d2-step-1)),
+  [Legacy Tier Retirement](#legacy-tier-retirement-d2)),
   then unset the `RBE_WEST_WORKERS` repo variable: same-repo runs then take
   mode `skip`, which the gate accepts (fork PRs still build, in mode `cache`,
-  so drift on `main` still reaches them). Unsetting the variable while the
+  so drift on `main` still reaches them). Unsetting the variable while a
   flag is still `"true"` turns `CI Gate / Required` red on every same-repo PR
-  (`BAZEL_EMBEDDED_RETIRED`), because PR Risk no longer runs the legacy
-  embedded tier for them. If rbe-west closes the read-only cache, fork runs
+  (`BAZEL_EMBEDDED_RETIRED`, `BAZEL_DOLT_SERVER_RETIRED`), because PR Risk
+  no longer runs those legacy tiers for them. If rbe-west closes the read-only cache, fork runs
   fall back to executing everything locally (slower, still green). If it
   is slow rather than closed, each lookup gives up after `fork-cache`'s
   15 s `--remote_timeout` (times its retries), and Bazel's failure circuit
@@ -107,7 +108,7 @@ Current PR-related workflow names:
   [Trusted-Author Fork PRs](#trusted-author-fork-prs-bazel-farm).
 - `.github/workflows/pr-risk.yml`: `PR Risk`
   Runs on `pull_request` and `merge_group`. Contains embedded Dolt risk
-  detection, the `bazel-embedded-coverage` decision, embedded build/test
+  detection, the `bazel-coverage` decision, embedded build/test
   shards, the proxied and server Dolt shards, the Nix flake smoke check, and
   the risk aggregate gate `PR Risk / PR Risk Gate / Required`.
 - `.github/workflows/main.yml`: `Main`
@@ -581,7 +582,7 @@ intentionally not kept in lockstep with later leaf additions and renames; use
 <!-- markdownlint-enable MD013 -->
 
 `.github/workflows/pr-risk.yml` has a companion aggregate for `detect-ci-tier`,
-`bazel-embedded-coverage`, `build-embedded`, the embedded, proxied and server
+`bazel-coverage`, `build-embedded`, the embedded, proxied and server
 Dolt test jobs, and `test-nix`.
 
 `.github/scripts/ci-gate.sh` is a small shell evaluator. It fails on any
@@ -593,12 +594,15 @@ intentionally absent for that event or risk tier:
 - In the risk aggregate, `BUILD_EMBEDDED` and the embedded, proxied and server
   Dolt test ids may be `skipped` when `FULL_EMBEDDED != true`.
 - In the risk aggregate, `TEST_EMBEDDED_STORAGE`, `TEST_EMBEDDED_CONFORMANCE`
-  and `TEST_EMBEDDED_CMD` may also be `skipped` when
-  `bazel-embedded-coverage` reported `covered=true`. `BAZEL_EMBEDDED_COVERAGE`
-  (that job's result) must be `success`.
-- In the baseline aggregate, `BAZEL_EMBEDDED_COVERAGE` must be `success` and
-  `BAZEL_EMBEDDED_RETIRED` is red when `covered=true` but the Bazel embedded
-  lane did not run remotely and pass.
+  and `TEST_EMBEDDED_CMD` may also be `skipped` when `bazel-coverage`
+  reported `embedded=true`; `TEST_PROXIED_CMD`, `TEST_SERVER_STORAGE` and
+  `TEST_SERVER_STORAGE_FULL` when it reported `dolt_server=true`; and
+  `BUILD_EMBEDDED` when it reported both. `BAZEL_COVERAGE` (that job's
+  result) must be `success`.
+- In the baseline aggregate, `BAZEL_COVERAGE` must be `success`;
+  `BAZEL_EMBEDDED_RETIRED` is red when `embedded=true` but the Bazel embedded
+  lane did not run remotely and pass, and `BAZEL_DOLT_SERVER_RETIRED` when
+  `dolt_server=true` but the proxied and server-storage lanes did not.
 - All baseline jobs must be `success`.
 
 This keeps branch protection pointed at stable aggregate jobs while preserving
@@ -650,138 +654,167 @@ The current embedded Dolt topology already fits the required-check model:
 
 - `detect-ci-tier` always runs.
 - `build-embedded`, `test-embedded-storage`, `test-embedded-conformance` and
-  `test-embedded-cmd` use job-level `if`; the three test jobs also stand down
-  where the Bazel lane covers them (next section).
+  `test-embedded-cmd` use job-level `if`; the three test jobs (and, with the
+  proxied and server jobs, `build-embedded`) also stand down where the Bazel
+  lanes cover them (next section).
 - `.github/scripts/ci-embedded-tier.sh` runs full embedded coverage for
   `push`, `merge_group`, unavailable PR diff bounds, and risky paths.
 - Docs-only PRs can skip the embedded matrix without leaving the required gate
   pending, because the aggregate job still runs.
 
-### Legacy Embedded Tier Retirement (D2 Step 1)
+### Legacy Tier Retirement (D2)
 
-Since D2 step 1, `pr-risk.yml`'s legacy embedded test jobs
-(`test-embedded-storage` x5, `test-embedded-conformance` x2,
-`test-embedded-cmd` x20: 27 jobs) do not run on same-repo PRs. There,
-`pr.yml`'s gated Bazel lane `Bazel / embedded Dolt tier` (`bazel.yml`'s
-`bazel-embedded`, `--config=embedded`, the same tests and shard manifests)
-is the tier's only pre-merge run, and `CI Gate / Required` requires it to
-have run remotely and passed.
+D2 retires `pr-risk.yml`'s legacy Dolt tiers on same-repo PRs, one step at
+a time, where `pr.yml`'s gated Bazel lanes run the same tests:
 
-- Switch: the committed workflow env `BAZEL_RETIRES_LEGACY_EMBEDDED`, set to
-  the same literal (`"true"` or `"false"`) in `pr.yml` and `pr-risk.yml`
-  (policy-tested). It is deliberately not the `RBE_WEST_WORKERS` repo
+<!-- markdownlint-disable MD013 -->
+
+| Step | Legacy jobs (`pr-risk.yml`) | Bazel lanes (`bazel.yml`) | Flag | `pr.yml` gate id |
+| --- | --- | --- | --- | --- |
+| 1 | `test-embedded-storage` x5, `test-embedded-conformance` x2, `test-embedded-cmd` x20 | `bazel-embedded` (`--config=embedded`) | `BAZEL_RETIRES_LEGACY_EMBEDDED` | `BAZEL_EMBEDDED_RETIRED` |
+| 2 | `test-proxied-cmd` x15, `test-server-storage`, `test-server-storage-full` x16 | `bazel-proxied` (`--config=doltserver-proxied`), `bazel-server-storage` (`--config=doltserver-integration`) | `BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS` | `BAZEL_DOLT_SERVER_RETIRED` |
+
+<!-- markdownlint-enable MD013 -->
+
+`build-embedded`, whose `embedded-test-binaries` artifact feeds exactly
+those six legacy jobs and nothing else, also stands down where both steps
+apply. The Bazel lanes run the same tests with the same shard scripts and
+manifests. On those PRs they are the tiers' only pre-merge run, and
+`CI Gate / Required` requires them to have run remotely and passed.
+
+- Switch: one committed workflow env flag per step (table above), each set
+  to the same literal (`"true"` or `"false"`) in `pr.yml` and `pr-risk.yml`
+  (policy-tested). They are deliberately not the `RBE_WEST_WORKERS` repo
   variable. A variable is read again by every run and re-run, and the two
   workflows are separate runs, so one could see it on and the other off;
   see "Why a committed flag" below.
 - Who: `pull_request` runs from same-repo branches (not forks) whose
-  `github.actor` is not `dependabot[bot]`, while the flag is `"true"`. The
-  executor secret is deliberately not part of the decision: a same-repo PR
-  whose run lacks it (secret deleted or emptied) is still covered, takes
-  Bazel mode `cache` (no embedded lane) and so turns `CI Gate / Required`
-  red, instead of quietly moving back to a legacy tier that one of its
-  runs may already have skipped.
-- Everyone else keeps the legacy tier unchanged:
+  `github.actor` is not `dependabot[bot]`, for each step whose flag is
+  `"true"`. The executor secret is deliberately not part of the decision: a
+  same-repo PR whose run lacks it (secret deleted or emptied) is still
+  covered, takes Bazel mode `cache` (no remote-only lanes) and so turns
+  `CI Gate / Required` red, instead of quietly moving back to a legacy tier
+  that one of its runs may already have skipped.
+- Everyone else keeps the legacy tiers unchanged:
   - fork PRs;
   - Dependabot PRs (no Actions secrets; `github.actor`, unlike
     `github.triggering_actor`, stays `dependabot[bot]` when someone else
     re-runs them);
   - every `merge_group` run (there is no merge queue today, so this is not
     a pre-merge net);
-  - every PR while the flag is `"false"`.
+  - every PR while that step's flag is `"false"`.
 
-  `main.yml`'s embedded jobs on push to `main` are untouched.
+  `main.yml`'s embedded and proxied jobs on push to `main` are untouched.
 - How:
-  - `pr-risk.yml` and `pr.yml` each run the identical
-    `bazel-embedded-coverage` job (policy-tested). The job does no checkout
-    and runs no repository code. It reads the flag, the event, the fork flag
-    and the actor (no secret, no variable), and outputs `covered`.
-  - The three legacy test jobs add
-    `needs.bazel-embedded-coverage.outputs.covered != 'true'` to their `if`.
-  - PR Risk's gate accepts their skip only when `covered == true`.
-  - `pr.yml`'s gate requires `BAZEL_EMBEDDED_COVERAGE` (the job's result)
-    and `BAZEL_EMBEDDED_RETIRED`. The latter is red when `covered == true`
-    and the Bazel call's mode is not `remote` or `BAZEL_EMBEDDED` is not
-    `success`. In particular, mode `skip` (the farm switch off) and mode
-    `local` (the executor secret missing) are red there, although
+  - `pr-risk.yml` and `pr.yml` each run the identical `bazel-coverage` job
+    (policy-tested). The job does no checkout and runs no repository code.
+    It reads the flags, the event, the fork flag and the actor (no secret,
+    no variable), and outputs `embedded` (step 1) and `dolt_server`
+    (step 2).
+  - Each legacy test job adds
+    `needs.bazel-coverage.outputs.<its step's output> != 'true'` to its
+    `if`; `build-embedded` adds
+    `(embedded != 'true' || dolt_server != 'true')`.
+  - PR Risk's gate accepts a legacy test job's skip only when its step's
+    output is `true`, and `BUILD_EMBEDDED`'s only when both are.
+  - `pr.yml`'s gate requires `BAZEL_COVERAGE` (the job's result) and one
+    `BAZEL_*_RETIRED` id per step. Such an id is red when its step's output
+    is `true` and the Bazel call's mode is not `remote` or any of the step's
+    lanes (`BAZEL_EMBEDDED`; `BAZEL_PROXIED` and `BAZEL_SERVER_STORAGE`) is
+    not `success`. In particular, mode `skip` (the farm switch off) and
+    mode `cache` (the executor secret missing) are red there, although
     `bazel-gate.sh` alone would accept them.
   - A failed, cancelled or missing decision is red in both gates.
-- `build-embedded` keeps running: its `embedded-test-binaries` artifact also
-  feeds `test-proxied-cmd`, `test-server-storage` and
-  `test-server-storage-full`, which are not retired in this step.
 - Why a committed flag:
-  - `covered` depends on nothing a re-run can change (flag, event, fork,
-    actor). So any run or re-run of PR Risk that skips the legacy tier is
-    matched by `pr.yml` runs that compute the same `covered`.
-  - Each such `pr.yml` run is green only if the Bazel lane ran remotely and
-    passed in that run.
+  - The outputs depend on nothing a re-run can change (flags, event, fork,
+    actor). So any run or re-run of PR Risk that skips a legacy tier is
+    matched by `pr.yml` runs that compute the same outputs.
+  - Each such `pr.yml` run is green only if that tier's Bazel lanes ran
+    remotely and passed in that run.
   - Flipping `RBE_WEST_WORKERS` either way, plus "Re-run all jobs" of
     either workflow, can no longer leave both required checks green with
-    neither tier run.
+    neither the legacy tier nor its lanes run.
   - `scripts/pr_risk_bazel_coverage_test.go` checks this by running both
     workflows' actual decision steps, `bazel.yml`'s `rbe` step and `pr.yml`'s
     actual gate step over every event, variable value, secret, fork, actor
     and flag combination, with the variable and the secret each differing
     between the two runs. It also requires the two workflows to share their
-    `pull_request` triggers.
-- Cost of failing closed: while the flag is `"true"`, a same-repo PR without
+    `pull_request` triggers, and simulates PR Risk's actual gate step over
+    every risk tier and decision.
+- Cost of failing closed: while a flag is `"true"`, a same-repo PR without
   the executor secret (secret deleted or emptied, or a non-Dependabot bot
   whose runs get no secrets) is red until the secret is restored or the
   flag is committed `"false"`.
-- Revert:
-  1. Commit `BAZEL_RETIRES_LEGACY_EMBEDDED: "false"` in both workflows on
-     `main`.
+- Revert (per step):
+  1. Commit that step's flag `"false"` in both workflows on `main`. To turn
+     remote execution off, commit both flags `"false"`.
   2. Every PR needs a new push or a merge of `main` to pick it up: a
      pull_request run uses the workflow files of the PR's merge commit, and
      a re-run reuses that commit.
   3. Only then unset `RBE_WEST_WORKERS`, if remote execution should be off.
 
-  Reverting the D2 commits removes the decision jobs entirely.
-- Admin changes: flipping `RBE_WEST_WORKERS` or deleting the executor
-  secret, followed by "Re-run all jobs" of either workflow, can no longer
-  leave both required checks green with neither tier run.
+  Reverting the D2 commits removes the decision job entirely.
 - Re-runs: "Re-run all jobs" (or "Re-run failed jobs") of one workflow
   re-evaluates variables and secrets for that workflow's run only. The
   other workflow's last result stays on the head SHA. With the committed
-  flag this cannot drop the tier silently: `covered` depends on the flag
+  flags this cannot drop a tier silently: the outputs depend on the flags
   (fixed by the merge commit), the event, the fork flag and the actor, and
   on no variable or secret. Re-running "failed jobs" keeps the earlier
-  jobs' outputs, including `covered` and the `rbe` mode.
+  jobs' outputs, including the decision and the `rbe` mode.
 - Enforcement scope: the beads-only ruleset requires both gates on the
   default branch (`main`) only. On PRs into `release/**` both workflows run
   and report, but merging does not wait for them, before or after this
   change. There is no merge queue and `strict` is off, so no
-  pre-merge run catches a gap; only `main.yml`'s embedded jobs and
-  `bazel.yml`'s push run do, after merge.
-- Lane hardening that the retirement relies on (policy-tested in
+  pre-merge run catches a gap; only `main.yml`'s embedded and proxied jobs
+  and `bazel.yml`'s push run do, after merge (`main.yml` has no server-Dolt
+  storage jobs; `bazel.yml`'s push run covers that tier).
+- Lane hardening that the retirement relies on, for `bazel-embedded`,
+  `bazel-proxied` and `bazel-server-storage` alike (policy-tested in
   `scripts/ci_workflow_test.go` and `scripts/pr_risk_bazel_coverage_test.go`):
-  - `test:embedded --nocache_test_results`: every run executes every test,
-    like the legacy `-test.count=1` jobs, so a stale or poisoned entry in
-    the shared farm action cache cannot stand in for a run.
+  - `--nocache_test_results` in `test:embedded`, `test:doltserver-proxied`
+    and `test:doltserver-integration`: every run executes every test, like
+    the legacy `-test.count=1` jobs, so a stale or poisoned entry in the
+    shared farm action cache cannot stand in for a run. Nothing else in
+    `.bazelrc` sets test result caching except `test:docker` (also off).
   - No retries: no `--flaky_test_attempts` or
     `--runs_per_test_detects_flakes` anywhere, and no `flaky =` other than
-    a literal `False`. The lane also runs
-    `bazel query 'attr(flaky, 1, tests(//...))'` before the tier and fails
+    a literal `False`. Each lane also runs
+    `bazel query 'attr(flaky, 1, tests(//...))'` before its tier and fails
     on any result, so a macro or variable cannot hide a flaky target.
+    (Bazel's own retry of a whole invocation after "Lost inputs" from the
+    remote cache re-runs the build, not a failed test.)
   - Pinned selection:
-    - The lane's `bazel test //... --config=embedded` step and the
-      `--config=embedded` lines are pinned exactly.
-    - No other rc line of a config the lane uses (unconfigured,
-      `remote-exec`, or anything they reference) may filter, narrow,
-      re-run or re-route tests.
+    - Each lane's `bazel test //... --config=<config>` step and its
+      config's `.bazelrc` lines are pinned exactly.
+    - No other rc line of a config the lanes use (unconfigured,
+      `remote-exec`, `fork-cache`, or anything they reference) may filter,
+      narrow, re-run or re-route tests.
     - `.bazelrc` imports only the two gitignored try-imports, and no other
       rc file is committed.
     - `tools/bazel/*.sh` and the whole setup-bazel action may not inject
-      test selection or skips.
-    - The four embedded-tagged targets' `args` and `env` are pinned.
-  - `tools/bazel/check_shard_coverage.py` runs after the tier. It requires:
-    - every Bazel shard to have run exactly the tests its shard script lists
-      (list-only mode, minus `TestMain`, which `grep '^func Test'` lists
-      but which is never a test);
-    - no shard, and no conformance partition, to be all skipped.
+      test selection, skips or the tiers' switches
+      (`BEADS_TEST_PROXIED_SERVER`, `BEADS_TEST_ENV_RUN_DOLT`, ...).
+    - The `args` and `env` of every target tagged `embedded`,
+      `dolt-server-proxied` or `dolt-server-integration` are pinned.
+  - `tools/bazel/check_shard_coverage.py` runs after each tier. It requires:
+    - every Bazel shard of `//cmd/bd:bd_embedded_test`,
+      `//internal/storage/embeddeddolt:embeddeddolt_embedded_test`,
+      `//cmd/bd:bd_proxied_test` (15) and
+      `//internal/storage/dolt:dolt_server_full_test` (16) to have run
+      exactly the tests its shard script lists (list-only mode, minus
+      `TestMain`, which `grep '^func Test'` lists but which is never a
+      test; a policy test runs all four real scripts and requires every
+      other listed name to be a `func Name(t *testing.T)`);
+    - no shard, and no unsharded target (the embedded conformance
+      partitions, `//internal/storage/dolt:dolt_server_conformance_test`),
+      to be all skipped.
 
     A test the scripts discover from source but the Bazel binary lacks
     fails the lane instead of passing silently, and so does an injected
     `-test.short` or `BEADS_TEST_SKIP` that skips a whole shard.
+  - Verified on a real remote run before step 2 (2026-10-01): proxied 164
+    top-level tests over 15 shards, 0 skipped; server storage 1246 + 1
+    conformance, 10 skipped (none all-skipped); both checkers pass.
 - Not changed: `conformance.yml`'s Tier 1 (`scripts/conformance.sh`) runs the
   embedded-Dolt `TestConformance` again (non-race, unsharded), duplicating
   `test-embedded-conformance` and the Bazel lane. It is not part of either
@@ -792,7 +825,9 @@ have run remotely and passed.
 `test-server-storage-full` mirrors `test-embedded-storage`'s sharding, one
 tier down in the same workflow:
 
-- Job-level `if` uses the same `detect-ci-tier` gate as the embedded matrix.
+- Job-level `if` uses the same `detect-ci-tier` gate as the embedded matrix,
+  and both server jobs stand down where the Bazel `server-Dolt storage tier`
+  lane covers them (D2 step 2, [Legacy Tier Retirement](#legacy-tier-retirement-d2)).
 - `.github/scripts/server-storage-test-shard.sh` discovers top-level
   `Test*` functions from `internal/storage/dolt/*_test.go` (excluding
   `TestConformance`, which keeps its own `test-server-storage` job), assigns
@@ -859,8 +894,8 @@ Policy for `merge_group`:
 - `detect-ci-tier` should keep treating `merge_group` as full embedded coverage.
 - There is no merge queue today (see Current State), so these runs are not a
   pre-merge safety net for anything PRs skip; in particular they are not one
-  for the retired legacy embedded tier (D2 step 1). `merge_group` keeps that
-  tier only so a queue added later starts with full coverage.
+  for the retired legacy tiers (D2). `merge_group` keeps those tiers only
+  so a queue added later starts with full coverage.
 - Any risk detector added to the required topology should default to run on
   `merge_group`, because the merge group commit may combine individually safe
   PRs into a risky integration state.
