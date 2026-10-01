@@ -564,16 +564,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`bd dolt restart` and `bd dolt set remotesapi-port` expose the managed
   shared server's remotesapi listener.** `bd dolt set remotesapi-port <port>`
-  stores the one machine-global setting (`0`, the default, disables it), and
-  `bd dolt restart` applies it through the fenced `doltserver.Restart` from
+  stores the one machine-global setting (`0`, the default, disables it) and
+  refuses the shared server's own SQL port. `bd dolt restart` applies it
+  through the fenced `doltserver.Restart` from
   [#6020](https://github.com/gastownhall/beads/pull/6020): one lifecycle lock
   across flush, stop, start, and readiness, with the SQL port preserved.
-  `bd dolt show`, `bd dolt status`, and `bd doctor` report the effective
-  endpoint as disabled, unreachable, or reachable; `bd doctor` now inspects
-  the shared server's data directory and pidfile for a shared-mode workspace
-  instead of the project's. Remedies that said `bd dolt stop && bd dolt start`
-  now say `bd dolt restart`. Current Dolt releases bind remotesapi on all
-  interfaces; bound network access remains the deployment's responsibility.
+  `Restart` now checks the configuration before it stops anything — a
+  remotesapi port equal to the SQL port or already in use is refused with the
+  server left running, instead of stopping a shared server that then cannot
+  start for any workspace on the machine. `bd dolt show`, `bd dolt status`,
+  and `bd doctor` report the effective endpoint as disabled, unreachable, or
+  reachable; `bd doctor` now inspects the shared server's data directory and
+  pidfile for a shared-mode workspace instead of the project's, and no longer
+  auto-starts a stopped server to list its remotes. Remedies that said
+  `bd dolt stop && bd dolt start` now say `bd dolt restart`. Current Dolt
+  releases bind remotesapi on all interfaces; bound network access remains
+  the deployment's responsibility.
 
 - **A long-running schema migration now says so instead of going quiet**
   ([#5997](https://github.com/gastownhall/beads/pull/5997)). Migrations are
