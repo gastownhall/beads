@@ -14,8 +14,14 @@ const (
 	hookMarkerStateValid  = "valid"
 	hookMarkerStateBroken = "broken"
 
-	hookMarkerBeginTag = "BEGIN BEADS INTEGRATION"
-	hookMarkerEndTag   = "END BEADS INTEGRATION"
+	// Anchored at the real marker line's column-0 prefix (matching
+	// generateHookSection/hookSectionBeginPrefix in cmd/bd/hooks.go), not a
+	// raw substring: the generated section also embeds this text indented
+	// inside a quoted shell case-arm literal (the .old bd-hook classifier),
+	// so a plain strings.Count would see two BEGINs for one END and never
+	// converge (GH#6840 review).
+	hookMarkerBeginTag = "# --- BEGIN BEADS INTEGRATION"
+	hookMarkerEndTag   = "# --- END BEADS INTEGRATION"
 )
 
 var managedHookNames = []string{
@@ -187,14 +193,27 @@ func classifyHookMigration(hook *HookMigrationHookPlan) {
 }
 
 func detectHookMarkerState(content string) string {
-	beginCount := strings.Count(content, hookMarkerBeginTag)
-	endCount := strings.Count(content, hookMarkerEndTag)
+	beginCount, endCount := 0, 0
+	beginLine, endLine := -1, -1
+
+	for i, line := range strings.Split(content, "\n") {
+		switch {
+		case strings.HasPrefix(line, hookMarkerBeginTag):
+			beginCount++
+			if beginLine == -1 {
+				beginLine = i
+			}
+		case strings.HasPrefix(line, hookMarkerEndTag):
+			endCount++
+			if endLine == -1 {
+				endLine = i
+			}
+		}
+	}
 
 	switch {
 	case beginCount == 1 && endCount == 1:
-		beginIdx := strings.Index(content, hookMarkerBeginTag)
-		endIdx := strings.Index(content, hookMarkerEndTag)
-		if beginIdx < endIdx {
+		if beginLine < endLine {
 			return hookMarkerStateValid
 		}
 		return hookMarkerStateBroken
