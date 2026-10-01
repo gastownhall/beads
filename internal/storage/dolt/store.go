@@ -329,6 +329,7 @@ type DoltStore struct {
 	serverEndpoint          string       // Exact endpoint bound to bootstrap reset authority
 	mu                      sync.RWMutex // Protects concurrent access
 	readOnly                bool         // True if opened in read-only mode
+	classifiedRead          bool         // True if readOnly came from command classification (GH#804), not strict --readonly/preview/foreign-project; still eligible for the defer-wake sweep (be-vbhpf)
 	credentialKey           []byte       // Random encryption key for federation credentials
 
 	// localActiveDatabaseDir is the exact active database directory when this
@@ -377,6 +378,19 @@ type Config struct {
 	Database       string // Database name within Dolt (default: "beads")
 	ReadOnly       bool   // Open in read-only mode (skip schema init)
 	Preview        bool   // Non-mutating preview: embedded opens skip schema init and refuse writes
+
+	// ClassifiedRead marks a ReadOnly open whose read-only-ness comes purely
+	// from command classification (GH#804: bd ready/bd list are read-only for
+	// the CURRENT project) rather than strict --readonly, an explicit preview,
+	// or a foreign-project lookup. Only a classified-read open is eligible for
+	// the lazy defer-wake sweep (be-vbhpf) — the others must never mutate.
+	//
+	// Strict --readonly and preview are excluded by the policy expression that
+	// computes this field; foreign-project and auxiliary opens are excluded
+	// because they construct their own Config and leave this at its false zero
+	// value. That default is the guarantee — setting it true on such an open
+	// would make it eligible to sweep.
+	ClassifiedRead bool
 
 	// LenientOpen opens the store leniently: a migration gate refusal (#4259)
 	// or a dirty-working-set refusal (#4566) skips the migration instead of
@@ -1699,6 +1713,10 @@ func applyConfigDefaults(cfg *Config) {
 	if cfg.RemotePassword == "" {
 		cfg.RemotePassword = os.Getenv("DOLT_REMOTE_PASSWORD")
 	}
+	// Pool deadlines last: every DoltStore open (the CLI's store and library
+	// callers of New/NewFromConfig*) reaches New, so the knob ladder holds
+	// here regardless of how cfg was built.
+	applyPoolTimeouts(cfg)
 }
 
 // New creates a new Dolt storage backend.
@@ -2135,6 +2153,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		remotePassword:         cfg.RemotePassword,
 		serverMode:             true,
 		readOnly:               cfg.ReadOnly,
+		classifiedRead:         cfg.ClassifiedRead,
 		autoStartedServerDir:   autoStartedDir,
 	}
 
@@ -3138,12 +3157,22 @@ func sharedServerDatabase(cfg *Config) bool {
 	if !doltserver.ManagesLiveServerOnPort(cfg.BeadsDir, cfg.ServerPort) {
 		return true
 	}
-	// Proof of a bd-managed server does not override an explicit declaration
-	// that the lifecycle is external (metadata dolt_server_port, host
-	// inference, BEADS_DOLT_SERVER_MODE). Keeping this last means the change
-	// above can only ever ADD shared classifications to what #5920/#6048
-	// already gated, never remove one.
-	return doltserver.ResolveServerMode(cfg.BeadsDir) != doltserver.ServerModeOwned
+	// Proof of a bd-managed server does not override a genuine external
+	// declaration (metadata dolt_server_port, host inference,
+	// BEADS_DOLT_SERVER_MODE, IsSharedServerMode). Keeping this last means
+	// the change above can only ever ADD shared classifications to what
+	// #5920/#6048 already gated, never remove one.
+	//
+	// Uses ResolveServerModeIgnoringPortEnv, not the public ResolveServerMode
+	// (GH#6169): BEADS_DOLT_SERVER_PORT/BEADS_DOLT_PORT are also set
+	// ambiently on multi-agent rigs purely to route bd's own client
+	// connections to a shared coordination server, and say nothing about who
+	// owns cfg.BeadsDir's own server -- that question was just answered,
+	// above, by proof rather than inference. Honoring the ambient port env
+	// var here would let it override that proof and reclassify bd's own
+	// just-started server as shared, so a normal `bd init`/first-write on a
+	// multi-agent rig would refuse to migrate its own workspace database.
+	return doltserver.ResolveServerModeIgnoringPortEnv(cfg.BeadsDir) != doltserver.ServerModeOwned
 }
 
 func (s *DoltStore) initSchema(ctx context.Context, bootstrapHeal *schema.FreshBootstrapHealCapability) (int, error) {

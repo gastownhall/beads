@@ -25,8 +25,9 @@ import (
 // testTimeout bounds each test's context. It must cover a cold store setup —
 // container-assisted connect plus the FULL migration chain (every versioned +
 // ignored migration, each Dolt-committed), which grows as migrations
-// accumulate — with headroom for a loaded machine; some tests set up two
-// stores under one context.
+// accumulate — with headroom for a loaded machine. Opens routed through
+// openStoreWithOwnBudget each start from a full budget; a test that still
+// calls New(ctx, ...) directly shares whatever deadline its caller built.
 //
 // Was 45s; raised to 90s for be-696w. At 45s, migrating-open tests
 // (cross_project_test.go's TestCrossProject_*, TestMigratingOpen_FirstReadSucceeds)
@@ -79,6 +80,47 @@ func releaseAllTestSlots() {
 func testContext(t *testing.T) (context.Context, context.CancelFunc) {
 	t.Helper()
 	return context.WithTimeout(context.Background(), testTimeout)
+}
+
+// openStoreWithOwnBudget opens a store under its own testTimeout budget and
+// releases that budget as soon as the open returns.
+//
+// Use it anywhere a test opens two stores in sequence. Sharing one context
+// across both opens is the bug it exists to prevent: a cold open runs the full
+// migration chain, so under host load the first open can consume most of a
+// shared deadline and leave the second only the remainder, which then fails
+// with "context deadline exceeded" (be-gvnsq, ~39% of runs under load). Each
+// open starting from a full budget removes the coupling between the opens.
+//
+// It does not by itself decouple the rest of the caller. Deadlines are
+// absolute, so a context built BEFORE the opens is drained by them anyway, and
+// the next call on that context fails under the same condition — just at a
+// cheaper, more misleading call site. Build the caller's context after the last
+// open (see setupTestStore's note below), or give each intervening call its own
+// budget with setConfigWithOwnBudget.
+//
+// Cancelling at return is safe: the context bounds the open itself, not the
+// returned store. Store operations take the caller's own context afterwards.
+func openStoreWithOwnBudget(t *testing.T, cfg *Config) (*DoltStore, error) {
+	t.Helper()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	return New(ctx, cfg)
+}
+
+// setConfigWithOwnBudget writes one config key under its own testTimeout budget
+// and releases that budget as soon as the write returns.
+//
+// Use it for the cheap calls a setup helper makes between cold opens. Sharing a
+// context with those opens is the bug it exists to prevent: the opens drain a
+// context built before them, so this write — a warm round-trip costing
+// milliseconds — is what reports "context deadline exceeded", which reads as a
+// config bug rather than the slow open it actually is (be-gvnsq).
+func setConfigWithOwnBudget(t *testing.T, store *DoltStore, key, value string) error {
+	t.Helper()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	return store.SetConfig(ctx, key, value)
 }
 
 // skipIfNoDolt skips the test if Dolt is not installed or the test server

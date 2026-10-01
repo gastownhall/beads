@@ -9,6 +9,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd init --force` can no longer silently recreate a missing server-side
+  database as empty** (be-5up5). `--force` is an alias for `--reinit-local`,
+  which skips the existing-data guard entirely, and the reinit path's own typed
+  confirmation keys on the issue count — which is 0 in exactly the case where
+  the database is missing. So `bd init --force` against a lost database created
+  a fresh empty one at the same name, with no prompt and no destroy token: the
+  2026-08-11 fleet-wide data-loss reflex, reached through the flag an operator
+  in a panic is most likely to try. The missing-database refusal now applies on
+  the reinit path too. `--force`/`--reinit-local` authorize destroying a
+  database that exists; only the explicit, per-invocation `--recreate-missing`
+  authorizes creating one where the configured database has gone missing.
+
+- **`bd init --reinit-local` and `--force` no longer wave through a workspace
+  that predates `project_id`.** Their missing-database safety net returned
+  early whenever `.beads/metadata.json` carried no `project_id`, before it ever
+  probed for this project's local database directory — so a workspace
+  initialized before GH#2372 minted that field, whose local Dolt storage had
+  since been lost, was protected under plain `bd init` but not under the two
+  flags an operator reaches for in a panic. The probe now runs first and
+  unconditionally, and an absent `project_id` is allowed through only when
+  there is no local Dolt data directory either, matching the plain-`bd init`
+  guard. `--recreate-missing` still opens it. The signal decision behind both
+  guards is recorded in `engdocs/adr/0004-missing-database-guard-signal.md`.
+
+- **`bd init --recreate-missing` now reaches its own opt-in.** The existing-data
+  check derived "is this project's database here?" from the Dolt data
+  directory, which exists on every initialized workspace, so the
+  missing-database branch was unreachable and both `--recreate-missing` opt-ins
+  behind it were dead code. Four surfaces — the flag help, `bd help
+  init-safety`, `docs/recovery/init-safety.md`, and the guard's own refusal
+  text — told the operator to run `bd init --recreate-missing --prefix <p>`;
+  that command exited 1 with a false "already initialized" message and pointed
+  back at `bd init --reinit-local`, which is the destructive path, leaving the
+  documented recovery circling between two refusals. The check now probes
+  `<dolt-data-dir>/<database>/.dolt`, the same probe the reinit-path guard
+  uses.
+
+- **The missing-database guard probes this project's own database directory**
+  (`<dolt-data-dir>/<database>/.dolt`) rather than the Dolt data directory that
+  merely contains it. The data directory always exists on an initialized
+  workspace — shared-server mode creates the machine-global one on resolution,
+  and per-project mode creates it at init — so probing it made the guard a
+  no-op in shared-server mode, which is the topology of the 2026-08-11 loss.
+  User-visible wherever the data directory exists but the database is gone.
+
+- **`BEADS_DOLT_POOL_READ_TIMEOUT` / `dolt.pool-read-timeout` (and the write
+  twins) now apply to every `bd` command in server mode.** The knobs shipped in
+  #5089, but their env/config ladder ran only for callers of `NewFromConfig*`;
+  the CLI's own store open hand-builds its config and goes straight to `New`,
+  so every `bd` command kept the built-in 10 s pool
+  deadline whatever the knob said — on a large shared server that is what made
+  `bd close` of a bead with dependents die in its recompute with `i/o timeout`
+  and no relief valve. The ladder now runs from the constructor every DoltStore
+  open shares — the CLI's store and library callers of
+  `New`/`NewFromConfig*`; `bd serve`'s HTTP data path builds its own
+  DSN without pool deadlines and is unchanged
+  ([#6144](https://github.com/gastownhall/beads/issues/6144)). Note for
+  operators of loaded servers: the documented precedence now reaches `bd
+  import` as well — it used to inherit the 5 m long-read fallback
+  unconditionally because the CLI's knob value was always 0, so a
+  `BEADS_DOLT_POOL_READ_TIMEOUT` set below that now bounds import too; size the
+  knob for your largest import, or leave it unset for the fallback.
+
+- **No-DB commands in a redirected workspace no longer lose the source
+  repo's `dolt_database`** (be-xil, be-fyt). `bd doctor`, `bootstrap`,
+  `context`, `dolt`, `init` and `version` skip store init, and the beads dir
+  they select is resolved through `beads.FindBeadsDir()`, which follows a
+  `.beads/redirect` internally. The source repo's configured database name was
+  therefore gone before anything could capture it, so `bd doctor` fell through
+  to the shared target directory's own default database and reported
+  `Dolt Schema: wrong database` — offering a `--fix` that would have repointed
+  the rig at an unrelated rig's store. The redirect source is now captured
+  before that resolution, matching the store-requiring path.
+- **An explicit `--db`, `BEADS_DB` or `BD_DB` target is no longer shadowed by
+  the ambient repo's redirect-source database** (be-fyt). `beads.GetRedirectInfo()`
+  deliberately resolves from the CWD repo's local `.beads` regardless of
+  `--db`/`BEADS_DIR` (bd-wayc3), so when the ambient repo itself had an active
+  redirect, the preservation above re-opened the same "wrong database" failure
+  through a narrower door. Preservation is now skipped whenever the caller
+  named an explicit target, asking the same question `selectedNoDBBeadsDir`
+  asks so the two cannot drift apart. Note that a `--db` value naming a
+  *database* rather than a path is not an explicit *directory* target: it is
+  consumed only on the store-requiring path, the ambient workspace is still
+  what gets selected, and its source database is still preserved.
+
+- **An ambient `BEADS_DOLT_SERVER_PORT` now marks a workspace externally
+  managed — suppressing auto-start — and no longer stops bd reaping its own
+  orphaned server**
+  ([#5934](https://github.com/gastownhall/beads/pull/5934)). Setting
+  `BEADS_DOLT_SERVER_PORT` (or the legacy `BEADS_DOLT_PORT`) now makes
+  `ResolveServerMode` classify a workspace as an externally-managed server, so
+  bd stops trying to own a lifecycle it does not own. The stale-server cleanup
+  path is deliberately carved out of that rule: it keeps resolving the mode
+  without the port var, so bd still reaps a same-repo orphan it started
+  (GH#2430) instead of declining because the environment named a port. A
+  `proxied-server` workspace is exempt from the new rule entirely — it reaches
+  its server through the proxy, so an ambient port does not describe its
+  lifecycle.
+
 - **`bd doctor` no longer flags a `.local_version` that starts with `v`.** The
   canonical spelling of a Go module version — and the string a build stamped
   from a Go pseudo-version reports and writes into `.local_version` itself —
@@ -135,6 +234,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   denied that INSERT fails its open until one privileged `bd` opens the store
   and heals the pattern — self-healing, one privileged open per upgrade
   (degrading a denied seed to a skip is tracked separately).
+
+- **`bd ready --parent` and `bd blocked --parent` no longer re-scan the whole
+  parent-child edge relation for every descendant they find.** The transitive
+  descendant walk recursed against a materialized `parent_edges` CTE that Dolt
+  cannot index through, so its cost was (parent-child rows) × (descendants):
+  7.5 s for a 483-descendant parent on a 4.6k-edge database, and past the
+  shared-pool read deadline on a busy server. The walk now recurses directly
+  off `dependencies` / `wisp_dependencies` through their typed target indexes
+  and returns the same rows in a fraction of the time
+  ([#6128](https://github.com/gastownhall/beads/issues/6128)).
+
+- **`bd list --parent` on a proxied-server workspace no longer drops a child
+  whose prefix differs from its parent's**
+  ([#6130](https://github.com/gastownhall/beads/pull/6130)). The edge to such
+  a parent is stored in `depends_on_external` — `issueops.IsExternalDepTarget`
+  routes every cross-prefix target there — but the descendant walk behind the
+  proxied tree view resolved a parent only through the issue and wisp target
+  columns, so the child and its subtree were missing from the tree and from
+  `--watch`, while the direct route listed them. The walk now reads all three
+  target columns, as the direct route's `--parent` filter does. Nothing listed
+  before can drop out: the added column is read only when the other two are
+  both empty.
 
 - **`notion.token` is kept out of the Dolt database**
   ([#6676](https://github.com/gastownhall/beads/issues/6676)). It was missing
@@ -350,6 +471,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A long-running schema migration now says so instead of going quiet**
+  ([#5997](https://github.com/gastownhall/beads/pull/5997)). Migrations are
+  allowed to take a long time by design — migration 0047's full-table
+  `is_blocked` recompute is a real example — but until now a slow one and a
+  wedged one looked identical from outside: `bd` simply stopped printing. A
+  watchdog now emits a WARN naming the migration's version, name, and elapsed
+  time once the migration's own SQL has been running past the interval, and
+  repeats every interval while it keeps running, so an operator reading logs
+  can tell "still working" from "stopped emitting anything". Coverage is the
+  migration body specifically — the per-step Dolt commit that follows it on
+  the production embedded path is outside the watchdog, so a stall there is
+  still quiet. Set `BEADS_MIGRATION_WATCHDOG_INTERVAL` to change the
+  5-minute default; it accepts durations like `10m` and bare seconds like `90`,
+  and falls back to the default when unset or unparsable. This is observability
+  only and never a circuit breaker: the migration receives the caller's exact
+  context, its error is passed through unchanged, and nothing is aborted or
+  rolled back. The warning is deliberately not terminal-gated, so it survives
+  `bd serve`, systemd, CI, and piped invocations.
+
 - **Auto-backup runs on a managed-local proxied-server workspace.** The
   proxied arm of the post-command hook now calls auto-backup, so an explicit
   `backup.enabled=true` (or `BD_BACKUP_ENABLED=1`) takes the same throttled,
@@ -490,6 +630,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   publication failure after the SQL side already committed is a genuine
   partial, and the count alone cannot tell the two apart.
 
+
+- **`PATCH /v0/beads/issues/{id}` accepts `claim: true`**, the wire spelling of
+  `bd update <id> --claim`. It passes through to the same lifecycle role the
+  direct route uses (`issueops.UpdateRequest.Claim`), so the claim and the
+  patch land in one transaction with the direct route's semantics: a
+  same-actor re-claim is idempotent (`changed: false`), a foreign holder is
+  409 `already_claimed` and an unclaimable status 409 `not_claimable` — both
+  naming `claim` and carrying `{id}:claim`'s `assignee` / `issue_status`
+  members — and a refused claim writes none of the patch. With `claim: true`
+  the `patch` may be empty. `claim` beside `expected_assignee`,
+  `expected_status` or `force_assignee_transfer` is a 400. A server that
+  predates the member refuses it as `unknown_parameter` before any database
+  work, so an HTTP client can forward `bd update --claim` instead of refusing
+  it, and can never mistake an older server for one that dropped the claim.
 
 ### Fixed
 
@@ -634,6 +788,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `blocks` is no longer purged (reported as `live_dependent_skipped`), so a
   purge that used to delete a closed molecule root under a live step now
   leaves it. See the `--wisps-plane` entry under Added.
+
+- **`bd status` now discloses the counted rows a default `bd list` will not
+  show.** `Total Issues` counts the database; `bd list` shows a filtered view of
+  it, and the two disagreed silently — an operator reconciling a total against
+  a listing found rows they could not account for. A new line names the
+  breakdown and the flags that reveal each part: `Not shown by bd list: 2 gates
+  (--include-gates --all), 1 template (--include-templates --all)`, omitted
+  entirely when there is nothing to disclose. The counts describe the database,
+  every status included, which is why the remedy names `--all` beside the type
+  flag: the default listing hides closed rows independently of what a row is,
+  so a closed gate is counted here and the type flag alone would not show it.
+  `gate_issues` and `template_issues` join the `--json` payload and the OpenAPI
+  `Statistics` schema, additively; they are broken out of `TotalIssues` rather
+  than removed from it, so the buckets still do not sum to the total in either
+  direction. `bd status --assigned` gets the same breakdown, which it needs for
+  the same reason against `bd list --assignee`. Not yet covered: durable rows
+  carrying a configured infra type (GH#6439), which need the workspace's
+  `types.infra` set that the portable count has no seam to read.
 
 - **Proxied-server refusals now say *why* they refuse.** The JSON a refused
   command prints gains a `reason` field next to the existing `code`, `error`

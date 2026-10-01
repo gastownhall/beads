@@ -504,6 +504,27 @@ func (i *Issue) SetDefaults() {
 	}
 }
 
+// NormalizeOptionalTimestampsToUTC converts every set optional timestamp to UTC
+// in place. CreatedAt and UpdatedAt are value fields normalized separately by
+// the insert paths; the optional pointer timestamps below were previously left
+// in their original location. An offset-bearing value imported from JSONL — for
+// example a closed_at carrying a -04:00 offset from an older SQLite-era export —
+// was therefore stored with its local wall-clock digits relabeled UTC, shifting
+// the recorded instant by the offset. Normalizing to UTC here matches how
+// CreatedAt/UpdatedAt are already handled and keeps every timestamp on a row
+// referring to the same absolute instant. Fixes #5765.
+func (i *Issue) NormalizeOptionalTimestampsToUTC() {
+	for _, ts := range []**time.Time{
+		&i.StartedAt, &i.ClosedAt, &i.CompactedAt,
+		&i.DueAt, &i.DeferUntil, &i.LeaseExpiresAt, &i.HeartbeatAt,
+	} {
+		if *ts != nil {
+			utc := (*ts).UTC()
+			*ts = &utc
+		}
+	}
+}
+
 // Status represents the current state of an issue
 type Status string
 
@@ -1915,6 +1936,21 @@ type Statistics struct {
 	PinnedIssues            int     `json:"pinned_issues"`   // Persistent issues
 	EpicsEligibleForClosure int     `json:"epics_eligible_for_closure"`
 	AverageLeadTime         float64 `json:"average_lead_time_hours"`
+
+	// GateIssues and TemplateIssues count rows the default `bd list` suppresses
+	// on account of what they are. They are already part of TotalIssues, which
+	// counts the database rather than the listing; they are broken out so the
+	// two commands can be reconciled instead of silently disagreeing.
+	//
+	// THE POPULATION IS EVERY STATUS, exactly TotalIssues': a CLOSED gate is
+	// counted in GateIssues, and the two overlap the status buckets the way
+	// PinnedIssues does rather than partitioning them. They are not scoped to
+	// the rows a default listing shows. That is why `bd status` prints --all
+	// beside the type flag - the listing's status exclusion is independent of
+	// its type exclusions, so the type flag alone would not reveal every row
+	// counted here (cmd/bd/status.go).
+	GateIssues     int `json:"gate_issues"`
+	TemplateIssues int `json:"template_issues"`
 }
 
 // IssueFilter is used to filter issue queries
