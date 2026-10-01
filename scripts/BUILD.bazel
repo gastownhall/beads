@@ -32,6 +32,7 @@ go_test(
         "host_tools_test.go",
         "install_dolt_test.go",
         "pr_preflight_test.go",
+        "pr_risk_bazel_coverage_test.go",
         "pull_dolt_image_test.go",
         "release_script_test.go",
         "test_script_test.go",

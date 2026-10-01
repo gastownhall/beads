@@ -4549,6 +4549,9 @@ func TestReleaseWorkflowRestoresNoCache(t *testing.T) {
 // BUILD file or macro may mark a target flaky = True (Bazel retries those up
 // to three times by default).
 func TestBazelGatedLanesNeverRetryFlakyTests(t *testing.T) {
+	if os.Getenv("TEST_SRCDIR") != "" {
+		t.Skip("scripts_test's runfiles hold no other package's BUILD files")
+	}
 	root := sourceRepoRoot(t)
 	retry := regexp.MustCompile(`flaky_test_attempts|runs_per_test_detects_flakes`)
 	flakyAttr := regexp.MustCompile(`\bflaky\s*=\s*(True|1)\b`)
