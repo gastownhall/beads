@@ -42,9 +42,11 @@ func TestDoltRestartCommandSharedServer(t *testing.T) {
 	sqlPort, rapiPort := ports[0], ports[1]
 
 	// A minimal environment: the ambient one may carry BEADS_*/GT_ROOT
-	// values that redirect the child to a real workspace.
+	// values that redirect the child to a real workspace. sbin stays on PATH
+	// because the restart preflight attributes a busy listener with lsof,
+	// which macOS installs under /usr/sbin.
 	baseEnv := []string{
-		"PATH=" + filepath.Dir(doltBin) + ":/usr/bin:/bin",
+		"PATH=" + filepath.Dir(doltBin) + ":/usr/bin:/bin:/usr/sbin:/sbin",
 		"HOME=" + home,
 		"USERPROFILE=" + home,
 		"XDG_CONFIG_HOME=" + filepath.Join(home, ".config"),
@@ -117,6 +119,26 @@ func TestDoltRestartCommandSharedServer(t *testing.T) {
 	if status["remotesapi_reachable"] != true || int(status["remotesapi_port"].(float64)) != rapiPort {
 		t.Fatalf("status = %v, want remotesapi %d reachable", status, rapiPort)
 	}
+
+	// The normal second restart: the remotesapi port is busy, but held by the
+	// server being replaced, so preflight must attribute it and let the
+	// restart proceed rather than refuse the port as taken.
+	againOut, err := bd("--json", "dolt", "restart")
+	if err != nil {
+		t.Fatalf("bd dolt restart with its own listener up: %v\n%s", err, againOut)
+	}
+	var again struct {
+		PID            int `json:"pid"`
+		Port           int `json:"port"`
+		RemotesAPIPort int `json:"remotesapi_port"`
+	}
+	if jsonErr := json.Unmarshal([]byte(againOut[strings.Index(againOut, "{"):]), &again); jsonErr != nil {
+		t.Fatalf("decode second restart JSON: %v\n%s", jsonErr, againOut)
+	}
+	if again.Port != sqlPort || again.RemotesAPIPort != rapiPort || again.PID == restarted.PID || !doltserver.ProbeRemotesAPI(rapiPort) {
+		t.Fatalf("second restart = %+v, want a new PID (was %d) on SQL %d with remotesapi %d live", again, restarted.PID, sqlPort, rapiPort)
+	}
+	restarted.PID = again.PID
 
 	// Restart preflight: an occupied remotesapi port is refused before the
 	// running server is stopped, so SQL keeps serving.

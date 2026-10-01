@@ -2107,10 +2107,21 @@ func preflightRestart(cfg *Config, previous *State) error {
 	if err == nil {
 		return nil
 	}
-	if previous != nil && findPIDOnPort(cfg.RemotesAPIPort) == previous.PID {
-		return nil
+	if previous == nil {
+		return fmt.Errorf("%w; free it or choose a different port with 'bd dolt set remotesapi-port <port>'", err)
 	}
-	return fmt.Errorf("%w; free it or choose a different port with 'bd dolt set remotesapi-port <port>'", err)
+	switch owner := findPIDOnPort(cfg.RemotesAPIPort); {
+	case owner == previous.PID:
+		return nil
+	case owner == 0:
+		// The listener cannot be attributed (no lsof/netstat, or a transient
+		// state). Refusing is the safe side; say what is missing and name the
+		// path that does not depend on attribution.
+		return fmt.Errorf("%w; bd cannot identify the listener (check with: %s). If it is the running server's own remotesapi listener, apply the change with 'bd dolt stop && bd dolt start'; otherwise free the port or choose a different one with 'bd dolt set remotesapi-port <port>'",
+			err, fmt.Sprintf(portConflictHint, cfg.RemotesAPIPort))
+	default:
+		return fmt.Errorf("%w (held by PID %d); free it or choose a different port with 'bd dolt set remotesapi-port <port>'", err, owner)
+	}
 }
 
 // StopWithForce is like Stop but with an optional force flag.

@@ -757,10 +757,13 @@ listener. `bd dolt restart` holds the lifecycle lock across graceful stop and
 start, preserves the SQL port, and returns only after SQL and remotesapi are
 ready. It checks the configuration before it stops the running server: a
 remotesapi port equal to the SQL port, or one already in use, is refused and
-the server keeps serving. It remains available when `dolt.auto-start: false`,
-because that setting disables transparent starts rather than explicit operator
-lifecycle commands. The shared server serves every local workspace, so a
-restart interrupts other projects' open connections.
+the server keeps serving. The check cannot cover the moment between it and the
+new server's bind; a process that takes the port in that window leaves the
+server stopped with the SQL port kept for a retry, and the error says so. It
+remains available when `dolt.auto-start: false`, because that setting disables
+transparent starts rather than explicit operator lifecycle commands. The
+shared server serves every local workspace, so a restart interrupts other
+projects' open connections.
 
 Current Dolt releases bind remotesapi on all interfaces even when the SQL
 listener is bound to `127.0.0.1`; there is no remotesapi host knob. Restrict
