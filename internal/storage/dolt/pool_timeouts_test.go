@@ -66,7 +66,7 @@ func TestApplyConfigDefaultsAppliesPoolTimeoutLadder(t *testing.T) {
 	})
 
 	// The config.yaml rung, on the constructor path. The subtests above only
-	// reach the env rung, so poolTimeoutFromConfig's dir fallback -- the rung a
+	// reach the env rung, so poolKnobFromConfig's dir fallback -- the rung a
 	// library consumer that never called config.Initialize depends on -- was
 	// pinned only for applyResolvedConfig (TestApplyResolvedConfig in
 	// open_test.go). This mirrors that subtest through applyConfigDefaults,
@@ -99,6 +99,89 @@ func TestApplyConfigDefaultsAppliesPoolTimeoutLadder(t *testing.T) {
 		}
 		if dsn := buildServerDSN(cfg, cfg.Database); !strings.Contains(dsn, "readTimeout=2m0s") {
 			t.Fatalf("buildServerDSN did not carry the config.yaml deadline: %s", dsn)
+		}
+	})
+}
+
+// TestApplyConfigDefaultsAppliesPoolSizeLadder pins the pool-size knob at the
+// same seam. BEADS_DOLT_MAX_CONNS / dolt.max-conns (GH#3140) were read only in
+// applyResolvedConfig, which the CLI's main store open never reaches, so
+// ordinary `bd` commands in server mode ran on the built-in 10-connection pool
+// whatever the knob said — the hole #6144 found for the pool deadlines. Each
+// subtest follows the knob through applyPoolLimits to the *sql.DB it actually
+// sizes.
+func TestApplyConfigDefaultsAppliesPoolSizeLadder(t *testing.T) {
+	poolSize := func(t *testing.T, cfg *Config) int {
+		t.Helper()
+		db, _ := openMockDB(t)
+		t.Cleanup(func() { _ = db.Close() })
+		applyPoolLimits(db, cfg)
+		return db.Stats().MaxOpenConnections
+	}
+
+	t.Run("env var sizes the pool on the constructor path", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_MAX_CONNS", "3")
+		cfg := &Config{ServerMode: true, Database: "ladder", Path: t.TempDir()}
+
+		applyConfigDefaults(cfg)
+
+		if cfg.MaxOpenConns != 3 {
+			t.Fatalf("MaxOpenConns = %d, want 3 from BEADS_DOLT_MAX_CONNS", cfg.MaxOpenConns)
+		}
+		if got := poolSize(t, cfg); got != 3 {
+			t.Fatalf("pool MaxOpenConnections = %d, want 3", got)
+		}
+	})
+
+	t.Run("caller-set pool size wins over the env var", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_MAX_CONNS", "3")
+		cfg := &Config{ServerMode: true, Database: "ladder", Path: t.TempDir(), MaxOpenConns: 1}
+
+		applyConfigDefaults(cfg)
+
+		if cfg.MaxOpenConns != 1 {
+			t.Fatalf("MaxOpenConns = %d, want the caller's 1", cfg.MaxOpenConns)
+		}
+	})
+
+	t.Run("unset knob leaves the built-in default in place", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_MAX_CONNS", "")
+		config.ResetForTesting() // the config.yaml rung reads package state, not just env
+		t.Cleanup(config.ResetForTesting)
+		cfg := &Config{ServerMode: true, Database: "ladder", Path: t.TempDir()}
+
+		applyConfigDefaults(cfg)
+
+		if cfg.MaxOpenConns != 0 {
+			t.Fatalf("MaxOpenConns = %d, want 0 so applyPoolLimits applies its default", cfg.MaxOpenConns)
+		}
+		if got := poolSize(t, cfg); got != defaultMaxOpenConns {
+			t.Fatalf("pool MaxOpenConnections = %d, want the default %d", got, defaultMaxOpenConns)
+		}
+	})
+
+	t.Run("config.yaml sizes the pool on the constructor path", func(t *testing.T) {
+		// Same premise as the deadline subtest above: with a populated global
+		// viper the dir-fallback rung under test is not the one answering.
+		config.ResetForTesting()
+		t.Cleanup(config.ResetForTesting)
+		if config.GetString("dolt.max-conns") != "" {
+			t.Fatal("global viper unexpectedly configured; this subtest's premise is broken")
+		}
+		t.Setenv("BEADS_DOLT_MAX_CONNS", "")
+		beadsDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  max-conns: 25\n"), 0o644); err != nil {
+			t.Fatalf("writing config.yaml: %v", err)
+		}
+		cfg := &Config{ServerMode: true, Database: "ladder", Path: t.TempDir(), BeadsDir: beadsDir}
+
+		applyConfigDefaults(cfg)
+
+		if cfg.MaxOpenConns != 25 {
+			t.Fatalf("MaxOpenConns = %d, want 25 from config.yaml", cfg.MaxOpenConns)
+		}
+		if got := poolSize(t, cfg); got != 25 {
+			t.Fatalf("pool MaxOpenConnections = %d, want 25", got)
 		}
 	})
 }
