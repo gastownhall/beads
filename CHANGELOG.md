@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BEADS_DOLT_POOL_READ_TIMEOUT` set below that now bounds import too; size the
   knob for your largest import, or leave it unset for the fallback.
 
+- **`BEADS_DOLT_MAX_CONNS` / `dolt.max-conns` now size the pool for ordinary
+  `bd` commands in server mode.** The pool-size knob (GH#3140) had the same
+  hole as the deadline knobs above: it was read only on the `NewFromConfig*`
+  path (routed stores, `bd doctor`, ...), so the CLI's own store open always
+  ran on the built-in 10-connection pool whatever the knob said. It now shares
+  the deadlines' ladder in the constructor every DoltStore open reaches
+  ([#7052](https://github.com/gastownhall/beads/pull/7052)).
+
 - **No-DB commands in a redirected workspace no longer lose the source
   repo's `dolt_database`** (be-xil, be-fyt). `bd doctor`, `bootstrap`,
   `context`, `dolt`, `init` and `version` skip store init, and the beads dir
