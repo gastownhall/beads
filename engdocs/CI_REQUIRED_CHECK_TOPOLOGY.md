@@ -130,8 +130,12 @@ the `bazel` call) and `PR Risk Gate / Required` (`pr-risk.yml`). PR Risk's
 gate job was renamed from `CI Gate / Required` to `PR Risk Gate / Required`
 (#6939), so the two required contexts are distinct; before that both
 workflows reported the same check name. Organization admins and one team
-may bypass it. There is no merge queue, so the checks run on
-`pull_request`.
+may bypass it. There is no merge queue (no `merge_queue` rule, and no
+`merge_group` run has ever happened), so the checks run on `pull_request`
+only, and the ruleset does not require branches to be up to date
+(strict off). The ruleset applies to the default branch only: PRs into
+`release/**` run both workflows (and the Bazel lane), but neither gate is
+enforced there.
 
 ## Trusted-Author Fork PRs (Bazel Farm)
 
@@ -429,7 +433,8 @@ would only be needed if maintainers still want exactly one required check.
 - Baseline aggregate candidate: `PR / CI Gate / Required`
 - Risk aggregate candidate: `PR Risk / PR Risk Gate / Required`
 - Source: GitHub Actions
-- Required on: pull requests and merge queue groups targeting `main`
+- Required on: pull requests (and merge queue groups, if a queue is ever
+  added) targeting `main`; not on `release/**`
 
 Do not require these existing check names directly:
 
@@ -713,6 +718,35 @@ have run remotely and passed.
   3. Only then unset `RBE_WEST_WORKERS`, if remote execution should be off.
 
   Reverting the D2 commits removes the decision jobs entirely.
+- Re-runs: "Re-run all jobs" (or "Re-run failed jobs") of one workflow
+  re-evaluates variables and secrets for that workflow's run only. The
+  other workflow's last result stays on the head SHA. With the committed
+  flag this cannot drop the tier silently: `covered` depends on the flag
+  (fixed by the merge commit) and the secret, not on `RBE_WEST_WORKERS`.
+  Re-running "failed jobs" keeps the earlier jobs' outputs, including
+  `covered` and the `rbe` mode. Only an empty or deleted `RBE_WEST_EXECUTOR`
+  between runs (residual risk above) can make the two disagree.
+- Enforcement scope: the beads-only ruleset requires both gates on the
+  default branch (`main`) only. On PRs into `release/**` both workflows run
+  and report, but merging does not wait for them, before or after this
+  change. There is no merge queue and `strict` is off, so no
+  pre-merge run catches a gap; only `main.yml`'s embedded jobs and
+  `bazel.yml`'s push run do, after merge.
+- Lane hardening that the retirement relies on (policy-tested in
+  `scripts/ci_workflow_test.go` and `scripts/pr_risk_bazel_coverage_test.go`):
+  - `test:embedded --nocache_test_results`: every run executes every test,
+    like the legacy `-test.count=1` jobs, so a stale or poisoned entry in
+    the shared farm action cache cannot stand in for a run.
+  - No retries: no `--flaky_test_attempts` or
+    `--runs_per_test_detects_flakes` anywhere, and no `flaky = True`
+    target.
+  - Pinned selection: the lane's `bazel test //... --config=embedded`
+    step and the `--config=embedded` lines are pinned exactly, and no
+    unconfigured rc line or generated rc may narrow tests.
+  - `tools/bazel/check_shard_coverage.py` runs after the tier and requires
+    every Bazel shard to have run exactly the tests its shard script lists
+    (list-only mode). A test the scripts discover from source but the Bazel
+    binary lacks fails the lane instead of passing silently.
 - Not changed: `conformance.yml`'s Tier 1 (`scripts/conformance.sh`) runs the
   embedded-Dolt `TestConformance` again (non-race, unsharded), duplicating
   `test-embedded-conformance` and the Bazel lane. It is not part of either
@@ -788,6 +822,10 @@ Policy for `merge_group`:
 
 - `PR` and `PR Risk` must include `merge_group`.
 - `detect-ci-tier` should keep treating `merge_group` as full embedded coverage.
+- There is no merge queue today (see Current State), so these runs are not a
+  pre-merge safety net for anything PRs skip; in particular they are not one
+  for the retired legacy embedded tier (D2 step 1). `merge_group` keeps that
+  tier only so a queue added later starts with full coverage.
 - Any risk detector added to the required topology should default to run on
   `merge_group`, because the merge group commit may combine individually safe
   PRs into a risky integration state.
