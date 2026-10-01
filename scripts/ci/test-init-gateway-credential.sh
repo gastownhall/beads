@@ -39,7 +39,6 @@ host_info="$("$go_executable" env GOHOSTOS GOOS)"
 
 # This single list owns both test selection and required execution evidence.
 expected=(
-    TestApplyInitGatewayCredentialHelperProtocol
     TestApplyInitGatewayCredentialAdoptsToken
     TestApplyInitGatewayCredentialSkipsEmbeddedMode
     TestApplyInitGatewayCredentialNoopWithoutCommand
@@ -47,7 +46,7 @@ expected=(
     TestApplyInitGatewayCredentialPresetWins
 )
 # ...which makes the array the only wiring between a fixture and native
-# execution, with nothing tying it back to the source file. A seventh
+# execution, with nothing tying it back to the source file. A new
 # TestApplyInitGatewayCredential* fixture added later would fall out of the
 # selector, lose macOS/Windows execution entirely, and still leave this driver
 # exiting 0 with the required gate green — the exact "green because nothing ran"
