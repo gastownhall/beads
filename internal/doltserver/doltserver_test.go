@@ -1688,6 +1688,10 @@ func TestIsSharedServerModeForDirPrecedence(t *testing.T) {
 
 	t.Run("target overrides active workspace", func(t *testing.T) {
 		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+		// An inherited port env var makes any target external via check 2c,
+		// independent of its shared-server classification.
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", "")
 		activeDir := writeMode(t, "true")
 		targetDir := writeMode(t, "false")
 		t.Setenv("BEADS_DIR", activeDir)
