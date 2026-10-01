@@ -52,6 +52,7 @@ endif
 all: build
 
 BUILD_DIR := .
+BD_BUILD_OUTPUT := $(BUILD_DIR)/bd$(if $(filter Windows_NT,$(OS)),.exe)
 GIT_BUILD := $(shell git rev-parse --short HEAD)
 ifeq ($(OS),Windows_NT)
 INSTALL_DIR := $(USERPROFILE)/.local/bin
@@ -104,21 +105,21 @@ build:
 ifeq ($(OS),Windows_NT)
 	@if [ -n "$$CC" ]; then \
 		echo "Using CC=$$CC"; \
-		go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+		go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o "$(BD_BUILD_OUTPUT)" ./cmd/bd; \
 	elif command -v gcc >/dev/null 2>&1; then \
-		CC=gcc go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+		CC=gcc go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o "$(BD_BUILD_OUTPUT)" ./cmd/bd; \
 	elif command -v clang >/dev/null 2>&1 && clang -dumpmachine 2>/dev/null | grep -qi 'windows.*gnu'; then \
-		CC=clang go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+		CC=clang go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o "$(BD_BUILD_OUTPUT)" ./cmd/bd; \
 	else \
 		for bin in $(WINDOWS_CGO_BINS); do \
 			if [ -x "$$bin/gcc.exe" ]; then \
 				echo "Using Windows CGO gcc from $$bin"; \
-				PATH="$$bin:$$PATH" CC=gcc go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+				PATH="$$bin:$$PATH" CC=gcc go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o "$(BD_BUILD_OUTPUT)" ./cmd/bd; \
 				exit $$?; \
 			fi; \
 			if [ -x "$$bin/clang.exe" ] && "$$bin/clang.exe" -dumpmachine 2>/dev/null | grep -qi 'windows.*gnu'; then \
 				echo "Using Windows CGO clang from $$bin"; \
-				PATH="$$bin:$$PATH" CC=clang go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+				PATH="$$bin:$$PATH" CC=clang go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o "$(BD_BUILD_OUTPUT)" ./cmd/bd; \
 				exit $$?; \
 			fi; \
 		done; \
@@ -128,9 +129,9 @@ ifeq ($(OS),Windows_NT)
 		exit 1; \
 	fi
 else
-	go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd ./cmd/bd
+	go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o "$(BD_BUILD_OUTPUT)" ./cmd/bd
 ifeq ($(shell uname),Darwin)
-	@codesign -s - -f $(BUILD_DIR)/bd 2>/dev/null || true
+	@codesign -s - -f "$(BD_BUILD_OUTPUT)" 2>/dev/null || true
 	@echo "Signed bd for macOS"
 endif
 endif
@@ -264,7 +265,7 @@ test-regression:
 # Override version: ./scripts/upgrade-smoke-test.sh v0.62.0
 test-upgrade: build
 	@echo "Running upgrade smoke tests..."
-	@CANDIDATE_BIN=./bd ./scripts/upgrade-smoke-test.sh
+	@CANDIDATE_BIN="$(BD_BUILD_OUTPUT)" ./scripts/upgrade-smoke-test.sh
 
 
 # Run cross-version smoke tests (last 30 tags → candidate).
@@ -273,14 +274,14 @@ test-upgrade: build
 # All from v0.30.0: ./scripts/cross-version-smoke-test.sh --from v0.30.0
 test-cross-version: build
 	@echo "Running cross-version smoke tests..."
-	@CANDIDATE_BIN=./bd ./scripts/cross-version-smoke-test.sh
+	@CANDIDATE_BIN="$(BD_BUILD_OUTPUT)" ./scripts/cross-version-smoke-test.sh
 
 # Run the authenticated historical upgrade corpus with strict fidelity checks.
 # All qualified versions: ./scripts/migration-test/run.sh
 # Single version: ./scripts/migration-test/run.sh --version v0.49.6
 test-migration: build
 	@echo "Running migration test harness..."
-	@CANDIDATE_BIN=./bd ./scripts/migration-test/run.sh
+	@CANDIDATE_BIN="$(BD_BUILD_OUTPUT)" ./scripts/migration-test/run.sh
 
 # Regenerate the golden-JSON contract corpus (cmd/bd/protocol/testdata/corpus/).
 # Run after any deliberate bd --json wire change; review the diff, then commit.
@@ -343,18 +344,21 @@ endif
 # The old rm-first shape added an ENOENT window on top. Same treatment for the
 # beads symlink.
 #
-# EXCEPTION — native Windows keeps the rm-first + cp shape: under Git for
-# Windows' bash the staged tmp+rename leaves no bd.exe at the destination even
-# though cp && mv exit 0 (caught by pr.yml's spaced-USERPROFILE install proof;
-# root cause untraced). Restore Windows atomicity only with that proof green.
+# On Git for Windows, `rm path/bd` can resolve and delete `path/bd.exe` when no
+# literal extensionless entry exists. Replace bd.exe first, then enumerate real
+# legacy aliases (including case variants and redirected install directories)
+# so cleanup cannot remove the executable or weaken a failed install. Keep
+# directories named bd; the Windows PATH above supplies MSYS find, not System32 find.
+# find -H follows the install-directory argument; internal aliases are selected by
+# ! -type d, without assuming how this find implementation classifies junctions.
 install install-force: build
 	@mkdir -p "$(INSTALL_DIR)"
 ifeq ($(OS),Windows_NT)
-	@rm -f "$(INSTALL_DIR)/bd" "$(INSTALL_DIR)/bd.exe"
-	@cp "$(BUILD_DIR)/bd.exe" "$(INSTALL_DIR)/bd.exe"
+	@cp "$(BD_BUILD_OUTPUT)" "$(INSTALL_DIR)/.bd.exe.install.tmp.$$$$" && mv -f "$(INSTALL_DIR)/.bd.exe.install.tmp.$$$$" "$(INSTALL_DIR)/bd.exe"
+	@find -H "$(INSTALL_DIR)" -mindepth 1 -maxdepth 1 -iname bd ! -type d -exec rm -f -- {} +
 	@echo "Installed bd.exe to $(INSTALL_DIR)/bd.exe"
 else
-	@cp "$(BUILD_DIR)/bd" "$(INSTALL_DIR)/.bd.install.tmp.$$$$" && mv -f "$(INSTALL_DIR)/.bd.install.tmp.$$$$" "$(INSTALL_DIR)/bd"
+	@cp "$(BD_BUILD_OUTPUT)" "$(INSTALL_DIR)/.bd.install.tmp.$$$$" && mv -f "$(INSTALL_DIR)/.bd.install.tmp.$$$$" "$(INSTALL_DIR)/bd"
 	@echo "Installed bd to $(INSTALL_DIR)/bd"
 	@ln -sfn bd "$(INSTALL_DIR)/.beads.install.tmp.$$$$" && mv -f "$(INSTALL_DIR)/.beads.install.tmp.$$$$" "$(INSTALL_DIR)/beads"
 	@echo "Created 'beads' alias -> bd"
@@ -363,10 +367,13 @@ endif
 
 install: check-up-to-date
 
-# Format all Go files
+# Format all Go files.
+# Through the go.mod-pinned gofmt, never a bare PATH one: a newer local Go
+# formats differently from CI, so a bare gofmt -w here rewrites files into a
+# form CI's gofmt then rejects. See scripts/ci/gofmt-bin.sh.
 fmt:
 	@echo "Formatting Go files..."
-	@gofmt -w .
+	@gofmt_bin="$$(./scripts/ci/gofmt-bin.sh)" && "$$gofmt_bin" -w .
 	@echo "Done"
 
 # Check that all Go files are properly formatted (for CI)
@@ -376,8 +383,8 @@ fmt-check:
 # Validate documentation references against actual CLI flags
 check-docs:
 	@echo "Building bd for docs checks..."
-	@CGO_ENABLED=0 go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd ./cmd/bd
-	@./scripts/check-doc-flags.sh ./bd
+	@CGO_ENABLED=0 go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o "$(BUILD_DIR)/bd" ./cmd/bd
+	@./scripts/check-doc-flags.sh "$(BUILD_DIR)/bd"
 	@./scripts/check-doc-freshness.sh
 	@go test -tags=gms_pure_go ./test/docsync
 

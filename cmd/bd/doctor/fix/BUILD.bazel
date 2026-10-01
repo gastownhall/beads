@@ -114,11 +114,45 @@ sh_test(
     srcs = ["//tools/bazel:go_test_variant.sh"],
     args = ["$(rootpath :fix_test)"],
     data = [":fix_test"],
-    env = {"BEADS_FIX_REQUIRE_DOLT": "1"},
+    # Pinned to the container backend (the docker lane is the A/B control);
+    # rule env beats --test_env, so =local on the command line cannot flip it.
+    env = {
+        "BEADS_FIX_REQUIRE_DOLT": "1",
+        "BEADS_TEST_DOLT_SERVER": "container",
+    },
     tags = [
         "no-remote-exec",
         "requires-docker",
     ],
+)
+
+# The Dolt-backed half of fix_test, as pr.yml's "Test doctor/fix (Dolt-backed,
+# hard-require container)" step runs it, on the dolt-server lane: TestMain's
+# server is a local `dolt sql-server` child of the test process, and
+# BEADS_FIX_REQUIRE_DOLT=1 keeps the suite from skipping when it cannot start.
+# fix_docker_test is the A/B control. 4 shards: unsharded it was the lane's
+# critical path (~4 min remotely).
+#
+# Tags:
+#   dolt-server: starts hermetic dolt sql-servers from the pinned dolt in the
+#     test wrapper's runfiles (BEADS_TEST_DOLT_SERVER=local); excluded from
+#     --config=prcore/ci, selected by --config=doltserver. Runs remotely: no
+#     docker, and a missing server fails (REQUIRE=1) instead of skipping, so
+#     a cached pass is as good as a fresh one.
+sh_test(
+    name = "fix_dolt_test",
+    size = "large",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :fix_test)"],
+    data = [":fix_test"],
+    env = {
+        "BEADS_FIX_REQUIRE_DOLT": "1",
+        "BEADS_TEST_DOLT_SERVER": "local",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+        "GOMAXPROCS": "4",
+    },
+    shard_count = 4,
+    tags = ["dolt-server"],
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

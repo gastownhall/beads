@@ -112,9 +112,10 @@ func (s *testSuite) TestConfig_ReadFailuresAreNotMissing() {
 				s.Require().Error(roleErr)
 				s.ErrorAs(roleErr, &exitErr)
 			} else if tc.name == "invalid_routing_boolean" {
-				_, found, roleErr := domain.NewGitUseCase(s.tmpDir, s.repo).BeadsRole(s.Ctx())
+				role, found, roleErr := domain.NewGitUseCase(s.tmpDir, s.repo).BeadsRole(s.Ctx())
 				s.Require().NoError(roleErr)
 				s.False(found)
+				s.Empty(role)
 			}
 		})
 	}

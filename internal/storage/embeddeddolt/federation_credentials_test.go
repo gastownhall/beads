@@ -3,8 +3,11 @@
 package embeddeddolt
 
 import (
+	"bytes"
+	"crypto/rand"
 	"database/sql"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +21,14 @@ import (
 func newPeerAuthTestStore(t *testing.T) *EmbeddedDoltStore {
 	t.Helper()
 	ctx := t.Context()
+
+	// Several cases here deliberately build the state that warns about a
+	// suppressed ambient password; keep that off the test log unless a test
+	// installs its own writer to assert on it.
+	prevWarn := federationWarnWriter
+	federationWarnWriter = io.Discard
+	t.Cleanup(func() { federationWarnWriter = prevWarn })
+
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	store, err := Open(ctx, beadsDir, "fedauth", "main")
 	if err != nil {
@@ -143,6 +154,146 @@ func TestWithPeerAuth(t *testing.T) {
 	}
 }
 
+func TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPassword(t *testing.T) {
+	// Pinned verbatim, not matched by substring: the peer name, the username,
+	// the stored tier, and the Warning: prefix are the parts an operator
+	// reads, so a wording change has to be made here deliberately.
+	const wantOpenPwdWarning = `Warning: peer "open-pwd" stores a username with an empty password, ` +
+		`which overrides the ambient DOLT_REMOTE_PASSWORD for this operation; ` +
+		`store a password by re-running 'bd federation add-peer open-pwd <url> ` +
+		`--user peeruser' and entering it at the prompt.` + "\n"
+	const wantTieredWarning = `Warning: peer "tiered" stores a username with an empty password, ` +
+		`which overrides the ambient DOLT_REMOTE_PASSWORD for this operation; ` +
+		`store a password by re-running 'bd federation add-peer tiered <url> ` +
+		`--user peeruser --sovereignty T2' and entering it at the prompt.` + "\n"
+
+	cases := []struct {
+		name       string
+		peer       *storage.FederationPeer
+		remote     string
+		ambient    string
+		ambientSet bool
+		// directPeer, when set, calls the warning helper itself instead of
+		// going through withPeerAuth, pinning the helper's own boundary.
+		directPeer *storage.FederationPeer
+		wantLine   string
+	}{
+		{
+			name: "username with empty stored password suppresses ambient password",
+			peer: &storage.FederationPeer{
+				Name:      "open-pwd",
+				RemoteURL: "https://peer.example/peerdb",
+				Username:  "peeruser",
+			},
+			remote: "open-pwd", ambient: "envpass", ambientSet: true,
+			wantLine: wantOpenPwdWarning,
+		},
+		{
+			// add-peer upserts sovereignty along with the credentials, so the
+			// suggested re-run must carry the stored tier or it clears it.
+			name: "suggested re-add keeps the stored sovereignty tier",
+			peer: &storage.FederationPeer{
+				Name:        "tiered",
+				RemoteURL:   "https://peer.example/peerdb",
+				Username:    "peeruser",
+				Sovereignty: "T2",
+			},
+			remote: "tiered", ambient: "envpass", ambientSet: true,
+			wantLine: wantTieredWarning,
+		},
+		{
+			name: "stored password suppresses nothing the operator can act on",
+			peer: &storage.FederationPeer{
+				Name:      "team",
+				RemoteURL: "https://peer.example/peerdb",
+				Username:  "peeruser",
+				Password:  "peerpass",
+			},
+			remote: "team", ambient: "envpass", ambientSet: true,
+		},
+		{
+			name: "no ambient password to suppress",
+			peer: &storage.FederationPeer{
+				Name:      "open-pwd",
+				RemoteURL: "https://peer.example/peerdb",
+				Username:  "peeruser",
+			},
+			remote: "open-pwd",
+		},
+		{
+			name: "empty ambient password reads as no ambient password",
+			peer: &storage.FederationPeer{
+				Name:      "open-pwd",
+				RemoteURL: "https://peer.example/peerdb",
+				Username:  "peeruser",
+			},
+			remote: "open-pwd", ambient: "", ambientSet: true,
+		},
+		{
+			name: "peer without a username keeps the password puzzle out of scope",
+			peer: &storage.FederationPeer{
+				Name:      "open-usr",
+				RemoteURL: "https://peer.example/peerdb",
+				Password:  "peerpass",
+			},
+			remote: "open-usr", ambient: "envpass", ambientSet: true,
+		},
+		{
+			name:   "unknown remote keeps the environment fallback",
+			remote: "not-a-peer", ambient: "envpass", ambientSet: true,
+		},
+		{
+			// withPeerAuth returns before the helper when a peer stores
+			// neither field, so a direct call is the only way to reach the
+			// helper's defensive empty-username clause.
+			name:       "helper called directly with an all-empty peer stays silent",
+			directPeer: &storage.FederationPeer{},
+			remote:     "empty-peer", ambient: "envpass", ambientSet: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+
+			t.Setenv("DOLT_REMOTE_USER", "envuser")
+			t.Setenv("DOLT_REMOTE_PASSWORD", tc.ambient)
+			if !tc.ambientSet {
+				_ = os.Unsetenv("DOLT_REMOTE_PASSWORD")
+			}
+
+			var warnings bytes.Buffer
+			captureWarnings := func() {
+				// Installed after any store: newPeerAuthTestStore points the
+				// writer at io.Discard for the rest of the suite.
+				prev := federationWarnWriter
+				federationWarnWriter = &warnings
+				t.Cleanup(func() { federationWarnWriter = prev })
+			}
+
+			if tc.directPeer != nil {
+				captureWarnings()
+				warnStoredPeerSuppressesAmbientPassword(tc.remote, tc.directPeer)
+			} else {
+				store := newPeerAuthTestStore(t)
+				if tc.peer != nil {
+					if err := store.AddFederationPeer(ctx, tc.peer); err != nil {
+						t.Fatalf("AddFederationPeer: %v", err)
+					}
+				}
+				captureWarnings()
+				if err := store.withPeerAuth(ctx, tc.remote, func(string) error { return nil }); err != nil {
+					t.Fatalf("withPeerAuth: %v", err)
+				}
+			}
+
+			if got := warnings.String(); got != tc.wantLine {
+				t.Errorf("warning = %q, want %q", got, tc.wantLine)
+			}
+		})
+	}
+}
+
 func TestWithPeerAuth_RestoresEnvWhenCallbackFails(t *testing.T) {
 	ctx := t.Context()
 	store := newPeerAuthTestStore(t)
@@ -189,6 +340,156 @@ func TestWithPeerAuth_RestoresAbsentEnv(t *testing.T) {
 	}
 	if v, set := os.LookupEnv("DOLT_REMOTE_USER"); set {
 		t.Errorf("DOLT_REMOTE_USER after fn = %q, want unset", v)
+	}
+}
+
+// rotateCredentialKey simulates machine B: the peer row arrived with the
+// database, the machine-local key file did not, so this machine holds a key
+// that cannot decrypt the stored password.
+func rotateCredentialKey(t *testing.T, store *EmbeddedDoltStore) {
+	t.Helper()
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		t.Fatalf("generate replacement key: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(store.beadsDir, credentialKeyFile), key, 0600); err != nil {
+		t.Fatalf("write replacement key: %v", err)
+	}
+	store.credentialKey = nil
+}
+
+// wantKeyMismatchClause is the enrichment storage.CredentialKeyMismatchError
+// emits, pinned verbatim. The machine-local key file reads as context inside a
+// parenthetical rather than as the asserted cause, because an AES-GCM open also
+// fails on a tampered blob and on a row still under the legacy key; re-adding
+// the peer is the fix in all three cases (GH#5085 review).
+//
+// It takes the store because the clause names the key file by its RESOLVED
+// path, not by basename, so this pin fails if a caller regresses to the bare
+// const (GH#5214 review).
+func wantKeyMismatchClause(store *EmbeddedDoltStore) string {
+	return "stored peer credentials cannot be decrypted with this machine's credential key " +
+		"(the key file " + filepath.Join(store.beadsDir, credentialKeyFile) + " is machine-local and does not replicate with the database); " +
+		"re-run 'bd federation add-peer <name> <url> --user <user>' on this machine"
+}
+
+// Pins the decrypt-failure branch (GH#5085 review): a peer row whose password
+// was encrypted with a different machine's key must fail with the local context
+// and the fix, not a bare cipher error, on every read path.
+func TestDecryptPassword_KeyMismatchNamesTheLocalKey(t *testing.T) {
+	ctx := t.Context()
+	store := newPeerAuthTestStore(t)
+
+	if err := store.AddFederationPeer(ctx, &storage.FederationPeer{
+		Name: "team", RemoteURL: "https://peer.example/peerdb",
+		Username: "peeruser", Password: "peerpass",
+	}); err != nil {
+		t.Fatalf("AddFederationPeer: %v", err)
+	}
+	rotateCredentialKey(t, store)
+
+	wantFragments := []string{
+		// Both read paths name the peer, so the operator knows which one to re-add.
+		"for peer team",
+		wantKeyMismatchClause(store),
+		// The cipher error stays wrapped so the raw cause is still readable.
+		"cipher: message authentication failed",
+	}
+
+	t.Run("GetFederationPeer", func(t *testing.T) {
+		_, err := store.GetFederationPeer(ctx, "team")
+		if err == nil {
+			t.Fatal("GetFederationPeer succeeded, want decrypt failure")
+		}
+		if !errors.Is(err, storage.ErrCredentialKeyMismatch) {
+			t.Errorf("error = %v, want errors.Is storage.ErrCredentialKeyMismatch", err)
+		}
+		for _, want := range wantFragments {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
+	})
+
+	t.Run("ListFederationPeers", func(t *testing.T) {
+		_, err := store.ListFederationPeers(ctx)
+		if err == nil {
+			t.Fatal("ListFederationPeers succeeded, want decrypt failure")
+		}
+		if !errors.Is(err, storage.ErrCredentialKeyMismatch) {
+			t.Errorf("error = %v, want errors.Is storage.ErrCredentialKeyMismatch", err)
+		}
+		for _, want := range wantFragments {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
+	})
+}
+
+// Pins the short-ciphertext branch (GH#5214 review): a stored blob shorter
+// than the GCM nonce is local corruption of the credential row, so it must
+// classify through the same sentinel as a failed authentication rather than
+// surface as a bare cipher error that federation status reads as an
+// unreachable peer.
+func TestDecryptPassword_ShortCiphertextClassifiesAsKeyMismatch(t *testing.T) {
+	store := newPeerAuthTestStore(t)
+
+	_, err := store.decryptPassword([]byte("short"))
+	if err == nil {
+		t.Fatal("decryptPassword succeeded, want short-ciphertext failure")
+	}
+	if !errors.Is(err, storage.ErrCredentialKeyMismatch) {
+		t.Errorf("error = %v, want errors.Is storage.ErrCredentialKeyMismatch", err)
+	}
+	for _, want := range []string{wantKeyMismatchClause(store), "ciphertext too short"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+// A remote verb keeps failing closed on an undecryptable password: the
+// operation must not run under ambient credentials, which could present the
+// wrong identity to the peer.
+func TestWithPeerAuth_KeyMismatchFailsClosed(t *testing.T) {
+	ctx := t.Context()
+	store := newPeerAuthTestStore(t)
+
+	t.Setenv("DOLT_REMOTE_USER", "envuser")
+	t.Setenv("DOLT_REMOTE_PASSWORD", "envpass")
+
+	if err := store.AddFederationPeer(ctx, &storage.FederationPeer{
+		Name: "team", RemoteURL: "https://peer.example/peerdb",
+		Username: "peeruser", Password: "peerpass",
+	}); err != nil {
+		t.Fatalf("AddFederationPeer: %v", err)
+	}
+	rotateCredentialKey(t, store)
+
+	called := false
+	err := store.withPeerAuth(ctx, "team", func(string) error {
+		called = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("withPeerAuth succeeded, want decrypt failure")
+	}
+	if called {
+		t.Error("withPeerAuth ran the operation, want fail-closed")
+	}
+	if !errors.Is(err, storage.ErrCredentialKeyMismatch) {
+		t.Errorf("error = %v, want errors.Is storage.ErrCredentialKeyMismatch", err)
+	}
+	// The message a remote verb prints, wrap included.
+	for _, want := range []string{
+		"resolve peer credentials:",
+		"decrypt password for peer team:",
+		wantKeyMismatchClause(store),
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
 	}
 }
 

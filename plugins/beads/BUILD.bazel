@@ -20,3 +20,14 @@ filegroup(
     ),
     visibility = ["//cmd/bd/setup:__pkg__"],
 )
+
+# Plugin manifests gated by //internal/versioncheck's releaseSources table,
+# aggregated into //:release_metadata_files.
+exports_files(
+    [
+        ".claude-plugin/plugin.json",
+        ".codex-plugin/plugin.json",
+        ".copilot-plugin/plugin.json",
+    ],
+    visibility = ["//:__pkg__"],
+)

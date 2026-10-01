@@ -3,8 +3,10 @@ package issueops
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/steveyegge/beads/beadserrors"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // ErrAlreadyClaimed is returned when attempting to claim an issue that is already
@@ -61,6 +63,32 @@ type ErrUnsupported = beadserrors.ErrUnsupported
 // UpdateRequest.ExpectedAssignee.
 var ErrAssigneeMismatch = errors.New("assignee mismatch")
 
+// ErrNotesOverwrite is returned when an update's Patch.Notes would replace
+// existing non-empty notes with different non-empty content (see
+// NotesReplacement) and UpdateRequest.ForceNotesOverwrite is false. It is
+// independent of the assignee fence —
+// unlike ErrAlreadyClaimed it applies regardless of ExpectedAssignee — because
+// there is no compare-and-set that authorizes a notes overwrite the way a
+// matching ExpectedAssignee authorizes an assignee transfer. Bypass with
+// ForceNotesOverwrite (`bd update --force`); preserve history instead with
+// --append-notes.
+var ErrNotesOverwrite = errors.New("update would replace existing notes")
+
+// NotesReplacement reports whether proposed would replace existing non-empty
+// notes with different non-empty content — the one condition the
+// notes-overwrite fence refuses without ForceNotesOverwrite. An explicit
+// clear (proposed "") is not a replacement: every sibling text field clears
+// the same way, the blind-clobber pattern the fence exists to stop is an
+// agent writing its own non-empty content over someone else's, and the
+// refusal's advice (force, or append) is meaningless for a clear. The clear
+// itself is guarded separately at the CLI flag layer (`--notes ""` is
+// refused; `bd update --clear-notes` is the deliberate verb, GH#6021), where
+// an accidental empty — a dead command substitution — cannot be told from a
+// deliberate one by its bytes; that guard is not this predicate's concern.
+func NotesReplacement(existing, proposed string) bool {
+	return existing != "" && proposed != "" && proposed != existing
+}
+
 // ErrNotOwner is returned when an actor tries to release a claim that a
 // different actor holds. Releasing another actor's claim requires the force
 // escape hatch (ReleaseRequest.Force, `bd unclaim --force`), reserved for
@@ -102,6 +130,97 @@ var ErrPrefixMismatch = errors.New("prefix mismatch")
 // closed because it is still blocked (is_blocked=1: an open blocking dependency
 // or an open blocking gate). Bypass with CloseIssueOptions.Force.
 var ErrCloseBlocked = errors.New("cannot close blocked issue")
+
+// Blocker is one live blocker named by a BlockedError: a local issue id, or an
+// `external:<project>:<capability>` reference, with the blocking edge's type
+// when the refusal knew it.
+type Blocker struct {
+	// ID is the blocker's issue id or its full `external:` reference.
+	ID string
+	// Type is the blocking edge's dependency type. It is empty when the
+	// refusal did not report it, which is the case for an `external:`
+	// reference named by the external-dependency guard.
+	Type types.DependencyType
+}
+
+// externalBlockerPrefix marks a blocker that lives in another project and is
+// satisfied by a shipped capability rather than by a local close.
+const externalBlockerPrefix = "external:"
+
+// External reports whether the blocker is an `external:` reference rather than
+// an issue this database holds.
+func (b Blocker) External() bool { return strings.HasPrefix(b.ID, externalBlockerPrefix) }
+
+// String spells the blocker the way a blocked-issue refusal always has: the
+// bare id for a `blocks` edge or an unreported type, and "id (type)" for the
+// other blocking edges. ParseBlocker is its inverse.
+func (b Blocker) String() string {
+	if b.Type == "" || b.Type == types.DepBlocks {
+		return b.ID
+	}
+	return b.ID + " (" + string(b.Type) + ")"
+}
+
+// ParseBlocker reads one entry of the []string blocker list a store's IsBlocked
+// reports — the spelling Blocker.String writes — back into its typed form. It
+// exists for producers that hold only that string contract; a producer with the
+// edges in hand builds Blocker values directly. A bare local id is a `blocks`
+// edge, and an `external:` reference keeps an unreported type.
+//
+// The `external:` test comes first because a capability may itself end in a
+// parenthesized suffix: `external:remote:pay (beta)` is a legal reference, and
+// splitting it would report a truncated ID and a type the external guard never
+// names.
+func ParseBlocker(s string) Blocker {
+	if strings.HasPrefix(s, externalBlockerPrefix) {
+		return Blocker{ID: s}
+	}
+	if i := strings.LastIndex(s, " ("); i > 0 && strings.HasSuffix(s, ")") {
+		return Blocker{ID: s[:i], Type: types.DependencyType(s[i+2 : len(s)-1])}
+	}
+	return Blocker{ID: s, Type: types.DepBlocks}
+}
+
+// BlockedError reports the live blockers that refused an operation on a blocked
+// issue, read by the refusing check itself. It wraps the refusal rather than
+// replacing it — the ClaimConflictError arrangement — so the sentinel still
+// matches and its message is byte-identical to the historical
+// "<sentinel>: <id> is blocked by [<blockers>]", while a caller that reports the
+// refusal elsewhere (the HTTP surface's `blockers` member) reads the typed list
+// instead of parsing that prose.
+//
+// Err is ErrCloseBlocked for a close-policy refusal. The type is not
+// close-specific: any refusal whose subject is "this issue is blocked by these"
+// can carry its own sentinel.
+type BlockedError struct {
+	// IssueID names the issue that was refused.
+	IssueID string
+	// Blockers are the live blockers, in the order the check reported them.
+	Blockers []Blocker
+	// Err is the wrapped refusal sentinel, e.g. ErrCloseBlocked.
+	Err error
+}
+
+// NewCloseBlockedError builds the close-policy refusal for issueID from the
+// []string blocker list a store's IsBlocked reports (see ParseBlocker).
+func NewCloseBlockedError(issueID string, blockers []string) *BlockedError {
+	parsed := make([]Blocker, 0, len(blockers))
+	for _, blocker := range blockers {
+		parsed = append(parsed, ParseBlocker(blocker))
+	}
+	return &BlockedError{IssueID: issueID, Blockers: parsed, Err: ErrCloseBlocked}
+}
+
+func (e *BlockedError) Error() string {
+	names := make([]string, 0, len(e.Blockers))
+	for _, blocker := range e.Blockers {
+		names = append(names, blocker.String())
+	}
+	return fmt.Sprintf("%v: %s is blocked by %v", e.Err, e.IssueID, names)
+}
+
+// Unwrap makes BlockedError match the refusal it carries.
+func (e *BlockedError) Unwrap() error { return e.Err }
 
 // ErrCloseOpenChildren is returned when an unforced close finds open
 // parent-child dependents.

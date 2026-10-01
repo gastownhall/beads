@@ -2,11 +2,23 @@ load("@gazelle//:def.bzl", "gazelle")
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 # gazelle:prefix github.com/steveyegge/beads
-# gazelle:build_tags gms_pure_go
+# gazelle drops files whose build constraints name a tag it does not know.
+# integration is listed so the `//go:build integration` test files (and
+# //internal/testutil/integration) are in srcs and deps; rules_go filters them
+# out of every build except --config=integration (.bazelrc), which sets the tag.
+# gazelle:build_tags gms_pure_go,integration
 # integrations/ holds no Go; it stays visible to Bazel (not in .bazelignore)
 # only so //test/docsync can declare the markdown its link checks resolve.
 # gazelle:exclude integrations
 gazelle(name = "gazelle")
+
+exports_files(
+    [".buildflags"],
+    visibility = [
+        "//scripts/pr-lint:__pkg__",
+        "//scripts/prlintmake:__pkg__",
+    ],
+)
 
 exports_files([
     "go.mod",
@@ -18,6 +30,13 @@ exports_files([
 exports_files(
     [".gitattributes"],
     visibility = ["//scripts/gitattributespolicy:__pkg__"],
+)
+
+# //scripts:scripts_test keeps pr.yml's release-target cross-compilation matrix
+# in lockstep with the release targets .goreleaser.yml declares.
+exports_files(
+    [".goreleaser.yml"],
+    visibility = ["//scripts:__pkg__"],
 )
 
 # //cmd/bd:bd_test: tracked git hooks (generator parity) and the formula
@@ -65,6 +84,31 @@ filegroup(
     visibility = ["//scripts:__pkg__"],
 )
 
+# PR Risk's manifest-sharded tiers' shard scripts and their committed
+# manifests (embedded-Dolt cmd and storage, proxied-server cmd, server-Dolt
+# storage). The variants (//cmd/bd:bd_embedded_test, //cmd/bd:bd_proxied_test,
+# //internal/storage/embeddeddolt:embeddeddolt_embedded_test,
+# //internal/storage/dolt:dolt_server_full_test) run them through
+# tools/bazel/go_test_manifest_shard.sh, so each Bazel shard runs exactly the
+# tests of the CI job with the same shard number.
+exports_files(
+    [
+        ".github/scripts/embedded-cmd-test-shards.txt",
+        ".github/scripts/embedded-storage-test-shard.sh",
+        ".github/scripts/embedded-storage-test-shards.txt",
+        ".github/scripts/embedded-test-shard.sh",
+        ".github/scripts/proxied-cmd-test-shards.txt",
+        ".github/scripts/proxied-test-shard.sh",
+        ".github/scripts/server-storage-test-shard.sh",
+        ".github/scripts/server-storage-test-shards.txt",
+    ],
+    visibility = [
+        "//cmd/bd:__pkg__",
+        "//internal/storage/dolt:__pkg__",
+        "//internal/storage/embeddeddolt:__pkg__",
+    ],
+)
+
 # //scripts:scripts_test runs scripts/test.sh, which sources the canonical
 # build flags and reads the known-broken-test skip list.
 filegroup(
@@ -74,6 +118,40 @@ filegroup(
         ".test-skip",
     ],
     visibility = ["//scripts:__pkg__"],
+)
+
+# //internal/versioncheck and //scripts/check-versions release-gate tests: the
+# metadata surfaces versioncheck.releaseSources gates, plus the canonical
+# version it compares them against and the tracked git hooks whose version
+# markers it checks.
+#
+# Hand-listed rather than globbed because releaseSources is itself a closed
+# list: a newly gated surface must be added here too, and until it is the test
+# fails under Bazel (it passes under `go test`, which sees the whole checkout).
+#
+# The exception is npm-package/package.json: npm-package/ is in .bazelignore,
+# so no target can declare it. Listing it anyway passes under remote execution
+# but fails in a local sandbox, which is how fork-PR CI runs.
+# TestRepositoryReleaseVersionsMatch tolerates exactly its absence under
+# Bazel; `go test` still checks it.
+filegroup(
+    name = "release_metadata_files",
+    srcs = [
+        ".claude-plugin/marketplace.json",
+        "integrations/beads-mcp/pyproject.toml",
+        "integrations/beads-mcp/src/beads_mcp/__init__.py",
+        "integrations/beads-mcp/uv.lock",
+        "//cmd/bd:version.go",
+        "//cmd/bd:winres/manifest.xml",
+        "//cmd/bd:winres/winres.json",
+        "//plugins/beads:.claude-plugin/plugin.json",
+        "//plugins/beads:.codex-plugin/plugin.json",
+        "//plugins/beads:.copilot-plugin/plugin.json",
+    ] + glob([".githooks/*"]),
+    visibility = [
+        "//internal/versioncheck:__pkg__",
+        "//scripts/check-versions:__pkg__",
+    ],
 )
 
 # Inputs of the Bazel policy tests in //scripts (bazel_policy_test.go), so they

@@ -6,6 +6,11 @@
 # dolt_go_serial.patch are adapted from the gascity project
 # (github.com/gastownhall/gascity, third_party/patches). Keep them in sync
 # when bumping the pinned dolt versions in go.mod.
+#
+# gozstd_nocgo.patch is beads' own: panicking !cgo stubs for the gozstd API
+# dolt uses, so `--config=pure` (CGO off) can compile store/nbs, which rules_go
+# builds as a declared dep even though no pure-Go file imports it. Their init
+# panics, so a pure binary that does link gozstd fails when started.
 
 package(default_visibility = ["//visibility:public"])
 

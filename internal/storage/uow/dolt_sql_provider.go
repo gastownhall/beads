@@ -193,11 +193,13 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	// UPDATE and the SELECT that must observe it are inside one transaction on
 	// one session. Both scopes are released when the connection is
 	// (doltServerTx.releaseConn / poisonConn), so an entry cannot outlive its
-	// transaction.
+	// transaction. The blocked-recheck scope is bound and released the same
+	// way; Commit takes what it recorded once the transaction has committed.
 	return &doltServerTx{
 		conn:              conn,
 		clearJournalScope: issueops.ScopeEventsJournalTransaction(conn, p.eventsJournalEnabled.Load()),
 		clearVersionScope: issueops.ScopeVersionedHistoryTransaction(conn, p.versionedHistoryEnabled.Load()),
+		clearRecheckScope: issueops.ScopeBlockedRecheckTransaction(conn),
 	}, nil
 }
 

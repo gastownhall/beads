@@ -81,6 +81,67 @@ To skip an optional service explicitly, use the existing skip mechanism:
 BEADS_TEST_SKIP=dolt ./scripts/test.sh ./...
 ```
 
+Tests that need a Dolt SQL server get one from `internal/testutil`
+(`EnsureDoltContainerForTestMain`, `RequireDoltContainer`,
+`StartIsolatedDoltContainer[Handle]`, `NewContainerProvider`). Two backends
+sit behind that API, selected by `BEADS_TEST_DOLT_SERVER`:
+
+- `container`: the `dolthub/dolt-sql-server` image through testcontainers
+  (needs docker and the pulled image). The default under plain `go test`.
+- `local`: a `dolt sql-server` started by the test process from the pinned
+  dolt CLI (`BEADS_TEST_DOLT_BINARY`, else `dolt` on `PATH`; it must be the
+  image's version). No docker. Used only when explicitly selected, under
+  `go test` and `bazel test` alike (a Bazel target's `env`, or
+  `--test_env=BEADS_TEST_DOLT_SERVER=local`); unset means `container`, which
+  in a Bazel action without docker keeps the usual skip.
+
+`BEADS_TEST_REQUIRE_DOLT_CONTAINER=1` turns an unavailable backend into a
+failure (per test and in every `TestMain`) instead of a skip; lanes that
+exist to run the Dolt suites set it.
+
+Under Bazel, `bazel test //... --config=doltserver` runs the Dolt-backed
+suites of pr.yml's "Test (storage domain + uow)" and "Contract corpus" jobs
+on the `local` backend (the `dolt-server` targets); they need no docker and
+execute remotely with `--config=remote-exec`. `--config=docker` runs the same
+suites on the `container` backend (host docker) as the A/B control.
+PR Risk's heavier server tiers have configs of their own, run by bazel.yml
+only with remote execution, each in a job of its own (`bazel-proxied`,
+`bazel-server-storage`): `--config=doltserver-proxied` is the
+proxied-server cmd/bd tier ("Test (Proxied Dolt Cmd N/15)",
+`//cmd/bd:bd_proxied_test`), and `--config=doltserver-integration` the
+server-Dolt storage tier ("Test (Server Dolt Conformance)", "Test (Server
+Dolt Full Suite N/16)", `//internal/storage/dolt:dolt_server_*_test`), which
+builds with the integration tag like `--config=integration`. Each shard
+runs its CI job's shard script, so Bazel shard k runs the tests of job k+1.
+
+An ambient `BEADS_DOLT_SERVER_PORT` or `BEADS_DOLT_PORT` is never honored by
+the suites that call `testutil.EnsureDoltContainerForTestMain`. When a test
+container is started, that container's port overwrites both variables; when one
+cannot be started -- for any reason, including `BEADS_TEST_SKIP=dolt` -- both
+are cleared, so no environment-named server can be resolved. Point a test run
+at a specific Dolt server by starting a container for it, not by exporting a
+port.
+
+The one sanctioned way to hand these suites a server you started yourself is
+`./scripts/test.sh` with `BEADS_TEST_SHARED_SERVER=1`: it starts one
+`dolt sql-server`, exports its port as `BEADS_DOLT_PORT`, and marks it by
+exporting `BEADS_TEST_SHARED_DOLT_SERVER` set to that same port number. It
+starts nothing if either port variable is still set when it gets there. The
+runner's test environment clears both first, so that only happens when that
+isolation is skipped (for example `BEADS_TEST_ENV_DISABLE=1`), and the script
+then says so on stderr. The marker -- set only by that script, only for a
+port it allocated -- is what the helper treats as container-equivalent, and
+only for a variable holding exactly the port it names: that variable survives
+the clearing above, and any other port variable is still cleared. A container
+still wins where one can be started; the shared server is the Docker-less path.
+
+Clearing the environment variables closes the channel the ambient port
+travelled on; it does not make a port unresolvable in general. Resolution
+continues into the file chain (`.beads/dolt-server.port`, `config.yaml`,
+`metadata.json`), and `internal/storage/dolt`'s production-port detection is
+narrower than that resolution -- see `be-rl6tm`, which tracks the remaining
+gap.
+
 Tests that need a temporary repository or store should use `t.TempDir()` and
 `t.Cleanup()`. Temporary repositories must set a repository-local hooks path;
 do not inherit the developer's global hooks configuration.
@@ -117,6 +178,65 @@ external-dependency boundary. Keep new uses within the repository policy:
 
 ```bash
 make check-testing-short
+```
+
+### Dolt Container Tests (podman-rootless)
+
+Anything that does not carry `BEADS_TEST_SKIP=dolt` — including
+`BEADS_TEST_ENV_RUN_DOLT=1` and a bare `go test` — reaches a real
+`dolt sql-server`: by default through testcontainers-go where a container
+runtime and the pinned image are present (otherwise those suites self-skip),
+and from the local `dolt` CLI in the suites that use
+`testutil.RequireDoltBinary`. Lanes that set
+`BEADS_TEST_REQUIRE_DOLT_CONTAINER=1` fail instead of skipping. Two limitations
+of the containerized path are worth recognizing before reading a failure as a
+product bug. Neither failure mode manifests in production or on GitHub Actions:
+CI exercises this same containerized path green on every risk-tier PR, and
+`.github/workflows/pr-risk.yml` pulls the pinned image precisely to defeat the
+self-skip. A hang there is a real bug, not this section's subject.
+
+**Migration 0032 hangs over the wire protocol.** Migration `0032`
+(`drop_schema_migrations_applied_at`) hangs indefinitely when applied through
+the containerized sql-server. How it surfaces depends on the caller's context.
+A `go test ./internal/storage/uow/... -count=1` with no `BEADS_TEST_SKIP`
+passes `context.Background()`, so it sits in `initSchema` until the package
+timeout rather than failing — that is the shape you will normally see, with no
+deadline to cut it short. A caller that does supply one gets the hang reported
+by the server-mode store open (`newServerMode` in
+`internal/storage/dolt/store.go`) instead:
+
+```
+failed to initialize schema: context deadline exceeded
+```
+
+The cause is the podman-rootless container port-forwarding path, not migration
+0032's SQL: the identical statement completes normally through the embedded/CLI
+engine, and against a bare-host-process `dolt sql-server` matching the deployed
+shape. Evidence chain in `be-j3szz`. Use `BEADS_TEST_SKIP=dolt` unless the
+container path is what you are testing.
+
+**Disabling Ryuk removes the container safety net.** This repository sets no
+`TESTCONTAINERS_RYUK_DISABLED`, so CI runs with Ryuk — testcontainers-go's
+orphan-reaper sidecar — enabled. The podman-rootless flow generally requires
+turning it off by hand (`TESTCONTAINERS_RYUK_DISABLED=true`), because under
+rootless podman Ryuk frequently cannot start: it wants the runtime socket. See
+`be-w3n2m`. With Ryuk off, nothing reaps a container whose test process exited
+without running its cleanup — `os.Exit` reached before a deferred
+`TerminateDoltContainer`, for instance. `be-5kkk6` records the cost: 101 leaked
+containers, and an exhausted swap. When running with Ryuk disabled, keep
+teardown on the normal return path using the `testMainInner` pattern
+(`beads_test.go`), and check for strays afterwards. Carry the rootless socket
+this flow runs on — a bare `docker ps` talks to the CLI's default endpoint and
+reports a false all-clear — and read the tag from the pin rather than copying
+it, so the command cannot drift when the pin moves. An empty read would be the
+same false all-clear (`ancestor=` matches nothing), so the command refuses to
+run without a tag:
+
+```bash
+dolt_image=$(sed -n 's/.*DoltDockerImage = "\(.*\)".*/\1/p' \
+  "$(git rev-parse --show-toplevel)/internal/testutil/testdoltcommon.go")
+DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock \
+  docker ps -a --filter "ancestor=${dolt_image:?could not read the Dolt image pin}"
 ```
 
 ## Test Design

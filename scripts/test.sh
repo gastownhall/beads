@@ -121,9 +121,15 @@ fi
 
 # Optional: start a single shared Dolt test server for all packages.
 # When BEADS_TEST_SHARED_SERVER=1, we start one dolt sql-server and export
-# BEADS_DOLT_PORT so every test package reuses it instead of spawning its own.
-# This reduces 8-16+ concurrent dolt processes down to 1.
-if [[ "${BEADS_TEST_SHARED_SERVER:-}" == "1" && -z "${BEADS_DOLT_PORT:-}" ]]; then
+# BEADS_DOLT_PORT (plus BEADS_TEST_SHARED_DOLT_SERVER set to that same port,
+# which marks it as ours rather than inherited) so every test package reuses it
+# instead of spawning its own. This reduces 8-16+ concurrent dolt processes down
+# to 1. Packages whose TestMain can start a Dolt container still prefer the
+# container: it overwrites both port variables on success. Nothing starts when
+# either port variable is already set: a port someone else named is not ours to
+# vouch for. beads_test_env_enter cleared both above, so one can only still be
+# set here when that isolation was skipped (e.g. BEADS_TEST_ENV_DISABLE=1).
+if [[ "${BEADS_TEST_SHARED_SERVER:-}" == "1" && -z "${BEADS_DOLT_PORT:-}" && -z "${BEADS_DOLT_SERVER_PORT:-}" ]]; then
     if command -v dolt &>/dev/null; then
         SHARED_DOLT_DIR=$(mktemp -d /tmp/beads-shared-test-dolt-XXXXXX)
         DOLT_ROOT_PATH="$SHARED_DOLT_DIR"
@@ -153,6 +159,19 @@ if [[ "${BEADS_TEST_SHARED_SERVER:-}" == "1" && -z "${BEADS_DOLT_PORT:-}" ]]; th
 
         if nc -z 127.0.0.1 "$SHARED_PORT" 2>/dev/null; then
             export BEADS_DOLT_PORT="$SHARED_PORT"
+            # Mark the port as harness-provisioned. testutil's
+            # EnsureDoltContainerForTestMain clears an ambient BEADS_DOLT_PORT
+            # whenever it is left without a container (gm-2g3g5r: an inherited
+            # port can be a production server), which would erase the server we
+            # just started on any host without Docker -- this flow's primary
+            # audience. The marker is what distinguishes "a test server we
+            # allocated" from "whatever the environment happened to name". Its
+            # value is the port it vouches for, so it covers the BEADS_DOLT_PORT
+            # exported above and no other variable; it is exported only here,
+            # only after the server answered, and only for a port this script
+            # allocated itself (the guard above requires both port variables to
+            # have been unset).
+            export BEADS_TEST_SHARED_DOLT_SERVER="$SHARED_PORT"
             export BEADS_TEST_MODE=1
             echo "Shared test Dolt server started on port $SHARED_PORT (PID $SHARED_DOLT_PID)" >&2
             cleanup_shared_server() {
@@ -167,6 +186,8 @@ if [[ "${BEADS_TEST_SHARED_SERVER:-}" == "1" && -z "${BEADS_DOLT_PORT:-}" ]]; th
             rm -rf "$SHARED_DOLT_DIR"
         fi
     fi
+elif [[ "${BEADS_TEST_SHARED_SERVER:-}" == "1" ]]; then
+    echo "WARN: BEADS_TEST_SHARED_SERVER=1 ignored: BEADS_DOLT_PORT or BEADS_DOLT_SERVER_PORT is already set, so no shared server was started" >&2
 fi
 
 # Build go test command

@@ -35,8 +35,9 @@ type updateInput struct {
 	// guard).
 	ifAssignee *string
 	ifStatus   *string
-	// bd-98s5c: --force bypasses the live-claim reassign fence (mutually
-	// exclusive with --if-assignee at the flag-group level).
+	// bd-98s5c: --force bypasses the live-claim reassign fence only when no
+	// --if-assignee guard rides the command; it also opts into the notes
+	// overwrite and close-policy bypasses (runCommandUpdateMutation).
 	force bool
 }
 
@@ -102,7 +103,13 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 	}
 	if cmd.Flags().Changed("notes") {
 		notes, _ := cmd.Flags().GetString("notes")
+		if err := validateNotesUpdate(notes); err != nil {
+			return nil, HandleErrorRespectJSON("%v", err)
+		}
 		in.fields["notes"] = notes
+	}
+	if clearNotesRequested(cmd) {
+		in.fields["notes"] = ""
 	}
 	if cmd.Flags().Changed("append-notes") {
 		in.appendNotes, _ = cmd.Flags().GetString("append-notes")
@@ -176,7 +183,7 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		} else {
 			t, err := timeparsing.ParseRelativeTime(dueStr, time.Now())
 			if err != nil {
-				return nil, HandleErrorRespectJSON("invalid --due format %q. Examples: +6h, tomorrow, next monday, 2025-01-15", dueStr)
+				return nil, HandleErrorRespectJSON("invalid --due format %q. %s", dueStr, deferUntilFormatHint)
 			}
 			in.fields["due_at"] = t
 		}
@@ -192,7 +199,7 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		} else {
 			t, err := timeparsing.ParseRelativeTime(deferStr, time.Now())
 			if err != nil {
-				return nil, HandleErrorRespectJSON("invalid --defer format %q. Examples: +1h, tomorrow, next monday, 2025-01-15", deferStr)
+				return nil, HandleErrorRespectJSON("invalid --defer format %q. %s", deferStr, deferUntilFormatHint)
 			}
 			inPast := t.Before(time.Now())
 			if inPast && !jsonOut {

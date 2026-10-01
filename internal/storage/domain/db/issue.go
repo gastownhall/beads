@@ -329,6 +329,9 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 			if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps); err != nil {
 				return fmt.Errorf("db: Update %s: recompute is_blocked: %w", id, err)
 			}
+			if !newActive {
+				issueops.NoteStatusChangeBlockedRecheck(r.runner, id, string(newStatus), affectedIssues, affectedWisps)
+			}
 		}
 	}
 	// Snapshot only after all derived blocked-state maintenance has completed.
@@ -743,6 +746,10 @@ func normalizeIssueTimestamps(issue *types.Issue) {
 	} else {
 		issue.UpdatedAt = issue.UpdatedAt.UTC()
 	}
+	// Optional timestamps (closed_at, started_at, due_at, …) may arrive from a
+	// JSONL import carrying a non-UTC offset; normalize them to UTC so the stored
+	// instant matches created_at/updated_at instead of keeping local wall-clock.
+	issue.NormalizeOptionalTimestampsToUTC()
 }
 
 func pickIssueTable(useWisps bool) string {
@@ -944,6 +951,13 @@ func (r *issueSQLRepositoryImpl) SearchAcrossIssuesAndWispsWithCounts(ctx contex
 	return r.searchAcrossIssuesAndWispsWithCounts(ctx, query, filter)
 }
 
+// SearchWispsPlane runs the shared wisps-plane search body on this
+// repository's transaction, so the unit-of-work provider and the two store
+// backends read the plane through one function.
+func (r *issueSQLRepositoryImpl) SearchWispsPlane(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+	return issueops.SearchWispsPlaneInTx(ctx, r.runner, query, filter)
+}
+
 func (r *issueSQLRepositoryImpl) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
 	return issueops.SearchIssueIDsInTx(ctx, r.runner, query, filter)
 }
@@ -1074,8 +1088,12 @@ func (r *issueSQLRepositoryImpl) AffectedByDeletion(ctx context.Context, issueID
 	return issueops.AffectedByDeletionInTx(ctx, r.runner, issueIDs, wispIDs)
 }
 
-func (r *issueSQLRepositoryImpl) RecomputeIsBlocked(ctx context.Context, issueIDs, wispIDs []string) error {
-	return issueops.RecomputeIsBlockedInTx(ctx, r.runner, issueIDs, wispIDs)
+func (r *issueSQLRepositoryImpl) RecomputeIsBlockedAfterDelete(ctx context.Context, deletedIDs, issueIDs, wispIDs []string) error {
+	if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, issueIDs, wispIDs); err != nil {
+		return err
+	}
+	issueops.NoteDeleteBlockedRecheck(r.runner, deletedIDs, "", issueIDs, wispIDs)
+	return nil
 }
 
 func (r *issueSQLRepositoryImpl) AsOf(ctx context.Context, id, ref string) (*types.Issue, error) {

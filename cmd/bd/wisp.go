@@ -210,9 +210,10 @@ func runWispCreateCore(cmd *cobra.Command, args []string) error {
 	if err == nil {
 		subgraph = sg
 		protoID = sg.Root.ID
-	} else if errors.Is(err, formula.ErrVarValidation) {
-		// args[0] IS a formula; the --var values it was given fail
-		// enum/pattern/required-empty constraints. Report that directly
+	} else if errors.Is(err, formula.ErrVarValidation) || errors.Is(err, formula.ErrValidation) {
+		// args[0] IS a formula; either the formula itself does not
+		// validate, or the --var values it was given fail enum/pattern/
+		// required-empty constraints. Report that directly
 		// instead of falling through to the legacy proto-ID lookup below,
 		// which would otherwise mask this as "not found as formula or proto".
 		return HandleError("%v", err)
@@ -269,7 +270,7 @@ func runWispCreateCore(cmd *cobra.Command, args []string) error {
 	vars = applyVariableDefaults(vars, subgraph)
 
 	if err := checkRequiredVars(subgraph, vars); err != nil {
-		return HandleErrorWithHint(err.Error(), fmt.Sprintf("Provide them with: --var %s=<value>", firstMissingVar(subgraph, vars)))
+		return handleVarErrorWithHint(err, firstMissingVar(subgraph, vars))
 	}
 
 	if dryRun {
@@ -301,7 +302,7 @@ func checkRequiredVars(subgraph *TemplateSubgraph, vars map[string]string) error
 	if len(missingVars) > 0 {
 		return fmt.Errorf("missing required variables: %s", strings.Join(missingVars, ", "))
 	}
-	return nil
+	return checkUnknownVars(subgraph, nil, vars)
 }
 
 func firstMissingVar(subgraph *TemplateSubgraph, vars map[string]string) string {
@@ -997,12 +998,12 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 
 func init() {
 	// Wisp command flags (for direct create: bd mol wisp <proto>)
-	wispCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value)")
+	wispCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value); a name the proto cannot consume is an error")
 	wispCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	wispCmd.Flags().Bool("root-only", false, "Create only the root issue (no child step issues)")
 
 	// Wisp create command flags (kept for backwards compat: bd mol wisp create <proto>)
-	wispCreateCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value)")
+	wispCreateCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value); a name the proto cannot consume is an error")
 	wispCreateCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	wispCreateCmd.Flags().Bool("root-only", false, "Create only the root issue (no child step issues)")
 

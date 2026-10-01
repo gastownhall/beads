@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -239,7 +240,7 @@ var configSetCmd = &cobra.Command{
 			if !validRoles[value] {
 				return HandleError("invalid role %q (valid values: maintainer, contributor)", value)
 			}
-			// bd config's own beads.role reads and writes ignore inherited Git
+			// bd config get/set/unset/set-many beads.role ignore inherited Git
 			// routing, including GIT_CONFIG_GLOBAL, so the value lands in the
 			// repository this command selected. beads.role is an authority
 			// value and the reader it feeds treats a missing value as
@@ -797,13 +798,14 @@ func showConfigYAMLOverrides(dbConfig map[string]string) {
 // cleanup runs either way, and a failed YAML unset carries the row's fate in
 // its error rather than dropping it.
 func runConfigUnsetYamlOnly(key string) error {
-	location := "config.yaml"
+	file := "config.yaml"
+	var changed bool
 	var unsetErr error
 	if config.IsUserGlobalKey(key) {
-		unsetErr = config.UnsetUserYamlConfig(key)
-		location = config.UserConfigYamlDisplayPath()
+		changed, unsetErr = config.UnsetUserYamlConfig(key)
+		file = config.UserConfigYamlDisplayPath()
 	} else {
-		unsetErr = config.UnsetYamlConfig(key)
+		changed, unsetErr = config.UnsetYamlConfig(key)
 	}
 
 	cleanup := unsetLeakedSecretRow(key)
@@ -812,10 +814,23 @@ func runConfigUnsetYamlOnly(key string) error {
 		return HandleError("unsetting config: %v%s", unsetErr, cleanup.rowNote(key))
 	}
 
+	// The location is a report of the write, not a guess made before it: an
+	// absent file or a key that was never written there is a no-op, and saying
+	// "Unset <key> (in config.yaml)" over a file that never held it is the
+	// untrustworthy message this command's fix set out to remove.
+	location := ""
+	if changed {
+		location = file
+	}
+
 	if jsonOutput {
 		payload := map[string]interface{}{
 			"key":      key,
 			"location": location,
+			// The human branch gets an explicit "was not set" sentence; without
+			// this the machine branch cannot tell that no-op apart from an
+			// unpopulated field, since both render location as "".
+			"changed": changed,
 		}
 		if config.IsSecretKey(key) {
 			cleanup.jsonFields(payload)
@@ -823,11 +838,22 @@ func runConfigUnsetYamlOnly(key string) error {
 		if err := outputJSON(payload); err != nil {
 			return err
 		}
-	} else {
+	} else if changed {
 		fmt.Printf("Unset %s (in %s)\n", key, location)
 		cleanup.describe(key, location)
+	} else {
+		fmt.Printf("%s was not set in %s\n", key, file)
+		cleanup.describe(key, file)
 	}
-	printConfigSideEffects(checkConfigUnsetSideEffects(key))
+	// Gate the hint on the write, uniformly across all three arms above. Every
+	// key in checkConfigUnsetSideEffects is phrased in the completed past tense
+	// ("Backup config removed...") and three of the four hand the operator a
+	// follow-up command, so on the no-op branch the command contradicted the
+	// line it had just printed. This covers the jsonOutput arm too: the hint
+	// goes to stderr, so --json never suppressed it.
+	if changed {
+		printConfigSideEffects(checkConfigUnsetSideEffects(key))
+	}
 	return nil
 }
 
@@ -885,14 +911,44 @@ var configUnsetCmd = &cobra.Command{
 		}
 		noteDirectConfigWrite()
 
+		// Clear the config.yaml layer unconditionally and report what the
+		// write actually did. Pre-checking with GetYamlConfig would read
+		// viper's *merged* value - SetDefault values and AutomaticEnv
+		// included - so a key with a non-empty default (no-hooks, json,
+		// events-journal-retain-days, ...) looked present in config.yaml even
+		// in a workspace with no config.yaml at all. That produced a more
+		// specific false claim than the message this fix removed, and, with no
+		// project config.yaml, failed the command after the database row was
+		// already gone.
+		//
+		// A config.yaml the unset refuses to edit (a flow-style mapping, a
+		// block value) is reported as exactly that: any database row is
+		// already gone, but the key is still effective from the file, so this
+		// still fails. "Any": UnsetSettingResult cannot say whether a row
+		// existed, since the storage seam discards the affected-row count.
+		location := "database"
+		yamlCleared, err := config.UnsetYamlConfig(result.Key)
+		// A workspace with no project config.yaml has no YAML layer to clear, so
+		// the database write above is the whole unset and this succeeds - that is
+		// the case that used to fail the command after the row was already gone.
+		// A config.yaml that exists and refused the edit is the opposite: the key
+		// is still effective from the file, so that still fails.
+		if err != nil && !errors.Is(err, config.ErrNoProjectConfigYaml) {
+			return HandleError("%s is still set in config.yaml (any database row was removed): %v", result.Key, err)
+		}
+		if yamlCleared {
+			location = "database, config.yaml"
+		}
+
 		if jsonOutput {
 			if err := outputJSON(map[string]string{
-				"key": result.Key,
+				"key":      result.Key,
+				"location": location,
 			}); err != nil {
 				return err
 			}
 		} else {
-			fmt.Printf("Unset %s\n", result.Key)
+			fmt.Printf("Unset %s (in %s)\n", result.Key, location)
 		}
 		printConfigSideEffects(checkConfigUnsetSideEffects(result.Key))
 		return nil
@@ -1264,7 +1320,11 @@ func validateStorageClassConfig(key, value string) error {
 	if canonical := issueType.Normalize(); canonical != issueType {
 		return fmt.Errorf("invalid key %q: %q is an alias of %q, and create-time lookup uses the canonical type; set storage-class.%s instead", key, suffix, canonical, canonical)
 	}
-	if !issueType.IsValidWithCustom(loadEmbeddedCustomTypes()) {
+	customTypes, err := resolveWorkspaceCustomTypes(rootCtx)
+	if err != nil {
+		return err
+	}
+	if !issueType.IsValidWithCustom(customTypes) {
 		return fmt.Errorf("invalid key %q: unknown issue type %q (use a built-in type, or add it to types.custom first)", key, suffix)
 	}
 	if _, err := types.ParseStorageClass(value); err != nil {

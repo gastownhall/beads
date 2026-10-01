@@ -13,6 +13,7 @@ go_library(
     importpath = "github.com/steveyegge/beads/internal/utils",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/debug",
         "//internal/types",
     ] + select({
         "@rules_go//go/platform:darwin": [
@@ -28,7 +29,10 @@ go_library(
 go_test(
     name = "utils_test",
     srcs = [
+        "id_parser_exact_test.go",
+        "id_parser_fake_test.go",
         "id_parser_prefix_test.go",
+        "id_parser_sentinel_test.go",
         "id_parser_test.go",
         "id_parser_unit_test.go",
         "issue_446_test.go",

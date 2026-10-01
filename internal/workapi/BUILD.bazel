@@ -39,9 +39,11 @@ go_test(
     name = "workapi_test",
     srcs = [
         "bootstrap_test.go",
+        "count_skipwisps_test.go",
         "count_test.go",
         "delete_test.go",
         "detail_test.go",
+        "detail_unresolvable_test.go",
         "list_comments_test.go",
         "list_ephemeral_test.go",
         "list_golden_test.go",

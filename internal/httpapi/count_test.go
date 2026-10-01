@@ -114,7 +114,9 @@ func TestCountForwardsEveryDocumentedParameter(t *testing.T) {
 		"no_assignee":       {"true"},
 		"no_labels":         {"true"},
 		"metadata_field":    {"team=platform", "env=prod"},
+		"has_metadata_key":  {"audit_ref"},
 		"include_infra":     {"true"},
+		"include_ephemeral": {"true"},
 	}.Encode())
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
@@ -163,8 +165,10 @@ func TestCountForwardsEveryDocumentedParameter(t *testing.T) {
 		NoAssignee:     true,
 		NoLabels:       true,
 		MetadataFields: map[string]string{"team": "platform", "env": "prod"},
+		HasMetadataKey: "audit_ref",
 
-		IncludeInfra: true,
+		IncludeInfra:     true,
+		IncludeEphemeral: true,
 	}
 	if !reflect.DeepEqual(got[0], want) {
 		t.Errorf("request = %+v\nwant     %+v", got[0], want)
@@ -174,11 +178,11 @@ func TestCountForwardsEveryDocumentedParameter(t *testing.T) {
 // TestCountDefaultsToTheDurablePlaneAndNoBucketing: an empty request is the
 // role's default answer and nothing else.
 //
-// The zero value of IncludeInfra is the whole plane story on this operation and
-// it is worth an assertion of its own: false means DURABLE ONLY — no wisps, no
-// `no_history` beads stored in that tier — and a handler that defaulted it on
-// would silently start counting ephemeral rows a scripted caller has never
-// counted.
+// The zero values of IncludeInfra and IncludeEphemeral are the whole plane story
+// on this operation and worth an assertion of their own: both false means
+// DURABLE ONLY — no wisps, no `no_history` beads stored in that tier — and a
+// handler that defaulted either on would silently start counting ephemeral rows
+// a scripted caller has never counted.
 func TestCountDefaultsToTheDurablePlaneAndNoBucketing(t *testing.T) {
 	counter := &roleCounter{}
 	ts := newCountServer(t, counter)
@@ -195,6 +199,43 @@ func TestCountDefaultsToTheDurablePlaneAndNoBucketing(t *testing.T) {
 	}
 	if len(counter.groupRequests()) != 0 {
 		t.Errorf("%d grouped counts; an absent `group_by` must not reach the bucketing method", len(counter.groupRequests()))
+	}
+}
+
+// TestCountForwardsTheEphemeralPlaneParameter is the count twin of
+// TestListForwardsTheEphemeralPlaneParameter: each plane parameter, sent ALONE,
+// reaches the role as its own field and nothing else.
+//
+// TestCountForwardsEveryDocumentedParameter cannot see this. It sends both
+// parameters at once, so a handler that also mapped `include_ephemeral` onto
+// IncludeInfra records the same request there. Alone, that handler turns a
+// plane-only count into one that also drops templates and gates — the answer
+// `include_ephemeral` exists to avoid — and this is where it shows.
+func TestCountForwardsTheEphemeralPlaneParameter(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		query string
+		want  issueops.CountRequest
+	}{
+		{"absent leaves the durable count alone", "", issueops.CountRequest{}},
+		{"include_ephemeral is the plane bit alone", "?include_ephemeral=true", issueops.CountRequest{IncludeEphemeral: true}},
+		{"include_infra does not set the plane bit", "?include_infra=true", issueops.CountRequest{IncludeInfra: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			counter := &roleCounter{}
+			ts := newCountServer(t, counter)
+
+			if resp := ts.get(t, countPath+tc.query); resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+			}
+			got := counter.countRequests()
+			if len(got) != 1 {
+				t.Fatalf("%d counts, want 1", len(got))
+			}
+			if !reflect.DeepEqual(got[0], tc.want) {
+				t.Errorf("request = %+v, want %+v", got[0], tc.want)
+			}
+		})
 	}
 }
 
@@ -540,9 +581,10 @@ func TestCountParametersMatchTheHandler(t *testing.T) {
 // It also keeps the role's group refusal unreachable from the wire: the
 // handler refuses an unknown group at the edge. Metadata validation is a
 // separate path. An invalid key reaches BuildCountFilter, whose role refusal
-// failReadErr classifies as a 400 on `metadata_field`. This test guards only the
-// group vocabulary; if that enum and the role's constants diverged, a value the
-// server accepted and the role refused would arrive as an unclassified 500.
+// failReadErr classifies as a 400 on `metadata_field` or `has_metadata_key`.
+// This test guards only the group vocabulary; if that enum and the role's
+// constants diverged, a value the server accepted and the role refused would
+// arrive as an unclassified 500.
 func TestCountGroupEnumMatchesTheRolesVocabulary(t *testing.T) {
 	doc := loadSpec(t)
 	so := specOps(t, doc)["countIssues"]
@@ -568,7 +610,7 @@ func TestCountGroupEnumMatchesTheRolesVocabulary(t *testing.T) {
 // The other two are already mechanical: TestCountParametersMatchTheHandler ties
 // the parameter names to the DOCUMENT, and TestCountForwardsEveryDocumentedParameter
 // ties each parameter's VALUE to the field it lands in. Neither can see a role
-// field that no parameter reaches — a 24th filter added to CountRequest and left
+// field that no parameter reaches — a new filter added to CountRequest and left
 // unpublished turns nothing red, and the wire silently stops being able to ask
 // a question the role can answer. That is the failure this map closes, and it is
 // the one that matters for an HTTP-backed store: it is how the wire becomes
@@ -600,11 +642,13 @@ var countFieldForParameter = map[string]string{
 	"no_assignee":       "NoAssignee",
 	"no_labels":         "NoLabels",
 	"metadata_field":    "MetadataFields",
+	"has_metadata_key":  "HasMetadataKey",
 	"include_infra":     "IncludeInfra",
+	"include_ephemeral": "IncludeEphemeral",
 }
 
-// TestEveryCountRequestFieldIsPublished: the role publishes 24 filters and the
-// wire publishes all 24. A field added to issueops.CountRequest fails here and
+// TestEveryCountRequestFieldIsPublished: the wire publishes every filter the
+// role declares. A field added to issueops.CountRequest fails here and
 // NAMES itself, so the choice is made deliberately — publish it, or record why
 // it is withheld — rather than by nobody noticing.
 //

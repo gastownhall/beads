@@ -117,7 +117,7 @@ func printSkipLabelsFooter(skipLabels bool) {
 	if !skipLabels || isQuiet() {
 		return
 	}
-	fmt.Print(skipLabelsFooterText())
+	fmt.Print(skipLabelsFooterText()) //nolint:forbidigo // Pretty/tree output is outside the --format contract.
 }
 
 // formatSkipLabelsConflictError builds the user-facing error message for AD-02
@@ -317,7 +317,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 			}
 
 			if len(treeIssues) == 0 {
-				fmt.Printf("Issue '%s' has no children\n", in.ParentID)
+				fmt.Printf("Issue '%s' has no children\n", in.ParentID) //nolint:forbidigo // Pretty/tree output is outside the --format contract.
 				return nil
 			}
 
@@ -373,7 +373,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		for _, issue := range issues {
 			formatAgentIssue(&buf, issue, blocking.blockedBy[issue.ID], blocking.blocks[issue.ID], blocking.parent[issue.ID])
 		}
-		fmt.Print(buf.String())
+		fmt.Print(buf.String()) //nolint:forbidigo // Agent output is outside the --format contract.
 		printTruncationHint(truncated, in.effectiveLimit)
 		return nil
 	} else if in.longFormat {
@@ -394,7 +394,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	}
 
 	if err := ui.ToPager(buf.String(), ui.PagerOptions{NoPager: in.noPager}); err != nil {
-		if _, writeErr := fmt.Fprint(os.Stdout, buf.String()); writeErr != nil {
+		if _, writeErr := fmt.Fprint(os.Stdout, buf.String()); writeErr != nil { //nolint:forbidigo // Pager fallback is outside the --format contract.
 			fmt.Fprintf(os.Stderr, "Error writing output: %v\n", writeErr)
 		}
 	}
@@ -406,12 +406,12 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 }
 
 func init() {
-	listCmd.Flags().StringP("status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed). Comma-separated for multiple: --status open,in_progress. Note: repeating -s/--status silently overwrites the previous value — always use the comma-separated form for multi-status filters.")
-	listCmd.Flags().String("state", "", "Alias for --status")
+	listCmd.Flags().VarP(&listStatusFlag, "status", "s", "Filter by stored status (open, in_progress, blocked, deferred, closed). Comma-separated or repeated for multiple: --status open,in_progress")
+	listCmd.Flags().Var(&listStateFlag, "state", "Alias for --status")
 	_ = listCmd.Flags().MarkHidden("state")
 	registerPriorityFlag(listCmd, "")
-	listCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
-	listCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate, convoy). Aliases: mr→merge-request, feat→feature, mol→molecule, dec/adr→decision")
+	listCmd.Flags().VarP(&listAssigneeFlag, "assignee", "a", "Filter by assignee")
+	listCmd.Flags().VarP(&listTypeFlag, "type", "t", "Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate, convoy). Aliases: mr→merge-request, feat→feature, mol→molecule, dec/adr→decision")
 	listCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
 	listCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
 	listCmd.Flags().StringSlice("exclude-label", []string{}, "Exclude issues that have ANY of these labels")
@@ -419,10 +419,10 @@ func init() {
 	listCmd.Flags().String("label-regex", "", "Filter by label regex pattern (e.g., 'tech-(debt|legacy)')")
 	listCmd.Flags().String("title", "", "Filter by title text (case-insensitive substring match)")
 	listCmd.Flags().String("spec", "", "Filter by spec_id prefix")
-	listCmd.Flags().String("id", "", "Filter by specific issue IDs (comma-separated, e.g., bd-1,bd-5,bd-10)")
-	listCmd.Flags().IntP("limit", "n", workapi.DefaultListLimit, "Limit results (default 50, use 0 for unlimited)")
+	listCmd.Flags().Var(&listIDFlag, "id", "Filter by specific issue IDs (comma-separated or repeated, e.g., bd-1,bd-5,bd-10)")
+	listCmd.Flags().IntP("limit", "n", workapi.DefaultListLimit, "Limit results (an explicit --limit always wins, 0 meaning unlimited; otherwise --all is unlimited; otherwise a configured list.limit applies; otherwise unlimited when piped, else 20 in agent mode at a terminal, else 50)")
 	listCmd.Flags().Int("offset", 0, "Skip the first N matching results (0-based). Only supported under --proxied-server.")
-	listCmd.Flags().String("format", "", "Output format: 'digraph' (for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or Go template")
+	listCmd.Flags().String("format", "", "Export the dependency graph of the listed issues: 'digraph' (edge list for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or a Go template rendered once per edge over .IssueID, .DependsOnID, .Type, .Issue, .Dependency. 'json' is the exception and does not export the graph: it is equivalent to --json, which also wins when both flags are given. 'digraph' and templates print nothing when no listed issue depends on another; 'dot' still prints the nodes")
 	listCmd.Flags().Bool("all", false, "Show all issues including closed (overrides default filter)")
 	listCmd.Flags().Bool("long", false, "Show detailed multi-line output for each issue")
 	listCmd.Flags().String("sort", "", "Sort by field: priority, created, updated, closed, status, id, title, type, assignee")

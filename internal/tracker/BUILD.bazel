@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 go_library(
     name = "tracker",
@@ -57,4 +58,53 @@ go_test(
         "//internal/testutil",
         "//internal/types",
     ],
+)
+
+# tracker_test as pr.yml's "Test (storage domain + uow)" job runs it: no
+# -short and no BEADS_TEST_SKIP=dolt, so TestMain starts the shared dolt
+# sql-server container, and BEADS_TEST_REQUIRE_DOLT_CONTAINER=1 turns a missing
+# container into a failure instead of a suite of skips. tracker_test itself
+# stays untagged: under --config=prcore its Dolt-backed tests skip.
+#
+# Tags:
+#   requires-docker: needs a docker daemon; excluded from --config=prcore/ci,
+#     selected by --config=docker.
+#   no-remote-exec: the daemon is on the host, not on remote workers.
+sh_test(
+    name = "tracker_docker_test",
+    size = "large",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :tracker_test)"],
+    data = [":tracker_test"],
+    env = {"BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1"},
+    tags = [
+        "no-remote-exec",
+        "requires-docker",
+    ],
+)
+
+# tracker_test as pr.yml's "Test (storage domain + uow)" job runs it (no
+# -short; TestMain starts the shared server), on the dolt-server lane: the
+# server is a local `dolt sql-server` child of the test process.
+# BEADS_TEST_REQUIRE_DOLT_CONTAINER=1 makes TestMain exit 1 if it cannot start,
+# instead of WARN-skipping the suite. tracker_docker_test is the A/B control.
+#
+# Tags:
+#   dolt-server: starts hermetic dolt sql-servers from the pinned dolt in the
+#     test wrapper's runfiles (BEADS_TEST_DOLT_SERVER=local); excluded from
+#     --config=prcore/ci, selected by --config=doltserver. Runs remotely: no
+#     docker, and a missing server fails (REQUIRE=1) instead of skipping, so
+#     a cached pass is as good as a fresh one.
+sh_test(
+    name = "tracker_dolt_test",
+    size = "large",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :tracker_test)"],
+    data = [":tracker_test"],
+    env = {
+        "BEADS_TEST_DOLT_SERVER": "local",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+        "GOMAXPROCS": "4",
+    },
+    tags = ["dolt-server"],
 )

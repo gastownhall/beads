@@ -7,6 +7,7 @@ import (
 	"github.com/steveyegge/beads/backend/conformance"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // TestDualWriteContract runs the dual-write history contract with
@@ -282,7 +283,12 @@ func TestDualWriteVersionRowsRideTheMutationsDoltCommit(t *testing.T) {
 		t.Fatalf("issues.current_revision for %s = %d, want 1", id, currentRevision)
 	}
 
-	for _, table := range []string{"issue_versions", "issues"} {
+	// All three tables issueops.VersionedHistoryStagedTables names, not just the
+	// two the version rows land in. store_epoch is the one whose loss this PR
+	// calls unrecoverable, and the first mint seeds its singleton row
+	// (version_history.go), so in this scenario it is guaranteed dirty-then-staged:
+	// a regression that dropped it from the staged set would otherwise pass here.
+	for _, table := range []string{"issue_versions", "store_epoch", "issues"} {
 		var dirty int
 		if err := store.db.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM dolt_status WHERE table_name = ?`, table).Scan(&dirty); err != nil {
@@ -290,6 +296,92 @@ func TestDualWriteVersionRowsRideTheMutationsDoltCommit(t *testing.T) {
 		}
 		if dirty != 0 {
 			t.Errorf("dolt_status still reports %s dirty after the mutation committed — the rows this operation wrote are outside its own Dolt commit: unreplicated, and waiting to be swept into whatever unrelated commit stages next", table)
+		}
+	}
+}
+
+// TestDualWriteDeleteNeighborRewriteRidesTheDeletesDoltCommit covers the
+// staging plane neither DualWriteFixture nor the RunInTransaction case above can
+// reach: the server-backed delete role.
+//
+// A delete is a version-completeness EXEMPTION for the row it removes — there is
+// no surviving row to version — which is why issueops' own exemption table lists
+// DeleteInTx. It is not an exemption for the TRANSACTION. DeleteInTx rewrites
+// every surviving neighbor that cites a deleted id through UpdateIssueInTx, the
+// minting entry point, so a delete with a neighbor really does mint; and until
+// the fix this test arrived with, deleter.Delete staged its hand-listed
+// sweptTables and nothing else, leaving those version rows in the working set
+// while issuing its own DOLT_COMMIT.
+//
+// The delete path is also the only one of the three where the store_epoch
+// assertion is load-bearing without arranging for it: history is turned on AFTER
+// the fixture rows exist, so the delete's own transaction takes the first mint in
+// this store and seeds the epoch singleton inside it.
+func TestDualWriteDeleteNeighborRewriteRidesTheDeletesDoltCommit(t *testing.T) {
+	store, storeCleanup := setupTestStore(t)
+	defer storeCleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	configurer, ok := any(store).(storage.VersionedHistoryConfigurer)
+	if !ok {
+		t.Fatalf("%T does not implement storage.VersionedHistoryConfigurer", store)
+	}
+
+	const target, neighbor = "dwdel-target", "dwdel-neighbor"
+	fixtures := []*types.Issue{
+		{ID: target, Title: "doomed", IssueType: types.TypeTask, Status: types.StatusOpen},
+		// The citation is what makes this a MINTING delete: the rewrite only
+		// touches a neighbor whose text names a deleted id.
+		{ID: neighbor, Title: "survivor", Description: "blocked by " + target,
+			IssueType: types.TypeTask, Status: types.StatusOpen},
+	}
+	for _, issue := range fixtures {
+		if err := store.CreateIssue(ctx, issue, "creator"); err != nil {
+			t.Fatalf("create %s: %v", issue.ID, err)
+		}
+	}
+	// An INBOUND edge, so the neighborhood read finds the survivor at all;
+	// Force is then what lets the delete orphan it instead of refusing.
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: neighbor, DependsOnID: target, Type: types.DepBlocks,
+	}, "linker"); err != nil {
+		t.Fatalf("add dep: %v", err)
+	}
+
+	configurer.SetVersionedHistoryEnabled(true)
+	defer configurer.SetVersionedHistoryEnabled(false)
+
+	deleter, err := store.Deleter()
+	if err != nil {
+		t.Fatalf("Deleter(): %v", err)
+	}
+	result, err := deleter.Delete(ctx, publicops.DeleteRequest{
+		IDs: []string{target}, Force: true, Actor: "deleter",
+	})
+	if err != nil {
+		t.Fatalf("delete %s: %v", target, err)
+	}
+	if result.ReferencesUpdated != 1 {
+		t.Fatalf("ReferencesUpdated = %d, want 1 — the citation rewrite did not run, so this case is not exercising the minting delete path it exists for", result.ReferencesUpdated)
+	}
+
+	var versions int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM issue_versions WHERE issue_id = ?`, neighbor).Scan(&versions); err != nil {
+		t.Fatalf("count issue_versions for %s: %v", neighbor, err)
+	}
+	if versions != 1 {
+		t.Fatalf("issue_versions rows for the rewritten neighbor %s = %d, want 1 — the delete's own transaction is not scoped for minting", neighbor, versions)
+	}
+
+	for _, table := range []string{"issue_versions", "store_epoch", "issues"} {
+		var dirty int
+		if err := store.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM dolt_status WHERE table_name = ?`, table).Scan(&dirty); err != nil {
+			t.Fatalf("read dolt_status for %s: %v", table, err)
+		}
+		if dirty != 0 {
+			t.Errorf("dolt_status still reports %s dirty after the delete committed — the neighbor's version rows are outside the delete's own Dolt commit: unreplicated, and waiting to be swept into whatever unrelated commit stages next", table)
 		}
 	}
 }
