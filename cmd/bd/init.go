@@ -2566,7 +2566,7 @@ Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 				//
 				// SETTLED by ADR-0004 (engdocs/adr/0004-missing-database-guard-signal.md).
 				// project_id is a weak proof of prior LOCAL init: .beads/metadata.json
-				// is git-tracked by default (see defaultGitignoreContent in
+				// is git-tracked by default (see GitignoreTemplate in
 				// cmd/bd/doctor/gitignore.go, which says so in as many words), so a
 				// fresh clone inherits one and is refused here with a recovery
 				// message. That is ACCEPTED, not a gap awaiting a fix: absence of

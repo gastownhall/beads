@@ -26,7 +26,7 @@ refuse-by-default) and `guardMissingServerDatabaseAt` (the safety net for
 Both used the same signal for the ambiguous case: `cfg.ProjectID != ""`, from
 `.beads/metadata.json`, minted by `bd init` and originally added for
 cross-project leak detection (GH#2372). That file is **git-tracked by
-default** — `defaultGitignoreContent` in `cmd/bd/doctor/gitignore.go` says so
+default** — `GitignoreTemplate` in `cmd/bd/doctor/gitignore.go` says so
 explicitly — so a fresh clone inherits a `project_id` it never earned locally
 (GH#2433). Worse, whether it is tracked depends on the consuming repo's own
 `.gitignore`, so the signal's meaning varies per repository.
