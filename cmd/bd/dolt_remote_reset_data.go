@@ -238,9 +238,11 @@ only live chunks:
       bd dolt push --force
 
 This rewrites the remote's data plane. Every other clone must re-clone from
-the reset remote (that is already true after the squash itself). Refuses to
-run with uncommitted working-set changes: the rebuilt remote holds exactly
-HEAD, and anything uncommitted would not be part of it.
+the reset remote (that is already true after the squash itself). Uncommitted
+working-set changes are committed first, before anything on the remote is
+touched, so the rebuilt remote holds everything local; a commit that fails
+leaves the remote as it was. In server mode, where the working set is shared,
+the command refuses while anything is uncommitted instead.
 
 Examples:
   bd dolt remote reset-data origin          # prompts for confirmation
@@ -285,9 +287,19 @@ Examples:
 				"Use 'bd dolt remote list' to see configured remotes.")
 		}
 
-		// The rebuilt remote holds exactly HEAD; refuse while anything
-		// uncommitted would be silently left out of it.
-		if det, ok := storage.UnwrapStore(st).(storage.PendingChangeDetector); ok {
+		// Only the server-mode store reports pending changes, and its
+		// working set is shared: refuse while anything is uncommitted, since
+		// the rebuilt remote holds exactly HEAD and committing here would
+		// publish another session's unfinished work. Checked before the
+		// prompt, so a dirty working set is refused up front, and again after
+		// it, since another session can write while the prompt waits. The
+		// embedded store has no detector and takes the commit-first branch
+		// below; a detector added to it would move it to this one.
+		det, sharedWorkingSet := storage.UnwrapStore(st).(storage.PendingChangeDetector)
+		refuseIfDirty := func() error {
+			if !sharedWorkingSet {
+				return nil
+			}
 			dirty, derr := det.HasCommittablePending(ctx)
 			if derr != nil {
 				return HandleError("checking working set: %v", derr)
@@ -297,6 +309,10 @@ Examples:
 					"working set has uncommitted changes; refusing to reset remote data",
 					"Run 'bd dolt commit' first — the rebuilt remote holds exactly HEAD.")
 			}
+			return nil
+		}
+		if err := refuseIfDirty(); err != nil {
+			return err
 		}
 
 		kind, err := classifyResetDataRemote(url)
@@ -320,7 +336,11 @@ Examples:
 			}
 			fmt.Printf("This replaces all Dolt data stored on remote %q:\n", name)
 			fmt.Printf("  %s\n", resetDataTarget(url, kind, dataRef))
-			fmt.Println("The remote is rebuilt from local HEAD, including any pending changes; other clones must re-clone.")
+			if sharedWorkingSet {
+				fmt.Println("The remote is rebuilt from local HEAD; other clones must re-clone.")
+			} else {
+				fmt.Println("The remote is rebuilt from local HEAD, including any pending changes; other clones must re-clone.")
+			}
 			fmt.Print("Proceed? (y/N): ")
 			reader := bufio.NewReader(os.Stdin)
 			response, rerr := reader.ReadString('\n')
@@ -331,6 +351,23 @@ Examples:
 			if response != "y" && response != "yes" {
 				fmt.Println("Canceled.")
 				return nil
+			}
+		}
+
+		if sharedWorkingSet {
+			if err := refuseIfDirty(); err != nil {
+				return err
+			}
+		} else {
+			// A store with a private working set (embedded) commits pending
+			// changes inside the push below. Commit them here, before the
+			// remote's data is removed, so a commit that fails leaves the
+			// remote intact; after the removal the same failure would leave
+			// the remote without its data ref.
+			if _, cerr := st.CommitPending(ctx, getActorWithGit()); cerr != nil {
+				return HandleErrorWithHint(
+					fmt.Sprintf("commit pending changes before reset: %v", cerr),
+					"The remote was not touched. Run 'bd dolt commit' to see the failure on its own, then re-run reset-data.")
 			}
 		}
 
