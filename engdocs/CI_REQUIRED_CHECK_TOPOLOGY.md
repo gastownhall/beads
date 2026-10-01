@@ -747,15 +747,30 @@ have run remotely and passed.
     like the legacy `-test.count=1` jobs, so a stale or poisoned entry in
     the shared farm action cache cannot stand in for a run.
   - No retries: no `--flaky_test_attempts` or
-    `--runs_per_test_detects_flakes` anywhere, and no `flaky = True`
-    target.
-  - Pinned selection: the lane's `bazel test //... --config=embedded`
-    step and the `--config=embedded` lines are pinned exactly, and no
-    unconfigured rc line or generated rc may narrow tests.
-  - `tools/bazel/check_shard_coverage.py` runs after the tier and requires
-    every Bazel shard to have run exactly the tests its shard script lists
-    (list-only mode). A test the scripts discover from source but the Bazel
-    binary lacks fails the lane instead of passing silently.
+    `--runs_per_test_detects_flakes` anywhere, and no `flaky =` other than
+    a literal `False`. The lane also runs
+    `bazel query 'attr(flaky, 1, tests(//...))'` before the tier and fails
+    on any result, so a macro or variable cannot hide a flaky target.
+  - Pinned selection:
+    - The lane's `bazel test //... --config=embedded` step and the
+      `--config=embedded` lines are pinned exactly.
+    - No other rc line of a config the lane uses (unconfigured,
+      `remote-exec`, or anything they reference) may filter, narrow,
+      re-run or re-route tests.
+    - `.bazelrc` imports only the two gitignored try-imports, and no other
+      rc file is committed.
+    - `tools/bazel/*.sh` and the whole setup-bazel action may not inject
+      test selection or skips.
+    - The four embedded-tagged targets' `args` and `env` are pinned.
+  - `tools/bazel/check_shard_coverage.py` runs after the tier. It requires:
+    - every Bazel shard to have run exactly the tests its shard script lists
+      (list-only mode, minus `TestMain`, which `grep '^func Test'` lists
+      but which is never a test);
+    - no shard, and no conformance partition, to be all skipped.
+
+    A test the scripts discover from source but the Bazel binary lacks
+    fails the lane instead of passing silently, and so does an injected
+    `-test.short` or `BEADS_TEST_SKIP` that skips a whole shard.
 - Not changed: `conformance.yml`'s Tier 1 (`scripts/conformance.sh`) runs the
   embedded-Dolt `TestConformance` again (non-race, unsharded), duplicating
   `test-embedded-conformance` and the Bazel lane. It is not part of either
