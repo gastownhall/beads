@@ -718,6 +718,19 @@ jobs:
         if: ${{ always() && steps.test.outcome != 'skipped' }}
         run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
 
+      # Since D2 step 1 this lane is the tier's only pre-merge run on
+      # same-repo PRs. The shard scripts discover tests from source, but each
+      # Bazel binary holds only its target's srcs: a listed test the binary
+      # lacks matches nothing and passes silently. Fail unless every Bazel
+      # shard ran exactly the tests its script lists (list-only mode, cheap).
+      - name: Every listed test ran in its shard
+        if: ${{ always() && steps.test.outcome != 'skipped' }}
+        run: >-
+          python3 tools/bazel/check_shard_coverage.py
+          --bep "$RUNNER_TEMP/bazel-bep.json"
+          --suite //cmd/bd:bd_embedded_test .github/scripts/embedded-test-shard.sh 20
+          --suite //internal/storage/embeddeddolt:embeddeddolt_embedded_test .github/scripts/embedded-storage-test-shard.sh 5
+
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

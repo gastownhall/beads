@@ -637,3 +637,136 @@ func copyMap(m map[string]string) map[string]string {
 	}
 	return out
 }
+
+// Review F5: bazel-embedded checks, after the run, that every Bazel shard of
+// the manifest-sharded targets ran exactly the tests its PR Risk shard
+// script lists, for the targets and shard counts of the legacy jobs.
+func TestBazelEmbeddedChecksListedTestsRan(t *testing.T) {
+	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelEmbedJobName)
+	step := job.step(t, "Every listed test ran in its shard")
+	risk := readCIWorkflow(t, prRiskWorkflowName)
+	want := []string{"python3 tools/bazel/check_shard_coverage.py", `--bep "$RUNNER_TEMP/bazel-bep.json"`}
+	for _, c := range []struct{ job, label, script string }{
+		{"test-embedded-cmd", "//cmd/bd:bd_embedded_test", ".github/scripts/embedded-test-shard.sh"},
+		{"test-embedded-storage", "//internal/storage/embeddeddolt:embeddeddolt_embedded_test", ".github/scripts/embedded-storage-test-shard.sh"},
+	} {
+		shards := len(risk.job(t, c.job).Strategy.Matrix.Shard)
+		if !strings.Contains(risk.job(t, c.job).step(t, "Test").Run, c.script) {
+			t.Errorf("pr-risk.yml %s no longer runs %s; update this suite", c.job, c.script)
+		}
+		want = append(want, fmt.Sprintf("--suite %s %s %d", c.label, c.script, shards))
+	}
+	if got := strings.Join(strings.Fields(step.Run), " "); got != strings.Join(want, " ") {
+		t.Errorf("%s coverage step runs %q, want %q", bazelEmbedJobName, got, strings.Join(want, " "))
+	}
+	if step.If != "${{ always() && steps.test.outcome != 'skipped' }}" || step.ContinueOnError != nil {
+		t.Errorf("coverage step: if %q, continue-on-error %v; want always() after the test step and no continue-on-error", step.If, step.ContinueOnError)
+	}
+	if !(job.stepIndex(t, "bazel test //... --config=embedded") < job.stepIndex(t, step.Name) &&
+		job.stepIndex(t, step.Name) < job.stepIndex(t, "Record job result")) {
+		t.Errorf("coverage step must run after the test step and before the result recorder")
+	}
+}
+
+// check_shard_coverage.py itself, on a synthetic BEP, test.xml files and
+// shard script.
+func TestCheckShardCoverageScript(t *testing.T) {
+	if os.Getenv("TEST_SRCDIR") != "" {
+		t.Skip("scripts_test's runfiles hold no tools/bazel Python")
+	}
+	requireHostTool(t, "bash")
+	python := requireHostTool(t, "python3")
+	script := filepath.Join(sourceRepoRoot(t), "tools", "bazel", "check_shard_coverage.py")
+	dir := t.TempDir()
+	shard := filepath.Join(dir, "shard.sh")
+	// Shard 1 lists TestA and TestB, shard 2 TestC; list-only mode only.
+	if err := os.WriteFile(shard, []byte(`#!/usr/bin/env bash
+set -euo pipefail
+[ "${BEADS_TEST_SHARD_LIST_ONLY:-}" = 1 ] || { echo "not list-only" >&2; exit 3; }
+[ "$2" = 2 ] || { echo "bad total $2" >&2; exit 1; }
+echo "Shard $1/$2: running"
+echo "  manifest: 1, fallback: 0"
+case "$1" in
+  1) printf '  %s\n' TestA TestB ;;
+  2) printf '  %s\n' TestC ;;
+  *) exit 1 ;;
+esac
+[ -z "${FAKE_SHARD_FAIL:-}" ] || exit 1
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const label = "//pkg:t"
+	writeBEP := func(shards int) string {
+		lines := []string{`{"id":{"targetConfigured":{"label":"` + label + `"}},"configured":{"targetKind":"sh_test rule"}}`}
+		for k := 1; k <= shards; k++ {
+			lines = append(lines, fmt.Sprintf(`{"id":{"testResult":{"label":"%s","shard":%d,"run":1,"attempt":1}}}`, label, k))
+		}
+		path := filepath.Join(dir, fmt.Sprintf("bep%d.json", shards))
+		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	writeXML := func(logs string, k int, names ...string) {
+		d := filepath.Join(logs, "pkg", "t", fmt.Sprintf("shard_%d_of_2", k))
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		var b strings.Builder
+		b.WriteString(`<testsuites><testsuite name="pkg">`)
+		for _, n := range names {
+			fmt.Fprintf(&b, `<testcase classname="pkg" name="%s"></testcase>`, n)
+		}
+		b.WriteString(`</testsuite></testsuites>`)
+		if err := os.WriteFile(filepath.Join(d, "test.xml"), []byte(b.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func(bep, logs string) (bool, string) {
+		cmd := exec.Command(python, script, "--bep", bep, "--testlogs", logs, "--suite", label, shard, "2")
+		out, err := cmd.CombinedOutput()
+		return err == nil, string(out)
+	}
+	cases := []struct {
+		name     string
+		bepShard int
+		s1, s2   []string
+		pass     bool
+		mention  string
+	}{
+		{"exact", 2, []string{"TestA", "TestB", "TestA/sub"}, []string{"TestC"}, true, ""},
+		{"listed test missing from the binary", 2, []string{"TestA"}, []string{"TestC"}, false, "TestB is listed"},
+		{"test in the wrong shard", 2, []string{"TestA", "TestB", "TestC"}, []string{}, false, "TestC"},
+		{"unlisted test ran", 2, []string{"TestA", "TestB", "TestZ"}, []string{"TestC"}, false, "TestZ ran"},
+		{"shard count differs", 1, []string{"TestA", "TestB"}, []string{"TestC"}, false, "want 2"},
+		{"missing test.xml", 2, []string{"TestA", "TestB"}, nil, false, "missing"},
+	}
+	for i, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			logs := filepath.Join(dir, fmt.Sprintf("logs%d", i))
+			writeXML(logs, 1, c.s1...)
+			if c.s2 != nil {
+				writeXML(logs, 2, c.s2...)
+			}
+			pass, out := run(writeBEP(c.bepShard), logs)
+			if pass != c.pass || (c.mention != "" && !strings.Contains(out, c.mention)) {
+				t.Errorf("pass = %v, want %v (mention %q):\n%s", pass, c.pass, c.mention, out)
+			}
+		})
+	}
+	// A failing shard script fails the check, even if what it listed
+	// matches; so does a missing one.
+	logs := filepath.Join(dir, "logs-bad")
+	writeXML(logs, 1, "TestA", "TestB")
+	writeXML(logs, 2, "TestC")
+	for _, c := range []struct {
+		script string
+		env    []string
+	}{{shard, []string{"FAKE_SHARD_FAIL=1"}}, {"/nonexistent/shard.sh", nil}} {
+		cmd := exec.Command(python, script, "--bep", writeBEP(2), "--testlogs", logs, "--suite", label, c.script, "2")
+		cmd.Env = append(os.Environ(), c.env...)
+		if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "failed") {
+			t.Errorf("shard script %s %v: check passed or did not say it failed:\n%s", c.script, c.env, out)
+		}
+	}
+}
