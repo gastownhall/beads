@@ -47,7 +47,11 @@ var prRiskBazelCoveredIDs = map[string]string{
 }
 
 // The bazel.yml rbe step env keys the decision copies verbatim.
-var prRiskSharedDecisionEnv = []string{"FORK", "HAS_EXECUTOR"}
+var prRiskSharedDecisionEnv = []string{"FORK"}
+
+// The decision's Dependabot test: Dependabot runs get no Actions secrets, so
+// bazel.yml runs them locally and they keep the legacy tier.
+const prRiskDependabotValue = "${{ github.actor == 'dependabot[bot]' }}"
 
 // rbeFacts: what GitHub evaluates the decision steps' env expressions on.
 type rbeFacts struct {
@@ -56,10 +60,12 @@ type rbeFacts struct {
 	secret  string // secrets.RBE_WEST_EXECUTOR ("" = unavailable: fork, Dependabot, unset)
 	fork    bool   // github.event.pull_request.head.repo.fork
 	retired string // the committed env.BAZEL_RETIRES_LEGACY_EMBEDDED
+	// github.actor is dependabot[bot] (fixed for a PR's runs and re-runs).
+	dependabot bool
 }
 
 func (f rbeFacts) String() string {
-	return fmt.Sprintf("event=%s var=%q secret=%v fork=%v retired=%q", f.event, f.rbeVar, f.secret != "", f.fork, f.retired)
+	return fmt.Sprintf("event=%s var=%q secret=%v fork=%v retired=%q dependabot=%v", f.event, f.rbeVar, f.secret != "", f.fork, f.retired, f.dependabot)
 }
 
 var (
@@ -77,7 +83,9 @@ func rbeFactsMatrix() []rbeFacts {
 			for _, secret := range rbeSecrets {
 				for _, fork := range []bool{false, true} {
 					for _, retired := range retiredValues {
-						out = append(out, rbeFacts{event, v, secret, fork, retired})
+						for _, dependabot := range []bool{false, true} {
+							out = append(out, rbeFacts{event, v, secret, fork, retired, dependabot})
+						}
 					}
 				}
 			}
@@ -104,6 +112,8 @@ func evalRBEExpr(t *testing.T, expr string, f rbeFacts, with map[string]string) 
 		return strconv.FormatBool(f.event == "pull_request")
 	case prRiskRetiredValue:
 		return strconv.FormatBool(strings.EqualFold(f.retired, "true"))
+	case prRiskDependabotValue:
+		return strconv.FormatBool(f.dependabot)
 	case "${{ vars.RBE_WEST_WORKERS == 'true' }}":
 		return strconv.FormatBool(strings.EqualFold(f.rbeVar, "true"))
 	case "${{ inputs.rbe == 'off' }}":
@@ -154,12 +164,12 @@ func workflowEnv(t *testing.T, name string) map[string]string {
 	return doc.Env
 }
 
-// The decision job reads the committed flag and, through bazel.yml's rbe
-// job's own expressions, the fork flag and the executor secret (only as an
-// emptiness test); never RBE_WEST_WORKERS or any other variable, and it runs
-// no repository code. pr.yml runs the identical job, and both workflows
-// commit the same flag. Nothing else in pr-risk.yml reads the facts or any
-// secret.
+// The decision job reads the committed flag, the event, the actor and,
+// through bazel.yml's rbe job's own expression, the fork flag: nothing a
+// re-run can change, so never RBE_WEST_WORKERS, any other variable or any
+// secret, and it runs no repository code. pr.yml runs the identical job, and
+// both workflows commit the same flag. Nothing else in pr-risk.yml reads the
+// facts, and nothing in it reads a secret.
 func TestPRRiskBazelEmbeddedCoverageJob(t *testing.T) {
 	risk := readCIWorkflow(t, prRiskWorkflowName)
 	job := risk.job(t, prRiskCoverageJobName)
@@ -179,7 +189,7 @@ func TestPRRiskBazelEmbeddedCoverageJob(t *testing.T) {
 	}
 	step := prRiskCoverageStep(t)
 	rbeStep := readCIWorkflow(t, bazelWorkflowName).job(t, bazelRBEJobName).Steps[0]
-	wantEnv := map[string]string{"PULL_REQUEST": prRiskPullRequestValue, "RETIRED": prRiskRetiredValue}
+	wantEnv := map[string]string{"PULL_REQUEST": prRiskPullRequestValue, "RETIRED": prRiskRetiredValue, "DEPENDABOT": prRiskDependabotValue}
 	for _, k := range prRiskSharedDecisionEnv {
 		wantEnv[k] = rbeStep.Env[k]
 	}
@@ -187,12 +197,17 @@ func TestPRRiskBazelEmbeddedCoverageJob(t *testing.T) {
 		t.Errorf("%s step: id %q, uses %q, shell %q, with %v, if %q, env %v; want id decide, a plain run step with env %v",
 			prRiskCoverageJobName, step.ID, step.Uses, step.Shell, step.With, step.If, step.Env, wantEnv)
 	}
-	if strings.Contains(step.Run, "${{") || regexp.MustCompile(`\.github/|\./|source |\bbash\b|RBE_WEST_WORKERS|RBE_VAR`).MatchString(step.Run) {
-		t.Errorf("%s step runs repository code, interpolates expressions or reads the RBE variable:\n%s", prRiskCoverageJobName, step.Run)
+	if strings.Contains(step.Run, "${{") || regexp.MustCompile(`\.github/|\./|source |\bbash\b|RBE_WEST_WORKERS|RBE_VAR|EXECUTOR`).MatchString(step.Run) {
+		t.Errorf("%s step runs repository code, interpolates expressions or reads the RBE variable or secret:\n%s", prRiskCoverageJobName, step.Run)
+	}
+	for k, v := range step.Env {
+		if regexp.MustCompile(`\b(secrets|vars)\s*(\.|\[)`).MatchString(v) {
+			t.Errorf("%s step env %s = %q reads a secret or variable; a re-run could change it", prRiskCoverageJobName, k, v)
+		}
 	}
 
-	// Only the decision step reads the facts; only its emptiness test reads
-	// a secret; nothing reads a repository variable.
+	// Only the decision step reads the facts; nothing reads a secret or a
+	// repository variable.
 	stepEnv := ".jobs." + prRiskCoverageJobName + ".steps[0].env."
 	secretRef := regexp.MustCompile(`\bsecrets\s*(\.|\[)`)
 	facts := regexp.MustCompile(`(?i)RBE_WEST_WORKERS|\bvars\s*(\.|\[)|head\.repo\.fork|RBE_WEST_EXECUTOR|github\.actor|dependabot|` + prRiskRetiredFlag)
@@ -203,8 +218,8 @@ func TestPRRiskBazelEmbeddedCoverageJob(t *testing.T) {
 			}
 			return
 		}
-		if secretRef.MatchString(value) && !(path == stepEnv+"HAS_EXECUTOR" && value == bazelRBESecretValue) {
-			t.Errorf("%s: %s reads secrets (%q); only %s's emptiness test may", prRiskWorkflowName, path, value, prRiskCoverageJobName)
+		if secretRef.MatchString(value) {
+			t.Errorf("%s: %s reads secrets (%q); PR Risk needs none", prRiskWorkflowName, path, value)
 		}
 		if facts.MatchString(value) && !strings.HasPrefix(path, stepEnv) && !strings.HasPrefix(path, ".jobs."+prRiskCoverageJobName+".steps[0].run") {
 			t.Errorf("%s: %s re-derives the Bazel coverage decision (%q); read needs.%s.outputs.covered", prRiskWorkflowName, path, value, prRiskCoverageJobName)
@@ -244,13 +259,13 @@ func bazelPRCallLanes(t *testing.T, with map[string]string) map[string]map[strin
 
 // Never both gates green with neither the legacy tier nor the Bazel lane
 // having run it. covered (both workflows' actual decision scripts) is the
-// committed flag on a same-repo pull_request with the executor secret, and
-// is then never in a run where bazel.yml takes mode local. Across two runs
-// (PR Risk's and pr.yml's, or a re-run of either) that see RBE_WEST_WORKERS
-// differently, every combination: if PR Risk skipped the legacy tier, pr.yml's
-// actual gate step is green only if the lane ran remotely. The happy path
-// (flag and variable on) is green with the legacy tier skipped; the kill
-// switch alone (variable off, flag still on) is red.
+// committed flag on a same-repo, non-Dependabot pull_request: nothing a
+// re-run can change. Across two runs (PR Risk's and pr.yml's, or a re-run of
+// either) that see RBE_WEST_WORKERS and the executor secret differently,
+// every combination: if PR Risk skipped the legacy tier, pr.yml's actual
+// gate step is green only if the lane ran remotely. The happy path (flag,
+// variable and secret on) is green with the legacy tier skipped; the kill
+// switch (variable off) or a missing secret with the flag still on is red.
 func TestPRRiskEmbeddedDecisionMatchesBazelMode(t *testing.T) {
 	requireHostTool(t, "bash")
 	pr := readCIWorkflow(t, "pr.yml")
@@ -337,12 +352,9 @@ func TestPRRiskEmbeddedDecisionMatchesBazelMode(t *testing.T) {
 	sawCovered, sawLegacy := false, false
 	for _, f := range rbeFactsMatrix() {
 		d := decide(t, f)
-		want := strings.EqualFold(f.retired, "true") && f.event == "pull_request" && !f.fork && f.secret != ""
+		want := strings.EqualFold(f.retired, "true") && f.event == "pull_request" && !f.fork && !f.dependabot
 		if d.covered != strconv.FormatBool(want) || d.prCovered != d.covered {
 			t.Errorf("%v: covered = %q (pr.yml %q), want %v", f, d.covered, d.prCovered, want)
-		}
-		if want && d.mode == "local" {
-			t.Errorf("%v: covered, but bazel.yml takes mode local (the embedded lane never runs there)", f)
 		}
 		if want {
 			sawCovered = true
@@ -355,8 +367,8 @@ func TestPRRiskEmbeddedDecisionMatchesBazelMode(t *testing.T) {
 	}
 
 	// Two runs (PR Risk's and pr.yml's, each possibly re-run) that agree on
-	// everything committed or fixed by the event and differ only in the
-	// mutable variable.
+	// everything committed or fixed by the PR and differ in what an admin can
+	// change between them: the variable and the secret.
 	gateMemo := map[string]bool{}
 	prGatePasses := func(t *testing.T, event, mode, covered string) bool {
 		t.Helper()
@@ -374,13 +386,16 @@ func TestPRRiskEmbeddedDecisionMatchesBazelMode(t *testing.T) {
 		}
 		risk := decide(t, f)
 		for _, v := range rbeVarValues {
-			g := f
-			g.rbeVar = v
-			prRun := decide(t, g)
-			legacyRan := risk.covered != "true"
-			bazelRan := prRun.mode == "remote" // and passed: every lane succeeds here
-			if !legacyRan && !bazelRan && prGatePasses(t, g.event, prRun.mode, prRun.prCovered) {
-				t.Errorf("PR Risk run %v skipped the legacy tier and pr.yml run (var %q, mode %s, covered %s) is green without the Bazel lane", f, v, prRun.mode, prRun.prCovered)
+			for _, secret := range rbeSecrets {
+				g := f
+				g.rbeVar, g.secret = v, secret
+				prRun := decide(t, g)
+				legacyRan := risk.covered != "true"
+				bazelRan := prRun.mode == "remote" // and passed: every lane succeeds here
+				if !legacyRan && !bazelRan && prGatePasses(t, g.event, prRun.mode, prRun.prCovered) {
+					t.Errorf("PR Risk run %v skipped the legacy tier and pr.yml run (var %q, secret %v, mode %s, covered %s) is green without the Bazel lane",
+						f, v, secret != "", prRun.mode, prRun.prCovered)
+				}
 			}
 		}
 	}
@@ -392,15 +407,17 @@ func TestPRRiskEmbeddedDecisionMatchesBazelMode(t *testing.T) {
 		covered  string
 		prPasses bool
 	}{
-		{"same-repo PR, farm on", rbeFacts{"pull_request", "true", "x", false, "true"}, "true", true},
-		{"same-repo PR, kill switch (var unset)", rbeFacts{"pull_request", "", "x", false, "true"}, "true", false},
-		{"same-repo PR, flag reverted, var unset", rbeFacts{"pull_request", "", "x", false, "false"}, "false", true},
-		{"fork PR", rbeFacts{"pull_request", "true", "", true, "true"}, "false", true},
-		{"fork PR somehow with a secret", rbeFacts{"pull_request", "true", "x", true, "true"}, "false", true},
-		{"Dependabot PR (no Actions secrets)", rbeFacts{"pull_request", "true", "", false, "true"}, "false", true},
-		{"Dependabot PR, var unset", rbeFacts{"pull_request", "", "", false, "true"}, "false", true},
-		{"merge_group", rbeFacts{"merge_group", "true", "x", false, "true"}, "false", true},
-		{"merge_group, var unset", rbeFacts{"merge_group", "", "x", false, "true"}, "false", true},
+		{"same-repo PR, farm on", rbeFacts{"pull_request", "true", "x", false, "true", false}, "true", true},
+		{"same-repo PR, kill switch (var unset)", rbeFacts{"pull_request", "", "x", false, "true", false}, "true", false},
+		{"same-repo PR, executor secret missing", rbeFacts{"pull_request", "true", "", false, "true", false}, "true", false},
+		{"same-repo PR, flag reverted, var unset", rbeFacts{"pull_request", "", "x", false, "false", false}, "false", true},
+		{"same-repo PR, flag reverted, secret missing", rbeFacts{"pull_request", "true", "", false, "false", false}, "false", true},
+		{"fork PR", rbeFacts{"pull_request", "true", "", true, "true", false}, "false", true},
+		{"fork PR somehow with a secret", rbeFacts{"pull_request", "true", "x", true, "true", false}, "false", true},
+		{"Dependabot PR (no Actions secrets)", rbeFacts{"pull_request", "true", "", false, "true", true}, "false", true},
+		{"Dependabot PR, var unset", rbeFacts{"pull_request", "", "", false, "true", true}, "false", true},
+		{"merge_group", rbeFacts{"merge_group", "true", "x", false, "true", false}, "false", true},
+		{"merge_group, var unset", rbeFacts{"merge_group", "", "x", false, "true", false}, "false", true},
 	} {
 		d := decide(t, c.f)
 		if d.covered != c.covered {
@@ -440,7 +457,7 @@ func TestPRRiskEmbeddedDecisionMatchesBazelMode(t *testing.T) {
 	}
 	// A value that is not a boolean fails the job rather than deciding.
 	if out, err := runBazelRBEDecision(t, riskStep.Run, map[string]string{
-		"RETIRED": "true", "PULL_REQUEST": "true", "FORK": "", "HAS_EXECUTOR": "true",
+		"RETIRED": "true", "PULL_REQUEST": "true", "FORK": "", "DEPENDABOT": "false",
 	}); err == nil {
 		t.Errorf("decision with FORK='' succeeded with %v; want failure", out)
 	}

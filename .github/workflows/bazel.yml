@@ -7,11 +7,10 @@
 # PRs and merge groups run it through pr.yml's `bazel` job (workflow_call),
 # in the same run as the legacy jobs it mirrors, which stay required too,
 # except pr-risk.yml's embedded-Dolt test jobs: while the committed
-# BAZEL_RETIRES_LEGACY_EMBEDDED flag is "true", on a same-repo pull_request
-# with the executor secret (mode remote, or skip with RBE_WEST_WORKERS
-# unset), pr-risk.yml's bazel-embedded-coverage job stands them down and
+# BAZEL_RETIRES_LEGACY_EMBEDDED flag is "true", on a same-repo,
+# non-Dependabot pull_request (whatever the mode), pr-risk.yml's bazel-embedded-coverage job stands them down and
 # bazel-embedded alone runs the tier; pr.yml's ci-gate then requires that
-# lane to have run remotely and passed, so mode skip is red there
+# lane to have run remotely and passed, so modes skip and local are red there
 # (scripts/pr_risk_bazel_coverage_test.go).
 # This file has no pull_request or merge_group trigger of its own, so a PR
 # runs the lane once. Every lane reports its job.status as a workflow_call

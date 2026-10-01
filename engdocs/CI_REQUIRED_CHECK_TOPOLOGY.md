@@ -662,12 +662,18 @@ have run remotely and passed.
   variable. A variable is read again by every run and re-run, and the two
   workflows are separate runs, so one could see it on and the other off;
   see "Why a committed flag" below.
-- Who: `pull_request` runs from same-repo branches (not forks) that have the
-  `RBE_WEST_EXECUTOR` secret, while the flag is `"true"`.
+- Who: `pull_request` runs from same-repo branches (not forks) whose
+  `github.actor` is not `dependabot[bot]`, while the flag is `"true"`. The
+  executor secret is deliberately not part of the decision: a same-repo PR
+  whose run lacks it (secret deleted or emptied) is still covered, takes
+  Bazel mode `local` (no embedded lane) and so turns `CI Gate / Required`
+  red, instead of quietly moving back to a legacy tier that one of its
+  runs may already have skipped.
 - Everyone else keeps the legacy tier unchanged:
   - fork PRs;
-  - Dependabot PRs (no Actions secrets) and any other run without the
-    secret;
+  - Dependabot PRs (no Actions secrets; `github.actor`, unlike
+    `github.triggering_actor`, stays `dependabot[bot]` when someone else
+    re-runs them);
   - every `merge_group` run (there is no merge queue today, so this is not
     a pre-merge net);
   - every PR while the flag is `"false"`.
@@ -676,25 +682,25 @@ have run remotely and passed.
 - How:
   - `pr-risk.yml` and `pr.yml` each run the identical
     `bazel-embedded-coverage` job (policy-tested). The job does no checkout
-    and runs no repository code. It reads the flag, the event, the fork flag,
-    and `RBE_WEST_EXECUTOR` (only as an emptiness test), and outputs
-    `covered`.
+    and runs no repository code. It reads the flag, the event, the fork flag
+    and the actor (no secret, no variable), and outputs `covered`.
   - The three legacy test jobs add
     `needs.bazel-embedded-coverage.outputs.covered != 'true'` to their `if`.
   - PR Risk's gate accepts their skip only when `covered == true`.
   - `pr.yml`'s gate requires `BAZEL_EMBEDDED_COVERAGE` (the job's result)
     and `BAZEL_EMBEDDED_RETIRED`. The latter is red when `covered == true`
     and the Bazel call's mode is not `remote` or `BAZEL_EMBEDDED` is not
-    `success`. In particular, mode `skip` (the farm switch off) is red
-    there, although `bazel-gate.sh` alone would accept it.
+    `success`. In particular, mode `skip` (the farm switch off) and mode
+    `local` (the executor secret missing) are red there, although
+    `bazel-gate.sh` alone would accept them.
   - A failed, cancelled or missing decision is red in both gates.
 - `build-embedded` keeps running: its `embedded-test-binaries` artifact also
   feeds `test-proxied-cmd`, `test-server-storage` and
   `test-server-storage-full`, which are not retired in this step.
 - Why a committed flag:
-  - `covered` no longer depends on anything mutable but the secret. So any
-    run or re-run of PR Risk that skips the legacy tier is matched by
-    `pr.yml` runs that compute the same `covered`.
+  - `covered` depends on nothing a re-run can change (flag, event, fork,
+    actor). So any run or re-run of PR Risk that skips the legacy tier is
+    matched by `pr.yml` runs that compute the same `covered`.
   - Each such `pr.yml` run is green only if the Bazel lane ran remotely and
     passed in that run.
   - Flipping `RBE_WEST_WORKERS` either way, plus "Re-run all jobs" of
@@ -702,13 +708,14 @@ have run remotely and passed.
     neither tier run.
   - `scripts/pr_risk_bazel_coverage_test.go` checks this by running both
     workflows' actual decision steps, `bazel.yml`'s `rbe` step and `pr.yml`'s
-    actual gate step over every event, variable value, secret, fork and flag
-    combination, with the variable differing between the two runs. It also
-    requires the two workflows to share their `pull_request` triggers.
-- Residual risk: deleting or rotating `RBE_WEST_EXECUTOR` to empty between
-  the two workflows' decisions (or before a re-run of only one of them) can
-  leave PR Risk covered and `pr.yml` uncovered, with `pr.yml` in mode
-  `local`. This is rare and an admin action.
+    actual gate step over every event, variable value, secret, fork, actor
+    and flag combination, with the variable and the secret each differing
+    between the two runs. It also requires the two workflows to share their
+    `pull_request` triggers.
+- Cost of failing closed: while the flag is `"true"`, a same-repo PR without
+  the executor secret (secret deleted or emptied, or a non-Dependabot bot
+  whose runs get no secrets) is red until the secret is restored or the
+  flag is committed `"false"`.
 - Revert:
   1. Commit `BAZEL_RETIRES_LEGACY_EMBEDDED: "false"` in both workflows on
      `main`.
@@ -718,14 +725,16 @@ have run remotely and passed.
   3. Only then unset `RBE_WEST_WORKERS`, if remote execution should be off.
 
   Reverting the D2 commits removes the decision jobs entirely.
+- Admin changes: flipping `RBE_WEST_WORKERS` or deleting the executor
+  secret, followed by "Re-run all jobs" of either workflow, can no longer
+  leave both required checks green with neither tier run.
 - Re-runs: "Re-run all jobs" (or "Re-run failed jobs") of one workflow
   re-evaluates variables and secrets for that workflow's run only. The
   other workflow's last result stays on the head SHA. With the committed
   flag this cannot drop the tier silently: `covered` depends on the flag
-  (fixed by the merge commit) and the secret, not on `RBE_WEST_WORKERS`.
-  Re-running "failed jobs" keeps the earlier jobs' outputs, including
-  `covered` and the `rbe` mode. Only an empty or deleted `RBE_WEST_EXECUTOR`
-  between runs (residual risk above) can make the two disagree.
+  (fixed by the merge commit), the event, the fork flag and the actor, and
+  on no variable or secret. Re-running "failed jobs" keeps the earlier
+  jobs' outputs, including `covered` and the `rbe` mode.
 - Enforcement scope: the beads-only ruleset requires both gates on the
   default branch (`main`) only. On PRs into `release/**` both workflows run
   and report, but merging does not wait for them, before or after this
