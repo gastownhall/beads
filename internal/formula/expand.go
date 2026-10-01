@@ -17,6 +17,7 @@ package formula
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -194,6 +195,17 @@ func countStepIDs(steps []*Step, counts map[string]int) {
 // DefaultMaxExpansionDepth, an error is returned.
 // The vars parameter provides variable values for {varname} substitution.
 func expandStep(target *Step, template []*Step, depth int, vars map[string]string) ([]*Step, error) {
+	return expandStepWith(target, template, depth, func(s string) string {
+		return substituteVars(s, vars)
+	})
+}
+
+// expandStepWith is expandStep with the {varname} substitution supplied as
+// subst, which receives every string the expansion substitutes variables into -
+// after the {target} placeholders in it are replaced, where those apply. It
+// exists so ExpansionVarRefs can see exactly those strings without keeping a
+// second list of the fields that carry them.
+func expandStepWith(target *Step, template []*Step, depth int, subst func(string) string) ([]*Step, error) {
 	if depth > DefaultMaxExpansionDepth {
 		return nil, fmt.Errorf("expansion depth limit exceeded: max %d levels (currently at %d) - step %q",
 			DefaultMaxExpansionDepth, depth, target.ID)
@@ -203,12 +215,12 @@ func expandStep(target *Step, template []*Step, depth int, vars map[string]strin
 
 	for _, tmpl := range template {
 		expanded := &Step{
-			ID:             substituteVars(substituteTargetPlaceholders(tmpl.ID, target), vars),
-			Title:          substituteVars(substituteTargetPlaceholders(tmpl.Title, target), vars),
-			Description:    substituteVars(substituteTargetPlaceholders(tmpl.Description, target), vars),
+			ID:             subst(substituteTargetPlaceholders(tmpl.ID, target)),
+			Title:          subst(substituteTargetPlaceholders(tmpl.Title, target)),
+			Description:    subst(substituteTargetPlaceholders(tmpl.Description, target)),
 			Type:           tmpl.Type,
 			Priority:       tmpl.Priority,
-			Assignee:       substituteVars(tmpl.Assignee, vars),
+			Assignee:       subst(tmpl.Assignee),
 			SourceFormula:  tmpl.SourceFormula,  // Preserve source from template
 			SourceLocation: tmpl.SourceLocation, // Preserve source location
 		}
@@ -217,7 +229,7 @@ func expandStep(target *Step, template []*Step, depth int, vars map[string]strin
 		if len(tmpl.Labels) > 0 {
 			expanded.Labels = make([]string, len(tmpl.Labels))
 			for i, l := range tmpl.Labels {
-				expanded.Labels[i] = substituteVars(substituteTargetPlaceholders(l, target), vars)
+				expanded.Labels[i] = subst(substituteTargetPlaceholders(l, target))
 			}
 		}
 
@@ -225,20 +237,20 @@ func expandStep(target *Step, template []*Step, depth int, vars map[string]strin
 		if len(tmpl.DependsOn) > 0 {
 			expanded.DependsOn = make([]string, len(tmpl.DependsOn))
 			for i, d := range tmpl.DependsOn {
-				expanded.DependsOn[i] = substituteVars(substituteTargetPlaceholders(d, target), vars)
+				expanded.DependsOn[i] = subst(substituteTargetPlaceholders(d, target))
 			}
 		}
 
 		if len(tmpl.Needs) > 0 {
 			expanded.Needs = make([]string, len(tmpl.Needs))
 			for i, n := range tmpl.Needs {
-				expanded.Needs[i] = substituteVars(substituteTargetPlaceholders(n, target), vars)
+				expanded.Needs[i] = subst(substituteTargetPlaceholders(n, target))
 			}
 		}
 
 		// Handle children recursively with depth tracking
 		if len(tmpl.Children) > 0 {
-			children, err := expandStep(target, tmpl.Children, depth+1, vars)
+			children, err := expandStepWith(target, tmpl.Children, depth+1, subst)
 			if err != nil {
 				return nil, err
 			}
@@ -422,19 +434,64 @@ func MaterializeExpansion(f *Formula, targetID string, vars map[string]string) e
 		return nil
 	}
 
-	target := &Step{
-		ID:          targetID,
-		Title:       f.Formula,
-		Description: f.Description,
-	}
-
-	expandedSteps, err := expandStep(target, f.Template, 0, vars)
+	expandedSteps, err := expandStep(materializeTarget(f, targetID), f.Template, 0, vars)
 	if err != nil {
 		return fmt.Errorf("materializing expansion %q: %w", f.Formula, err)
 	}
 
 	f.Steps = expandedSteps
 	return nil
+}
+
+// materializeTarget is the synthetic target step a standalone expansion
+// formula's template is expanded against.
+func materializeTarget(f *Formula, targetID string) *Step {
+	return &Step{
+		ID:          targetID,
+		Title:       f.Formula,
+		Description: f.Description,
+	}
+}
+
+// ExpansionVarRefs returns the names of the {varname} placeholders that
+// MaterializeExpansion(f, targetID, vars) substitutes from vars, deduplicated
+// and sorted; nil when f is not an expansion formula with a Template.
+//
+// Those names are consumed while the template is expanded, so none of them
+// survives into the steps MaterializeExpansion produces: a caller that needs
+// to know which variables a standalone expansion formula can consume has to
+// ask before materializing it. The answer comes from running that same
+// expansion with a substitution that records names instead of replacing them,
+// so it covers every field the expansion substitutes into - including a name
+// that {target.description} pulls in from the formula's own description.
+//
+// Unlike MaterializeExpansion, this does not skip a formula that already has
+// Steps: FilterStepsByCondition can remove all of them first, and then the
+// template is materialized after all, so the names are reported either way.
+func ExpansionVarRefs(f *Formula, targetID string) []string {
+	if f.Type != TypeExpansion || len(f.Template) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]bool)
+	record := func(s string) string {
+		for _, m := range rangeVarPattern.FindAllStringSubmatch(s, -1) {
+			seen[m[1]] = true
+		}
+		return s
+	}
+	if _, err := expandStepWith(materializeTarget(f, targetID), f.Template, 0, record); err != nil {
+		// The template cannot be expanded at all; MaterializeExpansion
+		// reports why.
+		return nil
+	}
+
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // ApplyInlineExpansions applies Step.Expand fields to inline expansions.

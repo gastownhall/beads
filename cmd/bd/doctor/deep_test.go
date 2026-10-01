@@ -247,6 +247,63 @@ func TestCheckEpicCompleteness_OpenWispChildPreventsCompletedEpic(t *testing.T) 
 	}
 }
 
+// TestCheckEpicCompleteness_DuplicateClosedChildIsNotReady pins GH#5026 on the
+// deep check. The child is closed, so the three cases above (which all close
+// their children with an empty reason) still pass unchanged — but a close that
+// redirects the work rather than finishing it leaves the epic's real scope
+// undone, so the epic must not be reported ready to close and the check must
+// not ship its `bd close <epic-id>` Fix line for it. Before this, `bd doctor
+// --deep` said "ready to close" while `bd doctor`'s Stale Molecules check,
+// reading the shared EpicStatus.EligibleForClose, said the same epic on the
+// same repository was not stale.
+func TestCheckEpicCompleteness_DuplicateClosedChildIsNotReady(t *testing.T) {
+	store := newTestDoltStore(t, "epic")
+	ctx := context.Background()
+
+	epic := &types.Issue{
+		ID:        "epic-dup",
+		Title:     "Epic",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeEpic,
+		CreatedAt: time.Now(),
+	}
+	if err := store.CreateIssue(ctx, epic, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	child := &types.Issue{
+		ID:          "epic-dup.1",
+		Title:       "Duplicate-closed child",
+		Status:      types.StatusClosed,
+		IssueType:   types.TypeTask,
+		ClosedAt:    ptrTime(time.Now()),
+		CloseReason: "duplicate of epic-1.1",
+		CreatedAt:   time.Now(),
+	}
+	if err := store.CreateIssue(ctx, child, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	dep := &types.Dependency{
+		IssueID:     child.ID,
+		DependsOnID: epic.ID,
+		Type:        types.DepParentChild,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test",
+	}
+	if err := store.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	check := checkEpicCompleteness(store.UnderlyingDB())
+	if check.Status != StatusOK {
+		t.Errorf("Status = %q, want %q; message=%q detail=%q", check.Status, StatusOK, check.Message, check.Detail)
+	}
+	if strings.Contains(check.Fix, "bd close") {
+		t.Errorf("Fix = %q, want no 'bd close' instruction for a duplicate-closed epic", check.Fix)
+	}
+}
+
 // TestCheckMailThreadIntegrity_ValidThreads verifies valid thread references pass
 func TestCheckMailThreadIntegrity_ValidThreads(t *testing.T) {
 	store := newTestDoltStore(t, "thread")

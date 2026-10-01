@@ -189,9 +189,17 @@ func databaseNotFoundError(cfg *Config) error {
 	if cfg.SyncRemote != "" {
 		fmt.Fprintf(&b, "\n\nTip: sync.remote is configured (%s).\nRun bd bootstrap to recover from the remote or confirm what bootstrap will do with --dry-run.", cfg.SyncRemote)
 	} else {
-		b.WriteString("\n\nTip: If this is an existing project, fresh clone, or shared-server recovery, run bd bootstrap first.\n")
+		// be-5up5: no longer claims bootstrap is a safe first step "if this is an
+		// existing project" — bootstrap can silently create an empty database in
+		// server mode (2026-08-11 fleet-wide loss), so that framing pointed
+		// existing projects with a missing database at the same danger this guard
+		// exists to stop. Fresh-clone / shared-server-recovery guidance (the
+		// common, safe case) is unchanged.
+		b.WriteString("\n\nTip: If this is a fresh clone or shared-server recovery, run bd bootstrap first.\n")
 		b.WriteString("If bootstrap cannot find the expected remote automatically, set sync.remote\nin .beads/config.yaml and re-run bd bootstrap.\n")
 		b.WriteString("Use bd bootstrap --dry-run if you need to confirm the plan before it initializes anything.\n")
+		b.WriteString("If this is an existing project whose database went missing, run bd doctor before\n")
+		b.WriteString("bootstrap or init — neither is guaranteed to recover it safely.\n")
 		b.WriteString("Use bd init only when creating a brand-new project with no existing .beads data.")
 	}
 

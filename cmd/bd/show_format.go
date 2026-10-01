@@ -110,11 +110,11 @@ func formatIssueMetadata(issue *types.Issue) string {
 
 	// Line 2: Created · Updated · Due/Defer
 	timeParts := []string{}
-	timeParts = append(timeParts, fmt.Sprintf("Created: %s", issue.CreatedAt.Format("2006-01-02")))
+	timeParts = append(timeParts, fmt.Sprintf("Created: %s", issue.CreatedAt.Local().Format("2006-01-02")))
 	if issue.StartedAt != nil {
-		timeParts = append(timeParts, fmt.Sprintf("Started: %s", issue.StartedAt.Format("2006-01-02")))
+		timeParts = append(timeParts, fmt.Sprintf("Started: %s", issue.StartedAt.Local().Format("2006-01-02")))
 	}
-	timeParts = append(timeParts, fmt.Sprintf("Updated: %s", issue.UpdatedAt.Format("2006-01-02")))
+	timeParts = append(timeParts, fmt.Sprintf("Updated: %s", issue.UpdatedAt.Local().Format("2006-01-02")))
 
 	if issue.DueAt != nil {
 		timeParts = append(timeParts, fmt.Sprintf("Due: %s", issue.DueAt.Local().Format("2006-01-02")))
@@ -278,22 +278,40 @@ func printRelatedSection(relatedSeen map[string]*types.IssueWithDependencyMetada
 
 // printEpicChildProgress summarizes how much of an epic its children have
 // finished, printed under the CHILDREN section.
+//
+// The closed/total progress figure stays raw, mirroring the deliberate raw
+// EpicStatus.ClosedChildren convention, but "eligible for close" is a
+// closeability verdict and must apply the same rule the rest of the tool
+// applies: a child closed as duplicate/wontfix/superseded redirects the work
+// instead of finishing it, so it cannot make an epic closeable (GH#5026).
+// Deciding that here from a raw closed count would make `bd show` contradict
+// `bd epic`, `bd doctor` and `epic_closeable`, which all read the shared
+// EpicStatus.EligibleForClose computed by GetEpicsEligibleForClosureInTx.
 func printEpicChildProgress(children []*types.IssueWithDependencyMetadata) {
 	if len(children) == 0 {
 		return
 	}
 	closed := 0
+	completing := 0
 	for _, dep := range children {
-		if dep.Status == types.StatusClosed {
-			closed++
+		if dep.Status != types.StatusClosed {
+			continue
+		}
+		closed++
+		if !types.IsNonCompletingClose(dep.CloseReason) {
+			completing++
 		}
 	}
 	pct := closed * 100 / len(children)
+	icon := ui.RenderMuted("◐")
 	if closed == len(children) {
-		fmt.Printf("  %s %d/%d complete (%d%%) — eligible for close\n", ui.RenderPass("✓"), closed, len(children), pct)
-	} else {
-		fmt.Printf("  %s %d/%d complete (%d%%)\n", ui.RenderMuted("◐"), closed, len(children), pct)
+		icon = ui.RenderPass("✓")
 	}
+	eligible := ""
+	if completing == len(children) {
+		eligible = " — eligible for close"
+	}
+	fmt.Printf("  %s %d/%d complete (%d%%)%s\n", icon, closed, len(children), pct, eligible)
 }
 
 // formatSimpleDependencyLine formats a dependency without metadata (fallback)

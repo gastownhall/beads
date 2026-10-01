@@ -67,7 +67,10 @@ func BuildCountFilter(in issueops.CountRequest, cfg ListConfig) (types.IssueFilt
 	if len(in.MetadataFields) > 0 {
 		filter.MetadataFields = in.MetadataFields
 	}
-	if err := ValidateMetadataFilters(in.MetadataFields, ""); err != nil {
+	if in.HasMetadataKey != "" {
+		filter.HasMetadataKey = in.HasMetadataKey
+	}
+	if err := ValidateMetadataFilters(in.MetadataFields, in.HasMetadataKey); err != nil {
 		return types.IssueFilter{}, err
 	}
 
@@ -102,7 +105,7 @@ func BuildCountFilter(in issueops.CountRequest, cfg ListConfig) (types.IssueFilt
 
 	if in.IncludeInfra {
 		applyCountIncludeInfra(&filter, in.IssueType, cfg)
-	} else {
+	} else if !in.IncludeEphemeral {
 		filter.SkipWisps = true
 	}
 	return filter, nil
@@ -121,8 +124,9 @@ func BuildCountFilter(in issueops.CountRequest, cfg ListConfig) (types.IssueFilt
 //   - counting an infra type (agent/role/message, or the store-configured set)
 //     routes to the ephemeral wisps tier, like list's infra-type listing.
 //
-// A count without IncludeInfra never calls this and keeps its historical
-// durable-only semantics.
+// A count without IncludeInfra never calls this. It keeps its historical
+// durable-only semantics unless IncludeEphemeral admits the wisps tier: the
+// first of the changes above, with none of the rest.
 func applyCountIncludeInfra(filter *types.IssueFilter, issueType string, cfg ListConfig) {
 	filter.SkipWisps = false
 

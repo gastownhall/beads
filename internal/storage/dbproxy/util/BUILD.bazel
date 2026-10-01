@@ -18,6 +18,7 @@ go_test(
     name = "util_test",
     srcs = ["dsn_test.go"],
     embed = [":util"],
+    deps = ["@com_github_go_sql_driver_mysql//:mysql"],
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

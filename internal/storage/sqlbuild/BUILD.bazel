@@ -4,6 +4,7 @@ go_library(
     name = "sqlbuild",
     srcs = [
         "counts.go",
+        "descendants.go",
         "filter.go",
         "labels.go",
         "ready.go",
@@ -23,6 +24,7 @@ go_library(
 go_test(
     name = "sqlbuild_test",
     srcs = [
+        "descendants_test.go",
         "filter_test.go",
         "imports_boundary_test.go",
         "keyset_test.go",

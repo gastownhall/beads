@@ -150,6 +150,7 @@ go_test(
         "migration_0068_add_attribution_status_test.go",
         "migration_0069_datetime_precision_test.go",
         "migration_body_drain_test.go",
+        "migration_watchdog_test.go",
         "progress_test.go",
         "remote_migrate_gate_test.go",
         "schema_skew_test.go",
@@ -166,6 +167,7 @@ go_test(
         "//internal/testutil",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
         "@com_github_go_sql_driver_mysql//:mysql",
+        "@org_golang_x_term//:term",
     ],
 )
 

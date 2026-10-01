@@ -639,7 +639,7 @@ func CheckHooksPath() DoctorCheck {
 		}
 	}
 
-	managed := IsBeadsManagedHooksPath(repoRoot, hooksPath)
+	managed := IsBeadsManagedHooksPath(repoRoot, BeadsManagedStorageHooksDir(), hooksPath)
 	var fix string
 	if managed {
 		fix = "Run 'bd doctor --fix' to unset core.hooksPath, or: git config --unset core.hooksPath"
@@ -675,7 +675,7 @@ func FixHooksPath() error {
 		return nil // nothing set
 	}
 
-	if !IsBeadsManagedHooksPath(repoRoot, hooksPath) {
+	if !IsBeadsManagedHooksPath(repoRoot, BeadsManagedStorageHooksDir(), hooksPath) {
 		return nil // never touch a third-party hooksPath
 	}
 
@@ -709,8 +709,12 @@ func getConfiguredHooksPath(repoRoot string) (string, bool) {
 
 // IsBeadsManagedHooksPath reports whether hooksPath is one of the values bd
 // itself writes to core.hooksPath (.beads/hooks or .beads-hooks, relative or
-// absolute under repoRoot). It is the single matcher for that question;
-// resetHooksPathIfBeadsManaged (cmd/bd/hooks.go) calls it too, so the two
+// absolute under repoRoot, or storageHooksDir — the <effective .beads>/hooks
+// directory that `bd hooks install --beads` configures, which BEADS_DIR or a
+// .beads/redirect can place outside repoRoot). Callers pass
+// BeadsManagedStorageHooksDir() for storageHooksDir, or "" when no storage
+// applies. It is the single matcher for that question;
+// resetHooksPathAt (cmd/bd/hooks.go) calls it too, so the two
 // paths cannot drift apart.
 //
 // Absolute values are compared after symlink resolution. repoRoot comes from
@@ -721,7 +725,7 @@ func getConfiguredHooksPath(repoRoot string) (string, bool) {
 // is a symlink to /private/var, including all of t.TempDir()) hits this. The
 // false negative is not cosmetic: CheckHooksPath then reports the dangling
 // path as third-party and FixHooksPath deliberately refuses to unset it.
-func IsBeadsManagedHooksPath(repoRoot, hooksPath string) bool {
+func IsBeadsManagedHooksPath(repoRoot, storageHooksDir, hooksPath string) bool {
 	if hooksPath == ".beads/hooks" || hooksPath == ".beads-hooks" {
 		return true
 	}
@@ -730,8 +734,14 @@ func IsBeadsManagedHooksPath(repoRoot, hooksPath string) bool {
 	}
 	root := resolveExistingPrefix(repoRoot)
 	candidate := resolveExistingPrefix(hooksPath)
-	return candidate == filepath.Join(root, ".beads", "hooks") ||
-		candidate == filepath.Join(root, ".beads-hooks")
+	if candidate == filepath.Join(root, ".beads", "hooks") ||
+		candidate == filepath.Join(root, ".beads-hooks") {
+		return true
+	}
+	// The out-of-repo storage arm is gated on a resolved storage directory, so
+	// it recognizes only the directory bd would itself configure right now —
+	// never an arbitrary absolute hooksPath that happens to be named "hooks".
+	return storageHooksDir != "" && candidate == resolveExistingPrefix(storageHooksDir)
 }
 
 // resolveExistingPrefix returns path with its longest existing ancestor

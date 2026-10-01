@@ -64,6 +64,11 @@ func (l *lifecycle) Create(ctx context.Context, request publicops.CreateRequest)
 }
 
 func (l *lifecycle) Update(ctx context.Context, request publicops.UpdateRequest) (publicops.UpdateResult, error) {
+	if request.Claim {
+		if err := l.policy.guardExternalClose(ctx, request.IssueID, false); err != nil {
+			return publicops.UpdateResult{}, err
+		}
+	}
 	if request.Patch.Status.Set && string(request.Patch.Status.Value) == string(types.StatusClosed) {
 		if err := l.policy.guardExternalClose(ctx, request.IssueID, request.ForceClosePolicy); err != nil {
 			return publicops.UpdateResult{}, err
@@ -92,7 +97,7 @@ func (s *Store) guardExternalClose(ctx context.Context, id string, force bool) e
 		return err
 	}
 	if blockers := state.refsByIssue[id]; len(blockers) > 0 {
-		return fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
+		return publicops.NewCloseBlockedError(id, blockers)
 	}
 	return nil
 }
@@ -471,7 +476,7 @@ func (s *Store) CloseIssueChecked(ctx context.Context, issueID, actor string, op
 				return storage.CloseIssueResult{}, err
 			}
 			if blocked && len(blockers) > 0 {
-				return storage.CloseIssueResult{}, fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, issueID, blockers)
+				return storage.CloseIssueResult{}, publicops.NewCloseBlockedError(issueID, blockers)
 			}
 		}
 	}

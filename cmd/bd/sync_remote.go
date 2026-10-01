@@ -60,10 +60,11 @@ func commitBeadsConfigForActiveRepo(ctx context.Context, msg string) {
 }
 
 // normalizeRemoteURL converts a remote URL to a Dolt-compatible format.
-// Dolt-native URLs (dolthub://, file://, aws://, gs://, git+...) are
-// returned as-is. Git URLs (https://, ssh://, git@...) are converted
-// via gitURLToDoltRemote. Unknown schemes are returned as-is and let
-// dolt clone decide.
+// See doltremote.Normalize for the scheme rules - this wrapper adds nothing and
+// exists only so call sites in this package read against one local name.
+// Restating those rules here drifts: this comment still omitted s3:// after the
+// source gained it, and named gitURLToDoltRemote as the converter when the call
+// below goes to doltremote.Normalize directly.
 func normalizeRemoteURL(url string) string {
 	return doltremote.Normalize(url)
 }

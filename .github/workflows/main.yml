@@ -93,9 +93,9 @@ jobs:
           source ./.buildflags
           go_version="$(go version)"
           commit="$(git rev-parse HEAD)"
-          go build -tags "$BEADS_BUILD_TAGS" -o artifacts/bd-linux-gms-pure ./cmd/bd
+          go build -tags gms_pure_go -o artifacts/bd-linux-gms-pure ./cmd/bd
           chmod +x artifacts/bd-linux-gms-pure
-          go test -tags "$BEADS_BUILD_TAGS" -c -o artifacts/bd-cmd-test ./cmd/bd
+          go test -tags gms_pure_go -c -o artifacts/bd-cmd-test ./cmd/bd
           chmod +x artifacts/bd-cmd-test
           (
             cd artifacts
@@ -130,9 +130,8 @@ jobs:
           path: ${{ runner.temp }}/go-cache/non-race
           key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
 
-  # Fast check: every `go build|test|run|generate|install` invocation in
-  # tracked scripts/hooks/CI carries -tags=gms_pure_go. Prevents ICU-linkage
-  # regressions from re-entering the build (see engdocs/ICU-POLICY.md).
+  # Fast shell/Make guard for direct source-time build-tag declarations.
+  # Workflow `run` steps are checked structurally in the required policy wrapper.
   check-build-tags:
     name: Check build-tag policy
     runs-on: ubuntu-latest
@@ -140,6 +139,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
       - run: ./scripts/check-build-tags.sh
       - run: ./scripts/check-go-install-guidance.sh
+      - run: ./scripts/check-winget-portable-alias.sh
 
   # Lock in the cgo-test-contamination fix (mybd-ycx / GH#3683 follow-up).
   # cmd/bd carries a mix of cgo-only test helpers (embedded Dolt, sql.DB) and
@@ -366,6 +366,41 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: false
+
+      # Same cold-fetch exposure as pr.yml's pr-policy-wrapper: setup-go above
+      # runs with cache: false, so every run pulls the whole module graph from
+      # the proxy. Retrying it here means a proxy blip costs seconds instead of
+      # failing a required check.
+      #
+      # Deliberately NOT wrapped around the build: `make ci-pr-policy` runs a
+      # `go build ./cmd/bd` (scripts/ci/pr-policy.sh, build_docs_binary), and a
+      # compile error is not transient. See pr.yml's copy for the full rationale.
+      #
+      # 3 attempts x 120s + 2 backoffs x 10s = 380s worst case. 8m leaves ~100s
+      # of headroom, matching the bounded apt-get steps in migration-test.yml.
+      - name: Download modules
+        timeout-minutes: 8
+        run: |
+          downloaded=""
+          for attempt in 1 2 3; do
+            if timeout 120 go mod download; then
+              downloaded=yes
+              break
+            fi
+            echo "::warning::go mod download attempt $attempt failed or timed out"
+            # No backoff after the final attempt - there is nothing left to wait for.
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+            fi
+          done
+          # Unlike the best-effort apt-get retries elsewhere in this repo, this
+          # one is load-bearing: nothing downstream can build without the
+          # modules. Fail here, naming the fetch, so a module outage is not
+          # reported as a build failure.
+          if [ -z "$downloaded" ]; then
+            echo "::error::go mod download failed after 3 attempts - module fetch failure, not a build failure"
+            exit 1
+          fi
 
       - name: Run PR policy wrapper
         run: make ci-pr-policy
@@ -680,6 +715,13 @@ jobs:
       - name: Test domain + uow + tracker
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
+          # internal/storage/domain, internal/storage/uow, and internal/tracker
+          # run as concurrent package test binaries in this one invocation.
+          # testcontainers-go shares one Ryuk reaper per host; a failed
+          # handshake in one process can reap a sibling's live Dolt container
+          # mid-suite (be-2on). The runner is destroyed after the job, so the
+          # reaper buys nothing here and only costs this race.
+          TESTCONTAINERS_RYUK_DISABLED: "true"
         run: go test -tags gms_pure_go -race -count=1 -timeout 15m -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...
 
       # The doctor/fix DB-backed suite spins its own Dolt container in
@@ -690,6 +732,9 @@ jobs:
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
           BEADS_FIX_REQUIRE_DOLT: "1"
+          # Pinned for consistency with the step above: this single-package
+          # step has no sibling test binary to race for the reaper (be-2on).
+          TESTCONTAINERS_RYUK_DISABLED: "true"
         run: go test -tags gms_pure_go -race -count=1 -timeout 10m -v ./cmd/bd/doctor/fix/
 
   main-linux-integration-packages:
@@ -868,9 +913,14 @@ jobs:
   # Reuses the cmd/bd test binary compiled once by build-artifacts (bd-cmd-test):
   # the proxied tests share the package and are gated at runtime by
   # BEADS_TEST_PROXIED_SERVER=1. Shard assignment is committed in
-  # .github/scripts/proxied-cmd-test-shards.txt; newly-added TestProxiedServer*
-  # tests hash-distribute until listed there. Adopt the
-  # `TestProxiedServer<Subcommand>` naming convention for new entry points.
+  # .github/scripts/proxied-cmd-test-shards.txt; newly-added
+  # TestProxiedServer*/TestServerMode* tests hash-distribute until listed there.
+  # Prefer the `TestProxiedServer<Subcommand>` naming convention for new entry
+  # points; server-mode-topology suites named TestServerMode* are also
+  # discovered among the cmd/bd/*_test.go entry points, so neither family is
+  # left out of this lane. That glob is non-recursive: a container-gated suite
+  # added under cmd/bd/<subpkg>/ is still never selected here whatever it is
+  # named, so keep new proxied/server-mode entry points at the top level.
   test-proxied-cmd:
     name: Test (proxied-server cmd ${{ matrix.shard }}/15)
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
