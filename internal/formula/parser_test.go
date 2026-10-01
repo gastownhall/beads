@@ -520,6 +520,21 @@ func TestExtractVariables(t *testing.T) {
 			{ID: "s1", Title: "Deploy {{project}} to {{env}}"},
 			{ID: "s2", Title: "Notify {{owner}}"},
 			{ID: "s3", Gate: &Gate{Type: "gh:{{gate_kind}}", AwaitID: "{{pr_url}}", Timeout: "{{gate_timeout}}", Repo: "{{gate_repo}}"}},
+			// The fields below are substituted by cook/pour, so they must be
+			// scanned here too - otherwise a var used only in one of them is
+			// never demanded and ships as a literal placeholder (GH#5110,
+			// GH#5754).
+			{
+				ID:       "s4",
+				Notes:    "see {{runbook}}",
+				Assignee: "{{agent}}",
+				Labels:   []string{"static", "widget:{{widget_id}}"},
+				Metadata: map[string]interface{}{
+					"ado_id": "{{ado_id}}",
+					"count":  3,
+					"nested": map[string]interface{}{"k": "{{nested_var}}"},
+				},
+			},
 		},
 	}
 
@@ -532,6 +547,11 @@ func TestExtractVariables(t *testing.T) {
 		"pr_url":       true,
 		"gate_timeout": true,
 		"gate_repo":    true,
+		"runbook":      true,
+		"agent":        true,
+		"widget_id":    true,
+		"ado_id":       true,
+		"nested_var":   true,
 	}
 
 	if len(vars) != len(want) {
@@ -1020,6 +1040,67 @@ func TestValidate_WaitsForField(t *testing.T) {
 	if err == nil {
 		t.Error("Validate should fail for invalid waits_for value")
 	}
+}
+
+// A bare all-children/any-children gate takes its spawner from needs[0], so a
+// step with no needs gates on nothing: cooking gives it a gate:<value> label,
+// no dependency, and immediate readiness.
+func TestValidate_WaitsForWithoutSpawner(t *testing.T) {
+	for _, gate := range []string{"all-children", "any-children"} {
+		t.Run(gate, func(t *testing.T) {
+			f := &Formula{
+				Formula: "mol-spawnerless",
+				Version: 1,
+				Type:    TypeWorkflow,
+				Steps: []*Step{
+					{ID: "fanout", Title: "Fanout"},
+					{ID: "summarize", Title: "Summarize", WaitsFor: gate},
+				},
+			}
+
+			err := f.Validate()
+			if err == nil {
+				t.Fatalf("Validate() = nil, want an error for %s with no needs", gate)
+			}
+			if !strings.Contains(err.Error(), "needs") {
+				t.Errorf("Validate() error = %q, want it to point at needs", err)
+			}
+		})
+	}
+
+	t.Run("children-of names its own spawner", func(t *testing.T) {
+		f := &Formula{
+			Formula: "mol-explicit-spawner",
+			Version: 1,
+			Type:    TypeWorkflow,
+			Steps: []*Step{
+				{ID: "fanout", Title: "Fanout"},
+				{ID: "summarize", Title: "Summarize", WaitsFor: "children-of(fanout)"},
+			},
+		}
+
+		if err := f.Validate(); err != nil {
+			t.Errorf("Validate() = %v, want nil: children-of() needs no needs", err)
+		}
+	})
+
+	t.Run("nested child step", func(t *testing.T) {
+		f := &Formula{
+			Formula: "mol-spawnerless-child",
+			Version: 1,
+			Type:    TypeWorkflow,
+			Steps: []*Step{
+				{ID: "parent", Title: "Parent", Children: []*Step{
+					{ID: "child1", Title: "Child 1"},
+					{ID: "child2", Title: "Child 2", WaitsFor: "all-children"},
+				}},
+			},
+		}
+
+		if err := f.Validate(); err == nil {
+			t.Error("Validate() = nil, want an error for a spawnerless gate on a child step")
+		}
+	})
 }
 
 // TestValidate_WaitsForChildrenOf tests the children-of(step) syntax (gt-8tmz.38)

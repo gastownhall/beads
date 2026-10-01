@@ -373,6 +373,106 @@ func readInitHooksFile(t *testing.T, path string) []byte {
 	return data
 }
 
+func TestInitEmbeddedHooksSelectedTail(t *testing.T) {
+	for _, name := range []string{"missing", "skip", "nonrepo", "pure_jj", "quiet_pure_jj", "colocated", "bare", "config_lock", "quiet_config_lock"} {
+		t.Run(name, func(t *testing.T) {
+			selected, decoy, storage, common := newInitHooksFixture(t)
+			preserveInitRoleInputs(t, filepath.Join(decoy, ".git", "config"), filepath.Join(decoy, ".git", "index"))
+			if name == "nonrepo" || strings.Contains(name, "pure_jj") || name == "bare" {
+				selected = t.TempDir()
+			}
+			if name == "bare" {
+				initExcludeGit(t, selected, "init", "--bare")
+			}
+			if strings.Contains(name, "pure_jj") || name == "colocated" {
+				require.NoError(t, os.Mkdir(filepath.Join(selected, ".jj"), 0755))
+			}
+			if name == "colocated" {
+				initExcludeGit(t, selected, "config", "--local", "core.hooksPath", filepath.Join(common, "hooks"))
+			}
+			locked, quiet := strings.Contains(name, "config_lock"), strings.HasPrefix(name, "quiet")
+			if locked {
+				require.NoError(t, os.WriteFile(filepath.Join(common, "config.lock"), []byte("owned lock"), 0600))
+				preserveInitRoleInputs(t, filepath.Join(common, "config"))
+			}
+			run := func() { runEmbeddedInitHooks(t.Context(), selected, storage, name == "skip", quiet) }
+			if locked {
+				stderr := captureStderr(t, run)
+				require.Equal(t, !quiet, strings.Contains(stderr, "Failed to install git hooks"))
+				require.Equal(t, !quiet, strings.Contains(stderr, "bd hooks install --beads"))
+			} else {
+				stdout := captureStdout(t, func() error { run(); return nil })
+				require.Equal(t, name == "pure_jj", strings.Contains(stdout, "Jujutsu repository detected"))
+			}
+			destination := filepath.Join(storage, "hooks")
+			if name == "colocated" {
+				destination = filepath.Join(common, "hooks")
+			}
+			if name == "skip" || name == "nonrepo" || strings.Contains(name, "pure_jj") {
+				_, err := os.Stat(destination)
+				require.ErrorIs(t, err, os.ErrNotExist)
+				return
+			}
+			require.Contains(t, string(readInitHooksFile(t, filepath.Join(destination, "pre-commit"))), hookSectionBeginPrefix)
+			if !locked && name != "colocated" {
+				// A bare repository has no work tree to anchor, so it resolves
+				// through the work-tree-less hooks context (GH#6457) and is its own
+				// common directory. It installs like any other selected repository
+				// rather than degrading to a warning and no install at all.
+				configRoot := common
+				if name == "bare" {
+					configRoot = selected
+				}
+				got := initExcludeGit(t, selected, "config", "--file", filepath.Join(configRoot, "config"), "--get", "core.hooksPath")
+				require.Equal(t, filepath.Clean(destination), filepath.Clean(got))
+			}
+		})
+	}
+}
+
+func TestInitEmbeddedHooksSelectedStatus(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("hook current-status checks require POSIX executable bits")
+	}
+	for _, name := range []string{"decoy_current", "target_current", "target_outdated"} {
+		t.Run(name, func(t *testing.T) {
+			selected, decoy, storage, common := newInitHooksFixture(t)
+			current := filepath.Join(decoy, ".git", "hooks")
+			configuredRepo := decoy
+			if name != "decoy_current" {
+				current = filepath.Join(common, "hooks")
+				configuredRepo = selected
+			}
+			initExcludeGit(t, configuredRepo, "config", "--local", "core.hooksPath", current)
+			require.NoError(t, os.MkdirAll(current, 0755))
+			for _, hook := range managedHookNames {
+				content := "#!/bin/sh\n" + generateHookSection(hook)
+				if name == "target_outdated" {
+					content = "#!/bin/sh\n" + hookVersionPrefix + "0.0.0\n# bd (beads) " + hook + " hook\n"
+				}
+				require.NoError(t, os.WriteFile(filepath.Join(current, hook), []byte(content), 0755))
+			}
+			require.True(t, hooksInstalledAt(current))
+			require.Equal(t, name == "target_outdated", hookStatusesNeedUpdate(checkGitHooksAt(current)))
+			if name == "decoy_current" {
+				require.True(t, hooksInstalled() && !hooksNeedUpdate(), "inherited decoy hooks must be current")
+			}
+			preserveInitRoleInputs(t, filepath.Join(current, "pre-commit"), filepath.Join(decoy, ".git", "config"), filepath.Join(decoy, ".git", "index"))
+			stdout := captureStdout(t, func() error {
+				runEmbeddedInitHooks(t.Context(), selected, storage, false, false)
+				return nil
+			})
+			require.Equal(t, name == "target_outdated", strings.Contains(stdout, "Updating hooks to version"))
+			if name == "target_current" {
+				_, err := os.Stat(filepath.Join(storage, "hooks"))
+				require.ErrorIs(t, err, os.ErrNotExist)
+			} else {
+				require.Contains(t, string(readInitHooksFile(t, filepath.Join(storage, "hooks", "pre-commit"))), hookSectionBeginLine())
+			}
+		})
+	}
+}
+
 func preserveStandaloneHookInputs(t *testing.T, paths ...string) {
 	t.Helper()
 	beforeEnv := os.Environ()

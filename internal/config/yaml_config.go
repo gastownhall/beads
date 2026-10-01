@@ -193,18 +193,42 @@ func IsSecretKey(key string) bool {
 // named only by GIT_DIR/GIT_WORK_TREE — so the inherited context is consulted
 // before declaring the file untracked. Mirrors isGitTrackedFile in cmd/bd.
 func isGitTracked(path string) bool {
-	dir := filepath.Dir(path)
 	inherited := os.Environ()
-	for _, env := range [][]string{gitenv.ScrubRouting(inherited), inherited} {
+	return isGitTrackedWithEnv(path, gitenv.ScrubRouting(inherited), inherited)
+}
+
+// isGitTrackedWithEnv probes path under env, then under each fallback in
+// order, stopping at the first that reports it as tracked. Callers pass the
+// scrubbed environment as env so inherited routing cannot hide a tracked
+// config file, and the inherited one as the fallback: that preserves bare work
+// trees and trusted config, where the repository is reachable only through the
+// inherited context. Either probe reporting the path as tracked is sufficient
+// to refuse the write. This mirrors the hook guard in cmd/bd/hooks.go.
+//
+// The first environment is a separate parameter rather than part of the
+// variadic so that a zero-probe call, which would fall through to "untracked"
+// and write the secret, cannot be spelled. The tail stays variadic because a
+// test needs to probe one environment alone; the twin's fixed (clean,
+// inherited) arity cannot express that, since exec treats a nil Env as
+// "inherit the current process" rather than as a disabled probe.
+//
+// Every probe failing counts as untracked, so the guard only blocks writes it
+// can prove are unsafe.
+func isGitTrackedWithEnv(path string, env []string, fallbacks ...[]string) bool {
+	dir := filepath.Dir(path)
+	for _, probe := range append([][]string{env}, fallbacks...) {
 		cmd := exec.Command("git", "ls-files", "--error-unmatch", path)
 		cmd.Dir = dir
-		cmd.Env = env
+		cmd.Env = probe
 		cmd.Stdout = nil
 		cmd.Stderr = nil
 		err := cmd.Run()
 		if err == nil {
 			return true
 		}
+		// Exit 1 is git's "repository reached, path is not tracked" answer and
+		// is final, so a later probe runs only when this one failed for a
+		// configuration reason (no reachable repository).
 		if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
 			return false
 		}

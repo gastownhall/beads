@@ -18,6 +18,7 @@ go_test(
     name = "scripts_test",
     srcs = [
         "bazel_autofix_push_test.go",
+        "bazel_farm_workflow_test.go",
         "bazel_policy_test.go",
         "check_build_tags_test.go",
         "check_doc_freshness_test.go",
@@ -37,6 +38,7 @@ go_test(
     ],
     data = [
         ":scripts_files",
+        "//:.goreleaser.yml",
         "//:bazel_policy_files",
         "//:test_sh_files",
         "//:workflow_files",
@@ -51,6 +53,7 @@ go_test(
     deps = [
         "//internal/formula",
         "//internal/testutil/bazeltest",
+        "//scripts/internal/testbash",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
@@ -82,4 +85,9 @@ exports_files(
 exports_files(
     ["README.md"],
     visibility = ["//:__pkg__"],
+)
+
+exports_files(
+    ["ci/gofmt-bin.sh"],
+    visibility = ["//scripts/prlintmake:__pkg__"],
 )

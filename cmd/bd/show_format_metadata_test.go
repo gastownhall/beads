@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/steveyegge/beads/internal/types"
@@ -139,6 +140,40 @@ func TestFormatIssueMetadata_CreatedByLabel(t *testing.T) {
 	}
 	if strings.Contains(out, "Owner: ") {
 		t.Errorf("label %q must not appear — created_by must not render under the Owner label, got:\n%s", "Owner: ", out)
+	}
+}
+
+// TestFormatIssueMetadata_TimestampsRenderLocal guards the rule that the
+// metadata block reports timestamps on the reader's calendar, as the Due and
+// Deferred entries on the same line already did.
+//
+// Created/Started/Updated are stored in UTC. Printing those digits as a bare
+// date put the whole day wrong if it's already tomorrow in UTC.
+//
+// The stamp is handed over in a zone twelve hours ahead of time.Local, so its
+// own digits fall on the next day on any machine, a UTC CI box included, and
+// only a conversion to local time prints the right date. time.Local is never
+// assigned: every time.Now() in the process reads it, including in goroutines
+// no test can synchronize with (a served connection winding down after its
+// test, the collector Dolt starts at package init), so a swap trips -race even
+// with this test run alone.
+func TestFormatIssueMetadata_TimestampsRenderLocal(t *testing.T) {
+	t.Parallel()
+	// 18:30 on 2026-08-23 here is 06:30 on 2026-08-24 twelve hours east — the
+	// same instant on two different calendar days, which is the whole bug.
+	local := time.Date(2026, 8, 23, 18, 30, 0, 0, time.Local)
+	_, offset := local.Zone()
+	stamp := local.In(time.FixedZone("local+12h", offset+12*60*60))
+	issue := &types.Issue{
+		ID: "test-tz", Title: "t", IssueType: types.TypeTask,
+		CreatedAt: stamp, UpdatedAt: stamp, StartedAt: &stamp,
+	}
+
+	out := ansi.Strip(formatIssueMetadata(issue))
+	for _, want := range []string{"Created: 2026-08-23", "Started: 2026-08-23", "Updated: 2026-08-23"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in output (the stamp's own digits put the date a day ahead), got:\n%s", want, out)
+		}
 	}
 }
 

@@ -2036,6 +2036,14 @@ func hookSubprocessEnv(env []string) []string {
 // the pending index — where the staged deletion lives — so scrubbing it
 // here would make git fall back to the on-disk index and miss the
 // deletion. Reimplements gastownhall/beads#3838 (ckumar1).
+//
+// #nosec G702 -- no shell is involved: the binary is the literal "git" and
+// every argument is its own argv element. The only variable argument is the
+// export file's own path, and it sits after the "--" terminator, so git
+// always reads it as a pathspec and never as an option. Annotated on the
+// function rather than on the call so it stays correct however the body
+// addresses that path. Mirrors the annotation on configureHooksPath in
+// init_git_hooks.go.
 func isExportFileStagedForDeletion(fullPath string) bool {
 	// The export file's directory is not guaranteed to exist — hookJSONLDir
 	// can retarget into a worktree with no .beads yet, and a nested

@@ -88,6 +88,7 @@ go_test(
         "journal_seq_test.go",
         "label_test.go",
         "label_usecase_test.go",
+        "normalize_timestamps_utc_test.go",
         "normalize_update_value_test.go",
         "parity_direct_test.go",
         "ready_helpers_test.go",

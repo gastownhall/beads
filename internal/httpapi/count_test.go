@@ -116,6 +116,7 @@ func TestCountForwardsEveryDocumentedParameter(t *testing.T) {
 		"metadata_field":    {"team=platform", "env=prod"},
 		"has_metadata_key":  {"audit_ref"},
 		"include_infra":     {"true"},
+		"include_ephemeral": {"true"},
 	}.Encode())
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
@@ -166,7 +167,8 @@ func TestCountForwardsEveryDocumentedParameter(t *testing.T) {
 		MetadataFields: map[string]string{"team": "platform", "env": "prod"},
 		HasMetadataKey: "audit_ref",
 
-		IncludeInfra: true,
+		IncludeInfra:     true,
+		IncludeEphemeral: true,
 	}
 	if !reflect.DeepEqual(got[0], want) {
 		t.Errorf("request = %+v\nwant     %+v", got[0], want)
@@ -571,7 +573,7 @@ func TestCountGroupEnumMatchesTheRolesVocabulary(t *testing.T) {
 // The other two are already mechanical: TestCountParametersMatchTheHandler ties
 // the parameter names to the DOCUMENT, and TestCountForwardsEveryDocumentedParameter
 // ties each parameter's VALUE to the field it lands in. Neither can see a role
-// field that no parameter reaches — a 25th filter added to CountRequest and left
+// field that no parameter reaches — a 26th filter added to CountRequest and left
 // unpublished turns nothing red, and the wire silently stops being able to ask
 // a question the role can answer. That is the failure this map closes, and it is
 // the one that matters for an HTTP-backed store: it is how the wire becomes
@@ -605,6 +607,7 @@ var countFieldForParameter = map[string]string{
 	"metadata_field":    "MetadataFields",
 	"has_metadata_key":  "HasMetadataKey",
 	"include_infra":     "IncludeInfra",
+	"include_ephemeral": "IncludeEphemeral",
 }
 
 // TestEveryCountRequestFieldIsPublished: the role publishes 25 filters and the

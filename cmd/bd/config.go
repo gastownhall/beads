@@ -239,7 +239,7 @@ var configSetCmd = &cobra.Command{
 			if !validRoles[value] {
 				return HandleError("invalid role %q (valid values: maintainer, contributor)", value)
 			}
-			// bd config's own beads.role reads and writes ignore inherited Git
+			// bd config get/set/unset/set-many beads.role ignore inherited Git
 			// routing, including GIT_CONFIG_GLOBAL, so the value lands in the
 			// repository this command selected. beads.role is an authority
 			// value and the reader it feeds treats a missing value as

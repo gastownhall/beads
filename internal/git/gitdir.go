@@ -156,7 +156,8 @@ func normalizeHooksWorkDir(workDir string) (string, error) {
 //
 // This is the explicit-context sibling of GetGitHooksDir. It returns a struct
 // instead of following this file's GetXFrom(startDir) convention because all
-// four paths must come from one resolution of one directory.
+// four paths must come from one resolution of one directory. The first in-repo
+// caller is the selected-hook setup in cmd/bd/init_git_hooks.go (GH#6440).
 func ResolveHooksContext(workDir string, env []string) (HooksContext, error) {
 	if workDir == "" {
 		return HooksContext{}, fmt.Errorf("hooks context requires a working directory")
