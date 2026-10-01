@@ -1035,8 +1035,8 @@ func TestPRRiskGateReachesFullServerDoltStorageSuite(t *testing.T) {
 	if !contains(job.Needs, "detect-ci-tier") || !contains(job.Needs, "build-embedded") {
 		t.Errorf("%s needs = %v, want detect-ci-tier and build-embedded (reuse the existing artifact, no new build)", jobName, job.Needs)
 	}
-	if job.If != "needs.detect-ci-tier.outputs.full_embedded == 'true'" {
-		t.Errorf("%s if = %q, want the same tier gate as test-server-storage", jobName, job.If)
+	if sibling := workflow.job(t, "test-server-storage").If; job.If != sibling || !strings.HasPrefix(job.If, "needs.detect-ci-tier.outputs.full_embedded == 'true'") {
+		t.Errorf("%s if = %q, want the same tier gate as test-server-storage (%q)", jobName, job.If, sibling)
 	}
 
 	download := job.step(t, "Download binaries")
@@ -2112,8 +2112,11 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 	if !contains(gate.Needs, "bazel") {
 		t.Errorf("ci-gate needs = %v, want bazel", gate.Needs)
 	}
-	// Plus D2 step 1's retirement check (TestPRRiskEmbeddedDecisionMatchesBazelMode).
-	wantBazelIDs := []string{bazelAggregateGateID, "BAZEL_EMBEDDED_COVERAGE", "BAZEL_EMBEDDED_RETIRED"}
+	// Plus D2's decision and retirement checks (TestPRRiskDecisionMatchesBazelMode).
+	wantBazelIDs := []string{bazelAggregateGateID, prRiskCoverageGateID}
+	for _, r := range retiredTiers {
+		wantBazelIDs = append(wantBazelIDs, r.retiredID)
+	}
 	for lane, id := range bazelLaneGateIDs {
 		wantBazelIDs = append(wantBazelIDs, id)
 		if want := "${{ needs.bazel.outputs." + lane + " || 'skipped' }}"; evaluate.Env[id] != want {
@@ -2166,9 +2169,10 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 		}
 	}
 
-	// Legacy jobs stay required: D1 adds, D2 removes. (D2 step 1 lets
-	// pr-risk.yml's embedded test jobs skip where this lane runs remotely,
-	// but they stay required ids: TestPRRiskLegacyEmbeddedTierDefersToBazelLane.)
+	// Legacy jobs stay required: D1 adds, D2 removes. (D2 lets
+	// pr-risk.yml's embedded, proxied and server Dolt test jobs, and
+	// build-embedded, skip where the gated lanes run remotely, but they stay
+	// required ids: TestPRRiskLegacyTiersDeferToBazelLanes.)
 	for id, job := range map[string]string{
 		"BUILD_ARTIFACTS":            "build-artifacts",
 		"PR_CORE_WRAPPER":            "pr-core-wrapper",
@@ -2183,7 +2187,7 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 	risk := readCIWorkflow(t, "pr-risk.yml")
 	riskGate := risk.job(t, "ci-gate")
 	riskRequired := strings.Fields(riskGate.step(t, "Evaluate CI gate").Env["CI_GATE_REQUIRED"])
-	for _, id := range []string{"BUILD_EMBEDDED", "TEST_EMBEDDED_STORAGE", "TEST_EMBEDDED_CONFORMANCE", "TEST_EMBEDDED_CMD"} {
+	for _, id := range []string{"BUILD_EMBEDDED", "TEST_EMBEDDED_STORAGE", "TEST_EMBEDDED_CONFORMANCE", "TEST_EMBEDDED_CMD", "TEST_PROXIED_CMD", "TEST_SERVER_STORAGE", "TEST_SERVER_STORAGE_FULL"} {
 		if !contains(riskRequired, id) {
 			t.Errorf("pr-risk.yml ci-gate no longer requires legacy %s", id)
 		}
@@ -2282,11 +2286,12 @@ type bazelGateScenario struct {
 	mode, enabled string            // the call's rbe-mode / rbe-enabled outputs
 	call          string            // needs.bazel.result
 	outputs       map[string]string // the lanes' outputs ("" = not reported)
-	// pr.yml's bazel-embedded-coverage job (D2 step 1): its covered output
-	// and its result ("" = success).
-	covered, coverage string
-	wantPass          bool
-	wantMention       string // a red gate must name this id
+	// pr.yml's bazel-coverage job (D2): its outputs, per retiredTiers
+	// output name ("" = not reported), and its result ("" = success).
+	covered     map[string]string
+	coverage    string
+	wantPass    bool
+	wantMention string // a red gate must name this id
 }
 
 // runPRGateStep runs pr.yml's actual "Evaluate CI gate" step (its run block,
@@ -2314,8 +2319,15 @@ func runPRGateStep(t *testing.T, step ciWorkflowStep, sc bazelGateScenario) (boo
 			if got == "" {
 				got = "success"
 			}
-		case m[1] == prRiskCoverageJobName && m[3] == "covered":
-			got = sc.covered
+		case m[1] == prRiskCoverageJobName:
+			known := false
+			for _, r := range retiredTiers {
+				known = known || r.output == m[3]
+			}
+			if !known {
+				t.Fatalf("ci-gate env %s = %q: %s has no such tier output", key, value, prRiskCoverageJobName)
+			}
+			got = sc.covered[m[3]]
 		case m[1] != "bazel" && m[2] == "result":
 			got = "success"
 		case m[1] != "bazel":
@@ -3385,8 +3397,8 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 			t.Errorf("%s timeout-minutes = %d; it runs remotely only (longest shard ~2-8 min), keep it at most 30", c.job, job.TimeoutMinutes)
 		}
 		assertBazelTierStep(t, job, c.job, c.config)
-		if n := len(job.Steps); n != 6 {
-			t.Errorf("%s has %d steps, want checkout, setup-bazel, the tier, check_testcases.py, log upload, result recorder", c.job, n)
+		if n := len(job.Steps); n != 8 {
+			t.Errorf("%s has %d steps, want checkout, setup-bazel, the flaky query, the tier, check_testcases.py, check_shard_coverage.py, log upload, result recorder", c.job, n)
 		}
 		logs := job.step(t, "Upload test logs")
 		if logs.If != "${{ failure() && steps.test.outcome != 'skipped' }}" || logs.With["name"] != c.logs || !strings.HasPrefix(logs.Uses, "actions/upload-artifact@") {
@@ -3510,7 +3522,8 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		// Nothing turns result caching back on for the embedded lane (a
 		// later --cache_test_results wins over --nocache_test_results).
 		if !strings.HasPrefix(line, "#") && strings.Contains(line, "cache_test_results") &&
-			line != "test:embedded --nocache_test_results" && line != "test:docker --nocache_test_results" {
+			line != "test:embedded --nocache_test_results" && line != "test:docker --nocache_test_results" &&
+			line != "test:doltserver-proxied --nocache_test_results" && line != "test:doltserver-integration --nocache_test_results" {
 			t.Errorf(".bazelrc %q: only test:embedded and test:docker set test result caching", line)
 		}
 		if strings.HasPrefix(line, "test:embedded ") && (strings.Contains(line, "-test.short") || strings.Contains(line, "BEADS_TEST_SKIP")) {

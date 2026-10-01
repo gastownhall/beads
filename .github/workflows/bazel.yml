@@ -6,12 +6,14 @@
 #
 # PRs and merge groups run it through pr.yml's `bazel` job (workflow_call),
 # in the same run as the legacy jobs it mirrors, which stay required too,
-# except pr-risk.yml's embedded-Dolt test jobs: while the committed
-# BAZEL_RETIRES_LEGACY_EMBEDDED flag is "true", on a same-repo,
-# non-Dependabot pull_request (whatever the mode), pr-risk.yml's bazel-embedded-coverage job stands them down and
-# bazel-embedded alone runs the tier; pr.yml's ci-gate then requires that
-# lane to have run remotely and passed, so modes skip, local and cache are
-# red there (scripts/pr_risk_bazel_coverage_test.go).
+# except pr-risk.yml's embedded-Dolt, proxied-server and server-Dolt storage
+# test jobs: while the committed BAZEL_RETIRES_LEGACY_EMBEDDED /
+# BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS flag is "true", on a same-repo,
+# non-Dependabot pull_request (whatever the mode), pr-risk.yml's
+# bazel-coverage job stands them down and bazel-embedded, or bazel-proxied
+# and bazel-server-storage, alone run the tier; pr.yml's ci-gate then
+# requires those lanes to have run remotely and passed, so modes skip, local
+# and cache are red there (scripts/pr_risk_bazel_coverage_test.go).
 # This file has no pull_request or merge_group trigger of its own, so a PR
 # runs the lane once. Every lane reports its job.status as a workflow_call
 # output (named after the job) from an always() last step. pr.yml's ci-gate
@@ -678,7 +680,7 @@ jobs:
     # on the pool whose job cap this track exists to relieve, and it proves
     # nothing pr-risk.yml's embedded jobs (which do run for forks) do not.
     # On same-repo pull_requests those jobs stand down (pr-risk.yml's
-    # bazel-embedded-coverage), so this lane is then the tier's only PR run
+    # bazel-coverage), so this lane is then the tier's only PR run
     # and pr.yml's gate requires it to have run here and passed.
     # The runs-on expression is the shared one and always picks the
     # Blacksmith runner under this if.
@@ -965,6 +967,9 @@ jobs:
     # Remote execution only, like bazel-embedded: 15 shards of ~5-10
     # minutes, each with a dolt sql-server busy on ~4 cores, do not fit a
     # GitHub-hosted runner.
+    # On same-repo pull_requests the legacy jobs stand down (pr-risk.yml's
+    # bazel-coverage; D2 step 2), so this lane is then the tier's only PR
+    # run and pr.yml's gate requires it to have run here and passed.
     needs: rbe
     runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.enabled == 'true' }}
@@ -992,6 +997,18 @@ jobs:
           RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
           BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
 
+      # Bazel retries a flaky = True test (up to three attempts) and reports a
+      # later pass as PASSED. The policy test greps BUILD files for it; this
+      # asks Bazel itself, so a macro or a variable cannot hide one. Cheap:
+      # loading only, with the repository cache the test step needs anyway.
+      - name: No test target is marked flaky
+        run: |
+          flaky="$(bazel query 'attr(flaky, 1, tests(//...))')"
+          if [ -n "$flaky" ]; then
+            echo "::error::flaky = True on ${flaky//$'\n'/ }: the gated lanes run each test once"
+            exit 1
+          fi
+
       # Remote: the longest shard takes ~5-8 minutes (each shard's Go
       # timeout is its job's 15m, 1200s Bazel cap), plus a compile.
       - name: bazel test //... --config=doltserver-proxied
@@ -1011,6 +1028,16 @@ jobs:
       - name: Every target and shard ran tests
         if: ${{ always() && steps.test.outcome != 'skipped' }}
         run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
+
+      # Since D2 step 2 this lane is the tier's only pre-merge run on
+      # same-repo PRs: as in bazel-embedded, every Bazel shard must run
+      # exactly the tests its shard script lists, and not only skips.
+      - name: Every listed test ran in its shard
+        if: ${{ always() && steps.test.outcome != 'skipped' }}
+        run: >-
+          python3 tools/bazel/check_shard_coverage.py
+          --bep "$RUNNER_TEMP/bazel-bep.json"
+          --suite //cmd/bd:bd_proxied_test .github/scripts/proxied-test-shard.sh 15
 
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
@@ -1047,6 +1074,9 @@ jobs:
     name: server-Dolt storage tier
     # Remote execution only, like bazel-integration: locally the tagged race
     # build of //... alone is most of the timeout.
+    # On same-repo pull_requests the legacy jobs stand down (pr-risk.yml's
+    # bazel-coverage; D2 step 2), so this lane is then the tier's only PR
+    # run and pr.yml's gate requires it to have run here and passed.
     needs: rbe
     runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.enabled == 'true' }}
@@ -1074,6 +1104,18 @@ jobs:
           RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
           BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
 
+      # Bazel retries a flaky = True test (up to three attempts) and reports a
+      # later pass as PASSED. The policy test greps BUILD files for it; this
+      # asks Bazel itself, so a macro or a variable cannot hide one. Cheap:
+      # loading only, with the repository cache the test step needs anyway.
+      - name: No test target is marked flaky
+        run: |
+          flaky="$(bazel query 'attr(flaky, 1, tests(//...))')"
+          if [ -n "$flaky" ]; then
+            echo "::error::flaky = True on ${flaky//$'\n'/ }: the gated lanes run each test once"
+            exit 1
+          fi
+
       # Remote: the longest shard takes ~2-3 minutes (the storage suite's Go
       # timeout is 15m per shard, 1200s Bazel cap), plus a compile.
       - name: bazel test //... --config=doltserver-integration
@@ -1093,6 +1135,18 @@ jobs:
       - name: Every target and shard ran tests
         if: ${{ always() && steps.test.outcome != 'skipped' }}
         run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
+
+      # Since D2 step 2 this lane is the tier's only pre-merge run on
+      # same-repo PRs: as in bazel-embedded, every full-suite shard must run
+      # exactly the tests its shard script lists, and neither it nor the
+      # conformance target only skips.
+      - name: Every listed test ran in its shard
+        if: ${{ always() && steps.test.outcome != 'skipped' }}
+        run: >-
+          python3 tools/bazel/check_shard_coverage.py
+          --bep "$RUNNER_TEMP/bazel-bep.json"
+          --suite //internal/storage/dolt:dolt_server_full_test .github/scripts/server-storage-test-shard.sh 16
+          --whole //internal/storage/dolt:dolt_server_conformance_test
 
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}

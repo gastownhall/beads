@@ -151,6 +151,10 @@ test:doltserver-proxied --test_env=GO_TEST_WRAP_TESTV=1
 test:doltserver-proxied --test_arg=-test.parallel=4
 test:doltserver-proxied --local_test_jobs=4
 test:doltserver-proxied --remote_download_regex=.*/test\.(log|xml)$
+# Since D2 step 2 this lane is the tier's only pre-merge run on same-repo
+# PRs: execute every time, like the jobs' -test.count=1, never replay a
+# cached result.
+test:doltserver-proxied --nocache_test_results
 
 # Server-Dolt storage tier: PR Risk's "Test (Server Dolt Conformance)" and
 # "Test (Server Dolt Full Suite N/16)" jobs, as
@@ -178,6 +182,10 @@ test:doltserver-integration --test_env=GO_TEST_WRAP_TESTV=1
 test:doltserver-integration --test_arg=-test.parallel=4
 test:doltserver-integration --local_test_jobs=4
 test:doltserver-integration --remote_download_regex=.*/test\.(log|xml)$
+# Since D2 step 2 this lane is the tier's only pre-merge run on same-repo
+# PRs: execute every time, like the jobs' -test.count=1, never replay a
+# cached result.
+test:doltserver-integration --nocache_test_results
 
 # Integration lane: main.yml's "Main Linux integration packages (N/6)" and
 # "Main Linux integration cmd/bd (N/8)" jobs (and nightly.yml's Full Test

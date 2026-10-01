@@ -28,6 +28,7 @@ Exit status: 0 if every shard matches, 1 otherwise.
 """
 
 import argparse
+import concurrent.futures
 import os
 import re
 import subprocess
@@ -107,9 +108,13 @@ def check(tested, testlogs, suites, lister=listed_tests, whole=()):
             problems.append(f"{label}: the BEP has {tested.get(label, 0)} shard(s), want {shards} ({script})")
             continue
         total = 0
+        # The scripts' hash fallback forks per test (seconds per shard for
+        # the server suite's ~1200 tests): list the shards concurrently.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 2)) as pool:
+            listings = [pool.submit(lister, script, k, shards) for k in range(1, shards + 1)]
         for k, xml_path in enumerate(testlog_xmls(testlogs, label, shards), start=1):
             try:
-                want = lister(script, k, shards)
+                want = listings[k - 1].result()
             except (OSError, subprocess.CalledProcessError) as e:
                 problems.append(f"{label}: {script} {k} {shards} failed: {e}")
                 continue
