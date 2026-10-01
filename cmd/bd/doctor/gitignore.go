@@ -182,7 +182,7 @@ func CheckGitignore(repoPath string) DoctorCheck {
 				Status:  "warning",
 				Message: "Unexpected permissions on .beads/.gitignore",
 				Detail:  fmt.Sprintf("Mode is %04o, want 0600", info.Mode().Perm()),
-				Fix:     "Run: bd doctor --fix or bd init (safe to re-run)",
+				Fix:     "Run: bd doctor --fix",
 			}
 		}
 	}

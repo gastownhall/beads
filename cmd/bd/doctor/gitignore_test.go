@@ -3057,8 +3057,10 @@ func TestCheckGitignore_WarnsOnLoosePermsWhenPatternComplete(t *testing.T) {
 	if !strings.Contains(check.Detail, "0644") {
 		t.Errorf("Detail = %q, want the observed mode 0644", check.Detail)
 	}
-	if check.Fix == "" {
-		t.Error("expected a Fix suggestion for loose permissions")
+	// Pin the exact hint: re-running bd init is not a safe repair to suggest
+	// (be-5up5), and FixGitignore below is what actually restores the mode.
+	if check.Fix != "Run: bd doctor --fix" {
+		t.Errorf("Fix = %q, want %q", check.Fix, "Run: bd doctor --fix")
 	}
 
 	// After the fix runs, the check must go green.
