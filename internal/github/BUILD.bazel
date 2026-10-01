@@ -6,6 +6,7 @@ go_library(
         "client.go",
         "errors.go",
         "fieldmapper.go",
+        "links.go",
         "mapping.go",
         "tracker.go",
         "types.go",
@@ -23,8 +24,10 @@ go_test(
     name = "github_test",
     srcs = [
         "client_ratelimit_test.go",
+        "links_test.go",
         "mapping_test.go",
         "push_dedup_test.go",
+        "review_fixes_test.go",
         "tracker_test.go",
         "types_test.go",
     ],

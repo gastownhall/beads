@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -408,6 +409,115 @@ func TestEnsureGitignoreForBeadsDir_AppendsMissingRuntimePatterns(t *testing.T) 
 	}
 	if missing := missingGitignorePatterns(contentStr); len(missing) > 0 {
 		t.Fatalf("expected .beads/.gitignore to be complete after ensure, missing: %s", strings.Join(missing, ", "))
+	}
+}
+
+// TestEnsureGitignoreForBeadsDir_TightensPermsWhenPatternComplete covers the
+// regression flagged (but not fixed) in PR #5285: a pattern-complete
+// .beads/.gitignore with loose permissions (0644) must still be tightened to
+// 0600. Before the fix, the early return for "no missing patterns" skipped
+// the chmod entirely.
+func TestEnsureGitignoreForBeadsDir_TightensPermsWhenPatternComplete(t *testing.T) {
+	// Skip on Windows as it doesn't support Unix-style file permissions
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping file permissions test on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte(GitignoreTemplate), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// WriteFile's mode is filtered by umask; force the loose mode explicitly
+	// so the scenario holds under restrictive umasks (e.g. 077).
+	if err := os.Chmod(gitignorePath, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureGitignoreForBeadsDir(beadsDir); err != nil {
+		t.Fatalf("EnsureGitignoreForBeadsDir failed: %v", err)
+	}
+
+	info, err := os.Stat(gitignorePath)
+	if err != nil {
+		t.Fatalf("Failed to stat .gitignore: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("expected permissions 0600 for pattern-complete file, got %o", perm)
+	}
+
+	content, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatalf("Failed to read .gitignore: %v", err)
+	}
+	if string(content) != GitignoreTemplate {
+		t.Errorf("content changed when only permissions should have been tightened.\nGot:\n%s", content)
+	}
+}
+
+// TestFixGitignore_IdempotentNoDuplication ensures calling the fix twice in a
+// row does not append duplicate pattern blocks: content must be byte-identical
+// between the first and second invocation.
+func TestFixGitignore_IdempotentNoDuplication(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(oldDir); err != nil {
+			t.Error(err)
+		}
+	}()
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+
+	initialContent := "# Local additions\ncustom-local/\n*.db\ndaemon.log\n"
+	gitignorePath := filepath.Join(".beads", ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte(initialContent), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := FixGitignore(tmpDir); err != nil {
+		t.Fatalf("FixGitignore (first call) failed: %v", err)
+	}
+	firstContent, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatalf("Failed to read gitignore after first fix: %v", err)
+	}
+
+	if err := FixGitignore(tmpDir); err != nil {
+		t.Fatalf("FixGitignore (second call) failed: %v", err)
+	}
+	secondContent, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatalf("Failed to read gitignore after second fix: %v", err)
+	}
+
+	if !bytes.Equal(firstContent, secondContent) {
+		t.Errorf("content changed between first and second FixGitignore call (duplicate append?).\nFirst:\n%s\n\nSecond:\n%s", firstContent, secondContent)
+	}
+
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(gitignorePath)
+		if err != nil {
+			t.Fatalf("Failed to stat .gitignore: %v", err)
+		}
+		if perm := info.Mode().Perm(); perm != 0600 {
+			t.Errorf("expected permissions 0600 after idempotent fix, got %o", perm)
+		}
 	}
 }
 
@@ -951,7 +1061,7 @@ func TestCheckGitignore_VariousStatuses(t *testing.T) {
 				// Don't create .beads directory
 			},
 			expectedStatus: StatusWarning,
-			expectedFix:    "Run: bd init (safe to re-run) or bd doctor --fix",
+			expectedFix:    "Run: bd doctor --fix",
 			description:    "returns warning when .beads directory doesn't exist",
 		},
 		{
@@ -963,7 +1073,7 @@ func TestCheckGitignore_VariousStatuses(t *testing.T) {
 				}
 			},
 			expectedStatus: StatusWarning,
-			expectedFix:    "Run: bd init (safe to re-run) or bd doctor --fix",
+			expectedFix:    "Run: bd doctor --fix",
 			description:    "returns warning when .gitignore doesn't exist",
 		},
 		{
@@ -999,7 +1109,7 @@ daemon.log
 				}
 			},
 			expectedStatus: StatusWarning,
-			expectedFix:    "Run: bd doctor --fix or bd init (safe to re-run)",
+			expectedFix:    "Run: bd doctor --fix",
 			description:    "returns warning when missing required patterns like dolt/ and redirect",
 		},
 		{
@@ -1018,7 +1128,7 @@ daemon.log
 				}
 			},
 			expectedStatus: StatusWarning,
-			expectedFix:    "Run: bd doctor --fix or bd init (safe to re-run)",
+			expectedFix:    "Run: bd doctor --fix",
 			description:    "returns warning when missing multiple patterns",
 		},
 		{
@@ -1034,7 +1144,7 @@ daemon.log
 				}
 			},
 			expectedStatus: StatusWarning,
-			expectedFix:    "Run: bd doctor --fix or bd init (safe to re-run)",
+			expectedFix:    "Run: bd doctor --fix",
 			description:    "returns warning for empty file",
 		},
 		{
@@ -1054,7 +1164,7 @@ daemon.log
 				}
 			},
 			expectedStatus: StatusWarning,
-			expectedFix:    "Run: bd doctor --fix or bd init (safe to re-run)",
+			expectedFix:    "Run: bd doctor --fix",
 			description:    "returns warning for comments-only file",
 		},
 		{
@@ -2909,5 +3019,55 @@ func TestCheckNoVestigialSyncWorktrees_VestigialDetected(t *testing.T) {
 	}
 	if !strings.Contains(check.Message, "Vestigial") {
 		t.Errorf("Message = %q, want it to contain 'Vestigial'", check.Message)
+	}
+}
+
+func TestCheckGitignore_WarnsOnLoosePermsWhenPatternComplete(t *testing.T) {
+	// Skip on Windows as it doesn't support Unix-style file permissions
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping file permissions test on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte(GitignoreTemplate), 0644); err != nil { // #nosec G306 -- loose perms are the scenario under test
+		t.Fatal(err)
+	}
+	// WriteFile's mode is filtered by umask; force the loose mode explicitly
+	// so the scenario holds under restrictive umasks (e.g. 077).
+	if err := os.Chmod(gitignorePath, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckGitignore(tmpDir)
+	if check.Status != "warning" {
+		t.Fatalf("Status = %q, want %q (pattern-complete file at 0644 must warn so doctor --fix schedules FixGitignore)", check.Status, "warning")
+	}
+	// Pin the warning to the permission branch. CheckGitignore also warns for a
+	// missing file and for missing patterns, so asserting only that *a* warning
+	// fired would keep this test green for the wrong reason if GitignoreTemplate
+	// ever drifted out of requiredPatterns and the pattern branch returned first.
+	if check.Message != "Unexpected permissions on .beads/.gitignore" {
+		t.Errorf("Message = %q, want the permission-branch warning", check.Message)
+	}
+	if !strings.Contains(check.Detail, "0644") {
+		t.Errorf("Detail = %q, want the observed mode 0644", check.Detail)
+	}
+	// Pin the exact hint: re-running bd init is not a safe repair to suggest
+	// (be-5up5), and FixGitignore below is what actually restores the mode.
+	if check.Fix != "Run: bd doctor --fix" {
+		t.Errorf("Fix = %q, want %q", check.Fix, "Run: bd doctor --fix")
+	}
+
+	// After the fix runs, the check must go green.
+	if err := FixGitignore(tmpDir); err != nil {
+		t.Fatalf("FixGitignore: %v", err)
+	}
+	if check := CheckGitignore(tmpDir); check.Status != "ok" {
+		t.Fatalf("post-fix Status = %q, want ok", check.Status)
 	}
 }

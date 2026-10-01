@@ -1,6 +1,17 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
+# testdata/ holds the compilable preflight fixture below. Left to itself gazelle
+# would make testdata/ its own package, which empties this package's
+# glob(["testdata/**"]) and puts the fixture source across a package boundary.
+# gazelle:exclude testdata
+
+go_binary(
+    name = "preflight_go_fixture",
+    testonly = True,
+    srcs = ["testdata/preflight-go.go"],
+)
+
 go_library(
     name = "bd_lib",
     srcs = [
@@ -13,6 +24,7 @@ go_library(
         "backend_support.go",
         "backup.go",
         "backup_auto.go",
+        "backup_cap.go",
         "backup_dolt.go",
         "backup_export.go",
         "backup_lock.go",
@@ -179,6 +191,7 @@ go_library(
         "lint.go",
         "lint_proxied_server.go",
         "list.go",
+        "list_filter_flags.go",
         "list_format.go",
         "list_input.go",
         "list_output.go",
@@ -439,6 +452,7 @@ go_library(
         "@io_opentelemetry_go_otel_trace//:trace",
         "@land_charm_huh_v2//:huh",
         "@land_charm_lipgloss_v2//:lipgloss",
+        "@org_golang_x_mod//module",
         "@org_golang_x_mod//semver",
         "@org_golang_x_term//:term",
     ] + select({
@@ -500,6 +514,7 @@ go_test(
         "backup_auto_proxied_local_integration_test.go",
         "backup_auto_proxied_test.go",
         "backup_auto_test.go",
+        "backup_cap_test.go",
         "backup_dolt_test.go",
         "backup_embedded_test.go",
         "backup_export_failure_test.go",
@@ -620,8 +635,10 @@ go_test(
         "db_proxy_child_test.go",
         "defer_embedded_test.go",
         "defer_proxied_integration_test.go",
+        "defer_until_hint_test.go",
         "defer_wake_embedded_test.go",
         "defer_wake_proxied_integration_test.go",
+        "defer_wake_server_test.go",
         "delete_embedded_test.go",
         "delete_input_test.go",
         "delete_proxied_integration_test.go",
@@ -643,9 +660,11 @@ go_test(
         "diff_embedded_test.go",
         "directory_flag_test.go",
         "doctor_backend_guard_test.go",
+        "doctor_check_gate_test.go",
         "doctor_context_test.go",
         "doctor_conventions_test.go",
         "doctor_embedded_test.go",
+        "doctor_fix_gate_wiring_test.go",
         "doctor_fix_order_test.go",
         "doctor_fix_pending_migrations_test.go",
         "doctor_health_integration_test.go",
@@ -718,6 +737,8 @@ go_test(
         "export_proxied_integration_test.go",
         "export_source_wisp_subset_test.go",
         "export_test.go",
+        "external_policy_direct_integration_test.go",
+        "external_policy_embedded_test.go",
         "external_ref_test.go",
         "federation_embedded_test.go",
         "feedback_test.go",
@@ -740,6 +761,7 @@ go_test(
         "gc_embedded_test.go",
         "gc_prune_test.go",
         "git_repo_template_test.go",
+        "github_link_scope_test.go",
         "gitlab_integration_test.go",
         "gitlab_test.go",
         "global_identity_integration_test.go",
@@ -798,6 +820,7 @@ go_test(
         "init_explicit_beads_dir_embedded_test.go",
         "init_gateway_test.go",
         "init_git_bootstrap_routing_test.go",
+        "init_guard_force_e2e_test.go",
         "init_guard_test.go",
         "init_hooks_test.go",
         "init_metrics_test.go",
@@ -819,6 +842,7 @@ go_test(
         "init_worktree_test.go",
         "jira_max_rows_gate_test.go",
         "jira_test.go",
+        "json_flag_shadow_test.go",
         "kv_embedded_test.go",
         "kv_proxied_integration_test.go",
         "kv_test.go",
@@ -847,6 +871,7 @@ go_test(
         "list_comments_embedded_test.go",
         "list_comments_proxied_integration_test.go",
         "list_embedded_test.go",
+        "list_filter_flags_test.go",
         "list_footer_counts_test.go",
         "list_format_json_test.go",
         "list_helpers_test.go",
@@ -933,6 +958,7 @@ go_test(
         "prime_divergence_test.go",
         "prime_embedded_test.go",
         "prime_gemini_hook_test.go",
+        "prime_git_remote_test.go",
         "prime_memory_caps_test.go",
         "prime_proxied_integration_test.go",
         "prime_shared_server_test.go",
@@ -1040,6 +1066,7 @@ go_test(
         "serve_source_test.go",
         "serve_store_identity_test.go",
         "serve_test.go",
+        "serve_update_claim_proxied_integration_test.go",
         "serve_update_proxied_integration_test.go",
         "set_state_proxied_integration_test.go",
         "setup_embedded_test.go",
@@ -1061,6 +1088,8 @@ go_test(
         "show_proxied_watch_integration_test.go",
         "show_test.go",
         "show_unit_helpers_test.go",
+        "show_unresolvable_deps_embedded_test.go",
+        "show_unresolvable_deps_unit_test.go",
         "show_watch_loop_test.go",
         "show_watch_test.go",
         "simple_helpers_test.go",
@@ -1076,6 +1105,7 @@ go_test(
         "state_test.go",
         "status_embedded_test.go",
         "status_proxied_integration_test.go",
+        "status_suppressed_test.go",
         "status_test.go",
         "statuses_types_proxied_integration_test.go",
         "stdio_race_guard_test.go",
@@ -1164,6 +1194,7 @@ go_test(
         "workspace_gate_test.go",
         "workspace_identity_test.go",
         "worktree_cmd_test.go",
+        "worktree_gitignore_eol_test.go",
         "worktree_permissions_test.go",
         "worktree_remove_cmd_test.go",
         "worktree_remove_git_test.go",
@@ -1177,6 +1208,7 @@ go_test(
     data = glob(["testdata/**"]) + [
         ":bd_for_tests",
         ":go_srcs",
+        ":preflight_go_fixture",
         "//:bd_test_files",
         "//cmd/bd/doctor:go_srcs",
         "//cmd/bd/doctor/fix:go_srcs",
@@ -1187,6 +1219,7 @@ go_test(
     env = {
         "BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)",
         "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
+        "BEADS_TEST_PREFLIGHT_GO": "$(rlocationpath :preflight_go_fixture)",
     },
     shard_count = 16,
     deps = [
@@ -1239,11 +1272,13 @@ go_test(
         "//internal/telemetry",
         "//internal/testutil",
         "//internal/testutil/bazeltest",
+        "//internal/timeparsing",
         "//internal/tracker",
         "//internal/types",
         "//internal/ui",
         "//internal/uimd",
         "//internal/utils",
+        "//internal/validation",
         "//internal/workapi",
         "//internal/workspacegate",
         "//internal/worktreeremove",

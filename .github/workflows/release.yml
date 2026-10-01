@@ -61,6 +61,10 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          # Never restore a cache into release builds: setup-go's key is
+          # predictable and falls back to main's cache, whose module and build
+          # caches are not re-verified before binaries are built and signed.
+          cache: false
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -94,6 +98,10 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          # Never restore a cache into release builds: setup-go's key is
+          # predictable and falls back to main's cache, whose module and build
+          # caches are not re-verified before binaries are built and signed.
+          cache: false
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
@@ -121,6 +129,10 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          # Never restore a cache into release builds: setup-go's key is
+          # predictable and falls back to main's cache, whose module and build
+          # caches are not re-verified before binaries are built and signed.
+          cache: false
 
       - name: Install cross-compilation toolchains and signing tools
         # Backstop for a hang that escapes the inner `timeout` calls, so it has
@@ -229,6 +241,10 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          # Never restore a cache into release builds: setup-go's key is
+          # predictable and falls back to main's cache, whose module and build
+          # caches are not re-verified before binaries are built and signed.
+          cache: false
 
       - name: Extract version from tag
         id: version

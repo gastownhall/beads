@@ -5,8 +5,9 @@
 # 15-shard split, bin-packed longest-processing-time-first by
 # estimated cost (bd-init count; per-init migration chains dominate).
 # Regenerate with scripts/ci/gen_proxied_shard_manifest.py after adding,
-# splitting, or reweighting TestProxiedServer* functions. Newly-added
-# tests not listed here hash-distribute via proxied-test-shard.sh.
+# splitting, or reweighting TestProxiedServer*/TestServerMode*
+# functions. Newly-added tests not listed here hash-distribute via
+# proxied-test-shard.sh.
 #
 # This file is generated: notes added here are erased by the next
 # regeneration. Add them to the generator instead. Known blind spots
