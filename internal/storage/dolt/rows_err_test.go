@@ -137,3 +137,40 @@ func TestGetMoleculeProgressReportsTruncatedReads(t *testing.T) {
 		})
 	}
 }
+
+// Rows.Err is read after Rows.Close in both places, and Close cancels the
+// context database/sql derived for the result set. This pins that a complete
+// read still comes back clean under a cancellable context, so the new checks
+// cannot turn every successful call into a failure.
+func TestGetMoleculeProgressCountsCompleteReads(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ctx  func(t *testing.T) context.Context
+	}{
+		{
+			name: "background context",
+			ctx:  func(*testing.T) context.Context { return context.Background() },
+		},
+		{
+			name: "cancellable context",
+			ctx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				t.Cleanup(cancel)
+				return ctx
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := storeWithTruncatedRead(t, truncateTarget{})
+
+			stats, err := s.GetMoleculeProgress(tc.ctx(t), "bd-molecule")
+			if err != nil {
+				t.Fatalf("complete read returned an error: %v", err)
+			}
+			if stats.Total != 4 || stats.Completed != 2 {
+				t.Fatalf("got Total=%d Completed=%d, want Total=4 Completed=2",
+					stats.Total, stats.Completed)
+			}
+		})
+	}
+}
