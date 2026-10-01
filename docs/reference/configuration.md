@@ -263,7 +263,13 @@ How it works:
 - Push failures are warnings only (non-fatal), and failed attempts are throttled too.
 - Last push time and commit are tracked in `.beads/push-state.json`, a per-machine file (not in the database, to avoid merge conflicts across machines).
 
-Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bounded by a 30-second timeout. For large stores, raise it with the runtime-only `BEADS_FSCK_TIMEOUT` environment variable (accepts durations like `2m` or bare seconds like `90`).
+Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bounded by a 30-second timeout. For large stores, persist a larger budget in local startup configuration:
+
+```bash
+bd config set dolt.fsck-timeout 5m
+```
+
+The setting accepts positive durations like `2m` or bare seconds like `90`, and is stored in `config.yaml`, not the issue database. It applies to every store open, so non-interactive callers do not need a refreshed parent environment. `BEADS_FSCK_TIMEOUT` remains the runtime override; unset or invalid overrides retain the configured repository budget. This changes the deadline, not the integrity check. An enclosing caller deadline (such as `dolt.auto-push-timeout`) can still end a push earlier.
 
 ## Actor Identity Resolution
 
@@ -502,7 +508,7 @@ Selected commonly-used variables:
 | `BEADS_CEILING_DIRECTORIES` | Directories (separated like `PATH`) that `.beads` and `config.yaml` discovery never looks at or above, like git's `GIT_CEILING_DIRECTORIES`; the starting directory is always examined. For sandboxes such as `bazel test` that must not reach the user's own `~/.beads` |
 | `BEADS_ACTOR` | Actor identity (preferred over `BD_ACTOR`, which is a deprecated alias) |
 | `BEADS_IDENTITY` | Sender identity for `bd mail` |
-| `BEADS_FSCK_TIMEOUT` | Runtime-only timeout for the pre-push `dolt fsck --quiet` integrity check (default `30s`) |
+| `BEADS_FSCK_TIMEOUT` | Runtime override for the pre-push `dolt fsck --quiet` integrity check; otherwise `dolt.fsck-timeout` applies (default `30s`) |
 | `BEADS_MIGRATION_WATCHDOG_INTERVAL` | Interval between soft WARN lines while a schema migration's SQL keeps running (default `5m`; accepts durations like `10m` or bare seconds like `90`). Observability only — it never aborts a migration |
 | `BEADS_DOLT_SERVER_MODE`, `BEADS_DOLT_SHARED_SERVER`, `BEADS_DOLT_DATA_DIR`, `BEADS_DOLT_PORT`, ... | Embedded/server Dolt overrides |
 | `BEADS_DOLT_BIN` | Pin the exact external `dolt` CLI binary managed proxied-server mode spawns, overriding PATH lookup (highest precedence; an explicit path that fails validation is an error, not a silent fallback to PATH). On Windows the executable extension may be omitted — `C:\tools\dolt` finds `C:\tools\dolt.exe` via PATHEXT, though a file at the exact spelled path wins if both exist |

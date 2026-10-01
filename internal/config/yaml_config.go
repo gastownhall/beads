@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/gitenv"
@@ -94,6 +95,7 @@ var YamlOnlyKeys = map[string]bool{
 	"dolt.max-conns":          true, // Connection pool size override (default 10, GH#3140)
 	"dolt.pool-read-timeout":  true, // Pool per-I/O read deadline override (default 10s, bd-vz0y9)
 	"dolt.pool-write-timeout": true, // Pool per-I/O write deadline override (default 10s, bd-vz0y9)
+	"dolt.fsck-timeout":       true, // Pre-push integrity deadline; read before opening the store
 	"dolt.debug":              true, // Debug-mode dolt sql-server: --loglevel=debug + --prof cpu
 
 	// Secrets: tokens and API keys must NOT be stored in the Dolt database
@@ -1400,6 +1402,15 @@ func isDuration(s string) bool {
 // Returns an error if the value is invalid for the given key.
 func validateYamlConfigValue(key, value string) error {
 	switch key {
+	case "dolt.fsck-timeout":
+		raw := strings.TrimSpace(value)
+		duration, err := time.ParseDuration(raw)
+		if err != nil {
+			duration, err = time.ParseDuration(raw + "s")
+		}
+		if err != nil || duration <= 0 {
+			return fmt.Errorf("dolt.fsck-timeout must be a positive duration or seconds, got %q", value)
+		}
 	case "hierarchy.max-depth":
 		// Must be a positive integer >= 1 (GH#995)
 		depth, err := strconv.Atoi(value)

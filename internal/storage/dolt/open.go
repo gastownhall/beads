@@ -379,7 +379,7 @@ func applyPoolTimeouts(cfg *Config) {
 	}
 }
 
-// poolTimeoutFromConfig reads a pool-deadline key from the initialized config
+// poolTimeoutFromConfig reads a startup deadline key from the initialized config
 // and, like the auto-start ladder above, falls back to the .beads directory's
 // own config.yaml for library consumers that never called config.Initialize.
 func poolTimeoutFromConfig(cfg *Config, key string) string {
@@ -390,6 +390,28 @@ func poolTimeoutFromConfig(cfg *Config, key string) string {
 		return ""
 	}
 	return config.GetStringFromDir(cfg.BeadsDir, key)
+}
+
+// applyFSCKTimeout resolves the local integrity-check budget on every store
+// open, including the CLI's hand-built Config. Invalid persisted settings fail
+// before connecting rather than silently selecting a smaller deadline.
+func applyFSCKTimeout(cfg *Config) error {
+	if cfg.FSCKTimeout < 0 {
+		return fmt.Errorf("dolt.fsck-timeout must be positive, got %s", cfg.FSCKTimeout)
+	}
+	if cfg.FSCKTimeout > 0 {
+		return nil
+	}
+	raw := poolTimeoutFromConfig(cfg, "dolt.fsck-timeout")
+	if raw == "" {
+		cfg.FSCKTimeout = fsckTimeout
+		return nil
+	}
+	cfg.FSCKTimeout = parseTimeout(raw, 0)
+	if cfg.FSCKTimeout <= 0 {
+		return fmt.Errorf("dolt.fsck-timeout must be a positive duration or seconds, got %q", raw)
+	}
+	return nil
 }
 
 // applyCentralConfigDefaults loads the central server config from
