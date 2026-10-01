@@ -10,9 +10,13 @@
 # recipe (fork PRs). Drift elsewhere (third_party/patches, go.mod) is never
 # patched; the failing run lists it for a human.
 #
-# Trigger: only "Bazel" (bazel.yml on pull_request), the one workflow that
-# uploads bazel-sync-patch; pr.yml does not call bazel.yml. A run without the
-# artifact is a no-op. bazel.yml builds the PR MERGE commit, so the patch also
+# Trigger: only "PR" (pr.yml). bazel.yml has no pull_request trigger of its
+# own: PRs run it through pr.yml's `bazel` job (workflow_call), so its
+# bazel-sync-patch upload belongs to the PR run, and a failing sync step
+# fails that run. The "Bazel" workflow's own runs (push to main, dispatch)
+# are never pull_request events, so triggering on them would only ever be a
+# no-op. A PR run without the artifact (it failed for other reasons) is a
+# no-op too. bazel.yml builds the PR MERGE commit, so the patch also
 # carries any drift main has; only files in packages the PR itself changed
 # are pushed (see the script), so main's drift never lands on an unrelated PR.
 #
@@ -21,7 +25,10 @@
 # cancel-in-progress, so the two bots queue instead of racing on one branch
 # or cancelling a fix that is already running. The second one sees the moved
 # head and stops; with the PAT its push retriggers CI, which re-derives the
-# other fix.
+# other fix. Both bots now fire on the same PR run's completion, so one runs
+# while the other waits. GitHub keeps one pending job per group: a later PR
+# run finishing inside that short window can displace a waiting job, whose
+# fix the next failing run re-derives.
 #
 # SECURITY MODEL: this runs with write permissions via workflow_run, so it
 # never checks out or executes PR code. It checks out the base default branch
@@ -47,7 +54,7 @@ name: Bazel Autofix
 
 on:
   workflow_run:
-    workflows: ["Bazel"]
+    workflows: ["PR"]
     types: [completed]
 
 permissions:

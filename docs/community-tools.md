@@ -32,6 +32,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 - **[Maggie](https://github.com/mulgadc/maggie)** - Single Go binary with the SPA embedded, serving dashboard, table, board and dependency graph views. Text, id glob, priority, type, assignee, label and status filters compose in one filter bar. Uses the `bd` CLI for every read and write, keeping no store of its own. Runs from a container that bundles `bd` and `dolt`, against either a local `.beads/` directory or a shared Dolt SQL server. Built by [@mulgadc](https://github.com/mulgadc). (Go/React)
 
+- **[beadcyte](https://gitlab.com/incytestudios/beadcyte)** - Local web app that draws two things that look alike and are not: what happened, which is measured, and what it expects to happen, which is a model's opinion. Three models drive the projection — a historical-median duration estimator, a greedy WIP-cap scheduler calibrated against your real throughput, and an eight-signal triage score — each shown with its own uncertainty rather than a flat number. Views for what to do next, the team's frontier, what-if plan diffs, and cost per week; a single self-contained SVG export with no server (`beadcyte --out gantt.svg`); and a changelog generated from closed beads that carry ship evidence. Reads and writes through the `bd` CLI (`bd list --all --json`, `bd show`, `bd history`); `beadcyte freeze` additionally reads the embedded Dolt database directly (read-only, opt out with `--no-dolt`) — never `.beads/issues.jsonl`. Run with `npx beadcyte start`. Built by [Incyte Studios](https://incytestudios.com) ([@treystout](https://github.com/treystout)). (Node.js/Vue)
+
 ## Editor Extensions
 
 - **[vscode-beads](https://marketplace.visualstudio.com/items?itemName=planet57.vscode-beads)** - VS Code extension with issues panel and server management. Built by [@jdillon](https://github.com/jdillon). (TypeScript)
@@ -84,6 +86,8 @@ Install with `uv tool install git+https://github.com/jklenk/thread`. Built by [@
 - **[claude-protocol](https://github.com/weselow/claude-protocol)** - Actively maintained fork of beads-orchestration. Ground-up rewrite optimized for Claude 4.6 family models: trigger-based dev rules (TDD, logging, resilience), cross-platform Node.js hooks (replaced 19 bash scripts with 8 .cjs hooks), mandatory checklist verification, session-start dashboard, knowledge base with auto-capture. Install via `npx claude-protocol init`. Built by [@weselow](https://github.com/weselow). (Node.js/Python)
 
 - **[LoopTroop](https://github.com/looptroop-ai/LoopTroop)** - Local AI coding orchestrator for automated task planning, execution, and feedback loops. Uses a Beads-inspired methodology with LLM Council consensus and worktree isolation. Built by [@looptroop-ai](https://github.com/looptroop-ai). (Node.js/TypeScript)
+
+- **[beads-pm-kit](https://github.com/cuongbphv/beads-pm-kit)** - Ten skills that let an agent run a Beads board the way a project manager does: split a spec into sized beads, estimate from measured history, take and loop through ready work, run a batch in parallel worktrees, report progress, forecast an ETA (or refuse to give a date), audit "already done" claims, and hand off a session. One authored copy builds for Claude Code, Cursor, Codex and Antigravity; all reads and writes go through the `bd` CLI. Install with `npx skills add cuongbphv/beads-pm-kit`. Built by [@cuongbphv](https://github.com/cuongbphv). (Markdown/Node.js/Python)
 
 ## Mail Delegates
 

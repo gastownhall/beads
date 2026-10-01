@@ -974,8 +974,8 @@ func (s *Server) failApplyBatch(w http.ResponseWriter, r *http.Request, request 
 		s.fail(w, r, res)
 
 	case errors.Is(err, issueops.ErrCloseBlocked):
-		s.fail(w, r, at(newResult(CodeNotClosable,
-			"an item closes a blocked issue; clear the blocker, or send the item's force flag"), ""))
+		s.fail(w, r, at(closeBlockedResult(err,
+			"an item closes a blocked issue", "clear the blocker, or send the item's force flag"), ""))
 
 	case errors.Is(err, storage.ErrAlreadyClaimed):
 		res := at(newResult(CodeAlreadyClaimed,

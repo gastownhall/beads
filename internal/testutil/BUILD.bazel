@@ -116,6 +116,10 @@ go_test(
     ],
     data = glob(["testdata/**"]),
     embed = [":testutil"],
+    deps = [
+        "//internal/storage/doltutil",
+        "@com_github_go_sql_driver_mysql//:mysql",
+    ],
 )
 
 # Dolt image pin read as text by //test/docsync and the dolt pin tests in

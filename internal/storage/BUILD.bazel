@@ -160,6 +160,7 @@ filegroup(
         "//internal/storage/rowid:go_srcs",
         "//internal/storage/schema:go_srcs",
         "//internal/storage/sqlbuild:go_srcs",
+        "//internal/storage/sqlclass:go_srcs",
         "//internal/storage/storagecontract:go_srcs",
         "//internal/storage/uow:go_srcs",
         "//internal/storage/versioncontrolops:go_srcs",

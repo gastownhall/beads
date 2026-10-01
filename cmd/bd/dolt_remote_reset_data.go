@@ -282,7 +282,7 @@ Examples:
 			}
 			fmt.Printf("This replaces all Dolt data stored on remote %q:\n", name)
 			fmt.Printf("  %s\n", url)
-			fmt.Println("The remote is rebuilt from local HEAD; other clones must re-clone.")
+			fmt.Println("The remote is rebuilt from local HEAD, including any pending changes; other clones must re-clone.")
 			fmt.Print("Proceed? (y/N): ")
 			reader := bufio.NewReader(os.Stdin)
 			response, rerr := reader.ReadString('\n')

@@ -210,9 +210,10 @@ func runWispCreateCore(cmd *cobra.Command, args []string) error {
 	if err == nil {
 		subgraph = sg
 		protoID = sg.Root.ID
-	} else if errors.Is(err, formula.ErrVarValidation) {
-		// args[0] IS a formula; the --var values it was given fail
-		// enum/pattern/required-empty constraints. Report that directly
+	} else if errors.Is(err, formula.ErrVarValidation) || errors.Is(err, formula.ErrValidation) {
+		// args[0] IS a formula; either the formula itself does not
+		// validate, or the --var values it was given fail enum/pattern/
+		// required-empty constraints. Report that directly
 		// instead of falling through to the legacy proto-ID lookup below,
 		// which would otherwise mask this as "not found as formula or proto".
 		return HandleError("%v", err)
