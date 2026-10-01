@@ -119,8 +119,8 @@ func (r *issueSQLRepositoryImpl) GetDescendants(ctx context.Context, rootID stri
 // dodge a dolt 2.1.6 analyzer bug.
 //
 // The members are joined with UNION, not UNION ALL, so a stored parent-child
-// cycle ends once its rows repeat instead of recursing to the engine's limit,
-// and a node reached by several paths is expanded once. The root can come back
+// cycle ends once its rows repeat instead of recursing without end, and a
+// node reached by several paths is expanded once. The root can come back
 // through such a cycle, so the final SELECT excludes it.
 //
 // Edge members resolve the parent across all three typed target columns, the

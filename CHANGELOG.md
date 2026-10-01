@@ -132,11 +132,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now uses the recursive descendants query the `--proxied-server` route already
   ran, through a new `DoltStorage.GetDescendants`, and loads dependency records
   for the displayed issues only. The query now stops at a stored parent-child
-  cycle; before, the proxied route recursed through one until the engine's
-  limit. `--max-rows` now counts the whole subtree, as `bd dep tree` does,
-  instead of each parent's children separately; the parent shown at the top is
-  not counted. A tree whose every level fits under the cap can now be refused,
-  and the proxied tree, which ignored the cap, now honors it.
+  cycle; before, the proxied route's query did not finish on one. `--max-rows`
+  now counts the whole subtree, as `bd dep tree` does, instead of each parent's
+  children separately; the parent shown at the top is not counted. A tree whose
+  every level fits under the cap can now be refused, and the proxied tree, which
+  ignored the cap, now honors it.
 
 - **An ambient `BEADS_DOLT_SERVER_PORT` now marks a workspace externally
   managed — suppressing auto-start — and no longer stops bd reaping its own
