@@ -3378,12 +3378,21 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		"test:embedded --test_tag_filters=embedded",
 		// The jobs pass no -parallel: GOMAXPROCS on 4-vCPU ubuntu-latest.
 		"test:embedded --test_arg=-test.parallel=4",
+		// The tier's only pre-merge run (D2 step 1) must execute, like the
+		// legacy jobs' -test.count=1, never replay a cached result.
+		"test:embedded --nocache_test_results",
 	} {
 		if !rc[want] {
 			t.Errorf(".bazelrc lacks %q", want)
 		}
 	}
 	for line := range rc {
+		// Nothing turns result caching back on for the embedded lane (a
+		// later --cache_test_results wins over --nocache_test_results).
+		if !strings.HasPrefix(line, "#") && strings.Contains(line, "cache_test_results") &&
+			line != "test:embedded --nocache_test_results" && line != "test:docker --nocache_test_results" {
+			t.Errorf(".bazelrc %q: only test:embedded and test:docker set test result caching", line)
+		}
 		if strings.HasPrefix(line, "test:embedded ") && (strings.Contains(line, "-test.short") || strings.Contains(line, "BEADS_TEST_SKIP")) {
 			t.Errorf(".bazelrc %q: the embedded jobs run without -short and BEADS_TEST_SKIP", line)
 		}
