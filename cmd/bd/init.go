@@ -636,6 +636,13 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			cmdCtx.ProxiedServerMode = initProxiedServer
 		}
 
+		// Both init routes must reject a project root passed as BEADS_DIR before
+		// either can create workspace state. The proxied route returns below, so
+		// this guard cannot live only in the embedded/server continuation.
+		if err := guardExplicitBeadsDirProjectRoot(); err != nil {
+			return err
+		}
+
 		if initProxiedServer {
 			if beadsDir := resolveInitBeadsDir(); beadsDir != "" {
 				if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
@@ -782,15 +789,6 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					"  Set dolt.mode: server in %s or pass --server to bd init.",
 					detail, conflict.source, config.UserConfigYamlDisplayPath())
 			}
-		}
-
-		// BEADS_DIR names the workspace directory, not the project directory.
-		// If the explicit target is empty but contains an initialized .beads
-		// child, accepting it would create a second workspace directly in the
-		// project root. Refuse that typo before any init side effects. An empty
-		// arbitrary explicit directory remains a supported initialization target.
-		if err := guardExplicitBeadsDirProjectRoot(); err != nil {
-			return err
 		}
 
 		// Historical workspaces need an explicit sealed-copy bridge. This runs
