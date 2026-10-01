@@ -113,3 +113,63 @@ func initGuardServerMessage(dbName, host string, port int, prefix, syncRemote st
 	b.WriteString("\nAborting.")
 	return errors.New(b.String())
 }
+
+// initAllowRecreateMissing is threaded from --recreate-missing for the
+// duration of a single `bd init` invocation (be-5up5). It must only ever be
+// set from that explicit per-invocation flag — never from a config key, env
+// var, or implied by --force/--reinit-local — because it authorizes the one
+// thing this file's guard exists to prevent: creating a fresh database when
+// an existing project's configured one is missing or unreachable.
+var initAllowRecreateMissing bool
+
+// initGuardMissingServerDBMessage builds the refusal error for be-5up5: a
+// workspace with evidence of prior initialization whose configured
+// server-mode database is absent or the server could not be reached to
+// confirm. This differs from initGuardServerMessage above, which would be used
+// where there is no evidence either way about prior initialization and
+// `bd bootstrap` is a reasonable next step — it has no production caller
+// today, so the contrast is one of intent, not of two live code paths. Here
+// prior initialization is already established, so recommending bootstrap would
+// route straight back into the same class of silent-empty-database creation
+// this guard exists to stop (2026-08-11 fleet-wide data loss). Point at
+// restore-from-export instead, and require the explicit --recreate-missing
+// opt-in before bd init will create anything.
+//
+// haveProjectID selects which evidence the message may cite. The plain-init
+// guard only reaches this message with a project_id in hand, but the
+// --reinit-local/--force guard also reaches it for a workspace that predates
+// project_id (GH#2372) and is proven only by its local Dolt storage. Naming
+// metadata.json in that cell would assert evidence the caller does not have,
+// misdirecting an operator who audits metadata.json mid-recovery.
+func initGuardMissingServerDBMessage(dbName, host string, port int, prefix string, haveProjectID bool) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n%s Database %q not found on server at %s:%d (or the server could not be reached to confirm).\n", ui.RenderWarn("⚠"), dbName, host, port)
+	if haveProjectID {
+		b.WriteString("This workspace was already initialized (metadata.json has a project_id from a prior\n")
+		b.WriteString("bd init), so this looks like a recovery situation, not a fresh clone: the configured\n")
+		b.WriteString("database is missing from the server, or the server could not be reached to check.\n")
+	} else {
+		b.WriteString("This workspace shows evidence of prior initialization (local Dolt storage is present,\n")
+		b.WriteString("though metadata.json carries no project_id — the shape of a workspace predating\n")
+		b.WriteString("GH#2372), so this looks like a recovery situation, not a fresh clone: the configured\n")
+		b.WriteString("database is missing from the server, or the server could not be reached to check.\n")
+	}
+
+	b.WriteString("\nbd init will NOT create an empty database here — that would strand any existing\n")
+	b.WriteString("issue data behind a new, empty database of the same name.\n")
+
+	b.WriteString("\nDiagnose with:\n")
+	b.WriteString("  bd doctor          # check project health\n")
+	b.WriteString("  bd dolt status     # inspect Dolt server state\n")
+
+	b.WriteString("\nTo recover existing data, restore from an export rather than creating fresh:\n")
+	b.WriteString("  bd backup restore                  # if a local backup snapshot exists\n")
+	b.WriteString("  Check .beads/backup/ for a JSONL export you can import manually.\n")
+
+	b.WriteString("\nIf you are certain no recoverable data exists and want a fresh, empty database at\n")
+	b.WriteString("this name, opt in explicitly for this one invocation:\n")
+	fmt.Fprintf(&b, "  bd init --recreate-missing --prefix %s\n", prefix)
+
+	b.WriteString("\nAborting.")
+	return errors.New(b.String())
+}

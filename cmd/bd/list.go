@@ -117,7 +117,7 @@ func printSkipLabelsFooter(skipLabels bool) {
 	if !skipLabels || isQuiet() {
 		return
 	}
-	fmt.Print(skipLabelsFooterText())
+	fmt.Print(skipLabelsFooterText()) //nolint:forbidigo // Pretty/tree output is outside the --format contract.
 }
 
 // formatSkipLabelsConflictError builds the user-facing error message for AD-02
@@ -317,7 +317,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 			}
 
 			if len(treeIssues) == 0 {
-				fmt.Printf("Issue '%s' has no children\n", in.ParentID)
+				fmt.Printf("Issue '%s' has no children\n", in.ParentID) //nolint:forbidigo // Pretty/tree output is outside the --format contract.
 				return nil
 			}
 
@@ -373,7 +373,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		for _, issue := range issues {
 			formatAgentIssue(&buf, issue, blocking.blockedBy[issue.ID], blocking.blocks[issue.ID], blocking.parent[issue.ID])
 		}
-		fmt.Print(buf.String())
+		fmt.Print(buf.String()) //nolint:forbidigo // Agent output is outside the --format contract.
 		printTruncationHint(truncated, in.effectiveLimit)
 		return nil
 	} else if in.longFormat {
@@ -394,7 +394,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	}
 
 	if err := ui.ToPager(buf.String(), ui.PagerOptions{NoPager: in.noPager}); err != nil {
-		if _, writeErr := fmt.Fprint(os.Stdout, buf.String()); writeErr != nil {
+		if _, writeErr := fmt.Fprint(os.Stdout, buf.String()); writeErr != nil { //nolint:forbidigo // Pager fallback is outside the --format contract.
 			fmt.Fprintf(os.Stderr, "Error writing output: %v\n", writeErr)
 		}
 	}
@@ -422,7 +422,7 @@ func init() {
 	listCmd.Flags().String("id", "", "Filter by specific issue IDs (comma-separated, e.g., bd-1,bd-5,bd-10)")
 	listCmd.Flags().IntP("limit", "n", workapi.DefaultListLimit, "Limit results (an explicit --limit always wins, 0 meaning unlimited; otherwise --all is unlimited; otherwise a configured list.limit applies; otherwise unlimited when piped, else 20 in agent mode at a terminal, else 50)")
 	listCmd.Flags().Int("offset", 0, "Skip the first N matching results (0-based). Only supported under --proxied-server.")
-	listCmd.Flags().String("format", "", "Output format: 'digraph' (for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or Go template")
+	listCmd.Flags().String("format", "", "Export the dependency graph of the listed issues: 'digraph' (edge list for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or a Go template rendered once per edge over .IssueID, .DependsOnID, .Type, .Issue, .Dependency. 'json' is the exception and does not export the graph: it is equivalent to --json, which also wins when both flags are given. 'digraph' and templates print nothing when no listed issue depends on another; 'dot' still prints the nodes")
 	listCmd.Flags().Bool("all", false, "Show all issues including closed (overrides default filter)")
 	listCmd.Flags().Bool("long", false, "Show detailed multi-line output for each issue")
 	listCmd.Flags().String("sort", "", "Sort by field: priority, created, updated, closed, status, id, title, type, assignee")

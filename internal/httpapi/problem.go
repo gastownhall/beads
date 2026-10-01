@@ -842,10 +842,13 @@ var operationCodes = map[string][]Code{
 	// workspace-vocabulary issue_type or status, a metadata key the query layer
 	// could not spell, a field-length refusal that slipped the edge check —
 	// through failUpdate.
+	//
+	// not_claimable arrived with `claim`, beside the already_claimed it shares
+	// with the fence: a refused claim answers as claimIssue does.
 	OpUpdateIssue: {
 		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound,
 		CodePreconditionFailed, CodeNotClosable, CodeAlreadyClaimed,
-		CodeDependencyCycle, CodeDependencyExists,
+		CodeNotClaimable, CodeDependencyCycle, CodeDependencyExists,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
 	// No not_found. The role refuses an edge whose target names nothing, and

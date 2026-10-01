@@ -164,6 +164,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
       - run: ./scripts/check-build-tags.sh
       - run: ./scripts/check-go-install-guidance.sh
+      - run: ./scripts/check-winget-portable-alias.sh
 
   # Lock in two CGO-disabled portability boundaries. cmd/bd carries a mix of
   # cgo-only test helpers (embedded Dolt, sql.DB) and pure-Go tests; compiling
@@ -253,11 +254,76 @@ jobs:
         run: |
           go test -tags gms_pure_go -count=1 -short -run '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir|NocgoFactoriesHonorSharedServer|NocgoNewDoltStoreFromConfig_ErrorSuggestsCorrectFlag|NocgoNewReadOnlyStoreFromConfig_ErrorSuggestsCorrectFlag)' ./cmd/bd
 
+  # Compile every shipped release target on every PR, so a platform-gating
+  # mistake is caught here instead of at tag time (#5662).
+  #
+  # Coverage boundary, recorded so the green is not over-read: every leg below
+  # builds CGO_ENABLED=0, but .goreleaser.yml builds bd-linux-amd64,
+  # bd-linux-arm64 and bd-windows-amd64 with CGO_ENABLED=1, and the darwin pair
+  # is built natively at CGO_ENABLED=1 by release.yml's goreleaser-macos job.
+  # Five of these eight legs are therefore a weaker proxy than the binary they
+  # stand for: the cgo half of the tree (beads_cgo.go ->
+  # internal/storage/embeddeddolt) is never compiled here, so a break confined
+  # to it still passes this check. Only android/arm64, windows/arm64 and
+  # freebsd/amd64 replicate their release configuration exactly.
+  #
+  # The build scope is deliberately ./... and not the ./cmd/bd that every
+  # .goreleaser.yml build id declares as main:. Compiling the whole tree per
+  # platform is intentional extra coverage, not an oversight.
+  check-release-target-cross-compilation:
+    name: Check release target cross-compilation (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: android
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+          - goos: freebsd
+            goarch: amd64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Build complete release target tree
+        env:
+          CGO_ENABLED: "0"
+          GOARCH: ${{ matrix.goarch }}
+          GOOS: ${{ matrix.goos }}
+        run: go build -tags gms_pure_go ./...
+
   # The lingering-handle liveness regression test is //go:build windows: the
   # Ubuntu job above selects it by name but compiles it out, and main.yml's
   # Windows job runs only on pushes to main (build/smoke, no go test). Run
-  # exactly the liveness pair on windows-latest so the regression guard
-  # actually executes at PR time.
+  # the liveness pair and native config fixture on Windows so their platform
+  # regressions actually execute at PR time. The init credential shell
+  # fixtures are a separate concern and run natively in
+  # pr-preflight-platforms, not here.
   test-windows-liveness:
     name: Test (Windows) cmd/bd liveness regression
     runs-on: windows-latest
@@ -270,6 +336,30 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: false
+
+      - name: Run native Windows global Prime override
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go_path=$(command -v go)
+          [[ "$("$go_path" env GOHOSTOS GOOS)" == $'windows\nwindows' ]]
+          test_status=0
+          test_output=$(./scripts/test.sh -v -timeout 5m -run '^TestPrimeBinaryPortfolio$/^TestPrime_HookJSON_GlobalPrimeOverride$' -count=1 ./cmd/bd) || test_status=$?
+          printf '%s\n' "$test_output"
+          ((test_status == 0))
+          pass_pattern='^[[:space:]]*--- PASS: TestPrimeBinaryPortfolio/TestPrime_HookJSON_GlobalPrimeOverride \('
+          nonpass_pattern='^[[:space:]]*--- (FAIL|SKIP): '
+          pass_count=0
+          while IFS= read -r line; do
+            if [[ "$line" =~ $pass_pattern ]]; then
+              ((pass_count += 1))
+            fi
+            if [[ "$line" =~ $nonpass_pattern ]]; then
+              exit 1
+            fi
+          done <<<"$test_output"
+          ((pass_count == 1))
 
       - name: Run Windows liveness regression test
         run: go test -tags gms_pure_go -count=1 -run '^TestIsServerProbablyRunning' ./cmd/bd
@@ -528,6 +618,48 @@ jobs:
         shell: bash
         run: go test '-tags=gms_pure_go' -count=1 -run '^TestGeneratedHookTimeoutProcessBoundary$' ./cmd/bd
 
+      - name: Exercise native init gateway credential shell
+        shell: bash
+        run: bash scripts/ci/test-init-gateway-credential.sh "$RUNNER_OS"
+
+      - name: Exercise credential command fixtures on Windows
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          $go = (Get-Command go -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+          $hostInfo = @(& $go env GOHOSTOS GOOS)
+          if ($LASTEXITCODE -ne 0 -or ($hostInfo -join ',') -ne 'windows,windows') {
+            throw 'Credential fixtures require native Windows Go'
+          }
+          $expected = @{
+            'github.com/steveyegge/beads/internal/testutil/credentialcmd' = @('TestProtocol')
+            'github.com/steveyegge/beads/internal/creds' = @(
+              'TestCommandSourceRealShell', 'TestCredentialCommandFixtureProtocol')
+            'github.com/steveyegge/beads/internal/storage/dolt' = @(
+              'TestApplyGatewayCredentialCommand', 'TestApplyGatewayCredentialJSONEnvelope',
+              'TestApplyGatewayCredentialFailsClosed', 'TestApplyGatewayCredentialPresetWins',
+              'TestApplyGatewayCredentialRejectsBadCharToken', 'TestApplyResolvedConfigGatewayCredential')
+          }
+          $selector = '^(' + (($expected.Values | ForEach-Object { $_ }) -join '|') + ')$'
+          $raw = & $go test -json -tags gms_pure_go -count=1 -run $selector @($expected.Keys)
+          $testStatus = $LASTEXITCODE
+          $events = @($raw | ForEach-Object { $_ | ConvertFrom-Json -ErrorAction Stop })
+          $events | Where-Object Output | ForEach-Object { [Console]::Write($_.Output) }
+          if ($testStatus -ne 0) { exit $testStatus }
+          if (@($events | Where-Object { $_.Action -in 'fail', 'skip' }).Count -ne 0) {
+            throw 'Credential fixtures must pass without skips'
+          }
+          foreach ($package in $expected.Keys) {
+            foreach ($test in $expected[$package]) {
+              $passes = @($events | Where-Object {
+                $_.Package -eq $package -and $_.Test -eq $test -and $_.Action -eq 'pass'
+              })
+              if ($passes.Count -ne 1) { throw "Expected one PASS for $package/$test" }
+            }
+          }
+
       - name: Check benchmark environment scrubbing
         if: matrix.os == 'windows-latest'
         shell: bash
@@ -689,6 +821,43 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: false
+
+      # The module fetch is the only part of this job that talks to the network,
+      # and setup-go above runs with cache: false, so every run pulls the whole
+      # module graph from the proxy. Doing it here, retried, means a proxy blip
+      # costs seconds instead of failing a required check.
+      #
+      # Deliberately NOT wrapped around the build: `make ci-pr-policy` runs a
+      # `go build ./cmd/bd` (scripts/ci/pr-policy.sh, build_docs_binary), and a
+      # compile error is not transient. Retrying it would make a genuinely broken
+      # build take three attempts to report and look like a slow one. The fetch
+      # has a legitimate transient failure mode; the build does not.
+      #
+      # 3 attempts x 120s + 2 backoffs x 10s = 380s worst case. 8m leaves ~100s
+      # of headroom, matching the bounded apt-get steps in migration-test.yml.
+      - name: Download modules
+        timeout-minutes: 8
+        run: |
+          downloaded=""
+          for attempt in 1 2 3; do
+            if timeout 120 go mod download; then
+              downloaded=yes
+              break
+            fi
+            echo "::warning::go mod download attempt $attempt failed or timed out"
+            # No backoff after the final attempt - there is nothing left to wait for.
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+            fi
+          done
+          # Unlike the best-effort apt-get retries elsewhere in this repo, this
+          # one is load-bearing: nothing downstream can build without the
+          # modules. Fail here, naming the fetch, so a module outage is not
+          # reported as a build failure.
+          if [ -z "$downloaded" ]; then
+            echo "::error::go mod download failed after 3 attempts - module fetch failure, not a build failure"
+            exit 1
+          fi
 
       - name: Run PR policy wrapper
         run: make ci-pr-policy
@@ -1319,21 +1488,175 @@ jobs:
             throw 'Native Make installed bd.exe with unexpected contents'
           }
 
-          $expectedInstall = @(
+          $expectedFirstInstall = @(
             'D profile with spaces'
             'D profile with spaces/.local'
             'D profile with spaces/.local/bin'
             "F profile with spaces/.local/bin/bd.exe $sentinelHash"
           ) | Sort-Object
-          $actualInstall = @(Get-TreeManifest -Root $installRoot)
-          if (Compare-Object -ReferenceObject $expectedInstall -DifferenceObject $actualInstall) {
-            throw "Native Make changed paths outside the exact install destination:`n$($actualInstall -join "`n")"
+          $actualFirstInstall = @(Get-TreeManifest -Root $installRoot)
+          if (Compare-Object -ReferenceObject $expectedFirstInstall -DifferenceObject $actualFirstInstall) {
+            throw "Native Make changed paths outside the exact first install destination:`n$($actualFirstInstall -join "`n")"
           }
 
-          $fixtureAfter = @(Get-TreeManifest -Root $fixtureRepo)
-          if (Compare-Object -ReferenceObject $fixtureBefore -DifferenceObject $fixtureAfter) {
-            throw 'Native Make split the spaced install path or otherwise mutated the fixture repository'
+          $fixtureAfterFirstInstall = @(Get-TreeManifest -Root $fixtureRepo)
+          if (Compare-Object -ReferenceObject $fixtureBefore -DifferenceObject $fixtureAfterFirstInstall) {
+            throw 'Native Make split the spaced first-install path or otherwise mutated the fixture repository'
           }
+
+          $legacyAlias = Join-Path $installProfile '.local\bin\BD'
+          Set-Content -LiteralPath $legacyAlias -Encoding ascii -NoNewline -Value 'legacy-extensionless-alias'
+          $installBeforeFailedReplacement = @(Get-TreeManifest -Root $installRoot)
+          $fixtureBeforeFailedReplacement = @(Get-TreeManifest -Root $fixtureRepo)
+          $missingBuildDir = Join-Path $fixtureRepo 'missing build output'
+          if (Test-Path -LiteralPath $missingBuildDir) {
+            throw "Failure-injection source unexpectedly exists: '$missingBuildDir'"
+          }
+
+          Push-Location $fixtureRepo
+          try {
+            & $make --no-print-directory -o build "BUILD_DIR=$missingBuildDir" GIT_BUILD=install-proof install-force
+            if ($LASTEXITCODE -eq 0) {
+              throw 'Native Make replacement unexpectedly succeeded without a source bd.exe'
+            }
+          } finally {
+            Pop-Location
+          }
+
+          $installAfterFailedReplacement = @(Get-TreeManifest -Root $installRoot)
+          if (Compare-Object -ReferenceObject $installBeforeFailedReplacement -DifferenceObject $installAfterFailedReplacement) {
+            throw "Failed native Make replacement changed the live install tree:`n$($installAfterFailedReplacement -join "`n")"
+          }
+          $fixtureAfterFailedReplacement = @(Get-TreeManifest -Root $fixtureRepo)
+          if (Compare-Object -ReferenceObject $fixtureBeforeFailedReplacement -DifferenceObject $fixtureAfterFailedReplacement) {
+            throw 'Failed native Make replacement mutated the fixture repository'
+          }
+
+          Set-Content -LiteralPath $sentinel -Encoding ascii -NoNewline -Value 'native-install-sentinel-v2'
+          $replacementHash = (Get-FileHash -LiteralPath $sentinel -Algorithm SHA256).Hash
+          $fixtureBeforeReplacement = @(Get-TreeManifest -Root $fixtureRepo)
+
+          Push-Location $fixtureRepo
+          try {
+            & $make --no-print-directory -o build "BUILD_DIR=$buildDir" GIT_BUILD=install-proof install-force
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Native Make replacement install-force failed with a case-variant legacy alias'
+            }
+          } finally {
+            Pop-Location
+          }
+
+          if (Test-Path -LiteralPath $legacyAlias) {
+            throw "Native Make left the case-variant legacy alias '$legacyAlias'"
+          }
+          if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) {
+            throw "Native Make replacement left no bd.exe at '$installed'"
+          }
+          if ((Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash -ne $replacementHash) {
+            throw 'Native Make replacement installed bd.exe with unexpected contents'
+          }
+
+          $expectedReplacement = @(
+            'D profile with spaces'
+            'D profile with spaces/.local'
+            'D profile with spaces/.local/bin'
+            "F profile with spaces/.local/bin/bd.exe $replacementHash"
+          ) | Sort-Object
+          $actualReplacement = @(Get-TreeManifest -Root $installRoot)
+          if (Compare-Object -ReferenceObject $expectedReplacement -DifferenceObject $actualReplacement) {
+            throw "Native Make replacement changed paths outside the exact install destination:`n$($actualReplacement -join "`n")"
+          }
+
+          $fixtureAfterReplacement = @(Get-TreeManifest -Root $fixtureRepo)
+          if (Compare-Object -ReferenceObject $fixtureBeforeReplacement -DifferenceObject $fixtureAfterReplacement) {
+            throw 'Native Make split the spaced replacement path or otherwise mutated the fixture repository'
+          }
+
+          $junctionRoot = Join-Path $proofRoot 'junction install sandbox'
+          $junctionProfile = Join-Path $junctionRoot 'profile with spaces'
+          $junctionParent = Join-Path $junctionProfile '.local'
+          $junctionTarget = Join-Path $junctionRoot 'bin target with spaces'
+          New-Item -ItemType Directory -Force -Path $junctionParent, $junctionTarget | Out-Null
+          $junctionBin = Join-Path $junctionParent 'bin'
+          New-Item -ItemType Junction -Path $junctionBin -Target $junctionTarget | Out-Null
+          $junctionLegacyAlias = Join-Path $junctionTarget 'bd'
+          Set-Content -LiteralPath $junctionLegacyAlias -Encoding ascii -NoNewline -Value 'junction-legacy-alias'
+          Set-Content -LiteralPath $sentinel -Encoding ascii -NoNewline -Value 'native-install-sentinel-v3'
+          $junctionHash = (Get-FileHash -LiteralPath $sentinel -Algorithm SHA256).Hash
+          $fixtureBeforeJunctionInstall = @(Get-TreeManifest -Root $fixtureRepo)
+
+          $env:USERPROFILE = $junctionProfile
+          Push-Location $fixtureRepo
+          try {
+            & $make --no-print-directory -o build "BUILD_DIR=$buildDir" GIT_BUILD=install-proof install-force
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Native Make install-force failed through a junction install directory'
+            }
+          } finally {
+            Pop-Location
+          }
+
+          if (Test-Path -LiteralPath $junctionLegacyAlias) {
+            throw "Native Make left the legacy alias behind the install junction '$junctionLegacyAlias'"
+          }
+          $junctionInstalled = Join-Path $junctionTarget 'bd.exe'
+          $junctionVisibleInstalled = Join-Path $junctionBin 'bd.exe'
+          foreach ($path in @($junctionInstalled, $junctionVisibleInstalled)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Native Make junction install left no bd.exe at '$path'"
+            }
+            if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $junctionHash) {
+              throw "Native Make junction install wrote unexpected contents at '$path'"
+            }
+          }
+          $expectedJunctionTarget = @("F bd.exe $junctionHash")
+          $actualJunctionTarget = @(Get-TreeManifest -Root $junctionTarget)
+          if (Compare-Object -ReferenceObject $expectedJunctionTarget -DifferenceObject $actualJunctionTarget) {
+            throw "Native Make junction install left unexpected target entries:`n$($actualJunctionTarget -join "`n")"
+          }
+
+          $fixtureAfterJunctionInstall = @(Get-TreeManifest -Root $fixtureRepo)
+          if (Compare-Object -ReferenceObject $fixtureBeforeJunctionInstall -DifferenceObject $fixtureAfterJunctionInstall) {
+            throw 'Native Make junction install mutated the fixture repository'
+          }
+
+          $directoryAlias = Join-Path $installProfile '.local/bin/BD'
+          New-Item -ItemType Directory -Path $directoryAlias | Out-Null
+          $directorySentinel = Join-Path $directoryAlias 'keep.txt'
+          Set-Content -LiteralPath $directorySentinel -Encoding ascii -NoNewline -Value 'preserve-bd-directory'
+          $directorySentinelHash = (Get-FileHash -LiteralPath $directorySentinel -Algorithm SHA256).Hash
+          Set-Content -LiteralPath $sentinel -Encoding ascii -NoNewline -Value 'native-install-sentinel-v4'
+          $directoryInstallHash = (Get-FileHash -LiteralPath $sentinel -Algorithm SHA256).Hash
+          $fixtureBeforeDirectoryInstall = @(Get-TreeManifest -Root $fixtureRepo)
+
+          $env:USERPROFILE = $installProfile
+          Push-Location $fixtureRepo
+          try {
+            & $make --no-print-directory -o build "BUILD_DIR=$buildDir" GIT_BUILD=install-proof install-force
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Native Make install-force failed with a directory named BD'
+            }
+          } finally {
+            Pop-Location
+          }
+
+          $expectedDirectoryInstall = @(
+            'D profile with spaces'
+            'D profile with spaces/.local'
+            'D profile with spaces/.local/bin'
+            'D profile with spaces/.local/bin/BD'
+            "F profile with spaces/.local/bin/BD/keep.txt $directorySentinelHash"
+            "F profile with spaces/.local/bin/bd.exe $directoryInstallHash"
+          ) | Sort-Object
+          $actualDirectoryInstall = @(Get-TreeManifest -Root $installRoot)
+          if (Compare-Object -ReferenceObject $expectedDirectoryInstall -DifferenceObject $actualDirectoryInstall) {
+            throw "Native Make changed the preserved BD directory or install tree:`n$($actualDirectoryInstall -join "`n")"
+          }
+          $fixtureAfterDirectoryInstall = @(Get-TreeManifest -Root $fixtureRepo)
+          if (Compare-Object -ReferenceObject $fixtureBeforeDirectoryInstall -DifferenceObject $fixtureAfterDirectoryInstall) {
+            throw 'Native Make install with a BD directory mutated the fixture repository'
+          }
+          Write-Output 'Native Make install proof passed: first install, failed copy, case-variant alias, junction, preserved BD directory'
 
       - name: Exercise MSYS2-hosted Make
         if: matrix.host == 'msys2'
@@ -1466,6 +1789,7 @@ jobs:
       - build-artifacts
       - check-build-tags
       - check-cmd-bd-puregeo-tests
+      - check-release-target-cross-compilation
       - test-windows-liveness
       - worktree-remove-windows
       - check-version-consistency
@@ -1497,6 +1821,7 @@ jobs:
             BUILD_ARTIFACTS
             CHECK_BUILD_TAGS
             CHECK_CMD_BD_PUREGEO_TESTS
+            CHECK_RELEASE_TARGET_CROSS_COMPILATION
             TEST_WINDOWS_LIVENESS
             WORKTREE_REMOVE_WINDOWS
             CHECK_VERSION_CONSISTENCY
@@ -1526,6 +1851,7 @@ jobs:
           BUILD_ARTIFACTS: ${{ needs.build-artifacts.result }}
           CHECK_BUILD_TAGS: ${{ needs.check-build-tags.result }}
           CHECK_CMD_BD_PUREGEO_TESTS: ${{ needs.check-cmd-bd-puregeo-tests.result }}
+          CHECK_RELEASE_TARGET_CROSS_COMPILATION: ${{ needs.check-release-target-cross-compilation.result }}
           TEST_WINDOWS_LIVENESS: ${{ needs.test-windows-liveness.result }}
           WORKTREE_REMOVE_WINDOWS: ${{ needs.worktree-remove-windows.result }}
           CHECK_VERSION_CONSISTENCY: ${{ needs.check-version-consistency.result }}

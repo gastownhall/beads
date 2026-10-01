@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+# Canonical installer for PackageIdentifier GasTownHall.Beads (published under
+# manifests/g/GasTownHall/Beads/<version>/ in microsoft/winget-pkgs).
+#
+# PortableCommandAlias is REQUIRED so winget creates
+# %LOCALAPPDATA%\Microsoft\WinGet\Links\bd.exe. Without it, only the package
+# folder is on PATH (visible only to processes started after install) and
+# already-running shells never see `bd` (GH#4908).
+#
+# Commands: is search metadata only — it does NOT create the Links symlink.
+PackageIdentifier: GasTownHall.Beads
+PackageVersion: 1.1.0
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: bd.exe
+    PortableCommandAlias: bd
+Commands:
+  - bd
+ReleaseDate: 2026-07-04
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/gastownhall/beads/releases/download/v1.1.0/beads_1.1.0_windows_amd64.zip
+    InstallerSha256: 12B1D37344D3B1543301E21A2B9ED3AB6AE009F0418441F3DE5F762B40769A6B
+  - Architecture: arm64
+    InstallerUrl: https://github.com/gastownhall/beads/releases/download/v1.1.0/beads_1.1.0_windows_arm64.zip
+    InstallerSha256: C2F3FC50407896336BAFAAB74E955F632FDFB487579FD24E44D766AB05792F7F
+ManifestType: installer
+ManifestVersion: 1.12.0

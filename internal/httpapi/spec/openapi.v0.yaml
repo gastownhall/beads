@@ -2199,7 +2199,32 @@ paths:
 
         An EMPTY `patch` object is a `400`: a write that writes nothing is a
         client bug, the same judgement `issues:batchCreate` makes about an
-        empty `items`.
+        empty `items`. The one exception is an empty `patch` beside
+        `claim: true`, where the claim is the whole write.
+
+
+        ## Claim
+
+
+        `claim: true` claims the issue for `actor` IN THE SAME TRANSACTION as
+        the patch — what `bd update <id> --claim` does on the direct route,
+        through the same role, so eligibility, claim pools and the conflict
+        vocabulary are one definition. The claim sets `assignee` to `actor` and
+        `status` to `in_progress` first and the patch applies after it, so a
+        `patch.assignee` or `patch.status` overrides the claim's own value. An
+        issue already `in_progress` and held by `actor` is an idempotent
+        success (`changed: false` when the patch changes nothing either). A
+        refused claim writes NOTHING, the patch included. It cannot be
+        combined with `expected_assignee`, `expected_status` or
+        `force_assignee_transfer` — the claim is its own compare-and-set —
+        and it may be combined with `expected_version`, which is checked
+        before the claim.
+
+
+        A server that predates this member refuses it as an unknown member
+        (`400`, `reason: "unknown_parameter"`, `param: "claim"`) before any
+        database work, so a client can never mistake an older server for one
+        that dropped the claim.
 
 
         `labels` is COMPLETE REPLACEMENT. It is the only shape whose result the
@@ -2229,8 +2254,9 @@ paths:
         preconditions above, or the other's guard.
 
 
-        Three members carry policy, which is where this operation's `409`s come
-        from. `status` crossing into the workspace's done category answers to
+        Four members carry policy, which is where this operation's `409`s come
+        from. `claim` answers exactly as `{id}:claim` does (`already_claimed`,
+        `not_claimable`). `status` crossing into the workspace's done category answers to
         close policy (`not_closable`). `assignee` transferring away from a live
         foreign in-progress owner answers to the assignee fence
         (`already_claimed`). `parent_id` is a graph edit and answers to the
@@ -2313,7 +2339,8 @@ paths:
             value outside its documented bounds, `notes` together with
             `append_notes`, `metadata.replace` together with any other metadata
             edit, `force_assignee_transfer` without `patch.assignee` or beside
-            `expected_assignee`, a `patch.parent_id` naming the issue itself or
+            `expected_assignee`, `claim` beside `expected_assignee`,
+            `expected_status` or `force_assignee_transfer`, a `patch.parent_id` naming the issue itself or
             naming no issue this workspace holds — or a value this workspace's
             own validation refuses, such as an `issue_type` or `status` outside
             its configured vocabulary.
@@ -2335,10 +2362,19 @@ paths:
         '409':
           description: >-
             The request is well-formed and the STATE refuses it, and NOTHING WAS
-            WRITTEN. Five codes, each inherited from the operation that already
-            publishes it rather than minted here, and described in the four
+            WRITTEN. Six codes, each inherited from the operation that already
+            publishes it rather than minted here, and described in the
             paragraphs below — `dependency_cycle` and `dependency_exists` share
             one, because they are one member reaching the graph.
+
+
+            `already_claimed` and `not_claimable` with `param: "claim"` are a
+            refused `claim`, answered as `POST /v0/beads/issues/{id}:claim`
+            answers them: `already_claimed` when another actor holds the issue
+            (with the `assignee` extension member when the refusing transaction
+            reported the holder), `not_claimable` when its status is not
+            claimable (with `issue_status`). Nothing was written, the patch
+            included.
 
 
             `precondition_failed` is `expected_version`, `expected_status` or
@@ -2356,7 +2392,8 @@ paths:
             `force_close_policy` is the bypass.
 
 
-            `already_claimed` is the assignee fence: a `patch.assignee` that
+            `already_claimed` with `param: "patch.assignee"` is the assignee
+            fence: a `patch.assignee` that
             transfers work away from a live foreign in-progress owner.
             `force_assignee_transfer` is the bypass and `expected_assignee` is
             the compare-and-set that replaces the fence outright. The `assignee`
@@ -2383,7 +2420,7 @@ paths:
             scheduling cycle, every time.
           x-bd-codes:
             [already_claimed, dependency_cycle, dependency_exists,
-             not_closable, precondition_failed]
+             not_claimable, not_closable, precondition_failed]
           content:
             application/problem+json:
               schema:
@@ -7116,6 +7153,27 @@ components:
         average_lead_time_hours:
           type: number
           description: ALWAYS 0, for the reason above.
+        gate_issues:
+          type: integer
+          description: >-
+            Gate rows, which the default `bd list` suppresses on account of what
+            they are rather than on any filter the caller passed.
+
+
+            ALREADY INCLUDED in `total_issues`, which counts the database rather
+            than the listing — so this is a breakdown of that total, never an
+            addition to it. It is broken out so the two surfaces can be
+            reconciled instead of silently disagreeing about how many issues
+            exist.
+        template_issues:
+          type: integer
+          description: >-
+            Template rows, suppressed by the default `bd list` on the same terms
+            as `gate_issues` and likewise already counted in `total_issues`.
+
+
+            Do not sum the two: a row can be both a gate and a template, and
+            would be counted once in each.
     # The two cycle schemas are pinned like the seven above, and to the same end,
     # but to the canonical types in `issueops` rather than in `internal/types`:
     # the role's own result IS the CLI's `--json` element, so `bd dep cycles`
@@ -10306,6 +10364,23 @@ components:
             lines.
         patch:
           $ref: '#/components/schemas/IssuePatchBody'
+        claim:
+          type: boolean
+          default: false
+          description: >-
+            Claims the issue for `actor` in the same transaction as `patch`:
+            `bd update <id> --claim`, served by the same role. The claim sets
+            `assignee` to `actor` and `status` to `in_progress`, then the patch
+            applies, so a `patch.assignee` or `patch.status` overrides the
+            claim's value. Eligibility is `{id}:claim`'s: a claimable status,
+            and unassigned, already held by `actor`, or held by a configured
+            claim pool. Held by `actor` and `in_progress` already is an
+            idempotent success. A refusal is `409 already_claimed` or `409
+            not_claimable` naming `claim`, and writes nothing — the patch
+            included. With `claim: true` the `patch` may be empty. It must not
+            be combined with `expected_assignee`, `expected_status` or
+            `force_assignee_transfer`; a request that does is a `400` naming
+            `claim`.
         expected_version:
           type: string
           description: >-
@@ -10376,7 +10451,9 @@ components:
       description: >-
         The fields to write. Every member is optional and PRESENCE is the
         signal: a member present is written, a member absent is untouched. An
-        empty object is a `400` — a write that writes nothing is a client bug.
+        empty object is a `400` — a write that writes nothing is a client bug —
+        except on `updateIssue` beside `claim: true`, where the claim is the
+        write.
 
 
         This is a deliberate SUBSET of the fields an issue carries; the members
