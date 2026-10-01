@@ -687,7 +687,7 @@ set -euo pipefail
 echo "Shard $1/$2: running"
 echo "  manifest: 1, fallback: 0"
 case "$1" in
-  1) printf '  %s\n' TestA TestB ;;
+  1) printf '  %s\n' TestA TestB TestMain ;; # TestMain: never a testcase
   2) printf '  %s\n' TestC ;;
   *) exit 1 ;;
 esac
@@ -767,6 +767,85 @@ esac
 		cmd.Env = append(os.Environ(), c.env...)
 		if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "failed") {
 			t.Errorf("shard script %s %v: check passed or did not say it failed:\n%s", c.script, c.env, out)
+		}
+	}
+}
+
+// Review G1: the checker's input is the real shard scripts' list-only
+// output. Every name they list, for every shard, must be a test go test
+// runs (declared `func Name(t *testing.T)` in the package's _test.go files),
+// or one check_shard_coverage.py drops as NOT_TESTS; and each NOT_TESTS name
+// must really not be a test (TestMain takes *testing.M). Otherwise the
+// checker reports a listed test that "did not run" on every real run.
+func TestEmbeddedShardScriptsListOnlyRealTests(t *testing.T) {
+	if os.Getenv("TEST_SRCDIR") != "" {
+		t.Skip("scripts_test's runfiles hold neither the shard scripts' sources nor tools/bazel")
+	}
+	requireHostTool(t, "bash")
+	root := sourceRepoRoot(t)
+	m := regexp.MustCompile(`(?m)^NOT_TESTS = frozenset\(\{([^}]*)\}\)`).FindStringSubmatch(readPolicyFile(t, root, "tools/bazel/check_shard_coverage.py"))
+	if m == nil {
+		t.Fatal("tools/bazel/check_shard_coverage.py has no NOT_TESTS = frozenset({...})")
+	}
+	notTests := map[string]bool{}
+	for _, q := range regexp.MustCompile(`"([^"]+)"`).FindAllStringSubmatch(m[1], -1) {
+		notTests[q[1]] = true
+	}
+	risk := readCIWorkflow(t, prRiskWorkflowName)
+	for _, c := range []struct{ job, script, pkg string }{
+		{"test-embedded-cmd", ".github/scripts/embedded-test-shard.sh", "cmd/bd"},
+		{"test-embedded-storage", ".github/scripts/embedded-storage-test-shard.sh", "internal/storage/embeddeddolt"},
+	} {
+		var src strings.Builder
+		files, err := filepath.Glob(filepath.Join(root, c.pkg, "*_test.go"))
+		if err != nil || len(files) == 0 {
+			t.Fatalf("%s: no _test.go files (%v)", c.pkg, err)
+		}
+		for _, f := range files {
+			data, err := os.ReadFile(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			src.Write(data)
+			src.WriteString("\n")
+		}
+		declared := map[string]bool{}
+		for _, d := range regexp.MustCompile(`(?m)^func (Test\w*)\(\w+ \*testing\.T\) \{`).FindAllStringSubmatch(src.String(), -1) {
+			declared[d[1]] = true
+		}
+		shards := len(risk.job(t, c.job).Strategy.Matrix.Shard)
+		listed := 0
+		for k := 1; k <= shards; k++ {
+			cmd := exec.Command("bash", c.script, strconv.Itoa(k), strconv.Itoa(shards))
+			cmd.Dir = root
+			cmd.Env = append(os.Environ(), "BEADS_TEST_SHARD_LIST_ONLY=1")
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("%s %d %d: %v", c.script, k, shards, err)
+			}
+			for _, line := range strings.Split(string(out), "\n") {
+				name, ok := strings.CutPrefix(line, "  ")
+				if !ok || !strings.HasPrefix(name, "Test") || strings.ContainsAny(name, " :") {
+					continue
+				}
+				listed++
+				isTest := declared[name]
+				switch {
+				case notTests[name] && isTest:
+					t.Errorf("%s shard %d lists %s, which check_shard_coverage.py drops, but it is a real test", c.script, k, name)
+				case !notTests[name] && !isTest:
+					t.Errorf("%s shard %d lists %s, which is not a `func %s(t *testing.T)` test in %s: check_shard_coverage.py would report it missing on every run (add it to NOT_TESTS only if go test never runs it)",
+						c.script, k, name, name, c.pkg)
+				}
+			}
+		}
+		if listed < 50 {
+			t.Errorf("%s listed only %d tests over %d shards; did the list-only output format change?", c.script, listed, shards)
+		}
+	}
+	for name := range notTests {
+		if name != "TestMain" {
+			t.Errorf("NOT_TESTS has %s; only TestMain is never a test", name)
 		}
 	}
 }

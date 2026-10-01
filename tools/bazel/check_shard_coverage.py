@@ -34,6 +34,16 @@ from equivalence import read_bep, testlog_xmls  # noqa: E402
 
 LISTED = re.compile(r"^  (Test[A-Za-z0-9_]*)$")
 
+# Names the shard scripts' `grep '^func Test'` discovery lists that go test
+# never runs as a test: TestMain(m *testing.M) is the package's test entry
+# point (internal/storage/embeddeddolt/test_fixture_test.go), never a
+# <testcase>. The legacy jobs' -test.run selector harmlessly matches nothing
+# for it. Filtered here rather than in the shard scripts so the legacy jobs'
+# selection stays byte-for-byte what it was. scripts/
+# pr_risk_bazel_coverage_test.go runs both real scripts in list-only mode and
+# requires every other listed name to be a `func Name(t *testing.T)`.
+NOT_TESTS = frozenset({"TestMain"})
+
 
 def listed_tests(script, shard, shards):
     """Return the set of tests SCRIPT assigns to shard SHARD of SHARDS."""
@@ -42,7 +52,7 @@ def listed_tests(script, shard, shards):
         ["bash", script, str(shard), str(shards)],
         env=env, check=True, capture_output=True, text=True,
     ).stdout
-    return {m.group(1) for m in map(LISTED.match, out.splitlines()) if m}
+    return {m.group(1) for m in map(LISTED.match, out.splitlines()) if m} - NOT_TESTS
 
 
 def ran_tests(xml_path):
