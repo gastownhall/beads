@@ -92,7 +92,7 @@ const (
 	drainGrace = 5 * time.Second
 	// uowCloseTimeout bounds the DETACHED close described on WithUOW.
 	uowCloseTimeout = 5 * time.Second
-	// defaultLargeApplyCeiling is Config.LargeApplyCeiling's default: the
+	// DefaultLargeApplyCeiling is Config.LargeApplyCeiling's default: the
 	// whole-run budget a POST issues:batchApply request over
 	// largeApplyItemThreshold items gets once it holds the one-wide
 	// large-apply slot (acquireLargeApply). It is an operator-configurable
@@ -101,7 +101,12 @@ const (
 	// slot, whether it carries 101 items or 1000, because scaling it down for
 	// a request well under the envelope's top end would narrow a caller's
 	// budget for a reason unrelated to what it actually sent.
-	defaultLargeApplyCeiling = 5 * time.Minute
+	//
+	// It is exported so `bd serve --large-apply-ceiling` defaults to this
+	// same value instead of repeating it: bd serve always passes a positive
+	// ceiling, so a second literal there, not this constant, would be the
+	// default every bd serve deployment actually runs with.
+	DefaultLargeApplyCeiling = 5 * time.Minute
 )
 
 // Pool limits for the provider's *sql.DB. The semaphore bounds handlers, not
@@ -167,10 +172,10 @@ type Config struct {
 	AllowedHosts []string
 	// LargeApplyCeiling bounds how long POST /v0/beads/issues:batchApply may
 	// hold a write transaction for a request over largeApplyItemThreshold
-	// items (batch_apply.go). Zero takes defaultLargeApplyCeiling (5
+	// items (batch_apply.go). Zero takes DefaultLargeApplyCeiling (5
 	// minutes). It is wired to `bd serve --large-apply-ceiling`.
 	//
-	// It is a CEILING, not a target — see defaultLargeApplyCeiling for why
+	// It is a CEILING, not a target — see DefaultLargeApplyCeiling for why
 	// every request over the threshold gets the whole budget rather than a
 	// value scaled to its item count. Raising or lowering it is an
 	// operational decision, not a wire change: it does not move
@@ -448,7 +453,7 @@ type Server struct {
 	// sem the instant enough large applies queued up.
 	largeApplySem chan struct{}
 	// largeApplyCeiling is the resolved Config.LargeApplyCeiling (defaulted
-	// via orDefault to defaultLargeApplyCeiling). acquireLargeApply builds
+	// via orDefault to DefaultLargeApplyCeiling). acquireLargeApply builds
 	// each run's deadline from this, fresh, at the moment the slot is
 	// acquired — never before, so time spent queued is never charged against
 	// the run itself.
@@ -631,7 +636,7 @@ func Listen(cfg Config) (*Server, error) {
 		semTimeout:        semAcquireTimeout,
 		semWarn:           saturationWarn,
 		largeApplySem:     make(chan struct{}, 1),
-		largeApplyCeiling: orDefault(cfg.LargeApplyCeiling, defaultLargeApplyCeiling),
+		largeApplyCeiling: orDefault(cfg.LargeApplyCeiling, DefaultLargeApplyCeiling),
 
 		closing:         make(chan struct{}),
 		maxWatchStreams: maxWatchStreams,
@@ -1548,6 +1553,12 @@ func (s *Server) acquireLargeApply(ctx context.Context) (runCtx context.Context,
 // builds the run's own detached, freshly-timed context and stamps
 // s.largeApplyDeadline for Serve's graceful-drain budget to read.
 //
+// The run context is also marked with issueops.WithExtendedRetryBudget, and
+// this is the only place that marks one: the marker, not the deadline's size,
+// is what lets a BatchApplier's commit-retry loop scale to the extended
+// budget instead of stopping at its ordinary fixed ceiling. An ordinary
+// request never reaches this function, so it stays unmarked.
+//
 // It re-checks s.closing AFTER taking the slot and storing the deadline,
 // because a select with multiple ready cases (largeApplySem and s.closing
 // both ready at once, in acquireLargeApply above) picks pseudo-randomly: the
@@ -1557,12 +1568,15 @@ func (s *Server) acquireLargeApply(ctx context.Context) (runCtx context.Context,
 // request this budget was sized for is the only one that can still be
 // holding the slot" invariant true.
 func (s *Server) admitLargeApply(ctx context.Context) (runCtx context.Context, release func(), err error) {
-	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), orDefault(s.largeApplyCeiling, defaultLargeApplyCeiling))
+	runCtx, cancel := context.WithTimeout(
+		issueops.WithExtendedRetryBudget(context.WithoutCancel(ctx)),
+		orDefault(s.largeApplyCeiling, DefaultLargeApplyCeiling),
+	)
 	deadline, _ := runCtx.Deadline()
 	s.largeApplyDeadline.Store(&deadline)
 	release = func() {
-		s.largeApplyDeadline.Store(nil)
 		cancel()
+		s.largeApplyDeadline.Store(nil)
 		<-s.largeApplySem
 	}
 
@@ -2236,7 +2250,7 @@ func (s *Server) logStartup() {
 		// separate from the ordinary "deadline" above: an operator reading
 		// this line must not conclude every request here is bounded by the
 		// 60s "deadline" figure just because that is the only one printed.
-		"large_apply_ceiling", orDefault(s.largeApplyCeiling, defaultLargeApplyCeiling).String(),
+		"large_apply_ceiling", orDefault(s.largeApplyCeiling, DefaultLargeApplyCeiling).String(),
 	}
 	// The pool bounds are this server's, applied to the provider above. On the
 	// roles source there is no pool here to bound, and printing the numbers

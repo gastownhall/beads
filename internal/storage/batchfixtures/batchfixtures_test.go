@@ -83,16 +83,9 @@ func TestShapeItemCounts(t *testing.T) {
 
 			// Every shape must validate and plan cleanly against the role's own
 			// request-shape contract (ref ordering, key uniqueness,
-			// exactly-one-payload) whenever it fits under the role's item cap —
-			// a fixture that failed it would be measuring nothing. The 356- and
-			// 712-item shapes exceed issueops.MaxApplyBatchItems (100) before B1
-			// raises it to 1000, so this check is skipped above the current cap
-			// rather than ordered against a B1 commit that may not have landed
-			// yet; B1's own tests cover the cap itself.
-			if len(tc.req.Items) > issueops.MaxApplyBatchItems {
-				t.Skipf("item count %d exceeds current issueops.MaxApplyBatchItems (%d); cap coverage lives in the B1 tests",
-					len(tc.req.Items), issueops.MaxApplyBatchItems)
-			}
+			// exactly-one-payload, the issueops.MaxApplyBatchItems cap) — a
+			// fixture that failed it would be measuring nothing, and one over
+			// the cap would be measuring a request no caller can send.
 			if _, err := storage.PlanApplyBatch(tc.req); err != nil {
 				t.Fatalf("PlanApplyBatch: %v", err)
 			}

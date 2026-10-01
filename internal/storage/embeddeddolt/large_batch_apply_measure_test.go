@@ -250,7 +250,7 @@ var wallClockShapes = []struct {
 // on the embedded backend at 356 and 1000 items. It is deliberately NOT a
 // pass/fail regression gate — wall-clock time is host- and CI-runner-
 // sensitive in a way statement counts are not — but the numbers it logs are
-// the real-data justification for defaultLargeApplyCeiling
+// the real-data justification for httpapi.DefaultLargeApplyCeiling
 // (internal/httpapi/server.go, 5 minutes): both measured shapes must
 // complete in a small fraction of that budget for the ceiling to be
 // generous headroom rather than a number picked out of thin air.
@@ -290,7 +290,7 @@ func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 			}
 			elapsed := time.Since(start)
 
-			t.Logf("embedded wall-clock: %s items (%d actual) = %s (defaultLargeApplyCeiling headroom: %.1fx)",
+			t.Logf("embedded wall-clock: %s items (%d actual) = %s (DefaultLargeApplyCeiling headroom: %.1fx)",
 				tc.name, len(plan.Items), elapsed, (5*time.Minute).Seconds()/elapsed.Seconds())
 		})
 	}

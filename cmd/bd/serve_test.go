@@ -29,7 +29,10 @@ import (
 // deliberately, rather than arriving as one nobody designed.
 //
 // Every flag added here defaults to the behavior that existed without it, so
-// `bd serve` with no arguments is the same server it has always been.
+// a flag's default is never what changes `bd serve` with no arguments from
+// one release to the next. For --large-apply-ceiling that behavior is
+// httpapi.DefaultLargeApplyCeiling, the ceiling the server applies when none
+// is configured.
 func TestServeFlags(t *testing.T) {
 	var got []string
 	serveCmd.Flags().VisitAll(func(f *pflag.Flag) { got = append(got, f.Name) })
@@ -37,18 +40,20 @@ func TestServeFlags(t *testing.T) {
 
 	want := []string{
 		"addr", "allow-non-loopback", "allowed-host", "auth-token-file",
-		"insecure-no-auth",
+		"insecure-no-auth", "large-apply-ceiling",
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("bd serve flags = %v, want %v", got, want)
 	}
 
 	// The defaults ARE the compatibility promise: no token file, no extra
-	// hosts, and no waiver.
+	// hosts, no waiver, and the large-apply ceiling that SERVE_RUNBOOK.md
+	// sizes an orchestrator's stop grace against.
 	for _, tc := range []struct{ flag, want string }{
 		{"auth-token-file", ""},
 		{"insecure-no-auth", "false"},
 		{"allowed-host", "[]"},
+		{"large-apply-ceiling", "5m0s"},
 	} {
 		f := serveCmd.Flags().Lookup(tc.flag)
 		if f == nil {
@@ -522,7 +527,7 @@ func withServeFlags(t *testing.T) {
 	serveAddr, serveAllowNonLoopback = "127.0.0.1:0", false
 	serveAuthTokenFile, serveInsecureNoAuth = "", false
 	serveAllowedHosts = nil
-	serveLargeApplyCeiling = 5 * time.Minute
+	serveLargeApplyCeiling = httpapi.DefaultLargeApplyCeiling
 }
 
 func serveTokenFile(t *testing.T) string {

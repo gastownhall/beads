@@ -96,8 +96,8 @@ func TestCapBatchApplyLargeTiesAllThreeLimits(t *testing.T) {
 	if largeApplyItemThreshold != wantThreshold {
 		t.Errorf("largeApplyItemThreshold = %d, want %d", largeApplyItemThreshold, wantThreshold)
 	}
-	if defaultLargeApplyCeiling != wantDefaultCeiling {
-		t.Errorf("defaultLargeApplyCeiling = %s, want %s", defaultLargeApplyCeiling, wantDefaultCeiling)
+	if DefaultLargeApplyCeiling != wantDefaultCeiling {
+		t.Errorf("DefaultLargeApplyCeiling = %s, want %s", DefaultLargeApplyCeiling, wantDefaultCeiling)
 	}
 	if !slices.Contains(behaviorCapabilities, CapBatchApplyLarge) {
 		t.Fatal("CapBatchApplyLarge is not advertised in behaviorCapabilities; a client cannot discover this envelope")
@@ -429,8 +429,12 @@ func TestLargeApplyQueueDoesNotStarveOrdinaryRequests(t *testing.T) {
 // a semTimeout long enough that the old bounded-but-unbounded-waiter-count
 // behavior would visibly stall small requests, 16 concurrent large requests
 // racing 8 concurrent small ones must never make a small request wait on the
-// large-apply contention at all — each small one completes in well under
-// 100ms, not "eventually, once a wait times out".
+// large-apply contention at all — each small one completes in well under a
+// second, not "eventually, once a wait times out" (semTimeout, 5s). The bound
+// is a stall detector, not a latency benchmark: a small request can still
+// queue briefly behind the refused large requests, each holding a general sem
+// slot while its body decodes, and under -race on a loaded 4-vCPU CI runner
+// that measured ~160ms.
 func TestLargeApplyBurstNeverStarvesSmallRequestsForSemTimeout(t *testing.T) {
 	applier := &controlledApplier{gate: make(chan struct{})}
 	gateClosed := false
@@ -479,8 +483,8 @@ func TestLargeApplyBurstNeverStarvesSmallRequestsForSemTimeout(t *testing.T) {
 			if res.resp.StatusCode != http.StatusOK {
 				t.Errorf("small request status = %d, want 200: %s", res.resp.StatusCode, readAll(t, res.resp))
 			}
-			if res.elapsed > 100*time.Millisecond {
-				t.Errorf("small request took %s, want well under 100ms: a waiter for the large-apply slot must never hold a general sem slot long enough to stall a small request", res.elapsed)
+			if res.elapsed > time.Second {
+				t.Errorf("small request took %s, want well under a second: a waiter for the large-apply slot must never hold a general sem slot long enough to stall a small request", res.elapsed)
 			}
 		case <-time.After(2 * time.Second):
 			t.Fatalf("small request %d never completed — this is the starvation bug item 1 fixes", i)
@@ -710,19 +714,32 @@ func TestDrainBudget(t *testing.T) {
 }
 
 // deadlineCapturingApplier records the ctx.Deadline() each call actually
-// received, so an HTTP-level test can check what budget handleApplyBatch
-// handed the role without a real backend or a sleep-based race.
+// received, and whether that ctx carried issueops' extended-retry-budget
+// marker, so an HTTP-level test can check what budget handleApplyBatch handed
+// the role without a real backend or a sleep-based race.
 type deadlineCapturingApplier struct {
 	mu        sync.Mutex
 	deadlines []time.Time
+	marked    []bool
 }
 
 func (d *deadlineCapturingApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBatchRequest) (issueops.ApplyBatchResult, error) {
 	dl, _ := ctx.Deadline()
 	d.mu.Lock()
 	d.deadlines = append(d.deadlines, dl)
+	d.marked = append(d.marked, issueops.HasExtendedRetryBudget(ctx))
 	d.mu.Unlock()
 	return issueops.ApplyBatchResult{Items: make([]issueops.ItemResult, len(req.Items))}, nil
+}
+
+func (d *deadlineCapturingApplier) lastMarked(t *testing.T) bool {
+	t.Helper()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.marked) == 0 {
+		t.Fatal("ApplyBatch was never called")
+	}
+	return d.marked[len(d.marked)-1]
 }
 
 func (d *deadlineCapturingApplier) last(t *testing.T) time.Time {
@@ -803,6 +820,43 @@ func TestApplyBatchDeadlineExceedsTheOrdinaryRequestDeadlineWhenConfiguredTo(t *
 	const slack = 5 * time.Second
 	if got < testCeiling-slack {
 		t.Errorf("applier's ctx budget = %s, want ~%s: the large apply's own ceiling must not be narrowed to the ordinary %s request deadline", got, testCeiling, requestDeadline)
+	}
+}
+
+// TestApplyBatchMarksOnlyALargeApplyForTheExtendedRetryBudget pins the seam
+// between the two halves of the large-apply retry budget.
+// internal/storage/uow's retryTxBudget lets a commit-time conflict keep
+// retrying past the ordinary 15s ceiling only when ctx carries
+// issueops.WithExtendedRetryBudget's marker, and admitLargeApply is the one
+// place that sets it. The uow tests mark their contexts by hand, and the
+// deadline tests above never look at the marker, so without this pin the
+// extension could be left unwired with every other test green. The case at
+// the threshold matters as much as the ones over it: marking an ordinary
+// request would raise its retry ceiling from 15s to nearly its whole 60s
+// deadline, the regression the marker exists to prevent.
+func TestApplyBatchMarksOnlyALargeApplyForTheExtendedRetryBudget(t *testing.T) {
+	applier := &deadlineCapturingApplier{}
+	ts := newTestServer(t, rolesConfig(Config{BatchApplier: applier}))
+
+	cases := []struct {
+		name  string
+		items int
+		want  bool
+	}{
+		{"at threshold (100)", largeApplyItemThreshold, false},
+		{"just over threshold (101)", largeApplyItemThreshold + 1, true},
+		{"at cap (1000)", issueops.MaxApplyBatchItems, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := ts.claim(t, batchApplyPath, createItemsBody("alice", tc.items))
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+			}
+			if got := applier.lastMarked(t); got != tc.want {
+				t.Errorf("%d items: issueops.HasExtendedRetryBudget(applier's ctx) = %t, want %t", tc.items, got, tc.want)
+			}
+		})
 	}
 }
 

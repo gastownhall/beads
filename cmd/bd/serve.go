@@ -176,7 +176,7 @@ func registerServeFlags(cmd *cobra.Command) {
 		"Serve a non-loopback bind with NO authentication. Every peer that can reach the address gets full read and claim access")
 	cmd.Flags().StringArrayVar(&serveAllowedHosts, "allowed-host", nil,
 		"Additional Host header value to answer to, e.g. a service DNS name. Repeatable; matched exactly, with no wildcards")
-	cmd.Flags().DurationVar(&serveLargeApplyCeiling, "large-apply-ceiling", 5*time.Minute,
+	cmd.Flags().DurationVar(&serveLargeApplyCeiling, "large-apply-ceiling", httpapi.DefaultLargeApplyCeiling,
 		"Whole-run budget for a POST issues:batchApply request over 100 items (a ceiling, not a target; requests at or under 100 items are unaffected). Must be positive. The orchestrator's stop grace must be at least this long, or an external SIGKILL can cut off an in-flight large apply a graceful drain would otherwise have waited out; see engdocs/SERVE_RUNBOOK.md")
 }
 
