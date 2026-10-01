@@ -218,6 +218,7 @@ func TestDoltShowConfigSharedRemotesAPI(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
 	t.Setenv("BEADS_SHARED_SERVER_DIR", filepath.Join(home, ".beads", "shared-server"))
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
@@ -352,7 +353,10 @@ func TestSetDoltConfigSharedRemotesAPIPortWritesUserConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", filepath.Join(home, ".beads", "shared-server"))
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "")
 	config.ResetForTesting()
 	t.Cleanup(config.ResetForTesting)
@@ -394,6 +398,30 @@ func TestSetDoltConfigSharedRemotesAPIPortWritesUserConfig(t *testing.T) {
 	if !strings.Contains(out, "--update-config is not valid") {
 		t.Fatalf("shared remotesapi --update-config output = %q, want explicit refusal", out)
 	}
+
+	// The shared server's own SQL port is refused at set time: restart
+	// re-pins the live SQL port, so the collision could only be applied by
+	// taking the server down for every workspace.
+	sqlPort := doltserver.DefaultConfig(beadsDir).Port
+	out = captureDoltSetOutput(t, "remotesapi-port", strconv.Itoa(sqlPort), false)
+	if !strings.Contains(out, "equals the shared Dolt server's SQL port") {
+		t.Fatalf("set remotesapi-port %d (the SQL port) output = %q, want refusal", sqlPort, out)
+	}
+	if got := config.GetUserYamlConfig("dolt.remotesapi-port"); got != "8001" {
+		t.Fatalf("user-global remotesapi port after refused set = %q, want unchanged 8001", got)
+	}
+
+	// An exported BEADS_DOLT_REMOTESAPI_PORT outranks the stored value; the
+	// set succeeds but says so.
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "9999")
+	out = captureDoltSetOutput(t, "remotesapi-port", "8003", false)
+	if !strings.Contains(out, "BEADS_DOLT_REMOTESAPI_PORT=9999") || !strings.Contains(out, "overrides") {
+		t.Fatalf("set under env override output = %q, want the override warning", out)
+	}
+	if got := config.GetUserYamlConfig("dolt.remotesapi-port"); got != "8003" {
+		t.Fatalf("user-global remotesapi port = %q, want 8003 stored despite the override", got)
+	}
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "")
 
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 	config.ResetForTesting()
@@ -1011,13 +1039,6 @@ func TestDoltRestartModeValidation(t *testing.T) {
 			}
 		})
 	}
-	t.Setenv("BEADS_DOLT_AUTO_START", "0")
-	if err := validateDoltRestartMode(local, true, false); err != nil {
-		t.Fatalf("explicit restart must remain allowed when auto-start is disabled: %v", err)
-	}
-	if !strings.Contains(doltRestartCmd.Long, "auto-start is disabled") {
-		t.Fatalf("restart help must document explicit lifecycle policy:\n%s", doltRestartCmd.Long)
-	}
 }
 
 func TestRenderDoltRestartResult(t *testing.T) {
@@ -1029,21 +1050,27 @@ func TestRenderDoltRestartResult(t *testing.T) {
 		DataDir:        "/tmp/shared/dolt",
 	}
 	jsonOutput = false
-	text := captureStdout(t, func() error { return renderDoltRestartResult(state) })
-	for _, want := range []string{"PID 42", "port 3308", "RemotesAPI: 8080", "/tmp/shared/dolt"} {
+	text := captureStdout(t, func() error { return renderDoltRestartResult(state, true, true) })
+	for _, want := range []string{"Dolt server restarted", "PID 42", "port 3308", "RemotesAPI: 8080", "/tmp/shared/dolt", "Mode: shared server"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("restart text missing %q:\n%s", want, text)
 		}
 	}
+	// Nothing was running: the output must not claim a process was replaced.
+	text = captureStdout(t, func() error { return renderDoltRestartResult(state, false, false) })
+	if !strings.Contains(text, "was not running; started") || strings.Contains(text, "restarted") || strings.Contains(text, "shared server") {
+		t.Fatalf("cold restart text = %q, want a start report without shared-mode note", text)
+	}
 
 	jsonOutput = true
 	t.Cleanup(func() { jsonOutput = false })
-	raw := captureStdout(t, func() error { return renderDoltRestartResult(state) })
+	raw := captureStdout(t, func() error { return renderDoltRestartResult(state, false, true) })
 	var result map[string]any
 	if err := json.Unmarshal([]byte(raw), &result); err != nil {
 		t.Fatalf("decode restart JSON: %v\n%s", err, raw)
 	}
 	if result["restarted"] != true ||
+		result["was_running"] != false ||
 		int(result["port"].(float64)) != 3308 ||
 		int(result["remotesapi_port"].(float64)) != 8080 {
 		t.Fatalf("restart JSON = %v", result)

@@ -59,6 +59,7 @@ func TestEmbeddedDolt(t *testing.T) {
 		args []string
 	}{
 		{"start", []string{"start"}},
+		{"restart", []string{"restart"}},
 		{"stop", []string{"stop"}},
 		{"test", []string{"test"}},
 		{"set", []string{"set", "host", "127.0.0.1"}},
