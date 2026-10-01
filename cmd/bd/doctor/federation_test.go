@@ -161,6 +161,53 @@ func TestDoltServerConfig_EnablesCLIAutoStartWithoutConfiguredPort(t *testing.T)
 	}
 }
 
+// TestCheckFederationRemotesAPI_DoesNotStartServer pins that the remotesapi
+// check diagnoses the server that is running and never starts one, even where
+// doltServerConfig's CLI policy (used by the other federation checks) would
+// auto-start an owned standalone server.
+func TestCheckFederationRemotesAPI_DoesNotStartServer(t *testing.T) {
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_TEST_MODE", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "1")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	doltDir := filepath.Join(beadsDir, "dolt")
+	if err := os.MkdirAll(doltDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &configfile.Config{Backend: configfile.BackendDolt, DoltDatabase: "beads_test"}
+	data, _ := json.Marshal(cfg)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Precondition: the shared config path would auto-start here.
+	if !doltServerConfig(beadsDir, doltDir).AutoStart {
+		t.Fatal("precondition: doltServerConfig should enable CLI auto-start for this workspace")
+	}
+	target, err := resolveFederationRemotesAPITarget(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sqlCfg := federationTargetSQLConfig(beadsDir, target); sqlCfg.AutoStart || !sqlCfg.DisableAutoStart {
+		t.Fatalf("remotesapi target config = AutoStart %v DisableAutoStart %v, want no auto-start", sqlCfg.AutoStart, sqlCfg.DisableAutoStart)
+	}
+
+	check := CheckFederationRemotesAPI(tmpDir)
+	if check.Status != StatusOK || !strings.Contains(check.Message, "server not running") {
+		t.Fatalf("got %s %q, want OK for a stopped server", check.Status, check.Message)
+	}
+	if _, statErr := os.Stat(filepath.Join(beadsDir, doltserver.PIDFileName)); !os.IsNotExist(statErr) {
+		t.Fatalf("the check started a server: pidfile stat = %v", statErr)
+	}
+	if state, runErr := doltserver.IsRunning(beadsDir); runErr != nil || (state != nil && state.Running) {
+		t.Fatalf("server state after check = %+v (err %v), want not running", state, runErr)
+	}
+}
+
 func TestDoltServerConfig_HonorsAutoStartOptOut(t *testing.T) {
 	t.Setenv("BEADS_TEST_MODE", "")
 	t.Setenv("BEADS_DOLT_AUTO_START", "0")
@@ -535,6 +582,7 @@ func TestResolveFederationRemotesAPITargetUsesTargetPaths(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "")
@@ -580,14 +628,15 @@ func TestResolveFederationRemotesAPITargetUsesTargetPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantNonSharedData := filepath.Join(nonSharedDir, "dolt")
+	nonSharedSQL := federationTargetSQLConfig(nonSharedDir, nonShared)
 	if nonShared.SharedMode ||
 		nonShared.DoltPath != wantNonSharedData ||
 		nonShared.ServerDir != nonSharedDir ||
-		nonShared.SQLConfig.ServerPort != 15555 ||
-		nonShared.SQLConfig.ServerPortSource != doltserver.PortSourceMetadataJSON ||
-		nonShared.SQLConfig.ServerPortSharedServer ||
+		nonSharedSQL.ServerPort != 15555 ||
+		nonSharedSQL.ServerPortSource != doltserver.PortSourceMetadataJSON ||
+		nonSharedSQL.ServerPortSharedServer ||
 		nonShared.RemotesAPIPort != 7001 {
-		t.Fatalf("non-shared target = %+v, want data:%q state:%q sql:15555 shared-provenance:false rapi:7001", nonShared, wantNonSharedData, nonSharedDir)
+		t.Fatalf("non-shared target = %+v sql=%+v, want data:%q state:%q sql:15555 shared-provenance:false rapi:7001", nonShared, nonSharedSQL, wantNonSharedData, nonSharedDir)
 	}
 
 	sharedDir := filepath.Join(t.TempDir(), ".beads")
@@ -604,14 +653,16 @@ func TestResolveFederationRemotesAPITargetUsesTargetPaths(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(sharedDir, "dolt")); !os.IsNotExist(err) {
 		t.Fatalf("precondition: shared project unexpectedly has local dolt dir: %v", err)
 	}
+	sharedSQL := federationTargetSQLConfig(sharedDir, shared)
 	if !shared.SharedMode ||
 		shared.DoltPath != filepath.Join(sharedRoot, "dolt") ||
 		shared.ServerDir != sharedRoot ||
-		shared.SQLConfig.ServerPort != doltserver.DefaultSharedServerPort ||
-		shared.SQLConfig.ServerPortSource != doltserver.PortSourceSharedServerDefault ||
-		!shared.SQLConfig.ServerPortSharedServer ||
+		sharedSQL.ServerHost != "127.0.0.1" ||
+		sharedSQL.ServerPort != doltserver.DefaultSharedServerPort ||
+		sharedSQL.ServerPortSource != doltserver.PortSourceSharedServerDefault ||
+		!sharedSQL.ServerPortSharedServer ||
 		shared.RemotesAPIPort != 8123 {
-		t.Fatalf("shared target = %+v, want data:%q state:%q sql:%d shared-provenance:true rapi:8123", shared, filepath.Join(sharedRoot, "dolt"), sharedRoot, doltserver.DefaultSharedServerPort)
+		t.Fatalf("shared target = %+v sql=%+v, want data:%q state:%q sql:127.0.0.1:%d shared-provenance:true rapi:8123", shared, sharedSQL, filepath.Join(sharedRoot, "dolt"), sharedRoot, doltserver.DefaultSharedServerPort)
 	}
 }
 
@@ -654,9 +705,6 @@ func TestCheckFederationChecks_CategoryIsFederation(t *testing.T) {
 }
 
 func TestDoltServerConfig_PopulatesFromConfig(t *testing.T) {
-	// Shared mode pins the server host to loopback; this test covers the
-	// per-project host from metadata.json.
-	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	doltDir := filepath.Join(beadsDir, "dolt")

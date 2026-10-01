@@ -29,33 +29,17 @@ func doltDatabaseName(beadsDir string) string {
 // connection settings from beads configuration. This ensures federation checks
 // use the configured host/port rather than falling back to defaults.
 func doltServerConfig(beadsDir, doltPath string) *dolt.Config {
-	sharedMode := doltserver.IsSharedServerMode()
-	return doltServerConfigForTarget(
-		beadsDir,
-		doltPath,
-		doltserver.DefaultConfigForMode(beadsDir, sharedMode),
-		sharedMode,
-	)
-}
-
-func doltServerConfigForTarget(
-	beadsDir, doltPath string,
-	resolved *doltserver.Config,
-	sharedMode bool,
-) *dolt.Config {
 	cfg := &dolt.Config{
-		Path:                   doltPath,
-		ReadOnly:               true,
-		Database:               doltDatabaseName(beadsDir),
-		ServerHost:             resolved.Host,
-		ServerPort:             resolved.Port,
-		ServerPortSource:       resolved.PortSource,
-		ServerPortSharedServer: resolved.PortSharedServer,
+		Path:     doltPath,
+		ReadOnly: true,
+		Database: doltDatabaseName(beadsDir),
 	}
 	if bcfg, err := configfile.Load(beadsDir); err == nil && bcfg != nil {
-		if !sharedMode {
-			cfg.ServerHost = bcfg.GetDoltServerHost()
-		}
+		cfg.ServerHost = bcfg.GetDoltServerHost()
+		// Carries PortSource with the port: this cfg reaches applyConfigDefaults,
+		// which reads a sourceless port as caller-explicit (see
+		// dolt.ApplyResolvedServerPort).
+		dolt.ApplyResolvedServerPort(beadsDir, cfg)
 		cfg.ServerUser = bcfg.GetDoltServerUser()
 		cfg.ServerTLS = bcfg.GetDoltServerTLS()
 		cfg.ServerPassword = bcfg.GetDoltServerPasswordForPort(cfg.ServerPort)
@@ -221,6 +205,7 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 			Category: CategoryFederation,
 		}
 	}
+	sqlConfig := federationTargetSQLConfig(beadsDir, target)
 
 	serverState, _ := doltserver.IsRunning(target.ServerDir)
 	serverRunning := serverState != nil && serverState.Running
@@ -228,7 +213,7 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 	if !serverRunning {
 		// No server running - check if we have remotes configured
 		ctx := context.Background()
-		store, err := dolt.New(ctx, target.SQLConfig)
+		store, err := dolt.New(ctx, sqlConfig)
 		if err != nil {
 			return DoctorCheck{
 				Name:     "Federation remotesapi",
@@ -264,7 +249,7 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 	// probing the remotesapi port. Without peers, remotesapi is irrelevant.
 	{
 		ctx := context.Background()
-		store, err := dolt.New(ctx, target.SQLConfig)
+		store, err := dolt.New(ctx, sqlConfig)
 		if err == nil {
 			remotes, err := store.ListRemotes(ctx)
 			_ = store.Close()
@@ -300,15 +285,14 @@ type federationRemotesAPITarget struct {
 	SharedMode     bool
 	DoltPath       string
 	ServerDir      string
-	SQLConfig      *dolt.Config
 	RemotesAPIPort int
 }
 
-// resolveFederationRemotesAPITarget resolves the server paths, SQL connection
-// and remotesapi port for beadsDir. In shared mode the data directory and the
-// pidfile live under the shared server root, not under the project's .beads/;
-// checking the project paths there reports a missing database or a stopped
-// server for a shared server that is running.
+// resolveFederationRemotesAPITarget resolves the server paths and remotesapi
+// port for beadsDir without side effects. In shared mode the data directory
+// and the pidfile live under the shared server root, not under the project's
+// .beads/; checking the project paths there reports a missing database or a
+// stopped server for a shared server that is running.
 //
 // The remotesapi port follows the same chain the launcher uses
 // (BEADS_DOLT_REMOTESAPI_PORT -> user-global dolt.remotesapi-port for a shared
@@ -330,17 +314,44 @@ func resolveFederationRemotesAPITarget(beadsDir string) (federationRemotesAPITar
 			return federationRemotesAPITarget{}, fmt.Errorf("resolving shared server path: %w", err)
 		}
 	}
-	resolvedServer := doltserver.DefaultConfigForMode(beadsDir, sharedMode)
-	sqlConfig := doltServerConfigForTarget(beadsDir, doltPath, resolvedServer, sharedMode)
-	sqlConfig.AutoStart = false
-	sqlConfig.DisableAutoStart = true
 	return federationRemotesAPITarget{
 		SharedMode:     sharedMode,
 		DoltPath:       doltPath,
 		ServerDir:      serverDir,
-		SQLConfig:      sqlConfig,
 		RemotesAPIPort: doltserver.ResolveRemotesAPIPortForMode(beadsDir, sharedMode),
 	}, nil
+}
+
+// federationTargetSQLConfig is doltServerConfig aimed at the target server.
+// doltServerConfig classifies mode and resolves the port for the ACTIVE
+// workspace (process-wide), as the other federation checks expect; this check
+// resolves both for the target directory, so `bd doctor <path>` describes the
+// server that path uses, and a shared-mode target is addressed on loopback,
+// where the shared server always lives.
+//
+// The remotesapi check never starts a server: the question is whether a
+// RUNNING server opened its listener, and starting one from a diagnostic
+// would both mask "server not running" and, for a shared server, change
+// state for every workspace on the machine. The other federation checks keep
+// doltServerConfig's CLI auto-start policy.
+//
+// Callers run this only after the target's data directory is known to exist,
+// so the shared-mode resolution does not create the shared server root.
+func federationTargetSQLConfig(beadsDir string, target federationRemotesAPITarget) *dolt.Config {
+	cfg := doltServerConfig(beadsDir, target.DoltPath)
+	resolved := doltserver.DefaultConfigForMode(beadsDir, target.SharedMode)
+	if target.SharedMode {
+		cfg.ServerHost = resolved.Host
+	}
+	cfg.ServerPort = resolved.Port
+	cfg.ServerPortSource = resolved.PortSource
+	cfg.ServerPortSharedServer = resolved.PortSharedServer
+	if bcfg, err := configfile.Load(beadsDir); err == nil && bcfg != nil {
+		cfg.ServerPassword = bcfg.GetDoltServerPasswordForPort(cfg.ServerPort)
+	}
+	cfg.AutoStart = false
+	cfg.DisableAutoStart = true
+	return cfg
 }
 
 // checkRemotesAPIListener probes the remotesapi listener of a running server.
