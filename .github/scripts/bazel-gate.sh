@@ -7,7 +7,7 @@
 #   bazel-gate.sh skips      the Bazel gate ids whose job is skipped by design
 #                            in this mode, for CI_GATE_SKIPPED_OK:
 #                              skip:   every lane and the aggregate (BAZEL)
-#                              local:  the remote-only BAZEL_EMBEDDED,
+#                              local, cache: the remote-only BAZEL_EMBEDDED,
 #                                      BAZEL_INTEGRATION, BAZEL_PROXIED,
 #                                      BAZEL_SERVER_STORAGE
 #                              remote: none
@@ -29,7 +29,7 @@ mode="${BAZEL_RBE_MODE:-}"
 enabled="${BAZEL_RBE_ENABLED:-}"
 valid=false
 case "$mode/$enabled" in
-    remote/true | local/false | skip/false) valid=true ;;
+    remote/true | local/false | cache/false | skip/false) valid=true ;;
 esac
 
 case "${1:-}" in
@@ -38,7 +38,7 @@ case "${1:-}" in
         if [[ "$valid" == true ]]; then
             case "$mode" in
                 skip) skips+=(BAZEL BAZEL_TEST BAZEL_PURE BAZEL_EMBEDDED BAZEL_INTEGRATION BAZEL_DOLTSERVER BAZEL_PROXIED BAZEL_SERVER_STORAGE) ;;
-                local) skips+=(BAZEL_EMBEDDED BAZEL_INTEGRATION BAZEL_PROXIED BAZEL_SERVER_STORAGE) ;;
+                local | cache) skips+=(BAZEL_EMBEDDED BAZEL_INTEGRATION BAZEL_PROXIED BAZEL_SERVER_STORAGE) ;;
             esac
         fi
         echo "${skips[*]-}"

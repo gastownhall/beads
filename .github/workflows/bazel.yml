@@ -39,8 +39,14 @@
 #     RBE_TLS_CERT, RBE_TLS_KEY (base64; RBE_TLS_CA optional): remote
 #     execution on rbe-west, instance "oss" (shared with gascity), from the
 #     Blacksmith runner.
-#   local: fork PRs, rbe=off dispatches, and same-repo runs without the
-#     secret (Dependabot PRs: same-repo, but no Actions secrets): local
+#   cache: fork PRs (unless bazel-farm.yml authorized them), rbe=cache
+#     dispatches and same-repo runs without the secret (Dependabot PRs:
+#     same-repo, but no Actions secrets): like local (ubuntu-latest,
+#     remote-only jobs skipped), plus rbe-west's anonymous read-only cache
+#     (.bazelrc --config=fork-cache): hits for every action trusted CI
+#     already executed, no credentials, no uploads. The farm can close it at
+#     any time; Bazel then runs everything locally.
+#   local: rbe=off dispatches (fork simulation without the cache): local
 #     execution on ubuntu-latest, slower but the same results, for every job
 #     but the remote-only ones (bazel-embedded, bazel-integration,
 #     bazel-proxied, bazel-server-storage), which are skipped.
@@ -51,13 +57,14 @@
 # the base branch's .github/bazel-farm-allowlist.txt, with fork-farm:
 # authorized and checkout-sha: the event's pinned head SHA. Only that
 # combination, on a pull_request_target event, lets a fork run remotely; a
-# fork's pull_request run (pr.yml, which the fork may edit) stays local
-# whatever it passes, and has no secrets anyway. See
+# fork's pull_request run (pr.yml, which the fork may edit) stays in mode
+# cache (or local) whatever it passes, and has no secrets anyway. See
 # engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "Trusted-author fork PRs".
-# workflow_dispatch with rbe=off simulates a fork run. The decision is also a
-# workflow_call output (rbe-mode, rbe-enabled), so pr.yml's gate can tell an
-# expected skip from a missing lane without re-deriving it. Callers pass
-# exactly the four RBE secrets below, never `secrets: inherit`.
+# workflow_dispatch with rbe=cache simulates a fork run; rbe=off also drops
+# the cache. The decision is also a workflow_call output (rbe-mode,
+# rbe-enabled), so pr.yml's gate can tell an expected skip from a missing
+# lane without re-deriving it. Callers pass exactly the four RBE secrets
+# below, never `secrets: inherit`.
 #
 # Accepted risk (same model as gascity's bazel-test.yml): on push, merge_group
 # and same-repo pull_request runs, code from the PR head runs with the RBE
@@ -78,11 +85,11 @@
 # the generated rc), and the certificate
 # is issued to beads CI alone, so it can be revoked without affecting other
 # clients. Maintainers decided (2026-09-28) that same-repo PRs keep remote
-# execution under this model. Still open: a beads-only RBE_INSTANCE and
-# farm-side denial of client action-cache writes. Nothing downstream consumes
-# artifacts built here yet; in pr.yml's run the bd artifact is
-# bazel-ci-build-artifacts, so it cannot collide with the build-artifacts
-# job's ci-build-artifacts.
+# execution under this model. Still open: a beads-only RBE_INSTANCE. The farm
+# refuses client action-cache writes (only its workers write; rbe-west D2).
+# Nothing downstream consumes artifacts built here yet; in pr.yml's run the
+# bd artifact is bazel-ci-build-artifacts, so it cannot collide with the
+# build-artifacts job's ci-build-artifacts.
 #
 # Runner cache: one entry per (.bazelversion, MODULE.bazel.lock) pair, about
 # 2 GB (Bazel's content-addressable --repository_cache, re-hashed on every
@@ -100,11 +107,11 @@ on:
   workflow_dispatch:
     inputs:
       rbe:
-        description: "Remote execution: on (use secrets) or off (fork simulation)"
+        description: "Remote execution: on (use secrets), cache (fork simulation: anonymous read-only cache) or off (local only)"
         required: true
         type: choice
         default: "on"
-        options: [ "on", "off" ]
+        options: [ "on", "cache", "off" ]
       details:
         description: "List every equivalence divergence"
         required: false
@@ -189,7 +196,7 @@ on:
         description: "'true' when the lanes executed remotely on rbe-west, else 'false'"
         value: ${{ jobs.rbe.outputs.enabled }}
       rbe-mode:
-        description: "remote, local (no remote-only jobs) or skip (no jobs): the rbe job's decision"
+        description: "remote, cache or local (no remote-only jobs), or skip (no jobs): the rbe job's decision"
         value: ${{ jobs.rbe.outputs.mode }}
       bazel-test:
         description: "bazel-test's job.status"
@@ -235,7 +242,7 @@ jobs:
   # job sees the same answer for the whole run. Its step reads one secret, and
   # only to test it for emptiness: the step's env holds a boolean, never the
   # value, and the step runs no repository code (no checkout). Dependabot
-  # runs read vars but get no secrets, so they come out local, not remote.
+  # runs read vars but get no secrets, so they come out cache, not remote.
   rbe:
     name: execution mode
     runs-on: ubuntu-latest
@@ -251,21 +258,24 @@ jobs:
         env:
           RBE_VAR_ON: ${{ vars.RBE_WEST_WORKERS == 'true' }}
           RBE_INPUT_OFF: ${{ inputs.rbe == 'off' }}
+          RBE_INPUT_CACHE: ${{ inputs.rbe == 'cache' }}
           FORK: ${{ github.event.pull_request.head.repo.fork == true }}
           FORK_FARM: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' && inputs.checkout-sha != '' }}
           HAS_EXECUTOR: ${{ secrets.RBE_WEST_EXECUTOR != '' }}
         run: |
-          for v in RBE_VAR_ON RBE_INPUT_OFF FORK FORK_FARM HAS_EXECUTOR; do
+          for v in RBE_VAR_ON RBE_INPUT_OFF RBE_INPUT_CACHE FORK FORK_FARM HAS_EXECUTOR; do
             case "${!v}" in
               true|false) ;;
               *) echo "::error::$v is '${!v}', want true or false"; exit 1 ;;
             esac
           done
-          # A fork runs locally unless bazel-farm.yml authorized it; an
-          # authorized fork run is remote or nothing (pr.yml's call already
-          # runs it locally).
-          if [ "$RBE_INPUT_OFF" = true ] || { [ "$FORK" = true ] && [ "$FORK_FARM" != true ]; }; then
+          # A fork runs locally with the read-only cache unless
+          # bazel-farm.yml authorized it; an authorized fork run is remote or
+          # nothing (pr.yml's call already runs it locally).
+          if [ "$RBE_INPUT_OFF" = true ]; then
             mode=local
+          elif [ "$RBE_INPUT_CACHE" = true ] || { [ "$FORK" = true ] && [ "$FORK_FARM" != true ]; }; then
+            mode=cache
           elif [ "$RBE_VAR_ON" != true ]; then
             mode=skip
           elif [ "$HAS_EXECUTOR" = true ]; then
@@ -273,21 +283,21 @@ jobs:
           elif [ "$FORK_FARM" = true ]; then
             mode=skip
           else
-            mode=local
+            mode=cache
           fi
           enabled=false
           if [ "$mode" = remote ]; then enabled=true; fi
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
-          echo "Bazel execution mode: **$mode** (RBE_WEST_WORKERS on: $RBE_VAR_ON, rbe=off: $RBE_INPUT_OFF, fork: $FORK, fork farm: $FORK_FARM, executor secret: $HAS_EXECUTOR)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Bazel execution mode: **$mode** (RBE_WEST_WORKERS on: $RBE_VAR_ON, rbe=off: $RBE_INPUT_OFF, rbe=cache: $RBE_INPUT_CACHE, fork: $FORK, fork farm: $FORK_FARM, executor secret: $HAS_EXECUTOR)" | tee -a "$GITHUB_STEP_SUMMARY"
 
   bazel-test:
     name: test
     # Remote-execution runs use the org's Blacksmith pool (the farm's edge
-    # admits it; GitHub-hosted runners are refused) and do not count against
-    # GitHub's concurrent-job cap. Local runs (forks, rbe=off, no secrets)
-    # build everything on the runner, so they get the larger GitHub-hosted
-    # one.
+    # admits any runner holding the client certificate; there is no IP
+    # allowlist) and do not count against GitHub's concurrent-job cap. Local
+    # and cache runs (forks, rbe=off/cache, no secrets) build everything
+    # they miss on the runner, so they get the larger GitHub-hosted one.
     needs: rbe
     runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     # Remote execution goes to rbe-west (instance "oss", the Blacksmith-backed
@@ -338,6 +348,7 @@ jobs:
           RBE_TLS_KEY: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_KEY || '' }}
           RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
           RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
 
       # T1: remote + restored repository cache; T2: remote, cold runner; local:
       # no remote execution (reported, never budgeted).
@@ -559,6 +570,7 @@ jobs:
           RBE_TLS_KEY: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_KEY || '' }}
           RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
           RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
 
       - name: Run js/wasm hook boundary
         run: |
@@ -695,6 +707,7 @@ jobs:
           RBE_TLS_KEY: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_KEY || '' }}
           RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
           RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
 
       # Bazel retries a flaky = True test (up to three attempts) and reports a
       # later pass as PASSED. The policy test greps BUILD files for it; this
@@ -813,6 +826,7 @@ jobs:
           RBE_TLS_KEY: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_KEY || '' }}
           RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
           RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
 
       # Remote: a cold compile (a PR touching a widely imported package; the
       # first cold run took 17 minutes end to end, warm ones ~3.5) plus the
@@ -897,6 +911,7 @@ jobs:
           RBE_TLS_KEY: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_KEY || '' }}
           RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
           RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
 
       # Docker lane only (the A/B control), as in the mirrored jobs; its
       # tests fail rather than skip without the image.
@@ -975,6 +990,7 @@ jobs:
           RBE_TLS_KEY: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_KEY || '' }}
           RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
           RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
 
       # Remote: the longest shard takes ~5-8 minutes (each shard's Go
       # timeout is its job's 15m, 1200s Bazel cap), plus a compile.
@@ -1056,6 +1072,7 @@ jobs:
           RBE_TLS_KEY: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_KEY || '' }}
           RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
           RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
 
       # Remote: the longest shard takes ~2-3 minutes (the storage suite's Go
       # timeout is 15m per shard, 1200s Bazel cap), plus a compile.

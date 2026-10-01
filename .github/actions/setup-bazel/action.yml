@@ -7,12 +7,17 @@ description: >
   and write a CI bazelrc outside the workspace. When the caller passes all of
   BAZEL_REMOTE_EXECUTOR, RBE_TLS_CERT and RBE_TLS_KEY in the step env, that rc
   enables --config=remote-exec for every bazel command; with none of them the
-  job runs locally (fork PRs); a partial set fails. `bazel` on PATH is a
+  job runs locally; with BAZEL_FORK_CACHE=true (and no secrets) it enables
+  the read-only fork cache (--config=fork-cache, fork PRs); a partial set,
+  or the fork cache together with the secrets, fails. `bazel` on PATH is a
   wrapper that always passes the generated rc.
 outputs:
   remote:
     description: '"true" when remote execution is configured'
     value: ${{ steps.rc.outputs.remote }}
+  cache:
+    description: '"true" when the read-only fork cache (rbe-cache) is configured'
+    value: ${{ steps.rc.outputs.cache }}
   cache-restored:
     description: '"true" when a runner Bazel cache was restored (any prefix match)'
     value: ${{ steps.restore.outputs.cache-matched-key != '' }}
