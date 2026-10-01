@@ -502,8 +502,9 @@ func detectBootstrapPlan(beadsDir string, cfg *configfile.Config) BootstrapPlan 
 		// check above does not return for it), so every `bd bootstrap` over a
 		// healthy workspace — including --dry-run and --json — runs it. That is
 		// why the local emptiness proof goes first and the remote check second:
-		// on a healthy workspace the proof stops at its first config row
-		// (issue_prefix), tens of milliseconds, and the remote check — a
+		// on a healthy workspace the proof stops in its config read, at the first
+		// row that is not a seeded default (issue_prefix on any initialized
+		// workspace), tens of milliseconds, and the remote check — a
 		// `git ls-remote` with a 10s timeout — never runs. Only a proven-empty
 		// skeleton pays for the network. The proof's ctx allows 30s and
 		// embeddeddolt.OpenSQL's backoff has no max elapsed time, so a database
@@ -919,6 +920,10 @@ func embeddedDBIsEmpty(dataDir, dbName string) bool {
 //
 //   - config holds exactly skeletonSeededConfig, key and value. This also rules
 //     out the issue_prefix identity marker.
+//   - the database has no Dolt remotes and no branch but main. These live
+//     outside the tables: `bd dolt remote add`, `bd federation add-peer`
+//     without --user, and `bd branch` all succeed on the skeleton and write
+//     only here.
 //   - every other base table is empty, except skeletonBookkeepingTables. This
 //     covers metadata (so the _project_id identity marker), and it covers any
 //     table added later without anyone having to list it here.
@@ -975,6 +980,10 @@ func embeddedDBUserWork(dataDir, dbName string) string {
 	}
 	_ = rows.Close()
 
+	if why := embeddedDoltRefsUserWork(ctx, db); why != "" {
+		return why
+	}
+
 	tables, err := embeddedBaseTables(ctx, db)
 	if err != nil {
 		return fmt.Sprintf("list tables: %v", err)
@@ -1007,23 +1016,56 @@ func embeddedDBUserWork(dataDir, dbName string) string {
 	return ""
 }
 
+// embeddedDoltRefsUserWork returns "" when the database has no Dolt remotes and
+// main is its only branch, as on a fresh skeleton. Otherwise it names the first
+// remote or extra branch, or the read error.
+func embeddedDoltRefsUserWork(ctx context.Context, db *sql.DB) string {
+	remotes, err := embeddedQueryNames(ctx, db, "SELECT name FROM dolt_remotes")
+	if err != nil {
+		return fmt.Sprintf("read dolt_remotes: %v", err)
+	}
+	if len(remotes) > 0 {
+		return fmt.Sprintf("dolt remote %q is configured", remotes[0])
+	}
+	branches, err := embeddedQueryNames(ctx, db, "SELECT name FROM dolt_branches")
+	if err != nil {
+		return fmt.Sprintf("read dolt_branches: %v", err)
+	}
+	for _, branch := range branches {
+		if branch != "main" {
+			return fmt.Sprintf("dolt branch %q exists", branch)
+		}
+	}
+	// Same guard as sawIssues: an empty listing proves nothing.
+	if len(branches) != 1 {
+		return fmt.Sprintf("dolt_branches lists %d branches, want only main", len(branches))
+	}
+	return ""
+}
+
 // embeddedBaseTables lists the base tables (not views) of the current database.
 func embeddedBaseTables(ctx context.Context, db *sql.DB) ([]string, error) {
-	rows, err := db.QueryContext(ctx,
+	return embeddedQueryNames(ctx, db,
 		"SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'")
+}
+
+// embeddedQueryNames runs a query that selects one string column and returns
+// the values in row order.
+func embeddedQueryNames(ctx context.Context, db *sql.DB, query string) ([]string, error) {
+	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	var tables []string
+	var names []string
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
 			return nil, err
 		}
-		tables = append(tables, name)
+		names = append(names, name)
 	}
-	return tables, rows.Err()
+	return names, rows.Err()
 }
 
 // unprovenSiblingDatabases returns the entries in dataDir that an emptiness

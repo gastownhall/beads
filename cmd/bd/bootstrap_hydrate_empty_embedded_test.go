@@ -184,6 +184,10 @@ func TestEmbeddedDBIsEmpty(t *testing.T) {
 		{name: "bd_kv_set", bdArgs: []string{"kv", "set", "mykey", "myval"}, wantWhy: `"kv.mykey"`},
 		{name: "bd_config_set_new_key", bdArgs: []string{"config", "set", "custom.setting", "v"}, wantWhy: `"custom.setting"`},
 		{name: "bd_config_set_changed_default", bdArgs: []string{"config", "set", "compact_batch_size", "7"}, wantWhy: `"compact_batch_size"`},
+		// r3: these three verbs write no table row, only a Dolt remote or branch.
+		{name: "bd_dolt_remote_add", bdArgs: []string{"dolt", "remote", "add", "extra", "file:///tmp/probe-remote"}, wantWhy: `dolt remote "extra"`},
+		{name: "bd_federation_add_peer", bdArgs: []string{"federation", "add-peer", "peer1", "file:///tmp/peer1"}, wantWhy: `dolt remote "peer1"`},
+		{name: "bd_branch", bdArgs: []string{"branch", "feature"}, wantWhy: `dolt branch "feature"`},
 		{name: "issue_row", sql: "INSERT INTO issues (id, title, description, design, acceptance_criteria, notes) VALUES ('hyd-zz1', 't', '', '', '', '')", wantWhy: "table issues"},
 		{name: "project_id_in_metadata", sql: "INSERT INTO metadata (`key`, value) VALUES ('_project_id', 'p')", wantWhy: "table metadata"},
 		{name: "route_row", sql: "INSERT INTO routes (prefix, path) VALUES ('zz', '/tmp/zz')", wantWhy: "table routes"},
