@@ -79,11 +79,16 @@ Current PR-related workflow names:
   red, and autofix only patches packages the PR itself changed), the RBE
   farm is down, or the beads CI RBE client certificate expires (about
   2027-09-27; a partial secret set also fails every same-repo run), fix
-  `main` (`make bazel-sync`) or renew the secrets, or unset the
-  `RBE_WEST_WORKERS` repo variable: same-repo runs then take mode `skip`,
-  which the gate accepts (fork PRs still run locally, so drift on `main`
-  still reaches them), and `pr-risk.yml`'s legacy embedded tier runs and is
-  required again on every PR.
+  `main` (`make bazel-sync`) or renew the secrets. To turn remote execution
+  off instead, first commit `BAZEL_RETIRES_LEGACY_EMBEDDED: "false"` in both
+  `pr.yml` and `pr-risk.yml` (see
+  [Legacy Embedded Tier Retirement](#legacy-embedded-tier-retirement-d2-step-1)),
+  then unset the `RBE_WEST_WORKERS` repo variable: same-repo runs then take
+  mode `skip`, which the gate accepts (fork PRs still run locally, so drift
+  on `main` still reaches them). Unsetting the variable while the flag is
+  still `"true"` turns `CI Gate / Required` red on every same-repo PR
+  (`BAZEL_EMBEDDED_RETIRED`), because PR Risk no longer runs the legacy
+  embedded tier for them.
 - `.github/workflows/bazel-farm.yml`: `Bazel Farm (trusted forks)`
   Runs on `pull_request_target` for fork PRs to `main` whose author and
   triggering user are on `.github/bazel-farm-allowlist.txt`, and calls
@@ -575,6 +580,9 @@ intentionally absent for that event or risk tier:
   and `TEST_EMBEDDED_CMD` may also be `skipped` when
   `bazel-embedded-coverage` reported `covered=true`. `BAZEL_EMBEDDED_COVERAGE`
   (that job's result) must be `success`.
+- In the baseline aggregate, `BAZEL_EMBEDDED_COVERAGE` must be `success` and
+  `BAZEL_EMBEDDED_RETIRED` is red when `covered=true` but the Bazel embedded
+  lane did not run remotely and pass.
 - All baseline jobs must be `success`.
 
 This keeps branch protection pointed at stable aggregate jobs while preserving
@@ -637,48 +645,74 @@ The current embedded Dolt topology already fits the required-check model:
 
 Since D2 step 1, `pr-risk.yml`'s legacy embedded test jobs
 (`test-embedded-storage` x5, `test-embedded-conformance` x2,
-`test-embedded-cmd` x20: 27 jobs) do not run on the PRs where `pr.yml`'s
-gated Bazel lane `Bazel / embedded Dolt tier` (`bazel.yml`'s
+`test-embedded-cmd` x20: 27 jobs) do not run on same-repo PRs. There,
+`pr.yml`'s gated Bazel lane `Bazel / embedded Dolt tier` (`bazel.yml`'s
 `bazel-embedded`, `--config=embedded`, the same tests and shard manifests)
-runs and is required instead.
+is the tier's only pre-merge run, and `CI Gate / Required` requires it to
+have run remotely and passed.
 
-- Who: `pull_request` runs from same-repo branches (not forks) while the
-  `RBE_WEST_WORKERS` repo variable is `true` (any case) and the
-  `RBE_WEST_EXECUTOR` secret is available, which is exactly when
-  `pr.yml`'s Bazel call takes execution mode `remote`.
-- Everyone else keeps the legacy tier unchanged: fork PRs, Dependabot PRs (no
-  Actions secrets), any secret-less run, every PR while `RBE_WEST_WORKERS` is
-  unset or not `true`, and every `merge_group` run (the merge group is the
-  final safety net). `main.yml`'s embedded jobs on push to `main` are
-  untouched.
-- How: `pr-risk.yml`'s `bazel-embedded-coverage` job (no checkout, no
-  repository code; reads `RBE_WEST_EXECUTOR` only as an emptiness test)
-  outputs `covered`. Its env expressions are copied verbatim from
-  `bazel.yml`'s `rbe` job. The three test jobs add
-  `needs.bazel-embedded-coverage.outputs.covered != 'true'` to their `if`, and
-  the risk gate accepts their skip only when `covered == true`; a failed,
-  cancelled or missing decision is red.
+- Switch: the committed workflow env `BAZEL_RETIRES_LEGACY_EMBEDDED`, set to
+  the same literal (`"true"` or `"false"`) in `pr.yml` and `pr-risk.yml`
+  (policy-tested). It is deliberately not the `RBE_WEST_WORKERS` repo
+  variable. A variable is read again by every run and re-run, and the two
+  workflows are separate runs, so one could see it on and the other off;
+  see "Why a committed flag" below.
+- Who: `pull_request` runs from same-repo branches (not forks) that have the
+  `RBE_WEST_EXECUTOR` secret, while the flag is `"true"`.
+- Everyone else keeps the legacy tier unchanged:
+  - fork PRs;
+  - Dependabot PRs (no Actions secrets) and any other run without the
+    secret;
+  - every `merge_group` run (there is no merge queue today, so this is not
+    a pre-merge net);
+  - every PR while the flag is `"false"`.
+
+  `main.yml`'s embedded jobs on push to `main` are untouched.
+- How:
+  - `pr-risk.yml` and `pr.yml` each run the identical
+    `bazel-embedded-coverage` job (policy-tested). The job does no checkout
+    and runs no repository code. It reads the flag, the event, the fork flag,
+    and `RBE_WEST_EXECUTOR` (only as an emptiness test), and outputs
+    `covered`.
+  - The three legacy test jobs add
+    `needs.bazel-embedded-coverage.outputs.covered != 'true'` to their `if`.
+  - PR Risk's gate accepts their skip only when `covered == true`.
+  - `pr.yml`'s gate requires `BAZEL_EMBEDDED_COVERAGE` (the job's result)
+    and `BAZEL_EMBEDDED_RETIRED`. The latter is red when `covered == true`
+    and the Bazel call's mode is not `remote` or `BAZEL_EMBEDDED` is not
+    `success`. In particular, mode `skip` (the farm switch off) is red
+    there, although `bazel-gate.sh` alone would accept it.
+  - A failed, cancelled or missing decision is red in both gates.
 - `build-embedded` keeps running: its `embedded-test-binaries` artifact also
   feeds `test-proxied-cmd`, `test-server-storage` and
   `test-server-storage-full`, which are not retired in this step.
-- Drift guard: `scripts/pr_risk_bazel_coverage_test.go` runs `bazel.yml`'s
-  actual `rbe` decision step (with `pr.yml`'s call inputs) and
-  `bazel-embedded-coverage`'s step over every combination of event, variable
-  value, secret presence and fork, and requires `covered` to be true exactly
-  when the event is `pull_request` and the mode is `remote`. It also requires
-  `pr.yml`'s gate to require `BAZEL_EMBEDDED` (not skippable in mode `remote`)
-  and the two workflows to share their `pull_request` triggers.
-- Safety relies on the beads-only ruleset requiring both
-  `CI Gate / Required` (which gates the Bazel lane) and
-  `PR Risk Gate / Required`.
-- Residual risk: the two decisions are evaluated in different workflow runs.
-  If `RBE_WEST_WORKERS` is unset between `pr-risk.yml`'s decision and
-  `pr.yml`'s `rbe` job (a window of seconds), that run may have neither tier;
-  re-run both workflows after flipping the variable.
-- Revert: unset `RBE_WEST_WORKERS` (or set it to anything but `true`). The
-  next run of every PR then takes `covered=false` and runs and requires the
-  legacy tier, with no workflow change. Reverting the commit removes the
-  decision job entirely.
+- Why a committed flag:
+  - `covered` no longer depends on anything mutable but the secret. So any
+    run or re-run of PR Risk that skips the legacy tier is matched by
+    `pr.yml` runs that compute the same `covered`.
+  - Each such `pr.yml` run is green only if the Bazel lane ran remotely and
+    passed in that run.
+  - Flipping `RBE_WEST_WORKERS` either way, plus "Re-run all jobs" of
+    either workflow, can no longer leave both required checks green with
+    neither tier run.
+  - `scripts/pr_risk_bazel_coverage_test.go` checks this by running both
+    workflows' actual decision steps, `bazel.yml`'s `rbe` step and `pr.yml`'s
+    actual gate step over every event, variable value, secret, fork and flag
+    combination, with the variable differing between the two runs. It also
+    requires the two workflows to share their `pull_request` triggers.
+- Residual risk: deleting or rotating `RBE_WEST_EXECUTOR` to empty between
+  the two workflows' decisions (or before a re-run of only one of them) can
+  leave PR Risk covered and `pr.yml` uncovered, with `pr.yml` in mode
+  `local`. This is rare and an admin action.
+- Revert:
+  1. Commit `BAZEL_RETIRES_LEGACY_EMBEDDED: "false"` in both workflows on
+     `main`.
+  2. Every PR needs a new push or a merge of `main` to pick it up: a
+     pull_request run uses the workflow files of the PR's merge commit, and
+     a re-run reuses that commit.
+  3. Only then unset `RBE_WEST_WORKERS`, if remote execution should be off.
+
+  Reverting the D2 commits removes the decision jobs entirely.
 - Not changed: `conformance.yml`'s Tier 1 (`scripts/conformance.sh`) runs the
   embedded-Dolt `TestConformance` again (non-race, unsharded), duplicating
   `test-embedded-conformance` and the Bazel lane. It is not part of either

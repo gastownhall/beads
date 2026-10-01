@@ -12,6 +12,15 @@ concurrency:
 env:
   BD_DISABLE_METRICS: "1"
   BD_DISABLE_EVENT_FLUSH: "1"
+  # D2 step 1: "true" retires PR Risk's legacy embedded-Dolt test jobs on
+  # same-repo pull_requests that have the RBE executor secret; pr.yml's
+  # gated Bazel lane is then the tier's only pre-merge run, and pr.yml's
+  # gate goes red unless that lane ran remotely and passed. Committed, not a
+  # repo variable, so a re-run can never change it; must equal pr.yml's /
+  # pr-risk.yml's copy (scripts/pr_risk_bazel_coverage_test.go). Revert:
+  # commit "false" in both workflows (in-flight PRs pick it up on their next
+  # push or merge of main).
+  BAZEL_RETIRES_LEGACY_EMBEDDED: "true"
 
 jobs:
   detect-ci-tier:
@@ -55,19 +64,17 @@ jobs:
             printf '%s\n' "$selection" | sed 's/^/- `/' | sed 's/$/`/'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # D2 step 1: whether pr.yml's gated Bazel lane runs the embedded-Dolt tier
-  # for this run, so the legacy test-embedded-* jobs below can stand down.
-  # True only on a same-repo (not fork) pull_request whose Bazel call will
-  # take execution mode remote: RBE_WEST_WORKERS on and the RBE executor
-  # secret present. The env expressions are bazel.yml's rbe job's, verbatim
-  # (pr.yml's call passes no rbe or fork-farm input and never runs on
-  # pull_request_target, so its mode is remote exactly then), and
-  # scripts/pr_risk_bazel_coverage_test.go runs both decision scripts over the same
-  # scenarios so they cannot drift. Forks and Dependabot (no secrets), the
-  # farm switch unset, merge_group and every other event keep the legacy tier.
-  # Like bazel.yml's rbe job, the step reads the secret only as an emptiness
-  # test (a boolean) and runs no repository code. Revert: unset
-  # RBE_WEST_WORKERS and every PR runs the legacy tier again.
+  # D2 step 1: whether the legacy test-embedded-* jobs below stand down
+  # because pr.yml's gated Bazel `embedded Dolt tier` lane is this PR's run of
+  # the tier. True only with BAZEL_RETIRES_LEGACY_EMBEDDED, on a same-repo (not
+  # fork) pull_request that has the RBE executor secret: exactly where
+  # bazel.yml's mode is remote or (RBE_WEST_WORKERS unset) skip, never local.
+  # pr.yml runs this same job (policy-tested identical) and its gate goes red
+  # unless the lane then ran remotely and passed, so the kill switch cannot
+  # silently drop the tier. Forks and Dependabot (no secrets), merge_group and
+  # every other event keep the legacy tier. Like bazel.yml's rbe job, the step
+  # reads the secret only as an emptiness test (a boolean) and runs no
+  # repository code.
   bazel-embedded-coverage:
     name: Bazel embedded coverage
     runs-on: ubuntu-latest
@@ -75,27 +82,30 @@ jobs:
     outputs:
       covered: ${{ steps.decide.outputs.covered }}
     steps:
-      # The expressions' == is case-insensitive (RBE_WEST_WORKERS=True counts).
+      # GitHub's == is case-insensitive. FORK and HAS_EXECUTOR are bazel.yml's
+      # rbe job's expressions, verbatim; RBE_WEST_WORKERS is deliberately not
+      # read (a mutable variable, evaluated per run, would let one workflow's
+      # re-run disagree with the other's).
       - name: Decide whether the Bazel lane covers the embedded tier
         id: decide
         env:
+          RETIRED: ${{ env.BAZEL_RETIRES_LEGACY_EMBEDDED == 'true' }}
           PULL_REQUEST: ${{ github.event_name == 'pull_request' }}
-          RBE_VAR_ON: ${{ vars.RBE_WEST_WORKERS == 'true' }}
           FORK: ${{ github.event.pull_request.head.repo.fork == true }}
           HAS_EXECUTOR: ${{ secrets.RBE_WEST_EXECUTOR != '' }}
         run: |
-          for v in PULL_REQUEST RBE_VAR_ON FORK HAS_EXECUTOR; do
+          for v in RETIRED PULL_REQUEST FORK HAS_EXECUTOR; do
             case "${!v}" in
               true|false) ;;
               *) echo "::error::$v is '${!v}', want true or false"; exit 1 ;;
             esac
           done
           covered=false
-          if [ "$PULL_REQUEST" = true ] && [ "$FORK" = false ] && [ "$RBE_VAR_ON" = true ] && [ "$HAS_EXECUTOR" = true ]; then
+          if [ "$RETIRED" = true ] && [ "$PULL_REQUEST" = true ] && [ "$FORK" = false ] && [ "$HAS_EXECUTOR" = true ]; then
             covered=true
           fi
           echo "covered=$covered" >> "$GITHUB_OUTPUT"
-          echo "Bazel embedded Dolt tier replaces the legacy tier: **$covered** (pull_request: $PULL_REQUEST, fork: $FORK, RBE_WEST_WORKERS on: $RBE_VAR_ON, executor secret: $HAS_EXECUTOR)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Legacy embedded Dolt tier retired in favour of the Bazel lane: **$covered** (retired: $RETIRED, pull_request: $PULL_REQUEST, fork: $FORK, executor secret: $HAS_EXECUTOR)" | tee -a "$GITHUB_STEP_SUMMARY"
 
   # End-to-end coverage for proxied-server CLI subcommands, sharded across the
   # CI matrix. Each sub-test drives the bd CLI subprocess against a real dolt

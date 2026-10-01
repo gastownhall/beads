@@ -6,11 +6,13 @@
 #
 # PRs and merge groups run it through pr.yml's `bazel` job (workflow_call),
 # in the same run as the legacy jobs it mirrors, which stay required too,
-# except pr-risk.yml's embedded-Dolt test jobs: on a same-repo pull_request
-# whose mode (below) is remote, pr-risk.yml's bazel-embedded-coverage job
-# stands them down and bazel-embedded alone runs the tier. That job copies
-# the rbe job's expressions; scripts/pr_risk_bazel_coverage_test.go keeps
-# the two decisions equal.
+# except pr-risk.yml's embedded-Dolt test jobs: while the committed
+# BAZEL_RETIRES_LEGACY_EMBEDDED flag is "true", on a same-repo pull_request
+# with the executor secret (mode remote, or skip with RBE_WEST_WORKERS
+# unset), pr-risk.yml's bazel-embedded-coverage job stands them down and
+# bazel-embedded alone runs the tier; pr.yml's ci-gate then requires that
+# lane to have run remotely and passed, so mode skip is red there
+# (scripts/pr_risk_bazel_coverage_test.go).
 # This file has no pull_request or merge_group trigger of its own, so a PR
 # runs the lane once. Every lane reports its job.status as a workflow_call
 # output (named after the job) from an always() last step. pr.yml's ci-gate
@@ -664,8 +666,9 @@ jobs:
     # processes (~7-10k test-seconds) on one runner, an hour or more per run
     # on the pool whose job cap this track exists to relieve, and it proves
     # nothing pr-risk.yml's embedded jobs (which do run for forks) do not.
-    # Where it does run on a pull_request, those jobs stand down (pr-risk.yml's
-    # bazel-embedded-coverage), so this lane is then the tier's only PR run.
+    # On same-repo pull_requests those jobs stand down (pr-risk.yml's
+    # bazel-embedded-coverage), so this lane is then the tier's only PR run
+    # and pr.yml's gate requires it to have run here and passed.
     # The runs-on expression is the shared one and always picks the
     # Blacksmith runner under this if.
     needs: rbe

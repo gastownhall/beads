@@ -2048,7 +2048,8 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 	if !contains(gate.Needs, "bazel") {
 		t.Errorf("ci-gate needs = %v, want bazel", gate.Needs)
 	}
-	wantBazelIDs := []string{bazelAggregateGateID}
+	// Plus D2 step 1's retirement check (TestPRRiskEmbeddedDecisionMatchesBazelMode).
+	wantBazelIDs := []string{bazelAggregateGateID, "BAZEL_EMBEDDED_COVERAGE", "BAZEL_EMBEDDED_RETIRED"}
 	for lane, id := range bazelLaneGateIDs {
 		wantBazelIDs = append(wantBazelIDs, id)
 		if want := "${{ needs.bazel.outputs." + lane + " || 'skipped' }}"; evaluate.Env[id] != want {
@@ -2217,8 +2218,11 @@ type bazelGateScenario struct {
 	mode, enabled string            // the call's rbe-mode / rbe-enabled outputs
 	call          string            // needs.bazel.result
 	outputs       map[string]string // the lanes' outputs ("" = not reported)
-	wantPass      bool
-	wantMention   string // a red gate must name this id
+	// pr.yml's bazel-embedded-coverage job (D2 step 1): its covered output
+	// and its result ("" = success).
+	covered, coverage string
+	wantPass          bool
+	wantMention       string // a red gate must name this id
 }
 
 // runPRGateStep runs pr.yml's actual "Evaluate CI gate" step (its run block,
@@ -2241,6 +2245,13 @@ func runPRGateStep(t *testing.T, step ciWorkflowStep, sc bazelGateScenario) (boo
 		}
 		var got string
 		switch {
+		case m[1] == prRiskCoverageJobName && m[2] == "result":
+			got = sc.coverage
+			if got == "" {
+				got = "success"
+			}
+		case m[1] == prRiskCoverageJobName && m[3] == "covered":
+			got = sc.covered
 		case m[1] != "bazel" && m[2] == "result":
 			got = "success"
 		case m[1] != "bazel":
