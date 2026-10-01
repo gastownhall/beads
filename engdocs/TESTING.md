@@ -114,6 +114,34 @@ Dolt Full Suite N/16)", `//internal/storage/dolt:dolt_server_*_test`), which
 builds with the integration tag like `--config=integration`. Each shard
 runs its CI job's shard script, so Bazel shard k runs the tests of job k+1.
 
+An ambient `BEADS_DOLT_SERVER_PORT` or `BEADS_DOLT_PORT` is never honored by
+the suites that call `testutil.EnsureDoltContainerForTestMain`. When a test
+container is started, that container's port overwrites both variables; when one
+cannot be started -- for any reason, including `BEADS_TEST_SKIP=dolt` -- both
+are cleared, so no environment-named server can be resolved. Point a test run
+at a specific Dolt server by starting a container for it, not by exporting a
+port.
+
+The one sanctioned way to hand these suites a server you started yourself is
+`./scripts/test.sh` with `BEADS_TEST_SHARED_SERVER=1`: it starts one
+`dolt sql-server`, exports its port as `BEADS_DOLT_PORT`, and marks it by
+exporting `BEADS_TEST_SHARED_DOLT_SERVER` set to that same port number. It
+starts nothing if either port variable is still set when it gets there. The
+runner's test environment clears both first, so that only happens when that
+isolation is skipped (for example `BEADS_TEST_ENV_DISABLE=1`), and the script
+then says so on stderr. The marker -- set only by that script, only for a
+port it allocated -- is what the helper treats as container-equivalent, and
+only for a variable holding exactly the port it names: that variable survives
+the clearing above, and any other port variable is still cleared. A container
+still wins where one can be started; the shared server is the Docker-less path.
+
+Clearing the environment variables closes the channel the ambient port
+travelled on; it does not make a port unresolvable in general. Resolution
+continues into the file chain (`.beads/dolt-server.port`, `config.yaml`,
+`metadata.json`), and `internal/storage/dolt`'s production-port detection is
+narrower than that resolution -- see `be-rl6tm`, which tracks the remaining
+gap.
+
 Tests that need a temporary repository or store should use `t.TempDir()` and
 `t.Cleanup()`. Temporary repositories must set a repository-local hooks path;
 do not inherit the developer's global hooks configuration.

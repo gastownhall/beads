@@ -88,7 +88,7 @@ func TestUpdateForwardsEveryDocumentedMember(t *testing.T) {
 		t.Errorf("the role received actor %q id %q", req.Actor, req.IssueID)
 	}
 	// Every precondition and force flag stays zero: unpublished on this surface.
-	if req.Claim || req.ForceAssigneeTransfer || req.ForceClosePolicy ||
+	if req.Claim || req.ForceAssigneeTransfer || req.ForceClosePolicy || req.ForceNotesOverwrite ||
 		req.ExpectedVersion != nil || req.ExpectedAssignee != nil || req.ExpectedStatus != nil {
 		t.Errorf("the handler published a precondition or force flag: %+v", req)
 	}
@@ -320,6 +320,7 @@ func TestUpdateRejectsTheShapesTheDocumentRefuses(t *testing.T) {
 		{"unknown metadata member", `{"actor":"alice","patch":{"metadata":{"clear":true}}}`, "patch.metadata.clear"},
 		{"force_assignee_transfer without an assignee edit", `{"actor":"alice","patch":{"title":"t"},"force_assignee_transfer":true}`, "force_assignee_transfer"},
 		{"force_assignee_transfer beside expected_assignee", `{"actor":"alice","patch":{"assignee":"bob"},"force_assignee_transfer":true,"expected_assignee":"carol"}`, "force_assignee_transfer"},
+		{"force_notes_overwrite without a notes edit", `{"actor":"alice","patch":{"title":"t"},"force_notes_overwrite":true}`, "force_notes_overwrite"},
 		// The guard is a decimal STRING; a bare number is the spelling this
 		// contract deliberately does not also accept, since a double-based
 		// client would have rounded it before it ever arrived.
@@ -927,6 +928,15 @@ func TestUpdateAnswersThePolicyRefusalsItsMembersEarned(t *testing.T) {
 					t.Errorf("assignee = %v; the fence reports no typed holder, so this must not be scraped from the message", got)
 				}
 			},
+		},
+		{
+			name:       "notes overwrite refused",
+			body:       `{"actor":"alice","patch":{"notes":"replacement"}}`,
+			err:        fmt.Errorf("update: %w: issue bd-1", storage.ErrNotesOverwrite),
+			wantStatus: http.StatusConflict,
+			wantCode:   CodeNotesOverwrite,
+			wantParam:  "patch.notes",
+			check:      func(*testing.T, map[string]any) {},
 		},
 		{
 			// THE DEFENSIVE ARM, driven directly because no reparent can reach

@@ -483,16 +483,142 @@ func ensureSharedContainer() {
 	})
 }
 
+// checkDoltFn is the readiness probe used by EnsureDoltContainerForTestMain.
+// It is a variable purely so the fail-closed regression test can force a
+// not-ready state deterministically -- without a Docker daemon, and without
+// starting the shared singleton container just to observe the failure path.
+// Production code never reassigns it. The direct checkDolt() calls in the
+// t.Skip paths above and below are deliberately left alone: they gate a skip,
+// not the fail-closed behavior this seam exists to test.
+var checkDoltFn = checkDolt
+
+// startSharedContainerFn starts the shared container once checkDoltFn reports
+// ready. It is a variable for the same reason checkDoltFn is: the fail-closed
+// tests reach the container-would-not-start path through it without consuming
+// doltServerOnce, which would leave this package's real-container test running
+// against a singleton that has already failed. Production code never
+// reassigns it.
+var startSharedContainerFn = startSharedContainer
+
+// EnvSharedDoltServer names the one Dolt port that a test harness started a
+// server on for this process tree, as opposed to a port inherited from the
+// surrounding environment. Its value is that port number: scripts/test.sh sets
+// it to the same value as the BEADS_DOLT_PORT it exports for the dockerless
+// `dolt sql-server` of its BEADS_TEST_SHARED_SERVER=1 flow. It vouches for that
+// value only, never for the process: a port variable holding anything else is
+// still ambient, however it got there.
+//
+// It is deliberately a distinct name from BEADS_TEST_SHARED_SERVER. That flag
+// is also read by cmd/bd's shared-server integration test for an unrelated
+// purpose, and it only says a shared server was asked for, not that one was
+// started: the flow starts none when a port variable is already set, so the
+// flag beside a port cannot tell the script's own port from an inherited one.
+const EnvSharedDoltServer = "BEADS_TEST_SHARED_DOLT_SERVER"
+
+// sharedContainerErr reads the shared-container error under doltServerMu.
+// Every write to doltServerErr takes that mutex (ensureSharedContainer,
+// RestartSharedDoltContainer), so reads belong under it too; callers must not
+// already hold the mutex.
+func sharedContainerErr() error {
+	doltServerMu.Lock()
+	defer doltServerMu.Unlock()
+	return doltServerErr
+}
+
+// startSharedContainer is ensureSharedContainer plus the error it recorded.
+func startSharedContainer() error {
+	ensureSharedContainer()
+	return sharedContainerErr()
+}
+
 // EnsureDoltContainerForTestMain starts a shared Dolt container for use in
 // TestMain functions. Call TerminateDoltContainer() after m.Run() to clean up.
-// Sets BEADS_DOLT_PORT and BEADS_DOLT_SERVER_PORT process-wide.
+// On success it sets BEADS_DOLT_PORT and BEADS_DOLT_SERVER_PORT process-wide,
+// which also means a container, when one can be started, takes precedence over
+// any port the environment already named.
+//
+// On ANY failure -- Docker missing, image missing or wrong version, an
+// explicit BEADS_TEST_SKIP=dolt opt-out, or a container that would not start
+// -- it instead clears both variables (see neutralizeAmbientDoltPort) and
+// returns an error. Callers that warn and run the suite anyway therefore
+// cannot resolve a store onto an ambient server.
+//
+// The single exception is a variable holding exactly the port that
+// EnvSharedDoltServer names, i.e. one a harness provisioned for this process
+// tree: that is a dedicated test server and survives the failure paths (see
+// neutralizeUnvouchedDoltPorts). Without that exception this function would
+// erase the port scripts/test.sh exports for its own shared `dolt sql-server`,
+// which on a Docker-less host is every one of these TestMains.
 func EnsureDoltContainerForTestMain() error {
-	if state := checkDolt(); state != doltReady {
-		return fmt.Errorf("%s", state)
+	var err error
+	if state := checkDoltFn(); state != doltReady {
+		err = fmt.Errorf("%s", state)
+	} else {
+		err = startSharedContainerFn()
 	}
+	// One clear serves both failure paths, so "no usable container" and "a
+	// container that would not start" cannot drift apart.
+	if err != nil {
+		neutralizeUnvouchedDoltPorts()
+	}
+	return err
+}
 
-	ensureSharedContainer()
-	return doltServerErr
+// neutralizeUnvouchedDoltPorts is the clear EnsureDoltContainerForTestMain
+// applies when it has no container: neutralizeAmbientDoltPort, except that a
+// port variable holding exactly the port EnvSharedDoltServer names survives,
+// and says so on stderr, because the suite is about to talk to that server.
+//
+// The decision is made per variable, not per process. scripts/test.sh vouches
+// for the BEADS_DOLT_PORT it exports; an unrelated BEADS_DOLT_SERVER_PORT
+// beside it -- which applyConfigDefaults in internal/storage/dolt resolves
+// FIRST, falling back to BEADS_DOLT_PORT only when it is empty -- is cleared
+// even though the marker is set, or it would outrank the harness's server and
+// carry the suite onto whatever server it names (gm-2g3g5r).
+func neutralizeUnvouchedDoltPorts() {
+	vouched := os.Getenv(EnvSharedDoltServer)
+	if vouched == "" {
+		neutralizeAmbientDoltPort()
+		return
+	}
+	for _, name := range []string{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"} {
+		if os.Getenv(name) == vouched {
+			fmt.Fprintf(os.Stderr, "testutil: keeping %s=%s, the harness-provisioned test server named by %s\n",
+				name, vouched, EnvSharedDoltServer)
+			continue
+		}
+		_ = os.Unsetenv(name)
+	}
+}
+
+// neutralizeAmbientDoltPort clears the inherited connection-port variables so
+// that a TestMain which warns-and-continues without a container cannot resolve
+// a store onto whatever server the ambient environment names -- in a gc-managed
+// city, the production one (gm-2g3g5r).
+//
+// What this guarantees is exactly that: no ENVIRONMENT-NAMED port is honored.
+// It is not the wider claim that no port is resolvable afterwards. Port
+// resolution continues past the env vars into the file chain, and
+// applyConfigDefaults derives a directory from filepath.Dir(cfg.Path) when
+// cfg.BeadsDir is empty (internal/storage/dolt/store.go:1661-1664), so a
+// reachable .beads/dolt-server.port can still supply a non-zero port -- the
+// ServerPort == 0 arm of the BEADS_TEST_MODE guard (store.go:1683-1687) then
+// never fires. Port 1 is forced only via isProductionPort, and
+// production-port DETECTION is narrower than resolution: Rule 1 recognizes
+// only DefaultSQLPort, and Rule 3 -- the only rule that sees a dynamic port --
+// needs an explicit cfg.BeadsDir and is suppressed by the BEADS_TEST_SERVER=1
+// that beads TestMains set. That residual is tracked in be-rl6tm; clearing the
+// env vars removes the channel this leak actually traveled on, not every
+// channel.
+//
+// This fires on EVERY not-ready state, not only "Docker unavailable": a
+// missing or wrong-version image and an explicit BEADS_TEST_SKIP=dolt opt-out
+// clear the ambient port too. That is deliberate. The invariant is about the
+// absence of a test container, not about the reason for it -- an opted-out run
+// has no more business reaching a shared server than a Docker-less one does.
+func neutralizeAmbientDoltPort() {
+	_ = os.Unsetenv("BEADS_DOLT_SERVER_PORT")
+	_ = os.Unsetenv("BEADS_DOLT_PORT")
 }
 
 // RequireDoltContainer ensures a shared Dolt container is running. Skips the

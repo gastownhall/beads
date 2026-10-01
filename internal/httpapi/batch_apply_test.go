@@ -74,8 +74,8 @@ func TestApplyBatchForwardsEveryLevelOfTheDocumentedBody(t *testing.T) {
 			{"kind":"update","update":{
 				"target":{"key":"root"},
 				"expected_status":"open","expected_assignee":"bob",
-				"force_close_policy":true,"force_assignee_transfer":true,
-				"patch":{"title":"renamed","status":"closed","assignee":"dave","owner":"erin",
+				"force_close_policy":true,"force_assignee_transfer":true,"force_notes_overwrite":true,
+				"patch":{"title":"renamed","status":"closed","assignee":"dave","owner":"erin","notes":"replacement",
 					"labels":{"replace":["a"],"add":["b"],"remove":["c"]},
 					"metadata":{"set":{"k":null},"unset":["old"]},
 					"estimated_minutes":null}}},
@@ -179,8 +179,12 @@ func TestApplyBatchForwardsEveryLevelOfTheDocumentedBody(t *testing.T) {
 	if update.ExpectedAssignee == nil || *update.ExpectedAssignee != "bob" {
 		t.Errorf("update.expected_assignee = %v, want bob", update.ExpectedAssignee)
 	}
-	if !update.ForceClosePolicy || !update.ForceAssigneeTransfer {
-		t.Errorf("update force flags = %v/%v, want both true", update.ForceClosePolicy, update.ForceAssigneeTransfer)
+	if !update.ForceClosePolicy || !update.ForceAssigneeTransfer || !update.ForceNotesOverwrite {
+		t.Errorf("update force flags = %v/%v/%v, want all three true",
+			update.ForceClosePolicy, update.ForceAssigneeTransfer, update.ForceNotesOverwrite)
+	}
+	if !update.Patch.Notes.Set || update.Patch.Notes.Value != "replacement" {
+		t.Errorf("update.patch.notes = %+v, want replacement", update.Patch.Notes)
 	}
 	if !update.Patch.Status.Set || string(update.Patch.Status.Value) != "closed" {
 		t.Errorf("update.patch.status = %+v, want the crossing status this operation publishes", update.Patch.Status)

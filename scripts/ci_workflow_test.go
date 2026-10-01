@@ -2110,7 +2110,8 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 	if !contains(gate.Needs, "bazel") {
 		t.Errorf("ci-gate needs = %v, want bazel", gate.Needs)
 	}
-	wantBazelIDs := []string{bazelAggregateGateID}
+	// Plus D2 step 1's retirement check (TestPRRiskEmbeddedDecisionMatchesBazelMode).
+	wantBazelIDs := []string{bazelAggregateGateID, "BAZEL_EMBEDDED_COVERAGE", "BAZEL_EMBEDDED_RETIRED"}
 	for lane, id := range bazelLaneGateIDs {
 		wantBazelIDs = append(wantBazelIDs, id)
 		if want := "${{ needs.bazel.outputs." + lane + " || 'skipped' }}"; evaluate.Env[id] != want {
@@ -2163,7 +2164,9 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 		}
 	}
 
-	// Legacy jobs stay required: D1 adds, D2 removes.
+	// Legacy jobs stay required: D1 adds, D2 removes. (D2 step 1 lets
+	// pr-risk.yml's embedded test jobs skip where this lane runs remotely,
+	// but they stay required ids: TestPRRiskLegacyEmbeddedTierDefersToBazelLane.)
 	for id, job := range map[string]string{
 		"BUILD_ARTIFACTS":            "build-artifacts",
 		"PR_CORE_WRAPPER":            "pr-core-wrapper",
@@ -2277,8 +2280,11 @@ type bazelGateScenario struct {
 	mode, enabled string            // the call's rbe-mode / rbe-enabled outputs
 	call          string            // needs.bazel.result
 	outputs       map[string]string // the lanes' outputs ("" = not reported)
-	wantPass      bool
-	wantMention   string // a red gate must name this id
+	// pr.yml's bazel-embedded-coverage job (D2 step 1): its covered output
+	// and its result ("" = success).
+	covered, coverage string
+	wantPass          bool
+	wantMention       string // a red gate must name this id
 }
 
 // runPRGateStep runs pr.yml's actual "Evaluate CI gate" step (its run block,
@@ -2301,6 +2307,13 @@ func runPRGateStep(t *testing.T, step ciWorkflowStep, sc bazelGateScenario) (boo
 		}
 		var got string
 		switch {
+		case m[1] == prRiskCoverageJobName && m[2] == "result":
+			got = sc.coverage
+			if got == "" {
+				got = "success"
+			}
+		case m[1] == prRiskCoverageJobName && m[3] == "covered":
+			got = sc.covered
 		case m[1] != "bazel" && m[2] == "result":
 			got = "success"
 		case m[1] != "bazel":
@@ -3396,6 +3409,33 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 // runs the embedded variants race like the jobs' binaries, with the jobs'
 // parallelism; each shard variant runs its job's shard script with the job's
 // shard total, and the conformance variants pass the jobs' exact selectors.
+// bazel-embedded's test step, exactly (review F4).
+const bazelEmbeddedTestRun = `set -o pipefail
+start=$(date +%s)
+rc=0
+bazel test //... --config=embedded \
+  --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+  2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
+echo "bazel test --config=embedded: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
+exit "$rc"`
+
+// .bazelrc's --config=embedded, exactly and in order (review F4): no
+// --test_filter, no -test.short/-test.run/-test.skip, no retries, no
+// result caching. The conformance targets' own -test.run/-test.skip args
+// (the legacy jobs' partition) are checked against pr-risk.yml below.
+var bazelEmbeddedRCLines = []string{
+	"test:embedded --@rules_go//go/config:race",
+	"test:embedded --test_tag_filters=embedded",
+	"test:embedded --build_tests_only",
+	"test:embedded --keep_going",
+	"test:embedded --test_summary=terse",
+	"test:embedded --test_timeout=-1,-1,-1,1200",
+	"test:embedded --test_arg=-test.parallel=4",
+	"test:embedded --test_env=GO_TEST_WRAP_TESTV=1",
+	"test:embedded --remote_download_regex=.*/test\\.xml$",
+	"test:embedded --nocache_test_results",
+}
+
 func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelEmbedJobName)
 	test := job.step(t, "bazel test //... --config=embedded")
@@ -3406,6 +3446,13 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		t.Errorf("embedded step selects remote-exec itself; setup-bazel's rc does that only when secrets are present")
 	}
 	assertTestStepKeepsExitStatus(t, test)
+	// Review F4: the exact command line. Since D2 step 1 this lane is the
+	// tier's only pre-merge run on same-repo PRs, so an extra flag (a
+	// --test_filter, a --test_arg=-test.short/-test.run/-test.skip) that
+	// quietly narrows it must be a reviewed edit of this test too.
+	if strings.TrimSpace(test.Run) != bazelEmbeddedTestRun {
+		t.Errorf("embedded step run changed; want exactly:\n%s\ngot:\n%s", bazelEmbeddedTestRun, test.Run)
+	}
 	// A shard with no tests assigned, or a selector that matches nothing,
 	// exits 0; the job fails on any target or shard whose test.xml lists none.
 	if !strings.Contains(test.Run, `--build_event_json_file="$RUNNER_TEMP/bazel-bep.json"`) {
@@ -3427,12 +3474,43 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		"test:embedded --test_tag_filters=embedded",
 		// The jobs pass no -parallel: GOMAXPROCS on 4-vCPU ubuntu-latest.
 		"test:embedded --test_arg=-test.parallel=4",
+		// The tier's only pre-merge run (D2 step 1) must execute, like the
+		// legacy jobs' -test.count=1, never replay a cached result.
+		"test:embedded --nocache_test_results",
 	} {
 		if !rc[want] {
 			t.Errorf(".bazelrc lacks %q", want)
 		}
 	}
+	// Review F4: --config=embedded is exactly these lines, in this order, and
+	// no unconfigured common/build/test line (which applies to every config)
+	// selects or narrows tests.
+	var embeddedLines []string
+	narrow := regexp.MustCompile(`test_filter|test_arg|-test\.(short|run|skip)|test_tag_filters|test_lang_filters|test_size_filters|test_timeout_filters`)
+	for _, line := range strings.Split(readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc"), "\n") {
+		line = strings.TrimSpace(line)
+		cmd, _, _ := strings.Cut(line, " ")
+		if strings.HasSuffix(cmd, ":embedded") {
+			embeddedLines = append(embeddedLines, line)
+		}
+		if (cmd == "common" || cmd == "build" || cmd == "test") && narrow.MatchString(line) {
+			t.Errorf(".bazelrc %q narrows every config's tests, including --config=embedded", line)
+		}
+	}
+	if !reflect.DeepEqual(embeddedLines, bazelEmbeddedRCLines) {
+		t.Errorf(".bazelrc --config=embedded lines changed; want exactly:\n%s\ngot:\n%s",
+			strings.Join(bazelEmbeddedRCLines, "\n"), strings.Join(embeddedLines, "\n"))
+	}
+	if gen := readPolicyFile(t, sourceRepoRoot(t), setupBazelActionDir+"/write-bazelrc.sh"); narrow.MatchString(gen) {
+		t.Errorf("setup-bazel's generated rc selects or narrows tests; it may only configure remote execution")
+	}
 	for line := range rc {
+		// Nothing turns result caching back on for the embedded lane (a
+		// later --cache_test_results wins over --nocache_test_results).
+		if !strings.HasPrefix(line, "#") && strings.Contains(line, "cache_test_results") &&
+			line != "test:embedded --nocache_test_results" && line != "test:docker --nocache_test_results" {
+			t.Errorf(".bazelrc %q: only test:embedded and test:docker set test result caching", line)
+		}
 		if strings.HasPrefix(line, "test:embedded ") && (strings.Contains(line, "-test.short") || strings.Contains(line, "BEADS_TEST_SKIP")) {
 			t.Errorf(".bazelrc %q: the embedded jobs run without -short and BEADS_TEST_SKIP", line)
 		}
@@ -4521,5 +4599,73 @@ func TestReleaseWorkflowRestoresNoCache(t *testing.T) {
 	}
 	if setupGo == 0 {
 		t.Fatal("release.yml has no setup-go step; update this test")
+	}
+}
+
+// Review F3: the gated Bazel lanes never retry a failing test. The legacy
+// jobs they mirror (and, since D2 step 1, replace for the embedded tier) ran
+// each test once, so a retry would hide a flaky failure no other job sees.
+// Nothing may set --flaky_test_attempts (or --runs_per_test_detects_flakes,
+// which reports a failed-then-passed test as FLAKY, not FAILED): not .bazelrc,
+// a workflow, setup-bazel's generated rc, or a tools/bazel wrapper; and no
+// BUILD file or macro may mark a target flaky = True (Bazel retries those up
+// to three times by default).
+func TestBazelGatedLanesNeverRetryFlakyTests(t *testing.T) {
+	if os.Getenv("TEST_SRCDIR") != "" {
+		t.Skip("scripts_test's runfiles hold no other package's BUILD files")
+	}
+	root := sourceRepoRoot(t)
+	retry := regexp.MustCompile(`flaky_test_attempts|runs_per_test_detects_flakes`)
+	// Any flaky = other than a literal False/0 (a variable or macro
+	// parameter could be True). bazel-embedded also asks Bazel itself
+	// (TestBazelEmbeddedQueriesFlakyTargets).
+	flakyAttr := regexp.MustCompile(`\bflaky\s*=\s*([^,)\s]+)`)
+	checked := 0
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, path)
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", ".beads":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil // bazel-* convenience symlinks
+		}
+		base := d.Name()
+		isBuild := base == "BUILD" || base == "BUILD.bazel" || strings.HasSuffix(base, ".bzl")
+		isRetrySurface := rel == ".bazelrc" || strings.HasPrefix(rel, ".github"+string(filepath.Separator)) ||
+			strings.HasPrefix(rel, filepath.Join("tools", "bazel")+string(filepath.Separator))
+		if !isBuild && !isRetrySurface {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		checked++
+		for i, line := range strings.Split(string(data), "\n") {
+			code := line
+			if j := strings.Index(code, "#"); j >= 0 && (isBuild || rel == ".bazelrc") {
+				code = code[:j]
+			}
+			if retry.MatchString(code) {
+				t.Errorf("%s:%d retries failing tests (%q); the gated lanes run each test once", rel, i+1, strings.TrimSpace(line))
+			}
+			if m := flakyAttr.FindStringSubmatch(code); isBuild && m != nil && m[1] != "False" && m[1] != "0" {
+				t.Errorf("%s:%d marks a target flaky (%q); Bazel would retry it", rel, i+1, strings.TrimSpace(line))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checked < 10 {
+		t.Fatalf("checked only %d files; is the repository root right?", checked)
 	}
 }

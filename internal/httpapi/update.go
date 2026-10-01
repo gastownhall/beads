@@ -39,7 +39,7 @@ const (
 var (
 	updateRequestMembers = []string{
 		"actor", updateClaimMember, "expected_assignee", "expected_status", "expected_version",
-		"force_assignee_transfer", "force_close_policy", updatePatchMember,
+		"force_assignee_transfer", "force_close_policy", "force_notes_overwrite", updatePatchMember,
 	}
 	issuePatchMembers = []string{
 		"title", "description", "design", "acceptance_criteria",
@@ -177,6 +177,15 @@ func (s *Server) updateRequest(w http.ResponseWriter, r *http.Request, id string
 	if !ok {
 		return issueops.UpdateRequest{}, false
 	}
+	forceNotesOverwrite, ok := s.booleanMember(w, r, members, "force_notes_overwrite")
+	if !ok {
+		return issueops.UpdateRequest{}, false
+	}
+	if forceNotesOverwrite && !patch.Notes.Set {
+		s.fail(w, r, InvalidArgument("force_notes_overwrite", ReasonInvalidValue,
+			"`force_notes_overwrite` bypasses the fence on a NOTES REPLACEMENT; send `patch.notes` with it"))
+		return issueops.UpdateRequest{}, false
+	}
 	// The role refuses a claim beside the assignee and status guards, and a
 	// claim beside the forced transfer (ValidateUpdateRequest): the claim is
 	// its own compare-and-set, with claim-pool eligibility the guards do not
@@ -234,6 +243,7 @@ func (s *Server) updateRequest(w http.ResponseWriter, r *http.Request, id string
 		ExpectedAssignee:      expectedAssignee,
 		ForceClosePolicy:      forceClosePolicy,
 		ForceAssigneeTransfer: forceAssigneeTransfer,
+		ForceNotesOverwrite:   forceNotesOverwrite,
 		Provenance:            updateProvenance,
 	}, true
 }
@@ -507,15 +517,15 @@ func patchParam(member string) string {
 // EVERY 409 BRANCH READS TYPED FIELDS, never prose, and every one of them is
 // matched BEFORE the ErrValidation and ErrNotFound arms. That order is the
 // whole correctness of this function, and the hazard it avoids is worse than a
-// disagreement between backends: NEITHER LEG WRAPS THESE FIVE FAMILIES IN
+// disagreement between backends: NEITHER LEG WRAPS THESE SIX FAMILIES IN
 // ErrValidation. The store legs return ExecuteUpdate's error through
 // runIssueOperationTx unchanged (internal/storage/dolt/issue_operations.go) and
 // the unit of work returns ApplyUpdate's unchanged
 // (internal/storage/uow/issue_operations.go), so a precondition miss, a close-
-// policy refusal, the assignee fence and both graph refusals reach here as bare
-// sentinels. Below the ErrValidation arm they would all fall into `!Is(...)`
-// and be swallowed into failErr — a generic 500, on BOTH legs, for five
-// conditions this document names by code.
+// policy refusal, the assignee fence, the notes-overwrite fence and both graph
+// refusals reach here as bare sentinels. Below the ErrValidation arm they
+// would all fall into `!Is(...)` and be swallowed into failErr — a generic
+// 500, on BOTH legs, for six conditions this document names by code.
 //
 // NEITHER BRANCH QUOTES THE ROLE'S MESSAGE. A refusal from the workspace's
 // configured vocabulary arrives as prose about statuses and types, and a
@@ -593,6 +603,11 @@ func (s *Server) failUpdate(w http.ResponseWriter, r *http.Request, request issu
 			}
 		}
 		s.fail(w, r, res)
+
+	case errors.Is(err, storage.ErrNotesOverwrite):
+		s.fail(w, r, named(newResult(CodeNotesOverwrite,
+			"`patch.notes` would replace existing non-empty notes; send `force_notes_overwrite`, or use `patch.append_notes` to preserve history"),
+			patchParam("notes")))
 
 	case errors.As(err, &typeConflict):
 		s.fail(w, r, named(newResult(CodeDependencyExists,

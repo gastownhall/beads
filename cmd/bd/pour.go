@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -185,7 +186,7 @@ func runPour(cmd *cobra.Command, args []string) error {
 		attachSubgraphs = append(attachSubgraphs, a.subgraph)
 	}
 	if err := checkPourVars(subgraph, attachSubgraphs, vars); err != nil {
-		return HandleErrorWithHint(err.Error(), fmt.Sprintf("Provide them with: --var %s=<value>", missingVarHint(subgraph, attachSubgraphs, vars)))
+		return handleVarErrorWithHint(err, missingVarHint(subgraph, attachSubgraphs, vars))
 	}
 
 	if in.dryRun {
@@ -261,7 +262,113 @@ func checkPourVars(subgraph *TemplateSubgraph, attachSubgraphs []*TemplateSubgra
 	if len(missingVars) > 0 {
 		return fmt.Errorf("missing required variables: %s", strings.Join(missingVars, ", "))
 	}
-	return nil
+	return checkUnknownVars(subgraph, attachSubgraphs, vars)
+}
+
+// checkUnknownVars rejects --var names the protos being poured cannot consume.
+// A name is accepted if any proto declares it in [vars], references it as a
+// {{handlebar}} in a field the pour substitutes (including the assignee,
+// labels, a gate's AwaitID and metadata values), references it from a step
+// condition, or - in a standalone expansion formula - uses it as a {name}
+// placeholder in the template; so documentation handlebars and vars belonging
+// to an --attach proto still pass. What is left over cannot affect the pour, and silently dropping it
+// turns a typo in an optional var into a conditional step that quietly never
+// appears.
+//
+// The check applies only when the known set is complete - see knownVarsAcross.
+// Where it is not, no name is refused at all: a wrong refusal breaks a pour that
+// works, which is worse than the silent drop this replaces.
+func checkUnknownVars(subgraph *TemplateSubgraph, attachSubgraphs []*TemplateSubgraph, vars map[string]string) error {
+	known, complete := knownVarsAcross(subgraph, attachSubgraphs)
+	if !complete {
+		return nil
+	}
+
+	var unknown []string
+	for name := range vars {
+		if !known[name] {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+
+	knownNames := make([]string, 0, len(known))
+	for name := range known {
+		knownNames = append(knownNames, name)
+	}
+	sort.Strings(knownNames)
+
+	if len(knownNames) == 0 {
+		return fmt.Errorf("unknown variables: %s (this proto takes no variables)", strings.Join(unknown, ", "))
+	}
+	return fmt.Errorf("unknown variables: %s (available: %s)", strings.Join(unknown, ", "), strings.Join(knownNames, ", "))
+}
+
+// knownVarsAcross returns the variable names the protos being poured can
+// consume, and whether that set is COMPLETE.
+//
+// It is incomplete as soon as one participating proto was loaded from the
+// database instead of cooked from a formula. Persistence keeps the issues but
+// not the formula, so VarDefs is gone and all that survives is the handlebars
+// visible in issue text: a variable the formula declared in [vars] but never
+// wrote into a substituted field is then indistinguishable from a typo, and
+// refusing it would reject a --var the pour does consume. That covers every
+// `bd cook --persist` proto and every --attach proto, which is always DB-loaded.
+func knownVarsAcross(subgraph *TemplateSubgraph, attachSubgraphs []*TemplateSubgraph) (map[string]bool, bool) {
+	known := make(map[string]bool)
+	complete := true
+	add := func(sg *TemplateSubgraph) {
+		if sg == nil {
+			return
+		}
+		if !sg.DeclaredVarsKnown {
+			complete = false
+		}
+		for name := range sg.VarDefs {
+			known[name] = true
+		}
+		// Every field the clone substitutes, not just the prose: the
+		// assignee, labels, a gate's await_id and every metadata value carry
+		// handlebars that the pour fills in, so names appearing only there
+		// are consumable too.
+		for _, name := range extractConsumableVariables(sg) {
+			known[name] = true
+		}
+		// Names the formula referenced that were consumed or erased before the
+		// cook - a step condition, the text of a step the condition filter
+		// dropped, or a standalone expansion template's {name} placeholder. All
+		// are consumable: a condition decides which steps get poured at all,
+		// dropped text must not stop being valid just because another var
+		// switched its step off, and a placeholder was substituted while the
+		// steps were being built.
+		for _, name := range sg.FormulaVarRefs {
+			known[name] = true
+		}
+	}
+
+	add(subgraph)
+	for _, attachSubgraph := range attachSubgraphs {
+		add(attachSubgraph)
+	}
+	return known, complete
+}
+
+// handleVarErrorWithHint reports a --var error, attaching the "Provide them
+// with" hint only when there is a name to put in it. An unknown-var error has no
+// missing name to suggest, and an unguarded hint renders as the nonsense
+// `--var =<value>`.
+//
+// Shared by every route that reports one of these errors (bd mol pour, bd mol
+// wisp, and the proxied wisp server) so the guard cannot be dropped at one site
+// while the others keep it.
+func handleVarErrorWithHint(err error, hint string) error {
+	if hint != "" {
+		return HandleErrorWithHint(err.Error(), fmt.Sprintf("Provide them with: --var %s=<value>", hint))
+	}
+	return HandleError("%v", err)
 }
 
 func missingVarHint(subgraph *TemplateSubgraph, attachSubgraphs []*TemplateSubgraph, vars map[string]string) string {
@@ -318,7 +425,7 @@ func renderPourResult(result *InstantiateResult, totalAttached, attachCount int)
 
 func init() {
 	// Pour command flags
-	pourCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value)")
+	pourCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value); a name the proto cannot consume is an error")
 	pourCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	pourCmd.Flags().String("assignee", "", "Assign the root issue to this agent/user")
 	pourCmd.Flags().StringSlice("attach", []string{}, "Proto to attach after spawning (repeatable)")
