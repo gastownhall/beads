@@ -1249,6 +1249,7 @@ go_test(
         "//internal/ui",
         "//internal/uimd",
         "//internal/utils",
+        "//internal/validation",
         "//internal/workapi",
         "//internal/workspacegate",
         "//internal/worktreeremove",

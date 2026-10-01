@@ -676,7 +676,7 @@ or poured.`,
 				Name:     "Labels",
 				Type:     "[]string",
 				JSONName: "labels",
-				Doc:      `Labels are applied to the created issue.`,
+				Doc:      `Labels are applied to the created issue (supports substitution).`,
 			},
 			{
 				Name:     "Metadata",
@@ -684,7 +684,8 @@ or poured.`,
 				JSONName: "metadata",
 				Doc: `Metadata is carried through to the created issue's Metadata field as
 JSON. Lets formulas pre-declare keys that downstream tooling can project
-without a post-pour compose step.`,
+without a post-pour compose step. String values support substitution at
+any nesting depth; keys are never rewritten.`,
 			},
 			{
 				Name:     "DependsOn",

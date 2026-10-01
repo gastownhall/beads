@@ -184,6 +184,7 @@ go_test(
         "promote_no_history_test.go",
         "pull_config_wedge_test.go",
         "pull_settle_test.go",
+        "push_commit_pending_test.go",
         "querier_contract_test.go",
         "reader_contract_test.go",
         "ready_claimer_contract_test.go",

@@ -86,3 +86,8 @@ exports_files(
     ["README.md"],
     visibility = ["//:__pkg__"],
 )
+
+exports_files(
+    ["ci/gofmt-bin.sh"],
+    visibility = ["//scripts/prlintmake:__pkg__"],
+)

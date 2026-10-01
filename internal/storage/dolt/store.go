@@ -1713,6 +1713,10 @@ func applyConfigDefaults(cfg *Config) {
 	if cfg.RemotePassword == "" {
 		cfg.RemotePassword = os.Getenv("DOLT_REMOTE_PASSWORD")
 	}
+	// Pool deadlines last: every DoltStore open (the CLI's store and library
+	// callers of New/NewFromConfig*) reaches New, so the knob ladder holds
+	// here regardless of how cfg was built.
+	applyPoolTimeouts(cfg)
 }
 
 // New creates a new Dolt storage backend.
