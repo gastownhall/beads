@@ -58,10 +58,13 @@ func verdictName(code int) string {
 }
 
 // TestDoltTestMainVerdictHelper is the child half of runTestMainVerdict. It
-// is inert unless re-exec'd with the marker set.
+// is inert unless re-exec'd with the marker set. Outside that it returns
+// rather than skips: every ordinary run executes it like any other test, and
+// a skip would report a SKIP in each of them. The last case of
+// TestDoltTestMainVerdict pins that.
 func TestDoltTestMainVerdictHelper(t *testing.T) {
 	if os.Getenv(testMainVerdictHelperEnv) != "1" {
-		t.Skip("helper process for runTestMainVerdict")
+		return
 	}
 	if err := EnsureDoltContainerForTestMain(); err != nil {
 		if DoltUnavailableForTestMain(err) {
