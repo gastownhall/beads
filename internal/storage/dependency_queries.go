@@ -10,6 +10,10 @@ import (
 type DependencyQueryStore interface {
 	GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error)
 	GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
+	// GetDescendants returns the filtered parent-child subtree of rootID, without
+	// rootID, in one read. The filter applies at every level, and MaxRows caps
+	// the whole subtree.
+	GetDescendants(ctx context.Context, rootID string, filter types.IssueFilter) ([]*types.Issue, error)
 	// GetDependentRecords returns raw dependency rows whose target is targetID
 	// (the inbound edges), without hydrating the source issues, spanning both the
 	// durable and wisp dependency tables. depType filters by dependency type

@@ -284,8 +284,8 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	//   arm calls the bare GetReadyWork and whose --parent arm walks the tree;
 	//   neither reads Lite.
 	//
-	//   --parent with --pretty is that same tree walk, an unlimited per-level
-	//   query rather than a page.
+	//   --parent with --pretty is that same tree query, one unlimited subtree
+	//   read rather than a page.
 	//
 	//   --format hands the whole issue to a caller-written template, so
 	//   `--brief --format '{{.Issue.Description}}'` would print an empty string

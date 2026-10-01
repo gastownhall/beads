@@ -253,6 +253,17 @@ func (s *InstrumentedStorage) SearchIssues(ctx context.Context, query string, fi
 	return issues, err
 }
 
+func (s *InstrumentedStorage) GetDescendants(ctx context.Context, rootID string, filter types.IssueFilter) ([]*types.Issue, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", rootID)}
+	ctx, span, t := s.op(ctx, "GetDescendants", attrs...)
+	issues, err := s.inner.GetDescendants(ctx, rootID, filter)
+	if err == nil {
+		span.SetAttributes(attribute.Int("bd.result.count", len(issues)))
+	}
+	s.done(ctx, span, t, err, attrs...)
+	return issues, err
+}
+
 func (s *InstrumentedStorage) SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueWithCounts, error) {
 	attrs := []attribute.KeyValue{attribute.String("bd.query", query)}
 	ctx, span, t := s.op(ctx, "SearchIssuesWithCounts", attrs...)

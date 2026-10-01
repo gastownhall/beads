@@ -172,7 +172,7 @@ are inventoried here rather than repeated.
 There are two families.
 
 **Direct storage operations** — `storage.<Method>`, one per storage method
-(74 spans):
+(75 spans):
 
 ```
 AddDependency AddIssueComment AddLabel CloseIssue CloseIssueChecked
@@ -180,9 +180,9 @@ CountDependencies CountDependents CountEvents CountIssueComments CountIssues
 CountIssuesByGroup CreateIssue CreateIssues DeleteIssue GetAllConfig
 GetAllEventsSince GetBlockedIssues GetConfig GetDependencies
 GetDependenciesWithMetadata GetDependencyTree GetDependents
-GetDependentsWithMetadata GetEpicsEligibleForClosure GetEvents GetIssue
-GetIssueByExternalRef GetIssueComments GetIssueCommentsPage GetIssuesByIDs
-GetIssuesByLabel GetLabels GetLocalMetadata GetProvenanceByRef
+GetDependentsWithMetadata GetDescendants GetEpicsEligibleForClosure GetEvents
+GetIssue GetIssueByExternalRef GetIssueComments GetIssueCommentsPage
+GetIssuesByIDs GetIssuesByLabel GetLabels GetLocalMetadata GetProvenanceByRef
 GetProvenanceEvents GetReadyWork GetReadyWorkWithCounts
 GetReadyWorkWithCountsAndTotal GetStatistics IterAllEventsSince
 IterBlockedIssues IterDependenciesWithMetadata IterDependentsWithMetadata

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -84,6 +85,12 @@ func (r *issueSQLRepositoryImpl) GetDescendants(ctx context.Context, rootID stri
 	if err != nil {
 		return nil, fmt.Errorf("descendants: %w", err)
 	}
+	// The cap counts the whole subtree, after deduplication and before
+	// hydration. The walk threads no LIMIT, so the check is post-hoc, as in
+	// issueops.WalkTree for `bd dep tree`.
+	if err := issueops.EnforceMaxRowsCap(len(page.ordered), filter.MaxRows, filter.MaxRowsSource); err != nil {
+		return nil, err
+	}
 
 	issuesByID, err := r.fetchIssuesByIDs(ctx, page.issueIDs, issuesFilterTables, filter)
 	if err != nil {
@@ -110,6 +117,11 @@ func (r *issueSQLRepositoryImpl) GetDescendants(ctx context.Context, rootID stri
 // found it, so re-expanding them would only multiply duplicate rows.
 // Filter predicates are hoisted into named matches CTEs (see predBundle) to
 // dodge a dolt 2.1.6 analyzer bug.
+//
+// The members are joined with UNION, not UNION ALL, so a stored parent-child
+// cycle ends once its rows repeat instead of recursing to the engine's limit,
+// and a node reached by several paths is expanded once. The root can come back
+// through such a cycle, so the final SELECT excludes it.
 //
 // Edge members resolve the parent across all three typed target columns, the
 // same set and precedence as depTargetExpr / sqlbuild.DepTargetExpr and as the
@@ -155,7 +167,7 @@ func buildDescendantsCTE(rootID string, walkWisps bool, issuePred, wispPred pred
       %s`, issuePred.snippet)
 	args = append(args, rootID)
 
-	b.WriteString("\n    UNION ALL\n")
+	b.WriteString("\n    UNION\n")
 	fmt.Fprintf(&b, `    SELECT i.id, 'i' AS src, 'd' AS via
     FROM issues i
     WHERE i.id LIKE CONCAT(?, '.%%')
@@ -164,7 +176,7 @@ func buildDescendantsCTE(rootID string, walkWisps bool, issuePred, wispPred pred
 	args = append(args, rootID)
 
 	if walkWisps {
-		b.WriteString("\n    UNION ALL\n")
+		b.WriteString("\n    UNION\n")
 		fmt.Fprintf(&b, `    SELECT w.id, 'w' AS src, 'e' AS via
     FROM wisps w
     JOIN wisp_dependencies wd ON wd.issue_id = w.id
@@ -173,7 +185,7 @@ func buildDescendantsCTE(rootID string, walkWisps bool, issuePred, wispPred pred
       %s`, wispPred.snippet)
 		args = append(args, rootID)
 
-		b.WriteString("\n    UNION ALL\n")
+		b.WriteString("\n    UNION\n")
 		fmt.Fprintf(&b, `    SELECT w.id, 'w' AS src, 'd' AS via
     FROM wisps w
     WHERE w.id LIKE CONCAT(?, '.%%')
@@ -182,7 +194,7 @@ func buildDescendantsCTE(rootID string, walkWisps bool, issuePred, wispPred pred
 		args = append(args, rootID)
 	}
 
-	b.WriteString("\n    UNION ALL\n")
+	b.WriteString("\n    UNION\n")
 
 	fmt.Fprintf(&b, `    SELECT i.id, 'i' AS src, 'e' AS via
     FROM issues i
@@ -191,7 +203,7 @@ func buildDescendantsCTE(rootID string, walkWisps bool, issuePred, wispPred pred
     WHERE d.type = 'parent-child'
       %s`, issuePred.snippet)
 
-	b.WriteString("\n    UNION ALL\n")
+	b.WriteString("\n    UNION\n")
 	fmt.Fprintf(&b, `    SELECT i.id, 'i' AS src, 'd' AS via
     FROM issues i
     JOIN descendants p ON i.id LIKE CONCAT(p.id, '.%%')
@@ -200,7 +212,7 @@ func buildDescendantsCTE(rootID string, walkWisps bool, issuePred, wispPred pred
       %s`, issuePred.snippet)
 
 	if walkWisps {
-		b.WriteString("\n    UNION ALL\n")
+		b.WriteString("\n    UNION\n")
 		fmt.Fprintf(&b, `    SELECT w.id, 'w' AS src, 'e' AS via
     FROM wisps w
     JOIN wisp_dependencies wd ON wd.issue_id = w.id
@@ -208,7 +220,7 @@ func buildDescendantsCTE(rootID string, walkWisps bool, issuePred, wispPred pred
     WHERE wd.type = 'parent-child'
       %s`, wispPred.snippet)
 
-		b.WriteString("\n    UNION ALL\n")
+		b.WriteString("\n    UNION\n")
 		fmt.Fprintf(&b, `    SELECT w.id, 'w' AS src, 'd' AS via
     FROM wisps w
     JOIN descendants p ON w.id LIKE CONCAT(p.id, '.%%')
@@ -217,6 +229,7 @@ func buildDescendantsCTE(rootID string, walkWisps bool, issuePred, wispPred pred
       %s`, wispPred.snippet)
 	}
 
-	b.WriteString("\n)\nSELECT id, src FROM descendants\n")
+	b.WriteString("\n)\nSELECT id, src FROM descendants WHERE id <> ?\n")
+	args = append(args, rootID)
 	return b.String(), args
 }

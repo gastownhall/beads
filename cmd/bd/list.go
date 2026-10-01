@@ -220,10 +220,11 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 
 	// `bd list`'s PAGE is on issueops.Reader. The filter is still built here
 	// because --watch and the hierarchical --parent tree consume it as a VALUE:
-	// the poll loop re-runs it on a ticker and the tree walk re-parents a copy
-	// of it at every level, neither of which a page can express. Building it
+	// the poll loop re-runs it on a ticker and the tree query filters each
+	// level, neither of which a page can express. Building it
 	// unconditionally also keeps the page query ahead of the tree branch, so
-	// `--parent --pretty --max-rows N` still refuses on the cap where it did.
+	// `--parent --pretty --max-rows N` still refuses on the page cap; the tree
+	// query then applies the same cap to the whole subtree.
 	cfg, err := workapi.LoadStoreListConfig(rootCtx, store)
 	if err != nil {
 		return HandleError("%v", err)
@@ -313,6 +314,9 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		if in.ParentID != "" && !in.ReadyFlag {
 			treeIssues, err := getHierarchicalChildren(ctx, activeStore, "", in.ParentID, filter)
 			if err != nil {
+				if capErr := handleMaxRowsError(err); capErr != nil {
+					return capErr
+				}
 				return HandleError("%v", err)
 			}
 
@@ -321,11 +325,15 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 				return nil
 			}
 
-			allDeps, depErr := activeStore.GetAllDependencyRecords(ctx)
+			issueIDs := make([]string, len(treeIssues))
+			for i, issue := range treeIssues {
+				issueIDs[i] = issue.ID
+			}
+			allDeps, depErr := activeStore.GetDependencyRecordsForIssues(ctx, issueIDs)
 			if depErr != nil && in.depsMode != "" {
 				return HandleError("loading dependencies for --deps: %v", depErr)
 			}
-			// Hierarchical --parent walks use an unlimited per-level query, so the tree is never page-truncated.
+			// Hierarchical --parent queries gather the full subtree, so the tree is never page-truncated.
 			displayPrettyListWithDepsMode(treeIssues, false, allDeps, in.depsMode, false, in.ReadyFlag, in.Status, in.SortBy, in.Reverse)
 			printSkipLabelsFooter(in.SkipLabels)
 			return nil

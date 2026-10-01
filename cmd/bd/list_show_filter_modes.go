@@ -31,9 +31,9 @@ import (
 // names no type, so a helper in this file could hand one back.
 //
 // What lives here is everything that genuinely needs the filter as a value:
-// the recursive --parent tree walk, which re-parents a copy of it at every
-// level; the --watch poll loop, which re-runs the same filter on a ticker; the
-// proxied route's builder call, which has to name the type to hand the filter
+// the recursive --parent tree query, which filters each level; the --watch
+// poll loop, which re-runs the same filter on a ticker; the proxied route's
+// builder call, which has to name the type to hand the filter
 // back; and --current, which resolves an id from a deliberately BARE filter
 // that must not pick up the default listing's exclusions.
 //
@@ -73,59 +73,23 @@ func getHierarchicalChildren(ctx context.Context, store storage.DoltStorage, dbP
 		return nil, fmt.Errorf("parent issue '%s' not found", parentID)
 	}
 
-	// Use recursive search to find all descendants using the same logic as --parent filter.
-	// The parent itself is NOT included in the result set — only actual children and
-	// their descendants. This matches the behavior of --json and --flat (GH#3349).
-	allDescendants := make(map[string]*types.Issue)
-
-	err = findAllDescendants(ctx, store, dbPath, parentID, baseFilter, allDescendants)
+	var descendants []*types.Issue
+	err = withStorage(ctx, store, dbPath, func(s storage.DoltStorage) error {
+		var err error
+		descendants, err = s.GetDescendants(ctx, parentID, baseFilter)
+		return err
+	})
 	if err != nil {
-		return nil, fmt.Errorf("error finding descendants: %v", err)
+		return nil, fmt.Errorf("error finding descendants: %w", err)
 	}
 
-	if len(allDescendants) == 0 {
+	if len(descendants) == 0 {
 		return nil, nil
 	}
 
 	// Include the parent as the tree root only when descendants exist,
 	// so the tree renderer can draw the hierarchy with the parent at the top.
-	allDescendants[parentID] = parentIssue
-
-	treeIssues := make([]*types.Issue, 0, len(allDescendants))
-	for _, issue := range allDescendants {
-		treeIssues = append(treeIssues, issue)
-	}
-
-	return treeIssues, nil
-}
-
-// findAllDescendants recursively finds all descendants using parent filtering.
-// baseFilter carries CLI filters (--type, --status, etc.) so the tree respects them.
-func findAllDescendants(ctx context.Context, store storage.DoltStorage, dbPath string, parentID string, baseFilter types.IssueFilter, result map[string]*types.Issue) error {
-	var children []*types.Issue
-	err := withStorage(ctx, store, dbPath, func(s storage.DoltStorage) error {
-		filter := baseFilter
-		filter.ParentID = &parentID
-		filter.Limit = 0 // unlimited per level to avoid truncating the tree walk
-		var err error
-		children, err = s.SearchIssues(ctx, "", filter)
-		return err
-	})
-	if err != nil {
-		return err
-	}
-
-	for _, child := range children {
-		if _, exists := result[child.ID]; !exists {
-			result[child.ID] = child
-			err = findAllDescendants(ctx, store, dbPath, child.ID, baseFilter, result)
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
+	return append([]*types.Issue{parentIssue}, descendants...), nil
 }
 
 // watchIssues polls for changes and re-displays (GH#654)
@@ -150,8 +114,8 @@ func loadWatchedIssues(ctx context.Context, store storage.DoltStorage, filter ty
 		if err != nil {
 			return nil, err
 		}
-		// getHierarchicalChildren builds its result from a map, so normalize the
-		// slice before snapshot comparison to avoid spurious redraws.
+		// Normalize the query result before snapshot comparison to avoid
+		// spurious redraws.
 		workapi.SortIssues(issues, "id", false)
 		return issues, nil
 	}
@@ -267,7 +231,7 @@ func runListProxiedHierarchicalParent(ctx context.Context, uw uow.UnitOfWork, in
 		return err
 	}
 
-	// Hierarchical --parent walks use an unlimited per-level query; never page-truncated.
+	// Hierarchical --parent queries gather the full subtree; never page-truncated.
 	displayPrettyListWithDepsMode(treeIssues, false, depsByIssueID, in.depsMode, false, in.ReadyFlag, in.Status, in.SortBy, in.Reverse)
 	printSkipLabelsFooter(in.SkipLabels)
 	return nil
