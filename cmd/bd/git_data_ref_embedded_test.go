@@ -19,8 +19,41 @@ import (
 // embedded engine: a remote added with --ref pushes to that ref and never to
 // refs/dolt/data, bootstrap reads the ref from sync.remote-ref or --ref, the
 // origin probe follows it, a fresh database is wired to a git-backed
-// sync.remote on the ref when the ref holds no data yet, and a ref change
-// without a terminal needs --yes. Run with BEADS_TEST_EMBEDDED_DOLT=1.
+// sync.remote on the ref when the ref holds no data yet, a ref change
+// without a terminal needs --yes, reset-data publishes a row left pending
+// and leaves the ref alone when the working set cannot be committed. Run
+// with BEADS_TEST_EMBEDDED_DOLT=1.
+
+// plantUncommittableWorkingSet creates a table with a foreign key to issues
+// and one violating row (plant true), recorded by `dolt constraints verify`
+// so the next DOLT_COMMIT refuses; plant false drops the table again. It
+// reports false, having done nothing, without the dolt CLI on PATH: the
+// DOLT_VERIFY_CONSTRAINTS procedure through the embedded driver records no
+// violation for the untracked table, so the CLI is the one way to plant it.
+func plantUncommittableWorkingSet(t *testing.T, beadsDir, database string, plant bool) bool {
+	t.Helper()
+	doltBin, err := exec.LookPath("dolt")
+	if err != nil {
+		t.Log("dolt CLI not on PATH; the uncommittable working set case is skipped (the ordering is pinned by TestResetDataOrder)")
+		return false
+	}
+	dbDir := filepath.Join(beadsDir, "embeddeddolt", database)
+	if !plant {
+		runDolt(t, doltBin, dbDir, "sql", "-q", "DROP TABLE reset_violation;")
+		return true
+	}
+	runDolt(t, doltBin, dbDir, "sql", "-q",
+		"CREATE TABLE reset_violation (id INT PRIMARY KEY, issue_id VARCHAR(255), "+
+			"CONSTRAINT fk_reset_violation FOREIGN KEY (issue_id) REFERENCES issues(id));"+
+			"SET FOREIGN_KEY_CHECKS=0; INSERT INTO reset_violation VALUES (1, 'gr-missing');")
+	// verify exits 1 when it finds violations; that exit is the point.
+	verify := exec.Command(doltBin, "constraints", "verify", "--all")
+	verify.Dir = dbDir
+	if out, verr := verify.CombinedOutput(); !strings.Contains(string(out), "reset_violation") {
+		t.Fatalf("dolt constraints verify did not record the planted violation (%v):\n%s", verr, out)
+	}
+	return true
+}
 
 func skipUnlessEmbeddedDolt(t *testing.T) {
 	t.Helper()
@@ -186,6 +219,38 @@ func TestEmbeddedGitDataRefRemoteAddPushesToRefAndBootstrapReadsIt(t *testing.T)
 				t.Fatalf("the refused reset-data removed %s", ref)
 			}
 
+			// A row left in the working set (auto-commit off) reaches the
+			// rebuilt ref; the bootstrap subtest below reads it back. This pins
+			// publication only: the push would commit the row too. The order,
+			// commit before the remote is touched, is pinned by the violation
+			// case that follows.
+			stdout, stderr, err = runBDIn(t, bd, dir, "--dolt-auto-commit", "off", "create", "pending before reset", "--json")
+			if err != nil {
+				t.Fatalf("bd create with auto-commit off: %v\nstderr:\n%s", err, stderr)
+			}
+			var pending struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal([]byte(stdout), &pending); err != nil || pending.ID == "" {
+				t.Fatalf("decode bd create --json: %v\n%s", err, stdout)
+			}
+
+			// A working set that cannot be committed fails the reset before the
+			// remote is touched: the ref survives. Real-engine check of what
+			// TestResetDataOrder pins with a fake store; runs with the dolt CLI.
+			before := lsRemoteRef(t, remoteDir, ref)
+			if plantUncommittableWorkingSet(t, beadsDir, "gr", true) {
+				if _, stderr, err := bdDoltSeparate(t, bd, dir, "remote", "reset-data", "origin", "--yes"); err == nil {
+					t.Error("reset-data with an uncommittable working set should fail")
+				} else if !strings.Contains(stderr, "commit pending changes before reset") {
+					t.Errorf("reset-data should fail on the commit before the reset, got:\n%s", stderr)
+				}
+				if got := lsRemoteRef(t, remoteDir, ref); got != before {
+					t.Errorf("the failed reset-data changed %s: %q -> %q", ref, before, got)
+				}
+				plantUncommittableWorkingSet(t, beadsDir, "gr", false)
+			}
+
 			// reset-data rebuilds the configured ref, never refs/dolt/data.
 			stdout, stderr, err = bdDoltSeparate(t, bd, dir, "remote", "reset-data", "origin", "--yes")
 			if err != nil {
@@ -242,8 +307,12 @@ func TestEmbeddedGitDataRefRemoteAddPushesToRefAndBootstrapReadsIt(t *testing.T)
 				if got := remoteRefsOf(t, bd, ws)["origin"]; got != ref {
 					t.Errorf("bootstrapped origin ref = %q, want %q", got, ref)
 				}
-				if _, stderr, err := runBDIn(t, bd, ws, "list"); err != nil {
+				listed, stderr, err := runBDIn(t, bd, ws, "list", "--json")
+				if err != nil {
 					t.Fatalf("bd list after bootstrap: %v\nstderr:\n%s", err, stderr)
+				}
+				if !strings.Contains(listed, pending.ID) {
+					t.Errorf("the row pending at reset-data (%s) is missing from the clone of %s:\n%s", pending.ID, ref, listed)
 				}
 			})
 			t.Run("bootstrap from --ref persists the key", func(t *testing.T) {

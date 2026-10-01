@@ -295,6 +295,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--reinit-local` help, `bd help init-safety` and the recovery playbook now
   say that neither flag authorizes recreating a missing server-mode database.
 
+- **`bd dolt remote reset-data` leaves the remote intact when the local
+  working set cannot be committed.** Since the embedded store commits pending
+  changes inside every push, the command's delete-then-push order could remove
+  the remote's data ref and then fail on the commit, leaving a remote no clone
+  can bootstrap from. The embedded store now commits pending changes before
+  anything on the remote is removed; server mode keeps refusing a dirty working
+  set and checks again after the confirmation prompt.
+
 - **`BEADS_DOLT_POOL_READ_TIMEOUT` / `dolt.pool-read-timeout` (and the write
   twins) now apply to every `bd` command in server mode.** The knobs shipped in
   #5089, but their env/config ladder ran only for callers of `NewFromConfig*`;
