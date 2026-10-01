@@ -267,15 +267,18 @@ go_test(
 sh_test(
     name = "embeddeddolt_embedded_test",
     size = "large",
-    # The script gives the binary the job's -test.timeout=15m per shard; it
-    # fires (with a goroutine dump) well before Bazel's 1200s action limit
-    # (eternal under --config=embedded). The job itself also stops at 15m.
+    # The script gives the binary the job's -test.timeout=20m, as long as
+    # Bazel's 1200s action limit (eternal under --config=embedded), which
+    # starts earlier and kills without a goroutine dump (rules_go's wrapper
+    # ignores the SIGTERM). The trailing -test.timeout=19m overrides it (the
+    # last flag wins) so Go's own timeout fires first and dumps to test.log.
     timeout = "eternal",
     srcs = ["//tools/bazel:go_test_manifest_shard.sh"],
     args = [
         "$(rootpath //:.github/scripts/embedded-storage-test-shard.sh)",
         "BEADS_TEST_EMBEDDED_TEST_BINARY",
         "$(rootpath :embeddeddolt_test)",
+        "-test.timeout=19m",
     ],
     data = [
         ":embeddeddolt_test",

@@ -185,10 +185,10 @@ type Config struct {
 	// issues.batchApplyLarge capability token would otherwise advertise a
 	// budget it no longer honors.
 	//
-	// The orchestrator's stop grace must be at least this long: Serve's drain
-	// extends its budget to match an in-flight large apply's deadline, but a
-	// SIGKILL from outside this process does not consult it. See
-	// engdocs/SERVE_RUNBOOK.md.
+	// The orchestrator's stop grace must be at least this long plus
+	// drainGrace (5s): Serve's drain extends its budget to an in-flight large
+	// apply's remaining deadline plus drainGrace, but a SIGKILL from outside
+	// this process does not consult it. See engdocs/SERVE_RUNBOOK.md.
 	LargeApplyCeiling time.Duration
 	// Provider is where every database-touching handler opens its one unit of
 	// work per request.

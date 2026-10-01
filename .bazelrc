@@ -89,11 +89,10 @@ test:embedded --keep_going
 test:embedded --test_summary=terse
 # The variants are timeout = "eternal" because the jobs' Go timeouts are past
 # "long"; rbe-west rejects any action timeout over 1200s, so eternal means
-# 1200s here, and the effective limits are: storage shards, the job's
-# -test.timeout=15m; cmd shards and conformance core/audit, -test.timeout=19m
-# (the jobs pass 20m and 30m), so that Go's timeout, which dumps every
-# goroutine, fires before Bazel's 1200s kill, which does not (see the BUILD
-# targets).
+# 1200s here, and the effective limit of every variant is -test.timeout=19m
+# (the storage and cmd shard jobs pass 20m, conformance core/audit 30m), so
+# that Go's timeout, which dumps every goroutine, fires before Bazel's 1200s
+# kill, which does not (see the BUILD targets).
 test:embedded --test_timeout=-1,-1,-1,1200
 # The jobs pass no -parallel: GOMAXPROCS on a 4-vCPU runner.
 test:embedded --test_arg=-test.parallel=4

@@ -3562,10 +3562,19 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 				t.Errorf("%s:%s does not contain %q (pr-risk.yml %s):\n%s", c.pkg, c.target, want, c.job, rule)
 			}
 		}
+		// The script's -test.timeout=20m equals Bazel's 1200s action limit,
+		// which kills without a goroutine dump; 19m lets Go's fire first.
+		script := readPolicyFile(t, root, c.script)
+		if !strings.Contains(script, "-test.timeout=20m") {
+			t.Errorf("%s no longer passes -test.timeout=20m; revisit %s:%s's -test.timeout=19m", c.script, c.pkg, c.target)
+		}
+		if !strings.Contains(bazelAttrBlock(rule, "args"), `"-test.timeout=19m",`) {
+			t.Errorf("%s:%s must pass -test.timeout=19m after the script's own:\n%s", c.pkg, c.target, rule)
+		}
 		// The script and its manifest must be in the runfiles: without the
 		// manifest the script silently falls back to hash assignment, so
 		// every shard still passes but no longer runs its job's tests.
-		m := shardManifestDefault.FindStringSubmatch(readPolicyFile(t, root, c.script))
+		m := shardManifestDefault.FindStringSubmatch(script)
 		if m == nil {
 			t.Fatalf("%s has no ${BEADS_TEST_SHARD_MANIFEST:-...} default manifest", c.script)
 		}
@@ -3582,11 +3591,6 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		rule := bazelRuleBlock(readPolicyFile(t, sourceRepoRoot(t), "cmd/bd/BUILD.bazel"), "bd_embedded_test")
 		if !strings.Contains(rule, `"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd)"`) {
 			t.Errorf("cmd/bd:bd_embedded_test must run the race //cmd/bd:bd as BEADS_TEST_BD_BINARY:\n%s", rule)
-		}
-		// The script's -test.timeout=20m equals Bazel's 1200s action limit,
-		// which kills without a goroutine dump; 19m lets Go's fire first.
-		if !strings.Contains(bazelAttrBlock(rule, "args"), `"-test.timeout=19m",`) {
-			t.Errorf("cmd/bd:bd_embedded_test must pass -test.timeout=19m after the script's own:\n%s", rule)
 		}
 	}
 

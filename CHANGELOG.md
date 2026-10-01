@@ -614,16 +614,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waits out an in-flight large apply up to its own deadline, but refuses any
   large apply still queued for the semaphore once shutdown begins, rather than
   extending the drain further. `bd serve`'s orchestrator stop grace must be at
-  least `--large-apply-ceiling`, or an external `SIGKILL` can still cut off an
-  in-flight large apply the drain would otherwise have waited out; see
-  `engdocs/SERVE_RUNBOOK.md`. A new `issues.batchApplyLarge` capability token
-  on `GET /v0/beads/context` lets a client learn whether a given server
-  accepts the raised envelope before sending a plan over the old 100-item
-  bound. Measured wall-clock for the whole-transaction apply (embedded Dolt,
-  build+commit only) backs the 5-minute default: a 356-item plan (the design
-  doc's primary measured shape) commits in ~12.6s (23.8x headroom under the
-  ceiling), and a 1000-item plan (the new cap) commits in ~57.5s (5.2x
-  headroom).
+  least `--large-apply-ceiling` plus 5 seconds, or an external `SIGKILL` can
+  still cut off an in-flight large apply the drain would otherwise have waited
+  out; see `engdocs/SERVE_RUNBOOK.md`. A new `issues.batchApplyLarge`
+  capability token on `GET /v0/beads/context` lets a client learn whether a
+  given server accepts the raised envelope before sending a plan over the old
+  100-item bound. Measured wall-clock for the whole-transaction apply
+  (embedded Dolt, build+commit only) backs the 5-minute default: a 356-item
+  plan (the design doc's primary measured shape) commits in ~12.6s (23.8x
+  headroom under the ceiling), and a 1000-item plan (the new cap) commits in
+  ~57.5s (5.2x headroom).
 
 - **A long-running schema migration now says so instead of going quiet**
   ([#5997](https://github.com/gastownhall/beads/pull/5997)). Migrations are

@@ -265,7 +265,12 @@ jobs:
     needs: [detect-ci-tier, bazel-embedded-coverage, build-embedded]
     if: needs.detect-ci-tier.outputs.full_embedded == 'true' && needs.bazel-embedded-coverage.outputs.covered != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The shard script's -test.timeout=20m plus setup. At 15m the 1000-item
+    # batch-apply cap cancelled shard 2/5: TestBatchApplyContract took 604s
+    # under -race (97s at the 100-item cap, main run 35862663577) and the
+    # shard hit 15m twice (run 36807191489). The manifest now pins the heavy
+    # tests apart; the heaviest shard projects to ~13m.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
