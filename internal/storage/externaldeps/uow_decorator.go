@@ -379,7 +379,7 @@ func (u *issueUseCase) guardExternalClose(ctx context.Context, id string, force 
 		return fmt.Errorf("external dependencies: %w", err)
 	}
 	if blockers := state.refsByIssue[id]; len(blockers) > 0 {
-		return fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
+		return publicops.NewCloseBlockedError(id, blockers)
 	}
 	return nil
 }

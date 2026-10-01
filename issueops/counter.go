@@ -125,9 +125,9 @@ type CountRequest struct {
 	// the implementation. A caller does not supply it and cannot: that is the
 	// config load this role exists to keep off both front doors.
 	//
-	// Unset, the count is durable-plane only and applies none of those four —
-	// the historical `bd count` answer, kept exactly so a scripted caller reads
-	// the same number it read yesterday.
+	// Unset — and with IncludeEphemeral also unset — the count is durable-plane
+	// only and applies none of those four: the historical `bd count` answer,
+	// kept exactly so a scripted caller reads the same number it read yesterday.
 	IncludeInfra bool
 
 	// IncludeEphemeral admits the EPHEMERAL PLANE — the wisps TABLE — and
@@ -150,7 +150,8 @@ type CountRequest struct {
 	// it; only IncludeInfra sets out to reconcile cardinality, and it pays for
 	// that with three changes beyond the plane.
 	//
-	// Unset, the count is durable-plane only: the historical answer, unchanged.
+	// Unset — and with IncludeInfra also unset — the count is durable-plane
+	// only: the historical answer, unchanged.
 	IncludeEphemeral bool
 }
 

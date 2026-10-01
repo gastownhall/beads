@@ -211,9 +211,11 @@ func TestWrapUOWProviderRefusesProxiedCheckedClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewUOW: %v", err)
 	}
-	if _, err := uw.IssueUseCase().CloseIssueChecked(t.Context(), blocked.ID, domain.CloseIssueParams{}, "tester", false); !errors.Is(err, storage.ErrCloseBlocked) {
+	_, err = uw.IssueUseCase().CloseIssueChecked(t.Context(), blocked.ID, domain.CloseIssueParams{}, "tester", false)
+	if !errors.Is(err, storage.ErrCloseBlocked) {
 		t.Fatalf("CloseIssueChecked error = %v, want ErrCloseBlocked", err)
 	}
+	assertExternalCloseBlockers(t, err, blocked.ID, "external:remote:payments")
 	if len(issues.closed) != 0 {
 		t.Fatalf("inner close calls = %v, want none", issues.closed)
 	}

@@ -73,6 +73,7 @@ go_test(
         "sweep_suite_test.go",
         "sweep_test.go",
         "testmain_integration_test.go",
+        "testmain_test.go",
     ],
     embed = [":doltserver"],
     deps = [

@@ -503,6 +503,29 @@ func TestEmbeddedList(t *testing.T) {
 		}
 	})
 
+	t.Run("parent_filter_short_id", func(t *testing.T) {
+		// Regression for #5440: a --parent value without its project prefix
+		// (e.g. "c7v" instead of "tl-c7v") must resolve the same way
+		// `bd history <shortid>` already does (GH#4868), not error "not found".
+		// Uses the plain (non-JSON) render, matching the issue's own repro and
+		// tree_parent above -- --json --parent takes a different code path
+		// (reader.List's own filter, not getHierarchicalChildren) that this
+		// fix does not touch; see the relay notes for that separate finding.
+		idParts := strings.Split(seed.epic, "-")
+		shortID := idParts[len(idParts)-1]
+		if shortID == seed.epic {
+			t.Fatalf("test setup: seed.epic %q has no prefix to strip", seed.epic)
+		}
+
+		out := bdList(t, bd, dir, "--parent", shortID)
+		if !strings.Contains(out, seed.childTaskA) {
+			t.Errorf("child A %s should appear with --parent %s (short id):\n%s", seed.childTaskA, shortID, out)
+		}
+		if !strings.Contains(out, seed.childTaskB) {
+			t.Errorf("child B %s should appear with --parent %s (short id):\n%s", seed.childTaskB, shortID, out)
+		}
+	})
+
 	t.Run("no_parent", func(t *testing.T) {
 		issues := bdListJSON(t, bd, dir, "--no-parent")
 		if containsID(issues, seed.childTaskA) {

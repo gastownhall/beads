@@ -100,6 +100,24 @@ func pushWithContext(ctx context.Context, target autoPushTarget) error {
 	}
 }
 
+// pushedCommitForState returns the commit to record as LastCommit after a
+// successful auto-push. Push commits pending changes before pushing (GH#5433),
+// so HEAD can move during the push call; reusing the pre-push value would leave
+// LastCommit pointing at the parent of what was actually pushed, and the next
+// tick would see a mismatch and push once redundantly before re-latching.
+//
+// A failed re-read is not a push failure -- the push already succeeded -- so
+// fall back to the pre-push commit rather than leaving LastCommit unset and
+// losing change detection entirely.
+func pushedCommitForState(ctx context.Context, target autoPushTarget, prePush string) string {
+	c, err := target.GetCurrentCommit(ctx)
+	if err != nil {
+		debug.Logf("dolt auto-push: failed to re-read commit after push: %v\n", err)
+		return prePush
+	}
+	return c
+}
+
 // maybeAutoPush pushes to the Dolt remote if enabled and the debounce interval has passed.
 // Called from PersistentPostRun after auto-commit and auto-backup.
 func maybeAutoPush(ctx context.Context) {
@@ -196,9 +214,9 @@ func maybeAutoPush(ctx context.Context) {
 		return
 	}
 
-	// Record last push time and commit to local file
+	// Record last push time and commit to local file.
 	now := time.Now().UTC().Format(time.RFC3339)
-	if err := savePushState(&pushState{LastPush: now, LastCommit: currentCommit}); err != nil {
+	if err := savePushState(&pushState{LastPush: now, LastCommit: pushedCommitForState(ctx, st, currentCommit)}); err != nil {
 		debug.Logf("dolt auto-push: failed to save push state: %v\n", err)
 	}
 

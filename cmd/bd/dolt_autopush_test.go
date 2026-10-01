@@ -12,12 +12,13 @@ import (
 )
 
 type fakeAutoPushTarget struct {
-	commit string
-	push   func(context.Context) error
+	commit    string
+	commitErr error
+	push      func(context.Context) error
 }
 
 func (f *fakeAutoPushTarget) GetCurrentCommit(context.Context) (string, error) {
-	return f.commit, nil
+	return f.commit, f.commitErr
 }
 
 func (f *fakeAutoPushTarget) Push(ctx context.Context) error {
@@ -264,4 +265,29 @@ func TestLoadPushState_CorruptJSON(t *testing.T) {
 	if err == nil {
 		t.Error("loadPushState with corrupt JSON: expected error, got nil")
 	}
+}
+
+// TestPushedCommitForState pins the push-state hash recorded after a successful
+// auto-push. Push commits pending changes before pushing (GH#5433), so HEAD can
+// move during the push call and the pre-push hash is no longer what was pushed.
+func TestPushedCommitForState(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("records the post-push commit", func(t *testing.T) {
+		target := &fakeAutoPushTarget{commit: "after"}
+		if got := pushedCommitForState(ctx, target, "before"); got != "after" {
+			t.Fatalf("pushedCommitForState() = %q, want %q (the commit the guard created, not its parent)", got, "after")
+		}
+	})
+
+	// The push already succeeded here, so a failed re-read must not drop
+	// LastCommit -- that would lose change detection entirely. The fake still
+	// returns a commit alongside the error, so this can only pass if the error
+	// branch is actually taken.
+	t.Run("falls back to the pre-push commit when the re-read fails", func(t *testing.T) {
+		target := &fakeAutoPushTarget{commit: "after", commitErr: errors.New("engine closed")}
+		if got := pushedCommitForState(ctx, target, "before"); got != "before" {
+			t.Fatalf("pushedCommitForState() = %q, want %q (pre-push fallback)", got, "before")
+		}
+	})
 }
