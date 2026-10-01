@@ -18,6 +18,7 @@ go_library(
         "issue_search_counts.go",
         "journal.go",
         "label.go",
+        "label_vocabulary.go",
         "raw_sql.go",
         "ready_work.go",
         "ready_work_union.go",

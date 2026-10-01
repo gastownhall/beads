@@ -134,6 +134,12 @@ func newUOWIssueOperationsFixture(t *testing.T, ctx context.Context) conformance
 				return "set " + key, uw.ConfigUseCase().SetConfig(ctx, key, value)
 			})
 		},
+		Exec: func(ctx context.Context, query string, args ...any) error {
+			return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+				_, err := uw.RawSQLUseCase().Exec(ctx, query, args...)
+				return "conformance exec", err
+			})
+		},
 		UpdateRaw: func(ctx context.Context, id string, updates map[string]any, actor string) error {
 			return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
 				return "raw update " + id, uw.IssueUseCase().UpdateIssue(ctx, id, updates, actor)
@@ -259,4 +265,14 @@ func rawSQLString(value any) string {
 	default:
 		return fmt.Sprint(typed)
 	}
+}
+
+func TestIssueOperationsUpdateRefusesAnUndefinedLabelUnderEnforce(t *testing.T) {
+	ctx := context.Background()
+	conformance.RunIssueOperationsUpdateRefusesAnUndefinedLabelUnderEnforce(t, ctx, newUOWIssueOperationsFixture(t, ctx))
+}
+
+func TestIssueOperationsCreateRefusesAnUndefinedLabelUnderEnforce(t *testing.T) {
+	ctx := context.Background()
+	conformance.RunIssueOperationsCreateRefusesAnUndefinedLabelUnderEnforce(t, ctx, newUOWIssueOperationsFixture(t, ctx))
 }

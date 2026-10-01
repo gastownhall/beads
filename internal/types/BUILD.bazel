@@ -4,6 +4,7 @@ go_library(
     name = "types",
     srcs = [
         "id_generator.go",
+        "label_definition.go",
         "orphans.go",
         "storage_ext.go",
         "types.go",

@@ -267,6 +267,19 @@ pointless).`,
 			warnLabelsContainingWhitespace(set)
 			updates["set_labels"] = set
 		}
+		// Vocabulary check on the labels the patch would WRITE, computed the
+		// same way the guarded layer computes them (removal wins): checking
+		// add/set per-flag refused `--add-label X --remove-label X`, a patch
+		// the in-transaction guard accepts because X never lands.
+		{
+			added, _ := updates["add_labels"].([]string)
+			removed, _ := updates["remove_labels"].([]string)
+			set, setChanged := updates["set_labels"].([]string)
+			candidates := storageissueops.GuardedLabelPatchCandidates(setChanged, set, added, removed)
+			if err := checkLabelVocabulary(rootCtx, candidates); err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
+		}
 		if cmd.Flags().Changed("parent") {
 			parent, _ := cmd.Flags().GetString("parent")
 			updates["parent"] = parent

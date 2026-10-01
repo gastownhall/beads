@@ -371,6 +371,8 @@ var roleContractCases = []roleContract{
 		RunIssueOperationsUpdateStatusCrossingSettlesAConditionalBlocksDepender,
 		RunIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction,
 		RunIssueOperationsClaimLeavesBlockedStateAlone,
+		RunIssueOperationsUpdateRefusesAnUndefinedLabelUnderEnforce,
+		RunIssueOperationsCreateRefusesAnUndefinedLabelUnderEnforce,
 	),
 
 	// The versioned-store pair, separately nil-able: see

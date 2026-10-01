@@ -22,6 +22,7 @@ type UnitOfWork interface {
 	CommentUseCase() domain.CommentUseCase
 	RawSQLUseCase() domain.RawSQLUseCase
 	EventsJournalUseCase() domain.EventsJournalUseCase
+	LabelVocabularyUseCase() domain.LabelVocabularyUseCase
 }
 
 type UnitOfWorkProvider interface {
@@ -49,6 +50,7 @@ type baseUOW struct {
 	commentUseCase       domain.CommentUseCase
 	rawSQLUseCase        domain.RawSQLUseCase
 	eventsJournalUseCase domain.EventsJournalUseCase
+	labelVocabUseCase    domain.LabelVocabularyUseCase
 }
 
 func (u *baseUOW) Commit(ctx context.Context, message string) error {
@@ -131,4 +133,14 @@ func (u *baseUOW) EventsJournalUseCase() domain.EventsJournalUseCase {
 		u.eventsJournalUseCase = domain.NewEventsJournalUseCase(db.NewEventsJournalSQLRepository(u.tx.Runner()))
 	}
 	return u.eventsJournalUseCase
+}
+
+// LabelVocabularyUseCase serves `bd label define`/`undefine`/`defined` in
+// proxied-server mode, through the same pinned transaction as every other
+// repository.
+func (u *baseUOW) LabelVocabularyUseCase() domain.LabelVocabularyUseCase {
+	if u.labelVocabUseCase == nil {
+		u.labelVocabUseCase = domain.NewLabelVocabularyUseCase(db.NewLabelVocabularySQLRepository(u.tx.Runner()))
+	}
+	return u.labelVocabUseCase
 }
