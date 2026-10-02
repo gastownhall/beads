@@ -1025,6 +1025,7 @@ go_test(
         "remote_migrate_gate_test.go",
         "remote_sync_open_test.go",
         "removed_backend_heal_embedded_test.go",
+        "rename_prefix_compute_test.go",
         "rename_prefix_embedded_test.go",
         "rename_prefix_repair_test.go",
         "rename_prefix_rewrite_test.go",
