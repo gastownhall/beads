@@ -459,11 +459,14 @@ Do not require these existing check names directly:
 - `Test (ubuntu-latest)`
 - `Test (macos-latest)`
 - `Test (storage domain + uow)`
-- `Bazel embedded coverage`
+- `Bazel tier coverage`
 - `Build (Embedded Dolt)`
 - `Test (Embedded Dolt Storage 1/5)` through `Test (Embedded Dolt Storage 5/5)`
 - `Test (Embedded Dolt Conformance - core)` and `- audit`
 - `Test (Embedded Dolt Cmd 1/20)` through `Test (Embedded Dolt Cmd 20/20)`
+- `Test (Proxied Dolt Cmd 1/15)` through `Test (Proxied Dolt Cmd 15/15)`
+- `Test (Server Dolt Conformance)`
+- `Test (Server Dolt Full Suite 1/16)` through `Test (Server Dolt Full Suite 16/16)`
 - `Test (Windows - smoke)`
 - `Check formatting`
 - `Lint`
