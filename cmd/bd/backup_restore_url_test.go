@@ -123,9 +123,10 @@ func TestBackupRestoreCommandKeepsDirectoryValidation(t *testing.T) {
 
 // TestBackupRestoreCommandReportsTheJSONSourceVerbatim pins the success-path
 // echo. "source" is data: a caller compares it with the argument it passed, so
-// it is the argument byte-for-byte and not a redacted copy. A credentialed
-// remote makes the distinction observable: the success payload stays verbatim,
-// while errors that quote the same source must use RedactBackupURL.
+// it is the argument byte-for-byte and not a redacted copy. A remote with a
+// query parameter makes the distinction observable without putting a
+// credential in the fixture: the success payload stays verbatim, while
+// RedactBackupURL would remove the query.
 func TestBackupRestoreCommandReportsTheJSONSourceVerbatim(t *testing.T) {
 	oldStore := store
 	oldRootCtx := rootCtx
@@ -150,7 +151,7 @@ func TestBackupRestoreCommandReportsTheJSONSourceVerbatim(t *testing.T) {
 	proxiedServerMode = false
 	jsonOutput = true
 
-	const source = "https://user:hunter2pass@doltremoteapi.dolthub.com/org/db"
+	const source = "s3://bucket/db?region=auto"
 	if redacted := versioncontrolops.RedactBackupURL(source); redacted == source {
 		t.Fatalf("fixture %q survives RedactBackupURL, so it cannot tell a verbatim source from a redacted one", source)
 	}
@@ -359,16 +360,18 @@ func TestBackupRestoreCommandRegistersBackupURLAfterRestore(t *testing.T) {
 	}
 }
 
-func TestRegisterBackupRemoteRedactsBackupAddFailure(t *testing.T) {
-	const source = "aws://AKIAEXAMPLE:wJalrXUtnFEMI/K7MDENG@bucket/db"
+func TestRegisterBackupRemotePreservesStorageRedactedBackupAddError(t *testing.T) {
+	const storageErr = `add backup default: Dolt rejected "aws://bucket/db"; contact ops@example.com? retry #1`
 	fake := &backupRestoreRecordingStore{
-		backupAddErr: fmt.Errorf("Dolt rejected %q", source),
+		backupAddErr: errors.New(storageErr),
 	}
 
 	stderr := captureStderr(t, func() {
-		registerBackupRemote(context.Background(), fake, source)
+		registerBackupRemote(context.Background(), fake, "aws://bucket/db")
 	})
-	assertBackupWarningRedacted(t, stderr)
+	if want := "Warning: failed to register backup remote: " + storageErr + "\n"; stderr != want {
+		t.Errorf("warning = %q, want the storage-sanitized diagnostic unchanged, %q", stderr, want)
+	}
 }
 
 func TestReconcileRestoredProxiedWorkspaceRegistersBackupURL(t *testing.T) {
@@ -412,7 +415,12 @@ func TestReconcileRestoredProxiedWorkspaceRegistersBackupURL(t *testing.T) {
 	}
 }
 
-func TestReconcileRestoredProxiedWorkspaceRedactsBackupAddFailure(t *testing.T) {
+// TestReconcileRestoredProxiedWorkspacePreservesStorageRedactedBackupAddError
+// exercises the real versioncontrolops.BackupAdd wrapper and verifies that the
+// command does not run its URL-only redactor over the already-sanitized error.
+// The storage-level credential-redaction invariant itself is pinned by
+// versioncontrolops.TestBackupAddScrubsEchoedURLAndPreservesCause.
+func TestReconcileRestoredProxiedWorkspacePreservesStorageRedactedBackupAddError(t *testing.T) {
 	beadsDir := backupConfigTestDir(t)
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 	if err != nil {
@@ -435,7 +443,7 @@ func TestReconcileRestoredProxiedWorkspaceRedactsBackupAddFailure(t *testing.T) 
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("CALL DOLT_BACKUP('add', ?, ?)").
 		WithArgs(proxiedBackupTargetName, source).
-		WillReturnError(fmt.Errorf("Dolt rejected %q", source))
+		WillReturnError(fmt.Errorf("Dolt rejected %q; contact ops@example.com? retry #1", source))
 
 	stderr := captureStderr(t, func() {
 		if err := reconcileRestoredProxiedWorkspace(context.Background(), conn, beadsDir, source, false); err != nil {
@@ -446,6 +454,9 @@ func TestReconcileRestoredProxiedWorkspaceRedactsBackupAddFailure(t *testing.T) 
 		t.Fatalf("proxied backup registration: %v", err)
 	}
 	assertBackupWarningRedacted(t, stderr)
+	if !strings.Contains(stderr, "contact ops@example.com? retry #1") {
+		t.Errorf("warning %q mangles safe prose from the storage-sanitized error", stderr)
+	}
 }
 
 func backupConfigTestDir(t *testing.T) string {

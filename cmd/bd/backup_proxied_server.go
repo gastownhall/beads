@@ -535,8 +535,7 @@ func reconcileRestoredProxiedWorkspace(ctx context.Context, conn *sql.Conn, bead
 	backupURL := resolveDoltBackupURL(dir)
 	_ = versioncontrolops.BackupRemove(ctx, conn, proxiedBackupTargetName)
 	if err := versioncontrolops.BackupAdd(ctx, conn, proxiedBackupTargetName, backupURL); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to register backup remote: %s\n",
-			versioncontrolops.RedactBackupURL(err.Error()))
+		fmt.Fprintf(os.Stderr, "Warning: failed to register backup remote: %v\n", err)
 		return nil
 	}
 	if err := saveDoltBackupConfig(backupURL); err != nil {

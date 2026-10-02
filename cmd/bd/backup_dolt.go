@@ -218,7 +218,7 @@ func validateBackupInitTarget(raw string) error {
 		return nil
 	}
 	scheme, _, _ := strings.Cut(raw, "://")
-	return fmt.Errorf("unsupported backup URL scheme %q (backup URL schemes are case-sensitive)", scheme)
+	return fmt.Errorf("unsupported backup URL scheme %q", scheme)
 }
 
 // resolveDoltBackupURL converts a user-provided path or URL into a Dolt backup URL.
