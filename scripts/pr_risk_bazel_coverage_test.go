@@ -832,20 +832,44 @@ func TestPRRiskLegacyTiersDeferToBazelLanes(t *testing.T) {
 	// 'true', excuses nothing, whatever the jobs did.
 	for _, bad := range []struct{ result, covered string }{
 		{"failure", ""}, {"cancelled", ""}, {"skipped", ""}, {"failure", "true"}, {"cancelled", "true"},
-		{"success", ""}, {"success", "TRUE "}, {"success", "yes"}, {"success", "1"},
 	} {
 		r := results(true, "success", coveredAll("false"))
 		r[prRiskCoverageJobName] = bad.result
 		for _, id := range append(retiredJobNames(), prRiskBuildEmbeddedJob) {
 			r[id] = "skipped"
 		}
-		mention := prRiskBuildEmbeddedID
-		if bad.result != "success" {
-			mention = prRiskCoverageGateID
-		}
 		scenarios = append(scenarios, prRiskGateScenario{
 			name:    fmt.Sprintf("decision %s covered=%q, legacy skipped", bad.result, bad.covered),
-			results: r, outputs: outputs(true, coveredAll(bad.covered)), wantPass: false, wantMention: mention,
+			results: r, outputs: outputs(true, coveredAll(bad.covered)), wantPass: false, wantMention: prRiskCoverageGateID,
+		})
+	}
+	// Review F3 (step 2): per tier, with the other tier's output a valid
+	// "false" (so its jobs and build-embedded ran), a successful decision
+	// whose output for this tier is not exactly 'true' excuses none of this
+	// tier's skipped jobs: a gate testing != "false" (or similar) fails here.
+	for _, tier := range retiredTiers {
+		for _, covered := range []string{"", "TRUE ", "yes", "1", "True\n", "false "} {
+			cov := coveredAll("false")
+			cov[tier.output] = covered
+			for job, id := range tier.jobs {
+				r := results(true, "success", coveredAll("false"))
+				r[job] = "skipped"
+				scenarios = append(scenarios, prRiskGateScenario{
+					name:    fmt.Sprintf("decision success %s=%q, %s skipped", tier.output, covered, job),
+					results: r, outputs: outputs(true, cov), wantPass: false, wantMention: id,
+				})
+			}
+		}
+		// And build-embedded's skip is excused only when both are exactly true.
+		cov := coveredAll("true")
+		cov[tier.output] = "yes"
+		r := results(true, "success", coveredAll("true"))
+		for job := range tier.jobs {
+			r[job] = "success" // isolate BUILD_EMBEDDED's own skip rule
+		}
+		scenarios = append(scenarios, prRiskGateScenario{
+			name:    fmt.Sprintf("decision success %s=yes, other true, build-embedded skipped", tier.output),
+			results: r, outputs: outputs(true, cov), wantPass: false, wantMention: prRiskBuildEmbeddedID,
 		})
 	}
 	// The decision job itself must succeed even when nothing else needs it.
