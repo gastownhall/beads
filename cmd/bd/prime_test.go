@@ -378,6 +378,79 @@ func TestPrimeLocalOnlyDoesNotClaimNoGitAuthority(t *testing.T) {
 	}
 }
 
+// TestPrimeGitContextIsScopedToInspectedWorkspace guards GH#7095: the
+// authority text must name the workspace prime actually inspected and state
+// that it grants no authority anywhere else, so an unscoped root (e.g. a
+// City conductor with no remote) can't leak a blanket no-git-ops warning
+// into a sibling contribution rig's authority block.
+func TestPrimeGitContextIsScopedToInspectedWorkspace(t *testing.T) {
+	defer stubPrimeStoreUnavailable()()
+	defer stubIsEphemeralBranch(false)()
+	defer stubPrimeHasGitRemote(false)()
+	defer stubPrimeHasSyncRemote(false)()
+	defer stubPrimeNoPushConfigured(false)()
+	defer stubPrimeAgentProfile(config.ProfileConservative)()
+	defer stubPrimeGitContextScope("/workspace/no-remote")()
+
+	for _, tc := range []struct {
+		name   string
+		output func(*bytes.Buffer, bool) error
+	}{
+		{name: "CLI", output: func(buf *bytes.Buffer, stealth bool) error { return outputCLIContext(buf, stealth) }},
+		{name: "MCP", output: func(buf *bytes.Buffer, stealth bool) error { return outputMCPContext(buf, stealth) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := tc.output(&buf, false); err != nil {
+				t.Fatalf("render prime context: %v", err)
+			}
+
+			output := buf.String()
+			for _, expected := range []string{
+				`Git context scope: "/workspace/no-remote"`,
+				"No git remote configured for this workspace",
+				"observations, restrictions, and authority in this output apply only to this workspace",
+				"For another repository, inspect its Git context",
+				"follow that repository's existing authority and higher-priority instructions",
+				"this output grants no authority there",
+			} {
+				if !strings.Contains(output, expected) {
+					t.Errorf("expected scoped Git context to contain %q; output:\n%s", expected, output)
+				}
+			}
+		})
+	}
+}
+
+// TestPrimeGitContextScopePreservesWorkspaceFlag guards the real
+// primeGitContextScope precedence (not the stub above): -C must keep
+// outranking whatever primeGitContextScope would otherwise resolve to,
+// exactly as primeWorkspaceDir already guarantees for every other
+// workspace-relative read (#5509). It deliberately does not assert what the
+// no -C baseline resolves to: internalbeads.GetRepoContext() can consult
+// BEADS_DIR or other ambient state the test harness pins for isolation, so
+// a bare tempdir's cwd is not guaranteed to be that baseline. The invariant
+// under test is narrower and harness-independent: -C always wins.
+func TestPrimeGitContextScopePreservesWorkspaceFlag(t *testing.T) {
+	t.Cleanup(func() { changeDir = "" })
+
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+
+	changeDir = ""
+	baseline := primeGitContextScope()
+	if baseline == target {
+		t.Fatalf("baseline (no -C) already equals the -C target %q; pick a target the baseline can't coincidentally match", target)
+	}
+
+	changeDir = target
+	if got := primeGitContextScope(); got != target {
+		t.Errorf("-C %q: primeGitContextScope() = %q, want the -C target", target, got)
+	}
+}
+
 func TestPrimeClaimGuidanceUsesAtomicClaim(t *testing.T) {
 	defer stubPrimeStoreUnavailable()()
 	defer stubIsEphemeralBranch(false)()
@@ -695,6 +768,19 @@ func stubPrimeHasGitRemote(hasRemote bool) func() {
 	}
 	return func() {
 		primeHasGitRemote = original
+	}
+}
+
+// stubPrimeGitContextScope temporarily replaces primeGitContextScope with a
+// stub returning scope, so authority-text tests can assert against a fixed
+// workspace label without depending on the test process's own repo context.
+func stubPrimeGitContextScope(scope string) func() {
+	original := primeGitContextScope
+	primeGitContextScope = func() string {
+		return scope
+	}
+	return func() {
+		primeGitContextScope = original
 	}
 }
 

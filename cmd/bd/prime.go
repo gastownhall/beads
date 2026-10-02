@@ -410,6 +410,23 @@ var primeAgentProfile = func() config.AgentProfile {
 	return config.GetAgentProfile()
 }
 
+var primeGitContextScope = func() string {
+	if ws := primeWorkspaceDir(); ws != "" {
+		return ws
+	}
+	if rc, err := internalbeads.GetRepoContext(); err == nil && rc.CWDRepoRoot != "" {
+		return rc.CWDRepoRoot
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return cwd
+	}
+	return "(unknown working directory)"
+}
+
+func primeGitContextScopeRule(scope string) string {
+	return fmt.Sprintf("Git context scope: %q. Git observations, restrictions, and authority in this output apply only to this workspace. For another repository, inspect its Git context and follow that repository's existing authority and higher-priority instructions; this output grants no authority there.", scope)
+}
+
 // primeHasGitRemote detects if any git remote is configured (stubbable for tests)
 //
 // NOTE: despite the prime prefix, this has a consumer outside prime —
@@ -773,6 +790,7 @@ func primeErrorSummary(err error) string {
 
 // outputMCPContext outputs minimal context for MCP users
 func outputMCPContext(w io.Writer, stealthMode bool) error {
+	gitScope := primeGitContextScope()
 	ephemeral := isEphemeralBranch()
 	noPush := primeNoPushConfigured()
 	// localOnly reflects only the git-remote axis (drives git push/pull
@@ -792,10 +810,10 @@ func outputMCPContext(w io.Writer, stealthMode bool) error {
 	} else if localOnly {
 		if primeAgentProfile() == config.ProfileTeamMaintainer {
 			closeProtocol = "Before saying \"done\": bd close <completed-ids>; run checks; run git status and commit local changes as routine work (agent.profile=team-maintainer); do not push, pull, or run remote sync."
-			profileRule = "Git authority: local-only/no-remote. No git remote configured. Profile: team-maintainer active (agent.profile=team-maintainer) - local commits are routine; do not push, pull, or run remote sync. Explicit no-commit instructions still override."
+			profileRule = "Git authority: local-only/no-remote. No git remote configured for this workspace. Profile: team-maintainer active (agent.profile=team-maintainer) - local commits are routine; do not push, pull, or run remote sync. Explicit no-commit instructions still override."
 		} else {
 			closeProtocol = "Before saying \"done\": bd close <completed-ids>; run checks; report git status and proposed handoff (local-only/no remote sync)"
-			profileRule = "Git authority: local-only/no-remote. No git remote configured. Do not push, pull, or run remote sync. Local git operations follow active user, orchestrator, and repository authority."
+			profileRule = "Git authority: local-only/no-remote. No git remote configured for this workspace. Do not push, pull, or run remote sync. Local git operations follow active user, orchestrator, and repository authority."
 		}
 	} else if ephemeral {
 		closeProtocol = "Before saying \"done\": bd close <completed-ids>; run checks; report git status and proposed handoff (no push - ephemeral branch)"
@@ -842,6 +860,7 @@ func outputMCPContext(w io.Writer, stealthMode bool) error {
 - **Workflow**: Create beads issue BEFORE writing code, mark in_progress when starting
 - **Memory**: Use ` + "`bd remember`" + ` for durable project facts, not per-tool memory files. Per-operator preferences belong in your harness's own memory.
 - Persistence you don't need beats lost context
+- ` + primeGitContextScopeRule(gitScope) + `
 - ` + profileRule + `
 
 Start: Check ` + "`ready`" + ` tool for available work.
@@ -853,6 +872,7 @@ Start: Check ` + "`ready`" + ` tool for available work.
 
 // outputCLIContext outputs full CLI reference for non-MCP users
 func outputCLIContext(w io.Writer, stealthMode bool) error {
+	gitScope := primeGitContextScope()
 	ephemeral := isEphemeralBranch()
 	noPush := primeNoPushConfigured()
 	// localOnly reflects only the git-remote axis (drives git push/pull
@@ -882,7 +902,7 @@ bd close <id1> <id2> ...    # Close all completed issues at once
 		gitWorkflowRule = "Git workflow: stealth mode (no git ops)"
 		profileRule = "Git authority: no git operations in this context"
 	} else if localOnly {
-		closeNote = "**Note:** No git remote configured. Do not push, pull, or run remote sync. Local git operations follow active user, orchestrator, and repository authority."
+		closeNote = "**Note:** No git remote configured for this workspace. Do not push, pull, or run remote sync. Local git operations follow active user, orchestrator, and repository authority."
 		syncSection = `### Sync & Collaboration
 - ` + "`bd search <query>`" + ` - Search issues by keyword`
 		if primeAgentProfile() == config.ProfileTeamMaintainer {
@@ -1036,6 +1056,7 @@ git status                  # Check changed files
 - **Workflow**: Create beads issue BEFORE writing code, mark in_progress when starting
 - **Memory**: Use ` + "`bd remember \"insight\"`" + ` for durable **project** facts — keep them here rather than in per-tool memory files, which fragment across accounts and are often capped. Per-operator preferences and agent-specific corrections belong in your harness's own memory; they aren't project knowledge, so keep them out of beads. Search with ` + "`bd memories <keyword>`" + `.
 - Persistence you don't need beats lost context
+- ` + primeGitContextScopeRule(gitScope) + `
 - ` + profileRule + `
 - ` + gitWorkflowRule + `
 - Session management: check ` + "`bd ready`" + ` for available work
