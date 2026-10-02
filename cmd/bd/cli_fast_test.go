@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/testutil/bazeltest"
+	"github.com/steveyegge/beads/internal/testutil/credentialcmd"
 )
 
 // Fast CLI tests converted from scripttest suite
@@ -1013,6 +1014,12 @@ func init() {
 	// Main integration shards reported at cd25e0919. The helper never uses
 	// testBD, so skip the work entirely in that child.
 	if os.Getenv(worktreeRemoveHelperEnv) != "" {
+		return
+	}
+	// Likewise the credential-command helper (internal/testutil/credentialcmd):
+	// this init runs before TestMain dispatches it, in the helper's cwd, where
+	// the `go build .` fallback panics and the fixture reports exit 2.
+	if credentialcmd.IsHelperProcess() {
 		return
 	}
 	// Prebuilt fast path (scripts/test.sh and CI export this), else build
