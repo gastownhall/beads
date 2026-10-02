@@ -260,8 +260,12 @@ func TestBackupSizeCapExceeded_DisabledWithZero(t *testing.T) {
 // fix: the warning must not tell operators to delete the backup directory
 // — nothing confirms the destination is cleanly recreated by the next
 // sync, and Dolt's server-side backup remote stays registered against that
-// path. It should point at the safe levers instead: raising the cap, or a
-// fresh destination via `bd backup init`.
+// path. It should point at the levers that end the pause instead: raising
+// the cap, or pointing backup.git-repo at another repository. It must not
+// point at `bd backup init`, which the original fix suggested (PR #6071
+// post-merge review): that configures the destination for manual `bd backup
+// sync` and leaves auto-backup paused — see
+// TestMaybeAutoBackup_RemediationLevers for all three, run for real.
 func TestPauseAutoBackupForSizeCap_RemediationAdvice(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("BEADS_DIR", "")
@@ -285,8 +289,11 @@ func TestPauseAutoBackupForSizeCap_RemediationAdvice(t *testing.T) {
 	if !strings.Contains(stderr, "backup.size-cap-mb") {
 		t.Errorf("warning missing backup.size-cap-mb pointer: %q", stderr)
 	}
-	if !strings.Contains(stderr, "bd backup init") {
-		t.Errorf("warning missing `bd backup init <new-path>` pointer: %q", stderr)
+	if !strings.Contains(stderr, "backup.git-repo") {
+		t.Errorf("warning missing backup.git-repo pointer: %q", stderr)
+	}
+	if strings.Contains(stderr, "bd backup init") {
+		t.Errorf("warning points at `bd backup init`, which does not move the auto-backup destination: %q", stderr)
 	}
 }
 
@@ -545,6 +552,142 @@ func TestMaybeAutoBackup_PausedSkipArmsIntervalThrottle(t *testing.T) {
 		t.Errorf("last_dolt_commit = %q, want %q left untouched so change detection still sees pending work once the cap is raised",
 			st.LastDoltCommit, "oldcommit")
 	}
+}
+
+// dirRecordingBackupStore records the destination of every backup, so a
+// test can tell a sync into the paused destination from one into a new one.
+type dirRecordingBackupStore struct {
+	failingBackupStore
+	dirs []string
+}
+
+func (f *dirRecordingBackupStore) BackupDatabase(ctx context.Context, dir string) error {
+	f.dirs = append(f.dirs, dir)
+	return f.failingBackupStore.BackupDatabase(ctx, dir)
+}
+
+// TestMaybeAutoBackup_RemediationLevers runs the PAUSED advice for real
+// (PR #6071 post-merge review): each lever it names must resume
+// auto-backup, and `bd backup init <new-path>`, which it used to name, must
+// not. backupDir() reads only backup.git-repo, so the destination init
+// configures for manual `bd backup sync` never reaches auto-backup.
+func TestMaybeAutoBackup_RemediationLevers(t *testing.T) {
+	// paused returns an over-cap destination whose pause has already been
+	// recorded, and the fake store a resumed sync would reach.
+	paused := func(t *testing.T) (string, *dirRecordingBackupStore) {
+		t.Helper()
+		t.Chdir(t.TempDir())
+		// A resumed sync takes the workspace-scoped backup lock, so the
+		// command needs a real workspace.
+		prepareBackupStatusTest(t)
+
+		repo := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BD_GIT_HOOK", "")
+		t.Setenv("BD_BACKUP_GIT_REPO", repo)
+		t.Setenv("BD_BACKUP_ENABLED", "1")
+		t.Setenv("BD_BACKUP_SIZE_CAP_MB", "1")
+		initConfigForTest(t)
+
+		dir, err := backupDir()
+		if err != nil {
+			t.Fatalf("backupDir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "filler"), make([]byte, 2*1024*1024), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		seeded := &backupState{Timestamp: time.Now().UTC().Add(-time.Hour), LastDoltCommit: "oldcommit"}
+		if err := saveBackupState(dir, seeded); err != nil {
+			t.Fatal(err)
+		}
+
+		oldStore := store
+		fake := &dirRecordingBackupStore{failingBackupStore: failingBackupStore{commit: "deadbeef"}}
+		store = fake
+		t.Cleanup(func() { store = oldStore })
+
+		stderr := captureStderr(t, func() { maybeAutoBackup(context.Background()) })
+		if !strings.Contains(stderr, "auto-backup PAUSED") || len(fake.dirs) != 0 {
+			t.Fatalf("auto-backup did not pause (synced to %q), so this test proves nothing: %q", fake.dirs, stderr)
+		}
+		return dir, fake
+	}
+	// rewindThrottle stands in for waiting out backup.interval, which the
+	// pause re-armed: a lever applied to the same destination takes effect
+	// at its next eligible sync, not on the very next command.
+	rewindThrottle := func(t *testing.T, dir string) time.Time {
+		t.Helper()
+		st, err := loadBackupState(dir)
+		if err != nil {
+			t.Fatalf("loadBackupState: %v", err)
+		}
+		st.Timestamp = time.Now().UTC().Add(-time.Hour)
+		if err := saveBackupState(dir, st); err != nil {
+			t.Fatal(err)
+		}
+		return st.Timestamp
+	}
+
+	t.Run("raise backup.size-cap-mb", func(t *testing.T) {
+		dir, fake := paused(t)
+		t.Setenv("BD_BACKUP_SIZE_CAP_MB", "10")
+		initConfigForTest(t)
+		rewindThrottle(t, dir)
+
+		maybeAutoBackup(context.Background())
+		if len(fake.dirs) != 1 || fake.dirs[0] != dir {
+			t.Errorf("synced to %q after raising the cap, want one sync to %q", fake.dirs, dir)
+		}
+	})
+
+	t.Run("point backup.git-repo at a different git repository", func(t *testing.T) {
+		_, fake := paused(t)
+		other := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(other, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BD_BACKUP_GIT_REPO", other)
+		initConfigForTest(t)
+
+		// No rewind: the new destination has no throttle state of its own.
+		maybeAutoBackup(context.Background())
+		want := filepath.Join(other, "backup")
+		if len(fake.dirs) != 1 || fake.dirs[0] != want {
+			t.Errorf("synced to %q after switching backup.git-repo, want one sync to %q", fake.dirs, want)
+		}
+	})
+
+	t.Run("bd backup init leaves auto-backup paused", func(t *testing.T) {
+		dir, fake := paused(t)
+		oldCtx, oldWrote := rootCtx, commandDidWrite.Load()
+		rootCtx = context.Background()
+		t.Cleanup(func() {
+			rootCtx = oldCtx
+			commandDidWrite.Store(oldWrote)
+		})
+		stdout := captureStdout(t, func() error {
+			return backupInitCmd.RunE(backupInitCmd, []string{t.TempDir()})
+		})
+		if !strings.Contains(stdout, "Backup destination configured") {
+			t.Fatalf("`bd backup init` did not configure a destination, so this test proves nothing: %q", stdout)
+		}
+		rewound := rewindThrottle(t, dir)
+
+		maybeAutoBackup(context.Background())
+		if len(fake.dirs) != 0 {
+			t.Fatalf("synced to %q after `bd backup init`, want auto-backup still paused", fake.dirs)
+		}
+		st, err := loadBackupState(dir)
+		if err != nil {
+			t.Fatalf("loadBackupState: %v", err)
+		}
+		if !st.Timestamp.After(rewound) {
+			t.Errorf("timestamp = %v, want it re-armed past %v by the size-cap skip: the cap check never ran, so this proves nothing",
+				st.Timestamp, rewound)
+		}
+	})
 }
 
 // TestWarnBackupSizeCapUnavailable_IsOperatorVisible pins the PR #6071

@@ -120,6 +120,40 @@ filegroup(
     visibility = ["//scripts:__pkg__"],
 )
 
+# //internal/versioncheck and //scripts/check-versions release-gate tests: the
+# metadata surfaces versioncheck.releaseSources gates, plus the canonical
+# version it compares them against and the tracked git hooks whose version
+# markers it checks.
+#
+# Hand-listed rather than globbed because releaseSources is itself a closed
+# list: a newly gated surface must be added here too, and until it is the test
+# fails under Bazel (it passes under `go test`, which sees the whole checkout).
+#
+# The exception is npm-package/package.json: npm-package/ is in .bazelignore,
+# so no target can declare it. Listing it anyway passes under remote execution
+# but fails in a local sandbox, which is how fork-PR CI runs.
+# TestRepositoryReleaseVersionsMatch tolerates exactly its absence under
+# Bazel; `go test` still checks it.
+filegroup(
+    name = "release_metadata_files",
+    srcs = [
+        ".claude-plugin/marketplace.json",
+        "integrations/beads-mcp/pyproject.toml",
+        "integrations/beads-mcp/src/beads_mcp/__init__.py",
+        "integrations/beads-mcp/uv.lock",
+        "//cmd/bd:version.go",
+        "//cmd/bd:winres/manifest.xml",
+        "//cmd/bd:winres/winres.json",
+        "//plugins/beads:.claude-plugin/plugin.json",
+        "//plugins/beads:.codex-plugin/plugin.json",
+        "//plugins/beads:.copilot-plugin/plugin.json",
+    ] + glob([".githooks/*"]),
+    visibility = [
+        "//internal/versioncheck:__pkg__",
+        "//scripts/check-versions:__pkg__",
+    ],
+)
+
 # Inputs of the Bazel policy tests in //scripts (bazel_policy_test.go), so they
 # run under `bazel test` as well as `go test`.
 filegroup(

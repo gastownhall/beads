@@ -1840,7 +1840,7 @@ const bazelAggregateGateID = "BAZEL"
 // The gate script and the rbe job's execution modes.
 const bazelGateScript = ".github/scripts/bazel-gate.sh"
 
-var bazelRBEModes = []string{"remote", "local", "skip"}
+var bazelRBEModes = []string{"remote", "cache", "local", "skip"}
 
 // The four RBE secrets, the only ones a caller may hand bazel.yml.
 var bazelCallSecrets = map[string]string{
@@ -1895,8 +1895,9 @@ func TestBazelWorkflowJobsAndExecutionMode(t *testing.T) {
 	}
 	// Every lane needs the rbe job and takes its runner, skip rule and
 	// setup-bazel env from that job's outputs alone. Remote runs use the
-	// Blacksmith pool (the farm admits nothing else); local runs (forks,
-	// rbe=off, secret-less Dependabot runs) the GitHub-hosted runner.
+	// Blacksmith pool; local and cache runs (forks, rbe=off/cache,
+	// secret-less Dependabot runs) the GitHub-hosted runner. Cache runs get
+	// BAZEL_FORK_CACHE and never a secret.
 	const wantRunsOn = "${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
 	// Local-capable lanes skip only in mode skip (same-repo, RBE_WEST_WORKERS
 	// unset); remote-only lanes (27 race processes and more, an hour or more
@@ -1911,6 +1912,7 @@ func TestBazelWorkflowJobsAndExecutionMode(t *testing.T) {
 		"RBE_TLS_KEY":           "${{ " + gate + "secrets.RBE_TLS_KEY || '' }}",
 		"RBE_TLS_CA":            "${{ " + gate + "secrets.RBE_TLS_CA || '' }}",
 		"RBE_INSTANCE":          "${{ " + gate + "'oss' || '' }}",
+		"BAZEL_FORK_CACHE":      "${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}",
 	}
 	for name, job := range workflow.Jobs {
 		if name == bazelRBEJobName {
@@ -2260,7 +2262,7 @@ func bazelLaneRunModes(t *testing.T, lane, ifExpr string, with map[string]string
 	t.Helper()
 	switch ifExpr {
 	case "${{ needs.rbe.outputs.mode != 'skip' }}":
-		return map[string]bool{"remote": true, "local": true}
+		return map[string]bool{"remote": true, "cache": true, "local": true}
 	case "${{ needs.rbe.outputs.enabled == 'true' }}":
 		return map[string]bool{"remote": true}
 	case bazelIntegIf:
@@ -2463,7 +2465,7 @@ func TestBazelGateSimulation(t *testing.T) {
 	// A missing or inconsistent decision (the rbe job failed, the call never
 	// started, or the outputs disagree) allows no skip and fails the gate.
 	for _, bad := range []struct{ mode, enabled string }{
-		{"", ""}, {"remote", "false"}, {"local", "true"}, {"skip", "true"}, {"remote", ""}, {"bogus", "false"}, {"REMOTE", "true"},
+		{"", ""}, {"remote", "false"}, {"local", "true"}, {"cache", "true"}, {"skip", "true"}, {"remote", ""}, {"bogus", "false"}, {"REMOTE", "true"}, {"CACHE", "false"},
 	} {
 		if got := runScript(bad.mode, bad.enabled, "skips"); got != "" {
 			t.Errorf("mode %q enabled %q: skips = %q, want none", bad.mode, bad.enabled, got)
@@ -3560,10 +3562,19 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 				t.Errorf("%s:%s does not contain %q (pr-risk.yml %s):\n%s", c.pkg, c.target, want, c.job, rule)
 			}
 		}
+		// The script's -test.timeout=20m equals Bazel's 1200s action limit,
+		// which kills without a goroutine dump; 19m lets Go's fire first.
+		script := readPolicyFile(t, root, c.script)
+		if !strings.Contains(script, "-test.timeout=20m") {
+			t.Errorf("%s no longer passes -test.timeout=20m; revisit %s:%s's -test.timeout=19m", c.script, c.pkg, c.target)
+		}
+		if !strings.Contains(bazelAttrBlock(rule, "args"), `"-test.timeout=19m",`) {
+			t.Errorf("%s:%s must pass -test.timeout=19m after the script's own:\n%s", c.pkg, c.target, rule)
+		}
 		// The script and its manifest must be in the runfiles: without the
 		// manifest the script silently falls back to hash assignment, so
 		// every shard still passes but no longer runs its job's tests.
-		m := shardManifestDefault.FindStringSubmatch(readPolicyFile(t, root, c.script))
+		m := shardManifestDefault.FindStringSubmatch(script)
 		if m == nil {
 			t.Fatalf("%s has no ${BEADS_TEST_SHARD_MANIFEST:-...} default manifest", c.script)
 		}
@@ -3580,11 +3591,6 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		rule := bazelRuleBlock(readPolicyFile(t, sourceRepoRoot(t), "cmd/bd/BUILD.bazel"), "bd_embedded_test")
 		if !strings.Contains(rule, `"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd)"`) {
 			t.Errorf("cmd/bd:bd_embedded_test must run the race //cmd/bd:bd as BEADS_TEST_BD_BINARY:\n%s", rule)
-		}
-		// The script's -test.timeout=20m equals Bazel's 1200s action limit,
-		// which kills without a goroutine dump; 19m lets Go's fire first.
-		if !strings.Contains(bazelAttrBlock(rule, "args"), `"-test.timeout=19m",`) {
-			t.Errorf("cmd/bd:bd_embedded_test must pass -test.timeout=19m after the script's own:\n%s", rule)
 		}
 	}
 
@@ -3917,11 +3923,11 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 	})
 }
 
-// The execution mode (remote, local, skip) is decided once, by the rbe job,
+// The execution mode (remote, cache, local, skip) is decided once, by the rbe job,
 // so a run cannot mix modes and no lane can drift from the others (review D1
 // F1/F5/F6): Dependabot PRs are same-repo but get no secrets, so a condition
 // on vars and fork alone sent them to the remote-only path with nothing to
-// run it. The job's one step reads nothing but four booleans, runs no
+// run it. The job's one step reads nothing but booleans, runs no
 // repository code, and its outputs are the workflow_call outputs.
 func TestBazelRBEJobDecidesOnce(t *testing.T) {
 	workflow := readCIWorkflow(t, bazelWorkflowName)
@@ -3942,11 +3948,12 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 	}
 	step := job.Steps[0]
 	wantEnv := map[string]string{
-		"RBE_VAR_ON":    "${{ vars.RBE_WEST_WORKERS == 'true' }}",
-		"RBE_INPUT_OFF": "${{ inputs.rbe == 'off' }}",
-		"FORK":          "${{ github.event.pull_request.head.repo.fork == true }}",
-		"FORK_FARM":     bazelForkFarmValue,
-		"HAS_EXECUTOR":  bazelRBESecretValue,
+		"RBE_VAR_ON":      "${{ vars.RBE_WEST_WORKERS == 'true' }}",
+		"RBE_INPUT_OFF":   "${{ inputs.rbe == 'off' }}",
+		"RBE_INPUT_CACHE": "${{ inputs.rbe == 'cache' }}",
+		"FORK":            "${{ github.event.pull_request.head.repo.fork == true }}",
+		"FORK_FARM":       bazelForkFarmValue,
+		"HAS_EXECUTOR":    bazelRBESecretValue,
 	}
 	if step.ID != "decide" || step.Uses != "" || step.Shell != "" || len(step.With) != 0 || !reflect.DeepEqual(step.Env, wantEnv) {
 		t.Errorf("%s step: id %q, uses %q, shell %q, with %v, env %v; want id decide, a run step with env %v",
@@ -3990,8 +3997,25 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 		t.Errorf("%s: %s re-derives the execution mode (%q); read needs.rbe.outputs instead", bazelWorkflowName, path, value)
 	})
 
-	// The decision, for the facts GitHub evaluates the four env expressions
-	// on (its == is case-insensitive; a missing secret reads as '').
+	// The dispatch choices: on, cache (fork simulation) and off.
+	var dispatch struct {
+		On struct {
+			WorkflowDispatch struct {
+				Inputs map[string]struct {
+					Options []string `yaml:"options"`
+				} `yaml:"inputs"`
+			} `yaml:"workflow_dispatch"`
+		} `yaml:"on"`
+	}
+	if err := yaml.Unmarshal([]byte(readPolicyFile(t, sourceRepoRoot(t), ".github/workflows/"+bazelWorkflowName)), &dispatch); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := dispatch.On.WorkflowDispatch.Inputs["rbe"].Options, []string{"on", "cache", "off"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("workflow_dispatch rbe options = %v, want %v", got, want)
+	}
+
+	// The decision, for the facts GitHub evaluates the env expressions on
+	// (its == is case-insensitive; a missing secret reads as '').
 	type facts struct {
 		rbeVar, rbeInput, secret string
 		fork, farm               bool
@@ -4004,11 +4028,19 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 		{"same-repo PR with secrets", facts{"true", "", "grpcs://x", false, false}, "remote", "true"},
 		{"push to main", facts{"true", "", "grpcs://x", false, false}, "remote", "true"},
 		{"var in other case", facts{"True", "on", "grpcs://x", false, false}, "remote", "true"},
-		{"Dependabot PR (no secrets)", facts{"true", "", "", false, false}, "local", "false"},
-		{"fork PR", facts{"true", "", "", true, false}, "local", "false"},
-		{"fork PR, var unset", facts{"", "", "", true, false}, "local", "false"},
+		// Fork and secret-less runs: local execution with the read-only
+		// cache (rbe=cache simulates them); rbe=off drops the cache too.
+		{"Dependabot PR (no secrets)", facts{"true", "", "", false, false}, "cache", "false"},
+		{"fork PR", facts{"true", "", "", true, false}, "cache", "false"},
+		{"fork PR, var unset", facts{"", "", "", true, false}, "cache", "false"},
+		{"fork PR, var false", facts{"false", "", "", true, false}, "cache", "false"},
+		{"dispatch rbe=cache", facts{"true", "cache", "grpcs://x", false, false}, "cache", "false"},
+		{"dispatch rbe=cache, var unset", facts{"", "cache", "", false, false}, "cache", "false"},
+		{"call rbe=CACHE", facts{"true", "CACHE", "grpcs://x", false, false}, "cache", "false"},
+		{"fork PR rbe=cache", facts{"true", "cache", "", true, false}, "cache", "false"},
 		{"dispatch rbe=off", facts{"true", "off", "grpcs://x", false, false}, "local", "false"},
 		{"call rbe=OFF", facts{"true", "OFF", "grpcs://x", false, false}, "local", "false"},
+		{"fork PR rbe=off", facts{"true", "off", "", true, false}, "local", "false"},
 		{"same-repo, var unset", facts{"", "", "grpcs://x", false, false}, "skip", "false"},
 		{"Dependabot, var unset", facts{"", "", "", false, false}, "skip", "false"},
 		{"var false", facts{"false", "on", "grpcs://x", false, false}, "skip", "false"},
@@ -4020,16 +4052,17 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 		{"authorized fork farm, rbe=off", facts{"true", "off", "grpcs://x", true, true}, "local", "false"},
 		// FORK_FARM without the secret (a fork's own pull_request run
 		// cannot make it true: it needs event pull_request_target).
-		{"fork, not authorized, secret", facts{"true", "", "grpcs://x", true, false}, "local", "false"},
+		{"fork, not authorized, secret", facts{"true", "", "grpcs://x", true, false}, "cache", "false"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			env := map[string]string{
-				"RBE_VAR_ON":    strconv.FormatBool(strings.EqualFold(c.in.rbeVar, "true")),
-				"RBE_INPUT_OFF": strconv.FormatBool(strings.EqualFold(c.in.rbeInput, "off")),
-				"FORK":          strconv.FormatBool(c.in.fork),
-				"FORK_FARM":     strconv.FormatBool(c.in.farm),
-				"HAS_EXECUTOR":  strconv.FormatBool(c.in.secret != ""),
+				"RBE_VAR_ON":      strconv.FormatBool(strings.EqualFold(c.in.rbeVar, "true")),
+				"RBE_INPUT_OFF":   strconv.FormatBool(strings.EqualFold(c.in.rbeInput, "off")),
+				"RBE_INPUT_CACHE": strconv.FormatBool(strings.EqualFold(c.in.rbeInput, "cache")),
+				"FORK":            strconv.FormatBool(c.in.fork),
+				"FORK_FARM":       strconv.FormatBool(c.in.farm),
+				"HAS_EXECUTOR":    strconv.FormatBool(c.in.secret != ""),
 			}
 			out, err := runBazelRBEDecision(t, step.Run, env)
 			if err != nil {
@@ -4043,9 +4076,14 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 	}
 	// A value that is not a boolean fails the job rather than picking a mode.
 	if out, err := runBazelRBEDecision(t, step.Run, map[string]string{
-		"RBE_VAR_ON": "true", "RBE_INPUT_OFF": "false", "FORK": "", "FORK_FARM": "false", "HAS_EXECUTOR": "true",
+		"RBE_VAR_ON": "true", "RBE_INPUT_OFF": "false", "RBE_INPUT_CACHE": "false", "FORK": "", "FORK_FARM": "false", "HAS_EXECUTOR": "true",
 	}); err == nil {
 		t.Errorf("decision with FORK='' succeeded with %v; want failure", out)
+	}
+	if out, err := runBazelRBEDecision(t, step.Run, map[string]string{
+		"RBE_VAR_ON": "true", "RBE_INPUT_OFF": "false", "FORK": "false", "FORK_FARM": "false", "HAS_EXECUTOR": "true",
+	}); err == nil {
+		t.Errorf("decision without RBE_INPUT_CACHE succeeded with %v; want failure", out)
 	}
 }
 
@@ -4075,9 +4113,10 @@ func runBazelRBEDecision(t *testing.T, script string, env map[string]string) (ma
 	return out, nil
 }
 
-// write-bazelrc.sh: no secrets means a local-only rc (fork PRs), a partial set
-// fails, and the full set enables remote-exec with the key material and rc
-// outside the workspace and the runner cache.
+// write-bazelrc.sh: no secrets means a local-only rc, plus --config=fork-cache
+// with BAZEL_FORK_CACHE=true (fork PRs), a partial set (or the fork cache
+// with the secrets) fails, and the full set enables remote-exec with the key
+// material and rc outside the workspace and the runner cache.
 func TestSetupBazelRCWriter(t *testing.T) {
 	bash := requireHostTool(t, "bash")
 	script := filepath.Join(sourceRepoRoot(t), setupBazelActionDir, "write-bazelrc.sh")
@@ -4126,7 +4165,44 @@ func TestSetupBazelRCWriter(t *testing.T) {
 		if !strings.Contains(rc, "\ncommon --repo_contents_cache=\n") {
 			t.Errorf("rc = %q; want common --repo_contents_cache= (disabled)", rc)
 		}
+		if !strings.Contains(outputs, "cache=false") || strings.Contains(rc, "fork-cache") {
+			t.Errorf("outputs=%q rc=%q; want cache=false and no fork-cache line", outputs, rc)
+		}
 	})
+	t.Run("fork cache without secrets", func(t *testing.T) {
+		outputs, rc, logs, err := run(t, "BAZEL_FORK_CACHE=true")
+		if err != nil {
+			t.Fatalf("err=%v\n%s", err, logs)
+		}
+		if !strings.Contains(rc, "\nbuild --config=fork-cache\n") {
+			t.Errorf("rc = %q; want build --config=fork-cache", rc)
+		}
+		if strings.Contains(rc, "remote-exec") || strings.Contains(rc, "tls") || strings.Contains(rc, "--remote_") {
+			t.Errorf("rc = %q; the fork cache must add nothing but --config=fork-cache", rc)
+		}
+		if !strings.Contains(outputs, "remote=false") || !strings.Contains(outputs, "cache=true") {
+			t.Errorf("outputs = %q, want remote=false and cache=true", outputs)
+		}
+		if !strings.Contains(logs, "setup-bazel: read-only remote cache (rbe-cache); executing locally") {
+			t.Errorf("log lacks the read-only cache notice:\n%s", logs)
+		}
+	})
+	t.Run("rejects fork cache with the secrets", func(t *testing.T) {
+		_, rc, logs, err := run(t, "BAZEL_FORK_CACHE=true", executor, "RBE_TLS_CERT="+pem("CERTIFICATE"), "RBE_TLS_KEY="+pem("PRIVATE KEY"))
+		if err == nil || !strings.Contains(logs, "mutually exclusive") {
+			t.Errorf("err=%v, want failure naming the conflict:\n%s", err, logs)
+		}
+		if strings.Contains(rc, "remote_executor") || strings.Contains(rc, "fork-cache") {
+			t.Errorf("rc = %q after the conflict; want neither remote-exec nor fork-cache", rc)
+		}
+	})
+	for _, bad := range []string{"yes", "false", "1", "TRUE"} {
+		t.Run("rejects BAZEL_FORK_CACHE="+bad, func(t *testing.T) {
+			if _, _, logs, err := run(t, "BAZEL_FORK_CACHE="+bad); err == nil {
+				t.Errorf("want failure, got success:\n%s", logs)
+			}
+		})
+	}
 	for name, env := range map[string][]string{
 		"executor only":    {executor},
 		"cert and key":     {"RBE_TLS_CERT=" + pem("CERTIFICATE"), "RBE_TLS_KEY=" + pem("PRIVATE KEY")},
@@ -4155,8 +4231,8 @@ func TestSetupBazelRCWriter(t *testing.T) {
 		if strings.Contains(rc, "--disk_cache") || strings.Contains(rc, "--remote_instance_name") {
 			t.Errorf("rc sets --disk_cache or an instance nobody asked for:\n%s", rc)
 		}
-		if !strings.Contains(outputs, "remote=true") {
-			t.Errorf("outputs = %q, want remote=true", outputs)
+		if !strings.Contains(outputs, "remote=true") || !strings.Contains(outputs, "cache=false") || strings.Contains(rc, "fork-cache") {
+			t.Errorf("outputs = %q, want remote=true, cache=false and no fork-cache in the rc", outputs)
 		}
 		for _, want := range []string{"::add-mask::farm.invalid\n", "::add-mask::MIIBfakeCERTIFICATE\n", "::add-mask::MIIBfakePRIVATEKEY\n", "::add-mask::line2\n", "::warning title=RBE_INSTANCE not set::"} {
 			if !strings.Contains(logs, want) {

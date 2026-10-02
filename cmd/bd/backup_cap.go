@@ -95,8 +95,10 @@ func showSizeCapStatus(dir string) {
 	}
 	capBytes := int64(capMB) * 1024 * 1024
 	if size >= capBytes {
+		// Same two levers as pauseAutoBackupForSizeCap's warning — see
+		// there for why `bd backup init` is not one of them.
 		fmt.Printf("  Size cap: PAUSED (cap exceeded) — %s / %s. Raise backup.size-cap-mb "+
-			"or run `bd backup init <new-path>` to switch destinations.\n",
+			"or point backup.git-repo at a different git repository to switch destinations.\n",
 			formatBytes(size), formatBytes(capBytes))
 		return
 	}
@@ -183,6 +185,14 @@ func warnBackupSizeCapUnavailable(err error) {
 // human-visible warning could effectively never fire; those callers have
 // `bd backup status --json`'s size_cap field instead.
 //
+// The advice names only the levers that end the pause: raising the cap, or
+// pointing backup.git-repo — the only setting backupDir() reads — at another
+// repository, whose backup/ directory carries none of this one's size or
+// throttle state. `bd backup init` registers the separate destination that
+// manual `bd backup sync` pushes to; auto-backup still targets this
+// directory afterwards, so it would stay paused (PR #6071 post-merge
+// review).
+//
 // Never returns an error: a failure to persist must not block the
 // (already-decided) skip of the backup attempt itself.
 func pauseAutoBackupForSizeCap(dir string, state *backupState, size int64) {
@@ -208,7 +218,8 @@ func pauseAutoBackupForSizeCap(dir string, state *backupState, size int64) {
 		fmt.Fprintf(os.Stderr,
 			"Warning: auto-backup PAUSED — destination %s has reached %s. "+
 				"No further syncs will run until you raise backup.size-cap-mb "+
-				"or switch to a fresh destination with `bd backup init <new-path>`.\n",
+				"or point backup.git-repo at a different git repository "+
+				"(auto-backup then syncs to a backup/ directory inside it).\n",
 			dir, formatBytes(size))
 		debug.Logf("backup: size cap exceeded (%s), auto-backup paused\n", formatBytes(size))
 		return

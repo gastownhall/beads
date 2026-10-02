@@ -190,6 +190,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
       - name: Check all versions match
         run: ./scripts/check-versions.sh
 
@@ -1053,7 +1059,12 @@ jobs:
     needs: [detect-ci-tier, build-embedded]
     if: needs.detect-ci-tier.outputs.full_embedded == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The shard script's -test.timeout=20m plus setup. At 15m the 1000-item
+    # batch-apply cap cancelled shard 2/5: TestBatchApplyContract took 604s
+    # under -race (97s at the 100-item cap, main run 35862663577) and the
+    # shard hit 15m twice (PR Risk run 36807191489). The manifest now pins
+    # the heavy tests apart; the heaviest shard projects to ~13m.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:

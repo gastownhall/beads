@@ -478,6 +478,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
       - name: Check all versions match
         run: ./scripts/check-versions.sh
 
@@ -1784,13 +1790,13 @@ jobs:
   # bazel-embedded-coverage job; D2 step 1), and ci-gate then requires this
   # call's embedded lane to have run remotely and passed. bazel.yml has no pull_request/merge_group trigger of its own:
   # this call is its only PR run. It gets the four RBE secrets and nothing
-  # else; its rbe job decides remote, local (forks, Dependabot: no
-  # remote-only lanes) or skip, and exports that for ci-gate. Its
-  # bazel-integration lane (main.yml's integration jobs, which run only on
-  # push to main) is on and required here, remote only: same-repo PRs run
-  # it, fork and Dependabot PRs (mode local) skip it until the farm has a
-  # read-only cache for them. Its bd artifact is renamed so it cannot
-  # collide with build-artifacts' upload.
+  # else; its rbe job decides remote, cache (forks, Dependabot: local
+  # execution with the anonymous read-only cache, no remote-only lanes) or
+  # skip, and exports that for ci-gate. Its bazel-integration lane
+  # (main.yml's integration jobs, which run only on push to main) is on and
+  # required here, remote only: same-repo PRs run it, fork and Dependabot PRs
+  # (mode cache) skip it. Its bd artifact is renamed so it cannot collide
+  # with build-artifacts' upload.
   bazel:
     name: Bazel
     permissions:
@@ -1821,7 +1827,7 @@ jobs:
       # and not the executor secret (either, evaluated per run, would let one
       # workflow's re-run disagree with the other's). A same-repo PR whose run
       # lacks the secret is covered anyway, so pr.yml's gate goes red (mode
-      # local) instead of the tier silently moving back. Dependabot runs get
+      # cache) instead of the tier silently moving back. Dependabot runs get
       # no Actions secrets by design and keep the legacy tier; github.actor
       # (unlike triggering_actor) stays the PR's actor on a re-run.
       - name: Decide whether the Bazel lane covers the embedded tier
@@ -1965,8 +1971,8 @@ jobs:
           fi
           # Bazel lanes skipped by design in the call's execution mode (all
           # of them in mode skip, the remote-only embedded, integration,
-          # proxied and server-storage tiers in mode local), and the
-          # aggregate unless the mode is missing or invalid.
+          # proxied and server-storage tiers in modes local and cache), and
+          # the aggregate unless the mode is missing or invalid.
           skipped_ok="$skipped_ok $(bash .github/scripts/bazel-gate.sh skips)"
           BAZEL="$(bash .github/scripts/bazel-gate.sh aggregate)"
           export BAZEL

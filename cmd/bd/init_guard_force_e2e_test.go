@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -45,27 +46,10 @@ func TestInitGuard_ForceE2EDoesNotRecreateMissingServerDB(t *testing.T) {
 
 			// Port 1 is unreachable by construction, standing in for a server
 			// whose database has been lost.
-			env := []string{}
-			for _, kv := range os.Environ() {
-				switch {
-				case strings.HasPrefix(kv, "BEADS_DIR="),
-					strings.HasPrefix(kv, "BEADS_DB="),
-					strings.HasPrefix(kv, "BD_DB="),
-					strings.HasPrefix(kv, "BEADS_DOLT_SERVER_PORT="),
-					strings.HasPrefix(kv, "BEADS_DOLT_SERVER_DATABASE="):
-					continue
-				}
-				env = append(env, kv)
-			}
-			env = append(env,
-				"BEADS_DOLT_SERVER_PORT=1",
-				"BD_NON_INTERACTIVE=1",
-			)
-
 			// #nosec G204 -- bd is a locally built binary, flag is a literal
 			cmd := exec.Command(bd, "init", flag, "--prefix", "myproject", "--skip-hooks")
 			cmd.Dir = projectDir
-			cmd.Env = env
+			cmd.Env = initGuardE2EEnv(t, 1)
 			out, err := cmd.CombinedOutput()
 
 			if err == nil {
@@ -79,4 +63,72 @@ func TestInitGuard_ForceE2EDoesNotRecreateMissingServerDB(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestInitGuard_RecreateMissingE2ECreatesMissingServerDB is the success-side
+// twin of the test above. The unit tests that permit --recreate-missing flip
+// initAllowRecreateMissing directly, so nothing else runs the documented
+// recovery command itself through what follows the guard (remote safety, the
+// metadata rewrite, CREATE DATABASE). This runs the real binary against a live
+// server that lacks the configured database: refused without the opt-in, and
+// with it, init succeeds and the database exists on that server.
+func TestInitGuard_RecreateMissingE2ECreatesMissingServerDB(t *testing.T) {
+	beadsDir := startProjectServerModeGuardFixture(t, "myproject")
+	port, err := strconv.Atoi(os.Getenv("BEADS_DOLT_SERVER_PORT"))
+	if err != nil {
+		t.Fatalf("fixture must pin BEADS_DOLT_SERVER_PORT: %v", err)
+	}
+	// The legacy-upgrade guard runs before init's own guards and refuses a
+	// server workspace whose local Dolt storage has no current-era version
+	// witness; a workspace bd initialized has one.
+	if err := writeLocalVersion(filepath.Join(beadsDir, localVersionFile), Version); err != nil {
+		t.Fatalf("write local version: %v", err)
+	}
+	if check := checkDatabaseOnServer("127.0.0.1", port, "root", "", "myproject", false); !check.Reachable || check.Exists {
+		t.Fatalf("precondition: server must be reachable and lack the database, got %+v", check)
+	}
+
+	projectDir := filepath.Dir(beadsDir)
+	env := initGuardE2EEnv(t, port)
+	args := []string{"init", "--prefix", "myproject", "--skip-hooks", "--skip-agents"}
+
+	// Without the opt-in this exact workspace is refused, so the success below
+	// is the flag's doing rather than a fixture init would accept anyway.
+	out, err := runExternalServerBD(t, projectDir, env, args...)
+	if err == nil || !strings.Contains(out, "not found on server") {
+		t.Fatalf("precondition: bd init without --recreate-missing must be refused by the missing-database guard, got err=%v:\n%s", err, out)
+	}
+
+	out, err = runExternalServerBD(t, projectDir, env, append(args, "--recreate-missing")...)
+	if err != nil {
+		t.Fatalf("bd init --recreate-missing must create the missing database, got %v:\n%s", err, out)
+	}
+	if check := checkDatabaseOnServer("127.0.0.1", port, "root", "", "myproject", false); !check.Reachable || !check.Exists {
+		t.Fatalf("bd init --recreate-missing reported success but the database is not on the server: %+v\n%s", check, out)
+	}
+}
+
+// initGuardE2EEnv builds a bd child environment in which only the fixture's
+// files and the given port choose the server. Every BEADS_DOLT_* setting
+// (shared-server mode, data dir, mode, the TestMain container's port) and the
+// BEADS_DIR, BEADS_DB, BD_DB and BEADS_SHARED_SERVER_DIR overrides are
+// dropped, which is what startProjectServerModeGuardFixture pins in-process.
+// The mode variables are dropped rather than set to "0":
+// initModeExplicitlyRequested treats any non-empty value as an explicit mode
+// choice, and init would then stop inheriting server mode from metadata.json.
+func initGuardE2EEnv(t *testing.T, port int) []string {
+	t.Helper()
+	env := []string{}
+	for _, kv := range externalServerTestEnv(t) {
+		name, _, _ := strings.Cut(kv, "=")
+		switch name {
+		case "BEADS_DB", "BD_DB", "BEADS_SHARED_SERVER_DIR":
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env,
+		"BEADS_DOLT_SERVER_PORT="+strconv.Itoa(port),
+		"BD_NON_INTERACTIVE=1",
+	)
 }

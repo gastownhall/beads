@@ -31,6 +31,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // UserRole represents the user's relationship to a repository.
@@ -100,6 +101,143 @@ func GetRepoContext() (*RepoContext, error) {
 	return repoCtx, repoCtxErr
 }
 
+// NoRepoRootError reports that a .beads directory was found and cleared the
+// SEC-003 safe-boundary check, but git could not tell us a repository root for
+// it.
+//
+// "Git could not tell us", not "there is no repo": git.GetMainRepoRoot bottoms
+// out in a single `git rev-parse`, and every failure of that command arrives
+// here. The common case is the plain one — the workspace is not inside a git
+// repo — but a dangling gitfile, a dubious-ownership refusal, or git missing
+// from PATH all land here too. Recovering is equally safe in all of them (the
+// workspace is located and boundary-checked either way), but a caller
+// reporting on the workspace should not claim to know which it was. `bd
+// context` says so by leaving cwd_repo_root empty, and printContextText prints
+// "git: unavailable" for it.
+//
+// It is deliberately distinct from the other two failures buildRepoContext can
+// return ("no .beads directory found" and the unsafe-location rejection):
+// those mean bd does not know which workspace it is looking at, while this one
+// means it does. Only this failure is safe for a git-independent caller to
+// recover from, and only a typed error can say so — the unsafe-location
+// message embeds the offending path verbatim, so any substring test over the
+// message text is a path-controlled discriminator.
+type NoRepoRootError struct {
+	// BeadsDir is the resolved, boundary-checked .beads directory.
+	BeadsDir string
+	// Err is the underlying git failure.
+	Err error
+}
+
+func (e *NoRepoRootError) Error() string {
+	return fmt.Sprintf("cannot determine repository root: %v", e.Err)
+}
+
+func (e *NoRepoRootError) Unwrap() error { return e.Err }
+
+// GetRepoContextAllowingNoGit returns the repository context for callers that
+// only need to locate the workspace, not operate on git — `bd context` and the
+// context provider behind the proxied route, both of which read config files
+// and are documented to answer in degraded states.
+//
+// It behaves exactly like GetRepoContext except for NoRepoRootError, where it
+// synthesizes a context rooted at the .beads parent. Every other failure,
+// including the unsafe-location rejection, propagates untouched. Callers that
+// actually run git commands must keep using GetRepoContext, so that a missing
+// repository stays an error at the point where it matters (GH#4772).
+func GetRepoContextAllowingNoGit() (*RepoContext, error) {
+	return recoverNoGit(GetRepoContext())
+}
+
+// recoverNoGit is the selection itself, split out from
+// GetRepoContextAllowingNoGit so a test can drive the discriminator rather than
+// re-deriving errors.As over hand-built values — which is a property of the
+// standard library, not of this package's choice of discriminator.
+//
+// It returns (rc, err) untouched for every error that is not a
+// *NoRepoRootError, and a synthesized context for the one that is.
+func recoverNoGit(rc *RepoContext, err error) (*RepoContext, error) {
+	var noRoot *NoRepoRootError
+	if !errors.As(err, &noRoot) {
+		return rc, err
+	}
+	return &RepoContext{
+		BeadsDir: noRoot.BeadsDir,
+		// Root from the .beads side, not at filepath.Dir(BeadsDir). The failure
+		// that reaches here is the CWD's missing repository, not the .beads's —
+		// so when the .beads DOES live inside a repo, naming its parent would
+		// report a subdirectory and the same workspace would answer differently
+		// depending only on where the caller stood. repoRootForBeadsDir asks git
+		// from the .beads directory, which needs no CWD repo, and already falls
+		// back to filepath.Dir(beadsDir) when git cannot answer — so the
+		// no-git-anywhere result is unchanged.
+		RepoRoot: repoRootForBeadsDir(noRoot.BeadsDir),
+		// Known-empty, not merely usually: GetMainRepoRoot, GetRepoRoot and
+		// IsWorktree all read one sync.Once-cached gitContext, so reaching
+		// recoverNoGit means that cached lookup has already failed and all three
+		// degrade together. The call stays because it documents where the value
+		// comes from, but it cannot return anything but "" here.
+		CWDRepoRoot: git.GetRepoRoot(),
+		// Externality is decided POSITIONALLY: the resolved .beads is a redirect
+		// iff discovery standing in the current working directory would not have
+		// found it.
+		//
+		// Why position rather than an inventory of environment variables: bd has
+		// four caller-directed workspace channels — BEADS_DIR, --db,
+		// BEADS_DB/BD_DB and -C — and every one but BEADS_DIR reaches
+		// FindBeadsDir only after cmd/bd has rewritten BEADS_DIR for itself
+		// (selectedNoDBBeadsDir; applyChangeDirSelection for -C, which resolves a
+		// .beads and exports it WITHOUT changing the process directory). Reading
+		// the environment therefore cannot distinguish a workspace the caller
+		// named from one bd just found and re-exported, an inventory goes stale
+		// as channels are added, and a further BEADS_DIR writer already exists in
+		// the save/restore pair in cmd/bd/doctor.go. Asking where the caller is
+		// STANDING needs no inventory and covers all four channels uniformly.
+		//
+		// isExternalBeadsDir answers this by comparing git COMMON DIRS on the
+		// normal path; the CWD side of that comparison needs a repository, which
+		// is precisely what is missing here, so position is the substitute.
+		IsRedirected: beadsDirIsExternalToCWD(noRoot.BeadsDir),
+		// IsWorktree stays false for the same reason CWDRepoRoot is empty: the
+		// one cached git context this all reads has already failed, so
+		// git.IsWorktree() cannot be true here.
+	}, nil
+}
+
+// beadsDirIsExternalToCWD reports whether beadsDir is external to the working
+// directory — whether workspace discovery, standing in the CWD, would have
+// found something other than beadsDir, or nothing at all.
+//
+// It reuses FindBeadsDirFrom, which is both the primitive -C itself resolves
+// through (resolveChangeDirBeadsDir) and purely positional: it consults none of
+// the caller-directed variables, and its git probe scrubs routing env, so bd's
+// own re-exported BEADS_DIR cannot make a walk-found workspace look named.
+//
+// Settled boundary (the unspecified case the review flagged): a store reachable
+// only by being named is a redirect, INCLUDING one in a sibling directory of the
+// CWD. With no repository for the CWD there is no enclosing scope that could
+// make a sibling local, so the ancestor walk is the only defensible notion of
+// "the workspace I am standing in". This matches what Role() means by "external
+// repo mode": you are not standing in this store's project.
+func beadsDirIsExternalToCWD(beadsDir string) bool {
+	if beadsDir == "" {
+		return false
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		// No position to compare against. Report no redirect rather than
+		// inventing one from a failure that says nothing about provenance.
+		return false
+	}
+	discovered := FindBeadsDirFrom(cwd)
+	if discovered == "" {
+		// Nothing is discoverable from here, yet a workspace was resolved, so
+		// some caller-directed channel must have named it.
+		return true
+	}
+	return !utils.PathsEqual(discovered, beadsDir)
+}
+
 // buildRepoContext constructs the RepoContext by resolving all paths.
 // This is called once per process via sync.Once.
 func buildRepoContext() (*RepoContext, error) {
@@ -134,7 +272,12 @@ func buildRepoContext() (*RepoContext, error) {
 		var err error
 		repoRoot, err = git.GetMainRepoRoot()
 		if err != nil {
-			return nil, fmt.Errorf("cannot determine repository root: %w", err)
+			// Typed so callers that can work without git select this exact
+			// failure with errors.As instead of matching the message text.
+			// beadsDir is carried along because it has already cleared steps
+			// 1 and 2 above (found, and inside the safe boundary), which is
+			// precisely what makes the no-git fallback safe to take.
+			return nil, &NoRepoRootError{BeadsDir: beadsDir, Err: err}
 		}
 	}
 

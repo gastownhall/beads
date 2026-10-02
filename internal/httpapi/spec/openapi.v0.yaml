@@ -2422,7 +2422,7 @@ paths:
             scheduling cycle, every time.
           x-bd-codes:
             [already_claimed, dependency_cycle, dependency_exists,
-             not_claimable, not_closable, precondition_failed]
+             not_claimable, not_closable, notes_overwrite_refused, precondition_failed]
           content:
             application/problem+json:
               schema:
@@ -3841,12 +3841,19 @@ paths:
         ## What lands, and what it costs
 
 
-        `items` accepts at most 100 entries. The cap bounds how long one request
-        may hold a write transaction — it is not a statement about batch
-        semantics, and it is the bound the sibling batch operations already run
-        under. Split a larger plan; each request is atomic on its own, but note
-        that splitting it changes what the end gate can see, since the gate runs
-        over one request at a time.
+        `items` accepts at most 1000 entries (raised from 100; see the
+        `issues.batchApplyLarge` capability token on `ContextResponse`). The
+        cap bounds how long one request may hold a write transaction — it is
+        not a statement about batch semantics. A request over 100 items also
+        EXTENDS the effective request deadline to an operator-configured
+        ceiling (`bd serve --large-apply-ceiling`, 5 minutes by default)
+        instead of the ordinary small-request deadline, so a plan that
+        genuinely needs minutes to apply is not cut off mid-commit; a request
+        at or under 100 items keeps exactly the deadline — and the sibling
+        batch operations' bound — it has always had. Split a larger plan if
+        you must; each request is atomic on its own, but note that splitting
+        it changes what the end gate can see, since the gate runs over one
+        request at a time.
 
 
         ONE HISTORY ENTRY IS RECORDED FOR THE WHOLE REQUEST, attributed to
@@ -4029,7 +4036,7 @@ paths:
             a malformed request.
           x-bd-codes:
             [already_claimed, already_exists, dependency_cycle,
-             dependency_exists, not_closable, precondition_failed]
+             dependency_exists, not_closable, notes_overwrite_refused, precondition_failed]
           content:
             application/problem+json:
               schema:
@@ -7449,12 +7456,26 @@ components:
             `dependencies.add`, `dependencies.remove`,
             `memories.list`, `memories.get`, `memories.remember`,
             `memories.forget`, `events.list`, `events.watch`,
-            `issues.casMetadata`; the one behavior token is `project.enforce`,
+            `issues.casMetadata`; the behavior tokens are `project.enforce`,
             which announces that a `Bd-Project-Id` stamp for the wrong workspace
-            is refused here rather than silently ignored. The list grows
-            additively, and an operation never appears here unless it is fully
-            implemented. This is how a client checks for an operation or a
-            behavior — never the version string.
+            is refused here rather than silently ignored, and
+            `issues.batchApplyLarge`, which announces that
+            `POST /v0/beads/issues:batchApply` accepts the RAISED envelope —
+            up to 1000 items (`ApplyBatchRequest.items.maxItems`), a 16 MiB
+            body, and (for a request over 100 items) a run budget that
+            EXTENDS to an operator-configured ceiling (`bd serve
+            --large-apply-ceiling`, 5 minutes by default) — rather than the
+            original 100-item, 4 MiB bound. The ceiling is a flat whole-run
+            budget, not a value scaled by item count: a 101-item request and a
+            1000-item request both get the same extended budget. A request at
+            or under 100 items is unaffected either way and keeps the
+            server's ordinary deadline exactly as before. A client that
+            checks for this token before sending a plan over 100 items learns
+            whether THIS server accepts it without paying for a round trip an
+            older server would refuse anyway. The list grows additively, and
+            an operation never appears here unless it is fully implemented.
+            This is how a client checks for an operation or a behavior —
+            never the version string.
 
 
             THIS LIST IS BUILD-LEVEL, NOT WORKSPACE-LEVEL. It says which
@@ -8796,7 +8817,7 @@ components:
         items:
           type: array
           minItems: 1
-          maxItems: 100
+          maxItems: 1000
           description: >-
             The items to apply, IN THE ORDER THEY ARE TO BE APPLIED. An empty
             array is a `400` rather than a successful no-op: a write request that
@@ -8804,10 +8825,20 @@ components:
             client whose own plan filtered to nothing silently stops writing.
 
 
-            The 100-item cap bounds how long one request may hold a write
-            transaction, not batch semantics. Split a larger plan; each request
-            is atomic on its own — but splitting it changes what the end gate
-            can see, since the gate runs over one request at a time.
+            The 1000-item cap (raised from 100; see the `issues.batchApplyLarge`
+            capability token on `ContextResponse`) bounds how long one request
+            may hold a write transaction, not batch semantics. A request over
+            100 items also EXTENDS the effective request deadline: the server
+            grants a flat, operator-configured ceiling (`bd serve
+            --large-apply-ceiling`, 5 minutes by default) instead of the
+            ordinary small-request deadline, so a plan that genuinely needs
+            minutes to apply is not cut off mid-commit. It never narrows: a
+            request at or under 100 items keeps exactly the deadline it has
+            always had. Split a larger plan if you must; each request is
+            atomic on its own — but splitting it changes what the end gate
+            can see, since the gate runs over one request at a time, and the
+            server itself never splits a plan you send it: a single `items`
+            array either commits in full or changes nothing.
 
 
             A per-item refusal names its offender as `items[i].kind.member`.
@@ -9174,6 +9205,18 @@ components:
             idempotent and needs no force. It requires `patch.assignee` — a
             request setting it without one is a `400` — and it must be false
             when `expected_assignee` is sent.
+        force_notes_overwrite:
+          type: boolean
+          default: false
+          description: >-
+            Bypasses ONLY the refusal on a `patch.notes` that would replace
+            existing non-empty notes with different non-empty content (an
+            explicit clear is not fenced). It requires
+            `patch.notes` — an item setting it without one is a `400` — and,
+            UNLIKE `force_assignee_transfer`, it has no `expected_assignee`
+            exemption: there is no compare-and-set that authorizes a notes
+            overwrite, so combining the two is legal and each answers its own
+            question.
 
     ApplyPatchBody:
       type: object
@@ -9225,7 +9268,10 @@ components:
           type: string
           description: >-
             Replaces the notes. Mutually exclusive with `append_notes`; sending
-            both is a `400`.
+            both is a `400`. Replacing EXISTING non-empty notes with
+            different non-empty content is refused with `409
+            notes_overwrite_refused` unless `force_notes_overwrite` is set; an
+            explicit clear (empty string) is not fenced.
         append_notes:
           type: string
           description: >-
@@ -10523,6 +10569,18 @@ components:
             idempotent and needs no force. It requires `patch.assignee` — a
             request setting it without one is a `400` — and it must be false
             when `expected_assignee` is sent.
+        force_notes_overwrite:
+          type: boolean
+          default: false
+          description: >-
+            Bypasses ONLY the refusal on a `patch.notes` that would replace
+            existing non-empty notes with different non-empty content (an
+            explicit clear is not fenced). It requires
+            `patch.notes` — a request setting it without one is a `400` —
+            and, UNLIKE `force_assignee_transfer`, it has no
+            `expected_assignee` exemption: there is no compare-and-set that
+            authorizes a notes overwrite, so combining the two is legal and
+            each answers its own question.
 
     IssuePatchBody:
       type: object
@@ -10565,7 +10623,10 @@ components:
           type: string
           description: >-
             Replaces the notes. Mutually exclusive with `append_notes`; sending
-            both is a `400`.
+            both is a `400`. Replacing EXISTING non-empty notes with
+            different non-empty content is refused with `409
+            notes_overwrite_refused` unless `force_notes_overwrite` is set; an
+            explicit clear (empty string) is not fenced.
         append_notes:
           type: string
           description: >-

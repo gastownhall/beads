@@ -807,7 +807,9 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// --reinit-local both bypass this local-only guard; they do NOT
 		// authorize cross-boundary operations on remote history (see
 		// CheckRemoteSafety at cmd/bd/init_safety.go and
-		// engdocs/adr/0002-init-safety-invariants.md).
+		// engdocs/adr/0002-init-safety-invariants.md), nor recreating a
+		// missing server-mode database (guardMissingServerDatabase below;
+		// engdocs/adr/0004-missing-database-guard-signal.md).
 		if reinitLocal {
 			// be-5up5 round 2 (review of PR #5791): --reinit-local/--force skip
 			// checkExistingBeadsData entirely, and the typed confirmation below
@@ -2258,8 +2260,8 @@ func init() {
 	initCmd.Flags().Bool("setup-exclude", false, "Configure .git/info/exclude to keep beads files local (for forks)")
 	initCmd.Flags().Bool("skip-hooks", false, "Skip git hooks installation")
 	initCmd.Flags().Bool("skip-agents", false, "Skip AGENTS.md and Claude/Codex/Cursor setup generation")
-	initCmd.Flags().Bool("force", false, "Deprecated alias for --reinit-local. Bypasses only the LOCAL data-safety guard; does NOT authorize remote divergence (see 'bd help init-safety').")
-	initCmd.Flags().Bool("reinit-local", false, "Re-initialize local .beads/ over existing local data. Does NOT authorize remote divergence; see --discard-remote.")
+	initCmd.Flags().Bool("force", false, "Deprecated alias for --reinit-local. Bypasses only the LOCAL data-safety guard; does NOT authorize remote divergence or recreating a missing server-mode database (see 'bd help init-safety').")
+	initCmd.Flags().Bool("reinit-local", false, "Re-initialize local .beads/ over existing local data. Does NOT authorize remote divergence (see --discard-remote) or recreating a missing server-mode database (see --recreate-missing).")
 	initCmd.Flags().Bool("discard-remote", false, "Authorize discarding the configured remote's Dolt history when re-initializing. Requires --destroy-token in non-interactive mode; see 'bd help init-safety'.")
 	initCmd.Flags().Bool("recreate-missing", false, "Explicitly authorize creating a fresh, empty database when this project's configured server-mode database is missing or unreachable. Opt-in per invocation only; never implied by --force, config, or env (see 'bd help init-safety').")
 	initCmd.Flags().Bool("from-jsonl", false, "Import issues from configured import.path; refuses remote history unless --discard-remote authorizes replacement")

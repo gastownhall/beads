@@ -122,7 +122,8 @@ Deep Validation Mode (--deep):
   Additional checks:
   - Parent consistency: All parent-child deps point to existing issues
   - Dependency integrity: All deps reference valid issues
-  - Epic completeness: Find epics ready to close (all children closed)
+  - Epic completeness: Find epics ready to close (all children closed as
+    completed work; duplicate/wontfix/superseded closes do not count)
   - Agent bead integrity: Agent beads have valid state values
   - Mail thread integrity: Thread IDs reference existing issues
   - Molecule integrity: Molecules have valid parent-child structures

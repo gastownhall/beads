@@ -70,7 +70,7 @@ jobs:
   # fork) pull_request whose actor is not Dependabot. pr.yml runs this same
   # job (policy-tested identical) and its gate goes red unless the lane then
   # ran remotely and passed, so neither the kill switch (mode skip) nor a
-  # missing executor secret (mode local) can silently drop the tier. Forks
+  # missing executor secret (mode cache) can silently drop the tier. Forks
   # and Dependabot (no secrets), merge_group and every other event keep the
   # legacy tier. The step reads no secret or variable and runs no repository
   # code.
@@ -86,7 +86,7 @@ jobs:
       # and not the executor secret (either, evaluated per run, would let one
       # workflow's re-run disagree with the other's). A same-repo PR whose run
       # lacks the secret is covered anyway, so pr.yml's gate goes red (mode
-      # local) instead of the tier silently moving back. Dependabot runs get
+      # cache) instead of the tier silently moving back. Dependabot runs get
       # no Actions secrets by design and keep the legacy tier; github.actor
       # (unlike triggering_actor) stays the PR's actor on a re-run.
       - name: Decide whether the Bazel lane covers the embedded tier
@@ -265,7 +265,12 @@ jobs:
     needs: [detect-ci-tier, bazel-embedded-coverage, build-embedded]
     if: needs.detect-ci-tier.outputs.full_embedded == 'true' && needs.bazel-embedded-coverage.outputs.covered != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The shard script's -test.timeout=20m plus setup. At 15m the 1000-item
+    # batch-apply cap cancelled shard 2/5: TestBatchApplyContract took 604s
+    # under -race (97s at the 100-item cap, main run 35862663577) and the
+    # shard hit 15m twice (run 36807191489). The manifest now pins the heavy
+    # tests apart; the heaviest shard projects to ~13m.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:

@@ -664,7 +664,7 @@ func localFileRecoveryPlan(plan BootstrapPlan, beadsDir string) (BootstrapPlan, 
 // initialized (ProjectID set) and the configured server-mode database could
 // not be confirmed to exist. Creating one here would strand the existing issue
 // data behind a new, empty database of the same name — the same root cause
-// PR #5791 (open, not yet merged) addresses for bd init.
+// the be-5up5 guards in init.go address for bd init (PR #5791).
 //
 // Reaching the init fall-through already implies the database was not
 // confirmed: existingBootstrapDBPlan returns a settled "none" plan whenever a
@@ -1111,9 +1111,9 @@ func bootstrapMissingServerDBSummary(dbName, host string, port int, probeErr err
 // workspace that was already initialized elsewhere. Per GH#2363, this must
 // never suggest a destructive "recreate" action as an actionable next step.
 //
-// The equivalent guard for `bd init` is proposed in PR #5791, which is open
-// and not yet merged; this wording is kept deliberately close to it so the
-// two can share one message once that lands.
+// The equivalent `bd init` refusal is initGuardMissingServerDBMessage, from
+// PR #5791. This wording is kept deliberately close to it so the two can be
+// folded into one message.
 func bootstrapMissingServerDBRefusal(dbName, host string, port int, probeErr error) error {
 	var b strings.Builder
 	if probeErr != nil {
@@ -1134,8 +1134,8 @@ func bootstrapMissingServerDBRefusal(dbName, host string, port int, probeErr err
 	// Every route here must be followable FROM this state. `bd backup restore`
 	// alone is not: it restores a Dolt-native snapshot, not a `bd export`
 	// JSONL, and it requires an initialized database — so it silently routes
-	// the operator back through `bd init`, the very unguarded door this
-	// refusal exists to keep shut (PR #5791). Name that precondition instead
+	// the operator back through `bd init`, the door this refusal exists to
+	// keep shut (PR #5791). Name that precondition instead
 	// of implying it, and lead with the routes that need no init at all.
 	b.WriteString("\nTo recover existing data, repopulate the database rather than creating fresh.\n")
 	b.WriteString("Routes that work from this state:\n")

@@ -98,3 +98,10 @@ exports_files(
     ["ci/gofmt-bin.sh"],
     visibility = ["//scripts/prlintmake:__pkg__"],
 )
+
+# The compatibility entrypoint whose exit-status contract
+# //scripts/check-versions:check-versions_test drives.
+exports_files(
+    ["check-versions.sh"],
+    visibility = ["//scripts/check-versions:__pkg__"],
+)

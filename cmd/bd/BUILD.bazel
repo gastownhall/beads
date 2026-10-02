@@ -243,6 +243,7 @@ go_library(
         "ping_proxied_server.go",
         "pour.go",
         "preflight.go",
+        "preflight_versions.go",
         "prime.go",
         "prime_divergence.go",
         "prime_proxied_server.go",
@@ -339,6 +340,7 @@ go_library(
         "update.go",
         "update_description_guard.go",
         "update_input.go",
+        "update_notes_guard.go",
         "update_proxied_server.go",
         "upgrade.go",
         "vc.go",
@@ -429,6 +431,7 @@ go_library(
         "//internal/uimd",
         "//internal/utils",
         "//internal/validation",
+        "//internal/versioncheck",
         "//internal/workapi",
         "//internal/workspacegate",
         "//internal/worktreeremove",
@@ -558,7 +561,10 @@ go_test(
         "command_telemetry_test.go",
         "comment_promote_embedded_test.go",
         "comment_proxied_integration_test.go",
+        "comment_reserved_word_test.go",
+        "comment_routed_exact_test.go",
         "comment_test.go",
+        "comments_add_test.go",
         "comments_cli_embedded_test.go",
         "comments_test.go",
         "compact_embedded_test.go",
@@ -598,6 +604,7 @@ go_test(
         "context_identity_test.go",
         "context_proxied_integration_test.go",
         "context_test.go",
+        "context_text_test.go",
         "contributor_embedded_test.go",
         "contributor_routing_e2e_test.go",
         "cook_qnt_test.go",
@@ -762,6 +769,7 @@ go_test(
         "gc_embedded_test.go",
         "gc_prune_test.go",
         "git_repo_template_test.go",
+        "git_test_helpers_scope_test.go",
         "github_link_scope_test.go",
         "gitlab_integration_test.go",
         "gitlab_test.go",
@@ -850,6 +858,7 @@ go_test(
         "label_embedded_test.go",
         "label_list_all_test.go",
         "label_normalization_test.go",
+        "label_prefix_test.go",
         "label_proxied_integration_test.go",
         "label_rename_message_test.go",
         "label_rename_publish_failure_test.go",
@@ -954,6 +963,8 @@ go_test(
         "orphans_test.go",
         "output_test.go",
         "pour_proxied_integration_test.go",
+        "pour_unknown_vars_pipeline_test.go",
+        "pour_unknown_vars_test.go",
         "pour_wisp_var_validation_test.go",
         "preflight_test.go",
         "prime_divergence_test.go",
@@ -1083,6 +1094,7 @@ go_test(
         "show_details_json_test.go",
         "show_embedded_test.go",
         "show_format_metadata_test.go",
+        "show_format_test.go",
         "show_not_found_hint_test.go",
         "show_proxied_integration_test.go",
         "show_proxied_reader_test.go",
@@ -1172,6 +1184,7 @@ go_test(
         "update_lifecycle_test.go",
         "update_metadata_test.go",
         "update_multi_id_exit_test.go",
+        "update_notes_guard_test.go",
         "update_notes_warning_test.go",
         "update_proxied_integration_test.go",
         "update_proxied_server_test.go",
@@ -1273,6 +1286,7 @@ go_test(
         "//internal/telemetry",
         "//internal/testutil",
         "//internal/testutil/bazeltest",
+        "//internal/testutil/credentialcmd",
         "//internal/timeparsing",
         "//internal/tracker",
         "//internal/types",
@@ -1280,6 +1294,7 @@ go_test(
         "//internal/uimd",
         "//internal/utils",
         "//internal/validation",
+        "//internal/versioncheck",
         "//internal/workapi",
         "//internal/workspacegate",
         "//internal/worktreeremove",
@@ -1475,6 +1490,18 @@ exports_files(
 exports_files(
     ["init_safety_help.go"],
     visibility = ["//test/docsync:__pkg__"],
+)
+
+# Release-metadata surfaces gated by //internal/versioncheck's releaseSources
+# table: the canonical version and the Windows PE resource files. Aggregated
+# into //:release_metadata_files, which is what the tests declare as data.
+exports_files(
+    [
+        "version.go",
+        "winres/manifest.xml",
+        "winres/winres.json",
+    ],
+    visibility = ["//:__pkg__"],
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

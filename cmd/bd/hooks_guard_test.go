@@ -296,6 +296,177 @@ func TestInstallHooksBacksUpForeignHook(t *testing.T) {
 	}
 }
 
+// externalIntegrationHook is the shape beads prescribes for external hook
+// managers (GH#946): the manager owns the file, and one line delegates to bd.
+// It carries no beads marker, so bd must recognize it as a working integration
+// (bd hooks list says installed) while still treating the file as foreign.
+//
+// The write-path tests below exist because recognizing it via IsBdHook — the
+// ownership predicate — made bd destroy exactly this file. They all fail if the
+// classification is carried on IsBdHook instead of IsExternalIntegration.
+const externalIntegrationHook = "#!/bin/sh\nlefthook run pre-commit \"$@\"\nbd hooks run pre-commit \"$@\"\n"
+
+// A hook bd does not own must be backed up before injection even when it
+// delegates to bd: the delegation makes it a beads integration, not beads'
+// property.
+func TestInstallHooksBacksUpExternalIntegrationHook(t *testing.T) {
+	repoDir := setupGuardTestRepo(t)
+
+	hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-commit")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hookPath, []byte(externalIntegrationHook), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := installHooksWithOptions(managedHookNames, false, false, false, false); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+
+	backup, err := os.ReadFile(hookPath + ".backup")
+	if err != nil {
+		t.Fatalf("expected .backup sidecar for an external-manager hook: %v", err)
+	}
+	if string(backup) != externalIntegrationHook {
+		t.Fatalf(".backup does not match original content:\n%s", backup)
+	}
+
+	merged, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(merged), "lefthook run pre-commit") {
+		t.Fatal("external hook manager's own line lost from hook after injection")
+	}
+	if !strings.Contains(string(merged), hookSectionBeginPrefix) {
+		t.Fatal("bd section not injected into hook")
+	}
+}
+
+// The tracked-file refusal must still fire for a delegating hook: a committed
+// team hook under core.hooksPath that calls bd hooks run is the shape this
+// repository itself ships in .githooks/pre-commit.
+func TestInstallHooksRefusesTrackedExternalIntegrationHook(t *testing.T) {
+	repoDir := setupGuardTestRepo(t)
+
+	if err := os.MkdirAll(filepath.Join(repoDir, "hooks"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	trackedHook := filepath.Join(repoDir, "hooks", "pre-commit")
+	if err := os.WriteFile(trackedHook, []byte(externalIntegrationHook), 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"add", "hooks/pre-commit"},
+		{"commit", "-m", "add tracked external integration hook"},
+		{"config", "core.hooksPath", "hooks"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repoDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Skipf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+	git.ResetCaches()
+
+	installErr := installHooksWithOptions(managedHookNames, false, false, false, false)
+	if installErr == nil {
+		t.Fatal("expected install to refuse a tracked external-manager hook, got nil error")
+	}
+	if !strings.Contains(installErr.Error(), "tracked by git") {
+		t.Fatalf("expected tracked-file refusal, got: %v", installErr)
+	}
+}
+
+// Uninstall removes files bd owns. A delegating hook bd never wrote must
+// survive: deleting it silently destroys the external manager's hook, with no
+// .backup to restore from.
+func TestUninstallHooksPreservesExternalIntegrationHook(t *testing.T) {
+	repoDir := setupGuardTestRepo(t)
+
+	hookPath := filepath.Join(repoDir, ".git", "hooks", "pre-commit")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hookPath, []byte(externalIntegrationHook), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := uninstallHooks(); err != nil {
+		t.Fatalf("uninstallHooks() failed: %v", err)
+	}
+
+	content, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("external-manager hook must survive uninstall: %v", err)
+	}
+	if string(content) != externalIntegrationHook {
+		t.Fatalf("external-manager hook was modified by uninstall:\n%s", content)
+	}
+}
+
+// bd hooks run chains to <hook>.old, so a .old that itself delegates via
+// "bd hooks run" would re-enter bd and run again without bound. The recursion
+// guard must skip it even though it is not IsBdHook, and must still run a plain
+// .old.
+//
+// The delegating fixture comments its "bd hooks run" line out. The classifier
+// matches the call anywhere in the file, so it still classifies as an external
+// integration, but if the guard stops firing it only leaves the marker behind
+// instead of recursing.
+func TestRunChainedHookSkipsDelegatingOldHook(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chained .old fixtures are POSIX shell scripts")
+	}
+	for _, tc := range []struct {
+		name      string
+		delegates bool
+		wantRun   bool
+	}{
+		{name: "delegating .old is skipped", delegates: true},
+		{name: "plain .old runs", wantRun: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repoDir := setupGuardTestRepo(t)
+
+			hooksDir := filepath.Join(repoDir, ".git", "hooks")
+			if err := os.MkdirAll(hooksDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(t.TempDir(), "chained-hook-ran")
+			script := "#!/bin/sh\n"
+			if tc.delegates {
+				script += "# bd hooks run pre-commit \"$@\"\n"
+			}
+			script += "touch '" + marker + "'\n"
+			oldHook := filepath.Join(hooksDir, "pre-commit.old")
+			if err := os.WriteFile(oldHook, []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+
+			// Pin the classification the guard keys on, so a fixture that
+			// stopped looking like an integration cannot pass for the wrong
+			// reason.
+			info, err := getHookVersion(oldHook)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.IsBdHook || info.IsExternalIntegration != tc.delegates {
+				t.Fatalf("fixture classified as %+v, want IsExternalIntegration=%v and IsBdHook=false", info, tc.delegates)
+			}
+
+			if code := runChainedHook("pre-commit", nil); code != 0 {
+				t.Fatalf("runChainedHook() = %d, want 0", code)
+			}
+			_, statErr := os.Stat(marker)
+			if ran := statErr == nil; ran != tc.wantRun {
+				t.Fatalf("chained .old ran = %v, want %v", ran, tc.wantRun)
+			}
+		})
+	}
+}
+
 // Shared installs (.beads-hooks/) are deliberately committed, so the
 // tracked-file guard must not fire for them.
 func TestGuardHookWritePathAllowsTrackedWhenShared(t *testing.T) {

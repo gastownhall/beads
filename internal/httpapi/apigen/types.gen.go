@@ -354,7 +354,7 @@ type ApplyBatchRequest struct {
 
 	// Items The items to apply, IN THE ORDER THEY ARE TO BE APPLIED. An empty array is a `400` rather than a successful no-op: a write request that writes nothing is a client bug, and answering it cheerfully is how a client whose own plan filtered to nothing silently stops writing.
 	//
-	// The 100-item cap bounds how long one request may hold a write transaction, not batch semantics. Split a larger plan; each request is atomic on its own — but splitting it changes what the end gate can see, since the gate runs over one request at a time.
+	// The 1000-item cap (raised from 100; see the `issues.batchApplyLarge` capability token on `ContextResponse`) bounds how long one request may hold a write transaction, not batch semantics. A request over 100 items also EXTENDS the effective request deadline: the server grants a flat, operator-configured ceiling (`bd serve --large-apply-ceiling`, 5 minutes by default) instead of the ordinary small-request deadline, so a plan that genuinely needs minutes to apply is not cut off mid-commit. It never narrows: a request at or under 100 items keeps exactly the deadline it has always had. Split a larger plan if you must; each request is atomic on its own — but splitting it changes what the end gate can see, since the gate runs over one request at a time, and the server itself never splits a plan you send it: a single `items` array either commits in full or changes nothing.
 	//
 	// A per-item refusal names its offender as `items[i].kind.member`.
 	Items []ApplyItem `json:"items"`
@@ -674,7 +674,7 @@ type ApplyPatchBody struct {
 	// `replace` replaces the whole document. Present holding `null`, `{}` or an empty value CLEARS metadata — and clearing STORES THE EMPTY JSON DOCUMENT rather than SQL null, so "created with no metadata" and "given metadata and then cleared" are the same stored value; a reader must treat absent, empty and `{}` as one value on the way out. `merge` must be a nonempty JSON OBJECT and is merged into the current document.
 	Metadata *ApplyMetadataPatch `json:"metadata,omitempty"`
 
-	// Notes Replaces the notes. Mutually exclusive with `append_notes`; sending both is a `400`.
+	// Notes Replaces the notes. Mutually exclusive with `append_notes`; sending both is a `400`. Replacing EXISTING non-empty notes with different non-empty content is refused with `409 notes_overwrite_refused` unless `force_notes_overwrite` is set; an explicit clear (empty string) is not fenced.
 	Notes    *string `json:"notes,omitempty"`
 	Owner    *string `json:"owner,omitempty"`
 	Priority *int    `json:"priority,omitempty"`
@@ -712,6 +712,9 @@ type ApplyUpdateItem struct {
 
 	// ForceClosePolicy Bypasses ONLY close policy — the open-children refusal and the live blocker refusal — for a `patch.status` that crosses into the workspace's done category. It has no effect without such a status change, and it never bypasses validation, the preconditions above, or the assignee fence.
 	ForceClosePolicy *bool `json:"force_close_policy,omitempty"`
+
+	// ForceNotesOverwrite Bypasses ONLY the refusal on a `patch.notes` that would replace existing non-empty notes with different non-empty content (an explicit clear is not fenced). It requires `patch.notes` — an item setting it without one is a `400` — and, UNLIKE `force_assignee_transfer`, it has no `expected_assignee` exemption: there is no compare-and-set that authorizes a notes overwrite, so combining the two is legal and each answers its own question.
+	ForceNotesOverwrite *bool `json:"force_notes_overwrite,omitempty"`
 
 	// Patch The fields an `update` item writes. Every member is optional and PRESENCE is the signal: a member present is written, a member absent is untouched. An empty object is a `400` — a write that writes nothing is a client bug.
 	//
@@ -1007,7 +1010,7 @@ type ContextResponse struct {
 	// OPTIONAL, and absent means only that this server does not disclose its filesystem layout — never that it has no workspace. A client MUST NOT require it, MUST NOT treat absence as an error, and has no use for the value beyond display: it is a path on the SERVER's filesystem, which the client cannot open. Identify the workspace by `project_id` and `database`, which are required.
 	BeadsDir *string `json:"beads_dir,omitempty"`
 
-	// Capabilities The tokens this server advertises: the OPERATIONS it implements, derived from its route table, and the server-wide BEHAVIORS it enforces. v0's operation vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.count`, `issues.get`, `issues.related`, `issues.create`, `issues.addComment`, `issues.batchClose`, `issues.claim`, `issues.claimNext`, `issues.release`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `config.set`, `config.unset`, `dependencies.cycles`, `dependencies.list`, `dependencies.count`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`; the one behavior token is `project.enforce`, which announces that a `Bd-Project-Id` stamp for the wrong workspace is refused here rather than silently ignored. The list grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation or a behavior — never the version string.
+	// Capabilities The tokens this server advertises: the OPERATIONS it implements, derived from its route table, and the server-wide BEHAVIORS it enforces. v0's operation vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.count`, `issues.get`, `issues.related`, `issues.create`, `issues.addComment`, `issues.batchClose`, `issues.claim`, `issues.claimNext`, `issues.release`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `config.set`, `config.unset`, `dependencies.cycles`, `dependencies.list`, `dependencies.count`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`; the behavior tokens are `project.enforce`, which announces that a `Bd-Project-Id` stamp for the wrong workspace is refused here rather than silently ignored, and `issues.batchApplyLarge`, which announces that `POST /v0/beads/issues:batchApply` accepts the RAISED envelope — up to 1000 items (`ApplyBatchRequest.items.maxItems`), a 16 MiB body, and (for a request over 100 items) a run budget that EXTENDS to an operator-configured ceiling (`bd serve --large-apply-ceiling`, 5 minutes by default) — rather than the original 100-item, 4 MiB bound. The ceiling is a flat whole-run budget, not a value scaled by item count: a 101-item request and a 1000-item request both get the same extended budget. A request at or under 100 items is unaffected either way and keeps the server's ordinary deadline exactly as before. A client that checks for this token before sending a plan over 100 items learns whether THIS server accepts it without paying for a round trip an older server would refuse anyway. The list grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation or a behavior — never the version string.
 	//
 	// THIS LIST IS BUILD-LEVEL, NOT WORKSPACE-LEVEL. It says which operations this binary serves, and for every entry but two that is the whole answer. `events.list` and `events.watch` are the exceptions: the durable events journal is a per-workspace setting that is OFF by default, so a server that advertises them may still refuse every request to both with 409 `events_journal_disabled` — correctly, because the operations exist and the workspace has no journal. A consumer of either MUST treat the capability as "this server speaks it" and the 409 as "not on this workspace", and must not read the capability as a promise that records will arrive.
 	Capabilities []string `json:"capabilities"`
@@ -1393,7 +1396,7 @@ type IssuePatchBody struct {
 	// `replace` replaces the whole document. Present holding `null`, `{}` or an empty value CLEARS metadata — and clearing STORES THE EMPTY JSON DOCUMENT rather than SQL null, so "created with no metadata" and "given metadata and then cleared" are the same stored value; a reader must treat absent, empty and `{}` as one value on the way out. `merge` must be a nonempty JSON OBJECT and is merged into the current document.
 	Metadata *ApplyMetadataPatch `json:"metadata,omitempty"`
 
-	// Notes Replaces the notes. Mutually exclusive with `append_notes`; sending both is a `400`.
+	// Notes Replaces the notes. Mutually exclusive with `append_notes`; sending both is a `400`. Replacing EXISTING non-empty notes with different non-empty content is refused with `409 notes_overwrite_refused` unless `force_notes_overwrite` is set; an explicit clear (empty string) is not fenced.
 	Notes *string `json:"notes,omitempty"`
 
 	// ParentId Replaces the issue's parents atomically: a nonempty value makes THAT issue the only parent, and an EMPTY STRING removes every parent-child edge the issue has. Labels are not inherited — that is a create-time choice (`CreateIssueRequest.inherit_labels_from_parent`) and a reparent does not re-run it.
@@ -1954,6 +1957,9 @@ type UpdateIssueRequest struct {
 
 	// ForceClosePolicy Bypasses ONLY close policy — the open-children refusal and the live blocker refusal — for a `patch.status` that crosses into the workspace's done category. It has no effect without such a status change, and it never bypasses validation, the preconditions above, or the assignee fence.
 	ForceClosePolicy *bool `json:"force_close_policy,omitempty"`
+
+	// ForceNotesOverwrite Bypasses ONLY the refusal on a `patch.notes` that would replace existing non-empty notes with different non-empty content (an explicit clear is not fenced). It requires `patch.notes` — a request setting it without one is a `400` — and, UNLIKE `force_assignee_transfer`, it has no `expected_assignee` exemption: there is no compare-and-set that authorizes a notes overwrite, so combining the two is legal and each answers its own question.
+	ForceNotesOverwrite *bool `json:"force_notes_overwrite,omitempty"`
 
 	// Patch The fields to write. Every member is optional and PRESENCE is the signal: a member present is written, a member absent is untouched. An empty object is a `400` — a write that writes nothing is a client bug — except on `updateIssue` beside `claim: true`, where the claim is the write.
 	//

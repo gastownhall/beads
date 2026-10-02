@@ -42,8 +42,10 @@ Current PR-related workflow names:
 - `.github/workflows/bazel.yml`: `Bazel`
   Runs on `push` to `main`, manual dispatch, and `workflow_call` only. PRs and
   merge groups run it once, through `pr.yml`'s `bazel` job. Its `rbe` job
-  decides the execution mode once (`remote`, `local` for fork and Dependabot
-  PRs, or `skip` while the `RBE_WEST_WORKERS` repo variable is unset) and
+  decides the execution mode once (`remote`; `cache` for fork and Dependabot
+  PRs: local execution plus rbe-west's anonymous read-only action cache,
+  `.bazelrc`'s `fork-cache` config; `local` for `rbe=off` dispatches; or
+  `skip` while the `RBE_WEST_WORKERS` repo variable is unset) and
   exports it as the `rbe-mode` / `rbe-enabled` outputs; every lane exports its
   `job.status` as an output named after the job. `pr.yml`'s gate requires the
   call's result (`BAZEL`) and `BAZEL_TEST`, `BAZEL_PURE`, `BAZEL_EMBEDDED`,
@@ -53,8 +55,8 @@ Current PR-related workflow names:
   place (see
   [Legacy Embedded Tier Retirement](#legacy-embedded-tier-retirement-d2-step-1)).
   `.github/scripts/bazel-gate.sh` reads the exported mode, never the variable
-  or the fork flag: mode `skip` allows every Bazel id to skip, mode `local`
-  allows only the remote-only `BAZEL_EMBEDDED`, `BAZEL_INTEGRATION`,
+  or the fork flag: mode `skip` allows every Bazel id to skip, modes `local`
+  and `cache` allow only the remote-only `BAZEL_EMBEDDED`, `BAZEL_INTEGRATION`,
   `BAZEL_PROXIED` and `BAZEL_SERVER_STORAGE` (fork and Dependabot PRs rely on
   `pr-risk.yml`'s legacy tiers for the embedded, proxied and server-storage
   tiers), and mode `remote` allows none.
@@ -66,11 +68,11 @@ Current PR-related workflow names:
   `remote` it runs, and a failure, cancellation or missing result turns the
   gate red. Its legacy twins still run only on push to `main`, so this lane
   is the only PR-time run of the full integration-tagged suite. Fork and
-  Dependabot PRs (mode `local`) skip it, with no legacy fallback on the PR:
+  Dependabot PRs (mode `cache`) skip it, with no legacy fallback on the PR:
   they get integration coverage only after merge, from `main.yml`. Running it
-  for forks waits on a read-only remote cache they may use; that change is
-  making the lane local-capable for forks in `bazel.yml` and dropping
-  `BAZEL_INTEGRATION` from `bazel-gate.sh`'s mode-`local` skips. Its step
+  for forks, now that they have the read-only cache, means making the lane
+  cache-capable in `bazel.yml` and dropping `BAZEL_INTEGRATION` from
+  `bazel-gate.sh`'s mode-`cache` skips. Its step
   timeout (45 minutes) covers a cold compile plus the 1200 s per-action cap
   (policy-tested against `.bazelrc`); warm runs take about 3.5 minutes.
   `scripts/ci_workflow_test.go` fails when a new `bazel.yml` job has neither
@@ -84,11 +86,19 @@ Current PR-related workflow names:
   `pr.yml` and `pr-risk.yml` (see
   [Legacy Embedded Tier Retirement](#legacy-embedded-tier-retirement-d2-step-1)),
   then unset the `RBE_WEST_WORKERS` repo variable: same-repo runs then take
-  mode `skip`, which the gate accepts (fork PRs still run locally, so drift
-  on `main` still reaches them). Unsetting the variable while the flag is
-  still `"true"` turns `CI Gate / Required` red on every same-repo PR
+  mode `skip`, which the gate accepts (fork PRs still build, in mode `cache`,
+  so drift on `main` still reaches them). Unsetting the variable while the
+  flag is still `"true"` turns `CI Gate / Required` red on every same-repo PR
   (`BAZEL_EMBEDDED_RETIRED`), because PR Risk no longer runs the legacy
-  embedded tier for them.
+  embedded tier for them. If rbe-west closes the read-only cache, fork runs
+  fall back to executing everything locally (slower, still green). If it
+  is slow rather than closed, each lookup gives up after `fork-cache`'s
+  15 s `--remote_timeout` (times its retries), and Bazel's failure circuit
+  breaker (`--experimental_circuit_breaker_strategy=failure`) stops calling
+  it once too many lookups fail (by default 10% within 60 s); the remaining
+  actions run locally. Lookups that time out before the breaker trips still
+  cost up to that timeout each, so a slow endpoint slows fork runs until it
+  trips.
 - `.github/workflows/bazel-farm.yml`: `Bazel Farm (trusted forks)`
   Runs on `pull_request_target` for fork PRs to `main` whose author and
   triggering user are on `.github/bazel-farm-allowlist.txt`, and calls
@@ -140,7 +150,8 @@ enforced there.
 ## Trusted-Author Fork PRs (Bazel Farm)
 
 Fork PRs get no Actions secrets, so `pr.yml`'s Bazel call runs them in mode
-`local` (no remote-only lanes, slower). `bazel-farm.yml` gives the
+`cache` (local execution with the anonymous read-only cache, no remote-only
+lanes, slower). `bazel-farm.yml` gives the
 remote-execution farm to fork PRs from an allowlist of trusted authors
 (`.github/bazel-farm-allowlist.txt`: the numeric user ids of the same four
 people as gascity's `.github/blacksmith-allowlist.txt`). Everyone else's
@@ -300,8 +311,8 @@ What anyone else can do: nothing new.
   the base allowlist and says no. `farm` is skipped, and no secret or PR
   code is involved.
 - Fork `pull_request` runs still get no secrets, and `bazel.yml` keeps them
-  local even if the fork's `pr.yml` passes `fork-farm`, because the event is
-  not `pull_request_target`.
+  local (mode `cache`) even if the fork's `pr.yml` passes `fork-farm`,
+  because the event is not `pull_request_target`.
 
 Attacks considered:
 
@@ -666,7 +677,7 @@ have run remotely and passed.
   `github.actor` is not `dependabot[bot]`, while the flag is `"true"`. The
   executor secret is deliberately not part of the decision: a same-repo PR
   whose run lacks it (secret deleted or emptied) is still covered, takes
-  Bazel mode `local` (no embedded lane) and so turns `CI Gate / Required`
+  Bazel mode `cache` (no embedded lane) and so turns `CI Gate / Required`
   red, instead of quietly moving back to a legacy tier that one of its
   runs may already have skipped.
 - Everyone else keeps the legacy tier unchanged:
