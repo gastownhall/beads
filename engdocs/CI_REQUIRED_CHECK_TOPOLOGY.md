@@ -781,8 +781,22 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
     a literal `False`. Each lane also runs
     `bazel query 'attr(flaky, 1, tests(//...))'` before its tier and fails
     on any result, so a macro or variable cannot hide a flaky target.
-    (Bazel's own retry of a whole invocation after "Lost inputs" from the
-    remote cache re-runs the build, not a failed test.)
+  - No whole-invocation retry: `--experimental_remote_cache_eviction_retries=0`
+    in all three lane configs (no other `.bazelrc` line may set it; it is
+    not in `remote-exec`, which may only hold flags that are key-neutral
+    between trusted and fork runs, policy-tested).
+    By default (5) Bazel re-runs the entire `bazel test` invocation when an
+    input was evicted from the remote cache ("Lost inputs ... Found
+    transient remote cache error, retrying the build"), and that exit code
+    outranks a test failure. With `--keep_going` and
+    `--nocache_test_results`, a test that failed in the first attempt is
+    then executed again and only the retry's result (and BEP) is reported,
+    so a flaky failure could turn green. With 0, an eviction fails the step
+    instead; "Re-run failed jobs" retries it visibly. Reproduced against a
+    local HTTP cache emptied mid-build (2026-10-02): default retries
+    rebuilt and exited 0, `=0` failed with "Unexpected lost inputs". The
+    real proxied run before this change hit an eviction on all 15 shards
+    (before any test ran) and was retried silently.
   - Pinned selection:
     - Each lane's `bazel test //... --config=<config>` step and its
       config's `.bazelrc` lines are pinned exactly.

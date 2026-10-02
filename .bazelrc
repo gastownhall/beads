@@ -104,6 +104,12 @@ test:embedded --remote_download_regex=.*/test\.xml$
 # farm action-cache entry, or an unreproduced -race finding, stand in for a
 # run: always execute, at farm (not runner) cost.
 test:embedded --nocache_test_results
+# No whole-invocation retry on a remote cache eviction ("Lost inputs"):
+# Bazel would re-run every test, and a test that failed in the first
+# attempt but passes in the retry would report green, unlike the legacy
+# jobs, which never retried. Evicted inputs fail the step instead; a
+# visible "Re-run failed jobs" retries it.
+test:embedded --experimental_remote_cache_eviction_retries=0
 
 # Dolt-server lane: the same jobs as the docker lane ("Test (storage domain +
 # uow)" and "Contract corpus"), but every dolt sql-server is a child of the
@@ -155,6 +161,12 @@ test:doltserver-proxied --remote_download_regex=.*/test\.(log|xml)$
 # PRs: execute every time, like the jobs' -test.count=1, never replay a
 # cached result.
 test:doltserver-proxied --nocache_test_results
+# No whole-invocation retry on a remote cache eviction ("Lost inputs"):
+# Bazel would re-run every test, and a test that failed in the first
+# attempt but passes in the retry would report green, unlike the legacy
+# jobs, which never retried. Evicted inputs fail the step instead; a
+# visible "Re-run failed jobs" retries it.
+test:doltserver-proxied --experimental_remote_cache_eviction_retries=0
 
 # Server-Dolt storage tier: PR Risk's "Test (Server Dolt Conformance)" and
 # "Test (Server Dolt Full Suite N/16)" jobs, as
@@ -186,6 +198,12 @@ test:doltserver-integration --remote_download_regex=.*/test\.(log|xml)$
 # PRs: execute every time, like the jobs' -test.count=1, never replay a
 # cached result.
 test:doltserver-integration --nocache_test_results
+# No whole-invocation retry on a remote cache eviction ("Lost inputs"):
+# Bazel would re-run every test, and a test that failed in the first
+# attempt but passes in the retry would report green, unlike the legacy
+# jobs, which never retried. Evicted inputs fail the step instead; a
+# visible "Re-run failed jobs" retries it.
+test:doltserver-integration --experimental_remote_cache_eviction_retries=0
 
 # Integration lane: main.yml's "Main Linux integration packages (N/6)" and
 # "Main Linux integration cmd/bd (N/8)" jobs (and nightly.yml's Full Test

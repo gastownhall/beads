@@ -3448,6 +3448,7 @@ var bazelEmbeddedRCLines = []string{
 	"test:embedded --test_env=GO_TEST_WRAP_TESTV=1",
 	"test:embedded --remote_download_regex=.*/test\\.xml$",
 	"test:embedded --nocache_test_results",
+	"test:embedded --experimental_remote_cache_eviction_retries=0",
 }
 
 func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {

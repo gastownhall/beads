@@ -1216,7 +1216,7 @@ func TestShardScriptsListOnlyRealTests(t *testing.T) {
 // skips.
 func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 	root := sourceRepoRoot(t)
-	rcNarrow := regexp.MustCompile(`test_filter|test_arg|-test\.|_filters\b|test_env=(BEADS_TEST|GO_TEST|TESTBRIDGE)|--config=|cache_test_results|run_under|flaky|runs_per_test|test_sharding_strategy|build_tests_only`)
+	rcNarrow := regexp.MustCompile(`test_filter|test_arg|-test\.|_filters\b|test_env=(BEADS_TEST|GO_TEST|TESTBRIDGE)|--config=|cache_test_results|eviction_retries|run_under|flaky|runs_per_test|test_sharding_strategy|build_tests_only`)
 	const runUnder = "test --run_under=//tools/bazel:test_env"
 	wantImports := []string{"try-import %workspace%/.bazelrc.local", "try-import %workspace%/user.bazelrc"}
 
@@ -1316,7 +1316,7 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 	// The scripts every lane's test runs under or through, and the whole
 	// setup-bazel action (its generated rc applies to every command).
 	if os.Getenv("TEST_SRCDIR") == "" {
-		scriptNarrow := regexp.MustCompile(`-test\.(short|run|skip|list|bench)|BEADS_TEST_SKIP|BEADS_TEST_EMBEDDED_DOLT|BEADS_TEST_PROXIED_SERVER|BEADS_TEST_ENV_RUN_DOLT|BEADS_TEST_REQUIRE_DOLT_CONTAINER|BEADS_TEST_DOLT_SERVER\b|TESTBRIDGE_TEST_ONLY|test_filter|test_arg|_filters\b|cache_test_results|flaky|runs_per_test|test_sharding_strategy`)
+		scriptNarrow := regexp.MustCompile(`-test\.(short|run|skip|list|bench)|BEADS_TEST_SKIP|BEADS_TEST_EMBEDDED_DOLT|BEADS_TEST_PROXIED_SERVER|BEADS_TEST_ENV_RUN_DOLT|BEADS_TEST_REQUIRE_DOLT_CONTAINER|BEADS_TEST_DOLT_SERVER\b|TESTBRIDGE_TEST_ONLY|test_filter|test_arg|_filters\b|cache_test_results|eviction_retries|flaky|runs_per_test|test_sharding_strategy`)
 		files, _ := filepath.Glob(filepath.Join(root, "tools", "bazel", "*.sh"))
 		action, _ := filepath.Glob(filepath.Join(root, setupBazelActionDir, "*"))
 		files = append(files, action...)
@@ -1505,6 +1505,7 @@ var bazelDoltServerRCLines = map[string][]string{
 		"test:doltserver-proxied --local_test_jobs=4",
 		"test:doltserver-proxied --remote_download_regex=.*/test\\.(log|xml)$",
 		"test:doltserver-proxied --nocache_test_results",
+		"test:doltserver-proxied --experimental_remote_cache_eviction_retries=0",
 	},
 	"doltserver-integration": {
 		"build:doltserver-integration --@rules_go//go/config:tags=gms_pure_go,integration",
@@ -1519,6 +1520,7 @@ var bazelDoltServerRCLines = map[string][]string{
 		"test:doltserver-integration --local_test_jobs=4",
 		"test:doltserver-integration --remote_download_regex=.*/test\\.(log|xml)$",
 		"test:doltserver-integration --nocache_test_results",
+		"test:doltserver-integration --experimental_remote_cache_eviction_retries=0",
 	},
 }
 
@@ -1549,6 +1551,28 @@ func TestBazelRetiredLanesArePinned(t *testing.T) {
 		}
 		if !contains(want, "test:"+config+" --nocache_test_results") {
 			t.Errorf("pinned --config=%s lacks --nocache_test_results: the tier's only pre-merge run must execute", config)
+		}
+	}
+	// Review F1 (step 2): no whole-invocation retry after a remote cache
+	// eviction in any retired lane (it would re-run, and could turn green,
+	// a test that failed in the first attempt), and nothing else in
+	// .bazelrc sets the retry count (a later value would win).
+	evictionAllowed := map[string]bool{}
+	for _, config := range bazelRetiredLaneConfigs {
+		want := "test:" + config + " --experimental_remote_cache_eviction_retries=0"
+		lines := bazelEmbeddedRCLines
+		if config != "embedded" {
+			lines = bazelDoltServerRCLines[config]
+		}
+		if !contains(lines, want) {
+			t.Errorf("pinned --config=%s lacks %q", config, want)
+		}
+		evictionAllowed[want] = true
+	}
+	for _, line := range strings.Split(rc, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "#") && strings.Contains(line, "remote_cache_eviction_retries") && !evictionAllowed[line] {
+			t.Errorf(".bazelrc %q: only the retired tiers' configs set the eviction retry count (to 0)", line)
 		}
 	}
 	// A later --cache_test_results (any config the lanes use) would win.
