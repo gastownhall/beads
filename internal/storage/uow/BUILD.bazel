@@ -1,0 +1,268 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+go_library(
+    name = "uow",
+    srcs = [
+        "batch_applier.go",
+        "batch_closer.go",
+        "batch_creator.go",
+        "blocked_recheck.go",
+        "blockingannotator.go",
+        "bootstrapper.go",
+        "commenter.go",
+        "counter.go",
+        "cycle_detector.go",
+        "deleter.go",
+        "dependency_editor.go",
+        "dolt_sql_provider.go",
+        "doltserver_provider.go",
+        "doltserver_tx.go",
+        "edgereader.go",
+        "errors.go",
+        "events_journal.go",
+        "external_doltserver_provider.go",
+        "graph_counter.go",
+        "importer.go",
+        "init_verifier.go",
+        "issue_claimer.go",
+        "issue_operations.go",
+        "issue_reader.go",
+        "journal_maintenance.go",
+        "maintenance.go",
+        "memories.go",
+        "metadata_cas.go",
+        "notifying.go",
+        "pool.go",
+        "querier.go",
+        "ready_claimer.go",
+        "ready_counter.go",
+        "relations.go",
+        "releaser.go",
+        "stats_reporter.go",
+        "sweeper.go",
+        "team_server_schema.go",
+        "tree_walker.go",
+        "tx.go",
+        "uow.go",
+        "version_reconciler.go",
+        "wake_defers.go",
+        "workspace_config.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/storage/uow",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/config",
+        "//internal/configfile",
+        "//internal/debug",
+        "//internal/hooks",
+        "//internal/memoryapi",
+        "//internal/storage",
+        "//internal/storage/dberrors",
+        "//internal/storage/dbproxy/proxy",
+        "//internal/storage/dbproxy/server",
+        "//internal/storage/dbproxy/util",
+        "//internal/storage/domain",
+        "//internal/storage/domain/db",
+        "//internal/storage/issueops",
+        "//internal/storage/memoryops",
+        "//internal/storage/schema",
+        "//internal/storage/sqlbuild",
+        "//internal/types",
+        "//internal/workapi",
+        "//issueops",
+        "//memoryops",
+        "@com_github_cenkalti_backoff_v4//:backoff",
+        "@com_github_go_sql_driver_mysql//:mysql",
+    ],
+)
+
+go_test(
+    name = "uow_test",
+    srcs = [
+        "batch_applier_retry_budget_test.go",
+        "batch_apply_contract_test.go",
+        "batch_closer_contract_test.go",
+        "batch_creator_contract_test.go",
+        "blocked_recheck_race_test.go",
+        "blocking_annotator_contract_test.go",
+        "bootstrapper_contract_test.go",
+        "claimer_contract_test.go",
+        "commenter_contract_test.go",
+        "counter_contract_test.go",
+        "cross_record_invariant_contract_test.go",
+        "cycle_detector_contract_test.go",
+        "deleter_contract_test.go",
+        "dependency_editor_contract_test.go",
+        "dolt_sql_provider_lock_test.go",
+        "dolt_sql_provider_test.go",
+        "doltserver_provider_test.go",
+        "doltserver_tx_test.go",
+        "dualwrite_history_contract_test.go",
+        "edge_reader_contract_test.go",
+        "errors_test.go",
+        "expected_revision_contract_test.go",
+        "external_doltserver_provider_test.go",
+        "graph_counter_contract_test.go",
+        "importer_contract_test.go",
+        "importer_uow_test.go",
+        "issue_claimer_test.go",
+        "issue_operations_claim_contract_test.go",
+        "issue_operations_contract_test.go",
+        "issue_operations_force_close_policy_test.go",
+        "issue_operations_test.go",
+        "issue_operations_update_real_uow_test.go",
+        "issue_reader_test.go",
+        "journal_contract_test.go",
+        "journal_delete_actor_test.go",
+        "journal_scope_test.go",
+        "lifecycle_close_reopen_contract_test.go",
+        "lifecycle_create_contract_test.go",
+        "lifecycle_role_hooks_test.go",
+        "lifecycle_update_contract_test.go",
+        "list_comments_plane_test.go",
+        "lostupdate_dolt_test.go",
+        "memories_contract_test.go",
+        "metadata_cas_contract_test.go",
+        "metadata_patch_dolt_test.go",
+        "notifying_integration_test.go",
+        "notifying_parity_test.go",
+        "notifying_test.go",
+        "preview_provider_test.go",
+        "querier_contract_test.go",
+        "reader_contract_test.go",
+        "ready_claimer_contract_test.go",
+        "ready_counter_contract_test.go",
+        "relations_contract_test.go",
+        "releaser_contract_test.go",
+        "retention_epoch_contract_test.go",
+        "role_fixture_kit_test.go",
+        "session_database_test.go",
+        "shared_server_cleanup_guard_test.go",
+        "shared_server_cleanup_test.go",
+        "shared_store_migrate_gate_test.go",
+        "stats_reporter_contract_test.go",
+        "sweeper_contract_test.go",
+        "team_server_integration_test.go",
+        "team_server_schema_test.go",
+        "testmain_test.go",
+        "tree_walker_contract_test.go",
+        "tx_test.go",
+        "version_reconcile_boot_test.go",
+        "version_reconcile_integration_test.go",
+        "version_reconciler_contract_test.go",
+        "workspace_config_contract_test.go",
+    ],
+    data = [
+        ":go_srcs",
+        "//cmd/bd:bd_for_tests",
+    ],
+    embed = [":uow"],
+    env = {"BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)"},
+    deps = [
+        "//backend/conformance",
+        "//internal/configfile",
+        "//internal/doltserver",
+        "//internal/hooks",
+        "//internal/procid",
+        "//internal/storage",
+        "//internal/storage/dberrors",
+        "//internal/storage/dbproxy/pidfile",
+        "//internal/storage/dbproxy/proxy",
+        "//internal/storage/dbproxy/server",
+        "//internal/storage/domain",
+        "//internal/storage/domain/db",
+        "//internal/storage/issueops",
+        "//internal/storage/schema",
+        "//internal/testutil",
+        "//internal/testutil/bazeltest",
+        "//internal/types",
+        "//internal/workapi",
+        "//internal/workapi/storereader",
+        "//issueops",
+        "@com_github_cenkalti_backoff_v4//:backoff",
+        "@com_github_data_dog_go_sqlmock//:go-sqlmock",
+        "@com_github_go_sql_driver_mysql//:mysql",
+        "@com_github_stretchr_testify//assert",
+        "@com_github_stretchr_testify//require",
+    ],
+)
+
+# The container-backed uow tests as pr.yml's "Test (storage domain + uow)" job
+# runs them (no -short; each test starts its own dolt sql-server container),
+# with BEADS_TEST_REQUIRE_DOLT_CONTAINER=1 so a missing container fails instead
+# of skipping. It repeats uow_test's `env` (go_test_variant.sh cannot inherit
+# it). uow_test itself stays untagged: under --config=prcore those tests skip.
+#
+# Tags:
+#   requires-docker: needs a docker daemon; excluded from --config=prcore/ci,
+#     selected by --config=docker.
+#   no-remote-exec: the daemon is on the host, not on remote workers.
+sh_test(
+    name = "uow_docker_test",
+    size = "large",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :uow_test)"],
+    data = [
+        ":uow_test",
+        "//cmd/bd:bd_for_tests",
+    ],
+    # Pinned to the container backend (the docker lane is the A/B control);
+    # rule env beats --test_env, so =local on the command line cannot flip it.
+    env = {
+        "BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)",
+        "BEADS_TEST_DOLT_SERVER": "container",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+    },
+    # ~12 min unsharded under -race on a loaded host (large allows 15).
+    shard_count = 4,
+    tags = [
+        "no-remote-exec",
+        "requires-docker",
+    ],
+)
+
+# uow_test as pr.yml's "Test (storage domain + uow)" job runs it (no -short),
+# on the dolt-server lane: every server the tests ask internal/testutil for is
+# a `dolt sql-server` child of the test process, so the target runs on remote
+# workers. It repeats uow_test's `env` (go_test_variant.sh cannot inherit it).
+# GOMAXPROCS=4 is the job's runner shape. uow_docker_test is the A/B control.
+# 8 shards keep each under ~2 min remotely (the package is ~7 min in the job).
+#
+# Tags:
+#   dolt-server: starts hermetic dolt sql-servers from the pinned dolt in the
+#     test wrapper's runfiles (BEADS_TEST_DOLT_SERVER=local); excluded from
+#     --config=prcore/ci, selected by --config=doltserver. Runs remotely: no
+#     docker, and a missing server fails (REQUIRE=1) instead of skipping, so
+#     a cached pass is as good as a fresh one.
+sh_test(
+    name = "uow_dolt_test",
+    size = "large",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :uow_test)"],
+    data = [
+        ":uow_test",
+        "//cmd/bd:bd_for_tests",
+    ],
+    env = {
+        "BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)",
+        "BEADS_TEST_DOLT_SERVER": "local",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+        "GOMAXPROCS": "4",
+    },
+    shard_count = 8,
+    tags = ["dolt-server"],
+)
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

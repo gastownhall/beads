@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,8 +11,18 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/ceiling"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"gopkg.in/yaml.v3"
 )
+
+// ErrNoProjectConfigYaml reports that the workspace has no project config.yaml
+// for a YAML-only write to edit - an external BEADS_DIR, or a database-only
+// workspace. It is a sentinel because the answer is caller-dependent: a caller
+// whose whole job is the YAML edit has failed and must say so, while a caller
+// mirroring a database write into the YAML layer has nothing to clear and has
+// not.
+var ErrNoProjectConfigYaml = errors.New("no project config.yaml in this workspace")
 
 // YamlOnlyKeys are configuration keys that must be stored in config.yaml
 // rather than the database. These are "startup" settings that are
@@ -78,17 +89,21 @@ var YamlOnlyKeys = map[string]bool{
 	"hierarchy.max-depth": true,
 
 	// Backup settings (must be in yaml so GetValueSource can detect overrides)
-	"backup.enabled":  true,
-	"backup.interval": true,
-	"backup.git-push": true,
-	"backup.git-repo": true,
+	"backup.enabled":            true,
+	"backup.interval":           true,
+	"backup.git-push":           true,
+	"backup.git-repo":           true,
+	"backup.size-cap-mb":        true,
+	"backup.size-warn-interval": true,
 
 	// Import settings
 	"import.auto": true,
 	"import.path": true,
 
 	// Dolt server settings
-	"dolt.shared-server":      true, // Shared Dolt server at ~/.beads/shared-server/ (GH#2377)
+	"dolt.shared-server":   true, // Shared Dolt server at ~/.beads/shared-server/ (GH#2377)
+	"dolt.remotesapi-port": true, // Machine-global shared-server remotesapi listener (0 disables)
+
 	"dolt.max-conns":          true, // Connection pool size override (default 10, GH#3140)
 	"dolt.pool-read-timeout":  true, // Pool per-I/O read deadline override (default 10s, bd-vz0y9)
 	"dolt.pool-write-timeout": true, // Pool per-I/O write deadline override (default 10s, bd-vz0y9)
@@ -104,6 +119,7 @@ var YamlOnlyKeys = map[string]bool{
 	"jira.api_token":             true,
 	"gitlab.token":               true,
 	"ado.pat":                    true,
+	"notion.token":               true,
 }
 
 // IsYamlOnlyKey returns true if the given key should be stored in config.yaml
@@ -178,14 +194,59 @@ func IsSecretKey(key string) bool {
 	return false
 }
 
-// isGitTracked returns true if the file at path is tracked by git
-// (i.e., has been git-added). Uses `git ls-files --error-unmatch`.
+// isGitTracked reports whether either the containing repository or the
+// inherited Git context tracks the file at path (i.e., it has been git-added).
+// Uses `git ls-files --error-unmatch`. If neither probe succeeds, errors count
+// as untracked — the secret guard only blocks writes it can prove are unsafe.
+//
+// The containing repository is probed first so inherited routing cannot hide a
+// tracked file. Exit 1 is git's "repository reached, path is not tracked"
+// answer and is final; any other failure means the scrubbed environment
+// reached no repository at all — as for a bare repository whose work tree is
+// named only by GIT_DIR/GIT_WORK_TREE — so the inherited context is consulted
+// before declaring the file untracked. Mirrors isGitTrackedFile in cmd/bd.
 func isGitTracked(path string) bool {
-	cmd := exec.Command("git", "ls-files", "--error-unmatch", path)
-	cmd.Dir = filepath.Dir(path)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	return cmd.Run() == nil
+	inherited := os.Environ()
+	return isGitTrackedWithEnv(path, gitenv.ScrubRouting(inherited), inherited)
+}
+
+// isGitTrackedWithEnv probes path under env, then under each fallback in
+// order, stopping at the first that reports it as tracked. Callers pass the
+// scrubbed environment as env so inherited routing cannot hide a tracked
+// config file, and the inherited one as the fallback: that preserves bare work
+// trees and trusted config, where the repository is reachable only through the
+// inherited context. Either probe reporting the path as tracked is sufficient
+// to refuse the write. This mirrors the hook guard in cmd/bd/hooks.go.
+//
+// The first environment is a separate parameter rather than part of the
+// variadic so that a zero-probe call, which would fall through to "untracked"
+// and write the secret, cannot be spelled. The tail stays variadic because a
+// test needs to probe one environment alone; the twin's fixed (clean,
+// inherited) arity cannot express that, since exec treats a nil Env as
+// "inherit the current process" rather than as a disabled probe.
+//
+// Every probe failing counts as untracked, so the guard only blocks writes it
+// can prove are unsafe.
+func isGitTrackedWithEnv(path string, env []string, fallbacks ...[]string) bool {
+	dir := filepath.Dir(path)
+	for _, probe := range append([][]string{env}, fallbacks...) {
+		cmd := exec.Command("git", "ls-files", "--error-unmatch", path)
+		cmd.Dir = dir
+		cmd.Env = probe
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+		err := cmd.Run()
+		if err == nil {
+			return true
+		}
+		// Exit 1 is git's "repository reached, path is not tracked" answer and
+		// is final, so a later probe runs only when this one failed for a
+		// configuration reason (no reachable repository).
+		if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
+			return false
+		}
+	}
+	return false
 }
 
 var secretKeyEnvVarHints = map[string]string{ //nolint:gosec // Values are environment variable names, not credentials.
@@ -196,6 +257,7 @@ var secretKeyEnvVarHints = map[string]string{ //nolint:gosec // Values are envir
 	"ai.api_key":     "ANTHROPIC_API_KEY",
 	"github.token":   "GITHUB_TOKEN",
 	"linear.api_key": "LINEAR_API_KEY",
+	"notion.token":   "NOTION_TOKEN",
 }
 
 // secretKeyEnvVarHint returns a suggested environment variable name for a
@@ -301,7 +363,10 @@ var userGlobalKeyPrefixes = []string{"metrics."}
 // happening while the operator believes they are protected. Routing the write
 // to ~/.config/bd/config.yaml keeps it per-machine; viper still merges that
 // file, so config.NodeID() reads it back.
-var userGlobalExactKeys = map[string]bool{"node_id": true}
+var userGlobalExactKeys = map[string]bool{
+	"dolt.remotesapi-port": true,
+	"node_id":              true,
+}
 
 func IsUserGlobalKey(key string) bool {
 	if userGlobalExactKeys[key] {
@@ -353,20 +418,77 @@ func WorkspaceYamlValue(beadsDir, key string) (string, bool) {
 // without conflating a malformed or unreadable file with an absent key. A
 // missing file or key returns present=false and no error; all other I/O and
 // YAML shape errors are returned to the caller.
+//
+// It reads config.yaml ONLY. Callers that must agree with the merged reader
+// (config.GetBool and friends) want WorkspaceYamlValueStrictWithLocal below,
+// which also honors the machine-local override layer Initialize merges.
 func WorkspaceYamlValueStrict(beadsDir, key string) (value string, present bool, err error) {
 	if beadsDir == "" {
 		return "", false, nil
 	}
-	data, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml")) //nolint:gosec // beadsDir is caller-resolved workspace state
+	return strictYamlValueAtPath(filepath.Join(beadsDir, ProjectConfigFileName), key)
+}
+
+// WorkspaceYamlValueStrictWithLocal reads one dotted key from ONE workspace's
+// project-level config the way Initialize's merged reader resolves it: a
+// config.local.yaml beside config.yaml is merged LAST there (the file-loading
+// block at the end of Initialize), i.e. it has the highest priority of the two,
+// so it is consulted first here.
+//
+// "Beside config.yaml" is a condition, not scenery. Initialize hangs its local
+// merge off the project config.yaml it actually found, so a .beads holding
+// config.local.yaml ALONE is never merged and config.GetBool answers from
+// defaults. This reader mirrors that and ignores a lone local file, because
+// honoring one would put it in the same position the layered read exists to
+// fix — the single resolver in the tree that answers from a file nothing else
+// reads — just pointed the other way.
+//
+// That layer is the documented way to hold machine-specific state out of the
+// git-tracked config.yaml (docs/reference/configuration.md), which makes it
+// load-bearing for exactly the settings a cross-workspace open has to resolve
+// against the target — a workspace can track `dolt.shared-server: true` for the
+// team and opt one machine out locally. A workspace-scoped reader that saw only
+// config.yaml would answer differently from every merged-config consumer in the
+// tree for that ordinary shape.
+//
+// Each layer keeps WorkspaceYamlValueStrict's strict contract: an absent file or
+// an absent key falls through to the next layer, while an unreadable file, an
+// unparseable one, or a non-scalar value at the key is returned as an error
+// rather than silently treated as absent. Initialize is equally strict — it
+// fails outright on a config.local.yaml it cannot merge.
+func WorkspaceYamlValueStrictWithLocal(beadsDir, key string) (value string, present bool, err error) {
+	if beadsDir == "" {
+		return "", false, nil
+	}
+	names := []string{LocalConfigFileName, ProjectConfigFileName}
+	if _, statErr := os.Stat(filepath.Join(beadsDir, ProjectConfigFileName)); statErr != nil {
+		// No project config.yaml here, so Initialize would have nothing to hang
+		// the local merge off: drop the local layer to stay in step with it. A
+		// stat error other than "not exist" drops it too, matching Initialize,
+		// whose own os.Stat probes for a project config.yaml fail the same way;
+		// the read below then surfaces that error rather than swallowing it.
+		names = names[1:]
+	}
+	for _, name := range names {
+		value, present, err = strictYamlValueAtPath(filepath.Join(beadsDir, name), key)
+		if err != nil || present {
+			return value, present, err
+		}
+	}
+	return "", false, nil
+}
+
+func strictYamlValueAtPath(path, key string) (value string, present bool, err error) {
+	data, err := os.ReadFile(path) //nolint:gosec // path is caller-resolved workspace state
 	if os.IsNotExist(err) {
 		return "", false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("reading workspace config.yaml: %w", err)
+		return "", false, fmt.Errorf("reading workspace %s: %w", filepath.Base(path), err)
 	}
 	var root map[string]interface{}
 	if err := yaml.Unmarshal(data, &root); err != nil {
-		return "", false, fmt.Errorf("parsing workspace config.yaml: %w", err)
+		return "", false, fmt.Errorf("parsing workspace %s: %w", filepath.Base(path), err)
 	}
 	if root == nil {
 		return "", false, nil
@@ -452,10 +574,10 @@ func yamlScalarString(v interface{}) (string, bool) {
 // GetUserYamlConfig reads a single dotted key from the user-global config.yaml
 // ONLY, never project/BEADS_DIR config, returning "" if unset. It is the read
 // counterpart of SetUserYamlConfig/UnsetUserYamlConfig and the generic form of
-// the per-key consent helpers below. User-global keys (see IsUserGlobalKey —
-// currently metrics.*) must be read through this so `bd config get` reports the
-// value that actually governs runtime behavior, not the merged value a project's
-// .beads/config.yaml could shadow.
+// per-key consent helpers below. Keys selected by IsUserGlobalKey (for example
+// metrics.*, node_id, and the shared-server remotesapi port) must be read
+// through this so `bd config get` reports the value that actually governs
+// runtime behavior, not a merged project value the machine ignores.
 func GetUserYamlConfig(key string) string {
 	raw, _ := readUserGlobalYamlValue(key)
 	return strings.TrimSpace(raw)
@@ -504,32 +626,49 @@ func MetricsNoticeShownByUserConfig() bool {
 	return shown
 }
 
-func UnsetUserYamlConfig(key string) error {
+// UnsetUserYamlConfig comments out key in the user-global config.yaml. The bool
+// reports whether the file was actually changed, on the same terms as
+// UnsetYamlConfig: an absent file or an absent key is (false, nil), not an
+// error.
+func UnsetUserYamlConfig(key string) (bool, error) {
 	configPath, err := UserConfigYamlPath()
 	if err != nil {
-		return err
+		return false, err
 	}
 	content, err := os.ReadFile(configPath) //nolint:gosec // configPath is a validated absolute user config path
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("failed to read user config.yaml: %w", err)
+		return false, fmt.Errorf("failed to read user config.yaml: %w", err)
 	}
 
-	newContent, err := commentOutYamlKey(string(content), key)
+	// Normalize before the call, not after it. commentOutYamlKey rewrites CRLF
+	// to LF as its first statement, so comparing its result against the raw
+	// bytes asks whether the bytes moved rather than whether the key was
+	// commented out: on any CRLF file those always differ, and an unset of an
+	// absent key reported "Unset <key> (in config.yaml)" — the false claim this
+	// path exists to remove — while rewriting the whole file to LF. Comparing
+	// against the same normalized form the callee answered from keeps the bool
+	// meaning "the key was there", and skipping the write on false leaves a
+	// CRLF file byte-identical.
+	normalized := strings.ReplaceAll(string(content), "\r\n", "\n")
+	newContent, err := commentOutYamlKey(normalized, key)
 	if err != nil {
-		return err
+		return false, err
+	}
+	if newContent == normalized {
+		return false, nil
 	}
 
 	// Preserve the owner-private 0600 posture every other user-global writer
 	// uses (SetUserYamlConfig, setYamlConfigAtPath, the metrics bootstrap);
 	// rewriting at 0644 would relax this shared user config to world-readable.
 	if err := os.WriteFile(configPath, []byte(newContent), 0o600); err != nil { //nolint:gosec // configPath is from UserConfigYamlPath
-		return fmt.Errorf("failed to write user config.yaml: %w", err)
+		return false, fmt.Errorf("failed to write user config.yaml: %w", err)
 	}
 
-	return nil
+	return true, nil
 }
 
 func SetUserYamlConfig(key, value string) error {
@@ -583,29 +722,56 @@ func GetYamlConfig(key string) string {
 	return v.GetString(key)
 }
 
-// UnsetYamlConfig removes a configuration value from the project's config.yaml file.
-// The key line is commented out (prefixed with "# ") to preserve it as documentation.
-func UnsetYamlConfig(key string) error {
+// UnsetYamlConfig removes a configuration value from the project's config.yaml
+// file. The key line is commented out (prefixed with "# ") to preserve it as
+// documentation.
+//
+// The bool reports whether the file was actually changed, so a caller can name
+// where the unset landed rather than asserting a write it did not make. It is
+// false, with a nil error, when the key is not present in the file: "the key is
+// not in config.yaml" is the correct answer to give there, not a failure.
+//
+// A workspace with no project config.yaml at all is reported separately, as
+// ErrNoProjectConfigYaml, because the callers need different answers for it and
+// only they can tell which applies. The two `bd config unset` routes need
+// opposite ones — the yaml-only route reports it, the database-backed route
+// tolerates it via errors.Is, since there the database write is the whole unset.
+// The two `sync.remote` cleanup sites (cmd/bd/dolt.go and
+// cmd/bd/dolt_remote_proxied_server.go) take a third: they deliberately keep
+// their base warn-on-any-error behavior. Resolution stays here so none of them
+// re-derives it: pre-checking in the caller is what produced the false
+// "(in config.yaml)" claims this whole path exists to remove.
+func UnsetYamlConfig(key string) (bool, error) {
 	configPath, err := findProjectConfigYaml()
 	if err != nil {
-		return err
+		return false, fmt.Errorf("%w: %w", ErrNoProjectConfigYaml, err)
 	}
 
 	content, err := os.ReadFile(configPath) //nolint:gosec // configPath is from findProjectConfigYaml
 	if err != nil {
-		return fmt.Errorf("failed to read config.yaml: %w", err)
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to read config.yaml: %w", err)
 	}
 
-	newContent, err := commentOutYamlKey(string(content), key)
+	// Normalize before the call so the comparison below answers "was the key
+	// commented out", not "did the bytes move" — see UnsetUserYamlConfig for
+	// the CRLF false-positive this avoids.
+	normalized := strings.ReplaceAll(string(content), "\r\n", "\n")
+	newContent, err := commentOutYamlKey(normalized, key)
 	if err != nil {
-		return err
+		return false, err
+	}
+	if newContent == normalized {
+		return false, nil
 	}
 
 	if err := os.WriteFile(configPath, []byte(newContent), 0600); err != nil { //nolint:gosec // configPath is validated
-		return fmt.Errorf("failed to write config.yaml: %w", err)
+		return false, fmt.Errorf("failed to write config.yaml: %w", err)
 	}
 
-	return nil
+	return true, nil
 }
 
 // findProjectConfigYaml finds the active config.yaml path for YAML-only config writes.
@@ -669,7 +835,8 @@ func findProjectBeadsDir() string {
 		return ""
 	}
 
-	for dir := cwd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+	bound := ceiling.For(cwd)
+	for dir := cwd; dir != filepath.Dir(dir) && !bound.Excludes(dir); dir = filepath.Dir(dir) {
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			return beadsDir
@@ -990,6 +1157,13 @@ func scalarStyleFor(value string) yaml.Style {
 }
 
 func commentOutYamlKey(content, key string) (string, error) {
+	// Normalize CRLF up front. The old implementation scanned with
+	// bufio.Scanner, whose ScanLines drops a trailing "\r", so a CRLF file came
+	// back LF-only; splitting on "\n" instead (below, to keep the file's final
+	// newline) would otherwise carry every "\r" through and change that
+	// long-standing behavior.
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+
 	if err := unsupportedUnsetShape(content, key); err != nil {
 		return "", err
 	}
@@ -1011,10 +1185,19 @@ func commentOutYamlKey(content, key string) (string, error) {
 	// `remote: keep-this` inside it is prose, and commenting it out edits their
 	// data. Matching by line has to skip those lines to stay honest.
 	blockIndent := -1
-	scanner := bufio.NewScanner(strings.NewReader(content))
-	for scanner.Scan() {
-		line := scanner.Text()
-
+	// Split rather than scan so the file's trailing newline survives: a
+	// scanner drops it, so every unset rewrote the file without its final
+	// newline, and the unset callers could not tell "nothing matched" from a
+	// write by comparing content.
+	lines := strings.Split(content, "\n")
+	// A flat key is a TOP-LEVEL key whose name contains the dots, so it only
+	// matches at the document's top-level indentation. Without this, a
+	// single-segment key such as `enabled` matched a nested `  enabled:` line
+	// under some other section and commented out a key the caller never named.
+	// The top level is usually column 0, but yaml.v3 accepts a document whose
+	// whole mapping is indented, so it is read from the first key line.
+	topIndent := yamlTopLevelIndent(lines)
+	for i, line := range lines {
 		if blockIndent >= 0 {
 			if strings.TrimSpace(line) == "" || lineIndent(line) > blockIndent {
 				result = append(result, line)
@@ -1024,12 +1207,18 @@ func commentOutYamlKey(content, key string) (string, error) {
 		}
 		blockIndent = blockScalarIndent(line)
 
-		if matches := flatPattern.FindStringSubmatch(line); matches != nil {
+		if matches := flatPattern.FindStringSubmatch(line); matches != nil && len(matches[1]) == topIndent {
+			if err := mappingValueUnsetRefusal(lines, i, len(matches[1]), key); err != nil {
+				return "", err
+			}
 			result = append(result, matches[1]+"# "+strings.TrimLeft(line, " \t"))
 			continue
 		}
 
 		if name, indent, ok := yamlKeyOnLine(line); ok && walk.step(name, indent) {
+			if err := mappingValueUnsetRefusal(lines, i, indent, key); err != nil {
+				return "", err
+			}
 			result = append(result, strings.Repeat(" ", indent)+"# "+strings.TrimLeft(line, " \t"))
 			continue
 		}
@@ -1056,6 +1245,72 @@ func commentOutYamlKey(content, key string) (string, error) {
 	// cannot rewrite the end of a file that was already written that way.
 	out := strings.Join(result, "\n")
 	return strings.TrimRight(out, "\n") + content[len(strings.TrimRight(content, "\n")):], nil
+}
+
+// mappingValueUnsetRefusal refuses a matched key line whose value continues on
+// the lines beneath it rather than sitting on the key's own line: a nested
+// mapping, a list, or a plain scalar continued on the next line. Commenting
+// that one line out would orphan those lines, leaving a config.yaml that no
+// longer parses. The value is judged by the first following line that carries
+// content, so a key with an empty value and nothing under it is still
+// commented as before.
+//
+// Nothing on the key's own line but a comment, an anchor or a tag (`b:  #
+// note`, `base: &b`, `m: !!map`) still leaves the value to the lines beneath.
+// A list may sit at the key's OWN indentation (`types.custom:` then `- step`),
+// which YAML allows for a sequence value, so a `-` item at that indentation
+// belongs to the key too.
+func mappingValueUnsetRefusal(lines []string, idx, indent int, key string) error {
+	_, rest, _ := strings.Cut(strings.TrimLeft(lines[idx], " \t"), ":")
+	if !valueContinuesBelow(rest) {
+		return nil
+	}
+	for _, next := range lines[idx+1:] {
+		// TrimSpace, not TrimLeft: a CRLF file's blank line is a lone "\r",
+		// which must not read as content at column 0 and end the value early.
+		trimmed := strings.TrimSpace(next)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		nextIndent := lineIndent(next)
+		if nextIndent < indent {
+			return nil
+		}
+		if nextIndent == indent && trimmed != "-" && !strings.HasPrefix(trimmed, "- ") {
+			return nil
+		}
+		return fmt.Errorf("cannot unset %q: its value continues on the lines beneath it, and commenting the key out would orphan them; remove it by hand, or unset its keys individually if it is a mapping", key)
+	}
+	return nil
+}
+
+// valueContinuesBelow reports whether the text after a key's colon leaves the
+// value to the following lines: it is empty once a trailing comment is dropped,
+// or holds only anchors and tags.
+func valueContinuesBelow(rest string) bool {
+	rest = strings.TrimSpace(rest)
+	if i := strings.Index(rest, " #"); i >= 0 {
+		rest = rest[:i]
+	} else if strings.HasPrefix(rest, "#") {
+		rest = ""
+	}
+	for _, tok := range strings.Fields(rest) {
+		if !strings.HasPrefix(tok, "&") && !strings.HasPrefix(tok, "!") {
+			return false
+		}
+	}
+	return true
+}
+
+// yamlTopLevelIndent is the indentation of the document's first key line, which
+// every top-level key shares, or 0 when the document declares no key.
+func yamlTopLevelIndent(lines []string) int {
+	for _, line := range lines {
+		if _, indent, ok := yamlKeyOnLine(line); ok {
+			return indent
+		}
+	}
+	return 0
 }
 
 // nestedKeyWalk tracks how much of a dotted key a line-by-line scan has matched
@@ -1131,17 +1386,20 @@ func (w *nestedKeyWalk) step(name string, indent int) bool {
 // direction already refuses what it cannot write correctly, so unset says so too.
 //
 // This is a list of known shapes, not a decision procedure for the whole class:
-// a mapping-valued key and a value that spans lines in flow or quoted style land
-// their bodies in the same place and are still silent.
+// a value that spans lines in flow or quoted style lands its body in the same
+// place and is still silent. A mapping-valued key is refused by the line
+// matcher itself (mappingValueUnsetRefusal), which also covers single-segment
+// keys this function never walks.
 //
 // Only a key that is actually present can be refused: unsetting a key that was
 // never there has always been a successful no-op, and staying silent about a
 // shape nobody asked to touch is the point.
 func unsupportedUnsetShape(content, key string) error {
+	// Single-segment keys are checked too. The database-backed unset clears
+	// the config.yaml layer for every key, so `notes: |` with an indented body
+	// reaches this path, and commenting its key line out orphans the body
+	// exactly as it does for a dotted key.
 	segments := strings.Split(key, ".")
-	if len(segments) < 2 {
-		return nil
-	}
 	var root yaml.Node
 	if err := yaml.Unmarshal([]byte(content), &root); err != nil || len(root.Content) == 0 {
 		// Nothing to walk. A file yaml.v3 cannot parse is not this function's
@@ -1306,6 +1564,11 @@ func validateYamlConfigValue(key, value string) error {
 		lower := strings.ToLower(value)
 		if lower != "true" && lower != "false" {
 			return fmt.Errorf("dolt.shared-server must be \"true\" or \"false\", got %q", value)
+		}
+	case "dolt.remotesapi-port":
+		port, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || port < 0 || port > 65535 {
+			return fmt.Errorf("dolt.remotesapi-port must be 0 (disabled) or a valid port number (1-65535), got %q", value)
 		}
 	case "dolt.debug":
 		lower := strings.ToLower(value)

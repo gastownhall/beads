@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -11,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/workapi"
 )
 
@@ -47,6 +49,16 @@ import (
 // getHierarchicalChildren handles the --tree --parent combination logic.
 // baseFilter carries CLI filters (--type, --status, etc.) through the recursive walk.
 func getHierarchicalChildren(ctx context.Context, store storage.DoltStorage, dbPath string, parentID string, baseFilter types.IssueFilter) ([]*types.Issue, error) {
+	// Accept a short/partial parent ID the same way `bd history <id>` does
+	// (GH#4868's mechanism, not applied here before). Not-found IDs fall
+	// through unchanged so the existing "parent issue '%s' not found" path
+	// below still fires with the id the user actually typed.
+	if resolved, err := utils.ResolvePartialID(ctx, store, parentID); err == nil {
+		parentID = resolved
+	} else if errors.Is(err, utils.ErrAmbiguousID) {
+		return nil, err
+	}
+
 	// First verify that the parent issue exists
 	var parentIssue *types.Issue
 	err := withStorage(ctx, store, dbPath, func(s storage.DoltStorage) error {
@@ -156,7 +168,7 @@ func loadWatchedIssues(ctx context.Context, store storage.DoltStorage, filter ty
 // names its scope instead of asserting an in-progress count the ready filter
 // forced to zero. A watch loop is where a stale "0 in progress" is most likely
 // to be read as a live fact, so this is the path that most needs it.
-func displayWatchedIssueList(ctx context.Context, store watchListDependencyStore, issues []*types.Issue, truncated, readyFiltered bool, statusSelector string) {
+func displayWatchedIssueList(ctx context.Context, store watchListDependencyStore, issues []*types.Issue, truncated, readyFiltered bool, statusSelector, sortBy string, reverse bool) {
 	var allDeps map[string][]*types.Dependency
 	if store != nil {
 		deps, err := store.GetAllDependencyRecords(ctx)
@@ -164,7 +176,7 @@ func displayWatchedIssueList(ctx context.Context, store watchListDependencyStore
 			allDeps = deps
 		}
 	}
-	displayPrettyListWithDeps(issues, true, allDeps, truncated, readyFiltered, statusSelector)
+	displayPrettyListWithDepsMode(issues, true, allDeps, "", truncated, readyFiltered, statusSelector, sortBy, reverse)
 }
 
 // watchIssues returns an error only for the initial query — a failure there
@@ -184,7 +196,7 @@ func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.Is
 	// below depends on; what is left is the cut and its verdict, and those are
 	// the shared epilogue's on every other listing this command has.
 	issues, truncated := workapi.FinishPage(issues, "", false, effectiveLimit, false)
-	displayWatchedIssueList(ctx, store, issues, truncated, ready, statusSelector)
+	displayWatchedIssueList(ctx, store, issues, truncated, ready, statusSelector, sortBy, reverse)
 	printTruncationHint(truncated, effectiveLimit)
 	lastSnapshot := issueSnapshot(issues)
 
@@ -214,7 +226,7 @@ func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.Is
 			snap := issueSnapshot(issues)
 			if snap != lastSnapshot {
 				lastSnapshot = snap
-				displayWatchedIssueList(ctx, store, issues, truncated, ready, statusSelector)
+				displayWatchedIssueList(ctx, store, issues, truncated, ready, statusSelector, sortBy, reverse)
 				printTruncationHint(truncated, effectiveLimit)
 				fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
 			}
@@ -246,7 +258,7 @@ func runListProxiedHierarchicalParent(ctx context.Context, uw uow.UnitOfWork, in
 		return err
 	}
 	if len(treeIssues) == 0 {
-		fmt.Printf("Issue '%s' has no children\n", in.ParentID)
+		fmt.Printf("Issue '%s' has no children\n", in.ParentID) //nolint:forbidigo // Pretty/tree output is outside the --format contract.
 		return nil
 	}
 
@@ -256,7 +268,7 @@ func runListProxiedHierarchicalParent(ctx context.Context, uw uow.UnitOfWork, in
 	}
 
 	// Hierarchical --parent walks use an unlimited per-level query; never page-truncated.
-	displayPrettyListWithDepsMode(treeIssues, false, depsByIssueID, in.depsMode, false, in.ReadyFlag, in.Status)
+	displayPrettyListWithDepsMode(treeIssues, false, depsByIssueID, in.depsMode, false, in.ReadyFlag, in.Status, in.SortBy, in.Reverse)
 	printSkipLabelsFooter(in.SkipLabels)
 	return nil
 }

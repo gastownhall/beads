@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/git"
@@ -75,6 +76,20 @@ func guardLegacyUpgradeWorkspace(beadsDir string) error {
 		return nil
 	}
 	if serverMode {
+		if !present && isEmptyDirectory(filepath.Join(beadsDir, "dolt")) {
+			// An empty .beads/dolt holds no Dolt data, so no legacy release
+			// could have left anything in it to protect: it carries no more
+			// evidence than a server workspace without that directory, which
+			// is admitted above. bd creates exactly this shape itself — the
+			// local Dolt root is made on use even when the data lives on an
+			// external server — so refusing it made `bd init --server
+			// --external` fail over a provisioner's empty root, and made a
+			// workspace that lost its gitignored witness unusable with no bd
+			// command able to repair it. Admitting it lets the command re-seed
+			// the witness. A present pre-1.0 witness was refused above, and a
+			// root holding anything at all still refuses below.
+			return nil
+		}
 		if present && classifyVersionWitness(version) == witnessEraUnknown {
 			// A witness that is present but unreadable — including one left
 			// blank or whitespace-only by an interrupted or disk-full
@@ -245,7 +260,11 @@ func guardUndiscoveredLegacyWorkspace() error {
 	}
 	dir := utils.CanonicalizePath(cwd)
 	boundary := utils.CanonicalizePath(git.GetRepoRoot())
+	bound := ceiling.For(dir)
 	for {
+		if bound.Excludes(dir) {
+			return nil
+		}
 		if err := guardLegacyUpgradeWorkspace(filepath.Join(dir, ".beads")); err != nil {
 			return err
 		}
@@ -263,6 +282,22 @@ func guardUndiscoveredLegacyWorkspace() error {
 func hasLegacyDoltRoot(beadsDir string) bool {
 	info, err := os.Lstat(filepath.Join(beadsDir, "dolt"))
 	return err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0
+}
+
+// isEmptyDirectory reports whether path is a real (non-symlink) directory with
+// no entries. Any error reading it answers false, so callers fail closed.
+func isEmptyDirectory(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	dir, err := os.Open(path) // #nosec G304 -- bounded probe beneath selected workspace
+	if err != nil {
+		return false
+	}
+	defer func() { _ = dir.Close() }()
+	names, err := dir.Readdirnames(1)
+	return len(names) == 0 && err == io.EOF
 }
 
 func isNonEmptyRegularFile(path string) bool {

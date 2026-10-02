@@ -255,3 +255,9 @@ tmp/build/cli-docs/where.md
 tmp/build/cli-docs/worktree.md
 tmp/docs/CLI_REFERENCE.md
 *.gate.lock*
+
+# Bazel: output symlinks and machine-local rc files (remote executor endpoint,
+# TLS credentials). Never commit these.
+/bazel-*
+/.bazelrc.local
+/user.bazelrc

@@ -16,6 +16,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/types"
@@ -73,7 +74,11 @@ func TestServeAnswersFromTheStoreTheRootCommandOpened(t *testing.T) {
 	// that chdirs into its own workspace has to clear it going in and coming
 	// out.
 	beads.ResetCaches()
-	t.Cleanup(beads.ResetCaches)
+	git.ResetCaches()
+	t.Cleanup(func() {
+		beads.ResetCaches()
+		git.ResetCaches()
+	})
 
 	// Stand in for PersistentPreRunE, which opens the workspace through exactly
 	// this dispatch and leaves it in `store`. This is the store bd already

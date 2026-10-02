@@ -1,0 +1,25 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "storereader",
+    srcs = ["reader.go"],
+    importpath = "github.com/steveyegge/beads/internal/workapi/storereader",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage",
+        "//internal/types",
+        "//internal/workapi",
+        "//issueops",
+    ],
+)
+
+go_test(
+    name = "storereader_test",
+    srcs = ["reader_test.go"],
+    embed = [":storereader"],
+    deps = [
+        "//internal/storage",
+        "//internal/types",
+        "//issueops",
+    ],
+)

@@ -1,0 +1,227 @@
+load("@gazelle//:def.bzl", "gazelle")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+# gazelle:prefix github.com/steveyegge/beads
+# gazelle drops files whose build constraints name a tag it does not know.
+# integration is listed so the `//go:build integration` test files (and
+# //internal/testutil/integration) are in srcs and deps; rules_go filters them
+# out of every build except --config=integration (.bazelrc), which sets the tag.
+# gazelle:build_tags gms_pure_go,integration
+# integrations/ holds no Go; it stays visible to Bazel (not in .bazelignore)
+# only so //test/docsync can declare the markdown its link checks resolve.
+# gazelle:exclude integrations
+gazelle(name = "gazelle")
+
+exports_files(
+    [".buildflags"],
+    visibility = [
+        "//scripts/pr-lint:__pkg__",
+        "//scripts/prlintmake:__pkg__",
+    ],
+)
+
+exports_files([
+    "go.mod",
+    "go.sum",
+])
+
+# Repository files read by source-scanning tests, declared as their `data` so
+# the tests run under `bazel test` and remote execution.
+exports_files(
+    [".gitattributes"],
+    visibility = ["//scripts/gitattributespolicy:__pkg__"],
+)
+
+# //scripts:scripts_test keeps pr.yml's release-target cross-compilation matrix
+# in lockstep with the release targets .goreleaser.yml declares.
+exports_files(
+    [".goreleaser.yml"],
+    visibility = ["//scripts:__pkg__"],
+)
+
+# //cmd/bd:bd_test: tracked git hooks (generator parity) and the formula
+# primitive fixtures.
+filegroup(
+    name = "bd_test_files",
+    srcs = glob([
+        ".githooks/*",
+        "examples/formulas/primitives/**",
+    ]),
+    visibility = ["//cmd/bd:__pkg__"],
+)
+
+exports_files(
+    [".claude-plugin/marketplace.json"],
+    visibility = ["//cmd/bd/setup:__pkg__"],
+)
+
+# //test/docsync: the Mintlify site, engdocs, root markdown, and the files
+# outside those trees that their local links point at.
+#
+# The out-of-tree link targets are hand-listed: a new docs/engdocs link to a
+# file outside these globs passes `go test` but fails under Bazel until the
+# target is added here. The globs stop at package boundaries, so no BUILD file
+# may live under docs/ or engdocs/ (enforced by scripts/bazel_policy_test.go).
+filegroup(
+    name = "docsync_files",
+    srcs = glob([
+        "*.md",
+        "docs/**",
+        "engdocs/**",
+    ]) + [
+        "integrations/beads-mcp/PYPI.md",
+        "//scripts:README.md",
+    ],
+    visibility = ["//test/docsync:__pkg__"],
+)
+
+# //scripts:scripts_test workflow-policy and CI-script tests: the whole
+# .github tree (workflows, composite actions, CI helper scripts) they parse
+# and run. The one whole-tree input the plan allows (it is small).
+filegroup(
+    name = "workflow_files",
+    srcs = glob([".github/**"]),
+    visibility = ["//scripts:__pkg__"],
+)
+
+# PR Risk's manifest-sharded tiers' shard scripts and their committed
+# manifests (embedded-Dolt cmd and storage, proxied-server cmd, server-Dolt
+# storage). The variants (//cmd/bd:bd_embedded_test, //cmd/bd:bd_proxied_test,
+# //internal/storage/embeddeddolt:embeddeddolt_embedded_test,
+# //internal/storage/dolt:dolt_server_full_test) run them through
+# tools/bazel/go_test_manifest_shard.sh, so each Bazel shard runs exactly the
+# tests of the CI job with the same shard number.
+exports_files(
+    [
+        ".github/scripts/embedded-cmd-test-shards.txt",
+        ".github/scripts/embedded-storage-test-shard.sh",
+        ".github/scripts/embedded-storage-test-shards.txt",
+        ".github/scripts/embedded-test-shard.sh",
+        ".github/scripts/proxied-cmd-test-shards.txt",
+        ".github/scripts/proxied-test-shard.sh",
+        ".github/scripts/server-storage-test-shard.sh",
+        ".github/scripts/server-storage-test-shards.txt",
+    ],
+    visibility = [
+        "//cmd/bd:__pkg__",
+        "//internal/storage/dolt:__pkg__",
+        "//internal/storage/embeddeddolt:__pkg__",
+    ],
+)
+
+# //scripts:scripts_test runs scripts/test.sh, which sources the canonical
+# build flags and reads the known-broken-test skip list.
+filegroup(
+    name = "test_sh_files",
+    srcs = [
+        ".buildflags",
+        ".test-skip",
+    ],
+    visibility = ["//scripts:__pkg__"],
+)
+
+# //internal/versioncheck and //scripts/check-versions release-gate tests: the
+# metadata surfaces versioncheck.releaseSources gates, plus the canonical
+# version it compares them against and the tracked git hooks whose version
+# markers it checks.
+#
+# Hand-listed rather than globbed because releaseSources is itself a closed
+# list: a newly gated surface must be added here too, and until it is the test
+# fails under Bazel (it passes under `go test`, which sees the whole checkout).
+#
+# The exception is npm-package/package.json: npm-package/ is in .bazelignore,
+# so no target can declare it. Listing it anyway passes under remote execution
+# but fails in a local sandbox, which is how fork-PR CI runs.
+# TestRepositoryReleaseVersionsMatch tolerates exactly its absence under
+# Bazel; `go test` still checks it.
+filegroup(
+    name = "release_metadata_files",
+    srcs = [
+        ".claude-plugin/marketplace.json",
+        "integrations/beads-mcp/pyproject.toml",
+        "integrations/beads-mcp/src/beads_mcp/__init__.py",
+        "integrations/beads-mcp/uv.lock",
+        "//cmd/bd:version.go",
+        "//cmd/bd:winres/manifest.xml",
+        "//cmd/bd:winres/winres.json",
+        "//plugins/beads:.claude-plugin/plugin.json",
+        "//plugins/beads:.codex-plugin/plugin.json",
+        "//plugins/beads:.copilot-plugin/plugin.json",
+    ] + glob([".githooks/*"]),
+    visibility = [
+        "//internal/versioncheck:__pkg__",
+        "//scripts/check-versions:__pkg__",
+    ],
+)
+
+# Inputs of the Bazel policy tests in //scripts (bazel_policy_test.go), so they
+# run under `bazel test` as well as `go test`.
+filegroup(
+    name = "bazel_policy_files",
+    srcs = [
+        ".bazelrc",
+        ".bazelversion",
+        ".gitignore",
+        "BUILD.bazel",
+        "MODULE.bazel",
+        "go.mod",
+    ],
+    visibility = ["//scripts:__pkg__"],
+)
+
+go_library(
+    name = "beads",
+    srcs = [
+        "beads.go",
+        "beads_cgo.go",
+        "beads_nocgo.go",
+        "claim.go",
+    ],
+    importpath = "github.com/steveyegge/beads",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//internal/beads",
+        "//internal/configfile",
+        "//internal/doltserver",
+        "//internal/storage",
+        "//internal/storage/backends",
+        "//internal/storage/dolt",
+        "//internal/storage/domain",
+        "//internal/storage/embeddeddolt",
+        "//internal/storage/schema",
+        "//internal/types",
+        "//internal/workspacegate",
+    ],
+)
+
+go_test(
+    name = "beads_test",
+    srcs = [
+        "beads_gated_test.go",
+        "beads_test.go",
+        "claim_roundtrip_test.go",
+        "claim_test.go",
+        "errors_test.go",
+        "export_dependency_add_options_test.go",
+        "issue_lifecycle_external_test.go",
+        "issue_roles_external_test.go",
+        "open_backend_selection_test.go",
+        "open_nocgo_test.go",
+        "query_interfaces_cgo_test.go",
+        "query_interfaces_test.go",
+    ],
+    embed = [":beads"],
+    deps = [
+        "//internal/hooks",
+        "//internal/storage",
+        "//internal/storage/backends",
+        "//internal/storage/dolt",
+        "//internal/storage/domain",
+        "//internal/storage/embeddeddolt",
+        "//internal/telemetry",
+        "//internal/testutil",
+        "//internal/types",
+        "//internal/workspacegate",
+        "//issueops",
+    ],
+)

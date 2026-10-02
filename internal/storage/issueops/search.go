@@ -32,6 +32,44 @@ func SearchIssueIDsInTx(ctx context.Context, tx DBTX, query string, filter types
 	return searchInTx(ctx, tx, query, filter, idProjection)
 }
 
+// SearchIssueSummariesInTx is the narrow-projection variant of
+// SearchIssuesInTx for list-shaped rendering paths: applies the same WHERE
+// clauses, wisp-merge semantics, and sort order as SearchIssuesInTx, but
+// projects only the columns in IssueSummaryColumns (plus a separate label
+// hydration pass) and returns []*types.IssueSummary instead of full issues.
+func SearchIssueSummariesInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter) ([]*types.IssueSummary, error) {
+	return searchInTx(ctx, tx, query, filter, summaryProjection)
+}
+
+// SearchWispsPlaneInTx searches the wisps plane ALONE: every row stored in
+// the wisps table, whatever its ephemeral, no_history or wisp_type values, and
+// never the issues table.
+//
+// It is not SearchIssuesInTx with Ephemeral=true. That filter adds an
+// "ephemeral = 1" clause, which drops the no-history rows stored beside the
+// wisps, and it falls back to the issues table when the wisps plane is empty.
+// This answers "what is in the wisps table" — the unit
+// issueops.SweepWispsPlane selects by — and a database with no wisps table
+// answers with nothing.
+func SearchWispsPlaneInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+	proj := issueProjection
+	if filter.Lite {
+		proj = issueLiteProjection
+	}
+	results, err := searchTableInTxT(ctx, tx, query, filter, WispsFilterTables, proj)
+	if err != nil {
+		if missingOptionalWispTable(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("search wisps plane: %w", err)
+	}
+	results = trimToSearchLimit(results, filter.Limit)
+	if err := EnforceMaxRowsCap(len(results), filter.MaxRows, filter.MaxRowsSource); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
 // searchProjection describes how to project, scan, and dedup search results.
 // Adding a narrow-projection variant means adding a new projection literal —
 // not a parallel top-level function or wisp-merge wrapper, which is how the
@@ -120,6 +158,21 @@ var idProjection = searchProjection[string]{
 	},
 }
 
+// summaryProjection is the narrow list-rendering variant: reads
+// IssueSummaryColumns instead of the wide or lite column sets, scans with
+// ScanIssueSummaryFrom, and hydrates only labels (hydrateSummaryLabels) since
+// types.IssueSummary carries no Dependencies field to hydrate. idShrink stays
+// false (the zero value) — IssueSummaryColumns is already narrower than
+// IssueSelectColumnsLite, so Pattern B's extra id-scan round-trip isn't a
+// clear win here the way it is for the wide issueProjection.
+var summaryProjection = searchProjection[*types.IssueSummary]{
+	columns: func(_ FilterTables) string { return IssueSummaryColumns },
+	scan:    func(rows *sql.Rows) (*types.IssueSummary, error) { return ScanIssueSummaryFrom(rows) },
+	id:      func(s *types.IssueSummary) string { return s.ID },
+	hydrate: hydrateSummaryLabels,
+	less:    sqlbuild.LessSummary,
+}
+
 // hydrateIssueLabelsAndDeps bulk-loads labels (and optionally dependencies)
 // for the given issues. searchTableInTxT runs against exactly one of the
 // issues/wisps tables, so every ID here belongs to tables.Labels — we use
@@ -164,6 +217,29 @@ func hydrateIssueLabelsAndDeps(ctx context.Context, tx DBTX, tables FilterTables
 func missingOptionalWispTable(err error) bool {
 	name, ok := dberrors.MissingTableName(err)
 	return ok && sqlbuild.OptionalWispTable(name)
+}
+
+// hydrateSummaryLabels bulk-loads labels for the given summaries. Mirrors the
+// label half of hydrateIssueLabelsAndDeps; types.IssueSummary has no
+// Dependencies field, so there is no dependency-hydration half to mirror.
+func hydrateSummaryLabels(ctx context.Context, tx DBTX, tables FilterTables, summaries []*types.IssueSummary, filter types.IssueFilter) error {
+	if filter.SkipLabels {
+		return nil
+	}
+	ids := make([]string, len(summaries))
+	for i, s := range summaries {
+		ids[i] = s.ID
+	}
+	labelMap, err := GetLabelsForIssuesFromTableInTx(ctx, tx, tables.Labels, ids)
+	if err != nil {
+		return fmt.Errorf("hydrate summary labels: %w", err)
+	}
+	for _, s := range summaries {
+		if labels, ok := labelMap[s.ID]; ok {
+			s.Labels = labels
+		}
+	}
+	return nil
 }
 
 // searchInTx is the shared wisp-merge wrapper. Ephemeral routing, the

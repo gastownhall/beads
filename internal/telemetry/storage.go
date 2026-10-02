@@ -275,6 +275,17 @@ func (s *InstrumentedStorage) SearchIssueIDs(ctx context.Context, query string, 
 	return ids, err
 }
 
+func (s *InstrumentedStorage) SearchIssueSummaries(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueSummary, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.query", query)}
+	ctx, span, t := s.op(ctx, "SearchIssueSummaries", attrs...)
+	summaries, err := s.inner.SearchIssueSummaries(ctx, query, filter)
+	if err == nil {
+		span.SetAttributes(attribute.Int("bd.result.count", len(summaries)))
+	}
+	s.done(ctx, span, t, err, attrs...)
+	return summaries, err
+}
+
 // ── Dependencies ────────────────────────────────────────────────────────────
 
 func (s *InstrumentedStorage) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
@@ -388,6 +399,23 @@ func (s *InstrumentedStorage) RemoveLabel(ctx context.Context, issueID, label, a
 	err := s.inner.RemoveLabel(ctx, issueID, label, actor)
 	s.done(ctx, span, t, err, attrs...)
 	return err
+}
+
+func (s *InstrumentedStorage) RenameLabel(ctx context.Context, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error) {
+	attrs := []attribute.KeyValue{
+		attribute.String("bd.label.old", oldLabel),
+		attribute.String("bd.label.new", newLabel),
+	}
+	ctx, span, t := s.op(ctx, "RenameLabel", attrs...)
+	renamed, merged, ids, err = s.inner.RenameLabel(ctx, oldLabel, newLabel, actor)
+	if err == nil {
+		span.SetAttributes(
+			attribute.Int("bd.result.count", renamed),
+			attribute.Int("bd.merged.count", merged),
+		)
+	}
+	s.done(ctx, span, t, err, attrs...)
+	return renamed, merged, ids, err
 }
 
 func (s *InstrumentedStorage) GetLabels(ctx context.Context, issueID string) ([]string, error) {

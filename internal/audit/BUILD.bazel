@@ -1,0 +1,21 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "audit",
+    srcs = ["audit.go"],
+    importpath = "github.com/steveyegge/beads/internal/audit",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads",
+        "//internal/config",
+    ],
+)
+
+go_test(
+    name = "audit_test",
+    srcs = [
+        "audit_test.go",
+        "concurrency_test.go",
+    ],
+    embed = [":audit"],
+)

@@ -1,0 +1,20 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "versioncheck",
+    srcs = ["check.go"],
+    importpath = "github.com/steveyegge/beads/internal/versioncheck",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "@com_github_burntsushi_toml//:toml",
+        "@org_golang_x_mod//modfile",
+    ],
+)
+
+go_test(
+    name = "versioncheck_test",
+    srcs = ["check_test.go"],
+    data = ["//:release_metadata_files"],
+    embed = [":versioncheck"],
+    deps = ["//internal/testutil/bazeltest"],
+)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -106,7 +107,19 @@ Config options:
   See docs/getting-started/ide-setup.md#policy-profiles for what each profile means.
 
 	Workflow customization:
-	- Place a .beads/PRIME.md file in the local clone or resolved workspace to override the default workflow text. Persistent memories (from bd remember) are still appended so memory injection keeps working under a custom template.
+	- Place a PRIME.md file to override the default workflow text. Checked in this
+	  order, once bd resolves a workspace (outside one, prime emits no content):
+	  (1) .beads/PRIME.md relative to the current directory (the -C target
+	      when -C is set);
+	  (2) PRIME.md in the .beads directory bd resolves for this workspace
+	      (honors $BEADS_DIR, which -C overrides; a redirected .beads is
+	      followed);
+	  (3) the global PRIME.md in bd's user config dir:
+	      ~/.config/beads/ on Linux ($XDG_CONFIG_HOME/beads/ if set),
+	      ~/Library/Application Support/beads/ on macOS,
+	      %AppData%\beads\ on Windows.
+	- Persistent memories (from bd remember) are still appended so memory
+	  injection keeps working under a custom template.
 	- Use --export to dump the default content for customization.
 	- Use --memories-only for hook contexts that should inject only persistent memories; this returns only the memories section even when a custom PRIME.md is present.
 	- Use --no-memories to omit the persistent memories section (useful when the memories section is large and would dominate a context budget). --memories-only takes precedence if both are set.
@@ -187,7 +200,7 @@ Memory injection caps:
 		// working under a custom template — matching the default-template behavior
 		// (GH#3941).
 		if !primeExportMode {
-			if content, ok := readCustomPrimeContent(beadsDir); ok {
+			if content, ok := readCustomPrimeContent(primeWorkspaceDir(), beadsDir); ok {
 				if !primeNoMemories {
 					if mem := formatMemoriesForPrime(false); mem != "" {
 						content += mem
@@ -209,7 +222,7 @@ Memory injection caps:
 		// Append the AGENTS.md/CLAUDE.md divergence reminder only when both
 		// files are independent regulars carrying the bd marker; otherwise this
 		// adds nothing (zero output, negligible cost).
-		buf.WriteString(primeDivergenceReminder(""))
+		buf.WriteString(primeDivergenceReminder(primeWorkspaceDir()))
 		emit(buf.String())
 		return nil
 	},
@@ -229,14 +242,16 @@ func init() {
 }
 
 // readCustomPrimeContent returns the contents of a custom PRIME.md override and
-// true when one is found. It checks, in priority order: the local .beads/PRIME.md
-// (clone-specific customization), the redirected workspace PRIME.md (shared
-// customization), then the global ~/.config/beads/PRIME.md. It returns ("", false)
-// when no override exists, so callers fall through to the generated default.
-func readCustomPrimeContent(beadsDir string) (string, bool) {
-	localPrimePath := filepath.Join(".beads", "PRIME.md")
-	// Try local first (user's clone-specific customization).
-	// #nosec G304 -- path is relative to cwd
+// true when one is found. It checks, in priority order: the workspace-local
+// .beads/PRIME.md under workspaceDir (clone-specific customization; "" means
+// the cwd), the redirected workspace PRIME.md under beadsDir (shared
+// customization), then the global ~/.config/beads/PRIME.md. It returns
+// ("", false) when no override exists, so callers fall through to the
+// generated default.
+func readCustomPrimeContent(workspaceDir, beadsDir string) (string, bool) {
+	// Try local first (user's clone-specific customization; 4021f4944 / GH#876).
+	localPrimePath := filepath.Join(workspaceDir, ".beads", "PRIME.md")
+	// #nosec G304 -- path is relative to the workspace root (-C target or cwd)
 	if content, err := os.ReadFile(localPrimePath); err == nil {
 		return string(content), true
 	}
@@ -254,6 +269,58 @@ func readCustomPrimeContent(beadsDir string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// primeWorkspaceDir returns the directory prime resolves workspace-relative
+// state against — the .beads/PRIME.md local tier, the AGENTS.md/CLAUDE.md
+// divergence reminder, the git probes behind the default template's
+// git-authority wording, and the template's redirect notice: the absolute -C
+// target when set, else "" (the process cwd). -C only redirects BEADS_DIR, it does not chdir, so this is what makes
+// `bd -C dir prime` match `cd dir && bd prime` (#5509). It is deliberately not
+// the parent of the resolved beads dir, which may have followed .beads/redirect
+// or walked up from a subdirectory (see the CASE A/B tests in
+// prime_divergence_test.go).
+func primeWorkspaceDir() string {
+	if strings.TrimSpace(changeDir) == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(changeDir)
+	if err != nil {
+		return filepath.Clean(changeDir)
+	}
+	return abs
+}
+
+// primeGitCmd returns the git command prime's repository probes run. Under -C
+// it runs in the -C target, so the upstream/remote checks describe the primed
+// workspace rather than the process cwd (#5509); otherwise it runs in the
+// cwd repository via GitCmdCWD, exactly as before.
+//
+// NOTE: the probes built here are not prime-only — see primeHasGitRemote for
+// the auto-backup consumer that inherits this directory choice.
+//
+// NOTE: since GH#4927 every return path pairs with a nil error — the
+// GetRepoContext() failure falls back to a cwd probe instead of propagating —
+// so the err != nil arms at both call sites are unreachable today. The error
+// result is retained for future callers that can genuinely fail.
+func primeGitCmd(ctx context.Context, args ...string) (*exec.Cmd, error) {
+	if ws := primeWorkspaceDir(); ws != "" {
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Dir = ws
+		return cmd, nil
+	}
+	rc, err := internalbeads.GetRepoContext()
+	if err != nil {
+		// GH#4927: an unusable BEADS_DIR must not be reported as "no git
+		// remote" / "ephemeral branch". An external BEADS_DIR under another
+		// account's home (common in agent sandboxes) makes buildRepoContext
+		// fail, but the process cwd is frequently a perfectly good git
+		// workspace, so probe it directly instead of giving up. The SEC-003
+		// boundary on BEADS_DIR stays enforced by the callers that consume
+		// BEADS_DIR itself; these probes only ask git about its own workspace.
+		return exec.CommandContext(ctx, "git", args...), nil
+	}
+	return rc.GitCmdCWD(ctx, args...), nil
 }
 
 // outputHookJSON wraps content in the SessionStart hook JSON envelope shared
@@ -317,15 +384,16 @@ func isMCPActive() bool {
 	return false
 }
 
-// isEphemeralBranch detects if current branch has no upstream (ephemeral/local-only)
+// isEphemeralBranch detects if current branch has no upstream (ephemeral/local-only).
+// Runs through primeGitCmd, so it honors -C (#5509) and still falls back to the
+// process CWD git workspace when BEADS_DIR is unusable (GH#4927).
 var isEphemeralBranch = func() bool {
 	// git rev-parse --abbrev-ref --symbolic-full-name @{u}
 	// Returns error code 128 if no upstream configured
-	rc, err := internalbeads.GetRepoContext()
+	cmd, err := primeGitCmd(context.Background(), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
 	if err != nil {
 		return true // Default to ephemeral if we can't determine context
 	}
-	cmd := rc.GitCmdCWD(context.Background(), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
 	return cmd.Run() != nil
 }
 
@@ -343,12 +411,51 @@ var primeAgentProfile = func() config.AgentProfile {
 }
 
 // primeHasGitRemote detects if any git remote is configured (stubbable for tests)
+//
+// NOTE: despite the prime prefix, this has a consumer outside prime —
+// isBackupAutoEnabled (backup_auto.go) gates auto-backup and the
+// `bd backup status` note on it. Since it probes through primeGitCmd,
+// `bd -C dir <any command>` now keys that decision off the -C target's git
+// remote rather than the cwd's (#5509). That is the consistent answer, because
+// the store being backed up is the -C-resolved one, but it is a behavior
+// change beyond prime: check backup_auto before changing what this probes.
+//
+// GH#4927: this must not require a valid RepoContext / BEADS_DIR. An external
+// BEADS_DIR under another account's home (common in agent sandboxes) fails to
+// build a RepoContext and must not be misreported as "no git remote" when
+// `git remote` in the workspace succeeds. primeGitCmd supplies that fallback,
+// which keeps the -C behavior above intact. The SEC-003 boundary on BEADS_DIR
+// remains enforced elsewhere.
 var primeHasGitRemote = func() bool {
-	rc, err := internalbeads.GetRepoContext()
+	cmd, err := primeGitCmd(context.Background(), "remote")
 	if err != nil {
 		return false
 	}
-	cmd := rc.GitCmdCWD(context.Background(), "remote")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return len(strings.TrimSpace(string(out))) > 0
+}
+
+// gitCWDHasRemote reports whether the process CWD git repo has any remote.
+// Delegates to gitDirHasRemote (no BEADS_DIR coupling). It is the
+// BEADS_DIR-independent primitive the GH#4927 regression test drives directly,
+// alongside primeHasGitRemote.
+//
+// This pair is a test-only oracle with no production callers: the production
+// probes build their own command in primeGitCmd.
+func gitCWDHasRemote() bool {
+	return gitDirHasRemote("")
+}
+
+// gitDirHasRemote reports whether the git repo at dir has any remote
+// configured. dir == "" runs git in the process's current working directory
+// (this is what gitCWDHasRemote uses); a non-empty dir lets tests probe an
+// explicit fixture repo without chdir-ing the whole process.
+func gitDirHasRemote(dir string) bool {
+	cmd := exec.Command("git", "remote")
+	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
 		return false
@@ -379,9 +486,18 @@ func primeDoltSyncBullets(doltSync bool, pushFirst bool) string {
 		"- `bd dolt push` - Push beads to Dolt remote\n"
 }
 
+// primeRedirectInfo reports the redirect state of the primed workspace: the
+// -C target when one is given (#5509), else the process cwd exactly as before.
+func primeRedirectInfo() beads.RedirectInfo {
+	if ws := primeWorkspaceDir(); ws != "" {
+		return internalbeads.GetRedirectInfoFrom(ws)
+	}
+	return beads.GetRedirectInfo()
+}
+
 // getRedirectNotice returns a notice string if beads is redirected
 func getRedirectNotice(verbose bool) string {
-	redirectInfo := beads.GetRedirectInfo()
+	redirectInfo := primeRedirectInfo()
 	if !redirectInfo.IsRedirected {
 		return ""
 	}
@@ -724,7 +840,7 @@ func outputMCPContext(w io.Writer, stealthMode bool) error {
 - **Default**: Use beads for ALL task tracking (` + "`bd create`" + `, ` + "`bd ready`" + `, ` + "`bd close`" + `)
 - **Prohibited**: Do NOT use TodoWrite, TaskCreate, or markdown files for task tracking
 - **Workflow**: Create beads issue BEFORE writing code, mark in_progress when starting
-- **Memory**: Use ` + "`bd remember`" + ` for persistent knowledge. Do NOT use MEMORY.md files.
+- **Memory**: Use ` + "`bd remember`" + ` for durable project facts, not per-tool memory files. Per-operator preferences belong in your harness's own memory.
 - Persistence you don't need beats lost context
 - ` + profileRule + `
 
@@ -918,7 +1034,7 @@ git status                  # Check changed files
 - **Default**: Use beads for ALL task tracking (` + "`bd create`" + `, ` + "`bd ready`" + `, ` + "`bd close`" + `)
 - **Prohibited**: Do NOT use TodoWrite, TaskCreate, or markdown files for task tracking
 - **Workflow**: Create beads issue BEFORE writing code, mark in_progress when starting
-- **Memory**: Use ` + "`bd remember \"insight\"`" + ` for persistent knowledge across sessions. Do NOT use MEMORY.md files — they fragment across accounts. Search with ` + "`bd memories <keyword>`" + `.
+- **Memory**: Use ` + "`bd remember \"insight\"`" + ` for durable **project** facts — keep them here rather than in per-tool memory files, which fragment across accounts and are often capped. Per-operator preferences and agent-specific corrections belong in your harness's own memory; they aren't project knowledge, so keep them out of beads. Search with ` + "`bd memories <keyword>`" + `.
 - Persistence you don't need beats lost context
 - ` + profileRule + `
 - ` + gitWorkflowRule + `
@@ -940,7 +1056,7 @@ git status                  # Check changed files
 - ` + "`bd unclaim <id>`" + ` - Release stuck issue (agent crashed)
 - ` + "`bd update <id> --assignee=username`" + ` - Assign to someone
 - ` + "`bd update <id> --if-assignee=<expected> --assignee=<new>`" + ` - Atomic reassign: applies only if the assignee still matches (--if-status=<expected> guards status; --if-assignee='' requires unassigned). Mismatch exits non-zero with nothing written — never retry blindly
-- ` + "`bd update <id> --title/--description/--notes/--design`" + ` - Update fields inline
+- ` + "`bd update <id> --title/--description/--design`" + ` - Update fields inline (` + "`--notes`" + ` replaces existing notes and requires ` + "`--force`" + ` once set; prefer ` + "`--append-notes`" + `)
 - ` + "`bd close <id>`" + ` - Mark complete
 - ` + "`bd close <id1> <id2> ...`" + ` - Close multiple issues at once (more efficient)
 - ` + "`bd close <id> --reason=\"explanation\"`" + ` - Close with reason
@@ -963,7 +1079,7 @@ git status                  # Check changed files
 - ` + "`bd create --validate`" + ` - Check description has required sections
 - ` + "`bd create --acceptance=\"criteria\"`" + ` - Set acceptance criteria (checked by --validate)
 - ` + "`bd create --design=\"decisions\"`" + ` - Record design decisions
-- ` + "`bd create --notes=\"context\"`" + ` - Add supplementary notes
+- ` + "`bd create --notes=\"context\"`" + ` - Set supplementary notes (add later with ` + "`bd update --append-notes`" + `)
 - ` + "`bd config set validation.on-create warn`" + ` - Auto-validate on every create
 - ` + "`bd lint`" + ` - Check existing issues for missing sections
 

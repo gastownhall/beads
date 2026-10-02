@@ -354,7 +354,7 @@ type ApplyBatchRequest struct {
 
 	// Items The items to apply, IN THE ORDER THEY ARE TO BE APPLIED. An empty array is a `400` rather than a successful no-op: a write request that writes nothing is a client bug, and answering it cheerfully is how a client whose own plan filtered to nothing silently stops writing.
 	//
-	// The 100-item cap bounds how long one request may hold a write transaction, not batch semantics. Split a larger plan; each request is atomic on its own — but splitting it changes what the end gate can see, since the gate runs over one request at a time.
+	// The 1000-item cap (raised from 100; see the `issues.batchApplyLarge` capability token on `ContextResponse`) bounds how long one request may hold a write transaction, not batch semantics. A request over 100 items also EXTENDS the effective request deadline: the server grants a flat, operator-configured ceiling (`bd serve --large-apply-ceiling`, 5 minutes by default) instead of the ordinary small-request deadline, so a plan that genuinely needs minutes to apply is not cut off mid-commit. It never narrows: a request at or under 100 items keeps exactly the deadline it has always had. Split a larger plan if you must; each request is atomic on its own — but splitting it changes what the end gate can see, since the gate runs over one request at a time, and the server itself never splits a plan you send it: a single `items` array either commits in full or changes nothing.
 	//
 	// A per-item refusal names its offender as `items[i].kind.member`.
 	Items []ApplyItem `json:"items"`
@@ -674,7 +674,7 @@ type ApplyPatchBody struct {
 	// `replace` replaces the whole document. Present holding `null`, `{}` or an empty value CLEARS metadata — and clearing STORES THE EMPTY JSON DOCUMENT rather than SQL null, so "created with no metadata" and "given metadata and then cleared" are the same stored value; a reader must treat absent, empty and `{}` as one value on the way out. `merge` must be a nonempty JSON OBJECT and is merged into the current document.
 	Metadata *ApplyMetadataPatch `json:"metadata,omitempty"`
 
-	// Notes Replaces the notes. Mutually exclusive with `append_notes`; sending both is a `400`.
+	// Notes Replaces the notes. Mutually exclusive with `append_notes`; sending both is a `400`. Replacing EXISTING non-empty notes with different non-empty content is refused with `409 notes_overwrite_refused` unless `force_notes_overwrite` is set; an explicit clear (empty string) is not fenced.
 	Notes    *string `json:"notes,omitempty"`
 	Owner    *string `json:"owner,omitempty"`
 	Priority *int    `json:"priority,omitempty"`
@@ -712,6 +712,9 @@ type ApplyUpdateItem struct {
 
 	// ForceClosePolicy Bypasses ONLY close policy — the open-children refusal and the live blocker refusal — for a `patch.status` that crosses into the workspace's done category. It has no effect without such a status change, and it never bypasses validation, the preconditions above, or the assignee fence.
 	ForceClosePolicy *bool `json:"force_close_policy,omitempty"`
+
+	// ForceNotesOverwrite Bypasses ONLY the refusal on a `patch.notes` that would replace existing non-empty notes with different non-empty content (an explicit clear is not fenced). It requires `patch.notes` — an item setting it without one is a `400` — and, UNLIKE `force_assignee_transfer`, it has no `expected_assignee` exemption: there is no compare-and-set that authorizes a notes overwrite, so combining the two is legal and each answers its own question.
+	ForceNotesOverwrite *bool `json:"force_notes_overwrite,omitempty"`
 
 	// Patch The fields an `update` item writes. Every member is optional and PRESENCE is the signal: a member present is written, a member absent is untouched. An empty object is a `400` — a write that writes nothing is a client bug.
 	//
@@ -813,6 +816,18 @@ type BatchCreateResponse struct {
 	//
 	// There is no `has_more` and no `next_cursor`. This is not a page — the client already knows how many items it sent — and publishing a paging envelope over a fixed-length answer would invite a client to look for a second page that can never exist.
 	Items []Issue `json:"items"`
+}
+
+// Blocker One live blocker named by a blocked-issue refusal.
+type Blocker struct {
+	// Id The blocker: a local issue id, or the full `external:<project>:<capability>` reference.
+	Id string `json:"id"`
+
+	// Kind `local` for an issue this database holds, which clears when it closes; `external` for an `external:` reference, which clears when the named project ships the capability. The set may grow; default-branch on unknown values.
+	Kind string `json:"kind"`
+
+	// Type The blocking edge's dependency type (`blocks`, `waits-for`, `conditional-blocks`). ABSENT when the refusal did not report it, which is the case for an `external:` blocker.
+	Type *string `json:"type,omitempty"`
 }
 
 // BlockingAnnotations The blocking decoration of the named issues. It is NOT a page: this operation has no limit and no cursor, because the number of issues asked about is what bounds it.
@@ -917,6 +932,9 @@ type CloseOutcome struct {
 	// A BATCH WHOSE ITEMS ARE ALL `true` LANDED NOTHING, and records no history entry: a per-item success that changed nothing is not work the caller did.
 	AlreadyClosed *bool `json:"already_closed,omitempty"`
 
+	// Blockers With `not_closable` on the live-blocker refusal: the blockers that refused THIS item, exactly as `Problem.blockers` carries them for the single close, and optional for the same reason. Absent on a successful item and on every other refusal.
+	Blockers *[]Blocker `json:"blockers,omitempty"`
+
 	// Code This item's refusal, from `Problem.code`'s vocabulary and restricted to `not_found` (the id names no row in either plane) and `not_closable` (close policy refused it: open children, or a live blocker — see `open_children`). ABSENT means the item succeeded.
 	//
 	// It is the problem vocabulary rather than a second one because an item refusal and a request refusal are the same question asked at two scopes, and a client that had to learn two vocabularies to classify one condition would be classifying the SCOPE rather than the condition.
@@ -992,7 +1010,7 @@ type ContextResponse struct {
 	// OPTIONAL, and absent means only that this server does not disclose its filesystem layout — never that it has no workspace. A client MUST NOT require it, MUST NOT treat absence as an error, and has no use for the value beyond display: it is a path on the SERVER's filesystem, which the client cannot open. Identify the workspace by `project_id` and `database`, which are required.
 	BeadsDir *string `json:"beads_dir,omitempty"`
 
-	// Capabilities The tokens this server advertises: the OPERATIONS it implements, derived from its route table, and the server-wide BEHAVIORS it enforces. v0's operation vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.count`, `issues.get`, `issues.related`, `issues.create`, `issues.addComment`, `issues.batchClose`, `issues.claim`, `issues.claimNext`, `issues.release`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `config.set`, `config.unset`, `dependencies.cycles`, `dependencies.list`, `dependencies.count`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`; the one behavior token is `project.enforce`, which announces that a `Bd-Project-Id` stamp for the wrong workspace is refused here rather than silently ignored. The list grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation or a behavior — never the version string.
+	// Capabilities The tokens this server advertises: the OPERATIONS it implements, derived from its route table, and the server-wide BEHAVIORS it enforces. v0's operation vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.count`, `issues.get`, `issues.related`, `issues.create`, `issues.addComment`, `issues.batchClose`, `issues.claim`, `issues.claimNext`, `issues.release`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `config.set`, `config.unset`, `dependencies.cycles`, `dependencies.list`, `dependencies.count`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`; the behavior tokens are `project.enforce`, which announces that a `Bd-Project-Id` stamp for the wrong workspace is refused here rather than silently ignored, and `issues.batchApplyLarge`, which announces that `POST /v0/beads/issues:batchApply` accepts the RAISED envelope — up to 1000 items (`ApplyBatchRequest.items.maxItems`), a 16 MiB body, and (for a request over 100 items) a run budget that EXTENDS to an operator-configured ceiling (`bd serve --large-apply-ceiling`, 5 minutes by default) — rather than the original 100-item, 4 MiB bound. The ceiling is a flat whole-run budget, not a value scaled by item count: a 101-item request and a 1000-item request both get the same extended budget. A request at or under 100 items is unaffected either way and keeps the server's ordinary deadline exactly as before. A client that checks for this token before sending a plan over 100 items learns whether THIS server accepts it without paying for a round trip an older server would refuse anyway. The list grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation or a behavior — never the version string.
 	//
 	// THIS LIST IS BUILD-LEVEL, NOT WORKSPACE-LEVEL. It says which operations this binary serves, and for every entry but two that is the whole answer. `events.list` and `events.watch` are the exceptions: the durable events journal is a per-workspace setting that is OFF by default, so a server that advertises them may still refuse every request to both with 409 `events_journal_disabled` — correctly, because the operations exist and the workspace has no journal. A consumer of either MUST treat the capability as "this server speaks it" and the 409 as "not on this workspace", and must not read the capability as a promise that records will arrive.
 	Capabilities []string `json:"capabilities"`
@@ -1324,7 +1342,7 @@ type IssueCount struct {
 // IssueDetails An `Issue` with its labels, dependency edges and cardinalities — the body of `GET /v0/beads/issues/{id}`. `dependencies` and `dependents` carry FULL issue objects plus the edge type, not bare edges. Property semantics are documented on `Issue`.
 type IssueDetails = types.IssueDetails
 
-// IssuePatchBody The fields to write. Every member is optional and PRESENCE is the signal: a member present is written, a member absent is untouched. An empty object is a `400` — a write that writes nothing is a client bug.
+// IssuePatchBody The fields to write. Every member is optional and PRESENCE is the signal: a member present is written, a member absent is untouched. An empty object is a `400` — a write that writes nothing is a client bug — except on `updateIssue` beside `claim: true`, where the claim is the write.
 //
 // This is a deliberate SUBSET of the fields an issue carries; the members it does not spell are future surface rather than oversights, and `updateIssue`'s own description says which and why.
 //
@@ -1378,7 +1396,7 @@ type IssuePatchBody struct {
 	// `replace` replaces the whole document. Present holding `null`, `{}` or an empty value CLEARS metadata — and clearing STORES THE EMPTY JSON DOCUMENT rather than SQL null, so "created with no metadata" and "given metadata and then cleared" are the same stored value; a reader must treat absent, empty and `{}` as one value on the way out. `merge` must be a nonempty JSON OBJECT and is merged into the current document.
 	Metadata *ApplyMetadataPatch `json:"metadata,omitempty"`
 
-	// Notes Replaces the notes. Mutually exclusive with `append_notes`; sending both is a `400`.
+	// Notes Replaces the notes. Mutually exclusive with `append_notes`; sending both is a `400`. Replacing EXISTING non-empty notes with different non-empty content is refused with `409 notes_overwrite_refused` unless `force_notes_overwrite` is set; an explicit clear (empty string) is not fenced.
 	Notes *string `json:"notes,omitempty"`
 
 	// ParentId Replaces the issue's parents atomically: a nonempty value makes THAT issue the only parent, and an EMPTY STRING removes every parent-child edge the issue has. Labels are not inherited — that is a create-time choice (`CreateIssueRequest.inherit_labels_from_parent`) and a reparent does not re-run it.
@@ -1480,6 +1498,13 @@ type Problem struct {
 	// BlockerIsAncestor With `dependency_cycle`, hierarchy refusal only: true when `blocker_id` is an ANCESTOR of `issue_id` (which cannot close until its descendants finish, so the gate would never clear), false when it is a DESCENDANT (blocked status cascades, so it would inherit the block and never close). Both polarities are reported; this member is never omitted to mean false. See `issue_id`.
 	BlockerIsAncestor *bool `json:"blocker_is_ancestor,omitempty"`
 
+	// Blockers With `not_closable`, and ONLY on the live-blocker refusal: the live blockers that refused the close, in the order the refusing check reported them, read from the refusal's typed list rather than parsed out of any message. Never present together with `open_children`.
+	//
+	// A client renders the direct CLI's sentence from it: `cannot close blocked issue: <id> is blocked by [<b1> <b2> …]`, each blocker spelled `id` when its `type` is absent or `blocks` and `id (type)` otherwise — the sentence `detail` already begins with when this member is present.
+	//
+	// IT IS OPTIONAL. A refusal that could not name its blockers omits it and keeps the generic `detail`; absence means "this refusal did not name them", never "nothing blocks it". Re-read the issue's dependencies then.
+	Blockers *[]Blocker `json:"blockers,omitempty"`
+
 	// Code The stable machine-readable reason, and the ONLY member a client may dispatch on. v0's vocabulary: `invalid_argument` (400, also emitted by the Host-header middleware on any route), `invalid_cursor` (400), `unauthenticated` (401, only on a server configured with a token file), `not_found` (404), `already_claimed` (409), `not_claimable` (409), `not_closable` (409), `not_releasable` (409), `dependency_cycle` (409), `dependency_exists` (409), `already_exists` (409), `precondition_failed` (409), `events_journal_disabled` (409), `events_journal_truncated` (410), `busy` (503), `db_unavailable` (503), `events_watch_saturated` (503), `internal` (500). Renaming or removing a status+code pair is a breaking change; ADDING one is not, so clients MUST default-branch on unknown values and fall back to the status class (unknown 4xx → client bug, fail loud; unknown 503 → retry per `Retry-After`; other unknown 5xx → server fault).
 	Code string `json:"code"`
 
@@ -1539,7 +1564,7 @@ type Problem struct {
 
 	// OpenChildren With `not_closable`: how many open children the transaction that refused the close observed, read inside that transaction rather than parsed out of `detail`.
 	//
-	// PRESENT ONLY for the open-children refusal. The other `not_closable` refusal is a live blocker and carries no such member, so member presence — not prose — is how a client tells the two apart. Both are bypassed by `force`.
+	// PRESENT ONLY for the open-children refusal. The other `not_closable` refusal is a live blocker and carries `blockers` instead, so member presence — not prose — is how a client tells the two apart. Both are bypassed by `force`.
 	OpenChildren *int `json:"open_children,omitempty"`
 
 	// Param With `invalid_argument`: the offending query parameter, body member or header name. Present on every 400 except a body that fails to parse at all.
@@ -1909,6 +1934,9 @@ type UpdateIssueRequest struct {
 	// Actor Who is editing the issue. `ClaimRequest.actor`'s rules exactly: the server trims it, then refuses an empty result, anything longer than 256 BYTES (the `maxLength` above counts characters — the byte limit is the binding one), and any control character including newline. The value reaches the history entry's attribution and the storage commit message, so an unvalidated newline would forge audit-trail lines.
 	Actor string `json:"actor"`
 
+	// Claim Claims the issue for `actor` in the same transaction as `patch`: `bd update <id> --claim`, served by the same role. The claim sets `assignee` to `actor` and `status` to `in_progress`, then the patch applies, so a `patch.assignee` or `patch.status` overrides the claim's value. Eligibility is `{id}:claim`'s: a claimable status, and unassigned, already held by `actor`, or held by a configured claim pool. Held by `actor` and `in_progress` already is an idempotent success. A refusal is `409 already_claimed` or `409 not_claimable` naming `claim`, and writes nothing — the patch included. With `claim: true` the `patch` may be empty. It must not be combined with `expected_assignee`, `expected_status` or `force_assignee_transfer`; a request that does is a `400` naming `claim`.
+	Claim *bool `json:"claim,omitempty"`
+
 	// ExpectedAssignee Requires the issue's assignee to equal this value before the patch. A match AUTHORIZES the requested `patch.assignee` transfer: this compare-and-set replaces the ordinary anti-steal fence, so it must not be combined with `force_assignee_transfer`. A miss refuses the whole request with `409 precondition_failed`.
 	ExpectedAssignee *string `json:"expected_assignee,omitempty"`
 
@@ -1930,7 +1958,10 @@ type UpdateIssueRequest struct {
 	// ForceClosePolicy Bypasses ONLY close policy — the open-children refusal and the live blocker refusal — for a `patch.status` that crosses into the workspace's done category. It has no effect without such a status change, and it never bypasses validation, the preconditions above, or the assignee fence.
 	ForceClosePolicy *bool `json:"force_close_policy,omitempty"`
 
-	// Patch The fields to write. Every member is optional and PRESENCE is the signal: a member present is written, a member absent is untouched. An empty object is a `400` — a write that writes nothing is a client bug.
+	// ForceNotesOverwrite Bypasses ONLY the refusal on a `patch.notes` that would replace existing non-empty notes with different non-empty content (an explicit clear is not fenced). It requires `patch.notes` — a request setting it without one is a `400` — and, UNLIKE `force_assignee_transfer`, it has no `expected_assignee` exemption: there is no compare-and-set that authorizes a notes overwrite, so combining the two is legal and each answers its own question.
+	ForceNotesOverwrite *bool `json:"force_notes_overwrite,omitempty"`
+
+	// Patch The fields to write. Every member is optional and PRESENCE is the signal: a member present is written, a member absent is untouched. An empty object is a `400` — a write that writes nothing is a client bug — except on `updateIssue` beside `claim: true`, where the claim is the write.
 	//
 	// This is a deliberate SUBSET of the fields an issue carries; the members it does not spell are future surface rather than oversights, and `updateIssue`'s own description says which and why.
 	//
@@ -2363,13 +2394,21 @@ type CountIssuesParams struct {
 	// MetadataField Top-level metadata equality filter as `key=value`, split on the first `=`. Repeatable. An invalid key is a 400.
 	MetadataField *[]string `form:"metadata_field,omitempty" json:"metadata_field,omitempty"`
 
+	// IncludeEphemeral Admit the EPHEMERAL PLANE — the wisps table — and nothing else. Exactly the first of `include_infra`'s four changes, with none of the other three: no type exclusion is taken off, so a row whose TYPE a default count already excludes stays excluded.
+	//
+	// It exists because there was no way to ask for that one thing. The write path routes on STORAGE CLASS, not type, so a `no_history` bead lives in the wisps table while remaining ordinary durable work. Reaching it needed `include_infra`, which also drops template rows of the named type — one silent undercount traded for another.
+	IncludeEphemeral *bool `form:"include_ephemeral,omitempty" json:"include_ephemeral,omitempty"`
+
+	// HasMetadataKey Only issues carrying this top-level metadata key.
+	HasMetadataKey *string `form:"has_metadata_key,omitempty" json:"has_metadata_key,omitempty"`
+
 	// IncludeInfra Count the cardinality of `bd list --include-infra --all` instead of the durable plane. IT CHANGES FOUR THINGS AT ONCE, and they are listed rather than summarized because a caller reading "include infra" would expect one:
 	//
 	// the ephemeral wisps tier is MERGED IN, picking up both wisps and the `no_history` beads that are durable work stored in that tier; template molecules are EXCLUDED, which a default count includes; gate beads are EXCLUDED unless `type=gate` asks for them by name; and a `type` this workspace calls infra ROUTES the count to the ephemeral tier instead of the durable one.
 	//
 	// The infra vocabulary is the WORKSPACE's, read from its configuration inside the role. A caller does not supply it and cannot — that config load is what this role exists to keep off both front doors.
 	//
-	// Unset, the count is durable-plane only and applies none of the four: the historical `bd count` answer, kept exactly so a scripted caller reads the same number it read yesterday.
+	// Unset — and with `include_ephemeral` also unset — the count is durable-plane only and applies none of the four: the historical `bd count` answer, kept exactly so a scripted caller reads the same number it read yesterday.
 	IncludeInfra *bool `form:"include_infra,omitempty" json:"include_infra,omitempty"`
 
 	// GroupBy Bucket the count by one dimension and return `groups` beside `total`. Absent, the response carries `total` alone.

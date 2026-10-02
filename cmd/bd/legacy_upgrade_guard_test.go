@@ -206,14 +206,12 @@ func TestLegacyUpgradeGuardMetadataLessSQLiteAndCurrentEmbeddedPrecedence(t *tes
 		}
 	})
 
-	t.Run("explicit server metadata with missing version witness and local Dolt root is refused", func(t *testing.T) {
+	t.Run("explicit server metadata with missing version witness and populated local Dolt root is refused", func(t *testing.T) {
 		beadsDir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"server"}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Mkdir(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
-			t.Fatal(err)
-		}
+		populateLegacyDoltRoot(t, beadsDir)
 		if err := guardLegacyUpgradeWorkspace(beadsDir); !isLegacyUpgradeRefusal(err) {
 			t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want migration refusal", err)
 		}
@@ -290,9 +288,7 @@ func TestLegacyUpgradeGuardServerSelectionBeatsStaleEmbeddedRepository(t *testin
 					t.Fatal(err)
 				}
 			}
-			if err := os.Mkdir(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
-				t.Fatal(err)
-			}
+			populateLegacyDoltRoot(t, beadsDir)
 			staleRepo := filepath.Join(beadsDir, "embeddeddolt", "stale", ".dolt")
 			if err := os.MkdirAll(staleRepo, 0o700); err != nil {
 				t.Fatal(err)

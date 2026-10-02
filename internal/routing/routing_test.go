@@ -4,12 +4,15 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
 )
 
 func TestDetermineTargetRepo(t *testing.T) {
@@ -459,5 +462,145 @@ func TestDetectUserRole_JJSecondaryWorkspace_NonCwdRepoPath(t *testing.T) {
 	}
 	if strings.Contains(stderr, "not configured") {
 		t.Errorf("expected no role-not-configured warning, got stderr:\n%s", stderr)
+	}
+}
+
+func TestDetectUserRoleIgnoresInheritedGitRouting(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t.Chdir(t.TempDir()) // The explicit target must also work outside CWD.
+	runGit := func(t *testing.T, repo string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		cmd.Env = gitenv.ScrubRouting(os.Environ())
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("fixture git %v: %v: %s", args, err, out)
+		}
+	}
+	for _, tc := range []struct {
+		name, role, global string
+		inline, warning    bool
+		want               UserRole
+	}{
+		{"repository", "maintainer", "", false, false, Maintainer},
+		{"inline", "maintainer", "", true, false, Maintainer},
+		{"missing_remote", "", "", false, true, Contributor},
+		{"invalid_remote", "invalid", "", false, true, Contributor},
+		{"default_global", "", "maintainer", true, false, Maintainer},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, target, decoy := t.TempDir(), t.TempDir(), t.TempDir()
+			for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+				t.Setenv(key, home)
+			}
+			if tc.global != "" {
+				if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[beads]\nrole = "+tc.global+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, repo := range []string{target, decoy} {
+				runGit(t, repo, "init", "--quiet")
+			}
+			runGit(t, decoy, "config", "beads.role", "contributor")
+			runGit(t, decoy, "remote", "add", "origin", "git@example.invalid:owner/decoy.git")
+			runGit(t, target, "remote", "add", "origin", "https://example.invalid/owner/target.git")
+			if tc.role != "" {
+				runGit(t, target, "config", "beads.role", tc.role)
+			}
+			poison := map[string]string{"GIT_DIR": filepath.Join(decoy, ".git"), "GIT_WORK_TREE": decoy}
+			if tc.inline {
+				poison = map[string]string{"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "beads.role", "GIT_CONFIG_VALUE_0": "contributor"}
+			}
+			for key, value := range poison {
+				t.Setenv(key, value)
+			}
+			var got UserRole
+			var err error
+			stderr := captureStderr(t, func() { got, err = DetectUserRole(target) })
+			if err != nil || got != tc.want {
+				t.Errorf("DetectUserRole(target) = %q, %v; want %q", got, err, tc.want)
+			}
+			if strings.Contains(stderr, "beads.role not configured") != tc.warning {
+				t.Errorf("fallback warning = %q; want warning=%v", stderr, tc.warning)
+			}
+			for key, value := range poison {
+				if os.Getenv(key) != value {
+					t.Errorf("reader changed parent environment %s", key)
+				}
+			}
+		})
+	}
+}
+
+// TestDetectUserRoleIgnoresInheritedConfigSuppression is the deny-direction
+// counterpart to the test above. Injecting a role is not the only way to steer
+// role detection: an inherited config-suppression entry blinds the lookup
+// instead, and DetectUserRole answers a miss with detectFromURL, whose
+// no-remote arm returns Maintainer. So the reader must discard suppression too,
+// not just redirects.
+//
+// Only the global-file vector is observable end to end: repository config is
+// never suppressed by these variables, and a system file cannot be planted
+// hermetically because GIT_CONFIG_SYSTEM=<path> is itself scrubbed. The
+// GIT_CONFIG_NOSYSTEM and GIT_CONFIG_SYSTEM forms are pinned one level down, in
+// gitenv.TestScrubRoutingAndSuppressionDropsSuppression.
+func TestDetectUserRoleIgnoresInheritedConfigSuppression(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t.Chdir(t.TempDir())
+
+	home, target := t.TempDir(), t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[beads]\nrole = contributor\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// No local role and no origin: the only arms left after a blinded read are
+	// detectFromURL's permissive ones, so an escalation would be visible.
+	initCmd := exec.Command("git", "init", "--quiet")
+	initCmd.Dir = target
+	initCmd.Env = gitenv.ScrubRouting(os.Environ())
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("fixture git init: %v: %s", err, out)
+	}
+
+	for _, tc := range []struct {
+		name, blind string
+	}{
+		// Fixture guard: without blinding the global role must be readable at
+		// all, otherwise every case below would pass for the wrong reason.
+		{"unblinded", ""},
+		{"global_null", os.DevNull},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.blind != "" {
+				t.Setenv("GIT_CONFIG_GLOBAL", tc.blind)
+			}
+			var got UserRole
+			var err error
+			captureStderr(t, func() { got, err = DetectUserRole(target) })
+			if err != nil {
+				t.Fatalf("DetectUserRole(target) error: %v", err)
+			}
+			if got != Contributor {
+				t.Errorf("DetectUserRole(target) = %q, want %q: a blinded role read must not escalate", got, Contributor)
+			}
+		})
 	}
 }

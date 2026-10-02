@@ -37,11 +37,37 @@ const (
 	// It bounds how long one request may hold a write transaction — not batch
 	// semantics, which have no size in them.
 	maxApplyBatchItems = issueops.MaxApplyBatchItems
-	// maxApplyBatchBodyBytes bounds the request body. A hundred items each
+	// maxApplyBatchBodyBytes bounds the request body. A thousand items each
 	// carrying a description, a design, acceptance criteria and a metadata
 	// document is the shape this has to admit, so it refuses the absurd before
-	// any of it is parsed. It is the batch create's bound for the same reason.
-	maxApplyBatchBodyBytes = 4 << 20
+	// any of it is parsed.
+	//
+	// Raised from 4 MiB to 16 MiB alongside maxApplyBatchItems's 100->1000
+	// raise: the measured max shape's body (102 creates, descriptions
+	// totaling about 878 KB) is about 1.1 MB, and 1000 items at the same
+	// density is comfortably inside 16 MiB with headroom for a caller that
+	// writes longer descriptions than that sample.
+	//
+	// See TestCapBatchApplyLargeTiesAllThreeLimits: this constant,
+	// largeApplyItemThreshold and issueops.MaxApplyBatchItems are pinned
+	// together with CapBatchApplyLarge, the token that advertises all three.
+	//
+	// See maxInflight's doc comment (server.go) for the worst-case concurrent
+	// decode memory this implies: maxInflight requests may each be decoding a
+	// body up to this size at once, before the large-apply semaphore narrows
+	// how many of them can go on to actually run.
+	maxApplyBatchBodyBytes = 16 << 20
+	// largeApplyItemThreshold is where a request crosses from "the original,
+	// always-supported shape" to "the raised envelope": a request with MORE
+	// than this many items holds the largeApplySem slot (serializing
+	// oversized transactions one at a time, Server.acquireLargeApply) and
+	// runs under a whole separate, EXTENDED budget (Server.largeApplyCeiling)
+	// instead of the ordinary requestDeadline every other request gets. It is
+	// deliberately the OLD cap, not some fraction of the new one: every
+	// request at or under this threshold runs under EXACTLY the deadline it
+	// always has — route() applies requestDeadline unconditionally, and
+	// nothing in this file touches it for such a request.
+	largeApplyItemThreshold = 100
 )
 
 // The document's member list at each of this body's levels. Every schema is
@@ -65,7 +91,7 @@ var (
 	}
 	applyUpdateItemMembers = []string{
 		"expected_assignee", "expected_status", "expected_version",
-		"force_assignee_transfer", "force_close_policy", "patch", "target",
+		"force_assignee_transfer", "force_close_policy", "force_notes_overwrite", "patch", "target",
 	}
 	applyPatchMembers = []string{
 		"acceptance_criteria", "append_notes", "assignee", "defer_until",
@@ -116,6 +142,24 @@ func (s *Server) handleApplyBatch(w http.ResponseWriter, r *http.Request) {
 	request, ok := s.applyBatchRequest(w, r)
 	if !ok {
 		return
+	}
+
+	// One-wide "large write" semaphore: a request carrying more than
+	// largeApplyItemThreshold items serializes against every other large
+	// apply, so at most one oversized transaction holds a write connection
+	// at a time, and runs under an EXTENDED budget built fresh at the moment
+	// it is admitted (Server.acquireLargeApply). An ordinary (<=threshold)
+	// request never touches this, is never waited on by one, and keeps
+	// r.Context() exactly as route() built it — requestDeadline,
+	// unconditionally, the same as it always has.
+	if len(request.Items) > largeApplyItemThreshold {
+		runCtx, release, err := s.acquireLargeApply(r.Context())
+		if err != nil {
+			s.failApplyBatch(w, r, request, err)
+			return
+		}
+		defer release()
+		r = r.WithContext(runCtx)
 	}
 
 	applier, err := s.batchApplier(r)
@@ -467,6 +511,9 @@ func applyUpdateItem(prefix string, encoded json.RawMessage, raw map[string]json
 	}
 	if wire.ForceAssigneeTransfer != nil {
 		item.ForceAssigneeTransfer = *wire.ForceAssigneeTransfer
+	}
+	if wire.ForceNotesOverwrite != nil {
+		item.ForceNotesOverwrite = *wire.ForceNotesOverwrite
 	}
 	return item, nil
 }
@@ -974,8 +1021,8 @@ func (s *Server) failApplyBatch(w http.ResponseWriter, r *http.Request, request 
 		s.fail(w, r, res)
 
 	case errors.Is(err, issueops.ErrCloseBlocked):
-		s.fail(w, r, at(newResult(CodeNotClosable,
-			"an item closes a blocked issue; clear the blocker, or send the item's force flag"), ""))
+		s.fail(w, r, at(closeBlockedResult(err,
+			"an item closes a blocked issue", "clear the blocker, or send the item's force flag"), ""))
 
 	case errors.Is(err, storage.ErrAlreadyClaimed):
 		res := at(newResult(CodeAlreadyClaimed,
@@ -989,6 +1036,10 @@ func (s *Server) failApplyBatch(w http.ResponseWriter, r *http.Request, request 
 			}
 		}
 		s.fail(w, r, res)
+
+	case errors.Is(err, storage.ErrNotesOverwrite):
+		s.fail(w, r, at(newResult(CodeNotesOverwrite,
+			"an update's `patch.notes` would replace existing non-empty notes; send `force_notes_overwrite`, or use `patch.append_notes` to preserve history"), "notes"))
 
 	case errors.Is(err, issueops.ErrVersionMismatch),
 		errors.Is(err, issueops.ErrStatusMismatch),

@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "atomicfile",
+    srcs = ["atomicfile.go"],
+    importpath = "github.com/steveyegge/beads/internal/atomicfile",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "atomicfile_test",
+    srcs = ["atomicfile_test.go"],
+    embed = [":atomicfile"],
+)

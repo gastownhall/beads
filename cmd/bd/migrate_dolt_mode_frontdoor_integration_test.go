@@ -69,7 +69,9 @@ func assertDependencyPair(t *testing.T, bd, dir string, env []string, sentinelID
 }
 
 func migrationFrontDoorBinary(t *testing.T) string {
-	if p := os.Getenv("BEADS_TEST_BD_BINARY"); p != "" {
+	if p, err := findPrebuiltBDBinary(); err != nil {
+		t.Fatal(err)
+	} else if p != "" {
 		return p
 	}
 	out := filepath.Join(t.TempDir(), "bd")

@@ -1,0 +1,13 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "storequerier",
+    srcs = ["querier.go"],
+    importpath = "github.com/steveyegge/beads/internal/workapi/storequerier",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage",
+        "//internal/workapi",
+        "//issueops",
+    ],
+)

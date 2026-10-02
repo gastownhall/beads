@@ -1,0 +1,35 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "util",
+    srcs = [
+        "dsn.go",
+        "flock.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/storage/dbproxy/util",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/lockfile",
+        "@com_github_go_sql_driver_mysql//:mysql",
+    ],
+)
+
+go_test(
+    name = "util_test",
+    srcs = ["dsn_test.go"],
+    embed = [":util"],
+    deps = ["@com_github_go_sql_driver_mysql//:mysql"],
+)
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

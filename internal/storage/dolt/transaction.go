@@ -156,6 +156,21 @@ func (t *doltTransaction) dirtyTableNames() []string {
 }
 
 func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {
+	pending, err := s.runDoltTransactionRecording(ctx, commitMsg, fn)
+	// Settled here, after the pinned connection and any borrowed ignored-table
+	// connection have gone back to the pool: the recheck needs one of its own.
+	// pending is non-empty only when the regular SQL commit landed or may have
+	// landed, so this also runs when the Dolt commit after it failed
+	// (ErrCommitIndeterminate): those rows are committed all the same.
+	s.settleBlockedRecheck(ctx, pending)
+	return err
+}
+
+// runDoltTransactionRecording is runDoltTransaction's transaction. Once it has
+// committed it hands back the dependents the callback's unblocking writes
+// recorded on either of its SQL transactions, for the post-commit
+// blocked-state recheck (gastownhall/beads#6716).
+func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) (issueops.BlockedRecheck, error) {
 	// Pin a single connection for the entire operation: SQL transaction,
 	// config protection, and DOLT_COMMIT must all run on the same Dolt
 	// session. Each pool connection has an independent working set in Dolt
@@ -182,18 +197,18 @@ func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn
 	}
 
 	if err != nil {
-		return fmt.Errorf("failed to acquire connection: %w", err)
+		return issueops.BlockedRecheck{}, fmt.Errorf("failed to acquire connection: %w", err)
 	}
 	defer conn.Close()
 
 	var currentBranch string
 	if err := conn.QueryRowContext(ctx, "SELECT active_branch()").Scan(&currentBranch); err != nil {
-		return fmt.Errorf("failed to read active branch: %w", err)
+		return issueops.BlockedRecheck{}, fmt.Errorf("failed to read active branch: %w", err)
 	}
 
 	regularTx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("failed to begin regular tx: %w", err)
+		return issueops.BlockedRecheck{}, fmt.Errorf("failed to begin regular tx: %w", err)
 	}
 
 	// The journal counter and rows must commit in the SAME SQL transaction as
@@ -220,12 +235,32 @@ func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn
 		ignoredCleanup, ignoredTx, err = s.beginIgnoredTxOnBranch(ctx, currentBranch)
 		if err != nil {
 			_ = regularTx.Rollback()
-			return err
+			return issueops.BlockedRecheck{}, err
 		}
 		defer ignoredCleanup()
 	}
 	clearJournalScope := issueops.ScopeEventsJournalTransaction(regularTx, journalEnabled)
 	defer clearJournalScope()
+	// Versioned history binds to the SAME regular transaction the mutation runs
+	// in, for the same reason the journal does: RecordVersionInTx no-ops unless
+	// this scope is set. Without it every issues-plane mutation routed through
+	// runDoltTransaction — the whole doltTransaction mutator surface, reached
+	// from bd create, batch create/import, bd graph apply, merge_slot and the
+	// CLI transact wrappers — commits durably while minting no version row, so
+	// the bead has no creation version and the first later mutation that does
+	// run scoped is minted as revision 1: the history then asserts that the
+	// update IS the creation.
+	clearVersionScope := issueops.ScopeVersionedHistoryTransaction(regularTx, s.versionedHistoryEnabled.Load())
+	defer clearVersionScope()
+	// Unblocking writes record their dependents on whichever transaction they
+	// ran in: the regular one, or the ignored one wisps use when the journal
+	// does not pin both planes together.
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(regularTx)
+	defer clearRecheckScope()
+	if !journalEnabled {
+		clearIgnoredRecheckScope := issueops.ScopeBlockedRecheckTransaction(ignoredTx)
+		defer clearIgnoredRecheckScope()
+	}
 
 	tx := &doltTransaction{regularTx: regularTx, ignoredTx: ignoredTx, store: s, journalPinned: journalEnabled}
 
@@ -244,10 +279,34 @@ func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn
 		if !journalEnabled {
 			_ = ignoredTx.Rollback()
 		}
-		return err
+		return issueops.BlockedRecheck{}, err
 	}
 
-	return s.finishDoltTransaction(ctx, conn, tx, commitMsg)
+	return s.finishDoltTransactionRecording(ctx, conn, tx, commitMsg)
+}
+
+// finishDoltTransactionRecording is finishDoltTransaction that also hands back
+// the dependents the transaction's unblocking writes recorded, on either of its
+// SQL transactions, for the post-commit blocked-state recheck.
+//
+// They are handed back with the error when the commit is indeterminate
+// (ErrCommitIndeterminate): the regular SQL commit may have landed, or did land
+// and only the Dolt commit or the ignored-table commit after it failed. The
+// rows are then committed without a caller being able to replay the write, so
+// the recheck is the only thing that can settle their dependents; being a full
+// recompute of committed state, it is harmless if the commit did not land.
+// Any other failure means the regular SQL commit was refused and rolled back,
+// and nothing is handed back.
+func (s *DoltStore) finishDoltTransactionRecording(ctx context.Context, conn *sql.Conn, tx *doltTransaction, commitMsg string) (issueops.BlockedRecheck, error) {
+	err := s.finishDoltTransaction(ctx, conn, tx, commitMsg)
+	if err != nil && !errors.Is(err, ErrCommitIndeterminate) {
+		return issueops.BlockedRecheck{}, err
+	}
+	pending := issueops.TakeBlockedRecheck(tx.regularTx)
+	if !tx.journalPinned {
+		pending = pending.Merge(issueops.TakeBlockedRecheck(tx.ignoredTx))
+	}
+	return pending, err
 }
 
 // finishDoltTransaction commits the regular SQL transaction, its associated
@@ -267,6 +326,12 @@ func (s *DoltStore) finishDoltTransaction(ctx context.Context, conn *sql.Conn, t
 		rollbackIgnored()
 		return wrapSQLCommitError("sql commit (regular)", err)
 	}
+
+	// The mutations in this transaction ran with versioned history scoped on
+	// regularTx (see runDoltTransaction), so anything they minted has to be
+	// staged with them or the version rows never reach this operation's Dolt
+	// commit. Marked here, once, rather than at each MarkDirty call site.
+	tx.dirty.MarkVersionedHistoryDirty(s.versionedHistoryEnabled.Load())
 
 	if err := versioncontrolops.StageAndCommit(ctx, conn, tx.dirty.DirtyTables(), commitMsg, s.commitAuthorString()); err != nil {
 		rollbackIgnored()
