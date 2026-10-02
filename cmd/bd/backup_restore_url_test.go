@@ -123,10 +123,9 @@ func TestBackupRestoreCommandKeepsDirectoryValidation(t *testing.T) {
 
 // TestBackupRestoreCommandReportsTheJSONSourceVerbatim pins the success-path
 // echo. "source" is data: a caller compares it with the argument it passed, so
-// it is the argument byte-for-byte and not a redacted copy. RedactBackupURL has
-// to over-strip to fail closed, and the "@" in this directory name is where
-// that shows: it reads as userinfo, and the redacted URL is file://2024/db, a
-// different location.
+// it is the argument byte-for-byte and not a redacted copy. A credentialed
+// remote makes the distinction observable: the success payload stays verbatim,
+// while errors that quote the same source must use RedactBackupURL.
 func TestBackupRestoreCommandReportsTheJSONSourceVerbatim(t *testing.T) {
 	oldStore := store
 	oldRootCtx := rootCtx
@@ -151,7 +150,7 @@ func TestBackupRestoreCommandReportsTheJSONSourceVerbatim(t *testing.T) {
 	proxiedServerMode = false
 	jsonOutput = true
 
-	const source = "file:///srv/backups@2024/db"
+	const source = "https://user:hunter2pass@doltremoteapi.dolthub.com/org/db"
 	if redacted := versioncontrolops.RedactBackupURL(source); redacted == source {
 		t.Fatalf("fixture %q survives RedactBackupURL, so it cannot tell a verbatim source from a redacted one", source)
 	}
@@ -426,7 +425,11 @@ func TestReconcileRestoredProxiedWorkspaceRedactsBackupAddFailure(t *testing.T) 
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	const source = "aws://AKIAEXAMPLE:wJalrXUtnFEMI/K7MDENG@bucket/db"
+	// Keep the credentialed URL parse-valid. B1 deliberately hides the entire
+	// Dolt cause for parse-invalid credentialed URLs because net/url can echo a
+	// credential fragment outside the URL; this case exercises the ordinary
+	// redacted-error path and retains the safe backup location.
+	const source = "aws://AKIAEXAMPLE:wJalrXUtnFEMIK7MDENG@bucket/db"
 	mock.ExpectExec("CALL DOLT_BACKUP('rm', ?)").
 		WithArgs(proxiedBackupTargetName).
 		WillReturnResult(sqlmock.NewResult(0, 0))
