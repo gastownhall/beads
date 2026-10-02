@@ -51,8 +51,9 @@ Current PR-related workflow names:
   call's result (`BAZEL`) and `BAZEL_TEST`, `BAZEL_PURE`, `BAZEL_EMBEDDED`,
   `BAZEL_INTEGRATION`, `BAZEL_DOLTSERVER`, `BAZEL_PROXIED` and
   `BAZEL_SERVER_STORAGE`. The legacy jobs these mirror stay required in
-  `pr.yml` and `pr-risk.yml`, except where `BAZEL_EMBEDDED`, or
-  `BAZEL_PROXIED` and `BAZEL_SERVER_STORAGE`, run in their place (see
+  `pr.yml` and `pr-risk.yml`, except where `BAZEL_EMBEDDED`;
+  `BAZEL_PROXIED` and `BAZEL_SERVER_STORAGE`; or `BAZEL_TEST`, `BAZEL_PURE`
+  and `BAZEL_DOLTSERVER` run in their place (see
   [Legacy Tier Retirement](#legacy-tier-retirement-d2)).
   `.github/scripts/bazel-gate.sh` reads the exported mode, never the variable
   or the fork flag: mode `skip` allows every Bazel id to skip, modes `local`
@@ -82,16 +83,18 @@ Current PR-related workflow names:
   farm is down, or the beads CI RBE client certificate expires (about
   2027-09-27; a partial secret set also fails every same-repo run), fix
   `main` (`make bazel-sync`) or renew the secrets. To turn remote execution
-  off instead, first commit `BAZEL_RETIRES_LEGACY_EMBEDDED: "false"` and
-  `BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS: "false"` in both
+  off instead, first commit `BAZEL_RETIRES_LEGACY_EMBEDDED: "false"`,
+  `BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS: "false"` and
+  `BAZEL_RETIRES_LEGACY_PR_LANES: "false"` in both
   `pr.yml` and `pr-risk.yml` (see
   [Legacy Tier Retirement](#legacy-tier-retirement-d2)),
   then unset the `RBE_WEST_WORKERS` repo variable: same-repo runs then take
   mode `skip`, which the gate accepts (fork PRs still build, in mode `cache`,
   so drift on `main` still reaches them). Unsetting the variable while a
   flag is still `"true"` turns `CI Gate / Required` red on every same-repo PR
-  (`BAZEL_EMBEDDED_RETIRED`, `BAZEL_DOLT_SERVER_RETIRED`), because PR Risk
-  no longer runs those legacy tiers for them. If rbe-west closes the read-only cache, fork runs
+  (`BAZEL_EMBEDDED_RETIRED`, `BAZEL_DOLT_SERVER_RETIRED`,
+  `BAZEL_PR_LANES_RETIRED`), because the legacy tiers no longer run for
+  them. If rbe-west closes the read-only cache, fork runs
   fall back to executing everything locally (slower, still green). If it
   is slow rather than closed, each lookup gives up after `fork-cache`'s
   15 s `--remote_timeout` (times its retries), and Bazel's failure circuit
@@ -459,6 +462,10 @@ Do not require these existing check names directly:
 - `Test (ubuntu-latest)`
 - `Test (macos-latest)`
 - `Test (storage domain + uow)`
+- `Test (Dolt server fingerprint)`
+- `Contract corpus (golden + determinism + conformance)`
+- `PR Core (wrapper timing)`
+- `Build Artifacts`
 - `Bazel tier coverage`
 - `Build (Embedded Dolt)`
 - `Test (Embedded Dolt Storage 1/5)` through `Test (Embedded Dolt Storage 5/5)`
@@ -602,10 +609,15 @@ intentionally absent for that event or risk tier:
   `TEST_SERVER_STORAGE_FULL` when it reported `dolt_server=true`; and
   `BUILD_EMBEDDED` when it reported both. `BAZEL_COVERAGE` (that job's
   result) must be `success`.
+- In the baseline aggregate, `BUILD_ARTIFACTS`, `PR_CORE_WRAPPER`,
+  `CHECK_CMD_BD_PUREGEO_TESTS`, `TEST_DOMAIN_UOW` and `CONTRACT_CORPUS` may
+  be `skipped` when `bazel-coverage` reported `pr_lanes=true`.
 - In the baseline aggregate, `BAZEL_COVERAGE` must be `success`;
   `BAZEL_EMBEDDED_RETIRED` is red when `embedded=true` but the Bazel embedded
-  lane did not run remotely and pass, and `BAZEL_DOLT_SERVER_RETIRED` when
-  `dolt_server=true` but the proxied and server-storage lanes did not.
+  lane did not run remotely and pass, `BAZEL_DOLT_SERVER_RETIRED` when
+  `dolt_server=true` but the proxied and server-storage lanes did not, and
+  `BAZEL_PR_LANES_RETIRED` when `pr_lanes=true` but the test, pure-Go and
+  dolt-server lanes did not.
 - All baseline jobs must be `success`.
 
 This keeps branch protection pointed at stable aggregate jobs while preserving
@@ -667,15 +679,17 @@ The current embedded Dolt topology already fits the required-check model:
 
 ### Legacy Tier Retirement (D2)
 
-D2 retires `pr-risk.yml`'s legacy Dolt tiers on same-repo PRs, one step at
-a time, where `pr.yml`'s gated Bazel lanes run the same tests:
+D2 retires legacy test jobs on same-repo PRs, one step at a time, where
+`pr.yml`'s gated Bazel lanes run the same tests: `pr-risk.yml`'s Dolt tiers
+(steps 1 and 2) and `pr.yml`'s own Go test jobs (step 3):
 
 <!-- markdownlint-disable MD013 -->
 
-| Step | Legacy jobs (`pr-risk.yml`) | Bazel lanes (`bazel.yml`) | Flag | `pr.yml` gate id |
+| Step | Legacy jobs | Bazel lanes (`bazel.yml`) | Flag | `pr.yml` gate id |
 | --- | --- | --- | --- | --- |
 | 1 | `test-embedded-storage` x5, `test-embedded-conformance` x2, `test-embedded-cmd` x20 | `bazel-embedded` (`--config=embedded`) | `BAZEL_RETIRES_LEGACY_EMBEDDED` | `BAZEL_EMBEDDED_RETIRED` |
 | 2 | `test-proxied-cmd` x15, `test-server-storage`, `test-server-storage-full` x16 | `bazel-proxied` (`--config=doltserver-proxied`), `bazel-server-storage` (`--config=doltserver-integration`) | `BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS` | `BAZEL_DOLT_SERVER_RETIRED` |
+| 3 | `pr.yml`: `pr-core-wrapper` (PR Core), `build-artifacts`, `check-cmd-bd-puregeo-tests` (pure-Go and js/wasm), `test-domain-uow`, `contract-corpus` | `bazel-test` (`--config=ci`, which also publishes `bazel-ci-build-artifacts`), `bazel-pure` (`--config=pure`, `--config=js-wasm`), `bazel-doltserver` (`--config=doltserver`) | `BAZEL_RETIRES_LEGACY_PR_LANES` | `BAZEL_PR_LANES_RETIRED` |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -685,6 +699,65 @@ apply. The Bazel lanes run the same tests with the same shard scripts and
 manifests. On those PRs they are the tiers' only pre-merge run, and
 `CI Gate / Required` requires them to have run remotely and passed.
 
+- Step 3 specifics (`pr.yml`'s own jobs, so the legacy jobs and their Bazel
+  lanes run in the same `pr.yml` run):
+  - The five jobs add `needs: bazel-coverage` and
+    `if: needs.bazel-coverage.outputs.pr_lanes != 'true'`; `pr.yml`'s gate
+    accepts their skips only when `pr_lanes` is exactly `true`, and then
+    requires `BAZEL_TEST`, `BAZEL_PURE` and `BAZEL_DOLTSERVER` to have run
+    remotely and passed (`BAZEL_PR_LANES_RETIRED`). `pr-risk.yml` commits
+    the flag too, only so the shared `bazel-coverage` job stays identical;
+    nothing in PR Risk reads `pr_lanes`.
+  - Artifact consumers: `build-artifacts`' `ci-build-artifacts` fed PR Core,
+    domain+uow and the package gates. The first two stand down with it.
+    The package gates (`package-mcp`, `package-npm`) now also need
+    `bazel-coverage` and the `bazel` call, and download
+    `bazel-ci-build-artifacts` (published by `bazel-test`, same layout, bd
+    built as `//cmd/bd:bd_for_tests`) where `pr_lanes` is `true`. They wait
+    for the whole call, so on PRs that change a package they finish a few
+    minutes after it. The Bazel bd carries no vcs build info (`bd version`
+    prints `1.3.0 (dev)`, no commit); no consumer reads it. Verified
+    2026-10-02: both package gates pass with the Bazel-built bd (MCP: 228
+    passed, 5 skipped; npm: all tests and the pack dry run), the same as
+    with a `go build` bd. No other job in any workflow reads `pr.yml`'s
+    artifacts (`docs-autofix.yml` reads `check-doc-flags`'
+    `cli-docs-freshness-patch`, which is unaffected).
+  - Kept on every PR: the Dolt server fingerprint (container image vs the
+    pinned dolt CLI the Bazel dolt-server lanes start), formerly
+    `test-domain-uow`'s first step, is its own required job
+    `test-dolt-server-fingerprint` (`Test (Dolt server fingerprint)`,
+    `TEST_DOLT_SERVER_FINGERPRINT`). The Go tests `bazel test --config=ci`
+    does not run or skips (`tools/bazel/equivalence_allowlist.txt`: today
+    two in `cmd/bd`, eight in `scripts`) run under `go test` in
+    `pr-preflight-platforms`' Linux leg (`scripts/ci/allowlisted-go-tests.sh`,
+    PR Core's environment and flags except `-race`); each allowlist entry
+    must match a test that ran and passed, so a new `skip` entry runs there
+    automatically. `check-release-target-cross-compilation` still
+    `go build`s `./...` with `CGO_ENABLED=0` on every PR.
+  - PR Core's other work: `scripts/ci/pr-core.sh` is the one `go test` (plus
+    a timing summary); its `BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1` is
+    `test:prcore`'s too. `bazel-test`'s equivalence step compares Bazel's
+    tests with `go list`, not with PR Core's run, so it is unaffected;
+    `nightly.yml` still runs PR Core's `go test -json` for the skip-parity
+    check.
+  - `--config=sole-run` (`--nocache_test_results`,
+    `--experimental_remote_cache_eviction_retries=0`, the step 1 and 2
+    hardening) is added to every `bazel test` of the three lanes in mode
+    `remote` only (`BAZEL_SOLE_RUN`), which every covered PR runs in. Fork
+    and Dependabot runs (modes `cache` and `local`), whose legacy jobs still
+    run, keep cached results, which keeps their local runs short. Measured
+    2026-10-02: `bazel test //... --config=ci --nocache_test_results`
+    remotely took 132 s (113 targets).
+  - Pinned for step 3 (`scripts/pr_lanes_bazel_coverage_test.go`): the
+    three lanes' Bazel steps and the `prcore`, `ci`, `doltserver`, `pure`,
+    `js-wasm` and `sole-run` rc lines exactly; no other rc line of a config
+    they use may filter, narrow or re-run tests; no BUILD rule other than
+    the pinned retired-tier targets, and no `.bzl`, may carry `-test.short`,
+    `-test.run`, `-test.skip`, `BEADS_TEST_SKIP`, `--test_filter` or a
+    non-`False` `flaky`. (Pinning every target's args, as steps 1 and 2 do
+    for their few targets, is not practical for the whole tree.) The flaky
+    target query in the step 1 and 2 lanes covers `tests(//...)` and runs on
+    every covered PR.
 - Switch: one committed workflow env flag per step (table above), each set
   to the same literal (`"true"` or `"false"`) in `pr.yml` and `pr-risk.yml`
   (policy-tested). They are deliberately not the `RBE_WEST_WORKERS` repo
@@ -712,8 +785,8 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
   - `pr-risk.yml` and `pr.yml` each run the identical `bazel-coverage` job
     (policy-tested). The job does no checkout and runs no repository code.
     It reads the flags, the event, the fork flag and the actor (no secret,
-    no variable), and outputs `embedded` (step 1) and `dolt_server`
-    (step 2).
+    no variable), and outputs `embedded` (step 1), `dolt_server`
+    (step 2) and `pr_lanes` (step 3).
   - Each legacy test job adds
     `needs.bazel-coverage.outputs.<its step's output> != 'true'` to its
     `if`; `build-embedded` adds
@@ -723,8 +796,8 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
   - `pr.yml`'s gate requires `BAZEL_COVERAGE` (the job's result) and one
     `BAZEL_*_RETIRED` id per step. Such an id is red when its step's output
     is `true` and the Bazel call's mode is not `remote` or any of the step's
-    lanes (`BAZEL_EMBEDDED`; `BAZEL_PROXIED` and `BAZEL_SERVER_STORAGE`) is
-    not `success`. In particular, mode `skip` (the farm switch off) and
+    lanes (`BAZEL_EMBEDDED`; `BAZEL_PROXIED` and `BAZEL_SERVER_STORAGE`;
+    `BAZEL_TEST`, `BAZEL_PURE` and `BAZEL_DOLTSERVER`) is not `success`. In particular, mode `skip` (the farm switch off) and
     mode `cache` (the executor secret missing) are red there, although
     `bazel-gate.sh` alone would accept them.
   - A failed, cancelled or missing decision is red in both gates.
