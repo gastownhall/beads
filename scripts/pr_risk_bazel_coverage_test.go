@@ -336,6 +336,19 @@ func TestPRRiskBazelCoverageJob(t *testing.T) {
 			t.Errorf("%s: %s re-derives the Bazel coverage decision (%q); read needs.%s.outputs", prRiskWorkflowName, path, value, prRiskCoverageJobName)
 		}
 	})
+	// In pr.yml too, only the workflow env sets a flag and only the
+	// decision step reads one (ci-gate names them in its messages).
+	walkYAML(readYAMLNode(t, filepath.Join(".github", "workflows", "pr.yml")), "", func(path string, key bool, value string) {
+		if key {
+			if flags[value] && path != ".env."+value {
+				t.Errorf("pr.yml: %s sets %s; only the workflow env may", path, value)
+			}
+			return
+		}
+		if regexp.MustCompile(`env\.BAZEL_RETIRES_`).MatchString(value) && !strings.HasPrefix(path, stepEnv) {
+			t.Errorf("pr.yml: %s reads a BAZEL_RETIRES_* flag (%q); read needs.%s.outputs", path, value, prRiskCoverageJobName)
+		}
+	})
 	// Every BAZEL_RETIRES_* flag either workflow commits is one of retiredTiers.
 	for name, env := range map[string]map[string]string{prRiskWorkflowName: riskEnv, "pr.yml": prEnv} {
 		for k := range env {
