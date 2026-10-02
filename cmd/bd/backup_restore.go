@@ -74,10 +74,10 @@ To initialize and restore in one step, use: bd init && bd backup restore`,
 		// restore from a silently skipped one. "source" is the argument
 		// verbatim, not redacted like the prose echoes of it: it is data a
 		// caller compares against what it passed, and RedactBackupURL has to
-		// over-strip to fail closed (file:///srv/backups@2024/db would come back
-		// as file://2024/db, a different location). It is the caller's own input
-		// on its own stdout, as raw as the backup_url that 'bd backup init
-		// --json' and 'bd backup status --json' already report.
+		// strip query parameters to fail closed (s3://bucket/db?region=auto would
+		// come back as s3://bucket/db, a different source string). It is the
+		// caller's own input on its own stdout, as raw as the backup_url that
+		// 'bd backup init --json' and 'bd backup status --json' already report.
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
 				"restored": true,
@@ -140,8 +140,7 @@ func registerBackupRemote(ctx context.Context, bs storage.BackupStore, dir strin
 	// Remove + re-add to handle the case where a remote already exists.
 	_ = bs.BackupRemove(ctx, defaultDoltBackupName)
 	if err := bs.BackupAdd(ctx, defaultDoltBackupName, backupURL); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to register backup remote: %s\n",
-			versioncontrolops.RedactBackupURL(err.Error()))
+		fmt.Fprintf(os.Stderr, "Warning: failed to register backup remote: %v\n", err)
 		return
 	}
 	if err := saveDoltBackupConfig(backupURL); err != nil {
