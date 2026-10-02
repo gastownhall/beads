@@ -18,6 +18,7 @@ go_test(
     name = "scripts_test",
     srcs = [
         "bazel_autofix_push_test.go",
+        "bazel_cache_mode_test.go",
         "bazel_farm_workflow_test.go",
         "bazel_policy_test.go",
         "bazel_skip_allowlist_test.go",

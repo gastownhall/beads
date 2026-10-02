@@ -1,8 +1,9 @@
 # Bazel lanes on the remote-execution farm for fork PRs by trusted authors.
 #
 # Fork PRs get no Actions secrets, so pr.yml's Bazel call runs them locally
-# with rbe-west's anonymous read-only cache (mode cache, no remote-only
-# lanes). This workflow gives the farm to fork PRs whose
+# with rbe-west's anonymous read-only cache (mode cache: no embedded,
+# proxied-server or server-storage tier). This workflow gives the farm to
+# fork PRs whose
 # author AND triggering user are on .github/bazel-farm-allowlist.txt (by
 # numeric user id), by calling bazel.yml from pull_request_target, which has
 # the secrets.
@@ -10,8 +11,8 @@
 # ADVISORY. pr.yml is unchanged: every fork PR, listed or not, still runs the
 # cache-mode Bazel lanes (local execution, read-only cache) inside the
 # enforced `CI Gate / Required`. This run adds a fast remote signal,
-# including the remote-only embedded, integration, proxied-server and
-# server-storage tiers, that no required check and no privileged workflow
+# including the remote-only embedded, proxied-server and server-storage
+# tiers, that no required check and no privileged workflow
 # reads. Making it authoritative needs a trusted reporter; see
 # engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "Trusted-author fork PRs".
 #

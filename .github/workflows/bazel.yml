@@ -31,10 +31,12 @@
 # gate. bazel-integration runs in the PR call (pr.yml passes integration:
 # "on") although its legacy counterparts, main.yml's integration jobs, run
 # only on push to main: remotely it is minutes, and it catches on the PR what
-# main.yml would catch after the merge. Like every remote-only lane it skips
-# for fork and Dependabot PRs (mode cache: the read-only cache speeds up
-# local execution, it does not run the remote-only lanes). Direct runs (push
-# to main, workflow_dispatch, nightly.yml's call) gate nothing.
+# main.yml would catch after the merge. Unlike the remote-only lanes it also
+# runs for fork and Dependabot PRs (mode cache): with the read-only cache
+# only what the PR changed is built and tested on the runner, and it is
+# their only PR-time integration run (no legacy job runs it on PRs). Mode
+# local (rbe=off) still skips it. Direct runs (push to main,
+# workflow_dispatch, nightly.yml's call) gate nothing.
 #
 # Execution mode, decided once by the rbe job (every other job needs it and
 # reads its outputs; none re-derives the condition) and passed to
@@ -48,14 +50,16 @@
 #   cache: fork PRs (unless bazel-farm.yml authorized them), rbe=cache
 #     dispatches and same-repo runs without the secret (Dependabot PRs:
 #     same-repo, but no Actions secrets): like local (ubuntu-latest,
-#     remote-only jobs skipped), plus rbe-west's anonymous read-only cache
-#     (.bazelrc --config=fork-cache): hits for every action trusted CI
-#     already executed, no credentials, no uploads. The farm can close it at
-#     any time; Bazel then runs everything locally.
+#     bazel-embedded, bazel-proxied and bazel-server-storage skipped), plus
+#     rbe-west's anonymous read-only cache (.bazelrc --config=fork-cache):
+#     hits for every action trusted CI already executed, no credentials, no
+#     uploads; and bazel-integration runs too (a warm run hits all but what
+#     the PR changed). The farm can close the cache at any time; Bazel then
+#     runs everything locally.
 #   local: rbe=off dispatches (fork simulation without the cache): local
 #     execution on ubuntu-latest, slower but the same results, for every job
-#     but the remote-only ones (bazel-embedded, bazel-integration,
-#     bazel-proxied, bazel-server-storage), which are skipped.
+#     but the remote-only ones (bazel-embedded, bazel-proxied,
+#     bazel-server-storage) and bazel-integration, which are skipped.
 #   skip: same-repo runs while RBE_WEST_WORKERS is unset (the farm switch),
 #     and authorized fork-farm runs without it or without the secret.
 # Trusted-author fork PRs: bazel-farm.yml (pull_request_target, advisory)
@@ -202,7 +206,7 @@ on:
         description: "'true' when the lanes executed remotely on rbe-west, else 'false'"
         value: ${{ jobs.rbe.outputs.enabled }}
       rbe-mode:
-        description: "remote, cache or local (no remote-only jobs), or skip (no jobs): the rbe job's decision"
+        description: "remote, cache (no remote-only jobs but integration), local (no remote-only jobs), or skip (no jobs): the rbe job's decision"
         value: ${{ jobs.rbe.outputs.mode }}
       bazel-test:
         description: "bazel-test's job.status"
@@ -822,15 +826,17 @@ jobs:
   # on same-repo PRs; see the header.
   bazel-integration:
     name: integration
-    # Remote execution only, like bazel-embedded: locally the tagged race
-    # build of //... plus 14 jobs' worth of tests on one runner is well over
-    # the timeout, for tests main.yml's integration jobs already run. A
-    # caller may turn it off with integration: "off"; pr.yml and
+    # Remote, or local with the read-only cache (mode cache: fork and
+    # Dependabot PRs, rbe=cache dispatches), which serves every action
+    # trusted CI already ran, so only what the PR changed builds and tests
+    # on the GitHub-hosted runner. Never plain local (rbe=off): the tagged
+    # race build of //... plus 14 jobs' worth of tests on one runner, cold.
+    # A caller may turn it off with integration: "off"; pr.yml and
     # bazel-farm.yml pass "on".
     needs: rbe
     runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    if: ${{ needs.rbe.outputs.enabled == 'true' && inputs.integration != 'off' }}
-    timeout-minutes: 55
+    if: ${{ (needs.rbe.outputs.mode == 'remote' || needs.rbe.outputs.mode == 'cache') && inputs.integration != 'off' }}
+    timeout-minutes: 85
     outputs:
       result: ${{ steps.result.outputs.result }}
     steps:
@@ -857,10 +863,15 @@ jobs:
       # Remote: a cold compile (a PR touching a widely imported package; the
       # first cold run took 17 minutes end to end, warm ones ~3.5) plus the
       # longest test action (1200s cap, see .bazelrc) if it starts last.
-      # scripts/ci_workflow_test.go keeps this at or above that sum.
+      # scripts/ci_workflow_test.go keeps this at or above that sum. Mode
+      # cache on a 4-CPU runner (simulated, 2026-10-02): ~2.5 minutes warm,
+      # 3-5 for a cmd/bd change, plus up to ~11 more when slow blob reads
+      # make Bazel restart the build ("Lost inputs"), and ~30 with the cache
+      # closed (the farm's kill switch: everything local, cold), which must
+      # still fit so closing the cache does not turn fork PRs red.
       - name: bazel test //... --config=integration
         id: test
-        timeout-minutes: 45
+        timeout-minutes: 75
         run: |
           set -o pipefail
           start=$(date +%s)

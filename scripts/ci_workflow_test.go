@@ -1791,8 +1791,9 @@ const (
 var bazelJobNames = []string{bazelDoltJobName, bazelEmbedJobName, bazelIntegJobName, bazelProxiedJobName, bazelPureJobName, bazelServerJobName, bazelJobName, bazelRBEJobName}
 
 // The lanes that only run remotely (skipped unless the rbe job chose remote);
+// bazel-integration runs remotely or with the read-only cache (bazelIntegIf);
 // every other lane also runs locally.
-var bazelRemoteOnlyJobs = map[string]bool{bazelEmbedJobName: true, bazelIntegJobName: true, bazelProxiedJobName: true, bazelServerJobName: true}
+var bazelRemoteOnlyJobs = map[string]bool{bazelEmbedJobName: true, bazelProxiedJobName: true, bazelServerJobName: true}
 
 // The rbe job's decision step reads exactly one secret, and only to test it
 // for emptiness: its env value is a boolean, not the secret.
@@ -1821,10 +1822,9 @@ var bazelLaneGateIDs = map[string]string{
 	// pr-risk.yml's legacy jobs, like the embedded tier's).
 	bazelProxiedJobName: "BAZEL_PROXIED",
 	bazelServerJobName:  "BAZEL_SERVER_STORAGE",
-	// main.yml's integration jobs, required on same-repo PRs although their
-	// legacy twins run only on push to main. Remote-only: fork and
-	// Dependabot PRs skip it until the farm has a read-only cache for them
-	// (then it becomes local-capable for forks, here and in bazel-gate.sh).
+	// main.yml's integration jobs, required on PRs although their legacy
+	// twins run only on push to main: remotely on same-repo PRs, locally
+	// with the read-only cache (mode cache) on fork and Dependabot PRs.
 	bazelIntegJobName: "BAZEL_INTEGRATION",
 }
 
@@ -1832,11 +1832,14 @@ var bazelLaneGateIDs = map[string]string{
 // turns off has a place to record why.
 var bazelAdvisoryLanes = map[string]string{}
 
-// bazel-integration's if: remote only, and off when a caller passes
-// integration: "off" (pr.yml and bazel-farm.yml pass "on"). A string input:
-// on push and dispatch it is null, and null != 'off', so the lane keeps
-// running on main.
-const bazelIntegIf = "${{ needs.rbe.outputs.enabled == 'true' && inputs.integration != 'off' }}"
+// bazel-integration's if: remote, or local with the read-only cache (mode
+// cache: fork and Dependabot PRs, whose only PR-time integration run it is;
+// a warm run builds and tests only what the PR changed), never plain local
+// (rbe=off: a cold tagged race build of //... on one runner); and off when a
+// caller passes integration: "off" (pr.yml and bazel-farm.yml pass "on"). A
+// string input: on push and dispatch it is null, and null != 'off', so the
+// lane keeps running on main.
+const bazelIntegIf = "${{ (needs.rbe.outputs.mode == 'remote' || needs.rbe.outputs.mode == 'cache') && inputs.integration != 'off' }}"
 
 // pr.yml's call of bazel.yml: exactly these inputs (review D1 v2 N3). An rbe
 // override would put every PR in local mode and ungate the embedded tier
@@ -2287,7 +2290,7 @@ func bazelLaneRunModes(t *testing.T, lane, ifExpr string, with map[string]string
 		if strings.EqualFold(with["integration"], "off") {
 			return map[string]bool{}
 		}
-		return map[string]bool{"remote": true}
+		return map[string]bool{"remote": true, "cache": true}
 	}
 	t.Fatalf("%s if = %q: teach bazelLaneRunModes which modes run it", lane, ifExpr)
 	return nil
@@ -3123,9 +3126,16 @@ func TestBazelIntegrationJob(t *testing.T) {
 	// A required PR lane: the step must fit a cold compile (the first
 	// GitHub run took 17 minutes end to end) followed by the longest test
 	// action, which .bazelrc caps at its test:integration --test_timeout
-	// (rbe-west's 1200s limit). The job adds setup and log upload, but
-	// stays remote-only short.
+	// (rbe-west's 1200s limit). The job adds setup and log upload. In mode
+	// cache it runs on a 4-CPU GitHub-hosted runner, and with the read-only
+	// cache closed (the farm's kill switch) the whole suite builds and runs
+	// there cold, about 30 minutes simulated: the step keeps twice that.
 	const coldCompileMinutes = 20
+	const cacheClosedMinutes = 30
+	if test.TimeoutMinutes < 2*cacheClosedMinutes {
+		t.Errorf("%s test step timeout-minutes = %d, want at least %d (mode cache with the cache closed: ~%d minutes cold on a GitHub-hosted runner)",
+			bazelIntegJobName, test.TimeoutMinutes, 2*cacheClosedMinutes, cacheClosedMinutes)
+	}
 	actionCapMinutes := 0
 	for line := range bazelrcLines(t) {
 		if v, ok := strings.CutPrefix(line, "test:integration --test_timeout="); ok {

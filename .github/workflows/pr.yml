@@ -1965,11 +1965,12 @@ jobs:
   # remotely and passed. bazel.yml has no pull_request/merge_group trigger
   # of its own: this call is its only PR run. It gets the four RBE secrets
   # and nothing else; its rbe job decides remote, cache (forks, Dependabot:
-  # local execution with the anonymous read-only cache, no remote-only
-  # lanes) or skip, and exports that for ci-gate. Its bazel-integration lane
-  # (main.yml's integration jobs, which run only on push to main) is on and
-  # required here, remote only: same-repo PRs run it, fork and Dependabot PRs
-  # (mode cache) skip it. Its bd artifact is renamed
+  # local execution with the anonymous read-only cache, no embedded,
+  # proxied or server-storage lane) or skip, and exports that for ci-gate.
+  # Its bazel-integration lane (main.yml's integration jobs, which run only
+  # on push to main) is on and required here in modes remote and cache:
+  # same-repo PRs run it remotely, fork and Dependabot PRs locally with the
+  # read-only cache. Its bd artifact is renamed
   # (bazel-ci-build-artifacts) so it cannot collide with build-artifacts'
   # upload; the package gates take it where build-artifacts stands down.
   bazel:
@@ -2177,9 +2178,10 @@ jobs:
             skipped_ok="CHECK_NO_BEADS_CHANGES"
           fi
           # Bazel lanes skipped by design in the call's execution mode (all
-          # of them in mode skip, the remote-only embedded, integration,
-          # proxied and server-storage tiers in modes local and cache), and
-          # the aggregate unless the mode is missing or invalid.
+          # of them in mode skip, the remote-only embedded, proxied and
+          # server-storage tiers in modes local and cache, and integration
+          # in mode local), and the aggregate unless the mode is missing or
+          # invalid.
           skipped_ok="$skipped_ok $(bash .github/scripts/bazel-gate.sh skips)"
           BAZEL="$(bash .github/scripts/bazel-gate.sh aggregate)"
           export BAZEL
