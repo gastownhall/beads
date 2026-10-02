@@ -463,6 +463,7 @@ Do not require these existing check names directly:
 - `Test (macos-latest)`
 - `Test (storage domain + uow)`
 - `Test (Dolt server fingerprint)`
+- `Go test (scripts), go vet and Bazel-skipped tests`
 - `Contract corpus (golden + determinism + conformance)`
 - `PR Core (wrapper timing)`
 - `Build Artifacts`
@@ -726,14 +727,37 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
     pinned dolt CLI the Bazel dolt-server lanes start), formerly
     `test-domain-uow`'s first step, is its own required job
     `test-dolt-server-fingerprint` (`Test (Dolt server fingerprint)`,
-    `TEST_DOLT_SERVER_FINGERPRINT`). The Go tests `bazel test --config=ci`
-    does not run or skips (`tools/bazel/equivalence_allowlist.txt`: today
-    two in `cmd/bd`, eight in `scripts`) run under `go test` in
-    `pr-preflight-platforms`' Linux leg (`scripts/ci/allowlisted-go-tests.sh`,
-    PR Core's environment and flags except `-race`); each allowlist entry
-    must match a test that ran and passed, so a new `skip` entry runs there
-    automatically. `check-release-target-cross-compilation` still
-    `go build`s `./...` with `CGO_ENABLED=0` on every PR.
+    `TEST_DOLT_SERVER_FINGERPRINT`). `check-release-target-cross-compilation`
+    still `go build`s `./...` with `CGO_ENABLED=0` on every PR.
+  - Also kept on every PR, in the required job `scripts-go-checks`
+    (`SCRIPTS_GO_CHECKS`; PR Core's environment: dolt, git and dolt
+    identity, `scripts/ci/lib/test-env.sh`):
+    - `go test ./scripts/...` with PR Core's flags
+      (`scripts/ci/scripts-go-test.sh`). The repository policy tests,
+      including the D2 guards, check part or all of their rules under
+      `go test` only (their inputs are not in `//scripts:scripts_test`'s
+      runfiles), so without this they would have no required pre-merge run
+      on covered PRs.
+    - `go test`'s own vet checks (cmd/go's `defaultVetFlags`, policy-tested
+      equal to the toolchain's) over `./...` (`scripts/ci/go-test-vet.sh`):
+      rules_go's `go_test` runs no vet, so a `go test` vet finding would
+      otherwise first fail on `main` and then on every fork PR.
+    - the Go tests `bazel test --config=ci` does not run or skips
+      (`tools/bazel/equivalence_allowlist.txt`), under `go test`
+      (`scripts/ci/allowlisted-go-tests.sh`); each entry must match a test
+      that ran and passed.
+
+    `TestBazelOnlySkipsAreAllowlisted` (itself go-test-only, so in that
+    job) requires every top-level test with a `TEST_SRCDIR`- or
+    `bazeltest.IsBazel()`-guarded `t.Skip` to have an allowlist `skip`
+    entry, and every test that runs part of its checks under `go test`
+    only to live under `./scripts`.
+  - Package gates on a covered PR in a non-remote mode (the farm switch off)
+    fail in their own "Check the Bazel-built bd exists" step, naming
+    `BAZEL_PR_LANES_RETIRED`, instead of on a missing artifact.
+  - Every artifact `bazel.yml` uploads sets `overwrite: true`, so
+    "Re-run failed jobs" of a lane (the recovery for an eviction or a flake)
+    does not fail on the upload with a 409 (policy-tested).
   - PR Core's other work: `scripts/ci/pr-core.sh` is the one `go test` (plus
     a timing summary); its `BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1` is
     `test:prcore`'s too. `bazel-test`'s equivalence step compares Bazel's
