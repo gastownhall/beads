@@ -8,6 +8,7 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -27,7 +28,7 @@ func BackupAdd(ctx context.Context, db DBConn, name, url string) error {
 // BackupSync pushes the database to the named backup destination.
 func BackupSync(ctx context.Context, db DBConn, name string) error {
 	if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('sync', ?)", name); err != nil {
-		return fmt.Errorf("sync backup %s: %w", name, err)
+		return fmt.Errorf("sync backup %s: %w", name, redactBackupError(err, ""))
 	}
 	return nil
 }
@@ -44,9 +45,9 @@ func BackupRemove(ctx context.Context, db DBConn, name string) error {
 // the named database. When force is true, an existing database with the
 // same name is overwritten. Mirrors the CLI: dolt backup restore [--force] <url> <db_name>
 func BackupRestore(ctx context.Context, db DBConn, url, dbName string, force bool) error {
-	if _, err := neturl.Parse(url); err != nil {
+	if _, err := neturl.Parse(url); err != nil && RedactBackupURL(url) != url {
 		return fmt.Errorf("restore from backup %s: invalid backup URL: %w",
-			RedactBackupURL(url), &hiddenBackupError{err: err})
+			RedactBackupURL(url), &hiddenBackupError{err: err, source: url})
 	}
 	if force {
 		if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('restore', '--force', ?, ?)", url, dbName); err != nil {
@@ -71,11 +72,45 @@ type backupErrorRedactor struct {
 }
 
 func (e *backupErrorRedactor) Error() string {
-	return strings.ReplaceAll(e.err.Error(), e.source, RedactBackupURL(e.source))
+	message := redactBackupURLsInText(e.err.Error())
+	if e.source == "" {
+		return message
+	}
+
+	replacements := map[string]string{
+		e.source: RedactBackupURL(e.source),
+	}
+	if parsed, err := neturl.Parse(e.source); err == nil && parsed.User != nil {
+		replacements[parsed.String()] = RedactBackupURL(parsed.String())
+		for _, credential := range backupCredentialSpellings(e.source, parsed) {
+			// Very short strings are too likely to be ordinary words or pieces of
+			// an unrelated diagnostic. Full URLs and userinfo are scrubbed above;
+			// individual credential spellings are useful only when non-trivial.
+			if len(credential) >= 4 {
+				replacements[credential] = "[redacted]"
+			}
+		}
+	}
+
+	keys := make([]string, 0, len(replacements))
+	for old := range replacements {
+		if old != "" && old != replacements[old] {
+			keys = append(keys, old)
+		}
+	}
+	sort.Slice(keys, func(i, j int) bool { return len(keys[i]) > len(keys[j]) })
+	for _, old := range keys {
+		message = strings.ReplaceAll(message, old, replacements[old])
+	}
+	return message
 }
 
 func (e *backupErrorRedactor) Unwrap() error {
 	return e.err
+}
+
+func (e *backupErrorRedactor) As(target any) bool {
+	return assignRedactedURLError(target, e.err, e.source)
 }
 
 func redactBackupError(err error, source string) error {
@@ -88,9 +123,98 @@ func redactBackupError(err error, source string) error {
 	// parse-invalid. BackupRestore rejects it before Dolt; BackupAdd retains
 	// Dolt's bracketed aws compatibility but still cannot leak a failing cause.
 	if _, parseErr := neturl.Parse(source); parseErr != nil && RedactBackupURL(source) != source {
-		return &hiddenBackupError{err: err}
+		return &hiddenBackupError{err: err, source: source}
 	}
 	return &backupErrorRedactor{err: err, source: source}
+}
+
+// backupCredentialSpellings returns the raw and decoded forms that a URL
+// parser or a downstream factory can emit separately from the full URL. It is
+// called only for a successfully parsed URL carrying userinfo.
+func backupCredentialSpellings(source string, parsed *neturl.URL) []string {
+	userinfo := parsed.User.String()
+	spellings := []string{userinfo}
+
+	if sep := strings.Index(source, "://"); sep >= 0 {
+		rest := source[sep+len("://"):]
+		if at := strings.LastIndex(rest, "@"); at >= 0 {
+			rawUserinfo := rest[:at]
+			spellings = append(spellings, rawUserinfo)
+			if colon := strings.IndexByte(rawUserinfo, ':'); colon >= 0 {
+				spellings = append(spellings, rawUserinfo[colon+1:])
+			}
+		}
+	}
+
+	username := parsed.User.Username()
+	if password, ok := parsed.User.Password(); ok {
+		spellings = append(spellings, username+":"+password, password)
+		// UserPassword.String is the canonical userinfo escaping used by
+		// url.URL.String (notably, it turns an @ in a password into %40).
+		if escaped := neturl.UserPassword("", password).String(); len(escaped) > 1 {
+			spellings = append(spellings, escaped[1:])
+		}
+	}
+	return spellings
+}
+
+// redactBackupURLsInText scrubs recognizable backup URLs from a Dolt error
+// even when the caller has only a remote name, as BackupSync does. Dolt quotes
+// URLs in these diagnostics; whitespace and quote characters therefore form
+// the conservative token boundary. Strings without :// are deliberately left
+// to RedactBackupURL's source-aware handling rather than scanned from prose.
+func redactBackupURLsInText(message string) string {
+	var out strings.Builder
+	for cursor := 0; cursor < len(message); {
+		start := nextBackupURL(message, cursor)
+		if start < 0 {
+			out.WriteString(message[cursor:])
+			break
+		}
+		out.WriteString(message[cursor:start])
+		end := start
+		for end < len(message) && !strings.ContainsRune(" \t\r\n'\"<>", rune(message[end])) {
+			end++
+		}
+		out.WriteString(RedactBackupURL(message[start:end]))
+		cursor = end
+	}
+	return out.String()
+}
+
+func nextBackupURL(message string, cursor int) int {
+	next := -1
+	for scheme := range backupSchemes {
+		if offset := strings.Index(message[cursor:], scheme+"://"); offset >= 0 {
+			candidate := cursor + offset
+			if next < 0 || candidate < next {
+				next = candidate
+			}
+		}
+	}
+	return next
+}
+
+// assignRedactedURLError intercepts errors.As for *url.Error so callers see a
+// sanitized URL field instead of the raw credential-bearing value. The
+// original cause remains unwrap-compatible for errors.Is and other error
+// types; the nested parse detail is hidden only when rendering the clone.
+func assignRedactedURLError(target any, err error, source string) bool {
+	targetURL, ok := target.(**neturl.Error)
+	if !ok {
+		return false
+	}
+	var urlErr *neturl.Error
+	if !errors.As(err, &urlErr) {
+		return false
+	}
+	safeURL := RedactBackupURL(urlErr.URL)
+	inner := urlErr.Err
+	if safeURL != urlErr.URL || (source != "" && RedactBackupURL(source) != source) {
+		inner = &hiddenBackupError{err: inner}
+	}
+	*targetURL = &neturl.Error{Op: urlErr.Op, URL: safeURL, Err: inner}
+	return true
 }
 
 // hiddenBackupError keeps a rejected parser or Dolt error classifiable without
@@ -98,7 +222,8 @@ func redactBackupError(err error, source string) error {
 // the quoted raw URL (for example, as an "invalid port"), so replacing the URL
 // alone is not enough on this path.
 type hiddenBackupError struct {
-	err error
+	err    error
+	source string
 }
 
 func (e *hiddenBackupError) Error() string {
@@ -107,6 +232,10 @@ func (e *hiddenBackupError) Error() string {
 
 func (e *hiddenBackupError) Unwrap() error {
 	return e.err
+}
+
+func (e *hiddenBackupError) As(target any) bool {
+	return assignRedactedURLError(target, e.err, e.source)
 }
 
 // CurrentCommit returns the hash of the current HEAD commit.
