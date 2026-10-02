@@ -1142,7 +1142,8 @@ func TestShardScriptsListOnlyRealTests(t *testing.T) {
 	if os.Getenv("TEST_SRCDIR") != "" {
 		t.Skip("scripts_test's runfiles hold neither the shard scripts' sources nor tools/bazel")
 	}
-	requireHostTool(t, "bash")
+	// The CI shard scripts use bash 4 associative arrays (Linux runners only).
+	requireAutofixBash(t)
 	root := sourceRepoRoot(t)
 	m := regexp.MustCompile(`(?m)^NOT_TESTS = frozenset\(\{([^}]*)\}\)`).FindStringSubmatch(readPolicyFile(t, root, "tools/bazel/check_shard_coverage.py"))
 	if m == nil {
