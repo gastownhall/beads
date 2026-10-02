@@ -139,18 +139,25 @@ func TestBackupInitRejectsUnrecognizedScheme(t *testing.T) {
 	rootCtx = context.Background()
 	proxiedServerMode = false
 
-	const source = "S3://bucket/path"
-	err := backupInitCmd.RunE(backupInitCmd, []string{source})
-	if err == nil {
-		t.Fatalf("backup init %q = nil, want an unsupported-scheme refusal", source)
-	}
-	for _, want := range []string{"unsupported backup URL scheme", `"S3"`, "case-sensitive"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("backup init %q error %q does not contain %q", source, err, want)
-		}
-	}
-	if fake.backupAddURL != "" {
-		t.Errorf("BackupAdd URL = %q, want no registration attempt", fake.backupAddURL)
+	for _, tc := range []struct {
+		source  string
+		wantErr string
+	}{
+		{source: "S3://bucket/path", wantErr: `unsupported backup URL scheme "S3"`},
+		{source: "az://container/path", wantErr: `unsupported backup URL scheme "az"`},
+	} {
+		t.Run(tc.source, func(t *testing.T) {
+			err := backupInitCmd.RunE(backupInitCmd, []string{tc.source})
+			if err == nil {
+				t.Fatalf("backup init %q = nil, want an unsupported-scheme refusal", tc.source)
+			}
+			if err.Error() != tc.wantErr {
+				t.Errorf("backup init %q error = %q, want %q", tc.source, err, tc.wantErr)
+			}
+			if fake.backupAddURL != "" {
+				t.Errorf("BackupAdd URL = %q, want no registration attempt", fake.backupAddURL)
+			}
+		})
 	}
 }
 
