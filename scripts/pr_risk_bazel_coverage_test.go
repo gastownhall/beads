@@ -1346,6 +1346,18 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 		}
 	}
 
+	// Review F2 (step 2): the shard scripts the sharded targets run (the
+	// legacy jobs run the same scripts, so they are not changed here): the
+	// command that runs the selected tests is pinned exactly, and nothing
+	// else in them may select, skip, export a tier switch or run tests.
+	if os.Getenv("TEST_SRCDIR") == "" {
+		for _, c := range bazelShardScripts {
+			for _, e := range shardScriptNarrowing(c, readPolicyFile(t, root, c.script)) {
+				t.Error(e)
+			}
+		}
+	}
+
 	// The lanes' targets (tagged embedded, dolt-server-proxied or
 	// dolt-server-integration): exactly these, with exactly these args and
 	// env (the legacy jobs' flags; the shard scripts add the rest).
@@ -1584,6 +1596,121 @@ func TestBazelRetiredLanesArePinned(t *testing.T) {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "#") && strings.Contains(line, "cache_test_results") && !allowed[line] {
 			t.Errorf(".bazelrc %q: only the docker and retired tiers' configs set test result caching (to off)", line)
+		}
+	}
+}
+
+// bazelShardScript: a manifest shard script a retired lane's sharded target
+// runs, and how it runs the selected tests.
+type bazelShardScript struct {
+	script, binVar, timeout, goTags string
+	race                            bool
+	pkg, cd                         string // cd: the directory the prebuilt binary runs in ("" = none)
+}
+
+var bazelShardScripts = []bazelShardScript{
+	{".github/scripts/embedded-test-shard.sh", "CMD_BINARY", "20m", "gms_pure_go", true, "./cmd/bd/", ""},
+	{".github/scripts/embedded-storage-test-shard.sh", "STORAGE_BINARY", "20m", "gms_pure_go", true, "./internal/storage/embeddeddolt/", ""},
+	{".github/scripts/proxied-test-shard.sh", "CMD_BINARY", "15m", "gms_pure_go", false, "./cmd/bd/", ""},
+	{".github/scripts/server-storage-test-shard.sh", "STORAGE_BINARY", "15m", "integration,gms_pure_go", false, "./internal/storage/dolt/", "internal/storage/dolt"},
+}
+
+// tail: the script's code lines (comments and blank lines dropped) from the
+// prebuilt-binary branch to the end of the file, exactly.
+func (c bazelShardScript) tail() []string {
+	race := ""
+	if c.race {
+		race = "-race "
+	}
+	out := []string{`if [ -x "$` + c.binVar + `" ]; then`}
+	if c.cd != "" {
+		out = append(out, "cd "+c.cd)
+	}
+	return append(out,
+		`exec "$`+c.binVar+`" -test.v -test.count=1 -test.timeout=`+c.timeout+` \`,
+		`-test.run "$RUN_REGEX" \`,
+		`"$@"`,
+		"else",
+		`echo "Warning: pre-built test binary not found at $`+c.binVar+`, falling back to go test"`,
+		`exec go test -tags=`+c.goTags+` -v `+race+`-count=1 -timeout `+c.timeout+` \`,
+		`-run "$RUN_REGEX" \`,
+		`"$@" \`,
+		c.pkg,
+		"fi",
+	)
+}
+
+const bazelShardRunRegex = `RUN_REGEX="^($(IFS='|'; echo "${SHARD_TESTS[*]}"))$"`
+
+// shardScriptNarrowing: why src does not run exactly c.tail() as its last code
+// lines, builds RUN_REGEX from the selection exactly once, and outside the
+// tail neither runs tests nor selects, skips or switches them.
+func shardScriptNarrowing(c bazelShardScript, src string) []string {
+	var errs []string
+	var code []string
+	for _, line := range strings.Split(src, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			code = append(code, line)
+		}
+	}
+	want := c.tail()
+	if len(code) < len(want) || !reflect.DeepEqual(code[len(code)-len(want):], want) {
+		got := code
+		if len(code) > len(want) {
+			got = code[len(code)-len(want):]
+		}
+		return append(errs, fmt.Sprintf("%s: the command that runs the shard changed; want exactly:\n%s\ngot:\n%s", c.script, strings.Join(want, "\n"), strings.Join(got, "\n")))
+	}
+	narrow := regexp.MustCompile(`-test\.|(^|\s)-(short|run|skip|count|list|bench)\b|\bexec\b|\bgo (test|run)\b|"\$@"|\$\*|\beval\b|BEADS_TEST_(SKIP|EMBEDDED_DOLT|PROXIED_SERVER|ENV_RUN_DOLT|REQUIRE_DOLT_CONTAINER|DOLT_SERVER\b)|GOFLAGS|TESTBRIDGE|RUN_REGEX`)
+	runRegex := 0
+	for _, line := range code[:len(code)-len(want)] {
+		if line == bazelShardRunRegex {
+			runRegex++
+			continue
+		}
+		if narrow.MatchString(line) {
+			errs = append(errs, fmt.Sprintf("%s: %q can run, select, skip or switch the shard's tests outside its pinned command", c.script, line))
+		}
+	}
+	if runRegex != 1 {
+		errs = append(errs, fmt.Sprintf("%s: want exactly one %s, got %d", c.script, bazelShardRunRegex, runRegex))
+	}
+	return errs
+}
+
+// The shard script check itself, on the real scripts and on narrowing edits
+// of one (review F2 mutations m2 and m3).
+func TestShardScriptNarrowingCheck(t *testing.T) {
+	if os.Getenv("TEST_SRCDIR") != "" {
+		t.Skip("scripts_test's runfiles hold no .github/scripts")
+	}
+	root := sourceRepoRoot(t)
+	scripts := map[string]bool{}
+	for _, c := range bazelShardScripts {
+		scripts[c.script] = true
+	}
+	// Every retired lane's sharded target runs one of these scripts.
+	for _, c := range []string{"embedded-test-shard.sh", "embedded-storage-test-shard.sh", "proxied-test-shard.sh", "server-storage-test-shard.sh"} {
+		if !scripts[".github/scripts/"+c] {
+			t.Errorf("bazelShardScripts lacks %s", c)
+		}
+	}
+	c := bazelShardScripts[3]
+	src := readPolicyFile(t, root, c.script)
+	for name, edit := range map[string][2]string{
+		"exec -test.short":        {`-test.timeout=15m \`, `-test.timeout=15m -test.short \`},
+		"export BEADS_TEST_SKIP":  {"set -euo pipefail\n", "set -euo pipefail\nexport BEADS_TEST_SKIP=dolt\n"},
+		"GOFLAGS":                 {"set -euo pipefail\n", "set -euo pipefail\nexport GOFLAGS=-short\n"},
+		"second exec":             {"set -euo pipefail\n", "set -euo pipefail\n[ -n \"${X:-}\" ] && exec true\n"},
+		"narrowed regex":          {bazelShardRunRegex, `RUN_REGEX="^(${SHARD_TESTS[0]})$"`},
+		"go test fallback -short": {`-v -count=1 -timeout 15m \`, `-v -short -count=1 -timeout 15m \`},
+	} {
+		if strings.Count(src, edit[0]) == 0 {
+			t.Fatalf("%s: mutation %q no longer applies", c.script, name)
+		}
+		if len(shardScriptNarrowing(c, strings.Replace(src, edit[0], edit[1], 1))) == 0 {
+			t.Errorf("%s: mutation %q passes the shard script check", c.script, name)
 		}
 	}
 }
