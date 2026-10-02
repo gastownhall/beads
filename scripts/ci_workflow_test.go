@@ -684,6 +684,9 @@ func TestPRPreflightPlatformsExercisesCredentialCommandFixturesOnWindows(t *test
 func TestPRCIGateRequiresWindowsGlobalPrimeOverride(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "test-windows-liveness")
+	if job.TimeoutMinutes != 20 {
+		t.Fatalf("Windows liveness/Prime job timeout = %d minutes, want 20", job.TimeoutMinutes)
+	}
 	step := job.step(t, "Run native Windows global Prime override")
 	if job.If != "" || job.ContinueOnError || step.If != "" ||
 		(step.ContinueOnError != nil && step.ContinueOnError != false) {

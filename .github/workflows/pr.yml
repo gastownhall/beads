@@ -359,6 +359,10 @@ jobs:
   test-windows-liveness:
     name: Test (Windows) cmd/bd liveness regression
     runs-on: windows-latest
+    # Retained runs take about 8m (roughly 7m in setup/build/compile outside
+    # the Prime test's 5m Go deadline). Twenty minutes preserves cold-cache
+    # headroom while bounding the whole required job, not just go test.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
