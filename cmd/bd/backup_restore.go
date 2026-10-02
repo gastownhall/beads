@@ -213,11 +213,15 @@ func defaultBackupRestoreDir() (string, error) {
 		}
 		return dir, nil
 	}
+	hint := "Pass a directory that holds a Dolt backup."
+	if !usesProxiedServer() {
+		hint = "Pass the backup URL explicitly, or pass a directory that holds a Dolt backup."
+	}
 	return "", HandleErrorRespectJSON(
 		"the configured backup destination is a remote URL (%s), which 'bd backup restore' does not use by default,\n"+
 			"and no local backup is recorded in %s.\n"+
-			"Pass the backup URL explicitly, or pass a directory that holds a Dolt backup.",
-		remote, dir)
+			"%s",
+		remote, dir, hint)
 }
 
 // persistedRemoteBackupURL returns the backup destination recorded in

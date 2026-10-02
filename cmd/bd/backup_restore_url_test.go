@@ -574,6 +574,46 @@ func TestBackupRestoreCommandRefusesNoArgWhenDestinationIsRemote(t *testing.T) {
 	}
 }
 
+// TestBackupRestoreCommandNoArgInProxiedModeDoesNotSuggestURL covers the
+// managed-local route where a URL restore is rejected. The no-argument
+// refusal must not direct the operator to retry with an explicit URL that the
+// same command will refuse one branch later.
+func TestBackupRestoreCommandNoArgInProxiedModeDoesNotSuggestURL(t *testing.T) {
+	oldStore := store
+	oldRootCtx := rootCtx
+	oldProxiedServerMode := proxiedServerMode
+	t.Cleanup(func() {
+		store = oldStore
+		rootCtx = oldRootCtx
+		proxiedServerMode = oldProxiedServerMode
+	})
+
+	beadsDir := backupConfigTestDir(t)
+	writeDoltBackupConfig(t, beadsDir, "s3://bucket/db")
+
+	fake := &backupRestoreRecordingStore{restoreErr: errBackupRestoreReachedStorage}
+	store = fake
+	rootCtx = context.Background()
+	proxiedServerMode = true
+
+	var err error
+	stderr := captureStderr(t, func() {
+		err = backupRestoreCmd.RunE(backupRestoreCmd, nil)
+	})
+	if err == nil {
+		t.Fatalf("backup restore error = nil, want a refusal")
+	}
+	if fake.restoreCalls != 0 {
+		t.Fatalf("RestoreDatabase calls = %d, want 0", fake.restoreCalls)
+	}
+	if !strings.Contains(stderr, "Pass a directory that holds a Dolt backup") {
+		t.Fatalf("refusal %q does not give the supported local-directory remedy", stderr)
+	}
+	if strings.Contains(stderr, "Pass the backup URL explicitly") {
+		t.Fatalf("refusal %q suggests a URL that proxied mode does not support", stderr)
+	}
+}
+
 // TestBackupRestoreCommandNoArgRestoresRecordedBackupWhenDestinationIsRemote is
 // the twin of the refusal above, one setup line apart. Auto-backup writes to
 // the backup directory whatever destination `bd backup init` recorded, and the
