@@ -150,12 +150,23 @@ func CheckGitignore(repoPath string) DoctorCheck {
 
 	// Check if file exists
 	content, err := os.ReadFile(gitignorePath) // #nosec G304 -- path is constructed from known parts
-	if err != nil {
+	if os.IsNotExist(err) {
 		return DoctorCheck{
 			Name:    "Gitignore",
 			Status:  "warning",
 			Message: ".beads/.gitignore not found",
 			Fix:     "Run: bd doctor --fix",
+		}
+	}
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Gitignore",
+			Status:  "warning",
+			Message: "Unable to inspect .beads/.gitignore",
+			Detail: fmt.Sprintf(
+				"Restore owner read access manually, then rerun bd doctor: %v",
+				err,
+			),
 		}
 	}
 
