@@ -704,6 +704,7 @@ go_test(
         "dolt_remote_remove_proxied_integration_test.go",
         "dolt_remote_reset_data_embedded_test.go",
         "dolt_remote_reset_data_test.go",
+        "dolt_restart_integration_test.go",
         "dolt_stop_test.go",
         "dolt_test.go",
         "dolt_worktree_remote_test.go",
@@ -1299,36 +1300,59 @@ go_test(
         "@org_golang_x_term//:term",
     ] + select({
         "@rules_go//go/platform:aix": [
+            "//internal/testutil/integration",
             "//internal/tracker/conformance",
         ],
         "@rules_go//go/platform:android": [
+            "//internal/testutil/integration",
             "//internal/tracker/conformance",
         ],
         "@rules_go//go/platform:darwin": [
+            "//internal/testutil/integration",
             "//internal/tracker/conformance",
         ],
         "@rules_go//go/platform:dragonfly": [
+            "//internal/testutil/integration",
             "//internal/tracker/conformance",
         ],
         "@rules_go//go/platform:freebsd": [
+            "//internal/testutil/integration",
             "//internal/tracker/conformance",
         ],
         "@rules_go//go/platform:illumos": [
+            "//internal/testutil/integration",
             "//internal/tracker/conformance",
         ],
         "@rules_go//go/platform:ios": [
+            "//internal/testutil/integration",
             "//internal/tracker/conformance",
         ],
+        "@rules_go//go/platform:js": [
+            "//internal/testutil/integration",
+        ],
         "@rules_go//go/platform:linux": [
+            "//internal/testutil/integration",
             "//internal/tracker/conformance",
         ],
         "@rules_go//go/platform:netbsd": [
+            "//internal/testutil/integration",
             "//internal/tracker/conformance",
         ],
         "@rules_go//go/platform:openbsd": [
+            "//internal/testutil/integration",
             "//internal/tracker/conformance",
         ],
+        "@rules_go//go/platform:osx": [
+            "//internal/testutil/integration",
+        ],
+        "@rules_go//go/platform:plan9": [
+            "//internal/testutil/integration",
+        ],
+        "@rules_go//go/platform:qnx": [
+            "//internal/testutil/integration",
+        ],
         "@rules_go//go/platform:solaris": [
+            "//internal/testutil/integration",
             "//internal/tracker/conformance",
         ],
         "@rules_go//go/platform:windows": [
