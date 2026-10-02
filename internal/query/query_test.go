@@ -954,6 +954,31 @@ func TestMetadataKeysAreQueryable(t *testing.T) {
 	}
 }
 
+func TestHyphenatedMetadataKeyQueryParity(t *testing.T) {
+	tests := []struct {
+		name      string
+		query     string
+		predicate bool
+	}{
+		{name: "simple filter", query: "metadata.drill-meta=v"},
+		{name: "has key filter", query: "has_metadata_key=drill-meta"},
+		{name: "predicate value", query: "metadata.drill-meta=v OR status=closed", predicate: true},
+		{name: "predicate has key", query: "has_metadata_key=drill-meta OR status=closed", predicate: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := Evaluate(tt.query)
+			if err != nil {
+				t.Fatalf("Evaluate(%q): %v", tt.query, err)
+			}
+			if result.RequiresPredicate != tt.predicate {
+				t.Fatalf("RequiresPredicate = %v, want %v", result.RequiresPredicate, tt.predicate)
+			}
+		})
+	}
+}
+
 func TestEvaluatorHasMetadataKeyQueries(t *testing.T) {
 	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
 
