@@ -130,8 +130,10 @@ jobs:
           path: ${{ runner.temp }}/go-cache/non-race
           key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
 
-  # Fast shell/Make guard for direct source-time build-tag declarations.
-  # Workflow `run` steps are checked structurally in the required policy wrapper.
+  # Fast shell/Make guard plus the separate workflow Bazel-user census.
+  # The required Go policy wrapper reads only top-level workflow YAML files and
+  # jobs.*.steps[*].run; it does not follow `uses:` targets or composite actions
+  # and does no Bazel handling.
   check-build-tags:
     name: Check build-tag policy
     runs-on: ubuntu-latest
