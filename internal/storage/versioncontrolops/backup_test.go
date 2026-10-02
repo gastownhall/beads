@@ -649,9 +649,10 @@ func TestBackupRestoreScrubsEchoedURLAndPreservesCause(t *testing.T) {
 
 func TestBackupRestoreScrubsReserializedURL(t *testing.T) {
 	tests := []struct {
-		name    string
-		source  string
-		secrets []string
+		name                string
+		source              string
+		decodedPasswordEcho string
+		secrets             []string
 	}{
 		{
 			name:    "at sign is escaped",
@@ -663,12 +664,22 @@ func TestBackupRestoreScrubsReserializedURL(t *testing.T) {
 			source:  "https://user:pa%73s@doltremoteapi.dolthub.com/org/db",
 			secrets: []string{"user:", "pa%73s", "pass"},
 		},
+		{
+			name:                "decoded password differs from canonical escape",
+			source:              "https://user:p%40ss@doltremoteapi.dolthub.com/org/db",
+			decodedPasswordEcho: "p@ss",
+			secrets:             []string{"user:", "p@ss", "p%40ss"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sentinel := errors.New("typed Dolt failure")
-			conn := &reserializingEchoConn{cause: sentinel}
+			cause := error(sentinel)
+			if tt.decodedPasswordEcho != "" {
+				cause = fmt.Errorf("decoded password=%s: %w", tt.decodedPasswordEcho, sentinel)
+			}
+			conn := &reserializingEchoConn{cause: cause}
 			err := BackupRestore(context.Background(), conn, tt.source, "beads", false)
 			if err == nil {
 				t.Fatal("BackupRestore returned nil for a failing statement")
