@@ -63,7 +63,7 @@ func TestBazelSkippingTestsScan(t *testing.T) {
 		}
 	}
 	write("go.mod", "module example.com/m\n")
-	write("a/a_test.go", `package a
+	write("a/a_test.go", fixtureFuncs(`package a
 
 import (
 	"os"
@@ -72,48 +72,48 @@ import (
 	"example.com/m/bazeltest"
 )
 
-func skipUnderBazel(t *testing.T) {
+FUNC skipUnderBazel(t *testing.T) {
 	if bazeltest.IsBazel() {
 		t.Skip("no")
 	}
 }
 
-func TestEnvGuard(t *testing.T) {
+FUNC TestEnvGuard(t *testing.T) {
 	if os.Getenv("TEST_SRCDIR") != "" {
 		t.Skip("runfiles")
 	}
 }
 
-func TestIsBazelGuard(t *testing.T) {
+FUNC TestIsBazelGuard(t *testing.T) {
 	if bazeltest.IsBazel() {
 		t.Skipf("%s", "x")
 	}
 }
 
-func TestViaHelper(t *testing.T) {
+FUNC TestViaHelper(t *testing.T) {
 	skipUnderBazel(t)
 }
 
-func TestLaterGuard(t *testing.T) {
+FUNC TestLaterGuard(t *testing.T) {
 	_ = 1
 	if srcdir := os.Getenv("TEST_SRCDIR"); srcdir != "" {
 		t.SkipNow()
 	}
 }
 
-func TestGoTestOnlySkip(t *testing.T) {
+FUNC TestGoTestOnlySkip(t *testing.T) {
 	if os.Getenv("TEST_SRCDIR") == "" {
 		t.Skip("only under go test")
 	}
 }
 
-func TestNotBazel(t *testing.T) {
+FUNC TestNotBazel(t *testing.T) {
 	if !bazeltest.IsBazel() {
 		t.Skip("go test only")
 	}
 }
 
-func TestSubtestOnly(t *testing.T) {
+FUNC TestSubtestOnly(t *testing.T) {
 	t.Run("x", func(t *testing.T) {
 		if bazeltest.IsBazel() {
 			t.Skip("subtest")
@@ -121,14 +121,14 @@ func TestSubtestOnly(t *testing.T) {
 	})
 }
 
-func TestNoSkip(t *testing.T) {
+FUNC TestNoSkip(t *testing.T) {
 	if bazeltest.IsBazel() {
 		return
 	}
 }
 
-func helperTakingM(m *testing.M) {}
-`)
+FUNC helperTakingM(m *testing.M) {}
+`))
 	write("node_modules/x/x_test.go", "package x\nimport \"testing\"\nfunc TestIgnored(t *testing.T) { if bazeltest.IsBazel() { t.Skip() } }\n")
 	write("sub/go.mod", "module example.com/sub\n")
 	write("sub/s_test.go", "package s\nimport \"testing\"\nfunc TestOtherModule(t *testing.T) { if bazeltest.IsBazel() { t.Skip() } }\n")
@@ -379,4 +379,12 @@ func calledHelper(body *ast.BlockStmt, pkgName string, helpers map[string]bool) 
 		return true
 	})
 	return name
+}
+
+// fixtureFuncs turns the "FUNC " placeholders of fixture source back into
+// "func ": written literally, the fixture's `func TestXxx(t *testing.T)` lines
+// would be counted as real tests of this package by line-based test discovery
+// (tools/bazel/equivalence.py, the CI shard scripts).
+func fixtureFuncs(src string) string {
+	return strings.ReplaceAll(src, "\nFUNC ", "\nfunc ")
 }
