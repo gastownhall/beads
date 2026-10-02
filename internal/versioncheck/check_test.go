@@ -15,8 +15,8 @@ func TestRepositoryReleaseVersionsMatch(t *testing.T) {
 	if err != nil && !(bazeltest.IsBazel() && onlyNPMManifestUndeclared(t, root, report)) {
 		t.Fatalf("repository release metadata is inconsistent: %v", err)
 	}
-	if report.CheckedSources != 12 {
-		t.Fatalf("checked sources = %d, want 12", report.CheckedSources)
+	if report.CheckedSources != 13 {
+		t.Fatalf("checked sources = %d, want 13", report.CheckedSources)
 	}
 	hookEntries, err := os.ReadDir(filepath.Join(root, ".githooks"))
 	if err != nil {
@@ -43,11 +43,11 @@ func TestRepositoryReleaseVersionsMatch(t *testing.T) {
 			expectedHookMarkers,
 		)
 	}
-	if len(report.Sources) != 13+expectedHookMarkers {
+	if len(report.Sources) != 14+expectedHookMarkers {
 		t.Fatalf(
-			"reported sources = %d, want %d (twelve release metadata checks, uv.lock, and tracked hook markers)",
+			"reported sources = %d, want %d (thirteen release metadata checks, uv.lock, and tracked hook markers)",
 			len(report.Sources),
-			13+expectedHookMarkers,
+			14+expectedHookMarkers,
 		)
 	}
 }
@@ -56,6 +56,7 @@ func TestCheckCoversEveryReleaseSource(t *testing.T) {
 	// Keyed by description: winres.json contributes several gated fields from
 	// a single path, so the path alone is no longer a unique key.
 	expected := map[string]string{
+		"Nix package version":                   "default.nix",
 		"MCP pyproject.toml":                    "integrations/beads-mcp/pyproject.toml",
 		"MCP __init__.py":                       "integrations/beads-mcp/src/beads_mcp/__init__.py",
 		"Claude plugin.json":                    "plugins/beads/.claude-plugin/plugin.json",
@@ -254,6 +255,24 @@ func TestCheckRejectsMissingMalformedOrAmbiguousMetadata(t *testing.T) {
 			path: "integrations/beads-mcp/src/beads_mcp/__init__.py",
 			data: nil,
 			want: "MCP __init__.py:",
+		},
+		{
+			name: "missing Nix version declaration",
+			path: "default.nix",
+			data: []byte("{ buildGoModule }:\nbuildGoModule {\n  pname = \"beads\";\n}\n"),
+			want: "Nix package version: found 0 Nix version string declarations, want exactly one",
+		},
+		{
+			name: "malformed Nix version declaration",
+			path: "default.nix",
+			data: []byte("{ buildGoModule }:\nbuildGoModule {\n  version = 1.1.0;\n}\n"),
+			want: "Nix package version: found 0 Nix version string declarations, want exactly one",
+		},
+		{
+			name: "ambiguous Nix version declarations",
+			path: "default.nix",
+			data: []byte("version = \"1.1.0\";\nversion = \"1.1.0\";\n"),
+			want: "Nix package version: found 2 Nix version string declarations, want exactly one",
 		},
 		{
 			name: "duplicate project TOML field",
@@ -581,6 +600,7 @@ func writeFixtureAt(t *testing.T, root, version string) {
 
 	files := map[string]string{
 		"go.mod":                     "module " + ModulePath + "\n\ngo 1.26\n",
+		"default.nix":                "{ buildGoModule }:\nbuildGoModule {\n  version = \"" + version + "\";\n}\n",
 		"cmd/bd/version.go":          "package main\n\nvar Version = \"" + version + "\"\n",
 		"scripts/update-versions.sh": "#!/bin/sh\n",
 		"integrations/beads-mcp/pyproject.toml": "[project]\nversion = \"" +
