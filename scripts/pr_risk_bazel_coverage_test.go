@@ -44,18 +44,19 @@ const (
 // retiredTier: one D2 step's legacy tier, the committed flag that retires
 // it, the decision job's output for it, and the Bazel lanes that replace it.
 type retiredTier struct {
+	workflow   string            // the workflow whose legacy jobs stand down
 	output     string            // bazel-coverage's output
 	flag       string            // the committed workflow env flag
 	envKey     string            // the decision step's env key reading flag
 	coversEnv  string            // both gates' env key reading output
 	retiredID  string            // pr.yml's gate id: the lanes ran remotely and passed
-	jobs       map[string]string // legacy job -> PR Risk gate id
+	jobs       map[string]string // legacy job -> its workflow's gate id
 	bazelLanes []string          // bazel.yml jobs
 }
 
 var retiredTiers = []retiredTier{
 	{
-		output: "embedded", flag: "BAZEL_RETIRES_LEGACY_EMBEDDED", envKey: "RETIRED_EMBEDDED",
+		workflow: prRiskWorkflowName, output: "embedded", flag: "BAZEL_RETIRES_LEGACY_EMBEDDED", envKey: "RETIRED_EMBEDDED",
 		coversEnv: "BAZEL_COVERS_EMBEDDED", retiredID: "BAZEL_EMBEDDED_RETIRED",
 		jobs: map[string]string{
 			"test-embedded-storage":     "TEST_EMBEDDED_STORAGE",
@@ -65,7 +66,7 @@ var retiredTiers = []retiredTier{
 		bazelLanes: []string{bazelEmbedJobName},
 	},
 	{
-		output: "dolt_server", flag: "BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS", envKey: "RETIRED_DOLT_SERVER",
+		workflow: prRiskWorkflowName, output: "dolt_server", flag: "BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS", envKey: "RETIRED_DOLT_SERVER",
 		coversEnv: "BAZEL_COVERS_DOLT_SERVER", retiredID: "BAZEL_DOLT_SERVER_RETIRED",
 		jobs: map[string]string{
 			"test-proxied-cmd":         "TEST_PROXIED_CMD",
@@ -74,6 +75,31 @@ var retiredTiers = []retiredTier{
 		},
 		bazelLanes: []string{bazelProxiedJobName, bazelServerJobName},
 	},
+	// Step 3: pr.yml's own legacy jobs, whose Bazel lanes run in the same
+	// pr.yml run (scripts/pr_lanes_bazel_coverage_test.go).
+	{
+		workflow: "pr.yml", output: "pr_lanes", flag: "BAZEL_RETIRES_LEGACY_PR_LANES", envKey: "RETIRED_PR_LANES",
+		coversEnv: "BAZEL_COVERS_PR_LANES", retiredID: "BAZEL_PR_LANES_RETIRED",
+		jobs: map[string]string{
+			"build-artifacts":            "BUILD_ARTIFACTS",
+			"pr-core-wrapper":            "PR_CORE_WRAPPER",
+			"check-cmd-bd-puregeo-tests": "CHECK_CMD_BD_PUREGEO_TESTS",
+			"test-domain-uow":            "TEST_DOMAIN_UOW",
+			"contract-corpus":            "CONTRACT_CORPUS",
+		},
+		bazelLanes: []string{bazelJobName, bazelPureJobName, bazelDoltJobName},
+	},
+}
+
+// riskTiers: the tiers whose legacy jobs are pr-risk.yml's.
+func riskTiers() []retiredTier {
+	var out []retiredTier
+	for _, r := range retiredTiers {
+		if r.workflow == prRiskWorkflowName {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func (r retiredTier) retiredValue() string { return "${{ env." + r.flag + " == 'true' }}" }
@@ -87,10 +113,10 @@ func (r retiredTier) legacyIf() string {
 var prRiskBuildEmbeddedIf = "needs.detect-ci-tier.outputs.full_embedded == 'true' && (needs." + prRiskCoverageJobName + ".outputs.embedded != 'true' || needs." +
 	prRiskCoverageJobName + ".outputs.dolt_server != 'true')"
 
-// retiredJobs: every retired legacy test job -> its tier.
+// retiredJobs: every retired pr-risk.yml legacy test job -> its tier.
 func retiredJobs() map[string]retiredTier {
 	out := map[string]retiredTier{}
-	for _, r := range retiredTiers {
+	for _, r := range riskTiers() {
 		for job := range r.jobs {
 			out[job] = r
 		}
@@ -112,7 +138,7 @@ type rbeFacts struct {
 	secret string // secrets.RBE_WEST_EXECUTOR ("" = unavailable: fork, Dependabot, unset)
 	fork   bool   // github.event.pull_request.head.repo.fork
 	// The committed env.BAZEL_RETIRES_LEGACY_* flags, in retiredTiers order.
-	retired [2]string
+	retired [3]string
 	// github.actor is dependabot[bot] (fixed for a PR's runs and re-runs).
 	dependabot bool
 }
@@ -131,9 +157,12 @@ var (
 	rbeEvents    = []string{"pull_request", "merge_group", "push", "workflow_dispatch", "pull_request_target"}
 	rbeVarValues = []string{"", "true", "True", "TRUE", "false", "1", "yes"}
 	rbeSecrets   = []string{"", "grpcs://rbe.example:443"}
-	// Both flags on, each alone, both off, and the case-insensitive and
-	// non-boolean spellings on either side.
-	retiredValues = [][2]string{{"true", "true"}, {"true", "false"}, {"false", "true"}, {"false", "false"}, {"True", ""}, {"", "TRUE"}}
+	// Every flag on, each alone, all off, and the case-insensitive and
+	// non-boolean spellings of each.
+	retiredValues = [][3]string{
+		{"true", "true", "true"}, {"true", "false", "false"}, {"false", "true", "false"}, {"false", "false", "true"},
+		{"false", "false", "false"}, {"True", "", ""}, {"", "TRUE", ""}, {"", "yes", "True"},
+	}
 )
 
 // rbeFactsMatrix: every combination of the facts the decisions read.
@@ -454,7 +483,7 @@ func TestPRRiskDecisionMatchesBazelMode(t *testing.T) {
 			return d
 		}
 		noFlags := f
-		noFlags.retired = [2]string{}
+		noFlags.retired = [3]string{}
 		mode, ok := modeMemo[noFlags]
 		if !ok {
 			bazel, err := runDecisionStep(t, rbeStep, f, call.With)
@@ -521,7 +550,12 @@ func TestPRRiskDecisionMatchesBazelMode(t *testing.T) {
 				prRun := decide(t, g)
 				bazelRan := prRun.mode == "remote" // and passed: every lane succeeds here
 				for _, r := range retiredTiers {
+					// PR Risk's tiers stand down in PR Risk's run; pr.yml's
+					// own (step 3) in this same pr.yml run.
 					legacyRan := risk.covered[r.output] != "true"
+					if r.workflow == "pr.yml" {
+						legacyRan = prRun.prCovered[r.output] != "true"
+					}
 					if !legacyRan && !bazelRan && prGatePasses(t, g.event, prRun.mode, prRun.prCovered) {
 						t.Errorf("PR Risk run %v skipped the legacy %s tier and pr.yml run (var %q, secret %v, mode %s, covered %v) is green without its Bazel lanes",
 							f, r.output, v, secret != "", prRun.mode, prRun.prCovered)
@@ -534,7 +568,9 @@ func TestPRRiskDecisionMatchesBazelMode(t *testing.T) {
 	// Named cases, for the record. Forks and Dependabot run in mode cache,
 	// which, like local, skips the remote-only lanes, so they keep the
 	// legacy tiers. reds: the retired ids a red gate must name.
-	both, embOnly, dsOnly, none := [2]string{"true", "true"}, [2]string{"true", "false"}, [2]string{"false", "true"}, [2]string{"false", "false"}
+	both, embOnly, dsOnly, prOnly, none := [3]string{"true", "true", "true"}, [3]string{"true", "false", "false"}, [3]string{"false", "true", "false"},
+		[3]string{"false", "false", "true"}, [3]string{"false", "false", "false"}
+	allRetired := []string{"BAZEL_EMBEDDED_RETIRED", "BAZEL_DOLT_SERVER_RETIRED", "BAZEL_PR_LANES_RETIRED"}
 	for _, c := range []struct {
 		name     string
 		f        rbeFacts
@@ -544,10 +580,13 @@ func TestPRRiskDecisionMatchesBazelMode(t *testing.T) {
 		reds     []string
 	}{
 		{"same-repo PR, farm on", rbeFacts{"pull_request", "true", "x", false, both, false}, "remote", coveredAll("true"), true, nil},
-		{"same-repo PR, kill switch (var unset)", rbeFacts{"pull_request", "", "x", false, both, false}, "skip", coveredAll("true"), false, []string{"BAZEL_EMBEDDED_RETIRED", "BAZEL_DOLT_SERVER_RETIRED"}},
-		{"same-repo PR, executor secret missing", rbeFacts{"pull_request", "true", "", false, both, false}, "cache", coveredAll("true"), false, []string{"BAZEL_EMBEDDED_RETIRED", "BAZEL_DOLT_SERVER_RETIRED"}},
-		{"same-repo PR, only embedded retired, var unset", rbeFacts{"pull_request", "", "x", false, embOnly, false}, "skip", map[string]string{"embedded": "true", "dolt_server": "false"}, false, []string{"BAZEL_EMBEDDED_RETIRED"}},
-		{"same-repo PR, only proxied/server retired, var unset", rbeFacts{"pull_request", "", "x", false, dsOnly, false}, "skip", map[string]string{"embedded": "false", "dolt_server": "true"}, false, []string{"BAZEL_DOLT_SERVER_RETIRED"}},
+		{"same-repo PR, kill switch (var unset)", rbeFacts{"pull_request", "", "x", false, both, false}, "skip", coveredAll("true"), false, allRetired},
+		{"same-repo PR, executor secret missing", rbeFacts{"pull_request", "true", "", false, both, false}, "cache", coveredAll("true"), false, allRetired},
+		{"same-repo PR, only embedded retired, var unset", rbeFacts{"pull_request", "", "x", false, embOnly, false}, "skip", map[string]string{"embedded": "true", "dolt_server": "false", "pr_lanes": "false"}, false, []string{"BAZEL_EMBEDDED_RETIRED"}},
+		{"same-repo PR, only proxied/server retired, var unset", rbeFacts{"pull_request", "", "x", false, dsOnly, false}, "skip", map[string]string{"embedded": "false", "dolt_server": "true", "pr_lanes": "false"}, false, []string{"BAZEL_DOLT_SERVER_RETIRED"}},
+		{"same-repo PR, only pr.yml's jobs retired, var unset", rbeFacts{"pull_request", "", "x", false, prOnly, false}, "skip", map[string]string{"embedded": "false", "dolt_server": "false", "pr_lanes": "true"}, false, []string{"BAZEL_PR_LANES_RETIRED"}},
+		{"same-repo PR, only pr.yml's jobs retired, secret missing", rbeFacts{"pull_request", "true", "", false, prOnly, false}, "cache", map[string]string{"embedded": "false", "dolt_server": "false", "pr_lanes": "true"}, false, []string{"BAZEL_PR_LANES_RETIRED"}},
+		{"same-repo PR, only pr.yml's jobs retired, farm on", rbeFacts{"pull_request", "true", "x", false, prOnly, false}, "remote", map[string]string{"embedded": "false", "dolt_server": "false", "pr_lanes": "true"}, true, nil},
 		{"same-repo PR, flags reverted, var unset", rbeFacts{"pull_request", "", "x", false, none, false}, "skip", coveredAll("false"), true, nil},
 		{"same-repo PR, flags reverted, secret missing", rbeFacts{"pull_request", "true", "", false, none, false}, "cache", coveredAll("false"), true, nil},
 		{"fork PR", rbeFacts{"pull_request", "true", "", true, both, false}, "cache", coveredAll("false"), true, nil},
@@ -743,8 +782,12 @@ func TestPRRiskLegacyTiersDeferToBazelLanes(t *testing.T) {
 		t.Errorf("pr-risk ci-gate does not require %s's result: needs %v, env %v", prRiskCoverageJobName, gate.Needs, step.Env)
 	}
 	for _, r := range retiredTiers {
-		if step.Env[r.coversEnv] != "${{ needs."+prRiskCoverageJobName+".outputs."+r.output+" }}" {
-			t.Errorf("pr-risk ci-gate %s = %q, want needs.%s.outputs.%s", r.coversEnv, step.Env[r.coversEnv], prRiskCoverageJobName, r.output)
+		want := "${{ needs." + prRiskCoverageJobName + ".outputs." + r.output + " }}"
+		if r.workflow != prRiskWorkflowName {
+			want = "" // pr.yml's own jobs: nothing in PR Risk reads it
+		}
+		if step.Env[r.coversEnv] != want {
+			t.Errorf("pr-risk ci-gate %s = %q, want %q", r.coversEnv, step.Env[r.coversEnv], want)
 		}
 	}
 	for name, r := range retired {
@@ -847,7 +890,7 @@ func TestPRRiskLegacyTiersDeferToBazelLanes(t *testing.T) {
 	// "false" (so its jobs and build-embedded ran), a successful decision
 	// whose output for this tier is not exactly 'true' excuses none of this
 	// tier's skipped jobs: a gate testing != "false" (or similar) fails here.
-	for _, tier := range retiredTiers {
+	for _, tier := range riskTiers() {
 		for _, covered := range []string{"", "TRUE ", "yes", "1", "True\n", "false "} {
 			cov := coveredAll("false")
 			cov[tier.output] = covered
@@ -1274,6 +1317,10 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 	for config, want := range bazelDoltServerRCLines {
 		laneConfigs[config] = want
 	}
+	// D2 step 3's lanes (PR-core, dolt-server, pure-Go/js-wasm, sole-run).
+	for config, want := range bazelPRLaneRCLines {
+		laneConfigs[config] = want
+	}
 	rcEnabled := map[string]bool{"remote-exec": true, "fork-cache": true}
 	inUse := map[string]bool{"": true}
 	for c := range laneConfigs {
@@ -1489,6 +1536,59 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("the retired lanes' targets' args/env changed:\ngot  %v\nwant %v", got, want)
 	}
+
+	// D2 step 3: the PR-core, dolt-server and pure lanes run (nearly) every
+	// other test target, too many to pin one by one: no rule outside the
+	// pinned ones above, and no .bzl macro, may select, skip or switch off
+	// tests through its args, env or anything else.
+	ruleNarrow := regexp.MustCompile(`-test\.(short|run|skip|list|bench)|BEADS_TEST_SKIP|BEADS_TEST_EMBEDDED_DOLT|TESTBRIDGE_TEST_ONLY|test_filter|flaky\s*=\s*(True|1|[A-Za-z_])`)
+	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", ".beads":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		isBzl := strings.HasSuffix(d.Name(), ".bzl")
+		if d.Type()&os.ModeSymlink != 0 || (d.Name() != "BUILD.bazel" && d.Name() != "BUILD" && !isBzl) {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, path)
+		pkg := filepath.ToSlash(filepath.Dir(rel))
+		var units []string
+		if isBzl {
+			units = []string{string(data)}
+		} else {
+			units = bazelTopRules(string(data))
+		}
+		for _, unit := range units {
+			if !isBzl {
+				if name := nameRe.FindStringSubmatch(unit); name != nil {
+					if _, pinned := want["//"+pkg+":"+name[1]]; pinned {
+						continue
+					}
+				}
+			}
+			for _, line := range strings.Split(unit, "\n") {
+				code, _, _ := strings.Cut(line, "#")
+				if ruleNarrow.MatchString(code) && !strings.Contains(code, "flaky = False") {
+					t.Errorf("%s: %q can select, skip or retry tests of the gated lanes", rel, strings.TrimSpace(line))
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 // Review G4: each retired tier's lane asks Bazel which test targets are
@@ -1594,7 +1694,7 @@ func TestBazelRetiredLanesArePinned(t *testing.T) {
 	// eviction in any retired lane (it would re-run, and could turn green,
 	// a test that failed in the first attempt), and nothing else in
 	// .bazelrc sets the retry count (a later value would win).
-	evictionAllowed := map[string]bool{}
+	evictionAllowed := map[string]bool{bazelSoleRunEvictionLine: true}
 	for _, config := range bazelRetiredLaneConfigs {
 		want := "test:" + config + " --experimental_remote_cache_eviction_retries=0"
 		lines := bazelEmbeddedRCLines
@@ -1613,7 +1713,7 @@ func TestBazelRetiredLanesArePinned(t *testing.T) {
 		}
 	}
 	// A later --cache_test_results (any config the lanes use) would win.
-	allowed := map[string]bool{"test:docker --nocache_test_results": true, "test:embedded --nocache_test_results": true}
+	allowed := map[string]bool{"test:docker --nocache_test_results": true, "test:embedded --nocache_test_results": true, bazelSoleRunNoCacheLine: true}
 	for config := range bazelDoltServerRCLines {
 		allowed["test:"+config+" --nocache_test_results"] = true
 	}

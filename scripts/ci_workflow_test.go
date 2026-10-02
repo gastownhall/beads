@@ -170,8 +170,13 @@ func readGoreleaserBuilds(t *testing.T) []goreleaserBuild {
 func TestPRCoreRequiresExcludeReadPermissionCoverage(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "pr-core-wrapper")
-	if job.RunsOn != "ubuntu-latest" || job.If != "" || job.ContinueOnError {
+	// Its only condition is D2 step 3's stand-down, where Bazel's PR-core
+	// lane (required instead) runs the test with the same requirement.
+	if job.RunsOn != "ubuntu-latest" || job.If != prLaneLegacyIf || job.ContinueOnError {
 		t.Error("exclude permission coverage must remain in the required Linux PR Core job")
+	}
+	if !contains(bazelPRLaneRCLines["prcore"], "test:prcore --test_env=BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1") {
+		t.Error("Bazel's PR-core lane must require actual exclude read-permission coverage where PR Core stands down")
 	}
 	step := job.Steps[job.stepIndex(t, "Run PR core wrapper")]
 	if step.If != "" || (step.ContinueOnError != nil && step.ContinueOnError != false) || strings.TrimSpace(step.Run) != "make ci-pr-core" {
@@ -438,7 +443,10 @@ func TestPRCIGateRequiresJSWasmHookExecution(t *testing.T) {
 	if job.RunsOn != "ubuntu-latest" {
 		t.Errorf("js/wasm hook job runs-on = %q, want ubuntu-latest", job.RunsOn)
 	}
-	if job.If != "" {
+	// Only D2 step 3's stand-down, where Bazel's pure-Go and js/wasm lane
+	// (TestBazelPureJobMirrorsPureGoJob) is required instead
+	// (TestPRLegacyLanesDeferToBazelLanes).
+	if job.If != prLaneLegacyIf {
 		t.Errorf("js/wasm hook job is conditional: %q", job.If)
 	}
 
@@ -571,9 +579,10 @@ func TestStorageDomainUOWJobsUseNestedTimeoutBudgets(t *testing.T) {
 		})
 	}
 
-	// pr.yml's job is the one lane with both the image and the pinned dolt
-	// CLI, so it is where the container and local test servers are compared.
-	job := readCIWorkflow(t, "pr.yml").job(t, "test-domain-uow")
+	// The container and local test servers are compared in pr.yml's own
+	// every-PR job (it was test-domain-uow's first step until D2 step 3;
+	// TestPRDoltServerFingerprintRunsOnEveryPR pins it).
+	job := readCIWorkflow(t, "pr.yml").job(t, prFingerprintJob)
 	const fingerprintStep = "Test Dolt server fingerprint (container + local)"
 	assertStepRunsExactly(t, job, fingerprintStep,
 		"go test -tags gms_pure_go -count=1 -timeout 5m -v -run '^TestDoltServerFingerprint$' ./internal/testutil/")
@@ -2288,8 +2297,12 @@ type bazelGateScenario struct {
 	outputs       map[string]string // the lanes' outputs ("" = not reported)
 	// pr.yml's bazel-coverage job (D2): its outputs, per retiredTiers
 	// output name ("" = not reported), and its result ("" = success).
-	covered     map[string]string
-	coverage    string
+	covered  map[string]string
+	coverage string
+	// Non-Bazel needs' results that differ from what the jobs' if: give
+	// (success, or skipped for pr.yml's legacy jobs that bazel-coverage
+	// retired, D2 step 3).
+	results     map[string]string
 	wantPass    bool
 	wantMention string // a red gate must name this id
 }
@@ -2329,7 +2342,7 @@ func runPRGateStep(t *testing.T, step ciWorkflowStep, sc bazelGateScenario) (boo
 			}
 			got = sc.covered[m[3]]
 		case m[1] != "bazel" && m[2] == "result":
-			got = "success"
+			got = prLegacyJobResult(m[1], sc)
 		case m[1] != "bazel":
 			t.Fatalf("ci-gate env %s = %q: the gate simulation cannot evaluate it", key, value)
 		case m[2] == "result":
@@ -3524,7 +3537,8 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		// later --cache_test_results wins over --nocache_test_results).
 		if !strings.HasPrefix(line, "#") && strings.Contains(line, "cache_test_results") &&
 			line != "test:embedded --nocache_test_results" && line != "test:docker --nocache_test_results" &&
-			line != "test:doltserver-proxied --nocache_test_results" && line != "test:doltserver-integration --nocache_test_results" {
+			line != "test:doltserver-proxied --nocache_test_results" && line != "test:doltserver-integration --nocache_test_results" &&
+			line != bazelSoleRunNoCacheLine {
 			t.Errorf(".bazelrc %q: only test:embedded and test:docker set test result caching", line)
 		}
 		if strings.HasPrefix(line, "test:embedded ") && (strings.Contains(line, "-test.short") || strings.Contains(line, "BEADS_TEST_SKIP")) {
@@ -3666,7 +3680,7 @@ func TestBazelPureJobMirrorsPureGoJob(t *testing.T) {
 		t.Errorf("%s PURE_CMD_BD_TESTS = %q, want pr.yml's -short -run selector %q", bazelPureJobName, job.Env["PURE_CMD_BD_TESTS"], m[1])
 	}
 	run := job.step(t, "Run pure-Go cmd/bd test subset (--config=pure)").Run
-	for _, required := range []string{"bazel test --config=pure //cmd/bd:bd_test", `"--test_arg=-test.run=$PURE_CMD_BD_TESTS"`, "(( n > 0 ))"} {
+	for _, required := range []string{"bazel test --config=pure " + bazelSoleRunArg + " //cmd/bd:bd_test", `"--test_arg=-test.run=$PURE_CMD_BD_TESTS"`, "(( n > 0 ))"} {
 		if !strings.Contains(run, required) {
 			t.Errorf("pure subset step does not contain %q:\n%s", required, run)
 		}

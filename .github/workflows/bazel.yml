@@ -6,14 +6,18 @@
 #
 # PRs and merge groups run it through pr.yml's `bazel` job (workflow_call),
 # in the same run as the legacy jobs it mirrors, which stay required too,
-# except pr-risk.yml's embedded-Dolt, proxied-server and server-Dolt storage
-# test jobs: while the committed BAZEL_RETIRES_LEGACY_EMBEDDED /
-# BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS flag is "true", on a same-repo,
-# non-Dependabot pull_request (whatever the mode), pr-risk.yml's
-# bazel-coverage job stands them down and bazel-embedded, or bazel-proxied
-# and bazel-server-storage, alone run the tier; pr.yml's ci-gate then
-# requires those lanes to have run remotely and passed, so modes skip, local
-# and cache are red there (scripts/pr_risk_bazel_coverage_test.go).
+# except where their D2 flag retires them: while the committed
+# BAZEL_RETIRES_LEGACY_EMBEDDED / BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS /
+# BAZEL_RETIRES_LEGACY_PR_LANES flag is "true", on a same-repo,
+# non-Dependabot pull_request (whatever the mode), the bazel-coverage job
+# stands down pr-risk.yml's embedded-Dolt test jobs (bazel-embedded runs
+# the tier), its proxied-server and server-Dolt storage test jobs
+# (bazel-proxied, bazel-server-storage), or pr.yml's PR Core,
+# build-artifacts, pure-Go/js-wasm, domain+uow and contract corpus jobs
+# (bazel-test, bazel-pure, bazel-doltserver; their `bazel test`s then add
+# --config=sole-run); pr.yml's ci-gate then requires those lanes to have run
+# remotely and passed, so modes skip, local and cache are red there
+# (scripts/pr_risk_bazel_coverage_test.go, pr_lanes_bazel_coverage_test.go).
 # This file has no pull_request or merge_group trigger of its own, so a PR
 # runs the lane once. Every lane reports its job.status as a workflow_call
 # output (named after the job) from an always() last step. pr.yml's ci-gate
@@ -89,9 +93,9 @@
 # clients. Maintainers decided (2026-09-28) that same-repo PRs keep remote
 # execution under this model. Still open: a beads-only RBE_INSTANCE. The farm
 # refuses client action-cache writes (only its workers write; rbe-west D2).
-# Nothing downstream consumes artifacts built here yet; in pr.yml's run the
-# bd artifact is bazel-ci-build-artifacts, so it cannot collide with the
-# build-artifacts job's ci-build-artifacts.
+# In pr.yml's run the bd artifact is bazel-ci-build-artifacts, so it cannot
+# collide with the build-artifacts job's ci-build-artifacts; pr.yml's
+# package gates consume it where build-artifacts stands down (D2 step 3).
 #
 # Runner cache: one entry per (.bazelversion, MODULE.bazel.lock) pair, about
 # 2 GB (Bazel's content-addressable --repository_cache, re-hashed on every
@@ -309,6 +313,14 @@ jobs:
     timeout-minutes: 100
     outputs:
       result: ${{ steps.result.outputs.result }}
+    env:
+      # D2 step 3: on covered PRs (always mode remote) this lane is the only
+      # pre-merge run of pr.yml's legacy PR Core job, which ran every test
+      # every time and never retried: --config=sole-run then executes every
+      # test (no cached results) and fails on a remote cache eviction
+      # instead of re-running the whole invocation. Local and cache runs
+      # (forks, Dependabot: the legacy jobs still run) keep cached results.
+      BAZEL_SOLE_RUN: ${{ needs.rbe.outputs.mode == 'remote' && '--config=sole-run' || '' }}
     steps:
       # inputs.checkout-sha: see the header (empty: the event's default ref).
       # checkout v7 refuses a fork head on pull_request_target unless opted
@@ -380,7 +392,7 @@ jobs:
           set -o pipefail
           start=$(date +%s)
           rc=0
-          bazel test //... --config=ci \
+          bazel test //... --config=ci ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} \
             --profile="$RUNNER_TEMP/bazel-profile.json" \
             --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
             2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
@@ -389,10 +401,11 @@ jobs:
           exit "$rc"
 
       # pr.yml's build-artifacts job, built by Bazel: the same artifact name
-      # and layout (bd-linux-gms-pure, SHA256SUMS, build-manifest.txt), so its
-      # consumers (PR Core, domain+uow, the package gates) can switch to it.
-      # None does yet. The script documents which binary and how it differs
-      # from `go build`'s.
+      # and layout (bd-linux-gms-pure, SHA256SUMS, build-manifest.txt). Where
+      # build-artifacts stands down (D2 step 3), pr.yml's package gates take
+      # it; its other consumers (PR Core, domain+uow) stand down there too.
+      # The script documents which binary and how it differs from `go
+      # build`'s.
       - name: Package bd (ci-build-artifacts layout)
         id: bd-artifact
         if: ${{ always() && steps.test.outcome != 'skipped' }}
@@ -543,6 +556,13 @@ jobs:
       result: ${{ steps.result.outputs.result }}
     env:
       PURE_CMD_BD_TESTS: '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir|NocgoFactoriesHonorSharedServer|NocgoNewDoltStoreFromConfig_ErrorSuggestsCorrectFlag|NocgoNewReadOnlyStoreFromConfig_ErrorSuggestsCorrectFlag)'
+      # D2 step 3: on covered PRs (always mode remote) this lane is the only
+      # pre-merge run of pr.yml's legacy pure-Go and js/wasm job, which ran every test
+      # every time and never retried: --config=sole-run then executes every
+      # test (no cached results) and fails on a remote cache eviction
+      # instead of re-running the whole invocation. Local and cache runs
+      # (forks, Dependabot: the legacy jobs still run) keep cached results.
+      BAZEL_SOLE_RUN: ${{ needs.rbe.outputs.mode == 'remote' && '--config=sole-run' || '' }}
     steps:
       # inputs.checkout-sha: see the header (empty: the event's default ref).
       # checkout v7 refuses a fork head on pull_request_target unless opted
@@ -637,7 +657,7 @@ jobs:
         run: |
           set -euo pipefail
           bazel run --config=pure //cmd/bd:bd -- version
-          bazel test --config=pure \
+          bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} \
             //internal/storage/embeddeddolt:embeddeddolt_test \
             //internal/tracker:tracker_test \
             --test_sharding_strategy=disabled \
@@ -649,7 +669,7 @@ jobs:
       - name: Run pure-Go cmd/bd test subset (--config=pure)
         run: |
           set -euo pipefail
-          bazel test --config=pure //cmd/bd:bd_test \
+          bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} //cmd/bd:bd_test \
             --test_sharding_strategy=disabled \
             "--test_arg=-test.run=$PURE_CMD_BD_TESTS"
           n="$(grep -c '<testcase ' bazel-testlogs/cmd/bd/bd_test/test.xml || true)"
@@ -899,6 +919,13 @@ jobs:
       result: ${{ steps.result.outputs.result }}
     env:
       BAZEL_DOLT_LANE: ${{ inputs.dolt-lane || 'doltserver' }}
+      # D2 step 3: on covered PRs (always mode remote) this lane is the only
+      # pre-merge run of pr.yml's legacy domain+uow and contract corpus jobs, which ran every test
+      # every time and never retried: --config=sole-run then executes every
+      # test (no cached results) and fails on a remote cache eviction
+      # instead of re-running the whole invocation. Local and cache runs
+      # (forks, Dependabot: the legacy jobs still run) keep cached results.
+      BAZEL_SOLE_RUN: ${{ needs.rbe.outputs.mode == 'remote' && '--config=sole-run' || '' }}
     steps:
       # inputs.checkout-sha: see the header (empty: the event's default ref).
       # checkout v7 refuses a fork head on pull_request_target unless opted
@@ -933,7 +960,7 @@ jobs:
           set -o pipefail
           start=$(date +%s)
           rc=0
-          bazel test //... "--config=$BAZEL_DOLT_LANE" 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
+          bazel test //... "--config=$BAZEL_DOLT_LANE" ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
           echo "bazel test --config=$BAZEL_DOLT_LANE: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 

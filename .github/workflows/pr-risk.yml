@@ -24,6 +24,12 @@ env:
   # Step 2: the proxied-server and server-Dolt storage test jobs (Bazel
   # `proxied-server tier` and `server-Dolt storage tier`).
   BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS: "true"
+  # Step 3: pr.yml's own legacy jobs whose Bazel lanes run in the same pr.yml
+  # run: PR Core, build-artifacts, the pure-Go/js-wasm check, domain+uow and
+  # contract corpus (Bazel `test`, `pure-Go and js/wasm`, `dolt-server
+  # lane`). pr-risk.yml retires nothing for it; its copy only keeps the
+  # shared bazel-coverage job identical.
+  BAZEL_RETIRES_LEGACY_PR_LANES: "true"
 
 jobs:
   detect-ci-tier:
@@ -71,8 +77,9 @@ jobs:
   # lanes run them instead: `embedded` (the test-embedded-* jobs; Bazel
   # `embedded Dolt tier`) and `dolt_server` (test-proxied-cmd and the
   # test-server-storage* jobs; Bazel `proxied-server tier` and `server-Dolt
-  # storage tier`). Each is true only with its committed BAZEL_RETIRES_LEGACY_*
-  # flag, on a same-repo (not fork) pull_request whose actor is not
+  # storage tier`), plus `pr_lanes`, which only pr.yml reads (its own PR
+  # Core, build-artifacts, pure-Go, domain+uow and contract corpus jobs).
+  # Each is true only with its committed BAZEL_RETIRES_LEGACY_* flag, on a same-repo (not fork) pull_request whose actor is not
   # Dependabot. pr.yml runs this same job (policy-tested identical) and its
   # gate goes red unless the lanes then ran remotely and passed, so neither
   # the kill switch (mode skip) nor a missing executor secret (mode cache)
@@ -86,6 +93,7 @@ jobs:
     outputs:
       embedded: ${{ steps.decide.outputs.embedded }}
       dolt_server: ${{ steps.decide.outputs.dolt_server }}
+      pr_lanes: ${{ steps.decide.outputs.pr_lanes }}
     steps:
       # GitHub's == is case-insensitive. FORK is bazel.yml's rbe job's
       # expression, verbatim. Nothing mutable is read: not RBE_WEST_WORKERS
@@ -100,11 +108,12 @@ jobs:
         env:
           RETIRED_EMBEDDED: ${{ env.BAZEL_RETIRES_LEGACY_EMBEDDED == 'true' }}
           RETIRED_DOLT_SERVER: ${{ env.BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS == 'true' }}
+          RETIRED_PR_LANES: ${{ env.BAZEL_RETIRES_LEGACY_PR_LANES == 'true' }}
           PULL_REQUEST: ${{ github.event_name == 'pull_request' }}
           FORK: ${{ github.event.pull_request.head.repo.fork == true }}
           DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
         run: |
-          for v in RETIRED_EMBEDDED RETIRED_DOLT_SERVER PULL_REQUEST FORK DEPENDABOT; do
+          for v in RETIRED_EMBEDDED RETIRED_DOLT_SERVER RETIRED_PR_LANES PULL_REQUEST FORK DEPENDABOT; do
             case "${!v}" in
               true|false) ;;
               *) echo "::error::$v is '${!v}', want true or false"; exit 1 ;;
@@ -122,11 +131,16 @@ jobs:
           if [ "$same_repo_pr" = true ] && [ "$RETIRED_DOLT_SERVER" = true ]; then
             dolt_server=true
           fi
+          pr_lanes=false
+          if [ "$same_repo_pr" = true ] && [ "$RETIRED_PR_LANES" = true ]; then
+            pr_lanes=true
+          fi
           {
             echo "embedded=$embedded"
             echo "dolt_server=$dolt_server"
+            echo "pr_lanes=$pr_lanes"
           } >> "$GITHUB_OUTPUT"
-          echo "Legacy tiers retired in favour of the Bazel lanes: embedded Dolt **$embedded**, proxied and server Dolt **$dolt_server** (pull_request: $PULL_REQUEST, fork: $FORK, dependabot: $DEPENDABOT, retired embedded: $RETIRED_EMBEDDED, retired proxied/server: $RETIRED_DOLT_SERVER)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Legacy tiers retired in favour of the Bazel lanes: embedded Dolt **$embedded**, proxied and server Dolt **$dolt_server**, pr.yml's PR Core/build/pure-Go/domain+uow/contract jobs **$pr_lanes** (pull_request: $PULL_REQUEST, fork: $FORK, dependabot: $DEPENDABOT, retired embedded: $RETIRED_EMBEDDED, retired proxied/server: $RETIRED_DOLT_SERVER, retired pr.yml jobs: $RETIRED_PR_LANES)" | tee -a "$GITHUB_STEP_SUMMARY"
 
   # End-to-end coverage for proxied-server CLI subcommands, sharded across the
   # CI matrix. Each sub-test drives the bd CLI subprocess against a real dolt
