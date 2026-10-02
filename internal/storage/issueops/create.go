@@ -142,6 +142,12 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 		return result, nil
 	}
 
+	// Must run before the upsert, which makes an overwrite and a tie indistinguishable.
+	rowOverwritten, err := upsertOverwritesStoredRow(ctx, tx, issueTable, issue, bc.Opts)
+	if err != nil {
+		return result, err
+	}
+
 	isNew, staleRejected, err := InsertIssueIfNew(ctx, tx, issueTable, issue, bc.Opts)
 	if err != nil {
 		return result, err
@@ -180,7 +186,7 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 		return result, err
 	}
 	result.ChangedTables = mergeChangedTables(result.ChangedTables, labelResult.ChangedTables)
-	commentResult, err := PersistComments(ctx, tx, issue)
+	commentResult, err := persistComments(ctx, tx, issue, rowOverwritten)
 	if err != nil {
 		return result, err
 	}
@@ -800,7 +806,41 @@ func PersistLabels(ctx context.Context, tx DBTX, issue *types.Issue, actor, even
 	return result, nil
 }
 
+// PersistComments persists issue.Comments, never rewriting a stored comment.
 func PersistComments(ctx context.Context, tx DBTX, issue *types.Issue) (CreateIssueResult, error) {
+	return persistComments(ctx, tx, issue, false)
+}
+
+// upsertOverwritesStoredRow reports whether the issue upsert will rewrite an
+// existing row, by the same rule as issueUpsertAssignments: always for a plain
+// UPSERT, and under RejectStaleUpserts only when the incoming row is strictly
+// newer.
+//
+//nolint:gosec // G201: table is a hardcoded constant
+func upsertOverwritesStoredRow(ctx context.Context, tx DBTX, issueTable string, issue *types.Issue, opts storage.BatchCreateOptions) (bool, error) {
+	if opts.ConflictSkip || opts.CreateOnly || issue.ID == "" || !hasIncomingCommentIDs(issue) {
+		return false, nil
+	}
+	if !opts.RejectStaleUpserts {
+		return true, nil
+	}
+	var storedOlder int
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ? AND updated_at < ?`, issueTable), issue.ID, issue.UpdatedAt).Scan(&storedOlder); err != nil {
+		return false, fmt.Errorf("failed to check issue staleness for %s: %w", issue.ID, err)
+	}
+	return storedOlder > 0, nil
+}
+
+func hasIncomingCommentIDs(issue *types.Issue) bool {
+	for _, comment := range issue.Comments {
+		if comment != nil && comment.ID != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func persistComments(ctx context.Context, tx DBTX, issue *types.Issue, overwriteExisting bool) (CreateIssueResult, error) {
 	var result CreateIssueResult
 	if len(issue.Comments) == 0 {
 		return result, nil
@@ -840,8 +880,44 @@ func PersistComments(ctx context.Context, tx DBTX, issue *types.Issue) (CreateIs
 			}
 			continue
 		}
-		// Incoming id (import/interchange): preserve it, with the historical
-		// existence check preventing duplicates on re-import.
+		var stored types.Comment
+		//nolint:gosec // G201: table is determined by ephemeral flag
+		lookupErr := tx.QueryRowContext(ctx, fmt.Sprintf(`
+				SELECT issue_id, author, text FROM %s WHERE id = ?
+			`, commentTable), comment.ID).Scan(&stored.IssueID, &stored.Author, &stored.Text)
+		switch {
+		case lookupErr == nil:
+			if stored.IssueID != issue.ID {
+				return result, fmt.Errorf("failed to insert comment for %s: comment id %s already belongs to %s", issue.ID, comment.ID, stored.IssueID)
+			}
+			var sameCreatedAt int
+			//nolint:gosec // G201: table is determined by ephemeral flag
+			if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
+				SELECT COUNT(*) FROM %s WHERE id = ? AND created_at = ?
+			`, commentTable), comment.ID, createdAtText).Scan(&sameCreatedAt); err != nil {
+				return result, fmt.Errorf("failed to check comment existence for %s: %w", issue.ID, err)
+			}
+			if stored.Author == comment.Author && stored.Text == comment.Text && sameCreatedAt != 0 {
+				continue
+			}
+			if !overwriteExisting {
+				continue
+			}
+			//nolint:gosec // G201: table is determined by ephemeral flag
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
+				UPDATE %s SET author = ?, text = ?, created_at = ? WHERE id = ? AND issue_id = ?
+			`, commentTable), comment.Author, comment.Text, createdAtText, comment.ID, issue.ID); err != nil {
+				return result, fmt.Errorf("failed to update comment %s for %s: %w", comment.ID, issue.ID, err)
+			}
+			result.markChanged(commentTable)
+			result.persistedComments = append(result.persistedComments, EventComment{
+				ID: comment.ID, Author: comment.Author, Text: comment.Text, CreatedAt: createdAt, Source: CommentSourceStructured,
+			})
+			continue
+		case errors.Is(lookupErr, sql.ErrNoRows):
+		default:
+			return result, fmt.Errorf("failed to check comment existence for %s: %w", issue.ID, lookupErr)
+		}
 		var exists int
 		//nolint:gosec // G201: table is determined by ephemeral flag
 		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
