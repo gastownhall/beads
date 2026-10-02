@@ -98,6 +98,18 @@ umask 077
 	# The repo contents cache (default: under the repository cache, so in
 	# the runner cache) holds extracted repos Bazel never re-verifies; off.
 	echo "common --repo_contents_cache="
+	# Every mode fetches external repositories on the runner. gazelle's
+	# go_repository fetches Go modules with the go command (fetch_repo), not
+	# Bazel's downloader, and the go command never retries: one TLS
+	# handshake timeout against proxy.golang.org failed a whole lane. With
+	# "|" the go command moves to the next entry on any error (a ","
+	# list only on 404/410): the proxy twice, then the module's origin.
+	# fetch_repo checks every module against its go.sum hash whatever the
+	# source. Key neutral: repository fetching only, no action reads it.
+	echo "common --repo_env=GOPROXY=https://proxy.golang.org|https://proxy.golang.org|direct"
+	# Bazel's own downloader (the Go SDK, http_archive) already retries;
+	# give slow TLS handshakes and reads twice the default timeouts.
+	echo "common --http_timeout_scaling=2.0"
 } >"$rc"
 
 # write_pem DEST VALUE: decode base64 (or accept raw PEM) and check it is PEM.
