@@ -259,7 +259,7 @@ func (s *testSuite) depInsertEmitsAddedEvent() {
 		"SELECT actor, new_value FROM events WHERE issue_id = ? AND event_type = ?",
 		"bd-dep-evt-a", string(types.EventDependencyAdded)).Scan(&actor, &newValue))
 	s.Equal("tester", actor)
-	s.Equal("Added dependency: bd-dep-evt-a blocks bd-dep-evt-b", newValue)
+	s.Equal("Added dependency: bd-dep-evt-b blocks bd-dep-evt-a", newValue)
 }
 
 // depInsertWithoutEmitEventRecordsNoEvent proves the create-with-deps path (which
