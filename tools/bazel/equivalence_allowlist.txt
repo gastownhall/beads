@@ -39,3 +39,4 @@ scripts TestCheckShardCoverageScript skip  # runs tools/bazel/check_shard_covera
 scripts TestShardScriptsListOnlyRealTests skip  # runs the real .github/scripts shard scripts over the source tree; runs under go test
 scripts TestShardScriptNarrowingCheck skip  # reads the real .github/scripts shard scripts; runs under go test
 scripts TestBazelOnlySkipsAreAllowlisted skip  # parses every _test.go file in the checkout; runs under go test
+scripts TestRunAllowlistedGoTestsScript skip  # runs tools/bazel/run_allowlisted_go_tests.py, not in the runfiles; runs under go test

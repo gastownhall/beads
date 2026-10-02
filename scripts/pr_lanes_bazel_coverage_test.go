@@ -20,9 +20,9 @@ import (
 // (BAZEL_PR_LANES_RETIRED, simulated with the other tiers in
 // TestPRRiskDecisionMatchesBazelMode). Everything the retired jobs did
 // besides those tests keeps running on every PR: the package gates take the
-// Bazel-built bd, the Dolt server fingerprint has its own job, and the Go
-// tests the Bazel lane does not run or skips (equivalence allowlist) run
-// under go test in pr-preflight-platforms.
+// Bazel-built bd, the Dolt server fingerprint has its own job, and
+// scripts-go-checks runs `go test ./scripts/...`, go test's vet checks and
+// the Go tests the Bazel lane does not run or skips (equivalence allowlist).
 
 const (
 	// The legacy jobs' if: not covered.
@@ -35,6 +35,9 @@ const (
 	prFingerprintJob      = "test-dolt-server-fingerprint"
 	prFingerprintID       = "TEST_DOLT_SERVER_FINGERPRINT"
 	prAllowlistedStep     = "Run the Go tests the Bazel lane skips"
+	prScriptsChecksJob    = "scripts-go-checks"
+	prPackageBDCheck      = "Check the Bazel-built bd exists"
+	prScriptsChecksID     = "SCRIPTS_GO_CHECKS"
 	// bazel.yml's lanes for the step add --config=sole-run in mode remote.
 	bazelSoleRunEnv          = "${{ needs.rbe.outputs.mode == 'remote' && '--config=sole-run' || '' }}"
 	bazelSoleRunArg          = `${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"}`
@@ -268,6 +271,22 @@ func TestPRLegacyLanesDeferToBazelLanes(t *testing.T) {
 		if !contains(required, id) {
 			t.Errorf("ci-gate does not require %s", id)
 		}
+		// Review L2: with the farm off (mode skip) on a covered PR, say why
+		// there is no bd before the download fails on a missing artifact.
+		check := job.step(t, prPackageBDCheck)
+		if check.If != "steps.applicability.outputs.run == 'true' && needs."+prRiskCoverageJobName+".outputs.pr_lanes == 'true'" ||
+			!reflect.DeepEqual(check.Env, map[string]string{"BAZEL_RBE_MODE": "${{ needs.bazel.outputs.rbe-mode }}"}) || check.ContinueOnError != nil ||
+			job.stepIndex(t, prPackageBDCheck) > job.stepIndex(t, "Download build artifacts") {
+			t.Errorf("%s step %q: if %q, env %v; want it before the download, on covered applicable runs, reading the call's mode", name, prPackageBDCheck, check.If, check.Env)
+		}
+		for mode, wantOK := range map[string]bool{"remote": true, "skip": false, "cache": false, "local": false, "": false} {
+			cmd := exec.Command("bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", check.Run)
+			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "BAZEL_RBE_MODE=" + mode}
+			out, err := cmd.CombinedOutput()
+			if (err == nil) != wantOK || (!wantOK && !(strings.Contains(string(out), "::error::") && strings.Contains(string(out), "BAZEL_PR_LANES_RETIRED"))) {
+				t.Errorf("%s bd check in mode %q: ok %v, want %v\n%s", name, mode, err == nil, wantOK, out)
+			}
+		}
 	}
 	// Bazel's artifact: bazel-test publishes it (always, after its tests)
 	// under the name pr.yml passes, with build-artifacts' layout
@@ -332,10 +351,10 @@ func TestPRLegacyLanesDeferToBazelLanes(t *testing.T) {
 	}
 	for _, c := range []string{"true", "false"} {
 		for _, res := range []string{"skipped", "failure", "cancelled"} {
-			for _, job := range []string{prFingerprintJob, "package-mcp", "package-npm", "pr-preflight-platforms"} {
+			for _, job := range []string{prFingerprintJob, "package-mcp", "package-npm", "pr-preflight-platforms", prScriptsChecksJob} {
 				sc := prGateFor(t, lanes, "pull_request", "remote", cov(c))
 				sc.results = map[string]string{job: res}
-				id := map[string]string{prFingerprintJob: prFingerprintID, "pr-preflight-platforms": "PR_PREFLIGHT_PLATFORMS"}[job]
+				id := map[string]string{prFingerprintJob: prFingerprintID, "pr-preflight-platforms": "PR_PREFLIGHT_PLATFORMS", prScriptsChecksJob: prScriptsChecksID}[job]
 				if id == "" {
 					id = prPackageGates[job]
 				}
@@ -414,47 +433,117 @@ func TestPRDoltServerFingerprintRunsOnEveryPR(t *testing.T) {
 	}
 }
 
-// The Go tests the Bazel PR-core lane does not run or skips
-// (tools/bazel/equivalence_allowlist.txt) run under go test on every PR,
-// in pr-preflight-platforms' required Linux leg, each required to pass.
+// PR Core's duties the Bazel lanes do not take over run on every PR, in
+// pr.yml's required scripts-go-checks job (PR Core's environment): `go test
+// ./scripts/...` with PR Core's flags (the policy tests, some of which check
+// part or all of their rules under go test only), go test's vet checks over
+// ./... (rules_go's go_test runs none), and the Go tests Bazel does not run
+// or skips (tools/bazel/equivalence_allowlist.txt), each required to pass.
 func TestPRRunsGoTestsBazelSkips(t *testing.T) {
 	pr := readCIWorkflow(t, "pr.yml")
-	job := pr.job(t, "pr-preflight-platforms")
-	if job.If != "" || job.ContinueOnError || len(job.Needs) != 0 || !contains(job.Strategy.Matrix.OS, "ubuntu-latest") {
-		t.Errorf("pr-preflight-platforms: if %q, continue-on-error %v, needs %v, os %v; want unconditional with ubuntu-latest", job.If, job.ContinueOnError, job.Needs, job.Strategy.Matrix.OS)
+	job := pr.job(t, prScriptsChecksJob)
+	if job.If != "" || job.ContinueOnError || len(job.Needs) != 0 || job.RunsOn != "ubuntu-latest" || job.TimeoutMinutes == 0 {
+		t.Errorf("%s: if %q, continue-on-error %v, needs %v, runs-on %q, timeout %d; want an unconditional ubuntu-latest job with a timeout",
+			prScriptsChecksJob, job.If, job.ContinueOnError, job.Needs, job.RunsOn, job.TimeoutMinutes)
 	}
-	step := job.step(t, prAllowlistedStep)
-	if step.Run != "bash scripts/ci/allowlisted-go-tests.sh" || step.If != "matrix.os == 'ubuntu-latest'" || step.Shell != "bash" ||
-		step.ContinueOnError != nil || len(step.Env) != 0 {
-		t.Errorf("%q: run %q, if %q, shell %q, continue-on-error %v, env %v", prAllowlistedStep, step.Run, step.If, step.Shell, step.ContinueOnError, step.Env)
-	}
-	if !contains(strings.Fields(pr.job(t, "ci-gate").step(t, "Evaluate CI gate").Env["CI_GATE_REQUIRED"]), "PR_PREFLIGHT_PLATFORMS") {
-		t.Errorf("ci-gate no longer requires PR_PREFLIGHT_PLATFORMS")
-	}
-	if os.Getenv("TEST_SRCDIR") != "" {
-		return // scripts_test's runfiles hold neither script
-	}
-	root := sourceRepoRoot(t)
-	wrapper := readPolicyFile(t, root, "scripts/ci/allowlisted-go-tests.sh")
-	var code []string
-	for _, line := range strings.Split(wrapper, "\n") {
-		if l := strings.TrimSpace(line); l != "" && !strings.HasPrefix(l, "#") {
-			code = append(code, l)
+	var names []string
+	for _, st := range job.Steps {
+		names = append(names, st.Name)
+		if st.ContinueOnError != nil {
+			t.Errorf("%s step %q has continue-on-error", prScriptsChecksJob, st.Name)
 		}
 	}
-	wantCode := []string{
+	wantNames := []string{"", "Set up Go", "Restore Go module cache", "Restore race Go build cache", "Install Dolt",
+		"Configure Git and Dolt identity", "Go test the scripts packages", "Go vet with go test's checks", prAllowlistedStep}
+	if !reflect.DeepEqual(names, wantNames) {
+		t.Errorf("%s steps %q, want %q", prScriptsChecksJob, names, wantNames)
+	}
+	// The environment PR Core's job gives its go test.
+	core := pr.job(t, "pr-core-wrapper")
+	for _, name := range []string{"Install Dolt", "Configure Git and Dolt identity", "Restore race Go build cache"} {
+		if got, want := job.step(t, name), core.step(t, name); got.Run != want.Run || !reflect.DeepEqual(got.With, want.With) || got.Uses != want.Uses {
+			t.Errorf("%s step %q differs from pr-core-wrapper's", prScriptsChecksJob, name)
+		}
+	}
+	untilDone := "${{ !cancelled() && steps.setup-go.outcome == 'success' }}"
+	for name, want := range map[string]struct {
+		run, ifc string
+		env      map[string]string
+	}{
+		"Go test the scripts packages": {"bash scripts/ci/scripts-go-test.sh", "", map[string]string{
+			"BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION": "1", "GOCACHE": "${{ runner.temp }}/go-cache/race"}},
+		"Go vet with go test's checks": {"bash scripts/ci/go-test-vet.sh", untilDone, nil},
+		prAllowlistedStep:              {"bash scripts/ci/allowlisted-go-tests.sh", untilDone, nil},
+	} {
+		st := job.step(t, name)
+		if st.Run != want.run || st.If != want.ifc || st.Shell != "" || (len(st.Env) != 0 || len(want.env) != 0) && !reflect.DeepEqual(st.Env, want.env) {
+			t.Errorf("%s step %q: run %q, if %q, shell %q, env %v; want run %q, if %q, env %v", prScriptsChecksJob, name, st.Run, st.If, st.Shell, st.Env, want.run, want.ifc, want.env)
+		}
+	}
+	gate := pr.job(t, "ci-gate")
+	env := gate.step(t, "Evaluate CI gate").Env
+	if !contains(gate.Needs, prScriptsChecksJob) || env[prScriptsChecksID] != "${{ needs."+prScriptsChecksJob+".result }}" ||
+		!contains(strings.Fields(env["CI_GATE_REQUIRED"]), prScriptsChecksID) {
+		t.Errorf("ci-gate does not require %s", prScriptsChecksID)
+	}
+	// Nothing else in pr.yml runs these (one place to look).
+	for name, j := range pr.Jobs {
+		for _, st := range j.Steps {
+			for _, script := range []string{"allowlisted-go-tests.sh", "scripts-go-test.sh", "go-test-vet.sh"} {
+				if strings.Contains(st.Run, script) && name != prScriptsChecksJob {
+					t.Errorf("%s step %q runs %s; only %s does", name, st.Name, script, prScriptsChecksJob)
+				}
+			}
+		}
+	}
+	if os.Getenv("TEST_SRCDIR") != "" {
+		return // scripts_test's runfiles hold none of the scripts (this part runs in that job itself)
+	}
+	root := sourceRepoRoot(t)
+	prelude := []string{
 		"set -euo pipefail",
 		`SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"`,
 		`REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"`,
 		`source "$REPO_ROOT/.buildflags"`,
-		`source "$REPO_ROOT/scripts/ci/lib/test-env.sh"`,
-		`cd "$REPO_ROOT"`,
-		"beads_test_env_enter",
-		"export BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1",
-		`python3 tools/bazel/run_allowlisted_go_tests.py "$@"`,
 	}
-	if !reflect.DeepEqual(code, wantCode) {
-		t.Errorf("scripts/ci/allowlisted-go-tests.sh code changed:\n%s\nwant:\n%s", strings.Join(code, "\n"), strings.Join(wantCode, "\n"))
+	for script, rest := range map[string][]string{
+		"scripts/ci/allowlisted-go-tests.sh": {
+			`source "$REPO_ROOT/scripts/ci/lib/test-env.sh"`,
+			`cd "$REPO_ROOT"`,
+			"beads_test_env_enter",
+			"export BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1",
+			`python3 tools/bazel/run_allowlisted_go_tests.py "$@"`,
+		},
+		"scripts/ci/scripts-go-test.sh": {
+			`source "$REPO_ROOT/scripts/ci/lib/timing.sh"`,
+			`source "$REPO_ROOT/scripts/ci/lib/test-env.sh"`,
+			`cd "$REPO_ROOT"`,
+			"beads_test_env_enter",
+			`ci_time "scripts go test" -- \`,
+			`go test -p 4 -parallel 4 -race -short -timeout=30m -skip '^TestEmbedded' ./scripts/...`,
+		},
+		"scripts/ci/go-test-vet.sh": {
+			`source "$REPO_ROOT/scripts/ci/lib/timing.sh"`,
+			`cd "$REPO_ROOT"`,
+			"GO_TEST_VET_FLAGS=(" + strings.Join(goTestDefaultVetFlags(t), " ") + ")",
+			`ci_time "go vet (go test's checks)" -- \`,
+			`go vet -tags gms_pure_go "${GO_TEST_VET_FLAGS[@]}" ./...`,
+		},
+	} {
+		var code []string
+		for _, line := range strings.Split(readPolicyFile(t, root, script), "\n") {
+			if l := strings.TrimSpace(line); l != "" && !strings.HasPrefix(l, "#") {
+				code = append(code, l)
+			}
+		}
+		if want := append(append([]string{}, prelude...), rest...); !reflect.DeepEqual(code, want) {
+			t.Errorf("%s code changed:\n%s\nwant:\n%s", script, strings.Join(code, "\n"), strings.Join(want, "\n"))
+		}
+	}
+	// PR Core's own test command: the scripts step must keep its flags.
+	if core := readPolicyFile(t, root, "scripts/ci/pr-core.sh"); !strings.Contains(core,
+		`go_test -p "$GO_TEST_PKG_PARALLEL" -parallel "$GO_TEST_PARALLEL" -race -short -timeout=30m -skip '^TestEmbedded' ./...`) {
+		t.Errorf("scripts/ci/pr-core.sh's go test changed; keep scripts/ci/scripts-go-test.sh's flags equal to it")
 	}
 
 	// The real allowlist plans: every entry maps to a package go test runs.
@@ -477,6 +566,37 @@ func TestPRRunsGoTestsBazelSkips(t *testing.T) {
 			t.Errorf("allowlist entry %q: not selected:\n%s", line, out)
 		}
 	}
+}
+
+// goTestDefaultVetFlags: the vet checks the Go toolchain running this test
+// gives `go test` (cmd/go's defaultVetFlags), read from its source, so a Go
+// upgrade that changes them fails here until go-test-vet.sh follows.
+func goTestDefaultVetFlags(t *testing.T) []string {
+	t.Helper()
+	goroot, err := exec.Command(requireHostTool(t, "go"), "env", "GOROOT").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := os.ReadFile(filepath.Join(strings.TrimSpace(string(goroot)), "src", "cmd", "go", "internal", "test", "test.go"))
+	if err != nil {
+		t.Fatalf("reading cmd/go's test.go for defaultVetFlags: %v", err)
+	}
+	m := regexp.MustCompile(`(?s)var defaultVetFlags = \[\]string\{(.*?)\n\}`).FindSubmatch(src)
+	if m == nil {
+		t.Fatal("cmd/go's test.go has no defaultVetFlags")
+	}
+	var flags []string
+	for _, line := range strings.Split(string(m[1]), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "//") || line == "" {
+			continue
+		}
+		flags = append(flags, strings.Trim(strings.TrimSuffix(line, ","), `"`))
+	}
+	if len(flags) < 5 {
+		t.Fatalf("defaultVetFlags parsed as %v", flags)
+	}
+	return flags
 }
 
 // run_allowlisted_go_tests.py on a synthetic allowlist and a fake go that

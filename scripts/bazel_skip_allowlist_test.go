@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -38,10 +39,27 @@ func TestBazelOnlySkipsAreAllowlisted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(found) < 8 {
+	if len(found) < 16 {
 		t.Fatalf("found only %d Bazel-skipping tests (%v); the scan is broken", len(found), found)
 	}
+	partial := 0
+	defer func() {
+		if partial < 5 {
+			t.Errorf("found only %d tests with a go-test-only part; the scan is broken", partial)
+		}
+	}()
 	for _, f := range found {
+		if f.partial {
+			// D2 step 3: under go test, only ./scripts/... still runs on every
+			// PR (pr.yml's scripts-go-checks job), so a Test that runs part
+			// of its checks under go test only must live there.
+			partial++
+			if f.pkg != "scripts" && !strings.HasPrefix(f.pkg, "scripts/") {
+				t.Errorf("%s %s runs part of its checks under go test only (%s); outside ./scripts/... nothing runs that part on every PR: move the check to ./scripts or make the test t.Skip under Bazel and allowlist it",
+					f.pkg, f.test, f.where)
+			}
+			continue
+		}
 		if !skipAllowlisted(entries, f.pkg, f.test) {
 			t.Errorf("%s %s skips under Bazel (%s) but tools/bazel/equivalence_allowlist.txt has no `%s %s skip  # why` entry",
 				f.pkg, f.test, f.where, f.pkg, f.test)
@@ -127,7 +145,41 @@ FUNC TestNoSkip(t *testing.T) {
 	}
 }
 
+FUNC TestGoOnlyBlock(t *testing.T) {
+	if os.Getenv("TEST_SRCDIR") == "" {
+		t.Error("checked under go test only")
+	}
+}
+
+FUNC TestGoOnlySetup(t *testing.T) {
+	if !bazeltest.IsBazel() {
+		t.Setenv("X", "")
+	}
+}
+
+FUNC TestLoopContinue(t *testing.T) {
+	for range []int{1} {
+		if os.Getenv("TEST_SRCDIR") != "" {
+			continue
+		}
+	}
+}
+
 FUNC helperTakingM(m *testing.M) {}
+`))
+	write("scripts/s_test.go", fixtureFuncs(`package scripts
+
+import (
+	"testing"
+
+	"example.com/m/bazeltest"
+)
+
+FUNC TestScriptsPartial(t *testing.T) {
+	if bazeltest.IsBazel() {
+		return
+	}
+}
 `))
 	write("node_modules/x/x_test.go", "package x\nimport \"testing\"\nfunc TestIgnored(t *testing.T) { if bazeltest.IsBazel() { t.Skip() } }\n")
 	write("sub/go.mod", "module example.com/sub\n")
@@ -139,10 +191,14 @@ FUNC helperTakingM(m *testing.M) {}
 	}
 	var got []string
 	for _, f := range found {
-		got = append(got, f.pkg+" "+f.test)
+		got = append(got, f.pkg+" "+f.test+" "+strconv.FormatBool(f.partial))
 	}
 	sort.Strings(got)
-	want := []string{"a TestEnvGuard", "a TestIsBazelGuard", "a TestLaterGuard", "a TestViaHelper"}
+	want := []string{
+		"a TestEnvGuard false", "a TestGoOnlyBlock true", "a TestIsBazelGuard false",
+		"a TestLaterGuard false", "a TestLoopContinue true", "a TestNoSkip true", "a TestViaHelper false",
+		"scripts TestScriptsPartial true",
+	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("scan found %v, want %v", got, want)
 	}
@@ -155,7 +211,13 @@ FUNC helperTakingM(m *testing.M) {}
 	}
 }
 
-type bazelSkip struct{ pkg, test, where string }
+// bazelSkip: a top-level test that skips under Bazel, or (partial) runs
+// part of its checks only under go test (a Bazel-guarded return/continue,
+// or a block guarded by TEST_SRCDIR == "" / !IsBazel()).
+type bazelSkip struct {
+	pkg, test, where string
+	partial          bool
+}
 
 type skipEntry struct{ pkg, test string }
 
@@ -255,13 +317,92 @@ func bazelSkippingTests(root string) ([]bazelSkip, error) {
 					where = "via " + h
 				}
 				if where != "" {
-					out = append(out, bazelSkip{pkg, fn.Name.Name, where})
+					out = append(out, bazelSkip{pkg, fn.Name.Name, where, false})
+				} else if pos := goTestOnlyPart(fn.Body); pos.IsValid() {
+					out = append(out, bazelSkip{pkg, fn.Name.Name, "line " + strconv.Itoa(fset.Position(pos).Line), true})
 				}
 			}
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].pkg+" "+out[i].test < out[j].pkg+" "+out[j].test })
 	return out, nil
+}
+
+// goTestOnlyPart: the first if statement (outside closures) that ends a
+// Bazel run early (Bazel condition, body returns or continues) or runs
+// checks only under go test (TEST_SRCDIR == "" or !IsBazel(), body reports
+// failures).
+func goTestOnlyPart(body *ast.BlockStmt) token.Pos {
+	pos := token.NoPos
+	ast.Inspect(body, func(n ast.Node) bool {
+		if pos.IsValid() {
+			return false
+		}
+		switch n := n.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.IfStmt:
+			if (bazelCond(n.Cond) && exits(n.Body)) || (goTestCond(n.Cond) && checks(n.Body)) {
+				pos = n.Pos()
+				return false
+			}
+		}
+		return true
+	})
+	return pos
+}
+
+// checks: the block reports test failures (t.Error*, t.Fatal*), i.e. it
+// is a check, not go-test-only setup.
+func checks(body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				switch sel.Sel.Name {
+				case "Error", "Errorf", "Fatal", "Fatalf":
+					found = true
+				}
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+func exits(body *ast.BlockStmt) bool {
+	for _, st := range body.List {
+		switch st := st.(type) {
+		case *ast.ReturnStmt:
+			return true
+		case *ast.BranchStmt:
+			if st.Tok == token.CONTINUE {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// goTestCond: TEST_SRCDIR == "" or !...IsBazel().
+func goTestCond(cond ast.Expr) bool {
+	switch c := cond.(type) {
+	case *ast.ParenExpr:
+		return goTestCond(c.X)
+	case *ast.UnaryExpr:
+		if call, ok := c.X.(*ast.CallExpr); ok && c.Op == token.NOT {
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			return ok && sel.Sel.Name == "IsBazel"
+		}
+	case *ast.BinaryExpr:
+		if c.Op == token.LAND {
+			return goTestCond(c.X) || goTestCond(c.Y)
+		}
+		if lit, ok := c.Y.(*ast.BasicLit); ok && c.Op == token.EQL && lit.Value == `""` {
+			return mentionsTestSrcdir(c.X)
+		}
+	}
+	return false
 }
 
 func takesTestingT(fn *ast.FuncDecl) bool {

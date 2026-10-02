@@ -885,6 +885,11 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "pr-core-wrapper"), []goCacheStep{
 		restoreModuleCache(), restoreBuildCache("race"),
 	})
+	// D2 step 3: PR Core's environment for ./scripts/..., go vet and the
+	// Bazel-skipped tests; read-only like PR Core.
+	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "scripts-go-checks"), []goCacheStep{
+		restoreModuleCache(), restoreBuildCache("race"),
+	})
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "test-macos"), []goCacheStep{
 		restoreModuleCache(), restoreBuildCache("non-race"), restoreBuildCache("race"),
 	})
@@ -905,7 +910,7 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 			"build-artifacts": true, "build-embedded": true, "pr-core-wrapper": true, "test": true, "test-windows": true,
 		},
 		"pr.yml": {
-			"build-artifacts": true, "pr-core-wrapper": true, "test-macos": true, "worktree-remove-windows": true,
+			"build-artifacts": true, "pr-core-wrapper": true, "scripts-go-checks": true, "test-macos": true, "worktree-remove-windows": true,
 			"check-doc-freshness-platforms": true, "pr-preflight-platforms": true, "build-examples": true,
 			"check-release-target-cross-compilation": true,
 		},

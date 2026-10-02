@@ -655,16 +655,6 @@ jobs:
         shell: bash
         run: go test '-tags=gms_pure_go' -count=1 -run '^TestGeneratedHookTimeoutProcessBoundary$' ./cmd/bd
 
-      # PR Core's share of the Go tests Bazel / test does not run or skips
-      # (tools/bazel/equivalence_allowlist.txt), each required to pass. Their
-      # only pre-merge run where PR Core stands down (D2 step 3); every PR,
-      # so it never depends on that decision. Reuses the cmd/bd and scripts
-      # test builds of the steps above.
-      - name: Run the Go tests the Bazel lane skips
-        if: matrix.os == 'ubuntu-latest'
-        shell: bash
-        run: bash scripts/ci/allowlisted-go-tests.sh
-
       - name: Exercise native init gateway credential shell
         shell: bash
         run: bash scripts/ci/test-init-gateway-credential.sh "$RUNNER_OS"
@@ -781,6 +771,20 @@ jobs:
             echo "MCP package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
           fi
 
+      # D2 step 3: where build-artifacts stood down, the bd comes from the
+      # bazel call's `test` lane, which runs only in mode remote; say so
+      # instead of failing on a missing artifact (ci-gate is red then too,
+      # BAZEL_PR_LANES_RETIRED).
+      - name: Check the Bazel-built bd exists
+        if: steps.applicability.outputs.run == 'true' && needs.bazel-coverage.outputs.pr_lanes == 'true'
+        env:
+          BAZEL_RBE_MODE: ${{ needs.bazel.outputs.rbe-mode }}
+        run: |
+          if [[ "$BAZEL_RBE_MODE" != "remote" ]]; then
+            echo "::error::Build Artifacts stood down for Bazel / test (BAZEL_RETIRES_LEGACY_PR_LANES), but the Bazel call ran in mode '${BAZEL_RBE_MODE:-none}', so no bd was built for this gate. See BAZEL_PR_LANES_RETIRED in CI Gate / Required."
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         if: steps.applicability.outputs.run == 'true'
 
@@ -830,6 +834,20 @@ jobs:
           echo "run=${{ needs.detect-package-gates.outputs.npm_package }}" >> "$GITHUB_OUTPUT"
           if [[ "${{ needs.detect-package-gates.outputs.npm_package }}" != "true" ]]; then
             echo "npm package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
+          fi
+
+      # D2 step 3: where build-artifacts stood down, the bd comes from the
+      # bazel call's `test` lane, which runs only in mode remote; say so
+      # instead of failing on a missing artifact (ci-gate is red then too,
+      # BAZEL_PR_LANES_RETIRED).
+      - name: Check the Bazel-built bd exists
+        if: steps.applicability.outputs.run == 'true' && needs.bazel-coverage.outputs.pr_lanes == 'true'
+        env:
+          BAZEL_RBE_MODE: ${{ needs.bazel.outputs.rbe-mode }}
+        run: |
+          if [[ "$BAZEL_RBE_MODE" != "remote" ]]; then
+            echo "::error::Build Artifacts stood down for Bazel / test (BAZEL_RETIRES_LEGACY_PR_LANES), but the Bazel call ran in mode '${BAZEL_RBE_MODE:-none}', so no bd was built for this gate. See BAZEL_PR_LANES_RETIRED in CI Gate / Required."
+            exit 1
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -919,8 +937,8 @@ jobs:
 
   # D2 step 3: stands down where bazel-coverage says pr_lanes; Bazel /
   # test (`bazel test //... --config=ci`, the same selection, checked by its
-  # equivalence step) runs it, and pr-preflight-platforms runs the few tests
-  # Bazel does not (tools/bazel/equivalence_allowlist.txt) under go test.
+  # equivalence step) runs it, and scripts-go-checks runs what Bazel does not
+  # (./scripts/... and the allowlisted tests under go test, go test's vet).
   pr-core-wrapper:
     name: PR Core (wrapper timing)
     runs-on: ubuntu-latest
@@ -979,6 +997,67 @@ jobs:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
           GOCACHE: ${{ runner.temp }}/go-cache/race
         run: make ci-pr-core
+
+  # PR Core's duties the Bazel lanes do not take over (D2 step 3), on every
+  # PR whatever bazel-coverage says, in PR Core's environment (dolt, git and
+  # dolt identity, scripts/ci/lib/test-env.sh):
+  # - `go test ./scripts/...` with PR Core's flags: the repository policy
+  #   tests, several of which check part or all of their rules under go test
+  #   only (scripts/bazel_skip_allowlist_test.go keeps such parts there);
+  # - go test's own vet checks over ./... (rules_go's go_test runs none);
+  # - the Go tests `bazel test --config=ci` does not run or skips
+  #   (tools/bazel/equivalence_allowlist.txt), each required to pass.
+  scripts-go-checks:
+    name: Go test (scripts), go vet and Bazel-skipped tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Restore race Go build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-
+
+      - name: Install Dolt
+        run: ./scripts/ci/install-dolt.sh
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Go test the scripts packages
+        env:
+          BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION: '1'
+          GOCACHE: ${{ runner.temp }}/go-cache/race
+        run: bash scripts/ci/scripts-go-test.sh
+
+      - name: Go vet with go test's checks
+        if: ${{ !cancelled() && steps.setup-go.outcome == 'success' }}
+        run: bash scripts/ci/go-test-vet.sh
+
+      - name: Run the Go tests the Bazel lane skips
+        if: ${{ !cancelled() && steps.setup-go.outcome == 'success' }}
+        run: bash scripts/ci/allowlisted-go-tests.sh
 
   pr-lint-wrapper:
     name: PR Lint (wrapper timing)
@@ -1990,6 +2069,7 @@ jobs:
       - package-npm
       - pr-policy-wrapper
       - pr-core-wrapper
+      - scripts-go-checks
       - pr-lint-wrapper
       - test-domain-uow
       - test-dolt-server-fingerprint
@@ -2024,6 +2104,7 @@ jobs:
             PACKAGE_NPM
             PR_POLICY_WRAPPER
             PR_CORE_WRAPPER
+            SCRIPTS_GO_CHECKS
             PR_LINT_WRAPPER
             TEST_DOMAIN_UOW
             TEST_DOLT_SERVER_FINGERPRINT
@@ -2060,6 +2141,7 @@ jobs:
           PACKAGE_NPM: ${{ needs.package-npm.result }}
           PR_POLICY_WRAPPER: ${{ needs.pr-policy-wrapper.result }}
           PR_CORE_WRAPPER: ${{ needs.pr-core-wrapper.result }}
+          SCRIPTS_GO_CHECKS: ${{ needs.scripts-go-checks.result }}
           PR_LINT_WRAPPER: ${{ needs.pr-lint-wrapper.result }}
           TEST_DOMAIN_UOW: ${{ needs.test-domain-uow.result }}
           TEST_DOLT_SERVER_FINGERPRINT: ${{ needs.test-dolt-server-fingerprint.result }}

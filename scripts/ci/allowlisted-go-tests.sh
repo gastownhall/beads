@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The Go tests the Bazel PR-core lane does not run or skips
 # (tools/bazel/equivalence_allowlist.txt), under `go test` in PR Core's test
-# environment. pr.yml runs this on every PR (pr-preflight-platforms, Linux):
+# environment. pr.yml runs this on every PR (scripts-go-checks):
 # where PR Core stands down for the Bazel lane (D2 step 3) it is their only
 # pre-merge run.
 
