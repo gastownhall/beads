@@ -480,6 +480,38 @@ func (c *echoingConn) QueryRowContext(context.Context, string, ...any) *sql.Row 
 	return nil
 }
 
+// reserializingEchoConn mirrors the http/https Dolt factory: it parses the
+// supplied URL and includes url.URL.String() rather than the caller's original
+// spelling in its error.
+type reserializingEchoConn struct {
+	calls int
+	cause error
+}
+
+func (c *reserializingEchoConn) ExecContext(_ context.Context, _ string, args ...any) (sql.Result, error) {
+	c.calls++
+	for _, arg := range args {
+		raw, ok := arg.(string)
+		if !ok || !strings.Contains(raw, "://") {
+			continue
+		}
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("could not access dolt url %q: %w", parsed.String(), c.cause)
+	}
+	return nil, c.cause
+}
+
+func (c *reserializingEchoConn) QueryContext(context.Context, string, ...any) (*sql.Rows, error) {
+	return nil, errStubConn
+}
+
+func (c *reserializingEchoConn) QueryRowContext(context.Context, string, ...any) *sql.Row {
+	return nil
+}
+
 // A failed restore must not echo credentials a user put in the URL: userinfo
 // and signed query parameters both reach BackupRestore verbatim because
 // ResolveBackupSource passes URLs through untouched.
@@ -533,8 +565,59 @@ func TestBackupRestoreRejectsInvalidCredentialedURLsBeforeDolt(t *testing.T) {
 			var parseErr *url.Error
 			if !errors.As(err, &parseErr) {
 				t.Errorf("BackupRestore(%q) error no longer preserves *url.Error: %v", source, err)
+				return
+			}
+			if want := RedactBackupURL(source); parseErr.URL != want {
+				t.Errorf("errors.As(*url.Error).URL = %q, want %q", parseErr.URL, want)
+			}
+			for _, secret := range []string{"AKIAEXAMPLE", "wJalrXUtnFEMI", "K7MDENG", "hunter2pass", "pass%zz"} {
+				if strings.Contains(parseErr.Error(), secret) {
+					t.Errorf("errors.As(*url.Error) for %q renders %q", source, parseErr)
+				}
 			}
 		})
+	}
+}
+
+func TestBackupRestoreAllowsBracketedAWSToReachDolt(t *testing.T) {
+	const source = "aws://[dynamo_table:bucket]/db"
+	sentinel := errors.New("Dolt reached")
+	conn := &failingConn{err: sentinel}
+
+	err := BackupRestore(context.Background(), conn, source, "beads", false)
+	if err == nil {
+		t.Fatal("BackupRestore returned nil for a failing statement")
+	}
+	if conn.calls != 1 {
+		t.Fatalf("BackupRestore called Dolt %d time(s), want 1", conn.calls)
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("BackupRestore error %q no longer preserves errors.Is", err)
+	}
+}
+
+func TestBackupRestoreSanitizesWrappedURLError(t *testing.T) {
+	const (
+		source     = "https://user:p@ss@doltremoteapi.dolthub.com/org/db"
+		serialized = "https://user:p%40ss@doltremoteapi.dolthub.com/org/db"
+	)
+	conn := &failingConn{err: &url.Error{Op: "Get", URL: serialized, Err: errors.New("dial failed")}}
+
+	err := BackupRestore(context.Background(), conn, source, "beads", false)
+	if err == nil {
+		t.Fatal("BackupRestore returned nil for a failing statement")
+	}
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		t.Fatalf("BackupRestore error no longer preserves *url.Error: %v", err)
+	}
+	if want := "https://doltremoteapi.dolthub.com/org/db"; urlErr.URL != want {
+		t.Errorf("errors.As(*url.Error).URL = %q, want %q", urlErr.URL, want)
+	}
+	for _, secret := range []string{"user:", "p@ss", "p%40ss"} {
+		if strings.Contains(urlErr.Error(), secret) {
+			t.Errorf("errors.As(*url.Error) renders %q", urlErr)
+		}
 	}
 }
 
@@ -561,6 +644,91 @@ func TestBackupRestoreScrubsEchoedURLAndPreservesCause(t *testing.T) {
 		if !errors.Is(err, sentinel) {
 			t.Errorf("BackupRestore error %q no longer preserves errors.Is", err)
 		}
+	}
+}
+
+func TestBackupRestoreScrubsReserializedURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  string
+		secrets []string
+	}{
+		{
+			name:    "at sign is escaped",
+			source:  "https://user:p@ss@doltremoteapi.dolthub.com/org/db",
+			secrets: []string{"user:", "p@ss", "p%40ss"},
+		},
+		{
+			name:    "percent escape is decoded",
+			source:  "https://user:pa%73s@doltremoteapi.dolthub.com/org/db",
+			secrets: []string{"user:", "pa%73s", "pass"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sentinel := errors.New("typed Dolt failure")
+			conn := &reserializingEchoConn{cause: sentinel}
+			err := BackupRestore(context.Background(), conn, tt.source, "beads", false)
+			if err == nil {
+				t.Fatal("BackupRestore returned nil for a failing statement")
+			}
+			if conn.calls != 1 {
+				t.Fatalf("BackupRestore called Dolt %d time(s), want 1", conn.calls)
+			}
+			if !strings.Contains(err.Error(), "https://doltremoteapi.dolthub.com/org/db") {
+				t.Errorf("BackupRestore error %q dropped the safe URL", err)
+			}
+			for _, secret := range tt.secrets {
+				if strings.Contains(err.Error(), secret) {
+					t.Errorf("BackupRestore error %q echoes %q", err, secret)
+				}
+			}
+			if !errors.Is(err, sentinel) {
+				t.Errorf("BackupRestore error %q no longer preserves errors.Is", err)
+			}
+		})
+	}
+}
+
+func TestBackupErrorRedactorScrubsCredentialSpellings(t *testing.T) {
+	const source = "https://user:pa%73s@doltremoteapi.dolthub.com/org/db"
+	sentinel := errors.New("typed Dolt failure")
+	cause := fmt.Errorf("raw userinfo=user:pa%%73s raw password=pa%%73s decoded userinfo=user:pass decoded password=pass: %w", sentinel)
+	err := redactBackupError(cause, source)
+
+	for _, secret := range []string{"user:pa%73s", "pa%73s", "user:pass", "pass"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("redactBackupError error %q echoes %q", err, secret)
+		}
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("redactBackupError error %q no longer preserves errors.Is", err)
+	}
+}
+
+func TestBackupSyncScrubsURLFromDoltError(t *testing.T) {
+	sentinel := errors.New("typed Dolt failure")
+	conn := &failingConn{err: fmt.Errorf("could not access dolt url %q: %w",
+		"https://user:p%40ss@doltremoteapi.dolthub.com/org/db", sentinel)}
+
+	err := BackupSync(context.Background(), conn, "default")
+	if err == nil {
+		t.Fatal("BackupSync returned nil for a failing statement")
+	}
+	if conn.calls != 1 {
+		t.Fatalf("BackupSync called Dolt %d time(s), want 1", conn.calls)
+	}
+	if !strings.Contains(err.Error(), "https://doltremoteapi.dolthub.com/org/db") {
+		t.Errorf("BackupSync error %q dropped the safe URL", err)
+	}
+	for _, secret := range []string{"user:", "p@ss", "p%40ss"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("BackupSync error %q echoes %q", err, secret)
+		}
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("BackupSync error %q no longer preserves errors.Is", err)
 	}
 }
 
