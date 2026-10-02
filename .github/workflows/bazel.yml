@@ -402,6 +402,7 @@ jobs:
         if: ${{ always() && steps.bd-artifact.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          overwrite: true # a job re-run is the same run: replace, not 409
           name: ${{ inputs.build-artifact-name || 'ci-build-artifacts' }}
           path: ${{ runner.temp }}/bd-artifacts/
           retention-days: 1
@@ -485,6 +486,7 @@ jobs:
         if: ${{ always() && steps.sync.outcome == 'failure' && github.event_name != 'pull_request_target' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-sync-patch
           path: ${{ runner.temp }}/bazel-sync-patch/
           if-no-files-found: ignore
@@ -494,6 +496,7 @@ jobs:
         if: ${{ failure() && steps.test.outcome == 'failure' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-testlogs
           path: |
             bazel-testlogs/**/test.log
@@ -766,6 +769,7 @@ jobs:
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-embedded-testlogs
           path: |
             bazel-testlogs/**/test.log
@@ -858,6 +862,7 @@ jobs:
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-integration-testlogs
           path: |
             bazel-testlogs/**/test.log
@@ -936,6 +941,7 @@ jobs:
         if: ${{ failure() && steps.test.outcome == 'failure' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-${{ env.BAZEL_DOLT_LANE }}-testlogs
           path: |
             bazel-testlogs/**/test.log
@@ -1043,6 +1049,7 @@ jobs:
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-proxied-testlogs
           path: |
             bazel-testlogs/**/test.log
@@ -1152,6 +1159,7 @@ jobs:
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-server-storage-testlogs
           path: |
             bazel-testlogs/**/test.log

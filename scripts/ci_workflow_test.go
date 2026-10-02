@@ -4759,3 +4759,27 @@ func TestBazelGatedLanesNeverRetryFlakyTests(t *testing.T) {
 		t.Fatalf("checked only %d files; is the repository root right?", checked)
 	}
 }
+
+// Every artifact bazel.yml uploads has a fixed name within its run, and a
+// job re-run ("Re-run failed jobs", the documented recovery for a Bazel lane
+// that hit a remote cache eviction or a flake) is the same workflow run:
+// upload-artifact v4+ refuses a second artifact of the same name there
+// (409 Conflict) unless overwrite is set, which would turn a passing retry
+// red. bazel-test uploads the bd package even after its tests fail.
+func TestBazelWorkflowUploadsSurviveJobReruns(t *testing.T) {
+	uploads := 0
+	for name, job := range readCIWorkflow(t, bazelWorkflowName).Jobs {
+		for _, step := range job.Steps {
+			if !strings.HasPrefix(step.Uses, "actions/upload-artifact@") {
+				continue
+			}
+			uploads++
+			if step.With["overwrite"] != "true" {
+				t.Errorf("%s step %q uploads %q without overwrite: true; a job re-run's upload would fail with 409", name, step.Name, step.With["name"])
+			}
+		}
+	}
+	if uploads < 8 {
+		t.Errorf("found %d upload steps in %s, want at least 8", uploads, bazelWorkflowName)
+	}
+}
