@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `bd preflight --fix --json` no longer returns a `Version sync` fix result:
   version updates must keep all release surfaces aligned via `scripts/update-versions.sh`.
 - Release-tag pushes require Go and reject batches containing different release versions.
+- On version drift the release-tag pre-push hook points at the checker's
+  remedies instead of prescribing `scripts/update-versions.sh <version>`, and
+  `scripts/check-versions.sh` and `bd preflight` list the three that work: with
+  `cmd/bd/version.go` already at the release version, that re-run rewrites only
+  the `.githooks` markers and `uv.lock` and leaves any other drifted file as it was.
 
 ### Fixed
 

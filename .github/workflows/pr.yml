@@ -15,21 +15,37 @@ concurrency:
 env:
   BD_DISABLE_METRICS: "1"
   BD_DISABLE_EVENT_FLUSH: "1"
-  # D2 step 1: "true" retires PR Risk's legacy embedded-Dolt test jobs on
-  # same-repo, non-Dependabot pull_requests; pr.yml's
-  # gated Bazel lane is then the tier's only pre-merge run, and pr.yml's
-  # gate goes red unless that lane ran remotely and passed. Committed, not a
-  # repo variable, so a re-run can never change it; must equal pr.yml's /
-  # pr-risk.yml's copy (scripts/pr_risk_bazel_coverage_test.go). Revert:
-  # commit "false" in both workflows (in-flight PRs pick it up on their next
-  # push or merge of main).
+  # D2: "true" retires a PR Risk legacy tier on same-repo, non-Dependabot
+  # pull_requests; pr.yml's gated Bazel lane(s) for it are then the tier's
+  # only pre-merge run, and pr.yml's gate goes red unless they ran remotely
+  # and passed. Committed, not repo variables, so a re-run can never change
+  # them; each must equal pr.yml's / pr-risk.yml's copy
+  # (scripts/pr_risk_bazel_coverage_test.go). Revert: commit "false" in both
+  # workflows (in-flight PRs pick it up on their next push or merge of main).
+  # Step 1: the embedded-Dolt test jobs (Bazel `embedded Dolt tier`).
   BAZEL_RETIRES_LEGACY_EMBEDDED: "true"
+  # Step 2: the proxied-server and server-Dolt storage test jobs (Bazel
+  # `proxied-server tier` and `server-Dolt storage tier`).
+  BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS: "true"
+  # Step 3: pr.yml's own legacy jobs whose Bazel lanes run in the same pr.yml
+  # run: PR Core, build-artifacts, the pure-Go/js-wasm check, domain+uow and
+  # contract corpus (Bazel `test`, `pure-Go and js/wasm`, `dolt-server
+  # lane`). pr-risk.yml retires nothing for it; its copy only keeps the
+  # shared bazel-coverage job identical.
+  BAZEL_RETIRES_LEGACY_PR_LANES: "true"
 
 jobs:
 
+  # D2 step 3: stands down where bazel-coverage says pr_lanes (same-repo,
+  # non-Dependabot PRs while BAZEL_RETIRES_LEGACY_PR_LANES is "true"): its
+  # consumers then stand down too, or (the package gates) take bazel.yml's
+  # bazel-ci-build-artifacts, the same layout built by Bazel /
+  # test, which ci-gate then requires to have run remotely and passed.
   build-artifacts:
     name: Build Artifacts
     runs-on: ubuntu-latest
+    needs: bazel-coverage
+    if: needs.bazel-coverage.outputs.pr_lanes != 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
@@ -181,9 +197,16 @@ jobs:
   # process execution must fail explicitly, so this required leaf job compiles
   # the complete package test binary and executes that exact contract under
   # Node rather than allowing a missing platform implementation to recur.
+  #
+  # D2 step 3: stands down where bazel-coverage says pr_lanes; Bazel's
+  # `pure-Go and js/wasm` lane (bazel-pure) runs the same boundaries, and
+  # check-release-target-cross-compilation still `go build`s ./... with
+  # CGO_ENABLED=0 on every PR.
   check-cmd-bd-puregeo-tests:
     name: Check pure-Go and js/wasm boundaries (CGO_ENABLED=0)
     runs-on: ubuntu-latest
+    needs: bazel-coverage
+    if: needs.bazel-coverage.outputs.pr_lanes != 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -734,7 +757,11 @@ jobs:
   package-mcp:
     name: Package Gate (MCP)
     runs-on: ubuntu-latest
-    needs: [detect-package-gates, build-artifacts]
+    # D2 step 3: where bazel-coverage says pr_lanes, build-artifacts stands
+    # down and this gate takes the Bazel-built bd (bazel-ci-build-artifacts,
+    # uploaded by the bazel call's `test` lane), so it waits for the call.
+    needs: [detect-package-gates, build-artifacts, bazel-coverage, bazel]
+    if: ${{ !cancelled() && needs.detect-package-gates.result == 'success' && needs.bazel-coverage.result == 'success' && (needs.bazel-coverage.outputs.pr_lanes == 'true' || needs.build-artifacts.result == 'success') }}
     steps:
       - name: Check applicability
         id: applicability
@@ -742,6 +769,20 @@ jobs:
           echo "run=${{ needs.detect-package-gates.outputs.mcp_package }}" >> "$GITHUB_OUTPUT"
           if [[ "${{ needs.detect-package-gates.outputs.mcp_package }}" != "true" ]]; then
             echo "MCP package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
+          fi
+
+      # D2 step 3: where build-artifacts stood down, the bd comes from the
+      # bazel call's `test` lane, which runs only in mode remote; say so
+      # instead of failing on a missing artifact (ci-gate is red then too,
+      # BAZEL_PR_LANES_RETIRED).
+      - name: Check the Bazel-built bd exists
+        if: steps.applicability.outputs.run == 'true' && needs.bazel-coverage.outputs.pr_lanes == 'true'
+        env:
+          BAZEL_RBE_MODE: ${{ needs.bazel.outputs.rbe-mode }}
+        run: |
+          if [[ "$BAZEL_RBE_MODE" != "remote" ]]; then
+            echo "::error::Build Artifacts stood down for Bazel / test (BAZEL_RETIRES_LEGACY_PR_LANES), but the Bazel call ran in mode '${BAZEL_RBE_MODE:-none}', so no bd was built for this gate. See BAZEL_PR_LANES_RETIRED in CI Gate / Required."
+            exit 1
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -761,7 +802,7 @@ jobs:
         if: steps.applicability.outputs.run == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: ci-build-artifacts
+          name: ${{ needs.bazel-coverage.outputs.pr_lanes == 'true' && 'bazel-ci-build-artifacts' || 'ci-build-artifacts' }}
           path: ci-build-artifacts
 
       - name: Verify build artifacts
@@ -781,7 +822,11 @@ jobs:
   package-npm:
     name: Package Gate (npm)
     runs-on: ubuntu-latest
-    needs: [detect-package-gates, build-artifacts]
+    # D2 step 3: where bazel-coverage says pr_lanes, build-artifacts stands
+    # down and this gate takes the Bazel-built bd (bazel-ci-build-artifacts,
+    # uploaded by the bazel call's `test` lane), so it waits for the call.
+    needs: [detect-package-gates, build-artifacts, bazel-coverage, bazel]
+    if: ${{ !cancelled() && needs.detect-package-gates.result == 'success' && needs.bazel-coverage.result == 'success' && (needs.bazel-coverage.outputs.pr_lanes == 'true' || needs.build-artifacts.result == 'success') }}
     steps:
       - name: Check applicability
         id: applicability
@@ -789,6 +834,20 @@ jobs:
           echo "run=${{ needs.detect-package-gates.outputs.npm_package }}" >> "$GITHUB_OUTPUT"
           if [[ "${{ needs.detect-package-gates.outputs.npm_package }}" != "true" ]]; then
             echo "npm package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
+          fi
+
+      # D2 step 3: where build-artifacts stood down, the bd comes from the
+      # bazel call's `test` lane, which runs only in mode remote; say so
+      # instead of failing on a missing artifact (ci-gate is red then too,
+      # BAZEL_PR_LANES_RETIRED).
+      - name: Check the Bazel-built bd exists
+        if: steps.applicability.outputs.run == 'true' && needs.bazel-coverage.outputs.pr_lanes == 'true'
+        env:
+          BAZEL_RBE_MODE: ${{ needs.bazel.outputs.rbe-mode }}
+        run: |
+          if [[ "$BAZEL_RBE_MODE" != "remote" ]]; then
+            echo "::error::Build Artifacts stood down for Bazel / test (BAZEL_RETIRES_LEGACY_PR_LANES), but the Bazel call ran in mode '${BAZEL_RBE_MODE:-none}', so no bd was built for this gate. See BAZEL_PR_LANES_RETIRED in CI Gate / Required."
+            exit 1
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -804,7 +863,7 @@ jobs:
         if: steps.applicability.outputs.run == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: ci-build-artifacts
+          name: ${{ needs.bazel-coverage.outputs.pr_lanes == 'true' && 'bazel-ci-build-artifacts' || 'ci-build-artifacts' }}
           path: ci-build-artifacts
 
       - name: Verify build artifacts
@@ -876,10 +935,15 @@ jobs:
       - name: Run PR policy wrapper
         run: make ci-pr-policy
 
+  # D2 step 3: stands down where bazel-coverage says pr_lanes; Bazel /
+  # test (`bazel test //... --config=ci`, the same selection, checked by its
+  # equivalence step) runs it, and scripts-go-checks runs what Bazel does not
+  # (./scripts/... and the allowlisted tests under go test, go test's vet).
   pr-core-wrapper:
     name: PR Core (wrapper timing)
     runs-on: ubuntu-latest
-    needs: build-artifacts
+    needs: [build-artifacts, bazel-coverage]
+    if: needs.bazel-coverage.outputs.pr_lanes != 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -933,6 +997,67 @@ jobs:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
           GOCACHE: ${{ runner.temp }}/go-cache/race
         run: make ci-pr-core
+
+  # PR Core's duties the Bazel lanes do not take over (D2 step 3), on every
+  # PR whatever bazel-coverage says, in PR Core's environment (dolt, git and
+  # dolt identity, scripts/ci/lib/test-env.sh):
+  # - `go test ./scripts/...` with PR Core's flags: the repository policy
+  #   tests, several of which check part or all of their rules under go test
+  #   only (scripts/bazel_skip_allowlist_test.go keeps such parts there);
+  # - go test's own vet checks over ./... (rules_go's go_test runs none);
+  # - the Go tests `bazel test --config=ci` does not run or skips
+  #   (tools/bazel/equivalence_allowlist.txt), each required to pass.
+  scripts-go-checks:
+    name: Go test (scripts), go vet and Bazel-skipped tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Restore race Go build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-
+
+      - name: Install Dolt
+        run: ./scripts/ci/install-dolt.sh
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Go test the scripts packages
+        env:
+          BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION: '1'
+          GOCACHE: ${{ runner.temp }}/go-cache/race
+        run: bash scripts/ci/scripts-go-test.sh
+
+      - name: Go vet with go test's checks
+        if: ${{ !cancelled() && steps.setup-go.outcome == 'success' }}
+        run: bash scripts/ci/go-test-vet.sh
+
+      - name: Run the Go tests the Bazel lane skips
+        if: ${{ !cancelled() && steps.setup-go.outcome == 'success' }}
+        run: bash scripts/ci/allowlisted-go-tests.sh
 
   pr-lint-wrapper:
     name: PR Lint (wrapper timing)
@@ -1026,10 +1151,16 @@ jobs:
   # Dolt sql-server image cached locally (testcontainers checks `docker image
   # inspect` and skips otherwise). Pulling the image up front guarantees the
   # suite actually runs and surfaces failures here with a clear job name.
+  #
+  # D2 step 3: stands down where bazel-coverage says pr_lanes; Bazel's
+  # `dolt-server lane` runs the same packages against a local dolt
+  # sql-server, which test-dolt-server-fingerprint (every PR) keeps equal to
+  # the container this job uses.
   test-domain-uow:
     name: Test (storage domain + uow)
     runs-on: ubuntu-latest
-    needs: build-artifacts
+    needs: [build-artifacts, bazel-coverage]
+    if: needs.bazel-coverage.outputs.pr_lanes != 'true'
     # The race-enabled storage package has outgrown Go's implicit 10-minute
     # timeout. Keep both per-package deadlines inside one finite job budget.
     timeout-minutes: 30
@@ -1073,15 +1204,6 @@ jobs:
           sha256sum -c SHA256SUMS
           chmod +x bd-linux-gms-pure
 
-      # The only lane with both the image and the pinned dolt CLI: compares
-      # the container and the local test server backend against the one
-      # checked-in fingerprint, so an image bump cannot drift the container
-      # side unnoticed. REQUIRE makes the container half fail, not skip.
-      - name: Test Dolt server fingerprint (container + local)
-        env:
-          BEADS_TEST_REQUIRE_DOLT_CONTAINER: "1"
-        run: go test -tags gms_pure_go -count=1 -timeout 5m -v -run '^TestDoltServerFingerprint$' ./internal/testutil/
-
       - name: Test domain + uow + tracker
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
@@ -1106,6 +1228,48 @@ jobs:
           # step has no sibling test binary to race for the reaper (be-2on).
           TESTCONTAINERS_RYUK_DISABLED: "true"
         run: go test -tags gms_pure_go -race -count=1 -timeout 10m -v ./cmd/bd/doctor/fix/
+
+  # Compares the Dolt sql-server container image the container-backed tests
+  # use and the local test server backend (the pinned dolt CLI, what every
+  # Bazel dolt-server lane starts) against the one checked-in fingerprint,
+  # so an image bump cannot drift the container side unnoticed. REQUIRE
+  # makes the container half fail, not skip. Every PR, whatever bazel-coverage
+  # says: it was test-domain-uow's first step, and the Bazel lanes that
+  # replace that job (D2 step 3) have no docker.
+  test-dolt-server-fingerprint:
+    name: Test (Dolt server fingerprint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Install Dolt CLI
+        run: ./scripts/ci/install-dolt.sh
+
+      - name: Verify dolt on PATH
+        run: dolt version
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Pull Dolt sql-server image
+        # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
+        run: ./scripts/ci/pull-dolt-image.sh
+
+      - name: Test Dolt server fingerprint (container + local)
+        env:
+          BEADS_TEST_REQUIRE_DOLT_CONTAINER: "1"
+        run: go test -tags gms_pure_go -count=1 -timeout 5m -v -run '^TestDoltServerFingerprint$' ./internal/testutil/
 
   # macOS-only regressions were landing on main undetected: main.yml's Test
   # (macos-latest) leg only runs `if: github.event_name == 'push' &&
@@ -1210,9 +1374,14 @@ jobs:
   # ~10 min: each test builds an isolated Dolt-backed workspace. If that ever
   # becomes unacceptable on PRs, shard this job by an exhaustive `go test
   # -list` partition — do not reintroduce a hand-written -run regex.
+  #
+  # D2 step 3: stands down where bazel-coverage says pr_lanes; Bazel's
+  # `dolt-server lane` runs the package (//cmd/bd/protocol:protocol_dolt_test).
   contract-corpus:
     name: Contract corpus (golden + determinism + conformance)
     runs-on: ubuntu-latest
+    needs: bazel-coverage
+    if: needs.bazel-coverage.outputs.pr_lanes != 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -1784,19 +1953,25 @@ jobs:
   # The Bazel lane (bazel.yml), gated alongside the legacy jobs it mirrors
   # (PR Core, build-artifacts, the pure-Go/js-wasm check, domain+uow and
   # contract corpus, and pr-risk.yml's embedded-Dolt, proxied-server and
-  # server-Dolt storage tiers), all of which stay required, except that
-  # pr-risk.yml's embedded-Dolt test jobs stand down on same-repo PRs with
-  # a non-Dependabot actor while BAZEL_RETIRES_LEGACY_EMBEDDED is "true" (its
-  # bazel-embedded-coverage job; D2 step 1), and ci-gate then requires this
-  # call's embedded lane to have run remotely and passed. bazel.yml has no pull_request/merge_group trigger of its own:
-  # this call is its only PR run. It gets the four RBE secrets and nothing
-  # else; its rbe job decides remote, cache (forks, Dependabot: local
-  # execution with the anonymous read-only cache, no remote-only lanes) or
-  # skip, and exports that for ci-gate. Its bazel-integration lane
+  # server-Dolt storage tiers), all of which stay required ids, but stand
+  # down on same-repo PRs with a non-Dependabot actor while their D2 flag
+  # is "true" (bazel-coverage): pr-risk.yml's embedded-Dolt test jobs
+  # (BAZEL_RETIRES_LEGACY_EMBEDDED, step 1), its proxied-server and
+  # server-Dolt storage test jobs (BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS,
+  # step 2), and this workflow's PR Core, build-artifacts, pure-Go/js-wasm,
+  # domain+uow and contract corpus jobs (BAZEL_RETIRES_LEGACY_PR_LANES,
+  # step 3). ci-gate then requires this call's lanes for them (embedded;
+  # proxied and server-storage; test, pure and doltserver) to have run
+  # remotely and passed. bazel.yml has no pull_request/merge_group trigger
+  # of its own: this call is its only PR run. It gets the four RBE secrets
+  # and nothing else; its rbe job decides remote, cache (forks, Dependabot:
+  # local execution with the anonymous read-only cache, no remote-only
+  # lanes) or skip, and exports that for ci-gate. Its bazel-integration lane
   # (main.yml's integration jobs, which run only on push to main) is on and
   # required here, remote only: same-repo PRs run it, fork and Dependabot PRs
-  # (mode cache) skip it. Its bd artifact is renamed so it cannot collide
-  # with build-artifacts' upload.
+  # (mode cache) skip it. Its bd artifact is renamed
+  # (bazel-ci-build-artifacts) so it cannot collide with build-artifacts'
+  # upload; the package gates take it where build-artifacts stands down.
   bazel:
     name: Bazel
     permissions:
@@ -1811,45 +1986,67 @@ jobs:
       build-artifact-name: bazel-ci-build-artifacts
       integration: "on"
 
-  # D2 step 1: pr-risk.yml's bazel-embedded-coverage job, verbatim (policy-
-  # tested identical). Where it says covered, PR Risk skips its legacy
-  # embedded test jobs, so ci-gate requires the Bazel embedded lane to have
-  # run remotely and passed in this run.
-  bazel-embedded-coverage:
-    name: Bazel embedded coverage
+  # D2: pr-risk.yml's bazel-coverage job, verbatim (policy-tested
+  # identical). Where it says a tier is covered, PR Risk skips that tier's
+  # legacy test jobs (embedded, dolt_server), or this workflow skips its own
+  # (pr_lanes: build-artifacts, PR Core, the pure-Go/js-wasm check,
+  # domain+uow and contract corpus), so ci-gate requires the tier's Bazel
+  # lanes to have run remotely and passed in this run.
+  bazel-coverage:
+    name: Bazel tier coverage
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      covered: ${{ steps.decide.outputs.covered }}
+      embedded: ${{ steps.decide.outputs.embedded }}
+      dolt_server: ${{ steps.decide.outputs.dolt_server }}
+      pr_lanes: ${{ steps.decide.outputs.pr_lanes }}
     steps:
       # GitHub's == is case-insensitive. FORK is bazel.yml's rbe job's
       # expression, verbatim. Nothing mutable is read: not RBE_WEST_WORKERS
       # and not the executor secret (either, evaluated per run, would let one
       # workflow's re-run disagree with the other's). A same-repo PR whose run
       # lacks the secret is covered anyway, so pr.yml's gate goes red (mode
-      # cache) instead of the tier silently moving back. Dependabot runs get
-      # no Actions secrets by design and keep the legacy tier; github.actor
+      # cache) instead of a tier silently moving back. Dependabot runs get
+      # no Actions secrets by design and keep the legacy tiers; github.actor
       # (unlike triggering_actor) stays the PR's actor on a re-run.
-      - name: Decide whether the Bazel lane covers the embedded tier
+      - name: Decide which legacy tiers the Bazel lanes cover
         id: decide
         env:
-          RETIRED: ${{ env.BAZEL_RETIRES_LEGACY_EMBEDDED == 'true' }}
+          RETIRED_EMBEDDED: ${{ env.BAZEL_RETIRES_LEGACY_EMBEDDED == 'true' }}
+          RETIRED_DOLT_SERVER: ${{ env.BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS == 'true' }}
+          RETIRED_PR_LANES: ${{ env.BAZEL_RETIRES_LEGACY_PR_LANES == 'true' }}
           PULL_REQUEST: ${{ github.event_name == 'pull_request' }}
           FORK: ${{ github.event.pull_request.head.repo.fork == true }}
           DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
         run: |
-          for v in RETIRED PULL_REQUEST FORK DEPENDABOT; do
+          for v in RETIRED_EMBEDDED RETIRED_DOLT_SERVER RETIRED_PR_LANES PULL_REQUEST FORK DEPENDABOT; do
             case "${!v}" in
               true|false) ;;
               *) echo "::error::$v is '${!v}', want true or false"; exit 1 ;;
             esac
           done
-          covered=false
-          if [ "$RETIRED" = true ] && [ "$PULL_REQUEST" = true ] && [ "$FORK" = false ] && [ "$DEPENDABOT" = false ]; then
-            covered=true
+          same_repo_pr=false
+          if [ "$PULL_REQUEST" = true ] && [ "$FORK" = false ] && [ "$DEPENDABOT" = false ]; then
+            same_repo_pr=true
           fi
-          echo "covered=$covered" >> "$GITHUB_OUTPUT"
-          echo "Legacy embedded Dolt tier retired in favour of the Bazel lane: **$covered** (retired: $RETIRED, pull_request: $PULL_REQUEST, fork: $FORK, dependabot: $DEPENDABOT)" | tee -a "$GITHUB_STEP_SUMMARY"
+          embedded=false
+          if [ "$same_repo_pr" = true ] && [ "$RETIRED_EMBEDDED" = true ]; then
+            embedded=true
+          fi
+          dolt_server=false
+          if [ "$same_repo_pr" = true ] && [ "$RETIRED_DOLT_SERVER" = true ]; then
+            dolt_server=true
+          fi
+          pr_lanes=false
+          if [ "$same_repo_pr" = true ] && [ "$RETIRED_PR_LANES" = true ]; then
+            pr_lanes=true
+          fi
+          {
+            echo "embedded=$embedded"
+            echo "dolt_server=$dolt_server"
+            echo "pr_lanes=$pr_lanes"
+          } >> "$GITHUB_OUTPUT"
+          echo "Legacy tiers retired in favour of the Bazel lanes: embedded Dolt **$embedded**, proxied and server Dolt **$dolt_server**, pr.yml's PR Core/build/pure-Go/domain+uow/contract jobs **$pr_lanes** (pull_request: $PULL_REQUEST, fork: $FORK, dependabot: $DEPENDABOT, retired embedded: $RETIRED_EMBEDDED, retired proxied/server: $RETIRED_DOLT_SERVER, retired pr.yml jobs: $RETIRED_PR_LANES)" | tee -a "$GITHUB_STEP_SUMMARY"
 
   ci-gate:
     name: CI Gate / Required
@@ -1872,14 +2069,16 @@ jobs:
       - package-npm
       - pr-policy-wrapper
       - pr-core-wrapper
+      - scripts-go-checks
       - pr-lint-wrapper
       - test-domain-uow
+      - test-dolt-server-fingerprint
       - contract-corpus
       - fmt-check
       - lint
       - windows-make-shell
       - bazel
-      - bazel-embedded-coverage
+      - bazel-coverage
     if: ${{ always() }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -1905,8 +2104,10 @@ jobs:
             PACKAGE_NPM
             PR_POLICY_WRAPPER
             PR_CORE_WRAPPER
+            SCRIPTS_GO_CHECKS
             PR_LINT_WRAPPER
             TEST_DOMAIN_UOW
+            TEST_DOLT_SERVER_FINGERPRINT
             CONTRACT_CORPUS
             FMT_CHECK
             LINT
@@ -1919,8 +2120,10 @@ jobs:
             BAZEL_DOLTSERVER
             BAZEL_PROXIED
             BAZEL_SERVER_STORAGE
-            BAZEL_EMBEDDED_COVERAGE
+            BAZEL_COVERAGE
             BAZEL_EMBEDDED_RETIRED
+            BAZEL_DOLT_SERVER_RETIRED
+            BAZEL_PR_LANES_RETIRED
           BUILD_ARTIFACTS: ${{ needs.build-artifacts.result }}
           CHECK_BUILD_TAGS: ${{ needs.check-build-tags.result }}
           CHECK_CMD_BD_PUREGEO_TESTS: ${{ needs.check-cmd-bd-puregeo-tests.result }}
@@ -1938,8 +2141,10 @@ jobs:
           PACKAGE_NPM: ${{ needs.package-npm.result }}
           PR_POLICY_WRAPPER: ${{ needs.pr-policy-wrapper.result }}
           PR_CORE_WRAPPER: ${{ needs.pr-core-wrapper.result }}
+          SCRIPTS_GO_CHECKS: ${{ needs.scripts-go-checks.result }}
           PR_LINT_WRAPPER: ${{ needs.pr-lint-wrapper.result }}
           TEST_DOMAIN_UOW: ${{ needs.test-domain-uow.result }}
+          TEST_DOLT_SERVER_FINGERPRINT: ${{ needs.test-dolt-server-fingerprint.result }}
           CONTRACT_CORPUS: ${{ needs.contract-corpus.result }}
           FMT_CHECK: ${{ needs.fmt-check.result }}
           LINT: ${{ needs.lint.result }}
@@ -1960,10 +2165,12 @@ jobs:
           BAZEL_CALL: ${{ needs.bazel.result }}
           BAZEL_RBE_MODE: ${{ needs.bazel.outputs.rbe-mode }}
           BAZEL_RBE_ENABLED: ${{ needs.bazel.outputs.rbe-enabled }}
-          # D2 step 1: whether PR Risk retired its legacy embedded tier for
-          # this PR (BAZEL_EMBEDDED_RETIRED below).
-          BAZEL_EMBEDDED_COVERAGE: ${{ needs.bazel-embedded-coverage.result }}
-          BAZEL_COVERS_EMBEDDED: ${{ needs.bazel-embedded-coverage.outputs.covered }}
+          # D2: which legacy tiers PR Risk, or this workflow (pr_lanes),
+          # retired for this PR (BAZEL_*_RETIRED below).
+          BAZEL_COVERAGE: ${{ needs.bazel-coverage.result }}
+          BAZEL_COVERS_EMBEDDED: ${{ needs.bazel-coverage.outputs.embedded }}
+          BAZEL_COVERS_DOLT_SERVER: ${{ needs.bazel-coverage.outputs.dolt_server }}
+          BAZEL_COVERS_PR_LANES: ${{ needs.bazel-coverage.outputs.pr_lanes }}
         run: |
           skipped_ok=""
           if [[ "$GITHUB_EVENT_NAME" == "merge_group" ]]; then
@@ -1976,15 +2183,35 @@ jobs:
           skipped_ok="$skipped_ok $(bash .github/scripts/bazel-gate.sh skips)"
           BAZEL="$(bash .github/scripts/bazel-gate.sh aggregate)"
           export BAZEL
-          # Where PR Risk's legacy embedded tier is retired, this run's Bazel
-          # embedded lane is the tier's only pre-merge run: it must have run
-          # remotely and passed. Mode skip (the farm switch off), or any
-          # other result, is red whatever bazel-gate.sh allows.
-          BAZEL_EMBEDDED_RETIRED=success
-          if [[ "$BAZEL_COVERS_EMBEDDED" == "true" ]] && { [[ "$BAZEL_RBE_MODE" != "remote" ]] || [[ "$BAZEL_EMBEDDED" != "success" ]]; }; then
-            BAZEL_EMBEDDED_RETIRED="not-run-remotely"
-            echo "::error::PR Risk's legacy embedded Dolt tier is retired (BAZEL_RETIRES_LEGACY_EMBEDDED) and the Bazel embedded lane did not run remotely and pass (mode '${BAZEL_RBE_MODE:-none}', result '${BAZEL_EMBEDDED:-none}'). If remote execution is off on purpose, commit BAZEL_RETIRES_LEGACY_EMBEDDED: \"false\" in pr.yml and pr-risk.yml and push this PR again."
+          # D2 step 3: this workflow's legacy jobs that stand down where
+          # bazel-coverage says pr_lanes (exactly "true"); their Bazel lanes
+          # are then required below.
+          if [[ "$BAZEL_COVERS_PR_LANES" == "true" ]]; then
+            skipped_ok="$skipped_ok BUILD_ARTIFACTS CHECK_CMD_BD_PUREGEO_TESTS PR_CORE_WRAPPER TEST_DOMAIN_UOW CONTRACT_CORPUS"
           fi
-          export BAZEL_EMBEDDED_RETIRED
+          # Where a legacy tier is retired (by PR Risk or by this
+          # workflow), this run's Bazel lanes for it are the tier's only
+          # pre-merge run: each must have run remotely and passed. Mode skip
+          # (the farm switch off), or any other result, is red whatever
+          # bazel-gate.sh allows.
+          # retired ID FLAG COVERED TIER LANE...: set and export ID.
+          retired() {
+            local id="$1" flag="$2" covered="$3" tier="$4" result=success lane
+            shift 4
+            if [[ "$covered" == "true" ]]; then
+              [[ "$BAZEL_RBE_MODE" == "remote" ]] || result="not-run-remotely"
+              for lane in "$@"; do
+                [[ "${!lane:-}" == "success" ]] || result="not-run-remotely"
+              done
+              if [[ "$result" != "success" ]]; then
+                echo "::error::The legacy $tier is retired ($flag) and its Bazel lanes ($*) did not all run remotely and pass (mode '${BAZEL_RBE_MODE:-none}'). If remote execution is off on purpose, commit $flag: \"false\" in pr.yml and pr-risk.yml and push this PR again."
+              fi
+            fi
+            printf -v "$id" '%s' "$result"
+            export "${id?}"
+          }
+          retired BAZEL_EMBEDDED_RETIRED BAZEL_RETIRES_LEGACY_EMBEDDED "$BAZEL_COVERS_EMBEDDED" "PR Risk embedded Dolt tier" BAZEL_EMBEDDED
+          retired BAZEL_DOLT_SERVER_RETIRED BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS "$BAZEL_COVERS_DOLT_SERVER" "PR Risk proxied-server and server-Dolt storage tiers" BAZEL_PROXIED BAZEL_SERVER_STORAGE
+          retired BAZEL_PR_LANES_RETIRED BAZEL_RETIRES_LEGACY_PR_LANES "$BAZEL_COVERS_PR_LANES" "PR Core, build-artifacts, pure-Go/js-wasm, domain+uow and contract corpus jobs" BAZEL_TEST BAZEL_PURE BAZEL_DOLTSERVER
           export CI_GATE_SKIPPED_OK="$skipped_ok"
           bash .github/scripts/ci-gate.sh

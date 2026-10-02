@@ -37,7 +37,7 @@ if [ "$pushing_version_tag" -eq 1 ]; then
                         echo ""
                         if [ "$checker_status" -eq 1 ]; then
                             echo "❌ Refusing to push release tag v$tag_version: versions are inconsistent." >&2
-                            echo "   Fix with: scripts/update-versions.sh <version>" >&2
+                            echo "   See the checker output above for what is inconsistent and how to fix it." >&2
                         elif [ "$checker_status" -eq 3 ]; then
                             echo "❌ Refusing to push release tag v$tag_version: the tag does not match this checkout's release version." >&2
                             echo "   The release surfaces agree with each other, so do NOT re-run update-versions.sh." >&2

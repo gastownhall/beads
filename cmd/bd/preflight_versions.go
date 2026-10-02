@@ -21,7 +21,7 @@ func runBeadsVersionSyncCheckWithUV(
 	if err != nil {
 		output := err.Error()
 		if report.CanonicalVersion != "" {
-			output += "\nRun: scripts/update-versions.sh " + report.CanonicalVersion
+			output += "\n" + report.MismatchRemedy()
 		}
 		return CheckResult{
 			Name:    "Version sync",

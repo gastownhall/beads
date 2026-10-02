@@ -12,15 +12,24 @@ concurrency:
 env:
   BD_DISABLE_METRICS: "1"
   BD_DISABLE_EVENT_FLUSH: "1"
-  # D2 step 1: "true" retires PR Risk's legacy embedded-Dolt test jobs on
-  # same-repo, non-Dependabot pull_requests; pr.yml's
-  # gated Bazel lane is then the tier's only pre-merge run, and pr.yml's
-  # gate goes red unless that lane ran remotely and passed. Committed, not a
-  # repo variable, so a re-run can never change it; must equal pr.yml's /
-  # pr-risk.yml's copy (scripts/pr_risk_bazel_coverage_test.go). Revert:
-  # commit "false" in both workflows (in-flight PRs pick it up on their next
-  # push or merge of main).
+  # D2: "true" retires a PR Risk legacy tier on same-repo, non-Dependabot
+  # pull_requests; pr.yml's gated Bazel lane(s) for it are then the tier's
+  # only pre-merge run, and pr.yml's gate goes red unless they ran remotely
+  # and passed. Committed, not repo variables, so a re-run can never change
+  # them; each must equal pr.yml's / pr-risk.yml's copy
+  # (scripts/pr_risk_bazel_coverage_test.go). Revert: commit "false" in both
+  # workflows (in-flight PRs pick it up on their next push or merge of main).
+  # Step 1: the embedded-Dolt test jobs (Bazel `embedded Dolt tier`).
   BAZEL_RETIRES_LEGACY_EMBEDDED: "true"
+  # Step 2: the proxied-server and server-Dolt storage test jobs (Bazel
+  # `proxied-server tier` and `server-Dolt storage tier`).
+  BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS: "true"
+  # Step 3: pr.yml's own legacy jobs whose Bazel lanes run in the same pr.yml
+  # run: PR Core, build-artifacts, the pure-Go/js-wasm check, domain+uow and
+  # contract corpus (Bazel `test`, `pure-Go and js/wasm`, `dolt-server
+  # lane`). pr-risk.yml retires nothing for it; its copy only keeps the
+  # shared bazel-coverage job identical.
+  BAZEL_RETIRES_LEGACY_PR_LANES: "true"
 
 jobs:
   detect-ci-tier:
@@ -64,51 +73,74 @@ jobs:
             printf '%s\n' "$selection" | sed 's/^/- `/' | sed 's/$/`/'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # D2 step 1: whether the legacy test-embedded-* jobs below stand down
-  # because pr.yml's gated Bazel `embedded Dolt tier` lane is this PR's run of
-  # the tier. True only with BAZEL_RETIRES_LEGACY_EMBEDDED, on a same-repo (not
-  # fork) pull_request whose actor is not Dependabot. pr.yml runs this same
-  # job (policy-tested identical) and its gate goes red unless the lane then
-  # ran remotely and passed, so neither the kill switch (mode skip) nor a
-  # missing executor secret (mode cache) can silently drop the tier. Forks
-  # and Dependabot (no secrets), merge_group and every other event keep the
-  # legacy tier. The step reads no secret or variable and runs no repository
-  # code.
-  bazel-embedded-coverage:
-    name: Bazel embedded coverage
+  # D2: which legacy tiers below stand down because pr.yml's gated Bazel
+  # lanes run them instead: `embedded` (the test-embedded-* jobs; Bazel
+  # `embedded Dolt tier`) and `dolt_server` (test-proxied-cmd and the
+  # test-server-storage* jobs; Bazel `proxied-server tier` and `server-Dolt
+  # storage tier`), plus `pr_lanes`, which only pr.yml reads (its own PR
+  # Core, build-artifacts, pure-Go, domain+uow and contract corpus jobs).
+  # Each is true only with its committed BAZEL_RETIRES_LEGACY_* flag, on a same-repo (not fork) pull_request whose actor is not
+  # Dependabot. pr.yml runs this same job (policy-tested identical) and its
+  # gate goes red unless the lanes then ran remotely and passed, so neither
+  # the kill switch (mode skip) nor a missing executor secret (mode cache)
+  # can silently drop a tier. Forks and Dependabot (no secrets), merge_group
+  # and every other event keep the legacy tiers. The step reads no secret or
+  # variable and runs no repository code.
+  bazel-coverage:
+    name: Bazel tier coverage
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      covered: ${{ steps.decide.outputs.covered }}
+      embedded: ${{ steps.decide.outputs.embedded }}
+      dolt_server: ${{ steps.decide.outputs.dolt_server }}
+      pr_lanes: ${{ steps.decide.outputs.pr_lanes }}
     steps:
       # GitHub's == is case-insensitive. FORK is bazel.yml's rbe job's
       # expression, verbatim. Nothing mutable is read: not RBE_WEST_WORKERS
       # and not the executor secret (either, evaluated per run, would let one
       # workflow's re-run disagree with the other's). A same-repo PR whose run
       # lacks the secret is covered anyway, so pr.yml's gate goes red (mode
-      # cache) instead of the tier silently moving back. Dependabot runs get
-      # no Actions secrets by design and keep the legacy tier; github.actor
+      # cache) instead of a tier silently moving back. Dependabot runs get
+      # no Actions secrets by design and keep the legacy tiers; github.actor
       # (unlike triggering_actor) stays the PR's actor on a re-run.
-      - name: Decide whether the Bazel lane covers the embedded tier
+      - name: Decide which legacy tiers the Bazel lanes cover
         id: decide
         env:
-          RETIRED: ${{ env.BAZEL_RETIRES_LEGACY_EMBEDDED == 'true' }}
+          RETIRED_EMBEDDED: ${{ env.BAZEL_RETIRES_LEGACY_EMBEDDED == 'true' }}
+          RETIRED_DOLT_SERVER: ${{ env.BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS == 'true' }}
+          RETIRED_PR_LANES: ${{ env.BAZEL_RETIRES_LEGACY_PR_LANES == 'true' }}
           PULL_REQUEST: ${{ github.event_name == 'pull_request' }}
           FORK: ${{ github.event.pull_request.head.repo.fork == true }}
           DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
         run: |
-          for v in RETIRED PULL_REQUEST FORK DEPENDABOT; do
+          for v in RETIRED_EMBEDDED RETIRED_DOLT_SERVER RETIRED_PR_LANES PULL_REQUEST FORK DEPENDABOT; do
             case "${!v}" in
               true|false) ;;
               *) echo "::error::$v is '${!v}', want true or false"; exit 1 ;;
             esac
           done
-          covered=false
-          if [ "$RETIRED" = true ] && [ "$PULL_REQUEST" = true ] && [ "$FORK" = false ] && [ "$DEPENDABOT" = false ]; then
-            covered=true
+          same_repo_pr=false
+          if [ "$PULL_REQUEST" = true ] && [ "$FORK" = false ] && [ "$DEPENDABOT" = false ]; then
+            same_repo_pr=true
           fi
-          echo "covered=$covered" >> "$GITHUB_OUTPUT"
-          echo "Legacy embedded Dolt tier retired in favour of the Bazel lane: **$covered** (retired: $RETIRED, pull_request: $PULL_REQUEST, fork: $FORK, dependabot: $DEPENDABOT)" | tee -a "$GITHUB_STEP_SUMMARY"
+          embedded=false
+          if [ "$same_repo_pr" = true ] && [ "$RETIRED_EMBEDDED" = true ]; then
+            embedded=true
+          fi
+          dolt_server=false
+          if [ "$same_repo_pr" = true ] && [ "$RETIRED_DOLT_SERVER" = true ]; then
+            dolt_server=true
+          fi
+          pr_lanes=false
+          if [ "$same_repo_pr" = true ] && [ "$RETIRED_PR_LANES" = true ]; then
+            pr_lanes=true
+          fi
+          {
+            echo "embedded=$embedded"
+            echo "dolt_server=$dolt_server"
+            echo "pr_lanes=$pr_lanes"
+          } >> "$GITHUB_OUTPUT"
+          echo "Legacy tiers retired in favour of the Bazel lanes: embedded Dolt **$embedded**, proxied and server Dolt **$dolt_server**, pr.yml's PR Core/build/pure-Go/domain+uow/contract jobs **$pr_lanes** (pull_request: $PULL_REQUEST, fork: $FORK, dependabot: $DEPENDABOT, retired embedded: $RETIRED_EMBEDDED, retired proxied/server: $RETIRED_DOLT_SERVER, retired pr.yml jobs: $RETIRED_PR_LANES)" | tee -a "$GITHUB_STEP_SUMMARY"
 
   # End-to-end coverage for proxied-server CLI subcommands, sharded across the
   # CI matrix. Each sub-test drives the bd CLI subprocess against a real dolt
@@ -120,11 +152,13 @@ jobs:
   # BEADS_TEST_PROXIED_SERVER=1, so no separate build is needed. Shard
   # assignment is committed in .github/scripts/proxied-cmd-test-shards.txt;
   # newly-added TestProxiedServer*/TestServerMode* tests hash-distribute until
-  # listed there.
+  # listed there. Stands down, with the test-server-storage* jobs, where
+  # bazel-coverage's dolt_server says pr.yml's gated Bazel `proxied-server
+  # tier` lane runs it (D2 step 2).
   test-proxied-cmd:
     name: Test (Proxied Dolt Cmd ${{ matrix.shard }}/${{ strategy.job-total }})
-    needs: [detect-ci-tier, build-embedded]
-    if: needs.detect-ci-tier.outputs.full_embedded == 'true'
+    needs: [detect-ci-tier, bazel-coverage, build-embedded]
+    if: needs.detect-ci-tier.outputs.full_embedded == 'true' && needs.bazel-coverage.outputs.dolt_server != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -176,14 +210,16 @@ jobs:
   # still auto-distribute via hash fallback until the manifest is updated.
   #
   # The storage, conformance and cmd test jobs stand down when
-  # bazel-embedded-coverage says pr.yml's gated Bazel `embedded Dolt tier`
-  # lane runs them instead; build-embedded keeps running, because its
-  # artifact also feeds the proxied and server Dolt jobs.
+  # bazel-coverage says pr.yml's gated Bazel `embedded Dolt tier` lane runs
+  # them instead (its `embedded` output); the proxied and server Dolt jobs
+  # when its Bazel `proxied-server tier` and `server-Dolt storage tier` lanes
+  # do (`dolt_server`). build-embedded's embedded-test-binaries artifact
+  # feeds all six (and nothing else), so it stands down only when both do.
 
   build-embedded:
     name: Build (Embedded Dolt)
-    needs: detect-ci-tier
-    if: needs.detect-ci-tier.outputs.full_embedded == 'true'
+    needs: [detect-ci-tier, bazel-coverage]
+    if: needs.detect-ci-tier.outputs.full_embedded == 'true' && (needs.bazel-coverage.outputs.embedded != 'true' || needs.bazel-coverage.outputs.dolt_server != 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -262,8 +298,8 @@ jobs:
 
   test-embedded-storage:
     name: Test (Embedded Dolt Storage ${{ matrix.shard }}/${{ strategy.job-total }})
-    needs: [detect-ci-tier, bazel-embedded-coverage, build-embedded]
-    if: needs.detect-ci-tier.outputs.full_embedded == 'true' && needs.bazel-embedded-coverage.outputs.covered != 'true'
+    needs: [detect-ci-tier, bazel-coverage, build-embedded]
+    if: needs.detect-ci-tier.outputs.full_embedded == 'true' && needs.bazel-coverage.outputs.embedded != 'true'
     runs-on: ubuntu-latest
     # The shard script's -test.timeout=20m plus setup. At 15m the 1000-item
     # batch-apply cap cancelled shard 2/5: TestBatchApplyContract took 604s
@@ -305,8 +341,8 @@ jobs:
 
   test-embedded-conformance:
     name: Test (Embedded Dolt Conformance - ${{ matrix.partition }})
-    needs: [detect-ci-tier, bazel-embedded-coverage, build-embedded]
-    if: needs.detect-ci-tier.outputs.full_embedded == 'true' && needs.bazel-embedded-coverage.outputs.covered != 'true'
+    needs: [detect-ci-tier, bazel-coverage, build-embedded]
+    if: needs.detect-ci-tier.outputs.full_embedded == 'true' && needs.bazel-coverage.outputs.embedded != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
@@ -348,8 +384,8 @@ jobs:
 
   test-server-storage:
     name: Test (Server Dolt Conformance)
-    needs: [detect-ci-tier, build-embedded]
-    if: needs.detect-ci-tier.outputs.full_embedded == 'true'
+    needs: [detect-ci-tier, bazel-coverage, build-embedded]
+    if: needs.detect-ci-tier.outputs.full_embedded == 'true' && needs.bazel-coverage.outputs.dolt_server != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -393,8 +429,8 @@ jobs:
 
   test-server-storage-full:
     name: Test (Server Dolt Full Suite ${{ matrix.shard }}/${{ strategy.job-total }})
-    needs: [detect-ci-tier, build-embedded]
-    if: needs.detect-ci-tier.outputs.full_embedded == 'true'
+    needs: [detect-ci-tier, bazel-coverage, build-embedded]
+    if: needs.detect-ci-tier.outputs.full_embedded == 'true' && needs.bazel-coverage.outputs.dolt_server != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -456,8 +492,8 @@ jobs:
 
   test-embedded-cmd:
     name: Test (Embedded Dolt Cmd ${{ matrix.shard }}/${{ strategy.job-total }})
-    needs: [detect-ci-tier, bazel-embedded-coverage, build-embedded]
-    if: needs.detect-ci-tier.outputs.full_embedded == 'true' && needs.bazel-embedded-coverage.outputs.covered != 'true'
+    needs: [detect-ci-tier, bazel-coverage, build-embedded]
+    if: needs.detect-ci-tier.outputs.full_embedded == 'true' && needs.bazel-coverage.outputs.embedded != 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -522,7 +558,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - detect-ci-tier
-      - bazel-embedded-coverage
+      - bazel-coverage
       - build-embedded
       - test-embedded-storage
       - test-embedded-conformance
@@ -540,7 +576,7 @@ jobs:
           CI_GATE_NAME: PR risk gate
           CI_GATE_REQUIRED: >-
             DETECT_CI_TIER
-            BAZEL_EMBEDDED_COVERAGE
+            BAZEL_COVERAGE
             BUILD_EMBEDDED
             TEST_EMBEDDED_STORAGE
             TEST_EMBEDDED_CONFORMANCE
@@ -550,9 +586,10 @@ jobs:
             TEST_PROXIED_CMD
             TEST_NIX
           FULL_EMBEDDED: ${{ needs.detect-ci-tier.outputs.full_embedded }}
-          BAZEL_COVERS_EMBEDDED: ${{ needs.bazel-embedded-coverage.outputs.covered }}
+          BAZEL_COVERS_EMBEDDED: ${{ needs.bazel-coverage.outputs.embedded }}
+          BAZEL_COVERS_DOLT_SERVER: ${{ needs.bazel-coverage.outputs.dolt_server }}
           DETECT_CI_TIER: ${{ needs.detect-ci-tier.result }}
-          BAZEL_EMBEDDED_COVERAGE: ${{ needs.bazel-embedded-coverage.result }}
+          BAZEL_COVERAGE: ${{ needs.bazel-coverage.result }}
           BUILD_EMBEDDED: ${{ needs.build-embedded.result }}
           TEST_EMBEDDED_STORAGE: ${{ needs.test-embedded-storage.result }}
           TEST_EMBEDDED_CONFORMANCE: ${{ needs.test-embedded-conformance.result }}
@@ -566,11 +603,19 @@ jobs:
           if [[ "$FULL_EMBEDDED" != "true" ]]; then
             skipped_ok="BUILD_EMBEDDED TEST_EMBEDDED_STORAGE TEST_EMBEDDED_CONFORMANCE TEST_SERVER_STORAGE TEST_SERVER_STORAGE_FULL TEST_EMBEDDED_CMD TEST_PROXIED_CMD"
           fi
-          # The legacy embedded test jobs stand down only where pr.yml's gated
-          # Bazel lane runs the tier (bazel-embedded-coverage); any other skip
-          # of them, or a failed or missing decision, fails the gate.
+          # The legacy tiers' test jobs stand down only where pr.yml's gated
+          # Bazel lanes run the tier (bazel-coverage), and build-embedded,
+          # whose artifact only they consume, only where all of them do; any
+          # other skip of them, or a failed or missing decision, fails the
+          # gate.
           if [[ "$BAZEL_COVERS_EMBEDDED" == "true" ]]; then
             skipped_ok="$skipped_ok TEST_EMBEDDED_STORAGE TEST_EMBEDDED_CONFORMANCE TEST_EMBEDDED_CMD"
+          fi
+          if [[ "$BAZEL_COVERS_DOLT_SERVER" == "true" ]]; then
+            skipped_ok="$skipped_ok TEST_PROXIED_CMD TEST_SERVER_STORAGE TEST_SERVER_STORAGE_FULL"
+          fi
+          if [[ "$BAZEL_COVERS_EMBEDDED" == "true" ]] && [[ "$BAZEL_COVERS_DOLT_SERVER" == "true" ]]; then
+            skipped_ok="$skipped_ok BUILD_EMBEDDED"
           fi
           export CI_GATE_SKIPPED_OK="$skipped_ok"
           bash .github/scripts/ci-gate.sh
