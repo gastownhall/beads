@@ -353,3 +353,119 @@ func sweepCandidateIDs(issues []*types.Issue) []string {
 	}
 	return ids
 }
+
+func TestValidateSweepRequestGatesTheWispsPlane(t *testing.T) {
+	cutoff := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := ValidateSweepRequest(issueops.SweepRequest{Tier: issueops.SweepWispsPlane}); !errors.Is(err, issueops.ErrValidation) {
+		t.Fatalf("unfiltered wisps-plane sweep error = %v, want ErrValidation: it reaches no-history (durable-tier) rows", err)
+	}
+	for _, req := range []issueops.SweepRequest{
+		{Tier: issueops.SweepWispsPlane, ClosedBefore: &cutoff},
+		{Tier: issueops.SweepWispsPlane, IDPattern: "*"},
+	} {
+		if err := ValidateSweepRequest(req); err != nil {
+			t.Errorf("ValidateSweepRequest(%+v) = %v, want nil", req, err)
+		}
+	}
+}
+
+func TestBuildSweepCandidateFilterForTheWispsPlaneHasNoTierConstraint(t *testing.T) {
+	cutoff := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	req := issueops.SweepRequest{Tier: issueops.SweepWispsPlane, ClosedBefore: &cutoff}
+	if !SweepSearchesWispsPlaneOnly(req) {
+		t.Fatal("SweepSearchesWispsPlaneOnly(wisps-plane) = false; the plane IS the selection")
+	}
+	filter := BuildSweepCandidateFilter(req)
+	if filter.Status == nil || *filter.Status != types.StatusClosed {
+		t.Fatalf("Status = %v, want closed", filter.Status)
+	}
+	if filter.EphemeralTier != nil || filter.Ephemeral != nil {
+		t.Fatalf("wisps-plane filter carries a flag constraint (EphemeralTier=%v, Ephemeral=%v); "+
+			"that would drop no-history rows", filter.EphemeralTier, filter.Ephemeral)
+	}
+	if filter.ClosedBefore == nil || !filter.ClosedBefore.Equal(cutoff) || filter.ClosedBefore == &cutoff {
+		t.Fatalf("ClosedBefore = %v, want a copy of %v", filter.ClosedBefore, cutoff)
+	}
+	for _, tier := range []issueops.SweepTier{issueops.SweepEphemeral, issueops.SweepDurable} {
+		if SweepSearchesWispsPlaneOnly(issueops.SweepRequest{Tier: tier}) {
+			t.Errorf("SweepSearchesWispsPlaneOnly(%s) = true; tier queries merge both planes", tier)
+		}
+	}
+}
+
+func TestSweepLiveDependentsCountOnlyProtectingEdgesFromLiveSources(t *testing.T) {
+	dep := func(source, target string, typ types.DependencyType) *types.Dependency {
+		return &types.Dependency{IssueID: source, DependsOnID: target, Type: typ}
+	}
+	incoming := map[string][]*types.Dependency{
+		"root":    {dep("step-open", "root", types.DepParentChild), dep("step-done", "root", types.DepParentChild)},
+		"tracked": {dep("convoy", "tracked", types.DepTracks)},
+		"gate":    {dep("waiter", "gate", types.DepBlocks)},
+		"linked":  {dep("reader", "linked", types.DepRelated)},
+		"orphan":  {dep("step-done", "orphan", types.DepParentChild), nil},
+	}
+
+	sources := SweepLiveDependentSources(incoming)
+	if want := []string{"convoy", "step-done", "step-open", "waiter"}; strings.Join(sources, ",") != strings.Join(want, ",") {
+		t.Fatalf("SweepLiveDependentSources = %v, want %v (sorted, protecting edges only)", sources, want)
+	}
+
+	live := map[string]bool{"step-open": true, "convoy": true, "waiter": true, "reader": true}
+	protected := SweepLiveDependentTargets(incoming, live)
+	for _, id := range []string{"root", "tracked", "gate"} {
+		if !protected[id] {
+			t.Errorf("%s not protected; a live source depends on it through a protecting edge", id)
+		}
+	}
+	for _, id := range []string{"linked", "orphan"} {
+		if protected[id] {
+			t.Errorf("%s protected; its only live source is a non-protecting edge or none is live", id)
+		}
+	}
+
+	candidates := []*types.Issue{{ID: "root"}, {ID: "linked"}, {ID: "tracked"}, {ID: "orphan"}}
+	kept, count := PartitionSweepLiveDependents(candidates, protected)
+	if count != 2 || len(kept) != 2 || kept[0].ID != "linked" || kept[1].ID != "orphan" {
+		t.Fatalf("PartitionSweepLiveDependents = %d kept %v, count %d; want [linked orphan] and 2", len(kept), kept, count)
+	}
+}
+
+func TestValidateSweepRequestRefusesANegativeLimit(t *testing.T) {
+	err := ValidateSweepRequest(issueops.SweepRequest{Tier: issueops.SweepEphemeral, Limit: -1})
+	if !errors.Is(err, issueops.ErrValidation) {
+		t.Fatalf("negative Limit error = %v, want ErrValidation", err)
+	}
+	if err := ValidateSweepRequest(issueops.SweepRequest{Tier: issueops.SweepEphemeral, Limit: 0}); err != nil {
+		t.Fatalf("zero Limit (no cap) error = %v, want nil", err)
+	}
+}
+
+func TestLimitSweepCandidatesTakesTheOldestClosedFirst(t *testing.T) {
+	at := func(day int) *time.Time {
+		ts := time.Date(2026, 1, day, 0, 0, 0, 0, time.UTC)
+		return &ts
+	}
+	candidates := []*types.Issue{
+		{ID: "c", ClosedAt: at(3)},
+		{ID: "b2", ClosedAt: at(1)},
+		{ID: "a", ClosedAt: at(2)},
+		{ID: "b1", ClosedAt: at(1)},
+	}
+
+	kept, remaining := LimitSweepCandidates(candidates, 3)
+	var got []string
+	for _, issue := range kept {
+		got = append(got, issue.ID)
+	}
+	if strings.Join(got, ",") != "b1,b2,a" || remaining != 1 {
+		t.Fatalf("LimitSweepCandidates(3) = %v, remaining %d; want [b1 b2 a] (closed_at, then id) and 1", got, remaining)
+	}
+	if candidates[0].ID != "c" {
+		t.Fatal("LimitSweepCandidates reordered the caller's slice")
+	}
+	for _, limit := range []int{0, 4, 10} {
+		if kept, remaining := LimitSweepCandidates(candidates, limit); len(kept) != 4 || remaining != 0 {
+			t.Errorf("LimitSweepCandidates(%d) kept %d, remaining %d; want all 4 and 0", limit, len(kept), remaining)
+		}
+	}
+}

@@ -43,9 +43,12 @@ func proxiedDoltStartRefusal() *ProxyCapabilityError {
 
 // proxiedDoltStatus is the `bd dolt status --json` payload for a proxied
 // workspace. It reports the two processes separately because they fail
-// separately and an operator's next move differs: Running describes the proxy,
-// which is the endpoint every bd command connects through, while the Backend*
-// fields describe the dolt server behind it.
+// separately and an operator's next move differs: Running says whether the
+// workspace is serving (a live proxy, and on a managed topology a live dolt
+// behind it), Proxy* describe the proxy every bd command connects through, and
+// the Backend* fields describe the dolt server behind it. A proxy left in front
+// of a dead managed backend (possible with proxies started by an older bd)
+// therefore reports running=false with proxy_pid still set.
 type proxiedDoltStatus struct {
 	Mode      string `json:"mode"`
 	Root      string `json:"root"`
@@ -98,7 +101,15 @@ func collectProxiedDoltStatus(beadsDir string) (proxiedDoltStatus, error) {
 			status.BackendEndpoint = externalDoltEndpoint(*info.External)
 		}
 	}
+	status.Running = proxiedStatusServing(live.ProxyRunning, status.BackendManaged, status.BackendRunning)
 	return status, nil
+}
+
+// proxiedStatusServing reports whether a proxied workspace is serving: its
+// proxy is live and, when bd manages the backend, that dolt server is live
+// too. A proxy in front of a dead managed backend serves nothing.
+func proxiedStatusServing(proxyRunning, backendManaged, backendRunning bool) bool {
+	return proxyRunning && (!backendManaged || backendRunning)
 }
 
 func externalDoltEndpoint(cfg configfile.ExternalDoltConfig) string {
@@ -116,11 +127,20 @@ func renderProxiedDoltStatus(status proxiedDoltStatus) {
 		return
 	}
 
-	if status.Running {
+	// A live proxy in front of a managed backend that is gone serves nothing,
+	// so do not call it running. The proxy retires itself once it notices
+	// the backend exit; a proxy from an older bd may not.
+	backendDown := !status.Running && status.ProxyPID != 0 && status.BackendManaged && !status.BackendRunning
+	switch {
+	case backendDown:
+		fmt.Printf("Dolt server: not serving (%s): proxy is up but its dolt backend is not running\n", status.Mode)
+		fmt.Printf("  Proxy PID:  %d\n", status.ProxyPID)
+		fmt.Printf("  Proxy port: %d\n", status.ProxyPort)
+	case status.Running:
 		fmt.Printf("Dolt server: running (%s)\n", status.Mode)
 		fmt.Printf("  Proxy PID:  %d\n", status.ProxyPID)
 		fmt.Printf("  Proxy port: %d\n", status.ProxyPort)
-	} else {
+	default:
 		fmt.Printf("Dolt server: not running (%s)\n", status.Mode)
 	}
 	fmt.Printf("  Root:       %s\n", status.Root)
@@ -135,8 +155,11 @@ func renderProxiedDoltStatus(status proxiedDoltStatus) {
 	if status.IdleTimeout != "" {
 		fmt.Printf("  Idle timeout: %s\n", status.IdleTimeout)
 	}
-	if !status.Running {
+	if !status.Running && !backendDown {
 		fmt.Println("  The proxy starts on demand; the next bd command launches it.")
+	}
+	if backendDown {
+		fmt.Println("  Run 'bd dolt stop' to retire the proxy; the next bd command starts a fresh proxy and backend.")
 	}
 	if isDoltLocalOnly() {
 		fmt.Println("  Remote sync: disabled (dolt.local-only=true)")

@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -36,6 +37,7 @@ var (
 	ErrAlreadyIdentified = issueops.ErrAlreadyIdentified
 	ErrVersionMismatch   = issueops.ErrVersionMismatch
 	ErrStatusMismatch    = issueops.ErrStatusMismatch
+	ErrNotesOverwrite    = issueops.ErrNotesOverwrite
 )
 
 // CloseOpenChildrenError reports the issue and open-child count that refused a
@@ -84,6 +86,32 @@ const (
 	ClaimedByFragment          = " by "
 	NotClaimableStatusFragment = ": status "
 )
+
+// ErrCredentialKeyMismatch is returned when a stored federation peer's password
+// cannot be decrypted with the local credential key. federation_peers rows
+// travel with the database, but the key file is machine-local and gitignored,
+// so a database pulled from another machine carries peer passwords this
+// machine's key cannot read. Callers errors.Is it to tell that local key
+// problem apart from an unreachable peer.
+var ErrCredentialKeyMismatch = errors.New("stored peer credentials cannot be decrypted with this machine's credential key")
+
+// CredentialKeyMismatchError wraps a federation password decrypt failure with
+// the ErrCredentialKeyMismatch sentinel, the machine-local nature of keyFile,
+// and the command that re-stores the password on this machine. Both backends
+// (dolt, embeddeddolt) call it with their own credentialKeyFile so the operator
+// reads one wording whichever store answered.
+//
+// The machine-local key is context, not an asserted cause: an AES-GCM open also
+// fails on a tampered or truncated blob and on a row still encrypted under the
+// pre-migration legacy key. Re-adding the peer is the fix in every one of those
+// cases, so the remediation holds even where the parenthetical does not.
+//
+// cause stays wrapped, so the raw cipher error remains readable and both the
+// sentinel and cause are reachable through errors.Is / errors.As.
+func CredentialKeyMismatchError(keyFile string, cause error) error {
+	return fmt.Errorf("%w (the key file %s is machine-local and does not replicate with the database); re-run 'bd federation add-peer <name> <url> --user <user>' on this machine: %w",
+		ErrCredentialKeyMismatch, keyFile, cause)
+}
 
 // CommentPageCursor is the resume position for a keyset page of an issue's
 // comments: the (created_at, id) of the last comment already returned. The zero
@@ -382,6 +410,29 @@ type Storage interface {
 	// returns only matching issue IDs. Use when full row hydration is wasted
 	// (e.g., partial-ID resolution in internal/utils/id_parser.go).
 	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
+	// SearchIssueSummaries is a narrow-projection variant of SearchIssues that
+	// returns []*types.IssueSummary instead of full issues, for list-shaped
+	// rendering paths that never dereference TEXT/JSON columns. SortBy/SortDesc
+	// are honored identically to SearchIssues — including SortBy=="id", which
+	// both paths deliberately leave to the caller: sqlbuild.OrderBy emits no
+	// ORDER BY for it (sqlbuild.IsGoSideSort), so storage orders id-sorted rows
+	// only where the issues+wisps merge re-sorts them (sqlbuild.LessSummary,
+	// mirroring sqlbuild.Less for SearchIssues). The user-facing id order is
+	// cmd/bd's, applied post-call via utils.NaturalCompareIDs — numeric-aware
+	// and intentionally different from the lexicographic storage comparator, so
+	// a storage-side id sorter here would diverge from SearchIssues rather than
+	// complete it.
+	//
+	// Two filter fields behave differently here than on SearchIssues, both
+	// because types.IssueSummary has no Dependencies field to populate:
+	// IncludeDependencies is a silent no-op (SearchIssues hydrates dependency
+	// records; this path has nowhere to put them, so a caller that needs them
+	// must use SearchIssues), while SkipLabels is honored exactly as it is
+	// there. Wisps are NOT excluded: the issues+wisps merge runs for any filter
+	// that does not set SkipWisps, and types.IssueSummary carries the four
+	// wisp-plane markers so a merged wisp row serializes identically to the one
+	// SearchIssues would return.
+	SearchIssueSummaries(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueSummary, error)
 
 	// Dependencies
 	AddDependency(ctx context.Context, dep *types.Dependency, actor string) error
@@ -407,6 +458,19 @@ type Storage interface {
 	RemoveLabel(ctx context.Context, issueID, label, actor string) error
 	GetLabels(ctx context.Context, issueID string) ([]string, error)
 	GetIssuesByLabel(ctx context.Context, label string) ([]*types.Issue, error)
+	// RenameLabel renames a label across every issue and wisp that carries
+	// it. An issue that already carries newLabel is a merge (the stale
+	// oldLabel row is dropped, no error) rather than a duplicate-key
+	// conflict. renamed is the count of issues and wisps that carried
+	// oldLabel; merged is the subset that already had newLabel; ids lists
+	// every touched id, both planes together. oldLabel carried by nothing is
+	// an honest no-op: renamed and merged are 0, ids is nil, err is nil.
+	// oldLabel and newLabel equal after trimming is refused with
+	// issueops.ErrRenameLabelSameName instead of treated as a no-op - the
+	// merge branch above would otherwise wipe the label instead of leaving
+	// it alone (every carrier already "has newLabel", so the stale-row drop
+	// removes every row).
+	RenameLabel(ctx context.Context, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error)
 
 	// Work queries
 	GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error)
@@ -691,6 +755,14 @@ type ActiveDatabaseSizer interface {
 	ActiveDatabaseSize(ctx context.Context) (int64, error)
 }
 
+// ExternalGCLocator supplies the authoritative local working directory for
+// the active database's external garbage-collection tool. Implementations
+// return *ErrUnsupported when this instance cannot authorize that operation.
+// Neither a readable size nor a general store path grants this capability.
+type ExternalGCLocator interface {
+	ExternalGCPath(ctx context.Context) (string, error)
+}
+
 // GarbageCollector provides Dolt garbage collection capability.
 // Callers that need to reclaim disk space should type-assert to this interface.
 type GarbageCollector interface {
@@ -837,6 +909,30 @@ type EventsJournalAccessor interface {
 // config, and a consumer holding the read role has no business changing it.
 type EventsJournalConfigurer interface {
 	SetEventsJournalEnabled(enabled bool)
+}
+
+// VersionedHistoryConfigurer controls dual-write issue-version history
+// activation on ONE storage instance. Implementations must never use
+// process-global state, for the same reason as EventsJournalConfigurer:
+// a process can hold several stores at once, and enabling history on one must
+// not turn it on for any other. Callers type-assert; a store that does not
+// implement it simply cannot record version history.
+//
+// SINGLE WRITER ONLY until the version_id primary-key swap lands.
+// issue_versions is keyed PRIMARY KEY (issue_id, revision), and revision is
+// a local ordinal (MAX(revision)+1 inside the writing transaction), so two
+// disconnected writers that each mint the same ordinal for the same issue
+// collide on merge — and TryAutoResolveMergeConflicts
+// (versioncontrolops/mergesettle.go) fails the pull for a table it does not
+// know. Enabling versioned history is therefore safe only with a SINGLE
+// writer per store until migration 0068 steps 1-3 (UUID version_id primary
+// key, ordinal demoted to an index) land; those steps follow as their own
+// PR. "Single writer" means one writer at a time per store, not merely one
+// clone: MAX(revision)+1 is not a safe allocator for two concurrent
+// transactions in one store either (gastownhall/beads#6379, item 4). See
+// issueops/version_history.go for why the ordinal is never an address.
+type VersionedHistoryConfigurer interface {
+	SetVersionedHistoryEnabled(enabled bool)
 }
 
 // LifecycleManager provides lifecycle inspection beyond Close().

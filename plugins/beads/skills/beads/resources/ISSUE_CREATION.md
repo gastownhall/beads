@@ -54,7 +54,7 @@ For complex technical features spanning multiple sessions, enhance notes field w
 ### Example pattern:
 
 ```markdown
-bd update issue-9 --notes "IMPLEMENTATION GUIDE:
+bd update issue-9 --append-notes "IMPLEMENTATION GUIDE:
 WORKING CODE: service.about().get(fields='importFormats')
 Returns: dict with 49 entries like {'text/markdown': [...]}
 OUTPUT FORMAT: # Drive Import Formats (markdown with categorized list)

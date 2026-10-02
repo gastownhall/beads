@@ -319,6 +319,24 @@ contexts: the budget covers a claim inside its serialization-retry budget plus
 its commit, because killing such a connection early would leave the client
 unable to tell whether its write landed.
 
+**A large `POST /v0/beads/issues:batchApply` (over 100 items) extends this
+budget rather than being cut off by it.** Such a request can legitimately still
+be running at up to `--large-apply-ceiling` (5 minutes by default) when
+shutdown begins, so the drain budget computed at shutdown start extends to that
+request's own remaining deadline, plus 5 seconds to write its response back,
+instead of the ordinary 20 seconds — the in-flight write is waited out, not
+killed mid-commit. A large apply still *queued* for the one-wide large-apply
+semaphore when shutdown begins is refused with `503` immediately rather than
+being admitted or extending the drain further.
+
+**The orchestrator's stop grace (e.g. a Kubernetes `terminationGracePeriodSeconds`)
+must be at least `--large-apply-ceiling` plus 5 seconds.** The drain logic above
+only runs inside this process; an external `SIGKILL` after the orchestrator's
+own grace period expires cuts the process off regardless of what the drain was
+waiting for, which can still sever an in-flight large apply the drain would
+otherwise have waited out. Size the grace period to the ceiling plus those 5
+seconds, not to the ordinary 20s drain.
+
 Journal streams are the exception, and they have to be: a held-open response
 would otherwise sit through the whole budget and then be killed anyway. They get
 an explicit close signal when the drain starts and end on their own within a

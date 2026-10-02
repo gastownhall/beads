@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "worktreeremove",
+    srcs = ["policy.go"],
+    importpath = "github.com/steveyegge/beads/internal/worktreeremove",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "worktreeremove_test",
+    srcs = ["policy_test.go"],
+    embed = [":worktreeremove"],
+)

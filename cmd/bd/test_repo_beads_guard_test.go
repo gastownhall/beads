@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/steveyegge/beads/internal/testutil/credentialcmd"
 )
 
 // beforeTestsHook is set by CGO-tagged test files to perform setup before tests run
@@ -50,7 +51,9 @@ type testRunner interface {
 }
 
 func runTestsAndSweep(m testRunner) int {
+	stdout, stderr := os.Stdout, os.Stderr
 	code := m.Run()
+	code = checkStdioAfterRun(code, stdout, stderr)
 	swept := doltserver.SweepSuiteTestServers(testTempRoot)
 	return doltserver.ApplyLeakPolicy("cmd/bd", code, swept)
 }
@@ -62,8 +65,16 @@ const suiteRootPrefix = "beads-bd-tests-"
 // Guardrail: ensure the cmd/bd test suite does not touch the real repo .beads state.
 // Disable with BEADS_TEST_GUARD_DISABLE=1 (useful when running tests while actively using beads).
 func TestMain(m *testing.M) {
+	if code, ok := credentialcmd.Dispatch(); ok {
+		os.Exit(code)
+	}
 	// Delegate to testMainInner so defers run before os.Exit.
-	os.Exit(testMainInner(m))
+	code := testMainInner(m)
+	if err := credentialcmd.Cleanup(); err != nil {
+		fmt.Fprintf(os.Stderr, "credential command fixture cleanup: %v\n", err)
+		code = 1
+	}
+	os.Exit(code)
 }
 
 func testMainInner(m *testing.M) int {
@@ -196,6 +207,8 @@ func testMainInner(m *testing.M) int {
 	// Clear BEADS_DIR to prevent tests from accidentally picking up the project's
 	// .beads directory via git repo detection when there's a redirect file.
 	// Each test that needs a .beads directory should set BEADS_DIR explicitly.
+	// This is startup isolation only: fresh in-process command fixtures should
+	// use isolateBeadsDirForTest before setup to contain later dispatch mutations.
 	origBeadsDir := os.Getenv("BEADS_DIR")
 	os.Unsetenv("BEADS_DIR")
 	defer func() {

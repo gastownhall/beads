@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -47,17 +48,81 @@ const proxiedBackupTargetName = defaultDoltBackupName
 // Defense in depth, not a second policy: the rule and its wording come from the
 // same registry row the pre-provider gate consults, so the two cannot drift.
 func requireLocalProxiedBackup(path string) error {
-	row, ok := LookupCapabilityRow(path, "")
+	rule, ok := proxiedBackupRule(path)
 	if !ok {
 		// Unreachable: TestProxyCapabilityRegistryCoversCommandTree fails the
 		// build for a backup path with no row. Refuse rather than guess.
 		return HandleErrorRespectJSON("%s has no proxied-server capability row", path)
 	}
-	rule := row.ruleFor(resolveProxiedTopology(beads.FindBeadsDir()))
 	if rule.Outcome == ProxyOutcomeHonored {
 		return nil
 	}
 	return HandleProxyCapabilityError(proxyCapabilityErrorFor(rule))
+}
+
+// proxiedBackupRule resolves the registry rule for a backup path on this
+// workspace's proxied topology. ok is false only for a path with no row.
+func proxiedBackupRule(path string) (proxyCapabilityRule, bool) {
+	row, ok := LookupCapabilityRow(path, "")
+	if !ok {
+		return proxyCapabilityRule{}, false
+	}
+	return row.ruleFor(resolveProxiedTopology(beads.FindBeadsDir())), true
+}
+
+// proxiedAutoBackupBackend returns the backend post-command auto-backup runs
+// against on a proxied-server workspace, or ok=false when it must not run.
+//
+// Auto-backup is a `bd backup sync` nobody typed, so it is honored exactly
+// where that verb is — the "backup sync" registry row, i.e. managed-local
+// only. Anywhere else the backup remote it registers would land on a server bd
+// does not own, where it is global to every client; that is the storm the
+// explicit verbs refuse by design, and an implicit trigger must not reopen it.
+//
+// It never opens a provider of its own. A command that did not open one (or
+// closed it, as restore does) has no live topology to back up, and opening one
+// here would relaunch a server the command may just have stopped.
+func proxiedAutoBackupBackend() (localBackupBackend, bool) {
+	if rule, ok := proxiedBackupRule("backup sync"); !ok || rule.Outcome != ProxyOutcomeHonored {
+		debug.Logf("backup: skipping auto-backup — proxied topology does not honor backup sync\n")
+		return nil, false
+	}
+	if uowProvider == nil {
+		return nil, false
+	}
+	mp, ok := uowProvider.(uow.MaintenanceProvider)
+	if !ok {
+		debug.Logf("backup: skipping auto-backup — provider %T has no maintenance seam\n", uowProvider)
+		return nil, false
+	}
+	return proxiedLocalBackup{provider: mp}, true
+}
+
+// proxiedLocalBackup is localBackupBackend over the proxied provider's
+// non-transactional seam, the one `bd backup sync` uses.
+//
+// No pre-backup commit: change detection compares HEAD, and every proxied
+// write transaction already ends in DOLT_COMMIT('-Am') (uow doltServerTx), so
+// HEAD is where the data is — the invariant direct mode gets from running
+// auto-commit just before auto-backup.
+type proxiedLocalBackup struct {
+	provider uow.MaintenanceProvider
+}
+
+func (b proxiedLocalBackup) CurrentCommit(ctx context.Context) (string, error) {
+	var hash string
+	err := b.provider.RunNonTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
+		var err error
+		hash, err = versioncontrolops.CurrentCommit(ctx, conn)
+		return err
+	})
+	return hash, err
+}
+
+func (b proxiedLocalBackup) BackupToDir(ctx context.Context, dir string) error {
+	return b.provider.RunNonTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
+		return versioncontrolops.BackupToDir(ctx, conn, conn, dir)
+	})
 }
 
 // proxiedActiveDatabase asks the server which database the provider opened,
@@ -203,7 +268,7 @@ func runBackupRemoveProxied(ctx context.Context) error {
 			return err
 		}
 		// auto-export may have registered a second remote at the same URL.
-		_ = versioncontrolops.BackupRemove(ctx, conn, "backup_export")
+		_ = versioncontrolops.BackupRemove(ctx, conn, versioncontrolops.ExportBackupName)
 		return nil
 	})
 	if err != nil {

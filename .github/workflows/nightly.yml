@@ -26,6 +26,7 @@ on:
           - nix
           - mcp-package
           - npm-package
+          - bazel
       smoke_version:
         description: "Optional previous release for cross-version-smoke"
         required: false
@@ -38,11 +39,79 @@ env:
 jobs:
   measure:
     name: Measure selected CI suite
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.suite != 'full-test' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.suite != 'full-test' && inputs.suite != 'bazel' }}
     uses: ./.github/workflows/ci-measurements.yml
     with:
       suite: ${{ inputs.suite }}
       smoke_version: ${{ inputs.smoke_version }}
+
+  # PR Core's go test (scripts/ci/pr-core.sh) with -json output, so the Bazel
+  # job below can compare per-test status: a test that passes here and skips
+  # under Bazel fails the equivalence check unless allowlisted.
+  bazel-go-test-json:
+    name: Bazel equivalence (go-test side)
+    if: ${{ github.event_name == 'schedule' || inputs.suite == 'bazel' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Install Dolt
+        run: ./scripts/ci/install-dolt.sh
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Run PR core go-test (JSON)
+        env:
+          BEADS_PR_CORE_GO_TEST_JSON: ${{ runner.temp }}/go-test.json
+        run: make ci-pr-core
+
+      # Uploaded even when tests fail: the status comparison still applies.
+      - name: Upload go-test results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: bazel-equivalence-go-test-json
+          path: ${{ runner.temp }}/go-test.json
+          if-no-files-found: error
+          retention-days: 7
+
+  # Bazel lane with the full go test equivalence listing and the skip-parity
+  # check (reported here; PRs gate on it through pr.yml). Remote execution
+  # when the repo secrets are present; bazel.yml gets those four and nothing
+  # else.
+  bazel:
+    name: Bazel equivalence (full detail)
+    needs: bazel-go-test-json
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || inputs.suite == 'bazel') }}
+    uses: ./.github/workflows/bazel.yml
+    secrets:
+      RBE_WEST_EXECUTOR: ${{ secrets.RBE_WEST_EXECUTOR }}
+      RBE_TLS_CERT: ${{ secrets.RBE_TLS_CERT }}
+      RBE_TLS_KEY: ${{ secrets.RBE_TLS_KEY }}
+      RBE_TLS_CA: ${{ secrets.RBE_TLS_CA }}
+    with:
+      details: true
+      go-test-json-artifact: bazel-equivalence-go-test-json
 
   full-test:
     name: Full Test Suite

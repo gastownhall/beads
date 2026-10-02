@@ -117,13 +117,25 @@ const (
 	// children, or a live blocker. The open-children refusal carries the count
 	// in the `open_children` extension member, read inside the refusing
 	// transaction — never parsed out of the sentinel's message text — and its
-	// PRESENCE is how a client tells the two refusals apart without prose.
+	// PRESENCE is how a client tells the two refusals apart without prose. The
+	// live-blocker refusal names its blockers in the `blockers` member, from
+	// *issueops.BlockedError's typed list (see closeBlocked).
 	//
 	// A 409 rather than the delete precedent's 400: this is a statement about
 	// the current state of one named resource, so the same request succeeds or
 	// fails on state the client cannot see without reading it. That is the
 	// not_claimable situation and it gets the not_claimable answer.
 	CodeNotClosable Code = "not_closable"
+	// CodeNotesOverwrite is a `patch.notes` that would replace existing
+	// non-empty notes with a different value, refused unless
+	// `force_notes_overwrite` is set. It is the notes analog of
+	// CodeAlreadyClaimed: a live-state fence with a force bypass — but unlike
+	// that fence it carries no compare-and-set alternative and no extension
+	// member, because there is no observation to attach: the refusal is
+	// entirely a statement about the request's own two values (the existing
+	// notes and the patched ones), not about a foreign actor's identity a
+	// client might need to display.
+	CodeNotesOverwrite Code = "notes_overwrite_refused"
 	// CodeDependencyCycle covers BOTH never-makes-progress refusals a requested
 	// edge set can earn: a scheduling cycle, and a blocking edge against the
 	// issue's own ancestor or descendant. They are one code because they have
@@ -249,6 +261,7 @@ var codeStatus = map[Code]int{
 	CodeAlreadyClaimed:   http.StatusConflict,
 	CodeNotClaimable:     http.StatusConflict,
 	CodeNotClosable:      http.StatusConflict,
+	CodeNotesOverwrite:   http.StatusConflict,
 	CodeNotReleasable:    http.StatusConflict,
 	CodeDependencyCycle:  http.StatusConflict,
 	CodeDependencyExists: http.StatusConflict,
@@ -720,9 +733,10 @@ var operationCodes = map[string][]Code{
 	// malformed values, repeated single-valued parameters and a `group_by`
 	// outside the closed set. countGroupOf stops that last case at the edge.
 	// The role has exactly one reachable refusal: BuildCountFilter rejects an
-	// invalid metadata key. failReadErr classifies it through invalidFilterParam
-	// as a 400 on `metadata_field`. An unrecognized status or type is not a
-	// refusal; the role promises it matches nothing and answers 0.
+	// invalid metadata key, from `metadata_field` or `has_metadata_key`.
+	// failReadErr classifies it through invalidFilterParam as a 400 naming the
+	// parameter it came from. An unrecognized status or type is not a refusal;
+	// the role promises it matches nothing and answers 0.
 	OpCountIssues: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The listing's vocabulary minus the cursor: this operation has none, so
 	// invalid_cursor cannot arise. An unparseable EXPRESSION is an
@@ -841,10 +855,13 @@ var operationCodes = map[string][]Code{
 	// workspace-vocabulary issue_type or status, a metadata key the query layer
 	// could not spell, a field-length refusal that slipped the edge check —
 	// through failUpdate.
+	//
+	// not_claimable arrived with `claim`, beside the already_claimed it shares
+	// with the fence: a refused claim answers as claimIssue does.
 	OpUpdateIssue: {
 		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound,
-		CodePreconditionFailed, CodeNotClosable, CodeAlreadyClaimed,
-		CodeDependencyCycle, CodeDependencyExists,
+		CodePreconditionFailed, CodeNotClosable, CodeAlreadyClaimed, CodeNotesOverwrite,
+		CodeNotClaimable, CodeDependencyCycle, CodeDependencyExists,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
 	// No not_found. The role refuses an edge whose target names nothing, and
@@ -905,7 +922,7 @@ var operationCodes = map[string][]Code{
 	// resource this operation was asked to address.
 	OpApplyBatch: {
 		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound,
-		CodePreconditionFailed, CodeNotClosable, CodeAlreadyClaimed, CodeAlreadyExists,
+		CodePreconditionFailed, CodeNotClosable, CodeAlreadyClaimed, CodeNotesOverwrite, CodeAlreadyExists,
 		CodeDependencyCycle, CodeDependencyExists,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
@@ -1050,6 +1067,69 @@ func (r Result) WithIssueStatus(status string) Result {
 func (r Result) WithOpenChildren(n int) Result {
 	r.Problem.OpenChildren = &n
 	return r
+}
+
+// Blocker kinds on the wire, the `kind` member of apigen.Blocker.
+const (
+	blockerKindLocal    = "local"
+	blockerKindExternal = "external"
+)
+
+// closeBlocked builds the live-blocker `not_closable` for one refusal site.
+//
+// subject and hint are the site's own words ("… closes a blocked issue",
+// "clear the blocker, or send …"). When err carries the typed
+// *issueops.BlockedError the refusing check filled, the subject is replaced by
+// that error's own sentence — "cannot close blocked issue: <id> is blocked by
+// [<blockers>]", byte-identical to what the direct CLI prints before its
+// --force hint — and the list travels typed in the `blockers` member. Both are
+// built from the typed fields, never parsed out of a message: an error that
+// only MENTIONS blockers in prose keeps the generic detail and no member.
+func closeBlocked(err error, subject, hint string) (string, *[]apigen.Blocker) {
+	blocked := closeBlockedError(err)
+	if blocked == nil {
+		return subject + "; " + hint, nil
+	}
+	return blocked.Error() + "; " + hint, wireBlockers(blocked.Blockers)
+}
+
+// closeBlockedError returns the typed close-policy refusal err carries, or nil
+// when it carries none or names no blockers. The wrapped sentinel is checked
+// too, so a BlockedError raised for some other refusal is never reported as a
+// close's blockers.
+func closeBlockedError(err error) *issueops.BlockedError {
+	var blocked *issueops.BlockedError
+	if !errors.As(err, &blocked) || !errors.Is(blocked.Err, issueops.ErrCloseBlocked) || len(blocked.Blockers) == 0 {
+		return nil
+	}
+	return blocked
+}
+
+// wireBlockers projects typed blockers onto the `blockers` member, in the
+// order the refusing check reported them. `type` is omitted, not sent empty,
+// when the refusal did not report the edge type.
+func wireBlockers(blockers []issueops.Blocker) *[]apigen.Blocker {
+	out := make([]apigen.Blocker, 0, len(blockers))
+	for _, blocker := range blockers {
+		wire := apigen.Blocker{Id: blocker.ID, Kind: blockerKindLocal}
+		if blocker.External() {
+			wire.Kind = blockerKindExternal
+		}
+		if blocker.Type != "" {
+			wire.Type = ptrTo(string(blocker.Type))
+		}
+		out = append(out, wire)
+	}
+	return &out
+}
+
+// closeBlockedResult is closeBlocked as a problem document: the live-blocker
+// `not_closable` with its `blockers` member when the refusal named them.
+func closeBlockedResult(err error, subject, hint string) Result {
+	detail, blockers := closeBlocked(err, subject, hint)
+	res := newResult(CodeNotClosable, detail)
+	res.Problem.Blockers = blockers
+	return res
 }
 
 // WithDependencyTypeConflict attaches the two `dependency_exists` extension
@@ -1391,7 +1471,7 @@ func ClassifyError(err error) Result {
 		return newResult(CodeNotClosable, "issue has open children; close them first or close with force")
 
 	case errors.Is(err, issueops.ErrCloseBlocked):
-		return newResult(CodeNotClosable, "issue is blocked; clear the blocker or close with force")
+		return closeBlockedResult(err, "issue is blocked", "clear the blocker or close with force")
 
 	case errors.Is(err, ErrBusy):
 		res := newResult(CodeBusy, "")

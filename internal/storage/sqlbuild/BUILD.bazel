@@ -1,0 +1,54 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "sqlbuild",
+    srcs = [
+        "counts.go",
+        "descendants.go",
+        "filter.go",
+        "labels.go",
+        "ready.go",
+        "reclaim.go",
+        "sort.go",
+        "sqlbuild.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/storage/sqlbuild",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage",
+        "//internal/storage/domain",
+        "//internal/types",
+    ],
+)
+
+go_test(
+    name = "sqlbuild_test",
+    srcs = [
+        "descendants_test.go",
+        "filter_test.go",
+        "imports_boundary_test.go",
+        "keyset_test.go",
+        "labels_test.go",
+        "reclaim_test.go",
+        "sqlbuild_test.go",
+    ],
+    data = [
+        ":go_srcs",
+        "//internal/storage/domain:go_srcs",
+    ],
+    embed = [":sqlbuild"],
+    deps = ["//internal/types"],
+)
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

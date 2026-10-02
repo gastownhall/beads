@@ -150,7 +150,10 @@ func acquireEmbeddedLock(beadsDir string, serverMode bool) (util.Unlocker, error
 //
 // This is the factory the CROSS-WORKSPACE opens use — routed creates,
 // remote-cache hydration — so activation is resolved from beadsDir's own
-// config, not the launching workspace's.
+// config, not the launching workspace's. effectiveServerMode below is what
+// keeps that true for the dolt.shared-server layer; the one deliberate
+// exception is BEADS_DOLT_SHARED_SERVER, which is machine-global in every
+// resolver in the tree (see sharedServerModeForWorkspace).
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (s storage.DoltStorage, err error) {
 	defer func() { s, err = activateEventsJournalStore(beadsDir, s, err) }()
 	cfg, err := configfile.Load(beadsDir)
@@ -172,7 +175,7 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (s storage.Dol
 	if cfg != nil && cfg.IsDoltProxiedServerMode() {
 		return nil, errProxiedStoreUnrouted()
 	}
-	if cfg != nil && cfg.IsDoltServerMode() {
+	if effectiveServerMode(beadsDir, cfg) {
 		return dolt.NewFromConfig(ctx, beadsDir)
 	}
 	database := configfile.DefaultDoltDatabase
@@ -274,7 +277,7 @@ func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, previe
 	if cfg != nil && cfg.IsDoltProxiedServerMode() {
 		return nil, errProxiedStoreUnrouted()
 	}
-	if cfg != nil && cfg.IsDoltServerMode() {
+	if effectiveServerMode(beadsDir, cfg) {
 		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	}
 	database := configfile.DefaultDoltDatabase

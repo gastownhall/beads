@@ -188,12 +188,7 @@ func (s *DoltStore) ListBranches(ctx context.Context) ([]string, error) {
 // GetCurrentCommit returns the hash of the current HEAD commit.
 // Implements storage.VersionedStorage.
 func (s *DoltStore) GetCurrentCommit(ctx context.Context) (string, error) {
-	var hash string
-	err := s.db.QueryRowContext(ctx, "SELECT DOLT_HASHOF('HEAD')").Scan(&hash)
-	if err != nil {
-		return "", fmt.Errorf("failed to get current commit: %w", err)
-	}
-	return hash, nil
+	return versioncontrolops.CurrentCommit(ctx, s.db)
 }
 
 // GetStateHash returns a hash of the entire database including the working

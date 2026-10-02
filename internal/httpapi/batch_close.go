@@ -94,7 +94,9 @@ func (s *Server) handleBatchClose(w http.ResponseWriter, r *http.Request) {
 // on this surface follows, applied one scope down. `open_children` comes from
 // *issueops.CloseOpenChildrenError's own field, filled inside the transaction
 // that refused, and its ABSENCE is what tells a client the other not_closable
-// refusal (a live blocker) apart from this one.
+// refusal (a live blocker) apart from this one. That refusal's `blockers` come
+// from *issueops.BlockedError's typed list, the same member the single close
+// carries.
 //
 // AN UNRECOGNIZED ITEM ERROR IS NOT SILENTLY DROPPED. The role documents three
 // refusals and this maps three; anything else becomes a `not_closable` carrying
@@ -128,8 +130,10 @@ func closeOutcome(outcome issueops.CloseOutcome) apigen.CloseOutcome {
 
 	case errors.Is(outcome.Err, issueops.ErrCloseBlocked):
 		// No `open_children`, and its ABSENCE is what tells a client which of
-		// the two close-policy refusals this item got.
-		code, detail = CodeNotClosable, "this issue is blocked; clear the blocker, or send `force`"
+		// the two close-policy refusals this item got. The blockers travel as
+		// the single close's do, so a client names them per item.
+		code = CodeNotClosable
+		detail, wire.Blockers = closeBlocked(outcome.Err, "this issue is blocked", "clear the blocker, or send `force`")
 
 	case errors.Is(outcome.Err, storage.ErrNotFound):
 		code, detail = CodeNotFound, "no issue with this id in either plane"

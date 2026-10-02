@@ -19,6 +19,7 @@ import (
 type backupState struct {
 	LastDoltCommit string    `json:"last_dolt_commit"`
 	Timestamp      time.Time `json:"timestamp"`
+	LastCapWarnAt  time.Time `json:"last_cap_warn_at"`
 }
 
 // backupDir returns the backup directory path, creating it if needed.
@@ -122,9 +123,35 @@ func atomicWriteFile(path string, data []byte) error {
 	return nil
 }
 
+// localBackupBackend is what a Dolt-native backup into a local directory needs
+// from storage: the commit it would capture, and the backup itself. The direct
+// store supplies one (directLocalBackup) and so does the proxied provider
+// (proxiedLocalBackup, backup_proxied_server.go).
+type localBackupBackend interface {
+	CurrentCommit(ctx context.Context) (string, error)
+	BackupToDir(ctx context.Context, dir string) error
+}
+
+// directLocalBackup is localBackupBackend over an embedded or sql-server store.
+type directLocalBackup struct {
+	store storage.DoltStorage
+}
+
+func (b directLocalBackup) CurrentCommit(ctx context.Context) (string, error) {
+	return b.store.GetCurrentCommit(ctx)
+}
+
+func (b directLocalBackup) BackupToDir(ctx context.Context, dir string) error {
+	bs, ok := storage.UnwrapStore(b.store).(storage.BackupStore)
+	if !ok {
+		return fmt.Errorf("storage backend does not support backup operations")
+	}
+	return bs.BackupDatabase(ctx, dir)
+}
+
 // runBackupExport performs a Dolt-native backup to .beads/backup/.
 // Returns the updated state.
-func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
+func runBackupExport(ctx context.Context, backend localBackupBackend, force bool) (*backupState, error) {
 	dir, err := backupDir()
 	if err != nil {
 		return nil, err
@@ -137,7 +164,7 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 
 	// Change detection: skip if nothing changed (unless forced)
 	if !force {
-		currentCommit, err := store.GetCurrentCommit(ctx)
+		currentCommit, err := backend.CurrentCommit(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get current commit: %w", err)
 		}
@@ -147,12 +174,7 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 		}
 	}
 
-	bs, ok := storage.UnwrapStore(store).(storage.BackupStore)
-	if !ok {
-		return nil, fmt.Errorf("storage backend does not support backup operations")
-	}
-
-	if err := bs.BackupDatabase(ctx, dir); err != nil {
+	if err := backend.BackupToDir(ctx, dir); err != nil {
 		// Persist the attempt time even on failure so the throttle
 		// interval (checked by maybeAutoBackup via state.Timestamp)
 		// applies to the next command. Without this, a sync that keeps
@@ -170,7 +192,7 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 	}
 
 	// Update watermarks
-	currentCommit, err := store.GetCurrentCommit(ctx)
+	currentCommit, err := backend.CurrentCommit(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get current commit for state: %w", err)
 	}

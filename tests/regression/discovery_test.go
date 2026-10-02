@@ -589,7 +589,7 @@ func TestProtocol_NotesAppendVsOverwrite(t *testing.T) {
 		t.Errorf("notes should be 'Original', got: %v", data[0]["notes"])
 	}
 
-	w.run("update", a, "--notes", "Replaced")
+	w.run("update", a, "--notes", "Replaced", "--force")
 	data = parseJSON(t, w.run("show", a, "--json"))
 	if data[0]["notes"] != "Replaced" {
 		t.Errorf("notes should be 'Replaced', got: %v", data[0]["notes"])

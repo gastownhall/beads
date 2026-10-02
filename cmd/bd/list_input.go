@@ -43,6 +43,10 @@ type listInput struct {
 func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in := listInput{}
 
+	// The custom filter values persist across in-process Execute() calls;
+	// clear them once this read has copied them out.
+	defer resetListFilterFlags(cmd.Flags())
+
 	in.Status, _ = cmd.Flags().GetString("status")
 	if in.Status == "" {
 		in.Status, _ = cmd.Flags().GetString("state")
@@ -101,6 +105,7 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in.NoLabels, _ = cmd.Flags().GetBool("no-labels")
 
 	in.Brief, _ = cmd.Flags().GetBool("brief")
+	in.IncludeComments, _ = cmd.Flags().GetBool("include-comments")
 	in.SkipLabels, _ = cmd.Flags().GetBool("skip-labels")
 	if in.SkipLabels {
 		conflicts := skipLabelsConflicts(in.Labels, in.LabelsAny, in.LabelPattern, in.LabelRegex, in.ExcludeLabels, in.NoLabels)
@@ -258,6 +263,13 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in.prettyFormat = (prettyFormat || treeFormat) && !in.jsonOutput && in.formatStr == ""
 	in.watchMode, _ = cmd.Flags().GetBool("watch")
 	if in.watchMode {
+		// --watch re-renders the pretty listing on every tick, so a --format
+		// template would be dropped without a word (GH#6277). Refused here,
+		// ahead of the route split, so the direct and proxied routes answer
+		// the same way.
+		if in.formatStr != "" {
+			return in, HandleError("--format cannot be combined with --watch; --watch always renders the pretty listing")
+		}
 		in.prettyFormat = true
 	}
 	in.noPager, _ = cmd.Flags().GetBool("no-pager")

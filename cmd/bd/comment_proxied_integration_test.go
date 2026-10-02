@@ -216,6 +216,75 @@ func TestProxiedServerComment(t *testing.T) {
 		}
 	})
 
+	// TestProxiedServerComment/comment_write_never_resolves_abbreviated_id is
+	// the "document/test the gap explicitly" half of steveyegge's PR #5393
+	// review item (b): "the proxied-server path is untouched by the
+	// exact-match fix... extend exact matching to that path, or document/test
+	// the gap explicitly."
+	//
+	// Investigation (not just this test) found there is no gap to extend
+	// matching to: resolveCommentTargetProxied (comments_proxied_server.go)
+	// resolves via workapi.GetIssueOrWisp with the RAW id, which bottoms out
+	// in issueSQLRepositoryImpl.Get's plain "WHERE id = ?" (SQL exact
+	// equality — internal/storage/domain/db/issue.go). Unlike the embedded
+	// path (resolveAndGetIssueWithRouting -> utils.ResolvePartialID), nothing
+	// in this call chain ever performed leading-prefix abbreviation matching
+	// — comment's proxied writes were exact-id-only before PR #5393 and
+	// remain so. This test locks that in as a regression guard: an
+	// abbreviation of a REAL issue's id must be refused (not silently
+	// resolved to it, and not silently resolved to an unrelated bystander
+	// issue) when running against a real proxied server, the same way it
+	// already is against the embedded store.
+	t.Run("comment_write_never_resolves_abbreviated_id", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "pa")
+		target := bdProxiedCreate(t, bd, p.dir, "Needs exact id on comment (proxied)")
+		bystander := bdProxiedCreate(t, bd, p.dir, "Bystander issue (proxied)")
+
+		if len(target.ID) < 4 {
+			t.Fatalf("test setup: generated id %q too short to abbreviate", target.ID)
+		}
+		abbrev := target.ID[:len(target.ID)-1]
+
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "comment", abbrev, "should not land anywhere")
+		if err == nil {
+			t.Fatalf("bd comment %s unexpectedly succeeded in proxied mode\nstdout:\n%s\nstderr:\n%s", abbrev, stdout, stderr)
+		}
+		// Asserted as the whole message, not strings.Contains(id): the proxied
+		// route resolves through one exact "WHERE id = ?", so it cannot tell an
+		// abbreviation of a real issue from an id that names nothing, and it
+		// deliberately keeps the same "not found" wording for both — where the
+		// embedded route says "id abbreviations are not accepted on comment
+		// writes" (comment.go). Giving the proxied plane the truthful wording
+		// would mean probing for abbreviation matches on a write path, which is
+		// the resolution behaviour this PR exists to remove. A Contains(id)
+		// assertion passes on either wording, so it would leave that asymmetry
+		// untested; pinning the exact text makes it a deliberate choice that
+		// breaks loudly if either side moves.
+		if got, want := strings.TrimSpace(stderr), "Error: issue "+abbrev+" not found"; got != want {
+			t.Errorf("abbreviated-ID stderr = %q, want %q", got, want)
+		}
+		if stdout != "" {
+			t.Errorf("abbreviated-ID stdout = %q, want empty", stdout)
+		}
+
+		// The regression check: neither the abbreviation's real target nor an
+		// unrelated bystander received a comment.
+		for _, id := range []string{target.ID, bystander.ID} {
+			commentsOut, commentsErr, cErr := bdProxiedRunBuffers(t, bd, p.dir, "comments", "--json", id)
+			if cErr != nil {
+				t.Fatalf("bd comments --json %s failed: %v\nstdout:\n%s\nstderr:\n%s", id, cErr, commentsOut, commentsErr)
+			}
+			var comments []types.Comment
+			if err := json.Unmarshal([]byte(commentsOut), &comments); err != nil {
+				t.Fatalf("decode comments JSON for %s: %v\nraw: %q", id, err, commentsOut)
+			}
+			if len(comments) != 0 {
+				t.Fatalf("expected no comments on %s after rejected abbreviated 'comment', got: %v", id, comments)
+			}
+		}
+	})
+
 	t.Run("wisp_comments_add_round_trip_and_physical_routing", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "wa")

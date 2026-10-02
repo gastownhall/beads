@@ -15,10 +15,20 @@
 # excluded — it runs in the separate test-embedded-conformance job, which
 # shards by sub-test path (core/audit), not by top-level function name, and
 # is a different mechanism from this manifest.
+#
+# Three tests are placed by measured -race duration instead (PR Risk run
+# 36807191489, at the 1000-item issueops.MaxApplyBatchItems cap):
+# TestBatchApplyContract (604s) on shard 4, which has ~3m of other tests,
+# and TestLargeBatchApplyStatementCounts_Embedded (247s) and
+# TestLargeBatchApplyWallClock_Embedded (261s) on shards 2 and 5. Hashed,
+# TestBatchApplyContract shared shard 2 with ~5m of other tests and ran it
+# past the job's old 15m timeout; placed so, the heaviest shard projects to
+# ~13m.
 5 1 TestActiveDatabaseSizeFailsForMissingEmbeddedDatabase
 5 2 TestActiveDatabaseSizeScopesToActiveEmbeddedDatabase
 5 3 TestAddDependency
 5 4 TestAddLabel
+5 4 TestBatchApplyContract
 5 5 TestBuildDSN_NoDatabase
 5 1 TestBuildDSN_SpacesInPath
 5 2 TestBuildDSN_WithDatabase
@@ -73,6 +83,8 @@
 5 1 TestHistory_NullTextColumns
 5 2 TestHookFiringStoreCreateIssuesFiresDependencyUpdatesFromEmbeddedStore
 5 3 TestIsBlockedBatchEmbedded
+5 2 TestLargeBatchApplyStatementCounts_Embedded
+5 5 TestLargeBatchApplyWallClock_Embedded
 5 4 TestLeaseLifecycleEmbedded
 5 5 TestListWisps
 5 1 TestOpenAfterCloseCreatesNewStore
