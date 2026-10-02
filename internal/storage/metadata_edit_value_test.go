@@ -84,3 +84,22 @@ func TestApplyMetadataEditsTypesScalars(t *testing.T) {
 		t.Errorf("metadata[existing] = %#v, want %q: pre-existing keys must survive", got["existing"], "yes")
 	}
 }
+
+func TestApplyMetadataEditsHyphenatedKey(t *testing.T) {
+	t.Parallel()
+	set, err := ApplyMetadataEdits(json.RawMessage(`{"existing":"yes"}`), []string{"drill-meta=v"}, nil)
+	if err != nil {
+		t.Fatalf("set hyphenated key: %v", err)
+	}
+	if got := string(set); got != `{"drill-meta":"v","existing":"yes"}` {
+		t.Fatalf("set result = %s", got)
+	}
+
+	unset, err := ApplyMetadataEdits(set, nil, []string{"drill-meta"})
+	if err != nil {
+		t.Fatalf("unset hyphenated key: %v", err)
+	}
+	if got := string(unset); got != `{"existing":"yes"}` {
+		t.Fatalf("unset result = %s", got)
+	}
+}
