@@ -551,10 +551,10 @@ func TestRunUsesEachWindowsPassSelectedToolchain(t *testing.T) {
 		return data, nil, err
 	}
 	var stderr bytes.Buffer
-	if code := run(nil, ".", environ, io.Discard, &stderr, runner); code != 0 || len(runner.runCommands) != 2 {
+	if code := run(nil, ".", environ, io.Discard, &stderr, runner); code != 0 || len(runner.runCommands) != 3 {
 		t.Fatalf("run = %d, passes = %d, stderr=%s", code, len(runner.runCommands), &stderr)
 	}
-	for index, root := range []string{nativeRoot, crossRoot} {
+	for index, root := range []string{nativeRoot, crossRoot, crossRoot} {
 		env := runner.runCommands[index].env
 		assertSingleLogicalEnvironmentKey(t, env, "PATH")
 		assertEnvironmentValue(t, env, "PATH", filepath.Join(root, "bin")+";original", true)

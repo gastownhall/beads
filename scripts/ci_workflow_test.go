@@ -527,6 +527,38 @@ func TestPRWorkflowExercisesNativeUserConfigDiagnostics(t *testing.T) {
 	}
 }
 
+func TestWindowsLintDriverRunsInRequiredPlatformJob(t *testing.T) {
+	const (
+		jobName     = "pr-preflight-platforms"
+		stepName    = "Exercise lint driver on native Windows"
+		stepCommand = "go test -tags gms_pure_go -count=1 -timeout 5m -v ./scripts/pr-lint"
+	)
+
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, jobName)
+	if job.RunsOn != "${{ matrix.os }}" || !contains(job.Strategy.Matrix.OS, "windows-latest") {
+		t.Fatalf("lint driver needs the required platform matrix with Windows: runs-on=%q os=%v", job.RunsOn, job.Strategy.Matrix.OS)
+	}
+	step := job.step(t, stepName)
+	if step.If != "matrix.os == 'windows-latest'" || step.Shell != "bash" ||
+		step.TimeoutMinutes != 10 || step.TimeoutMinutes >= job.TimeoutMinutes ||
+		(step.ContinueOnError != nil && step.ContinueOnError != false) {
+		t.Fatalf("native Windows lint-driver step is not required and bounded: if=%q shell=%q timeout=%d job-timeout=%d continue-on-error=%v",
+			step.If, step.Shell, step.TimeoutMinutes, job.TimeoutMinutes, step.ContinueOnError)
+	}
+	if strings.TrimSpace(step.Run) != stepCommand {
+		t.Fatalf("native Windows lint-driver command = %q, want %q", step.Run, stepCommand)
+	}
+	assertStepsBefore(t, job, []string{"Set up Go", "Restore Go module cache"}, []string{stepName})
+
+	gate := workflow.job(t, "ci-gate")
+	gateEnv := gate.step(t, "Evaluate CI gate").Env
+	if !contains(gate.Needs, jobName) || gateEnv["PR_PREFLIGHT_PLATFORMS"] != "${{ needs.pr-preflight-platforms.result }}" ||
+		!contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), "PR_PREFLIGHT_PLATFORMS") {
+		t.Fatal("native Windows lint-driver result must remain part of the required platform aggregate")
+	}
+}
+
 func TestPRWorkflowRequiresNativeInitGatewayCredential(t *testing.T) {
 	const (
 		jobName     = "pr-preflight-platforms"

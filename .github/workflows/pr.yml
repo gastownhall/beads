@@ -831,6 +831,12 @@ jobs:
           key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
+      - name: Exercise lint driver on native Windows
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        timeout-minutes: 10
+        run: go test -tags gms_pure_go -count=1 -timeout 5m -v ./scripts/pr-lint
+
       - name: Exercise the real Bash process boundary
         shell: bash
         run: go test '-tags=integration,gms_pure_go' -count=1 -run '^TestPRPreflight' ./scripts
