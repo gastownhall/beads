@@ -9,9 +9,7 @@ import (
 )
 
 func TestFormulaSchemaList_HumanOutput(t *testing.T) {
-	prevJSON := jsonOutput
-	jsonOutput = false
-	defer func() { jsonOutput = prevJSON }()
+	pinJSONOutput(t, false)
 
 	out := captureStdout(t, func() error {
 		return runFormulaSchemaList()
@@ -28,9 +26,7 @@ func TestFormulaSchemaList_HumanOutput(t *testing.T) {
 }
 
 func TestFormulaSchemaList_JSON(t *testing.T) {
-	prevJSON := jsonOutput
-	jsonOutput = true
-	defer func() { jsonOutput = prevJSON }()
+	pinJSONOutput(t, true)
 
 	out := captureStdout(t, func() error {
 		return runFormulaSchemaList()
@@ -48,9 +44,7 @@ func TestFormulaSchemaList_JSON(t *testing.T) {
 }
 
 func TestFormulaSchemaShow_RendersFields(t *testing.T) {
-	prevJSON := jsonOutput
-	jsonOutput = false
-	defer func() { jsonOutput = prevJSON }()
+	pinJSONOutput(t, false)
 
 	out := captureStdout(t, func() error {
 		return runFormulaSchemaShow("loop")
@@ -64,9 +58,7 @@ func TestFormulaSchemaShow_RendersFields(t *testing.T) {
 }
 
 func TestFormulaSchemaShow_AliasResolution(t *testing.T) {
-	prevJSON := jsonOutput
-	jsonOutput = false
-	defer func() { jsonOutput = prevJSON }()
+	pinJSONOutput(t, false)
 
 	for _, input := range []string{"on_complete", "OnComplete", "OnCompleteSpec"} {
 		out := captureStdout(t, func() error {
@@ -96,9 +88,7 @@ func TestFormulaSchemaCmd_AliasRegistered(t *testing.T) {
 }
 
 func TestFormulaSchemaShow_JSON(t *testing.T) {
-	prevJSON := jsonOutput
-	jsonOutput = true
-	defer func() { jsonOutput = prevJSON }()
+	pinJSONOutput(t, true)
 
 	out := captureStdout(t, func() error {
 		return runFormulaSchemaShow("loop")
