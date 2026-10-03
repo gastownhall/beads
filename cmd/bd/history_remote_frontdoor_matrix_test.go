@@ -47,7 +47,7 @@ func TestProxiedServerHistoryRemoteRefusalFrontDoorMatrix(t *testing.T) {
 			fixture{name: "external-unix", make: func(t *testing.T) proxiedProject {
 				requireProxiedServerEnv(t)
 				upstream := testutil.StartIsolatedDoltContainerHandle(t)
-				socket := filepath.Join(t.TempDir(), "dolt.sock")
+				socket := shortSocketPath(t, "dolt.sock")
 				bridge := startHistoryUnixBridge(t, socket, upstream.Port)
 				t.Cleanup(func() { _ = bridge.Process.Kill() })
 				return bdProxiedInit(t, bd, "hm_unix", "--proxied-server-external-socket-path", socket)
