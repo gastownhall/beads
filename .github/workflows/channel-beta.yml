@@ -1,0 +1,273 @@
+# Beta channel — promote a Dev build through the full release gate.
+#
+# Part of the release-channel proposal for gastownhall/beads (issue #5867).
+# Phase 1 of three; see engdocs/RELEASE-CHANNELS.md in the same PR.
+#
+# Beta is where the expensive gate runs. Once cut, a beta STOPS TRACKING main:
+# fixes reach it by deliberate cherry-pick, one at a time. That is what makes
+# stable promotable without re-litigating everything on main — and it is what
+# beads lacked in August, when recovering from v1.2.1 meant hand-building a
+# release off the v1.1.2 tree because no maintained stable line existed.
+#
+# WHICH GATES RUN HERE, AND WHY ONLY THOSE. The split is not arbitrary — it is
+# whatever the beta tag does not already trigger:
+#
+#   Pre-tag, in this workflow          Because it runs on `push: main` only and
+#     make test                        would otherwise never see the candidate
+#     make test-regression             at all.
+#     check-migration-hygiene.sh
+#     check-versions.sh
+#     ci-package-mcp / ci-package-npm  (cheap, and failing here beats failing
+#                                       after the tag exists)
+#
+#   Post-tag, existing workflows       Already fire on `push: tags: v*`. Not
+#     cross-version-smoke.yml            duplicated here.
+#       (30-release upgrade matrix)
+#     migration-test.yml
+#     release.yml (publishes the
+#       prerelease; PyPI/npm correctly
+#       skipped for a hyphenated tag)
+#
+# THE ONE-MIGRATION RULE. channel-promote.sh refuses a beta whose span carries
+# more than one schema step. ~98% of the backlog touches no migration at all
+# (measured 2026-08-15), so this costs almost nothing in throughput and removes
+# the exact shape that broke v1.2.1: twelve forward-only, auto-applied schema
+# steps in a single release.
+#
+# WHY IT PUBLISHES A CHECK RUN. The pre-tag gates run against the source tree,
+# but the beta commit is that tree plus a version bump, so their results are
+# recorded against the wrong SHA. Phase 2's dossier reads check runs on the
+# beta commit — so this workflow publishes its own verdict there explicitly.
+# Without that, the dossier would silently under-report and a promotion would
+# look less gated than it was.
+#
+# ADOPTION PREREQUISITES, which this workflow cannot grant itself:
+#   1. refs/heads/channel/* writable by GITHUB_TOKEN.
+#   2. The v* tag ruleset must admit the Actions bot for prerelease tags.
+
+name: Channel — Beta
+
+on:
+  schedule:
+    # Mondays, 03:00 UTC — after the nightly, so channel/dev is fresh.
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "What to promote. Defaults to the dev channel."
+        required: false
+        default: "channel/dev"
+        type: string
+      bump:
+        description: "Base version bump"
+        required: false
+        type: choice
+        default: auto
+        options: [ auto, minor, patch ]
+      allow_multi_migration:
+        description: "Cut a beta spanning more than one schema step (discouraged)"
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: "Run the gate and report, but do not push branch or tag"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: channel-beta
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  BD_DISABLE_METRICS: "1"
+  BD_DISABLE_EVENT_FLUSH: "1"
+  SOURCE_REF: ${{ inputs.source_ref || 'channel/dev' }}
+
+jobs:
+  gate:
+    name: Full release gate
+    if: ${{ github.repository == 'gastownhall/beads' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      base_tag: ${{ steps.plan.outputs.base_tag }}
+      migration_count: ${{ steps.plan.outputs.migration_count }}
+      source_sha: ${{ steps.src.outputs.sha }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Identify the source
+        id: src
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Promoting ${SOURCE_REF} @ $(git rev-parse --short HEAD)"
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Install uv
+        run: python -m pip install uv==0.11.16
+
+      # Plan first, and fail here rather than after an hour of tests. The
+      # migration guard is the cheapest check and the most consequential.
+      - name: Plan the beta (enforces the one-migration rule)
+        id: plan
+        run: |
+          args=(--channel beta --bump "${{ inputs.bump || 'auto' }}")
+          if [ "${{ inputs.allow_multi_migration }}" = "true" ]; then
+            echo "::warning::Multi-migration beta explicitly permitted for this run."
+            args+=(--allow-multi-migration)
+          fi
+          bash scripts/channel-promote.sh "${args[@]}"
+
+      # --- the gates the beta tag will NOT trigger -------------------------
+
+      - name: Full test suite
+        run: TEST_TIMEOUT=25m make test
+
+      - name: Regression suite (differential against the pinned baseline)
+        run: make test-regression
+
+      - name: Migration hygiene
+        run: ./scripts/check-migration-hygiene.sh
+
+      - name: MCP package gate
+        run: make ci-package-mcp
+
+      - name: npm package gate
+        run: make ci-package-npm
+
+      - name: Gate summary
+        if: always()
+        run: |
+          {
+            echo "## Beta gate — \`${{ steps.plan.outputs.version }}\`"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Source | \`${SOURCE_REF}\` @ \`${{ steps.src.outputs.sha }}\` |"
+            echo "| Base tag | \`${{ steps.plan.outputs.base_tag }}\` |"
+            echo "| Schema steps | ${{ steps.plan.outputs.migration_count }} |"
+            echo
+            echo "Gates run here: full suite, regression, migration hygiene, MCP and"
+            echo "npm package gates. The 30-release upgrade matrix, the migration"
+            echo "harness and the prerelease publish run on the tag."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  cut:
+    name: Cut the beta
+    needs: gate
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      checks: write
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          # The exact commit the gate ran against, not the branch head, which
+          # may have moved while the suite was running.
+          ref: ${{ needs.gate.outputs.source_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Install uv
+        run: python -m pip install uv==0.11.16
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Stage the version bump
+        id: plan
+        run: |
+          bash scripts/channel-promote.sh \
+            --channel beta \
+            --bump "${{ inputs.bump || 'auto' }}" \
+            --apply
+
+      - name: Commit to the channel branch
+        id: commit
+        run: |
+          set -euo pipefail
+          version="${{ steps.plan.outputs.version }}"
+          git add -A
+          git commit -m "chore(release): beta candidate v${version}
+
+          Promoted from ${SOURCE_REF} @ ${{ needs.gate.outputs.source_sha }} after
+          the full release gate. Publishes a GitHub prerelease only — the stable
+          channels are untouched until this is promoted."
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Move the channel pointer
+        run: git push --force origin HEAD:refs/heads/channel/beta
+
+      # Record the pre-tag verdict against the BETA commit, so the Phase 2
+      # dossier sees it. Without this the gate results live on the source
+      # commit and the promotion looks less gated than it was.
+      - name: Publish the gate verdict onto the beta commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Explicit JSON body rather than nested -f fields, built from env vars
+          # so nothing is quoted inside the code. gh reads it from stdin.
+          export CR_SHA="${{ steps.commit.outputs.sha }}"
+          export CR_SRC="${{ needs.gate.outputs.source_sha }}"
+          export CR_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          python3 scripts/channel-check-run.py > /tmp/check-run.json
+          gh api "repos/${{ github.repository }}/check-runs" --input /tmp/check-run.json >/dev/null
+          echo "Published pre-tag verdict onto ${CR_SHA}."
+
+      - name: Tag
+        run: |
+          set -euo pipefail
+          version="${{ steps.plan.outputs.version }}"
+          git tag -a "v${version}" -m "Beta candidate v${version}
+
+          Gated: full suite, regression, migration hygiene, package gates.
+          Schema steps in this span: ${{ needs.gate.outputs.migration_count }}."
+          # Triggers cross-version-smoke (30 deep), migration-test, and
+          # release.yml — which publishes a prerelease and correctly skips
+          # PyPI and npm for a hyphenated tag.
+          git push origin "v${version}"
+
+      - name: Summary
+        run: |
+          {
+            echo "## Cut \`v${{ steps.plan.outputs.version }}\`"
+            echo
+            echo "Soak begins when the prerelease publishes. Promote to stable with"
+            echo "the **Channel — Stable** workflow, which will assemble the gate"
+            echo "dossier and hold for approval."
+          } >> "$GITHUB_STEP_SUMMARY"
