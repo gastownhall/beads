@@ -96,6 +96,7 @@ go_test(
         "ready_work_counts_test.go",
         "ready_work_missing_table_test.go",
         "ready_work_test.go",
+        "ready_work_walk_once_test.go",
         "remote_test.go",
         "reopen_test.go",
         "reopen_usecase_test.go",

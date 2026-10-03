@@ -668,6 +668,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   just `bd show`'s DESCRIPTION field. An explicit `GLAMOUR_STYLE` override
   still takes priority over the detected background.
 
+- **`bd ready --parent` computes the parent's descendant set once per call
+  instead of once per plane.** The issues leg and the wisp leg each ran the
+  transitive descendant walk — the dominant cost of a scoped ready call — so
+  a `bd ready --parent` listing paid it twice (16.0 s for a 483-descendant parent
+  on a 4.6k-edge database, 13.6 s of it in the two walks); the proxied-server
+  stack repeated the deferred-parent probes the same way. Both stacks now
+  compute the shared predicate inputs once and reuse them for every plane
+  (`bd ready --json` already did, through the shared probe of
+  [#6731](https://github.com/gastownhall/beads/pull/6731))
+  ([#6129](https://github.com/gastownhall/beads/issues/6129)).
+
 ### Added
 
 - **`POST /v0/beads/issues:batchApply` accepts up to 1000 items, up from 100.**
