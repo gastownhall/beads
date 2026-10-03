@@ -4,6 +4,9 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -62,6 +65,50 @@ func (w *watchBannerWriter) waitForRender(want int, timeout time.Duration, exite
 			return w.count >= want
 		case <-deadline:
 			return false
+		}
+	}
+}
+
+// pipeCapture hands a child one end of a pipe as its stdout and lets the test
+// read, on demand, exactly what the child has written so far. A plain buffer
+// behind exec's copy goroutine cannot give that: stdout and stderr are copied
+// by two independent goroutines, so a write the child made to stdout before
+// the banner can reach the test after the banner does.
+type pipeCapture struct {
+	r   *os.File
+	buf bytes.Buffer
+}
+
+// newPipeCapture returns the capture and the write end to set as cmd.Stdout.
+// The caller closes the write end once the child has started.
+func newPipeCapture(t *testing.T) (*pipeCapture, *os.File) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	return &pipeCapture{r: r}, w
+}
+
+// drain moves every byte already in the pipe into the buffer and returns the
+// whole capture. A read attempts the syscall before it consults the deadline,
+// so bytes the child has written are never left behind; the deadline only ends
+// the wait once the pipe is empty.
+func (c *pipeCapture) drain(t *testing.T) string {
+	t.Helper()
+	chunk := make([]byte, 4096)
+	for {
+		if err := c.r.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+			t.Fatalf("stdout pipe deadline: %v", err)
+		}
+		n, err := c.r.Read(chunk)
+		c.buf.Write(chunk[:n])
+		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, io.EOF) {
+				return c.buf.String()
+			}
+			t.Fatalf("read stdout pipe: %v", err)
 		}
 	}
 }
@@ -147,17 +194,22 @@ func TestProxiedServerShowWatch(t *testing.T) {
 		p := newSharedProxiedProject(t, bd, "swd")
 		issue := bdProxiedCreate(t, bd, p.dir, "Watch then delete", "--type", "task")
 
-		// Locked: stdout is read while the child is still writing to it.
-		stdout := &watchBannerWriter{renders: make(chan int, 1)}
+		// The child writes stdout straight into a pipe the test drains itself.
+		// The initial render is written before the banner, so once the banner
+		// is seen a drain returns all of it, and "before" cannot be taken
+		// mid-render.
+		stdout, stdoutW := newPipeCapture(t)
 		stderr := &watchBannerWriter{renders: make(chan int, 1)}
 		cmd := exec.Command(bd, "--json", "show", issue.ID, "--watch")
 		cmd.Dir = p.dir
 		cmd.Env = bdProxiedEnv(p.dir)
-		cmd.Stdout = stdout
+		cmd.Stdout = stdoutW
 		cmd.Stderr = stderr
 		if err := cmd.Start(); err != nil {
+			_ = stdoutW.Close()
 			t.Fatalf("start bd show --watch: %v", err)
 		}
+		_ = stdoutW.Close()
 		exited := make(chan struct{})
 		go func() {
 			_ = cmd.Wait()
@@ -169,9 +221,9 @@ func TestProxiedServerShowWatch(t *testing.T) {
 		})
 
 		if !stderr.waitForRender(1, 60*time.Second, exited) {
-			t.Fatalf("bd show --watch never started watching\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+			t.Fatalf("bd show --watch never started watching\nstdout:\n%s\nstderr:\n%s", stdout.drain(t), stderr.String())
 		}
-		before := len(stdout.String())
+		before := len(stdout.drain(t))
 		bdProxiedDelete(t, bd, p.dir, issue.ID, "--force")
 
 		// Several poll intervals, so a per-tick report would have fired.
@@ -180,7 +232,7 @@ func TestProxiedServerShowWatch(t *testing.T) {
 			t.Fatalf("bd show --watch exited after the issue was deleted\nstderr:\n%s", stderr.String())
 		case <-time.After(3 * showWatchPollInterval):
 		}
-		if after := stdout.String()[before:]; after != "" {
+		if after := stdout.drain(t)[before:]; after != "" {
 			t.Errorf("stdout grew after the delete:\n%s", after)
 		}
 		if strings.Contains(stderr.String(), "Error") || strings.Contains(stderr.String(), "not found") {
