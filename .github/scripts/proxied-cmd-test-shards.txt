@@ -3,11 +3,17 @@
 # Format: <total_shards> <shard_number> <top_level_test_name>
 #
 # 15-shard split, bin-packed longest-processing-time-first by
-# estimated cost (bd-init count; per-init migration chains dominate).
-# Regenerate with scripts/ci/gen_proxied_shard_manifest.py after adding,
-# splitting, or reweighting TestProxiedServer*/TestServerMode*
-# functions. Newly-added tests not listed here hash-distribute via
-# proxied-test-shard.sh.
+# estimated cost (bd-init count; per-init migration chains dominate), as of
+# the test set that existed when this block was last generated.
+# Regenerating it (scripts/ci/gen_proxied_shard_manifest.py 15 --write) is
+# deliberately NOT part of normal maintenance: this block is frozen for
+# pr-risk.yml's/main.yml's legacy fork/push jobs (see engdocs/TESTING.md),
+# so every TestProxiedServer*/TestServerMode* function added since it was
+# last generated hash-distributes via proxied-test-shard.sh (cksum(name) %
+# total) instead of being explicitly listed here. Only reweight it on
+# purpose, and expect the shard assignments below to change substantially
+# if you do (a fresh run packs every currently-discovered test, not just
+# the ones already listed here).
 #
 # This file is generated: notes added here are erased by the next
 # regeneration. Add them to the generator instead. Known blind spots
@@ -198,12 +204,14 @@
 # longest-processing-time-first by measured wall-time from
 # scripts/ci/proxied_test_durations.json (see that file for
 # provenance and its "relative weight, not absolute SLA" caveat).
-# Regenerate with scripts/ci/gen_proxied_shard_manifest.py 30 --weights=duration
-# after adding, splitting, or reweighting TestProxiedServer*/
-# TestServerMode* functions — ideally after refreshing
-# proxied_test_durations.json too. Newly-added tests not listed here
-# hash-distribute via proxied-test-shard.sh using the same fallback
-# ratio documented in proxied_test_durations.json.
+# Regenerate with scripts/ci/gen_proxied_shard_manifest.py 30
+# --weights=duration --write after adding, splitting, or reweighting
+# TestProxiedServer*/TestServerMode* functions — ideally after
+# refreshing proxied_test_durations.json too (--check verifies this
+# block is not stale). Newly-added tests not listed here
+# hash-distribute via proxied-test-shard.sh: cksum(name) % total,
+# unrelated to proxied_test_durations.json (that file only feeds this
+# generator's own cost estimate for a test it has not measured yet).
 #
 # This file is generated: notes added here are erased by the next
 # regeneration. Add them to the generator or the durations file

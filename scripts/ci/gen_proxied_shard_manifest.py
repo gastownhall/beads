@@ -26,9 +26,21 @@ assignment keeps its exact current behavior):
 
 Either way, tests are packed into TOTAL shards longest-processing-time-first
 (heaviest first onto the currently lightest shard) so the heaviest shard's
-total is minimized. Prints the manifest block to stdout.
+total is minimized.
+
+The manifest file holds more than one block (one per total_shards value in
+use): the legacy, frozen 15-shard block pr-risk.yml/main.yml's jobs read, and
+the Bazel-only lane's own block (30 shards as of F2). By default this prints
+only the requested total's block to stdout, which is NOT safe to redirect
+straight into the manifest file (`gen... 30 > file` deletes every other
+block). Use --write to update the file in place instead: it replaces only
+the block for the requested total_shards and leaves every other block
+untouched. Use --check to verify the committed block for a total_shards
+still matches a fresh (re-)generation, without writing anything — this is
+the form a CI policy check should call.
 
 Usage: gen_proxied_shard_manifest.py [total_shards] [--weights=inits|duration]
+                                      [--write | --check] [--manifest PATH]
 """
 import argparse
 import glob
@@ -36,6 +48,11 @@ import json
 import os
 import re
 import sys
+
+# Relative to the repo root, like discover_inits_cost's cmd/bd/*_test.go glob:
+# this script must be run from (or with --manifest pointed relative to) the
+# repo root, matching every other caller (the shell shard scripts, CI).
+default_manifest_path = '.github/scripts/proxied-cmd-test-shards.txt'
 
 func_re = re.compile(r'^func (Test(?:ProxiedServer|ServerMode)[A-Za-z0-9_]+)\(')
 
@@ -69,6 +86,12 @@ def duration_cost(inits):
         data = json.load(fh)
     measured = data['tests']
     fallback_ratio = data['seconds_per_init_fallback']
+    stale = sorted(name for name in measured if name not in inits)
+    if stale:
+        sys.stderr.write(
+            f'warning: proxied_test_durations.json has {len(stale)} capture(s) for '
+            'tests that no longer exist in cmd/bd/*_test.go (renamed, split or '
+            f'deleted since the last capture): {", ".join(stale)}\n')
     costs = {}
     for name, cost in inits.items():
         costs[name] = measured[name] if name in measured else cost * fallback_ratio
@@ -97,10 +120,10 @@ def render(total, shards, weights):
     if weights == 'inits':
         out.append(f'# {total}-shard split, bin-packed longest-processing-time-first by')
         out.append('# estimated cost (bd-init count; per-init migration chains dominate).')
-        out.append(f'# Regenerate with scripts/ci/gen_proxied_shard_manifest.py {total} after adding,')
-        out.append('# splitting, or reweighting TestProxiedServer*/TestServerMode*')
-        out.append('# functions. Newly-added tests not listed here hash-distribute via')
-        out.append('# proxied-test-shard.sh.')
+        out.append(f'# Regenerating it (scripts/ci/gen_proxied_shard_manifest.py {total} --write)')
+        out.append('# is deliberately NOT part of normal maintenance; see the frozen note')
+        out.append('# below. Newly-added tests not listed here hash-distribute via')
+        out.append('# proxied-test-shard.sh: cksum(name) % total.')
         out.append('#')
         out.append('# This file is generated: notes added here are erased by the next')
         out.append('# regeneration. Add them to the generator instead. Known blind spots')
@@ -119,20 +142,24 @@ def render(total, shards, weights):
         out.append('#   a doc comment.')
         out.append('#')
         out.append(f'# This {total}-shard block is frozen for pr-risk.yml/main.yml\'s legacy')
-        out.append('# fork/push jobs: do not regenerate it even after adding tests (they')
-        out.append('# hash-distribute until a maintainer chooses to reweight on purpose).')
+        out.append('# fork/push jobs (see engdocs/TESTING.md): do not regenerate it even')
+        out.append('# after adding tests (they hash-distribute until a maintainer chooses')
+        out.append('# to reweight on purpose). --check does not cover this block; only the')
+        out.append('# Bazel-only --weights=duration block is checked in CI.')
     else:
         out.append(f'# {total}-shard split for the Bazel-only proxied-server tier')
         out.append('# (bazel-proxied in .github/workflows/bazel.yml), bin-packed')
         out.append('# longest-processing-time-first by measured wall-time from')
         out.append('# scripts/ci/proxied_test_durations.json (see that file for')
         out.append('# provenance and its "relative weight, not absolute SLA" caveat).')
-        out.append(f'# Regenerate with scripts/ci/gen_proxied_shard_manifest.py {total} --weights=duration')
-        out.append('# after adding, splitting, or reweighting TestProxiedServer*/')
-        out.append('# TestServerMode* functions — ideally after refreshing')
-        out.append('# proxied_test_durations.json too. Newly-added tests not listed here')
-        out.append('# hash-distribute via proxied-test-shard.sh using the same fallback')
-        out.append('# ratio documented in proxied_test_durations.json.')
+        out.append(f'# Regenerate with scripts/ci/gen_proxied_shard_manifest.py {total}')
+        out.append('# --weights=duration --write after adding, splitting, or reweighting')
+        out.append('# TestProxiedServer*/TestServerMode* functions — ideally after')
+        out.append('# refreshing proxied_test_durations.json too (--check verifies this')
+        out.append('# block is not stale). Newly-added tests not listed here')
+        out.append('# hash-distribute via proxied-test-shard.sh: cksum(name) % total,')
+        out.append('# unrelated to proxied_test_durations.json (that file only feeds this')
+        out.append('# generator\'s own cost estimate for a test it has not measured yet).')
         out.append('#')
         out.append('# This file is generated: notes added here are erased by the next')
         out.append('# regeneration. Add them to the generator or the durations file')
@@ -145,10 +172,104 @@ def render(total, shards, weights):
     return out
 
 
+def split_blocks(text):
+    """Split a manifest file's text into its per-total_shards blocks.
+
+    A block is a run of leading '#' comment (and blank spacer) lines,
+    immediately followed by a run of lines that do not start with '#' (shard
+    assignment lines and the blank lines render() puts between shards) that
+    ends at the next '#' line or end of file. Returns a list of dicts with
+    'header' and 'body' line lists and the block's 'total' (parsed from its
+    first assignment line; None for a block with no assignment lines yet).
+    """
+    lines = text.split('\n')
+    blocks = []
+    i, n = 0, len(lines)
+    while i < n:
+        header = []
+        while i < n and lines[i].startswith('#'):
+            header.append(lines[i])
+            i += 1
+        while i < n and lines[i] == '' and not (i + 1 < n and lines[i + 1].startswith('#')):
+            header.append(lines[i])
+            i += 1
+        body = []
+        while i < n and not lines[i].startswith('#'):
+            body.append(lines[i])
+            i += 1
+        if not header and not body:
+            continue
+        total = None
+        for bl in body:
+            m = re.match(r'^(\d+) ', bl)
+            if m:
+                total = int(m.group(1))
+                break
+        blocks.append({'header': header, 'body': body, 'total': total})
+    return blocks
+
+
+def write_block(path, total, out):
+    """Replace path's block for total_shards == total with out (a render()
+    list), preserving every other block and its position. Appends out as a
+    new trailing block if path has none for this total yet."""
+    text = open(path).read() if os.path.exists(path) else ''
+    blocks = split_blocks(text) if text else []
+    result = []
+    replaced = False
+    for b in blocks:
+        if b['total'] == total:
+            result.extend(out)
+            replaced = True
+        else:
+            result.extend(b['header'])
+            result.extend(b['body'])
+    if not replaced:
+        if result and result[-1] != '':
+            result.append('')
+        result.extend(out)
+    with open(path, 'w') as fh:
+        fh.write('\n'.join(result).rstrip('\n') + '\n')
+
+
+def check_block(path, total, out):
+    """Return None if path's committed block for total_shards == total
+    equals out (a render() list); otherwise an actionable error string."""
+    if not os.path.exists(path):
+        return f'{path} does not exist'
+    blocks = split_blocks(open(path).read())
+    for b in blocks:
+        if b['total'] == total:
+            got = b['header'] + b['body']
+            want = out
+            # Both end with a run of blank lines that gets collapsed by
+            # write_block/the legacy stdout path; compare with trailing
+            # blanks stripped so that distinction does not cause false drift.
+            while got and got[-1] == '':
+                got.pop()
+            while want and want[-1] == '':
+                want.pop()
+            if got == want:
+                return None
+            return (f"{path}'s {total}-shard block does not match a fresh regeneration.\n"
+                     f'Run: python3 {sys.argv[0]} {total} '
+                     f'--weights={"duration" if any("duration" in h for h in b["header"]) else "inits"} --write\n'
+                     'then commit the result.')
+    return f'{path} has no block for total_shards={total}'
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('total_shards', nargs='?', type=int, default=15)
     ap.add_argument('--weights', choices=['inits', 'duration'], default='inits')
+    ap.add_argument('--manifest', default=default_manifest_path,
+                     help=f'manifest file to read/write (default: {default_manifest_path})')
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument('--write', action='store_true',
+                       help='rewrite only this total_shards block in --manifest in place')
+    mode.add_argument('--check', action='store_true',
+                       help="exit non-zero if --manifest's block for this total_shards is stale "
+                            '(does not write anything)')
     args = ap.parse_args()
 
     inits = discover_inits_cost()
@@ -162,6 +283,17 @@ def main():
     sys.stderr.write(f'shard loads (est. {unit}, weights={args.weights}): ' +
                       ', '.join(f'{i + 1}:{fmt(loads[i])}' for i in range(args.total_shards)) + '\n')
     sys.stderr.write(f'heaviest shard: {fmt(max(loads))} {unit}\n')
+
+    if args.check:
+        err = check_block(args.manifest, args.total_shards, out)
+        if err:
+            sys.stderr.write('error: ' + err + '\n')
+            sys.exit(1)
+        return
+    if args.write:
+        write_block(args.manifest, args.total_shards, out)
+        sys.stderr.write(f'wrote {args.manifest}\'s {args.total_shards}-shard block\n')
+        return
     print('\n'.join(out).rstrip() + '\n', end='')
 
 

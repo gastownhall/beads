@@ -1385,6 +1385,34 @@ func TestShardScriptsListOnlyRealTests(t *testing.T) {
 	}
 }
 
+// S3: the Bazel-only 30-shard block is not frozen like the legacy 15-shard
+// block (TestShardScriptsListOnlyRealTests's B1 fix catches outright
+// corruption, but not a committed block that is merely stale relative to the
+// generator and proxied_test_durations.json, e.g. a test added or
+// reweighted without anyone running --write). gen_proxied_shard_manifest.py
+// --check regenerates the block in memory and fails with the exact command
+// to fix it; run that here so a stale 30-block fails go test ./scripts/...
+// (and so scripts-go-checks, which runs on fork PRs) instead of only
+// surfacing as a worse LPT balance nobody notices. The legacy 15-shard block
+// is deliberately excluded: its header documents that it is frozen and must
+// not be regenerated (see .github/scripts/proxied-cmd-test-shards.txt and
+// engdocs/TESTING.md), so a --check against it would always fail by design.
+func TestProxiedShardManifestGeneratorNotStale(t *testing.T) {
+	if os.Getenv("TEST_SRCDIR") != "" {
+		t.Skip("scripts_test's runfiles hold neither the generator's sources nor cmd/bd")
+	}
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	root := sourceRepoRoot(t)
+	cmd := exec.Command(python, "scripts/ci/gen_proxied_shard_manifest.py", "30", "--weights=duration", "--check")
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Errorf("gen_proxied_shard_manifest.py 30 --weights=duration --check: %v\n%s", err, out)
+	}
+}
+
 // Review G3: since D2 the retired tiers' Bazel lanes (embedded, proxied,
 // server-storage) are those tiers' only pre-merge run on same-repo PRs, so
 // nothing that reaches them may narrow them (select fewer tests, or turn
