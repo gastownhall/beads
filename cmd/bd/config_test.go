@@ -4,12 +4,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
@@ -1190,6 +1192,95 @@ func TestBeadsRoleWriteErrorsRetainGitDiagnostics(t *testing.T) {
 				require.NoError(t, readErr)
 				require.Equal(t, before, after, "failed role write changed config")
 			})
+		}
+	}
+}
+
+func TestBeadsRoleWriteErrorOutput(t *testing.T) {
+	isolateBeadsDirForTest(t)
+	bd := buildBDForInitTests(t)
+	t.Setenv("LC_ALL", "C")
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			require.NoError(t, os.Unsetenv(key))
+		}
+	}
+	for _, mode := range []string{"text", "json", "envelope"} {
+		for _, operation := range []struct {
+			name string
+			args []string
+		}{
+			{"set", []string{"set", "beads.role", "contributor"}},
+			{"set-many", []string{"set-many", "beads.role=contributor"}},
+			{"unset", []string{"unset", "beads.role"}},
+		} {
+			for _, failure := range []string{"nonrepo", "config_lock", "duplicate"} {
+				t.Run(mode+"/"+operation.name+"/"+failure, func(t *testing.T) {
+					home := t.TempDir()
+					for _, key := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME"} {
+						t.Setenv(key, home)
+					}
+					t.Setenv("BD_JSON_ENVELOPE", "0")
+					if mode == "envelope" {
+						t.Setenv("BD_JSON_ENVELOPE", "1")
+					}
+					repo := newGitRepo(t)
+					runGitForBootstrapTest(t, repo, "config", "--local", "beads.role", "maintainer")
+					dir, want := repo, "not a git repository"
+					switch failure {
+					case "nonrepo":
+						dir = t.TempDir()
+					case "config_lock":
+						require.NoError(t, os.WriteFile(filepath.Join(repo, ".git", "config.lock"), []byte("owned lock"), 0600))
+						want = "could not lock config file"
+					case "duplicate":
+						runGitForBootstrapTest(t, repo, "config", "--local", "--add", "beads.role", "contributor")
+						want = "multiple values"
+					}
+					configPath := filepath.Join(repo, ".git", "config")
+					before, err := os.ReadFile(configPath)
+					require.NoError(t, err)
+					args := append([]string{"config"}, operation.args...)
+					if mode != "text" {
+						args = append(args, "--json")
+					}
+					ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+					defer cancel()
+					cmd := exec.CommandContext(ctx, bd, args...)
+					cmd.Dir, cmd.Env = dir, bdEnv(home)
+					stdout, stderr, err := runCommandBuffers(t, cmd)
+					var exit *exec.ExitError
+					require.ErrorAs(t, err, &exit, "stdout=%s stderr=%s", stdout.String(), stderr.String())
+					require.Equal(t, 1, exit.ExitCode())
+					if mode == "text" {
+						require.Empty(t, stdout.String())
+						require.Contains(t, stderr.String(), want)
+						require.Contains(t, stderr.String(), "in git config:")
+					} else {
+						require.Empty(t, stderr.String())
+						var payload struct {
+							SchemaVersion int    `json:"schema_version"`
+							Error         string `json:"error"`
+							Data          struct {
+								Error string `json:"error"`
+							} `json:"data"`
+						}
+						require.NoError(t, json.Unmarshal(stdout.Bytes(), &payload), "stdout=%s", stdout.String())
+						require.Equal(t, JSONSchemaVersion, payload.SchemaVersion)
+						message := payload.Error
+						if mode == "envelope" {
+							message = payload.Data.Error
+						}
+						require.Contains(t, message, want)
+						require.Contains(t, message, "in git config:")
+					}
+					after, err := os.ReadFile(configPath)
+					require.NoError(t, err)
+					require.Equal(t, before, after, "failed role write changed config")
+				})
+			}
 		}
 	}
 }
