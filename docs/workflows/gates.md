@@ -54,18 +54,13 @@ repository.
 ### Known limitations: multi-rig and proxied-server topologies
 
 Bead gates and prefix routing (`routes.jsonl`) do not work in every
-topology. Three limitations to expect, all tracked in
+topology. Two limitations to expect, both tracked in
 [#5861](https://github.com/gastownhall/beads/issues/5861):
 
 - **Cross-rig bead gates never resolve on their own.** A `<rig>:<bead-id>`
   await value reports `cannot be checked (multi-rig routing removed)` and
   stays pending regardless of the awaited bead's status. Close it with
   `bd gate resolve`.
-- **`bd close` cannot verify a bead gate in the experimental proxied-server
-  mode.** Proxied-server commands never open a local store, so closing the
-  gate refuses with `no local store available` even when the awaited bead is
-  closed. Run `bd gate check`, which evaluates bead gates in proxied-server
-  mode and closes the satisfied ones, or `bd close --force`.
 - **Prefix routing cannot open a proxied-server target rig.** A routed
   lookup into a rig that is itself in proxied-server mode fails with
   `proxy server store needs to be uow provider`, so an all-proxied

@@ -274,6 +274,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   installed/missing check still only tests for file existence and is tracked
   separately.
 
+- **`bd close` verifies a bead gate in proxied-server mode.** The close
+  pre-check built its bead-gate lookup on the local store, which the
+  proxied-server route never opens, so closing a bead gate there refused with
+  `no local store available` even after the awaited bead had closed, while
+  `bd gate check` resolved the same gate. The close pre-check now reads the
+  awaited bead through the same fresh-read path `bd gate check` uses on that
+  route; the direct and embedded routes are unchanged
+  ([#5861](https://github.com/gastownhall/beads/issues/5861) item 1).
+
 - **`bd doctor` no longer flags a `.local_version` that starts with `v`.** The
   canonical spelling of a Go module version — and the string a build stamped
   from a Go pseudo-version reports and writes into `.local_version` itself —

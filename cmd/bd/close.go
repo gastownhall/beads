@@ -671,7 +671,7 @@ func checkGateSatisfaction(issue *types.Issue) error {
 	case issue.AwaitType == "timer":
 		resolved, escalated, reason, err = checkTimer(issue, time.Now())
 	case issue.AwaitType == "bead":
-		resolved, reason = checkBeadGate(rootCtx, routedBeadGateGetter{localStore: store}, issue.AwaitID)
+		resolved, reason = checkBeadGate(rootCtx, closeBeadGateGetter(), issue.AwaitID)
 		if resolved {
 			return nil
 		}
@@ -693,6 +693,20 @@ func checkGateSatisfaction(issue *types.Issue) error {
 	}
 
 	return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", reason)
+}
+
+// closeBeadGateGetter picks the bead-gate lookup the current route can serve.
+// The proxied-server route never opens the local store (the root pre-run
+// short-circuits to uowProvider), so a store-backed getter there refused every
+// bead gate with "no local store available" even when the awaited bead was
+// closed (#5861); that route now reads through the same fresh-read getter
+// `bd gate check` uses. The direct and embedded routes keep the store-backed
+// local -> prefix-route lookup.
+func closeBeadGateGetter() issueGetter {
+	if usesProxiedServer() {
+		return proxiedFreshReadGetter{}
+	}
+	return routedBeadGateGetter{localStore: store}
 }
 
 // autoCloseCompletedMolecule checks if closing a step completed an auto-closing

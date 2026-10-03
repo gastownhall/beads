@@ -982,3 +982,71 @@ func TestProxiedServerCloseConcurrent(t *testing.T) {
 		t.Errorf("open issues remain after concurrent close: %d", openCount)
 	}
 }
+
+// bd close on a bead gate evaluates the awaited bead through the proxied read
+// path. Before #5861 item 1 was fixed this route refused every bead gate with
+// "no local store available", closed target or not, while bd gate check
+// resolved the same gate.
+func TestProxiedServerCloseBeadGate(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	createBeadGate := func(t *testing.T, p proxiedProject) (gateID string, awaited *types.Issue) {
+		t.Helper()
+		parked := bdProxiedCreate(t, bd, p.dir, "Parked bead")
+		awaited = bdProxiedCreate(t, bd, p.dir, "Awaited bead")
+		out, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
+			"gate", "create", "--type=bead", "--blocks", parked.ID, "--await-id", awaited.ID, "--reason", "waiting on "+awaited.ID)
+		if err != nil {
+			t.Fatalf("bead gate create failed: %v\nstderr:\n%s", err, stderr)
+		}
+		return parseCreatedGateID(t, out), awaited
+	}
+
+	t.Run("awaited_open_refuses_with_its_status", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cbgo")
+		gateID, awaited := createBeadGate(t, p)
+
+		out := bdProxiedCloseFail(t, bd, p.dir, gateID)
+		if strings.Contains(out, "no local store available") {
+			t.Errorf("close read the gate through a store-less getter:\n%s", out)
+		}
+		if !strings.Contains(out, "gate condition not satisfied") || !strings.Contains(out, "bead "+awaited.ID+" is open") {
+			t.Errorf("expected the awaited bead's status in the refusal, got:\n%s", out)
+		}
+		db := openProxiedDB(t, p)
+		if got := readStatus(t, db, gateID); got != types.StatusOpen {
+			t.Errorf("refused gate should stay open, got %q", got)
+		}
+	})
+
+	t.Run("awaited_closed_closes", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cbgc")
+		gateID, awaited := createBeadGate(t, p)
+
+		bdProxiedClose(t, bd, p.dir, awaited.ID)
+		bdProxiedClose(t, bd, p.dir, gateID, "-r", "awaited bead closed")
+		db := openProxiedDB(t, p)
+		if got := readStatus(t, db, gateID); got != types.StatusClosed {
+			t.Errorf("gate should close once its awaited bead is closed, got %q", got)
+		}
+		if got := readCloseReason(t, db, gateID); got != "awaited bead closed" {
+			t.Errorf("close_reason: got %q, want %q", got, "awaited bead closed")
+		}
+	})
+
+	t.Run("force_skips_the_check", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cbgf")
+		gateID, _ := createBeadGate(t, p)
+
+		bdProxiedClose(t, bd, p.dir, gateID, "--force")
+		db := openProxiedDB(t, p)
+		if got := readStatus(t, db, gateID); got != types.StatusClosed {
+			t.Errorf("--force should close the gate regardless, got %q", got)
+		}
+	})
+}

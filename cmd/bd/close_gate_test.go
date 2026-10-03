@@ -201,3 +201,21 @@ func TestCheckGateSatisfaction_ErrorMessageFormat(t *testing.T) {
 		t.Errorf("error message should mention 'gate condition not satisfied', got: %s", errMsg)
 	}
 }
+
+// The close pre-check reads a bead gate's target through the route that can
+// serve it: the proxied route has no local store, so it must not build a
+// store-backed getter there (#5861).
+func TestCloseBeadGateGetter_RouteSelection(t *testing.T) {
+	oldMode := proxiedServerMode
+	t.Cleanup(func() { proxiedServerMode = oldMode })
+
+	proxiedServerMode = true
+	if _, ok := closeBeadGateGetter().(proxiedFreshReadGetter); !ok {
+		t.Errorf("proxied-server mode: got %T, want proxiedFreshReadGetter", closeBeadGateGetter())
+	}
+
+	proxiedServerMode = false
+	if _, ok := closeBeadGateGetter().(routedBeadGateGetter); !ok {
+		t.Errorf("direct mode: got %T, want routedBeadGateGetter", closeBeadGateGetter())
+	}
+}
