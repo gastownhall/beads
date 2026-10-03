@@ -194,8 +194,11 @@ func runCreateLintIssue(in createInput) error {
 	}
 	lintIssue := &types.Issue{
 		IssueType:          types.IssueType(in.issueType).Normalize(),
+		Title:              in.title,
 		Description:        in.description,
+		Design:             in.design,
 		AcceptanceCriteria: in.acceptanceCriteria,
+		Notes:              in.notes,
 	}
 	if err := validation.LintIssue(lintIssue); err != nil {
 		if in.validationMode == "error" {
