@@ -39,8 +39,19 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 		issue.Ephemeral = true // infra and wisp types get marked ephemeral (legacy behavior)
 	}
 
+	// withRetryTx replays the closure on a rolled-back attempt, but an ID the
+	// attempt minted lives on the caller's struct, where the rollback cannot
+	// reach it. Decide once, outside the retry boundary, whether the ID is
+	// ours to mint, and clear it before every attempt (withRetryTx's closure
+	// contract). Otherwise a replay reads the stale candidate as
+	// caller-supplied, skips the CreateOnly insert, and upserts over any row a
+	// concurrent writer committed under that ID in the meantime.
+	autoMint := issue.ID == ""
 	var result issueops.CreateIssueResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		if autoMint {
+			issue.ID = ""
+		}
 		// SkipPrefixValidation matches legacy behavior: single-issue path does
 		// not validate prefixes for explicit IDs.
 		bc, err := issueops.NewBatchContext(ctx, tx, storage.BatchCreateOptions{
@@ -50,7 +61,13 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 			return err
 		}
 		result, err = issueops.CreateIssueInTxWithResult(ctx, tx, bc, issue, actor)
-		return err
+		if err != nil {
+			return err
+		}
+		if s.createIssueAttemptHook != nil {
+			return s.createIssueAttemptHook(ctx, issue)
+		}
+		return nil
 	}); err != nil {
 		return err
 	}

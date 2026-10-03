@@ -1,0 +1,219 @@
+//go:build cgo
+
+package embeddeddolt_test
+
+import (
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/idgen"
+	"github.com/steveyegge/beads/internal/types"
+)
+
+// TestAutoMintedCreateTakesCreateOnlyPath pins that an auto-minted create
+// inserts CreateOnly even though the caller's options don't ask for it (the
+// store's single-issue path passes none). The CreateOnly branch is the only
+// writer of the issue-create coordination row in local_metadata, so the row is
+// the observable proof: an auto-minted create leaves one, and an explicit-ID
+// create, which keeps the caller's options, leaves none.
+func TestAutoMintedCreateTakesCreateOnlyPath(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "co")
+	ctx := t.Context()
+
+	coordinationRows := func() int {
+		var n int
+		te.queryScalar(t, ctx, "SELECT COUNT(*) FROM local_metadata WHERE `key` LIKE 'issue-create/%'", nil, &n)
+		return n
+	}
+
+	explicit := &types.Issue{ID: "co-explicit", Title: "explicit", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := te.store.CreateIssue(ctx, explicit, "tester"); err != nil {
+		t.Fatalf("explicit-ID CreateIssue: %v", err)
+	}
+	if n := coordinationRows(); n != 0 {
+		t.Fatalf("explicit-ID create wrote %d coordination rows, want 0", n)
+	}
+
+	auto := &types.Issue{Title: "auto", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := te.store.CreateIssue(ctx, auto, "tester"); err != nil {
+		t.Fatalf("auto-minted CreateIssue: %v", err)
+	}
+	if n := coordinationRows(); n != 1 {
+		t.Fatalf("auto-minted create wrote %d coordination rows, want 1", n)
+	}
+}
+
+// TestFailedAutoMintedCreateRestoresEmptyID pins that a failed create hands an
+// auto-minted struct back with an empty ID. A label over MaxFieldLen fails the
+// create after the ID is minted and the row inserted. The transaction rolls
+// back, so the minted ID names nothing, and a caller retrying the struct must
+// mint again rather than take the explicit-ID upsert path. A caller-supplied
+// ID is the caller's and survives the same failure.
+func TestFailedAutoMintedCreateRestoresEmptyID(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "fr")
+	ctx := t.Context()
+	tooLong := strings.Repeat("x", types.MaxFieldLen+1)
+
+	auto := &types.Issue{Title: "auto", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Labels: []string{tooLong}}
+	if err := te.store.CreateIssue(ctx, auto, "tester"); !errors.Is(err, types.ErrFieldTooLong) {
+		t.Fatalf("auto-minted CreateIssue with an over-length label: err = %v, want ErrFieldTooLong", err)
+	}
+	if auto.ID != "" {
+		t.Fatalf("failed auto-minted create left ID %q, want it restored to empty", auto.ID)
+	}
+
+	explicit := &types.Issue{ID: "fr-explicit", Title: "explicit", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Labels: []string{tooLong}}
+	if err := te.store.CreateIssue(ctx, explicit, "tester"); !errors.Is(err, types.ErrFieldTooLong) {
+		t.Fatalf("explicit-ID CreateIssue with an over-length label: err = %v, want ErrFieldTooLong", err)
+	}
+	if explicit.ID != "fr-explicit" {
+		t.Fatalf("failed explicit-ID create changed ID to %q, want fr-explicit", explicit.ID)
+	}
+
+	var rows int
+	te.queryScalar(t, ctx, "SELECT COUNT(*) FROM issues", nil, &rows)
+	if rows != 0 {
+		t.Fatalf("issues holds %d rows after two failed creates, want 0", rows)
+	}
+}
+
+// TestAutoMintedHashIDSkipsSiblingPlaneOccupant pins that hash minting probes
+// both storage planes. issues and wisps share one ID space, and the create
+// guard rejects a candidate either plane holds. A minter that probed only its
+// own table returned the other plane's occupant, and since minting is
+// deterministic, every create of that issue failed the same way. Each case
+// occupies the nonce-0 candidate at every length the adaptive minter can start
+// from, in the plane the mint does NOT land in.
+func TestAutoMintedHashIDSkipsSiblingPlaneOccupant(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+
+	const (
+		title = "sibling occupant fixture"
+		desc  = "an auto-minted ID must step past the other plane's occupant"
+		actor = "tester"
+	)
+	createdAt := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+
+	for _, tc := range []struct {
+		name          string
+		mintEphemeral bool   // plane the auto create lands in
+		mintPrefix    string // prefix the minter hashes with for that plane
+		mintTable     string
+		occupantTable string
+	}{
+		{name: "issue mint past wisp occupant", mintPrefix: "hs", mintTable: "issues", occupantTable: "wisps"},
+		{name: "wisp mint past issue occupant", mintEphemeral: true, mintPrefix: "hs-wisp", mintTable: "wisps", occupantTable: "issues"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			te := newTestEnv(t, "hs")
+			ctx := t.Context()
+
+			occupied := map[string]bool{}
+			for length := 3; length <= 8; length++ {
+				id := idgen.GenerateHashID(tc.mintPrefix, title, desc, actor, createdAt, length, 0)
+				occupant := &types.Issue{
+					ID:        id,
+					Title:     "occupant " + id,
+					Status:    types.StatusOpen,
+					Priority:  2,
+					IssueType: types.TypeTask,
+					Ephemeral: !tc.mintEphemeral,
+				}
+				if err := te.store.CreateIssue(ctx, occupant, actor); err != nil {
+					t.Fatalf("CreateIssue(occupant %s): %v", id, err)
+				}
+				occupied[id] = true
+			}
+
+			issue := &types.Issue{
+				Title:       title,
+				Description: desc,
+				Status:      types.StatusOpen,
+				Priority:    2,
+				IssueType:   types.TypeTask,
+				CreatedAt:   createdAt,
+				Ephemeral:   tc.mintEphemeral,
+			}
+			if err := te.store.CreateIssue(ctx, issue, actor); err != nil {
+				t.Fatalf("auto-minted CreateIssue: %v", err)
+			}
+			if occupied[issue.ID] {
+				t.Fatalf("auto-minted ID %q belongs to an occupant in %s", issue.ID, tc.occupantTable)
+			}
+			te.assertIssueTitle(t, ctx, tc.mintTable, issue.ID, title)
+			for id := range occupied {
+				te.assertIssueTitle(t, ctx, tc.occupantTable, id, "occupant "+id)
+				te.assertRowNotExists(t, ctx, tc.mintTable, id)
+			}
+		})
+	}
+}
+
+// TestAutoMintedCounterIDJumpsPastExplicitIDs pins that counter mode survives
+// explicit IDs created ahead of the counter. The counter bump runs inside the
+// create's transaction, so a create that failed on an occupied value rolled its
+// bump back, and every later auto create replayed the same occupied value: a
+// permanent wedge, and at this PR's base a silent overwrite of the explicit
+// row. The counter now jumps past the highest numeric suffix either plane
+// holds. In the wisp case an issues-only scan would land on an occupied value.
+func TestAutoMintedCounterIDJumpsPastExplicitIDs(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+
+	for _, tc := range []struct {
+		name      string
+		ephemeral bool // plane the explicit IDs land in
+		explicit  []string
+		wantNext  []string
+	}{
+		{name: "explicit issues ahead", explicit: []string{"cl-2", "cl-3", "cl-4"}, wantNext: []string{"cl-5", "cl-6"}},
+		{name: "explicit wisps ahead", ephemeral: true, explicit: []string{"cl-2", "cl-3"}, wantNext: []string{"cl-4", "cl-5"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			te := newTestEnv(t, "cl")
+			ctx := t.Context()
+
+			if err := te.store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+				t.Fatalf("SetConfig(issue_id_mode): %v", err)
+			}
+			if err := te.store.Commit(ctx, "enable counter mode"); err != nil {
+				t.Fatalf("Commit: %v", err)
+			}
+
+			first := &types.Issue{Title: "auto first", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+			if err := te.store.CreateIssue(ctx, first, "tester"); err != nil {
+				t.Fatalf("CreateIssue(first): %v", err)
+			}
+			if first.ID != "cl-1" {
+				t.Fatalf("first counter ID = %q, want cl-1", first.ID)
+			}
+
+			explicitTable := "issues"
+			if tc.ephemeral {
+				explicitTable = "wisps"
+			}
+			for _, id := range tc.explicit {
+				explicit := &types.Issue{ID: id, Title: "explicit " + id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: tc.ephemeral}
+				if err := te.store.CreateIssue(ctx, explicit, "tester"); err != nil {
+					t.Fatalf("CreateIssue(%s): %v", id, err)
+				}
+			}
+
+			for _, want := range tc.wantNext {
+				auto := &types.Issue{Title: "auto after lag", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+				if err := te.store.CreateIssue(ctx, auto, "tester"); err != nil {
+					t.Fatalf("auto CreateIssue (want %s): %v", want, err)
+				}
+				if auto.ID != want {
+					t.Fatalf("auto counter ID = %q, want %s", auto.ID, want)
+				}
+			}
+			for _, id := range tc.explicit {
+				te.assertIssueTitle(t, ctx, explicitTable, id, "explicit "+id)
+			}
+		})
+	}
+}
