@@ -477,11 +477,19 @@ would only be needed if maintainers still want exactly one required check.
 Do not require these existing check names directly:
 
 - `Detect CI tier`
-- `Check build-tag policy`
+- `Fast checks (build tags, versions, migrations, beads diff, fmt)` (F7a fold
+  of the former standalone `Check build-tag policy`, `Check version
+  consistency`, `Check for .beads changes` and `Check formatting` checks into
+  one job's steps; see
+  [F7a: Same-Repo Blacksmith Moves and Job Folds](#f7a-same-repo-blacksmith-moves-and-job-folds))
 - `Check pure-Go and js/wasm boundaries (CGO_ENABLED=0)`
-- `Check version consistency`
 - `Check doc flags freshness`
-- `Check for .beads changes`
+- `Check release target cross-compilation (unix)` and `(desktop)` (F7a fold
+  of the former eight-target `check-release-target-cross-compilation` matrix)
+- `Windows Make shell (native, msys2, cygwin)` (F7a fold of the former
+  `host: [native, msys2, cygwin]` three-job matrix)
+- `Test (Windows) small packages (doltversion, dbproxy server)` (F7a fold of
+  the former `test-windows-doltversion` and `test-windows-dbproxy-server`)
 - `Test (ubuntu-latest)`
 - `Test (macos-latest)`
 - `Test (storage domain + uow)`
@@ -499,7 +507,6 @@ Do not require these existing check names directly:
 - `Test (Server Dolt Conformance)`
 - `Test (Server Dolt Full Suite 1/16)` through `Test (Server Dolt Full Suite 16/16)`
 - `Test (Windows - smoke)`
-- `Check formatting`
 - `PR Lint (native)`, `PR Lint (windows)` and `PR Lint (darwin)`
 - `Test Nix Flake`
 - `Differential Regression (v0.49.6 baseline)`
@@ -1028,20 +1035,29 @@ scope, not this slice's.
   `continue-on-error`/`timeout-minutes` design, because a job-level timeout or
   failure would cancel or red the job — exactly the blocking-by-a-different-door
   outcome both were written to avoid. The job does carry a generous job-level
-  `timeout-minutes: 45`, because `TestSameRepoBlacksmithRunners` requires a
-  timeout on every Blacksmith-eligible job; it sits comfortably above the sum
-  of the step timeouts, so it is a backstop against a stuck runner, not a
-  realistic ceiling.
+  `timeout-minutes: 60` (review N-2: raised from an initial 45 for headroom
+  above the sum of the step timeouts), because `TestSameRepoBlacksmithRunners`
+  requires a timeout on every Blacksmith-eligible job; it is a backstop
+  against a stuck runner, not a realistic ceiling.
 - **`windows-make-shell` 3 → 1.** The `host: [native, msys2, cygwin]` matrix
-  (three Windows jobs) became one job with three step pairs (install +
-  exercise), each pair's own `id`/`if: ${{ !cancelled() }}`, plus a final
-  bash aggregator step that reproduces the pre-fold rule exactly: a native or
-  MSYS2 install/exercise failure reds the job, and only a genuine Cygwin
-  *exercise* failure reds it (a Cygwin *setup* failure stays warning-only, as
-  it was in the separate `cygwin` job). `test-windows-doltversion` and
-  `test-windows-dbproxy-server` folded the same way into `test-windows-small`;
-  neither was ever in ci-gate's `needs`/`CI_GATE_REQUIRED`, so no gate token
-  changed. Both folded jobs stay on `windows-latest` — F7a does not move any
+  (three Windows job instances) became one job with three step pairs (install
+  + exercise), each pair's own `id` and `if: ${{ !cancelled() }}` so a leg
+  still runs after an earlier leg fails. Review SF-1 found the original fold's
+  hand-written aggregator step (meant to reproduce the pre-fold rule — a
+  native or MSYS2 failure reds the job, but only a Cygwin *exercise* failure
+  does, since Cygwin *setup* stays warning-only as it was in the pre-fold
+  `cygwin` matrix leg) survived a mutation that always exited 0, because
+  `continue-on-error: true` was left on every install/exercise step as well as
+  the Cygwin setup step. The aggregator was deleted outright:
+  `continue-on-error` now sits only on the Cygwin *setup* step (id `cygwin`),
+  so a native or MSYS2 install/exercise failure, or a Cygwin *exercise*
+  failure, reds the job natively — no hand-written step can silently
+  undershoot that. `test-windows-doltversion` and `test-windows-dbproxy-server`
+  folded the same way into `test-windows-small`, with the same aggregator
+  deletion; neither was ever in ci-gate's `needs`/`CI_GATE_REQUIRED`, so no
+  gate token changed. `TestPRWindowsMakeShellLegsFailTheJob` pins the leg
+  `if`/`continue-on-error` contract and the absence of both jobs' aggregator
+  steps. Both folded jobs stay on `windows-latest` — F7a does not move any
   Windows job to Blacksmith (there is no Windows Blacksmith pool), and
   neither job is one F4's concurrent Windows-region edits touch.
 
