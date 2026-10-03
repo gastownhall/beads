@@ -2701,7 +2701,10 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 		// label in a trivial expression instead (see the job's own comment).
 		// Tracked here so the "no other Blacksmith label leaks" sweep below
 		// also covers main.yml.
-		"main.yml": {"blacksmith-setup-go-cache": "${{ 'blacksmith-4vcpu-ubuntu-2404' }}"},
+		"main.yml": {
+			"blacksmith-setup-go-cache":   "${{ 'blacksmith-4vcpu-ubuntu-2404' }}",
+			"windows-test-binaries-cache": mainWindowsTestBinariesCacheRunsOn,
+		},
 	}
 	// The two required gates' display names are a stable external contract
 	// (branch protection rule names) - moving them to Blacksmith must not

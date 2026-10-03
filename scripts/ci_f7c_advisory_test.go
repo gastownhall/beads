@@ -758,73 +758,82 @@ func containsSecretRef(s string) bool {
 	return strings.Contains(s, "secrets.")
 }
 
-// TestF7cAdvisorySameRepoBlacksmithExpressionSemantics is a literal
-// (deliberately un-clever) mirror of the sameRepoBlacksmith2vcpu/4vcpu
-// expression's boolean logic, run against a truth table covering every event
-// shape the F7c advisory workflows see: merge_group, a same-repo PR, a fork
-// PR, a Dependabot PR, and push/workflow_dispatch/schedule. It exists so a
-// change to the real formula's semantics has to be made in both places
-// before this test goes green again, and it is the "fork runner selection"
-// coverage spec-f7.md §4.3 asks for.
+// advisoryBlacksmithRunnerJobs pins which F7c advisory job runs on which
+// same-repo Blacksmith expression, and what label each falls back to when
+// the same-repo/merge_group condition is false. migration-test.yml's
+// historical-upgrades job is the one case with a non-ubuntu-latest fallback
+// (sameRepoBlacksmith4vcpuNoble, F7c review fix B1): it must still resolve to
+// the literal ubuntu-24.04 label, not the usual ubuntu-latest, for forks/
+// Dependabot/push.
+var advisoryBlacksmithRunnerJobs = []struct {
+	file            string
+	job             string
+	blacksmithLabel string
+	fallback        string
+}{
+	{"conformance.yml", "conformance", "blacksmith-4vcpu-ubuntu-2404", "ubuntu-latest"},
+	{"regression.yml", "regression", "blacksmith-4vcpu-ubuntu-2404", "ubuntu-latest"},
+	{"migration-test.yml", "historical-upgrades", "blacksmith-4vcpu-ubuntu-2404", "ubuntu-24.04"},
+	{"cross-version-smoke.yml", "smoke", "blacksmith-4vcpu-ubuntu-2404", "ubuntu-latest"},
+	{"cross-version-smoke.yml", "versions", "blacksmith-2vcpu-ubuntu-2404", "ubuntu-latest"},
+	{"docs-mintlify.yml", "docsync", "blacksmith-2vcpu-ubuntu-2404", "ubuntu-latest"},
+	{"docs-mintlify.yml", "broken-links", "blacksmith-2vcpu-ubuntu-2404", "ubuntu-latest"},
+	{"proxied-local-smoke.yml", "managed-local-smoke", "blacksmith-4vcpu-ubuntu-2404", "ubuntu-latest"},
+}
+
+// TestF7cAdvisorySameRepoBlacksmithExpressionSemantics evaluates each F7c
+// advisory job's REAL, as-parsed-from-YAML runs-on expression text through
+// F7a's shared evalGHExpr/mustEvalGHRunsOn (ci_blacksmith_runner_test.go),
+// against a truth table covering every event shape the advisory workflows
+// see: merge_group, a same-repo PR, a fork PR, a Dependabot PR, a deleted
+// fork head, and push/pull_request_target/workflow_dispatch/schedule.
 //
-// NOTE (F7c review fix S2, coordination with F7a): F7a (ci/f7a-blacksmith-fold,
-// landing before F7c) independently defines its own
-// TestSameRepoBlacksmithExpressionSemantics plus a real GitHub-Actions
-// expression evaluator in a shared scripts test helper file, and is moving
-// the sameRepoBlacksmith2vcpu/4vcpu constants there too. Per the coordinator,
-// this F7c-local test is deliberately named differently to avoid a duplicate
-// top-level symbol when this branch rebases onto F7a, and is NOT a competing
-// evaluator - it is intentionally the same simple literal mirror this test
-// always was. At rebase time this test should be deleted (or reduced to
-// advisory-workflow-specific cases) in favor of F7a's shared real-expression
-// evaluator run against this file's own advisoryBlacksmithRunnerJobs, once
-// F7a's helper name/API is known.
+// This replaces an earlier, F7c-local hand-written Go mirror of the same
+// boolean logic (a tautology risk the F7a review flagged for its own
+// equivalent test: a change to both the mirror and the real expression, in
+// the same wrong way, would still pass). Per the coordinator, this test now
+// reuses F7a's real evaluator instead of building a second one, and is
+// scoped to the F7c advisory jobs specifically; F7a's own
+// TestSameRepoBlacksmithExpressionSemantics (ci_blacksmith_runner_test.go)
+// covers the shared sameRepoBlacksmith{2,4,8}vcpu consts themselves.
 func TestF7cAdvisorySameRepoBlacksmithExpressionSemantics(t *testing.T) {
-	const label = "blacksmith-4vcpu-ubuntu-2404"
-	eval := func(eventName, actor string, headRepoEqualsBase bool) string {
-		sameRepoPR := eventName == "pull_request" && headRepoEqualsBase && actor != "dependabot[bot]"
-		if eventName == "merge_group" || sameRepoPR {
-			return label
-		}
-		return "ubuntu-latest"
+	const ownRepo = "steveyegge/beads"
+	type tc struct {
+		name           string
+		event          string
+		headRepo       string // github.event.pull_request.head.repo.full_name; "" = fork or deleted fork head
+		actor          string
+		wantBlacksmith bool
 	}
-
-	cases := []struct {
-		name               string
-		eventName          string
-		actor              string
-		headRepoEqualsBase bool
-		want               string
-	}{
-		{"merge_group always Blacksmith", "merge_group", "someone", false, label},
-		{"same-repo PR, human actor", "pull_request", "alice", true, label},
-		{"same-repo PR, dependabot actor stays ubuntu-latest", "pull_request", "dependabot[bot]", true, "ubuntu-latest"},
-		{"fork PR, human actor stays ubuntu-latest", "pull_request", "alice", false, "ubuntu-latest"},
-		{"fork PR, dependabot actor stays ubuntu-latest", "pull_request", "dependabot[bot]", false, "ubuntu-latest"},
-		{"push stays ubuntu-latest", "push", "alice", true, "ubuntu-latest"},
-		{"workflow_dispatch stays ubuntu-latest", "workflow_dispatch", "alice", true, "ubuntu-latest"},
-		{"schedule stays ubuntu-latest", "schedule", "alice", true, "ubuntu-latest"},
+	cases := []tc{
+		{"same-repo PR, human actor", "pull_request", ownRepo, "alice", true},
+		{"merge_group always Blacksmith", "merge_group", "", "", true},
+		{"fork PR stays on fallback", "pull_request", "someone-else/beads", "alice", false},
+		{"deleted fork head stays on fallback", "pull_request", "", "alice", false},
+		{"same-repo PR, dependabot actor stays on fallback", "pull_request", ownRepo, "dependabot[bot]", false},
+		{"push stays on fallback", "push", "", "alice", false},
+		{"pull_request_target stays on fallback", "pull_request_target", ownRepo, "alice", false},
+		{"schedule stays on fallback", "schedule", "", "", false},
+		{"workflow_dispatch stays on fallback", "workflow_dispatch", "", "", false},
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := eval(c.eventName, c.actor, c.headRepoEqualsBase); got != c.want {
-				t.Errorf("eval(%q, %q, %v) = %q, want %q", c.eventName, c.actor, c.headRepoEqualsBase, got, c.want)
-			}
-		})
-	}
-
-	// Pin that sameRepoBlacksmith4vcpu actually contains this exact boolean
-	// structure (not just a same-shaped-but-differently-wired formula).
-	for _, want := range []string{
-		"github.event_name == 'merge_group'",
-		"github.event_name == 'pull_request'",
-		"github.event.pull_request.head.repo.full_name == github.repository",
-		"github.actor != 'dependabot[bot]'",
-		"'" + label + "'",
-		"'ubuntu-latest'",
-	} {
-		if !strings.Contains(sameRepoBlacksmith4vcpu, want) {
-			t.Errorf("sameRepoBlacksmith4vcpu does not contain %q", want)
+	for _, j := range advisoryBlacksmithRunnerJobs {
+		job := readCIWorkflow(t, j.file).job(t, j.job)
+		for _, c := range cases {
+			t.Run(j.file+"/"+j.job+"/"+c.name, func(t *testing.T) {
+				ctx := map[string]string{
+					"github.event_name":                             c.event,
+					"github.event.pull_request.head.repo.full_name": c.headRepo,
+					"github.repository":                             ownRepo,
+					"github.actor":                                  c.actor,
+				}
+				want := j.fallback
+				if c.wantBlacksmith {
+					want = j.blacksmithLabel
+				}
+				if got := mustEvalGHRunsOn(t, job.RunsOn, ctx); got != want {
+					t.Errorf("%s/%s real runs-on %q evaluated under %+v = %q, want %q", j.file, j.job, job.RunsOn, c, got, want)
+				}
+			})
 		}
 	}
 }
