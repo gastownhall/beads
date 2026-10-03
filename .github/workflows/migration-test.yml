@@ -78,7 +78,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
-          cache: ${{ runner.environment != 'self-hosted' }}
+          cache: ${{ runner.environment == 'github-hosted' }}
 
       # Blacksmith runners cannot see GitHub-hosted setup-go cache entries, so
       # setup-go's own `cache: true` (used above on ubuntu-24.04/ubuntu-latest)
@@ -87,6 +87,17 @@ jobs:
       # Restore-only by design (see B2 in the F7c implementation report): a
       # same-repo PR can read this cache but never write to it, so a PR cannot
       # poison what main's seeder or other PRs read.
+      # F7c review fix S5: this job's own key copy must match main.yml's
+      # seeder key byte-for-byte (TestBlacksmithSetupGoCacheKeysMatchAcrossSeederAndConsumers),
+      # which now keys by UTC calendar day instead of github.sha so main
+      # pushes don't churn a multi-GB cache entry on every commit; this step
+      # computes that same day value locally so the key expression below
+      # resolves (steps.* references only resolve within the same job).
+      - name: Compute cache date
+        id: cache-date
+        if: runner.environment == 'self-hosted'
+        run: echo "today=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
       - name: Restore Blacksmith setup-go cache
         if: runner.environment == 'self-hosted'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -94,7 +105,7 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          key: blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
           restore-keys: |
             blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
             blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
@@ -156,8 +167,21 @@ jobs:
           git config --global user.name "CI Bot"
           git config --global user.email "ci@beads.test"
 
-      - name: Cache pinned historical release
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # F7c review fix X1: a bare actions/cache here would auto-save on any
+      # key miss. On Blacksmith, same-repo PRs are the only ones that ever
+      # run this job (tag push and workflow_dispatch land on ubuntu-24.04,
+      # not Blacksmith), so a bare save would make every historical-dolt-*
+      # entry a same-repo-PR-only write - exactly what B2 forbids elsewhere.
+      # The checksum verification lib/binary.sh does on every extracted
+      # archive is not a sufficient mitigation: `tar -P` extraction plus
+      # `cp -f` following a planted `verified/<ver>/bd` symlink can still
+      # write outside ~/.cache/beads-regression (e.g. over the checked-out
+      # workspace or the candidate binary itself) before the checksum check
+      # ever runs. Restore-only here, same split as smoke-binaries-*/
+      # regression-baseline-* below: only push/dispatch (always GitHub-hosted
+      # for this job) may save.
+      - name: Restore pinned historical release cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/beads-regression
           key: historical-dolt-${{ matrix.shard }}-${{ matrix.cache-hash }}-${{ runner.os }}-${{ runner.arch }}
@@ -173,7 +197,7 @@ jobs:
           # No Blacksmith restore step for this narrow one-off (src shard
           # only, a single version): accepting a cold build here rather than
           # adding a second seeded cache keyspace for one matrix leg.
-          cache: ${{ runner.environment != 'self-hosted' }}
+          cache: ${{ runner.environment == 'github-hosted' }}
 
       # Each version runs as its own `run.sh` subprocess: the underlying
       # historical-dolt-upgrade-test.sh uses `set -euo pipefail` and aborts at
@@ -224,3 +248,10 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
           exit "$failed"
+
+      - name: Save pinned historical release cache
+        if: github.event_name != 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/beads-regression
+          key: historical-dolt-${{ matrix.shard }}-${{ matrix.cache-hash }}-${{ runner.os }}-${{ runner.arch }}

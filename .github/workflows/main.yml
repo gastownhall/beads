@@ -1507,7 +1507,15 @@ jobs:
     # the label in a trivial expression to keep actionlint clean and match
     # repo convention.
     runs-on: ${{ 'blacksmith-4vcpu-ubuntu-2404' }}
-    if: github.repository == 'gastownhall/beads'
+    # F7c review fix S2: pin push-to-main-only at the job level, not just via
+    # this workflow's current `on: push` trigger. If main.yml ever gained a
+    # pull_request (or merge_group) trigger in the future, a bare
+    # `github.repository == ...` guard would let this job - and the bare,
+    # always-saving cache below it - run on a PR, making every same-repo PR a
+    # writer of the Blacksmith setup-go cache namespace every advisory
+    # consumer trusts. Pinned exactly by
+    # TestBlacksmithSeederGuardedAgainstPullRequest.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'gastownhall/beads'
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -1519,13 +1527,27 @@ jobs:
           go-version-file: 'go.mod'
           cache: false
 
+      # F7c review fix S5: the old key suffix was ${{ github.sha }}, so every
+      # single push to main - whether or not go.sum changed - saved a brand
+      # new multi-GB ~/go/pkg/mod + ~/.cache/go-build entry under this
+      # namespace. On a cache store with LRU eviction (Blacksmith), that churn
+      # risked evicting F7a's own beads-go-mod-v2-*/beads-go-build-v2-* cache
+      # entries. Keying per UTC day instead still bounds staleness (a go.sum
+      # change is picked up on save on the very next push, and a same-day
+      # restore-keys fallback to yesterday's entry is only ever a prefix
+      # away), while capping writes to at most once per calendar day instead
+      # of once per push. Pinned by TestBlacksmithSeederCacheKeyIsNotPerCommit.
+      - name: Compute cache date
+        id: cache-date
+        run: echo "today=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
       - name: Restore Blacksmith setup-go cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          key: blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
           restore-keys: |
             blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
             blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
@@ -1558,4 +1580,4 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          key: blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}

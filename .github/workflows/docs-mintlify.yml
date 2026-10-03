@@ -43,7 +43,18 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
-          cache: ${{ runner.environment != 'self-hosted' }}
+          cache: ${{ runner.environment == 'github-hosted' }}
+
+      # F7c review fix S5: this job's own key copy must match main.yml's
+      # seeder key byte-for-byte (TestBlacksmithSetupGoCacheKeysMatchAcrossSeederAndConsumers),
+      # which now keys by UTC calendar day instead of github.sha so main
+      # pushes don't churn a multi-GB cache entry on every commit; this step
+      # computes that same day value locally so the key expression below
+      # resolves (steps.* references only resolve within the same job).
+      - name: Compute cache date
+        id: cache-date
+        if: runner.environment == 'self-hosted'
+        run: echo "today=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
       - name: Restore Blacksmith setup-go cache
         if: runner.environment == 'self-hosted'
@@ -52,7 +63,7 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          key: blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
           restore-keys: |
             blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
             blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-

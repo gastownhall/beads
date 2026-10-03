@@ -60,6 +60,12 @@ var advisoryPathFilterOwnEntries = map[string][]string{
 		// BEADS_TEST_EMBEDDED_DOLT=1; it was previously excluded from the
 		// filter by the shared base's `!**_test.go` negation.
 		"internal/storage/embeddeddolt/conformance_test.go",
+		// F7c review fix (S4): TestMain for the whole embeddeddolt package
+		// (the fixture conformance_test.go and every sibling test reuse)
+		// lives in test_fixture_test.go, not conformance_test.go; it was
+		// excluded by the same `!**_test.go` negation with nothing to
+		// re-include it until now.
+		"internal/storage/embeddeddolt/test_fixture_test.go",
 		// Future-proofing: mirrors the existing test/conformance/** re-include.
 		"backend/conformance/**",
 	},
@@ -856,7 +862,8 @@ var blacksmithSetupGoCacheConsumers = map[string][]string{
 // (not setup-go's own implicit key) that the seeder and every consumer share,
 // so the "no save in a consumer job" checks below can scope to exactly this
 // cache without also flagging an unrelated, legitimately-caching step (e.g.
-// migration-test.yml's checksum-verified historical-dolt-* cache).
+// migration-test.yml's historical-dolt-* cache, which is a distinct
+// restore/save pair of its own - see advisoryBinaryCaches below).
 const blacksmithSetupGoCacheKeyNamespace = "blacksmith-sg-v1-"
 
 // TestBlacksmithSetupGoSeedExistsForAdvisoryConsumers pins that main.yml's
@@ -951,6 +958,59 @@ func TestBlacksmithSetupGoSeedExistsForAdvisoryConsumers(t *testing.T) {
 	}
 }
 
+// TestBlacksmithSeederGuardedAgainstPullRequest pins main.yml's
+// blacksmith-setup-go-cache job `if:` byte-for-byte (F7c review fix S2): this
+// job is the ONLY writer every advisory consumer's blacksmith-sg-v1- restore
+// trusts, so it must stay push-to-main-only even in the counterfactual where
+// main.yml's `on:` trigger set grows a pull_request (or merge_group) entry
+// someday. A guard that only checks github.repository (the pre-fix state)
+// would not catch that: every same-repo PR also satisfies
+// github.repository == 'gastownhall/beads'. The real regression this closes
+// is evaluated below via evalGHExpr, not just a string match, so the job is
+// also proven actually unreachable under a same-repo pull_request event.
+func TestBlacksmithSeederGuardedAgainstPullRequest(t *testing.T) {
+	const wantIf = "github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'gastownhall/beads'"
+	job := readCIWorkflow(t, "main.yml").job(t, "blacksmith-setup-go-cache")
+	if job.If != wantIf {
+		t.Fatalf("main.yml's blacksmith-setup-go-cache if=%q, want exactly %q", job.If, wantIf)
+	}
+
+	const ownRepo = "gastownhall/beads"
+	cases := []struct {
+		name string
+		ctx  map[string]string
+		want bool
+	}{
+		{"actual push to main", map[string]string{
+			"github.event_name": "push", "github.ref": "refs/heads/main", "github.repository": ownRepo,
+		}, true},
+		{"same-repo pull_request stays excluded", map[string]string{
+			"github.event_name": "pull_request", "github.ref": "refs/pull/1/merge", "github.repository": ownRepo,
+			"github.event.pull_request.head.repo.full_name": ownRepo,
+		}, false},
+		{"merge_group stays excluded", map[string]string{
+			"github.event_name": "merge_group", "github.ref": "refs/heads/gh-readonly-queue/main/pr-1", "github.repository": ownRepo,
+		}, false},
+		{"push to a non-main branch stays excluded", map[string]string{
+			"github.event_name": "push", "github.ref": "refs/heads/not-main", "github.repository": ownRepo,
+		}, false},
+		{"push from a fork stays excluded", map[string]string{
+			"github.event_name": "push", "github.ref": "refs/heads/main", "github.repository": "someone-else/beads",
+		}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := evalGHExpr(job.If, c.ctx)
+			if err != nil {
+				t.Fatalf("evalGHExpr(%q): %v", job.If, err)
+			}
+			if ghTruthy(got) != c.want {
+				t.Errorf("evalGHExpr(%q) under %+v = %#v, want truthy=%v", job.If, c.ctx, got, c.want)
+			}
+		})
+	}
+}
+
 // TestAdvisoryBlacksmithConsumersAreCacheRestoreOnly replaces the pre-review
 // TestAdvisoryBlacksmithConsumersKeepImplicitSetupGoCache (F7c review fix
 // B2): each consumer must disable setup-go's own implicit cache on a
@@ -960,8 +1020,10 @@ func TestBlacksmithSetupGoSeedExistsForAdvisoryConsumers(t *testing.T) {
 // cache but never poison what another PR or main's seeder reads back. The
 // "no save" check is scoped to the blacksmith-sg-v1- key namespace
 // specifically (not "no actions/cache/save in this job at all"), since
-// migration-test.yml's historical-upgrades job legitimately keeps its own,
-// separately checksum-verified historical-dolt-* cache untouched by B2.
+// migration-test.yml's historical-upgrades job keeps its own historical-dolt-*
+// cache in a different namespace - governed by its own restore/save-gated
+// pair below (advisoryBinaryCaches / F7c review fix X1), not an exemption
+// from this one.
 func TestAdvisoryBlacksmithConsumersAreCacheRestoreOnly(t *testing.T) {
 	for file, jobNames := range blacksmithSetupGoCacheConsumers {
 		workflow := readCIWorkflow(t, file)
@@ -974,8 +1036,12 @@ func TestAdvisoryBlacksmithConsumersAreCacheRestoreOnly(t *testing.T) {
 					switch actionFamily(step.Uses) {
 					case setupGoActionFamily:
 						sawSetupGo = true
-						if step.With["cache"] != "${{ runner.environment != 'self-hosted' }}" {
-							t.Errorf("%s job %s setup-go cache = %q, want it disabled on self-hosted runners", file, jobName, step.With["cache"])
+						// F7c review fix N1: fail-closed. Pinned to the
+						// "== 'github-hosted'" form (not "!= 'self-hosted'")
+						// so an empty/unknown runner.environment value keeps
+						// caching OFF instead of turning it on.
+						if step.With["cache"] != "${{ runner.environment == 'github-hosted' }}" {
+							t.Errorf("%s job %s setup-go cache = %q, want it disabled on self-hosted runners (fail-closed)", file, jobName, step.With["cache"])
 						}
 					case cacheRestoreActionFamily:
 						if strings.HasPrefix(step.With["key"], blacksmithSetupGoCacheKeyNamespace) {
@@ -997,6 +1063,39 @@ func TestAdvisoryBlacksmithConsumersAreCacheRestoreOnly(t *testing.T) {
 					t.Errorf("%s job %s has no blacksmith-sg-v1- cache restore step", file, jobName)
 				}
 			})
+		}
+	}
+}
+
+// TestBlacksmithSeederCacheKeyIsNotPerCommit pins F7c review fix S5: the
+// seeder's save/restore key suffix must be a UTC calendar day
+// (steps.cache-date.outputs.today), not github.sha. Keying per commit meant
+// every single push to main - whether or not go.sum changed - wrote a new
+// multi-GB ~/go/pkg/mod + ~/.cache/go-build entry under this namespace; on a
+// cache store with LRU eviction (Blacksmith) that churn risked evicting
+// F7a's own beads-go-mod-v2-*/beads-go-build-v2-* entries. Keying per day
+// instead caps writes to at most once per calendar day while still picking
+// up a go.sum change on the very next push.
+func TestBlacksmithSeederCacheKeyIsNotPerCommit(t *testing.T) {
+	job := readCIWorkflow(t, "main.yml").job(t, "blacksmith-setup-go-cache")
+
+	dateStep := job.step(t, "Compute cache date")
+	if dateStep.ID != "cache-date" {
+		t.Errorf("main.yml's blacksmith-setup-go-cache Compute cache date step has id %q, want \"cache-date\"", dateStep.ID)
+	}
+	if !strings.Contains(dateStep.Run, "date -u") {
+		t.Errorf("main.yml's blacksmith-setup-go-cache Compute cache date step run = %q, want it to compute a UTC date", dateStep.Run)
+	}
+
+	restore := job.step(t, "Restore Blacksmith setup-go cache")
+	save := job.step(t, "Save Blacksmith setup-go cache")
+	for name, step := range map[string]ciWorkflowStep{"Restore": restore, "Save": save} {
+		key := step.With["key"]
+		if strings.Contains(key, "github.sha") {
+			t.Errorf("main.yml's blacksmith-setup-go-cache %s step key = %q, must not key per-commit (github.sha) - see F7c review fix S5", name, key)
+		}
+		if !strings.Contains(key, "steps.cache-date.outputs.today") {
+			t.Errorf("main.yml's blacksmith-setup-go-cache %s step key = %q, want it keyed by steps.cache-date.outputs.today", name, key)
 		}
 	}
 }
@@ -1035,7 +1134,7 @@ func TestBlacksmithSetupGoCacheKeysMatchAcrossSeederAndConsumers(t *testing.T) {
 			if restore.With["key"] != seederKey {
 				t.Errorf("%s job %s restore key = %q, want it identical to the seeder's save key %q", file, jobName, restore.With["key"], seederKey)
 			}
-			if !strings.Contains(restore.With["restore-keys"], strings.TrimSuffix(seederKey, "${{ github.sha }}")) {
+			if !strings.Contains(restore.With["restore-keys"], strings.TrimSuffix(seederKey, "${{ steps.cache-date.outputs.today }}")) {
 				t.Errorf("%s job %s restore-keys %q does not contain the seeder's key prefix (without the commit-specific suffix)", file, jobName, restore.With["restore-keys"])
 			}
 		}
@@ -1044,18 +1143,33 @@ func TestBlacksmithSetupGoCacheKeysMatchAcrossSeederAndConsumers(t *testing.T) {
 
 // --- Binary caches: restore-always, save only off pull_request ------------
 
-// advisoryBinaryCaches are the two per-binary caches F7c review fix B2
+// advisoryBinaryCaches are the per-binary caches F7c review fixes B2 and X1
 // converted from a monolithic (auto-saving) actions/cache into an explicit
 // restore/save pair, so a same-repo PR can read a previously published
 // binary but never publish its own into a cache another run would trust
-// unverified. migration-test.yml's historical-dolt-* cache is deliberately
-// NOT included here: the reviewer confirmed it is already safe as-is, since
-// scripts/migration-test/lib/binary.sh checksum-verifies it on every read.
+// unverified. migration-test.yml's historical-dolt-* cache was originally
+// exempted here on the theory that scripts/migration-test/lib/binary.sh's
+// sha256 verification of every extracted archive made a bare, auto-saving
+// actions/cache safe regardless of who wrote it. That exemption was unsound
+// (F7c review fix X1): `tar -P` extraction plus lib/binary.sh's `cp -f`
+// following a symlink planted inside the archive can redirect the final copy
+// to an arbitrary path (e.g. over the checked-out workspace or the candidate
+// binary itself) before the checksum check ever runs, so checksum
+// verification alone does not make a same-repo-PR-writable cache entry safe
+// to trust. historical-dolt-* now gets the same restore-always/save-off-PR
+// split as the other two.
 var advisoryBinaryCaches = []struct {
 	file, job, restoreStep, saveStep, keyPrefix string
+	// wantSaveIf is the save step's `if:` condition, required byte-for-byte
+	// (F7c review fix S3): a `strings.Contains` check here would pass under
+	// e.g. `... || true`, which always evaluates true and silently
+	// reintroduces the same-repo-PR poisoning path this whole table exists
+	// to close.
+	wantSaveIf string
 }{
-	{"cross-version-smoke.yml", "smoke", "Restore previous release binaries cache", "Save previous release binaries cache", "smoke-binaries-"},
-	{"regression.yml", "regression", "Restore baseline binary cache", "Save baseline binary cache", "regression-baseline-"},
+	{"cross-version-smoke.yml", "smoke", "Restore previous release binaries cache", "Save previous release binaries cache", "smoke-binaries-", "github.event_name != 'pull_request'"},
+	{"regression.yml", "regression", "Restore baseline binary cache", "Save baseline binary cache", "regression-baseline-", "steps.detect.outputs.run_regression == 'true' && github.event_name != 'pull_request'"},
+	{"migration-test.yml", "historical-upgrades", "Restore pinned historical release cache", "Save pinned historical release cache", "historical-dolt-", "github.event_name != 'pull_request'"},
 }
 
 // TestAdvisoryBinaryCachesAreRestoreAlwaysSavePRGated pins the restore/save
@@ -1083,8 +1197,8 @@ func TestAdvisoryBinaryCachesAreRestoreAlwaysSavePRGated(t *testing.T) {
 			if actionFamily(save.Uses) != cacheSaveActionFamily {
 				t.Errorf("%s job %s step %q uses %q, want family %q", c.file, c.job, c.saveStep, save.Uses, cacheSaveActionFamily)
 			}
-			if !strings.Contains(save.If, "github.event_name != 'pull_request'") {
-				t.Errorf("%s job %s step %q has if=%q, want it gated off pull_request", c.file, c.job, c.saveStep, save.If)
+			if save.If != c.wantSaveIf {
+				t.Errorf("%s job %s step %q has if=%q, want exactly %q", c.file, c.job, c.saveStep, save.If, c.wantSaveIf)
 			}
 			if save.With["key"] != restore.With["key"] {
 				t.Errorf("%s job %s: restore key %q != save key %q", c.file, c.job, restore.With["key"], save.With["key"])
@@ -1113,6 +1227,304 @@ func TestRegressionStepsAfterDetectAreGated(t *testing.T) {
 	for _, step := range job.Steps[detectIndex+1:] {
 		if !strings.Contains(step.If, want) {
 			t.Errorf("regression.yml step %q has if=%q, want it to contain %q", step.Name, step.If, want)
+		}
+	}
+}
+
+// TestRegressionDetectStepBehavioral runs regression.yml's "Decide whether to
+// run differential regression tests" (id: detect) step for real, the same
+// way TestMigrationHarnessLoopExecutesBehaviorally exercises the migration
+// loop (F7c review fix S1, closes mutation M13: a detect step hardcoded to
+// always emit run_regression=false). TestRegressionStepsAfterDetectAreGated
+// only pins that steps AFTER detect stay gated on its output; it says nothing
+// about whether detect's own logic ever produces "true", so a detect step
+// that always reports false would make every downstream gate vacuously
+// satisfied while regression silently never ran. This executes the step's
+// actual bash against real GITHUB_OUTPUT/GITHUB_EVENT_PATH files and a real
+// two-commit git repo for each input that must change the verdict.
+func TestRegressionDetectStepBehavioral(t *testing.T) {
+	requireHostTool(t, "bash")
+	requireHostTool(t, "jq")
+	requireHostTool(t, "git")
+
+	job := readCIWorkflow(t, "regression.yml").job(t, "regression")
+	step := job.step(t, "Decide whether to run differential regression tests")
+	if step.ID != "detect" {
+		t.Fatalf("detect step id = %q, want %q", step.ID, "detect")
+	}
+
+	// newRepo creates a base commit, then (if any changedFiles are given) a
+	// second commit that adds each of them, and returns the repo dir plus
+	// both commit SHAs for PR_BASE_SHA/PR_HEAD_SHA.
+	newRepo := func(t *testing.T, changedFiles ...string) (dir, base, head string) {
+		t.Helper()
+		dir = t.TempDir()
+		git := func(args ...string) string {
+			t.Helper()
+			cmd := exec.Command("git", args...)
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(),
+				"GIT_CONFIG_NOSYSTEM=1",
+				"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t.test",
+				"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t.test",
+			)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("git %v: %v\n%s", args, err, out)
+			}
+			return strings.TrimSpace(string(out))
+		}
+		git("init", "-q", "-b", "main")
+		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("base\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		git("add", "README.md")
+		git("commit", "-q", "-m", "base")
+		base = git("rev-parse", "HEAD")
+
+		for _, f := range changedFiles {
+			full := filepath.Join(dir, f)
+			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(full, []byte("x\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			git("add", f)
+		}
+		if len(changedFiles) > 0 {
+			git("commit", "-q", "-m", "head")
+		}
+		head = git("rev-parse", "HEAD")
+		return dir, base, head
+	}
+
+	writeEvent := func(t *testing.T, dir string, labels ...string) string {
+		t.Helper()
+		type label struct {
+			Name string `json:"name"`
+		}
+		type prBody struct {
+			Labels []label `json:"labels"`
+		}
+		type event struct {
+			PullRequest prBody `json:"pull_request"`
+		}
+		e := event{PullRequest: prBody{Labels: []label{}}}
+		for _, l := range labels {
+			e.PullRequest.Labels = append(e.PullRequest.Labels, label{Name: l})
+		}
+		b, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(dir, "event.json")
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	runDetect := func(t *testing.T, dir, eventPath, eventName, base, head string) (runRegression, reason string) {
+		t.Helper()
+		outFile := filepath.Join(t.TempDir(), "output")
+		if err := os.WriteFile(outFile, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step.Run)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"EVENT_NAME="+eventName,
+			"PR_BASE_SHA="+base,
+			"PR_HEAD_SHA="+head,
+			"GITHUB_OUTPUT="+outFile,
+			"GITHUB_EVENT_PATH="+eventPath,
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("detect step: %v\noutput:\n%s", err, out)
+		}
+		outBytes, err := os.ReadFile(outFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(string(outBytes), "\n") {
+			if v, ok := strings.CutPrefix(line, "run_regression="); ok {
+				runRegression = v
+			}
+			if v, ok := strings.CutPrefix(line, "reason="); ok {
+				reason = v
+			}
+		}
+		return runRegression, reason
+	}
+
+	cases := []struct {
+		name         string
+		eventName    string
+		labels       []string
+		changedFiles []string
+		want         string
+	}{
+		{"push always runs", "push", nil, nil, "true"},
+		{"run-regression label forces true", "pull_request", []string{"run-regression"}, []string{"docs/unrelated.md"}, "true"},
+		{"skip-regression label forces false", "pull_request", []string{"skip-regression"}, []string{"cmd/bd/x.go"}, "false"},
+		{"cmd/bd non-test change runs", "pull_request", nil, []string{"cmd/bd/x.go"}, "true"},
+		{"only a cmd/bd test file changed skips", "pull_request", nil, []string{"cmd/bd/x_test.go"}, "false"},
+		{"docs-only change skips", "pull_request", nil, []string{"docs/a.md"}, "false"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir, base, head := newRepo(t, c.changedFiles...)
+			eventPath := writeEvent(t, dir, c.labels...)
+			got, reason := runDetect(t, dir, eventPath, c.eventName, base, head)
+			if got != c.want {
+				t.Errorf("run_regression = %q (reason %q), want %q", got, reason, c.want)
+			}
+		})
+	}
+}
+
+// --- General sweep: no Blacksmith-reachable advisory job may save a cache --
+
+// generalCacheSweepWorkflows is every F7c advisory workflow plus main.yml
+// (the seeder). pr.yml, pr-risk.yml and bazel.yml also run jobs on
+// Blacksmith, but their Go-cache topology is already pinned exhaustively,
+// job-by-job and step-by-step, by TestGoCacheOwnershipTopology and
+// TestBazelWorkflowCacheTopology; those jobs' runs-on expressions also
+// depend on a prior job's `needs.rbe.outputs.enabled` output, which the
+// minimal evalGHExpr engine below (deliberately scoped to github.*/runner.*
+// context lookups) cannot resolve, so folding them into this sweep would
+// either silently under-check them or require duplicating that existing
+// machinery. This list is every workflow this F7c round can actually edit
+// plus the one workflow (main.yml) whose seeder job this round added a new
+// guard to.
+var generalCacheSweepWorkflows = append(mapKeys(blacksmithSetupGoCacheConsumers), "main.yml")
+
+// blacksmithTrustContexts are the two event shapes a same-repo Blacksmith
+// `runs-on` ternary can route onto a `blacksmith-*` label for (F7c review fix
+// S2): a trusted same-repo pull_request, and merge_group. runner.environment
+// is pinned to "self-hosted" in both, matching what a job actually observes
+// once it lands on a Blacksmith runner, so a step's own
+// `runner.environment == 'self-hosted'`-gated logic evaluates the same way
+// here as it would for real.
+var blacksmithTrustContexts = map[string]map[string]string{
+	"pull_request": {
+		"github.event_name":                             "pull_request",
+		"github.event.pull_request.head.repo.full_name": "gastownhall/beads",
+		"github.repository":                             "gastownhall/beads",
+		"github.actor":                                  "alice",
+		"github.ref":                                    "refs/pull/1/merge",
+		"runner.environment":                            "self-hosted",
+	},
+	"merge_group": {
+		"github.event_name":  "merge_group",
+		"github.repository":  "gastownhall/beads",
+		"github.ref":         "refs/heads/gh-readonly-queue/main/pr-1",
+		"runner.environment": "self-hosted",
+	},
+}
+
+// ghExprTruthyDefaultTrue evaluates expr under ctx, treating both an empty
+// expr and an evaluation error as truthy/reachable: this sweep's job is to
+// catch a missing or wrong save-gate, so an `if:` this minimal evaluator
+// cannot parse must fail closed (assume the step/job runs) rather than
+// silently skip the jobs or steps that use it.
+func ghExprTruthyDefaultTrue(expr string, ctx map[string]string) bool {
+	if strings.TrimSpace(expr) == "" {
+		return true
+	}
+	v, err := evalGHExpr(expr, ctx)
+	if err != nil {
+		return true
+	}
+	return ghTruthy(v)
+}
+
+// resolveRunsOnLabel returns the runner label a job's runs-on resolves to
+// under ctx: the literal string itself if it is not a `${{ ... }}`
+// expression, the evaluated result if it is and evaluates to a string, or ""
+// (never a Blacksmith label) if it cannot be resolved at all.
+func resolveRunsOnLabel(runsOn string, ctx map[string]string) string {
+	if !strings.Contains(runsOn, "${{") {
+		return strings.TrimSpace(runsOn)
+	}
+	v, err := evalGHExpr(runsOn, ctx)
+	if err != nil {
+		return ""
+	}
+	s, ok := v.(string)
+	if !ok {
+		return ""
+	}
+	return s
+}
+
+// TestBlacksmithReachableAdvisoryJobsNeverSaveACache is the general sweep the
+// F7c re-review required (S2): rather than a hand-picked table of the caches
+// known about so far (B2, X1), evaluate EVERY job in EVERY generalCacheSweep-
+// Workflows workflow against both blacksmithTrustContexts, and for every job
+// whose runs-on actually resolves to a blacksmith-* label under one of them,
+// forbid: a bare (monolithic) actions/cache step; an actions/cache/save step
+// that is not gated off (would still run under) that same context; a
+// setup-go step whose effective `cache` input is not disabled on a
+// self-hosted runner; and a setup-node/setup-python step with any `cache`
+// input set at all. This is the mechanism that would have caught N3 (docs
+// setup-node cache: npm), N4 (a new bare actions/cache step in a Blacksmith
+// job), and - once main.yml's seeder gained its S2 job-level guard - proves
+// X1/N6 (main.yml growing a pull_request trigger) still cannot make the
+// seeder's always-on save step run on a PR, without any of those needing
+// their own bespoke test.
+func TestBlacksmithReachableAdvisoryJobsNeverSaveACache(t *testing.T) {
+	for _, file := range generalCacheSweepWorkflows {
+		workflow := readCIWorkflow(t, file)
+		for jobName, job := range workflow.Jobs {
+			t.Run(file+"/"+jobName, func(t *testing.T) {
+				var checkCtx map[string]string
+				for ctxName, ctx := range blacksmithTrustContexts {
+					if !ghExprTruthyDefaultTrue(job.If, ctx) {
+						continue // job cannot even run under this event
+					}
+					label := resolveRunsOnLabel(job.RunsOn, ctx)
+					if strings.HasPrefix(label, "blacksmith-") {
+						checkCtx = ctx
+						_ = ctxName
+						break
+					}
+				}
+				if checkCtx == nil {
+					return // never lands on Blacksmith under either trust context
+				}
+
+				for _, step := range job.Steps {
+					family := actionFamily(step.Uses)
+					switch family {
+					case cacheMonolithicActionFamily:
+						t.Errorf("%s job %s step %q uses bare actions/cache on a Blacksmith-reachable job; it auto-saves on any key miss (B2/X1 forbid this - use actions/cache/restore + a non-PR-gated actions/cache/save)", file, jobName, step.Name)
+					case cacheSaveActionFamily:
+						if ghExprTruthyDefaultTrue(step.If, checkCtx) {
+							t.Errorf("%s job %s step %q (actions/cache/save) has if=%q, which still runs under a same-repo Blacksmith event; it must be gated off", file, jobName, step.Name, step.If)
+						}
+					case setupGoActionFamily:
+						cacheVal, ok := step.With["cache"]
+						wouldCache := true
+						if ok {
+							if !strings.Contains(cacheVal, "${{") {
+								wouldCache = cacheVal == "true"
+							} else if v, err := evalGHExpr(cacheVal, checkCtx); err == nil {
+								wouldCache = ghTruthy(v)
+							}
+						}
+						if wouldCache {
+							t.Errorf("%s job %s setup-go step %q has cache=%q, which stays enabled on a self-hosted (Blacksmith) runner; it must disable its own implicit cache there", file, jobName, step.Name, cacheVal)
+						}
+					case setupNodeActionFamily, setupPythonActionFamily:
+						if cacheVal, ok := step.With["cache"]; ok && cacheVal != "" {
+							t.Errorf("%s job %s step %q sets cache=%q on a Blacksmith-reachable job; setup-node/setup-python's own cache uses a bare actions/cache internally", file, jobName, step.Name, cacheVal)
+						}
+					}
+				}
+			})
 		}
 	}
 }

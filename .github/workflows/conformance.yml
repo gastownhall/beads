@@ -22,6 +22,12 @@ on:
       - 'scripts/conformance.sh'
       - 'test/conformance/**'
       - 'internal/storage/embeddeddolt/conformance_test.go'
+      # F7c review fix S4: TestMain (the fixture that builds the
+      # pristine embedded-Dolt databases conformance_test.go and every
+      # other test in this package reuse) lives here, not in
+      # conformance_test.go itself; a PR editing only the fixture was
+      # previously excluded by '!**_test.go' with nothing to re-include it.
+      - 'internal/storage/embeddeddolt/test_fixture_test.go'
       - 'backend/conformance/**'
   push:
     branches: [ main ]
@@ -36,6 +42,12 @@ on:
       - 'scripts/conformance.sh'
       - 'test/conformance/**'
       - 'internal/storage/embeddeddolt/conformance_test.go'
+      # F7c review fix S4: TestMain (the fixture that builds the
+      # pristine embedded-Dolt databases conformance_test.go and every
+      # other test in this package reuse) lives here, not in
+      # conformance_test.go itself; a PR editing only the fixture was
+      # previously excluded by '!**_test.go' with nothing to re-include it.
+      - 'internal/storage/embeddeddolt/test_fixture_test.go'
       - 'backend/conformance/**'
   merge_group:
 
@@ -60,7 +72,25 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
-          cache: ${{ runner.environment != 'self-hosted' }}
+          # F7c review fix N1: fail-closed. setup-go's own implicit cache
+          # must stay off on Blacksmith (it would try to use a GitHub-hosted
+          # cache entry Blacksmith can't see, and only the self-keyed
+          # blacksmith-sg-v1- restore below should feed this job there); the
+          # prior `!= 'self-hosted'` form fails OPEN (caching turns on) if
+          # runner.environment is ever empty/unknown for some future runner
+          # class, instead of staying off until proven github-hosted.
+          cache: ${{ runner.environment == 'github-hosted' }}
+
+      # F7c review fix S5: this job's own key copy must match main.yml's
+      # seeder key byte-for-byte (TestBlacksmithSetupGoCacheKeysMatchAcrossSeederAndConsumers),
+      # which now keys by UTC calendar day instead of github.sha so main
+      # pushes don't churn a multi-GB cache entry on every commit; this step
+      # computes that same day value locally so the key expression below
+      # resolves (steps.* references only resolve within the same job).
+      - name: Compute cache date
+        id: cache-date
+        if: runner.environment == 'self-hosted'
+        run: echo "today=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
       - name: Restore Blacksmith setup-go cache
         if: runner.environment == 'self-hosted'
@@ -69,7 +99,7 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          key: blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
           restore-keys: |
             blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
             blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
