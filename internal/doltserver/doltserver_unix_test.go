@@ -24,9 +24,43 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 			want:     []int{102},
 		},
 		{
-			name:     "ordered loose false positive",
+			name:     "loose substring false positive is rejected",
 			snapshot: "103 S some-tool says dolt then sql-server\n",
-			want:     []int{103},
+		},
+		{
+			name:     "executable basename must be exactly dolt",
+			snapshot: "116 S /opt/dolt-tools/bin/dolt-helper sql-server\n",
+		},
+		{
+			name:     "dolt config path is not a sql-server argument",
+			snapshot: "117 S /usr/bin/cat /etc/dolt/sql-server.yaml\n",
+		},
+		{
+			name: "empty state column keeps the command",
+			snapshot: "   1466      /Users/u/.nix-profile/bin/dolt sql-server --config /Users/u/.beads/shared-server/dolt-server-config.yaml\n" +
+				"1467 dolt sql-server\n" +
+				"1468 /usr/bin/python3 -c dolt sql-server\n",
+			want: []int{1466, 1467},
+		},
+		{
+			name:     "empty state with profiled command",
+			snapshot: "1469 /Users/u/.nix-profile/bin/dolt --prof cpu sql-server\n",
+			want:     []int{1469},
+		},
+		{
+			name:     "linux tracing-stop state t keeps a live server",
+			snapshot: "120 t dolt sql-server\n121 tl dolt sql-server\n",
+			want:     []int{120, 121},
+		},
+		{
+			name:     "historical and freebsd primary states L and W keep a live server",
+			snapshot: "122 L dolt sql-server\n123 W dolt sql-server\n124 Ls+ dolt sql-server\n",
+			want:     []int{122, 123, 124},
+		},
+		{
+			name:     "freebsd capability and jail modifiers keep a live server",
+			snapshot: "125 SJ dolt sql-server\n126 SC+ dolt sql-server\n127 Ss+CJ dolt sql-server\n",
+			want:     []int{125, 126, 127},
 		},
 		{
 			name:     "sql server before dolt is rejected",
@@ -53,7 +87,6 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 				"-1 S dolt sql-server\n" +
 				"112\n" +
 				"113 S\n" +
-				"114\tdolt sql-server\n" +
 				"115 S \n",
 		},
 		{

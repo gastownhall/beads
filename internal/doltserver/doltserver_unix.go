@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -53,8 +54,18 @@ func listDoltProcessPIDs() []int {
 	return parseDoltProcessPIDs(out)
 }
 
+// psStatePattern matches the state column of `ps`: one primary state letter
+// followed by optional modifiers (for example "S", "Sl", "S+", "Z+", "X<",
+// "t", "SJ"). Primary letters cover Linux (including tracing-stop "t" and
+// historical "W") and FreeBSD (including "L" and "W"); modifiers add FreeBSD
+// "C" (capability mode) and "J" (jail). macOS 26 prints an empty state for
+// many rows, so the state column is optional.
+var psStatePattern = regexp.MustCompile(`^[RSIDTtUZXELW][<>+NLsVlWEIDRSTZCJ]*$`)
+
 // parseDoltProcessPIDs returns matching, non-defunct Dolt server PIDs from a
 // `ps -axo pid=,state=,command=` snapshot. It preserves the source row order.
+// The state may be empty, in which case the first field after the PID is the
+// executable.
 func parseDoltProcessPIDs(snapshot []byte) []int {
 	var pids []int
 	for _, line := range strings.Split(string(snapshot), "\n") {
@@ -67,25 +78,48 @@ func parseDoltProcessPIDs(snapshot []byte) []int {
 		if !ok {
 			continue
 		}
-		state, command, ok := splitPSField(rest)
-		if !ok {
-			continue
-		}
 
 		pid, err := strconv.Atoi(pidText)
 		if err != nil || pid <= 0 {
 			continue
 		}
-		if state[0] == 'Z' || state[0] == 'X' {
+
+		var state, command string
+		if field, remainder, ok := splitPSField(rest); ok && psStatePattern.MatchString(field) {
+			state, command = field, remainder
+		} else {
+			command = rest
+		}
+		if command == "" {
+			continue
+		}
+		if state != "" && (state[0] == 'Z' || state[0] == 'X') {
 			continue
 		}
 
-		doltIndex := strings.Index(command, "dolt")
-		if doltIndex >= 0 && strings.Contains(command[doltIndex+len("dolt"):], "sql-server") {
+		if isDoltSQLServerCommand(command) {
 			pids = append(pids, pid)
 		}
 	}
 	return pids
+}
+
+// isDoltSQLServerCommand reports whether command runs a binary named exactly
+// "dolt" with a "sql-server" argument. Flags may sit between the two (as in
+// `dolt --prof cpu sql-server`). Matching on the executable's basename and
+// whole arguments rejects paths like `/opt/dolt-tools/dolt-helper` and
+// arguments that merely contain the words.
+func isDoltSQLServerCommand(command string) bool {
+	fields := strings.Fields(command)
+	if len(fields) == 0 || filepath.Base(fields[0]) != "dolt" {
+		return false
+	}
+	for _, arg := range fields[1:] {
+		if arg == "sql-server" {
+			return true
+		}
+	}
+	return false
 }
 
 // splitPSField separates the next whitespace-delimited ps field from the
