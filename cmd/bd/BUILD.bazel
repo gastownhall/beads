@@ -770,6 +770,7 @@ go_test(
         "git_repo_template_test.go",
         "git_test_helpers_scope_test.go",
         "github_link_scope_test.go",
+        "github_links_test.go",
         "gitlab_integration_test.go",
         "gitlab_test.go",
         "global_identity_integration_test.go",
