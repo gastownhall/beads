@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -541,6 +542,22 @@ func TestEmbeddedList(t *testing.T) {
 		out := bdList(t, bd, dir, "--tree", "--parent", seed.epic)
 		if !strings.Contains(out, seed.epic) {
 			t.Errorf("tree output should contain parent ID %s", seed.epic)
+		}
+	})
+
+	t.Run("tree_parent_max_rows_counts_subtree", func(t *testing.T) {
+		// The page query sees one child, so only the subtree cap can refuse,
+		// and it must refuse the way every other --max-rows refusal does.
+		parent := bdCreate(t, bd, dir, "Capped tree parent", "--type", "epic")
+		child := bdCreate(t, bd, dir, "Capped tree child", "--type", "task", "--parent", parent.ID)
+		bdCreate(t, bd, dir, "Capped tree grandchild", "--type", "task", "--parent", child.ID)
+		cmd := exec.Command(bd, "list", "--parent", parent.ID, "--max-rows", "1")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 || !strings.Contains(string(out), "too many rows: 2 found") {
+			t.Fatalf("bd list --parent --max-rows 1 = %v, want exit 2 with the cap message:\n%s", err, out)
 		}
 	})
 

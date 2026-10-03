@@ -879,6 +879,7 @@ go_test(
         "lint_stale_proxied_integration_test.go",
         "list_comments_embedded_test.go",
         "list_comments_proxied_integration_test.go",
+        "list_descendants_test.go",
         "list_embedded_test.go",
         "list_filter_flags_test.go",
         "list_footer_counts_test.go",

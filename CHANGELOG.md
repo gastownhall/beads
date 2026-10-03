@@ -155,6 +155,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consumed only on the store-requiring path, the ambient workspace is still
   what gets selected, and its source database is still preserved.
 
+- **`bd list --parent` gathers the tree in one query on the direct route**
+  ([#5397](https://github.com/gastownhall/beads/issues/5397)). The pretty
+  parent tree issued one search per node, and in embedded mode each search
+  opened and closed a Dolt engine, so the command slowed with subtree size. It
+  now uses the recursive descendants query the `--proxied-server` route already
+  ran, through a new `DoltStorage.GetDescendants`, and loads dependency records
+  for the displayed issues only. The query now stops at a stored parent-child
+  cycle; before, the proxied route's query did not finish on one. `--max-rows`
+  now counts the whole subtree, as `bd dep tree` does, instead of each parent's
+  children separately; the parent shown at the top is not counted. A tree whose
+  every level fits under the cap can now be refused, and the proxied tree, which
+  ignored the cap, now honors it.
+
 - **An ambient `BEADS_DOLT_SERVER_PORT` now marks a workspace externally
   managed — suppressing auto-start — and no longer stops bd reaping its own
   orphaned server**

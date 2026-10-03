@@ -58,9 +58,9 @@ func openProxiedListUOW(ctx context.Context) (uow.UnitOfWork, error) {
 }
 
 // runListProxiedTree serves the ONE mode that is deliberately off the role: the
-// hierarchical --parent walk under pretty output. It consumes the FILTER as a
-// value, re-parenting a copy of it at every level, and it reaches no page
-// epilogue on either route.
+// hierarchical --parent tree under pretty output. It consumes the FILTER as a
+// value, which the descendants query applies at every level, and it reaches no
+// page epilogue on either route.
 func runListProxiedTree(ctx context.Context, in listInput) error {
 	uw, filter, err := openAndPrepare(ctx, in)
 	if err != nil {

@@ -260,3 +260,42 @@ func (s *testSuite) TestGetDescendantsFilteredByStatus() {
 	s.ElementsMatch([]string{"bd-f-a", "bd-f-r.1"}, ids,
 		"only open descendants must be returned; the per-level filter must apply across edge and dotted branches")
 }
+
+func (s *testSuite) TestGetDescendantsCycles() {
+	r := s.issueRepo()
+	deps := s.depRepo()
+	all := []string{"bd-cycle-r", "bd-cycle-a", "bd-cycle-b", "bd-cycle-c", "bd-cycle-d"}
+	for _, id := range all {
+		s.Require().NoError(r.Insert(s.Ctx(), newTestIssue(id, id), "tester", domain.InsertIssueOpts{}))
+	}
+	// Seed stored corruption below the normal cycle-checking write boundary:
+	// cycles through the root and an anchor node, plus c<->d two levels below
+	// the anchor, which only path extension in the recursive members can stop.
+	for _, e := range []struct{ child, parent string }{
+		{"bd-cycle-a", "bd-cycle-r"},
+		{"bd-cycle-b", "bd-cycle-a"},
+		{"bd-cycle-a", "bd-cycle-b"},
+		{"bd-cycle-r", "bd-cycle-b"},
+		{"bd-cycle-c", "bd-cycle-b"},
+		{"bd-cycle-d", "bd-cycle-c"},
+		{"bd-cycle-c", "bd-cycle-d"},
+	} {
+		s.Require().NoError(deps.Insert(s.Ctx(),
+			&types.Dependency{IssueID: e.child, DependsOnID: e.parent, Type: types.DepParentChild},
+			"tester", domain.DepInsertOpts{CycleValidated: true, HierarchyValidated: true}))
+	}
+	for _, root := range []string{"bd-cycle-r", "bd-cycle-a"} {
+		got, err := r.GetDescendants(s.Ctx(), root, types.IssueFilter{})
+		s.Require().NoError(err)
+		var ids, want []string
+		for _, issue := range got {
+			ids = append(ids, issue.ID)
+		}
+		for _, id := range all {
+			if id != root {
+				want = append(want, id)
+			}
+		}
+		s.ElementsMatch(want, ids, "cycles must terminate and exclude the root")
+	}
+}
