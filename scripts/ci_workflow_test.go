@@ -1974,6 +1974,21 @@ func isForbiddenGoCacheActionFamily(family string) bool {
 	return family == cacheMonolithicActionFamily
 }
 
+// goCacheImplicitCacheExceptions carves out the one documented exception to
+// the blanket "setup-go cache must be false" rule enforced below: jobs whose
+// entire purpose is to seed Blacksmith's own setup-go implicit cache (which
+// cannot see GitHub-saved actions/cache entries — see spec-f7.md §2.2 Group
+// B). main.yml's blacksmith-setup-go-cache job intentionally runs setup-go
+// with cache: true so that Conformance/Regression/Migration-Test-Harness/
+// Cross-Version-Smoke/Docs-docsync/Proxied-Local — all moved to Blacksmith by
+// F7c — get a warm implicit cache instead of a cold one on every same-repo
+// PR. Every other job in main.yml/pr.yml/pr-risk.yml must still pin false and
+// rely on the explicit actions/cache restore/save steps asserted elsewhere in
+// this file.
+var goCacheImplicitCacheExceptions = map[string]map[string]bool{
+	"main.yml": {"blacksmith-setup-go-cache": true},
+}
+
 func assertPinnedGoCacheActions(t *testing.T, workflowName string, workflow ciWorkflow) {
 	t.Helper()
 
@@ -2006,7 +2021,7 @@ func assertPinnedGoCacheActions(t *testing.T, workflowName string, workflow ciWo
 			if sha != wantSHA {
 				t.Errorf("%s job %q step %q action %q has SHA %q, want released SHA %q", workflowName, jobName, step.Name, family, sha, wantSHA)
 			}
-			if family == setupGoActionFamily && step.With["cache"] != "false" {
+			if family == setupGoActionFamily && step.With["cache"] != "false" && !goCacheImplicitCacheExceptions[workflowName][jobName] {
 				t.Errorf("%s job %q setup-go cache = %q, want false", workflowName, jobName, step.With["cache"])
 			}
 		}
@@ -2427,6 +2442,13 @@ const wantRBERunsOn = "${{ (github.event_name == 'push' || github.event_name == 
 // as every other Blacksmith runs-on in this repo.
 const mainWindowsTestBinariesCacheRunsOn = "${{ matrix.runner == 'blacksmith' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
 
+// F7c: used to define its own sameRepoBlacksmith4vcpu here (same expression
+// as sameRepoBlacksmith2vcpu with the 4 vCPU label, for advisory jobs that
+// compile Go: conformance.yml, regression.yml, migration-test.yml,
+// cross-version-smoke.yml, proxied-local-smoke.yml). F7a independently
+// defined the same const; both are now served by the single shared
+// sameRepoBlacksmith4vcpu in ci_blacksmith_runner_test.go.
+
 // pr.yml's call of bazel.yml: exactly these inputs (review D1 v2 N3). An rbe
 // override would put every PR in local mode and ungate the embedded tier
 // while the gate stays self-consistent; integration: "off" would drop the
@@ -2658,6 +2680,16 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 			"test-nix": sameRepoBlacksmith4vcpu,
 		},
 		bazelWorkflowName: {bazelRBEJobName: wantRBERunsOn},
+		// F7c: advisory workflows. Each compiles Go (or, for docsync/
+		// broken-links, is cheap enough to size at 2 vCPU per spec-f7.md
+		// §2.2) and moves to Blacksmith for same-repo PRs/merge_group only;
+		// forks, Dependabot and push stay on ubuntu-latest.
+		"conformance.yml":         {"conformance": sameRepoBlacksmith4vcpu},
+		"regression.yml":          {"regression": sameRepoBlacksmith4vcpu},
+		"migration-test.yml":      {"historical-upgrades": sameRepoBlacksmith4vcpu},
+		"cross-version-smoke.yml": {"smoke": sameRepoBlacksmith4vcpu, "versions": sameRepoBlacksmith2vcpu},
+		"docs-mintlify.yml":       {"docsync": sameRepoBlacksmith2vcpu, "broken-links": sameRepoBlacksmith2vcpu},
+		"proxied-local-smoke.yml": {"managed-local-smoke": sameRepoBlacksmith4vcpu},
 	}
 	// The two required gates' display names are a stable external contract
 	// (branch protection rule names) - moving them to Blacksmith must not
@@ -2690,7 +2722,13 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 	}
 	// No other job in pr.yml or pr-risk.yml may name a Blacksmith label beyond
 	// the ones enumerated in `want` above (F4 added windows-test-binaries).
-	for _, file := range []string{"pr.yml", "pr-risk.yml"} {
+	// Same sweep for the F7c advisory workflows: nothing in them may name a
+	// Blacksmith label beyond the jobs listed in `want` above.
+	for _, file := range []string{
+		"pr.yml", "pr-risk.yml",
+		"conformance.yml", "regression.yml", "migration-test.yml",
+		"cross-version-smoke.yml", "docs-mintlify.yml", "proxied-local-smoke.yml",
+	} {
 		workflow := readCIWorkflow(t, file)
 		allowed := want[file]
 		for name, job := range workflow.Jobs {

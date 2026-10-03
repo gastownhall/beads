@@ -2,10 +2,19 @@ name: Migration Test Harness
 
 on:
   pull_request:
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
-      - 'website/**'
+    # "Upgrade-relevant code" allowlist (spec-f7.md §2.4): kept identical
+    # (modulo each workflow's own file/script entries) across conformance.yml,
+    # migration-test.yml and cross-version-smoke.yml, and pinned by
+    # TestAdvisoryWorkflowPathFilters.
+    paths:
+      - '**.go'
+      - '!**_test.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Makefile'
+      - '.buildflags'
+      - '.github/workflows/migration-test.yml'
+      - 'scripts/migration-test/**'
   push:
     tags: ['v*']
   workflow_dispatch:
@@ -21,46 +30,39 @@ env:
 
 jobs:
   historical-upgrades:
-    name: Historical ${{ matrix.version }} → candidate
-    # v0.55.4 is dynamically linked against the ICU version shipped here.
-    # Pin the image so a runner alias update cannot invalidate the fixture.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    name: Historical ${{ matrix.shard }} shard → candidate
+    # v0.55.4 is dynamically linked against the ICU version shipped here, and
+    # blacksmith-*-ubuntu-2404 is Ubuntu 24.04, so the libicu74 pin still
+    # holds there too.
+    # F7c: 14 matrix legs (one per historical version) folded into 3 shards.
+    # Each shard builds the candidate once, installs its own dependencies
+    # once, then loops over `run.sh --version` for every version it owns,
+    # collecting failures so one bad version does not hide the rest (see
+    # "Verify explicit historical upgrades" below).
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
-          - version: v0.9.1
-            cache-identity: v0.9.1-source-e3c8554fa2c3e4b9caf7e296e9c8abbe24211a72-go1.25.0-cgo1
-          - version: v0.17.0
-            cache-identity: v0.17.0-d4d08617a324c85b45c9628bc519d659a9ff9c7c37da67aa48727e0af7f19a75
-          - version: v0.49.6
-            cache-identity: v0.49.6-8546dc9a47e11dc31ac2bc9a0224a9c690975e91850932cbb62623053fbb7db8
-          - version: v0.50.3
-            cache-identity: v0.50.3-e94b09e0b6a9324bbc0e81ea36bccaaa42172a926bfedfb389e9a26dedb63184
-          - version: v0.55.4
-            cache-identity: v0.55.4-e0fa25456dd82890230eef17653448a0bf995104c78864be91c5ed84426a5f49
-          - version: v0.56.1
-            cache-identity: v0.56.1-4f9f6cc44465a11613ff529009901eaaf841c6b1f91c15e002b0ecda2015a15c
-          - version: v0.57.0
-            cache-identity: v0.57.0-f8629d5627bed7d25f06f92334addc171d679f9aed9d08c5d42a9684205dc04b
-          - version: v0.62.0
-            cache-identity: v0.62.0-4cca7265b22e5c3ca8d62ab0b9752bec31f68b7f5fa636282a4c7e5454c35535
-          - version: v0.63.3
-            cache-identity: v0.63.3-5f4efd2e010209b3f381dbcd783b2a3a652f50ea72f40ef04c8ba434d408bf9e
-          - version: v1.0.0
-            cache-identity: v1.0.0-7057db1e92428fcf5c08d5dc6b07ead57e588b262cba78b9a26893d55bd29fdb
-          - version: v1.0.1
-            cache-identity: v1.0.1-1d2364d5d7083a4634a9e734ca87822fb79c2b6625988f9f791e3376313b1b77
-          - version: v1.1.0
-            cache-identity: v1.1.0-b0f3dd607c3fb989ee08d0a6854fba80d0402971eb108f9af6170bc14d491a34
-          - version: v1.1.2
-            cache-identity: v1.1.2-a72d71ed374955dc9f83a0f90b54bd7b6a0016709dd1676ae2e368651ed401c2
-          # The v1.1.2 tree re-tagged by the recovery release, so it adds no new
-          # storage regime — but it is the tag field upgrades actually start
-          # from, and it was never in this corpus.
-          - version: v1.2.2
-            cache-identity: v1.2.2-8140098a51d3b81d5548d1c5e6db1a2d9930e5d141efe2a4bff7d079c4d321e8
+          # src: the one version built from source against Go 1.25, instead
+          # of installed as a pinned binary.
+          - shard: src
+            versions: '["v0.9.1"]'
+            cache-hash: 453aa2e25bbad328
+          # pre-dolt: historical versions that predate the separate Dolt
+          # runtime oracle (no "Install Dolt test runtime" step needed).
+          - shard: pre-dolt
+            versions: '["v0.17.0","v0.49.6","v0.50.3","v0.63.3","v1.0.0"]'
+            cache-hash: 03cccab45291ead3
+          # dolt-runtime: versions that need the pinned Dolt runtime binary
+          # as a read-only oracle (the old per-version `contains(...)` list).
+          - shard: dolt-runtime
+            versions: '["v0.55.4","v0.56.1","v0.57.0","v0.62.0","v1.0.1","v1.1.0","v1.1.2","v1.2.2"]'
+            cache-hash: a8579bd64e9a0926
+            # The v1.1.2 tree re-tagged by the recovery release, so it adds no
+            # new storage regime — but it is the tag field upgrades actually
+            # start from, and it was never in this corpus.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -73,7 +75,7 @@ jobs:
         # Backstop for a hang that escapes the inner `timeout` calls, so it has
         # to sit ABOVE what those calls can legitimately consume: 3 update
         # attempts x 120s + 2 backoffs x 10s + 180s install = 560s worst case.
-        # 11m leaves ~100s of headroom and stays under the job's 15m budget, so
+        # 11m leaves ~100s of headroom and stays under the job's 20m budget, so
         # a stuck step fails as a step instead of cancelling the whole job.
         timeout-minutes: 11
         run: |
@@ -105,8 +107,9 @@ jobs:
       - name: Install Dolt test runtime
         # v0.55.4-v0.62.0 host their fixture on this server; v1.0.1-v1.1.2 use
         # the same pinned binary as a read-only oracle over the wisp plane,
-        # which has no `bd dolt sql` equivalent.
-        if: contains(fromJSON('["v0.55.4","v0.56.1","v0.57.0","v0.62.0","v1.0.1","v1.1.0","v1.1.2","v1.2.2"]'), matrix.version)
+        # which has no `bd dolt sql` equivalent. This is exactly the
+        # dolt-runtime shard's version list.
+        if: matrix.shard == 'dolt-runtime'
         run: |
           archive="$RUNNER_TEMP/dolt-linux-amd64.tar.gz"
           runtime="$RUNNER_TEMP/dolt-runtime"
@@ -129,22 +132,40 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/beads-regression
-          key: historical-dolt-${{ matrix.cache-identity }}-${{ runner.os }}-${{ runner.arch }}
+          key: historical-dolt-${{ matrix.shard }}-${{ matrix.cache-hash }}-${{ runner.os }}-${{ runner.arch }}
 
       - name: Build candidate
         run: make build
 
       - name: Set up Go 1.25 for v0.9.1 source build
-        if: matrix.version == 'v0.9.1'
+        if: matrix.shard == 'src'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.25.0'
 
-      - name: Verify explicit historical upgrade
+      # Each version runs as its own `run.sh` subprocess: the underlying
+      # historical-dolt-upgrade-test.sh uses `set -euo pipefail` and aborts at
+      # its first failure within one process, so a single multi-version
+      # invocation could silently hide every version queued after the first
+      # failure. Looping subprocess calls here, guarded by `if !`, is what
+      # lets "all versions run, and the job fails if any failed" (spec-f7.md
+      # §2.3.7) hold for shards with more than one version.
+      - name: Verify explicit historical upgrades
         env:
           CANDIDATE_BIN: ./bd
           GIT_CONFIG_NOSYSTEM: "1"
           DOLT_BIN: ${{ github.workspace }}/.tools/dolt/bin/dolt
-          HISTORICAL_VERSION: ${{ matrix.version }}
+          SHARD_VERSIONS: ${{ matrix.versions }}
         run: |
-          ./scripts/migration-test/run.sh --version "$HISTORICAL_VERSION"
+          set -euo pipefail
+          mapfile -t versions < <(jq -r '.[]' <<<"$SHARD_VERSIONS")
+          failed=0
+          for v in "${versions[@]}"; do
+            echo "::group::Historical upgrade: $v"
+            if ! ./scripts/migration-test/run.sh --version "$v"; then
+              echo "::error::historical upgrade failed for $v"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$failed"

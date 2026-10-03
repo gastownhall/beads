@@ -1475,3 +1475,57 @@ jobs:
             exit 1
           fi
           echo "Help text first line is correct"
+
+  # F7c: Blacksmith cannot see GitHub-hosted cache entries, so the advisory
+  # workflows that moved onto a same-repo-PR Blacksmith runner (Conformance,
+  # Regression's PR run, Migration Test Harness, Cross-Version Smoke, Docs
+  # docsync, Proxied Local) and only ever relied on setup-go's own implicit
+  # cache need a Blacksmith-side writer for that same
+  # setup-go-Linux-x64-ubuntu24-go-<ver>-<go.sum> key. This job is push-to-main
+  # only (always trusted), so it runs on a hardcoded Blacksmith label rather
+  # than the same-repo-PR conditional expression those consumers use.
+  #
+  # Precondition (spec-f7.md §3): an org admin must confirm Blacksmith's
+  # "branch-protected caches" toggle is ON before this seed is trusted to
+  # feed PR-scoped restores; see the F7c implementation report.
+  #
+  # Verify on the first run that Blacksmith's ImageOS yields "ubuntu24" in the
+  # key (setup-go derives it from $ImageOS). If it does not, this seed is a
+  # no-op for the six consumers above and they must fall back to an explicit
+  # `beads-go-mod-v2`/`non-race` restore with `cache: false`.
+  blacksmith-setup-go-cache:
+    name: Seed setup-go cache (Blacksmith)
+    # A literal (non-expression) Blacksmith label is actionlint's unknown-
+    # runner-label check; every other same-repo Blacksmith job in this repo
+    # routes through a conditional expression instead (actionlint only
+    # validates literal runs-on strings). This job is push-to-main only
+    # (always trusted, so there is nothing to gate on), but it still wraps
+    # the label in a trivial expression to keep actionlint clean and match
+    # repo convention.
+    runs-on: ${{ 'blacksmith-4vcpu-ubuntu-2404' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Build bd
+        if: steps.setup-go.outputs.cache-hit != 'true'
+        run: make build
+
+      - name: Compile regression tests
+        if: steps.setup-go.outputs.cache-hit != 'true'
+        run: go test -c -tags regression,gms_pure_go ./tests/regression
+
+      - name: Compile embedded Dolt conformance tests
+        if: steps.setup-go.outputs.cache-hit != 'true'
+        run: go test -c -tags gms_pure_go ./internal/storage/embeddeddolt
+
+      - name: Compile e2e conformance tests
+        if: steps.setup-go.outputs.cache-hit != 'true'
+        run: go test -c -tags 'gms_pure_go e2e' ./test/conformance
