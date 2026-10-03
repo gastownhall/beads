@@ -520,9 +520,10 @@ Do not require these existing check names directly:
 - `PR Lint (native)`, `PR Lint (windows)` and `PR Lint (darwin)`
 - `Test Nix Flake`
 - `Differential Regression (v0.49.6 baseline)`
-- `Upgrade smoke (<version> -> candidate)`
+- `Upgrade smoke (chunk N)` (F7c: folded from one job per version into one job
+  per 5-version chunk; still never require a matrix-expanded chunk job
+  directly)
 - `Resolve versions to test`
-- `nix build .#default`
 - `Bazel / test` and the other jobs of `bazel.yml`
 - `Bazel Farm / *` (`bazel-farm.yml`'s advisory, PR-controlled results)
 
@@ -1125,14 +1126,19 @@ The preferred required-check topology keeps only aggregate gates required.
 
 ### Nix Build
 
-`.github/workflows/nix-build.yml` currently uses workflow-level `paths` filters.
-Keep `nix build .#default` non-required.
+`.github/workflows/nix-build.yml` dropped its `pull_request` trigger entirely
+(F7c, spec-f7.md §2.4): it now runs `nix build .#default` only on push to
+`main` and on `workflow_dispatch`, so it is no longer a PR check at all, let
+alone a required one. PR coverage is PR Risk's required `test-nix` job
+(`nix run .#default -- --help` plus `nix flake check -L`), which is a
+superset of plain `nix build .#default`.
 
-If the full Nix build must affect mergeability, move it into an unfiltered
-required PR workflow behind a detector and job-level `if`, then teach the
-aggregate gate when a skipped Nix build is acceptable. Do not make the
-path-filtered `nix build` workflow or `nix build .#default` job directly
-required.
+If the full `nix build` must additionally affect PR mergeability, move it (or
+an equivalent build step) into an unfiltered required PR workflow behind a
+detector and job-level `if`, then teach the aggregate gate when a skipped Nix
+build is acceptable. Do not make `nix build .#default` directly required on
+`nix-build.yml` - its path filter means it would silently fail to report on
+PRs that don't touch Nix or Go module files.
 
 ### Cross-Version Smoke
 
@@ -1140,7 +1146,9 @@ required.
 maintainers explicitly choose to pay that cost in the aggregate gate. If it
 becomes required, add `merge_group` and put it behind a detector plus aggregate
 inside the required topology. Do not require matrix-expanded
-`Upgrade smoke (<version> -> candidate)` jobs directly.
+`Upgrade smoke (chunk N)` jobs directly (F7c folded the old one-job-per-version
+matrix into one job per 5-version chunk; the per-chunk job name changed but
+the "do not require individually" guidance is unchanged).
 
 ## Merge Queue Behavior
 
