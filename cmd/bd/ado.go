@@ -10,7 +10,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/ado"
-	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
@@ -868,24 +867,8 @@ func pushADOLinks(ctx context.Context, resolver *ado.LinkResolver, at *ado.Track
 // local issues by external_ref, source_system, and heuristic before creating
 // duplicates. When noCreate is true, unmatched items are skipped entirely.
 func buildADOPullHooks(ctx context.Context, at *ado.Tracker, bootstrapMatch, noCreate bool, matchCount *int, warn func(string)) *tracker.PullHooks {
-	prefix := "bd"
-	// YAML config takes precedence — in shared-server mode the DB
-	// may belong to a different project (GH#2469).
-	if p := config.GetString("issue-prefix"); p != "" {
-		prefix = p
-	} else if store != nil {
-		if p, err := store.GetConfig(ctx, "issue_prefix"); err == nil && p != "" {
-			prefix = p
-		}
-	}
-
 	hooks := &tracker.PullHooks{
-		GenerateID: func(_ context.Context, issue *types.Issue) error {
-			if issue.ID == "" {
-				issue.ID = generateIssueID(prefix)
-			}
-			return nil
-		},
+		GenerateID: pullIssueIDHook(ctx),
 	}
 
 	if bootstrapMatch || noCreate {

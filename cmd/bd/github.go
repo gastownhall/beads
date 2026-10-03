@@ -758,23 +758,7 @@ func buildGitHubPushHooks(gt *github.Tracker) *tracker.PushHooks {
 
 // buildGitHubPullHooks creates PullHooks for GitHub-specific pull behavior.
 func buildGitHubPullHooks(ctx context.Context) *tracker.PullHooks {
-	prefix := "bd"
-	// YAML config takes precedence — in shared-server mode the DB
-	// may belong to a different project (GH#2469).
-	if p := config.GetString("issue-prefix"); p != "" {
-		prefix = p
-	} else if store != nil {
-		if p, err := store.GetConfig(ctx, "issue_prefix"); err == nil && p != "" {
-			prefix = p
-		}
-	}
-
 	return &tracker.PullHooks{
-		GenerateID: func(_ context.Context, issue *types.Issue) error {
-			if issue.ID == "" {
-				issue.ID = generateIssueID(prefix)
-			}
-			return nil
-		},
+		GenerateID: pullIssueIDHook(ctx),
 	}
 }
