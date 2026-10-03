@@ -4,11 +4,13 @@ package embeddeddolt_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -167,4 +169,162 @@ func TestCreateIssuesUpsertsCommentsByID(t *testing.T) {
 			t.Fatalf("import comment id owned by another issue: err = %v, want 'already belongs to cuh-1'", err)
 		}
 	})
+}
+
+// updated_at is DATETIME(0), and the engine ROUNDS a sub-second value into it
+// (half a second rounds up); it does not truncate. A comparison against a
+// bound parameter sees the parameter's full precision instead. Together these
+// are why issueops.NormalizeUpdatedAt exists and must round.
+func TestIssueUpdatedAtColumnRoundsSubSecond(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+
+	te := newTestEnv(t, "dtr")
+	ctx := t.Context()
+	stored := time.Date(2026, 6, 1, 13, 0, 0, 0, time.UTC)
+	if err := te.store.CreateIssuesWithFullOptions(ctx, []*types.Issue{{
+		ID: "dtr-1", Title: "title", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		CreatedAt: stored.Add(-time.Hour), UpdatedAt: stored,
+	}}, "tester", storage.BatchCreateOptions{SkipPrefixValidation: true}); err != nil {
+		t.Fatalf("seed issue: %v", err)
+	}
+
+	var olderThanParam int
+	te.queryScalar(t, ctx, "SELECT COUNT(*) FROM issues WHERE id = ? AND updated_at < ?",
+		[]any{"dtr-1", stored.Add(300 * time.Millisecond)}, &olderThanParam)
+	if olderThanParam != 1 {
+		t.Fatalf("stored %v < bound %v: count = %d, want 1 (a bound parameter keeps its fraction)",
+			stored, stored.Add(300*time.Millisecond), olderThanParam)
+	}
+
+	for _, tc := range []struct {
+		frac time.Duration
+		want time.Time
+	}{
+		{0, stored},
+		{300 * time.Millisecond, stored},
+		{499 * time.Millisecond, stored},
+		{500 * time.Millisecond, stored.Add(time.Second)},
+		{700 * time.Millisecond, stored.Add(time.Second)},
+		{999 * time.Millisecond, stored.Add(time.Second)},
+	} {
+		written := stored.Add(tc.frac)
+		te.exec(t, ctx, "UPDATE issues SET updated_at = ? WHERE id = ?", written, "dtr-1")
+		var got time.Time
+		te.queryScalar(t, ctx, "SELECT updated_at FROM issues WHERE id = ?", []any{"dtr-1"}, &got)
+		if !got.UTC().Equal(tc.want) {
+			t.Fatalf("updated_at written as %v stored as %v, want %v", written, got.UTC(), tc.want)
+		}
+		if normalized := issueops.NormalizeUpdatedAt(written); !normalized.Equal(got.UTC()) {
+			t.Fatalf("NormalizeUpdatedAt(%v) = %v, but the column stored %v", written, normalized, got.UTC())
+		}
+	}
+}
+
+// A sub-second incoming updated_at must reach one verdict for the issue row
+// and its comments: both overwritten or both kept. The stored row sits on a
+// whole second; the incoming row carries a new title and an edited comment.
+func TestCreateIssuesSubSecondUpdatedAtMovesRowAndCommentTogether(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+
+	stored := time.Date(2026, 6, 1, 13, 0, 0, 0, time.UTC)
+	createdAt := stored.Add(-time.Hour)
+	commentAt := createdAt.Add(10 * time.Minute)
+	const commentID = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a6a"
+	const newID = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a6b"
+
+	row := func(id, title string, updatedAt time.Time, comments ...*types.Comment) *types.Issue {
+		return &types.Issue{
+			ID: id, Title: title, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+			CreatedAt: createdAt, UpdatedAt: updatedAt, Comments: comments,
+		}
+	}
+	comment := func(id, text string) *types.Comment {
+		return &types.Comment{ID: id, Author: "alice", Text: text, CreatedAt: commentAt}
+	}
+	setup := func(t *testing.T, prefix string) (*testEnv, string) {
+		t.Helper()
+		te := newTestEnv(t, prefix)
+		id := prefix + "-1"
+		if err := te.store.CreateIssuesWithFullOptions(t.Context(),
+			[]*types.Issue{row(id, "old", stored, comment(commentID, "original"))},
+			"tester", storage.BatchCreateOptions{SkipPrefixValidation: true}); err != nil {
+			t.Fatalf("seed issue: %v", err)
+		}
+		return te, id
+	}
+	importRow := func(t *testing.T, te *testEnv, issue *types.Issue, opts storage.BatchCreateOptions) {
+		t.Helper()
+		opts.SkipPrefixValidation = true
+		opts.SkipDependencyValidationErrors = true
+		if err := te.store.CreateIssuesWithFullOptions(t.Context(), []*types.Issue{issue}, "tester", opts); err != nil {
+			t.Fatalf("import at %v: %v", issue.UpdatedAt, err)
+		}
+	}
+
+	stale := storage.BatchCreateOptions{RejectStaleUpserts: true}
+	allowStale := storage.BatchCreateOptions{}
+
+	for i, tc := range []struct {
+		name          string
+		frac          time.Duration
+		opts          storage.BatchCreateOptions
+		wantOverwrite bool
+	}{
+		{"default_plus_300ms_is_a_tie", 300 * time.Millisecond, stale, false},
+		{"default_plus_500ms_rounds_up_to_newer", 500 * time.Millisecond, stale, true},
+		{"default_plus_700ms_rounds_up_to_newer", 700 * time.Millisecond, stale, true},
+		{"allow_stale_plus_300ms", 300 * time.Millisecond, allowStale, true},
+		{"allow_stale_plus_500ms", 500 * time.Millisecond, allowStale, true},
+		{"allow_stale_plus_700ms", 700 * time.Millisecond, allowStale, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			te, id := setup(t, fmt.Sprintf("ss%c", 'a'+i))
+			ctx := t.Context()
+			importRow(t, te, row(id, "new", stored.Add(tc.frac), comment(commentID, "edited")), tc.opts)
+
+			var title, text string
+			var updatedAt time.Time
+			te.queryScalar(t, ctx, "SELECT title, updated_at FROM issues WHERE id = ?", []any{id}, &title, &updatedAt)
+			te.queryScalar(t, ctx, "SELECT text FROM comments WHERE id = ?", []any{commentID}, &text)
+			rowOverwritten, commentOverwritten := title == "new", text == "edited"
+			if rowOverwritten != commentOverwritten {
+				t.Fatalf("issue row and comment diverged at +%v: title=%q updated_at=%v comment=%q",
+					tc.frac, title, updatedAt.UTC(), text)
+			}
+			if rowOverwritten != tc.wantOverwrite {
+				t.Fatalf("at +%v: overwritten = %v, want %v (title=%q updated_at=%v comment=%q)",
+					tc.frac, rowOverwritten, tc.wantOverwrite, title, updatedAt.UTC(), text)
+			}
+		})
+	}
+
+	// The stale check rounds the same way: -300ms lands on the stored second
+	// (a tie, whose new aux rows still merge), -700ms on the second before it
+	// (stale, rejected whole).
+	for i, tc := range []struct {
+		name           string
+		frac           time.Duration
+		wantNewComment bool
+	}{
+		{"default_minus_300ms_is_a_tie_not_stale", -300 * time.Millisecond, true},
+		{"default_minus_700ms_is_stale", -700 * time.Millisecond, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			te, id := setup(t, fmt.Sprintf("st%c", 'a'+i))
+			ctx := t.Context()
+			importRow(t, te, row(id, "new", stored.Add(tc.frac), comment(commentID, "edited"), comment(newID, "added")), stale)
+
+			var title, text string
+			var newCount int
+			te.queryScalar(t, ctx, "SELECT title FROM issues WHERE id = ?", []any{id}, &title)
+			te.queryScalar(t, ctx, "SELECT text FROM comments WHERE id = ?", []any{commentID}, &text)
+			te.queryScalar(t, ctx, "SELECT COUNT(*) FROM comments WHERE id = ?", []any{newID}, &newCount)
+			if title != "old" || text != "original" {
+				t.Fatalf("at %v: title=%q comment=%q, want the stored row and comment kept", tc.frac, title, text)
+			}
+			if (newCount == 1) != tc.wantNewComment {
+				t.Fatalf("at %v: new comment stored = %v, want %v", tc.frac, newCount == 1, tc.wantNewComment)
+			}
+		})
+	}
 }

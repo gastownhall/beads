@@ -98,6 +98,9 @@ type ImportResult struct {
 	// row for these (second-granularity timestamp ties, bd-hj85c); their
 	// aux data still merges.
 	TieKeptLocalIDs []string
+	// CommentEditsSkipped counts incoming comment edits dropped because
+	// their issue row was stale or tied (see importChangePlan).
+	CommentEditsSkipped int
 }
 
 // ImportChange describes how an import row modified an existing local issue.
@@ -159,7 +162,7 @@ func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, 
 		staleSkippedIDs = skipped
 		changePlan = plan
 		if len(issues) == 0 {
-			return &ImportResult{Skipped: len(staleSkippedIDs), StaleSkippedIDs: staleSkippedIDs, Unchanged: len(changePlan.Unchanged)}, nil
+			return &ImportResult{Skipped: len(staleSkippedIDs), StaleSkippedIDs: staleSkippedIDs, Unchanged: len(changePlan.Unchanged), CommentEditsSkipped: changePlan.CommentEditsSkipped}, nil
 		}
 	}
 
@@ -240,6 +243,7 @@ func assembleImportResult(issues []*types.Issue, staleSkippedIDs []string, chang
 		SkippedDependencies: skippedDependencies,
 		UpdatedIssues:       updatedIssues,
 		TieKeptLocalIDs:     changePlan.TieKeptLocal,
+		CommentEditsSkipped: changePlan.CommentEditsSkipped,
 	}
 }
 
@@ -715,6 +719,11 @@ type importChangePlan struct {
 	NewIDs []string
 	// NewCount is the number of incoming rows classified as new. See NewIDs.
 	NewCount int
+	// CommentEditsSkipped counts incoming comments, on stale or tied rows,
+	// whose id is already stored for the issue with different content. The
+	// write path rewrites a stored comment only when it overwrites the issue
+	// row, so these edits are dropped; --allow-stale applies them.
+	CommentEditsSkipped int
 }
 
 func filterStaleImportIssues(ctx context.Context, store importIssueLookup, issues []*types.Issue) ([]*types.Issue, []string, importChangePlan, error) {
@@ -786,6 +795,9 @@ func filterStaleImportIssues(ctx context.Context, store importIssueLookup, issue
 	// Positions in filtered whose row ties the local one with identical
 	// columns; proveUnchangedImportRows decides which of them leave the set.
 	tieIdentical := make(map[int]struct{})
+	// Rows whose stored issue row the import keeps (stale or tied): the
+	// write path does not rewrite their stored comments either.
+	var keptLocal []*types.Issue
 	for _, issue := range issues {
 		if issue == nil {
 			filtered = append(filtered, issue)
@@ -813,14 +825,19 @@ func filterStaleImportIssues(ctx context.Context, store importIssueLookup, issue
 			addNew(issue.ID)
 			continue
 		}
-		// Compare at second granularity: updated_at is DATETIME(0) in the
-		// store, so a sub-second component on the JSONL side must not turn
-		// a tie into a spurious "newer" classification.
-		incomingAt := issue.UpdatedAt.UTC().Truncate(time.Second)
-		localAt := local.UpdatedAt.UTC().Truncate(time.Second)
+		// Compare at the store's granularity, normalized exactly as the write
+		// path normalizes updated_at (DATETIME(0), rounded): a sub-second
+		// component on the JSONL side must classify the row the way the
+		// stale-guarded upsert will treat it.
+		incomingAt := issueops.NormalizeUpdatedAt(issue.UpdatedAt)
+		localAt := issueops.NormalizeUpdatedAt(local.UpdatedAt)
 		if incomingAt.Before(localAt) {
 			skippedIDs = append(skippedIDs, issue.ID)
+			keptLocal = append(keptLocal, issue)
 			continue
+		}
+		if incomingAt.Equal(localAt) {
+			keptLocal = append(keptLocal, issue)
 		}
 		if summary := importRowChangeSummary(local, issue); summary != "" {
 			if incomingAt.Equal(localAt) {
@@ -835,10 +852,19 @@ func filterStaleImportIssues(ctx context.Context, store importIssueLookup, issue
 		}
 		filtered = append(filtered, issue)
 	}
-	if len(tieIdentical) == 0 {
+	// One bulk comment load serves both the skipped-edit count and the
+	// unchanged-row proof below.
+	storedComments, haveComments, err := loadImportStoredComments(ctx, store, importCommentLoadIDs(filtered, tieIdentical, keptLocal))
+	if err != nil {
+		return nil, nil, plan, err
+	}
+	if haveComments {
+		plan.CommentEditsSkipped = countSkippedCommentEdits(keptLocal, storedComments)
+	}
+	if len(tieIdentical) == 0 || !haveComments {
 		return filtered, skippedIDs, plan, nil
 	}
-	unchanged, err := proveUnchangedImportRows(ctx, store, filtered, tieIdentical, localByID)
+	unchanged, err := proveUnchangedImportRows(ctx, store, filtered, tieIdentical, localByID, storedComments)
 	if err != nil {
 		return nil, nil, plan, err
 	}
@@ -869,8 +895,9 @@ func filterStaleImportIssues(ctx context.Context, store importIssueLookup, issue
 // not yet stored, a lease row the rewrite would insert, replace or drop —
 // keeps the row in the write set, i.e. today's behavior. Comments are keyed
 // the way PersistComments checks existence (author, created_at as stored,
-// text).
-func proveUnchangedImportRows(ctx context.Context, store importIssueLookup, filtered []*types.Issue, candidates map[int]struct{}, localByID map[string]*types.Issue) (map[int]struct{}, error) {
+// text). comments is the stored-comment load (loadImportStoredComments) for
+// at least every candidate's issue.
+func proveUnchangedImportRows(ctx context.Context, store importIssueLookup, filtered []*types.Issue, candidates map[int]struct{}, localByID map[string]*types.Issue, comments map[string][]*types.Comment) (map[int]struct{}, error) {
 	rel, ok := store.(importRelationLookup)
 	if !ok {
 		return nil, nil
@@ -886,13 +913,6 @@ func proveUnchangedImportRows(ctx context.Context, store importIssueLookup, filt
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	comments, err := rel.GetCommentsForIssues(ctx, ids)
-	if errors.Is(err, errImportRelationsUnavailable) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("check existing comments before import: %w", err)
-	}
 	deps, err := rel.GetDependencyRecordsForIssues(ctx, ids)
 	if errors.Is(err, errImportRelationsUnavailable) {
 		return nil, nil
@@ -912,6 +932,88 @@ func proveUnchangedImportRows(ctx context.Context, store importIssueLookup, filt
 		}
 	}
 	return unchanged, nil
+}
+
+// importCommentLoadIDs lists, sorted and deduplicated, the issues whose stored
+// comments the pre-filter needs: every tie candidate for the unchanged-row
+// proof, and every kept-local row carrying an id-bearing comment for the
+// skipped-edit count.
+func importCommentLoadIDs(filtered []*types.Issue, tieIdentical map[int]struct{}, keptLocal []*types.Issue) []string {
+	seen := make(map[string]struct{}, len(tieIdentical)+len(keptLocal))
+	ids := make([]string, 0, len(tieIdentical)+len(keptLocal))
+	add := func(id string) {
+		if _, dup := seen[id]; !dup {
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+	}
+	for pos := range tieIdentical {
+		add(filtered[pos].ID)
+	}
+	for _, issue := range keptLocal {
+		for _, c := range issue.Comments {
+			if c != nil && c.ID != "" {
+				add(issue.ID)
+				break
+			}
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// loadImportStoredComments bulk-loads the stored comments for ids. ok is false
+// when there is nothing to load or the store cannot supply them (no bulk
+// loader, or errImportRelationsUnavailable); any other error is a real read
+// failure and stops the import.
+func loadImportStoredComments(ctx context.Context, store importIssueLookup, ids []string) (map[string][]*types.Comment, bool, error) {
+	if len(ids) == 0 {
+		return nil, false, nil
+	}
+	rel, ok := store.(importRelationLookup)
+	if !ok {
+		return nil, false, nil
+	}
+	comments, err := rel.GetCommentsForIssues(ctx, ids)
+	if errors.Is(err, errImportRelationsUnavailable) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("check existing comments before import: %w", err)
+	}
+	return comments, true, nil
+}
+
+// countSkippedCommentEdits counts the incoming comments on keptLocal rows
+// (stale or tied, so the stored issue row is kept) whose id is already stored
+// for that issue with a different author, text or created_at. The write path
+// keeps the stored comment for these, so the import reports the dropped edits
+// instead of exiting silently. A comment with no created_at is compared on
+// author and text only, since the write path stamps it.
+func countSkippedCommentEdits(keptLocal []*types.Issue, stored map[string][]*types.Comment) int {
+	skipped := 0
+	for _, issue := range keptLocal {
+		byID := make(map[string]*types.Comment, len(stored[issue.ID]))
+		for _, c := range stored[issue.ID] {
+			if c != nil && c.ID != "" {
+				byID[c.ID] = c
+			}
+		}
+		for _, c := range issue.Comments {
+			if c == nil || c.ID == "" {
+				continue
+			}
+			s, ok := byID[c.ID]
+			if !ok {
+				continue
+			}
+			sameCreatedAt := c.CreatedAt.IsZero() || issueops.FormatAuxTime(s.CreatedAt) == issueops.FormatAuxTime(c.CreatedAt)
+			if s.Author != c.Author || s.Text != c.Text || !sameCreatedAt {
+				skipped++
+			}
+		}
+	}
+	return skipped
 }
 
 // importLeaseAlreadyReconciled reports whether RestoreLeaseOnImportInTx would

@@ -30,15 +30,27 @@ func TestEmbeddedImportCommentUpsertByID(t *testing.T) {
 	updated := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	commentAt := time.Date(2026, 6, 1, 11, 30, 0, 0, time.UTC)
 
-	writeRow := func(text string) string {
+	writeRowAt := func(updatedAt time.Time, text string) string {
 		t.Helper()
 		path := filepath.Join(t.TempDir(), "import.jsonl")
 		writeJSONLFile(t, path, []types.Issue{{
 			ID: issueID, Title: "Comment upsert", Status: types.StatusOpen, IssueType: types.TypeTask,
-			CreatedAt: updated.Add(-time.Hour), UpdatedAt: updated,
+			CreatedAt: updated.Add(-time.Hour), UpdatedAt: updatedAt,
 			Comments: []*types.Comment{{ID: commentID, IssueID: issueID, Author: "tester", Text: text, CreatedAt: commentAt}},
 		}})
 		return path
+	}
+	writeRow := func(text string) string { return writeRowAt(updated, text) }
+
+	const skippedLine = "Skipped 1 comment edit(s) on issues whose local row is the same age or newer (use --allow-stale to overwrite)"
+	wantSkipLine := func(stage, out string, want bool) {
+		t.Helper()
+		if got := strings.Contains(out, skippedLine); got != want {
+			t.Fatalf("%s: skipped-edit line present = %v, want %v\noutput:\n%s", stage, got, want, out)
+		}
+		if !want && strings.Contains(out, "comment edit(s)") {
+			t.Fatalf("%s: unexpected skipped-edit line\noutput:\n%s", stage, out)
+		}
 	}
 
 	commentTexts := func() map[string]string {
@@ -74,18 +86,36 @@ func TestEmbeddedImportCommentUpsertByID(t *testing.T) {
 		}
 	}
 
-	bdImport(t, bd, dir, writeRow("original"))
+	out := bdImport(t, bd, dir, writeRow("original"))
 	want("initial import", "original")
+	wantSkipLine("initial import", out, false)
 
-	bdImport(t, bd, dir, writeRow("original"))
+	out = bdImport(t, bd, dir, writeRow("original"))
 	want("identical re-import", "original")
+	wantSkipLine("identical re-import", out, false)
 
-	bdImport(t, bd, dir, writeRow("edited"))
+	out = bdImport(t, bd, dir, writeRow("edited"))
 	want("edited comment, equal updated_at", "original")
+	wantSkipLine("edited comment, equal updated_at", out, true)
 
-	bdImport(t, bd, dir, "--allow-stale", writeRow("edited"))
+	out = bdImport(t, bd, dir, "--allow-stale", writeRow("edited"))
 	want("edited comment, --allow-stale", "edited")
+	wantSkipLine("edited comment, --allow-stale", out, false)
 
 	bdImport(t, bd, dir, "--allow-stale", writeRow("edited"))
 	want("--allow-stale re-import", "edited")
+
+	out = bdImport(t, bd, dir, writeRowAt(updated.Add(-time.Hour), "older edit"))
+	want("edited comment, stale row", "edited")
+	wantSkipLine("edited comment, stale row", out, true)
+
+	// Sub-second updated_at: the report must agree with the write, which
+	// rounds into the DATETIME(0) column (+300ms ties, +700ms is newer).
+	out = bdImport(t, bd, dir, writeRowAt(updated.Add(300*time.Millisecond), "sub-second edit"))
+	want("edited comment, +300ms", "edited")
+	wantSkipLine("edited comment, +300ms", out, true)
+
+	out = bdImport(t, bd, dir, writeRowAt(updated.Add(700*time.Millisecond), "sub-second edit"))
+	want("edited comment, +700ms", "sub-second edit")
+	wantSkipLine("edited comment, +700ms", out, false)
 }

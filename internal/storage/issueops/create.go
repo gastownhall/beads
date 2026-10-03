@@ -549,6 +549,22 @@ func createBlockedRecomputeIDs(ctx context.Context, tx DBTX, issues []*types.Iss
 	return issueIDs, wispIDs, nil
 }
 
+// NormalizeUpdatedAt returns t as the issues table stores it: UTC, at the
+// whole-second precision of the DATETIME(0) updated_at column. The engine
+// rounds a sub-second value into that column (half a second rounds up)
+// instead of truncating it, so this rounds the same way
+// (TestIssueUpdatedAtColumnRoundsSubSecond pins the engine rule). A bound
+// parameter, by contrast, is compared at full precision, so every pre-check
+// that compares an incoming updated_at with the stored one (the stale check,
+// the comment-overwrite probe, the import pre-filter) binds this value, which
+// is what the conditional upsert's VALUES(updated_at) holds after coercion.
+//
+// issue.UpdatedAt itself is not rewritten: create echoes the caller's
+// sub-second timestamp (conformance RunLifecycleCreateEchoesSubSecondTimestamps).
+func NormalizeUpdatedAt(t time.Time) time.Time {
+	return t.UTC().Round(time.Second)
+}
+
 // PrepareIssueForInsert normalizes timestamps, validates, and computes the content hash.
 func PrepareIssueForInsert(issue *types.Issue, customStatuses, customTypes []string) error {
 	if err := ValidateMetadataIfConfigured(issue.Metadata); err != nil {
@@ -717,7 +733,9 @@ func InsertIssueIfNew(ctx context.Context, tx DBTX, issueTable string, issue *ty
 	}
 	if opts.RejectStaleUpserts && existingCount > 0 {
 		var storedNewer int
-		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ? AND updated_at > ?`, issueTable), issue.ID, issue.UpdatedAt).Scan(&storedNewer); err != nil {
+		// Bind the value the column will hold, so a sub-second row the upsert
+		// treats as a tie is not rejected as stale here.
+		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ? AND updated_at > ?`, issueTable), issue.ID, NormalizeUpdatedAt(issue.UpdatedAt)).Scan(&storedNewer); err != nil {
 			return false, false, fmt.Errorf("failed to check issue staleness for %s: %w", issue.ID, err)
 		}
 		if storedNewer > 0 {
@@ -814,7 +832,8 @@ func PersistComments(ctx context.Context, tx DBTX, issue *types.Issue) (CreateIs
 // upsertOverwritesStoredRow reports whether the issue upsert will rewrite an
 // existing row, by the same rule as issueUpsertAssignments: always for a plain
 // UPSERT, and under RejectStaleUpserts only when the incoming row is strictly
-// newer.
+// newer, compared at the column's rounded precision (NormalizeUpdatedAt) as
+// the upsert compares it.
 //
 //nolint:gosec // G201: table is a hardcoded constant
 func upsertOverwritesStoredRow(ctx context.Context, tx DBTX, issueTable string, issue *types.Issue, opts storage.BatchCreateOptions) (bool, error) {
@@ -825,7 +844,7 @@ func upsertOverwritesStoredRow(ctx context.Context, tx DBTX, issueTable string, 
 		return true, nil
 	}
 	var storedOlder int
-	if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ? AND updated_at < ?`, issueTable), issue.ID, issue.UpdatedAt).Scan(&storedOlder); err != nil {
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ? AND updated_at < ?`, issueTable), issue.ID, NormalizeUpdatedAt(issue.UpdatedAt)).Scan(&storedOlder); err != nil {
 		return false, fmt.Errorf("failed to check issue staleness for %s: %w", issue.ID, err)
 	}
 	return storedOlder > 0, nil
