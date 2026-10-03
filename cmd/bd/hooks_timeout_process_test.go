@@ -88,6 +88,9 @@ printf 'hostile-gtimeout-invoked\n' >&2
 exit 98
 `
 
+// The real supervisor is a fork/waitpid loop that exits 142 only on alarm
+// expiry and remaps the child's own 142 to 117. This stub has no deadline, so
+// it emulates the status contract: relay the child, remap its 142.
 const hookProcessPerlStub = `#!/bin/sh
 if [ "${1-}" != "-e" ] || [ "${3-}" != "--" ] || [ "$#" -lt 8 ]; then
   printf 'invalid-perl-argv\n' >&2
@@ -97,7 +100,9 @@ shift 3
 printf 'helper=perl\n'
 printf 'duration=<%s>\n' "$1"
 shift
-exec "$@"
+"$@" || _bd_test_s=$?
+if [ "${_bd_test_s:-0}" -eq 142 ]; then _bd_test_s=117; fi
+exit "${_bd_test_s:-0}"
 `
 
 type hookProcessFixture struct {
@@ -313,11 +318,12 @@ func testHookProcessReservedStatuses(t *testing.T) {
 		wantDBWarning bool
 	}{
 		{name: "database-not-initialized is skipped", fixtures: gnu, bdExit: 3, wantDBWarning: true},
-		{name: "GNU owns 124", fixtures: gnu, bdExit: 124, wantWarning: true},
+		{name: "GNU remaps a child's own 124", fixtures: gnu, bdExit: 124, wantExit: 117},
+		{name: "GNU preserves 117", fixtures: gnu, bdExit: 117, wantExit: 117},
 		{name: "GNU preserves 137", fixtures: gnu, bdExit: 137, wantExit: 137},
 		{name: "GNU preserves 142", fixtures: gnu, bdExit: 142, wantExit: 142},
 		{name: "Perl preserves 124", fixtures: perl, bdExit: 124, wantExit: 124},
-		{name: "Perl owns 142", fixtures: perl, bdExit: 142, wantWarning: true},
+		{name: "Perl remaps a child's own 142", fixtures: perl, bdExit: 142, wantExit: 117},
 		{name: "direct preserves 124", fixtures: direct, bdExit: 124, wantExit: 124},
 		{name: "direct preserves 137", fixtures: direct, bdExit: 137, wantExit: 137},
 		{name: "direct preserves 142", fixtures: direct, bdExit: 142, wantExit: 142},
@@ -473,6 +479,11 @@ func runGeneratedHookProcess(t *testing.T, tc hookProcessCase) hookProcessResult
 		bdBody = hookProcessBDStub
 	}
 	writeHookProcessFixture(t, binDir, "bd", bdBody)
+	// The coreutils branch wraps bd in a `sh -c` status shim — the same sh the
+	// hook's own `#!/usr/bin/env sh` shebang already requires on PATH. The
+	// controlled PATH carries only fixtures, so forward to the real shell.
+	writeHookProcessFixture(t, binDir, "sh",
+		"#!/bin/sh\nexec "+hookProcessShellQuote(hookProcessShell(t))+" \"$@\"\n")
 	for _, fixture := range tc.fixtures {
 		writeHookProcessFixture(t, binDir, fixture.name, fixture.body)
 	}
