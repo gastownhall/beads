@@ -26,6 +26,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Deliberately not named TestProxiedServer...: this would make it discovered
+// by the shard scripts' ^Test(ProxiedServer|ServerMode) regex, but both its
+// subtests still fail a real "exceeded 3s bound" assertion against a stopped
+// external upstream (bead filed: outage command exceeds 3s bound against
+// stopped external upstream, tcp and unix). Renaming it into a required lane
+// before that's fixed would turn Bazel + the legacy 15-shard hash-fallback
+// red. Rename it once the underlying latency issue is resolved.
 func TestProxiedOutageReconnectAcceptanceMatrix(t *testing.T) {
 	requireProxiedServerEnv(t)
 	bd := buildEmbeddedBD(t)
@@ -45,7 +52,7 @@ func TestProxiedOutageReconnectAcceptanceMatrix(t *testing.T) {
 			require.NoError(t, err)
 			var endpoint string
 			if topology.socket {
-				endpoint = filepath.Join(t.TempDir(), "dolt.sock")
+				endpoint = shortSocketPath(t, "dolt.sock")
 			} else {
 				endpoint = strconv.Itoa(gatePort)
 			}
@@ -184,18 +191,12 @@ func runProxiedDeadline(t *testing.T, bd, dir string, timeout time.Duration, arg
 	cmd.Dir, cmd.Env = dir, bdProxiedEnv(dir)
 	var out, errOut strings.Builder
 	cmd.Stdout, cmd.Stderr = &out, &errOut
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			if cmd.Process != nil {
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			}
-		case <-done:
-		}
-	}()
+	// CommandContext calls Cancel only after Start, so reading cmd.Process
+	// here is ordered after Start's write to it -- unlike the watcher
+	// goroutine this replaces, which raced Start/Run's write to cmd.Process
+	// from a separate goroutine (caught by -race once the deadline expired).
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	err = cmd.Run()
-	close(done)
 	return out.String(), errOut.String(), err, ctx.Err() != nil
 }
 
@@ -237,4 +238,17 @@ func startOutageBridge(t *testing.T, endpoint, upstreamPort string, socket bool)
 		}
 	})
 	return cmd
+}
+
+// shortSocketPath returns a unix-socket path under a short private directory:
+// t.TempDir() nests the (64-byte-truncated) test name under TMPDIR and the
+// suite root, which overflows sockaddr_un's 108-byte sun_path.
+func shortSocketPath(t *testing.T, name string) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "bds")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, name)
 }

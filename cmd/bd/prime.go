@@ -299,15 +299,14 @@ func primeWorkspaceDir() string {
 // NOTE: the probes built here are not prime-only — see primeHasGitRemote for
 // the auto-backup consumer that inherits this directory choice.
 //
-// NOTE: since GH#4927 every return path pairs with a nil error — the
-// GetRepoContext() failure falls back to a cwd probe instead of propagating —
-// so the err != nil arms at both call sites are unreachable today. The error
-// result is retained for future callers that can genuinely fail.
-func primeGitCmd(ctx context.Context, args ...string) (*exec.Cmd, error) {
+// NOTE: since GH#4927 every return path is infallible — the GetRepoContext()
+// failure falls back to a cwd probe instead of propagating — so this no
+// longer returns an error. If a future caller needs one, reintroduce it then.
+func primeGitCmd(ctx context.Context, args ...string) *exec.Cmd {
 	if ws := primeWorkspaceDir(); ws != "" {
 		cmd := exec.CommandContext(ctx, "git", args...)
 		cmd.Dir = ws
-		return cmd, nil
+		return cmd
 	}
 	rc, err := internalbeads.GetRepoContext()
 	if err != nil {
@@ -318,9 +317,9 @@ func primeGitCmd(ctx context.Context, args ...string) (*exec.Cmd, error) {
 		// workspace, so probe it directly instead of giving up. The SEC-003
 		// boundary on BEADS_DIR stays enforced by the callers that consume
 		// BEADS_DIR itself; these probes only ask git about its own workspace.
-		return exec.CommandContext(ctx, "git", args...), nil
+		return exec.CommandContext(ctx, "git", args...)
 	}
-	return rc.GitCmdCWD(ctx, args...), nil
+	return rc.GitCmdCWD(ctx, args...)
 }
 
 // outputHookJSON wraps content in the SessionStart hook JSON envelope shared
@@ -390,10 +389,7 @@ func isMCPActive() bool {
 var isEphemeralBranch = func() bool {
 	// git rev-parse --abbrev-ref --symbolic-full-name @{u}
 	// Returns error code 128 if no upstream configured
-	cmd, err := primeGitCmd(context.Background(), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
-	if err != nil {
-		return true // Default to ephemeral if we can't determine context
-	}
+	cmd := primeGitCmd(context.Background(), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
 	return cmd.Run() != nil
 }
 
@@ -427,10 +423,7 @@ var primeAgentProfile = func() config.AgentProfile {
 // which keeps the -C behavior above intact. The SEC-003 boundary on BEADS_DIR
 // remains enforced elsewhere.
 var primeHasGitRemote = func() bool {
-	cmd, err := primeGitCmd(context.Background(), "remote")
-	if err != nil {
-		return false
-	}
+	cmd := primeGitCmd(context.Background(), "remote")
 	out, err := cmd.Output()
 	if err != nil {
 		return false

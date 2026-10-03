@@ -242,13 +242,13 @@ func TestCheckNoDuplicateVersionsPanicsWithBothFilenames(t *testing.T) {
 	checkNoDuplicateVersions(files)
 }
 
-// TestEmbeddedMigrationSourcesHaveNoDuplicateVersions runs discovery over the
+// TestGoEmbedMigrationSourcesHaveNoDuplicateVersions runs discovery over the
 // real embedded migration tree for both sources. list() panics on duplicate
 // numeric prefixes — at runtime that panic fires at store open, before any
 // command's RunE, so a duplicate bricks every bd command. Tests that read a
 // migration's SQL file directly bypass list() and cannot catch this; this
 // discovery-level check makes the whole failure class fail in CI instead.
-func TestEmbeddedMigrationSourcesHaveNoDuplicateVersions(t *testing.T) {
+func TestGoEmbedMigrationSourcesHaveNoDuplicateVersions(t *testing.T) {
 	for _, src := range []migrationSource{mainSource, ignoredSource} {
 		files := src.list() // panics on duplicate versions
 		if len(files) == 0 {

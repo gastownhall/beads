@@ -32,6 +32,17 @@ exports_files(
     visibility = ["//scripts/gitattributespolicy:__pkg__"],
 )
 
+# //scripts:scripts_test checks the pinned golangci-lint version/sha256 in
+# engdocs/LINTING.md and the pre-commit hook's separate `go run` pin against
+# scripts/ci/install-golangci-lint.sh, so both must be readable as data.
+exports_files(
+    [
+        "engdocs/LINTING.md",
+        ".githooks/pre-commit",
+    ],
+    visibility = ["//scripts:__pkg__"],
+)
+
 # //scripts:scripts_test keeps pr.yml's release-target cross-compilation matrix
 # in lockstep with the release targets .goreleaser.yml declares.
 exports_files(
@@ -165,6 +176,20 @@ filegroup(
         "BUILD.bazel",
         "MODULE.bazel",
         "go.mod",
+    ],
+    visibility = ["//scripts:__pkg__"],
+)
+
+# F3: TestMCPPytestWorkerCountPinned (ci_workflow_test.go) reads the MCP
+# package's pytest-xdist pin directly from its manifest and lock file, so it
+# runs under `bazel test` as well as `go test`. integrations/beads-mcp has no
+# BUILD.bazel of its own (unlike npm-package/, it is not .bazelignore'd), so
+# these are ordinary sources under this package.
+filegroup(
+    name = "mcp_package_policy_files",
+    srcs = [
+        "integrations/beads-mcp/pyproject.toml",
+        "integrations/beads-mcp/uv.lock",
     ],
     visibility = ["//scripts:__pkg__"],
 )

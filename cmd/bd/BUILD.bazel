@@ -514,7 +514,7 @@ go_test(
         "agent_hook_test.go",
         "assign_fence_embedded_test.go",
         "assign_fence_proxied_test.go",
-        "auto_import_upgrade_test.go",
+        "auto_import_upgrade_embedded_test.go",
         "auto_import_upgrade_unit_test.go",
         "autocommit_embedded_test.go",
         "backend_registry_contract_test.go",
@@ -661,7 +661,7 @@ go_test(
         "dep_cycles_test.go",
         "dep_edge_reader_test.go",
         "dep_embedded_test.go",
-        "dep_list_cross_db_test.go",
+        "dep_list_cross_db_embedded_test.go",
         "dep_proxied_integration_test.go",
         "dep_relation_test.go",
         "dep_test.go",
@@ -905,6 +905,7 @@ go_test(
         "main_test.go",
         "maintenance_commands_proxied_integration_test.go",
         "markdown_test.go",
+        "max_rows_embedded_test.go",
         "max_rows_test.go",
         "memory_embedded_test.go",
         "memory_proxied_integration_test.go",
@@ -1000,6 +1001,7 @@ go_test(
         "prune_proxied_integration_test.go",
         "purge_embedded_test.go",
         "purge_test.go",
+        "purge_wisps_plane_embedded_test.go",
         "purge_wisps_plane_integration_test.go",
         "purge_wisps_plane_managed_local_test.go",
         "query_embedded_test.go",
@@ -1129,6 +1131,7 @@ go_test(
         "storage_class_embedded_test.go",
         "storage_class_proxied_integration_test.go",
         "storage_class_pure_test.go",
+        "store_factory_embedded_test.go",
         "store_factory_nocgo_test.go",
         "store_factory_test.go",
         "store_reopen_embedded_resolution_test.go",
@@ -1165,6 +1168,7 @@ go_test(
         "tracker_frontdoor_proxy_test.go",
         "tracker_proxy_uow_conformance_integration_test.go",
         "types_builtin_test.go",
+        "types_create_agreement_embedded_test.go",
         "types_create_agreement_test.go",
         "types_embedded_test.go",
         "unclaim_conditional_embedded_test.go",
@@ -1253,6 +1257,7 @@ go_test(
         "//cmd/bd/doctor",
         "//internal/ado",
         "//internal/beads",
+        "//internal/ceiling",
         "//internal/config",
         "//internal/configfile",
         "//internal/debug",
@@ -1410,18 +1415,22 @@ sh_test(
     tags = ["embedded"],
 )
 
-# bd_test as PR Risk's "Test (Proxied Dolt Cmd N/15)" jobs run it: shard k
-# runs .github/scripts/proxied-test-shard.sh k+1 15 (the TestProxiedServer*
-# functions, assigned by the committed manifest) against this configuration's
+# Runs 30 Bazel shards against the TestProxiedServer*/TestServerMode*
+# functions, assigned by the manifest's 30-shard block (duration-balanced;
+# see scripts/ci/proxied_test_durations.json), against this configuration's
 # (race) bd_test with BEADS_TEST_PROXIED_SERVER=1 and the non-race
-# bd_for_tests as the subprocess binary, like the jobs' /tmp/bd-cmd-test and
-# /tmp/bd-proxied. (main.yml's twin job runs the same shard script against
-# build-artifacts' non-race bd-cmd-test; race here is the stricter one.)
-# The shared proxied harness gets its dolt sql-server from
-# internal/testutil's local backend (the pinned dolt in the test wrapper's
-# runfiles) instead of the jobs' container, and fails instead of skipping
-# when it cannot start one. It repeats bd_test's `env`. shard_count must
-# stay equal to the manifest's shard total.
+# bd_for_tests as the subprocess binary. This is a *different* shard count
+# from PR Risk's legacy fork/push jobs, "Test (Proxied Dolt Cmd N/15)"
+# (pr-risk.yml, main.yml): those keep running 15 shards of their own,
+# frozen bd-init-cost-proxy block in the same manifest file — shard k here
+# is not the same split as their shard k. PR Risk builds its bd-cmd-test
+# with -race, as here; main.yml's test-proxied-cmd twin uses
+# build-artifacts' non-race bd-cmd-test, so this lane is the stricter of
+# the two. The shared proxied harness gets its dolt sql-server from
+# internal/testutil's local backend (the pinned dolt in the test
+# wrapper's runfiles) instead of the jobs' container, and fails instead
+# of skipping when it cannot start one. It repeats bd_test's `env`.
+# shard_count must stay equal to the manifest block's shard total.
 #
 # Tags:
 #   dolt-server-proxied: the proxied-server tier; starts hermetic dolt
@@ -1462,7 +1471,7 @@ sh_test(
         # 192-core worker).
         "GOMAXPROCS": "4",
     },
-    shard_count = 15,
+    shard_count = 30,
     tags = ["dolt-server-proxied"],
 )
 

@@ -271,9 +271,12 @@ func workflowEnv(t *testing.T, name string) map[string]string {
 func TestPRRiskBazelCoverageJob(t *testing.T) {
 	risk := readCIWorkflow(t, prRiskWorkflowName)
 	job := risk.job(t, prRiskCoverageJobName)
-	if len(job.Needs) != 0 || job.If != "" || job.RunsOn != "ubuntu-latest" || len(job.Env) != 0 || job.ContinueOnError || job.TimeoutMinutes == 0 {
-		t.Errorf("%s: needs %v, if %q, runs-on %q, env %v, continue-on-error %v, timeout %d; want no needs, if, env or continue-on-error, ubuntu-latest, a timeout",
-			prRiskCoverageJobName, job.Needs, job.If, job.RunsOn, job.Env, job.ContinueOnError, job.TimeoutMinutes)
+	// F3: this job moved to Blacksmith for same-repo PRs (and merge_group);
+	// forks and Dependabot stay on ubuntu-latest (TestSameRepoBlacksmithRunners
+	// pins the same literal for pr.yml's copy).
+	if len(job.Needs) != 0 || job.If != "" || job.RunsOn != sameRepoBlacksmith2vcpu || len(job.Env) != 0 || job.ContinueOnError || job.TimeoutMinutes == 0 {
+		t.Errorf("%s: needs %v, if %q, runs-on %q, env %v, continue-on-error %v, timeout %d; want no needs, if, env or continue-on-error, on %q, a timeout",
+			prRiskCoverageJobName, job.Needs, job.If, job.RunsOn, job.Env, job.ContinueOnError, job.TimeoutMinutes, sameRepoBlacksmith2vcpu)
 	}
 	wantOutputs := map[string]string{}
 	wantEnv := map[string]string{"PULL_REQUEST": prRiskPullRequestValue, "DEPENDABOT": prRiskDependabotValue}
@@ -331,6 +334,15 @@ func TestPRRiskBazelCoverageJob(t *testing.T) {
 		}
 		if secretRef.MatchString(value) {
 			t.Errorf("%s: %s reads secrets (%q); PR Risk needs none", prRiskWorkflowName, path, value)
+		}
+		// F3: detect-ci-tier/bazel-coverage/ci-gate's own runs-on picks a
+		// runner venue (Blacksmith vs ubuntu-latest) for trusted same-repo
+		// PRs; it shares some predicates (github.actor, dependabot,
+		// head.repo.full_name) with the coverage decision but decides
+		// something else entirely - not a re-derivation of the decision
+		// (TestSameRepoBlacksmithRunners pins the literal).
+		if strings.HasSuffix(path, ".runs-on") && value == sameRepoBlacksmith2vcpu {
+			return
 		}
 		if facts.MatchString(value) && !strings.HasPrefix(path, stepEnv) && !strings.HasPrefix(path, ".jobs."+prRiskCoverageJobName+".steps[0].run") {
 			t.Errorf("%s: %s re-derives the Bazel coverage decision (%q); read needs.%s.outputs", prRiskWorkflowName, path, value, prRiskCoverageJobName)
@@ -973,28 +985,61 @@ func copyMap(m map[string]string) map[string]string {
 // unsharded targets did not only skip.
 func TestBazelRetiredLanesCheckListedTestsRan(t *testing.T) {
 	risk := readCIWorkflow(t, prRiskWorkflowName)
-	type suite struct{ job, step, label, script string }
+	type suite struct {
+		job, step, label, script string
+		// shardCount overrides the expected check_shard_coverage.py shard
+		// count for this suite when the Bazel lane's own manifest block runs
+		// a different number of shards than this PR Risk job's matrix. Zero
+		// means "same as this suite's PR Risk job matrix size" (the common
+		// case for a lane that is a drop-in retirement of the legacy job).
+		// -1 means "read cmd/bd:bd_proxied_test's own shard_count from
+		// cmd/bd/BUILD.bazel" (bazelProxiedShardCount); only label ==
+		// "//cmd/bd:bd_proxied_test" may use -1 (enforced below), so
+		// copying this onto another suite needs a reviewed change there.
+		shardCount int
+	}
 	for _, c := range []struct {
 		lane, config string
 		suites       []suite
 		whole        []string
 	}{
 		{bazelEmbedJobName, "embedded", []suite{
-			{"test-embedded-cmd", "Test", "//cmd/bd:bd_embedded_test", ".github/scripts/embedded-test-shard.sh"},
-			{"test-embedded-storage", "Test", "//internal/storage/embeddeddolt:embeddeddolt_embedded_test", ".github/scripts/embedded-storage-test-shard.sh"},
+			{"test-embedded-cmd", "Test", "//cmd/bd:bd_embedded_test", ".github/scripts/embedded-test-shard.sh", 0},
+			{"test-embedded-storage", "Test", "//internal/storage/embeddeddolt:embeddeddolt_embedded_test", ".github/scripts/embedded-storage-test-shard.sh", 0},
 		}, []string{"//internal/storage/embeddeddolt:embeddeddolt_conformance_core_test", "//internal/storage/embeddeddolt:embeddeddolt_conformance_audit_test"}},
 		{bazelProxiedJobName, "doltserver-proxied", []suite{
-			{"test-proxied-cmd", "Test proxied-server cmd shard", "//cmd/bd:bd_proxied_test", ".github/scripts/proxied-test-shard.sh"},
+			// bazel-proxied runs its own duration-balanced manifest block
+			// (scripts/ci/proxied_test_durations.json), not PR Risk's frozen
+			// 15-shard bd-init-cost-proxy block: it is not a drop-in
+			// retirement of test-proxied-cmd's shard count, just its tests.
+			// bazelProxiedShardCount reads the real count from
+			// cmd/bd/BUILD.bazel, making this suite's `want` (below) a
+			// genuine cross-file pin against bazel.yml's own
+			// check_shard_coverage.py argument, not an independently
+			// hard-coded literal that could drift from BUILD.bazel unnoticed
+			// (S1). This -1 sentinel is deliberately restricted to
+			// bd_proxied_test below: copying it onto another suite requires
+			// touching that guard, not just this literal.
+			{"test-proxied-cmd", "Test proxied-server cmd shard", "//cmd/bd:bd_proxied_test", ".github/scripts/proxied-test-shard.sh", -1},
 		}, nil},
 		{bazelServerJobName, "doltserver-integration", []suite{
-			{"test-server-storage-full", "Test", "//internal/storage/dolt:dolt_server_full_test", ".github/scripts/server-storage-test-shard.sh"},
+			{"test-server-storage-full", "Test", "//internal/storage/dolt:dolt_server_full_test", ".github/scripts/server-storage-test-shard.sh", 0},
 		}, []string{"//internal/storage/dolt:dolt_server_conformance_test"}},
 	} {
 		job := readCIWorkflow(t, bazelWorkflowName).job(t, c.lane)
 		step := job.step(t, "Every listed test ran in its shard")
 		want := []string{"python3 tools/bazel/check_shard_coverage.py", `--bep "$RUNNER_TEMP/bazel-bep.json"`}
 		for _, s := range c.suites {
-			shards := len(risk.job(t, s.job).Strategy.Matrix.Shard)
+			shards := s.shardCount
+			switch {
+			case shards < 0:
+				if s.label != "//cmd/bd:bd_proxied_test" {
+					t.Fatalf("%s: shardCount<0 (read live from BUILD.bazel) is only allowed for //cmd/bd:bd_proxied_test, not %s", s.job, s.label)
+				}
+				shards = bazelProxiedShardCount(t)
+			case shards == 0:
+				shards = len(risk.job(t, s.job).Strategy.Matrix.Shard)
+			}
 			if !strings.Contains(risk.job(t, s.job).step(t, s.step).Run, s.script) {
 				t.Errorf("pr-risk.yml %s no longer runs %s; update this suite", s.job, s.script)
 			}
@@ -1234,51 +1279,145 @@ func TestShardScriptsListOnlyRealTests(t *testing.T) {
 		for _, d := range regexp.MustCompile(`(?m)^func (Test\w*)\(\w+ \*testing\.T\) \{`).FindAllStringSubmatch(src.String(), -1) {
 			declared[d[1]] = true
 		}
-		shards := len(risk.job(t, c.job).Strategy.Matrix.Shard)
-		// The scripts' hash fallback forks per test (seconds per shard for
-		// the server suite): list the shards concurrently.
-		outs, errs := make([][]byte, shards+1), make([]error, shards+1)
-		var wg sync.WaitGroup
-		for k := 1; k <= shards; k++ {
-			wg.Add(1)
-			go func(k int) {
-				defer wg.Done()
-				cmd := exec.Command("bash", c.script, strconv.Itoa(k), strconv.Itoa(shards))
-				cmd.Dir = root
-				cmd.Env = append(os.Environ(), "BEADS_TEST_SHARD_LIST_ONLY=1")
-				outs[k], errs[k] = cmd.Output()
-			}(k)
+
+		// B1: validate every total this script's committed manifest holds a
+		// block for, plus this job's own PR Risk matrix size and (for
+		// test-proxied-cmd) the Bazel lane's own shard_count — not just
+		// whichever total happens to equal this PR Risk job's matrix. Before
+		// F2 those always coincided; now the Bazel-only bazel-proxied lane
+		// reads a manifest block (30) that no PR-Risk-matrix-only check ever
+		// exercises, so a fork PR (which never runs bazel-proxied) could
+		// corrupt that block and still merge green. Looping over every
+		// distinct total in the manifest closes that gap for this script and
+		// any other script that later grows a second block the same way.
+		mm := shardManifestDefault.FindStringSubmatch(readPolicyFile(t, root, c.script))
+		if mm == nil {
+			t.Fatalf("%s has no ${BEADS_TEST_SHARD_MANIFEST:-...} default manifest", c.script)
 		}
-		wg.Wait()
-		listed := 0
-		for k := 1; k <= shards; k++ {
-			if errs[k] != nil {
-				t.Fatalf("%s %d %d: %v", c.script, k, shards, errs[k])
+		totalsSet := map[int]bool{len(risk.job(t, c.job).Strategy.Matrix.Shard): true}
+		for _, line := range strings.Split(readPolicyFile(t, root, mm[1]), "\n") {
+			line, _, _ = strings.Cut(line, "#")
+			fields := strings.Fields(line)
+			if len(fields) == 0 {
+				continue
 			}
-			for _, line := range strings.Split(string(outs[k]), "\n") {
-				name, ok := strings.CutPrefix(line, "  ")
-				if !ok || !strings.HasPrefix(name, "Test") || strings.ContainsAny(name, " :") {
-					continue
-				}
-				listed++
-				isTest := declared[name]
-				switch {
-				case notTests[name] && isTest:
-					t.Errorf("%s shard %d lists %s, which check_shard_coverage.py drops, but it is a real test", c.script, k, name)
-				case !notTests[name] && !isTest:
-					t.Errorf("%s shard %d lists %s, which is not a `func %s(t *testing.T)` test in %s: check_shard_coverage.py would report it missing on every run (add it to NOT_TESTS only if go test never runs it)",
-						c.script, k, name, name, c.pkg)
-				}
+			if n, err := strconv.Atoi(fields[0]); err == nil {
+				totalsSet[n] = true
 			}
 		}
-		if listed < 50 {
-			t.Errorf("%s listed only %d tests over %d shards; did the list-only output format change?", c.script, listed, shards)
+		if c.script == ".github/scripts/proxied-test-shard.sh" {
+			totalsSet[bazelProxiedShardCount(t)] = true
+		}
+		totals := make([]int, 0, len(totalsSet))
+		for n := range totalsSet {
+			totals = append(totals, n)
+		}
+		sort.Ints(totals)
+
+		for _, shards := range totals {
+			// The scripts' hash fallback forks per test (seconds per shard
+			// for the server suite): list the shards concurrently.
+			outs, errs := make([][]byte, shards+1), make([]error, shards+1)
+			var wg sync.WaitGroup
+			for k := 1; k <= shards; k++ {
+				wg.Add(1)
+				go func(k int) {
+					defer wg.Done()
+					cmd := exec.Command("bash", c.script, strconv.Itoa(k), strconv.Itoa(shards))
+					cmd.Dir = root
+					cmd.Env = append(os.Environ(), "BEADS_TEST_SHARD_LIST_ONLY=1")
+					outs[k], errs[k] = cmd.Output()
+				}(k)
+			}
+			wg.Wait()
+			listed, manifestSum := 0, 0
+			for k := 1; k <= shards; k++ {
+				if errs[k] != nil {
+					// The script itself exits 1 on a duplicate manifest entry
+					// or a manifest entry that names no discovered test
+					// (rename/typo/stale-after-delete), for the requested
+					// total only: this is what catches a corrupted block
+					// that a PR-Risk-matrix-only check at a different total
+					// would never see.
+					t.Fatalf("%s %d %d: %v\n%s", c.script, k, shards, errs[k], outs[k])
+				}
+				for _, line := range strings.Split(string(outs[k]), "\n") {
+					if mc := regexp.MustCompile(`^  manifest: (\d+), fallback: \d+$`).FindStringSubmatch(line); mc != nil {
+						n, _ := strconv.Atoi(mc[1])
+						manifestSum += n
+						continue
+					}
+					name, ok := strings.CutPrefix(line, "  ")
+					if !ok || !strings.HasPrefix(name, "Test") || strings.ContainsAny(name, " :") {
+						continue
+					}
+					listed++
+					isTest := declared[name]
+					switch {
+					case notTests[name] && isTest:
+						t.Errorf("%s shard %d/%d lists %s, which check_shard_coverage.py drops, but it is a real test", c.script, k, shards, name)
+					case !notTests[name] && !isTest:
+						t.Errorf("%s shard %d/%d lists %s, which is not a `func %s(t *testing.T)` test in %s: check_shard_coverage.py would report it missing on every run (add it to NOT_TESTS only if go test never runs it)",
+							c.script, k, shards, name, name, c.pkg)
+					}
+				}
+			}
+			if listed < 50 {
+				t.Errorf("%s at %d shards listed only %d tests; did the list-only output format change?", c.script, shards, listed)
+			}
+			// S1: a total that is supposed to have a committed manifest
+			// block (every total this loop considers does: it is either a
+			// live job's matrix size or a total this script's own manifest
+			// already names) must not have silently gone 100% hash fallback,
+			// which is what "the whole block was deleted" looks like from
+			// here: check_shard_coverage.py would still pass (it rebuilds
+			// its expectation from this same script), so nothing else
+			// catches it.
+			if manifestSum == 0 {
+				t.Errorf("%s at %d shards: manifest entries for this total sum to 0 across all shards (100%% hash fallback); its committed block in %s may have been deleted", c.script, shards, mm[1])
+			}
 		}
 	}
 	for name := range notTests {
 		if name != "TestMain" {
 			t.Errorf("NOT_TESTS has %s; only TestMain is never a test", name)
 		}
+	}
+}
+
+// S3: the Bazel-only 30-shard block is not frozen like the legacy 15-shard
+// block (TestShardScriptsListOnlyRealTests's B1 fix catches outright
+// corruption, but not a committed block that has drifted from the currently
+// discovered TestProxiedServer*/TestServerMode* test set, e.g. a test added,
+// renamed, or removed without anyone running --write). gen_proxied_shard_
+// manifest.py --check verifies only that the committed block names every
+// discovered test exactly once -- not that its shard *assignments* match a
+// fresh LPT pack -- and fails with the exact command to fix it when a name
+// is missing, stale, or duplicated. It deliberately does NOT fail merely
+// because proxied_test_durations.json's weights changed and the existing
+// packing is now suboptimal: two PRs each adding one proxied test would
+// otherwise force a full repack and conflict on unrelated shard lines (see
+// --repack below for the explicit opt-in to that). Run --check here so a
+// block with missing/stale/duplicate names fails go test ./scripts/...
+// (and so scripts-go-checks, which runs on fork PRs) instead of only
+// surfacing as a test silently never running in any shard. The legacy
+// 15-shard block is deliberately excluded: its header documents that it is
+// frozen and must not be regenerated (see
+// .github/scripts/proxied-cmd-test-shards.txt and engdocs/TESTING.md), so a
+// --check against it would always fail by design.
+func TestProxiedShardManifestGeneratorNotStale(t *testing.T) {
+	if os.Getenv("TEST_SRCDIR") != "" {
+		t.Skip("scripts_test's runfiles hold neither the generator's sources nor cmd/bd")
+	}
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	root := sourceRepoRoot(t)
+	cmd := exec.Command(python, "scripts/ci/gen_proxied_shard_manifest.py", "30", "--weights=duration", "--check")
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Errorf("gen_proxied_shard_manifest.py 30 --weights=duration --check: %v\n%s", err, out)
 	}
 }
 

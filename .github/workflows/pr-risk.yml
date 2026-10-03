@@ -34,7 +34,14 @@ env:
 jobs:
   detect-ci-tier:
     name: Detect CI tier
-    runs-on: ubuntu-latest
+    # F3: same-repo PRs and merge_group get the org's Blacksmith pool; forks,
+    # Dependabot and any other event stay GitHub-hosted. This job restores no
+    # GitHub-saved cache.
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    # F3: now on Blacksmith for same-repo PRs; a hang used to burn only the
+    # default 360 minutes of a free GitHub-hosted runner, now Blacksmith
+    # minutes too.
+    timeout-minutes: 10
     outputs:
       full_embedded: ${{ steps.tier.outputs.full_embedded }}
       reason: ${{ steps.tier.outputs.reason }}
@@ -88,7 +95,13 @@ jobs:
   # variable and runs no repository code.
   bazel-coverage:
     name: Bazel tier coverage
-    runs-on: ubuntu-latest
+    # F3: same-repo PRs and merge_group get the org's Blacksmith pool; forks,
+    # Dependabot and any other event stay GitHub-hosted. This job restores no
+    # GitHub-saved cache, so Blacksmith's inability to see one does not cost
+    # it anything. Must stay byte-identical to pr.yml's copy
+    # (TestPRRiskBazelCoverageJob) and to the TestSameRepoBlacksmithRunners
+    # pin.
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 5
     outputs:
       embedded: ${{ steps.decide.outputs.embedded }}
@@ -555,7 +568,16 @@ jobs:
 
   ci-gate:
     name: PR Risk Gate / Required
-    runs-on: ubuntu-latest
+    # F3: same-repo PRs and merge_group get the org's Blacksmith pool; forks,
+    # Dependabot and any other event stay GitHub-hosted. This job restores no
+    # GitHub-saved cache. Must match the TestSameRepoBlacksmithRunners pin;
+    # the gate's NAME must never change (ruleset requires exactly "PR Risk
+    # Gate / Required").
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    # F3: now on Blacksmith for same-repo PRs; a hang used to burn only the
+    # default 360 minutes of a free GitHub-hosted runner, now Blacksmith
+    # minutes too.
+    timeout-minutes: 10
     needs:
       - detect-ci-tier
       - bazel-coverage

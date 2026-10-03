@@ -42,6 +42,67 @@ func setupTestRepo(t *testing.T) (repoPath string, cleanup func()) {
 	return repoPath, cleanup
 }
 
+// TestPinNoRepositoryUnderForTestingSurvivesResetCaches is a probe for the
+// bug a branch reviewer found in the original PinNoRepositoryForTesting: it
+// seeded a one-shot sentinel into gitCtx, but ResetCaches (called by every
+// test fixture that chdirs, e.g. cmd/bd's runInDir/resetRepoCachesForTest)
+// unconditionally cleared gitCtx, including that sentinel — so the pin was
+// gone the moment any single test in the binary chdir'd and reset caches,
+// defeating the whole-binary fence for every test after the first one that
+// did. PinNoRepositoryUnderForTesting fixes this by making the pin
+// directory-scoped and independent of gitCtx/gitCtxOnce, so ResetCaches
+// cannot clear it. This test reproduces the reviewer's repro: pin a real
+// repo root, simulate a fixture that chdirs OUT to its own directory and
+// resets caches (which must restore real detection there), then chdir BACK
+// under the pinned root and reset caches again (which must NOT restore real
+// detection, because the process never left the pinned root's jurisdiction).
+func TestPinNoRepositoryUnderForTestingSurvivesResetCaches(t *testing.T) {
+	repoPath, _ := setupTestRepo(t)
+
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(origWD); err != nil {
+			t.Fatalf("restore working directory: %v", err)
+		}
+		pinnedRootForTesting = ""
+		ResetCaches()
+	})
+
+	if err := os.Chdir(repoPath); err != nil {
+		t.Fatalf("chdir to repo: %v", err)
+	}
+	PinNoRepositoryUnderForTesting(repoPath)
+
+	if got := GetRepoRoot(); got != "" {
+		t.Fatalf("GetRepoRoot() = %q immediately after pinning, want \"\"", got)
+	}
+
+	// Simulate a fixture OUTSIDE the pinned root: real detection should work
+	// there, same as before this pin existed, once caches are reset.
+	fixtureDir := t.TempDir()
+	if err := os.Chdir(fixtureDir); err != nil {
+		t.Fatalf("chdir to fixture: %v", err)
+	}
+	ResetCaches()
+	if got := GetRepoRoot(); got != "" {
+		t.Fatalf("GetRepoRoot() = %q in an unpinned fixture outside the pinned root, want \"\" (fixtureDir is not a repo, but it must not inherit the pinned repo's root either)", got)
+	}
+
+	// Return to the pinned root and reset caches again — exactly what
+	// runInDir's deferred cleanup does on the way out of a subtest. The pin
+	// must still answer "not a repository" here.
+	if err := os.Chdir(repoPath); err != nil {
+		t.Fatalf("chdir back to pinned repo: %v", err)
+	}
+	ResetCaches()
+	if got := GetRepoRoot(); got != "" {
+		t.Fatalf("GetRepoRoot() = %q after ResetCaches back under the pinned root, want \"\" (the pin must survive ResetCaches)", got)
+	}
+}
+
 func TestGetGitHooksDirTildeExpansion(t *testing.T) {
 	// Use an explicit temporary home so tilde expansion is deterministic
 	// regardless of the environment (CI, containers, overridden homes, etc.).

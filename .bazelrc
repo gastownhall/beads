@@ -137,9 +137,10 @@ test:doltserver --remote_download_regex=.*/test\.(log|xml)$
 # Proxied-server tier: PR Risk's "Test (Proxied Dolt Cmd N/15)" jobs, as
 # //cmd/bd:bd_proxied_test (dolt-server-proxied tag). Kept out of
 # --config=doltserver because bazel.yml runs that lane locally too (forks,
-# rbe=off), where 15 shards of ~10 minutes, each with a dolt sql-server busy
-# on ~4 cores, do not fit; bazel.yml runs this one only with remote
-# execution, in a job of its own (bazel-proxied). The build is
+# rbe=off), where 30 concurrent shards, each with a dolt sql-server busy on
+# ~4 cores, do not fit regardless of any single shard's wall time; bazel.yml
+# runs this one only with remote execution, in a job of its own
+# (bazel-proxied). The build is
 # --config=doltserver's: race, like PR Risk's /tmp/bd-cmd-test (main.yml's
 # twin job runs build-artifacts' non-race bd-cmd-test, so this is the
 # stricter of the two); the subprocess bd is the non-race bd_for_tests, like

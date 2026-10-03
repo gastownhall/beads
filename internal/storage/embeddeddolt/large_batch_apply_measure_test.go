@@ -254,12 +254,50 @@ var wallClockShapes = []struct {
 // (internal/httpapi/server.go, 5 minutes): both measured shapes must
 // complete in a small fraction of that budget for the ceiling to be
 // generous headroom rather than a number picked out of thin air.
+//
+// The 1000-item shape is skipped under -race: that shape alone was observed
+// taking 597-651s under the embedded tier's --config=embedded (race-enabled)
+// CI lane, a multi-x inflation from race-instrumenting the in-process Dolt
+// engine's own internal goroutine/lock machinery on every one of its
+// hundreds of internal statements, not from anything this test asserts (it
+// has no duration or count assertion to weaken). It twice pushed its shard
+// over the job's 19-minute test timeout (see embedded-storage-test-shards.txt
+// and this package's TestBatchApplyContract for the sibling case). The
+// 356-item shape (the design's primary measured shape) always runs, race or
+// not — only the 1000-item shape is conditionally skipped above.
+//
+// Coverage accounting for the skipped 1000-item shape (no assertion is
+// weakened here — this test logs timing only — but the real question is
+// what still exercises a true 1000-item apply at all):
+//   - The shared inner write body (internal/storage/issueops.ApplyBatchInTx),
+//     used by both this package's BatchApplier and internal/storage/dolt's,
+//     still gets a real, full 1000-item apply with result assertions,
+//     non-race, via internal/storage/dolt's own
+//     TestBatchApplyContract/BoundsTheItemCount. That job runs unconditionally
+//     on merge_group and push, but is conditional on PRs (gated by
+//     detect-ci-tier's full_embedded output; see
+//     .github/scripts/ci-embedded-tier.sh) — so "every PR" overstates it.
+//   - This package's OWN wrapper around that body (the
+//     version-commit-published-after-the-tx mechanism unique to the embedded
+//     backend) does NOT get a full 1000-item apply under -race anymore: this
+//     package's own TestBatchApplyContract/BoundsTheItemCount applies 150
+//     items under -race and the full 1000 only when built without -race (see
+//     its doc comment and conformance.RunBatchApplyBoundsTheItemCountAtScale).
+//     So as of that change, the largest real, full-assertion apply embedded's
+//     own wrapper gets under -race, anywhere in CI, is 150 items; without
+//     -race it still gets the full 1000 in that same subtest. This is a
+//     known, deliberate gap for the race-enabled lane specifically, not an
+//     oversight — closing it needs a dedicated non-race embedded run (see the
+//     nightly workflow step added alongside this comment).
 func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
 
 	for _, tc := range wallClockShapes {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "1000" && raceEnabled {
+				t.Skip("1000-item shape skipped under -race for wall-clock timing; see doc comment above for what still covers a real 1000-item apply")
+			}
 			fixture := newPristineEmbeddedDoltFixture(t, tc.db)
 			t.Cleanup(func() { closeEmbeddedDoltStore(t, fixture.store) })
 

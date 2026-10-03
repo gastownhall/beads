@@ -19,13 +19,13 @@ import (
 // that nothing was recorded. Nothing short of mutating and then reading back
 // can tell the difference.
 
-// TestServeActivatesTheEventsJournal covers `bd serve` against a SERVER-MODE
+// TestProxiedServerServeActivatesTheEventsJournal covers `bd serve` against a SERVER-MODE
 // workspace, where PersistentPreRunE builds a DoltStore and no unit-of-work
 // provider at all — so serve constructs its own, from the workspace's Dolt
 // connection settings. That provider was never activated: every mutation the
 // HTTP surface accepted committed with an empty journal while /healthz stayed
 // green and every response looked normal.
-func TestServeActivatesTheEventsJournal(t *testing.T) {
+func TestProxiedServerServeActivatesTheEventsJournal(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)

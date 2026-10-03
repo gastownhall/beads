@@ -82,7 +82,12 @@ while IFS= read -r path; do
             ;;
     esac
     case "$path" in
-        scripts/ci/detect-package-gates.sh|.github/workflows/pr.yml|.github/workflows/main.yml|.github/workflows/pr-risk.yml|.github/workflows/ci-measurements.yml|Makefile)
+        # F3: package-mcp/package-npm's job definitions (this detect step
+        # included) now live in bazel.yml, not pr.yml, so a change there
+        # must run both gates the same way a pr.yml/main.yml change does.
+        # package-bazel-bd.sh packages the Bazel-built bd both gates use on
+        # the remote-execution path.
+        scripts/ci/detect-package-gates.sh|scripts/ci/package-bazel-bd.sh|.github/workflows/bazel.yml|.github/workflows/pr.yml|.github/workflows/main.yml|.github/workflows/pr-risk.yml|.github/workflows/ci-measurements.yml|Makefile)
             mcp_package=true
             npm_package=true
             ;;

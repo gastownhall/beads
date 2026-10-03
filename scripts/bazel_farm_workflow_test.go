@@ -244,6 +244,13 @@ func TestBazelWorkflowForkFarmInputs(t *testing.T) {
 			}
 			checkouts++
 			want := map[string]string{"ref": bazelCheckoutRef, "persist-credentials": "false", "allow-unsafe-pr-checkout": bazelAllowUnsafeCheckout}
+			// F3: package-mcp/package-npm's detect step diffs PR_BASE_SHA
+			// against PR_HEAD_SHA (scripts/ci/detect-package-gates.sh, same
+			// as pr.yml's legacy detect job used); that needs full history,
+			// unlike every other lane's shallow, history-free checkout.
+			if bazelPackageJobs[name] {
+				want["fetch-depth"] = "0"
+			}
 			if !reflect.DeepEqual(step.With, want) {
 				t.Errorf("%s job %s checkout with = %v, want %v", bazelWorkflowName, name, step.With, want)
 			}

@@ -31,10 +31,12 @@
 # gate. bazel-integration runs in the PR call (pr.yml passes integration:
 # "on") although its legacy counterparts, main.yml's integration jobs, run
 # only on push to main: remotely it is minutes, and it catches on the PR what
-# main.yml would catch after the merge. Like every remote-only lane it skips
-# for fork and Dependabot PRs (mode cache: the read-only cache speeds up
-# local execution, it does not run the remote-only lanes). Direct runs (push
-# to main, workflow_dispatch, nightly.yml's call) gate nothing.
+# main.yml would catch after the merge. Unlike the remote-only lanes it also
+# runs for fork and Dependabot PRs (mode cache): with the read-only cache
+# only what the PR changed is built and tested on the runner, and it is
+# their only PR-time integration run (no legacy job runs it on PRs). Mode
+# local (rbe=off) still skips it. Direct runs (push to main,
+# workflow_dispatch, nightly.yml's call) gate nothing.
 #
 # Execution mode, decided once by the rbe job (every other job needs it and
 # reads its outputs; none re-derives the condition) and passed to
@@ -48,14 +50,16 @@
 #   cache: fork PRs (unless bazel-farm.yml authorized them), rbe=cache
 #     dispatches and same-repo runs without the secret (Dependabot PRs:
 #     same-repo, but no Actions secrets): like local (ubuntu-latest,
-#     remote-only jobs skipped), plus rbe-west's anonymous read-only cache
-#     (.bazelrc --config=fork-cache): hits for every action trusted CI
-#     already executed, no credentials, no uploads. The farm can close it at
-#     any time; Bazel then runs everything locally.
+#     bazel-embedded, bazel-proxied and bazel-server-storage skipped), plus
+#     rbe-west's anonymous read-only cache (.bazelrc --config=fork-cache):
+#     hits for every action trusted CI already executed, no credentials, no
+#     uploads; and bazel-integration runs too (a warm run hits all but what
+#     the PR changed). The farm can close the cache at any time; Bazel then
+#     runs everything locally.
 #   local: rbe=off dispatches (fork simulation without the cache): local
 #     execution on ubuntu-latest, slower but the same results, for every job
-#     but the remote-only ones (bazel-embedded, bazel-integration,
-#     bazel-proxied, bazel-server-storage), which are skipped.
+#     but the remote-only ones (bazel-embedded, bazel-proxied,
+#     bazel-server-storage) and bazel-integration, which are skipped.
 #   skip: same-repo runs while RBE_WEST_WORKERS is unset (the farm switch),
 #     and authorized fork-farm runs without it or without the secret.
 # Trusted-author fork PRs: bazel-farm.yml (pull_request_target, advisory)
@@ -94,8 +98,9 @@
 # execution under this model. Still open: a beads-only RBE_INSTANCE. The farm
 # refuses client action-cache writes (only its workers write; rbe-west D2).
 # In pr.yml's run the bd artifact is bazel-ci-build-artifacts, so it cannot
-# collide with the build-artifacts job's ci-build-artifacts; pr.yml's
-# package gates consume it where build-artifacts stands down (D2 step 3).
+# collide with the build-artifacts job's ci-build-artifacts. F3: the package
+# gates no longer consume this artifact (they build their own bd); it is
+# kept for the F3.5.3 SHA256SUMS comparison and for debugging.
 #
 # Runner cache: one entry per (.bazelversion, MODULE.bazel.lock) pair, about
 # 2 GB (Bazel's content-addressable --repository_cache, re-hashed on every
@@ -183,6 +188,19 @@ on:
         type: string
         required: false
         default: "off"
+      # "on" (pr.yml only) runs package-mcp and package-npm in this call,
+      # which waits on nothing but the rbe job (F3: the legacy pr.yml jobs
+      # those gates used to need: detect-package-gates, build-artifacts,
+      # bazel-coverage, and the whole bazel call). bazel-farm.yml, nightly.yml
+      # and direct runs (push, dispatch) keep the default "off": main.yml
+      # keeps its own package jobs, and a fork-farm run has no bd artifact
+      # consumer waiting on these.
+      package-gates:
+        description: >
+          "on" (pr.yml only) runs the MCP and npm package gates in this call.
+        type: string
+        required: false
+        default: "off"
     # Only what the rbe job and setup-bazel need; callers pass them
     # explicitly. None is required: fork and Dependabot runs have none.
     secrets:
@@ -202,7 +220,7 @@ on:
         description: "'true' when the lanes executed remotely on rbe-west, else 'false'"
         value: ${{ jobs.rbe.outputs.enabled }}
       rbe-mode:
-        description: "remote, cache or local (no remote-only jobs), or skip (no jobs): the rbe job's decision"
+        description: "remote, cache (no remote-only jobs but integration), local (no remote-only jobs), or skip (no jobs): the rbe job's decision"
         value: ${{ jobs.rbe.outputs.mode }}
       bazel-test:
         description: "bazel-test's job.status"
@@ -225,6 +243,12 @@ on:
       bazel-server-storage:
         description: "bazel-server-storage's job.status"
         value: ${{ jobs.bazel-server-storage.outputs.result }}
+      package-mcp:
+        description: "package-mcp's job.status (empty unless package-gates is 'on')"
+        value: ${{ jobs.package-mcp.outputs.result }}
+      package-npm:
+        description: "package-npm's job.status (empty unless package-gates is 'on')"
+        value: ${{ jobs.package-npm.outputs.result }}
 
 # Main runs always finish (they may save the runner cache); PR runs (called
 # from pr.yml or bazel-farm.yml, whose own groups cancel the calling run too)
@@ -251,7 +275,12 @@ jobs:
   # runs read vars but get no secrets, so they come out cache, not remote.
   rbe:
     name: execution mode
-    runs-on: ubuntu-latest
+    # Same-repo PRs (and merge_group/push/dispatch/schedule runs, which are
+    # never forks) get the org's Blacksmith pool; a pull_request_target farm
+    # run and any fork or Dependabot PR stay on GitHub-hosted runners. This
+    # job reads no repository code and holds no secret value (see below), so
+    # Blacksmith sees nothing sensitive either way.
+    runs-on: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 5
     outputs:
       enabled: ${{ steps.decide.outputs.enabled }}
@@ -402,10 +431,11 @@ jobs:
 
       # pr.yml's build-artifacts job, built by Bazel: the same artifact name
       # and layout (bd-linux-gms-pure, SHA256SUMS, build-manifest.txt). Where
-      # build-artifacts stands down (D2 step 3), pr.yml's package gates take
-      # it; its other consumers (PR Core, domain+uow) stand down there too.
-      # The script documents which binary and how it differs from `go
-      # build`'s.
+      # build-artifacts stands down (D2 step 3), its other consumers (PR
+      # Core, domain+uow) stand down there too. F3: the package gates build
+      # their own bd and no longer consume this artifact; it is kept for the
+      # F3.5.3 SHA256SUMS comparison and for debugging. The script documents
+      # which binary and how it differs from `go build`'s.
       - name: Package bd (ci-build-artifacts layout)
         id: bd-artifact
         if: ${{ always() && steps.test.outcome != 'skipped' }}
@@ -822,15 +852,17 @@ jobs:
   # on same-repo PRs; see the header.
   bazel-integration:
     name: integration
-    # Remote execution only, like bazel-embedded: locally the tagged race
-    # build of //... plus 14 jobs' worth of tests on one runner is well over
-    # the timeout, for tests main.yml's integration jobs already run. A
-    # caller may turn it off with integration: "off"; pr.yml and
+    # Remote, or local with the read-only cache (mode cache: fork and
+    # Dependabot PRs, rbe=cache dispatches), which serves every action
+    # trusted CI already ran, so only what the PR changed builds and tests
+    # on the GitHub-hosted runner. Never plain local (rbe=off): the tagged
+    # race build of //... plus 14 jobs' worth of tests on one runner, cold.
+    # A caller may turn it off with integration: "off"; pr.yml and
     # bazel-farm.yml pass "on".
     needs: rbe
     runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    if: ${{ needs.rbe.outputs.enabled == 'true' && inputs.integration != 'off' }}
-    timeout-minutes: 55
+    if: ${{ (needs.rbe.outputs.mode == 'remote' || needs.rbe.outputs.mode == 'cache') && inputs.integration != 'off' }}
+    timeout-minutes: 85
     outputs:
       result: ${{ steps.result.outputs.result }}
     steps:
@@ -857,10 +889,15 @@ jobs:
       # Remote: a cold compile (a PR touching a widely imported package; the
       # first cold run took 17 minutes end to end, warm ones ~3.5) plus the
       # longest test action (1200s cap, see .bazelrc) if it starts last.
-      # scripts/ci_workflow_test.go keeps this at or above that sum.
+      # scripts/ci_workflow_test.go keeps this at or above that sum. Mode
+      # cache on a 4-CPU runner (simulated, 2026-10-02): ~2.5 minutes warm,
+      # 3-5 for a cmd/bd change, plus up to ~11 more when slow blob reads
+      # make Bazel restart the build ("Lost inputs"), and ~30 with the cache
+      # closed (the farm's kill switch: everything local, cold), which must
+      # still fit so closing the cache does not turn fork PRs red.
       - name: bazel test //... --config=integration
         id: test
-        timeout-minutes: 45
+        timeout-minutes: 75
         run: |
           set -o pipefail
           start=$(date +%s)
@@ -986,20 +1023,24 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
 
-  # pr-risk.yml's proxied-server tier, "Test (Proxied Dolt Cmd N/15)", as
-  # --config=doltserver-proxied: //cmd/bd:bd_proxied_test runs the job's
-  # shard script in 15 Bazel shards, so shard k runs exactly job k's tests.
-  # Same build as --config=doltserver (race bd_test, non-race bd_for_tests),
-  # shared with bazel-doltserver through the remote cache. PR Risk builds
-  # its bd-cmd-test with -race, as here; main.yml's test-proxied-cmd twin
-  # uses build-artifacts' non-race bd-cmd-test, so this lane is the stricter
-  # of the two. A job of its own, not gated by any integration switch: it
-  # runs in pr.yml's call and its gate requires it (BAZEL_PROXIED).
+  # Like pr-risk.yml's proxied-server tier, "Test (Proxied Dolt Cmd N/15)",
+  # as --config=doltserver-proxied: //cmd/bd:bd_proxied_test runs the shard
+  # script, so shard k runs exactly that manifest entry's tests. This lane
+  # runs 30 shards of its own (.github/scripts/proxied-cmd-test-shards.txt's
+  # duration-balanced 30-block; see scripts/ci/proxied_test_durations.json),
+  # not the legacy jobs' 15 — shard k here is not the same split as their
+  # shard k. Same build as --config=doltserver (race bd_test, non-race
+  # bd_for_tests), shared with bazel-doltserver through the remote cache.
+  # PR Risk builds its bd-cmd-test with -race, as here; main.yml's
+  # test-proxied-cmd twin uses build-artifacts' non-race bd-cmd-test, so
+  # this lane is the stricter of the two. A job of its own, not gated by
+  # any integration switch: it runs in pr.yml's call and its gate requires
+  # it (BAZEL_PROXIED).
   bazel-proxied:
     name: proxied-server tier
-    # Remote execution only, like bazel-embedded: 15 shards of ~5-10
-    # minutes, each with a dolt sql-server busy on ~4 cores, do not fit a
-    # GitHub-hosted runner.
+    # Remote execution only, like bazel-embedded: 30 concurrent shards, each
+    # running its own dolt sql-server busy on ~4 cores, do not fit a
+    # GitHub-hosted runner regardless of any single shard's wall time.
     # On same-repo pull_requests the legacy jobs stand down (pr-risk.yml's
     # bazel-coverage; D2 step 2), so this lane is then the tier's only PR
     # run and pr.yml's gate requires it to have run here and passed.
@@ -1042,8 +1083,36 @@ jobs:
             exit 1
           fi
 
-      # Remote: the longest shard takes ~5-8 minutes (each shard's Go
-      # timeout is its job's 15m, 1200s Bazel cap), plus a compile.
+      # Remote: each shard's Go timeout is its job's 15m, 1200s Bazel cap,
+      # plus a compile. scripts/ci/proxied_test_durations.json's 176 entries
+      # are each a clean, single-job (no concurrent heavy bazel/dolt job
+      # intentionally started on the box; see that file's header for its
+      # ambient-contention caveat), -test.parallel=4 top-level-test
+      # duration — the exact config this job uses — from a single fresh,
+      # manifest-aligned 30-shard sweep's own <testsuite time> (errors="0",
+      # so a failing-but-complete suite's time is still trustworthy); every
+      # one of the 176 discovered tests completed inside its shard run, so
+      # no `bazel run` leaf-summation workaround was needed this time. See
+      # that file's header for the full methodology, including why an
+      # earlier -test.parallel=1 (serial) capture was replaced: serial
+      # timings don't model this lane (which always runs parallel=4), and
+      # an independent re-review measured near-zero correlation (r=0.08)
+      # between the serial-derived predicted shard load and actual
+      # parallel=4 wall time.
+      #
+      # Measured per-shard wall time for the full 30-shard local sweep that
+      # produced this data: shards ranged from roughly 32s to 341s, with
+      # most clustering well under this job's 25m step timeout / 30m job
+      # timeout. After repacking with these corrected weights, the LPT
+      # estimate clusters every shard within a few seconds of ~355-360s
+      # (sum of all 176 measured durations / 30 shards) — no single test or
+      # small group of tests dominates a shard the way the discarded serial
+      # data wrongly implied. This is a local, single-job measurement, not
+      # a verified RBE forecast (this job has only ever run remote); if a
+      # shard's RBE wall time diverges sharply from this local estimate,
+      # that is RBE throughput differing from local execution, not
+      # necessarily a regression — compare against this job's own recent
+      # run history before assuming a hang.
       - name: bazel test //... --config=doltserver-proxied
         id: test
         timeout-minutes: 25
@@ -1070,7 +1139,7 @@ jobs:
         run: >-
           python3 tools/bazel/check_shard_coverage.py
           --bep "$RUNNER_TEMP/bazel-bep.json"
-          --suite //cmd/bd:bd_proxied_test .github/scripts/proxied-test-shard.sh 15
+          --suite //cmd/bd:bd_proxied_test .github/scripts/proxied-test-shard.sh 30
 
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
@@ -1197,6 +1266,247 @@ jobs:
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
       # cancellation too.
+      - name: Record job result
+        id: result
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
+
+  # F3: moved here from pr.yml so the gate depends on nothing but the rbe
+  # job's decision (not detect-package-gates, build-artifacts, bazel-coverage
+  # or the whole bazel call). Only pr.yml opts in (package-gates: "on");
+  # bazel-farm.yml and nightly.yml keep the default "off" and this job does
+  # not run for them. Same-repo PRs get a Bazel-built bd (no --config=ci:
+  # only test:ci is defined in .bazelrc, so bazel build //cmd/bd:bd_for_tests
+  # is run directly); forks, Dependabot and rbe-off/skip runs fall back to
+  # `go build`, same as package-mcp.sh's own prepare_bd_binary() does when
+  # BEADS_TEST_BD_BINARY is unset.
+  package-mcp:
+    name: Package Gate (MCP)
+    needs: rbe
+    # 4 vCPU on purpose: pytest-xdist -n 8 measured ~2.7-3x on 4 CPUs
+    # (tools/f3 timing, 2026-10), well past 2 vCPU's ceiling.
+    runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    if: ${{ inputs.package-gates == 'on' }}
+    timeout-minutes: 30
+    outputs:
+      result: ${{ steps.result.outputs.result }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
+
+      - name: Decide applicability
+        id: detect
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_AFTER_SHA: ${{ github.sha }}
+        run: ./scripts/ci/detect-package-gates.sh
+
+      - name: Set up Bazel
+        id: bazel
+        if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.enabled == 'true' }}
+        uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+
+      # No --config=ci: only test:ci is defined in .bazelrc, and `bazel
+      # build --config=foo` fails when only test:foo exists. The explicit
+      # --@rules_go//go/config:race matches test:ci's top-level build
+      # setting (test:ci -> test:prcore), so bd_for_tests' race="off"
+      # transition lands in the same k8-fastbuild-ST-... output directory
+      # and action-cache key `bazel test --config=ci` already populated,
+      # instead of plain k8-fastbuild's; race itself still builds a non-race
+      # bd (verified with cquery: both configs cquery to the identical
+      # bazel-out/k8-fastbuild-ST-.../bin/cmd/bd/bd_for_tests/bd path).
+      - name: bazel build //cmd/bd:bd_for_tests
+        if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.enabled == 'true' }}
+        run: bazel build --@rules_go//go/config:race //cmd/bd:bd_for_tests --remote_download_regex='.*/bin/cmd/bd/bd_for_tests/bd$'
+
+      - name: Package the Bazel-built bd
+        if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.enabled == 'true' }}
+        run: |
+          ./scripts/ci/package-bazel-bd.sh "$RUNNER_TEMP/bd-artifacts"
+          echo "BEADS_TEST_BD_BINARY=$RUNNER_TEMP/bd-artifacts/bd-linux-gms-pure" >> "$GITHUB_ENV"
+          # Defense in depth: nothing after this step needs the Bazel server
+          # or its RBE client key (uv sync and pytest run PR-controlled
+          # code). Shutting down also frees the JVM's memory for the 8
+          # xdist workers that follow on this 4 vCPU runner.
+          bazel shutdown
+          rm -rf "$RUNNER_TEMP/bazel-ci-secret"
+
+      - name: Set up Go
+        id: setup-go
+        if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.enabled != 'true' }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.enabled != 'true' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Verify Go modules
+        if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.enabled != 'true' }}
+        run: go mod verify
+
+      - name: Restore non-race Go build cache
+        if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.enabled != 'true' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
+
+      - name: Set up Python
+        if: ${{ steps.detect.outputs.mcp_package == 'true' }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Install uv
+        if: ${{ steps.detect.outputs.mcp_package == 'true' }}
+        run: python -m pip install uv==0.11.16
+
+      - name: Run MCP package gate
+        if: ${{ steps.detect.outputs.mcp_package == 'true' }}
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
+        run: make ci-package-mcp
+
+      # Last step: the job's result as a workflow_call output for pr.yml's
+      # ci-gate. always() runs it after a failure, a timeout or a
+      # cancellation too; package-gates == 'on' is the only skip condition
+      # (the job itself), so PACKAGE_MCP is never "skipped" on pr.yml.
+      - name: Record job result
+        id: result
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
+
+  # F3: npm's twin of package-mcp above. Structurally identical apart from
+  # the language setup (Node instead of Python/uv) and the `make` target.
+  package-npm:
+    name: Package Gate (npm)
+    needs: rbe
+    runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    if: ${{ inputs.package-gates == 'on' }}
+    timeout-minutes: 30
+    outputs:
+      result: ${{ steps.result.outputs.result }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
+
+      - name: Decide applicability
+        id: detect
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_AFTER_SHA: ${{ github.sha }}
+        run: ./scripts/ci/detect-package-gates.sh
+
+      - name: Set up Bazel
+        id: bazel
+        if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.enabled == 'true' }}
+        uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+
+      # No --config=ci: only test:ci is defined in .bazelrc, and `bazel
+      # build --config=foo` fails when only test:foo exists. The explicit
+      # --@rules_go//go/config:race matches test:ci's top-level build
+      # setting (test:ci -> test:prcore), so bd_for_tests' race="off"
+      # transition lands in the same k8-fastbuild-ST-... output directory
+      # and action-cache key `bazel test --config=ci` already populated,
+      # instead of plain k8-fastbuild's; race itself still builds a non-race
+      # bd (verified with cquery: both configs cquery to the identical
+      # bazel-out/k8-fastbuild-ST-.../bin/cmd/bd/bd_for_tests/bd path).
+      - name: bazel build //cmd/bd:bd_for_tests
+        if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.enabled == 'true' }}
+        run: bazel build --@rules_go//go/config:race //cmd/bd:bd_for_tests --remote_download_regex='.*/bin/cmd/bd/bd_for_tests/bd$'
+
+      - name: Package the Bazel-built bd
+        if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.enabled == 'true' }}
+        run: |
+          ./scripts/ci/package-bazel-bd.sh "$RUNNER_TEMP/bd-artifacts"
+          echo "BEADS_TEST_BD_BINARY=$RUNNER_TEMP/bd-artifacts/bd-linux-gms-pure" >> "$GITHUB_ENV"
+          # Defense in depth: nothing after this step needs the Bazel server
+          # or its RBE client key (npm install runs PR-controlled code).
+          bazel shutdown
+          rm -rf "$RUNNER_TEMP/bazel-ci-secret"
+
+      - name: Set up Go
+        id: setup-go
+        if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.enabled != 'true' }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.enabled != 'true' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Verify Go modules
+        if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.enabled != 'true' }}
+        run: go mod verify
+
+      - name: Restore non-race Go build cache
+        if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.enabled != 'true' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
+
+      - name: Set up Node.js
+        if: ${{ steps.detect.outputs.npm_package == 'true' }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: '24'
+
+      - name: Run npm package gate
+        if: ${{ steps.detect.outputs.npm_package == 'true' }}
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
+        run: make ci-package-npm
+
+      # Last step: the job's result as a workflow_call output for pr.yml's
+      # ci-gate. always() runs it after a failure, a timeout or a
+      # cancellation too; package-gates == 'on' is the only skip condition
+      # (the job itself), so PACKAGE_NPM is never "skipped" on pr.yml.
       - name: Record job result
         id: result
         if: ${{ always() }}
