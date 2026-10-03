@@ -36,7 +36,10 @@ exports_files(
 # engdocs/LINTING.md and the pre-commit hook's separate `go run` pin against
 # scripts/ci/install-golangci-lint.sh, so both must be readable as data.
 exports_files(
-    ["engdocs/LINTING.md", ".githooks/pre-commit"],
+    [
+        "engdocs/LINTING.md",
+        ".githooks/pre-commit",
+    ],
     visibility = ["//scripts:__pkg__"],
 )
 
