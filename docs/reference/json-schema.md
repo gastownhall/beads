@@ -206,6 +206,16 @@ items, plus:
 - `comments_omitted` (boolean, optional): `true` only when `comment_count` is
   nonzero and `comments` was left out of the response (no `--include-comments`).
   Absent when comments were included or when there are none to omit (ga-clgh)
+- `gated_by` (object[], optional): The gates actively blocking this issue, each
+  `{id, type, reason}` — the gate bead to resolve, its await condition (`human`,
+  `timer`, `gh:run`, `gh:pr`, `bead`, or `gate` when it carries none), and the
+  reason recorded at creation. A gate counts when it is reached over a `blocks`
+  or `conditional-blocks` edge, is itself neither closed nor pinned, and the
+  issue is neither closed nor pinned; a `waits-for` edge onto a gate does not
+  count, because that leg of the readiness rule is a fanout over the gate's
+  children rather than a status test. Absent when nothing gates the issue.
+  DERIVED, not stored: `status` is unaffected, and the list is nonempty exactly
+  when `bd ready` withholds the issue on a gate's account
 
 ### `import --json`
 

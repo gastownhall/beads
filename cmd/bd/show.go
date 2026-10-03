@@ -187,15 +187,30 @@ var showCmd = &cobra.Command{
 				result.Close()
 				continue
 			}
+			// Dependencies are read here rather than at the DEPENDS ON
+			// section below because the header needs them: the derived GATED
+			// marker (wy-j2upyy) is the gate-typed subset of this very set,
+			// so hoisting the read decorates the header and the meta block
+			// without a second query. Best effort, as it always was: a failed
+			// read renders the issue undecorated rather than not at all.
+			//
+			// Counts first — see readDepCounts for why the order matters. The
+			// listing's error is KEPT, not discarded: rendering stays best
+			// effort, but a FAILED listing and a SHORT one both leave the
+			// slice empty, and only the second is an unresolvable edge.
+			depCountsSnapshot := readDepCounts(ctx, issueStore, issue.ID)
+			depsWithMeta, depsErr := issueStore.GetDependenciesWithMetadata(ctx, issue.ID)
+			gates := types.GatesHolding(issue, depsWithMeta)
+
 			if idx > 0 {
 				fmt.Println("\n" + ui.RenderMuted(strings.Repeat("─", 60)))
-				fmt.Printf("\n%s\n", formatIssueHeader(issue))
+				fmt.Printf("\n%s\n", formatIssueHeaderWithGates(issue, gates))
 			} else {
-				fmt.Printf("%s\n", formatIssueHeader(issue))
+				fmt.Printf("%s\n", formatIssueHeaderWithGates(issue, gates))
 			}
 
 			// Metadata: Owner · Type | Created · Updated
-			fmt.Println(formatIssueMetadata(issue))
+			fmt.Println(formatIssueMetadataWithGates(issue, gates))
 
 			// Content sections — always show DESCRIPTION header so the user
 			// can distinguish "empty" from "hidden" (GH#3336).
@@ -230,12 +245,7 @@ var showCmd = &cobra.Command{
 			relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
 
 			// Show dependencies - grouped by dependency type for clarity
-			// Counts first — see readDepCounts for why the order matters.
-			depCountsSnapshot := readDepCounts(ctx, issueStore, issue.ID)
-			// The errors are KEPT, not discarded: rendering stays best
-			// effort, but a FAILED listing and a SHORT one both leave the
-			// slice empty, and only the second is an unresolvable edge.
-			depsWithMeta, depsErr := issueStore.GetDependenciesWithMetadata(ctx, issue.ID) // Best effort: show issue even if deps unavailable
+			// (read above, with the header's gate decoration).
 			for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
 				printDepSection(sec)
 			}

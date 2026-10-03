@@ -197,7 +197,10 @@ func runSetState(ctx context.Context, issueID, dimension, newValue, reason strin
 		eventDesc = fmt.Sprintf("Set %s to %s", dimension, newValue)
 	}
 	if reason != "" {
-		eventDesc += "\n\nReason: " + reason
+		// The same marker types.GateDescription writes, from the one constant
+		// that owns its spelling — types.GateReason reads any description
+		// carrying it, so the two writers must not drift apart by accident.
+		eventDesc += types.ReasonMarker + reason
 	}
 
 	lifecycle, err := openIssueLifecycle()
