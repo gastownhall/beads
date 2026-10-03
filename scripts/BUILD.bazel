@@ -46,6 +46,7 @@ go_test(
         ":scripts_files",
         "//:.goreleaser.yml",
         "//:bazel_policy_files",
+        "//:mcp_package_policy_files",
         "//:test_sh_files",
         "//:workflow_files",
         "//internal/testutil:testdoltcommon.go",

@@ -187,6 +187,19 @@ on:
         type: string
         required: false
         default: "off"
+      # "on" (pr.yml only) runs package-mcp and package-npm in this call,
+      # which waits on nothing but the rbe job (F3: the legacy pr.yml jobs
+      # those gates used to need: detect-package-gates, build-artifacts,
+      # bazel-coverage, and the whole bazel call). bazel-farm.yml, nightly.yml
+      # and direct runs (push, dispatch) keep the default "off": main.yml
+      # keeps its own package jobs, and a fork-farm run has no bd artifact
+      # consumer waiting on these.
+      package-gates:
+        description: >
+          "on" (pr.yml only) runs the MCP and npm package gates in this call.
+        type: string
+        required: false
+        default: "off"
     # Only what the rbe job and setup-bazel need; callers pass them
     # explicitly. None is required: fork and Dependabot runs have none.
     secrets:
@@ -229,6 +242,12 @@ on:
       bazel-server-storage:
         description: "bazel-server-storage's job.status"
         value: ${{ jobs.bazel-server-storage.outputs.result }}
+      package-mcp:
+        description: "package-mcp's job.status (empty unless package-gates is 'on')"
+        value: ${{ jobs.package-mcp.outputs.result }}
+      package-npm:
+        description: "package-npm's job.status (empty unless package-gates is 'on')"
+        value: ${{ jobs.package-npm.outputs.result }}
 
 # Main runs always finish (they may save the runner cache); PR runs (called
 # from pr.yml or bazel-farm.yml, whose own groups cancel the calling run too)
@@ -255,7 +274,12 @@ jobs:
   # runs read vars but get no secrets, so they come out cache, not remote.
   rbe:
     name: execution mode
-    runs-on: ubuntu-latest
+    # Same-repo PRs (and merge_group/push/dispatch/schedule runs, which are
+    # never forks) get the org's Blacksmith pool; a pull_request_target farm
+    # run and any fork or Dependabot PR stay on GitHub-hosted runners. This
+    # job reads no repository code and holds no secret value (see below), so
+    # Blacksmith sees nothing sensitive either way.
+    runs-on: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 5
     outputs:
       enabled: ${{ steps.decide.outputs.enabled }}
@@ -1208,6 +1232,223 @@ jobs:
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
       # cancellation too.
+      - name: Record job result
+        id: result
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
+
+  # F3: moved here from pr.yml so the gate depends on nothing but the rbe
+  # job's decision (not detect-package-gates, build-artifacts, bazel-coverage
+  # or the whole bazel call). Only pr.yml opts in (package-gates: "on");
+  # bazel-farm.yml and nightly.yml keep the default "off" and this job does
+  # not run for them. Same-repo PRs get a Bazel-built bd (no --config=ci:
+  # only test:ci is defined in .bazelrc, so bazel build //cmd/bd:bd_for_tests
+  # is run directly); forks, Dependabot and rbe-off/skip runs fall back to
+  # `go build`, same as package-mcp.sh's own prepare_bd_binary() does when
+  # BEADS_TEST_BD_BINARY is unset.
+  package-mcp:
+    name: Package Gate (MCP)
+    needs: rbe
+    # 4 vCPU on purpose: pytest-xdist -n 8 measured ~2.7-3x on 4 CPUs
+    # (tools/f3 timing, 2026-10), well past 2 vCPU's ceiling.
+    runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    if: ${{ inputs.package-gates == 'on' }}
+    timeout-minutes: 30
+    outputs:
+      result: ${{ steps.result.outputs.result }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
+
+      - name: Decide applicability
+        id: detect
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_AFTER_SHA: ${{ github.sha }}
+        run: ./scripts/ci/detect-package-gates.sh
+
+      - name: Set up Bazel
+        id: bazel
+        if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.enabled == 'true' }}
+        uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+
+      # No --config=ci: only test:ci is defined in .bazelrc, and `bazel
+      # build --config=foo` fails when only test:foo exists.
+      - name: bazel build //cmd/bd:bd_for_tests
+        if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.enabled == 'true' }}
+        run: bazel build //cmd/bd:bd_for_tests --remote_download_regex='.*/bin/cmd/bd/bd_for_tests/bd$'
+
+      - name: Package the Bazel-built bd
+        if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.enabled == 'true' }}
+        run: |
+          ./scripts/ci/package-bazel-bd.sh "$RUNNER_TEMP/bd-artifacts"
+          echo "BEADS_TEST_BD_BINARY=$RUNNER_TEMP/bd-artifacts/bd-linux-gms-pure" >> "$GITHUB_ENV"
+
+      - name: Set up Go
+        id: setup-go
+        if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.enabled != 'true' }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.enabled != 'true' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Verify Go modules
+        if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.enabled != 'true' }}
+        run: go mod verify
+
+      - name: Restore non-race Go build cache
+        if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.enabled != 'true' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
+
+      - name: Set up Python
+        if: ${{ steps.detect.outputs.mcp_package == 'true' }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Install uv
+        if: ${{ steps.detect.outputs.mcp_package == 'true' }}
+        run: python -m pip install uv==0.11.16
+
+      - name: Run MCP package gate
+        if: ${{ steps.detect.outputs.mcp_package == 'true' }}
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
+        run: make ci-package-mcp
+
+      # Last step: the job's result as a workflow_call output for pr.yml's
+      # ci-gate. always() runs it after a failure, a timeout or a
+      # cancellation too; package-gates == 'on' is the only skip condition
+      # (the job itself), so PACKAGE_MCP is never "skipped" on pr.yml.
+      - name: Record job result
+        id: result
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
+
+  # F3: npm's twin of package-mcp above. Structurally identical apart from
+  # the language setup (Node instead of Python/uv) and the `make` target.
+  package-npm:
+    name: Package Gate (npm)
+    needs: rbe
+    runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    if: ${{ inputs.package-gates == 'on' }}
+    timeout-minutes: 30
+    outputs:
+      result: ${{ steps.result.outputs.result }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
+
+      - name: Decide applicability
+        id: detect
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_AFTER_SHA: ${{ github.sha }}
+        run: ./scripts/ci/detect-package-gates.sh
+
+      - name: Set up Bazel
+        id: bazel
+        if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.enabled == 'true' }}
+        uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+
+      # No --config=ci: only test:ci is defined in .bazelrc, and `bazel
+      # build --config=foo` fails when only test:foo exists.
+      - name: bazel build //cmd/bd:bd_for_tests
+        if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.enabled == 'true' }}
+        run: bazel build //cmd/bd:bd_for_tests --remote_download_regex='.*/bin/cmd/bd/bd_for_tests/bd$'
+
+      - name: Package the Bazel-built bd
+        if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.enabled == 'true' }}
+        run: |
+          ./scripts/ci/package-bazel-bd.sh "$RUNNER_TEMP/bd-artifacts"
+          echo "BEADS_TEST_BD_BINARY=$RUNNER_TEMP/bd-artifacts/bd-linux-gms-pure" >> "$GITHUB_ENV"
+
+      - name: Set up Go
+        id: setup-go
+        if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.enabled != 'true' }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.enabled != 'true' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Verify Go modules
+        if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.enabled != 'true' }}
+        run: go mod verify
+
+      - name: Restore non-race Go build cache
+        if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.enabled != 'true' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
+
+      - name: Set up Node.js
+        if: ${{ steps.detect.outputs.npm_package == 'true' }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: '24'
+
+      - name: Run npm package gate
+        if: ${{ steps.detect.outputs.npm_package == 'true' }}
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
+        run: make ci-package-npm
+
+      # Last step: the job's result as a workflow_call output for pr.yml's
+      # ci-gate. always() runs it after a failure, a timeout or a
+      # cancellation too; package-gates == 'on' is the only skip condition
+      # (the job itself), so PACKAGE_NPM is never "skipped" on pr.yml.
       - name: Record job result
         id: result
         if: ${{ always() }}

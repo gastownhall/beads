@@ -271,9 +271,12 @@ func workflowEnv(t *testing.T, name string) map[string]string {
 func TestPRRiskBazelCoverageJob(t *testing.T) {
 	risk := readCIWorkflow(t, prRiskWorkflowName)
 	job := risk.job(t, prRiskCoverageJobName)
-	if len(job.Needs) != 0 || job.If != "" || job.RunsOn != "ubuntu-latest" || len(job.Env) != 0 || job.ContinueOnError || job.TimeoutMinutes == 0 {
-		t.Errorf("%s: needs %v, if %q, runs-on %q, env %v, continue-on-error %v, timeout %d; want no needs, if, env or continue-on-error, ubuntu-latest, a timeout",
-			prRiskCoverageJobName, job.Needs, job.If, job.RunsOn, job.Env, job.ContinueOnError, job.TimeoutMinutes)
+	// F3: this job moved to Blacksmith for same-repo PRs (and merge_group);
+	// forks and Dependabot stay on ubuntu-latest (TestSameRepoBlacksmithRunners
+	// pins the same literal for pr.yml's copy).
+	if len(job.Needs) != 0 || job.If != "" || job.RunsOn != sameRepoBlacksmith2vcpu || len(job.Env) != 0 || job.ContinueOnError || job.TimeoutMinutes == 0 {
+		t.Errorf("%s: needs %v, if %q, runs-on %q, env %v, continue-on-error %v, timeout %d; want no needs, if, env or continue-on-error, on %q, a timeout",
+			prRiskCoverageJobName, job.Needs, job.If, job.RunsOn, job.Env, job.ContinueOnError, job.TimeoutMinutes, sameRepoBlacksmith2vcpu)
 	}
 	wantOutputs := map[string]string{}
 	wantEnv := map[string]string{"PULL_REQUEST": prRiskPullRequestValue, "DEPENDABOT": prRiskDependabotValue}
@@ -331,6 +334,15 @@ func TestPRRiskBazelCoverageJob(t *testing.T) {
 		}
 		if secretRef.MatchString(value) {
 			t.Errorf("%s: %s reads secrets (%q); PR Risk needs none", prRiskWorkflowName, path, value)
+		}
+		// F3: detect-ci-tier/bazel-coverage/ci-gate's own runs-on picks a
+		// runner venue (Blacksmith vs ubuntu-latest) for trusted same-repo
+		// PRs; it shares some predicates (github.actor, dependabot,
+		// head.repo.full_name) with the coverage decision but decides
+		// something else entirely - not a re-derivation of the decision
+		// (TestSameRepoBlacksmithRunners pins the literal).
+		if strings.HasSuffix(path, ".runs-on") && value == sameRepoBlacksmith2vcpu {
+			return
 		}
 		if facts.MatchString(value) && !strings.HasPrefix(path, stepEnv) && !strings.HasPrefix(path, ".jobs."+prRiskCoverageJobName+".steps[0].run") {
 			t.Errorf("%s: %s re-derives the Bazel coverage decision (%q); read needs.%s.outputs", prRiskWorkflowName, path, value, prRiskCoverageJobName)

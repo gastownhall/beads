@@ -169,6 +169,20 @@ filegroup(
     visibility = ["//scripts:__pkg__"],
 )
 
+# F3: TestMCPPytestWorkerCountPinned (ci_workflow_test.go) reads the MCP
+# package's pytest-xdist pin directly from its manifest and lock file, so it
+# runs under `bazel test` as well as `go test`. integrations/beads-mcp has no
+# BUILD.bazel of its own (unlike npm-package/, it is not .bazelignore'd), so
+# these are ordinary sources under this package.
+filegroup(
+    name = "mcp_package_policy_files",
+    srcs = [
+        "integrations/beads-mcp/pyproject.toml",
+        "integrations/beads-mcp/uv.lock",
+    ],
+    visibility = ["//scripts:__pkg__"],
+)
+
 go_library(
     name = "beads",
     srcs = [

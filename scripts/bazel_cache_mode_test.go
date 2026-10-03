@@ -192,6 +192,14 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 			}
 			var wantSkips []string
 			for lane, id := range bazelLaneGateIDs {
+				// F3: package-mcp/package-npm skip only when the caller's
+				// package-gates input is off, never because of rbe mode;
+				// bazel-gate.sh knows nothing about them (its skip list is
+				// mode-derived only), so this scenario's with (which never
+				// sets package-gates here) must not expect them either.
+				if bazelPackageJobs[lane] {
+					continue
+				}
 				if !ran[lane] {
 					wantSkips = append(wantSkips, id)
 				}

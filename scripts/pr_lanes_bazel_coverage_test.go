@@ -26,18 +26,12 @@ import (
 
 const (
 	// The legacy jobs' if: not covered.
-	prLaneLegacyIf = "needs." + prRiskCoverageJobName + ".outputs.pr_lanes != 'true'"
-	// The package gates: they run whenever detection and the decision did,
-	// on build-artifacts' bd, or on Bazel's where build-artifacts stood down.
-	prPackageGateIf = "${{ !cancelled() && needs.detect-package-gates.result == 'success' && needs." + prRiskCoverageJobName +
-		".result == 'success' && (needs." + prRiskCoverageJobName + ".outputs.pr_lanes == 'true' || needs.build-artifacts.result == 'success') }}"
-	prPackageGateArtifact = "${{ needs." + prRiskCoverageJobName + ".outputs.pr_lanes == 'true' && 'bazel-ci-build-artifacts' || 'ci-build-artifacts' }}"
-	prFingerprintJob      = "test-dolt-server-fingerprint"
-	prFingerprintID       = "TEST_DOLT_SERVER_FINGERPRINT"
-	prAllowlistedStep     = "Run the Go tests the Bazel lane skips"
-	prScriptsChecksJob    = "scripts-go-checks"
-	prPackageBDCheck      = "Check the Bazel-built bd exists"
-	prScriptsChecksID     = "SCRIPTS_GO_CHECKS"
+	prLaneLegacyIf     = "needs." + prRiskCoverageJobName + ".outputs.pr_lanes != 'true'"
+	prFingerprintJob   = "test-dolt-server-fingerprint"
+	prFingerprintID    = "TEST_DOLT_SERVER_FINGERPRINT"
+	prAllowlistedStep  = "Run the Go tests the Bazel lane skips"
+	prScriptsChecksJob = "scripts-go-checks"
+	prScriptsChecksID  = "SCRIPTS_GO_CHECKS"
 	// bazel.yml's lanes for the step add --config=sole-run in mode remote.
 	bazelSoleRunEnv          = "${{ needs.rbe.outputs.mode == 'remote' && '--config=sole-run' || '' }}"
 	bazelSoleRunArg          = `${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"}`
@@ -45,9 +39,12 @@ const (
 	bazelSoleRunEvictionLine = "test:sole-run --experimental_remote_cache_eviction_retries=0"
 )
 
-// The package gates (consumers of build-artifacts' ci-build-artifacts that
-// keep running where it stands down).
-var prPackageGates = map[string]string{"package-mcp": "PACKAGE_MCP", "package-npm": "PACKAGE_NPM"}
+// F3: the package gates moved into bazel.yml (package-mcp, package-npm);
+// they depend only on the caller's package-gates input, not on
+// bazel-coverage's decision or build-artifacts (TestPackageGateJobs). This
+// map is only their CI_GATE_REQUIRED ids, for the gate-simulation scenarios
+// below (pr.yml no longer has jobs by these names).
+var prPackageGateIDs = map[string]string{"package-mcp": "PACKAGE_MCP", "package-npm": "PACKAGE_NPM"}
 
 // Each retired job's needs, exactly.
 var prLaneLegacyNeeds = map[string][]string{
@@ -172,9 +169,10 @@ func prLegacyJobResult(job string, sc bazelGateScenario) string {
 			return "skipped"
 		}
 	}
-	if _, ok := prPackageGates[job]; ok && !decided {
-		return "skipped"
-	}
+	// F3: package-mcp/package-npm are bazel.yml call outputs now
+	// (needs.bazel.outputs.package-mcp), not pr.yml job results, so
+	// runPRGateStep never calls this helper for them - they are simulated
+	// through sc.outputs instead (see the scenario loop below).
 	return "success"
 }
 
@@ -211,25 +209,27 @@ func TestPRLegacyLanesDeferToBazelLanes(t *testing.T) {
 		t.Errorf("pr.yml tier lanes = %v", tier.bazelLanes)
 	}
 
-	// Only the retired jobs, the package gates and the gate read the
-	// decision; only they and the gate need build-artifacts.
+	// Only the retired jobs and the gate read the decision; only they and
+	// the gate need build-artifacts. The package gates moved into bazel.yml
+	// (F3) and never depend on this decision or on build-artifacts at all -
+	// they build bd for themselves, via Bazel or a go build fallback
+	// (TestPackageGateJobs).
 	for name, job := range pr.Jobs {
 		_, retired := tier.jobs[name]
-		_, pkg := prPackageGates[name]
-		if retired || pkg || name == "ci-gate" || name == prRiskCoverageJobName {
+		if retired || name == "ci-gate" || name == prRiskCoverageJobName {
 			continue
 		}
 		if strings.Contains(job.If, prRiskCoverageJobName) || contains(job.Needs, prRiskCoverageJobName) {
-			t.Errorf("%s depends on %s; only the retired jobs and the package gates may", name, prRiskCoverageJobName)
+			t.Errorf("%s depends on %s; only the retired jobs may", name, prRiskCoverageJobName)
 		}
 		if contains(job.Needs, "build-artifacts") {
-			t.Errorf("%s needs build-artifacts, which stands down on covered PRs; take the artifact like the package gates do", name)
+			t.Errorf("%s needs build-artifacts, which stands down on covered PRs", name)
 		}
 	}
 
-	// Artifact consumers: the retired jobs read build-artifacts' artifact
-	// (they only run where it does); the package gates read Bazel's where
-	// it stood down. Nothing downloads by pattern or without a name.
+	// Artifact consumers: only the retired jobs read build-artifacts'
+	// artifact (they only run where it does). Nothing downloads by pattern
+	// or without a name.
 	for name, job := range pr.Jobs {
 		for _, step := range job.Steps {
 			if !strings.HasPrefix(step.Uses, "actions/download-artifact@") {
@@ -243,51 +243,15 @@ func TestPRLegacyLanesDeferToBazelLanes(t *testing.T) {
 			if !strings.Contains(art, "ci-build-artifacts") {
 				continue
 			}
-			_, retired := tier.jobs[name]
-			_, pkg := prPackageGates[name]
-			switch {
-			case retired && art == "ci-build-artifacts":
-			case pkg && art == prPackageGateArtifact:
-			default:
-				t.Errorf("%s downloads %q; only the retired jobs (ci-build-artifacts) and the package gates (%s) may", name, art, prPackageGateArtifact)
+			if _, retired := tier.jobs[name]; !retired || art != "ci-build-artifacts" {
+				t.Errorf("%s downloads %q; only the retired jobs (ci-build-artifacts) may", name, art)
 			}
 			if step.With["path"] != "ci-build-artifacts" {
 				t.Errorf("%s downloads into %q, want ci-build-artifacts (the layout its steps read)", name, step.With["path"])
 			}
 		}
 	}
-	for name, id := range prPackageGates {
-		job := pr.job(t, name)
-		want := []string{"detect-package-gates", "build-artifacts", prRiskCoverageJobName, "bazel"}
-		if job.If != prPackageGateIf || !reflect.DeepEqual([]string(job.Needs), want) {
-			t.Errorf("%s: if %q, needs %v; want if %q, needs %v", name, job.If, job.Needs, prPackageGateIf, want)
-		}
-		if dl := job.step(t, "Download build artifacts"); dl.With["name"] != prPackageGateArtifact {
-			t.Errorf("%s downloads %q, want %q", name, dl.With["name"], prPackageGateArtifact)
-		}
-		if v := job.step(t, "Verify build artifacts").Run; !strings.Contains(v, "sha256sum -c SHA256SUMS") || !strings.Contains(v, "chmod +x bd-linux-gms-pure") {
-			t.Errorf("%s no longer verifies the artifact:\n%s", name, v)
-		}
-		if !contains(required, id) {
-			t.Errorf("ci-gate does not require %s", id)
-		}
-		// Review L2: with the farm off (mode skip) on a covered PR, say why
-		// there is no bd before the download fails on a missing artifact.
-		check := job.step(t, prPackageBDCheck)
-		if check.If != "steps.applicability.outputs.run == 'true' && needs."+prRiskCoverageJobName+".outputs.pr_lanes == 'true'" ||
-			!reflect.DeepEqual(check.Env, map[string]string{"BAZEL_RBE_MODE": "${{ needs.bazel.outputs.rbe-mode }}"}) || check.ContinueOnError != nil ||
-			job.stepIndex(t, prPackageBDCheck) > job.stepIndex(t, "Download build artifacts") {
-			t.Errorf("%s step %q: if %q, env %v; want it before the download, on covered applicable runs, reading the call's mode", name, prPackageBDCheck, check.If, check.Env)
-		}
-		for mode, wantOK := range map[string]bool{"remote": true, "skip": false, "cache": false, "local": false, "": false} {
-			cmd := exec.Command("bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", check.Run)
-			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "BAZEL_RBE_MODE=" + mode}
-			out, err := cmd.CombinedOutput()
-			if (err == nil) != wantOK || (!wantOK && !(strings.Contains(string(out), "::error::") && strings.Contains(string(out), "BAZEL_PR_LANES_RETIRED"))) {
-				t.Errorf("%s bd check in mode %q: ok %v, want %v\n%s", name, mode, err == nil, wantOK, out)
-			}
-		}
-	}
+	testPackageGateJobs(t, required)
 	// Bazel's artifact: bazel-test publishes it (always, after its tests)
 	// under the name pr.yml passes, with build-artifacts' layout
 	// (TestBazelWorkflowPublishesBuildArtifacts).
@@ -353,17 +317,25 @@ func TestPRLegacyLanesDeferToBazelLanes(t *testing.T) {
 		for _, res := range []string{"skipped", "failure", "cancelled"} {
 			for _, job := range []string{prFingerprintJob, "package-mcp", "package-npm", "pr-preflight-platforms", prScriptsChecksJob} {
 				sc := prGateFor(t, lanes, "pull_request", "remote", cov(c))
-				sc.results = map[string]string{job: res}
+				// F3: package-mcp/package-npm are bazel.yml call outputs
+				// (needs.bazel.outputs.package-mcp), not pr.yml job
+				// results, so the gate simulation overrides sc.outputs for
+				// them instead of sc.results.
+				if _, pkg := prPackageGateIDs[job]; pkg {
+					sc.outputs[job] = res
+				} else {
+					sc.results = map[string]string{job: res}
+				}
 				id := map[string]string{prFingerprintJob: prFingerprintID, "pr-preflight-platforms": "PR_PREFLIGHT_PLATFORMS", prScriptsChecksJob: prScriptsChecksID}[job]
 				if id == "" {
-					id = prPackageGates[job]
+					id = prPackageGateIDs[job]
 				}
 				add(fmt.Sprintf("covered=%s, %s %s", c, job, res), sc, false, id)
 			}
 		}
 	}
-	// A failed decision: the retired jobs and the package gates skip
-	// through needs, and the gate is red.
+	// A failed decision: the retired jobs skip through needs (the package
+	// gates do not depend on the decision at all, F3), and the gate is red.
 	for _, res := range []string{"failure", "cancelled", "skipped"} {
 		sc := prGateFor(t, lanes, "pull_request", "remote", cov(""))
 		sc.coverage = res
@@ -389,6 +361,128 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// F3: the package gates (bazel.yml's package-mcp, package-npm). They depend
+// only on the caller turning package-gates on (never on bazel-coverage or
+// build-artifacts: TestPRLegacyLanesDeferToBazelLanes already checked that
+// nothing but the retired jobs reads either), build bd for themselves - via
+// the Bazel lane's binary when the farm is up, a go build fallback
+// otherwise (package-mcp.sh/package-npm.sh's prepare_bd_binary) - and are
+// structurally identical apart from their language setup and `make` target.
+// Their runs-on/if/needs/result-recorder are already pinned for every
+// bazel.yml job by TestBazelWorkflowJobsAndExecutionMode and
+// TestBazelLaneIsGatedAlongsideLegacy; this test pins the step-by-step
+// detail those generic checks do not.
+func testPackageGateJobs(t *testing.T, prGateRequired []string) {
+	t.Helper()
+	workflow := readCIWorkflow(t, bazelWorkflowName)
+	type pkgLane struct {
+		job, detectOutput, langStepName, makeTarget string
+	}
+	lanes := []pkgLane{
+		{bazelPackageMCPJobName, "mcp_package", "Set up Python", "make ci-package-mcp"},
+		{bazelPackageNPMJobName, "npm_package", "Set up Node.js", "make ci-package-npm"},
+	}
+	for _, lane := range lanes {
+		id := bazelLaneGateIDs[lane.job]
+		if !contains(prGateRequired, id) {
+			t.Errorf("ci-gate does not require %s (%s)", lane.job, id)
+		}
+		job, ok := workflow.Jobs[lane.job]
+		if !ok {
+			t.Fatalf("%s has no %s job", bazelWorkflowName, lane.job)
+		}
+		if !reflect.DeepEqual([]string(job.Needs), []string{bazelRBEJobName}) || job.If != bazelPackageGatesIf || job.RunsOn != bazelPackageRunsOn {
+			t.Errorf("%s: needs %v, if %q, runs-on %q; want needs [%s], if %q, runs-on %q",
+				lane.job, job.Needs, job.If, job.RunsOn, bazelRBEJobName, bazelPackageGatesIf, bazelPackageRunsOn)
+		}
+
+		detectCond := "steps.detect.outputs." + lane.detectOutput + " == 'true'"
+		detectIf := "${{ " + detectCond + " }}"
+		bazelPathIf := "${{ " + detectCond + " && needs." + bazelRBEJobName + ".outputs.enabled == 'true' }}"
+		fallbackIf := "${{ " + detectCond + " && needs." + bazelRBEJobName + ".outputs.enabled != 'true' }}"
+		wantNames := []string{
+			"", // checkout (no name)
+			"Decide applicability",
+			"Set up Bazel",
+			"bazel build //cmd/bd:bd_for_tests",
+			"Package the Bazel-built bd",
+			"Set up Go",
+			"Restore Go module cache",
+			"Verify Go modules",
+			"Restore non-race Go build cache",
+			lane.langStepName,
+		}
+		if lane.job == bazelPackageMCPJobName {
+			wantNames = append(wantNames, "Install uv")
+		}
+		wantNames = append(wantNames, "Run "+map[string]string{bazelPackageMCPJobName: "MCP", bazelPackageNPMJobName: "npm"}[lane.job]+" package gate", "Record job result")
+
+		var gotNames []string
+		for _, s := range job.Steps {
+			gotNames = append(gotNames, s.Name)
+		}
+		if !reflect.DeepEqual(gotNames, wantNames) {
+			t.Errorf("%s step names = %q, want %q", lane.job, gotNames, wantNames)
+		}
+
+		checkout := job.Steps[0]
+		if checkout.Uses != "actions/checkout@"+checkoutSHA || checkout.With["fetch-depth"] != "0" {
+			t.Errorf("%s checkout = %+v; want fetch-depth 0 (detect-package-gates.sh diffs full history)", lane.job, checkout)
+		}
+
+		detect := job.step(t, "Decide applicability")
+		wantDetectEnv := map[string]string{
+			"PR_BASE_SHA":     "${{ github.event.pull_request.base.sha }}",
+			"PR_HEAD_SHA":     "${{ github.event.pull_request.head.sha }}",
+			"PUSH_BEFORE_SHA": "${{ github.event.before }}",
+			"PUSH_AFTER_SHA":  "${{ github.sha }}",
+		}
+		if detect.ID != "detect" || detect.Run != "./scripts/ci/detect-package-gates.sh" || !reflect.DeepEqual(detect.Env, wantDetectEnv) {
+			t.Errorf("%s detect step: id %q, run %q, env %v; want id detect, run ./scripts/ci/detect-package-gates.sh, env %v",
+				lane.job, detect.ID, detect.Run, detect.Env, wantDetectEnv)
+		}
+
+		// The Bazel-built-bd path: gated on the farm being up, in addition
+		// to detection. No --config=ci (only test:ci exists).
+		buildStep := job.step(t, "bazel build //cmd/bd:bd_for_tests")
+		if buildStep.If != bazelPathIf || buildStep.Run != `bazel build //cmd/bd:bd_for_tests --remote_download_regex='.*/bin/cmd/bd/bd_for_tests/bd$'` {
+			t.Errorf("%s bazel build step: if %q, run %q; want if %q", lane.job, buildStep.If, buildStep.Run, bazelPathIf)
+		}
+		pkgBD := job.step(t, "Package the Bazel-built bd")
+		if pkgBD.If != bazelPathIf || !strings.Contains(pkgBD.Run, `./scripts/ci/package-bazel-bd.sh "$RUNNER_TEMP/bd-artifacts"`) ||
+			!strings.Contains(pkgBD.Run, "BEADS_TEST_BD_BINARY=$RUNNER_TEMP/bd-artifacts/bd-linux-gms-pure") {
+			t.Errorf("%s package-the-Bazel-built-bd step: if %q, run %q", lane.job, pkgBD.If, pkgBD.Run)
+		}
+		setupBazel := job.step(t, "Set up Bazel")
+		if setupBazel.If != bazelPathIf || setupBazel.Uses != "./"+setupBazelActionDir {
+			t.Errorf("%s Set up Bazel: if %q, uses %q; want if %q", lane.job, setupBazel.If, setupBazel.Uses, bazelPathIf)
+		}
+
+		// The go-build-fallback path: gated on detection and the farm being
+		// down; it restores caches but never sets BEADS_TEST_BD_BINARY, so
+		// prepare_bd_binary() falls back to `go build`.
+		for _, name := range []string{"Set up Go", "Restore Go module cache", "Verify Go modules", "Restore non-race Go build cache"} {
+			if st := job.step(t, name); st.If != fallbackIf {
+				t.Errorf("%s step %q: if %q, want %q", lane.job, name, st.If, fallbackIf)
+			}
+		}
+
+		// The language setup and the gate command run whenever detection
+		// did, whichever bd path provided the binary.
+		if st := job.step(t, lane.langStepName); st.If != detectIf {
+			t.Errorf("%s step %q: if %q, want %q", lane.job, lane.langStepName, st.If, detectIf)
+		}
+		gateName := "Run " + map[string]string{bazelPackageMCPJobName: "MCP", bazelPackageNPMJobName: "npm"}[lane.job] + " package gate"
+		gate := job.step(t, gateName)
+		if gate.If != detectIf || gate.Run != lane.makeTarget {
+			t.Errorf("%s gate step: if %q, run %q; want if %q, run %q", lane.job, gate.If, gate.Run, detectIf, lane.makeTarget)
+		}
+		if job.stepIndex(t, gateName) != len(job.Steps)-2 {
+			t.Errorf("%s gate step is not the last step before the result recorder", lane.job)
+		}
+	}
 }
 
 // The Dolt server fingerprint (container image vs the pinned dolt CLI the

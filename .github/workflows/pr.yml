@@ -38,9 +38,10 @@ jobs:
 
   # D2 step 3: stands down where bazel-coverage says pr_lanes (same-repo,
   # non-Dependabot PRs while BAZEL_RETIRES_LEGACY_PR_LANES is "true"): its
-  # consumers then stand down too, or (the package gates) take bazel.yml's
-  # bazel-ci-build-artifacts, the same layout built by Bazel /
-  # test, which ci-gate then requires to have run remotely and passed.
+  # consumers then stand down too. F3: the package gates (package-mcp,
+  # package-npm) are no longer among those consumers - they moved into
+  # bazel.yml and build their own bd (Bazel-built on same-repo PRs, `go
+  # build` otherwise), needing only the call's rbe job.
   build-artifacts:
     name: Build Artifacts
     runs-on: ubuntu-latest
@@ -733,154 +734,10 @@ jobs:
           fi
           echo "No .beads/issues.jsonl changes detected"
 
-  detect-package-gates:
-    name: Detect package gates
-    runs-on: ubuntu-latest
-    outputs:
-      mcp_package: ${{ steps.detect.outputs.mcp_package }}
-      npm_package: ${{ steps.detect.outputs.npm_package }}
-      reason: ${{ steps.detect.outputs.reason }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          fetch-depth: 0
-
-      - name: Decide package gates
-        id: detect
-        env:
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PUSH_BEFORE_SHA: ${{ github.event.before }}
-          PUSH_AFTER_SHA: ${{ github.sha }}
-        run: ./scripts/ci/detect-package-gates.sh
-
-  package-mcp:
-    name: Package Gate (MCP)
-    runs-on: ubuntu-latest
-    # D2 step 3: where bazel-coverage says pr_lanes, build-artifacts stands
-    # down and this gate takes the Bazel-built bd (bazel-ci-build-artifacts,
-    # uploaded by the bazel call's `test` lane), so it waits for the call.
-    needs: [detect-package-gates, build-artifacts, bazel-coverage, bazel]
-    if: ${{ !cancelled() && needs.detect-package-gates.result == 'success' && needs.bazel-coverage.result == 'success' && (needs.bazel-coverage.outputs.pr_lanes == 'true' || needs.build-artifacts.result == 'success') }}
-    steps:
-      - name: Check applicability
-        id: applicability
-        run: |
-          echo "run=${{ needs.detect-package-gates.outputs.mcp_package }}" >> "$GITHUB_OUTPUT"
-          if [[ "${{ needs.detect-package-gates.outputs.mcp_package }}" != "true" ]]; then
-            echo "MCP package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
-          fi
-
-      # D2 step 3: where build-artifacts stood down, the bd comes from the
-      # bazel call's `test` lane, which runs only in mode remote; say so
-      # instead of failing on a missing artifact (ci-gate is red then too,
-      # BAZEL_PR_LANES_RETIRED).
-      - name: Check the Bazel-built bd exists
-        if: steps.applicability.outputs.run == 'true' && needs.bazel-coverage.outputs.pr_lanes == 'true'
-        env:
-          BAZEL_RBE_MODE: ${{ needs.bazel.outputs.rbe-mode }}
-        run: |
-          if [[ "$BAZEL_RBE_MODE" != "remote" ]]; then
-            echo "::error::Build Artifacts stood down for Bazel / test (BAZEL_RETIRES_LEGACY_PR_LANES), but the Bazel call ran in mode '${BAZEL_RBE_MODE:-none}', so no bd was built for this gate. See BAZEL_PR_LANES_RETIRED in CI Gate / Required."
-            exit 1
-          fi
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        if: steps.applicability.outputs.run == 'true'
-
-      - name: Set up Python
-        if: steps.applicability.outputs.run == 'true'
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.14'
-
-      - name: Install uv
-        if: steps.applicability.outputs.run == 'true'
-        run: python -m pip install uv==0.11.16
-
-      - name: Download build artifacts
-        if: steps.applicability.outputs.run == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: ${{ needs.bazel-coverage.outputs.pr_lanes == 'true' && 'bazel-ci-build-artifacts' || 'ci-build-artifacts' }}
-          path: ci-build-artifacts
-
-      - name: Verify build artifacts
-        if: steps.applicability.outputs.run == 'true'
-        run: |
-          set -euo pipefail
-          cd ci-build-artifacts
-          sha256sum -c SHA256SUMS
-          chmod +x bd-linux-gms-pure
-
-      - name: Run MCP package gate
-        if: steps.applicability.outputs.run == 'true'
-        env:
-          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
-        run: make ci-package-mcp
-
-  package-npm:
-    name: Package Gate (npm)
-    runs-on: ubuntu-latest
-    # D2 step 3: where bazel-coverage says pr_lanes, build-artifacts stands
-    # down and this gate takes the Bazel-built bd (bazel-ci-build-artifacts,
-    # uploaded by the bazel call's `test` lane), so it waits for the call.
-    needs: [detect-package-gates, build-artifacts, bazel-coverage, bazel]
-    if: ${{ !cancelled() && needs.detect-package-gates.result == 'success' && needs.bazel-coverage.result == 'success' && (needs.bazel-coverage.outputs.pr_lanes == 'true' || needs.build-artifacts.result == 'success') }}
-    steps:
-      - name: Check applicability
-        id: applicability
-        run: |
-          echo "run=${{ needs.detect-package-gates.outputs.npm_package }}" >> "$GITHUB_OUTPUT"
-          if [[ "${{ needs.detect-package-gates.outputs.npm_package }}" != "true" ]]; then
-            echo "npm package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
-          fi
-
-      # D2 step 3: where build-artifacts stood down, the bd comes from the
-      # bazel call's `test` lane, which runs only in mode remote; say so
-      # instead of failing on a missing artifact (ci-gate is red then too,
-      # BAZEL_PR_LANES_RETIRED).
-      - name: Check the Bazel-built bd exists
-        if: steps.applicability.outputs.run == 'true' && needs.bazel-coverage.outputs.pr_lanes == 'true'
-        env:
-          BAZEL_RBE_MODE: ${{ needs.bazel.outputs.rbe-mode }}
-        run: |
-          if [[ "$BAZEL_RBE_MODE" != "remote" ]]; then
-            echo "::error::Build Artifacts stood down for Bazel / test (BAZEL_RETIRES_LEGACY_PR_LANES), but the Bazel call ran in mode '${BAZEL_RBE_MODE:-none}', so no bd was built for this gate. See BAZEL_PR_LANES_RETIRED in CI Gate / Required."
-            exit 1
-          fi
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        if: steps.applicability.outputs.run == 'true'
-
-      - name: Set up Node.js
-        if: steps.applicability.outputs.run == 'true'
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
-        with:
-          node-version: '24'
-
-      - name: Download build artifacts
-        if: steps.applicability.outputs.run == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: ${{ needs.bazel-coverage.outputs.pr_lanes == 'true' && 'bazel-ci-build-artifacts' || 'ci-build-artifacts' }}
-          path: ci-build-artifacts
-
-      - name: Verify build artifacts
-        if: steps.applicability.outputs.run == 'true'
-        run: |
-          set -euo pipefail
-          cd ci-build-artifacts
-          sha256sum -c SHA256SUMS
-          chmod +x bd-linux-gms-pure
-
-      - name: Run npm package gate
-        if: steps.applicability.outputs.run == 'true'
-        env:
-          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
-        run: make ci-package-npm
-
-
+  # F3: package-mcp and package-npm (and the detect job that fed them) moved
+  # into bazel.yml, which pr.yml calls with package-gates: "on" below. They
+  # now depend on nothing but the rbe job's decision, so they no longer wait
+  # on build-artifacts, bazel-coverage or the rest of the bazel call.
   pr-policy-wrapper:
     name: PR Policy (wrapper timing)
     runs-on: ubuntu-latest
@@ -1986,6 +1843,9 @@ jobs:
     with:
       build-artifact-name: bazel-ci-build-artifacts
       integration: "on"
+      # F3: only pr.yml opts in; the package-mcp/package-npm jobs run inside
+      # this call, needing only its rbe job.
+      package-gates: "on"
 
   # D2: pr-risk.yml's bazel-coverage job, verbatim (policy-tested
   # identical). Where it says a tier is covered, PR Risk skips that tier's
@@ -1995,7 +1855,13 @@ jobs:
   # lanes to have run remotely and passed in this run.
   bazel-coverage:
     name: Bazel tier coverage
-    runs-on: ubuntu-latest
+    # F3: same-repo PRs and merge_group get the org's Blacksmith pool; forks,
+    # Dependabot and any other event stay GitHub-hosted. This job restores no
+    # GitHub-saved cache, so Blacksmith's inability to see one does not cost
+    # it anything. Must stay byte-identical to pr-risk.yml's copy
+    # (TestPRRiskBazelCoverageJob) and to the TestSameRepoBlacksmithRunners
+    # pin.
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 5
     outputs:
       embedded: ${{ steps.decide.outputs.embedded }}
@@ -2051,7 +1917,12 @@ jobs:
 
   ci-gate:
     name: CI Gate / Required
-    runs-on: ubuntu-latest
+    # F3: same-repo PRs and merge_group get the org's Blacksmith pool; forks,
+    # Dependabot and any other event stay GitHub-hosted. This job restores no
+    # GitHub-saved cache. Must match the TestSameRepoBlacksmithRunners pin;
+    # the gate's NAME must never change (ruleset requires exactly "CI Gate /
+    # Required").
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     needs:
       - build-artifacts
       - check-build-tags
@@ -2065,9 +1936,6 @@ jobs:
       - check-doc-freshness-platforms
       - pr-preflight-platforms
       - check-no-beads-changes
-      - detect-package-gates
-      - package-mcp
-      - package-npm
       - pr-policy-wrapper
       - pr-core-wrapper
       - scripts-go-checks
@@ -2100,7 +1968,6 @@ jobs:
             CHECK_DOC_FRESHNESS_PLATFORMS
             PR_PREFLIGHT_PLATFORMS
             CHECK_NO_BEADS_CHANGES
-            DETECT_PACKAGE_GATES
             PACKAGE_MCP
             PACKAGE_NPM
             PR_POLICY_WRAPPER
@@ -2137,9 +2004,12 @@ jobs:
           CHECK_DOC_FRESHNESS_PLATFORMS: ${{ needs.check-doc-freshness-platforms.result }}
           PR_PREFLIGHT_PLATFORMS: ${{ needs.pr-preflight-platforms.result }}
           CHECK_NO_BEADS_CHANGES: ${{ needs.check-no-beads-changes.result }}
-          DETECT_PACKAGE_GATES: ${{ needs.detect-package-gates.result }}
-          PACKAGE_MCP: ${{ needs.package-mcp.result }}
-          PACKAGE_NPM: ${{ needs.package-npm.result }}
+          # F3: package-mcp/package-npm now run inside the bazel call; their
+          # job.status surfaces as a call output exactly like the Bazel lanes
+          # below, never "skipped" on pr.yml (package-gates is always "on"
+          # here).
+          PACKAGE_MCP: ${{ needs.bazel.outputs.package-mcp || 'skipped' }}
+          PACKAGE_NPM: ${{ needs.bazel.outputs.package-npm || 'skipped' }}
           PR_POLICY_WRAPPER: ${{ needs.pr-policy-wrapper.result }}
           PR_CORE_WRAPPER: ${{ needs.pr-core-wrapper.result }}
           SCRIPTS_GO_CHECKS: ${{ needs.scripts-go-checks.result }}

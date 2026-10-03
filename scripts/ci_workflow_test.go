@@ -1205,11 +1205,13 @@ func assertNoUnmanagedGoCacheSteps(t *testing.T, workflows map[string]ciWorkflow
 const (
 	setupGoActionFamily         = "actions/setup-go"
 	setupNodeActionFamily       = "actions/setup-node"
+	setupPythonActionFamily     = "actions/setup-python"
 	cacheMonolithicActionFamily = "actions/cache"
 	cacheRestoreActionFamily    = "actions/cache/restore"
 	cacheSaveActionFamily       = "actions/cache/save"
 	setupGoSHA                  = "b7ad1dad31e06c5925ef5d2fc7ad053ef454303e"
 	setupNodeSHA                = "820762786026740c76f36085b0efc47a31fe5020"
+	setupPythonSHA              = "5fda3b95a4ea91299a34e894583c3862153e4b97"
 	cacheSHA                    = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
 	goCacheSchema               = "v2"
 	goBaseTag                   = "gms_pure_go"
@@ -1773,7 +1775,20 @@ const (
 	bazelIntegJobName   = "bazel-integration"
 	bazelProxiedJobName = "bazel-proxied"
 	bazelServerJobName  = "bazel-server-storage"
-	setupBazelActionDir = ".github/actions/setup-bazel"
+	// F3: the MCP and npm package gates, moved here from pr.yml so they need
+	// only the rbe job. Unlike every other lane they do not mirror a Bazel
+	// config; pr.yml opts them in with package-gates: "on".
+	bazelPackageMCPJobName = "package-mcp"
+	bazelPackageNPMJobName = "package-npm"
+	setupBazelActionDir    = ".github/actions/setup-bazel"
+)
+
+// F3: package-mcp and package-npm, the two lanes bazel-gate.sh does not
+// know about at all - their skip reason is the caller's package-gates
+// input, never the rbe job's mode.
+var bazelPackageJobs = map[string]bool{bazelPackageMCPJobName: true, bazelPackageNPMJobName: true}
+
+const (
 	uploadArtifactSHA   = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 	downloadArtifactSHA = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
 	checkoutSHA         = "3d3c42e5aac5ba805825da76410c181273ba90b1"
@@ -1787,8 +1802,9 @@ const (
 )
 
 // bazel.yml's jobs: the rbe job that decides the execution mode, the
-// --config=ci lane, and one job per CI job a Bazel config mirrors.
-var bazelJobNames = []string{bazelDoltJobName, bazelEmbedJobName, bazelIntegJobName, bazelProxiedJobName, bazelPureJobName, bazelServerJobName, bazelJobName, bazelRBEJobName}
+// --config=ci lane, one job per CI job a Bazel config mirrors, and the two
+// package gates (F3), sorted alphabetically to match TestBazelWorkflowJobsAndExecutionMode's sort.Strings.
+var bazelJobNames = []string{bazelDoltJobName, bazelEmbedJobName, bazelIntegJobName, bazelProxiedJobName, bazelPureJobName, bazelServerJobName, bazelJobName, bazelPackageMCPJobName, bazelPackageNPMJobName, bazelRBEJobName}
 
 // The lanes that only run remotely (skipped unless the rbe job chose remote);
 // bazel-integration runs remotely or with the read-only cache (bazelIntegIf);
@@ -1826,6 +1842,10 @@ var bazelLaneGateIDs = map[string]string{
 	// twins run only on push to main: remotely on same-repo PRs, locally
 	// with the read-only cache (mode cache) on fork and Dependabot PRs.
 	bazelIntegJobName: "BAZEL_INTEGRATION",
+	// F3: never skippable on pr.yml (package-gates is always "on" there), so
+	// bazel-gate.sh's skip list never names them.
+	bazelPackageMCPJobName: "PACKAGE_MCP",
+	bazelPackageNPMJobName: "PACKAGE_NPM",
 }
 
 // None today: every lane is gated. Kept so a future lane that pr.yml's call
@@ -1841,6 +1861,28 @@ var bazelAdvisoryLanes = map[string]string{}
 // lane keeps running on main.
 const bazelIntegIf = "${{ (needs.rbe.outputs.mode == 'remote' || needs.rbe.outputs.mode == 'cache') && inputs.integration != 'off' }}"
 
+// F3: package-mcp and package-npm's if. Unlike every other lane's, it does
+// not read the rbe job's outputs at all - only the caller's package-gates
+// input - so these two never skip because of execution mode, only because a
+// caller left package-gates at its default "off".
+const bazelPackageGatesIf = "${{ inputs.package-gates == 'on' }}"
+
+// F3: the package gates' runner. 4 vCPU, not bazel.yml's usual 2: pytest-xdist
+// -n 8 is pinned to measured timing on a 4 vCPU runner (tools/f3).
+const bazelPackageRunsOn = "${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
+
+// F3: the rbe job's own runner (not gated by its own outputs - it decides
+// them). Same-repo PRs and merge_group/push/dispatch/schedule (never forks)
+// get Blacksmith; a pull_request_target farm run and any fork or Dependabot
+// PR stay GitHub-hosted. Pinned verbatim by TestSameRepoBlacksmithRunners.
+const wantRBERunsOn = "${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
+
+// F3: the same "same-repo PR, or merge_group" Blacksmith expression used by
+// pr.yml's and pr-risk.yml's bazel-coverage/ci-gate/detect-ci-tier jobs - a
+// package-level const so every test that needs it (TestSameRepoBlacksmithRunners,
+// TestPRRiskBazelCoverageJob, ...) reads the one literal.
+const sameRepoBlacksmith2vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
+
 // pr.yml's call of bazel.yml: exactly these inputs (review D1 v2 N3). An rbe
 // override would put every PR in local mode and ungate the embedded tier
 // while the gate stays self-consistent; integration: "off" would drop the
@@ -1849,6 +1891,9 @@ const bazelIntegIf = "${{ (needs.rbe.outputs.mode == 'remote' || needs.rbe.outpu
 var bazelPRCallWith = map[string]string{
 	"build-artifact-name": "bazel-ci-build-artifacts",
 	"integration":         "on",
+	// F3: only pr.yml opts in; bazel-farm.yml and nightly.yml keep the
+	// default "off" (TestBazelGateSimulation's other callers).
+	"package-gates": "on",
 }
 
 // The call's aggregate result (needs.bazel.result, through bazel-gate.sh).
@@ -1931,6 +1976,15 @@ func TestBazelWorkflowJobsAndExecutionMode(t *testing.T) {
 		"RBE_INSTANCE":          "${{ " + gate + "'oss' || '' }}",
 		"BAZEL_FORK_CACHE":      "${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}",
 	}
+	// F3: the rbe job itself runs on Blacksmith for same-repo PRs (and
+	// merge_group/push/dispatch/schedule, which are never forks); a
+	// pull_request_target farm run and any fork or Dependabot PR stay
+	// GitHub-hosted. Pinned again, verbatim, by TestSameRepoBlacksmithRunners.
+	if rbe, ok := workflow.Jobs[bazelRBEJobName]; !ok {
+		t.Fatalf("%s has no %s job", bazelWorkflowName, bazelRBEJobName)
+	} else if rbe.RunsOn != wantRBERunsOn {
+		t.Errorf("%s runs-on = %q, want %q", bazelRBEJobName, rbe.RunsOn, wantRBERunsOn)
+	}
 	for name, job := range workflow.Jobs {
 		if name == bazelRBEJobName {
 			continue
@@ -1938,22 +1992,110 @@ func TestBazelWorkflowJobsAndExecutionMode(t *testing.T) {
 		if !reflect.DeepEqual([]string(job.Needs), []string{bazelRBEJobName}) {
 			t.Errorf("%s needs = %v, want [%s]", name, job.Needs, bazelRBEJobName)
 		}
-		if job.RunsOn != wantRunsOn {
-			t.Errorf("%s runs-on = %q, want %q", name, job.RunsOn, wantRunsOn)
+		// F3: the package gates use a 4 vCPU runner (pytest-xdist -n 8) and
+		// their own if (the caller's package-gates input, not the rbe job's
+		// mode - they never skip for execution-mode reasons).
+		wantJobRunsOn, wantJobIf := wantRunsOn, wantIf
+		if bazelPackageJobs[name] {
+			wantJobRunsOn, wantJobIf = bazelPackageRunsOn, bazelPackageGatesIf
+		} else if bazelRemoteOnlyJobs[name] {
+			wantJobIf = wantRemoteOnlyIf
+		} else if name == bazelIntegJobName {
+			wantJobIf = bazelIntegIf
 		}
-		want := wantIf
-		if bazelRemoteOnlyJobs[name] {
-			want = wantRemoteOnlyIf
+		if job.RunsOn != wantJobRunsOn {
+			t.Errorf("%s runs-on = %q, want %q", name, job.RunsOn, wantJobRunsOn)
 		}
-		if name == bazelIntegJobName {
-			want = bazelIntegIf
-		}
-		if job.If != want {
-			t.Errorf("%s if = %q, want %q", name, job.If, want)
+		if job.If != wantJobIf {
+			t.Errorf("%s if = %q, want %q", name, job.If, wantJobIf)
 		}
 		for _, step := range job.Steps {
 			if step.Uses == "./"+setupBazelActionDir && !reflect.DeepEqual(step.Env, wantSetupEnv) {
 				t.Errorf("%s setup-bazel env = %v, want %v", name, step.Env, wantSetupEnv)
+			}
+		}
+	}
+}
+
+// F3: bazelPackageRunsOn's comment and the package-mcp job's 4 vCPU runner
+// are both premised on mcp_pytest() in package-mcp.sh passing an explicit
+// "-n 8" (not "-n auto", which would reintroduce the CPU-count/cgroup-quota
+// mismatch -n 8 was pinned to avoid), and on pytest-xdist itself being a
+// locked dev dependency so that worker count is reproducible across CI runs.
+// Neither half of that premise is checked by any other policy test, so pin
+// both here directly against the script and the MCP package's manifest/lock.
+func TestMCPPytestWorkerCountPinned(t *testing.T) {
+	root := sourceRepoRoot(t)
+	script := readPolicyFile(t, root, "scripts/ci/package-mcp.sh")
+	if !strings.Contains(script, "pytest -n 8") {
+		t.Errorf("scripts/ci/package-mcp.sh mcp_pytest() does not pass an explicit -n 8")
+	}
+	if strings.Contains(script, "-n auto") {
+		t.Errorf("scripts/ci/package-mcp.sh mcp_pytest() uses -n auto; want the pinned -n 8")
+	}
+	pyproject := readPolicyFile(t, root, "integrations/beads-mcp/pyproject.toml")
+	if !regexp.MustCompile(`(?m)^\s*"pytest-xdist[><=]`).MatchString(pyproject) {
+		t.Errorf("integrations/beads-mcp/pyproject.toml does not pin pytest-xdist as a dev dependency")
+	}
+	lock := readPolicyFile(t, root, "integrations/beads-mcp/uv.lock")
+	if !strings.Contains(lock, "name = \"pytest-xdist\"") {
+		t.Errorf("integrations/beads-mcp/uv.lock has no locked pytest-xdist entry; run uv lock")
+	}
+}
+
+// F3: package-mcp and package-npm's job definitions (including the very
+// detect step this script's output feeds) moved into bazel.yml, so a PR that
+// edits only bazel.yml's package-gate logic must still self-trigger both
+// gates the same way editing pr.yml/main.yml/pr-risk.yml does; otherwise a
+// change to the job that runs the gates could ship without the gates having
+// run against it. No other policy test reads this script's content.
+func TestDetectPackageGatesCoversBazelWorkflow(t *testing.T) {
+	root := sourceRepoRoot(t)
+	script := readPolicyFile(t, root, "scripts/ci/detect-package-gates.sh")
+	re := regexp.MustCompile(`(?s)scripts/ci/detect-package-gates\.sh\|[^)]*\)\s*\n\s*mcp_package=true\s*\n\s*npm_package=true`)
+	loc := re.FindString(script)
+	if loc == "" {
+		t.Fatalf("scripts/ci/detect-package-gates.sh has no case arm forcing both mcp_package and npm_package true alongside its own path")
+	}
+	if !strings.Contains(loc, ".github/workflows/bazel.yml") {
+		t.Errorf("scripts/ci/detect-package-gates.sh's both-gates case arm does not include .github/workflows/bazel.yml, where the package-mcp/package-npm job definitions now live")
+	}
+}
+
+// F3: the exact "same-repo PR, or merge_group" Blacksmith expression, pinned
+// once per job so a future edit cannot drift one copy from another. Reads no
+// repo variable, so the rollback is a plain revert. The rbe job's own
+// version additionally covers push, workflow_dispatch and schedule (never
+// forks); every other job below reads only merge_group and pull_request.
+func TestSameRepoBlacksmithRunners(t *testing.T) {
+	want := map[string]map[string]string{
+		"pr.yml":          {"bazel-coverage": sameRepoBlacksmith2vcpu, "ci-gate": sameRepoBlacksmith2vcpu},
+		"pr-risk.yml":     {"bazel-coverage": sameRepoBlacksmith2vcpu, "ci-gate": sameRepoBlacksmith2vcpu, "detect-ci-tier": sameRepoBlacksmith2vcpu},
+		bazelWorkflowName: {bazelRBEJobName: wantRBERunsOn},
+	}
+	for file, jobs := range want {
+		workflow := readCIWorkflow(t, file)
+		for name, wantRunsOn := range jobs {
+			job, ok := workflow.Jobs[name]
+			if !ok {
+				t.Fatalf("%s has no %s job", file, name)
+			}
+			if job.RunsOn != wantRunsOn {
+				t.Errorf("%s %s runs-on = %q, want %q", file, name, job.RunsOn, wantRunsOn)
+			}
+		}
+	}
+	// No other job in pr.yml or pr-risk.yml may name a Blacksmith label: F4
+	// adds one more (not in this slice's scope), but nothing here should.
+	for _, file := range []string{"pr.yml", "pr-risk.yml"} {
+		workflow := readCIWorkflow(t, file)
+		allowed := want[file]
+		for name, job := range workflow.Jobs {
+			if allowed[name] != "" {
+				continue
+			}
+			if strings.Contains(job.RunsOn, "blacksmith-") {
+				t.Errorf("%s job %s runs-on %q names a Blacksmith label; only %v may", file, name, job.RunsOn, allowed)
 			}
 		}
 	}
@@ -2135,7 +2277,13 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 		wantBazelIDs = append(wantBazelIDs, r.retiredID)
 	}
 	for lane, id := range bazelLaneGateIDs {
-		wantBazelIDs = append(wantBazelIDs, id)
+		// F3: package-mcp/package-npm's ids (PACKAGE_MCP, PACKAGE_NPM) do not
+		// follow the "BAZEL" naming convention the prefix filter below
+		// groups by - they predate bazel.yml and keep their names - so they
+		// are checked here but excluded from wantBazelIDs.
+		if !bazelPackageJobs[lane] {
+			wantBazelIDs = append(wantBazelIDs, id)
+		}
 		if want := "${{ needs.bazel.outputs." + lane + " || 'skipped' }}"; evaluate.Env[id] != want {
 			t.Errorf("ci-gate env %s = %q, want %q", id, evaluate.Env[id], want)
 		}
@@ -2291,6 +2439,14 @@ func bazelLaneRunModes(t *testing.T, lane, ifExpr string, with map[string]string
 			return map[string]bool{}
 		}
 		return map[string]bool{"remote": true, "cache": true}
+	case bazelPackageGatesIf:
+		// F3: unlike every other lane, these two never skip because of the
+		// rbe job's decision - only because the caller turned them off
+		// entirely (pr.yml always passes "on").
+		if strings.EqualFold(with["package-gates"], "on") {
+			return map[string]bool{"remote": true, "cache": true, "local": true, "skip": true}
+		}
+		return map[string]bool{}
 	}
 	t.Fatalf("%s if = %q: teach bazelLaneRunModes which modes run it", lane, ifExpr)
 	return nil
@@ -2424,6 +2580,13 @@ func TestBazelGateSimulation(t *testing.T) {
 		var wantSkips []string
 		anyRuns := false
 		for lane, modes := range lanes {
+			// F3: bazel-gate.sh's skip list and its BAZEL aggregate are
+			// mode-derived only; it has never heard of package-mcp/npm
+			// (their own PACKAGE_MCP/PACKAGE_NPM scenarios are exercised
+			// below, by lane, not through this script).
+			if bazelPackageJobs[lane] {
+				continue
+			}
 			if modes[mode] {
 				anyRuns = true
 			} else if id, gated := bazelLaneGateIDs[lane]; gated {
@@ -2697,6 +2860,7 @@ func TestBazelWorkflowActionsArePinned(t *testing.T) {
 	}
 	want := map[string]string{
 		setupNodeActionFamily:       setupNodeSHA,
+		setupPythonActionFamily:     setupPythonSHA,
 		"actions/checkout":          checkoutSHA,
 		setupGoActionFamily:         setupGoSHA,
 		cacheRestoreActionFamily:    cacheSHA,
@@ -3975,9 +4139,13 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 func TestBazelRBEJobDecidesOnce(t *testing.T) {
 	workflow := readCIWorkflow(t, bazelWorkflowName)
 	job := workflow.job(t, bazelRBEJobName)
-	if len(job.Needs) != 0 || job.If != "" || job.RunsOn != "ubuntu-latest" || len(job.Env) != 0 {
-		t.Errorf("%s: needs %v, if %q, runs-on %q, env %v; want no needs, if or env, on ubuntu-latest",
-			bazelRBEJobName, job.Needs, job.If, job.RunsOn, job.Env)
+	// F3: runs-on picks the *venue* (Blacksmith for trusted same-repo PRs,
+	// ubuntu-latest otherwise) - a separate concern from the RBE mode
+	// decision (remote/cache/local/skip), which still lives solely in the
+	// decide step's outputs below.
+	if len(job.Needs) != 0 || job.If != "" || job.RunsOn != wantRBERunsOn || len(job.Env) != 0 {
+		t.Errorf("%s: needs %v, if %q, runs-on %q, env %v; want no needs, if or env, on %q",
+			bazelRBEJobName, job.Needs, job.If, job.RunsOn, job.Env, wantRBERunsOn)
 	}
 	wantOutputs := map[string]string{
 		"enabled": "${{ steps.decide.outputs.enabled }}",
@@ -4030,6 +4198,14 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 	rederive := regexp.MustCompile(`(?i)vars\.RBE_WEST_WORKERS|inputs\.rbe\b|inputs\.fork-farm|head\.repo\.fork|github\.actor|dependabot`)
 	walkYAML(readYAMLNode(t, filepath.Join(".github", "workflows", bazelWorkflowName)), "", func(path string, key bool, value string) {
 		if key || !rederive.MatchString(value) || strings.HasPrefix(path, ".jobs."+bazelRBEJobName+".steps[0].env.") {
+			return
+		}
+		// F3: the rbe job's own runs-on picks a runner venue (Blacksmith vs
+		// ubuntu-latest) for trusted same-repo PRs; it shares some of the
+		// same trust predicates (github.actor, dependabot) as the mode
+		// decision but decides something else entirely (where the decide
+		// step runs, not what it decides) - not a re-derivation of mode.
+		if path == ".jobs."+bazelRBEJobName+".runs-on" {
 			return
 		}
 		// The checkout opt-in for fork code (TestBazelWorkflowForkFarmInputs
