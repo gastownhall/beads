@@ -512,7 +512,7 @@ func TestPRComplexityReportIsAdvisoryAndBestEffort(t *testing.T) {
 	// (TestSameRepoBlacksmithRunners requires one of every moved job) that is
 	// a backstop against a stuck runner, not a realistic ceiling - every
 	// step underneath still carries its own tight timeout/continue-on-error.
-	if job.RunsOn != sameRepoBlacksmith2vcpu || job.TimeoutMinutes != 45 || job.ContinueOnError {
+	if job.RunsOn != sameRepoBlacksmith2vcpu || job.TimeoutMinutes != 60 || job.ContinueOnError {
 		t.Errorf("advisory-reports job must run on same-repo Blacksmith with a backstop timeout/no job continue-on-error: runs-on=%q timeout=%d continue=%v", job.RunsOn, job.TimeoutMinutes, job.ContinueOnError)
 	}
 	if contains(job.Needs, "ci-gate") {
@@ -2399,28 +2399,15 @@ const bazelPackageRunsOn = "${{ needs.rbe.outputs.enabled == 'true' && 'blacksmi
 // PR stay GitHub-hosted. Pinned verbatim by TestSameRepoBlacksmithRunners.
 const wantRBERunsOn = "${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
 
-// F3: the same "same-repo PR, or merge_group" Blacksmith expression used by
-// pr.yml's and pr-risk.yml's bazel-coverage/ci-gate/detect-ci-tier jobs - a
-// package-level const so every test that needs it (TestSameRepoBlacksmithRunners,
-// TestPRRiskBazelCoverageJob, ...) reads the one literal.
-const sameRepoBlacksmith2vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
-
-// F7a: the same same-repo expression at 4 vCPU, for jobs sized larger than
-// the 2 vCPU default (check-doc-flags, pr-policy-wrapper, pr-risk.yml's
-// test-nix).
-const sameRepoBlacksmith4vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
-
-// F7a/F4: the same same-repo expression at 8 vCPU. F7a uses it for
-// check-release-target-cross-compilation; F4 uses it for pr.yml's
-// windows-test-binaries cross-compile job (mingw build + two go test -c
-// compiles benefit from the extra cores). Both fall back to ubuntu-latest
-// for forks/Dependabot exactly like the 2vcpu const above.
-const sameRepoBlacksmith8vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
+// The sameRepoBlacksmith{2,4,8}vcpu consts and the real-expression evaluator
+// that checks them now live in ci_blacksmith_runner_test.go (shared with
+// F7c; see that file's doc comment for the API F7c rebases onto).
 
 // F4 review SF-1: main.yml's windows-test-binaries-cache job seeds the same
 // cache keys/paths from both runner selections pr.yml's windows-test-binaries
-// job can land on (sameRepoBlacksmith8vcpu above, for same-repo PRs/
-// merge_group; ubuntu-latest for forks/Dependabot). Blacksmith runners can't
+// job can land on (sameRepoBlacksmith8vcpu, defined in
+// ci_blacksmith_runner_test.go, for same-repo PRs/merge_group; ubuntu-latest
+// for forks/Dependabot). Blacksmith runners can't
 // see a GitHub-hosted runner's actions/cache entries (and vice versa) even
 // though both report the same runner.os/runner.arch, so a single-leg seeder
 // only ever warms one of the two consumer paths. matrix.runner (not a
@@ -2691,12 +2678,20 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 }
 
 // TestBlacksmithJobsReadNoSecrets: F7a's rule that a job whose runs-on can
-// select a Blacksmith label never reads a secret, in any form (job env, step
-// env, step with:, or a step's run: body interpolating ${{ secrets.X }}).
-// Blacksmith's ternary already falls back to ubuntu-latest for forks and
-// Dependabot, but the no-secrets rule is a second, independent backstop: even
-// a same-repo Blacksmith run should never need repository secrets for a
-// cache-free, read-only check.
+// select a Blacksmith label never reads a secret, in any form (job env, job
+// if:, step env, step with:, step if:, or a step's run: body interpolating
+// ${{ secrets.X }}). Blacksmith's ternary already falls back to ubuntu-latest
+// for forks and Dependabot, but the no-secrets rule is a second, independent
+// backstop: even a same-repo Blacksmith run should never need repository
+// secrets for a cache-free, read-only check.
+//
+// Review N-4 (2026-10-03): this also now scans job.If and step.If, since a
+// conditional guarded on a secret (e.g. an if: expression testing
+// secrets.FOO) would otherwise slip past the env/with/run checks below. It
+// does not yet inspect
+// container/services credentials or resolve matrix markers in runs-on
+// (neither ciWorkflowJob field exists today); that is deferred to F7b, which
+// is where container/services and matrix-aware runs-on resolution land.
 func TestBlacksmithJobsReadNoSecrets(t *testing.T) {
 	secretRef := regexp.MustCompile(`\bsecrets\s*(\.|\[)`)
 	for _, file := range []string{"pr.yml", "pr-risk.yml"} {
@@ -2705,12 +2700,18 @@ func TestBlacksmithJobsReadNoSecrets(t *testing.T) {
 			if !strings.Contains(job.RunsOn, "blacksmith-") {
 				continue
 			}
+			if secretRef.MatchString(job.If) {
+				t.Errorf("%s job %s if %q reads a secret; Blacksmith-eligible jobs must not", file, name, job.If)
+			}
 			for k, v := range job.Env {
 				if secretRef.MatchString(v) {
 					t.Errorf("%s job %s env %s = %q reads a secret; Blacksmith-eligible jobs must not", file, name, k, v)
 				}
 			}
 			for _, step := range job.Steps {
+				if secretRef.MatchString(step.If) {
+					t.Errorf("%s job %s step %q if %q reads a secret", file, name, step.Name, step.If)
+				}
 				for k, v := range step.Env {
 					if secretRef.MatchString(v) {
 						t.Errorf("%s job %s step %q env %s = %q reads a secret", file, name, step.Name, k, v)
@@ -2729,56 +2730,11 @@ func TestBlacksmithJobsReadNoSecrets(t *testing.T) {
 	}
 }
 
-// TestSameRepoBlacksmithExpressionSemantics is a table test of the same-repo
-// Blacksmith selection expression (sameRepoBlacksmith2vcpu et al. share one
-// literal form, differing only in the Blacksmith label) against every event
-// shape the policy cares about: trusted same-repo PRs and merge_group get
-// Blacksmith; forks, Dependabot, a deleted fork head, and any other event
-// fall back to ubuntu-latest. A hand-rolled re-implementation is checked
-// against the table first, then every pinned expression constant is checked
-// to literally equal the template this test builds from the same pieces, so
-// the two can never drift apart silently.
-func TestSameRepoBlacksmithExpressionSemantics(t *testing.T) {
-	type ctx struct {
-		event      string
-		headRepo   string // github.event.pull_request.head.repo.full_name ("" = fork/deleted)
-		actor      string
-		wantRunner bool
-	}
-	const ownRepo = "steveyegge/beads"
-	cases := []ctx{
-		{event: "pull_request", headRepo: ownRepo, actor: "alice", wantRunner: true},
-		{event: "merge_group", headRepo: "", actor: "", wantRunner: true},
-		{event: "pull_request", headRepo: "someone-else/beads", actor: "alice", wantRunner: false},
-		{event: "pull_request", headRepo: "", actor: "alice", wantRunner: false}, // deleted fork head
-		{event: "pull_request", headRepo: ownRepo, actor: "dependabot[bot]", wantRunner: false},
-		{event: "push", headRepo: "", actor: "alice", wantRunner: false},
-		{event: "pull_request_target", headRepo: ownRepo, actor: "alice", wantRunner: false},
-		{event: "schedule", headRepo: "", actor: "", wantRunner: false},
-		{event: "workflow_dispatch", headRepo: "", actor: "", wantRunner: false},
-	}
-	evalSameRepoBlacksmith := func(c ctx) bool {
-		return c.event == "merge_group" ||
-			(c.event == "pull_request" && c.headRepo == ownRepo && c.actor != "dependabot[bot]")
-	}
-	for _, c := range cases {
-		if got := evalSameRepoBlacksmith(c); got != c.wantRunner {
-			t.Errorf("%+v: evalSameRepoBlacksmith = %v, want %v", c, got, c.wantRunner)
-		}
-	}
-	// Every pinned same-repo-Blacksmith constant must share this exact
-	// template, varying only the Blacksmith label.
-	for label, want := range map[string]string{
-		"blacksmith-2vcpu-ubuntu-2404": sameRepoBlacksmith2vcpu,
-		"blacksmith-4vcpu-ubuntu-2404": sameRepoBlacksmith4vcpu,
-		"blacksmith-8vcpu-ubuntu-2404": sameRepoBlacksmith8vcpu,
-	} {
-		got := "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && '" + label + "' || 'ubuntu-latest' }}"
-		if got != want {
-			t.Errorf("same-repo Blacksmith template for %s = %q, want %q", label, got, want)
-		}
-	}
-}
+// TestSameRepoBlacksmithExpressionSemantics now lives in
+// ci_blacksmith_runner_test.go, which evaluates the real
+// sameRepoBlacksmith{2,4,8}vcpu expression strings with a small GitHub
+// Actions expression evaluator instead of a hand-written Go mirror
+// (review SF-3). That file is shared with F7c.
 
 // TestPRCIGateFastChecksTokens pins pr.yml's F7a fold of five formerly
 // standalone jobs (check-build-tags, check-version-consistency,
@@ -2843,6 +2799,124 @@ func TestPRCIGateFastChecksTokens(t *testing.T) {
 	// unchanged by the fold.
 	if !strings.Contains(gateStep.Run, `skipped_ok="CHECK_NO_BEADS_CHANGES"`) {
 		t.Error("ci-gate run script no longer allow-lists CHECK_NO_BEADS_CHANGES's merge_group skip")
+	}
+
+	// Review N-6 (2026-10-03): pin the folded steps' actual commands/env, not
+	// just their id/if/output/token wiring. These three gaps predate F7a (the
+	// standalone jobs were never pinned either), but fast-checks is now one
+	// job, so the cost of covering them here is marginal.
+	buildTags := job.step(t, "Check build-tag policy")
+	for _, want := range []string{
+		"./scripts/check-build-tags.sh",
+		"./scripts/check-go-install-guidance.sh",
+		"./scripts/check-winget-portable-alias.sh",
+	} {
+		if !strings.Contains(buildTags.Run, want) {
+			t.Errorf("fast-checks build-tags step run does not call %s:\n%s", want, buildTags.Run)
+		}
+	}
+	migrationHygiene := job.step(t, "Run migration hygiene checks")
+	const wantBaseSHA = "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}"
+	if migrationHygiene.Env["BASE_SHA"] != wantBaseSHA {
+		t.Errorf("fast-checks migration-hygiene step env BASE_SHA = %q, want %q", migrationHygiene.Env["BASE_SHA"], wantBaseSHA)
+	}
+}
+
+// Review N-6 (2026-10-03): test-windows-small's dbproxy-server leg must keep
+// building CGO-disabled, same as before the fold.
+func TestPRWindowsSmallDbproxyServerIsCGODisabled(t *testing.T) {
+	pr := readCIWorkflow(t, "pr.yml")
+	job := pr.job(t, "test-windows-small")
+	step := job.step(t, "Run dbproxy server package tests on Windows")
+	if step.Env["CGO_ENABLED"] != "0" {
+		t.Errorf("test-windows-small dbproxy-server step env CGO_ENABLED = %q, want \"0\"", step.Env["CGO_ENABLED"])
+	}
+}
+
+// stepContinueOnError reports whether a step's continue-on-error is truthy
+// (the field unmarshals as `any` because the YAML schema also allows an
+// expression string, which GitHub itself treats as whatever it evaluates to
+// - this test only cares about the literal `true` every current step uses).
+func stepContinueOnError(step ciWorkflowStep) bool {
+	v, ok := step.ContinueOnError.(bool)
+	return ok && v
+}
+
+// TestPRWindowsMakeShellLegsFailTheJob is review SF-1 (2026-10-03):
+// windows-make-shell is a required gate (WINDOWS_MAKE_SHELL). Before this
+// fix, every leg's install/exercise step carried continue-on-error and a
+// hand-written final step reconstructed the job's pass/fail from each step's
+// .outcome - two mutations (an aggregator that always exits 0, and one that
+// silently dropped the MSYS2 install check) both passed the suite, because
+// nothing pinned the aggregator's own correctness. The fix removes the
+// aggregator entirely: every step after checkout keeps `if: !cancelled()`
+// (so a failing leg does not stop later legs from attempting to run), but
+// only the Cygwin *setup* step (a flaky installer download, not a code
+// failure) may carry continue-on-error. Every other step's failure now fails
+// the job directly, with no hand-written logic in between to go stale.
+func TestPRWindowsMakeShellLegsFailTheJob(t *testing.T) {
+	pr := readCIWorkflow(t, "pr.yml")
+	// Only the install/exercise "leg" steps need `if: !cancelled()` (so a
+	// failing leg does not stop a later, independent leg from attempting to
+	// run) and the no-continue-on-error rule; checkout/setup steps that every
+	// leg depends on are deliberately left to run unconditionally.
+	legSteps := map[string][]string{
+		"windows-make-shell": {
+			"Install native GNU Make", "Set up MSYS2 GNU Make", "Set up Cygwin GNU Make",
+			"Warn when Cygwin setup was skipped by a download failure",
+			"Exercise native Windows Make", "Exercise MSYS2-hosted Make", "Exercise Cygwin-hosted Make",
+		},
+		"test-windows-small": {
+			"Run doltversion package tests on Windows", "Run dbproxy server package tests on Windows",
+		},
+	}
+	for jobName, names := range legSteps {
+		job := pr.job(t, jobName)
+		for _, name := range names {
+			step := job.step(t, name)
+			if !strings.Contains(step.If, "!cancelled()") {
+				t.Errorf("%s step %q if = %q, want it to contain !cancelled() so later legs still run after an earlier one fails", jobName, step.Name, step.If)
+			}
+			allowCOE := jobName == "windows-make-shell" && step.ID == "cygwin"
+			if stepContinueOnError(step) && !allowCOE {
+				t.Errorf("%s step %q (id %q) has continue-on-error; only windows-make-shell's Cygwin setup step may, so every other leg's failure reds the job directly", jobName, step.Name, step.ID)
+			}
+			if allowCOE && !stepContinueOnError(step) {
+				t.Errorf("%s Cygwin setup step lost continue-on-error; a flaky installer download would now fail the job", jobName)
+			}
+		}
+		for _, step := range job.Steps {
+			if strings.HasPrefix(step.Name, "Fail if") {
+				t.Errorf("%s still has a hand-written aggregator step %q; SF-1 replaced aggregators with per-step failure propagation", jobName, step.Name)
+			}
+			if step.ID != "cygwin" && stepContinueOnError(step) {
+				t.Errorf("%s step %q (id %q) has continue-on-error; only windows-make-shell's Cygwin setup step may", jobName, step.Name, step.ID)
+			}
+		}
+	}
+	// The aggregator's job outputs (native/msys2/cygwin) are gone too
+	// (review N-3): nothing reads them once ci-gate only needs the job's own
+	// .result.
+	windowsMakeShell := pr.job(t, "windows-make-shell")
+	if len(windowsMakeShell.Outputs) != 0 {
+		t.Errorf("windows-make-shell outputs = %v, want none (N-3: they were unused)", windowsMakeShell.Outputs)
+	}
+}
+
+// TestPRWindowsMakeShellSetupStepsHaveTimeouts is review SF-2 (2026-10-03):
+// the Cygwin and MSYS2 setup steps download third-party installers from the
+// network; a step timeout bounds how long a hang can block the later legs'
+// exercise steps behind it, instead of consuming the whole 30-minute job
+// timeout (which would also lose native/msys2 coverage, since their exercise
+// steps would never get a chance to run before the job-level cancel).
+func TestPRWindowsMakeShellSetupStepsHaveTimeouts(t *testing.T) {
+	pr := readCIWorkflow(t, "pr.yml")
+	job := pr.job(t, "windows-make-shell")
+	for _, name := range []string{"Set up MSYS2 GNU Make", "Set up Cygwin GNU Make"} {
+		step := job.step(t, name)
+		if step.TimeoutMinutes <= 0 {
+			t.Errorf("windows-make-shell step %q has no timeout-minutes", name)
+		}
 	}
 }
 

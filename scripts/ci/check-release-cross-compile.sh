@@ -10,6 +10,13 @@
 #
 # Usage: check-release-cross-compile.sh <group>
 #
+# Review N-1 (2026-10-03): the spec sketched a 2-wide parallel build per leg
+# with a per-target GOCACHE. This builds sequentially with one shared GOCACHE
+# instead - simpler, and safe because the targets in a group never touch the
+# same GOCACHE entries destructively. Measured per-target time on an 8 vCPU
+# Blacksmith runner is a couple of minutes, off the gate's critical path; if a
+# future group's wall time regresses past ~4 minutes, revisit 2-wide.
+#
 # Coverage boundary, carried over from the pre-fold job: every target here
 # builds CGO_ENABLED=0, but .goreleaser.yml builds bd-linux-amd64,
 # bd-linux-arm64 and bd-windows-amd64 with CGO_ENABLED=1, and the darwin pair
