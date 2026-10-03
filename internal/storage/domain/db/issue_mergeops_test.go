@@ -51,7 +51,7 @@ func (s *testSuite) issueUpdateSetMetadataMerges() {
 
 	err := r.Update(s.Ctx(), "bd-mo-set", map[string]any{
 		issueops.OpSetMetadata: []string{"tier=gold", "score=99"},
-	}, "tester", domain.IssueTableOpts{})
+	}, "tester", domain.IssueTableOpts{}, false)
 	s.Require().NoError(err)
 
 	got := s.readMetadataMap("bd-mo-set", domain.IssueTableOpts{})
@@ -66,7 +66,7 @@ func (s *testSuite) issueUpdateMergeMetadataOverlays() {
 
 	err := r.Update(s.Ctx(), "bd-mo-merge", map[string]any{
 		issueops.OpMergeMetadata: json.RawMessage(`{"b":3,"c":4}`),
-	}, "tester", domain.IssueTableOpts{})
+	}, "tester", domain.IssueTableOpts{}, false)
 	s.Require().NoError(err)
 
 	got := s.readMetadataMap("bd-mo-merge", domain.IssueTableOpts{})
@@ -82,7 +82,7 @@ func (s *testSuite) issueUpdateUnsetMetadataRemoves() {
 
 	err := r.Update(s.Ctx(), "bd-mo-unset", map[string]any{
 		issueops.OpUnsetMetadata: []string{"drop"},
-	}, "tester", domain.IssueTableOpts{})
+	}, "tester", domain.IssueTableOpts{}, false)
 	s.Require().NoError(err)
 
 	got := s.readMetadataMap("bd-mo-unset", domain.IssueTableOpts{})
@@ -96,7 +96,7 @@ func (s *testSuite) issueUpdateAppendNotes() {
 
 	err := r.Update(s.Ctx(), "bd-mo-notes", map[string]any{
 		issueops.OpAppendNotes: "second",
-	}, "tester", domain.IssueTableOpts{})
+	}, "tester", domain.IssueTableOpts{}, false)
 	s.Require().NoError(err)
 
 	out, err := r.Get(s.Ctx(), "bd-mo-notes", domain.IssueTableOpts{})
@@ -110,7 +110,7 @@ func (s *testSuite) issueUpdateAppendNotesEmpty() {
 
 	err := r.Update(s.Ctx(), "bd-mo-notes-empty", map[string]any{
 		issueops.OpAppendNotes: "only",
-	}, "tester", domain.IssueTableOpts{})
+	}, "tester", domain.IssueTableOpts{}, false)
 	s.Require().NoError(err)
 
 	out, err := r.Get(s.Ctx(), "bd-mo-notes-empty", domain.IssueTableOpts{})
@@ -125,7 +125,7 @@ func (s *testSuite) issueUpdateAppendNotesConflict() {
 	err := r.Update(s.Ctx(), "bd-mo-notes-conf", map[string]any{
 		issueops.OpAppendNotes: "second",
 		"notes":                "replacement",
-	}, "tester", domain.IssueTableOpts{})
+	}, "tester", domain.IssueTableOpts{}, false)
 	s.Require().Error(err)
 	s.Contains(err.Error(), "notes replacement")
 }
@@ -137,7 +137,7 @@ func (s *testSuite) issueUpdateSetMetadataConflict() {
 	err := r.Update(s.Ctx(), "bd-mo-set-conf", map[string]any{
 		issueops.OpSetMetadata: []string{"b=2"},
 		"metadata":             json.RawMessage(`{"c":3}`),
-	}, "tester", domain.IssueTableOpts{})
+	}, "tester", domain.IssueTableOpts{}, false)
 	s.Require().Error(err)
 	s.Contains(err.Error(), "metadata replacement")
 }
@@ -152,7 +152,7 @@ func (s *testSuite) issueUpdateMergeOpsWispRouting() {
 	err := r.Update(s.Ctx(), "bd-mo-wisp", map[string]any{
 		issueops.OpSetMetadata: []string{"extra=1"},
 		issueops.OpAppendNotes: "w2",
-	}, "tester", domain.IssueTableOpts{UseWispsTable: true})
+	}, "tester", domain.IssueTableOpts{UseWispsTable: true}, false)
 	s.Require().NoError(err)
 
 	out, err := r.Get(s.Ctx(), "bd-mo-wisp", domain.IssueTableOpts{UseWispsTable: true})

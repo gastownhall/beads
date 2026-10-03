@@ -206,6 +206,20 @@ func ManageStartedAt(oldIssue *types.Issue, updates map[string]interface{}, setC
 //
 // Returns true when the update ends/transfers the claim and the issue's lease
 // row must be deleted (DeleteLeaseInTx) after the row update.
+//
+// The claim verb itself is a deliberate, reviewed exception to "only ever
+// CLEARS" above: both backends re-arm a lease from inside the claim-carrying
+// update's own transaction rather than leaving it to this helper or to the
+// heartbeat self-heal (lease.go's actorMatches branch) on the next beat —
+// domain/db/issue.go's Update (IsClaim-gated) on the proxied/domain backend,
+// PR #5349's finalAssigneeIfStillClaimed on the classic/wisps backend.
+// Neither shares this helper's own arm/clear decision or bypasses its
+// contract for any other caller; sameClaim above still correctly never holds
+// for an assignee transfer. steveyegge, reviewing #5349's identical
+// invariant on the other backend: "Not sharing ManageLeaseOnUpdate is the
+// right call for exactly the reason stated: its pinned clear-only contract
+// (bd-9hpgf/#4716) and a sameClaim predicate that can never be true for this
+// transfer."
 func ManageLeaseOnUpdate(oldIssue *types.Issue, updates map[string]interface{}) bool {
 	rawStatus, hasStatus := updates["status"]
 	rawAssignee, hasAssignee := updates["assignee"]

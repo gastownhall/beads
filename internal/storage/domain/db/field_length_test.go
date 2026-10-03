@@ -51,7 +51,7 @@ func (s *testSuite) TestFieldLengthGuards() {
 	s.Run("UpdateOverLengthAssigneeRejected", func() {
 		r := s.issueRepo()
 		s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-fl-upd", "x"), "tester", domain.InsertIssueOpts{}))
-		err := r.Update(s.Ctx(), "bd-fl-upd", map[string]any{"assignee": over}, "tester", domain.IssueTableOpts{})
+		err := r.Update(s.Ctx(), "bd-fl-upd", map[string]any{"assignee": over}, "tester", domain.IssueTableOpts{}, false)
 		s.Require().ErrorIs(err, types.ErrFieldTooLong)
 	})
 

@@ -95,7 +95,7 @@ func (s *testSuite) iucDeleteRewritesRefs() {
 	s.seedOpenIssue("bd-iuc-ref-neighbor")
 	s.Require().NoError(s.issueRepo().Update(s.Ctx(), "bd-iuc-ref-neighbor",
 		map[string]any{"description": "see bd-iuc-ref-target for context"},
-		"seeder", domain.IssueTableOpts{}))
+		"seeder", domain.IssueTableOpts{}, false))
 	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
 		newDep("bd-iuc-ref-target", "bd-iuc-ref-neighbor", types.DepRelated), "tester", domain.DepInsertOpts{}))
 
@@ -240,7 +240,7 @@ func (s *testSuite) iucDeleteSkipsRefsWhenFlagOff() {
 	original := "links bd-iuc-noref-target here"
 	s.Require().NoError(s.issueRepo().Update(s.Ctx(), "bd-iuc-noref-neighbor",
 		map[string]any{"description": original},
-		"seeder", domain.IssueTableOpts{}))
+		"seeder", domain.IssueTableOpts{}, false))
 	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
 		newDep("bd-iuc-noref-target", "bd-iuc-noref-neighbor", types.DepRelated),
 		"tester", domain.DepInsertOpts{}))
@@ -431,7 +431,7 @@ func (s *testSuite) iucDeleteWispRewritesTextReferencesInWisps() {
 	s.seedOpenWisp(neighbor)
 	s.Require().NoError(s.issueRepo().Update(s.Ctx(), neighbor,
 		map[string]any{"description": "see " + target + " for context"},
-		"seeder", domain.IssueTableOpts{UseWispsTable: true}))
+		"seeder", domain.IssueTableOpts{UseWispsTable: true}, false))
 	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
 		newDep(target, neighbor, types.DepRelated), "tester", domain.DepInsertOpts{UseWispsTable: true}))
 
