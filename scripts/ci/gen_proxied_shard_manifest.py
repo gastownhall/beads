@@ -24,9 +24,35 @@ assignment keeps its exact current behavior):
     the file's "seconds_per_init_fallback" ratio, so a brand-new test still
     gets a plausible seconds-shaped weight instead of a unit-mismatched one.
 
-Either way, tests are packed into TOTAL shards longest-processing-time-first
-(heaviest first onto the currently lightest shard) so the heaviest shard's
-total is minimized.
+Either way, a from-scratch pack puts TOTAL shards' worth of tests together
+longest-processing-time-first (heaviest first onto the currently lightest
+shard) so the heaviest shard's total is minimized.
+
+--write is INCREMENTAL by default: it keeps every existing assignment in the
+requested total_shards block as-is, drops names that no longer exist (a
+test renamed, split or deleted since the block was last written), and LPT-
+places only the newly-discovered names onto whichever shards are currently
+lightest (by the requested --weights' cost model) — it never moves a test
+that is already assigned. This means two unrelated PRs that each add one new
+proxied test do not generate a textual conflict with each other (each only
+appends its own new test's line) and do not silently invalidate each other's
+packing. Pass --repack to instead throw away the existing block and do a
+full from-scratch LPT pack, exactly like earlier versions of this script
+always did — intentionally rebalancing every assignment, so expect large,
+unrelated-looking diffs when you do this on purpose.
+
+--check verifies exact-once NAME coverage only: every currently-discovered
+TestProxiedServer*/TestServerMode* function is listed in the requested
+total_shards block exactly once, with no stale (no-longer-existing) or
+duplicate entries. It does NOT verify that the block matches a fresh
+re-pack's shard *assignments* — an incremental --write intentionally
+diverges from a from-scratch repack over time, and reweighting
+proxied_test_durations.json no longer by itself fails --check (only adding,
+renaming, or removing a test does). If you need to confirm the packing is
+still well-balanced after a lot of incremental drift, run with --repack
+and read the stderr shard-load report, or pass --check anyway: it still
+reports the block's current loads to stderr even though it only gates on
+name coverage.
 
 The manifest file holds more than one block (one per total_shards value in
 use): the legacy, frozen 15-shard block pr-risk.yml/main.yml's jobs read, and
@@ -36,11 +62,11 @@ straight into the manifest file (`gen... 30 > file` deletes every other
 block). Use --write to update the file in place instead: it replaces only
 the block for the requested total_shards and leaves every other block
 untouched. Use --check to verify the committed block for a total_shards
-still matches a fresh (re-)generation, without writing anything — this is
-the form a CI policy check should call.
+has exact-once name coverage, without writing anything — this is the form a
+CI policy check should call.
 
 Usage: gen_proxied_shard_manifest.py [total_shards] [--weights=inits|duration]
-                                      [--write | --check] [--manifest PATH]
+                                      [--write [--repack] | --check] [--manifest PATH]
 """
 import argparse
 import glob
@@ -111,6 +137,44 @@ def pack(costs, total):
     return shards, loads
 
 
+def read_assignments(path, total):
+    """Return {name: shard_number} for path's block matching total_shards ==
+    total, or None if path or that block does not exist yet."""
+    if not os.path.exists(path):
+        return None
+    for b in split_blocks(open(path).read()):
+        if b['total'] == total:
+            assignments = {}
+            for ln in b['body']:
+                m = re.match(r'^(\d+) (\d+) (\S+)$', ln)
+                if m and int(m.group(1)) == total:
+                    assignments[m.group(3)] = int(m.group(2))
+            return assignments
+    return None
+
+
+def incremental_pack(costs, total, existing):
+    """Keep every name in `existing` that is still in `costs` on its current
+    shard; drop names no longer in `costs` (renamed/split/deleted); LPT-place
+    every name in `costs` not already in `existing` onto whichever shard is
+    currently lightest. Never moves an already-assigned test. Returns
+    (shards, loads), like pack()."""
+    shards = [[] for _ in range(total)]
+    loads = [0.0] * total
+    for name, shard_num in existing.items():
+        if name not in costs or not (1 <= shard_num <= total):
+            continue  # stale, or out of range for a changed total: re-place below
+        shards[shard_num - 1].append(name)
+        loads[shard_num - 1] += costs[name]
+    placed = {n for s in shards for n in s}
+    new_names = sorted((n for n in costs if n not in placed), key=lambda k: (-costs[k], k))
+    for name in new_names:
+        i = loads.index(min(loads))
+        shards[i].append(name)
+        loads[i] += costs[name]
+    return shards, loads
+
+
 def render(total, shards, weights):
     out = []
     out.append('# Proxied-server cmd test shard manifest.')
@@ -153,10 +217,19 @@ def render(total, shards, weights):
         out.append('# scripts/ci/proxied_test_durations.json (see that file for')
         out.append('# provenance and its "relative weight, not absolute SLA" caveat).')
         out.append(f'# Regenerate with scripts/ci/gen_proxied_shard_manifest.py {total}')
-        out.append('# --weights=duration --write after adding, splitting, or reweighting')
-        out.append('# TestProxiedServer*/TestServerMode* functions — ideally after')
-        out.append('# refreshing proxied_test_durations.json too (--check verifies this')
-        out.append('# block is not stale). Newly-added tests not listed here')
+        out.append('# --weights=duration --write after adding or removing')
+        out.append('# TestProxiedServer*/TestServerMode* functions. --write is incremental:')
+        out.append('# it keeps every already-assigned test on its current shard and only')
+        out.append('# places newly-discovered names, onto whichever shard is currently')
+        out.append('# lightest, so two unrelated PRs that each add one test do not textually')
+        out.append('# conflict or silently invalidate each other\'s packing. Pass --repack to')
+        out.append('# force a full from-scratch rebalance instead (a deliberate, separate')
+        out.append('# change — expect a large diff). --check only verifies every discovered')
+        out.append('# name is listed here exactly once (no stale or duplicate entries); it')
+        out.append('# does NOT verify the packing is still well-balanced, so a reweighted')
+        out.append('# proxied_test_durations.json does not by itself fail --check — rerun')
+        out.append('# with --repack periodically (or whenever shard loads look uneven in CI)')
+        out.append('# to rebalance on purpose. Newly-added tests not listed here')
         out.append('# hash-distribute via proxied-test-shard.sh: cksum(name) % total,')
         out.append('# unrelated to proxied_test_durations.json (that file only feeds this')
         out.append('# generator\'s own cost estimate for a test it has not measured yet).')
@@ -232,29 +305,42 @@ def write_block(path, total, out):
         fh.write('\n'.join(result).rstrip('\n') + '\n')
 
 
-def check_block(path, total, out):
-    """Return None if path's committed block for total_shards == total
-    equals out (a render() list); otherwise an actionable error string."""
+def check_coverage(path, total, universe):
+    """Return None if path's committed block for total_shards == total lists
+    every name in `universe` (the currently-discovered test set) exactly
+    once, with no stale or duplicate names; otherwise an actionable error
+    string. Does NOT check the block's shard *assignments* — see this
+    script's module docstring for why (incremental --write)."""
     if not os.path.exists(path):
         return f'{path} does not exist'
-    blocks = split_blocks(open(path).read())
-    for b in blocks:
+    for b in split_blocks(open(path).read()):
         if b['total'] == total:
-            got = b['header'] + b['body']
-            want = out
-            # Both end with a run of blank lines that gets collapsed by
-            # write_block/the legacy stdout path; compare with trailing
-            # blanks stripped so that distinction does not cause false drift.
-            while got and got[-1] == '':
-                got.pop()
-            while want and want[-1] == '':
-                want.pop()
-            if got == want:
+            names = []
+            for ln in b['body']:
+                m = re.match(r'^(\d+) (\d+) (\S+)$', ln)
+                if m and int(m.group(1)) == total:
+                    names.append(m.group(3))
+            universe_set = set(universe)
+            counts = {}
+            for n in names:
+                counts[n] = counts.get(n, 0) + 1
+            dupes = sorted(n for n, c in counts.items() if c > 1)
+            stale = sorted(n for n in counts if n not in universe_set)
+            missing = sorted(n for n in universe_set if n not in counts)
+            if not dupes and not stale and not missing:
                 return None
-            return (f"{path}'s {total}-shard block does not match a fresh regeneration.\n"
-                     f'Run: python3 {sys.argv[0]} {total} '
-                     f'--weights={"duration" if any("duration" in h for h in b["header"]) else "inits"} --write\n'
-                     'then commit the result.')
+            weights_guess = 'duration' if any('duration' in h for h in b['header']) else 'inits'
+            msg = [f"{path}'s {total}-shard block does not have exact-once "
+                   'coverage of the currently-discovered TestProxiedServer*/'
+                   'TestServerMode* test set.']
+            if missing:
+                msg.append(f'missing ({len(missing)}): {", ".join(missing)}')
+            if stale:
+                msg.append(f'stale/unknown ({len(stale)}): {", ".join(stale)}')
+            if dupes:
+                msg.append(f'duplicated ({len(dupes)}): {", ".join(dupes)}')
+            msg.append(f'Run: python3 {sys.argv[0]} {total} --weights={weights_guess} --write')
+            return '\n'.join(msg)
     return f'{path} has no block for total_shards={total}'
 
 
@@ -266,33 +352,46 @@ def main():
                      help=f'manifest file to read/write (default: {default_manifest_path})')
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument('--write', action='store_true',
-                       help='rewrite only this total_shards block in --manifest in place')
+                       help='rewrite only this total_shards block in --manifest in place '
+                            '(incremental by default; see --repack)')
     mode.add_argument('--check', action='store_true',
-                       help="exit non-zero if --manifest's block for this total_shards is stale "
-                            '(does not write anything)')
+                       help="exit non-zero unless --manifest's block for this total_shards has "
+                            'exact-once coverage of the discovered test set (does not write '
+                            'anything, and does not check shard assignments — see --repack to '
+                            'preview those)')
+    ap.add_argument('--repack', action='store_true',
+                     help='ignore any existing block for this total_shards and do a full '
+                          'from-scratch LPT pack, instead of the default incremental placement '
+                          'that keeps every already-assigned test on its current shard')
     args = ap.parse_args()
 
     inits = discover_inits_cost()
     costs = inits if args.weights == 'inits' else duration_cost(inits)
 
-    shards, loads = pack(costs, args.total_shards)
+    existing = None if args.repack else read_assignments(args.manifest, args.total_shards)
+    if existing:
+        shards, loads = incremental_pack(costs, args.total_shards, existing)
+    else:
+        shards, loads = pack(costs, args.total_shards)
     out = render(args.total_shards, shards, args.weights)
 
     unit = 'inits' if args.weights == 'inits' else 's'
     fmt = (lambda v: str(v)) if args.weights == 'inits' else (lambda v: f'{v:.1f}')
-    sys.stderr.write(f'shard loads (est. {unit}, weights={args.weights}): ' +
+    mode_label = 'repack' if (args.repack or not existing) else 'incremental'
+    sys.stderr.write(f'shard loads ({mode_label}, est. {unit}, weights={args.weights}): ' +
                       ', '.join(f'{i + 1}:{fmt(loads[i])}' for i in range(args.total_shards)) + '\n')
     sys.stderr.write(f'heaviest shard: {fmt(max(loads))} {unit}\n')
 
     if args.check:
-        err = check_block(args.manifest, args.total_shards, out)
+        err = check_coverage(args.manifest, args.total_shards, costs.keys())
         if err:
             sys.stderr.write('error: ' + err + '\n')
             sys.exit(1)
         return
     if args.write:
         write_block(args.manifest, args.total_shards, out)
-        sys.stderr.write(f'wrote {args.manifest}\'s {args.total_shards}-shard block\n')
+        sys.stderr.write(f'wrote {args.manifest}\'s {args.total_shards}-shard block '
+                          f'({mode_label})\n')
         return
     print('\n'.join(out).rstrip() + '\n', end='')
 

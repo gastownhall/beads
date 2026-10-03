@@ -1387,16 +1387,24 @@ func TestShardScriptsListOnlyRealTests(t *testing.T) {
 
 // S3: the Bazel-only 30-shard block is not frozen like the legacy 15-shard
 // block (TestShardScriptsListOnlyRealTests's B1 fix catches outright
-// corruption, but not a committed block that is merely stale relative to the
-// generator and proxied_test_durations.json, e.g. a test added or
-// reweighted without anyone running --write). gen_proxied_shard_manifest.py
-// --check regenerates the block in memory and fails with the exact command
-// to fix it; run that here so a stale 30-block fails go test ./scripts/...
+// corruption, but not a committed block that has drifted from the currently
+// discovered TestProxiedServer*/TestServerMode* test set, e.g. a test added,
+// renamed, or removed without anyone running --write). gen_proxied_shard_
+// manifest.py --check verifies only that the committed block names every
+// discovered test exactly once -- not that its shard *assignments* match a
+// fresh LPT pack -- and fails with the exact command to fix it when a name
+// is missing, stale, or duplicated. It deliberately does NOT fail merely
+// because proxied_test_durations.json's weights changed and the existing
+// packing is now suboptimal: two PRs each adding one proxied test would
+// otherwise force a full repack and conflict on unrelated shard lines (see
+// --repack below for the explicit opt-in to that). Run --check here so a
+// block with missing/stale/duplicate names fails go test ./scripts/...
 // (and so scripts-go-checks, which runs on fork PRs) instead of only
-// surfacing as a worse LPT balance nobody notices. The legacy 15-shard block
-// is deliberately excluded: its header documents that it is frozen and must
-// not be regenerated (see .github/scripts/proxied-cmd-test-shards.txt and
-// engdocs/TESTING.md), so a --check against it would always fail by design.
+// surfacing as a test silently never running in any shard. The legacy
+// 15-shard block is deliberately excluded: its header documents that it is
+// frozen and must not be regenerated (see
+// .github/scripts/proxied-cmd-test-shards.txt and engdocs/TESTING.md), so a
+// --check against it would always fail by design.
 func TestProxiedShardManifestGeneratorNotStale(t *testing.T) {
 	if os.Getenv("TEST_SRCDIR") != "" {
 		t.Skip("scripts_test's runfiles hold neither the generator's sources nor cmd/bd")
