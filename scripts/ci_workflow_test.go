@@ -37,7 +37,36 @@ func TestCIWorkflowArtifactOwnership(t *testing.T) {
 
 			assertJobRunsExactly(t, workflow.job(t, "pr-policy-wrapper"), "make ci-pr-policy")
 			assertJobRunsExactly(t, workflow.job(t, "pr-lint-wrapper"), "make ci-pr-lint")
+
+			// F5.1: the duplicate whole-tree/diff-scoped `Lint` job (and its
+			// LINT gate id, pr.yml only) is folded into pr-lint-wrapper.
+			if _, found := workflow.Jobs["lint"]; found {
+				t.Errorf("%s has a %q job; its only-new-issues pass duplicates pr-lint-wrapper's native leg (H7) and was folded into it", workflowName, "lint")
+			}
+
+			// F5.2: pr-lint-wrapper is a 3-leg matrix keyed on matrix.target,
+			// with BD_LINT_TARGETS telling scripts/pr-lint which legs to run.
+			lintWrapper := workflow.job(t, "pr-lint-wrapper")
+			if lintWrapper.Strategy.FailFast {
+				t.Errorf("%s pr-lint-wrapper strategy.fail-fast = true, want false", workflowName)
+			}
+			if want := []string{"native", "windows", "darwin"}; !equalStrings(lintWrapper.Strategy.Matrix.Target, want) {
+				t.Errorf("%s pr-lint-wrapper matrix.target = %v, want %v", workflowName, lintWrapper.Strategy.Matrix.Target, want)
+			}
+			if got := lintWrapper.step(t, "Run PR lint wrapper").Env["BD_LINT_TARGETS"]; got != "${{ matrix.target }}" {
+				t.Errorf("%s pr-lint-wrapper BD_LINT_TARGETS = %q, want %q", workflowName, got, "${{ matrix.target }}")
+			}
+			if got := lintWrapper.step(t, "Install golangci-lint").Run; got != "./scripts/ci/install-golangci-lint.sh" {
+				t.Errorf("%s pr-lint-wrapper installs golangci-lint with %q, want the pinned install script", workflowName, got)
+			}
 		})
+	}
+
+	if got := readCIWorkflow(t, "pr.yml").job(t, "pr-lint-wrapper").step(t, "Run PR lint wrapper").Env["BD_LINT_NEW_FROM_MERGE_BASE"]; got != "origin/main" {
+		t.Errorf("pr.yml pr-lint-wrapper BD_LINT_NEW_FROM_MERGE_BASE = %q, want origin/main (PR lane stays diff-scoped)", got)
+	}
+	if got := readCIWorkflow(t, "main.yml").job(t, "pr-lint-wrapper").step(t, "Run PR lint wrapper").Env["BD_LINT_NEW_FROM_MERGE_BASE"]; got != "" {
+		t.Errorf("main.yml pr-lint-wrapper BD_LINT_NEW_FROM_MERGE_BASE = %q, want unset", got)
 	}
 }
 
@@ -64,6 +93,71 @@ func TestPRCIGateRequiresPolicyAndLintWrappers(t *testing.T) {
 		if !strings.Contains(gateEnv["CI_GATE_REQUIRED"], required) {
 			t.Errorf("ci-gate CI_GATE_REQUIRED does not include %q", required)
 		}
+	}
+
+	// F5.1/F5.4: the deleted `lint` job's LINT id must not linger in the gate.
+	if contains(gate.Needs, "lint") {
+		t.Errorf("ci-gate needs %q, which no longer exists: %v", "lint", gate.Needs)
+	}
+	if contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), "LINT") {
+		t.Error("ci-gate CI_GATE_REQUIRED still includes LINT")
+	}
+	if _, found := gateEnv["LINT"]; found {
+		t.Error("ci-gate env still sets LINT")
+	}
+}
+
+// F5.2/F5.7: the pinned golangci-lint install script's version and sha256
+// values must stay in sync with LINTING.md's documented version and with
+// .githooks/pre-commit's `go run ...@<version>`, and the three workflows that
+// use the script (pr.yml, main.yml, ci-measurements.yml) must all call it
+// instead of `go install`.
+func TestGolangciLintInstallScriptPinned(t *testing.T) {
+	root := sourceRepoRoot(t)
+	script := readPolicyFile(t, root, "scripts/ci/install-golangci-lint.sh")
+
+	const version = "2.10.1"
+	wantSHA256 := map[string]string{
+		"amd64": "dfa775874cf0561b404a02a8f4481fc69b28091da95aa697259820d429b09c99",
+		"arm64": "6652b42ae02915eb2f9cb2a2e0cac99514c8eded8388d88ae3e06e1a52c00de8",
+	}
+
+	if !strings.Contains(script, `readonly version="`+version+`"`) {
+		t.Errorf("install-golangci-lint.sh does not pin version %q", version)
+	}
+	for arch, sha := range wantSHA256 {
+		if !strings.Contains(script, "["+arch+"]=\""+sha+"\"") {
+			t.Errorf("install-golangci-lint.sh does not pin %s sha256 %q", arch, sha)
+		}
+	}
+
+	linting := readPolicyFile(t, root, "engdocs/LINTING.md")
+	if !strings.Contains(linting, "v"+version) {
+		t.Errorf("engdocs/LINTING.md does not mention v%s", version)
+	}
+
+	preCommit := readPolicyFile(t, root, ".githooks/pre-commit")
+	if !strings.Contains(preCommit, "golangci-lint/v2/cmd/golangci-lint@v"+version) {
+		t.Errorf(".githooks/pre-commit does not pin golangci-lint @v%s", version)
+	}
+	// The hook stays on `go run` deliberately (CI-only RUNNER_TEMP/GITHUB_PATH
+	// requirement); it must not switch to the install script.
+	if strings.Contains(preCommit, "install-golangci-lint.sh") {
+		t.Error(".githooks/pre-commit must keep using `go run`, not the CI-only install script")
+	}
+
+	for _, workflow := range []string{"pr.yml", "main.yml"} {
+		job := readCIWorkflow(t, workflow).job(t, "pr-lint-wrapper")
+		if got := job.step(t, "Install golangci-lint").Run; got != "./scripts/ci/install-golangci-lint.sh" {
+			t.Errorf("%s pr-lint-wrapper installs golangci-lint with %q, want the pinned install script", workflow, got)
+		}
+	}
+	measurements := readPolicyFile(t, root, ".github/workflows/ci-measurements.yml")
+	if strings.Contains(measurements, "go install github.com/golangci/golangci-lint") {
+		t.Error("ci-measurements.yml still uses go install for golangci-lint; use scripts/ci/install-golangci-lint.sh")
+	}
+	if !strings.Contains(measurements, "install-golangci-lint.sh") {
+		t.Error("ci-measurements.yml does not call scripts/ci/install-golangci-lint.sh")
 	}
 }
 
@@ -898,6 +992,12 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheInventory(t, workflows["main.yml"].job(t, "test-windows"), []goCacheStep{
 		mainRestoreModuleCache(), mainRestoreBuildCache("non-race"), saveModuleCache(), saveBuildCache("non-race"),
 	})
+	assertGoCacheInventory(t, workflows["main.yml"].job(t, "pr-lint-wrapper"), []goCacheStep{
+		mainRestoreGolangciCache(), saveGolangciCache(),
+	})
+	assertGoCacheInventory(t, workflows["main.yml"].job(t, "go-vet-cache"), []goCacheStep{
+		mainRestoreModuleCache(), mainRestoreVetCache(), saveVetCache(),
+	})
 	assertConditionalCacheWritersHaveMatrixMember(t, workflows["main.yml"].job(t, "test"), macOSRunner)
 
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "build-artifacts"), []goCacheStep{
@@ -909,8 +1009,9 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	// D2 step 3: PR Core's environment for ./scripts/..., go vet and the
 	// Bazel-skipped tests; read-only like PR Core.
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "scripts-go-checks"), []goCacheStep{
-		restoreModuleCache(), restoreBuildCache("race"),
+		restoreModuleCache(), restoreBuildCacheIf("race", "matrix.check == 'scripts-test'"), restoreVetCache(), restoreBuildCacheIf("non-race", "matrix.check == 'allowlisted'"),
 	})
+	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "pr-lint-wrapper"), []goCacheStep{restoreGolangciCache()})
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "test-macos"), []goCacheStep{
 		restoreModuleCache(), restoreBuildCache("non-race"), restoreBuildCache("race"),
 	})
@@ -929,11 +1030,12 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertNoUnmanagedGoCacheSteps(t, workflows, map[string]map[string]bool{
 		"main.yml": {
 			"build-artifacts": true, "build-embedded": true, "pr-core-wrapper": true, "test": true, "test-windows": true,
+			"pr-lint-wrapper": true, "go-vet-cache": true,
 		},
 		"pr.yml": {
 			"build-artifacts": true, "pr-core-wrapper": true, "scripts-go-checks": true, "test-macos": true, "worktree-remove-windows": true,
 			"check-doc-freshness-platforms": true, "pr-preflight-platforms": true, "build-examples": true,
-			"check-release-target-cross-compilation": true,
+			"check-release-target-cross-compilation": true, "pr-lint-wrapper": true,
 		},
 		"pr-risk.yml": {"build-embedded": true},
 	})
@@ -1022,6 +1124,8 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheWriter(t, workflows["main.yml"], "test", "${{ matrix.os }}", "Save race Go build cache", failureSurvivingCacheSaveCondition(macOSMatrixCondition, cacheMissCondition(goBuildCacheRestoreID("race"))))
 	assertGoCacheWriter(t, workflows["main.yml"], "test-windows", "windows-latest", "Save Go module cache", cacheMissCondition(goModuleCacheRestoreID))
 	assertGoCacheWriter(t, workflows["main.yml"], "test-windows", "windows-latest", "Save non-race Go build cache", cacheMissCondition(goBuildCacheRestoreID("non-race")))
+	assertGoCacheWriter(t, workflows["main.yml"], "pr-lint-wrapper", "ubuntu-latest", "Save golangci-lint cache", cacheMissCondition(golangciCacheRestoreID()))
+	assertGoCacheWriter(t, workflows["main.yml"], "go-vet-cache", "ubuntu-latest", "Save vet Go build cache", cacheMissCondition(goVetCacheRestoreID()))
 	for _, target := range []struct{ workflow, job string }{
 		{"main.yml", "build-artifacts"},
 		{"main.yml", "build-embedded"},
@@ -1346,6 +1450,78 @@ func saveBuildCacheAfterFailureOnMacOS(profile string) goCacheStep {
 	return step
 }
 
+// The go-vet-cache family (F5.3): a dedicated, go-vet-only GOCACHE restored
+// by pr.yml's scripts-go-checks vet leg, falling back to the non-race build
+// cache (go vet compiles dependencies much like a non-race build) and warmed
+// by main.yml's go-vet-cache job on push.
+const goVetCacheSchema = "v1"
+
+func goVetCachePrefix() string {
+	return "beads-go-vet-" + goVetCacheSchema + "-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-" + goBaseTag + "-vet-"
+}
+
+func goVetCacheKey() string { return goVetCachePrefix() + "${{ github.sha }}" }
+
+func goVetCacheRestoreKeys() string {
+	return goVetCachePrefix() + "\n" + goBuildCachePrefix("non-race") + "\n"
+}
+
+func goVetCachePath() string { return "${{ runner.temp }}/go-cache/vet" }
+
+func goVetCacheRestoreID() string { return "restore-vet-go-build-cache" }
+
+func restoreVetCache() goCacheStep {
+	return goCacheStep{name: "Restore vet Go build cache", family: cacheRestoreActionFamily, key: goVetCacheKey(), restoreKeys: goVetCacheRestoreKeys(), path: goVetCachePath(), ifCondition: "matrix.check == 'vet'"}
+}
+
+func mainRestoreVetCache() goCacheStep {
+	step := restoreVetCache()
+	step.id = goVetCacheRestoreID()
+	step.ifCondition = ""
+	return step
+}
+
+func saveVetCache() goCacheStep {
+	return goCacheStep{name: "Save vet Go build cache", family: cacheSaveActionFamily, key: goVetCacheKey(), path: goVetCachePath(), ifCondition: cacheMissCondition(goVetCacheRestoreID())}
+}
+
+// The golangci-lint cache family (F5.2): one cache per PR Lint matrix leg,
+// keyed on file content, the leg and the sha, so a stale entry can never mask
+// an issue. pr.yml only ever restores; main.yml's matrix is the only saver.
+func golangciCachePrefix() string {
+	return "beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-"
+}
+
+func golangciCacheContentKey() string {
+	return golangciCachePrefix() + "${{ hashFiles('.golangci.yml', 'go.sum') }}-"
+}
+
+func golangciCacheKey() string { return golangciCacheContentKey() + "${{ github.sha }}" }
+
+func golangciCacheRestoreKeys() string {
+	return golangciCacheContentKey() + "\n" + golangciCachePrefix() + "\n"
+}
+
+func golangciCachePath() string {
+	return "~/.cache/golangci-lint\n${{ runner.temp }}/go-cache/lint-${{ matrix.target }}\n"
+}
+
+func golangciCacheRestoreID() string { return "restore-golangci-lint-cache" }
+
+func restoreGolangciCache() goCacheStep {
+	return goCacheStep{name: "Restore golangci-lint cache", family: cacheRestoreActionFamily, key: golangciCacheKey(), restoreKeys: golangciCacheRestoreKeys(), path: golangciCachePath()}
+}
+
+func mainRestoreGolangciCache() goCacheStep {
+	step := restoreGolangciCache()
+	step.id = golangciCacheRestoreID()
+	return step
+}
+
+func saveGolangciCache() goCacheStep {
+	return goCacheStep{name: "Save golangci-lint cache", family: cacheSaveActionFamily, key: golangciCacheKey(), path: golangciCachePath(), ifCondition: cacheMissCondition(golangciCacheRestoreID())}
+}
+
 func assertGoCacheInventory(t *testing.T, job ciWorkflowJob, want []goCacheStep) {
 	t.Helper()
 
@@ -1546,6 +1722,8 @@ type ciWorkflowStrategy struct {
 type ciWorkflowMatrix struct {
 	OS      []string                  `yaml:"os"`
 	Shard   []int                     `yaml:"shard"`
+	Target  []string                  `yaml:"target"`
+	Check   []string                  `yaml:"check"`
 	Include []ciWorkflowMatrixInclude `yaml:"include"`
 }
 

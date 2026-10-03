@@ -32,6 +32,14 @@ exports_files(
     visibility = ["//scripts/gitattributespolicy:__pkg__"],
 )
 
+# //scripts:scripts_test checks the pinned golangci-lint version/sha256 in
+# engdocs/LINTING.md and the pre-commit hook's separate `go run` pin against
+# scripts/ci/install-golangci-lint.sh, so both must be readable as data.
+exports_files(
+    ["engdocs/LINTING.md", ".githooks/pre-commit"],
+    visibility = ["//scripts:__pkg__"],
+)
+
 # //scripts:scripts_test keeps pr.yml's release-target cross-compilation matrix
 # in lockstep with the release targets .goreleaser.yml declares.
 exports_files(

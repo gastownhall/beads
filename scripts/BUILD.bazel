@@ -44,9 +44,11 @@ go_test(
     ],
     data = [
         ":scripts_files",
+        "//:.githooks/pre-commit",
         "//:.goreleaser.yml",
         "//:bazel_policy_files",
         "//:mcp_package_policy_files",
+        "//:engdocs/LINTING.md",
         "//:test_sh_files",
         "//:workflow_files",
         "//internal/testutil:testdoltcommon.go",

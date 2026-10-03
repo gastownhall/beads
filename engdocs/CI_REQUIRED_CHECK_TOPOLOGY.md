@@ -486,7 +486,7 @@ Do not require these existing check names directly:
 - `Test (macos-latest)`
 - `Test (storage domain + uow)`
 - `Test (Dolt server fingerprint)`
-- `Go test (scripts), go vet and Bazel-skipped tests`
+- `Go checks (scripts-test)`, `Go checks (vet)` and `Go checks (allowlisted)`
 - `Contract corpus (golden + determinism + conformance)`
 - `PR Core (wrapper timing)`
 - `Build Artifacts`
@@ -500,7 +500,7 @@ Do not require these existing check names directly:
 - `Test (Server Dolt Full Suite 1/16)` through `Test (Server Dolt Full Suite 16/16)`
 - `Test (Windows - smoke)`
 - `Check formatting`
-- `Lint`
+- `PR Lint (native)`, `PR Lint (windows)` and `PR Lint (darwin)`
 - `Test Nix Flake`
 - `Differential Regression (v0.49.6 baseline)`
 - `Upgrade smoke (<version> -> candidate)`

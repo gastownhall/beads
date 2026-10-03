@@ -575,6 +575,14 @@ func TestPRRunsGoTestsBazelSkips(t *testing.T) {
 		t.Errorf("%s: if %q, continue-on-error %v, needs %v, runs-on %q, timeout %d; want an unconditional ubuntu-latest job with a timeout",
 			prScriptsChecksJob, job.If, job.ContinueOnError, job.Needs, job.RunsOn, job.TimeoutMinutes)
 	}
+	// F5.3: three legs behind matrix.check, not fail-fast (a vet regression
+	// must not hide an allowlisted regression, or vice versa).
+	if job.Strategy.FailFast {
+		t.Errorf("%s strategy.fail-fast = true, want false", prScriptsChecksJob)
+	}
+	if want := []string{"scripts-test", "vet", "allowlisted"}; !equalStrings(job.Strategy.Matrix.Check, want) {
+		t.Errorf("%s matrix.check = %v, want %v", prScriptsChecksJob, job.Strategy.Matrix.Check, want)
+	}
 	var names []string
 	for _, st := range job.Steps {
 		names = append(names, st.Name)
@@ -582,27 +590,45 @@ func TestPRRunsGoTestsBazelSkips(t *testing.T) {
 			t.Errorf("%s step %q has continue-on-error", prScriptsChecksJob, st.Name)
 		}
 	}
-	wantNames := []string{"", "Set up Go", "Restore Go module cache", "Restore race Go build cache", "Install Dolt",
-		"Configure Git and Dolt identity", "Go test the scripts packages", "Go vet with go test's checks", prAllowlistedStep}
+	wantNames := []string{"", "Set up Go", "Restore Go module cache", "Restore race Go build cache", "Restore vet Go build cache",
+		"Restore non-race Go build cache", "Install Dolt", "Configure Git and Dolt identity", "Go test the scripts packages",
+		"Go vet with go test's checks", prAllowlistedStep}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Errorf("%s steps %q, want %q", prScriptsChecksJob, names, wantNames)
 	}
-	// The environment PR Core's job gives its go test.
+	// The environment PR Core's job gives its go test (the race leg's cache
+	// restore and Dolt setup stay byte-for-byte the same as pr-core-wrapper's).
 	core := pr.job(t, "pr-core-wrapper")
 	for _, name := range []string{"Install Dolt", "Configure Git and Dolt identity", "Restore race Go build cache"} {
 		if got, want := job.step(t, name), core.step(t, name); got.Run != want.Run || !reflect.DeepEqual(got.With, want.With) || got.Uses != want.Uses {
 			t.Errorf("%s step %q differs from pr-core-wrapper's", prScriptsChecksJob, name)
 		}
 	}
-	untilDone := "${{ !cancelled() && steps.setup-go.outcome == 'success' }}"
+	legIf := func(checks ...string) string {
+		parts := make([]string, len(checks))
+		for i, c := range checks {
+			parts[i] = "matrix.check == '" + c + "'"
+		}
+		return strings.Join(parts, " || ")
+	}
+	// Dolt is only needed by the legs that use it; the vet leg skips it.
+	for _, name := range []string{"Install Dolt", "Configure Git and Dolt identity"} {
+		if got, want := job.step(t, name).If, legIf("scripts-test", "allowlisted"); got != want {
+			t.Errorf("%s step %q if = %q, want %q", prScriptsChecksJob, name, got, want)
+		}
+	}
 	for name, want := range map[string]struct {
 		run, ifc string
 		env      map[string]string
 	}{
-		"Go test the scripts packages": {"bash scripts/ci/scripts-go-test.sh", "", map[string]string{
+		"Go test the scripts packages": {"bash scripts/ci/scripts-go-test.sh", legIf("scripts-test"), map[string]string{
 			"BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION": "1", "GOCACHE": "${{ runner.temp }}/go-cache/race"}},
-		"Go vet with go test's checks": {"bash scripts/ci/go-test-vet.sh", untilDone, nil},
-		prAllowlistedStep:              {"bash scripts/ci/allowlisted-go-tests.sh", untilDone, nil},
+		"Go vet with go test's checks": {"bash scripts/ci/go-test-vet.sh",
+			"${{ !cancelled() && steps.setup-go.outcome == 'success' && matrix.check == 'vet' }}",
+			map[string]string{"GOCACHE": "${{ runner.temp }}/go-cache/vet"}},
+		prAllowlistedStep: {"bash scripts/ci/allowlisted-go-tests.sh",
+			"${{ !cancelled() && steps.setup-go.outcome == 'success' && matrix.check == 'allowlisted' }}",
+			map[string]string{"GOCACHE": "${{ runner.temp }}/go-cache/non-race"}},
 	} {
 		st := job.step(t, name)
 		if st.Run != want.run || st.If != want.ifc || st.Shell != "" || (len(st.Env) != 0 || len(want.env) != 0) && !reflect.DeepEqual(st.Env, want.env) {
@@ -624,6 +650,21 @@ func TestPRRunsGoTestsBazelSkips(t *testing.T) {
 				}
 			}
 		}
+	}
+	// main.yml's push-only go-vet-cache job (F5.3) is the one explicit
+	// exception: it warms the vet cache pr.yml's vet leg restores, and
+	// nothing else in main.yml may run these scripts either.
+	for name, j := range readCIWorkflow(t, "main.yml").Jobs {
+		for _, st := range j.Steps {
+			for _, script := range []string{"allowlisted-go-tests.sh", "scripts-go-test.sh", "go-test-vet.sh"} {
+				if strings.Contains(st.Run, script) && name != "go-vet-cache" {
+					t.Errorf("main.yml %s step %q runs %s; only go-vet-cache may (go-test-vet.sh)", name, st.Name, script)
+				}
+			}
+		}
+	}
+	if got := readCIWorkflow(t, "main.yml").job(t, "go-vet-cache").step(t, "Go vet with go test's checks").Run; got != "bash scripts/ci/go-test-vet.sh" {
+		t.Errorf("main.yml go-vet-cache does not run go-test-vet.sh: %q", got)
 	}
 	if os.Getenv("TEST_SRCDIR") != "" {
 		return // scripts_test's runfiles hold none of the scripts (this part runs in that job itself)
