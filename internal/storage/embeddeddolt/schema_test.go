@@ -44,6 +44,120 @@ func TestSchemaAfterInit(t *testing.T) {
 		}
 	}
 
+	// Additional column/index/FK spot-checks (be-jxsqm): broader coverage
+	// than the D4v2-specific block above, across the tables this migration
+	// set touches most.
+	//
+	// Columns are checked by exact name via INFORMATION_SCHEMA.COLUMNS, one
+	// query per table, not by substring on SHOW CREATE TABLE: a substring
+	// check is satisfied by any superstring in the same CREATE statement —
+	// "rig" by the pre-existing column "original_size"
+	// (0001_create_issues.up.sql / 0020_create_wisps.up.sql), "defer_until"
+	// by the index name "idx_issues_defer_until" — and would stay green
+	// even if the named column were dropped entirely (round 1 #7 fixed the
+	// defer_until instance alone with a one-off query; round 2 non-blocking
+	// #4 found "rig" was still open the same way, so this folds every
+	// column check into the same exact-match mechanism instead of leaving
+	// a second special case). Index and FK names are left on the
+	// substring/SHOW CREATE TABLE check: every name below is long and
+	// specific enough that no table's other identifiers accidentally
+	// contain it.
+	columnChecks := map[string][]string{
+		"issues": {
+			"due_at", "rig", "role_type", "agent_state",
+			"hook_bead", "role_bead", "await_type", "event_kind",
+			"defer_until",
+		},
+		"dependencies": {
+			"thread_id", "metadata",
+		},
+		"wisps": {
+			"defer_until", "due_at", "rig",
+		},
+		"wisp_dependencies": {
+			"thread_id", "metadata",
+		},
+	}
+	indexChecks := map[string][]string{
+		"issues": {
+			"idx_issues_status_updated_at", "idx_issues_defer_until",
+			"idx_issues_external_ref",
+		},
+		"dependencies": {
+			"idx_dependencies_thread", "idx_dep_type_issue", "fk_dep_issue",
+		},
+		"wisps": {
+			"idx_wisps_status",
+		},
+		"wisp_dependencies": {
+			"fk_wisp_dep_issue_target", "idx_wisp_dep_type",
+			"idx_wisp_dep_type_issue",
+		},
+	}
+
+	for table, cols := range columnChecks {
+		rows, err := db.QueryContext(ctx, `
+			SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+		`, table)
+		if err != nil {
+			t.Errorf("reading %s columns: %v", table, err)
+			continue
+		}
+		got := map[string]bool{}
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				rows.Close()
+				t.Fatalf("scanning %s column name: %v", table, err)
+			}
+			got[name] = true
+		}
+		rows.Close()
+		for _, col := range cols {
+			if !got[col] {
+				t.Errorf("table %s: missing column %q", table, col)
+			}
+		}
+	}
+
+	for table, checks := range indexChecks {
+		var stmt, name string
+		row := db.QueryRowContext(ctx, "SHOW CREATE TABLE `"+table+"`")
+		if err := row.Scan(&name, &stmt); err != nil {
+			t.Errorf("SHOW CREATE TABLE %s: %v", table, err)
+			continue
+		}
+		for _, check := range checks {
+			if !strings.Contains(stmt, check) {
+				t.Errorf("table %s: expected %q in CREATE statement, not found", table, check)
+			}
+		}
+	}
+
+	// --- Verify views ---
+
+	for _, view := range []string{"ready_issues", "blocked_issues"} {
+		if _, err := db.ExecContext(ctx, "SELECT 1 FROM `"+view+"` LIMIT 0"); err != nil {
+			t.Errorf("view %s not queryable: %v", view, err)
+		}
+	}
+
+	// --- Verify default config ---
+
+	// Migration 0016 (0016_default_config.up.sql) INSERT IGNOREs exactly 9
+	// keys; no later up-migration touches rows matching those keys (0030
+	// only removes keys matching '%.last_sync'). A drift here means some
+	// migration added or removed a default config key without updating this
+	// pin.
+	var configCount int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM config").Scan(&configCount); err != nil {
+		t.Fatalf("counting config rows: %v", err)
+	}
+	if configCount != 9 {
+		t.Errorf("config rows: got %d, want 9", configCount)
+	}
+
 	var maxVersion int
 	if err := db.QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&maxVersion); err != nil {
 		t.Fatalf("reading max schema_migrations version: %v", err)
