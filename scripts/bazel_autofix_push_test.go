@@ -3,6 +3,7 @@ package scripts_test
 import (
 	"archive/zip"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -140,12 +141,18 @@ func (r *autofixRepo) commitOn(parent, name, msg string, edit func(r *autofixRep
 }
 
 // patch applies edit to a clean PR-head tree, returns the staged diff as a
-// patch file and resets the tree.
-func (r *autofixRepo) patch(edit func()) string {
+// patch file and resets the tree. Executable modes are set in the index after
+// staging, since Windows chmod cannot create those Git modes.
+func (r *autofixRepo) patch(edit func(), executable ...string) string {
 	r.t.Helper()
 	r.run("checkout", "-q", "--detach", r.head)
-	edit()
+	if edit != nil {
+		edit()
+	}
 	r.run("add", "-A")
+	for _, path := range executable {
+		r.run("update-index", "--chmod=+x", "--", path)
+	}
 	diff := r.run("diff", "--cached", "--binary")
 	r.run("reset", "-q", "--hard", r.head)
 	r.run("clean", "-qfdx")
@@ -240,17 +247,10 @@ func TestBazelAutofixPushAllowlist(t *testing.T) {
 			r.write("cmd/bd/BUILD.bazel", "ok()\n")
 			r.write(".github/workflows/ci.yml", "name: pwned\n")
 		}),
-		"mode change": r.patch(func() {
-			if err := os.Chmod(filepath.Join(r.dir, "cmd/bd/BUILD.bazel"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-		}),
+		"mode change": r.patch(nil, "cmd/bd/BUILD.bazel"),
 		"executable new file": r.patch(func() {
 			r.write("pkg/BUILD.bazel", "x\n")
-			if err := os.Chmod(filepath.Join(r.dir, "pkg/BUILD.bazel"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-		}),
+		}, "pkg/BUILD.bazel"),
 		"symlink": r.patch(func() {
 			if err := os.Symlink("../.github/workflows/ci.yml", filepath.Join(r.dir, "scripts", "BUILD.bazel")); err != nil {
 				t.Fatal(err)
@@ -305,12 +305,8 @@ func TestDocsAutofixPushAllowlist(t *testing.T) {
 		"rename script to doc": r.patch(func() {
 			r.run("mv", "scripts.sh", "docs/cli-reference/x.md")
 		}),
-		"mode change": r.patch(func() {
-			if err := os.Chmod(filepath.Join(r.dir, "docs/docs.json"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-		}),
-		"binary": r.patch(func() { r.write("docs/cli-reference/bin.md", "a\x00b\n") }),
+		"mode change": r.patch(nil, "docs/docs.json"),
+		"binary":      r.patch(func() { r.write("docs/cli-reference/bin.md", "a\x00b\n") }),
 	}
 	for name, patch := range hostileHeaderPatches(t, "scripts.sh", "docs/cli-reference/x.md") {
 		hostile[name] = patch
@@ -418,10 +414,14 @@ func (r *autofixRepo) runFlow(t *testing.T, f autofixFlow) autofixFlowResult {
 	r.run("--git-dir="+remote, "branch", "-f", "main", r.base)
 	r.run("--git-dir="+remote, "branch", "-f", f.branch, f.remoteAt)
 	gitconfig := filepath.Join(t.TempDir(), "gitconfig")
-	if err := os.WriteFile(gitconfig, []byte("[url \"file://"+github+"/\"]\n\tinsteadOf = https://github.com/\n"+
-		"[uploadpack]\n\tallowFilter = true\n[protocol \"file\"]\n\tallow = always\n"), 0o644); err != nil {
-		t.Fatal(err)
+	githubPath := filepath.ToSlash(github)
+	if !strings.HasPrefix(githubPath, "/") {
+		githubPath = "/" + githubPath // A Windows drive is a URL path, not a host.
 	}
+	githubURL := (&url.URL{Scheme: "file", Path: githubPath + "/"}).String()
+	r.run("config", "--file", gitconfig, "url."+githubURL+".insteadOf", "https://github.com/")
+	r.run("config", "--file", gitconfig, "uploadpack.allowFilter", "true")
+	r.run("config", "--file", gitconfig, "protocol.file.allow", "always")
 	log := filepath.Join(t.TempDir(), "gh.log")
 	pulls := f.pulls
 	if pulls == "" {
@@ -724,11 +724,7 @@ func TestBazelAutofixPushFlow(t *testing.T) {
 		}
 		// A mode change on an allowlisted file passes the path check; only the
 		// mode arm of check_staged stops it.
-		mode := r.patch(func() {
-			if err := os.Chmod(filepath.Join(r.dir, "cmd/bd/BUILD.bazel"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-		})
+		mode := r.patch(nil, "cmd/bd/BUILD.bazel")
 		res := r.runFlow(t, autofixFlow{script: noValidator, patch: mode})
 		if res.err == nil {
 			t.Errorf("mode change not refused:\n%s", res.out)
@@ -938,11 +934,7 @@ func TestDocsAutofixPushFlow(t *testing.T) {
 	})
 
 	t.Run("staged check alone refuses a mode change", func(t *testing.T) {
-		mode := r.patch(func() {
-			if err := os.Chmod(filepath.Join(r.dir, "docs/docs.json"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-		})
+		mode := r.patch(nil, "docs/docs.json")
 		res := r.runFlow(t, autofixFlow{script: withoutValidator(t, docsAutofixPushScript), patch: mode})
 		if res.err == nil || res.head != r.head || !strings.Contains(res.out, "REFUSED: staged change is not a regular-file edit") {
 			t.Errorf("err=%v head moved=%v\n%s", res.err, res.head != r.head, res.out)
@@ -1086,12 +1078,17 @@ esac
 						t.Fatal(err)
 					}
 				}
+				if err := os.WriteFile(filepath.Join(runner, "symlink-target"), []byte("x\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
 				output := filepath.Join(tmp, "output")
 				log := filepath.Join(tmp, "gh.log")
 				cmd := exec.Command("bash", "-e", "-c", step.Run)
 				cmd.Dir = workspace
 				cmd.Env = append(os.Environ(),
 					"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+					// Git Bash must restore links, not emulate them by copying the target.
+					"MSYS=winsymlinks:nativestrict",
 					"GITHUB_REPOSITORY=owner/beads", "RUNNER_TEMP="+runner, "GITHUB_OUTPUT="+output,
 					"RUN_ID=42", "GH_TOKEN=x", "FAKE_GH_LOG="+log, "FAKE_ZIP="+zipPath,
 					"FAKE_ARTIFACTS="+listed)
@@ -1139,7 +1136,11 @@ esac
 							entries[f] = "x\n"
 						}
 					}
-					out, outputs, _, err := run(t, entries, map[string]string{name: "/etc/passwd"}, listed)
+					out, outputs, dir, err := run(t, entries, map[string]string{name: "../symlink-target"}, listed)
+					info, statErr := os.Lstat(filepath.Join(dir, name))
+					if statErr != nil || info.Mode()&os.ModeSymlink == 0 {
+						t.Fatalf("unzip did not restore the symlink fixture: %v\n%s", statErr, out)
+					}
 					if err == nil || strings.Contains(outputs, "found=true") || !strings.Contains(out, "is not a regular file") {
 						t.Errorf("err=%v outputs=%q\n%s", err, outputs, out)
 					}
