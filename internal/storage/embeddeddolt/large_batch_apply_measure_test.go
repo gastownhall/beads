@@ -254,12 +254,31 @@ var wallClockShapes = []struct {
 // (internal/httpapi/server.go, 5 minutes): both measured shapes must
 // complete in a small fraction of that budget for the ceiling to be
 // generous headroom rather than a number picked out of thin air.
+//
+// The 1000-item shape is skipped under -race: that shape alone was observed
+// taking 597-651s under the embedded tier's --config=embedded (race-enabled)
+// CI lane, a multi-x inflation from race-instrumenting the in-process Dolt
+// engine's own internal goroutine/lock machinery on every one of its
+// hundreds of internal statements, not from anything this test asserts (it
+// has no duration or count assertion to weaken). It twice pushed its shard
+// over the job's 19-minute test timeout (see embedded-storage-test-shards.txt
+// and this package's TestBatchApplyContract for the sibling case). A real
+// 1000-item apply still runs under race with full result assertions, just
+// not here: TestBatchApplyContract/BoundsTheItemCount (this package and
+// internal/storage/dolt) already builds and applies exactly
+// issueops.MaxApplyBatchItems (1000) real items and checks the outcome, so
+// skipping the timing-only duplicate here does not remove any correctness
+// coverage. The 356-item shape (the design's primary measured shape) still
+// runs under race.
 func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
 
 	for _, tc := range wallClockShapes {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "1000" && raceEnabled {
+				t.Skip("1000-item apply is redundant under -race: see doc comment above")
+			}
 			fixture := newPristineEmbeddedDoltFixture(t, tc.db)
 			t.Cleanup(func() { closeEmbeddedDoltStore(t, fixture.store) })
 

@@ -189,6 +189,8 @@ go_test(
         "pull_settle_test.go",
         "push_commit_pending_test.go",
         "querier_contract_test.go",
+        "race_detector_off_test.go",
+        "race_detector_on_test.go",
         "reader_contract_test.go",
         "ready_claimer_contract_test.go",
         "ready_counter_contract_test.go",
