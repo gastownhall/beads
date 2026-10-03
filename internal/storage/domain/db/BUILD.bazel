@@ -105,6 +105,7 @@ go_test(
     data = [":go_srcs"],
     embed = [":db"],
     deps = [
+        "//internal/idgen",
         "//internal/storage",
         "//internal/storage/dberrors",
         "//internal/storage/depid",

@@ -48,6 +48,28 @@ func (s *testSuite) TestFieldLengthGuards() {
 		s.Require().ErrorIs(err, types.ErrFieldTooLong)
 	})
 
+	// CreateOnly takes the strict-insert branch, not the upsert one; the
+	// guard has to hold there too, since every minted-ID create lands on it.
+	s.Run("CreateOnlyOverLengthAssigneeRejectedNotPersisted", func() {
+		r := s.issueRepo()
+		in := newTestIssue("bd-fl-co-assignee", "over-length assignee, create-only")
+		in.Assignee = over
+		err := r.Insert(s.Ctx(), in, "tester", domain.InsertIssueOpts{CreateOnly: true})
+		s.Require().ErrorIs(err, types.ErrFieldTooLong)
+
+		exists, err := r.Exists(s.Ctx(), "bd-fl-co-assignee", domain.IssueTableOpts{})
+		s.Require().NoError(err)
+		s.False(exists, "issue must not be persisted when assignee is rejected")
+	})
+
+	s.Run("CreateOnlyOverLengthOwnerRejected", func() {
+		r := s.issueRepo()
+		in := newTestIssue("bd-fl-co-owner", "over-length owner, create-only")
+		in.Owner = over
+		err := r.Insert(s.Ctx(), in, "tester", domain.InsertIssueOpts{CreateOnly: true})
+		s.Require().ErrorIs(err, types.ErrFieldTooLong)
+	})
+
 	s.Run("UpdateOverLengthAssigneeRejected", func() {
 		r := s.issueRepo()
 		s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-fl-upd", "x"), "tester", domain.InsertIssueOpts{}))
