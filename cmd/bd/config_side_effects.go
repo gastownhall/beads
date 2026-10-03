@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/steveyegge/beads/internal/versionedhistory"
 )
 
 // configSideEffect describes a hint or warning to show after a config change.
@@ -64,6 +66,11 @@ func checkConfigSetSideEffects(key, value string) []configSideEffect {
 		effects = append(effects, configSideEffect{
 			Message: fmt.Sprintf("Git sync remote set to %q. Ensure this git remote exists.", value),
 			Command: fmt.Sprintf("git remote -v | grep %s", value),
+		})
+
+	case key == versionedHistorySettingKey && versionedhistory.ValueEnables(value):
+		effects = append(effects, configSideEffect{
+			Message: "Versioned history now records for this store. The setting replicates on 'bd dolt push' and 'bd dolt pull', so every clone that pulls it records too, and it is safe with a single writer only: keep one writer at a time per store (docs/reference/configuration.md#versioned-issue-history).",
 		})
 	}
 

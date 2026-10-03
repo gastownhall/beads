@@ -474,6 +474,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-seeds it on the next command. A pre-1.0 witness, or a `.beads/dolt` that
   holds anything, is still refused.
 
+- **`versioned-history.enabled` now records for every store a write opens, and
+  each store reads its own setting.** The switch was applied where the root
+  pre-run wraps the command's own store, so a prefix-routed `bd update` or
+  `bd close`, `bd create --repo`, and the direct-mode open each built a store
+  for the target workspace that was never activated: with the setting on they
+  minted no `issue_versions` row while the command reported success. Activation
+  now happens where a store or unit-of-work provider is constructed, on the raw
+  store, and reads that store's own `config` row, so a write routed into rig B
+  follows rig B's setting and never the launching workspace's.
+  `BD_VERSIONED_HISTORY_ENABLED=1` (or a `versioned-history.enabled` value in
+  `config.yaml`) still applies to every store the process opens, and can only
+  turn recording on: `BD_VERSIONED_HISTORY_ENABLED=0` does not switch off a store
+  whose row says `true`. Proxied-server providers read the same row when they
+  are constructed. A row read that errors (as opposed to an absent row) still
+  resolves to off but is now reported under `BD_DEBUG`. The setting is
+  documented in `docs/reference/configuration.md`, including that it replicates
+  on `bd dolt push`/`pull` and is single-writer only.
+
+- **Versioned history refuses a number outside the I-JSON exact-integer range
+  however it is spelled, and turning it on checks the store first.** The
+  admission gate on a version's metadata looked only at literals that denote an
+  integer value, so `9007199254740993.5` (nearest double 2^53+2) was admitted
+  and then rounded to an integer the gate itself refuses. It now classifies each
+  literal by the binary64 nearest to it, so every spelling of a magnitude past
+  2^53-1, fractions and exponent forms included, is refused alike, and a literal
+  that overflows binary64 is refused as an out-of-range number instead of
+  failing as an invalid literal. The classification is linear in the length of
+  the literal, so an exponent such as `1e1000000` no longer builds a
+  million-digit integer inside the writer's transaction. Ordinary fractions such
+  as `0.1` are still admitted, and nothing the store could already hold is
+  admitted or refused differently. The refusal now reads "number is outside the
+  I-JSON exact-integer range (magnitude above 2^53-1)"; `ErrIntegerNotRepresentable`
+  keeps its name. With history on, a write that introduces such a number already
+  fails atomically, but a row that already holds one, written while history was
+  off, would fail every later write to it. So
+  `bd config set versioned-history.enabled true` now checks every issue the store
+  would version, the whole issue and not only its metadata, and refuses, writing
+  nothing, while any holds a number outside the range, in its metadata or in a
+  gate's timeout (held as nanoseconds, so the limit is about 104.25 days), or
+  duplicate keys in its metadata. It prints the count, the ids, the field and
+  the fix. For metadata that is one `bd update <id> --metadata ...` (or
+  `--unset-metadata`) per issue, which works with history on or off. `bd update`
+  cannot change a gate's timeout, so for that it is removing the gate, or
+  setting its `timeout_ns` column with `bd sql` (server-backed stores only),
+  while history is off. There is no override, and turning history off never runs
+  the check. The check runs once: a writer that does not record (an older bd,
+  `bd sql`, a pull from a clone that had history off) can still add such a row
+  afterwards, and the first write to it then fails with the same refusal.
+  Turning it on through `BD_VERSIONED_HISTORY_ENABLED` or `config.yaml` does not
+  pass through the command, so those planes rely on the refusal at write time.
+  Dolt's JSON column collapses duplicate keys when it stores a document, so on a
+  Dolt store neither the check nor a write can see one; that refusal is a
+  defense for another backend that keeps them.
+
 - **`bd -C dir prime` now describes the target workspace instead of the launch
   directory** ([#5509](https://github.com/gastownhall/beads/issues/5509)). `-C`
   resolves `BEADS_DIR` but never changes directory, so prime's cwd-relative

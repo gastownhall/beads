@@ -151,6 +151,7 @@ go_test(
         "version_reconcile_boot_test.go",
         "version_reconcile_integration_test.go",
         "version_reconciler_contract_test.go",
+        "versioned_read_contract_test.go",
         "workspace_config_contract_test.go",
     ],
     data = [

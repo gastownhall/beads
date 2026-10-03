@@ -25,8 +25,10 @@ import (
 // workspace and then deletes them from the project. Those are ordinary bead
 // mutations in another workspace, so they belong in that workspace's events
 // journal if it has one enabled — and the setting is read from there, not from
-// the workspace bd was launched in.
+// the workspace bd was launched in. The same goes for its issue-version history,
+// which the store's own settings row decides.
 func openMigrationPlanningStore(ctx context.Context, planningBeadsDir string) (s storage.DoltStorage, err error) {
+	defer func() { s, err = activateVersionedHistoryStore(ctx, s, err) }()
 	defer func() { s, err = activateEventsJournalStore(planningBeadsDir, s, err) }()
 	return dolt.New(ctx, &dolt.Config{
 		Path:     doltserver.ResolveDoltDir(planningBeadsDir),

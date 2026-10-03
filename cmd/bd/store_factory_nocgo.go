@@ -34,6 +34,7 @@ func usesProxiedServer() bool {
 // exists here too so the root pre-run's registry arm has one activating
 // construction path in both builds.
 func newRegisteredBackendStore(ctx context.Context, name, beadsDir string, readOnly bool) (s storage.DoltStorage, err error) {
+	defer func() { s, err = activateVersionedHistoryStore(ctx, s, err) }()
 	defer func() { s, err = activateEventsJournalStore(beadsDir, s, err) }()
 	backend, ok := backends.Lookup(name)
 	if !ok {
@@ -48,6 +49,7 @@ func newRegisteredBackendStore(ctx context.Context, name, beadsDir string, readO
 // newDoltStore applies events-journal activation for the same reason its CGO
 // twin does — see the note at the top of events_journal.go.
 func newDoltStore(ctx context.Context, cfg *dolt.Config) (s storage.DoltStorage, err error) {
+	defer func() { s, err = activateVersionedHistoryStore(ctx, s, err) }()
 	defer func() { s, err = activateEventsJournalStore(cfg.BeadsDir, s, err) }()
 	if cfg.ProxiedServer {
 		return nil, errProxiedStoreUnrouted()
@@ -65,6 +67,7 @@ func acquireEmbeddedLock(_ string, _ bool) (util.Unlocker, error) {
 
 // newDoltStoreFromConfig creates a SQL-server-backed storage backend from config.
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (s storage.DoltStorage, err error) {
+	defer func() { s, err = activateVersionedHistoryStore(ctx, s, err) }()
 	defer func() { s, err = activateEventsJournalStore(beadsDir, s, err) }()
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {

@@ -23,6 +23,13 @@ import (
 // storage spans measure pure DB time without hook-firing overhead. The policy
 // sits directly beneath hooks so serve's one hook-layer peel retains it.
 //
+// Versioned-history activation is NOT applied here. It used to be, and this runs
+// on the one store a command opens for its own workspace, so every store a
+// routed write opens for another workspace missed it. It now happens in the
+// factories that construct a store, on the raw store before anything can wrap it
+// (see versioned_history.go) -- which is also why the decorators above, none of
+// which forwards SetVersionedHistoryEnabled, cannot get in its way.
+//
 // Extracted from main.go's PersistentPreRunE so the chain composition is
 // unit-testable — the bug this PR fixes was a missing WrapStorage call,
 // and the regression class deserves test coverage.

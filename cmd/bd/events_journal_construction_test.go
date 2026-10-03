@@ -89,14 +89,20 @@ var qualifiedActivationCalls = map[string]map[string]bool{
 
 // scannedPackages are the directories searched for construction sites: every
 // package that builds a store or provider for the bd binary, plus the standalone
-// embedded-Dolt utility so it is accounted for rather than merely unnoticed.
-// Each maps to the prefix its sites are keyed under.
+// embedded-Dolt utility and the Go SDK's own opens (the repository root), so they
+// are accounted for rather than merely unnoticed. Each maps to the prefix its
+// sites are keyed under.
 var scannedPackages = map[string]string{
 	".":          "",
 	"doctor":     "doctor/",
 	"doctor/fix": "doctor/fix/",
 	"../../internal/storage/embeddeddolt/cmd": "embeddeddolt-cmd/",
+	"../..": "sdk/",
 }
+
+// sdkOpenExemptionReason is the one reason the Go SDK's five opens share. It has
+// to be true of both per-store switches, because the exemption list is shared.
+const sdkOpenExemptionReason = "SDK entry point (library surface, not the bd binary): applies neither per-store switch, the events journal's or versioned history's; the bd binary's factories do"
 
 // constructionExemptions are construction sites that legitimately do NOT
 // activate the events journal, each with a reason. Keyed by
@@ -170,6 +176,17 @@ var constructionExemptions = map[string]string{
 	// A standalone developer utility binary, not bd. It has no workspace config
 	// to read and never runs as part of a bd command.
 	"embeddeddolt-cmd/main.go:main": "standalone embeddeddolt debug utility, not the bd binary; no workspace config and no bd command context",
+
+	// The Go SDK's own opens (the repository root's beads package). They are a
+	// library surface that embedders call directly, and they build stores without
+	// applying either per-store switch. They are declared here so that a new SDK
+	// open is noticed rather than missed. Making them apply the switches would
+	// change the library's behavior for every embedder, so it is a separate change.
+	"sdk/beads.go:Open":                    sdkOpenExemptionReason,
+	"sdk/beads.go:OpenFromConfig":          sdkOpenExemptionReason,
+	"sdk/beads.go:OpenGated":               sdkOpenExemptionReason,
+	"sdk/beads_cgo.go:OpenBestAvailable":   sdkOpenExemptionReason,
+	"sdk/beads_nocgo.go:OpenBestAvailable": sdkOpenExemptionReason,
 }
 
 func TestEveryStoreConstructionActivatesTheEventsJournal(t *testing.T) {
@@ -233,6 +250,9 @@ func exemptionFor(key string) (exemption, reason string, ok bool) {
 type constructionSite struct {
 	constructors []string
 	activates    bool
+	// activatesVersionedHistory is the same question for the versioned-history
+	// guard, which reuses this scan (see versioned_history_construction_test.go).
+	activatesVersionedHistory bool
 }
 
 // scanStoreConstructionSites parses each scanned package and returns one entry
@@ -362,9 +382,15 @@ func inspectConstructionSite(node ast.Node, imports map[string]string) *construc
 			if qualifiedActivationCalls[path][fun.Sel.Name] {
 				site.activates = true
 			}
+			if qualifiedVersionedHistoryActivationCalls[path][fun.Sel.Name] {
+				site.activatesVersionedHistory = true
+			}
 		case *ast.Ident:
 			if activationCalls[fun.Name] {
 				site.activates = true
+			}
+			if versionedHistoryActivationCalls[fun.Name] {
+				site.activatesVersionedHistory = true
 			}
 		}
 		return true

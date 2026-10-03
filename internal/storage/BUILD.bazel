@@ -59,6 +59,7 @@ go_library(
         "storage.go",
         "sync.go",
         "version_control.go",
+        "version_lister.go",
         "versioned.go",
         "wake_defers.go",
     ],

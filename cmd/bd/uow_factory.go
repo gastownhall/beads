@@ -449,6 +449,7 @@ func resolveServerModeUOWTopologyWithTransportResolver(ctx context.Context, bead
 // the paths it resolves (root, log) are the same ones proxied mode uses because
 // both modes root their server at the same directory.
 func newExternalProxiedServerUOWProvider(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts ...uow.ProviderOption) (p uow.UnitOfWorkProvider, err error) {
+	defer func() { p, err = activateVersionedHistoryProvider(ctx, p, err) }()
 	defer func() { p, err = activateEventsJournalProvider(ctx, beadsDir, p, err) }()
 	rootPath, err := resolveProxiedServerRootPath(beadsDir)
 	if err != nil {
@@ -489,6 +490,7 @@ func newExternalProxiedServerUOWProvider(ctx context.Context, beadsDir string, t
 }
 
 func newManagedProxiedServerUOWProvider(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts ...uow.ProviderOption) (p uow.UnitOfWorkProvider, err error) {
+	defer func() { p, err = activateVersionedHistoryProvider(ctx, p, err) }()
 	defer func() { p, err = activateEventsJournalProvider(ctx, beadsDir, p, err) }()
 	// Resolve and hardened-probe the external dolt binary before spawning
 	// it: an env/sidecar override that is explicitly named but broken

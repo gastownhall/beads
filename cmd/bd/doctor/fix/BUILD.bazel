@@ -43,6 +43,7 @@ go_library(
         "//internal/storage/issueops",
         "//internal/types",
         "//internal/utils",
+        "//internal/versionedhistory",
         "@com_github_burntsushi_toml//:toml",
         "@com_github_go_sql_driver_mysql//:mysql",
         "@in_gopkg_yaml_v3//:yaml_v3",
@@ -81,7 +82,11 @@ go_test(
         "testmain_cgo_test.go",
         "testmain_nocgo_test.go",
         "validation_test.go",
+        "versioned_history_activation_test.go",
     ],
+    # versioned_history_activation_test.go parses store.go from its working
+    # directory, and a Bazel test only sees its declared runfiles.
+    data = ["store.go"],
     embed = [":fix"],
     deps = [
         "//internal/configfile",

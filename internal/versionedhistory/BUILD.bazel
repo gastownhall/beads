@@ -1,0 +1,31 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "versionedhistory",
+    srcs = ["activation.go"],
+    importpath = "github.com/steveyegge/beads/internal/versionedhistory",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/config",
+        "//internal/debug",
+        "//internal/storage",
+        "//internal/storage/uow",
+        "//issueops",
+    ],
+)
+
+go_test(
+    name = "versionedhistory_test",
+    srcs = ["activation_test.go"],
+    embed = [":versionedhistory"],
+    deps = [
+        "//internal/config",
+        "//internal/debug",
+        "//internal/storage",
+        "//internal/storage/domain",
+        "//internal/storage/externaldeps",
+        "//internal/storage/uow",
+        "//internal/telemetry",
+        "//issueops",
+    ],
+)
