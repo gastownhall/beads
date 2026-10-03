@@ -764,6 +764,13 @@ func hasBeadsProjectFiles(beadsDir string) bool {
 	return false
 }
 
+// HasProjectFiles reports whether dir contains workspace configuration or
+// storage. It is exported for command paths which must validate an explicit
+// workspace location before normal discovery can run.
+func HasProjectFiles(dir string) bool {
+	return hasBeadsProjectFiles(dir)
+}
+
 // AncestorDirWalk yields canonical directories from startDir upward, up to and
 // including the filesystem root.
 //

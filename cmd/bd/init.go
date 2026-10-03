@@ -645,6 +645,13 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			cmdCtx.ProxiedServerMode = initProxiedServer
 		}
 
+		// Both init routes must reject a project root passed as BEADS_DIR before
+		// either can create workspace state. The proxied route returns below, so
+		// this guard cannot live only in the embedded/server continuation.
+		if err := guardExplicitBeadsDirProjectRoot(); err != nil {
+			return err
+		}
+
 		if initProxiedServer {
 			if beadsDir := resolveInitBeadsDir(); beadsDir != "" {
 				if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
@@ -2893,6 +2900,20 @@ func resolveInitBeadsDir() string {
 		return beads.GetWorktreeFallbackBeadsDir()
 	}
 	return filepath.Join(cwd, ".beads")
+}
+
+func guardExplicitBeadsDirProjectRoot() error {
+	explicit := beads.ExplicitBeadsDir()
+	if explicit == "" || beads.HasProjectFiles(explicit) {
+		return nil
+	}
+
+	nested := filepath.Join(explicit, ".beads")
+	if !beads.HasProjectFiles(nested) {
+		return nil
+	}
+
+	return fmt.Errorf("BEADS_DIR=%q points to a project root, not its beads workspace; use BEADS_DIR=%q", explicit, nested)
 }
 
 // existingWorkspaceDBName returns the Dolt database name explicitly recorded
