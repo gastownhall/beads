@@ -262,14 +262,28 @@ var wallClockShapes = []struct {
 // hundreds of internal statements, not from anything this test asserts (it
 // has no duration or count assertion to weaken). It twice pushed its shard
 // over the job's 19-minute test timeout (see embedded-storage-test-shards.txt
-// and this package's TestBatchApplyContract for the sibling case). A real
-// 1000-item apply still runs under race with full result assertions, just
-// not here: TestBatchApplyContract/BoundsTheItemCount (this package and
-// internal/storage/dolt) already builds and applies exactly
-// issueops.MaxApplyBatchItems (1000) real items and checks the outcome, so
-// skipping the timing-only duplicate here does not remove any correctness
-// coverage. The 356-item shape (the design's primary measured shape) still
-// runs under race.
+// and this package's TestBatchApplyContract for the sibling case). This does
+// not drop embedded-specific correctness coverage of a real, full
+// MaxApplyBatchItems (1000) apply down to zero: internal/storage/dolt's
+// TestBatchApplyContract/BoundsTheItemCount still builds and applies exactly
+// 1000 real items through the SAME shared inner write body
+// (internal/storage/issueops.ApplyBatchInTx) this package's BatchApplier
+// wraps, non-race, every PR. What it does NOT cover is this package's OWN
+// wrapper around that body (the version-commit-published-after-the-tx
+// mechanism unique to the embedded backend) at the full 1000-item count:
+// this package's own TestBatchApplyContract/BoundsTheItemCount also now
+// applies a reduced count (150, not 1000) under -race, for the identical
+// reason (see its doc comment and
+// conformance.RunBatchApplyBoundsTheItemCountAtScale) — so as of that
+// change, NO CI lane re-exercises embedded's own post-tx-commit-publish
+// wrapper at the true 1000-item count; the largest real, full-assertion
+// apply this backend's own wrapper gets, anywhere in CI, is the 150 items in
+// that sibling subtest (always, race or not) or the 356 items below
+// (non-race only). This is a known, deliberate, reported gap, not an
+// oversight: see the beads CI follow-ups report (fix6) for the full
+// reasoning and the option of a dedicated non-race nightly run to close it.
+// The 356-item shape (the design's primary measured shape) still runs under
+// race.
 func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
