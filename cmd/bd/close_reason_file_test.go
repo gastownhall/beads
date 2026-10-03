@@ -176,9 +176,10 @@ func TestCloseResolveReasons_PerIDReasons(t *testing.T) {
 	cmd.SetArgs([]string{"issue-a", "--reason", "reason A", "issue-b", "--reason", "reason B"})
 
 	var gotReasons, gotArgs []string
+	var gotExplicit bool
 	cmd.Run = func(cmd *cobra.Command, args []string) {
 		var err error
-		gotReasons, gotArgs, err = resolveCloseReasons(cmd, args)
+		gotReasons, gotArgs, gotExplicit, err = resolveCloseReasons(cmd, args)
 		if err != nil {
 			t.Fatalf("resolveCloseReasons: %v", err)
 		}
@@ -193,6 +194,9 @@ func TestCloseResolveReasons_PerIDReasons(t *testing.T) {
 	if !slices.Equal(gotReasons, []string{"reason A", "reason B"}) {
 		t.Fatalf("reasons = %v, want per-ID reasons", gotReasons)
 	}
+	if !gotExplicit {
+		t.Error("explicit = false; --reason is the caller spelling one")
+	}
 }
 
 func TestCloseResolveReasons_SharedReasonForMultipleIDs(t *testing.T) {
@@ -200,9 +204,10 @@ func TestCloseResolveReasons_SharedReasonForMultipleIDs(t *testing.T) {
 	cmd.SetArgs([]string{"issue-a", "issue-b", "--reason", "same reason"})
 
 	var gotReasons, gotArgs []string
+	var gotExplicit bool
 	cmd.Run = func(cmd *cobra.Command, args []string) {
 		var err error
-		gotReasons, gotArgs, err = resolveCloseReasons(cmd, args)
+		gotReasons, gotArgs, gotExplicit, err = resolveCloseReasons(cmd, args)
 		if err != nil {
 			t.Fatalf("resolveCloseReasons: %v", err)
 		}
@@ -217,6 +222,9 @@ func TestCloseResolveReasons_SharedReasonForMultipleIDs(t *testing.T) {
 	if !slices.Equal(gotReasons, []string{"same reason"}) {
 		t.Fatalf("reasons = %v, want one shared reason", gotReasons)
 	}
+	if !gotExplicit {
+		t.Error("explicit = false; --reason is the caller spelling one")
+	}
 }
 
 func TestCloseResolveReasons_EmptyReasonFallsBackToDefault(t *testing.T) {
@@ -224,9 +232,10 @@ func TestCloseResolveReasons_EmptyReasonFallsBackToDefault(t *testing.T) {
 	cmd.SetArgs([]string{"issue-a", "--reason", ""})
 
 	var gotReasons, gotArgs []string
+	var gotExplicit bool
 	cmd.Run = func(cmd *cobra.Command, args []string) {
 		var err error
-		gotReasons, gotArgs, err = resolveCloseReasons(cmd, args)
+		gotReasons, gotArgs, gotExplicit, err = resolveCloseReasons(cmd, args)
 		if err != nil {
 			t.Fatalf("resolveCloseReasons: %v", err)
 		}
@@ -241,6 +250,11 @@ func TestCloseResolveReasons_EmptyReasonFallsBackToDefault(t *testing.T) {
 	if !slices.Equal(gotReasons, []string{"Closed"}) {
 		t.Fatalf("reasons = %v, want default reason", gotReasons)
 	}
+	// The "Closed" default is bd's word, not the caller's, so an empty
+	// --reason must not read as an amendment request on a re-close.
+	if gotExplicit {
+		t.Error("explicit = true for the fallback default; it is not caller-supplied")
+	}
 }
 
 func TestCloseResolveReasons_EmptyReasonDoesNotConflictWithReasonFile(t *testing.T) {
@@ -254,9 +268,10 @@ func TestCloseResolveReasons_EmptyReasonDoesNotConflictWithReasonFile(t *testing
 	cmd.SetArgs([]string{"issue-a", "--reason", "", "--reason-file", path})
 
 	var gotReasons, gotArgs []string
+	var gotExplicit bool
 	cmd.Run = func(cmd *cobra.Command, args []string) {
 		var err error
-		gotReasons, gotArgs, err = resolveCloseReasons(cmd, args)
+		gotReasons, gotArgs, gotExplicit, err = resolveCloseReasons(cmd, args)
 		if err != nil {
 			t.Fatalf("resolveCloseReasons: %v", err)
 		}
@@ -271,6 +286,9 @@ func TestCloseResolveReasons_EmptyReasonDoesNotConflictWithReasonFile(t *testing
 	if !slices.Equal(gotReasons, []string{"from file"}) {
 		t.Fatalf("reasons = %v, want file reason", gotReasons)
 	}
+	if !gotExplicit {
+		t.Error("explicit = false; --reason-file is the caller spelling one")
+	}
 }
 
 func TestCloseResolveReasons_RejectsMismatchedPerIDReasons(t *testing.T) {
@@ -278,7 +296,7 @@ func TestCloseResolveReasons_RejectsMismatchedPerIDReasons(t *testing.T) {
 	cmd.SetArgs([]string{"issue-a", "--reason", "reason A", "issue-b", "--reason", "reason B", "issue-c"})
 
 	cmd.Run = func(cmd *cobra.Command, args []string) {
-		_, _, err := resolveCloseReasons(cmd, args)
+		_, _, _, err := resolveCloseReasons(cmd, args)
 		if err == nil {
 			t.Fatal("expected mismatch error, got nil")
 		}
