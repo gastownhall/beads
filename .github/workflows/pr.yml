@@ -113,93 +113,101 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  # examples/ holds separate Go modules that reach the parent through a
-  # `replace` directive, so their go.mod/go.sum record the parent's whole
-  # dependency graph and go stale whenever the root module's does. Nothing in
-  # CI compiled them, so that drift was invisible: on 2026-08-01 BOTH example
-  # modules failed a plain `go build` on main with "updates to go.mod needed".
-  # Examples are the first code a new user copies; this keeps them buildable.
-  #
-  # Advisory on purpose, and NOT in ci-gate's required list.
-  #
-  # Because of the `replace` directive, any root go.mod change that is not
-  # mirrored into the examples fails this job. Whether that should block a merge
-  # is a maintainer call about contributor friction, so this PR does not make it
-  # one. Advisory has to be implemented at the STEP level: a job-level
-  # continue-on-error job still reports its check run as FAILURE in the PR
-  # rollup (only the workflow-run conclusion turns success), and pr-preflight
-  # and the pr-babysit merge patrol gate on per-check-run conclusions — so a
-  # job-level red here would stall the merge lane repo-wide while claiming to
-  # be optional. Step-level continue-on-error (the cygwin-leg precedent below)
-  # keeps the check run green and surfaces failures as warning annotations.
-  #
-  # To promote it to a real gate: drop the step's continue-on-error and the
-  # warning step, then add `build-examples` to ci-gate's `needs`,
-  # `CI_GATE_REQUIRED`, and its env map.
-  build-examples:
-    name: Build example modules
-    runs-on: ubuntu-latest
-    # No job-level timeout on purpose: a job-level timeout CANCELS the job,
-    # and a cancelled advisory job is a red check run — blocking again by a
-    # different door. Instead every step below carries its own
-    # timeout-minutes AND continue-on-error, so a hang or failure anywhere
-    # (setup download stall, cache stall, build hang) degrades to a warning
-    # annotation while the job itself always concludes green.
+  # F7a: fold of five independent, no-cache pr.yml checks that previously ran
+  # as five separate ubuntu-latest jobs (check-build-tags,
+  # check-version-consistency, check-migration-hygiene,
+  # check-no-beads-changes, fmt-check) into one Blacksmith job with five
+  # steps. Each step gets its own id and `if: ${{ !cancelled() }}` so one
+  # check's failure does not block the others from running, and the job
+  # exposes each step's outcome as a job output so ci-gate can still red the
+  # exact same CI_GATE_REQUIRED token it did before the fold -
+  # TestPRCIGateFastChecksTokens pins the mapping. FAST_CHECKS (the job's own
+  # `result`) is an added backstop token: if the whole job is lost (e.g. a
+  # cancelled runner) before any step sets its output, the per-check outputs
+  # read empty and the CI_GATE_REQUIRED fallback below treats that as
+  # "skipped" - which is NOT skipped_ok, so the gate still reds, but
+  # FAST_CHECKS gives ci-gate.sh one clear error line ("FAST_CHECKS=cancelled")
+  # instead of five confusing ones.
+  fast-checks:
+    name: Fast checks (build tags, versions, migrations, beads diff, fmt)
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    outputs:
+      build-tags: ${{ steps.build-tags.outcome }}
+      version-consistency: ${{ steps.version-consistency.outcome }}
+      migration-hygiene: ${{ steps.migration-hygiene.outcome }}
+      no-beads-changes: ${{ steps.no-beads-changes.outcome }}
+      fmt: ${{ steps.fmt.outcome }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        id: checkout
-        continue-on-error: true
-        timeout-minutes: 5
+        with:
+          # check-migration-hygiene and check-no-beads-changes diff against
+          # the base branch; a shallow checkout starves both.
+          fetch-depth: 0
 
       - name: Set up Go
-        id: setup-go
-        continue-on-error: true
-        timeout-minutes: 5
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
           cache: false
 
-      # The examples' dependency graph is the parent module's (via the
-      # `replace` directive), so the repo-wide module cache key is a
-      # near-perfect hit; without it this job cold-downloads the whole
-      # dolt-sized graph on every PR.
-      - name: Restore Go module cache
-        continue-on-error: true
-        timeout-minutes: 5
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      - name: Type-check every module under examples/
-        id: build-examples
-        if: steps.checkout.outcome == 'success' && steps.setup-go.outcome == 'success'
-        continue-on-error: true
-        timeout-minutes: 10
-        run: ./scripts/build-examples.sh
-
-      - name: Warn when example modules are stale or fail to build
-        if: steps.build-examples.outcome == 'failure'
+      # Fast shell/Make guard for direct source-time build-tag declarations.
+      # Workflow `run` steps are checked structurally in the required policy
+      # wrapper.
+      - name: Check build-tag policy
+        id: build-tags
+        if: ${{ !cancelled() }}
         run: |
-          echo "::warning title=Example modules out of date::examples/ failed to type-check against this tree. Run 'go mod tidy' in each module under examples/ (see scripts/build-examples.sh output above). Advisory only; this does not block the merge."
+          ./scripts/check-build-tags.sh
+          ./scripts/check-go-install-guidance.sh
+          ./scripts/check-winget-portable-alias.sh
 
-      - name: Warn when the advisory job could not run at all
-        if: steps.checkout.outcome != 'success' || steps.setup-go.outcome != 'success'
+      # Fast check to ensure all version files are in sync
+      - name: Check all versions match
+        id: version-consistency
+        if: ${{ !cancelled() }}
+        run: ./scripts/check-versions.sh
+
+      # Migration hygiene: duplicate version numbers, nondeterministic SQL
+      # (UUID()/NOW()/RAND(), the #4259 root-cause class), and edits to
+      # migration files that already exist on the base branch (shipped
+      # migrations are frozen; fix forward with a new version). Fails at PR
+      # time, before any test even compiles. Details:
+      # scripts/check-migration-hygiene.sh.
+      - name: Run migration hygiene checks
+        id: migration-hygiene
+        if: ${{ !cancelled() }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: ./scripts/check-migration-hygiene.sh
+
+      # Fast check to catch accidental .beads/issues.jsonl changes from
+      # contributors. pull_request-only, same as before the fold: merge_group
+      # has no base_ref to diff against, so the step (and therefore this
+      # token) is skipped there, and merge_group's CI_GATE_SKIPPED_OK
+      # allow-lists exactly that skip below.
+      - name: Check for .beads/issues.jsonl changes
+        id: no-beads-changes
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         run: |
-          echo "::warning title=Example build check skipped::checkout or Go setup failed, so examples/ could not be checked this run (checkout: ${{ steps.checkout.outcome }}, setup-go: ${{ steps.setup-go.outcome }}). Advisory only; this does not block the merge."
+          if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "^\.beads/issues\.jsonl$"; then
+            echo "This PR includes changes to .beads/issues.jsonl"
+            echo ""
+            echo "This file is the project's issue database and should not be modified in PRs."
+            echo ""
+            echo "To fix, run:"
+            echo "  git checkout origin/main -- .beads/issues.jsonl"
+            echo "  git commit --amend"
+            echo "  git push --force"
+            echo ""
+            exit 1
+          fi
+          echo "No .beads/issues.jsonl changes detected"
 
-  # Fast shell/Make guard for direct source-time build-tag declarations.
-  # Workflow `run` steps are checked structurally in the required policy wrapper.
-  check-build-tags:
-    name: Check build-tag policy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-      - run: ./scripts/check-build-tags.sh
-      - run: ./scripts/check-go-install-guidance.sh
-      - run: ./scripts/check-winget-portable-alias.sh
+      - name: Check gofmt
+        id: fmt
+        if: ${{ !cancelled() }}
+        run: make fmt-check
 
   # Lock in two CGO-disabled portability boundaries. cmd/bd carries a mix of
   # cgo-only test helpers (embedded Dolt, sql.DB) and pure-Go tests; compiling
@@ -312,29 +320,25 @@ jobs:
   # The build scope is deliberately ./... and not the ./cmd/bd that every
   # .goreleaser.yml build id declares as main:. Compiling the whole tree per
   # platform is intentional extra coverage, not an oversight.
+  #
+  # F7a: folded from 8 per-target jobs into 2 per-group jobs. The target list
+  # moved out of this matrix and into scripts/ci/release-targets.txt, which
+  # scripts/ci/check-release-cross-compile.sh reads and
+  # TestReleaseTargetCrossCompilationMatrixMatchesGoreleaser pins against
+  # .goreleaser.yml, so the manifest (not this YAML) is now the single
+  # source of truth for the target set. Moved to Blacksmith for same-repo
+  # PRs/merge_group: this job restores no GitHub-saved build cache (only a
+  # best-effort module-cache restore, whose misses are cheap network
+  # fetches, not lost compute). Runner choice must match the
+  # TestSameRepoBlacksmithRunners pin.
   check-release-target-cross-compilation:
-    name: Check release target cross-compilation (${{ matrix.goos }}/${{ matrix.goarch }})
-    runs-on: ubuntu-latest
+    name: Check release target cross-compilation (${{ matrix.group }})
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: android
-            goarch: arm64
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
-          - goos: windows
-            goarch: amd64
-          - goos: windows
-            goarch: arm64
-          - goos: freebsd
-            goarch: amd64
+        group: [unix, desktop]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -352,12 +356,8 @@ jobs:
           key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
-      - name: Build complete release target tree
-        env:
-          CGO_ENABLED: "0"
-          GOARCH: ${{ matrix.goarch }}
-          GOOS: ${{ matrix.goos }}
-        run: go build -tags gms_pure_go ./...
+      - name: Build complete release target tree for group ${{ matrix.group }}
+        run: ./scripts/ci/check-release-cross-compile.sh ${{ matrix.group }}
 
   # The lingering-handle liveness regression test is //go:build windows: the
   # Ubuntu job above selects it by name but compiles it out, and main.yml's
@@ -413,8 +413,23 @@ jobs:
   # executing them. Same pattern as the liveness job above: run exactly
   # this package on windows-latest so the platform it targets actually
   # exercises it at PR time. Small on purpose (~1 min).
-  test-windows-doltversion:
-    name: Test (Windows) doltversion package
+  #
+  # internal/storage/dbproxy/server carries the platform-portable path
+  # handling that #5820 introduced (testPlatformPath, external dolt config
+  # validation, DSN shaping); run exactly this package on windows-latest -
+  # the platform those paths target. Tests that need a dolt binary Skipf
+  # loudly (dolt is not installed on the Windows runners), and the
+  # unix-socket cases skip on Windows by design.
+  #
+  # F7a: fold of two small, independent windows-latest jobs
+  # (test-windows-doltversion, test-windows-dbproxy-server) into one. Neither
+  # was in ci-gate's needs/CI_GATE_REQUIRED before the fold (promoting either
+  # to required-for-merge, once it has run clean for a while, is a separate
+  # maintainer call), so this fold needs no gate changes. Not one of the
+  # Windows jobs F4 touches (test-windows-liveness, worktree-remove-windows,
+  # the preflight/doc-freshness matrices, the twins).
+  test-windows-small:
+    name: Test (Windows) small packages (doltversion, dbproxy server)
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -428,7 +443,33 @@ jobs:
           cache: false
 
       - name: Run doltversion package tests on Windows
+        id: doltversion
+        if: ${{ !cancelled() }}
+        continue-on-error: true
         run: go test -tags gms_pure_go -count=1 ./internal/doltversion/
+
+      - name: Run dbproxy server package tests on Windows
+        id: dbproxy-server
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          CGO_ENABLED: "0"
+        run: go test -tags gms_pure_go -count=1 -v ./internal/storage/dbproxy/server/
+
+      - name: Fail if either small Windows package test failed
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          status=0
+          if [[ "${{ steps.doltversion.outcome }}" == "failure" ]]; then
+            echo "::error::doltversion package tests failed on Windows"
+            status=1
+          fi
+          if [[ "${{ steps.dbproxy-server.outcome }}" == "failure" ]]; then
+            echo "::error::dbproxy server package tests failed on Windows"
+            status=1
+          fi
+          exit "$status"
 
   # Destructive worktree removal depends on native Windows path identity.
   # This focused process suite requires NTFS per-directory case sensitivity
@@ -466,45 +507,6 @@ jobs:
           CGO_ENABLED: "0"
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test -tags gms_pure_go -count=1 -run '^TestWorktreeRemove' ./cmd/bd
-
-  # internal/storage/dbproxy/server carries the platform-portable path
-  # handling that #5820 introduced (testPlatformPath, external dolt config
-  # validation, DSN shaping), and until now no PR-triggered job executed the
-  # package on Windows - the platform those paths target - so a path-shaped
-  # regression stayed invisible until someone ran it by hand (the #5820
-  # review merged on a contributor's windows/amd64 attestation for exactly
-  # that reason). Same pattern as the focused jobs above: run exactly this
-  # package on windows-latest. Tests that need a dolt binary Skipf loudly
-  # (dolt is not installed on the Windows runners), and the unix-socket
-  # cases skip on Windows by design - the portability class this job guards
-  # runs without either.
-  #
-  # Deliberately NOT added to ci-gate's `needs`/`CI_GATE_REQUIRED`/env map,
-  # following the advisory-job precedent used elsewhere in this file (e.g.
-  # `test-windows-doltversion`): promoting a new job to required-for-merge is
-  # a maintainer call once it has run clean for a while.
-  # Until then it runs on every PR and surfaces red on the PR page without
-  # blocking the merge lane. Say the word and I will wire it into the gate in
-  # the same PR - the three edits are `ci-gate.needs`, `CI_GATE_REQUIRED`, and
-  # `TEST_WINDOWS_DBPROXY_SERVER: ${{ needs.test-windows-dbproxy-server.result }}`.
-  test-windows-dbproxy-server:
-    name: Test (Windows) dbproxy server package
-    runs-on: windows-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Run dbproxy server package tests on Windows
-        env:
-          CGO_ENABLED: "0"
-        run: go test -tags gms_pure_go -count=1 -v ./internal/storage/dbproxy/server/
 
   # F4 side-by-side rollout (advisory phase): cross-compiles the Windows test
   # binaries this file's native Windows jobs need, from a committed manifest
@@ -680,44 +682,15 @@ jobs:
         shell: bash
         run: bash scripts/ci/run-go-test-binary.sh "$RUNNER_TEMP/win-bin/cmd-bd-nocgo.test.exe" ./cmd/bd -run '^TestWorktreeRemove' -count=1
 
-  # Fast check to ensure all version files are in sync
-  check-version-consistency:
-    name: Check version consistency
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Check all versions match
-        run: ./scripts/check-versions.sh
-
-  # Migration hygiene: duplicate version numbers, nondeterministic SQL
-  # (UUID()/NOW()/RAND(), the #4259 root-cause class), and edits to migration
-  # files that already exist on the base branch (shipped migrations are
-  # frozen; fix forward with a new version). Fails at PR time, before any
-  # test even compiles. Details: scripts/check-migration-hygiene.sh.
-  check-migration-hygiene:
-    name: Check migration hygiene
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          fetch-depth: 0
-
-      - name: Run migration hygiene checks
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
-        run: ./scripts/check-migration-hygiene.sh
-
   # Check documentation references match actual CLI flags
+  #
+  # F7a: moved to Blacksmith for same-repo PRs/merge_group. This job's module
+  # cache restore step was already absent before the fold (every run cold-
+  # builds bd), so there is no GitHub-saved cache to lose here.
   check-doc-flags:
     name: Check doc flags freshness
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
@@ -893,39 +866,18 @@ jobs:
         shell: bash
         run: bash scripts/ci/test-windows-env-helpers.sh
 
-  # Fast check to catch accidental .beads/issues.jsonl changes from contributors
-  check-no-beads-changes:
-    name: Check for .beads changes
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          fetch-depth: 0
-
-      - name: Check for .beads/issues.jsonl changes
-        run: |
-          if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "^\.beads/issues\.jsonl$"; then
-            echo "This PR includes changes to .beads/issues.jsonl"
-            echo ""
-            echo "This file is the project's issue database and should not be modified in PRs."
-            echo ""
-            echo "To fix, run:"
-            echo "  git checkout origin/main -- .beads/issues.jsonl"
-            echo "  git commit --amend"
-            echo "  git push --force"
-            echo ""
-            exit 1
-          fi
-          echo "No .beads/issues.jsonl changes detected"
-
   # F3: package-mcp and package-npm (and the detect job that fed them) moved
   # into bazel.yml, which pr.yml calls with package-gates: "on" below. They
   # now depend on nothing but the rbe job's decision, so they no longer wait
   # on build-artifacts, bazel-coverage or the rest of the bazel call.
+  #
+  # F7a: moved to Blacksmith for same-repo PRs/merge_group. setup-go runs with
+  # cache: false and the module download step below always hits the network,
+  # so this job restores no GitHub-saved cache.
   pr-policy-wrapper:
     name: PR Policy (wrapper timing)
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
@@ -1193,25 +1145,85 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/lint-${{ matrix.target }}
         run: make ci-pr-lint
 
-  # Advisory architecture signal. This deliberately does not participate in
-  # ci-gate while maintainers evaluate the baseline and refactoring payoff.
-  complexity-report:
-    name: Complexity report (advisory)
-    runs-on: ubuntu-latest
+  # F7a: fold of build-examples + complexity-report, the two pr.yml jobs that
+  # are advisory-only (not in ci-gate's needs/CI_GATE_REQUIRED) and restore no
+  # GitHub-saved build cache, onto one Blacksmith runner for same-repo
+  # PRs/merge_group. Both keep their pre-fold step-level
+  # continue-on-error/timeout-minutes design: a job-level timeout or failure
+  # would CANCEL or red the job, and a cancelled/red advisory check is exactly
+  # the blocking-by-a-different-door outcome both were written to avoid. A
+  # generous job-level timeout-minutes is still set, because
+  # TestSameRepoBlacksmithRunners requires one of every job it pins (so a
+  # stuck Blacksmith runner cannot spend minutes forever) - it sits comfortably
+  # above the sum of the step timeouts below so it is a backstop, not a
+  # realistic ceiling.
+  #
+  # examples/ holds separate Go modules that reach the parent through a
+  # `replace` directive, so their go.mod/go.sum record the parent's whole
+  # dependency graph and go stale whenever the root module's does. Nothing in
+  # CI compiled them, so that drift was invisible: on 2026-08-01 BOTH example
+  # modules failed a plain `go build` on main with "updates to go.mod needed".
+  # Examples are the first code a new user copies; this keeps them buildable.
+  #
+  # To promote the examples check to a real gate: drop its step's
+  # continue-on-error and warning step, then add `advisory-reports` to
+  # ci-gate's `needs`, `CI_GATE_REQUIRED`, and its env map.
+  #
+  # The complexity report is an advisory architecture signal; it deliberately
+  # does not participate in ci-gate while maintainers evaluate the baseline
+  # and refactoring payoff.
+  advisory-reports:
+    name: Advisory reports (examples build, complexity)
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        timeout-minutes: 3
+        id: checkout
         continue-on-error: true
+        timeout-minutes: 5
         with:
+          # complexity.sh diffs against origin/main; examples/ does not need
+          # history but shares this checkout.
           fetch-depth: 0
 
       - name: Set up Go
-        timeout-minutes: 3
+        id: setup-go
         continue-on-error: true
+        timeout-minutes: 5
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
           cache: false
+
+      # The examples' dependency graph is the parent module's (via the
+      # `replace` directive), so the repo-wide module cache key is a
+      # near-perfect hit; without it this job cold-downloads the whole
+      # dolt-sized graph on every PR.
+      - name: Restore Go module cache
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Type-check every module under examples/
+        id: build-examples
+        if: steps.checkout.outcome == 'success' && steps.setup-go.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 10
+        run: ./scripts/build-examples.sh
+
+      - name: Warn when example modules are stale or fail to build
+        if: steps.build-examples.outcome == 'failure'
+        run: |
+          echo "::warning title=Example modules out of date::examples/ failed to type-check against this tree. Run 'go mod tidy' in each module under examples/ (see scripts/build-examples.sh output above). Advisory only; this does not block the merge."
+
+      - name: Warn when the examples build could not run at all
+        if: steps.checkout.outcome != 'success' || steps.setup-go.outcome != 'success'
+        run: |
+          echo "::warning title=Example build check skipped::checkout or Go setup failed, so examples/ could not be checked this run (checkout: ${{ steps.checkout.outcome }}, setup-go: ${{ steps.setup-go.outcome }}). Advisory only; this does not block the merge."
 
       - name: Install gocyclo
         timeout-minutes: 5
@@ -1343,9 +1355,13 @@ jobs:
   # makes the container half fail, not skip. Every PR, whatever bazel-coverage
   # says: it was test-domain-uow's first step, and the Bazel lanes that
   # replace that job (D2 step 3) have no docker.
+  #
+  # F7a: moved to Blacksmith for same-repo PRs/merge_group. Restores no
+  # GitHub-saved cache (Dolt CLI and the sql-server image are fetched fresh
+  # every run via scripts/ci/install-dolt.sh and pull-dolt-image.sh).
   test-dolt-server-fingerprint:
     name: Test (Dolt server fingerprint)
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -1458,41 +1474,42 @@ jobs:
           BEADS_PROTOCOL_REQUIRE_DOLT: "1"
         run: go test -tags gms_pure_go -count=1 -timeout 30m ./cmd/bd/protocol
 
-  fmt-check:
-    name: Check formatting
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Check gofmt
-        run: make fmt-check
-
+  # F7a: fold of a 3-host matrix (native, msys2, cygwin) into one sequential
+  # job on a single windows-latest runner. Each leg's setup+exercise step pair
+  # keeps `continue-on-error: true` (new for native/msys2; cygwin's setup
+  # already had it) so a leg failing does not stop the later legs from
+  # running - the fail-fast: false behavior the matrix used to give for free.
+  # The job needs its own pass/fail verdict now that the 3 legs no longer
+  # produce 3 independent job results: the final step below fails the job if
+  # native or msys2's setup or exercise step failed, or if the Cygwin exercise
+  # step failed - reproducing the pre-fold rule that only a genuine Make
+  # regression reds the check, while a Cygwin installer download flake
+  # (steps.cygwin.outcome == 'failure') stays a warning, never a hard
+  # failure. windows-make-shell is not a Windows job F4 touches (it does not
+  # intersect test-windows-liveness, worktree-remove-windows, the preflight/
+  # doc-freshness matrices, or the twins).
   windows-make-shell:
-    name: Windows Make shell (${{ matrix.host }})
+    name: Windows Make shell (native, msys2, cygwin)
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        host:
-          - native
-          - msys2
-          - cygwin
+    timeout-minutes: 30
+    outputs:
+      native: ${{ steps.native.outcome }}
+      msys2: ${{ steps.msys2.outcome }}
+      cygwin: ${{ steps.cygwin-test.outcome }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Install native GNU Make
-        if: matrix.host == 'native'
+        id: install-native
+        if: ${{ !cancelled() }}
+        continue-on-error: true
         shell: pwsh
         run: choco install make --version=4.4.1 --yes --no-progress
 
       - name: Set up MSYS2 GNU Make
-        if: matrix.host == 'msys2'
+        id: install-msys2
+        if: ${{ !cancelled() }}
+        continue-on-error: true
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
         with:
           msystem: MSYS
@@ -1500,7 +1517,7 @@ jobs:
           path-type: minimal
 
       - name: Set up Cygwin GNU Make
-        if: matrix.host == 'cygwin'
+        if: ${{ !cancelled() }}
         id: cygwin
         # cygwin-install-action downloads setup-x86_64.exe from cygwin.com. That
         # download times out often enough to red the required check for a reason
@@ -1515,13 +1532,15 @@ jobs:
           add-to-path: 'false'
 
       - name: Warn when Cygwin setup was skipped by a download failure
-        if: matrix.host == 'cygwin' && steps.cygwin.outcome == 'failure'
+        if: ${{ !cancelled() && steps.cygwin.outcome == 'failure' }}
         shell: bash
         run: |
           echo "::warning title=Cygwin Make-shell leg skipped::cygwin-install-action could not download the Cygwin installer (network flake); skipping the Cygwin-hosted Make smoke test. This is an infrastructure failure, not a code failure."
 
       - name: Exercise native Windows Make
-        if: matrix.host == 'native'
+        id: native
+        if: ${{ !cancelled() && steps.install-native.outcome == 'success' }}
+        continue-on-error: true
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -1853,7 +1872,9 @@ jobs:
           Write-Output 'Native Make install proof passed: first install, failed copy, case-variant alias, junction, preserved BD directory'
 
       - name: Exercise MSYS2-hosted Make
-        if: matrix.host == 'msys2'
+        id: msys2
+        if: ${{ !cancelled() && steps.install-msys2.outcome == 'success' }}
+        continue-on-error: true
         shell: msys2 {0}
         run: |
           set -euo pipefail
@@ -1894,11 +1915,13 @@ jobs:
           make --no-print-directory -f "$profile/smoke.mk" windows-make-shell-smoke
 
       - name: Exercise Cygwin-hosted Make
+        id: cygwin-test
         # Only run when the Cygwin toolchain actually installed; a skipped install
         # (download flake) leaves this leg un-exercised rather than failing on a
         # missing bash. A real install success followed by a Make regression here
         # still fails the job as before.
-        if: matrix.host == 'cygwin' && steps.cygwin.outcome == 'success'
+        if: ${{ !cancelled() && steps.cygwin.outcome == 'success' }}
+        continue-on-error: true
         shell: pwsh
         env:
           CYGWIN_ROOT: ${{ steps.cygwin.outputs.root }}
@@ -1950,6 +1973,30 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw 'Cygwin Make shell smoke failed'
           }
+
+      # Reproduces the pre-fold rule from when each host was its own matrix
+      # leg/job: native and MSYS2 are required (their setup or exercise
+      # failing reds this job), while Cygwin's setup is best-effort (a
+      # download flake only warns, see above) and only a Make regression in
+      # its exercise step reds the job.
+      - name: Fail if a required Windows Make shell leg failed
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          status=0
+          if [[ "${{ steps.install-native.outcome }}" == "failure" || "${{ steps.native.outcome }}" == "failure" ]]; then
+            echo "::error::native Windows Make shell leg failed (install: ${{ steps.install-native.outcome }}, exercise: ${{ steps.native.outcome }})"
+            status=1
+          fi
+          if [[ "${{ steps.install-msys2.outcome }}" == "failure" || "${{ steps.msys2.outcome }}" == "failure" ]]; then
+            echo "::error::MSYS2 Windows Make shell leg failed (install: ${{ steps.install-msys2.outcome }}, exercise: ${{ steps.msys2.outcome }})"
+            status=1
+          fi
+          if [[ "${{ steps.cygwin-test.outcome }}" == "failure" ]]; then
+            echo "::error::Cygwin Windows Make shell leg failed (exercise: ${{ steps.cygwin-test.outcome }})"
+            status=1
+          fi
+          exit "$status"
 
   # The Bazel lane (bazel.yml), gated alongside the legacy jobs it mirrors
   # (PR Core, build-artifacts, the pure-Go/js-wasm check, domain+uow and
@@ -2075,19 +2122,16 @@ jobs:
     timeout-minutes: 10
     needs:
       - build-artifacts
-      - check-build-tags
+      - fast-checks
       - check-cmd-bd-puregeo-tests
       - check-release-target-cross-compilation
       - test-windows-liveness
       - worktree-remove-windows
       - test-windows-liveness-prebuilt
       - worktree-remove-windows-prebuilt
-      - check-version-consistency
-      - check-migration-hygiene
       - check-doc-flags
       - check-doc-freshness-platforms
       - pr-preflight-platforms
-      - check-no-beads-changes
       - pr-policy-wrapper
       - pr-core-wrapper
       - scripts-go-checks
@@ -2095,7 +2139,6 @@ jobs:
       - test-domain-uow
       - test-dolt-server-fingerprint
       - contract-corpus
-      - fmt-check
       - windows-make-shell
       - bazel
       - bazel-coverage
@@ -2108,15 +2151,17 @@ jobs:
           CI_GATE_NAME: PR baseline gate
           CI_GATE_REQUIRED: >-
             BUILD_ARTIFACTS
+            FAST_CHECKS
             CHECK_BUILD_TAGS
-            CHECK_CMD_BD_PUREGEO_TESTS
-            CHECK_RELEASE_TARGET_CROSS_COMPILATION
             CHECK_VERSION_CONSISTENCY
             CHECK_MIGRATION_HYGIENE
+            CHECK_NO_BEADS_CHANGES
+            FMT_CHECK
+            CHECK_CMD_BD_PUREGEO_TESTS
+            CHECK_RELEASE_TARGET_CROSS_COMPILATION
             CHECK_DOC_FLAGS
             CHECK_DOC_FRESHNESS_PLATFORMS
             PR_PREFLIGHT_PLATFORMS
-            CHECK_NO_BEADS_CHANGES
             PACKAGE_MCP
             PACKAGE_NPM
             PR_POLICY_WRAPPER
@@ -2126,7 +2171,6 @@ jobs:
             TEST_DOMAIN_UOW
             TEST_DOLT_SERVER_FINGERPRINT
             CONTRACT_CORPUS
-            FMT_CHECK
             WINDOWS_MAKE_SHELL
             BAZEL
             BAZEL_TEST
@@ -2141,7 +2185,22 @@ jobs:
             BAZEL_DOLT_SERVER_RETIRED
             BAZEL_PR_LANES_RETIRED
           BUILD_ARTIFACTS: ${{ needs.build-artifacts.result }}
-          CHECK_BUILD_TAGS: ${{ needs.check-build-tags.result }}
+          # F7a: fast-checks folds five formerly-separate jobs into one job
+          # with five steps; each token below now reads that step's outcome
+          # (via the job's outputs) instead of a sibling job's result, with a
+          # 'skipped' fallback for a lost job (see FAST_CHECKS below).
+          # TestPRCIGateFastChecksTokens pins this mapping.
+          CHECK_BUILD_TAGS: ${{ needs.fast-checks.outputs.build-tags || 'skipped' }}
+          CHECK_VERSION_CONSISTENCY: ${{ needs.fast-checks.outputs.version-consistency || 'skipped' }}
+          CHECK_MIGRATION_HYGIENE: ${{ needs.fast-checks.outputs.migration-hygiene || 'skipped' }}
+          CHECK_NO_BEADS_CHANGES: ${{ needs.fast-checks.outputs.no-beads-changes || 'skipped' }}
+          FMT_CHECK: ${{ needs.fast-checks.outputs.fmt || 'skipped' }}
+          # Backstop: if fast-checks itself is lost (e.g. a cancelled runner)
+          # before any step sets an output, the five tokens above all read
+          # 'skipped' (none are in CI_GATE_SKIPPED_OK by default, so the gate
+          # still reds) - FAST_CHECKS gives ci-gate.sh one clear line naming
+          # the job instead of five step-shaped ones.
+          FAST_CHECKS: ${{ needs.fast-checks.result }}
           CHECK_CMD_BD_PUREGEO_TESTS: ${{ needs.check-cmd-bd-puregeo-tests.result }}
           CHECK_RELEASE_TARGET_CROSS_COMPILATION: ${{ needs.check-release-target-cross-compilation.result }}
           TEST_WINDOWS_LIVENESS: ${{ needs.test-windows-liveness.result }}
@@ -2152,12 +2211,9 @@ jobs:
           # CI_GATE_SKIPPED_OK.
           TEST_WINDOWS_LIVENESS_PREBUILT: ${{ needs.test-windows-liveness-prebuilt.result }}
           WORKTREE_REMOVE_WINDOWS_PREBUILT: ${{ needs.worktree-remove-windows-prebuilt.result }}
-          CHECK_VERSION_CONSISTENCY: ${{ needs.check-version-consistency.result }}
-          CHECK_MIGRATION_HYGIENE: ${{ needs.check-migration-hygiene.result }}
           CHECK_DOC_FLAGS: ${{ needs.check-doc-flags.result }}
           CHECK_DOC_FRESHNESS_PLATFORMS: ${{ needs.check-doc-freshness-platforms.result }}
           PR_PREFLIGHT_PLATFORMS: ${{ needs.pr-preflight-platforms.result }}
-          CHECK_NO_BEADS_CHANGES: ${{ needs.check-no-beads-changes.result }}
           # F3: package-mcp/package-npm now run inside the bazel call; their
           # job.status surfaces as a call output exactly like the Bazel lanes
           # below, never "skipped" on pr.yml (package-gates is always "on"
@@ -2171,7 +2227,6 @@ jobs:
           TEST_DOMAIN_UOW: ${{ needs.test-domain-uow.result }}
           TEST_DOLT_SERVER_FINGERPRINT: ${{ needs.test-dolt-server-fingerprint.result }}
           CONTRACT_CORPUS: ${{ needs.contract-corpus.result }}
-          FMT_CHECK: ${{ needs.fmt-check.result }}
           WINDOWS_MAKE_SHELL: ${{ needs.windows-make-shell.result }}
           # bazel.yml's lanes report their job.status as outputs; a lane that
           # did not report (skipped, or lost before its last step) reads as

@@ -971,6 +971,80 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
   `test-embedded-conformance` and the Bazel lane. It is not part of either
   required gate; retiring it is a separate decision.
 
+### F7a: Same-Repo Blacksmith Moves and Job Folds
+
+F7a (design: `~/beads-bazel-plan/five-min/spec-f7.md`) moves pr.yml/pr-risk.yml
+jobs that are same-repo-safe and restore no GitHub-saved build cache onto the
+org's Blacksmith runner pool, and folds several independent single-purpose
+jobs into fewer jobs with multiple isolated steps, to cut same-repo PR queue
+time. Jobs that need a Blacksmith-side build-cache saver (scripts-go-checks,
+pr-lint-wrapper, the preflight/doc-freshness matrices' ubuntu legs) are F7b's
+scope, not this slice's.
+
+- **Runner moves** (same-repo-Blacksmith expression, §
+  [Trusted-Author Fork PRs](#trusted-author-fork-prs-bazel-farm)'s pattern,
+  reused verbatim with only the vCPU label varying; pinned by
+  `TestSameRepoBlacksmithRunners` and `TestSameRepoBlacksmithExpressionSemantics`
+  in `scripts/ci_workflow_test.go`): pr.yml's `fast-checks`,
+  `advisory-reports`, `check-release-target-cross-compilation` (8 vCPU),
+  `check-doc-flags` (4 vCPU), `pr-policy-wrapper` (4 vCPU),
+  `test-dolt-server-fingerprint`; pr-risk.yml's `test-nix` (4 vCPU). Every
+  other job keeps the default 2 vCPU label. Forks and Dependabot PRs fall back
+  to `ubuntu-latest`, as F3's `bazel-coverage`/`ci-gate`/`detect-ci-tier` jobs
+  and bazel.yml's `rbe` job already do; `TestBlacksmithJobsReadNoSecrets`
+  requires that no job eligible for a Blacksmith label ever reads a secret, so
+  a maintainer re-running a Dependabot PR landing on Blacksmith (actor change,
+  same as F3) is harmless.
+- **`fast-checks` fold.** `check-build-tags`, `check-version-consistency`,
+  `check-migration-hygiene`, `check-no-beads-changes` and `fmt-check` became
+  five steps of one job, each with its own `id` and `if: ${{ !cancelled() }}`
+  so one check's failure does not stop the others from running. The job
+  exposes each step's `outcome` as a job output; ci-gate reads
+  `needs.fast-checks.outputs.<x> || 'skipped'` into the same
+  `CI_GATE_REQUIRED` token (`CHECK_BUILD_TAGS`, `CHECK_VERSION_CONSISTENCY`,
+  `CHECK_MIGRATION_HYGIENE`, `CHECK_NO_BEADS_CHANGES`, `FMT_CHECK`) that token
+  named before the fold, so a failing check still reds the exact same gate
+  line. `FAST_CHECKS` (the job's own `.result`) is an added backstop token: if
+  the whole job is lost before any step reports, the five per-check tokens all
+  read `skipped` (not `skipped_ok`, so the gate still reds), but `FAST_CHECKS`
+  gives `ci-gate.sh` one clear line naming the job instead of five confusing
+  ones. `TestPRCIGateFastChecksTokens` pins the whole mapping, including
+  `CHECK_NO_BEADS_CHANGES`'s `pull_request`-only step `if:` and its
+  `merge_group` entry in `CI_GATE_SKIPPED_OK`, both unchanged by the fold.
+- **Cross-compilation 8 → 2.** `check-release-target-cross-compilation`'s
+  eight per-target matrix legs (one `go build` each) became two legs
+  (`unix`, `desktop`) driven by `scripts/ci/release-targets.txt`, a
+  `GOOS GOARCH GROUP` manifest kept in sync with `.goreleaser.yml`'s `builds:`
+  list (plus the darwin/amd64 and darwin/arm64 exception release.yml's
+  `goreleaser-macos` job builds natively) by
+  `TestReleaseTargetCrossCompilationMatrixMatchesGoreleaser`. Each leg runs
+  `scripts/ci/check-release-cross-compile.sh <group>`, which builds every
+  target in its group sequentially and reports every failure before exiting
+  non-zero, so a PR touching two platforms at once sees both failures in one
+  log instead of needing a per-target re-run.
+- **`advisory-reports` fold.** `build-examples` and `complexity-report` (both
+  already advisory: neither was in ci-gate's `needs`/`CI_GATE_REQUIRED`)
+  became one job's steps. Each keeps its pre-fold step-level
+  `continue-on-error`/`timeout-minutes` design, because a job-level timeout or
+  failure would cancel or red the job — exactly the blocking-by-a-different-door
+  outcome both were written to avoid. The job does carry a generous job-level
+  `timeout-minutes: 45`, because `TestSameRepoBlacksmithRunners` requires a
+  timeout on every Blacksmith-eligible job; it sits comfortably above the sum
+  of the step timeouts, so it is a backstop against a stuck runner, not a
+  realistic ceiling.
+- **`windows-make-shell` 3 → 1.** The `host: [native, msys2, cygwin]` matrix
+  (three Windows jobs) became one job with three step pairs (install +
+  exercise), each pair's own `id`/`if: ${{ !cancelled() }}`, plus a final
+  bash aggregator step that reproduces the pre-fold rule exactly: a native or
+  MSYS2 install/exercise failure reds the job, and only a genuine Cygwin
+  *exercise* failure reds it (a Cygwin *setup* failure stays warning-only, as
+  it was in the separate `cygwin` job). `test-windows-doltversion` and
+  `test-windows-dbproxy-server` folded the same way into `test-windows-small`;
+  neither was ever in ci-gate's `needs`/`CI_GATE_REQUIRED`, so no gate token
+  changed. Both folded jobs stay on `windows-latest` — F7a does not move any
+  Windows job to Blacksmith (there is no Windows Blacksmith pool), and
+  neither job is one F4's concurrent Windows-region edits touch.
+
 ### Server Dolt Storage Matrix
 
 `test-server-storage-full` mirrors `test-embedded-storage`'s sharding, one
@@ -1087,6 +1161,35 @@ remain pending maintainer decisions.
 If rollback is needed because the aggregate logic is wrong, prefer first
 relaxing branch protection to remove the aggregate requirement. That unblocks
 merges without hiding the failed workflow logs needed for diagnosis.
+
+### Blacksmith Off
+
+No slice that moves a job onto Blacksmith reads a repository variable to do
+so (F3's precedent, kept by F7a) — the runner choice is a literal
+`github.event_name`/`github.actor`/`head.repo.full_name` expression baked
+into each job's `runs-on:`, so rollback is a plain revert of the commit(s)
+that changed it. Each slice reverts independently.
+
+In a Blacksmith outage, every same-repo job pinned to a `blacksmith-*` label
+would queue forever on a missing runner label instead of falling back to
+`ubuntu-latest` (the ternary's fallback arm is for forks/Dependabot, not for
+the label being unavailable). Revert these four together to take same-repo
+PRs off Blacksmith entirely and back onto `ubuntu-latest`:
+
+1. **F3's gate runners** — pr.yml's and pr-risk.yml's `bazel-coverage`,
+   `ci-gate` and `detect-ci-tier` jobs.
+2. **bazel.yml's `rbe` job** runner.
+3. **F7a** — pr.yml's `fast-checks`, `advisory-reports`,
+   `check-release-target-cross-compilation`, `check-doc-flags`,
+   `pr-policy-wrapper`, `test-dolt-server-fingerprint`; pr-risk.yml's
+   `test-nix`.
+4. **F7b** (cache-dependent moves, once that slice lands) — main.yml's
+   Blacksmith cache seeds and the `scripts-go-checks`/`pr-lint-wrapper`/
+   preflight/doc-freshness runner moves.
+
+F7c (the advisory workflows) is excluded from this list: it is advisory only,
+so leaving it on Blacksmith during an outage delays non-required checks but
+never blocks a merge.
 
 ## Commit-Message Skip Directives
 

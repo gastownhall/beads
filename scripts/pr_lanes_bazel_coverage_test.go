@@ -526,8 +526,11 @@ func testPackageGateJobs(t *testing.T, prGateRequired []string) {
 func TestPRDoltServerFingerprintRunsOnEveryPR(t *testing.T) {
 	pr := readCIWorkflow(t, "pr.yml")
 	job := pr.job(t, prFingerprintJob)
-	if job.If != "" || len(job.Needs) != 0 || job.ContinueOnError || job.RunsOn != "ubuntu-latest" || job.TimeoutMinutes == 0 {
-		t.Errorf("%s: if %q, needs %v, continue-on-error %v, runs-on %q, timeout %d; want an unconditional ubuntu-latest job with a timeout",
+	// F7a: moved to the same same-repo Blacksmith expression every other
+	// cache-free same-repo pr.yml job uses; forks/Dependabot still fall back
+	// to ubuntu-latest (TestSameRepoBlacksmithRunners covers that fallback).
+	if job.If != "" || len(job.Needs) != 0 || job.ContinueOnError || job.RunsOn != sameRepoBlacksmith2vcpu || job.TimeoutMinutes == 0 {
+		t.Errorf("%s: if %q, needs %v, continue-on-error %v, runs-on %q, timeout %d; want an unconditional same-repo-Blacksmith job with a timeout",
 			prFingerprintJob, job.If, job.Needs, job.ContinueOnError, job.RunsOn, job.TimeoutMinutes)
 	}
 	var names []string

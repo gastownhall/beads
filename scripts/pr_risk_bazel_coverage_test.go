@@ -341,7 +341,7 @@ func TestPRRiskBazelCoverageJob(t *testing.T) {
 		// head.repo.full_name) with the coverage decision but decides
 		// something else entirely - not a re-derivation of the decision
 		// (TestSameRepoBlacksmithRunners pins the literal).
-		if strings.HasSuffix(path, ".runs-on") && value == sameRepoBlacksmith2vcpu {
+		if strings.HasSuffix(path, ".runs-on") && (value == sameRepoBlacksmith2vcpu || value == sameRepoBlacksmith4vcpu || value == sameRepoBlacksmith8vcpu) {
 			return
 		}
 		if facts.MatchString(value) && !strings.HasPrefix(path, stepEnv) && !strings.HasPrefix(path, ".jobs."+prRiskCoverageJobName+".steps[0].run") {

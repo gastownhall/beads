@@ -537,7 +537,10 @@ jobs:
 
   test-nix:
     name: Test Nix Flake
-    runs-on: ubuntu-latest
+    # F7a: cache-free (no GitHub-saved cache restored/saved here) same-repo
+    # job moved onto Blacksmith at 4 vCPU; forks, Dependabot and any other
+    # event stay GitHub-hosted. Must match TestSameRepoBlacksmithRunners.
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
