@@ -14,3 +14,7 @@ Replace, expand, or delete sections freely. CONTRIBUTING.md has the full hygiene
 ## Verification
 
 <!-- How you tested. Commands a reviewer can run to confirm. -->
+
+<!-- If an agent produced a substantial portion of this PR, disclose it with an
+     `Assisted-by:` trailer or a line here — see CODE_OF_CONDUCT.md. When in
+     doubt, disclose; transparency is valued and never penalized. -->
