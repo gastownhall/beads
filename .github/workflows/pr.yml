@@ -903,9 +903,11 @@ jobs:
         with:
           path: ${{ runner.temp }}/go-cache/vet
           key: beads-go-vet-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-vet-${{ github.sha }}
-          restore-keys: |
-            beads-go-vet-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-vet-
-            beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
+          # The non-race build cache fallback this used to list can never hit:
+          # actions/cache versions an entry by its path list, and that cache
+          # saves to a different path (.../go-cache/non-race), so the prefix
+          # match is always filtered out (SF-5).
+          restore-keys: beads-go-vet-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-vet-
 
       - name: Restore non-race Go build cache
         if: matrix.check == 'allowlisted'
@@ -949,6 +951,7 @@ jobs:
   pr-lint-wrapper:
     name: PR Lint (${{ matrix.target }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     strategy:
@@ -968,23 +971,30 @@ jobs:
           go-version-file: 'go.mod'
           cache: false
 
+      - name: Restore Go module cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
       - name: Install golangci-lint
         run: ./scripts/ci/install-golangci-lint.sh
 
-      # Keyed on file content and the leg, so a stale entry cannot mask an
-      # issue: a config or dependency change always misses. pr.yml never
-      # saves this cache (§0); main.yml's pr-lint-wrapper matrix is the only
-      # saver, on an exact-key miss.
+      # Keyed on file content and the leg; a miss on the exact content key
+      # falls back to the leg's most recent entry, which golangci-lint
+      # revalidates against the current config and inputs. pr.yml never saves
+      # this cache (§0); main.yml's pr-lint-wrapper matrix is the only saver,
+      # on an exact-key miss. The key omits the sha (SF-4) so main.yml only
+      # saves when .golangci.yml or go.sum change.
       - name: Restore golangci-lint cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/golangci-lint
-            ${{ runner.temp }}/go-cache/lint-${{ matrix.target }}
-          key: beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-${{ hashFiles('.golangci.yml', 'go.sum') }}-${{ github.sha }}
-          restore-keys: |
-            beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-${{ hashFiles('.golangci.yml', 'go.sum') }}-
-            beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-
+            ${{ matrix.target == 'native' && format('{0}/go-cache/lint-{1}', runner.temp, matrix.target) || '' }}
+          key: beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-${{ hashFiles('.golangci.yml', 'go.sum') }}
+          restore-keys: beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-
 
       # Scope the wrapper's lint to what this PR introduces, matching the
       # (now-deleted) `lint` job's only-new-issues scope. main.yml runs the

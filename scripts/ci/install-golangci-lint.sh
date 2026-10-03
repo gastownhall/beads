@@ -5,9 +5,10 @@ set -euo pipefail
 # (F5.2): the release tarball drops the install step from about 58s to about
 # 3s, because it is a straight download-and-verify rather than a compile.
 # CI-only: this script requires $RUNNER_TEMP and $GITHUB_PATH, so the local
-# `.githooks/pre-commit` hook and `make ci-pr-lint` keep using
+# `.githooks/pre-commit` hook keeps using
 # `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1`,
-# which needs no change here.
+# which needs no change here. `make ci-pr-lint` (scripts/pr-lint) looks up
+# whatever `golangci-lint` binary is on PATH; it does not use `go run`.
 #
 # Keep this version and the sha256 values in sync with CONTRIBUTING.md,
 # engdocs/LINTING.md, .github/workflows/pr.yml, .github/workflows/main.yml,

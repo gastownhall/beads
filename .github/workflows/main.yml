@@ -473,6 +473,7 @@ jobs:
   pr-lint-wrapper:
     name: PR Lint (${{ matrix.target }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -487,23 +488,31 @@ jobs:
           go-version-file: 'go.mod'
           cache: false
 
+      - name: Restore Go module cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
       - name: Install golangci-lint
         run: ./scripts/ci/install-golangci-lint.sh
 
       # This push lane is the only saver (§0, F5.2): keyed on file content and
-      # the leg, so a stale entry cannot mask an issue, and pr.yml only ever
-      # restores.
+      # the leg; a miss on the exact content key falls back to the leg's most
+      # recent entry, which golangci-lint revalidates against the current
+      # config and inputs. pr.yml only ever restores. The key omits the sha
+      # (SF-4) so a save only happens when .golangci.yml or go.sum change,
+      # not on every push to main.
       - name: Restore golangci-lint cache
         id: restore-golangci-lint-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/golangci-lint
-            ${{ runner.temp }}/go-cache/lint-${{ matrix.target }}
-          key: beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-${{ hashFiles('.golangci.yml', 'go.sum') }}-${{ github.sha }}
-          restore-keys: |
-            beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-${{ hashFiles('.golangci.yml', 'go.sum') }}-
-            beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-
+            ${{ matrix.target == 'native' && format('{0}/go-cache/lint-{1}', runner.temp, matrix.target) || '' }}
+          key: beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-${{ hashFiles('.golangci.yml', 'go.sum') }}
+          restore-keys: beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-
 
       # No BD_LINT_NEW_FROM_MERGE_BASE here: the push lane sweeps the whole
       # tree, including the GOOS=windows and GOOS=darwin cross-lints. pr.yml
@@ -514,14 +523,19 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/lint-${{ matrix.target }}
         run: make ci-pr-lint
 
+      # !cancelled() (not just a cache-hit check): golangci-lint's own cache is
+      # content-addressed and GOCACHE is unaffected by lint findings, so it is
+      # safe -- and worth keeping -- to save even when the lint step itself
+      # fails (SF-1). Without this, a red lint run on main never warms the
+      # cache and every PR leg stays cold.
       - name: Save golangci-lint cache
-        if: steps.restore-golangci-lint-cache.outputs.cache-hit != 'true'
+        if: ${{ !cancelled() && steps.restore-golangci-lint-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cache/golangci-lint
-            ${{ runner.temp }}/go-cache/lint-${{ matrix.target }}
-          key: beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-${{ hashFiles('.golangci.yml', 'go.sum') }}-${{ github.sha }}
+            ${{ matrix.target == 'native' && format('{0}/go-cache/lint-{1}', runner.temp, matrix.target) || '' }}
+          key: beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-${{ hashFiles('.golangci.yml', 'go.sum') }}
 
   # Cross-platform test matrix (Linux/macOS only - Windows uses smoke tests)
   #
@@ -1292,6 +1306,7 @@ jobs:
   go-vet-cache:
     name: Warm go vet cache
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -1316,9 +1331,11 @@ jobs:
         with:
           path: ${{ runner.temp }}/go-cache/vet
           key: beads-go-vet-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-vet-${{ github.sha }}
-          restore-keys: |
-            beads-go-vet-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-vet-
-            beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
+          # The non-race build cache fallback this used to list can never hit:
+          # actions/cache versions an entry by its path list, and that cache
+          # saves to a different path (.../go-cache/non-race), so the prefix
+          # match is always filtered out (SF-5).
+          restore-keys: beads-go-vet-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-vet-
 
       - name: Go vet with go test's checks
         env:
@@ -1327,8 +1344,10 @@ jobs:
 
       # build-artifacts is the module cache's sole saver (same key); this job
       # only restores it to warm the vet run, and only saves its own cache.
+      # !cancelled(): go vet's cache is content-addressed, so it is safe to
+      # save even when the vet step itself fails (SF-1).
       - name: Save vet Go build cache
-        if: steps.restore-vet-go-build-cache.outputs.cache-hit != 'true'
+        if: ${{ !cancelled() && steps.restore-vet-go-build-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/go-cache/vet

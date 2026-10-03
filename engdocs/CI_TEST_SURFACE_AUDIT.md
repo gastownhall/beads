@@ -181,7 +181,8 @@ Key jobs preserved by display name:
 - `Check version consistency`, `Check no duplicate migration versions`,
   `Check doc flags freshness`, and PR-only `Check for .beads changes`.
 - `PR Policy (wrapper timing)`, `PR Core (wrapper timing)`, and
-  `PR Lint (wrapper timing)`.
+  `PR Lint (wrapper timing)` (superseded by F5's 3-leg `PR Lint (native|windows|darwin)`
+  matrix; this is a dated snapshot).
 - `Package Gate (MCP)`, `Package Gate (npm)`, and `Package Gate (website)`.
 - `Test (storage domain + uow)`.
 - `Build (Embedded Dolt)`, `Test (Embedded Dolt Storage N/5)`, and

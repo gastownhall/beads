@@ -16,7 +16,10 @@ must pass with zero issues in its own scope.
 - **The PR lane reports only what the PR introduces.** `pr-lint-wrapper` runs
   the repository-owned `ci-pr-lint` wrapper with `BD_LINT_NEW_FROM_MERGE_BASE`
   set to the diff against the merge base with `main`. A finding in code the PR
-  did not touch does not block it.
+  did not touch does not block it. "New" is measured off the diff, so MOVED
+  CODE READS AS NEW: a pre-existing violation carried into a PR by a move or a
+  rename is reported against that PR and blocks it. Fix it or `//nolint` it
+  there — that is the accepted cost of the diff-scoped trade.
 - **The main lane sweeps the whole tree.** The same job runs on every push to
   `main` with `BD_LINT_NEW_FROM_MERGE_BASE` unset, so a finding that lands
   there reds main's own run rather than every open PR.
@@ -32,9 +35,10 @@ Each leg installs golangci-lint from the pinned release binary
 (`scripts/ci/install-golangci-lint.sh`, sha256-verified) instead of
 `go install`, and restores a per-leg cache
 (`~/.cache/golangci-lint` plus a leg-specific `GOCACHE`) keyed on
-`.golangci.yml`, `go.sum` and the leg. The cache is keyed on file content, so
-a stale entry cannot mask an issue. pr.yml only ever restores; main.yml's
-matrix is the only saver, on an exact-key miss.
+`.golangci.yml`, `go.sum` and the leg. A miss on the exact content key falls
+back to the leg's most recent entry; golangci-lint revalidates it against the
+current config and inputs, so a stale restore cannot mask an issue. pr.yml
+only ever restores; main.yml's matrix is the only saver, on an exact-key miss.
 
 Run the wrapper locally with:
 
@@ -70,8 +74,8 @@ Beads-source `bd preflight`. The pre-commit hook does not call it: the hook
 uses changed-lines scope, adds `--fix`, and omits the Windows cross-lint pass.
 The driver honors `BD_LINT_TARGETS` (a comma list of `native`, `windows` and
 `darwin`; default all three) so each CI matrix leg can run just its own pass;
-`make ci-pr-lint`, `bd preflight` and the pre-commit hook all leave it unset
-and keep running all three.
+`make ci-pr-lint` and `bd preflight` both leave it unset and keep running all
+three.
 
 The driver matches `.buildflags` when preparing `GOFLAGS`: appending
 `-tags=gms_pure_go` can override an inherited bare-Go tags value; it does not
