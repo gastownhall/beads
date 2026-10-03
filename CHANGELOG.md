@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Engine interface:** `storage.Storage` now requires `DetailBatchReader()`.
+  Backend implementers must supply the new read role, which returns ordered
+  issue details for exact IDs from one snapshot. Existing `Reader.Get` remains
+  unchanged; CLI and HTTP adoption will follow separately.
+
 ### Changed
 
 - `bd preflight --fix --json` no longer returns a `Version sync` fix result:

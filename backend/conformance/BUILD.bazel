@@ -25,6 +25,7 @@ go_library(
         "cycle_detector_contract.go",
         "deleter_contract.go",
         "dependency_editor_contract.go",
+        "detail_batch_reader_contract.go",
         "dualwrite_history_contract.go",
         "edge_reader_contract.go",
         "expected_revision_contract.go",

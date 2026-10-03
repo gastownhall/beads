@@ -285,6 +285,12 @@ var roleContractCases = []roleContract{
 		RunDependencyEditorAcceptsBlockingAcrossIssueTypes,
 	),
 
+	roleCases("DetailBatchReader", "DetailBatchReader()", oncePerRole,
+		func(b RoleContractBundle) func(t *testing.T) *DetailBatchReaderFixture { return b.DetailBatchReader },
+		RunDetailBatchReaderParity,
+		RunDetailBatchReaderChunkBoundaries,
+	),
+
 	// The accessor named here is not an accessor at all, alone among these
 	// rows except Journal: storage.VersionedHistoryConfigurer is reached by
 	// TYPE ASSERTION, either on a store (the dolt and embedded-dolt legs) or

@@ -33,6 +33,10 @@ type issueSQLRepositoryImpl struct {
 
 var _ domain.IssueSQLRepository = (*issueSQLRepositoryImpl)(nil)
 
+func (r *issueSQLRepositoryImpl) GetDetailBatch(ctx context.Context, request publicops.DetailBatchRequest) (publicops.DetailBatchResult, error) {
+	return issueops.ExecuteDetailBatch(ctx, r.runner, request, issueops.DetailBatchUOW)
+}
+
 // issueSelectColumns aliases the shared canonical column list; the scan side
 // delegates to issueops.ScanIssueFrom, which scans it positionally.
 const issueSelectColumns = sqlbuild.IssueSelectColumns

@@ -37,6 +37,8 @@ type ClaimRowResult struct {
 }
 
 type IssueSQLRepository interface {
+	// GetDetailBatch reads through the shared DBTX body on this transaction.
+	GetDetailBatch(ctx context.Context, request publicops.DetailBatchRequest) (publicops.DetailBatchResult, error)
 	Insert(ctx context.Context, issue *types.Issue, actor string, opts InsertIssueOpts) error
 	InsertBatch(ctx context.Context, issues []*types.Issue, actor string, opts InsertIssueOpts) error
 	MovePersistence(ctx context.Context, id string, mode types.PersistenceMode, actor string) (changed bool, err error)
@@ -309,6 +311,7 @@ type UpdateSpec struct {
 }
 
 type IssueUseCase interface {
+	GetDetailBatch(ctx context.Context, request publicops.DetailBatchRequest) (publicops.DetailBatchResult, error)
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)
 	GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error)
 	FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error)
@@ -466,6 +469,10 @@ func (u *issueUseCaseImpl) get(ctx context.Context, id string, useWisp bool) (*t
 		return nil, fmt.Errorf("get %s: %w", id, err)
 	}
 	return issue, nil
+}
+
+func (u *issueUseCaseImpl) GetDetailBatch(ctx context.Context, request publicops.DetailBatchRequest) (publicops.DetailBatchResult, error) {
+	return u.issueRepo.GetDetailBatch(ctx, request)
 }
 
 func (u *issueUseCaseImpl) GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
