@@ -30,6 +30,9 @@ type DetailBatchItem struct {
 // DetailBatchResult has one item per input ID, in input order, including repeats.
 // Items is non-nil on success, even for an empty request. A failed read returns
 // an error and no items, never a partial answer or silently blank fields.
+// Items can share memory: repeated IDs, and relation rows for the same issue,
+// may point to the same slices. Treat a result as read-only, or copy an item
+// before changing it.
 type DetailBatchResult struct {
 	Items []DetailBatchItem
 }
@@ -51,9 +54,11 @@ func ValidateDetailBatchRequest(request DetailBatchRequest) error {
 // and per-item absence without making the caller assemble several snapshots.
 //
 // Successful items match Reader.Get on the same route and options, including
-// that route's relation order, multiplicity and plane selection. Subjects are
-// durable-first. Edge counts include all types across both edge tables and sum
-// duplicates. Optional rows, parent, epic progress, brief dependencies, comment
+// relation multiplicity and plane selection. Relation rows come in a fixed
+// order: the batch keeps Reader.Get's sort keys where it has them and breaks
+// ties by edge, and it sorts by edge where Reader.Get leaves the order to the
+// database. Subjects are durable-first. Edge counts include all types across
+// both edge tables and sum duplicates. Optional rows, parent, epic progress, brief dependencies, comment
 // omission and revision retain the existing detail-view semantics.
 //
 // This is a read: it changes no rows, records no history and fires no completion

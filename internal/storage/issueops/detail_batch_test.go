@@ -322,6 +322,13 @@ func TestDetailBatchRoutePolicyAndAssembly(t *testing.T) {
 					}
 					mock.ExpectQuery(`SELECT id, issue_id, author, text, created_at FROM ` + commentTable).WithArgs("bd-a").WillReturnRows(rows)
 				}
+				var wantNested []string
+				if route.policy != DetailBatchUOW {
+					// The stores' GetIssueInTx takes Issue.Labels from the durable subject row's plane.
+					wantNested = []string{"durable-label"}
+					mock.ExpectQuery(`SELECT issue_id, label FROM labels`).WithArgs("bd-a").
+						WillReturnRows(sqlmock.NewRows([]string{"issue_id", "label"}).AddRow("bd-a", "durable-label"))
+				}
 				out, err := ExecuteDetailBatch(ctx, db, publicops.DetailBatchRequest{
 					IDs: []string{"bd-a"}, IncludeDependents: full, IncludeComments: full, BriefDeps: full,
 				}, route.policy)
@@ -331,6 +338,9 @@ func TestDetailBatchRoutePolicyAndAssembly(t *testing.T) {
 				details := out.Items[0].Issue
 				if details.Title != "Durable subject" || details.Revision != "9007199254740993" || !reflect.DeepEqual(details.Labels, []string{wantLabel}) || *details.CommentCount != int64(wantComments) {
 					t.Fatalf("subject/auxiliary plane/revision = %+v", details)
+				}
+				if !reflect.DeepEqual(details.Issue.Labels, wantNested) {
+					t.Fatalf("nested labels = %v, want %v", details.Issue.Labels, wantNested)
 				}
 				wantDeps := 2
 				if route.policy == DetailBatchDirectServer {

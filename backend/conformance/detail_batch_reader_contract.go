@@ -1,10 +1,13 @@
 package conformance
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,7 +84,7 @@ func RunDetailBatchReaderParity(t *testing.T, ctx context.Context, f DetailBatch
 	edge("wisp_dependencies", "01w", "a", "b", types.DepRelated)
 	edge("wisp_dependencies", "02w", "a", "parent-a", types.DepParentChild)
 	// Edge-id order (08, 09) disagrees with source-id order (dep-a, dep-z), so
-	// parity fails if a leg breaks the equal-created_at tie by the wrong key.
+	// the order check fails if a leg breaks the equal-created_at tie by the wrong key.
 	edge("dependencies", "09", "dep-a", "a", types.DepBlocks)
 	edge("dependencies", "08", "dep-z", "a", types.DepRelated)
 	edge("wisp_dependencies", "03w", "wisp", "a", types.DepBlocks)
@@ -116,16 +119,10 @@ func RunDetailBatchReaderParity(t *testing.T, ctx context.Context, f DetailBatch
 				if err != nil {
 					t.Fatal(err)
 				}
-				got, err := json.Marshal(item.Issue)
-				if err != nil {
-					t.Fatal(err)
-				}
-				want, err := json.Marshal(perID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if string(got) != string(want) {
-					t.Fatalf("Reader.Get parity ID=%s direct=%v uow=%v options=%d\nbatch=%s\nper-ID=%s", item.ID, f.DirectServer, f.UOW, options, got, want)
+				if got, want := detailBatchOrderFree(item.Issue), detailBatchOrderFree(perID); !reflect.DeepEqual(got, want) {
+					gotJSON, _ := json.Marshal(got)
+					wantJSON, _ := json.Marshal(want)
+					t.Fatalf("Reader.Get parity ID=%s direct=%v uow=%v options=%d\nbatch=%s nested labels %v\nper-ID=%s nested labels %v", item.ID, f.DirectServer, f.UOW, options, gotJSON, got.Issue.Labels, wantJSON, want.Issue.Labels)
 				}
 			}
 			a := result.Items[0].Issue
@@ -143,6 +140,19 @@ func RunDetailBatchReaderParity(t *testing.T, ctx context.Context, f DetailBatch
 			}
 			if len(a.Dependencies) != wantOut || a.Parent == nil || *a.Parent != parent {
 				t.Errorf("outgoing=%d parent=%v, want %d %s", len(a.Dependencies), a.Parent, wantOut, parent)
+			}
+			// Parity above ignores row order, so pin the batch's own fixed order.
+			wantOutOrder := []string{id("parent-z"), id("parent-a"), id("b"), id("b"), id("parent-a")}
+			wantInOrder := []string{id("dep-z"), id("dep-a"), id("wisp")}
+			if f.DirectServer {
+				wantOutOrder = []string{id("b"), id("parent-a")}
+				wantInOrder = []string{id("wisp"), id("dep-a"), id("dep-z")}
+			}
+			if got := detailBatchRowIDs(a.Dependencies); !slices.Equal(got, wantOutOrder) {
+				t.Errorf("outgoing order=%v, want %v", got, wantOutOrder)
+			}
+			if got := detailBatchRowIDs(a.Dependents); req.IncludeDependents && !slices.Equal(got, wantInOrder) {
+				t.Errorf("dependent order=%v, want %v", got, wantInOrder)
 			}
 			bRows := 0
 			for _, dep := range a.Dependencies {
@@ -218,6 +228,30 @@ func RunDetailBatchReaderParity(t *testing.T, ctx context.Context, f DetailBatch
 	if len(result.Items) != 4 || result.Items[0].ID != id("b") || result.Items[1].ID != id("missing") || result.Items[1].Found || result.Items[1].Issue != nil || result.Items[2].ID != id("a") || !reflect.DeepEqual(result.Items[0], result.Items[3]) {
 		t.Fatalf("ordered repeat/missing items=%+v", result.Items)
 	}
+}
+
+// detailBatchOrderFree copies d with its relation rows sorted and Parent
+// cleared. Reader.Get leaves most relation orders to the database, and Parent
+// is the first parent-child row in that order, so parity compares rows as a
+// multiset and the parity case pins the batch's own order and parent.
+func detailBatchOrderFree(d *publicops.IssueDetails) publicops.IssueDetails {
+	c := *d
+	c.Parent = nil
+	for _, rows := range []*[]*types.IssueWithDependencyMetadata{&c.Dependencies, &c.Dependents} {
+		*rows = slices.Clone(*rows)
+		slices.SortStableFunc(*rows, func(x, y *types.IssueWithDependencyMetadata) int {
+			return cmp.Or(strings.Compare(x.ID, y.ID), strings.Compare(string(x.DependencyType), string(y.DependencyType)))
+		})
+	}
+	return c
+}
+
+func detailBatchRowIDs(rows []*types.IssueWithDependencyMetadata) []string {
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+	}
+	return ids
 }
 
 // RunDetailBatchReaderChunkBoundaries pins the unlimited ordered request at

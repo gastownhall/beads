@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
@@ -136,6 +137,11 @@ func ExecuteDetailBatch(ctx context.Context, tx DBTX, request publicops.DetailBa
 			}
 		}
 	}
+	if policy != DetailBatchUOW {
+		if err := detailBatchSubjectLabelsInTx(ctx, tx, foundIDs, subjects, subjectWisps, auxWisps, src.labels); err != nil {
+			return publicops.DetailBatchResult{}, err
+		}
+	}
 	out := publicops.DetailBatchResult{Items: make([]publicops.DetailBatchItem, 0, len(request.IDs))}
 	for _, id := range request.IDs {
 		item := publicops.DetailBatchItem{ID: id}
@@ -199,6 +205,34 @@ func detailBatchSubjectsInTx(ctx context.Context, tx DBTX, ids []string) (map[st
 		}
 	}
 	return subjects, wisps, nil
+}
+
+// detailBatchSubjectLabelsInTx sets Issue.Labels as the stores' GetIssueInTx
+// does: from the plane the subject row came from. The auxiliary labels follow
+// wisp existence instead, so they differ only for a durable subject that also
+// has a wisp row; only those IDs need another read. UOW's Reader.Get leaves the
+// nested field empty. Each subject gets its own copy of the slice.
+func detailBatchSubjectLabelsInTx(ctx context.Context, tx DBTX, ids []string, subjects map[string]*types.Issue, subjectWisps, auxWisps map[string]struct{}, auxLabels map[string][]string) error {
+	var dual []string
+	for _, id := range ids {
+		_, subjectWisp := subjectWisps[id]
+		if _, auxWisp := auxWisps[id]; auxWisp && !subjectWisp {
+			dual = append(dual, id)
+		}
+	}
+	durable, err := GetLabelsForIssuesFromTableInTx(ctx, tx, "labels", dual)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		labels := auxLabels[id]
+		_, subjectWisp := subjectWisps[id]
+		if _, auxWisp := auxWisps[id]; auxWisp && !subjectWisp {
+			labels = durable[id]
+		}
+		subjects[id].Labels = slices.Clone(labels)
+	}
+	return nil
 }
 
 type detailBatchEdge struct {
