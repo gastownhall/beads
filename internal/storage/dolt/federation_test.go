@@ -1497,9 +1497,7 @@ func TestFilteredPushExcludesCustomType(t *testing.T) {
 // derives blocked state from its filtered graph: removing X and W->X must
 // publish retained waiter W with is_blocked=false.
 func TestFilteredStagingPublishesRetainedWaiterUnblocked(t *testing.T) {
-	if os.Getenv("BEADS_TEST_ENV_RUN_DOLT") == "1" && testServerPort == 0 {
-		t.Fatal("BEADS_TEST_ENV_RUN_DOLT=1 but real-Dolt test infrastructure is unavailable")
-	}
+	requireDoltTestServer(t)
 	store, cleanup := setupConcurrentTestStore(t)
 	defer cleanup()
 	ctx, cancel := testContext(t)

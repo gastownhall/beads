@@ -31,6 +31,7 @@ var testSharedConn *sql.DB
 var helperSubprocessSentinels = []string{
 	"BEADS_SCHEMA_INIT_HELPER",
 	"BEADS_MULTISTORE_HELPER",
+	"BEADS_REQUIRED_SERVER_HELPER",
 }
 
 // isHelperSubprocess reports whether this process was re-exec'd as a helper
