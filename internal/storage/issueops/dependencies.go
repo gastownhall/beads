@@ -371,7 +371,7 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	if opts.EmitEvent {
 		_, _, eventTable, _ := WispTableRouting(srcIsWisp)
 		if err := RecordEventInTable(ctx, tx, eventTable, dep.IssueID, types.EventDependencyAdded, actor,
-			fmt.Sprintf("Added dependency: %s %s %s", dep.IssueID, dep.Type, dep.DependsOnID)); err != nil {
+			dep.AddedEventDescription()); err != nil {
 			return false, fmt.Errorf("record dependency_added event: %w", err)
 		}
 		eventWritten = true

@@ -1188,6 +1188,18 @@ type Dependency struct {
 	ThreadID string `json:"thread_id,omitempty"`
 }
 
+// AddedEventDescription returns the user-facing history text for an added
+// dependency edge. A stored blocks edge is source-dependent -> blocker, while
+// the English relation reads blocker blocks source; all other relation names
+// retain their stored source/type/target order.
+func (d Dependency) AddedEventDescription() string {
+	left, right := d.IssueID, d.DependsOnID
+	if d.Type == DepBlocks {
+		left, right = right, left
+	}
+	return fmt.Sprintf("Added dependency: %s %s %s", left, d.Type, right)
+}
+
 // DependencyCounts holds counts for dependencies and dependents
 type DependencyCounts struct {
 	DependencyCount int `json:"dependency_count"` // Number of issues this issue depends on
