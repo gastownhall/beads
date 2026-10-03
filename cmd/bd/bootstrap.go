@@ -1554,6 +1554,8 @@ func inferPrefix(cfg *configfile.Config) string {
 
 // isNonInteractiveBootstrap returns true if bootstrap should skip confirmation prompts.
 // Precedence: explicit flag > BD_NON_INTERACTIVE env > CI env > terminal detection.
+// Unlike init, BD_NON_INTERACTIVE=0/false does not force interaction: only
+// 1/true is an override here; other values continue to CI and terminal detection.
 func isNonInteractiveBootstrap(flagValue bool) bool {
 	if flagValue {
 		return true
