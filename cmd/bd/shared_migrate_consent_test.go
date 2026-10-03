@@ -93,7 +93,7 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			out := captureNoticeStderr(t, func() {
-				noticeSharedMigrateRefusal(&schema.RemoteMigrateGateError{
+				noticeAutoMigrateRefusal(&schema.RemoteMigrateGateError{
 					CurrentVersion: 65, LatestVersion: 66, Pending: 1,
 					Decision: tt.decision,
 				})
@@ -113,7 +113,7 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 	t.Run("suppressed in json mode", func(t *testing.T) {
 		pinJSONOutput(t, true)
 		out := captureNoticeStderr(t, func() {
-			noticeSharedMigrateRefusal(&schema.RemoteMigrateGateError{
+			noticeAutoMigrateRefusal(&schema.RemoteMigrateGateError{
 				CurrentVersion: 65, LatestVersion: 66, Pending: 1,
 				Decision: "shared-no-remote",
 			})
@@ -128,7 +128,7 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 		globalFlag = true
 		defer func() { globalFlag = orig }()
 		out := captureNoticeStderr(t, func() {
-			noticeSharedMigrateRefusal(&schema.RemoteMigrateGateError{
+			noticeAutoMigrateRefusal(&schema.RemoteMigrateGateError{
 				CurrentVersion: 65, LatestVersion: 66, Pending: 1,
 				Decision: "shared-no-remote",
 			})
@@ -139,9 +139,21 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 	})
 
 	t.Run("an untyped error prints nothing", func(t *testing.T) {
-		out := captureNoticeStderr(t, func() { noticeSharedMigrateRefusal(io.EOF) })
+		out := captureNoticeStderr(t, func() { noticeAutoMigrateRefusal(io.EOF) })
 		if out != "" {
 			t.Errorf("only a gate refusal should produce a notice, got:\n%s", out)
+		}
+	})
+
+	t.Run("dirty tables name the commit and migration recovery", func(t *testing.T) {
+		pinJSONOutput(t, false)
+		out := captureNoticeStderr(t, func() {
+			noticeAutoMigrateRefusal(&schema.DirtyTablesError{Tables: []string{"issues"}})
+		})
+		for _, want := range []string{"schema migration was not applied", "issues", "bd dolt commit", "re-run the migration"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("dirty-table notice missing %q:\n%s", want, out)
+			}
 		}
 	})
 }

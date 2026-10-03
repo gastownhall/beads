@@ -1686,11 +1686,10 @@ var rootCmd = &cobra.Command{
 		// is the one-shot signal autoMigrateOnVersionBump reads, and a preview
 		// skips that reconciliation (see below). See trackBdVersionPreview.
 		if policy.runMaintenance && !frozenForMaintenance {
-			if previewMode {
-				trackBdVersionPreview()
-			} else {
-				trackBdVersion()
-			}
+			// Detect now, but consume the one-shot marker only after the
+			// migration outcome below is known (#6929). Preview mode never
+			// reaches the finishing step, so it remains non-consuming.
+			trackBdVersionPreview()
 		}
 
 		// If the operator passed --force on `bd migrate` or `bd migrate schema`,
@@ -1728,7 +1727,7 @@ var rootCmd = &cobra.Command{
 		// dry-run plan. frozenForMaintenance excludes it for the same reason
 		// as the trackBdVersion call above — see that comment.
 		if policy.runMaintenance && !previewMode && !frozenForMaintenance {
-			autoMigrateOnVersionBump(beadsDir)
+			finishBdVersionTracking(beadsDir, autoMigrateOnVersionBump(beadsDir))
 		}
 
 		// Initialize direct storage access
