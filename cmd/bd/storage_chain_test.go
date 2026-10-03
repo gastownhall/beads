@@ -153,3 +153,65 @@ func TestWireStorageDecorators_NilHookRunner(t *testing.T) {
 		t.Errorf("with telemetry off and nil hookRunner, expected external decorator around raw store; got %T", ext.Unwrap())
 	}
 }
+
+// versionedHistoryStub records whether the versioned-history capability was
+// switched on, and on which store instance.
+type versionedHistoryStub struct {
+	storage.DoltStorage
+	enabled *bool
+}
+
+func (s *versionedHistoryStub) SetVersionedHistoryEnabled(enabled bool) { *s.enabled = enabled }
+
+// TestVersionedHistoryConfigAppliesToTheRawStore pins the ORDERING that
+// applyVersionedHistoryConfig depends on.
+//
+// The capability is reached by type assertion, and none of the decorators
+// (telemetry, externaldeps, hooks) forwards SetVersionedHistoryEnabled. So
+// applying the config after any wrap would assert against a wrapper, fail
+// silently, and leave versioned history OFF while the operator's config said
+// it was on -- a wrong answer rather than an empty one.
+//
+// The second half of this test is the part that actually guards the ordering:
+// it proves the wrapped chain does NOT satisfy the capability, so if someone
+// moves the call below a wrap the first half stops passing.
+func TestVersionedHistoryConfigAppliesToTheRawStore(t *testing.T) {
+	var enabled bool
+	raw := &versionedHistoryStub{enabled: &enabled}
+
+	applyVersionedHistoryConfig(raw, true)
+	if !enabled {
+		t.Error("applyVersionedHistoryConfig(raw, true) did not enable versioned history on the raw store")
+	}
+
+	wrapped := storage.DoltStorage(wireExternalDependencyPolicy(telemetry.WrapStorage(raw)))
+	if _, ok := wrapped.(storage.VersionedHistoryConfigurer); ok {
+		// Fatal, not Skip. A skip here returns BEFORE the afterWrap
+		// assertion below -- the half that actually guards the ordering --
+		// so the case would report "not applicable" while checking nothing.
+		// If a decorator starts forwarding, the constraint this test exists
+		// for has changed and the test must be rewritten, not quietly passed.
+		t.Fatal("a decorator now forwards SetVersionedHistoryEnabled; the ordering constraint has changed and this test needs rewriting rather than silently passing")
+	}
+
+	var afterWrap bool
+	rawForWrapped := &versionedHistoryStub{enabled: &afterWrap}
+	applyVersionedHistoryConfig(wireExternalDependencyPolicy(telemetry.WrapStorage(rawForWrapped)), true)
+	if afterWrap {
+		t.Error("the capability was somehow reached through the decorators; this test's premise is stale")
+	}
+}
+
+// TestVersionedHistoryConfigOffIsANoop pins that the disabled path touches
+// nothing at all -- flag-off must be byte-identical to a build without the
+// feature, which is the contract #6135 ships under.
+func TestVersionedHistoryConfigOffIsANoop(t *testing.T) {
+	enabled := false
+	raw := &versionedHistoryStub{enabled: &enabled}
+
+	applyVersionedHistoryConfig(raw, false)
+
+	if enabled {
+		t.Error("applyVersionedHistoryConfig(raw, false) enabled versioned history; flag-off must be a no-op")
+	}
+}

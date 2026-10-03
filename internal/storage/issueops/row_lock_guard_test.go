@@ -140,19 +140,24 @@ var funcNameExemptions = map[string]string{
 	// ExpectedVersion CAS reject a row it should still recognize.
 	"resolveOneConflictRow": "whole-row `theirs` adoption: the adopted row_lock already vouches for the (identical) adopted content",
 
-	// RecordVersionInTx (version_history.go) runs immediately after the
+	// recordVersionAtInTx (version_history.go) is the shared body behind both
+	// RecordVersionInTx and its R7.1 test-support twin RecordVersionAtInTx
+	// (gastownhall/beads#5898 rev 9, gastownhall/beads#6136, be-x5jqd.5).
+	// RecordVersionInTx's production callers run it immediately after the
 	// mutation it is snapshotting — create.go/update.go's own writes, or
 	// domain/db's Insert/Update — and those callers have already minted a
 	// fresh row_lock in that same INSERT/UPDATE, in the same transaction.
-	// RecordVersionInTx's own `UPDATE issues SET current_revision = ?` only
-	// advances a denormalized pointer to the issue_versions row it just
-	// inserted; it deliberately does not touch row_lock at all (not even to
-	// carry the existing value forward) because reminting here would bump the
-	// token a second time within one transaction, invalidating the
-	// RowVersion/CAS value the primary mutation's own caller already
-	// captured and could cause a legitimate subsequent CAS check to fail as a
-	// spurious lost update.
-	"RecordVersionInTx": "runs after the primary mutation already minted a fresh row_lock in the same transaction; reminting here would double-bump the token and invalidate the RowVersion/CAS value already returned to that mutation's caller",
+	// RecordVersionAtInTx's fixture-only callers likewise run it only after a
+	// bare-create has already minted the row's row_lock, never as a row's
+	// first write. Either way, this function's own
+	// `UPDATE issues SET current_revision = ?` only advances a denormalized
+	// pointer to the issue_versions row it just inserted; it deliberately
+	// does not touch row_lock at all (not even to carry the existing value
+	// forward) because reminting here would bump the token a second time
+	// within one transaction, invalidating the RowVersion/CAS value the
+	// primary mutation's own caller already captured and could cause a
+	// legitimate subsequent CAS check to fail as a spurious lost update.
+	"recordVersionAtInTx": "runs after the primary mutation (or, for RecordVersionAtInTx's fixture-only callers, a bare-create) already minted a fresh row_lock in the same transaction; reminting here would double-bump the token and invalidate the RowVersion/CAS value already returned to that mutation's caller",
 }
 
 // TestAllIssueRowWritesStampRowLock is the load-bearing completeness guard for

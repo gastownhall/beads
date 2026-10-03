@@ -1,11 +1,14 @@
 package issueops
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math/big"
 	"sync"
 	"time"
 
@@ -190,11 +193,126 @@ func canonicalDurableState(issue any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := refuseUnrepresentableIntegers(marshaled); err != nil {
+		return nil, err
+	}
+	return jcsCanonicalize(marshaled)
+}
+
+// jcsCanonicalize is canonicalDurableState's RFC 8785 (JCS) step alone, below
+// the admission gate rather than behind it.
+//
+// IT MUST EXIST SEPARATELY because refuseUnrepresentableIntegers and RFC 8785
+// disagree on purpose, not by oversight: RFC 8785 section 3.2.2.3 canonicalizes
+// ANY number as a double, whatever its magnitude, while the admission gate
+// refuses an integer-valued literal past 2^53-1 outright (see
+// refuseUnrepresentableIntegers's doc comment on why that rule has no
+// notation carve-out). One of the RFC 8785 vectors this store pins conformance
+// against, testdata/jcs/input/values.json, both ships from the spec's own
+// reference suite AND contains 1E30 -- a value the gate refuses and RFC 8785
+// requires canonicalizing to 1e+30. Routing that vector through
+// canonicalDurableState would force a choice between weakening spec-conformance
+// coverage and putting a magnitude exception in the gate, and neither is
+// right: the gate's refusal is a policy decision about what this store admits,
+// not a claim about what JCS can canonicalize. jcsCanonicalize lets a caller
+// ask the second question without the first, so TestCanonicalDurableStateIsJCS
+// can hold the RFC 8785 vectors to the spec's own bytes -- including
+// values.json -- while refuseUnrepresentableIntegers's refusal of the same
+// magnitude is pinned separately, in the admission tests
+// (version_history_integer_admission_test.go), where it belongs.
+func jcsCanonicalize(marshaled []byte) ([]byte, error) {
 	canonical, err := jcs.Transform(marshaled)
 	if err != nil {
 		return nil, fmt.Errorf("canonicalize (RFC 8785): %w", err)
 	}
 	return canonical, nil
+}
+
+// ErrIntegerNotRepresentable reports a JSON integer literal that binary64
+// cannot hold exactly, which RFC 8785 would silently round.
+var ErrIntegerNotRepresentable = errors.New("integer literal is not exactly representable as an IEEE 754 binary64 value")
+
+// maxExactJSONInteger is 2^53-1, the largest integer binary64 represents
+// exactly. RFC 7493 (I-JSON) section 2.2 bounds interoperable integers here,
+// and BDP's admission law (gastownhall/bdp#21) makes a literal past it
+// invalid rather than merely lossy.
+const maxExactJSONInteger = 1<<53 - 1
+
+// maxExactJSONIntegerBig is maxExactJSONInteger as a *big.Int, so
+// refuseUnrepresentableIntegers can compare exact integer values without
+// ever routing through float64.
+var maxExactJSONIntegerBig = big.NewInt(maxExactJSONInteger)
+
+// refuseUnrepresentableIntegers rejects marshaled if any JSON number literal
+// in it denotes an integer VALUE whose magnitude exceeds what binary64 holds
+// exactly, regardless of which of JSON's number forms -- bare integer,
+// decimal, or exponential -- spells that value.
+//
+// WHY REFUSE RATHER THAN ROUND. jcs.Transform canonicalizes numbers as
+// IEEE-754 doubles (RFC 8785 section 3.2.2.3), so 9007199254740993 becomes
+// 9007199254740992 on the way in. That is not a formatting difference, it is
+// a DIFFERENT VALUE, and it collapses two distinct issue states onto one
+// durable_state and therefore one content token -- the token can no longer
+// tell them apart, and a reader comparing tokens concludes the second write
+// was a no-op. Rounding is silent; refusing is not.
+//
+// This seam is the admission gate, one layer above RecordVersionInTx, which
+// is where BDP puts it: an authority adapting an existing store "MUST map or
+// refuse values outside this contract before it serves them as BDP
+// Resources" (gastownhall/bdp#20 section 5.1).
+//
+// VALUE, NOT FORM. Each number literal is parsed exactly with big.Rat (never
+// float64 -- float64 rounding is the exact thing being guarded against), and
+// the check is whether the VALUE is a mathematical integer (big.Rat.IsInt),
+// not whether the literal's spelling contains '.', 'e', or 'E'.
+// 9007199254740993, 9007199254740993.0, and 9.007199254740993e15 all denote
+// the same integer value and must all be refused alike; a check keyed on
+// spelling instead of value would let the last two through.
+//
+// SCOPE, deliberately narrow to integers. A non-integer VALUE such as 0.1 is
+// not exactly representable either, but ES6's shortest-round-trip formatting
+// is a bijection on doubles: it always returns to the same double, so two
+// non-integer literals collide only if they already denote the same double
+// before this gate ever runs -- not the failure this gate exists to close.
+// The asymmetry is deliberate on its own terms too, not just a side effect of
+// the bijection: a non-integer literal already carries an expectation of
+// binary64 approximation -- 0.1 was never a promise of exact decimal storage
+// -- so canonicalizing it to the nearest double honors that expectation,
+// while an integer literal carries the opposite one, exactness, and silently
+// changing its VALUE rather than merely its formatting would corrupt an
+// identity the caller had every reason to believe was preserved. BDP's
+// admission rule (gastownhall/bdp#21 item 2) is itself stated only for
+// integers. types.Issue's own integer fields are ordinals and priorities and
+// cannot reach this bound -- the reachable path is Metadata, a
+// json.RawMessage passed through verbatim.
+func refuseUnrepresentableIntegers(marshaled []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(marshaled))
+	dec.UseNumber()
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("scan for unrepresentable integers: %w", err)
+		}
+		num, ok := tok.(json.Number)
+		if !ok {
+			continue
+		}
+		lit := num.String()
+		rat, ok := new(big.Rat).SetString(lit)
+		if !ok {
+			return fmt.Errorf("scan for unrepresentable integers: invalid JSON number literal %q", lit)
+		}
+		if !rat.IsInt() {
+			continue // not an integer value; see SCOPE above
+		}
+		abs := new(big.Int).Abs(rat.Num())
+		if abs.Cmp(maxExactJSONIntegerBig) > 0 {
+			return fmt.Errorf("%w: %s", ErrIntegerNotRepresentable, lit)
+		}
+	}
 }
 
 // RecordVersionInTx mints one issue_versions row for issueID and advances
@@ -219,6 +337,56 @@ func RecordVersionInTx(ctx context.Context, tx DBTX, issueID, actor string) erro
 	if !versionedHistoryEnabled(tx) {
 		return nil
 	}
+	return recordVersionAtInTx(ctx, tx, issueID, actor, time.Now().UTC())
+}
+
+// RecordVersionAtInTx is RecordVersionInTx's test-support twin: it mints a
+// version row at a caller-chosen change_at instead of time.Now(), and --
+// deliberately -- does not gate on versionedHistoryEnabled at all, since its
+// whole purpose is controlled-timestamp minting for conformance fixtures
+// (R7.1's AsOfReadFixture.MintAt, backend/conformance/versioned_read_contract.go)
+// regardless of a store's activation state. Production code never calls
+// this; only per-leg as-of-read fixtures do, so their bare issue-create step
+// can stay history-off (no unwanted real-time row) while still minting the
+// exact versions a test needs at the instants it needs them.
+func RecordVersionAtInTx(ctx context.Context, tx DBTX, issueID, actor string, at time.Time) error {
+	return recordVersionAtInTx(ctx, tx, issueID, actor, at)
+}
+
+// recordVersionAtInTx is RecordVersionInTx and RecordVersionAtInTx's shared
+// body, taking at where the two callers differ: time.Now().UTC() for the
+// production gate-checked path, a caller-chosen instant for test minting.
+// The no-op rules documented on RecordVersionInTx above (wisps) apply here
+// too, since this is that function's entire mechanism minus the gate.
+func recordVersionAtInTx(ctx context.Context, tx DBTX, issueID, actor string, at time.Time) error {
+	// change_at is DATETIME(6) as of migration 0069, and this function
+	// deliberately does NOT floor `at` to the second.
+	//
+	// It used to. While 0067's plain DATETIME (precision 0) was in force that
+	// floor was load-bearing: Dolt's datetime(0) does not truncate sub-second
+	// input, it ROUNDS half-up, so a change_at of 13:32:04.77 stored as
+	// 13:32:05 -- strictly LATER than the instant it recorded. That breaks
+	// AsOfReadInTx's "latest version accepted at or before T"
+	// (resolveAsOfRevisionInTx, asof_read.go) for any T between the true
+	// instant and the rounded-up one. Flooring first left nothing to round.
+	//
+	// 0069 widened change_at and removed_at to DATETIME(6), which removes the
+	// rounding entirely and makes the floor actively harmful: it threw away
+	// the microseconds the widening exists to keep. Two versions minted in the
+	// same second collapsed onto one stored value and became indistinguishable
+	// by change_at -- which defeats --at, the only PORTABLE selector the read
+	// surface offers while revision stays a local ordinal and no durable
+	// version address has shipped. Measured before this change on a store
+	// carrying both: four versions minted in one second all read back
+	// 15:40:38.000000.
+	//
+	// So the column's precision is now relied on rather than worked around.
+	// Pinned by TestRecordVersionKeepsSubSecondChangeAt below; the column's
+	// own half of the contract is pinned by
+	// TestMigration0069ChangeAtSurvivesSubSecondPrecisionThroughDoltCLI in
+	// internal/storage/schema. MarkLatestVersionRemovedInTx (asof_read.go)
+	// needs no matching change -- it already passes time.Now().UTC() straight
+	// through, so removed_at was never floored.
 
 	issue, err := GetIssueInTx(ctx, tx, issueID)
 	if err != nil {
@@ -288,7 +456,7 @@ func RecordVersionInTx(ctx context.Context, tx DBTX, issueID, actor string) erro
 		`INSERT INTO issue_versions
 			(issue_id, revision, epoch, durable_state, change_actor, change_agent, change_message, change_at, attribution_status)
 		VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
-		issueID, newRevision, epoch, durableState, actor, time.Now().UTC(), attributionStatusForActor(actor),
+		issueID, newRevision, epoch, durableState, actor, at, attributionStatusForActor(actor),
 	); err != nil {
 		return fmt.Errorf("versioned history: insert version row for %s: %w", issueID, err)
 	}

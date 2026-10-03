@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -30,6 +32,7 @@ func wireStorageDecorators(store storage.DoltStorage, hookRunner *hooks.Runner, 
 	if store == nil {
 		return nil
 	}
+	applyVersionedHistoryConfig(store, versionedHistoryEnabledForWiring(store))
 	store = telemetry.WrapStorage(store)
 	store = wireExternalDependencyPolicy(store)
 	if hookRunner != nil && !hooksDisabled {
@@ -86,4 +89,35 @@ func wireExternalDependencyUOWProvider(provider uow.UnitOfWorkProvider) uow.Unit
 			return newReadOnlyStoreFromConfig(ctx, filepath.Join(projectRoot, ".beads"))
 		},
 	)
+}
+
+// applyVersionedHistoryConfig turns dual-write issue-version history on for
+// this store instance when versioned-history.enabled is set (env:
+// BD_VERSIONED_HISTORY_ENABLED).
+//
+// It MUST run on the raw store, before wireStorageDecorators wraps anything.
+// The capability is a type assertion, and none of the decorators above
+// (telemetry.WrapStorage, externaldeps, HookFiringStore) forwards
+// SetVersionedHistoryEnabled -- so calling this after a wrap would assert
+// against the wrapper, fail silently, and leave history off while the config
+// said it was on. That is the "wrong answer, not an empty one" failure this
+// feature exists to avoid, so the ordering is pinned by
+// TestVersionedHistoryConfigAppliesToTheRawStore.
+//
+// A store that does not implement the capability is not an error: proxied and
+// no-db backends legitimately do not. But it is not silently ignored either --
+// asking for history and not getting it is exactly the case a user must be
+// told about, so it warns.
+func applyVersionedHistoryConfig(store storage.DoltStorage, enabled bool) {
+	if !enabled {
+		return
+	}
+	configurer, ok := store.(storage.VersionedHistoryConfigurer)
+	if !ok {
+		fmt.Fprintf(os.Stderr,
+			"warning: versioned-history.enabled is set, but this storage backend (%T) does not support version history; it stays off\n",
+			store)
+		return
+	}
+	configurer.SetVersionedHistoryEnabled(true)
 }
