@@ -205,10 +205,19 @@
 # scripts/ci/proxied_test_durations.json (see that file for
 # provenance and its "relative weight, not absolute SLA" caveat).
 # Regenerate with scripts/ci/gen_proxied_shard_manifest.py 30
-# --weights=duration --write after adding, splitting, or reweighting
-# TestProxiedServer*/TestServerMode* functions — ideally after
-# refreshing proxied_test_durations.json too (--check verifies this
-# block is not stale). Newly-added tests not listed here
+# --weights=duration --write after adding or removing
+# TestProxiedServer*/TestServerMode* functions. --write is incremental:
+# it keeps every already-assigned test on its current shard and only
+# places newly-discovered names, onto whichever shard is currently
+# lightest, so two unrelated PRs that each add one test do not textually
+# conflict or silently invalidate each other's packing. Pass --repack to
+# force a full from-scratch rebalance instead (a deliberate, separate
+# change — expect a large diff). --check only verifies every discovered
+# name is listed here exactly once (no stale or duplicate entries); it
+# does NOT verify the packing is still well-balanced, so a reweighted
+# proxied_test_durations.json does not by itself fail --check — rerun
+# with --repack periodically (or whenever shard loads look uneven in CI)
+# to rebalance on purpose. Newly-added tests not listed here
 # hash-distribute via proxied-test-shard.sh: cksum(name) % total,
 # unrelated to proxied_test_durations.json (that file only feeds this
 # generator's own cost estimate for a test it has not measured yet).
@@ -217,210 +226,208 @@
 # regeneration. Add them to the generator or the durations file
 # instead.
 
-30 1 TestProxiedServerDep2
+30 1 TestProxiedServerGateList
+30 1 TestProxiedServerHuman
+30 1 TestProxiedServerReclaim
+30 1 TestProxiedServerSQLStatementRouting
+30 1 TestProxiedServerServeLifecycle
 
-30 2 TestProxiedServerClose
+30 2 TestProxiedServerDelete
+30 2 TestProxiedServerDeleteForceOrphans
+30 2 TestProxiedServerListComments
+30 2 TestProxiedServerPromote
+30 2 TestProxiedServerTypesAgreeWithCreate
 
-30 3 TestProxiedServerUpdate2
+30 3 TestProxiedServerDuplicates
+30 3 TestProxiedServerReadyWisp
+30 3 TestProxiedServerServeDelete
+30 3 TestProxiedServerServeModeGate
+30 3 TestProxiedServerServeReadRevision
 
-30 4 TestProxiedServerUpdate
+30 4 TestProxiedServerGateCreateInheritsRepoMetadata
+30 4 TestProxiedServerMolBurn
+30 4 TestProxiedServerReadyConcurrent
+30 4 TestProxiedServerServeAddDependencies
+30 4 TestProxiedServerServeRelatedIssues
 
-30 5 TestProxiedServerLabel
+30 5 TestProxiedServerCleanDatabases
+30 5 TestProxiedServerCreate
+30 5 TestProxiedServerEventsJournal
+30 5 TestProxiedServerPour
+30 5 TestProxiedServerServeUpdateClaim
+30 5 TestServerModeDeferAutoWake
 
-30 6 TestProxiedServerRecomputeBlocked
+30 6 TestProxiedServerBatchParity
+30 6 TestProxiedServerHistoryRemoteSupportedFrontDoorParity
+30 6 TestProxiedServerMolShow
+30 6 TestProxiedServerMultiStatementSQL
+30 6 TestProxiedServerReady
+30 6 TestProxiedServerServeRemoveDependency
 
-30 7 TestProxiedServerCreate2
+30 7 TestProxiedServerCleanDatabasesPurgeDropped
+30 7 TestProxiedServerCount
+30 7 TestProxiedServerCountIncludeInfra
+30 7 TestProxiedServerDoltLifecycle
+30 7 TestProxiedServerGC
+30 7 TestProxiedServerUpdate
 
-30 8 TestProxiedServerReopen
+30 8 TestProxiedServerInitIfMissing
+30 8 TestProxiedServerPathHelpers
+30 8 TestProxiedServerReopenConcurrent
+30 8 TestProxiedServerShow2
+30 8 TestProxiedServerTypes
+30 8 TestProxiedServerUpdateClosePolicy
 
-30 9 TestProxiedServerReclaim
-30 9 TestProxiedServerServeAddDependencies
-30 9 TestProxiedServerServeEdgeCounts
-30 9 TestProxiedServerUpdateHooks
+30 9 TestProxiedServerCloseConcurrent
+30 9 TestProxiedServerDep2
+30 9 TestProxiedServerListWatchCountsTheOffsetIntoMaxRows
+30 9 TestProxiedServerMolReadyGated
+30 9 TestProxiedServerSQL
 
-30 10 TestProxiedServerCleanDatabases
-30 10 TestProxiedServerDeferAutoWake
-30 10 TestProxiedServerDep
-30 10 TestProxiedServerServeReadRevision
-30 10 TestProxiedServerServeRelease
+30 10 TestProxiedServerAutoPrune
+30 10 TestProxiedServerClose2
+30 10 TestProxiedServerPing
+30 10 TestProxiedServerServeClose
+30 10 TestProxiedServerServeEdgeCounts
 
-30 11 TestProxiedServerClose2
-30 11 TestProxiedServerHistory
-30 11 TestProxiedServerHistoryRemoteSupportedFrontDoorParity
-30 11 TestProxiedServerPing
-30 11 TestProxiedServerSQL
-30 11 TestProxiedServerServeReadParity
+30 11 TestProxiedServerBatchDefersThenDoltCommitAdvancesHeadOnce
+30 11 TestProxiedServerReady2
+30 11 TestProxiedServerServeReadsTheJournalItJustWrote
+30 11 TestProxiedServerServeRefusesTheJournalWhenItIsDisabled
+30 11 TestProxiedServerShow
 
-30 12 TestProxiedServerCount
-30 12 TestProxiedServerGateFrontDoorDirectServerProxyParity
-30 12 TestProxiedServerMultiStatementSQL
-30 12 TestProxiedServerReassignFence
-30 12 TestProxiedServerServeReadsTheJournalItJustWrote
-30 12 TestProxiedServerServeRelatedIssues
-30 12 TestProxiedServerUpdateWisp
+30 12 TestProxiedServerAssign
+30 12 TestProxiedServerConfigSetMany
+30 12 TestProxiedServerContext
+30 12 TestProxiedServerInitExplicitBeadsDirIsAuthoritative
+30 12 TestProxiedServerReadyClaimConcurrent
+30 12 TestProxiedServerServeBatchClose
 
-30 13 TestProxiedServerBatchDefersThenDoltCommitAdvancesHeadOnce
-30 13 TestProxiedServerConfigConcurrent
-30 13 TestProxiedServerHeartbeat
-30 13 TestProxiedServerMemory
-30 13 TestProxiedServerMoleculeFrontDoorWriteParity
-30 13 TestProxiedServerShow
+30 13 TestProxiedServerChildren
+30 13 TestProxiedServerConfig
+30 13 TestProxiedServerDoltRemoteRemove
+30 13 TestProxiedServerExternalMutationPolicy
+30 13 TestProxiedServerPriority
+30 13 TestProxiedServerServeUpdate
 
-30 14 TestProxiedServerDeleteConcurrent
-30 14 TestProxiedServerEdit
-30 14 TestProxiedServerMolReadyGated
-30 14 TestProxiedServerReopenConcurrent
-30 14 TestProxiedServerServeAddComment
-30 14 TestProxiedServerServeDelete
+30 14 TestProxiedServerInfo
+30 14 TestProxiedServerLint
+30 14 TestProxiedServerNote
+30 14 TestProxiedServerQuery
+30 14 TestProxiedServerUpdate3
+30 14 TestProxiedServerWispCreate
 
-30 15 TestProxiedServerCompactHistory
-30 15 TestProxiedServerCreate
-30 15 TestProxiedServerPurgeWispsPlaneRetention
-30 15 TestProxiedServerServeCreate
-30 15 TestProxiedServerServeStreamsTheJournalItIsWriting
-30 15 TestProxiedServerShow2
-30 15 TestProxiedServerTodo
+30 15 TestProxiedServerCompactDolt
+30 15 TestProxiedServerMolDistill
+30 15 TestProxiedServerMolProgress
+30 15 TestProxiedServerServeClaimNext
+30 15 TestProxiedServerServeRefusesAStreamOnADisabledJournal
+30 15 TestProxiedServerUnclaimIfAssigneeParity
 
-30 16 TestProxiedServerAssign
-30 16 TestProxiedServerDeleteBlockedJSONSingleDoc
-30 16 TestProxiedServerDeleteForceOrphans
-30 16 TestProxiedServerEventsJournal
-30 16 TestProxiedServerReady
-30 16 TestProxiedServerReadyClaimConcurrent
-30 16 TestProxiedServerServeCount
+30 16 TestProxiedServerCascadeParity
+30 16 TestProxiedServerExternalCreate
+30 16 TestProxiedServerGraph
+30 16 TestProxiedServerLabel
 30 16 TestProxiedServerSwarm
+30 16 TestProxiedServerTodo
+30 16 TestProxiedServerUpdateConcurrentMetadata
 
-30 17 TestProxiedServerCascadeParity
-30 17 TestProxiedServerGateList
-30 17 TestProxiedServerLint
-30 17 TestProxiedServerMolDistill
-30 17 TestProxiedServerServeClaim
-30 17 TestProxiedServerServeRefusesAStaleCheckpointWithGone
-30 17 TestProxiedServerStale
-30 17 TestServerModeServeSkipsPostRunMaintenance
+30 17 TestProxiedServerClose
+30 17 TestProxiedServerConfigConcurrent
+30 17 TestProxiedServerDeleteConcurrent
+30 17 TestProxiedServerSearch
+30 17 TestProxiedServerServeReadParity
+30 17 TestProxiedServerStatus
 
-30 18 TestProxiedServerConfigSetMany
-30 18 TestProxiedServerMolShow
-30 18 TestProxiedServerPourRejectsEnumViolatingVar
-30 18 TestProxiedServerQuery
+30 18 TestProxiedServerHeartbeat
+30 18 TestProxiedServerMolBond
 30 18 TestProxiedServerSQLDatabaseFlag
-30 18 TestProxiedServerServeLifecycle
-30 18 TestProxiedServerUpdate3
-30 18 TestProxiedServerWispGC
+30 18 TestProxiedServerServeCount
+30 18 TestProxiedServerUpdate2
+30 18 TestServerModeTypesAgreeWithCreate
 
-30 19 TestProxiedServerAutoPrune
-30 19 TestProxiedServerBackupRefusedOnExternalTopology
-30 19 TestProxiedServerBlocked
-30 19 TestProxiedServerCloseSiblingBlockersFanIn
-30 19 TestProxiedServerDeleteWisp
-30 19 TestProxiedServerEventsJournalOffByDefault
-30 19 TestProxiedServerHistoryRemoteRefusalFrontDoorMatrix
-30 19 TestProxiedServerQuick
-30 19 TestProxiedServerReady2
+30 19 TestProxiedServerCreate2
+30 19 TestProxiedServerEdit
+30 19 TestProxiedServerPourRejectsEnumViolatingVar
+30 19 TestProxiedServerReassignFence
+30 19 TestProxiedServerUpdateWisp
+30 19 TestServerModeServe
 
-30 20 TestProxiedServerBatchParity
-30 20 TestProxiedServerDeferUndefer
-30 20 TestProxiedServerGateCheck
-30 20 TestProxiedServerInitIfMissing
-30 20 TestProxiedServerMolLastActivity
-30 20 TestProxiedServerMoleculeFrontDoorDirectServerProxyParity
-30 20 TestProxiedServerPriority
-30 20 TestProxiedServerReadyConcurrent
-30 20 TestProxiedServerStatuses
+30 20 TestProxiedServerExternalPolicyDirectParity
+30 20 TestProxiedServerHistory
+30 20 TestProxiedServerImport
+30 20 TestProxiedServerMemory
+30 20 TestProxiedServerMolCurrent
+30 20 TestProxiedServerServeStreamsTheJournalItIsWriting
 
-30 21 TestProxiedServerCompactDolt
-30 21 TestProxiedServerConfig
-30 21 TestProxiedServerDoltLifecycle
-30 21 TestProxiedServerExternalMutationPolicy
+30 21 TestProxiedServerDeleteWisp
+30 21 TestProxiedServerDepConcurrent
 30 21 TestProxiedServerListSortRetiresTheWalk
-30 21 TestProxiedServerMolProgress
-30 21 TestProxiedServerServeClose
-30 21 TestProxiedServerStatus
+30 21 TestProxiedServerPrime
+30 21 TestProxiedServerRelate
+30 21 TestProxiedServerSetState
+30 21 TestProxiedServerUpdateConcurrentAppendNotes
 
-30 22 TestProxiedServerCloseConcurrent
-30 22 TestProxiedServerMolBurn
-30 22 TestProxiedServerPathHelpers
-30 22 TestProxiedServerPour
-30 22 TestProxiedServerSQLStatementRouting
-30 22 TestProxiedServerSearch
+30 22 TestProxiedServerCompactHistory
+30 22 TestProxiedServerGateLifecycle
+30 22 TestProxiedServerKV
 30 22 TestProxiedServerShow3
-30 22 TestProxiedServerUpdateConcurrentAppendNotes
-30 22 TestProxiedServerUpdateConcurrentClaim
+30 22 TestProxiedServerStale
+30 22 TestProxiedServerStatuses
 
-30 23 TestProxiedServerDepConcurrent
-30 23 TestProxiedServerInfo
-30 23 TestProxiedServerInitExplicitBeadsDirIsAuthoritative
-30 23 TestProxiedServerKV
-30 23 TestProxiedServerPrime
-30 23 TestProxiedServerServeClaimNext
-30 23 TestProxiedServerServeModeGate
-30 23 TestProxiedServerTypes
+30 23 TestProxiedServerBackupRefusedOnExternalTopology
+30 23 TestProxiedServerCloseSiblingBlockersFanIn
+30 23 TestProxiedServerDeleteBlockedJSONSingleDoc
+30 23 TestProxiedServerQuick
+30 23 TestProxiedServerStorageClass
+30 23 TestProxiedServerUpdateHooks
+30 23 TestProxiedServerWispGC
 
-30 24 TestProxiedServerMolCurrent
-30 24 TestProxiedServerPromote
-30 24 TestProxiedServerReadyWisp
-30 24 TestProxiedServerServeRefusesTheJournalWhenItIsDisabled
-30 24 TestProxiedServerShowWatch
-30 24 TestProxiedServerUpdateClosePolicy
-30 24 TestProxiedServerUpdateConcurrentMetadata
-30 24 TestServerModeServe
+30 24 TestProxiedServerCreateInfraTypeRoutesToWisps
+30 24 TestProxiedServerEpic
+30 24 TestProxiedServerLink
+30 24 TestProxiedServerMoleculeFrontDoorDirectServerProxyParity
+30 24 TestProxiedServerRecomputeBlocked
+30 24 TestServerModeServeSkipsPostRunMaintenance
 
-30 25 TestProxiedServerChildren
-30 25 TestProxiedServerGateLifecycle
-30 25 TestProxiedServerGraph
-30 25 TestProxiedServerMolBond
-30 25 TestProxiedServerMolSquash
-30 25 TestProxiedServerServeRemoveDependency
-30 25 TestProxiedServerSetState
-30 25 TestProxiedServerWispList
+30 25 TestProxiedServerDeferUndefer
+30 25 TestProxiedServerOrphans
+30 25 TestProxiedServerServeClaim
+30 25 TestProxiedServerShowWatch
+30 25 TestProxiedServerUpdateIfGuards
+30 25 TestProxiedServerWispCreateRejectsEnumViolatingVar
 
-30 26 TestProxiedServerCreateInfraTypeRoutesToWisps
-30 26 TestProxiedServerDepListSingleIDWarnsOnDroppedExternalEdge
-30 26 TestProxiedServerGateCreateInheritsRepoMetadata
-30 26 TestProxiedServerListWatchCountsTheOffsetIntoMaxRows
+30 26 TestProxiedServerFindDuplicates
+30 26 TestProxiedServerGateCheck
+30 26 TestProxiedServerGateFrontDoorDirectServerProxyParity
+30 26 TestProxiedServerServeAddComment
 30 26 TestProxiedServerServeSettingsWrites
 30 26 TestProxiedServerState
-30 26 TestProxiedServerUnclaimIfAssigneeParity
-30 26 TestProxiedServerUpdateIfGuards
-30 26 TestProxiedServerWispCreate
 
-30 27 TestProxiedServerEpic
-30 27 TestProxiedServerImport
-30 27 TestProxiedServerLink
-30 27 TestProxiedServerList
-30 27 TestProxiedServerListComments
-30 27 TestProxiedServerOutageReconnectAcceptanceMatrix
-30 27 TestProxiedServerServeUpdate
-30 27 TestProxiedServerTypesAgreeWithCreate
-30 27 TestProxiedServerUnclaim
+30 27 TestProxiedServerBlocked
+30 27 TestProxiedServerMolLastActivity
+30 27 TestProxiedServerMolStale
+30 27 TestProxiedServerMoleculeFrontDoorWriteParity
+30 27 TestProxiedServerServeActivatesTheEventsJournal
+30 27 TestProxiedServerServeRefusesAStaleCheckpointWithGone
 
-30 28 TestProxiedServerCleanDatabasesPurgeDropped
 30 28 TestProxiedServerComment
-30 28 TestProxiedServerFindDuplicates
-30 28 TestProxiedServerOrphans
-30 28 TestProxiedServerPrune
-30 28 TestProxiedServerRelate
-30 28 TestProxiedServerServeUpdateClaim
-30 28 TestServerModeSharedServeGlobalReportsTheServedDatabase
-30 28 TestServerModeTypesAgreeWithCreate
+30 28 TestProxiedServerExport
+30 28 TestProxiedServerList
+30 28 TestProxiedServerReopen
+30 28 TestProxiedServerServeCreate
+30 28 TestProxiedServerUnclaim
 
-30 29 TestProxiedServerCountIncludeInfra
-30 29 TestProxiedServerDoltRemoteRemove
-30 29 TestProxiedServerDuplicates
-30 29 TestProxiedServerExport
-30 29 TestProxiedServerExternalCreate
-30 29 TestProxiedServerGC
-30 29 TestProxiedServerHuman
-30 29 TestProxiedServerServeActivatesTheEventsJournal
-30 29 TestProxiedServerStorageClass
-30 29 TestProxiedServerWispCreateRejectsEnumViolatingVar
+30 29 TestProxiedServerDeferAutoWake
+30 29 TestProxiedServerDep
+30 29 TestProxiedServerDepListSingleIDWarnsOnDroppedExternalEdge
+30 29 TestProxiedServerHistoryRemoteRefusalFrontDoorMatrix
+30 29 TestProxiedServerTag
+30 29 TestProxiedServerWispList
 
-30 30 TestProxiedServerContext
-30 30 TestProxiedServerDelete
-30 30 TestProxiedServerExternalPolicyDirectParity
-30 30 TestProxiedServerMolStale
-30 30 TestProxiedServerNote
-30 30 TestProxiedServerServeBatchClose
-30 30 TestProxiedServerServeRefusesAStreamOnADisabledJournal
-30 30 TestProxiedServerTag
-30 30 TestServerModeDeferAutoWake
+30 30 TestProxiedServerEventsJournalOffByDefault
+30 30 TestProxiedServerMolSquash
+30 30 TestProxiedServerPrune
+30 30 TestProxiedServerPurgeWispsPlaneRetention
+30 30 TestProxiedServerServeRelease
+30 30 TestProxiedServerUpdateConcurrentClaim

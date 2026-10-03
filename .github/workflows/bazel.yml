@@ -1084,33 +1084,35 @@ jobs:
           fi
 
       # Remote: each shard's Go timeout is its job's 15m, 1200s Bazel cap,
-      # plus a compile. scripts/ci/proxied_test_durations.json's 178 entries
-      # are each a clean, single-job (no concurrent heavy bazel/dolt job on
-      # the box), -test.parallel=1 top-level-test duration — either a fresh
-      # manifest-aligned sweep's own <testsuite time> (errors="0", so a
-      # failing-but-complete suite's time is still trustworthy) or, for the
-      # handful too slow to finish inside Bazel's default per-target
-      # timeout, a `bazel run` leaf-subtest-only sum (never double-counting
-      # a parallel group's own line on top of its children's). See that
-      # file's header for the full methodology and its contention-artifact
-      # lesson.
+      # plus a compile. scripts/ci/proxied_test_durations.json's 176 entries
+      # are each a clean, single-job (no concurrent heavy bazel/dolt job
+      # intentionally started on the box; see that file's header for its
+      # ambient-contention caveat), -test.parallel=4 top-level-test
+      # duration — the exact config this job uses — from a single fresh,
+      # manifest-aligned 30-shard sweep's own <testsuite time> (errors="0",
+      # so a failing-but-complete suite's time is still trustworthy); every
+      # one of the 176 discovered tests completed inside its shard run, so
+      # no `bazel run` leaf-summation workaround was needed this time. See
+      # that file's header for the full methodology, including why an
+      # earlier -test.parallel=1 (serial) capture was replaced: serial
+      # timings don't model this lane (which always runs parallel=4), and
+      # an independent re-review measured near-zero correlation (r=0.08)
+      # between the serial-derived predicted shard load and actual
+      # parallel=4 wall time.
       #
-      # The resulting 30-shard LPT packing is NOT within a few seconds of
-      # itself end to end: two single tests dominate and can't be split
-      # further by this manifest (shard_count shards within one test
-      # binary's own sharding; this manifest assigns whole top-level tests).
-      # Shard 1 is TestProxiedServerDep2 alone, ~2358s (~39m) locally; shard
-      # 2 is TestProxiedServerClose alone, ~1105s (~18m). Every other shard
-      # clusters tightly around 741-876s (~12-15m). Those two outliers'
-      # local numbers exceed this job's 25m step timeout / 30m job timeout
-      # on their own merits, before counting compile time or RBE's actual
-      # per-shard throughput (unmeasured here — this job only ever ran
-      # remote; the local numbers are a relative-cost signal for the LPT
-      # packing, not a verified RBE forecast). If shard 1 or 2 times out on
-      # RBE, that is this known imbalance surfacing, not a new regression —
-      # see TestProxiedServerDep2/TestProxiedServerClose above before
-      # assuming a hang: both are simply large, each running ~15-25 real
-      # `bd init`-against-a-live-dolt-server subtests serially.
+      # Measured per-shard wall time for the full 30-shard local sweep that
+      # produced this data: shards ranged from roughly 32s to 341s, with
+      # most clustering well under this job's 25m step timeout / 30m job
+      # timeout. After repacking with these corrected weights, the LPT
+      # estimate clusters every shard within a few seconds of ~355-360s
+      # (sum of all 176 measured durations / 30 shards) — no single test or
+      # small group of tests dominates a shard the way the discarded serial
+      # data wrongly implied. This is a local, single-job measurement, not
+      # a verified RBE forecast (this job has only ever run remote); if a
+      # shard's RBE wall time diverges sharply from this local estimate,
+      # that is RBE throughput differing from local execution, not
+      # necessarily a regression — compare against this job's own recent
+      # run history before assuming a hang.
       - name: bazel test //... --config=doltserver-proxied
         id: test
         timeout-minutes: 25
