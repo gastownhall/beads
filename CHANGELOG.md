@@ -33,6 +33,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is still ridden out within one command. A backend that drops a connection
   after the greeting, a dial timeout, and every refusal from a managed (local
   sidecar) backend keep the full transient retry.
+- **`bd backup restore --force` no longer destroys the live database before
+  checking the source holds a backup** (GH#7098, GH#5972). Dolt's own `CALL
+  DOLT_BACKUP('restore', ...)` drops the target database before discovering
+  the source is invalid, and the only local check gating that call was
+  "does this path exist" — an existing-but-empty directory (the operator's
+  most likely typo, reached for mid-incident) passed straight through,
+  dropped the live database, and only then failed with `not found`, leaving
+  `table not found: config` and every issue gone. `bd backup restore` now
+  checks for a Dolt backup manifest at the top of the directory before any
+  restore proceeds, confirmed against a real `bd backup sync` output rather
+  than assumed from documentation. Scoped to local directory / `file://`
+  sources, the confirmed and reproduced case; remote sources (`gs://`,
+  `aws://`, `http(s)://`) are not validated here and would need a different
+  approach (restore into a scratch database, swap in only on success).
 - **`bd list` no longer silently drops all but the last repeated filter flag.**
   `--status`, `--state`, and `--id` were plain string flags, so
   `bd list --status open --status closed --status pinned` kept only `pinned` —

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -167,9 +168,37 @@ func syncProjectIDFromDB(ctx context.Context, s storage.DoltStorage) error {
 	return cfg.Save(beadsDir)
 }
 
+// validateBackupRestoreDir checks dir looks like a real Dolt backup before
+// any restore proceeds. Dolt's own CALL DOLT_BACKUP('restore', ...) drops
+// the target database before it discovers the source holds no backup, so
+// an existing-but-empty directory (or any directory without a Dolt
+// manifest) previously passed this check and then destroyed the live
+// database on the ensuing "not found" failure (GH#7098, GH#5972). The
+// manifest file sits at the top level of a backup directory produced by
+// `bd backup sync` / `dolt backup sync` -- confirmed against a real
+// embedded backup, not assumed from documentation.
+//
+// This only covers local directory / file:// sources, which is the
+// confirmed, reproduced case. Remote sources (gs://, aws://, http(s)://)
+// are not validated here; see GH#7098's own note that the remote case was
+// not reproduced and would need a different approach (restore into a
+// scratch database, swap in only on success).
 func validateBackupRestoreDir(dir string) error {
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
+	info, err := os.Stat(dir)
+	if os.IsNotExist(err) {
 		return fmt.Errorf("backup directory not found: %s\nRun 'bd backup' first to create a backup", dir)
+	}
+	if err != nil {
+		return fmt.Errorf("backup directory %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("backup source is not a directory: %s", dir)
+	}
+	manifest := filepath.Join(dir, "manifest")
+	if _, err := os.Stat(manifest); os.IsNotExist(err) {
+		return fmt.Errorf("%s does not look like a Dolt backup (no manifest file found)\nRun 'bd backup' first to create a backup, or check the path is correct", dir)
+	} else if err != nil {
+		return fmt.Errorf("backup directory %s: %w", dir, err)
 	}
 	return nil
 }
