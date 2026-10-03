@@ -219,6 +219,12 @@ func TestGolangciLintInstallScriptPinned(t *testing.T) {
 // comparison were missing or broken.
 func TestInstallGolangciLintFailsClosedOnChecksumMismatch(t *testing.T) {
 	bash := requireHostTool(t, "bash")
+	// The script is CI-only and Linux-only, and keeps its pinned hashes in a
+	// bash 4 associative array; macOS runners ship /bin/bash 3.2, where the
+	// declaration itself fails before the script reaches the download.
+	if err := exec.Command(bash, "-c", "declare -A probe=()").Run(); err != nil {
+		t.Skip("bash lacks associative arrays (bash >= 4 required)")
+	}
 
 	bin := t.TempDir()
 	stateDir := t.TempDir()
