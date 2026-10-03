@@ -36,6 +36,7 @@ go_test(
         "ci_workflow_test.go",
         "complexity_script_test.go",
         "conformance_script_test.go",
+        "embedded_shard_count_test.go",
         "host_tools_test.go",
         "install_dolt_test.go",
         "pr_lanes_bazel_coverage_test.go",

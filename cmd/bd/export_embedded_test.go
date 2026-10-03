@@ -27,7 +27,12 @@ func bdExport(t *testing.T, bd, dir string, args ...string) string {
 	return stdout.String()
 }
 
-func TestEmbeddedExport(t *testing.T) {
+// TestEmbeddedExportFormats was split from TestEmbeddedExport (originally
+// ~225s, measured under --config=embedded) into 2 top-level tests over
+// disjoint subtest groups, for CI shard balance (see
+// ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedExportFormats(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt export tests")
 	}
@@ -118,6 +123,15 @@ func TestEmbeddedExport(t *testing.T) {
 			t.Errorf("--all should produce >= lines than default: all=%d default=%d", allLines, defaultLines)
 		}
 	})
+}
+
+func TestEmbeddedExportFlags(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt export tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("include_infra", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "exinfra")

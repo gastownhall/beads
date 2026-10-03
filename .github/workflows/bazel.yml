@@ -797,10 +797,15 @@ jobs:
     name: embedded Dolt tier
     # Remote execution only: skipped unless the rbe job chose remote,
     # fork-ro or fork-rw (enabled; not in modes cache, local or skip).
-    # Locally the tier is 27 race test
-    # processes (~7-10k test-seconds) on one runner, an hour or more per run
-    # on the pool whose job cap this track exists to relieve, and it proves
-    # nothing pr-risk.yml's embedded jobs (which do run for forks) do not.
+    # Locally the tier is 56 race test
+    # processes (40 cmd/bd shards + 14 embeddeddolt storage shards + 2
+    # conformance partitions; ~22k test-seconds measured locally -- see
+    # scripts/ci/embedded_cmd_test_durations.json and
+    # scripts/ci/embedded_storage_test_durations.json -- up from an earlier,
+    # smaller test surface's ~7-10k estimate) on one runner, several hours
+    # per run on the pool whose job cap this track exists to relieve, and it
+    # proves nothing pr-risk.yml's embedded jobs (which do run for forks) do
+    # not.
     # On same-repo pull_requests those jobs stand down (pr-risk.yml's
     # bazel-coverage), so this lane is then the tier's only PR run
     # and pr.yml's gate requires it to have run here and passed.
@@ -882,8 +887,8 @@ jobs:
         run: >-
           python3 tools/bazel/check_shard_coverage.py
           --bep "$RUNNER_TEMP/bazel-bep.json"
-          --suite //cmd/bd:bd_embedded_test .github/scripts/embedded-test-shard.sh 20
-          --suite //internal/storage/embeddeddolt:embeddeddolt_embedded_test .github/scripts/embedded-storage-test-shard.sh 5
+          --suite //cmd/bd:bd_embedded_test .github/scripts/embedded-test-shard.sh 40
+          --suite //internal/storage/embeddeddolt:embeddeddolt_embedded_test .github/scripts/embedded-storage-test-shard.sh 14
           --whole //internal/storage/embeddeddolt:embeddeddolt_conformance_core_test
           --whole //internal/storage/embeddeddolt:embeddeddolt_conformance_audit_test
 

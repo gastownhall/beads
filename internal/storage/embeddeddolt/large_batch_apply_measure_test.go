@@ -166,11 +166,13 @@ var largeBatchApplyShapes = []struct {
 	},
 }
 
-// TestLargeBatchApplyStatementCounts_Embedded pins the ACTUAL number of SQL
-// statements issueops.ApplyBatchInTx issues on the embedded backend, for
-// each of three measured shapes (slice B0). It is a REGRESSION BASELINE for
-// B2 (a later, lighter fast
-// path): B2 must lower these numbers, and this test is what proves it did.
+// TestLargeBatchApplyStatementCounts{356,712,Classic40}_Embedded (below)
+// jointly pin the ACTUAL number of SQL statements issueops.ApplyBatchInTx
+// issues on the embedded backend, for each of three measured shapes (slice
+// B0; originally one test, TestLargeBatchApplyStatementCounts_Embedded, see
+// its split's doc comment below for why it is now 3). Together they are a
+// REGRESSION BASELINE for B2 (a later, lighter fast path): B2 must lower
+// these numbers, and these tests are what prove it did.
 //
 // The exact counts are backend- and Dolt-version-sensitive by nature — they
 // come from real driver round trips, not a cost model — so a failure here
@@ -189,11 +191,32 @@ var largeBatchApplyShapes = []struct {
 // and must be re-measured and re-pinned deliberately.
 const statementCountTolerance = 2
 
-func TestLargeBatchApplyStatementCounts_Embedded(t *testing.T) {
+// TestLargeBatchApplyStatementCounts356_Embedded,
+// TestLargeBatchApplyStatementCounts712_Embedded and
+// TestLargeBatchApplyStatementCountsClassic40_Embedded were split from
+// TestLargeBatchApplyStatementCounts_Embedded (measured ~350.25s under
+// --config=embedded: 81.03s + 260.70s + 8.52s for the 356/712/classic-40
+// shapes respectively) into 3 top-level tests, one per shape, for CI shard
+// balance (see ~/beads-bazel-plan/f1/impl-report.md, slice F1). Each runs
+// exactly one disjoint element of largeBatchApplyShapes, selected by name
+// (not index) so the split stays correct if the shared shapes slice is
+// reordered; the union of shapes run is identical to the original loop's,
+// each exactly once.
+//
+// The 712 (mol 2x) shape alone still measures ~260.70s: it is a single
+// pinned statement-count assertion over one indivisible ApplyBatchInTx
+// transaction (no internal sub-cases to split further) and cannot be
+// shrunk without weakening what B0's regression baseline actually pins —
+// the same kind of irreducible single-operation exception as the cmd
+// tier's TestEmbeddedUpdateConcurrent/TestEmbeddedCloseConcurrent.
+func runLargeBatchApplyStatementCountsShape(t *testing.T, shapeName string) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
 
 	for _, tc := range largeBatchApplyShapes {
+		if tc.name != shapeName {
+			continue
+		}
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newPristineEmbeddedDoltFixture(t, tc.db)
 			t.Cleanup(func() { closeEmbeddedDoltStore(t, fixture.store) })
@@ -224,6 +247,18 @@ func TestLargeBatchApplyStatementCounts_Embedded(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLargeBatchApplyStatementCounts356_Embedded(t *testing.T) {
+	runLargeBatchApplyStatementCountsShape(t, "356 (mol 1x)")
+}
+
+func TestLargeBatchApplyStatementCounts712_Embedded(t *testing.T) {
+	runLargeBatchApplyStatementCountsShape(t, "712 (mol 2x)")
+}
+
+func TestLargeBatchApplyStatementCountsClassic40_Embedded(t *testing.T) {
+	runLargeBatchApplyStatementCountsShape(t, "40 (classic)")
 }
 
 // wallClockShapes is the coordinator's item-8 ask: real wall-clock numbers at

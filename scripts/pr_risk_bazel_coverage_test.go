@@ -1081,11 +1081,25 @@ func TestBazelRetiredLanesCheckListedTestsRan(t *testing.T) {
 		// a different number of shards than this PR Risk job's matrix. Zero
 		// means "same as this suite's PR Risk job matrix size" (the common
 		// case for a lane that is a drop-in retirement of the legacy job).
-		// -1 means "read cmd/bd:bd_proxied_test's own shard_count from
-		// cmd/bd/BUILD.bazel" (bazelProxiedShardCount); only label ==
-		// "//cmd/bd:bd_proxied_test" may use -1 (enforced below), so
-		// copying this onto another suite needs a reviewed change there.
+		// -1 means "read this suite's label's own shard_count live from its
+		// BUILD.bazel rule", via the liveShardCount dispatch table below
+		// (bazelProxiedShardCount, bazelEmbeddedCmdShardCount,
+		// bazelEmbeddedStorageShardCount); only a label present in that
+		// table may use -1 (enforced below), so copying this onto another
+		// suite needs a reviewed change there.
 		shardCount int
+	}
+	// liveShardCount dispatches a suite's -1 shardCount to the accessor that
+	// reads its target's own shard_count from its BUILD.bazel rule — the
+	// single source of truth for a Bazel-only lane's shard split, which no
+	// longer has to equal the retired PR Risk job's matrix size (F2's
+	// bd_proxied_test; F1's bd_embedded_test and
+	// embeddeddolt_embedded_test). See bazelProxiedShardCount's doc comment
+	// (scripts/ci_workflow_test.go) for the shared rationale.
+	liveShardCount := map[string]func(*testing.T) int{
+		"//cmd/bd:bd_proxied_test":                                   bazelProxiedShardCount,
+		"//cmd/bd:bd_embedded_test":                                  bazelEmbeddedCmdShardCount,
+		"//internal/storage/embeddeddolt:embeddeddolt_embedded_test": bazelEmbeddedStorageShardCount,
 	}
 	for _, c := range []struct {
 		lane, config string
@@ -1093,8 +1107,18 @@ func TestBazelRetiredLanesCheckListedTestsRan(t *testing.T) {
 		whole        []string
 	}{
 		{bazelEmbedJobName, "embedded", []suite{
-			{"test-embedded-cmd", "Test", "//cmd/bd:bd_embedded_test", ".github/scripts/embedded-test-shard.sh", 0},
-			{"test-embedded-storage", "Test", "//internal/storage/embeddeddolt:embeddeddolt_embedded_test", ".github/scripts/embedded-storage-test-shard.sh", 0},
+			// bazel-embedded runs its own duration-balanced manifest blocks
+			// (scripts/ci/embedded_{cmd,storage}_test_durations.json), not
+			// PR Risk's frozen 20- and 5-shard blocks (slice F1): neither is
+			// a drop-in retirement of its legacy job's shard count, just its
+			// tests. bazelEmbeddedCmdShardCount/bazelEmbeddedStorageShardCount
+			// read the real counts from BUILD.bazel, making these suites'
+			// `want` (below) genuine cross-file pins against bazel.yml's own
+			// check_shard_coverage.py arguments, not independently
+			// hard-coded literals that could drift from BUILD.bazel
+			// unnoticed (S1).
+			{"test-embedded-cmd", "Test", "//cmd/bd:bd_embedded_test", ".github/scripts/embedded-test-shard.sh", -1},
+			{"test-embedded-storage", "Test", "//internal/storage/embeddeddolt:embeddeddolt_embedded_test", ".github/scripts/embedded-storage-test-shard.sh", -1},
 		}, []string{"//internal/storage/embeddeddolt:embeddeddolt_conformance_core_test", "//internal/storage/embeddeddolt:embeddeddolt_conformance_audit_test"}},
 		{bazelProxiedJobName, "doltserver-proxied", []suite{
 			// bazel-proxied runs its own duration-balanced manifest block
@@ -1106,9 +1130,7 @@ func TestBazelRetiredLanesCheckListedTestsRan(t *testing.T) {
 			// genuine cross-file pin against bazel.yml's own
 			// check_shard_coverage.py argument, not an independently
 			// hard-coded literal that could drift from BUILD.bazel unnoticed
-			// (S1). This -1 sentinel is deliberately restricted to
-			// bd_proxied_test below: copying it onto another suite requires
-			// touching that guard, not just this literal.
+			// (S1).
 			{"test-proxied-cmd", "Test proxied-server cmd shard", "//cmd/bd:bd_proxied_test", ".github/scripts/proxied-test-shard.sh", -1},
 		}, nil},
 		{bazelServerJobName, "doltserver-integration", []suite{
@@ -1122,10 +1144,11 @@ func TestBazelRetiredLanesCheckListedTestsRan(t *testing.T) {
 			shards := s.shardCount
 			switch {
 			case shards < 0:
-				if s.label != "//cmd/bd:bd_proxied_test" {
-					t.Fatalf("%s: shardCount<0 (read live from BUILD.bazel) is only allowed for //cmd/bd:bd_proxied_test, not %s", s.job, s.label)
+				fn, ok := liveShardCount[s.label]
+				if !ok {
+					t.Fatalf("%s: shardCount<0 (read live from BUILD.bazel) is not configured for %s", s.job, s.label)
 				}
-				shards = bazelProxiedShardCount(t)
+				shards = fn(t)
 			case shards == 0:
 				shards = len(risk.job(t, s.job).Strategy.Matrix.Shard)
 			}

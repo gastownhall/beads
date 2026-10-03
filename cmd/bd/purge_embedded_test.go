@@ -52,7 +52,12 @@ func createAndCloseEphemeral(t *testing.T, bd, dir, title string) string {
 	return issue.ID
 }
 
-func TestEmbeddedPurge(t *testing.T) {
+// TestEmbeddedPurgeBasics was split from TestEmbeddedPurge (originally
+// ~194s, measured under --config=embedded) into 2 top-level tests over
+// disjoint subtest groups, for CI shard balance (see
+// ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedPurgeBasics(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -94,6 +99,15 @@ func TestEmbeddedPurge(t *testing.T) {
 			t.Error("expected non-empty dry-run output")
 		}
 	})
+}
+
+func TestEmbeddedPurgeFiltered(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	// ===== Force =====
 

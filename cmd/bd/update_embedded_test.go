@@ -243,14 +243,19 @@ func TestEmbeddedUpdateRoutedStoreCommitsTargetHead(t *testing.T) {
 	}
 }
 
-func TestEmbeddedUpdate(t *testing.T) {
+// TestEmbeddedUpdateFields and TestEmbeddedUpdateLifecycle were split from
+// TestEmbeddedUpdate (originally ~267s, measured under --config=embedded)
+// into 2 top-level tests over disjoint subtest groups, for CI shard balance
+// (see ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedUpdateFields(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
 	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
-	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tu")
+	dir, _, _ := bdInit(t, bd, "--prefix", "tu")
 
 	t.Run("update_direct_flag_mapping", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Multi update", "--type", "task", "--metadata", `{"remove":"me"}`)
@@ -527,6 +532,16 @@ func TestEmbeddedUpdate(t *testing.T) {
 			t.Errorf("expected status=deferred, got %q", got.Status)
 		}
 	})
+}
+
+func TestEmbeddedUpdateLifecycle(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tu")
 
 	t.Run("relative_defer_is_persisted_in_UTC", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "UTC defer test", "--type", "task")

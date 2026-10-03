@@ -99,7 +99,12 @@ func bdLabelListAllJSON(t *testing.T, bd, dir string) []map[string]interface{} {
 	return results
 }
 
-func TestEmbeddedLabel(t *testing.T) {
+// TestEmbeddedLabelAddRemove was split from TestEmbeddedLabel (originally
+// ~360s, measured under --config=embedded) into 3 top-level tests over
+// disjoint subtest groups, for CI shard balance (see
+// ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedLabelAddRemove(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -342,6 +347,21 @@ func TestEmbeddedLabel(t *testing.T) {
 			t.Errorf("no-match prefix remove JSON = %v, want an empty array", rows)
 		}
 	})
+}
+
+// TestEmbeddedLabelEditReports was split from TestEmbeddedLabel (originally
+// ~360s, measured under --config=embedded) into 3 top-level tests over
+// disjoint subtest groups, for CI shard balance (see
+// ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedLabelEditReports(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tl")
 
 	// Two issues carrying DIFFERENT matching sets: the report is per issue and
 	// each issue's set is resolved from its own labels, so a refactor that
@@ -594,6 +614,21 @@ func TestEmbeddedLabel(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestEmbeddedLabelPropagateRename was split from TestEmbeddedLabel
+// (originally ~360s, measured under --config=embedded) into 3 top-level
+// tests over disjoint subtest groups, for CI shard balance (see
+// ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedLabelPropagateRename(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tl")
 
 	// ===== Label Propagate =====
 

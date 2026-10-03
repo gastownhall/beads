@@ -40,7 +40,15 @@ func bdDoltFail(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
-func TestEmbeddedDolt(t *testing.T) {
+// TestEmbeddedDoltBlockedAndCommit was split from TestEmbeddedDolt
+// (originally ~183s, measured under --config=embedded) into 2 top-level
+// tests over disjoint subtest groups, for CI shard balance (see
+// ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// subtest is preserved exactly once. The commit/remote/push subtests in the
+// second group (TestEmbeddedDoltRemoteAndPush) only ever read or mutate
+// their own fresh `dir` (or their own ppDir/pfDir/cleanDir), so neither
+// group depends on state the other group's subtests produce.
+func TestEmbeddedDoltBlockedAndCommit(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -138,6 +146,16 @@ func TestEmbeddedDolt(t *testing.T) {
 			t.Errorf("expected 'Nothing to commit.' on a clean working set, got: %s", out)
 		}
 	})
+}
+
+func TestEmbeddedDoltRemoteAndPush(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "td")
 
 	// ===== Remote management =====
 

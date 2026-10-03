@@ -4958,10 +4958,20 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		}
 		root := sourceRepoRoot(t)
 		rule := bazelRuleBlock(readPolicyFile(t, root, c.pkg+"/BUILD.bazel"), c.target)
+		// c.target's own shard_count is deliberately NOT asserted to equal
+		// shards (pr-risk.yml's matrix size) here: since slice F1, the
+		// Bazel-only bazel-embedded job (bazel.yml) shards both of these
+		// targets on its own duration-balanced manifest block, a different
+		// total from PR Risk's/main.yml's legacy "Test (Embedded Dolt {Cmd
+		// N/20,Storage N/5})" jobs' frozen block (same reasoning as
+		// cmd/bd:bd_proxied_test's noBuildShardPin above, F2). The real
+		// cross-file pin for c.target's shard_count lives in
+		// pr_risk_bazel_coverage_test.go's TestBazelRetiredLanesCheckListedTestsRan,
+		// which ties it to bazel.yml's check_shard_coverage.py argument via
+		// bazelEmbeddedCmdShardCount/bazelEmbeddedStorageShardCount.
 		for _, want := range []string{
 			`srcs = ["//tools/bazel:go_test_manifest_shard.sh"],`,
 			`"$(rootpath //:` + c.script + `)",`,
-			"shard_count = " + strconv.Itoa(shards) + ",",
 			`"BEADS_TEST_EMBEDDED_DOLT": "1"`,
 			`"embedded"`,
 		} {

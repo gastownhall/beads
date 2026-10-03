@@ -973,11 +973,14 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
     - The `args` and `env` of every target tagged `embedded`,
       `dolt-server-proxied` or `dolt-server-integration` are pinned.
   - `tools/bazel/check_shard_coverage.py` runs after each tier. It requires:
-    - every Bazel shard of `//cmd/bd:bd_embedded_test`,
-      `//internal/storage/embeddeddolt:embeddeddolt_embedded_test`,
-      `//cmd/bd:bd_proxied_test` (30; PR Risk's own legacy
+    - every Bazel shard of `//cmd/bd:bd_embedded_test` (40; PR Risk's own
+      legacy `test-embedded-cmd` fork/push jobs still run 20 shards of
+      their own, frozen manifest block — a different split, not this one,
+      F1), `//internal/storage/embeddeddolt:embeddeddolt_embedded_test`
+      (14; legacy `test-embedded-storage` still runs 5 of its own, same
+      reasoning, F1), `//cmd/bd:bd_proxied_test` (30; PR Risk's own legacy
       `test-proxied-cmd` fork/push jobs still run 15 shards of their own,
-      frozen manifest block — a different split, not this one) and
+      frozen manifest block — a different split, not this one, F2) and
       `//internal/storage/dolt:dolt_server_full_test` (16) to have run
       exactly the tests its shard script lists (list-only mode, minus
       `TestMain`, which `grep '^func Test'` lists but which is never a

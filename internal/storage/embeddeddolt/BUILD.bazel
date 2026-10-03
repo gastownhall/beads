@@ -256,12 +256,18 @@ go_test(
     ],
 )
 
-# embeddeddolt_test as PR Risk's "Test (Embedded Dolt Storage N/5)" jobs run
-# it: shard k runs .github/scripts/embedded-storage-test-shard.sh k 5 (every
-# top-level test but TestConformance, assigned by the committed manifest)
-# with BEADS_TEST_EMBEDDED_DOLT=1; the wrapper points
+# Runs 14 Bazel shards against every top-level Test* function in
+# internal/storage/embeddeddolt/*_test.go but TestConformance, assigned by
+# the manifest's 14-shard block (duration-balanced; see
+# scripts/ci/embedded_storage_test_durations.json), with
+# BEADS_TEST_EMBEDDED_DOLT=1; the wrapper points
 # BEADS_TEST_EMBEDDED_TEST_BINARY at this binary, which the concurrency test
-# re-executes. shard_count must stay equal to the manifest's shard total.
+# re-executes. This is a *different* shard count from PR Risk's legacy
+# fork/push jobs, "Test (Embedded Dolt Storage N/5)" (pr-risk.yml,
+# main.yml): those keep running 5 shards of their own, frozen hand-assigned
+# block in the same manifest file — shard k here is not the same split as
+# their shard k. shard_count must stay equal to this lane's manifest
+# block's shard total.
 #
 # Tags:
 #   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
@@ -289,7 +295,7 @@ sh_test(
         "//:.github/scripts/embedded-storage-test-shards.txt",
     ],
     env = {"BEADS_TEST_EMBEDDED_DOLT": "1"},
-    shard_count = 5,
+    shard_count = 14,
     tags = ["embedded"],
 )
 

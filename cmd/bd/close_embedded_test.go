@@ -58,14 +58,18 @@ func bdDepAdd(t *testing.T, bd, dir string, args ...string) {
 
 // ===== Close tests =====
 
-func TestEmbeddedClose(t *testing.T) {
+// TestEmbeddedCloseBasic was split from TestEmbeddedClose (originally ~404s,
+// measured under --config=embedded) into 3 top-level tests over disjoint
+// subtest groups, for CI shard balance (see ~/beads-bazel-plan/f1/impl-report.md,
+// bead bd-f1shard). Every original subtest is preserved exactly once.
+func TestEmbeddedCloseBasic(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
 	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
-	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tc")
+	dir, _, _ := bdInit(t, bd, "--prefix", "tc")
 
 	// ===== Basic Close Behavior =====
 
@@ -261,6 +265,22 @@ func TestEmbeddedClose(t *testing.T) {
 		}
 	})
 
+}
+
+// TestEmbeddedCloseGuardsAndEpics was split from TestEmbeddedClose (originally
+// ~404s, measured under --config=embedded) into 3 top-level tests over
+// disjoint subtest groups, for CI shard balance (see
+// ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedCloseGuardsAndEpics(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tc")
+
 	// Proves the S7 delegation: `bd close` on a blocked issue now surfaces the
 	// engine's atomic guard (storage.ErrCloseBlocked) rather than a duplicated
 	// CLI pre-check. The refusal must be atomic — the issue stays open because the
@@ -368,6 +388,21 @@ func TestEmbeddedClose(t *testing.T) {
 			t.Errorf("expected Dolt commit count to increase after close: before=%d afterCreate=%d afterClose=%d", before, afterCreate, afterClose)
 		}
 	})
+
+}
+
+// TestEmbeddedCloseAlreadyClosed was split from TestEmbeddedClose (originally
+// ~404s, measured under --config=embedded) into 3 top-level tests over
+// disjoint subtest groups, for CI shard balance (see
+// ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedCloseAlreadyClosed(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	// The direct route's mirror of the proxied route's
 	// single_transaction_dolt_commit oracle. N ids are ONE request, and the

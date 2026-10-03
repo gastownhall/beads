@@ -48,7 +48,12 @@ func writeJSONLFile(t *testing.T, path string, issues []types.Issue) {
 	}
 }
 
-func TestEmbeddedImport(t *testing.T) {
+// TestEmbeddedImportFromSources was split from TestEmbeddedImport (originally
+// ~239s, measured under --config=embedded) into 2 top-level tests over
+// disjoint subtest groups, for CI shard balance (see
+// ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedImportFromSources(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
 	}
@@ -164,6 +169,15 @@ func TestEmbeddedImport(t *testing.T) {
 			t.Errorf("expected '1 memor' in output, got: %s", out)
 		}
 	})
+}
+
+func TestEmbeddedImportUpsertAndPrefixSync(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("empty_file", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "imemp")
