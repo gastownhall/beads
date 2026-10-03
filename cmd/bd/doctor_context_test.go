@@ -14,10 +14,10 @@ import (
 func savePersistentPreRunState(t *testing.T) {
 	t.Helper()
 
-	// Track env vars that PersistentPreRun may modify via prepareSelectedCommandContext
-	// or applyChangeDirSelection. Without this, a call to PersistentPreRun leaves
-	// BEADS_DIR set to the project's .beads dir, corrupting subsequent tests.
-	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB"} {
+	// Track env vars that PersistentPreRun may modify via prepareSelectedCommandContext,
+	// applyChangeDirSelection, or preserveRedirectSourceDatabase. Restoring them
+	// prevents routing state from leaking into subsequent tests.
+	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB", "BEADS_DOLT_SERVER_DATABASE"} {
 		t.Setenv(key, os.Getenv(key))
 	}
 
@@ -58,6 +58,55 @@ func writeMetadataConfig(t *testing.T, beadsDir string, doltMode string, databas
 		DoltDatabase: database,
 	}).Save(beadsDir); err != nil {
 		t.Fatalf("save metadata: %v", err)
+	}
+}
+
+func TestSavePersistentPreRunStateRestoresRedirectDatabase(t *testing.T) {
+	const databaseEnv = "BEADS_DOLT_SERVER_DATABASE"
+	const sourceDatabase = "source_db"
+	const inheritedDatabase = "inherited_db"
+
+	for _, tc := range []struct {
+		name       string
+		value      string
+		present    bool
+		wantDuring string
+	}{
+		{name: "absent", present: false, wantDuring: sourceDatabase},
+		{name: "empty", present: true, wantDuring: sourceDatabase},
+		{name: "inherited", value: inheritedDatabase, present: true, wantDuring: inheritedDatabase},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(databaseEnv, tc.value)
+			if !tc.present {
+				if err := os.Unsetenv(databaseEnv); err != nil {
+					t.Fatalf("unset database env: %v", err)
+				}
+			}
+
+			t.Run("redirect", func(t *testing.T) {
+				savePersistentPreRunState(t)
+				repoDir := t.TempDir()
+				sourceBeadsDir := filepath.Join(repoDir, "source", ".beads")
+				targetBeadsDir := filepath.Join(repoDir, "target", ".beads")
+				writeTestConfigYAML(t, sourceBeadsDir, "")
+				writeMetadataConfig(t, sourceBeadsDir, configfile.DoltModeServer, sourceDatabase)
+				writeTestConfigYAML(t, targetBeadsDir, "")
+				writeMetadataConfig(t, targetBeadsDir, configfile.DoltModeServer, "target_db")
+				if err := os.WriteFile(filepath.Join(sourceBeadsDir, beads.RedirectFileName), []byte(targetBeadsDir+"\n"), 0o600); err != nil {
+					t.Fatalf("write redirect: %v", err)
+				}
+
+				preserveRedirectSourceDatabase(sourceBeadsDir)
+				if got, present := os.LookupEnv(databaseEnv); !present || got != tc.wantDuring {
+					t.Fatalf("redirect database = (%q, %t), want (%q, true)", got, present, tc.wantDuring)
+				}
+			})
+
+			if got, present := os.LookupEnv(databaseEnv); present != tc.present || got != tc.value {
+				t.Errorf("database env after child cleanup = (%q, %t), want (%q, %t)", got, present, tc.value, tc.present)
+			}
+		})
 	}
 }
 
