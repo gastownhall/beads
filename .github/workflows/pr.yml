@@ -428,6 +428,12 @@ jobs:
   # maintainer call), so this fold needs no gate changes. Not one of the
   # Windows jobs F4 touches (test-windows-liveness, worktree-remove-windows,
   # the preflight/doc-freshness matrices, the twins).
+  #
+  # Review SF-1 (2026-10-03): neither step carries continue-on-error, so a
+  # failing test already fails the job on its own; `if: ${{ !cancelled() }}`
+  # on the second step only ensures it still runs after the first fails,
+  # giving both packages' results in one log instead of stopping at the
+  # first failure. No aggregator step is needed.
   test-windows-small:
     name: Test (Windows) small packages (doltversion, dbproxy server)
     runs-on: windows-latest
@@ -445,31 +451,14 @@ jobs:
       - name: Run doltversion package tests on Windows
         id: doltversion
         if: ${{ !cancelled() }}
-        continue-on-error: true
         run: go test -tags gms_pure_go -count=1 ./internal/doltversion/
 
       - name: Run dbproxy server package tests on Windows
         id: dbproxy-server
         if: ${{ !cancelled() }}
-        continue-on-error: true
         env:
           CGO_ENABLED: "0"
         run: go test -tags gms_pure_go -count=1 -v ./internal/storage/dbproxy/server/
-
-      - name: Fail if either small Windows package test failed
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          status=0
-          if [[ "${{ steps.doltversion.outcome }}" == "failure" ]]; then
-            echo "::error::doltversion package tests failed on Windows"
-            status=1
-          fi
-          if [[ "${{ steps.dbproxy-server.outcome }}" == "failure" ]]; then
-            echo "::error::dbproxy server package tests failed on Windows"
-            status=1
-          fi
-          exit "$status"
 
   # Destructive worktree removal depends on native Windows path identity.
   # This focused process suite requires NTFS per-directory case sensitivity
@@ -1175,7 +1164,11 @@ jobs:
   advisory-reports:
     name: Advisory reports (examples build, complexity)
     runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    timeout-minutes: 45
+    # Review N-2 (2026-10-03): step timeouts sum to 42 min; 60 (not 45) keeps
+    # job setup/post overhead from turning a stacked near-timeout stall into a
+    # job-level cancel, which would red this advisory check through "another
+    # door" instead of the step that actually stalled.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         id: checkout
@@ -1475,41 +1468,35 @@ jobs:
         run: go test -tags gms_pure_go -count=1 -timeout 30m ./cmd/bd/protocol
 
   # F7a: fold of a 3-host matrix (native, msys2, cygwin) into one sequential
-  # job on a single windows-latest runner. Each leg's setup+exercise step pair
-  # keeps `continue-on-error: true` (new for native/msys2; cygwin's setup
-  # already had it) so a leg failing does not stop the later legs from
-  # running - the fail-fast: false behavior the matrix used to give for free.
-  # The job needs its own pass/fail verdict now that the 3 legs no longer
-  # produce 3 independent job results: the final step below fails the job if
-  # native or msys2's setup or exercise step failed, or if the Cygwin exercise
-  # step failed - reproducing the pre-fold rule that only a genuine Make
-  # regression reds the check, while a Cygwin installer download flake
-  # (steps.cygwin.outcome == 'failure') stays a warning, never a hard
-  # failure. windows-make-shell is not a Windows job F4 touches (it does not
-  # intersect test-windows-liveness, worktree-remove-windows, the preflight/
-  # doc-freshness matrices, or the twins).
+  # job on a single windows-latest runner. Review SF-1 (2026-10-03): only the
+  # Cygwin *setup* step keeps `continue-on-error: true` (a flaky installer
+  # download is infrastructure noise, not a code failure). The native and
+  # msys2 install/exercise steps and the Cygwin *exercise* step carry no
+  # continue-on-error, so a genuine failure in any of them already fails the
+  # job on its own - no hand-written aggregator step needed. Each of those
+  # steps keeps `if: ${{ !cancelled() }}` (plus a check that its own leg's
+  # setup succeeded) so a failure in one leg does not stop the later legs
+  # from attempting to run - the fail-fast: false behavior the matrix used to
+  # give for free. windows-make-shell is not a Windows job F4 touches (it
+  # does not intersect test-windows-liveness, worktree-remove-windows, the
+  # preflight/doc-freshness matrices, or the twins).
   windows-make-shell:
     name: Windows Make shell (native, msys2, cygwin)
     runs-on: windows-latest
     timeout-minutes: 30
-    outputs:
-      native: ${{ steps.native.outcome }}
-      msys2: ${{ steps.msys2.outcome }}
-      cygwin: ${{ steps.cygwin-test.outcome }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Install native GNU Make
         id: install-native
         if: ${{ !cancelled() }}
-        continue-on-error: true
         shell: pwsh
         run: choco install make --version=4.4.1 --yes --no-progress
 
       - name: Set up MSYS2 GNU Make
         id: install-msys2
         if: ${{ !cancelled() }}
-        continue-on-error: true
+        timeout-minutes: 10
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
         with:
           msystem: MSYS
@@ -1525,7 +1512,11 @@ jobs:
         # (non-blocking) warning: the smoke step below is gated on this step
         # succeeding, so a genuine Cygwin Make regression still fails loudly,
         # while a flaky installer download only skips the leg with a warning.
+        # Review SF-2 (2026-10-03): a 10-minute step timeout caps how long a
+        # hung download can block the native/msys2 legs' exercise steps
+        # behind it, instead of consuming the whole 30-minute job timeout.
         continue-on-error: true
+        timeout-minutes: 10
         uses: cygwin/cygwin-install-action@3f0a3f9f988f7e96b8c18098ae05eaec175f5b52 # v6
         with:
           packages: git make
@@ -1540,7 +1531,6 @@ jobs:
       - name: Exercise native Windows Make
         id: native
         if: ${{ !cancelled() && steps.install-native.outcome == 'success' }}
-        continue-on-error: true
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -1874,7 +1864,6 @@ jobs:
       - name: Exercise MSYS2-hosted Make
         id: msys2
         if: ${{ !cancelled() && steps.install-msys2.outcome == 'success' }}
-        continue-on-error: true
         shell: msys2 {0}
         run: |
           set -euo pipefail
@@ -1921,7 +1910,6 @@ jobs:
         # missing bash. A real install success followed by a Make regression here
         # still fails the job as before.
         if: ${{ !cancelled() && steps.cygwin.outcome == 'success' }}
-        continue-on-error: true
         shell: pwsh
         env:
           CYGWIN_ROOT: ${{ steps.cygwin.outputs.root }}
@@ -1973,30 +1961,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw 'Cygwin Make shell smoke failed'
           }
-
-      # Reproduces the pre-fold rule from when each host was its own matrix
-      # leg/job: native and MSYS2 are required (their setup or exercise
-      # failing reds this job), while Cygwin's setup is best-effort (a
-      # download flake only warns, see above) and only a Make regression in
-      # its exercise step reds the job.
-      - name: Fail if a required Windows Make shell leg failed
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          status=0
-          if [[ "${{ steps.install-native.outcome }}" == "failure" || "${{ steps.native.outcome }}" == "failure" ]]; then
-            echo "::error::native Windows Make shell leg failed (install: ${{ steps.install-native.outcome }}, exercise: ${{ steps.native.outcome }})"
-            status=1
-          fi
-          if [[ "${{ steps.install-msys2.outcome }}" == "failure" || "${{ steps.msys2.outcome }}" == "failure" ]]; then
-            echo "::error::MSYS2 Windows Make shell leg failed (install: ${{ steps.install-msys2.outcome }}, exercise: ${{ steps.msys2.outcome }})"
-            status=1
-          fi
-          if [[ "${{ steps.cygwin-test.outcome }}" == "failure" ]]; then
-            echo "::error::Cygwin Windows Make shell leg failed (exercise: ${{ steps.cygwin-test.outcome }})"
-            status=1
-          fi
-          exit "$status"
 
   # The Bazel lane (bazel.yml), gated alongside the legacy jobs it mirrors
   # (PR Core, build-artifacts, the pure-Go/js-wasm check, domain+uow and
