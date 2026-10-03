@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -80,6 +81,11 @@ func SaveProxiedServerClientInfo(beadsDir string, info *ProxiedServerClientInfo)
 	}
 	if err = os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("writing %s: %w", ProxiedServerClientInfoFileName, err)
+	}
+	// Windows cannot sync a directory handle opened by os.Open. The temp file
+	// has already been synced and closed before the successful rename.
+	if runtime.GOOS == "windows" {
+		return nil
 	}
 	d, err := os.Open(beadsDir) // #nosec G304 -- beadsDir is the discovered workspace directory
 	if err != nil {
