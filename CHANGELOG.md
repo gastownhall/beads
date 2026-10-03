@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A #4356 untrack scratch table left only at HEAD is now swept.** When
+  `__temp__ignored_schema_migrations_untrack` was committed at HEAD but already
+  dropped from the working set, the open-time reconcile saw nothing to do, so
+  the uncommitted deletion stayed behind and `bd dolt pull` refused it. The
+  reconcile now also checks HEAD for the scratch table and sweeps that state;
+  it never treats a scratch that is absent from the working set as a source of
+  cursor rows, which would otherwise fail every writable open of a store whose
+  cursor table is also missing. This costs one more bounded read on each
+  writable open of a healthy database.
+
 - **`bd list` no longer silently drops all but the last repeated filter flag.**
   `--status`, `--state`, and `--id` were plain string flags, so
   `bd list --status open --status closed --status pinned` kept only `pinned` —
