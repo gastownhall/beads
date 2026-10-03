@@ -985,28 +985,43 @@ func copyMap(m map[string]string) map[string]string {
 // unsharded targets did not only skip.
 func TestBazelRetiredLanesCheckListedTestsRan(t *testing.T) {
 	risk := readCIWorkflow(t, prRiskWorkflowName)
-	type suite struct{ job, step, label, script string }
+	type suite struct {
+		job, step, label, script string
+		// shardCount overrides the expected check_shard_coverage.py shard
+		// count for this suite when the Bazel lane's own manifest block runs
+		// a different number of shards than this PR Risk job's matrix. Zero
+		// means "same as this suite's PR Risk job matrix size" (the common
+		// case for a lane that is a drop-in retirement of the legacy job).
+		shardCount int
+	}
 	for _, c := range []struct {
 		lane, config string
 		suites       []suite
 		whole        []string
 	}{
 		{bazelEmbedJobName, "embedded", []suite{
-			{"test-embedded-cmd", "Test", "//cmd/bd:bd_embedded_test", ".github/scripts/embedded-test-shard.sh"},
-			{"test-embedded-storage", "Test", "//internal/storage/embeddeddolt:embeddeddolt_embedded_test", ".github/scripts/embedded-storage-test-shard.sh"},
+			{"test-embedded-cmd", "Test", "//cmd/bd:bd_embedded_test", ".github/scripts/embedded-test-shard.sh", 0},
+			{"test-embedded-storage", "Test", "//internal/storage/embeddeddolt:embeddeddolt_embedded_test", ".github/scripts/embedded-storage-test-shard.sh", 0},
 		}, []string{"//internal/storage/embeddeddolt:embeddeddolt_conformance_core_test", "//internal/storage/embeddeddolt:embeddeddolt_conformance_audit_test"}},
 		{bazelProxiedJobName, "doltserver-proxied", []suite{
-			{"test-proxied-cmd", "Test proxied-server cmd shard", "//cmd/bd:bd_proxied_test", ".github/scripts/proxied-test-shard.sh"},
+			// bazel-proxied runs its own duration-balanced 30-shard manifest
+			// block (scripts/ci/proxied_test_durations.json), not PR Risk's
+			// frozen 15-shard bd-init-cost-proxy block: it is not a drop-in
+			// retirement of test-proxied-cmd's shard count, just its tests.
+			{"test-proxied-cmd", "Test proxied-server cmd shard", "//cmd/bd:bd_proxied_test", ".github/scripts/proxied-test-shard.sh", 30},
 		}, nil},
 		{bazelServerJobName, "doltserver-integration", []suite{
-			{"test-server-storage-full", "Test", "//internal/storage/dolt:dolt_server_full_test", ".github/scripts/server-storage-test-shard.sh"},
+			{"test-server-storage-full", "Test", "//internal/storage/dolt:dolt_server_full_test", ".github/scripts/server-storage-test-shard.sh", 0},
 		}, []string{"//internal/storage/dolt:dolt_server_conformance_test"}},
 	} {
 		job := readCIWorkflow(t, bazelWorkflowName).job(t, c.lane)
 		step := job.step(t, "Every listed test ran in its shard")
 		want := []string{"python3 tools/bazel/check_shard_coverage.py", `--bep "$RUNNER_TEMP/bazel-bep.json"`}
 		for _, s := range c.suites {
-			shards := len(risk.job(t, s.job).Strategy.Matrix.Shard)
+			shards := s.shardCount
+			if shards == 0 {
+				shards = len(risk.job(t, s.job).Strategy.Matrix.Shard)
+			}
 			if !strings.Contains(risk.job(t, s.job).step(t, s.step).Run, s.script) {
 				t.Errorf("pr-risk.yml %s no longer runs %s; update this suite", s.job, s.script)
 			}

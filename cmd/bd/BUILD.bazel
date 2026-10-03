@@ -1402,18 +1402,19 @@ sh_test(
     tags = ["embedded"],
 )
 
-# bd_test as PR Risk's "Test (Proxied Dolt Cmd N/15)" jobs run it: shard k
-# runs .github/scripts/proxied-test-shard.sh k+1 15 (the TestProxiedServer*
-# functions, assigned by the committed manifest) against this configuration's
+# Runs 30 Bazel shards against the TestProxiedServer*/TestServerMode*
+# functions, assigned by the manifest's 30-shard block (duration-balanced;
+# see scripts/ci/proxied_test_durations.json), against this configuration's
 # (race) bd_test with BEADS_TEST_PROXIED_SERVER=1 and the non-race
-# bd_for_tests as the subprocess binary, like the jobs' /tmp/bd-cmd-test and
-# /tmp/bd-proxied. (main.yml's twin job runs the same shard script against
-# build-artifacts' non-race bd-cmd-test; race here is the stricter one.)
-# The shared proxied harness gets its dolt sql-server from
-# internal/testutil's local backend (the pinned dolt in the test wrapper's
-# runfiles) instead of the jobs' container, and fails instead of skipping
-# when it cannot start one. It repeats bd_test's `env`. shard_count must
-# stay equal to the manifest's shard total.
+# bd_for_tests as the subprocess binary. This is a *different* shard count
+# from PR Risk's legacy fork/push jobs, "Test (Proxied Dolt Cmd N/15)"
+# (pr-risk.yml, main.yml): those keep running 15 shards of their own,
+# frozen bd-init-cost-proxy block in the same manifest file — shard k here
+# is not the same split as their shard k. The shared proxied harness gets
+# its dolt sql-server from internal/testutil's local backend (the pinned
+# dolt in the test wrapper's runfiles) instead of the jobs' container, and
+# fails instead of skipping when it cannot start one. It repeats bd_test's
+# `env`. shard_count must stay equal to the manifest block's shard total.
 #
 # Tags:
 #   dolt-server-proxied: the proxied-server tier; starts hermetic dolt
@@ -1454,7 +1455,7 @@ sh_test(
         # 192-core worker).
         "GOMAXPROCS": "4",
     },
-    shard_count = 15,
+    shard_count = 30,
     tags = ["dolt-server-proxied"],
 )
 

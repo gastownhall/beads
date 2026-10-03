@@ -1023,18 +1023,22 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
 
-  # pr-risk.yml's proxied-server tier, "Test (Proxied Dolt Cmd N/15)", as
-  # --config=doltserver-proxied: //cmd/bd:bd_proxied_test runs the job's
-  # shard script in 15 Bazel shards, so shard k runs exactly job k's tests.
-  # Same build as --config=doltserver (race bd_test, non-race bd_for_tests),
-  # shared with bazel-doltserver through the remote cache. PR Risk builds
-  # its bd-cmd-test with -race, as here; main.yml's test-proxied-cmd twin
-  # uses build-artifacts' non-race bd-cmd-test, so this lane is the stricter
-  # of the two. A job of its own, not gated by any integration switch: it
-  # runs in pr.yml's call and its gate requires it (BAZEL_PROXIED).
+  # Like pr-risk.yml's proxied-server tier, "Test (Proxied Dolt Cmd N/15)",
+  # as --config=doltserver-proxied: //cmd/bd:bd_proxied_test runs the shard
+  # script, so shard k runs exactly that manifest entry's tests. This lane
+  # runs 30 shards of its own (.github/scripts/proxied-cmd-test-shards.txt's
+  # duration-balanced 30-block; see scripts/ci/proxied_test_durations.json),
+  # not the legacy jobs' 15 — shard k here is not the same split as their
+  # shard k. Same build as --config=doltserver (race bd_test, non-race
+  # bd_for_tests), shared with bazel-doltserver through the remote cache.
+  # PR Risk builds its bd-cmd-test with -race, as here; main.yml's
+  # test-proxied-cmd twin uses build-artifacts' non-race bd-cmd-test, so
+  # this lane is the stricter of the two. A job of its own, not gated by
+  # any integration switch: it runs in pr.yml's call and its gate requires
+  # it (BAZEL_PROXIED).
   bazel-proxied:
     name: proxied-server tier
-    # Remote execution only, like bazel-embedded: 15 shards of ~5-10
+    # Remote execution only, like bazel-embedded: 30 shards of ~5-10
     # minutes, each with a dolt sql-server busy on ~4 cores, do not fit a
     # GitHub-hosted runner.
     # On same-repo pull_requests the legacy jobs stand down (pr-risk.yml's
@@ -1079,8 +1083,12 @@ jobs:
             exit 1
           fi
 
-      # Remote: the longest shard takes ~5-8 minutes (each shard's Go
-      # timeout is its job's 15m, 1200s Bazel cap), plus a compile.
+      # Remote: the longest shard takes ~5-10 minutes (each shard's Go
+      # timeout is its job's 15m, 1200s Bazel cap), plus a compile. 30-shard
+      # loads from scripts/ci/proxied_test_durations.json's LPT packing are
+      # within 5s of each other (that file's duration data is from two
+      # contention-era runs: the no-shard-is-the-long-pole property is the
+      # signal, not the absolute minutes).
       - name: bazel test //... --config=doltserver-proxied
         id: test
         timeout-minutes: 25
@@ -1107,7 +1115,7 @@ jobs:
         run: >-
           python3 tools/bazel/check_shard_coverage.py
           --bep "$RUNNER_TEMP/bazel-bep.json"
-          --suite //cmd/bd:bd_proxied_test .github/scripts/proxied-test-shard.sh 15
+          --suite //cmd/bd:bd_proxied_test .github/scripts/proxied-test-shard.sh 30
 
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}

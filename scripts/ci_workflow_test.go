@@ -3521,11 +3521,24 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 
 	type shardTier struct {
 		workflow, job, step, script, binVar, pkg, target, env string
+		// buildShardCount overrides the expected BUILD.bazel shard_count for
+		// this tier's target when it must not equal this workflow/job's own
+		// matrix size. Zero means "same as this tier's matrix shard count"
+		// (the common case: the Bazel target and this legacy job share one
+		// manifest block and one shard_count).
+		buildShardCount int
 	}
 	tiers := []shardTier{
-		{"pr-risk.yml", "test-proxied-cmd", "Test proxied-server cmd shard", ".github/scripts/proxied-test-shard.sh", "BEADS_TEST_CMD_BINARY", "cmd/bd", "bd_proxied_test", "BEADS_TEST_PROXIED_SERVER"},
-		{"main.yml", "test-proxied-cmd", "Test proxied-server cmd shard", ".github/scripts/proxied-test-shard.sh", "BEADS_TEST_CMD_BINARY", "cmd/bd", "bd_proxied_test", "BEADS_TEST_PROXIED_SERVER"},
-		{"pr-risk.yml", "test-server-storage-full", "Test", ".github/scripts/server-storage-test-shard.sh", "BEADS_TEST_SERVER_TEST_BINARY", "internal/storage/dolt", "dolt_server_full_test", "BEADS_TEST_ENV_RUN_DOLT"},
+		// pr-risk.yml/main.yml's own "Test (Proxied Dolt Cmd N/15)" matrix
+		// stays 15 (the legacy, frozen bd-init-cost-proxy manifest block),
+		// but cmd/bd:bd_proxied_test's shard_count is 30: the Bazel-only
+		// bazel-proxied job (bazel.yml) runs that target with its own
+		// duration-balanced 30-shard manifest block, not these jobs'. Shard k
+		// in one split is not shard k in the other; see cmd/bd/BUILD.bazel's
+		// bd_proxied_test comment and bazel.yml's bazel-proxied comment.
+		{"pr-risk.yml", "test-proxied-cmd", "Test proxied-server cmd shard", ".github/scripts/proxied-test-shard.sh", "BEADS_TEST_CMD_BINARY", "cmd/bd", "bd_proxied_test", "BEADS_TEST_PROXIED_SERVER", 30},
+		{"main.yml", "test-proxied-cmd", "Test proxied-server cmd shard", ".github/scripts/proxied-test-shard.sh", "BEADS_TEST_CMD_BINARY", "cmd/bd", "bd_proxied_test", "BEADS_TEST_PROXIED_SERVER", 30},
+		{"pr-risk.yml", "test-server-storage-full", "Test", ".github/scripts/server-storage-test-shard.sh", "BEADS_TEST_SERVER_TEST_BINARY", "internal/storage/dolt", "dolt_server_full_test", "BEADS_TEST_ENV_RUN_DOLT", 0},
 	}
 	for _, c := range tiers {
 		j := readCIWorkflow(t, c.workflow).job(t, c.job)
@@ -3540,13 +3553,17 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 		if os.Getenv("TEST_SRCDIR") != "" {
 			continue // scripts_test's runfiles hold no other package's BUILD
 		}
+		buildShards := c.buildShardCount
+		if buildShards == 0 {
+			buildShards = shards
+		}
 		root := sourceRepoRoot(t)
 		rule := bazelRuleBlock(readPolicyFile(t, root, c.pkg+"/BUILD.bazel"), c.target)
 		for _, want := range []string{
 			`srcs = ["//tools/bazel:go_test_manifest_shard.sh"],`,
 			`"$(rootpath //:` + c.script + `)",`,
 			`"` + c.binVar + `",`,
-			"shard_count = " + strconv.Itoa(shards) + ",",
+			"shard_count = " + strconv.Itoa(buildShards) + ",",
 			`timeout = "eternal",`,
 		} {
 			if !strings.Contains(rule, want) {
