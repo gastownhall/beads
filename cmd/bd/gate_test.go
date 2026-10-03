@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -1156,4 +1157,13 @@ func gateIDs(gs []*types.Issue) []string {
 		ids = append(ids, g.ID)
 	}
 	return ids
+}
+
+func TestGateResolveNotFoundMessage(t *testing.T) {
+	msg := gateResolveNotFoundMessage("my-await-id")
+	for _, want := range []string{"gate not found: my-await-id", "await_id", "bd gate list"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("gateResolveNotFoundMessage() = %q, want it to contain %q", msg, want)
+		}
+	}
 }
