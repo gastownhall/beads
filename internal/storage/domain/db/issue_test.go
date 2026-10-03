@@ -3,6 +3,8 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -79,6 +81,9 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("CountsMatching", s.issueCountForPrefixMatches)
 		s.Run("ExcludesChildIDs", s.issueCountForPrefixExcludesChildren)
 		s.Run("RoutedToWisps", s.issueCountForPrefixWispRouting)
+		s.Run("CountsPromotedWispsInIssues", s.issueCountForPrefixPromotedWisps)
+		s.Run("LiveWispsDoNotCountForBasePrefix", s.issueCountForPrefixLiveWispsExcluded)
+		s.Run("CountsBaseNamespaceHeldInWisps", s.issueCountForPrefixBaseNamespaceInWisps)
 		s.Run("EmptyPrefixReturnsError", s.issueCountForPrefixEmptyPrefix)
 	})
 	s.Run("NextCounterID", func() {
@@ -549,7 +554,105 @@ func (s *testSuite) issueCountForPrefixWispRouting() {
 	s.Equal(1, got)
 	got, err = r.CountForPrefix(s.Ctx(), "cfpWisp", domain.IssueTableOpts{})
 	s.Require().NoError(err)
-	s.Equal(0, got, "issues table should not see wisp rows")
+	// Issues and wisps share one ID space, so the issues-side count also adds
+	// the wisps held in the prefix's exact namespace, and cfpWisp-c1 is one.
+	s.Equal(1, got, "issues-side count adds the wisp held in the prefix's exact namespace")
+}
+
+// countForPrefixFixtureSize is the row count the sibling-plane CountForPrefix
+// tests seed. CountForPrefix returns a raw count, with no length threshold in
+// play, so all this needs is to make the cases distinguishable: 12 versus 0 for
+// the sibling plane, and 3 versus 15 for the live wisps a naive sum would add.
+const countForPrefixFixtureSize = 12
+
+// countForPrefixSuffix returns the i-th distinct three-character base36 string,
+// the shape of a short hash ID suffix. 36*36 is the first three-digit number.
+func countForPrefixSuffix(i int) string {
+	return strconv.FormatInt(int64(36*36+i), 36)
+}
+
+// countIDsLike counts the rows of table whose id matches the LIKE pattern.
+func (s *testSuite) countIDsLike(table, pattern string) int {
+	var n int
+	//nolint:gosec // G201: table is a hardcoded constant in every caller
+	err := s.db.QueryRowContext(s.Ctx(), fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id LIKE ?", table), pattern).Scan(&n)
+	s.Require().NoError(err)
+	return n
+}
+
+// A promoted wisp moves into issues under its unchanged <prefix>-wisp-* ID, so
+// the count behind a wisp mint has to look at the issues table too.
+func (s *testSuite) issueCountForPrefixPromotedWisps() {
+	r := s.issueRepo()
+	for i := 0; i < countForPrefixFixtureSize; i++ {
+		id := "cfpProm-wisp-" + countForPrefixSuffix(i)
+		w := newTestIssue(id, id)
+		w.Ephemeral = true
+		s.Require().NoError(r.Insert(s.Ctx(), w, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
+		s.Require().NoError(r.PromoteFromEphemeral(s.Ctx(), id, "tester"))
+	}
+	s.Require().Equal(countForPrefixFixtureSize, s.countIDsLike("issues", "cfpProm-wisp-%"), "promotion moves every wisp into issues")
+	s.Require().Equal(0, s.countIDsLike("wisps", "cfpProm-%"), "promotion leaves nothing in wisps")
+
+	got, err := r.CountForPrefix(s.Ctx(), "cfpProm-wisp", domain.IssueTableOpts{UseWispsTable: true})
+	s.Require().NoError(err)
+	s.Equal(countForPrefixFixtureSize, got, "wisps-side count adds the promoted wisps held in issues")
+}
+
+// A live <prefix>-wisp-<hash> wisp matches the LIKE '<prefix>-%' pattern, but no
+// <prefix>-<hash> ID can equal it, so it must not lengthen the base prefix.
+func (s *testSuite) issueCountForPrefixLiveWispsExcluded() {
+	r := s.issueRepo()
+	const durable = 3
+	for i := 0; i < durable; i++ {
+		id := "cfpLive-" + countForPrefixSuffix(i)
+		s.Require().NoError(r.Insert(s.Ctx(), newTestIssue(id, id), "tester", domain.InsertIssueOpts{}))
+	}
+	for i := 0; i < countForPrefixFixtureSize; i++ {
+		id := "cfpLive-wisp-" + countForPrefixSuffix(i)
+		w := newTestIssue(id, id)
+		w.Ephemeral = true
+		s.Require().NoError(r.Insert(s.Ctx(), w, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
+	}
+	// This is why the test discriminates: every live wisp matches the plain
+	// prefix pattern, so summing that count over both planes would read
+	// durable+countForPrefixFixtureSize instead of durable.
+	s.Require().Equal(countForPrefixFixtureSize, s.countIDsLike("wisps", "cfpLive-%"))
+
+	got, err := r.CountForPrefix(s.Ctx(), "cfpLive", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal(durable, got, "live wisps under the -wisp- sub-prefix must not count toward the base prefix")
+}
+
+// A demoted issue keeps its <prefix>-<hash> ID in the wisps table, so the count
+// behind an issue mint has to look at the wisps table too. Child IDs are not
+// counted on either side.
+func (s *testSuite) issueCountForPrefixBaseNamespaceInWisps() {
+	r := s.issueRepo()
+	for i := 0; i < countForPrefixFixtureSize; i++ {
+		id := "cfpDem-" + countForPrefixSuffix(i)
+		w := newTestIssue(id, id)
+		w.Ephemeral = true
+		s.Require().NoError(r.Insert(s.Ctx(), w, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
+	}
+	child := newTestIssue("cfpDem-"+countForPrefixSuffix(0)+".1", "wisp child")
+	child.Ephemeral = true
+	s.Require().NoError(r.Insert(s.Ctx(), child, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
+	s.Require().Equal(0, s.countIDsLike("issues", "cfpDem-%"), "the base namespace lives entirely in wisps")
+
+	got, err := r.CountForPrefix(s.Ctx(), "cfpDem", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal(countForPrefixFixtureSize, got, "issues-side count adds the base namespace held in wisps, not its child IDs")
+
+	// Both planes contribute: the sibling count adds to the own-table count.
+	const durable = 5
+	for i := 0; i < durable; i++ {
+		id := "cfpDem-" + countForPrefixSuffix(countForPrefixFixtureSize+i)
+		s.Require().NoError(r.Insert(s.Ctx(), newTestIssue(id, id), "tester", domain.InsertIssueOpts{}))
+	}
+	got, err = r.CountForPrefix(s.Ctx(), "cfpDem", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal(countForPrefixFixtureSize+durable, got, "own-table and sibling-plane counts add")
 }
 
 func (s *testSuite) issueCountForPrefixEmptyPrefix() {
