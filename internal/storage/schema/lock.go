@@ -29,6 +29,14 @@ const (
 	// absorbs land within a millisecond, so the delay only has to let the
 	// session settle, not to wait out load.
 	freshBootstrapResetRetryDelay = 50 * time.Millisecond
+	// migrationPassTimeout bounds the post-lock unit that runs detached from
+	// the caller's context. Detaching alone would make that unit uncancelable
+	// forever, so a Dolt server wedging mid-migration could hang the process
+	// with no escape: the store path has a driver ReadTimeout backstop, but
+	// the uow provider's DSN sets none. The cap is deliberately far above any
+	// real migration, so it never truncates honest work -- it only restores
+	// liveness in the wedged case.
+	migrationPassTimeout = 30 * time.Minute
 )
 
 var (
@@ -326,7 +334,30 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		}
 	}
 
-	applied, err = MigrateUp(ctx, conn)
+	// Detaching the pass swallows the caller's interrupt, which would
+	// otherwise leave no trace of why the process kept working after a Ctrl-C.
+	// Disclose it once, from this goroutine and after the pass: MigrateUp
+	// writes its own per-migration progress to stderr, so a watcher goroutine
+	// reporting the interrupt live would be a second concurrent writer to a
+	// writer that is not safe for that (the race detector agrees).
+	defer func() {
+		if ctx.Err() != nil {
+			fmt.Fprint(stderr, "Schema migration ran to completion before exiting (interrupt received mid-migration).\n")
+		}
+	}()
+
+	// A migration pass must run to completion once the lock is held: the
+	// caller's context can no longer abandon it mid-flight, which would
+	// leave schema_migrations short of latest under a released lock.
+	//
+	// migrateCtx covers the whole post-lock unit, not just the MigrateUp
+	// calls: the heal between them consumes a one-shot capability before it
+	// resets, so a context expiring between the two would burn the capability
+	// with no reset performed and leave the logical open permanently
+	// unhealable by any outer retry.
+	migrateCtx, cancelMigrate := detachedMigrationContext(ctx)
+	defer cancelMigrate()
+	applied, err = MigrateUp(migrateCtx, conn)
 	var dirtyErr *DirtyTablesError
 	if err != nil && o.freshBootstrapHeal != nil && errors.As(err, &dirtyErr) {
 		// Authorization is checked after the dirty guard fires and while the
@@ -334,7 +365,7 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		// ancestor, probe error, or previously consumed capability returns the
 		// original DirtyTablesError without attempting a destructive reset.
 		if !o.freshBootstrapHeal.capability.consumeIfCurrentIncarnation(
-			ctx, conn, databaseName, o.freshBootstrapHeal.endpoint,
+			migrateCtx, conn, databaseName, o.freshBootstrapHeal.endpoint,
 		) {
 			return applied, err
 		}
@@ -344,10 +375,10 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		// second reset in the caller's outer retry loop.
 		fmt.Fprintf(stderr, "Discarding interrupted-bootstrap working set (%s) and re-running migrations…\n",
 			strings.Join(dirtyErr.Tables, ", "))
-		if resetErr := drainFreshBootstrapReset(ctx, conn); resetErr != nil {
+		if resetErr := drainFreshBootstrapReset(migrateCtx, conn); resetErr != nil {
 			return applied, errors.Join(err, fmt.Errorf("schema: fresh-bootstrap reset: %w", resetErr))
 		}
-		applied, err = MigrateUp(ctx, conn)
+		applied, err = MigrateUp(migrateCtx, conn)
 	}
 	return applied, err
 }
@@ -399,6 +430,14 @@ func drainFreshBootstrapReset(ctx context.Context, conn *sql.Conn) error {
 		}
 	}
 	return err
+}
+
+// detachedMigrationContext derives the context the post-lock unit runs on: cut
+// off from the caller's cancellation so the pass cannot be abandoned mid-flight
+// under a held lock, but still bounded by migrationPassTimeout so a wedged
+// server cannot hang the process forever.
+func detachedMigrationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), migrationPassTimeout)
 }
 
 // consumeIfCurrentIncarnation validates and atomically consumes c. All probes
