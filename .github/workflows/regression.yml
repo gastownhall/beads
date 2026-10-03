@@ -164,7 +164,13 @@ jobs:
         run: go test -tags=regression,gms_pure_go -timeout=40m -v ./tests/regression/...
 
       - name: Save baseline binary cache
-        if: steps.detect.outputs.run_regression == 'true' && github.event_name != 'pull_request'
+        # Allow-list push/workflow_dispatch rather than deny-list
+        # pull_request: a deny-list also admits a hypothetical future
+        # merge_group event, which this job's runs-on expression already
+        # resolves to Blacksmith for. Pinned by
+        # TestBlacksmithReachableAdvisoryJobsNeverSaveACache (checks both the
+        # pull_request and merge_group trust contexts independently).
+        if: steps.detect.outputs.run_regression == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: ~/.cache/beads-regression

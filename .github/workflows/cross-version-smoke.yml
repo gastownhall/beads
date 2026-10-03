@@ -130,7 +130,15 @@ jobs:
         run: ./scripts/upgrade-smoke-test.sh
 
       - name: Save previous release binaries cache
-        if: github.event_name != 'pull_request'
+        # Allow-list the two triggers this workflow actually intends to
+        # write from (push, workflow_dispatch), rather than deny-listing
+        # pull_request: a deny-list of `!= 'pull_request'` also admits a
+        # hypothetical future merge_group event, which this job's own
+        # runs-on expression already resolves to Blacksmith for - exactly
+        # the same same-repo-writer risk X1 closed for pull_request. Pinned
+        # by TestBlacksmithReachableAdvisoryJobsNeverSaveACache, which checks
+        # both the pull_request and merge_group trust contexts independently.
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: ~/.cache/beads-regression

@@ -1167,18 +1167,23 @@ var advisoryBinaryCaches = []struct {
 	// to close.
 	wantSaveIf string
 }{
-	{"cross-version-smoke.yml", "smoke", "Restore previous release binaries cache", "Save previous release binaries cache", "smoke-binaries-", "github.event_name != 'pull_request'"},
-	{"regression.yml", "regression", "Restore baseline binary cache", "Save baseline binary cache", "regression-baseline-", "steps.detect.outputs.run_regression == 'true' && github.event_name != 'pull_request'"},
-	{"migration-test.yml", "historical-upgrades", "Restore pinned historical release cache", "Save pinned historical release cache", "historical-dolt-", "github.event_name != 'pull_request'"},
+	{"cross-version-smoke.yml", "smoke", "Restore previous release binaries cache", "Save previous release binaries cache", "smoke-binaries-", "github.event_name == 'push' || github.event_name == 'workflow_dispatch'"},
+	{"regression.yml", "regression", "Restore baseline binary cache", "Save baseline binary cache", "regression-baseline-", "steps.detect.outputs.run_regression == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')"},
+	{"migration-test.yml", "historical-upgrades", "Restore pinned historical release cache", "Save pinned historical release cache", "historical-dolt-", "github.event_name == 'push' || github.event_name == 'workflow_dispatch'"},
 }
 
 // TestAdvisoryBinaryCachesAreRestoreAlwaysSavePRGated pins the restore/save
 // split itself (F7c review fix B2): the restore step always runs (modulo the
 // job's own pre-existing gate, e.g. regression's run_regression detection),
-// the save step additionally requires `github.event_name != 'pull_request'`,
-// both steps key off the same cache, and no monolithic (bare) actions/cache
-// step remains for either binary cache - a monolithic step would silently
-// reintroduce the auto-save-on-any-PR poisoning path B2 closes.
+// the save step additionally requires an exact allow-list of
+// `github.event_name == 'push' || github.event_name == 'workflow_dispatch'`
+// (F7c review fix, discovered via the S2 sweep: a deny-list of
+// `!= 'pull_request'` also admits a hypothetical future merge_group event,
+// which each of these three jobs' runs-on expressions already resolve to
+// Blacksmith for), both steps key off the same cache, and no monolithic
+// (bare) actions/cache step remains for either binary cache - a monolithic
+// step would silently reintroduce the auto-save-on-any-PR poisoning path B2
+// closes.
 func TestAdvisoryBinaryCachesAreRestoreAlwaysSavePRGated(t *testing.T) {
 	for _, c := range advisoryBinaryCaches {
 		t.Run(c.file, func(t *testing.T) {
@@ -1476,55 +1481,65 @@ func resolveRunsOnLabel(runsOn string, ctx map[string]string) string {
 // seeder's always-on save step run on a PR, without any of those needing
 // their own bespoke test.
 func TestBlacksmithReachableAdvisoryJobsNeverSaveACache(t *testing.T) {
+	// Sorted so t.Run subtest names (and therefore failure ordering) are
+	// stable regardless of Go's randomized map iteration.
+	ctxNames := make([]string, 0, len(blacksmithTrustContexts))
+	for name := range blacksmithTrustContexts {
+		ctxNames = append(ctxNames, name)
+	}
+	sort.Strings(ctxNames)
+
 	for _, file := range generalCacheSweepWorkflows {
 		workflow := readCIWorkflow(t, file)
 		for jobName, job := range workflow.Jobs {
-			t.Run(file+"/"+jobName, func(t *testing.T) {
-				var checkCtx map[string]string
-				for ctxName, ctx := range blacksmithTrustContexts {
+			job := job
+			for _, ctxName := range ctxNames {
+				ctx := blacksmithTrustContexts[ctxName]
+				t.Run(file+"/"+jobName+"/"+ctxName, func(t *testing.T) {
 					if !ghExprTruthyDefaultTrue(job.If, ctx) {
-						continue // job cannot even run under this event
+						return // job cannot even run under this event
 					}
 					label := resolveRunsOnLabel(job.RunsOn, ctx)
-					if strings.HasPrefix(label, "blacksmith-") {
-						checkCtx = ctx
-						_ = ctxName
-						break
+					if !strings.HasPrefix(label, "blacksmith-") {
+						return // doesn't land on Blacksmith under this context
 					}
-				}
-				if checkCtx == nil {
-					return // never lands on Blacksmith under either trust context
-				}
 
-				for _, step := range job.Steps {
-					family := actionFamily(step.Uses)
-					switch family {
-					case cacheMonolithicActionFamily:
-						t.Errorf("%s job %s step %q uses bare actions/cache on a Blacksmith-reachable job; it auto-saves on any key miss (B2/X1 forbid this - use actions/cache/restore + a non-PR-gated actions/cache/save)", file, jobName, step.Name)
-					case cacheSaveActionFamily:
-						if ghExprTruthyDefaultTrue(step.If, checkCtx) {
-							t.Errorf("%s job %s step %q (actions/cache/save) has if=%q, which still runs under a same-repo Blacksmith event; it must be gated off", file, jobName, step.Name, step.If)
-						}
-					case setupGoActionFamily:
-						cacheVal, ok := step.With["cache"]
-						wouldCache := true
-						if ok {
-							if !strings.Contains(cacheVal, "${{") {
-								wouldCache = cacheVal == "true"
-							} else if v, err := evalGHExpr(cacheVal, checkCtx); err == nil {
-								wouldCache = ghTruthy(v)
+					// Every context under which the job is Blacksmith-reachable
+					// must be checked independently (not just the first one
+					// found): a save gate like `github.event_name !=
+					// 'pull_request'` is false under pull_request but true
+					// under merge_group, so a job reachable on Blacksmith
+					// under both needs both verified.
+					for _, step := range job.Steps {
+						family := actionFamily(step.Uses)
+						switch family {
+						case cacheMonolithicActionFamily:
+							t.Errorf("%s job %s step %q uses bare actions/cache on a Blacksmith-reachable job; it auto-saves on any key miss (B2/X1 forbid this - use actions/cache/restore + a non-PR-gated actions/cache/save)", file, jobName, step.Name)
+						case cacheSaveActionFamily:
+							if ghExprTruthyDefaultTrue(step.If, ctx) {
+								t.Errorf("%s job %s step %q (actions/cache/save) has if=%q, which still runs under a same-repo Blacksmith %s event; it must be gated off", file, jobName, step.Name, step.If, ctxName)
+							}
+						case setupGoActionFamily:
+							cacheVal, ok := step.With["cache"]
+							wouldCache := true
+							if ok {
+								if !strings.Contains(cacheVal, "${{") {
+									wouldCache = cacheVal == "true"
+								} else if v, err := evalGHExpr(cacheVal, ctx); err == nil {
+									wouldCache = ghTruthy(v)
+								}
+							}
+							if wouldCache {
+								t.Errorf("%s job %s setup-go step %q has cache=%q, which stays enabled on a self-hosted (Blacksmith) runner; it must disable its own implicit cache there", file, jobName, step.Name, cacheVal)
+							}
+						case setupNodeActionFamily, setupPythonActionFamily:
+							if cacheVal, ok := step.With["cache"]; ok && cacheVal != "" {
+								t.Errorf("%s job %s step %q sets cache=%q on a Blacksmith-reachable job; setup-node/setup-python's own cache uses a bare actions/cache internally", file, jobName, step.Name, cacheVal)
 							}
 						}
-						if wouldCache {
-							t.Errorf("%s job %s setup-go step %q has cache=%q, which stays enabled on a self-hosted (Blacksmith) runner; it must disable its own implicit cache there", file, jobName, step.Name, cacheVal)
-						}
-					case setupNodeActionFamily, setupPythonActionFamily:
-						if cacheVal, ok := step.With["cache"]; ok && cacheVal != "" {
-							t.Errorf("%s job %s step %q sets cache=%q on a Blacksmith-reachable job; setup-node/setup-python's own cache uses a bare actions/cache internally", file, jobName, step.Name, cacheVal)
-						}
 					}
-				}
-			})
+				})
+			}
 		}
 	}
 }
