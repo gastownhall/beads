@@ -40,6 +40,11 @@ fi
 echo "== host go toolchain ==" >&2
 go env GOVERSION GOHOSTOS GOHOSTARCH >&2
 
+if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+    echo "== mingw-w64 cross-compiler ==" >&2
+    x86_64-w64-mingw32-gcc --version | head -n1 >&2
+fi
+
 built=0
 while IFS= read -r line; do
     # Strip comments and blank lines.
@@ -47,7 +52,6 @@ while IFS= read -r line; do
     line="$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
     [[ -z "$line" ]] && continue
 
-    # shellcheck disable=SC2206 # fields are whitespace-delimited by design
     read -r name cgo tags package <<<"$line"
     if [[ -z "$name" || -z "$cgo" || -z "$tags" || -z "$package" ]]; then
         echo "malformed manifest line: $line" >&2

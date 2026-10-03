@@ -282,6 +282,7 @@ set -euo pipefail
 {
     printf 'cwd=%s\n' "$PWD"
     printf 'repo_root=%s\n' "${BEADS_TEST_REPO_ROOT:-}"
+    printf 'env_root=%s\n' "${BEADS_TEST_ENV_ROOT:-}"
     for a in "$@"; do
         printf 'arg=%s\n' "$a"
     done
@@ -293,6 +294,7 @@ const testScriptPrebuiltLogEnv = "BEADS_TEST_SCRIPT_PREBUILT_LOG"
 type prebuiltTestBinaryRun struct {
 	cwd      string
 	repoRoot string
+	envRoot  string
 	args     []string
 }
 
@@ -314,7 +316,7 @@ func TestTestScriptPrebuiltTestBinaryContract(t *testing.T) {
 	t.Run("maps go-test flags to -test.* flags, cwd, and BEADS_TEST_REPO_ROOT", func(t *testing.T) {
 		repoRoot := sourceRepoRoot(t)
 		run := runTestScriptWithPrebuiltBinary(t, repoRoot, []string{
-			"-v", "-timeout", "5m", "-skip", "TestBar", "-run", "TestFoo", "-count", "1", "./cmd/bd",
+			"-v", "-timeout", "5m", "-skip", "TestBar", "-run", "TestFoo", "-count", "1", "./scripts/ci",
 		})
 
 		wantArgs := []string{
@@ -324,12 +326,13 @@ func TestTestScriptPrebuiltTestBinaryContract(t *testing.T) {
 			"-test.skip", "TestBar",
 			"-test.run", "TestFoo",
 			"-test.count", "1",
+			"-test.paniconexit0",
 		}
 		if strings.Join(run.args, " ") != strings.Join(wantArgs, " ") {
 			t.Fatalf("args = %v, want %v", run.args, wantArgs)
 		}
 
-		wantCwd := filepath.Join(repoRoot, "cmd", "bd")
+		wantCwd := filepath.Join(repoRoot, "scripts", "ci")
 		if !sameTestScriptDir(t, run.cwd, wantCwd) {
 			t.Fatalf("cwd = %q, want %q", run.cwd, wantCwd)
 		}
@@ -340,8 +343,8 @@ func TestTestScriptPrebuiltTestBinaryContract(t *testing.T) {
 
 	t.Run("supports -count=N form alongside -count N", func(t *testing.T) {
 		repoRoot := sourceRepoRoot(t)
-		run := runTestScriptWithPrebuiltBinary(t, repoRoot, []string{"-count=1", "./cmd/bd"})
-		wantArgs := []string{"-test.timeout", "25m", "-test.parallel", "4", "-test.count", "1"}
+		run := runTestScriptWithPrebuiltBinary(t, repoRoot, []string{"-count=1", "./scripts/ci"})
+		wantArgs := []string{"-test.timeout", "25m", "-test.parallel", "4", "-test.count", "1", "-test.paniconexit0"}
 		if strings.Join(run.args, " ") != strings.Join(wantArgs, " ") {
 			t.Fatalf("args = %v, want %v", run.args, wantArgs)
 		}
@@ -349,12 +352,31 @@ func TestTestScriptPrebuiltTestBinaryContract(t *testing.T) {
 
 	t.Run("refuses more than one package", func(t *testing.T) {
 		repoRoot := sourceRepoRoot(t)
-		output, err := runTestScriptWithPrebuiltBinaryExpectFailure(t, repoRoot, []string{"./cmd/bd", "./scripts"})
+		output, err := runTestScriptWithPrebuiltBinaryExpectFailure(t, repoRoot, []string{"./scripts/ci", "./scripts"})
 		if err == nil {
 			t.Fatalf("expected scripts/test.sh to fail for two packages, output:\n%s", output)
 		}
 		if !strings.Contains(string(output), "requires exactly one package") {
 			t.Fatalf("expected a single-package error, got:\n%s", output)
+		}
+	})
+
+	t.Run("cleans up BEADS_TEST_ENV_ROOT after the binary exits (no exec short-circuit)", func(t *testing.T) {
+		// Regression test for F4 review SF-4: scripts/test.sh's prebuilt-binary
+		// branch used to `exec` run-go-test-binary.sh, which replaces the
+		// shell process image before the EXIT trap armed by
+		// beads_test_env_enter (beads_test_env_cleanup) ever runs - leaking
+		// the per-run BEADS_TEST_ENV_ROOT temp directory (and, with
+		// BEADS_TEST_SHARED_SERVER=1, potentially orphaning a shared dolt
+		// sql-server process). Running the binary as a child and exiting with
+		// its captured status instead lets the trap fire normally.
+		repoRoot := sourceRepoRoot(t)
+		run := runTestScriptWithPrebuiltBinary(t, repoRoot, []string{"-count=1", "./scripts/ci"})
+		if run.envRoot == "" {
+			t.Fatal("fake prebuilt binary never observed BEADS_TEST_ENV_ROOT; cannot assert cleanup")
+		}
+		if _, err := os.Stat(run.envRoot); !os.IsNotExist(err) {
+			t.Fatalf("BEADS_TEST_ENV_ROOT %q still exists after scripts/test.sh exited (cleanup trap did not run); stat err = %v", run.envRoot, err)
 		}
 	})
 }
@@ -373,6 +395,8 @@ func runTestScriptWithPrebuiltBinary(t *testing.T, repoRoot string, args []strin
 			run.cwd = strings.TrimPrefix(line, "cwd=")
 		case strings.HasPrefix(line, "repo_root="):
 			run.repoRoot = strings.TrimPrefix(line, "repo_root=")
+		case strings.HasPrefix(line, "env_root="):
+			run.envRoot = strings.TrimPrefix(line, "env_root=")
 		case strings.HasPrefix(line, "arg="):
 			run.args = append(run.args, strings.TrimPrefix(line, "arg="))
 		}

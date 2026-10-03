@@ -116,21 +116,6 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-      # F4.3: the non-race GOCACHE this job saves is also what the PR
-      # preflight/doc-freshness ubuntu legs restore. Compiling (not running;
-      # `-c -o /dev/null` discards the binary) the packages those legs test
-      # keeps their first post-restore build from paying full compile cost,
-      # without changing what this job itself builds or tests above.
-      - name: Warm non-race Go build cache (test-only packages)
-        if: steps.restore-non-race-go-build-cache.outputs.cache-hit != 'true'
-        env:
-          GOCACHE: ${{ runner.temp }}/go-cache/non-race
-        run: |
-          go test -c -o /dev/null -tags gms_pure_go ./cmd/bd
-          go test -c -o /dev/null -tags gms_pure_go ./scripts
-          go test -c -o /dev/null -tags integration,gms_pure_go ./scripts
-          go test -c -o /dev/null -tags integration,gms_pure_go ./scripts/gitattributespolicy
-
       - name: Save Go module cache
         if: steps.restore-go-module-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -151,19 +136,30 @@ jobs:
   # shared key). This is the seeder, mirroring build-artifacts' and test's
   # module/GOCACHE save pattern for the one new cache key xcompile added.
   #
-  # One plain ubuntu-latest leg, not a Blacksmith/GitHub-hosted matrix: the
-  # cache keys above are scoped by `runner.os`/`runner.arch` (Linux/X64),
-  # which is identical whether pr.yml's windows-test-binaries job later lands
-  # on `blacksmith-8vcpu-ubuntu-2404` (same-repo PRs) or `ubuntu-latest`
-  # (forks/Dependabot) -- same as every other Go build-cache key in this
-  # repo, which is already restored across differently-labeled runners of
-  # the same OS/arch without a second saver leg. A literal Blacksmith label
-  # in a matrix array (unlike the `cond && 'label' || 'ubuntu-latest'`
-  # expression form used elsewhere) also isn't resolvable by actionlint and
-  # fails its unknown-runner-label check.
+  # Two legs, not one: pr.yml's windows-test-binaries job (pr.yml:522) lands
+  # on `blacksmith-8vcpu-ubuntu-2404` for same-repo PRs/merge_group and
+  # `ubuntu-latest` for forks/Dependabot. `runner.os`/`runner.arch` alone
+  # look identical between those two (both report Linux/X64), but Blacksmith
+  # runners cannot see caches `actions/cache` saved from a GitHub-hosted
+  # runner (and vice versa): the cache storage is scoped to the runner
+  # infrastructure, not just the key. A single ubuntu-latest seeder leg would
+  # therefore only ever warm the fork-PR path and leave every same-repo PR
+  # (the common case) cold on every run. Seeding from both runner selections,
+  # with identical keys/paths, covers both consumer legs. The ternary form
+  # (rather than a literal Blacksmith label in a matrix array) is required
+  # for actionlint: it resolves literal matrix arrays of runner labels and
+  # fails on an undeclared self-hosted label, but treats a ternary
+  # expression as a dynamic value it can't resolve, and skips validation --
+  # the same reason every other Blacksmith `runs-on` in this repo uses the
+  # ternary form.
   windows-test-binaries-cache:
     name: Save Windows test binaries cache
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [blacksmith, github]
+    runs-on: ${{ matrix.runner == 'blacksmith' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -792,22 +788,6 @@ jobs:
         with:
           path: ~/go/pkg/mod
           key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-
-      # F4.3: this is the only macOS build-cache saver in the repo, and the
-      # PR preflight/doc-freshness macOS legs restore it. Compiling (not
-      # running; `-c -o /dev/null` discards the binary) the packages those
-      # legs test keeps their first post-restore build from paying full
-      # compile cost, without changing what this job itself builds or tests
-      # above.
-      - name: Warm non-race Go build cache (test-only packages)
-        if: ${{ !cancelled() && matrix.os == 'macos-latest' && steps.restore-non-race-go-build-cache.outputs.cache-hit != 'true' }}
-        env:
-          GOCACHE: ${{ runner.temp }}/go-cache/non-race
-        run: |
-          go test -c -o /dev/null -tags gms_pure_go ./cmd/bd
-          go test -c -o /dev/null -tags gms_pure_go ./scripts
-          go test -c -o /dev/null -tags integration,gms_pure_go ./scripts
-          go test -c -o /dev/null -tags integration,gms_pure_go ./scripts/gitattributespolicy
 
       - name: Save non-race Go build cache
         if: ${{ !cancelled() && matrix.os == 'macos-latest' && steps.restore-non-race-go-build-cache.outputs.cache-hit != 'true' }}

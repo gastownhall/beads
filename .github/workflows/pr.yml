@@ -33,6 +33,16 @@ env:
   # lane`). pr-risk.yml retires nothing for it; its copy only keeps the
   # shared bazel-coverage job identical.
   BAZEL_RETIRES_LEGACY_PR_LANES: "true"
+  # F4 side-by-side rollout: "false" keeps the native windows-latest jobs
+  # (test-windows-liveness, worktree-remove-windows) as the required pair and
+  # their Linux-cross-built "-prebuilt" twins (test-windows-liveness-prebuilt,
+  # worktree-remove-windows-prebuilt) advisory-only. Both pairs run and report
+  # on every PR regardless of this flag; flipping it to "true" swaps which
+  # pair ci-gate enforces (the other pair moves to CI_GATE_SKIPPED_OK) without
+  # touching ci-gate.needs or the env map below -- see the "Evaluate CI gate"
+  # step's run script. Committed, not a repo variable, for the same reason as
+  # the BAZEL_RETIRES_LEGACY_* flags above: a re-run can never change it.
+  WINDOWS_PREBUILT_REQUIRED: "false"
 
 jobs:
 
@@ -506,12 +516,14 @@ jobs:
   # that otherwise runs once per Windows job runs here once instead.
   #
   # Deliberately advisory only: the native `test-windows-liveness` and
-  # `worktree-remove-windows` jobs above are untouched and still required
-  # (ci-gate). This job and its twins are NOT added to ci-gate's
-  # `needs`/`CI_GATE_REQUIRED`/env map -- the side-by-side phase runs both
-  # paths on every PR so a policy test (TestWindowsTestBinariesManifest) can
-  # confirm they select the same tests before anyone flips the required lane
-  # over. See ~/beads-bazel-plan/f4/impl-report.md for the flip plan.
+  # `worktree-remove-windows` jobs above are untouched and still the only
+  # required pair while WINDOWS_PREBUILT_REQUIRED (top of this file) is
+  # "false". ci-gate does wait on this job's two twins below (they are in its
+  # `needs`), but neither twin's result is in CI_GATE_REQUIRED yet -- the
+  # side-by-side phase runs both paths on every PR so a policy test
+  # (TestWindowsTestBinariesSelectSameTestsAsNativeJobs, in
+  # scripts/windows_test_binaries_manifest_test.go) can confirm they select
+  # the same tests before anyone flips WINDOWS_PREBUILT_REQUIRED to "true".
   #
   # Manifest is intentionally partial in this phase: it covers only the two
   # cmd/bd-backed jobs twinned below. Forks and Dependabot PRs get no
@@ -584,11 +596,13 @@ jobs:
   # windows-test-binaries cross-compiled instead of compiling here. Step
   # names, -run patterns, -count, and the PASS/FAIL parsing block are kept
   # byte-for-byte equivalent to the native job on purpose --
-  # TestWindowsTestBinariesManifest checks the -run literals stay in sync.
+  # TestWindowsTestBinariesSelectSameTestsAsNativeJobs checks the -run
+  # literals stay in sync.
   test-windows-liveness-prebuilt:
     name: Test (Windows, prebuilt) cmd/bd liveness regression
     needs: windows-test-binaries
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -1364,6 +1378,26 @@ jobs:
           BEADS_TEST_REQUIRE_DOLT_CONTAINER: "1"
         run: go test -tags gms_pure_go -count=1 -timeout 5m -v -run '^TestDoltServerFingerprint$' ./internal/testutil/
 
+  # `test-macos` / "Test (macos-latest)" used to run here and is deliberately
+  # removed (F4, PR CI -> 5 min). It was a non-required, PR-side mirror of
+  # main.yml's `test` job's macOS leg (full `go test -race -short ./...`),
+  # added after the 2026-08-01 incident where three separately-merged PRs each
+  # introduced a $TMPDIR=/var/folders regression that only reproduces on
+  # macOS and that main.yml's leg -- `if: github.event_name == 'push' &&
+  # github.ref == 'refs/heads/main'`, i.e. push-to-main only -- could not have
+  # caught pre-merge.
+  #
+  # Removing it is an accepted tradeoff, not a coverage-neutral cleanup:
+  # required merge-gate coverage is unaffected (this job was never in
+  # ci-gate's needs/CI_GATE_REQUIRED), but PRs lose the one pre-merge signal
+  # for macOS-only `go test -race ./...` regressions of this kind; such a
+  # regression can land on main again and will only be caught by main.yml's
+  # push-triggered leg, after the fact. The other macOS matrix legs left in
+  # this file (check-doc-freshness-platforms, pr-preflight-platforms) run on
+  # every PR but exercise narrow, specific scripts, not the full suite, so
+  # they are not a substitute. If this tradeoff turns out to be wrong,
+  # reinstate a PR-side mirror rather than relying on main.yml alone.
+
   # Producer-side guard for the Beads<->consumer CLI contract. Runs the whole
   # cmd/bd/protocol package: the golden corpus (regenerated from this branch's
   # bd and byte-compared to the committed testdata/corpus/, so an unreviewed
@@ -2046,6 +2080,8 @@ jobs:
       - check-release-target-cross-compilation
       - test-windows-liveness
       - worktree-remove-windows
+      - test-windows-liveness-prebuilt
+      - worktree-remove-windows-prebuilt
       - check-version-consistency
       - check-migration-hygiene
       - check-doc-flags
@@ -2075,8 +2111,6 @@ jobs:
             CHECK_BUILD_TAGS
             CHECK_CMD_BD_PUREGEO_TESTS
             CHECK_RELEASE_TARGET_CROSS_COMPILATION
-            TEST_WINDOWS_LIVENESS
-            WORKTREE_REMOVE_WINDOWS
             CHECK_VERSION_CONSISTENCY
             CHECK_MIGRATION_HYGIENE
             CHECK_DOC_FLAGS
@@ -2112,6 +2146,12 @@ jobs:
           CHECK_RELEASE_TARGET_CROSS_COMPILATION: ${{ needs.check-release-target-cross-compilation.result }}
           TEST_WINDOWS_LIVENESS: ${{ needs.test-windows-liveness.result }}
           WORKTREE_REMOVE_WINDOWS: ${{ needs.worktree-remove-windows.result }}
+          # F4 side-by-side rollout: always evaluated, like the native pair
+          # above; WINDOWS_PREBUILT_REQUIRED (top of this file) decides below
+          # which pair is in CI_GATE_REQUIRED and which is in
+          # CI_GATE_SKIPPED_OK.
+          TEST_WINDOWS_LIVENESS_PREBUILT: ${{ needs.test-windows-liveness-prebuilt.result }}
+          WORKTREE_REMOVE_WINDOWS_PREBUILT: ${{ needs.worktree-remove-windows-prebuilt.result }}
           CHECK_VERSION_CONSISTENCY: ${{ needs.check-version-consistency.result }}
           CHECK_MIGRATION_HYGIENE: ${{ needs.check-migration-hygiene.result }}
           CHECK_DOC_FLAGS: ${{ needs.check-doc-flags.result }}
@@ -2160,6 +2200,23 @@ jobs:
           if [[ "$GITHUB_EVENT_NAME" == "merge_group" ]]; then
             skipped_ok="CHECK_NO_BEADS_CHANGES"
           fi
+          # F4 side-by-side rollout: WINDOWS_PREBUILT_REQUIRED (top of this
+          # file) flips which pair of Windows jobs ci-gate enforces with a
+          # single committed flag, instead of three edits per job
+          # (ci-gate.needs, CI_GATE_REQUIRED, and this step's env map) done
+          # twice. Both pairs are unconditionally in ci-gate.needs and always
+          # evaluated above (neither is in the static CI_GATE_REQUIRED list);
+          # only which pair is added to CI_GATE_REQUIRED (enforced) vs.
+          # skipped_ok (merely advisory -- a failure there cannot redden the
+          # gate) changes here.
+          if [[ "$WINDOWS_PREBUILT_REQUIRED" == "true" ]]; then
+            CI_GATE_REQUIRED="$CI_GATE_REQUIRED TEST_WINDOWS_LIVENESS_PREBUILT WORKTREE_REMOVE_WINDOWS_PREBUILT"
+            skipped_ok="$skipped_ok TEST_WINDOWS_LIVENESS WORKTREE_REMOVE_WINDOWS"
+          else
+            CI_GATE_REQUIRED="$CI_GATE_REQUIRED TEST_WINDOWS_LIVENESS WORKTREE_REMOVE_WINDOWS"
+            skipped_ok="$skipped_ok TEST_WINDOWS_LIVENESS_PREBUILT WORKTREE_REMOVE_WINDOWS_PREBUILT"
+          fi
+          export CI_GATE_REQUIRED
           # Bazel lanes skipped by design in the call's execution mode (all
           # of them in mode skip, the remote-only embedded, proxied and
           # server-storage tiers in modes local and cache, and integration

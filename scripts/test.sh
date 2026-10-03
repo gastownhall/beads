@@ -237,7 +237,16 @@ if [[ -n "${BEADS_TEST_PREBUILT_TEST_BINARY:-}" ]]; then
     echo "Running (prebuilt binary): ${RUN_ARGS[*]}" >&2
     echo "Skipping: $SKIP_PATTERN" >&2
     echo "" >&2
-    exec "$REPO_ROOT/scripts/ci/run-go-test-binary.sh" "${RUN_ARGS[@]}"
+    # Run as a child, not `exec`: `exec` would replace this shell's image
+    # before the EXIT trap armed above (cleanup_shared_server,
+    # beads_test_env_cleanup via beads_test_env_enter) ever runs, leaking
+    # the per-run BEADS_TEST_ENV_ROOT temp dir and, with
+    # BEADS_TEST_SHARED_SERVER=1, orphaning the shared dolt sql-server
+    # process. Capturing and re-exiting the status preserves the same exit
+    # code `exec` would have, with the trap still firing on the way out.
+    "$REPO_ROOT/scripts/ci/run-go-test-binary.sh" "${RUN_ARGS[@]}"
+    status=$?
+    exit $status
 fi
 
 # Build go test command

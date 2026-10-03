@@ -19,9 +19,8 @@
 # Windows jobs that currently have "-prebuilt" twins
 # (test-windows-liveness-prebuilt, worktree-remove-windows-prebuilt) in
 # pr.yml. The windows legs of pr-preflight-platforms and
-# check-doc-freshness-platforms, and the small CGO=0 packages, are follow-up
-# work tracked in ~/beads-bazel-plan/f4/impl-report.md and are NOT yet listed
-# here or consumed by any job.
+# check-doc-freshness-platforms, and the small CGO=0 packages, are unscheduled
+# follow-up work and are NOT yet listed here or consumed by any job.
 #
 # name                     cgo  tags          package
 bd.exe                     1    gms_pure_go   ./cmd/bd

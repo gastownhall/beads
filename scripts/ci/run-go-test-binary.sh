@@ -22,6 +22,15 @@
 #   -timeout DURATION  -> -test.timeout DURATION
 #   -parallel N          -> -test.parallel N
 #
+# `go test` also injects two flags `cmd/go` adds to every test binary
+# invocation, which a bare binary never gets on its own: a default
+# `-test.timeout=10m0s` when the caller doesn't pass `-timeout`, and an
+# unconditional `-test.paniconexit0` (since Go 1.14, so a panic inside the
+# test binary still exits non-zero through the normal runtime panic path).
+# Both are added below so the prebuilt path can't silently run with no
+# deadline or swallow a panic's exit code relative to the native job it
+# twins.
+#
 # Anything after a literal `--` is passed through to the binary unchanged
 # (e.g. -required-suite=doc-freshness, -required-host, -expected-goos
 # windows): those are flags the test binary itself defines with the `flag`
@@ -33,6 +42,19 @@
 # cross-built binary. internal/testutil/bazeltest honors
 # BEADS_TEST_REPO_ROOT when it names a directory holding go.mod -- see that
 # package's doc comment for the full resolution order.
+#
+# This re-export is not fighting scripts/ci/lib/test-env.sh's
+# beads_test_env_enter, which unsets any BEADS_TEST_REPO_ROOT it finds
+# already set (so a leaked dev-shell override can't point a CI run's
+# source-scan guards at the wrong checkout): the two never race. When this
+# script is chained after test.sh's BEADS_TEST_PREBUILT_TEST_BINARY
+# short-circuit, beads_test_env_enter's unset has already run by the time
+# control reaches here, so the line below's `${BEADS_TEST_REPO_ROOT:-...}`
+# always falls through to GITHUB_WORKSPACE -- exactly the value a CI runner
+# needs. When this script instead runs standalone (the "-prebuilt" jobs'
+# direct `run-go-test-binary.sh ...` steps, with no test.sh and no
+# beads_test_env_enter in between), there is nothing to have unset it, and
+# the same GITHUB_WORKSPACE fallback applies for the same reason.
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
@@ -62,6 +84,7 @@ PKGDIR_ABS="$(cd "$PKGDIR" && pwd)"
 TEST_ARGS=()
 PASSTHROUGH=()
 seen_dashdash=0
+timeout_given=0
 while [[ $# -gt 0 ]]; do
     if [[ "$seen_dashdash" == "1" ]]; then
         PASSTHROUGH+=("$1")
@@ -91,6 +114,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         -timeout)
             TEST_ARGS+=(-test.timeout "$2")
+            timeout_given=1
             shift 2
             ;;
         -parallel)
@@ -107,6 +131,14 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Match cmd/go's own defaults (see the comment above the flag table): a
+# bare test binary has no deadline and doesn't force a non-zero exit code on
+# panic unless told to.
+if [[ "$timeout_given" == "0" ]]; then
+    TEST_ARGS+=(-test.timeout 10m)
+fi
+TEST_ARGS+=(-test.paniconexit0)
 
 export BEADS_TEST_REPO_ROOT="${BEADS_TEST_REPO_ROOT:-${GITHUB_WORKSPACE:-}}"
 if [[ -z "$BEADS_TEST_REPO_ROOT" ]]; then

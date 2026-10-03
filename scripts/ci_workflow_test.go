@@ -412,6 +412,7 @@ type goreleaserBuild struct {
 	ID     string   `yaml:"id"`
 	GOOS   []string `yaml:"goos"`
 	GOARCH []string `yaml:"goarch"`
+	Env    []string `yaml:"env"`
 }
 
 func readGoreleaserBuilds(t *testing.T) []goreleaserBuild {
@@ -697,11 +698,19 @@ func TestPRCIGateRequiresWindowsGlobalPrimeOverride(t *testing.T) {
 		t.Fatal("native Windows gate must execute the global Prime override fixture")
 	}
 	gate := workflow.job(t, "ci-gate")
-	env := gate.step(t, "Evaluate CI gate").Env
+	evaluate := gate.step(t, "Evaluate CI gate")
+	env := evaluate.Env
+	// F4 side-by-side rollout (SF-5): TEST_WINDOWS_LIVENESS is no longer in
+	// the static CI_GATE_REQUIRED list -- the WINDOWS_PREBUILT_REQUIRED flag
+	// mechanism (TestWindowsPrebuiltRequiredFlagMechanism,
+	// scripts/windows_test_binaries_manifest_test.go) adds it dynamically in
+	// the run script, required by default (flag "false"). Check that default
+	// wiring here instead of the old static list membership.
 	if !contains(gate.Needs, "test-windows-liveness") ||
 		env["TEST_WINDOWS_LIVENESS"] != "${{ needs.test-windows-liveness.result }}" ||
-		!contains(strings.Fields(env["CI_GATE_REQUIRED"]), "TEST_WINDOWS_LIVENESS") {
-		t.Fatal("CI gate must require the native Windows result")
+		workflow.Env["WINDOWS_PREBUILT_REQUIRED"] != "false" ||
+		!strings.Contains(evaluate.Run, `CI_GATE_REQUIRED="$CI_GATE_REQUIRED TEST_WINDOWS_LIVENESS WORKTREE_REMOVE_WINDOWS"`) {
+		t.Fatal("CI gate must require the native Windows result by default (WINDOWS_PREBUILT_REQUIRED=\"false\")")
 	}
 }
 
@@ -1222,8 +1231,7 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 
 	mainArtifacts := workflows["main.yml"].job(t, "build-artifacts")
 	assertStepsBefore(t, mainArtifacts, []string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Build reusable Linux artifacts"})
-	assertStepsBefore(t, mainArtifacts, []string{"Build reusable Linux artifacts", "Upload build artifacts"}, []string{"Warm non-race Go build cache (test-only packages)"})
-	assertStepsBefore(t, mainArtifacts, []string{"Warm non-race Go build cache (test-only packages)"}, []string{"Save Go module cache", "Save non-race Go build cache"})
+	assertStepsBefore(t, mainArtifacts, []string{"Build reusable Linux artifacts", "Upload build artifacts"}, []string{"Save Go module cache", "Save non-race Go build cache"})
 
 	mainEmbedded := workflows["main.yml"].job(t, "build-embedded")
 	embeddedRaceBuilds := []string{"Build embedded bd binary", "Build embedded storage test binary", "Build embedded cmd test binary"}
@@ -1237,8 +1245,7 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertStepsBefore(t, mainTest, []string{"Restore non-race Go build cache"}, []string{"Build"})
 	assertStepsBefore(t, mainTest, []string{"Restore race Go build cache"}, []string{"Test (with coverage + JUnit XML)", "Test"})
 	assertStepsBefore(t, mainTest, []string{"Build", "Test"}, []string{"Save Go module cache"})
-	assertStepsBefore(t, mainTest, []string{"Build"}, []string{"Warm non-race Go build cache (test-only packages)"})
-	assertStepsBefore(t, mainTest, []string{"Warm non-race Go build cache (test-only packages)"}, []string{"Save non-race Go build cache"})
+	assertStepsBefore(t, mainTest, []string{"Build"}, []string{"Save non-race Go build cache"})
 	assertStepsBefore(t, mainTest, []string{"Test"}, []string{"Save race Go build cache"})
 
 	mainWindows := workflows["main.yml"].job(t, "test-windows")
@@ -1275,12 +1282,10 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertStepsBefore(t, prRiskEmbedded, []string{"Restore non-race Go build cache"}, prRiskNonRaceBuilds)
 
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "build-artifacts"), "Build reusable Linux artifacts", "non-race")
-	assertGoCacheEnv(t, workflows["main.yml"].job(t, "build-artifacts"), "Warm non-race Go build cache (test-only packages)", "non-race")
 	for _, stepName := range []string{"Build embedded bd binary", "Build embedded storage test binary", "Build embedded cmd test binary"} {
 		assertGoCacheEnv(t, workflows["main.yml"].job(t, "build-embedded"), stepName, "race")
 	}
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test"), "Build", "non-race")
-	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test"), "Warm non-race Go build cache (test-only packages)", "non-race")
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test"), "Test (with coverage + JUnit XML)", "race")
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test"), "Test", "race")
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test-windows"), "Build (pure Go regex)", "non-race")
@@ -1316,8 +1321,8 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheWriter(t, workflows["main.yml"], "test-windows", "windows-latest", "Save non-race Go build cache", cacheMissCondition(goBuildCacheRestoreID("non-race")))
 	assertGoCacheWriter(t, workflows["main.yml"], "pr-lint-wrapper", "ubuntu-latest", "Save golangci-lint cache", failureSurvivingCacheSaveCondition(cacheMissCondition(golangciCacheRestoreID())))
 	assertGoCacheWriter(t, workflows["main.yml"], "go-vet-cache", "ubuntu-latest", "Save vet Go build cache", failureSurvivingCacheSaveCondition(cacheMissCondition(goVetCacheRestoreID())))
-	assertGoCacheWriter(t, workflows["main.yml"], "windows-test-binaries-cache", "ubuntu-latest", "Save Go module cache", saveModuleCacheAfterFailure().ifCondition)
-	assertGoCacheWriter(t, workflows["main.yml"], "windows-test-binaries-cache", "ubuntu-latest", "Save Go build cache (Windows cross-compile)", saveXCompileCache().ifCondition)
+	assertGoCacheWriter(t, workflows["main.yml"], "windows-test-binaries-cache", mainWindowsTestBinariesCacheRunsOn, "Save Go module cache", saveModuleCacheAfterFailure().ifCondition)
+	assertGoCacheWriter(t, workflows["main.yml"], "windows-test-binaries-cache", mainWindowsTestBinariesCacheRunsOn, "Save Go build cache (Windows cross-compile)", saveXCompileCache().ifCondition)
 	for _, target := range []struct{ workflow, job string }{
 		{"main.yml", "build-artifacts"},
 		{"main.yml", "build-embedded"},
@@ -1337,6 +1342,34 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		if got := workflows[target.workflow].job(t, target.job).step(t, "Set up Go").ID; got != "setup-go" {
 			t.Errorf("%s job %q setup-go id = %q, want setup-go", target.workflow, target.job, got)
 		}
+	}
+}
+
+// TestMainWindowsTestBinariesCacheSeedsBothRunnerSelections is the regression
+// test for F4 review SF-1: main.yml's windows-test-binaries-cache job must
+// seed its cache keys from both runner selections pr.yml's windows-test-
+// binaries job can land on (Blacksmith for same-repo PRs/merge_group,
+// ubuntu-latest for forks/Dependabot), because Blacksmith and GitHub-hosted
+// runners cannot see each other's actions/cache entries even for an
+// identical key. A single-leg seeder would silently leave one of the two
+// consumer paths permanently cold.
+func TestMainWindowsTestBinariesCacheSeedsBothRunnerSelections(t *testing.T) {
+	job := readCIWorkflow(t, "main.yml").job(t, "windows-test-binaries-cache")
+
+	if job.RunsOn != mainWindowsTestBinariesCacheRunsOn {
+		t.Errorf("windows-test-binaries-cache runs-on = %q, want %q", job.RunsOn, mainWindowsTestBinariesCacheRunsOn)
+	}
+	wantRunners := []string{"blacksmith", "github"}
+	if !equalStrings(job.Strategy.Matrix.Runner, wantRunners) {
+		t.Errorf("windows-test-binaries-cache strategy.matrix.runner = %v, want %v", job.Strategy.Matrix.Runner, wantRunners)
+	}
+	if job.Strategy.FailFast {
+		t.Error("windows-test-binaries-cache strategy.fail-fast must be false: one runner selection being unavailable must not cancel the other's seed")
+	}
+	// Mirrors pr.yml's windows-test-binaries job (pr.yml:522's timeout is 30
+	// too): this job runs the same mingw install + cross-compile.
+	if job.TimeoutMinutes != 30 {
+		t.Errorf("windows-test-binaries-cache timeout-minutes = %d, want 30", job.TimeoutMinutes)
 	}
 }
 
@@ -1936,6 +1969,7 @@ func assertPinnedGoCacheActions(t *testing.T, workflowName string, workflow ciWo
 }
 
 type ciWorkflow struct {
+	Env  map[string]string        `yaml:"env"`
 	Jobs map[string]ciWorkflowJob `yaml:"jobs"`
 }
 
@@ -1963,6 +1997,7 @@ type ciWorkflowStrategy struct {
 
 type ciWorkflowMatrix struct {
 	OS      []string                  `yaml:"os"`
+	Runner  []string                  `yaml:"runner"`
 	Shard   []int                     `yaml:"shard"`
 	Target  []string                  `yaml:"target"`
 	Check   []string                  `yaml:"check"`
@@ -2329,6 +2364,19 @@ const sameRepoBlacksmith2vcpu = "${{ (github.event_name == 'merge_group' || (git
 // two go test -c compiles benefit from the extra cores; forks/Dependabot PRs
 // fall back to ubuntu-latest exactly like the 2vcpu const above).
 const sameRepoBlacksmith8vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
+
+// F4 review SF-1: main.yml's windows-test-binaries-cache job seeds the same
+// cache keys/paths from both runner selections pr.yml's windows-test-binaries
+// job can land on (sameRepoBlacksmith8vcpu above, for same-repo PRs/
+// merge_group; ubuntu-latest for forks/Dependabot). Blacksmith runners can't
+// see a GitHub-hosted runner's actions/cache entries (and vice versa) even
+// though both report the same runner.os/runner.arch, so a single-leg seeder
+// only ever warms one of the two consumer paths. matrix.runner (not a
+// literal Blacksmith label substituted directly into runs-on) keeps
+// actionlint from trying and failing to resolve an undeclared self-hosted
+// label: it treats this ternary form as a dynamic value and skips it, same
+// as every other Blacksmith runs-on in this repo.
+const mainWindowsTestBinariesCacheRunsOn = "${{ matrix.runner == 'blacksmith' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
 
 // pr.yml's call of bazel.yml: exactly these inputs (review D1 v2 N3). An rbe
 // override would put every PR in local mode and ungate the embedded tier
