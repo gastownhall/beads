@@ -1888,13 +1888,19 @@ func (m *minimalPullStore) ListRemotes(context.Context) ([]storage.RemoteInfo, e
 }
 
 // minimalPushStore implements storage.DoltStorage by embedding the interface
-// (all methods panic on nil) with Push and ForcePush overridden for controlled testing.
+// (all methods panic on nil) with Push, ForcePush and PushRemote overridden
+// for controlled testing.
 type minimalPushStore struct {
 	storage.DoltStorage
 	pushCalled bool
 }
 
 func (m *minimalPushStore) Push(ctx context.Context) error {
+	m.pushCalled = true
+	return nil
+}
+
+func (m *minimalPushStore) PushRemote(ctx context.Context, remote string, force bool) error {
 	m.pushCalled = true
 	return nil
 }
@@ -1938,6 +1944,103 @@ func TestNoPushSkipsDoltPush(t *testing.T) {
 	}
 }
 
+// TestDoltPushRemoteJSONSuppressesChatter pins GH#5125 review (bee-ghosttrack,
+// MAJOR): every isQuiet()-gated print in doltPushCmd must also respect
+// --json, not just --quiet — "bd dolt push --json" was writing "Pushing to
+// Dolt remote ..." / "Push complete." human text into what callers expect to
+// be pure JSON output.
+func TestDoltPushRemoteJSONSuppressesChatter(t *testing.T) {
+	// Cannot be parallel: modifies process-global store and config.
+	saveAndRestoreGlobals(t)
+	resetCommandContext()
+
+	fake := &minimalPushStore{}
+	store = fake
+
+	config.ResetForTesting()
+	t.Cleanup(func() { config.ResetForTesting() })
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+
+	if err := doltPushCmd.Flags().Set("remote", "origin"); err != nil {
+		t.Fatalf("failed to set --remote flag: %v", err)
+	}
+	t.Cleanup(func() { _ = doltPushCmd.Flags().Set("remote", "") })
+
+	savedJSONOutput := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = savedJSONOutput })
+
+	out := captureStdout(t, func() error {
+		return doltPushCmd.RunE(doltPushCmd, nil)
+	})
+
+	if !fake.pushCalled {
+		t.Fatal("test setup: PushRemote() was not called")
+	}
+	if out != "" {
+		t.Errorf("bd dolt push --json --remote origin must not print human chatter; got: %q", out)
+	}
+}
+
+// TestDoltPushNoPushJSONSuppressesChatter pins GH#5125 re-review
+// (bee-ghosttrack, 2026-09-18): "skipping push: rig is local-only" gated
+// on !isQuiet() alone, so "bd dolt push --json" with no-push: true still
+// wrote human text to stdout ahead of the JSON caller's parser.
+func TestDoltPushNoPushJSONSuppressesChatter(t *testing.T) {
+	// Cannot be parallel: modifies process-global store and config.
+	saveAndRestoreGlobals(t)
+	resetCommandContext()
+
+	fake := &minimalPushStore{}
+	store = fake
+
+	t.Setenv("BD_NO_PUSH", "true")
+	config.ResetForTesting()
+	t.Cleanup(func() { config.ResetForTesting() })
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	if !config.GetBool("no-push") {
+		t.Fatal("test setup: BD_NO_PUSH=true must make no-push=true")
+	}
+
+	savedJSONOutput := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = savedJSONOutput })
+
+	out := captureStdout(t, func() error {
+		return doltPushCmd.RunE(doltPushCmd, nil)
+	})
+
+	if fake.pushCalled {
+		t.Error("bd dolt push --json must not call Push() when no-push: true; Push() was called")
+	}
+	if out != "" {
+		t.Errorf("bd dolt push --json with no-push: true must not print human chatter; got: %q", out)
+	}
+}
+
+// TestPrintNoRemoteGuidanceJSONSuppressesChatter pins GH#5125 re-review
+// (bee-ghosttrack, 2026-09-18): printNoRemoteGuidance gated on isQuiet()
+// alone, so "bd dolt push --json" / "pull --json" against a rig with no
+// remote wrote ~490 bytes of prose to stdout ahead of the JSON output.
+func TestPrintNoRemoteGuidanceJSONSuppressesChatter(t *testing.T) {
+	// Cannot be parallel: modifies process-global jsonOutput.
+	savedJSONOutput := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = savedJSONOutput })
+
+	out := captureStdout(t, func() error {
+		printNoRemoteGuidance()
+		return nil
+	})
+	if out != "" {
+		t.Errorf("printNoRemoteGuidance under --json must not print chatter; got: %q", out)
+	}
+}
+
 func TestNoPushDoesNotSkipDoltPull(t *testing.T) {
 	// no-push is a push-only guard. bd dolt pull must contact the remote even when
 	// no-push: true — contributor clones need to receive upstream updates.
@@ -1975,6 +2078,89 @@ func TestNoPushDoesNotSkipDoltPull(t *testing.T) {
 	}
 	if !strings.Contains(out, "Pulling from Dolt remote") {
 		t.Errorf("expected pull attempt output, got: %q", out)
+	}
+}
+
+// TestDoltPullQuietAndJSONSuppressChatter pins GH#5125 review (bee-ghosttrack,
+// MINOR): "-q works for push and commit but silently does nothing for pull"
+// (maintainer's 2026-07-29 item 5). bd dolt pull must honor --quiet and
+// --json the same way bd dolt push does, instead of always printing
+// "Pulling from Dolt remote..." / "Pull complete.".
+func TestDoltPullQuietAndJSONSuppressChatter(t *testing.T) {
+	// Cannot be parallel: modifies process-global store and config.
+	saveAndRestoreGlobals(t)
+	resetCommandContext()
+
+	fake := &minimalPullStore{}
+	store = fake
+
+	config.ResetForTesting()
+	t.Cleanup(func() { config.ResetForTesting() })
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+
+	savedJSONOutput := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = savedJSONOutput })
+
+	out := captureStdout(t, func() error {
+		return doltPullCmd.RunE(doltPullCmd, nil)
+	})
+
+	if !fake.pullCalled {
+		t.Fatal("test setup: Pull() was not called")
+	}
+	if out != "" {
+		t.Errorf("bd dolt pull --json must not print human chatter; got: %q", out)
+	}
+}
+
+// TestDoltLocalOnlyQuietSuppressesChatter pins GH#5125 review (bee-ghosttrack,
+// MINOR): the "dolt.local-only=true" guidance in bd dolt push/pull, and
+// printNoRemoteGuidance, printed unconditionally regardless of --quiet.
+func TestDoltLocalOnlyQuietSuppressesChatter(t *testing.T) {
+	// Cannot be parallel: modifies process-global store and config.
+	saveAndRestoreGlobals(t)
+	resetCommandContext()
+
+	store = &minimalPushStore{}
+
+	t.Setenv("BD_DOLT_LOCAL_ONLY", "true")
+	config.ResetForTesting()
+	t.Cleanup(func() { config.ResetForTesting() })
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	if !config.GetBool("dolt.local-only") {
+		t.Fatal("test setup: BD_DOLT_LOCAL_ONLY=true must make dolt.local-only=true")
+	}
+
+	savedQuiet := quietFlag
+	quietFlag = true
+	t.Cleanup(func() { quietFlag = savedQuiet })
+
+	pushOut := captureStdout(t, func() error {
+		return doltPushCmd.RunE(doltPushCmd, nil)
+	})
+	if pushOut != "" {
+		t.Errorf("bd dolt push -q with dolt.local-only=true must not print chatter; got: %q", pushOut)
+	}
+
+	store = &minimalPullStore{}
+	pullOut := captureStdout(t, func() error {
+		return doltPullCmd.RunE(doltPullCmd, nil)
+	})
+	if pullOut != "" {
+		t.Errorf("bd dolt pull -q with dolt.local-only=true must not print chatter; got: %q", pullOut)
+	}
+
+	noRemoteOut := captureStdout(t, func() error {
+		printNoRemoteGuidance()
+		return nil
+	})
+	if noRemoteOut != "" {
+		t.Errorf("printNoRemoteGuidance under -q must not print chatter; got: %q", noRemoteOut)
 	}
 }
 
