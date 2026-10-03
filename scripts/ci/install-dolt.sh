@@ -12,17 +12,24 @@ set -euo pipefail
 # side by side against the same databases; letting the two drift means the
 # suite is exercising a Dolt pair no release ever shipped.
 #
-# Why pinned rather than latest: Dolt 2.3.0 (released 2026-08-13) regressed
-# CALL DOLT_RESET('--hard') so that roughly one freshly created database in
-# twenty comes up with the procedure permanently broken --
+# Why pinned rather than latest: Dolt 2.2.4 through 2.3.1
+# can break CALL DOLT_RESET('--hard') (dolthub/dolt#11581) so that some
+# freshly created databases come up with the procedure permanently broken --
 # "Error 1105 (HY000): context canceled" on every connection, from any
 # session, for the life of the server process. Measured 2026-08-20 by
 # creating fresh databases and immediately calling the procedure: 2.1.8 0/40
 # broken, 2.2.0 0/60, 2.3.0 3/60, 2.3.1 3/100. That is what made
 # TestFreshBootstrapHealIncarnation fail on a coin flip the day
 # releases/latest moved to 2.3.x, and it also puts bd dolt compact/flatten
-# and the #4566 fresh-bootstrap heal at risk on 2.3.x. Raise this pin only
-# once a Dolt release is confirmed clean by that same measurement.
+# and the #4566 fresh-bootstrap heal at risk on 2.2.4 through 2.3.1.
+# Upstream fixed it in 2.3.2 (dolthub/dolt#11652); 2.3.4 also fixes a
+# related journal-writer race (dolthub/dolt#11796). Re-measured 2026-09-29
+# with one client and with 8 parallel ones, each statement on a new
+# connection (method in docs/architecture/dolt.md): 2.2.0 0/400 broken,
+# 2.3.1 110/400, 2.3.5 0/400, plus 0/640 with 16 clients; with 8 clients
+# only, 2.2.1 0/200, 2.2.3 0/200, 2.2.4 74/200, 2.3.4 0/200. Raise this pin
+# only to 2.3.4 or newer, and only to a release confirmed clean by that
+# same measurement.
 readonly version="2.2.0"
 readonly max_attempts=3
 readonly retry_delay_seconds=5
