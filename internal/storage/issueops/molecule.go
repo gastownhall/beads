@@ -89,6 +89,9 @@ func GetMoleculeProgressInTx(ctx context.Context, tx *sql.Tx, moleculeID string)
 				childMap[id] = childInfo{status: status}
 			}
 			_ = statusRows.Close()
+			if err := statusRows.Err(); err != nil {
+				return nil, fmt.Errorf("get molecule progress: iterate statuses: %w", err)
+			}
 		}
 
 		for _, childID := range childIDs {
