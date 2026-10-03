@@ -4943,6 +4943,10 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 			if asked && !strings.Contains(log, bazelMintStatusURL+"beads&run=4242&attempt=2&pr=7123") {
 				t.Errorf("mint status URL does not name this run:\n%s", log)
 			}
+			// A closed gate drops the connection: each try gives up in 5 s.
+			if asked && !strings.Contains(log, "curl -sS --connect-timeout 5 --max-time 30 ") {
+				t.Errorf("mint status asked without --connect-timeout 5 --max-time 30:\n%s", log)
+			}
 		})
 	}
 	// A value that is not a boolean fails the job rather than picking a mode.
@@ -4970,7 +4974,7 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 
 // bazelTestMintEnv selects runBazelRBEDecision's curl stub's answer for
 // rbe-fork-mint's /v1/status: ro, rw (open, that tier), closed, rw-closed
-// (open false), canary (403), busy (502), garbage, evil (open with a tier
+// (open false; today's mint answers ro instead while rw is off), canary (403), busy (502), garbage, evil (open with a tier
 // that is neither), or anything else (connection refused, as while the
 // farm's gate is closed or DNS has no rbe-mint yet).
 const bazelTestMintEnv = "BAZEL_TEST_MINT"

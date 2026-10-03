@@ -354,7 +354,7 @@ jobs:
           elif [ "$PULL_REQUEST" = true ] && { [ "$FORK" = true ] || [ "$DEPENDABOT" = true ]; }; then
             [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,8}$ ]] || { echo "::error::PR number '$PR_NUMBER'"; exit 1; }
             url="https://rbe-mint.ops.gascity.com:8444/v1/status?repo=${GITHUB_REPOSITORY#*/}&run=$GITHUB_RUN_ID&attempt=$GITHUB_RUN_ATTEMPT&pr=$PR_NUMBER"
-            st=$(curl -sS --max-time 30 --retry 3 --retry-all-errors "$url" || echo '{}')
+            st=$(curl -sS --connect-timeout 5 --max-time 30 --retry 3 --retry-all-errors "$url" || echo '{}')
             tier=$(jq -r 'if .open == true then .tier else "" end' <<<"$st" 2>/dev/null || true)
             case "$tier" in
               ro|rw) mode="fork-$tier" ;;

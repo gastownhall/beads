@@ -31,8 +31,8 @@ const (
 var rbeForkInstance = map[string]string{"ro": "oss-fork", "rw": "oss"}
 
 // bazelTestMintCertStub stands in for curl in fork-credential.sh cert: it
-// parses the arguments that script passes, logs the URL and body, and
-// answers as BAZEL_TEST_MINT_CERT says: ro / rw (sign the CSR at
+// parses the arguments that script passes, logs the URL and body (and the
+// timeouts on a "timeouts" line), and answers as BAZEL_TEST_MINT_CERT says: ro / rw (sign the CSR at
 // BAZEL_TEST_CSR, as the mint would after downloading the artifact),
 // ro-as-rw (tier rw with instance oss-fork), evil-endpoint, an HTTP status
 // with an error body, 000 (connection refused), or "<first>-then-<rest>"
@@ -40,12 +40,14 @@ var rbeForkInstance = map[string]string{"ro": "oss-fork", "rw": "oss"}
 const bazelTestMintCertStub = `#!/usr/bin/env bash
 set -euo pipefail
 d=$BAZEL_TEST_MINT_DIR
-out= data= url=
+out= data= url= connect= max=
 while [ $# -gt 0 ]; do
 	case "$1" in
 	-o) out=$2; shift 2 ;;
 	--data) data=$2; shift 2 ;;
-	-w | --max-time | -H) shift 2 ;;
+	--connect-timeout) connect=$2; shift 2 ;;
+	--max-time) max=$2; shift 2 ;;
+	-w | -H) shift 2 ;;
 	-*) shift ;;
 	*) url=$1; shift ;;
 	esac
@@ -53,6 +55,7 @@ done
 n=$(($(cat "$d/calls" 2>/dev/null || echo 0) + 1))
 echo "$n" >"$d/calls"
 printf 'curl %s %s\n' "$url" "$data" >>"$d/log"
+printf 'timeouts connect=%s max=%s\n' "$connect" "$max" >>"$d/log"
 answer=$BAZEL_TEST_MINT_CERT
 case "$answer" in
 *-then-*) if [ "$n" -eq 1 ]; then answer=${answer%%-then-*}; else answer=${answer#*-then-}; fi ;;
@@ -136,6 +139,17 @@ func runForkCredential(t *testing.T, m forkMint, arg string, env map[string]stri
 	return parseGitHubOutput(string(data)), string(b), err
 }
 
+// forkMintSleeps: the stub sleep's arguments in the mint log, in order.
+func forkMintSleeps(log string) string {
+	var got []string
+	for _, line := range strings.Split(log, "\n") {
+		if n, ok := strings.CutPrefix(line, "sleep "); ok {
+			got = append(got, n)
+		}
+	}
+	return strings.Join(got, " ")
+}
+
 func parseGitHubOutput(data string) map[string]string {
 	got := map[string]string{}
 	for _, line := range strings.Split(strings.TrimSpace(data), "\n") {
@@ -157,7 +171,9 @@ var (
 // key (EC P-256, PKCS#8, 0600, outside the workspace), the CSR artifact's
 // name, the request body (exactly the mint's six keys), the endpoint pin, the
 // tier/instance pairing, the tier check against the rbe job's, the retries
-// (502 and connection failures only) and the refusals.
+// (429, 502 and connection failures only; backoff 10, 20, 30 s, none after
+// the last attempt), the timeouts (a closed gate drops the connection) and
+// the refusals.
 func TestSetupBazelForkCredential(t *testing.T) {
 	requireHostTool(t, "bash")
 	m := newForkMint(t)
@@ -252,7 +268,7 @@ func TestSetupBazelForkCredential(t *testing.T) {
 	}
 	wantBody := map[string]any{"repo": "beads", "run_id": 4242.0, "run_attempt": 2.0, "pr": 7123.0, "job": "bazel-test", "artifact_id": 99.0}
 	for _, tier := range []string{"ro", "rw"} {
-		for _, answer := range []string{tier, "502-then-" + tier, "000-then-" + tier} {
+		for _, answer := range []string{tier, "429-then-" + tier, "502-then-" + tier, "000-then-" + tier} {
 			got, logs, err := cert(t, answer, tier)
 			if err != nil {
 				t.Errorf("cert %s (mint %s): %v\n%s", tier, answer, err, logs)
@@ -269,6 +285,12 @@ func TestSetupBazelForkCredential(t *testing.T) {
 			calls := strings.Count(m.log(t), "curl ")
 			if wantCalls := map[bool]int{false: 1, true: 2}[strings.Contains(answer, "-then-")]; calls != wantCalls {
 				t.Errorf("mint %s: %d requests, want %d:\n%s", answer, calls, wantCalls, m.log(t))
+			}
+			if got, want := forkMintSleeps(m.log(t)), map[bool]string{false: "", true: "10"}[strings.Contains(answer, "-then-")]; got != want {
+				t.Errorf("mint %s: slept %q, want %q:\n%s", answer, got, want, m.log(t))
+			}
+			if got := strings.Count(m.log(t), "timeouts connect=5 max=60\n"); got != calls {
+				t.Errorf("mint %s: %d of %d requests with --connect-timeout 5 --max-time 60:\n%s", answer, got, calls, m.log(t))
 			}
 			for _, line := range strings.Split(strings.TrimSpace(m.log(t)), "\n") {
 				if !strings.HasPrefix(line, "curl ") {
@@ -292,7 +314,7 @@ func TestSetupBazelForkCredential(t *testing.T) {
 	}{
 		{"403", "ro", 1, "rbe-fork mint refused (HTTP 403)"},
 		{"409", "ro", 1, "rbe-fork mint refused (HTTP 409)"},
-		{"429", "ro", 1, "rbe-fork mint refused (HTTP 429)"},
+		{"429", "ro", 4, "rbe-fork mint refused (HTTP 429)"},
 		{"503", "rw", 1, "rbe-fork mint refused (HTTP 503)"},
 		{"502", "ro", 4, "rbe-fork mint refused (HTTP 502)"},
 		{"000", "ro", 4, "rbe-fork mint refused (HTTP 000)"},
@@ -310,6 +332,10 @@ func TestSetupBazelForkCredential(t *testing.T) {
 		}
 		if calls := strings.Count(m.log(t), "curl "); calls != c.calls {
 			t.Errorf("mint %s: %d requests, want %d", c.answer, calls, c.calls)
+		}
+		// Backoff between attempts only: nothing after the last one.
+		if got, want := forkMintSleeps(m.log(t)), map[int]string{1: "", 4: "10 20 30"}[c.calls]; got != want {
+			t.Errorf("mint %s: slept %q, want %q", c.answer, got, want)
 		}
 	}
 	// cert needs every fact it sends.

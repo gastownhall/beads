@@ -51,11 +51,14 @@ cert)
 	reply="$dir/mint.json"
 	code=000
 	for attempt in 1 2 3 4; do
-		code=$(curl -sS -o "$reply" -w '%{http_code}' --max-time 60 -H 'content-type: application/json' \
-			--data "$body" "$MINT/v1/cert") || code=000
-		# Retry what may pass on its own: the mint could not reach GitHub (502),
-		# or the network (000). Everything else is an answer.
-		case "$code" in 200) break ;; 502 | 000) sleep $((attempt * 10)) ;; *) break ;; esac
+		# --connect-timeout: a closed gate drops the SYN; fail fast, not in 60 s.
+		code=$(curl -sS -o "$reply" -w '%{http_code}' --connect-timeout 5 --max-time 60 \
+			-H 'content-type: application/json' --data "$body" "$MINT/v1/cert") || code=000
+		# Retry what may pass on its own: a rate or live-certificate limit (429;
+		# the rates are per minute, the backoff sums to one), the mint could not
+		# reach GitHub (502), or the network (000). Everything else is an answer.
+		case "$code" in 429 | 502 | 000) ;; *) break ;; esac
+		[ "$attempt" -eq 4 ] || sleep $((attempt * 10))
 	done
 	if [ "$code" != 200 ]; then
 		echo "::error title=rbe-fork mint refused (HTTP $code)::$(jq -r '.error // empty' "$reply" 2>/dev/null || true)"
