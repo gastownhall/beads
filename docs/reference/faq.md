@@ -226,6 +226,15 @@ Yes — `bd github sync --pull-only` imports issues in bulk (`bd github pull <re
 
 ## Migration
 
+### What changes when GitHub sync adds metadata footers?
+
+The first push after upgrading to GitHub metadata footers updates the bodies of
+linked issues in the selected sync set, even when their other fields are
+unchanged. A full sync can therefore issue a body PATCH for every linked issue
+and trigger GitHub notifications. Pulling strips the generated footer from the
+local description while preserving user text. Bare or malformed marker examples
+remain user text; they do not establish a link to a bead.
+
 ### How do I migrate from GitHub Issues, Jira, or Linear?
 
 Beads has built-in bidirectional sync for all three — `bd github`, `bd jira`, and `bd linear` each provide `sync` for bulk moves, plus `pull`/`push` for specific issues by ID (GitLab, Azure DevOps, and Notion are covered by `bd gitlab`, `bd ado`, and `bd notion`). Configure credentials with `bd config set` per the [CLI reference](/cli-reference/index), then run the sync in the pull direction: `bd github sync --pull-only`, `bd jira sync --pull`, or `bd linear sync --pull`.

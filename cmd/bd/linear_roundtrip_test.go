@@ -626,8 +626,8 @@ func TestLinearRoundTripRelationships(t *testing.T) {
 // but works with an explicit store instead of the global.
 func buildLinearPushHooksForTest(ctx context.Context, lt *linear.Tracker) *tracker.PushHooks {
 	return &tracker.PushHooks{
-		FormatDescription: func(issue *types.Issue) string {
-			return linear.BuildLinearDescription(issue)
+		FormatDescription: func(issue *types.Issue) (string, error) {
+			return linear.BuildLinearDescription(issue), nil
 		},
 		ContentEqual: func(local *types.Issue, remote *tracker.TrackerIssue) bool {
 			localComparable := linear.NormalizeIssueForLinearHash(local)
