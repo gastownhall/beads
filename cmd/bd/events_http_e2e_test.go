@@ -19,14 +19,14 @@ import (
 // transaction, and the read plumbing that pages them back out.
 //
 // It is the composition that has failed before (see the note on
-// TestServeActivatesTheEventsJournal): each half looked correct in isolation
+// TestProxiedServerServeActivatesTheEventsJournal): each half looked correct in isolation
 // while the server committed with an empty journal and every response looked
 // normal.
 
-// TestServeReadsTheJournalItJustWrote: mutate over HTTP, then read the journal
+// TestProxiedServerServeReadsTheJournalItJustWrote: mutate over HTTP, then read the journal
 // over HTTP, and require the records to be there, gapless, and paced by a head
 // that matches.
-func TestServeReadsTheJournalItJustWrote(t *testing.T) {
+func TestProxiedServerServeReadsTheJournalItJustWrote(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)
@@ -138,7 +138,7 @@ func TestServeReadsTheJournalItJustWrote(t *testing.T) {
 	}
 }
 
-// TestServeRefusesAStaleCheckpointWithGone is the retention boundary over HTTP.
+// TestProxiedServerServeRefusesAStaleCheckpointWithGone is the retention boundary over HTTP.
 // A consumer whose checkpoint was pruned past must be TOLD, with the window the
 // server can still serve — not handed the surviving suffix as though it were a
 // complete history, and not handed an empty success it would read as "caught
@@ -147,7 +147,7 @@ func TestServeReadsTheJournalItJustWrote(t *testing.T) {
 // Both retention floors are zeroed so the prune can actually cut: the shipped
 // defaults (7 days / 100k rows) protect everything a test could create, which
 // is the point of them and the reason this has to say so explicitly.
-func TestServeRefusesAStaleCheckpointWithGone(t *testing.T) {
+func TestProxiedServerServeRefusesAStaleCheckpointWithGone(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)
@@ -214,12 +214,12 @@ func TestServeRefusesAStaleCheckpointWithGone(t *testing.T) {
 	sp.shutdown(t)
 }
 
-// TestServeRefusesTheJournalWhenItIsDisabled is the distinction the data cannot
+// TestProxiedServerServeRefusesTheJournalWhenItIsDisabled is the distinction the data cannot
 // make. This workspace never enabled the journal, so it records nothing and
 // never will — and the read has to say so rather than answer the empty page an
 // enabled-but-untouched workspace answers, which a consumer would poll against
 // forever.
-func TestServeRefusesTheJournalWhenItIsDisabled(t *testing.T) {
+func TestProxiedServerServeRefusesTheJournalWhenItIsDisabled(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)

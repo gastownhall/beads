@@ -26,7 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestProxiedOutageReconnectAcceptanceMatrix(t *testing.T) {
+func TestProxiedServerOutageReconnectAcceptanceMatrix(t *testing.T) {
 	requireProxiedServerEnv(t)
 	bd := buildEmbeddedBD(t)
 	for _, topology := range []struct {

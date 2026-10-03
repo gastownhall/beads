@@ -284,7 +284,7 @@ func TestServerModeServeSkipsPostRunMaintenance(t *testing.T) {
 // identity, so it naming the project database while every operation answers
 // from the global one is a lie with a straight face. Without the fix the
 // handshake and the startup line both report p.database here.
-func TestSharedServerModeServeGlobalReportsTheServedDatabase(t *testing.T) {
+func TestServerModeSharedServeGlobalReportsTheServedDatabase(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)

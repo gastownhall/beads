@@ -212,7 +212,7 @@ func TestEmbeddedCreateStorageClass(t *testing.T) {
 	// `bd create --file` used to accept --storage-class and the per-type config
 	// default and honor neither. buildMarkdownBatchRequest is the ONE projection
 	// both transports use, so these subtests cover the direct half of that fix
-	// and TestStorageClassProxiedServer covers the other.
+	// and TestProxiedServerStorageClass covers the other.
 	t.Run("markdown_batch", func(t *testing.T) {
 		batch := `## Batch one
 

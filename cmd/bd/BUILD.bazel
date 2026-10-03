@@ -1410,11 +1410,14 @@ sh_test(
 # from PR Risk's legacy fork/push jobs, "Test (Proxied Dolt Cmd N/15)"
 # (pr-risk.yml, main.yml): those keep running 15 shards of their own,
 # frozen bd-init-cost-proxy block in the same manifest file — shard k here
-# is not the same split as their shard k. The shared proxied harness gets
-# its dolt sql-server from internal/testutil's local backend (the pinned
-# dolt in the test wrapper's runfiles) instead of the jobs' container, and
-# fails instead of skipping when it cannot start one. It repeats bd_test's
-# `env`. shard_count must stay equal to the manifest block's shard total.
+# is not the same split as their shard k. PR Risk builds its bd-cmd-test
+# with -race, as here; main.yml's test-proxied-cmd twin uses
+# build-artifacts' non-race bd-cmd-test, so this lane is the stricter of
+# the two. The shared proxied harness gets its dolt sql-server from
+# internal/testutil's local backend (the pinned dolt in the test
+# wrapper's runfiles) instead of the jobs' container, and fails instead
+# of skipping when it cannot start one. It repeats bd_test's `env`.
+# shard_count must stay equal to the manifest block's shard total.
 #
 # Tags:
 #   dolt-server-proxied: the proxied-server tier; starts hermetic dolt

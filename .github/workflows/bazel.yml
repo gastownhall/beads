@@ -1038,9 +1038,9 @@ jobs:
   # it (BAZEL_PROXIED).
   bazel-proxied:
     name: proxied-server tier
-    # Remote execution only, like bazel-embedded: 30 shards of ~5-10
-    # minutes, each with a dolt sql-server busy on ~4 cores, do not fit a
-    # GitHub-hosted runner.
+    # Remote execution only, like bazel-embedded: 30 concurrent shards, each
+    # running its own dolt sql-server busy on ~4 cores, do not fit a
+    # GitHub-hosted runner regardless of any single shard's wall time.
     # On same-repo pull_requests the legacy jobs stand down (pr-risk.yml's
     # bazel-coverage; D2 step 2), so this lane is then the tier's only PR
     # run and pr.yml's gate requires it to have run here and passed.
@@ -1083,12 +1083,17 @@ jobs:
             exit 1
           fi
 
-      # Remote: the longest shard takes ~5-10 minutes (each shard's Go
-      # timeout is its job's 15m, 1200s Bazel cap), plus a compile. 30-shard
+      # Remote: each shard's Go timeout is its job's 15m, 1200s Bazel cap,
+      # plus a compile. Local --nohome_rc representative-shard runs (race
+      # build, GOMAXPROCS=4, this host's CPU count, not a GH runner's)
+      # measured 55-81s wall per shard across shards 1/15/30 of 30 — well
+      # under the Bazel cap, but not a forecast for RBE's shape. 30-shard
       # loads from scripts/ci/proxied_test_durations.json's LPT packing are
-      # within 5s of each other (that file's duration data is from two
-      # contention-era runs: the no-shard-is-the-long-pole property is the
-      # signal, not the absolute minutes).
+      # a relative-cost signal for balancing shards (avoiding one long-pole
+      # shard), not an absolute-seconds prediction: that file's duration
+      # data is from contention-era runs and is being recaptured with
+      # -test.parallel=1 to remove intra-process overlap double-counting
+      # (see the file's own header for provenance and how to refresh it).
       - name: bazel test //... --config=doltserver-proxied
         id: test
         timeout-minutes: 25
