@@ -84,7 +84,17 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 		if err := issueops.RecordEventInTx(ctx, r.runner, issueops.EventCreate, issue.ID, actor); err != nil {
 			return err
 		}
-		return issueops.RecordVersionInTx(ctx, r.runner, issue.ID, actor)
+		// EnsureIssueIDAvailableInTx above already refused a collision, so this
+		// strict insert is unconditionally a new row.
+		return issueops.RecordVersionForCreateInTx(ctx, r.runner, issue.ID, actor)
+	}
+	// insertIssueRow is an upsert (ON DUPLICATE KEY UPDATE): unlike the
+	// CreateOnly branch above, "create" here can resolve to an already-existing
+	// row. The participation_generation write-fence (design §16.2b) needs to
+	// know which, so check existence before the upsert overwrites it.
+	existed, err := r.Exists(ctx, issue.ID, domain.IssueTableOpts{UseWispsTable: opts.UseWispsTable})
+	if err != nil {
+		return err
 	}
 	if err := insertIssueRow(ctx, r.runner, table, issue); err != nil {
 		return err
@@ -99,7 +109,10 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 	if err := issueops.RecordEventInTx(ctx, r.runner, issueops.EventCreate, issue.ID, actor); err != nil {
 		return err
 	}
-	return issueops.RecordVersionInTx(ctx, r.runner, issue.ID, actor)
+	if existed {
+		return issueops.RecordVersionInTx(ctx, r.runner, issue.ID, actor)
+	}
+	return issueops.RecordVersionForCreateInTx(ctx, r.runner, issue.ID, actor)
 }
 
 func (r *issueSQLRepositoryImpl) InsertBatch(ctx context.Context, issues []*types.Issue, actor string, opts domain.InsertIssueOpts) error {

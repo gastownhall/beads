@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 func TestMoveIssuePersistenceInTxMovesAggregateAndReportsTables(t *testing.T) {
@@ -355,5 +356,97 @@ func TestMoveIssuePersistenceInTxRepairsFlagsInTheIssuesPlane(t *testing.T) {
 	}
 	if wisps != 0 {
 		t.Errorf("wisps rows = %d, want 0: a same-plane repair must not move the row", wisps)
+	}
+}
+
+// TestPersistenceRepairKeepsTheRowsOwnParticipation pins the one persistence
+// path that mints update-shaped on purpose. A repair (the same-plane branch
+// above: an issues-plane row carrying a wisp flag, made persistent in place)
+// leaves the row where it is, so the row keeps its own
+// participation_generation. With versioned history on, a legacy row stays
+// legacy and mints nothing, because a repair is an ordinary write and must
+// not promote it (design §16.2b, R2.3). A row created with the flag on mints
+// one version, as any update of it would. A move out of the wisps table is
+// different: it inserts a new issues row, so it is create-shaped
+// (RunParticipationGenerationWispPersistenceMoveBeginsHistory). Both repair
+// entry points are covered, because they mint at different sites:
+// MoveIssuePersistenceInTx's own repair mint, and the guarded update's one
+// end-of-update mint.
+func TestPersistenceRepairKeepsTheRowsOwnParticipation(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	defer store.SetVersionedHistoryEnabled(false)
+	ctx := context.Background()
+	ops, err := NewIssueOperations(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repairs := map[string]func(id string) error{
+		"move": func(id string) error {
+			return store.withRetryTx(ctx, func(tx *sql.Tx) error {
+				current, err := issueops.GetIssueInTx(ctx, tx, id)
+				if err != nil {
+					return err
+				}
+				_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModePersistent, "repairer")
+				return err
+			})
+		},
+		"update": func(id string) error {
+			_, err := ops.Update(ctx, publicops.UpdateRequest{Actor: "repairer", IssueID: id, Patch: publicops.IssuePatch{
+				Persistence: publicops.Field[publicops.PersistenceMode]{Set: true, Value: publicops.PersistenceModePersistent},
+			}})
+			return err
+		},
+	}
+	state := func(id string) (versions int, generation sql.NullInt64) {
+		t.Helper()
+		if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_versions WHERE issue_id = ?`, id).Scan(&versions); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.db.QueryRowContext(ctx, `SELECT participation_generation FROM issues WHERE id = ?`, id).Scan(&generation); err != nil {
+			t.Fatal(err)
+		}
+		return versions, generation
+	}
+
+	for _, legacy := range []bool{true, false} {
+		for _, via := range []string{"move", "update"} {
+			id := "persist-repair-pg-" + via
+			if legacy {
+				id += "-legacy"
+			}
+			// A legacy row is created with the flag off; either way the
+			// repair itself runs with it on.
+			store.SetVersionedHistoryEnabled(!legacy)
+			if err := store.CreateIssue(ctx, &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "tester"); err != nil {
+				t.Fatal(err)
+			}
+			store.SetVersionedHistoryEnabled(true)
+			if _, err := store.db.ExecContext(ctx, `UPDATE issues SET ephemeral = 1 WHERE id = ?`, id); err != nil {
+				t.Fatal(err)
+			}
+			beforeVersions, beforeGeneration := state(id)
+
+			if err := repairs[via](id); err != nil {
+				t.Fatalf("%s: repairing %s: %v", via, id, err)
+			}
+
+			afterVersions, afterGeneration := state(id)
+			if afterGeneration != beforeGeneration {
+				t.Errorf("%s: participation_generation for %s went from %v to %v across the repair, want it "+
+					"unchanged: the row stays on the issues plane, so its participation is its own",
+					via, id, beforeGeneration, afterGeneration)
+			}
+			wantVersions := beforeVersions + 1
+			if legacy {
+				wantVersions = beforeVersions
+			}
+			if afterVersions != wantVersions {
+				t.Errorf("%s: version rows for %s (legacy=%v) went from %d to %d across the repair, want %d: "+
+					"a repair is update-shaped, so it mints for a participating row and skips a legacy one",
+					via, id, legacy, beforeVersions, afterVersions, wantVersions)
+			}
+		}
 	}
 }

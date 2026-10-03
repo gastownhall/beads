@@ -90,6 +90,13 @@ type CreateIssueResult struct {
 	// Set only on the path that would otherwise have minted, so the batch
 	// mints for exactly the issues a singular create would have.
 	versionDeferred bool
+	// isNew mirrors InsertIssueIfNew's result: whether this create actually
+	// inserted a new row, as opposed to resolving to an already-existing one.
+	// The participation_generation write-fence (design §16.2b) needs this to
+	// choose RecordVersionForCreateInTx over RecordVersionInTx; the deferred
+	// batch path carries it here since the per-issue isNew local is out of
+	// scope by the time the batch mints.
+	isNew bool
 }
 
 type persistedDependency struct {
@@ -157,6 +164,7 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 		return result, nil
 	}
 	result.markChanged(issueTable)
+	result.isNew = isNew
 
 	// Reconcile the ephemeral lease row with the accepted issue state
 	// (restore an imported lease / drop an orphaned one — see
@@ -213,6 +221,10 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 	// create has nothing after this point and mints here.
 	if bc.DeferVersionMint {
 		result.versionDeferred = true
+	} else if isNew {
+		if err := RecordVersionForCreateInTx(ctx, tx, issue.ID, actor); err != nil {
+			return result, err
+		}
 	} else if err := RecordVersionInTx(ctx, tx, issue.ID, actor); err != nil {
 		return result, err
 	}
@@ -292,6 +304,15 @@ func CreateIssuesInTxWithResult(ctx context.Context, tx DBTX, issues []*types.Is
 	return CreateIssuesInTxWithContext(ctx, tx, bc, issues, actor)
 }
 
+// deferredVersion carries a create's issue id and whether it was a genuinely
+// new row from the per-issue loop in CreateIssuesInTxWithContext to that
+// function's own final mint pass, since the per-issue isNew local goes out of
+// scope once CreateIssueInTxWithResult returns.
+type deferredVersion struct {
+	id    string
+	isNew bool
+}
+
 // CreateIssuesInTxWithContext is CreateIssuesInTxWithResult with a
 // caller-supplied BatchContext. Callers that split config reads from row
 // writes across SQL sessions (doltTransaction's wisp tier) build the context
@@ -330,7 +351,7 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 
 	result := CreateIssuesResult{}
 	accepted := issues[:0:0]
-	var toVersion []string
+	var toVersion []deferredVersion
 	for _, issue := range issues {
 		issueResult, err := CreateIssueInTxWithResult(ctx, tx, &batch, issue, actor)
 		if err != nil {
@@ -338,7 +359,7 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 		}
 		result.merge(issueResult.ChangedTables)
 		if issueResult.versionDeferred {
-			toVersion = append(toVersion, issue.ID)
+			toVersion = append(toVersion, deferredVersion{id: issue.ID, isNew: issueResult.isNew})
 		}
 		if issueResult.StaleRejected {
 			continue // stale snapshot: keep its deps out of the batch too
@@ -380,8 +401,14 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	// outgoing edge set. PersistDependenciesWithOptionsResult writes the edge
 	// rows directly and mints nothing itself, so this is the one version per
 	// issue at creation. Wisps are excluded by the seam.
-	for _, id := range toVersion {
-		if err := RecordVersionInTx(ctx, tx, id, actor); err != nil {
+	for _, dv := range toVersion {
+		if dv.isNew {
+			if err := RecordVersionForCreateInTx(ctx, tx, dv.id, actor); err != nil {
+				return CreateIssuesResult{}, err
+			}
+			continue
+		}
+		if err := RecordVersionInTx(ctx, tx, dv.id, actor); err != nil {
 			return CreateIssuesResult{}, err
 		}
 	}

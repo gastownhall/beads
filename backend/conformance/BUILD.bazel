@@ -26,6 +26,7 @@ go_library(
         "deleter_contract.go",
         "dependency_editor_contract.go",
         "dualwrite_history_contract.go",
+        "dualwrite_participation_generation_contract.go",
         "edge_reader_contract.go",
         "expected_revision_contract.go",
         "graph_counter_contract.go",

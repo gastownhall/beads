@@ -205,6 +205,7 @@ go_test(
         "dolt_test.go",
         "draincall_regression_test.go",
         "dualwrite_history_contract_test.go",
+        "dualwrite_participation_generation_contract_test.go",
         "edge_reader_contract_test.go",
         "empty_commit_test.go",
         "ephemeral_routing_test.go",

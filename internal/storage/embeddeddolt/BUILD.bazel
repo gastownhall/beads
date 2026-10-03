@@ -133,6 +133,7 @@ go_test(
         "detection_test.go",
         "dirty_tables_gate_test.go",
         "dualwrite_history_contract_test.go",
+        "dualwrite_participation_generation_contract_test.go",
         "edge_reader_contract_test.go",
         "events_since_test.go",
         "expected_revision_contract_test.go",
