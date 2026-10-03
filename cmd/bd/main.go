@@ -27,6 +27,7 @@ import (
 	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/crashlog"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/hooks"
@@ -2643,6 +2644,8 @@ func validateWorkspaceIdentity(ctx context.Context, s storage.DoltStorage, beads
 }
 
 func main() {
+	defer crashlog.Recover() // durable panic log; os.Exit paths below log via crashlog.Error
+
 	// BD_NAME overrides the binary name in help text (e.g. BD_NAME=ops makes
 	// "ops --help" show "ops" instead of "bd"). Useful for multi-instance
 	// setups where wrapper scripts set BEADS_DIR for routing.
@@ -2672,6 +2675,11 @@ func main() {
 	metrics.CloseAndFlush()
 
 	if err != nil {
+		cmdName := "bd"
+		if executedCmd != nil {
+			cmdName = executedCmd.Name()
+		}
+		crashlog.Error(cmdName, err)
 		if code, ok := exitCodeFromError(err); ok {
 			os.Exit(code)
 		}
