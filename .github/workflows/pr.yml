@@ -1486,13 +1486,19 @@ jobs:
           #!/usr/bin/env bash
           set -euo pipefail
 
-          [[ "${1-}" == build ]] || exit 91
+          [[ "${1-}" == build ]] || {
+              printf 'fake go: expected build as the first argument, got %q\n' "${1-}" >&2
+              exit 91
+          }
           shift
           output=
           while (($#)); do
               case "$1" in
                   -o)
-                      [[ $# -ge 2 ]] || exit 92
+                      [[ $# -ge 2 ]] || {
+                          printf 'fake go: -o requires an output path\n' >&2
+                          exit 92
+                      }
                       output=$2
                       shift 2
                       ;;
