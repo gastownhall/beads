@@ -111,6 +111,91 @@ func checkOrphanedDependenciesDB(db *sql.DB) DoctorCheck {
 	}
 }
 
+// CheckOrphanedChildCounters detects child_counters/wisp_child_counters rows
+// whose parent_id has no matching issues/wisps row. A single such row can
+// fail Dolt constraint validation on subsequent writes, silently bricking
+// every `bd create` while `bd doctor` reports 0 errors (#4539, follow-up to
+// #4534). Credit: check suggested by @eitsupi in #4534.
+func CheckOrphanedChildCounters(path string) DoctorCheck {
+	beadsDir := ResolveBeadsDirForRepo(path)
+
+	db, store, err := openStoreDB(beadsDir)
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Orphaned Child Counters",
+			Status:  "ok",
+			Message: "N/A (no database)",
+		}
+	}
+	defer func() { _ = store.Close() }()
+
+	return checkOrphanedChildCountersDB(db)
+}
+
+// checkOrphanedChildCountersDB is the core logic for CheckOrphanedChildCounters.
+func checkOrphanedChildCountersDB(db *sql.DB) DoctorCheck {
+	// Query for child_counters rows dangling from issues and wisp_child_counters
+	// rows dangling from wisps (the twin gap called out in #4539).
+	query := `
+		SELECT 'child_counters' AS counter_table, cc.parent_id, cc.last_child
+		FROM child_counters cc
+		LEFT JOIN issues i ON cc.parent_id = i.id
+		WHERE i.id IS NULL
+		UNION ALL
+		SELECT 'wisp_child_counters' AS counter_table, wcc.parent_id, wcc.last_child
+		FROM wisp_child_counters wcc
+		LEFT JOIN wisps w ON wcc.parent_id = w.id
+		WHERE w.id IS NULL
+	`
+	rows, err := db.Query(query)
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Orphaned Child Counters",
+			Status:  StatusWarning,
+			Message: "N/A (query failed)",
+		}
+	}
+	defer rows.Close()
+
+	var orphans []string
+	for rows.Next() {
+		var counterTable, parentID string
+		var lastChild int
+		if err := rows.Scan(&counterTable, &parentID, &lastChild); err == nil {
+			orphans = append(orphans, fmt.Sprintf("%s:%s", counterTable, parentID))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return DoctorCheck{
+			Name:    "Orphaned Child Counters",
+			Status:  StatusWarning,
+			Message: "Row iteration error",
+			Detail:  err.Error(),
+		}
+	}
+
+	if len(orphans) == 0 {
+		return DoctorCheck{
+			Name:    "Orphaned Child Counters",
+			Status:  "ok",
+			Message: "No orphaned child counters",
+		}
+	}
+
+	detail := strings.Join(orphans, ", ")
+	if len(detail) > 200 {
+		detail = detail[:200] + "..."
+	}
+
+	return DoctorCheck{
+		Name:    "Orphaned Child Counters",
+		Status:  "error",
+		Message: fmt.Sprintf("%d orphaned child counter row(s) — can brick 'bd create' on constraint validation", len(orphans)),
+		Detail:  detail,
+		Fix:     "Run 'bd doctor --fix' to remove orphaned child counter rows",
+	}
+}
+
 // CheckDuplicateIssues detects issues with identical content.
 // When orchestratorMode is true, the threshold parameter defines how many duplicates
 // are acceptable before warning (default 1000 for orchestrator's ephemeral wisps).
