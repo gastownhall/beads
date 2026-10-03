@@ -90,6 +90,8 @@
 20 2 TestEmbeddedLintConcurrent
 20 3 TestEmbeddedList
 20 4 TestEmbeddedListConcurrent
+20 13 TestEmbeddedMaxRowsList
+20 11 TestEmbeddedMaxRowsNonListPaths
 20 5 TestEmbeddedMemory
 20 6 TestEmbeddedMemoryConcurrent
 20 7 TestEmbeddedMigrate
