@@ -551,7 +551,7 @@ func TestPRDoltServerFingerprintRunsOnEveryPR(t *testing.T) {
 		}
 		names = append(names, s.Name)
 	}
-	want := []string{"", "Set up Go", "Install Dolt CLI", "Verify dolt on PATH", "Configure Git and Dolt identity", "Pull Dolt sql-server image", "Test Dolt server fingerprint (container + local)"}
+	want := []string{"", "Set up Go", "Install Dolt CLI", "Verify dolt on PATH", "Configure Git and Dolt identity", "Pull Dolt sql-server image", "Test Dolt server fingerprint (container + local)", "Test guarded JSON batch provider parity"}
 	if !reflect.DeepEqual(names, want) {
 		t.Errorf("%s steps %q, want %q", prFingerprintJob, names, want)
 	}
@@ -560,6 +560,15 @@ func TestPRDoltServerFingerprintRunsOnEveryPR(t *testing.T) {
 	}
 	if got := job.step(t, "Install Dolt CLI").Run; got != "./scripts/ci/install-dolt.sh" {
 		t.Errorf("%s installs dolt with %q", prFingerprintJob, got)
+	}
+	parity := job.step(t, "Test guarded JSON batch provider parity")
+	if parity.Env["BEADS_TEST_REQUIRE_DOLT_CONTAINER"] != "1" || parity.Env["BEADS_TEST_PROXIED_SERVER"] != "1" {
+		t.Fatal("guarded JSON parity must fail on unavailable proxy/container infrastructure")
+	}
+	for _, name := range []string{"TestProxiedServerBatchJSONGuardedPublicationParity", "TestBatchJSONEmbeddedGuardedPublication", "TestProxiedServerBatchJSONManagedGuardedPublication"} {
+		if !strings.Contains(parity.Run, name) {
+			t.Errorf("required provider parity omits %s", name)
+		}
 	}
 	gate := pr.job(t, "ci-gate")
 	env := gate.step(t, "Evaluate CI gate").Env
