@@ -1011,6 +1011,7 @@ go_test(
         "readonly_policy_test.go",
         "readonly_test.go",
         "ready_embedded_test.go",
+        "ready_explain_ids_test.go",
         "ready_input_test.go",
         "ready_max_rows_proxied_test.go",
         "ready_max_rows_test.go",
