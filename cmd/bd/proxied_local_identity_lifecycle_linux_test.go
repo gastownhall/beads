@@ -544,6 +544,9 @@ func startCopiedBDManagedHelper(t *testing.T, bd string, p proxiedProject) manag
 			if err != nil {
 				return
 			}
+			// The helper publishes its identity only after its readiness probe
+			// reads a MySQL greeting.
+			_, _ = conn.Write([]byte("\x0a5.7.9-copied-bd-upstream\x00"))
 			_ = conn.Close()
 		}
 	}()

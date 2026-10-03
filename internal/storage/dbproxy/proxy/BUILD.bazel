@@ -28,6 +28,7 @@ go_library(
         "//internal/atomicfile",
         "//internal/configfile",
         "//internal/debug",
+        "//internal/doltserver",
         "//internal/fdhygiene",
         "//internal/lockfile",
         "//internal/procid",
@@ -70,6 +71,7 @@ go_test(
         "force_stop_linux_test.go",
         "server_epoch_internal_test.go",
         "server_test.go",
+        "waitready_internal_test.go",
     ],
     embed = [":proxy"],
     deps = [

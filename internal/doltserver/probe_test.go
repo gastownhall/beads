@@ -1,6 +1,8 @@
 package doltserver
 
 import (
+	"context"
+	"io"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -202,6 +204,130 @@ func TestDrainAndCloseProbe(t *testing.T) {
 		}
 		if elapsed > 150*time.Millisecond {
 			t.Errorf("DrainAndCloseProbe took %v against a mute peer; want within ~150ms (100ms read deadline)", elapsed)
+		}
+	})
+
+	t.Run("greeting delivered with io.EOF returns true", func(t *testing.T) {
+		if !DrainAndCloseProbe(&eofGreetingConn{}) {
+			t.Errorf("DrainAndCloseProbe returned false for greeting bytes that arrived together with io.EOF")
+		}
+	})
+}
+
+// eofGreetingConn returns the whole greeting together with io.EOF, which
+// io.Reader permits for a peer that greets and closes at once.
+type eofGreetingConn struct {
+	net.Conn // nil: the probe only reads, sets deadlines and closes
+	served   bool
+}
+
+func (c *eofGreetingConn) Read(b []byte) (int, error) {
+	if c.served {
+		return 0, io.EOF
+	}
+	c.served = true
+	return copy(b, fakeMySQLGreeting), io.EOF
+}
+
+func (*eofGreetingConn) SetReadDeadline(time.Time) error { return nil }
+
+func (*eofGreetingConn) Close() error { return nil }
+
+// TestDrainAndCloseProbeContext covers the greeting wait for a server that may
+// be remote: it lasts until ctx's deadline, falls back to the loopback window
+// when ctx has none, and ends as soon as ctx is canceled.
+func TestDrainAndCloseProbeContext(t *testing.T) {
+	// dialPeer accepts one connection on a fresh loopback listener, hands the
+	// server side to serve, and returns the client side.
+	dialPeer := func(t *testing.T, serve func(net.Conn)) net.Conn {
+		t.Helper()
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		go func() {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			serve(conn)
+		}()
+		conn, err := net.DialTimeout("tcp", ln.Addr().String(), time.Second)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		return conn
+	}
+	// mute never writes. It holds the connection until the probe closes it,
+	// or for longer than any wait under test.
+	mute := func(c net.Conn) {
+		_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+		_, _ = io.Copy(io.Discard, c)
+	}
+
+	t.Run("greeting after the loopback window arrives within ctx's deadline", func(t *testing.T) {
+		conn := dialPeer(t, func(c net.Conn) {
+			time.Sleep(300 * time.Millisecond)
+			_, _ = c.Write(fakeMySQLGreeting)
+			time.Sleep(20 * time.Millisecond)
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		if !DrainAndCloseProbeContext(ctx, conn) {
+			t.Errorf("DrainAndCloseProbeContext returned false for a peer that greeted 300ms after the dial, inside ctx's 2s deadline")
+		}
+	})
+
+	t.Run("cancel ends a mute wait early", func(t *testing.T) {
+		conn := dialPeer(t, mute)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		time.AfterFunc(100*time.Millisecond, cancel)
+
+		start := time.Now()
+		greeted := DrainAndCloseProbeContext(ctx, conn)
+		elapsed := time.Since(start)
+
+		if greeted {
+			t.Errorf("DrainAndCloseProbeContext returned true for a mute peer")
+		}
+		if elapsed > time.Second {
+			t.Errorf("DrainAndCloseProbeContext took %v after a cancel at 100ms; want the cancel to end the wait well before ctx's 2s deadline", elapsed)
+		}
+	})
+
+	t.Run("already canceled ctx does not wait", func(t *testing.T) {
+		conn := dialPeer(t, mute)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		cancel()
+
+		start := time.Now()
+		greeted := DrainAndCloseProbeContext(ctx, conn)
+		elapsed := time.Since(start)
+
+		if greeted {
+			t.Errorf("DrainAndCloseProbeContext returned true for a mute peer")
+		}
+		if elapsed > time.Second {
+			t.Errorf("DrainAndCloseProbeContext took %v with an already canceled ctx; want no wait for the greeting", elapsed)
+		}
+	})
+
+	t.Run("without a ctx deadline the loopback window applies", func(t *testing.T) {
+		conn := dialPeer(t, mute)
+
+		start := time.Now()
+		greeted := DrainAndCloseProbeContext(context.Background(), conn)
+		elapsed := time.Since(start)
+
+		if greeted {
+			t.Errorf("DrainAndCloseProbeContext returned true for a mute peer")
+		}
+		if elapsed > time.Second {
+			t.Errorf("DrainAndCloseProbeContext took %v against a mute peer with no ctx deadline; want the ~100ms loopback window, not an unbounded wait", elapsed)
 		}
 	})
 }

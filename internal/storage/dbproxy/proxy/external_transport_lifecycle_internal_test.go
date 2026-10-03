@@ -47,6 +47,7 @@ type externalTransportFixture struct {
 	blackhole bool
 
 	mu        sync.Mutex
+	greeting  []byte // written to the next accepted conn only, then cleared
 	open      map[net.Conn]struct{}
 	accepted  chan net.Conn
 	doneCh    chan struct{}
@@ -86,23 +87,36 @@ func (f *externalTransportFixture) acceptLoop() {
 		}
 		f.mu.Lock()
 		f.open[conn] = struct{}{}
+		greeting := f.greeting
+		f.greeting = nil
 		f.mu.Unlock()
 		select {
 		case f.accepted <- conn:
 		default:
 			_ = conn.Close()
 		}
-		go f.serve(conn)
+		go f.serve(conn, greeting)
 	}
 }
 
-func (f *externalTransportFixture) serve(conn net.Conn) {
+// greetNextAccept arms a one-shot MySQL greeting for the next accepted
+// connection, leaving later connections to the blackhole/echo behavior.
+func (f *externalTransportFixture) greetNextAccept(greeting []byte) {
+	f.mu.Lock()
+	f.greeting = greeting
+	f.mu.Unlock()
+}
+
+func (f *externalTransportFixture) serve(conn net.Conn, greeting []byte) {
 	defer func() {
 		f.mu.Lock()
 		delete(f.open, conn)
 		f.mu.Unlock()
 		_ = conn.Close()
 	}()
+	if len(greeting) > 0 {
+		_, _ = conn.Write(greeting)
+	}
 	if f.blackhole {
 		// Reading, without writing a protocol response, models an upstream
 		// that accepted the transport but never completes a SQL handshake.
@@ -188,6 +202,9 @@ type runningExternalProxy struct {
 
 func startExternalProxy(t *testing.T, fixture *externalTransportFixture) *runningExternalProxy {
 	t.Helper()
+	// The proxy publishes only after its startup readiness probe reads a MySQL
+	// greeting, and that probe is the fixture's next accepted connection.
+	fixture.greetNextAccept(proxyTestGreeting)
 	root := t.TempDir()
 	upstream, err := server.NewExternalDoltServer(externalServerConfig(t, fixture.network, fixture.address))
 	if err != nil {
