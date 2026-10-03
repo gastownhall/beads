@@ -1011,6 +1011,34 @@ func TestBlacksmithSeederGuardedAgainstPullRequest(t *testing.T) {
 	}
 }
 
+// TestMainWorkflowHasNoSameRepoPRReachableTrigger is the direct half of F7c
+// review fix S2's "pin the seeder's trust boundary" ask: belt-and-suspenders
+// alongside the job-level guard in TestBlacksmithSeederGuardedAgainstPullRequest.
+// The guard defuses the vulnerability even if one of these triggers is added
+// to main.yml's `on:` block, but this test catches the trigger addition
+// itself at the workflow-trust-surface level, so a future edit here gets
+// flagged before anyone has to reason about whether the job-level `if:`
+// still holds. (A mutation that only edits `on:`, leaving the job-level `if:`
+// untouched, would otherwise not fail any other test here.)
+func TestMainWorkflowHasNoSameRepoPRReachableTrigger(t *testing.T) {
+	type mainTriggers struct {
+		On map[string]any `yaml:"on"`
+	}
+	var parsed mainTriggers
+	text := readPolicyFile(t, sourceRepoRoot(t), ".github/workflows/main.yml")
+	if err := yaml.Unmarshal([]byte(text), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"pull_request", "pull_request_target", "merge_group", "workflow_run"} {
+		if _, ok := parsed.On[forbidden]; ok {
+			t.Errorf("main.yml's on: has a %q trigger; its blacksmith-setup-go-cache seeder is the ONLY writer every advisory consumer trusts, so this workflow must never become reachable from a same-repo PR/merge-queue event even with the job-level guard as a second layer", forbidden)
+		}
+	}
+	if _, ok := parsed.On["push"]; !ok {
+		t.Errorf("main.yml's on: has no push trigger: %+v", parsed.On)
+	}
+}
+
 // TestAdvisoryBlacksmithConsumersAreCacheRestoreOnly replaces the pre-review
 // TestAdvisoryBlacksmithConsumersKeepImplicitSetupGoCache (F7c review fix
 // B2): each consumer must disable setup-go's own implicit cache on a
