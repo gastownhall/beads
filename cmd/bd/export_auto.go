@@ -1115,6 +1115,10 @@ func scrubGitHookEnvForOS(env []string, goos string) []string {
 	for _, entry := range cleaned {
 		// Prefix policy also drops valueless GIT_CONFIG entries. Without
 		// intentionally preserves valueless exact keys such as GIT_DIR.
+		// Matching this fixed GIT_CONFIG prefix against the raw entry would be
+		// equivalent: the separator cannot occur inside the prefix. EntryKey
+		// keeps environment parsing with execenv, including bare entries and
+		// Windows drive pseudo-variables.
 		key := execenv.EntryKey(entry)
 		if !execenv.KeyHasPrefixForOS(key, "GIT_CONFIG", goos) {
 			out = append(out, entry)
