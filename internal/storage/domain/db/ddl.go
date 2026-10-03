@@ -23,6 +23,9 @@ func ValidateIdentifier(name string) error {
 }
 
 type DDLSQLRepository interface {
+	// DatabaseExists reports whether the named database is present on the
+	// server, matching names by the server's own rule.
+	DatabaseExists(ctx context.Context, database string) (bool, error)
 	CreateDatabaseIfNotExists(ctx context.Context, database string) error
 	// CreateDatabase issues a bare CREATE DATABASE (no IF NOT EXISTS) so the
 	// server arbitrates creation atomically: success proves this call created
@@ -42,6 +45,17 @@ type ddlSQLRepository struct {
 }
 
 var _ DDLSQLRepository = (*ddlSQLRepository)(nil)
+
+func (r *ddlSQLRepository) DatabaseExists(ctx context.Context, database string) (bool, error) {
+	var count int
+	if err := r.runner.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?",
+		database,
+	).Scan(&count); err != nil {
+		return false, fmt.Errorf("db: DatabaseExists: %w", err)
+	}
+	return count > 0, nil
+}
 
 func (r *ddlSQLRepository) CreateDatabaseIfNotExists(ctx context.Context, database string) error {
 	ident, err := quoteIdentifier(database)

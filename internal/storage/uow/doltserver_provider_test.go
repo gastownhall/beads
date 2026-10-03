@@ -108,6 +108,7 @@ func TestNewDoltServerUOWProvider_HappyPath(t *testing.T) {
 		0,
 		false,
 		"",
+		WithCreateIfMissing(true),
 	)
 
 	require.NoError(t, err)
@@ -162,6 +163,7 @@ func TestNewDoltServerUOWProvider_ConcurrentInstantiation(t *testing.T) {
 				0,
 				false,
 				"",
+				WithCreateIfMissing(true),
 			)
 			results[i] = result{provider: p, err: err}
 		}()
