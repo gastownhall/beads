@@ -725,6 +725,27 @@ func TestDoltTestcontainerStepsDisableRyuk(t *testing.T) {
 	}
 }
 
+// TestNightlyFullTestRunsEmbeddedDoltBatchApplySuite pins the nightly
+// full-test job's embedded-Dolt step: it must set BEADS_TEST_EMBEDDED_DOLT=1
+// (the gate skipUnlessEmbeddedDolt checks) and run exactly
+// TestBatchApplyContract and TestLargeBatchApplyWallClock_Embedded, non-race,
+// after the main "Full Test Suite" step. That main step never sets
+// BEADS_TEST_EMBEDDED_DOLT, so without this step the nightly job would never
+// exercise a real 1000-item apply through the embedded backend at all — see
+// the step's own comment in nightly.yml for why non-race and why these two
+// tests specifically.
+func TestNightlyFullTestRunsEmbeddedDoltBatchApplySuite(t *testing.T) {
+	job := readCIWorkflow(t, "nightly.yml").job(t, "full-test")
+	const stepName = "Embedded Dolt batch-apply suite (non-race)"
+	const wantRun = "go test -tags gms_pure_go -run '^(TestBatchApplyContract|TestLargeBatchApplyWallClock_Embedded)$' ./internal/storage/embeddeddolt"
+	assertStepRunsExactly(t, job, stepName, wantRun)
+	assertStepEnvValue(t, job, stepName, "BEADS_TEST_EMBEDDED_DOLT", "1")
+	assertStepsBefore(t, job, []string{"Full Test Suite (including integration tests)"}, []string{stepName})
+	if strings.Contains(wantRun, "-race") {
+		t.Errorf("embedded-dolt nightly step run = %q, must stay non-race (race dramatically inflates this backend's own wall-clock)", wantRun)
+	}
+}
+
 func TestPRPreflightPlatformsRunsTestScriptPrebuiltBinaryContract(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "pr-preflight-platforms")
