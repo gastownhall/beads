@@ -468,6 +468,35 @@ func TestEmbeddedGateCreate(t *testing.T) {
 		}
 	})
 
+	t.Run("create_gate_with_custom_title", func(t *testing.T) {
+		// --title must win over both derived forms: "Gate: <type>" and
+		// "Gate: <type> <await-id>" (buildGateIssue precedence, PR #5099).
+		task := bdCreate(t, bd, dir, "Task for titled gate", "--type", "task")
+
+		cmd := exec.Command(bd, "gate", "create", "--blocks", task.ID,
+			"--type", "gh:pr", "--await-id", "77",
+			"--title", "Gate: awaiting owner sign-off", "--json")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd gate create --title failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+
+		var gate types.Issue
+		s := strings.TrimSpace(stdout.String())
+		start := strings.Index(s, "{")
+		if err := json.Unmarshal([]byte(s[start:]), &gate); err != nil {
+			t.Fatalf("parse gate JSON: %v\n%s", err, s)
+		}
+		if gate.Title != "Gate: awaiting owner sign-off" {
+			t.Errorf("expected explicit --title to override the derived title, got %q", gate.Title)
+		}
+		if gate.AwaitType != "gh:pr" || gate.AwaitID != "77" {
+			t.Errorf("await fields must be unaffected by --title, got type=%q id=%q", gate.AwaitType, gate.AwaitID)
+		}
+	})
+
 	t.Run("create_gate_blocks_ready", func(t *testing.T) {
 		// Use a fresh db so ready output isn't polluted by other subtests
 		freshDir, freshBeads, _ := bdInit(t, bd, "--prefix", "gr")
