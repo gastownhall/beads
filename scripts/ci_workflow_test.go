@@ -3321,6 +3321,34 @@ func bazelRuleBlock(build, name string) string {
 	return build[start : i+end+3]
 }
 
+// bazelProxiedShardCount returns cmd/bd:bd_proxied_test's own shard_count
+// from cmd/bd/BUILD.bazel: the single source of truth for the Bazel-only
+// bazel-proxied lane's shard split, which no longer has to equal PR
+// Risk's/main.yml's legacy test-proxied-cmd jobs' matrix size (F2). Under
+// `bazel test`, scripts_test's runfiles hold no other package's BUILD file,
+// so this falls back to the literal the structural checks below pin under
+// plain `go test` (TestBazelDoltServerTiersMirrorPRRisk and
+// TestBazelRetiredLanesCheckListedTestsRan both fail if cmd/bd/BUILD.bazel's
+// shard_count ever drifts from this fallback).
+func bazelProxiedShardCount(t *testing.T) int {
+	t.Helper()
+	const bazelTestFallback = 30
+	if os.Getenv("TEST_SRCDIR") != "" {
+		return bazelTestFallback
+	}
+	root := sourceRepoRoot(t)
+	rule := bazelRuleBlock(readPolicyFile(t, root, "cmd/bd/BUILD.bazel"), "bd_proxied_test")
+	m := regexp.MustCompile(`(?m)^    shard_count = (\d+),$`).FindStringSubmatch(rule)
+	if m == nil {
+		t.Fatalf("cmd/bd:bd_proxied_test has no `shard_count = N,` in cmd/bd/BUILD.bazel:\n%s", rule)
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatalf("cmd/bd:bd_proxied_test shard_count: %v", err)
+	}
+	return n
+}
+
 // bazel-integration mirrors main.yml's integration jobs with the unmodified
 // --config=integration (whose .bazelrc filter and flags
 // TestBazelrcIntegrationLane pins): no extra filter, selector or remote
@@ -3521,28 +3549,38 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 
 	type shardTier struct {
 		workflow, job, step, script, binVar, pkg, target, env string
-		// buildShardCount overrides the expected BUILD.bazel shard_count for
-		// this tier's target when it must not equal this workflow/job's own
-		// matrix size. Zero means "same as this tier's matrix shard count"
-		// (the common case: the Bazel target and this legacy job share one
-		// manifest block and one shard_count).
-		buildShardCount int
+		// noBuildShardPin is true when this tier's target's BUILD.bazel
+		// shard_count is allowed to differ from this workflow/job's own
+		// matrix size, because a separate Bazel-only lane shards that same
+		// target on its own manifest block (F2). Reading the expected value
+		// back out of the same BUILD.bazel file we are about to check would
+		// be tautological, so these tiers skip the `shard_count = N,`
+		// sub-assertion below entirely; the real cross-file pin for them
+		// lives in pr_risk_bazel_coverage_test.go, which ties BUILD.bazel's
+		// shard_count to bazel.yml's check_shard_coverage.py argument.
+		noBuildShardPin bool
 	}
 	tiers := []shardTier{
 		// pr-risk.yml/main.yml's own "Test (Proxied Dolt Cmd N/15)" matrix
 		// stays 15 (the legacy, frozen bd-init-cost-proxy manifest block),
-		// but cmd/bd:bd_proxied_test's shard_count is 30: the Bazel-only
-		// bazel-proxied job (bazel.yml) runs that target with its own
-		// duration-balanced 30-shard manifest block, not these jobs'. Shard k
-		// in one split is not shard k in the other; see cmd/bd/BUILD.bazel's
-		// bd_proxied_test comment and bazel.yml's bazel-proxied comment.
-		{"pr-risk.yml", "test-proxied-cmd", "Test proxied-server cmd shard", ".github/scripts/proxied-test-shard.sh", "BEADS_TEST_CMD_BINARY", "cmd/bd", "bd_proxied_test", "BEADS_TEST_PROXIED_SERVER", 30},
-		{"main.yml", "test-proxied-cmd", "Test proxied-server cmd shard", ".github/scripts/proxied-test-shard.sh", "BEADS_TEST_CMD_BINARY", "cmd/bd", "bd_proxied_test", "BEADS_TEST_PROXIED_SERVER", 30},
-		{"pr-risk.yml", "test-server-storage-full", "Test", ".github/scripts/server-storage-test-shard.sh", "BEADS_TEST_SERVER_TEST_BINARY", "internal/storage/dolt", "dolt_server_full_test", "BEADS_TEST_ENV_RUN_DOLT", 0},
+		// but cmd/bd:bd_proxied_test's shard_count need not match: the
+		// Bazel-only bazel-proxied job (bazel.yml) runs that target with its
+		// own duration-balanced manifest block, not these jobs'. Shard k in
+		// one split is not shard k in the other; see cmd/bd/BUILD.bazel's
+		// bd_proxied_test comment and bazel.yml's bazel-proxied comment. Both
+		// matrices are still required (below, after this loop) to equal each
+		// other and the legacy manifest block's total.
+		{"pr-risk.yml", "test-proxied-cmd", "Test proxied-server cmd shard", ".github/scripts/proxied-test-shard.sh", "BEADS_TEST_CMD_BINARY", "cmd/bd", "bd_proxied_test", "BEADS_TEST_PROXIED_SERVER", true},
+		{"main.yml", "test-proxied-cmd", "Test proxied-server cmd shard", ".github/scripts/proxied-test-shard.sh", "BEADS_TEST_CMD_BINARY", "cmd/bd", "bd_proxied_test", "BEADS_TEST_PROXIED_SERVER", true},
+		{"pr-risk.yml", "test-server-storage-full", "Test", ".github/scripts/server-storage-test-shard.sh", "BEADS_TEST_SERVER_TEST_BINARY", "internal/storage/dolt", "dolt_server_full_test", "BEADS_TEST_ENV_RUN_DOLT", false},
 	}
+	proxiedMatrixLen := map[string]int{}
 	for _, c := range tiers {
 		j := readCIWorkflow(t, c.workflow).job(t, c.job)
 		shards := len(j.Strategy.Matrix.Shard)
+		if c.target == "bd_proxied_test" {
+			proxiedMatrixLen[c.workflow] = shards
+		}
 		step := j.step(t, c.step)
 		if want := "bash " + c.script + " ${{ matrix.shard }} " + strconv.Itoa(shards); strings.TrimSpace(step.Run) != want {
 			t.Errorf("%s %s runs %q, want %q", c.workflow, c.job, step.Run, want)
@@ -3553,21 +3591,21 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 		if os.Getenv("TEST_SRCDIR") != "" {
 			continue // scripts_test's runfiles hold no other package's BUILD
 		}
-		buildShards := c.buildShardCount
-		if buildShards == 0 {
-			buildShards = shards
-		}
+		buildShards := shards
 		root := sourceRepoRoot(t)
 		rule := bazelRuleBlock(readPolicyFile(t, root, c.pkg+"/BUILD.bazel"), c.target)
-		for _, want := range []string{
+		want := []string{
 			`srcs = ["//tools/bazel:go_test_manifest_shard.sh"],`,
 			`"$(rootpath //:` + c.script + `)",`,
 			`"` + c.binVar + `",`,
-			"shard_count = " + strconv.Itoa(buildShards) + ",",
 			`timeout = "eternal",`,
-		} {
-			if !strings.Contains(rule, want) {
-				t.Errorf("%s:%s does not contain %q (%s %s):\n%s", c.pkg, c.target, want, c.workflow, c.job, rule)
+		}
+		if !c.noBuildShardPin {
+			want = append(want, "shard_count = "+strconv.Itoa(buildShards)+",")
+		}
+		for _, w := range want {
+			if !strings.Contains(rule, w) {
+				t.Errorf("%s:%s does not contain %q (%s %s):\n%s", c.pkg, c.target, w, c.workflow, c.job, rule)
 			}
 		}
 		mm := shardManifestDefault.FindStringSubmatch(readPolicyFile(t, root, c.script))
@@ -3580,6 +3618,13 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 				t.Errorf("%s:%s data lacks //:%s (without the manifest every shard falls back to hashing):\n%s", c.pkg, c.target, file, data)
 			}
 		}
+	}
+	// S1: pr-risk.yml's and main.yml's legacy test-proxied-cmd matrices must
+	// stay equal to each other (they share one frozen manifest block); a
+	// divergence must fail here even though cmd/bd:bd_proxied_test's own
+	// shard_count is no longer pinned to either of them (above).
+	if a, b := proxiedMatrixLen["pr-risk.yml"], proxiedMatrixLen["main.yml"]; a != b {
+		t.Errorf("pr-risk.yml test-proxied-cmd has %d shards, main.yml has %d; these share one legacy manifest block and must match", a, b)
 	}
 
 	conf := risk.job(t, "test-server-storage").step(t, "Test").Run
