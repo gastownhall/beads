@@ -186,6 +186,13 @@ func (c *roleCommenter) AddComment(_ context.Context, req issueops.AddCommentReq
 	return issueops.AddCommentResult{Comment: c.comment}, nil
 }
 
+func (c *roleCommenter) DeleteComment(_ context.Context, req issueops.DeleteCommentRequest) (issueops.DeleteCommentResult, error) {
+	if c.err != nil {
+		return issueops.DeleteCommentResult{}, c.err
+	}
+	return issueops.DeleteCommentResult{Comment: c.comment}, nil
+}
+
 func (c *roleCommenter) commentRequests() []issueops.AddCommentRequest {
 	c.mu.Lock()
 	defer c.mu.Unlock()
