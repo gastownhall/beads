@@ -15,6 +15,7 @@ on:
       - '.buildflags'
       - '.github/workflows/migration-test.yml'
       - 'scripts/migration-test/**'
+      - 'scripts/migrate-legacy-to-current.sh'
   push:
     tags: ['v*']
   workflow_dispatch:
@@ -31,15 +32,21 @@ env:
 jobs:
   historical-upgrades:
     name: Historical ${{ matrix.shard }} shard → candidate
-    # v0.55.4 is dynamically linked against the ICU version shipped here, and
-    # blacksmith-*-ubuntu-2404 is Ubuntu 24.04, so the libicu74 pin still
-    # holds there too.
+    # v0.55.4 is dynamically linked against the ICU version shipped by Ubuntu
+    # 24.04's libicu74 package. blacksmith-*-ubuntu-2404 IS 24.04, so the pin
+    # holds there. The non-Blacksmith fallback below is pinned to the literal
+    # `ubuntu-24.04` label (NOT `ubuntu-latest`) for the same reason:
+    # actions/runner-images#14748 schedules `ubuntu-latest` to move from 24.04
+    # to 26.04 starting 2026-10-19, and 26.04 drops libicu74 entirely, which
+    # would break the "Install test dependencies" step below and the v0.55.4
+    # fixture's ICU ABI even if it didn't. Do not change this fallback to
+    # `ubuntu-latest`; see sameRepoBlacksmith4vcpuNoble in ci_workflow_test.go.
     # F7c: 14 matrix legs (one per historical version) folded into 3 shards.
     # Each shard builds the candidate once, installs its own dependencies
     # once, then loops over `run.sh --version` for every version it owns,
     # collecting failures so one bad version does not hide the rest (see
     # "Verify explicit historical upgrades" below).
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -67,9 +74,30 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: ${{ runner.environment != 'self-hosted' }}
+
+      # Blacksmith runners cannot see GitHub-hosted setup-go cache entries, so
+      # setup-go's own `cache: true` (used above on ubuntu-24.04/ubuntu-latest)
+      # is disabled here and this job restores from the Blacksmith-side cache
+      # main.yml's blacksmith-setup-go-cache job seeds on every push to main.
+      # Restore-only by design (see B2 in the F7c implementation report): a
+      # same-repo PR can read this cache but never write to it, so a PR cannot
+      # poison what main's seeder or other PRs read.
+      - name: Restore Blacksmith setup-go cache
+        if: runner.environment == 'self-hosted'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
+            blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
       - name: Install test dependencies
         # Backstop for a hang that escapes the inner `timeout` calls, so it has
@@ -142,6 +170,10 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.25.0'
+          # No Blacksmith restore step for this narrow one-off (src shard
+          # only, a single version): accepting a cold build here rather than
+          # adding a second seeded cache keyspace for one matrix leg.
+          cache: ${{ runner.environment != 'self-hosted' }}
 
       # Each version runs as its own `run.sh` subprocess: the underlying
       # historical-dolt-upgrade-test.sh uses `set -euo pipefail` and aborts at
@@ -156,16 +188,39 @@ jobs:
           GIT_CONFIG_NOSYSTEM: "1"
           DOLT_BIN: ${{ github.workspace }}/.tools/dolt/bin/dolt
           SHARD_VERSIONS: ${{ matrix.versions }}
+          SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
           mapfile -t versions < <(jq -r '.[]' <<<"$SHARD_VERSIONS")
+          # Fail closed: `jq -r '.[]'` over an empty array, a non-array
+          # scalar, or unparsable JSON all produce zero lines rather than a
+          # non-zero exit under process substitution, so mapfile would
+          # otherwise silently succeed with an empty $versions and this step
+          # would report green having verified nothing.
+          if [ "${#versions[@]}" -eq 0 ]; then
+            echo "::error::shard $SHARD resolved to zero versions from SHARD_VERSIONS=$SHARD_VERSIONS; failing closed instead of reporting a false pass"
+            exit 1
+          fi
           failed=0
+          failed_versions=()
           for v in "${versions[@]}"; do
             echo "::group::Historical upgrade: $v"
-            if ! ./scripts/migration-test/run.sh --version "$v"; then
+            # 8m per version plus a 30s SIGKILL grace: observed real runs take
+            # well under a minute, so this only trips on a genuine hang, and
+            # bounds the damage to one version's budget instead of a stuck
+            # subprocess silently consuming the rest of the job's 20m timeout
+            # and hiding every version queued after it.
+            if ! timeout --kill-after=30s 8m ./scripts/migration-test/run.sh --version "$v"; then
               echo "::error::historical upgrade failed for $v"
               failed=1
+              failed_versions+=("$v")
             fi
             echo "::endgroup::"
           done
+          if [ "${#failed_versions[@]}" -gt 0 ]; then
+            {
+              echo "### Failed historical upgrades (shard $SHARD)"
+              printf -- '- %s\n' "${failed_versions[@]}"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
           exit "$failed"

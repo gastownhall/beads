@@ -64,9 +64,23 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: ${{ runner.environment != 'self-hosted' }}
+
+      - name: Restore Blacksmith setup-go cache
+        if: runner.environment == 'self-hosted'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
+            blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
       - name: Configure Git
         run: |
@@ -83,8 +97,14 @@ jobs:
           echo "versions=$versions" >> "$GITHUB_OUTPUT"
           echo "hash=$hash" >> "$GITHUB_OUTPUT"
 
-      - name: Cache previous release binaries
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+      # actions/cache (bare) auto-saves at job end on any key miss, which
+      # would let a same-repo PR that changes the chunk's version set write a
+      # binaries cache entry another PR (or a later run) could then read back
+      # without re-downloading or re-verifying it. Restore-only here; the
+      # matching save below is gated off pull_request so only push/dispatch
+      # runs can populate this cache (B2, F7c implementation report).
+      - name: Restore previous release binaries cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: ~/.cache/beads-regression
           key: smoke-binaries-${{ steps.chunk.outputs.hash }}-${{ runner.os }}
@@ -97,6 +117,13 @@ jobs:
           CANDIDATE_BIN: /tmp/bd-candidate
           SMOKE_VERSIONS: ${{ steps.chunk.outputs.versions }}
         run: ./scripts/upgrade-smoke-test.sh
+
+      - name: Save previous release binaries cache
+        if: github.event_name != 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+        with:
+          path: ~/.cache/beads-regression
+          key: smoke-binaries-${{ steps.chunk.outputs.hash }}-${{ runner.os }}
 
   versions:
     name: Resolve versions to test

@@ -79,10 +79,24 @@ jobs:
         run: echo "${{ steps.detect.outputs.reason }}"
 
       - name: Set up Go
+        id: setup-go
         if: steps.detect.outputs.run_regression == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: ${{ runner.environment != 'self-hosted' }}
+
+      - name: Restore Blacksmith setup-go cache
+        if: steps.detect.outputs.run_regression == 'true' && runner.environment == 'self-hosted'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
+            blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
       - name: Configure Git
         if: steps.detect.outputs.run_regression == 'true'
@@ -110,9 +124,14 @@ jobs:
         if: steps.detect.outputs.run_regression == 'true'
         run: ./scripts/ci/pull-dolt-image.sh
 
-      - name: Cache baseline binary
+      # Restore-only: actions/cache (bare) auto-saves on any key miss, which
+      # would let a same-repo PR that bumps BASELINE_VERSION write a baseline
+      # binary cache entry a later PR or main could read back unverified. The
+      # matching save below only runs off pull_request (B2, F7c implementation
+      # report).
+      - name: Restore baseline binary cache
         if: steps.detect.outputs.run_regression == 'true'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: ~/.cache/beads-regression
           key: regression-baseline-${{ hashFiles('tests/regression/BASELINE_VERSION') }}
@@ -132,3 +151,10 @@ jobs:
       - name: Run regression tests
         if: steps.detect.outputs.run_regression == 'true'
         run: go test -tags=regression,gms_pure_go -timeout=40m -v ./tests/regression/...
+
+      - name: Save baseline binary cache
+        if: steps.detect.outputs.run_regression == 'true' && github.event_name != 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+        with:
+          path: ~/.cache/beads-regression
+          key: regression-baseline-${{ hashFiles('tests/regression/BASELINE_VERSION') }}
