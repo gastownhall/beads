@@ -1234,6 +1234,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An epic that blocks on its own children no longer hides them from `bd
+  ready`** ([#6506](https://github.com/gastownhall/beads/issues/6506)). A
+  parent-child edge now propagates only a parent's *exogenous* blockedness —
+  blockedness whose cause lies outside the parent's own subtree — so the
+  close-gate idiom, a parent carrying `blocks` edges onto its own children (or
+  grandchildren) so it cannot close before them, stops darkening the very work
+  it is waiting for. The parent itself stays blocked. One case is knowingly
+  left alone, always in the direction of showing work rather than hiding it: a
+  sub-epic blocked BOTH by its own children AND by an exogenously blocked
+  ancestor keeps its children visible, where the contract would darken them
+  (tracked as [#6601](https://github.com/gastownhall/beads/issues/6601)).
+  "Inside my own subtree" is also decided to a fixed depth of **four**
+  parent-child levels — epic → sub-epic → leg → task — so a parent that
+  blocks on something deeper than that still darkens its whole subtree, exactly
+  as it did before this fix; that depth is a measured trade (the
+  bounded walk is a fixed chain of index probes, where a recursive one cost
+  7.5x per evaluation) and raising it is a one-constant change. Existing stores
+  repair on the next write that touches the hierarchy, or with
+  `bd doctor --fix`.
+- `bd dep add` no longer explains its refusal of a blocking edge onto your own
+  descendant by claiming the block would cascade down and never clear — it
+  does not, as of the fix above. The refusal stands, and now names the
+  sanctioned way to say it: a waits-for gate over the children.
+
 - **`routes.jsonl` prefixes containing a hyphen now route**
   ([#5048](https://github.com/gastownhall/beads/issues/5048)). Prefix routing
   cut the bead ID at its first `-` and required an exact match, so a route

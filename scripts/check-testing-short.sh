@@ -11,6 +11,7 @@ internal/testutil/fixtures/fixtures_test.go::TestXLargeDolt
 internal/testutil/fixtures/fixtures_test.go::TestLargeFromJSONL
 internal/storage/dolt/concurrent_test.go::TestHighContentionStress
 internal/storage/dolt/concurrent_test.go::TestConcurrentWorkQueueDrain
+internal/storage/dolt/blocked_scale_bench_test.go::TestBlockedStateScaleTiming
 internal/storage/dolt/lease_test.go::TestConcurrentHeartbeatReclaimClose
 internal/storage/uow/lostupdate_dolt_test.go::TestUOW_ConcurrentMergeOps_NoLostUpdate
 internal/workapi/sweep_test.go::TestCandidateIDMatcherLargeFixture

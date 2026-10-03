@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
@@ -335,6 +336,150 @@ func CheckChildParentDependencies(path string) DoctorCheck {
 	defer func() { _ = store.Close() }()
 
 	return checkChildParentDependenciesDB(db)
+}
+
+// detailMaxBytes is the budget for a DoctorCheck Detail line: enough to show
+// the shape of a finding, short enough not to bury the report.
+const detailMaxBytes = 200
+
+// truncateDetail cuts a detail line to detailMaxBytes WITHOUT splitting a
+// rune. The gate inventory joins its entries with U+2192 (three bytes), so a
+// plain detail[:200] lands mid-rune about two times in three and puts invalid
+// UTF-8 into `bd doctor --json`, where it is no longer a display nuisance but
+// a value a consumer has to decode.
+func truncateDetail(detail string) string {
+	if len(detail) <= detailMaxBytes {
+		return detail
+	}
+	cut := detailMaxBytes
+	for cut > 0 && !utf8.RuneStart(detail[cut]) {
+		cut--
+	}
+	return detail[:cut] + "..."
+}
+
+// CheckParentBlocksOwnChild reports parents that carry a blocking edge onto one
+// of their own parent-child descendants — the "close gate on the epic" idiom,
+// where P blocks on C1 and C2 (or on a grandchild) so P cannot close before
+// them.
+//
+// It is INFORMATIONAL and has no fix. Before gastownhall/beads#6506 these
+// edges were a trap: the parent's blocked bit cascaded to its children
+// whatever set it, so the gate hid the very children it was waiting for and
+// nothing in the subtree could ever become ready. The cascade now propagates
+// only exogenous blockedness, so the edges are harmless and frequently
+// intentional; what an operator wants from doctor is the inventory — which
+// beads in this store use the idiom — not a repair.
+func CheckParentBlocksOwnChild(path string) DoctorCheck {
+	beadsDir := ResolveBeadsDirForRepo(path)
+
+	db, store, err := openStoreDB(beadsDir)
+	if err != nil {
+		return DoctorCheck{
+			Name:     "Parent Close Gates",
+			Status:   StatusOK,
+			Message:  "N/A (no database)",
+			Category: CategoryMetadata,
+		}
+	}
+	defer func() { _ = store.Close() }()
+
+	return checkParentBlocksOwnChildDB(db)
+}
+
+// checkParentBlocksOwnChildDB is the core logic for CheckParentBlocksOwnChild.
+// The pair is symmetric-but-opposite to checkChildParentDependenciesDB above:
+// that one finds a CHILD blocking on its PARENT (still a deadlock, still
+// fixable); this one finds a PARENT blocking on its own DESCENDANT, and
+// matches on real parent-child edges rather than on dotted-ID ancestry,
+// because the close-gate idiom is wired with explicit edges between unrelated
+// ids. "Descendant" is walked to the same four parent-child levels the cascade
+// fix uses to decide "inside my own subtree" (issueops subtreeWalkDepth), so
+// the inventory and the fix agree on which gates are gates: a parent that
+// blocks on its grandchild is listed, one that blocks five levels down is not.
+func checkParentBlocksOwnChildDB(db *sql.DB) DoctorCheck {
+	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
+	query := `
+		SELECT DISTINCT b.issue_id, b.depends_on_id
+		FROM (` + doctorDependencyUnionSQL() + `) b
+		JOIN (
+		    SELECT l1.depends_on_id AS anc, l1.issue_id AS des
+		    FROM (` + doctorDependencyUnionSQL() + `) l1
+		    WHERE l1.type = 'parent-child'
+		  UNION
+		    SELECT l1.depends_on_id, l2.issue_id
+		    FROM (` + doctorDependencyUnionSQL() + `) l1
+		    JOIN (` + doctorDependencyUnionSQL() + `) l2
+		      ON l2.type = 'parent-child' AND l2.depends_on_id = l1.issue_id
+		    WHERE l1.type = 'parent-child'
+		  UNION
+		    SELECT l1.depends_on_id, l3.issue_id
+		    FROM (` + doctorDependencyUnionSQL() + `) l1
+		    JOIN (` + doctorDependencyUnionSQL() + `) l2
+		      ON l2.type = 'parent-child' AND l2.depends_on_id = l1.issue_id
+		    JOIN (` + doctorDependencyUnionSQL() + `) l3
+		      ON l3.type = 'parent-child' AND l3.depends_on_id = l2.issue_id
+		    WHERE l1.type = 'parent-child'
+		  UNION
+		    SELECT l1.depends_on_id, l4.issue_id
+		    FROM (` + doctorDependencyUnionSQL() + `) l1
+		    JOIN (` + doctorDependencyUnionSQL() + `) l2
+		      ON l2.type = 'parent-child' AND l2.depends_on_id = l1.issue_id
+		    JOIN (` + doctorDependencyUnionSQL() + `) l3
+		      ON l3.type = 'parent-child' AND l3.depends_on_id = l2.issue_id
+		    JOIN (` + doctorDependencyUnionSQL() + `) l4
+		      ON l4.type = 'parent-child' AND l4.depends_on_id = l3.issue_id
+		    WHERE l1.type = 'parent-child'
+		) d ON d.anc = b.issue_id AND d.des = b.depends_on_id
+		WHERE b.type IN ('blocks', 'conditional-blocks')
+		ORDER BY b.issue_id, b.depends_on_id
+	`
+	rows, err := db.Query(query)
+	if err != nil {
+		return DoctorCheck{
+			Name:     "Parent Close Gates",
+			Status:   StatusOK,
+			Message:  "N/A (query failed)",
+			Category: CategoryMetadata,
+		}
+	}
+	defer rows.Close()
+
+	var gates []string
+	for rows.Next() {
+		var issueID, dependsOnID string
+		if err := rows.Scan(&issueID, &dependsOnID); err == nil {
+			gates = append(gates, fmt.Sprintf("%s→%s", issueID, dependsOnID))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return DoctorCheck{
+			Name:     "Parent Close Gates",
+			Status:   StatusOK,
+			Message:  "N/A (row iteration error)",
+			Detail:   err.Error(),
+			Category: CategoryMetadata,
+		}
+	}
+
+	if len(gates) == 0 {
+		return DoctorCheck{
+			Name:     "Parent Close Gates",
+			Status:   StatusOK,
+			Message:  "No parent→own-descendant blocking edges",
+			Category: CategoryMetadata,
+		}
+	}
+
+	detail := truncateDetail(strings.Join(gates, ", "))
+
+	return DoctorCheck{
+		Name:     "Parent Close Gates",
+		Status:   StatusOK,
+		Message:  fmt.Sprintf("%d parent→own-descendant blocking edge(s) (informational: the children stay in bd ready)", len(gates)),
+		Detail:   detail,
+		Category: CategoryMetadata,
+	}
 }
 
 // checkDoltConflicts queries the Dolt server for unresolved merge conflicts (GH-2249).
