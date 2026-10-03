@@ -127,13 +127,18 @@ func RecordProvenanceEventInTx(ctx context.Context, tx *sql.Tx, ev types.Provena
 		// (the occurred_at column is bare DATETIME, second precision).
 		occurredAt = ev.OccurredAt.UTC().Truncate(time.Second)
 	}
+	// Bind ingest time explicitly in UTC. provenance_events.created_at is a
+	// timezone-less DATETIME, so relying on DEFAULT CURRENT_TIMESTAMP would
+	// persist the database session's local wall clock and later readers could
+	// mislabel that value as UTC. Whole-second precision matches DATETIME(0).
+	createdAt := time.Now().UTC().Truncate(time.Second)
 
 	result, err := tx.ExecContext(ctx, `
 		INSERT IGNORE INTO provenance_events
-			(id, issue_id, kind, actor, ref, ref_kind, payload, source, occurred_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			(id, issue_id, kind, actor, ref, ref_kind, payload, source, occurred_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, id, ev.IssueID, string(ev.Kind), NullStringPtr(ev.Actor), NullStringPtr(ev.Ref),
-		NullStringPtr(ev.RefKind), NullStringPtr(ev.Payload), ev.Source, occurredAt)
+		NullStringPtr(ev.RefKind), NullStringPtr(ev.Payload), ev.Source, occurredAt, createdAt)
 	if err != nil {
 		return "", false, fmt.Errorf("recording provenance event: %w", err)
 	}
