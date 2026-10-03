@@ -116,6 +116,21 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      # F4.3: the non-race GOCACHE this job saves is also what the PR
+      # preflight/doc-freshness ubuntu legs restore. Compiling (not running;
+      # `-c -o /dev/null` discards the binary) the packages those legs test
+      # keeps their first post-restore build from paying full compile cost,
+      # without changing what this job itself builds or tests above.
+      - name: Warm non-race Go build cache (test-only packages)
+        if: steps.restore-non-race-go-build-cache.outputs.cache-hit != 'true'
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
+        run: |
+          go test -c -o /dev/null -tags gms_pure_go ./cmd/bd
+          go test -c -o /dev/null -tags gms_pure_go ./scripts
+          go test -c -o /dev/null -tags integration,gms_pure_go ./scripts
+          go test -c -o /dev/null -tags integration,gms_pure_go ./scripts/gitattributespolicy
+
       - name: Save Go module cache
         if: steps.restore-go-module-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -129,6 +144,87 @@ jobs:
         with:
           path: ${{ runner.temp }}/go-cache/non-race
           key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+
+  # F4.7: pr.yml's `windows-test-binaries` job only restores the module cache
+  # and the Windows cross-compile GOCACHE; PR workflows never save caches
+  # (forks and same-repo PRs alike would otherwise be able to poison a
+  # shared key). This is the seeder, mirroring build-artifacts' and test's
+  # module/GOCACHE save pattern for the one new cache key xcompile added.
+  #
+  # One plain ubuntu-latest leg, not a Blacksmith/GitHub-hosted matrix: the
+  # cache keys above are scoped by `runner.os`/`runner.arch` (Linux/X64),
+  # which is identical whether pr.yml's windows-test-binaries job later lands
+  # on `blacksmith-8vcpu-ubuntu-2404` (same-repo PRs) or `ubuntu-latest`
+  # (forks/Dependabot) -- same as every other Go build-cache key in this
+  # repo, which is already restored across differently-labeled runners of
+  # the same OS/arch without a second saver leg. A literal Blacksmith label
+  # in a matrix array (unlike the `cond && 'label' || 'ubuntu-latest'`
+  # expression form used elsewhere) also isn't resolvable by actionlint and
+  # fails its unknown-runner-label check.
+  windows-test-binaries-cache:
+    name: Save Windows test binaries cache
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        id: restore-go-module-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Install mingw cross-compiler
+        timeout-minutes: 12
+        run: |
+          updated=""
+          for attempt in 1 2 3; do
+            if sudo timeout 120 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update; then
+              updated=yes
+              break
+            fi
+            echo "::warning::apt-get update attempt $attempt failed or timed out"
+            if [ "$attempt" -lt 3 ]; then sleep 10; fi
+          done
+          if [ -z "$updated" ]; then
+            echo "::warning::apt-get update failed after 3 attempts; proceeding with cached index"
+          fi
+          sudo timeout 300 apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Restore Go build cache (Windows cross-compile)
+        id: restore-xcompile-go-build-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/xcompile-windows-amd64
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-xcompile-windows-amd64-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-xcompile-windows-amd64-
+
+      - name: Build Windows test binaries
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/xcompile-windows-amd64
+        run: bash scripts/ci/build-windows-test-binaries.sh "$RUNNER_TEMP/win-bin"
+
+      - name: Save Go module cache
+        if: ${{ !cancelled() && steps.restore-go-module-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+
+      - name: Save Go build cache (Windows cross-compile)
+        if: ${{ !cancelled() && steps.restore-xcompile-go-build-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/xcompile-windows-amd64
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-xcompile-windows-amd64-${{ github.sha }}
 
   # Fast shell/Make guard for direct source-time build-tag declarations.
   # Workflow `run` steps are checked structurally in the required policy wrapper.
@@ -696,6 +792,22 @@ jobs:
         with:
           path: ~/go/pkg/mod
           key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+
+      # F4.3: this is the only macOS build-cache saver in the repo, and the
+      # PR preflight/doc-freshness macOS legs restore it. Compiling (not
+      # running; `-c -o /dev/null` discards the binary) the packages those
+      # legs test keeps their first post-restore build from paying full
+      # compile cost, without changing what this job itself builds or tests
+      # above.
+      - name: Warm non-race Go build cache (test-only packages)
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && steps.restore-non-race-go-build-cache.outputs.cache-hit != 'true' }}
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
+        run: |
+          go test -c -o /dev/null -tags gms_pure_go ./cmd/bd
+          go test -c -o /dev/null -tags gms_pure_go ./scripts
+          go test -c -o /dev/null -tags integration,gms_pure_go ./scripts
+          go test -c -o /dev/null -tags integration,gms_pure_go ./scripts/gitattributespolicy
 
       - name: Save non-race Go build cache
         if: ${{ !cancelled() && matrix.os == 'macos-latest' && steps.restore-non-race-go-build-cache.outputs.cache-hit != 'true' }}

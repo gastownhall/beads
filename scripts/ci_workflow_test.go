@@ -873,13 +873,11 @@ func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 	const (
 		workspaceBDBinary = "${{ github.workspace }}/bd"
 		buildCommand      = "go build -v -tags gms_pure_go ./cmd/bd"
-		// -timeout=30m is pinned on both lanes because ./cmd/bd has outgrown
-		// `go test`'s 10m per-package default (#6091, and wy-5b5fbl before it —
-		// that default is what made these legs flaky). In main.yml it sits on
-		// the invocation rather than in matrix.test-flags, so editing the
-		// matrix cannot silently drop it, and so the macOS leg cannot drift
-		// away from the ubuntu -race lanes' deadline.
-		prTestCommand   = "go test -tags gms_pure_go -v -race -short -timeout=30m -skip '^TestEmbedded' ./..."
+		// -timeout=30m is pinned here because ./cmd/bd has outgrown `go test`'s
+		// 10m per-package default (#6091, and wy-5b5fbl before it — that
+		// default is what made this leg flaky). It sits on the invocation
+		// rather than in matrix.test-flags, so editing the matrix cannot
+		// silently drop it.
 		mainTestCommand = "go test -tags gms_pure_go ${{ matrix.test-flags }} -timeout=30m -skip '^TestEmbedded' ./..."
 		// The macOS leg is the only consumer of main.yml's matrix test-flags
 		// (the ubuntu leg's coverage step hardcodes its own). The deadline is
@@ -892,15 +890,13 @@ func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 		"pr.yml":   readCIWorkflow(t, "pr.yml"),
 	}
 
-	prMacOS := workflows["pr.yml"].job(t, "test-macos")
-	if prMacOS.RunsOn != macOSRunner {
-		t.Errorf("pr macOS test runner = %q, want %q", prMacOS.RunsOn, macOSRunner)
-	}
-	assertStepRunsExactly(t, prMacOS, "Build", buildCommand)
-	assertStepRunsExactly(t, prMacOS, "Test", prTestCommand)
-	assertStepsBefore(t, prMacOS, []string{"Build"}, []string{"Test"})
-	assertStepEnvValue(t, prMacOS, "Test", "BEADS_TEST_BD_BINARY", workspaceBDBinary)
-
+	// pr.yml's own "test-macos" job (a full-suite pre-merge race against
+	// main.yml's macOS leg, run on every PR to catch macOS-only regressions
+	// before merge) was removed under the F4 rollout: main.yml's
+	// push-triggered macOS leg below is now the only lane that ever runs
+	// this suite on macOS, so no PR run exercises it pre-merge any more.
+	// Nothing in pr.yml should carry the workspace bd binary override
+	// checked in the loop below.
 	mainTest := workflows["main.yml"].job(t, "test")
 	assertStepRunsExactly(t, mainTest, "Build", buildCommand)
 	assertStepRunsExactly(t, mainTest, "Test", mainTestCommand)
@@ -925,7 +921,6 @@ func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 		for jobName, job := range workflow.Jobs {
 			for _, step := range job.Steps {
 				if step.Env["BEADS_TEST_BD_BINARY"] == workspaceBDBinary &&
-					!(workflowName == "pr.yml" && jobName == "test-macos" && step.Name == "Test") &&
 					!(workflowName == "main.yml" && jobName == "test" && step.Name == "Test") {
 					t.Errorf("%s job %q step %q has unexpected workspace bd binary override", workflowName, jobName, step.Name)
 				}
@@ -1173,6 +1168,11 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		mainRestoreModuleCache(), mainRestoreVetCache(), saveVetCache(),
 	})
 	assertConditionalCacheWritersHaveMatrixMember(t, workflows["main.yml"].job(t, "test"), macOSRunner)
+	// F4.7: seeds the module and xcompile caches pr.yml's windows-test-binaries
+	// job only restores (PR workflows never save).
+	assertGoCacheInventory(t, workflows["main.yml"].job(t, "windows-test-binaries-cache"), []goCacheStep{
+		mainRestoreModuleCache(), mainRestoreXCompileCache(), saveModuleCacheAfterFailure(), saveXCompileCache(),
+	})
 
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "build-artifacts"), []goCacheStep{
 		restoreModuleCache(), restoreBuildCache("non-race"),
@@ -1186,11 +1186,17 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		restoreModuleCache(), restoreBuildCacheIf("race", "matrix.check == 'scripts-test'"), restoreVetCache(), restoreBuildCacheIf("non-race", "matrix.check == 'allowlisted'"),
 	})
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "pr-lint-wrapper"), []goCacheStep{restoreModuleCache(), restoreGolangciCache()})
-	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "test-macos"), []goCacheStep{
-		restoreModuleCache(), restoreBuildCache("non-race"), restoreBuildCache("race"),
-	})
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "worktree-remove-windows"), []goCacheStep{
 		restoreModuleCache(), restoreBuildCache("non-race"),
+	})
+	// F4.4 advisory phase: windows-test-binaries cross-compiles on Linux and
+	// only restores (never saves; main.yml's windows-test-binaries-cache job
+	// is the saver). Its "-prebuilt" twins (test-windows-liveness-prebuilt,
+	// worktree-remove-windows-prebuilt) download the resulting artifact and
+	// run the binaries directly, so they use no Go cache action at all and
+	// need no entry here or in the managed map below.
+	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "windows-test-binaries"), []goCacheStep{
+		restoreModuleCache(), restoreXCompileCache(),
 	})
 	for _, jobName := range []string{
 		"check-doc-freshness-platforms", "pr-preflight-platforms", "build-examples",
@@ -1204,19 +1210,20 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertNoUnmanagedGoCacheSteps(t, workflows, map[string]map[string]bool{
 		"main.yml": {
 			"build-artifacts": true, "build-embedded": true, "pr-core-wrapper": true, "test": true, "test-windows": true,
-			"pr-lint-wrapper": true, "go-vet-cache": true,
+			"pr-lint-wrapper": true, "go-vet-cache": true, "windows-test-binaries-cache": true,
 		},
 		"pr.yml": {
-			"build-artifacts": true, "pr-core-wrapper": true, "scripts-go-checks": true, "test-macos": true, "worktree-remove-windows": true,
+			"build-artifacts": true, "pr-core-wrapper": true, "scripts-go-checks": true, "worktree-remove-windows": true,
 			"check-doc-freshness-platforms": true, "pr-preflight-platforms": true, "build-examples": true,
-			"check-release-target-cross-compilation": true, "pr-lint-wrapper": true,
+			"check-release-target-cross-compilation": true, "pr-lint-wrapper": true, "windows-test-binaries": true,
 		},
 		"pr-risk.yml": {"build-embedded": true},
 	})
 
 	mainArtifacts := workflows["main.yml"].job(t, "build-artifacts")
 	assertStepsBefore(t, mainArtifacts, []string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Build reusable Linux artifacts"})
-	assertStepsBefore(t, mainArtifacts, []string{"Build reusable Linux artifacts", "Upload build artifacts"}, []string{"Save Go module cache", "Save non-race Go build cache"})
+	assertStepsBefore(t, mainArtifacts, []string{"Build reusable Linux artifacts", "Upload build artifacts"}, []string{"Warm non-race Go build cache (test-only packages)"})
+	assertStepsBefore(t, mainArtifacts, []string{"Warm non-race Go build cache (test-only packages)"}, []string{"Save Go module cache", "Save non-race Go build cache"})
 
 	mainEmbedded := workflows["main.yml"].job(t, "build-embedded")
 	embeddedRaceBuilds := []string{"Build embedded bd binary", "Build embedded storage test binary", "Build embedded cmd test binary"}
@@ -1230,7 +1237,8 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertStepsBefore(t, mainTest, []string{"Restore non-race Go build cache"}, []string{"Build"})
 	assertStepsBefore(t, mainTest, []string{"Restore race Go build cache"}, []string{"Test (with coverage + JUnit XML)", "Test"})
 	assertStepsBefore(t, mainTest, []string{"Build", "Test"}, []string{"Save Go module cache"})
-	assertStepsBefore(t, mainTest, []string{"Build"}, []string{"Save non-race Go build cache"})
+	assertStepsBefore(t, mainTest, []string{"Build"}, []string{"Warm non-race Go build cache (test-only packages)"})
+	assertStepsBefore(t, mainTest, []string{"Warm non-race Go build cache (test-only packages)"}, []string{"Save non-race Go build cache"})
 	assertStepsBefore(t, mainTest, []string{"Test"}, []string{"Save race Go build cache"})
 
 	mainWindows := workflows["main.yml"].job(t, "test-windows")
@@ -1241,10 +1249,16 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		[]string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Build reusable Linux artifacts"})
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "pr-core-wrapper"),
 		[]string{"Restore Go module cache", "Restore race Go build cache"}, []string{"Run PR core wrapper"})
-	prMacOS := workflows["pr.yml"].job(t, "test-macos")
-	assertStepsBefore(t, prMacOS, []string{"Restore Go module cache"}, []string{"Build", "Test"})
-	assertStepsBefore(t, prMacOS, []string{"Restore non-race Go build cache"}, []string{"Build"})
-	assertStepsBefore(t, prMacOS, []string{"Restore race Go build cache"}, []string{"Test"})
+	prXCompile := workflows["pr.yml"].job(t, "windows-test-binaries")
+	assertStepsBefore(t, prXCompile, []string{"Restore Go module cache"}, []string{"Verify Go module checksums", "Build Windows test binaries"})
+	assertStepsBefore(t, prXCompile, []string{"Install mingw cross-compiler", "Restore Go build cache (Windows cross-compile)"}, []string{"Build Windows test binaries"})
+	assertStepsBefore(t, prXCompile, []string{"Build Windows test binaries"}, []string{"Upload Windows test binaries"})
+
+	mainXCompileCache := workflows["main.yml"].job(t, "windows-test-binaries-cache")
+	assertStepsBefore(t, mainXCompileCache, []string{"Restore Go module cache"}, []string{"Install mingw cross-compiler", "Build Windows test binaries"})
+	assertStepsBefore(t, mainXCompileCache, []string{"Install mingw cross-compiler", "Restore Go build cache (Windows cross-compile)"}, []string{"Build Windows test binaries"})
+	assertStepsBefore(t, mainXCompileCache, []string{"Build Windows test binaries"}, []string{"Save Go module cache", "Save Go build cache (Windows cross-compile)"})
+
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "worktree-remove-windows"),
 		[]string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Run native Windows worktree removal boundary tests"})
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "check-doc-freshness-platforms"),
@@ -1261,17 +1275,19 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertStepsBefore(t, prRiskEmbedded, []string{"Restore non-race Go build cache"}, prRiskNonRaceBuilds)
 
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "build-artifacts"), "Build reusable Linux artifacts", "non-race")
+	assertGoCacheEnv(t, workflows["main.yml"].job(t, "build-artifacts"), "Warm non-race Go build cache (test-only packages)", "non-race")
 	for _, stepName := range []string{"Build embedded bd binary", "Build embedded storage test binary", "Build embedded cmd test binary"} {
 		assertGoCacheEnv(t, workflows["main.yml"].job(t, "build-embedded"), stepName, "race")
 	}
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test"), "Build", "non-race")
+	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test"), "Warm non-race Go build cache (test-only packages)", "non-race")
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test"), "Test (with coverage + JUnit XML)", "race")
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test"), "Test", "race")
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test-windows"), "Build (pure Go regex)", "non-race")
+	assertGoCacheEnv(t, workflows["main.yml"].job(t, "windows-test-binaries-cache"), "Build Windows test binaries", xcompileCacheProfile())
 	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "build-artifacts"), "Build reusable Linux artifacts", "non-race")
 	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "pr-core-wrapper"), "Run PR core wrapper", "race")
-	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "test-macos"), "Build", "non-race")
-	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "test-macos"), "Test", "race")
+	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "windows-test-binaries"), "Build Windows test binaries", xcompileCacheProfile())
 	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "worktree-remove-windows"), "Run native Windows worktree removal boundary tests", "non-race")
 	for _, stepName := range []string{"Build embedded bd binary", "Build embedded storage test binary", "Build embedded cmd test binary"} {
 		assertGoCacheEnv(t, workflows["pr-risk.yml"].job(t, "build-embedded"), stepName, "race")
@@ -1300,15 +1316,18 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheWriter(t, workflows["main.yml"], "test-windows", "windows-latest", "Save non-race Go build cache", cacheMissCondition(goBuildCacheRestoreID("non-race")))
 	assertGoCacheWriter(t, workflows["main.yml"], "pr-lint-wrapper", "ubuntu-latest", "Save golangci-lint cache", failureSurvivingCacheSaveCondition(cacheMissCondition(golangciCacheRestoreID())))
 	assertGoCacheWriter(t, workflows["main.yml"], "go-vet-cache", "ubuntu-latest", "Save vet Go build cache", failureSurvivingCacheSaveCondition(cacheMissCondition(goVetCacheRestoreID())))
+	assertGoCacheWriter(t, workflows["main.yml"], "windows-test-binaries-cache", "ubuntu-latest", "Save Go module cache", saveModuleCacheAfterFailure().ifCondition)
+	assertGoCacheWriter(t, workflows["main.yml"], "windows-test-binaries-cache", "ubuntu-latest", "Save Go build cache (Windows cross-compile)", saveXCompileCache().ifCondition)
 	for _, target := range []struct{ workflow, job string }{
 		{"main.yml", "build-artifacts"},
 		{"main.yml", "build-embedded"},
 		{"main.yml", "pr-core-wrapper"},
 		{"main.yml", "test"},
 		{"main.yml", "test-windows"},
+		{"main.yml", "windows-test-binaries-cache"},
 		{"pr.yml", "build-artifacts"},
 		{"pr.yml", "pr-core-wrapper"},
-		{"pr.yml", "test-macos"},
+		{"pr.yml", "windows-test-binaries"},
 		{"pr.yml", "worktree-remove-windows"},
 		{"pr.yml", "check-doc-freshness-platforms"},
 		{"pr.yml", "pr-preflight-platforms"},
@@ -1594,6 +1613,16 @@ func saveModuleCacheAfterFailureOnMacOS() goCacheStep {
 	return step
 }
 
+// saveModuleCacheAfterFailure is saveModuleCacheAfterFailureOnMacOS without
+// the matrix condition, for single-runner saver jobs (windows-test-binaries-
+// cache) where a flaky mid-build step (e.g. the mingw apt-get install)
+// should not prevent the module cache fetched before it from being saved.
+func saveModuleCacheAfterFailure() goCacheStep {
+	step := saveModuleCache()
+	step.ifCondition = failureSurvivingCacheSaveCondition(cacheMissCondition(goModuleCacheRestoreID))
+	return step
+}
+
 func restoreBuildCache(profile string) goCacheStep {
 	return restoreBuildCacheIf(profile, "")
 }
@@ -1699,6 +1728,40 @@ func mainRestoreGolangciCache() goCacheStep {
 
 func saveGolangciCache() goCacheStep {
 	return goCacheStep{name: "Save golangci-lint cache", family: cacheSaveActionFamily, key: golangciCacheKey(), path: golangciCachePath(), ifCondition: failureSurvivingCacheSaveCondition(cacheMissCondition(golangciCacheRestoreID()))}
+}
+
+// The Windows cross-compile GOCACHE (F4.4) is a separate cache dimension from
+// goBuildCache*'s base/race/non-race profiles: it is never shared with a
+// native build on the runner's own OS, so it gets its own key shape (no
+// "-base-<tag>-" segment) and its own fixed restore/save id, rather than
+// reusing goBuildCacheRestoreID's "restore-<profile>-go-build-cache" pattern.
+func xcompileCacheProfile() string { return "xcompile-windows-amd64" }
+
+func xcompileCachePrefix() string {
+	return "beads-go-build-" + goCacheSchema + "-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-" + xcompileCacheProfile() + "-"
+}
+
+func xcompileCacheKey() string { return xcompileCachePrefix() + "${{ github.sha }}" }
+
+func xcompileCachePath() string { return goBuildCachePath(xcompileCacheProfile()) }
+
+func xcompileCacheRestoreID() string { return "restore-xcompile-go-build-cache" }
+
+// restoreXCompileCache is the PR-side (restore-only, no id needed since
+// pr.yml never saves) shape; mainRestoreXCompileCache is main.yml's
+// saver-side shape, which needs the id for its Save step's cache-miss `if`.
+func restoreXCompileCache() goCacheStep {
+	return goCacheStep{name: "Restore Go build cache (Windows cross-compile)", family: cacheRestoreActionFamily, key: xcompileCacheKey(), restoreKeys: xcompileCachePrefix(), path: xcompileCachePath()}
+}
+
+func mainRestoreXCompileCache() goCacheStep {
+	step := restoreXCompileCache()
+	step.id = xcompileCacheRestoreID()
+	return step
+}
+
+func saveXCompileCache() goCacheStep {
+	return goCacheStep{name: "Save Go build cache (Windows cross-compile)", family: cacheSaveActionFamily, key: xcompileCacheKey(), path: xcompileCachePath(), ifCondition: failureSurvivingCacheSaveCondition(cacheMissCondition(xcompileCacheRestoreID()))}
 }
 
 func assertGoCacheInventory(t *testing.T, job ciWorkflowJob, want []goCacheStep) {
@@ -2261,6 +2324,12 @@ const wantRBERunsOn = "${{ (github.event_name == 'push' || github.event_name == 
 // TestPRRiskBazelCoverageJob, ...) reads the one literal.
 const sameRepoBlacksmith2vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
 
+// F4: the same same-repo-or-merge_group expression, but selecting the 8vcpu
+// label pr.yml's windows-test-binaries cross-compile job uses (mingw build +
+// two go test -c compiles benefit from the extra cores; forks/Dependabot PRs
+// fall back to ubuntu-latest exactly like the 2vcpu const above).
+const sameRepoBlacksmith8vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
+
 // pr.yml's call of bazel.yml: exactly these inputs (review D1 v2 N3). An rbe
 // override would put every PR in local mode and ungate the embedded tier
 // while the gate stays self-consistent; integration: "off" would drop the
@@ -2453,7 +2522,7 @@ func TestDetectPackageGatesCoversBazelWorkflow(t *testing.T) {
 // forks); every other job below reads only merge_group and pull_request.
 func TestSameRepoBlacksmithRunners(t *testing.T) {
 	want := map[string]map[string]string{
-		"pr.yml":          {"bazel-coverage": sameRepoBlacksmith2vcpu, "ci-gate": sameRepoBlacksmith2vcpu},
+		"pr.yml":          {"bazel-coverage": sameRepoBlacksmith2vcpu, "ci-gate": sameRepoBlacksmith2vcpu, "windows-test-binaries": sameRepoBlacksmith8vcpu},
 		"pr-risk.yml":     {"bazel-coverage": sameRepoBlacksmith2vcpu, "ci-gate": sameRepoBlacksmith2vcpu, "detect-ci-tier": sameRepoBlacksmith2vcpu},
 		bazelWorkflowName: {bazelRBEJobName: wantRBERunsOn},
 	}
@@ -2486,8 +2555,8 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 			}
 		}
 	}
-	// No other job in pr.yml or pr-risk.yml may name a Blacksmith label: F4
-	// adds one more (not in this slice's scope), but nothing here should.
+	// No other job in pr.yml or pr-risk.yml may name a Blacksmith label beyond
+	// the ones enumerated in `want` above (F4 added windows-test-binaries).
 	for _, file := range []string{"pr.yml", "pr-risk.yml"} {
 		workflow := readCIWorkflow(t, file)
 		allowed := want[file]

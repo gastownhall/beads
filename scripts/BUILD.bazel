@@ -41,6 +41,7 @@ go_test(
         "required_suite_test.go",
         "test_script_test.go",
         "upgrade_smoke_loop_test.go",
+        "windows_test_binaries_manifest_test.go",
     ],
     data = [
         ":scripts_files",
@@ -51,6 +52,13 @@ go_test(
         "//:mcp_package_policy_files",
         "//:test_sh_files",
         "//:workflow_files",
+        # F4: TestTestScriptPrebuiltTestBinaryContract runs scripts/test.sh
+        # against the literal arg "./cmd/bd" (the same relative package path
+        # the real CI jobs pass) and needs that directory to exist under the
+        # runfiles-rooted repo root sourceRepoRoot(t) resolves to under
+        # Bazel; it never builds or runs the real package, so the source
+        # files alone (not a full go_library) are enough.
+        "//cmd/bd:go_srcs",
         "//internal/testutil:testdoltcommon.go",
         "//tools/bazel:dolt.bzl",
     ],

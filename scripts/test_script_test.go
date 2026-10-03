@@ -268,3 +268,196 @@ func nativeExecutableSuffix() string {
 func portableTestScriptPath(path string) string {
 	return filepath.ToSlash(filepath.Clean(path))
 }
+
+// fakePrebuiltTestBinary is a stand-in for a cross-compiled `go test -c`
+// binary: it records its own cwd, its BEADS_TEST_REPO_ROOT, and every
+// argument it was launched with, then exits 0. The flag-mapping contract it
+// exercises (scripts/test.sh -> scripts/ci/run-go-test-binary.sh -> this
+// binary) is host-independent, so a bash stand-in is representative even
+// though the real artifact is a Windows PE .exe: that artifact's own
+// Windows-launch behavior is exercised by the CI job itself, not by this
+// policy test.
+const fakePrebuiltTestBinary = `#!/usr/bin/env bash
+set -euo pipefail
+{
+    printf 'cwd=%s\n' "$PWD"
+    printf 'repo_root=%s\n' "${BEADS_TEST_REPO_ROOT:-}"
+    for a in "$@"; do
+        printf 'arg=%s\n' "$a"
+    done
+} >>"$BEADS_TEST_SCRIPT_PREBUILT_LOG"
+`
+
+const testScriptPrebuiltLogEnv = "BEADS_TEST_SCRIPT_PREBUILT_LOG"
+
+type prebuiltTestBinaryRun struct {
+	cwd      string
+	repoRoot string
+	args     []string
+}
+
+// TestTestScriptPrebuiltTestBinaryContract pins scripts/test.sh's
+// BEADS_TEST_PREBUILT_TEST_BINARY mode (F4.4's run-go-test-binary.sh path):
+// it must map go-test-style flags to -test.* flags, launch the binary from
+// the package directory (the same convention `go test` itself uses), export
+// BEADS_TEST_REPO_ROOT, and refuse a request naming more than one package
+// (a prebuilt binary is compiled from exactly one package, so there is no
+// single binary that could run a multi-package request).
+func TestTestScriptPrebuiltTestBinaryContract(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The bash stand-in above is a Linux/macOS-only harness; see its doc
+		// comment. The real cross-built .exe is launched by the Windows job,
+		// not this test.
+		t.Skip("prebuilt-binary contract is exercised with a bash stand-in on Linux/macOS")
+	}
+
+	t.Run("maps go-test flags to -test.* flags, cwd, and BEADS_TEST_REPO_ROOT", func(t *testing.T) {
+		repoRoot := sourceRepoRoot(t)
+		run := runTestScriptWithPrebuiltBinary(t, repoRoot, []string{
+			"-v", "-timeout", "5m", "-skip", "TestBar", "-run", "TestFoo", "-count", "1", "./cmd/bd",
+		})
+
+		wantArgs := []string{
+			"-test.timeout", "5m",
+			"-test.parallel", "4",
+			"-test.v",
+			"-test.skip", "TestBar",
+			"-test.run", "TestFoo",
+			"-test.count", "1",
+		}
+		if strings.Join(run.args, " ") != strings.Join(wantArgs, " ") {
+			t.Fatalf("args = %v, want %v", run.args, wantArgs)
+		}
+
+		wantCwd := filepath.Join(repoRoot, "cmd", "bd")
+		if !sameTestScriptDir(t, run.cwd, wantCwd) {
+			t.Fatalf("cwd = %q, want %q", run.cwd, wantCwd)
+		}
+		if !sameTestScriptDir(t, run.repoRoot, repoRoot) {
+			t.Fatalf("BEADS_TEST_REPO_ROOT = %q, want %q", run.repoRoot, repoRoot)
+		}
+	})
+
+	t.Run("supports -count=N form alongside -count N", func(t *testing.T) {
+		repoRoot := sourceRepoRoot(t)
+		run := runTestScriptWithPrebuiltBinary(t, repoRoot, []string{"-count=1", "./cmd/bd"})
+		wantArgs := []string{"-test.timeout", "25m", "-test.parallel", "4", "-test.count", "1"}
+		if strings.Join(run.args, " ") != strings.Join(wantArgs, " ") {
+			t.Fatalf("args = %v, want %v", run.args, wantArgs)
+		}
+	})
+
+	t.Run("refuses more than one package", func(t *testing.T) {
+		repoRoot := sourceRepoRoot(t)
+		output, err := runTestScriptWithPrebuiltBinaryExpectFailure(t, repoRoot, []string{"./cmd/bd", "./scripts"})
+		if err == nil {
+			t.Fatalf("expected scripts/test.sh to fail for two packages, output:\n%s", output)
+		}
+		if !strings.Contains(string(output), "requires exactly one package") {
+			t.Fatalf("expected a single-package error, got:\n%s", output)
+		}
+	})
+}
+
+func runTestScriptWithPrebuiltBinary(t *testing.T, repoRoot string, args []string) prebuiltTestBinaryRun {
+	t.Helper()
+	output, logContent, err := runTestScriptPrebuiltBinary(t, repoRoot, args)
+	if err != nil {
+		t.Fatalf("scripts/test.sh failed: %v\n%s", err, output)
+	}
+
+	run := prebuiltTestBinaryRun{}
+	for _, line := range strings.Split(strings.TrimRight(logContent, "\n"), "\n") {
+		switch {
+		case strings.HasPrefix(line, "cwd="):
+			run.cwd = strings.TrimPrefix(line, "cwd=")
+		case strings.HasPrefix(line, "repo_root="):
+			run.repoRoot = strings.TrimPrefix(line, "repo_root=")
+		case strings.HasPrefix(line, "arg="):
+			run.args = append(run.args, strings.TrimPrefix(line, "arg="))
+		}
+	}
+	if run.cwd == "" {
+		t.Fatalf("fake prebuilt binary never ran; scripts/test.sh output:\n%s\nlog:\n%s", output, logContent)
+	}
+	return run
+}
+
+func runTestScriptWithPrebuiltBinaryExpectFailure(t *testing.T, repoRoot string, args []string) ([]byte, error) {
+	t.Helper()
+	output, _, err := runTestScriptPrebuiltBinary(t, repoRoot, args)
+	return output, err
+}
+
+// filterEnv returns environ with any "key=..." entry for the given keys
+// removed, so a caller can force a subprocess to fall back to its own
+// hardcoded default instead of inheriting the host/sandbox's value.
+func filterEnv(environ []string, keys ...string) []string {
+	drop := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		drop[k] = true
+	}
+	filtered := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		name, _, ok := strings.Cut(kv, "=")
+		if ok && drop[name] {
+			continue
+		}
+		filtered = append(filtered, kv)
+	}
+	return filtered
+}
+
+func runTestScriptPrebuiltBinary(t *testing.T, repoRoot string, args []string) (output []byte, logContent string, err error) {
+	t.Helper()
+
+	root := t.TempDir()
+	fakeBin := filepath.Join(root, "fake-prebuilt-bd-cgo.test")
+	if err := os.WriteFile(fakeBin, []byte(fakePrebuiltTestBinary), 0o755); err != nil {
+		t.Fatalf("write fake prebuilt test binary: %v", err)
+	}
+	logPath := filepath.Join(root, "fake-prebuilt.log")
+	if err := os.WriteFile(logPath, nil, 0o600); err != nil {
+		t.Fatalf("initialize fake prebuilt binary log: %v", err)
+	}
+
+	bash, lookErr := exec.LookPath("bash")
+	if lookErr != nil {
+		t.Fatalf("bash is required to exercise scripts/test.sh: %v", lookErr)
+	}
+
+	// Bazel's test runner sets its own TEST_TIMEOUT in the sandbox env
+	// (seconds, e.g. "300" for the default moderate size) - the same name
+	// scripts/test.sh reads to override its "25m" default. Strip it so the
+	// "-count=N form" subtest's assertion on that hardcoded default is not
+	// at the mercy of whatever test size this target happens to run under;
+	// go test does not set this variable, so only Bazel needs the filter.
+	env := append(filterEnv(os.Environ(), "TEST_TIMEOUT"),
+		"BEADS_TEST_BD_BINARY=/nonexistent-bd-not-needed-in-prebuilt-test-binary-mode",
+		"BEADS_TEST_PREBUILT_TEST_BINARY="+fakeBin,
+		"GITHUB_WORKSPACE="+repoRoot,
+		testScriptPrebuiltLogEnv+"="+logPath,
+	)
+
+	cmdArgs := append([]string{filepath.Join(repoRoot, "scripts", "test.sh")}, args...)
+	cmd := exec.Command(bash, cmdArgs...)
+	cmd.Dir = repoRoot
+	cmd.Env = env
+	output, err = cmd.CombinedOutput()
+
+	logBytes, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("read fake prebuilt binary log: %v", readErr)
+	}
+	return output, string(logBytes), err
+}
+
+func sameTestScriptDir(t *testing.T, first, second string) bool {
+	t.Helper()
+	firstInfo, firstErr := os.Stat(first)
+	secondInfo, secondErr := os.Stat(second)
+	if firstErr != nil || secondErr != nil {
+		return false
+	}
+	return os.SameFile(firstInfo, secondInfo)
+}
