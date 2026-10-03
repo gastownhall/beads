@@ -6994,9 +6994,11 @@ components:
           type: string
           description: >-
             The node this one was reached FROM, empty on the root. A node is
-            reached ONCE per walk, by the first path that got there, so a shared
-            child of two parents names only the first of them here and the
-            second has no visible edge to it.
+            EXPANDED once per walk, by the first path that got there; a second
+            path reaching it re-emits it as a `deduped` stub whose `parent_id`
+            names that second path, so every edge stays visible in the
+            UNPRUNED walk. A `status` prune narrows the answer to one entry
+            per id: a stub whose full occurrence survived the prune is dropped.
         edge_from_parent:
           type: string
           description: >-
@@ -7010,6 +7012,14 @@ components:
             is ABSENT from the answer rather than present and flagged, so a
             client cannot tell a tree that ended from one that was cut. It is
             documented rather than removed because it is on the wire today.
+        deduped:
+          type: boolean
+          description: >-
+            Marks a repeated occurrence of a node already expanded elsewhere in
+            the tree (diamond dependency): the edge to its parent is real, but
+            its subtree is rendered at the first occurrence only. ABSENT
+            (`omitempty`, so false never rides the wire) on every node that is
+            not a duplicate.
 
     Dependency:
       type: object
