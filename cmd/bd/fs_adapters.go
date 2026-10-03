@@ -19,12 +19,17 @@ func newBeadsDirTemplates() domain.BeadsDirTemplates {
 	}
 }
 
-func newFileSystemAdapters() domain.BeadsDirFSAdapters {
+// newInitFileSystemAdapters keeps the selected Git project separate from storage paths.
+func newInitFileSystemAdapters(workDir string) domain.BeadsDirFSAdapters {
 	return domain.BeadsDirFSAdapters{
 		ApplyNoCOW:        applyNoCOW,
 		WriteLocalVersion: writeLocalVersion,
-		SetupForkExclude:  setupForkExclude,
-		SetupStealthMode:  setupStealthMode,
+		SetupForkExclude: func(verbose bool) error {
+			return setupForkExcludeAt(workDir, verbose)
+		},
+		SetupStealthMode: func(verbose bool) error {
+			return setupStealthModeAt(workDir, verbose)
+		},
 		InstallGitHooks: func(p domain.HooksInstallParams) error {
 			return installHooksWithOptions(p.HookNames, p.Force, p.Shared, p.Chain, p.BeadsHooks)
 		},
@@ -35,18 +40,6 @@ func newFileSystemAdapters() domain.BeadsDirFSAdapters {
 		InstallClaudeProject: setup.InstallClaudeProject,
 		SetYAMLConfig:        config.SetYamlConfig,
 	}
-}
-
-// newInitFileSystemAdapters keeps the selected Git project separate from storage paths.
-func newInitFileSystemAdapters(workDir string) domain.BeadsDirFSAdapters {
-	adapters := newFileSystemAdapters()
-	adapters.SetupForkExclude = func(verbose bool) error {
-		return setupForkExcludeAt(workDir, verbose)
-	}
-	adapters.SetupStealthMode = func(verbose bool) error {
-		return setupStealthModeAt(workDir, verbose)
-	}
-	return adapters
 }
 
 // withInitHooks scopes only hook operations; exclude and the other supplied
