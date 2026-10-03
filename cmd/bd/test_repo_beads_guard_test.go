@@ -82,6 +82,10 @@ func TestMain(m *testing.M) {
 
 func testMainInner(m *testing.M) int {
 	origWD, _ := os.Getwd()
+	// Computed once and reused below for the pin, the ceiling-var boundary,
+	// and the guard's own watch setup, so all three agree on exactly which
+	// checkout this process started in.
+	repoRoot := findRepoRootFrom(origWD)
 
 	// Fence the whole test binary's beads/git discovery before any test (or
 	// package-level init/sync.Once) gets a chance to make the first
@@ -91,23 +95,39 @@ func testMainInner(m *testing.M) int {
 	// per-test chdirs — and beads.FindBeadsDir's worktree-fallback discovery
 	// then treats that as license to read and write the main checkout's
 	// shared .beads database (e.g. /data/projects/beads/.beads when this
-	// worktree is a sibling checkout). Pinning "no repository" here makes
-	// that ambient state inert by default; tests that need real git behavior
-	// already call git.ResetCaches/beads.ResetCaches themselves after
-	// chdir'ing into a fixture they control (cmd/bd/git_test_helpers.go),
-	// which overrides this pin for their own scope.
-	git.PinNoRepositoryForTesting()
+	// worktree is a sibling checkout). Pinning "no repository" for repoRoot
+	// (not just the package directory this process started in) makes that
+	// ambient state inert by default for any subdirectory of the checkout a
+	// test might chdir into, and keeps answering that way even after
+	// git.ResetCaches: see PinNoRepositoryUnderForTesting's doc. Tests that
+	// need real git behavior chdir OUTSIDE repoRoot into a fixture they
+	// control (cmd/bd/git_test_helpers.go's runInDir, normally a
+	// t.TempDir()) and call git.ResetCaches/beads.ResetCaches there, which
+	// gets real detection scoped to that fixture — the pin only answers for
+	// repoRoot and its descendants.
+	//
+	// Residual scope this pin does NOT cover: -C (main.go's flag handling)
+	// and doctor.ResolveBeadsDirForRepo's callers resolve a beads directory
+	// by shelling out to `git -C <dir> ...` directly
+	// (internal/beads/beads.go's FindBeadsDirFrom/ResolveBeadsDirForRepo),
+	// never reading this package's cached git context at all, so this pin
+	// cannot fence them. No test in this package currently exercises that
+	// path against the real checkout, so it is an untested gap rather than
+	// a guarded one — flagged here rather than silently assumed covered.
+	if repoRoot != "" {
+		git.PinNoRepositoryUnderForTesting(repoRoot)
+	}
 	beads.ResetCaches()
 
 	// Separately bound any literal ancestor-directory walk that starts
-	// at (or under) this checkout: PinNoRepositoryForTesting only defeats
-	// the git-worktree-fallback vector above, not a plain upward walk from a
-	// worktree nested under a directory that itself has a .beads (e.g. a
-	// scratch checkout under a dir with a live .beads ancestor). Append
-	// rather than overwrite: Bazel's tools/bazel/test_env.sh already sets a
-	// ceiling derived from TEST_SRCDIR/TEST_TMPDIR for bazel-run tests, and
-	// this must only add a boundary, never remove one those runs rely on.
-	if repoRoot := findRepoRootFrom(origWD); repoRoot != "" {
+	// at (or under) this checkout: the pin above only defeats the
+	// git-context-cache vector, not a plain upward walk from a worktree
+	// nested under a directory that itself has a .beads (e.g. a scratch
+	// checkout under a dir with a live .beads ancestor). Append rather than
+	// overwrite: Bazel's tools/bazel/test_env.sh already sets a ceiling
+	// derived from TEST_SRCDIR/TEST_TMPDIR for bazel-run tests, and this
+	// must only add a boundary, never remove one those runs rely on.
+	if repoRoot != "" {
 		ceilingList := repoRoot
 		if existing := os.Getenv(ceiling.EnvVar); existing != "" {
 			ceilingList = existing + string(os.PathListSeparator) + repoRoot
@@ -285,17 +305,43 @@ func testMainInner(m *testing.M) int {
 		return runTestsAndSweep(m)
 	}
 
-	repoRoot := findRepoRootFrom(origWD)
 	if repoRoot == "" {
 		return runTestsAndSweep(m)
 	}
 
 	repoBeadsDir := filepath.Join(repoRoot, ".beads")
-	if _, err := os.Stat(repoBeadsDir); err != nil {
+	// Backstop: also watch the shared worktree-fallback .beads directory that
+	// beads.FindBeadsDir's discovery would fall back to for a linked worktree
+	// (e.g. the main checkout's .beads when this package's repo root is a
+	// worktree). This is computed directly via git plumbing, independent of
+	// the process-wide cache PinNoRepositoryUnderForTesting neutralizes
+	// above, so it still catches pollution if that pin is ever bypassed or
+	// narrowed. Computed and checked BEFORE deciding whether repoBeadsDir
+	// itself exists: a linked worktree with no local .beads of its own is
+	// exactly the layout where the fallback is live, so skipping this whole
+	// function when repoBeadsDir is absent would guard nothing in precisely
+	// the case that matters most.
+	fallbackBeadsDir := worktreeFallbackBeadsDirDirect(repoRoot)
+
+	var guardDirs []string
+	if _, err := os.Stat(repoBeadsDir); err == nil {
+		guardDirs = append(guardDirs, repoBeadsDir)
+	}
+	if fallbackBeadsDir != "" && fallbackBeadsDir != repoBeadsDir {
+		if _, err := os.Stat(fallbackBeadsDir); err == nil {
+			guardDirs = append(guardDirs, fallbackBeadsDir)
+		}
+	}
+	if len(guardDirs) == 0 {
 		return runTestsAndSweep(m)
 	}
 
-	watch := []string{
+	// Top-level files checked by exact name. interactions.jsonl is excluded:
+	// legitimately created by init during tests. last-touched is excluded:
+	// it is bumped by any `bd` invocation anywhere in the checkout, including
+	// other processes sharing it concurrently, so it is not a reliable signal
+	// of this suite's own writes.
+	watchFiles := []string{
 		"beads.db",
 		"beads.db-wal",
 		"beads.db-shm",
@@ -303,34 +349,39 @@ func testMainInner(m *testing.M) int {
 		"issues.jsonl",
 		"beads.jsonl",
 		"metadata.json",
-		// interactions.jsonl excluded: legitimately created by init during tests
+		"config.yaml",
+		"routes.jsonl",
 		"deletions.jsonl",
 		"molecules.jsonl",
 	}
 
-	guardDirs := []string{repoBeadsDir}
-	// Backstop: also watch the shared worktree-fallback .beads directory that
-	// beads.FindBeadsDir's discovery would fall back to for a linked worktree
-	// (e.g. the main checkout's .beads when this package's repo root is a
-	// worktree). This is computed directly via git plumbing, independent of
-	// the process-wide cache PinNoRepositoryForTesting neutralizes above, so
-	// it still catches pollution if that pin is ever bypassed or narrowed.
-	if fallback := worktreeFallbackBeadsDirDirect(repoRoot); fallback != "" && fallback != repoBeadsDir {
-		if _, err := os.Stat(fallback); err == nil {
-			guardDirs = append(guardDirs, fallback)
+	// dirSnapshot pairs the flat top-level watch with a recursive snapshot of
+	// dolt/, the Dolt backend's own state directory. A flat name list can't
+	// see writes inside dolt/ (e.g. a `bd create` landing a real commit in
+	// the fallback's database), so this is required for the guard to mean
+	// what its error message claims for a Dolt-backed fallback workspace.
+	type dirSnapshot struct {
+		flat, dolt map[string]fileSnap
+	}
+	snapshotDir := func(dir string) dirSnapshot {
+		return dirSnapshot{
+			flat: snapshotFiles(dir, watchFiles),
+			dolt: snapshotDoltTree(filepath.Join(dir, "dolt")),
 		}
 	}
 
-	before := make(map[string]map[string]fileSnap, len(guardDirs))
+	before := make(map[string]dirSnapshot, len(guardDirs))
 	for _, dir := range guardDirs {
-		before[dir] = snapshotFiles(dir, watch)
+		before[dir] = snapshotDir(dir)
 	}
 	code := runTestsAndSweep(m)
 
 	var allDiffs string
 	for _, dir := range guardDirs {
-		after := snapshotFiles(dir, watch)
-		if diff := diffSnapshots(before[dir], after); diff != "" {
+		after := snapshotDir(dir)
+		diff := diffSnapshots(before[dir].flat, after.flat)
+		diff += diffSnapshots(before[dir].dolt, after.dolt)
+		if diff != "" {
 			allDiffs += fmt.Sprintf("in %s:\n%s", dir, diff)
 		}
 	}
@@ -348,7 +399,7 @@ func testMainInner(m *testing.M) int {
 // worktreeFallbackBeadsDirDirect resolves the shared .beads directory a
 // linked worktree at repoRoot would fall back to, via a direct git shell-out
 // independent of internal/git's process-wide cache (which
-// PinNoRepositoryForTesting deliberately neutralizes above). Mirrors
+// PinNoRepositoryUnderForTesting deliberately neutralizes above). Mirrors
 // internal/beads's worktreeFallbackBeadsDirForRepo; kept local and minimal
 // since this is a test-only detection backstop, not production discovery.
 func worktreeFallbackBeadsDirDirect(repoRoot string) string {
@@ -409,10 +460,43 @@ func snapshotFiles(dir string, names []string) map[string]fileSnap {
 	return out
 }
 
+// snapshotDoltTree walks dir recursively and returns a map keyed by path
+// relative to dir, for directories whose structure itself needs watching
+// (e.g. .beads/dolt, which stores workspace state as an arbitrary tree of
+// files rather than a fixed set of top-level names snapshotFiles's explicit
+// list can name). A missing or unreadable dir yields an empty map, not an
+// error: a .beads without its own dolt/ is normal (a non-Dolt backend, or a
+// workspace that was never provisioned), and must not be treated as 212
+// files vanishing on the "after" side.
+func snapshotDoltTree(dir string) map[string]fileSnap {
+	out := make(map[string]fileSnap)
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return nil //nolint:nilerr // best-effort snapshot; a walk error just narrows what gets watched
+		}
+		rel, relErr := filepath.Rel(dir, path)
+		if relErr != nil {
+			rel = path
+		}
+		out[rel] = fileSnap{exists: true, size: info.Size(), modUnix: info.ModTime().UnixNano()}
+		return nil
+	})
+	return out
+}
+
+// diffSnapshots reports entries that appeared, disappeared, or changed size
+// between before and after. Checks both directions (before→after for
+// removals/changes, after→before for additions) so it works for a recursive
+// snapshotDoltTree map, where "after" can legitimately contain keys "before"
+// never had — unlike snapshotFiles's fixed name list, where the key set is
+// identical on both sides and only the addition-check is a no-op.
 func diffSnapshots(before, after map[string]fileSnap) string {
 	var out string
 	for name, b := range before {
-		a := after[name]
+		a, ok := after[name]
+		if !ok {
+			a = fileSnap{exists: false}
+		}
 		if b.exists != a.exists {
 			out += fmt.Sprintf("- %s: exists %v → %v\n", name, b.exists, a.exists)
 			continue
@@ -425,6 +509,11 @@ func diffSnapshots(before, after map[string]fileSnap) string {
 		// from read-only operations (config loading, etc.) which is not pollution.
 		if b.size != a.size {
 			out += fmt.Sprintf("- %s: size %d → %d\n", name, b.size, a.size)
+		}
+	}
+	for name, a := range after {
+		if _, ok := before[name]; !ok && a.exists {
+			out += fmt.Sprintf("- %s: new file (size %d)\n", name, a.size)
 		}
 	}
 	return out
