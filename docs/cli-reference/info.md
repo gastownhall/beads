@@ -1,6 +1,6 @@
 ---
 title: "bd info"
-description: "Display information about the current database."
+description: "Show database information"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -30,7 +30,6 @@ bd info [flags]
 **Flags:**
 
 ```
-      --json        Output in JSON format
       --schema      Include schema information in output
       --thanks      Show thank you page for contributors
       --whats-new   Show agent-relevant changes from recent versions
