@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -62,6 +63,9 @@ After adding, run 'bd backup sync' to push your data.`,
 
 		ctx := rootCtx
 		rawPath := args[0]
+		if err := validateBackupInitTarget(rawPath); err != nil {
+			return err
+		}
 
 		if usesProxiedServer() {
 			return runBackupInitProxied(ctx, rawPath)
@@ -72,7 +76,7 @@ After adding, run 'bd backup sync' to push your data.`,
 		}
 
 		// Resolve filesystem paths to absolute and add file:// prefix.
-		// DoltHub URLs are passed through as-is.
+		// Recognized backup URLs are passed through as-is.
 		backupURL := resolveDoltBackupURL(rawPath)
 
 		bs, ok := storage.UnwrapStore(store).(storage.BackupStore)
@@ -204,14 +208,25 @@ Run 'bd backup init <path>' first to configure a destination.`,
 	},
 }
 
+var backupURLShape = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://`)
+
+// validateBackupInitTarget refuses URL-shaped inputs that IsBackupURL does not
+// recognize. Treating one as a path would silently turn S3://bucket/path into
+// file://$PWD/S3:/bucket/path, configuring a different destination.
+func validateBackupInitTarget(raw string) error {
+	if !backupURLShape.MatchString(raw) || versioncontrolops.IsBackupURL(raw) {
+		return nil
+	}
+	scheme, _, _ := strings.Cut(raw, "://")
+	return fmt.Errorf("unsupported backup URL scheme %q", scheme)
+}
+
 // resolveDoltBackupURL converts a user-provided path or URL into a Dolt backup URL.
-// Filesystem paths get resolved to absolute and prefixed with file://
-// URLs (https://, http://) are passed through as-is.
+// Recognized backup URLs (versioncontrolops.IsBackupURL) pass through unchanged;
+// anything else is treated as a filesystem path, resolved to absolute and
+// prefixed with file://.
 func resolveDoltBackupURL(raw string) string {
-	// DoltHub or other remote URLs — pass through
-	if strings.HasPrefix(raw, "https://") || strings.HasPrefix(raw, "http://") ||
-		strings.HasPrefix(raw, "file://") || strings.HasPrefix(raw, "aws://") ||
-		strings.HasPrefix(raw, "gs://") {
+	if versioncontrolops.IsBackupURL(raw) {
 		return raw
 	}
 
