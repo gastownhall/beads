@@ -44,14 +44,34 @@ var (
 // getGitContext lookup while a pin is active, so a test that chdirs outside
 // the pinned root (e.g. into its own t.TempDir() fixture) still gets real git
 // detection scoped to that fixture.
+//
+// Both sides are compared with symlinks resolved: os.Getwd returns $PWD's
+// spelling while $PWD still names the working directory and the kernel's
+// resolved path after a chdir, so the same directory can arrive here as
+// /var/folders/... or /private/var/folders/... (macOS's default TMPDIR), or
+// through any symlinked checkout path.
 func underPinnedRootForTesting(wd string) bool {
 	if pinnedRootForTesting == "" || wd == "" {
 		return false
 	}
+	wd = resolvePinPath(wd)
 	if wd == pinnedRootForTesting {
 		return true
 	}
 	return strings.HasPrefix(wd, pinnedRootForTesting+string(filepath.Separator))
+}
+
+// resolvePinPath returns path absolute and with symlinks resolved, falling
+// back to the absolute (then the given) spelling when a step fails, e.g. for
+// a directory that no longer exists.
+func resolvePinPath(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	return path
 }
 
 // initGitContext populates the gitContext with a single git call.
@@ -556,11 +576,7 @@ var errPinnedNoRepository = errors.New("not a git repository (pinned for testing
 // WARNING: Not thread-safe, like ResetCaches. Only call before m.Run(),
 // before any goroutines that might read the git context are started.
 func PinNoRepositoryUnderForTesting(root string) {
-	abs, err := filepath.Abs(root)
-	if err == nil {
-		root = abs
-	}
-	pinnedRootForTesting = root
+	pinnedRootForTesting = resolvePinPath(root)
 	gitCtxOnce = sync.Once{}
 	gitCtx = gitContext{}
 }

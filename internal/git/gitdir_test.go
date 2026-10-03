@@ -103,6 +103,61 @@ func TestPinNoRepositoryUnderForTestingSurvivesResetCaches(t *testing.T) {
 	}
 }
 
+// TestPinNoRepositoryUnderForTestingMatchesThroughSymlink pins a root by a
+// symlinked spelling and by its resolved spelling, then enters it by the
+// other one. Either way the process is under the pinned root, so the pin
+// must answer "not a repository": os.Getwd reports the resolved path after a
+// chdir whatever spelling the caller pinned or chdir'd with.
+func TestPinNoRepositoryUnderForTestingMatchesThroughSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs privileges on Windows")
+	}
+	repoPath, _ := setupTestRepo(t)
+	realRepo, err := filepath.EvalSymlinks(repoPath)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", repoPath, err)
+	}
+	linkRepo := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(realRepo, linkRepo); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(origWD); err != nil {
+			t.Fatalf("restore working directory: %v", err)
+		}
+		pinnedRootForTesting = ""
+		ResetCaches()
+	})
+
+	for _, tc := range []struct{ name, pin, enter string }{
+		{"pin the symlink, enter the real path", linkRepo, realRepo},
+		{"pin the real path, enter the symlink", realRepo, linkRepo},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.Chdir(tc.enter); err != nil {
+				t.Fatalf("chdir: %v", err)
+			}
+			PinNoRepositoryUnderForTesting(tc.pin)
+			if got := GetRepoRoot(); got != "" {
+				t.Fatalf("GetRepoRoot() = %q under the pinned root, want \"\"", got)
+			}
+			sub := filepath.Join(tc.enter, ".beads")
+			if err := os.Chdir(sub); err != nil {
+				t.Fatalf("chdir to subdirectory: %v", err)
+			}
+			ResetCaches()
+			if got := GetRepoRoot(); got != "" {
+				t.Fatalf("GetRepoRoot() = %q in a subdirectory of the pinned root, want \"\"", got)
+			}
+		})
+	}
+}
+
 func TestGetGitHooksDirTildeExpansion(t *testing.T) {
 	// Use an explicit temporary home so tilde expansion is deterministic
 	// regardless of the environment (CI, containers, overridden homes, etc.).
