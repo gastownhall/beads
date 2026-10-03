@@ -331,6 +331,7 @@
           "reference/protected-branches",
           "reference/advanced",
           "reference/json-schema",
+          "reference/graphql",
           "reference/events-journal",
           "reference/observability",
           "reference/troubleshooting",

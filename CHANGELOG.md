@@ -885,6 +885,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   work, so an HTTP client can forward `bd update --claim` instead of refusing
   it, and can never mistake an older server for one that dropped the claim.
 
+- **`bd gql` runs read-only GraphQL queries over issues.** A document selects
+  the fields it needs, follows `dependencies` and `dependents` in the same call,
+  and fetches several issues by ID in request order with `issuesById`. `issues`
+  takes the `bd query` language and `ready` returns what `bd ready` returns, both
+  with `limit`, `offset` and `has_more`. The document comes from an argument,
+  `--file` or `--stdin`, with variables in `--vars`, and every response carries
+  `extensions.schema_version`. It reads through the same reader roles as
+  `bd show` and `bd query`, on both the embedded and proxied-server routes, and
+  has no mutations. `docs/reference/graphql.md` describes the limits and errors.
+
 ### Fixed
 
 - **`bd show` counts a wisp's comments instead of reporting `comment_count: 0`**

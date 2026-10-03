@@ -1,0 +1,98 @@
+# Read-only GraphQL schema for bd gql. Field names match bd --json.
+schema { query: Query }
+scalar Time
+scalar JSON
+
+type Query {
+  issue(id: ID!): Issue
+  issuesById(ids: [ID!]!): [Issue]!
+  issues(query: String, all: Boolean = false, sort: String, reverse: Boolean = false, limit: Int = 50, offset: Int = 0): IssuePage!
+  ready(limit: Int = 100, offset: Int = 0, sort: String = "priority", assignee: String, type: String, labels: [String!], parent: String): IssuePage!
+}
+
+type IssuePage {
+  items: [Issue!]!
+  has_more: Boolean!
+}
+
+type Relation {
+  id: ID!
+  dependency_type: String!
+  issue: Issue!
+}
+
+type Comment {
+  id: ID!
+  issue_id: String!
+  author: String!
+  text: String!
+  created_at: Time!
+}
+
+type Issue {
+  id: ID!
+  title: String!
+  description: String!
+  design: String!
+  acceptance_criteria: String!
+  notes: String!
+  spec_id: String!
+  status: String!
+  issue_type: String!
+  assignee: String!
+  owner: String!
+  created_by: String!
+  close_reason: String!
+  closed_by_session: String!
+  lease_granted_node: String!
+  source_system: String!
+  sender: String!
+  wisp_type: String!
+  storage_class: String!
+  await_type: String!
+  await_id: String!
+  source_formula: String!
+  source_location: String!
+  mol_type: String!
+  work_type: String!
+  event_kind: String!
+  actor: String!
+  target: String!
+  payload: String!
+  revision: String!
+  external_ref: String
+  compacted_at_commit: String
+  parent: String
+  priority: Int!
+  compaction_level: Int!
+  original_size: Int!
+  dependency_count: Int!
+  dependent_count: Int!
+  comment_count: Int!
+  estimated_minutes: Int
+  epic_total_children: Int
+  epic_closed_children: Int
+  is_blocked: Boolean!
+  ephemeral: Boolean!
+  no_history: Boolean!
+  pinned: Boolean!
+  is_template: Boolean!
+  epic_closeable: Boolean
+  created_at: Time!
+  updated_at: Time!
+  started_at: Time
+  closed_at: Time
+  lease_expires_at: Time
+  heartbeat_at: Time
+  due_at: Time
+  defer_until: Time
+  compacted_at: Time
+  metadata: JSON
+  bonded_from: JSON
+  timeout: JSON
+  labels: [String!]!
+  waiters: [String!]!
+  dependencies: [Relation!]!
+  dependents: [Relation!]!
+  comments: [Comment!]!
+}

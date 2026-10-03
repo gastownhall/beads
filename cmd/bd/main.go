@@ -180,6 +180,7 @@ var readOnlyCommands = map[string]bool{
 	"count":      true,
 	"search":     true,
 	"query":      true,
+	"gql":        true,
 	"graph":      true,
 	"duplicates": true,
 	"comments":   true, // list comments (not add)
