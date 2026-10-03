@@ -26,25 +26,29 @@ func checkConfigSetSideEffects(key, value string) []configSideEffect {
 	case key == "dolt.shared-server" && strings.EqualFold(value, "true"):
 		effects = append(effects, configSideEffect{
 			Message: "Shared server mode enabled. Start the server to activate.",
-			Command: "bd dolt server start",
+			Command: "bd dolt start",
 		})
 
 	case key == "dolt.shared-server" && !strings.EqualFold(value, "true"):
 		effects = append(effects, configSideEffect{
-			Message: "Shared server mode disabled. Stop any running server if no longer needed.",
-			Command: "bd dolt server stop",
+			Message: "Shared server mode disabled for this workspace. The shared process is left running for other projects; stop it only from a shared-enabled workspace after confirming no users remain.",
 		})
 
 	case key == "dolt.debug" && strings.EqualFold(value, "true"):
 		effects = append(effects, configSideEffect{
 			Message: "Debug mode will apply on the next Dolt server start (loglevel=debug, --prof cpu).",
-			Command: "bd dolt stop && bd dolt start",
+			Command: "bd dolt restart",
 		})
 
 	case key == "dolt.debug" && !strings.EqualFold(value, "true"):
 		effects = append(effects, configSideEffect{
 			Message: "Debug mode disabled. Restart the server to drop --prof and --loglevel=debug.",
-			Command: "bd dolt stop && bd dolt start",
+			Command: "bd dolt restart",
+		})
+
+	case key == "dolt.remotesapi-port":
+		effects = append(effects, configSideEffect{
+			Message: "RemotesAPI port updated. From a shared-server-enabled workspace, run 'bd dolt restart' to apply it.",
 		})
 
 	case key == "routing.mode":
@@ -83,14 +87,18 @@ func checkConfigUnsetSideEffects(key string) []configSideEffect {
 
 	case "dolt.shared-server":
 		effects = append(effects, configSideEffect{
-			Message: "Shared server config removed. Stop any running server if no longer needed.",
-			Command: "bd dolt server stop",
+			Message: "Shared server config removed from this workspace. The shared process is left running for other projects; stop it only from a shared-enabled workspace after confirming no users remain.",
 		})
 
 	case "dolt.debug":
 		effects = append(effects, configSideEffect{
 			Message: "Debug config removed. Restart the server to drop --prof and --loglevel=debug.",
-			Command: "bd dolt stop && bd dolt start",
+			Command: "bd dolt restart",
+		})
+
+	case "dolt.remotesapi-port":
+		effects = append(effects, configSideEffect{
+			Message: "RemotesAPI disabled. From a shared-server-enabled workspace, run 'bd dolt restart' to close the existing listener.",
 		})
 
 	case "backup.enabled":
