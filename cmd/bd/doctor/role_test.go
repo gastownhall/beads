@@ -142,9 +142,14 @@ func TestCheckBeadsRole_NonexistentPath(t *testing.T) {
 	// Test with a path that doesn't exist — git will report "not a git repository"
 	check := CheckBeadsRole(filepath.Join(os.TempDir(), "nonexistent-beads-test-dir"))
 
-	// Should return OK/N/A since the path is not a git repository
+	// Should return OK/N/A since the path is not a git repository. Status alone
+	// cannot separate that from an ambient role leaking in: "Configured as
+	// maintainer" is StatusOK too, so the message is the discriminating claim.
 	if check.Status != StatusOK {
 		t.Errorf("expected status %s, got %s", StatusOK, check.Status)
+	}
+	if check.Message != "N/A (not a git repository)" {
+		t.Errorf("expected message 'N/A (not a git repository)', got %q", check.Message)
 	}
 }
 
