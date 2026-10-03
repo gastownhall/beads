@@ -41,6 +41,7 @@ go_test(
         "commit_empty_test.go",
         "conflicts_test.go",
         "fastforward_test.go",
+        "flatten_preservation_test.go",
         "gc_test.go",
         "remotes_githooks_test.go",
         "remotes_gittrace_test.go",
@@ -48,8 +49,11 @@ go_test(
     ],
     embed = [":versioncontrolops"],
     deps = [
+        "//internal/doltserver",
         "//internal/githooksenv",
+        "//internal/testutil",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
+        "@com_github_go_sql_driver_mysql//:mysql",
     ],
 )
 

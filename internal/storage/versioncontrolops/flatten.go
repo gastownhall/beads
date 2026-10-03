@@ -3,87 +3,117 @@ package versioncontrolops
 import (
 	"context"
 	"fmt"
+	"time"
+
+	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
-// Flatten squashes all Dolt commit history into a single commit using
-// the Tim Sehn recipe:
-//  1. Create a temp branch from current state
-//  2. Checkout temp branch
-//  3. Soft-reset to the initial (oldest) commit, collapsing all history
-//  4. Stage all + commit as a single snapshot
-//  5. Checkout main
-//  6. Hard-reset main to the flattened branch
-//  7. Delete temp branch
-//
-// Callers should run PruneRemoteRefs and then DoltGC afterward to reclaim disk
-// space from orphaned history — remote-tracking refs still anchor the
-// pre-flatten chain, and GC alone reclaims nothing while they exist (bd-agctw).
-//
-// conn must be a single database connection (not a pooled *sql.DB) since the
-// stored procedures rely on session-scoped state (current branch, working set).
-func Flatten(ctx context.Context, conn DBConn) error {
-	// Find the initial commit hash (oldest ancestor).
-	var initialHash string
-	if err := conn.QueryRowContext(ctx,
-		"SELECT commit_hash FROM dolt_log ORDER BY date ASC LIMIT 1",
-	).Scan(&initialHash); err != nil {
-		return fmt.Errorf("find initial commit: %w", err)
-	}
+const flattenRootQuery = `SELECT l.commit_hash FROM dolt_log l
+	JOIN dolt_commit_ancestors a ON l.commit_hash = a.commit_hash
+	WHERE a.parent_hash IS NULL`
 
-	// Count commits to check if flatten is needed.
-	var commitCount int
-	if err := conn.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM dolt_log",
-	).Scan(&commitCount); err != nil {
-		return fmt.Errorf("count commits: %w", err)
+// Flatten squashes main's history into an empty ancestry root plus a snapshot
+// of the current working state. Checkpoint pending changes before moving HEAD,
+// then soft-reset and commit on the same connection. Neither checkout nor hard
+// reset is safe here: checkout can leave dirty config on the old branch, and
+// hard reset drops clone-local FKs on ignored tables (#6772).
+//
+// Callers must exclude concurrent writers, then run PruneRemoteRefs and DoltGC
+// after success to reclaim history. conn must be a pinned connection, since
+// Dolt branch and working-set state is session scoped.
+func Flatten(ctx context.Context, conn DBConn) error {
+	var branch string
+	if err := conn.QueryRowContext(ctx, "SELECT active_branch()").Scan(&branch); err != nil {
+		return fmt.Errorf("flatten: read active branch: %w", err)
+	}
+	if branch != "main" {
+		return fmt.Errorf("flatten requires active branch main, got %q", branch)
+	}
+	commitCount, initialHash, err := FlattenDryRun(ctx, conn)
+	if err != nil {
+		return err
 	}
 	if commitCount <= 1 {
-		return nil // already flat
+		return nil // no history to shorten; leave pending changes untouched
 	}
-
-	execSQL := func(name, query string, args ...interface{}) error {
-		if _, err := conn.ExecContext(ctx, query, args...); err != nil {
-			return fmt.Errorf("flatten step %q: %w", name, err)
-		}
-		return nil
+	// A timestamp is not ancestry. Also refuse a nonempty root, rather than
+	// silently retaining historical data in the supposedly empty base.
+	rows, err := conn.QueryContext(ctx, "SHOW TABLES AS OF ?", initialHash)
+	if err != nil {
+		return fmt.Errorf("flatten: inspect ancestry root: %w", err)
 	}
-
-	steps := []struct {
-		name  string
-		query string
-		args  []interface{}
-	}{
-		{"create temp branch", "CALL DOLT_BRANCH('flatten-tmp')", nil},
-		{"checkout temp branch", "CALL DOLT_CHECKOUT('flatten-tmp')", nil},
-		{"soft reset to initial", "CALL DOLT_RESET('--soft', ?)", []interface{}{initialHash}},
-		{"commit flattened snapshot", "CALL DOLT_COMMIT('-Am', 'flatten: squash all history into single commit')", nil},
-		{"checkout main", "CALL DOLT_CHECKOUT('main')", nil},
-		{"reset main to flattened", "CALL DOLT_RESET('--hard', 'flatten-tmp')", nil},
-		{"delete temp branch", "CALL DOLT_BRANCH('-D', 'flatten-tmp')", nil},
-	}
-
-	for _, s := range steps {
-		if err := execSQL(s.name, s.query, s.args...); err != nil {
-			return err
+	nonempty := rows.Next()
+	var rootTable string
+	if nonempty {
+		if err := rows.Scan(&rootTable); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("flatten: read ancestry root table: %w", err)
 		}
 	}
-
+	rowsErr := rows.Err()
+	closeErr := rows.Close()
+	if rowsErr != nil {
+		return fmt.Errorf("flatten: inspect ancestry root: %w", rowsErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("flatten: close ancestry root tables: %w", closeErr)
+	}
+	if nonempty {
+		return fmt.Errorf("flatten: ancestry root %s is not empty (table %s)", initialHash, rootTable)
+	}
+	pending, err := issueops.HasPendingChanges(ctx, conn)
+	if err != nil {
+		return fmt.Errorf("flatten: check pending changes: %w", err)
+	}
+	if pending {
+		if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'flatten: checkpoint pending changes')"); err != nil {
+			return fmt.Errorf("flatten: checkpoint pending changes: %w", err)
+		}
+	}
+	var checkpoint string
+	if err := conn.QueryRowContext(ctx, "SELECT DOLT_HASHOF('HEAD')").Scan(&checkpoint); err != nil {
+		return fmt.Errorf("flatten: read checkpoint: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_RESET('--soft', ?)", initialHash); err != nil {
+		return fmt.Errorf("flatten: soft reset to ancestry root: %w", err)
+	}
+	// --allow-empty also handles a working state in which all tracked tables
+	// were deleted. Ignored rows and their schemas remain in the working set.
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('--allow-empty', '-Am', 'flatten: squash all history into single commit')"); err != nil {
+		// Restore history without replacing any working rows or schemas, even
+		// when the caller canceled. Never use a hard reset for recovery.
+		recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if _, recoveryErr := conn.ExecContext(recoveryCtx, "CALL DOLT_RESET('--soft', ?)", checkpoint); recoveryErr != nil {
+			return fmt.Errorf("flatten: commit snapshot: %w (restore checkpoint %s also failed: %v; working state retained)", err, checkpoint, recoveryErr)
+		}
+		return fmt.Errorf("flatten: commit snapshot: %w (history restored to checkpoint %s; working state retained)", err, checkpoint)
+	}
 	return nil
 }
 
-// FlattenDryRun returns the commit count and initial hash without modifying anything.
+// FlattenDryRun returns the reachable commit count and unique ancestry root.
 func FlattenDryRun(ctx context.Context, conn DBConn) (commitCount int, initialHash string, err error) {
-	if err = conn.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM dolt_log",
-	).Scan(&commitCount); err != nil {
-		err = fmt.Errorf("count commits: %w", err)
-		return
+	if err = conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_log").Scan(&commitCount); err != nil {
+		return 0, "", fmt.Errorf("count commits: %w", err)
 	}
-	if err = conn.QueryRowContext(ctx,
-		"SELECT commit_hash FROM dolt_log ORDER BY date ASC LIMIT 1",
-	).Scan(&initialHash); err != nil {
-		err = fmt.Errorf("find initial commit: %w", err)
-		return
+	rows, err := conn.QueryContext(ctx, flattenRootQuery)
+	if err != nil {
+		return 0, "", fmt.Errorf("find ancestry root: %w", err)
 	}
-	return
+	defer rows.Close()
+	roots := 0
+	for rows.Next() {
+		if err := rows.Scan(&initialHash); err != nil {
+			return 0, "", fmt.Errorf("read ancestry root: %w", err)
+		}
+		roots++
+	}
+	if err := rows.Err(); err != nil {
+		return 0, "", fmt.Errorf("read ancestry roots: %w", err)
+	}
+	if roots != 1 {
+		return 0, "", fmt.Errorf("flatten requires one ancestry root, found %d", roots)
+	}
+	return commitCount, initialHash, nil
 }
