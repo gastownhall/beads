@@ -592,10 +592,24 @@ type Storage = storage.Storage
 // Use Storage.RunInTransaction() to obtain a Transaction instance.
 type Transaction = storage.Transaction
 
-// FindDatabasePath discovers the bd database path using bd's standard search order:
+// FindDatabasePath discovers the bd database path using this search order:
 //  1. $BEADS_DIR environment variable (points to .beads directory)
 //  2. $BEADS_DB environment variable (points directly to database file, deprecated)
 //  3. .beads/*.db in current directory or ancestors
+//
+// This is NOT the precedence the bd CLI applies, and it must not be read as the
+// documented one (see the workspace-selection precedence in
+// docs/reference/configuration.md). Since be-git2o (GH#6255), cmd/bd resolves
+// $BEADS_DB and $BD_DB on its own command paths, ahead of this call and ahead of
+// $BEADS_DIR. With both $BEADS_DIR and $BEADS_DB exported, an embedder calling
+// this function and a `bd` invocation in the same environment therefore select
+// different workspaces: this function honors $BEADS_DIR, the CLI honors
+// $BEADS_DB. There is also deliberately no $BD_DB branch here; that alias is
+// recognized only in cmd/bd.
+//
+// The branch order below is left as-is on purpose: changing it would move
+// behavior for every library embedder, whose call sites are outside the scope
+// of the CLI fix.
 //
 // Redirect files are supported: if a .beads/redirect file exists, its contents
 // are used as the actual .beads directory path.

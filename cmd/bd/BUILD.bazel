@@ -1125,6 +1125,7 @@ go_test(
         "storage_class_embedded_test.go",
         "storage_class_proxied_integration_test.go",
         "storage_class_pure_test.go",
+        "store_env_db_regression_test.go",
         "store_factory_nocgo_test.go",
         "store_factory_test.go",
         "store_reopen_embedded_resolution_test.go",
