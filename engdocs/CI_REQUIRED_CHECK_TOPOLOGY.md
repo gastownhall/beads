@@ -42,11 +42,18 @@ Current PR-related workflow names:
 - `.github/workflows/bazel.yml`: `Bazel`
   Runs on `push` to `main`, manual dispatch, and `workflow_call` only. PRs and
   merge groups run it once, through `pr.yml`'s `bazel` job. Its `rbe` job
-  decides the execution mode once (`remote`; `cache` for fork and Dependabot
-  PRs: local execution plus rbe-west's anonymous read-only action cache,
-  `.bazelrc`'s `fork-cache` config; `local` for `rbe=off` dispatches; or
-  `skip` while the `RBE_WEST_WORKERS` repo variable is unset) and
-  exports it as the `rbe-mode` / `rbe-enabled` outputs; every lane exports its
+  decides the execution mode once (`remote`; for fork and Dependabot PRs,
+  which get no secrets or variables, rbe-west's certificate mint decides
+  (`rbe-mint.ops.gascity.com:8444/v1/status`, infra README "rbe-fork"):
+  `fork-ro` or `fork-rw` while it is open for the run, every lane executing
+  remotely on `rbe-fork.ops.gascity.com:8444` with its own short-lived
+  certificate (instance `oss-fork`, the fork pool; or `oss`, the OSS pool,
+  for allowlisted authors), else `cache`: local execution plus rbe-west's
+  anonymous read-only action cache, `.bazelrc`'s `fork-cache` config;
+  `local` for `rbe=off` dispatches; or `skip` while the `RBE_WEST_WORKERS`
+  repo variable is unset) and exports it as the `rbe-mode` / `rbe-enabled`
+  outputs (`rbe-enabled` is `true` in `remote`, `fork-ro` and `fork-rw`);
+  every lane exports its
   `job.status` as an output named after the job. `pr.yml`'s gate requires the
   call's result (`BAZEL`) and `BAZEL_TEST`, `BAZEL_PURE`, `BAZEL_EMBEDDED`,
   `BAZEL_INTEGRATION`, `BAZEL_DOLTSERVER`, `BAZEL_PROXIED` and
@@ -60,14 +67,17 @@ Current PR-related workflow names:
   allows only the remote-only `BAZEL_EMBEDDED`, `BAZEL_PROXIED` and
   `BAZEL_SERVER_STORAGE` (fork and Dependabot PRs rely on `pr-risk.yml`'s
   legacy tiers for them), mode `local` (`rbe=off` dispatches) those and
-  `BAZEL_INTEGRATION`, and mode `remote` allows none.
+  `BAZEL_INTEGRATION`, and modes `remote`, `fork-ro` and `fork-rw` allow
+  none.
   A lane that should run and fails, is cancelled, or reports no result fails
   the gate, and so does a missing or invalid mode.
   `bazel-integration` (`bazel test //... --config=integration`, the Bazel
   twin of `main.yml`'s Linux integration shards) is required on every PR:
-  `pr.yml` passes `integration: "on"` (policy-pinned), so it runs in mode
-  `remote` (same-repo PRs) and in mode `cache` (fork and Dependabot PRs,
-  locally on the GitHub-hosted runner with the read-only cache), and a
+  `pr.yml` passes `integration: "on"` (policy-pinned), so it runs in modes
+  `remote` (same-repo PRs) and `fork-ro`/`fork-rw` (fork and Dependabot PRs
+  while rbe-fork is open), and in mode `cache` (fork and Dependabot PRs
+  while it is closed, locally on the GitHub-hosted runner with the
+  read-only cache), and a
   failure, cancellation or missing result turns the gate red. Its legacy
   twins still run only on push to `main`, so this lane is the only PR-time
   run of the full integration-tagged suite. In mode `cache` every action
@@ -800,10 +810,11 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
     check.
   - `--config=sole-run` (`--nocache_test_results`,
     `--experimental_remote_cache_eviction_retries=0`, the step 1 and 2
-    hardening) is added to every `bazel test` of the three lanes in mode
-    `remote` only (`BAZEL_SOLE_RUN`), which every covered PR runs in. Fork
-    and Dependabot runs (modes `cache` and `local`), whose legacy jobs still
-    run, keep cached results, which keeps their local runs short. Measured
+    hardening) is added to every `bazel test` of the three lanes wherever
+    they execute remotely (`BAZEL_SOLE_RUN`: modes `remote`, `fork-ro` and
+    `fork-rw`), which every covered PR runs in. Runs in modes `cache` and
+    `local`, whose legacy jobs still run, keep cached results, which keeps
+    their local runs short. Measured
     2026-10-02: `bazel test //... --config=ci --nocache_test_results`
     remotely took 132 s (113 targets).
   - Pinned for step 3 (`scripts/pr_lanes_bazel_coverage_test.go`): the
@@ -830,9 +841,17 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
   lane) and so turns
   `CI Gate / Required` red, instead of quietly moving back to a legacy tier
   that one of its runs may already have skipped.
+  Fork and Dependabot PRs too, but only while the committed
+  `BAZEL_COVERS_FORKS` flag (the same literal in both workflows,
+  policy-tested) is `"true"`: their lanes then run remotely through
+  rbe-fork (modes `fork-ro`/`fork-rw`), and a run rbe-fork does not serve
+  (mode `cache`) turns `CI Gate / Required` red rather than falling back.
+  It ships `"false"`.
 - Everyone else keeps the legacy tiers unchanged:
-  - fork PRs;
-  - Dependabot PRs (no Actions secrets; `github.actor`, unlike
+  - fork PRs, while `BAZEL_COVERS_FORKS` is `"false"` (their Bazel lanes
+    run beside the legacy tiers: remotely while rbe-fork is open, else in
+    mode `cache`);
+  - Dependabot PRs, likewise (no Actions secrets; `github.actor`, unlike
     `github.triggering_actor`, stays `dependabot[bot]` when someone else
     re-runs them);
   - every `merge_group` run (there is no merge queue today, so this is not

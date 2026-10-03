@@ -25,9 +25,16 @@
 # cert path) and outside BAZEL_CI_CACHE_DIR (the runner cache must never store
 # credentials). The endpoint is masked in the job log.
 #
-# BAZEL_FORK_CACHE=true (bazel.yml mode "cache": fork PRs and rbe=cache
-# dispatches) appends --config=fork-cache: .bazelrc's credential-free,
-# read-only rbe-west cache. It is mutually exclusive with the RBE secrets.
+# BAZEL_FORK_CACHE=true (bazel.yml mode "cache": rbe=cache dispatches, and
+# fork/Dependabot runs while rbe-fork is closed) appends --config=fork-cache:
+# .bazelrc's credential-free, read-only rbe-west cache.
+#
+# RBE_FORK_CERT_FILE + RBE_FORK_KEY_FILE + RBE_FORK_ENDPOINT + RBE_FORK_INSTANCE
+# (bazel.yml modes fork-ro/fork-rw: fork-credential.sh's outputs, a
+# short-lived rbe-fork-mint certificate) enable --config=remote-exec against
+# rbe-fork: instance oss-fork (the fork pool, nothing cached) or oss
+# (allowlisted authors: the OSS pool, results cached by the workers). The
+# three modes are mutually exclusive.
 #
 # Outputs (to $GITHUB_OUTPUT when set, else stdout): rc=<path>,
 # remote=true|false, cache=true|false.
@@ -82,6 +89,21 @@ key="${RBE_TLS_KEY:-}"
 ca="${RBE_TLS_CA:-}"
 instance="${RBE_INSTANCE:-}"
 fork_cache="${BAZEL_FORK_CACHE:-}"
+fork_cert="${RBE_FORK_CERT_FILE:-}"
+fork_key="${RBE_FORK_KEY_FILE:-}"
+fork_endpoint="${RBE_FORK_ENDPOINT:-}"
+fork_instance="${RBE_FORK_INSTANCE:-}"
+fork_fields=0
+for v in "$fork_cert" "$fork_key" "$fork_endpoint" "$fork_instance"; do
+	[[ -n "$v" ]] && fork_fields=$((fork_fields + 1))
+done
+case "$fork_fields/$fork_instance" in
+0/ | 4/oss | 4/oss-fork) ;;
+*)
+	echo "setup-bazel: RBE_FORK_CERT_FILE, RBE_FORK_KEY_FILE, RBE_FORK_ENDPOINT and RBE_FORK_INSTANCE (oss or oss-fork) go together" >&2
+	exit 1
+	;;
+esac
 case "$fork_cache" in
 "" | true) ;;
 *)
@@ -142,7 +164,25 @@ done
 
 remote=false
 cache=false
-if [[ "$set_fields" -eq 3 ]]; then
+if [[ "$fork_fields" -eq 4 ]]; then
+	if [[ "$set_fields" -ne 0 || "$fork_cache" == true ]]; then
+		echo "setup-bazel: the rbe-fork certificate, the remote execution secrets and BAZEL_FORK_CACHE are mutually exclusive" >&2
+		exit 1
+	fi
+	{
+		echo "build:remote-exec --remote_executor=$fork_endpoint"
+		echo "build:remote-exec --tls_client_certificate=$fork_cert"
+		echo "build:remote-exec --tls_client_key=$fork_key"
+		echo "build:remote-exec --remote_instance_name=$fork_instance"
+		echo "build:remote-exec --noremote_upload_local_results"
+		# The farm admits 128 connections per source IP (Blacksmith runners
+		# share addresses). Key-neutral, like everything in this rc.
+		echo "build:remote-exec --remote_max_connections=8"
+		echo "build --config=remote-exec"
+	} >>"$rc"
+	remote=true
+	echo "setup-bazel: remote execution on rbe-fork (instance $fork_instance, short-lived certificate)"
+elif [[ "$set_fields" -eq 3 ]]; then
 	if [[ "$fork_cache" == true ]]; then
 		echo "setup-bazel: BAZEL_FORK_CACHE and the remote execution secrets are mutually exclusive" >&2
 		exit 1

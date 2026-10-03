@@ -128,8 +128,15 @@ func retiredJobs() map[string]retiredTier {
 var prRiskSharedDecisionEnv = []string{"FORK"}
 
 // The decision's Dependabot test: Dependabot runs get no Actions secrets, so
-// bazel.yml runs them locally and they keep the legacy tiers.
+// they are covered (like fork PRs) only while BAZEL_COVERS_FORKS is "true".
 const prRiskDependabotValue = "${{ github.actor == 'dependabot[bot]' }}"
+
+// The committed flag that covers fork and Dependabot PRs too (rbe-fork), and
+// its expression in both decision steps.
+const (
+	prCoversForksFlag  = "BAZEL_COVERS_FORKS"
+	prCoversForksValue = "${{ env." + prCoversForksFlag + " == 'true' }}"
+)
 
 // rbeFacts: what GitHub evaluates the decision steps' env expressions on.
 type rbeFacts struct {
@@ -141,17 +148,32 @@ type rbeFacts struct {
 	retired [3]string
 	// github.actor is dependabot[bot] (fixed for a PR's runs and re-runs).
 	dependabot bool
+	// The committed env.BAZEL_COVERS_FORKS.
+	coversForks string
+	// What rbe-fork-mint's /v1/status answers this run (bazelTestMintEnv;
+	// "" = unreachable). Only fork and Dependabot pull_request runs ask.
+	mint string
 }
 
 func (f rbeFacts) String() string {
-	return fmt.Sprintf("event=%s var=%q secret=%v fork=%v retired=%q dependabot=%v", f.event, f.rbeVar, f.secret != "", f.fork, f.retired, f.dependabot)
+	return fmt.Sprintf("event=%s var=%q secret=%v fork=%v retired=%q dependabot=%v covers-forks=%q mint=%q",
+		f.event, f.rbeVar, f.secret != "", f.fork, f.retired, f.dependabot, f.coversForks, f.mint)
 }
 
-// covers: whether a same-repo, non-Dependabot pull_request with tier i's
-// flag set, the decision both workflows must take for tier i.
+// covers: whether a pull_request with tier i's flag set is covered, the
+// decision both workflows must take for tier i: same-repo, non-Dependabot
+// PRs always; fork and Dependabot PRs while BAZEL_COVERS_FORKS is "true".
+// Never what the mint says: a covered fork run it does not serve is red.
 func (f rbeFacts) covers(i int) bool {
-	return strings.EqualFold(f.retired[i], "true") && f.event == "pull_request" && !f.fork && !f.dependabot
+	return strings.EqualFold(f.retired[i], "true") && f.event == "pull_request" &&
+		(!f.fork && !f.dependabot || strings.EqualFold(f.coversForks, "true"))
 }
+
+// forkPR: a run that asks rbe-fork-mint (bazel.yml's rbe job).
+func (f rbeFacts) forkPR() bool { return f.event == "pull_request" && (f.fork || f.dependabot) }
+
+// rbeMintAnswers: the mint states every forkPR fact is tried with.
+var rbeMintAnswers = []string{"", "closed", "ro", "rw"}
 
 var (
 	rbeEvents    = []string{"pull_request", "merge_group", "push", "workflow_dispatch", "pull_request_target"}
@@ -166,15 +188,37 @@ var (
 )
 
 // rbeFactsMatrix: every combination of the facts the decisions read.
+// BAZEL_COVERS_FORKS takes both values (and other spellings) where it can
+// matter, fork and Dependabot facts, and "true" elsewhere only with every
+// tier retired (to show it changes nothing there); the mint answers only
+// matter to forkPR facts.
 func rbeFactsMatrix() []rbeFacts {
 	var out []rbeFacts
+	allRetired := [3]string{"true", "true", "true"}
 	for _, event := range rbeEvents {
 		for _, v := range rbeVarValues {
 			for _, secret := range rbeSecrets {
 				for _, fork := range []bool{false, true} {
 					for _, retired := range retiredValues {
 						for _, dependabot := range []bool{false, true} {
-							out = append(out, rbeFacts{event, v, secret, fork, retired, dependabot})
+							covers := []string{"false"}
+							switch {
+							case (fork || dependabot) && retired == allRetired:
+								covers = []string{"false", "true", "True", "", "yes"}
+							case fork || dependabot, retired == allRetired:
+								covers = []string{"false", "true"}
+							}
+							for _, c := range covers {
+								f := rbeFacts{event, v, secret, fork, retired, dependabot, c, ""}
+								if !f.forkPR() {
+									out = append(out, f)
+									continue
+								}
+								for _, m := range rbeMintAnswers {
+									f.mint = m
+									out = append(out, f)
+								}
+							}
 						}
 					}
 				}
@@ -206,6 +250,13 @@ func evalRBEExpr(t *testing.T, expr string, f rbeFacts, with map[string]string) 
 		}
 	}
 	switch expr {
+	case prCoversForksValue:
+		return strconv.FormatBool(strings.EqualFold(f.coversForks, "true"))
+	case "${{ github.event.pull_request.number }}":
+		if f.event == "pull_request" || f.event == "pull_request_target" {
+			return "7123"
+		}
+		return ""
 	case prRiskPullRequestValue:
 		return strconv.FormatBool(f.event == "pull_request")
 	case prRiskDependabotValue:
@@ -232,7 +283,7 @@ func evalRBEExpr(t *testing.T, expr string, f rbeFacts, with map[string]string) 
 // with its env evaluated for f, and returns its $GITHUB_OUTPUT.
 func runDecisionStep(t *testing.T, step ciWorkflowStep, f rbeFacts, with map[string]string) (map[string]string, error) {
 	t.Helper()
-	env := map[string]string{}
+	env := map[string]string{bazelTestMintEnv: f.mint}
 	for k, v := range step.Env {
 		env[k] = evalRBEExpr(t, v, f, with)
 	}
@@ -279,7 +330,7 @@ func TestPRRiskBazelCoverageJob(t *testing.T) {
 			prRiskCoverageJobName, job.Needs, job.If, job.RunsOn, job.Env, job.ContinueOnError, job.TimeoutMinutes, sameRepoBlacksmith2vcpu)
 	}
 	wantOutputs := map[string]string{}
-	wantEnv := map[string]string{"PULL_REQUEST": prRiskPullRequestValue, "DEPENDABOT": prRiskDependabotValue}
+	wantEnv := map[string]string{"PULL_REQUEST": prRiskPullRequestValue, "DEPENDABOT": prRiskDependabotValue, "COVERS_FORKS": prCoversForksValue}
 	for _, r := range retiredTiers {
 		wantOutputs[r.output] = "${{ steps.decide.outputs." + r.output + " }}"
 		wantEnv[r.envKey] = r.retiredValue()
@@ -291,9 +342,13 @@ func TestPRRiskBazelCoverageJob(t *testing.T) {
 		t.Errorf("pr.yml's %s differs from pr-risk.yml's:\n%+v\n%+v", prRiskCoverageJobName, prJob, job)
 	}
 	riskEnv, prEnv := workflowEnv(t, prRiskWorkflowName), workflowEnv(t, "pr.yml")
+	committed := []string{prCoversForksFlag}
 	for _, r := range retiredTiers {
-		if riskFlag, prFlag := riskEnv[r.flag], prEnv[r.flag]; riskFlag != prFlag || (riskFlag != "true" && riskFlag != "false") {
-			t.Errorf("%s: pr-risk.yml %q, pr.yml %q; want the same literal \"true\" or \"false\" in both", r.flag, riskFlag, prFlag)
+		committed = append(committed, r.flag)
+	}
+	for _, flag := range committed {
+		if riskFlag, prFlag := riskEnv[flag], prEnv[flag]; riskFlag != prFlag || (riskFlag != "true" && riskFlag != "false") {
+			t.Errorf("%s: pr-risk.yml %q, pr.yml %q; want the same literal \"true\" or \"false\" in both", flag, riskFlag, prFlag)
 		}
 	}
 	step := prRiskCoverageStep(t)
@@ -318,8 +373,8 @@ func TestPRRiskBazelCoverageJob(t *testing.T) {
 	// repository variable; only the workflow env sets a flag.
 	stepEnv := ".jobs." + prRiskCoverageJobName + ".steps[0].env."
 	secretRef := regexp.MustCompile(`\bsecrets\s*(\.|\[)`)
-	flags := map[string]bool{}
-	var flagAlt []string
+	flags := map[string]bool{prCoversForksFlag: true}
+	flagAlt := []string{prCoversForksFlag}
 	for _, r := range retiredTiers {
 		flags[r.flag] = true
 		flagAlt = append(flagAlt, r.flag)
@@ -357,8 +412,8 @@ func TestPRRiskBazelCoverageJob(t *testing.T) {
 			}
 			return
 		}
-		if regexp.MustCompile(`env\.BAZEL_RETIRES_`).MatchString(value) && !strings.HasPrefix(path, stepEnv) {
-			t.Errorf("pr.yml: %s reads a BAZEL_RETIRES_* flag (%q); read needs.%s.outputs", path, value, prRiskCoverageJobName)
+		if regexp.MustCompile(`env\.BAZEL_(RETIRES_|COVERS_FORKS\b)`).MatchString(value) && !strings.HasPrefix(path, stepEnv) {
+			t.Errorf("pr.yml: %s reads a BAZEL_RETIRES_* or BAZEL_COVERS_FORKS flag (%q); read needs.%s.outputs", path, value, prRiskCoverageJobName)
 		}
 	})
 	// Every BAZEL_RETIRES_* flag either workflow commits is one of retiredTiers.
@@ -384,7 +439,7 @@ func prGateFor(t *testing.T, lanes map[string]map[string]bool, event, mode strin
 	}
 	return bazelGateScenario{
 		name: fmt.Sprintf("%s mode %s covered %v", event, mode, covered), event: event,
-		mode: mode, enabled: strconv.FormatBool(mode == "remote"), call: "success",
+		mode: mode, enabled: bazelModeEnabled(mode), call: "success",
 		outputs: outputs, covered: covered,
 	}
 }
@@ -501,6 +556,7 @@ func TestPRRiskDecisionMatchesBazelMode(t *testing.T) {
 		mode               string
 	}
 	modeMemo := map[rbeFacts]string{}
+	coverMemo := map[rbeFacts][2]map[string]string{}
 	decideMemo := map[rbeFacts]decided{}
 	decide := func(t *testing.T, f rbeFacts) decided {
 		t.Helper()
@@ -509,6 +565,7 @@ func TestPRRiskDecisionMatchesBazelMode(t *testing.T) {
 		}
 		noFlags := f
 		noFlags.retired = [3]string{}
+		noFlags.coversForks = ""
 		mode, ok := modeMemo[noFlags]
 		if !ok {
 			bazel, err := runDecisionStep(t, rbeStep, f, call.With)
@@ -518,15 +575,25 @@ func TestPRRiskDecisionMatchesBazelMode(t *testing.T) {
 			mode = bazel["mode"]
 			modeMemo[noFlags] = mode
 		}
-		risk, err := runDecisionStep(t, riskStep, f, nil)
-		if err != nil || len(risk) != len(retiredTiers) {
-			t.Fatalf("%s decision step: %v %v", prRiskCoverageJobName, risk, err)
+		// The coverage steps read no variable, secret or mint (their env is
+		// pinned exactly by TestPRRiskBazelCoverageJob): one run per fact
+		// without them.
+		noMint := f
+		noMint.rbeVar, noMint.secret, noMint.mint = "", "", ""
+		cov, ok := coverMemo[noMint]
+		if !ok {
+			risk, err := runDecisionStep(t, riskStep, noMint, nil)
+			if err != nil || len(risk) != len(retiredTiers) {
+				t.Fatalf("%s decision step: %v %v", prRiskCoverageJobName, risk, err)
+			}
+			prd, err := runDecisionStep(t, prStep, noMint, nil)
+			if err != nil {
+				t.Fatalf("pr.yml %s step: %v", prRiskCoverageJobName, err)
+			}
+			cov = [2]map[string]string{risk, prd}
+			coverMemo[noMint] = cov
 		}
-		prd, err := runDecisionStep(t, prStep, f, nil)
-		if err != nil {
-			t.Fatalf("pr.yml %s step: %v", prRiskCoverageJobName, err)
-		}
-		d := decided{risk, prd, mode}
+		d := decided{cov[0], cov[1], mode}
 		decideMemo[f] = d
 		return d
 	}
@@ -568,31 +635,40 @@ func TestPRRiskDecisionMatchesBazelMode(t *testing.T) {
 			continue // the events both workflows run on
 		}
 		risk := decide(t, f)
+		mints := []string{f.mint}
+		if f.forkPR() {
+			mints = rbeMintAnswers // rbe-fork may open or close between the runs
+		}
 		for _, v := range rbeVarValues {
 			for _, secret := range rbeSecrets {
-				g := f
-				g.rbeVar, g.secret = v, secret
-				prRun := decide(t, g)
-				bazelRan := prRun.mode == "remote" // and passed: every lane succeeds here
-				for _, r := range retiredTiers {
-					// PR Risk's tiers stand down in PR Risk's run; pr.yml's
-					// own (step 3) in this same pr.yml run.
-					legacyRan := risk.covered[r.output] != "true"
-					if r.workflow == "pr.yml" {
-						legacyRan = prRun.prCovered[r.output] != "true"
-					}
-					if !legacyRan && !bazelRan && prGatePasses(t, g.event, prRun.mode, prRun.prCovered) {
-						t.Errorf("PR Risk run %v skipped the legacy %s tier and pr.yml run (var %q, secret %v, mode %s, covered %v) is green without its Bazel lanes",
-							f, r.output, v, secret != "", prRun.mode, prRun.prCovered)
+				for _, m := range mints {
+					g := f
+					g.rbeVar, g.secret, g.mint = v, secret, m
+					prRun := decide(t, g)
+					bazelRan := bazelRemoteModes[prRun.mode] // and passed: every lane succeeds here
+					for _, r := range retiredTiers {
+						// PR Risk's tiers stand down in PR Risk's run; pr.yml's
+						// own (step 3) in this same pr.yml run.
+						legacyRan := risk.covered[r.output] != "true"
+						if r.workflow == "pr.yml" {
+							legacyRan = prRun.prCovered[r.output] != "true"
+						}
+						if !legacyRan && !bazelRan && prGatePasses(t, g.event, prRun.mode, prRun.prCovered) {
+							t.Errorf("PR Risk run %v skipped the legacy %s tier and pr.yml run (var %q, secret %v, mint %q, mode %s, covered %v) is green without its Bazel lanes",
+								f, r.output, v, secret != "", m, prRun.mode, prRun.prCovered)
+						}
 					}
 				}
 			}
 		}
 	}
 
-	// Named cases, for the record. Forks and Dependabot run in mode cache,
-	// which, like local, skips the remote-only lanes, so they keep the
-	// legacy tiers. reds: the retired ids a red gate must name.
+	// Named cases, for the record. Forks and Dependabot run in mode cache
+	// while rbe-fork is closed, which, like local, skips the remote-only
+	// lanes, or remotely in fork-ro/fork-rw; while BAZEL_COVERS_FORKS is
+	// "false" they keep the legacy tiers either way. While it is "true" they
+	// are covered: green only with their lanes run remotely, red in mode
+	// cache. reds: the retired ids a red gate must name.
 	both, embOnly, dsOnly, prOnly, none := [3]string{"true", "true", "true"}, [3]string{"true", "false", "false"}, [3]string{"false", "true", "false"},
 		[3]string{"false", "false", "true"}, [3]string{"false", "false", "false"}
 	allRetired := []string{"BAZEL_EMBEDDED_RETIRED", "BAZEL_DOLT_SERVER_RETIRED", "BAZEL_PR_LANES_RETIRED"}
@@ -604,23 +680,36 @@ func TestPRRiskDecisionMatchesBazelMode(t *testing.T) {
 		prPasses bool
 		reds     []string
 	}{
-		{"same-repo PR, farm on", rbeFacts{"pull_request", "true", "x", false, both, false}, "remote", coveredAll("true"), true, nil},
-		{"same-repo PR, kill switch (var unset)", rbeFacts{"pull_request", "", "x", false, both, false}, "skip", coveredAll("true"), false, allRetired},
-		{"same-repo PR, executor secret missing", rbeFacts{"pull_request", "true", "", false, both, false}, "cache", coveredAll("true"), false, allRetired},
-		{"same-repo PR, only embedded retired, var unset", rbeFacts{"pull_request", "", "x", false, embOnly, false}, "skip", map[string]string{"embedded": "true", "dolt_server": "false", "pr_lanes": "false"}, false, []string{"BAZEL_EMBEDDED_RETIRED"}},
-		{"same-repo PR, only proxied/server retired, var unset", rbeFacts{"pull_request", "", "x", false, dsOnly, false}, "skip", map[string]string{"embedded": "false", "dolt_server": "true", "pr_lanes": "false"}, false, []string{"BAZEL_DOLT_SERVER_RETIRED"}},
-		{"same-repo PR, only pr.yml's jobs retired, var unset", rbeFacts{"pull_request", "", "x", false, prOnly, false}, "skip", map[string]string{"embedded": "false", "dolt_server": "false", "pr_lanes": "true"}, false, []string{"BAZEL_PR_LANES_RETIRED"}},
-		{"same-repo PR, only pr.yml's jobs retired, secret missing", rbeFacts{"pull_request", "true", "", false, prOnly, false}, "cache", map[string]string{"embedded": "false", "dolt_server": "false", "pr_lanes": "true"}, false, []string{"BAZEL_PR_LANES_RETIRED"}},
-		{"same-repo PR, only pr.yml's jobs retired, farm on", rbeFacts{"pull_request", "true", "x", false, prOnly, false}, "remote", map[string]string{"embedded": "false", "dolt_server": "false", "pr_lanes": "true"}, true, nil},
-		{"same-repo PR, flags reverted, var unset", rbeFacts{"pull_request", "", "x", false, none, false}, "skip", coveredAll("false"), true, nil},
-		{"same-repo PR, flags reverted, secret missing", rbeFacts{"pull_request", "true", "", false, none, false}, "cache", coveredAll("false"), true, nil},
-		{"fork PR", rbeFacts{"pull_request", "true", "", true, both, false}, "cache", coveredAll("false"), true, nil},
-		{"fork PR, var unset", rbeFacts{"pull_request", "", "", true, both, false}, "cache", coveredAll("false"), true, nil},
-		{"fork PR somehow with a secret", rbeFacts{"pull_request", "true", "x", true, both, false}, "cache", coveredAll("false"), true, nil},
-		{"Dependabot PR (no Actions secrets)", rbeFacts{"pull_request", "true", "", false, both, true}, "cache", coveredAll("false"), true, nil},
-		{"Dependabot PR, var unset", rbeFacts{"pull_request", "", "", false, both, true}, "skip", coveredAll("false"), true, nil},
-		{"merge_group", rbeFacts{"merge_group", "true", "x", false, both, false}, "remote", coveredAll("false"), true, nil},
-		{"merge_group, var unset", rbeFacts{"merge_group", "", "x", false, both, false}, "skip", coveredAll("false"), true, nil},
+		{"same-repo PR, farm on", rbeFacts{"pull_request", "true", "x", false, both, false, "false", ""}, "remote", coveredAll("true"), true, nil},
+		{"same-repo PR, kill switch (var unset)", rbeFacts{"pull_request", "", "x", false, both, false, "false", ""}, "skip", coveredAll("true"), false, allRetired},
+		{"same-repo PR, executor secret missing", rbeFacts{"pull_request", "true", "", false, both, false, "false", ""}, "cache", coveredAll("true"), false, allRetired},
+		{"same-repo PR, only embedded retired, var unset", rbeFacts{"pull_request", "", "x", false, embOnly, false, "false", ""}, "skip", map[string]string{"embedded": "true", "dolt_server": "false", "pr_lanes": "false"}, false, []string{"BAZEL_EMBEDDED_RETIRED"}},
+		{"same-repo PR, only proxied/server retired, var unset", rbeFacts{"pull_request", "", "x", false, dsOnly, false, "false", ""}, "skip", map[string]string{"embedded": "false", "dolt_server": "true", "pr_lanes": "false"}, false, []string{"BAZEL_DOLT_SERVER_RETIRED"}},
+		{"same-repo PR, only pr.yml's jobs retired, var unset", rbeFacts{"pull_request", "", "x", false, prOnly, false, "false", ""}, "skip", map[string]string{"embedded": "false", "dolt_server": "false", "pr_lanes": "true"}, false, []string{"BAZEL_PR_LANES_RETIRED"}},
+		{"same-repo PR, only pr.yml's jobs retired, secret missing", rbeFacts{"pull_request", "true", "", false, prOnly, false, "false", ""}, "cache", map[string]string{"embedded": "false", "dolt_server": "false", "pr_lanes": "true"}, false, []string{"BAZEL_PR_LANES_RETIRED"}},
+		{"same-repo PR, only pr.yml's jobs retired, farm on", rbeFacts{"pull_request", "true", "x", false, prOnly, false, "false", ""}, "remote", map[string]string{"embedded": "false", "dolt_server": "false", "pr_lanes": "true"}, true, nil},
+		{"same-repo PR, flags reverted, var unset", rbeFacts{"pull_request", "", "x", false, none, false, "false", ""}, "skip", coveredAll("false"), true, nil},
+		{"same-repo PR, flags reverted, secret missing", rbeFacts{"pull_request", "true", "", false, none, false, "false", ""}, "cache", coveredAll("false"), true, nil},
+		{"fork PR", rbeFacts{"pull_request", "true", "", true, both, false, "false", ""}, "cache", coveredAll("false"), true, nil},
+		{"fork PR, var unset", rbeFacts{"pull_request", "", "", true, both, false, "false", ""}, "cache", coveredAll("false"), true, nil},
+		{"fork PR somehow with a secret", rbeFacts{"pull_request", "true", "x", true, both, false, "false", ""}, "cache", coveredAll("false"), true, nil},
+		{"Dependabot PR (no Actions secrets)", rbeFacts{"pull_request", "true", "", false, both, true, "false", ""}, "cache", coveredAll("false"), true, nil},
+		// rbe-fork decides for Dependabot like for forks (the mint, not the
+		// farm switch): unreachable here, so cache.
+		{"Dependabot PR, var unset", rbeFacts{"pull_request", "", "", false, both, true, "false", ""}, "cache", coveredAll("false"), true, nil},
+		{"fork PR, rbe-fork ro", rbeFacts{"pull_request", "true", "", true, both, false, "false", "ro"}, "fork-ro", coveredAll("false"), true, nil},
+		{"fork PR, rbe-fork rw", rbeFacts{"pull_request", "", "", true, both, false, "false", "rw"}, "fork-rw", coveredAll("false"), true, nil},
+		{"fork PR, rbe-fork closed", rbeFacts{"pull_request", "true", "", true, both, false, "false", "closed"}, "cache", coveredAll("false"), true, nil},
+		{"Dependabot PR, rbe-fork ro", rbeFacts{"pull_request", "true", "", false, both, true, "false", "ro"}, "fork-ro", coveredAll("false"), true, nil},
+		{"covered fork PR, rbe-fork ro", rbeFacts{"pull_request", "true", "", true, both, false, "true", "ro"}, "fork-ro", coveredAll("true"), true, nil},
+		{"covered fork PR, rbe-fork rw", rbeFacts{"pull_request", "", "", true, both, false, "true", "rw"}, "fork-rw", coveredAll("true"), true, nil},
+		{"covered fork PR, rbe-fork closed", rbeFacts{"pull_request", "true", "", true, both, false, "true", "closed"}, "cache", coveredAll("true"), false, allRetired},
+		{"covered fork PR, mint unreachable", rbeFacts{"pull_request", "true", "", true, both, false, "true", ""}, "cache", coveredAll("true"), false, allRetired},
+		{"covered Dependabot PR, rbe-fork ro", rbeFacts{"pull_request", "true", "", false, both, true, "true", "ro"}, "fork-ro", coveredAll("true"), true, nil},
+		{"covered Dependabot PR, rbe-fork closed", rbeFacts{"pull_request", "", "", false, both, true, "true", "closed"}, "cache", coveredAll("true"), false, allRetired},
+		{"covered fork PR, only pr.yml's jobs retired, rbe-fork closed", rbeFacts{"pull_request", "true", "", true, prOnly, false, "true", "closed"}, "cache", map[string]string{"embedded": "false", "dolt_server": "false", "pr_lanes": "true"}, false, []string{"BAZEL_PR_LANES_RETIRED"}},
+		{"merge_group", rbeFacts{"merge_group", "true", "x", false, both, false, "false", ""}, "remote", coveredAll("false"), true, nil},
+		{"merge_group, var unset", rbeFacts{"merge_group", "", "x", false, both, false, "false", ""}, "skip", coveredAll("false"), true, nil},
 	} {
 		d := decide(t, c.f)
 		if !reflect.DeepEqual(d.covered, c.covered) || d.mode != c.mode {
@@ -679,7 +768,7 @@ func TestPRRiskDecisionMatchesBazelMode(t *testing.T) {
 		}
 	}
 	// A value that is not a boolean fails the job rather than deciding.
-	base := map[string]string{"PULL_REQUEST": "true", "FORK": "false", "DEPENDABOT": "false"}
+	base := map[string]string{"PULL_REQUEST": "true", "FORK": "false", "DEPENDABOT": "false", "COVERS_FORKS": "false"}
 	for _, r := range retiredTiers {
 		base[r.envKey] = "true"
 	}

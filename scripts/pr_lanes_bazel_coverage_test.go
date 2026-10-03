@@ -32,8 +32,11 @@ const (
 	prAllowlistedStep  = "Run the Go tests the Bazel lane skips"
 	prScriptsChecksJob = "scripts-go-checks"
 	prScriptsChecksID  = "SCRIPTS_GO_CHECKS"
-	// bazel.yml's lanes for the step add --config=sole-run in mode remote.
-	bazelSoleRunEnv          = "${{ needs.rbe.outputs.mode == 'remote' && '--config=sole-run' || '' }}"
+	// bazel.yml's lanes for the step add --config=sole-run whenever they
+	// execute remotely (enabled: mode remote, and the rbe-fork modes
+	// fork-ro/fork-rw, whose lanes are a fork's only run once
+	// BAZEL_COVERS_FORKS covers it).
+	bazelSoleRunEnv          = "${{ needs.rbe.outputs.enabled == 'true' && '--config=sole-run' || '' }}"
 	bazelSoleRunArg          = `${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"}`
 	bazelSoleRunNoCacheLine  = "test:sole-run --nocache_test_results"
 	bazelSoleRunEvictionLine = "test:sole-run --experimental_remote_cache_eviction_retries=0"
@@ -284,6 +287,12 @@ func TestPRLegacyLanesDeferToBazelLanes(t *testing.T) {
 	add("covered, remote, lanes passed, legacy skipped", prGateFor(t, lanes, "pull_request", "remote", cov("true")), true, "")
 	add("not covered, remote, legacy ran", prGateFor(t, lanes, "pull_request", "remote", cov("false")), true, "")
 	add("merge_group, not covered, remote", prGateFor(t, lanes, "merge_group", "remote", cov("false")), true, "")
+	// rbe-fork: a covered fork or Dependabot PR (BAZEL_COVERS_FORKS) whose
+	// lanes ran remotely with a mint certificate.
+	for _, mode := range []string{"fork-ro", "fork-rw"} {
+		add("covered, mode "+mode+", lanes passed, legacy skipped", prGateFor(t, lanes, "pull_request", mode, cov("true")), true, "")
+		add("not covered, mode "+mode+", legacy ran", prGateFor(t, lanes, "pull_request", mode, cov("false")), true, "")
+	}
 	for _, mode := range []string{"local", "cache"} {
 		add("not covered, mode "+mode+", legacy ran", prGateFor(t, lanes, "pull_request", mode, cov("false")), true, "")
 	}
@@ -404,8 +413,10 @@ func testPackageGateJobs(t *testing.T, prGateRequired []string) {
 
 		detectCond := "steps.detect.outputs." + lane.detectOutput + " == 'true'"
 		detectIf := "${{ " + detectCond + " }}"
-		bazelPathIf := "${{ " + detectCond + " && needs." + bazelRBEJobName + ".outputs.enabled == 'true' }}"
-		fallbackIf := "${{ " + detectCond + " && needs." + bazelRBEJobName + ".outputs.enabled != 'true' }}"
+		// Mode remote, not enabled: the package gates take no rbe-fork
+		// certificate, so fork modes keep the go build fallback.
+		bazelPathIf := "${{ " + detectCond + " && needs." + bazelRBEJobName + ".outputs.mode == 'remote' }}"
+		fallbackIf := "${{ " + detectCond + " && needs." + bazelRBEJobName + ".outputs.mode != 'remote' }}"
 		wantNames := []string{
 			"", // checkout (no name)
 			"Decide applicability",

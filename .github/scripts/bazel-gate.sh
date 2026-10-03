@@ -13,7 +13,7 @@
 #                              cache:  BAZEL_EMBEDDED, BAZEL_PROXIED,
 #                                      BAZEL_SERVER_STORAGE (integration
 #                                      runs with the read-only cache)
-#                              remote: none
+#                              remote, fork-ro, fork-rw: none
 #   bazel-gate.sh aggregate  the value to gate on for BAZEL: the call's
 #                            aggregate result, or, when the mode is missing
 #                            or invalid (the rbe job failed, the call never
@@ -32,7 +32,7 @@ mode="${BAZEL_RBE_MODE:-}"
 enabled="${BAZEL_RBE_ENABLED:-}"
 valid=false
 case "$mode/$enabled" in
-    remote/true | local/false | cache/false | skip/false) valid=true ;;
+    remote/true | fork-ro/true | fork-rw/true | local/false | cache/false | skip/false) valid=true ;;
 esac
 
 case "${1:-}" in
