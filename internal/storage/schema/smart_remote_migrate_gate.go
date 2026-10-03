@@ -98,8 +98,10 @@ type smartGateDecision int
 
 const (
 	// smartUndetermined: the remote's cached schema state could not be read
-	// (no cached ref, missing table/column, or query error). Fall back to the
-	// blunt #4515 block — no surprise network, no guessing.
+	// (no cached ref, missing table/column, or query error), or it read fine
+	// but the ancestry query against the cached ref failed on the
+	// equal-version arm (gastownhall/beads#6666). Fall back to the blunt
+	// #4515 block — no surprise network, no guessing.
 	smartUndetermined smartGateDecision = iota
 	// smartAutoMigrate: remote is at the same version as local, no content
 	// skew, and local is at/above the convergence floor — a safe first-mover.

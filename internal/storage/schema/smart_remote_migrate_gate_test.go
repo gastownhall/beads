@@ -908,6 +908,13 @@ func TestSmartGateRoutingDataBehind(t *testing.T) {
 		if gateErr.FallbackReason != fallbackReasonUnreadableState {
 			t.Errorf("FallbackReason = %q, want %q", gateErr.FallbackReason, fallbackReasonUnreadableState)
 		}
+		// #6666: the cached schema state WAS read here — the parity check that
+		// routed to this arm depended on it. The explanation must name the
+		// ancestry query, or the operator goes hunting for a missing/stale
+		// cached ref that is not the problem.
+		if msg := gateErr.UserMessage(); !strings.Contains(msg, "ancestry query against the cached ref failed") {
+			t.Errorf("UserMessage should name the failed ancestry query (#6666):\n%s", msg)
+		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unmet expectations: %v", err)
 		}
@@ -1167,6 +1174,13 @@ func TestSmartGateRoutingDataBehindShapes(t *testing.T) {
 		}
 		if gateErr.FallbackReason != fallbackReasonUnreadableState {
 			t.Errorf("FallbackReason = %q, want %q", gateErr.FallbackReason, fallbackReasonUnreadableState)
+		}
+		// #6666: this is the exact shape the issue reports — AheadBehind's
+		// dolt_log query failing after the cached hashes read fine — so the
+		// explanation must cover the ancestry read, not only cached-schema
+		// causes.
+		if msg := gateErr.UserMessage(); !strings.Contains(msg, "ancestry query against the cached ref failed") {
+			t.Errorf("UserMessage should name the failed ancestry query (#6666):\n%s", msg)
 		}
 	})
 
