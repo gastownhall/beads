@@ -29,9 +29,16 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from equivalence import DEFAULT_ALLOWLIST, load_allowlist  # noqa: E402
 
+# The build tag(s) PR Core's test flags apply (tags come from .buildflags'
+# GOFLAGS too). Factored out so --compile-only's `go test -c` command below
+# can reuse it directly instead of slicing GO_TEST_FLAGS (F7b review fix N1:
+# `GO_TEST_FLAGS[-2:]` silently assumed these were always the last two
+# elements of GO_TEST_FLAGS; any future reordering or addition there would
+# have fed `-c` the wrong flags with no error, just a tag-less compile).
+BUILD_FLAGS = ["-tags", "gms_pure_go"]
 # PR Core's test flags (scripts/ci/pr-core.sh), less -race, -p/-parallel and
-# -timeout's package count; tags come from .buildflags' GOFLAGS too.
-GO_TEST_FLAGS = ["-short", "-count=1", "-timeout=30m", "-skip", "^TestEmbedded", "-tags", "gms_pure_go"]
+# -timeout's package count.
+GO_TEST_FLAGS = ["-short", "-count=1", "-timeout=30m", "-skip", "^TestEmbedded", *BUILD_FLAGS]
 # Tests an allowlisted test needs in the same process, run alongside it:
 # TestZZStdioNotLeaked compares against the streams TestAAAStdioBaseline
 # recorded (and skips without it), which is why Bazel's sharding skips it.
@@ -103,6 +110,17 @@ def main(argv=None):
     ap.add_argument("--allowlist", default=DEFAULT_ALLOWLIST)
     ap.add_argument("--go", default="go")
     ap.add_argument("--dry-run", action="store_true", help="print the go test commands only")
+    ap.add_argument(
+        "--compile-only",
+        action="store_true",
+        help=(
+            "compile each allowlisted package's test binary (go test -c -o "
+            "/dev/null) instead of running it; used by main.yml's "
+            "blacksmith-go-build-cache seed to warm the non-race GOCACHE for "
+            "exactly the packages this script's real run needs, with zero "
+            "risk of the package list drifting from the allowlist (F7b)."
+        ),
+    )
     args = ap.parse_args(argv)
 
     if not os.path.exists(args.allowlist):
@@ -117,6 +135,25 @@ def main(argv=None):
     except ValueError as err:
         print(err, file=sys.stderr)
         return 1
+
+    if args.compile_only:
+        problems = []
+        for pkg in pkgs:
+            cmd = [args.go, "test", "-c", *BUILD_FLAGS, "-o", os.devnull, "./" + pkg]
+            print("+ " + " ".join(cmd), flush=True)
+            if args.dry_run:
+                continue
+            proc = subprocess.run(cmd)
+            if proc.returncode != 0:
+                problems.append(f"{pkg}: go test -c exited {proc.returncode}")
+        if args.dry_run:
+            return 0
+        if problems:
+            print("\nFAIL: compiling allowlisted packages' test binaries:", file=sys.stderr)
+            print("\n".join("  " + p for p in problems), file=sys.stderr)
+            return 1
+        print(f"\nok: compiled {len(pkgs)} allowlisted package test binaries")
+        return 0
 
     problems, ran = [], 0
     for pkg, group in pkgs.items():

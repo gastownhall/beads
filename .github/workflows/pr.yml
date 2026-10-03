@@ -374,9 +374,31 @@ jobs:
   # regressions actually execute at PR time. The init credential shell
   # fixtures are a separate concern and run natively in
   # pr-preflight-platforms, not here.
+  # F7b: same-repo Blacksmith (blacksmith-4vcpu-windows-2025) for same-repo
+  # PRs/merge_group, falling back to windows-latest for forks/Dependabot --
+  # same pattern as the Linux same-repo jobs above, with the Windows-2025
+  # label instead (public beta; GitHub's windows-2025 image minus the full
+  # Visual Studio IDE/EdgeDriver/WinAppDriver, VS Build Tools 2022 present,
+  # no Linux Docker).
+  #
+  # RISK (unverified from this sandbox, flagged in the F7b report): the first
+  # step below builds and runs ./cmd/bd with CGO_ENABLED=1 (embedded Dolt).
+  # windows-latest's cgo build works today via the toolchain GitHub documents
+  # for that image; Blacksmith's windows-2025 docs only confirm "VS Build
+  # Tools 2022" is present, not which cgo toolchain (MSVC/clang-cl vs an
+  # installed mingw-w64) backs `go build` with CGO_ENABLED=1 there. The
+  # fork-PR path (windows-latest) is an unaffected, always-on canary for this
+  # job; if the same-repo leg fails here specifically with a cgo/link error,
+  # that is the toolchain gap to roll back on (revert this runs-on line to
+  # the literal `windows-latest`).
   test-windows-liveness:
     name: Test (Windows) cmd/bd liveness regression
-    runs-on: windows-latest
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest' }}
+    # F7b review fix (S6): raised from 15 to 20, matching open PR #7143's own
+    # measurement on this exact job (retained runs take about 8m; one run's
+    # own step timing showed 451s total with a 403s compile step) and
+    # main.yml's test-windows (S8) for consistency.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -387,10 +409,49 @@ jobs:
           go-version-file: 'go.mod'
           cache: false
 
+      # F7b review fix (S9): Blacksmith's windows-2025 image docs confirm "VS
+      # Build Tools 2022" but not which cgo toolchain backs CGO_ENABLED=1 go
+      # builds there (see the RISK comment above). Print the relevant tool
+      # versions early and clearly-labelled so a toolchain gap surfaces in
+      # this step's own log instead of failing deep into the liveness test
+      # below with an opaque cgo/link error.
+      - name: Check Windows cgo toolchain diagnostics
+        shell: bash
+        run: |
+          echo "::group::go env (CGO_ENABLED, CC, GOOS, GOARCH)"
+          go env CGO_ENABLED CC GOOS GOARCH
+          echo "::endgroup::"
+          echo "::group::gcc (mingw-w64) presence"
+          command -v gcc && gcc --version || echo "gcc not found on PATH"
+          echo "::endgroup::"
+          echo "::group::choco presence"
+          command -v choco && choco --version || echo "choco not found on PATH"
+          echo "::endgroup::"
+
+      - name: Restore Go module cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      # F7b review fix (S2): restore-only non-race Go build cache seeded by
+      # main.yml's test-windows Blacksmith leg (warm-non-race-cache.sh) on
+      # the exact same runner selection, so the cold cmd/bd compile below
+      # (the real long pole here per the reviewer's step-timing data) gets a
+      # true cache hit instead of starting cold every PR.
+      - name: Restore non-race Go build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
+
       - name: Run native Windows global Prime override
         shell: bash
         env:
           CGO_ENABLED: "1"
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: |
           go_path=$(command -v go)
           [[ "$("$go_path" env GOHOSTOS GOOS)" == $'windows\nwindows' ]]
@@ -412,6 +473,8 @@ jobs:
           ((pass_count == 1))
 
       - name: Run Windows liveness regression test
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test -tags gms_pure_go -count=1 -run '^TestIsServerProbablyRunning' ./cmd/bd
 
   # internal/doltversion carries Windows-specific branches (PATHEXT
@@ -442,9 +505,12 @@ jobs:
   # on the second step only ensures it still runs after the first fails,
   # giving both packages' results in one log instead of stopping at the
   # first failure. No aggregator step is needed.
+  # F7b: same-repo Blacksmith (blacksmith-2vcpu-windows-2025); both steps
+  # build with CGO_ENABLED=0 (or no cgo at all for doltversion), so this job
+  # carries none of test-windows-liveness's cgo-toolchain risk.
   test-windows-small:
     name: Test (Windows) small packages (doltversion, dbproxy server)
-    runs-on: windows-latest
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-windows-2025' || 'windows-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -455,6 +521,15 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: false
+
+      # F7b review fix (S9): see test-windows-liveness's identical step for
+      # the full rationale. Both packages here build with CGO_ENABLED=0 (or
+      # no cgo at all), so this is lower-risk than test-windows-liveness, but
+      # printing the toolchain state costs nothing and keeps the diagnostic
+      # convention uniform across every moved Windows job.
+      - name: Check Windows toolchain diagnostics
+        shell: bash
+        run: go env CGO_ENABLED CC GOOS GOARCH
 
       - name: Run doltversion package tests on Windows
         id: doltversion
@@ -471,9 +546,29 @@ jobs:
   # Destructive worktree removal depends on native Windows path identity.
   # This focused process suite requires NTFS per-directory case sensitivity
   # and fails (rather than skips) when the runner cannot provide it.
+  # F7b: same-repo Blacksmith (blacksmith-4vcpu-windows-2025). CGO_ENABLED=0
+  # below, so no cgo-toolchain risk; this leg's non-race GOCACHE restore-keys
+  # prefix now gets a hit from main.yml's test-windows job, whose `venue`
+  # matrix extension (F7b) saves that same key on this exact runner
+  # selection (restore-keys falls back to the most recent prefix match
+  # regardless of the exact sha, same as build-artifacts already does for
+  # the Linux preflight/doc-freshness legs).
+  #
+  # RISK (F7b review: not flagged in the original implementation --
+  # cmd/bd/worktree_remove_git_windows_test.go:233 shells out to
+  # `fsutil file SetCaseSensitiveInfo`, which requires the "Windows Subsystem
+  # for Linux" optional feature's per-directory case-sensitivity support to
+  # be enabled on the image. If that feature is not enabled on Blacksmith's
+  # windows-2025 image, this FAILS OUTRIGHT rather than skipping (the test
+  # does not treat an unsupported fsutil call as a skip condition). The
+  # diagnostic step below surfaces that gap in this job's own log instead of
+  # a bare test failure deep in the suite; if it reports the feature missing,
+  # roll back this job's runs-on to the literal `windows-latest` (same
+  # rollback as test-windows-liveness's cgo risk above) until Blacksmith
+  # confirms/enables it.
   worktree-remove-windows:
     name: Worktree remove boundary (Windows)
-    runs-on: windows-latest
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -484,6 +579,21 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: false
+
+      - name: Check Windows case-sensitivity tooling diagnostics
+        shell: pwsh
+        run: |
+          Write-Output "::group::fsutil file SetCaseSensitiveInfo capability"
+          $tmp = Join-Path $env:RUNNER_TEMP "case-sensitivity-probe"
+          New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+          & fsutil file SetCaseSensitiveInfo $tmp enable
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::warning::fsutil file SetCaseSensitiveInfo failed (exit $LASTEXITCODE) - this job's worktree-remove tests require the Windows Subsystem for Linux optional feature's per-directory case-sensitivity support and will FAIL (not skip) below if it is unavailable on this image"
+          } else {
+            Write-Output "fsutil file SetCaseSensitiveInfo: supported"
+          }
+          Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+          Write-Output "::endgroup::"
 
       - name: Restore Go module cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -597,10 +707,14 @@ jobs:
   # byte-for-byte equivalent to the native job on purpose --
   # TestWindowsTestBinariesSelectSameTestsAsNativeJobs checks the -run
   # literals stay in sync.
+  # F7b: same-repo Blacksmith (blacksmith-2vcpu-windows-2025). This leg only
+  # runs a prebuilt binary (cross-compiled on Linux by windows-test-binaries
+  # via mingw-w64) rather than compiling with cgo on the Windows runner
+  # itself, so it carries none of test-windows-liveness's cgo-toolchain risk.
   test-windows-liveness-prebuilt:
     name: Test (Windows, prebuilt) cmd/bd liveness regression
     needs: windows-test-binaries
-    runs-on: windows-latest
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-windows-2025' || 'windows-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -623,6 +737,17 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/win-bin"
           sha256sum -c SHA256SUMS
+
+      # F7b review fix (S9): these binaries are cgo-linked on Linux via
+      # mingw-w64 (windows-test-binaries), not compiled on this runner, so
+      # the risk here is specifically whether a cross-compiled binary loads
+      # and runs at all on Blacksmith's windows-2025 image (missing runtime
+      # DLLs, etc.), not the cgo-toolchain risk test-windows-liveness
+      # carries. `-run '^$'` loads/links the binary and matches no tests, so
+      # a load failure surfaces here instead of inside the real test step.
+      - name: Check prebuilt Windows binary loads
+        shell: bash
+        run: bash scripts/ci/run-go-test-binary.sh "$RUNNER_TEMP/win-bin/cmd-bd-cgo.test.exe" ./cmd/bd -run '^$' -count=1
 
       - name: Run native Windows global Prime override (prebuilt)
         shell: bash
@@ -655,10 +780,12 @@ jobs:
   # Advisory twin of worktree-remove-windows: same package, -run pattern, and
   # CGO_ENABLED=0 selection as the native job, but against the cgo=0 binary
   # windows-test-binaries cross-compiled instead of compiling here.
+  # F7b: same-repo Blacksmith (blacksmith-2vcpu-windows-2025); same prebuilt-
+  # binary rationale as test-windows-liveness-prebuilt above.
   worktree-remove-windows-prebuilt:
     name: Worktree remove boundary (Windows, prebuilt)
     needs: windows-test-binaries
-    runs-on: windows-latest
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-windows-2025' || 'windows-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -674,6 +801,12 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/win-bin"
           sha256sum -c SHA256SUMS
+
+      # F7b review fix (S9): see test-windows-liveness-prebuilt's identical
+      # step for the full rationale.
+      - name: Check prebuilt Windows binary loads
+        shell: bash
+        run: bash scripts/ci/run-go-test-binary.sh "$RUNNER_TEMP/win-bin/cmd-bd-nocgo.test.exe" ./cmd/bd -run '^$' -count=1
 
       - name: Run native Windows worktree removal boundary tests (prebuilt)
         shell: bash
@@ -724,9 +857,19 @@ jobs:
           path: ${{ runner.temp }}/cli-docs-freshness.patch
           if-no-files-found: ignore
 
+  # F7b: same-repo Blacksmith for all three OSes via the "matrix marker" form
+  # (spec F7/F7b §2.1): Actions does not expand `${{ }}` inside a matrix
+  # array/include value, so each leg's `include` entry instead carries a
+  # plain string `runner` marker, and the job's `runs-on` is a single chained
+  # ternary (sameRepoPlatformsMatrixMarkerRunsOn in
+  # scripts/ci_blacksmith_runner_test.go) that resolves per-marker, falling
+  # back to `matrix.os` for forks/Dependabot (each marker's own same-repo
+  # condition false) or any leg with no marker. main.yml's
+  # blacksmith-go-build-cache (non-race leg) seeds the Linux leg's GOCACHE;
+  # the Windows/macOS legs restore no GOCACHE before or after this move.
   check-doc-freshness-platforms:
     name: Check doc freshness (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner == 'same-repo-linux' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest') || matrix.runner == 'same-repo-windows' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest') || matrix.runner == 'same-repo-macos' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-6vcpu-macos-latest' || 'macos-latest') || matrix.os }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -734,10 +877,13 @@ jobs:
         include:
           - os: ubuntu-latest
             expected_goos: linux
+            runner: same-repo-linux
           - os: macos-latest
             expected_goos: darwin
+            runner: same-repo-macos
           - os: windows-latest
             expected_goos: windows
+            runner: same-repo-windows
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -755,27 +901,61 @@ jobs:
           key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
+      # F7b review fix (S2): same restore-only non-race Go build cache as
+      # pr-preflight-platforms above, seeded by the same push-to-main savers
+      # on the exact same runner selections; this job's two "go test" steps
+      # below compile ./scripts and ./scripts/gitattributespolicy, so they
+      # benefit from the same warm cache (main.yml's warm-non-race-cache.sh
+      # run compiles both exact packages -- F7b spec 4.2).
+      - name: Restore non-race Go build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
+
       - name: Exercise native date and Bash process boundary
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test '-tags=integration,gms_pure_go' -count=1 -run '^(TestDocFreshness.*|TestRequiredSuiteContract)$' ./scripts -args -required-suite=doc-freshness
 
       - name: Exercise repository text EOL policy boundary
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test '-tags=integration,gms_pure_go' -count=1 ./scripts/gitattributespolicy -args -required-host -expected-goos '${{ matrix.expected_goos }}'
 
+  # F7b: same-repo Blacksmith via the "matrix marker" form (see
+  # check-doc-freshness-platforms above for the full explanation;
+  # sameRepoPlatformsMatrixMarkerRunsOn in scripts/ci_blacksmith_runner_test.go
+  # is this same chained ternary).
+  #
+  # F7b review (S1): an earlier revision of this job split the Windows leg
+  # into two `shard` entries on the theory that it would turn one ~9-minute
+  # leg into two ~4-5 minute parallel legs. Real step-timing data from PR
+  # runs disproved that: shard 2 (the three Windows-only steps moved below)
+  # only ever holds 15-25s of work, while shard 1 still takes 450-480s, so
+  # the split added a second billed Blacksmith Windows runner for no
+  # measurable critical-path win. The actual long pole on every OS is the
+  # cold `cmd/bd` test compile in "Exercise generated Git hook timeout
+  # process boundary" (250-300s); see S2 below (the restore-non-race-cache
+  # step) for the fix that actually targets it. Reverted to one leg per OS.
   pr-preflight-platforms:
     name: PR preflight process (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner == 'same-repo-linux' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest') || matrix.runner == 'same-repo-windows' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest') || matrix.runner == 'same-repo-macos' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-6vcpu-macos-latest' || 'macos-latest') || matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
         include:
           - os: ubuntu-latest
             expected_goos: linux
+            runner: same-repo-linux
           - os: macos-latest
             expected_goos: darwin
+            runner: same-repo-macos
           - os: windows-latest
             expected_goos: windows
+            runner: same-repo-windows
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -793,22 +973,46 @@ jobs:
           key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
+      # F7b review (S2): restore-only non-race Go build cache, seeded by the
+      # push-to-main saver on the exact same runner selection (Linux:
+      # main.yml's blacksmith-go-build-cache non-race leg; Windows:
+      # main.yml's test-windows Blacksmith leg; macOS: main.yml's test job's
+      # macOS leg) so the cold cmd/bd compile below (the real long pole,
+      # 250-300s uncached) gets a true cache hit instead of starting cold.
+      # GOCACHE must match the seeder's exactly, and CGO_ENABLED is left at
+      # its platform default (same as the seeder) so the key families line
+      # up; see mainBlacksmithGoBuildCacheRunsOn / mainVenueBlacksmithWindows4vcpuRunsOn
+      # in ci_workflow_test.go for the seeder side of this contract.
+      - name: Restore non-race Go build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
+
       - name: Exercise the real Bash process boundary
         shell: bash
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test '-tags=integration,gms_pure_go' -count=1 -run '^TestPRPreflight' ./scripts
 
       - name: Check native user config diagnostics
         shell: bash
         env:
           CGO_ENABLED: "0"
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: bash scripts/ci/test-user-config-diagnostic.sh '${{ matrix.expected_goos }}'
 
       - name: Exercise test.sh prebuilt binary path
         shell: bash
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test '-tags=gms_pure_go' -count=1 -run '^TestTestScriptPrebuiltBinaryContract$' ./scripts
 
       - name: Exercise generated Git hook timeout process boundary
         shell: bash
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test '-tags=gms_pure_go' -count=1 -run '^TestGeneratedHookTimeoutProcessBoundary$' ./cmd/bd
 
       - name: Exercise native init gateway credential shell
@@ -998,9 +1202,14 @@ jobs:
   # - go test's own vet checks over ./... (rules_go's go_test runs none);
   # - the Go tests `bazel test --config=ci` does not run or skips
   #   (tools/bazel/equivalence_allowlist.txt), each required to pass.
+  # F7b: same-repo Blacksmith (blacksmith-4vcpu-ubuntu-2404) for same-repo
+  # PRs/merge_group, falling back to ubuntu-latest for forks/Dependabot, same
+  # pattern as advisory-reports/pr-policy-wrapper/pr-core-wrapper above.
+  # main.yml's blacksmith-go-build-cache job seeds this leg's race and
+  # non-race GOCACHEs; go-vet-cache's venue matrix seeds the vet leg's.
   scripts-go-checks:
     name: Go checks (${{ matrix.check }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -1082,9 +1291,13 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: bash scripts/ci/allowlisted-go-tests.sh
 
+  # F7b: same-repo Blacksmith (blacksmith-4vcpu-ubuntu-2404) for same-repo
+  # PRs/merge_group, falling back to ubuntu-latest for forks/Dependabot.
+  # main.yml's pr-lint-wrapper `venue` matrix seeds this leg's golangci-lint
+  # and lint-native GOCACHEs.
   pr-lint-wrapper:
     name: PR Lint (${{ matrix.target }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 20
     permissions:
       contents: read
@@ -1488,12 +1701,40 @@ jobs:
   # give for free. windows-make-shell is not a Windows job F4 touches (it
   # does not intersect test-windows-liveness, worktree-remove-windows, the
   # preflight/doc-freshness matrices, or the twins).
+  # F7b: same-repo Blacksmith (blacksmith-4vcpu-windows-2025).
+  #
+  # RISK (unverified from this sandbox, flagged in the F7b report): the
+  # native-Make step below assumes Chocolatey is preinstalled (`choco
+  # install ...`), as it is on GitHub's windows-latest image. Blacksmith's
+  # windows-2025 image is documented as GitHub's windows-2025 minus the full
+  # Visual Studio IDE/EdgeDriver/WinAppDriver; Chocolatey is a base-image
+  # tool unrelated to those, so it is expected to still be present, but this
+  # is not independently confirmed. The msys2/setup-msys2 and
+  # cygwin/cygwin-install-action steps download their own tooling and do not
+  # depend on any preinstalled image contents, so they carry no equivalent
+  # risk. The fork-PR path (windows-latest) remains an always-on canary; if
+  # only the same-repo leg's native-Make step fails here, that is the gap to
+  # roll back on (revert this runs-on line to the literal `windows-latest`).
   windows-make-shell:
     name: Windows Make shell (native, msys2, cygwin)
-    runs-on: windows-latest
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      # F7b review fix (S9): print the preinstalled tool versions this job
+      # depends on before relying on them, so a Blacksmith image gap (see the
+      # RISK comment above) surfaces here instead of failing deep in a later
+      # step with an opaque "command not found".
+      - name: Check Windows tooling diagnostics
+        shell: pwsh
+        run: |
+          Write-Output "::group::choco"
+          choco --version
+          Write-Output "::endgroup::"
+          Write-Output "::group::go env (CGO_ENABLED, CC)"
+          go env CGO_ENABLED CC
+          Write-Output "::endgroup::"
 
       - name: Install native GNU Make
         id: install-native
@@ -1501,6 +1742,18 @@ jobs:
         shell: pwsh
         run: choco install make --version=4.4.1 --yes --no-progress
 
+      # F7b review fix (B1): msys2/setup-msys2 caches its installed packages
+      # by default (action.yml: cache.default = true), which means this step
+      # would SAVE an actions/cache entry from a same-repo PR the moment it
+      # moved onto a Blacksmith runner -- confirmed via a real GitHub cache
+      # list entry (msys2-pkgs-upd:false-conf:...) with a
+      # refs/pull/.../merge ref. `runner.environment == 'github-hosted'`
+      # disables that implicit save on Blacksmith (fail-closed: only the
+      # literal "github-hosted" value keeps caching on, matching the
+      # fail-closed convention F7c review fix N1 set for actions/setup-go's
+      # own `cache` input) while leaving the always-on fork-PR
+      # (windows-latest) leg's caching behavior unchanged. Pinned by
+      # TestBlacksmithReachablePRJobsDisableDefaultCachingActions.
       - name: Set up MSYS2 GNU Make
         id: install-msys2
         if: ${{ !cancelled() }}
@@ -1510,6 +1763,7 @@ jobs:
           msystem: MSYS
           install: git make
           path-type: minimal
+          cache: ${{ runner.environment == 'github-hosted' }}
 
       - name: Set up Cygwin GNU Make
         if: ${{ !cancelled() }}

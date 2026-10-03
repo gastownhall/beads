@@ -585,8 +585,10 @@ func TestPRDoltServerFingerprintRunsOnEveryPR(t *testing.T) {
 func TestPRRunsGoTestsBazelSkips(t *testing.T) {
 	pr := readCIWorkflow(t, "pr.yml")
 	job := pr.job(t, prScriptsChecksJob)
-	if job.If != "" || job.ContinueOnError || len(job.Needs) != 0 || job.RunsOn != "ubuntu-latest" || job.TimeoutMinutes == 0 {
-		t.Errorf("%s: if %q, continue-on-error %v, needs %v, runs-on %q, timeout %d; want an unconditional ubuntu-latest job with a timeout",
+	// F7b: same-repo PRs now run this job on Blacksmith (forks/Dependabot keep
+	// ubuntu-latest); see sameRepoBlacksmith4vcpu in ci_blacksmith_runner_test.go.
+	if job.If != "" || job.ContinueOnError || len(job.Needs) != 0 || job.RunsOn != sameRepoBlacksmith4vcpu || job.TimeoutMinutes == 0 {
+		t.Errorf("%s: if %q, continue-on-error %v, needs %v, runs-on %q, timeout %d; want an unconditional same-repo-Blacksmith job with a timeout",
 			prScriptsChecksJob, job.If, job.ContinueOnError, job.Needs, job.RunsOn, job.TimeoutMinutes)
 	}
 	// F5.3: three legs behind matrix.check, not fail-fast (a vet regression
