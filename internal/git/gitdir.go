@@ -476,6 +476,32 @@ func ResetCaches() {
 	gitCtx = gitContext{}
 }
 
+// PinNoRepositoryForTesting permanently seeds the process-wide git context
+// cache with a "not a git repository" sentinel, so IsWorktree, GetRepoRoot,
+// and GetMainRepoRoot answer as if no repository were present until a test
+// explicitly calls ResetCaches.
+//
+// This exists for whole-binary test fencing (GH#7145-style cmd/bd pollution):
+// without it, the first cached-git-context call made anywhere in a test
+// binary — before any individual test has had a chance to chdir into its own
+// fixture — permanently answers for the rest of the process from whatever
+// repository the binary happened to start in. For a worktree checkout, that
+// answer includes a real --git-common-dir, which beads' worktree-fallback
+// discovery (FindBeadsDir) treats as license to read and write the main
+// checkout's shared .beads database. Pinning the cache to "no repository" as
+// the very first statement of a test binary's TestMain makes that ambient
+// state inert by default; tests that need real git behavior for a directory
+// they control already call ResetCaches (see cmd/bd/git_test_helpers.go)
+// after chdir'ing there, which overrides this pin for their own scope.
+//
+// WARNING: Not thread-safe, like ResetCaches. Only call before m.Run(),
+// before any goroutines that might read the git context are started.
+func PinNoRepositoryForTesting() {
+	gitCtxOnce = sync.Once{}
+	gitCtxOnce.Do(func() {})
+	gitCtx = gitContext{err: errors.New("not a git repository (pinned for testing)")}
+}
+
 // IsJujutsuRepo returns true if the current directory is in a jujutsu (jj) repository.
 // Jujutsu stores its data in a .jj directory at the repository root.
 func IsJujutsuRepo() bool {

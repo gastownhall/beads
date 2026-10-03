@@ -8,8 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/testutil"
@@ -79,6 +82,38 @@ func TestMain(m *testing.M) {
 
 func testMainInner(m *testing.M) int {
 	origWD, _ := os.Getwd()
+
+	// Fence the whole test binary's beads/git discovery before any test (or
+	// package-level init/sync.Once) gets a chance to make the first
+	// cached-git-context call from this worktree checkout. Without this, that
+	// first call permanently answers isWorktree=true / a real
+	// --git-common-dir for the rest of the process — regardless of later
+	// per-test chdirs — and beads.FindBeadsDir's worktree-fallback discovery
+	// then treats that as license to read and write the main checkout's
+	// shared .beads database (e.g. /data/projects/beads/.beads when this
+	// worktree is a sibling checkout). Pinning "no repository" here makes
+	// that ambient state inert by default; tests that need real git behavior
+	// already call git.ResetCaches/beads.ResetCaches themselves after
+	// chdir'ing into a fixture they control (cmd/bd/git_test_helpers.go),
+	// which overrides this pin for their own scope.
+	git.PinNoRepositoryForTesting()
+	beads.ResetCaches()
+
+	// Separately bound any literal ancestor-directory walk that starts
+	// at (or under) this checkout: PinNoRepositoryForTesting only defeats
+	// the git-worktree-fallback vector above, not a plain upward walk from a
+	// worktree nested under a directory that itself has a .beads (e.g. a
+	// scratch checkout under a dir with a live .beads ancestor). Append
+	// rather than overwrite: Bazel's tools/bazel/test_env.sh already sets a
+	// ceiling derived from TEST_SRCDIR/TEST_TMPDIR for bazel-run tests, and
+	// this must only add a boundary, never remove one those runs rely on.
+	if repoRoot := findRepoRootFrom(origWD); repoRoot != "" {
+		ceilingList := repoRoot
+		if existing := os.Getenv(ceiling.EnvVar); existing != "" {
+			ceilingList = existing + string(os.PathListSeparator) + repoRoot
+		}
+		_ = os.Setenv(ceiling.EnvVar, ceilingList)
+	}
 
 	// Isolate config discovery from the repo's tracked `.beads/config.yaml`.
 	// Many tests expect default config values; running from within this repo would
@@ -273,18 +308,85 @@ func testMainInner(m *testing.M) int {
 		"molecules.jsonl",
 	}
 
-	before := snapshotFiles(repoBeadsDir, watch)
-	code := runTestsAndSweep(m)
-	after := snapshotFiles(repoBeadsDir, watch)
+	guardDirs := []string{repoBeadsDir}
+	// Backstop: also watch the shared worktree-fallback .beads directory that
+	// beads.FindBeadsDir's discovery would fall back to for a linked worktree
+	// (e.g. the main checkout's .beads when this package's repo root is a
+	// worktree). This is computed directly via git plumbing, independent of
+	// the process-wide cache PinNoRepositoryForTesting neutralizes above, so
+	// it still catches pollution if that pin is ever bypassed or narrowed.
+	if fallback := worktreeFallbackBeadsDirDirect(repoRoot); fallback != "" && fallback != repoBeadsDir {
+		if _, err := os.Stat(fallback); err == nil {
+			guardDirs = append(guardDirs, fallback)
+		}
+	}
 
-	if diff := diffSnapshots(before, after); diff != "" {
-		fmt.Fprintf(os.Stderr, "ERROR: test suite modified repo .beads state:\n%s\n", diff)
+	before := make(map[string]map[string]fileSnap, len(guardDirs))
+	for _, dir := range guardDirs {
+		before[dir] = snapshotFiles(dir, watch)
+	}
+	code := runTestsAndSweep(m)
+
+	var allDiffs string
+	for _, dir := range guardDirs {
+		after := snapshotFiles(dir, watch)
+		if diff := diffSnapshots(before[dir], after); diff != "" {
+			allDiffs += fmt.Sprintf("in %s:\n%s", dir, diff)
+		}
+	}
+
+	if allDiffs != "" {
+		fmt.Fprintf(os.Stderr, "ERROR: test suite modified repo .beads state:\n%s\n", allDiffs)
 		if code == 0 {
 			code = 1
 		}
 	}
 
 	return code
+}
+
+// worktreeFallbackBeadsDirDirect resolves the shared .beads directory a
+// linked worktree at repoRoot would fall back to, via a direct git shell-out
+// independent of internal/git's process-wide cache (which
+// PinNoRepositoryForTesting deliberately neutralizes above). Mirrors
+// internal/beads's worktreeFallbackBeadsDirForRepo; kept local and minimal
+// since this is a test-only detection backstop, not production discovery.
+func worktreeFallbackBeadsDirDirect(repoRoot string) string {
+	if repoRoot == "" {
+		return ""
+	}
+	cmd := exec.Command("git", "-C", repoRoot, "rev-parse", "--git-dir", "--git-common-dir")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) < 2 {
+		return ""
+	}
+	gitDir := resolveGitPath(repoRoot, strings.TrimSpace(lines[0]))
+	commonDir := resolveGitPath(repoRoot, strings.TrimSpace(lines[1]))
+	if gitDir == "" || commonDir == "" || gitDir == commonDir {
+		return "" // not a worktree
+	}
+	if filepath.Base(commonDir) == ".git" {
+		return filepath.Join(filepath.Dir(commonDir), ".beads")
+	}
+	return filepath.Join(commonDir, ".beads")
+}
+
+func resolveGitPath(repoRoot, p string) string {
+	if p == "" {
+		return ""
+	}
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(repoRoot, p)
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return ""
+	}
+	return abs
 }
 
 type fileSnap struct {
