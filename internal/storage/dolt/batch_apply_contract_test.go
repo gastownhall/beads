@@ -206,7 +206,17 @@ func TestBatchApplyContract(t *testing.T) {
 		conformance.RunBatchApplyLandsAnIdempotencyRecordWithItsWork(t, ctx, fixture)
 	})
 	t.Run("BoundsTheItemCount", func(t *testing.T) {
-		ctx, cancel := testContext(t)
+		// 3x the package's usual testTimeout, not the standard budget: this
+		// subtest applies MaxApplyBatchItems (1000) real items and then
+		// MaxApplyBatchItems+1 more, so it does ~1000x the DB work of a
+		// typical subtest here. Measured at 66s against the standard 90s
+		// testTimeout on the server tier (25% headroom) - the same class of
+		// flake risk testTimeout's own doc comment describes for host
+		// contention. A dedicated 3x budget gives this one subtest realistic
+		// headroom without raising the shared testTimeout (and therefore
+		// every `5*testTimeout` cleanup bound) for every other subtest that
+		// doesn't need it.
+		ctx, cancel := context.WithTimeout(context.Background(), 3*testTimeout)
 		defer cancel()
 		conformance.RunBatchApplyBoundsTheItemCount(t, ctx, fixture)
 	})
