@@ -733,19 +733,30 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
     the flag too, only so the shared `bazel-coverage` job stays identical;
     nothing in PR Risk reads `pr_lanes`.
   - Artifact consumers: `build-artifacts`' `ci-build-artifacts` fed PR Core,
-    domain+uow and the package gates. The first two stand down with it.
-    The package gates (`package-mcp`, `package-npm`) now also need
-    `bazel-coverage` and the `bazel` call, and download
-    `bazel-ci-build-artifacts` (published by `bazel-test`, same layout, bd
-    built as `//cmd/bd:bd_for_tests`) where `pr_lanes` is `true`. They wait
-    for the whole call, so on PRs that change a package they finish a few
-    minutes after it. The Bazel bd carries no vcs build info (`bd version`
-    prints `1.3.0 (dev)`, no commit); no consumer reads it. Verified
-    2026-10-02: both package gates pass with the Bazel-built bd (MCP: 228
-    passed, 5 skipped; npm: all tests and the pack dry run), the same as
-    with a `go build` bd. No other job in any workflow reads `pr.yml`'s
-    artifacts (`docs-autofix.yml` reads `check-doc-flags`'
+    domain+uow and (before F3) the package gates; all three now stand down
+    with it. No other job in any workflow reads `pr.yml`'s artifacts
+    (`docs-autofix.yml` reads `check-doc-flags`'
     `cli-docs-freshness-patch`, which is unaffected).
+  - F3: the package gates (`package-mcp`, `package-npm`) moved into
+    `bazel.yml` itself, behind the caller input `package-gates` (`pr.yml`
+    passes `"on"`; `bazel-farm.yml`/`nightly.yml` keep the default `"off"`).
+    They need only the `rbe` job, not `bazel-coverage`, `build-artifacts` or
+    the rest of the `bazel` call, and no longer download an artifact: on a
+    same-repo PR (`needs.rbe.outputs.enabled == 'true'`) each job builds its
+    own bd with `bazel build --@rules_go//go/config:race
+    //cmd/bd:bd_for_tests` (the race flag matches `test:ci`'s top-level
+    build setting, so the action keys and output path equal `bazel-test`'s
+    `bd_for_tests`, race itself still off for the binary); otherwise (forks,
+    Dependabot, rbe off/skip) they fall back to `go build ./cmd/bd`, same as
+    before F3. The Bazel bd carries no vcs build info (`bd version` prints
+    `1.3.0 (dev)`, no commit); no consumer reads it. Verified 2026-10-02:
+    both package gates pass with the Bazel-built bd (MCP: 228 passed, 5
+    skipped; npm: all tests and the pack dry run), the same as with a
+    `go build` bd. Both run on `blacksmith-4vcpu-ubuntu-2404` when
+    `rbe.outputs.enabled == 'true'` (4 vCPU: `pytest -n 8` is pinned to
+    timing measured there), `ubuntu-latest` otherwise. `bazel-test`'s own
+    `bazel-ci-build-artifacts` upload is no longer consumed by anything; it
+    is kept for the F3.5.3 SHA256SUMS comparison and for debugging.
   - Kept on every PR: the Dolt server fingerprint (container image vs the
     pinned dolt CLI the Bazel dolt-server lanes start), formerly
     `test-domain-uow`'s first step, is its own required job

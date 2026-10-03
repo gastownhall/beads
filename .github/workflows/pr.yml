@@ -1829,7 +1829,9 @@ jobs:
   # same-repo PRs run it remotely, fork and Dependabot PRs locally with the
   # read-only cache. Its bd artifact is renamed
   # (bazel-ci-build-artifacts) so it cannot collide with build-artifacts'
-  # upload; the package gates take it where build-artifacts stands down.
+  # upload. F3: the package gates build their own bd (via this call's rbe
+  # job) and do not consume this artifact; it is kept for the F3.5.3
+  # SHA256SUMS comparison and for debugging.
   bazel:
     name: Bazel
     permissions:
@@ -1923,6 +1925,10 @@ jobs:
     # the gate's NAME must never change (ruleset requires exactly "CI Gate /
     # Required").
     runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    # F3: now on Blacksmith for same-repo PRs; a hang used to burn only the
+    # default 360 minutes of a free GitHub-hosted runner, now Blacksmith
+    # minutes too.
+    timeout-minutes: 10
     needs:
       - build-artifacts
       - check-build-tags

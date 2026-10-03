@@ -377,6 +377,10 @@ func sortedKeys[V any](m map[string]V) []string {
 func testPackageGateJobs(t *testing.T, prGateRequired []string) {
 	t.Helper()
 	workflow := readCIWorkflow(t, bazelWorkflowName)
+	// main.yml's own package-mcp/package-npm jobs (nightly, not gated by
+	// rbe) run the same language setup; bazel.yml's copy must not drift
+	// from it.
+	mainWorkflow := readCIWorkflow(t, "main.yml")
 	type pkgLane struct {
 		job, detectOutput, langStepName, makeTarget string
 	}
@@ -445,15 +449,27 @@ func testPackageGateJobs(t *testing.T, prGateRequired []string) {
 		}
 
 		// The Bazel-built-bd path: gated on the farm being up, in addition
-		// to detection. No --config=ci (only test:ci exists).
+		// to detection. No --config=ci (only test:ci exists). The explicit
+		// --@rules_go//go/config:race matches test:ci's top-level build
+		// setting, so bd_for_tests' race="off" transition lands in the same
+		// output directory and action-cache key `bazel test --config=ci`
+		// already populated (verified with cquery against origin/main
+		// e2b78f7d7a: both configs cquery to the identical
+		// bazel-out/k8-fastbuild-ST-.../bin/cmd/bd/bd_for_tests/bd path).
 		buildStep := job.step(t, "bazel build //cmd/bd:bd_for_tests")
-		if buildStep.If != bazelPathIf || buildStep.Run != `bazel build //cmd/bd:bd_for_tests --remote_download_regex='.*/bin/cmd/bd/bd_for_tests/bd$'` {
+		if buildStep.If != bazelPathIf || buildStep.Run != `bazel build --@rules_go//go/config:race //cmd/bd:bd_for_tests --remote_download_regex='.*/bin/cmd/bd/bd_for_tests/bd$'` {
 			t.Errorf("%s bazel build step: if %q, run %q; want if %q", lane.job, buildStep.If, buildStep.Run, bazelPathIf)
 		}
 		pkgBD := job.step(t, "Package the Bazel-built bd")
 		if pkgBD.If != bazelPathIf || !strings.Contains(pkgBD.Run, `./scripts/ci/package-bazel-bd.sh "$RUNNER_TEMP/bd-artifacts"`) ||
 			!strings.Contains(pkgBD.Run, "BEADS_TEST_BD_BINARY=$RUNNER_TEMP/bd-artifacts/bd-linux-gms-pure") {
 			t.Errorf("%s package-the-Bazel-built-bd step: if %q, run %q", lane.job, pkgBD.If, pkgBD.Run)
+		}
+		// F3 review NIT-5: nothing past this step needs the Bazel server or
+		// its RBE client key (uv sync/pytest/npm install run PR-controlled
+		// code), so both are torn down here, defense in depth.
+		if !strings.Contains(pkgBD.Run, "bazel shutdown") || !strings.Contains(pkgBD.Run, `rm -rf "$RUNNER_TEMP/bazel-ci-secret"`) {
+			t.Errorf("%s package-the-Bazel-built-bd step does not shut down Bazel and remove the RBE client key: run %q", lane.job, pkgBD.Run)
 		}
 		setupBazel := job.step(t, "Set up Bazel")
 		if setupBazel.If != bazelPathIf || setupBazel.Uses != "./"+setupBazelActionDir {
@@ -473,6 +489,25 @@ func testPackageGateJobs(t *testing.T, prGateRequired []string) {
 		// did, whichever bd path provided the binary.
 		if st := job.step(t, lane.langStepName); st.If != detectIf {
 			t.Errorf("%s step %q: if %q, want %q", lane.job, lane.langStepName, st.If, detectIf)
+		}
+
+		// The language setup itself must not drift from main.yml's copy of
+		// the same job (python-version / Node version / the uv install
+		// command): main.yml's jobs are ungated by rbe, so they are the one
+		// other place this exact setup is pinned.
+		mainJob := mainWorkflow.job(t, lane.job)
+		langStep := job.step(t, lane.langStepName)
+		mainLangStep := mainJob.step(t, lane.langStepName)
+		if langStep.Uses != mainLangStep.Uses || !reflect.DeepEqual(langStep.With, mainLangStep.With) {
+			t.Errorf("%s %q: uses %q, with %v; main.yml's %s has uses %q, with %v",
+				lane.job, lane.langStepName, langStep.Uses, langStep.With, lane.job, mainLangStep.Uses, mainLangStep.With)
+		}
+		if lane.job == bazelPackageMCPJobName {
+			installUv := job.step(t, "Install uv")
+			mainInstallUv := mainJob.step(t, "Install uv")
+			if installUv.Run != mainInstallUv.Run {
+				t.Errorf("%s Install uv: run %q; main.yml's has run %q", lane.job, installUv.Run, mainInstallUv.Run)
+			}
 		}
 		gateName := "Run " + map[string]string{bazelPackageMCPJobName: "MCP", bazelPackageNPMJobName: "npm"}[lane.job] + " package gate"
 		gate := job.step(t, gateName)

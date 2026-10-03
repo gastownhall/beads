@@ -2060,6 +2060,12 @@ func TestDetectPackageGatesCoversBazelWorkflow(t *testing.T) {
 	if !strings.Contains(loc, ".github/workflows/bazel.yml") {
 		t.Errorf("scripts/ci/detect-package-gates.sh's both-gates case arm does not include .github/workflows/bazel.yml, where the package-mcp/package-npm job definitions now live")
 	}
+	// F3 review NIT-6: package-bazel-bd.sh packages the Bazel-built bd for
+	// both package-mcp and package-npm on the remote-execution path, so a
+	// change to it must run both gates too.
+	if !strings.Contains(loc, "scripts/ci/package-bazel-bd.sh") {
+		t.Errorf("scripts/ci/detect-package-gates.sh's both-gates case arm does not include scripts/ci/package-bazel-bd.sh, which both package gates use to package the Bazel-built bd")
+	}
 }
 
 // F3: the exact "same-repo PR, or merge_group" Blacksmith expression, pinned
@@ -2073,6 +2079,14 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 		"pr-risk.yml":     {"bazel-coverage": sameRepoBlacksmith2vcpu, "ci-gate": sameRepoBlacksmith2vcpu, "detect-ci-tier": sameRepoBlacksmith2vcpu},
 		bazelWorkflowName: {bazelRBEJobName: wantRBERunsOn},
 	}
+	// The two required gates' display names are a stable external contract
+	// (branch protection rule names) - moving them to Blacksmith must not
+	// rename them. Reviewed 2026-10-03: a rename of either survived every
+	// other policy test, since nothing else reads job.Name.
+	wantGateName := map[string]map[string]string{
+		"pr.yml":      {"ci-gate": "CI Gate / Required"},
+		"pr-risk.yml": {"ci-gate": "PR Risk Gate / Required"},
+	}
 	for file, jobs := range want {
 		workflow := readCIWorkflow(t, file)
 		for name, wantRunsOn := range jobs {
@@ -2082,6 +2096,15 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 			}
 			if job.RunsOn != wantRunsOn {
 				t.Errorf("%s %s runs-on = %q, want %q", file, name, job.RunsOn, wantRunsOn)
+			}
+			if wantName := wantGateName[file][name]; wantName != "" && job.Name != wantName {
+				t.Errorf("%s %s name = %q, want %q", file, name, job.Name, wantName)
+			}
+			// F3: every job moved onto Blacksmith needs its own
+			// timeout-minutes - a hang there burns paid Blacksmith minutes,
+			// not just a free GitHub-hosted runner's default 360.
+			if job.TimeoutMinutes == 0 {
+				t.Errorf("%s %s has no timeout-minutes (now runs on Blacksmith for same-repo PRs)", file, name)
 			}
 		}
 	}

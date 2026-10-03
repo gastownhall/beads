@@ -98,8 +98,9 @@
 # execution under this model. Still open: a beads-only RBE_INSTANCE. The farm
 # refuses client action-cache writes (only its workers write; rbe-west D2).
 # In pr.yml's run the bd artifact is bazel-ci-build-artifacts, so it cannot
-# collide with the build-artifacts job's ci-build-artifacts; pr.yml's
-# package gates consume it where build-artifacts stands down (D2 step 3).
+# collide with the build-artifacts job's ci-build-artifacts. F3: the package
+# gates no longer consume this artifact (they build their own bd); it is
+# kept for the F3.5.3 SHA256SUMS comparison and for debugging.
 #
 # Runner cache: one entry per (.bazelversion, MODULE.bazel.lock) pair, about
 # 2 GB (Bazel's content-addressable --repository_cache, re-hashed on every
@@ -430,10 +431,11 @@ jobs:
 
       # pr.yml's build-artifacts job, built by Bazel: the same artifact name
       # and layout (bd-linux-gms-pure, SHA256SUMS, build-manifest.txt). Where
-      # build-artifacts stands down (D2 step 3), pr.yml's package gates take
-      # it; its other consumers (PR Core, domain+uow) stand down there too.
-      # The script documents which binary and how it differs from `go
-      # build`'s.
+      # build-artifacts stands down (D2 step 3), its other consumers (PR
+      # Core, domain+uow) stand down there too. F3: the package gates build
+      # their own bd and no longer consume this artifact; it is kept for the
+      # F3.5.3 SHA256SUMS comparison and for debugging. The script documents
+      # which binary and how it differs from `go build`'s.
       - name: Package bd (ci-build-artifacts layout)
         id: bd-artifact
         if: ${{ always() && steps.test.outcome != 'skipped' }}
@@ -1288,16 +1290,29 @@ jobs:
           BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
 
       # No --config=ci: only test:ci is defined in .bazelrc, and `bazel
-      # build --config=foo` fails when only test:foo exists.
+      # build --config=foo` fails when only test:foo exists. The explicit
+      # --@rules_go//go/config:race matches test:ci's top-level build
+      # setting (test:ci -> test:prcore), so bd_for_tests' race="off"
+      # transition lands in the same k8-fastbuild-ST-... output directory
+      # and action-cache key `bazel test --config=ci` already populated,
+      # instead of plain k8-fastbuild's; race itself still builds a non-race
+      # bd (verified with cquery: both configs cquery to the identical
+      # bazel-out/k8-fastbuild-ST-.../bin/cmd/bd/bd_for_tests/bd path).
       - name: bazel build //cmd/bd:bd_for_tests
         if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.enabled == 'true' }}
-        run: bazel build //cmd/bd:bd_for_tests --remote_download_regex='.*/bin/cmd/bd/bd_for_tests/bd$'
+        run: bazel build --@rules_go//go/config:race //cmd/bd:bd_for_tests --remote_download_regex='.*/bin/cmd/bd/bd_for_tests/bd$'
 
       - name: Package the Bazel-built bd
         if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.enabled == 'true' }}
         run: |
           ./scripts/ci/package-bazel-bd.sh "$RUNNER_TEMP/bd-artifacts"
           echo "BEADS_TEST_BD_BINARY=$RUNNER_TEMP/bd-artifacts/bd-linux-gms-pure" >> "$GITHUB_ENV"
+          # Defense in depth: nothing after this step needs the Bazel server
+          # or its RBE client key (uv sync and pytest run PR-controlled
+          # code). Shutting down also frees the JVM's memory for the 8
+          # xdist workers that follow on this 4 vCPU runner.
+          bazel shutdown
+          rm -rf "$RUNNER_TEMP/bazel-ci-secret"
 
       - name: Set up Go
         id: setup-go
@@ -1394,16 +1409,27 @@ jobs:
           BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
 
       # No --config=ci: only test:ci is defined in .bazelrc, and `bazel
-      # build --config=foo` fails when only test:foo exists.
+      # build --config=foo` fails when only test:foo exists. The explicit
+      # --@rules_go//go/config:race matches test:ci's top-level build
+      # setting (test:ci -> test:prcore), so bd_for_tests' race="off"
+      # transition lands in the same k8-fastbuild-ST-... output directory
+      # and action-cache key `bazel test --config=ci` already populated,
+      # instead of plain k8-fastbuild's; race itself still builds a non-race
+      # bd (verified with cquery: both configs cquery to the identical
+      # bazel-out/k8-fastbuild-ST-.../bin/cmd/bd/bd_for_tests/bd path).
       - name: bazel build //cmd/bd:bd_for_tests
         if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.enabled == 'true' }}
-        run: bazel build //cmd/bd:bd_for_tests --remote_download_regex='.*/bin/cmd/bd/bd_for_tests/bd$'
+        run: bazel build --@rules_go//go/config:race //cmd/bd:bd_for_tests --remote_download_regex='.*/bin/cmd/bd/bd_for_tests/bd$'
 
       - name: Package the Bazel-built bd
         if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.enabled == 'true' }}
         run: |
           ./scripts/ci/package-bazel-bd.sh "$RUNNER_TEMP/bd-artifacts"
           echo "BEADS_TEST_BD_BINARY=$RUNNER_TEMP/bd-artifacts/bd-linux-gms-pure" >> "$GITHUB_ENV"
+          # Defense in depth: nothing after this step needs the Bazel server
+          # or its RBE client key (npm install runs PR-controlled code).
+          bazel shutdown
+          rm -rf "$RUNNER_TEMP/bazel-ci-secret"
 
       - name: Set up Go
         id: setup-go

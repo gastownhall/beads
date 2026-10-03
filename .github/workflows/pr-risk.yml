@@ -38,6 +38,10 @@ jobs:
     # Dependabot and any other event stay GitHub-hosted. This job restores no
     # GitHub-saved cache.
     runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    # F3: now on Blacksmith for same-repo PRs; a hang used to burn only the
+    # default 360 minutes of a free GitHub-hosted runner, now Blacksmith
+    # minutes too.
+    timeout-minutes: 10
     outputs:
       full_embedded: ${{ steps.tier.outputs.full_embedded }}
       reason: ${{ steps.tier.outputs.reason }}
@@ -570,6 +574,10 @@ jobs:
     # the gate's NAME must never change (ruleset requires exactly "PR Risk
     # Gate / Required").
     runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    # F3: now on Blacksmith for same-repo PRs; a hang used to burn only the
+    # default 360 minutes of a free GitHub-hosted runner, now Blacksmith
+    # minutes too.
+    timeout-minutes: 10
     needs:
       - detect-ci-tier
       - bazel-coverage
