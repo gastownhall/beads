@@ -980,7 +980,7 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
 
 ### F7a: Same-Repo Blacksmith Moves and Job Folds
 
-F7a (design: `~/beads-bazel-plan/five-min/spec-f7.md`) moves pr.yml/pr-risk.yml
+F7a moves pr.yml/pr-risk.yml
 jobs that are same-repo-safe and restore no GitHub-saved build cache onto the
 org's Blacksmith runner pool, and folds several independent single-purpose
 jobs into fewer jobs with multiple isolated steps, to cut same-repo PR queue
