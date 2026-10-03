@@ -1084,16 +1084,33 @@ jobs:
           fi
 
       # Remote: each shard's Go timeout is its job's 15m, 1200s Bazel cap,
-      # plus a compile. Local --nohome_rc representative-shard runs (race
-      # build, GOMAXPROCS=4, this host's CPU count, not a GH runner's)
-      # measured 55-81s wall per shard across shards 1/15/30 of 30 — well
-      # under the Bazel cap, but not a forecast for RBE's shape. 30-shard
-      # loads from scripts/ci/proxied_test_durations.json's LPT packing are
-      # a relative-cost signal for balancing shards (avoiding one long-pole
-      # shard), not an absolute-seconds prediction: that file's duration
-      # data is from contention-era runs and is being recaptured with
-      # -test.parallel=1 to remove intra-process overlap double-counting
-      # (see the file's own header for provenance and how to refresh it).
+      # plus a compile. scripts/ci/proxied_test_durations.json's 178 entries
+      # are each a clean, single-job (no concurrent heavy bazel/dolt job on
+      # the box), -test.parallel=1 top-level-test duration — either a fresh
+      # manifest-aligned sweep's own <testsuite time> (errors="0", so a
+      # failing-but-complete suite's time is still trustworthy) or, for the
+      # handful too slow to finish inside Bazel's default per-target
+      # timeout, a `bazel run` leaf-subtest-only sum (never double-counting
+      # a parallel group's own line on top of its children's). See that
+      # file's header for the full methodology and its contention-artifact
+      # lesson.
+      #
+      # The resulting 30-shard LPT packing is NOT within a few seconds of
+      # itself end to end: two single tests dominate and can't be split
+      # further by this manifest (shard_count shards within one test
+      # binary's own sharding; this manifest assigns whole top-level tests).
+      # Shard 1 is TestProxiedServerDep2 alone, ~2358s (~39m) locally; shard
+      # 2 is TestProxiedServerClose alone, ~1105s (~18m). Every other shard
+      # clusters tightly around 741-876s (~12-15m). Those two outliers'
+      # local numbers exceed this job's 25m step timeout / 30m job timeout
+      # on their own merits, before counting compile time or RBE's actual
+      # per-shard throughput (unmeasured here — this job only ever ran
+      # remote; the local numbers are a relative-cost signal for the LPT
+      # packing, not a verified RBE forecast). If shard 1 or 2 times out on
+      # RBE, that is this known imbalance surfacing, not a new regression —
+      # see TestProxiedServerDep2/TestProxiedServerClose above before
+      # assuming a hang: both are simply large, each running ~15-25 real
+      # `bd init`-against-a-live-dolt-server subtests serially.
       - name: bazel test //... --config=doltserver-proxied
         id: test
         timeout-minutes: 25
