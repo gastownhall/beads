@@ -1813,6 +1813,9 @@ func RunBatchApplyBoundsTheItemCount(t *testing.T, ctx context.Context, fixture 
 // real engine makes that unusually expensive.
 func RunBatchApplyBoundsTheItemCountAtScale(t *testing.T, ctx context.Context, fixture BatchApplyFixture, atBoundItems int) {
 	t.Helper()
+	if atBoundItems < 1 || atBoundItems > publicops.MaxApplyBatchItems {
+		t.Fatalf("atBoundItems = %d, want 1..%d (the production bound this contract pins)", atBoundItems, publicops.MaxApplyBatchItems)
+	}
 	const accepted = "batch apply at the item bound"
 	const refused = "batch apply over the item bound"
 

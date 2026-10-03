@@ -154,9 +154,11 @@ func TestBatchApplyContract(t *testing.T) {
 			// big accepted batch. The SAME inner write body
 			// (internal/storage/issueops.ApplyBatchInTx) this backend
 			// shares with internal/storage/dolt still gets a real, full
-			// 1000-item run there, non-race, every PR
+			// 1000-item run there, non-race
 			// (TestBatchApplyContract/BoundsTheItemCount on the
-			// server-Dolt tier's dolt_race_off build) — see
+			// server-Dolt tier's dolt_race_off build) — unconditionally on
+			// merge_group/push, conditionally on PRs (full_embedded gating
+			// in .github/scripts/ci-embedded-tier.sh), not "every PR". See
 			// large_batch_apply_measure_test.go's updated note for the
 			// embedded-specific coverage this leaves.
 			conformance.RunBatchApplyBoundsTheItemCountAtScale(t, ctx, fixture, 150)

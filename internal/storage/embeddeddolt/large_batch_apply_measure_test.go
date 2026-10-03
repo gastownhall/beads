@@ -262,28 +262,33 @@ var wallClockShapes = []struct {
 // hundreds of internal statements, not from anything this test asserts (it
 // has no duration or count assertion to weaken). It twice pushed its shard
 // over the job's 19-minute test timeout (see embedded-storage-test-shards.txt
-// and this package's TestBatchApplyContract for the sibling case). This does
-// not drop embedded-specific correctness coverage of a real, full
-// MaxApplyBatchItems (1000) apply down to zero: internal/storage/dolt's
-// TestBatchApplyContract/BoundsTheItemCount still builds and applies exactly
-// 1000 real items through the SAME shared inner write body
-// (internal/storage/issueops.ApplyBatchInTx) this package's BatchApplier
-// wraps, non-race, every PR. What it does NOT cover is this package's OWN
-// wrapper around that body (the version-commit-published-after-the-tx
-// mechanism unique to the embedded backend) at the full 1000-item count:
-// this package's own TestBatchApplyContract/BoundsTheItemCount also now
-// applies a reduced count (150, not 1000) under -race, for the identical
-// reason (see its doc comment and
-// conformance.RunBatchApplyBoundsTheItemCountAtScale) — so as of that
-// change, NO CI lane re-exercises embedded's own post-tx-commit-publish
-// wrapper at the true 1000-item count; the largest real, full-assertion
-// apply this backend's own wrapper gets, anywhere in CI, is the 150 items in
-// that sibling subtest (always, race or not) or the 356 items below
-// (non-race only). This is a known, deliberate, reported gap, not an
-// oversight: see the beads CI follow-ups report (fix6) for the full
-// reasoning and the option of a dedicated non-race nightly run to close it.
-// The 356-item shape (the design's primary measured shape) still runs under
-// race.
+// and this package's TestBatchApplyContract for the sibling case). The
+// 356-item shape (the design's primary measured shape) always runs, race or
+// not — only the 1000-item shape is conditionally skipped above.
+//
+// Coverage accounting for the skipped 1000-item shape (no assertion is
+// weakened here — this test logs timing only — but the real question is
+// what still exercises a true 1000-item apply at all):
+//   - The shared inner write body (internal/storage/issueops.ApplyBatchInTx),
+//     used by both this package's BatchApplier and internal/storage/dolt's,
+//     still gets a real, full 1000-item apply with result assertions,
+//     non-race, via internal/storage/dolt's own
+//     TestBatchApplyContract/BoundsTheItemCount. That job runs unconditionally
+//     on merge_group and push, but is conditional on PRs (gated by
+//     detect-ci-tier's full_embedded output; see
+//     .github/scripts/ci-embedded-tier.sh) — so "every PR" overstates it.
+//   - This package's OWN wrapper around that body (the
+//     version-commit-published-after-the-tx mechanism unique to the embedded
+//     backend) does NOT get a full 1000-item apply under -race anymore: this
+//     package's own TestBatchApplyContract/BoundsTheItemCount applies 150
+//     items under -race and the full 1000 only when built without -race (see
+//     its doc comment and conformance.RunBatchApplyBoundsTheItemCountAtScale).
+//     So as of that change, the largest real, full-assertion apply embedded's
+//     own wrapper gets under -race, anywhere in CI, is 150 items; without
+//     -race it still gets the full 1000 in that same subtest. This is a
+//     known, deliberate gap for the race-enabled lane specifically, not an
+//     oversight — closing it needs a dedicated non-race embedded run (see the
+//     nightly workflow step added alongside this comment).
 func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
@@ -291,7 +296,7 @@ func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 	for _, tc := range wallClockShapes {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.name == "1000" && raceEnabled {
-				t.Skip("1000-item apply is redundant under -race: see doc comment above")
+				t.Skip("1000-item shape skipped under -race for wall-clock timing; see doc comment above for what still covers a real 1000-item apply")
 			}
 			fixture := newPristineEmbeddedDoltFixture(t, tc.db)
 			t.Cleanup(func() { closeEmbeddedDoltStore(t, fixture.store) })
