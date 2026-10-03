@@ -152,7 +152,26 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 		return nil, err
 	}
 
+	// GitHub's POST /issues cannot set state, so a closed bead is created
+	// open. Close it with a follow-up update so the state carries; without
+	// it the issue stays open for good, because the push content hash
+	// recorded after the create already says "closed" and later pushes skip
+	// it. Same approach and trade-offs as the GitLab tracker: on failure keep
+	// the created issue and its external_ref (an error would strand it and
+	// re-create a duplicate on the next push) and surface a warning instead.
+	var warnings []string
+	if issue.Status == types.StatusClosed {
+		if closed, err := t.client.UpdateIssue(ctx, created.Number, map[string]interface{}{
+			"state": "closed",
+		}); err == nil {
+			created = closed
+		} else {
+			warnings = append(warnings, fmt.Sprintf("created GitHub issue #%d but failed to close it (left open): %v", created.Number, err))
+		}
+	}
+
 	ti := githubToTrackerIssue(created)
+	ti.Warnings = warnings
 	return &ti, nil
 }
 
