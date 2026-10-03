@@ -189,6 +189,11 @@ func startDoltContainer() error {
 		testcontainers.WithEnv(map[string]string{"DOLT_ROOT_HOST": "%"}),
 	)
 	if err != nil {
+		// dolt.Run can return a non-nil container alongside the error (e.g.
+		// when the Ryuk reaper fails to connect): the container was created
+		// but never started. Terminate it here or it leaks in `created`
+		// state forever (ga-rv0rh9).
+		_ = testcontainers.TerminateContainer(ctr)
 		return fmt.Errorf("starting Dolt container: %w", err)
 	}
 
@@ -439,6 +444,11 @@ func startIsolatedDoltContainer(t *testing.T) *IsolatedDoltContainer {
 		testcontainers.WithEnv(map[string]string{"DOLT_ROOT_HOST": "%"}),
 	)
 	if err != nil {
+		// dolt.Run can return a non-nil container alongside the error (e.g.
+		// when the Ryuk reaper fails to connect): the container was created
+		// but never started. Terminate it here or it leaks in `created`
+		// state forever (ga-rv0rh9).
+		_ = testcontainers.TerminateContainer(ctr)
 		t.Fatalf("starting Dolt container: %v", err)
 	}
 	t.Cleanup(func() {
