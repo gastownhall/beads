@@ -185,6 +185,26 @@ func TestDetectHookMarkerState_ValidSingle(t *testing.T) {
 	}
 }
 
+func TestDetectHookMarkerState_IndentedQuotedCaseArmLiteralIsNotASecondMarker(t *testing.T) {
+	// Mirrors the shape generateHookSection actually emits (cmd/bd/hooks.go):
+	// the real column-0 marker line, plus an indented, quoted copy of the
+	// same prefix text inside a shell case-arm literal used to classify a
+	// chained .old hook. Raw substring counting sees two BEGINs for one END
+	// and never converges (GH#6840 review); anchoring to the line's start
+	// must treat the indented, quoted copy as not a marker.
+	content := "#!/bin/sh\n" +
+		"# --- BEGIN BEADS INTEGRATION v0.57.0 ---\n" +
+		"case \"$_bd_old_line\" in\n" +
+		"  \"# --- BEGIN BEADS INTEGRATION\"*|\"# bd-shim \"*) _bd_chain_exists=0; break ;;\n" +
+		"esac\n" +
+		"bd hook pre-commit \"$@\"\n" +
+		"# --- END BEADS INTEGRATION v0.57.0 ---\n"
+	got := detectHookMarkerState(content)
+	if got != hookMarkerStateValid {
+		t.Fatalf("expected valid despite indented quoted case-arm literal, got %q", got)
+	}
+}
+
 func TestDetectHookMarkerState_None(t *testing.T) {
 	content := "#!/bin/sh\necho hello\n"
 	got := detectHookMarkerState(content)
