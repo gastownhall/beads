@@ -47,19 +47,29 @@ func parseDepSpecs(deps []string) ([]domain.DependencySpec, error) {
 	// each --deps value, so re-splitting on "," here would double-decode a
 	// CSV-quoted target that legitimately contains a comma. Only trim and
 	// drop empties; splitting is cobra's job.
-	var out []domain.DependencySpec
+	var entries []depSpecEntry
 	for _, raw := range deps {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
 			continue
 		}
-		spec, err := parseDepSpec(raw)
+		spec, rawType, err := parseDepSpec(raw)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, spec)
+		entries = append(entries, depSpecEntry{spec: spec, rawType: rawType})
 	}
-	return dedupeDepSpecs(out)
+	return dedupeDepSpecs(entries)
+}
+
+// depSpecEntry pairs a parsed dependency spec with the type spelling exactly
+// as the caller typed it, before canonicalDependencyType's alias
+// normalization. It exists only so dedupeDepSpecs's same-target conflict
+// error can report what was actually typed (e.g. "blocked-by") instead of
+// the canonical stored type ("blocks") that the alias normalizes to.
+type depSpecEntry struct {
+	spec    domain.DependencySpec
+	rawType types.DependencyType
 }
 
 // dedupeDepSpecs collapses repeated identical edges and rejects edges that
@@ -69,21 +79,21 @@ func parseDepSpecs(deps []string) ([]domain.DependencySpec, error) {
 // treats a repeated identical (target, type) add as idempotent, so an exact
 // repeat here must be deduped rather than rejected.
 // GH#4626: discovered-from:X,blocked-by:X used to silently keep only one edge.
-func dedupeDepSpecs(specs []domain.DependencySpec) ([]domain.DependencySpec, error) {
+func dedupeDepSpecs(entries []depSpecEntry) ([]domain.DependencySpec, error) {
 	// Key: swapDirection|target — same effective endpoint pair for a new issue.
-	seen := make(map[string]types.DependencyType, len(specs))
-	out := make([]domain.DependencySpec, 0, len(specs))
-	for _, s := range specs {
-		key := fmt.Sprintf("%t|%s", s.SwapDirection, s.TargetID)
+	seen := make(map[string]depSpecEntry, len(entries))
+	out := make([]domain.DependencySpec, 0, len(entries))
+	for _, e := range entries {
+		key := fmt.Sprintf("%t|%s", e.spec.SwapDirection, e.spec.TargetID)
 		prev, ok := seen[key]
 		switch {
 		case !ok:
-			seen[key] = s.Type
-			out = append(out, s)
-		case prev != s.Type:
+			seen[key] = e
+			out = append(out, e.spec)
+		case prev.spec.Type != e.spec.Type:
 			return nil, fmt.Errorf(
 				"--deps cannot attach both %q and %q to the same target %q: a target can only carry one dependency type at a time. Pick one type, or open a separate issue for the second relationship (GH#4626)",
-				prev, s.Type, s.TargetID,
+				prev.rawType, e.rawType, e.spec.TargetID,
 			)
 		default:
 			// Identical edge repeated (e.g. blocked-by and depends-on both
@@ -127,17 +137,21 @@ func resolveDepSpecTargets(ctx context.Context, st storage.Storage, specs []doma
 	return out, nil
 }
 
-func parseDepSpec(raw string) (domain.DependencySpec, error) {
+// parseDepSpec parses a single "type:id" or bare "id" --deps entry. It
+// returns both the parsed (alias-normalized) spec and the type exactly as
+// typed, so callers building a depSpecEntry can report the raw spelling in
+// conflict errors.
+func parseDepSpec(raw string) (domain.DependencySpec, types.DependencyType, error) {
 	if !strings.Contains(raw, ":") {
 		return domain.DependencySpec{
 			Type:     types.DepBlocks,
 			TargetID: raw,
-		}, nil
+		}, types.DepBlocks, nil
 	}
 
 	parts := strings.SplitN(raw, ":", 2)
 	if len(parts) != 2 {
-		return domain.DependencySpec{}, fmt.Errorf("invalid dependency format %q, expected 'type:id' or 'id'", raw)
+		return domain.DependencySpec{}, "", fmt.Errorf("invalid dependency format %q, expected 'type:id' or 'id'", raw)
 	}
 	rawType := types.DependencyType(strings.TrimSpace(parts[0]))
 	target := strings.TrimSpace(parts[1])
@@ -151,9 +165,9 @@ func parseDepSpec(raw string) (domain.DependencySpec, error) {
 	}
 
 	if err := validateDependencyType(spec.Type); err != nil {
-		return domain.DependencySpec{}, err
+		return domain.DependencySpec{}, "", err
 	}
-	return spec, nil
+	return spec, rawType, nil
 }
 
 // canonicalDependencyType maps the documented alias spellings "depends-on"

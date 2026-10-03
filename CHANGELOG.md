@@ -1638,6 +1638,33 @@ which dumps the entire release history.)
 
 ### Changed
 
+- **`bd link --type` and `bd batch` `dep.add` now reject custom dependency
+  types, and canonicalize the `blocked-by` / `depends-on` aliases** (#5585,
+  #5560). Both used to accept any string that passed the length check, so
+  `bd link A B --type blocked-by` stored the literal `blocked-by` as an inert
+  edge that `bd ready` / `bd blocked` gating never matched, and a typo such as
+  `--type bogus-type` was stored silently. They now run the same
+  canonicalize-then-validate pair `bd dep add` and `bd create --deps` adopted in
+  #5116: the aliases become `blocks`, and anything outside the well-known set
+  is refused with the accepted list. **This narrows the contract**: a script
+  that relied on `bd link` or `dep.add` to store a custom type such as
+  `mycustom` now gets an error instead. Custom types remain valid at the
+  storage and HTTP layers; this change covers the three CLI sites only.
+
+  The interactive `bd create` form takes the same parse path, so its `Deps`
+  field canonicalizes aliases too, and two entries with different types on the
+  same target are no longer silently collapsed to one edge (#4626, #4833). The
+  form keeps its lenient posture rather than failing after everything has been
+  typed: an unknown type, or a second type on a target that already has one,
+  is warned about and dropped, and the warning names the spellings as typed.
+  `bd link --help` now lists every accepted type and both aliases.
+
+- **`bd gate check` resolves bead gates whose target lives in a prefix-routed
+  rig** ([#5859](https://github.com/gastownhall/beads/pull/5859)). After a local
+  miss, the evaluator follows the target bead ID through `routes.jsonl` and
+  reads the owning store without writing to it. This covers explicit gate
+  checks in embedded, server, and proxied-server command paths; the legacy
+  `<rig>:<bead-id>` await value remains accepted for compatibility.
 - Shared Dolt databases (sql-server mode) no longer auto-apply schema
   migrations on a version bump. Migrating a shared database promotes the
   schema for every connected bd client at once and locks out clients still
