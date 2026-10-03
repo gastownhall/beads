@@ -1041,7 +1041,7 @@ func TestInitContributorSetsBeadsRoleContributor(t *testing.T) {
 	// The pipe below supplies real wizard answers; explicitly allow interaction
 	// even when CI or terminal detection would normally suppress it.
 	t.Setenv("BD_NON_INTERACTIVE", "0")
-	for _, name := range []string{"contributor", "team", "force", "non-interactive", "role", "prefix", "quiet"} {
+	for _, name := range []string{"contributor", "team", "force", "non-interactive", "role", "prefix", "quiet", "init-if-missing", "skip-hooks", "backend"} {
 		flag := initCmd.Flags().Lookup(name)
 		if flag == nil {
 			t.Fatalf("missing init flag --%s", name)
@@ -1070,16 +1070,20 @@ func TestInitContributorSetsBeadsRoleContributor(t *testing.T) {
 		git.ResetCaches()
 	}()
 
-	// Keep test isolated from the real home/planning repo.
+	// Keep the home and Git config redirects before newGitRepo: its one-shot
+	// template must not be initialized against the real user's configuration.
 	testHome := t.TempDir()
 	t.Setenv("HOME", testHome)
 	t.Setenv("USERPROFILE", testHome)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(testHome, ".config"))
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(testHome, ".gitconfig"))
 
 	tmpDir := newGitRepo(t)
 	t.Chdir(tmpDir)
 
-	// Owned local remotes prevent network lookups during initialization.
+	// Owned local remotes prevent network lookups during initialization. Like
+	// the former SSH origin, the local origin must imply push access so the
+	// two answers below include the separate-planning-repo confirmation.
 	cmd := exec.Command("git", "remote", "add", "origin", newGitRepo(t))
 	cmd.Dir = tmpDir
 	if err := cmd.Run(); err != nil {
@@ -1089,6 +1093,9 @@ func TestInitContributorSetsBeadsRoleContributor(t *testing.T) {
 	cmd.Dir = tmpDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to add upstream remote: %v", err)
+	}
+	if hasPush, origin := checkPushAccess(); !hasPush {
+		t.Fatalf("local origin %q must imply push access for the wizard answers", origin)
 	}
 
 	// Wizard answers:
@@ -1108,6 +1115,12 @@ func TestInitContributorSetsBeadsRoleContributor(t *testing.T) {
 	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--contributor", "--quiet"})
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("init --contributor failed: %v", err)
+	}
+	// A canceled wizard also returns nil and sets the role. The planning repo
+	// is created only after its cancellation prompts have been accepted.
+	planningPath := filepath.Join(testHome, ".beads-planning")
+	if info, err := os.Stat(planningPath); err != nil || !info.IsDir() {
+		t.Fatalf("contributor wizard did not create planning repo %s: %v", planningPath, err)
 	}
 
 	role, hasRole := getBeadsRole()
