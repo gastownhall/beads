@@ -150,11 +150,15 @@ jobs:
 
       # The suite above never sets BEADS_TEST_EMBEDDED_DOLT, so every
       # skipUnlessEmbeddedDolt-gated test in internal/storage/embeddeddolt
-      # (including TestBatchApplyContract and the 1000-item case of
-      # TestLargeBatchApplyWallClock_Embedded) is skipped there, on every
-      # lane, not just this one. This step is their only non-race coverage of
-      # a real 1000-item apply through the embedded backend: the race lanes
-      # (main.yml, pr-risk.yml) shrink that subtest under raceEnabled — see
+      # (including TestBatchApplyContract, the 1000-item case of
+      # TestLargeBatchApplyWallClock_Embedded, and — F1 — the 712-item case of
+      # TestLargeBatchApplyStatementCounts712_Embedded) is skipped there, on
+      # every lane, not just this one. This step is their only non-race
+      # coverage of a real 1000-item apply through the embedded backend, and
+      # (F1) the only coverage at all of the 712-item shape's pinned
+      # statement-count regression baseline on a per-PR race lane: the race
+      # lanes (main.yml, pr-risk.yml) shrink/skip those cases under
+      # raceEnabled — see
       # internal/storage/embeddeddolt/large_batch_apply_measure_test.go — and
       # the PR-conditional server-Dolt full suite (full_embedded in
       # .github/scripts/ci-embedded-tier.sh) covers the SAME write body
@@ -163,11 +167,14 @@ jobs:
       # own goroutine/lock machinery runs inside this test binary and the
       # race detector dramatically inflates its wall-clock (see
       # race_detector_on_test.go), which is exactly what
-      # TestLargeBatchApplyWallClock_Embedded is measuring.
+      # TestLargeBatchApplyWallClock_Embedded is measuring and exactly why
+      # TestLargeBatchApplyStatementCounts712_Embedded's 712-item case takes
+      # ~260-300s under -race (genuine engine-internal race overhead, not
+      # test logic — see that test's doc comment).
       - name: Embedded Dolt batch-apply suite (non-race)
         env:
           BEADS_TEST_EMBEDDED_DOLT: "1"
-        run: go test -tags gms_pure_go -run '^(TestBatchApplyContract|TestLargeBatchApplyWallClock_Embedded)$' ./internal/storage/embeddeddolt
+        run: go test -tags gms_pure_go -run '^(TestBatchApplyContract|TestLargeBatchApplyWallClock_Embedded|TestLargeBatchApplyStatementCounts712_Embedded)$' ./internal/storage/embeddeddolt
 
       - name: Check coverage threshold
         run: |

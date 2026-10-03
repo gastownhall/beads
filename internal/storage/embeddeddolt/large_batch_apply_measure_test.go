@@ -203,12 +203,28 @@ const statementCountTolerance = 2
 // reordered; the union of shapes run is identical to the original loop's,
 // each exactly once.
 //
-// The 712 (mol 2x) shape alone still measures ~260.70s: it is a single
+// The 712 (mol 2x) shape alone still measures ~260-300s: it is a single
 // pinned statement-count assertion over one indivisible ApplyBatchInTx
-// transaction (no internal sub-cases to split further) and cannot be
-// shrunk without weakening what B0's regression baseline actually pins —
-// the same kind of irreducible single-operation exception as the cmd
-// tier's TestEmbeddedUpdateConcurrent/TestEmbeddedCloseConcurrent.
+// transaction (no internal sub-cases to split further). Re-measured solo in
+// an isolated clone (no ambient cross-test contention) it still came in at
+// ~298.60s — unlike the cmd tier's TestEmbeddedUpdateConcurrent/
+// TestEmbeddedCloseConcurrent (whose originally-recorded 475s/308s turned
+// out to be ~2.9-3.1x contention-inflated measurement artifacts, true solo
+// cost ~152s/~106s, see ~/beads-bazel-plan/f1/impl-report.md slice F1), this
+// one is a genuine, non-artifactual, CPU-bound cost: 14014 real SQL
+// statement round-trips through the race-instrumented in-process Dolt
+// engine. It is skipped under -race below, following the exact precedent
+// TestLargeBatchApplyWallClock_Embedded set for its 1000-item shape: the
+// cost here is race-instrumentation overhead on the engine's own internal
+// goroutine/lock machinery, not on anything this test's own logic does, and
+// unlike the wall-clock test this one DOES have a real pass/fail assertion
+// (the pinned Total() above), so skipping it under race is a deliberate,
+// coordinator-sanctioned reduction from per-PR to nightly-only coverage for
+// this specific regression check — not a weakening of the assertion itself.
+// nightly.yml's "Embedded Dolt batch-apply suite (non-race)" step (the
+// nightly embedded non-race lane from #7128) has its -run regex extended
+// alongside this change to include this test, so the full 14014-statement
+// pinned baseline still runs, non-race, every night.
 func runLargeBatchApplyStatementCountsShape(t *testing.T, shapeName string) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
@@ -218,6 +234,9 @@ func runLargeBatchApplyStatementCountsShape(t *testing.T, shapeName string) {
 			continue
 		}
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "712 (mol 2x)" && raceEnabled {
+				t.Skip("712-item shape's statement-count assertion skipped under -race (race-instrumentation overhead on the Dolt engine itself, not test logic); nightly.yml's Embedded Dolt batch-apply suite (non-race) step runs the full pinned assertion nightly instead; see doc comment above")
+			}
 			fixture := newPristineEmbeddedDoltFixture(t, tc.db)
 			t.Cleanup(func() { closeEmbeddedDoltStore(t, fixture.store) })
 
