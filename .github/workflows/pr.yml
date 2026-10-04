@@ -294,8 +294,8 @@ jobs:
   # of TestExternalDoltServer_Dial, "unix socket dial against a live
   # listener succeeds" is gated by an unconditional len(sockPath) >= 104
   # sun_path check that no GOOS guard wraps: on the hosted windows-latest
-  # runner the generated socket path is 161 bytes (this job's log,
-  # 2026-10-04), 57 over the limit, so it skips there. That leaves its
+  # runner the generated socket path is about 160 bytes (it moves by a byte
+  # or two between runs), far over the limit, so it skips. That leaves its
   # sibling "unix socket dial against a missing path returns wrapped error"
   # as the only unix-socket dial case that runs on that runner, and it dials
   # a nonexistent path without ever opening a listener - error-path
