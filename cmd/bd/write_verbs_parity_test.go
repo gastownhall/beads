@@ -286,6 +286,23 @@ func newParityEnv(t *testing.T) *parityEnv {
 	// the ambient git identity. Pin it: CI commonly sets GIT_AUTHOR_EMAIL, a developer
 	// shell usually does not, and the suite must render the same verdict in both.
 	t.Setenv("GIT_AUTHOR_EMAIL", parityOwnerEmail)
+	// bd create auto-routes by routing.DetectUserRole("."), which reads
+	// `git config beads.role` in the process's working directory and, when it
+	// is unset, prints a "beads.role not configured" warning to stderr before
+	// falling back to a URL heuristic. The pinned stderr contract is the
+	// configured case, so configure the role (maintainer: route to ".") in a
+	// global git config of this test's own, whatever repository, if any, the
+	// test binary runs in. Not GIT_CONFIG_*: the role lookup scrubs every
+	// GIT_CONFIG variable (gitenv.ScrubRoutingAndSuppression), but git also
+	// reads $XDG_CONFIG_HOME/git/config as global config.
+	xdg := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(xdg, "git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(xdg, "git", "config"), []byte("[beads]\n\trole = maintainer\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdg)
 	t.Setenv("BEADS_DIR", beadsDir)
 
 	// Pin every config key the write verbs read. config.Initialize() merges
