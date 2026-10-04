@@ -129,19 +129,29 @@ func MatchesSweepPattern(pattern, id string) bool {
 }
 
 // SweepProtectedLabelSet turns a request's ProtectedLabels into the set
-// FilterSweepCandidates matches against. Empty entries are dropped: a label
-// row is never empty, so an empty entry could only ever have come from a
-// caller splitting an empty config value, and admitting it would protect
-// nothing while looking like protection.
+// FilterSweepCandidates matches against. Entries are TRIMMED and then empty
+// ones are dropped: a label row is never empty, so an empty entry could only
+// ever have come from a caller splitting an empty config value, and admitting
+// it would protect nothing while looking like protection. A whitespace-only
+// entry is the same harm one space over, and a padded entry is worse still —
+// it looks like a named protection and matches no row — so the trim happens
+// HERE rather than at one front door: `bd purge` resolves its labels through
+// utils.NormalizeLabels and would otherwise be the only front door that is
+// safe, leaving every other route to re-derive the rule or fail open.
 //
-// It is exported so a front door can report what it resolved without
-// re-deriving the rule.
+// Trimming is the whole normalization. Case is deliberately NOT folded:
+// matching is whole-label and exact, pinned by
+// TestFilterSweepCandidatesMatchesLabelsWholeAndExactly.
+//
+// It is exported as the single definition of that rule, so a front door that
+// needs to report what it resolved does not re-derive it.
 func SweepProtectedLabelSet(labels []string) map[string]bool {
 	if len(labels) == 0 {
 		return nil
 	}
 	set := make(map[string]bool, len(labels))
 	for _, l := range labels {
+		l = strings.TrimSpace(l)
 		if l == "" {
 			continue
 		}

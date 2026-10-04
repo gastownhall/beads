@@ -42,7 +42,7 @@ func TestSweepPathReachesItsHandler(t *testing.T) {
 }
 
 // TestSweepForwardsEveryDocumentedMember is the operation's central pin: each
-// of the six body members reaches the role's request unchanged.
+// of the seven body members reaches the role's request unchanged.
 //
 // It is asserted on the REQUEST the role received rather than on the response:
 // a body carrying the right numbers says nothing about which set was swept, and
@@ -57,6 +57,7 @@ func TestSweepForwardsEveryDocumentedMember(t *testing.T) {
 		"closed_before": "2026-03-01T12:00:00Z",
 		"pattern": "bd-old-*",
 		"protect_referenced": true,
+		"protected_labels": ["gt:message", "bd:protected"],
 		"dry_run": true
 	}`)
 	if resp.StatusCode != http.StatusOK {
@@ -75,7 +76,11 @@ func TestSweepForwardsEveryDocumentedMember(t *testing.T) {
 		Actor:             "alice",
 		IDPattern:         "bd-old-*",
 		ProtectReferenced: true,
-		DryRun:            true,
+		// The WHOLE array, in order: this member can only subtract rows from a
+		// deletion, so a handler that forwarded one entry of it — or none —
+		// deletes rows the caller marked protected and reports nothing.
+		ProtectedLabels: []string{"gt:message", "bd:protected"},
+		DryRun:          true,
 	}
 	cutoff := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 	want.ClosedBefore = &cutoff
@@ -147,8 +152,8 @@ func TestSweepPublishesTheWholeResult(t *testing.T) {
 		Labels:       2,
 		Events:       11,
 		Skipped: issueops.SweepSkips{
-			Pinned: 1, Referenced: 2, NotClosed: 3,
-			UnknownClosedAt: 4, ClosedAtOrAfterCutoff: 5, Unreadable: 6,
+			Pinned: 1, Referenced: 2, Labeled: 3, NotClosed: 4,
+			UnknownClosedAt: 5, ClosedAtOrAfterCutoff: 6, Unreadable: 7,
 		},
 		ReferencedIDs: []string{"bd-1", "bd-2"},
 	}}
@@ -179,9 +184,13 @@ func TestSweepPublishesTheWholeResult(t *testing.T) {
 	if !ok {
 		t.Fatalf("skipped = %v, want an object", body["skipped"])
 	}
+	// Every member of the schema's `required` list for SweepSkips, each with a
+	// distinct count: `labeled` is on that list too, and a projection that
+	// dropped it would take the only evidence a remote caller has that the
+	// label guard held anything back.
 	for key, want := range map[string]float64{
-		"pinned": 1, "referenced": 2, "not_closed": 3,
-		"unknown_closed_at": 4, "closed_at_or_after_cutoff": 5, "unreadable": 6,
+		"pinned": 1, "referenced": 2, "labeled": 3, "not_closed": 4,
+		"unknown_closed_at": 5, "closed_at_or_after_cutoff": 6, "unreadable": 7,
 	} {
 		if skipped[key] != want {
 			t.Errorf("skipped.%s = %v, want %v", key, skipped[key], want)

@@ -3,6 +3,7 @@ package workapi
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -525,6 +526,13 @@ func TestFilterSweepCandidatesWithoutProtectedLabelsProtectsNothing(t *testing.T
 		{"absent", issueops.SweepRequest{}},
 		{"empty slice", issueops.SweepRequest{ProtectedLabels: []string{}}},
 		{"only empty strings", issueops.SweepRequest{ProtectedLabels: []string{"", ""}}},
+		// End to end, whitespace-only reads the same as empty. It does not
+		// discriminate the TRIM on its own — an untrimmed set of " " matches
+		// no row either, so both rows sweep with or without it; what the trim
+		// buys is pinned at the set level in
+		// TestSweepProtectedLabelSetTrimsAndDropsEmpties and, in the direction
+		// that costs rows, in TestFilterSweepCandidatesTrimsRequestedLabels.
+		{"only whitespace strings", issueops.SweepRequest{ProtectedLabels: []string{" ", "\t"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			filtered, skips := FilterSweepCandidates(candidates, tc.req)
@@ -535,6 +543,67 @@ func TestFilterSweepCandidatesWithoutProtectedLabelsProtectsNothing(t *testing.T
 				t.Errorf("skips.Labeled = %d, want 0", skips.Labeled)
 			}
 		})
+	}
+}
+
+// TestSweepProtectedLabelSetTrimsAndDropsEmpties pins the resolution rule at
+// the one place it is defined, which is where the front doors inherit it from.
+//
+// The last case is the load-bearing one: when every entry drops the answer is
+// NO SET AT ALL, not a set that happens to match nothing. The two are the same
+// to hasProtectedLabel today, and the difference is the whole finding — a set
+// built from " " looks like a protection the caller asked for and silently
+// protects nothing.
+func TestSweepProtectedLabelSetTrimsAndDropsEmpties(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   []string
+		want map[string]bool
+	}{
+		{"a padded entry is trimmed", []string{"  bd:protected  "}, map[string]bool{"bd:protected": true}},
+		{"an empty entry is dropped", []string{"", "bd:protected"}, map[string]bool{"bd:protected": true}},
+		{"a whitespace-only entry is dropped", []string{" ", "\t", "bd:protected"}, map[string]bool{"bd:protected": true}},
+		{"nothing left means no set at all", []string{"", " ", "\t"}, nil},
+		// Trimming is the whole normalization: the guard stays whole-label and
+		// exact, so case is carried through untouched.
+		{"case is not folded", []string{"BD:PROTECTED"}, map[string]bool{"BD:PROTECTED": true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SweepProtectedLabelSet(tc.in); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("SweepProtectedLabelSet(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFilterSweepCandidatesTrimsRequestedLabels is the other half of the empty
+// entry rule, and the one a front door can hit: a PADDED label protects the row
+// it names. `bd purge` never sends one — it resolves through
+// utils.NormalizeLabels — but the HTTP member is decoded straight off the wire,
+// and an untrimmed set would report Labeled: 0 and DELETE the rows a caller
+// asked to protect, with no error. That is fail-open on the one member whose
+// entire job is to fail closed.
+//
+// `other-label` is the negative control: trimming must not turn the set into
+// one that matches anything.
+func TestFilterSweepCandidatesTrimsRequestedLabels(t *testing.T) {
+	closedAt := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	candidates := []*types.Issue{
+		{ID: "other-label", Status: types.StatusClosed, ClosedAt: &closedAt, Labels: []string{"gt:message"}},
+		{ID: "protected", Status: types.StatusClosed, ClosedAt: &closedAt, Labels: []string{"bd:protected"}},
+	}
+
+	filtered, skips := FilterSweepCandidates(candidates, issueops.SweepRequest{
+		ProtectedLabels: []string{"  bd:protected  "},
+	})
+
+	got := sweepCandidateIDs(filtered)
+	want := []string{"other-label"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("filtered IDs = %v, want %v — a padded entry must protect the label it names", got, want)
+	}
+	if skips.Labeled != 1 {
+		t.Errorf("skips.Labeled = %d, want 1", skips.Labeled)
 	}
 }
 

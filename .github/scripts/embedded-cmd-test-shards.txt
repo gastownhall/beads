@@ -293,6 +293,7 @@
 50 16 TestEmbeddedKV
 50 16 TestEmbeddedMaxRowsReady
 50 16 TestEmbeddedOpen_EmptyDatabaseRejected
+50 16 TestEmbeddedPurgeProtectedLabels
 50 16 TestEmbeddedRestoreConcurrent
 50 16 TestEmbeddedVCCommitVariantsAndMerge
 50 16 TestEmbeddedVersion
