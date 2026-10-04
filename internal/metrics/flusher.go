@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,6 +43,14 @@ var pruneQueueFn = PruneQueue
 // undetectable no-op.
 func pruneUnderLock(ctx context.Context, dir string, now time.Time) (int, int64, error) {
 	lock, err := filelock.New(filepath.Join(dir, lockFilename))
+	if errors.Is(err, os.ErrNotExist) {
+		// No queue dir: the emitter never wrote, so there is nothing to prune
+		// and nothing to serialize against. fslock opens the lock file's parent
+		// dir up front, so the missing-dir case has to be caught here to stay
+		// the silent no-op the unlocked prune (and eventkit's own Flush) treat
+		// it as, rather than a "send-metrics: prune:" error line on every run.
+		return 0, 0, nil
+	}
 	if err != nil {
 		return 0, 0, err
 	}

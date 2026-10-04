@@ -144,6 +144,26 @@ func TestPruneUnderLockWaitsForReleaseThenRuns(t *testing.T) {
 	_ = free.Unlock()
 }
 
+// TestPruneUnderLockMissingQueueDirIsNoop pins the never-enabled machine's
+// case: with no eventsData dir there is nothing to prune, so pruneUnderLock
+// must succeed with nothing dropped — keeping RunSendMetrics as silent as the
+// unlocked prune was (cmd/bd's TestSendMetricsHonorsMemDiagnostics asserts
+// that end to end) — and must not create the dir just to take its lock.
+func TestPruneUnderLockMissingQueueDirIsNoop(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "eventsData")
+
+	dropped, freed, err := pruneUnderLock(context.Background(), dir, time.Now())
+	if err != nil {
+		t.Fatalf("pruneUnderLock() err = %v, want nil for a missing queue dir", err)
+	}
+	if dropped != 0 || freed != 0 {
+		t.Errorf("pruneUnderLock() = (%d, %d), want (0, 0)", dropped, freed)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("pruneUnderLock created the queue dir (stat err = %v); a never-enabled machine keeps none", err)
+	}
+}
+
 // TestRunSendMetricsReleasesLockBeforeFlush is the sharpest Factor B
 // regression: if pruneUnderLock ever leaked its lock hold past return, the
 // FileFlusher's own lock acquisition inside Flush would hit contention and
