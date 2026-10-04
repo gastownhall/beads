@@ -761,13 +761,16 @@ func TestPRCIGateRequiresWindowsGlobalPrimeOverride(t *testing.T) {
 	// the static CI_GATE_REQUIRED list -- the WINDOWS_PREBUILT_REQUIRED flag
 	// mechanism (TestWindowsPrebuiltRequiredFlagMechanism,
 	// scripts/windows_test_binaries_manifest_test.go) adds it dynamically in
-	// the run script, required by default (flag "false"). Check that default
-	// wiring here instead of the old static list membership.
+	// the run script. Since the rollout finished the flag is "true": the
+	// prebuilt pair is required and the native pair stays wired (advisory)
+	// for a one-line rollback. Check that wiring here instead of the old
+	// static list membership.
 	if !contains(gate.Needs, "test-windows-liveness") ||
 		env["TEST_WINDOWS_LIVENESS"] != "${{ needs.test-windows-liveness.result }}" ||
-		workflow.Env["WINDOWS_PREBUILT_REQUIRED"] != "false" ||
-		!strings.Contains(evaluate.Run, `CI_GATE_REQUIRED="$CI_GATE_REQUIRED TEST_WINDOWS_LIVENESS WORKTREE_REMOVE_WINDOWS"`) {
-		t.Fatal("CI gate must require the native Windows result by default (WINDOWS_PREBUILT_REQUIRED=\"false\")")
+		workflow.Env["WINDOWS_PREBUILT_REQUIRED"] != "true" ||
+		!strings.Contains(evaluate.Run, `CI_GATE_REQUIRED="$CI_GATE_REQUIRED TEST_WINDOWS_LIVENESS WORKTREE_REMOVE_WINDOWS"`) ||
+		!strings.Contains(evaluate.Run, `CI_GATE_REQUIRED="$CI_GATE_REQUIRED TEST_WINDOWS_LIVENESS_PREBUILT WORKTREE_REMOVE_WINDOWS_PREBUILT"`) {
+		t.Fatal("CI gate must keep both Windows pairs wired and require the prebuilt pair (WINDOWS_PREBUILT_REQUIRED=\"true\"); the native pair stays wired for rollback")
 	}
 }
 
