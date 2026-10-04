@@ -206,34 +206,13 @@ func TestYamlOnlyConfigWithoutDatabase(t *testing.T) {
 	}
 }
 
-// setupTestDB creates a temporary test database
+// setupTestDB creates a test store on the suite's Dolt test server
+// (skipped when it is not running). The store is closed by t.Cleanup; the
+// returned cleanup is kept for the callers' defer and does nothing more.
 func setupTestDB(t *testing.T) (*dolt.DoltStore, func()) {
-	tmpDir, err := os.MkdirTemp("", "bd-test-config-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-
-	testDB := filepath.Join(tmpDir, "test.db")
-	store, err := dolt.New(context.Background(), &dolt.Config{Path: testDB})
-	if err != nil {
-		os.RemoveAll(tmpDir)
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-
-	// CRITICAL (bd-166): Set issue_prefix to prevent "database not initialized" errors
-	ctx := context.Background()
-	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
-		store.Close()
-		os.RemoveAll(tmpDir)
-		t.Fatalf("Failed to set issue_prefix: %v", err)
-	}
-
-	cleanup := func() {
-		store.Close()
-		os.RemoveAll(tmpDir)
-	}
-
-	return store, cleanup
+	t.Helper()
+	store := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "bd")
+	return store, func() {}
 }
 
 // TestBeadsRoleGitConfig verifies that beads.role is stored in git config,
@@ -874,11 +853,17 @@ func TestCustomStatusConfig(t *testing.T) {
 		if len(detailed) != 2 {
 			t.Fatalf("expected 2 statuses, got %d", len(detailed))
 		}
-		if detailed[0].Category != types.CategoryActive {
-			t.Errorf("review should be active, got %q", detailed[0].Category)
+		// The custom_statuses table is read back in name order, not
+		// config order: look each status up by name.
+		categories := map[string]types.StatusCategory{}
+		for _, d := range detailed {
+			categories[d.Name] = d.Category
 		}
-		if detailed[1].Category != types.CategoryUnspecified {
-			t.Errorf("legacy should be unspecified, got %q", detailed[1].Category)
+		if got := categories["review"]; got != types.CategoryActive {
+			t.Errorf("review should be active, got %q", got)
+		}
+		if got, ok := categories["legacy"]; !ok || got != types.CategoryUnspecified {
+			t.Errorf("legacy should be unspecified, got %q (present=%v)", got, ok)
 		}
 	})
 
@@ -894,7 +879,8 @@ func TestCustomStatusConfig(t *testing.T) {
 		if len(names) != 3 {
 			t.Fatalf("expected 3 names, got %d", len(names))
 		}
-		want := []string{"review", "testing", "qa"}
+		// Name order (custom_statuses is read back ORDER BY name).
+		want := []string{"qa", "review", "testing"}
 		for i, name := range names {
 			if name != want[i] {
 				t.Errorf("name[%d] = %q, want %q", i, name, want[i])
