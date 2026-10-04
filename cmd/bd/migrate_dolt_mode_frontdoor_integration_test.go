@@ -112,6 +112,10 @@ func TestMigrateDoltModeFrontDoor(t *testing.T) {
 	dir := t.TempDir()
 	home := t.TempDir()
 	env := migrationFrontDoorEnv(home)
+	// The closing show/list after the reverse migration auto-start a
+	// repo-local server again; stop it before t.TempDir removes the tree it
+	// serves (the suite fails on a leaked dolt sql-server). Idempotent.
+	t.Cleanup(func() { _, _ = runBDExecWithBinary(t, bd, dir, env, "dolt", "stop") })
 	out, err := runBDExecWithBinary(t, bd, dir, env, "init", "--backend", "dolt", "--server", "--prefix", "fd", "--quiet")
 	if err != nil {
 		t.Fatalf("init: %v\n%s", err, out)

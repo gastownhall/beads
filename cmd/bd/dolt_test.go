@@ -283,7 +283,9 @@ func TestDoltSetConfigValidation(t *testing.T) {
 func TestDoltSetConfigJSONOutput(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+	// 0700: bd warns about a group/world-readable .beads, and the warning
+	// would land in the JSON output under test.
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		t.Fatalf("failed to create .beads dir: %v", err)
 	}
 
@@ -315,7 +317,7 @@ func TestDoltSetConfigJSONOutput(t *testing.T) {
 
 	var result map[string]any
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Skipf("output not pure JSON: %s", output)
+		t.Fatalf("output not pure JSON: %s", output)
 	}
 
 	if result["key"] != "database" {
@@ -332,7 +334,9 @@ func TestDoltSetConfigJSONOutput(t *testing.T) {
 func TestDoltSetConfigWithUpdateConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+	// 0700: bd warns about a group/world-readable .beads, and the warning
+	// would land in the JSON output under test.
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		t.Fatalf("failed to create .beads dir: %v", err)
 	}
 
@@ -371,7 +375,7 @@ func TestDoltSetConfigWithUpdateConfig(t *testing.T) {
 
 	var result map[string]any
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Skipf("output not pure JSON: %s", output)
+		t.Fatalf("output not pure JSON: %s", output)
 	}
 
 	if result["config_yaml_updated"] != true {
@@ -399,11 +403,11 @@ func TestTestServerConnection(t *testing.T) {
 	})
 
 	t.Run("localhost with unlikely port", func(t *testing.T) {
-		// Clear test server port override so GetDoltServerPort() returns 59999
+		// Clear the test server port override so the config's port is used.
 		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 		cfg := configfile.DefaultConfig()
 		cfg.DoltServerHost = "127.0.0.1"
-		cfg.DoltServerPort = 59999 // Unlikely to be in use
+		cfg.DoltServerPort = closedLoopbackPort(t)
 
 		result := testServerConnection(cfg.DoltServerHost, cfg.DoltServerPort)
 		if result {
