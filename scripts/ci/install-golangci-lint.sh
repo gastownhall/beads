@@ -18,10 +18,16 @@ readonly version="2.10.1"
 readonly max_attempts=3
 readonly retry_delay_seconds=5
 
-declare -A sha256_by_arch=(
-  [amd64]="dfa775874cf0561b404a02a8f4481fc69b28091da95aa697259820d429b09c99"
-  [arm64]="6652b42ae02915eb2f9cb2a2e0cac99514c8eded8388d88ae3e06e1a52c00de8"
-)
+# A case function rather than `declare -A`: associative arrays need bash 4,
+# and macOS's /bin/bash 3.2 silently parses `declare -A` as an indexed array,
+# so `[amd64]=` becomes an arithmetic lookup that dies under `set -u` before
+# the Linux-only guard below can print its message.
+sha256_for_arch() {
+  case "$1" in
+    amd64) printf '%s' "dfa775874cf0561b404a02a8f4481fc69b28091da95aa697259820d429b09c99" ;;
+    arm64) printf '%s' "6652b42ae02915eb2f9cb2a2e0cac99514c8eded8388d88ae3e06e1a52c00de8" ;;
+  esac
+}
 
 : "${RUNNER_TEMP:?RUNNER_TEMP is required; this script is CI-only}"
 : "${GITHUB_PATH:?GITHUB_PATH is required; this script is CI-only}"
@@ -42,7 +48,8 @@ case "$arch" in
     ;;
 esac
 
-expected_sha256="${sha256_by_arch[$arch]:?no pinned sha256 for arch: $arch}"
+expected_sha256="$(sha256_for_arch "$arch")"
+: "${expected_sha256:?no pinned sha256 for arch: $arch}"
 readonly asset="golangci-lint-${version}-${os}-${arch}.tar.gz"
 readonly url="https://github.com/golangci/golangci-lint/releases/download/v${version}/${asset}"
 

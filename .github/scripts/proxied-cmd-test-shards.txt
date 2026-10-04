@@ -278,6 +278,7 @@
 30 8 TestProxiedServerTypes
 30 8 TestProxiedServerUpdateClosePolicy
 30 8 TestProxiedServerVersionedHistorySwitchRefusesAnUnrecordableGateTimeout
+30 8 TestServerModeSharedServeGlobalReportsTheServedDatabase
 
 30 9 TestProxiedServerCloseConcurrent
 30 9 TestProxiedServerDep2

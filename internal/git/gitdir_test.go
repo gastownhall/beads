@@ -68,6 +68,7 @@ func TestPinNoRepositoryUnderForTestingSurvivesResetCaches(t *testing.T) {
 			t.Fatalf("restore working directory: %v", err)
 		}
 		pinnedRootForTesting = ""
+		pinnedRootRawForTesting = ""
 		ResetCaches()
 	})
 
@@ -100,6 +101,67 @@ func TestPinNoRepositoryUnderForTestingSurvivesResetCaches(t *testing.T) {
 	ResetCaches()
 	if got := GetRepoRoot(); got != "" {
 		t.Fatalf("GetRepoRoot() = %q after ResetCaches back under the pinned root, want \"\" (the pin must survive ResetCaches)", got)
+	}
+}
+
+// TestPinNoRepositoryUnderForTestingMatchesThroughSymlinks reproduces, on any
+// platform with symlinks, the macOS failure of the pin: there t.TempDir() is
+// /var/folders/... while getcwd(2) reports /private/var/folders/... (/var is
+// a symlink), so pinning the unresolved path and comparing it to os.Getwd()
+// never matched. Pinning through a symlink must still fence the real
+// directory, and pinning the real directory must still fence a working
+// directory reported through the symlink.
+func TestPinNoRepositoryUnderForTestingMatchesThroughSymlinks(t *testing.T) {
+	realRepo, _ := setupTestRepo(t)
+	realRepo, err := filepath.EvalSymlinks(realRepo)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	link := filepath.Join(t.TempDir(), "linked-repo")
+	if err := os.Symlink(realRepo, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	subdir := filepath.Join(realRepo, "sub")
+	if err := os.MkdirAll(subdir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(origWD); err != nil {
+			t.Fatalf("restore working directory: %v", err)
+		}
+		pinnedRootForTesting = ""
+		pinnedRootRawForTesting = ""
+		ResetCaches()
+	})
+
+	for _, tc := range []struct{ name, pin, wd string }{
+		{"pin via symlink, cwd real", link, realRepo},
+		{"pin via symlink, cwd real subdir", link, subdir},
+		{"pin real, cwd via symlink", realRepo, filepath.Join(link, "sub")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.Chdir(tc.wd); err != nil {
+				t.Fatalf("chdir: %v", err)
+			}
+			PinNoRepositoryUnderForTesting(tc.pin)
+			if !underPinnedRootForTesting(tc.wd) {
+				t.Errorf("underPinnedRootForTesting(%q) = false with pin %q (stored %q), want true", tc.wd, tc.pin, pinnedRootForTesting)
+			}
+			if got := GetRepoRoot(); got != "" {
+				t.Errorf("GetRepoRoot() = %q under pinned root %q, want \"\"", got, tc.pin)
+			}
+		})
+	}
+
+	// A sibling that merely shares the string prefix is not under the pin.
+	PinNoRepositoryUnderForTesting(realRepo)
+	if underPinnedRootForTesting(realRepo + "-sibling") {
+		t.Errorf("underPinnedRootForTesting(%q) = true, want false (prefix-only sibling)", realRepo+"-sibling")
 	}
 }
 

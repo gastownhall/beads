@@ -415,8 +415,8 @@ func TestRunGoTestBinaryDefaultsTimeoutWhenOmitted(t *testing.T) {
 func TestWindowsPrebuiltRequiredFlagMechanism(t *testing.T) {
 	pr := readCIWorkflow(t, "pr.yml")
 
-	if got := pr.Env["WINDOWS_PREBUILT_REQUIRED"]; got != "false" {
-		t.Errorf("pr.yml top-level env WINDOWS_PREBUILT_REQUIRED = %q, want \"false\" (the native pair is required by default)", got)
+	if got := pr.Env["WINDOWS_PREBUILT_REQUIRED"]; got != "true" {
+		t.Errorf("pr.yml top-level env WINDOWS_PREBUILT_REQUIRED = %q, want \"true\" (the prebuilt pair is required since the side-by-side rollout finished)", got)
 	}
 
 	gate := pr.job(t, "ci-gate")
