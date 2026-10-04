@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
@@ -269,7 +268,7 @@ func newDepGraph() *depGraph {
 
 // load reads, for every id in ids not yet loaded in that direction, its
 // outgoing rows (incoming false: the issue_id index) or its incoming rows
-// (incoming true: the three target-column indexes), one read per table per
+// (incoming true: one read per target-column index), per table per
 // queryBatchSize chunk. Rows already known are skipped, so a row reached from
 // both ends is counted once.
 //
@@ -294,47 +293,22 @@ func (g *depGraph) load(ctx context.Context, tx DBTX, ids []string, incoming boo
 			want[id] = true
 		}
 		for _, table := range cycleDetectionTables() {
-			query := fmt.Sprintf("SELECT issue_id, %s, type FROM %s WHERE issue_id IN (%s)", DepTargetExpr, table, placeholders)
-			queryArgs := args
+			// Outgoing rows come through the issue_id index. Incoming rows
+			// come through each target column's own index, one read per
+			// column: Dolt plans a UNION ALL of the three as a scan (~0.7 s
+			// on a 100k-edge table) where each leg alone is an index lookup.
+			queries := []string{fmt.Sprintf("SELECT issue_id, %s, type FROM %s WHERE issue_id IN (%s)", DepTargetExpr, table, placeholders)}
 			if incoming {
-				var legs []string
-				queryArgs = nil
+				queries = queries[:0]
 				for _, col := range []string{"depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"} {
-					legs = append(legs, fmt.Sprintf("SELECT issue_id, %s, type FROM %s WHERE %s IN (%s)", DepTargetExpr, table, col, placeholders))
-					queryArgs = append(queryArgs, args...)
+					queries = append(queries, fmt.Sprintf("SELECT issue_id, %s, type FROM %s WHERE %s IN (%s)", DepTargetExpr, table, col, placeholders))
 				}
-				query = strings.Join(legs, " UNION ALL ")
-			}
-			rows, err := tx.QueryContext(ctx, query, queryArgs...)
-			if err != nil {
-				return fmt.Errorf("load dependency edges from %s: %w", table, err)
 			}
 			read := map[depEdgeKey][]types.DependencyType{}
-			for rows.Next() {
-				var source string
-				var target sql.NullString
-				var depType string
-				if err := rows.Scan(&source, &target, &depType); err != nil {
-					_ = rows.Close()
-					return fmt.Errorf("load dependency edges from %s: %w", table, err)
+			for _, query := range queries {
+				if err := g.readRows(ctx, tx, table, query, args, incoming, want, read); err != nil {
+					return err
 				}
-				// The target is the first set target column, as in the CTEs;
-				// an incoming read can match a row through a later column, and
-				// that row is not an incoming edge of the id. A row with no
-				// target set (target "") joins to a NULL node in the CTE and is
-				// tracked for duplicate detection only.
-				if incoming && !want[target.String] {
-					continue
-				}
-				key := depEdgeKey{table: table, source: source, target: target.String}
-				if _, known := g.rows[key]; known {
-					continue
-				}
-				read[key] = append(read[key], types.DependencyType(depType))
-			}
-			_ = rows.Close()
-			if err := rows.Err(); err != nil {
-				return fmt.Errorf("load dependency edges from %s: %w", table, err)
 			}
 			for key, depTypes := range read {
 				if incoming && len(depTypes) > 1 {
@@ -346,6 +320,39 @@ func (g *depGraph) load(ctx context.Context, tx DBTX, ids []string, incoming boo
 				}
 			}
 		}
+	}
+	return nil
+}
+
+// readRows collects the rows query returns into read, skipping rows the graph
+// already knows and, for an incoming read, rows whose target (the first set
+// target column, as in the CTEs) is not one of the ids asked for. A row with
+// no target set (target "") joins to a NULL node in the CTE and is tracked
+// for duplicate detection only.
+func (g *depGraph) readRows(ctx context.Context, tx DBTX, table, query string, args []any, incoming bool, want map[string]bool, read map[depEdgeKey][]types.DependencyType) error {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("load dependency edges from %s: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var source string
+		var target sql.NullString
+		var depType string
+		if err := rows.Scan(&source, &target, &depType); err != nil {
+			return fmt.Errorf("load dependency edges from %s: %w", table, err)
+		}
+		if incoming && !want[target.String] {
+			continue
+		}
+		key := depEdgeKey{table: table, source: source, target: target.String}
+		if _, known := g.rows[key]; known {
+			continue
+		}
+		read[key] = append(read[key], types.DependencyType(depType))
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("load dependency edges from %s: %w", table, err)
 	}
 	return nil
 }

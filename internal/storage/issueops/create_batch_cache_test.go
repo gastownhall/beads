@@ -209,29 +209,27 @@ func TestDepGraphSearchesFromBothEnds(t *testing.T) {
 	ctx := context.Background()
 	db, mock, tx := beginMockTx(t)
 	defer db.Close()
-	cols := []string{"issue_id", "target", "type"}
 	type row = [3]string
 	expect := func(incoming bool, ids []string, rows map[string][]row) {
+		args := make([]driver.Value, len(ids))
+		for i, id := range ids {
+			args[i] = id
+		}
 		for _, table := range []string{"dependencies", "wisp_dependencies"} {
-			var args []driver.Value
-			legs := 1
+			cols := []string{"issue_id"}
 			if incoming {
-				legs = 3
+				cols = []string{"depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"}
 			}
-			for range legs {
-				for _, id := range ids {
-					args = append(args, id)
+			for i, col := range cols {
+				r := sqlmock.NewRows([]string{"issue_id", "target", "type"})
+				if i == 0 {
+					for _, x := range rows[table] {
+						r.AddRow(x[0], x[1], x[2])
+					}
 				}
+				q := "SELECT issue_id, " + DepTargetExpr + ", type FROM " + table + " WHERE " + col + " IN ("
+				mock.ExpectQuery(regexp.QuoteMeta(q)).WithArgs(args...).WillReturnRows(r)
 			}
-			r := sqlmock.NewRows(cols)
-			for _, x := range rows[table] {
-				r.AddRow(x[0], x[1], x[2])
-			}
-			q := "SELECT issue_id, " + DepTargetExpr + ", type FROM " + table + " WHERE issue_id IN ("
-			if incoming {
-				q = "SELECT issue_id, " + DepTargetExpr + ", type FROM " + table + " WHERE depends_on_issue_id IN ("
-			}
-			mock.ExpectQuery(regexp.QuoteMeta(q)).WithArgs(args...).WillReturnRows(r)
 		}
 	}
 	g := newDepGraph()

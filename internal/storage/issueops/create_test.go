@@ -595,9 +595,11 @@ func TestPersistDependenciesBatchValidatesPlannedHierarchyBeforeBlocking(t *test
 			WillReturnRows(sqlmock.NewRows([]string{"issue_id", "target", "type"}))
 	}
 	for _, table := range []string{"dependencies", "wisp_dependencies"} {
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, " + DepTargetExpr + ", type FROM " + table + " WHERE depends_on_issue_id IN (?,?,?)")).
-			WithArgs(append(append(append([]driver.Value{}, ids...), ids...), ids...)...).
-			WillReturnRows(sqlmock.NewRows([]string{"issue_id", "target", "type"}))
+		for _, col := range []string{"depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"} {
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, " + DepTargetExpr + ", type FROM " + table + " WHERE " + col + " IN (?,?,?)")).
+				WithArgs(ids...).
+				WillReturnRows(sqlmock.NewRows([]string{"issue_id", "target", "type"}))
+		}
 	}
 	for _, pair := range [][2]string{{"bd-child", "bd-parent"}, {"bd-parent", "bd-grand"}} {
 		mock.ExpectExec("INSERT INTO dependencies").
