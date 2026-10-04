@@ -70,6 +70,16 @@ To initialize and restore in one step, use: bd init && bd backup restore`,
 			// proxied contract local-only until that server-side capability and
 			// credential policy are settled; see backupRemoteSchemeTracking.
 			if versioncontrolops.IsBackupURL(dir) {
+				if !isRemoteBackupURL(dir) {
+					// A file:// URL names a local directory, so the remote-backup
+					// reason below would mislead, and `bd backup init` and
+					// `bd backup status` print local destinations in exactly
+					// this form. The remedy is the directory itself.
+					return HandleErrorRespectJSON(
+						"backup restore from a file:// URL is not supported in proxied-server mode: %s\n"+
+							"Pass the directory path itself instead of the file:// URL.",
+						versioncontrolops.RedactBackupURL(dir))
+				}
 				return HandleErrorRespectJSON(
 					"backup restore from a URL is not supported in proxied-server mode: %s\n"+
 						"The proxied route restores through the dolt server bd spawned, whose remote-backup "+

@@ -197,6 +197,9 @@ func TestBackupRestoreCommandProxiedRefusesBackupURL(t *testing.T) {
 	if !strings.Contains(stderr, "not supported in proxied-server mode") {
 		t.Fatalf("backup restore %q said %q, want the topology refusal", source, stderr)
 	}
+	if !strings.Contains(stderr, "remote-backup support comes from the installed dolt binary") {
+		t.Fatalf("backup restore %q said %q, want the remote-backup reason", source, stderr)
+	}
 	if strings.Contains(stderr, "not a directory") || strings.Contains(stderr, "provider") {
 		t.Fatalf("backup restore %q said %q, want refusal before resolution or provider startup", source, stderr)
 	}
@@ -207,7 +210,8 @@ func TestBackupRestoreCommandProxiedRefusesBackupURL(t *testing.T) {
 
 // TestBackupRestoreCommandProxiedRefusesFileURL keeps the command's local-only
 // contract literal: proxied callers pass a directory, not a file:// spelling
-// of one. The lower-level resolver still validates file URLs for storage paths
+// of one, and the refusal says so rather than borrowing the remote-backup
+// reason. The lower-level resolver still validates file URLs for storage paths
 // that call it directly.
 func TestBackupRestoreCommandProxiedRefusesFileURL(t *testing.T) {
 	workspace, fake := useProxiedRestoreWorkspace(t)
@@ -222,6 +226,15 @@ func TestBackupRestoreCommandProxiedRefusesFileURL(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "not supported in proxied-server mode") {
 		t.Fatalf("backup restore %q said %q, want the topology refusal", source, stderr)
+	}
+	if !strings.Contains(stderr, "Pass the directory path itself instead of the file:// URL") {
+		t.Fatalf("backup restore %q said %q, want the directory remedy", source, stderr)
+	}
+	if strings.Contains(stderr, "remote-backup") {
+		t.Fatalf("backup restore %q said %q: a file:// source is local, not a remote backup", source, stderr)
+	}
+	if !strings.Contains(stderr, source) {
+		t.Fatalf("backup restore %q said %q, want the local source named as given", source, stderr)
 	}
 	if strings.Contains(stderr, "provider") {
 		t.Fatalf("backup restore %q said %q: it got past the URL build to the live provider", source, stderr)
