@@ -114,9 +114,17 @@ func insertIssueCreateOnly(ctx context.Context, tx DBTX, table string, issue *ty
 	return executeIssueInsert(ctx, tx, table, issue, "")
 }
 
+// issueInsertSQL renders the issue-row INSERT for rows VALUES tuples followed
+// by suffix (an ON DUPLICATE KEY UPDATE clause, or ""). Single-row and
+// multi-row writes share it, so their column list cannot drift.
+//
 //nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
-func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types.Issue, suffix string) error {
-	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
+func issueInsertSQL(table string, rows int, suffix string) string {
+	tuples := make([]string, rows)
+	for i := range tuples {
+		tuples[i] = issueInsertRow
+	}
+	return fmt.Sprintf(`
 		INSERT INTO %s (
 			id, content_hash, title, description, design, acceptance_criteria, notes,
 			status, priority, issue_type, assignee, estimated_minutes,
@@ -128,7 +136,13 @@ func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types
 			await_type, await_id, timeout_ns, waiters,
 			due_at, defer_until, metadata,
 			row_lock, storage_class
-		) VALUES (
+		) VALUES %s
+		%s
+	`, table, strings.Join(tuples, ", "), suffix)
+}
+
+// issueInsertRow is one VALUES tuple for issueInsertSQL's column list.
+const issueInsertRow = `(
 			?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?, ?, ?,
@@ -139,9 +153,12 @@ func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types
 			?, ?, ?, ?,
 			?, ?, ?,
 			?, ?
-		)
-		%s
-	`, table, suffix),
+		)`
+
+// issueInsertArgs binds issue to issueInsertRow. row_lock is minted fresh
+// per row (freshRowLock), as every issues/wisps content write must.
+func issueInsertArgs(issue *types.Issue) []any {
+	return []any{
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes,
 		issue.Status, issue.Priority, issue.IssueType, NullString(issue.Assignee), NullInt(issue.EstimatedMinutes),
 		issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.StartedAt, issue.ClosedAt, NullStringPtr(issue.ExternalRef), issue.SpecID,
@@ -152,9 +169,39 @@ func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), FormatJSONStringArray(issue.Waiters),
 		issue.DueAt, issue.DeferUntil, JSONMetadata(issue.Metadata),
 		freshRowLock(), NullString(string(issue.StorageClass.Normalize())),
-	)
+	}
+}
+
+//nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
+func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types.Issue, suffix string) error {
+	_, err := tx.ExecContext(ctx, issueInsertSQL(table, 1, suffix), issueInsertArgs(issue)...)
 	if err != nil {
 		return fmt.Errorf("insert issue into %s: %w", table, err)
+	}
+	return nil
+}
+
+// issueInsertRowsPerStatement bounds a multi-row issue INSERT: 49 bound
+// columns per row keeps a full statement far below the 65535-placeholder
+// protocol limit.
+const issueInsertRowsPerStatement = 100
+
+// insertIssueRowsIntoTable writes issues into table with multi-row INSERTs
+// carrying the same ON DUPLICATE KEY UPDATE clause insertIssueIntoTable uses,
+// so each row lands exactly as its single-row insert would have.
+//
+//nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
+func insertIssueRowsIntoTable(ctx context.Context, tx DBTX, table string, issues []*types.Issue, rejectStaleUpdate bool) error {
+	suffix := "ON DUPLICATE KEY UPDATE\n\t\t\t" + issueUpsertAssignments(table, rejectStaleUpdate)
+	for start := 0; start < len(issues); start += issueInsertRowsPerStatement {
+		end := min(start+issueInsertRowsPerStatement, len(issues))
+		args := make([]any, 0, (end-start)*49)
+		for _, issue := range issues[start:end] {
+			args = append(args, issueInsertArgs(issue)...)
+		}
+		if _, err := tx.ExecContext(ctx, issueInsertSQL(table, end-start, suffix), args...); err != nil {
+			return fmt.Errorf("insert issues into %s: %w", table, err)
+		}
 	}
 	return nil
 }

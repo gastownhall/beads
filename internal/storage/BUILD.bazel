@@ -138,6 +138,7 @@ filegroup(
         "//internal/storage/backends:go_srcs",
         "//internal/storage/batchfixtures:go_srcs",
         "//internal/storage/contextinfo:go_srcs",
+        "//internal/storage/createbatchequiv:go_srcs",
         "//internal/storage/dberrors:go_srcs",
         "//internal/storage/dbproxy/identity:go_srcs",
         "//internal/storage/dbproxy/pidfile:go_srcs",

@@ -157,6 +157,7 @@
 
 15 2 TestActiveDatabaseSizeScopesToActiveEmbeddedDatabase
 15 2 TestCleanGitRemoteCacheGarbage
+15 2 TestCreateBatchFastPathsMatchPerRow_Embedded
 15 2 TestDepRekeyMarkerStillInIgnoredSeries
 15 2 TestDescendantWalkReachesEveryTargetKindAndStopsOnCycles
 15 2 TestDualWriteFixtureKitIsWired
