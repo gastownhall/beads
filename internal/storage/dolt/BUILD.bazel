@@ -537,9 +537,9 @@ sh_test(
 # but TestConformance, assigned by the committed manifest) against
 # dolt_race_off, with the jobs' BEADS_TEST_ENV_RUN_DOLT=1 and a local dolt
 # sql-server as in dolt_server_conformance_test. SubprocessRunner's helper
-# processes re-exec this same binary (BEADS_TEST_SUBPROCESS_BINARY) where the
-# job compiles the package again with `go test -tags integration -c`; go.mod
-# lets integration.ModuleRoot find the module root it no longer builds in.
+# processes re-exec this same binary (BEADS_TEST_SUBPROCESS_BINARY), as the
+# jobs re-exec their downloaded one; go.mod lets integration.ModuleRoot find
+# the module root it no longer builds in.
 # shard_count must stay equal to the manifest's shard total.
 #
 # Tags:

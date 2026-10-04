@@ -181,6 +181,7 @@
 15 2 TestLeaseLifecycleEmbedded
 15 2 TestLenientGateWarningBody_ShapedDecisions
 15 2 TestReadEventsAutoPruneStateResolvesBothHalvesInOneQuery
+15 2 TestRestoreDatabasePassesFileURLThrough
 15 2 TestSchemaAfterInit
 15 2 TestStageAndCommitAfterSQLCommitResponseLossIsIndeterminateAndNotReplayed
 15 2 TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPassword
@@ -263,6 +264,7 @@
 15 5 TestLenientGateWarningBody_BluntRefusalKeepsSharedGuidance
 15 5 TestOpenReturnsCachedStore
 15 5 TestPartitionWispIDs
+15 5 TestRestoreDatabaseRefusesMissingFileURL
 15 5 TestRetentionContract
 15 5 TestWithPeerAuth_KeyMismatchFailsClosed
 
@@ -347,6 +349,7 @@
 15 8 TestMergeAndSettleWithStrategy_EmptyStrategyMatchesMergeAndSettle
 15 8 TestReclaimExpiredLeaseSurvivesRestartEmbedded
 15 8 TestRemoteVerbPlainRemoteWithoutAuthPresentsNone
+15 8 TestRestoreDatabaseRefusesRelativeFileURL
 15 8 TestTransactionCleanupAfterSQLCommitIsIndeterminate
 
 15 9 TestCommenterContract
@@ -402,6 +405,7 @@
 15 10 TestIgnoredCursorHealResumeRespectsOperatorOverride
 15 10 TestReclaimRefusesForeignReplicaLease
 15 10 TestRemoteEntryPointsUseVersionControlOps
+15 10 TestRestoreDatabaseStatsDirectorySource
 15 10 TestTransactionCleanupBeforeSQLCommitRemainsDefinite
 15 10 TestVersionReconcilerContract
 15 10 TestWithPeerAuth_MissingRemoteFailsClosed

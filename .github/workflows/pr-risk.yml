@@ -518,8 +518,18 @@ jobs:
         # zero failures -- it just ran out of time). server-storage-test-shard.sh
         # excludes TestConformance from discovery, so it never lands in one of
         # these shards.
+        #
+        # TestMultiProcessSchemaInit and TestMultiStoreConcurrent_Subprocess
+        # re-exec this package's test binary through SubprocessRunner, which
+        # otherwise compiles it again (`go test -tags integration -c`) under a
+        # 2-minute budget. With no setup-go or build cache here, that cold
+        # build stopped fitting once the package's tests linked the embedded
+        # engine (jobs 110953733112 and 110953732986: killed at 120s). Hand it
+        # the downloaded binary, as //internal/storage/dolt:dolt_server_full_test
+        # does.
         env:
           BEADS_TEST_ENV_RUN_DOLT: "1"
+          BEADS_TEST_SUBPROCESS_BINARY: /tmp/dolt-conformance-test
         run: bash .github/scripts/server-storage-test-shard.sh ${{ matrix.shard }} 16
 
   test-embedded-cmd:
