@@ -708,7 +708,7 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 			return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
 		}
 		if spec.ExpectedVersion != nil && current.RowVersion != *spec.ExpectedVersion {
-			return nil, fmt.Errorf("%w: expected %d, got %d", storage.ErrVersionMismatch, *spec.ExpectedVersion, current.RowVersion)
+			return nil, &storage.VersionMismatchError{Expected: *spec.ExpectedVersion, Current: current.RowVersion}
 		}
 		if spec.ExpectedAssignee != nil && !validation.ActorMatches(current.Assignee, *spec.ExpectedAssignee) {
 			return nil, fmt.Errorf("%w: %s is held by %q, expected %q",

@@ -52,6 +52,9 @@ func TestLifecycleUpdateContract(t *testing.T) {
 	t.Run("ConditionalGuardsGateOrdinaryEdits", func(t *testing.T) {
 		conformance.RunLifecycleUpdateConditionalGuardsGateOrdinaryEdits(t, ctx, fixture)
 	})
+	t.Run("ExpectedVersionSingleWinnerUnderConcurrency", func(t *testing.T) {
+		conformance.RunLifecycleUpdateExpectedVersionSingleWinnerUnderConcurrency(t, ctx, fixture)
+	})
 	t.Run("ConditionalGuardAcceptsRespelledAssignee", func(t *testing.T) {
 		conformance.RunLifecycleUpdateConditionalGuardAcceptsRespelledAssignee(t, ctx, fixture)
 	})

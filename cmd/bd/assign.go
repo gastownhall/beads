@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var assignCmd = &cobra.Command{
@@ -40,8 +41,16 @@ Examples:
 
 		force, _ := cmd.Flags().GetBool("force")
 
+		// A8 (beads#4682): assign takes exactly two positional args (id, name),
+		// so "one id only" always holds; no separate check is needed the way
+		// update/close/delete need one.
+		ifRevision, err := parseIfRevisionFlag(cmd)
+		if err != nil {
+			return err
+		}
+
 		if usesProxiedServer() {
-			return runAssignProxiedServer(rootCtx, args, force)
+			return runAssignProxiedServer(rootCtx, args, force, ifRevision)
 		}
 
 		id := args[0]
@@ -77,10 +86,33 @@ Examples:
 			return HandleErrorRespectJSON("%s", err)
 		}
 
-		updates := map[string]interface{}{
-			"assignee": assignee,
+		// A8 (beads#4682): routed through issueops.Lifecycle.Update (via the
+		// shared commandUpdateMutation helper update.go uses) rather than the
+		// store's raw UpdateIssue, so --if-revision has a checked write to
+		// guard — bd assign had no compare-and-set surface at all before this.
+		ops, err := writeOps(issueStore)
+		if err != nil {
+			return HandleErrorRespectJSON("updating %s: %v", id, err)
 		}
-		if err := issueStore.UpdateIssue(ctx, result.ResolvedID, updates, actor); err != nil {
+		opsCtx, err := issueOpsContext(ctx)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		mutationResult, err := runCommandUpdateMutation(opsCtx, ops, commandUpdateMutation{
+			actor:   actor,
+			issueID: result.ResolvedID,
+			patch: issueops.IssuePatch{
+				Assignee: issueops.Field[string]{Set: true, Value: assignee},
+			},
+			force:           force,
+			expectedVersion: ifRevision,
+		})
+		if err != nil {
+			if ifRevision != nil {
+				if reported, ok := reportIfRevisionFailure("assigning", id, err); ok {
+					return reported
+				}
+			}
 			return HandleErrorRespectJSON("updating %s: %v", id, err)
 		}
 
@@ -93,7 +125,7 @@ Examples:
 
 		SetLastTouchedID(result.ResolvedID)
 
-		updatedIssue, _ := issueStore.GetIssue(ctx, result.ResolvedID)
+		updatedIssue := mutationResult.Issue
 		title := ""
 		if updatedIssue != nil {
 			title = updatedIssue.Title
@@ -117,6 +149,8 @@ Examples:
 
 func init() {
 	assignCmd.Flags().Bool("force", false, "Allow overwriting another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim)")
+	// A8 (beads#4682)
+	assignCmd.Flags().String("if-revision", "", ifRevisionFlagHelp)
 	assignCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(assignCmd)
 }

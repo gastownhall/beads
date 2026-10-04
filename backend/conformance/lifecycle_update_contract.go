@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -903,6 +905,99 @@ func RunLifecycleUpdateConditionalGuardsGateOrdinaryEdits(t *testing.T, ctx cont
 	}
 	assertPriority("priority after a stale guard behind a holding one", 0)
 	maskedEvents.assert(t, "guard masked by the one before it", 0)
+}
+
+// RunLifecycleUpdateExpectedVersionSingleWinnerUnderConcurrency pins A8's
+// (gastownhall/beads#4682) headline claim about Lifecycle.Update's
+// ExpectedVersion guard, for `bd update/close/assign/delete --if-revision`:
+// the compare and the write are ONE atomic operation, not a read-then-write a
+// concurrent writer can slip between (T4.4, BEADS-JOURNAL-PLAN.md Item 4). N
+// goroutines race the SAME token — the row's version as of before any of them
+// run — against the same row; exactly one may apply it, every other goroutine
+// must see ErrVersionMismatch (never a second silent success), and the row
+// that is left behind must be exactly the single winner's content, never a
+// torn write belonging to neither the seed nor any one racer.
+//
+// THIS IS A GENUINE CONCURRENCY TEST, not N sequential attempts dressed up as
+// parallel ones. cmd/bd's embedded-mode backend admits only one `bd` process
+// at a time (an exclusive flock — see acquireEmbeddedLock in
+// cmd/bd/store_factory.go), which would make "exactly one winner" trivially
+// true even of a buggy read-then-write implementation with no atomicity at
+// all, because no second process could ever observe the first one's
+// in-flight state. That is why the CLI-level --if-revision tests
+// (cmd/bd/if_revision_embedded_test.go) assert the match/mismatch CONTRACT
+// sequentially and leave the race to this fixture: goroutines sharing one
+// already-open Lifecycle are the one shape in this suite that can actually
+// interleave at the transaction level, independent of whatever process-level
+// serialization a given CLI backend layers on top.
+func RunLifecycleUpdateExpectedVersionSingleWinnerUnderConcurrency(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+
+	const racers = 16
+
+	id := fixture.IssuePrefix + "-lup-singlewinner"
+	seedLifecycleUpdateIssue(t, ctx, fixture, lifecycleUpdateIssue(id))
+
+	seed := lifecycleUpdateRow(t, ctx, fixture, id)
+	racedToken := seed.RowVersion
+
+	// Priority is a small enum (0-4, see validation.ValidatePriority); each
+	// racer's own index would overflow it past four racers, so the index rides
+	// in Notes instead (free-text, nothing else writes it in this test) and
+	// priority merely alternates, giving the final-state check two independent
+	// columns that must agree on which one racer actually landed.
+	var wg sync.WaitGroup
+	won := make([]bool, racers)
+	errs := make([]error, racers)
+	wg.Add(racers)
+	for i := 0; i < racers; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			version := racedToken
+			result, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{
+				Actor:   "racer",
+				IssueID: id,
+				Patch: publicops.IssuePatch{
+					Priority: publicops.Field[int]{Set: true, Value: i % 5},
+					Notes:    publicops.Field[string]{Set: true, Value: fmt.Sprintf("racer-%d", i)},
+				},
+				ExpectedVersion: &version,
+			})
+			errs[i] = err
+			won[i] = err == nil && result.Changed
+		}()
+	}
+	wg.Wait()
+
+	winners := 0
+	winner := -1
+	for i, win := range won {
+		if win {
+			winners++
+			winner = i
+			continue
+		}
+		if !errors.Is(errs[i], storage.ErrVersionMismatch) {
+			t.Errorf("racer %d: err = %v, want nil (won) or ErrVersionMismatch (lost the race)", i, errs[i])
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("%d racers shared one --if-revision token %d; got %d winners, want exactly 1 (errs=%v)",
+			racers, racedToken, winners, errs)
+	}
+
+	final := lifecycleUpdateRow(t, ctx, fixture, id)
+	wantNotes := fmt.Sprintf("racer-%d", winner)
+	if final.Notes != wantNotes {
+		t.Errorf("final notes = %q, want the single winner's %q — a torn or lost write", final.Notes, wantNotes)
+	}
+	if final.Priority != winner%5 {
+		t.Errorf("final priority = %d, want the single winner's %d — a torn or lost write", final.Priority, winner%5)
+	}
+	if final.RowVersion == racedToken {
+		t.Errorf("final row version = %d, want it to have advanced past the raced token %d", final.RowVersion, racedToken)
+	}
 }
 
 // RunLifecycleUpdateConditionalGuardAcceptsRespelledAssignee pins the
