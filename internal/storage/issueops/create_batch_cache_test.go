@@ -77,7 +77,8 @@ func TestDepBatchGraphTracksTheStoredRows(t *testing.T) {
 
 	l := &depBatchLookups{graph: newDepGraph()}
 	for _, id := range []string{"bd-a", "bd-b", "bd-c"} {
-		l.graph.loaded[id] = true
+		l.graph.loadedOut[id] = true
+		l.graph.loadedIn[id] = true
 	}
 	l.graph.add(depEdgeKey{table: "dependencies", source: "bd-b", target: "bd-a"}, types.DepRelated)
 	reaches := func(from, to string, parentsOnly bool) bool {
@@ -197,54 +198,87 @@ func issueRowArgMatchers(id string) []driver.Value {
 	return args
 }
 
-// TestDepGraphLoadsOnlyTheNodesItWalks pins the lazy load: a walk reads each
-// BFS level's unloaded nodes in one IN-list read per table, through the
-// issue_id index, never the whole edge tables, and never reads a node twice;
-// a write for a source not yet loaded loads it (row included) instead of
-// adding the edge a second time.
-func TestDepGraphLoadsOnlyTheNodesItWalks(t *testing.T) {
+// TestDepGraphSearchesFromBothEnds pins the lazy, bidirectional search: each
+// step expands the smaller frontier, loading only that level's unloaded nodes
+// in that direction (outgoing through issue_id, incoming through the three
+// target columns), never the whole edge tables and never a node twice; an
+// incoming read ignores a row matched through a column that is not its
+// target; and a write whose pair the graph cannot vouch for is re-read
+// rather than guessed.
+func TestDepGraphSearchesFromBothEnds(t *testing.T) {
 	ctx := context.Background()
 	db, mock, tx := beginMockTx(t)
 	defer db.Close()
 	cols := []string{"issue_id", "target", "type"}
-	expectLevel := func(ids []string, rows map[string][][3]string) {
+	type row = [3]string
+	expect := func(incoming bool, ids []string, rows map[string][]row) {
 		for _, table := range []string{"dependencies", "wisp_dependencies"} {
-			args := make([]driver.Value, len(ids))
-			for i, id := range ids {
-				args[i] = id
+			var args []driver.Value
+			legs := 1
+			if incoming {
+				legs = 3
+			}
+			for range legs {
+				for _, id := range ids {
+					args = append(args, id)
+				}
 			}
 			r := sqlmock.NewRows(cols)
-			for _, row := range rows[table] {
-				r.AddRow(row[0], row[1], row[2])
+			for _, x := range rows[table] {
+				r.AddRow(x[0], x[1], x[2])
 			}
-			mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, " + DepTargetExpr + ", type FROM " + table + " WHERE issue_id IN (")).
-				WithArgs(args...).WillReturnRows(r)
+			q := "SELECT issue_id, " + DepTargetExpr + ", type FROM " + table + " WHERE issue_id IN ("
+			if incoming {
+				q = "SELECT issue_id, " + DepTargetExpr + ", type FROM " + table + " WHERE depends_on_issue_id IN ("
+			}
+			mock.ExpectQuery(regexp.QuoteMeta(q)).WithArgs(args...).WillReturnRows(r)
 		}
 	}
 	g := newDepGraph()
-	// a -> b (blocks), a -> w (wisp table, blocks), b -> c (parent-child).
-	expectLevel([]string{"a"}, map[string][][3]string{
-		"dependencies":      {{"a", "b", "blocks"}},
-		"wisp_dependencies": {{"a", "w", "blocks"}},
-	})
-	expectLevel([]string{"b", "w"}, map[string][][3]string{"dependencies": {{"b", "c", "parent-child"}}})
-	expectLevel([]string{"c"}, nil)
-	ok, err := g.reaches(ctx, tx, "a", "zz", false)
-	if err != nil || ok {
-		t.Fatalf("reaches(a, zz) = %v, %v; want false, nil", ok, err)
+	// Stored: a -> b (blocks), b -> c (parent-child), w -> a (wisp table,
+	// blocks). Is a reachable from c? (No.) Is c reachable from w? (Yes.)
+	// Step 1, frontiers {c} and {a} tie: forward from c, which has no edges.
+	expect(false, []string{"c"}, nil)
+	if ok, err := g.reaches(ctx, tx, "c", "a", false); err != nil || ok {
+		t.Fatalf("reaches(c, a) = %v, %v; want false, nil", ok, err)
 	}
-	// Everything reached is loaded: no further reads.
-	if ok, err := g.reaches(ctx, tx, "a", "c", false); err != nil || !ok {
-		t.Fatalf("reaches(a, c) = %v, %v; want true, nil", ok, err)
+	// Forward from w: w -> a; then backward from c (smaller? tie: forward
+	// again from {a}): a -> b; then {b} vs {c}: forward b -> c meets c.
+	expect(false, []string{"w"}, map[string][]row{"wisp_dependencies": {{"w", "a", "blocks"}}})
+	expect(false, []string{"a"}, map[string][]row{"dependencies": {{"a", "b", "blocks"}}})
+	expect(false, []string{"b"}, map[string][]row{"dependencies": {{"b", "c", "parent-child"}}})
+	if ok, err := g.reaches(ctx, tx, "w", "c", false); err != nil || !ok {
+		t.Fatalf("reaches(w, c) = %v, %v; want true, nil", ok, err)
 	}
-	// A written edge whose source was never loaded: load it, row and all.
+	// Backward: once the forward frontier {x, y} outgrows the backward one,
+	// the search keeps reading incoming rows — c, b, a, w — and never loads
+	// x or y. A row matched through a non-target column is ignored, and rows
+	// already known (b -> c, a -> b, w -> a) are not counted again.
+	g.loadedOut["s"] = true
+	g.add(depEdgeKey{table: "dependencies", source: "s", target: "x"}, types.DepBlocks)
+	g.add(depEdgeKey{table: "dependencies", source: "s", target: "y"}, types.DepBlocks)
+	expect(true, []string{"c"}, map[string][]row{"dependencies": {{"b", "c", "parent-child"}, {"q", "elsewhere", "blocks"}}})
+	expect(true, []string{"b"}, map[string][]row{"dependencies": {{"a", "b", "blocks"}}})
+	expect(true, []string{"a"}, map[string][]row{"wisp_dependencies": {{"w", "a", "blocks"}}})
+	expect(true, []string{"w"}, nil)
+	if ok, err := g.reaches(ctx, tx, "s", "c", false); err != nil || ok {
+		t.Fatalf("reaches(s, c) = %v, %v; want false, nil", ok, err)
+	}
+	if _, known := g.rows[depEdgeKey{table: "dependencies", source: "q", target: "elsewhere"}]; known {
+		t.Fatal("a row matched through a non-target column was taken as an incoming edge")
+	}
+	if n := g.out.parents["b"]["c"]; n != 1 {
+		t.Fatalf("edge b -> c counted %d times after being read from both ends, want 1", n)
+	}
+	// A written pair neither end vouches for is re-read, not assumed new.
 	l := &depBatchLookups{graph: g}
-	expectLevel([]string{"d"}, map[string][][3]string{"dependencies": {{"d", "a", "blocks"}}})
-	if err := l.recordInsert(ctx, tx, "dependencies", &types.Dependency{IssueID: "d", DependsOnID: "a", Type: types.DepBlocks}, 1); err != nil {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT type FROM dependencies WHERE issue_id = ? AND "+DepTargetExpr+" = ?")).
+		WithArgs("m", "n").WillReturnRows(sqlmock.NewRows([]string{"type"}).AddRow("related"))
+	if err := l.recordInsert(ctx, tx, "dependencies", &types.Dependency{IssueID: "m", DependsOnID: "n", Type: types.DepBlocks}, 1); err != nil {
 		t.Fatalf("recordInsert: %v", err)
 	}
-	if n := g.sched["d"]["a"]; n != 1 {
-		t.Fatalf("edge d -> a counted %d times, want 1", n)
+	if g.out.sched["m"]["n"] != 0 {
+		t.Fatal("a matched duplicate's incoming type was taken as the stored one")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)

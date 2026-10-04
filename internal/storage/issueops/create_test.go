@@ -3,6 +3,7 @@ package issueops
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"regexp"
 	"strings"
@@ -587,9 +588,15 @@ func TestPersistDependenciesBatchValidatesPlannedHierarchyBeforeBlocking(t *test
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM issues WHERE id IN (?,?)")).
 		WithArgs("bd-grand", "bd-parent").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("bd-grand").AddRow("bd-parent"))
+	ids := []driver.Value{"bd-child", "bd-grand", "bd-parent"}
 	for _, table := range []string{"dependencies", "wisp_dependencies"} {
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, "+DepTargetExpr+", type FROM "+table+" WHERE issue_id IN (?,?,?)")).
-			WithArgs("bd-child", "bd-grand", "bd-parent").
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, " + DepTargetExpr + ", type FROM " + table + " WHERE issue_id IN (?,?,?)")).
+			WithArgs(ids...).
+			WillReturnRows(sqlmock.NewRows([]string{"issue_id", "target", "type"}))
+	}
+	for _, table := range []string{"dependencies", "wisp_dependencies"} {
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, " + DepTargetExpr + ", type FROM " + table + " WHERE depends_on_issue_id IN (?,?,?)")).
+			WithArgs(append(append(append([]driver.Value{}, ids...), ids...), ids...)...).
 			WillReturnRows(sqlmock.NewRows([]string{"issue_id", "target", "type"}))
 	}
 	for _, pair := range [][2]string{{"bd-child", "bd-parent"}, {"bd-parent", "bd-grand"}} {
