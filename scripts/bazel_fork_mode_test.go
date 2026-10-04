@@ -381,7 +381,9 @@ func TestSetupBazelRCWriterForkMode(t *testing.T) {
 			"RBE_FORK_ENDPOINT": rbeForkEndpoint, "RBE_FORK_INSTANCE": instance}
 	}
 	for _, instance := range []string{"oss-fork", "oss"} {
-		out, rc, logs, err := run(t, fork(instance))
+		// RBE_CACHE_ZSTD=1 too: rbe-fork advertises no compressor, so the
+		// exact lines below must not grow --remote_cache_compression.
+		out, rc, logs, err := run(t, mergeMaps(fork(instance), map[string]string{"RBE_CACHE_ZSTD": "1"}))
 		if err != nil {
 			t.Fatalf("%s: %v\n%s", instance, err, logs)
 		}

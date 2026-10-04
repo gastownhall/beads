@@ -45,10 +45,14 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 		"RBE_TLS_CA":        pem("CERTIFICATE"),
 	}
 
+	// Repository variables as set once switched on: RBE_CACHE_ZSTD=1 asks
+	// the fork cache for zstd, so every mode below runs with it on.
+	repoVars := map[string]string{"RBE_CACHE_ZSTD": "1"}
+
 	// setup-bazel's env values: `needs.rbe.outputs.X == 'v' && RHS || ''`,
-	// RHS a secret or a literal. Anything else fails the test, so the
-	// simulation cannot drift from the workflow.
-	setupExpr := regexp.MustCompile(`^\$\{\{ needs\.rbe\.outputs\.(enabled|mode) == '([a-z]+)' && (?:secrets\.([A-Z_]+)|'([^']*)') \|\| '' \}\}$`)
+	// RHS a secret, a repository variable or a literal. Anything else fails
+	// the test, so the simulation cannot drift from the workflow.
+	setupExpr := regexp.MustCompile(`^\$\{\{ needs\.rbe\.outputs\.(enabled|mode) == '([a-z]+)' && (?:secrets\.([A-Z_]+)|vars\.([A-Z_]+)|'([^']*)') \|\| '' \}\}$`)
 	evalSetup := func(t *testing.T, expr, mode, enabled, tier string, haveSecrets bool) string {
 		t.Helper()
 		switch expr {
@@ -80,7 +84,14 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 			}
 			return v
 		}
-		return m[4]
+		if m[4] != "" {
+			v, ok := repoVars[m[4]]
+			if !ok {
+				t.Fatalf("setup-bazel env reads vars.%s, which this simulation does not set", m[4])
+			}
+			return v
+		}
+		return m[5]
 	}
 
 	// writeRC: write-bazelrc.sh as the rc step runs it, in runner.temp (the
@@ -322,6 +333,19 @@ func checkModeRC(t *testing.T, lane, mode, outputs, rc string, files []string, l
 		if !has(want) {
 			t.Errorf("%s (mode %s): rc lacks %q:\n%s", lane, mode, strings.TrimSpace(want), rc)
 		}
+	}
+	// zstd: only the anonymous fork cache advertises it, so mode cache (with
+	// RBE_CACHE_ZSTD=1, as simulated) carries exactly this line and no other
+	// mode carries any compression: the trusted schedulers and rbe-fork
+	// advertise none, and Bazel refuses such a remote.
+	if mode == "cache" {
+		if !has("\n" + forkCacheZstdLine + "\n") {
+			t.Errorf("%s (mode cache, RBE_CACHE_ZSTD=1): rc lacks %q:\n%s", lane, forkCacheZstdLine, rc)
+		}
+		rc = strings.Replace(rc, "\n"+forkCacheZstdLine+"\n", "\n", 1)
+	}
+	if has("remote_cache_compression") {
+		t.Errorf("%s (mode %s): rc asks for compression:\n%s", lane, mode, rc)
 	}
 	credentialFree := func() {
 		for _, bad := range []string{"remote_executor", "remote-exec", "tls_", "remote_instance_name", "--remote_upload_local_results", "--remote_cache", "--remote_header", "--bes_", "farm.invalid"} {
