@@ -536,11 +536,21 @@ func checkGitHooksAt(hooksDir string) []HookStatus {
 			Name: hookName,
 		}
 
-		// Check if hook exists
+		// Check if hook exists and is a beads-managed hook (GH#6084).
+		// getHookVersion returns (hookVersionInfo{}, nil) — no error — when the
+		// file is readable but contains no beads markers. Only set Installed=true
+		// when the file is actually a beads hook; a foreign file that beads never
+		// touched must not be reported as installed.
+		//
+		// This is a recognition gate, not an ownership gate, so it also accepts a
+		// hook bd does not own that delegates via "bd hooks run" (GH#946): that
+		// setup genuinely works, and reporting it "not installed" is the bug
+		// GH#6084's fix would otherwise introduce. Ownership stays narrower —
+		// see hookVersionInfo.IsExternalIntegration.
 		hookPath := filepath.Join(hooksDir, hookName)
 		versionInfo, err := getHookVersion(hookPath)
-		if err != nil {
-			// Hook doesn't exist or couldn't be read
+		if err != nil || (!versionInfo.IsBdHook && !versionInfo.IsExternalIntegration) {
+			// Hook doesn't exist, couldn't be read, or is not a beads hook
 			status.Installed = false
 		} else {
 			status.Installed = true
@@ -549,7 +559,7 @@ func checkGitHooksAt(hooksDir string) []HookStatus {
 
 			// Thin shims are never outdated (they delegate to bd)
 			// bd hooks are outdated if version is missing (legacy inline) or differs
-			if !versionInfo.IsShim && versionInfo.IsBdHook && versionInfo.Version != Version {
+			if !versionInfo.IsShim && versionInfo.Version != Version {
 				status.Outdated = true
 			}
 		}
@@ -564,7 +574,15 @@ func checkGitHooksAt(hooksDir string) []HookStatus {
 type hookVersionInfo struct {
 	Version  string // bd version (for legacy hooks) or shim version
 	IsShim   bool   // true if this is a thin shim
-	IsBdHook bool   // true if this is any type of bd hook (shim or inline)
+	IsBdHook bool   // true if bd owns the file: bd wrote it and may rewrite or remove it
+	// IsExternalIntegration is true for a hook bd did NOT write that delegates to
+	// bd anyway — the "bd hooks run" shape beads prescribes for external managers
+	// like lefthook and husky (GH#946). Such a file is a working beads
+	// integration, so the surfaces that merely *recognize* hooks must count it;
+	// but it belongs to the external manager, so it is deliberately NOT
+	// IsBdHook. Ownership decisions (install rewrite, uninstall removal,
+	// isBdOwnedHookFile) key on IsBdHook alone and must keep leaving it alone.
+	IsExternalIntegration bool
 }
 
 // getHookVersion extracts the version from a hook file
@@ -613,6 +631,31 @@ func getHookVersion(path string) (hookVersionInfo, error) {
 	// These don't have version markers but have "# bd (beads)" comment
 	if strings.Contains(content.String(), inlineHookMarker) {
 		return hookVersionInfo{IsBdHook: true}, nil
+	}
+
+	// A hook that calls "bd hooks run" is a beads integration even with no
+	// marker: that is the shape beads prescribes for external hook managers
+	// like lefthook and husky (GH#946), and doctor.IsBdHookContent — the
+	// classifier both packages now share — already recognizes it. Without this,
+	// the GH#6084 IsBdHook gate would report that supported setup as "not
+	// installed" on bd hooks list, bd info and bd config drift, whose exit code
+	// is a documented contract.
+	//
+	// It is IsExternalIntegration and NOT IsBdHook on purpose. bd did not write
+	// this file and must never rewrite or delete it: IsBdHook is the ownership
+	// predicate at three write sites (the install rewrite, the uninstall
+	// os.Remove, and isBdOwnedHookFile behind the tracked-file refusal), so
+	// setting it here would let bd destroy the external manager's own hook —
+	// without even the .backup sidecar — on precisely the setup this branch
+	// exists to support.
+	//
+	// Report it as a shim: the behavior lives in the bd binary the hook
+	// delegates to, so there is no hook template to re-install and Outdated must
+	// stay false. A versionless non-shim would instead be flagged outdated,
+	// which keeps bd config drift exiting 1 and tells the user to run
+	// bd hooks install — advice that would overwrite the manager's own hook.
+	if doctor.IsBdHookContent(content.String()) {
+		return hookVersionInfo{IsShim: true, IsExternalIntegration: true}, nil
 	}
 
 	// No version found and not a bd hook
@@ -798,7 +841,16 @@ var hooksListCmd = &cobra.Command{
 				if !status.Installed {
 					fmt.Printf("  ✗ %s: not installed\n", status.Name)
 				} else if status.IsShim {
-					fmt.Printf("  ✓ %s: installed (shim %s)\n", status.Name, status.Version)
+					// An external manager's integration (GH#946) carries no bd
+					// version, so print no parenthetical version rather than the
+					// dangling "(shim )" — the same confusing empty-parens shape
+					// GH#6084 reported. Only the rendered string changes;
+					// HookStatus is marshaled verbatim by --json.
+					if status.Version == "" {
+						fmt.Printf("  ✓ %s: installed (shim)\n", status.Name)
+					} else {
+						fmt.Printf("  ✓ %s: installed (shim %s)\n", status.Name, status.Version)
+					}
 				} else if status.Outdated {
 					fmt.Printf("  ⚠ %s: installed (version %s, current: %s) - outdated\n",
 						status.Name, status.Version, Version)
@@ -1713,9 +1765,15 @@ func runChainedHook(hookName string, args []string) int {
 	// Check if .old is itself a bd hook (shim or inline) - skip to prevent infinite recursion
 	// This can happen if user runs `bd hooks install --chain` multiple times,
 	// renaming an existing bd hook to .old. See: GH#843, GH#1120
+	//
+	// IsExternalIntegration counts here too: a .old that delegates via
+	// "bd hooks run" re-enters bd, which chains to the same .old again. This is a
+	// recursion question ("would running this call us back?"), not an ownership
+	// question, so it takes the wider predicate — unlike the write sites, which
+	// stay on IsBdHook alone.
 	versionInfo, err := getHookVersion(oldHookPath)
-	if err == nil && versionInfo.IsBdHook {
-		// Skip execution - .old is a bd hook which would call us again
+	if err == nil && (versionInfo.IsBdHook || versionInfo.IsExternalIntegration) {
+		// Skip execution - .old would call us again
 		return 0
 	}
 

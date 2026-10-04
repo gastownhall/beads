@@ -291,7 +291,7 @@ docker run --rm -v $(pwd):/workspace -w /workspace nixos/nix \
 
 If the build fails with a `vendorHash` mismatch, run `./scripts/update-nix-vendorhash.sh` to recompute and update `default.nix`, or update it manually with the `got:` hash from the error message and rebuild.
 
-The `nix build` CI job (`.github/workflows/nix-build.yml`) runs on any PR that touches `go.mod`, `go.sum`, `default.nix`, `flake.nix`, or `flake.lock`, so dependabot bumps that invalidate `vendorHash` fail loudly instead of silently breaking Nix users on main. For dependabot Go-module bumps specifically, `.github/workflows/update-vendor-hash.yml` runs the same `update-nix-vendorhash.sh` script and pushes the hash bump back to the dependabot branch automatically (note: GitHub does not retrigger `pull_request` workflows for `GITHUB_TOKEN`-authored commits, so a maintainer may need to re-run `nix build .#default` once after the auto-fix push to mark the gate green).
+On a PR, this is covered by PR Risk's required `test-nix` job (`.github/workflows/pr-risk.yml`), which runs `nix run .#default -- --help` plus `nix flake check -L` on every PR touching `go.mod`, `go.sum`, `default.nix`, `flake.nix`, or `flake.lock` -- a superset of plain `nix build .#default`. `.github/workflows/nix-build.yml` dropped its own `pull_request` trigger as redundant (F7c, spec-f7.md §2.4) and now only runs `nix build .#default` on push to `main` and on `workflow_dispatch`, so dependabot bumps that invalidate `vendorHash` still fail loudly post-merge instead of silently breaking Nix users on main. For dependabot Go-module bumps specifically, `.github/workflows/update-vendor-hash.yml` runs the same `update-nix-vendorhash.sh` script and pushes the hash bump back to the dependabot branch automatically (note: GitHub does not retrigger `pull_request` workflows for `GITHUB_TOKEN`-authored commits, so a maintainer may need to re-run PR Risk's `test-nix` once after the auto-fix push to mark the gate green).
 
 ### Debugging
 
@@ -314,6 +314,14 @@ dlv debug ./cmd/bd -- create "Test issue"
 3. Tag release: `git tag v0.x.0`
 4. Push tag: `git push origin v0.x.0`
 5. GitHub Actions will build and publish
+
+The pre-push version gate requires Go and validates each `v*` release tag
+against the checkout's canonical version. A batch containing different release
+versions is refused; push only the tag matching this checkout.
+
+`bd preflight` finds the nearest Beads source module by walking ancestor
+directories, checking both source markers and the module identity. Its version
+check runs directly in Go; `scripts/check-versions.sh` remains a Bash entrypoint.
 
 ## Questions?
 

@@ -47,11 +47,12 @@ const (
 )
 
 var (
-	serveAddr             string
-	serveAllowNonLoopback bool
-	serveAuthTokenFile    string
-	serveInsecureNoAuth   bool
-	serveAllowedHosts     []string
+	serveAddr              string
+	serveAllowNonLoopback  bool
+	serveAuthTokenFile     string
+	serveInsecureNoAuth    bool
+	serveAllowedHosts      []string
+	serveLargeApplyCeiling time.Duration
 )
 
 var serveCmd = &cobra.Command{
@@ -175,6 +176,8 @@ func registerServeFlags(cmd *cobra.Command) {
 		"Serve a non-loopback bind with NO authentication. Every peer that can reach the address gets full read and claim access")
 	cmd.Flags().StringArrayVar(&serveAllowedHosts, "allowed-host", nil,
 		"Additional Host header value to answer to, e.g. a service DNS name. Repeatable; matched exactly, with no wildcards")
+	cmd.Flags().DurationVar(&serveLargeApplyCeiling, "large-apply-ceiling", httpapi.DefaultLargeApplyCeiling,
+		"Whole-run budget for a POST issues:batchApply request over 100 items (a ceiling, not a target; requests at or under 100 items are unaffected). Must be positive. The orchestrator's stop grace must be at least this long plus 5s, or an external SIGKILL can cut off an in-flight large apply a graceful drain would otherwise have waited out; see engdocs/SERVE_RUNBOOK.md")
 }
 
 // serveOptions is the part of a server's configuration that depends on NEITHER
@@ -187,11 +190,12 @@ func registerServeFlags(cmd *cobra.Command) {
 // server configuration that cannot yet describe a server. The field names match
 // Config's because they become those fields verbatim, in applyTo.
 type serveOptions struct {
-	Addr             string
-	AllowNonLoopback bool
-	InsecureNoAuth   bool
-	AllowedHosts     []string
-	Auth             *httpapi.TokenFileAuth
+	Addr              string
+	AllowNonLoopback  bool
+	InsecureNoAuth    bool
+	AllowedHosts      []string
+	Auth              *httpapi.TokenFileAuth
+	LargeApplyCeiling time.Duration
 }
 
 // applyTo writes the operator's choices onto the configuration a database arm
@@ -203,6 +207,7 @@ func (o serveOptions) applyTo(cfg *httpapi.Config) {
 	cfg.InsecureNoAuth = o.InsecureNoAuth
 	cfg.AllowedHosts = o.AllowedHosts
 	cfg.Auth = o.Auth
+	cfg.LargeApplyCeiling = o.LargeApplyCeiling
 }
 
 // resolveServeConfig turns the flags and their environment fallbacks into the
@@ -215,13 +220,17 @@ func (o serveOptions) applyTo(cfg *httpapi.Config) {
 // standing in, and must not arrive after a database has been opened.
 func resolveServeConfig() (serveOptions, error) {
 	cfg := serveOptions{
-		Addr:             serveAddr,
-		AllowNonLoopback: serveAllowNonLoopback,
-		InsecureNoAuth:   serveInsecureNoAuth,
-		AllowedHosts:     serveAllowedHosts,
+		Addr:              serveAddr,
+		AllowNonLoopback:  serveAllowNonLoopback,
+		InsecureNoAuth:    serveInsecureNoAuth,
+		AllowedHosts:      serveAllowedHosts,
+		LargeApplyCeiling: serveLargeApplyCeiling,
 	}
 	if _, err := httpapi.ValidateBindAddr(serveAddr, serveAllowNonLoopback); err != nil {
 		return cfg, err
+	}
+	if serveLargeApplyCeiling <= 0 {
+		return cfg, fmt.Errorf("--large-apply-ceiling must be positive, got %s", serveLargeApplyCeiling)
 	}
 
 	tokenFile := serveAuthTokenFile

@@ -39,6 +39,26 @@ const ProjectIDHeader = "Bd-Project-Id"
 // instead of discovering an older server silently ignored its stamp.
 const CapProjectEnforce = "project.enforce"
 
+// CapBatchApplyLarge is the behavior capability that advertises the raised
+// issues:batchApply envelope: up to issueops.MaxApplyBatchItems (1000)
+// items, a maxApplyBatchBodyBytes (16 MiB) body, and — for a request over
+// largeApplyItemThreshold items — an EXTENDED, operator-configurable run
+// budget (Server.largeApplyCeiling, batch_apply.go / server.go) on top of
+// the ordinary requestDeadline every request already gets; see
+// Server.acquireLargeApply for how that budget is built and why it never
+// narrows a small request's deadline.
+//
+// This token names all three limits together, and
+// TestCapBatchApplyLargeTiesAllThreeLimits pins that: a build that lowers
+// one of the three without removing this token would advertise an envelope
+// it does not actually honor. Like CapProjectEnforce it names a server-wide
+// BEHAVIOR rather than a route — issues.batchApply itself is already the
+// per-operation token — so an older client that checks capabilities before
+// sending an over-100-item plan can tell whether THIS server accepts it
+// before it dials, rather than discovering a 400 only after paying for the
+// round trip an old server would refuse anyway.
+const CapBatchApplyLarge = "issues.batchApplyLarge"
+
 // customMethodTarget splits the custom method off the segment the router
 // matched, and reports the row that claims it.
 //
@@ -480,8 +500,18 @@ var routeTable = []route{
 		// ordered plan of four verbs whose items may reference each other — and a
 		// flag on that operation would have made one operationId carrying two
 		// contracts, two request schemas and two result shapes.
-		pattern:     "/v0/beads/issues:batchApply",
-		capability:  "issues.batchApply",
+		pattern:    "/v0/beads/issues:batchApply",
+		capability: "issues.batchApply",
+		// This row carries NO maxDeadline: route() gives every request here
+		// the same unconditional requestDeadline (60s) every other route
+		// gets, so a request at or under largeApplyItemThreshold items runs
+		// under EXACTLY the deadline it always has. A request that crosses
+		// the threshold gets a whole separate, EXTENDED budget —
+		// s.largeApplyCeiling, an operator flag defaulting to 5 minutes —
+		// built fresh the moment it acquires the one-wide large-apply slot
+		// (Server.acquireLargeApply, server.go). See issues.batchApplyLarge
+		// (CapBatchApplyLarge) below, the token that advertises this
+		// envelope exists.
 		implemented: true,
 		handler:     (*Server).handleApplyBatch,
 	},
@@ -748,7 +778,7 @@ func (r route) specPathOf() string {
 // route. project.enforce announces per-request Bd-Project-Id enforcement
 // (checkProjectStamp): a stamped client reads it to know the refusal is available
 // rather than silently dropped by an older server.
-var behaviorCapabilities = []string{CapProjectEnforce}
+var behaviorCapabilities = []string{CapProjectEnforce, CapBatchApplyLarge}
 
 // Capabilities lists what this build advertises in ContextResponse.capabilities:
 // the operations it actually implements, gated on `implemented` so a stub can

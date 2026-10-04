@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 const closeCheckedSavepointPrefix = "issueops_close_checked_"
@@ -151,12 +152,12 @@ func enforceClosePolicyForTargetInTx(ctx context.Context, tx DBTX, id, targetCol
 		return 0, &storage.CloseOpenChildrenError{IssueID: id, OpenChildren: openChildren}
 	}
 	if !force && !closed {
-		blocked, blockers, err := IsBlockedInTx(ctx, tx, id)
+		blocked, blockers, err := isBlockedByInTx(ctx, tx, id)
 		if err != nil {
 			return 0, err
 		}
 		if blocked && len(blockers) > 0 {
-			return 0, fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
+			return 0, &publicops.BlockedError{IssueID: id, Blockers: blockers, Err: storage.ErrCloseBlocked}
 		}
 	}
 	return openChildren, nil

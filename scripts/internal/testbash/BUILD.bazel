@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "testbash",
+    srcs = [
+        "resolver.go",
+        "resolver_other.go",
+        "resolver_windows.go",
+    ],
+    importpath = "github.com/steveyegge/beads/scripts/internal/testbash",
+    visibility = ["//scripts:__subpackages__"],
+)
+
+go_test(
+    name = "testbash_test",
+    srcs = [
+        "resolver_other_test.go",
+        "resolver_test.go",
+        "resolver_windows_test.go",
+    ],
+    embed = [":testbash"],
+)

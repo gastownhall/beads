@@ -219,12 +219,15 @@ func countFilters(q *query) issueops.CountRequest {
 		MetadataFields: q.metadataFields("metadata_field"),
 		HasMetadataKey: q.str("has_metadata_key"),
 
-		// The plane switch, forwarded as the boolean the caller sent. What it
-		// MEANS — merge the wisps tier, drop templates, drop gates, and route an
-		// infra type to the ephemeral tier — is four decisions the role makes
-		// from the WORKSPACE's own infra vocabulary, which is a config load this
-		// handler must never perform.
-		IncludeInfra:     q.boolean("include_infra"),
+		// The plane switches, each forwarded as the boolean the caller sent.
+		// What include_infra MEANS — merge the wisps tier, drop templates, drop
+		// gates, and route an infra type to the ephemeral tier — is four
+		// decisions the role makes from the WORKSPACE's own infra vocabulary,
+		// which is a config load this handler must never perform.
+		IncludeInfra: q.boolean("include_infra"),
+		// include_ephemeral is the first of those four and none of the rest, so
+		// it reaches the role as its own field and never as IncludeInfra: folded
+		// into it, a plane-only count would also lose its templates and gates.
 		IncludeEphemeral: q.boolean("include_ephemeral"),
 	}
 }

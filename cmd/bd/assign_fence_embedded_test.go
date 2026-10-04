@@ -163,8 +163,8 @@ func TestReassignFenceCLI(t *testing.T) {
 
 	t.Run("if_assignee_transfer_needs_no_force", func(t *testing.T) {
 		// The holder-aware CAS (bd-wsqvw park transition) names the holder
-		// explicitly — nothing silent — and --force/--if-assignee are
-		// mutually exclusive, so the fence must not fire under the guard.
+		// explicitly — nothing silent — so the fence must not fire under the
+		// guard, with or without --force.
 		issue := claimAs(t, "holder")
 		bdUpdate(t, bd, dir, issue.ID, "--actor", "supervisor", "--if-assignee", "holder", "--assignee", "parked")
 		if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "parked" {
@@ -172,11 +172,43 @@ func TestReassignFenceCLI(t *testing.T) {
 		}
 	})
 
-	t.Run("force_and_if_assignee_mutually_exclusive", func(t *testing.T) {
+	t.Run("force_and_if_assignee_combine_via_the_cas", func(t *testing.T) {
+		// --force and --if-assignee are no longer mutually exclusive at the
+		// flag level: a caller pairing --notes with --if-assignee needs
+		// --force to opt into overwriting existing notes, and cobra can no
+		// longer refuse the combination outright. An assignee edit riding the
+		// same command still transfers ONLY through the --if-assignee CAS,
+		// never through --force: runCommandUpdateMutation never asserts
+		// ForceAssigneeTransfer when ExpectedAssignee is set, so this is the
+		// SAME guarded park as the case above, --force along for the ride.
 		issue := claimAs(t, "holder")
-		out, _ := bdUpdateFailCode(t, bd, dir, issue.ID, "--force", "--if-assignee", "holder", "--assignee", "x")
-		if !strings.Contains(out, "force") || !strings.Contains(out, "if-assignee") {
-			t.Errorf("expected flag-exclusion error naming both flags, got:\n%s", out)
+		bdUpdate(t, bd, dir, issue.ID, "--actor", "supervisor", "--force", "--if-assignee", "holder", "--assignee", "parked")
+		if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "parked" {
+			t.Errorf("guarded park should pass with --force along for the ride: assignee=%q, want parked", got.Assignee)
+		}
+	})
+
+	t.Run("force_with_if_assignee_arms_close_policy", func(t *testing.T) {
+		// The close-policy half of --force stays armed under --if-assignee:
+		// only the assignee-transfer half defers to the CAS. A guarded close
+		// of a parent with an open child was unreachable while cobra rejected
+		// the flag pair; now it must behave exactly like an unguarded one —
+		// refused unforced, authorized with --force.
+		parent := claimAs(t, "holder")
+		child := bdCreate(t, bd, dir, "Open child", "--type", "task")
+		bdRunOK(t, bd, dir, "dep", "add", child.ID, parent.ID, "--type", "parent-child")
+
+		out, code := bdUpdateFailCode(t, bd, dir, parent.ID, "--actor", "holder", "--if-assignee", "holder", "--status", "closed")
+		if code != 1 {
+			t.Errorf("unforced guarded close exit = %d, want 1 (policy refusal, never 13/guard-mismatch)\n%s", code, out)
+		}
+		if got := bdShow(t, bd, dir, parent.ID); got.Status != types.StatusInProgress {
+			t.Errorf("refused close changed the row: status=%s, want in_progress", got.Status)
+		}
+
+		bdUpdate(t, bd, dir, parent.ID, "--actor", "holder", "--force", "--if-assignee", "holder", "--status", "closed")
+		if got := bdShow(t, bd, dir, parent.ID); got.Status != types.StatusClosed {
+			t.Errorf("forced guarded close did not apply: status=%s, want closed", got.Status)
 		}
 	})
 

@@ -107,6 +107,9 @@ go_test(
     name = "testutil_test",
     srcs = [
         "dockercontext_test.go",
+        "gm2g3g5r_failopen_test.go",
+        "gm2g3g5r_failopen_unix_test.go",
+        "gm2g3g5r_failopen_windows_test.go",
         "localdoltserver_test.go",
         "suite_temp_test.go",
         "testdoltbranch_test.go",

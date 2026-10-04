@@ -31,21 +31,21 @@ func TestAddToGitignoreCompletesTrailingCR(t *testing.T) {
 }
 
 // TestAddToGitignoreCompletesUnterminatedCRLFLine covers the one arm where
-// addToGitignore actually uses the detected line ending as its separator.
+// addToGitignore's append completes the final line with the detected line ending.
 //
-// The separator assignment is guarded twice over: the block is only entered when
-// the file does not end in "\n", and inside it a trailing "\r" is completed with
-// a bare "\n" instead. So the detected "\r\n" is used only for a CRLF file whose
+// gitignore.AppendLines guards that completion twice over: it only completes a
+// file that does not end in "\n", and it completes a trailing "\r" with a bare
+// "\n" instead. So the detected "\r\n" is used only for a CRLF file whose
 // final byte is neither — an unterminated final line like "build/". The sibling
 // fixtures in this file cannot reach it: "a/\r\nb/\r" ends in CR and takes the
-// completion branch, and "node_modules/\r\n" ends in LF and never enters the
-// block at all. Without this case, reverting the separator to a hardcoded "\n"
-// still passes every test here while writing exactly the mixed-terminator
-// .gitignore this change exists to prevent.
+// bare "\n" completion, and "node_modules/\r\n" ends in LF and needs no
+// completion at all. Without this case, completing the final line with a
+// hardcoded "\n" still passes every test here while writing exactly the
+// mixed-terminator .gitignore this change exists to prevent.
 //
-// internal/gitignore's own table already covers this input for the detector
-// (append_test.go, "CRLF with unterminated final line"); this is the call site
-// that consumes it.
+// internal/gitignore's own tables already cover this input (append_test.go,
+// "CRLF with unterminated final line" for the detector and "CRLF unterminated"
+// for AppendLines); this is the call site that consumes them.
 func TestAddToGitignoreCompletesUnterminatedCRLFLine(t *testing.T) {
 	repoRoot := initGitRepoForGitignoreTest(t)
 	path := filepath.Join(repoRoot, ".gitignore")

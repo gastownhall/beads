@@ -169,6 +169,9 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 	if err := AuthorizeAssigneeTransfer(ctx, tx, before, attempt); err != nil {
 		return publicops.UpdateResult{}, nil, err
 	}
+	if err := AuthorizeNotesOverwrite(before, attempt); err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
 	// Every constituent below runs its no-mint variant: one guarded update is
 	// one caller-visible mutation, and its version is minted exactly once at
 	// the end, after the last patch, so durable_state carries the final row,

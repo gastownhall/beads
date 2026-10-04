@@ -29,3 +29,15 @@ scripts TestBazelTestTagsFollowTaxonomy skip  # reads every BUILD file in the ch
 scripts TestBazelTreeGoSrcsListsEveryPackage skip  # walks the source checkout; runs under go test
 scripts TestCheckTestingShortPassesOnCleanRepoTree skip  # walks the whole checkout; runs under go test
 scripts TestReleaseFormula* skip  # .beads/ is in .bazelignore, so the formula cannot be data; runs under go test
+
+# Policy tests whose inputs (other packages' BUILD files, .github/scripts,
+# tools/bazel Python) are not in //scripts:scripts_test's runfiles. Missing
+# here, they turned nightly.yml's skip-parity check red (2026-10-02).
+# scripts TestBazelOnlySkipsAreAllowlisted keeps this list complete.
+scripts TestBazelGatedLanesNeverRetryFlakyTests skip  # reads every BUILD and .bzl file in the checkout; runs under go test
+scripts TestCheckShardCoverageScript skip  # runs tools/bazel/check_shard_coverage.py, not in the runfiles; runs under go test
+scripts TestShardScriptsListOnlyRealTests skip  # runs the real .github/scripts shard scripts over the source tree; runs under go test
+scripts TestProxiedShardManifestGeneratorNotStale skip  # runs scripts/ci/gen_proxied_shard_manifest.py --check, not in the runfiles; runs under go test
+scripts TestShardScriptNarrowingCheck skip  # reads the real .github/scripts shard scripts; runs under go test
+scripts TestBazelOnlySkipsAreAllowlisted skip  # parses every _test.go file in the checkout; runs under go test
+scripts TestRunAllowlistedGoTestsScript skip  # runs tools/bazel/run_allowlisted_go_tests.py, not in the runfiles; runs under go test

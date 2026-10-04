@@ -311,9 +311,9 @@ func TestIsBdHookContent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isBdHookContent(tt.content)
+			got := IsBdHookContent(tt.content)
 			if got != tt.want {
-				t.Errorf("isBdHookContent() = %v, want %v", got, tt.want)
+				t.Errorf("IsBdHookContent() = %v, want %v", got, tt.want)
 			}
 		})
 	}

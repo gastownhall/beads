@@ -27,7 +27,7 @@ import (
 // CI note: this shard is gated on BEADS_TEST_PROXIED_SERVER=1 and runs mostly
 // only on push-to-main, so it is meant to be run locally alongside any change
 // to the create input path.
-func TestStorageClassProxiedServer(t *testing.T) {
+func TestProxiedServerStorageClass(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 

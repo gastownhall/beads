@@ -118,6 +118,31 @@ bd show bd-a1b2c3d4
 bd list --full-ids
 ```
 
+### `bd comment` requires the full id
+
+Every command above resolves an abbreviation the same way — but `bd comment
+<id> "text"` (and its `bd comments add` twin) is the one deliberate exception:
+it accepts only a full, exact id, never an abbreviation. This is a policy
+trade for an agent fleet, not an oversight: an abbreviation that happens to be
+a leading-prefix match for the wrong issue would silently write the comment
+there instead of erroring, and a comment write has no confirmation step to
+catch it before the message lands on the wrong issue. Reads and every other
+mutation (`show`, `close`, `update`, …) keep accepting abbreviations as
+documented above.
+
+```bash
+bd show a1b2              # OK — abbreviation resolves for reads
+bd close a1b2              # OK — abbreviation resolves for other writes
+bd comment a1b2 "text"     # refused — comment writes require the full id
+bd comment bd-a1b2c3d4 "text"   # OK — use the full id from `bd show`
+```
+
+A reserved word (`list`, `add`, `rm`, `delete`) as the id positional is
+refused the same way, for a related reason: `bd comment list "text"` almost
+always means the caller confused the singular shorthand with the plural `bd
+comments list`/`bd comments add <id> "text"`, not that an issue is literally
+named `list`.
+
 ## Migration from Sequential IDs
 
 If migrating from a system with sequential IDs:
@@ -132,7 +157,9 @@ bd show bd-new --json | jq '.original_id'
 
 ## Best Practices
 
-1. **Use short references** - `bd-a1b2` is usually unique enough
+1. **Use short references** - `bd-a1b2` is usually unique enough, except on
+   `bd comment` writes, which require the full id (see
+   [Working with IDs](#working-with-ids) above)
 2. **Use `--json` for scripts** - Parse full ID programmatically
 3. **Reference by hash in commits** - `Fixed bd-a1b2` in commit messages
 4. **Let hierarchies form naturally** - Create epics, add children as needed

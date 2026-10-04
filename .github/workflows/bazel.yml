@@ -5,40 +5,96 @@
 # and server-Dolt storage tiers, main.yml's integration jobs).
 #
 # PRs and merge groups run it through pr.yml's `bazel` job (workflow_call),
-# in the same run as the legacy jobs it mirrors, which stay required too.
+# in the same run as the legacy jobs it mirrors, which stay required too,
+# except where their D2 flag retires them: while the committed
+# BAZEL_RETIRES_LEGACY_EMBEDDED / BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS /
+# BAZEL_RETIRES_LEGACY_PR_LANES flag is "true", on a same-repo,
+# non-Dependabot pull_request (whatever the mode), the bazel-coverage job
+# stands down pr-risk.yml's embedded-Dolt test jobs (bazel-embedded runs
+# the tier), its proxied-server and server-Dolt storage test jobs
+# (bazel-proxied, bazel-server-storage), or pr.yml's PR Core,
+# build-artifacts, pure-Go/js-wasm, domain+uow and contract corpus jobs
+# (bazel-test, bazel-pure, bazel-doltserver; their `bazel test`s then add
+# --config=sole-run); pr.yml's ci-gate then requires those lanes to have run
+# remotely and passed, so modes skip, local and cache are red there
+# (scripts/pr_risk_bazel_coverage_test.go, pr_lanes_bazel_coverage_test.go).
 # This file has no pull_request or merge_group trigger of its own, so a PR
 # runs the lane once. Every lane reports its job.status as a workflow_call
 # output (named after the job) from an always() last step. pr.yml's ci-gate
 # requires the call's aggregate result (BAZEL) and bazel-test, bazel-pure,
-# bazel-embedded, bazel-doltserver, bazel-proxied and bazel-server-storage
-# (BAZEL_TEST, BAZEL_PURE, BAZEL_EMBEDDED, BAZEL_DOLTSERVER, BAZEL_PROXIED,
-# BAZEL_SERVER_STORAGE); .github/scripts/bazel-gate.sh turns the rbe job's
-# rbe-mode output into the skips it accepts, so a lane skipped by its `if:`
-# below passes and one that should have run and failed, was cancelled or
-# reported nothing fails the gate. bazel-integration is not part of the PR
-# call (pr.yml passes integration: "off"): its legacy counterparts, main.yml's
-# integration jobs, run only on push to main, so it runs on push to main,
-# dispatch and nightly, like them. Direct runs (push to main,
+# bazel-embedded, bazel-integration, bazel-doltserver, bazel-proxied and
+# bazel-server-storage (BAZEL_TEST, BAZEL_PURE, BAZEL_EMBEDDED,
+# BAZEL_INTEGRATION, BAZEL_DOLTSERVER, BAZEL_PROXIED, BAZEL_SERVER_STORAGE);
+# .github/scripts/bazel-gate.sh turns the rbe job's rbe-mode output into the
+# skips it accepts, so a lane skipped by its `if:` below passes and one that
+# should have run and failed, was cancelled or reported nothing fails the
+# gate. bazel-integration runs in the PR call (pr.yml passes integration:
+# "on") although its legacy counterparts, main.yml's integration jobs, run
+# only on push to main: remotely it is minutes, and it catches on the PR what
+# main.yml would catch after the merge. Fork and Dependabot PRs run it
+# remotely in modes fork-ro/fork-rw like every lane, and in mode cache
+# (rbe-fork closed) unlike the remote-only lanes: with the read-only cache
+# only what the PR changed is built and tested on the runner, and it is
+# their only PR-time integration run (no legacy job runs it on PRs). Mode
+# local (rbe=off) still skips it. Direct runs (push to main,
 # workflow_dispatch, nightly.yml's call) gate nothing.
 #
 # Execution mode, decided once by the rbe job (every other job needs it and
 # reads its outputs; none re-derives the condition) and passed to
 # .github/actions/setup-bazel:
-#   remote: repo variable RBE_WEST_WORKERS=true, rbe not off, not a fork PR,
-#     and the secret RBE_WEST_EXECUTOR (grpcs:// endpoint) present, plus
+#   remote: repo variable RBE_WEST_WORKERS=true, rbe not off, not a fork or
+#     Dependabot PR (or a fork PR bazel-farm.yml authorized, below), and the
+#     secret RBE_WEST_EXECUTOR (grpcs:// endpoint) present, plus
 #     RBE_TLS_CERT, RBE_TLS_KEY (base64; RBE_TLS_CA optional): remote
 #     execution on rbe-west, instance "oss" (shared with gascity), from the
 #     Blacksmith runner.
-#   local: fork PRs, rbe=off dispatches, and same-repo runs without the
-#     secret (Dependabot PRs: same-repo, but no Actions secrets): local
+#   fork-ro, fork-rw: fork and Dependabot pull_request runs while rbe-west's
+#     certificate mint (rbe-fork-mint, infra nativelink-cas/west README
+#     "rbe-fork") says open for this run. Such runs get no secrets, no OIDC
+#     token and no repository variables, so the farm decides: the rbe job
+#     asks the mint's /v1/status, and every lane then proves it is a
+#     running job of this run (a CSR uploaded as an artifact of it) and gets
+#     its own certificate of about two hours (setup-bazel,
+#     fork-credential.sh). fork-ro: instance "oss-fork", the fork pool,
+#     nothing cached for anyone; fork-rw (PRs from an allowlisted author's
+#     own fork, triggered by an allowlisted user; the mint reads the
+#     default branch's .github/bazel-farm-allowlist.txt): instance "oss",
+#     the trusted OSS pool, results cached by its workers. Every lane runs,
+#     remotely, as in mode remote, from a GitHub-hosted runner (the client
+#     only). A lane whose certificate says another tier than this job fails
+#     ("re-run all jobs").
+#   cache: rbe=cache dispatches, fork and Dependabot PRs while rbe-fork is
+#     closed, unreachable or refuses the run (the mint's canary list, its
+#     switches, the farm's gate), and same-repo runs without the secret:
+#     like local (ubuntu-latest, bazel-embedded, bazel-proxied and
+#     bazel-server-storage skipped), plus rbe-west's anonymous read-only
+#     cache (.bazelrc --config=fork-cache): hits for every action trusted CI
+#     already executed, no credentials, no uploads; and bazel-integration
+#     runs too (a warm run hits all but what the PR changed). The farm can
+#     close the cache at any time; Bazel then runs everything locally.
+#   local: rbe=off dispatches (fork simulation without the cache): local
 #     execution on ubuntu-latest, slower but the same results, for every job
-#     but the remote-only ones (bazel-embedded, bazel-integration,
-#     bazel-proxied, bazel-server-storage), which are skipped.
-#   skip: same-repo runs while RBE_WEST_WORKERS is unset (the farm switch).
-# workflow_dispatch with rbe=off simulates a fork run. The decision is also a
-# workflow_call output (rbe-mode, rbe-enabled), so pr.yml's gate can tell an
-# expected skip from a missing lane without re-deriving it. Callers pass
-# exactly the four RBE secrets below, never `secrets: inherit`.
+#     but the remote-only ones (bazel-embedded, bazel-proxied,
+#     bazel-server-storage) and bazel-integration, which are skipped.
+#   skip: same-repo runs while RBE_WEST_WORKERS is unset (the farm switch),
+#     and authorized fork-farm runs without it or without the secret. Fork
+#     and Dependabot pull_request runs cannot read the variable; rbe-fork's
+#     own switches decide for them.
+# Trusted-author fork PRs: bazel-farm.yml (pull_request_target, advisory)
+# calls this workflow for fork PRs whose author and triggering user are on
+# the base branch's .github/bazel-farm-allowlist.txt, with fork-farm:
+# authorized and checkout-sha: the event's pinned head SHA. Only that
+# combination, on a pull_request_target event, lets a fork run remotely; a
+# fork's pull_request run (pr.yml, which the fork may edit) stays in mode
+# cache (or local, or fork-ro/fork-rw as the mint decides) whatever it
+# passes, and has no secrets anyway. See engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md,
+# "Trusted-author fork PRs". (rbe-fork's tier rw replaces this workflow
+# once allowlisted forks have run it.)
+# workflow_dispatch with rbe=cache simulates a fork run; rbe=off also drops
+# the cache. The decision is also a workflow_call output (rbe-mode,
+# rbe-enabled), so pr.yml's gate can tell an expected skip from a missing
+# lane without re-deriving it. Callers pass exactly the four RBE secrets
+# below, never `secrets: inherit`.
 #
 # Accepted risk (same model as gascity's bazel-test.yml): on push, merge_group
 # and same-repo pull_request runs, code from the PR head runs with the RBE
@@ -46,10 +102,17 @@
 # by every later step and by locally executed Bazel actions, and a .bazelrc
 # edit can point the BEP or the executor anywhere. Anyone who can push a
 # branch here can therefore use or copy the certificate and write to the
-# farm's cache. Fork PRs never get it: pull_request from a fork receives no
-# secrets, neither this workflow nor its callers have a pull_request_target
-# trigger, and forks cannot write the runner cache. Nor do Dependabot PRs, which run as same-repo but
-# get no Actions secrets. In place: secrets are referenced by the setup step
+# farm's cache. Fork PRs never get it, except those bazel-farm.yml
+# authorizes (allowlisted author and sender, accepted as same-repo-level
+# trust; that workflow's header lists what it adds): pull_request from a
+# fork receives no secrets, bazel-farm.yml is the only pull_request_target
+# caller (policy-tested), and forks cannot write the runner cache. Nor do
+# Dependabot PRs, which run as same-repo but get no Actions secrets. Fork
+# and Dependabot runs in modes fork-ro/fork-rw hold a certificate of their
+# own instead, worth what their run gets anyway (remote execution under the
+# farm's quotas, AC_OSS reads, hash-verified CAS uploads; no action-cache
+# writes) for about two hours: anyone who copies it from the run gets no
+# more than the PR's author already has. In place: secrets are referenced by the setup step
 # alone (plus the rbe job's emptiness test of RBE_WEST_EXECUTOR, which yields
 # a boolean) and never by a workflow- or job-level env (policy-tested), decoded key
 # material is masked in logs, and CI uploads only remotely executed results
@@ -57,14 +120,16 @@
 # the generated rc), and the certificate
 # is issued to beads CI alone, so it can be revoked without affecting other
 # clients. Maintainers decided (2026-09-28) that same-repo PRs keep remote
-# execution under this model. Still open: a beads-only RBE_INSTANCE and
-# farm-side denial of client action-cache writes. Nothing downstream consumes
-# artifacts built here yet; in pr.yml's run the bd artifact is
-# bazel-ci-build-artifacts, so it cannot collide with the build-artifacts
-# job's ci-build-artifacts.
+# execution under this model. Still open: a beads-only RBE_INSTANCE. The farm
+# refuses client action-cache writes (only its workers write; rbe-west D2).
+# In pr.yml's run the bd artifact is bazel-ci-build-artifacts, so it cannot
+# collide with the build-artifacts job's ci-build-artifacts. F3: the package
+# gates no longer consume this artifact (they build their own bd); it is
+# kept for the F3.5.3 SHA256SUMS comparison and for debugging.
 #
 # Runner cache: one entry per (.bazelversion, MODULE.bazel.lock) pair, about
-# 2 GB (Bazel's --repository_cache plus Bazelisk's Bazel download), written
+# 2 GB (Bazel's content-addressable --repository_cache, re-hashed on every
+# hit; never the Bazel binary or the repo contents cache), written
 # only by a push to main that missed it. No --disk_cache: remote runs use the
 # remote cache, and local runs would need about 7 GB more.
 #
@@ -78,11 +143,11 @@ on:
   workflow_dispatch:
     inputs:
       rbe:
-        description: "Remote execution: on (use secrets) or off (fork simulation)"
+        description: "Remote execution: on (use secrets), cache (fork simulation: anonymous read-only cache) or off (local only)"
         required: true
         type: choice
         default: "on"
-        options: [ "on", "off" ]
+        options: [ "on", "cache", "off" ]
       details:
         description: "List every equivalence divergence"
         required: false
@@ -117,8 +182,8 @@ on:
       # test would silently stop the lane on main.
       integration:
         description: >
-          "off" skips bazel-integration (pr.yml: its legacy counterparts do
-          not run on PRs); anything else runs it where remote execution is on.
+          "off" skips bazel-integration; anything else (pr.yml and
+          bazel-farm.yml pass "on") runs it where remote execution is on.
         type: string
         required: false
         default: "on"
@@ -130,6 +195,37 @@ on:
         type: string
         required: false
         default: "ci-build-artifacts"
+      # Set only by bazel-farm.yml (policy-tested): the fork PR's head SHA
+      # from its pull_request_target event, pinned, and "authorized" once
+      # that workflow's authorize job has checked the base branch's
+      # allowlist. See the header.
+      checkout-sha:
+        description: >
+          Commit every lane checks out (bazel-farm.yml: the trusted fork PR's
+          head SHA); empty checks out the event's default ref.
+        type: string
+        required: false
+        default: ""
+      fork-farm:
+        description: >
+          "authorized" (bazel-farm.yml only) lets a pull_request_target fork
+          run execute remotely; anything else keeps forks local.
+        type: string
+        required: false
+        default: "off"
+      # "on" (pr.yml only) runs package-mcp and package-npm in this call,
+      # which waits on nothing but the rbe job (F3: the legacy pr.yml jobs
+      # those gates used to need: detect-package-gates, build-artifacts,
+      # bazel-coverage, and the whole bazel call). bazel-farm.yml, nightly.yml
+      # and direct runs (push, dispatch) keep the default "off": main.yml
+      # keeps its own package jobs, and a fork-farm run has no bd artifact
+      # consumer waiting on these.
+      package-gates:
+        description: >
+          "on" (pr.yml only) runs the MCP and npm package gates in this call.
+        type: string
+        required: false
+        default: "off"
     # Only what the rbe job and setup-bazel need; callers pass them
     # explicitly. None is required: fork and Dependabot runs have none.
     secrets:
@@ -149,7 +245,7 @@ on:
         description: "'true' when the lanes executed remotely on rbe-west, else 'false'"
         value: ${{ jobs.rbe.outputs.enabled }}
       rbe-mode:
-        description: "remote, local (no remote-only jobs) or skip (no jobs): the rbe job's decision"
+        description: "remote, fork-ro or fork-rw (every lane runs remotely), cache (no remote-only jobs but integration), local (no remote-only jobs), or skip (no jobs): the rbe job's decision"
         value: ${{ jobs.rbe.outputs.mode }}
       bazel-test:
         description: "bazel-test's job.status"
@@ -161,7 +257,7 @@ on:
         description: "bazel-embedded's job.status"
         value: ${{ jobs.bazel-embedded.outputs.result }}
       bazel-integration:
-        description: "bazel-integration's job.status (empty in pr.yml's call, which turns the lane off)"
+        description: "bazel-integration's job.status"
         value: ${{ jobs.bazel-integration.outputs.result }}
       bazel-doltserver:
         description: "bazel-doltserver's job.status"
@@ -172,13 +268,20 @@ on:
       bazel-server-storage:
         description: "bazel-server-storage's job.status"
         value: ${{ jobs.bazel-server-storage.outputs.result }}
+      package-mcp:
+        description: "package-mcp's job.status (empty unless package-gates is 'on')"
+        value: ${{ jobs.package-mcp.outputs.result }}
+      package-npm:
+        description: "package-npm's job.status (empty unless package-gates is 'on')"
+        value: ${{ jobs.package-npm.outputs.result }}
 
 # Main runs always finish (they may save the runner cache); PR runs (called
-# from pr.yml, whose own group cancels the calling run too) supersede. The
-# group differs from pr.yml's, as a called workflow's must.
+# from pr.yml or bazel-farm.yml, whose own groups cancel the calling run too)
+# supersede. The group differs from each caller's, as a called workflow's
+# must.
 concurrency:
   group: bazel-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'pull_request_target' }}
 
 permissions:
   contents: read
@@ -193,56 +296,105 @@ jobs:
   # The one place the execution mode is decided (see the header), so every
   # job sees the same answer for the whole run. Its step reads one secret, and
   # only to test it for emptiness: the step's env holds a boolean, never the
-  # value, and the step runs no repository code (no checkout). Dependabot
-  # runs read vars but get no secrets, so they come out local, not remote.
+  # value, and the step runs no repository code (no checkout). Fork and
+  # Dependabot pull_request runs get no secrets: rbe-fork-mint decides
+  # theirs (fork-ro, fork-rw, or cache while it is closed).
   rbe:
     name: execution mode
-    runs-on: ubuntu-latest
+    # Same-repo PRs (and merge_group/push/dispatch/schedule runs, which are
+    # never forks) get the org's Blacksmith pool; a pull_request_target farm
+    # run and any fork or Dependabot PR stay on GitHub-hosted runners. This
+    # job reads no repository code and holds no secret value (see below), so
+    # Blacksmith sees nothing sensitive either way.
+    runs-on: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 5
     outputs:
       enabled: ${{ steps.decide.outputs.enabled }}
       mode: ${{ steps.decide.outputs.mode }}
+      tier: ${{ steps.decide.outputs.tier }}
     steps:
       # The expressions' == is case-insensitive (RBE_WEST_WORKERS=True counts).
       # A push, merge_group or dispatch has no pull_request, so FORK is false.
+      # Fork and Dependabot pull_request runs see no secrets and no vars: for
+      # them rbe-west decides (rbe-fork-mint's status: open, and the tier from
+      # the PR's author and this run's triggering actor). Its answer is the
+      # whole run's mode; every lane then gets its own certificate
+      # (setup-bazel, BAZEL_FORK_REMOTE) and fails if the tier changed. A
+      # mint that is closed, refuses or cannot be reached leaves mode cache,
+      # as before rbe-fork.
       - name: Decide remote execution
         id: decide
         env:
           RBE_VAR_ON: ${{ vars.RBE_WEST_WORKERS == 'true' }}
           RBE_INPUT_OFF: ${{ inputs.rbe == 'off' }}
+          RBE_INPUT_CACHE: ${{ inputs.rbe == 'cache' }}
+          PULL_REQUEST: ${{ github.event_name == 'pull_request' }}
           FORK: ${{ github.event.pull_request.head.repo.fork == true }}
+          DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
+          FORK_FARM: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' && inputs.checkout-sha != '' }}
           HAS_EXECUTOR: ${{ secrets.RBE_WEST_EXECUTOR != '' }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          for v in RBE_VAR_ON RBE_INPUT_OFF FORK HAS_EXECUTOR; do
+          for v in RBE_VAR_ON RBE_INPUT_OFF RBE_INPUT_CACHE PULL_REQUEST FORK DEPENDABOT FORK_FARM HAS_EXECUTOR; do
             case "${!v}" in
               true|false) ;;
               *) echo "::error::$v is '${!v}', want true or false"; exit 1 ;;
             esac
           done
-          if [ "$RBE_INPUT_OFF" = true ] || [ "$FORK" = true ]; then
+          # A fork or Dependabot pull_request run executes remotely only with
+          # rbe-fork's certificate (mint open for this run), else locally with
+          # the read-only cache. Any other fork run (pull_request_target)
+          # stays local unless bazel-farm.yml authorized it; an authorized
+          # fork run is remote or nothing (pr.yml's call already runs it).
+          tier=
+          if [ "$RBE_INPUT_OFF" = true ]; then
             mode=local
+          elif [ "$RBE_INPUT_CACHE" = true ]; then
+            mode=cache
+          elif [ "$PULL_REQUEST" = true ] && { [ "$FORK" = true ] || [ "$DEPENDABOT" = true ]; }; then
+            [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,8}$ ]] || { echo "::error::PR number '$PR_NUMBER'"; exit 1; }
+            url="https://rbe-mint.ops.gascity.com:8444/v1/status?repo=${GITHUB_REPOSITORY#*/}&run=$GITHUB_RUN_ID&attempt=$GITHUB_RUN_ATTEMPT&pr=$PR_NUMBER"
+            st=$(curl -sS --connect-timeout 5 --max-time 30 --retry 3 --retry-all-errors "$url" || echo '{}')
+            tier=$(jq -r 'if .open == true then .tier else "" end' <<<"$st" 2>/dev/null || true)
+            case "$tier" in
+              ro|rw) mode="fork-$tier" ;;
+              *)
+                tier=
+                mode=cache
+                echo "::warning title=rbe-fork closed for this run::$(jq -r '.reason // .error // "rbe-fork-mint unreachable"' <<<"$st" 2>/dev/null || echo unreachable)"
+                ;;
+            esac
+          elif [ "$FORK" = true ] && [ "$FORK_FARM" != true ]; then
+            mode=cache
           elif [ "$RBE_VAR_ON" != true ]; then
             mode=skip
           elif [ "$HAS_EXECUTOR" = true ]; then
             mode=remote
+          elif [ "$FORK_FARM" = true ]; then
+            mode=skip
           else
-            mode=local
+            mode=cache
           fi
           enabled=false
-          if [ "$mode" = remote ]; then enabled=true; fi
-          echo "mode=$mode" >> "$GITHUB_OUTPUT"
-          echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
-          echo "Bazel execution mode: **$mode** (RBE_WEST_WORKERS on: $RBE_VAR_ON, rbe=off: $RBE_INPUT_OFF, fork: $FORK, executor secret: $HAS_EXECUTOR)" | tee -a "$GITHUB_STEP_SUMMARY"
+          case "$mode" in remote|fork-ro|fork-rw) enabled=true ;; esac
+          {
+            echo "mode=$mode"
+            echo "enabled=$enabled"
+            echo "tier=$tier"
+          } >> "$GITHUB_OUTPUT"
+          echo "Bazel execution mode: **$mode** (RBE_WEST_WORKERS on: $RBE_VAR_ON, rbe=off: $RBE_INPUT_OFF, rbe=cache: $RBE_INPUT_CACHE, fork: $FORK, dependabot: $DEPENDABOT, fork farm: $FORK_FARM, executor secret: $HAS_EXECUTOR)" | tee -a "$GITHUB_STEP_SUMMARY"
 
   bazel-test:
     name: test
     # Remote-execution runs use the org's Blacksmith pool (the farm's edge
-    # admits it; GitHub-hosted runners are refused) and do not count against
-    # GitHub's concurrent-job cap. Local runs (forks, rbe=off, no secrets)
-    # build everything on the runner, so they get the larger GitHub-hosted
-    # one.
+    # admits any runner holding the client certificate; there is no IP
+    # allowlist) and do not count against GitHub's concurrent-job cap. Local
+    # and cache runs (forks, rbe=off/cache, no secrets) build everything
+    # they miss on the runner, so they get the larger GitHub-hosted one.
+    # Fork modes (fork-ro/fork-rw) execute remotely but stay GitHub-hosted,
+    # like every fork job: the runner is only a client.
     needs: rbe
-    runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     # Remote execution goes to rbe-west (instance "oss", the Blacksmith-backed
     # worker pool shared with gascity). Skipped only in mode skip (same-repo
     # runs while RBE_WEST_WORKERS is unset).
@@ -250,8 +402,24 @@ jobs:
     timeout-minutes: 100
     outputs:
       result: ${{ steps.result.outputs.result }}
+    env:
+      # D2 step 3: on covered PRs (always mode remote) this lane is the only
+      # pre-merge run of pr.yml's legacy PR Core job, which ran every test
+      # every time and never retried: --config=sole-run then executes every
+      # test (no cached results) and fails on a remote cache eviction
+      # instead of re-running the whole invocation. Fork modes do the same
+      # (with BAZEL_COVERS_FORKS "true" it is their only run too). Local and
+      # cache runs (the legacy jobs still run) keep cached results.
+      BAZEL_SOLE_RUN: ${{ needs.rbe.outputs.enabled == 'true' && '--config=sole-run' || '' }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      # inputs.checkout-sha: see the header (empty: the event's default ref).
+      # checkout v7 refuses a fork head on pull_request_target unless opted
+      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout-sha }}
+          persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       # Go is for tools/bazel/equivalence.py's `go list` and for make; Bazel
       # uses its own hermetic SDK.
@@ -270,15 +438,24 @@ jobs:
           key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
+      # Go does not re-hash extracted module directories on use; a restored
+      # cache written by an untrusted run is checked against go.sum first.
+      - name: Verify restored Go modules
+        run: go mod verify
+
       - name: Set up Bazel
         id: bazel
         uses: ./.github/actions/setup-bazel
         env:
-          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_WEST_EXECUTOR || '' }}
-          RBE_TLS_CERT: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CERT || '' }}
-          RBE_TLS_KEY: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_KEY || '' }}
-          RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
-          RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+          BAZEL_FORK_REMOTE: ${{ startsWith(needs.rbe.outputs.mode, 'fork-') && 'true' || '' }}
+          RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
+          RBE_FORK_PR: ${{ github.event.pull_request.number }}
 
       # T1: remote + restored repository cache; T2: remote, cold runner; local:
       # no remote execution (reported, never budgeted).
@@ -308,7 +485,7 @@ jobs:
           set -o pipefail
           start=$(date +%s)
           rc=0
-          bazel test //... --config=ci \
+          bazel test //... --config=ci ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} \
             --profile="$RUNNER_TEMP/bazel-profile.json" \
             --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
             2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
@@ -317,10 +494,12 @@ jobs:
           exit "$rc"
 
       # pr.yml's build-artifacts job, built by Bazel: the same artifact name
-      # and layout (bd-linux-gms-pure, SHA256SUMS, build-manifest.txt), so its
-      # consumers (PR Core, domain+uow, the package gates) can switch to it.
-      # None does yet. The script documents which binary and how it differs
-      # from `go build`'s.
+      # and layout (bd-linux-gms-pure, SHA256SUMS, build-manifest.txt). Where
+      # build-artifacts stands down (D2 step 3), its other consumers (PR
+      # Core, domain+uow) stand down there too. F3: the package gates build
+      # their own bd and no longer consume this artifact; it is kept for the
+      # F3.5.3 SHA256SUMS comparison and for debugging. The script documents
+      # which binary and how it differs from `go build`'s.
       - name: Package bd (ci-build-artifacts layout)
         id: bd-artifact
         if: ${{ always() && steps.test.outcome != 'skipped' }}
@@ -330,6 +509,7 @@ jobs:
         if: ${{ always() && steps.bd-artifact.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          overwrite: true # a job re-run is the same run: replace, not 409
           name: ${{ inputs.build-artifact-name || 'ci-build-artifacts' }}
           path: ${{ runner.temp }}/bd-artifacts/
           retention-days: 1
@@ -406,10 +586,14 @@ jobs:
           exit "$check"
 
       # Data only: bazel-autofix.yml validates every path before applying it.
+      # Not from bazel-farm.yml's pull_request_target runs: autofix reads only
+      # "PR" runs, and a trusted-fork run publishes nothing meant for a
+      # privileged consumer.
       - name: Upload BUILD sync patch
-        if: ${{ always() && steps.sync.outcome == 'failure' }}
+        if: ${{ always() && steps.sync.outcome == 'failure' && github.event_name != 'pull_request_target' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-sync-patch
           path: ${{ runner.temp }}/bazel-sync-patch/
           if-no-files-found: ignore
@@ -419,6 +603,7 @@ jobs:
         if: ${{ failure() && steps.test.outcome == 'failure' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-testlogs
           path: |
             bazel-testlogs/**/test.log
@@ -427,7 +612,7 @@ jobs:
           retention-days: 7
 
       # Only a push to main that missed the exact key writes the runner cache.
-      # Its content (--repository_cache and Bazelisk's download, never the rc
+      # Its content (--repository_cache only, never the rc
       # or credentials) is fixed by .bazelversion and MODULE.bazel.lock, so one
       # entry per lock is enough and later pushes do not churn the quota.
       - name: Save Bazel runner cache
@@ -435,7 +620,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bazel-ci-cache
-          key: bazel-repo-v2-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}
+          key: bazel-repo-v3-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}
 
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
@@ -458,15 +643,30 @@ jobs:
     name: pure-Go and js/wasm
     # Same runner and skip rule as bazel-test.
     needs: rbe
-    runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.mode != 'skip' }}
     timeout-minutes: 90
     outputs:
       result: ${{ steps.result.outputs.result }}
     env:
       PURE_CMD_BD_TESTS: '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir|NocgoFactoriesHonorSharedServer|NocgoNewDoltStoreFromConfig_ErrorSuggestsCorrectFlag|NocgoNewReadOnlyStoreFromConfig_ErrorSuggestsCorrectFlag)'
+      # D2 step 3: on covered PRs (always mode remote) this lane is the only
+      # pre-merge run of pr.yml's legacy pure-Go and js/wasm job, which ran every test
+      # every time and never retried: --config=sole-run then executes every
+      # test (no cached results) and fails on a remote cache eviction
+      # instead of re-running the whole invocation. Fork modes do the same
+      # (with BAZEL_COVERS_FORKS "true" it is their only run too). Local and
+      # cache runs (the legacy jobs still run) keep cached results.
+      BAZEL_SOLE_RUN: ${{ needs.rbe.outputs.enabled == 'true' && '--config=sole-run' || '' }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      # inputs.checkout-sha: see the header (empty: the event's default ref).
+      # checkout v7 refuses a fork head on pull_request_target unless opted
+      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout-sha }}
+          persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       # Only for go_js_wasm_exec and wasm_exec_node.js, which must match the
       # Go version Bazel compiles with (go.mod's; policy-tested).
@@ -485,11 +685,15 @@ jobs:
         id: bazel
         uses: ./.github/actions/setup-bazel
         env:
-          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_WEST_EXECUTOR || '' }}
-          RBE_TLS_CERT: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CERT || '' }}
-          RBE_TLS_KEY: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_KEY || '' }}
-          RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
-          RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+          BAZEL_FORK_REMOTE: ${{ startsWith(needs.rbe.outputs.mode, 'fork-') && 'true' || '' }}
+          RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
+          RBE_FORK_PR: ${{ github.event.pull_request.number }}
 
       - name: Run js/wasm hook boundary
         run: |
@@ -551,7 +755,7 @@ jobs:
         run: |
           set -euo pipefail
           bazel run --config=pure //cmd/bd:bd -- version
-          bazel test --config=pure \
+          bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} \
             //internal/storage/embeddeddolt:embeddeddolt_test \
             //internal/tracker:tracker_test \
             --test_sharding_strategy=disabled \
@@ -563,7 +767,7 @@ jobs:
       - name: Run pure-Go cmd/bd test subset (--config=pure)
         run: |
           set -euo pipefail
-          bazel test --config=pure //cmd/bd:bd_test \
+          bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} //cmd/bd:bd_test \
             --test_sharding_strategy=disabled \
             "--test_arg=-test.run=$PURE_CMD_BD_TESTS"
           n="$(grep -c '<testcase ' bazel-testlogs/cmd/bd/bd_test/test.xml || true)"
@@ -591,31 +795,58 @@ jobs:
   # does not (same race configuration, shared through the remote cache).
   bazel-embedded:
     name: embedded Dolt tier
-    # Remote execution only: skipped unless the rbe job chose remote (no
-    # fork, rbe=off or secret-less run). Locally the tier is 27 race test
+    # Remote execution only: skipped unless the rbe job chose remote,
+    # fork-ro or fork-rw (enabled; not in modes cache, local or skip).
+    # Locally the tier is 27 race test
     # processes (~7-10k test-seconds) on one runner, an hour or more per run
     # on the pool whose job cap this track exists to relieve, and it proves
     # nothing pr-risk.yml's embedded jobs (which do run for forks) do not.
-    # The runs-on expression is the shared one and always picks the
-    # Blacksmith runner under this if.
+    # On same-repo pull_requests those jobs stand down (pr-risk.yml's
+    # bazel-coverage), so this lane is then the tier's only PR run
+    # and pr.yml's gate requires it to have run here and passed.
+    # The runs-on expression is the shared one: Blacksmith in mode remote,
+    # GitHub-hosted in the fork modes (a client only).
     needs: rbe
-    runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.enabled == 'true' }}
     timeout-minutes: 60
     outputs:
       result: ${{ steps.result.outputs.result }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      # inputs.checkout-sha: see the header (empty: the event's default ref).
+      # checkout v7 refuses a fork head on pull_request_target unless opted
+      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout-sha }}
+          persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       - name: Set up Bazel
         id: bazel
         uses: ./.github/actions/setup-bazel
         env:
-          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_WEST_EXECUTOR || '' }}
-          RBE_TLS_CERT: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CERT || '' }}
-          RBE_TLS_KEY: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_KEY || '' }}
-          RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
-          RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+          BAZEL_FORK_REMOTE: ${{ startsWith(needs.rbe.outputs.mode, 'fork-') && 'true' || '' }}
+          RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
+          RBE_FORK_PR: ${{ github.event.pull_request.number }}
+
+      # Bazel retries a flaky = True test (up to three attempts) and reports a
+      # later pass as PASSED. The policy test greps BUILD files for it; this
+      # asks Bazel itself, so a macro or a variable cannot hide one. Cheap:
+      # loading only, with the repository cache the test step needs anyway.
+      - name: No test target is marked flaky
+        run: |
+          flaky="$(bazel query 'attr(flaky, 1, tests(//...))')"
+          if [ -n "$flaky" ]; then
+            echo "::error::flaky = True on ${flaky//$'\n'/ }: the gated lanes run each test once"
+            exit 1
+          fi
 
       # --build_event_json_file is a command option, so it goes after `test`.
       - name: bazel test //... --config=embedded
@@ -638,10 +869,29 @@ jobs:
         if: ${{ always() && steps.test.outcome != 'skipped' }}
         run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
 
+      # Since D2 step 1 this lane is the tier's only pre-merge run on
+      # same-repo PRs. The shard scripts discover tests from source, but each
+      # Bazel binary holds only its target's srcs: a listed test the binary
+      # lacks matches nothing and passes silently. Fail unless every Bazel
+      # shard ran exactly the tests its script lists (list-only mode, cheap),
+      # and unless every shard and conformance partition ran at least one
+      # top-level test that was not skipped (an injected -test.short or
+      # BEADS_TEST_SKIP turns the tier into t.Skip calls).
+      - name: Every listed test ran in its shard
+        if: ${{ always() && steps.test.outcome != 'skipped' }}
+        run: >-
+          python3 tools/bazel/check_shard_coverage.py
+          --bep "$RUNNER_TEMP/bazel-bep.json"
+          --suite //cmd/bd:bd_embedded_test .github/scripts/embedded-test-shard.sh 20
+          --suite //internal/storage/embeddeddolt:embeddeddolt_embedded_test .github/scripts/embedded-storage-test-shard.sh 5
+          --whole //internal/storage/embeddeddolt:embeddeddolt_conformance_core_test
+          --whole //internal/storage/embeddeddolt:embeddeddolt_conformance_audit_test
+
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-embedded-testlogs
           path: |
             bazel-testlogs/**/test.log
@@ -670,37 +920,60 @@ jobs:
   # selection (go list without the integration tag, -short, ^TestEmbedded
   # skipped), and its job mode needs the integration jobs' go test -json,
   # which no run here has. check_testcases.py still catches a target or
-  # shard that ran no tests.
+  # shard that ran no tests. pr.yml's gate requires it (BAZEL_INTEGRATION)
+  # on same-repo PRs; see the header.
   bazel-integration:
-    name: integration (advisory)
-    # Remote execution only, like bazel-embedded: locally the tagged race
-    # build of //... plus 14 jobs' worth of tests on one runner is well over
-    # the timeout, for tests main.yml's integration jobs already run. Off in
-    # pr.yml's call (integration: "off"), as those jobs are off on PRs.
+    name: integration
+    # Remote (modes remote, fork-ro, fork-rw), or local with the read-only
+    # cache (mode cache: fork and Dependabot PRs while rbe-fork is closed,
+    # rbe=cache dispatches), which serves every action
+    # trusted CI already ran, so only what the PR changed builds and tests
+    # on the GitHub-hosted runner. Never plain local (rbe=off): the tagged
+    # race build of //... plus 14 jobs' worth of tests on one runner, cold.
+    # A caller may turn it off with integration: "off"; pr.yml and
+    # bazel-farm.yml pass "on".
     needs: rbe
-    runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    if: ${{ needs.rbe.outputs.enabled == 'true' && inputs.integration != 'off' }}
-    timeout-minutes: 40
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    if: ${{ (needs.rbe.outputs.enabled == 'true' || needs.rbe.outputs.mode == 'cache') && inputs.integration != 'off' }}
+    timeout-minutes: 85
     outputs:
       result: ${{ steps.result.outputs.result }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      # inputs.checkout-sha: see the header (empty: the event's default ref).
+      # checkout v7 refuses a fork head on pull_request_target unless opted
+      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout-sha }}
+          persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       - name: Set up Bazel
         id: bazel
         uses: ./.github/actions/setup-bazel
         env:
-          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_WEST_EXECUTOR || '' }}
-          RBE_TLS_CERT: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CERT || '' }}
-          RBE_TLS_KEY: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_KEY || '' }}
-          RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
-          RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+          BAZEL_FORK_REMOTE: ${{ startsWith(needs.rbe.outputs.mode, 'fork-') && 'true' || '' }}
+          RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
+          RBE_FORK_PR: ${{ github.event.pull_request.number }}
 
-      # Remote: a cold compile plus the longest test action (1200s cap, see
-      # .bazelrc) fits well inside 30 minutes.
+      # Remote: a cold compile (a PR touching a widely imported package; the
+      # first cold run took 17 minutes end to end, warm ones ~3.5) plus the
+      # longest test action (1200s cap, see .bazelrc) if it starts last.
+      # scripts/ci_workflow_test.go keeps this at or above that sum. Mode
+      # cache on a 4-CPU runner (simulated, 2026-10-02): ~2.5 minutes warm,
+      # 3-5 for a cmd/bd change, plus up to ~11 more when slow blob reads
+      # make Bazel restart the build ("Lost inputs"), and ~30 with the cache
+      # closed (the farm's kill switch: everything local, cold), which must
+      # still fit so closing the cache does not turn fork PRs red.
       - name: bazel test //... --config=integration
         id: test
-        timeout-minutes: 30
+        timeout-minutes: 75
         run: |
           set -o pipefail
           start=$(date +%s)
@@ -722,6 +995,7 @@ jobs:
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-integration-testlogs
           path: |
             bazel-testlogs/**/test.log
@@ -729,8 +1003,9 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      # Last step: the job's result as a workflow_call output (for
-      # symmetry; pr.yml's call turns this lane off).
+      # Last step: the job's result as a workflow_call output for pr.yml's
+      # ci-gate. always() runs it after a failure, a timeout or a
+      # cancellation too.
       - name: Record job result
         id: result
         if: ${{ always() }}
@@ -750,25 +1025,44 @@ jobs:
     name: dolt-server lane
     # Same runner and skip rule as bazel-test.
     needs: rbe
-    runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.mode != 'skip' }}
     timeout-minutes: 90
     outputs:
       result: ${{ steps.result.outputs.result }}
     env:
       BAZEL_DOLT_LANE: ${{ inputs.dolt-lane || 'doltserver' }}
+      # D2 step 3: on covered PRs (always mode remote) this lane is the only
+      # pre-merge run of pr.yml's legacy domain+uow and contract corpus jobs, which ran every test
+      # every time and never retried: --config=sole-run then executes every
+      # test (no cached results) and fails on a remote cache eviction
+      # instead of re-running the whole invocation. Fork modes do the same
+      # (with BAZEL_COVERS_FORKS "true" it is their only run too). Local and
+      # cache runs (the legacy jobs still run) keep cached results.
+      BAZEL_SOLE_RUN: ${{ needs.rbe.outputs.enabled == 'true' && '--config=sole-run' || '' }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      # inputs.checkout-sha: see the header (empty: the event's default ref).
+      # checkout v7 refuses a fork head on pull_request_target unless opted
+      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout-sha }}
+          persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       - name: Set up Bazel
         id: bazel
         uses: ./.github/actions/setup-bazel
         env:
-          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_WEST_EXECUTOR || '' }}
-          RBE_TLS_CERT: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CERT || '' }}
-          RBE_TLS_KEY: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_KEY || '' }}
-          RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
-          RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+          BAZEL_FORK_REMOTE: ${{ startsWith(needs.rbe.outputs.mode, 'fork-') && 'true' || '' }}
+          RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
+          RBE_FORK_PR: ${{ github.event.pull_request.number }}
 
       # Docker lane only (the A/B control), as in the mirrored jobs; its
       # tests fail rather than skip without the image.
@@ -783,7 +1077,7 @@ jobs:
           set -o pipefail
           start=$(date +%s)
           rc=0
-          bazel test //... "--config=$BAZEL_DOLT_LANE" 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
+          bazel test //... "--config=$BAZEL_DOLT_LANE" ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
           echo "bazel test --config=$BAZEL_DOLT_LANE: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
@@ -791,6 +1085,7 @@ jobs:
         if: ${{ failure() && steps.test.outcome == 'failure' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-${{ env.BAZEL_DOLT_LANE }}-testlogs
           path: |
             bazel-testlogs/**/test.log
@@ -808,41 +1103,99 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
 
-  # pr-risk.yml's proxied-server tier, "Test (Proxied Dolt Cmd N/15)", as
-  # --config=doltserver-proxied: //cmd/bd:bd_proxied_test runs the job's
-  # shard script in 15 Bazel shards, so shard k runs exactly job k's tests.
-  # Same build as --config=doltserver (race bd_test, non-race bd_for_tests),
-  # shared with bazel-doltserver through the remote cache. PR Risk builds
-  # its bd-cmd-test with -race, as here; main.yml's test-proxied-cmd twin
-  # uses build-artifacts' non-race bd-cmd-test, so this lane is the stricter
-  # of the two. A job of its own, not gated by any integration switch: it
-  # runs in pr.yml's call and its gate requires it (BAZEL_PROXIED).
+  # Like pr-risk.yml's proxied-server tier, "Test (Proxied Dolt Cmd N/15)",
+  # as --config=doltserver-proxied: //cmd/bd:bd_proxied_test runs the shard
+  # script, so shard k runs exactly that manifest entry's tests. This lane
+  # runs 30 shards of its own (.github/scripts/proxied-cmd-test-shards.txt's
+  # duration-balanced 30-block; see scripts/ci/proxied_test_durations.json),
+  # not the legacy jobs' 15 — shard k here is not the same split as their
+  # shard k. Same build as --config=doltserver (race bd_test, non-race
+  # bd_for_tests), shared with bazel-doltserver through the remote cache.
+  # PR Risk builds its bd-cmd-test with -race, as here; main.yml's
+  # test-proxied-cmd twin uses build-artifacts' non-race bd-cmd-test, so
+  # this lane is the stricter of the two. A job of its own, not gated by
+  # any integration switch: it runs in pr.yml's call and its gate requires
+  # it (BAZEL_PROXIED).
   bazel-proxied:
     name: proxied-server tier
-    # Remote execution only, like bazel-embedded: 15 shards of ~5-10
-    # minutes, each with a dolt sql-server busy on ~4 cores, do not fit a
-    # GitHub-hosted runner.
+    # Remote execution only, like bazel-embedded: 30 concurrent shards, each
+    # running its own dolt sql-server busy on ~4 cores, do not fit a
+    # GitHub-hosted runner regardless of any single shard's wall time.
+    # On same-repo pull_requests the legacy jobs stand down (pr-risk.yml's
+    # bazel-coverage; D2 step 2), so this lane is then the tier's only PR
+    # run and pr.yml's gate requires it to have run here and passed.
     needs: rbe
-    runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.enabled == 'true' }}
     timeout-minutes: 30
     outputs:
       result: ${{ steps.result.outputs.result }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      # inputs.checkout-sha: see the header (empty: the event's default ref).
+      # checkout v7 refuses a fork head on pull_request_target unless opted
+      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout-sha }}
+          persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       - name: Set up Bazel
         id: bazel
         uses: ./.github/actions/setup-bazel
         env:
-          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_WEST_EXECUTOR || '' }}
-          RBE_TLS_CERT: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CERT || '' }}
-          RBE_TLS_KEY: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_KEY || '' }}
-          RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
-          RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+          BAZEL_FORK_REMOTE: ${{ startsWith(needs.rbe.outputs.mode, 'fork-') && 'true' || '' }}
+          RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
+          RBE_FORK_PR: ${{ github.event.pull_request.number }}
 
-      # Remote: the longest shard takes ~5-8 minutes (each shard's Go
-      # timeout is its job's 15m, 1200s Bazel cap), plus a compile.
+      # Bazel retries a flaky = True test (up to three attempts) and reports a
+      # later pass as PASSED. The policy test greps BUILD files for it; this
+      # asks Bazel itself, so a macro or a variable cannot hide one. Cheap:
+      # loading only, with the repository cache the test step needs anyway.
+      - name: No test target is marked flaky
+        run: |
+          flaky="$(bazel query 'attr(flaky, 1, tests(//...))')"
+          if [ -n "$flaky" ]; then
+            echo "::error::flaky = True on ${flaky//$'\n'/ }: the gated lanes run each test once"
+            exit 1
+          fi
+
+      # Remote: each shard's Go timeout is its job's 15m, 1200s Bazel cap,
+      # plus a compile. scripts/ci/proxied_test_durations.json's 176 entries
+      # are each a clean, single-job (no concurrent heavy bazel/dolt job
+      # intentionally started on the box; see that file's header for its
+      # ambient-contention caveat), -test.parallel=4 top-level-test
+      # duration — the exact config this job uses — from a single fresh,
+      # manifest-aligned 30-shard sweep's own <testsuite time> (errors="0",
+      # so a failing-but-complete suite's time is still trustworthy); every
+      # one of the 176 discovered tests completed inside its shard run, so
+      # no `bazel run` leaf-summation workaround was needed this time. See
+      # that file's header for the full methodology, including why an
+      # earlier -test.parallel=1 (serial) capture was replaced: serial
+      # timings don't model this lane (which always runs parallel=4), and
+      # an independent re-review measured near-zero correlation (r=0.08)
+      # between the serial-derived predicted shard load and actual
+      # parallel=4 wall time.
+      #
+      # Measured per-shard wall time for the full 30-shard local sweep that
+      # produced this data: shards ranged from roughly 32s to 341s, with
+      # most clustering well under this job's 25m step timeout / 30m job
+      # timeout. After repacking with these corrected weights, the LPT
+      # estimate clusters every shard within a few seconds of ~355-360s
+      # (sum of all 176 measured durations / 30 shards) — no single test or
+      # small group of tests dominates a shard the way the discarded serial
+      # data wrongly implied. This is a local, single-job measurement, not
+      # a verified RBE forecast (this job has only ever run remote); if a
+      # shard's RBE wall time diverges sharply from this local estimate,
+      # that is RBE throughput differing from local execution, not
+      # necessarily a regression — compare against this job's own recent
+      # run history before assuming a hang.
       - name: bazel test //... --config=doltserver-proxied
         id: test
         timeout-minutes: 25
@@ -861,10 +1214,21 @@ jobs:
         if: ${{ always() && steps.test.outcome != 'skipped' }}
         run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
 
+      # Since D2 step 2 this lane is the tier's only pre-merge run on
+      # same-repo PRs: as in bazel-embedded, every Bazel shard must run
+      # exactly the tests its shard script lists, and not only skips.
+      - name: Every listed test ran in its shard
+        if: ${{ always() && steps.test.outcome != 'skipped' }}
+        run: >-
+          python3 tools/bazel/check_shard_coverage.py
+          --bep "$RUNNER_TEMP/bazel-bep.json"
+          --suite //cmd/bd:bd_proxied_test .github/scripts/proxied-test-shard.sh 30
+
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-proxied-testlogs
           path: |
             bazel-testlogs/**/test.log
@@ -896,24 +1260,50 @@ jobs:
     name: server-Dolt storage tier
     # Remote execution only, like bazel-integration: locally the tagged race
     # build of //... alone is most of the timeout.
+    # On same-repo pull_requests the legacy jobs stand down (pr-risk.yml's
+    # bazel-coverage; D2 step 2), so this lane is then the tier's only PR
+    # run and pr.yml's gate requires it to have run here and passed.
     needs: rbe
-    runs-on: ${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.enabled == 'true' }}
     timeout-minutes: 30
     outputs:
       result: ${{ steps.result.outputs.result }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+      # inputs.checkout-sha: see the header (empty: the event's default ref).
+      # checkout v7 refuses a fork head on pull_request_target unless opted
+      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout-sha }}
+          persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       - name: Set up Bazel
         id: bazel
         uses: ./.github/actions/setup-bazel
         env:
-          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_WEST_EXECUTOR || '' }}
-          RBE_TLS_CERT: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CERT || '' }}
-          RBE_TLS_KEY: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_KEY || '' }}
-          RBE_TLS_CA: ${{ needs.rbe.outputs.enabled == 'true' && secrets.RBE_TLS_CA || '' }}
-          RBE_INSTANCE: ${{ needs.rbe.outputs.enabled == 'true' && 'oss' || '' }}
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+          BAZEL_FORK_REMOTE: ${{ startsWith(needs.rbe.outputs.mode, 'fork-') && 'true' || '' }}
+          RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
+          RBE_FORK_PR: ${{ github.event.pull_request.number }}
+
+      # Bazel retries a flaky = True test (up to three attempts) and reports a
+      # later pass as PASSED. The policy test greps BUILD files for it; this
+      # asks Bazel itself, so a macro or a variable cannot hide one. Cheap:
+      # loading only, with the repository cache the test step needs anyway.
+      - name: No test target is marked flaky
+        run: |
+          flaky="$(bazel query 'attr(flaky, 1, tests(//...))')"
+          if [ -n "$flaky" ]; then
+            echo "::error::flaky = True on ${flaky//$'\n'/ }: the gated lanes run each test once"
+            exit 1
+          fi
 
       # Remote: the longest shard takes ~2-3 minutes (the storage suite's Go
       # timeout is 15m per shard, 1200s Bazel cap), plus a compile.
@@ -935,10 +1325,23 @@ jobs:
         if: ${{ always() && steps.test.outcome != 'skipped' }}
         run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
 
+      # Since D2 step 2 this lane is the tier's only pre-merge run on
+      # same-repo PRs: as in bazel-embedded, every full-suite shard must run
+      # exactly the tests its shard script lists, and neither it nor the
+      # conformance target only skips.
+      - name: Every listed test ran in its shard
+        if: ${{ always() && steps.test.outcome != 'skipped' }}
+        run: >-
+          python3 tools/bazel/check_shard_coverage.py
+          --bep "$RUNNER_TEMP/bazel-bep.json"
+          --suite //internal/storage/dolt:dolt_server_full_test .github/scripts/server-storage-test-shard.sh 16
+          --whole //internal/storage/dolt:dolt_server_conformance_test
+
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          overwrite: true # a job re-run is the same run: replace, not 409
           name: bazel-server-storage-testlogs
           path: |
             bazel-testlogs/**/test.log
@@ -949,6 +1352,249 @@ jobs:
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
       # cancellation too.
+      - name: Record job result
+        id: result
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
+
+  # F3: moved here from pr.yml so the gate depends on nothing but the rbe
+  # job's decision (not detect-package-gates, build-artifacts, bazel-coverage
+  # or the whole bazel call). Only pr.yml opts in (package-gates: "on");
+  # bazel-farm.yml and nightly.yml keep the default "off" and this job does
+  # not run for them. Same-repo PRs get a Bazel-built bd (no --config=ci:
+  # only test:ci is defined in .bazelrc, so bazel build //cmd/bd:bd_for_tests
+  # is run directly); forks, Dependabot (whatever rbe-fork says: these gates
+  # take no fork certificate) and rbe-off/skip/cache runs fall back to
+  # `go build`, same as package-mcp.sh's own prepare_bd_binary() does when
+  # BEADS_TEST_BD_BINARY is unset. Hence mode == 'remote' below, not enabled
+  # (the fork modes are enabled too).
+  package-mcp:
+    name: Package Gate (MCP)
+    needs: rbe
+    # 4 vCPU on purpose: pytest-xdist -n 8 measured ~2.7-3x on 4 CPUs
+    # (tools/f3 timing, 2026-10), well past 2 vCPU's ceiling.
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    if: ${{ inputs.package-gates == 'on' }}
+    timeout-minutes: 30
+    outputs:
+      result: ${{ steps.result.outputs.result }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
+
+      - name: Decide applicability
+        id: detect
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_AFTER_SHA: ${{ github.sha }}
+        run: ./scripts/ci/detect-package-gates.sh
+
+      - name: Set up Bazel
+        id: bazel
+        if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.mode == 'remote' }}
+        uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+
+      # No --config=ci: only test:ci is defined in .bazelrc, and `bazel
+      # build --config=foo` fails when only test:foo exists. The explicit
+      # --@rules_go//go/config:race matches test:ci's top-level build
+      # setting (test:ci -> test:prcore), so bd_for_tests' race="off"
+      # transition lands in the same k8-fastbuild-ST-... output directory
+      # and action-cache key `bazel test --config=ci` already populated,
+      # instead of plain k8-fastbuild's; race itself still builds a non-race
+      # bd (verified with cquery: both configs cquery to the identical
+      # bazel-out/k8-fastbuild-ST-.../bin/cmd/bd/bd_for_tests/bd path).
+      - name: bazel build //cmd/bd:bd_for_tests
+        if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.mode == 'remote' }}
+        run: bazel build --@rules_go//go/config:race //cmd/bd:bd_for_tests --remote_download_regex='.*/bin/cmd/bd/bd_for_tests/bd$'
+
+      - name: Package the Bazel-built bd
+        if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.mode == 'remote' }}
+        run: |
+          ./scripts/ci/package-bazel-bd.sh "$RUNNER_TEMP/bd-artifacts"
+          echo "BEADS_TEST_BD_BINARY=$RUNNER_TEMP/bd-artifacts/bd-linux-gms-pure" >> "$GITHUB_ENV"
+          # Defense in depth: nothing after this step needs the Bazel server
+          # or its RBE client key (uv sync and pytest run PR-controlled
+          # code). Shutting down also frees the JVM's memory for the 8
+          # xdist workers that follow on this 4 vCPU runner.
+          bazel shutdown
+          rm -rf "$RUNNER_TEMP/bazel-ci-secret"
+
+      - name: Set up Go
+        id: setup-go
+        if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.mode != 'remote' }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.mode != 'remote' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Verify Go modules
+        if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.mode != 'remote' }}
+        run: go mod verify
+
+      - name: Restore non-race Go build cache
+        if: ${{ steps.detect.outputs.mcp_package == 'true' && needs.rbe.outputs.mode != 'remote' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
+
+      - name: Set up Python
+        if: ${{ steps.detect.outputs.mcp_package == 'true' }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Install uv
+        if: ${{ steps.detect.outputs.mcp_package == 'true' }}
+        run: python -m pip install uv==0.11.16
+
+      - name: Run MCP package gate
+        if: ${{ steps.detect.outputs.mcp_package == 'true' }}
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
+        run: make ci-package-mcp
+
+      # Last step: the job's result as a workflow_call output for pr.yml's
+      # ci-gate. always() runs it after a failure, a timeout or a
+      # cancellation too; package-gates == 'on' is the only skip condition
+      # (the job itself), so PACKAGE_MCP is never "skipped" on pr.yml.
+      - name: Record job result
+        id: result
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
+
+  # F3: npm's twin of package-mcp above. Structurally identical apart from
+  # the language setup (Node instead of Python/uv) and the `make` target.
+  package-npm:
+    name: Package Gate (npm)
+    needs: rbe
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    if: ${{ inputs.package-gates == 'on' }}
+    timeout-minutes: 30
+    outputs:
+      result: ${{ steps.result.outputs.result }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
+
+      - name: Decide applicability
+        id: detect
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_AFTER_SHA: ${{ github.sha }}
+        run: ./scripts/ci/detect-package-gates.sh
+
+      - name: Set up Bazel
+        id: bazel
+        if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.mode == 'remote' }}
+        uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+
+      # No --config=ci: only test:ci is defined in .bazelrc, and `bazel
+      # build --config=foo` fails when only test:foo exists. The explicit
+      # --@rules_go//go/config:race matches test:ci's top-level build
+      # setting (test:ci -> test:prcore), so bd_for_tests' race="off"
+      # transition lands in the same k8-fastbuild-ST-... output directory
+      # and action-cache key `bazel test --config=ci` already populated,
+      # instead of plain k8-fastbuild's; race itself still builds a non-race
+      # bd (verified with cquery: both configs cquery to the identical
+      # bazel-out/k8-fastbuild-ST-.../bin/cmd/bd/bd_for_tests/bd path).
+      - name: bazel build //cmd/bd:bd_for_tests
+        if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.mode == 'remote' }}
+        run: bazel build --@rules_go//go/config:race //cmd/bd:bd_for_tests --remote_download_regex='.*/bin/cmd/bd/bd_for_tests/bd$'
+
+      - name: Package the Bazel-built bd
+        if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.mode == 'remote' }}
+        run: |
+          ./scripts/ci/package-bazel-bd.sh "$RUNNER_TEMP/bd-artifacts"
+          echo "BEADS_TEST_BD_BINARY=$RUNNER_TEMP/bd-artifacts/bd-linux-gms-pure" >> "$GITHUB_ENV"
+          # Defense in depth: nothing after this step needs the Bazel server
+          # or its RBE client key (npm install runs PR-controlled code).
+          bazel shutdown
+          rm -rf "$RUNNER_TEMP/bazel-ci-secret"
+
+      - name: Set up Go
+        id: setup-go
+        if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.mode != 'remote' }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.mode != 'remote' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Verify Go modules
+        if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.mode != 'remote' }}
+        run: go mod verify
+
+      - name: Restore non-race Go build cache
+        if: ${{ steps.detect.outputs.npm_package == 'true' && needs.rbe.outputs.mode != 'remote' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
+
+      - name: Set up Node.js
+        if: ${{ steps.detect.outputs.npm_package == 'true' }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: '24'
+
+      - name: Run npm package gate
+        if: ${{ steps.detect.outputs.npm_package == 'true' }}
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
+        run: make ci-package-npm
+
+      # Last step: the job's result as a workflow_call output for pr.yml's
+      # ci-gate. always() runs it after a failure, a timeout or a
+      # cancellation too; package-gates == 'on' is the only skip condition
+      # (the job itself), so PACKAGE_NPM is never "skipped" on pr.yml.
       - name: Record job result
         id: result
         if: ${{ always() }}

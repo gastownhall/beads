@@ -758,6 +758,76 @@ func TestStopNoStateFiles(t *testing.T) {
 	}
 }
 
+func TestStopWaitsForLifecycleLockWhenStopped(t *testing.T) {
+	dir := t.TempDir()
+	lockF, err := acquireLifecycleLock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- Stop(dir) }()
+	select {
+	case err := <-done:
+		releaseLifecycleLock(lockF)
+		t.Fatalf("Stop returned while lifecycle lock was held: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	releaseLifecycleLock(lockF)
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrServerNotRunning) {
+			t.Fatalf("Stop after lock release = %v, want ErrServerNotRunning", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not resume after lifecycle lock release")
+	}
+}
+
+func TestEnsureRunningDetailedWaitsForLifecycleLock(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+
+	dir := t.TempDir()
+	cfg := configfile.DefaultConfig()
+	cfg.Backend = configfile.BackendDolt
+	cfg.DoltMode = configfile.DoltModeServer
+	cfg.DoltServerPort = 1
+	if err := cfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	lockF, err := acquireLifecycleLock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := EnsureRunningDetailed(dir)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		releaseLifecycleLock(lockF)
+		t.Fatalf("EnsureRunningDetailed returned while lifecycle lock was held: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	releaseLifecycleLock(lockF)
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("EnsureRunningDetailed unexpectedly succeeded against disabled external server")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("EnsureRunningDetailed did not resume after lifecycle lock release")
+	}
+}
+
 // TestStopNotRunningWithCleanupError verifies that Stop returns both the
 // sentinel and cleanup errors when the server is not running but state
 // files can't be removed.
@@ -784,6 +854,31 @@ func TestStopNotRunningWithCleanupError(t *testing.T) {
 	remaining := IgnoreNotRunning(err)
 	if remaining == nil {
 		t.Error("expected cleanup error to be preserved, got nil")
+	}
+}
+
+func TestRestartPreservesStoppedCleanupError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod not effective on Windows")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(lockPath(dir), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pidPath(dir), []byte("999999999"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	_, err := Restart(dir)
+	if err == nil {
+		t.Fatal("Restart succeeded despite stale-state cleanup failure")
+	}
+	if !strings.Contains(err.Error(), "stopping Dolt server for restart") {
+		t.Fatalf("Restart error = %v, want preserved stop cleanup failure", err)
 	}
 }
 
@@ -1365,7 +1460,9 @@ func TestRecoverPreV56DoltDir(t *testing.T) {
 		if _, statErr := os.Stat(sentinel); !os.IsNotExist(statErr) {
 			t.Error("expected old .dolt/ contents to be removed during recovery")
 		}
-		t.Skipf("recovery partially completed (dolt init may have failed): %v", err)
+		// Same two causes as TestEnsureDoltInit_WritesMarker's skip: dolt
+		// absent, or no dolt identity under the redirected HOME.
+		t.Skipf("recovery partially completed (dolt not installed, or no dolt identity in HOME=%q): %v", os.Getenv("HOME"), err)
 	}
 	if !recovered {
 		t.Error("expected recovery to be performed")
@@ -1416,8 +1513,10 @@ func TestEnsureDoltInit_WritesMarker(t *testing.T) {
 	// ensureDoltInit should create .dolt/ and write the marker
 	err := ensureDoltInit(doltDir)
 	if err != nil {
-		// dolt might not be installed in test env; skip marker check
-		t.Skipf("dolt init failed (dolt may not be installed): %v", err)
+		// dolt is absent, or the environment has no dolt identity for it to
+		// author the init commit with. TestMain configures one inside the
+		// isolated HOME; see configureDoltIdentity in testmain_test.go.
+		t.Skipf("dolt init failed (dolt not installed, or no dolt identity in HOME=%q): %v", os.Getenv("HOME"), err)
 	}
 
 	markerPath := filepath.Join(doltDir, bdDoltMarker)
@@ -1564,6 +1663,145 @@ func TestDefaultConfig_SharedModeFixedPort(t *testing.T) {
 	cfg := DefaultConfig(dir)
 	if cfg.Port != DefaultSharedServerPort {
 		t.Errorf("shared mode: expected port %d (DefaultSharedServerPort), got %d", DefaultSharedServerPort, cfg.Port)
+	}
+}
+func TestIsSharedServerModeForDirPrecedence(t *testing.T) {
+	writeMode := func(t *testing.T, value string) string {
+		t.Helper()
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+			[]byte("dolt:\n  shared-server: "+value+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return beadsDir
+	}
+
+	t.Run("environment overrides target", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+		if !IsSharedServerModeForDir(writeMode(t, "false")) {
+			t.Fatal("BEADS_DOLT_SHARED_SERVER=1 must override target shared-server=false")
+		}
+	})
+
+	t.Run("target overrides active workspace", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+		// An inherited port env var makes any target external via check 2c,
+		// independent of its shared-server classification.
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", "")
+		activeDir := writeMode(t, "true")
+		targetDir := writeMode(t, "false")
+		t.Setenv("BEADS_DIR", activeDir)
+		config.ResetForTesting()
+		t.Cleanup(config.ResetForTesting)
+		if err := config.Initialize(); err != nil {
+			t.Fatal(err)
+		}
+		if IsSharedServerModeForDir(targetDir) {
+			t.Fatal("explicit target shared-server=false must override active workspace true")
+		}
+		if got := DefaultConfigForMode(targetDir, false).Mode; got != ServerModeOwned {
+			t.Fatalf("explicit non-shared target mode = %s, want owned despite active shared workspace", got)
+		}
+	})
+
+	t.Run("target true overrides active workspace", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+		activeDir := writeMode(t, "false")
+		targetDir := writeMode(t, "true")
+		t.Setenv("BEADS_DIR", activeDir)
+		config.ResetForTesting()
+		t.Cleanup(config.ResetForTesting)
+		if err := config.Initialize(); err != nil {
+			t.Fatal(err)
+		}
+		if !IsSharedServerModeForDir(targetDir) {
+			t.Fatal("explicit target shared-server=true must override active workspace false")
+		}
+		if got := DefaultConfigForMode(targetDir, true).Mode; got != ServerModeExternal {
+			t.Fatalf("explicit shared target mode = %s, want external despite active non-shared workspace", got)
+		}
+	})
+}
+
+func TestDefaultConfig_SharedRemotesAPIPortIsMachineGlobal(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("BEADS_SHARED_SERVER_DIR", filepath.Join(home, ".beads", "shared-server"))
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "")
+
+	projectBeads := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(projectBeads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projectCfg := configfile.DefaultConfig()
+	projectCfg.DoltRemotesAPIPort = 7001
+	if err := projectCfg.Save(projectBeads); err != nil {
+		t.Fatal(err)
+	}
+	if got := DefaultConfig(projectBeads).RemotesAPIPort; got != 0 {
+		t.Fatalf("shared remotesapi port = %d with no user-global value, want disabled 0 despite project metadata 7001", got)
+	}
+
+	if err := config.SetUserYamlConfig(remotesAPIPortConfigKey, "8001"); err != nil {
+		t.Fatal(err)
+	}
+	configPath, err := config.UserConfigYamlPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configBody, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := config.GetUserYamlConfig(remotesAPIPortConfigKey); got != "8001" {
+		t.Fatalf("user-global config %s contains %q but resolved remotesapi port = %q, want 8001", configPath, configBody, got)
+	}
+
+	if got := DefaultConfig(projectBeads).RemotesAPIPort; got != 8001 {
+		t.Fatalf("shared remotesapi port = %d, want user-global 8001 (project metadata must not skew one shared process)", got)
+	}
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "not-a-port")
+	if got := DefaultConfig(projectBeads).RemotesAPIPort; got != 8001 {
+		t.Fatalf("malformed env resolved remotesapi port = %d, want persisted 8001", got)
+	}
+
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "9001")
+	if got := DefaultConfig(projectBeads).RemotesAPIPort; got != 9001 {
+		t.Fatalf("shared remotesapi port = %d, want env override 9001", got)
+	}
+
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "0")
+	if got := DefaultConfig(projectBeads).RemotesAPIPort; got != 0 {
+		t.Fatalf("shared remotesapi port = %d, want explicit env disable 0", got)
+	}
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "")
+	if err := config.SetUserYamlConfig(remotesAPIPortConfigKey, "0"); err != nil {
+		t.Fatal(err)
+	}
+	if got := DefaultConfig(projectBeads).RemotesAPIPort; got != 0 {
+		t.Fatalf("persisted shared remotesapi port = %d, want explicit disable 0", got)
+	}
+}
+
+func TestDefaultConfig_RemotesAPIPortDisabledByDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", "")
+
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := DefaultConfig(beadsDir).RemotesAPIPort; got != 0 {
+		t.Fatalf("unconfigured remotesapi port = %d, want disabled 0", got)
 	}
 }
 
@@ -2081,7 +2319,7 @@ func TestBuildDoltServerArgs(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			args := buildDoltServerArgs(tc.host, tc.port, false, "")
+			args := buildDoltServerArgs(tc.host, tc.port, 0, false, "")
 
 			if len(args) == 0 || args[0] != "sql-server" {
 				t.Fatalf("args[0] = %q, want %q; full args: %v",
@@ -2104,6 +2342,9 @@ func TestBuildDoltServerArgs(t *testing.T) {
 			}
 			if got := args[portIdx+1]; got != tc.wantPort {
 				t.Errorf("port = %q, want %q", got, tc.wantPort)
+			}
+			if indexOf(args, "--remotesapi-port") >= 0 {
+				t.Errorf("disabled remotesapi must not add a flag: %v", args)
 			}
 
 			// --loglevel=<level> — the actual fix.
@@ -2140,7 +2381,7 @@ func TestBuildDoltServerArgs(t *testing.T) {
 // runMain). Placing --prof after sql-server silently drops profiling.
 func TestBuildDoltServerArgs_DebugMode(t *testing.T) {
 	const profDir = "/tmp/test-pprof"
-	args := buildDoltServerArgs("127.0.0.1", 3308, true, profDir)
+	args := buildDoltServerArgs("127.0.0.1", 3308, 0, true, profDir)
 
 	// --prof and --prof-path must precede sql-server.
 	subIdx := indexOf(args, "sql-server")
@@ -2187,7 +2428,7 @@ func TestBuildDoltServerArgs_DebugMode(t *testing.T) {
 // The warning loglevel floor is also reasserted here so a future
 // refactor can't silently degrade only the non-debug path.
 func TestBuildDoltServerArgs_NoDebugFlagsWhenDisabled(t *testing.T) {
-	args := buildDoltServerArgs("127.0.0.1", 3308, false, "")
+	args := buildDoltServerArgs("127.0.0.1", 3308, 0, false, "")
 	if indexOf(args, "--prof") >= 0 {
 		t.Errorf("non-debug args should not contain --prof: %v", args)
 	}
@@ -2203,6 +2444,42 @@ func TestBuildDoltServerArgs_NoDebugFlagsWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestBuildDoltServerArgs_RemotesAPI(t *testing.T) {
+	args := buildDoltServerArgs("127.0.0.1", 3308, 8081, false, "")
+	idx := indexOf(args, "--remotesapi-port")
+	if idx < 0 || idx+1 >= len(args) || args[idx+1] != "8081" {
+		t.Fatalf("configured remotesapi flag missing or wrong: %v", args)
+	}
+}
+
+func TestVerifyRemotesAPIState(t *testing.T) {
+	if _, err := verifyRemotesAPIState(
+		&Config{RemotesAPIPort: 3308},
+		&State{Running: true, PID: 41, Port: 3308},
+	); err == nil || !strings.Contains(err.Error(), "distinct") {
+		t.Fatalf("equal SQL/remotesapi verification = %v, want distinct-port error", err)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	state := &State{Running: true, PID: 42, Port: 3308}
+	got, err := verifyRemotesAPIState(&Config{RemotesAPIPort: port}, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RemotesAPIPort != port {
+		t.Fatalf("state remotesapi port = %d, want %d", got.RemotesAPIPort, port)
+	}
+	_ = listener.Close()
+	if _, err := verifyRemotesAPIState(&Config{RemotesAPIPort: port}, state); err == nil ||
+		!strings.Contains(err.Error(), "bd dolt stop && bd dolt start") {
+		t.Fatalf("unreachable remotesapi verification = %v, want stop/start-required error", err)
+	}
+}
+
 // TestBuildDoltServerYAMLConfig verifies the --config counterpart to
 // buildDoltServerArgs: it must round-trip through Dolt's own YAML loader
 // with the same host/port/log-level as the CLI-flag form, plus
@@ -2211,7 +2488,7 @@ func TestBuildDoltServerArgs_NoDebugFlagsWhenDisabled(t *testing.T) {
 // caller-resolved value (gastownhall/beads#4986 round 2: --config mode
 // skips Dolt's own .doltcfg discovery, so this must be set explicitly).
 func TestBuildDoltServerYAMLConfig(t *testing.T) {
-	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, false, "/tmp/some/.doltcfg")
+	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, 8081, false, "/tmp/some/.doltcfg")
 	if err != nil {
 		t.Fatalf("buildDoltServerYAMLConfig: %v", err)
 	}
@@ -2226,6 +2503,10 @@ func TestBuildDoltServerYAMLConfig(t *testing.T) {
 	if got := cfg.Port(); got != 54321 {
 		t.Errorf("Port = %d, want %d", got, 54321)
 	}
+	if got := cfg.RemotesapiPort(); got == nil || *got != 8081 {
+		t.Errorf("RemotesapiPort = %v, want 8081", got)
+	}
+
 	if got := string(cfg.LogLevel()); got != doltServerLogLevel {
 		t.Errorf("LogLevel = %q, want %q", got, doltServerLogLevel)
 	}
@@ -2249,7 +2530,7 @@ func TestBuildDoltServerYAMLConfig(t *testing.T) {
 // YAML config's log level the same way buildDoltServerArgs does for the
 // CLI-flag form.
 func TestBuildDoltServerYAMLConfig_DebugLogLevel(t *testing.T) {
-	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, true, "/tmp/some/.doltcfg")
+	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, 0, true, "/tmp/some/.doltcfg")
 	if err != nil {
 		t.Fatalf("buildDoltServerYAMLConfig: %v", err)
 	}

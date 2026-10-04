@@ -129,6 +129,7 @@ go_test(
         "dependency_editor_contract_test.go",
         "dependency_editor_version_history_test.go",
         "dependents_records_test.go",
+        "descendants_test.go",
         "detection_test.go",
         "dirty_tables_gate_test.go",
         "dualwrite_history_contract_test.go",
@@ -157,6 +158,7 @@ go_test(
         "journal_truncation_test.go",
         "label_list_all_benchmark_test.go",
         "label_rename_test.go",
+        "large_batch_apply_measure_test.go",
         "lease_replica_test.go",
         "lease_test.go",
         "lenient_gate_warning_test.go",
@@ -176,6 +178,7 @@ go_test(
         "migrate_journal_shape_repair_test.go",
         "migrate_repair_atomicity_test.go",
         "migrate_selfheal_test.go",
+        "migrate_temp_intermediates_test.go",
         "migrate_wisp_dep_forward_repair_test.go",
         "new_methods_test.go",
         "open_test.go",
@@ -184,7 +187,10 @@ go_test(
         "promote_no_history_test.go",
         "pull_config_wedge_test.go",
         "pull_settle_test.go",
+        "push_commit_pending_test.go",
         "querier_contract_test.go",
+        "race_detector_off_test.go",
+        "race_detector_on_test.go",
         "reader_contract_test.go",
         "ready_claimer_contract_test.go",
         "ready_counter_contract_test.go",
@@ -225,6 +231,7 @@ go_test(
         "//internal/eventsjournal",
         "//internal/hooks",
         "//internal/storage",
+        "//internal/storage/batchfixtures",
         "//internal/storage/dberrors",
         "//internal/storage/depid",
         "//internal/storage/doltutil",
@@ -232,15 +239,18 @@ go_test(
         "//internal/storage/externaldeps",
         "//internal/storage/issueops",
         "//internal/storage/schema",
+        "//internal/storage/sqlcount",
         "//internal/storage/storagecontract",
         "//internal/storage/versioncontrolops",
         "//internal/testutil/bazeltest",
         "//internal/types",
         "//internal/workapi",
         "//issueops",
+        "@com_github_cenkalti_backoff_v4//:backoff",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
         "@com_github_dolthub_dolt_go//libraries/doltcore/dbfactory",
         "@com_github_dolthub_dolt_go//store/blobstore",
+        "@com_github_dolthub_driver_v2//:driver",
         "@com_github_google_uuid//:uuid",
         "@org_golang_x_sync//errgroup",
     ],
@@ -259,15 +269,18 @@ go_test(
 sh_test(
     name = "embeddeddolt_embedded_test",
     size = "large",
-    # The script gives the binary the job's -test.timeout=15m per shard; it
-    # fires (with a goroutine dump) well before Bazel's 1200s action limit
-    # (eternal under --config=embedded). The job itself also stops at 15m.
+    # The script gives the binary the job's -test.timeout=20m, as long as
+    # Bazel's 1200s action limit (eternal under --config=embedded), which
+    # starts earlier and kills without a goroutine dump (rules_go's wrapper
+    # ignores the SIGTERM). The trailing -test.timeout=19m overrides it (the
+    # last flag wins) so Go's own timeout fires first and dumps to test.log.
     timeout = "eternal",
     srcs = ["//tools/bazel:go_test_manifest_shard.sh"],
     args = [
         "$(rootpath //:.github/scripts/embedded-storage-test-shard.sh)",
         "BEADS_TEST_EMBEDDED_TEST_BINARY",
         "$(rootpath :embeddeddolt_test)",
+        "-test.timeout=19m",
     ],
     data = [
         ":embeddeddolt_test",

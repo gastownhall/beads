@@ -51,7 +51,7 @@ How bd-issue-tracking integrates with TodoWrite, writing-plans, and other skills
 
 **Corresponding bead notes (persistent context):**
 ```bash
-bd update issue-123 --notes "COMPLETED: Login endpoint with bcrypt password
+bd update issue-123 --append-notes "COMPLETED: Login endpoint with bcrypt password
 hashing (12 rounds). KEY DECISION: Using JWT tokens (not sessions) for stateless
 auth - simplifies horizontal scaling. IN PROGRESS: Session middleware implementation.
 NEXT: Need user input on token expiry time (1hr vs 24hr trade-off)."
@@ -105,7 +105,7 @@ TodoWrite:
 **End of Session 1**:
 ```bash
 # Update bd with outcomes
-bd update oauth-1 --notes "COMPLETED: Researched OAuth2 refresh flow. Decided on 7-day refresh tokens.
+bd update oauth-1 --append-notes "COMPLETED: Researched OAuth2 refresh flow. Decided on 7-day refresh tokens.
 KEY DECISION: RS256 over HS256 (enables key rotation per security review).
 IN PROGRESS: Need to set up test OAuth provider.
 NEXT: Configure test provider, then implement token endpoint."
@@ -128,7 +128,7 @@ TodoWrite:
 # Work proceeds...
 
 # Update bd at milestone
-bd update oauth-1 --notes "COMPLETED: Test provider configured, token endpoint implemented.
+bd update oauth-1 --append-notes "COMPLETED: Test provider configured, token endpoint implemented.
 TESTS: 5 passing (token generation, validation, expiry).
 IN PROGRESS: Adding refresh token rotation.
 NEXT: Implement rotation, add rate limiting, security review."
@@ -236,7 +236,7 @@ git commit -m "feat: add token refresh endpoint"
 
 **Example bd notes after using detailed plan:**
 ```bash
-bd update oauth-5 --notes "COMPLETED: Token refresh endpoint (5 tasks from plan: endpoint + rotation + tests)
+bd update oauth-5 --append-notes "COMPLETED: Token refresh endpoint (5 tasks from plan: endpoint + rotation + tests)
 KEY DECISION: 7-day refresh tokens (vs 30-day) - reduces risk of token theft
 TESTS: All 12 tests passing (auth, rotation, expiry, error handling)"
 ```
@@ -277,7 +277,7 @@ TESTS: All 12 tests passing (auth, rotation, expiry, error handling)"
 
 3. Update bd notes at milestones:
    ```bash
-   bd update strat-1 --notes "COMPLETED: Research phase (reviewed 5 competitor docs, 3 internal reports)
+   bd update strat-1 --append-notes "COMPLETED: Research phase (reviewed 5 competitor docs, 3 internal reports)
    KEY DECISION: Focus on market expansion over cost optimization per exec input
    IN PROGRESS: Drafting recommendations section
    NEXT: Get exec review of draft recommendations before finalizing"

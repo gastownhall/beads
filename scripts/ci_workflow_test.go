@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -37,7 +38,57 @@ func TestCIWorkflowArtifactOwnership(t *testing.T) {
 
 			assertJobRunsExactly(t, workflow.job(t, "pr-policy-wrapper"), "make ci-pr-policy")
 			assertJobRunsExactly(t, workflow.job(t, "pr-lint-wrapper"), "make ci-pr-lint")
+
+			// F5.1: the duplicate whole-tree/diff-scoped `Lint` job (and its
+			// LINT gate id, pr.yml only) is folded into pr-lint-wrapper.
+			if _, found := workflow.Jobs["lint"]; found {
+				t.Errorf("%s has a %q job; its only-new-issues pass duplicates pr-lint-wrapper's native leg (H7) and was folded into it", workflowName, "lint")
+			}
+
+			// F5.2: pr-lint-wrapper is a 3-leg matrix keyed on matrix.target,
+			// with BD_LINT_TARGETS telling scripts/pr-lint which legs to run.
+			lintWrapper := workflow.job(t, "pr-lint-wrapper")
+			if lintWrapper.Strategy.FailFast {
+				t.Errorf("%s pr-lint-wrapper strategy.fail-fast = true, want false", workflowName)
+			}
+			if want := []string{"native", "windows", "darwin"}; !equalStrings(lintWrapper.Strategy.Matrix.Target, want) {
+				t.Errorf("%s pr-lint-wrapper matrix.target = %v, want %v", workflowName, lintWrapper.Strategy.Matrix.Target, want)
+			}
+			if got := lintWrapper.step(t, "Run PR lint wrapper").Env["BD_LINT_TARGETS"]; got != "${{ matrix.target }}" {
+				t.Errorf("%s pr-lint-wrapper BD_LINT_TARGETS = %q, want %q", workflowName, got, "${{ matrix.target }}")
+			}
+			// N-5: a dropped GOCACHE env here silently stops the lint cache
+			// from doing anything (the step still passes; it just never
+			// reuses or populates the restored/saved directory).
+			if got, want := lintWrapper.step(t, "Run PR lint wrapper").Env["GOCACHE"], "${{ runner.temp }}/go-cache/lint-${{ matrix.target }}"; got != want {
+				t.Errorf("%s pr-lint-wrapper GOCACHE = %q, want %q", workflowName, got, want)
+			}
+			if got := lintWrapper.step(t, "Install golangci-lint").Run; got != "./scripts/ci/install-golangci-lint.sh" {
+				t.Errorf("%s pr-lint-wrapper installs golangci-lint with %q, want the pinned install script", workflowName, got)
+			}
+			// N-7.
+			if lintWrapper.TimeoutMinutes != 20 {
+				t.Errorf("%s pr-lint-wrapper timeout-minutes = %d, want 20 (matches scripts-go-checks)", workflowName, lintWrapper.TimeoutMinutes)
+			}
 		})
+	}
+
+	if got := readCIWorkflow(t, "pr.yml").job(t, "pr-lint-wrapper").step(t, "Run PR lint wrapper").Env["BD_LINT_NEW_FROM_MERGE_BASE"]; got != "origin/main" {
+		t.Errorf("pr.yml pr-lint-wrapper BD_LINT_NEW_FROM_MERGE_BASE = %q, want origin/main (PR lane stays diff-scoped)", got)
+	}
+	if got := readCIWorkflow(t, "main.yml").job(t, "pr-lint-wrapper").step(t, "Run PR lint wrapper").Env["BD_LINT_NEW_FROM_MERGE_BASE"]; got != "" {
+		t.Errorf("main.yml pr-lint-wrapper BD_LINT_NEW_FROM_MERGE_BASE = %q, want unset", got)
+	}
+	// N-5: --new-from-merge-base in pr.yml's pr-lint-wrapper needs real
+	// history; a dropped fetch-depth: 0 would fail loudly (M3, a NIT-grade
+	// mutation per the review), but pin it anyway since it is part of the
+	// same wrapper contract as the GOCACHE pin above.
+	if got := readCIWorkflow(t, "pr.yml").job(t, "pr-lint-wrapper").Steps[0].With["fetch-depth"]; got != "0" {
+		t.Errorf("pr.yml pr-lint-wrapper checkout fetch-depth = %q, want %q", got, "0")
+	}
+	// go-vet-cache (N-7).
+	if job := readCIWorkflow(t, "main.yml").job(t, "go-vet-cache"); job.TimeoutMinutes != 20 {
+		t.Errorf("main.yml go-vet-cache timeout-minutes = %d, want 20 (matches scripts-go-checks)", job.TimeoutMinutes)
 	}
 }
 
@@ -65,13 +116,376 @@ func TestPRCIGateRequiresPolicyAndLintWrappers(t *testing.T) {
 			t.Errorf("ci-gate CI_GATE_REQUIRED does not include %q", required)
 		}
 	}
+
+	// F5.1/F5.4: the deleted `lint` job's LINT id must not linger in the gate.
+	if contains(gate.Needs, "lint") {
+		t.Errorf("ci-gate needs %q, which no longer exists: %v", "lint", gate.Needs)
+	}
+	if contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), "LINT") {
+		t.Error("ci-gate CI_GATE_REQUIRED still includes LINT")
+	}
+	if _, found := gateEnv["LINT"]; found {
+		t.Error("ci-gate env still sets LINT")
+	}
+}
+
+// F5.2/F5.7: the pinned golangci-lint install script's version and sha256
+// values must stay in sync with LINTING.md's documented version and with
+// .githooks/pre-commit's `go run ...@<version>`, and the three workflows that
+// use the script (pr.yml, main.yml, ci-measurements.yml) must all call it
+// instead of `go install`.
+func TestGolangciLintInstallScriptPinned(t *testing.T) {
+	root := sourceRepoRoot(t)
+	script := readPolicyFile(t, root, "scripts/ci/install-golangci-lint.sh")
+
+	const version = "2.10.1"
+	wantSHA256 := map[string]string{
+		"amd64": "dfa775874cf0561b404a02a8f4481fc69b28091da95aa697259820d429b09c99",
+		"arm64": "6652b42ae02915eb2f9cb2a2e0cac99514c8eded8388d88ae3e06e1a52c00de8",
+	}
+
+	if !strings.Contains(script, `readonly version="`+version+`"`) {
+		t.Errorf("install-golangci-lint.sh does not pin version %q", version)
+	}
+	for arch, sha := range wantSHA256 {
+		if !strings.Contains(script, "["+arch+"]=\""+sha+"\"") {
+			t.Errorf("install-golangci-lint.sh does not pin %s sha256 %q", arch, sha)
+		}
+	}
+
+	linting := readPolicyFile(t, root, "engdocs/LINTING.md")
+	if !strings.Contains(linting, "v"+version) {
+		t.Errorf("engdocs/LINTING.md does not mention v%s", version)
+	}
+
+	preCommit := readPolicyFile(t, root, ".githooks/pre-commit")
+	if !strings.Contains(preCommit, "golangci-lint/v2/cmd/golangci-lint@v"+version) {
+		t.Errorf(".githooks/pre-commit does not pin golangci-lint @v%s", version)
+	}
+	// The hook stays on `go run` deliberately (CI-only RUNNER_TEMP/GITHUB_PATH
+	// requirement); it must not switch to the install script.
+	if strings.Contains(preCommit, "install-golangci-lint.sh") {
+		t.Error(".githooks/pre-commit must keep using `go run`, not the CI-only install script")
+	}
+
+	for _, workflow := range []string{"pr.yml", "main.yml"} {
+		job := readCIWorkflow(t, workflow).job(t, "pr-lint-wrapper")
+		if got := job.step(t, "Install golangci-lint").Run; got != "./scripts/ci/install-golangci-lint.sh" {
+			t.Errorf("%s pr-lint-wrapper installs golangci-lint with %q, want the pinned install script", workflow, got)
+		}
+	}
+	measurements := readPolicyFile(t, root, ".github/workflows/ci-measurements.yml")
+	if strings.Contains(measurements, "go install github.com/golangci/golangci-lint") {
+		t.Error("ci-measurements.yml still uses go install for golangci-lint; use scripts/ci/install-golangci-lint.sh")
+	}
+	if !strings.Contains(measurements, "install-golangci-lint.sh") {
+		t.Error("ci-measurements.yml does not call scripts/ci/install-golangci-lint.sh")
+	}
+
+	// SF-2: install-golangci-lint.sh and the "pr-lint wrapper" measurement run
+	// in the same shell block (not separate steps), so appending to
+	// $GITHUB_PATH (which only takes effect in later *steps*) is not enough;
+	// the script's install_dir must also be exported into this step's own
+	// PATH, after the install call and before the wrapper that needs it.
+	const (
+		installMarker = "install-golangci-lint.sh"
+		pathExport    = `export PATH="$RUNNER_TEMP/golangci-lint:$PATH"`
+		wrapperMarker = `ci_time "pr-lint wrapper"`
+	)
+	installIdx := strings.Index(measurements, installMarker)
+	pathIdx := strings.Index(measurements, pathExport)
+	wrapperIdx := strings.Index(measurements, wrapperMarker)
+	if pathIdx < 0 {
+		t.Errorf("ci-measurements.yml does not export golangci-lint's install dir onto PATH in the same step (want %q)", pathExport)
+	}
+	if installIdx < 0 || wrapperIdx < 0 {
+		t.Fatalf("ci-measurements.yml missing expected markers: install=%d wrapper=%d", installIdx, wrapperIdx)
+	}
+	if !(installIdx < pathIdx && pathIdx < wrapperIdx) {
+		t.Errorf("ci-measurements.yml PATH export must sit between the golangci-lint install (%d) and the pr-lint wrapper call (%d); got PATH export at %d", installIdx, wrapperIdx, pathIdx)
+	}
+}
+
+// TestInstallGolangciLintFailsClosedOnChecksumMismatch is the regression net
+// for install-golangci-lint.sh's supply-chain gate (SF-3). Without it, nothing
+// exercises the sha256 comparison's behavior -- TestGolangciLintInstallScriptPinned
+// above only pins the hash strings as text, so e.g. replacing the comparison
+// with an always-false condition passes every other test in this package. A
+// fake curl hands the script a tarball whose content never matches either
+// pinned hash; a fake tar makes extraction succeed anyway (so a bypassed check
+// is exposed cleanly as "installed the wrong thing", not masked by tar
+// choking on bad bytes), which is exactly the gap a real supply-chain attack
+// (a compromised release asset, a MITM'd download) would exploit if the
+// comparison were missing or broken.
+func TestInstallGolangciLintFailsClosedOnChecksumMismatch(t *testing.T) {
+	bash := requireHostTool(t, "bash")
+
+	bin := t.TempDir()
+	stateDir := t.TempDir()
+	runnerTemp := t.TempDir()
+	curlLog := filepath.Join(stateDir, "curl-calls")
+	tarLog := filepath.Join(stateDir, "tar-calls")
+	githubPath := filepath.Join(stateDir, "github-path")
+	for _, path := range []string{curlLog, tarLog, githubPath} {
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Writes fixed, wrong-checksum bytes to curl's -o target. Any download
+	// (first attempt or a retry) "succeeds" the same way, so the script
+	// reaches the sha256 comparison deterministically.
+	writeExecutable(t, filepath.Join(bin, "curl"), `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>"$GOLANGCI_INSTALL_CURL_LOG"
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-o" ]; then
+    out="$arg"
+  fi
+  prev="$arg"
+done
+if [ -n "$out" ]; then
+  printf 'not the real golangci-lint release asset\n' >"$out"
+fi
+`)
+	// Materializes a plausible-looking extracted binary unconditionally, the
+	// way a real tarball's contents would after a successful `tar -xzf`. The
+	// script's sha256 check -- not tar's own format validation -- must be
+	// what stands between this fake binary and $RUNNER_TEMP/golangci-lint.
+	writeExecutable(t, filepath.Join(bin, "tar"), `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>"$GOLANGCI_INSTALL_TAR_LOG"
+outdir=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-C" ]; then
+    outdir="$arg"
+  fi
+  prev="$arg"
+done
+mkdir -p "$outdir/golangci-lint-2.10.1-linux-amd64"
+cat >"$outdir/golangci-lint-2.10.1-linux-amd64/golangci-lint" <<'SCRIPT'
+#!/bin/sh
+printf 'golangci-lint has version 2.10.1 built from unknown\n'
+SCRIPT
+chmod +x "$outdir/golangci-lint-2.10.1-linux-amd64/golangci-lint"
+`)
+	// Pins the platform so the asset name, arch lookup and extracted layout
+	// are fixed regardless of the machine running the test.
+	writeExecutable(t, filepath.Join(bin, "uname"), `#!/bin/sh
+set -eu
+case "${1:-}" in
+  -m) printf 'x86_64\n' ;;
+  *) printf 'Linux\n' ;;
+esac
+`)
+
+	pathEnv := shellPathEnv()
+	binPath := shellPathUnderEnv(t, bash, bin, pathEnv)
+	statePath := shellPathUnderEnv(t, bash, stateDir, pathEnv)
+	commandPath := binPath + ":" + os.Getenv("PATH") + ":/usr/bin:/bin"
+	if runtime.GOOS == "windows" {
+		commandPath = binPath + ":/usr/bin:/bin"
+	}
+	root := sourceRepoRoot(t)
+	env := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"BEADS_TEST_COMMAND_PATH=" + commandPath,
+		"LC_ALL=C",
+		"LANG=C",
+		"BASH_ENV=",
+		"ENV=",
+		"RUNNER_TEMP=" + shellPathUnderEnv(t, bash, runnerTemp, pathEnv),
+		"GITHUB_PATH=" + statePath + "/github-path",
+		"GOLANGCI_INSTALL_CURL_LOG=" + statePath + "/curl-calls",
+		"GOLANGCI_INSTALL_TAR_LOG=" + statePath + "/tar-calls",
+	}
+	for _, name := range []string{"curl", "tar", "uname"} {
+		requireShellCommandPath(t, bash, root, env, name, binPath+"/"+name)
+	}
+
+	cmd := bashScriptCommand(bash, "scripts/ci/install-golangci-lint.sh")
+	cmd.Dir = root
+	cmd.Env = env
+	output, runErr := cmd.CombinedOutput()
+
+	if code := pullDoltExitCode(runErr); code == 0 {
+		t.Fatalf("exit = 0, want non-zero; output:\n%s", output)
+	}
+	if !strings.Contains(string(output), "sha256 mismatch") {
+		t.Errorf("output does not contain %q:\n%s", "sha256 mismatch", output)
+	}
+	if calls := readCallLines(t, tarLog); len(calls) != 0 {
+		t.Errorf("tar was invoked %d time(s), want 0 (the sha256 check must reject the download before extraction): %q", len(calls), calls)
+	}
+	if calls := readCallLines(t, curlLog); len(calls) == 0 {
+		t.Fatalf("curl was never invoked; test did not exercise the script's download path")
+	}
+	if entries, err := os.ReadDir(runnerTemp); err != nil {
+		t.Fatal(err)
+	} else if len(entries) != 0 {
+		t.Errorf("RUNNER_TEMP = %v, want empty (nothing installed on a checksum mismatch)", entries)
+	}
+	if data, err := os.ReadFile(githubPath); err != nil {
+		t.Fatal(err)
+	} else if len(data) != 0 {
+		t.Errorf("GITHUB_PATH = %q, want empty (nothing appended on a checksum mismatch)", data)
+	}
+}
+
+// TestPRCIGateRequiresReleaseTargetCrossCompilation pins the cross-compilation
+// check into the gate. Wiring a job into ci-gate takes three separate edits --
+// needs:, the CI_GATE_REQUIRED token list, and the CHECK_* env mapping -- and
+// the gate silently ignores a token that is missing any one of them. Every
+// other load-bearing check in this file is pinned by name for that reason.
+func TestPRCIGateRequiresReleaseTargetCrossCompilation(t *testing.T) {
+	const (
+		jobName = "check-release-target-cross-compilation"
+		token   = "CHECK_RELEASE_TARGET_CROSS_COMPILATION"
+	)
+
+	gate := readCIWorkflow(t, "pr.yml").job(t, "ci-gate")
+	gateEnv := gate.step(t, "Evaluate CI gate").Env
+
+	if !contains(gate.Needs, jobName) {
+		t.Errorf("ci-gate needs %q: %v", jobName, gate.Needs)
+	}
+	if got, want := gateEnv[token], "${{ needs."+jobName+".result }}"; got != want {
+		t.Errorf("ci-gate env %s = %q, want %q", token, got, want)
+	}
+	if !contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), token) {
+		t.Errorf("ci-gate CI_GATE_REQUIRED does not include %q", token)
+	}
+}
+
+// TestReleaseTargetCrossCompilationMatrixMatchesGoreleaser keeps
+// scripts/ci/release-targets.txt (F7a: the single source of truth for the
+// pr.yml cross-compilation job's two matrix legs, read by
+// scripts/ci/check-release-cross-compile.sh) and the set of shipped release
+// targets in lockstep. Without a guard a newly added release target -- the
+// way freebsd/amd64 once was -- is silently uncovered while a green "release
+// target cross-compilation" check still stands. That is worse than having no
+// check at all, because the check's existence implies the coverage it has
+// quietly lost.
+func TestReleaseTargetCrossCompilationMatrixMatchesGoreleaser(t *testing.T) {
+	const jobName = "check-release-target-cross-compilation"
+	const manifestPath = "scripts/ci/release-targets.txt"
+
+	// darwin/amd64 and darwin/arm64 are shipped release targets that are
+	// deliberately absent from .goreleaser.yml's builds: release.yml's
+	// goreleaser-macos job builds them natively at CGO_ENABLED=1 for embedded
+	// Dolt support, as .goreleaser.yml's own comment records.
+	want := map[string]string{
+		"darwin/amd64": "release.yml goreleaser-macos",
+		"darwin/arm64": "release.yml goreleaser-macos",
+	}
+	for _, build := range readGoreleaserBuilds(t) {
+		for _, goos := range build.GOOS {
+			for _, goarch := range build.GOARCH {
+				want[goos+"/"+goarch] = ".goreleaser.yml " + build.ID
+			}
+		}
+	}
+
+	// The job itself must still read the manifest, so a future rewrite of the
+	// job that stops threading matrix.group through to the script cannot pass
+	// silently.
+	job := readCIWorkflow(t, "pr.yml").job(t, jobName)
+	groups := append([]string(nil), job.Strategy.Matrix.Group...)
+	sort.Strings(groups)
+	if !reflect.DeepEqual(groups, []string{"desktop", "unix"}) {
+		t.Errorf("%s matrix groups = %v, want [desktop unix]", jobName, groups)
+	}
+	var ranScript bool
+	for _, step := range job.Steps {
+		if strings.Contains(step.Run, "check-release-cross-compile.sh ${{ matrix.group }}") {
+			ranScript = true
+		}
+	}
+	if !ranScript {
+		t.Errorf("%s does not run check-release-cross-compile.sh with matrix.group", jobName)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(sourceRepoRoot(t), manifestPath))
+	if err != nil {
+		t.Fatalf("read %s: %v", manifestPath, err)
+	}
+	got := make(map[string]bool)
+	seenGroups := make(map[string]bool)
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 3 {
+			t.Fatalf("%s: malformed row %q, want 'GOOS GOARCH GROUP'", manifestPath, line)
+		}
+		goos, goarch, group := fields[0], fields[1], fields[2]
+		if group != "unix" && group != "desktop" {
+			t.Fatalf("%s: row %q has unknown group %q", manifestPath, line, group)
+		}
+		seenGroups[group] = true
+		got[goos+"/"+goarch] = true
+	}
+	for _, g := range []string{"unix", "desktop"} {
+		if !seenGroups[g] {
+			t.Errorf("%s: no targets in group %q", manifestPath, g)
+		}
+	}
+
+	for target, source := range want {
+		if !got[target] {
+			t.Errorf("release target %s (%s) is not covered by %s", target, source, manifestPath)
+		}
+	}
+	for target := range got {
+		if _, ok := want[target]; !ok {
+			t.Errorf("%s lists %s, which is not a shipped release target", manifestPath, target)
+		}
+	}
+}
+
+type goreleaserBuild struct {
+	ID     string   `yaml:"id"`
+	GOOS   []string `yaml:"goos"`
+	GOARCH []string `yaml:"goarch"`
+	Env    []string `yaml:"env"`
+}
+
+func readGoreleaserBuilds(t *testing.T) []goreleaserBuild {
+	t.Helper()
+
+	path := filepath.Join(sourceRepoRoot(t), ".goreleaser.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var config struct {
+		Builds []goreleaserBuild `yaml:"builds"`
+	}
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	if len(config.Builds) == 0 {
+		t.Fatalf("%s declares no builds", path)
+	}
+	return config.Builds
 }
 
 func TestPRCoreRequiresExcludeReadPermissionCoverage(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "pr-core-wrapper")
-	if job.RunsOn != "ubuntu-latest" || job.If != "" || job.ContinueOnError {
+	// Its only condition is D2 step 3's stand-down, where Bazel's PR-core
+	// lane (required instead) runs the test with the same requirement.
+	if job.RunsOn != "ubuntu-latest" || job.If != prLaneLegacyIf || job.ContinueOnError {
 		t.Error("exclude permission coverage must remain in the required Linux PR Core job")
+	}
+	if !contains(bazelPRLaneRCLines["prcore"], "test:prcore --test_env=BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1") {
+		t.Error("Bazel's PR-core lane must require actual exclude read-permission coverage where PR Core stands down")
 	}
 	step := job.Steps[job.stepIndex(t, "Run PR core wrapper")]
 	if step.If != "" || (step.ContinueOnError != nil && step.ContinueOnError != false) || strings.TrimSpace(step.Run) != "make ci-pr-core" {
@@ -92,9 +506,14 @@ func TestPRCoreRequiresExcludeReadPermissionCoverage(t *testing.T) {
 
 func TestPRComplexityReportIsAdvisoryAndBestEffort(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
-	job := workflow.job(t, "complexity-report")
-	if job.RunsOn != "ubuntu-latest" || job.TimeoutMinutes != 0 || job.ContinueOnError {
-		t.Errorf("complexity job must have no job timeout/continue-on-error: runs-on=%q timeout=%d continue=%v", job.RunsOn, job.TimeoutMinutes, job.ContinueOnError)
+	job := workflow.job(t, "advisory-reports")
+	// F7a: advisory-reports (examples build + complexity) moved to a
+	// same-repo Blacksmith runner and gained a generous job-level timeout
+	// (TestSameRepoBlacksmithRunners requires one of every moved job) that is
+	// a backstop against a stuck runner, not a realistic ceiling - every
+	// step underneath still carries its own tight timeout/continue-on-error.
+	if job.RunsOn != sameRepoBlacksmith2vcpu || job.TimeoutMinutes != 60 || job.ContinueOnError {
+		t.Errorf("advisory-reports job must run on same-repo Blacksmith with a backstop timeout/no job continue-on-error: runs-on=%q timeout=%d continue=%v", job.RunsOn, job.TimeoutMinutes, job.ContinueOnError)
 	}
 	if contains(job.Needs, "ci-gate") {
 		t.Errorf("complexity report unexpectedly depends on ci-gate: %v", job.Needs)
@@ -118,7 +537,7 @@ func TestPRComplexityReportIsAdvisoryAndBestEffort(t *testing.T) {
 		t.Errorf("complexity annotation step missing always/warning contract: if=%q run=%q", annotate.If, annotate.Run)
 	}
 	gate := workflow.job(t, "ci-gate")
-	if contains(gate.Needs, "complexity-report") {
+	if contains(gate.Needs, "advisory-reports") {
 		t.Errorf("ci-gate must not require advisory complexity report: %v", gate.Needs)
 	}
 }
@@ -138,6 +557,11 @@ func TestPRWorkflowExercisesNativeUserConfigDiagnostics(t *testing.T) {
 		}
 	}
 	step := job.step(t, "Check native user config diagnostics")
+	// F7b review fix (S1): the Windows shard split this step's `if:` used to
+	// be gated on (matrix.shard == 1) was reverted (see pr-preflight-platforms'
+	// own comment in pr.yml) because it measurably failed to help: shard 2
+	// only ever held 15-25s of work while shard 1 stayed at 450-480s. The
+	// step is unconditional again, same as every OS's leg.
 	if step.If != "" || step.Shell != "bash" || step.Env["CGO_ENABLED"] != "0" ||
 		(step.ContinueOnError != nil && step.ContinueOnError != false) {
 		t.Fatalf("native diagnostic step is conditional, optional, or uses the wrong host: %+v", step)
@@ -153,14 +577,59 @@ func TestPRWorkflowExercisesNativeUserConfigDiagnostics(t *testing.T) {
 	}
 }
 
+func TestPRWorkflowRequiresNativeInitGatewayCredential(t *testing.T) {
+	const (
+		jobName     = "pr-preflight-platforms"
+		stepCommand = `bash scripts/ci/test-init-gateway-credential.sh "$RUNNER_OS"`
+		gateKey     = "PR_PREFLIGHT_PLATFORMS"
+	)
+
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, jobName)
+	if job.RunsOn != sameRepoPlatformsMatrixMarkerRunsOn || !equalStrings(matrixIncludeHosts(job.Strategy.Matrix.Include), []string{"macos-latest", "ubuntu-latest", "windows-latest"}) {
+		t.Errorf("credential shell boundary requires the native three-host matrix: runner=%q include=%v", job.RunsOn, job.Strategy.Matrix.Include)
+	}
+	if job.If != "" || job.ContinueOnError {
+		t.Errorf("credential process job is bypassable: if=%q continue-on-error=%v", job.If, job.ContinueOnError)
+	}
+	matchingSteps := 0
+	for _, step := range job.Steps {
+		if strings.TrimSpace(step.Run) != stepCommand {
+			continue
+		}
+		matchingSteps++
+		if step.Shell != "bash" || step.Env["RUNNER_OS"] != "" {
+			t.Errorf("credential driver needs Bash and the native runner OS: shell=%q env=%v", step.Shell, step.Env)
+		}
+		// F7b review fix (S1): common to all three hosts; the shard split this
+		// step's `if:` used to be gated on (matrix.shard == 1) was reverted
+		// (see pr-preflight-platforms' own comment in pr.yml), so the step
+		// is unconditional again.
+		if step.If != "" || (step.ContinueOnError != nil && step.ContinueOnError != false) {
+			t.Errorf("gateway credential step is bypassable: if=%q continue-on-error=%v", step.If, step.ContinueOnError)
+		}
+	}
+	if matchingSteps != 1 {
+		t.Fatalf("native preflight job has %d gateway credential commands, want 1", matchingSteps)
+	}
+
+	gate := workflow.job(t, "ci-gate")
+	gateEnv := gate.step(t, "Evaluate CI gate").Env
+	if !contains(gate.Needs, jobName) || gateEnv[gateKey] != "${{ needs.pr-preflight-platforms.result }}" ||
+		!contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), gateKey) {
+		t.Errorf("ci-gate does not require the native credential process lane: needs=%v %s=%q required=%q",
+			gate.Needs, gateKey, gateEnv[gateKey], gateEnv["CI_GATE_REQUIRED"])
+	}
+}
+
 func TestPRWorkflowExercisesWindowsBenchmarkEnvScrubbing(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "pr-preflight-platforms")
 
-	if job.RunsOn != "${{ matrix.os }}" {
-		t.Errorf("pr-preflight-platforms runs-on = %q, want matrix.os", job.RunsOn)
+	if job.RunsOn != sameRepoPlatformsMatrixMarkerRunsOn {
+		t.Errorf("pr-preflight-platforms runs-on = %q, want the matrix-marker chained ternary", job.RunsOn)
 	}
-	if got := job.Strategy.Matrix.OS; !equalStrings(got, []string{"ubuntu-latest", "macos-latest", "windows-latest"}) {
+	if got := matrixIncludeHosts(job.Strategy.Matrix.Include); !equalStrings(got, []string{"macos-latest", "ubuntu-latest", "windows-latest"}) {
 		t.Errorf("pr-preflight-platforms matrix os = %v, want required three-host matrix", got)
 	}
 	if job.If != "" {
@@ -171,6 +640,7 @@ func TestPRWorkflowExercisesWindowsBenchmarkEnvScrubbing(t *testing.T) {
 	}
 
 	step := job.step(t, "Check benchmark environment scrubbing")
+	// F7b: this step is Windows-only.
 	if step.If != "matrix.os == 'windows-latest'" {
 		t.Errorf("benchmark environment scrubbing selector = %q, want native Windows only", step.If)
 	}
@@ -206,6 +676,7 @@ func TestPRWorkflowExercisesWindowsEnvironmentHelpers(t *testing.T) {
 	// The benchmark test owns this shared job's matrix and CI Gate propagation.
 	job := workflow.job(t, "pr-preflight-platforms")
 	step := job.step(t, "Check shared environment key semantics")
+	// F7b: Windows-only, alongside the other windows-only steps.
 	if step.If != "matrix.os == 'windows-latest'" || step.Shell != "bash" {
 		t.Errorf("environment helpers need native Windows Bash: if=%q shell=%q", step.If, step.Shell)
 	}
@@ -214,6 +685,57 @@ func TestPRWorkflowExercisesWindowsEnvironmentHelpers(t *testing.T) {
 	}
 	if got := strings.TrimSpace(step.Run); got != "bash scripts/ci/test-windows-env-helpers.sh" {
 		t.Errorf("environment helper entrypoint = %q", got)
+	}
+}
+
+func TestPRPreflightPlatformsExercisesCredentialCommandFixturesOnWindows(t *testing.T) {
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, "pr-preflight-platforms")
+	step := job.step(t, "Exercise credential command fixtures on Windows")
+
+	// F7b: Windows-only, alongside the other windows-only steps.
+	if step.If != "matrix.os == 'windows-latest'" {
+		t.Errorf("credential command fixture selector = %q, want native Windows only", step.If)
+	}
+	if step.Shell != "pwsh" {
+		t.Errorf("credential command fixture shell = %q, want PowerShell", step.Shell)
+	}
+	if step.ContinueOnError != nil && step.ContinueOnError != false {
+		t.Error("credential command fixture step may not continue on error")
+	}
+	if got := step.Env["CGO_ENABLED"]; got != "0" {
+		t.Errorf("credential command fixture CGO_ENABLED = %q, want 0", got)
+	}
+	// Pin the step's assertions, not just its wiring. Pinning only the packages
+	// and one test name left a required gate whose sole surviving guarantee was
+	// "go test exited 0" — which a fully skipped suite also satisfies. Dropping
+	// six of the nine names from $expected, deleting the fail/skip throw, or
+	// deleting the exactly-one-PASS loop all kept this test green. Every name
+	// below is a test the Windows job must actually observe passing, so a
+	// selector that narrows silently now fails here; widen the two together.
+	for _, required := range []string{
+		"internal/testutil/credentialcmd", "TestProtocol",
+		"internal/creds",
+		"TestCommandSourceRealShell", "TestCredentialCommandFixtureProtocol",
+		"internal/storage/dolt",
+		"TestApplyGatewayCredentialCommand", "TestApplyGatewayCredentialJSONEnvelope",
+		"TestApplyGatewayCredentialFailsClosed", "TestApplyGatewayCredentialPresetWins",
+		"TestApplyGatewayCredentialRejectsBadCharToken", "TestApplyResolvedConfigGatewayCredential",
+		// The two load-bearing guards inside the step body.
+		"'fail', 'skip'", "Expected one PASS",
+	} {
+		if !strings.Contains(step.Run, required) {
+			t.Errorf("credential command fixture step omits %q", required)
+		}
+	}
+
+	gate := workflow.job(t, "ci-gate")
+	gateEnv := gate.step(t, "Evaluate CI gate").Env
+	if !contains(gate.Needs, "pr-preflight-platforms") ||
+		gateEnv["PR_PREFLIGHT_PLATFORMS"] != "${{ needs.pr-preflight-platforms.result }}" ||
+		!contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), "PR_PREFLIGHT_PLATFORMS") {
+		t.Errorf("credential command fixture job is not required by ci-gate: needs=%v result=%q required=%q",
+			gate.Needs, gateEnv["PR_PREFLIGHT_PLATFORMS"], gateEnv["CI_GATE_REQUIRED"])
 	}
 }
 
@@ -233,11 +755,19 @@ func TestPRCIGateRequiresWindowsGlobalPrimeOverride(t *testing.T) {
 		t.Fatal("native Windows gate must execute the global Prime override fixture")
 	}
 	gate := workflow.job(t, "ci-gate")
-	env := gate.step(t, "Evaluate CI gate").Env
+	evaluate := gate.step(t, "Evaluate CI gate")
+	env := evaluate.Env
+	// F4 side-by-side rollout (SF-5): TEST_WINDOWS_LIVENESS is no longer in
+	// the static CI_GATE_REQUIRED list -- the WINDOWS_PREBUILT_REQUIRED flag
+	// mechanism (TestWindowsPrebuiltRequiredFlagMechanism,
+	// scripts/windows_test_binaries_manifest_test.go) adds it dynamically in
+	// the run script, required by default (flag "false"). Check that default
+	// wiring here instead of the old static list membership.
 	if !contains(gate.Needs, "test-windows-liveness") ||
 		env["TEST_WINDOWS_LIVENESS"] != "${{ needs.test-windows-liveness.result }}" ||
-		!contains(strings.Fields(env["CI_GATE_REQUIRED"]), "TEST_WINDOWS_LIVENESS") {
-		t.Fatal("CI gate must require the native Windows result")
+		workflow.Env["WINDOWS_PREBUILT_REQUIRED"] != "false" ||
+		!strings.Contains(evaluate.Run, `CI_GATE_REQUIRED="$CI_GATE_REQUIRED TEST_WINDOWS_LIVENESS WORKTREE_REMOVE_WINDOWS"`) {
+		t.Fatal("CI gate must require the native Windows result by default (WINDOWS_PREBUILT_REQUIRED=\"false\")")
 	}
 }
 
@@ -247,7 +777,10 @@ func TestPRCIGateRequiresJSWasmHookExecution(t *testing.T) {
 	if job.RunsOn != "ubuntu-latest" {
 		t.Errorf("js/wasm hook job runs-on = %q, want ubuntu-latest", job.RunsOn)
 	}
-	if job.If != "" {
+	// Only D2 step 3's stand-down, where Bazel's pure-Go and js/wasm lane
+	// (TestBazelPureJobMirrorsPureGoJob) is required instead
+	// (TestPRLegacyLanesDeferToBazelLanes).
+	if job.If != prLaneLegacyIf {
 		t.Errorf("js/wasm hook job is conditional: %q", job.If)
 	}
 
@@ -324,13 +857,16 @@ func TestPRCIGateRequiresGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, jobName)
-	if job.RunsOn != "${{ matrix.os }}" || !equalStrings(job.Strategy.Matrix.OS, []string{"ubuntu-latest", "macos-latest", "windows-latest"}) {
-		t.Errorf("generated-hook process job is not the required three-host matrix: runs-on=%q os=%v", job.RunsOn, job.Strategy.Matrix.OS)
+	if job.RunsOn != sameRepoPlatformsMatrixMarkerRunsOn || !equalStrings(matrixIncludeHosts(job.Strategy.Matrix.Include), []string{"macos-latest", "ubuntu-latest", "windows-latest"}) {
+		t.Errorf("generated-hook process job is not the required three-host matrix: runs-on=%q include=%v", job.RunsOn, job.Strategy.Matrix.Include)
 	}
 	if job.TimeoutMinutes != 20 {
 		t.Errorf("generated-hook process job timeout = %d minutes, want 20", job.TimeoutMinutes)
 	}
 	step := job.step(t, stepName)
+	// F7b review fix (S1): common to all three hosts; unconditional again
+	// now that the shard split is reverted (see pr-preflight-platforms' own
+	// comment in pr.yml).
 	if step.If != "" || (step.ContinueOnError != nil && step.ContinueOnError != false) || step.Shell != "bash" || step.Run != stepCommand {
 		t.Errorf("generated-hook process step is not required exact Bash execution: if=%q continue-on-error=%v shell=%q run=%q",
 			step.If, step.ContinueOnError, step.Shell, step.Run)
@@ -380,9 +916,10 @@ func TestStorageDomainUOWJobsUseNestedTimeoutBudgets(t *testing.T) {
 		})
 	}
 
-	// pr.yml's job is the one lane with both the image and the pinned dolt
-	// CLI, so it is where the container and local test servers are compared.
-	job := readCIWorkflow(t, "pr.yml").job(t, "test-domain-uow")
+	// The container and local test servers are compared in pr.yml's own
+	// every-PR job (it was test-domain-uow's first step until D2 step 3;
+	// TestPRDoltServerFingerprintRunsOnEveryPR pins it).
+	job := readCIWorkflow(t, "pr.yml").job(t, prFingerprintJob)
 	const fingerprintStep = "Test Dolt server fingerprint (container + local)"
 	assertStepRunsExactly(t, job, fingerprintStep,
 		"go test -tags gms_pure_go -count=1 -timeout 5m -v -run '^TestDoltServerFingerprint$' ./internal/testutil/")
@@ -405,13 +942,11 @@ func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 	const (
 		workspaceBDBinary = "${{ github.workspace }}/bd"
 		buildCommand      = "go build -v -tags gms_pure_go ./cmd/bd"
-		// -timeout=30m is pinned on both lanes because ./cmd/bd has outgrown
-		// `go test`'s 10m per-package default (#6091, and wy-5b5fbl before it —
-		// that default is what made these legs flaky). In main.yml it sits on
-		// the invocation rather than in matrix.test-flags, so editing the
-		// matrix cannot silently drop it, and so the macOS leg cannot drift
-		// away from the ubuntu -race lanes' deadline.
-		prTestCommand   = "go test -tags gms_pure_go -v -race -short -timeout=30m -skip '^TestEmbedded' ./..."
+		// -timeout=30m is pinned here because ./cmd/bd has outgrown `go test`'s
+		// 10m per-package default (#6091, and wy-5b5fbl before it — that
+		// default is what made this leg flaky). It sits on the invocation
+		// rather than in matrix.test-flags, so editing the matrix cannot
+		// silently drop it.
 		mainTestCommand = "go test -tags gms_pure_go ${{ matrix.test-flags }} -timeout=30m -skip '^TestEmbedded' ./..."
 		// The macOS leg is the only consumer of main.yml's matrix test-flags
 		// (the ubuntu leg's coverage step hardcodes its own). The deadline is
@@ -424,15 +959,13 @@ func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 		"pr.yml":   readCIWorkflow(t, "pr.yml"),
 	}
 
-	prMacOS := workflows["pr.yml"].job(t, "test-macos")
-	if prMacOS.RunsOn != macOSRunner {
-		t.Errorf("pr macOS test runner = %q, want %q", prMacOS.RunsOn, macOSRunner)
-	}
-	assertStepRunsExactly(t, prMacOS, "Build", buildCommand)
-	assertStepRunsExactly(t, prMacOS, "Test", prTestCommand)
-	assertStepsBefore(t, prMacOS, []string{"Build"}, []string{"Test"})
-	assertStepEnvValue(t, prMacOS, "Test", "BEADS_TEST_BD_BINARY", workspaceBDBinary)
-
+	// pr.yml's own "test-macos" job (a full-suite pre-merge race against
+	// main.yml's macOS leg, run on every PR to catch macOS-only regressions
+	// before merge) was removed under the F4 rollout: main.yml's
+	// push-triggered macOS leg below is now the only lane that ever runs
+	// this suite on macOS, so no PR run exercises it pre-merge any more.
+	// Nothing in pr.yml should carry the workspace bd binary override
+	// checked in the loop below.
 	mainTest := workflows["main.yml"].job(t, "test")
 	assertStepRunsExactly(t, mainTest, "Build", buildCommand)
 	assertStepRunsExactly(t, mainTest, "Test", mainTestCommand)
@@ -457,7 +990,6 @@ func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 		for jobName, job := range workflow.Jobs {
 			for _, step := range job.Steps {
 				if step.Env["BEADS_TEST_BD_BINARY"] == workspaceBDBinary &&
-					!(workflowName == "pr.yml" && jobName == "test-macos" && step.Name == "Test") &&
 					!(workflowName == "main.yml" && jobName == "test" && step.Name == "Test") {
 					t.Errorf("%s job %q step %q has unexpected workspace bd binary override", workflowName, jobName, step.Name)
 				}
@@ -466,17 +998,97 @@ func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 	}
 }
 
+// TestDoltTestcontainerStepsDisableRyuk pins TESTCONTAINERS_RYUK_DISABLED on
+// the four steps enumerated in the table below — the two Dolt-backed steps of
+// the test-domain-uow job, in pr.yml and main.yml. It is an allow-list of
+// literal (workflow, job, step) triples, so it catches an un-pinning
+// regression on those four steps only; it does not detect the class, and a
+// newly added container-starting step passes it unpinned.
+//
+// Why the pin: testcontainers-go shares one Ryuk reaper per host; when a step
+// runs several container-starting packages as concurrent test binaries (plain
+// "go test" parallelizes across packages), they race to attach to that shared
+// reaper, and a failed handshake from one process reaps a sibling's live
+// container mid-suite (be-2on). A GitHub Actions runner is destroyed after the
+// job, so the reaper buys nothing there and only costs this race.
+//
+// The scope is the job, not a per-step predicate: "Test domain + uow +
+// tracker" runs three container-starting package trees in one invocation and
+// is the step the race is concrete on, while "Test doctor/fix" runs the single
+// ./cmd/bd/doctor/fix/ package and is pinned for consistency inside the same
+// job rather than because it has an in-step sibling.
+//
+// Left unpinned, deliberately. A step can only start a Dolt container if its
+// job pre-caches the image via scripts/ci/pull-dolt-image.sh: checkDolt in
+// internal/testutil gates on `docker image inspect` and never auto-pulls. The
+// other jobs that do pull it are pr.yml/contract-corpus,
+// main.yml/test-proxied-cmd, pr-risk.yml/test-proxied-cmd,
+// pr-risk.yml/test-server-storage and -full, regression.yml/regression, and
+// bazel.yml's --config=docker lane. They are out of scope for this change, not
+// immune: no reap has been attributed to them, and the docker lane would
+// additionally need --test_env=TESTCONTAINERS_RYUK_DISABLED=true because bazel
+// does not forward ambient environment into tests. Extending the pin — and
+// teaching this guard to scan for the class, the way assertGoCacheWriter below
+// walks every job and step — is follow-up work on be-2on.
+//
+// Steps that run under BEADS_TEST_SKIP=dolt (pr-core.sh's hermetic wrapper,
+// the sharded main-linux-integration-* jobs) never start a container at all
+// and are correctly excluded: internal/testutil's readiness check treats
+// BEADS_TEST_SKIP=dolt as an explicit opt-out before it ever reaches Docker.
+func TestDoltTestcontainerStepsDisableRyuk(t *testing.T) {
+	type doltContainerStep struct {
+		workflow string
+		job      string
+		step     string
+	}
+
+	steps := []doltContainerStep{
+		{"pr.yml", "test-domain-uow", "Test domain + uow + tracker"},
+		{"pr.yml", "test-domain-uow", "Test doctor/fix (Dolt-backed, hard-require container)"},
+		{"main.yml", "test-domain-uow", "Test domain + uow + tracker"},
+		{"main.yml", "test-domain-uow", "Test doctor/fix (Dolt-backed, hard-require container)"},
+	}
+
+	for _, tc := range steps {
+		t.Run(tc.workflow+"/"+tc.job+"/"+tc.step, func(t *testing.T) {
+			job := readCIWorkflow(t, tc.workflow).job(t, tc.job)
+			assertStepEnvValue(t, job, tc.step, "TESTCONTAINERS_RYUK_DISABLED", "true")
+		})
+	}
+}
+
+// TestNightlyFullTestRunsEmbeddedDoltBatchApplySuite pins the nightly
+// full-test job's embedded-Dolt step: it must set BEADS_TEST_EMBEDDED_DOLT=1
+// (the gate skipUnlessEmbeddedDolt checks) and run exactly
+// TestBatchApplyContract and TestLargeBatchApplyWallClock_Embedded, non-race,
+// after the main "Full Test Suite" step. That main step never sets
+// BEADS_TEST_EMBEDDED_DOLT, so without this step the nightly job would never
+// exercise a real 1000-item apply through the embedded backend at all — see
+// the step's own comment in nightly.yml for why non-race and why these two
+// tests specifically.
+func TestNightlyFullTestRunsEmbeddedDoltBatchApplySuite(t *testing.T) {
+	job := readCIWorkflow(t, "nightly.yml").job(t, "full-test")
+	const stepName = "Embedded Dolt batch-apply suite (non-race)"
+	const wantRun = "go test -tags gms_pure_go -run '^(TestBatchApplyContract|TestLargeBatchApplyWallClock_Embedded)$' ./internal/storage/embeddeddolt"
+	assertStepRunsExactly(t, job, stepName, wantRun)
+	assertStepEnvValue(t, job, stepName, "BEADS_TEST_EMBEDDED_DOLT", "1")
+	assertStepsBefore(t, job, []string{"Full Test Suite (including integration tests)"}, []string{stepName})
+	if strings.Contains(wantRun, "-race") {
+		t.Errorf("embedded-dolt nightly step run = %q, must stay non-race (race dramatically inflates this backend's own wall-clock)", wantRun)
+	}
+}
+
 func TestPRPreflightPlatformsRunsTestScriptPrebuiltBinaryContract(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "pr-preflight-platforms")
-	if job.RunsOn != "${{ matrix.os }}" {
-		t.Errorf("pr-preflight-platforms runs-on = %q, want matrix.os", job.RunsOn)
+	if job.RunsOn != sameRepoPlatformsMatrixMarkerRunsOn {
+		t.Errorf("pr-preflight-platforms runs-on = %q, want the matrix-marker chained ternary", job.RunsOn)
 	}
 	if job.If != "" || job.TimeoutMinutes != 20 {
 		t.Errorf("pr-preflight-platforms condition/timeout = %q/%d, want unconditional/20",
 			job.If, job.TimeoutMinutes)
 	}
-	if got := job.Strategy.Matrix.OS; !equalStrings(got, []string{"ubuntu-latest", "macos-latest", "windows-latest"}) {
+	if got := matrixIncludeHosts(job.Strategy.Matrix.Include); !equalStrings(got, []string{"macos-latest", "ubuntu-latest", "windows-latest"}) {
 		t.Errorf("pr-preflight-platforms matrix os = %v, want all three hosted platforms", got)
 	}
 
@@ -484,6 +1096,9 @@ func TestPRPreflightPlatformsRunsTestScriptPrebuiltBinaryContract(t *testing.T) 
 	assertStepRunsExactly(t, job, stepName,
 		"go test '-tags=gms_pure_go' -count=1 -run '^TestTestScriptPrebuiltBinaryContract$' ./scripts")
 	step := job.step(t, stepName)
+	// F7b review fix (S1): common to all three hosts; unconditional again
+	// now that the shard split is reverted (see pr-preflight-platforms' own
+	// comment in pr.yml).
 	if step.Shell != "bash" || step.If != "" || (step.ContinueOnError != nil && step.ContinueOnError != false) {
 		t.Errorf("%s shell/condition/continue-on-error = %q/%q/%v, want unconditional required bash",
 			stepName, step.Shell, step.If, step.ContinueOnError)
@@ -506,13 +1121,22 @@ func TestRepositoryTextEOLPolicyWorkflow(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "check-doc-freshness-platforms")
 
-	if want := "${{ matrix.os }}"; job.RunsOn != want {
+	if want := sameRepoPlatformsMatrixMarkerRunsOn; job.RunsOn != want {
 		t.Errorf("check-doc-freshness-platforms runs-on = %q, want %q", job.RunsOn, want)
 	}
 	wantMatrix := map[string]string{
 		"ubuntu-latest":  "linux",
 		"macos-latest":   "darwin",
 		"windows-latest": "windows",
+	}
+	// F7b: each host's include tuple also carries a "runner" marker
+	// (same-repo-linux/-macos/-windows) that sameRepoPlatformsMatrixMarkerRunsOn
+	// resolves against; check it matches the host instead of treating it as an
+	// unexpected field.
+	wantRunnerMarker := map[string]string{
+		"ubuntu-latest":  "same-repo-linux",
+		"macos-latest":   "same-repo-macos",
+		"windows-latest": "same-repo-windows",
 	}
 	if len(job.Strategy.Matrix.OS) != 0 {
 		t.Errorf("check-doc-freshness-platforms retains an unbound os-list matrix: %v", job.Strategy.Matrix.OS)
@@ -534,6 +1158,9 @@ func TestRepositoryTextEOLPolicyWorkflow(t *testing.T) {
 		if tuple.ExpectedGOOS != wantGOOS {
 			t.Errorf("runner %q expected_goos = %q, want %q", tuple.OS, tuple.ExpectedGOOS, wantGOOS)
 		}
+		if tuple.Runner != wantRunnerMarker[tuple.OS] {
+			t.Errorf("runner %q matrix runner marker = %q, want %q", tuple.OS, tuple.Runner, wantRunnerMarker[tuple.OS])
+		}
 		if tuple.Coverage || tuple.TestFlags != "" {
 			t.Errorf(
 				"runner %q has unexpected shared matrix fields: coverage=%t test-flags=%q",
@@ -548,9 +1175,12 @@ func TestRepositoryTextEOLPolicyWorkflow(t *testing.T) {
 	}
 
 	docStep := job.step(t, "Exercise native date and Bash process boundary")
-	const wantDocCommand = "go test '-tags=integration,gms_pure_go' -count=1 -run '^TestDocFreshness' ./scripts"
+	const (
+		requiredSuiteSelector = "-required-suite=doc-freshness"
+		wantDocCommand        = "go test '-tags=integration,gms_pure_go' -count=1 -run '^(TestDocFreshness.*|TestRequiredSuiteContract)$' ./scripts -args " + requiredSuiteSelector
+	)
 	if docStep.Run != wantDocCommand {
-		t.Errorf("doc-freshness command = %q, want exact original %q", docStep.Run, wantDocCommand)
+		t.Errorf("doc-freshness command = %q, want required-suite execution %q", docStep.Run, wantDocCommand)
 	}
 
 	eolStep := job.step(t, "Exercise repository text EOL policy boundary")
@@ -613,9 +1243,32 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		saveModuleCacheAfterFailureOnMacOS(), saveBuildCacheAfterFailureOnMacOS("non-race"), saveBuildCacheAfterFailureOnMacOS("race"),
 	})
 	assertGoCacheInventory(t, workflows["main.yml"].job(t, "test-windows"), []goCacheStep{
-		mainRestoreModuleCache(), mainRestoreBuildCache("non-race"), saveModuleCache(), saveBuildCache("non-race"),
+		mainRestoreModuleCache(), mainRestoreBuildCacheDayBucketedIf("non-race", ""), saveModuleCache(), saveBuildCacheDayBucketed("non-race"),
+	})
+	assertGoCacheInventory(t, workflows["main.yml"].job(t, "pr-lint-wrapper"), []goCacheStep{
+		restoreModuleCache(), mainRestoreGolangciCache(), saveGolangciCache(),
+	})
+	assertGoCacheInventory(t, workflows["main.yml"].job(t, "go-vet-cache"), []goCacheStep{
+		mainRestoreModuleCache(), mainRestoreVetCache(), saveVetCache(),
 	})
 	assertConditionalCacheWritersHaveMatrixMember(t, workflows["main.yml"].job(t, "test"), macOSRunner)
+	// F4.7: seeds the module and xcompile caches pr.yml's windows-test-binaries
+	// job only restores (PR workflows never save).
+	assertGoCacheInventory(t, workflows["main.yml"].job(t, "windows-test-binaries-cache"), []goCacheStep{
+		mainRestoreModuleCache(), mainRestoreXCompileCache(), saveModuleCacheAfterFailure(), saveXCompileCache(),
+	})
+	// F7b: Blacksmith-only analogue of build-artifacts'/build-embedded's
+	// race/non-race GOCACHE saves, for same-repo PR consumers
+	// (scripts-go-checks, pr-preflight-platforms, check-doc-freshness-platforms)
+	// that now run on Blacksmith, whose cache namespace is invisible to
+	// GitHub-hosted build-artifacts/build-embedded.
+	assertGoCacheInventory(t, workflows["main.yml"].job(t, "blacksmith-go-build-cache"), []goCacheStep{
+		mainRestoreModuleCache(),
+		mainRestoreBuildCacheDayBucketedIf("race", "matrix.flavor == 'race'"),
+		mainRestoreBuildCacheDayBucketedIf("non-race", "matrix.flavor == 'non-race'"),
+		saveBuildCacheDayBucketedAfterFailureIf("race", "matrix.flavor == 'race'"),
+		saveBuildCacheDayBucketedAfterFailureIf("non-race", "matrix.flavor == 'non-race'"),
+	})
 
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "build-artifacts"), []goCacheStep{
 		restoreModuleCache(), restoreBuildCache("non-race"),
@@ -623,25 +1276,73 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "pr-core-wrapper"), []goCacheStep{
 		restoreModuleCache(), restoreBuildCache("race"),
 	})
-	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "test-macos"), []goCacheStep{
-		restoreModuleCache(), restoreBuildCache("non-race"), restoreBuildCache("race"),
+	// D2 step 3: PR Core's environment for ./scripts/..., go vet and the
+	// Bazel-skipped tests; read-only like PR Core.
+	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "scripts-go-checks"), []goCacheStep{
+		restoreModuleCache(), restoreBuildCacheIf("race", "matrix.check == 'scripts-test'"), restoreVetCache(), restoreBuildCacheIf("non-race", "matrix.check == 'allowlisted'"),
 	})
+	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "pr-lint-wrapper"), []goCacheStep{restoreModuleCache(), restoreGolangciCache()})
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "worktree-remove-windows"), []goCacheStep{
 		restoreModuleCache(), restoreBuildCache("non-race"),
 	})
-	for _, jobName := range []string{"check-doc-freshness-platforms", "pr-preflight-platforms", "build-examples"} {
+	// F4.4 advisory phase: windows-test-binaries cross-compiles on Linux and
+	// only restores (never saves; main.yml's windows-test-binaries-cache job
+	// is the saver). Its "-prebuilt" twins (test-windows-liveness-prebuilt,
+	// worktree-remove-windows-prebuilt) download the resulting artifact and
+	// run the binaries directly, so they use no Go cache action at all and
+	// need no entry here or in the managed map below.
+	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "windows-test-binaries"), []goCacheStep{
+		restoreModuleCache(), restoreXCompileCache(),
+	})
+	// F7b review (S2): restore-only non-race Go build cache seeded by
+	// main.yml's test-windows Blacksmith leg (warm-non-race-cache.sh) on the
+	// exact same runner selection, targeting this job's own cold cmd/bd test
+	// compile (the reviewer's measured long pole here).
+	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "test-windows-liveness"), []goCacheStep{
+		restoreModuleCache(), restoreBuildCache("non-race"),
+	})
+	for _, jobName := range []string{
+		"advisory-reports", "check-release-target-cross-compilation",
+	} {
 		assertGoCacheInventory(t, workflows["pr.yml"].job(t, jobName), []goCacheStep{restoreModuleCache()})
 	}
+	// F7b review (S2): check-doc-freshness-platforms additionally restores a
+	// restore-only non-race Go build cache, seeded by the same push-to-main
+	// savers pr-preflight-platforms' leg restores below (see that job's own
+	// comment in pr.yml for the per-OS seeder mapping).
+	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "check-doc-freshness-platforms"), []goCacheStep{
+		restoreModuleCache(), restoreBuildCache("non-race"),
+	})
+	// F7b review (S1): the Windows shard split this job's matrix once had
+	// (an extra `shard: 2` leg) was reverted: it measurably failed to help
+	// (shard 2 only ever held 15-25s of work while shard 1 stayed at
+	// 450-480s). The job is a single leg per OS again, so its module-cache
+	// restore is unconditional, same as every other three-host job; see S2
+	// above for the added non-race build-cache restore.
+	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "pr-preflight-platforms"), []goCacheStep{
+		restoreModuleCache(), restoreBuildCache("non-race"),
+	})
 	assertGoCacheInventory(t, workflows["pr-risk.yml"].job(t, "build-embedded"), []goCacheStep{
 		restoreModuleCache(), restoreBuildCache("race"), restoreBuildCache("non-race"),
 	})
 	assertNoUnmanagedGoCacheSteps(t, workflows, map[string]map[string]bool{
 		"main.yml": {
 			"build-artifacts": true, "build-embedded": true, "pr-core-wrapper": true, "test": true, "test-windows": true,
+			"pr-lint-wrapper": true, "go-vet-cache": true, "windows-test-binaries-cache": true, "blacksmith-go-build-cache": true,
+			// F7c: blacksmith-setup-go-cache's own restore/save pair seeds the
+			// self-defined blacksmith-sg-v1- cache namespace every advisory
+			// Blacksmith consumer restores from (B2, F7c implementation
+			// report); it is covered by its own
+			// TestBlacksmithSetupGoSeedExistsForAdvisoryConsumers and
+			// TestBlacksmithSetupGoCacheKeysMatchAcrossSeederAndConsumers in
+			// ci_f7c_advisory_test.go, not by assertGoCacheInventory above.
+			"blacksmith-setup-go-cache": true,
 		},
 		"pr.yml": {
-			"build-artifacts": true, "pr-core-wrapper": true, "test-macos": true, "worktree-remove-windows": true,
-			"check-doc-freshness-platforms": true, "pr-preflight-platforms": true, "build-examples": true,
+			"build-artifacts": true, "pr-core-wrapper": true, "scripts-go-checks": true, "worktree-remove-windows": true,
+			"check-doc-freshness-platforms": true, "pr-preflight-platforms": true, "advisory-reports": true,
+			"check-release-target-cross-compilation": true, "pr-lint-wrapper": true, "windows-test-binaries": true,
+			"test-windows-liveness": true,
 		},
 		"pr-risk.yml": {"build-embedded": true},
 	})
@@ -673,17 +1374,23 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		[]string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Build reusable Linux artifacts"})
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "pr-core-wrapper"),
 		[]string{"Restore Go module cache", "Restore race Go build cache"}, []string{"Run PR core wrapper"})
-	prMacOS := workflows["pr.yml"].job(t, "test-macos")
-	assertStepsBefore(t, prMacOS, []string{"Restore Go module cache"}, []string{"Build", "Test"})
-	assertStepsBefore(t, prMacOS, []string{"Restore non-race Go build cache"}, []string{"Build"})
-	assertStepsBefore(t, prMacOS, []string{"Restore race Go build cache"}, []string{"Test"})
+	prXCompile := workflows["pr.yml"].job(t, "windows-test-binaries")
+	assertStepsBefore(t, prXCompile, []string{"Restore Go module cache"}, []string{"Verify Go module checksums", "Build Windows test binaries"})
+	assertStepsBefore(t, prXCompile, []string{"Install mingw cross-compiler", "Restore Go build cache (Windows cross-compile)"}, []string{"Build Windows test binaries"})
+	assertStepsBefore(t, prXCompile, []string{"Build Windows test binaries"}, []string{"Upload Windows test binaries"})
+
+	mainXCompileCache := workflows["main.yml"].job(t, "windows-test-binaries-cache")
+	assertStepsBefore(t, mainXCompileCache, []string{"Restore Go module cache"}, []string{"Install mingw cross-compiler", "Build Windows test binaries"})
+	assertStepsBefore(t, mainXCompileCache, []string{"Install mingw cross-compiler", "Restore Go build cache (Windows cross-compile)"}, []string{"Build Windows test binaries"})
+	assertStepsBefore(t, mainXCompileCache, []string{"Build Windows test binaries"}, []string{"Save Go module cache", "Save Go build cache (Windows cross-compile)"})
+
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "worktree-remove-windows"),
 		[]string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Run native Windows worktree removal boundary tests"})
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "check-doc-freshness-platforms"),
 		[]string{"Restore Go module cache"}, []string{"Exercise native date and Bash process boundary"})
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "pr-preflight-platforms"),
 		[]string{"Restore Go module cache"}, []string{"Exercise the real Bash process boundary", "Exercise test.sh prebuilt binary path"})
-	assertStepsBefore(t, workflows["pr.yml"].job(t, "build-examples"),
+	assertStepsBefore(t, workflows["pr.yml"].job(t, "advisory-reports"),
 		[]string{"Restore Go module cache"}, []string{"Type-check every module under examples/"})
 
 	prRiskEmbedded := workflows["pr-risk.yml"].job(t, "build-embedded")
@@ -700,10 +1407,10 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test"), "Test (with coverage + JUnit XML)", "race")
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test"), "Test", "race")
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test-windows"), "Build (pure Go regex)", "non-race")
+	assertGoCacheEnv(t, workflows["main.yml"].job(t, "windows-test-binaries-cache"), "Build Windows test binaries", xcompileCacheProfile())
 	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "build-artifacts"), "Build reusable Linux artifacts", "non-race")
 	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "pr-core-wrapper"), "Run PR core wrapper", "race")
-	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "test-macos"), "Build", "non-race")
-	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "test-macos"), "Test", "race")
+	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "windows-test-binaries"), "Build Windows test binaries", xcompileCacheProfile())
 	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "worktree-remove-windows"), "Run native Windows worktree removal boundary tests", "non-race")
 	for _, stepName := range []string{"Build embedded bd binary", "Build embedded storage test binary", "Build embedded cmd test binary"} {
 		assertGoCacheEnv(t, workflows["pr-risk.yml"].job(t, "build-embedded"), stepName, "race")
@@ -728,26 +1435,61 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheWriter(t, workflows["main.yml"], "test", "${{ matrix.os }}", "Save Go module cache", failureSurvivingCacheSaveCondition(macOSMatrixCondition, cacheMissCondition(goModuleCacheRestoreID)))
 	assertGoCacheWriter(t, workflows["main.yml"], "test", "${{ matrix.os }}", "Save non-race Go build cache", failureSurvivingCacheSaveCondition(macOSMatrixCondition, cacheMissCondition(goBuildCacheRestoreID("non-race"))))
 	assertGoCacheWriter(t, workflows["main.yml"], "test", "${{ matrix.os }}", "Save race Go build cache", failureSurvivingCacheSaveCondition(macOSMatrixCondition, cacheMissCondition(goBuildCacheRestoreID("race"))))
-	assertGoCacheWriter(t, workflows["main.yml"], "test-windows", "windows-latest", "Save Go module cache", cacheMissCondition(goModuleCacheRestoreID))
-	assertGoCacheWriter(t, workflows["main.yml"], "test-windows", "windows-latest", "Save non-race Go build cache", cacheMissCondition(goBuildCacheRestoreID("non-race")))
+	assertGoCacheWriter(t, workflows["main.yml"], "test-windows", mainVenueBlacksmithWindows4vcpuRunsOn, "Save Go module cache", cacheMissCondition(goModuleCacheRestoreID))
+	assertGoCacheWriter(t, workflows["main.yml"], "test-windows", mainVenueBlacksmithWindows4vcpuRunsOn, "Save non-race Go build cache", cacheMissCondition(goBuildCacheRestoreID("non-race")))
+	assertGoCacheWriter(t, workflows["main.yml"], "pr-lint-wrapper", mainVenueBlacksmithUbuntu4vcpuRunsOn, "Save golangci-lint cache", failureSurvivingCacheSaveCondition(cacheMissCondition(golangciCacheRestoreID())))
+	assertGoCacheWriter(t, workflows["main.yml"], "go-vet-cache", mainVenueBlacksmithUbuntu4vcpuRunsOn, "Save vet Go build cache", failureSurvivingCacheSaveCondition(cacheMissCondition(goVetCacheRestoreID())))
+	assertGoCacheWriter(t, workflows["main.yml"], "blacksmith-go-build-cache", mainBlacksmithGoBuildCacheRunsOn, "Save race Go build cache", saveBuildCacheAfterFailureIf("race", "matrix.flavor == 'race'").ifCondition)
+	assertGoCacheWriter(t, workflows["main.yml"], "blacksmith-go-build-cache", mainBlacksmithGoBuildCacheRunsOn, "Save non-race Go build cache", saveBuildCacheAfterFailureIf("non-race", "matrix.flavor == 'non-race'").ifCondition)
+	assertGoCacheWriter(t, workflows["main.yml"], "windows-test-binaries-cache", mainWindowsTestBinariesCacheRunsOn, "Save Go module cache", saveModuleCacheAfterFailure().ifCondition)
+	assertGoCacheWriter(t, workflows["main.yml"], "windows-test-binaries-cache", mainWindowsTestBinariesCacheRunsOn, "Save Go build cache (Windows cross-compile)", saveXCompileCache().ifCondition)
 	for _, target := range []struct{ workflow, job string }{
 		{"main.yml", "build-artifacts"},
 		{"main.yml", "build-embedded"},
 		{"main.yml", "pr-core-wrapper"},
 		{"main.yml", "test"},
 		{"main.yml", "test-windows"},
+		{"main.yml", "windows-test-binaries-cache"},
 		{"pr.yml", "build-artifacts"},
 		{"pr.yml", "pr-core-wrapper"},
-		{"pr.yml", "test-macos"},
+		{"pr.yml", "windows-test-binaries"},
 		{"pr.yml", "worktree-remove-windows"},
 		{"pr.yml", "check-doc-freshness-platforms"},
 		{"pr.yml", "pr-preflight-platforms"},
-		{"pr.yml", "build-examples"},
+		{"pr.yml", "advisory-reports"},
 		{"pr-risk.yml", "build-embedded"},
 	} {
 		if got := workflows[target.workflow].job(t, target.job).step(t, "Set up Go").ID; got != "setup-go" {
 			t.Errorf("%s job %q setup-go id = %q, want setup-go", target.workflow, target.job, got)
 		}
+	}
+}
+
+// TestMainWindowsTestBinariesCacheSeedsBothRunnerSelections is the regression
+// test for F4 review SF-1: main.yml's windows-test-binaries-cache job must
+// seed its cache keys from both runner selections pr.yml's windows-test-
+// binaries job can land on (Blacksmith for same-repo PRs/merge_group,
+// ubuntu-latest for forks/Dependabot), because Blacksmith and GitHub-hosted
+// runners cannot see each other's actions/cache entries even for an
+// identical key. A single-leg seeder would silently leave one of the two
+// consumer paths permanently cold.
+func TestMainWindowsTestBinariesCacheSeedsBothRunnerSelections(t *testing.T) {
+	job := readCIWorkflow(t, "main.yml").job(t, "windows-test-binaries-cache")
+
+	if job.RunsOn != mainWindowsTestBinariesCacheRunsOn {
+		t.Errorf("windows-test-binaries-cache runs-on = %q, want %q", job.RunsOn, mainWindowsTestBinariesCacheRunsOn)
+	}
+	wantRunners := []string{"blacksmith", "github"}
+	if !equalStrings(job.Strategy.Matrix.Runner, wantRunners) {
+		t.Errorf("windows-test-binaries-cache strategy.matrix.runner = %v, want %v", job.Strategy.Matrix.Runner, wantRunners)
+	}
+	if job.Strategy.FailFast {
+		t.Error("windows-test-binaries-cache strategy.fail-fast must be false: one runner selection being unavailable must not cancel the other's seed")
+	}
+	// Mirrors pr.yml's windows-test-binaries job (pr.yml:522's timeout is 30
+	// too): this job runs the same mingw install + cross-compile.
+	if job.TimeoutMinutes != 30 {
+		t.Errorf("windows-test-binaries-cache timeout-minutes = %d, want 30", job.TimeoutMinutes)
 	}
 }
 
@@ -778,8 +1520,8 @@ func TestPRRiskGateReachesFullServerDoltStorageSuite(t *testing.T) {
 	if !contains(job.Needs, "detect-ci-tier") || !contains(job.Needs, "build-embedded") {
 		t.Errorf("%s needs = %v, want detect-ci-tier and build-embedded (reuse the existing artifact, no new build)", jobName, job.Needs)
 	}
-	if job.If != "needs.detect-ci-tier.outputs.full_embedded == 'true'" {
-		t.Errorf("%s if = %q, want the same tier gate as test-server-storage", jobName, job.If)
+	if sibling := workflow.job(t, "test-server-storage").If; job.If != sibling || !strings.HasPrefix(job.If, "needs.detect-ci-tier.outputs.full_embedded == 'true'") {
+		t.Errorf("%s if = %q, want the same tier gate as test-server-storage (%q)", jobName, job.If, sibling)
 	}
 
 	download := job.step(t, "Download binaries")
@@ -934,11 +1676,13 @@ func assertNoUnmanagedGoCacheSteps(t *testing.T, workflows map[string]ciWorkflow
 const (
 	setupGoActionFamily         = "actions/setup-go"
 	setupNodeActionFamily       = "actions/setup-node"
+	setupPythonActionFamily     = "actions/setup-python"
 	cacheMonolithicActionFamily = "actions/cache"
 	cacheRestoreActionFamily    = "actions/cache/restore"
 	cacheSaveActionFamily       = "actions/cache/save"
 	setupGoSHA                  = "b7ad1dad31e06c5925ef5d2fc7ad053ef454303e"
 	setupNodeSHA                = "820762786026740c76f36085b0efc47a31fe5020"
+	setupPythonSHA              = "5fda3b95a4ea91299a34e894583c3862153e4b97"
 	cacheSHA                    = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
 	goCacheSchema               = "v2"
 	goBaseTag                   = "gms_pure_go"
@@ -974,6 +1718,51 @@ func goBuildCachePrefix(profile string) string {
 
 func goBuildCacheKey(profile string) string {
 	return goBuildCachePrefix(profile) + "${{ github.sha }}"
+}
+
+// goCacheDateSuffix is the key suffix for the day-bucketed caches saved by
+// main.yml's push-to-main-only Blacksmith seeders (blacksmith-go-build-cache,
+// go-vet-cache, test-windows): bounded by go.sum content plus a UTC calendar
+// day, not by commit sha, so an ordinary day of push traffic cannot exhaust
+// Blacksmith's 25 GB/week/repo cache quota the way a brand-new multi-GB entry
+// per push did (F7b review fix S7; measured ~1.74-2.4GB/push under the old
+// per-sha scheme). Each seeder's own "Compute cache date" step (id:
+// cache-date) in main.yml computes the day half; restore-keys are unaffected,
+// since they are already valid prefixes of this format too (they end right
+// before where the sha/hash segment used to start). Pinned by
+// TestBlacksmithSaverCacheKeysAreNotPerCommit.
+func goCacheDateSuffix() string {
+	return "${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}"
+}
+
+func goBuildCacheDayBucketedKey(profile string) string {
+	return goBuildCachePrefix(profile) + goCacheDateSuffix()
+}
+
+// mainRestoreBuildCacheDayBucketedIf is mainRestoreBuildCacheIf with a
+// day-bucketed key (S7), for main.yml's blacksmith-go-build-cache and
+// test-windows seeders.
+func mainRestoreBuildCacheDayBucketedIf(profile, condition string) goCacheStep {
+	step := mainRestoreBuildCacheIf(profile, condition)
+	step.key = goBuildCacheDayBucketedKey(profile)
+	return step
+}
+
+// saveBuildCacheDayBucketedAfterFailureIf is saveBuildCacheAfterFailureIf
+// with a day-bucketed key (S7), for main.yml's blacksmith-go-build-cache
+// seeder.
+func saveBuildCacheDayBucketedAfterFailureIf(profile, condition string) goCacheStep {
+	step := saveBuildCacheAfterFailureIf(profile, condition)
+	step.key = goBuildCacheDayBucketedKey(profile)
+	return step
+}
+
+// saveBuildCacheDayBucketed is saveBuildCache with a day-bucketed key (S7),
+// for main.yml's test-windows seeder.
+func saveBuildCacheDayBucketed(profile string) goCacheStep {
+	step := saveBuildCache(profile)
+	step.key = goBuildCacheDayBucketedKey(profile)
+	return step
 }
 
 func goBuildCachePath(profile string) string { return "${{ runner.temp }}/go-cache/" + profile }
@@ -1022,6 +1811,16 @@ func saveModuleCacheAfterFailureOnMacOS() goCacheStep {
 	return step
 }
 
+// saveModuleCacheAfterFailure is saveModuleCacheAfterFailureOnMacOS without
+// the matrix condition, for single-runner saver jobs (windows-test-binaries-
+// cache) where a flaky mid-build step (e.g. the mingw apt-get install)
+// should not prevent the module cache fetched before it from being saved.
+func saveModuleCacheAfterFailure() goCacheStep {
+	step := saveModuleCache()
+	step.ifCondition = failureSurvivingCacheSaveCondition(cacheMissCondition(goModuleCacheRestoreID))
+	return step
+}
+
 func restoreBuildCache(profile string) goCacheStep {
 	return restoreBuildCacheIf(profile, "")
 }
@@ -1050,6 +1849,132 @@ func saveBuildCacheAfterFailureOnMacOS(profile string) goCacheStep {
 	step := saveBuildCache(profile)
 	step.ifCondition = failureSurvivingCacheSaveCondition(macOSMatrixCondition, cacheMissCondition(goBuildCacheRestoreID(profile)))
 	return step
+}
+
+// saveBuildCacheAfterFailureIf is saveBuildCacheAfterFailureOnMacOS
+// parameterized on an arbitrary matrix condition, for main.yml's
+// blacksmith-go-build-cache job (F7b), which gates its race/non-race saves on
+// matrix.flavor instead of matrix.os.
+func saveBuildCacheAfterFailureIf(profile, condition string) goCacheStep {
+	step := saveBuildCache(profile)
+	step.ifCondition = failureSurvivingCacheSaveCondition(condition, cacheMissCondition(goBuildCacheRestoreID(profile)))
+	return step
+}
+
+// The go-vet-cache family (F5.3): a dedicated, go-vet-only GOCACHE restored
+// by pr.yml's scripts-go-checks vet leg and warmed by main.yml's go-vet-cache
+// job on push. There is deliberately no non-race-build-cache fallback restore
+// key (SF-5): actions/cache versions each entry by its path list, and that
+// cache saves to a different path, so a prefix fallback naming it could never
+// hit.
+const goVetCacheSchema = "v1"
+
+func goVetCachePrefix() string {
+	return "beads-go-vet-" + goVetCacheSchema + "-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-" + goBaseTag + "-vet-"
+}
+
+func goVetCacheKey() string { return goVetCachePrefix() + "${{ github.sha }}" }
+
+// goVetCacheDayBucketedKey is goVetCacheKey with the S7 day-bucketed suffix
+// (see goCacheDateSuffix), for main.yml's go-vet-cache seeder.
+func goVetCacheDayBucketedKey() string { return goVetCachePrefix() + goCacheDateSuffix() }
+
+func goVetCacheRestoreKeys() string { return goVetCachePrefix() }
+
+func goVetCachePath() string { return "${{ runner.temp }}/go-cache/vet" }
+
+func goVetCacheRestoreID() string { return "restore-vet-go-build-cache" }
+
+func restoreVetCache() goCacheStep {
+	return goCacheStep{name: "Restore vet Go build cache", family: cacheRestoreActionFamily, key: goVetCacheKey(), restoreKeys: goVetCacheRestoreKeys(), path: goVetCachePath(), ifCondition: "matrix.check == 'vet'"}
+}
+
+func mainRestoreVetCache() goCacheStep {
+	step := restoreVetCache()
+	step.id = goVetCacheRestoreID()
+	step.ifCondition = ""
+	step.key = goVetCacheDayBucketedKey()
+	return step
+}
+
+func saveVetCache() goCacheStep {
+	return goCacheStep{name: "Save vet Go build cache", family: cacheSaveActionFamily, key: goVetCacheDayBucketedKey(), path: goVetCachePath(), ifCondition: failureSurvivingCacheSaveCondition(cacheMissCondition(goVetCacheRestoreID()))}
+}
+
+// The golangci-lint cache family (F5.2): one cache per PR Lint matrix leg,
+// keyed on file content and the leg. A miss on the exact content key falls
+// back to the leg's prefix (its most recent entry); golangci-lint revalidates
+// a restored cache against the current config and inputs, so a stale restore
+// cannot mask an issue. pr.yml only ever restores; main.yml's matrix is the
+// only saver. The key deliberately omits the commit sha (SF-4): with it,
+// every green push to main saved a new multi-GB entry per leg regardless of
+// whether lint's inputs changed; keying on content alone means a save only
+// happens when .golangci.yml or go.sum change. Only the native leg's path
+// includes the lint GOCACHE (SF-4): the windows/darwin legs cross-compile and
+// their GOCACHE is large relative to the small golangci-lint result cache
+// that is the part actually worth keeping warm for them.
+func golangciCachePrefix() string {
+	return "beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-"
+}
+
+func golangciCacheKey() string {
+	return golangciCachePrefix() + "${{ hashFiles('.golangci.yml', 'go.sum') }}"
+}
+
+func golangciCacheRestoreKeys() string { return golangciCachePrefix() }
+
+func golangciCachePath() string {
+	return "~/.cache/golangci-lint\n${{ matrix.target == 'native' && format('{0}/go-cache/lint-{1}', runner.temp, matrix.target) || '' }}\n"
+}
+
+func golangciCacheRestoreID() string { return "restore-golangci-lint-cache" }
+
+func restoreGolangciCache() goCacheStep {
+	return goCacheStep{name: "Restore golangci-lint cache", family: cacheRestoreActionFamily, key: golangciCacheKey(), restoreKeys: golangciCacheRestoreKeys(), path: golangciCachePath()}
+}
+
+func mainRestoreGolangciCache() goCacheStep {
+	step := restoreGolangciCache()
+	step.id = golangciCacheRestoreID()
+	return step
+}
+
+func saveGolangciCache() goCacheStep {
+	return goCacheStep{name: "Save golangci-lint cache", family: cacheSaveActionFamily, key: golangciCacheKey(), path: golangciCachePath(), ifCondition: failureSurvivingCacheSaveCondition(cacheMissCondition(golangciCacheRestoreID()))}
+}
+
+// The Windows cross-compile GOCACHE (F4.4) is a separate cache dimension from
+// goBuildCache*'s base/race/non-race profiles: it is never shared with a
+// native build on the runner's own OS, so it gets its own key shape (no
+// "-base-<tag>-" segment) and its own fixed restore/save id, rather than
+// reusing goBuildCacheRestoreID's "restore-<profile>-go-build-cache" pattern.
+func xcompileCacheProfile() string { return "xcompile-windows-amd64" }
+
+func xcompileCachePrefix() string {
+	return "beads-go-build-" + goCacheSchema + "-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-" + xcompileCacheProfile() + "-"
+}
+
+func xcompileCacheKey() string { return xcompileCachePrefix() + "${{ github.sha }}" }
+
+func xcompileCachePath() string { return goBuildCachePath(xcompileCacheProfile()) }
+
+func xcompileCacheRestoreID() string { return "restore-xcompile-go-build-cache" }
+
+// restoreXCompileCache is the PR-side (restore-only, no id needed since
+// pr.yml never saves) shape; mainRestoreXCompileCache is main.yml's
+// saver-side shape, which needs the id for its Save step's cache-miss `if`.
+func restoreXCompileCache() goCacheStep {
+	return goCacheStep{name: "Restore Go build cache (Windows cross-compile)", family: cacheRestoreActionFamily, key: xcompileCacheKey(), restoreKeys: xcompileCachePrefix(), path: xcompileCachePath()}
+}
+
+func mainRestoreXCompileCache() goCacheStep {
+	step := restoreXCompileCache()
+	step.id = xcompileCacheRestoreID()
+	return step
+}
+
+func saveXCompileCache() goCacheStep {
+	return goCacheStep{name: "Save Go build cache (Windows cross-compile)", family: cacheSaveActionFamily, key: xcompileCacheKey(), path: xcompileCachePath(), ifCondition: failureSurvivingCacheSaveCondition(cacheMissCondition(xcompileCacheRestoreID()))}
 }
 
 func assertGoCacheInventory(t *testing.T, job ciWorkflowJob, want []goCacheStep) {
@@ -1149,6 +2074,23 @@ func equalStrings(got, want []string) bool {
 	return true
 }
 
+// matrixIncludeHosts returns the sorted, de-duplicated set of matrix.include
+// os values -- used by tests covering pr-preflight-platforms and
+// check-doc-freshness-platforms now that F7b restructured them from a
+// top-level os: list into an include:-only "matrix marker" shape.
+func matrixIncludeHosts(include []ciWorkflowMatrixInclude) []string {
+	seen := make(map[string]bool)
+	var hosts []string
+	for _, tuple := range include {
+		if !seen[tuple.OS] {
+			seen[tuple.OS] = true
+			hosts = append(hosts, tuple.OS)
+		}
+	}
+	sort.Strings(hosts)
+	return hosts
+}
+
 func assertGoCacheWriter(t *testing.T, workflow ciWorkflow, wantJob, wantRunner, wantStep, wantCondition string) {
 	t.Helper()
 
@@ -1224,6 +2166,7 @@ func assertPinnedGoCacheActions(t *testing.T, workflowName string, workflow ciWo
 }
 
 type ciWorkflow struct {
+	Env  map[string]string        `yaml:"env"`
 	Jobs map[string]ciWorkflowJob `yaml:"jobs"`
 }
 
@@ -1250,17 +2193,38 @@ type ciWorkflowStrategy struct {
 }
 
 type ciWorkflowMatrix struct {
-	OS      []string                  `yaml:"os"`
-	Shard   []int                     `yaml:"shard"`
+	OS     []string `yaml:"os"`
+	Runner []string `yaml:"runner"`
+	Shard  []int    `yaml:"shard"`
+	Target []string `yaml:"target"`
+	Check  []string `yaml:"check"`
+	Group  []string `yaml:"group"`
+	// Venue and Flavor back main.yml's "venue matrix" (F7b spec §4) push-to-
+	// main-only Blacksmith cache savers: pr-lint-wrapper/go-vet-cache/
+	// test-windows's `venue: [blacksmith, github]` and
+	// blacksmith-go-build-cache's `flavor: [race, non-race]`. Pinned by
+	// TestBlacksmithSaverVenueAndFlavorMatricesAreComplete (F7b review B2/S7
+	// follow-up) so dropping either leg from these lists -- silently losing
+	// that leg's cache seed or (for flavor) its race coverage -- fails loudly.
+	Venue   []string                  `yaml:"venue"`
+	Flavor  []string                  `yaml:"flavor"`
 	Include []ciWorkflowMatrixInclude `yaml:"include"`
 }
 
 type ciWorkflowMatrixInclude struct {
-	OS           string         `yaml:"os"`
-	ExpectedGOOS string         `yaml:"expected_goos"`
-	Coverage     bool           `yaml:"coverage"`
-	TestFlags    string         `yaml:"test-flags"`
-	Extra        map[string]any `yaml:",inline"`
+	OS           string `yaml:"os"`
+	ExpectedGOOS string `yaml:"expected_goos"`
+	Coverage     bool   `yaml:"coverage"`
+	TestFlags    string `yaml:"test-flags"`
+	Runner       string `yaml:"runner"`
+	// F7b review fix (S1): no typed `shard` field here. pr-preflight-
+	// platforms' Windows shard split (the one thing in this file that ever
+	// used it) was reverted as not measurably helpful, and a typed field
+	// here is shared by every workflow's `strategy.matrix.include` tuples —
+	// migration-test.yml's shard: src/pre-dolt/dolt-runtime entries use a
+	// STRING, not an int, so a mismatched type here would break parsing of
+	// an unrelated workflow. Untyped matrix keys fall through to Extra.
+	Extra map[string]any `yaml:",inline"`
 }
 
 type ciWorkflowStep struct {
@@ -1502,11 +2466,24 @@ const (
 	bazelIntegJobName   = "bazel-integration"
 	bazelProxiedJobName = "bazel-proxied"
 	bazelServerJobName  = "bazel-server-storage"
-	setupBazelActionDir = ".github/actions/setup-bazel"
+	// F3: the MCP and npm package gates, moved here from pr.yml so they need
+	// only the rbe job. Unlike every other lane they do not mirror a Bazel
+	// config; pr.yml opts them in with package-gates: "on".
+	bazelPackageMCPJobName = "package-mcp"
+	bazelPackageNPMJobName = "package-npm"
+	setupBazelActionDir    = ".github/actions/setup-bazel"
+)
+
+// F3: package-mcp and package-npm, the two lanes bazel-gate.sh does not
+// know about at all - their skip reason is the caller's package-gates
+// input, never the rbe job's mode.
+var bazelPackageJobs = map[string]bool{bazelPackageMCPJobName: true, bazelPackageNPMJobName: true}
+
+const (
 	uploadArtifactSHA   = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 	downloadArtifactSHA = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
 	checkoutSHA         = "3d3c42e5aac5ba805825da76410c181273ba90b1"
-	bazelCacheKeyPrefix = "bazel-repo-v2-${{ runner.os }}-"
+	bazelCacheKeyPrefix = "bazel-repo-v3-${{ runner.os }}-"
 	bazelCacheKey       = bazelCacheKeyPrefix + "${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}"
 	bazelCachePath      = "${{ runner.temp }}/bazel-ci-cache"
 	// Save only from a push to main that missed the exact key: the content is
@@ -1516,18 +2493,27 @@ const (
 )
 
 // bazel.yml's jobs: the rbe job that decides the execution mode, the
-// --config=ci lane, and one job per CI job a Bazel config mirrors.
-var bazelJobNames = []string{bazelDoltJobName, bazelEmbedJobName, bazelIntegJobName, bazelProxiedJobName, bazelPureJobName, bazelServerJobName, bazelJobName, bazelRBEJobName}
+// --config=ci lane, one job per CI job a Bazel config mirrors, and the two
+// package gates (F3), sorted alphabetically to match TestBazelWorkflowJobsAndExecutionMode's sort.Strings.
+var bazelJobNames = []string{bazelDoltJobName, bazelEmbedJobName, bazelIntegJobName, bazelProxiedJobName, bazelPureJobName, bazelServerJobName, bazelJobName, bazelPackageMCPJobName, bazelPackageNPMJobName, bazelRBEJobName}
 
 // The lanes that only run remotely (skipped unless the rbe job chose remote);
+// bazel-integration runs remotely or with the read-only cache (bazelIntegIf);
 // every other lane also runs locally.
-var bazelRemoteOnlyJobs = map[string]bool{bazelEmbedJobName: true, bazelIntegJobName: true, bazelProxiedJobName: true, bazelServerJobName: true}
+var bazelRemoteOnlyJobs = map[string]bool{bazelEmbedJobName: true, bazelProxiedJobName: true, bazelServerJobName: true}
 
 // The rbe job's decision step reads exactly one secret, and only to test it
 // for emptiness: its env value is a boolean, not the secret.
 const (
 	bazelRBESecretPath  = ".jobs." + bazelRBEJobName + ".steps[0].env.HAS_EXECUTOR"
 	bazelRBESecretValue = "${{ secrets.RBE_WEST_EXECUTOR != '' }}"
+)
+
+// rbe-fork: the lanes' setup-bazel env that asks it for a certificate (modes
+// fork-ro and fork-rw only), and the mint's status URL the rbe job probes.
+const (
+	bazelForkRemoteValue = "${{ startsWith(needs.rbe.outputs.mode, 'fork-') && 'true' || '' }}"
+	bazelMintStatusURL   = "https://rbe-mint.ops.gascity.com:8444/v1/status?repo="
 )
 
 // The only triggers bazel.yml may have. pull_request_target (and
@@ -1550,23 +2536,105 @@ var bazelLaneGateIDs = map[string]string{
 	// pr-risk.yml's legacy jobs, like the embedded tier's).
 	bazelProxiedJobName: "BAZEL_PROXIED",
 	bazelServerJobName:  "BAZEL_SERVER_STORAGE",
+	// main.yml's integration jobs, required on PRs although their legacy
+	// twins run only on push to main: remotely on same-repo PRs, locally
+	// with the read-only cache (mode cache) on fork and Dependabot PRs.
+	bazelIntegJobName: "BAZEL_INTEGRATION",
+	// F3: never skippable on pr.yml (package-gates is always "on" there), so
+	// bazel-gate.sh's skip list never names them.
+	bazelPackageMCPJobName: "PACKAGE_MCP",
+	bazelPackageNPMJobName: "PACKAGE_NPM",
 }
 
-var bazelAdvisoryLanes = map[string]string{
-	bazelIntegJobName: "its legacy counterparts, main.yml's integration jobs, run only on push to main",
-}
+// None today: every lane is gated. Kept so a future lane that pr.yml's call
+// turns off has a place to record why.
+var bazelAdvisoryLanes = map[string]string{}
 
-// bazel-integration's if: remote only, and off when the caller passes
-// integration: "off" (pr.yml). A string input: on push and dispatch it is
-// null, and null != 'off', so the lane keeps running on main.
-const bazelIntegIf = "${{ needs.rbe.outputs.enabled == 'true' && inputs.integration != 'off' }}"
+// bazel-integration's if: remote (modes remote, fork-ro, fork-rw: enabled),
+// or local with the read-only cache (mode cache: fork and Dependabot PRs
+// while rbe-fork is closed, whose only PR-time integration run it is; a
+// warm run builds and tests only what the PR changed), never plain local
+// (rbe=off: a cold tagged race build of //... on one runner); and off when a
+// caller passes integration: "off" (pr.yml and bazel-farm.yml pass "on"). A
+// string input: on push and dispatch it is null, and null != 'off', so the
+// lane keeps running on main.
+const bazelIntegIf = "${{ (needs.rbe.outputs.enabled == 'true' || needs.rbe.outputs.mode == 'cache') && inputs.integration != 'off' }}"
+
+// F3: package-mcp and package-npm's if. Unlike every other lane's, it does
+// not read the rbe job's outputs at all - only the caller's package-gates
+// input - so these two never skip because of execution mode, only because a
+// caller left package-gates at its default "off".
+const bazelPackageGatesIf = "${{ inputs.package-gates == 'on' }}"
+
+// F3: the package gates' runner. 4 vCPU, not bazel.yml's usual 2: pytest-xdist
+// -n 8 is pinned to measured timing on a 4 vCPU runner (tools/f3). Mode
+// remote only: the gates take no rbe-fork certificate, so fork modes
+// (enabled too) build bd with go build on a GitHub-hosted runner, as before.
+const bazelPackageRunsOn = "${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
+
+// F3: the rbe job's own runner (not gated by its own outputs - it decides
+// them). Same-repo PRs and merge_group/push/dispatch/schedule (never forks)
+// get Blacksmith; a pull_request_target farm run and any fork or Dependabot
+// PR stay GitHub-hosted. Pinned verbatim by TestSameRepoBlacksmithRunners.
+const wantRBERunsOn = "${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
+
+// The sameRepoBlacksmith{2,4,8}vcpu consts and the real-expression evaluator
+// that checks them now live in ci_blacksmith_runner_test.go (shared with
+// F7c; see that file's doc comment for the API F7c rebases onto).
+
+// F4 review SF-1: main.yml's windows-test-binaries-cache job seeds the same
+// cache keys/paths from both runner selections pr.yml's windows-test-binaries
+// job can land on (sameRepoBlacksmith8vcpu, defined in
+// ci_blacksmith_runner_test.go, for same-repo PRs/merge_group; ubuntu-latest
+// for forks/Dependabot). Blacksmith runners can't
+// see a GitHub-hosted runner's actions/cache entries (and vice versa) even
+// though both report the same runner.os/runner.arch, so a single-leg seeder
+// only ever warms one of the two consumer paths. matrix.runner (not a
+// literal Blacksmith label substituted directly into runs-on) keeps
+// actionlint from trying and failing to resolve an undeclared self-hosted
+// label: it treats this ternary form as a dynamic value and skips it, same
+// as every other Blacksmith runs-on in this repo.
+const mainWindowsTestBinariesCacheRunsOn = "${{ matrix.runner == 'blacksmith' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
+
+// F7c: used to define its own sameRepoBlacksmith4vcpu here (same expression
+// as sameRepoBlacksmith2vcpu with the 4 vCPU label, for advisory jobs that
+// compile Go: conformance.yml, regression.yml, migration-test.yml,
+// cross-version-smoke.yml, proxied-local-smoke.yml). F7a independently
+// defined the same const; both are now served by the single shared
+// sameRepoBlacksmith4vcpu in ci_blacksmith_runner_test.go. migration-test.yml's
+// historical-upgrades job uses sameRepoBlacksmith4vcpuNoble instead (below).
+
+// F7c review fix (B1): migration-test.yml's historical-upgrades job cannot
+// use the plain ubuntu-latest fallback that sameRepoBlacksmith4vcpu uses,
+// because the v0.55.4 fixture is dynamically linked against the ICU ABI
+// shipped by Ubuntu 24.04's libicu74 package, and GitHub's ubuntu-latest
+// label is scheduled to move from 24.04 to 26.04 starting 2026-10-19 (see
+// actions/runner-images#14748); 26.04 drops libicu74 entirely. The fallback
+// here is pinned to the literal `ubuntu-24.04` label instead so the
+// non-Blacksmith path keeps working after that migration regardless of when
+// it lands. Do not fold this back into sameRepoBlacksmith4vcpu.
+const sameRepoBlacksmith4vcpuNoble = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}"
+
+// F7b: venue-matrix runs-on for main.yml jobs that seed a Blacksmith GOCACHE
+// alongside their existing GitHub-hosted seed ("venue: [blacksmith, github]"):
+// pr-lint-wrapper, go-vet-cache, test-windows. blacksmith-go-build-cache needs
+// no fork/github fallback leg (main.yml only runs on push to main), so its
+// runs-on is a bare Blacksmith literal wrapped for actionlint, not a matrix.
+const mainVenueBlacksmithUbuntu4vcpuRunsOn = "${{ matrix.venue == 'blacksmith' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
+const mainVenueBlacksmithWindows4vcpuRunsOn = "${{ matrix.venue == 'blacksmith' && 'blacksmith-4vcpu-windows-2025' || 'windows-latest' }}"
+const mainBlacksmithGoBuildCacheRunsOn = "${{ 'blacksmith-4vcpu-ubuntu-2404' }}"
 
 // pr.yml's call of bazel.yml: exactly these inputs (review D1 v2 N3). An rbe
 // override would put every PR in local mode and ungate the embedded tier
-// while the gate stays self-consistent.
+// while the gate stays self-consistent; integration: "off" would drop the
+// required integration lane (explicit "on", so the pin and the gate
+// simulation, which reads these inputs, do not depend on the default).
 var bazelPRCallWith = map[string]string{
 	"build-artifact-name": "bazel-ci-build-artifacts",
-	"integration":         "off",
+	"integration":         "on",
+	// F3: only pr.yml opts in; bazel-farm.yml and nightly.yml keep the
+	// default "off" (TestBazelGateSimulation's other callers).
+	"package-gates": "on",
 }
 
 // The call's aggregate result (needs.bazel.result, through bazel-gate.sh).
@@ -1575,7 +2643,15 @@ const bazelAggregateGateID = "BAZEL"
 // The gate script and the rbe job's execution modes.
 const bazelGateScript = ".github/scripts/bazel-gate.sh"
 
-var bazelRBEModes = []string{"remote", "local", "skip"}
+var bazelRBEModes = []string{"remote", "fork-ro", "fork-rw", "cache", "local", "skip"}
+
+// bazelRemoteModes: the modes whose lanes execute on rbe-west (the rbe job's
+// enabled output is "true" in exactly these): remote with the CI secrets,
+// fork-ro and fork-rw with an rbe-fork-mint certificate.
+var bazelRemoteModes = map[string]bool{"remote": true, "fork-ro": true, "fork-rw": true}
+
+// bazelModeEnabled: the rbe job's enabled output for a mode.
+func bazelModeEnabled(mode string) string { return strconv.FormatBool(bazelRemoteModes[mode]) }
 
 // The four RBE secrets, the only ones a caller may hand bazel.yml.
 var bazelCallSecrets = map[string]string{
@@ -1630,22 +2706,42 @@ func TestBazelWorkflowJobsAndExecutionMode(t *testing.T) {
 	}
 	// Every lane needs the rbe job and takes its runner, skip rule and
 	// setup-bazel env from that job's outputs alone. Remote runs use the
-	// Blacksmith pool (the farm admits nothing else); local runs (forks,
-	// rbe=off, secret-less Dependabot runs) the GitHub-hosted runner.
-	const wantRunsOn = "${{ needs.rbe.outputs.enabled == 'true' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
+	// Blacksmith pool; fork modes (fork-ro/fork-rw: remote execution with an
+	// rbe-fork-mint certificate, the runner only a client), local and cache
+	// runs (forks while rbe-fork is closed, rbe=off/cache) the GitHub-hosted
+	// runner. Only mode remote gets the secrets; fork modes get
+	// BAZEL_FORK_REMOTE (setup-bazel mints the certificate), cache runs
+	// BAZEL_FORK_CACHE.
+	const wantRunsOn = "${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
 	// Local-capable lanes skip only in mode skip (same-repo, RBE_WEST_WORKERS
 	// unset); remote-only lanes (27 race processes and more, an hour or more
 	// on a GitHub-hosted runner, for tests the Go jobs already run there)
 	// skip unless remote.
 	const wantIf = "${{ needs.rbe.outputs.mode != 'skip' }}"
 	const wantRemoteOnlyIf = "${{ needs.rbe.outputs.enabled == 'true' }}"
-	gate := "needs.rbe.outputs.enabled == 'true' && "
-	wantSetupEnv := map[string]string{
+	gate := "needs.rbe.outputs.mode == 'remote' && "
+	// The package gates' setup-bazel (mode remote only, see
+	// bazelPackageRunsOn): the secrets, never a fork certificate.
+	wantPackageSetupEnv := map[string]string{
 		"BAZEL_REMOTE_EXECUTOR": "${{ " + gate + "secrets.RBE_WEST_EXECUTOR || '' }}",
 		"RBE_TLS_CERT":          "${{ " + gate + "secrets.RBE_TLS_CERT || '' }}",
 		"RBE_TLS_KEY":           "${{ " + gate + "secrets.RBE_TLS_KEY || '' }}",
 		"RBE_TLS_CA":            "${{ " + gate + "secrets.RBE_TLS_CA || '' }}",
 		"RBE_INSTANCE":          "${{ " + gate + "'oss' || '' }}",
+		"BAZEL_FORK_CACHE":      "${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}",
+	}
+	wantSetupEnv := copyMap(wantPackageSetupEnv)
+	wantSetupEnv["BAZEL_FORK_REMOTE"] = bazelForkRemoteValue
+	wantSetupEnv["RBE_FORK_TIER"] = "${{ needs.rbe.outputs.tier }}"
+	wantSetupEnv["RBE_FORK_PR"] = "${{ github.event.pull_request.number }}"
+	// F3: the rbe job itself runs on Blacksmith for same-repo PRs (and
+	// merge_group/push/dispatch/schedule, which are never forks); a
+	// pull_request_target farm run and any fork or Dependabot PR stay
+	// GitHub-hosted. Pinned again, verbatim, by TestSameRepoBlacksmithRunners.
+	if rbe, ok := workflow.Jobs[bazelRBEJobName]; !ok {
+		t.Fatalf("%s has no %s job", bazelWorkflowName, bazelRBEJobName)
+	} else if rbe.RunsOn != wantRBERunsOn {
+		t.Errorf("%s runs-on = %q, want %q", bazelRBEJobName, rbe.RunsOn, wantRBERunsOn)
 	}
 	for name, job := range workflow.Jobs {
 		if name == bazelRBEJobName {
@@ -1654,23 +2750,466 @@ func TestBazelWorkflowJobsAndExecutionMode(t *testing.T) {
 		if !reflect.DeepEqual([]string(job.Needs), []string{bazelRBEJobName}) {
 			t.Errorf("%s needs = %v, want [%s]", name, job.Needs, bazelRBEJobName)
 		}
-		if job.RunsOn != wantRunsOn {
-			t.Errorf("%s runs-on = %q, want %q", name, job.RunsOn, wantRunsOn)
+		// F3: the package gates use a 4 vCPU runner (pytest-xdist -n 8) and
+		// their own if (the caller's package-gates input, not the rbe job's
+		// mode - they never skip for execution-mode reasons).
+		wantJobRunsOn, wantJobIf, wantJobSetupEnv := wantRunsOn, wantIf, wantSetupEnv
+		if bazelPackageJobs[name] {
+			wantJobRunsOn, wantJobIf, wantJobSetupEnv = bazelPackageRunsOn, bazelPackageGatesIf, wantPackageSetupEnv
+		} else if bazelRemoteOnlyJobs[name] {
+			wantJobIf = wantRemoteOnlyIf
+		} else if name == bazelIntegJobName {
+			wantJobIf = bazelIntegIf
 		}
-		want := wantIf
-		if bazelRemoteOnlyJobs[name] {
-			want = wantRemoteOnlyIf
+		if job.RunsOn != wantJobRunsOn {
+			t.Errorf("%s runs-on = %q, want %q", name, job.RunsOn, wantJobRunsOn)
 		}
-		if name == bazelIntegJobName {
-			want = bazelIntegIf
-		}
-		if job.If != want {
-			t.Errorf("%s if = %q, want %q", name, job.If, want)
+		if job.If != wantJobIf {
+			t.Errorf("%s if = %q, want %q", name, job.If, wantJobIf)
 		}
 		for _, step := range job.Steps {
-			if step.Uses == "./"+setupBazelActionDir && !reflect.DeepEqual(step.Env, wantSetupEnv) {
-				t.Errorf("%s setup-bazel env = %v, want %v", name, step.Env, wantSetupEnv)
+			if step.Uses == "./"+setupBazelActionDir && !reflect.DeepEqual(step.Env, wantJobSetupEnv) {
+				t.Errorf("%s setup-bazel env = %v, want %v", name, step.Env, wantJobSetupEnv)
 			}
+		}
+	}
+}
+
+// F3: bazelPackageRunsOn's comment and the package-mcp job's 4 vCPU runner
+// are both premised on mcp_pytest() in package-mcp.sh passing an explicit
+// "-n 8" (not "-n auto", which would reintroduce the CPU-count/cgroup-quota
+// mismatch -n 8 was pinned to avoid), and on pytest-xdist itself being a
+// locked dev dependency so that worker count is reproducible across CI runs.
+// Neither half of that premise is checked by any other policy test, so pin
+// both here directly against the script and the MCP package's manifest/lock.
+func TestMCPPytestWorkerCountPinned(t *testing.T) {
+	root := sourceRepoRoot(t)
+	script := readPolicyFile(t, root, "scripts/ci/package-mcp.sh")
+	if !strings.Contains(script, "pytest -n 8") {
+		t.Errorf("scripts/ci/package-mcp.sh mcp_pytest() does not pass an explicit -n 8")
+	}
+	if strings.Contains(script, "-n auto") {
+		t.Errorf("scripts/ci/package-mcp.sh mcp_pytest() uses -n auto; want the pinned -n 8")
+	}
+	pyproject := readPolicyFile(t, root, "integrations/beads-mcp/pyproject.toml")
+	if !regexp.MustCompile(`(?m)^\s*"pytest-xdist[><=]`).MatchString(pyproject) {
+		t.Errorf("integrations/beads-mcp/pyproject.toml does not pin pytest-xdist as a dev dependency")
+	}
+	lock := readPolicyFile(t, root, "integrations/beads-mcp/uv.lock")
+	if !strings.Contains(lock, "name = \"pytest-xdist\"") {
+		t.Errorf("integrations/beads-mcp/uv.lock has no locked pytest-xdist entry; run uv lock")
+	}
+}
+
+// F3: package-mcp and package-npm's job definitions (including the very
+// detect step this script's output feeds) moved into bazel.yml, so a PR that
+// edits only bazel.yml's package-gate logic must still self-trigger both
+// gates the same way editing pr.yml/main.yml/pr-risk.yml does; otherwise a
+// change to the job that runs the gates could ship without the gates having
+// run against it. No other policy test reads this script's content.
+func TestDetectPackageGatesCoversBazelWorkflow(t *testing.T) {
+	root := sourceRepoRoot(t)
+	script := readPolicyFile(t, root, "scripts/ci/detect-package-gates.sh")
+	re := regexp.MustCompile(`(?s)scripts/ci/detect-package-gates\.sh\|[^)]*\)\s*\n\s*mcp_package=true\s*\n\s*npm_package=true`)
+	loc := re.FindString(script)
+	if loc == "" {
+		t.Fatalf("scripts/ci/detect-package-gates.sh has no case arm forcing both mcp_package and npm_package true alongside its own path")
+	}
+	if !strings.Contains(loc, ".github/workflows/bazel.yml") {
+		t.Errorf("scripts/ci/detect-package-gates.sh's both-gates case arm does not include .github/workflows/bazel.yml, where the package-mcp/package-npm job definitions now live")
+	}
+	// F3 review NIT-6: package-bazel-bd.sh packages the Bazel-built bd for
+	// both package-mcp and package-npm on the remote-execution path, so a
+	// change to it must run both gates too.
+	if !strings.Contains(loc, "scripts/ci/package-bazel-bd.sh") {
+		t.Errorf("scripts/ci/detect-package-gates.sh's both-gates case arm does not include scripts/ci/package-bazel-bd.sh, which both package gates use to package the Bazel-built bd")
+	}
+}
+
+// F3: the exact "same-repo PR, or merge_group" Blacksmith expression, pinned
+// once per job so a future edit cannot drift one copy from another. Reads no
+// repo variable, so the rollback is a plain revert. The rbe job's own
+// version additionally covers push, workflow_dispatch and schedule (never
+// forks); every other job below reads only merge_group and pull_request.
+func TestSameRepoBlacksmithRunners(t *testing.T) {
+	want := map[string]map[string]string{
+		// F7a: cache-free same-repo Linux jobs that restore no GitHub-saved
+		// build cache moved onto same-repo Blacksmith at their measured vCPU
+		// size (module-cache misses on the Blacksmith pool are acceptable
+		// per spec; jobs that need a Blacksmith-side build-cache saver are
+		// F7b's scope, not this one). windows-test-binaries is F4's Linux
+		// mingw cross-compile job, sized at 8vcpu like the cross-compilation
+		// matrix fold below.
+		"pr.yml": {
+			"bazel-coverage": sameRepoBlacksmith2vcpu, "ci-gate": sameRepoBlacksmith2vcpu,
+			"fast-checks":                            sameRepoBlacksmith2vcpu,
+			"advisory-reports":                       sameRepoBlacksmith2vcpu,
+			"test-dolt-server-fingerprint":           sameRepoBlacksmith2vcpu,
+			"check-doc-flags":                        sameRepoBlacksmith4vcpu,
+			"pr-policy-wrapper":                      sameRepoBlacksmith4vcpu,
+			"check-release-target-cross-compilation": sameRepoBlacksmith8vcpu,
+			"windows-test-binaries":                  sameRepoBlacksmith8vcpu,
+			// F7b: scripts-go-checks/pr-lint-wrapper moved to same-repo
+			// Blacksmith now that main.yml's blacksmith-go-build-cache and
+			// pr-lint-wrapper `venue` matrix seed their Blacksmith-selection
+			// GOCACHEs.
+			"scripts-go-checks": sameRepoBlacksmith4vcpu,
+			"pr-lint-wrapper":   sameRepoBlacksmith4vcpu,
+			// F7b: same-repo Blacksmith Windows (blacksmith-*vcpu-windows-2025,
+			// public beta). test-windows-liveness and worktree-remove-windows are
+			// sized at 4vcpu (a build plus a focused test run each);
+			// test-windows-small and the two "-prebuilt" twins (which only run an
+			// already-cross-compiled binary) are sized at 2vcpu; windows-make-shell
+			// is sized at 4vcpu (installs three separate Make toolchains). See the
+			// report's risk notes for test-windows-liveness (cgo/mingw on
+			// windows-2025, unverified) and windows-make-shell (Chocolatey
+			// preinstalled, unverified).
+			"test-windows-liveness":            sameRepoBlacksmithWindows4vcpu,
+			"worktree-remove-windows":          sameRepoBlacksmithWindows4vcpu,
+			"test-windows-small":               sameRepoBlacksmithWindows2vcpu,
+			"test-windows-liveness-prebuilt":   sameRepoBlacksmithWindows2vcpu,
+			"worktree-remove-windows-prebuilt": sameRepoBlacksmithWindows2vcpu,
+			"windows-make-shell":               sameRepoBlacksmithWindows4vcpu,
+			// F7b: mixed-OS matrix jobs using the "matrix marker" chained-ternary
+			// form (spec §2.1) instead of a flat same-repo ternary - see
+			// sameRepoPlatformsMatrixMarkerRunsOn's doc comment in
+			// scripts/ci_blacksmith_runner_test.go. (F7b review fix S1: an
+			// earlier revision additionally split pr-preflight-platforms' Windows
+			// leg into two `shard` matrix entries; that split was reverted as not
+			// measurably helpful, so this single map entry now covers exactly
+			// three matrix legs, one per OS.)
+			"check-doc-freshness-platforms": sameRepoPlatformsMatrixMarkerRunsOn,
+			"pr-preflight-platforms":        sameRepoPlatformsMatrixMarkerRunsOn,
+		},
+		"pr-risk.yml": {
+			"bazel-coverage": sameRepoBlacksmith2vcpu, "ci-gate": sameRepoBlacksmith2vcpu, "detect-ci-tier": sameRepoBlacksmith2vcpu,
+			"test-nix": sameRepoBlacksmith4vcpu,
+		},
+		bazelWorkflowName: {bazelRBEJobName: wantRBERunsOn},
+		// F7c: advisory workflows. Each compiles Go (or, for docsync/
+		// broken-links, is cheap enough to size at 2 vCPU per spec-f7.md
+		// §2.2) and moves to Blacksmith for same-repo PRs/merge_group only;
+		// forks, Dependabot and push stay on ubuntu-latest.
+		"conformance.yml":         {"conformance": sameRepoBlacksmith4vcpu},
+		"regression.yml":          {"regression": sameRepoBlacksmith4vcpu},
+		"migration-test.yml":      {"historical-upgrades": sameRepoBlacksmith4vcpuNoble},
+		"cross-version-smoke.yml": {"smoke": sameRepoBlacksmith4vcpu, "versions": sameRepoBlacksmith2vcpu},
+		"docs-mintlify.yml":       {"docsync": sameRepoBlacksmith2vcpu, "broken-links": sameRepoBlacksmith2vcpu},
+		"proxied-local-smoke.yml": {"managed-local-smoke": sameRepoBlacksmith4vcpu},
+		// main.yml's seeder job (B2, F7c implementation report) is the one
+		// Blacksmith job that is NOT gated by the same-repo-PR expression: it
+		// is push-to-main only (always trusted), so it wraps the literal
+		// label in a trivial expression instead (see the job's own comment).
+		// Tracked here so the "no other Blacksmith label leaks" sweep below
+		// also covers main.yml.
+		"main.yml": {
+			"blacksmith-setup-go-cache":   "${{ 'blacksmith-4vcpu-ubuntu-2404' }}",
+			"windows-test-binaries-cache": mainWindowsTestBinariesCacheRunsOn,
+			// F7b review (B2): these four push-to-main-only jobs seed the
+			// Blacksmith-selection GOCACHEs same-repo PR/merge_group jobs
+			// above restore from (pr-lint-wrapper/go-vet-cache/test-windows's
+			// "venue" matrix, blacksmith-go-build-cache's own single leg).
+			// Each is additionally guarded by a job-level
+			// github.event_name == 'push' && github.ref ==
+			// 'refs/heads/main' && github.repository == 'gastownhall/beads'
+			// if: (TestBlacksmithSaverJobsGuardedAgainstPullRequest below),
+			// matching F7c's own saver convention.
+			"pr-lint-wrapper":           mainVenueBlacksmithUbuntu4vcpuRunsOn,
+			"go-vet-cache":              mainVenueBlacksmithUbuntu4vcpuRunsOn,
+			"test-windows":              mainVenueBlacksmithWindows4vcpuRunsOn,
+			"blacksmith-go-build-cache": mainBlacksmithGoBuildCacheRunsOn,
+		},
+	}
+	// The two required gates' display names are a stable external contract
+	// (branch protection rule names) - moving them to Blacksmith must not
+	// rename them. Reviewed 2026-10-03: a rename of either survived every
+	// other policy test, since nothing else reads job.Name.
+	wantGateName := map[string]map[string]string{
+		"pr.yml":      {"ci-gate": "CI Gate / Required"},
+		"pr-risk.yml": {"ci-gate": "PR Risk Gate / Required"},
+	}
+	for file, jobs := range want {
+		workflow := readCIWorkflow(t, file)
+		for name, wantRunsOn := range jobs {
+			job, ok := workflow.Jobs[name]
+			if !ok {
+				t.Fatalf("%s has no %s job", file, name)
+			}
+			if job.RunsOn != wantRunsOn {
+				t.Errorf("%s %s runs-on = %q, want %q", file, name, job.RunsOn, wantRunsOn)
+			}
+			if wantName := wantGateName[file][name]; wantName != "" && job.Name != wantName {
+				t.Errorf("%s %s name = %q, want %q", file, name, job.Name, wantName)
+			}
+			// F3: every job moved onto Blacksmith needs its own
+			// timeout-minutes - a hang there burns paid Blacksmith minutes,
+			// not just a free GitHub-hosted runner's default 360.
+			if job.TimeoutMinutes == 0 {
+				t.Errorf("%s %s has no timeout-minutes (now runs on Blacksmith for same-repo PRs)", file, name)
+			}
+		}
+	}
+	// No other job in pr.yml or pr-risk.yml may name a Blacksmith label beyond
+	// the ones enumerated in `want` above (F4 added windows-test-binaries).
+	// Same sweep for the F7c advisory workflows: nothing in them may name a
+	// Blacksmith label beyond the jobs listed in `want` above.
+	for _, file := range []string{
+		"pr.yml", "pr-risk.yml", "main.yml",
+		"conformance.yml", "regression.yml", "migration-test.yml",
+		"cross-version-smoke.yml", "docs-mintlify.yml", "proxied-local-smoke.yml",
+	} {
+		workflow := readCIWorkflow(t, file)
+		allowed := want[file]
+		for name, job := range workflow.Jobs {
+			if allowed[name] != "" {
+				continue
+			}
+			if strings.Contains(job.RunsOn, "blacksmith-") {
+				t.Errorf("%s job %s runs-on %q names a Blacksmith label; only %v may", file, name, job.RunsOn, allowed)
+			}
+		}
+	}
+}
+
+// TestBlacksmithJobsReadNoSecrets: F7a's rule that a job whose runs-on can
+// select a Blacksmith label never reads a secret, in any form (job env, job
+// if:, step env, step with:, step if:, or a step's run: body interpolating
+// ${{ secrets.X }}). Blacksmith's ternary already falls back to ubuntu-latest
+// for forks and Dependabot, but the no-secrets rule is a second, independent
+// backstop: even a same-repo Blacksmith run should never need repository
+// secrets for a cache-free, read-only check.
+//
+// Review N-4 (2026-10-03): this also now scans job.If and step.If, since a
+// conditional guarded on a secret (e.g. an if: expression testing
+// secrets.FOO) would otherwise slip past the env/with/run checks below. It
+// does not yet inspect
+// container/services credentials or resolve matrix markers in runs-on
+// (neither ciWorkflowJob field exists today); that is deferred to F7b, which
+// is where container/services and matrix-aware runs-on resolution land.
+func TestBlacksmithJobsReadNoSecrets(t *testing.T) {
+	secretRef := regexp.MustCompile(`\bsecrets\s*(\.|\[)`)
+	for _, file := range []string{"pr.yml", "pr-risk.yml"} {
+		workflow := readCIWorkflow(t, file)
+		for name, job := range workflow.Jobs {
+			if !strings.Contains(job.RunsOn, "blacksmith-") {
+				continue
+			}
+			if secretRef.MatchString(job.If) {
+				t.Errorf("%s job %s if %q reads a secret; Blacksmith-eligible jobs must not", file, name, job.If)
+			}
+			for k, v := range job.Env {
+				if secretRef.MatchString(v) {
+					t.Errorf("%s job %s env %s = %q reads a secret; Blacksmith-eligible jobs must not", file, name, k, v)
+				}
+			}
+			for _, step := range job.Steps {
+				if secretRef.MatchString(step.If) {
+					t.Errorf("%s job %s step %q if %q reads a secret", file, name, step.Name, step.If)
+				}
+				for k, v := range step.Env {
+					if secretRef.MatchString(v) {
+						t.Errorf("%s job %s step %q env %s = %q reads a secret", file, name, step.Name, k, v)
+					}
+				}
+				for k, v := range step.With {
+					if secretRef.MatchString(v) {
+						t.Errorf("%s job %s step %q with %s = %q reads a secret", file, name, step.Name, k, v)
+					}
+				}
+				if secretRef.MatchString(step.Run) {
+					t.Errorf("%s job %s step %q run reads a secret:\n%s", file, name, step.Name, step.Run)
+				}
+			}
+		}
+	}
+}
+
+// TestSameRepoBlacksmithExpressionSemantics now lives in
+// ci_blacksmith_runner_test.go, which evaluates the real
+// sameRepoBlacksmith{2,4,8}vcpu expression strings with a small GitHub
+// Actions expression evaluator instead of a hand-written Go mirror
+// (review SF-3). That file is shared with F7c.
+
+// TestPRCIGateFastChecksTokens pins pr.yml's F7a fold of five formerly
+// standalone jobs (check-build-tags, check-version-consistency,
+// check-migration-hygiene, check-no-beads-changes, fmt-check) into
+// fast-checks' five steps: each step's id, its outputs entry, and the
+// CI_GATE_REQUIRED token/env mapping that lets ci-gate still red the exact
+// same token a failing check reddened before the fold. It also pins the
+// FAST_CHECKS backstop token (the job's own .result), which gives ci-gate.sh
+// one clear line if the whole job is lost before any step reports.
+func TestPRCIGateFastChecksTokens(t *testing.T) {
+	pr := readCIWorkflow(t, "pr.yml")
+	job := pr.job(t, "fast-checks")
+	gate := pr.job(t, "ci-gate")
+	gateStep := gate.step(t, "Evaluate CI gate")
+	required := strings.Fields(gateStep.Env["CI_GATE_REQUIRED"])
+
+	if !contains(gate.Needs, "fast-checks") {
+		t.Errorf("ci-gate does not need fast-checks: %v", gate.Needs)
+	}
+	if !contains(required, "FAST_CHECKS") || gateStep.Env["FAST_CHECKS"] != "${{ needs.fast-checks.result }}" {
+		t.Errorf("ci-gate does not require fast-checks' own result as the FAST_CHECKS backstop: required=%v env=%q", required, gateStep.Env["FAST_CHECKS"])
+	}
+
+	// stepID -> (job output name, CI_GATE_REQUIRED token).
+	mapping := map[string]struct{ output, token string }{
+		"build-tags":          {"build-tags", "CHECK_BUILD_TAGS"},
+		"version-consistency": {"version-consistency", "CHECK_VERSION_CONSISTENCY"},
+		"migration-hygiene":   {"migration-hygiene", "CHECK_MIGRATION_HYGIENE"},
+		"no-beads-changes":    {"no-beads-changes", "CHECK_NO_BEADS_CHANGES"},
+		"fmt":                 {"fmt", "FMT_CHECK"},
+	}
+	for stepID, m := range mapping {
+		step := job.step(t, map[string]string{
+			"build-tags": "Check build-tag policy", "version-consistency": "Check all versions match",
+			"migration-hygiene": "Run migration hygiene checks", "no-beads-changes": "Check for .beads/issues.jsonl changes",
+			"fmt": "Check gofmt",
+		}[stepID])
+		wantIf := "${{ !cancelled() }}"
+		if stepID == "no-beads-changes" {
+			// pull_request-only, same as before the fold: merge_group has no
+			// base_ref to diff against. The CI_GATE_SKIPPED_OK allowlist
+			// below covers exactly that skip on merge_group runs.
+			wantIf = "${{ !cancelled() && github.event_name == 'pull_request' }}"
+		}
+		if step.ID != stepID || step.If != wantIf {
+			t.Errorf("fast-checks step %q: id %q, if %q; want id %q, if %q", step.Name, step.ID, step.If, stepID, wantIf)
+		}
+		wantOutput := "${{ steps." + stepID + ".outcome }}"
+		if job.Outputs[m.output] != wantOutput {
+			t.Errorf("fast-checks outputs.%s = %q, want %q", m.output, job.Outputs[m.output], wantOutput)
+		}
+		if !contains(required, m.token) {
+			t.Errorf("ci-gate CI_GATE_REQUIRED does not include %s", m.token)
+		}
+		wantEnv := "${{ needs.fast-checks.outputs." + m.output + " || 'skipped' }}"
+		if gateStep.Env[m.token] != wantEnv {
+			t.Errorf("ci-gate env %s = %q, want %q", m.token, gateStep.Env[m.token], wantEnv)
+		}
+	}
+	// CHECK_NO_BEADS_CHANGES's step only runs on pull_request; the gate's own
+	// run: script must still allow-list exactly that skip on merge_group,
+	// unchanged by the fold.
+	if !strings.Contains(gateStep.Run, `skipped_ok="CHECK_NO_BEADS_CHANGES"`) {
+		t.Error("ci-gate run script no longer allow-lists CHECK_NO_BEADS_CHANGES's merge_group skip")
+	}
+
+	// Review N-6 (2026-10-03): pin the folded steps' actual commands/env, not
+	// just their id/if/output/token wiring. These three gaps predate F7a (the
+	// standalone jobs were never pinned either), but fast-checks is now one
+	// job, so the cost of covering them here is marginal.
+	buildTags := job.step(t, "Check build-tag policy")
+	for _, want := range []string{
+		"./scripts/check-build-tags.sh",
+		"./scripts/check-go-install-guidance.sh",
+		"./scripts/check-winget-portable-alias.sh",
+	} {
+		if !strings.Contains(buildTags.Run, want) {
+			t.Errorf("fast-checks build-tags step run does not call %s:\n%s", want, buildTags.Run)
+		}
+	}
+	migrationHygiene := job.step(t, "Run migration hygiene checks")
+	const wantBaseSHA = "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}"
+	if migrationHygiene.Env["BASE_SHA"] != wantBaseSHA {
+		t.Errorf("fast-checks migration-hygiene step env BASE_SHA = %q, want %q", migrationHygiene.Env["BASE_SHA"], wantBaseSHA)
+	}
+}
+
+// Review N-6 (2026-10-03): test-windows-small's dbproxy-server leg must keep
+// building CGO-disabled, same as before the fold.
+func TestPRWindowsSmallDbproxyServerIsCGODisabled(t *testing.T) {
+	pr := readCIWorkflow(t, "pr.yml")
+	job := pr.job(t, "test-windows-small")
+	step := job.step(t, "Run dbproxy server package tests on Windows")
+	if step.Env["CGO_ENABLED"] != "0" {
+		t.Errorf("test-windows-small dbproxy-server step env CGO_ENABLED = %q, want \"0\"", step.Env["CGO_ENABLED"])
+	}
+}
+
+// stepContinueOnError reports whether a step's continue-on-error is truthy
+// (the field unmarshals as `any` because the YAML schema also allows an
+// expression string, which GitHub itself treats as whatever it evaluates to
+// - this test only cares about the literal `true` every current step uses).
+func stepContinueOnError(step ciWorkflowStep) bool {
+	v, ok := step.ContinueOnError.(bool)
+	return ok && v
+}
+
+// TestPRWindowsMakeShellLegsFailTheJob is review SF-1 (2026-10-03):
+// windows-make-shell is a required gate (WINDOWS_MAKE_SHELL). Before this
+// fix, every leg's install/exercise step carried continue-on-error and a
+// hand-written final step reconstructed the job's pass/fail from each step's
+// .outcome - two mutations (an aggregator that always exits 0, and one that
+// silently dropped the MSYS2 install check) both passed the suite, because
+// nothing pinned the aggregator's own correctness. The fix removes the
+// aggregator entirely: every step after checkout keeps `if: !cancelled()`
+// (so a failing leg does not stop later legs from attempting to run), but
+// only the Cygwin *setup* step (a flaky installer download, not a code
+// failure) may carry continue-on-error. Every other step's failure now fails
+// the job directly, with no hand-written logic in between to go stale.
+func TestPRWindowsMakeShellLegsFailTheJob(t *testing.T) {
+	pr := readCIWorkflow(t, "pr.yml")
+	// Only the install/exercise "leg" steps need `if: !cancelled()` (so a
+	// failing leg does not stop a later, independent leg from attempting to
+	// run) and the no-continue-on-error rule; checkout/setup steps that every
+	// leg depends on are deliberately left to run unconditionally.
+	legSteps := map[string][]string{
+		"windows-make-shell": {
+			"Install native GNU Make", "Set up MSYS2 GNU Make", "Set up Cygwin GNU Make",
+			"Warn when Cygwin setup was skipped by a download failure",
+			"Exercise native Windows Make", "Exercise MSYS2-hosted Make", "Exercise Cygwin-hosted Make",
+		},
+		"test-windows-small": {
+			"Run doltversion package tests on Windows", "Run dbproxy server package tests on Windows",
+		},
+	}
+	for jobName, names := range legSteps {
+		job := pr.job(t, jobName)
+		for _, name := range names {
+			step := job.step(t, name)
+			if !strings.Contains(step.If, "!cancelled()") {
+				t.Errorf("%s step %q if = %q, want it to contain !cancelled() so later legs still run after an earlier one fails", jobName, step.Name, step.If)
+			}
+			allowCOE := jobName == "windows-make-shell" && step.ID == "cygwin"
+			if stepContinueOnError(step) && !allowCOE {
+				t.Errorf("%s step %q (id %q) has continue-on-error; only windows-make-shell's Cygwin setup step may, so every other leg's failure reds the job directly", jobName, step.Name, step.ID)
+			}
+			if allowCOE && !stepContinueOnError(step) {
+				t.Errorf("%s Cygwin setup step lost continue-on-error; a flaky installer download would now fail the job", jobName)
+			}
+		}
+		for _, step := range job.Steps {
+			if strings.HasPrefix(step.Name, "Fail if") {
+				t.Errorf("%s still has a hand-written aggregator step %q; SF-1 replaced aggregators with per-step failure propagation", jobName, step.Name)
+			}
+			if step.ID != "cygwin" && stepContinueOnError(step) {
+				t.Errorf("%s step %q (id %q) has continue-on-error; only windows-make-shell's Cygwin setup step may", jobName, step.Name, step.ID)
+			}
+		}
+	}
+	// The aggregator's job outputs (native/msys2/cygwin) are gone too
+	// (review N-3): nothing reads them once ci-gate only needs the job's own
+	// .result.
+	windowsMakeShell := pr.job(t, "windows-make-shell")
+	if len(windowsMakeShell.Outputs) != 0 {
+		t.Errorf("windows-make-shell outputs = %v, want none (N-3: they were unused)", windowsMakeShell.Outputs)
+	}
+}
+
+// TestPRWindowsMakeShellSetupStepsHaveTimeouts is review SF-2 (2026-10-03):
+// the Cygwin and MSYS2 setup steps download third-party installers from the
+// network; a step timeout bounds how long a hang can block the later legs'
+// exercise steps behind it, instead of consuming the whole 30-minute job
+// timeout (which would also lose native/msys2 coverage, since their exercise
+// steps would never get a chance to run before the job-level cancel).
+func TestPRWindowsMakeShellSetupStepsHaveTimeouts(t *testing.T) {
+	pr := readCIWorkflow(t, "pr.yml")
+	job := pr.job(t, "windows-make-shell")
+	for _, name := range []string{"Set up MSYS2 GNU Make", "Set up Cygwin GNU Make"} {
+		step := job.step(t, name)
+		if step.TimeoutMinutes <= 0 {
+			t.Errorf("windows-make-shell step %q has no timeout-minutes", name)
 		}
 	}
 }
@@ -1805,14 +3344,21 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 			}
 			callers++
 			// A caller forwards the RBE secrets: it must never run in a
-			// fork's privileged context (review D1 v2 N5).
-			for _, trigger := range yamlMapKeys(readYAMLNode(t, filepath.Join(".github", "workflows", entry.Name())), "on") {
-				if trigger == "pull_request_target" || trigger == "workflow_run" {
+			// fork's privileged context (review D1 v2 N5). The one
+			// deliberate exception is bazel-farm.yml, whose pull_request_target
+			// run is limited to allowlisted fork authors and whose every
+			// security property TestBazelFarmWorkflowSecurity pins.
+			triggers := yamlMapKeys(readYAMLNode(t, filepath.Join(".github", "workflows", entry.Name())), "on")
+			for _, trigger := range triggers {
+				if trigger == "workflow_run" || (trigger == "pull_request_target" && entry.Name() != bazelFarmWorkflowName) {
 					t.Errorf("%s calls %s and has trigger %s; a caller may not run with secrets in a fork PR's context", entry.Name(), bazelWorkflowName, trigger)
 				}
 			}
-			if entry.Name() != "pr.yml" && entry.Name() != "nightly.yml" {
-				t.Errorf("%s job %s calls %s; only pr.yml (PRs) and nightly.yml may", entry.Name(), jobName, bazelWorkflowName)
+			if entry.Name() == bazelFarmWorkflowName && !reflect.DeepEqual(triggers, []string{"pull_request_target"}) {
+				t.Errorf("%s triggers = %v, want exactly [pull_request_target]", entry.Name(), triggers)
+			}
+			if entry.Name() != "pr.yml" && entry.Name() != "nightly.yml" && entry.Name() != bazelFarmWorkflowName {
+				t.Errorf("%s job %s calls %s; only pr.yml (PRs), nightly.yml and %s (trusted forks) may", entry.Name(), jobName, bazelWorkflowName, bazelFarmWorkflowName)
 			}
 			got := map[string]string{}
 			if m, ok := job.Secrets.(map[string]any); ok {
@@ -1825,8 +3371,8 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 			}
 		}
 	}
-	if callers != 2 {
-		t.Errorf("%d jobs call %s, want 2 (pr.yml, nightly.yml)", callers, bazelWorkflowName)
+	if callers != 3 {
+		t.Errorf("%d jobs call %s, want 3 (pr.yml, nightly.yml, %s)", callers, bazelWorkflowName, bazelFarmWorkflowName)
 	}
 
 	// The gate: needs the call and requires exactly BAZEL plus one id per
@@ -1838,9 +3384,19 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 	if !contains(gate.Needs, "bazel") {
 		t.Errorf("ci-gate needs = %v, want bazel", gate.Needs)
 	}
-	wantBazelIDs := []string{bazelAggregateGateID}
+	// Plus D2's decision and retirement checks (TestPRRiskDecisionMatchesBazelMode).
+	wantBazelIDs := []string{bazelAggregateGateID, prRiskCoverageGateID}
+	for _, r := range retiredTiers {
+		wantBazelIDs = append(wantBazelIDs, r.retiredID)
+	}
 	for lane, id := range bazelLaneGateIDs {
-		wantBazelIDs = append(wantBazelIDs, id)
+		// F3: package-mcp/package-npm's ids (PACKAGE_MCP, PACKAGE_NPM) do not
+		// follow the "BAZEL" naming convention the prefix filter below
+		// groups by - they predate bazel.yml and keep their names - so they
+		// are checked here but excluded from wantBazelIDs.
+		if !bazelPackageJobs[lane] {
+			wantBazelIDs = append(wantBazelIDs, id)
+		}
 		if want := "${{ needs.bazel.outputs." + lane + " || 'skipped' }}"; evaluate.Env[id] != want {
 			t.Errorf("ci-gate env %s = %q, want %q", id, evaluate.Env[id], want)
 		}
@@ -1891,7 +3447,10 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 		}
 	}
 
-	// Legacy jobs stay required: D1 adds, D2 removes.
+	// Legacy jobs stay required: D1 adds, D2 removes. (D2 lets
+	// pr-risk.yml's embedded, proxied and server Dolt test jobs, and
+	// build-embedded, skip where the gated lanes run remotely, but they stay
+	// required ids: TestPRRiskLegacyTiersDeferToBazelLanes.)
 	for id, job := range map[string]string{
 		"BUILD_ARTIFACTS":            "build-artifacts",
 		"PR_CORE_WRAPPER":            "pr-core-wrapper",
@@ -1906,7 +3465,7 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 	risk := readCIWorkflow(t, "pr-risk.yml")
 	riskGate := risk.job(t, "ci-gate")
 	riskRequired := strings.Fields(riskGate.step(t, "Evaluate CI gate").Env["CI_GATE_REQUIRED"])
-	for _, id := range []string{"BUILD_EMBEDDED", "TEST_EMBEDDED_STORAGE", "TEST_EMBEDDED_CONFORMANCE", "TEST_EMBEDDED_CMD"} {
+	for _, id := range []string{"BUILD_EMBEDDED", "TEST_EMBEDDED_STORAGE", "TEST_EMBEDDED_CONFORMANCE", "TEST_EMBEDDED_CMD", "TEST_PROXIED_CMD", "TEST_SERVER_STORAGE", "TEST_SERVER_STORAGE_FULL"} {
 		if !contains(riskRequired, id) {
 			t.Errorf("pr-risk.yml ci-gate no longer requires legacy %s", id)
 		}
@@ -1950,8 +3509,9 @@ func TestBazelCallConcurrencyDiffersFromCallers(t *testing.T) {
 			"github.event_name": event,
 			"github.ref":        "refs/pull/123/merge",
 			"github.event.pull_request.number || github.ref": "123",
+			"github.event.pull_request.number":               "123",
 		}
-		if event != "pull_request" {
+		if event != "pull_request" && event != "pull_request_target" {
 			ctx["github.ref"] = "refs/heads/gh-readonly-queue/main/pr-123"
 			ctx["github.event.pull_request.number || github.ref"] = ctx["github.ref"]
 		}
@@ -1963,13 +3523,13 @@ func TestBazelCallConcurrencyDiffersFromCallers(t *testing.T) {
 			return v
 		})
 	}
-	for _, caller := range []string{"pr.yml", "nightly.yml"} {
+	for _, caller := range []string{"pr.yml", "nightly.yml", bazelFarmWorkflowName} {
 		callerGroup := group(caller)
 		if callerGroup == "" {
 			continue // no workflow-level group, nothing to collide with
 		}
 		name := yamlScalar(readYAMLNode(t, filepath.Join(".github", "workflows", caller)), "name")
-		for _, event := range []string{"pull_request", "merge_group", "push", "schedule", "workflow_dispatch"} {
+		for _, event := range []string{"pull_request", "pull_request_target", "merge_group", "push", "schedule", "workflow_dispatch"} {
 			if a, b := eval(bazelGroup, name, event), eval(callerGroup, name, event); a == b {
 				t.Errorf("%s event %s: %s's concurrency group %q equals the caller's; the call would deadlock", caller, event, bazelWorkflowName, a)
 			}
@@ -1984,14 +3544,22 @@ func bazelLaneRunModes(t *testing.T, lane, ifExpr string, with map[string]string
 	t.Helper()
 	switch ifExpr {
 	case "${{ needs.rbe.outputs.mode != 'skip' }}":
-		return map[string]bool{"remote": true, "local": true}
+		return map[string]bool{"remote": true, "fork-ro": true, "fork-rw": true, "cache": true, "local": true}
 	case "${{ needs.rbe.outputs.enabled == 'true' }}":
-		return map[string]bool{"remote": true}
+		return map[string]bool{"remote": true, "fork-ro": true, "fork-rw": true}
 	case bazelIntegIf:
 		if strings.EqualFold(with["integration"], "off") {
 			return map[string]bool{}
 		}
-		return map[string]bool{"remote": true}
+		return map[string]bool{"remote": true, "fork-ro": true, "fork-rw": true, "cache": true}
+	case bazelPackageGatesIf:
+		// F3: unlike every other lane, these two never skip because of the
+		// rbe job's decision - only because the caller turned them off
+		// entirely (pr.yml always passes "on").
+		if strings.EqualFold(with["package-gates"], "on") {
+			return map[string]bool{"remote": true, "fork-ro": true, "fork-rw": true, "cache": true, "local": true, "skip": true}
+		}
+		return map[string]bool{}
 	}
 	t.Fatalf("%s if = %q: teach bazelLaneRunModes which modes run it", lane, ifExpr)
 	return nil
@@ -2004,8 +3572,28 @@ type bazelGateScenario struct {
 	mode, enabled string            // the call's rbe-mode / rbe-enabled outputs
 	call          string            // needs.bazel.result
 	outputs       map[string]string // the lanes' outputs ("" = not reported)
-	wantPass      bool
-	wantMention   string // a red gate must name this id
+	// pr.yml's bazel-coverage job (D2): its outputs, per retiredTiers
+	// output name ("" = not reported), and its result ("" = success).
+	covered  map[string]string
+	coverage string
+	// Non-Bazel needs' results that differ from what the jobs' if: give
+	// (success, or skipped for pr.yml's legacy jobs that bazel-coverage
+	// retired, D2 step 3).
+	results     map[string]string
+	wantPass    bool
+	wantMention string // a red gate must name this id
+}
+
+// fastChecksLegacyJobNames: pr.yml's fast-checks job (F7a) output id -> the
+// standalone job name it replaced. Lets the gate simulation resolve
+// needs.fast-checks.outputs.* through the same prLegacyJobResult lookup
+// (and sc.results overrides) the pre-fold standalone jobs used.
+var fastChecksLegacyJobNames = map[string]string{
+	"build-tags":          "check-build-tags",
+	"version-consistency": "check-version-consistency",
+	"migration-hygiene":   "check-migration-hygiene",
+	"no-beads-changes":    "check-no-beads-changes",
+	"fmt":                 "fmt-check",
 }
 
 // runPRGateStep runs pr.yml's actual "Evaluate CI gate" step (its run block,
@@ -2028,8 +3616,34 @@ func runPRGateStep(t *testing.T, step ciWorkflowStep, sc bazelGateScenario) (boo
 		}
 		var got string
 		switch {
+		case m[1] == prRiskCoverageJobName && m[2] == "result":
+			got = sc.coverage
+			if got == "" {
+				got = "success"
+			}
+		case m[1] == prRiskCoverageJobName:
+			known := false
+			for _, r := range retiredTiers {
+				known = known || r.output == m[3]
+			}
+			if !known {
+				t.Fatalf("ci-gate env %s = %q: %s has no such tier output", key, value, prRiskCoverageJobName)
+			}
+			got = sc.covered[m[3]]
+		case m[1] == "fast-checks" && m[2] != "result":
+			// F7a: fast-checks folds five formerly-standalone jobs into one
+			// job's steps; ci-gate reads each step's outcome via the job's
+			// outputs instead of a separate job's .result. Resolve through
+			// the same prLegacyJobResult the standalone jobs used, keyed by
+			// their old job name, so sc.results overrides (and the default
+			// "success") work exactly as they did before the fold.
+			legacy, ok := fastChecksLegacyJobNames[m[3]]
+			if !ok {
+				t.Fatalf("ci-gate env %s = %q: fast-checks has no such step output", key, value)
+			}
+			got = prLegacyJobResult(legacy, sc)
 		case m[1] != "bazel" && m[2] == "result":
-			got = "success"
+			got = prLegacyJobResult(m[1], sc)
 		case m[1] != "bazel":
 			t.Fatalf("ci-gate env %s = %q: the gate simulation cannot evaluate it", key, value)
 		case m[2] == "result":
@@ -2056,9 +3670,10 @@ func runPRGateStep(t *testing.T, step ciWorkflowStep, sc bazelGateScenario) (boo
 // The gate over every execution mode (review D1 F3): the skip script allows
 // exactly the skips the lanes' own `if:`s produce in that mode, and for every
 // lane that should run, that lane alone skipped, failed or cancelled turns
-// pr.yml's actual gate step red, whatever the aggregate says. The advisory
-// integration lane's failure alone keeps it green; a missing or inconsistent
-// mode, or an aggregate failure no lane explains, turns it red.
+// pr.yml's actual gate step red, whatever the aggregate says (in mode remote
+// that includes the integration lane, which skips green in mode local); a
+// missing or inconsistent mode, or an aggregate failure no lane explains,
+// turns it red.
 func TestBazelGateSimulation(t *testing.T) {
 	requireHostTool(t, "bash")
 	root := sourceRepoRoot(t)
@@ -2082,7 +3697,7 @@ func TestBazelGateSimulation(t *testing.T) {
 			t.Errorf("gated lane %s does not run in pr.yml's call even in remote mode", name)
 		}
 	}
-	enabledFor := func(mode string) string { return strconv.FormatBool(mode == "remote") }
+	enabledFor := bazelModeEnabled
 
 	runScript := func(mode, enabled, arg string) string {
 		t.Helper()
@@ -2102,6 +3717,13 @@ func TestBazelGateSimulation(t *testing.T) {
 		var wantSkips []string
 		anyRuns := false
 		for lane, modes := range lanes {
+			// F3: bazel-gate.sh's skip list and its BAZEL aggregate are
+			// mode-derived only; it has never heard of package-mcp/npm
+			// (their own PACKAGE_MCP/PACKAGE_NPM scenarios are exercised
+			// below, by lane, not through this script).
+			if bazelPackageJobs[lane] {
+				continue
+			}
 			if modes[mode] {
 				anyRuns = true
 			} else if id, gated := bazelLaneGateIDs[lane]; gated {
@@ -2176,7 +3798,8 @@ func TestBazelGateSimulation(t *testing.T) {
 	// A missing or inconsistent decision (the rbe job failed, the call never
 	// started, or the outputs disagree) allows no skip and fails the gate.
 	for _, bad := range []struct{ mode, enabled string }{
-		{"", ""}, {"remote", "false"}, {"local", "true"}, {"skip", "true"}, {"remote", ""}, {"bogus", "false"}, {"REMOTE", "true"},
+		{"", ""}, {"remote", "false"}, {"local", "true"}, {"cache", "true"}, {"skip", "true"}, {"remote", ""}, {"bogus", "false"}, {"REMOTE", "true"}, {"CACHE", "false"},
+		{"fork-ro", "false"}, {"fork-rw", "false"}, {"fork-ro", ""}, {"FORK-RO", "true"}, {"fork", "true"}, {"fork-", "true"}, {"fork-rx", "true"},
 	} {
 		if got := runScript(bad.mode, bad.enabled, "skips"); got != "" {
 			t.Errorf("mode %q enabled %q: skips = %q, want none", bad.mode, bad.enabled, got)
@@ -2211,7 +3834,7 @@ func TestBazelGateSimulation(t *testing.T) {
 // (409) or a download pick the wrong file. So every run that calls bazel.yml
 // (with its own inputs) must not upload any name twice (review D1 F7).
 func TestBazelArtifactNamesUniqueInCallerRuns(t *testing.T) {
-	for _, caller := range []string{"pr.yml", "nightly.yml"} {
+	for _, caller := range []string{"pr.yml", "nightly.yml", bazelFarmWorkflowName} {
 		t.Run(caller, func(t *testing.T) {
 			uses := collectRunArtifactUploads(t, caller, nil, "")
 			var sawBazel bool
@@ -2375,6 +3998,7 @@ func TestBazelWorkflowActionsArePinned(t *testing.T) {
 	}
 	want := map[string]string{
 		setupNodeActionFamily:       setupNodeSHA,
+		setupPythonActionFamily:     setupPythonSHA,
 		"actions/checkout":          checkoutSHA,
 		setupGoActionFamily:         setupGoSHA,
 		cacheRestoreActionFamily:    cacheSHA,
@@ -2791,6 +4415,34 @@ func bazelRuleBlock(build, name string) string {
 	return build[start : i+end+3]
 }
 
+// bazelProxiedShardCount returns cmd/bd:bd_proxied_test's own shard_count
+// from cmd/bd/BUILD.bazel: the single source of truth for the Bazel-only
+// bazel-proxied lane's shard split, which no longer has to equal PR
+// Risk's/main.yml's legacy test-proxied-cmd jobs' matrix size (F2). Under
+// `bazel test`, scripts_test's runfiles hold no other package's BUILD file,
+// so this falls back to the literal the structural checks below pin under
+// plain `go test` (TestBazelDoltServerTiersMirrorPRRisk and
+// TestBazelRetiredLanesCheckListedTestsRan both fail if cmd/bd/BUILD.bazel's
+// shard_count ever drifts from this fallback).
+func bazelProxiedShardCount(t *testing.T) int {
+	t.Helper()
+	const bazelTestFallback = 30
+	if os.Getenv("TEST_SRCDIR") != "" {
+		return bazelTestFallback
+	}
+	root := sourceRepoRoot(t)
+	rule := bazelRuleBlock(readPolicyFile(t, root, "cmd/bd/BUILD.bazel"), "bd_proxied_test")
+	m := regexp.MustCompile(`(?m)^    shard_count = (\d+),$`).FindStringSubmatch(rule)
+	if m == nil {
+		t.Fatalf("cmd/bd:bd_proxied_test has no `shard_count = N,` in cmd/bd/BUILD.bazel:\n%s", rule)
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatalf("cmd/bd:bd_proxied_test shard_count: %v", err)
+	}
+	return n
+}
+
 // bazel-integration mirrors main.yml's integration jobs with the unmodified
 // --config=integration (whose .bazelrc filter and flags
 // TestBazelrcIntegrationLane pins): no extra filter, selector or remote
@@ -2800,12 +4452,39 @@ func bazelRuleBlock(build, name string) string {
 func TestBazelIntegrationJob(t *testing.T) {
 	workflow := readCIWorkflow(t, bazelWorkflowName)
 	job := workflow.job(t, bazelIntegJobName)
-	if job.TimeoutMinutes > 45 {
-		t.Errorf("%s timeout-minutes = %d; it runs remotely only, keep it near the step's 30", bazelIntegJobName, job.TimeoutMinutes)
-	}
 	test := job.step(t, "bazel test //... --config=integration")
-	if test.TimeoutMinutes == 0 || test.TimeoutMinutes >= job.TimeoutMinutes {
-		t.Errorf("%s test step timeout-minutes = %d, want set and below the job's %d", bazelIntegJobName, test.TimeoutMinutes, job.TimeoutMinutes)
+	// A required PR lane: the step must fit a cold compile (the first
+	// GitHub run took 17 minutes end to end) followed by the longest test
+	// action, which .bazelrc caps at its test:integration --test_timeout
+	// (rbe-west's 1200s limit). The job adds setup and log upload. In mode
+	// cache it runs on a 4-CPU GitHub-hosted runner, and with the read-only
+	// cache closed (the farm's kill switch) the whole suite builds and runs
+	// there cold, about 30 minutes simulated: the step keeps twice that.
+	const coldCompileMinutes = 20
+	const cacheClosedMinutes = 30
+	if test.TimeoutMinutes < 2*cacheClosedMinutes {
+		t.Errorf("%s test step timeout-minutes = %d, want at least %d (mode cache with the cache closed: ~%d minutes cold on a GitHub-hosted runner)",
+			bazelIntegJobName, test.TimeoutMinutes, 2*cacheClosedMinutes, cacheClosedMinutes)
+	}
+	actionCapMinutes := 0
+	for line := range bazelrcLines(t) {
+		if v, ok := strings.CutPrefix(line, "test:integration --test_timeout="); ok {
+			secs, err := strconv.Atoi(v)
+			if err != nil || secs <= 0 || secs > 1200 {
+				t.Fatalf(".bazelrc test:integration --test_timeout=%s, want one value of at most 1200 (rbe-west's cap)", v)
+			}
+			actionCapMinutes = (secs + 59) / 60
+		}
+	}
+	if actionCapMinutes == 0 {
+		t.Fatal(".bazelrc has no test:integration --test_timeout")
+	}
+	if want := coldCompileMinutes + actionCapMinutes; test.TimeoutMinutes < want {
+		t.Errorf("%s test step timeout-minutes = %d, want at least %d (cold compile %d + action cap %d)",
+			bazelIntegJobName, test.TimeoutMinutes, want, coldCompileMinutes, actionCapMinutes)
+	}
+	if job.TimeoutMinutes <= test.TimeoutMinutes || job.TimeoutMinutes > test.TimeoutMinutes+15 {
+		t.Errorf("%s timeout-minutes = %d, want above the test step's %d by at most 15", bazelIntegJobName, job.TimeoutMinutes, test.TimeoutMinutes)
 	}
 	cmd := regexp.MustCompile(`\s*\\\n\s*`).ReplaceAllString(test.Run, " ")
 	const wantCmd = `bazel test //... --config=integration --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?`
@@ -2948,7 +4627,7 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 	// is not race: bd_proxied_test (race, like PR Risk's) is the stricter of
 	// the two. Pinned so a change there is a decision, not drift.
 	mainYML := readCIWorkflow(t, "main.yml")
-	if run := mainYML.job(t, "build-artifacts").step(t, "Build reusable Linux artifacts").Run; !strings.Contains(run, `go test -tags "$BEADS_BUILD_TAGS" -c -o artifacts/bd-cmd-test ./cmd/bd`+"\n") {
+	if run := mainYML.job(t, "build-artifacts").step(t, "Build reusable Linux artifacts").Run; !strings.Contains(run, `go test -tags gms_pure_go -c -o artifacts/bd-cmd-test ./cmd/bd`+"\n") {
 		t.Errorf("main.yml build-artifacts no longer builds the non-race bd-cmd-test this tier is documented against (.bazelrc, cmd/bd:bd_proxied_test):\n%s", run)
 	}
 	if got := mainYML.job(t, "test-proxied-cmd").step(t, "Test proxied-server cmd shard").Env["BEADS_TEST_CMD_BINARY"]; got != "${{ github.workspace }}/ci-build-artifacts/bd-cmd-test" {
@@ -2964,15 +4643,38 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 
 	type shardTier struct {
 		workflow, job, step, script, binVar, pkg, target, env string
+		// noBuildShardPin is true when this tier's target's BUILD.bazel
+		// shard_count is allowed to differ from this workflow/job's own
+		// matrix size, because a separate Bazel-only lane shards that same
+		// target on its own manifest block (F2). Reading the expected value
+		// back out of the same BUILD.bazel file we are about to check would
+		// be tautological, so these tiers skip the `shard_count = N,`
+		// sub-assertion below entirely; the real cross-file pin for them
+		// lives in pr_risk_bazel_coverage_test.go, which ties BUILD.bazel's
+		// shard_count to bazel.yml's check_shard_coverage.py argument.
+		noBuildShardPin bool
 	}
 	tiers := []shardTier{
-		{"pr-risk.yml", "test-proxied-cmd", "Test proxied-server cmd shard", ".github/scripts/proxied-test-shard.sh", "BEADS_TEST_CMD_BINARY", "cmd/bd", "bd_proxied_test", "BEADS_TEST_PROXIED_SERVER"},
-		{"main.yml", "test-proxied-cmd", "Test proxied-server cmd shard", ".github/scripts/proxied-test-shard.sh", "BEADS_TEST_CMD_BINARY", "cmd/bd", "bd_proxied_test", "BEADS_TEST_PROXIED_SERVER"},
-		{"pr-risk.yml", "test-server-storage-full", "Test", ".github/scripts/server-storage-test-shard.sh", "BEADS_TEST_SERVER_TEST_BINARY", "internal/storage/dolt", "dolt_server_full_test", "BEADS_TEST_ENV_RUN_DOLT"},
+		// pr-risk.yml/main.yml's own "Test (Proxied Dolt Cmd N/15)" matrix
+		// stays 15 (the legacy, frozen bd-init-cost-proxy manifest block),
+		// but cmd/bd:bd_proxied_test's shard_count need not match: the
+		// Bazel-only bazel-proxied job (bazel.yml) runs that target with its
+		// own duration-balanced manifest block, not these jobs'. Shard k in
+		// one split is not shard k in the other; see cmd/bd/BUILD.bazel's
+		// bd_proxied_test comment and bazel.yml's bazel-proxied comment. Both
+		// matrices are still required (below, after this loop) to equal each
+		// other and the legacy manifest block's total.
+		{"pr-risk.yml", "test-proxied-cmd", "Test proxied-server cmd shard", ".github/scripts/proxied-test-shard.sh", "BEADS_TEST_CMD_BINARY", "cmd/bd", "bd_proxied_test", "BEADS_TEST_PROXIED_SERVER", true},
+		{"main.yml", "test-proxied-cmd", "Test proxied-server cmd shard", ".github/scripts/proxied-test-shard.sh", "BEADS_TEST_CMD_BINARY", "cmd/bd", "bd_proxied_test", "BEADS_TEST_PROXIED_SERVER", true},
+		{"pr-risk.yml", "test-server-storage-full", "Test", ".github/scripts/server-storage-test-shard.sh", "BEADS_TEST_SERVER_TEST_BINARY", "internal/storage/dolt", "dolt_server_full_test", "BEADS_TEST_ENV_RUN_DOLT", false},
 	}
+	proxiedMatrixLen := map[string]int{}
 	for _, c := range tiers {
 		j := readCIWorkflow(t, c.workflow).job(t, c.job)
 		shards := len(j.Strategy.Matrix.Shard)
+		if c.target == "bd_proxied_test" {
+			proxiedMatrixLen[c.workflow] = shards
+		}
 		step := j.step(t, c.step)
 		if want := "bash " + c.script + " ${{ matrix.shard }} " + strconv.Itoa(shards); strings.TrimSpace(step.Run) != want {
 			t.Errorf("%s %s runs %q, want %q", c.workflow, c.job, step.Run, want)
@@ -2983,17 +4685,21 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 		if os.Getenv("TEST_SRCDIR") != "" {
 			continue // scripts_test's runfiles hold no other package's BUILD
 		}
+		buildShards := shards
 		root := sourceRepoRoot(t)
 		rule := bazelRuleBlock(readPolicyFile(t, root, c.pkg+"/BUILD.bazel"), c.target)
-		for _, want := range []string{
+		want := []string{
 			`srcs = ["//tools/bazel:go_test_manifest_shard.sh"],`,
 			`"$(rootpath //:` + c.script + `)",`,
 			`"` + c.binVar + `",`,
-			"shard_count = " + strconv.Itoa(shards) + ",",
 			`timeout = "eternal",`,
-		} {
-			if !strings.Contains(rule, want) {
-				t.Errorf("%s:%s does not contain %q (%s %s):\n%s", c.pkg, c.target, want, c.workflow, c.job, rule)
+		}
+		if !c.noBuildShardPin {
+			want = append(want, "shard_count = "+strconv.Itoa(buildShards)+",")
+		}
+		for _, w := range want {
+			if !strings.Contains(rule, w) {
+				t.Errorf("%s:%s does not contain %q (%s %s):\n%s", c.pkg, c.target, w, c.workflow, c.job, rule)
 			}
 		}
 		mm := shardManifestDefault.FindStringSubmatch(readPolicyFile(t, root, c.script))
@@ -3006,6 +4712,13 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 				t.Errorf("%s:%s data lacks //:%s (without the manifest every shard falls back to hashing):\n%s", c.pkg, c.target, file, data)
 			}
 		}
+	}
+	// S1: pr-risk.yml's and main.yml's legacy test-proxied-cmd matrices must
+	// stay equal to each other (they share one frozen manifest block); a
+	// divergence must fail here even though cmd/bd:bd_proxied_test's own
+	// shard_count is no longer pinned to either of them (above).
+	if a, b := proxiedMatrixLen["pr-risk.yml"], proxiedMatrixLen["main.yml"]; a != b {
+		t.Errorf("pr-risk.yml test-proxied-cmd has %d shards, main.yml has %d; these share one legacy manifest block and must match", a, b)
 	}
 
 	conf := risk.job(t, "test-server-storage").step(t, "Test").Run
@@ -3065,7 +4778,7 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 	// pr.yml's gate requires it: bazelLaneGateIDs): not a step of
 	// bazel-doltserver (which also runs locally, and whose job a gate may
 	// require) or of bazel-integration (which a caller may switch off,
-	// although the server tier is a PR-time tier).
+	// while the server tier always runs remotely).
 	workflow := readCIWorkflow(t, bazelWorkflowName)
 	for _, c := range []struct{ job, config, logs string }{
 		{bazelProxiedJobName, "doltserver-proxied", "bazel-proxied-testlogs"},
@@ -3076,8 +4789,8 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 			t.Errorf("%s timeout-minutes = %d; it runs remotely only (longest shard ~2-8 min), keep it at most 30", c.job, job.TimeoutMinutes)
 		}
 		assertBazelTierStep(t, job, c.job, c.config)
-		if n := len(job.Steps); n != 6 {
-			t.Errorf("%s has %d steps, want checkout, setup-bazel, the tier, check_testcases.py, log upload, result recorder", c.job, n)
+		if n := len(job.Steps); n != 8 {
+			t.Errorf("%s has %d steps, want checkout, setup-bazel, the flaky query, the tier, check_testcases.py, check_shard_coverage.py, log upload, result recorder", c.job, n)
 		}
 		logs := job.step(t, "Upload test logs")
 		if logs.If != "${{ failure() && steps.test.outcome != 'skipped' }}" || logs.With["name"] != c.logs || !strings.HasPrefix(logs.Uses, "actions/upload-artifact@") {
@@ -3102,6 +4815,34 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 // runs the embedded variants race like the jobs' binaries, with the jobs'
 // parallelism; each shard variant runs its job's shard script with the job's
 // shard total, and the conformance variants pass the jobs' exact selectors.
+// bazel-embedded's test step, exactly (review F4).
+const bazelEmbeddedTestRun = `set -o pipefail
+start=$(date +%s)
+rc=0
+bazel test //... --config=embedded \
+  --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+  2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
+echo "bazel test --config=embedded: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
+exit "$rc"`
+
+// .bazelrc's --config=embedded, exactly and in order (review F4): no
+// --test_filter, no -test.short/-test.run/-test.skip, no retries, no
+// result caching. The conformance targets' own -test.run/-test.skip args
+// (the legacy jobs' partition) are checked against pr-risk.yml below.
+var bazelEmbeddedRCLines = []string{
+	"test:embedded --@rules_go//go/config:race",
+	"test:embedded --test_tag_filters=embedded",
+	"test:embedded --build_tests_only",
+	"test:embedded --keep_going",
+	"test:embedded --test_summary=terse",
+	"test:embedded --test_timeout=-1,-1,-1,1200",
+	"test:embedded --test_arg=-test.parallel=4",
+	"test:embedded --test_env=GO_TEST_WRAP_TESTV=1",
+	"test:embedded --remote_download_regex=.*/test\\.xml$",
+	"test:embedded --nocache_test_results",
+	"test:embedded --experimental_remote_cache_eviction_retries=0",
+}
+
 func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelEmbedJobName)
 	test := job.step(t, "bazel test //... --config=embedded")
@@ -3112,6 +4853,13 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		t.Errorf("embedded step selects remote-exec itself; setup-bazel's rc does that only when secrets are present")
 	}
 	assertTestStepKeepsExitStatus(t, test)
+	// Review F4: the exact command line. Since D2 step 1 this lane is the
+	// tier's only pre-merge run on same-repo PRs, so an extra flag (a
+	// --test_filter, a --test_arg=-test.short/-test.run/-test.skip) that
+	// quietly narrows it must be a reviewed edit of this test too.
+	if strings.TrimSpace(test.Run) != bazelEmbeddedTestRun {
+		t.Errorf("embedded step run changed; want exactly:\n%s\ngot:\n%s", bazelEmbeddedTestRun, test.Run)
+	}
 	// A shard with no tests assigned, or a selector that matches nothing,
 	// exits 0; the job fails on any target or shard whose test.xml lists none.
 	if !strings.Contains(test.Run, `--build_event_json_file="$RUNNER_TEMP/bazel-bep.json"`) {
@@ -3133,12 +4881,45 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		"test:embedded --test_tag_filters=embedded",
 		// The jobs pass no -parallel: GOMAXPROCS on 4-vCPU ubuntu-latest.
 		"test:embedded --test_arg=-test.parallel=4",
+		// The tier's only pre-merge run (D2 step 1) must execute, like the
+		// legacy jobs' -test.count=1, never replay a cached result.
+		"test:embedded --nocache_test_results",
 	} {
 		if !rc[want] {
 			t.Errorf(".bazelrc lacks %q", want)
 		}
 	}
+	// Review F4: --config=embedded is exactly these lines, in this order, and
+	// no unconfigured common/build/test line (which applies to every config)
+	// selects or narrows tests.
+	var embeddedLines []string
+	narrow := regexp.MustCompile(`test_filter|test_arg|-test\.(short|run|skip)|test_tag_filters|test_lang_filters|test_size_filters|test_timeout_filters`)
+	for _, line := range strings.Split(readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc"), "\n") {
+		line = strings.TrimSpace(line)
+		cmd, _, _ := strings.Cut(line, " ")
+		if strings.HasSuffix(cmd, ":embedded") {
+			embeddedLines = append(embeddedLines, line)
+		}
+		if (cmd == "common" || cmd == "build" || cmd == "test") && narrow.MatchString(line) {
+			t.Errorf(".bazelrc %q narrows every config's tests, including --config=embedded", line)
+		}
+	}
+	if !reflect.DeepEqual(embeddedLines, bazelEmbeddedRCLines) {
+		t.Errorf(".bazelrc --config=embedded lines changed; want exactly:\n%s\ngot:\n%s",
+			strings.Join(bazelEmbeddedRCLines, "\n"), strings.Join(embeddedLines, "\n"))
+	}
+	if gen := readPolicyFile(t, sourceRepoRoot(t), setupBazelActionDir+"/write-bazelrc.sh"); narrow.MatchString(gen) {
+		t.Errorf("setup-bazel's generated rc selects or narrows tests; it may only configure remote execution")
+	}
 	for line := range rc {
+		// Nothing turns result caching back on for the embedded lane (a
+		// later --cache_test_results wins over --nocache_test_results).
+		if !strings.HasPrefix(line, "#") && strings.Contains(line, "cache_test_results") &&
+			line != "test:embedded --nocache_test_results" && line != "test:docker --nocache_test_results" &&
+			line != "test:doltserver-proxied --nocache_test_results" && line != "test:doltserver-integration --nocache_test_results" &&
+			line != bazelSoleRunNoCacheLine {
+			t.Errorf(".bazelrc %q: only test:embedded and test:docker set test result caching", line)
+		}
 		if strings.HasPrefix(line, "test:embedded ") && (strings.Contains(line, "-test.short") || strings.Contains(line, "BEADS_TEST_SKIP")) {
 			t.Errorf(".bazelrc %q: the embedded jobs run without -short and BEADS_TEST_SKIP", line)
 		}
@@ -3188,10 +4969,19 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 				t.Errorf("%s:%s does not contain %q (pr-risk.yml %s):\n%s", c.pkg, c.target, want, c.job, rule)
 			}
 		}
+		// The script's -test.timeout=20m equals Bazel's 1200s action limit,
+		// which kills without a goroutine dump; 19m lets Go's fire first.
+		script := readPolicyFile(t, root, c.script)
+		if !strings.Contains(script, "-test.timeout=20m") {
+			t.Errorf("%s no longer passes -test.timeout=20m; revisit %s:%s's -test.timeout=19m", c.script, c.pkg, c.target)
+		}
+		if !strings.Contains(bazelAttrBlock(rule, "args"), `"-test.timeout=19m",`) {
+			t.Errorf("%s:%s must pass -test.timeout=19m after the script's own:\n%s", c.pkg, c.target, rule)
+		}
 		// The script and its manifest must be in the runfiles: without the
 		// manifest the script silently falls back to hash assignment, so
 		// every shard still passes but no longer runs its job's tests.
-		m := shardManifestDefault.FindStringSubmatch(readPolicyFile(t, root, c.script))
+		m := shardManifestDefault.FindStringSubmatch(script)
 		if m == nil {
 			t.Fatalf("%s has no ${BEADS_TEST_SHARD_MANIFEST:-...} default manifest", c.script)
 		}
@@ -3208,11 +4998,6 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		rule := bazelRuleBlock(readPolicyFile(t, sourceRepoRoot(t), "cmd/bd/BUILD.bazel"), "bd_embedded_test")
 		if !strings.Contains(rule, `"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd)"`) {
 			t.Errorf("cmd/bd:bd_embedded_test must run the race //cmd/bd:bd as BEADS_TEST_BD_BINARY:\n%s", rule)
-		}
-		// The script's -test.timeout=20m equals Bazel's 1200s action limit,
-		// which kills without a goroutine dump; 19m lets Go's fire first.
-		if !strings.Contains(bazelAttrBlock(rule, "args"), `"-test.timeout=19m",`) {
-			t.Errorf("cmd/bd:bd_embedded_test must pass -test.timeout=19m after the script's own:\n%s", rule)
 		}
 	}
 
@@ -3274,7 +5059,7 @@ func TestBazelPureJobMirrorsPureGoJob(t *testing.T) {
 		t.Errorf("%s PURE_CMD_BD_TESTS = %q, want pr.yml's -short -run selector %q", bazelPureJobName, job.Env["PURE_CMD_BD_TESTS"], m[1])
 	}
 	run := job.step(t, "Run pure-Go cmd/bd test subset (--config=pure)").Run
-	for _, required := range []string{"bazel test --config=pure //cmd/bd:bd_test", `"--test_arg=-test.run=$PURE_CMD_BD_TESTS"`, "(( n > 0 ))"} {
+	for _, required := range []string{"bazel test --config=pure " + bazelSoleRunArg + " //cmd/bd:bd_test", `"--test_arg=-test.run=$PURE_CMD_BD_TESTS"`, "(( n > 0 ))"} {
 		if !strings.Contains(run, required) {
 			t.Errorf("pure subset step does not contain %q:\n%s", required, run)
 		}
@@ -3545,22 +5330,27 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 	})
 }
 
-// The execution mode (remote, local, skip) is decided once, by the rbe job,
+// The execution mode (remote, cache, local, skip) is decided once, by the rbe job,
 // so a run cannot mix modes and no lane can drift from the others (review D1
 // F1/F5/F6): Dependabot PRs are same-repo but get no secrets, so a condition
 // on vars and fork alone sent them to the remote-only path with nothing to
-// run it. The job's one step reads nothing but four booleans, runs no
+// run it. The job's one step reads nothing but booleans, runs no
 // repository code, and its outputs are the workflow_call outputs.
 func TestBazelRBEJobDecidesOnce(t *testing.T) {
 	workflow := readCIWorkflow(t, bazelWorkflowName)
 	job := workflow.job(t, bazelRBEJobName)
-	if len(job.Needs) != 0 || job.If != "" || job.RunsOn != "ubuntu-latest" || len(job.Env) != 0 {
-		t.Errorf("%s: needs %v, if %q, runs-on %q, env %v; want no needs, if or env, on ubuntu-latest",
-			bazelRBEJobName, job.Needs, job.If, job.RunsOn, job.Env)
+	// F3: runs-on picks the *venue* (Blacksmith for trusted same-repo PRs,
+	// ubuntu-latest otherwise) - a separate concern from the RBE mode
+	// decision (remote/cache/local/skip), which still lives solely in the
+	// decide step's outputs below.
+	if len(job.Needs) != 0 || job.If != "" || job.RunsOn != wantRBERunsOn || len(job.Env) != 0 {
+		t.Errorf("%s: needs %v, if %q, runs-on %q, env %v; want no needs, if or env, on %q",
+			bazelRBEJobName, job.Needs, job.If, job.RunsOn, job.Env, wantRBERunsOn)
 	}
 	wantOutputs := map[string]string{
 		"enabled": "${{ steps.decide.outputs.enabled }}",
 		"mode":    "${{ steps.decide.outputs.mode }}",
+		"tier":    "${{ steps.decide.outputs.tier }}",
 	}
 	if !reflect.DeepEqual(job.Outputs, wantOutputs) {
 		t.Errorf("%s outputs = %v, want %v", bazelRBEJobName, job.Outputs, wantOutputs)
@@ -3570,10 +5360,15 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 	}
 	step := job.Steps[0]
 	wantEnv := map[string]string{
-		"RBE_VAR_ON":    "${{ vars.RBE_WEST_WORKERS == 'true' }}",
-		"RBE_INPUT_OFF": "${{ inputs.rbe == 'off' }}",
-		"FORK":          "${{ github.event.pull_request.head.repo.fork == true }}",
-		"HAS_EXECUTOR":  bazelRBESecretValue,
+		"RBE_VAR_ON":      "${{ vars.RBE_WEST_WORKERS == 'true' }}",
+		"RBE_INPUT_OFF":   "${{ inputs.rbe == 'off' }}",
+		"RBE_INPUT_CACHE": "${{ inputs.rbe == 'cache' }}",
+		"PULL_REQUEST":    prRiskPullRequestValue,
+		"FORK":            "${{ github.event.pull_request.head.repo.fork == true }}",
+		"DEPENDABOT":      prRiskDependabotValue,
+		"FORK_FARM":       bazelForkFarmValue,
+		"HAS_EXECUTOR":    bazelRBESecretValue,
+		"PR_NUMBER":       "${{ github.event.pull_request.number }}",
 	}
 	if step.ID != "decide" || step.Uses != "" || step.Shell != "" || len(step.With) != 0 || !reflect.DeepEqual(step.Env, wantEnv) {
 		t.Errorf("%s step: id %q, uses %q, shell %q, with %v, env %v; want id decide, a run step with env %v",
@@ -3604,92 +5399,247 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 	}
 
 	// Nothing outside the decision step re-derives the condition.
-	rederive := regexp.MustCompile(`(?i)vars\.RBE_WEST_WORKERS|inputs\.rbe\b|head\.repo\.fork|github\.actor|dependabot`)
+	rederive := regexp.MustCompile(`(?i)vars\.RBE_WEST_WORKERS|inputs\.rbe\b|inputs\.fork-farm|head\.repo\.fork|github\.actor|dependabot`)
 	walkYAML(readYAMLNode(t, filepath.Join(".github", "workflows", bazelWorkflowName)), "", func(path string, key bool, value string) {
-		if key || !rederive.MatchString(value) || strings.HasPrefix(path, ".jobs."+bazelRBEJobName+".steps[0].env.") {
+		// The decision step itself (its env and, since rbe-fork, its run:
+		// the DEPENDABOT fact) is the one place that may.
+		if key || !rederive.MatchString(value) || strings.HasPrefix(path, ".jobs."+bazelRBEJobName+".steps[0].env.") ||
+			path == ".jobs."+bazelRBEJobName+".steps[0].run" {
+			return
+		}
+		// F3: the rbe job's own runs-on picks a runner venue (Blacksmith vs
+		// ubuntu-latest) for trusted same-repo PRs; it shares some of the
+		// same trust predicates (github.actor, dependabot) as the mode
+		// decision but decides something else entirely (where the decide
+		// step runs, not what it decides) - not a re-derivation of mode.
+		if path == ".jobs."+bazelRBEJobName+".runs-on" {
+			return
+		}
+		// The checkout opt-in for fork code (TestBazelWorkflowForkFarmInputs
+		// pins it): a checkout input, not an execution-mode decision.
+		if value == bazelAllowUnsafeCheckout && strings.HasSuffix(path, ".with.allow-unsafe-pr-checkout") {
 			return
 		}
 		t.Errorf("%s: %s re-derives the execution mode (%q); read needs.rbe.outputs instead", bazelWorkflowName, path, value)
 	})
 
-	// The decision, for the facts GitHub evaluates the four env expressions
-	// on (its == is case-insensitive; a missing secret reads as '').
+	// The dispatch choices: on, cache (fork simulation) and off.
+	var dispatch struct {
+		On struct {
+			WorkflowDispatch struct {
+				Inputs map[string]struct {
+					Options []string `yaml:"options"`
+				} `yaml:"inputs"`
+			} `yaml:"workflow_dispatch"`
+		} `yaml:"on"`
+	}
+	if err := yaml.Unmarshal([]byte(readPolicyFile(t, sourceRepoRoot(t), ".github/workflows/"+bazelWorkflowName)), &dispatch); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := dispatch.On.WorkflowDispatch.Inputs["rbe"].Options, []string{"on", "cache", "off"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("workflow_dispatch rbe options = %v, want %v", got, want)
+	}
+
+	// The decision, for the facts GitHub evaluates the env expressions on
+	// (its == is case-insensitive; a missing secret reads as ''), and for
+	// fork and Dependabot pull_request runs what rbe-fork-mint's /v1/status
+	// answers (runBazelRBEDecision's curl stub; "" = unreachable).
 	type facts struct {
 		rbeVar, rbeInput, secret string
-		fork                     bool
+		fork, farm               bool
+		pr, dependabot           bool // event pull_request; github.actor dependabot[bot]
+		mint                     string
 	}
 	cases := []struct {
-		name          string
-		in            facts
-		mode, enabled string
+		name                string
+		in                  facts
+		mode, enabled, tier string
 	}{
-		{"same-repo PR with secrets", facts{"true", "", "grpcs://x", false}, "remote", "true"},
-		{"push to main", facts{"true", "", "grpcs://x", false}, "remote", "true"},
-		{"var in other case", facts{"True", "on", "grpcs://x", false}, "remote", "true"},
-		{"Dependabot PR (no secrets)", facts{"true", "", "", false}, "local", "false"},
-		{"fork PR", facts{"true", "", "", true}, "local", "false"},
-		{"fork PR, var unset", facts{"", "", "", true}, "local", "false"},
-		{"dispatch rbe=off", facts{"true", "off", "grpcs://x", false}, "local", "false"},
-		{"call rbe=OFF", facts{"true", "OFF", "grpcs://x", false}, "local", "false"},
-		{"same-repo, var unset", facts{"", "", "grpcs://x", false}, "skip", "false"},
-		{"Dependabot, var unset", facts{"", "", "", false}, "skip", "false"},
-		{"var false", facts{"false", "on", "grpcs://x", false}, "skip", "false"},
+		{"same-repo PR with secrets", facts{"true", "", "grpcs://x", false, false, true, false, ""}, "remote", "true", ""},
+		{"push to main", facts{"true", "", "grpcs://x", false, false, false, false, ""}, "remote", "true", ""},
+		{"var in other case", facts{"True", "on", "grpcs://x", false, false, false, false, ""}, "remote", "true", ""},
+		// Fork and Dependabot pull_request runs: rbe-fork decides. Open:
+		// remote execution with a mint certificate, tier ro or rw. Closed,
+		// refusing, unreachable or nonsense: local execution with the
+		// read-only cache, as before rbe-fork (rbe=cache simulates them);
+		// rbe=off drops the cache too.
+		{"fork PR, mint ro", facts{"true", "", "", true, false, true, false, "ro"}, "fork-ro", "true", "ro"},
+		{"fork PR, mint rw", facts{"true", "", "", true, false, true, false, "rw"}, "fork-rw", "true", "rw"},
+		{"fork PR, mint ro, var unset (forks cannot read it)", facts{"", "", "", true, false, true, false, "ro"}, "fork-ro", "true", "ro"},
+		{"fork PR somehow with the secret, mint ro", facts{"true", "", "grpcs://x", true, false, true, false, "ro"}, "fork-ro", "true", "ro"},
+		{"Dependabot PR, mint ro", facts{"true", "", "", false, false, true, true, "ro"}, "fork-ro", "true", "ro"},
+		{"Dependabot PR, var unset, mint ro", facts{"", "", "", false, false, true, true, "ro"}, "fork-ro", "true", "ro"},
+		{"fork PR, mint unreachable", facts{"true", "", "", true, false, true, false, ""}, "cache", "false", ""},
+		{"fork PR, mint closed", facts{"true", "", "", true, false, true, false, "closed"}, "cache", "false", ""},
+		{"fork PR, rw tier closed", facts{"true", "", "", true, false, true, false, "rw-closed"}, "cache", "false", ""},
+		{"fork PR, canary refuses", facts{"true", "", "", true, false, true, false, "canary"}, "cache", "false", ""},
+		{"fork PR, mint busy", facts{"true", "", "", true, false, true, false, "busy"}, "cache", "false", ""},
+		{"fork PR, mint answers garbage", facts{"true", "", "", true, false, true, false, "garbage"}, "cache", "false", ""},
+		{"fork PR, mint answers an unknown tier", facts{"true", "", "", true, false, true, false, "evil"}, "cache", "false", ""},
+		{"fork PR, var unset, mint unreachable", facts{"", "", "", true, false, true, false, ""}, "cache", "false", ""},
+		{"fork PR, var false, mint unreachable", facts{"false", "", "", true, false, true, false, ""}, "cache", "false", ""},
+		{"Dependabot PR, mint unreachable", facts{"true", "", "", false, false, true, true, ""}, "cache", "false", ""},
+		{"Dependabot, var unset, mint unreachable", facts{"", "", "", false, false, true, true, ""}, "cache", "false", ""},
+		{"dispatch rbe=cache", facts{"true", "cache", "grpcs://x", false, false, false, false, ""}, "cache", "false", ""},
+		{"dispatch rbe=cache, var unset", facts{"", "cache", "", false, false, false, false, ""}, "cache", "false", ""},
+		{"call rbe=CACHE", facts{"true", "CACHE", "grpcs://x", false, false, true, false, ""}, "cache", "false", ""},
+		{"fork PR rbe=cache, mint ro", facts{"true", "cache", "", true, false, true, false, "ro"}, "cache", "false", ""},
+		{"dispatch rbe=off", facts{"true", "off", "grpcs://x", false, false, false, false, ""}, "local", "false", ""},
+		{"call rbe=OFF", facts{"true", "OFF", "grpcs://x", false, false, true, false, ""}, "local", "false", ""},
+		{"fork PR rbe=off, mint ro", facts{"true", "off", "", true, false, true, false, "ro"}, "local", "false", ""},
+		{"same-repo, var unset", facts{"", "", "grpcs://x", false, false, true, false, ""}, "skip", "false", ""},
+		{"same-repo without the secret", facts{"true", "", "", false, false, true, false, ""}, "cache", "false", ""},
+		{"var false", facts{"false", "on", "grpcs://x", false, false, false, false, ""}, "skip", "false", ""},
+		// bazel-farm.yml's authorized fork runs: remote or nothing, never
+		// a second local run (pr.yml already runs one). Not a pull_request
+		// event, so the mint is never asked.
+		{"authorized fork farm", facts{"true", "", "grpcs://x", true, true, false, false, "ro"}, "remote", "true", ""},
+		{"authorized fork farm, var unset", facts{"", "", "grpcs://x", true, true, false, false, ""}, "skip", "false", ""},
+		{"authorized fork farm, no secret", facts{"true", "", "", true, true, false, false, ""}, "skip", "false", ""},
+		{"authorized fork farm, rbe=off", facts{"true", "off", "grpcs://x", true, true, false, false, ""}, "local", "false", ""},
+		// A fork run that is neither a pull_request nor authorized
+		// (pull_request_target without bazel-farm.yml's inputs) stays local.
+		{"fork, not authorized, secret", facts{"true", "", "grpcs://x", true, false, false, false, "ro"}, "cache", "false", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			env := map[string]string{
-				"RBE_VAR_ON":    strconv.FormatBool(strings.EqualFold(c.in.rbeVar, "true")),
-				"RBE_INPUT_OFF": strconv.FormatBool(strings.EqualFold(c.in.rbeInput, "off")),
-				"FORK":          strconv.FormatBool(c.in.fork),
-				"HAS_EXECUTOR":  strconv.FormatBool(c.in.secret != ""),
+				"RBE_VAR_ON":      strconv.FormatBool(strings.EqualFold(c.in.rbeVar, "true")),
+				"RBE_INPUT_OFF":   strconv.FormatBool(strings.EqualFold(c.in.rbeInput, "off")),
+				"RBE_INPUT_CACHE": strconv.FormatBool(strings.EqualFold(c.in.rbeInput, "cache")),
+				"PULL_REQUEST":    strconv.FormatBool(c.in.pr),
+				"FORK":            strconv.FormatBool(c.in.fork),
+				"DEPENDABOT":      strconv.FormatBool(c.in.dependabot),
+				"FORK_FARM":       strconv.FormatBool(c.in.farm),
+				"HAS_EXECUTOR":    strconv.FormatBool(c.in.secret != ""),
+				"PR_NUMBER":       "",
+				bazelTestMintEnv:  c.in.mint,
 			}
-			out, err := runBazelRBEDecision(t, step.Run, env)
+			if c.in.pr || c.in.farm {
+				env["PR_NUMBER"] = "7123"
+			}
+			out, log, err := runBazelRBEDecisionLog(t, step.Run, env)
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := map[string]string{"mode": c.mode, "enabled": c.enabled}
+			want := map[string]string{"mode": c.mode, "enabled": c.enabled, "tier": c.tier}
 			if !reflect.DeepEqual(out, want) {
 				t.Errorf("outputs = %v, want %v", out, want)
+			}
+			// The mint is asked exactly for fork and Dependabot
+			// pull_request runs not forced local or cache, about this run.
+			asked := c.in.pr && (c.in.fork || c.in.dependabot) && c.in.rbeInput == ""
+			if got := strings.Count(log, bazelMintStatusURL); got != map[bool]int{false: 0, true: 1}[asked] {
+				t.Errorf("mint status asked %d times, want %v:\n%s", got, asked, log)
+			}
+			if asked && !strings.Contains(log, bazelMintStatusURL+"beads&run=4242&attempt=2&pr=7123") {
+				t.Errorf("mint status URL does not name this run:\n%s", log)
+			}
+			// A closed gate drops the connection: each try gives up in 5 s.
+			if asked && !strings.Contains(log, "curl -sS --connect-timeout 5 --max-time 30 ") {
+				t.Errorf("mint status asked without --connect-timeout 5 --max-time 30:\n%s", log)
 			}
 		})
 	}
 	// A value that is not a boolean fails the job rather than picking a mode.
 	if out, err := runBazelRBEDecision(t, step.Run, map[string]string{
-		"RBE_VAR_ON": "true", "RBE_INPUT_OFF": "false", "FORK": "", "HAS_EXECUTOR": "true",
+		"RBE_VAR_ON": "true", "RBE_INPUT_OFF": "false", "RBE_INPUT_CACHE": "false", "PULL_REQUEST": "false", "FORK": "", "DEPENDABOT": "false", "FORK_FARM": "false", "HAS_EXECUTOR": "true",
 	}); err == nil {
 		t.Errorf("decision with FORK='' succeeded with %v; want failure", out)
 	}
+	if out, err := runBazelRBEDecision(t, step.Run, map[string]string{
+		"RBE_VAR_ON": "true", "RBE_INPUT_OFF": "false", "PULL_REQUEST": "false", "FORK": "false", "DEPENDABOT": "false", "FORK_FARM": "false", "HAS_EXECUTOR": "true",
+	}); err == nil {
+		t.Errorf("decision without RBE_INPUT_CACHE succeeded with %v; want failure", out)
+	}
+	// A fork pull_request run without a sane PR number fails rather than
+	// asking the mint about something else.
+	for _, n := range []string{"", "0", "12a", "1&repo=gascity", "1234567890"} {
+		if out, err := runBazelRBEDecision(t, step.Run, map[string]string{
+			"RBE_VAR_ON": "false", "RBE_INPUT_OFF": "false", "RBE_INPUT_CACHE": "false", "PULL_REQUEST": "true", "FORK": "true", "DEPENDABOT": "false",
+			"FORK_FARM": "false", "HAS_EXECUTOR": "false", "PR_NUMBER": n, bazelTestMintEnv: "ro",
+		}); err == nil {
+			t.Errorf("decision with PR_NUMBER %q succeeded with %v; want failure", n, out)
+		}
+	}
 }
 
+// bazelTestMintEnv selects runBazelRBEDecision's curl stub's answer for
+// rbe-fork-mint's /v1/status: ro, rw (open, that tier), closed, rw-closed
+// (open false; today's mint answers ro instead while rw is off), canary (403), busy (502), garbage, evil (open with a tier
+// that is neither), or anything else (connection refused, as while the
+// farm's gate is closed or DNS has no rbe-mint yet).
+const bazelTestMintEnv = "BAZEL_TEST_MINT"
+
+// bazelTestCurlStub stands in for curl on the decision step's PATH: it logs
+// its arguments and prints what the mint would. Its exit status is curl's
+// (no -f: HTTP errors still print the body and exit 0).
+const bazelTestCurlStub = `#!/usr/bin/env bash
+printf 'curl %s\n' "$*" >>"$BAZEL_TEST_CURL_LOG"
+open='"instance": "oss-fork", "endpoint": "grpcs://rbe-fork.ops.gascity.com:8444"'
+case "${BAZEL_TEST_MINT:-}" in
+ro) echo "{\"open\": true, \"tier\": \"ro\", $open, \"reason\": \"eligible\"}" ;;
+rw) echo '{"open": true, "tier": "rw", "instance": "oss", "endpoint": "grpcs://rbe-fork.ops.gascity.com:8444", "reason": "eligible"}' ;;
+closed) echo "{\"open\": false, \"tier\": \"ro\", $open, \"reason\": \"rbe-fork is closed\"}" ;;
+rw-closed) echo '{"open": false, "tier": "rw", "instance": "oss", "endpoint": "grpcs://rbe-fork.ops.gascity.com:8444", "reason": "the rw tier is closed"}' ;;
+canary) echo '{"error": "rbe-fork canary: this PR is not enabled yet"}' ;;
+busy) echo '{"error": "mint busy; retry later"}' ;;
+garbage) echo '<html>bad gateway</html>' ;;
+evil) echo '{"open": true, "tier": "admin", "instance": "", "endpoint": "grpcs://elsewhere:1"}' ;;
+*) echo "curl: (7) Failed to connect to rbe-mint.ops.gascity.com port 8444" >&2; exit 7 ;;
+esac
+`
+
 // runBazelRBEDecision runs the rbe job's step script under bash -e (as
-// GitHub's default shell) and returns its $GITHUB_OUTPUT.
+// GitHub's default shell) and returns its $GITHUB_OUTPUT. curl is
+// bazelTestCurlStub (env bazelTestMintEnv picks the mint's answer), so no
+// test reaches the network.
 func runBazelRBEDecision(t *testing.T, script string, env map[string]string) (map[string]string, error) {
+	t.Helper()
+	out, _, err := runBazelRBEDecisionLog(t, script, env)
+	return out, err
+}
+
+// runBazelRBEDecisionLog: runBazelRBEDecision, plus the stub's curl log.
+func runBazelRBEDecisionLog(t *testing.T, script string, env map[string]string) (map[string]string, string, error) {
 	t.Helper()
 	dir := t.TempDir()
 	output := filepath.Join(dir, "output")
+	bin := filepath.Join(dir, "bin")
+	curlLog := filepath.Join(dir, "curl.log")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "curl"), []byte(bazelTestCurlStub), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	cmd := exec.Command("bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script)
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GITHUB_OUTPUT=" + output, "GITHUB_STEP_SUMMARY=" + filepath.Join(dir, "summary")}
+	cmd.Env = []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"), "GITHUB_OUTPUT=" + output, "GITHUB_STEP_SUMMARY=" + filepath.Join(dir, "summary"),
+		"GITHUB_REPOSITORY=gastownhall/beads", "GITHUB_RUN_ID=4242", "GITHUB_RUN_ATTEMPT=2", "BAZEL_TEST_CURL_LOG=" + curlLog}
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
-	if b, err := cmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("%v: %s", err, b)
+	b, err := cmd.CombinedOutput()
+	logData, _ := os.ReadFile(curlLog)
+	if err != nil {
+		return nil, string(logData), fmt.Errorf("%v: %s", err, b)
 	}
 	data, err := os.ReadFile(output)
 	if err != nil {
-		return nil, err
+		return nil, string(logData), err
 	}
 	out := map[string]string{}
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		k, v, _ := strings.Cut(line, "=")
 		out[k] = v
 	}
-	return out, nil
+	return out, string(logData), nil
 }
 
-// write-bazelrc.sh: no secrets means a local-only rc (fork PRs), a partial set
-// fails, and the full set enables remote-exec with the key material and rc
-// outside the workspace and the runner cache.
+// write-bazelrc.sh: no secrets means a local-only rc, plus --config=fork-cache
+// with BAZEL_FORK_CACHE=true (fork PRs), a partial set (or the fork cache
+// with the secrets) fails, and the full set enables remote-exec with the key
+// material and rc outside the workspace and the runner cache.
 func TestSetupBazelRCWriter(t *testing.T) {
 	bash := requireHostTool(t, "bash")
 	script := filepath.Join(sourceRepoRoot(t), setupBazelActionDir, "write-bazelrc.sh")
@@ -3733,7 +5683,49 @@ func TestSetupBazelRCWriter(t *testing.T) {
 		if !strings.Contains(rc, "--repository_cache=") || strings.Contains(rc, "--disk_cache=") {
 			t.Errorf("local rc = %q; want --repository_cache and no --disk_cache (local runs never save it)", rc)
 		}
+		// The repo contents cache (extracted repos, never re-verified) would
+		// live in the runner cache: off.
+		if !strings.Contains(rc, "\ncommon --repo_contents_cache=\n") {
+			t.Errorf("rc = %q; want common --repo_contents_cache= (disabled)", rc)
+		}
+		if !strings.Contains(outputs, "cache=false") || strings.Contains(rc, "fork-cache") {
+			t.Errorf("outputs=%q rc=%q; want cache=false and no fork-cache line", outputs, rc)
+		}
 	})
+	t.Run("fork cache without secrets", func(t *testing.T) {
+		outputs, rc, logs, err := run(t, "BAZEL_FORK_CACHE=true")
+		if err != nil {
+			t.Fatalf("err=%v\n%s", err, logs)
+		}
+		if !strings.Contains(rc, "\nbuild --config=fork-cache\n") {
+			t.Errorf("rc = %q; want build --config=fork-cache", rc)
+		}
+		if strings.Contains(rc, "remote-exec") || strings.Contains(rc, "tls") || strings.Contains(rc, "--remote_") {
+			t.Errorf("rc = %q; the fork cache must add nothing but --config=fork-cache", rc)
+		}
+		if !strings.Contains(outputs, "remote=false") || !strings.Contains(outputs, "cache=true") {
+			t.Errorf("outputs = %q, want remote=false and cache=true", outputs)
+		}
+		if !strings.Contains(logs, "setup-bazel: read-only remote cache (rbe-cache); executing locally") {
+			t.Errorf("log lacks the read-only cache notice:\n%s", logs)
+		}
+	})
+	t.Run("rejects fork cache with the secrets", func(t *testing.T) {
+		_, rc, logs, err := run(t, "BAZEL_FORK_CACHE=true", executor, "RBE_TLS_CERT="+pem("CERTIFICATE"), "RBE_TLS_KEY="+pem("PRIVATE KEY"))
+		if err == nil || !strings.Contains(logs, "mutually exclusive") {
+			t.Errorf("err=%v, want failure naming the conflict:\n%s", err, logs)
+		}
+		if strings.Contains(rc, "remote_executor") || strings.Contains(rc, "fork-cache") {
+			t.Errorf("rc = %q after the conflict; want neither remote-exec nor fork-cache", rc)
+		}
+	})
+	for _, bad := range []string{"yes", "false", "1", "TRUE"} {
+		t.Run("rejects BAZEL_FORK_CACHE="+bad, func(t *testing.T) {
+			if _, _, logs, err := run(t, "BAZEL_FORK_CACHE="+bad); err == nil {
+				t.Errorf("want failure, got success:\n%s", logs)
+			}
+		})
+	}
 	for name, env := range map[string][]string{
 		"executor only":    {executor},
 		"cert and key":     {"RBE_TLS_CERT=" + pem("CERTIFICATE"), "RBE_TLS_KEY=" + pem("PRIVATE KEY")},
@@ -3762,8 +5754,8 @@ func TestSetupBazelRCWriter(t *testing.T) {
 		if strings.Contains(rc, "--disk_cache") || strings.Contains(rc, "--remote_instance_name") {
 			t.Errorf("rc sets --disk_cache or an instance nobody asked for:\n%s", rc)
 		}
-		if !strings.Contains(outputs, "remote=true") {
-			t.Errorf("outputs = %q, want remote=true", outputs)
+		if !strings.Contains(outputs, "remote=true") || !strings.Contains(outputs, "cache=false") || strings.Contains(rc, "fork-cache") {
+			t.Errorf("outputs = %q, want remote=true, cache=false and no fork-cache in the rc", outputs)
 		}
 		for _, want := range []string{"::add-mask::farm.invalid\n", "::add-mask::MIIBfakeCERTIFICATE\n", "::add-mask::MIIBfakePRIVATEKEY\n", "::add-mask::line2\n", "::warning title=RBE_INSTANCE not set::"} {
 			if !strings.Contains(logs, want) {
@@ -3831,8 +5823,8 @@ func TestBazelSyncStepPublishesPatch(t *testing.T) {
 		}
 	}
 	upload := job.step(t, "Upload BUILD sync patch")
-	if upload.If != "${{ always() && steps.sync.outcome == 'failure' }}" {
-		t.Errorf("patch upload if = %q; want it gated on the sync step's failure", upload.If)
+	if upload.If != "${{ always() && steps.sync.outcome == 'failure' && github.event_name != 'pull_request_target' }}" {
+		t.Errorf("patch upload if = %q; want it gated on the sync step's failure, never from %s's pull_request_target runs", upload.If, bazelFarmWorkflowName)
 	}
 	if upload.With["name"] != "bazel-sync-patch" || upload.With["path"] != "${{ runner.temp }}/bazel-sync-patch/" ||
 		upload.With["if-no-files-found"] != "ignore" {
@@ -4206,5 +6198,97 @@ func TestReleaseWorkflowRestoresNoCache(t *testing.T) {
 	}
 	if setupGo == 0 {
 		t.Fatal("release.yml has no setup-go step; update this test")
+	}
+}
+
+// Review F3: the gated Bazel lanes never retry a failing test. The legacy
+// jobs they mirror (and, since D2 step 1, replace for the embedded tier) ran
+// each test once, so a retry would hide a flaky failure no other job sees.
+// Nothing may set --flaky_test_attempts (or --runs_per_test_detects_flakes,
+// which reports a failed-then-passed test as FLAKY, not FAILED): not .bazelrc,
+// a workflow, setup-bazel's generated rc, or a tools/bazel wrapper; and no
+// BUILD file or macro may mark a target flaky = True (Bazel retries those up
+// to three times by default).
+func TestBazelGatedLanesNeverRetryFlakyTests(t *testing.T) {
+	if os.Getenv("TEST_SRCDIR") != "" {
+		t.Skip("scripts_test's runfiles hold no other package's BUILD files")
+	}
+	root := sourceRepoRoot(t)
+	retry := regexp.MustCompile(`flaky_test_attempts|runs_per_test_detects_flakes`)
+	// Any flaky = other than a literal False/0 (a variable or macro
+	// parameter could be True). bazel-embedded also asks Bazel itself
+	// (TestBazelEmbeddedQueriesFlakyTargets).
+	flakyAttr := regexp.MustCompile(`\bflaky\s*=\s*([^,)\s]+)`)
+	checked := 0
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, path)
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", ".beads":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil // bazel-* convenience symlinks
+		}
+		base := d.Name()
+		isBuild := base == "BUILD" || base == "BUILD.bazel" || strings.HasSuffix(base, ".bzl")
+		isRetrySurface := rel == ".bazelrc" || strings.HasPrefix(rel, ".github"+string(filepath.Separator)) ||
+			strings.HasPrefix(rel, filepath.Join("tools", "bazel")+string(filepath.Separator))
+		if !isBuild && !isRetrySurface {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		checked++
+		for i, line := range strings.Split(string(data), "\n") {
+			code := line
+			if j := strings.Index(code, "#"); j >= 0 && (isBuild || rel == ".bazelrc") {
+				code = code[:j]
+			}
+			if retry.MatchString(code) {
+				t.Errorf("%s:%d retries failing tests (%q); the gated lanes run each test once", rel, i+1, strings.TrimSpace(line))
+			}
+			if m := flakyAttr.FindStringSubmatch(code); isBuild && m != nil && m[1] != "False" && m[1] != "0" {
+				t.Errorf("%s:%d marks a target flaky (%q); Bazel would retry it", rel, i+1, strings.TrimSpace(line))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checked < 10 {
+		t.Fatalf("checked only %d files; is the repository root right?", checked)
+	}
+}
+
+// Every artifact bazel.yml uploads has a fixed name within its run, and a
+// job re-run ("Re-run failed jobs", the documented recovery for a Bazel lane
+// that hit a remote cache eviction or a flake) is the same workflow run:
+// upload-artifact v4+ refuses a second artifact of the same name there
+// (409 Conflict) unless overwrite is set, which would turn a passing retry
+// red. bazel-test uploads the bd package even after its tests fail.
+func TestBazelWorkflowUploadsSurviveJobReruns(t *testing.T) {
+	uploads := 0
+	for name, job := range readCIWorkflow(t, bazelWorkflowName).Jobs {
+		for _, step := range job.Steps {
+			if !strings.HasPrefix(step.Uses, "actions/upload-artifact@") {
+				continue
+			}
+			uploads++
+			if step.With["overwrite"] != "true" {
+				t.Errorf("%s step %q uploads %q without overwrite: true; a job re-run's upload would fail with 409", name, step.Name, step.With["name"])
+			}
+		}
+	}
+	if uploads < 8 {
+		t.Errorf("found %d upload steps in %s, want at least 8", uploads, bazelWorkflowName)
 	}
 }

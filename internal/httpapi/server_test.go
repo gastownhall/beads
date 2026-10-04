@@ -84,7 +84,7 @@ func (emptyDeps) GetIssueDependencyRecords(context.Context, []string) (map[strin
 // DetectCycleReport answers for a workspace with no cycles. Without it the
 // promoted method on the embedded nil interface panics, and the provider-backed
 // cycle route would 500 through the panic recovery rather than answering.
-func (emptyDeps) DetectCycleReport(context.Context) (issueops.CycleReport, error) {
+func (emptyDeps) DetectCycleReport(context.Context, issueops.DetectCyclesRequest) (issueops.CycleReport, error) {
 	return issueops.CycleReport{Cycles: []issueops.Cycle{}}, nil
 }
 
@@ -632,10 +632,10 @@ func TestCapabilitiesAdvertiseEveryImplementedOperation(t *testing.T) {
 		t.Fatal("the route table contributed no capabilities; this case would pass against a server that advertises nothing")
 	}
 	// The behavior tokens name no route, so the table walk above cannot reach
-	// them; project.enforce is advertised in the same list. It is spelled
-	// literally here to keep this an independent oracle rather than a second
-	// call to the code under test.
-	want = append(want, "project.enforce")
+	// them; project.enforce and issues.batchApplyLarge are advertised in the
+	// same list. Both are spelled literally here to keep this an independent
+	// oracle rather than a second call to the code under test.
+	want = append(want, "project.enforce", "issues.batchApplyLarge")
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		t.Errorf("capabilities = %v, want %v", got, want)

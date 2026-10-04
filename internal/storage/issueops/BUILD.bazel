@@ -121,6 +121,7 @@ go_library(
 go_test(
     name = "issueops_test",
     srcs = [
+        "aggregate_authorize_notes_test.go",
         "aggregate_authorize_transfer_test.go",
         "as_of_test.go",
         "batch_apply_test.go",
@@ -158,6 +159,7 @@ go_test(
         "label_rename_merged_count_test.go",
         "lease_replica_test.go",
         "metadata_test.go",
+        "prepare_timestamps_utc_test.go",
         "public_claim_test.go",
         "public_create_test.go",
         "public_hydration_test.go",
@@ -172,6 +174,7 @@ go_test(
         "search_goside_sort_test.go",
         "search_lite_merge_test.go",
         "search_missing_table_test.go",
+        "search_summary_merge_test.go",
         "search_test.go",
         "tree_walk_test.go",
         "update_closed_fields_test.go",

@@ -98,7 +98,7 @@ func TestEveryRawTxVersionScopeIsScopedOrExempt(t *testing.T) {
 	for key, f := range doltFns {
 		// In scope: a function that mints its own transaction AND hands it to a
 		// versioning mutator IN ITS OWN BODY. A function given a tx by
-		// withWriteTx/runDoltTransactionRecording inherits their scoping, and those two
+		// commitWriteTx/runDoltTransactionRecording inherits their scoping, and those two
 		// are covered by TestTxMintingWrappersScopeVersionedHistory below.
 		// Reachability is deliberately DIRECT, for the reasons the journal
 		// guard documents at length.
@@ -148,6 +148,7 @@ func TestEveryRawTxVersionScopeIsScopedOrExempt(t *testing.T) {
 // this second arm exists rather than being folded into the first.
 var txMintingWrappers = []string{
 	"DoltStore.runDoltTransactionRecording",
+	// withWriteTx and withRetryTx delegate transaction creation and scoping here.
 	"DoltStore.commitWriteTx",
 }
 

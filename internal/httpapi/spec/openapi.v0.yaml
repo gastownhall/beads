@@ -1789,12 +1789,13 @@ paths:
         ## Planes
 
 
-        A count is DURABLE-PLANE ONLY unless `include_infra` is set. The wisps
-        tier — ephemeral wisps and the `no_history` beads that are durable work
-        stored in that tier — is not counted by default, and `include_infra`
-        changes FOUR things at once rather than one. See that parameter; it is
-        the one place on this operation where a single flag moves the set in
-        more than one direction.
+        A count is DURABLE-PLANE ONLY unless `include_infra` or
+        `include_ephemeral` is set. The wisps tier — ephemeral wisps and the
+        `no_history` beads that are durable work stored in that tier — is not
+        counted by default. `include_ephemeral` admits that tier and changes
+        nothing else; `include_infra` admits it too but changes FOUR things at
+        once rather than one. See that parameter; it is the one place on this
+        operation where a single flag moves the set in more than one direction.
       parameters:
         - name: status
           in: query
@@ -2021,9 +2022,10 @@ paths:
             config load is what this role exists to keep off both front doors.
 
 
-            Unset, the count is durable-plane only and applies none of the four:
-            the historical `bd count` answer, kept exactly so a scripted caller
-            reads the same number it read yesterday.
+            Unset — and with `include_ephemeral` also unset — the count is
+            durable-plane only and applies none of the four: the historical
+            `bd count` answer, kept exactly so a scripted caller reads the same
+            number it read yesterday.
           schema:
             type: boolean
             default: false
@@ -2199,7 +2201,32 @@ paths:
 
         An EMPTY `patch` object is a `400`: a write that writes nothing is a
         client bug, the same judgement `issues:batchCreate` makes about an
-        empty `items`.
+        empty `items`. The one exception is an empty `patch` beside
+        `claim: true`, where the claim is the whole write.
+
+
+        ## Claim
+
+
+        `claim: true` claims the issue for `actor` IN THE SAME TRANSACTION as
+        the patch — what `bd update <id> --claim` does on the direct route,
+        through the same role, so eligibility, claim pools and the conflict
+        vocabulary are one definition. The claim sets `assignee` to `actor` and
+        `status` to `in_progress` first and the patch applies after it, so a
+        `patch.assignee` or `patch.status` overrides the claim's own value. An
+        issue already `in_progress` and held by `actor` is an idempotent
+        success (`changed: false` when the patch changes nothing either). A
+        refused claim writes NOTHING, the patch included. It cannot be
+        combined with `expected_assignee`, `expected_status` or
+        `force_assignee_transfer` — the claim is its own compare-and-set —
+        and it may be combined with `expected_version`, which is checked
+        before the claim.
+
+
+        A server that predates this member refuses it as an unknown member
+        (`400`, `reason: "unknown_parameter"`, `param: "claim"`) before any
+        database work, so a client can never mistake an older server for one
+        that dropped the claim.
 
 
         `labels` is COMPLETE REPLACEMENT. It is the only shape whose result the
@@ -2229,8 +2256,9 @@ paths:
         preconditions above, or the other's guard.
 
 
-        Three members carry policy, which is where this operation's `409`s come
-        from. `status` crossing into the workspace's done category answers to
+        Four members carry policy, which is where this operation's `409`s come
+        from. `claim` answers exactly as `{id}:claim` does (`already_claimed`,
+        `not_claimable`). `status` crossing into the workspace's done category answers to
         close policy (`not_closable`). `assignee` transferring away from a live
         foreign in-progress owner answers to the assignee fence
         (`already_claimed`). `parent_id` is a graph edit and answers to the
@@ -2313,7 +2341,8 @@ paths:
             value outside its documented bounds, `notes` together with
             `append_notes`, `metadata.replace` together with any other metadata
             edit, `force_assignee_transfer` without `patch.assignee` or beside
-            `expected_assignee`, a `patch.parent_id` naming the issue itself or
+            `expected_assignee`, `claim` beside `expected_assignee`,
+            `expected_status` or `force_assignee_transfer`, a `patch.parent_id` naming the issue itself or
             naming no issue this workspace holds — or a value this workspace's
             own validation refuses, such as an `issue_type` or `status` outside
             its configured vocabulary.
@@ -2335,10 +2364,19 @@ paths:
         '409':
           description: >-
             The request is well-formed and the STATE refuses it, and NOTHING WAS
-            WRITTEN. Five codes, each inherited from the operation that already
-            publishes it rather than minted here, and described in the four
+            WRITTEN. Six codes, each inherited from the operation that already
+            publishes it rather than minted here, and described in the
             paragraphs below — `dependency_cycle` and `dependency_exists` share
             one, because they are one member reaching the graph.
+
+
+            `already_claimed` and `not_claimable` with `param: "claim"` are a
+            refused `claim`, answered as `POST /v0/beads/issues/{id}:claim`
+            answers them: `already_claimed` when another actor holds the issue
+            (with the `assignee` extension member when the refusing transaction
+            reported the holder), `not_claimable` when its status is not
+            claimable (with `issue_status`). Nothing was written, the patch
+            included.
 
 
             `precondition_failed` is `expected_version`, `expected_status` or
@@ -2352,11 +2390,12 @@ paths:
             `not_closable` is close policy refusing a `patch.status` that
             crosses into the workspace's done category: open children, or a live
             blocker. `open_children` is attached for the first and withheld for
-            the second, so member presence tells them apart.
-            `force_close_policy` is the bypass.
+            the second, so member presence tells them apart; the second names
+            its blockers in `blockers`. `force_close_policy` is the bypass.
 
 
-            `already_claimed` is the assignee fence: a `patch.assignee` that
+            `already_claimed` with `param: "patch.assignee"` is the assignee
+            fence: a `patch.assignee` that
             transfers work away from a live foreign in-progress owner.
             `force_assignee_transfer` is the bypass and `expected_assignee` is
             the compare-and-set that replaces the fence outright. The `assignee`
@@ -2383,7 +2422,7 @@ paths:
             scheduling cycle, every time.
           x-bd-codes:
             [already_claimed, dependency_cycle, dependency_exists,
-             not_closable, precondition_failed]
+             not_claimable, not_closable, notes_overwrite_refused, precondition_failed]
           content:
             application/problem+json:
               schema:
@@ -3012,9 +3051,10 @@ paths:
 
         An unforced close is refused with `409` / `not_closable` when the issue
         has open children (the refusal carries `open_children`, the count the
-        refusing transaction observed) or a live blocker (no such member). The
-        MEMBER'S PRESENCE is the discriminator, so telling the two apart never
-        requires reading `detail`. Both refusals are the ROLE's, so `force`
+        refusing transaction observed) or a live blocker (no `open_children`;
+        the blockers themselves travel in `blockers`). The MEMBER'S PRESENCE is
+        the discriminator, so telling the two apart never requires reading
+        `detail`. Both refusals are the ROLE's, so `force`
         bypasses those two and nothing else — this endpoint cannot skip a guard
         by forgetting one exists.
 
@@ -3105,7 +3145,8 @@ paths:
 
             `not_closable`: close policy refused an unforced close — the issue
             has open children, carrying the `open_children` extension member, or
-            a live blocker, which carries none. Resend with `force: true` to
+            a live blocker, which carries no count and names the blockers in
+            `blockers`. Resend with `force: true` to
             bypass both. `force` does NOT bypass the guard above.
 
 
@@ -3800,12 +3841,19 @@ paths:
         ## What lands, and what it costs
 
 
-        `items` accepts at most 100 entries. The cap bounds how long one request
-        may hold a write transaction — it is not a statement about batch
-        semantics, and it is the bound the sibling batch operations already run
-        under. Split a larger plan; each request is atomic on its own, but note
-        that splitting it changes what the end gate can see, since the gate runs
-        over one request at a time.
+        `items` accepts at most 1000 entries (raised from 100; see the
+        `issues.batchApplyLarge` capability token on `ContextResponse`). The
+        cap bounds how long one request may hold a write transaction — it is
+        not a statement about batch semantics. A request over 100 items also
+        EXTENDS the effective request deadline to an operator-configured
+        ceiling (`bd serve --large-apply-ceiling`, 5 minutes by default)
+        instead of the ordinary small-request deadline, so a plan that
+        genuinely needs minutes to apply is not cut off mid-commit; a request
+        at or under 100 items keeps exactly the deadline — and the sibling
+        batch operations' bound — it has always had. Split a larger plan if
+        you must; each request is atomic on its own, but note that splitting
+        it changes what the end gate can see, since the gate runs over one
+        request at a time.
 
 
         ONE HISTORY ENTRY IS RECORDED FOR THE WHOLE REQUEST, attributed to
@@ -3954,9 +4002,9 @@ paths:
 
             `not_closable` is close policy refusing a `close` item, or an
             `update` whose `patch.status` crosses into the workspace's done
-            category: open children, or a live blocker. `close.force` and
-            `update.force_close_policy` are the per-item bypasses, and a forced
-            item never earns this.
+            category: open children (`open_children`), or a live blocker
+            (`blockers`). `close.force` and `update.force_close_policy` are the
+            per-item bypasses, and a forced item never earns this.
 
 
             `already_claimed` is the assignee fence: an `update` whose
@@ -3988,7 +4036,7 @@ paths:
             a malformed request.
           x-bd-codes:
             [already_claimed, already_exists, dependency_cycle,
-             dependency_exists, not_closable, precondition_failed]
+             dependency_exists, not_closable, notes_overwrite_refused, precondition_failed]
           content:
             application/problem+json:
               schema:
@@ -6671,6 +6719,47 @@ components:
             every such issue on a request that did not set `include_comments`.
             Without it, an absent `comments` key is ambiguous between "no
             comments" and "comments not included in this response".
+        unresolvable_dependencies:
+          type: integer
+          format: int64
+          description: >-
+            How many of `dependency_count`'s edges `dependencies` could not
+            represent, because the issue on the far end has no row in this
+            database — a cross-repo id or an `external:` reference. The edge is
+            real and correctly stored; only its far end is unreachable from
+            here, so the listing drops it while the count keeps it.
+
+
+            Without it the count reads as phantom: a caller sees
+            `dependency_count: 1` beside an absent `dependencies`, finds
+            nothing under that id anywhere, and concludes the count is wrong.
+            It is not — the edge record itself is readable, and on the CLI
+            `bd dep list <id> <id>` prints it.
+
+
+            ABSENT, NEVER ZERO, WHEN THERE IS NOTHING TO REPORT, and absent
+            too when the dependency read FAILED rather than came back short.
+            "Could not be represented" and "was never fetched" are different
+            facts and do not collapse into one member — the same distinction
+            `comments_omitted` draws.
+        unresolvable_dependents:
+          type: integer
+          format: int64
+          description: >-
+            The inbound counterpart of `unresolvable_dependencies`, on the same
+            terms.
+
+
+            Present only on a request that set `include_dependents`. Without
+            those rows `dependents` is absent by design, so a difference taken
+            against it would report every dependent the issue has as
+            unresolvable.
+
+
+            Note the plane disagreement this creates: `bd show` in text mode
+            reads dependents unconditionally and therefore always discloses
+            the inbound direction on stderr, while a client of this field sees
+            it only when it asked for `include_dependents`.
         epic_total_children:
           type: integer
         epic_closed_children:
@@ -7116,6 +7205,27 @@ components:
         average_lead_time_hours:
           type: number
           description: ALWAYS 0, for the reason above.
+        gate_issues:
+          type: integer
+          description: >-
+            Gate rows, which the default `bd list` suppresses on account of what
+            they are rather than on any filter the caller passed.
+
+
+            ALREADY INCLUDED in `total_issues`, which counts the database rather
+            than the listing — so this is a breakdown of that total, never an
+            addition to it. It is broken out so the two surfaces can be
+            reconciled instead of silently disagreeing about how many issues
+            exist.
+        template_issues:
+          type: integer
+          description: >-
+            Template rows, suppressed by the default `bd list` on the same terms
+            as `gate_issues` and likewise already counted in `total_issues`.
+
+
+            Do not sum the two: a row can be both a gate and a template, and
+            would be counted once in each.
     # The two cycle schemas are pinned like the seven above, and to the same end,
     # but to the canonical types in `issueops` rather than in `internal/types`:
     # the role's own result IS the CLI's `--json` element, so `bd dep cycles`
@@ -7346,12 +7456,26 @@ components:
             `dependencies.add`, `dependencies.remove`,
             `memories.list`, `memories.get`, `memories.remember`,
             `memories.forget`, `events.list`, `events.watch`,
-            `issues.casMetadata`; the one behavior token is `project.enforce`,
+            `issues.casMetadata`; the behavior tokens are `project.enforce`,
             which announces that a `Bd-Project-Id` stamp for the wrong workspace
-            is refused here rather than silently ignored. The list grows
-            additively, and an operation never appears here unless it is fully
-            implemented. This is how a client checks for an operation or a
-            behavior — never the version string.
+            is refused here rather than silently ignored, and
+            `issues.batchApplyLarge`, which announces that
+            `POST /v0/beads/issues:batchApply` accepts the RAISED envelope —
+            up to 1000 items (`ApplyBatchRequest.items.maxItems`), a 16 MiB
+            body, and (for a request over 100 items) a run budget that
+            EXTENDS to an operator-configured ceiling (`bd serve
+            --large-apply-ceiling`, 5 minutes by default) — rather than the
+            original 100-item, 4 MiB bound. The ceiling is a flat whole-run
+            budget, not a value scaled by item count: a 101-item request and a
+            1000-item request both get the same extended budget. A request at
+            or under 100 items is unaffected either way and keeps the
+            server's ordinary deadline exactly as before. A client that
+            checks for this token before sending a plan over 100 items learns
+            whether THIS server accepts it without paying for a round trip an
+            older server would refuse anyway. The list grows additively, and
+            an operation never appears here unless it is fully implemented.
+            This is how a client checks for an operation or a behavior —
+            never the version string.
 
 
             THIS LIST IS BUILD-LEVEL, NOT WORKSPACE-LEVEL. It says which
@@ -8693,7 +8817,7 @@ components:
         items:
           type: array
           minItems: 1
-          maxItems: 100
+          maxItems: 1000
           description: >-
             The items to apply, IN THE ORDER THEY ARE TO BE APPLIED. An empty
             array is a `400` rather than a successful no-op: a write request that
@@ -8701,10 +8825,20 @@ components:
             client whose own plan filtered to nothing silently stops writing.
 
 
-            The 100-item cap bounds how long one request may hold a write
-            transaction, not batch semantics. Split a larger plan; each request
-            is atomic on its own — but splitting it changes what the end gate
-            can see, since the gate runs over one request at a time.
+            The 1000-item cap (raised from 100; see the `issues.batchApplyLarge`
+            capability token on `ContextResponse`) bounds how long one request
+            may hold a write transaction, not batch semantics. A request over
+            100 items also EXTENDS the effective request deadline: the server
+            grants a flat, operator-configured ceiling (`bd serve
+            --large-apply-ceiling`, 5 minutes by default) instead of the
+            ordinary small-request deadline, so a plan that genuinely needs
+            minutes to apply is not cut off mid-commit. It never narrows: a
+            request at or under 100 items keeps exactly the deadline it has
+            always had. Split a larger plan if you must; each request is
+            atomic on its own — but splitting it changes what the end gate
+            can see, since the gate runs over one request at a time, and the
+            server itself never splits a plan you send it: a single `items`
+            array either commits in full or changes nothing.
 
 
             A per-item refusal names its offender as `items[i].kind.member`.
@@ -9071,6 +9205,18 @@ components:
             idempotent and needs no force. It requires `patch.assignee` — a
             request setting it without one is a `400` — and it must be false
             when `expected_assignee` is sent.
+        force_notes_overwrite:
+          type: boolean
+          default: false
+          description: >-
+            Bypasses ONLY the refusal on a `patch.notes` that would replace
+            existing non-empty notes with different non-empty content (an
+            explicit clear is not fenced). It requires
+            `patch.notes` — an item setting it without one is a `400` — and,
+            UNLIKE `force_assignee_transfer`, it has no `expected_assignee`
+            exemption: there is no compare-and-set that authorizes a notes
+            overwrite, so combining the two is legal and each answers its own
+            question.
 
     ApplyPatchBody:
       type: object
@@ -9122,7 +9268,10 @@ components:
           type: string
           description: >-
             Replaces the notes. Mutually exclusive with `append_notes`; sending
-            both is a `400`.
+            both is a `400`. Replacing EXISTING non-empty notes with
+            different non-empty content is refused with `409
+            notes_overwrite_refused` unless `force_notes_overwrite` is set; an
+            explicit clear (empty string) is not fenced.
         append_notes:
           type: string
           description: >-
@@ -9967,6 +10116,15 @@ components:
             PRESENCE is the discriminator between the two `not_closable`
             refusals, exactly as it is on a problem document: present means open
             children, absent means a live blocker.
+        blockers:
+          type: array
+          items:
+            $ref: '#/components/schemas/Blocker'
+          description: >-
+            With `not_closable` on the live-blocker refusal: the blockers that
+            refused THIS item, exactly as `Problem.blockers` carries them for
+            the single close, and optional for the same reason. Absent on a
+            successful item and on every other refusal.
         code:
           type: string
           description: >-
@@ -9987,6 +10145,31 @@ components:
             Prose for a refusal, never load-bearing and present only with
             `code`. It reflects the request and this server's own words rather
             than the role's message, for the reason `Problem.detail` gives.
+
+    Blocker:
+      type: object
+      required: [id, kind]
+      description: >-
+        One live blocker named by a blocked-issue refusal.
+      properties:
+        id:
+          type: string
+          description: >-
+            The blocker: a local issue id, or the full
+            `external:<project>:<capability>` reference.
+        kind:
+          type: string
+          description: >-
+            `local` for an issue this database holds, which clears when it
+            closes; `external` for an `external:` reference, which clears when
+            the named project ships the capability. The set may grow;
+            default-branch on unknown values.
+        type:
+          type: string
+          description: >-
+            The blocking edge's dependency type (`blocks`, `waits-for`,
+            `conditional-blocks`). ABSENT when the refusal did not report it,
+            which is the case for an `external:` blocker.
 
     CloseIssueRequest:
       type: object
@@ -10306,6 +10489,23 @@ components:
             lines.
         patch:
           $ref: '#/components/schemas/IssuePatchBody'
+        claim:
+          type: boolean
+          default: false
+          description: >-
+            Claims the issue for `actor` in the same transaction as `patch`:
+            `bd update <id> --claim`, served by the same role. The claim sets
+            `assignee` to `actor` and `status` to `in_progress`, then the patch
+            applies, so a `patch.assignee` or `patch.status` overrides the
+            claim's value. Eligibility is `{id}:claim`'s: a claimable status,
+            and unassigned, already held by `actor`, or held by a configured
+            claim pool. Held by `actor` and `in_progress` already is an
+            idempotent success. A refusal is `409 already_claimed` or `409
+            not_claimable` naming `claim`, and writes nothing — the patch
+            included. With `claim: true` the `patch` may be empty. It must not
+            be combined with `expected_assignee`, `expected_status` or
+            `force_assignee_transfer`; a request that does is a `400` naming
+            `claim`.
         expected_version:
           type: string
           description: >-
@@ -10369,6 +10569,18 @@ components:
             idempotent and needs no force. It requires `patch.assignee` — a
             request setting it without one is a `400` — and it must be false
             when `expected_assignee` is sent.
+        force_notes_overwrite:
+          type: boolean
+          default: false
+          description: >-
+            Bypasses ONLY the refusal on a `patch.notes` that would replace
+            existing non-empty notes with different non-empty content (an
+            explicit clear is not fenced). It requires
+            `patch.notes` — a request setting it without one is a `400` —
+            and, UNLIKE `force_assignee_transfer`, it has no
+            `expected_assignee` exemption: there is no compare-and-set that
+            authorizes a notes overwrite, so combining the two is legal and
+            each answers its own question.
 
     IssuePatchBody:
       type: object
@@ -10376,7 +10588,9 @@ components:
       description: >-
         The fields to write. Every member is optional and PRESENCE is the
         signal: a member present is written, a member absent is untouched. An
-        empty object is a `400` — a write that writes nothing is a client bug.
+        empty object is a `400` — a write that writes nothing is a client bug —
+        except on `updateIssue` beside `claim: true`, where the claim is the
+        write.
 
 
         This is a deliberate SUBSET of the fields an issue carries; the members
@@ -10409,7 +10623,10 @@ components:
           type: string
           description: >-
             Replaces the notes. Mutually exclusive with `append_notes`; sending
-            both is a `400`.
+            both is a `400`. Replacing EXISTING non-empty notes with
+            different non-empty content is refused with `409
+            notes_overwrite_refused` unless `force_notes_overwrite` is set; an
+            explicit clear (empty string) is not fenced.
         append_notes:
           type: string
           description: >-
@@ -10999,9 +11216,32 @@ components:
 
 
             PRESENT ONLY for the open-children refusal. The other
-            `not_closable` refusal is a live blocker and carries no such
-            member, so member presence — not prose — is how a client tells the
+            `not_closable` refusal is a live blocker and carries `blockers`
+            instead, so member presence — not prose — is how a client tells the
             two apart. Both are bypassed by `force`.
+        blockers:
+          type: array
+          items:
+            $ref: '#/components/schemas/Blocker'
+          description: >-
+            With `not_closable`, and ONLY on the live-blocker refusal: the live
+            blockers that refused the close, in the order the refusing check
+            reported them, read from the refusal's typed list rather than
+            parsed out of any message. Never present together with
+            `open_children`.
+
+
+            A client renders the direct CLI's sentence from it: `cannot close
+            blocked issue: <id> is blocked by [<b1> <b2> …]`, each blocker
+            spelled `id` when its `type` is absent or `blocks` and `id (type)`
+            otherwise — the sentence `detail` already begins with when this
+            member is present.
+
+
+            IT IS OPTIONAL. A refusal that could not name its blockers omits
+            it and keeps the generic `detail`; absence means "this refusal did
+            not name them", never "nothing blocks it". Re-read the issue's
+            dependencies then.
         existing_type:
           type: string
           description: >-

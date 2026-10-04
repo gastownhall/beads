@@ -200,6 +200,54 @@ func TestOpenChildrenCloseContractShape(t *testing.T) {
 	}
 }
 
+// TestBlockedErrorKeepsTheHistoricalSentence pins the compatibility half of the
+// typed refusal: its message is byte-identical to the fmt.Errorf every producer
+// used before it, so the direct and proxied CLI lines and `failed[].error` do
+// not move, while the list it prints is now typed.
+func TestBlockedErrorKeepsTheHistoricalSentence(t *testing.T) {
+	blockers := []string{"bd-2", "bd-3 (waits-for)", "bd-4 (conditional-blocks)", "external:remote:payments", "external:remote:pay (beta)"}
+	err := issueops.NewCloseBlockedError("bd-1", blockers)
+
+	legacy := fmt.Errorf("%w: %s is blocked by %v", issueops.ErrCloseBlocked, "bd-1", blockers)
+	if err.Error() != legacy.Error() {
+		t.Errorf("BlockedError = %q, want the historical %q", err.Error(), legacy.Error())
+	}
+	if !errors.Is(err, issueops.ErrCloseBlocked) {
+		t.Errorf("BlockedError does not match ErrCloseBlocked: %v", err)
+	}
+	var typed *issueops.BlockedError
+	if !errors.As(fmt.Errorf("close bd-1: %w", err), &typed) || typed.IssueID != "bd-1" {
+		t.Fatalf("errors.As through a wrap = %+v", typed)
+	}
+
+	want := []issueops.Blocker{
+		{ID: "bd-2", Type: "blocks"},
+		{ID: "bd-3", Type: "waits-for"},
+		{ID: "bd-4", Type: "conditional-blocks"},
+		{ID: "external:remote:payments"},
+		// A capability may end in a parenthesized suffix. The whole
+		// reference is the ID, and the external guard reports no type.
+		{ID: "external:remote:pay (beta)"},
+	}
+	// %#v, not %+v: Blocker implements String(), so the default verbs print
+	// the reassembled spelling — which round-trips even when the parse split
+	// an external reference wrongly, making got and want look identical.
+	if !reflect.DeepEqual(typed.Blockers, want) {
+		t.Errorf("Blockers = %#v, want %#v", typed.Blockers, want)
+	}
+	for i, blocker := range typed.Blockers {
+		if got := blocker.String(); got != blockers[i] {
+			t.Errorf("Blockers[%d].String() = %q, want the IsBlocked spelling %q", i, got, blockers[i])
+		}
+		if parsed := issueops.ParseBlocker(blocker.String()); parsed != blocker {
+			t.Errorf("ParseBlocker(String(%+v)) = %+v; the two must be inverses", blocker, parsed)
+		}
+		if got, wantExternal := blocker.External(), i >= 3; got != wantExternal {
+			t.Errorf("Blockers[%d].External() = %v, want %v", i, got, wantExternal)
+		}
+	}
+}
+
 func TestPublicDependencyConflictTypesRemainCanonical(t *testing.T) {
 	var typeConflict error = &issueops.DependencyTypeConflictError{}
 	var hierarchyConflict error = &issueops.DependencyHierarchyConflictError{}

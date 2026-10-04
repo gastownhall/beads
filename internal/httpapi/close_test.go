@@ -170,6 +170,92 @@ func TestCloseBlockedIsTheSameCodeWithoutTheCount(t *testing.T) {
 	}
 }
 
+// blockedCloseFixture is the typed refusal a store raises for bd-1 when a local
+// `blocks` edge, a local `waits-for` edge and an unsatisfied `external:`
+// reference all hold it — built by the same constructor the external guard
+// uses, over the []string spelling IsBlocked reports.
+func blockedCloseFixture() *issueops.BlockedError {
+	return issueops.NewCloseBlockedError("bd-1", []string{"bd-2", "bd-3 (waits-for)", "external:remote:payments"})
+}
+
+// blockedCloseSentence is what the direct route prints for that refusal before
+// its --force hint (closeDirectRefusal), and what `failed[].error` carries on
+// both CLI routes. It is transcribed rather than derived so a change to either
+// side's spelling fails here.
+const blockedCloseSentence = "cannot close blocked issue: bd-1 is blocked by [bd-2 bd-3 (waits-for) external:remote:payments]"
+
+// blockedCloseWire is the `blockers` member the fixture must travel as: every
+// blocker in the check's order, local ones with their edge type, and the
+// external one with `kind` external and no `type`, because the guard that
+// named it did not report one.
+const blockedCloseWire = `[{"id":"bd-2","kind":"local","type":"blocks"},` +
+	`{"id":"bd-3","kind":"local","type":"waits-for"},` +
+	`{"id":"external:remote:payments","kind":"external"}]`
+
+// assertBlockersMember checks a decoded `blockers` member against
+// blockedCloseWire, comparing re-encoded JSON so member order inside each
+// object does not matter and a missing or extra member does.
+func assertBlockersMember(t *testing.T, where string, member any) {
+	t.Helper()
+	if member == nil {
+		t.Fatalf("%s carries no blockers member; the typed refusal named three", where)
+	}
+	got, err := json.Marshal(member)
+	if err != nil {
+		t.Fatalf("re-encode %s blockers: %v", where, err)
+	}
+	if string(got) != blockedCloseWire {
+		t.Errorf("%s blockers = %s, want %s", where, got, blockedCloseWire)
+	}
+}
+
+// TestCloseBlockedNamesItsBlockers is the reason the live-blocker refusal is no
+// longer anonymous: a client must be able to say WHICH issues hold the close,
+// as the direct CLI does, without parsing prose. The list is the typed one the
+// refusing check filled, and `detail` opens with the direct route's sentence
+// built from it.
+func TestCloseBlockedNamesItsBlockers(t *testing.T) {
+	lifecycle := &roleLifecycle{closeErr: fmt.Errorf("close bd-1: %w", blockedCloseFixture())}
+	ts := newCloseServer(t, lifecycle)
+
+	resp := ts.closeIssue(t, closePath, `{"actor":"alice"}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", resp.StatusCode, readAll(t, resp))
+	}
+	body := decodeBody(t, resp)
+	if body["code"] != string(CodeNotClosable) {
+		t.Errorf("code = %v, want %s", body["code"], CodeNotClosable)
+	}
+	if _, present := body["open_children"]; present {
+		t.Errorf("the blocker refusal reported open_children: %v", body)
+	}
+	assertBlockersMember(t, "problem", body["blockers"])
+	if want := blockedCloseSentence + "; clear the blocker or close with force"; body["detail"] != want {
+		t.Errorf("detail = %q, want %q", body["detail"], want)
+	}
+}
+
+// TestCloseBlockedWithoutTheTypedListNamesNobody is the other side of the rule:
+// an error that only MENTIONS blockers in its message carries no member and the
+// generic detail, because the member is read from the typed list and never
+// scraped from prose.
+func TestCloseBlockedWithoutTheTypedListNamesNobody(t *testing.T) {
+	lifecycle := &roleLifecycle{closeErr: fmt.Errorf("%w: bd-1 is blocked by [bd-2]", issueops.ErrCloseBlocked)}
+	ts := newCloseServer(t, lifecycle)
+
+	resp := ts.closeIssue(t, closePath, `{"actor":"alice"}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", resp.StatusCode, readAll(t, resp))
+	}
+	body := decodeBody(t, resp)
+	if got, present := body["blockers"]; present {
+		t.Errorf("blockers = %v; it was scraped from the message rather than read from the typed list", got)
+	}
+	if want := "issue is blocked; clear the blocker or close with force"; body["detail"] != want {
+		t.Errorf("detail = %q, want the generic %q", body["detail"], want)
+	}
+}
+
 // TestCloseUnknownIDIs404 keeps the miss on the shape the document already
 // describes rather than inventing one for this operation.
 func TestCloseUnknownIDIs404(t *testing.T) {
