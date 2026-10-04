@@ -152,3 +152,15 @@ func (s *DoltStore) CurrentAddressFor(ctx context.Context, storeID, oldAddress s
 	}
 	return address, nil
 }
+
+// BumpEpochCarrying is the token-scheme-change bump. Stub: it advances the
+// counter as BumpEpoch does and carries nothing yet.
+func (s *DoltStore) BumpEpochCarrying(ctx context.Context, storeID, reason string) (int, error) {
+	return s.BumpEpoch(ctx, storeID, reason)
+}
+
+// LoseVersion records that storeID no longer serves the Version named by
+// address. Stub: not implemented yet.
+func (s *DoltStore) LoseVersion(_ context.Context, storeID, address string) error {
+	return fmt.Errorf("loss of %s for %s: not implemented", address, storeID)
+}

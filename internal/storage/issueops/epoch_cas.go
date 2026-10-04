@@ -73,6 +73,13 @@ type EpochResolveResult struct {
 // minted the address in the first place.
 var ErrEpochAddressNotFound = errors.New("epoch CAS: address not minted by this store")
 
+// ErrEpochAddressNotServed means the address exists in this store but the
+// store does not serve it: its lineage was lost, or it was minted in an epoch
+// that has not happened yet. It is distinct from ErrEpochAddressNotFound so a
+// caller can tell an address the store never minted from one it minted and no
+// longer serves.
+var ErrEpochAddressNotServed = errors.New("epoch CAS: address exists in this store but is not served")
+
 // ErrEpochAddressSeparator means a storeID or id passed to
 // MintUnderEpochInTx contains ":", the character epochAddress's encoding
 // uses as a field delimiter (gastownhall/beads#6664, bee-ghosttrack review
@@ -398,4 +405,16 @@ func CurrentAddressForInTx(ctx context.Context, tx DBTX, storeID, oldAddress str
 		return "", fmt.Errorf("epoch CAS: current address for %s: %w: %s", storeID, ErrEpochAddressNotFound, oldAddress)
 	}
 	return MintUnderEpochInTx(ctx, tx, storeID, row.mintedID)
+}
+
+// BumpEpochCarryingInTx is the token-scheme-change bump. Stub: it advances the
+// counter exactly as BumpEpochInTx does and carries nothing yet.
+func BumpEpochCarryingInTx(ctx context.Context, tx DBTX, storeID, reason string) (int, error) {
+	return BumpEpochInTx(ctx, tx, storeID, reason)
+}
+
+// LoseVersionInTx records that storeID no longer serves the Version named by
+// address. Stub: not implemented yet.
+func LoseVersionInTx(_ context.Context, _ DBTX, storeID, address string) error {
+	return fmt.Errorf("epoch CAS: lose version %s for %s: not implemented", address, storeID)
 }
