@@ -15,5 +15,16 @@
         ]
       }
     ]
+  },
+  "permissions": {
+    "deny": [
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git clean -f:*)",
+      "Bash(sed -i:*)",
+      "Bash(rm -rf:*)",
+      "Bash(rm -fr:*)"
+    ]
   }
 }
