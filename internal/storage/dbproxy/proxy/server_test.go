@@ -510,6 +510,41 @@ func TestProxy_IdleTimeout_BlockedByActiveConn(t *testing.T) {
 	assertNoPidFile(t, root)
 }
 
+func TestProxy_IdleTimeout_BlockedByShortLivedConns(t *testing.T) {
+	t.Parallel()
+
+	ts := server.New()
+	ts.Handler = server.DiscardHandler
+	stats := &proxy.Stats{}
+	port := freeTCPPort(t)
+	root := t.TempDir()
+
+	h := runProxy(t, proxy.ProxyOpts{
+		RootDir: root, Port: port,
+		IdleTimeout: 2 * time.Second,
+		Server:      ts, Stats: stats,
+	})
+	waitListening(t, root, listenWait)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		conn := dialProxy(t, port)
+		_, err := conn.Write([]byte("x"))
+		require.NoError(t, err)
+		require.NoError(t, conn.Close())
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	assert.Equal(t, int64(0), stats.Snapshot().IdleTimeouts)
+	pf, err := pidfile.Read(root, proxy.PIDFileName)
+	require.NoError(t, err)
+	assert.NotNil(t, pf)
+
+	require.NoError(t, h.waitErr(t, 6*time.Second))
+	assert.Equal(t, int64(1), stats.Snapshot().IdleTimeouts)
+	assertNoPidFile(t, root)
+}
+
 func TestProxy_IdleTimeout_Never(t *testing.T) {
 	t.Parallel()
 
