@@ -853,6 +853,7 @@ go_test(
         "jira_test.go",
         "json_flag_shadow_test.go",
         "kv_embedded_test.go",
+        "kv_prefix_test.go",
         "kv_proxied_integration_test.go",
         "kv_test.go",
         "label_embedded_test.go",

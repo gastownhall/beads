@@ -132,6 +132,7 @@ go_test(
         "blocked_state_template_test.go",
         "close_test.go",
         "config_helpers_test.go",
+        "config_prefix_test.go",
         "counts_missing_table_test.go",
         "create_only_errors_test.go",
         "create_only_guard_test.go",
