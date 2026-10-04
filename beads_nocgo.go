@@ -47,7 +47,8 @@ func OpenBestAvailableWith(ctx context.Context, beadsDir string, opts OpenOption
 	// the CLI store factories so SDK callers get the backend they registered
 	// instead of the embedded-Dolt-requires-CGO error. OpenWithOptions calls
 	// OpenWith when the backend has one, else falls back to Open — except a
-	// non-nil opts.Credential, which it refuses rather than silently drops.
+	// non-nil Credential, non-nil HTTPClient, or non-empty UserAgent, which it
+	// refuses rather than silently drops.
 	if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
 		return backend.OpenWithOptions(ctx, beadsDir, opts)
 	}

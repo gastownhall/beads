@@ -30,14 +30,17 @@ type PhysicalRoots struct {
 	// the workspace gate applies.
 	Roots []string
 	// Mode is the connection mode the open path will actually use:
-	// "embedded" | "server" | "shared-server" | "proxied-server".
+	// "embedded" | "server" | "shared-server" | "proxied-server" |
+	// "remote-backend" (a registered backend that backends.IsRemote).
 	Mode string
 	// Provenance is a one-line human explanation of how Mode and Roots
 	// were decided, for busy/diagnostic messages ("why is bd gating that
 	// directory?").
 	Provenance string
-	// RemoteBackend is true when the backend is a server on a non-local
-	// host: workspace gate only, no physical gate.
+	// RemoteBackend is true when bd opens no local files for the workspace:
+	// either a Dolt server on a non-local host (Mode "server") or a
+	// registered remote backend (backends.IsRemote, Mode "remote-backend")
+	// that owns its own connection. Workspace gate only, no physical gate.
 	RemoteBackend bool
 }
 

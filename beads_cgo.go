@@ -41,9 +41,10 @@ func OpenBestAvailable(ctx context.Context, beadsDir string) (Storage, error) {
 // backend, registered or not: Dolt and embedded Dolt have no OpenWith and
 // never see opts; a registered backend without OpenWith falls back to its
 // Open exactly as OpenBestAvailable always has. The one exception across
-// every path is a non-nil opts.Credential with nothing able to honor it —
-// that is always a typed refusal, never a silent open without
-// authenticating.
+// every path is a non-nil opts.Credential, non-nil opts.HTTPClient, or
+// non-empty opts.UserAgent with nothing able to honor it — that is always a
+// typed refusal (the matching ErrXWithoutOpenWith sentinel), never a silent
+// open with the field ignored.
 func OpenBestAvailableWith(ctx context.Context, beadsDir string, opts OpenOptions) (Storage, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
@@ -60,7 +61,8 @@ func OpenBestAvailableWith(ctx context.Context, beadsDir string, opts OpenOption
 	// the CLI store factories so SDK callers get the backend they registered
 	// instead of a silently-opened embedded Dolt store. OpenWithOptions calls
 	// OpenWith when the backend has one, else falls back to Open — except a
-	// non-nil opts.Credential, which it refuses rather than silently drops.
+	// non-nil Credential, non-nil HTTPClient, or non-empty UserAgent, which it
+	// refuses rather than silently drops.
 	if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
 		return backend.OpenWithOptions(ctx, beadsDir, opts)
 	}

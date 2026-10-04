@@ -345,14 +345,15 @@ func TestOpenBestAvailableWithDispatchesRegisteredBackendAndPassesOptions(t *tes
 // registered backend without OpenWith, registered backend with OpenWith, and
 // plain Dolt (no registered backend at all).
 //
-// OpenBestAvailableWith(zero opts) now simply delegates to OpenBestAvailable
-// (see beads.go), so a subtest that calls both and compares their results
-// would be vacuous: it can never fail regardless of what either returns,
-// because they are the same code path. Each subtest instead pins a fixed,
-// independently-meaningful expected result — a sentinel identity, a concrete
-// error message, or a concrete store-presence/nilness — so that a future
-// change which breaks the delegation (e.g. a stray early return, or dropped
-// opts threading) still has something to fail against.
+// OpenBestAvailable now simply delegates to OpenBestAvailableWith with a zero
+// OpenOptions (see beads_cgo.go and beads_nocgo.go), so a subtest that calls
+// both and compares their results would be vacuous: it can never fail
+// regardless of what either returns, because they are the same code path.
+// Each subtest instead pins a fixed, independently-meaningful expected result
+// — a sentinel identity, a concrete error message, or a concrete
+// store-presence/nilness — so that a future change which breaks the
+// delegation (e.g. a stray early return, or dropped opts threading) still has
+// something to fail against.
 func TestOpenBestAvailableWithZeroOptionsMatchesOpenBestAvailable(t *testing.T) {
 	t.Run("registered backend without OpenWith", func(t *testing.T) {
 		const name = "registry-backcompat-open-only"
@@ -433,30 +434,44 @@ func TestOpenBestAvailableWithRefusesCredentialWithoutOpenWithOnRegisteredBacken
 	}
 }
 
-// TestOpenBestAvailableWithRefusesCredentialOnPlainDolt covers the other
+// TestOpenBestAvailableWithRefusesPerOpenOptionsOnPlainDolt covers the other
 // half: no registered backend at all (plain Dolt, embedded or server) has no
-// per-open credential seam either, so the same refusal applies.
-func TestOpenBestAvailableWithRefusesCredentialOnPlainDolt(t *testing.T) {
-	beadsDir := filepath.Join(t.TempDir(), ".beads")
-	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
-		t.Fatalf("create .beads: %v", err)
+// per-open seam either, so the same refusal applies to each of Credential,
+// HTTPClient, and UserAgent. Those refusal arms are duplicated in
+// beads_cgo.go and beads_nocgo.go, so this runs against whichever copy the
+// build's CGO setting compiles.
+func TestOpenBestAvailableWithRefusesPerOpenOptionsOnPlainDolt(t *testing.T) {
+	tests := []struct {
+		name string
+		opts beads.OpenOptions
+		want error
+	}{
+		{name: "Credential", opts: beads.OpenOptions{Credential: fixtureCredential{}}, want: beads.ErrCredentialWithoutOpenWith},
+		{name: "HTTPClient", opts: beads.OpenOptions{HTTPClient: &http.Client{}}, want: beads.ErrHTTPClientWithoutOpenWith},
+		{name: "UserAgent", opts: beads.OpenOptions{UserAgent: "test-agent/1.0"}, want: beads.ErrUserAgentWithoutOpenWith},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			beadsDir := filepath.Join(t.TempDir(), ".beads")
+			if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+				t.Fatalf("create .beads: %v", err)
+			}
 
-	store, err := beads.OpenBestAvailableWith(context.Background(), beadsDir, beads.OpenOptions{
-		Credential: fixtureCredential{},
-	})
-	if store != nil {
-		_ = store.Close()
-		t.Fatal("OpenBestAvailableWith returned a store alongside the Credential refusal")
-	}
-	if !errors.Is(err, beads.ErrCredentialWithoutOpenWith) {
-		t.Fatalf("OpenBestAvailableWith error = %v, want %v", err, beads.ErrCredentialWithoutOpenWith)
-	}
-	// The fail-closed guarantee includes never provisioning a database while
-	// refusing to honor the Credential.
-	for _, artifact := range []string{"embeddeddolt", "dolt"} {
-		if _, statErr := os.Stat(filepath.Join(beadsDir, artifact)); !os.IsNotExist(statErr) {
-			t.Fatalf("Credential refusal on plain Dolt created %s (stat error: %v)", artifact, statErr)
-		}
+			store, err := beads.OpenBestAvailableWith(context.Background(), beadsDir, tt.opts)
+			if store != nil {
+				_ = store.Close()
+				t.Fatalf("OpenBestAvailableWith returned a store alongside the %s refusal", tt.name)
+			}
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("OpenBestAvailableWith error = %v, want %v", err, tt.want)
+			}
+			// The fail-closed guarantee includes never provisioning a database
+			// while refusing to honor the option.
+			for _, artifact := range []string{"embeddeddolt", "dolt"} {
+				if _, statErr := os.Stat(filepath.Join(beadsDir, artifact)); !os.IsNotExist(statErr) {
+					t.Fatalf("%s refusal on plain Dolt created %s (stat error: %v)", tt.name, artifact, statErr)
+				}
+			}
+		})
 	}
 }
