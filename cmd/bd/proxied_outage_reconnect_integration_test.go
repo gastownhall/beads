@@ -37,10 +37,8 @@ func TestProxiedServerOutageReconnectAcceptanceMatrix(t *testing.T) {
 		{name: "external-unix-socket", socket: true},
 	} {
 		t.Run(topology.name, func(t *testing.T) {
+			requireSocat(t)
 			upstream := testutil.StartIsolatedDoltContainerHandle(t)
-			if _, err := exec.LookPath("socat"); err != nil {
-				t.Skip("socat is required")
-			}
 			gatePort, err := proxy.PickFreePort()
 			require.NoError(t, err)
 			var endpoint string

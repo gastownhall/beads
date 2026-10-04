@@ -46,6 +46,7 @@ func TestProxiedServerHistoryRemoteRefusalFrontDoorMatrix(t *testing.T) {
 			}},
 			fixture{name: "external-unix", make: func(t *testing.T) proxiedProject {
 				requireProxiedServerEnv(t)
+				requireSocat(t)
 				upstream := testutil.StartIsolatedDoltContainerHandle(t)
 				socket := shortSocketPath(t, "dolt.sock")
 				bridge := startHistoryUnixBridge(t, socket, upstream.Port)
@@ -316,9 +317,7 @@ func openDirectHistoryDB(t *testing.T, p directHistoryProject) *sql.DB {
 
 func startHistoryUnixBridge(t *testing.T, endpoint, upstreamPort string) *exec.Cmd {
 	t.Helper()
-	if _, err := exec.LookPath("socat"); err != nil {
-		t.Skipf("socat is required for external Unix topology: %v", err)
-	}
+	requireSocat(t)
 	if err := os.Remove(endpoint); err != nil && !os.IsNotExist(err) {
 		t.Fatalf("remove stale Unix socket: %v", err)
 	}

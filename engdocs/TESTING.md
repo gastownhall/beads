@@ -97,7 +97,10 @@ sit behind that API, selected by `BEADS_TEST_DOLT_SERVER`:
 
 `BEADS_TEST_REQUIRE_DOLT_CONTAINER=1` turns an unavailable backend into a
 failure (per test and in every `TestMain`) instead of a skip; lanes that
-exist to run the Dolt suites set it.
+exist to run the Dolt suites set it. `BEADS_TEST_REQUIRE_SOCAT=1` does the
+same for the proxied subtests that bridge an external endpoint with `socat`
+(external-unix, the outage/reconnect matrix); `//cmd/bd:bd_proxied_test`
+sets it, and the legacy GitHub proxied jobs, which have no `socat`, do not.
 
 Under Bazel, `bazel test //... --config=doltserver` runs the Dolt-backed
 suites of pr.yml's "Test (storage domain + uow)" and "Contract corpus" jobs

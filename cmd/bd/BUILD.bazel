@@ -1456,6 +1456,10 @@ sh_test(
         "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
         "BEADS_TEST_PROXIED_SERVER": "1",
         "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+        # The external-unix / outage-matrix subtests bridge endpoints with
+        # socat, which the workers have: fail rather than skip if it is
+        # missing (requireSocat). The legacy GitHub lane leaves this unset.
+        "BEADS_TEST_REQUIRE_SOCAT": "1",
         # The 4-vCPU runner shape: -test.parallel defaults to GOMAXPROCS, and
         # the job runs 4 tests at once, not one per worker core (39
         # concurrent `bd init --proxied-server` against one server hung a
