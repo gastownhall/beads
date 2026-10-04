@@ -1469,12 +1469,10 @@ func setupSyncCommandTest(t *testing.T, fake *fakeSyncStore) {
 	saveAndRestoreGlobals(t)
 	resetCommandContext()
 
-	oldJSON := jsonOutput
 	oldCtx := rootCtx
 	oldQuiet := quietFlag
 	oldAdopt := syncAdoptGitOrigin
 	t.Cleanup(func() {
-		jsonOutput = oldJSON
 		rootCtx = oldCtx
 		quietFlag = oldQuiet
 		syncAdoptGitOrigin = oldAdopt
@@ -1485,7 +1483,7 @@ func setupSyncCommandTest(t *testing.T, fake *fakeSyncStore) {
 
 	store = fake
 	rootCtx = context.Background()
-	jsonOutput = false
+	pinJSONOutput(t, false)
 	quietFlag = false
 
 	config.ResetForTesting()
@@ -1520,7 +1518,7 @@ func TestRunSyncCommandNoRemoteExitsZero(t *testing.T) {
 func TestRunSyncCommandNoRemoteJSON(t *testing.T) {
 	fake := &fakeSyncStore{pullErr: errors.New(`Error 1105: no remote`)}
 	setupSyncCommandTest(t, fake)
-	jsonOutput = true
+	pinJSONOutput(t, true)
 
 	out := captureStdout(t, func() error { return runSyncCommand(syncCmd, nil) })
 	var got syncOutcome
@@ -1546,7 +1544,7 @@ func TestRunSyncCommandNoPushSetsPushSkipped(t *testing.T) {
 	if !config.GetBool("no-push") {
 		t.Fatal("test setup: BD_NO_PUSH=true must make no-push=true")
 	}
-	jsonOutput = true
+	pinJSONOutput(t, true)
 
 	out := captureStdout(t, func() error { return runSyncCommand(syncCmd, nil) })
 	if fake.pushCalls != 0 {
@@ -1622,7 +1620,7 @@ func TestRunSyncCommandExitCodeMapping(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			setupSyncCommandTest(t, tt.fake)
-			jsonOutput = true // silence the operator-facing stderr report; the exit code is what's under test
+			pinJSONOutput(t, true) // silence the operator-facing stderr report; the exit code is what's under test
 
 			err := runSyncCommand(syncCmd, nil)
 			if !tt.wantErr {
@@ -1677,7 +1675,7 @@ func TestRunSyncCommandJSONEnvelopePerStatus(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			setupSyncCommandTest(t, tt.fake)
-			jsonOutput = true
+			pinJSONOutput(t, true)
 
 			out := captureStdout(t, func() error {
 				_ = runSyncCommand(syncCmd, nil)
@@ -1770,7 +1768,7 @@ func TestRunSyncCommandAdoptsGitOriginOnDefaultRemote(t *testing.T) {
 		return true, nil
 	}
 
-	jsonOutput = true
+	pinJSONOutput(t, true)
 	out := captureStdout(t, func() error { return runSyncCommand(syncCmd, nil) })
 
 	if adoptCalls != 1 {
@@ -1817,7 +1815,7 @@ func TestRunSyncCommandNoGitOriginStillExitsZero(t *testing.T) {
 	setupSyncCommandTest(t, fake)
 	// setupSyncCommandTest already stubs "nothing to adopt"; assert the
 	// no-remote contract survives it explicitly.
-	jsonOutput = true
+	pinJSONOutput(t, true)
 
 	out := captureStdout(t, func() error { return runSyncCommand(syncCmd, nil) })
 	var got syncOutcome

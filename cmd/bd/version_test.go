@@ -22,7 +22,7 @@ func TestVersionCommand(t *testing.T) {
 			t.Fatalf("Failed to create pipe: %v", err)
 		}
 		os.Stdout = w
-		jsonOutput = false
+		pinJSONOutput(t, false)
 
 		// Run version command
 		if err := versionCmd.RunE(versionCmd, []string{}); err != nil {

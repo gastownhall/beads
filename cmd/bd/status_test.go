@@ -38,9 +38,7 @@ func TestRenderStatusJSON(t *testing.T) {
 		},
 	}
 
-	oldJSON := jsonOutput
-	jsonOutput = true
-	defer func() { jsonOutput = oldJSON }()
+	pinJSONOutput(t, true)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -104,9 +102,7 @@ func TestRenderStatusHuman(t *testing.T) {
 		},
 	}
 
-	oldJSON := jsonOutput
-	jsonOutput = false
-	defer func() { jsonOutput = oldJSON }()
+	pinJSONOutput(t, false)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
