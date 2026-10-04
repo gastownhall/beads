@@ -28,8 +28,9 @@ import (
 // incrementalExportThreshold caps the number of changed issue IDs we'll
 // incrementally re-encode before falling back to a full export. At high
 // change counts the per-issue SQL work (bulk loaders × changed set) stops
-// being cheaper than one `SearchIssues(Limit:0)` sweep.
-const incrementalExportThreshold = 5000
+// being cheaper than one `SearchIssues(Limit:0)` sweep. A var only so a
+// test can exercise the fallback without seeding 5000 issues.
+var incrementalExportThreshold = 5000
 
 // doltWorkingRef is the literal dolt_diff() accepts as an endpoint meaning
 // "the current working set", including uncommitted writes. Passing this
