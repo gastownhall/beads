@@ -57,22 +57,37 @@ type Credential interface {
 // existing behavior exactly, for every backend, registered or not.
 type OpenOptions struct {
 	// Credential authenticates this specific open to a remote backend's
-	// target. Nil means "use the backend's own default authentication", if
-	// it has one. A backend with no OpenWith to honor a non-nil Credential
-	// refuses rather than silently opening unauthenticated: see
-	// OpenWithOptions.
+	// target. Nil means "use the backend's own default authentication" —
+	// which, for most backends, means whatever ambient environment (env
+	// vars, a config file, a logged-in CLI session, ...) the backend's
+	// default auth already reads. That ambient fallback is the right
+	// default for a single-tenant CLI process, but it is almost never what
+	// a multi-tenant embedder (for example gc, Gas City — one process
+	// serving many workspaces, called "cities") wants: ambient env is
+	// process-global, so it cannot distinguish one tenant's workspace from
+	// another's. A multi-tenant embedder MUST pass a non-nil Credential for
+	// every open; relying on the nil/ambient default in that setting risks
+	// one tenant's request being silently authenticated as another's. A
+	// backend with no OpenWith to honor a non-nil Credential refuses rather
+	// than silently opening unauthenticated: see OpenWithOptions. (S1 does
+	// not add a RequireCredential knob to enforce the multi-tenant rule
+	// mechanically — that is deferred to S2.)
 	Credential Credential
 
 	// HTTPClient overrides the *http.Client (and therefore any RoundTripper)
 	// a remote backend's OpenWith dials with. Nil means "use the backend's
-	// default client." Unlike Credential, a backend with no OpenWith seam
-	// for this is free to ignore it silently: a transport override carries
-	// no secret whose loss would be a security hazard.
+	// default client." A backend with no OpenWith to honor a non-nil
+	// HTTPClient refuses rather than silently ignoring the override and
+	// dialing with its default client anyway: see OpenWithOptions. A caller
+	// that asked for a specific transport (a proxy, a custom TLS config, a
+	// test double, ...) must be told that request was not honored, not have
+	// it silently dropped — the dial still "succeeding" against the wrong
+	// transport can be worse than a loud refusal.
 	HTTPClient *http.Client
 
 	// UserAgent overrides the User-Agent string a remote backend's OpenWith
-	// sends. Empty means "use the backend's default." Ignorable the same way
-	// HTTPClient is.
+	// sends. Empty means "use the backend's default." Refused the same way
+	// HTTPClient is when the backend has no OpenWith.
 	UserAgent string
 }
 
@@ -82,6 +97,33 @@ type OpenOptions struct {
 // credential on the floor — a backend that cannot authenticate a per-open
 // credential must say so, not open anonymously.
 var ErrCredentialWithoutOpenWith = errors.New("backends: OpenOptions.Credential is set but the backend has no OpenWith to honor it; refusing to silently open without authenticating")
+
+// ErrHTTPClientWithoutOpenWith is returned by Backend.OpenWithOptions when
+// OpenOptions.HTTPClient is set but the backend has no OpenWith to honor it.
+// Same fail-closed family as ErrCredentialWithoutOpenWith: a caller that
+// asked for a specific transport must be told it was not honored, not have
+// the request silently ignored in favor of the backend's default client.
+var ErrHTTPClientWithoutOpenWith = errors.New("backends: OpenOptions.HTTPClient is set but the backend has no OpenWith to honor it; refusing to silently ignore the requested transport")
+
+// ErrUserAgentWithoutOpenWith is returned by Backend.OpenWithOptions when
+// OpenOptions.UserAgent is set but the backend has no OpenWith to honor it.
+// Same fail-closed family as ErrCredentialWithoutOpenWith.
+var ErrUserAgentWithoutOpenWith = errors.New("backends: OpenOptions.UserAgent is set but the backend has no OpenWith to honor it; refusing to silently ignore the requested User-Agent")
+
+// ErrUnsupportedCredential is the typed refusal an OpenWith implementation
+// MUST return — directly, or wrapped with backend-specific detail so that
+// errors.Is(err, ErrUnsupportedCredential) still holds — when it receives a
+// non-nil OpenOptions.Credential that does not type-assert to whatever
+// narrower credential interface that backend's OpenWith expects. Credential
+// is deliberately opaque at this package's level (see Credential's doc
+// comment): this package performs no type assertion against it, so the
+// assertion and the refusal-on-mismatch are entirely each OpenWith
+// implementation's responsibility. Silently ignoring a Credential of the
+// wrong type and opening with default/ambient auth instead would be worse
+// than a refusal: it looks like the caller's credential was honored when it
+// was not. A fake/test registrant's OpenWith is expected to demonstrate this
+// contract the same way a production one must.
+var ErrUnsupportedCredential = errors.New("backends: OpenOptions.Credential does not implement the credential type this backend's OpenWith expects")
 
 // Backend describes a registered storage backend.
 type Backend struct {
@@ -112,28 +154,46 @@ type Backend struct {
 	// multiple credentialed callers sharing one process — exactly the shape
 	// an embedder like gc (Gas City, one process serving many workspaces)
 	// needs for per-workspace credentials. Optional: nil means this backend
-	// has no per-open seam. OpenWithOptions then falls back to Open and
-	// ignores HTTPClient/UserAgent, but refuses a non-nil Credential rather
-	// than silently dropping it. A backend that sets OpenWith should make
-	// Open behave as OpenWith would with a zero OpenOptions, since
-	// OpenWithOptions calls Open directly whenever OpenWith is nil, and
-	// existing callers of Open never go through OpenWith at all.
+	// has no per-open seam, and OpenWithOptions falls back to Open — but
+	// only for a zero OpenOptions; a non-nil Credential, non-nil HTTPClient,
+	// or non-empty UserAgent is refused rather than silently dropped (see
+	// OpenWithOptions). A backend that sets OpenWith should make Open behave
+	// as OpenWith would with a zero OpenOptions, since OpenWithOptions calls
+	// Open directly whenever OpenWith is nil, and existing callers of Open
+	// never go through OpenWith at all.
+	//
+	// Contract for implementations: opts.Credential is typed only as the
+	// opaque Credential marker interface (see its doc comment); an OpenWith
+	// that expects a narrower, backend-specific credential type MUST type-
+	// assert and, on a non-nil Credential that fails the assertion, refuse
+	// with ErrUnsupportedCredential (directly, or wrapped so errors.Is still
+	// matches) rather than silently falling back to default/ambient auth.
+	// Opening unauthenticated when the caller supplied a credential — even
+	// one of the wrong shape — would look like the credential was honored
+	// when it was not.
 	OpenWith func(ctx context.Context, beadsDir string, opts OpenOptions) (storage.DoltStorage, error)
 }
 
 // OpenWithOptions opens beadsDir through this backend, honoring opts. It
-// calls OpenWith when the backend implements it. Otherwise it falls back to
-// the required Open and ignores HTTPClient/UserAgent — except Credential,
-// which is never silently dropped: with no OpenWith to honor it,
-// OpenWithOptions returns ErrCredentialWithoutOpenWith instead of opening
-// unauthenticated. A zero OpenOptions always reaches plain Open, so this is a
-// strict superset of calling Open directly.
+// calls OpenWith when the backend implements it. Otherwise it fails closed:
+// a zero OpenOptions falls back to the required Open, but a non-nil
+// Credential, non-nil HTTPClient, or non-empty UserAgent is never silently
+// dropped — with no OpenWith to honor it, OpenWithOptions returns the
+// matching ErrXWithoutOpenWith sentinel instead of opening with the field
+// ignored. A zero OpenOptions always reaches plain Open, so this is a strict
+// superset of calling Open directly.
 func (b Backend) OpenWithOptions(ctx context.Context, beadsDir string, opts OpenOptions) (storage.DoltStorage, error) {
 	if b.OpenWith != nil {
 		return b.OpenWith(ctx, beadsDir, opts)
 	}
 	if opts.Credential != nil {
 		return nil, ErrCredentialWithoutOpenWith
+	}
+	if opts.HTTPClient != nil {
+		return nil, ErrHTTPClientWithoutOpenWith
+	}
+	if opts.UserAgent != "" {
+		return nil, ErrUserAgentWithoutOpenWith
 	}
 	return b.Open(ctx, beadsDir)
 }

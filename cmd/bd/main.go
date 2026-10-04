@@ -2060,7 +2060,7 @@ var rootCmd = &cobra.Command{
 			if renderTypedOpenError(err) {
 				return SilentExit()
 			}
-			return HandleError("failed to open database: %v", err)
+			return HandleError("%s", openStoreErrorMessage(cfg.GetBackend(), err))
 		}
 
 		// Mark store as active for flush goroutine safety

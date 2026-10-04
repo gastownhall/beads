@@ -344,25 +344,28 @@ func TestOpenBestAvailableWithDispatchesRegisteredBackendAndPassesOptions(t *tes
 // behave identically to OpenBestAvailable for every existing path —
 // registered backend without OpenWith, registered backend with OpenWith, and
 // plain Dolt (no registered backend at all).
+//
+// OpenBestAvailableWith(zero opts) now simply delegates to OpenBestAvailable
+// (see beads.go), so a subtest that calls both and compares their results
+// would be vacuous: it can never fail regardless of what either returns,
+// because they are the same code path. Each subtest instead pins a fixed,
+// independently-meaningful expected result — a sentinel identity, a concrete
+// error message, or a concrete store-presence/nilness — so that a future
+// change which breaks the delegation (e.g. a stray early return, or dropped
+// opts threading) still has something to fail against.
 func TestOpenBestAvailableWithZeroOptionsMatchesOpenBestAvailable(t *testing.T) {
 	t.Run("registered backend without OpenWith", func(t *testing.T) {
 		const name = "registry-backcompat-open-only"
 		registerWorkspaceBackend(t, name)
 		beadsDir := writeBackendMetadata(t, name)
 
-		storeOld, errOld := beads.OpenBestAvailable(context.Background(), beadsDir)
-		storeNew, errNew := beads.OpenBestAvailableWith(context.Background(), beadsDir, beads.OpenOptions{})
-		if storeOld != nil {
-			_ = storeOld.Close()
+		store, err := beads.OpenBestAvailableWith(context.Background(), beadsDir, beads.OpenOptions{})
+		if store != nil {
+			_ = store.Close()
+			t.Fatal("OpenBestAvailableWith(zero opts) returned a non-nil store, want nil: the fixture's Open always fails")
 		}
-		if storeNew != nil {
-			_ = storeNew.Close()
-		}
-		if (storeOld != nil) != (storeNew != nil) {
-			t.Fatalf("store presence differs: OpenBestAvailable store=%v, OpenBestAvailableWith store=%v", storeOld, storeNew)
-		}
-		if !errors.Is(errOld, errRegistryBackendOpen) || !errors.Is(errNew, errRegistryBackendOpen) {
-			t.Fatalf("errors differ from the Open sentinel: old=%v new=%v", errOld, errNew)
+		if !errors.Is(err, errRegistryBackendOpen) {
+			t.Fatalf("OpenBestAvailableWith(zero opts) error = %v, want errRegistryBackendOpen", err)
 		}
 	})
 
@@ -384,33 +387,28 @@ func TestOpenBestAvailableWithZeroOptionsMatchesOpenBestAvailable(t *testing.T) 
 		if gotOpts != (beads.OpenOptions{}) {
 			t.Fatalf("OpenWith opts = %+v, want the zero value (OpenBestAvailable never set any)", gotOpts)
 		}
+		if gotBeadsDir != beadsDir {
+			t.Fatalf("OpenWith beadsDir = %q, want %q", gotBeadsDir, beadsDir)
+		}
 	})
 
 	t.Run("no registered backend (plain Dolt, server mode)", func(t *testing.T) {
-		// dolt_mode:"server" plus an unreachable port makes both calls fail
-		// fast on a dial error instead of spinning up embedded Dolt (slow,
-		// and exercises a path this slice does not touch). What matters here
-		// is that OpenBestAvailable and OpenBestAvailableWith(zero opts)
-		// reach the identical dispatch branch and fail identically.
+		// dolt_mode:"server" plus an unreachable port (127.0.0.1:1) makes
+		// the dial fail fast with a fixed, well-known error rather than
+		// spinning up embedded Dolt (slow, and exercises a path this slice
+		// does not touch).
 		beadsDir := plainDoltServerModeBeadsDir(t)
-		storeOld, errOld := beads.OpenBestAvailable(context.Background(), beadsDir)
-		if storeOld != nil {
-			_ = storeOld.Close()
+		store, err := beads.OpenBestAvailableWith(context.Background(), beadsDir, beads.OpenOptions{})
+		if store != nil {
+			_ = store.Close()
+			t.Fatal("OpenBestAvailableWith(zero opts) returned a non-nil store, want nil: 127.0.0.1:1 is unreachable")
 		}
-
-		beadsDir2 := plainDoltServerModeBeadsDir(t)
-		storeNew, errNew := beads.OpenBestAvailableWith(context.Background(), beadsDir2, beads.OpenOptions{})
-		if storeNew != nil {
-			_ = storeNew.Close()
-		}
-		if (storeOld != nil) != (storeNew != nil) {
-			t.Fatalf("store presence differs: OpenBestAvailable store=%v, OpenBestAvailableWith store=%v", storeOld != nil, storeNew != nil)
-		}
-		if (errOld == nil) != (errNew == nil) {
-			t.Fatalf("error presence differs: OpenBestAvailable err=%v, OpenBestAvailableWith err=%v", errOld, errNew)
-		}
-		if errOld == nil {
+		if err == nil {
 			t.Fatal("plain Dolt server mode against an unreachable port unexpectedly opened")
+		}
+		const wantSubstring = "Dolt server unreachable at 127.0.0.1:1"
+		if !strings.Contains(err.Error(), wantSubstring) {
+			t.Fatalf("OpenBestAvailableWith(zero opts) error = %q, want it to contain %q", err.Error(), wantSubstring)
 		}
 	})
 }

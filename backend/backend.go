@@ -154,6 +154,23 @@ type Credential = backends.Credential
 // OpenOptions.Credential is set but the backend has no OpenWith to honor it.
 var ErrCredentialWithoutOpenWith = backends.ErrCredentialWithoutOpenWith
 
+// ErrHTTPClientWithoutOpenWith is returned by Backend.OpenWithOptions when
+// OpenOptions.HTTPClient is set but the backend has no OpenWith to honor it.
+// Same fail-closed family as ErrCredentialWithoutOpenWith.
+var ErrHTTPClientWithoutOpenWith = backends.ErrHTTPClientWithoutOpenWith
+
+// ErrUserAgentWithoutOpenWith is returned by Backend.OpenWithOptions when
+// OpenOptions.UserAgent is set but the backend has no OpenWith to honor it.
+// Same fail-closed family as ErrCredentialWithoutOpenWith.
+var ErrUserAgentWithoutOpenWith = backends.ErrUserAgentWithoutOpenWith
+
+// ErrUnsupportedCredential is the typed refusal an OpenWith implementation
+// MUST return (directly or wrapped, so errors.Is still matches) when it
+// receives a non-nil Credential that does not type-assert to the narrower
+// credential interface that backend's OpenWith expects. See the aliased
+// error's docs in internal/storage/backends for the full contract.
+var ErrUnsupportedCredential = backends.ErrUnsupportedCredential
+
 // Register adds a backend under name. It is process-start wiring: call it
 // once during initialization (typically from a registrant package's init that
 // the embedding binary blank-imports), before any concurrent store access.

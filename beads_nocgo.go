@@ -53,12 +53,19 @@ func OpenBestAvailableWith(ctx context.Context, beadsDir string, opts OpenOption
 	}
 
 	// No registered backend claims this workspace: it is plain Dolt (server
-	// mode is the only option without CGO), which has no per-open credential
-	// seam. Silently dropping a caller-supplied Credential here would be the
-	// same silent-loss hazard OpenWithOptions refuses for a registered
-	// backend without OpenWith.
+	// mode is the only option without CGO), which has no per-open seam at
+	// all. Silently dropping a caller-supplied Credential, HTTPClient, or
+	// UserAgent here would be the same silent-loss hazard OpenWithOptions
+	// refuses for a registered backend without OpenWith (L2: fail closed on
+	// all three, not just Credential).
 	if opts.Credential != nil {
 		return nil, fmt.Errorf("beads: OpenOptions.Credential is not supported for backend %q (Dolt has no per-open credential seam): %w", cfg.GetBackend(), backends.ErrCredentialWithoutOpenWith)
+	}
+	if opts.HTTPClient != nil {
+		return nil, fmt.Errorf("beads: OpenOptions.HTTPClient is not supported for backend %q (Dolt has no per-open transport seam): %w", cfg.GetBackend(), backends.ErrHTTPClientWithoutOpenWith)
+	}
+	if opts.UserAgent != "" {
+		return nil, fmt.Errorf("beads: OpenOptions.UserAgent is not supported for backend %q (Dolt has no per-open transport seam): %w", cfg.GetBackend(), backends.ErrUserAgentWithoutOpenWith)
 	}
 
 	if cfg.IsDoltServerMode() {

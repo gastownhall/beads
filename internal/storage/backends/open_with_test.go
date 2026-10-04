@@ -3,6 +3,7 @@ package backends_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -122,21 +123,111 @@ func TestBackendOpenWithOptionsRefusesCredentialWithoutOpenWith(t *testing.T) {
 	}
 }
 
-// TestBackendOpenWithOptionsIgnoresHTTPClientAndUserAgentWithoutOpenWith
-// proves the design's narrower rule: ONLY Credential triggers a refusal
-// without OpenWith. HTTPClient and UserAgent carry no secret whose silent
-// loss is a security hazard, so a backend without OpenWith is free to fall
-// back to Open and ignore them.
-func TestBackendOpenWithOptionsIgnoresHTTPClientAndUserAgentWithoutOpenWith(t *testing.T) {
-	backend := fixtureBackend()
-
-	_, err := backend.OpenWithOptions(t.Context(), t.TempDir(), backends.OpenOptions{
-		HTTPClient: &http.Client{},
-		UserAgent:  "test-agent/1.0",
+// TestBackendOpenWithOptionsRefusesHTTPClientAndUserAgentWithoutOpenWith is
+// the L2 fail-closed rule: a backend with no OpenWith seam must refuse a
+// non-nil HTTPClient or non-empty UserAgent the same way it refuses a
+// non-nil Credential, rather than silently falling back to Open and
+// dropping the override — a caller that asked for a specific transport or
+// User-Agent must be told that request was not honored.
+func TestBackendOpenWithOptionsRefusesHTTPClientAndUserAgentWithoutOpenWith(t *testing.T) {
+	t.Run("HTTPClient alone", func(t *testing.T) {
+		backend := fixtureBackend()
+		store, err := backend.OpenWithOptions(t.Context(), t.TempDir(), backends.OpenOptions{
+			HTTPClient: &http.Client{},
+		})
+		if store != nil {
+			t.Fatal("OpenWithOptions returned a non-nil store alongside the refusal")
+		}
+		if !errors.Is(err, backends.ErrHTTPClientWithoutOpenWith) {
+			t.Fatalf("OpenWithOptions error = %v, want %v", err, backends.ErrHTTPClientWithoutOpenWith)
+		}
 	})
-	if !errors.Is(err, errFixtureOpen) {
-		t.Fatalf("OpenWithOptions error = %v, want %v (fell back to Open)", err, errFixtureOpen)
+
+	t.Run("UserAgent alone", func(t *testing.T) {
+		backend := fixtureBackend()
+		store, err := backend.OpenWithOptions(t.Context(), t.TempDir(), backends.OpenOptions{
+			UserAgent: "test-agent/1.0",
+		})
+		if store != nil {
+			t.Fatal("OpenWithOptions returned a non-nil store alongside the refusal")
+		}
+		if !errors.Is(err, backends.ErrUserAgentWithoutOpenWith) {
+			t.Fatalf("OpenWithOptions error = %v, want %v", err, backends.ErrUserAgentWithoutOpenWith)
+		}
+	})
+}
+
+// fixtureNarrowCredential is the credential type a hypothetical backend's
+// OpenWith expects. fixtureCredential (the generic marker used elsewhere in
+// this file) does not implement it, so passing fixtureCredential to an
+// OpenWith that requires fixtureNarrowCredential must be refused.
+type fixtureNarrowCredential struct{ apiKey string }
+
+func (fixtureNarrowCredential) BackendCredential() {}
+
+// narrowOpenWithBackend returns a Backend whose OpenWith type-asserts
+// opts.Credential to fixtureNarrowCredential and refuses with
+// backends.ErrUnsupportedCredential (wrapped, to prove errors.Is still
+// matches through a wrap) on any non-nil Credential that fails the
+// assertion — demonstrating the M3 contract OpenWith implementations must
+// follow.
+func narrowOpenWithBackend() backends.Backend {
+	open := func(context.Context, string) (storage.DoltStorage, error) {
+		return nil, errors.New("fixture: Open called despite backend having OpenWith")
 	}
+	return backends.Backend{
+		Open:         open,
+		OpenReadOnly: open,
+		OpenWith: func(_ context.Context, _ string, opts backends.OpenOptions) (storage.DoltStorage, error) {
+			if opts.Credential == nil {
+				return nil, errFixtureOpenWith
+			}
+			if _, ok := opts.Credential.(fixtureNarrowCredential); !ok {
+				return nil, fmt.Errorf("fixture: credential %T is not fixtureNarrowCredential: %w", opts.Credential, backends.ErrUnsupportedCredential)
+			}
+			return nil, errFixtureOpenWith
+		},
+	}
+}
+
+// TestBackendOpenWithRefusesUnsupportedCredentialType is the M3 contract: an
+// OpenWith implementation that receives a non-nil Credential it cannot
+// type-assert to its expected concrete type MUST refuse with
+// ErrUnsupportedCredential (or a wrap of it), not silently fall back to
+// default/ambient auth.
+func TestBackendOpenWithRefusesUnsupportedCredentialType(t *testing.T) {
+	backend := narrowOpenWithBackend()
+
+	t.Run("mismatched credential type is refused", func(t *testing.T) {
+		store, err := backend.OpenWithOptions(t.Context(), t.TempDir(), backends.OpenOptions{
+			Credential: fixtureCredential{},
+		})
+		if store != nil {
+			t.Fatal("OpenWithOptions returned a non-nil store alongside the refusal")
+		}
+		if !errors.Is(err, backends.ErrUnsupportedCredential) {
+			t.Fatalf("OpenWithOptions error = %v, want it to wrap %v", err, backends.ErrUnsupportedCredential)
+		}
+	})
+
+	t.Run("matching credential type is accepted", func(t *testing.T) {
+		_, err := backend.OpenWithOptions(t.Context(), t.TempDir(), backends.OpenOptions{
+			Credential: fixtureNarrowCredential{apiKey: "k"},
+		})
+		if errors.Is(err, backends.ErrUnsupportedCredential) {
+			t.Fatalf("OpenWithOptions refused a matching credential type: %v", err)
+		}
+		if !errors.Is(err, errFixtureOpenWith) {
+			t.Fatalf("OpenWithOptions error = %v, want %v (OpenWith reached, credential accepted)", err, errFixtureOpenWith)
+		}
+	})
+
+	t.Run("nil credential is unaffected", func(t *testing.T) {
+		_, err := backend.OpenWithOptions(t.Context(), t.TempDir(), backends.OpenOptions{})
+		if !errors.Is(err, errFixtureOpenWith) {
+			t.Fatalf("OpenWithOptions(nil Credential) error = %v, want %v", err, errFixtureOpenWith)
+		}
+	})
 }
 
 func TestBackendRemoteAndIsRemote(t *testing.T) {

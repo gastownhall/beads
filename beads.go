@@ -41,8 +41,14 @@ type Storage = beads.Storage
 // OpenOptions carries per-open injections (Credential, HTTPClient,
 // UserAgent) for OpenBestAvailableWith. A registered backend's OpenWith may
 // use these; Dolt and embedded Dolt have no per-open seam and never see
-// them, except that a non-nil Credential is always refused rather than
-// silently dropped (see OpenBestAvailableWith).
+// them — instead, a non-nil Credential, non-nil HTTPClient, or non-empty
+// UserAgent is always refused rather than silently dropped (see
+// OpenBestAvailableWith). A nil Credential means "use the backend's own
+// default authentication, which may include ambient environment state
+// (env vars, a config file, a logged-in CLI session, ...)"; a multi-tenant
+// embedder (one process serving many workspaces, such as gc, Gas City) MUST
+// pass a non-nil Credential for every open, since ambient auth cannot
+// distinguish one tenant's workspace from another's.
 type OpenOptions = backends.OpenOptions
 
 // Credential is the opaque per-open credential marker OpenOptions.Credential
@@ -60,6 +66,24 @@ type Credential = backends.Credential
 // is unimportable outside this module: an embedder checking this error with
 // errors.Is must do it through the public beads package.
 var ErrCredentialWithoutOpenWith = backends.ErrCredentialWithoutOpenWith
+
+// ErrHTTPClientWithoutOpenWith is returned by OpenBestAvailableWith when
+// opts.HTTPClient is set but nothing can honor it. Same fail-closed family
+// and aliasing rationale as ErrCredentialWithoutOpenWith.
+var ErrHTTPClientWithoutOpenWith = backends.ErrHTTPClientWithoutOpenWith
+
+// ErrUserAgentWithoutOpenWith is returned by OpenBestAvailableWith when
+// opts.UserAgent is set but nothing can honor it. Same fail-closed family
+// and aliasing rationale as ErrCredentialWithoutOpenWith.
+var ErrUserAgentWithoutOpenWith = backends.ErrUserAgentWithoutOpenWith
+
+// ErrUnsupportedCredential is the typed refusal a registered backend's
+// OpenWith returns (directly or wrapped) when opts.Credential is non-nil but
+// does not match the concrete credential type that backend's OpenWith
+// expects. See backends.ErrUnsupportedCredential for the full contract.
+// Aliased here for the same reason as ErrCredentialWithoutOpenWith: callers
+// outside this module cannot import internal/storage/backends directly.
+var ErrUnsupportedCredential = backends.ErrUnsupportedCredential
 
 // configuredBackendUnavailable is the public open path's fail-closed refusal for
 // metadata naming a removed or unrecognized backend. beadsDir and cfg let the
