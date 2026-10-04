@@ -85,8 +85,8 @@ func newDatabaseServer(backend proxy.Backend, rootDir, configPath, logPath, dolt
 			return nil, err
 		}
 		// A Beads-generated config's port was picked before dolt binds it;
-		// move it if another process got there first.
-		s.SetPortRepicker(repickManagedProxiedServerPort)
+		// if another process got there first, run on a free port instead.
+		s.SetPortConflictPolicy(managedPortConflictPolicy)
 		return s, nil
 	case proxy.BackendExternal:
 		return server.NewExternalDoltServer(external)

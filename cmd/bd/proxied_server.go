@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"net"
 	"os"
@@ -348,93 +347,82 @@ const proxiedServerListenerHost = "127.0.0.1"
 // managedPortRecordPrefix starts the comment line, right after the managed
 // marker, that records the listener port Beads chose. The dolt sql-server
 // binds that port only after the proxy child starts it, so another process
-// can take it first; the record is what lets the child tell a port Beads
-// chose (safe to move) from one an operator set (pinned). A config without
-// the record, such as one generated before it existed, is treated as pinned.
+// can take it first; the record lets the child tell a port Beads chose from
+// one an operator set (see managedPortConflictPolicy). The file itself is
+// still never rewritten: a moved port lives only in the proxy child's runtime
+// config (server.RuntimeConfigFileName).
 const managedPortRecordPrefix = "# beads-chosen-listener-port: "
 
 func managedPortRecordLine(port int) string {
-	return fmt.Sprintf("%s%d (Beads moves listener.port to a free port at startup if another process holds this one; set listener.port to any other value to pin it)\n",
+	return fmt.Sprintf("%s%d (Beads chose this port. If another process holds it when the server starts, Beads runs the server on a free port for that run, without editing this file. To pin a port, set listener.port to another value or delete this line.)\n",
 		managedPortRecordPrefix, port)
 }
 
-// repickManagedProxiedServerPort is the managed-local backend's
-// server.PortRepicker. It moves a Beads-generated config off inUsePort, a
-// port another process holds, onto a fresh one, and refuses (leaving the file
-// untouched) unless the file is Beads-generated, still carries the port
-// record, and its listener.port is the recorded port Beads chose. Only
-// listener.port and the record change; the rest of the file, hand edits
-// included, is kept.
-func repickManagedProxiedServerPort(_ context.Context, configPath string, inUsePort int) error {
-	target := resolveConfigWriteTarget(configPath)
-	body, err := os.ReadFile(target) // #nosec G304 -- the proxy child's own --config path
+// renderLegacyProxiedServerConfig is renderProxiedServerConfig as it was
+// before the port record existed: the marker followed directly by the YAML.
+func renderLegacyProxiedServerConfig(port int) ([]byte, error) {
+	body, err := renderProxiedServerConfig(port)
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(managedProxiedServerConfigMarker), body[len(managedProxiedServerConfigMarker)+len(managedPortRecordLine(port)):]...), nil
+}
+
+// managedPortConflictPolicy is the managed-local backend's
+// server.PortConflictPolicy. It lets the proxy child run the dolt sql-server
+// on a free port (through a runtime config; configPath is never modified)
+// only when configPath's listener.port is a port Beads chose:
+//   - the file carries the managed marker and the port record, and
+//     listener.port still equals the recorded port; or
+//   - the file is byte-identical to a config Beads generated before the
+//     record existed (any hand edit makes the bytes differ).
+//
+// Anything else (an operator's own config, a hand-set port, a hand-edited
+// legacy config) is pinned, and the error says what to do.
+func managedPortConflictPolicy(configPath string, inUsePort int) error {
+	body, err := os.ReadFile(configPath) // #nosec G304 -- the proxy child's own --config path
 	if err != nil {
 		return fmt.Errorf("read %s: %w", configPath, err)
 	}
+	remedy := fmt.Sprintf("free port %d, or set listener.port in %s to a free port", inUsePort, configPath)
 	if !isManagedProxiedServerConfig(body) {
-		return fmt.Errorf("%s is not a Beads-generated config", configPath)
+		return fmt.Errorf("%s is not a Beads-generated config, so its port is pinned; %s", configPath, remedy)
 	}
-	rest := body[len(managedProxiedServerConfigMarker):]
-	recorded, yamlBody, ok := cutManagedPortRecord(rest)
-	if !ok {
-		return fmt.Errorf("%s has no %q record, so its listener.port is treated as pinned", configPath, strings.TrimSpace(managedPortRecordPrefix))
+	remedy += ", or delete " + configPath + " so Beads regenerates it"
+	// The runtime config is written with environment placeholders already
+	// expanded, which would put their values (often credentials) on disk.
+	if bytes.Contains(body, []byte("${")) {
+		return fmt.Errorf("%s uses environment placeholders, so Beads will not write a runtime copy of it; %s", configPath, remedy)
 	}
-
-	var doc yaml.Node
-	if err := yaml.Unmarshal(yamlBody, &doc); err != nil {
+	cfg, err := servercfg.NewYamlConfig(body)
+	if err != nil {
 		return fmt.Errorf("parse %s: %w", configPath, err)
 	}
-	portNode := yamlMappingPath(&doc, "listener", "port")
-	if portNode == nil || portNode.Kind != yaml.ScalarNode {
-		return fmt.Errorf("%s has no listener.port", configPath)
-	}
-	current, err := strconv.Atoi(portNode.Value)
-	if err != nil {
-		return fmt.Errorf("%s: listener.port %q: %w", configPath, portNode.Value, err)
-	}
-	if current != recorded {
-		return fmt.Errorf("%s: listener.port %d was set by hand (Beads chose %d), so it is pinned", configPath, current, recorded)
-	}
+	current := cfg.Port()
 	if current != inUsePort {
-		return fmt.Errorf("%s: listener.port is %d, not the in-use port %d", configPath, current, inUsePort)
+		return fmt.Errorf("%s: listener.port is %d, not the in-use port %d; %s", configPath, current, inUsePort, remedy)
 	}
-
-	newPort := inUsePort
-	for newPort == inUsePort {
-		if newPort, err = proxy.PickFreePort(); err != nil {
-			return fmt.Errorf("pick free port: %w", err)
+	if recorded, _, ok := cutManagedPortRecord(body[len(managedProxiedServerConfigMarker):]); ok {
+		if current != recorded {
+			return fmt.Errorf("%s: listener.port %d was set by hand (Beads chose %d), so it is pinned; %s", configPath, current, recorded, remedy)
 		}
+		return nil
 	}
-	portNode.Value = strconv.Itoa(newPort)
-	portNode.Tag = "!!int"
-	portNode.Style = 0
-
-	var buf bytes.Buffer
-	enc := yaml.NewEncoder(&buf)
-	enc.SetIndent(4) // yaml.Marshal's indent, which renderProxiedServerConfig uses
-	if err := enc.Encode(&doc); err != nil {
-		return fmt.Errorf("render %s: %w", configPath, err)
-	}
-	if err := enc.Close(); err != nil {
-		return fmt.Errorf("render %s: %w", configPath, err)
-	}
-	out := append([]byte(managedProxiedServerConfigMarker+managedPortRecordLine(newPort)), buf.Bytes()...)
-	cfg, err := servercfg.NewYamlConfig(out)
+	legacy, err := renderLegacyProxiedServerConfig(current)
 	if err != nil {
-		return fmt.Errorf("re-parse rewritten %s: %w", configPath, err)
+		return fmt.Errorf("render legacy config: %w", err)
 	}
-	if cfg.Port() != newPort {
-		return fmt.Errorf("rewritten %s reports port %d, want %d", configPath, cfg.Port(), newPort)
+	if bytes.Equal(body, legacy) {
+		return nil
 	}
-	if err := atomicWriteFile(target, out); err != nil {
-		return fmt.Errorf("write %s: %w", configPath, err)
-	}
-	return nil
+	return fmt.Errorf("%s was edited by hand and has no %q record, so its listener.port is pinned; %s",
+		configPath, strings.TrimSpace(managedPortRecordPrefix), remedy)
 }
 
 // cutManagedPortRecord splits the port record line off the front of rest
 // (the managed config after its marker) and returns the recorded port and
-// the remaining YAML.
+// the remaining YAML. The digits must end at a space or the line end and
+// name a valid TCP port.
 func cutManagedPortRecord(rest []byte) (port int, yamlBody []byte, ok bool) {
 	if !bytes.HasPrefix(rest, []byte(managedPortRecordPrefix)) {
 		return 0, nil, false
@@ -448,38 +436,14 @@ func cutManagedPortRecord(rest []byte) (port int, yamlBody []byte, ok bool) {
 	for end < len(digits) && digits[end] >= '0' && digits[end] <= '9' {
 		end++
 	}
+	if end == 0 || (end < len(digits) && digits[end] != ' ') {
+		return 0, nil, false
+	}
 	port, err := strconv.Atoi(string(digits[:end]))
-	if err != nil {
+	if err != nil || port < 1 || port > 65535 {
 		return 0, nil, false
 	}
 	return port, after, true
-}
-
-// yamlMappingPath walks mapping keys from a document node and returns the
-// value node at the end of path, or nil.
-func yamlMappingPath(n *yaml.Node, path ...string) *yaml.Node {
-	if n.Kind == yaml.DocumentNode {
-		if len(n.Content) == 0 {
-			return nil
-		}
-		n = n.Content[0]
-	}
-	for _, key := range path {
-		if n.Kind != yaml.MappingNode {
-			return nil
-		}
-		var next *yaml.Node
-		for i := 0; i+1 < len(n.Content); i += 2 {
-			if n.Content[i].Value == key {
-				next = n.Content[i+1]
-			}
-		}
-		if next == nil {
-			return nil
-		}
-		n = next
-	}
-	return n
 }
 
 // TODO: this needs to return a dolt server uow provider as the global

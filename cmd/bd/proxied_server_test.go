@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -1227,17 +1226,6 @@ func TestResolveProxiedServerLogPath_FollowsCustomRoot(t *testing.T) {
 	})
 }
 
-// writeManagedConfig writes a Beads-generated config for port into a temp
-// dir and returns its path.
-func writeManagedConfig(t *testing.T, port int) string {
-	t.Helper()
-	body, err := renderProxiedServerConfig(port)
-	require.NoError(t, err)
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	require.NoError(t, os.WriteFile(path, body, 0o600))
-	return path
-}
-
 func TestRenderProxiedServerConfig_RecordsChosenPort(t *testing.T) {
 	body, err := renderProxiedServerConfig(54321)
 	require.NoError(t, err)
@@ -1247,66 +1235,122 @@ func TestRenderProxiedServerConfig_RecordsChosenPort(t *testing.T) {
 	assert.Equal(t, 54321, port)
 }
 
-func TestRepickManagedProxiedServerPort_MovesBeadsChosenPort(t *testing.T) {
-	path := writeManagedConfig(t, 40001)
-	// A hand edit elsewhere in the file must survive the rewrite.
-	body, err := os.ReadFile(path)
+func TestRenderLegacyProxiedServerConfig_IsMarkerPlusYAML(t *testing.T) {
+	legacy, err := renderLegacyProxiedServerConfig(40001)
 	require.NoError(t, err)
-	body = []byte(strings.Replace(string(body), "log_level: info", "log_level: debug", 1))
-	require.NoError(t, os.WriteFile(path, body, 0o600))
-
-	require.NoError(t, repickManagedProxiedServerPort(context.Background(), path, 40001))
-
-	got, err := os.ReadFile(path)
+	require.True(t, isManagedProxiedServerConfig(legacy))
+	_, _, ok := cutManagedPortRecord(legacy[len(managedProxiedServerConfigMarker):])
+	assert.False(t, ok, "the legacy form has no port record")
+	cfg, err := servercfg.NewYamlConfig(legacy)
 	require.NoError(t, err)
-	require.True(t, isManagedProxiedServerConfig(got), "rewrite must keep the managed marker")
-	recorded, _, ok := cutManagedPortRecord(got[len(managedProxiedServerConfigMarker):])
-	require.True(t, ok, "rewrite must keep the chosen-port record")
-	cfg, err := servercfg.NewYamlConfig(got)
-	require.NoError(t, err)
-	assert.NotEqual(t, 40001, cfg.Port(), "port must move off the in-use port")
-	assert.Equal(t, recorded, cfg.Port(), "record must name the new port")
-	assert.Equal(t, servercfg.LogLevel_Debug, cfg.LogLevel(), "hand edit must be preserved")
-	assert.Equal(t, proxiedServerListenerHost, cfg.Host())
-	require.NoError(t, validateProxiedServerConfig(path), "rewritten config must still pass the managed policy")
-
-	// The rewritten file is itself repickable.
-	require.NoError(t, repickManagedProxiedServerPort(context.Background(), path, cfg.Port()))
+	assert.Equal(t, 40001, cfg.Port())
 }
 
-func TestRepickManagedProxiedServerPort_Refuses(t *testing.T) {
-	ctx := context.Background()
+func TestCutManagedPortRecord(t *testing.T) {
+	for _, tc := range []struct {
+		line string
+		port int
+		ok   bool
+	}{
+		{line: managedPortRecordPrefix + "40001 (Beads chose this port.)\n", port: 40001, ok: true},
+		{line: managedPortRecordPrefix + "40001\n", port: 40001, ok: true},
+		{line: managedPortRecordPrefix + "4000abc\n"},
+		{line: managedPortRecordPrefix + "0\n"},
+		{line: managedPortRecordPrefix + "70000\n"},
+		{line: managedPortRecordPrefix + "\n"},
+		{line: managedPortRecordPrefix + "40001"},
+		{line: "log_level: info\n"},
+	} {
+		port, _, ok := cutManagedPortRecord([]byte(tc.line + "log_level: info\n"))
+		if tc.line == managedPortRecordPrefix+"40001" {
+			// No newline before the YAML in this case: the record runs into it.
+			port, _, ok = cutManagedPortRecord([]byte(tc.line))
+		}
+		assert.Equal(t, tc.ok, ok, "%q", tc.line)
+		if tc.ok {
+			assert.Equal(t, tc.port, port, "%q", tc.line)
+		}
+	}
+}
+
+func TestManagedPortConflictPolicy_AllowsBeadsChosenPort(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body func(t *testing.T) []byte
+	}{
+		{name: "generated config", body: func(t *testing.T) []byte {
+			b, err := renderProxiedServerConfig(40001)
+			require.NoError(t, err)
+			return b
+		}},
+		{name: "generated config edited elsewhere, port unchanged", body: func(t *testing.T) []byte {
+			b, err := renderProxiedServerConfig(40001)
+			require.NoError(t, err)
+			return []byte(strings.Replace(string(b), "log_level: info", "log_level: debug", 1))
+		}},
+		{name: "unedited config generated before the record existed", body: func(t *testing.T) []byte {
+			b, err := renderLegacyProxiedServerConfig(40001)
+			require.NoError(t, err)
+			return b
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			body := tc.body(t)
+			require.NoError(t, os.WriteFile(path, body, 0o600))
+			require.NoError(t, managedPortConflictPolicy(path, 40001))
+			after, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Equal(t, string(body), string(after), "the policy must never modify the config")
+		})
+	}
+}
+
+func TestManagedPortConflictPolicy_PinsOtherPorts(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		body   func(t *testing.T) []byte
 		inUse  int
-		errHas string
+		errHas []string
 	}{
 		{
-			name: "hand-set port is pinned",
+			name: "hand-set port",
 			body: func(t *testing.T) []byte {
 				b, err := renderProxiedServerConfig(40001)
 				require.NoError(t, err)
-				return []byte(strings.Replace(string(b), "port: 40001", "port: 40002", 1))
+				// The YAML key, not the "...-listener-port: 40001" record above it.
+				return []byte(strings.Replace(string(b), "\n    port: 40001", "\n    port: 40002", 1))
 			},
 			inUse:  40002,
-			errHas: "set by hand",
+			errHas: []string{"set by hand", "free port 40002", "delete"},
 		},
 		{
-			name: "config without the record is pinned",
+			name: "hand-edited config generated before the record existed",
 			body: func(t *testing.T) []byte {
-				return []byte(managedProxiedServerConfigMarker + "log_level: info\nlistener:\n    host: 127.0.0.1\n    port: 40001\n")
+				b, err := renderLegacyProxiedServerConfig(40001)
+				require.NoError(t, err)
+				return []byte(strings.Replace(string(b), "log_level: info", "log_level: debug", 1))
 			},
 			inUse:  40001,
-			errHas: "treated as pinned",
+			errHas: []string{"edited by hand", "pinned", "delete"},
 		},
 		{
-			name: "operator config is never rewritten",
+			name: "operator config",
 			body: func(t *testing.T) []byte {
 				return []byte("listener:\n  host: 127.0.0.1\n  port: 40001\n")
 			},
 			inUse:  40001,
-			errHas: "not a Beads-generated config",
+			errHas: []string{"not a Beads-generated config", "set listener.port in"},
+		},
+		{
+			name: "environment placeholders",
+			body: func(t *testing.T) []byte {
+				b, err := renderProxiedServerConfig(40001)
+				require.NoError(t, err)
+				return []byte(strings.Replace(string(b), "log_level: info", "log_level: ${BD_TEST_LOG_LEVEL}", 1))
+			},
+			inUse:  40001,
+			errHas: []string{"environment placeholders"},
 		},
 		{
 			name: "in-use port is not the config's port",
@@ -1316,19 +1360,19 @@ func TestRepickManagedProxiedServerPort_Refuses(t *testing.T) {
 				return b
 			},
 			inUse:  40009,
-			errHas: "not the in-use port",
+			errHas: []string{"not the in-use port"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BD_TEST_LOG_LEVEL", "info")
 			path := filepath.Join(t.TempDir(), "config.yaml")
 			body := tc.body(t)
 			require.NoError(t, os.WriteFile(path, body, 0o600))
-			err := repickManagedProxiedServerPort(ctx, path, tc.inUse)
+			err := managedPortConflictPolicy(path, tc.inUse)
 			require.Error(t, err)
-			assert.Contains(t, err.Error(), tc.errHas)
-			after, rerr := os.ReadFile(path)
-			require.NoError(t, rerr)
-			assert.Equal(t, string(body), string(after), "a refused repick must leave the file untouched")
+			for _, want := range tc.errHas {
+				assert.Contains(t, err.Error(), want)
+			}
 		})
 	}
 }

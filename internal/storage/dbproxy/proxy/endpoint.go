@@ -174,7 +174,8 @@ func PickFreePort() (int, error) {
 	// production caller allocates the Dolt config port. Another process can
 	// take that port before dolt binds it; server.DoltServer detects that
 	// (dolt's own ready line, not a bare dial, proves readiness) and, for a
-	// Beads-chosen port, moves the config to a fresh one and retries.
+	// Beads-chosen port, retries on a fresh port through a runtime copy of
+	// the config; the config file itself is never rewritten.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return 0, err
