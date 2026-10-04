@@ -156,6 +156,7 @@
 15 1 TestMergeWithStrategy_OursKeepsLocal
 
 15 2 TestActiveDatabaseSizeScopesToActiveEmbeddedDatabase
+15 2 TestAsOfReadContract
 15 2 TestCleanGitRemoteCacheGarbage
 15 2 TestDepRekeyMarkerStillInIgnoredSeries
 15 2 TestDescendantWalkReachesEveryTargetKindAndStopsOnCycles
@@ -263,6 +264,7 @@
 15 5 TestLenientGateWarningBody_BluntRefusalKeepsSharedGuidance
 15 5 TestOpenReturnsCachedStore
 15 5 TestPartitionWispIDs
+15 5 TestRecordVersionKeepsSubSecondChangeAt
 15 5 TestRetentionContract
 15 5 TestWithPeerAuth_KeyMismatchFailsClosed
 
@@ -348,6 +350,7 @@
 15 8 TestReclaimExpiredLeaseSurvivesRestartEmbedded
 15 8 TestRemoteVerbPlainRemoteWithoutAuthPresentsNone
 15 8 TestTransactionCleanupAfterSQLCommitIsIndeterminate
+15 8 TestVersionedHistoryKeepsNumbersTheStoreDistinguishesApart
 
 15 9 TestCommenterContract
 15 9 TestEmbeddedBatchCloserBackendFailureReturnsNoOutcomes
