@@ -467,7 +467,7 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 		p.tracef("handleConn(%s) backend dial error: %v", addr, err)
 		p.stats.IncBackendDialError()
 		if p.reportUpstreamOutage && isUpstreamUnreachableDialError(err) {
-			_ = writeUpstreamUnreachable(client, err.Error())
+			p.writeUpstreamOutage(client, dialFailureMessage(err))
 		}
 		_ = client.Close()
 		return err
@@ -509,12 +509,13 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 		p.tracef("handleConn(%s) backend→client done (n=%d, err=%v)", addr, n, err)
 		// A MySQL server speaks first, so a backend that reaches EOF having
 		// sent nothing never served this connection: a front whose own
-		// upstream is gone, or a server that accepted and dropped it. Tell
-		// the client instead of handing it a bare close. A client that hung
-		// up first closes backend, which makes this Copy fail rather than
-		// return a clean EOF, so that case stays silent.
+		// target is gone, or a server at its connection limit or shutting
+		// down. That is not proof of an outage (see upstream_error.go), so
+		// the client retries the report briefly rather than failing on it.
+		// A client that hung up first closes backend, which makes this Copy
+		// fail rather than return a clean EOF, so that case stays silent.
 		if p.reportUpstreamOutage && n == 0 && err == nil {
-			_ = writeUpstreamUnreachable(client, backendClosedBeforeGreeting(backend))
+			p.writeUpstreamOutage(client, closedBeforeGreetingMessage(backend))
 		}
 		return err
 	})

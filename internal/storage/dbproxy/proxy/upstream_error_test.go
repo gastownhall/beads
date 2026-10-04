@@ -4,14 +4,20 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	mysql "github.com/go-sql-driver/mysql"
+
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 )
 
 // serveThroughProxy runs handleConn for every connection accepted on a fresh
@@ -61,10 +67,10 @@ func requireUpstreamUnreachable(t *testing.T, err error, elapsed time.Duration, 
 	if !errors.As(err, &me) {
 		t.Fatalf("ping error = %v (%T), want *mysql.MySQLError", err, err)
 	}
-	if me.Number != upstreamUnreachableErrno || string(me.SQLState[:]) != upstreamUnreachableSQLState {
-		t.Fatalf("MySQL error = %d/%s, want %d/%s", me.Number, me.SQLState, upstreamUnreachableErrno, upstreamUnreachableSQLState)
+	if !IsUpstreamOutageError(err) || string(me.SQLState[:]) != upstreamErrorSQLState {
+		t.Fatalf("MySQL error = %d/%s %q, want the proxy's %d/%s upstream report", me.Number, me.SQLState, me.Message, UpstreamErrorNumber, upstreamErrorSQLState)
 	}
-	if !strings.Contains(me.Message, "upstream Dolt server unreachable") || !strings.Contains(me.Message, wantInMessage) {
+	if !strings.Contains(me.Message, wantInMessage) {
 		t.Fatalf("message %q lacks upstream context %q", me.Message, wantInMessage)
 	}
 	if elapsed > 2*time.Second {
@@ -110,6 +116,9 @@ func TestHandleConnUpstreamClosingBeforeGreetingAnswersWithMySQLError(t *testing
 	addr := serveThroughProxy(t, tcpBlackholeBackend{address: front.Addr().String()}, true)
 	elapsed, err := pingThroughProxy(t, addr)
 	requireUpstreamUnreachable(t, err, elapsed, front.Addr().String())
+	if !strings.Contains(err.Error(), "closed the connection before the MySQL greeting (down, restarting, or at its connection limit)") {
+		t.Fatalf("zero-byte close must not be reported as a proven outage: %v", err)
+	}
 }
 
 // A backend that spoke and then dropped the connection is not an unreachable
@@ -188,14 +197,74 @@ func requireUpstreamErrorPacket(t *testing.T, got []byte) {
 	if payloadLen != len(got)-4 || got[3] != 0 || got[4] != 0xff {
 		t.Fatalf("response is not a single sequence-0 ERR packet: % x", got)
 	}
-	if errno := int(got[5]) | int(got[6])<<8; errno != upstreamUnreachableErrno {
-		t.Fatalf("errno = %d, want %d", errno, upstreamUnreachableErrno)
+	if errno := int(got[5]) | int(got[6])<<8; errno != UpstreamErrorNumber {
+		t.Fatalf("errno = %d, want %d", errno, UpstreamErrorNumber)
 	}
-	if string(got[7:13]) != "#"+upstreamUnreachableSQLState {
-		t.Fatalf("SQL state marker = %q, want #%s", got[7:13], upstreamUnreachableSQLState)
+	if string(got[7:13]) != "#"+upstreamErrorSQLState {
+		t.Fatalf("SQL state marker = %q, want #%s", got[7:13], upstreamErrorSQLState)
 	}
-	if msg := string(got[13:]); !strings.Contains(msg, "upstream Dolt server unreachable") {
-		t.Fatalf("message %q lacks upstream context", msg)
+	if msg := string(got[13:]); !strings.HasPrefix(msg, UpstreamErrorPrefix+"upstream Dolt server") {
+		t.Fatalf("message %q lacks the proxy prefix and upstream context", msg)
+	}
+}
+
+// External backends enable the outage report through NewProxyServer; the
+// handleConn tests above set the flag by hand on fakes.
+func TestNewProxyServerReportsOutagesForExternalBackendsOnly(t *testing.T) {
+	ext, err := server.NewExternalDoltServer(configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: 3306})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !NewProxyServer(ProxyOpts{Server: ext}).reportUpstreamOutage {
+		t.Fatal("an external backend must report upstream outages")
+	}
+	if NewProxyServer(ProxyOpts{Server: blockingBackend{}}).reportUpstreamOutage {
+		t.Fatal("a non-external backend must not report upstream outages")
+	}
+}
+
+// The dial report names network, address and reason, without the Go
+// call-site prefixes ExternalDoltServer.Dial wraps the error in.
+func TestDialFailureMessageDropsGoCallSites(t *testing.T) {
+	dead, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, portStr, _ := net.SplitHostPort(dead.Addr().String())
+	_ = dead.Close()
+	port, _ := strconv.Atoi(portStr)
+	ext, err := server.NewExternalDoltServer(configfile.ExternalDoltConfig{Host: host, Port: port})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, dialErr := ext.Dial(context.Background())
+	if dialErr == nil || !isUpstreamUnreachableDialError(dialErr) {
+		t.Fatalf("dial error = %v, want a refusal", dialErr)
+	}
+	got := dialFailureMessage(dialErr)
+	want := "upstream Dolt server unreachable: dial tcp " + dead.Addr().String() + ": connection refused"
+	if got != want {
+		t.Fatalf("dialFailureMessage = %q, want %q", got, want)
+	}
+}
+
+func TestIsUpstreamOutageErrorRequiresTheProxyPrefix(t *testing.T) {
+	if IsUpstreamOutageError(&mysql.MySQLError{Number: UpstreamErrorNumber, Message: "Can't connect to MySQL server"}) {
+		t.Fatal("a 2003 without the proxy prefix is not the proxy's report")
+	}
+	if IsUpstreamOutageError(&mysql.MySQLError{Number: 1045, Message: UpstreamErrorPrefix + "x"}) {
+		t.Fatal("only 2003 carries the proxy's report")
+	}
+	if !IsUpstreamOutageError(fmt.Errorf("wrapped: %w", &mysql.MySQLError{Number: UpstreamErrorNumber, Message: UpstreamErrorPrefix + "x"})) {
+		t.Fatal("a wrapped proxy report must be recognized")
+	}
+}
+
+func TestUpstreamErrorPacketTruncatesOnARuneBoundary(t *testing.T) {
+	// "é" is two bytes; an odd prefix puts the byte limit mid-rune.
+	pkt := upstreamErrorPacket("x" + strings.Repeat("é", upstreamErrorMaxMessage))
+	if msg := pkt[13:]; !utf8.Valid(msg) || len(msg) > upstreamErrorMaxMessage {
+		t.Fatalf("truncated message is %d bytes, valid UTF-8 = %v", len(msg), utf8.Valid(msg))
 	}
 }
 
