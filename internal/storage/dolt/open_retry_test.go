@@ -510,6 +510,17 @@ func TestOpenRetryNotEngagedForManagedLocalhostOpen(t *testing.T) {
 // would light this up rather than silently start retrying.
 func TestOpenRetryNotReachableFromEmbeddedMode(t *testing.T) {
 	t.Setenv("BEADS_TEST_MODE", "1")
+	// Hermeticity: the package test harness exports the test server's port
+	// variables, and ResolveServerMode treats an ambient port variable as a
+	// server-mode signal (#5934), which would resolve this embedded fixture
+	// as external.
+	t.Setenv("BEADS_CENTRAL_CONFIG", filepath.Join(t.TempDir(), "absent-central-config.json"))
+	for _, key := range []string{
+		"BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SHARED_SERVER",
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT",
+	} {
+		t.Setenv(key, "")
+	}
 	log := stubOpenRetryDials(t, errStubRefused, nil)
 
 	beadsDir := writeBudgetConfig(t, map[string]string{config.OpenRetryBudgetKey: "30s"})
