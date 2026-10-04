@@ -2523,9 +2523,10 @@ const (
 	bazelRBESecretValue = "${{ secrets.RBE_WEST_EXECUTOR != '' }}"
 )
 
-// rbe-prewarm reads its two app secrets in exactly three places, mirroring
-// the rbe job's own emptiness-test/mint pattern above: an env boolean
-// (never an `if:`) gating the mint step, and the mint step's own `with:`
+// rbe-prewarm reads its one app secret (the private key; the App's public
+// client-id is a literal) in exactly two places, mirroring the rbe job's own
+// emptiness-test/mint pattern above: an env boolean (never an `if:`) gating
+// the mint step, and the mint step's own `with:`
 // (the only step in bazel.yml allowed to read a secret outside a
 // setup-bazel env, alongside bazelRBESecretPath/Value). Step indices are
 // steps[0]=credential check, [1]=mint, [2]=dispatch, [3]=record result (no
@@ -2533,8 +2534,6 @@ const (
 const (
 	bazelRBEPrewarmHasAppPath  = ".jobs." + bazelRBEPrewarmJobName + ".steps[0].env.HAS_POOL_APP"
 	bazelRBEPrewarmHasAppValue = "${{ secrets.RBE_POOL_APP_PRIVATE_KEY != '' }}"
-	bazelRBEPrewarmAppIDPath   = ".jobs." + bazelRBEPrewarmJobName + ".steps[1].with.app-id"
-	bazelRBEPrewarmAppIDValue  = "${{ secrets.RBE_POOL_APP_ID }}"
 	bazelRBEPrewarmKeyPath     = ".jobs." + bazelRBEPrewarmJobName + ".steps[1].with.private-key"
 	bazelRBEPrewarmKeyValue    = "${{ secrets.RBE_POOL_APP_PRIVATE_KEY }}"
 	// The job-level continue-on-error path itself: see
@@ -2705,8 +2704,8 @@ var bazelRemoteModes = map[string]bool{"remote": true, "fork-ro": true, "fork-rw
 func bazelModeEnabled(mode string) string { return strconv.FormatBool(bazelRemoteModes[mode]) }
 
 // The four RBE secrets plus the rbe-prewarm job's "bazel-allocator" GitHub
-// App id and private key (it mints its own gastownhall/gascity installation
-// token from these, inline in the job's own dispatch step - see bazel.yml's
+// App private key (it mints its own gastownhall/gascity installation
+// token from it, inline in the job's own dispatch step - see bazel.yml's
 // rbe-prewarm job), the full set bazel.yml declares under workflow_call and
 // the only secrets pr.yml or nightly.yml may hand it
 // (TestBazelLaneIsGatedAlongsideLegacy below).
@@ -2715,7 +2714,6 @@ var bazelCallSecrets = map[string]string{
 	"RBE_TLS_CERT":             "${{ secrets.RBE_TLS_CERT }}",
 	"RBE_TLS_KEY":              "${{ secrets.RBE_TLS_KEY }}",
 	"RBE_TLS_CA":               "${{ secrets.RBE_TLS_CA }}",
-	"RBE_POOL_APP_ID":          "${{ secrets.RBE_POOL_APP_ID }}",
 	"RBE_POOL_APP_PRIVATE_KEY": "${{ secrets.RBE_POOL_APP_PRIVATE_KEY }}",
 }
 
@@ -2724,7 +2722,7 @@ var bazelCallSecrets = map[string]string{
 // allowlisted fork author's own PR code runs under that trust tier, and the
 // app secrets mint a token with write access to another organization's
 // repository. Only pr.yml and nightly.yml (same-repo/trusted triggers only)
-// pass the two RBE_POOL_APP_* secrets; bazel-farm.yml passes exactly these
+// pass the RBE_POOL_APP_PRIVATE_KEY secret; bazel-farm.yml passes exactly these
 // four.
 var bazelFarmCallSecrets = map[string]string{
 	"RBE_WEST_EXECUTOR": "${{ secrets.RBE_WEST_EXECUTOR }}",
@@ -3454,8 +3452,8 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 			}
 			// bazel-farm.yml is the one deliberate exception (B1, security
 			// review of bdef342d5): its pull_request_target run must never
-			// carry the rbe-prewarm app secrets, so it gets the four-secret
-			// map instead of the full six pr.yml and nightly.yml pass.
+			// carry the rbe-prewarm app secret, so it gets the four-secret
+			// map instead of the full five pr.yml and nightly.yml pass.
 			want := bazelCallSecrets
 			if entry.Name() == bazelFarmWorkflowName {
 				want = bazelFarmCallSecrets
@@ -5440,7 +5438,6 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 		}
 		switch {
 		case path == bazelRBEPrewarmHasAppPath && value == bazelRBEPrewarmHasAppValue,
-			path == bazelRBEPrewarmAppIDPath && value == bazelRBEPrewarmAppIDValue,
 			path == bazelRBEPrewarmKeyPath && value == bazelRBEPrewarmKeyValue:
 			return // rbe-prewarm's own credential-check/mint step (see their doc comment)
 		}

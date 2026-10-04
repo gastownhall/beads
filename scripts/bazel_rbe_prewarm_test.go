@@ -192,7 +192,7 @@ func TestRBEPrewarmNeverFailsTheRun(t *testing.T) {
 }
 
 // TestRBEPrewarmSecretsOnlyInItsOwnJob walks the raw YAML of bazel.yml and
-// confirms the two app-credential secrets are referenced only inside the
+// confirms the app-credential secret is referenced only inside the
 // rbe-prewarm job (its HAS_POOL_APP env check and the mint step's `with:`),
 // never anywhere else in the file - not another job's env, not a workflow
 // top-level env, not an `if:`.
@@ -215,7 +215,7 @@ func TestRBEPrewarmSecretsOnlyInItsOwnJob(t *testing.T) {
 }
 
 // TestRBEPrewarmAppSecretsOnlyExpectedCallers: B1 (security review of
-// bdef342d5) requires the two bazel-allocator app secrets reach only
+// bdef342d5) requires the bazel-allocator app secret reach only
 // bazel.yml's rbe-prewarm job and the pass-through `secrets:` blocks of its
 // two same-repo/trusted callers (pr.yml, nightly.yml) - never
 // bazel-farm.yml, whose pull_request_target run executes an allowlisted
@@ -265,6 +265,34 @@ func TestRBEPrewarmAppSecretsOnlyExpectedCallers(t *testing.T) {
 	}
 }
 
+// bazelAllocatorClientID is the "bazel-allocator" GitHub App's public
+// Client ID (GET /apps/bazel-allocator), which rbe-prewarm's mint step passes
+// to actions/create-github-app-token as client-id.
+const bazelAllocatorClientID = "Iv23ligrqVEhlamZnoPU"
+
+// TestRBEPrewarmRetiredAppIDSecret: the RBE_POOL_APP_ID secret was retired
+// when the mint step switched to the literal client-id; no workflow may
+// declare, pass through or read it again.
+func TestRBEPrewarmRetiredAppIDSecret(t *testing.T) {
+	root := sourceRepoRoot(t)
+	entries, err := os.ReadDir(filepath.Join(root, ".github", "workflows"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".yml") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(root, ".github", "workflows", entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "RBE_POOL_APP_ID") {
+			t.Errorf("%s mentions the retired RBE_POOL_APP_ID secret; the mint step uses client-id %q instead", entry.Name(), bazelAllocatorClientID)
+		}
+	}
+}
+
 // TestRBEPrewarmAppTokenScoped pins the mint step to the exact "bazel-
 // allocator" installation-token shape the docs promise: the action pinned to
 // a full commit SHA with its version comment (same SHA this repo already
@@ -293,8 +321,14 @@ func TestRBEPrewarmAppTokenScoped(t *testing.T) {
 	if got := mint.With["repositories"]; got != "gascity" {
 		t.Errorf("mint step repositories = %q, want exactly %q (not a list, not the whole org)", got, "gascity")
 	}
-	if got := mint.With["app-id"]; got != "${{ secrets.RBE_POOL_APP_ID }}" {
-		t.Errorf("mint step app-id = %q, want the RBE_POOL_APP_ID secret", got)
+	// client-id, not the action's deprecated app-id input: the App's public
+	// Client ID (GET /apps/bazel-allocator) is not a credential, so it is a
+	// reviewed literal rather than a secret or repository variable.
+	if got, ok := mint.With["app-id"]; ok {
+		t.Errorf("mint step sets the deprecated app-id input (%q); use client-id", got)
+	}
+	if got := mint.With["client-id"]; got != bazelAllocatorClientID {
+		t.Errorf("mint step client-id = %q, want the bazel-allocator App's Client ID %q", got, bazelAllocatorClientID)
 	}
 	if got := mint.With["private-key"]; got != "${{ secrets.RBE_POOL_APP_PRIVATE_KEY }}" {
 		t.Errorf("mint step private-key = %q, want the RBE_POOL_APP_PRIVATE_KEY secret", got)

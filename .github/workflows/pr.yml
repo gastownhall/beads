@@ -2268,7 +2268,6 @@ jobs:
       RBE_TLS_CERT: ${{ secrets.RBE_TLS_CERT }}
       RBE_TLS_KEY: ${{ secrets.RBE_TLS_KEY }}
       RBE_TLS_CA: ${{ secrets.RBE_TLS_CA }}
-      RBE_POOL_APP_ID: ${{ secrets.RBE_POOL_APP_ID }}
       RBE_POOL_APP_PRIVATE_KEY: ${{ secrets.RBE_POOL_APP_PRIVATE_KEY }}
     with:
       build-artifact-name: bazel-ci-build-artifacts

@@ -123,7 +123,7 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/bazel.yml
-    # Exactly the four RBE secrets: never the two rbe-prewarm app secrets
+    # Exactly the four RBE secrets: never the rbe-prewarm app private key
     # (B1, security review of bdef342d5). This pull_request_target run is
     # the one caller whose code under test is an untrusted fork's, so it
     # must never carry the credential that mints gastownhall/gascity

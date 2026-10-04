@@ -94,8 +94,8 @@
 # the cache. The decision is also a workflow_call output (rbe-mode,
 # rbe-enabled), so pr.yml's gate can tell an expected skip from a missing
 # lane without re-deriving it. Callers pass secrets explicitly, never
-# `secrets: inherit`: pr.yml and nightly.yml pass all six declared secrets
-# (the four RBE ones plus rbe-prewarm's two bazel-allocator app secrets);
+# `secrets: inherit`: pr.yml and nightly.yml pass all five declared secrets
+# (the four RBE ones plus rbe-prewarm's bazel-allocator app private key);
 # bazel-farm.yml passes only the four RBE secrets (its pull_request_target
 # run never gets the app credential - see "rbe-west Pre-warm" below and B1
 # in this task's security review).
@@ -118,8 +118,8 @@
 # writes) for about two hours: anyone who copies it from the run gets no
 # more than the PR's author already has. In place: the four RBE secrets are
 # referenced by the setup-bazel step alone (plus the rbe job's emptiness test
-# of RBE_WEST_EXECUTOR, and rbe-prewarm's own has-app/mint steps for the two
-# app secrets, below), never by a workflow- or job-level env (policy-tested),
+# of RBE_WEST_EXECUTOR, and rbe-prewarm's own has-app/mint steps for the
+# app private key, below), never by a workflow- or job-level env (policy-tested),
 # decoded key material is masked in logs, and CI uploads only remotely
 # executed results (--noremote_upload_local_results in .bazelrc's
 # remote-exec config and in the generated rc), and the certificate
@@ -258,22 +258,21 @@ on:
       RBE_TLS_CA:
         required: false
       # rbe-prewarm only (never read by setup-bazel or the rbe job): the
-      # "bazel-allocator" GitHub App's id and private key. The app is
-      # installed on gastownhall/gascity alone with Actions (read/write) and
-      # Metadata (read) permissions, nothing else; rbe-prewarm's mint step
-      # reads the private key directly (it IS a long-lived credential, held
-      # in the runner's memory for that one step) to produce a short-lived
+      # "bazel-allocator" GitHub App's private key (its public client ID is
+      # a literal in the mint step, not a secret). The app is installed on
+      # gastownhall/gascity alone with Actions (read/write) and Metadata
+      # (read) permissions, nothing else; rbe-prewarm's mint step reads the
+      # private key directly (it IS a long-lived credential, held in the
+      # runner's memory for that one step) to produce a short-lived
       # installation token, which is all any later step ever sees. Unset
-      # (either one empty) disables pre-warming. Declared here so fork-rw
-      # could in principle request them, but no caller ever does: pr.yml and
-      # nightly.yml pass them straight through (both are same-repo/trusted
-      # triggers only); bazel-farm.yml's pull_request_target call does not,
-      # so no pre-warm credential ever reaches a fork-authored run (B1,
-      # security review of bdef342d5 - accepted risk is same-repo runs
-      # reaching the shared gascity scaler key, not forks). See
+      # disables pre-warming. Declared here so fork-rw could in principle
+      # request it, but no caller ever does: pr.yml and nightly.yml pass it
+      # straight through (both are same-repo/trusted triggers only);
+      # bazel-farm.yml's pull_request_target call does not, so no pre-warm
+      # credential ever reaches a fork-authored run (B1, security review of
+      # bdef342d5 - accepted risk is same-repo runs reaching the shared
+      # gascity scaler key, not forks). See
       # engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "rbe-west Pre-warm".
-      RBE_POOL_APP_ID:
-        required: false
       RBE_POOL_APP_PRIVATE_KEY:
         required: false
     # The rbe job's decision, and each lane's job.status (success, failure or
@@ -449,9 +448,8 @@ jobs:
   # bazel-test's comment above). That PR also carries no repository secrets
   # regardless of runs-on (GitHub strips them from a fork's pull_request
   # event), so the credential-check step below finds nothing to mint even if
-  # it runs. Neither app secret (secrets.RBE_POOL_APP_ID,
-  # secrets.RBE_POOL_APP_PRIVATE_KEY) is ever read in this `if:` or anywhere
-  # else in this file - only inside this job's own step env/with, same as the
+  # it runs. The app secret (secrets.RBE_POOL_APP_PRIVATE_KEY) is never
+  # read in this `if:` or anywhere else in this file - only inside this job's own step env/with, same as the
   # rbe job's HAS_EXECUTOR pattern - so a missing credential (the app not
   # provisioned yet, or the kill switch) fails soft (no mint attempt, then
   # the script's own ::warning::, exit 0) rather than changing whether the
@@ -505,20 +503,24 @@ jobs:
 
       # Mints a short-lived installation token for the "bazel-allocator"
       # GitHub App (installed on gastownhall/gascity only, Actions
-      # read/write + Metadata read): skipped entirely while the app secrets
-      # are not provisioned, leaving steps.mint.outputs.token empty, which
+      # read/write + Metadata read): skipped entirely while the app's
+      # private key is not provisioned, leaving steps.mint.outputs.token empty, which
       # the dispatch step below treats the same as any other missing-token
       # case (::warning::, exit 0). permission-actions narrows the minted
       # token to Actions even if the app is ever granted more. This is the
       # only step that ever reads the long-lived private key directly
       # (below); every step after it sees at most the short-lived token this
-      # one produces.
+      # one produces. client-id is the app's public Client ID (GET
+      # /apps/bazel-allocator; not a credential), committed as a literal so
+      # it is reviewed and policy-tested with the rest of this step rather
+      # than living in an unversioned repository variable; it replaces the
+      # action's deprecated app-id input.
       - name: Mint gastownhall/gascity installation token
         id: mint
         if: ${{ steps.has-app.outputs.has-app == 'true' }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         with:
-          app-id: ${{ secrets.RBE_POOL_APP_ID }}
+          client-id: Iv23ligrqVEhlamZnoPU
           private-key: ${{ secrets.RBE_POOL_APP_PRIVATE_KEY }}
           owner: gastownhall
           repositories: gascity
