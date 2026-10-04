@@ -2550,7 +2550,8 @@ const (
 )
 
 // The only triggers bazel.yml may have. pull_request_target (and
-// workflow_run) would run with secrets in the context of fork PRs. PRs and
+// workflow_run) would run with secrets in the context of fork PRs
+// (TestNoPrivilegedWorkflowRunsPRCode). PRs and
 // merge groups reach it only through pr.yml's call, so it runs once per PR.
 var bazelWorkflowTriggers = []string{"push", "workflow_call", "workflow_dispatch"}
 
@@ -2592,7 +2593,7 @@ var bazelAdvisoryLanes = map[string]string{
 // while rbe-fork is closed, whose only PR-time integration run it is; a
 // warm run builds and tests only what the PR changed), never plain local
 // (rbe=off: a cold tagged race build of //... on one runner); and off when a
-// caller passes integration: "off" (pr.yml and bazel-farm.yml pass "on"). A
+// caller passes integration: "off" (pr.yml passes "on"). A
 // string input: on push and dispatch it is null, and null != 'off', so the
 // lane keeps running on main.
 const bazelIntegIf = "${{ (needs.rbe.outputs.enabled == 'true' || needs.rbe.outputs.mode == 'cache') && inputs.integration != 'off' }}"
@@ -2615,9 +2616,9 @@ const bazelPackageRunsOn = "${{ needs.rbe.outputs.mode == 'remote' && 'blacksmit
 // never carries a workflow_call secret regardless of this if (GitHub does
 // not forward repository/App secrets to a fork's pull_request event), so
 // that half of the old condition always found no-app and no-op'd; it also
-// cost an idle runner-minute for nothing. bazel-farm.yml no longer forwards
-// the app secrets either (TestBazelFarmWorkflowSecurity), removing the only
-// other path that could have reached fork-rw with the credential attached.
+// cost an idle runner-minute for nothing. No privileged trigger calls
+// bazel.yml (TestNoPrivilegedWorkflowRunsPRCode), so no other path reaches
+// fork-rw with the credential attached.
 // Its runs-on still reuses the exact same mode-ternary every other lane
 // uses (wantRunsOn): TestBazelRBEJobDecidesOnce forbids re-deriving
 // fork/event facts outside the rbe job.
@@ -2625,8 +2626,7 @@ const bazelRBEPrewarmIf = "${{ needs.rbe.outputs.mode == 'remote' }}"
 
 // F3: the rbe job's own runner (not gated by its own outputs - it decides
 // them). Same-repo PRs and merge_group/push/dispatch/schedule (never forks)
-// get Blacksmith; a pull_request_target farm run and any fork or Dependabot
-// PR stay GitHub-hosted. Pinned verbatim by TestSameRepoBlacksmithRunners.
+// get Blacksmith; any fork or Dependabot PR stays GitHub-hosted. Pinned verbatim by TestSameRepoBlacksmithRunners.
 const wantRBERunsOn = "${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
 
 // The sameRepoBlacksmith{2,4,8}vcpu consts and the real-expression evaluator
@@ -2683,8 +2683,8 @@ const mainBlacksmithGoBuildCacheRunsOn = "${{ 'blacksmith-4vcpu-ubuntu-2404' }}"
 var bazelPRCallWith = map[string]string{
 	"build-artifact-name": "bazel-ci-build-artifacts",
 	"integration":         "on",
-	// F3: only pr.yml opts in; bazel-farm.yml and nightly.yml keep the
-	// default "off" (TestBazelGateSimulation's other callers).
+	// F3: only pr.yml opts in; nightly.yml keeps the default "off"
+	// (TestBazelGateSimulation's other caller).
 	"package-gates": "on",
 }
 
@@ -2717,20 +2717,6 @@ var bazelCallSecrets = map[string]string{
 	"RBE_TLS_CA":               "${{ secrets.RBE_TLS_CA }}",
 	"RBE_POOL_APP_ID":          "${{ secrets.RBE_POOL_APP_ID }}",
 	"RBE_POOL_APP_PRIVATE_KEY": "${{ secrets.RBE_POOL_APP_PRIVATE_KEY }}",
-}
-
-// bazel-farm.yml's pull_request_target run must never carry the
-// gastownhall/gascity app credential (B1, security review of bdef342d5): an
-// allowlisted fork author's own PR code runs under that trust tier, and the
-// app secrets mint a token with write access to another organization's
-// repository. Only pr.yml and nightly.yml (same-repo/trusted triggers only)
-// pass the two RBE_POOL_APP_* secrets; bazel-farm.yml passes exactly these
-// four.
-var bazelFarmCallSecrets = map[string]string{
-	"RBE_WEST_EXECUTOR": "${{ secrets.RBE_WEST_EXECUTOR }}",
-	"RBE_TLS_CERT":      "${{ secrets.RBE_TLS_CERT }}",
-	"RBE_TLS_KEY":       "${{ secrets.RBE_TLS_KEY }}",
-	"RBE_TLS_CA":        "${{ secrets.RBE_TLS_CA }}",
 }
 
 type ciCompositeAction struct {
@@ -2815,9 +2801,8 @@ func TestBazelWorkflowJobsAndExecutionMode(t *testing.T) {
 	wantSetupEnv["RBE_FORK_TIER"] = "${{ needs.rbe.outputs.tier }}"
 	wantSetupEnv["RBE_FORK_PR"] = "${{ github.event.pull_request.number }}"
 	// F3: the rbe job itself runs on Blacksmith for same-repo PRs (and
-	// merge_group/push/dispatch/schedule, which are never forks); a
-	// pull_request_target farm run and any fork or Dependabot PR stay
-	// GitHub-hosted. Pinned again, verbatim, by TestSameRepoBlacksmithRunners.
+	// merge_group/push/dispatch/schedule, which are never forks); any fork
+	// or Dependabot PR stays GitHub-hosted. Pinned again, verbatim, by TestSameRepoBlacksmithRunners.
 	if rbe, ok := workflow.Jobs[bazelRBEJobName]; !ok {
 		t.Fatalf("%s has no %s job", bazelWorkflowName, bazelRBEJobName)
 	} else if rbe.RunsOn != wantRBERunsOn {
@@ -3430,21 +3415,16 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 			}
 			callers++
 			// A caller forwards the RBE secrets: it must never run in a
-			// fork's privileged context (review D1 v2 N5). The one
-			// deliberate exception is bazel-farm.yml, whose pull_request_target
-			// run is limited to allowlisted fork authors and whose every
-			// security property TestBazelFarmWorkflowSecurity pins.
+			// fork's privileged context (review D1 v2 N5; F12 retired the
+			// one pull_request_target caller).
 			triggers := yamlMapKeys(readYAMLNode(t, filepath.Join(".github", "workflows", entry.Name())), "on")
 			for _, trigger := range triggers {
-				if trigger == "workflow_run" || (trigger == "pull_request_target" && entry.Name() != bazelFarmWorkflowName) {
+				if trigger == "workflow_run" || trigger == "pull_request_target" {
 					t.Errorf("%s calls %s and has trigger %s; a caller may not run with secrets in a fork PR's context", entry.Name(), bazelWorkflowName, trigger)
 				}
 			}
-			if entry.Name() == bazelFarmWorkflowName && !reflect.DeepEqual(triggers, []string{"pull_request_target"}) {
-				t.Errorf("%s triggers = %v, want exactly [pull_request_target]", entry.Name(), triggers)
-			}
-			if entry.Name() != "pr.yml" && entry.Name() != "nightly.yml" && entry.Name() != bazelFarmWorkflowName {
-				t.Errorf("%s job %s calls %s; only pr.yml (PRs), nightly.yml and %s (trusted forks) may", entry.Name(), jobName, bazelWorkflowName, bazelFarmWorkflowName)
+			if entry.Name() != "pr.yml" && entry.Name() != "nightly.yml" {
+				t.Errorf("%s job %s calls %s; only pr.yml (PRs) and nightly.yml may", entry.Name(), jobName, bazelWorkflowName)
 			}
 			got := map[string]string{}
 			if m, ok := job.Secrets.(map[string]any); ok {
@@ -3452,21 +3432,13 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 					got[k] = fmt.Sprint(v)
 				}
 			}
-			// bazel-farm.yml is the one deliberate exception (B1, security
-			// review of bdef342d5): its pull_request_target run must never
-			// carry the rbe-prewarm app secrets, so it gets the four-secret
-			// map instead of the full six pr.yml and nightly.yml pass.
-			want := bazelCallSecrets
-			if entry.Name() == bazelFarmWorkflowName {
-				want = bazelFarmCallSecrets
-			}
-			if !reflect.DeepEqual(got, want) {
-				t.Errorf("%s job %s secrets = %v, want exactly %v (never inherit)", entry.Name(), jobName, job.Secrets, want)
+			if !reflect.DeepEqual(got, bazelCallSecrets) {
+				t.Errorf("%s job %s secrets = %v, want exactly %v (never inherit)", entry.Name(), jobName, job.Secrets, bazelCallSecrets)
 			}
 		}
 	}
-	if callers != 3 {
-		t.Errorf("%d jobs call %s, want 3 (pr.yml, nightly.yml, %s)", callers, bazelWorkflowName, bazelFarmWorkflowName)
+	if callers != 2 {
+		t.Errorf("%d jobs call %s, want 2 (pr.yml, nightly.yml)", callers, bazelWorkflowName)
 	}
 
 	// The gate: needs the call and requires exactly BAZEL plus one id per
@@ -3605,7 +3577,7 @@ func TestBazelCallConcurrencyDiffersFromCallers(t *testing.T) {
 			"github.event.pull_request.number || github.ref": "123",
 			"github.event.pull_request.number":               "123",
 		}
-		if event != "pull_request" && event != "pull_request_target" {
+		if event != "pull_request" {
 			ctx["github.ref"] = "refs/heads/gh-readonly-queue/main/pr-123"
 			ctx["github.event.pull_request.number || github.ref"] = ctx["github.ref"]
 		}
@@ -3617,13 +3589,13 @@ func TestBazelCallConcurrencyDiffersFromCallers(t *testing.T) {
 			return v
 		})
 	}
-	for _, caller := range []string{"pr.yml", "nightly.yml", bazelFarmWorkflowName} {
+	for _, caller := range []string{"pr.yml", "nightly.yml"} {
 		callerGroup := group(caller)
 		if callerGroup == "" {
 			continue // no workflow-level group, nothing to collide with
 		}
 		name := yamlScalar(readYAMLNode(t, filepath.Join(".github", "workflows", caller)), "name")
-		for _, event := range []string{"pull_request", "pull_request_target", "merge_group", "push", "schedule", "workflow_dispatch"} {
+		for _, event := range []string{"pull_request", "merge_group", "push", "schedule", "workflow_dispatch"} {
 			if a, b := eval(bazelGroup, name, event), eval(callerGroup, name, event); a == b {
 				t.Errorf("%s event %s: %s's concurrency group %q equals the caller's; the call would deadlock", caller, event, bazelWorkflowName, a)
 			}
@@ -3939,7 +3911,7 @@ func TestBazelGateSimulation(t *testing.T) {
 // (409) or a download pick the wrong file. So every run that calls bazel.yml
 // (with its own inputs) must not upload any name twice (review D1 F7).
 func TestBazelArtifactNamesUniqueInCallerRuns(t *testing.T) {
-	for _, caller := range []string{"pr.yml", "nightly.yml", bazelFarmWorkflowName} {
+	for _, caller := range []string{"pr.yml", "nightly.yml"} {
 		t.Run(caller, func(t *testing.T) {
 			uses := collectRunArtifactUploads(t, caller, nil, "")
 			var sawBazel bool
@@ -5497,7 +5469,6 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 		"PULL_REQUEST":    prRiskPullRequestValue,
 		"FORK":            "${{ github.event.pull_request.head.repo.fork == true }}",
 		"DEPENDABOT":      prRiskDependabotValue,
-		"FORK_FARM":       bazelForkFarmValue,
 		"HAS_EXECUTOR":    bazelRBESecretValue,
 		"PR_NUMBER":       "${{ github.event.pull_request.number }}",
 	}
@@ -5530,7 +5501,7 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 	}
 
 	// Nothing outside the decision step re-derives the condition.
-	rederive := regexp.MustCompile(`(?i)vars\.RBE_WEST_WORKERS|inputs\.rbe\b|inputs\.fork-farm|head\.repo\.fork|github\.actor|dependabot`)
+	rederive := regexp.MustCompile(`(?i)vars\.RBE_WEST_WORKERS|inputs\.rbe\b|head\.repo\.fork|github\.actor|dependabot`)
 	walkYAML(readYAMLNode(t, filepath.Join(".github", "workflows", bazelWorkflowName)), "", func(path string, key bool, value string) {
 		// The decision step itself (its env and, since rbe-fork, its run:
 		// the DEPENDABOT fact) is the one place that may.
@@ -5544,11 +5515,6 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 		// decision but decides something else entirely (where the decide
 		// step runs, not what it decides) - not a re-derivation of mode.
 		if path == ".jobs."+bazelRBEJobName+".runs-on" {
-			return
-		}
-		// The checkout opt-in for fork code (TestBazelWorkflowForkFarmInputs
-		// pins it): a checkout input, not an execution-mode decision.
-		if value == bazelAllowUnsafeCheckout && strings.HasSuffix(path, ".with.allow-unsafe-pr-checkout") {
 			return
 		}
 		t.Errorf("%s: %s re-derives the execution mode (%q); read needs.rbe.outputs instead", bazelWorkflowName, path, value)
@@ -5577,7 +5543,7 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 	// answers (runBazelRBEDecision's curl stub; "" = unreachable).
 	type facts struct {
 		rbeVar, rbeInput, secret string
-		fork, farm               bool
+		fork                     bool
 		pr, dependabot           bool // event pull_request; github.actor dependabot[bot]
 		mint                     string
 	}
@@ -5586,51 +5552,45 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 		in                  facts
 		mode, enabled, tier string
 	}{
-		{"same-repo PR with secrets", facts{"true", "", "grpcs://x", false, false, true, false, ""}, "remote", "true", ""},
-		{"push to main", facts{"true", "", "grpcs://x", false, false, false, false, ""}, "remote", "true", ""},
-		{"var in other case", facts{"True", "on", "grpcs://x", false, false, false, false, ""}, "remote", "true", ""},
+		{"same-repo PR with secrets", facts{"true", "", "grpcs://x", false, true, false, ""}, "remote", "true", ""},
+		{"push to main", facts{"true", "", "grpcs://x", false, false, false, ""}, "remote", "true", ""},
+		{"var in other case", facts{"True", "on", "grpcs://x", false, false, false, ""}, "remote", "true", ""},
 		// Fork and Dependabot pull_request runs: rbe-fork decides. Open:
 		// remote execution with a mint certificate, tier ro or rw. Closed,
 		// refusing, unreachable or nonsense: local execution with the
 		// read-only cache, as before rbe-fork (rbe=cache simulates them);
 		// rbe=off drops the cache too.
-		{"fork PR, mint ro", facts{"true", "", "", true, false, true, false, "ro"}, "fork-ro", "true", "ro"},
-		{"fork PR, mint rw", facts{"true", "", "", true, false, true, false, "rw"}, "fork-rw", "true", "rw"},
-		{"fork PR, mint ro, var unset (forks cannot read it)", facts{"", "", "", true, false, true, false, "ro"}, "fork-ro", "true", "ro"},
-		{"fork PR somehow with the secret, mint ro", facts{"true", "", "grpcs://x", true, false, true, false, "ro"}, "fork-ro", "true", "ro"},
-		{"Dependabot PR, mint ro", facts{"true", "", "", false, false, true, true, "ro"}, "fork-ro", "true", "ro"},
-		{"Dependabot PR, var unset, mint ro", facts{"", "", "", false, false, true, true, "ro"}, "fork-ro", "true", "ro"},
-		{"fork PR, mint unreachable", facts{"true", "", "", true, false, true, false, ""}, "cache", "false", ""},
-		{"fork PR, mint closed", facts{"true", "", "", true, false, true, false, "closed"}, "cache", "false", ""},
-		{"fork PR, rw tier closed", facts{"true", "", "", true, false, true, false, "rw-closed"}, "cache", "false", ""},
-		{"fork PR, canary refuses", facts{"true", "", "", true, false, true, false, "canary"}, "cache", "false", ""},
-		{"fork PR, mint busy", facts{"true", "", "", true, false, true, false, "busy"}, "cache", "false", ""},
-		{"fork PR, mint answers garbage", facts{"true", "", "", true, false, true, false, "garbage"}, "cache", "false", ""},
-		{"fork PR, mint answers an unknown tier", facts{"true", "", "", true, false, true, false, "evil"}, "cache", "false", ""},
-		{"fork PR, var unset, mint unreachable", facts{"", "", "", true, false, true, false, ""}, "cache", "false", ""},
-		{"fork PR, var false, mint unreachable", facts{"false", "", "", true, false, true, false, ""}, "cache", "false", ""},
-		{"Dependabot PR, mint unreachable", facts{"true", "", "", false, false, true, true, ""}, "cache", "false", ""},
-		{"Dependabot, var unset, mint unreachable", facts{"", "", "", false, false, true, true, ""}, "cache", "false", ""},
-		{"dispatch rbe=cache", facts{"true", "cache", "grpcs://x", false, false, false, false, ""}, "cache", "false", ""},
-		{"dispatch rbe=cache, var unset", facts{"", "cache", "", false, false, false, false, ""}, "cache", "false", ""},
-		{"call rbe=CACHE", facts{"true", "CACHE", "grpcs://x", false, false, true, false, ""}, "cache", "false", ""},
-		{"fork PR rbe=cache, mint ro", facts{"true", "cache", "", true, false, true, false, "ro"}, "cache", "false", ""},
-		{"dispatch rbe=off", facts{"true", "off", "grpcs://x", false, false, false, false, ""}, "local", "false", ""},
-		{"call rbe=OFF", facts{"true", "OFF", "grpcs://x", false, false, true, false, ""}, "local", "false", ""},
-		{"fork PR rbe=off, mint ro", facts{"true", "off", "", true, false, true, false, "ro"}, "local", "false", ""},
-		{"same-repo, var unset", facts{"", "", "grpcs://x", false, false, true, false, ""}, "skip", "false", ""},
-		{"same-repo without the secret", facts{"true", "", "", false, false, true, false, ""}, "cache", "false", ""},
-		{"var false", facts{"false", "on", "grpcs://x", false, false, false, false, ""}, "skip", "false", ""},
-		// bazel-farm.yml's authorized fork runs: remote or nothing, never
-		// a second local run (pr.yml already runs one). Not a pull_request
-		// event, so the mint is never asked.
-		{"authorized fork farm", facts{"true", "", "grpcs://x", true, true, false, false, "ro"}, "remote", "true", ""},
-		{"authorized fork farm, var unset", facts{"", "", "grpcs://x", true, true, false, false, ""}, "skip", "false", ""},
-		{"authorized fork farm, no secret", facts{"true", "", "", true, true, false, false, ""}, "skip", "false", ""},
-		{"authorized fork farm, rbe=off", facts{"true", "off", "grpcs://x", true, true, false, false, ""}, "local", "false", ""},
-		// A fork run that is neither a pull_request nor authorized
-		// (pull_request_target without bazel-farm.yml's inputs) stays local.
-		{"fork, not authorized, secret", facts{"true", "", "grpcs://x", true, false, false, false, "ro"}, "cache", "false", ""},
+		{"fork PR, mint ro", facts{"true", "", "", true, true, false, "ro"}, "fork-ro", "true", "ro"},
+		{"fork PR, mint rw", facts{"true", "", "", true, true, false, "rw"}, "fork-rw", "true", "rw"},
+		{"fork PR, mint ro, var unset (forks cannot read it)", facts{"", "", "", true, true, false, "ro"}, "fork-ro", "true", "ro"},
+		{"fork PR somehow with the secret, mint ro", facts{"true", "", "grpcs://x", true, true, false, "ro"}, "fork-ro", "true", "ro"},
+		{"Dependabot PR, mint ro", facts{"true", "", "", false, true, true, "ro"}, "fork-ro", "true", "ro"},
+		{"Dependabot PR, var unset, mint ro", facts{"", "", "", false, true, true, "ro"}, "fork-ro", "true", "ro"},
+		{"fork PR, mint unreachable", facts{"true", "", "", true, true, false, ""}, "cache", "false", ""},
+		{"fork PR, mint closed", facts{"true", "", "", true, true, false, "closed"}, "cache", "false", ""},
+		{"fork PR, rw tier closed", facts{"true", "", "", true, true, false, "rw-closed"}, "cache", "false", ""},
+		{"fork PR, canary refuses", facts{"true", "", "", true, true, false, "canary"}, "cache", "false", ""},
+		{"fork PR, mint busy", facts{"true", "", "", true, true, false, "busy"}, "cache", "false", ""},
+		{"fork PR, mint answers garbage", facts{"true", "", "", true, true, false, "garbage"}, "cache", "false", ""},
+		{"fork PR, mint answers an unknown tier", facts{"true", "", "", true, true, false, "evil"}, "cache", "false", ""},
+		{"fork PR, var unset, mint unreachable", facts{"", "", "", true, true, false, ""}, "cache", "false", ""},
+		{"fork PR, var false, mint unreachable", facts{"false", "", "", true, true, false, ""}, "cache", "false", ""},
+		{"Dependabot PR, mint unreachable", facts{"true", "", "", false, true, true, ""}, "cache", "false", ""},
+		{"Dependabot, var unset, mint unreachable", facts{"", "", "", false, true, true, ""}, "cache", "false", ""},
+		{"dispatch rbe=cache", facts{"true", "cache", "grpcs://x", false, false, false, ""}, "cache", "false", ""},
+		{"dispatch rbe=cache, var unset", facts{"", "cache", "", false, false, false, ""}, "cache", "false", ""},
+		{"call rbe=CACHE", facts{"true", "CACHE", "grpcs://x", false, true, false, ""}, "cache", "false", ""},
+		{"fork PR rbe=cache, mint ro", facts{"true", "cache", "", true, true, false, "ro"}, "cache", "false", ""},
+		{"dispatch rbe=off", facts{"true", "off", "grpcs://x", false, false, false, ""}, "local", "false", ""},
+		{"call rbe=OFF", facts{"true", "OFF", "grpcs://x", false, true, false, ""}, "local", "false", ""},
+		{"fork PR rbe=off, mint ro", facts{"true", "off", "", true, true, false, "ro"}, "local", "false", ""},
+		{"same-repo, var unset", facts{"", "", "grpcs://x", false, true, false, ""}, "skip", "false", ""},
+		{"same-repo without the secret", facts{"true", "", "", false, true, false, ""}, "cache", "false", ""},
+		{"var false", facts{"false", "on", "grpcs://x", false, false, false, ""}, "skip", "false", ""},
+		// A fork run that is not a pull_request (none today: no privileged
+		// trigger calls bazel.yml, TestNoPrivilegedWorkflowRunsPRCode) stays
+		// on the read-only cache, secret or not; the mint is never asked.
+		{"fork, not a pull_request, secret", facts{"true", "", "grpcs://x", true, false, false, "ro"}, "cache", "false", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -5641,12 +5601,11 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 				"PULL_REQUEST":    strconv.FormatBool(c.in.pr),
 				"FORK":            strconv.FormatBool(c.in.fork),
 				"DEPENDABOT":      strconv.FormatBool(c.in.dependabot),
-				"FORK_FARM":       strconv.FormatBool(c.in.farm),
 				"HAS_EXECUTOR":    strconv.FormatBool(c.in.secret != ""),
 				"PR_NUMBER":       "",
 				bazelTestMintEnv:  c.in.mint,
 			}
-			if c.in.pr || c.in.farm {
+			if c.in.pr {
 				env["PR_NUMBER"] = "7123"
 			}
 			out, log, err := runBazelRBEDecisionLog(t, step.Run, env)
@@ -5674,12 +5633,12 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 	}
 	// A value that is not a boolean fails the job rather than picking a mode.
 	if out, err := runBazelRBEDecision(t, step.Run, map[string]string{
-		"RBE_VAR_ON": "true", "RBE_INPUT_OFF": "false", "RBE_INPUT_CACHE": "false", "PULL_REQUEST": "false", "FORK": "", "DEPENDABOT": "false", "FORK_FARM": "false", "HAS_EXECUTOR": "true",
+		"RBE_VAR_ON": "true", "RBE_INPUT_OFF": "false", "RBE_INPUT_CACHE": "false", "PULL_REQUEST": "false", "FORK": "", "DEPENDABOT": "false", "HAS_EXECUTOR": "true",
 	}); err == nil {
 		t.Errorf("decision with FORK='' succeeded with %v; want failure", out)
 	}
 	if out, err := runBazelRBEDecision(t, step.Run, map[string]string{
-		"RBE_VAR_ON": "true", "RBE_INPUT_OFF": "false", "PULL_REQUEST": "false", "FORK": "false", "DEPENDABOT": "false", "FORK_FARM": "false", "HAS_EXECUTOR": "true",
+		"RBE_VAR_ON": "true", "RBE_INPUT_OFF": "false", "PULL_REQUEST": "false", "FORK": "false", "DEPENDABOT": "false", "HAS_EXECUTOR": "true",
 	}); err == nil {
 		t.Errorf("decision without RBE_INPUT_CACHE succeeded with %v; want failure", out)
 	}
@@ -5688,7 +5647,7 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 	for _, n := range []string{"", "0", "12a", "1&repo=gascity", "1234567890"} {
 		if out, err := runBazelRBEDecision(t, step.Run, map[string]string{
 			"RBE_VAR_ON": "false", "RBE_INPUT_OFF": "false", "RBE_INPUT_CACHE": "false", "PULL_REQUEST": "true", "FORK": "true", "DEPENDABOT": "false",
-			"FORK_FARM": "false", "HAS_EXECUTOR": "false", "PR_NUMBER": n, bazelTestMintEnv: "ro",
+			"HAS_EXECUTOR": "false", "PR_NUMBER": n, bazelTestMintEnv: "ro",
 		}); err == nil {
 			t.Errorf("decision with PR_NUMBER %q succeeded with %v; want failure", n, out)
 		}
@@ -5954,8 +5913,8 @@ func TestBazelSyncStepPublishesPatch(t *testing.T) {
 		}
 	}
 	upload := job.step(t, "Upload BUILD sync patch")
-	if upload.If != "${{ always() && steps.sync.outcome == 'failure' && github.event_name != 'pull_request_target' }}" {
-		t.Errorf("patch upload if = %q; want it gated on the sync step's failure, never from %s's pull_request_target runs", upload.If, bazelFarmWorkflowName)
+	if upload.If != "${{ always() && steps.sync.outcome == 'failure' }}" {
+		t.Errorf("patch upload if = %q; want it gated on the sync step's failure", upload.If)
 	}
 	if upload.With["name"] != "bazel-sync-patch" || upload.With["path"] != "${{ runner.temp }}/bazel-sync-patch/" ||
 		upload.With["if-no-files-found"] != "ignore" {

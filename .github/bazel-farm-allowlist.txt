@@ -1,20 +1,17 @@
-# GitHub users whose fork PRs get the Bazel remote-execution farm
-# (.github/workflows/bazel-farm.yml). One numeric user id per line, the login
-# as a comment; blank lines and # comments are ignored. Ids, not logins: a
-# renamed account's old login can be registered by anyone. Look an id up
-# with: gh api users/<login> --jq .id
+# GitHub users whose fork PRs get rbe-west's trusted OSS pool. One numeric
+# user id per line, the login as a comment; blank lines and # comments are
+# ignored. Ids, not logins: a renamed account's old login can be registered
+# by anyone. Look an id up with: gh api users/<login> --jq .id
 #
-# Read only from the base branch (the pull_request_target run's own commit),
-# never from a PR: editing this file in a PR changes nothing until it merges.
-# Both the PR author and the user who triggered the run (opener or pusher)
-# must be listed, and the PR must come from the author's own fork. A listed
-# user gets same-repo-PR-level trust: its PR code runs with the RBE client
-# certificate. Same people as gascity's .github/blacksmith-allowlist.txt.
-# rbe-west's rbe-fork-mint reads this file too, from the default branch, by
-# the same rules: a listed author's own-fork PR, triggered by a listed user,
-# gets rbe-fork tier rw (bazel.yml mode fork-rw: the trusted OSS pool) when
-# the farm has rw switched on; everyone else gets tier ro (fork pool). A
-# line that is not a numeric id makes the mint treat the list as empty.
+# rbe-west's rbe-fork-mint reads this file from the default branch, never
+# from a PR: editing it in a PR changes nothing until it merges. A listed
+# author's own-fork PR, triggered by a listed user, gets rbe-fork tier rw
+# (bazel.yml mode fork-rw: the trusted OSS pool, results cached by its
+# workers) when the farm has rw switched on; everyone else gets tier ro
+# (the fork pool). A line that is not a numeric id makes the mint treat the
+# list as empty. Same people as gascity's .github/blacksmith-allowlist.txt.
+# The path is the mint's configuration (MINT_REPOS): keep it although
+# bazel-farm.yml, which first read this list, is gone.
 8082291 # julianknutsen
 91582 # quad341
 36544495 # sjarmak

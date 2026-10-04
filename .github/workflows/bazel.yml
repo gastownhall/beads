@@ -43,7 +43,7 @@
 # reads its outputs; none re-derives the condition) and passed to
 # .github/actions/setup-bazel:
 #   remote: repo variable RBE_WEST_WORKERS=true, rbe not off, not a fork or
-#     Dependabot PR (or a fork PR bazel-farm.yml authorized, below), and the
+#     Dependabot PR, and the
 #     secret RBE_WEST_EXECUTOR (grpcs:// endpoint) present, plus
 #     RBE_TLS_CERT, RBE_TLS_KEY (base64; RBE_TLS_CA optional): remote
 #     execution on rbe-west, instance "oss" (shared with gascity), from the
@@ -76,29 +76,21 @@
 #     execution on ubuntu-latest, slower but the same results, for every job
 #     but the remote-only ones (bazel-embedded, bazel-proxied,
 #     bazel-server-storage) and bazel-integration, which are skipped.
-#   skip: same-repo runs while RBE_WEST_WORKERS is unset (the farm switch),
-#     and authorized fork-farm runs without it or without the secret. Fork
-#     and Dependabot pull_request runs cannot read the variable; rbe-fork's
+#   skip: same-repo runs while RBE_WEST_WORKERS is unset (the farm switch).
+#     Fork and Dependabot pull_request runs cannot read the variable; rbe-fork's
 #     own switches decide for them.
-# Trusted-author fork PRs: bazel-farm.yml (pull_request_target, advisory)
-# calls this workflow for fork PRs whose author and triggering user are on
-# the base branch's .github/bazel-farm-allowlist.txt, with fork-farm:
-# authorized and checkout-sha: the event's pinned head SHA. Only that
-# combination, on a pull_request_target event, lets a fork run remotely; a
-# fork's pull_request run (pr.yml, which the fork may edit) stays in mode
-# cache (or local, or fork-ro/fork-rw as the mint decides) whatever it
-# passes, and has no secrets anyway. See engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md,
-# "Trusted-author fork PRs". (rbe-fork's tier rw replaces this workflow
-# once allowlisted forks have run it.)
+# Trusted-author fork PRs run in their own pull_request run like every fork:
+# rbe-fork's tier rw (mode fork-rw above) replaced bazel-farm.yml, the
+# pull_request_target caller that once handed them the RBE secrets. No
+# workflow with a privileged trigger (pull_request_target, workflow_run)
+# checks out PR code or calls this workflow (policy-tested). See
+# engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "Trusted-author fork PRs".
 # workflow_dispatch with rbe=cache simulates a fork run; rbe=off also drops
 # the cache. The decision is also a workflow_call output (rbe-mode,
 # rbe-enabled), so pr.yml's gate can tell an expected skip from a missing
 # lane without re-deriving it. Callers pass secrets explicitly, never
 # `secrets: inherit`: pr.yml and nightly.yml pass all six declared secrets
-# (the four RBE ones plus rbe-prewarm's two bazel-allocator app secrets);
-# bazel-farm.yml passes only the four RBE secrets (its pull_request_target
-# run never gets the app credential - see "rbe-west Pre-warm" below and B1
-# in this task's security review).
+# (the four RBE ones plus rbe-prewarm's two bazel-allocator app secrets).
 #
 # Accepted risk (same model as gascity's bazel-test.yml): on push, merge_group
 # and same-repo pull_request runs, code from the PR head runs with the RBE
@@ -106,11 +98,9 @@
 # by every later step and by locally executed Bazel actions, and a .bazelrc
 # edit can point the BEP or the executor anywhere. Anyone who can push a
 # branch here can therefore use or copy the certificate and write to the
-# farm's cache. Fork PRs never get it, except those bazel-farm.yml
-# authorizes (allowlisted author and sender, accepted as same-repo-level
-# trust; that workflow's header lists what it adds): pull_request from a
-# fork receives no secrets, bazel-farm.yml is the only pull_request_target
-# caller (policy-tested), and forks cannot write the runner cache. Nor do
+# farm's cache. Fork PRs never get it: pull_request from a fork receives no
+# secrets, no privileged trigger calls this workflow (policy-tested), and
+# forks cannot write the runner cache. Nor do
 # Dependabot PRs, which run as same-repo but get no Actions secrets. Fork
 # and Dependabot runs in modes fork-ro/fork-rw hold a certificate of their
 # own instead, worth what their run gets anyway (remote execution under the
@@ -202,8 +192,8 @@ on:
       # test would silently stop the lane on main.
       integration:
         description: >
-          "off" skips bazel-integration; anything else (pr.yml and
-          bazel-farm.yml pass "on") runs it where remote execution is on.
+          "off" skips bazel-integration; anything else (pr.yml passes
+          "on") runs it where remote execution is on.
         type: string
         required: false
         default: "on"
@@ -215,31 +205,12 @@ on:
         type: string
         required: false
         default: "ci-build-artifacts"
-      # Set only by bazel-farm.yml (policy-tested): the fork PR's head SHA
-      # from its pull_request_target event, pinned, and "authorized" once
-      # that workflow's authorize job has checked the base branch's
-      # allowlist. See the header.
-      checkout-sha:
-        description: >
-          Commit every lane checks out (bazel-farm.yml: the trusted fork PR's
-          head SHA); empty checks out the event's default ref.
-        type: string
-        required: false
-        default: ""
-      fork-farm:
-        description: >
-          "authorized" (bazel-farm.yml only) lets a pull_request_target fork
-          run execute remotely; anything else keeps forks local.
-        type: string
-        required: false
-        default: "off"
       # "on" (pr.yml only) runs package-mcp and package-npm in this call,
       # which waits on nothing but the rbe job (F3: the legacy pr.yml jobs
       # those gates used to need: detect-package-gates, build-artifacts,
-      # bazel-coverage, and the whole bazel call). bazel-farm.yml, nightly.yml
-      # and direct runs (push, dispatch) keep the default "off": main.yml
-      # keeps its own package jobs, and a fork-farm run has no bd artifact
-      # consumer waiting on these.
+      # bazel-coverage, and the whole bazel call). nightly.yml and direct
+      # runs (push, dispatch) keep the default "off": main.yml keeps its own
+      # package jobs.
       package-gates:
         description: >
           "on" (pr.yml only) runs the MCP and npm package gates in this call.
@@ -266,11 +237,11 @@ on:
       # installation token, which is all any later step ever sees. Unset
       # (either one empty) disables pre-warming. Declared here so fork-rw
       # could in principle request them, but no caller ever does: pr.yml and
-      # nightly.yml pass them straight through (both are same-repo/trusted
-      # triggers only); bazel-farm.yml's pull_request_target call does not,
-      # so no pre-warm credential ever reaches a fork-authored run (B1,
-      # security review of bdef342d5 - accepted risk is same-repo runs
-      # reaching the shared gascity scaler key, not forks). See
+      # nightly.yml pass them straight through, and a fork's pull_request
+      # run gets no secrets, so no pre-warm credential ever reaches a
+      # fork-authored run (B1, security review of bdef342d5 - accepted risk
+      # is same-repo runs reaching the shared gascity scaler key, not
+      # forks). See
       # engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "rbe-west Pre-warm".
       RBE_POOL_APP_ID:
         required: false
@@ -318,12 +289,11 @@ on:
         value: ${{ jobs.rbe-prewarm.outputs.result }}
 
 # Main runs always finish (they may save the runner cache); PR runs (called
-# from pr.yml or bazel-farm.yml, whose own groups cancel the calling run too)
-# supersede. The group differs from each caller's, as a called workflow's
-# must.
+# from pr.yml, whose own group cancels the calling run too) supersede. The
+# group differs from each caller's, as a called workflow's must.
 concurrency:
   group: bazel-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'pull_request_target' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -344,8 +314,8 @@ jobs:
   rbe:
     name: execution mode
     # Same-repo PRs (and merge_group/push/dispatch/schedule runs, which are
-    # never forks) get the org's Blacksmith pool; a pull_request_target farm
-    # run and any fork or Dependabot PR stay on GitHub-hosted runners. This
+    # never forks) get the org's Blacksmith pool; any fork or Dependabot PR
+    # stays on GitHub-hosted runners. This
     # job reads no repository code and holds no secret value (see below), so
     # Blacksmith sees nothing sensitive either way.
     runs-on: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
@@ -373,11 +343,10 @@ jobs:
           PULL_REQUEST: ${{ github.event_name == 'pull_request' }}
           FORK: ${{ github.event.pull_request.head.repo.fork == true }}
           DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
-          FORK_FARM: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' && inputs.checkout-sha != '' }}
           HAS_EXECUTOR: ${{ secrets.RBE_WEST_EXECUTOR != '' }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          for v in RBE_VAR_ON RBE_INPUT_OFF RBE_INPUT_CACHE PULL_REQUEST FORK DEPENDABOT FORK_FARM HAS_EXECUTOR; do
+          for v in RBE_VAR_ON RBE_INPUT_OFF RBE_INPUT_CACHE PULL_REQUEST FORK DEPENDABOT HAS_EXECUTOR; do
             case "${!v}" in
               true|false) ;;
               *) echo "::error::$v is '${!v}', want true or false"; exit 1 ;;
@@ -385,9 +354,8 @@ jobs:
           done
           # A fork or Dependabot pull_request run executes remotely only with
           # rbe-fork's certificate (mint open for this run), else locally with
-          # the read-only cache. Any other fork run (pull_request_target)
-          # stays local unless bazel-farm.yml authorized it; an authorized
-          # fork run is remote or nothing (pr.yml's call already runs it).
+          # the read-only cache. Any other fork run (none: no privileged
+          # trigger calls this workflow, policy-tested) stays on the cache.
           tier=
           if [ "$RBE_INPUT_OFF" = true ]; then
             mode=local
@@ -406,14 +374,12 @@ jobs:
                 echo "::warning title=rbe-fork closed for this run::$(jq -r '.reason // .error // "rbe-fork-mint unreachable"' <<<"$st" 2>/dev/null || echo unreachable)"
                 ;;
             esac
-          elif [ "$FORK" = true ] && [ "$FORK_FARM" != true ]; then
+          elif [ "$FORK" = true ]; then
             mode=cache
           elif [ "$RBE_VAR_ON" != true ]; then
             mode=skip
           elif [ "$HAS_EXECUTOR" = true ]; then
             mode=remote
-          elif [ "$FORK_FARM" = true ]; then
-            mode=skip
           else
             mode=cache
           fi
@@ -424,7 +390,7 @@ jobs:
             echo "enabled=$enabled"
             echo "tier=$tier"
           } >> "$GITHUB_OUTPUT"
-          echo "Bazel execution mode: **$mode** (RBE_WEST_WORKERS on: $RBE_VAR_ON, rbe=off: $RBE_INPUT_OFF, rbe=cache: $RBE_INPUT_CACHE, fork: $FORK, dependabot: $DEPENDABOT, fork farm: $FORK_FARM, executor secret: $HAS_EXECUTOR)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Bazel execution mode: **$mode** (RBE_WEST_WORKERS on: $RBE_VAR_ON, rbe=off: $RBE_INPUT_OFF, rbe=cache: $RBE_INPUT_CACHE, fork: $FORK, dependabot: $DEPENDABOT, executor secret: $HAS_EXECUTOR)" | tee -a "$GITHUB_STEP_SUMMARY"
 
   # Best-effort pre-warm of gastownhall/gascity's rbe-west OSS worker pool
   # (one Blacksmith-hosted NativeLink worker, rbe-worker-pool.yml) so it is
@@ -463,10 +429,7 @@ jobs:
     # fork-rw). fork-rw is reached only by a fork or Dependabot
     # pull_request run, which GitHub never hands a workflow_call secret
     # regardless of this job's `if:`, so that half of the old condition
-    # always found no-app and no-op'd; bazel-farm.yml (the one caller with a
-    # distinct pull_request_target trust tier that could otherwise have
-    # reached fork-rw with secrets attached) no longer forwards the app
-    # secrets either, below. See "rbe-west Pre-warm",
+    # always found no-app and no-op'd. See "rbe-west Pre-warm",
     # engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md.
     if: ${{ needs.rbe.outputs.mode == 'remote' }}
     runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
@@ -526,8 +489,7 @@ jobs:
 
       # Inlined rather than checked out and run from a script file (B1
       # above): every byte this step executes comes from this workflow
-      # definition, which pull_request_target always loads from the base
-      # branch and which editing suppresses pull_request runs under the
+      # definition, which editing suppresses pull_request runs under the
       # org's approval policy (see the header). steps.mint.outputs.token
       # appears nowhere else in this file (policy-tested): this is the only
       # step with the credential in its environment, and no step after it
@@ -631,14 +593,9 @@ jobs:
       # cache runs (the legacy jobs still run) keep cached results.
       BAZEL_SOLE_RUN: ${{ needs.rbe.outputs.enabled == 'true' && '--config=sole-run' || '' }}
     steps:
-      # inputs.checkout-sha: see the header (empty: the event's default ref).
-      # checkout v7 refuses a fork head on pull_request_target unless opted
-      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.checkout-sha }}
           persist-credentials: false
-          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       # Go is for tools/bazel/equivalence.py's `go list` and for make; Bazel
       # uses its own hermetic SDK.
@@ -805,11 +762,8 @@ jobs:
           exit "$check"
 
       # Data only: bazel-autofix.yml validates every path before applying it.
-      # Not from bazel-farm.yml's pull_request_target runs: autofix reads only
-      # "PR" runs, and a trusted-fork run publishes nothing meant for a
-      # privileged consumer.
       - name: Upload BUILD sync patch
-        if: ${{ always() && steps.sync.outcome == 'failure' && github.event_name != 'pull_request_target' }}
+        if: ${{ always() && steps.sync.outcome == 'failure' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
@@ -878,14 +832,9 @@ jobs:
       # cache runs (the legacy jobs still run) keep cached results.
       BAZEL_SOLE_RUN: ${{ needs.rbe.outputs.enabled == 'true' && '--config=sole-run' || '' }}
     steps:
-      # inputs.checkout-sha: see the header (empty: the event's default ref).
-      # checkout v7 refuses a fork head on pull_request_target unless opted
-      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.checkout-sha }}
           persist-credentials: false
-          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       # Only for go_js_wasm_exec and wasm_exec_node.js, which must match the
       # Go version Bazel compiles with (go.mod's; policy-tested).
@@ -1061,14 +1010,9 @@ jobs:
     outputs:
       result: ${{ steps.result.outputs.result }}
     steps:
-      # inputs.checkout-sha: see the header (empty: the event's default ref).
-      # checkout v7 refuses a fork head on pull_request_target unless opted
-      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.checkout-sha }}
           persist-credentials: false
-          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       - name: Set up Bazel
         id: bazel
@@ -1178,8 +1122,7 @@ jobs:
     # trusted CI already ran, so only what the PR changed builds and tests
     # on the GitHub-hosted runner. Never plain local (rbe=off): the tagged
     # race build of //... plus 14 jobs' worth of tests on one runner, cold.
-    # A caller may turn it off with integration: "off"; pr.yml and
-    # bazel-farm.yml pass "on".
+    # A caller may turn it off with integration: "off"; pr.yml passes "on".
     needs: rbe
     runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ (needs.rbe.outputs.enabled == 'true' || needs.rbe.outputs.mode == 'cache') && inputs.integration != 'off' }}
@@ -1187,14 +1130,9 @@ jobs:
     outputs:
       result: ${{ steps.result.outputs.result }}
     steps:
-      # inputs.checkout-sha: see the header (empty: the event's default ref).
-      # checkout v7 refuses a fork head on pull_request_target unless opted
-      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.checkout-sha }}
           persist-credentials: false
-          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       - name: Set up Bazel
         id: bazel
@@ -1289,14 +1227,9 @@ jobs:
       # cache runs (the legacy jobs still run) keep cached results.
       BAZEL_SOLE_RUN: ${{ needs.rbe.outputs.enabled == 'true' && '--config=sole-run' || '' }}
     steps:
-      # inputs.checkout-sha: see the header (empty: the event's default ref).
-      # checkout v7 refuses a fork head on pull_request_target unless opted
-      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.checkout-sha }}
           persist-credentials: false
-          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       - name: Set up Bazel
         id: bazel
@@ -1379,14 +1312,9 @@ jobs:
     outputs:
       result: ${{ steps.result.outputs.result }}
     steps:
-      # inputs.checkout-sha: see the header (empty: the event's default ref).
-      # checkout v7 refuses a fork head on pull_request_target unless opted
-      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.checkout-sha }}
           persist-credentials: false
-          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       - name: Set up Bazel
         id: bazel
@@ -1518,14 +1446,9 @@ jobs:
     outputs:
       result: ${{ steps.result.outputs.result }}
     steps:
-      # inputs.checkout-sha: see the header (empty: the event's default ref).
-      # checkout v7 refuses a fork head on pull_request_target unless opted
-      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.checkout-sha }}
           persist-credentials: false
-          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       - name: Set up Bazel
         id: bazel
@@ -1610,10 +1533,10 @@ jobs:
   # F3: moved here from pr.yml so the gate depends on nothing but the rbe
   # job's decision (not detect-package-gates, build-artifacts, bazel-coverage
   # or the whole bazel call). Only pr.yml opts in (package-gates: "on");
-  # bazel-farm.yml and nightly.yml keep the default "off" and this job does
-  # not run for them. Same-repo PRs get a Bazel-built bd (no --config=ci:
-  # only test:ci is defined in .bazelrc, so bazel build //cmd/bd:bd_for_tests
-  # is run directly); forks, Dependabot (whatever rbe-fork says: these gates
+  # nightly.yml keeps the default "off" and this job does not run for it.
+  # Same-repo PRs get a Bazel-built bd (no --config=ci: only test:ci is
+  # defined in .bazelrc, so bazel build //cmd/bd:bd_for_tests is run
+  # directly); forks, Dependabot (whatever rbe-fork says: these gates
   # take no fork certificate) and rbe-off/skip/cache runs fall back to
   # `go build`, same as package-mcp.sh's own prepare_bd_binary() does when
   # BEADS_TEST_BD_BINARY is unset. Hence mode == 'remote' below, not enabled
@@ -1631,10 +1554,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.checkout-sha }}
           fetch-depth: 0
           persist-credentials: false
-          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       - name: Decide applicability
         id: detect
@@ -1750,10 +1671,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.checkout-sha }}
           fetch-depth: 0
           persist-credentials: false
-          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
 
       - name: Decide applicability
         id: detect

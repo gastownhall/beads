@@ -28,8 +28,8 @@ import (
 // policy the way editing this YAML does, so any same-repo branch push - not
 // just a fork - could have altered that script to exfiltrate the shared
 // gascity scaler credential. The fix: no checkout step at all, and the
-// dispatch logic lives inline in the step's own `run:`, which
-// pull_request_target always loads from the trusted base branch. Several
+// dispatch logic lives inline in the step's own `run:`, which a PR can
+// change only by editing this workflow file (approval-gated). Several
 // tests below were rewritten to read that inline string (job.step(...).Run)
 // instead of a file that no longer exists; new tests pin the no-checkout and
 // nothing-after-the-mint-touches-a-repo-path invariants the old suite did
@@ -45,9 +45,8 @@ import (
 // ci_blacksmith_runner_test.go, not a hand-written mirror) against every mode
 // the rbe job can produce. Only remote may schedule the job (B1 dropped
 // fork-rw: a fork or Dependabot pull_request run never carries a
-// workflow_call secret regardless of this if, and bazel-farm.yml - the other
-// path to a privileged fork tier - no longer forwards the app secrets
-// either, so fork-rw never had a credential to use).
+// workflow_call secret regardless of this if, so fork-rw never had a
+// credential to use).
 func TestRBEPrewarmIfOnlyRemote(t *testing.T) {
 	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelRBEPrewarmJobName)
 	if job.If != bazelRBEPrewarmIf {
@@ -217,9 +216,8 @@ func TestRBEPrewarmSecretsOnlyInItsOwnJob(t *testing.T) {
 // TestRBEPrewarmAppSecretsOnlyExpectedCallers: B1 (security review of
 // bdef342d5) requires the two bazel-allocator app secrets reach only
 // bazel.yml's rbe-prewarm job and the pass-through `secrets:` blocks of its
-// two same-repo/trusted callers (pr.yml, nightly.yml) - never
-// bazel-farm.yml, whose pull_request_target run executes an allowlisted
-// fork author's own PR code, and never any other workflow file.
+// two same-repo/trusted callers (pr.yml, nightly.yml), never any other
+// workflow file.
 func TestRBEPrewarmAppSecretsOnlyExpectedCallers(t *testing.T) {
 	secretRef := regexp.MustCompile(`RBE_POOL_APP_(ID|PRIVATE_KEY)`)
 	root := sourceRepoRoot(t)
@@ -248,7 +246,7 @@ func TestRBEPrewarmAppSecretsOnlyExpectedCallers(t *testing.T) {
 					t.Errorf("%s: %s references an rbe-prewarm app credential outside the bazel.yml call's secrets pass-through", name, path)
 				}
 			default:
-				t.Errorf("%s: %s references an rbe-prewarm app credential; only bazel.yml, pr.yml and nightly.yml may (B1: bazel-farm.yml, and every other workflow, must not)", name, path)
+				t.Errorf("%s: %s references an rbe-prewarm app credential; only bazel.yml, pr.yml and nightly.yml may (B1)", name, path)
 			}
 		})
 	}
@@ -259,9 +257,6 @@ func TestRBEPrewarmAppSecretsOnlyExpectedCallers(t *testing.T) {
 		if found[caller] == 0 {
 			t.Errorf("found no RBE_POOL_APP_* reference in %s; expected its pass-through secrets block", caller)
 		}
-	}
-	if found[bazelFarmWorkflowName] != 0 {
-		t.Errorf("%s references an rbe-prewarm app credential %d time(s); B1 requires zero", bazelFarmWorkflowName, found[bazelFarmWorkflowName])
 	}
 }
 

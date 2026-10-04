@@ -136,12 +136,6 @@ Current PR-related workflow names:
   `go_repository` fetches modules with the go command, which never retries.
   `--http_timeout_scaling=2.0` doubles the timeouts of Bazel's own
   downloader. Both are key neutral.
-- `.github/workflows/bazel-farm.yml`: `Bazel Farm (trusted forks)`
-  Runs on `pull_request_target` for fork PRs to `main` whose author and
-  triggering user are on `.github/bazel-farm-allowlist.txt`, and calls
-  `bazel.yml` with the RBE secrets and the PR's pinned head SHA. Advisory:
-  no ruleset requires it and nothing reads its results; see
-  [Trusted-Author Fork PRs](#trusted-author-fork-prs-bazel-farm).
 - `.github/workflows/pr-risk.yml`: `PR Risk`
   Runs on `pull_request` and `merge_group`. Contains embedded Dolt risk
   detection, the `bazel-coverage` decision, embedded build/test
@@ -184,289 +178,57 @@ only, and the ruleset does not require branches to be up to date
 `release/**` run both workflows (and the Bazel lane), but neither gate is
 enforced there.
 
-## Trusted-Author Fork PRs (Bazel Farm)
+## Trusted-Author Fork PRs
 
-Fork PRs get no Actions secrets, so `pr.yml`'s Bazel call runs them in mode
-`cache` (local execution with the anonymous read-only cache, slower; the
-remote-only embedded, proxied-server and server-storage tiers skip). `bazel-farm.yml` gives the
-remote-execution farm to fork PRs from an allowlist of trusted authors
-(`.github/bazel-farm-allowlist.txt`: the numeric user ids of the same four
-people as gascity's `.github/blacksmith-allowlist.txt`). Everyone else's
-fork PRs are unchanged.
+Every fork PR, listed or not, runs the Bazel lanes in its own
+`pull_request` run (`pr.yml`'s `bazel` call). Such a run gets no secrets, so
+rbe-west's certificate mint (rbe-fork-mint) decides its mode, as `bazel.yml`'s
+header describes: `fork-rw` (instance `oss`, the trusted OSS pool, results
+cached by its workers) for a PR from a listed author's own fork, triggered
+by a listed user, while the farm has rw switched on; `fork-ro` (the fork
+pool, nothing cached) for everyone else; `cache` while the mint is closed,
+refuses the run or cannot be reached. Each lane holds its own certificate
+of about two hours, worth no more than the run already gets.
 
-### Design
+The list is `.github/bazel-farm-allowlist.txt`: the numeric user ids of the
+same four people as gascity's `.github/blacksmith-allowlist.txt`, logins as
+comments (a renamed account's old login can be registered by anyone; an id
+never changes hands). The mint reads it from the default branch, so a PR
+that edits it changes nothing until it merges. The path is the mint's
+configuration (`MINT_REPOS`) and keeps its old name.
 
-- Trigger: `pull_request_target`, types `opened` and `synchronize`, base
-  branch `main`. There is no `reopened` or `ready_for_review`: those
-  re-test a head that no listed user necessarily pushed (see "Sender vs.
-  author" below). Drafts run on `opened` and `synchronize` anyway.
-  `pull_request_target` runs the
-  workflow file from the base branch, and `uses: ./.github/workflows/bazel.yml`
-  resolves from that same commit, so a PR cannot change either for its own
-  run.
-- `authorize` job: no secrets and no PR code. It sparse-checks-out only the
-  allowlist and `.github/scripts/bazel-farm-authorize.sh` at `github.sha`
-  (the base commit the workflow came from), without persisted credentials.
-  Event facts reach the script through `env` only. It allows the run only
-  when all of these hold:
-  - the event is `pull_request_target` with action `opened` or
-    `synchronize`;
-  - the base repository is this one and the head repository is another (a
-    fork);
-  - the head repository's owner is the PR author (numeric ids), so the PR
-    comes from the author's own fork;
-  - the base ref is the default branch;
-  - the head SHA is a full 40-hex id;
-  - both `pull_request.user.id` (the author) and `sender.id` (who triggered
-    the event: the opener, or the pusher on `synchronize`) are on the list.
-    The list holds numeric user ids, with logins only as comments. A
-    renamed account's old login can be registered by anyone, but an id
-    never changes hands. Look one up with `gh api users/<login> --jq .id`.
-- `farm` job: calls `bazel.yml` only when `authorize` allowed it, with
-  `contents: read`, exactly the four RBE secrets, `checkout-sha` =
-  `github.event.pull_request.head.sha`, `fork-farm: authorized`, and
-  `integration: "on"`. `bazel.yml` checks out that SHA in every lane with
-  `persist-credentials: false`. actions/checkout v7 refuses to check out a
-  fork PR's head on `pull_request_target` unless `allow-unsafe-pr-checkout`
-  is true. Each lane sets that input to
-  `inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target'`,
-  so only the authorized farm call opts in (policy-tested: never a literal
-  `true`, and nowhere else). Its `rbe` job runs a fork remotely only when
-  `inputs.fork-farm == 'authorized'`, the event is `pull_request_target`, and
-  `checkout-sha` is set. An authorized farm run is `remote` or `skip` (farm
-  switch off or secret missing), never `local`, because `pr.yml` already
-  runs the local lanes.
-- Concurrency: one farm run per PR (`bazel-farm-<number>`), and a newer
-  event cancels the running one. This includes an event from an unlisted
-  sender, which then runs nothing. The run it cancels tested an older head
-  anyway.
-- Gate: advisory. `pr.yml` is unchanged. Every fork PR, listed or not, still
-  runs the local Bazel lanes inside the enforced `CI Gate / Required`, and
-  the farm run adds a faster signal that also covers the remote-only
-  embedded, proxied-server and server-storage tiers.
-- Policy tests: `scripts/bazel_farm_workflow_test.go` pins the trigger,
-  both jobs' conditions, the allowlist source, the pinned checkout, the
-  permissions, where secrets appear, and that no expression is interpolated
-  into a script. It also pins concurrency, the allowlist contents, the
-  authorize script's decisions, and that no privileged workflow consumes a
-  farm run. `TestBazelLaneIsGatedAlongsideLegacy` allows
-  `pull_request_target` on a `bazel.yml` caller for this file only.
+To add a user: add `<id> # <login>` (id from
+`gh api users/<login> --jq .id`) and update `rbeForkAllowlistUsers` in
+`scripts/bazel_workflow_security_test.go` in the same PR. To remove one,
+delete both lines; runs that ask the mint after the merge get `fork-ro`, and
+a certificate already issued expires within about two hours. For cause (a
+compromised account), also ask the farm to revoke the user's outstanding
+fork certificates.
 
-### Gate Options Considered
+History: until F12 (rbe-full-bazel-ci-plan 5.3) `bazel-farm.yml` gave listed
+authors the farm through `pull_request_target`, handing their PR code the
+long-lived RBE client certificate (an advisory run next to `pr.yml`'s local
+one). It, its authorize script and `bazel.yml`'s `checkout-sha` /
+`fork-farm` inputs and `allow-unsafe-pr-checkout` opt-ins were deleted once
+allowlisted forks ran green in `fork-rw`.
 
-1. Advisory farm run, with `pr.yml` unchanged (chosen). Nothing the farm run
-   produces can make a PR mergeable, so a flaw in it cannot weaken the
-   enforced gate. Cost: listed authors' fork PRs run Bazel twice (local in
-   `pr.yml`, remote here), and the merge still waits on the slower local
-   lanes.
-2. Authoritative farm run: `pr.yml` skips local Bazel for listed forks, and
-   the ruleset requires a farm check. Rejected for now:
-   - For fork PRs, `pull_request` runs the fork's own copy of `pr.yml`, so
-     any "listed fork, skip local Bazel" decision there is PR-controlled.
-   - `CI Gate / Required` cannot read another workflow's jobs.
-   - Rulesets cannot require a check conditionally, so the farm check would
-     have to exist on every PR. A skipped job reports success, so it would
-     pass for everyone who is not listed, and a fork that edited `pr.yml`
-     to skip local Bazel would then merge with no Bazel signal.
+No privileged checkout (policy-tested by
+`TestNoPrivilegedWorkflowRunsPRCode` in
+`scripts/bazel_workflow_security_test.go`): no workflow triggered by
+`pull_request_target` or `workflow_run` may check out a PR ref (a ref
+expression naming the pull request, its head or the triggering run's head),
+set `allow-unsafe-pr-checkout`, or call a local workflow that does, and none
+may call `bazel.yml`. `bazel-autofix.yml` and `docs-autofix.yml` check out
+only the default branch. The one pinned exception is
+`update-vendor-hash.yml`, which checks out a Dependabot PR's head (same
+repository only, its job `if` enforces it) to push a `default.nix` hash fix;
+it runs no Bazel.
 
-   Doing this safely needs a trusted reporter: a `pull_request_target` job
-   that runs no PR code and writes one required check run on the head SHA
-   after reading both workflows' results. It is the same reporter
-   [Commit-Message Skip Directives](#commit-message-skip-directives)
-   describes.
-3. Standalone copy of the lanes instead of calling `bazel.yml`. Rejected:
-   the copy would drift, and calling `bazel.yml` keeps every lane test
-   applicable.
-
-The farm run checks out the pinned head SHA, not `refs/pull/N/merge`. The
-merge ref is mutable, so checking it out would leave a gap between
-authorizing the run and checking out the code (TOCTOU). Cost: the farm run
-tests the head, not the head merged into `main`. `pr.yml`'s local run still
-tests the merge commit.
-
-### Threat Model
-
-Assets: the RBE client certificate and key (farm access and farm cache
-writes), the repository's Actions cache (read by `push` runs on `main`), the
-`GITHUB_TOKEN`, and the integrity of the required gates.
-
-What a listed author's fork PR can do: what a same-repo PR can do. Its code
-(`setup-bazel`, `.bazelrc`, repository rules, tests) runs with the RBE
-certificate, so it can use or copy the certificate and write to the farm's
-cache. Maintainers accepted this risk for same-repo PRs on 2026-09-28 (see
-`bazel.yml`'s header). Listing a user extends that trust to the account,
-and an account compromise has the same effect as a compromised same-repo
-contributor.
-
-Caches, the one place a `pull_request_target` run differs from a same-repo
-PR. It runs in the default branch's cache scope, which `push` runs on
-`main` restore from. Same-repo PRs use `refs/pull/N/merge`.
-
-- GitHub's Actions cache: read-only. Since 2026-06-26 GitHub gives
-  untrusted triggers, `pull_request_target` included, a read-only cache
-  token for the default branch's scope, and the cache service enforces it.
-  `cache-mode` (2026-09-10) makes `read` the default for these events and
-  carries through reusable workflows. A declared `cache-mode: write` or
-  `write-only` would override that default, so a policy test allows only
-  `read` or `none` in `bazel-farm.yml`, `bazel.yml` and `setup-bazel`. The
-  farm's safety depends on that default and on nothing declaring otherwise.
-- Blacksmith's colocated cache: unknown. Farm lanes run on
-  `blacksmith-2vcpu-ubuntu-2404`, whose cache transparently backs
-  `actions/cache`, scoped by branch like GitHub's. Nothing documents whether
-  it honours the read-only token. The canary run in the rollout notes
-  (`~/beads-bazel-plan/vip-forks-design.md`) or an answer from Blacksmith
-  settles it. Record the answer here.
-- What a writable cache would reach, and what now stops it. The `bazel.yml`
-  lanes on `main` and on same-repo PRs, which fall back to `main`'s scope,
-  restore two caches:
-  - The Bazel runner cache (`bazel-repo-v3-*`, restore-keys prefix). It now
-    holds only the content-addressable `--repository_cache`, whose hits
-    Bazel re-hashes. The Bazel binary is not cached: `setup-bazel`
-    downloads it into a fresh Bazelisk home with `BAZELISK_VERIFY_SHA256`
-    and checks it against a sha256 pinned for `.bazelversion`. The repo
-    contents cache (extracted repos, never re-verified) is off
-    (`--repo_contents_cache=`).
-  - The Go module cache (`beads-go-mod-v2-*`). `bazel-test` runs
-    `go mod verify` right after restoring it.
-
-  Outside the farm's path, other workflows restore caches that a writable
-  default-branch scope would poison:
-  - `release.yml`'s `setup-go` default cache (GOMODCACHE and GOCACHE, with a
-    key predictable from `go.sum`, in a job that signs and attests
-    binaries);
-  - the `beads-go-build-v2-*` GOCACHE entries restored by `main.yml` and
-    `pr.yml`;
-  - the executables in `smoke-binaries-*`, `historical-dolt-*` and
-    `regression-baseline-*`.
-
-  GitHub's read-only default covers all of them. Hardening `release.yml`
-  with `cache: false` is tracked separately.
-
-What anyone else can do: nothing new.
-
-- An unlisted author's fork PR triggers a run whose `authorize` job reads
-  the base allowlist and says no. `farm` is skipped, and no secret or PR
-  code is involved.
-- Fork `pull_request` runs still get no secrets, and `bazel.yml` keeps them
-  local (mode `cache`) even if the fork's `pr.yml` passes `fork-farm`,
-  because the event is not `pull_request_target`.
-
-Attacks considered:
-
-- Allowlist spoofing through PR edits. The allowlist and the decision
-  script come from `github.sha` (base) in a sparse checkout that never
-  contains PR files. A PR that edits them changes nothing until a
-  maintainer merges it.
-- Workflow-file edits in the PR. `pull_request_target` runs the base
-  branch's `bazel-farm.yml`, and `./.github/workflows/bazel.yml` resolves
-  from the same base commit. `setup-bazel` and everything after the
-  checkout are PR code. That is the accepted listed-author trust, the same
-  as for same-repo PRs.
-- Sender vs. author. Both must be listed.
-  - A collaborator on a listed author's fork who pushes gets
-    `sender = collaborator`, and nothing runs.
-  - Someone who opens a PR from a listed author's fork branch gets
-    `author = opener`, and nothing runs.
-  - A listed author who opens a PR from someone else's fork (compare
-    across forks) gets nothing: the head repository's owner must be the
-    author. Otherwise the fork's owner could push between the author's
-    review and "Create".
-  - A collaborator on a listed author's fork who pushes while the PR is
-    closed or a draft (skipped: `sender = collaborator`) cannot get that
-    head run by the author's click on "Reopen" or "Ready for review",
-    because those actions are not triggers.
-  - What remains is the listed author's responsibility: a PR opened, or a
-    push made, by the author on top of commits a fork collaborator pushed.
-    Listed authors should not add collaborators to their fork.
-  - A listed author who pushes to an unlisted author's PR also gets nothing
-    (the author check).
-  - An upstream maintainer who pushes to the PR, or clicks "Update branch",
-    is not listed either, so nothing runs. The next push by the author runs
-    it.
-  - Commit author/committer metadata is not checked: anyone can forge it.
-  - A listed author who pushes commits written by others vouches for them,
-    as a same-repo contributor does.
-- Force-push races (TOCTOU). The lanes check out
-  `github.event.pull_request.head.sha`, the commit the authorized event
-  describes, never a branch or merge ref. A later push is a new
-  `synchronize` event whose sender is judged again, and it cancels the
-  older run. A SHA that is not 40 lowercase hex characters is refused.
-- Script and expression injection. No `${{ }}` appears in any `run:` of
-  `bazel-farm.yml` or `bazel.yml` (policy-tested). Titles, branch names and
-  logins reach scripts only through `env`. The authorize script prints a
-  login only after checking it against GitHub's login character set.
-- Label and comment injection. There is no `labeled`, `issue_comment` or
-  `edited` trigger, and no label or comment is read.
-- Token and permissions. The workflow and every job have `contents: read`
-  only. Checkouts do not persist the token. `secrets: inherit` is never
-  used: exactly the four RBE secrets reach `bazel.yml`, and there only the
-  `setup-bazel` step's env reads them (plus the `rbe` job's emptiness test).
-- Artifact poisoning.
-  - `bazel.yml` does not upload `bazel-sync-patch` on `pull_request_target`.
-  - `bazel-autofix.yml` and `docs-autofix.yml`, the only `workflow_run`
-    consumers, watch only `PR` and act only on `pull_request` runs.
-  - Nothing downloads artifacts by run id.
-  - The farm run's other artifacts (test logs, `bazel-farm-build-artifacts`)
-    are for humans only.
-
-  All of this is policy-tested.
-- Farm cache poisoning. The farm's action cache is shared the same way
-  same-repo PRs share it, and client uploads of local results are off
-  (`--noremote_upload_local_results`). A beads-only RBE instance and
-  farm-side denial of client action-cache writes are still open.
-
-### Re-runs, Adding and Removing a User
-
-A re-run of a farm run (whole run or failed jobs) replays the original
-event. It keeps the original `GITHUB_SHA` and payload, so:
-
-- It checks out the same pinned head SHA. A re-run never picks up a newer
-  push; only a new `opened` or `synchronize` event does.
-- It runs the original base commit's `bazel-farm.yml`, `bazel.yml`,
-  allowlist and authorize script. A user removed from the allowlist on
-  `main` still passes `authorize` when one of their old runs is re-run,
-  and that run gets the RBE secrets again.
-
-Only users with write access can re-run, so this is a small window, but
-removal has to close it.
-
-To add a user: add `<id> # <login>` to the allowlist (id from
-`gh api users/<login> --jq .id`) and update `bazelFarmUsers` in
-`scripts/bazel_farm_workflow_test.go` in the same PR. It takes effect when
-the PR merges.
-
-To remove a user:
-
-1. Merge a PR that deletes their line from the allowlist and from
-   `bazelFarmUsers`.
-2. Cancel their in-progress farm runs, and delete their earlier farm runs
-   so that nobody can re-run them:
-
-   ```bash
-   # Runs whose head repository (the author's own fork) belongs to <id>.
-   gh api --paginate repos/gastownhall/beads/actions/workflows/bazel-farm.yml/runs \
-     --jq '.workflow_runs[] | select(.head_repository.owner.id == <id>) | "\(.id) \(.status)"'
-   gh run cancel <run-id>   # in-progress runs
-   gh run delete <run-id>   # completed runs
-   ```
-3. If the removal is for cause (a compromised account, or suspected misuse
-   of the certificate), assume the RBE client certificate was copied:
-   - rotate `RBE_TLS_CERT` / `RBE_TLS_KEY`;
-   - have the farm revoke the old certificate;
-   - consider purging the farm's action cache for the beads instance.
-
-   Rotating also closes the re-run window without step 2.
-
-Only a GitHub run can verify these:
-
-- The farm run's check runs appear on the PR.
-- The Blacksmith runner group accepts `pull_request_target` jobs for fork
-  PRs.
-- `actions/checkout` fetches a fork's head SHA from the base repository, and
-  the `allow-unsafe-pr-checkout` opt-in gets past v7's fork-checkout guard
-  (the lanes fail with "Refusing to check out fork pull request code" if
-  it doesn't).
-- An unlisted author, or a push by an unlisted collaborator, skips `farm`.
+Gates stay fork-controlled: a fork's `pull_request` run uses the PR's own
+workflow files, so `CI Gate / Required` is computed by code the fork can
+edit. The fix is a trusted reporter, the one
+[Commit-Message Skip Directives](#commit-message-skip-directives)
+describes; it is out of scope here.
 
 ## rbe-west Pre-warm
 
@@ -489,8 +251,7 @@ rbe-west's `oss` instance, which is what `rbe-worker-pool.yml` serves.
 runs-on or this job's `if:` - GitHub does not forward repository or App
 secrets to a fork's `pull_request` event - so that half of the condition
 always found no credential and no-opped; it was dropped as dead weight that
-only cost an idle runner-minute. See "Accepted risk" below for why
-`bazel-farm.yml`'s trusted-fork tier does not get pre-warming either.) When
+only cost an idle runner-minute.) When
 scheduled, it mints a short-lived GitHub App installation token and uses it to
 check gastownhall/gascity's current `rbe-worker-pool.yml` run count and, if
 under the desired worker count, dispatch enough new runs to reach it. Every
@@ -517,8 +278,7 @@ someone runs that check.
 
 The dispatch logic is inlined directly into the job's own `run:` step, not
 checked out from a `.github/scripts/*.sh` file. This job has no `actions/checkout`
-step at all: `pull_request_target` always loads the calling workflow's own
-YAML from the trusted base branch, but a step that checked out a PR's head
+step at all: a step that checked out a PR's head
 and then ran a script from that tree while a credential was live would let
 that PR's content exfiltrate it - and, unlike editing this workflow file,
 editing a script file does not trip the org's workflow-file approval policy,
@@ -540,8 +300,7 @@ gastownhall org. The token is used as `GH_TOKEN` for the `gh run list` /
 `gh workflow run` calls against gastownhall/gascity's `rbe-worker-pool.yml` on
 `main`, and nowhere else (`steps.mint.outputs.token` appears exactly once in
 `bazel.yml`, policy-tested). pr.yml and nightly.yml pass the two app secrets
-straight through like the four RBE secrets; `bazel-farm.yml` does not (see
-"Accepted risk" below). A fork or Dependabot `pull_request` run gets neither
+straight through like the four RBE secrets. A fork or Dependabot `pull_request` run gets neither
 secret regardless (GitHub never forwards repository or App secrets to a
 fork's `pull_request` event).
 
@@ -563,12 +322,10 @@ caches, and reading their artifacts - until the key is rotated on gascity's
 side. Because the key is shared, **rotating it to respond to a beads-side
 leak also breaks gascity's own scaler**; the kill switch below (not
 rotation) is the first response to a suspected leak, and this run stops
-holding the credential within the same job. `bazel-farm.yml`'s
-`pull_request_target` run - the one caller whose run executes a fork's own
-code - never receives these two secrets, so an allowlisted fork author can
-read beads' own RBE client certificate (an existing, accepted, revocable-for-
-beads-alone risk) but never this shared key; that path's Bazel lanes get a
-cold start instead of a pre-warmed pool.
+holding the credential within the same job. No run that executes a fork's
+own code receives these two secrets (fork `pull_request` runs get no
+secrets), so a fork's lanes, `fork-rw` included, get a cold start instead
+of a pre-warmed pool.
 
 **Secret names.**
 
@@ -646,7 +403,6 @@ Do not require these existing check names directly:
   directly)
 - `Resolve versions to test`
 - `Bazel / test` and the other jobs of `bazel.yml`
-- `Bazel Farm / *` (`bazel-farm.yml`'s advisory, PR-controlled results)
 
 Those checks should remain visible for diagnosis, but branch protection should
 point at aggregate gates after the gate jobs are verified.
@@ -878,7 +634,7 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
     `cli-docs-freshness-patch`, which is unaffected).
   - F3: the package gates (`package-mcp`, `package-npm`) moved into
     `bazel.yml` itself, behind the caller input `package-gates` (`pr.yml`
-    passes `"on"`; `bazel-farm.yml`/`nightly.yml` keep the default `"off"`).
+    passes `"on"`; `nightly.yml` keeps the default `"off"`).
     They need only the `rbe` job, not `bazel-coverage`, `build-artifacts` or
     the rest of the `bazel` call, and no longer download an artifact: on a
     same-repo PR (`needs.rbe.outputs.enabled == 'true'`) each job builds its
@@ -1132,9 +888,8 @@ time. Jobs that need a Blacksmith-side build-cache saver (scripts-go-checks,
 pr-lint-wrapper, the preflight/doc-freshness matrices' ubuntu legs) are F7b's
 scope, not this slice's.
 
-- **Runner moves** (same-repo-Blacksmith expression, §
-  [Trusted-Author Fork PRs](#trusted-author-fork-prs-bazel-farm)'s pattern,
-  reused verbatim with only the vCPU label varying; pinned by
+- **Runner moves** (same-repo-Blacksmith expression, the `bazel.yml` `rbe`
+  job's pattern, reused verbatim with only the vCPU label varying; pinned by
   `TestSameRepoBlacksmithRunners` and `TestSameRepoBlacksmithExpressionSemantics`
   in `scripts/ci_workflow_test.go`): pr.yml's `fast-checks`,
   `advisory-reports`, `check-release-target-cross-compilation` (8 vCPU),

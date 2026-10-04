@@ -269,9 +269,6 @@ func evalRBEExpr(t *testing.T, expr string, f rbeFacts, with map[string]string) 
 		return strconv.FormatBool(strings.EqualFold(input("rbe", "on"), "cache"))
 	case "${{ github.event.pull_request.head.repo.fork == true }}":
 		return strconv.FormatBool(f.fork)
-	case bazelForkFarmValue:
-		return strconv.FormatBool(strings.EqualFold(input("fork-farm", "off"), "authorized") &&
-			f.event == "pull_request_target" && input("checkout-sha", "") != "")
 	case bazelRBESecretValue:
 		return strconv.FormatBool(f.secret != "")
 	}

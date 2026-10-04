@@ -122,7 +122,6 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 	}
 	mint := newForkMint(t)
 	var starts []start
-	farm := map[string]string{"fork-farm": "authorized", "checkout-sha": "0123456789abcdef0123456789abcdef01234567"}
 	for _, rbeVar := range []string{"true", ""} {
 		v := "var=" + map[bool]string{true: "on", false: "unset"}[rbeVar != ""]
 		pr := func(fork, dependabot bool, secret bool) rbeFacts {
@@ -144,12 +143,13 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 			start{"Dependabot PR, " + v, pr(false, true, false), nil, false},
 			start{"fork PR, " + v, pr(true, false, false), nil, false},
 			start{"fork PR that somehow has the secrets, " + v, pr(true, false, true), nil, true},
-			start{"fork PR passing fork-farm from pull_request, " + v, pr(true, false, true), farm, true},
 			start{"push to main, " + v, rbeFacts{event: "push", rbeVar: rbeVar, secret: "x"}, nil, true},
 			start{"dispatch rbe=cache, " + v, rbeFacts{event: "workflow_dispatch", rbeVar: rbeVar, secret: "x"}, map[string]string{"rbe": "cache"}, true},
 			start{"dispatch rbe=off, " + v, rbeFacts{event: "workflow_dispatch", rbeVar: rbeVar, secret: "x"}, map[string]string{"rbe": "off"}, true},
-			start{"bazel-farm authorized fork, " + v, rbeFacts{event: "pull_request_target", rbeVar: rbeVar, secret: "x", fork: true}, farm, true},
-			start{"bazel-farm authorized fork without the secret, " + v, rbeFacts{event: "pull_request_target", rbeVar: rbeVar, fork: true}, farm, false},
+			// No privileged trigger calls bazel.yml since F12
+			// (TestNoPrivilegedWorkflowRunsPRCode); were one to, a fork run
+			// with the secrets would still stay on the read-only cache.
+			start{"pull_request_target fork with the secrets, " + v, rbeFacts{event: "pull_request_target", rbeVar: rbeVar, secret: "x", fork: true}, nil, true},
 			// rbe-fork: the mint's answer decides fork and Dependabot runs.
 			start{"fork PR, rbe-fork ro, " + v, prMint(true, false, false, "ro"), nil, false},
 			start{"fork PR, rbe-fork rw, " + v, prMint(true, false, false, "rw"), nil, false},
@@ -173,9 +173,8 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 			seen[mode] = true
 			// Fork and Dependabot pull_request runs: fork-<tier> when the
 			// mint says open with tier ro or rw, else cache, whatever else
-			// holds (rbe=off: local). Other forks outside bazel-farm.yml's
-			// authorized call, and rbe=cache, are mode cache.
-			authorized := s.f.event == "pull_request_target" && s.with["fork-farm"] == "authorized"
+			// holds (rbe=off: local). Any other fork run, and rbe=cache,
+			// is mode cache.
 			forkPR := s.f.event == "pull_request" && (s.f.fork || s.f.dependabot)
 			want := ""
 			switch {
@@ -185,7 +184,7 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 				want = "cache"
 			case forkPR && (s.f.mint == "ro" || s.f.mint == "rw"):
 				want = "fork-" + s.f.mint
-			case forkPR, s.f.fork && !authorized:
+			case forkPR, s.f.fork:
 				want = "cache"
 			}
 			if want != "" && mode != want {
@@ -194,8 +193,8 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 			if wantTier := strings.TrimPrefix(want, "fork-"); strings.HasPrefix(want, "fork-") && tier != wantTier || !strings.HasPrefix(mode, "fork-") && tier != "" {
 				t.Errorf("mode %s with tier %q", mode, tier)
 			}
-			if mode == "remote" && (!s.secret || s.f.fork && !authorized || forkPR) {
-				t.Errorf("mode remote without the secret, for an unauthorized fork, or for a fork or Dependabot pull_request")
+			if mode == "remote" && (!s.secret || s.f.fork || forkPR) {
+				t.Errorf("mode remote without the secret, for a fork, or for a fork or Dependabot pull_request")
 			}
 
 			var lanes []string
@@ -208,10 +207,8 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 				// rbe-prewarm never runs in any fork mode (B1, security
 				// review of bdef342d5: gated on mode remote only). A fork or
 				// Dependabot pull_request run never carries a
-				// workflow_call secret regardless of mode, and
-				// bazel-farm.yml (the other path to a privileged fork tier)
-				// no longer forwards the app secrets either, so there is no
-				// audience left for pre-warming in fork-ro or fork-rw (see
+				// workflow_call secret regardless of mode, so there is no
+				// audience for pre-warming in fork-ro or fork-rw (see
 				// bazel.yml's comment on the job).
 				case strings.HasPrefix(mode, "fork-") && !runs && !bazelPackageJobs[name] && !(name == bazelRBEPrewarmJobName && strings.HasPrefix(mode, "fork-")):
 					t.Errorf("%s does not run in mode %s (every lane runs remotely)", name, mode)
