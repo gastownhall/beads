@@ -39,8 +39,19 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 		issue.Ephemeral = true // infra and wisp types get marked ephemeral (legacy behavior)
 	}
 
+	// withRetryTx replays the closure on a rolled-back attempt, but an ID the
+	// attempt minted lives on the caller's struct, where the rollback cannot
+	// reach it. Decide once, outside the retry boundary, whether the ID is
+	// ours to mint, and clear it before every attempt (withRetryTx's closure
+	// contract). Otherwise a replay reads the stale candidate as
+	// caller-supplied, skips the CreateOnly insert, and upserts over any row a
+	// concurrent writer committed under that ID in the meantime.
+	autoMint := issue.ID == ""
 	var result issueops.CreateIssueResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		if autoMint {
+			issue.ID = ""
+		}
 		// SkipPrefixValidation matches legacy behavior: single-issue path does
 		// not validate prefixes for explicit IDs.
 		bc, err := issueops.NewBatchContext(ctx, tx, storage.BatchCreateOptions{
@@ -50,7 +61,13 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 			return err
 		}
 		result, err = issueops.CreateIssueInTxWithResult(ctx, tx, bc, issue, actor)
-		return err
+		if err != nil {
+			return err
+		}
+		if s.createIssueAttemptHook != nil {
+			return s.createIssueAttemptHook(ctx, issue)
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
@@ -105,6 +122,36 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 		return nil
 	}
 
+	// withRetryTx replays the closure on a rolled-back attempt, but an ID an
+	// attempt minted — and any dependency's IssueID defaulted from it —
+	// lives on the caller's structs, where the rollback cannot reach it.
+	// Decide once, outside the retry boundary, which issues are ours to
+	// mint, and clear those fields before every attempt (withRetryTx's
+	// closure contract). Otherwise a replay reads the stale candidate as
+	// caller-supplied, skips the CreateOnly insert, and upserts over any row
+	// a concurrent writer committed under that ID in the meantime.
+	autoMint := make([]bool, len(issues))
+	for i, issue := range issues {
+		autoMint[i] = issue.ID == ""
+	}
+	resetAutoMinted := func() {
+		for i, issue := range issues {
+			if !autoMint[i] {
+				continue
+			}
+			issue.ID = ""
+			// PersistDependenciesWithOptionsResult defaults an empty
+			// Dependency.IssueID to the owning issue's ID, but only when it
+			// is still empty; left set, a replay would skip re-defaulting
+			// it and point the dependency row at the abandoned candidate.
+			for _, dep := range issue.Dependencies {
+				if dep != nil {
+					dep.IssueID = ""
+				}
+			}
+		}
+	}
+
 	// All-wisps fast path: one SQL transaction, no Dolt versioning.
 	// Covers both ephemeral issues and no-history issues (both skip DOLT_COMMIT).
 	if issueops.AllWisps(issues) {
@@ -114,6 +161,7 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 			}
 		}
 		return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+			resetAutoMinted()
 			_, err := issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
 			return err
 		})
@@ -121,9 +169,16 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 
 	var result issueops.CreateIssuesResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		resetAutoMinted()
 		var err error
 		result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
-		return err
+		if err != nil {
+			return err
+		}
+		if s.createIssueAttemptHook != nil {
+			return s.createIssueAttemptHook(ctx, issues[0])
+		}
+		return nil
 	}); err != nil {
 		return err
 	}

@@ -119,7 +119,7 @@ func mergeChangedTables(dst map[string]bool, src map[string]bool) map[string]boo
 	return dst
 }
 
-func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) (CreateIssueResult, error) {
+func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) (_ CreateIssueResult, retErr error) {
 	var result CreateIssueResult
 	if err := PrepareIssueForInsert(issue, bc.CustomStatuses, bc.CustomTypes); err != nil {
 		return result, err
@@ -127,10 +127,35 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 
 	issueTable, eventTable := TableRouting(issue)
 
+	// An auto-minted ID always inserts CreateOnly, which also takes the
+	// EnsureIssueIDAvailableInTx coordination lock, whatever the caller asked
+	// for: the upsert path would overwrite whatever row already holds the ID.
+	// There is no re-mint loop. GenerateIssueIDInTable must return an ID free
+	// in this transaction's snapshot, so a collision here is a minter bug for
+	// the backstop to refuse. A concurrent writer that takes the same ID
+	// conflicts at commit instead, and the store's transaction retry replays
+	// the whole create on a fresh snapshot. An explicit caller-supplied ID
+	// keeps the caller's options.
+	wasAutoMinted := issue.ID == ""
+	if wasAutoMinted {
+		defer func() {
+			// A failed create's transaction is rolled back, so the minted ID
+			// names nothing. Drop it: a caller retrying this struct must mint
+			// again, not take the explicit-ID upsert path with a stale
+			// candidate that another writer may since have taken.
+			if retErr != nil {
+				issue.ID = ""
+			}
+		}()
+	}
 	if err := assignCreateIssueIDInTx(ctx, tx, bc, issue, actor); err != nil {
 		return result, err
 	}
-	if bc.Opts.CreateOnly {
+	insertOpts := bc.Opts
+	if wasAutoMinted {
+		insertOpts.CreateOnly = true
+	}
+	if insertOpts.CreateOnly {
 		if err := EnsureIssueIDAvailableInTx(ctx, tx, issue.ID); err != nil {
 			return result, err
 		}
@@ -142,7 +167,7 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 		return result, nil
 	}
 
-	isNew, staleRejected, err := InsertIssueIfNew(ctx, tx, issueTable, issue, bc.Opts)
+	isNew, staleRejected, err := InsertIssueIfNew(ctx, tx, issueTable, issue, insertOpts)
 	if err != nil {
 		return result, err
 	}
