@@ -2471,6 +2471,10 @@ const (
 	// config; pr.yml opts them in with package-gates: "on".
 	bazelPackageMCPJobName = "package-mcp"
 	bazelPackageNPMJobName = "package-npm"
+	// Best-effort, advisory pre-warm of gastownhall/gascity's rbe-west OSS
+	// worker pool; see bazel.yml's own comment and
+	// engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "rbe-west Pre-warm".
+	bazelRBEPrewarmJobName = "rbe-prewarm"
 	setupBazelActionDir    = ".github/actions/setup-bazel"
 )
 
@@ -2495,7 +2499,7 @@ const (
 // bazel.yml's jobs: the rbe job that decides the execution mode, the
 // --config=ci lane, one job per CI job a Bazel config mirrors, and the two
 // package gates (F3), sorted alphabetically to match TestBazelWorkflowJobsAndExecutionMode's sort.Strings.
-var bazelJobNames = []string{bazelDoltJobName, bazelEmbedJobName, bazelIntegJobName, bazelProxiedJobName, bazelPureJobName, bazelServerJobName, bazelJobName, bazelPackageMCPJobName, bazelPackageNPMJobName, bazelRBEJobName}
+var bazelJobNames = []string{bazelDoltJobName, bazelEmbedJobName, bazelIntegJobName, bazelProxiedJobName, bazelPureJobName, bazelServerJobName, bazelJobName, bazelPackageMCPJobName, bazelPackageNPMJobName, bazelRBEJobName, bazelRBEPrewarmJobName}
 
 // The lanes that only run remotely (skipped unless the rbe job chose remote);
 // bazel-integration runs remotely or with the read-only cache (bazelIntegIf);
@@ -2507,6 +2511,25 @@ var bazelRemoteOnlyJobs = map[string]bool{bazelEmbedJobName: true, bazelProxiedJ
 const (
 	bazelRBESecretPath  = ".jobs." + bazelRBEJobName + ".steps[0].env.HAS_EXECUTOR"
 	bazelRBESecretValue = "${{ secrets.RBE_WEST_EXECUTOR != '' }}"
+)
+
+// rbe-prewarm reads its two app secrets in exactly three places, mirroring
+// the rbe job's own emptiness-test/mint pattern above: an env boolean
+// (never an `if:`) gating the mint step, and the mint step's own `with:`
+// (the only step in bazel.yml allowed to read a secret outside a
+// setup-bazel env, alongside bazelRBESecretPath/Value). Step indices are
+// steps[0]=checkout, [1]=credential check, [2]=mint, [3]=dispatch,
+// [4]=record result.
+const (
+	bazelRBEPrewarmHasAppPath  = ".jobs." + bazelRBEPrewarmJobName + ".steps[1].env.HAS_POOL_APP"
+	bazelRBEPrewarmHasAppValue = "${{ secrets.RBE_POOL_APP_PRIVATE_KEY != '' }}"
+	bazelRBEPrewarmAppIDPath   = ".jobs." + bazelRBEPrewarmJobName + ".steps[2].with.app-id"
+	bazelRBEPrewarmAppIDValue  = "${{ secrets.RBE_POOL_APP_ID }}"
+	bazelRBEPrewarmKeyPath     = ".jobs." + bazelRBEPrewarmJobName + ".steps[2].with.private-key"
+	bazelRBEPrewarmKeyValue    = "${{ secrets.RBE_POOL_APP_PRIVATE_KEY }}"
+	// The job-level continue-on-error path itself: see
+	// TestBazelWorkflowJobsAndExecutionMode's comment on the same exception.
+	bazelRBEPrewarmContinueOnErrorPath = ".jobs." + bazelRBEPrewarmJobName + ".continue-on-error"
 )
 
 // rbe-fork: the lanes' setup-bazel env that asks it for a certificate (modes
@@ -2546,9 +2569,13 @@ var bazelLaneGateIDs = map[string]string{
 	bazelPackageNPMJobName: "PACKAGE_NPM",
 }
 
-// None today: every lane is gated. Kept so a future lane that pr.yml's call
-// turns off has a place to record why.
-var bazelAdvisoryLanes = map[string]string{}
+// rbe-prewarm: not a build/test lane at all (no Bazel config mirrors it), so
+// it has nothing for ci-gate to require; it is advisory by design
+// (continue-on-error, best-effort pre-warm dispatch) and reports only so
+// TestBazelLaneIsGatedAlongsideLegacy's generic shape check still applies.
+var bazelAdvisoryLanes = map[string]string{
+	bazelRBEPrewarmJobName: "best-effort pre-warm dispatch to gastownhall/gascity; never gates or blocks a lane",
+}
 
 // bazel-integration's if: remote (modes remote, fork-ro, fork-rw: enabled),
 // or local with the read-only cache (mode cache: fork and Dependabot PRs
@@ -2571,6 +2598,18 @@ const bazelPackageGatesIf = "${{ inputs.package-gates == 'on' }}"
 // remote only: the gates take no rbe-fork certificate, so fork modes
 // (enabled too) build bd with go build on a GitHub-hosted runner, as before.
 const bazelPackageRunsOn = "${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
+
+// rbe-prewarm's bespoke if (TestBazelWorkflowJobsAndExecutionMode): unlike
+// every other lane, it runs only when the lanes below will actually target
+// instance "oss" (modes remote and fork-rw; fork-ro targets the separate,
+// uncached "oss-fork" instance rbe-worker-pool.yml does not serve - see
+// bazel.yml's own comment above the job). Its runs-on reuses the exact same
+// mode-ternary every other lane uses (wantRunsOn): TestBazelRBEJobDecidesOnce
+// forbids re-deriving fork/event facts outside the rbe job, and a fork-rw run
+// (a genuine fork/Dependabot pull_request, whose workflow file content is the
+// fork's own) must never be hardcoded onto the trusted same-repo Blacksmith
+// runner.
+const bazelRBEPrewarmIf = "${{ needs.rbe.outputs.mode == 'remote' || needs.rbe.outputs.mode == 'fork-rw' }}"
 
 // F3: the rbe job's own runner (not gated by its own outputs - it decides
 // them). Same-repo PRs and merge_group/push/dispatch/schedule (never forks)
@@ -2653,12 +2692,17 @@ var bazelRemoteModes = map[string]bool{"remote": true, "fork-ro": true, "fork-rw
 // bazelModeEnabled: the rbe job's enabled output for a mode.
 func bazelModeEnabled(mode string) string { return strconv.FormatBool(bazelRemoteModes[mode]) }
 
-// The four RBE secrets, the only ones a caller may hand bazel.yml.
+// The four RBE secrets plus the rbe-prewarm job's "bazel-allocator" GitHub
+// App id and private key (it mints its own gastownhall/gascity installation
+// token from these; see rbe-prewarm.sh), the only ones a caller may hand
+// bazel.yml.
 var bazelCallSecrets = map[string]string{
-	"RBE_WEST_EXECUTOR": "${{ secrets.RBE_WEST_EXECUTOR }}",
-	"RBE_TLS_CERT":      "${{ secrets.RBE_TLS_CERT }}",
-	"RBE_TLS_KEY":       "${{ secrets.RBE_TLS_KEY }}",
-	"RBE_TLS_CA":        "${{ secrets.RBE_TLS_CA }}",
+	"RBE_WEST_EXECUTOR":        "${{ secrets.RBE_WEST_EXECUTOR }}",
+	"RBE_TLS_CERT":             "${{ secrets.RBE_TLS_CERT }}",
+	"RBE_TLS_KEY":              "${{ secrets.RBE_TLS_KEY }}",
+	"RBE_TLS_CA":               "${{ secrets.RBE_TLS_CA }}",
+	"RBE_POOL_APP_ID":          "${{ secrets.RBE_POOL_APP_ID }}",
+	"RBE_POOL_APP_PRIVATE_KEY": "${{ secrets.RBE_POOL_APP_PRIVATE_KEY }}",
 }
 
 type ciCompositeAction struct {
@@ -2693,7 +2737,15 @@ func TestBazelWorkflowJobsAndExecutionMode(t *testing.T) {
 	var names []string
 	for name, job := range workflow.Jobs {
 		names = append(names, name)
-		if job.ContinueOnError {
+		// rbe-prewarm is the one deliberate exception: it is advisory (never
+		// a `needs` of any lane, never in ci-gate's required list - see
+		// bazelAdvisoryLanes and TestBazelLaneIsGatedAlongsideLegacy), and a
+		// called reusable workflow's overall conclusion is "failure" if ANY
+		// job within it fails regardless of `needs`, so without job-level
+		// continue-on-error here a pre-warm hiccup would still turn
+		// bazel.yml's own run - and thus pr.yml's ci-gate - red for a job
+		// nothing requires.
+		if job.ContinueOnError && name != bazelRBEPrewarmJobName {
 			t.Errorf("%s continue-on-error hides failures from pr.yml's ci-gate", name)
 		}
 		if job.TimeoutMinutes == 0 {
@@ -2760,6 +2812,12 @@ func TestBazelWorkflowJobsAndExecutionMode(t *testing.T) {
 			wantJobIf = wantRemoteOnlyIf
 		} else if name == bazelIntegJobName {
 			wantJobIf = bazelIntegIf
+		} else if name == bazelRBEPrewarmJobName {
+			// Same runs-on ternary as every other lane (wantRunsOn, set
+			// above); only the if differs. Not a lane: never uses
+			// setup-bazel, so wantJobSetupEnv is moot (the per-step check
+			// below only fires for a setup-bazel step).
+			wantJobIf = bazelRBEPrewarmIf
 		}
 		if job.RunsOn != wantJobRunsOn {
 			t.Errorf("%s runs-on = %q, want %q", name, job.RunsOn, wantJobRunsOn)
@@ -3560,6 +3618,13 @@ func bazelLaneRunModes(t *testing.T, lane, ifExpr string, with map[string]string
 			return map[string]bool{"remote": true, "fork-ro": true, "fork-rw": true, "cache": true, "local": true, "skip": true}
 		}
 		return map[string]bool{}
+	case bazelRBEPrewarmIf:
+		// Same two modes as every lane that targets instance "oss"
+		// (TestBazelWorkflowJobsAndExecutionMode's comment on the job):
+		// remote and fork-rw. Unlike the historical advisory lanes, this one
+		// legitimately runs in pr.yml's own call (see bazelAdvisoryLanes'
+		// name-specific exception in TestBazelGateSimulation below).
+		return map[string]bool{"remote": true, "fork-rw": true}
 	}
 	t.Fatalf("%s if = %q: teach bazelLaneRunModes which modes run it", lane, ifExpr)
 	return nil
@@ -3688,9 +3753,13 @@ func TestBazelGateSimulation(t *testing.T) {
 			continue
 		}
 		lanes[name] = bazelLaneRunModes(t, name, job.If, callWith)
-		// Advisory lanes are not in the PR call; gated lanes run at least
-		// when remote.
-		if _, advisory := bazelAdvisoryLanes[name]; advisory && len(lanes[name]) != 0 {
+		// Advisory lanes are normally not in the PR call at all; the one
+		// exception is rbe-prewarm, which is advisory (never gated, never a
+		// `needs`: TestBazelLaneIsGatedAlongsideLegacy) but, unlike every
+		// other advisory lane this map has ever held, is deliberately part
+		// of every pr.yml call so it can dispatch before the lanes below
+		// need capacity - see bazel.yml's own comment on the job.
+		if _, advisory := bazelAdvisoryLanes[name]; advisory && name != bazelRBEPrewarmJobName && len(lanes[name]) != 0 {
 			t.Errorf("advisory lane %s runs in pr.yml's call in modes %v; turn it off there (%s)", name, lanes[name], bazelAdvisoryLanes[name])
 		}
 		if _, gated := bazelLaneGateIDs[name]; gated && !lanes[name]["remote"] {
@@ -4005,6 +4074,9 @@ func TestBazelWorkflowActionsArePinned(t *testing.T) {
 		cacheSaveActionFamily:       cacheSHA,
 		"actions/upload-artifact":   uploadArtifactSHA,
 		"actions/download-artifact": downloadArtifactSHA,
+		// rbe-prewarm's mint step: same SHA/comment already used in this repo
+		// for the same action, in update-flake-lock.yml.
+		"actions/create-github-app-token": "bcd2ba49218906704ab6c1aa796996da409d3eb1",
 	}
 	for file, list := range steps {
 		for _, step := range list {
@@ -5285,8 +5357,8 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 
 	setupSteps := map[string]bool{}
 	for name, job := range readCIWorkflow(t, bazelWorkflowName).Jobs {
-		if name == bazelRBEJobName {
-			continue // no setup-bazel; its one secret read is pinned below
+		if name == bazelRBEJobName || name == bazelRBEPrewarmJobName {
+			continue // no setup-bazel; rbe-prewarm's secret reads are pinned below
 		}
 		n := 0
 		for i, step := range job.Steps {
@@ -5302,7 +5374,14 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 	secretRef := regexp.MustCompile(`\bsecrets\s*(\.|\[)`)
 	walkYAML(root, "", func(path string, key bool, value string) {
 		if key && value == "continue-on-error" {
-			t.Errorf("%s: %s hides failures from pr.yml's ci-gate", bazelWorkflowName, path)
+			// rbe-prewarm's job-level continue-on-error is the one
+			// deliberate exception (TestBazelWorkflowJobsAndExecutionMode's
+			// comment on the job has the full reasoning): without it, this
+			// advisory job's failure would still fail bazel.yml's own run
+			// and cascade into pr.yml's ci-gate.
+			if path != bazelRBEPrewarmContinueOnErrorPath {
+				t.Errorf("%s: %s hides failures from pr.yml's ci-gate", bazelWorkflowName, path)
+			}
 		}
 		if key && (value == "secrets" && strings.HasPrefix(path, ".jobs.")) {
 			t.Errorf("%s: %s passes secrets to a called workflow or container", bazelWorkflowName, path)
@@ -5312,6 +5391,12 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 		}
 		if path == bazelRBESecretPath && value == bazelRBESecretValue {
 			return // the rbe job's emptiness test (TestBazelRBEJobDecidesOnce)
+		}
+		switch {
+		case path == bazelRBEPrewarmHasAppPath && value == bazelRBEPrewarmHasAppValue,
+			path == bazelRBEPrewarmAppIDPath && value == bazelRBEPrewarmAppIDValue,
+			path == bazelRBEPrewarmKeyPath && value == bazelRBEPrewarmKeyValue:
+			return // rbe-prewarm's own credential-check/mint step (see their doc comment)
 		}
 		prefix := path[:strings.LastIndex(path, ".")+1]
 		if !setupSteps[prefix] {

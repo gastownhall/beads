@@ -468,6 +468,69 @@ Only a GitHub run can verify these:
   it doesn't).
 - An unlisted author, or a push by an unlisted collaborator, skips `farm`.
 
+## rbe-west Pre-warm
+
+`bazel.yml`'s `rbe-prewarm` job is a best-effort attempt to have
+gastownhall/gascity's rbe-west OSS worker pool (one Blacksmith-hosted
+NativeLink worker, driven by gascity's own `rbe-worker-pool.yml`
+`workflow_dispatch`) already booting by the time this run's Bazel lanes need
+it, instead of each of them separately waiting out the ~120s it takes
+NativeLink to notice demand and scale the pool up from zero. gascity dispatches
+its own pool from inside its own `bazel-test.yml` job, same-repo, with
+`github.token`; beads cannot use its own `GITHUB_TOKEN` against gascity's
+repository, so this job needs its own credential into gascity instead.
+
+**What it does.** A job of its own (not a step inside `rbe`, so it never
+delays the mode decision every lane waits on), gated on
+`needs.rbe.outputs.mode` being `remote` or `fork-rw` - the two modes whose
+lanes actually target rbe-west's `oss` instance, which is what
+`rbe-worker-pool.yml` serves. (Mode `fork-ro` targets a separate, uncached
+`oss-fork` instance this pool does not serve, so it is excluded.) When
+scheduled, it mints a short-lived GitHub App installation token and uses it to
+check gastownhall/gascity's current `rbe-worker-pool.yml` run count and, if
+under the desired worker count, dispatch enough new runs to reach it. Every
+failure path - no credential, gascity unreachable, `gh` rate-limited, the
+dispatch itself rejected - prints a `::warning::` and the script still exits
+0: this job never gates anything (it is not a `needs` of any lane, and it is
+never in `.github/scripts/bazel-gate.sh`'s vocabulary, so pr.yml's `ci-gate`
+never looks at it), and it cannot fail the run either, since a called reusable
+workflow's overall conclusion is "failure" if any job inside it fails
+regardless of `needs` - the job itself therefore carries bazel.yml's one
+deliberate `continue-on-error: true`.
+
+**Credential scope.** A GitHub App named "bazel-allocator" is installed on
+gastownhall/gascity alone, granted exactly two permissions: Actions
+(read/write) and Metadata (read). bazel.yml's own secrets never include a
+long-lived credential for it - only the app's id and private key
+(`RBE_POOL_APP_ID`, `RBE_POOL_APP_PRIVATE_KEY`), from which the job mints a
+short-lived installation token (`actions/create-github-app-token`, pinned to a
+released commit SHA) scoped with `owner: gastownhall` and
+`repositories: gascity`, so the minted token can act on gascity and nothing
+else in the gastownhall org. That token is used as `GH_TOKEN` for the
+`gh run list` / `gh workflow run` calls against gastownhall/gascity's
+`rbe-worker-pool.yml` on `main`, and nowhere else. Every caller of bazel.yml
+(pr.yml, bazel-farm.yml, nightly.yml) passes these two secrets straight
+through like the four RBE secrets; a fork or Dependabot `pull_request` run
+gets neither (GitHub never forwards repository secrets to a fork's
+`pull_request` event), so even a trusted-author fork PR that reaches mode
+`fork-rw` finds no credential to mint and the job no-ops.
+
+**Secret names.**
+
+- `RBE_POOL_APP_ID` - the bazel-allocator App's id.
+- `RBE_POOL_APP_PRIVATE_KEY` - the App's private key (PEM).
+
+**Kill switch.** Pre-warming disables itself cleanly, without touching the
+job's `if:`, in either of two ways:
+
+- Leave `RBE_POOL_APP_PRIVATE_KEY` unset (or clear it): the job's own
+  `HAS_POOL_APP` check (the same env-boolean pattern as the `rbe` job's
+  `HAS_EXECUTOR`) skips the mint step, the dispatch script finds no
+  `GH_TOKEN`, warns, and exits 0. This is also the job's natural state before
+  the App is provisioned at all.
+- Set the repository variable `RBE_PREWARM_WORKERS` to `0`: the script's own
+  kill switch, checked before any network call.
+
 ## Required Check Contract
 
 After the aggregate checks are verified on the branch, branch protection or the

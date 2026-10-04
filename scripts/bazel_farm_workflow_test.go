@@ -251,6 +251,13 @@ func TestBazelWorkflowForkFarmInputs(t *testing.T) {
 			if bazelPackageJobs[name] {
 				want["fetch-depth"] = "0"
 			}
+			// rbe-prewarm only needs its own dispatch script, never the rest
+			// of the PR tree; a sparse, non-cone checkout of exactly that one
+			// path keeps it as cheap as every other lane's shallow checkout.
+			if name == bazelRBEPrewarmJobName {
+				want["sparse-checkout"] = ".github/scripts/rbe-prewarm.sh\n"
+				want["sparse-checkout-cone-mode"] = "false"
+			}
 			if !reflect.DeepEqual(step.With, want) {
 				t.Errorf("%s job %s checkout with = %v, want %v", bazelWorkflowName, name, step.With, want)
 			}

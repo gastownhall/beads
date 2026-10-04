@@ -237,6 +237,18 @@ on:
         required: false
       RBE_TLS_CA:
         required: false
+      # rbe-prewarm only (never read by setup-bazel or the rbe job): the
+      # "bazel-allocator" GitHub App's id and private key. The app is
+      # installed on gastownhall/gascity alone with Actions (read/write) and
+      # Metadata (read) permissions, nothing else; rbe-prewarm mints a
+      # short-lived installation token from these two and never sees a
+      # long-lived credential. Unset (either one empty) disables
+      # pre-warming. See engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "rbe-west
+      # Pre-warm".
+      RBE_POOL_APP_ID:
+        required: false
+      RBE_POOL_APP_PRIVATE_KEY:
+        required: false
     # The rbe job's decision, and each lane's job.status (success, failure or
     # cancelled; empty when the lane was skipped or never reported). pr.yml's
     # ci-gate reads them through .github/scripts/bazel-gate.sh.
@@ -274,6 +286,9 @@ on:
       package-npm:
         description: "package-npm's job.status (empty unless package-gates is 'on')"
         value: ${{ jobs.package-npm.outputs.result }}
+      rbe-prewarm:
+        description: "rbe-prewarm's job.status (advisory: continue-on-error, never gates or blocks a lane)"
+        value: ${{ jobs.rbe-prewarm.outputs.result }}
 
 # Main runs always finish (they may save the runner cache); PR runs (called
 # from pr.yml or bazel-farm.yml, whose own groups cancel the calling run too)
@@ -383,6 +398,113 @@ jobs:
             echo "tier=$tier"
           } >> "$GITHUB_OUTPUT"
           echo "Bazel execution mode: **$mode** (RBE_WEST_WORKERS on: $RBE_VAR_ON, rbe=off: $RBE_INPUT_OFF, rbe=cache: $RBE_INPUT_CACHE, fork: $FORK, dependabot: $DEPENDABOT, fork farm: $FORK_FARM, executor secret: $HAS_EXECUTOR)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # Best-effort pre-warm of gastownhall/gascity's rbe-west OSS worker pool
+  # (one Blacksmith-hosted NativeLink worker, rbe-worker-pool.yml) so it is
+  # already booting instead of the lanes below waiting ~120s at "N actions, 0
+  # running" while the pool scales from zero. A job of its own (not a step in
+  # `rbe`), so it never delays the mode decision every other job needs, and
+  # it is never a `needs` of any lane and never in pr.yml's ci-gate required
+  # list (advisory; .github/scripts/bazel-gate.sh does not read it). See
+  # engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "rbe-west Pre-warm".
+  #
+  # Only when the run's lanes will actually execute on instance "oss": mode
+  # remote (the CI secrets) or fork-rw (rbe-fork-mint's trusted-author tier,
+  # cached by the same OSS workers per the header above). Mode fork-ro targets
+  # instance "oss-fork", a separate, uncached pool rbe-worker-pool.yml does
+  # not serve, so it is excluded (TestBazelCacheModeReachesTheRC's one named
+  # exception to "every lane runs remotely" in a fork mode). Like every other
+  # lane, the `if:` reads only needs.rbe.outputs - TestBazelRBEJobDecidesOnce
+  # forbids re-deriving fork/event facts outside the rbe job itself - and
+  # runs-on is the same mode-ternary every other lane uses, so a genuine fork
+  # or Dependabot PR that reaches mode fork-rw still never touches Blacksmith:
+  # the runner is only a client there, like every other fork-mode lane (see
+  # bazel-test's comment above). That PR also carries no repository secrets
+  # regardless of runs-on (GitHub strips them from a fork's pull_request
+  # event), so the credential-check step below finds nothing to mint even if
+  # it runs. Neither app secret (secrets.RBE_POOL_APP_ID,
+  # secrets.RBE_POOL_APP_PRIVATE_KEY) is ever read in this `if:` or anywhere
+  # else in this file - only inside this job's own step env/with, same as the
+  # rbe job's HAS_EXECUTOR pattern - so a missing credential (the app not
+  # provisioned yet, or the kill switch) fails soft (no mint attempt, then
+  # the script's own ::warning::, exit 0) rather than changing whether the
+  # job runs.
+  rbe-prewarm:
+    name: pre-warm rbe-west pool
+    needs: rbe
+    if: ${{ needs.rbe.outputs.mode == 'remote' || needs.rbe.outputs.mode == 'fork-rw' }}
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    # Job-level, not step-level: the only continue-on-error in this workflow
+    # (TestBazelWorkflowSecretsAndFailureSurface and
+    # TestBazelWorkflowJobsAndExecutionMode both carve out this one path by
+    # name). Every other job here is a gated lane whose real failure must
+    # reach pr.yml's ci-gate; this one is advisory and must never fail the
+    # call bazel.yml's own run represents (a job's failure fails the whole
+    # reusable-workflow run regardless of `needs`, which would otherwise turn
+    # pr.yml's ci-gate red for a pre-warm hiccup nothing requires).
+    continue-on-error: true
+    outputs:
+      result: ${{ steps.result.outputs.result }}
+    steps:
+      # Only the dispatch script, never the rest of the PR (same pinned-ref
+      # and allow-unsafe-pr-checkout pattern as every other job; see the
+      # header). No token on disk: persist-credentials is false.
+      - name: Checkout the pre-warm script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout-sha }}
+          persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
+          sparse-checkout: |
+            .github/scripts/rbe-prewarm.sh
+          sparse-checkout-cone-mode: false
+
+      # Same env-boolean pattern as the rbe job's HAS_EXECUTOR: the secret is
+      # tested for emptiness, never referenced in an `if:` directly, and the
+      # next step's `if:` reads this step's output (a job-level env can't be
+      # read from another step's `if:`, only its own `env:`).
+      - name: Check for the pre-warm app credential
+        id: has-app
+        env:
+          HAS_POOL_APP: ${{ secrets.RBE_POOL_APP_PRIVATE_KEY != '' }}
+        run: echo "has-app=$HAS_POOL_APP" >> "$GITHUB_OUTPUT"
+
+      # Mints a short-lived installation token for the "bazel-allocator"
+      # GitHub App (installed on gastownhall/gascity only, Actions
+      # read/write + Metadata read): skipped entirely while the app secrets
+      # are not provisioned, leaving steps.mint.outputs.token empty, which
+      # the dispatch step and script below treat the same as any other
+      # missing-token case (::warning::, exit 0). permission-actions narrows
+      # the minted token to Actions even if the app is ever granted more.
+      - name: Mint gastownhall/gascity installation token
+        id: mint
+        if: ${{ steps.has-app.outputs.has-app == 'true' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          app-id: ${{ secrets.RBE_POOL_APP_ID }}
+          private-key: ${{ secrets.RBE_POOL_APP_PRIVATE_KEY }}
+          owner: gastownhall
+          repositories: gascity
+          permission-actions: write
+
+      - name: Pre-warm rbe-west OSS worker pool (gastownhall/gascity)
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          RBE_PREWARM_WORKERS: ${{ vars.RBE_PREWARM_WORKERS }}
+        run: bash .github/scripts/rbe-prewarm.sh
+
+      # Every lane reports its job.status from an always() last step
+      # (TestBazelLaneIsGatedAlongsideLegacy). The script above always exits
+      # 0, so this normally reads success regardless of what it found; the
+      # job-level continue-on-error above is the backstop for a step that
+      # fails outside the script (checkout, the mint action).
+      - name: Record result
+        id: result
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
 
   bazel-test:
     name: test

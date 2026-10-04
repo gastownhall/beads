@@ -205,7 +205,11 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 				}
 				runs := bazelLaneRunModes(t, name, job.If, s.with)[mode]
 				switch {
-				case strings.HasPrefix(mode, "fork-") && !runs && !bazelPackageJobs[name]:
+				// rbe-prewarm targets instance "oss" only (modes remote and
+				// fork-rw); fork-ro targets the separate "oss-fork" instance
+				// rbe-worker-pool.yml does not serve, so it is excluded by
+				// design (see bazel.yml's comment on the job).
+				case strings.HasPrefix(mode, "fork-") && !runs && !bazelPackageJobs[name] && !(name == bazelRBEPrewarmJobName && mode == "fork-ro"):
 					t.Errorf("%s does not run in mode %s (every lane runs remotely)", name, mode)
 				case mode == "cache" && name == bazelIntegJobName && !runs:
 					t.Errorf("%s does not run in mode cache", name)
