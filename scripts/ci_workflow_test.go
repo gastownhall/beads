@@ -2478,6 +2478,7 @@ const (
 	bazelIntegJobName   = "bazel-integration"
 	bazelProxiedJobName = "bazel-proxied"
 	bazelServerJobName  = "bazel-server-storage"
+	bazelCmdDoltJobName = "bazel-cmd-dolt"
 	// F3: the MCP and npm package gates, moved here from pr.yml so they need
 	// only the rbe job. Unlike every other lane they do not mirror a Bazel
 	// config; pr.yml opts them in with package-gates: "on".
@@ -2511,7 +2512,7 @@ const (
 // bazel.yml's jobs: the rbe job that decides the execution mode, the
 // --config=ci lane, one job per CI job a Bazel config mirrors, and the two
 // package gates (F3), sorted alphabetically to match TestBazelWorkflowJobsAndExecutionMode's sort.Strings.
-var bazelJobNames = []string{bazelDoltJobName, bazelEmbedJobName, bazelIntegJobName, bazelProxiedJobName, bazelPureJobName, bazelServerJobName, bazelJobName, bazelPackageMCPJobName, bazelPackageNPMJobName, bazelRBEJobName, bazelRBEPrewarmJobName}
+var bazelJobNames = []string{bazelCmdDoltJobName, bazelDoltJobName, bazelEmbedJobName, bazelIntegJobName, bazelProxiedJobName, bazelPureJobName, bazelServerJobName, bazelJobName, bazelPackageMCPJobName, bazelPackageNPMJobName, bazelRBEJobName, bazelRBEPrewarmJobName}
 
 // The lanes that only run remotely (skipped unless the rbe job chose remote);
 // bazel-integration runs remotely or with the read-only cache (bazelIntegIf);
@@ -2578,6 +2579,33 @@ var bazelLaneGateIDs = map[string]string{
 	// bazel-gate.sh's skip list never names them.
 	bazelPackageMCPJobName: "PACKAGE_MCP",
 	bazelPackageNPMJobName: "PACKAGE_NPM",
+}
+
+// bazelFlagGate: a lane pr.yml's ci-gate requires only while a committed
+// top-level pr.yml flag is "true" (the WINDOWS_PREBUILT_REQUIRED pattern):
+// the lane runs in pr.yml's call and always reports, its id is read into the
+// gate step's env but is never in the static CI_GATE_REQUIRED list, and the
+// run script adds it when the flag is "true". Until then it is advisory, so
+// it carries job-level continue-on-error (a failure must not turn the call's
+// aggregate, BAZEL, red); once required, its own id still reddens the gate.
+type bazelFlagGate struct {
+	id   string // its CI_GATE_REQUIRED id
+	flag string // pr.yml's top-level env flag
+	want string // the flag's committed value: flipping it is a reviewed change
+}
+
+var bazelFlagGatedLanes = map[string]bazelFlagGate{
+	// The cmd/bd Dolt-server tier (the Dolt-gated cmd/bd tests no other lane
+	// runs), advisory until its first clean runs.
+	bazelCmdDoltJobName: {id: "BAZEL_CMD_DOLT", flag: "BAZEL_CMD_DOLT_REQUIRED", want: "false"},
+}
+
+// bazelFlagGateRun is the run-script fragment that adds a flag-gated lane's
+// id to CI_GATE_REQUIRED.
+func bazelFlagGateRun(g bazelFlagGate) string {
+	return "if [[ \"$" + g.flag + "\" == \"true\" ]]; then\n" +
+		"  CI_GATE_REQUIRED=\"$CI_GATE_REQUIRED " + g.id + "\"\n" +
+		"fi\n"
 }
 
 // rbe-prewarm: not a build/test lane at all (no Bazel config mirrors it), so
@@ -2773,8 +2801,14 @@ func TestBazelWorkflowJobsAndExecutionMode(t *testing.T) {
 		// continue-on-error here a pre-warm hiccup would still turn
 		// bazel.yml's own run - and thus pr.yml's ci-gate - red for a job
 		// nothing requires.
-		if job.ContinueOnError && name != bazelRBEPrewarmJobName {
+		_, flagGated := bazelFlagGatedLanes[name]
+		if job.ContinueOnError && name != bazelRBEPrewarmJobName && !flagGated {
 			t.Errorf("%s continue-on-error hides failures from pr.yml's ci-gate", name)
+		}
+		// A flag-gated lane is advisory until its flag says otherwise, and
+		// an advisory job's failure must not fail the call (BAZEL).
+		if flagGated && !job.ContinueOnError {
+			t.Errorf("%s is flag-gated (advisory until pr.yml's %s is \"true\") but lacks job-level continue-on-error", name, bazelFlagGatedLanes[name].flag)
 		}
 		if job.TimeoutMinutes == 0 {
 			t.Errorf("%s has no timeout-minutes", name)
@@ -2838,7 +2872,9 @@ func TestBazelWorkflowJobsAndExecutionMode(t *testing.T) {
 			wantJobRunsOn, wantJobIf, wantJobSetupEnv = bazelPackageRunsOn, bazelPackageGatesIf, wantPackageSetupEnv
 		} else if bazelRemoteOnlyJobs[name] {
 			wantJobIf = wantRemoteOnlyIf
-		} else if name == bazelIntegJobName {
+		} else if name == bazelIntegJobName || name == bazelCmdDoltJobName {
+			// The cmd/bd Dolt-server tier runs exactly where the integration
+			// lane does: its build is --config=integration's.
 			wantJobIf = bazelIntegIf
 		} else if name == bazelRBEPrewarmJobName {
 			// Same runs-on ternary as every other lane (wantRunsOn, set
@@ -3350,9 +3386,10 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 		}
 		_, gated := bazelLaneGateIDs[name]
 		_, advisory := bazelAdvisoryLanes[name]
-		if gated == advisory {
-			t.Errorf("%s job %s: gated=%v advisory=%v; add it to exactly one of bazelLaneGateIDs (with a CI_GATE_REQUIRED id in pr.yml) or bazelAdvisoryLanes (with the reason)",
-				bazelWorkflowName, name, gated, advisory)
+		_, flagGated := bazelFlagGatedLanes[name]
+		if n := btoi(gated) + btoi(advisory) + btoi(flagGated); n != 1 {
+			t.Errorf("%s job %s: gated=%v advisory=%v flag-gated=%v; add it to exactly one of bazelLaneGateIDs (with a CI_GATE_REQUIRED id in pr.yml), bazelFlagGatedLanes (with its pr.yml flag) or bazelAdvisoryLanes (with the reason)",
+				bazelWorkflowName, name, gated, advisory, flagGated)
 		}
 		// Each lane reports its job.status from an always() last step.
 		if !reflect.DeepEqual(job.Outputs, map[string]string{"result": "${{ steps.result.outputs.result }}"}) {
@@ -3373,6 +3410,11 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 	for name := range bazelAdvisoryLanes {
 		if _, ok := workflow.Jobs[name]; !ok {
 			t.Errorf("bazelAdvisoryLanes lists %s, which %s does not have", name, bazelWorkflowName)
+		}
+	}
+	for name := range bazelFlagGatedLanes {
+		if _, ok := workflow.Jobs[name]; !ok {
+			t.Errorf("bazelFlagGatedLanes lists %s, which %s does not have", name, bazelWorkflowName)
 		}
 	}
 	gotCallOutputs := map[string]string{}
@@ -3508,6 +3550,27 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 	}
 	if _, ok := evaluate.Env[bazelAggregateGateID]; ok {
 		t.Errorf("ci-gate env sets %s; it must come from %s aggregate", bazelAggregateGateID, bazelGateScript)
+	}
+	// Flag-gated lanes: read like a gated lane, never statically required,
+	// added by the run script exactly when the committed flag is "true",
+	// and the flag's value is pinned (flipping it is a reviewed one-line
+	// change, here and in pr.yml).
+	for lane, g := range bazelFlagGatedLanes {
+		if want := "${{ needs.bazel.outputs." + lane + " || 'skipped' }}"; evaluate.Env[g.id] != want {
+			t.Errorf("ci-gate env %s = %q, want %q", g.id, evaluate.Env[g.id], want)
+		}
+		if contains(required, g.id) {
+			t.Errorf("CI_GATE_REQUIRED statically lists %s; only the %s conditional in the run script may add it", g.id, g.flag)
+		}
+		if got := pr.Env[g.flag]; got != g.want {
+			t.Errorf("pr.yml top-level env %s = %q, want %q (update bazelFlagGatedLanes in the same change that flips it)", g.flag, got, g.want)
+		}
+		frag := bazelFlagGateRun(g)
+		if strings.Count(evaluate.Run, frag) != 1 {
+			t.Errorf("ci-gate run script lacks exactly one\n%s", frag)
+		} else if strings.Index(evaluate.Run, frag) > strings.Index(evaluate.Run, "export CI_GATE_REQUIRED") {
+			t.Errorf("ci-gate run script adds %s after export CI_GATE_REQUIRED", g.id)
+		}
 	}
 	for id, value := range evaluate.Env {
 		for lane := range bazelAdvisoryLanes {
@@ -3680,7 +3743,10 @@ type bazelGateScenario struct {
 	// Non-Bazel needs' results that differ from what the jobs' if: give
 	// (success, or skipped for pr.yml's legacy jobs that bazel-coverage
 	// retired, D2 step 3).
-	results     map[string]string
+	results map[string]string
+	// pr.yml's top-level flags the run script reads (the workflow env is
+	// not part of the step's env): bazelFlagGatedLanes' flags.
+	flags       map[string]string
 	wantPass    bool
 	wantMention string // a red gate must name this id
 }
@@ -3706,6 +3772,9 @@ func runPRGateStep(t *testing.T, step ciWorkflowStep, sc bazelGateScenario) (boo
 	t.Helper()
 	expr := regexp.MustCompile(`^\$\{\{ needs\.([A-Za-z0-9_-]+)\.(result|outputs\.([A-Za-z0-9_-]+))( \|\| 'skipped')? \}\}$`)
 	env := []string{"PATH=" + os.Getenv("PATH"), "GITHUB_EVENT_NAME=" + sc.event}
+	for key, value := range sc.flags {
+		env = append(env, key+"="+value)
+	}
 	for key, value := range step.Env {
 		if !strings.Contains(value, "${{") {
 			env = append(env, key+"="+value)
@@ -3833,6 +3902,10 @@ func TestBazelGateSimulation(t *testing.T) {
 				anyRuns = true
 			} else if id, gated := bazelLaneGateIDs[lane]; gated {
 				wantSkips = append(wantSkips, id)
+			} else if g, flagGated := bazelFlagGatedLanes[lane]; flagGated {
+				// Listed even while advisory, so flipping the flag is the
+				// only change that makes it required.
+				wantSkips = append(wantSkips, g.id)
 			}
 		}
 		if !anyRuns {
@@ -3861,13 +3934,25 @@ func TestBazelGateSimulation(t *testing.T) {
 			}
 			return out
 		}
-		sc := func(name, call string, outputs map[string]string, pass bool, mention string) {
+		// Flags at their committed values, unless a scenario overrides one.
+		committedFlags := map[string]string{}
+		for _, g := range bazelFlagGatedLanes {
+			committedFlags[g.flag] = pr.Env[g.flag]
+		}
+		scFlags := func(name, call string, outputs map[string]string, flags map[string]string, pass bool, mention string) {
+			all := copyMap(committedFlags)
+			for k, v := range flags {
+				all[k] = v
+			}
 			for _, event := range []string{"pull_request", "merge_group"} {
 				scenarios = append(scenarios, bazelGateScenario{
 					name: mode + "/" + event + "/" + name, event: event, mode: mode, enabled: enabledFor(mode),
-					call: call, outputs: outputs, wantPass: pass, wantMention: mention,
+					call: call, outputs: outputs, flags: all, wantPass: pass, wantMention: mention,
 				})
 			}
+		}
+		sc := func(name, call string, outputs map[string]string, pass bool, mention string) {
+			scFlags(name, call, outputs, nil, pass, mention)
 		}
 
 		sc("every lane as designed", "success", base(), true, "")
@@ -3876,6 +3961,26 @@ func TestBazelGateSimulation(t *testing.T) {
 		sc("aggregate skipped", "skipped", base(), mode == "skip", bazelAggregateGateID)
 
 		for lane, modes := range lanes {
+			if g, flagGated := bazelFlagGatedLanes[lane]; flagGated {
+				off := map[string]string{g.flag: "false"}
+				on := map[string]string{g.flag: "true"}
+				// Advisory (flag "false"): continue-on-error keeps the
+				// aggregate green, and nothing the lane reports reddens
+				// the gate.
+				for _, result := range []string{"", "failure", "cancelled"} {
+					scFlags(lane+" reports "+result+" while advisory", "success", with(lane, result), off, true, "")
+				}
+				// Required (flag "true"): exactly a gated lane.
+				scFlags(lane+" required, as designed", "success", base(), on, true, "")
+				if !modes[mode] {
+					scFlags(lane+" required, ran and failed", "success", with(lane, "failure"), on, false, g.id)
+					continue
+				}
+				for _, result := range []string{"", "failure", "cancelled"} {
+					scFlags(lane+" required, alone "+result, "success", with(lane, result), on, false, g.id)
+				}
+				continue
+			}
 			id, gated := bazelLaneGateIDs[lane]
 			if !gated {
 				// Advisory: not in the call, so it cannot report, and
@@ -4370,7 +4475,7 @@ var (
 	// doltServerLaneTags are the tags of the lanes whose targets start
 	// hermetic dolt sql-servers; checkDoltServerRules holds each of them to
 	// the same rules.
-	doltServerLaneTags = []string{"dolt-server", "dolt-server-proxied", "dolt-server-integration"}
+	doltServerLaneTags = []string{"dolt-server", "dolt-server-proxied", "dolt-server-integration", "dolt-server-cmd"}
 	bazelRuleNameRe    = regexp.MustCompile(`(?m)^\s*name\s*=\s*"([^"]+)"`)
 )
 
@@ -5420,12 +5525,15 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 	secretRef := regexp.MustCompile(`\bsecrets\s*(\.|\[)`)
 	walkYAML(root, "", func(path string, key bool, value string) {
 		if key && value == "continue-on-error" {
-			// rbe-prewarm's job-level continue-on-error is the one
-			// deliberate exception (TestBazelWorkflowJobsAndExecutionMode's
-			// comment on the job has the full reasoning): without it, this
-			// advisory job's failure would still fail bazel.yml's own run
-			// and cascade into pr.yml's ci-gate.
-			if path != bazelRBEPrewarmContinueOnErrorPath {
+			// rbe-prewarm's job-level continue-on-error is a deliberate
+			// exception (TestBazelWorkflowJobsAndExecutionMode's comment on
+			// the job has the full reasoning): without it, this advisory
+			// job's failure would still fail bazel.yml's own run and
+			// cascade into pr.yml's ci-gate. So is each flag-gated lane's
+			// (bazelFlagGatedLanes): advisory until its pr.yml flag is
+			// "true", and required then through its own gate id.
+			_, flagGated := bazelFlagGatedLanes[strings.TrimSuffix(strings.TrimPrefix(path, ".jobs."), ".continue-on-error")]
+			if path != bazelRBEPrewarmContinueOnErrorPath && !flagGated {
 				t.Errorf("%s: %s hides failures from pr.yml's ci-gate", bazelWorkflowName, path)
 			}
 		}
@@ -6420,5 +6528,121 @@ func TestBazelWorkflowUploadsSurviveJobReruns(t *testing.T) {
 	}
 	if uploads < 8 {
 		t.Errorf("found %d upload steps in %s, want at least 8", uploads, bazelWorkflowName)
+	}
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// The cmd/bd Dolt-server tier (bazel.yml's bazel-cmd-dolt, advisory until
+// pr.yml's BAZEL_CMD_DOLT_REQUIRED is "true": bazelFlagGatedLanes): the
+// whole integration-tagged cmd/bd suite against a hermetic dolt sql-server,
+// because every other lane, Bazel or go test, runs cmd/bd with
+// BEADS_TEST_SKIP=dolt or only a manifest's tests, so its Dolt-gated tests
+// ran nowhere. Coverage is exact by construction: the target passes the
+// binary no test selection, the Go binary shards itself over every
+// top-level test, and check_testcases.py fails a shard that ran none.
+func TestBazelCmdDoltJob(t *testing.T) {
+	const config, target = "doltserver-cmd", "bd_dolt_server_test"
+	workflow := readCIWorkflow(t, bazelWorkflowName)
+	job := workflow.job(t, bazelCmdDoltJobName)
+	assertBazelTierStep(t, job, bazelCmdDoltJobName, config)
+	test := job.step(t, "bazel test //... --config="+config)
+	// Mode cache runs the shards on a 4-CPU GitHub-hosted runner; with the
+	// read-only cache closed the cold tagged race build comes first (as in
+	// TestBazelIntegrationJob).
+	if test.TimeoutMinutes < 60 || job.TimeoutMinutes <= test.TimeoutMinutes || job.TimeoutMinutes > test.TimeoutMinutes+15 {
+		t.Errorf("%s timeouts: step %d, job %d; want a step of at least 60 and a job above it by at most 15", bazelCmdDoltJobName, test.TimeoutMinutes, job.TimeoutMinutes)
+	}
+	if logs := job.step(t, "Upload test logs"); logs.If != "${{ failure() && steps.test.outcome != 'skipped' }}" || logs.With["name"] != "bazel-cmd-dolt-testlogs" {
+		t.Errorf("test-log upload: if=%q name=%q", logs.If, logs.With["name"])
+	}
+	if !job.ContinueOnError {
+		t.Errorf("%s lacks job-level continue-on-error; while advisory its failure must not fail the call", bazelCmdDoltJobName)
+	}
+
+	// .bazelrc: exactly --config=integration's build flags (so the lanes
+	// share every compile), the lane's own tag, no dolt skip, no test
+	// selection, Go's timeout under rbe-west's action cap.
+	rcText := readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc")
+	rc := bazelrcLines(t)
+	for _, want := range []string{
+		"build:" + config + " --@rules_go//go/config:tags=gms_pure_go,integration",
+		"build:integration --@rules_go//go/config:tags=gms_pure_go,integration",
+		"test:" + config + " --@rules_go//go/config:race",
+		"test:integration --@rules_go//go/config:race",
+		"test:" + config + " --test_tag_filters=dolt-server-cmd",
+		"test:" + config + " --test_timeout=-1,-1,-1,1200",
+		"test:" + config + " --test_arg=-test.timeout=19m",
+		"test:" + config + " --test_arg=-test.parallel=4",
+		"test:" + config + " --test_env=BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1",
+		"test:" + config + " --test_env=GO_TEST_WRAP_TESTV=1",
+	} {
+		if !rc[want] {
+			t.Errorf(".bazelrc lacks %q", want)
+		}
+	}
+	for _, o := range bazelrcLaneOptions(parseBazelrcOptions(rcText), config) {
+		arg, _ := strings.CutPrefix(o.flag, "--test_arg=")
+		arg = strings.TrimLeft(arg, "-")
+		switch {
+		case strings.HasPrefix(o.flag, "--test_env=BEADS_TEST_SKIP"):
+			t.Errorf("%s sets %s: the lane exists to run the Dolt-gated tests", o.source(), o.flag)
+		case strings.HasPrefix(o.flag, "--test_filter"),
+			strings.HasPrefix(arg, "test.run"), strings.HasPrefix(arg, "test.skip"), strings.HasPrefix(arg, "test.short"):
+			t.Errorf("%s sets %s: the lane runs every cmd/bd test", o.source(), o.flag)
+		case strings.HasPrefix(o.flag, "--@rules_go//go/config:") && o.command == "build" &&
+			o.flag != "--@rules_go//go/config:tags=gms_pure_go,integration":
+			t.Errorf("%s sets %s: its build must stay --config=integration's", o.source(), o.flag)
+		}
+	}
+
+	// The target: the dolt-server rules (local backend, fail closed, remote),
+	// the integration build's bd_test with no test selection, every env
+	// bd_test's own go_test sets, and the 4-vCPU runner shape.
+	if os.Getenv("TEST_SRCDIR") != "" {
+		return // scripts_test's runfiles hold no other package's BUILD
+	}
+	build := readPolicyFile(t, sourceRepoRoot(t), "cmd/bd/BUILD.bazel")
+	var rule, bdTest string
+	for _, r := range bazelTopRules(stripStarlarkComments(build)) {
+		if m := bazelRuleNameRe.FindStringSubmatch(r); m != nil {
+			switch m[1] {
+			case target:
+				rule = r
+			case "bd_test":
+				bdTest = r
+			}
+		}
+	}
+	if rule == "" || bdTest == "" {
+		t.Fatalf("cmd/bd/BUILD.bazel lacks %s or bd_test", target)
+	}
+	for _, err := range checkDoltServerRules("cmd/bd", rule) {
+		t.Error(err)
+	}
+	for _, want := range []string{
+		`srcs = ["//tools/bazel:go_test_variant.sh"]`,
+		`args = ["$(rootpath :bd_test)"]`,
+		`tags = ["dolt-server-cmd"]`,
+		`"GOMAXPROCS": "4"`,
+		`"BEADS_TEST_GIT_IDENTITY": "1"`,
+	} {
+		if !strings.Contains(rule, want) {
+			t.Errorf("%s lacks %s", target, want)
+		}
+	}
+	if m := regexp.MustCompile(`shard_count = (\d+)`).FindStringSubmatch(rule); m == nil {
+		t.Errorf("%s is not sharded", target)
+	}
+	envKey := regexp.MustCompile(`"(BEADS_TEST_[A-Z_]+)": "\$\(rlocationpath [^)]+\)"`)
+	for _, m := range envKey.FindAllStringSubmatch(bdTest, -1) {
+		if !strings.Contains(rule, m[0]) {
+			t.Errorf("%s does not repeat bd_test's env %s", target, m[0])
+		}
 	}
 }

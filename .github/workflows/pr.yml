@@ -51,6 +51,15 @@ env:
   # lanes run remotely beside them whenever rbe-fork is open (bazel.yml
   # modes fork-ro/fork-rw), else locally with the read-only cache as before.
   BAZEL_COVERS_FORKS: "false"
+  # bazel.yml's bazel-cmd-dolt lane (the cmd/bd Dolt-server tier: the
+  # Dolt-gated cmd/bd tests no other lane runs) is advisory while this is
+  # "false": it runs and reports in the bazel call (continue-on-error, so a
+  # failure never turns the call's aggregate red), and ci-gate ignores its
+  # BAZEL_CMD_DOLT result. "true" adds BAZEL_CMD_DOLT to CI_GATE_REQUIRED in
+  # the "Evaluate CI gate" step's run script; bazel-gate.sh still accepts
+  # its skip in modes skip and local. Committed, not a repo variable, for
+  # the same reason as the flags above.
+  BAZEL_CMD_DOLT_REQUIRED: "false"
 
 jobs:
 
@@ -2485,6 +2494,9 @@ jobs:
           BAZEL_DOLTSERVER: ${{ needs.bazel.outputs.bazel-doltserver || 'skipped' }}
           BAZEL_PROXIED: ${{ needs.bazel.outputs.bazel-proxied || 'skipped' }}
           BAZEL_SERVER_STORAGE: ${{ needs.bazel.outputs.bazel-server-storage || 'skipped' }}
+          # Advisory unless BAZEL_CMD_DOLT_REQUIRED (top of this file) is
+          # "true": see the run script.
+          BAZEL_CMD_DOLT: ${{ needs.bazel.outputs.bazel-cmd-dolt || 'skipped' }}
           # Inputs of bazel-gate.sh, which sets BAZEL (the call's aggregate,
           # red on a missing or inconsistent mode) and the expected skips
           # from bazel.yml's own rbe job decision.
@@ -2517,6 +2529,12 @@ jobs:
           else
             CI_GATE_REQUIRED="$CI_GATE_REQUIRED TEST_WINDOWS_LIVENESS WORKTREE_REMOVE_WINDOWS"
             skipped_ok="$skipped_ok TEST_WINDOWS_LIVENESS_PREBUILT WORKTREE_REMOVE_WINDOWS_PREBUILT"
+          fi
+          # The cmd/bd Dolt-server tier (bazel.yml's bazel-cmd-dolt) is
+          # advisory until BAZEL_CMD_DOLT_REQUIRED (top of this file) is
+          # "true"; it is never in the static list above.
+          if [[ "$BAZEL_CMD_DOLT_REQUIRED" == "true" ]]; then
+            CI_GATE_REQUIRED="$CI_GATE_REQUIRED BAZEL_CMD_DOLT"
           fi
           export CI_GATE_REQUIRED
           # Bazel lanes skipped by design in the call's execution mode (all

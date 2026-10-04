@@ -215,7 +215,7 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 				// bazel.yml's comment on the job).
 				case strings.HasPrefix(mode, "fork-") && !runs && !bazelPackageJobs[name] && !(name == bazelRBEPrewarmJobName && strings.HasPrefix(mode, "fork-")):
 					t.Errorf("%s does not run in mode %s (every lane runs remotely)", name, mode)
-				case mode == "cache" && name == bazelIntegJobName && !runs:
+				case mode == "cache" && (name == bazelIntegJobName || name == bazelCmdDoltJobName) && !runs:
 					t.Errorf("%s does not run in mode cache", name)
 				case mode == "cache" && bazelRemoteOnlyJobs[name] && runs:
 					t.Errorf("remote-only %s runs in mode cache", name)
@@ -275,6 +275,12 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 				}
 				if !ran[lane] {
 					wantSkips = append(wantSkips, id)
+				}
+			}
+			// Flag-gated lanes' skips are accepted whatever the flag says.
+			for lane, g := range bazelFlagGatedLanes {
+				if !ran[lane] {
+					wantSkips = append(wantSkips, g.id)
 				}
 			}
 			if len(lanes) == 0 {

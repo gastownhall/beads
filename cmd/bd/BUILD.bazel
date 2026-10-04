@@ -1472,6 +1472,58 @@ sh_test(
     tags = ["dolt-server-proxied"],
 )
 
+# The whole cmd/bd suite, as --config=doltserver-cmd builds it (exactly
+# --config=integration's build: the integration and gms_pure_go build tags,
+# race, so the two lanes share bd_test's compile), against a hermetic dolt sql-server:
+# TestMain starts the shared test server from the pinned dolt in the test
+# wrapper's runfiles (BEADS_TEST_DOLT_SERVER=local), and a server that
+# cannot start fails the target (BEADS_TEST_REQUIRE_DOLT_CONTAINER=1)
+# instead of skipping every Dolt-gated test into a cached pass. These are
+# the cmd/bd tests no other lane runs: every other configuration of bd_test
+# passes BEADS_TEST_SKIP=dolt (prcore/ci, integration) or runs only its
+# manifest (bd_embedded_test, bd_proxied_test), and so do main.yml's and
+# nightly.yml's go test jobs. No -test.run/-test.skip: the Go binary shards
+# itself over every top-level test (rules_go's TEST_SHARD_INDEX), so each
+# runs in exactly one shard, and check_testcases.py fails a shard that ran
+# none. It repeats bd_test's `env` (the wrapper cannot inherit it).
+#
+# Tags:
+#   dolt-server-cmd: the cmd/bd Dolt-server tier; starts hermetic dolt
+#     sql-servers and needs the integration build tag; excluded from
+#     --config=prcore/ci and --config=integration, selected by
+#     --config=doltserver-cmd.
+sh_test(
+    name = "bd_dolt_server_test",
+    size = "large",
+    # --config=doltserver-cmd's -test.timeout=19m fires (with a goroutine
+    # dump) before Bazel's 1200s action limit (eternal under the lane's
+    # --test_timeout), which kills without one.
+    timeout = "eternal",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :bd_test)"],
+    data = [
+        ":bd_for_tests",
+        ":bd_test",
+        ":preflight_go_fixture",
+        "@go_sdk//:bin/gofmt",
+    ],
+    env = {
+        "BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)",
+        "BEADS_TEST_DOLT_SERVER": "local",
+        # The integration jobs' global git identity (tools/bazel/test_env.sh).
+        "BEADS_TEST_GIT_IDENTITY": "1",
+        "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
+        "BEADS_TEST_PREFLIGHT_GO": "$(rlocationpath :preflight_go_fixture)",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+        # The 4-vCPU runner shape, as in bd_proxied_test: -test.parallel
+        # defaults to GOMAXPROCS, and every parallel test opens stores
+        # against the one shared server.
+        "GOMAXPROCS": "4",
+    },
+    shard_count = 32,
+    tags = ["dolt-server-cmd"],
+)
+
 # CLI flag registrations pinned by //internal/httpapi spec parity tests.
 exports_files(
     [

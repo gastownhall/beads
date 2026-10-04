@@ -122,6 +122,17 @@ runs the manifest's own 30-shard block — bin-packed by measured duration,
 not the legacy jobs' 15-shard, bd-init-cost-proxy block — so shard k there
 is not job k+1's tests; it is a different split of the same tests.
 
+`--config=doltserver-cmd` (`//cmd/bd:bd_dolt_server_test`, bazel.yml's
+advisory `bazel-cmd-dolt` job) runs the whole integration-tagged cmd/bd
+suite on the `local` backend: the Dolt-gated cmd/bd tests (`TestCLI_*`, the
+init and store-backed suites) that every other lane skips with
+`BEADS_TEST_SKIP=dolt` or leaves out of its manifest. It shares
+`--config=integration`'s build, passes the binary no test selection (the Go
+binary shards itself over every top-level test, 32 shards), and runs where
+the integration lane runs (remote, or with the read-only cache). pr.yml's
+gate requires it once `BAZEL_CMD_DOLT_REQUIRED` is `"true"`. Locally:
+`bazel test //cmd/bd:bd_dolt_server_test --config=doltserver-cmd`.
+
 An ambient `BEADS_DOLT_SERVER_PORT` or `BEADS_DOLT_PORT` is never honored by
 the suites that call `testutil.EnsureDoltContainerForTestMain`. When a test
 container is started, that container's port overwrites both variables; when one

@@ -37,7 +37,7 @@ test:prcore --test_env=BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1
 # Every tag that belongs to another lane (scripts/bazel_policy_test.go
 # bazelPRCoreExcludedTags). integration-only targets run zero tests outside
 # --config=integration.
-test:prcore --test_tag_filters=-requires-docker,-dolt-server,-dolt-server-proxied,-dolt-server-integration,-embedded,-manual,-integration-only
+test:prcore --test_tag_filters=-requires-docker,-dolt-server,-dolt-server-proxied,-dolt-server-integration,-dolt-server-cmd,-embedded,-manual,-integration-only
 
 test:ci --config=prcore
 test:ci --keep_going --test_summary=terse
@@ -206,6 +206,34 @@ test:doltserver-integration --nocache_test_results
 # visible "Re-run failed jobs" retries it.
 test:doltserver-integration --experimental_remote_cache_eviction_retries=0
 
+# cmd/bd Dolt-server tier: //cmd/bd:bd_dolt_server_test (dolt-server-cmd
+# tag), the whole integration-tagged cmd/bd suite against a hermetic dolt
+# sql-server, i.e. the Dolt-gated cmd/bd tests every other lane skips
+# (BEADS_TEST_SKIP=dolt in --config=prcore/ci and --config=integration, and
+# in main.yml's and nightly.yml's go test jobs). The build flags are exactly
+# --config=integration's, so it compiles nothing bazel-integration does not
+# (shared through the remote cache). bazel.yml runs it where it runs the
+# integration lane (remote, or with the read-only cache in mode cache), in a
+# job of its own (bazel-cmd-dolt), advisory until pr.yml's
+# BAZEL_CMD_DOLT_REQUIRED says otherwise. No BEADS_TEST_SKIP, no -short.
+# Results are cacheable, as in --config=doltserver: every input is in the
+# action key, and a server that cannot start fails the target.
+build:doltserver-cmd --@rules_go//go/config:tags=gms_pure_go,integration
+test:doltserver-cmd --@rules_go//go/config:race
+test:doltserver-cmd --test_tag_filters=dolt-server-cmd
+test:doltserver-cmd --build_tests_only
+test:doltserver-cmd --keep_going
+test:doltserver-cmd --test_summary=terse
+test:doltserver-cmd --test_timeout=-1,-1,-1,1200
+# As in --config=integration: Go's own timeout fires first and dumps every
+# goroutine to test.log, which Bazel's kill at 1200s does not.
+test:doltserver-cmd --test_arg=-test.timeout=19m
+test:doltserver-cmd --test_arg=-test.parallel=4
+test:doltserver-cmd --test_env=BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1
+test:doltserver-cmd --test_env=GO_TEST_WRAP_TESTV=1
+test:doltserver-cmd --local_test_jobs=4
+test:doltserver-cmd --remote_download_regex=.*/test\.(log|xml)$
+
 # Integration lane: main.yml's "Main Linux integration packages (N/6)" and
 # "Main Linux integration cmd/bd (N/8)" jobs (and nightly.yml's Full Test
 # Suite, which runs the same `go test` over ./... in one job): every package
@@ -224,7 +252,7 @@ test:integration --test_env=BEADS_TEST_SKIP=dolt
 # keeps every container- or server-backed test skipped, which is what the
 # untagged base targets already do. scripts/bazel_policy_test.go derives the
 # required exclusions from the PR-core list, so a new lane tag lands here too.
-test:integration --test_tag_filters=-requires-docker,-dolt-server,-dolt-server-proxied,-dolt-server-integration,-embedded,-manual
+test:integration --test_tag_filters=-requires-docker,-dolt-server,-dolt-server-proxied,-dolt-server-integration,-dolt-server-cmd,-embedded,-manual
 test:integration --build_tests_only
 test:integration --keep_going
 test:integration --test_summary=terse

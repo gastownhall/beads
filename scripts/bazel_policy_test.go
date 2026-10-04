@@ -783,10 +783,12 @@ var allowedBazelTestTags = map[string]string{
 	"dolt-server": "starts hermetic dolt sql-servers (or completes the lane's job without -short); excluded from --config=prcore/ci, run by --config=doltserver",
 	// The same rules as dolt-server (hermetic servers, remote, fail-closed:
 	// checkDoltServerRules), for the tiers bazel.yml runs only with remote
-	// execution and, for the server storage tier, under the integration
-	// lane's build flags.
+	// execution (and, for the cmd/bd tier, the read-only cache) and, for the
+	// server storage and cmd/bd tiers, under the integration lane's build
+	// flags.
 	"dolt-server-proxied":     "proxied-server cmd/bd tier: starts hermetic dolt sql-servers; excluded from --config=prcore/ci, run by --config=doltserver-proxied",
 	"dolt-server-integration": "server-Dolt storage tier: starts hermetic dolt sql-servers and needs the integration build tag; excluded from --config=prcore/ci, run by --config=doltserver-integration",
+	"dolt-server-cmd":         "cmd/bd Dolt-server tier: the whole integration-tagged cmd/bd suite against hermetic dolt sql-servers; excluded from --config=prcore/ci, run by --config=doltserver-cmd",
 	"embedded":                "embedded-Dolt tier variant; excluded from --config=prcore/ci, run by --config=embedded",
 	"manual":                  "never part of //...: a repro/bench harness, or a build input only another target needs; excluded from --config=prcore/ci",
 	// For a go_test whose every test file is `//go:build integration`: in any
@@ -802,7 +804,7 @@ var allowedBazelTestTags = map[string]string{
 // and vice versa (TestBazelPRCoreExcludedTagsMatchTaxonomy), so a new lane
 // tag lands here, and through bazelIntegrationExcludedTags in the
 // integration lane's filter too.
-var bazelPRCoreExcludedTags = []string{"requires-docker", "dolt-server", "dolt-server-proxied", "dolt-server-integration", "embedded", "manual", "integration-only"}
+var bazelPRCoreExcludedTags = []string{"requires-docker", "dolt-server", "dolt-server-proxied", "dolt-server-integration", "dolt-server-cmd", "embedded", "manual", "integration-only"}
 
 // bazelIntegrationRunsTags are the PR-core-excluded tags --config=integration
 // runs: the integration lane is main.yml's integration jobs, whose

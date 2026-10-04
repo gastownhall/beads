@@ -25,6 +25,9 @@
 # bazel-embedded, bazel-integration, bazel-doltserver, bazel-proxied and
 # bazel-server-storage (BAZEL_TEST, BAZEL_PURE, BAZEL_EMBEDDED,
 # BAZEL_INTEGRATION, BAZEL_DOLTSERVER, BAZEL_PROXIED, BAZEL_SERVER_STORAGE);
+# bazel-cmd-dolt (the cmd/bd Dolt-server tier, BAZEL_CMD_DOLT) is advisory:
+# job-level continue-on-error, and pr.yml requires it only while its
+# BAZEL_CMD_DOLT_REQUIRED flag is "true";
 # .github/scripts/bazel-gate.sh turns the rbe job's rbe-mode output into the
 # skips it accepts, so a lane skipped by its `if:` below passes and one that
 # should have run and failed, was cancelled or reported nothing fails the
@@ -306,6 +309,9 @@ on:
       bazel-server-storage:
         description: "bazel-server-storage's job.status"
         value: ${{ jobs.bazel-server-storage.outputs.result }}
+      bazel-cmd-dolt:
+        description: "bazel-cmd-dolt's job.status (advisory unless pr.yml's BAZEL_CMD_DOLT_REQUIRED is \"true\")"
+        value: ${{ jobs.bazel-cmd-dolt.outputs.result }}
       package-mcp:
         description: "package-mcp's job.status (empty unless package-gates is 'on')"
         value: ${{ jobs.package-mcp.outputs.result }}
@@ -1602,6 +1608,105 @@ jobs:
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
       # cancellation too.
+      - name: Record job result
+        id: result
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
+
+  # The cmd/bd Dolt-server tier, as --config=doltserver-cmd: the whole
+  # integration-tagged cmd/bd suite (//cmd/bd:bd_dolt_server_test, 32
+  # shards) against a hermetic dolt sql-server, i.e. the Dolt-gated cmd/bd
+  # tests (TestCLI_*, TestInit*, the store-backed suites) that every other
+  # lane and legacy job skips with BEADS_TEST_SKIP=dolt or leaves out of its
+  # manifest. --config=doltserver-cmd has exactly --config=integration's
+  # build flags, so it shares bazel-integration's compile through the
+  # remote cache. Runs exactly where bazel-integration runs (the same if):
+  # remotely (modes remote, fork-ro, fork-rw), or locally with the
+  # read-only cache (mode cache: fork and Dependabot PRs while rbe-fork is
+  # closed), never plain local (rbe=off), and not when a caller passes
+  # integration: "off".
+  # Advisory: job-level continue-on-error keeps a failure out of this
+  # call's aggregate result (BAZEL), and pr.yml's ci-gate requires the
+  # lane's own result (BAZEL_CMD_DOLT) only while pr.yml's committed
+  # BAZEL_CMD_DOLT_REQUIRED flag is "true" (scripts/ci_workflow_test.go,
+  # TestBazelCmdDoltJob).
+  bazel-cmd-dolt:
+    name: cmd/bd Dolt-server tier
+    needs: rbe
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    if: ${{ (needs.rbe.outputs.enabled == 'true' || needs.rbe.outputs.mode == 'cache') && inputs.integration != 'off' }}
+    timeout-minutes: 85
+    continue-on-error: true
+    outputs:
+      result: ${{ steps.result.outputs.result }}
+    steps:
+      # inputs.checkout-sha: see the header (empty: the event's default ref).
+      # checkout v7 refuses a fork head on pull_request_target unless opted
+      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout-sha }}
+          persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
+
+      - name: Set up Bazel
+        id: bazel
+        uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+          BAZEL_FORK_REMOTE: ${{ startsWith(needs.rbe.outputs.mode, 'fork-') && 'true' || '' }}
+          RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
+          RBE_FORK_PR: ${{ github.event.pull_request.number }}
+
+      # Remote: a compile shared with bazel-integration plus the longest
+      # shard (~4-5 minutes; Go's -test.timeout=19m, Bazel's 1200s cap).
+      # Mode cache on a 4-CPU runner: the compile hits the read-only cache,
+      # and a PR that changes cmd/bd or what it imports runs every shard
+      # locally, four at a time (~3,400 test-seconds measured: ~15-20
+      # minutes); with the cache closed, add the cold race build (~30).
+      - name: bazel test //... --config=doltserver-cmd
+        id: test
+        timeout-minutes: 75
+        run: |
+          set -o pipefail
+          start=$(date +%s)
+          rc=0
+          bazel test //... --config=doltserver-cmd \
+            --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
+          echo "bazel test --config=doltserver-cmd: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      # As in bazel-embedded: every shard of the target ran tests (the Go
+      # binary shards itself over every top-level test, so together the
+      # shards run each exactly once).
+      - name: Every target and shard ran tests
+        if: ${{ always() && steps.test.outcome != 'skipped' }}
+        run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
+
+      - name: Upload test logs
+        if: ${{ failure() && steps.test.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: bazel-cmd-dolt-testlogs
+          path: |
+            bazel-testlogs/**/test.log
+            bazel-testlogs/**/test.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # Last step: the job's result as a workflow_call output for pr.yml's
+      # ci-gate. always() runs it after a failure, a timeout or a
+      # cancellation too; job.status is the steps' status, unaffected by the
+      # job-level continue-on-error.
       - name: Record job result
         id: result
         if: ${{ always() }}
