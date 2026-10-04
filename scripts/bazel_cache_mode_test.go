@@ -205,11 +205,15 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 				}
 				runs := bazelLaneRunModes(t, name, job.If, s.with)[mode]
 				switch {
-				// rbe-prewarm targets instance "oss" only (modes remote and
-				// fork-rw); fork-ro targets the separate "oss-fork" instance
-				// rbe-worker-pool.yml does not serve, so it is excluded by
-				// design (see bazel.yml's comment on the job).
-				case strings.HasPrefix(mode, "fork-") && !runs && !bazelPackageJobs[name] && !(name == bazelRBEPrewarmJobName && mode == "fork-ro"):
+				// rbe-prewarm never runs in any fork mode (B1, security
+				// review of bdef342d5: gated on mode remote only). A fork or
+				// Dependabot pull_request run never carries a
+				// workflow_call secret regardless of mode, and
+				// bazel-farm.yml (the other path to a privileged fork tier)
+				// no longer forwards the app secrets either, so there is no
+				// audience left for pre-warming in fork-ro or fork-rw (see
+				// bazel.yml's comment on the job).
+				case strings.HasPrefix(mode, "fork-") && !runs && !bazelPackageJobs[name] && !(name == bazelRBEPrewarmJobName && strings.HasPrefix(mode, "fork-")):
 					t.Errorf("%s does not run in mode %s (every lane runs remotely)", name, mode)
 				case mode == "cache" && name == bazelIntegJobName && !runs:
 					t.Errorf("%s does not run in mode cache", name)

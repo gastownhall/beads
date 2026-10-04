@@ -1,6 +1,8 @@
 package scripts_test
 
 import (
+	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -19,28 +21,34 @@ import (
 // pinned to exactly gastownhall/gascity's rbe-worker-pool.yml on main with a
 // token scoped to that one repository.
 //
+// B1 (security review of bdef342d5, this task's second pass): the job used
+// to check out `.github/scripts/rbe-prewarm.sh` at the PR's own head SHA
+// (with allow-unsafe-pr-checkout) and run it while the mint step's token was
+// live. Editing a script file does not trip the org's workflow-file approval
+// policy the way editing this YAML does, so any same-repo branch push - not
+// just a fork - could have altered that script to exfiltrate the shared
+// gascity scaler credential. The fix: no checkout step at all, and the
+// dispatch logic lives inline in the step's own `run:`, which
+// pull_request_target always loads from the trusted base branch. Several
+// tests below were rewritten to read that inline string (job.step(...).Run)
+// instead of a file that no longer exists; new tests pin the no-checkout and
+// nothing-after-the-mint-touches-a-repo-path invariants the old suite did
+// not check (the mutation that added an extra step running
+// `bash .github/scripts/evil.sh` after the mint step passed undetected).
+//
 // Each test below was mutation-tested by hand while this job was written:
-// reverting the fix it pins (restoring the old event-gated `if:`, widening
-// the mint's `repositories:`, dropping the job-level continue-on-error,
-// adding rbe-prewarm to bazel-gate.sh's skip/aggregate logic or to another
-// job's `needs:`) reliably fails the corresponding test here. See this
-// task's notes file for the transcript.
+// reverting the fix it pins reliably fails the corresponding test here. See
+// this task's notes file for the transcript.
 
-// TestRBEPrewarmIfOnlyRemoteAndForkRW runs the job's real, pinned `if:`
-// expression (bazelRBEPrewarmIf, via the shared evalGHExpr from
+// TestRBEPrewarmIfOnlyRemote runs the job's real, pinned `if:` expression
+// (bazelRBEPrewarmIf, via the shared evalGHExpr from
 // ci_blacksmith_runner_test.go, not a hand-written mirror) against every mode
-// the rbe job can produce. Only remote and fork-rw must schedule the job:
-// fork-ro targets rbe-west's separate, uncached "oss-fork" instance (never
-// served by rbe-worker-pool.yml), and cache/local/skip mean nothing to
-// pre-warm. fork-rw is deliberately included - a trusted fork author's PR,
-// per rbe-fork-mint's tier decision, not just bazel-farm.yml's
-// pull_request_target path - and a fork or Dependabot pull_request is exactly
-// how that mode is reached, so this doubles as the fork/Dependabot
-// reachability check the original spec asked for: such a run only matters
-// here through needs.rbe.outputs.mode, never through re-inspecting
-// github.actor or head.repo.fork in this job's own `if:` (that ban is
-// TestBazelRBEJobDecidesOnce's job).
-func TestRBEPrewarmIfOnlyRemoteAndForkRW(t *testing.T) {
+// the rbe job can produce. Only remote may schedule the job (B1 dropped
+// fork-rw: a fork or Dependabot pull_request run never carries a
+// workflow_call secret regardless of this if, and bazel-farm.yml - the other
+// path to a privileged fork tier - no longer forwards the app secrets
+// either, so fork-rw never had a credential to use).
+func TestRBEPrewarmIfOnlyRemote(t *testing.T) {
 	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelRBEPrewarmJobName)
 	if job.If != bazelRBEPrewarmIf {
 		t.Fatalf("rbe-prewarm if = %q, want the pinned %q", job.If, bazelRBEPrewarmIf)
@@ -50,7 +58,7 @@ func TestRBEPrewarmIfOnlyRemoteAndForkRW(t *testing.T) {
 		want bool
 	}{
 		{"remote", true},
-		{"fork-rw", true},
+		{"fork-rw", false},
 		{"fork-ro", false},
 		{"cache", false},
 		{"local", false},
@@ -63,6 +71,59 @@ func TestRBEPrewarmIfOnlyRemoteAndForkRW(t *testing.T) {
 		if ghTruthy(v) != tc.want {
 			t.Errorf("rbe-prewarm if, mode=%s: evaluated to %v, want %v", tc.mode, v, tc.want)
 		}
+	}
+}
+
+// TestRBEPrewarmNoCheckoutStep: B1's core fix. No step in this job may check
+// out the repository at all - the dispatch logic lives entirely in the
+// trusted workflow YAML's own `run:` block, never a file read from a
+// checked-out tree.
+func TestRBEPrewarmNoCheckoutStep(t *testing.T) {
+	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelRBEPrewarmJobName)
+	for _, step := range job.Steps {
+		if actionFamily(step.Uses) == "actions/checkout" {
+			t.Errorf("rbe-prewarm step %q checks out the repository; B1 (security review of bdef342d5) requires this job have no checkout at all", step.Name)
+		}
+	}
+}
+
+// TestRBEPrewarmNothingAfterMintTouchesARepoPath: even with no checkout step,
+// a future edit could add a step after the mint step that runs a local
+// composite action or a script path from the working directory while the
+// token (or, worse, the raw private key) is still in scope. This is exactly
+// the review's M2 mutation (an extra step running
+// `bash .github/scripts/evil.sh` with the token in env), which the pre-B1
+// suite did not catch. Pin: no step at or after the mint step's index may
+// use a local ("./...") action, and no such step's `run:` may reference a
+// repository-relative path.
+func TestRBEPrewarmNothingAfterMintTouchesARepoPath(t *testing.T) {
+	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelRBEPrewarmJobName)
+	mintIndex := -1
+	for i, step := range job.Steps {
+		if step.Name == "Mint gastownhall/gascity installation token" {
+			mintIndex = i
+			break
+		}
+	}
+	if mintIndex < 0 {
+		t.Fatalf("rbe-prewarm has no mint step named %q", "Mint gastownhall/gascity installation token")
+	}
+	repoPath := regexp.MustCompile(`(^|[^$.])\.(/|github/)|\bbash\s+\.`)
+	checked := 0
+	for i, step := range job.Steps {
+		if i < mintIndex {
+			continue
+		}
+		checked++
+		if strings.HasPrefix(step.Uses, "./") {
+			t.Errorf("rbe-prewarm step %q (index %d, at/after the mint step) uses a local action %q; nothing after the mint step may run repository code", step.Name, i, step.Uses)
+		}
+		if repoPath.MatchString(step.Run) {
+			t.Errorf("rbe-prewarm step %q (index %d, at/after the mint step) run: references a repository-relative path; nothing after the mint step may run repository code:\n%s", step.Name, i, step.Run)
+		}
+	}
+	if checked < 2 {
+		t.Fatalf("only %d step(s) at/after the mint step; expected at least the dispatch and record-result steps", checked)
 	}
 }
 
@@ -101,8 +162,9 @@ func TestRBEPrewarmNeverGatedOrNeeded(t *testing.T) {
 
 // TestRBEPrewarmNeverFailsTheRun: the job carries the one deliberate
 // continue-on-error in bazel.yml (every other occurrence is banned by
-// TestBazelWorkflowSecretsAndFailureSurface), and the dispatch script it
-// runs has no path that exits non-zero.
+// TestBazelWorkflowSecretsAndFailureSurface), and the dispatch step's own
+// inline script (job.step(...).Run: no separate file since B1) has no path
+// that exits non-zero.
 func TestRBEPrewarmNeverFailsTheRun(t *testing.T) {
 	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelRBEPrewarmJobName)
 	if !job.ContinueOnError {
@@ -114,18 +176,17 @@ func TestRBEPrewarmNeverFailsTheRun(t *testing.T) {
 		}
 	}
 
-	root := sourceRepoRoot(t)
-	script := readPolicyFile(t, root, filepath.Join(".github", "scripts", "rbe-prewarm.sh"))
+	script := job.step(t, "Pre-warm rbe-west OSS worker pool (gastownhall/gascity)").Run
 	if !strings.Contains(script, "set -u") || strings.Contains(script, "set -e") {
-		t.Errorf("rbe-prewarm.sh must run under set -u only (no set -e/pipefail): every gh/curl failure path is handled explicitly and must fall through to the trailing exit 0")
+		t.Errorf("the dispatch step must run under set -u only (no set -e/pipefail): every gh failure path is handled explicitly and must fall through to the trailing exit 0")
 	}
 	exits := regexp.MustCompile(`(?m)^\s*exit\s+(\S+)`).FindAllStringSubmatch(script, -1)
 	if len(exits) == 0 {
-		t.Fatalf("rbe-prewarm.sh has no exit statement; expected only exit 0")
+		t.Fatalf("the dispatch step has no exit statement; expected only exit 0")
 	}
 	for _, m := range exits {
 		if m[1] != "0" {
-			t.Errorf("rbe-prewarm.sh has %q; every exit must be exit 0 (best-effort by design)", strings.TrimSpace(m[0]))
+			t.Errorf("the dispatch step has %q; every exit must be exit 0 (best-effort by design)", strings.TrimSpace(m[0]))
 		}
 	}
 }
@@ -150,6 +211,57 @@ func TestRBEPrewarmSecretsOnlyInItsOwnJob(t *testing.T) {
 	})
 	if found == 0 {
 		t.Fatalf("found no secrets.RBE_POOL_APP_* reference in %s; the test fixture or the job moved", bazelWorkflowName)
+	}
+}
+
+// TestRBEPrewarmAppSecretsOnlyExpectedCallers: B1 (security review of
+// bdef342d5) requires the two bazel-allocator app secrets reach only
+// bazel.yml's rbe-prewarm job and the pass-through `secrets:` blocks of its
+// two same-repo/trusted callers (pr.yml, nightly.yml) - never
+// bazel-farm.yml, whose pull_request_target run executes an allowlisted
+// fork author's own PR code, and never any other workflow file.
+func TestRBEPrewarmAppSecretsOnlyExpectedCallers(t *testing.T) {
+	secretRef := regexp.MustCompile(`RBE_POOL_APP_(ID|PRIVATE_KEY)`)
+	root := sourceRepoRoot(t)
+	entries, err := os.ReadDir(filepath.Join(root, ".github", "workflows"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]int{}
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".yml") {
+			continue
+		}
+		name := entry.Name()
+		walkYAML(readYAMLNode(t, filepath.Join(".github", "workflows", name)), "", func(path string, key bool, value string) {
+			if key || !secretRef.MatchString(value) {
+				return
+			}
+			found[name]++
+			switch name {
+			case bazelWorkflowName:
+				if !strings.HasPrefix(path, ".jobs."+bazelRBEPrewarmJobName+".") {
+					t.Errorf("%s: %s references an rbe-prewarm app credential outside the job", name, path)
+				}
+			case "pr.yml", "nightly.yml":
+				if !strings.HasPrefix(path, ".jobs.bazel.secrets.") {
+					t.Errorf("%s: %s references an rbe-prewarm app credential outside the bazel.yml call's secrets pass-through", name, path)
+				}
+			default:
+				t.Errorf("%s: %s references an rbe-prewarm app credential; only bazel.yml, pr.yml and nightly.yml may (B1: bazel-farm.yml, and every other workflow, must not)", name, path)
+			}
+		})
+	}
+	if found[bazelWorkflowName] == 0 {
+		t.Fatalf("found no RBE_POOL_APP_* reference in %s; the job moved", bazelWorkflowName)
+	}
+	for _, caller := range []string{"pr.yml", "nightly.yml"} {
+		if found[caller] == 0 {
+			t.Errorf("found no RBE_POOL_APP_* reference in %s; expected its pass-through secrets block", caller)
+		}
+	}
+	if found[bazelFarmWorkflowName] != 0 {
+		t.Errorf("%s references an rbe-prewarm app credential %d time(s); B1 requires zero", bazelFarmWorkflowName, found[bazelFarmWorkflowName])
 	}
 }
 
@@ -211,13 +323,16 @@ func TestRBEPrewarmGatedOnAppSecret(t *testing.T) {
 	}
 }
 
-// TestRBEPrewarmDispatchTargetPinned: the script's three target constants are
-// literal (never a variable the caller or a repo var could redirect), and the
-// only gh workflow/run subcommands in the script reference them, never a
-// hardcoded alternative.
+// TestRBEPrewarmDispatchTargetPinned: the dispatch step's inline script
+// (job.step(...).Run - no separate file since B1) pins its three target
+// constants literally (never a variable the caller or a repo var could
+// redirect), and every gh workflow/run subcommand invocation is the exact,
+// literal command line this job is meant to issue - not just any line
+// mentioning $POOL_REPO (the pre-B1 version of this test accepted any line
+// containing "${args[@]}", which a mutation could redirect freely).
 func TestRBEPrewarmDispatchTargetPinned(t *testing.T) {
-	root := sourceRepoRoot(t)
-	script := readPolicyFile(t, root, filepath.Join(".github", "scripts", "rbe-prewarm.sh"))
+	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelRBEPrewarmJobName)
+	script := job.step(t, "Pre-warm rbe-west OSS worker pool (gastownhall/gascity)").Run
 
 	for _, want := range []string{
 		`POOL_REPO="gastownhall/gascity"`,
@@ -225,22 +340,29 @@ func TestRBEPrewarmDispatchTargetPinned(t *testing.T) {
 		`POOL_REF="main"`,
 	} {
 		if !strings.Contains(script, want) {
-			t.Errorf("rbe-prewarm.sh does not contain %q", want)
+			t.Errorf("dispatch step run: does not contain %q", want)
 		}
 	}
 
-	ghCalls := regexp.MustCompile(`(?m)^\s*(gh |args=\()`).FindAllString(script, -1)
-	if len(ghCalls) == 0 {
-		t.Fatalf("rbe-prewarm.sh has no gh invocation; the dispatch logic moved")
+	const wantRunListCmd = `gh run list -R "$POOL_REPO" --workflow "$POOL_WORKFLOW" --limit 50 \`
+	if !strings.Contains(script, wantRunListCmd) {
+		t.Errorf("dispatch step run: does not contain the exact run-list invocation %q", wantRunListCmd)
 	}
-	// Every gh run-list/workflow-run invocation must use $POOL_REPO and
-	// $POOL_WORKFLOW, never a literal repo or workflow file.
+	const wantDispatchCmd = `gh workflow run "$POOL_WORKFLOW" -R "$POOL_REPO" --ref "$POOL_REF"`
+	if !strings.Contains(script, wantDispatchCmd) {
+		t.Errorf("dispatch step run: does not contain the exact dispatch invocation %q", wantDispatchCmd)
+	}
+
+	// Every gh invocation line must use the three variables, never a literal
+	// repo, workflow file or ref.
 	ghLine := regexp.MustCompile(`(?m)^.*\bgh\b.*$`)
-	for _, line := range ghLine.FindAllString(script, -1) {
-		if strings.Contains(line, "run list") || strings.Contains(line, "workflow run") || strings.Contains(line, `args=(workflow`) {
-			if !strings.Contains(line, "POOL_REPO") && !strings.Contains(line, `"${args[@]}"`) {
-				t.Errorf("rbe-prewarm.sh gh invocation does not reference $POOL_REPO: %q", strings.TrimSpace(line))
-			}
+	lines := ghLine.FindAllString(script, -1)
+	if len(lines) == 0 {
+		t.Fatalf("dispatch step run: has no gh invocation; the dispatch logic moved")
+	}
+	for _, line := range lines {
+		if strings.Contains(line, "gastownhall/gascity") || strings.Contains(line, "rbe-worker-pool.yml") {
+			t.Errorf("dispatch step run: gh invocation hardcodes the target instead of using $POOL_REPO/$POOL_WORKFLOW: %q", strings.TrimSpace(line))
 		}
 	}
 }
@@ -260,7 +382,212 @@ func TestRBEPrewarmTokenIsGHToken(t *testing.T) {
 	}
 }
 
-// actionPin and readYAMLNode/walkYAML/evalGHExpr/ghTruthy/readCIWorkflow/
-// readPolicyFile/sourceRepoRoot are shared helpers already defined in
-// ci_workflow_test.go and ci_blacksmith_runner_test.go; this file adds no new
-// infrastructure of its own.
+// TestRBEPrewarmTokenOnlyInDispatchStep: steps.mint.outputs.token must
+// appear exactly once in the whole file, and only as the dispatch step's own
+// GH_TOKEN - never copied into another step's env, with:, or run:, which
+// would widen the token's exposure beyond the one step B1 requires.
+func TestRBEPrewarmTokenOnlyInDispatchStep(t *testing.T) {
+	const tokenRef = "steps.mint.outputs.token"
+	wantPath := ".jobs." + bazelRBEPrewarmJobName + ".steps[2].env.GH_TOKEN"
+	// Confirm the expected path actually names the dispatch step before
+	// using it as the sole allowed match, so a step-index change doesn't
+	// silently make this test vacuous.
+	if job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelRBEPrewarmJobName); len(job.Steps) < 3 || job.Steps[2].Name != "Pre-warm rbe-west OSS worker pool (gastownhall/gascity)" {
+		t.Fatalf("rbe-prewarm steps[2] is not the dispatch step; update wantPath in this test")
+	}
+	found := 0
+	walkYAML(readYAMLNode(t, filepath.Join(".github", "workflows", bazelWorkflowName)), "", func(path string, key bool, value string) {
+		if key || !strings.Contains(value, tokenRef) {
+			return
+		}
+		found++
+		if path != wantPath || value != "${{ "+tokenRef+" }}" {
+			t.Errorf("%s: %s = %q references the minted token; only %s may, as exactly %q", bazelWorkflowName, path, value, wantPath, "${{ "+tokenRef+" }}")
+		}
+	})
+	if found != 1 {
+		t.Errorf("%s: found %d references to %s, want exactly 1 (the dispatch step's GH_TOKEN)", bazelWorkflowName, found, tokenRef)
+	}
+}
+
+// TestRBEPrewarmDispatchScriptBehavior extracts the dispatch step's real,
+// pinned inline `run:` string from the parsed YAML (not a hand-maintained
+// copy) and executes it against a fake `gh` on PATH, covering the same
+// scenarios this job's script was hand-verified against before it was
+// inlined (see this task's notes file): an empty token, the
+// RBE_PREWARM_WORKERS=0 kill switch, the pool already at the desired size,
+// `gh run list` failing, and `gh workflow run` failing or succeeding. This
+// keeps the inline script under continuous test even though it is no longer
+// a standalone file shellcheck or a Go test can read directly by path.
+func TestRBEPrewarmDispatchScriptBehavior(t *testing.T) {
+	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelRBEPrewarmJobName)
+	script := job.step(t, "Pre-warm rbe-west OSS worker pool (gastownhall/gascity)").Run
+	if strings.TrimSpace(script) == "" {
+		t.Fatal("dispatch step has an empty run: body")
+	}
+
+	scriptPath := filepath.Join(t.TempDir(), "prewarm.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeGHDir := t.TempDir()
+	const fakeGH = `#!/usr/bin/env bash
+set -u
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+  printf '%s' "${FAKE_GH_RUN_LIST_OUTPUT:-}"
+  exit "${FAKE_GH_RUN_LIST_EXIT:-0}"
+fi
+if [ "$1" = "workflow" ] && [ "$2" = "run" ]; then
+  echo "$*" >> "${FAKE_GH_CALL_LOG:?}"
+  exit "${FAKE_GH_WORKFLOW_RUN_EXIT:-0}"
+fi
+echo "fake gh: unexpected invocation: $*" >&2
+exit 127
+`
+	if err := os.WriteFile(filepath.Join(fakeGHDir, "gh"), []byte(fakeGH), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		stdout string
+		calls  string
+		code   int
+	}
+	run := func(t *testing.T, env map[string]string) result {
+		t.Helper()
+		callLog := filepath.Join(t.TempDir(), "calls.log")
+		if err := os.WriteFile(callLog, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("bash", scriptPath)
+		// fakeGHDir first so it shadows any real gh on PATH; the rest of the
+		// inherited PATH stays so the fake gh's own "#!/usr/bin/env bash"
+		// shebang can still find env and bash.
+		cmd.Env = []string{"PATH=" + fakeGHDir + ":" + os.Getenv("PATH"), "FAKE_GH_CALL_LOG=" + callLog}
+		for k, v := range env {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+		out, err := cmd.CombinedOutput()
+		code := 0
+		if err != nil {
+			if ee, ok := err.(*exec.ExitError); ok {
+				code = ee.ExitCode()
+			} else {
+				t.Fatalf("run dispatch script: %v", err)
+			}
+		}
+		calls, readErr := os.ReadFile(callLog)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		return result{stdout: string(out), calls: string(calls), code: code}
+	}
+
+	t.Run("empty token warns and does not call gh", func(t *testing.T) {
+		r := run(t, map[string]string{"GH_TOKEN": ""})
+		if r.code != 0 {
+			t.Errorf("exit code = %d, want 0 (best-effort)", r.code)
+		}
+		if !strings.Contains(r.stdout, "::warning title=rbe-west pre-warm::no dispatch token") {
+			t.Errorf("stdout = %q, want the no-dispatch-token warning", r.stdout)
+		}
+		if r.calls != "" {
+			t.Errorf("calls = %q, want no gh workflow run calls", r.calls)
+		}
+	})
+
+	t.Run("RBE_PREWARM_WORKERS=0 is the kill switch", func(t *testing.T) {
+		r := run(t, map[string]string{"GH_TOKEN": "tok", "RBE_PREWARM_WORKERS": "0"})
+		if r.code != 0 {
+			t.Errorf("exit code = %d, want 0", r.code)
+		}
+		if !strings.Contains(r.stdout, "RBE_PREWARM_WORKERS=0: rbe-west pre-warm disabled (kill switch)") {
+			t.Errorf("stdout = %q, want the kill-switch message", r.stdout)
+		}
+		if r.calls != "" {
+			t.Errorf("calls = %q, want no gh workflow run calls", r.calls)
+		}
+	})
+
+	t.Run("already at desired count dispatches nothing", func(t *testing.T) {
+		r := run(t, map[string]string{
+			"GH_TOKEN":                "tok",
+			"FAKE_GH_RUN_LIST_OUTPUT": "1",
+		})
+		if r.code != 0 {
+			t.Errorf("exit code = %d, want 0", r.code)
+		}
+		if !strings.Contains(r.stdout, "already active") {
+			t.Errorf("stdout = %q, want an already-active message", r.stdout)
+		}
+		if r.calls != "" {
+			t.Errorf("calls = %q, want no gh workflow run calls", r.calls)
+		}
+	})
+
+	t.Run("gh run list failure skips the dispatch", func(t *testing.T) {
+		r := run(t, map[string]string{
+			"GH_TOKEN":                "tok",
+			"FAKE_GH_RUN_LIST_EXIT":   "1",
+			"FAKE_GH_RUN_LIST_OUTPUT": "",
+		})
+		if r.code != 0 {
+			t.Errorf("exit code = %d, want 0", r.code)
+		}
+		if !strings.Contains(r.stdout, "::warning title=rbe-west pre-warm::could not read") {
+			t.Errorf("stdout = %q, want the could-not-read warning", r.stdout)
+		}
+		if r.calls != "" {
+			t.Errorf("calls = %q, want no gh workflow run calls", r.calls)
+		}
+	})
+
+	t.Run("gh workflow run failure warns but still exits 0", func(t *testing.T) {
+		r := run(t, map[string]string{
+			"GH_TOKEN":                  "tok",
+			"RBE_PREWARM_WORKERS":       "1",
+			"FAKE_GH_RUN_LIST_OUTPUT":   "0",
+			"FAKE_GH_WORKFLOW_RUN_EXIT": "1",
+		})
+		if r.code != 0 {
+			t.Errorf("exit code = %d, want 0", r.code)
+		}
+		if !strings.Contains(r.stdout, "::warning title=rbe-west pre-warm::gh workflow run rbe-worker-pool.yml -R gastownhall/gascity failed (attempt 1/1)") {
+			t.Errorf("stdout = %q, want the dispatch-failed warning", r.stdout)
+		}
+		if !strings.Contains(r.stdout, "dispatched 0/1") {
+			t.Errorf("stdout = %q, want a dispatched 0/1 summary", r.stdout)
+		}
+		if strings.Count(r.calls, "\n") != 1 {
+			t.Errorf("calls = %q, want exactly one attempted gh workflow run invocation", r.calls)
+		}
+	})
+
+	t.Run("dispatches the missing count and reports it", func(t *testing.T) {
+		r := run(t, map[string]string{
+			"GH_TOKEN":                "tok",
+			"RBE_PREWARM_WORKERS":     "2",
+			"FAKE_GH_RUN_LIST_OUTPUT": "0",
+		})
+		if r.code != 0 {
+			t.Errorf("exit code = %d, want 0", r.code)
+		}
+		if !strings.Contains(r.stdout, "dispatched 2/2 gastownhall/gascity/rbe-worker-pool.yml worker(s) (active before: 0, want: 2)") {
+			t.Errorf("stdout = %q, want the dispatched-2/2 summary", r.stdout)
+		}
+		if strings.Count(r.calls, "\n") != 2 {
+			t.Errorf("calls = %q, want exactly two gh workflow run invocations", r.calls)
+		}
+		for _, line := range strings.Split(strings.TrimRight(r.calls, "\n"), "\n") {
+			if strings.TrimSpace(line) != `workflow run rbe-worker-pool.yml -R gastownhall/gascity --ref main` {
+				t.Errorf("call line = %q, want the exact pinned dispatch invocation", line)
+			}
+		}
+	})
+}
+
+// actionPin, actionFamily and readYAMLNode/walkYAML/evalGHExpr/ghTruthy/
+// readCIWorkflow/readPolicyFile/sourceRepoRoot are shared helpers already
+// defined in ci_workflow_test.go and ci_blacksmith_runner_test.go; this file
+// adds no new infrastructure of its own.

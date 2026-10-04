@@ -93,8 +93,12 @@
 # workflow_dispatch with rbe=cache simulates a fork run; rbe=off also drops
 # the cache. The decision is also a workflow_call output (rbe-mode,
 # rbe-enabled), so pr.yml's gate can tell an expected skip from a missing
-# lane without re-deriving it. Callers pass exactly the four RBE secrets
-# below, never `secrets: inherit`.
+# lane without re-deriving it. Callers pass secrets explicitly, never
+# `secrets: inherit`: pr.yml and nightly.yml pass all six declared secrets
+# (the four RBE ones plus rbe-prewarm's two bazel-allocator app secrets);
+# bazel-farm.yml passes only the four RBE secrets (its pull_request_target
+# run never gets the app credential - see "rbe-west Pre-warm" below and B1
+# in this task's security review).
 #
 # Accepted risk (same model as gascity's bazel-test.yml): on push, merge_group
 # and same-repo pull_request runs, code from the PR head runs with the RBE
@@ -112,16 +116,32 @@
 # own instead, worth what their run gets anyway (remote execution under the
 # farm's quotas, AC_OSS reads, hash-verified CAS uploads; no action-cache
 # writes) for about two hours: anyone who copies it from the run gets no
-# more than the PR's author already has. In place: secrets are referenced by the setup step
-# alone (plus the rbe job's emptiness test of RBE_WEST_EXECUTOR, which yields
-# a boolean) and never by a workflow- or job-level env (policy-tested), decoded key
-# material is masked in logs, and CI uploads only remotely executed results
-# (--noremote_upload_local_results in .bazelrc's remote-exec config and in
-# the generated rc), and the certificate
+# more than the PR's author already has. In place: the four RBE secrets are
+# referenced by the setup-bazel step alone (plus the rbe job's emptiness test
+# of RBE_WEST_EXECUTOR, and rbe-prewarm's own has-app/mint steps for the two
+# app secrets, below), never by a workflow- or job-level env (policy-tested),
+# decoded key material is masked in logs, and CI uploads only remotely
+# executed results (--noremote_upload_local_results in .bazelrc's
+# remote-exec config and in the generated rc), and the certificate
 # is issued to beads CI alone, so it can be revoked without affecting other
 # clients. Maintainers decided (2026-09-28) that same-repo PRs keep remote
 # execution under this model. Still open: a beads-only RBE_INSTANCE. The farm
 # refuses client action-cache writes (only its workers write; rbe-west D2).
+#
+# Accepted risk, rbe-prewarm's credential (see "rbe-west Pre-warm",
+# engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, and B1 in this task's security
+# review): the bazel-allocator private key is shared with gascity's own
+# rbe-west scaler (a deliberate, user-approved reuse, not a beads-only
+# credential), so same-repo pull_request, merge_group, push and nightly.yml
+# runs - the only contexts that ever receive RBE_POOL_APP_PRIVATE_KEY - each
+# reach that shared key for the duration of the mint step alone (nothing
+# executes from the checked-out repository tree while it, or the token it
+# produces, is in scope: see the rbe-prewarm job below). Unlike the RBE
+# client certificate above, this key cannot be rotated or revoked for beads
+# alone without also breaking gascity's scaler; the kill switch
+# (RBE_POOL_APP_PRIVATE_KEY unset, or RBE_PREWARM_WORKERS=0) disables
+# pre-warming without touching the key itself, so it is the first response to
+# a suspected leak, not a rotation.
 # In pr.yml's run the bd artifact is bazel-ci-build-artifacts, so it cannot
 # collide with the build-artifacts job's ci-build-artifacts. F3: the package
 # gates no longer consume this artifact (they build their own bd); it is
@@ -240,11 +260,18 @@ on:
       # rbe-prewarm only (never read by setup-bazel or the rbe job): the
       # "bazel-allocator" GitHub App's id and private key. The app is
       # installed on gastownhall/gascity alone with Actions (read/write) and
-      # Metadata (read) permissions, nothing else; rbe-prewarm mints a
-      # short-lived installation token from these two and never sees a
-      # long-lived credential. Unset (either one empty) disables
-      # pre-warming. See engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "rbe-west
-      # Pre-warm".
+      # Metadata (read) permissions, nothing else; rbe-prewarm's mint step
+      # reads the private key directly (it IS a long-lived credential, held
+      # in the runner's memory for that one step) to produce a short-lived
+      # installation token, which is all any later step ever sees. Unset
+      # (either one empty) disables pre-warming. Declared here so fork-rw
+      # could in principle request them, but no caller ever does: pr.yml and
+      # nightly.yml pass them straight through (both are same-repo/trusted
+      # triggers only); bazel-farm.yml's pull_request_target call does not,
+      # so no pre-warm credential ever reaches a fork-authored run (B1,
+      # security review of bdef342d5 - accepted risk is same-repo runs
+      # reaching the shared gascity scaler key, not forks). See
+      # engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "rbe-west Pre-warm".
       RBE_POOL_APP_ID:
         required: false
       RBE_POOL_APP_PRIVATE_KEY:
@@ -432,7 +459,16 @@ jobs:
   rbe-prewarm:
     name: pre-warm rbe-west pool
     needs: rbe
-    if: ${{ needs.rbe.outputs.mode == 'remote' || needs.rbe.outputs.mode == 'fork-rw' }}
+    # Only mode remote (B1, security review of bdef342d5: was remote or
+    # fork-rw). fork-rw is reached only by a fork or Dependabot
+    # pull_request run, which GitHub never hands a workflow_call secret
+    # regardless of this job's `if:`, so that half of the old condition
+    # always found no-app and no-op'd; bazel-farm.yml (the one caller with a
+    # distinct pull_request_target trust tier that could otherwise have
+    # reached fork-rw with secrets attached) no longer forwards the app
+    # secrets either, below. See "rbe-west Pre-warm",
+    # engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md.
+    if: ${{ needs.rbe.outputs.mode == 'remote' }}
     runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 5
     # Job-level, not step-level: the only continue-on-error in this workflow
@@ -447,18 +483,15 @@ jobs:
     outputs:
       result: ${{ steps.result.outputs.result }}
     steps:
-      # Only the dispatch script, never the rest of the PR (same pinned-ref
-      # and allow-unsafe-pr-checkout pattern as every other job; see the
-      # header). No token on disk: persist-credentials is false.
-      - name: Checkout the pre-warm script
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.checkout-sha }}
-          persist-credentials: false
-          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
-          sparse-checkout: |
-            .github/scripts/rbe-prewarm.sh
-          sparse-checkout-cone-mode: false
+      # No checkout in this job (B1, security review of bdef342d5; policy-
+      # tested that it has none): a step that checked out PR-head content
+      # and then ran a script from that tree while this job's credential was
+      # live would let that content - or any same-repo branch push, since
+      # editing a .github/scripts/*.sh file does not trip the org's
+      # workflow-file approval gate the way editing this YAML does - read
+      # the shared gascity scaler key. The dispatch logic therefore lives
+      # entirely in this trusted workflow definition's own `run:` below,
+      # never a checked-out file.
 
       # Same env-boolean pattern as the rbe job's HAS_EXECUTOR: the secret is
       # tested for emptiness, never referenced in an `if:` directly, and the
@@ -474,9 +507,12 @@ jobs:
       # GitHub App (installed on gastownhall/gascity only, Actions
       # read/write + Metadata read): skipped entirely while the app secrets
       # are not provisioned, leaving steps.mint.outputs.token empty, which
-      # the dispatch step and script below treat the same as any other
-      # missing-token case (::warning::, exit 0). permission-actions narrows
-      # the minted token to Actions even if the app is ever granted more.
+      # the dispatch step below treats the same as any other missing-token
+      # case (::warning::, exit 0). permission-actions narrows the minted
+      # token to Actions even if the app is ever granted more. This is the
+      # only step that ever reads the long-lived private key directly
+      # (below); every step after it sees at most the short-lived token this
+      # one produces.
       - name: Mint gastownhall/gascity installation token
         id: mint
         if: ${{ steps.has-app.outputs.has-app == 'true' }}
@@ -488,17 +524,78 @@ jobs:
           repositories: gascity
           permission-actions: write
 
+      # Inlined rather than checked out and run from a script file (B1
+      # above): every byte this step executes comes from this workflow
+      # definition, which pull_request_target always loads from the base
+      # branch and which editing suppresses pull_request runs under the
+      # org's approval policy (see the header). steps.mint.outputs.token
+      # appears nowhere else in this file (policy-tested): this is the only
+      # step with the credential in its environment, and no step after it
+      # touches a repository path or runs a local composite action.
       - name: Pre-warm rbe-west OSS worker pool (gastownhall/gascity)
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
           RBE_PREWARM_WORKERS: ${{ vars.RBE_PREWARM_WORKERS }}
-        run: bash .github/scripts/rbe-prewarm.sh
+        run: |
+          set -u
+
+          POOL_REPO="gastownhall/gascity"
+          POOL_WORKFLOW="rbe-worker-pool.yml"
+          POOL_REF="main"
+
+          n="${RBE_PREWARM_WORKERS:-1}"
+          case "$n" in
+            '') n=1 ;;
+            *[!0-9]*) n=1 ;;
+          esac
+          if [ "$n" -gt 4 ]; then
+            n=4
+          fi
+
+          if [ "$n" -le 0 ]; then
+            echo "RBE_PREWARM_WORKERS=0: rbe-west pre-warm disabled (kill switch)"
+            exit 0
+          fi
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning title=rbe-west pre-warm::no dispatch token (bazel-allocator app not provisioned, or the mint step failed); skipping"
+            exit 0
+          fi
+
+          active="$(gh run list -R "$POOL_REPO" --workflow "$POOL_WORKFLOW" --limit 50 \
+            --json status --jq '[.[] | select(.status != "completed")] | length' 2>/dev/null)"
+          case "$active" in
+            '' | *[!0-9]*)
+              echo "::warning title=rbe-west pre-warm::could not read $POOL_REPO/$POOL_WORKFLOW run status; skipping dispatch"
+              exit 0
+              ;;
+          esac
+
+          missing=$((n - active))
+          if [ "$missing" -le 0 ]; then
+            echo "${active} $POOL_REPO/$POOL_WORKFLOW worker(s) already active (want ${n}); nothing to dispatch"
+            exit 0
+          fi
+
+          dispatched=0
+          i=1
+          while [ "$i" -le "$missing" ]; do
+            if gh workflow run "$POOL_WORKFLOW" -R "$POOL_REPO" --ref "$POOL_REF"; then
+              dispatched=$((dispatched + 1))
+            else
+              echo "::warning title=rbe-west pre-warm::gh workflow run $POOL_WORKFLOW -R $POOL_REPO failed (attempt $i/$missing)"
+            fi
+            i=$((i + 1))
+          done
+
+          echo "dispatched ${dispatched}/${missing} $POOL_REPO/$POOL_WORKFLOW worker(s) (active before: ${active}, want: ${n})"
+          exit 0
 
       # Every lane reports its job.status from an always() last step
-      # (TestBazelLaneIsGatedAlongsideLegacy). The script above always exits
-      # 0, so this normally reads success regardless of what it found; the
-      # job-level continue-on-error above is the backstop for a step that
-      # fails outside the script (checkout, the mint action).
+      # (TestBazelLaneIsGatedAlongsideLegacy). The dispatch step above always
+      # exits 0, so this normally reads success regardless of what it found;
+      # the job-level continue-on-error above is the backstop for a step
+      # that fails outside it (the mint action).
       - name: Record result
         id: result
         if: ${{ always() }}
