@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/hooks"
@@ -21,6 +22,28 @@ type stubChainStore struct {
 
 func (s *stubChainStore) ActiveDatabaseSize(context.Context) (int64, error) {
 	return s.databaseSize, nil
+}
+
+// stubPrefixChainStore is a concrete store that DOES implement the optional
+// prefix-read capability, standing in for DoltStore/EmbeddedDoltStore in the
+// discovery test below. It records the prefixes it was asked for, and counts
+// full reads, so the test can prove the call reached the raw store's fast path
+// rather than a fallback. The full read returns the same rows the prefix read
+// would, as the real stores do, so only those counters can tell the arms apart.
+type stubPrefixChainStore struct {
+	stubChainStore
+	prefixReads []string
+	fullReads   int
+}
+
+func (s *stubPrefixChainStore) GetConfigByPrefix(_ context.Context, prefix string) (map[string]string, error) {
+	s.prefixReads = append(s.prefixReads, prefix)
+	return map[string]string{prefix + "one": "1"}, nil
+}
+
+func (s *stubPrefixChainStore) GetAllConfig(context.Context) (map[string]string, error) {
+	s.fullReads++
+	return map[string]string{"kv.mail.one": "1"}, nil
 }
 
 // clearTelemetryEnv is defined once for the package, in
@@ -106,6 +129,81 @@ func TestGCStoreSizeUnwrapsStorageDecorators(t *testing.T) {
 
 	if got := storeSizeBytesForStore(t.Context(), wrapped); got != 99 {
 		t.Fatalf("storeSizeBytesForStore = %d, want 99", got)
+	}
+}
+
+// TestKVPrefixReaderUnwrapsStorageDecorators pins the read behind
+// `bd kv list --prefix`. That flag reads only the rows under a prefix when the
+// store offers the optional GetConfigByPrefix capability, and falls back to a
+// full GetAllConfig scan when it does not — a fallback that returns identical
+// rows, so a discovery miss produces no error, no log, and no failing test
+// while costing exactly the full-table serialization the flag exists to avoid.
+// Every decorator wireStorageDecorators installs embeds the
+// storage.DoltStorage interface, which does not declare GetConfigByPrefix, so
+// discovery only works if it peels. Covers every chain configuration, and
+// drives readKVListConfig, the read the command performs, so a bare assertion
+// on that path fails here rather than only one inside the discovery helper.
+func TestKVPrefixReaderUnwrapsStorageDecorators(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		telemetryOn   bool
+		hooksDisabled bool
+	}{
+		{name: "TelemetryOff_HookOn"},
+		{name: "TelemetryOn_HookOn", telemetryOn: true},
+		{name: "TelemetryOff_HookDisabled", hooksDisabled: true},
+		{name: "TelemetryOn_HookDisabled", telemetryOn: true, hooksDisabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearTelemetryEnv(t)
+			if tc.telemetryOn {
+				t.Setenv("BD_OTEL_STDOUT", "true")
+			}
+			raw := &stubPrefixChainStore{}
+			wrapped := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), tc.hooksDisabled)
+
+			got, err := readKVListConfig(t.Context(), wrapped, "mail.")
+			if err != nil {
+				t.Fatalf("readKVListConfig: %v", err)
+			}
+			if raw.fullReads != 0 {
+				t.Fatalf("prefix read fell back to %d full GetAllConfig scan(s) through the wired chain (%T); kv list --prefix would silently full-scan", raw.fullReads, wrapped)
+			}
+			if want := []string{"kv.mail."}; !reflect.DeepEqual(raw.prefixReads, want) {
+				t.Errorf("raw store prefix reads = %v; want %v — the read never reached the concrete store", raw.prefixReads, want)
+			}
+			if want := (map[string]string{"kv.mail.one": "1"}); !reflect.DeepEqual(got, want) {
+				t.Errorf("readKVListConfig = %v; want %v", got, want)
+			}
+		})
+	}
+}
+
+// TestKVPrefixReaderAbsentCapabilityFallsBack keeps the test above honest:
+// discovery must report a store that lacks the capability as incapable, so the
+// caller takes the GetAllConfig fallback. The telemetry-on case also pins the
+// deliberate choice of peel-to-raw over peel-until-implements —
+// InstrumentedStorage does implement GetConfigByPrefix, and we peel past it,
+// trading the storage span on prefix reads for the repo's standard UnwrapStore
+// idiom. Flipping that trade should have to flip this assertion.
+func TestKVPrefixReaderAbsentCapabilityFallsBack(t *testing.T) {
+	for _, telemetryOn := range []bool{false, true} {
+		name := "TelemetryOff"
+		if telemetryOn {
+			name = "TelemetryOn"
+		}
+		t.Run(name, func(t *testing.T) {
+			clearTelemetryEnv(t)
+			if telemetryOn {
+				t.Setenv("BD_OTEL_STDOUT", "true")
+			}
+			raw := &stubChainStore{}
+			wrapped := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+
+			if _, ok := configPrefixReaderFor(wrapped); ok {
+				t.Errorf("store without GetConfigByPrefix reported as prefix-capable through %T", wrapped)
+			}
+		})
 	}
 }
 

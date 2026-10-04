@@ -72,6 +72,7 @@ go_test(
     embed = [":telemetry"],
     deps = [
         "//internal/storage",
+        "//internal/storage/domain",
         "//internal/storage/externaldeps",
         "//issueops",
         "//memoryops",

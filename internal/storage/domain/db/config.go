@@ -129,22 +129,15 @@ func (r *configSQLRepositoryImpl) GetAllConfig(ctx context.Context) (map[string]
 // GetConfigByPrefix retrieves only the config rows whose key starts with
 // prefix, pushing the filter into SQL (domain.ConfigPrefixReader — the
 // optional fast path `bd kv list --prefix` discovers by assertion).
+//
+// Like the dolt and embeddeddolt stores it delegates to issueops rather than
+// re-running the query itself (Runner satisfies issueops.DBTX): query and row
+// scan belong together, and they were already sharing ConfigPrefixLikeQuery
+// across two scan loops — the drift the shared helper exists to prevent.
 func (r *configSQLRepositoryImpl) GetConfigByPrefix(ctx context.Context, prefix string) (map[string]string, error) {
-	rows, err := r.runner.QueryContext(ctx, issueops.ConfigPrefixLikeQuery, issueops.ConfigPrefixPattern(prefix))
+	out, err := issueops.GetConfigByPrefixInTx(ctx, r.runner, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("db: GetConfigByPrefix %s: %w", prefix, err)
-	}
-	defer rows.Close()
-	out := make(map[string]string)
-	for rows.Next() {
-		var k, v string
-		if err := rows.Scan(&k, &v); err != nil {
-			return nil, fmt.Errorf("db: GetConfigByPrefix %s: scan: %w", prefix, err)
-		}
-		out[k] = v
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("db: GetConfigByPrefix %s: read: %w", prefix, err)
 	}
 	return out, nil
 }
