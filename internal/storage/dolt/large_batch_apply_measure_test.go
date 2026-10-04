@@ -109,10 +109,12 @@ var largeBatchApplyDoltShapes = []struct {
 // TestLargeBatchApplyStatementCounts_Dolt pins the ACTUAL number of SQL
 // statements issueops.ApplyBatchInTx issues on the Dolt server (TCP)
 // backend, for each of three measured shapes. Sibling regression baseline to
-// TestLargeBatchApplyStatementCounts_Embedded in the embeddeddolt package —
-// see that test's doc comment for why counts are pinned with a small
-// tolerance rather than exactly, and why a drift beyond it should be
-// re-measured and re-pinned deliberately rather than loosened further.
+// TestLargeBatchApplyStatementCounts{356,712,Classic40}_Embedded in the
+// embeddeddolt package (originally one test, split for CI shard balance;
+// see its doc comment) — see that test's doc comment for why counts are
+// pinned with a small tolerance rather than exactly, and why a drift beyond
+// it should be re-measured and re-pinned deliberately rather than loosened
+// further.
 func TestLargeBatchApplyStatementCounts_Dolt(t *testing.T) {
 	ctx := context.Background()
 

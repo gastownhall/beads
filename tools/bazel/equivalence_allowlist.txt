@@ -38,6 +38,8 @@ scripts TestBazelGatedLanesNeverRetryFlakyTests skip  # reads every BUILD and .b
 scripts TestCheckShardCoverageScript skip  # runs tools/bazel/check_shard_coverage.py, not in the runfiles; runs under go test
 scripts TestShardScriptsListOnlyRealTests skip  # runs the real .github/scripts shard scripts over the source tree; runs under go test
 scripts TestProxiedShardManifestGeneratorNotStale skip  # runs scripts/ci/gen_proxied_shard_manifest.py --check, not in the runfiles; runs under go test
+scripts TestCmdEmbeddedShardManifestGeneratorNotStale skip  # runs scripts/ci/gen_embedded_cmd_shard_manifest.py --check, not in the runfiles; runs under go test
+scripts TestStorageEmbeddedShardManifestGeneratorNotStale skip  # runs scripts/ci/gen_embedded_storage_shard_manifest.py --check, not in the runfiles; runs under go test
 scripts TestShardScriptNarrowingCheck skip  # reads the real .github/scripts shard scripts; runs under go test
 scripts TestBazelOnlySkipsAreAllowlisted skip  # parses every _test.go file in the checkout; runs under go test
 scripts TestRunAllowlistedGoTestsScript skip  # runs tools/bazel/run_allowlisted_go_tests.py, not in the runfiles; runs under go test

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // The regression tests for be-gx8.
@@ -174,8 +176,21 @@ func withPatchComponent(version string) string {
 	return version
 }
 
+// testGo returns the go the test runs and puts it first on PATH for the
+// scripts it starts. Under Bazel that is the registered Go SDK (BUILD data,
+// BEADS_TEST_GO), which is go.mod's toolchain: the go of the executor's PATH
+// may be another release, and resolving go.mod's toolchain through it
+// downloads one, which fails where actions have no network.
 func testGo(t *testing.T) string {
 	t.Helper()
+	if bazeltest.IsBazel() {
+		path, err := bazeltest.RunfileEnv("BEADS_TEST_GO")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", filepath.Dir(path)+string(os.PathListSeparator)+os.Getenv("PATH"))
+		return path
+	}
 	path, err := exec.LookPath("go")
 	if err != nil {
 		t.Skipf("go is not on PATH: %v", err)

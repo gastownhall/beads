@@ -12,8 +12,9 @@ import (
 	"time"
 )
 
-// watchBannerWriter buffers a stream and signals every time the watch banner
-// is printed, so a test can wait for the Nth render instead of sleeping.
+// watchBannerWriter buffers a stream and signals every time new data lands,
+// so a test can wait for the Nth banner (waitForRender) or for a stream to go
+// idle (waitForQuiet) instead of sleeping.
 type watchBannerWriter struct {
 	mu      sync.Mutex
 	buf     bytes.Buffer
@@ -29,10 +30,13 @@ func (w *watchBannerWriter) Write(p []byte) (int, error) {
 	n, err := w.buf.Write(p)
 	if now := strings.Count(w.buf.String(), showWatchBanner); now > w.count {
 		w.count = now
-		select {
-		case w.renders <- now:
-		default:
-		}
+	}
+	// Ping on every write, not just a banner occurrence: waitForQuiet (used on
+	// the stdout stream, which never carries the banner) needs to know this
+	// buffer is still receiving data at all.
+	select {
+	case w.renders <- w.count:
+	default:
 	}
 	return n, err
 }
@@ -62,6 +66,44 @@ func (w *watchBannerWriter) waitForRender(want int, timeout time.Duration, exite
 			return w.count >= want
 		case <-deadline:
 			return false
+		}
+	}
+}
+
+// waitForQuiet blocks until no new data has arrived on this writer for idle,
+// or the process exits, or the overall timeout elapses.
+//
+// The stderr "Watching for changes..." banner is written right after
+// render() returns in the child process, but the test's stdout and stderr
+// buffers are each filled by their own goroutine copying an independent OS
+// pipe (see os/exec), so there is no happens-before relationship between
+// "the banner landed in our stderr buffer" and "the render's own bytes
+// landed in our stdout buffer". A render that prints several lines (the
+// proxied route's full issue view ends with an unconditional trailing
+// fmt.Println, written well after the earlier lines once dependency and
+// comment lookups finish) can still have bytes in flight on the stdout pipe
+// after the banner is already visible. Capturing a "no growth expected"
+// baseline right after the banner is therefore racy: the tail of the FIRST
+// render can land after the baseline is taken and look like unwanted growth.
+// Waiting for the stream to go idle confirms the render already signaled by
+// the banner has fully landed before anything measures growth from it.
+func (w *watchBannerWriter) waitForQuiet(idle, timeout time.Duration, exited <-chan struct{}) {
+	deadline := time.After(timeout)
+	timer := time.NewTimer(idle)
+	defer timer.Stop()
+	for {
+		select {
+		case <-w.renders:
+			if !timer.Stop() {
+				<-timer.C
+			}
+			timer.Reset(idle)
+		case <-timer.C:
+			return
+		case <-exited:
+			return
+		case <-deadline:
+			return
 		}
 	}
 }
@@ -171,6 +213,12 @@ func TestProxiedServerShowWatch(t *testing.T) {
 		if !stderr.waitForRender(1, 60*time.Second, exited) {
 			t.Fatalf("bd show --watch never started watching\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
 		}
+		// The banner only proves the render STARTED (it is printed right
+		// after render() returns, on an independent pipe from stdout); wait
+		// for stdout itself to go idle before trusting its length as a
+		// growth baseline, or the initial render's own trailing bytes can
+		// still be in flight and look like post-delete growth.
+		stdout.waitForQuiet(500*time.Millisecond, 10*time.Second, exited)
 		before := len(stdout.String())
 		bdProxiedDelete(t, bd, p.dir, issue.ID, "--force")
 
