@@ -248,6 +248,9 @@ func testMainInner(m *testing.M) int {
 	// command, so in-process runners can put the tree back between runs
 	// (resetCommandFlags).
 	snapshotCommandFlags(rootCmd)
+	// And undo what each in-process execution leaves in the process env and
+	// the storage-mode globals (installExecuteIsolation).
+	installExecuteIsolation()
 
 	// Enable test mode that forces accessor functions to use legacy globals.
 	// This ensures backward compatibility with tests that manipulate globals directly.

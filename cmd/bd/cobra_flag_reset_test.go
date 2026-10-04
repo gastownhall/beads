@@ -1,7 +1,9 @@
 package main
 
 import (
+	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -108,6 +110,82 @@ func resetCommandFlags(cmd *cobra.Command) {
 			_ = f.Value.(pflag.SliceValue).Replace(append([]string(nil), b.slice...))
 		}
 	})
+}
+
+// Every in-process execution of the bd command tree (the runners above, and
+// the many tests that call rootCmd.Execute directly) mutates process state
+// that nothing restores: PersistentPreRun exports the selected workspace as
+// BEADS_DIR and loads its .beads/.env, and records the workspace's storage
+// mode in serverMode/proxiedServerMode. Left behind, a since-deleted
+// fixture's BEADS_DIR sends a later test's workspace discovery to the wrong
+// place ("no active beads workspace found", "migration sidecar is
+// missing"), and a leaked proxiedServerMode routes later RunE-level tests
+// down the proxied path ("proxied-server UOW provider not initialized", a
+// nil-UOW panic in reopenProxiedResolve). installExecuteIsolation (called
+// once from TestMain) registers a cobra initializer/finalizer pair that
+// snapshots that state when an execution starts and puts it back when it
+// ends, whatever the outcome. Executions can overlap (parallel tests that
+// build their own commands): the outermost snapshot wins and is restored
+// when the last one finishes.
+var (
+	executeIsolationMu    sync.Mutex
+	executeIsolationDepth int
+	executeIsolationEnv   []string
+	executeIsolationModes [2]bool
+	executeIsolationOnce  sync.Once
+)
+
+func installExecuteIsolation() {
+	executeIsolationOnce.Do(func() {
+		cobra.OnInitialize(func() {
+			executeIsolationMu.Lock()
+			defer executeIsolationMu.Unlock()
+			if executeIsolationDepth == 0 {
+				executeIsolationEnv = os.Environ()
+				executeIsolationModes = [2]bool{serverMode, proxiedServerMode}
+			}
+			executeIsolationDepth++
+		})
+		cobra.OnFinalize(func() {
+			executeIsolationMu.Lock()
+			defer executeIsolationMu.Unlock()
+			if executeIsolationDepth == 0 {
+				return
+			}
+			executeIsolationDepth--
+			if executeIsolationDepth == 0 {
+				restoreProcessEnv(executeIsolationEnv)
+				serverMode, proxiedServerMode = executeIsolationModes[0], executeIsolationModes[1]
+			}
+		})
+	})
+}
+
+// restoreProcessEnv puts the process environment back to before, a prior
+// os.Environ(), touching only the keys that differ.
+func restoreProcessEnv(before []string) {
+	want := make(map[string]string, len(before))
+	for _, kv := range before {
+		if k, v, ok := strings.Cut(kv, "="); ok && k != "" {
+			want[k] = v
+		}
+	}
+	for _, kv := range os.Environ() {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || k == "" {
+			continue
+		}
+		if old, had := want[k]; !had {
+			_ = os.Unsetenv(k)
+		} else if old != v {
+			_ = os.Setenv(k, old)
+		}
+	}
+	for k, v := range want {
+		if _, ok := os.LookupEnv(k); !ok {
+			_ = os.Setenv(k, v)
+		}
+	}
 }
 
 // TestResetCommandFlagsRestoresEveryFlag sets every flag of the real bd

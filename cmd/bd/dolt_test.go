@@ -493,8 +493,7 @@ func TestDoltConfigEnvironmentOverrides(t *testing.T) {
 	// Only database, host, port, user support env overrides
 
 	t.Run("BEADS_DOLT_SERVER_DATABASE overrides", func(t *testing.T) {
-		os.Setenv("BEADS_DOLT_SERVER_DATABASE", "envdb")
-		defer os.Unsetenv("BEADS_DOLT_SERVER_DATABASE")
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "envdb")
 
 		if cfg.GetDoltDatabase() != "envdb" {
 			t.Errorf("expected env override to 'envdb', got %s", cfg.GetDoltDatabase())
@@ -502,8 +501,7 @@ func TestDoltConfigEnvironmentOverrides(t *testing.T) {
 	})
 
 	t.Run("BEADS_DOLT_SERVER_HOST overrides", func(t *testing.T) {
-		os.Setenv("BEADS_DOLT_SERVER_HOST", "envhost")
-		defer os.Unsetenv("BEADS_DOLT_SERVER_HOST")
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "envhost")
 
 		if cfg.GetDoltServerHost() != "envhost" {
 			t.Errorf("expected env override to 'envhost', got %s", cfg.GetDoltServerHost())
@@ -511,8 +509,7 @@ func TestDoltConfigEnvironmentOverrides(t *testing.T) {
 	})
 
 	t.Run("BEADS_DOLT_SERVER_PORT overrides", func(t *testing.T) {
-		os.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
-		defer os.Unsetenv("BEADS_DOLT_SERVER_PORT")
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
 
 		if cfg.GetDoltServerPort() != 9999 {
 			t.Errorf("expected env override to 9999, got %d", cfg.GetDoltServerPort())
@@ -520,8 +517,7 @@ func TestDoltConfigEnvironmentOverrides(t *testing.T) {
 	})
 
 	t.Run("BEADS_DOLT_SERVER_USER overrides", func(t *testing.T) {
-		os.Setenv("BEADS_DOLT_SERVER_USER", "envuser")
-		defer os.Unsetenv("BEADS_DOLT_SERVER_USER")
+		t.Setenv("BEADS_DOLT_SERVER_USER", "envuser")
 
 		if cfg.GetDoltServerUser() != "envuser" {
 			t.Errorf("expected env override to 'envuser', got %s", cfg.GetDoltServerUser())

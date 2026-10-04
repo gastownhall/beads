@@ -145,36 +145,11 @@ func createTempDirWithCleanup(t *testing.T) string {
 }
 
 // restoreEnvSnapshot puts the process environment back to before, a prior
-// os.Environ(), touching only the keys that differ. An in-process
-// rootCmd.Execute mutates the environment with raw os.Setenv and restores
-// nothing (PersistentPreRun exports the selected workspace as BEADS_DIR,
-// loads the workspace's .beads/.env, ...); left in place, the BEADS_DIR of a
-// since-deleted fixture makes every later test's workspace discovery report
-// "no active beads workspace found" (e.g. TestResolvedConfigRepoRoot).
-func restoreEnvSnapshot(before []string) {
-	want := make(map[string]string, len(before))
-	for _, kv := range before {
-		if k, v, ok := strings.Cut(kv, "="); ok && k != "" {
-			want[k] = v
-		}
-	}
-	for _, kv := range os.Environ() {
-		k, v, ok := strings.Cut(kv, "=")
-		if !ok || k == "" {
-			continue
-		}
-		if old, had := want[k]; !had {
-			_ = os.Unsetenv(k)
-		} else if old != v {
-			_ = os.Setenv(k, old)
-		}
-	}
-	for k, v := range want {
-		if _, ok := os.LookupEnv(k); !ok {
-			_ = os.Setenv(k, v)
-		}
-	}
-}
+// os.Environ(): an in-process rootCmd.Execute mutates the environment with
+// raw os.Setenv and restores nothing (see installExecuteIsolation, which now
+// does this for every execution; kept here so the runners do not depend on
+// TestMain having installed it).
+func restoreEnvSnapshot(before []string) { restoreProcessEnv(before) }
 
 // runBDInProcess runs bd commands in-process by calling rootCmd.Execute
 // This is ~10-20x faster than exec.Command because it avoids process spawn overhead
