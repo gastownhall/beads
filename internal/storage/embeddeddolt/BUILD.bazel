@@ -23,6 +23,7 @@ go_library(
         "dependency_editor.go",
         "detection.go",
         "edgereader.go",
+        "epoch_cas.go",
         "federation.go",
         "get_issue.go",
         "graph_counter.go",

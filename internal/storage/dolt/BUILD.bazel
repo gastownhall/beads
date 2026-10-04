@@ -26,6 +26,7 @@ go_library(
         "dependency_editor.go",
         "edgereader.go",
         "ephemeral_routing.go",
+        "epoch_cas.go",
         "errors.go",
         "events.go",
         "federation.go",
