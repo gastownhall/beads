@@ -66,7 +66,7 @@ func TestRetentionContract(t *testing.T) {
 // work's own runner (the *baseUOW/base.tx.Runner() pattern
 // expected_revision_contract_test.go's expectedRevisionUOWMutateOutside and
 // commenter_contract_test.go's SeedCommentAt both use), NOT through the
-// domain issue repository: EpochFixture's six hooks are store-singleton/
+// domain issue repository: EpochFixture's seven hooks are store-singleton/
 // administrative operations with no natural correspondence to
 // IssueUseCase's per-issue CRUD/notification semantics, so unlike
 // CompareAndSetVersion there is no domain/use-case method to route through
@@ -88,6 +88,15 @@ func TestEpochContract(t *testing.T) {
 	t.Run("EpochBumpVoidsOnlyAddressesOfVersionsNoLongerServed", func(t *testing.T) {
 		conformance.RunEpochBumpVoidsOnlyAddressesOfVersionsNoLongerServed(t, ctx, fixture)
 	})
+	t.Run("TokenSchemeChangeCarriesLiveAddressesAndOnlyThose", func(t *testing.T) {
+		conformance.RunTokenSchemeChangeCarriesLiveAddressesAndOnlyThose(t, ctx, fixture)
+	})
+	t.Run("ACarriedAddressKeepsResolvingAcrossLaterBumps", func(t *testing.T) {
+		conformance.RunACarriedAddressKeepsResolvingAcrossLaterBumps(t, ctx, fixture)
+	})
+	t.Run("ALostAddressStaysGoneAcrossASchemeChange", func(t *testing.T) {
+		conformance.RunALostAddressStaysGoneAcrossASchemeChange(t, ctx, fixture)
+	})
 }
 
 // newUOWEpochFixture wires this leg's UnitOfWorkProvider into the R20 epoch
@@ -106,12 +115,13 @@ func newUOWEpochFixture(t *testing.T, ctx context.Context, prefix string) confor
 		StillServes:       epochUOWStillServes(provider),
 		Resolve:           epochUOWResolve(provider),
 		CurrentAddressFor: epochUOWCurrentAddressFor(provider),
+		LoseVersion:       epochUOWLoseVersion(provider),
 	}
 }
 
 // epochUOWRunner recovers the *baseUOW a given attempt's UnitOfWork actually
 // is, the same type assertion expectedRevisionUOWMutateOutside makes: Tx.
-// Runner() is unexported outside this package and none of the six epoch
+// Runner() is unexported outside this package and none of the seven epoch
 // operations has a domain/use-case method to reach it through instead.
 func epochUOWRunner(uw UnitOfWork) (storeops.DBTX, error) {
 	base, ok := uw.(*baseUOW)
@@ -133,6 +143,11 @@ func epochUOWCurrentEpoch(provider UnitOfWorkProvider) func(ctx context.Context,
 	}
 }
 
+// epochUOWBumpEpoch chooses the bump by the typed trigger: only a
+// token-scheme-change bump carries live addresses to the new epoch, and the
+// other two triggers move the counter alone. The choice lives here, in the
+// contract-test translation layer, because the shared body has no switch on
+// the reason string.
 func epochUOWBumpEpoch(provider UnitOfWorkProvider) func(ctx context.Context, storeID string, trigger conformance.EpochBumpTrigger) (int, error) {
 	return func(ctx context.Context, storeID string, trigger conformance.EpochBumpTrigger) (int, error) {
 		return RunTxResult(ctx, provider, func(ctx context.Context, uw UnitOfWork) (int, string, error) {
@@ -140,7 +155,11 @@ func epochUOWBumpEpoch(provider UnitOfWorkProvider) func(ctx context.Context, st
 			if err != nil {
 				return 0, "", err
 			}
-			epoch, err := storeops.BumpEpochInTx(ctx, runner, storeID, trigger.String())
+			bump := storeops.BumpEpochInTx
+			if trigger == conformance.EpochBumpTriggerTokenSchemeChange {
+				bump = storeops.BumpEpochCarryingInTx
+			}
+			epoch, err := bump(ctx, runner, storeID, trigger.String())
 			if err != nil {
 				return 0, "", err
 			}
@@ -199,21 +218,32 @@ func epochUOWResolve(provider UnitOfWorkProvider) func(ctx context.Context, stor
 
 func epochUOWCurrentAddressFor(provider UnitOfWorkProvider) func(ctx context.Context, storeID string, oldAddress conformance.Address) (conformance.Address, error) {
 	return func(ctx context.Context, storeID string, oldAddress conformance.Address) (conformance.Address, error) {
-		address, err := RunTxResult(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, string, error) {
+		address, err := RunTxRead(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
 			runner, err := epochUOWRunner(uw)
 			if err != nil {
-				return "", "", err
+				return "", err
 			}
-			address, err := storeops.CurrentAddressForInTx(ctx, runner, storeID, string(oldAddress))
-			if err != nil {
-				return "", "", err
-			}
-			return address, fmt.Sprintf("bd: current address for %s (%s)", oldAddress, storeID), nil
+			return storeops.CurrentAddressForInTx(ctx, runner, storeID, string(oldAddress))
 		})
 		if err != nil {
 			return "", err
 		}
 		return conformance.Address(address), nil
+	}
+}
+
+func epochUOWLoseVersion(provider UnitOfWorkProvider) func(ctx context.Context, storeID string, address conformance.Address) error {
+	return func(ctx context.Context, storeID string, address conformance.Address) error {
+		return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+			runner, err := epochUOWRunner(uw)
+			if err != nil {
+				return "", err
+			}
+			if err := storeops.LoseVersionInTx(ctx, runner, storeID, string(address)); err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("bd: lose version %s for %s", address, storeID), nil
+		})
 	}
 }
 

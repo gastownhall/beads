@@ -62,8 +62,8 @@ func TestRetentionContract(t *testing.T) {
 // revision 9, this slice: be-x5jqd.4 / #6136) against the server-backed
 // store, which reaches internal/storage/issueops's epoch Tx functions
 // through this leg's own retrying write transaction or read transaction
-// (DoltStore.BumpEpoch/MintUnderEpoch/CurrentAddressFor and
-// DoltStore.CurrentEpoch/StillServes/Resolve) — see
+// (DoltStore.BumpEpoch/BumpEpochCarrying/MintUnderEpoch/LoseVersion and
+// DoltStore.CurrentEpoch/StillServes/Resolve/CurrentAddressFor) — see
 // internal/storage/dolt/epoch_cas.go.
 //
 // All three legs run that one shared body, so this is not an independent
@@ -78,6 +78,15 @@ func TestEpochContract(t *testing.T) {
 	})
 	t.Run("EpochBumpVoidsOnlyAddressesOfVersionsNoLongerServed", func(t *testing.T) {
 		conformance.RunEpochBumpVoidsOnlyAddressesOfVersionsNoLongerServed(t, ctx, fixture)
+	})
+	t.Run("TokenSchemeChangeCarriesLiveAddressesAndOnlyThose", func(t *testing.T) {
+		conformance.RunTokenSchemeChangeCarriesLiveAddressesAndOnlyThose(t, ctx, fixture)
+	})
+	t.Run("ACarriedAddressKeepsResolvingAcrossLaterBumps", func(t *testing.T) {
+		conformance.RunACarriedAddressKeepsResolvingAcrossLaterBumps(t, ctx, fixture)
+	})
+	t.Run("ALostAddressStaysGoneAcrossASchemeChange", func(t *testing.T) {
+		conformance.RunALostAddressStaysGoneAcrossASchemeChange(t, ctx, fixture)
 	})
 }
 
@@ -103,6 +112,7 @@ func newEpochDoltFixture(t *testing.T, prefix string) (conformance.EpochFixture,
 		StillServes:       epochDoltStillServes(store),
 		Resolve:           epochDoltResolve(store),
 		CurrentAddressFor: epochDoltCurrentAddressFor(store),
+		LoseVersion:       epochDoltLoseVersion(store),
 	}, ctx, stop
 }
 
@@ -112,8 +122,16 @@ func epochDoltCurrentEpoch(store *DoltStore) func(ctx context.Context, storeID s
 	}
 }
 
+// epochDoltBumpEpoch dispatches on the typed trigger: a token-scheme change is
+// the one bump that also carries every live address to the new epoch, and a
+// restore or destructive reinit advances only the counter. The dispatch lives
+// in this file, the translation boundary, because the shared body has no
+// switch on the reason string.
 func epochDoltBumpEpoch(store *DoltStore) func(ctx context.Context, storeID string, trigger conformance.EpochBumpTrigger) (int, error) {
 	return func(ctx context.Context, storeID string, trigger conformance.EpochBumpTrigger) (int, error) {
+		if trigger == conformance.EpochBumpTriggerTokenSchemeChange {
+			return store.BumpEpochCarrying(ctx, storeID, trigger.String())
+		}
 		return store.BumpEpoch(ctx, storeID, trigger.String())
 	}
 }
@@ -151,6 +169,12 @@ func epochDoltCurrentAddressFor(store *DoltStore) func(ctx context.Context, stor
 			return "", err
 		}
 		return conformance.Address(address), nil
+	}
+}
+
+func epochDoltLoseVersion(store *DoltStore) func(ctx context.Context, storeID string, address conformance.Address) error {
+	return func(ctx context.Context, storeID string, address conformance.Address) error {
+		return store.LoseVersion(ctx, storeID, string(address))
 	}
 }
 
