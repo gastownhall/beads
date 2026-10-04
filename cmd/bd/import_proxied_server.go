@@ -175,6 +175,7 @@ func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memorie
 	} else {
 		result.Skipped += len(staleSkippedIDs)
 		result.StaleSkippedIDs = append(result.StaleSkippedIDs, staleSkippedIDs...)
+		result.CommentEditsSkipped += changePlan.CommentEditsSkipped
 	}
 
 	return renderImportOutcome(result, source, dedupHits)

@@ -246,6 +246,7 @@ type importResultJSON struct {
 	IDs                 []string       `json:"ids,omitempty"`
 	UpdatedIssues       []ImportChange `json:"updated_issues,omitempty"`
 	TieKeptLocalIDs     []string       `json:"tie_kept_local_ids,omitempty"`
+	CommentEditsSkipped int            `json:"comment_edits_skipped,omitempty"`
 	StaleSkippedIDs     []string       `json:"stale_skipped_ids,omitempty"`
 	SkippedDependencies []string       `json:"skipped_dependencies,omitempty"`
 	DryRun              bool           `json:"dry_run,omitempty"`
@@ -510,6 +511,7 @@ func applyImportOutcome(result *importResultJSON, importResult *ImportResult) {
 	result.IDs = append(result.IDs, importResult.ImportedIDs...)
 	result.UpdatedIssues = append(result.UpdatedIssues, importResult.UpdatedIssues...)
 	result.TieKeptLocalIDs = append(result.TieKeptLocalIDs, importResult.TieKeptLocalIDs...)
+	result.CommentEditsSkipped += importResult.CommentEditsSkipped
 	result.StaleSkippedIDs = append(result.StaleSkippedIDs, importResult.StaleSkippedIDs...)
 }
 
@@ -568,6 +570,10 @@ func renderImportOutcome(result importResultJSON, source string, dedupHits int) 
 	if len(result.TieKeptLocalIDs) > 0 {
 		fmt.Fprintf(os.Stderr, "Kept local state for %d issue(s) with the same updated_at but different content (use --allow-stale to overwrite): %s\n",
 			len(result.TieKeptLocalIDs), strings.Join(result.TieKeptLocalIDs, ", "))
+	}
+	if result.CommentEditsSkipped > 0 {
+		fmt.Fprintf(os.Stderr, "Skipped %d comment edit(s) on issues whose local row is the same age or newer (use --allow-stale to overwrite)\n",
+			result.CommentEditsSkipped)
 	}
 	for _, skipped := range result.SkippedDependencies {
 		fmt.Fprintf(os.Stderr, "Skipped dependency: %s\n", skipped)

@@ -20,6 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd import` no longer fails with `Error 1062: duplicate primary key` when an
+  imported comment's id already exists with different content.** Incoming
+  comments were deduplicated by content and then inserted by id, so a JSONL
+  whose comment text had been edited aborted the import. Comments are now
+  matched by id: an identical comment is a no-op, a changed comment is
+  rewritten only when the issue row itself is (strictly newer, or
+  `--allow-stale`) and otherwise keeps the local text, and a new id is
+  inserted. A sub-second `updated_at` is compared as the `DATETIME(0)` column
+  stores it (rounded), so the issue row and its comments always get the same
+  verdict, and `bd import` reports comment edits it skipped on stale or tied
+  rows ("Skipped N comment edit(s) ... (use --allow-stale to overwrite)").
+
 - **`bd list` no longer silently drops all but the last repeated filter flag.**
   `--status`, `--state`, and `--id` were plain string flags, so
   `bd list --status open --status closed --status pinned` kept only `pinned` —

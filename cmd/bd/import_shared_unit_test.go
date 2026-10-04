@@ -889,3 +889,98 @@ func TestImportLeaseAlreadyReconciledComparesAtSecondGranularity(t *testing.T) {
 		t.Fatalf("a lease expiry one second apart is a different lease row")
 	}
 }
+
+// The pre-filter classifies a sub-second updated_at exactly as the write path
+// stores it: rounded into DATETIME(0) (issueops.NormalizeUpdatedAt), so +300ms
+// and -300ms tie, +700ms is newer, and -700ms is stale.
+func TestFilterStaleImportIssuesRoundsSubSecondLikeTheStore(t *testing.T) {
+	base := time.Date(2026, 6, 1, 13, 0, 0, 0, time.UTC)
+	ids := []string{"bd-p300", "bd-p700", "bd-m300", "bd-m700"}
+	offsets := []time.Duration{300 * time.Millisecond, 700 * time.Millisecond, -300 * time.Millisecond, -700 * time.Millisecond}
+	var incoming, local []*types.Issue
+	for i, id := range ids {
+		incoming = append(incoming, &types.Issue{ID: id, Title: "incoming", UpdatedAt: base.Add(offsets[i])})
+		local = append(local, &types.Issue{ID: id, Title: "local", UpdatedAt: base})
+	}
+	_, skippedIDs, plan, err := filterStaleImportIssues(context.Background(), &fakeImportIssueLookupStore{issues: local}, incoming)
+	if err != nil {
+		t.Fatalf("filterStaleImportIssues: %v", err)
+	}
+	if len(skippedIDs) != 1 || skippedIDs[0] != "bd-m700" {
+		t.Fatalf("skippedIDs = %v, want [bd-m700]", skippedIDs)
+	}
+	if len(plan.Updates) != 1 || plan.Updates[0].ID != "bd-p700" {
+		t.Fatalf("plan.Updates = %v, want [bd-p700]", plan.Updates)
+	}
+	if strings.Join(plan.TieKeptLocal, ",") != "bd-p300,bd-m300" {
+		t.Fatalf("plan.TieKeptLocal = %v, want [bd-p300 bd-m300]", plan.TieKeptLocal)
+	}
+}
+
+// A comment edit on a row whose stored issue row is kept (tie or stale) is
+// dropped by the write path, so the import counts it for the summary line.
+// Edits on a newer row, identical comments, new comment ids and a comment
+// with no created_at but the same text are not counted.
+func TestImportIssuesCoreCountsSkippedCommentEdits(t *testing.T) {
+	base := time.Date(2026, 6, 1, 13, 0, 0, 0, time.UTC)
+	commentAt := base.Add(-time.Hour)
+	row := func(id string, updatedAt time.Time, comments ...*types.Comment) *types.Issue {
+		return &types.Issue{ID: id, Title: "t", UpdatedAt: updatedAt, Comments: comments}
+	}
+	edit := func(issueID, text string, at time.Time) *types.Comment {
+		return &types.Comment{ID: "c-" + issueID, Author: "cat", Text: text, CreatedAt: at}
+	}
+	incoming := []*types.Issue{
+		row("bd-tie-edit", base, edit("bd-tie-edit", "edited", commentAt)),
+		row("bd-stale-edit", base.Add(-time.Hour), edit("bd-stale-edit", "edited", commentAt)),
+		row("bd-tie-moved", base, edit("bd-tie-moved", "original", commentAt.Add(time.Minute))),
+		row("bd-newer-edit", base.Add(time.Hour), edit("bd-newer-edit", "edited", commentAt)),
+		row("bd-tie-same", base, edit("bd-tie-same", "original", commentAt)),
+		row("bd-tie-new", base, &types.Comment{ID: "c-fresh", Author: "cat", Text: "new", CreatedAt: commentAt}),
+		row("bd-tie-unstamped", base, edit("bd-tie-unstamped", "original", time.Time{})),
+	}
+	var local []*types.Issue
+	comments := map[string][]*types.Comment{}
+	for _, issue := range incoming {
+		local = append(local, &types.Issue{ID: issue.ID, Title: "t", UpdatedAt: base})
+		comments[issue.ID] = []*types.Comment{{ID: "c-" + issue.ID, IssueID: issue.ID, Author: "cat", Text: "original", CreatedAt: commentAt}}
+	}
+	store := &fakeImportRelationStore{fakeImportIssueLookupStore: fakeImportIssueLookupStore{issues: local}, comments: comments}
+
+	result, err := importIssuesCore(context.Background(), "", store, incoming, ImportOptions{SkipPrefixValidation: true})
+	if err != nil {
+		t.Fatalf("importIssuesCore: %v", err)
+	}
+	if result.CommentEditsSkipped != 3 {
+		t.Fatalf("CommentEditsSkipped = %d, want 3 (tie edit, stale edit, tie created_at change)", result.CommentEditsSkipped)
+	}
+
+	// Every row stale: the early return still carries the count.
+	staleOnly := []*types.Issue{row("bd-stale-edit", base.Add(-time.Hour), edit("bd-stale-edit", "edited", commentAt))}
+	result, err = importIssuesCore(context.Background(), "", store, staleOnly, ImportOptions{SkipPrefixValidation: true})
+	if err != nil {
+		t.Fatalf("importIssuesCore (stale only): %v", err)
+	}
+	if result.CommentEditsSkipped != 1 || len(result.StaleSkippedIDs) != 1 {
+		t.Fatalf("stale only: CommentEditsSkipped = %d, StaleSkippedIDs = %v; want 1 and [bd-stale-edit]", result.CommentEditsSkipped, result.StaleSkippedIDs)
+	}
+
+	// --allow-stale applies every edit, so nothing is counted.
+	result, err = importIssuesCore(context.Background(), "", store, incoming, ImportOptions{SkipPrefixValidation: true, AllowStale: true})
+	if err != nil {
+		t.Fatalf("importIssuesCore (--allow-stale): %v", err)
+	}
+	if result.CommentEditsSkipped != 0 {
+		t.Fatalf("--allow-stale: CommentEditsSkipped = %d, want 0", result.CommentEditsSkipped)
+	}
+
+	// A store that cannot load comments reports nothing rather than guessing.
+	plain := &fakeImportIssueLookupStore{issues: local}
+	result, err = importIssuesCore(context.Background(), "", plain, incoming, ImportOptions{SkipPrefixValidation: true})
+	if err != nil {
+		t.Fatalf("importIssuesCore (no comment loader): %v", err)
+	}
+	if result.CommentEditsSkipped != 0 {
+		t.Fatalf("no comment loader: CommentEditsSkipped = %d, want 0", result.CommentEditsSkipped)
+	}
+}
