@@ -128,7 +128,7 @@ suite on the `local` backend: the Dolt-gated cmd/bd tests (`TestCLI_*`, the
 init and store-backed suites) that every other lane skips with
 `BEADS_TEST_SKIP=dolt` or leaves out of its manifest. It shares
 `--config=integration`'s build, passes the binary no test selection (the Go
-binary shards itself over every top-level test, 32 shards), and runs where
+binary shards itself over every top-level test, 16 shards), and runs where
 the integration lane runs (remote, or with the read-only cache). pr.yml's
 gate requires it once `BAZEL_CMD_DOLT_REQUIRED` is `"true"`. Locally:
 `bazel test //cmd/bd:bd_dolt_server_test --config=doltserver-cmd`.

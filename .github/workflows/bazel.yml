@@ -1616,7 +1616,7 @@ jobs:
         run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
 
   # The cmd/bd Dolt-server tier, as --config=doltserver-cmd: the whole
-  # integration-tagged cmd/bd suite (//cmd/bd:bd_dolt_server_test, 32
+  # integration-tagged cmd/bd suite (//cmd/bd:bd_dolt_server_test, 16
   # shards) against a hermetic dolt sql-server, i.e. the Dolt-gated cmd/bd
   # tests (TestCLI_*, TestInit*, the store-backed suites) that every other
   # lane and legacy job skips with BEADS_TEST_SKIP=dolt or leaves out of its
@@ -1666,11 +1666,13 @@ jobs:
           RBE_FORK_PR: ${{ github.event.pull_request.number }}
 
       # Remote: a compile shared with bazel-integration plus the longest
-      # shard (~4-5 minutes; Go's -test.timeout=19m, Bazel's 1200s cap).
-      # Mode cache on a 4-CPU runner: the compile hits the read-only cache,
-      # and a PR that changes cmd/bd or what it imports runs every shard
-      # locally, four at a time (~3,400 test-seconds measured: ~15-20
-      # minutes); with the cache closed, add the cold race build (~30).
+      # of 16 shards (~3 minutes measured; each shard pays ~30-40 s of
+      # TestMain and its own dolt sql-server; Go's -test.timeout=19m,
+      # Bazel's 1200s cap). Mode cache on a 4-CPU runner: the compile hits
+      # the read-only cache, and a PR that changes cmd/bd or what it imports
+      # runs every shard locally, four at a time (~2,200 test-seconds
+      # measured unloaded, slower four-up: ~20-30 minutes); with the cache
+      # closed, add the cold race build (~30).
       - name: bazel test //... --config=doltserver-cmd
         id: test
         timeout-minutes: 75

@@ -1520,7 +1520,7 @@ sh_test(
         # against the one shared server.
         "GOMAXPROCS": "4",
     },
-    shard_count = 32,
+    shard_count = 16,
     tags = ["dolt-server-cmd"],
 )
 

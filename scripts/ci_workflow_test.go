@@ -6636,8 +6636,12 @@ func TestBazelCmdDoltJob(t *testing.T) {
 			t.Errorf("%s lacks %s", target, want)
 		}
 	}
-	if m := regexp.MustCompile(`shard_count = (\d+)`).FindStringSubmatch(rule); m == nil {
-		t.Errorf("%s is not sharded", target)
+	// 16 shards: each pays ~30-40 s of fixed cost (TestMain, its own dolt
+	// sql-server), so more shards mostly add farm actions; with the suite's
+	// long pole gone the slowest of 16 stays within bazel-integration's
+	// critical path. Change it together with bazel.yml's comment.
+	if m := regexp.MustCompile(`shard_count = (\d+)`).FindStringSubmatch(rule); m == nil || m[1] != "16" {
+		t.Errorf("%s shard_count = %v, want 16", target, m)
 	}
 	envKey := regexp.MustCompile(`"(BEADS_TEST_[A-Z_]+)": "\$\(rlocationpath [^)]+\)"`)
 	for _, m := range envKey.FindAllStringSubmatch(bdTest, -1) {
