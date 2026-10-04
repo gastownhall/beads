@@ -51,14 +51,31 @@ const (
 // runs only in the detached send-metrics child, so its full directory scan
 // never lands on an interactive bd invocation.
 //
-// The prune deliberately runs OUTSIDE eventkit.lock (Flush's TryLock treats
-// ErrLocked as "another flusher owns the queue" and silently no-ops, so
-// taking the lock here would turn every prune into a skipped flush). The
-// worst lock-free interleaving: a rare second child mid-upload sees a file
-// this prune deleted and its whole Flush aborts on ENOENT — no event is
-// double-sent, the backlog just waits one more spawn interval. ENOENT
-// tolerance in eventkit's flush loop is the upstream fix (gastownhall/beads
-// GH#5649 lane).
+// PruneQueue itself takes NO lock: the locking decision belongs to the caller,
+// because the lock that matters here is eventkit's own and its lifetime has to
+// span more than the prune. Callers must hold eventkit.DefaultLockFilename for
+// the duration of the prune — otherwise a concurrently-spawned child scanning
+// the same directory can see a file this prune deleted and abort its whole
+// Flush on ENOENT — and must RELEASE it before any Flush, because
+// eventkit.FileFlusher.Flush acquires that same lock with a non-blocking
+// TryLock and silently no-ops (returns nil, as if it succeeded) when it
+// observes fslock.ErrLocked. Hold it across a Flush and every flush after a
+// prune becomes an undetectable no-op.
+//
+// pruneUnderLock (internal/metrics/flusher.go) is the only sanctioned entry
+// point and implements exactly that discipline; do not call PruneQueue directly
+// without it. Before that wrapper existed the prune ran lock-free and the
+// ENOENT interleaving above was the accepted worst case, pending upstream
+// ENOENT tolerance in eventkit's flush loop (gastownhall/beads GH#5649 lane);
+// holding the lock closes that window, so GH#5649 is no longer load-bearing
+// wherever the lock can be taken.
+//
+// It is still load-bearing where it cannot: on a host whose flock(2) errors
+// rather than blocks, pruneUnderLock degrades to running this function
+// unlocked instead of not running it at all (see its doc), because the
+// alternative is no bound on the queue at all — the same trade, and the same
+// accepted worst case, as before the wrapper. The collision partner is gone
+// there anyway: eventkit's Flush cannot take this lock on such a host either.
 //
 // The scan is bounded by ctx: it reads the directory in chunks and, once the
 // context is done, abandons the walk and keeps whatever it already decided

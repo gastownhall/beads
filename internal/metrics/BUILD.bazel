@@ -36,9 +36,9 @@ go_test(
     ],
     embed = [":metrics"],
     deps = [
+        "//internal/storage/filelock",
         "//internal/testutil/bazeltest",
         "@com_github_dolthub_eventkit//:eventkit",
-        "@com_github_dolthub_fslock//:fslock",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
