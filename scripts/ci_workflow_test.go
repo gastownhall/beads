@@ -148,7 +148,9 @@ func TestGolangciLintInstallScriptPinned(t *testing.T) {
 		t.Errorf("install-golangci-lint.sh does not pin version %q", version)
 	}
 	for arch, sha := range wantSHA256 {
-		if !strings.Contains(script, "["+arch+"]=\""+sha+"\"") {
+		// The script maps arch to sha256 with a case arm, not `declare -A`,
+		// so it still parses under macOS's bash 3.2.
+		if !strings.Contains(script, arch+") printf '%s' \""+sha+"\"") {
 			t.Errorf("install-golangci-lint.sh does not pin %s sha256 %q", arch, sha)
 		}
 	}
