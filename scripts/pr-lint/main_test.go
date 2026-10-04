@@ -142,6 +142,136 @@ func TestRunUsesCanonicalNativeAndCrossTargetPasses(t *testing.T) {
 	}
 }
 
+// TestRunHonorsBDLintTargetsSelection covers the pr.yml PR Lint matrix
+// (F5.2): each leg sets BD_LINT_TARGETS to exactly one of native, windows or
+// darwin, and only that pass must run.
+func TestRunHonorsBDLintTargetsSelection(t *testing.T) {
+	for _, tc := range []struct {
+		targets  string
+		wantRuns []string // GOOS set on the one command's env, in order
+	}{
+		{"native", []string{"linux"}},
+		{"windows", []string{"windows"}},
+		{"darwin", []string{"darwin"}},
+		{"native,windows", []string{"linux", "windows"}},
+		{" windows , darwin ", []string{"windows", "darwin"}},
+		{"windows,windows", []string{"windows"}},
+	} {
+		t.Run(tc.targets, func(t *testing.T) {
+			runner := &recordingRunner{
+				paths: map[string]string{
+					"go":            "/tools/go",
+					"golangci-lint": "/tools/golangci-lint",
+				},
+				goEnvOutput: `{"GOOS":"linux","CGO_ENABLED":"1"}`,
+			}
+			var stdout, stderr bytes.Buffer
+			environ := []string{"PATH=/tools", "BD_LINT_TARGETS=" + tc.targets}
+
+			code := run(nil, "/repo", environ, &stdout, &stderr, runner)
+			if code != 0 {
+				t.Fatalf("run exit = %d, want 0; stderr=%s", code, stderr.String())
+			}
+			if len(runner.runCommands) != len(tc.wantRuns) {
+				t.Fatalf("lint calls = %d, want %d (%v); commands=%#v", len(runner.runCommands), len(tc.wantRuns), tc.wantRuns, runner.runCommands)
+			}
+			for index, wantGOOS := range tc.wantRuns {
+				if wantGOOS == "linux" {
+					// The native pass does not force a GOOS override.
+					if got, found := environmentValue(runner.runCommands[index].env, "GOOS", false); found && got != "" && got != "linux" {
+						t.Fatalf("native pass GOOS override = %q", got)
+					}
+					continue
+				}
+				assertEnvironmentValue(t, runner.runCommands[index].env, "GOOS", wantGOOS, false)
+			}
+		})
+	}
+}
+
+func TestRunDefaultsBDLintTargetsToAllThree(t *testing.T) {
+	runner := &recordingRunner{
+		paths: map[string]string{
+			"go":            "/tools/go",
+			"golangci-lint": "/tools/golangci-lint",
+		},
+		goEnvOutput: `{"GOOS":"linux","CGO_ENABLED":"1"}`,
+	}
+	var stdout, stderr bytes.Buffer
+	// No BD_LINT_TARGETS at all, and a second case with it set but empty:
+	// both must run the full native+windows+darwin contract (the no-argument
+	// usage contract `make ci-pr-lint` and `bd preflight` depend on).
+	for _, environ := range [][]string{
+		{"PATH=/tools"},
+		{"PATH=/tools", "BD_LINT_TARGETS="},
+		{"PATH=/tools", "BD_LINT_TARGETS= , ,"},
+	} {
+		runner.runCommands = nil
+		code := run(nil, "/repo", environ, &stdout, &stderr, runner)
+		if code != 0 {
+			t.Fatalf("run exit = %d, want 0; stderr=%s", code, stderr.String())
+		}
+		if len(runner.runCommands) != 3 {
+			t.Fatalf("env=%v: lint calls = %d, want 3", environ, len(runner.runCommands))
+		}
+	}
+}
+
+func TestRunRejectsUnknownBDLintTarget(t *testing.T) {
+	runner := &recordingRunner{
+		paths: map[string]string{
+			"go":            "/tools/go",
+			"golangci-lint": "/tools/golangci-lint",
+		},
+		goEnvOutput: `{"GOOS":"linux","CGO_ENABLED":"1"}`,
+	}
+	var stdout, stderr bytes.Buffer
+	environ := []string{"PATH=/tools", "BD_LINT_TARGETS=native,solaris"}
+
+	code := run(nil, "/repo", environ, &stdout, &stderr, runner)
+	if code != 2 {
+		t.Fatalf("run exit = %d, want 2; stderr=%s", code, stderr.String())
+	}
+	if len(runner.runCommands) != 0 {
+		t.Fatalf("an unknown target must run nothing, got %d lint calls", len(runner.runCommands))
+	}
+	if !strings.Contains(stderr.String(), "solaris") {
+		t.Fatalf("missing the unknown target in the diagnostic: %q", stderr.String())
+	}
+}
+
+func TestParseLintTargets(t *testing.T) {
+	for _, tc := range []struct {
+		raw     string
+		want    []string
+		wantErr bool
+	}{
+		{"", []string{"native", "windows", "darwin"}, false},
+		{" , ", []string{"native", "windows", "darwin"}, false},
+		{"native", []string{"native"}, false},
+		{"native,darwin", []string{"native", "darwin"}, false},
+		{" native , darwin ", []string{"native", "darwin"}, false},
+		{"bogus", nil, true},
+		{"native,bogus", nil, true},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			got, err := parseLintTargets(tc.raw)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseLintTargets(%q) = %v, want an error", tc.raw, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseLintTargets(%q) unexpected error: %v", tc.raw, err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("parseLintTargets(%q) = %#v, want %#v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLintArgsKeepsHostileMergeBaseInOneArgument(t *testing.T) {
 	mergeBase := `origin/main; printf injected >&2`
 	args := lintArgs(mergeBase)

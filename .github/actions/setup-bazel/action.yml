@@ -8,9 +8,13 @@ description: >
   BAZEL_REMOTE_EXECUTOR, RBE_TLS_CERT and RBE_TLS_KEY in the step env, that rc
   enables --config=remote-exec for every bazel command; with none of them the
   job runs locally; with BAZEL_FORK_CACHE=true (and no secrets) it enables
-  the read-only fork cache (--config=fork-cache, fork PRs); a partial set,
-  or the fork cache together with the secrets, fails. `bazel` on PATH is a
-  wrapper that always passes the generated rc.
+  the read-only fork cache (--config=fork-cache); with BAZEL_FORK_REMOTE=true
+  (fork and Dependabot PRs, bazel.yml modes fork-ro/fork-rw; needs
+  RBE_FORK_PR and RBE_FORK_TIER) it gets a short-lived certificate from
+  rbe-fork-mint (fork-credential.sh, proving the run with a CSR artifact) and
+  enables remote execution on rbe-fork; a partial set, or two of these
+  together, fails. `bazel` on PATH is a wrapper that always passes the
+  generated rc.
 outputs:
   remote:
     description: '"true" when remote execution is configured'
@@ -77,12 +81,49 @@ runs:
           echo "BAZEL_CI_BAZEL_SHA256=$bazel_sha"
         } >> "$GITHUB_ENV"
 
+    # Fork and Dependabot runs (no secrets, no OIDC): a key and a CSR, the CSR
+    # as an artifact of this run (the mint's proof that the request comes
+    # from a running job of it), then the certificate. The key stays in the
+    # secret dir; the CSR and the certificate are public.
+    # fork-credential.sh key does nothing (no outputs) unless the caller set
+    # BAZEL_FORK_REMOTE=true; the next two steps follow its csr output.
+    - name: rbe-fork key and CSR
+      id: fork-key
+      shell: bash
+      env:
+        BAZEL_CI_SECRET_DIR: ${{ runner.temp }}/bazel-ci-secret
+      run: bash "$GITHUB_ACTION_PATH/fork-credential.sh" key
+
+    - name: rbe-fork CSR artifact (proof of this run)
+      id: fork-csr
+      if: steps.fork-key.outputs.csr != ''
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: ${{ steps.fork-key.outputs.artifact-name }}
+        path: ${{ steps.fork-key.outputs.csr }}
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 0
+
+    - name: rbe-fork certificate (rbe-fork-mint)
+      id: fork-cert
+      if: steps.fork-key.outputs.csr != ''
+      shell: bash
+      env:
+        BAZEL_CI_SECRET_DIR: ${{ runner.temp }}/bazel-ci-secret
+        ARTIFACT_ID: ${{ steps.fork-csr.outputs.artifact-id }}
+      run: bash "$GITHUB_ACTION_PATH/fork-credential.sh" cert
+
     - name: Write CI bazelrc
       id: rc
       shell: bash
       env:
         BAZEL_CI_CACHE_DIR: ${{ runner.temp }}/bazel-ci-cache
         BAZEL_CI_SECRET_DIR: ${{ runner.temp }}/bazel-ci-secret
+        RBE_FORK_CERT_FILE: ${{ steps.fork-cert.outputs.cert }}
+        RBE_FORK_KEY_FILE: ${{ steps.fork-cert.outputs.key }}
+        RBE_FORK_ENDPOINT: ${{ steps.fork-cert.outputs.endpoint }}
+        RBE_FORK_INSTANCE: ${{ steps.fork-cert.outputs.instance }}
       run: bash "$GITHUB_ACTION_PATH/write-bazelrc.sh"
 
     - name: Install bazel wrapper

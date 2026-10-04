@@ -42,6 +42,129 @@ func setupTestRepo(t *testing.T) (repoPath string, cleanup func()) {
 	return repoPath, cleanup
 }
 
+// TestPinNoRepositoryUnderForTestingSurvivesResetCaches is a probe for the
+// bug a branch reviewer found in the original PinNoRepositoryForTesting: it
+// seeded a one-shot sentinel into gitCtx, but ResetCaches (called by every
+// test fixture that chdirs, e.g. cmd/bd's runInDir/resetRepoCachesForTest)
+// unconditionally cleared gitCtx, including that sentinel — so the pin was
+// gone the moment any single test in the binary chdir'd and reset caches,
+// defeating the whole-binary fence for every test after the first one that
+// did. PinNoRepositoryUnderForTesting fixes this by making the pin
+// directory-scoped and independent of gitCtx/gitCtxOnce, so ResetCaches
+// cannot clear it. This test reproduces the reviewer's repro: pin a real
+// repo root, simulate a fixture that chdirs OUT to its own directory and
+// resets caches (which must restore real detection there), then chdir BACK
+// under the pinned root and reset caches again (which must NOT restore real
+// detection, because the process never left the pinned root's jurisdiction).
+func TestPinNoRepositoryUnderForTestingSurvivesResetCaches(t *testing.T) {
+	repoPath, _ := setupTestRepo(t)
+
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(origWD); err != nil {
+			t.Fatalf("restore working directory: %v", err)
+		}
+		pinnedRootForTesting = ""
+		pinnedRootRawForTesting = ""
+		ResetCaches()
+	})
+
+	if err := os.Chdir(repoPath); err != nil {
+		t.Fatalf("chdir to repo: %v", err)
+	}
+	PinNoRepositoryUnderForTesting(repoPath)
+
+	if got := GetRepoRoot(); got != "" {
+		t.Fatalf("GetRepoRoot() = %q immediately after pinning, want \"\"", got)
+	}
+
+	// Simulate a fixture OUTSIDE the pinned root: real detection should work
+	// there, same as before this pin existed, once caches are reset.
+	fixtureDir := t.TempDir()
+	if err := os.Chdir(fixtureDir); err != nil {
+		t.Fatalf("chdir to fixture: %v", err)
+	}
+	ResetCaches()
+	if got := GetRepoRoot(); got != "" {
+		t.Fatalf("GetRepoRoot() = %q in an unpinned fixture outside the pinned root, want \"\" (fixtureDir is not a repo, but it must not inherit the pinned repo's root either)", got)
+	}
+
+	// Return to the pinned root and reset caches again — exactly what
+	// runInDir's deferred cleanup does on the way out of a subtest. The pin
+	// must still answer "not a repository" here.
+	if err := os.Chdir(repoPath); err != nil {
+		t.Fatalf("chdir back to pinned repo: %v", err)
+	}
+	ResetCaches()
+	if got := GetRepoRoot(); got != "" {
+		t.Fatalf("GetRepoRoot() = %q after ResetCaches back under the pinned root, want \"\" (the pin must survive ResetCaches)", got)
+	}
+}
+
+// TestPinNoRepositoryUnderForTestingMatchesThroughSymlinks reproduces, on any
+// platform with symlinks, the macOS failure of the pin: there t.TempDir() is
+// /var/folders/... while getcwd(2) reports /private/var/folders/... (/var is
+// a symlink), so pinning the unresolved path and comparing it to os.Getwd()
+// never matched. Pinning through a symlink must still fence the real
+// directory, and pinning the real directory must still fence a working
+// directory reported through the symlink.
+func TestPinNoRepositoryUnderForTestingMatchesThroughSymlinks(t *testing.T) {
+	realRepo, _ := setupTestRepo(t)
+	realRepo, err := filepath.EvalSymlinks(realRepo)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	link := filepath.Join(t.TempDir(), "linked-repo")
+	if err := os.Symlink(realRepo, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	subdir := filepath.Join(realRepo, "sub")
+	if err := os.MkdirAll(subdir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(origWD); err != nil {
+			t.Fatalf("restore working directory: %v", err)
+		}
+		pinnedRootForTesting = ""
+		pinnedRootRawForTesting = ""
+		ResetCaches()
+	})
+
+	for _, tc := range []struct{ name, pin, wd string }{
+		{"pin via symlink, cwd real", link, realRepo},
+		{"pin via symlink, cwd real subdir", link, subdir},
+		{"pin real, cwd via symlink", realRepo, filepath.Join(link, "sub")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.Chdir(tc.wd); err != nil {
+				t.Fatalf("chdir: %v", err)
+			}
+			PinNoRepositoryUnderForTesting(tc.pin)
+			if !underPinnedRootForTesting(tc.wd) {
+				t.Errorf("underPinnedRootForTesting(%q) = false with pin %q (stored %q), want true", tc.wd, tc.pin, pinnedRootForTesting)
+			}
+			if got := GetRepoRoot(); got != "" {
+				t.Errorf("GetRepoRoot() = %q under pinned root %q, want \"\"", got, tc.pin)
+			}
+		})
+	}
+
+	// A sibling that merely shares the string prefix is not under the pin.
+	PinNoRepositoryUnderForTesting(realRepo)
+	if underPinnedRootForTesting(realRepo + "-sibling") {
+		t.Errorf("underPinnedRootForTesting(%q) = true, want false (prefix-only sibling)", realRepo+"-sibling")
+	}
+}
+
 func TestGetGitHooksDirTildeExpansion(t *testing.T) {
 	// Use an explicit temporary home so tilde expansion is deterministic
 	// regardless of the environment (CI, containers, overridden homes, etc.).

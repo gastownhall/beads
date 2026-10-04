@@ -34,6 +34,21 @@ func requireProxiedServerEnv(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 }
 
+// requireSocat skips a test that needs socat as an external-endpoint bridge
+// when it is not installed, or fails it when BEADS_TEST_REQUIRE_SOCAT=1. The
+// Bazel proxied lane sets that (its workers have socat), so these subtests
+// cannot silently stop running there; the legacy GitHub 15-shard lane has no
+// socat and leaves it unset, so they skip there.
+func requireSocat(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("socat"); err != nil {
+		if os.Getenv("BEADS_TEST_REQUIRE_SOCAT") == "1" {
+			t.Fatalf("socat is required (BEADS_TEST_REQUIRE_SOCAT=1): %v", err)
+		}
+		t.Skipf("socat is required: %v", err)
+	}
+}
+
 func bdProxiedEnv(dir string) []string {
 	var env []string
 	for _, e := range os.Environ() {

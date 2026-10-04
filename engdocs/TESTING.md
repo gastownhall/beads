@@ -97,8 +97,12 @@ sit behind that API, selected by `BEADS_TEST_DOLT_SERVER`:
 
 `BEADS_TEST_REQUIRE_DOLT_CONTAINER=1` turns an unavailable backend into a
 failure (per test and in every `TestMain`) instead of a skip; lanes that
-exist to run the Dolt suites set it. Without it, a backend that cannot run
-here (no docker, image not pulled) or was skipped with `BEADS_TEST_SKIP=dolt`
+exist to run the Dolt suites set it. `BEADS_TEST_REQUIRE_SOCAT=1` does the
+same for the proxied subtests that bridge an external endpoint with `socat`
+(external-unix, the outage/reconnect matrix); `//cmd/bd:bd_proxied_test`
+sets it, and the legacy GitHub proxied jobs, which have no `socat`, do not.
+Without `BEADS_TEST_REQUIRE_DOLT_CONTAINER`, a backend that cannot run here
+(no docker, image not pulled) or was skipped with `BEADS_TEST_SKIP=dolt`
 still skips. A server that fails to start after the environment reported it
 ready (say, a container runtime whose reaper times out) does not: it fails
 the package's `TestMain` (`testutil.ErrDoltServerStart`) rather than letting
@@ -116,8 +120,13 @@ proxied-server cmd/bd tier ("Test (Proxied Dolt Cmd N/15)",
 `//cmd/bd:bd_proxied_test`), and `--config=doltserver-integration` the
 server-Dolt storage tier ("Test (Server Dolt Conformance)", "Test (Server
 Dolt Full Suite N/16)", `//internal/storage/dolt:dolt_server_*_test`), which
-builds with the integration tag like `--config=integration`. Each shard
-runs its CI job's shard script, so Bazel shard k runs the tests of job k+1.
+builds with the integration tag like `--config=integration`. Each shard runs
+its CI job's shard script, so for `--config=doltserver-integration` Bazel
+shard k runs the tests of job k+1 (both split the manifest's 16-shard block
+the same way). `--config=doltserver-proxied`'s `bd_proxied_test` instead
+runs the manifest's own 30-shard block — bin-packed by measured duration,
+not the legacy jobs' 15-shard, bd-init-cost-proxy block — so shard k there
+is not job k+1's tests; it is a different split of the same tests.
 
 An ambient `BEADS_DOLT_SERVER_PORT` or `BEADS_DOLT_PORT` is never honored by
 the suites that call `testutil.EnsureDoltContainerForTestMain`. When a test

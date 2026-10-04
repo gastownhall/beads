@@ -128,8 +128,15 @@ func retiredJobs() map[string]retiredTier {
 var prRiskSharedDecisionEnv = []string{"FORK"}
 
 // The decision's Dependabot test: Dependabot runs get no Actions secrets, so
-// bazel.yml runs them locally and they keep the legacy tiers.
+// they are covered (like fork PRs) only while BAZEL_COVERS_FORKS is "true".
 const prRiskDependabotValue = "${{ github.actor == 'dependabot[bot]' }}"
+
+// The committed flag that covers fork and Dependabot PRs too (rbe-fork), and
+// its expression in both decision steps.
+const (
+	prCoversForksFlag  = "BAZEL_COVERS_FORKS"
+	prCoversForksValue = "${{ env." + prCoversForksFlag + " == 'true' }}"
+)
 
 // rbeFacts: what GitHub evaluates the decision steps' env expressions on.
 type rbeFacts struct {
@@ -141,17 +148,32 @@ type rbeFacts struct {
 	retired [3]string
 	// github.actor is dependabot[bot] (fixed for a PR's runs and re-runs).
 	dependabot bool
+	// The committed env.BAZEL_COVERS_FORKS.
+	coversForks string
+	// What rbe-fork-mint's /v1/status answers this run (bazelTestMintEnv;
+	// "" = unreachable). Only fork and Dependabot pull_request runs ask.
+	mint string
 }
 
 func (f rbeFacts) String() string {
-	return fmt.Sprintf("event=%s var=%q secret=%v fork=%v retired=%q dependabot=%v", f.event, f.rbeVar, f.secret != "", f.fork, f.retired, f.dependabot)
+	return fmt.Sprintf("event=%s var=%q secret=%v fork=%v retired=%q dependabot=%v covers-forks=%q mint=%q",
+		f.event, f.rbeVar, f.secret != "", f.fork, f.retired, f.dependabot, f.coversForks, f.mint)
 }
 
-// covers: whether a same-repo, non-Dependabot pull_request with tier i's
-// flag set, the decision both workflows must take for tier i.
+// covers: whether a pull_request with tier i's flag set is covered, the
+// decision both workflows must take for tier i: same-repo, non-Dependabot
+// PRs always; fork and Dependabot PRs while BAZEL_COVERS_FORKS is "true".
+// Never what the mint says: a covered fork run it does not serve is red.
 func (f rbeFacts) covers(i int) bool {
-	return strings.EqualFold(f.retired[i], "true") && f.event == "pull_request" && !f.fork && !f.dependabot
+	return strings.EqualFold(f.retired[i], "true") && f.event == "pull_request" &&
+		(!f.fork && !f.dependabot || strings.EqualFold(f.coversForks, "true"))
 }
+
+// forkPR: a run that asks rbe-fork-mint (bazel.yml's rbe job).
+func (f rbeFacts) forkPR() bool { return f.event == "pull_request" && (f.fork || f.dependabot) }
+
+// rbeMintAnswers: the mint states every forkPR fact is tried with.
+var rbeMintAnswers = []string{"", "closed", "ro", "rw"}
 
 var (
 	rbeEvents    = []string{"pull_request", "merge_group", "push", "workflow_dispatch", "pull_request_target"}
@@ -166,15 +188,37 @@ var (
 )
 
 // rbeFactsMatrix: every combination of the facts the decisions read.
+// BAZEL_COVERS_FORKS takes both values (and other spellings) where it can
+// matter, fork and Dependabot facts, and "true" elsewhere only with every
+// tier retired (to show it changes nothing there); the mint answers only
+// matter to forkPR facts.
 func rbeFactsMatrix() []rbeFacts {
 	var out []rbeFacts
+	allRetired := [3]string{"true", "true", "true"}
 	for _, event := range rbeEvents {
 		for _, v := range rbeVarValues {
 			for _, secret := range rbeSecrets {
 				for _, fork := range []bool{false, true} {
 					for _, retired := range retiredValues {
 						for _, dependabot := range []bool{false, true} {
-							out = append(out, rbeFacts{event, v, secret, fork, retired, dependabot})
+							covers := []string{"false"}
+							switch {
+							case (fork || dependabot) && retired == allRetired:
+								covers = []string{"false", "true", "True", "", "yes"}
+							case fork || dependabot, retired == allRetired:
+								covers = []string{"false", "true"}
+							}
+							for _, c := range covers {
+								f := rbeFacts{event, v, secret, fork, retired, dependabot, c, ""}
+								if !f.forkPR() {
+									out = append(out, f)
+									continue
+								}
+								for _, m := range rbeMintAnswers {
+									f.mint = m
+									out = append(out, f)
+								}
+							}
 						}
 					}
 				}
@@ -206,6 +250,13 @@ func evalRBEExpr(t *testing.T, expr string, f rbeFacts, with map[string]string) 
 		}
 	}
 	switch expr {
+	case prCoversForksValue:
+		return strconv.FormatBool(strings.EqualFold(f.coversForks, "true"))
+	case "${{ github.event.pull_request.number }}":
+		if f.event == "pull_request" || f.event == "pull_request_target" {
+			return "7123"
+		}
+		return ""
 	case prRiskPullRequestValue:
 		return strconv.FormatBool(f.event == "pull_request")
 	case prRiskDependabotValue:
@@ -232,7 +283,7 @@ func evalRBEExpr(t *testing.T, expr string, f rbeFacts, with map[string]string) 
 // with its env evaluated for f, and returns its $GITHUB_OUTPUT.
 func runDecisionStep(t *testing.T, step ciWorkflowStep, f rbeFacts, with map[string]string) (map[string]string, error) {
 	t.Helper()
-	env := map[string]string{}
+	env := map[string]string{bazelTestMintEnv: f.mint}
 	for k, v := range step.Env {
 		env[k] = evalRBEExpr(t, v, f, with)
 	}
@@ -271,12 +322,15 @@ func workflowEnv(t *testing.T, name string) map[string]string {
 func TestPRRiskBazelCoverageJob(t *testing.T) {
 	risk := readCIWorkflow(t, prRiskWorkflowName)
 	job := risk.job(t, prRiskCoverageJobName)
-	if len(job.Needs) != 0 || job.If != "" || job.RunsOn != "ubuntu-latest" || len(job.Env) != 0 || job.ContinueOnError || job.TimeoutMinutes == 0 {
-		t.Errorf("%s: needs %v, if %q, runs-on %q, env %v, continue-on-error %v, timeout %d; want no needs, if, env or continue-on-error, ubuntu-latest, a timeout",
-			prRiskCoverageJobName, job.Needs, job.If, job.RunsOn, job.Env, job.ContinueOnError, job.TimeoutMinutes)
+	// F3: this job moved to Blacksmith for same-repo PRs (and merge_group);
+	// forks and Dependabot stay on ubuntu-latest (TestSameRepoBlacksmithRunners
+	// pins the same literal for pr.yml's copy).
+	if len(job.Needs) != 0 || job.If != "" || job.RunsOn != sameRepoBlacksmith2vcpu || len(job.Env) != 0 || job.ContinueOnError || job.TimeoutMinutes == 0 {
+		t.Errorf("%s: needs %v, if %q, runs-on %q, env %v, continue-on-error %v, timeout %d; want no needs, if, env or continue-on-error, on %q, a timeout",
+			prRiskCoverageJobName, job.Needs, job.If, job.RunsOn, job.Env, job.ContinueOnError, job.TimeoutMinutes, sameRepoBlacksmith2vcpu)
 	}
 	wantOutputs := map[string]string{}
-	wantEnv := map[string]string{"PULL_REQUEST": prRiskPullRequestValue, "DEPENDABOT": prRiskDependabotValue}
+	wantEnv := map[string]string{"PULL_REQUEST": prRiskPullRequestValue, "DEPENDABOT": prRiskDependabotValue, "COVERS_FORKS": prCoversForksValue}
 	for _, r := range retiredTiers {
 		wantOutputs[r.output] = "${{ steps.decide.outputs." + r.output + " }}"
 		wantEnv[r.envKey] = r.retiredValue()
@@ -288,9 +342,13 @@ func TestPRRiskBazelCoverageJob(t *testing.T) {
 		t.Errorf("pr.yml's %s differs from pr-risk.yml's:\n%+v\n%+v", prRiskCoverageJobName, prJob, job)
 	}
 	riskEnv, prEnv := workflowEnv(t, prRiskWorkflowName), workflowEnv(t, "pr.yml")
+	committed := []string{prCoversForksFlag}
 	for _, r := range retiredTiers {
-		if riskFlag, prFlag := riskEnv[r.flag], prEnv[r.flag]; riskFlag != prFlag || (riskFlag != "true" && riskFlag != "false") {
-			t.Errorf("%s: pr-risk.yml %q, pr.yml %q; want the same literal \"true\" or \"false\" in both", r.flag, riskFlag, prFlag)
+		committed = append(committed, r.flag)
+	}
+	for _, flag := range committed {
+		if riskFlag, prFlag := riskEnv[flag], prEnv[flag]; riskFlag != prFlag || (riskFlag != "true" && riskFlag != "false") {
+			t.Errorf("%s: pr-risk.yml %q, pr.yml %q; want the same literal \"true\" or \"false\" in both", flag, riskFlag, prFlag)
 		}
 	}
 	step := prRiskCoverageStep(t)
@@ -315,8 +373,8 @@ func TestPRRiskBazelCoverageJob(t *testing.T) {
 	// repository variable; only the workflow env sets a flag.
 	stepEnv := ".jobs." + prRiskCoverageJobName + ".steps[0].env."
 	secretRef := regexp.MustCompile(`\bsecrets\s*(\.|\[)`)
-	flags := map[string]bool{}
-	var flagAlt []string
+	flags := map[string]bool{prCoversForksFlag: true}
+	flagAlt := []string{prCoversForksFlag}
 	for _, r := range retiredTiers {
 		flags[r.flag] = true
 		flagAlt = append(flagAlt, r.flag)
@@ -332,6 +390,15 @@ func TestPRRiskBazelCoverageJob(t *testing.T) {
 		if secretRef.MatchString(value) {
 			t.Errorf("%s: %s reads secrets (%q); PR Risk needs none", prRiskWorkflowName, path, value)
 		}
+		// F3: detect-ci-tier/bazel-coverage/ci-gate's own runs-on picks a
+		// runner venue (Blacksmith vs ubuntu-latest) for trusted same-repo
+		// PRs; it shares some predicates (github.actor, dependabot,
+		// head.repo.full_name) with the coverage decision but decides
+		// something else entirely - not a re-derivation of the decision
+		// (TestSameRepoBlacksmithRunners pins the literal).
+		if strings.HasSuffix(path, ".runs-on") && (value == sameRepoBlacksmith2vcpu || value == sameRepoBlacksmith4vcpu || value == sameRepoBlacksmith8vcpu) {
+			return
+		}
 		if facts.MatchString(value) && !strings.HasPrefix(path, stepEnv) && !strings.HasPrefix(path, ".jobs."+prRiskCoverageJobName+".steps[0].run") {
 			t.Errorf("%s: %s re-derives the Bazel coverage decision (%q); read needs.%s.outputs", prRiskWorkflowName, path, value, prRiskCoverageJobName)
 		}
@@ -345,8 +412,8 @@ func TestPRRiskBazelCoverageJob(t *testing.T) {
 			}
 			return
 		}
-		if regexp.MustCompile(`env\.BAZEL_RETIRES_`).MatchString(value) && !strings.HasPrefix(path, stepEnv) {
-			t.Errorf("pr.yml: %s reads a BAZEL_RETIRES_* flag (%q); read needs.%s.outputs", path, value, prRiskCoverageJobName)
+		if regexp.MustCompile(`env\.BAZEL_(RETIRES_|COVERS_FORKS\b)`).MatchString(value) && !strings.HasPrefix(path, stepEnv) {
+			t.Errorf("pr.yml: %s reads a BAZEL_RETIRES_* or BAZEL_COVERS_FORKS flag (%q); read needs.%s.outputs", path, value, prRiskCoverageJobName)
 		}
 	})
 	// Every BAZEL_RETIRES_* flag either workflow commits is one of retiredTiers.
@@ -372,7 +439,7 @@ func prGateFor(t *testing.T, lanes map[string]map[string]bool, event, mode strin
 	}
 	return bazelGateScenario{
 		name: fmt.Sprintf("%s mode %s covered %v", event, mode, covered), event: event,
-		mode: mode, enabled: strconv.FormatBool(mode == "remote"), call: "success",
+		mode: mode, enabled: bazelModeEnabled(mode), call: "success",
 		outputs: outputs, covered: covered,
 	}
 }
@@ -489,6 +556,7 @@ func TestPRRiskDecisionMatchesBazelMode(t *testing.T) {
 		mode               string
 	}
 	modeMemo := map[rbeFacts]string{}
+	coverMemo := map[rbeFacts][2]map[string]string{}
 	decideMemo := map[rbeFacts]decided{}
 	decide := func(t *testing.T, f rbeFacts) decided {
 		t.Helper()
@@ -497,6 +565,7 @@ func TestPRRiskDecisionMatchesBazelMode(t *testing.T) {
 		}
 		noFlags := f
 		noFlags.retired = [3]string{}
+		noFlags.coversForks = ""
 		mode, ok := modeMemo[noFlags]
 		if !ok {
 			bazel, err := runDecisionStep(t, rbeStep, f, call.With)
@@ -506,15 +575,25 @@ func TestPRRiskDecisionMatchesBazelMode(t *testing.T) {
 			mode = bazel["mode"]
 			modeMemo[noFlags] = mode
 		}
-		risk, err := runDecisionStep(t, riskStep, f, nil)
-		if err != nil || len(risk) != len(retiredTiers) {
-			t.Fatalf("%s decision step: %v %v", prRiskCoverageJobName, risk, err)
+		// The coverage steps read no variable, secret or mint (their env is
+		// pinned exactly by TestPRRiskBazelCoverageJob): one run per fact
+		// without them.
+		noMint := f
+		noMint.rbeVar, noMint.secret, noMint.mint = "", "", ""
+		cov, ok := coverMemo[noMint]
+		if !ok {
+			risk, err := runDecisionStep(t, riskStep, noMint, nil)
+			if err != nil || len(risk) != len(retiredTiers) {
+				t.Fatalf("%s decision step: %v %v", prRiskCoverageJobName, risk, err)
+			}
+			prd, err := runDecisionStep(t, prStep, noMint, nil)
+			if err != nil {
+				t.Fatalf("pr.yml %s step: %v", prRiskCoverageJobName, err)
+			}
+			cov = [2]map[string]string{risk, prd}
+			coverMemo[noMint] = cov
 		}
-		prd, err := runDecisionStep(t, prStep, f, nil)
-		if err != nil {
-			t.Fatalf("pr.yml %s step: %v", prRiskCoverageJobName, err)
-		}
-		d := decided{risk, prd, mode}
+		d := decided{cov[0], cov[1], mode}
 		decideMemo[f] = d
 		return d
 	}
@@ -556,31 +635,40 @@ func TestPRRiskDecisionMatchesBazelMode(t *testing.T) {
 			continue // the events both workflows run on
 		}
 		risk := decide(t, f)
+		mints := []string{f.mint}
+		if f.forkPR() {
+			mints = rbeMintAnswers // rbe-fork may open or close between the runs
+		}
 		for _, v := range rbeVarValues {
 			for _, secret := range rbeSecrets {
-				g := f
-				g.rbeVar, g.secret = v, secret
-				prRun := decide(t, g)
-				bazelRan := prRun.mode == "remote" // and passed: every lane succeeds here
-				for _, r := range retiredTiers {
-					// PR Risk's tiers stand down in PR Risk's run; pr.yml's
-					// own (step 3) in this same pr.yml run.
-					legacyRan := risk.covered[r.output] != "true"
-					if r.workflow == "pr.yml" {
-						legacyRan = prRun.prCovered[r.output] != "true"
-					}
-					if !legacyRan && !bazelRan && prGatePasses(t, g.event, prRun.mode, prRun.prCovered) {
-						t.Errorf("PR Risk run %v skipped the legacy %s tier and pr.yml run (var %q, secret %v, mode %s, covered %v) is green without its Bazel lanes",
-							f, r.output, v, secret != "", prRun.mode, prRun.prCovered)
+				for _, m := range mints {
+					g := f
+					g.rbeVar, g.secret, g.mint = v, secret, m
+					prRun := decide(t, g)
+					bazelRan := bazelRemoteModes[prRun.mode] // and passed: every lane succeeds here
+					for _, r := range retiredTiers {
+						// PR Risk's tiers stand down in PR Risk's run; pr.yml's
+						// own (step 3) in this same pr.yml run.
+						legacyRan := risk.covered[r.output] != "true"
+						if r.workflow == "pr.yml" {
+							legacyRan = prRun.prCovered[r.output] != "true"
+						}
+						if !legacyRan && !bazelRan && prGatePasses(t, g.event, prRun.mode, prRun.prCovered) {
+							t.Errorf("PR Risk run %v skipped the legacy %s tier and pr.yml run (var %q, secret %v, mint %q, mode %s, covered %v) is green without its Bazel lanes",
+								f, r.output, v, secret != "", m, prRun.mode, prRun.prCovered)
+						}
 					}
 				}
 			}
 		}
 	}
 
-	// Named cases, for the record. Forks and Dependabot run in mode cache,
-	// which, like local, skips the remote-only lanes, so they keep the
-	// legacy tiers. reds: the retired ids a red gate must name.
+	// Named cases, for the record. Forks and Dependabot run in mode cache
+	// while rbe-fork is closed, which, like local, skips the remote-only
+	// lanes, or remotely in fork-ro/fork-rw; while BAZEL_COVERS_FORKS is
+	// "false" they keep the legacy tiers either way. While it is "true" they
+	// are covered: green only with their lanes run remotely, red in mode
+	// cache. reds: the retired ids a red gate must name.
 	both, embOnly, dsOnly, prOnly, none := [3]string{"true", "true", "true"}, [3]string{"true", "false", "false"}, [3]string{"false", "true", "false"},
 		[3]string{"false", "false", "true"}, [3]string{"false", "false", "false"}
 	allRetired := []string{"BAZEL_EMBEDDED_RETIRED", "BAZEL_DOLT_SERVER_RETIRED", "BAZEL_PR_LANES_RETIRED"}
@@ -592,23 +680,36 @@ func TestPRRiskDecisionMatchesBazelMode(t *testing.T) {
 		prPasses bool
 		reds     []string
 	}{
-		{"same-repo PR, farm on", rbeFacts{"pull_request", "true", "x", false, both, false}, "remote", coveredAll("true"), true, nil},
-		{"same-repo PR, kill switch (var unset)", rbeFacts{"pull_request", "", "x", false, both, false}, "skip", coveredAll("true"), false, allRetired},
-		{"same-repo PR, executor secret missing", rbeFacts{"pull_request", "true", "", false, both, false}, "cache", coveredAll("true"), false, allRetired},
-		{"same-repo PR, only embedded retired, var unset", rbeFacts{"pull_request", "", "x", false, embOnly, false}, "skip", map[string]string{"embedded": "true", "dolt_server": "false", "pr_lanes": "false"}, false, []string{"BAZEL_EMBEDDED_RETIRED"}},
-		{"same-repo PR, only proxied/server retired, var unset", rbeFacts{"pull_request", "", "x", false, dsOnly, false}, "skip", map[string]string{"embedded": "false", "dolt_server": "true", "pr_lanes": "false"}, false, []string{"BAZEL_DOLT_SERVER_RETIRED"}},
-		{"same-repo PR, only pr.yml's jobs retired, var unset", rbeFacts{"pull_request", "", "x", false, prOnly, false}, "skip", map[string]string{"embedded": "false", "dolt_server": "false", "pr_lanes": "true"}, false, []string{"BAZEL_PR_LANES_RETIRED"}},
-		{"same-repo PR, only pr.yml's jobs retired, secret missing", rbeFacts{"pull_request", "true", "", false, prOnly, false}, "cache", map[string]string{"embedded": "false", "dolt_server": "false", "pr_lanes": "true"}, false, []string{"BAZEL_PR_LANES_RETIRED"}},
-		{"same-repo PR, only pr.yml's jobs retired, farm on", rbeFacts{"pull_request", "true", "x", false, prOnly, false}, "remote", map[string]string{"embedded": "false", "dolt_server": "false", "pr_lanes": "true"}, true, nil},
-		{"same-repo PR, flags reverted, var unset", rbeFacts{"pull_request", "", "x", false, none, false}, "skip", coveredAll("false"), true, nil},
-		{"same-repo PR, flags reverted, secret missing", rbeFacts{"pull_request", "true", "", false, none, false}, "cache", coveredAll("false"), true, nil},
-		{"fork PR", rbeFacts{"pull_request", "true", "", true, both, false}, "cache", coveredAll("false"), true, nil},
-		{"fork PR, var unset", rbeFacts{"pull_request", "", "", true, both, false}, "cache", coveredAll("false"), true, nil},
-		{"fork PR somehow with a secret", rbeFacts{"pull_request", "true", "x", true, both, false}, "cache", coveredAll("false"), true, nil},
-		{"Dependabot PR (no Actions secrets)", rbeFacts{"pull_request", "true", "", false, both, true}, "cache", coveredAll("false"), true, nil},
-		{"Dependabot PR, var unset", rbeFacts{"pull_request", "", "", false, both, true}, "skip", coveredAll("false"), true, nil},
-		{"merge_group", rbeFacts{"merge_group", "true", "x", false, both, false}, "remote", coveredAll("false"), true, nil},
-		{"merge_group, var unset", rbeFacts{"merge_group", "", "x", false, both, false}, "skip", coveredAll("false"), true, nil},
+		{"same-repo PR, farm on", rbeFacts{"pull_request", "true", "x", false, both, false, "false", ""}, "remote", coveredAll("true"), true, nil},
+		{"same-repo PR, kill switch (var unset)", rbeFacts{"pull_request", "", "x", false, both, false, "false", ""}, "skip", coveredAll("true"), false, allRetired},
+		{"same-repo PR, executor secret missing", rbeFacts{"pull_request", "true", "", false, both, false, "false", ""}, "cache", coveredAll("true"), false, allRetired},
+		{"same-repo PR, only embedded retired, var unset", rbeFacts{"pull_request", "", "x", false, embOnly, false, "false", ""}, "skip", map[string]string{"embedded": "true", "dolt_server": "false", "pr_lanes": "false"}, false, []string{"BAZEL_EMBEDDED_RETIRED"}},
+		{"same-repo PR, only proxied/server retired, var unset", rbeFacts{"pull_request", "", "x", false, dsOnly, false, "false", ""}, "skip", map[string]string{"embedded": "false", "dolt_server": "true", "pr_lanes": "false"}, false, []string{"BAZEL_DOLT_SERVER_RETIRED"}},
+		{"same-repo PR, only pr.yml's jobs retired, var unset", rbeFacts{"pull_request", "", "x", false, prOnly, false, "false", ""}, "skip", map[string]string{"embedded": "false", "dolt_server": "false", "pr_lanes": "true"}, false, []string{"BAZEL_PR_LANES_RETIRED"}},
+		{"same-repo PR, only pr.yml's jobs retired, secret missing", rbeFacts{"pull_request", "true", "", false, prOnly, false, "false", ""}, "cache", map[string]string{"embedded": "false", "dolt_server": "false", "pr_lanes": "true"}, false, []string{"BAZEL_PR_LANES_RETIRED"}},
+		{"same-repo PR, only pr.yml's jobs retired, farm on", rbeFacts{"pull_request", "true", "x", false, prOnly, false, "false", ""}, "remote", map[string]string{"embedded": "false", "dolt_server": "false", "pr_lanes": "true"}, true, nil},
+		{"same-repo PR, flags reverted, var unset", rbeFacts{"pull_request", "", "x", false, none, false, "false", ""}, "skip", coveredAll("false"), true, nil},
+		{"same-repo PR, flags reverted, secret missing", rbeFacts{"pull_request", "true", "", false, none, false, "false", ""}, "cache", coveredAll("false"), true, nil},
+		{"fork PR", rbeFacts{"pull_request", "true", "", true, both, false, "false", ""}, "cache", coveredAll("false"), true, nil},
+		{"fork PR, var unset", rbeFacts{"pull_request", "", "", true, both, false, "false", ""}, "cache", coveredAll("false"), true, nil},
+		{"fork PR somehow with a secret", rbeFacts{"pull_request", "true", "x", true, both, false, "false", ""}, "cache", coveredAll("false"), true, nil},
+		{"Dependabot PR (no Actions secrets)", rbeFacts{"pull_request", "true", "", false, both, true, "false", ""}, "cache", coveredAll("false"), true, nil},
+		// rbe-fork decides for Dependabot like for forks (the mint, not the
+		// farm switch): unreachable here, so cache.
+		{"Dependabot PR, var unset", rbeFacts{"pull_request", "", "", false, both, true, "false", ""}, "cache", coveredAll("false"), true, nil},
+		{"fork PR, rbe-fork ro", rbeFacts{"pull_request", "true", "", true, both, false, "false", "ro"}, "fork-ro", coveredAll("false"), true, nil},
+		{"fork PR, rbe-fork rw", rbeFacts{"pull_request", "", "", true, both, false, "false", "rw"}, "fork-rw", coveredAll("false"), true, nil},
+		{"fork PR, rbe-fork closed", rbeFacts{"pull_request", "true", "", true, both, false, "false", "closed"}, "cache", coveredAll("false"), true, nil},
+		{"Dependabot PR, rbe-fork ro", rbeFacts{"pull_request", "true", "", false, both, true, "false", "ro"}, "fork-ro", coveredAll("false"), true, nil},
+		{"covered fork PR, rbe-fork ro", rbeFacts{"pull_request", "true", "", true, both, false, "true", "ro"}, "fork-ro", coveredAll("true"), true, nil},
+		{"covered fork PR, rbe-fork rw", rbeFacts{"pull_request", "", "", true, both, false, "true", "rw"}, "fork-rw", coveredAll("true"), true, nil},
+		{"covered fork PR, rbe-fork closed", rbeFacts{"pull_request", "true", "", true, both, false, "true", "closed"}, "cache", coveredAll("true"), false, allRetired},
+		{"covered fork PR, mint unreachable", rbeFacts{"pull_request", "true", "", true, both, false, "true", ""}, "cache", coveredAll("true"), false, allRetired},
+		{"covered Dependabot PR, rbe-fork ro", rbeFacts{"pull_request", "true", "", false, both, true, "true", "ro"}, "fork-ro", coveredAll("true"), true, nil},
+		{"covered Dependabot PR, rbe-fork closed", rbeFacts{"pull_request", "", "", false, both, true, "true", "closed"}, "cache", coveredAll("true"), false, allRetired},
+		{"covered fork PR, only pr.yml's jobs retired, rbe-fork closed", rbeFacts{"pull_request", "true", "", true, prOnly, false, "true", "closed"}, "cache", map[string]string{"embedded": "false", "dolt_server": "false", "pr_lanes": "true"}, false, []string{"BAZEL_PR_LANES_RETIRED"}},
+		{"merge_group", rbeFacts{"merge_group", "true", "x", false, both, false, "false", ""}, "remote", coveredAll("false"), true, nil},
+		{"merge_group, var unset", rbeFacts{"merge_group", "", "x", false, both, false, "false", ""}, "skip", coveredAll("false"), true, nil},
 	} {
 		d := decide(t, c.f)
 		if !reflect.DeepEqual(d.covered, c.covered) || d.mode != c.mode {
@@ -667,7 +768,7 @@ func TestPRRiskDecisionMatchesBazelMode(t *testing.T) {
 		}
 	}
 	// A value that is not a boolean fails the job rather than deciding.
-	base := map[string]string{"PULL_REQUEST": "true", "FORK": "false", "DEPENDABOT": "false"}
+	base := map[string]string{"PULL_REQUEST": "true", "FORK": "false", "DEPENDABOT": "false", "COVERS_FORKS": "false"}
 	for _, r := range retiredTiers {
 		base[r.envKey] = "true"
 	}
@@ -973,28 +1074,84 @@ func copyMap(m map[string]string) map[string]string {
 // unsharded targets did not only skip.
 func TestBazelRetiredLanesCheckListedTestsRan(t *testing.T) {
 	risk := readCIWorkflow(t, prRiskWorkflowName)
-	type suite struct{ job, step, label, script string }
+	type suite struct {
+		job, step, label, script string
+		// shardCount overrides the expected check_shard_coverage.py shard
+		// count for this suite when the Bazel lane's own manifest block runs
+		// a different number of shards than this PR Risk job's matrix. Zero
+		// means "same as this suite's PR Risk job matrix size" (the common
+		// case for a lane that is a drop-in retirement of the legacy job).
+		// -1 means "read this suite's label's own shard_count live from its
+		// BUILD.bazel rule", via the liveShardCount dispatch table below
+		// (bazelProxiedShardCount, bazelEmbeddedCmdShardCount,
+		// bazelEmbeddedStorageShardCount); only a label present in that
+		// table may use -1 (enforced below), so copying this onto another
+		// suite needs a reviewed change there.
+		shardCount int
+	}
+	// liveShardCount dispatches a suite's -1 shardCount to the accessor that
+	// reads its target's own shard_count from its BUILD.bazel rule — the
+	// single source of truth for a Bazel-only lane's shard split, which no
+	// longer has to equal the retired PR Risk job's matrix size (F2's
+	// bd_proxied_test; F1's bd_embedded_test and
+	// embeddeddolt_embedded_test). See bazelProxiedShardCount's doc comment
+	// (scripts/ci_workflow_test.go) for the shared rationale.
+	liveShardCount := map[string]func(*testing.T) int{
+		"//cmd/bd:bd_proxied_test":                                   bazelProxiedShardCount,
+		"//cmd/bd:bd_embedded_test":                                  bazelEmbeddedCmdShardCount,
+		"//internal/storage/embeddeddolt:embeddeddolt_embedded_test": bazelEmbeddedStorageShardCount,
+	}
 	for _, c := range []struct {
 		lane, config string
 		suites       []suite
 		whole        []string
 	}{
 		{bazelEmbedJobName, "embedded", []suite{
-			{"test-embedded-cmd", "Test", "//cmd/bd:bd_embedded_test", ".github/scripts/embedded-test-shard.sh"},
-			{"test-embedded-storage", "Test", "//internal/storage/embeddeddolt:embeddeddolt_embedded_test", ".github/scripts/embedded-storage-test-shard.sh"},
+			// bazel-embedded runs its own duration-balanced manifest blocks
+			// (scripts/ci/embedded_{cmd,storage}_test_durations.json), not
+			// PR Risk's frozen 20- and 5-shard blocks (slice F1): neither is
+			// a drop-in retirement of its legacy job's shard count, just its
+			// tests. bazelEmbeddedCmdShardCount/bazelEmbeddedStorageShardCount
+			// read the real counts from BUILD.bazel, making these suites'
+			// `want` (below) genuine cross-file pins against bazel.yml's own
+			// check_shard_coverage.py arguments, not independently
+			// hard-coded literals that could drift from BUILD.bazel
+			// unnoticed (S1).
+			{"test-embedded-cmd", "Test", "//cmd/bd:bd_embedded_test", ".github/scripts/embedded-test-shard.sh", -1},
+			{"test-embedded-storage", "Test", "//internal/storage/embeddeddolt:embeddeddolt_embedded_test", ".github/scripts/embedded-storage-test-shard.sh", -1},
 		}, []string{"//internal/storage/embeddeddolt:embeddeddolt_conformance_core_test", "//internal/storage/embeddeddolt:embeddeddolt_conformance_audit_test"}},
 		{bazelProxiedJobName, "doltserver-proxied", []suite{
-			{"test-proxied-cmd", "Test proxied-server cmd shard", "//cmd/bd:bd_proxied_test", ".github/scripts/proxied-test-shard.sh"},
+			// bazel-proxied runs its own duration-balanced manifest block
+			// (scripts/ci/proxied_test_durations.json), not PR Risk's frozen
+			// 15-shard bd-init-cost-proxy block: it is not a drop-in
+			// retirement of test-proxied-cmd's shard count, just its tests.
+			// bazelProxiedShardCount reads the real count from
+			// cmd/bd/BUILD.bazel, making this suite's `want` (below) a
+			// genuine cross-file pin against bazel.yml's own
+			// check_shard_coverage.py argument, not an independently
+			// hard-coded literal that could drift from BUILD.bazel unnoticed
+			// (S1).
+			{"test-proxied-cmd", "Test proxied-server cmd shard", "//cmd/bd:bd_proxied_test", ".github/scripts/proxied-test-shard.sh", -1},
 		}, nil},
 		{bazelServerJobName, "doltserver-integration", []suite{
-			{"test-server-storage-full", "Test", "//internal/storage/dolt:dolt_server_full_test", ".github/scripts/server-storage-test-shard.sh"},
+			{"test-server-storage-full", "Test", "//internal/storage/dolt:dolt_server_full_test", ".github/scripts/server-storage-test-shard.sh", 0},
 		}, []string{"//internal/storage/dolt:dolt_server_conformance_test"}},
 	} {
 		job := readCIWorkflow(t, bazelWorkflowName).job(t, c.lane)
 		step := job.step(t, "Every listed test ran in its shard")
 		want := []string{"python3 tools/bazel/check_shard_coverage.py", `--bep "$RUNNER_TEMP/bazel-bep.json"`}
 		for _, s := range c.suites {
-			shards := len(risk.job(t, s.job).Strategy.Matrix.Shard)
+			shards := s.shardCount
+			switch {
+			case shards < 0:
+				fn, ok := liveShardCount[s.label]
+				if !ok {
+					t.Fatalf("%s: shardCount<0 (read live from BUILD.bazel) is not configured for %s", s.job, s.label)
+				}
+				shards = fn(t)
+			case shards == 0:
+				shards = len(risk.job(t, s.job).Strategy.Matrix.Shard)
+			}
 			if !strings.Contains(risk.job(t, s.job).step(t, s.step).Run, s.script) {
 				t.Errorf("pr-risk.yml %s no longer runs %s; update this suite", s.job, s.script)
 			}
@@ -1234,51 +1391,158 @@ func TestShardScriptsListOnlyRealTests(t *testing.T) {
 		for _, d := range regexp.MustCompile(`(?m)^func (Test\w*)\(\w+ \*testing\.T\) \{`).FindAllStringSubmatch(src.String(), -1) {
 			declared[d[1]] = true
 		}
-		shards := len(risk.job(t, c.job).Strategy.Matrix.Shard)
-		// The scripts' hash fallback forks per test (seconds per shard for
-		// the server suite): list the shards concurrently.
-		outs, errs := make([][]byte, shards+1), make([]error, shards+1)
-		var wg sync.WaitGroup
-		for k := 1; k <= shards; k++ {
-			wg.Add(1)
-			go func(k int) {
-				defer wg.Done()
-				cmd := exec.Command("bash", c.script, strconv.Itoa(k), strconv.Itoa(shards))
-				cmd.Dir = root
-				cmd.Env = append(os.Environ(), "BEADS_TEST_SHARD_LIST_ONLY=1")
-				outs[k], errs[k] = cmd.Output()
-			}(k)
+
+		// B1: validate every total this script's committed manifest holds a
+		// block for, plus this job's own PR Risk matrix size and (for
+		// test-proxied-cmd) the Bazel lane's own shard_count — not just
+		// whichever total happens to equal this PR Risk job's matrix. Before
+		// F2 those always coincided; now the Bazel-only bazel-proxied lane
+		// reads a manifest block (30) that no PR-Risk-matrix-only check ever
+		// exercises, so a fork PR (which never runs bazel-proxied) could
+		// corrupt that block and still merge green. Looping over every
+		// distinct total in the manifest closes that gap for this script and
+		// any other script that later grows a second block the same way.
+		mm := shardManifestDefault.FindStringSubmatch(readPolicyFile(t, root, c.script))
+		if mm == nil {
+			t.Fatalf("%s has no ${BEADS_TEST_SHARD_MANIFEST:-...} default manifest", c.script)
 		}
-		wg.Wait()
-		listed := 0
-		for k := 1; k <= shards; k++ {
-			if errs[k] != nil {
-				t.Fatalf("%s %d %d: %v", c.script, k, shards, errs[k])
+		totalsSet := map[int]bool{len(risk.job(t, c.job).Strategy.Matrix.Shard): true}
+		for _, line := range strings.Split(readPolicyFile(t, root, mm[1]), "\n") {
+			line, _, _ = strings.Cut(line, "#")
+			fields := strings.Fields(line)
+			if len(fields) == 0 {
+				continue
 			}
-			for _, line := range strings.Split(string(outs[k]), "\n") {
-				name, ok := strings.CutPrefix(line, "  ")
-				if !ok || !strings.HasPrefix(name, "Test") || strings.ContainsAny(name, " :") {
-					continue
-				}
-				listed++
-				isTest := declared[name]
-				switch {
-				case notTests[name] && isTest:
-					t.Errorf("%s shard %d lists %s, which check_shard_coverage.py drops, but it is a real test", c.script, k, name)
-				case !notTests[name] && !isTest:
-					t.Errorf("%s shard %d lists %s, which is not a `func %s(t *testing.T)` test in %s: check_shard_coverage.py would report it missing on every run (add it to NOT_TESTS only if go test never runs it)",
-						c.script, k, name, name, c.pkg)
-				}
+			if n, err := strconv.Atoi(fields[0]); err == nil {
+				totalsSet[n] = true
 			}
 		}
-		if listed < 50 {
-			t.Errorf("%s listed only %d tests over %d shards; did the list-only output format change?", c.script, listed, shards)
+		switch c.script {
+		case ".github/scripts/proxied-test-shard.sh":
+			totalsSet[bazelProxiedShardCount(t)] = true
+		case ".github/scripts/embedded-test-shard.sh":
+			// F1: the Bazel-only bazel-embedded lane reads a 50-shard cmd
+			// block that no PR-Risk-matrix-only (20-shard) check exercises;
+			// without this, "BUILD.bazel's shard_count and bazel.yml's
+			// check_shard_coverage.py arg both drift to a new total with no
+			// manifest block" passes every policy test (see review S3) --
+			// the lane then silently goes 100% hash fallback and loses its
+			// duration balancing.
+			totalsSet[bazelEmbeddedCmdShardCount(t)] = true
+		case ".github/scripts/embedded-storage-test-shard.sh":
+			// F1: mirrors the cmd case above for the 15-shard storage block.
+			totalsSet[bazelEmbeddedStorageShardCount(t)] = true
+		}
+		totals := make([]int, 0, len(totalsSet))
+		for n := range totalsSet {
+			totals = append(totals, n)
+		}
+		sort.Ints(totals)
+
+		for _, shards := range totals {
+			// The scripts' hash fallback forks per test (seconds per shard
+			// for the server suite): list the shards concurrently.
+			outs, errs := make([][]byte, shards+1), make([]error, shards+1)
+			var wg sync.WaitGroup
+			for k := 1; k <= shards; k++ {
+				wg.Add(1)
+				go func(k int) {
+					defer wg.Done()
+					cmd := exec.Command("bash", c.script, strconv.Itoa(k), strconv.Itoa(shards))
+					cmd.Dir = root
+					cmd.Env = append(os.Environ(), "BEADS_TEST_SHARD_LIST_ONLY=1")
+					outs[k], errs[k] = cmd.Output()
+				}(k)
+			}
+			wg.Wait()
+			listed, manifestSum := 0, 0
+			for k := 1; k <= shards; k++ {
+				if errs[k] != nil {
+					// The script itself exits 1 on a duplicate manifest entry
+					// or a manifest entry that names no discovered test
+					// (rename/typo/stale-after-delete), for the requested
+					// total only: this is what catches a corrupted block
+					// that a PR-Risk-matrix-only check at a different total
+					// would never see.
+					t.Fatalf("%s %d %d: %v\n%s", c.script, k, shards, errs[k], outs[k])
+				}
+				for _, line := range strings.Split(string(outs[k]), "\n") {
+					if mc := regexp.MustCompile(`^  manifest: (\d+), fallback: \d+$`).FindStringSubmatch(line); mc != nil {
+						n, _ := strconv.Atoi(mc[1])
+						manifestSum += n
+						continue
+					}
+					name, ok := strings.CutPrefix(line, "  ")
+					if !ok || !strings.HasPrefix(name, "Test") || strings.ContainsAny(name, " :") {
+						continue
+					}
+					listed++
+					isTest := declared[name]
+					switch {
+					case notTests[name] && isTest:
+						t.Errorf("%s shard %d/%d lists %s, which check_shard_coverage.py drops, but it is a real test", c.script, k, shards, name)
+					case !notTests[name] && !isTest:
+						t.Errorf("%s shard %d/%d lists %s, which is not a `func %s(t *testing.T)` test in %s: check_shard_coverage.py would report it missing on every run (add it to NOT_TESTS only if go test never runs it)",
+							c.script, k, shards, name, name, c.pkg)
+					}
+				}
+			}
+			if listed < 50 {
+				t.Errorf("%s at %d shards listed only %d tests; did the list-only output format change?", c.script, shards, listed)
+			}
+			// S1: a total that is supposed to have a committed manifest
+			// block (every total this loop considers does: it is either a
+			// live job's matrix size or a total this script's own manifest
+			// already names) must not have silently gone 100% hash fallback,
+			// which is what "the whole block was deleted" looks like from
+			// here: check_shard_coverage.py would still pass (it rebuilds
+			// its expectation from this same script), so nothing else
+			// catches it.
+			if manifestSum == 0 {
+				t.Errorf("%s at %d shards: manifest entries for this total sum to 0 across all shards (100%% hash fallback); its committed block in %s may have been deleted", c.script, shards, mm[1])
+			}
 		}
 	}
 	for name := range notTests {
 		if name != "TestMain" {
 			t.Errorf("NOT_TESTS has %s; only TestMain is never a test", name)
 		}
+	}
+}
+
+// S3: the Bazel-only 30-shard block is not frozen like the legacy 15-shard
+// block (TestShardScriptsListOnlyRealTests's B1 fix catches outright
+// corruption, but not a committed block that has drifted from the currently
+// discovered TestProxiedServer*/TestServerMode* test set, e.g. a test added,
+// renamed, or removed without anyone running --write). gen_proxied_shard_
+// manifest.py --check verifies only that the committed block names every
+// discovered test exactly once -- not that its shard *assignments* match a
+// fresh LPT pack -- and fails with the exact command to fix it when a name
+// is missing, stale, or duplicated. It deliberately does NOT fail merely
+// because proxied_test_durations.json's weights changed and the existing
+// packing is now suboptimal: two PRs each adding one proxied test would
+// otherwise force a full repack and conflict on unrelated shard lines (see
+// --repack below for the explicit opt-in to that). Run --check here so a
+// block with missing/stale/duplicate names fails go test ./scripts/...
+// (and so scripts-go-checks, which runs on fork PRs) instead of only
+// surfacing as a test silently never running in any shard. The legacy
+// 15-shard block is deliberately excluded: its header documents that it is
+// frozen and must not be regenerated (see
+// .github/scripts/proxied-cmd-test-shards.txt and engdocs/TESTING.md), so a
+// --check against it would always fail by design.
+func TestProxiedShardManifestGeneratorNotStale(t *testing.T) {
+	if os.Getenv("TEST_SRCDIR") != "" {
+		t.Skip("scripts_test's runfiles hold neither the generator's sources nor cmd/bd")
+	}
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	root := sourceRepoRoot(t)
+	cmd := exec.Command(python, "scripts/ci/gen_proxied_shard_manifest.py", "30", "--weights=duration", "--check")
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Errorf("gen_proxied_shard_manifest.py 30 --weights=duration --check: %v\n%s", err, out)
 	}
 }
 
@@ -1475,7 +1739,7 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 			map[string]string{
 				"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)", "BEADS_TEST_DOLT_SERVER": "local", "BEADS_TEST_GIT_IDENTITY": "1",
 				"BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)", "BEADS_TEST_PROXIED_SERVER": "1",
-				"BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1", "GOMAXPROCS": "4",
+				"BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1", "BEADS_TEST_REQUIRE_SOCAT": "1", "GOMAXPROCS": "4",
 			},
 		},
 		"//internal/storage/dolt:dolt_server_conformance_test": {

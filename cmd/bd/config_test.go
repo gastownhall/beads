@@ -758,6 +758,10 @@ func TestResolvedConfigRepoRoot(t *testing.T) {
 			t.Fatalf("Failed to create sub dir: %v", err)
 		}
 
+		// CWD discovery is what is under test: an inherited BEADS_DIR
+		// (a developer's shell, or one an earlier in-process command
+		// exported) would take precedence and fail the lookup.
+		t.Setenv("BEADS_DIR", "")
 		t.Chdir(subDir)
 		resetResolutionCaches(t)
 
@@ -802,6 +806,7 @@ func TestResolvedConfigRepoRoot(t *testing.T) {
 			t.Fatalf("Failed to create bare metadata.json: %v", err)
 		}
 
+		t.Setenv("BEADS_DIR", "") // as above: discovery, not BEADS_DIR, is under test
 		t.Chdir(worktreeDir)
 		resetResolutionCaches(t)
 

@@ -77,7 +77,7 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 		vars := mergeVars(expFormula, rule.Vars)
 
 		// Expand the target step (start at depth 0)
-		expandedSteps, err := expandStep(targetStep, expFormula.Template, 0, vars)
+		expandedSteps, err := expandStep(targetStep, expFormula.Template, vars)
 		if err != nil {
 			return nil, fmt.Errorf("expand %q: %w", rule.Target, err)
 		}
@@ -133,7 +133,7 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 
 		// Expand each matching step
 		for _, targetStep := range toExpand {
-			expandedSteps, err := expandStep(targetStep, expFormula.Template, 0, vars)
+			expandedSteps, err := expandStep(targetStep, expFormula.Template, vars)
 			if err != nil {
 				return nil, fmt.Errorf("map %q -> %q: %w", rule.Select, targetStep.ID, err)
 			}
@@ -189,13 +189,12 @@ func countStepIDs(steps []*Step, counts map[string]int) {
 	}
 }
 
-// expandStep expands a target step using the given template.
-// Returns the expanded steps with placeholders substituted.
-// The depth parameter tracks recursion depth for children; if it exceeds
-// DefaultMaxExpansionDepth, an error is returned.
+// expandStep expands a target step using the given template, starting at
+// recursion depth 0 (expandStepWith tracks depth for nested children; if it
+// exceeds DefaultMaxExpansionDepth, an error is returned).
 // The vars parameter provides variable values for {varname} substitution.
-func expandStep(target *Step, template []*Step, depth int, vars map[string]string) ([]*Step, error) {
-	return expandStepWith(target, template, depth, func(s string) string {
+func expandStep(target *Step, template []*Step, vars map[string]string) ([]*Step, error) {
+	return expandStepWith(target, template, 0, func(s string) string {
 		return substituteVars(s, vars)
 	})
 }
@@ -434,7 +433,7 @@ func MaterializeExpansion(f *Formula, targetID string, vars map[string]string) e
 		return nil
 	}
 
-	expandedSteps, err := expandStep(materializeTarget(f, targetID), f.Template, 0, vars)
+	expandedSteps, err := expandStep(materializeTarget(f, targetID), f.Template, vars)
 	if err != nil {
 		return fmt.Errorf("materializing expansion %q: %w", f.Formula, err)
 	}
@@ -542,7 +541,7 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([
 			vars := mergeVars(expFormula, step.ExpandVars)
 
 			// Expand the step using the template (reuse existing expandStep)
-			expandedSteps, err := expandStep(step, expFormula.Template, 0, vars)
+			expandedSteps, err := expandStep(step, expFormula.Template, vars)
 			if err != nil {
 				return nil, fmt.Errorf("inline expand on step %q: %w", step.ID, err)
 			}
