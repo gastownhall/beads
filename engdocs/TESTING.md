@@ -97,7 +97,10 @@ sit behind that API, selected by `BEADS_TEST_DOLT_SERVER`:
 
 `BEADS_TEST_REQUIRE_DOLT_CONTAINER=1` turns an unavailable backend into a
 failure (per test and in every `TestMain`) instead of a skip; lanes that
-exist to run the Dolt suites set it.
+exist to run the Dolt suites set it. `BEADS_TEST_REQUIRE_SOCAT=1` does the
+same for the proxied subtests that bridge an external endpoint with `socat`
+(external-unix, the outage/reconnect matrix); `//cmd/bd:bd_proxied_test`
+sets it, and the legacy GitHub proxied jobs, which have no `socat`, do not.
 
 Under Bazel, `bazel test //... --config=doltserver` runs the Dolt-backed
 suites of pr.yml's "Test (storage domain + uow)" and "Contract corpus" jobs
@@ -111,8 +114,24 @@ proxied-server cmd/bd tier ("Test (Proxied Dolt Cmd N/15)",
 `//cmd/bd:bd_proxied_test`), and `--config=doltserver-integration` the
 server-Dolt storage tier ("Test (Server Dolt Conformance)", "Test (Server
 Dolt Full Suite N/16)", `//internal/storage/dolt:dolt_server_*_test`), which
-builds with the integration tag like `--config=integration`. Each shard
-runs its CI job's shard script, so Bazel shard k runs the tests of job k+1.
+builds with the integration tag like `--config=integration`. Each shard runs
+its CI job's shard script, so for `--config=doltserver-integration` Bazel
+shard k runs the tests of job k+1 (both split the manifest's 16-shard block
+the same way). `--config=doltserver-proxied`'s `bd_proxied_test` instead
+runs the manifest's own 30-shard block — bin-packed by measured duration,
+not the legacy jobs' 15-shard, bd-init-cost-proxy block — so shard k there
+is not job k+1's tests; it is a different split of the same tests.
+
+`--config=doltserver-cmd` (`//cmd/bd:bd_dolt_server_test`, bazel.yml's
+advisory `bazel-cmd-dolt` job) runs the whole integration-tagged cmd/bd
+suite on the `local` backend: the Dolt-gated cmd/bd tests (`TestCLI_*`, the
+init and store-backed suites) that every other lane skips with
+`BEADS_TEST_SKIP=dolt` or leaves out of its manifest. It shares
+`--config=integration`'s build, passes the binary no test selection (the Go
+binary shards itself over every top-level test, 16 shards), and runs where
+the integration lane runs (remote, or with the read-only cache). pr.yml's
+gate requires it once `BAZEL_CMD_DOLT_REQUIRED` is `"true"`. Locally:
+`bazel test //cmd/bd:bd_dolt_server_test --config=doltserver-cmd`.
 
 An ambient `BEADS_DOLT_SERVER_PORT` or `BEADS_DOLT_PORT` is never honored by
 the suites that call `testutil.EnsureDoltContainerForTestMain`. When a test

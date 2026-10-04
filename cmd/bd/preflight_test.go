@@ -514,6 +514,19 @@ func TestRunVersionSyncCheck_BeadsUsesBuiltInAuthority(t *testing.T) {
 	if !strings.Contains(result.Output, "npm package.json: 9.9.9 (expected 1.1.0)") {
 		t.Fatalf("unexpected mismatch output: %q", result.Output)
 	}
+	// A bare update-versions.sh re-run no-ops on a drifted file, so the check
+	// carries the remedies that work, and the human view (which prints the
+	// first 500 bytes of a failed check) shows all of them for one drift.
+	remedy := versioncheck.Report{CanonicalVersion: "1.1.0"}.MismatchRemedy()
+	if !strings.HasSuffix(result.Output, "\n"+remedy) {
+		t.Fatalf("mismatch output lacks the drift remedy: %q", result.Output)
+	}
+	if strings.Contains(result.Output, "Run: scripts/update-versions.sh") {
+		t.Fatalf("mismatch output prescribes a bare update-versions.sh run: %q", result.Output)
+	}
+	if shown := truncateOutput(result.Output, 500); strings.HasSuffix(shown, "(truncated)") {
+		t.Fatalf("human output cuts the remedy for one drifted file: %q", shown)
+	}
 
 	if err := os.WriteFile(
 		filepath.Join(root, "npm-package", "package.json"),

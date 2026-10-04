@@ -77,8 +77,17 @@ go_library(
     ],
 )
 
+# Under --config=prcore/ci and --config=integration (BEADS_TEST_SKIP=dolt) the
+# Dolt-backed tests skip and the whole target takes a few seconds. Without a
+# lane config (a plain `bazel test //internal/storage/uow:uow_test`) nothing
+# skips them: every newTestUOWProvider test starts its own dolt sql-server,
+# ~6-8s apiece, and the package needs ~7 min serially (TestBatchApplyContract
+# alone ~1 min: BoundsTheItemCount applies 1000+1001 real items), past the
+# default medium 300s. size/shard_count cover that configless run, the same
+# workload uow_dolt_test (8 shards) and uow_docker_test (4 shards) run.
 go_test(
     name = "uow_test",
+    size = "large",
     srcs = [
         "batch_applier_retry_budget_test.go",
         "batch_apply_contract_test.go",
@@ -148,6 +157,7 @@ go_test(
         "testmain_test.go",
         "tree_walker_contract_test.go",
         "tx_test.go",
+        "upstream_outage_window_test.go",
         "version_reconcile_boot_test.go",
         "version_reconcile_integration_test.go",
         "version_reconciler_contract_test.go",
@@ -159,6 +169,7 @@ go_test(
     ],
     embed = [":uow"],
     env = {"BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)"},
+    shard_count = 4,
     deps = [
         "//backend/conformance",
         "//internal/configfile",

@@ -31,7 +31,60 @@ type gitContext struct {
 var (
 	gitCtxOnce sync.Once
 	gitCtx     gitContext
+
+	// pinnedRootForTesting is the root directory PinNoRepositoryUnderForTesting
+	// was given, or "" when no pin is active. Deliberately NOT cleared by
+	// ResetCaches: see that function's comment and PinNoRepositoryUnderForTesting's
+	// doc for why the pin must outlive a cache reset to do its job.
+	pinnedRootForTesting string
+	// pinnedRootRawForTesting is the pin as given (absolute but not
+	// symlink-resolved). underPinnedRootForTesting matches against both forms
+	// so canonicalization only ever widens the fence, never narrows it.
+	pinnedRootRawForTesting string
 )
+
+// underPinnedRootForTesting reports whether wd is pinnedRootForTesting itself
+// or a descendant of it. Called with the live working directory on every
+// getGitContext lookup while a pin is active, so a test that chdirs outside
+// the pinned root (e.g. into its own t.TempDir() fixture) still gets real git
+// detection scoped to that fixture.
+//
+// Both sides are compared in canonical form (see canonicalPinPath): on macOS
+// t.TempDir() and os.TempDir() live under /var/folders/..., but /var is a
+// symlink to /private/var and getcwd(2) reports the resolved
+// /private/var/folders/... path, so a raw prefix test never matched and the
+// pin silently did nothing there.
+func underPinnedRootForTesting(wd string) bool {
+	if pinnedRootForTesting == "" || wd == "" {
+		return false
+	}
+	canonicalWD := canonicalPinPath(wd)
+	for _, root := range []string{pinnedRootForTesting, pinnedRootRawForTesting} {
+		if root == "" {
+			continue
+		}
+		for _, dir := range []string{wd, canonicalWD} {
+			if dir == root || strings.HasPrefix(dir, root+string(filepath.Separator)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// canonicalPinPath returns p as an absolute, symlink-resolved, cleaned path,
+// falling back to the best form available when resolution fails (e.g. the
+// path no longer exists), so the pin comparison is never stricter than the
+// raw strings.
+func canonicalPinPath(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
+	return filepath.Clean(p)
+}
 
 // initGitContext populates the gitContext with a single git call.
 // This is called once per process via sync.Once.
@@ -234,6 +287,11 @@ func ResolveWorkTreelessHooksContext(workDir string, env []string) (HooksContext
 
 // getGitContext returns the cached git context, initializing it if needed.
 func getGitContext() (*gitContext, error) {
+	if pinnedRootForTesting != "" {
+		if wd, err := os.Getwd(); err == nil && underPinnedRootForTesting(wd) {
+			return nil, errPinnedNoRepository
+		}
+	}
 	gitCtxOnce.Do(initGitContext)
 	if gitCtx.err != nil {
 		return nil, gitCtx.err
@@ -470,8 +528,71 @@ func NormalizePath(path string) string {
 // In production, these caches are safe because the working directory
 // doesn't change during a single command execution.
 //
+// Deliberately does NOT clear a PinNoRepositoryUnderForTesting pin: that pin
+// is directory-scoped (re-evaluated against the live working directory on
+// every call, not baked into the one-shot gitCtx this function clears), so a
+// test fixture that chdirs out of the pinned root, calls ResetCaches, and
+// does real git work there is unaffected — and a test that chdirs back under
+// the pinned root and calls ResetCaches on the way out (e.g. cmd/bd's
+// runInDir/resetRepoCachesForTest idiom) must keep answering "not a
+// repository", or every later test in the binary loses the fence the pin
+// exists to provide. See PinNoRepositoryUnderForTesting.
+//
 // WARNING: Not thread-safe. Only call from single-threaded test contexts.
 func ResetCaches() {
+	gitCtxOnce = sync.Once{}
+	gitCtx = gitContext{}
+}
+
+// errPinnedNoRepository is returned by getGitContext for any working
+// directory PinNoRepositoryUnderForTesting pinned.
+var errPinnedNoRepository = errors.New("not a git repository (pinned for testing)")
+
+// PinNoRepositoryUnderForTesting pins "not a git repository" for root and
+// every directory under it, so IsWorktree, GetRepoRoot, and GetMainRepoRoot
+// answer as if no repository were present for any process working directory
+// at or below root — including across ResetCaches, unlike the one-shot
+// sentinel this replaced.
+//
+// This exists for whole-binary test fencing (GH#7145-style cmd/bd pollution):
+// without it, the first cached-git-context call made anywhere in a test
+// binary — before any individual test has had a chance to chdir into its own
+// fixture — permanently answers for the rest of the process from whatever
+// repository the binary happened to start in. For a worktree checkout, that
+// answer includes a real --git-common-dir, which beads' worktree-fallback
+// discovery (FindBeadsDir) treats as license to read and write the main
+// checkout's shared .beads database. root should be the repository root the
+// test binary started in (not a narrower directory like the package dir),
+// so the fence covers any subdirectory of that checkout a test might chdir
+// into without leaving it.
+//
+// The pin is directory-scoped, not a cache snapshot: getGitContext checks
+// the live working directory against root on every call, before touching
+// gitCtxOnce/gitCtx at all. A test that chdirs to a fixture OUTSIDE root
+// (e.g. its own t.TempDir(), which is not nested under a checkout root) and
+// calls ResetCaches gets real git detection scoped to that fixture, exactly
+// as before this pin existed (see cmd/bd/git_test_helpers.go's runInDir).
+// A test that chdirs back under root — including the package directory
+// itself, where most tests run without ever chdir'ing away — keeps
+// answering "not a repository" even after ResetCaches, because ResetCaches
+// does not clear pinnedRootForTesting.
+//
+// This lives in production code rather than a _test.go file (like
+// ResetCaches, which it pairs with) only so a test binary's TestMain can call
+// it: TestMain runs in the package under test, not in a _test.go-only
+// helper's package, and Go does not let a non-test file reach a _test.go
+// identifier. Treat it exactly like ResetCaches despite that: the only
+// intended caller is a TestMain (currently cmd/bd's), called once, before
+// m.Run(). Production code must never call this.
+//
+// WARNING: Not thread-safe, like ResetCaches. Only call before m.Run(),
+// before any goroutines that might read the git context are started.
+func PinNoRepositoryUnderForTesting(root string) {
+	pinnedRootRawForTesting = root
+	if abs, err := filepath.Abs(root); err == nil {
+		pinnedRootRawForTesting = abs
+	}
+	pinnedRootForTesting = canonicalPinPath(root)
 	gitCtxOnce = sync.Once{}
 	gitCtx = gitContext{}
 }

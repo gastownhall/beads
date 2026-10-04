@@ -1,10 +1,13 @@
 name: Update vendorHash for dependabot Go bumps
 
 # Dependabot bumps to go.mod/go.sum invalidate the proxyVendor FOD hash in
-# default.nix, which fails the nix-build CI gate. This workflow detects the
-# drift, computes the new hash via scripts/update-nix-vendorhash.sh, and
-# pushes the update back to the dependabot branch so the gate goes green
-# without a maintainer round-trip.
+# default.nix, which fails the required PR Risk `test-nix` gate (F7c,
+# spec-f7.md §2.4: nix-build.yml itself no longer runs on pull_request, since
+# test-nix's `nix run .#default` plus `nix flake check -L` is a superset of
+# plain `nix build .#default`). This workflow detects the drift, computes the
+# new hash via scripts/update-nix-vendorhash.sh, and pushes the update back to
+# the dependabot branch so the gate goes green without a maintainer
+# round-trip.
 #
 # Tracked under beads-bz5.
 #
@@ -28,9 +31,9 @@ name: Update vendorHash for dependabot Go bumps
 #
 # Caveat:
 #   GitHub does not retrigger pull_request workflow runs for commits
-#   authored by GITHUB_TOKEN. After this workflow pushes, the existing
-#   nix-build.yml check on this PR will remain stuck on the pre-fix commit.
-#   Maintainers either re-run nix-build manually, or this workflow's own
+#   authored by GITHUB_TOKEN. After this workflow pushes, the existing PR Risk
+#   `test-nix` check on this PR will remain stuck on the pre-fix commit.
+#   Maintainers either re-run test-nix manually, or this workflow's own
 #   success acts as the green signal that the hash is correct.
 
 on:

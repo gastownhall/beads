@@ -82,7 +82,12 @@ func TestFormatFederationPeerListJSONPreservesLegacyKeys(t *testing.T) {
 	}
 }
 
-func TestEmbeddedFederation(t *testing.T) {
+// TestEmbeddedFederationPeers and TestEmbeddedFederationStatus were split
+// from TestEmbeddedFederation (originally ~282s, measured under
+// --config=embedded) into 2 top-level tests over disjoint subtest groups,
+// for CI shard balance (see scripts/ci/embedded_cmd_test_durations.json and
+// engdocs/TESTING.md). Every original subtest is preserved exactly once.
+func TestEmbeddedFederationPeers(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt federation tests")
 	}
@@ -169,6 +174,15 @@ func TestEmbeddedFederation(t *testing.T) {
 			t.Errorf("expected sovereignty='T2', got %q", sov)
 		}
 	})
+}
+
+func TestEmbeddedFederationStatus(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt federation tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("remove_peer", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "fdrm")

@@ -12,9 +12,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `bd preflight --fix --json` no longer returns a `Version sync` fix result:
   version updates must keep all release surfaces aligned via `scripts/update-versions.sh`.
 - Release-tag pushes require Go and reject batches containing different release versions.
+- On version drift the release-tag pre-push hook points at the checker's
+  remedies instead of prescribing `scripts/update-versions.sh <version>`, and
+  `scripts/check-versions.sh` and `bd preflight` list the three that work: with
+  `cmd/bd/version.go` already at the release version, that re-run rewrites only
+  the `.githooks` markers and `uv.lock` and leaves any other drifted file as it was.
 
 ### Fixed
 
+- **A proxied-server command against an unreachable external Dolt upstream
+  now fails within about a second with a clear error instead of stalling
+  ~20-30s.** The local db proxy stayed up, so the client only saw a bare
+  close, which the bootstrap ping retried as a transient drop for its whole
+  30s budget before reporting `invalid connection`. The proxy now answers such
+  a connection with a MySQL error (2003, prefixed `beads db proxy:`) saying
+  what happened: the dial was refused / the socket is missing / the host is
+  unreachable, or the upstream closed the connection before the MySQL greeting
+  (down, restarting, or at its connection limit). The client retries that
+  error only for about a second, so an endpoint that is flapping or rebinding
+  is still ridden out within one command. A backend that drops a connection
+  after the greeting, a dial timeout, and every refusal from a managed (local
+  sidecar) backend keep the full transient retry.
 - **`bd list` no longer silently drops all but the last repeated filter flag.**
   `--status`, `--state`, and `--id` were plain string flags, so
   `bd list --status open --status closed --status pinned` kept only `pinned` —

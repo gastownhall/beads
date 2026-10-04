@@ -8,11 +8,19 @@ import (
 	"testing"
 )
 
+// These tests exercise `bd sql`, not the managed-local backend lifecycle, so
+// they run against the shared per-binary dolt sql-server instead of having
+// each `bd init --proxied-server` spawn its own. A spawned backend's port is
+// picked bind-and-close at init and bound by dolt seconds later; under the
+// parallel proxied tier another process can take it in between, dolt exits
+// with "Port N already in use", and the proxy's dial-only readiness check has
+// already accepted the foreign listener, so init's first ping dies with
+// "unexpected EOF" then "connection refused". The shared server's own startup
+// (testutil.localDoltServer) waits for dolt's ready line and retries on
+// another port, so it does not have that race.
 func TestProxiedServerMultiStatementSQL(t *testing.T) {
-	requireProxiedServerEnv(t)
-
 	bd := buildEmbeddedBD(t)
-	p := bdProxiedInit(t, bd, "ms")
+	p := newSharedProxiedProject(t, bd, "ms")
 
 	// A multi-statement batch is treated as a write: it executes and commits
 	// atomically, and reports "OK" with no rows-affected count.
@@ -70,16 +78,16 @@ func TestProxiedServerMultiStatementSQL(t *testing.T) {
 }
 
 func TestProxiedServerSQLDatabaseFlag(t *testing.T) {
-	requireProxiedServerEnv(t)
-
 	bd := buildEmbeddedBD(t)
-	p := bdProxiedInit(t, bd, "df")
+	p := newSharedProxiedProject(t, bd, "df")
 
 	// Stand up a second database with a table, alongside the project database.
+	// The server is shared, so the name derives from the project's unique one.
+	other := p.database + "_other"
 	db := openProxiedDB(t, p)
 	for _, q := range []string{
-		"CREATE DATABASE IF NOT EXISTS df_other",
-		"USE df_other; CREATE TABLE widgets (id INT PRIMARY KEY, name VARCHAR(32))",
+		"CREATE DATABASE " + other,
+		"USE " + other + "; CREATE TABLE widgets (id INT PRIMARY KEY, name VARCHAR(32))",
 	} {
 		if _, err := db.ExecContext(context.Background(), q); err != nil {
 			t.Fatalf("setup %q: %v", q, err)
@@ -87,7 +95,7 @@ func TestProxiedServerSQLDatabaseFlag(t *testing.T) {
 	}
 
 	// A single write routed to the other database with --database.
-	out, err := bdProxiedRun(t, bd, p.dir, "sql", "--database", "df_other",
+	out, err := bdProxiedRun(t, bd, p.dir, "sql", "--database", other,
 		"INSERT INTO widgets VALUES (1, 'gear')")
 	if err != nil {
 		t.Fatalf("bd sql --database write failed: %v\n%s", err, out)
@@ -96,19 +104,19 @@ func TestProxiedServerSQLDatabaseFlag(t *testing.T) {
 		t.Fatalf("--database write output = %q, want %q", got, "OK, 1 rows affected")
 	}
 
-	// The write must have committed in df_other, not the project database.
+	// The write must have committed in the other database, not the project one.
 	var n int
 	if err := db.QueryRowContext(context.Background(),
-		"SELECT COUNT(*) FROM df_other.widgets WHERE name = 'gear'").Scan(&n); err != nil {
-		t.Fatalf("count df_other.widgets: %v", err)
+		"SELECT COUNT(*) FROM "+other+".widgets WHERE name = 'gear'").Scan(&n); err != nil {
+		t.Fatalf("count %s.widgets: %v", other, err)
 	}
 	if n != 1 {
-		t.Fatalf("df_other.widgets rows = %d, want 1 (--database write not committed there)", n)
+		t.Fatalf("%s.widgets rows = %d, want 1 (--database write not committed there)", other, n)
 	}
 
 	// A read routed with --database against an unqualified table name resolves
 	// in the switched database and renders results.
-	out, err = bdProxiedRun(t, bd, p.dir, "sql", "--database", "df_other",
+	out, err = bdProxiedRun(t, bd, p.dir, "sql", "--database", other,
 		"SELECT name FROM widgets WHERE id = 1")
 	if err != nil {
 		t.Fatalf("bd sql --database read failed: %v\n%s", err, out)

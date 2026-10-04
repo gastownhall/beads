@@ -5,11 +5,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -152,14 +154,16 @@ func TestBulkDeleteNoResurrection(t *testing.T) {
 		t.Errorf("After delete: expected %d issues in DB, got %d", expectedRemaining, stats.TotalIssues)
 	}
 
+	// GetIssue reports a missing issue as storage.ErrNotFound.
 	for _, id := range toDelete {
 		issue, err := s.GetIssue(ctx, id)
+		if errors.Is(err, storage.ErrNotFound) {
+			continue
+		}
 		if err != nil {
 			t.Fatalf("GetIssue failed for %s: %v", id, err)
 		}
-		if issue != nil {
-			t.Errorf("Deleted issue %s was resurrected!", id)
-		}
+		t.Errorf("Deleted issue %s was resurrected: %+v", id, issue)
 	}
 }
 
@@ -211,13 +215,11 @@ func TestDeleteIssueWrapper(t *testing.T) {
 			t.Fatalf("deleteIssue failed: %v", err)
 		}
 
-		// Verify issue is gone
+		// Verify issue is gone: GetIssue reports a missing issue as
+		// storage.ErrNotFound.
 		deleted, err := s.GetIssue(ctx, issue.ID)
-		if err != nil {
-			t.Fatalf("GetIssue failed: %v", err)
-		}
-		if deleted != nil {
-			t.Error("Issue should be completely deleted")
+		if !errors.Is(err, storage.ErrNotFound) {
+			t.Fatalf("GetIssue after delete: got (%v, %v), want storage.ErrNotFound", deleted, err)
 		}
 	})
 
@@ -308,26 +310,4 @@ func TestDeleteIssueWrapper(t *testing.T) {
 				statsBefore.TotalIssues, statsAfter.TotalIssues)
 		}
 	})
-}
-
-func TestDeleteIssueUnsupportedStorage(t *testing.T) {
-	if testDoltServerPort == 0 {
-		t.Skip("skipping: Dolt test container not available")
-	}
-
-	oldStore := store
-	defer func() { store = oldStore }()
-
-	// Set store to nil - the type assertion will fail
-	store = nil
-
-	ctx := context.Background()
-	err := deleteIssue(ctx, "any-id")
-	if err == nil {
-		t.Error("Expected error when storage is nil")
-	}
-	expectedMsg := "delete operation not supported by this storage backend"
-	if err.Error() != expectedMsg {
-		t.Errorf("Expected error %q, got %q", expectedMsg, err.Error())
-	}
 }

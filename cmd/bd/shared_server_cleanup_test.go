@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/procid"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 // stopSharedServerCleanup is the cleanup every fixture in this package that
@@ -180,4 +181,18 @@ func sharedServerStillRunning(t *testing.T, pid int, token procid.Token) bool {
 		return false
 	}
 	return same
+}
+
+// closedLoopbackPort returns a 127.0.0.1 port nothing listens on right now,
+// for tests that need a server connection to fail. A fixed "unlikely" port
+// (59999 used to be hard-coded here) is not: any process on the host may
+// hold it, and a listener that accepts and resets turns the expected
+// "connection refused" into a different error.
+func closedLoopbackPort(t *testing.T) int {
+	t.Helper()
+	port, err := testutil.FindFreePort()
+	if err != nil {
+		t.Fatalf("find free port: %v", err)
+	}
+	return port
 }

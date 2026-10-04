@@ -163,6 +163,28 @@ func (r Report) SuccessMessage() string {
 	)
 }
 
+// MismatchRemedy formats the operator guidance for a mismatch found against a
+// readable canonical version. scripts/update-versions.sh derives the OLD
+// version from cmd/bd/version.go and rewrites every other surface with a
+// substitution anchored on it, so re-running it for the canonical version
+// leaves a drifted file as it was; only the .githooks markers (rewritten
+// wholesale) and uv.lock (regenerated) heal that way. Kept short, with the
+// several-files case ahead of the version.go one: bd preflight's human output
+// shows only the first 500 bytes of a failed check, this follows the list of
+// mismatches, and a wrong version.go mismatches every surface, so that list
+// alone fills those bytes.
+func (r Report) MismatchRemedy() string {
+	return fmt.Sprintf(
+		"Re-running scripts/update-versions.sh %[1]s fixes only .githooks markers and\n"+
+			"uv.lock (version.go already reads %[1]s). Fix whichever applies:\n"+
+			"- one file drifted: edit it to the expected value above\n"+
+			"- several drifted: set version.go to the previous version, then\n"+
+			"  scripts/update-versions.sh %[1]s\n"+
+			"- version.go is wrong: scripts/update-versions.sh <intended-version>",
+		r.CanonicalVersion,
+	)
+}
+
 // Check compares every released metadata surface with cmd/bd/version.go.
 func Check(root string) (Report, error) {
 	report := Report{CheckedSources: len(releaseSources)}

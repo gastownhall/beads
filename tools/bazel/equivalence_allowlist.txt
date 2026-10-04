@@ -15,6 +15,8 @@
 # The in-test `go build` of bd that this test guards does not happen under
 # Bazel (bd comes in through BEADS_TEST_BD_BINARY); go test still runs it.
 cmd/bd TestGOMODCACHENotUnderTestHome skip  # no in-test go build under Bazel; guarded by go test
+# Same: it checks the fallback `go build` of bd, which Bazel never takes.
+cmd/bd TestGoBuildBDCommandIsCWDIndependent skip  # no in-test go build under Bazel; guarded by go test
 # Needs TestAAAStdioBaseline in the same process; sharding splits them.
 # TestMain's checkStdioAfterRun still checks every shard.
 cmd/bd TestZZStdioNotLeaked skip  # baseline test lands in another shard; checkStdioAfterRun covers each shard
@@ -29,3 +31,17 @@ scripts TestBazelTestTagsFollowTaxonomy skip  # reads every BUILD file in the ch
 scripts TestBazelTreeGoSrcsListsEveryPackage skip  # walks the source checkout; runs under go test
 scripts TestCheckTestingShortPassesOnCleanRepoTree skip  # walks the whole checkout; runs under go test
 scripts TestReleaseFormula* skip  # .beads/ is in .bazelignore, so the formula cannot be data; runs under go test
+
+# Policy tests whose inputs (other packages' BUILD files, .github/scripts,
+# tools/bazel Python) are not in //scripts:scripts_test's runfiles. Missing
+# here, they turned nightly.yml's skip-parity check red (2026-10-02).
+# scripts TestBazelOnlySkipsAreAllowlisted keeps this list complete.
+scripts TestBazelGatedLanesNeverRetryFlakyTests skip  # reads every BUILD and .bzl file in the checkout; runs under go test
+scripts TestCheckShardCoverageScript skip  # runs tools/bazel/check_shard_coverage.py, not in the runfiles; runs under go test
+scripts TestShardScriptsListOnlyRealTests skip  # runs the real .github/scripts shard scripts over the source tree; runs under go test
+scripts TestProxiedShardManifestGeneratorNotStale skip  # runs scripts/ci/gen_proxied_shard_manifest.py --check, not in the runfiles; runs under go test
+scripts TestCmdEmbeddedShardManifestGeneratorNotStale skip  # runs scripts/ci/gen_embedded_cmd_shard_manifest.py --check, not in the runfiles; runs under go test
+scripts TestStorageEmbeddedShardManifestGeneratorNotStale skip  # runs scripts/ci/gen_embedded_storage_shard_manifest.py --check, not in the runfiles; runs under go test
+scripts TestShardScriptNarrowingCheck skip  # reads the real .github/scripts shard scripts; runs under go test
+scripts TestBazelOnlySkipsAreAllowlisted skip  # parses every _test.go file in the checkout; runs under go test
+scripts TestRunAllowlistedGoTestsScript skip  # runs tools/bazel/run_allowlisted_go_tests.py, not in the runfiles; runs under go test

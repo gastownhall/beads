@@ -46,7 +46,12 @@ func createAndClose(t *testing.T, bd, dir, title string) string {
 	return issue.ID
 }
 
-func TestEmbeddedPrune(t *testing.T) {
+// TestEmbeddedPruneSafetyAndScope was split from TestEmbeddedPrune
+// (originally ~256.67s, measured under --config=embedded) into 2 top-level
+// tests over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedPruneSafetyAndScope(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -145,6 +150,20 @@ func TestEmbeddedPrune(t *testing.T) {
 			t.Errorf("expected prune to skip closed ephemeral %s; got: %s", wispID, out)
 		}
 	})
+}
+
+// TestEmbeddedPruneDryRunAndFilters was split from TestEmbeddedPrune
+// (originally ~256.67s, measured under --config=embedded) into 2 top-level
+// tests over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedPruneDryRunAndFilters(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	// ===== Scope: must NOT touch open beads =====
 
