@@ -57,9 +57,6 @@ func TestReopenIssueInTxRetriesConditionalUpdateWhenLatestStatusIsCustomDone(t *
 	mock.ExpectQuery(`(?s)SELECT id FROM events`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectExec(`(?s)INSERT INTO events`).WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT DISTINCT issue_id FROM dependencies WHERE issue_id IN (?)")).
-		WithArgs(id).
-		WillReturnRows(sqlmock.NewRows([]string{"issue_id"}).AddRow(id))
 	mock.ExpectExec(`(?s)UPDATE issues i SET`).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`(?s)UPDATE issues i SET`).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectRollback()

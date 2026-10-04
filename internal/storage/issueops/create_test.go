@@ -558,9 +558,10 @@ func TestReconcileChildCountersReturnsWispLookupError(t *testing.T) {
 
 // TestPersistDependenciesBatchValidatesPlannedHierarchyBeforeBlocking is the
 // batch-lookup twin of TestPersistDependenciesValidatesPlannedHierarchyBeforeBlocking:
-// routing and target presence come from one batch read each, the edge tables
-// are loaded once, and the planned ancestry the parent-child phase wrote is
-// what rejects the blocks edge — with no per-edge recursive query.
+// routing and target presence come from one batch read each, edges are read
+// only for the batch's own endpoints, and the planned ancestry the
+// parent-child phase wrote is what rejects the blocks edge — with no per-edge
+// recursive query.
 func TestPersistDependenciesBatchValidatesPlannedHierarchyBeforeBlocking(t *testing.T) {
 	ctx := context.Background()
 	db, mock, tx := beginMockTx(t)
@@ -587,7 +588,8 @@ func TestPersistDependenciesBatchValidatesPlannedHierarchyBeforeBlocking(t *test
 		WithArgs("bd-grand", "bd-parent").
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("bd-grand").AddRow("bd-parent"))
 	for _, table := range []string{"dependencies", "wisp_dependencies"} {
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, " + DepTargetExpr + ", type FROM " + table)).
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, "+DepTargetExpr+", type FROM "+table+" WHERE issue_id IN (?,?,?)")).
+			WithArgs("bd-child", "bd-grand", "bd-parent").
 			WillReturnRows(sqlmock.NewRows([]string{"issue_id", "target", "type"}))
 	}
 	for _, pair := range [][2]string{{"bd-child", "bd-parent"}, {"bd-parent", "bd-grand"}} {

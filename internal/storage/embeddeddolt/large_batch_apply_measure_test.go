@@ -412,18 +412,19 @@ func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 //   - ExecuteCreate hands its own BatchContext to the batch body instead of
 //     letting it re-read the same config: -6 statements per create item
 //     (356: 102 creates, -612; 712: 204, -1224; classic: 10, -60).
-//   - The blocked-state recompute first probes which ids have a dependency
-//     row of their own (+1 per recompute). An id without one — every freshly
+//   - A create's blocked-state recompute first probes which of its ids have
+//     a dependency row of their own (+1). An id without one — every freshly
 //     created item — then gets one plain UPDATE instead of the two union
-//     UPDATEs (net 0, and the dropped statements were the expensive ones); an
-//     id with edges keeps both, so the probe is net +1 (classic: +7).
+//     UPDATEs: net 0, and the dropped statements were the expensive ones.
+//     Recomputes outside the create paths (dep adds, updates, closes) run no
+//     probe and are unchanged.
 //
 // Net: 356 -613 (incl. the documented 1-statement jitter), 712 -1224,
-// classic -53.
+// classic -60.
 var pinnedEmbeddedStatementCounts = map[string]int64{
 	"356 (mol 1x)":    6396,
 	large712ShapeName: 12790,
-	"40 (classic)":    793,
+	"40 (classic)":    786,
 }
 
 // BenchmarkLargeBatchApply_Embedded benchmarks issueops.ApplyBatchInTx on

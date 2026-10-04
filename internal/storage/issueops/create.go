@@ -392,7 +392,9 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	}
 	for _, issue := range issues {
 		if batch.cache.deferrable(issue, opts) {
-			issueTable, eventTable, skip, err := prepareCreateIssueInTx(ctx, tx, &batch, issue, actor)
+			// deferrable requires the id absent from both planes, so the
+			// cross-plane collision check cannot ask for a skip here.
+			issueTable, eventTable, _, err := prepareCreateIssueInTx(ctx, tx, &batch, issue, actor)
 			if err != nil {
 				// The issues before this one are written (and can fail) first,
 				// as they would have been one at a time.
@@ -401,17 +403,8 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 				}
 				return CreateIssuesResult{}, err
 			}
-			if !skip {
-				batch.cache.markInserted(issueTable, issue.ID)
-				deferred.created = append(deferred.created, deferredCreate{issue: issue, issueTable: issueTable, eventTable: eventTable})
-				continue
-			}
-			// Unreachable while deferrable requires the id absent from both
-			// planes; kept so a skip is handled exactly as below.
-			if err := flush(); err != nil {
-				return CreateIssuesResult{}, err
-			}
-			record(issue, CreateIssueResult{})
+			batch.cache.markInserted(issueTable, issue.ID)
+			deferred.created = append(deferred.created, deferredCreate{issue: issue, issueTable: issueTable, eventTable: eventTable})
 			continue
 		}
 		if err := flush(); err != nil {
@@ -451,7 +444,9 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	if err != nil {
 		return CreateIssuesResult{}, err
 	}
-	recomputed, err := RecomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs)
+	// The ids are this batch's rows, most of them fresh and edgeless: let the
+	// recompute skip the union statements for those (planRecomputeInTx).
+	recomputed, err := recomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs, true)
 	if err != nil {
 		return CreateIssuesResult{}, err
 	}

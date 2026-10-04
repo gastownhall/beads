@@ -113,6 +113,16 @@ func RecomputeIsBlockedInTx(ctx context.Context, tx DBTX, issueIDs, wispIDs []st
 func RecomputeIsBlockedInTxWithResult(
 	ctx context.Context, tx DBTX, issueIDs, wispIDs []string,
 ) (RecomputeIsBlockedResult, error) {
+	return recomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs, false)
+}
+
+// recomputeIsBlockedInTxWithResult is RecomputeIsBlockedInTxWithResult with
+// the caller's say on the no-edge shortcut (planRecomputeInTx): a create
+// passes splitEdgeless, because its ids are mostly fresh rows without edges;
+// every other caller leaves it to the chunk size.
+func recomputeIsBlockedInTxWithResult(
+	ctx context.Context, tx DBTX, issueIDs, wispIDs []string, splitEdgeless bool,
+) (RecomputeIsBlockedResult, error) {
 	var result RecomputeIsBlockedResult
 	if len(issueIDs) == 0 && len(wispIDs) == 0 {
 		return result, nil
@@ -122,12 +132,12 @@ func RecomputeIsBlockedInTxWithResult(
 		return result, err
 	}
 	issuePlan, err := planRecomputeInTx(ctx, tx, "issues", "dependencies",
-		markBlockedTemplateForIssues(), unmarkBlockedTemplateForIssues(), issueIDs)
+		markBlockedTemplateForIssues(), unmarkBlockedTemplateForIssues(), issueIDs, splitEdgeless)
 	if err != nil {
 		return result, err
 	}
 	wispPlan, err := planRecomputeInTx(ctx, tx, "wisps", "wisp_dependencies",
-		markBlockedTemplateForWisps(), unmarkBlockedTemplateForWisps(), wispIDs)
+		markBlockedTemplateForWisps(), unmarkBlockedTemplateForWisps(), wispIDs, splitEdgeless)
 	if err != nil {
 		return result, err
 	}
@@ -336,6 +346,10 @@ func runMarkUnmarkBatchedInTx(ctx context.Context, tx DBTX, markTmpl, unmarkTmpl
 	return changed, nil
 }
 
+// recomputeSplitMinChunk is the chunk size from which planRecomputeInTx
+// probes for edgeless ids without being asked to.
+const recomputeSplitMinChunk = 32
+
 // recomputeChunk is one queryBatchSize chunk of a recompute's ids, split by
 // whether each id has a dependency row of its own (see planRecomputeInTx).
 type recomputeChunk struct {
@@ -361,12 +375,18 @@ type recomputePlan struct {
 // "is_blocked = 1 -> 0". Those ids — every freshly created issue without
 // edges, which is most of what a large create or apply-batch recomputes —
 // need not ride the two union statements, whose cost grows with the table.
-func planRecomputeInTx(ctx context.Context, tx DBTX, table, depTable, markTmpl, unmarkTmpl string, ids []string) (recomputePlan, error) {
+//
+// The split costs one probe per chunk, which only pays when the chunk holds
+// edgeless ids worth skipping. So it runs when the caller asks (splitEdgeless:
+// the create paths) or when the chunk is large; the single-issue recomputes of
+// close, reopen, update and dependency edits keep exactly the statements they
+// ran before the shortcut existed.
+func planRecomputeInTx(ctx context.Context, tx DBTX, table, depTable, markTmpl, unmarkTmpl string, ids []string, splitEdgeless bool) (recomputePlan, error) {
 	plan := recomputePlan{table: table, markTmpl: markTmpl, unmarkTmpl: unmarkTmpl}
 	for start := 0; start < len(ids); start += queryBatchSize {
 		end := min(start+queryBatchSize, len(ids))
 		chunk := recomputeChunk{withEdges: ids[start:end]}
-		if !createFastPathsDisabled.Load() {
+		if !createFastPathsDisabled.Load() && (splitEdgeless || end-start >= recomputeSplitMinChunk) {
 			var err error
 			chunk.withEdges, chunk.edgeless, err = splitByOwnDependencyRowsInTx(ctx, tx, depTable, ids[start:end])
 			if err != nil {

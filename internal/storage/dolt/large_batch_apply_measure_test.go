@@ -169,7 +169,7 @@ const statementCountToleranceDolt = 2
 var pinnedDoltStatementCounts = map[string]int64{
 	"356 (mol 1x)": 6396,
 	"712 (mol 2x)": 12791,
-	"40 (classic)": 793,
+	"40 (classic)": 786,
 }
 
 // BenchmarkLargeBatchApply_Dolt is gated by setupBenchStore's own

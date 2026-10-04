@@ -22,10 +22,14 @@ import (
 // each run a recursive CTE over the union of both dependency tables. Dolt
 // cannot index into that union, so every recursion step rescans the edge
 // tables, and a batch whose edges form a chain pays that per edge — a 400-issue
-// import with one blocks edge each spent ~73s of ~82s there. depGraph loads
-// the edge tables once and walks them in memory, updating itself with every
-// edge the pass writes, so each check sees exactly the graph the CTE would
-// have seen at that point.
+// import with one blocks edge each spent ~73s of ~82s there. depGraph walks
+// the edges in memory instead. It loads a node's outgoing edges (from both
+// tables, through the issue_id index) the first time a walk reaches it —
+// the batch's own endpoints up front, one IN-list read per BFS level after
+// that — and keeps every loaded node equal to its stored rows by applying each
+// edge the pass writes. Memory and reads therefore scale with the subgraph the
+// batch's walks touch, not with the size of the edge tables, and each check
+// sees exactly the graph the CTE would have seen at that point.
 type depBatchLookups struct {
 	wisps        map[string]struct{}
 	issuesExists map[string]bool
@@ -33,8 +37,9 @@ type depBatchLookups struct {
 }
 
 // depBatchGraphMinEdges is the number of scheduling edges in a batch at which
-// loading the edge tables once beats walking them per edge. Each per-edge
-// walk scans the edge tables at least once, so the threshold is small.
+// the in-memory walk replaces the per-edge CTEs. Each per-edge CTE scans the
+// edge tables at least once, while the walk reads only the edges it reaches,
+// so the threshold is small.
 const depBatchGraphMinEdges = 2
 
 // depBatchLookupsMinDeps is the number of edges at which the batch routing
@@ -77,7 +82,11 @@ func newDepBatchLookups(ctx context.Context, tx DBTX, deps []*types.Dependency) 
 		return nil, err
 	}
 	if scheduling >= depBatchGraphMinEdges {
-		if l.graph, err = loadDepGraph(ctx, tx); err != nil {
+		l.graph = newDepGraph()
+		// Every edge the pass writes has its source here and every walk
+		// starts at one of these, so loading them now keeps recordInsert and
+		// the first step of each walk free of reads.
+		if err = l.graph.load(ctx, tx, ids); err != nil {
 			return nil, err
 		}
 	}
@@ -113,7 +122,9 @@ func (l *depBatchLookups) classify(ctx context.Context, tx DBTX, dep *types.Depe
 func (l *depBatchLookups) targetExists(ctx context.Context, tx DBTX, kind DepTargetKind, id string) (bool, error) {
 	if l != nil {
 		if kind == DepTargetWisp {
-			// classify found it in the wisps set, which the pass cannot change.
+			// The wisps set IS the presence proof: classify returned
+			// DepTargetWisp only because the id is in it, and the pass writes
+			// no wisp rows, so the per-edge `SELECT 1 FROM wisps` would find it.
 			return true, nil
 		}
 		return l.issuesExists[id], nil
@@ -144,12 +155,20 @@ func (l *depBatchLookups) checkHierarchy(ctx context.Context, tx DBTX, dep *type
 	if dep.IssueID == dep.DependsOnID {
 		return nil
 	}
-	if l.graph.reaches(dep.IssueID, dep.DependsOnID, true) {
+	ancestor, err := l.graph.reaches(ctx, tx, dep.IssueID, dep.DependsOnID, true)
+	if err != nil {
+		return fmt.Errorf("failed to check blocker ancestry: %w", err)
+	}
+	if ancestor {
 		return &domain.DependencyHierarchyConflictError{
 			IssueID: dep.IssueID, BlockerID: dep.DependsOnID, BlockerIsAncestor: true,
 		}
 	}
-	if l.graph.reaches(dep.DependsOnID, dep.IssueID, true) {
+	descendant, err := l.graph.reaches(ctx, tx, dep.DependsOnID, dep.IssueID, true)
+	if err != nil {
+		return fmt.Errorf("failed to check blocker ancestry: %w", err)
+	}
+	if descendant {
 		return &domain.DependencyHierarchyConflictError{
 			IssueID: dep.IssueID, BlockerID: dep.DependsOnID,
 		}
@@ -168,7 +187,11 @@ func (l *depBatchLookups) checkCycle(ctx context.Context, tx DBTX, dep *types.De
 	if !types.IsSchedulingEdge(dep.Type) {
 		return nil
 	}
-	if l.graph.reaches(dep.DependsOnID, dep.IssueID, false) {
+	cycle, err := l.graph.reaches(ctx, tx, dep.DependsOnID, dep.IssueID, false)
+	if err != nil {
+		return fmt.Errorf("failed to check for dependency cycle: %w", err)
+	}
+	if cycle {
 		return domain.ErrDependencyCycle
 	}
 	return nil
@@ -179,10 +202,14 @@ func (l *depBatchLookups) checkCycle(ctx context.Context, tx DBTX, dep *types.De
 // alone cannot say whether that statement inserted (a connection with
 // clientFoundRows reports a matched duplicate as 1), so: a pair the graph has
 // never seen was certainly inserted with dep.Type; a pair it has seen is
-// re-read from the table.
+// re-read from the table. A source the graph has not loaded yet is simply
+// loaded now, which reads the written row along with the rest.
 func (l *depBatchLookups) recordInsert(ctx context.Context, tx DBTX, depTable string, dep *types.Dependency, rowsAffected int64) error {
 	if l == nil || l.graph == nil || rowsAffected == 0 {
 		return nil
+	}
+	if !l.graph.loaded[dep.IssueID] {
+		return l.graph.load(ctx, tx, []string{dep.IssueID})
 	}
 	key := depEdgeKey{table: depTable, source: dep.IssueID, target: dep.DependsOnID}
 	if _, known := l.graph.rows[key]; !known {
@@ -196,11 +223,14 @@ type depEdgeKey struct {
 	table, source, target string
 }
 
-// depGraph mirrors the rows of both dependency tables as (table, source,
-// target) -> types, with adjacency counts for the two walks: scheduling
-// (blocks, conditional-blocks, parent-child — cycleReachabilityQuery's edge
-// set) and parent-child alone (isAncestorInTx's).
+// depGraph mirrors, for every node it has loaded, that node's outgoing rows
+// in both dependency tables as (table, source, target) -> types, with
+// adjacency counts for the two walks: scheduling (blocks, conditional-blocks,
+// parent-child — cycleReachabilityQuery's edge set) and parent-child alone
+// (isAncestorInTx's). A node's rows are loaded at most once; after that the
+// graph tracks them through add/reload as the pass writes.
 type depGraph struct {
+	loaded  map[string]bool
 	rows    map[depEdgeKey][]types.DependencyType
 	sched   map[string]map[string]int
 	parents map[string]map[string]int
@@ -208,45 +238,54 @@ type depGraph struct {
 
 func newDepGraph() *depGraph {
 	return &depGraph{
+		loaded:  map[string]bool{},
 		rows:    map[depEdgeKey][]types.DependencyType{},
 		sched:   map[string]map[string]int{},
 		parents: map[string]map[string]int{},
 	}
 }
 
-//nolint:gosec // G201: table names are the fixed cycleDetectionTables.
-func loadDepGraph(ctx context.Context, tx DBTX) (*depGraph, error) {
-	g := newDepGraph()
-	for _, table := range cycleDetectionTables() {
-		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
-			"SELECT issue_id, %s, type FROM %s", DepTargetExpr, table))
-		if err != nil {
-			return nil, fmt.Errorf("load dependency graph from %s: %w", table, err)
-		}
-		for rows.Next() {
-			var source string
-			var target sql.NullString
-			var depType string
-			if err := rows.Scan(&source, &target, &depType); err != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("load dependency graph from %s: %w", table, err)
-			}
-			if !target.Valid {
-				// No target column set: the CTE's join produces a NULL node,
-				// which can never equal a probed id. Track the row for
-				// duplicate detection only.
-				key := depEdgeKey{table: table, source: source}
-				g.rows[key] = append(g.rows[key], types.DependencyType(depType))
-				continue
-			}
-			g.add(depEdgeKey{table: table, source: source, target: target.String}, types.DependencyType(depType))
-		}
-		_ = rows.Close()
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("load dependency graph from %s: %w", table, err)
+// load reads the outgoing rows of every id in ids the graph has not loaded,
+// one IN-list read per table per queryBatchSize chunk.
+//
+//nolint:gosec // G201: table names are the fixed cycleDetectionTables; only placeholders are formatted in.
+func (g *depGraph) load(ctx context.Context, tx DBTX, ids []string) error {
+	var todo []string
+	for _, id := range ids {
+		if id != "" && !g.loaded[id] {
+			g.loaded[id] = true
+			todo = append(todo, id)
 		}
 	}
-	return g, nil
+	for start := 0; start < len(todo); start += queryBatchSize {
+		end := min(start+queryBatchSize, len(todo))
+		placeholders, args := buildSQLInClause(todo[start:end])
+		for _, table := range cycleDetectionTables() {
+			rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+				"SELECT issue_id, %s, type FROM %s WHERE issue_id IN (%s)", DepTargetExpr, table, placeholders), args...)
+			if err != nil {
+				return fmt.Errorf("load dependency edges from %s: %w", table, err)
+			}
+			for rows.Next() {
+				var source string
+				var target sql.NullString
+				var depType string
+				if err := rows.Scan(&source, &target, &depType); err != nil {
+					_ = rows.Close()
+					return fmt.Errorf("load dependency edges from %s: %w", table, err)
+				}
+				// A row with no target column set joins to a NULL node in the
+				// CTE, which never equals a probed id: track it (target "")
+				// for duplicate detection only.
+				g.add(depEdgeKey{table: table, source: source, target: target.String}, types.DependencyType(depType))
+			}
+			_ = rows.Close()
+			if err := rows.Err(); err != nil {
+				return fmt.Errorf("load dependency edges from %s: %w", table, err)
+			}
+		}
+	}
+	return nil
 }
 
 func bump(m map[string]map[string]int, from, to string, delta int) {
@@ -311,29 +350,35 @@ func (g *depGraph) reload(ctx context.Context, tx DBTX, key depEdgeKey) error {
 
 // reaches reports whether goal is reachable from start (start itself
 // included, as in the recursive CTEs' anchor row), walking scheduling edges,
-// or parent-child edges only when parentsOnly is set.
-func (g *depGraph) reaches(start, goal string, parentsOnly bool) bool {
+// or parent-child edges only when parentsOnly is set. It walks breadth-first,
+// loading each level's not-yet-loaded nodes in one read.
+func (g *depGraph) reaches(ctx context.Context, tx DBTX, start, goal string, parentsOnly bool) (bool, error) {
 	if start == goal {
-		return true
-	}
-	adj := g.sched
-	if parentsOnly {
-		adj = g.parents
+		return true, nil
 	}
 	visited := map[string]bool{start: true}
-	queue := []string{start}
-	for len(queue) > 0 {
-		node := queue[0]
-		queue = queue[1:]
-		for next := range adj[node] {
-			if next == goal {
-				return true
-			}
-			if !visited[next] {
-				visited[next] = true
-				queue = append(queue, next)
+	frontier := []string{start}
+	for len(frontier) > 0 {
+		if err := g.load(ctx, tx, frontier); err != nil {
+			return false, err
+		}
+		adj := g.sched
+		if parentsOnly {
+			adj = g.parents
+		}
+		var next []string
+		for _, node := range frontier {
+			for to := range adj[node] {
+				if to == goal {
+					return true, nil
+				}
+				if !visited[to] {
+					visited[to] = true
+					next = append(next, to)
+				}
 			}
 		}
+		frontier = next
 	}
-	return false
+	return false, nil
 }

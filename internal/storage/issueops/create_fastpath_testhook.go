@@ -11,9 +11,15 @@ var createFastPathsDisabled atomic.Bool
 
 // DisableCreateFastPathsForTest switches the batch-create fast paths off for
 // the whole process until the returned restore runs. It exists only for the
-// fast-vs-per-row equivalence tests (internal/storage/createbatchequiv); a
-// caller must not run concurrently with another caller of it.
+// fast-vs-per-row equivalence tests (internal/storage/createbatchequiv).
+//
+// It is process-global, and it also turns off the blocked-state no-edge
+// shortcut for every recompute in the process. A test that calls it must not
+// use t.Parallel (a sequential top-level test never overlaps parallel ones),
+// and two callers must not overlap: a second call while one is active panics.
 func DisableCreateFastPathsForTest() (restore func()) {
-	createFastPathsDisabled.Store(true)
+	if !createFastPathsDisabled.CompareAndSwap(false, true) {
+		panic("issueops.DisableCreateFastPathsForTest: already disabled by an overlapping caller")
+	}
 	return func() { createFastPathsDisabled.Store(false) }
 }

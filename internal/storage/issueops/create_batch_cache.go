@@ -38,6 +38,15 @@ import (
 //
 // A singular create never builds one: its single lookup of each kind costs
 // what the cache's batch read would.
+//
+// COLLATION ASSUMPTION. The cache (and the dependency pass's in-memory graph,
+// create_dep_batch.go) compares ids and labels with Go string equality where
+// the per-row SQL compared them under the column collation. Those agree under
+// the collation every beads table is created with — Dolt's default
+// utf8mb4_0900_bin, which is case-sensitive and NO PAD (the migrations name
+// no other). On a case-insensitive or PAD SPACE collation they would not: a
+// "Bug"/"bug" label pair would land as one row but buffer two label_added
+// events. A schema change to such a collation must revisit these paths.
 type createBatchCache struct {
 	// probed holds the ids whose presence in both planes was read up front.
 	probed map[string]bool
@@ -384,14 +393,6 @@ func (d *deferredCreates) flush(ctx context.Context, tx DBTX, bc *BatchContext, 
 	}
 	for _, table := range tables {
 		if err := insertIssueRowsIntoTable(ctx, tx, table, byTable[table], bc.Opts.RejectStaleUpserts); err != nil {
-			// A failed statement writes none of its rows, so replaying them
-			// one at a time surfaces the per-row error for the first row that
-			// cannot be written, worded as the per-row path words it.
-			for _, issue := range byTable[table] {
-				if rowErr := insertIssueIntoTable(ctx, tx, table, issue, bc.Opts.RejectStaleUpserts); rowErr != nil {
-					return nil, fmt.Errorf("failed to insert issue %s: %w", issue.ID, rowErr)
-				}
-			}
 			return nil, err
 		}
 	}

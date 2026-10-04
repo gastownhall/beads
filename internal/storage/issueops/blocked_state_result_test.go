@@ -46,7 +46,6 @@ func expectBlockedStatePass(mock sqlmock.Sqlmock, table, alias string, mark, unm
 func TestRecomputeIsBlockedInTxWithResult(t *testing.T) {
 	t.Run("issue rows changed", func(t *testing.T) {
 		mock, db := newBlockedStateResultMock(t)
-		expectOwnEdgesProbe(mock, "dependencies", "issue-1")
 		expectBlockedStatePass(mock, "issues", "i", sqlmock.NewResult(0, 1), sqlmock.NewResult(0, 0))
 		expectBlockedStatePass(mock, "issues", "i", sqlmock.NewResult(0, 0), sqlmock.NewResult(0, 0))
 
@@ -61,7 +60,6 @@ func TestRecomputeIsBlockedInTxWithResult(t *testing.T) {
 
 	t.Run("wisp rows changed", func(t *testing.T) {
 		mock, db := newBlockedStateResultMock(t)
-		expectOwnEdgesProbe(mock, "wisp_dependencies", "wisp-1")
 		expectBlockedStatePass(mock, "wisps", "w", sqlmock.NewResult(0, 0), sqlmock.NewResult(0, 1))
 		expectBlockedStatePass(mock, "wisps", "w", sqlmock.NewResult(0, 0), sqlmock.NewResult(0, 0))
 
@@ -76,8 +74,6 @@ func TestRecomputeIsBlockedInTxWithResult(t *testing.T) {
 
 	t.Run("no rows changed", func(t *testing.T) {
 		mock, db := newBlockedStateResultMock(t)
-		expectOwnEdgesProbe(mock, "dependencies", "issue-1")
-		expectOwnEdgesProbe(mock, "wisp_dependencies", "wisp-1")
 		expectBlockedStatePass(mock, "issues", "i", sqlmock.NewResult(0, 0), sqlmock.NewResult(0, 0))
 		expectBlockedStatePass(mock, "wisps", "w", sqlmock.NewResult(0, 0), sqlmock.NewResult(0, 0))
 
@@ -119,7 +115,8 @@ func TestRunMarkUnmarkBatchedInTxPropagatesRowsAffectedErrors(t *testing.T) {
 }
 
 // TestRecomputeIsBlockedSkipsUnionForIDsWithoutEdges pins the no-edge
-// shortcut: an id with no dependency row of its own cannot be in the scoped
+// shortcut a create asks for (the single-id cases above pin that nobody else
+// pays its probe): an id with no dependency row of its own cannot be in the scoped
 // should-be-blocked union, so it never reaches the union statements. It is
 // cleared by one plain unmark on the first pass, after the chunk's union
 // statements (which must see its pre-pass is_blocked, as the chunk's own
@@ -142,7 +139,7 @@ func TestRecomputeIsBlockedSkipsUnionForIDsWithoutEdges(t *testing.T) {
 	mock.ExpectExec(regexp.QuoteMeta("UPDATE issues i SET i.is_blocked = 0")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
-	result, err := RecomputeIsBlockedInTxWithResult(context.Background(), db, []string{"issue-1", "issue-2", "issue-3"}, nil)
+	result, err := recomputeIsBlockedInTxWithResult(context.Background(), db, []string{"issue-1", "issue-2", "issue-3"}, nil, true)
 	if err != nil {
 		t.Fatalf("RecomputeIsBlockedInTxWithResult: %v", err)
 	}
