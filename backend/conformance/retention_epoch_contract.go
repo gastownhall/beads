@@ -770,6 +770,16 @@ type EpochFixture struct {
 	// backend cannot report that, and the case that needs it skips with
 	// that reason.
 	CurrentAddressFor func(ctx context.Context, storeID string, oldAddress Address) (Address, error)
+
+	// LoseVersion records that storeID no longer serves the Version named by
+	// address. That address, and every address the same Version was carried
+	// to or from by a token-scheme change, resolves GoneReorganization from
+	// then on, in every later epoch: an epoch voids what the store lost,
+	// never what it still serves (R20-n). It is idempotent, never revives
+	// anything, and returns an error for an address storeID never minted. A
+	// nil LoseVersion means this backend cannot record a loss, and the cases
+	// that need one skip with that reason.
+	LoseVersion func(ctx context.Context, storeID string, address Address) error
 }
 
 // RunAnEpochBumpIsTriggeredOnlyByRestoreReinitOrSchemeChange pins R20-m: a
