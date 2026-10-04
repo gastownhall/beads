@@ -62,6 +62,7 @@ go_test(
         "fdleak_integration_test.go",
         "gc_config_test.go",
         "lifecycle_integration_test.go",
+        "listenerowner_linux_test.go",
         "logrotate_test.go",
         "managed_server_proof_test.go",
         "manifest_recovery_test.go",

@@ -4,30 +4,49 @@ package doltserver
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 )
 
+// procRoot is where listenerOwnership reads /proc; tests point it at a fake
+// tree.
+var procRoot = "/proc"
+
 // listenerOwnership reports whether a TCP listener on port belongs to pid or
-// one of its descendants (a dolt behind a wrapper script that does not exec).
-// known is false when /proc cannot answer, in which case the caller falls back
-// to weaker readiness evidence.
+// one of its descendants. Descendants cover a dolt behind a wrapper script
+// that does not exec; finding them needs task/*/children
+// (CONFIG_PROC_CHILDREN), and without it such a wrapper's dolt is not seen as
+// the child's.
+//
+// known is false when /proc cannot answer, and the caller then falls back to
+// weaker readiness evidence:
+//   - /proc is not this process's PID namespace's (/proc/self is not us);
+//   - the child's descriptors cannot be read (permissions, hardening);
+//   - no listener on port is listed at all, although one just answered:
+//     /proc/net/tcp is incomplete here (WSL1, some sandboxes) or the
+//     connection is forwarded elsewhere.
+//
+// A child that no longer exists is known not to own anything.
 func listenerOwnership(pid, port int) (owned, known bool) {
-	// A /proc that cannot show the child's descriptors (another PID
-	// namespace's /proc, hidepid, a hardened sandbox) cannot prove anything
-	// either way.
-	if _, err := os.ReadDir(filepath.Join("/proc", strconv.Itoa(pid), "fd")); err != nil {
+	if procRoot == "/proc" {
+		if self, err := os.Readlink("/proc/self"); err != nil || self != strconv.Itoa(os.Getpid()) {
+			return false, false
+		}
+	}
+	if _, err := os.ReadDir(filepath.Join(procRoot, strconv.Itoa(pid), "fd")); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, true
+		}
 		return false, false
 	}
 	inodes, err := listeningSocketInodes(port)
-	if err != nil {
+	if err != nil || len(inodes) == 0 {
 		return false, false
-	}
-	if len(inodes) == 0 {
-		return false, true
 	}
 	seen := map[int]bool{}
 	queue := []int{pid}
@@ -51,8 +70,8 @@ func listenerOwnership(pid, port int) (owned, known bool) {
 func listeningSocketInodes(port int) (map[string]bool, error) {
 	inodes := map[string]bool{}
 	read := 0
-	for _, name := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
-		f, err := os.Open(name) //nolint:gosec // G304: fixed /proc paths
+	for _, name := range []string{"tcp", "tcp6"} {
+		f, err := os.Open(filepath.Join(procRoot, "net", name)) //nolint:gosec // G304: fixed /proc paths
 		if err != nil {
 			continue
 		}
@@ -64,7 +83,7 @@ func listeningSocketInodes(port int) (map[string]bool, error) {
 		}
 	}
 	if read == 0 {
-		return nil, fmt.Errorf("no /proc/net/tcp")
+		return nil, fmt.Errorf("no %s/net/tcp", procRoot)
 	}
 	return inodes, nil
 }
@@ -98,7 +117,7 @@ func parseProcNetTCPListeners(sc *bufio.Scanner, port int, inodes map[string]boo
 }
 
 func processHoldsSocket(pid int, inodes map[string]bool) bool {
-	dir := filepath.Join("/proc", strconv.Itoa(pid), "fd")
+	dir := filepath.Join(procRoot, strconv.Itoa(pid), "fd")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return false
@@ -116,7 +135,7 @@ func processHoldsSocket(pid int, inodes map[string]bool) bool {
 }
 
 func childPIDs(pid int) []int {
-	tasks, _ := filepath.Glob(filepath.Join("/proc", strconv.Itoa(pid), "task", "*", "children"))
+	tasks, _ := filepath.Glob(filepath.Join(procRoot, strconv.Itoa(pid), "task", "*", "children"))
 	var out []int
 	for _, t := range tasks {
 		b, err := os.ReadFile(t) //nolint:gosec // G304: path is built from /proc and a pid

@@ -42,8 +42,71 @@ func (s *startedServer) hasExited() bool {
 	}
 }
 
-func (s *startedServer) kill() {
+// killExitWait bounds how long killAndWait waits for a killed child to exit.
+const killExitWait = 5 * time.Second
+
+// killAndWait kills the child (and, on unix, the process group it leads, so
+// a dolt behind a wrapper that did not exec goes too) and waits briefly for
+// it to exit. The wait matters before a retry: the next attempt opens the
+// same database, and the killed child holds dolt's database lock until the
+// kernel has finished its exit.
+func (s *startedServer) killAndWait() {
+	if s == nil {
+		return
+	}
+	if !s.hasExited() {
+		killProcessGroup(s.pid)
+	}
 	_ = s.proc.Kill()
+	select {
+	case <-s.exited:
+	case <-time.After(killExitWait):
+	}
+}
+
+// writeServerStateFiles records a launched server in the PID and port files.
+func writeServerStateFiles(beadsDir string, pid, port int) error {
+	if err := os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(pid)), 0600); err != nil {
+		return fmt.Errorf("writing PID file: %w", err)
+	}
+	if err := writePortFile(beadsDir, port); err != nil {
+		_ = os.Remove(pidPath(beadsDir))
+		return fmt.Errorf("writing port file: %w", err)
+	}
+	return nil
+}
+
+func removeServerStateFiles(beadsDir string) {
+	_ = os.Remove(pidPath(beadsDir))
+	_ = os.Remove(portPath(beadsDir))
+}
+
+// pinnedPortRemedy says why Start did not move off port, which another
+// process holds, and what the operator can do, worded by where the port came
+// from.
+func pinnedPortRemedy(cfg *Config, beadsDir string, port int) string {
+	switch {
+	case cfg.PortSource == PortSourceSharedServerDefault:
+		return fmt.Sprintf("port %d is the shared-server default port, which every project on this host dials, so bd will not move it: "+
+			"free it, or configure a different shared-server port with BEADS_DOLT_SERVER_PORT or dolt.port", port)
+	case cfg.PortSource == PortSourcePortFile:
+		return fmt.Sprintf("port %d is the shared server's recorded port (%s), which other projects dial, so bd will not move it: "+
+			"free it, or stop the shared server and delete that file", port, portPath(beadsDir))
+	default:
+		src := string(cfg.PortSource)
+		for _, ps := range portSources {
+			if ps.source == cfg.PortSource {
+				src = ps.label
+			}
+		}
+		switch cfg.PortSource {
+		case PortSourceCallerExplicit:
+			src = "an explicit port setting (e.g. bd init --server-port)"
+		case PortSourceUnset:
+			src = "an explicit setting"
+		}
+		return fmt.Sprintf("port %d comes from %s, which bd will not override: free it, or configure a different one with: bd dolt set port <port>", port, src)
+	}
 }
 
 // startupProbe describes how awaitOwnedListener decides that the child it
@@ -80,7 +143,9 @@ const (
 // a greeting only counts once the listener is shown to be the child's: by
 // dolt's ready line in the child's output when its log level emits one, or
 // else by the listening socket belonging to the child's process tree (Linux,
-// via /proc). Where neither is available the greeting decides, as before.
+// via /proc). When the socket is shown to belong to someone else the wait
+// ends at once with ErrPortInUse. Where neither proof is available the
+// greeting decides, as before, unless the log level promises a ready line.
 // Either way a child that exits, or says its port is taken, ends the wait,
 // with ErrPortInUse in the latter case.
 func awaitOwnedListener(srv *startedServer, p startupProbe) error {
@@ -92,48 +157,69 @@ func awaitOwnedListener(srv *startedServer, p startupProbe) error {
 	watch := NewStartupWatch(nil, p.port)
 	tail := logTail{path: p.logPath, off: p.logOffset}
 	deadline := time.Now().Add(p.timeout)
-	answeredByOther := false
+	answeredUnproven := false
 	for {
-		tail.feed(watch)
 		if err := childStartupFailure(srv, &tail, watch, addr); err != nil {
 			return err
 		}
 		greeted, _ := ProbeSQLServer("tcp", addr, startupProbeDialTimeout) //nolint:gosec // G704: addr is built from internal host+port, not user input
 		if greeted {
-			tail.feed(watch)
+			// Re-read the output before judging: a child that lost the port
+			// may have said so (and been reaped) since the check above.
+			if err := childStartupFailure(srv, &tail, watch, addr); err != nil {
+				return err
+			}
 			owned, known := watch.IsReady(), true
 			if !owned {
 				owned, known = owner(srv.pid, p.port)
 			}
-			if owned || (!known && !p.readyLineLogged) {
+			switch {
+			case owned || (!known && !p.readyLineLogged):
 				if err := childStartupFailure(srv, &tail, watch, addr); err != nil {
 					return err
 				}
 				return nil
+			case known:
+				// Proven: the listener belongs to another process. The child
+				// cannot bind this port; do not wait for it to find out.
+				return fmt.Errorf("%w: another process (not dolt sql-server PID %d) holds %s", ErrPortInUse, srv.pid, addr)
+			default:
+				answeredUnproven = true
 			}
-			answeredByOther = true
 		}
 		if time.Now().After(deadline) {
-			if answeredByOther {
-				return fmt.Errorf("timeout after %s: something answered at %s, but not the dolt sql-server bd started (PID %d)", p.timeout, addr, srv.pid)
-			}
-			return fmt.Errorf("timeout after %s waiting for server at %s", p.timeout, addr)
+			return startupTimeout(p, addr, srv.pid, answeredUnproven)
+		}
+		wait := startupProbeInterval
+		if left := time.Until(deadline); left < wait {
+			wait = left
 		}
 		select {
 		case <-srv.exited:
-		case <-time.After(startupProbeInterval):
+		case <-time.After(wait):
+			if time.Now().After(deadline) {
+				return startupTimeout(p, addr, srv.pid, answeredUnproven)
+			}
 		}
 	}
 }
 
-// childStartupFailure returns why srv cannot become ready, or nil while it
-// still may.
+func startupTimeout(p startupProbe, addr string, pid int, answeredUnproven bool) error {
+	if answeredUnproven {
+		return fmt.Errorf("timeout after %s: something answered at %s, but dolt sql-server (PID %d) never logged %q, "+
+			"which proves the listener is its own at log level debug; if a wrapper filters dolt's output, turn off debug mode (BEADS_DOLT_DEBUG, dolt.debug)",
+			p.timeout, addr, pid, DoltReadyLine)
+	}
+	return fmt.Errorf("timeout after %s waiting for server at %s", p.timeout, addr)
+}
+
+// childStartupFailure reads the child's latest output and returns why srv
+// cannot become ready, or nil while it still may. The output is read every
+// time, not only once the exit has been observed: the reaper goroutine can
+// lag the child's death, and the port-in-use line is already in the log.
 func childStartupFailure(srv *startedServer, tail *logTail, watch *StartupWatch, addr string) error {
 	exited := srv.hasExited()
-	if exited {
-		// The child has exited, so its output is complete.
-		tail.feed(watch)
-	}
+	tail.feed(watch)
 	if watch.SawPortInUse() {
 		return fmt.Errorf("%w: dolt sql-server (PID %d) could not bind %s", ErrPortInUse, srv.pid, addr)
 	}
@@ -155,6 +241,11 @@ func (t *logTail) feed(w io.Writer) {
 		return
 	}
 	defer func() { _ = f.Close() }()
+	if st, err := f.Stat(); err == nil && st.Size() < t.off {
+		// Truncated underneath us (an external copytruncate rotation):
+		// everything now in the file is new.
+		t.off = 0
+	}
 	n, _ := io.Copy(w, io.NewSectionReader(f, t.off, 1<<62))
 	t.off += n
 }

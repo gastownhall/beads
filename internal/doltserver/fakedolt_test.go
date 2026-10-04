@@ -6,6 +6,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,6 +17,18 @@ import (
 const (
 	fakeDoltEnv      = "BEADS_TEST_FAKE_DOLT"
 	fakeDoltDelayEnv = "BEADS_TEST_FAKE_DOLT_DELAY"
+	// fakeDoltInUseEnv lists ports ("all" for every port) the fake reports
+	// taken without trying to bind, as if another process grabbed them.
+	fakeDoltInUseEnv = "BEADS_TEST_FAKE_DOLT_INUSE_PORTS"
+	// fakeDoltExitEnv makes the fake exit with that status after its
+	// startup delay instead of binding.
+	fakeDoltExitEnv = "BEADS_TEST_FAKE_DOLT_EXIT"
+	// fakeDoltReadyEnv makes the fake log dolt's ready line once bound, as
+	// dolt does at log level info or debug.
+	fakeDoltReadyEnv = "BEADS_TEST_FAKE_DOLT_READY"
+	// fakeDoltLaunchesEnv names a file the fake appends each sql-server
+	// launch's port to.
+	fakeDoltLaunchesEnv = "BEADS_TEST_FAKE_DOLT_LAUNCHES"
 )
 
 var fakeDoltConfigPortRe = regexp.MustCompile(`(?m)^\s+port:\s*(\d+)`)
@@ -68,13 +81,32 @@ func fakeDolt(args []string) int {
 		fmt.Println("fake dolt: no port")
 		return 2
 	}
+	if path := os.Getenv(fakeDoltLaunchesEnv); path != "" {
+		if f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil { //nolint:gosec // G304: test-controlled path
+			_, _ = fmt.Fprintf(f, "%d\n", port)
+			_ = f.Close()
+		}
+	}
 	if d, err := time.ParseDuration(os.Getenv(fakeDoltDelayEnv)); err == nil {
 		time.Sleep(d)
+	}
+	if code, err := strconv.Atoi(os.Getenv(fakeDoltExitEnv)); err == nil {
+		fmt.Println("fake dolt: failing startup on purpose")
+		return code
+	}
+	for _, p := range strings.Split(os.Getenv(fakeDoltInUseEnv), ",") {
+		if p == "all" || p == strconv.Itoa(port) {
+			fmt.Printf("Port %d already in use.\n", port)
+			return 1
+		}
 	}
 	ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
 		fmt.Printf("Port %d already in use.\n", port)
 		return 1
+	}
+	if os.Getenv(fakeDoltReadyEnv) != "" {
+		fmt.Println(`time="2026-10-04T12:00:00Z" level=info msg="Server ready. Accepting connections."`)
 	}
 	for {
 		c, err := ln.Accept()
