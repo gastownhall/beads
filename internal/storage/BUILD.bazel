@@ -136,6 +136,7 @@ filegroup(
         ":go_srcs",
         "//internal/storage/backendnames:go_srcs",
         "//internal/storage/backends:go_srcs",
+        "//internal/storage/batchbench:go_srcs",
         "//internal/storage/batchfixtures:go_srcs",
         "//internal/storage/contextinfo:go_srcs",
         "//internal/storage/createbatchequiv:go_srcs",

@@ -261,6 +261,7 @@
 15 5 TestExpectedRevisionContract
 15 5 TestGetDependentRecordsForIssuesEmbedded
 15 5 TestLargeBatchApplyWallClock_Embedded
+15 5 TestLargeGraphCreateTiming_Embedded
 15 5 TestLenientGateWarningBody_BluntRefusalKeepsSharedGuidance
 15 5 TestOpenReturnsCachedStore
 15 5 TestPartitionWispIDs
