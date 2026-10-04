@@ -135,6 +135,7 @@
 # regeneration. Add them to the generator or the durations file instead.
 
 15 1 TestBatchApplyContract
+15 1 TestBumpEpochCarryingFailsAndRollsBackWhenARowAlreadyExistsAtTheNewEpoch
 15 1 TestEmbeddedClaimerClaimsAnUnassignedOpenIssueAndAnswersTheBareRow
 15 1 TestEmbeddedClaimerReclaimsAcrossSpellingWithoutWriting
 15 1 TestEmbeddedDependencyEditorWritesTheTargetIntoItsTypedColumn
@@ -206,11 +207,13 @@
 15 3 TestEventsJournalReadRefusesAnInteriorHole
 15 3 TestForeignSkipDetailIsBounded
 15 3 TestListWisps
+15 3 TestLoseVersionLeavesTheEpochTablesCommitted
 15 3 TestMergeAndSettleWithStrategy_ResolvesDeclinedConflict
 15 3 TestPushCommitsPendingChangesFirst
 15 3 TestUpdateMergeOps_DoltEngine_TwoIssues
 15 3 TestWithPeerAuth_RestoresAbsentEnv
 
+15 4 TestBumpEpochCarryingCarriesOnlyTheLineageHoldingTheNewestRow
 15 4 TestEmbeddedBatchCloserSettlesTheDependersOfWhatItClosed
 15 4 TestEmbeddedBlockedRecheckSettlesWhatTheWriteRecorded
 15 4 TestEmbeddedClaimIssueWrapperClaimsTheWispPlane
@@ -269,6 +272,7 @@
 15 5 TestWithPeerAuth_KeyMismatchFailsClosed
 
 15 6 TestCreateIssuesRejectStaleUpserts
+15 6 TestCurrentAddressForNeverReseedsAnAbsentStoreEpochRow
 15 6 TestDecryptPassword_KeyMismatchNamesTheLocalKey
 15 6 TestEmbeddedBatchCloserPerItemRefusalIsAResultAndSurvivorsCommit
 15 6 TestEmbeddedBatchCloserWispItemClosesAndEarnsTheClaim
@@ -294,6 +298,7 @@
 15 6 TestWithPeerAuth_ConcurrentPeersDoNotMixCredentials
 15 6 TestWithPeerAuth_RestoresEnvWhenCallbackFails
 
+15 7 TestBumpEpochCarryingLeavesTheEpochTablesCommitted
 15 7 TestCommitAllOutOfBandChangeAndHonestNoOp
 15 7 TestConcurrencyMultiProcess
 15 7 TestConcurrentOpenReturnsCached
@@ -352,6 +357,7 @@
 15 8 TestTransactionCleanupAfterSQLCommitIsIndeterminate
 15 8 TestVersionedHistoryKeepsNumbersTheStoreDistinguishesApart
 
+15 9 TestBumpEpochCarryingCarriesTheLiveRowsOfEveryStoreInTheDatabase
 15 9 TestCommenterContract
 15 9 TestEmbeddedBatchCloserBackendFailureReturnsNoOutcomes
 15 9 TestEmbeddedClaimerReclaimsItsOwnInProgressIssueWithoutWriting
@@ -377,6 +383,7 @@
 15 9 TestReadyWorkWithMissingDeferredParentTables
 15 9 TestUpdateMergeOps_DoltEngine
 
+15 10 TestABumpUnderOneStoreIDMovesTheEpochSeenThroughEveryStoreID
 15 10 TestBuildDSN_SpacesInPath
 15 10 TestCleanGitRemoteCacheGarbage_Throttled
 15 10 TestCreateIssues
@@ -436,6 +443,7 @@
 15 11 TestUpdateIssueType
 
 15 12 TestBatchCreatorContract
+15 12 TestBumpEpochCarryingNeitherCarriesNorServesARowFromAFutureEpoch
 15 12 TestDualWriteContract
 15 12 TestEmbeddedClaimerTakesAnOpenIssueTheActorAlreadyHolds
 15 12 TestEmbeddedDependencyEditorAttributesItsEventsToTheActor
@@ -484,11 +492,13 @@
 15 13 TestEmbeddedRelationsRefusesTheZeroDirection
 15 13 TestEventsJournal_EmbeddedConcurrentGaplessNoDup
 15 13 TestExternalCapabilityBlocksEmbeddedReadyAndAppearsInTree
+15 13 TestFirstMintLeavesTheEpochTablesCommitted
 15 13 TestIgnoredCursorHealRespectsOperatorOverride
 15 13 TestLegacyTrackedIgnoredCursorHealsOnOpen
 15 13 TestSweeperContract
 
 15 14 TestAddDependency
+15 14 TestBumpEpochCarryingWritesOneCarryRowPerLiveIDNamingTheLineageRoot
 15 14 TestCounterContract
 15 14 TestCountsWithMissingWispPlaneTables
 15 14 TestEmbeddedBlockedRecheckFailureKeepsTheWrite
@@ -514,6 +524,7 @@
 15 14 TestReadyCounterContract
 15 14 TestUnknownProvenanceLeaseStaysReclaimable
 
+15 15 TestBumpEpochCarryingDoesNotCarryALostLineage
 15 15 TestCreateIssue
 15 15 TestEdgeReaderContract
 15 15 TestEmbeddedBatchCloserAllRefusedBatchRecordsNoHistory
