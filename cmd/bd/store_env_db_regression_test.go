@@ -74,10 +74,19 @@ func TestStorePathHonorsEnvDBTargetOverAmbientWorkspace(t *testing.T) {
 	ambient := initStoreEnvDBWorkspace(t, bin, root, "ambient", "amb", "AMBIENT-ONLY-ISSUE")
 	target := initStoreEnvDBWorkspace(t, bin, root, "target", "tgt", "TARGET-ONLY-ISSUE")
 	targetBeadsDir := filepath.Join(target, ".beads")
+	// The legacy file-valued form names a database file a Dolt workspace never
+	// creates, so it must select the workspace without the file existing.
+	legacyDBFile := filepath.Join(targetBeadsDir, "beads.db")
+	if _, err := os.Stat(legacyDBFile); !os.IsNotExist(err) {
+		t.Fatalf("precondition: %q must not exist, or the legacy rows below never reach the missing-target check (stat: %v)",
+			legacyDBFile, err)
+	}
 
 	for _, tc := range []struct{ name, envVar, target string }{
 		{name: "BEADS_DB", envVar: "BEADS_DB", target: targetBeadsDir},
 		{name: "BD_DB", envVar: "BD_DB", target: targetBeadsDir},
+		{name: "BEADS_DB_LegacyDBFile", envVar: "BEADS_DB", target: legacyDBFile},
+		{name: "BD_DB_LegacyDBFile", envVar: "BD_DB", target: legacyDBFile},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := envForStoreEnvDBTest(filepath.Join(root, "home"), tc.envVar+"="+tc.target)
@@ -111,6 +120,10 @@ func TestStorePathHonorsEnvDBTargetOverAmbientWorkspace(t *testing.T) {
 			if !strings.Contains(string(listOut), "TARGET-ONLY-ISSUE") {
 				t.Fatalf("bd list did not read the %s target workspace %q\n%s",
 					tc.envVar, tc.target, listOut)
+			}
+			if _, err := os.Stat(legacyDBFile); !os.IsNotExist(err) {
+				t.Fatalf("bd list created %q for %s=%q; the target selects the workspace, not a file (stat: %v)",
+					legacyDBFile, tc.envVar, tc.target, err)
 			}
 		})
 	}

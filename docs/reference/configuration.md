@@ -538,7 +538,11 @@ variables for the duration of the command and cannot be outranked by them.
 On the store-requiring commands, a `BEADS_DB`/`BD_DB` that is set but names a
 path that does not exist is an error: `bd` reports the variable and the missing
 path and exits non-zero instead of falling back to a lower rung or creating an
-empty database beside it. `bd where` and `bd context` do not check the path.
+empty database beside it. The exception is a missing path whose parent directory
+is an initialized workspace (it holds `metadata.json`), such as the legacy
+`BEADS_DB=<workspace>/.beads/beads.db`: a Dolt workspace never creates that
+file, so the variable selects the workspace as it always has.
+`bd where` and `bd context` do not check the path.
 `bd where` exits 0 and prints the `.beads` directory of the workspace enclosing
 the path or, when there is none, the path's parent directory, even if that does
 not exist — so it cannot tell you the variable is wrong; `bd list` can. A

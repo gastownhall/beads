@@ -1433,7 +1433,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     which created a brand-new empty embedded database beside the typo, answered
     `No issues found.` and exited 0 — a false all-clear, plus an `embeddeddolt`
     directory and gate lock written outside any real workspace. `bd` now names
-    the variable and the missing path and exits non-zero. `bd where` and
+    the variable and the missing path and exits non-zero. The exception is a
+    missing path whose parent directory is an initialized workspace (it holds
+    `metadata.json`): the legacy file-valued `BEADS_DB=<ws>/.beads/beads.db`
+    names a file a Dolt workspace never creates, so it still selects that
+    workspace, as `TestStorePathHonorsEnvDBTargetOverAmbientWorkspace` pins
+    for both variables. `bd where` and
     `bd context` still do not check the path, and `bd where` exits 0 printing
     a location derived from it, so it cannot catch the typo. `bd init` and
     `bd bootstrap` are unaffected: they skip store initialization and never

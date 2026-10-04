@@ -1462,13 +1462,22 @@ var rootCmd = &cobra.Command{
 				// writing to a store outside any real workspace. That bootstrap
 				// fallback is for init/bootstrap, which return above via
 				// skipsStoreInit and never reach this block.
+				//
+				// The legacy file-valued form, BEADS_DB=<ws>/.beads/beads.db, is
+				// not a typo even though the file is missing: a Dolt workspace
+				// never creates it. Its parent holds metadata.json, so
+				// resolveCommandBeadsDir maps it to that workspace exactly as it
+				// did before this guard existed, and bd where already answers the
+				// same .beads directory for it.
 				if _, statErr := os.Stat(canonical); statErr != nil {
-					if os.IsNotExist(statErr) {
+					if !os.IsNotExist(statErr) {
+						return HandleErrorRespectJSON("%s=%q: %v", key, envTarget, statErr)
+					}
+					if _, metaErr := os.Stat(filepath.Join(filepath.Dir(canonical), configfile.ConfigFileName)); metaErr != nil {
 						return HandleErrorRespectJSON(
-							"%s=%q does not exist: point it at an existing .beads directory or database file, or unset it",
+							"%s=%q does not exist: point it at an existing .beads directory, or unset it",
 							key, envTarget)
 					}
-					return HandleErrorRespectJSON("%s=%q: %v", key, envTarget, statErr)
 				}
 				dbPath = canonical
 				break
