@@ -369,6 +369,14 @@ func TestEmbeddedInitA(t *testing.T) {
 		if strings.Contains(out, "bd initialized") {
 			t.Error("--quiet should suppress success message")
 		}
+		// The project installers (Claude, Codex, Cursor) run here (agents
+		// are not skipped); --quiet drops their progress too.
+		requireFile(t, filepath.Join(dir, ".claude", "settings.json"))
+		for _, chatter := range []string{"Installing Claude hooks", "Beads agent skill installed", "Cursor integration installed"} {
+			if strings.Contains(out, chatter) {
+				t.Errorf("--quiet should suppress installer output %q, got:\n%s", chatter, out)
+			}
+		}
 
 		// bd_version is in local_metadata (dolt-ignored), not metadata
 		func() {

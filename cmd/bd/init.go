@@ -2126,30 +2126,25 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// Auto-setup Claude hooks, Codex, and Cursor project integration. Skip in
 		// stealth mode or when agents are skipped.
 		if !stealth && !skipAgents && !isBareGitRepo() {
-			// The installers report progress on stdout; --quiet suppresses
-			// it like every other init message (their failures still reach
-			// stderr below, unless quiet).
-			restoreStdout := suppressStdoutIf(quiet)
-			defer restoreStdout()
-			if err := setup.InstallClaudeProject(stealth); err != nil {
-				if !quiet {
-					fmt.Fprintf(os.Stderr, "Warning: failed to setup Claude hooks: %v\n", err)
-				}
+			// --quiet drops the installers' progress like every other init
+			// message; failures still reach stderr (the installers' own
+			// error lines and the warnings below), quiet or not.
+			installOut := setup.ProjectInstallOutput{}
+			if quiet {
+				installOut = setup.QuietProjectInstallOutput()
+			}
+			if err := setup.InstallClaudeProjectTo(stealth, installOut); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to setup Claude hooks: %v\n", err)
 				// Non-fatal - continue with init
 			}
-			if err := setup.InstallCodexProject(); err != nil {
-				if !quiet {
-					fmt.Fprintf(os.Stderr, "Warning: failed to setup Codex integration: %v\n", err)
-				}
+			if err := setup.InstallCodexProjectTo(installOut); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to setup Codex integration: %v\n", err)
 				// Non-fatal - continue with init
 			}
-			if err := setup.InstallCursorProject(); err != nil {
-				if !quiet {
-					fmt.Fprintf(os.Stderr, "Warning: failed to setup Cursor integration: %v\n", err)
-				}
+			if err := setup.InstallCursorProjectTo(installOut); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to setup Cursor integration: %v\n", err)
 				// Non-fatal - continue with init
 			}
-			restoreStdout()
 		}
 
 		if !stealth && useLocalBeads {
@@ -3785,29 +3780,4 @@ func initArtifactGitCommand(workDir string, args ...string) *exec.Cmd {
 	cmd := exec.Command("git", args...)
 	cmd.Dir, cmd.Env = workDir, gitenv.ScrubRouting(os.Environ())
 	return cmd
-}
-
-// suppressStdoutIf points os.Stdout at the null device while quiet, for
-// helpers that print progress unconditionally, and returns the function that
-// restores it (idempotent, so callers may both defer it and call it early).
-// Without quiet it changes nothing.
-func suppressStdoutIf(quiet bool) func() {
-	if !quiet {
-		return func() {}
-	}
-	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-	if err != nil {
-		return func() {}
-	}
-	orig := os.Stdout
-	os.Stdout = devNull
-	restored := false
-	return func() {
-		if restored {
-			return
-		}
-		restored = true
-		os.Stdout = orig
-		_ = devNull.Close()
-	}
 }
