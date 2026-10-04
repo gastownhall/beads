@@ -282,6 +282,7 @@ go_library(
         "restore.go",
         "routed.go",
         "routing_read.go",
+        "routing_role.go",
         "rules.go",
         "sandbox_unix.go",
         "sandbox_windows.go",
