@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/externaldeps"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/telemetry"
 )
 
@@ -204,6 +207,139 @@ func TestKVPrefixReaderAbsentCapabilityFallsBack(t *testing.T) {
 				t.Errorf("store without GetConfigByPrefix reported as prefix-capable through %T", wrapped)
 			}
 		})
+	}
+}
+
+// kvListStubRows is every config row the proxied stubs below serve: two keys
+// under the listed prefix, a sibling key that shares its leading characters, an
+// unrelated kv key, and a non-kv config row.
+var kvListStubRows = map[string]string{
+	"kv.mail.dog.m1":      "1",
+	"kv.mail.dog.m2":      "2",
+	"kv.mail.doggerel.m3": "3",
+	"kv.other":            "4",
+	"issue_prefix":        "bd",
+}
+
+// wantKVListMailDog is what `bd kv list --prefix mail.dog.` prints over
+// kvListStubRows, whichever read served it.
+const wantKVListMailDog = "\nKey-Value Store:\n  mail.dog.m1 = 1\n  mail.dog.m2 = 2\n"
+
+func kvListStubRowsWithPrefix(prefix string) map[string]string {
+	out := make(map[string]string)
+	for k, v := range kvListStubRows {
+		if strings.HasPrefix(k, prefix) {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// stubFullConfigUC is a config use case WITHOUT the optional prefix-read
+// capability: GetAllConfig is its only read, and it counts them.
+type stubFullConfigUC struct {
+	domain.ConfigUseCase // any other method is a nil call: kv list must not reach one
+	fullReads            int
+}
+
+func (s *stubFullConfigUC) GetAllConfig(context.Context) (map[string]string, error) {
+	s.fullReads++
+	return kvListStubRowsWithPrefix(""), nil
+}
+
+// stubPrefixConfigUC is the proxied twin of stubPrefixChainStore: it adds the
+// capability and records the prefixes it was asked for. Like the real use case,
+// the prefix read returns only the rows under the prefix and the full read
+// returns every row, so only the counters can tell the arms apart.
+type stubPrefixConfigUC struct {
+	stubFullConfigUC
+	prefixReads []string
+}
+
+func (s *stubPrefixConfigUC) GetConfigByPrefix(_ context.Context, prefix string) (map[string]string, error) {
+	s.prefixReads = append(s.prefixReads, prefix)
+	return kvListStubRowsWithPrefix(prefix), nil
+}
+
+// configOnlyUOW serves the config use case and nothing else; kv list reads
+// nothing else.
+type configOnlyUOW struct {
+	uow.UnitOfWork
+	cfg domain.ConfigUseCase
+}
+
+func (u configOnlyUOW) Close(context.Context)               {}
+func (u configOnlyUOW) ConfigUseCase() domain.ConfigUseCase { return u.cfg }
+
+type configOnlyProvider struct{ cfg domain.ConfigUseCase }
+
+func (p configOnlyProvider) NewUOW(context.Context) (uow.UnitOfWork, error) {
+	return configOnlyUOW{cfg: p.cfg}, nil
+}
+
+func (p configOnlyProvider) Close(context.Context) error { return nil }
+
+// runKVListProxiedThrough runs the proxied `bd kv list --prefix` command
+// against provider and returns what it printed.
+func runKVListProxiedThrough(t *testing.T, provider uow.UnitOfWorkProvider, prefix string) string {
+	t.Helper()
+	oldProvider, oldJSON := uowProvider, jsonOutput
+	uowProvider, jsonOutput = provider, false
+	t.Cleanup(func() { uowProvider, jsonOutput = oldProvider, oldJSON })
+	return captureStdout(t, func() error {
+		return runKVListProxiedServer(t.Context(), prefix)
+	})
+}
+
+// TestKVListProxiedPrefixReadSurvivesProviderChain is the proxied-server twin
+// of TestKVPrefixReaderUnwrapsStorageDecorators. runKVListProxiedServer
+// discovers the prefix fast path by asserting on the unit of work's config use
+// case, and a miss falls back to GetAllConfig plus kvPairsWithPrefix — the same
+// rows, so a lost capability fails nothing but a read counter. Every layer
+// wireProxiedUOWProvider installs embeds uow.UnitOfWork and passes
+// ConfigUseCase through; a layer that wrapped the use case in a type embedding
+// domain.ConfigUseCase, which does not declare GetConfigByPrefix, would turn
+// every proxied `bd kv list --prefix` into a full scan. Covers both chain
+// configurations and drives the command's own read.
+func TestKVListProxiedPrefixReadSurvivesProviderChain(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		sinks uow.Sinks
+	}{
+		{name: "HookOn", sinks: uow.Sinks{Hook: hooks.NewRunner("/nonexistent")}},
+		{name: "HookDisabled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &stubPrefixConfigUC{}
+			wrapped := wireProxiedUOWProvider(configOnlyProvider{cfg: cfg}, tc.sinks)
+
+			got := runKVListProxiedThrough(t, wrapped, "mail.dog.")
+			if cfg.fullReads != 0 {
+				t.Fatalf("prefix read fell back to %d full GetAllConfig scan(s) through the wired chain (%T); proxied kv list --prefix would silently full-scan", cfg.fullReads, wrapped)
+			}
+			if want := []string{"kv.mail.dog."}; !reflect.DeepEqual(cfg.prefixReads, want) {
+				t.Errorf("use case prefix reads = %v; want %v — the read never reached the use case's fast path", cfg.prefixReads, want)
+			}
+			if got != wantKVListMailDog {
+				t.Errorf("kv list --prefix mail.dog. printed %q; want %q", got, wantKVListMailDog)
+			}
+		})
+	}
+}
+
+// TestKVListProxiedPrefixAbsentCapabilityFallsBack keeps the test above honest:
+// a use case without GetConfigByPrefix must be served by one full read, which
+// the listing narrows to the same rows the fast path returns.
+func TestKVListProxiedPrefixAbsentCapabilityFallsBack(t *testing.T) {
+	cfg := &stubFullConfigUC{}
+	wrapped := wireProxiedUOWProvider(configOnlyProvider{cfg: cfg}, uow.Sinks{Hook: hooks.NewRunner("/nonexistent")})
+
+	got := runKVListProxiedThrough(t, wrapped, "mail.dog.")
+	if cfg.fullReads != 1 {
+		t.Errorf("use case without GetConfigByPrefix served %d full read(s); want exactly 1", cfg.fullReads)
+	}
+	if got != wantKVListMailDog {
+		t.Errorf("kv list --prefix mail.dog. printed %q; want %q", got, wantKVListMailDog)
 	}
 }
 
