@@ -27,10 +27,12 @@
 #
 # BAZEL_FORK_CACHE=true (bazel.yml mode "cache": rbe=cache dispatches, and
 # fork/Dependabot runs while rbe-fork is closed) appends --config=fork-cache:
-# .bazelrc's credential-free, read-only rbe-west cache. With RBE_CACHE_ZSTD=1
-# (the repository variable) it also asks that cache for zstd transfers
-# (--remote_cache_compression); no other mode ever does, because only the
-# anonymous cache advertises zstd, and Bazel refuses a remote that does not.
+# .bazelrc's credential-free, read-only rbe-west cache. While that cache
+# advertises zstd (cache-zstd-probe.sh asks its GetCapabilities; any failure
+# means no) it also asks for zstd transfers (--remote_cache_compression). A
+# probe, not a repository variable: fork pull_request runs see no vars. No
+# other mode ever asks, because only the anonymous cache can advertise zstd,
+# and Bazel refuses a remote that does not.
 #
 # RBE_FORK_CERT_FILE + RBE_FORK_KEY_FILE + RBE_FORK_ENDPOINT + RBE_FORK_INSTANCE
 # (bazel.yml modes fork-ro/fork-rw: fork-credential.sh's outputs, a
@@ -92,7 +94,6 @@ key="${RBE_TLS_KEY:-}"
 ca="${RBE_TLS_CA:-}"
 instance="${RBE_INSTANCE:-}"
 fork_cache="${BAZEL_FORK_CACHE:-}"
-cache_zstd="${RBE_CACHE_ZSTD:-}"
 fork_cert="${RBE_FORK_CERT_FILE:-}"
 fork_key="${RBE_FORK_KEY_FILE:-}"
 fork_endpoint="${RBE_FORK_ENDPOINT:-}"
@@ -226,20 +227,12 @@ elif [[ "$set_fields" -ne 0 ]]; then
 	echo "setup-bazel: remote execution is partially configured; BAZEL_REMOTE_EXECUTOR, RBE_TLS_CERT and RBE_TLS_KEY must be set together (or none, for local execution)" >&2
 	exit 1
 elif [[ "$fork_cache" == true ]]; then
-	# zstd for the anonymous cache's transfers: transport only, so action keys
-	# are unchanged, and if rbe-cache stops advertising it, fork-cache's
-	# fallback flags make the build run locally. A bad value warns and stays
-	# off rather than failing every cache lane.
-	case "$cache_zstd" in
-	"" | 0 | 1) ;;
-	*)
-		echo "::warning title=RBE_CACHE_ZSTD::RBE_CACHE_ZSTD must be 0 or 1, got \"$cache_zstd\"; the fork cache stays identity"
-		cache_zstd=0
-		;;
-	esac
+	# zstd for the anonymous cache's transfers while it advertises zstd:
+	# transport only, so action keys are unchanged. The probe never fails
+	# this script; it only decides the line.
 	{
 		echo "build --config=fork-cache"
-		if [[ "$cache_zstd" == 1 ]]; then
+		if bash "$(dirname "${BASH_SOURCE[0]}")/cache-zstd-probe.sh"; then
 			echo "build:fork-cache --remote_cache_compression"
 		fi
 	} >>"$rc"

@@ -367,7 +367,8 @@ func TestSetupBazelRCWriterForkMode(t *testing.T) {
 		cmd := exec.Command(bash, script)
 		cmd.Dir = ws
 		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GITHUB_WORKSPACE=" + ws, "GITHUB_OUTPUT=" + filepath.Join(dir, "out"),
-			"BAZEL_CI_CACHE_DIR=" + filepath.Join(dir, "cache"), "BAZEL_CI_SECRET_DIR=" + secret}
+			"BAZEL_CI_CACHE_DIR=" + filepath.Join(dir, "cache"), "BAZEL_CI_SECRET_DIR=" + secret,
+			"RBE_CACHE_PROBE_URL=" + refusedProbeURL}
 		for k, v := range env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
@@ -381,9 +382,7 @@ func TestSetupBazelRCWriterForkMode(t *testing.T) {
 			"RBE_FORK_ENDPOINT": rbeForkEndpoint, "RBE_FORK_INSTANCE": instance}
 	}
 	for _, instance := range []string{"oss-fork", "oss"} {
-		// RBE_CACHE_ZSTD=1 too: rbe-fork advertises no compressor, so the
-		// exact lines below must not grow --remote_cache_compression.
-		out, rc, logs, err := run(t, mergeMaps(fork(instance), map[string]string{"RBE_CACHE_ZSTD": "1"}))
+		out, rc, logs, err := run(t, fork(instance))
 		if err != nil {
 			t.Fatalf("%s: %v\n%s", instance, err, logs)
 		}

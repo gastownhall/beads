@@ -2843,9 +2843,6 @@ func TestBazelWorkflowJobsAndExecutionMode(t *testing.T) {
 		"RBE_TLS_CA":            "${{ " + gate + "secrets.RBE_TLS_CA || '' }}",
 		"RBE_INSTANCE":          "${{ " + gate + "'oss' || '' }}",
 		"BAZEL_FORK_CACHE":      "${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}",
-		// zstd for the fork cache alone, off until the repository variable
-		// says 1 (write-bazelrc.sh acts on it in mode cache only).
-		"RBE_CACHE_ZSTD": "${{ needs.rbe.outputs.mode == 'cache' && vars.RBE_CACHE_ZSTD || '' }}",
 	}
 	wantSetupEnv := copyMap(wantPackageSetupEnv)
 	wantSetupEnv["BAZEL_FORK_REMOTE"] = bazelForkRemoteValue
@@ -5905,6 +5902,9 @@ func TestSetupBazelRCWriter(t *testing.T) {
 			"GITHUB_OUTPUT=" + out,
 			"BAZEL_CI_CACHE_DIR=" + filepath.Join(dir, "cache"),
 			"BAZEL_CI_SECRET_DIR=" + secret,
+			// The fork cache's zstd probe: a refused port unless extra
+			// names a stand-in rbe-cache; never rbe-cache itself.
+			"RBE_CACHE_PROBE_URL=" + refusedProbeURL,
 		}, extra...)
 		logs, err := cmd.CombinedOutput()
 		outputs, _ := os.ReadFile(out)
@@ -5951,32 +5951,56 @@ func TestSetupBazelRCWriter(t *testing.T) {
 			t.Errorf("log lacks the read-only cache notice:\n%s", logs)
 		}
 	})
-	// RBE_CACHE_ZSTD=1 adds the fork cache's zstd line and nothing else; any
-	// other value adds nothing (a bad one warns rather than failing the lane).
-	for value, wantLine := range map[string]bool{"1": true, "0": false, "": false, "true": false} {
-		t.Run("fork cache RBE_CACHE_ZSTD="+value, func(t *testing.T) {
-			outputs, rc, logs, err := run(t, "BAZEL_FORK_CACHE=true", "RBE_CACHE_ZSTD="+value)
+	// The fork cache asks for zstd exactly while rbe-cache advertises it
+	// (cache-zstd-probe.sh against a stand-in; TestCacheZstdProbe runs every
+	// other answer): the line follows --config=fork-cache, and the lane
+	// never fails on the probe. Remote-exec and rbe-fork never probe.
+	t.Run("fork cache zstd follows rbe-cache", func(t *testing.T) {
+		requireCacheZstdProbeTools(t)
+		for answer, wantLine := range map[string]bool{"zstd": true, "identity": false, "refused": false} {
+			env := []string{"BAZEL_FORK_CACHE=true"}
+			if answer != "refused" {
+				body := capsZstd
+				if answer == "identity" {
+					body = capsLive
+				}
+				url, ca, _ := serveCapabilities(t, capsAnswer{grpc: "0", body: grpcMessage(body)})
+				env = append(env, "RBE_CACHE_PROBE_URL="+url, "CURL_CA_BUNDLE="+ca)
+			}
+			outputs, rc, logs, err := run(t, env...)
 			if err != nil {
-				t.Fatalf("err=%v\n%s", err, logs)
+				t.Fatalf("%s: err=%v\n%s", answer, err, logs)
 			}
 			if got := strings.Contains(rc, "\nbuild --config=fork-cache\n"+forkCacheZstdLine+"\n"); got != wantLine || strings.Count(rc, "remote_cache_compression") != map[bool]int{true: 1}[wantLine] {
-				t.Errorf("rc = %q; want %q right after --config=fork-cache: %v", rc, forkCacheZstdLine, wantLine)
+				t.Errorf("rbe-cache %s: rc = %q; want %q right after --config=fork-cache: %v", answer, rc, forkCacheZstdLine, wantLine)
 			}
 			if strings.Contains(rc, "remote-exec") || !strings.Contains(outputs, "cache=true") {
-				t.Errorf("outputs = %q rc = %q; want cache=true and no remote-exec", outputs, rc)
+				t.Errorf("rbe-cache %s: outputs = %q rc = %q; want cache=true and no remote-exec", answer, outputs, rc)
 			}
-			if bad := value == "true"; bad != strings.Contains(logs, "::warning title=RBE_CACHE_ZSTD::") {
-				t.Errorf("RBE_CACHE_ZSTD=%q: warning logged %v, want %v:\n%s", value, !bad, bad, logs)
+			if !strings.Contains(logs, "rbe-cache zstd probe: ") {
+				t.Errorf("rbe-cache %s: log lacks the probe's verdict:\n%s", answer, logs)
 			}
-		})
-	}
-	t.Run("remote-exec never asks for zstd", func(t *testing.T) {
-		_, rc, logs, err := run(t, executor, "RBE_TLS_CERT="+pem("CERTIFICATE"), "RBE_TLS_KEY="+pem("PRIVATE KEY"), "RBE_CACHE_ZSTD=1")
-		if err != nil {
-			t.Fatalf("err=%v\n%s", err, logs)
 		}
-		if strings.Contains(rc, "remote_cache_compression") {
-			t.Errorf("trusted rc asks for compression; rbe-west's trusted schedulers advertise none:\n%s", rc)
+	})
+	t.Run("remote-exec and rbe-fork never ask for zstd", func(t *testing.T) {
+		requireCacheZstdProbeTools(t)
+		url, ca, hits := serveCapabilities(t, capsAnswer{grpc: "0", body: grpcMessage(capsZstd)})
+		probe := []string{"RBE_CACHE_PROBE_URL=" + url, "CURL_CA_BUNDLE=" + ca}
+		for name, env := range map[string][]string{
+			"remote-exec": {executor, "RBE_TLS_CERT=" + pem("CERTIFICATE"), "RBE_TLS_KEY=" + pem("PRIVATE KEY")},
+			"rbe-fork": {"RBE_FORK_CERT_FILE=/tmp/s/fork.crt", "RBE_FORK_KEY_FILE=/tmp/s/fork.key",
+				"RBE_FORK_ENDPOINT=grpcs://rbe-fork.ops.gascity.com:8444", "RBE_FORK_INSTANCE=oss-fork"},
+		} {
+			_, rc, logs, err := run(t, append(env, probe...)...)
+			if err != nil {
+				t.Fatalf("%s: err=%v\n%s", name, err, logs)
+			}
+			if strings.Contains(rc, "remote_cache_compression") {
+				t.Errorf("%s rc asks for compression; rbe-west's schedulers and rbe-fork advertise none:\n%s", name, rc)
+			}
+		}
+		if n := hits.Load(); n != 0 {
+			t.Errorf("remote-exec or rbe-fork probed rbe-cache %d times; only the fork cache may", n)
 		}
 	})
 	t.Run("rejects fork cache with the secrets", func(t *testing.T) {

@@ -342,11 +342,12 @@ var publicForkCacheLines = map[string]bool{
 const (
 	forkCacheEndpoint = "grpc" + "s://rbe-cache.ops.gascity.com:8443"
 	forkCacheInstance = "oss"
-	// zstd cache transfers: only the anonymous fork cache advertises a
-	// compressor, so only fork-cache may ask for one, and only when the
-	// repository variable RBE_CACHE_ZSTD is 1 (write-bazelrc.sh; rollback
-	// without a revert). Trusted remote-exec and rbe-fork never: their
-	// schedulers advertise none, and Bazel then refuses the remote.
+	// zstd cache transfers: only the anonymous fork cache can advertise a
+	// compressor, so only fork-cache may ask for one, and only while
+	// write-bazelrc.sh's cache-zstd-probe.sh finds it advertised (a probe,
+	// not a repository variable: fork pull_request runs see no vars).
+	// Trusted remote-exec and rbe-fork never: their schedulers advertise
+	// none, and Bazel then refuses the remote.
 	forkCacheZstdLine = "build:fork-cache --remote_cache_compression"
 )
 
@@ -1265,7 +1266,7 @@ func checkBazelrcForkCache(bazelrc string) []error {
 	var opts []bazelrcOption
 	for _, o := range parseBazelrcOptions(bazelrc) {
 		if strings.Contains(o.flag, "remote_cache_compression") {
-			errs = append(errs, errors.New(o.source()+" sets "+o.flag+"; only setup-bazel's generated rc may, for fork-cache behind RBE_CACHE_ZSTD"))
+			errs = append(errs, errors.New(o.source()+" sets "+o.flag+"; only setup-bazel's generated rc may, for fork-cache while rbe-cache advertises zstd"))
 		}
 		switch {
 		case o.config == "fork-cache":
@@ -1553,7 +1554,7 @@ func TestBazelrcIntegrationLaneFixtures(t *testing.T) {
 
 // TestBazelRemoteCacheCompressionOnlyForkCache: --remote_cache_compression
 // appears in one place, write-bazelrc.sh's fork-cache line behind
-// RBE_CACHE_ZSTD. No .bazelrc config, workflow or other action file may set
+// the zstd probe. No .bazelrc config, workflow or other action file may set
 // it: every other remote (rbe-west's trusted schedulers on :443, rbe-fork on
 // :8444) advertises no compressor, and Bazel then refuses the remote.
 func TestBazelRemoteCacheCompressionOnlyForkCache(t *testing.T) {
