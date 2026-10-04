@@ -1220,6 +1220,7 @@ func TestDefaultConfigReturnsZeroForStandalone(t *testing.T) {
 	// giving each project a unique port without hash collisions (GH#2098).
 	t.Setenv("GT_ROOT", "")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	isolateUserConfig(t)
 
 	dir := t.TempDir()
 	cfg := DefaultConfig(dir)
@@ -1243,6 +1244,7 @@ func TestDefaultConfigPortFileTakesPrecedence(t *testing.T) {
 	// Port file (written by Start) should take precedence over ephemeral.
 	t.Setenv("GT_ROOT", "")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	isolateUserConfig(t)
 
 	dir := t.TempDir()
 	if err := writePortFile(dir, 14567); err != nil {
