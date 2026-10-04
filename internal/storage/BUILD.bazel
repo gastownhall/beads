@@ -154,6 +154,7 @@ filegroup(
         "//internal/storage/embeddeddolt:go_srcs",
         "//internal/storage/embeddeddolt/cmd:go_srcs",
         "//internal/storage/externaldeps:go_srcs",
+        "//internal/storage/filelock:go_srcs",
         "//internal/storage/fs:go_srcs",
         "//internal/storage/git:go_srcs",
         "//internal/storage/issueops:go_srcs",
