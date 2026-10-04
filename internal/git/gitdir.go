@@ -37,6 +37,10 @@ var (
 	// ResetCaches: see that function's comment and PinNoRepositoryUnderForTesting's
 	// doc for why the pin must outlive a cache reset to do its job.
 	pinnedRootForTesting string
+	// pinnedRootRawForTesting is the pin as given (absolute but not
+	// symlink-resolved). underPinnedRootForTesting matches against both forms
+	// so canonicalization only ever widens the fence, never narrows it.
+	pinnedRootRawForTesting string
 )
 
 // underPinnedRootForTesting reports whether wd is pinnedRootForTesting itself
@@ -44,14 +48,42 @@ var (
 // getGitContext lookup while a pin is active, so a test that chdirs outside
 // the pinned root (e.g. into its own t.TempDir() fixture) still gets real git
 // detection scoped to that fixture.
+//
+// Both sides are compared in canonical form (see canonicalPinPath): on macOS
+// t.TempDir() and os.TempDir() live under /var/folders/..., but /var is a
+// symlink to /private/var and getcwd(2) reports the resolved
+// /private/var/folders/... path, so a raw prefix test never matched and the
+// pin silently did nothing there.
 func underPinnedRootForTesting(wd string) bool {
 	if pinnedRootForTesting == "" || wd == "" {
 		return false
 	}
-	if wd == pinnedRootForTesting {
-		return true
+	canonicalWD := canonicalPinPath(wd)
+	for _, root := range []string{pinnedRootForTesting, pinnedRootRawForTesting} {
+		if root == "" {
+			continue
+		}
+		for _, dir := range []string{wd, canonicalWD} {
+			if dir == root || strings.HasPrefix(dir, root+string(filepath.Separator)) {
+				return true
+			}
+		}
 	}
-	return strings.HasPrefix(wd, pinnedRootForTesting+string(filepath.Separator))
+	return false
+}
+
+// canonicalPinPath returns p as an absolute, symlink-resolved, cleaned path,
+// falling back to the best form available when resolution fails (e.g. the
+// path no longer exists), so the pin comparison is never stricter than the
+// raw strings.
+func canonicalPinPath(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
+	return filepath.Clean(p)
 }
 
 // initGitContext populates the gitContext with a single git call.
@@ -556,11 +588,11 @@ var errPinnedNoRepository = errors.New("not a git repository (pinned for testing
 // WARNING: Not thread-safe, like ResetCaches. Only call before m.Run(),
 // before any goroutines that might read the git context are started.
 func PinNoRepositoryUnderForTesting(root string) {
-	abs, err := filepath.Abs(root)
-	if err == nil {
-		root = abs
+	pinnedRootRawForTesting = root
+	if abs, err := filepath.Abs(root); err == nil {
+		pinnedRootRawForTesting = abs
 	}
-	pinnedRootForTesting = root
+	pinnedRootForTesting = canonicalPinPath(root)
 	gitCtxOnce = sync.Once{}
 	gitCtx = gitContext{}
 }

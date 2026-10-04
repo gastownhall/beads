@@ -123,6 +123,14 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/bazel.yml
+    # Exactly the four RBE secrets: never the rbe-prewarm app private key
+    # (B1, security review of bdef342d5). This pull_request_target run is
+    # the one caller whose code under test is an untrusted fork's, so it
+    # must never carry the credential that mints gastownhall/gascity
+    # Actions tokens; pre-warming is accepted as a same-repo-only benefit
+    # (bazel.yml's rbe-prewarm job also gates on mode remote only, which a
+    # fork-authorized farm run never reaches). See "rbe-west Pre-warm",
+    # engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md.
     secrets:
       RBE_WEST_EXECUTOR: ${{ secrets.RBE_WEST_EXECUTOR }}
       RBE_TLS_CERT: ${{ secrets.RBE_TLS_CERT }}

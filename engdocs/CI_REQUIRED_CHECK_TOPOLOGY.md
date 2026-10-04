@@ -313,8 +313,8 @@ PR. It runs in the default branch's cache scope, which `push` runs on
 - Blacksmith's colocated cache: unknown. Farm lanes run on
   `blacksmith-2vcpu-ubuntu-2404`, whose cache transparently backs
   `actions/cache`, scoped by branch like GitHub's. Nothing documents whether
-  it honours the read-only token. The canary run in the rollout notes
-  (`~/beads-bazel-plan/vip-forks-design.md`) or an answer from Blacksmith
+  it honours the read-only token. A canary farm run that tries to save
+  a cache entry from a fork-authorized PR, or an answer from Blacksmith,
   settles it. Record the answer here.
 - What a writable cache would reach, and what now stops it. The `bazel.yml`
   lanes on `main` and on same-repo PRs, which fall back to `main`'s scope,
@@ -467,6 +467,140 @@ Only a GitHub run can verify these:
   (the lanes fail with "Refusing to check out fork pull request code" if
   it doesn't).
 - An unlisted author, or a push by an unlisted collaborator, skips `farm`.
+
+## rbe-west Pre-warm
+
+`bazel.yml`'s `rbe-prewarm` job is a best-effort attempt to have
+gastownhall/gascity's rbe-west OSS worker pool (one Blacksmith-hosted
+NativeLink worker, driven by gascity's own `rbe-worker-pool.yml`
+`workflow_dispatch`) already booting by the time this run's Bazel lanes need
+it, instead of each of them separately waiting out the ~120s it takes
+NativeLink to notice demand and scale the pool up from zero. gascity dispatches
+its own pool from inside its own `bazel-test.yml` job, same-repo, with
+`github.token`; beads cannot use its own `GITHUB_TOKEN` against gascity's
+repository, so this job needs its own credential into gascity instead.
+
+**What it does.** A job of its own (not a step inside `rbe`, so it never
+delays the mode decision every lane waits on), gated on
+`needs.rbe.outputs.mode == 'remote'` only - the one mode whose lanes target
+rbe-west's `oss` instance, which is what `rbe-worker-pool.yml` serves.
+(Earlier this also included `fork-rw`, but a fork or Dependabot
+`pull_request` run never carries a `workflow_call` secret regardless of
+runs-on or this job's `if:` - GitHub does not forward repository or App
+secrets to a fork's `pull_request` event - so that half of the condition
+always found no credential and no-opped; it was dropped as dead weight that
+only cost an idle runner-minute. See "Accepted risk" below for why
+`bazel-farm.yml`'s trusted-fork tier does not get pre-warming either.) When
+scheduled, it mints a short-lived GitHub App installation token and uses it to
+check gastownhall/gascity's current `rbe-worker-pool.yml` run count and, if
+under the desired worker count, dispatch enough new runs to reach it. The
+desired count is the repository variable `RBE_PREWARM_WORKERS`: unset, empty
+or non-numeric means the default of 1, values above 4 are clamped to 4, and
+0 is the kill switch (below). The in-workflow default is deliberately 1;
+operators who want more warm workers raise the repository variable (it is
+currently set to 2) rather than the workflow default. Every
+failure path - no credential, gascity unreachable, `gh` rate-limited, the
+dispatch itself rejected - prints a `::warning::` and the step still exits 0:
+this job never gates anything (it is not a `needs` of any lane, and it is
+never in `.github/scripts/bazel-gate.sh`'s vocabulary, so pr.yml's `ci-gate`
+never looks at it), and it cannot fail the run either, since a called reusable
+workflow's overall conclusion is "failure" if any job inside it fails
+regardless of `needs` - the job itself therefore carries bazel.yml's one
+deliberate `continue-on-error: true`.
+
+*Unverified assumption:* the design above relies on a job-level
+`continue-on-error: true` inside a called reusable workflow preventing that
+job's own failure from flipping the *calling* workflow's own
+`needs.bazel.result` (pr.yml's `ci-gate` reads that, not `bazel.yml`'s
+internal conclusion, for its actual gating decision) to `failure`. This
+follows from GitHub's documented `continue-on-error` semantics and was
+reasoned through, not exercised against a real Actions run with a forced
+`rbe-prewarm` failure (a `workflow_dispatch` run with a deliberate `exit 1`
+patched into the dispatch step, observing `needs.bazel.result` in pr.yml's
+`ci-gate` job, would confirm it); treat it as a documented assumption until
+someone runs that check.
+
+The dispatch logic is inlined directly into the job's own `run:` step, not
+checked out from a `.github/scripts/*.sh` file. This job has no `actions/checkout`
+step at all: `pull_request_target` always loads the calling workflow's own
+YAML from the trusted base branch, but a step that checked out a PR's head
+and then ran a script from that tree while a credential was live would let
+that PR's content exfiltrate it - and, unlike editing this workflow file,
+editing a script file does not trip the org's workflow-file approval policy,
+so even a same-repo branch push could have altered it unreviewed. Nothing
+executes after the mint step except this one inline dispatch step and an
+`always()` result-recording step, neither of which touches a repository path
+(policy-tested: `scripts/bazel_rbe_prewarm_test.go`).
+
+**Credential scope.** A GitHub App named "bazel-allocator" is installed on
+gastownhall/gascity alone, granted exactly two permissions: Actions
+(read/write) and Metadata (read). Its private key (`RBE_POOL_APP_PRIVATE_KEY`)
+*is* a long-lived credential, and the mint step's `with:` does read it
+directly - that step, and only that step, holds it in the runner's memory, to
+produce a short-lived installation token (`actions/create-github-app-token`,
+pinned to a released commit SHA) scoped with `owner: gastownhall` and
+`repositories: gascity`. The App is identified by its public Client ID
+(`client-id: Iv23ligrqVEhlamZnoPU`, from `GET /apps/bazel-allocator`),
+committed as a literal in the mint step rather than kept as a secret or
+repository variable: it is not a credential, and a literal keeps it reviewed
+and policy-tested with the rest of the step. It replaces the action's
+deprecated `app-id` input. Every later step sees at most that token, never the
+key itself, and the token can act on gascity and nothing else in the
+gastownhall org. The token is used as `GH_TOKEN` for the `gh run list` /
+`gh workflow run` calls against gastownhall/gascity's `rbe-worker-pool.yml` on
+`main`, and nowhere else (`steps.mint.outputs.token` appears exactly once in
+`bazel.yml`, policy-tested). pr.yml and nightly.yml pass the app private key
+straight through like the four RBE secrets; `bazel-farm.yml` does not (see
+"Accepted risk" below). A fork or Dependabot `pull_request` run never gets it
+regardless (GitHub never forwards repository or App secrets to a
+fork's `pull_request` event).
+
+**Accepted risk.** The bazel-allocator private key is shared with gascity's
+own rbe-west scaler (its `bazel-test.yml` job dispatches its own pool
+same-repo, with `github.token`; beads instead got this dedicated App so it
+could reach gascity's repository at all) - a deliberate, user-approved reuse,
+not a credential minted solely for beads. Consequently, every same-repo
+`pull_request`, `merge_group`, `push` (to `main`) and nightly.yml run of
+`bazel.yml` - the only contexts that ever receive `RBE_POOL_APP_PRIVATE_KEY` -
+reaches that shared key for the duration of the mint step. This is a
+materially larger blast radius than losing beads' own revocable RBE client
+certificate (see the "Accepted risk" discussion of that certificate in
+`bazel.yml`'s own header): with the key, an attacker can mint
+gastownhall/gascity Actions-write tokens indefinitely - dispatching
+`rbe-worker-pool.yml` repeatedly to burn donated Blacksmith compute,
+cancelling or re-running gascity's own workflow runs, deleting their logs or
+caches, and reading their artifacts - until the key is rotated on gascity's
+side. Because the key is shared, **rotating it to respond to a beads-side
+leak also breaks gascity's own scaler**; the kill switch below (not
+rotation) is the first response to a suspected leak, and this run stops
+holding the credential within the same job. `bazel-farm.yml`'s
+`pull_request_target` run - the one caller whose run executes a fork's own
+code - never receives this secret, so an allowlisted fork author can
+read beads' own RBE client certificate (an existing, accepted, revocable-for-
+beads-alone risk) but never this shared key; that path's Bazel lanes get a
+cold start instead of a pre-warmed pool.
+
+**Secret names.**
+
+- `RBE_POOL_APP_PRIVATE_KEY` - the bazel-allocator App's private key (PEM),
+  the only secret this job reads. (The former `RBE_POOL_APP_ID` secret is no
+  longer referenced by any workflow now that the mint step uses the literal
+  Client ID; the repository secret can be deleted.)
+
+**Kill switch.** Pre-warming disables itself cleanly, without touching the
+job's `if:` or rotating the key, in either of two ways:
+
+- Leave `RBE_POOL_APP_PRIVATE_KEY` unset (or clear it): the job's own
+  `HAS_POOL_APP` check (the same env-boolean pattern as the `rbe` job's
+  `HAS_EXECUTOR`) skips the mint step, the dispatch step finds no
+  `GH_TOKEN`, warns, and exits 0. This is also the job's natural state before
+  the App is provisioned at all, and the fastest response to a suspected
+  leak of the token or key (it stops every future run from minting a new
+  token; it does not invalidate one already minted, which expires on its
+  own shortly after the job finishes).
+- Set the repository variable `RBE_PREWARM_WORKERS` to `0`: the dispatch
+  step's own kill switch, checked before any network call. Deleting the
+  variable does not disable pre-warming; it restores the default of 1.
 
 ## Required Check Contract
 

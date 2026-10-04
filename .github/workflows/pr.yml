@@ -42,7 +42,7 @@ env:
   # touching ci-gate.needs or the env map below -- see the "Evaluate CI gate"
   # step's run script. Committed, not a repo variable, for the same reason as
   # the BAZEL_RETIRES_LEGACY_* flags above: a re-run can never change it.
-  WINDOWS_PREBUILT_REQUIRED: "false"
+  WINDOWS_PREBUILT_REQUIRED: "true"
   # Fork and Dependabot PRs: "true" covers them like same-repo PRs (the
   # flags above then retire their legacy tiers too): rbe-west's mint
   # (rbe-fork) gives their Bazel lanes remote execution, instance oss-fork
@@ -2268,6 +2268,7 @@ jobs:
       RBE_TLS_CERT: ${{ secrets.RBE_TLS_CERT }}
       RBE_TLS_KEY: ${{ secrets.RBE_TLS_KEY }}
       RBE_TLS_CA: ${{ secrets.RBE_TLS_CA }}
+      RBE_POOL_APP_PRIVATE_KEY: ${{ secrets.RBE_POOL_APP_PRIVATE_KEY }}
     with:
       build-artifact-name: bazel-ci-build-artifacts
       integration: "on"

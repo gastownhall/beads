@@ -575,6 +575,30 @@ func TestBazelNoRemoteEndpointsInTrackedFiles(t *testing.T) {
 	}
 }
 
+// TestNoLocalPlanPathsInTrackedFiles: tracked files must not point readers
+// at a maintainer's private, out-of-repo planning notes (a home-directory
+// planning-notes tree), which no other contributor can open. Cite an
+// in-repo doc, a bead, or a PR instead. The needle is assembled at runtime so
+// this file does not match itself.
+func TestNoLocalPlanPathsInTrackedFiles(t *testing.T) {
+	root := bazelPolicyRoot(t)
+	if !gitRepoAvailable(root) {
+		t.Skip("not a git checkout (e.g. Bazel sandbox); tracked-file scan runs under go test and CI")
+	}
+	needle := "beads-" + "bazel-plan"
+	out, err := exec.Command("git", "-C", root, "grep", "-n", "-I", "-F", "-e", needle).Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return // no matches
+		}
+		t.Fatalf("git grep: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		t.Errorf("%s: tracked file references a local, non-repo %s path; point at an in-repo doc, bead or PR instead", line, needle)
+	}
+}
+
 // --- generated go_srcs filegroups are current -------------------------------
 
 // These checks walk the source checkout, which is not declared as Bazel data,

@@ -97,8 +97,10 @@ jobs:
 
   # Bazel lane with the full go test equivalence listing and the skip-parity
   # check (reported here; PRs gate on it through pr.yml). Remote execution
-  # when the repo secrets are present; bazel.yml gets those four and nothing
-  # else.
+  # when the repo secrets are present; bazel.yml gets the four RBE secrets
+  # plus rbe-prewarm's bazel-allocator app private key (same-repo/scheduled
+  # trigger only, so pre-warming is safe here - see bazel.yml's
+  # "rbe-west Pre-warm" header and engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md).
   bazel:
     name: Bazel equivalence (full detail)
     needs: bazel-go-test-json
@@ -109,6 +111,7 @@ jobs:
       RBE_TLS_CERT: ${{ secrets.RBE_TLS_CERT }}
       RBE_TLS_KEY: ${{ secrets.RBE_TLS_KEY }}
       RBE_TLS_CA: ${{ secrets.RBE_TLS_CA }}
+      RBE_POOL_APP_PRIVATE_KEY: ${{ secrets.RBE_POOL_APP_PRIVATE_KEY }}
     with:
       details: true
       go-test-json-artifact: bazel-equivalence-go-test-json
