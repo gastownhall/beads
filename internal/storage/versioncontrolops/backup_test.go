@@ -384,7 +384,15 @@ func TestRedactBackupURL(t *testing.T) {
 		{name: "userinfo in file authority", source: "file://key:secret@host/backups/x", want: "file://host/backups/x"},
 		{name: "plain path", source: "/var/backups/x", want: "/var/backups/x"},
 		{name: "malformed URL with userinfo", source: "aws:/k:s@b/db", want: "aws:[redacted]"},
+		{name: "single letter before userinfo", source: "u:secret@host/db", want: "u:[redacted]"},
 		{name: "clean URL", source: "s3://bucket/db", want: "s3://bucket/db"},
+
+		// A Windows drive path has the X:...@ shape of a malformed scheme, and
+		// DirToFileURL's file://C:\... has no "/" to end an authority. Neither
+		// carries userinfo, so an "@" in the path is kept like any other byte.
+		{name: "windows drive path", source: `C:\Users\me@corp\bk`, want: `C:\Users\me@corp\bk`},
+		{name: "windows drive path with slashes", source: "c:/Users/me@corp/bk", want: "c:/Users/me@corp/bk"},
+		{name: "windows drive file URL", source: `file://C:\Users\me@corp\bk`, want: `file://C:\Users\me@corp\bk`},
 
 		// One row per separator class, with the separator INSIDE the secret.
 		// A secret is arbitrary bytes, so each of these used to defeat the
@@ -593,6 +601,29 @@ func TestBackupRestoreAllowsBracketedAWSToReachDolt(t *testing.T) {
 	}
 	if !errors.Is(err, sentinel) {
 		t.Errorf("BackupRestore error %q no longer preserves errors.Is", err)
+	}
+}
+
+// DirToFileURL spells a Windows directory file://C:\..., which url.Parse
+// rejects and Dolt reads as a path. An "@" in that path is not userinfo, so the
+// restore must reach Dolt instead of being refused as an invalid URL.
+func TestBackupRestoreAllowsWindowsDriveFileURLToReachDolt(t *testing.T) {
+	const source = `file://C:\Users\me@corp\bk`
+	sentinel := errors.New("Dolt reached")
+	conn := &failingConn{err: sentinel}
+
+	err := BackupRestore(context.Background(), conn, source, "beads", false)
+	if err == nil {
+		t.Fatal("BackupRestore returned nil for a failing statement")
+	}
+	if conn.calls != 1 {
+		t.Fatalf("BackupRestore called Dolt %d time(s), want 1: %v", conn.calls, err)
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("BackupRestore error %q no longer preserves errors.Is", err)
+	}
+	if !strings.Contains(err.Error(), "restore from backup "+source+":") {
+		t.Errorf("BackupRestore error %q does not name the source directory", err)
 	}
 }
 

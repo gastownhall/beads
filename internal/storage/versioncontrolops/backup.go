@@ -315,8 +315,11 @@ func RedactBackupURL(source string) string {
 	if sep < 0 {
 		// A malformed scheme can still carry userinfo. Returning it unchanged is
 		// the unsafe failure mode: aws:/key:secret@bucket/db reaches both the
-		// resolver and CLI gate. Preserve only the scheme for diagnostics.
+		// resolver and CLI gate. Preserve only the scheme for diagnostics. A
+		// Windows drive path has the same shape and no scheme: C:\Users\me@corp\bk
+		// is a directory, and "C:[redacted]" would hide the path being reported.
 		if colon := strings.IndexByte(source, ':'); colon > 0 &&
+			!isWindowsDrivePath(source) &&
 			strings.LastIndex(source[colon+1:], "@") >= 0 &&
 			!strings.ContainsAny(source[:colon], `/\\`) {
 			return source[:colon+1] + "[redacted]"
@@ -328,9 +331,15 @@ func RedactBackupURL(source string) string {
 	if source[:sep] == "file" {
 		// file:///absolute/path@2024 has no authority, while
 		// file://user:secret@host/path does. Search only the authority so the
-		// former stays byte-identical and the latter still fails closed.
+		// former stays byte-identical and the latter still fails closed. On
+		// Windows DirToFileURL spells a directory file://C:\Users\me@corp\bk,
+		// with no "/" to end an authority; Dolt reads a drive after file:// as
+		// the path (earl.Parse), so it has no authority here either. Stripping
+		// to the "@" made BackupRestore refuse that restore as an invalid URL.
 		authorityEnd := len(rest)
-		if slash := strings.IndexByte(rest, '/'); slash >= 0 {
+		if isWindowsDrivePath(rest) {
+			authorityEnd = 0
+		} else if slash := strings.IndexByte(rest, '/'); slash >= 0 {
 			authorityEnd = slash
 		}
 		if at := strings.LastIndex(rest[:authorityEnd], "@"); at >= 0 {
@@ -343,6 +352,18 @@ func RedactBackupURL(source string) string {
 		rest = rest[:cut]
 	}
 	return prefix + rest
+}
+
+// isWindowsDrivePath reports whether path starts with a drive letter, a colon
+// and a separator (C:\ or C:/), the same test internal/doltremote applies. It
+// goes by shape on every OS, as Dolt's own drive check does.
+func isWindowsDrivePath(path string) bool {
+	if len(path) < 3 || path[1] != ':' {
+		return false
+	}
+	drive := path[0]
+	return ((drive >= 'A' && drive <= 'Z') || (drive >= 'a' && drive <= 'z')) &&
+		(path[2] == '/' || path[2] == '\\')
 }
 
 // DirToFileURL resolves dir to an absolute path and returns a file:// URL.
