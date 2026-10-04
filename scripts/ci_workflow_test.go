@@ -1065,8 +1065,10 @@ func TestDoltTestcontainerStepsDisableRyuk(t *testing.T) {
 // TestNightlyFullTestRunsEmbeddedDoltBatchApplySuite pins the nightly
 // full-test job's embedded-Dolt step: it must set BEADS_TEST_EMBEDDED_DOLT=1
 // (the gate skipUnlessEmbeddedDolt checks) and run exactly
-// TestBatchApplyContract, TestLargeBatchApplyWallClock_Embedded and (F1)
-// TestLargeBatchApplyStatementCounts712_Embedded, non-race, after the main
+// TestBatchApplyContract, TestLargeBatchApplyWallClock_Embedded, (F1)
+// TestLargeBatchApplyStatementCounts712_Embedded and the 458-issue
+// batch-create equivalence scenarios
+// (TestCreateBatchFastPathsMatchPerRowLarge_Embedded), non-race, after the main
 // "Full Test Suite" step. That main step never sets BEADS_TEST_EMBEDDED_DOLT,
 // so without this step the nightly job would never exercise a real
 // 1000-item apply through the embedded backend, nor the 712-item shape's
@@ -1075,7 +1077,7 @@ func TestDoltTestcontainerStepsDisableRyuk(t *testing.T) {
 func TestNightlyFullTestRunsEmbeddedDoltBatchApplySuite(t *testing.T) {
 	job := readCIWorkflow(t, "nightly.yml").job(t, "full-test")
 	const stepName = "Embedded Dolt batch-apply suite (non-race)"
-	const wantRun = "go test -tags gms_pure_go -timeout 20m -run '^(TestBatchApplyContract|TestLargeBatchApplyWallClock_Embedded|TestLargeBatchApplyStatementCounts712_Embedded)$' ./internal/storage/embeddeddolt"
+	const wantRun = "go test -tags gms_pure_go -timeout 20m -run '^(TestBatchApplyContract|TestLargeBatchApplyWallClock_Embedded|TestLargeBatchApplyStatementCounts712_Embedded|TestCreateBatchFastPathsMatchPerRowLarge_Embedded)$' ./internal/storage/embeddeddolt"
 	assertStepRunsExactly(t, job, stepName, wantRun)
 	assertStepEnvValue(t, job, stepName, "BEADS_TEST_EMBEDDED_DOLT", "1")
 	assertStepsBefore(t, job, []string{"Full Test Suite (including integration tests)"}, []string{stepName})

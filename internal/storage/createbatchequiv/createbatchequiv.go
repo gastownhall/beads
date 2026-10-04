@@ -56,13 +56,21 @@ type scenario struct {
 	apply     func() publicops.ApplyBatchRequest
 }
 
+// scenarios are the light ones Run drives on every lane.
 func scenarios() []scenario {
 	return []scenario{
 		{name: "small", seed: seed, afterSeed: plantStaleBlocked("s4"), batch: batch},
+		{name: "apply", seed: seedApply, apply: applyRequest},
+	}
+}
+
+// largeScenarios are the 458-issue ones RunLarge drives: about 35 s each on
+// the embedded engine without the race detector, many times that with it.
+func largeScenarios() []scenario {
+	return []scenario{
 		{name: "import458-reject-stale", seed: seed458, afterSeed: afterSeed458, batch: batch458,
 			opts: storage.BatchCreateOptions{RejectStaleUpserts: true}},
 		{name: "import458", seed: seed458, afterSeed: afterSeed458, batch: batch458},
-		{name: "apply", seed: seedApply, apply: applyRequest},
 	}
 }
 
@@ -80,7 +88,20 @@ const GoldenDirEnv = "CREATEBATCHEQUIV_GOLDEN_DIR"
 // any compared table, or if they differ from the scenario's golden digest.
 func Run(t *testing.T, open Open) {
 	t.Helper()
-	for _, sc := range scenarios() {
+	runScenarios(t, open, scenarios())
+}
+
+// RunLarge is Run for the 458-issue scenarios. A backend runs it from its own
+// top-level test so a race-instrumented lane can skip it (see the embedded
+// backend's caller) without losing the light scenarios.
+func RunLarge(t *testing.T, open Open) {
+	t.Helper()
+	runScenarios(t, open, largeScenarios())
+}
+
+func runScenarios(t *testing.T, open Open, list []scenario) {
+	t.Helper()
+	for _, sc := range list {
 		t.Run(sc.name, func(t *testing.T) {
 			if dir := os.Getenv(GoldenDirEnv); dir != "" {
 				writeGolden(t, dir, sc.name, applyScenario(t, open, sc, false))

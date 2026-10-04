@@ -322,6 +322,7 @@
 15 8 TestAddLabel
 15 8 TestBuildDSN_NoDatabase
 15 8 TestCleanGitRemoteCacheGarbage_NoCacheDir
+15 8 TestCreateBatchFastPathsMatchPerRowLarge_Embedded
 15 8 TestDoltCommitResponseLossIsIndeterminate
 15 8 TestEmbeddedBatchCloserClaimNextHydratesWhenSomethingClosed
 15 8 TestEmbeddedBatchCloserClaimNextIsNilWhenNothingClosed
