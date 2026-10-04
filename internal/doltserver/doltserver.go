@@ -417,8 +417,10 @@ func maxDoltServers() int {
 // allocateEphemeralPort asks the OS for a free TCP port on host.
 // It binds to port 0, reads the assigned port, and closes the listener.
 // The caller should pass the returned port to dolt sql-server promptly
-// to minimize the TOCTOU window.
-func allocateEphemeralPort(host string) (int, error) {
+// to minimize the TOCTOU window; Start still has to prove the server it
+// launched is the one that bound it (see awaitOwnedListener). A var so tests
+// can hand Start a port another process holds.
+var allocateEphemeralPort = func(host string) (int, error) {
 	ln, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
 	if err != nil {
 		return 0, fmt.Errorf("allocating ephemeral port: %w", err)
@@ -1670,6 +1672,10 @@ func startLocked(beadsDir string) (*State, error) {
 		actualPort int
 		lastErr    error
 		attempts   int
+		// notReady is set when a launched server neither came up nor
+		// reported a port conflict (it timed out or exited).
+		notReady    error
+		notReadyPID int
 	)
 	{
 		// Ensure dolt database directory is initialized
@@ -1808,7 +1814,9 @@ func startLocked(beadsDir string) (*State, error) {
 			// restarted. os/exec does not close those; mark them first.
 			sanitizeInheritedFDs()
 
-			if startErr := cmd.Start(); startErr != nil {
+			logOffset := logSize(logFile)
+			srv, startErr := launchServer(cmd)
+			if startErr != nil {
 				lastErr = startErr
 				if !explicitPort {
 					continue // retry with a new ephemeral port
@@ -1816,25 +1824,53 @@ func startLocked(beadsDir string) (*State, error) {
 				break
 			}
 
-			pid = cmd.Process.Pid
-			_ = cmd.Process.Release()
-
-			// Quick check: did the process exit immediately (bind failure)?
-			// Give it a moment to fail on port bind before proceeding.
-			time.Sleep(200 * time.Millisecond)
-			if !isProcessAlive(pid) {
-				lastErr = fmt.Errorf("dolt sql-server exited immediately on port %d (attempt %d/%d)", actualPort, i+1, attempts)
-				pid = 0
-				if !explicitPort {
-					continue
+			// Wait until this child, not whatever else holds the port, is
+			// accepting connections. A port another process took between
+			// allocation and dolt's bind shows up as ErrPortInUse: an
+			// ephemeral port is bd's own choice, so move to a fresh one; an
+			// explicit port is the operator's and stays pinned.
+			waitErr := awaitOwnedListener(srv, startupProbe{
+				host:            cfg.Host,
+				port:            actualPort,
+				logPath:         logPath(beadsDir),
+				logOffset:       logOffset,
+				readyLineLogged: debug,
+				timeout:         readyTimeout(),
+			})
+			if waitErr != nil {
+				srv.kill()
+				if errors.Is(waitErr, ErrPortInUse) {
+					if !explicitPort {
+						lastErr = fmt.Errorf("%w (attempt %d/%d)", waitErr, i+1, attempts)
+						continue
+					}
+					lastErr = fmt.Errorf("%w; port %d is configured explicitly, so bd will not move off it: free it, or configure a different one with: bd dolt set port <port>", waitErr, actualPort)
+					break
 				}
+				notReady, notReadyPID = waitErr, srv.pid
 				break
 			}
 
+			pid = srv.pid
 			lastErr = nil
 			break
 		}
 		_ = logFile.Close()
+
+		if notReady != nil {
+			if hasJournalCorruption, logErr := logHasCorruptJournalError(logPath(beadsDir)); logErr == nil && hasJournalCorruption {
+				return nil, fmt.Errorf("server started (PID %d) but not accepting connections on port %d: %w\n\n%s",
+					notReadyPID, actualPort, notReady, corruptJournalRecoveryHint(beadsDir))
+			}
+			if dirs, detErr := detectCorruptManifest(beadsDir, doltDir); detErr == nil && len(dirs) > 0 {
+				return nil, fmt.Errorf("server started (PID %d) but not accepting connections on port %d: %w\n"+
+					"Corrupt manifest with no recoverable data detected (GH#3290) in:\n  %s\n"+
+					"Run 'bd doctor --fix' to back up the corrupt database(s) and reinitialize.\nCheck logs: %s",
+					notReadyPID, actualPort, notReady, strings.Join(dirs, "\n  "), logPath(beadsDir))
+			}
+			return nil, fmt.Errorf("server started (PID %d) but not accepting connections on port %d: %w\nCheck logs: %s",
+				notReadyPID, actualPort, notReady, logPath(beadsDir))
+		}
 
 		if lastErr != nil {
 			// GH#3290 / bd-6dnrw.6: unclean-shutdown manifest corruption is
@@ -1866,20 +1902,6 @@ func startLocked(beadsDir string) (*State, error) {
 		return nil, fmt.Errorf("writing port file: %w", err)
 	}
 
-	// Wait for server to accept connections
-	if err := waitForReady(cfg.Host, actualPort, readyTimeout()); err != nil {
-		if proc, findErr := os.FindProcess(pid); findErr == nil {
-			_ = proc.Kill()
-		}
-		_ = os.Remove(pidPath(beadsDir))
-		_ = os.Remove(portPath(beadsDir))
-		if hasJournalCorruption, logErr := logHasCorruptJournalError(logPath(beadsDir)); logErr == nil && hasJournalCorruption {
-			return nil, fmt.Errorf("server started (PID %d) but not accepting connections on port %d: %w\n\n%s",
-				pid, actualPort, err, corruptJournalRecoveryHint(beadsDir))
-		}
-		return nil, fmt.Errorf("server started (PID %d) but not accepting connections on port %d: %w\nCheck logs: %s",
-			pid, actualPort, err, logPath(beadsDir))
-	}
 	if err := waitForRemotesAPI(cfg.RemotesAPIPort, readyTimeout()); err != nil {
 		if proc, findErr := os.FindProcess(pid); findErr == nil {
 			_ = proc.Kill()
