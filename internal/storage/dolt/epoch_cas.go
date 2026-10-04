@@ -8,8 +8,9 @@ import (
 	storeops "github.com/steveyegge/beads/internal/storage/issueops"
 )
 
-// CurrentEpoch, BumpEpoch, MintUnderEpoch, StillServes, Resolve and
-// CurrentAddressFor give this leg R20's epoch-transition enforcement
+// CurrentEpoch, BumpEpoch, BumpEpochCarrying, MintUnderEpoch, LoseVersion,
+// StillServes, Resolve and CurrentAddressFor give this leg R20's
+// epoch-transition enforcement
 // (gastownhall/beads#5898 revision 9, this slice: be-x5jqd.4 / #6136),
 // backed by store_epoch (migration 0067) and epoch_minted_addresses
 // (migration 0071).
@@ -34,7 +35,7 @@ import (
 // Method names match backend/conformance.EpochFixture's own field names
 // verbatim (CurrentVersion/CompareAndSetVersion's precedent).
 //
-// PUBLICATION ORDER. The three writers
+// PUBLICATION ORDER. The four writers
 // commit their SQL transaction FIRST and stage and Dolt-commit afterwards,
 // never from inside the open transaction. doltAddAndCommitInTx builds the Dolt
 // commit from the transaction's BEGIN-time snapshot, so under concurrent
@@ -43,6 +44,10 @@ import (
 // way is never rewritten (the HAZARD block on that helper).
 
 // CurrentEpoch reports storeID's current epoch generation.
+//
+// The epoch counter is per database, not per store. storeID appears only in
+// error text; one bump advances the epoch seen through every storeID that
+// shares this database.
 func (s *DoltStore) CurrentEpoch(ctx context.Context, storeID string) (int, error) {
 	var epoch int
 	if err := s.withReadTx(ctx, func(tx *sql.Tx) error {
@@ -64,6 +69,10 @@ func (s *DoltStore) CurrentEpoch(ctx context.Context, storeID string) (int, erro
 // the bump HAS applied: the epoch returned is the new one, the row is durable
 // in the working set and rides the next Dolt commit, and the caller must not
 // bump again to retry.
+//
+// The epoch counter is per database, not per store. storeID appears only in
+// error text; one bump advances the epoch seen through every storeID that
+// shares this database.
 func (s *DoltStore) BumpEpoch(ctx context.Context, storeID, reason string) (int, error) {
 	var epoch int
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
@@ -80,6 +89,35 @@ func (s *DoltStore) BumpEpoch(ctx context.Context, storeID, reason string) (int,
 	return epoch, nil
 }
 
+// BumpEpochCarrying is the token-scheme-change bump: BumpEpoch, and also the
+// carry of every live address in the database to the new epoch
+// (storeops.BumpEpochCarryingInTx). It writes store_epoch and
+// epoch_minted_addresses, so it publishes both. It surfaces a failed Dolt
+// commit exactly as BumpEpoch does, and the bump has applied in that case: the
+// epoch returned is the new one and the caller must not bump again to retry.
+//
+// The epoch counter is per database, not per store. storeID appears only in
+// error text; one bump advances the epoch seen through every storeID that
+// shares this database.
+//
+// CALLERS MUST HOLD THE WORKSPACE GATE (internal/workspacegate) EXCLUSIVELY FOR
+// THE BUMP, as a restore does: see storeops.BumpEpochCarryingInTx.
+func (s *DoltStore) BumpEpochCarrying(ctx context.Context, storeID, reason string) (int, error) {
+	var epoch int
+	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		epoch, err = storeops.BumpEpochCarryingInTx(ctx, tx, storeID, reason)
+		return err
+	}); err != nil {
+		return 0, err
+	}
+	if err := s.doltAddAndCommitPostTx(ctx, []string{"store_epoch", "epoch_minted_addresses"},
+		fmt.Sprintf("bd: carry addresses to epoch %d for %s (%s)", epoch, storeID, reason)); err != nil {
+		return epoch, fmt.Errorf("epoch bump for %s applied (epoch %d) but its Dolt commit failed: %w", storeID, epoch, err)
+	}
+	return epoch, nil
+}
+
 // MintUnderEpoch mints id's address under storeID's current epoch.
 //
 // It publishes like every issue mutation, through
@@ -89,8 +127,11 @@ func (s *DoltStore) BumpEpoch(ctx context.Context, storeID, reason string) (int,
 // missing history commit would only turn a harmless gap into caller errors.
 //
 // A mint whose transaction overlaps a BumpEpoch reads the epoch before the bump
-// and can commit an address the bump has already voided. That is left as it is;
-// TestMintOverlappingABumpCommitsAnAddressThatIsAlreadyGone records why.
+// and commits an address minted under the epoch the bump replaced. That address
+// is a Live survivor: a restore or reinit bump writes no address rows, and an
+// address's status is read from its own row. TestMintOverlappingABumpLeavesALiveSurvivor
+// records that interleaving, and TestAMintAfterAConcurrentLossNeverRevivesTheLostAddress
+// the one that must never bring a lost address back.
 func (s *DoltStore) MintUnderEpoch(ctx context.Context, storeID, id string) (string, error) {
 	var address string
 	if err := s.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (storeops.ChangedTables, string, error) {
@@ -134,33 +175,35 @@ func (s *DoltStore) Resolve(ctx context.Context, storeID, address string) (store
 	return result, nil
 }
 
-// CurrentAddressFor re-mints oldAddress's underlying id under storeID's
-// current epoch. It mints, so it publishes, and handles a failed Dolt commit,
-// exactly as MintUnderEpoch does.
+// CurrentAddressFor reports the address oldAddress now resolves to: the newest
+// address of its lineage, or oldAddress itself when nothing carried it. It only
+// reads, so it runs on this leg's read path and publishes nothing.
 func (s *DoltStore) CurrentAddressFor(ctx context.Context, storeID, oldAddress string) (string, error) {
 	var address string
-	if err := s.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (storeops.ChangedTables, string, error) {
+	if err := s.withReadTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		address, err = storeops.CurrentAddressForInTx(ctx, tx, storeID, oldAddress)
-		if err != nil {
-			return nil, "", err
-		}
-		return storeops.EpochMintDirtyTables(),
-			fmt.Sprintf("bd: current address for %s (%s)", oldAddress, storeID), nil
+		return err
 	}); err != nil {
 		return "", err
 	}
 	return address, nil
 }
 
-// BumpEpochCarrying is the token-scheme-change bump. Stub: it advances the
-// counter as BumpEpoch does and carries nothing yet.
-func (s *DoltStore) BumpEpochCarrying(ctx context.Context, storeID, reason string) (int, error) {
-	return s.BumpEpoch(ctx, storeID, reason)
-}
-
 // LoseVersion records that storeID no longer serves the Version named by
-// address. Stub: not implemented yet.
-func (s *DoltStore) LoseVersion(_ context.Context, storeID, address string) error {
-	return fmt.Errorf("loss of %s for %s: not implemented", address, storeID)
+// address (storeops.LoseVersionInTx). It writes epoch_minted_addresses, so it
+// publishes that table, and unlike a mint it RETURNS a failed Dolt commit: a
+// loss its caller believes recorded must not be left unpublished. The loss has
+// applied in that case, and replaying it is a no-op.
+func (s *DoltStore) LoseVersion(ctx context.Context, storeID, address string) error {
+	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		return storeops.LoseVersionInTx(ctx, tx, storeID, address)
+	}); err != nil {
+		return err
+	}
+	if err := s.doltAddAndCommitPostTx(ctx, []string{"epoch_minted_addresses"},
+		fmt.Sprintf("bd: lose version %s for %s", address, storeID)); err != nil {
+		return fmt.Errorf("loss of %s for %s recorded but its Dolt commit failed: %w", address, storeID, err)
+	}
+	return nil
 }

@@ -30,10 +30,36 @@ import (
 //
 // ADDRESSES ARE NEVER RECOMPUTED FROM store_epoch. Each is a deterministic
 // token over (storeID, id, the epoch current at mint time) — see
-// epochAddress — persisted once at mint and never rewritten in place: a
-// later mint of the same id under a bumped epoch produces a DIFFERENT
-// address and a new row, so a superseded address's row survives to answer
-// StillServes/Resolve as "no longer served" after the epoch moves on.
+// epochAddress — persisted once at mint: a later mint of the same id under a
+// bumped epoch produces a DIFFERENT address and a new row, and every
+// address's row survives to answer StillServes/Resolve after the epoch moves
+// on.
+//
+// SURVIVAL IS RECORDED ON THE ROW, NEVER INFERRED (gastownhall/beads#6664,
+// bee-ghosttrack review 5360880888, Major 1). An address is served unless its
+// own row says gone_at_epoch, and a row minted in an epoch that has not
+// happened yet is not served: the answer is a function of the address's row
+// and the current epoch, and nothing reads another row to reach it. Gone is
+// terminal. Two writers set gone_at_epoch, both guarded by IS NULL so that
+// nothing already lost is touched and nothing is ever cleared:
+// LoseVersionInTx, for a Version the store lost, and BumpEpochCarryingInTx,
+// for the losing lineage when two live lineages of one id meet at a
+// token-scheme change.
+//
+// A restore or a destructive reinit moves the counter and writes no address
+// row (BumpEpochInTx), so every address that was served stays Live at its own
+// address with no re-mint. A token-scheme change is the one bump that writes
+// address rows (BumpEpochCarryingInTx): it carries every live lineage to the
+// new epoch with one carry row whose carried_from names the lineage's ROOT
+// address, never the previous carry, so lineages stay flat and any member of
+// one reaches its newest address in a single indexed lookup.
+//
+// THE EPOCH COUNTER IS PER DATABASE, NOT PER STORE (gastownhall/beads#6664,
+// bee-ghosttrack review 5360880888, Minor 3). store_epoch has no store_id
+// column, and storeID appears only in error text: one bump advances the epoch
+// seen through every storeID that shares the database. There is deliberately
+// no storeID guard in this body, because the conformance suite uses several
+// synthetic storeIDs in one database.
 //
 // epochAddress'S ENCODING IS LENGTH-PREFIXED, NOT BARE-COLON-JOINED
 // (gastownhall/beads#6664, bee-ghosttrack review 5268699223, item B2): a
@@ -146,9 +172,9 @@ func ensureStoreEpochRow(ctx context.Context, tx DBTX) (int, error) {
 	return epoch, nil
 }
 
-// EpochMintDirtyTables names the tables a mint (MintUnderEpochInTx, and
-// CurrentAddressForInTx, which mints) can leave modified, for the leg that
-// publishes them to Dolt history. store_epoch is in the set although a mint
+// EpochMintDirtyTables names the tables a mint (MintUnderEpochInTx) can leave
+// modified, for the leg that publishes them to Dolt history. A token-scheme
+// bump (BumpEpochCarryingInTx) leaves the same two tables modified. store_epoch is in the set although a mint
 // never updates it: ensureStoreEpochRow INSERTs the singleton row on first use,
 // so a mint that published only epoch_minted_addresses would leave that row
 // modified and uncommitted, and the Dolt commit would hold minted rows without
@@ -162,10 +188,10 @@ func EpochMintDirtyTables() ChangedTables {
 // store_epoch's singleton row starting absent (migration 0067) and its
 // epoch being 1 are the same state, so a read-only caller can answer from
 // that default instead of initializing the row the way ensureStoreEpochRow
-// does (item B4 above). CurrentEpochInTx, StillServesInTx and
-// ResolveEpochInTx all read this way; only BumpEpochInTx and
-// MintUnderEpochInTx, which are about to write regardless, use
-// ensureStoreEpochRow.
+// does (item B4 above). CurrentEpochInTx, StillServesInTx, ResolveEpochInTx,
+// CurrentAddressForInTx and LoseVersionInTx all read this way; only
+// BumpEpochInTx and MintUnderEpochInTx, which are about to write regardless,
+// use ensureStoreEpochRow.
 func readStoreEpochInTx(ctx context.Context, tx DBTX) (int, error) {
 	var epoch int
 	err := tx.QueryRowContext(ctx, `SELECT epoch FROM store_epoch WHERE id = 1`).Scan(&epoch)
@@ -179,10 +205,32 @@ func readStoreEpochInTx(ctx context.Context, tx DBTX) (int, error) {
 }
 
 // epochMintedAddress is one row as read from epoch_minted_addresses.
+// carriedFrom is NULL for a root row (a fresh mint) and otherwise the address of
+// the lineage's root; goneAtEpoch is NULL while the store serves the row and
+// otherwise the epoch it was lost in.
 type epochMintedAddress struct {
 	storeID     string
 	mintedID    string
 	mintedEpoch int
+	carriedFrom sql.NullString
+	goneAtEpoch sql.NullInt64
+}
+
+// served reports whether the store serves the row at epoch. A row is served
+// unless it was lost, and a row minted in an epoch that has not happened yet
+// fails closed rather than being trusted.
+func (r epochMintedAddress) served(epoch int) bool {
+	return !r.goneAtEpoch.Valid && r.mintedEpoch <= epoch
+}
+
+// lineageRoot is the address every member of the row's lineage names: the
+// row's carried_from when it is a carry row, and its own address when it is a
+// root.
+func (r epochMintedAddress) lineageRoot(address string) string {
+	if r.carriedFrom.Valid {
+		return r.carriedFrom.String
+	}
+	return address
 }
 
 // readEpochMintedAddressInTx reads address's row, if any. found is false
@@ -192,8 +240,8 @@ type epochMintedAddress struct {
 func readEpochMintedAddressInTx(ctx context.Context, tx DBTX, address string) (epochMintedAddress, bool, error) {
 	var row epochMintedAddress
 	err := tx.QueryRowContext(ctx,
-		`SELECT store_id, minted_id, minted_epoch FROM epoch_minted_addresses WHERE address = ?`, address,
-	).Scan(&row.storeID, &row.mintedID, &row.mintedEpoch)
+		`SELECT store_id, minted_id, minted_epoch, carried_from, gone_at_epoch FROM epoch_minted_addresses WHERE address = ?`, address,
+	).Scan(&row.storeID, &row.mintedID, &row.mintedEpoch, &row.carriedFrom, &row.goneAtEpoch)
 	if errors.Is(err, sql.ErrNoRows) {
 		return epochMintedAddress{}, false, nil
 	}
@@ -238,6 +286,10 @@ func upsertEpochMintedAddressInTx(ctx context.Context, tx DBTX, address, storeID
 // counter per database, matching production reality (one logical store per
 // database already) — storeID is accepted here only to satisfy
 // EpochFixture's hook signature.
+//
+// The epoch counter is per database, not per store. storeID appears only in
+// error text; one bump advances the epoch seen through every storeID that
+// shares this database.
 func CurrentEpochInTx(ctx context.Context, tx DBTX, storeID string) (int, error) {
 	epoch, err := readStoreEpochInTx(ctx, tx)
 	if err != nil {
@@ -251,6 +303,15 @@ func CurrentEpochInTx(ctx context.Context, tx DBTX, storeID string) (int, error)
 // token-scheme-change — the leg adapter converts the fixture's
 // conformance.EpochBumpTrigger to this plain string via trigger.String(),
 // keeping that vocabulary out of this file per the package doc above).
+//
+// It writes store_epoch and nothing else: a restore or a destructive reinit
+// leaves every address row alone, so every address that was served stays Live
+// at its own address. A token-scheme change, which does write address rows,
+// calls BumpEpochCarryingInTx instead.
+//
+// The epoch counter is per database, not per store. storeID appears only in
+// error text; one bump advances the epoch seen through every storeID that
+// shares this database.
 func BumpEpochInTx(ctx context.Context, tx DBTX, storeID, reason string) (int, error) {
 	if _, err := ensureStoreEpochRow(ctx, tx); err != nil {
 		return 0, fmt.Errorf("epoch CAS: bump epoch for %s: %w", storeID, err)
@@ -268,10 +329,162 @@ func BumpEpochInTx(ctx context.Context, tx DBTX, storeID, reason string) (int, e
 	return newEpoch, nil
 }
 
+// BumpEpochCarryingInTx is BumpEpochInTx for a token-scheme change, the one
+// trigger that changes how addresses are encoded. It advances the epoch exactly
+// as BumpEpochInTx does and also records the carry: every lineage the store
+// still serves gets one new row at the new epoch, whose address is the
+// deterministic token for (store, id, new epoch) and whose carried_from names
+// the lineage's ROOT address. The old addresses keep resolving, and
+// CurrentAddressForInTx reports the new one from any member of the lineage.
+//
+// The carry is DATABASE-WIDE on purpose. The counter is per database, so this
+// bump moves the epoch every storeID sees, and carrying only storeID's rows
+// would strand every other store's addresses at the scheme boundary. storeID is
+// used for error text only, exactly as in BumpEpochInTx. It costs one read of
+// every live row and one insert per live id, in one transaction: acceptable
+// because a scheme change is a once-per-change migration, not a runtime path.
+//
+// Two live lineages of one id cannot both receive an address, because an
+// address is a function of (store, id, epoch) and so is one per id per epoch.
+// The lineage holding the newest row is carried, and every other lineage of
+// that id is marked gone at the new epoch (the safe direction: over-void, never
+// revive). Lineages already lost are not read, so they are never carried, and a
+// row minted in an epoch that has not happened yet is not read either: it stays
+// not served. A row already sitting at a carry's address means the counter
+// rewound, so that is a failure of the bump, not the benign race a mint
+// tolerates.
+//
+// CALLERS MUST HOLD THE WORKSPACE GATE (internal/workspacegate) EXCLUSIVELY FOR
+// THE BUMP, as a restore does. This is the one epoch operation that needs
+// mints excluded by contract: the store cannot make a mint conflict with a bump
+// (a mint has no cell of its own to change), so a mint that commits after this
+// bump read the live rows would leave a live row that was never carried.
+func BumpEpochCarryingInTx(ctx context.Context, tx DBTX, storeID, reason string) (int, error) {
+	newEpoch, err := BumpEpochInTx(ctx, tx, storeID, reason)
+	if err != nil {
+		return 0, err
+	}
+	candidates, err := readEpochCarryCandidatesInTx(ctx, tx, newEpoch)
+	if err != nil {
+		return 0, fmt.Errorf("epoch CAS: carry addresses to epoch %d for %s: %w", newEpoch, storeID, err)
+	}
+
+	// The candidates are ordered newest first within each (store, id), so the
+	// first row of a group holds the lineage that wins it.
+	type lineageKey struct{ storeID, mintedID string }
+	var groups []lineageKey
+	winningRoot := map[lineageKey]string{}
+	type losingLineage struct{ storeID, root string }
+	var losers []losingLineage
+	seenLoser := map[losingLineage]bool{}
+	for _, c := range candidates {
+		key := lineageKey{c.storeID, c.mintedID}
+		winner, seen := winningRoot[key]
+		if !seen {
+			winningRoot[key] = c.root()
+			groups = append(groups, key)
+			continue
+		}
+		if loser := (losingLineage{c.storeID, c.root()}); c.root() != winner && !seenLoser[loser] {
+			seenLoser[loser] = true
+			losers = append(losers, loser)
+		}
+	}
+
+	for _, loser := range losers {
+		if err := loseLineageInTx(ctx, tx, loser.storeID, loser.root, newEpoch); err != nil {
+			return 0, fmt.Errorf("epoch CAS: carry addresses to epoch %d for %s: %w", newEpoch, storeID, err)
+		}
+	}
+	for _, key := range groups {
+		address := epochAddress(key.storeID, key.mintedID, newEpoch)
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO epoch_minted_addresses (address, store_id, minted_id, minted_epoch, minted_at, carried_from) VALUES (?, ?, ?, ?, ?, ?)`,
+			address, key.storeID, key.mintedID, newEpoch, time.Now().UTC(), winningRoot[key],
+		); err != nil {
+			return 0, fmt.Errorf("epoch CAS: carry %s to epoch %d for %s: %w", key.mintedID, newEpoch, storeID, err)
+		}
+	}
+	return newEpoch, nil
+}
+
+// epochCarryCandidate is one live row below the new epoch, as
+// BumpEpochCarryingInTx reads it.
+type epochCarryCandidate struct {
+	address     string
+	storeID     string
+	mintedID    string
+	carriedFrom sql.NullString
+}
+
+// root is the address of the candidate's lineage root.
+func (c epochCarryCandidate) root() string {
+	if c.carriedFrom.Valid {
+		return c.carriedFrom.String
+	}
+	return c.address
+}
+
+// readEpochCarryCandidatesInTx reads every row the store still serves below
+// newEpoch, newest first within each (store, id). Rows already lost are not
+// read, and neither are rows minted at or above newEpoch: those are anomalies
+// and stay not served. The result is read to the end before any other statement
+// runs on the transaction.
+func readEpochCarryCandidatesInTx(ctx context.Context, tx DBTX, newEpoch int) ([]epochCarryCandidate, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT address, store_id, minted_id, carried_from FROM epoch_minted_addresses WHERE gone_at_epoch IS NULL AND minted_epoch < ? ORDER BY store_id, minted_id, minted_epoch DESC`,
+		newEpoch,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("read live addresses: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var candidates []epochCarryCandidate
+	for rows.Next() {
+		var c epochCarryCandidate
+		if err := rows.Scan(&c.address, &c.storeID, &c.mintedID, &c.carriedFrom); err != nil {
+			return nil, fmt.Errorf("scan live address: %w", err)
+		}
+		candidates = append(candidates, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read live addresses: %w", err)
+	}
+	return candidates, nil
+}
+
+// loseLineageInTx marks the lineage rooted at root gone at epoch: the root's own
+// row, then every carry row that names it. Each statement is guarded by
+// gone_at_epoch IS NULL, so a row already lost is never touched and nothing is
+// ever cleared. It is the only place gone_at_epoch is written, shared by
+// LoseVersionInTx and BumpEpochCarryingInTx.
+func loseLineageInTx(ctx context.Context, tx DBTX, storeID, root string, epoch int) error {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE epoch_minted_addresses SET gone_at_epoch = ? WHERE address = ? AND store_id = ? AND gone_at_epoch IS NULL`,
+		epoch, root, storeID,
+	); err != nil {
+		return fmt.Errorf("mark %s lost at epoch %d: %w", root, epoch, err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE epoch_minted_addresses SET gone_at_epoch = ? WHERE carried_from = ? AND store_id = ? AND gone_at_epoch IS NULL`,
+		epoch, root, storeID,
+	); err != nil {
+		return fmt.Errorf("mark the carries of %s lost at epoch %d: %w", root, epoch, err)
+	}
+	return nil
+}
+
 // MintUnderEpochInTx mints id's address under storeID's CURRENT epoch,
 // deterministically (epochAddress): minting the same id again under the
 // same epoch reproduces the same address and is an idempotent no-op upsert
 // of the same row.
+//
+// A mint only ever INSERTS its own root row. It never updates another row, so
+// no mint can retire or revive an address, and it never hands back an address
+// the store does not serve: a row already sitting at the computed address is
+// only possible when the lineage was minted in this epoch and lost in this same
+// epoch, and the mint then returns ErrEpochAddressNotServed instead of an
+// address that reads Gone.
 func MintUnderEpochInTx(ctx context.Context, tx DBTX, storeID, id string) (string, error) {
 	if err := validateEpochAddressInputs(storeID, id); err != nil {
 		return "", fmt.Errorf("epoch CAS: mint %s under epoch for %s: %w", id, storeID, err)
@@ -281,9 +494,12 @@ func MintUnderEpochInTx(ctx context.Context, tx DBTX, storeID, id string) (strin
 		return "", fmt.Errorf("epoch CAS: mint %s under epoch for %s: %w", id, storeID, err)
 	}
 	address := epochAddress(storeID, id, epoch)
-	_, found, err := readEpochMintedAddressInTx(ctx, tx, address)
+	row, found, err := readEpochMintedAddressInTx(ctx, tx, address)
 	if err != nil {
 		return "", err
+	}
+	if found && !row.served(epoch) {
+		return "", fmt.Errorf("epoch CAS: mint %s under epoch for %s: %w: %s", id, storeID, ErrEpochAddressNotServed, address)
 	}
 	if err := upsertEpochMintedAddressInTx(ctx, tx, address, storeID, id, epoch, found); err != nil {
 		return "", err
@@ -291,52 +507,13 @@ func MintUnderEpochInTx(ctx context.Context, tx DBTX, storeID, id string) (strin
 	return address, nil
 }
 
-// mintedIDHasAddressAtEpochInTx reports whether mintedID's mapping was
-// CARRIED FORWARD from priorEpoch through to epoch (storeID's current
-// epoch) — R20-n's retained-mapping exception: a version that survives an
-// epoch transition keeps its prior-epoch address resolving once
-// CurrentAddressForInTx (or a fresh MintUnderEpochInTx) has carried its id
-// forward into the current epoch. A bare "does mintedID have ANY row at
-// epoch" existence check is not that (gastownhall/beads#6664,
-// bee-ghosttrack review 5268699223, item B1): a mapping that lapses at an
-// intermediate epoch and is only later reused — an unrelated later mint
-// that happens to share the same id — would satisfy it too, wrongly
-// retaining an already-superseded address across the gap. Nor is a
-// single-hop check enough (gastownhall/beads#6664 FINDING 1): a mapping
-// carried forward through every intervening epoch across MORE than one hop
-// is just as validly retained, and epoch == priorEpoch + 1 wrongly rejects
-// it. Requiring an exact COUNT(DISTINCT minted_epoch) match against the
-// full range width (priorEpoch, epoch] pins this to an UNBROKEN CHAIN
-// across every intervening epoch: since epochAddress is deterministic per
-// (storeID, id, epoch) and upsertEpochMintedAddressInTx's exists-branch is
-// a no-op, there is at most one row per (storeID, mintedID, minted_epoch),
-// so a row exists at every one of the range's (epoch-priorEpoch) possible
-// values iff the distinct count equals that width — an exact pigeonhole
-// match, not a bound, so it still correctly rejects a gap (no epoch in the
-// range is missing from the count, no matter how many epochs follow it)
-// while now accepting any chain length >= 1, subsuming the old width=1
-// single-hop case. mintedID is never recomputed from a bumped store_epoch
-// (see the package doc above), so this is a lookup across a range of
-// later rows sharing the same id, not a derivation.
-func mintedIDHasAddressAtEpochInTx(ctx context.Context, tx DBTX, storeID, mintedID string, priorEpoch, epoch int) (bool, error) {
-	var count int
-	err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(DISTINCT minted_epoch) FROM epoch_minted_addresses WHERE store_id = ? AND minted_id = ? AND minted_epoch > ? AND minted_epoch <= ?`,
-		storeID, mintedID, priorEpoch, epoch,
-	).Scan(&count)
-	if err != nil {
-		return false, fmt.Errorf("epoch CAS: check retained mapping for %s across epochs (%d, %d]: %w", mintedID, priorEpoch, epoch, err)
-	}
-	return count == epoch-priorEpoch, nil
-}
-
 // StillServesInTx reports whether address is still served under storeID's
-// CURRENT epoch: an address minted under an earlier epoch is no longer
-// served once the epoch has moved past it, UNLESS its underlying id was
-// carried forward into the current epoch by a retained mapping (R20-n),
-// even though the row itself is never deleted (ResolveEpochInTx must still
-// be able to answer for it). An address from a different store, or one
-// never minted, is not served either.
+// CURRENT epoch. The answer is read from the address's own row and the epoch and
+// from nothing else: the row's gone_at_epoch says whether the store lost it, and
+// a row minted in an epoch that has not happened yet is not served. An address
+// that survived a restore or a destructive reinit therefore stays served with no
+// upkeep, and an address from a different store, or one never minted, is not
+// served either.
 func StillServesInTx(ctx context.Context, tx DBTX, storeID, address string) (bool, error) {
 	row, found, err := readEpochMintedAddressInTx(ctx, tx, address)
 	if err != nil {
@@ -349,24 +526,16 @@ func StillServesInTx(ctx context.Context, tx DBTX, storeID, address string) (boo
 	if err != nil {
 		return false, fmt.Errorf("epoch CAS: still serves %s for %s: %w", address, storeID, err)
 	}
-	if row.mintedEpoch == epoch {
-		return true, nil
-	}
-	retained, err := mintedIDHasAddressAtEpochInTx(ctx, tx, storeID, row.mintedID, row.mintedEpoch, epoch)
-	if err != nil {
-		return false, fmt.Errorf("epoch CAS: still serves %s for %s: %w", address, storeID, err)
-	}
-	return retained, nil
+	return row.served(epoch), nil
 }
 
-// ResolveEpochInTx answers R20's epoch-only restriction for address: Live
-// while its minting epoch is still current OR its id was carried forward
-// into the current epoch by a retained mapping (R20-n), GoneReorganization
-// once the epoch has moved past it with no such mapping (a reorganization,
-// not a retention or erasure outcome; RetentionFixture/R17 states are out
-// of scope here), and Unknown for an address this store never minted.
-// ProducingStore is always storeID: this file has no lineage/replica model
-// to attribute a foreign store to (unlike RetentionFixture's cross-store
+// ResolveEpochInTx answers R20's epoch-only restriction for address: Live while
+// the store serves it, GoneReorganization once the store lost it (a
+// reorganization, not a retention or erasure outcome; RetentionFixture/R17
+// states are out of scope here), and Unknown for an address this store never
+// minted. Like StillServesInTx it reads only the address's own row and the
+// epoch. ProducingStore is always storeID: this file has no lineage/replica
+// model to attribute a foreign store to (unlike RetentionFixture's cross-store
 // answers).
 func ResolveEpochInTx(ctx context.Context, tx DBTX, storeID, address string) (EpochResolveResult, error) {
 	row, found, err := readEpochMintedAddressInTx(ctx, tx, address)
@@ -380,22 +549,21 @@ func ResolveEpochInTx(ctx context.Context, tx DBTX, storeID, address string) (Ep
 	if err != nil {
 		return EpochResolveResult{}, fmt.Errorf("epoch CAS: resolve %s for %s: %w", address, storeID, err)
 	}
-	if row.mintedEpoch == epoch {
-		return EpochResolveResult{Restriction: EpochRestrictionLive, ProducingStore: storeID, Epoch: &epoch}, nil
-	}
-	retained, err := mintedIDHasAddressAtEpochInTx(ctx, tx, storeID, row.mintedID, row.mintedEpoch, epoch)
-	if err != nil {
-		return EpochResolveResult{}, fmt.Errorf("epoch CAS: resolve %s for %s: %w", address, storeID, err)
-	}
-	if retained {
+	if row.served(epoch) {
 		return EpochResolveResult{Restriction: EpochRestrictionLive, ProducingStore: storeID, Epoch: &epoch}, nil
 	}
 	return EpochResolveResult{Restriction: EpochRestrictionGoneReorganization, ProducingStore: storeID, Epoch: &epoch}, nil
 }
 
-// CurrentAddressForInTx re-mints oldAddress's underlying id under storeID's
-// CURRENT epoch, giving callers a live address to move to once oldAddress
-// stops being served. oldAddress must be one storeID has actually minted.
+// CurrentAddressForInTx reports the address oldAddress now resolves to: the
+// newest address of its lineage, or oldAddress itself when nothing carried the
+// Version to a new address. It only reads. It executes no INSERT, UPDATE or
+// DELETE, because a lookup that minted an address could make a lost address
+// look served again (gastownhall/beads#6664, bee-ghosttrack review 5360880888,
+// Major 1), and both Dolt legs run it on a read-write transaction that is
+// always rolled back, so a stray write would vanish silently instead of
+// failing. oldAddress must be one storeID minted (ErrEpochAddressNotFound
+// otherwise) and still serves (ErrEpochAddressNotServed otherwise).
 func CurrentAddressForInTx(ctx context.Context, tx DBTX, storeID, oldAddress string) (string, error) {
 	row, found, err := readEpochMintedAddressInTx(ctx, tx, oldAddress)
 	if err != nil {
@@ -404,17 +572,52 @@ func CurrentAddressForInTx(ctx context.Context, tx DBTX, storeID, oldAddress str
 	if !found || row.storeID != storeID {
 		return "", fmt.Errorf("epoch CAS: current address for %s: %w: %s", storeID, ErrEpochAddressNotFound, oldAddress)
 	}
-	return MintUnderEpochInTx(ctx, tx, storeID, row.mintedID)
-}
-
-// BumpEpochCarryingInTx is the token-scheme-change bump. Stub: it advances the
-// counter exactly as BumpEpochInTx does and carries nothing yet.
-func BumpEpochCarryingInTx(ctx context.Context, tx DBTX, storeID, reason string) (int, error) {
-	return BumpEpochInTx(ctx, tx, storeID, reason)
+	epoch, err := readStoreEpochInTx(ctx, tx)
+	if err != nil {
+		return "", fmt.Errorf("epoch CAS: current address for %s: %w", storeID, err)
+	}
+	if !row.served(epoch) {
+		return "", fmt.Errorf("epoch CAS: current address for %s: %w: %s", storeID, ErrEpochAddressNotServed, oldAddress)
+	}
+	var newest string
+	err = tx.QueryRowContext(ctx,
+		`SELECT address FROM epoch_minted_addresses WHERE carried_from = ? AND store_id = ? AND gone_at_epoch IS NULL AND minted_epoch <= ? ORDER BY minted_epoch DESC LIMIT 1`,
+		row.lineageRoot(oldAddress), storeID, epoch,
+	).Scan(&newest)
+	if errors.Is(err, sql.ErrNoRows) {
+		return oldAddress, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("epoch CAS: current address for %s: read the newest carry of %s: %w", storeID, oldAddress, err)
+	}
+	return newest, nil
 }
 
 // LoseVersionInTx records that storeID no longer serves the Version named by
-// address. Stub: not implemented yet.
-func LoseVersionInTx(_ context.Context, _ DBTX, storeID, address string) error {
-	return fmt.Errorf("epoch CAS: lose version %s for %s: not implemented", address, storeID)
+// address: it marks the lineage ROOT's own row and every carry row of that
+// root gone at the current epoch, so every address of the Version resolves
+// GoneReorganization from then on. Each statement is guarded by
+// gone_at_epoch IS NULL, so nothing already lost is touched and nothing is ever
+// cleared (Gone is terminal). Losing a lineage that is already lost matches no
+// rows and returns nil, so a retried transaction may replay it. address must be
+// one storeID minted, or ErrEpochAddressNotFound is returned and nothing is
+// written. A lineage member minted in an epoch that has not happened yet
+// violates the table's gone-not-before-mint check, and the resulting error is
+// returned rather than papered over.
+func LoseVersionInTx(ctx context.Context, tx DBTX, storeID, address string) error {
+	row, found, err := readEpochMintedAddressInTx(ctx, tx, address)
+	if err != nil {
+		return err
+	}
+	if !found || row.storeID != storeID {
+		return fmt.Errorf("epoch CAS: lose version for %s: %w: %s", storeID, ErrEpochAddressNotFound, address)
+	}
+	epoch, err := readStoreEpochInTx(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("epoch CAS: lose version %s for %s: %w", address, storeID, err)
+	}
+	if err := loseLineageInTx(ctx, tx, storeID, row.lineageRoot(address), epoch); err != nil {
+		return fmt.Errorf("epoch CAS: lose version %s for %s: %w", address, storeID, err)
+	}
+	return nil
 }

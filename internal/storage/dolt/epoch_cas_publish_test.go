@@ -419,10 +419,10 @@ func TestFirstMintLeavesTheEpochTablesCommitted(t *testing.T) {
 // live address in epoch_minted_addresses. Publishing only the counter would
 // leave those rows modified and uncommitted in the working set.
 func TestBumpEpochCarryingLeavesTheEpochTablesCommitted(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	skipIfNoServer(t)
 	ctx, cancel := testContext(t)
 	defer cancel()
+	store := newMultiConnectionEpochStore(t, ctx, "epoch_carry_published")
 
 	if _, err := store.MintUnderEpoch(ctx, epochPublishStoreID, epochPublishMintedID); err != nil {
 		t.Fatalf("MintUnderEpoch: %v", err)
@@ -458,10 +458,10 @@ func TestBumpEpochCarryingLeavesTheEpochTablesCommitted(t *testing.T) {
 // loss, which changes only epoch_minted_addresses: the row it marks must be in
 // the Dolt commit, not left modified in the working set.
 func TestLoseVersionLeavesTheEpochTablesCommitted(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	skipIfNoServer(t)
 	ctx, cancel := testContext(t)
 	defer cancel()
+	store := newMultiConnectionEpochStore(t, ctx, "epoch_loss_published")
 
 	address, err := store.MintUnderEpoch(ctx, epochPublishStoreID, epochPublishMintedID)
 	if err != nil {
@@ -495,10 +495,10 @@ func TestLoseVersionLeavesTheEpochTablesCommitted(t *testing.T) {
 // reads now: it answers from that default, leaves the singleton absent, and
 // leaves nothing in the working set to commit.
 func TestCurrentAddressForLeavesAnAbsentStoreEpochRowAbsent(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	skipIfNoServer(t)
 	ctx, cancel := testContext(t)
 	defer cancel()
+	store := newMultiConnectionEpochStore(t, ctx, "epoch_lookup_absent_row")
 
 	address, err := store.MintUnderEpoch(ctx, epochPublishStoreID, epochPublishMintedID)
 	if err != nil {
@@ -543,7 +543,11 @@ func TestCurrentAddressForLeavesAnAbsentStoreEpochRowAbsent(t *testing.T) {
 
 // newMultiConnectionEpochStore opens a store on its own database with several
 // connections to one branch, as in production server mode. setupTestStore pins
-// a single connection, which cannot overlap two transactions.
+// a single connection, which cannot overlap two transactions. A store of its own
+// also never queues on the shared test database's schema-init lock, whose
+// five-second acquire timeout runs out when many parallel tests set up at once
+// on a loaded host, so the publication probes that need a database of their own
+// for no other reason use it too.
 func newMultiConnectionEpochStore(t *testing.T, ctx context.Context, name string) *DoltStore {
 	t.Helper()
 	store, err := New(ctx, &Config{

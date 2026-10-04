@@ -15,10 +15,22 @@
 -- under the same epoch reproduces the same address and upserts the same
 -- row, while a later mint of that id under a bumped epoch produces a
 -- DIFFERENT address and adds a new row alongside the old one. Old rows are
--- kept, not superseded in place: StillServes and Resolve must still be able
--- to answer for a pre-bump address (as "no longer served" / "gone
--- reorganization") after the epoch moves on, which requires the old row to
--- still exist.
+-- kept: StillServes and Resolve answer for any address from its own row,
+-- whatever epoch it was minted in.
+--
+-- Survival is RECORDED on the row, never inferred from other rows
+-- (gastownhall/beads#6664, bee-ghosttrack review 5360880888, Major 1).
+-- gone_at_epoch is NULL while the store serves the address and otherwise the
+-- epoch the store lost it in; it is set once and never cleared, so a lost
+-- address stays lost. carried_from is NULL for a fresh mint, and for a row a
+-- token-scheme change carried to a new epoch it is the address of the
+-- lineage's ROOT (never the previous carry), so every member of a lineage is
+-- one indexed lookup from the newest. The index on carried_from serves exactly
+-- the two lookups that follow a lineage: the newest carry of a root, and every
+-- carry of a root when the lineage is lost. The CHECK is a database-level
+-- tripwire against a stale or rewound epoch being written into a loss marker;
+-- it is >=, not >, because a carry row is born at the new epoch and can be lost
+-- in that same epoch.
 --
 -- address is the PRIMARY KEY: it is the deterministic token the fixture's
 -- StillServes/Resolve/CurrentAddressFor hooks look addresses up by, so it
@@ -44,5 +56,9 @@ CREATE TABLE IF NOT EXISTS epoch_minted_addresses (
     minted_id VARCHAR(255) NOT NULL,
     minted_epoch INT NOT NULL,
     minted_at DATETIME NOT NULL,
-    PRIMARY KEY (address)
+    carried_from VARCHAR(255) NULL,
+    gone_at_epoch INT NULL,
+    PRIMARY KEY (address),
+    INDEX idx_epoch_minted_addresses_carried_from (carried_from),
+    CONSTRAINT ck_epoch_minted_addresses_gone_not_before_mint CHECK (gone_at_epoch IS NULL OR gone_at_epoch >= minted_epoch)
 );
