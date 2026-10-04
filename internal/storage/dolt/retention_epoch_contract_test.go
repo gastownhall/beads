@@ -98,12 +98,15 @@ func TestEpochContract(t *testing.T) {
 // the kit would have set verbatim.
 func newEpochDoltFixture(t *testing.T, prefix string) (conformance.EpochFixture, context.Context, func()) {
 	t.Helper()
-	store, storeCleanup := setupTestStore(t)
+	skipIfNoServer(t)
+	// A database of its own, not setupTestStore's branch on the shared one. The
+	// shared database's schema-init lock has a five-second acquire timeout, and a
+	// setup that queues behind another parallel test's runs out of it under load.
+	// The context is built after the open, so the open cannot drain its deadline.
+	openCtx, cancelOpen := testContext(t)
+	store := newMultiConnectionEpochStore(t, openCtx, "epoch_contract")
+	cancelOpen()
 	ctx, cancel := testContext(t)
-	stop := func() {
-		cancel()
-		storeCleanup()
-	}
 	return conformance.EpochFixture{
 		IssuePrefix:       prefix,
 		CurrentEpoch:      epochDoltCurrentEpoch(store),
@@ -113,7 +116,7 @@ func newEpochDoltFixture(t *testing.T, prefix string) (conformance.EpochFixture,
 		Resolve:           epochDoltResolve(store),
 		CurrentAddressFor: epochDoltCurrentAddressFor(store),
 		LoseVersion:       epochDoltLoseVersion(store),
-	}, ctx, stop
+	}, ctx, cancel
 }
 
 func epochDoltCurrentEpoch(store *DoltStore) func(ctx context.Context, storeID string) (int, error) {
