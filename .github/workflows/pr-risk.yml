@@ -30,6 +30,14 @@ env:
   # lane`). pr-risk.yml retires nothing for it; its copy only keeps the
   # shared bazel-coverage job identical.
   BAZEL_RETIRES_LEGACY_PR_LANES: "true"
+  # Fork and Dependabot PRs: "true" covers them like same-repo PRs (the
+  # flags above then retire their legacy tiers too): rbe-west's mint
+  # (rbe-fork) gives their Bazel lanes remote execution, instance oss-fork
+  # or, for allowlisted authors, oss, and a run the mint does not serve
+  # (mode cache) is red. "false": they keep the legacy tiers, and the Bazel
+  # lanes run remotely beside them whenever rbe-fork is open (bazel.yml
+  # modes fork-ro/fork-rw), else locally with the read-only cache as before.
+  BAZEL_COVERS_FORKS: "false"
 
 jobs:
   detect-ci-tier:
@@ -113,8 +121,11 @@ jobs:
       # and not the executor secret (either, evaluated per run, would let one
       # workflow's re-run disagree with the other's). A same-repo PR whose run
       # lacks the secret is covered anyway, so pr.yml's gate goes red (mode
-      # cache) instead of a tier silently moving back. Dependabot runs get
-      # no Actions secrets by design and keep the legacy tiers; github.actor
+      # cache) instead of a tier silently moving back. Fork and Dependabot
+      # runs get no Actions secrets by design: they are covered only while
+      # BAZEL_COVERS_FORKS is "true" (rbe-fork gives their lanes remote
+      # execution), and then a closed rbe-fork turns them red the same way;
+      # it never moves them back to a legacy tier silently. github.actor
       # (unlike triggering_actor) stays the PR's actor on a re-run.
       - name: Decide which legacy tiers the Bazel lanes cover
         id: decide
@@ -122,30 +133,38 @@ jobs:
           RETIRED_EMBEDDED: ${{ env.BAZEL_RETIRES_LEGACY_EMBEDDED == 'true' }}
           RETIRED_DOLT_SERVER: ${{ env.BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS == 'true' }}
           RETIRED_PR_LANES: ${{ env.BAZEL_RETIRES_LEGACY_PR_LANES == 'true' }}
+          COVERS_FORKS: ${{ env.BAZEL_COVERS_FORKS == 'true' }}
           PULL_REQUEST: ${{ github.event_name == 'pull_request' }}
           FORK: ${{ github.event.pull_request.head.repo.fork == true }}
           DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
         run: |
-          for v in RETIRED_EMBEDDED RETIRED_DOLT_SERVER RETIRED_PR_LANES PULL_REQUEST FORK DEPENDABOT; do
+          for v in RETIRED_EMBEDDED RETIRED_DOLT_SERVER RETIRED_PR_LANES COVERS_FORKS PULL_REQUEST FORK DEPENDABOT; do
             case "${!v}" in
               true|false) ;;
               *) echo "::error::$v is '${!v}', want true or false"; exit 1 ;;
             esac
           done
-          same_repo_pr=false
-          if [ "$PULL_REQUEST" = true ] && [ "$FORK" = false ] && [ "$DEPENDABOT" = false ]; then
-            same_repo_pr=true
+          # Covered: the Bazel lanes are this run's only run of the retired
+          # tiers. Same-repo PRs (the CI secrets); fork and Dependabot PRs
+          # too while BAZEL_COVERS_FORKS is "true".
+          covered=false
+          if [ "$PULL_REQUEST" = true ]; then
+            if [ "$FORK" = false ] && [ "$DEPENDABOT" = false ]; then
+              covered=true
+            elif [ "$COVERS_FORKS" = true ]; then
+              covered=true
+            fi
           fi
           embedded=false
-          if [ "$same_repo_pr" = true ] && [ "$RETIRED_EMBEDDED" = true ]; then
+          if [ "$covered" = true ] && [ "$RETIRED_EMBEDDED" = true ]; then
             embedded=true
           fi
           dolt_server=false
-          if [ "$same_repo_pr" = true ] && [ "$RETIRED_DOLT_SERVER" = true ]; then
+          if [ "$covered" = true ] && [ "$RETIRED_DOLT_SERVER" = true ]; then
             dolt_server=true
           fi
           pr_lanes=false
-          if [ "$same_repo_pr" = true ] && [ "$RETIRED_PR_LANES" = true ]; then
+          if [ "$covered" = true ] && [ "$RETIRED_PR_LANES" = true ]; then
             pr_lanes=true
           fi
           {
@@ -153,7 +172,7 @@ jobs:
             echo "dolt_server=$dolt_server"
             echo "pr_lanes=$pr_lanes"
           } >> "$GITHUB_OUTPUT"
-          echo "Legacy tiers retired in favour of the Bazel lanes: embedded Dolt **$embedded**, proxied and server Dolt **$dolt_server**, pr.yml's PR Core/build/pure-Go/domain+uow/contract jobs **$pr_lanes** (pull_request: $PULL_REQUEST, fork: $FORK, dependabot: $DEPENDABOT, retired embedded: $RETIRED_EMBEDDED, retired proxied/server: $RETIRED_DOLT_SERVER, retired pr.yml jobs: $RETIRED_PR_LANES)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Legacy tiers retired in favour of the Bazel lanes: embedded Dolt **$embedded**, proxied and server Dolt **$dolt_server**, pr.yml's PR Core/build/pure-Go/domain+uow/contract jobs **$pr_lanes** (pull_request: $PULL_REQUEST, fork: $FORK, dependabot: $DEPENDABOT, forks covered: $COVERS_FORKS, retired embedded: $RETIRED_EMBEDDED, retired proxied/server: $RETIRED_DOLT_SERVER, retired pr.yml jobs: $RETIRED_PR_LANES)" | tee -a "$GITHUB_STEP_SUMMARY"
 
   # End-to-end coverage for proxied-server CLI subcommands, sharded across the
   # CI matrix. Each sub-test drives the bd CLI subprocess against a real dolt
@@ -537,7 +556,10 @@ jobs:
 
   test-nix:
     name: Test Nix Flake
-    runs-on: ubuntu-latest
+    # F7a: cache-free (no GitHub-saved cache restored/saved here) same-repo
+    # job moved onto Blacksmith at 4 vCPU; forks, Dependabot and any other
+    # event stay GitHub-hosted. Must match TestSameRepoBlacksmithRunners.
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6

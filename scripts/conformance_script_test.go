@@ -72,7 +72,7 @@ func TestConformanceWorkflowHasOuterTimeoutBudget(t *testing.T) {
 	want := "  conformance:\n" +
 		"    name: Storage backend conformance (embedded Dolt oracle)\n" +
 		"    timeout-minutes: 45\n" +
-		"    runs-on: ubuntu-latest\n"
+		"    runs-on: " + sameRepoBlacksmith4vcpu + "\n"
 	if !strings.Contains(text, want) {
 		t.Fatalf("conformance job does not declare the maintained 45-minute outer budget:\n%s", text)
 	}

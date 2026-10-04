@@ -344,6 +344,16 @@ const (
 	forkCacheInstance = "oss"
 )
 
+// publicRBEForkPin: setup-bazel's fork-credential.sh pins the one endpoint
+// rbe-fork-mint may hand a fork run (rbe-fork, :8444), so a compromised
+// mint cannot point fork builds elsewhere. It is public and carries no
+// credential: allowed as exactly this line, in exactly that file (a byte
+// copy of gascity's tools/rbe/fork-credential.sh).
+const (
+	publicRBEForkPinFile = ".github/actions/setup-bazel/fork-credential.sh"
+	publicRBEForkPinLine = `ENDPOINT_RE=${RBE_FORK_ENDPOINT_RE:-'^` + "grpc" + `s://rbe-fork\.ops\.gascity\.com:8444$'}`
+)
+
 type endpointHit struct {
 	path string
 	line int
@@ -396,6 +406,9 @@ func findRemoteEndpoints(path string, content []byte, strict bool) []endpointHit
 	for n := 1; scanner.Scan(); n++ {
 		line := scanner.Text()
 		if path == ".bazelrc" && publicForkCacheLines[strings.TrimSpace(line)] {
+			continue
+		}
+		if path == publicRBEForkPinFile && line == publicRBEForkPinLine {
 			continue
 		}
 		for _, re := range flagRes {
@@ -484,6 +497,26 @@ func TestBazelNoRemoteEndpointsInTrackedFiles(t *testing.T) {
 	} {
 		if len(findRemoteEndpoints(".bazelrc", []byte(bad), true)) == 0 {
 			t.Errorf("non-allowlisted fork-cache variant not detected in .bazelrc: %q", bad)
+		}
+	}
+	// rbe-fork's endpoint pin: that line in that file only; anything else
+	// naming the endpoint, there or elsewhere, is flagged.
+	if hits := findRemoteEndpoints(publicRBEForkPinFile, []byte("set -eu\n"+publicRBEForkPinLine+"\n"), true); len(hits) != 0 {
+		t.Errorf("rbe-fork endpoint pin flagged in %s: %v", publicRBEForkPinFile, hits)
+	}
+	for _, path := range []string{".github/actions/setup-bazel/write-bazelrc.sh", ".github/workflows/bazel.yml", ".bazelrc", "tools/rbe/fork-credential.sh"} {
+		if len(findRemoteEndpoints(path, []byte(publicRBEForkPinLine+"\n"), true)) == 0 {
+			t.Errorf("rbe-fork endpoint pin not flagged in %s (allowlisted in %s only)", path, publicRBEForkPinFile)
+		}
+	}
+	for _, bad := range []string{
+		"  " + publicRBEForkPinLine,
+		strings.Replace(publicRBEForkPinLine, "8444", "443", 1),
+		`ENDPOINT=` + "grpc" + `s://rbe-fork.ops.gascity.com:8444`,
+		"build:remote-exec " + flag("remote_executor") + "=" + scheme + "rbe-fork.ops.gascity.com:8444",
+	} {
+		if len(findRemoteEndpoints(publicRBEForkPinFile, []byte(bad+"\n"), true)) == 0 {
+			t.Errorf("non-allowlisted rbe-fork line not detected in %s: %q", publicRBEForkPinFile, bad)
 		}
 	}
 	// Markdown: OTel gRPC exporter URLs and prose mentioning the flag are fine;

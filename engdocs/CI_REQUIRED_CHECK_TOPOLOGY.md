@@ -42,11 +42,18 @@ Current PR-related workflow names:
 - `.github/workflows/bazel.yml`: `Bazel`
   Runs on `push` to `main`, manual dispatch, and `workflow_call` only. PRs and
   merge groups run it once, through `pr.yml`'s `bazel` job. Its `rbe` job
-  decides the execution mode once (`remote`; `cache` for fork and Dependabot
-  PRs: local execution plus rbe-west's anonymous read-only action cache,
-  `.bazelrc`'s `fork-cache` config; `local` for `rbe=off` dispatches; or
-  `skip` while the `RBE_WEST_WORKERS` repo variable is unset) and
-  exports it as the `rbe-mode` / `rbe-enabled` outputs; every lane exports its
+  decides the execution mode once (`remote`; for fork and Dependabot PRs,
+  which get no secrets or variables, rbe-west's certificate mint decides
+  (`rbe-mint.ops.gascity.com:8444/v1/status`, infra README "rbe-fork"):
+  `fork-ro` or `fork-rw` while it is open for the run, every lane executing
+  remotely on `rbe-fork.ops.gascity.com:8444` with its own short-lived
+  certificate (instance `oss-fork`, the fork pool; or `oss`, the OSS pool,
+  for allowlisted authors), else `cache`: local execution plus rbe-west's
+  anonymous read-only action cache, `.bazelrc`'s `fork-cache` config;
+  `local` for `rbe=off` dispatches; or `skip` while the `RBE_WEST_WORKERS`
+  repo variable is unset) and exports it as the `rbe-mode` / `rbe-enabled`
+  outputs (`rbe-enabled` is `true` in `remote`, `fork-ro` and `fork-rw`);
+  every lane exports its
   `job.status` as an output named after the job. `pr.yml`'s gate requires the
   call's result (`BAZEL`) and `BAZEL_TEST`, `BAZEL_PURE`, `BAZEL_EMBEDDED`,
   `BAZEL_INTEGRATION`, `BAZEL_DOLTSERVER`, `BAZEL_PROXIED` and
@@ -60,14 +67,17 @@ Current PR-related workflow names:
   allows only the remote-only `BAZEL_EMBEDDED`, `BAZEL_PROXIED` and
   `BAZEL_SERVER_STORAGE` (fork and Dependabot PRs rely on `pr-risk.yml`'s
   legacy tiers for them), mode `local` (`rbe=off` dispatches) those and
-  `BAZEL_INTEGRATION`, and mode `remote` allows none.
+  `BAZEL_INTEGRATION`, and modes `remote`, `fork-ro` and `fork-rw` allow
+  none.
   A lane that should run and fails, is cancelled, or reports no result fails
   the gate, and so does a missing or invalid mode.
   `bazel-integration` (`bazel test //... --config=integration`, the Bazel
   twin of `main.yml`'s Linux integration shards) is required on every PR:
-  `pr.yml` passes `integration: "on"` (policy-pinned), so it runs in mode
-  `remote` (same-repo PRs) and in mode `cache` (fork and Dependabot PRs,
-  locally on the GitHub-hosted runner with the read-only cache), and a
+  `pr.yml` passes `integration: "on"` (policy-pinned), so it runs in modes
+  `remote` (same-repo PRs) and `fork-ro`/`fork-rw` (fork and Dependabot PRs
+  while rbe-fork is open), and in mode `cache` (fork and Dependabot PRs
+  while it is closed, locally on the GitHub-hosted runner with the
+  read-only cache), and a
   failure, cancellation or missing result turns the gate red. Its legacy
   twins still run only on push to `main`, so this lane is the only PR-time
   run of the full integration-tagged suite. In mode `cache` every action
@@ -477,11 +487,19 @@ would only be needed if maintainers still want exactly one required check.
 Do not require these existing check names directly:
 
 - `Detect CI tier`
-- `Check build-tag policy`
+- `Fast checks (build tags, versions, migrations, beads diff, fmt)` (F7a fold
+  of the former standalone `Check build-tag policy`, `Check version
+  consistency`, `Check for .beads changes` and `Check formatting` checks into
+  one job's steps; see
+  [F7a: Same-Repo Blacksmith Moves and Job Folds](#f7a-same-repo-blacksmith-moves-and-job-folds))
 - `Check pure-Go and js/wasm boundaries (CGO_ENABLED=0)`
-- `Check version consistency`
 - `Check doc flags freshness`
-- `Check for .beads changes`
+- `Check release target cross-compilation (unix)` and `(desktop)` (F7a fold
+  of the former eight-target `check-release-target-cross-compilation` matrix)
+- `Windows Make shell (native, msys2, cygwin)` (F7a fold of the former
+  `host: [native, msys2, cygwin]` three-job matrix)
+- `Test (Windows) small packages (doltversion, dbproxy server)` (F7a fold of
+  the former `test-windows-doltversion` and `test-windows-dbproxy-server`)
 - `Test (ubuntu-latest)`
 - `Test (macos-latest)`
 - `Test (storage domain + uow)`
@@ -499,13 +517,13 @@ Do not require these existing check names directly:
 - `Test (Server Dolt Conformance)`
 - `Test (Server Dolt Full Suite 1/16)` through `Test (Server Dolt Full Suite 16/16)`
 - `Test (Windows - smoke)`
-- `Check formatting`
 - `PR Lint (native)`, `PR Lint (windows)` and `PR Lint (darwin)`
 - `Test Nix Flake`
 - `Differential Regression (v0.49.6 baseline)`
-- `Upgrade smoke (<version> -> candidate)`
+- `Upgrade smoke (chunk N)` (F7c: folded from one job per version into one job
+  per 5-version chunk; still never require a matrix-expanded chunk job
+  directly)
 - `Resolve versions to test`
-- `nix build .#default`
 - `Bazel / test` and the other jobs of `bazel.yml`
 - `Bazel Farm / *` (`bazel-farm.yml`'s advisory, PR-controlled results)
 
@@ -800,10 +818,11 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
     check.
   - `--config=sole-run` (`--nocache_test_results`,
     `--experimental_remote_cache_eviction_retries=0`, the step 1 and 2
-    hardening) is added to every `bazel test` of the three lanes in mode
-    `remote` only (`BAZEL_SOLE_RUN`), which every covered PR runs in. Fork
-    and Dependabot runs (modes `cache` and `local`), whose legacy jobs still
-    run, keep cached results, which keeps their local runs short. Measured
+    hardening) is added to every `bazel test` of the three lanes wherever
+    they execute remotely (`BAZEL_SOLE_RUN`: modes `remote`, `fork-ro` and
+    `fork-rw`), which every covered PR runs in. Runs in modes `cache` and
+    `local`, whose legacy jobs still run, keep cached results, which keeps
+    their local runs short. Measured
     2026-10-02: `bazel test //... --config=ci --nocache_test_results`
     remotely took 132 s (113 targets).
   - Pinned for step 3 (`scripts/pr_lanes_bazel_coverage_test.go`): the
@@ -830,9 +849,17 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
   lane) and so turns
   `CI Gate / Required` red, instead of quietly moving back to a legacy tier
   that one of its runs may already have skipped.
+  Fork and Dependabot PRs too, but only while the committed
+  `BAZEL_COVERS_FORKS` flag (the same literal in both workflows,
+  policy-tested) is `"true"`: their lanes then run remotely through
+  rbe-fork (modes `fork-ro`/`fork-rw`), and a run rbe-fork does not serve
+  (mode `cache`) turns `CI Gate / Required` red rather than falling back.
+  It ships `"false"`.
 - Everyone else keeps the legacy tiers unchanged:
-  - fork PRs;
-  - Dependabot PRs (no Actions secrets; `github.actor`, unlike
+  - fork PRs, while `BAZEL_COVERS_FORKS` is `"false"` (their Bazel lanes
+    run beside the legacy tiers: remotely while rbe-fork is open, else in
+    mode `cache`);
+  - Dependabot PRs, likewise (no Actions secrets; `github.actor`, unlike
     `github.triggering_actor`, stays `dependabot[bot]` when someone else
     re-runs them);
   - every `merge_group` run (there is no merge queue today, so this is not
@@ -946,11 +973,14 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
     - The `args` and `env` of every target tagged `embedded`,
       `dolt-server-proxied` or `dolt-server-integration` are pinned.
   - `tools/bazel/check_shard_coverage.py` runs after each tier. It requires:
-    - every Bazel shard of `//cmd/bd:bd_embedded_test`,
-      `//internal/storage/embeddeddolt:embeddeddolt_embedded_test`,
-      `//cmd/bd:bd_proxied_test` (30; PR Risk's own legacy
+    - every Bazel shard of `//cmd/bd:bd_embedded_test` (50; PR Risk's own
+      legacy `test-embedded-cmd` fork/push jobs still run 20 shards of
+      their own, frozen manifest block — a different split, not this one,
+      F1), `//internal/storage/embeddeddolt:embeddeddolt_embedded_test`
+      (15; legacy `test-embedded-storage` still runs 5 of its own, same
+      reasoning, F1), `//cmd/bd:bd_proxied_test` (30; PR Risk's own legacy
       `test-proxied-cmd` fork/push jobs still run 15 shards of their own,
-      frozen manifest block — a different split, not this one) and
+      frozen manifest block — a different split, not this one, F2) and
       `//internal/storage/dolt:dolt_server_full_test` (16) to have run
       exactly the tests its shard script lists (list-only mode, minus
       `TestMain`, which `grep '^func Test'` lists but which is never a
@@ -970,6 +1000,89 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
   embedded-Dolt `TestConformance` again (non-race, unsharded), duplicating
   `test-embedded-conformance` and the Bazel lane. It is not part of either
   required gate; retiring it is a separate decision.
+
+### F7a: Same-Repo Blacksmith Moves and Job Folds
+
+F7a moves pr.yml/pr-risk.yml
+jobs that are same-repo-safe and restore no GitHub-saved build cache onto the
+org's Blacksmith runner pool, and folds several independent single-purpose
+jobs into fewer jobs with multiple isolated steps, to cut same-repo PR queue
+time. Jobs that need a Blacksmith-side build-cache saver (scripts-go-checks,
+pr-lint-wrapper, the preflight/doc-freshness matrices' ubuntu legs) are F7b's
+scope, not this slice's.
+
+- **Runner moves** (same-repo-Blacksmith expression, §
+  [Trusted-Author Fork PRs](#trusted-author-fork-prs-bazel-farm)'s pattern,
+  reused verbatim with only the vCPU label varying; pinned by
+  `TestSameRepoBlacksmithRunners` and `TestSameRepoBlacksmithExpressionSemantics`
+  in `scripts/ci_workflow_test.go`): pr.yml's `fast-checks`,
+  `advisory-reports`, `check-release-target-cross-compilation` (8 vCPU),
+  `check-doc-flags` (4 vCPU), `pr-policy-wrapper` (4 vCPU),
+  `test-dolt-server-fingerprint`; pr-risk.yml's `test-nix` (4 vCPU). Every
+  other job keeps the default 2 vCPU label. Forks and Dependabot PRs fall back
+  to `ubuntu-latest`, as F3's `bazel-coverage`/`ci-gate`/`detect-ci-tier` jobs
+  and bazel.yml's `rbe` job already do; `TestBlacksmithJobsReadNoSecrets`
+  requires that no job eligible for a Blacksmith label ever reads a secret, so
+  a maintainer re-running a Dependabot PR landing on Blacksmith (actor change,
+  same as F3) is harmless.
+- **`fast-checks` fold.** `check-build-tags`, `check-version-consistency`,
+  `check-migration-hygiene`, `check-no-beads-changes` and `fmt-check` became
+  five steps of one job, each with its own `id` and `if: ${{ !cancelled() }}`
+  so one check's failure does not stop the others from running. The job
+  exposes each step's `outcome` as a job output; ci-gate reads
+  `needs.fast-checks.outputs.<x> || 'skipped'` into the same
+  `CI_GATE_REQUIRED` token (`CHECK_BUILD_TAGS`, `CHECK_VERSION_CONSISTENCY`,
+  `CHECK_MIGRATION_HYGIENE`, `CHECK_NO_BEADS_CHANGES`, `FMT_CHECK`) that token
+  named before the fold, so a failing check still reds the exact same gate
+  line. `FAST_CHECKS` (the job's own `.result`) is an added backstop token: if
+  the whole job is lost before any step reports, the five per-check tokens all
+  read `skipped` (not `skipped_ok`, so the gate still reds), but `FAST_CHECKS`
+  gives `ci-gate.sh` one clear line naming the job instead of five confusing
+  ones. `TestPRCIGateFastChecksTokens` pins the whole mapping, including
+  `CHECK_NO_BEADS_CHANGES`'s `pull_request`-only step `if:` and its
+  `merge_group` entry in `CI_GATE_SKIPPED_OK`, both unchanged by the fold.
+- **Cross-compilation 8 → 2.** `check-release-target-cross-compilation`'s
+  eight per-target matrix legs (one `go build` each) became two legs
+  (`unix`, `desktop`) driven by `scripts/ci/release-targets.txt`, a
+  `GOOS GOARCH GROUP` manifest kept in sync with `.goreleaser.yml`'s `builds:`
+  list (plus the darwin/amd64 and darwin/arm64 exception release.yml's
+  `goreleaser-macos` job builds natively) by
+  `TestReleaseTargetCrossCompilationMatrixMatchesGoreleaser`. Each leg runs
+  `scripts/ci/check-release-cross-compile.sh <group>`, which builds every
+  target in its group sequentially and reports every failure before exiting
+  non-zero, so a PR touching two platforms at once sees both failures in one
+  log instead of needing a per-target re-run.
+- **`advisory-reports` fold.** `build-examples` and `complexity-report` (both
+  already advisory: neither was in ci-gate's `needs`/`CI_GATE_REQUIRED`)
+  became one job's steps. Each keeps its pre-fold step-level
+  `continue-on-error`/`timeout-minutes` design, because a job-level timeout or
+  failure would cancel or red the job — exactly the blocking-by-a-different-door
+  outcome both were written to avoid. The job does carry a generous job-level
+  `timeout-minutes: 60` (review N-2: raised from an initial 45 for headroom
+  above the sum of the step timeouts), because `TestSameRepoBlacksmithRunners`
+  requires a timeout on every Blacksmith-eligible job; it is a backstop
+  against a stuck runner, not a realistic ceiling.
+- **`windows-make-shell` 3 → 1.** The `host: [native, msys2, cygwin]` matrix
+  (three Windows job instances) became one job with three step pairs (install
+  + exercise), each pair's own `id` and `if: ${{ !cancelled() }}` so a leg
+  still runs after an earlier leg fails. Review SF-1 found the original fold's
+  hand-written aggregator step (meant to reproduce the pre-fold rule — a
+  native or MSYS2 failure reds the job, but only a Cygwin *exercise* failure
+  does, since Cygwin *setup* stays warning-only as it was in the pre-fold
+  `cygwin` matrix leg) survived a mutation that always exited 0, because
+  `continue-on-error: true` was left on every install/exercise step as well as
+  the Cygwin setup step. The aggregator was deleted outright:
+  `continue-on-error` now sits only on the Cygwin *setup* step (id `cygwin`),
+  so a native or MSYS2 install/exercise failure, or a Cygwin *exercise*
+  failure, reds the job natively — no hand-written step can silently
+  undershoot that. `test-windows-doltversion` and `test-windows-dbproxy-server`
+  folded the same way into `test-windows-small`, with the same aggregator
+  deletion; neither was ever in ci-gate's `needs`/`CI_GATE_REQUIRED`, so no
+  gate token changed. `TestPRWindowsMakeShellLegsFailTheJob` pins the leg
+  `if`/`continue-on-error` contract and the absence of both jobs' aggregator
+  steps. Both folded jobs stay on `windows-latest` — F7a does not move any
+  Windows job to Blacksmith (there is no Windows Blacksmith pool), and
+  neither job is one F4's concurrent Windows-region edits touch.
 
 ### Server Dolt Storage Matrix
 
@@ -1016,14 +1129,19 @@ The preferred required-check topology keeps only aggregate gates required.
 
 ### Nix Build
 
-`.github/workflows/nix-build.yml` currently uses workflow-level `paths` filters.
-Keep `nix build .#default` non-required.
+`.github/workflows/nix-build.yml` dropped its `pull_request` trigger entirely
+(F7c, spec-f7.md §2.4): it now runs `nix build .#default` only on push to
+`main` and on `workflow_dispatch`, so it is no longer a PR check at all, let
+alone a required one. PR coverage is PR Risk's required `test-nix` job
+(`nix run .#default -- --help` plus `nix flake check -L`), which is a
+superset of plain `nix build .#default`.
 
-If the full Nix build must affect mergeability, move it into an unfiltered
-required PR workflow behind a detector and job-level `if`, then teach the
-aggregate gate when a skipped Nix build is acceptable. Do not make the
-path-filtered `nix build` workflow or `nix build .#default` job directly
-required.
+If the full `nix build` must additionally affect PR mergeability, move it (or
+an equivalent build step) into an unfiltered required PR workflow behind a
+detector and job-level `if`, then teach the aggregate gate when a skipped Nix
+build is acceptable. Do not make `nix build .#default` directly required on
+`nix-build.yml` - its path filter means it would silently fail to report on
+PRs that don't touch Nix or Go module files.
 
 ### Cross-Version Smoke
 
@@ -1031,7 +1149,9 @@ required.
 maintainers explicitly choose to pay that cost in the aggregate gate. If it
 becomes required, add `merge_group` and put it behind a detector plus aggregate
 inside the required topology. Do not require matrix-expanded
-`Upgrade smoke (<version> -> candidate)` jobs directly.
+`Upgrade smoke (chunk N)` jobs directly (F7c folded the old one-job-per-version
+matrix into one job per 5-version chunk; the per-chunk job name changed but
+the "do not require individually" guidance is unchanged).
 
 ## Merge Queue Behavior
 
@@ -1087,6 +1207,35 @@ remain pending maintainer decisions.
 If rollback is needed because the aggregate logic is wrong, prefer first
 relaxing branch protection to remove the aggregate requirement. That unblocks
 merges without hiding the failed workflow logs needed for diagnosis.
+
+### Blacksmith Off
+
+No slice that moves a job onto Blacksmith reads a repository variable to do
+so (F3's precedent, kept by F7a) — the runner choice is a literal
+`github.event_name`/`github.actor`/`head.repo.full_name` expression baked
+into each job's `runs-on:`, so rollback is a plain revert of the commit(s)
+that changed it. Each slice reverts independently.
+
+In a Blacksmith outage, every same-repo job pinned to a `blacksmith-*` label
+would queue forever on a missing runner label instead of falling back to
+`ubuntu-latest` (the ternary's fallback arm is for forks/Dependabot, not for
+the label being unavailable). Revert these four together to take same-repo
+PRs off Blacksmith entirely and back onto `ubuntu-latest`:
+
+1. **F3's gate runners** — pr.yml's and pr-risk.yml's `bazel-coverage`,
+   `ci-gate` and `detect-ci-tier` jobs.
+2. **bazel.yml's `rbe` job** runner.
+3. **F7a** — pr.yml's `fast-checks`, `advisory-reports`,
+   `check-release-target-cross-compilation`, `check-doc-flags`,
+   `pr-policy-wrapper`, `test-dolt-server-fingerprint`; pr-risk.yml's
+   `test-nix`.
+4. **F7b** (cache-dependent moves, once that slice lands) — main.yml's
+   Blacksmith cache seeds and the `scripts-go-checks`/`pr-lint-wrapper`/
+   preflight/doc-freshness runner moves.
+
+F7c (the advisory workflows) is excluded from this list: it is advisory only,
+so leaving it on Blacksmith during an outage delays non-required checks but
+never blocks a merge.
 
 ## Commit-Message Skip Directives
 

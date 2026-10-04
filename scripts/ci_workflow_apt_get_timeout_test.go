@@ -70,6 +70,28 @@ func aptStepBudgets() []aptStepBudget {
 			installPkgs:    "gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu osslsigncode",
 			capMinutes:     13,
 		},
+		{
+			workflow:       "pr.yml",
+			job:            "windows-test-binaries",
+			step:           "Install mingw cross-compiler",
+			updateAttempts: 3,
+			updateTimeout:  120,
+			backoff:        10,
+			installTimeout: 300,
+			installPkgs:    "gcc-mingw-w64-x86-64",
+			capMinutes:     12,
+		},
+		{
+			workflow:       "main.yml",
+			job:            "windows-test-binaries-cache",
+			step:           "Install mingw cross-compiler",
+			updateAttempts: 3,
+			updateTimeout:  120,
+			backoff:        10,
+			installTimeout: 300,
+			installPkgs:    "gcc-mingw-w64-x86-64",
+			capMinutes:     12,
+		},
 	}
 }
 
