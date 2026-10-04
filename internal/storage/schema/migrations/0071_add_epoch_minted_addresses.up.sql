@@ -1,5 +1,5 @@
 -- epoch_minted_addresses: durable storage for R20 epoch-transition
--- enforcement (gastownhall/beads#5898 revision 9, this slice: be-x5jqd.4 /
+-- enforcement (gastownhall/beads#5898 revision 9,
 -- #6136). Independent of store_epoch (0067, #6135) -- that table holds only
 -- the store-wide singleton epoch counter (the current generation number);
 -- this table tracks the individual addresses minted under each generation,

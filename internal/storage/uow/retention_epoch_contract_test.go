@@ -60,7 +60,7 @@ func TestRetentionContract(t *testing.T) {
 }
 
 // TestEpochContract runs the R20 epoch contract (gastownhall/beads#5898
-// revision 9, this slice: be-x5jqd.4 / #6136) against the unit-of-work
+// revision 9, #6136) against the unit-of-work
 // provider, which reaches the same internal/storage/issueops's epoch Tx
 // functions the two store backends wrap — directly against the unit of
 // work's own runner (the *baseUOW/base.tx.Runner() pattern

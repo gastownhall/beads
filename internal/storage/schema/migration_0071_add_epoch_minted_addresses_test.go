@@ -9,7 +9,7 @@ import (
 )
 
 // R20's epoch-transition enforcement (gastownhall/beads#5898 revision 9,
-// this slice: be-x5jqd.4 / #6136) adds one brand-new table,
+// #6136) adds one brand-new table,
 // epoch_minted_addresses -- see
 // migrations/0071_add_epoch_minted_addresses.up.sql for the full rationale.
 // This migration is a plain, unguarded
@@ -41,7 +41,7 @@ import (
 func TestLatestVersionIncludesMigration0071(t *testing.T) {
 	const want = 71
 	if got := LatestVersion(); got != want {
-		t.Fatalf("LatestVersion() = %d, want %d (epoch_minted_addresses migration slot claimed by be-x5jqd.4)", got, want)
+		t.Fatalf("LatestVersion() = %d, want %d (epoch_minted_addresses migration slot claimed by gastownhall/beads#6664)", got, want)
 	}
 }
 

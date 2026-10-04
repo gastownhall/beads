@@ -12,7 +12,7 @@ import (
 )
 
 // This file implements R20 epoch-transition enforcement (gastownhall/beads#5898
-// revision 9, this slice: be-x5jqd.4 / #6136): a store-wide epoch generation
+// revision 9, #6136): a store-wide epoch generation
 // counter (store_epoch, migration 0067) plus a durable record of the
 // addresses minted under each generation (epoch_minted_addresses, migration
 // 0071), used to answer whether a previously-minted address is still served

@@ -59,7 +59,7 @@ func TestRetentionContract(t *testing.T) {
 }
 
 // TestEpochContract runs the R20 epoch contract (gastownhall/beads#5898
-// revision 9, this slice: be-x5jqd.4 / #6136) against the server-backed
+// revision 9, #6136) against the server-backed
 // store, which reaches internal/storage/issueops's epoch Tx functions
 // through this leg's own retrying write transaction or read transaction
 // (DoltStore.BumpEpoch/BumpEpochCarrying/MintUnderEpoch/LoseVersion and
