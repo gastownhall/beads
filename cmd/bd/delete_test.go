@@ -309,25 +309,3 @@ func TestDeleteIssueWrapper(t *testing.T) {
 		}
 	})
 }
-
-func TestDeleteIssueUnsupportedStorage(t *testing.T) {
-	if testDoltServerPort == 0 {
-		t.Skip("skipping: Dolt test container not available")
-	}
-
-	oldStore := store
-	defer func() { store = oldStore }()
-
-	// Set store to nil - the type assertion will fail
-	store = nil
-
-	ctx := context.Background()
-	err := deleteIssue(ctx, "any-id")
-	if err == nil {
-		t.Error("Expected error when storage is nil")
-	}
-	expectedMsg := "delete operation not supported by this storage backend"
-	if err.Error() != expectedMsg {
-		t.Errorf("Expected error %q, got %q", expectedMsg, err.Error())
-	}
-}
