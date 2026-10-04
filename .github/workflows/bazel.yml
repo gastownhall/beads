@@ -797,15 +797,39 @@ jobs:
     name: embedded Dolt tier
     # Remote execution only: skipped unless the rbe job chose remote,
     # fork-ro or fork-rw (enabled; not in modes cache, local or skip).
-    # Locally the tier is 56 race test
-    # processes (40 cmd/bd shards + 14 embeddeddolt storage shards + 2
-    # conformance partitions; ~22k test-seconds measured locally -- see
+    # Locally the tier is 67 race test
+    # processes (50 cmd/bd shards + 15 embeddeddolt storage shards + 2
+    # conformance partitions; ~24k test-seconds measured locally -- see
     # scripts/ci/embedded_cmd_test_durations.json and
     # scripts/ci/embedded_storage_test_durations.json -- up from an earlier,
     # smaller test surface's ~7-10k estimate) on one runner, several hours
     # per run on the pool whose job cap this track exists to relieve, and it
     # proves nothing pr-risk.yml's embedded jobs (which do run for forks) do
     # not.
+    #
+    # Shard counts: storage (15) is sized the way both tiers were originally
+    # meant to be -- the smallest count whose LPT-packed heaviest shard
+    # (scripts/ci/gen_embedded_storage_shard_manifest.py --weights=duration
+    # --repack) lands at or below the tier's own heaviest single top-level
+    # test (211-225s). cmd cannot reach that floor: Bazel hard-caps
+    # shard_count at 50 per sh_test-like rule ("Having more than 50 shards is
+    # indicative of poor test organization. Please reduce the number of
+    # shards." -- a native analysis-time error, not a style lint), and at 50
+    # shards the cmd suite's LPT-packed heaviest shard is ~409.6s -- above
+    # its own single heaviest test's 239.7s, because the suite's total
+    # duration (~20145 test-seconds across 242 tests) is too large to flatten
+    # to the single-test floor within 50 bins. Clearing more shards would
+    # need either further per-test speedups spread across the suite or
+    # splitting bd_embedded_test into multiple <=50-shard sh_test rules with
+    # shard-index-offset plumbing through tools/bazel/go_test_manifest_shard.sh
+    # and check_shard_coverage.py; neither is done here, so this lane's floor
+    # is cmd's ~409.6s, not the ~240s a 5-minute lane (including this job's
+    # ~60s fixed cost) would need -- tracked as a follow-up, not silently
+    # hidden in the shard count. On RBE this makes the tier's wall time ~=
+    # that floor + fixed cost (checkout, build, shard dispatch), not ~=
+    # sum(durations)/shard_count the way a CPU-core-bound local sweep is --
+    # each shard is its own remote action and runs concurrently with every
+    # other shard, farm capacity permitting.
     # On same-repo pull_requests those jobs stand down (pr-risk.yml's
     # bazel-coverage), so this lane is then the tier's only PR run
     # and pr.yml's gate requires it to have run here and passed.
@@ -887,8 +911,8 @@ jobs:
         run: >-
           python3 tools/bazel/check_shard_coverage.py
           --bep "$RUNNER_TEMP/bazel-bep.json"
-          --suite //cmd/bd:bd_embedded_test .github/scripts/embedded-test-shard.sh 40
-          --suite //internal/storage/embeddeddolt:embeddeddolt_embedded_test .github/scripts/embedded-storage-test-shard.sh 14
+          --suite //cmd/bd:bd_embedded_test .github/scripts/embedded-test-shard.sh 50
+          --suite //internal/storage/embeddeddolt:embeddeddolt_embedded_test .github/scripts/embedded-storage-test-shard.sh 15
           --whole //internal/storage/embeddeddolt:embeddeddolt_conformance_core_test
           --whole //internal/storage/embeddeddolt:embeddeddolt_conformance_audit_test
 

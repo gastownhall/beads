@@ -144,7 +144,7 @@ def render(total, shards, weights):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    ap.add_argument('total_shards', nargs='?', type=int, default=default_total_shards)
+    ap.add_argument('total_shards', nargs='?', type=int, default=None)
     ap.add_argument('--weights', choices=['inits', 'duration'], default='inits')
     ap.add_argument('--manifest', default=default_manifest_path,
                      help=f'manifest file to read/write (default: {default_manifest_path})')
@@ -159,6 +159,19 @@ def main():
                      help='ignore any existing block for this total_shards and do a full '
                           'from-scratch LPT pack')
     args = ap.parse_args()
+    if args.total_shards is None:
+        # N3 (F1 review): see gen_embedded_cmd_shard_manifest.py's identical
+        # guard for the full rationale -- a bare `--write` used to silently
+        # rewrite the FROZEN legacy 5-shard block via the (20->5-shard-
+        # equivalent) default_total_shards/--weights=inits default pairing.
+        if args.write:
+            ap.error(f'total_shards is required with --write (the default, {default_total_shards}, '
+                     'is the FROZEN legacy block -- see its header in embedded-storage-test-shards.txt; '
+                     'it must not be regenerated). Pass the Bazel-only total explicitly instead, e.g. '
+                     '"15 --weights=duration" for bazel-embedded\'s block (see '
+                     'internal/storage/embeddeddolt/BUILD.bazel\'s embeddeddolt_embedded_test '
+                     'shard_count for the current value)')
+        args.total_shards = default_total_shards
 
     inits = discover_inits_cost()
     costs = inits if args.weights == 'inits' else duration_cost(inits)

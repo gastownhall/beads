@@ -1070,12 +1070,18 @@ func TestDoltTestcontainerStepsDisableRyuk(t *testing.T) {
 func TestNightlyFullTestRunsEmbeddedDoltBatchApplySuite(t *testing.T) {
 	job := readCIWorkflow(t, "nightly.yml").job(t, "full-test")
 	const stepName = "Embedded Dolt batch-apply suite (non-race)"
-	const wantRun = "go test -tags gms_pure_go -run '^(TestBatchApplyContract|TestLargeBatchApplyWallClock_Embedded|TestLargeBatchApplyStatementCounts712_Embedded)$' ./internal/storage/embeddeddolt"
+	const wantRun = "go test -tags gms_pure_go -timeout 20m -run '^(TestBatchApplyContract|TestLargeBatchApplyWallClock_Embedded|TestLargeBatchApplyStatementCounts712_Embedded)$' ./internal/storage/embeddeddolt"
 	assertStepRunsExactly(t, job, stepName, wantRun)
 	assertStepEnvValue(t, job, stepName, "BEADS_TEST_EMBEDDED_DOLT", "1")
 	assertStepsBefore(t, job, []string{"Full Test Suite (including integration tests)"}, []string{stepName})
 	if strings.Contains(wantRun, "-race") {
 		t.Errorf("embedded-dolt nightly step run = %q, must stay non-race (race dramatically inflates this backend's own wall-clock)", wantRun)
+	}
+	// N4 (F1 review): this step must still run (and report) even if an
+	// earlier nightly step failed, and must carry its own explicit Go
+	// timeout independent of the job-level timeout-minutes.
+	if got := job.step(t, stepName).If; got != "${{ !cancelled() }}" {
+		t.Errorf("embedded-dolt nightly step if = %q, want ${{ !cancelled() }}", got)
 	}
 }
 

@@ -27,7 +27,7 @@ var shardCountPattern = regexp.MustCompile(`(?m)^    shard_count = (\d+),$`)
 // shard_count ever drifts from this fallback.
 func bazelEmbeddedCmdShardCount(t *testing.T) int {
 	t.Helper()
-	const bazelTestFallback = 40
+	const bazelTestFallback = 50
 	if os.Getenv("TEST_SRCDIR") != "" {
 		return bazelTestFallback
 	}
@@ -53,7 +53,7 @@ func bazelEmbeddedCmdShardCount(t *testing.T) int {
 // bazelEmbeddedCmdShardCount above; see its doc comment.
 func bazelEmbeddedStorageShardCount(t *testing.T) int {
 	t.Helper()
-	const bazelTestFallback = 14
+	const bazelTestFallback = 15
 	if os.Getenv("TEST_SRCDIR") != "" {
 		return bazelTestFallback
 	}
@@ -72,8 +72,8 @@ func bazelEmbeddedStorageShardCount(t *testing.T) int {
 
 // S3 (F1, mirroring F2's TestProxiedShardManifestGeneratorNotStale in
 // scripts/pr_risk_bazel_coverage_test.go — see that test's doc comment for
-// the full --check rationale, not repeated here): the Bazel-only 40-shard
-// cmd block and 14-shard storage block are not frozen like their files'
+// the full --check rationale, not repeated here): the Bazel-only 50-shard
+// cmd block and 15-shard storage block are not frozen like their files'
 // legacy 20- and 5-shard blocks. gen_embedded_{cmd,storage}_shard_manifest.py
 // --check verifies only that the committed block names every discovered
 // test exactly once, failing with the exact command to fix it when a name
@@ -94,16 +94,17 @@ func TestEmbeddedCmdShardManifestGeneratorNotStale(t *testing.T) {
 		t.Skip("python3 not available")
 	}
 	root := sourceRepoRoot(t)
-	cmd := exec.Command(python, "scripts/ci/gen_embedded_cmd_shard_manifest.py", "40", "--weights=duration", "--check")
+	shards := strconv.Itoa(bazelEmbeddedCmdShardCount(t))
+	cmd := exec.Command(python, "scripts/ci/gen_embedded_cmd_shard_manifest.py", shards, "--weights=duration", "--check")
 	cmd.Dir = root
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Errorf("gen_embedded_cmd_shard_manifest.py 40 --weights=duration --check: %v\n%s", err, out)
+		t.Errorf("gen_embedded_cmd_shard_manifest.py %s --weights=duration --check: %v\n%s", shards, err, out)
 	}
 }
 
 // TestEmbeddedStorageShardManifestGeneratorNotStale mirrors
 // TestEmbeddedCmdShardManifestGeneratorNotStale above for the storage tier's
-// Bazel-only 14-shard block; see that test's doc comment.
+// Bazel-only 15-shard block; see that test's doc comment.
 func TestEmbeddedStorageShardManifestGeneratorNotStale(t *testing.T) {
 	if os.Getenv("TEST_SRCDIR") != "" {
 		t.Skip("scripts_test's runfiles hold neither the generator's sources nor cmd/bd")
@@ -113,9 +114,10 @@ func TestEmbeddedStorageShardManifestGeneratorNotStale(t *testing.T) {
 		t.Skip("python3 not available")
 	}
 	root := sourceRepoRoot(t)
-	cmd := exec.Command(python, "scripts/ci/gen_embedded_storage_shard_manifest.py", "14", "--weights=duration", "--check")
+	shards := strconv.Itoa(bazelEmbeddedStorageShardCount(t))
+	cmd := exec.Command(python, "scripts/ci/gen_embedded_storage_shard_manifest.py", shards, "--weights=duration", "--check")
 	cmd.Dir = root
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Errorf("gen_embedded_storage_shard_manifest.py 14 --weights=duration --check: %v\n%s", err, out)
+		t.Errorf("gen_embedded_storage_shard_manifest.py %s --weights=duration --check: %v\n%s", shards, err, out)
 	}
 }

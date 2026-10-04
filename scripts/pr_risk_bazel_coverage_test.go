@@ -1417,8 +1417,21 @@ func TestShardScriptsListOnlyRealTests(t *testing.T) {
 				totalsSet[n] = true
 			}
 		}
-		if c.script == ".github/scripts/proxied-test-shard.sh" {
+		switch c.script {
+		case ".github/scripts/proxied-test-shard.sh":
 			totalsSet[bazelProxiedShardCount(t)] = true
+		case ".github/scripts/embedded-test-shard.sh":
+			// F1: the Bazel-only bazel-embedded lane reads a 50-shard cmd
+			// block that no PR-Risk-matrix-only (20-shard) check exercises;
+			// without this, "BUILD.bazel's shard_count and bazel.yml's
+			// check_shard_coverage.py arg both drift to a new total with no
+			// manifest block" passes every policy test (see review S3) --
+			// the lane then silently goes 100% hash fallback and loses its
+			// duration balancing.
+			totalsSet[bazelEmbeddedCmdShardCount(t)] = true
+		case ".github/scripts/embedded-storage-test-shard.sh":
+			// F1: mirrors the cmd case above for the 15-shard storage block.
+			totalsSet[bazelEmbeddedStorageShardCount(t)] = true
 		}
 		totals := make([]int, 0, len(totalsSet))
 		for n := range totalsSet {
