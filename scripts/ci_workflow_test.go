@@ -2193,12 +2193,21 @@ type ciWorkflowStrategy struct {
 }
 
 type ciWorkflowMatrix struct {
-	OS      []string                  `yaml:"os"`
-	Runner  []string                  `yaml:"runner"`
-	Shard   []int                     `yaml:"shard"`
-	Target  []string                  `yaml:"target"`
-	Check   []string                  `yaml:"check"`
-	Group   []string                  `yaml:"group"`
+	OS     []string `yaml:"os"`
+	Runner []string `yaml:"runner"`
+	Shard  []int    `yaml:"shard"`
+	Target []string `yaml:"target"`
+	Check  []string `yaml:"check"`
+	Group  []string `yaml:"group"`
+	// Venue and Flavor back main.yml's "venue matrix" (F7b spec §4) push-to-
+	// main-only Blacksmith cache savers: pr-lint-wrapper/go-vet-cache/
+	// test-windows's `venue: [blacksmith, github]` and
+	// blacksmith-go-build-cache's `flavor: [race, non-race]`. Pinned by
+	// TestBlacksmithSaverVenueAndFlavorMatricesAreComplete (F7b review B2/S7
+	// follow-up) so dropping either leg from these lists -- silently losing
+	// that leg's cache seed or (for flavor) its race coverage -- fails loudly.
+	Venue   []string                  `yaml:"venue"`
+	Flavor  []string                  `yaml:"flavor"`
 	Include []ciWorkflowMatrixInclude `yaml:"include"`
 }
 

@@ -30,6 +30,7 @@ go_test(
         "check_winget_portable_alias_test.go",
         "ci_blacksmith_runner_test.go",
         "ci_capability_selector_test.go",
+        "ci_f7b_review_test.go",
         "ci_f7c_advisory_test.go",
         "ci_workflow_apt_get_timeout_test.go",
         "ci_workflow_test.go",

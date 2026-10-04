@@ -62,7 +62,13 @@ const sameRepoBlacksmithMacOS12vcpu = "${{ (github.event_name == 'merge_group' |
 // chained ternary in the job's `runs-on` tests which marker (if any) the
 // current leg carries, falling back to `matrix.os` for legs with no marker or
 // when the marker's own same-repo condition is false.
-const sameRepoPlatformsMatrixMarkerRunsOn = "${{ matrix.runner == 'same-repo-linux' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest') || matrix.runner == 'same-repo-windows' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest') || matrix.runner == 'same-repo-macos' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-6vcpu-macos-latest' || 'macos-latest') || matrix.os }}"
+//
+// F7b review fix (S3): the macOS branch is a plain 'macos-latest', never
+// Blacksmith - Blacksmith macOS runners bill at roughly 20x Linux/Windows
+// rates and no push-to-main Blacksmith-macOS cache saver exists. The
+// `same-repo-macos` marker itself is kept (only its resolved value changed)
+// so the job's matrix shape stays uniform across all three OSes.
+const sameRepoPlatformsMatrixMarkerRunsOn = "${{ matrix.runner == 'same-repo-linux' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest') || matrix.runner == 'same-repo-windows' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest') || matrix.runner == 'same-repo-macos' && 'macos-latest' || matrix.os }}"
 
 // --- a minimal GitHub Actions expression evaluator -------------------------
 //
@@ -409,10 +415,13 @@ func TestSameRepoBlacksmithExpressionSemantics(t *testing.T) {
 // pinned sameRepoPlatformsMatrixMarkerRunsOn chained-ternary expression
 // (pr-preflight-platforms' and check-doc-freshness-platforms' runs-on, F7b
 // §2.1) through evalGHExpr for every (marker, event) combination the policy
-// cares about: each OS's `runner` marker resolves to that OS's Blacksmith
-// label only on a trusted same-repo PR/merge_group, falls back to that OS's
-// GitHub-hosted label otherwise, and a leg with no marker at all (there is
-// none today, but the fallback must still be safe) falls back to matrix.os.
+// cares about: the linux/windows `runner` markers resolve to that OS's
+// Blacksmith label only on a trusted same-repo PR/merge_group, falling back
+// to that OS's GitHub-hosted label otherwise; the macos marker always
+// resolves to GitHub-hosted macos-latest regardless of trust (F7b review fix
+// S3: Blacksmith macOS is ~20x the Linux/Windows rate and has no push-to-main
+// cache saver); and a leg with no marker at all (there is none today, but the
+// fallback must still be safe) falls back to matrix.os.
 func TestSameRepoPlatformsMatrixMarkerRunsOnExpressionSemantics(t *testing.T) {
 	const ownRepo = "steveyegge/beads"
 	trustedCtx := map[string]string{
@@ -438,7 +447,8 @@ func TestSameRepoPlatformsMatrixMarkerRunsOnExpressionSemantics(t *testing.T) {
 		{"linux marker, fork", "same-repo-linux", "ubuntu-latest", forkCtx, "ubuntu-latest"},
 		{"windows marker, trusted", "same-repo-windows", "windows-latest", trustedCtx, "blacksmith-4vcpu-windows-2025"},
 		{"windows marker, fork", "same-repo-windows", "windows-latest", forkCtx, "windows-latest"},
-		{"macos marker, trusted", "same-repo-macos", "macos-latest", trustedCtx, "blacksmith-6vcpu-macos-latest"},
+		// F7b review fix (S3): macOS never resolves to Blacksmith, trusted or not.
+		{"macos marker, trusted", "same-repo-macos", "macos-latest", trustedCtx, "macos-latest"},
 		{"macos marker, fork", "same-repo-macos", "macos-latest", forkCtx, "macos-latest"},
 		{"no marker falls back to matrix.os", "", "some-other-os", trustedCtx, "some-other-os"},
 	}
