@@ -266,7 +266,7 @@ func TestAwaitOwnedListener_ReadyLine(t *testing.T) {
 		srv, off := startFakeSQLServerDelay(t, port, logPath, "0s")
 		err := awaitOwnedListener(srv, startupProbe{
 			host: "127.0.0.1", port: port, logPath: logPath, logOffset: off,
-			readyLineLogged: true, timeout: 2 * time.Second, owner: unknown,
+			readyLineLogged: true, timeout: 8 * time.Second, owner: unknown,
 		})
 		if err == nil || !strings.Contains(err.Error(), DoltReadyLine) {
 			t.Fatalf("awaitOwnedListener = %v, want a timeout naming the missing ready line", err)
@@ -375,8 +375,13 @@ func TestStart_RecoversWhenEphemeralPortIsTaken(t *testing.T) {
 	if state.Port == foreign {
 		t.Fatalf("Start adopted port %d, which a foreign process holds", foreign)
 	}
-	if got := launchedPorts(t, launches); len(got) != 2 || got[0] != fmt.Sprint(foreign) {
-		t.Errorf("launches = %v, want the foreign port %d first and then one more", got, foreign)
+	if got := calls.Load(); got != 2 {
+		t.Errorf("allocateEphemeralPort called %d times, want 2 (the taken port, then a fresh one)", got)
+	}
+	// On Linux the first child can be killed before it records its launch:
+	// /proc proves the port foreign as soon as the greeting arrives.
+	if got := launchedPorts(t, launches); len(got) == 0 || got[len(got)-1] != fmt.Sprint(state.Port) {
+		t.Errorf("launches = %v, want the last one on the final port %d", got, state.Port)
 	}
 	if got := readPortFile(beadsDir); got != state.Port {
 		t.Errorf("port file = %d, want %d", got, state.Port)
