@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Concurrent `bd init --shared-server` runs in different projects no
+  longer refuse each other.** Every shared-server project gates the one shared
+  dolt data dir, and `bd init` holds that gate exclusively for its ~8s run but
+  waited only 5s for it, so a second init (or an init during another
+  project's long command) failed with "bd init refuses to run over live bd
+  activity". `bd init` now waits up to 30s, printing one "waiting for another
+  bd process on the shared server" notice after 2s, then fails with the same
+  refusal naming the bound. Override it with `BEADS_INIT_GATE_TIMEOUT`
+  (`2m`, `90`). Other exclusive operations keep their 5s wait.
+
 - **A proxied-server command against an unreachable external Dolt upstream
   now fails within about a second with a clear error instead of stalling
   ~20-30s.** The local db proxy stayed up, so the client only saw a bare

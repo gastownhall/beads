@@ -88,6 +88,65 @@ func exclusiveGateOptions(reason string) workspacegate.Options {
 	}
 }
 
+// initGateTimeoutEnv overrides initGateWaitDefault, following the
+// BEADS_*_TIMEOUT knob convention (BEADS_PRIME_TIMEOUT, BEADS_FSCK_TIMEOUT):
+// a Go duration ("90s", "2m") or bare whole seconds ("90").
+const initGateTimeoutEnv = "BEADS_INIT_GATE_TIMEOUT"
+
+// initGateWaitDefault is how long bd init waits for its EXCLUSIVE gate set.
+// It is deliberately longer than exclusiveGateWait and scoped to init only:
+// in shared-server mode every project's physical root is the one shared
+// dolt data dir, so init in project A contends with init (or any gated
+// command) in project B. A single init holds the gate for ~8s, so the
+// generic 5s budget made two concurrent `bd init --shared-server` runs in
+// different projects refuse each other. 30s rides out a few back-to-back
+// inits while still failing with a clear error on a genuinely stuck holder.
+// The other exclusive callers (backup restore, bootstrap, migrate) keep
+// exclusiveGateWait: they are rare, deliberate maintenance operations rather
+// than routine setup that tooling fans out across many projects at once.
+const initGateWaitDefault = 30 * time.Second
+
+// initGateNoticeDelay is how long init waits silently before telling the
+// user it is blocked: a sub-2s wait is not worth a line of output. A var so
+// tests can observe contention without sleeping.
+var initGateNoticeDelay = 2 * time.Second
+
+// initGateOnWait prints init's single "still waiting" notice. A var so
+// tests can observe it.
+var initGateOnWait = func(holder string) {
+	if quietFlag {
+		return
+	}
+	where := "this workspace"
+	if doltserver.IsSharedServerMode() {
+		where = "the shared server"
+	}
+	// %q: holder text comes from another process's gate sidecar (see
+	// exclusiveGateOnWait).
+	fmt.Fprintf(os.Stderr, "waiting for another bd process on %s (%q)...\n", where, holder) //nolint:gosec // G705: stderr, not a browser context; %q additionally neutralizes terminal escapes
+}
+
+// initGateWait resolves init's gate budget from initGateTimeoutEnv, falling
+// back to initGateWaitDefault (with a warning) on unset, malformed, or
+// non-positive values.
+func initGateWait() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(initGateTimeoutEnv))
+	if raw == "" {
+		return initGateWaitDefault
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		d, err = time.ParseDuration(raw + "s")
+	}
+	if err != nil || d <= 0 {
+		if !quietFlag {
+			fmt.Fprintf(os.Stderr, "warning: %s=%q is not a positive duration; using default %s\n", initGateTimeoutEnv, raw, initGateWaitDefault)
+		}
+		return initGateWaitDefault
+	}
+	return d
+}
+
 // closeStoreBeforeGateRelease enforces "gates outlive the store" on the
 // error exits: PersistentPostRunE's early returns (auto-commit/auto-export
 // failures) and PersistentPreRunE failures after the store opened would
@@ -249,6 +308,12 @@ func acquireCommandWorkspaceGates(ctx context.Context, cmd *cobra.Command, beads
 // acquires these gates and then runs git must do the same, or the hook's
 // child bd will fail (fail-closed, but confusing).
 func acquireExclusiveWorkspaceGates(ctx context.Context, beadsDir, reason string, extraRoots ...string) (*workspacegate.MultiHandle, error) {
+	return acquireExclusiveWorkspaceGatesWithOptions(ctx, beadsDir, exclusiveGateOptions(reason), extraRoots...)
+}
+
+// acquireExclusiveWorkspaceGatesWithOptions is acquireExclusiveWorkspaceGates
+// with caller-supplied acquisition options (bd init uses a longer wait).
+func acquireExclusiveWorkspaceGatesWithOptions(ctx context.Context, beadsDir string, opts workspacegate.Options, extraRoots ...string) (*workspacegate.MultiHandle, error) {
 	// Defense against callers that computed no workspace (bootstrap plans
 	// are the untrusted case): gating "" would resolve against the CWD and
 	// fence an arbitrary directory.
@@ -292,16 +357,37 @@ func acquireExclusiveWorkspaceGates(ctx context.Context, beadsDir, reason string
 			gates = append(gates, g)
 		}
 	}
-	return workspacegate.AcquireAll(ctx, workspacegate.Exclusive,
-		exclusiveGateOptions(reason), gates...)
+	return workspacegate.AcquireAll(ctx, workspacegate.Exclusive, opts, gates...)
 }
 
 // acquireInitMutationGate holds init's complete exclusive gate set while its
 // destructive preflight runs. A refusal or preflight error releases the gates;
 // a successful caller owns the returned handle through replacement.
+//
+// Contention waits up to initGateWait() (not the generic exclusiveGateWait),
+// honoring ctx cancellation, and prints one notice if the wait outlasts
+// initGateNoticeDelay. Exclusivity is unchanged; past the bound init fails
+// with the same refusal, naming the budget and the knob that raises it.
 func acquireInitMutationGate(ctx context.Context, beadsDir, physicalRoot string, preflight func() error) (*workspacegate.MultiHandle, error) {
-	h, err := acquireExclusiveWorkspaceGates(ctx, beadsDir, "bd init", physicalRoot)
+	wait := initGateWait()
+	var notice *time.Timer
+	opts := workspacegate.Options{
+		Wait:   wait,
+		Reason: "bd init",
+		// AcquireAll calls OnWait at most once, synchronously, before it
+		// returns, so notice is set (if at all) by the time Stop runs.
+		OnWait: func(holder string) {
+			notice = time.AfterFunc(initGateNoticeDelay, func() { initGateOnWait(holder) })
+		},
+	}
+	h, err := acquireExclusiveWorkspaceGatesWithOptions(ctx, beadsDir, opts, physicalRoot)
+	if notice != nil {
+		notice.Stop()
+	}
 	if err != nil {
+		if errors.Is(err, workspacegate.ErrBusy) {
+			return nil, fmt.Errorf("bd init refuses to run over live bd activity on this workspace (waited %s; set %s to wait longer): %w", wait, initGateTimeoutEnv, err)
+		}
 		return nil, fmt.Errorf("bd init refuses to run over live bd activity on this workspace: %w", err)
 	}
 	if preflight != nil {

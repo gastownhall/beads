@@ -509,6 +509,7 @@ Selected commonly-used variables:
 | `BEADS_ACTOR` | Actor identity (preferred over `BD_ACTOR`, which is a deprecated alias) |
 | `BEADS_IDENTITY` | Sender identity for `bd mail` |
 | `BEADS_FSCK_TIMEOUT` | Runtime-only timeout for the pre-push `dolt fsck --quiet` integrity check (default `30s`) |
+| `BEADS_INIT_GATE_TIMEOUT` | How long `bd init` waits for another bd process (another init, or live commands on the same workspace or shared server) to release the workspace gate before refusing (default `30s`; accepts durations like `2m` or bare seconds like `90`) |
 | `BEADS_MIGRATION_WATCHDOG_INTERVAL` | Interval between soft WARN lines while a schema migration's SQL keeps running (default `5m`; accepts durations like `10m` or bare seconds like `90`). Observability only — it never aborts a migration |
 | `BEADS_DOLT_SERVER_MODE`, `BEADS_DOLT_SHARED_SERVER`, `BEADS_DOLT_DATA_DIR`, `BEADS_DOLT_PORT`, ... | Embedded/server Dolt overrides |
 | `BEADS_DOLT_BIN` | Pin the exact external `dolt` CLI binary managed proxied-server mode spawns, overriding PATH lookup (highest precedence; an explicit path that fails validation is an error, not a silent fallback to PATH). On Windows the executable extension may be omitted — `C:\tools\dolt` finds `C:\tools\dolt.exe` via PATHEXT, though a file at the exact spelled path wins if both exist |
