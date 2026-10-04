@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -143,6 +144,156 @@ func TestCloseAlreadyClosedRefusesReasonOnEmptyStored(t *testing.T) {
 	}
 	if got := env.get("test-amd4").CloseReason; got != "" {
 		t.Errorf("close_reason = %q, want it still empty", got)
+	}
+}
+
+// TestCloseAlreadyClosedRefusesDiscardedReasonUnderJSONSuggestNext covers the
+// machine-readable path, which is the one the change was written for: agents
+// drive bd with --json, and --continue/--suggest-next are idiomatic on workflow
+// steps.
+//
+// --suggest-next and --continue own their --json output, so each returns as
+// soon as it has emitted its document — which used to be BEFORE the
+// discarded-reason exit at the bottom of RunE, leaving the refusal on stderr
+// and the status at 0. The text-mode arms above caught nothing here because
+// they never set jsonOutput.
+//
+// The payload assertions are not decoration: without them a regression that
+// simply stopped taking this branch would still exit non-zero, through the
+// shared block, and the test would pass while measuring nothing.
+func TestCloseAlreadyClosedRefusesDiscardedReasonUnderJSONSuggestNext(t *testing.T) {
+	env := newParityEnv(t)
+	seedClosed(t, env, "test-amd5", "Amend under --json", amendStoredReason)
+	// A dependent this close unblocks, so --suggest-next has something to
+	// report and actually takes its own return.
+	env.seed("test-amd6", "Blocked by the closed one", nil)
+	dep := &types.Dependency{IssueID: "test-amd6", DependsOnID: "test-amd5", Type: types.DepBlocks}
+	if err := env.store.inner.AddDependency(rootCtx, dep, "parity-seed"); err != nil {
+		t.Fatalf("seed blocks edge: %v", err)
+	}
+	jsonOutput = true
+
+	env.setFlags(closeCmd, map[string]string{"reason": amendSuppliedReason, "suggest-next": "true"})
+	res := env.run(closeCmd, "test-amd5")
+
+	if res.exitCode == 0 {
+		t.Errorf("exit = 0 under --json --suggest-next; the refusal is stderr prose, so the status is the only signal a JSON caller can branch on\nstdout:\n%s\nstderr:\n%s", res.stdout, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "close reason NOT recorded on test-amd5") {
+		t.Errorf("stderr does not say the reason was dropped:\n%s", res.stderr)
+	}
+
+	// Exactly ONE document, and it is the --suggest-next payload. Making these
+	// branches fall through to the shared exit block instead of emitting and
+	// then honoring reasonDiscarded would print a SECOND document from the
+	// generic emitter below them.
+	dec := json.NewDecoder(strings.NewReader(res.stdout))
+	var payload map[string]interface{}
+	if err := dec.Decode(&payload); err != nil {
+		t.Fatalf("stdout is not one JSON document: %v\nstdout:\n%s", err, res.stdout)
+	}
+	if dec.More() {
+		t.Errorf("stdout carries a SECOND JSON document; the post-close-flag branch must emit once:\n%s", res.stdout)
+	}
+	if _, ok := payload["unblocked"]; !ok {
+		t.Fatalf("payload has no `unblocked` key, so the --suggest-next branch never ran and this test proves nothing:\n%s", res.stdout)
+	}
+	if _, ok := payload["closed"]; !ok {
+		t.Errorf("payload has no `closed` key:\n%s", res.stdout)
+	}
+	// The JSON half of "never echo the discarded text".
+	if strings.Contains(res.stdout, amendSuppliedReason) {
+		t.Errorf("stdout echoed the discarded reason back:\n%s", res.stdout)
+	}
+}
+
+// TestCloseAlreadyClosedRefusesDiscardedReasonUnderJSONContinue is the
+// --continue twin of the --suggest-next case above. It is the other branch
+// that owns its --json document, and the more common one on workflow steps.
+// Each branch has its own return, so pinning one leaves the other free to
+// regress.
+func TestCloseAlreadyClosedRefusesDiscardedReasonUnderJSONContinue(t *testing.T) {
+	env := newParityEnv(t)
+	// A molecule whose only step is the closed one: AdvanceToNextStep reports
+	// it complete, which is a result, so --continue takes its own return.
+	env.seed("test-amd9", "Molecule root", func(i *types.Issue) { i.IssueType = types.TypeEpic })
+	seedClosed(t, env, "test-amd10", "Closed molecule step", amendStoredReason)
+	dep := &types.Dependency{IssueID: "test-amd10", DependsOnID: "test-amd9", Type: types.DepParentChild}
+	if err := env.store.inner.AddDependency(rootCtx, dep, "parity-seed"); err != nil {
+		t.Fatalf("seed parent-child edge: %v", err)
+	}
+	jsonOutput = true
+
+	env.setFlags(closeCmd, map[string]string{"reason": amendSuppliedReason, "continue": "true"})
+	res := env.run(closeCmd, "test-amd10")
+
+	if res.exitCode == 0 {
+		t.Errorf("exit = 0 under --json --continue; the refusal is stderr prose, so the status is the only signal a JSON caller can branch on\nstdout:\n%s\nstderr:\n%s", res.stdout, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "close reason NOT recorded on test-amd10") {
+		t.Errorf("stderr does not say the reason was dropped:\n%s", res.stderr)
+	}
+
+	dec := json.NewDecoder(strings.NewReader(res.stdout))
+	var payload map[string]interface{}
+	if err := dec.Decode(&payload); err != nil {
+		t.Fatalf("stdout is not one JSON document: %v\nstdout:\n%s", err, res.stdout)
+	}
+	if dec.More() {
+		t.Errorf("stdout carries a SECOND JSON document; the post-close-flag branch must emit once:\n%s", res.stdout)
+	}
+	if _, ok := payload["continue"]; !ok {
+		t.Fatalf("payload has no `continue` key, so the --continue branch never ran and this test proves nothing:\n%s", res.stdout)
+	}
+	if _, ok := payload["closed"]; !ok {
+		t.Errorf("payload has no `closed` key:\n%s", res.stdout)
+	}
+	if strings.Contains(res.stdout, amendSuppliedReason) {
+		t.Errorf("stdout echoed the discarded reason back:\n%s", res.stdout)
+	}
+}
+
+// TestCloseMultiIDDiscardedReasonIsNotReportedAsAFailedClose is the direct
+// route's half of the two-route contract: with a second id in the batch the
+// partial-failure summary becomes reachable, and a discarded reason must not
+// reach it. The issue IS closed; only an amendment was refused.
+//
+// Every other end-to-end case in this file closes exactly one id, and
+// reportCloseFailures short-circuits on total <= 1 — so one id is structurally
+// unable to observe this.
+func TestCloseMultiIDDiscardedReasonIsNotReportedAsAFailedClose(t *testing.T) {
+	env := newParityEnv(t)
+	seedClosed(t, env, "test-amd7", "Already closed", amendStoredReason)
+	env.seed("test-amd8", "Genuinely open", nil)
+
+	// One --reason fans out to every id (reasonForCloseIndex), so amd-7 gets a
+	// reason that disagrees with its record while amd-8 takes a real close.
+	env.setFlags(closeCmd, map[string]string{"reason": amendSuppliedReason})
+	res := env.run(closeCmd, "test-amd7", "test-amd8")
+
+	if res.exitCode == 0 {
+		t.Errorf("exit = 0; the discarded reason still went unreported\nstderr:\n%s", res.stderr)
+	}
+	if !strings.Contains(res.stderr, "close reason NOT recorded on test-amd7") {
+		t.Errorf("stderr does not carry the refusal:\n%s", res.stderr)
+	}
+	// The assertion this test exists for.
+	if strings.Contains(res.stderr, "failed to close") {
+		t.Errorf("a discarded reason was summarized as a failed close; both issues are closed:\n%s", res.stderr)
+	}
+	// Both ids really are closed, so the summary above would have been false.
+	if got := env.get("test-amd7").Status; got != types.StatusClosed {
+		t.Errorf("test-amd7 status = %q, want closed", got)
+	}
+	if got := env.get("test-amd8").Status; got != types.StatusClosed {
+		t.Errorf("test-amd8 status = %q, want closed", got)
+	}
+	// first-close-wins kept the original, and the real close took the supplied.
+	if got := env.get("test-amd7").CloseReason; got != amendStoredReason {
+		t.Errorf("close_reason = %q, want %q unchanged", got, amendStoredReason)
+	}
+	if got := env.get("test-amd8").CloseReason; got != amendSuppliedReason {
+		t.Errorf("close_reason = %q, want the supplied %q on the real close", got, amendSuppliedReason)
 	}
 }
 

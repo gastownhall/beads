@@ -216,7 +216,8 @@ is unaffected.`,
 				// write itself is a no-op), but still count the command as a successful
 				// close for its retry-safe post-close contracts (last-touched,
 				// --continue, --suggest-next, --claim-next) via alreadyClosed below.
-				// Exit stays 0.
+				// Exit stays 0 unless the re-close carried a differing explicit
+				// reason (reasonDiscarded above).
 				alreadyClosed++
 
 				// Molecule auto-close is itself a retry-safe, fully state-derived
@@ -307,7 +308,7 @@ is unaffected.`,
 			unblocked, err := postCloseStore.GetNewlyUnblockedByClose(ctx, resolvedIDs[0])
 			if err == nil && len(unblocked) > 0 {
 				if jsonOutput {
-					return outputJSON(map[string]interface{}{
+					return closeJSONExit(reasonDiscarded, map[string]interface{}{
 						"closed":    closedIssues,
 						"unblocked": unblocked,
 					})
@@ -340,7 +341,7 @@ is unaffected.`,
 					mutatedStores[postCloseStore] = append(mutatedStores[postCloseStore], result.NextStep.ID)
 				}
 				if jsonOutput {
-					return outputJSON(map[string]interface{}{
+					return closeJSONExit(reasonDiscarded, map[string]interface{}{
 						"closed":   closedIssues,
 						"continue": result,
 					})
@@ -441,6 +442,28 @@ is unaffected.`,
 type closeIDFailure struct {
 	ID    string `json:"id"`
 	Error string `json:"error"`
+}
+
+// closeJSONExit emits one of the post-close-flag JSON documents and then
+// applies the same discarded-reason exit status the text path takes.
+//
+// --suggest-next and --continue own their --json output because each carries a
+// second key beside "closed", so both branches emit and RETURN right there —
+// the shared exit block at the bottom of RunE never runs for them, and falling
+// through instead is not an option: the generic `if jsonOutput && len(
+// closedIssues) > 0` emitter below would print a SECOND document. Without this
+// the refusal would land on stderr and the command would still exit 0, i.e.
+// the be-ctr defect would survive on the machine-readable path for the exact
+// audience — agents, which drive bd with --json and --continue — that the
+// change was written for.
+func closeJSONExit(reasonDiscarded bool, payload interface{}) error {
+	if err := outputJSON(payload); err != nil {
+		return err
+	}
+	if reasonDiscarded {
+		return SilentExit()
+	}
+	return nil
 }
 
 // closeClaimedID names the issue --claim-next claimed on this run, or "" when
