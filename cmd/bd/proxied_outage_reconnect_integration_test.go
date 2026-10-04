@@ -26,14 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Deliberately not named TestProxiedServer...: this would make it discovered
-// by the shard scripts' ^Test(ProxiedServer|ServerMode) regex, but both its
-// subtests still fail a real "exceeded 3s bound" assertion against a stopped
-// external upstream (bead filed: outage command exceeds 3s bound against
-// stopped external upstream, tcp and unix). Renaming it into a required lane
-// before that's fixed would turn Bazel + the legacy 15-shard hash-fallback
-// red. Rename it once the underlying latency issue is resolved.
-func TestProxiedOutageReconnectAcceptanceMatrix(t *testing.T) {
+func TestProxiedServerOutageReconnectAcceptanceMatrix(t *testing.T) {
 	requireProxiedServerEnv(t)
 	bd := buildEmbeddedBD(t)
 	for _, topology := range []struct {

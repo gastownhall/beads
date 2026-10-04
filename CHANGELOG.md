@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A proxied-server command against an unreachable external Dolt upstream
+  now fails at once with a clear error instead of stalling ~20-30s.** The
+  local db proxy stayed up, so the client only saw a bare close, which the
+  bootstrap ping retried as a transient drop for its whole 30s budget before
+  reporting `invalid connection`. The proxy now answers such a connection with
+  a MySQL error (2003) naming the upstream — refused, socket missing, or a
+  front that closed before the server greeting — which is not retried. A
+  backend that drops a connection after the greeting, or a dial timeout,
+  still gets the transient retry, as does every refusal from a managed
+  (local sidecar) backend.
 - **`bd list` no longer silently drops all but the last repeated filter flag.**
   `--status`, `--state`, and `--id` were plain string flags, so
   `bd list --status open --status closed --status pinned` kept only `pinned` —

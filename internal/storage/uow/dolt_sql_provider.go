@@ -607,7 +607,11 @@ const pingAttemptTimeout = 10 * time.Second
 // application-level rejection that can reach us as one, so at boot an OpError
 // is always the connection itself: refused while the server restarts, reset,
 // or broken pipe. MySQL's own rejections arrive as *mysql.MySQLError and stay
-// permanent. A name that does not resolve is the exception — it will not start
+// permanent — including the db proxy's 2003 "upstream Dolt server
+// unreachable", which it sends in place of a bare close when an external
+// backend is refused or closes before the greeting
+// (dbproxy/proxy/upstream_error.go), so an external upstream outage behind a
+// live proxy fails at once instead of spending this budget. A name that does not resolve is the exception — it will not start
 // resolving, so retrying only spends the whole budget before reporting the
 // same misconfiguration.
 //

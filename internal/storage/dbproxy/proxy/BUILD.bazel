@@ -21,6 +21,7 @@ go_library(
         "unverified_process_linux.go",
         "unverified_process_unsupported.go",
         "unverified_process_windows.go",
+        "upstream_error.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/storage/dbproxy/proxy",
     visibility = ["//:__subpackages__"],
@@ -70,6 +71,7 @@ go_test(
         "force_stop_linux_test.go",
         "server_epoch_internal_test.go",
         "server_test.go",
+        "upstream_error_test.go",
     ],
     embed = [":proxy"],
     deps = [
@@ -79,6 +81,7 @@ go_test(
         "//internal/storage/dbproxy/pidfile",
         "//internal/storage/dbproxy/server",
         "//internal/storage/dbproxy/util",
+        "@com_github_go_sql_driver_mysql//:mysql",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ] + select({
