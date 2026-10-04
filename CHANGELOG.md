@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `backends.Backend` gains an optional `OpenWith(ctx, beadsDir, OpenOptions)`
+  and a `Remote bool` field for a registered extension backend (for example
+  an HTTP client registrant). `OpenOptions{Credential, HTTPClient,
+  UserAgent}` carries per-open injections — the motivating case is a single
+  embedder process serving many workspaces with distinct credentials against
+  a backend whose dialer would otherwise be process-global. `Open` keeps
+  working unmodified: a backend with no `OpenWith` falls back to it and
+  ignores `HTTPClient`/`UserAgent`, but refuses rather than silently drops a
+  non-nil `Credential`. The public SDK gains `beads.OpenBestAvailableWith`
+  (and the `backend` package's matching aliases); `beads.OpenBestAvailable`
+  is now that function called with a zero `OpenOptions`, with identical
+  behavior for every existing backend. `doltserver.ResolvePhysicalRoots` now
+  recognizes a registered remote backend (`backends.IsRemote`) before any
+  Dolt-mode check, so a remote-backend workspace is never misclassified as
+  having a local Dolt root to gate.
+
 ### Changed
 
 - `bd preflight --fix --json` no longer returns a `Version sync` fix result:

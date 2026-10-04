@@ -140,6 +140,20 @@ type VCStatus = storage.Status
 // store. See the field docs on the aliased struct.
 type Backend = backends.Backend
 
+// OpenOptions carries per-open injections (Credential, HTTPClient,
+// UserAgent) that Backend.OpenWith may use. See the field docs on the
+// aliased struct.
+type OpenOptions = backends.OpenOptions
+
+// Credential is the opaque per-open credential marker OpenOptions.Credential
+// carries. A backend that needs one declares its own narrower interface and
+// type-asserts the value its OpenWith receives. See the aliased type's docs.
+type Credential = backends.Credential
+
+// ErrCredentialWithoutOpenWith is returned by Backend.OpenWithOptions when
+// OpenOptions.Credential is set but the backend has no OpenWith to honor it.
+var ErrCredentialWithoutOpenWith = backends.ErrCredentialWithoutOpenWith
+
 // Register adds a backend under name. It is process-start wiring: call it
 // once during initialization (typically from a registrant package's init that
 // the embedding binary blank-imports), before any concurrent store access.
@@ -169,6 +183,12 @@ func Registered(name string) bool {
 // remote store), with no separately discoverable local database.
 func WorkspaceIsBeadsDir(name string) bool {
 	return backends.WorkspaceIsBeadsDir(name)
+}
+
+// IsRemote reports whether name is a registered backend that is a pure
+// network client of a bd serve with no local database (see Backend.Remote).
+func IsRemote(name string) bool {
+	return backends.IsRemote(name)
 }
 
 // Iter is the streaming-read cursor returned by the Iter* methods.

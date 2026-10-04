@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -36,6 +37,29 @@ import (
 // retry it explicitly after a callback has started when their operation is
 // safe to repeat.
 type Storage = beads.Storage
+
+// OpenOptions carries per-open injections (Credential, HTTPClient,
+// UserAgent) for OpenBestAvailableWith. A registered backend's OpenWith may
+// use these; Dolt and embedded Dolt have no per-open seam and never see
+// them, except that a non-nil Credential is always refused rather than
+// silently dropped (see OpenBestAvailableWith).
+type OpenOptions = backends.OpenOptions
+
+// Credential is the opaque per-open credential marker OpenOptions.Credential
+// carries. See backends.Credential for the full contract: this package
+// assigns it no methods and performs no assertions against it, so an
+// embedder (for example gc, Gas City) can carry a per-workspace credential
+// through OpenBestAvailableWith without this package knowing its shape.
+type Credential = backends.Credential
+
+// ErrCredentialWithoutOpenWith is returned by OpenBestAvailableWith when
+// opts.Credential is set but nothing can honor it: either a registered
+// backend has no OpenWith, or no backend is registered at all and the
+// workspace is plain Dolt, which has no per-open credential seam. It is
+// aliased here, not just in internal/storage/backends, because that package
+// is unimportable outside this module: an embedder checking this error with
+// errors.Is must do it through the public beads package.
+var ErrCredentialWithoutOpenWith = backends.ErrCredentialWithoutOpenWith
 
 // configuredBackendUnavailable is the public open path's fail-closed refusal for
 // metadata naming a removed or unrecognized backend. beadsDir and cfg let the

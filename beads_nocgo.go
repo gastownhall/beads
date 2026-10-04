@@ -16,7 +16,22 @@ import (
 // supported; embedded Dolt returns an error directing the user to server mode.
 //
 // beadsDir is the path to the .beads directory.
+//
+// OpenBestAvailable is OpenBestAvailableWith with a zero OpenOptions; see that
+// function for per-open injections into a registered backend. Mirrors the
+// cgo build exactly for every path: a registered backend dispatches through
+// OpenWithOptions regardless of CGO, so this build's only Dolt-specific
+// difference from beads_cgo.go is the embedded-Dolt arm.
 func OpenBestAvailable(ctx context.Context, beadsDir string) (Storage, error) {
+	return OpenBestAvailableWith(ctx, beadsDir, OpenOptions{})
+}
+
+// OpenBestAvailableWith is OpenBestAvailable plus per-open injections
+// (Credential, HTTPClient, UserAgent) for a registered backend that
+// implements Backend.OpenWith. See the cgo build's doc comment for the full
+// rationale; behavior here is identical except that embedded Dolt is
+// unavailable without CGO.
+func OpenBestAvailableWith(ctx context.Context, beadsDir string, opts OpenOptions) (Storage, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		return nil, fmt.Errorf("loading storage metadata: %w", err)
@@ -30,9 +45,20 @@ func OpenBestAvailable(ctx context.Context, beadsDir string) (Storage, error) {
 
 	// Dispatch to a registered extension backend before any Dolt path, mirroring
 	// the CLI store factories so SDK callers get the backend they registered
-	// instead of the embedded-Dolt-requires-CGO error.
+	// instead of the embedded-Dolt-requires-CGO error. OpenWithOptions calls
+	// OpenWith when the backend has one, else falls back to Open — except a
+	// non-nil opts.Credential, which it refuses rather than silently drops.
 	if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
-		return backend.Open(ctx, beadsDir)
+		return backend.OpenWithOptions(ctx, beadsDir, opts)
+	}
+
+	// No registered backend claims this workspace: it is plain Dolt (server
+	// mode is the only option without CGO), which has no per-open credential
+	// seam. Silently dropping a caller-supplied Credential here would be the
+	// same silent-loss hazard OpenWithOptions refuses for a registered
+	// backend without OpenWith.
+	if opts.Credential != nil {
+		return nil, fmt.Errorf("beads: OpenOptions.Credential is not supported for backend %q (Dolt has no per-open credential seam): %w", cfg.GetBackend(), backends.ErrCredentialWithoutOpenWith)
 	}
 
 	if cfg.IsDoltServerMode() {
