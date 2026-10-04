@@ -85,7 +85,7 @@ func bazelEmbeddedStorageShardCount(t *testing.T) int {
 // test-shards.txt and engdocs/TESTING.md), so a --check against them is
 // expected to report "missing" entries by design (see those generators'
 // module docstrings) and is not what this test runs.
-func TestEmbeddedCmdShardManifestGeneratorNotStale(t *testing.T) {
+func TestCmdEmbeddedShardManifestGeneratorNotStale(t *testing.T) {
 	if os.Getenv("TEST_SRCDIR") != "" {
 		t.Skip("scripts_test's runfiles hold neither the generator's sources nor cmd/bd")
 	}
@@ -102,10 +102,10 @@ func TestEmbeddedCmdShardManifestGeneratorNotStale(t *testing.T) {
 	}
 }
 
-// TestEmbeddedStorageShardManifestGeneratorNotStale mirrors
-// TestEmbeddedCmdShardManifestGeneratorNotStale above for the storage tier's
+// TestStorageEmbeddedShardManifestGeneratorNotStale mirrors
+// TestCmdEmbeddedShardManifestGeneratorNotStale above for the storage tier's
 // Bazel-only 15-shard block; see that test's doc comment.
-func TestEmbeddedStorageShardManifestGeneratorNotStale(t *testing.T) {
+func TestStorageEmbeddedShardManifestGeneratorNotStale(t *testing.T) {
 	if os.Getenv("TEST_SRCDIR") != "" {
 		t.Skip("scripts_test's runfiles hold neither the generator's sources nor cmd/bd")
 	}
