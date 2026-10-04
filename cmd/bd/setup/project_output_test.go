@@ -56,3 +56,24 @@ func TestProjectInstallersReportToTheGivenOutput(t *testing.T) {
 		t.Errorf("successful installs wrote errors: %q", errOut.String())
 	}
 }
+
+// A re-run of the Claude project installer over an existing SessionStart hook
+// reports that through the caller's stdout. It used to print straight to the
+// process stdout, so QuietProjectInstallOutput could not suppress it (#7186).
+func TestClaudeHookAlreadyRegisteredReportsThroughGivenOutput(t *testing.T) {
+	env, _, _ := newClaudeTestEnv(t)
+	stubClaudeEnvProvider(t, env, nil)
+	inTempDir(t)
+
+	var first bytes.Buffer
+	if err := InstallClaudeProjectTo(false, ProjectInstallOutput{Stdout: &first, Stderr: &first}); err != nil {
+		t.Fatalf("first InstallClaudeProjectTo: %v", err)
+	}
+	var second bytes.Buffer
+	if err := InstallClaudeProjectTo(false, ProjectInstallOutput{Stdout: &second, Stderr: &second}); err != nil {
+		t.Fatalf("second InstallClaudeProjectTo: %v", err)
+	}
+	if !strings.Contains(second.String(), "Hook already registered: SessionStart") {
+		t.Errorf("second install did not report the existing hook through the given stdout: %q", second.String())
+	}
+}

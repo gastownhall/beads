@@ -303,6 +303,8 @@ func installClaude(env claudeEnv, global bool, stealth bool) error {
 	} else {
 		if addHookCommand(hooks, "SessionStart", command) {
 			_, _ = fmt.Fprintln(env.stdout, "✓ Registered SessionStart hook")
+		} else {
+			_, _ = fmt.Fprintln(env.stdout, "✓ Hook already registered: SessionStart")
 		}
 	}
 
@@ -580,7 +582,6 @@ func addHookCommand(hooks map[string]interface{}, event, command string) bool {
 				continue
 			}
 			if cmdMap["command"] == command {
-				fmt.Printf("✓ Hook already registered: %s\n", event)
 				return false
 			}
 		}

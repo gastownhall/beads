@@ -365,6 +365,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Override it with `BEADS_INIT_GATE_TIMEOUT` (`2m`, `90`). Other exclusive
   operations keep their 5s wait.
 
+- **`bd init --quiet` no longer prints "Hook already registered: SessionStart"** when the
+  project's `.claude/settings.json` already carries the `bd prime` SessionStart
+  hook (a re-init, or a fresh clone of a repo that commits it). The Claude and
+  Gemini installers now report that state through their own output stream, so
+  quiet installs stay silent (#7186).
+
 - **A proxied-server command against an unreachable external Dolt upstream
   now fails within about a second with a clear error instead of stalling
   ~20-30s.** The local db proxy stayed up, so the client only saw a bare
