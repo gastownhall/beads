@@ -539,6 +539,15 @@ func waitForServerReady(ctx context.Context, s server.DatabaseServer, timeout ti
 			return err
 		}
 		_ = conn.Close()
+		// The dial proves something answers on the backend's address, not
+		// that the backend does. A local backend's Start has already proved
+		// its own process owns the port (see server.DoltServer.waitReady),
+		// and while it runs nobody else can bind it, so re-checking Running
+		// after the dial closes the gap where the backend exited in between
+		// and another process took the port.
+		if !s.Running(ctx) {
+			return errors.New("database server exited during readiness check")
+		}
 		return nil
 	}, backoff.WithContext(bo, ctx))
 }

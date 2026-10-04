@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -1224,4 +1225,110 @@ func TestResolveProxiedServerLogPath_FollowsCustomRoot(t *testing.T) {
 		assert.Equal(t, filepath.Join(bd, "dolt", "server.log"), path)
 		assert.False(t, isCustom)
 	})
+}
+
+// writeManagedConfig writes a Beads-generated config for port into a temp
+// dir and returns its path.
+func writeManagedConfig(t *testing.T, port int) string {
+	t.Helper()
+	body, err := renderProxiedServerConfig(port)
+	require.NoError(t, err)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, body, 0o600))
+	return path
+}
+
+func TestRenderProxiedServerConfig_RecordsChosenPort(t *testing.T) {
+	body, err := renderProxiedServerConfig(54321)
+	require.NoError(t, err)
+	require.True(t, isManagedProxiedServerConfig(body))
+	port, _, ok := cutManagedPortRecord(body[len(managedProxiedServerConfigMarker):])
+	require.True(t, ok, "generated config must carry the chosen-port record")
+	assert.Equal(t, 54321, port)
+}
+
+func TestRepickManagedProxiedServerPort_MovesBeadsChosenPort(t *testing.T) {
+	path := writeManagedConfig(t, 40001)
+	// A hand edit elsewhere in the file must survive the rewrite.
+	body, err := os.ReadFile(path)
+	require.NoError(t, err)
+	body = []byte(strings.Replace(string(body), "log_level: info", "log_level: debug", 1))
+	require.NoError(t, os.WriteFile(path, body, 0o600))
+
+	require.NoError(t, repickManagedProxiedServerPort(context.Background(), path, 40001))
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.True(t, isManagedProxiedServerConfig(got), "rewrite must keep the managed marker")
+	recorded, _, ok := cutManagedPortRecord(got[len(managedProxiedServerConfigMarker):])
+	require.True(t, ok, "rewrite must keep the chosen-port record")
+	cfg, err := servercfg.NewYamlConfig(got)
+	require.NoError(t, err)
+	assert.NotEqual(t, 40001, cfg.Port(), "port must move off the in-use port")
+	assert.Equal(t, recorded, cfg.Port(), "record must name the new port")
+	assert.Equal(t, servercfg.LogLevel_Debug, cfg.LogLevel(), "hand edit must be preserved")
+	assert.Equal(t, proxiedServerListenerHost, cfg.Host())
+	require.NoError(t, validateProxiedServerConfig(path), "rewritten config must still pass the managed policy")
+
+	// The rewritten file is itself repickable.
+	require.NoError(t, repickManagedProxiedServerPort(context.Background(), path, cfg.Port()))
+}
+
+func TestRepickManagedProxiedServerPort_Refuses(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		body   func(t *testing.T) []byte
+		inUse  int
+		errHas string
+	}{
+		{
+			name: "hand-set port is pinned",
+			body: func(t *testing.T) []byte {
+				b, err := renderProxiedServerConfig(40001)
+				require.NoError(t, err)
+				return []byte(strings.Replace(string(b), "port: 40001", "port: 40002", 1))
+			},
+			inUse:  40002,
+			errHas: "set by hand",
+		},
+		{
+			name: "config without the record is pinned",
+			body: func(t *testing.T) []byte {
+				return []byte(managedProxiedServerConfigMarker + "log_level: info\nlistener:\n    host: 127.0.0.1\n    port: 40001\n")
+			},
+			inUse:  40001,
+			errHas: "treated as pinned",
+		},
+		{
+			name: "operator config is never rewritten",
+			body: func(t *testing.T) []byte {
+				return []byte("listener:\n  host: 127.0.0.1\n  port: 40001\n")
+			},
+			inUse:  40001,
+			errHas: "not a Beads-generated config",
+		},
+		{
+			name: "in-use port is not the config's port",
+			body: func(t *testing.T) []byte {
+				b, err := renderProxiedServerConfig(40001)
+				require.NoError(t, err)
+				return b
+			},
+			inUse:  40009,
+			errHas: "not the in-use port",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			body := tc.body(t)
+			require.NoError(t, os.WriteFile(path, body, 0o600))
+			err := repickManagedProxiedServerPort(ctx, path, tc.inUse)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.errHas)
+			after, rerr := os.ReadFile(path)
+			require.NoError(t, rerr)
+			assert.Equal(t, string(body), string(after), "a refused repick must leave the file untouched")
+		})
+	}
 }

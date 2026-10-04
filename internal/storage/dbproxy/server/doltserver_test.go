@@ -641,3 +641,121 @@ func TestDoltServer_DoltInit_Idempotent(t *testing.T) {
 	require.NoError(t, s.Start(ctx), "Start against pre-initialized rootDir should succeed")
 	t.Cleanup(func() { stopWithTimeout(t, s) })
 }
+
+// holdPort occupies a loopback port with a listener that accepts and then
+// ignores connections: a stand-in for another process that took the port the
+// config names before dolt could bind it. It returns the port.
+func holdPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	var mu sync.Mutex
+	var conns []net.Conn
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	})
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// newDoltServerOnPort is newDoltServer with the listener port chosen by the
+// caller. It returns the server, its root dir and its config path.
+func newDoltServerOnPort(t *testing.T, port int) (*server.DoltServer, string, string) {
+	t.Helper()
+	bin := requireDolt(t)
+	t.Setenv("HOME", t.TempDir())
+	rootDir := t.TempDir()
+	cfg := writeConfig(t, port)
+	log := filepath.Join(t.TempDir(), "server.log")
+	s, err := server.NewDoltServer(bin, rootDir, cfg, log, 0, "")
+	require.NoError(t, err)
+	verifiedStopCleanup(t, s, rootDir)
+	return s, rootDir, cfg
+}
+
+// TestDoltServer_Start_ForeignListenerIsNotReady pins that a port another
+// process holds is not mistaken for the started server. A dial to the port
+// succeeds, but the dolt sql-server Start launched cannot bind it and exits;
+// Start used to accept the dial and report a running server that was already
+// gone.
+func TestDoltServer_Start_ForeignListenerIsNotReady(t *testing.T) {
+	held := holdPort(t)
+	s, rootDir, _ := newDoltServerOnPort(t, held)
+	ctx := context.Background()
+
+	err := s.Start(ctx)
+	require.Error(t, err, "Start must not report ready against another process's listener")
+	assert.ErrorIs(t, err, server.ErrPortInUse)
+	assert.False(t, s.Running(ctx))
+	left, rerr := pidfile.Read(rootDir, server.PIDFileName)
+	require.NoError(t, rerr)
+	assert.Nil(t, left, "a failed Start must not leave a backend pid record")
+}
+
+// TestDoltServer_Start_RepicksPortHeldByAnotherProcess verifies Start
+// recovers through the PortRepicker: it moves the config to a fresh port,
+// re-reads it, and the server comes up there.
+func TestDoltServer_Start_RepicksPortHeldByAnotherProcess(t *testing.T) {
+	held := holdPort(t)
+	s, rootDir, cfgPath := newDoltServerOnPort(t, held)
+	ctx := context.Background()
+
+	var calls []int
+	newPort := freePort(t)
+	s.SetPortRepicker(func(_ context.Context, configPath string, inUsePort int) error {
+		calls = append(calls, inUsePort)
+		require.Equal(t, cfgPath, configPath)
+		body := fmt.Sprintf("log_level: debug\nlistener:\n  host: 127.0.0.1\n  port: %d\n", newPort)
+		return os.WriteFile(configPath, []byte(body), 0o600)
+	})
+
+	require.NoError(t, s.Start(ctx))
+	t.Cleanup(func() { stopWithTimeout(t, s) })
+	assert.Equal(t, []int{held}, calls, "repicker must be called once, with the held port")
+
+	pf, err := pidfile.Read(rootDir, server.PIDFileName)
+	require.NoError(t, err)
+	require.NotNil(t, pf)
+	assert.Equal(t, newPort, pf.Port, "backend record must advertise the new port")
+
+	qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	db, err := sql.Open("mysql", s.DSN(ctx, "", "root", ""))
+	require.NoError(t, err)
+	var got int
+	require.NoError(t, db.QueryRowContext(qctx, "SELECT 1").Scan(&got), "DSN must reach the server on its new port")
+	assert.Equal(t, 1, got)
+	require.NoError(t, db.Close())
+}
+
+// TestDoltServer_Start_RepickerDeclines verifies a repicker that refuses to
+// move the port (an operator-chosen port) ends Start with ErrPortInUse.
+func TestDoltServer_Start_RepickerDeclines(t *testing.T) {
+	held := holdPort(t)
+	s, _, _ := newDoltServerOnPort(t, held)
+	ctx := context.Background()
+	s.SetPortRepicker(func(context.Context, string, int) error {
+		return errors.New("port is pinned")
+	})
+
+	err := s.Start(ctx)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, server.ErrPortInUse)
+	assert.Contains(t, err.Error(), "port is pinned")
+	assert.False(t, s.Running(ctx))
+}
