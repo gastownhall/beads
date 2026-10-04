@@ -88,7 +88,10 @@ func snapshotCommandFlags(cmd *cobra.Command) {
 }
 
 // resetCommandFlags returns every flag in cmd's tree to its baseline value
-// with Changed=false. Flags registered after the snapshot (cobra adds
+// with Changed=false. Flags bound to package globals (dbPath, actor,
+// jsonOutput, readonlyMode, ...) are reset with them, so the runners
+// overwrite any value a test assigned to such a global directly, before and
+// after each run. Flags registered after the snapshot (cobra adds
 // --help lazily) go back to their DefValue.
 func resetCommandFlags(cmd *cobra.Command) {
 	flagBaselineMu.Lock()
@@ -215,13 +218,22 @@ func TestResetCommandFlagsRestoresEveryFlag(t *testing.T) {
 		"stringArray": "carried-over", "intSlice": "7",
 	}
 	visitCommandFlags(rootCmd, func(f *pflag.Flag) {
+		// resetCommandFlags restores a Value through its pointee; a
+		// non-pointer Value (or a map type, whose Set re-points the bound
+		// map) would need its own handling.
+		if reflect.ValueOf(f.Value).Kind() != reflect.Pointer {
+			t.Errorf("flag --%s: Value %T is not a pointer; resetCommandFlags cannot restore it", f.Name, f.Value)
+		}
 		v, ok := sample[f.Value.Type()]
 		if !ok {
-			v = "carried-over"
+			t.Errorf("flag --%s: no sample value for type %q; add one so its reset is tested", f.Name, f.Value.Type())
+			return
 		}
-		if err := f.Value.Set(v); err == nil {
-			f.Changed = true
+		if err := f.Value.Set(v); err != nil {
+			t.Errorf("flag --%s (%s): Set(%q): %v; pick a sample it accepts so its reset is tested", f.Name, f.Value.Type(), v, err)
+			return
 		}
+		f.Changed = true
 	})
 
 	resetCommandFlags(rootCmd)

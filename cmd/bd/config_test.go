@@ -879,7 +879,9 @@ func TestCustomStatusConfig(t *testing.T) {
 		if len(names) != 3 {
 			t.Fatalf("expected 3 names, got %d", len(names))
 		}
-		// Name order (custom_statuses is read back ORDER BY name).
+		// Name order: since the normalized custom_statuses table (#2961,
+		// 8537d943b) statuses are read back ORDER BY name; the table has
+		// no ordinal column, and custom_types reads the same way.
 		want := []string{"qa", "review", "testing"}
 		for i, name := range names {
 			if name != want[i] {

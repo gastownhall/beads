@@ -2060,6 +2060,38 @@ func TestCLI_CreateRejectsFlagLikeTitles(t *testing.T) {
 		})
 	}
 
+	// Without "--" cobra rejects an unknown flag-like word before create's
+	// guard runs; either way bd-2c0's point holds: no garbage issue.
+	t.Run("BareUnknownFlagCreatesNothing", func(t *testing.T) {
+		tmpDir := createTempDirWithCleanup(t)
+		initCmd := exec.Command(testBD, "init", "--prefix", "test", "--quiet")
+		initCmd.Dir = tmpDir
+		initCmd.Env = os.Environ()
+		if out, err := initCmd.CombinedOutput(); err != nil {
+			t.Fatalf("init failed: %v\n%s", err, out)
+		}
+		cmd := exec.Command(testBD, "create", "--foo-bar")
+		cmd.Dir = tmpDir
+		cmd.Env = os.Environ()
+		if out, err := cmd.CombinedOutput(); err == nil {
+			t.Fatalf("bd create --foo-bar succeeded:\n%s", out)
+		}
+		list := exec.Command(testBD, "list", "--json", "--all")
+		list.Dir = tmpDir
+		list.Env = os.Environ()
+		out, err := list.Output()
+		if err != nil {
+			t.Fatalf("bd list: %v\n%s", err, out)
+		}
+		var issues []map[string]any
+		if err := json.Unmarshal(out, &issues); err != nil {
+			t.Fatalf("bd list --json: %v\n%s", err, out)
+		}
+		if len(issues) != 0 {
+			t.Fatalf("bd create --foo-bar created %d issue(s): %s", len(issues), out)
+		}
+	})
+
 	// Verify that --title flag with dash-prefixed value is still allowed
 	t.Run("TitleFlagAllowsDashes", func(t *testing.T) {
 		tmpDir := setupCLITestDB(t)

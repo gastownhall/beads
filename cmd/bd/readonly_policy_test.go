@@ -362,11 +362,14 @@ func TestConfigValidateReadOnlyIsHermetic(t *testing.T) {
 	}
 }
 
-// withoutGateLockFiles drops workspacegate's lock files (*.gate.lock and
-// their advisory sidecars) from a snapshot.
+// withoutGateLockFiles drops the physical-root gate a readonly command takes
+// (workspacegate.ForPhysicalRoot(.beads/dolt): .beads/dolt.gate.lock) and its
+// advisory holder-info sidecar from a snapshot. Any other new file, another
+// gate file included, still trips the canary.
 func withoutGateLockFiles(s readonlyTreeSnapshot) readonlyTreeSnapshot {
 	for rel := range s.Entries {
-		if strings.Contains(filepath.Base(rel), ".gate.lock") {
+		switch filepath.ToSlash(rel) {
+		case "dolt.gate.lock", "dolt.gate.lock.info":
 			delete(s.Entries, rel)
 		}
 	}
