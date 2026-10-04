@@ -298,10 +298,12 @@ func TestBazelCacheModeReachesTheRC(t *testing.T) {
 func checkModeRC(t *testing.T, lane, mode, outputs, rc string, files []string, logs string) {
 	t.Helper()
 	has := func(s string) bool { return strings.Contains(rc, s) }
-	// Every mode: the fetch hardening (key neutral, repository fetching only).
+	// Every mode: the fetch hardening (key neutral, repository fetching only)
+	// and the client heap (R4: a startup option, key neutral).
 	for _, want := range []string{
 		"\ncommon --repo_env=GOPROXY=https://proxy.golang.org|https://proxy.golang.org|direct\n",
 		"\ncommon --http_timeout_scaling=2.0\n",
+		"\nstartup --host_jvm_args=-Xmx4g\n",
 	} {
 		if !has(want) {
 			t.Errorf("%s (mode %s): rc lacks %q:\n%s", lane, mode, strings.TrimSpace(want), rc)

@@ -132,6 +132,11 @@ umask 077
 	# Bazel's own downloader (the Go SDK, http_archive) already retries;
 	# give slow TLS handshakes and reads twice the default timeouts.
 	echo "common --http_timeout_scaling=2.0"
+	# The client's JVM heap. Bazel's default caps it at 25% of RAM, about
+	# 2 GB on the 8 GB 2 vCPU runners every remote lane uses; //... analysis
+	# fits today, with little headroom. A startup option: key neutral, it only
+	# restarts the server. Each lane reports peak-heap-size to size this.
+	echo "startup --host_jvm_args=-Xmx4g"
 } >"$rc"
 
 # write_pem DEST VALUE: decode base64 (or accept raw PEM) and check it is PEM.
