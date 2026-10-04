@@ -1515,6 +1515,12 @@ sh_test(
         "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
         "BEADS_TEST_PREFLIGHT_GO": "$(rlocationpath :preflight_go_fixture)",
         "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+        # TestSharedServerConcurrent (skipped everywhere else) as a bounded
+        # smoke: 6 concurrent bd clients, 3 per database, against 2
+        # shared-server projects (~1 min; bd init alone is ~8s a project).
+        "BEADS_TEST_SHARED_SERVER_CONCURRENT": "1",
+        "BEADS_TEST_SS_CLIENTS": "6",
+        "BEADS_TEST_SS_DIRS": "2",
         # The 4-vCPU runner shape, as in bd_proxied_test: -test.parallel
         # defaults to GOMAXPROCS, and every parallel test opens stores
         # against the one shared server.

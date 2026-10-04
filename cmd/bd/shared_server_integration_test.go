@@ -43,7 +43,15 @@ func ssEnvInt(key string, def int) int {
 // Multiple clients may share a directory (and therefore a database),
 // exercising concurrent multi-writer access to the same Dolt database.
 //
-// Requires BEADS_TEST_SHARED_SERVER=1 to run (skipped by default).
+// Skipped by default. It runs when either variable below is set:
+//
+//	BEADS_TEST_SHARED_SERVER=1            — the original manual stress run
+//	BEADS_TEST_SHARED_SERVER_CONCURRENT=1 — what //cmd/bd:bd_dolt_server_test
+//	                                         sets, together with small
+//	                                         BEADS_TEST_SS_DIRS/CLIENTS, so
+//	                                         --config=doltserver-cmd runs a
+//	                                         bounded smoke of it against the
+//	                                         lane's hermetic dolt sql-server
 //
 // Configuration via environment variables:
 //
@@ -54,8 +62,8 @@ func ssEnvInt(key string, def int) int {
 // Recommended: set BEADS_TEST_EMBEDDED_DOLT=1 to skip the unrelated
 // singleton Dolt container that TestMain starts for other tests in this package.
 func TestSharedServerConcurrent(t *testing.T) {
-	if os.Getenv("BEADS_TEST_SHARED_SERVER") == "" {
-		t.Skip("skipping: set BEADS_TEST_SHARED_SERVER=1 to run")
+	if os.Getenv("BEADS_TEST_SHARED_SERVER") == "" && os.Getenv("BEADS_TEST_SHARED_SERVER_CONCURRENT") != "1" {
+		t.Skip("skipping: set BEADS_TEST_SHARED_SERVER=1 (or BEADS_TEST_SHARED_SERVER_CONCURRENT=1) to run")
 	}
 	if runtime.GOOS == "windows" {
 		t.Skip("not supported on Windows")
@@ -77,6 +85,11 @@ func TestSharedServerConcurrent(t *testing.T) {
 	phase = time.Now()
 	cp, err := testutil.NewContainerProvider()
 	if err != nil {
+		// A lane that exists to run the Dolt server suites must not pass
+		// green having skipped this test.
+		if os.Getenv(testutil.EnvRequireDoltContainer) == "1" {
+			t.Fatalf("cannot start Dolt server, but %s=1: %v", testutil.EnvRequireDoltContainer, err)
+		}
 		t.Skipf("cannot start Dolt container: %v", err)
 	}
 	containerPort := cp.Port()
@@ -117,6 +130,12 @@ func TestSharedServerConcurrent(t *testing.T) {
 	}
 
 	// ── Init project directories ────────────────────────────────────────
+	// One at a time: in shared-server mode every project's physical root is
+	// the one shared dolt dir, and bd init holds that root's workspace gate
+	// EXCLUSIVELY (acquireInitMutationGate), waiting at most
+	// exclusiveGateWait (5s) for it. Concurrent inits therefore refuse each
+	// other ("bd init refuses to run over live bd activity") by design;
+	// what this test exercises is the concurrent workload phase below.
 	phase = time.Now()
 	type project struct {
 		dir, prefix string
@@ -124,7 +143,7 @@ func TestSharedServerConcurrent(t *testing.T) {
 	projects := make([]project, numDirs)
 
 	eg, egCtx := errgroup.WithContext(ctx)
-	eg.SetLimit(maxProcs)
+	eg.SetLimit(1)
 	for i := range numDirs {
 		i := i
 		eg.Go(func() error {
