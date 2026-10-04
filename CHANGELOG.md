@@ -19,6 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `.githooks` markers and `uv.lock` and leaves any other drifted file as it was.
 
 ### Fixed
+- **The prebuilt-binary default-contract test fixture no longer inherits a
+  developer's `GO_TEST_PARALLEL` override.** `scripts/test_script_test.go`'s
+  `runTestScriptPrebuiltBinary` already stripped `TEST_TIMEOUT` and the
+  `BEADS_TEST_ENV_*` markers from the subprocess it builds, for the same
+  reason, but left `GO_TEST_PARALLEL` inherited. Running the suite with
+  `GO_TEST_PARALLEL=2` set (a supported override `scripts/test.sh` reads)
+  failed the fixture's hardcoded `-test.parallel 4` assertions. Now filtered
+  the same way (#7177).
+
 
 - **A proxied-server command against an unreachable external Dolt upstream
   now fails within about a second with a clear error instead of stalling
