@@ -15,6 +15,19 @@
 # if you do (a fresh run packs every currently-discovered test, not just
 # the ones already listed here).
 #
+# Deliberate exception (Oct 2026): four tests that had been hash-placed
+# onto the two shards closest to the 15m -test.timeout are pinned here
+# by hand, onto shards whose measured CI job time was lowest; nothing
+# that was already listed moved. TestProxiedServerStorageClass and
+# TestProxiedServerServeRefusesAStaleCheckpointWithGone (discovered
+# from #7129 on) had hashed onto shard 5, which then hit the timeout on
+# most Main runs; pinning them returns shard 5 to its earlier test set.
+# TestProxiedServerListComments and
+# TestProxiedServerServeRefusesAStreamOnADisabledJournal had hashed
+# onto shard 3, which runs within about a minute of the timeout. An
+# incremental --write keeps pinned lines where they are; a pin is a
+# reviewed choice, not a regeneration of this block.
+#
 # This file is generated: notes added here are erased by the next
 # regeneration. Add them to the generator instead. Known blind spots
 # of the cost proxy (it counts inits, not the work done per init):
@@ -40,6 +53,7 @@
 15 1 TestProxiedServerMolLastActivity
 15 1 TestProxiedServerReopenConcurrent
 15 1 TestProxiedServerServeReadParity
+15 1 TestProxiedServerServeRefusesAStreamOnADisabledJournal
 15 1 TestProxiedServerUpdateConcurrentClaim
 
 15 2 TestProxiedServerCompactHistory
@@ -66,6 +80,7 @@
 
 15 4 TestProxiedServerCreateInfraTypeRoutesToWisps
 15 4 TestProxiedServerEdit
+15 4 TestProxiedServerListComments
 15 4 TestProxiedServerMoleculeFrontDoorWriteParity
 15 4 TestProxiedServerPour
 15 4 TestProxiedServerReassignFence
@@ -102,6 +117,7 @@
 15 7 TestProxiedServerOrphans
 15 7 TestProxiedServerReady
 15 7 TestProxiedServerServeClaim
+15 7 TestProxiedServerServeRefusesAStaleCheckpointWithGone
 15 7 TestProxiedServerServeUpdate
 15 7 TestProxiedServerState
 
@@ -181,6 +197,7 @@
 15 14 TestProxiedServerPrime
 15 14 TestProxiedServerReadyConcurrent
 15 14 TestProxiedServerServeLifecycle
+15 14 TestProxiedServerStorageClass
 15 14 TestProxiedServerUnclaimIfAssigneeParity
 
 15 15 TestProxiedServerCloseConcurrent
