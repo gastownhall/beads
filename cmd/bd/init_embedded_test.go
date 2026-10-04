@@ -95,7 +95,7 @@ func buildEmbeddedBD(t *testing.T) string {
 			name = "bd.exe"
 		}
 		embeddedBD = filepath.Join(tmpDir, name)
-		cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", embeddedBD, ".")
+		cmd := goBuildBDCommand(embeddedBD)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			embeddedBDErr = fmt.Errorf("go build failed: %v\n%s", err, out)
 		}

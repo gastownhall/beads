@@ -75,8 +75,8 @@ func migrationFrontDoorBinary(t *testing.T) string {
 		return p
 	}
 	out := filepath.Join(t.TempDir(), "bd")
-	cmd := exec.Command("go", "build", "-o", out, ".")
-	cmd.Dir = "."
+	cmd := exec.Command("go", "build", "-o", out, bdModulePackage)
+	cmd.Dir = bdSourceDir
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build cgo bd: %v\n%s", err, b)
 	}

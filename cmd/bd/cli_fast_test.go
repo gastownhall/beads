@@ -1042,7 +1042,7 @@ func init() {
 		panic(err)
 	}
 	testBD = filepath.Join(tmpDir, bdBinary)
-	cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", testBD, ".")
+	cmd := goBuildBDCommand(testBD)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		panic(string(out))
 	}
