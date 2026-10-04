@@ -2,13 +2,24 @@ load("@rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "createbatchequiv",
-    srcs = ["createbatchequiv.go"],
+    srcs = [
+        "createbatchequiv.go",
+        "scenario_apply.go",
+        "scenario_import458.go",
+    ],
+    embedsrcs = [
+        "golden/apply.json",
+        "golden/import458-reject-stale.json",
+        "golden/import458.json",
+        "golden/small.json",
+    ],
     importpath = "github.com/steveyegge/beads/internal/storage/createbatchequiv",
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/storage",
         "//internal/storage/issueops",
         "//internal/types",
+        "//issueops",
     ],
 )
 

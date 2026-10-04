@@ -7,10 +7,16 @@ package createbatchequiv
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -19,49 +25,183 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // Prefix is the issue prefix every scenario id carries.
 const Prefix = "eq"
 
 // Open returns a *sql.DB on a fresh, migrated database whose issue_prefix is
-// Prefix. Run calls it twice, once per body.
+// Prefix. Run calls it twice per scenario, once per body.
 type Open func(t *testing.T) *sql.DB
 
-// Outcome is everything Run compares between the two bodies.
+// Outcome is everything Run compares, between the two bodies and against the
+// golden digests.
 type Outcome struct {
 	Tables  map[string][]string
 	Skipped []string
+	Stale   []string
 	Changed []string
 	Counter []string
 }
 
-// Run seeds two fresh databases identically, applies the same import-shaped
-// batch to each — one through the fast paths, one with them disabled — and
-// fails if the stored outcome differs in any compared table.
+// scenario is one seed plus one batch. A batch is either an import-shaped
+// CreateIssuesInTxWithResult call (batch) or an apply-batch request (apply).
+type scenario struct {
+	name      string
+	seed      func() []*types.Issue
+	afterSeed func(t *testing.T, db *sql.DB)
+	batch     func() []*types.Issue
+	opts      storage.BatchCreateOptions
+	apply     func() publicops.ApplyBatchRequest
+}
+
+func scenarios() []scenario {
+	return []scenario{
+		{name: "small", seed: seed, afterSeed: plantStaleBlocked("s4"), batch: batch},
+		{name: "import458-reject-stale", seed: seed458, afterSeed: afterSeed458, batch: batch458,
+			opts: storage.BatchCreateOptions{RejectStaleUpserts: true}},
+		{name: "import458", seed: seed458, afterSeed: afterSeed458, batch: batch458},
+		{name: "apply", seed: seedApply, apply: applyRequest},
+	}
+}
+
+// GoldenDirEnv names the environment variable that switches Run from
+// checking to recording: set to a directory, each scenario's outcome digest
+// is written there instead of compared. The committed digests (golden/) were
+// recorded from the code BEFORE the batch-create fast paths existed
+// (ebe3b6bcb), so the check holds the current code — fast and per-row
+// bodies alike, including changes the fast-path switch does not gate — to
+// what that code stored.
+const GoldenDirEnv = "CREATEBATCHEQUIV_GOLDEN_DIR"
+
+// Run seeds fresh databases, applies each scenario's batch through the fast
+// paths and with them disabled, and fails if the two stored outcomes differ in
+// any compared table, or if they differ from the scenario's golden digest.
 func Run(t *testing.T, open Open) {
 	t.Helper()
-	fast := apply(t, open, false)
-	perRow := apply(t, open, true)
+	for _, sc := range scenarios() {
+		t.Run(sc.name, func(t *testing.T) {
+			if dir := os.Getenv(GoldenDirEnv); dir != "" {
+				writeGolden(t, dir, sc.name, applyScenario(t, open, sc, false))
+				return
+			}
+			fast := applyScenario(t, open, sc, false)
+			perRow := applyScenario(t, open, sc, true)
+			compareOutcomes(t, fast, perRow)
+			checkGolden(t, sc.name, fast)
+			if sc.apply == nil && (len(perRow.Skipped) == 0 || len(perRow.Tables["events"]) == 0 ||
+				len(perRow.Tables["bd_events_journal"]) == 0 || len(perRow.Tables["issue_versions"]) == 0) {
+				t.Fatalf("scenario exercised nothing: skipped=%d events=%d journal=%d versions=%d", len(perRow.Skipped),
+					len(perRow.Tables["events"]), len(perRow.Tables["bd_events_journal"]), len(perRow.Tables["issue_versions"]))
+			}
+		})
+	}
+}
+
+func compareOutcomes(t *testing.T, fast, perRow Outcome) {
+	t.Helper()
 	for _, table := range sortedKeys(perRow.Tables) {
 		if !reflect.DeepEqual(fast.Tables[table], perRow.Tables[table]) {
 			t.Errorf("%s differs between the fast and per-row bodies:\nfast:    %s\nper-row: %s",
 				table, strings.Join(fast.Tables[table], "\n         "), strings.Join(perRow.Tables[table], "\n         "))
 		}
 	}
-	if !reflect.DeepEqual(fast.Skipped, perRow.Skipped) {
-		t.Errorf("skipped dependencies differ:\nfast:    %v\nper-row: %v", fast.Skipped, perRow.Skipped)
+	for _, f := range []struct {
+		what         string
+		fast, perRow []string
+	}{
+		{"skipped dependencies", fast.Skipped, perRow.Skipped},
+		{"stale rejections", fast.Stale, perRow.Stale},
+		{"changed tables", fast.Changed, perRow.Changed},
+		{"changed child-counter tables", fast.Counter, perRow.Counter},
+	} {
+		if !reflect.DeepEqual(f.fast, f.perRow) {
+			t.Errorf("%s differ:\nfast:    %v\nper-row: %v", f.what, f.fast, f.perRow)
+		}
 	}
-	if !reflect.DeepEqual(fast.Changed, perRow.Changed) {
-		t.Errorf("changed tables differ: fast %v, per-row %v", fast.Changed, perRow.Changed)
+}
+
+// golden is an Outcome reduced to a row count and a digest per table (the
+// full row dumps of the 458-issue scenario run to hundreds of kilobytes); the
+// short lists are kept verbatim.
+type golden struct {
+	Tables  map[string]goldenTable `json:"tables"`
+	Skipped []string               `json:"skipped"`
+	Stale   []string               `json:"stale"`
+	Changed []string               `json:"changed"`
+	Counter []string               `json:"counter"`
+}
+
+type goldenTable struct {
+	Rows   int    `json:"rows"`
+	SHA256 string `json:"sha256"`
+}
+
+var eventUpdatedAtRe = regexp.MustCompile(`\\"updated_at\\":\\"[^\\]*\\"`)
+
+//go:embed golden/*.json
+var goldenFS embed.FS
+
+func digestOf(o Outcome) golden {
+	g := golden{Tables: map[string]goldenTable{}, Skipped: o.Skipped, Stale: o.Stale, Changed: o.Changed, Counter: o.Counter}
+	for table, rows := range o.Tables {
+		sum := sha256.Sum256([]byte(strings.Join(rows, "\n")))
+		g.Tables[table] = goldenTable{Rows: len(rows), SHA256: hex.EncodeToString(sum[:])}
 	}
-	if !reflect.DeepEqual(fast.Counter, perRow.Counter) {
-		t.Errorf("changed child-counter tables differ: fast %v, per-row %v", fast.Counter, perRow.Counter)
+	return g
+}
+
+func writeGolden(t *testing.T, dir, name string, o Outcome) {
+	t.Helper()
+	b, err := json.MarshalIndent(digestOf(o), "", "  ")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(perRow.Skipped) == 0 || len(perRow.Tables["events"]) == 0 ||
-		len(perRow.Tables["bd_events_journal"]) == 0 || len(perRow.Tables["issue_versions"]) == 0 {
-		t.Fatalf("scenario exercised nothing: skipped=%d events=%d journal=%d versions=%d", len(perRow.Skipped),
-			len(perRow.Tables["events"]), len(perRow.Tables["bd_events_journal"]), len(perRow.Tables["issue_versions"]))
+	if err := os.WriteFile(filepath.Join(dir, name+".json"), append(b, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The full dump beside it, for diffing a future mismatch by hand.
+	full, _ := json.MarshalIndent(o, "", "  ")
+	_ = os.WriteFile(filepath.Join(dir, name+".full.json.txt"), full, 0o600)
+}
+
+func checkGolden(t *testing.T, name string, o Outcome) {
+	t.Helper()
+	b, err := goldenFS.ReadFile("golden/" + name + ".json")
+	if err != nil {
+		t.Fatalf("no golden digest for scenario %q: record one from the pre-fast-path code with %s (see its doc): %v", name, GoldenDirEnv, err)
+	}
+	var want golden
+	if err := json.Unmarshal(b, &want); err != nil {
+		t.Fatalf("golden/%s.json: %v", name, err)
+	}
+	got := digestOf(o)
+	norm := func(s []string) []string {
+		if len(s) == 0 {
+			return nil
+		}
+		return s
+	}
+	for _, table := range sortedKeys(want.Tables) {
+		if got.Tables[table] != want.Tables[table] {
+			t.Errorf("%s: %s differs from the pre-change golden: got %d rows %s, want %d rows %s\n%s",
+				name, table, got.Tables[table].Rows, got.Tables[table].SHA256, want.Tables[table].Rows, want.Tables[table].SHA256,
+				strings.Join(o.Tables[table], "\n"))
+		}
+	}
+	for _, f := range []struct {
+		what      string
+		got, want []string
+	}{
+		{"skipped dependencies", got.Skipped, want.Skipped},
+		{"stale rejections", got.Stale, want.Stale},
+		{"changed tables", got.Changed, want.Changed},
+		{"changed child-counter tables", got.Counter, want.Counter},
+	} {
+		if !reflect.DeepEqual(norm(f.got), norm(f.want)) {
+			t.Errorf("%s: %s differ from the pre-change golden:\ngot:  %v\nwant: %v", name, f.what, f.got, f.want)
+		}
 	}
 }
 
@@ -151,68 +291,115 @@ func batch() []*types.Issue {
 	return out
 }
 
-func apply(t *testing.T, open Open, perRow bool) Outcome {
+func plantStaleBlocked(suffix string) func(t *testing.T, db *sql.DB) {
+	return func(t *testing.T, db *sql.DB) {
+		t.Helper()
+		if _, err := db.Exec("UPDATE issues SET is_blocked = 1 WHERE id = ?", id(suffix)); err != nil {
+			t.Fatalf("plant stale is_blocked: %v", err)
+		}
+	}
+}
+
+func applyScenario(t *testing.T, open Open, sc scenario, perRow bool) Outcome {
 	t.Helper()
 	ctx := context.Background()
 	db := open(t)
-	opts := storage.BatchCreateOptions{SkipPrefixValidation: true}
-	run := func(issues []*types.Issue, opts storage.BatchCreateOptions, journaled bool) issueops.CreateIssuesResult {
+	inTx := func(journaled bool, body func(tx *sql.Tx)) {
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			t.Fatalf("begin: %v", err)
 		}
 		// The batch runs with the events journal and versioned history on,
 		// so the comparison covers the order and content of what they record.
-		defer issueops.ScopeEventsJournalTransaction(tx, journaled)()
-		defer issueops.ScopeVersionedHistoryTransaction(tx, journaled)()
-		result, err := issueops.CreateIssuesInTxWithResult(ctx, tx, issues, "importer", opts)
-		if err != nil {
-			_ = tx.Rollback()
-			t.Fatalf("CreateIssuesInTxWithResult: %v", err)
-		}
+		clearJournal := issueops.ScopeEventsJournalTransaction(tx, journaled)
+		clearVersions := issueops.ScopeVersionedHistoryTransaction(tx, journaled)
+		body(tx)
+		clearVersions()
+		clearJournal()
 		if err := tx.Commit(); err != nil {
 			t.Fatalf("commit: %v", err)
 		}
-		return result
 	}
-	// Seed through the per-row bodies on both sides, so only the batch below
+	// Seed through the per-row bodies on both sides, so only the batch
 	// differs.
 	restore := issueops.DisableCreateFastPathsForTest()
-	run(seed(), opts, false)
-	if _, err := db.ExecContext(ctx, "UPDATE issues SET is_blocked = 1 WHERE id = ?", id("s4")); err != nil {
-		t.Fatalf("plant stale is_blocked: %v", err)
+	inTx(false, func(tx *sql.Tx) {
+		if _, err := issueops.CreateIssuesInTxWithResult(ctx, tx, sc.seed(), "importer", storage.BatchCreateOptions{SkipPrefixValidation: true}); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("seed: %v", err)
+		}
+	})
+	if sc.afterSeed != nil {
+		sc.afterSeed(t, db)
 	}
 	if !perRow {
 		restore()
 	}
 	var out Outcome
-	opts.SkipDependencyValidationErrors = true
-	opts.OnSkippedDependency = func(issueID, dependsOnID, reason string) {
-		out.Skipped = append(out.Skipped, issueID+" -> "+dependsOnID+": "+reason)
-	}
-	result := run(batch(), opts, true)
+	inTx(true, func(tx *sql.Tx) {
+		if sc.apply != nil {
+			plan, err := storage.PlanApplyBatch(sc.apply())
+			if err != nil {
+				t.Fatalf("plan apply batch: %v", err)
+			}
+			result, write, err := issueops.ApplyBatchInTx(ctx, tx, plan)
+			if err != nil {
+				_ = tx.Rollback()
+				t.Fatalf("ApplyBatchInTx: %v", err)
+			}
+			out.Changed = sortedKeys(write.Tables)
+			for _, item := range result.Items {
+				out.Skipped = append(out.Skipped, fmt.Sprintf("%s %s changed=%v", item.Kind, item.IssueID, item.Changed))
+			}
+			return
+		}
+		opts := sc.opts
+		opts.SkipPrefixValidation = true
+		opts.SkipDependencyValidationErrors = true
+		opts.OnSkippedDependency = func(issueID, dependsOnID, reason string) {
+			out.Skipped = append(out.Skipped, issueID+" -> "+dependsOnID+": "+reason)
+		}
+		opts.OnStaleRejected = func(issueID string) { out.Stale = append(out.Stale, issueID) }
+		result, err := issueops.CreateIssuesInTxWithResult(ctx, tx, sc.batch(), "importer", opts)
+		if err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("CreateIssuesInTxWithResult: %v", err)
+		}
+		out.Changed = sortedKeys(result.ChangedTables)
+		out.Counter = sortedKeys(result.ChangedChildCounterTables)
+	})
 	if perRow {
 		restore()
 	}
-	out.Changed = sortedKeys(result.ChangedTables)
-	out.Counter = sortedKeys(result.ChangedChildCounterTables)
 	out.Tables = map[string][]string{}
 	for table, query := range map[string]string{
-		"issues":            "SELECT id, title, status, priority, is_blocked, content_hash FROM issues",
-		"wisps":             "SELECT id, title, status, priority, is_blocked, content_hash FROM wisps",
+		"issues": "SELECT id, title, status, priority, is_blocked, content_hash, assignee FROM issues",
+		"wisps":  "SELECT id, title, status, priority, is_blocked, content_hash FROM wisps",
+		// updated_at is wall clock on rows the batch creates without a
+		// timestamp (apply), so only rows the scenarios stamp are compared.
+		"issues_updated_at": "SELECT id, DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') FROM issues WHERE id LIKE 'eq-%' AND updated_at < '2026-06-01'",
 		"labels":            "SELECT issue_id, label FROM labels",
 		"wisp_labels":       "SELECT issue_id, label FROM wisp_labels",
-		"dependencies":      "SELECT issue_id, " + issueops.DepTargetExpr + ", type, created_by, metadata FROM dependencies",
-		"wisp_dependencies": "SELECT issue_id, " + issueops.DepTargetExpr + ", type, created_by, metadata FROM wisp_dependencies",
+		"dependencies":      "SELECT id, issue_id, " + issueops.DepTargetExpr + ", type, created_by, metadata FROM dependencies",
+		"wisp_dependencies": "SELECT id, issue_id, " + issueops.DepTargetExpr + ", type, created_by, metadata FROM wisp_dependencies",
 		// created_at is wall clock (and so is every id derived from it); the
 		// rest of the row, with multiplicity, is the comparable content.
 		"events":         "SELECT issue_id, event_type, actor, old_value, new_value, comment FROM events",
 		"wisp_events":    "SELECT issue_id, event_type, actor, old_value, new_value, comment FROM wisp_events",
+		"events_ids":     "SELECT COUNT(*), COUNT(DISTINCT id) FROM events",
 		"comments":       "SELECT id, issue_id, author, text FROM comments",
 		"child_counters": "SELECT parent_id, last_child FROM child_counters",
 		"issue_versions": "SELECT issue_id, revision, change_actor FROM issue_versions",
 	} {
 		out.Tables[table] = rowsOf(t, db, query)
+	}
+	// An update event's old_value snapshots the row, wall-clock updated_at
+	// included.
+	for _, table := range []string{"events", "wisp_events"} {
+		for i, row := range out.Tables[table] {
+			out.Tables[table][i] = eventUpdatedAtRe.ReplaceAllString(row, `updated_at:*`)
+		}
+		sort.Strings(out.Tables[table])
 	}
 	// The journal is an ordered log: compare it in seq order, with each
 	// snapshot reduced to the fields a create decides (row_lock and other
@@ -241,7 +428,7 @@ func journalRows(t *testing.T, db *sql.DB) []string {
 			if err := json.Unmarshal([]byte(issueJSON.String), &issue); err != nil {
 				t.Fatalf("decode journal snapshot: %v", err)
 			}
-			snapshot = fmt.Sprintf("%s|%s|%s|blocked=%v|labels=%v", issue.ID, issue.Title, issue.Status, issue.IsBlocked, issue.Labels)
+			snapshot = fmt.Sprintf("%s|%s|%s|blocked=%v|labels=%v|deps=%d", issue.ID, issue.Title, issue.Status, issue.IsBlocked, issue.Labels, len(issue.Dependencies))
 		}
 		out = append(out, fmt.Sprintf("%s %s %s %s dep=%s comment=%v", op, issueID, actor, snapshot, depJSON.String, commentJSON.Valid))
 	}

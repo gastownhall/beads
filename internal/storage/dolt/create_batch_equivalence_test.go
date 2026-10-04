@@ -16,6 +16,11 @@ func TestCreateBatchFastPathsMatchPerRow_Dolt(t *testing.T) {
 	createbatchequiv.Run(t, func(t *testing.T) *sql.DB {
 		store, cleanup := setupConcurrentTestStore(t)
 		t.Cleanup(cleanup)
+		// Generated ids carry the configured prefix; match the embedded
+		// fixture's so both engines reproduce the same golden digests.
+		if err := store.SetConfig(t.Context(), "issue_prefix", createbatchequiv.Prefix); err != nil {
+			t.Fatalf("set issue_prefix: %v", err)
+		}
 		db, closeDB, err := openCountedDoltConn(store.connStr, &sqlcount.Counts{})
 		if err != nil {
 			t.Fatalf("openCountedDoltConn: %v", err)
