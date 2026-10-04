@@ -17,6 +17,7 @@ go_test(
         "backends_test.go",
         "classification_deregister_test.go",
         "classification_test.go",
+        "open_with_test.go",
     ],
     deps = [
         ":backends",
