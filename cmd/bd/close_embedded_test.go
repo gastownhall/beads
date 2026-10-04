@@ -60,8 +60,8 @@ func bdDepAdd(t *testing.T, bd, dir string, args ...string) {
 
 // TestEmbeddedCloseBasic was split from TestEmbeddedClose (originally ~404s,
 // measured under --config=embedded) into 3 top-level tests over disjoint
-// subtest groups, for CI shard balance (see ~/beads-bazel-plan/f1/impl-report.md,
-// bead bd-f1shard). Every original subtest is preserved exactly once.
+// subtest groups, for CI shard balance (see scripts/ci/embedded_cmd_test_durations.json and
+// engdocs/TESTING.md). Every original subtest is preserved exactly once.
 func TestEmbeddedCloseBasic(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -270,7 +270,7 @@ func TestEmbeddedCloseBasic(t *testing.T) {
 // TestEmbeddedCloseGuardsAndEpics was split from TestEmbeddedClose (originally
 // ~404s, measured under --config=embedded) into 3 top-level tests over
 // disjoint subtest groups, for CI shard balance (see
-// ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
 // subtest is preserved exactly once.
 func TestEmbeddedCloseGuardsAndEpics(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
@@ -394,7 +394,7 @@ func TestEmbeddedCloseGuardsAndEpics(t *testing.T) {
 // TestEmbeddedCloseAlreadyClosed was split from TestEmbeddedClose (originally
 // ~404s, measured under --config=embedded) into 3 top-level tests over
 // disjoint subtest groups, for CI shard balance (see
-// ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
 // subtest is preserved exactly once.
 func TestEmbeddedCloseAlreadyClosed(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
@@ -624,6 +624,14 @@ func TestEmbeddedCloseAlreadyClosed(t *testing.T) {
 // TestEmbeddedCloseConcurrent exercises create, close, and list operations
 // concurrently to verify EmbeddedDoltStore handles concurrent CLI invocations
 // without panics, data corruption, or deadlocks.
+//
+// issuesPerWorker was 5 (F1 review S1): under real CI-like load this
+// measured ~324s for the same reason documented on
+// TestEmbeddedUpdateConcurrent above (genuine serialized-write contention,
+// not a queueing-delay artifact). issuesPerWorker=2 preserves the same
+// invariants (duplicate-ID detection across all numWorkers concurrent
+// processes, one non-decreasing-list-count check per worker) at 40% of the
+// serialized work.
 func TestEmbeddedCloseConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -635,7 +643,7 @@ func TestEmbeddedCloseConcurrent(t *testing.T) {
 
 	const (
 		numWorkers      = 10
-		issuesPerWorker = 5
+		issuesPerWorker = 2
 	)
 
 	type workerResult struct {

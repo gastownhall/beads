@@ -116,7 +116,7 @@ func bdShowFail2(t *testing.T, bd, dir string, args ...string) string {
 // TestEmbeddedShowBasicsAndJSON was split from TestEmbeddedShow (originally
 // ~193s, measured under --config=embedded) into 2 top-level tests over
 // disjoint subtest groups, for CI shard balance (see
-// ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
 // subtest is preserved exactly once. show_current_fallback_to_last_touched
 // (in the second group) only requires that SOME earlier subtest in its own
 // group already created/touched an issue in the shared dir — it is placed

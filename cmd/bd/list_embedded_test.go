@@ -180,7 +180,7 @@ type testSeedData struct {
 // TestEmbeddedListFiltering and TestEmbeddedListSearchAndOutput were split
 // from TestEmbeddedList (originally ~298s, measured under --config=embedded)
 // into 2 top-level tests over disjoint subtest groups, for CI shard balance
-// (see ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// (see scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
 // subtest is preserved exactly once.
 func TestEmbeddedListFiltering(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {

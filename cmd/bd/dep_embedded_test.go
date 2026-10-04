@@ -100,7 +100,7 @@ func bdDepWithInputFail(t *testing.T, bd, dir, input string, args ...string) str
 // TestEmbeddedDepA and TestEmbeddedDepB were split from TestEmbeddedDep
 // (originally ~317s, measured under --config=embedded) into 2 top-level
 // tests over disjoint subtest groups, for CI shard balance (see
-// ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
 // subtest is preserved exactly once. The "list_*" subtests (which assert on
 // dependencies added by "add_positional_args" / "add_type_parent_child")
 // stay grouped with the "add_*" cluster in TestEmbeddedDepA rather than a
@@ -313,11 +313,19 @@ func TestEmbeddedDepB(t *testing.T) {
 	// Pre-create issues for dependency testing.
 	_ = bdCreate(t, bd, dir, "Dep issue A", "--type", "task")
 	_ = bdCreate(t, bd, dir, "Dep issue B", "--type", "task")
-	_ = bdCreate(t, bd, dir, "Dep issue C", "--type", "task")
-	_ = bdCreate(t, bd, dir, "Dep issue D", "--type", "task")
+	issueC := bdCreate(t, bd, dir, "Dep issue C", "--type", "task")
+	issueD := bdCreate(t, bd, dir, "Dep issue D", "--type", "task")
 	epic := bdCreate(t, bd, dir, "Dep epic", "--type", "epic")
 	child1 := bdCreate(t, bd, dir, "Dep child 1", "--type", "task")
-	_ = bdCreate(t, bd, dir, "Dep child 2", "--type", "task")
+	child2 := bdCreate(t, bd, dir, "Dep child 2", "--type", "task")
+
+	// Wire up the same parent-child/blocks edges TestEmbeddedDepA builds, so
+	// the tree_* subtests below exercise real multi-node traversal instead of
+	// rendering isolated single-node trees (see review S2: these subtests
+	// previously passed vacuously against an edgeless graph).
+	bdDep(t, bd, dir, "add", child1.ID, epic.ID, "--type", "parent-child")
+	bdDep(t, bd, dir, "add", child2.ID, epic.ID, "--type", "parent-child")
+	bdDep(t, bd, dir, "add", issueC.ID, issueD.ID)
 
 	// ===== dep remove =====
 

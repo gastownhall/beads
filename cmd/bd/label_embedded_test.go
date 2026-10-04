@@ -102,7 +102,7 @@ func bdLabelListAllJSON(t *testing.T, bd, dir string) []map[string]interface{} {
 // TestEmbeddedLabelAddRemove was split from TestEmbeddedLabel (originally
 // ~360s, measured under --config=embedded) into 3 top-level tests over
 // disjoint subtest groups, for CI shard balance (see
-// ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
 // subtest is preserved exactly once.
 func TestEmbeddedLabelAddRemove(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
@@ -352,7 +352,7 @@ func TestEmbeddedLabelAddRemove(t *testing.T) {
 // TestEmbeddedLabelEditReports was split from TestEmbeddedLabel (originally
 // ~360s, measured under --config=embedded) into 3 top-level tests over
 // disjoint subtest groups, for CI shard balance (see
-// ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
 // subtest is preserved exactly once.
 func TestEmbeddedLabelEditReports(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
@@ -619,7 +619,7 @@ func TestEmbeddedLabelEditReports(t *testing.T) {
 // TestEmbeddedLabelPropagateRename was split from TestEmbeddedLabel
 // (originally ~360s, measured under --config=embedded) into 3 top-level
 // tests over disjoint subtest groups, for CI shard balance (see
-// ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
 // subtest is preserved exactly once.
 func TestEmbeddedLabelPropagateRename(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {

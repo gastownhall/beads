@@ -21,7 +21,7 @@ import (
 // TestEmbeddedCreateStorageClassBasic was split from TestEmbeddedCreateStorageClass
 // (originally ~356s, measured under --config=embedded) into 3 top-level tests
 // over disjoint subtest groups, for CI shard balance (see
-// ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
 // subtest is preserved exactly once.
 func TestEmbeddedCreateStorageClassBasic(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
@@ -120,8 +120,8 @@ func TestEmbeddedCreateStorageClassBasic(t *testing.T) {
 // TestEmbeddedCreateStorageClassConflicts was split from
 // TestEmbeddedCreateStorageClass (originally ~356s, measured under
 // --config=embedded) into 3 top-level tests over disjoint subtest groups,
-// for CI shard balance (see ~/beads-bazel-plan/f1/impl-report.md, bead
-// bd-f1shard). Every original subtest is preserved exactly once.
+// for CI shard balance (see scripts/ci/embedded_cmd_test_durations.json and
+// engdocs/TESTING.md). Every original subtest is preserved exactly once.
 func TestEmbeddedCreateStorageClassConflicts(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
@@ -210,8 +210,8 @@ func TestEmbeddedCreateStorageClassConflicts(t *testing.T) {
 // TestEmbeddedCreateStorageClassBatchAndMisc was split from
 // TestEmbeddedCreateStorageClass (originally ~356s, measured under
 // --config=embedded) into 3 top-level tests over disjoint subtest groups,
-// for CI shard balance (see ~/beads-bazel-plan/f1/impl-report.md, bead
-// bd-f1shard). Every original subtest is preserved exactly once.
+// for CI shard balance (see scripts/ci/embedded_cmd_test_durations.json and
+// engdocs/TESTING.md). Every original subtest is preserved exactly once.
 func TestEmbeddedCreateStorageClassBatchAndMisc(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")

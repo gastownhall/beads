@@ -332,7 +332,7 @@ func requireNoFile(t *testing.T, path string) {
 // TestEmbeddedInitA, TestEmbeddedInitB, and TestEmbeddedInitC were split from
 // TestEmbeddedInit (originally ~356s, measured under --config=embedded) into
 // 3 top-level tests over disjoint subtest groups, for CI shard balance (see
-// ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
 // subtest is preserved exactly once.
 func TestEmbeddedInitA(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {

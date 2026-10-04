@@ -49,7 +49,7 @@ func createAndClose(t *testing.T, bd, dir, title string) string {
 // TestEmbeddedPruneSafetyAndScope was split from TestEmbeddedPrune
 // (originally ~256.67s, measured under --config=embedded) into 2 top-level
 // tests over disjoint subtest groups, for CI shard balance (see
-// ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
 // subtest is preserved exactly once.
 func TestEmbeddedPruneSafetyAndScope(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
@@ -155,7 +155,7 @@ func TestEmbeddedPruneSafetyAndScope(t *testing.T) {
 // TestEmbeddedPruneDryRunAndFilters was split from TestEmbeddedPrune
 // (originally ~256.67s, measured under --config=embedded) into 2 top-level
 // tests over disjoint subtest groups, for CI shard balance (see
-// ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
 // subtest is preserved exactly once.
 func TestEmbeddedPruneDryRunAndFilters(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {

@@ -55,7 +55,7 @@ func seedReadyIssues(t *testing.T, bd, dir string, n int) []string {
 // doctor family (lint, doctor --check=conventions, doctor --check=pollution),
 // and config show emission of BEADS_MAX_ROWS.
 //
-// bd-f1shard: split into five top-level tests (TestEmbeddedMaxRowsReady,
+// This test was split into five top-level tests (TestEmbeddedMaxRowsReady,
 // TestEmbeddedMaxRowsReadyMerge, TestEmbeddedMaxRowsDepTreeAndDuplicates,
 // TestEmbeddedMaxRowsGraph, TestEmbeddedMaxRowsDoctorAndConfig) below so the
 // Bazel embedded-cmd shard script (a top-level-function-name sharder) can
@@ -63,7 +63,7 @@ func seedReadyIssues(t *testing.T, bd, dir string, n int) []string {
 // instead of pinning it to one. Every t.Run subtest name and body is
 // unchanged from the original single function; only the grouping into
 // separate top-level funcs (each gated and built the same way) changed. See
-// ~/beads-bazel-plan/f1/impl-report.md for the before/after subtest-name
+// scripts/ci/embedded_cmd_test_durations.json for the before/after subtest-name
 // equivalence proof.
 
 // ----------- bd ready -----------
@@ -108,7 +108,7 @@ func TestEmbeddedMaxRowsReady(t *testing.T) {
 	// `bd ready --json` and `bd list --ready --json` route through
 	// GetReadyWorkWithCountsInTx, a separate query path from the plain
 	// `bd ready` above (GetReadyWorkInTx). Mirrors
-	// TestEmbeddedMaxRowsList/Flag_OverCap's --json coverage for `bd list`.
+	// TestEmbeddedMaxRowsListBasic/Flag_OverCap's --json coverage for `bd list`.
 	t.Run("ReadyMaxRowsJSON_FlagOverCap_Exits2", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "mrrjf")
 		seedReadyIssues(t, bd, dir, 6)
@@ -433,7 +433,7 @@ func countListIDs(out, prefix string) int {
 // TestEmbeddedMaxRowsList{Basic,LimitInteraction} were split from
 // TestEmbeddedMaxRowsList (measured ~209.67s under --config=embedded) into 2
 // top-level tests over disjoint subtest groups, for CI shard balance (see
-// ~/beads-bazel-plan/f1/impl-report.md, bead bd-f1shard). Every original
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
 // subtest is preserved exactly once. Both cover the 10 designer §6.1
 // behavioral scenarios for `bd list`. Builder bead: be-x42v.2 (CLI wiring).
 // Each redoes the original's shared rig of 21 open task issues — the
