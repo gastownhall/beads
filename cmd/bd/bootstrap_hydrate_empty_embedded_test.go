@@ -314,9 +314,13 @@ func primeSkeletonForTest(t *testing.T, bd string) (cloneDir, dataDir, dbName st
 	runGitForBootstrapTest(t, "", "clone", remoteURL, cloneDir)
 
 	// Simulate the SessionStart hook: `bd prime` auto-creates the empty skeleton.
+	// Lift prime's 10s store-open deadline: a -race bd (CI's embedded shards)
+	// can need longer to migrate a fresh database, and a prime that gives up
+	// mid-migration leaves dirty, half-migrated tables that every later bd
+	// command refuses to open. The skeleton under test is the migrated one.
 	primeCmd := exec.Command(bd, "prime")
 	primeCmd.Dir = cloneDir
-	primeCmd.Env = bdEnv(cloneDir)
+	primeCmd.Env = append(bdEnv(cloneDir), primeStoreTimeoutEnv+"=5m")
 	_, _ = primeCmd.CombinedOutput() // prime is best-effort; assert its effect next.
 
 	dataDir = filepath.Join(cloneDir, ".beads", "embeddeddolt")
