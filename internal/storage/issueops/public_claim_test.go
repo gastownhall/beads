@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -47,10 +48,9 @@ func claimIssueRow(id, assignee string, status types.Status) *sqlmock.Rows {
 	return issueRows().AddRow(values...)
 }
 
-// expectClaimableRead mocks everything ClaimIssueInTx reads before its
-// conditional UPDATE: the wisp routing probe, the pre-image, and the two
-// config lookups that widen the CAS predicate.
-func expectClaimableRead(mock sqlmock.Sqlmock, id, assignee string, status types.Status) {
+// expectClaimPreImageRead mocks the wisp routing probe and the pre-image read
+// ClaimIssueInTx makes before it looks at the blocked flag.
+func expectClaimPreImageRead(mock sqlmock.Sqlmock, id, assignee string, status types.Status) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps WHERE id = ? LIMIT 1")).
 		WithArgs(id).
 		WillReturnError(sql.ErrNoRows)
@@ -60,6 +60,22 @@ func expectClaimableRead(mock sqlmock.Sqlmock, id, assignee string, status types
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT label FROM labels WHERE issue_id = ? ORDER BY label")).
 		WithArgs(id).
 		WillReturnRows(sqlmock.NewRows([]string{"label"}))
+}
+
+// expectClaimBlockedFlagRead mocks the denormalized is_blocked read that
+// decides whether an unforced claim is refused before the CAS.
+func expectClaimBlockedFlagRead(mock sqlmock.Sqlmock, id string, isBlocked int) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT is_blocked FROM issues WHERE id = ?")).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{"is_blocked"}).AddRow(isBlocked))
+}
+
+// expectClaimableRead mocks everything ClaimIssueInTx reads before its
+// conditional UPDATE: the wisp routing probe, the pre-image, the blocked flag,
+// and the two config lookups that widen the CAS predicate.
+func expectClaimableRead(mock sqlmock.Sqlmock, id, assignee string, status types.Status) {
+	expectClaimPreImageRead(mock, id, assignee, status)
+	expectClaimBlockedFlagRead(mock, id, 0)
 	// One row is enough to make custom-status resolution authoritative, so it
 	// never falls through to the legacy config string.
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT name, category FROM custom_statuses ORDER BY name")).
@@ -342,4 +358,66 @@ func TestExecuteClaimRefusesIncompleteRequestsBeforeAnySQL(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestExecuteClaimRefusesABlockedIssueBeforeTheCAS pins the blocked-issue
+// refusal on the role's door, which never passes through ExecuteUpdate: the
+// guard has to live in ClaimIssueInTx for this door to give the same answer as
+// bd update --claim, and it has to answer before the UPDATE is attempted.
+func TestExecuteClaimRefusesABlockedIssueBeforeTheCAS(t *testing.T) {
+	const id = "bd-1"
+	depEdges := func(mock sqlmock.Sqlmock, rows *sqlmock.Rows) {
+		mock.ExpectQuery(`(?s)SELECT .* FROM dependencies\s+WHERE issue_id = \?`).
+			WithArgs(id).
+			WillReturnRows(rows)
+		mock.ExpectQuery(`(?s)SELECT .* FROM wisp_dependencies\s+WHERE issue_id = \?`).
+			WithArgs(id).
+			WillReturnRows(sqlmock.NewRows([]string{"depends_on_id", "type"}))
+	}
+
+	t.Run("names the live blocker", func(t *testing.T) {
+		_, mock, tx := beginMockTx(t)
+		expectClaimPreImageRead(mock, id, "", types.StatusOpen)
+		expectClaimBlockedFlagRead(mock, id, 1)
+		depEdges(mock, sqlmock.NewRows([]string{"depends_on_id", "type"}).AddRow("bd-2", "blocks"))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT id, status FROM issues WHERE id IN (?)")).
+			WithArgs("bd-2").
+			WillReturnRows(sqlmock.NewRows([]string{"id", "status"}).AddRow("bd-2", string(types.StatusOpen)))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT id, status FROM wisps WHERE id IN (?)")).
+			WithArgs("bd-2").
+			WillReturnRows(sqlmock.NewRows([]string{"id", "status"}))
+
+		_, tables, err := ExecuteClaim(context.Background(), tx, publicops.ClaimRequest{Actor: claimActor, IssueID: id})
+		if !errors.Is(err, storage.ErrClaimBlocked) {
+			t.Fatalf("err = %v, want ErrClaimBlocked", err)
+		}
+		var blocked *publicops.BlockedError
+		if !errors.As(err, &blocked) || len(blocked.Blockers) != 1 || blocked.Blockers[0].ID != "bd-2" {
+			t.Errorf("refusal = %v, want a *BlockedError naming bd-2", err)
+		}
+		if len(tables) != 0 {
+			t.Errorf("a refused claim staged %v", tables)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("a blocked claim reached further than the blocker read: %v", err)
+		}
+	})
+
+	t.Run("inherited block with no live edge", func(t *testing.T) {
+		_, mock, tx := beginMockTx(t)
+		expectClaimPreImageRead(mock, id, "", types.StatusOpen)
+		expectClaimBlockedFlagRead(mock, id, 1)
+		depEdges(mock, sqlmock.NewRows([]string{"depends_on_id", "type"}))
+
+		_, _, err := ExecuteClaim(context.Background(), tx, publicops.ClaimRequest{Actor: claimActor, IssueID: id})
+		if !errors.Is(err, storage.ErrClaimBlocked) {
+			t.Fatalf("err = %v, want ErrClaimBlocked", err)
+		}
+		if msg := err.Error(); !strings.Contains(msg, "inherited from an ancestor") || strings.Contains(msg, "[]") {
+			t.Errorf("message = %q, want the inherited sentence and no empty list", msg)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("a blocked claim reached further than the blocker read: %v", err)
+		}
+	})
 }

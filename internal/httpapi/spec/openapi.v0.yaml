@@ -2769,8 +2769,11 @@ paths:
         '409':
           description: >-
             The issue is held by another actor (`already_claimed`, with the
-            `assignee` extension member) or is not in a claimable state
-            (`not_claimable`, with the `issue_status` extension member).
+            `assignee` extension member), is not in a claimable state
+            (`not_claimable`, with the `issue_status` extension member), or has
+            an open blocker (`not_claimable`, no extension member; `detail`
+            names the blockers, or says the block is inherited from an
+            ancestor, and this operation has no force for them).
           x-bd-codes: [already_claimed, not_claimable]
           content:
             application/problem+json:
@@ -10502,9 +10505,11 @@ components:
             claim pool. Held by `actor` and `in_progress` already is an
             idempotent success. A refusal is `409 already_claimed` or `409
             not_claimable` naming `claim`, and writes nothing — the patch
-            included. With `claim: true` the `patch` may be empty. It must not
-            be combined with `expected_assignee`, `expected_status` or
-            `force_assignee_transfer`; a request that does is a `400` naming
+            included. An issue with an open blocker is `409 not_claimable` as
+            well, the same issue `bd ready` leaves out; `force_close_policy`
+            lifts that one refusal. With `claim: true` the `patch` may be empty.
+            It must not be combined with `expected_assignee`, `expected_status`
+            or `force_assignee_transfer`; a request that does is a `400` naming
             `claim`.
         expected_version:
           type: string
@@ -10555,11 +10560,12 @@ components:
           type: boolean
           default: false
           description: >-
-            Bypasses ONLY close policy — the open-children refusal and the live
-            blocker refusal — for a `patch.status` that crosses into the
-            workspace's done category. It has no effect without such a status
-            change, and it never bypasses validation, the preconditions above,
-            or the assignee fence.
+            Bypasses ONLY the blocked-graph refusals: close policy — the
+            open-children refusal and the live blocker refusal — for a
+            `patch.status` that crosses into the workspace's done category, and
+            the open-blocker refusal for `claim: true`. It has no effect without
+            such a status change or claim, and it never bypasses validation, the
+            preconditions above, or the assignee fence.
         force_assignee_transfer:
           type: boolean
           default: false

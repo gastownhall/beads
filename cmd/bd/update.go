@@ -551,14 +551,18 @@ pointless).`,
 			})
 			if updateErr != nil {
 				failureText := fmt.Sprintf("updating issue: %v", updateErr)
-				if errors.Is(updateErr, issueops.ErrNotesOverwrite) {
+				switch {
+				case errors.Is(updateErr, issueops.ErrNotesOverwrite):
 					// The contract's AuthorizeNotesOverwrite fence refused
 					// inside the mutation transaction. Print the advice, not
 					// the raw sentinel.
 					refusal := errNotesOverwriteRefusal(id)
 					failureText = refusal.Error()
 					fmt.Fprintf(os.Stderr, "%s\n", refusal)
-				} else {
+				case errors.Is(updateErr, issueops.ErrClaimBlocked), errors.Is(updateErr, issueops.ErrCloseBlocked) && !claimFlag:
+					failureText = fmt.Sprintf("%v (use --force to override)", updateErr)
+					fmt.Fprintf(os.Stderr, "%s\n", failureText)
+				default:
 					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, updateErr)
 				}
 				failures = append(failures, updateIDFailure{

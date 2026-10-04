@@ -20,7 +20,11 @@ type InsertIssueOpts struct {
 }
 
 type IssueTableOpts struct {
-	UseWispsTable    bool
+	UseWispsTable bool
+	// ForceClaimPolicy lets Claim take an issue that is still blocked. The zero
+	// value refuses it with storage.ErrClaimBlocked before any write. It is the
+	// repository-side spelling of UpdateSpec.ForceClaimPolicy and lifts nothing
+	// else: the compare-and-set and its anti-steal rule hold either way.
 	ForceClaimPolicy bool
 }
 
@@ -285,8 +289,12 @@ type ClaimReadyResult struct {
 }
 
 type UpdateSpec struct {
-	Fields           map[string]any
-	Claim            bool
+	Fields map[string]any
+	Claim  bool
+	// ForceClaimPolicy lets a Claim take a blocked issue; without it the claim
+	// is refused with storage.ErrClaimBlocked and the whole update writes
+	// nothing. It is fed from UpdateRequest.ForceClosePolicy, so one --force
+	// lifts both the close-policy refusal and the blocked-claim refusal.
 	ForceClaimPolicy bool
 	// ExpectedVersion requires the current row version to match before any
 	// claim or field writes.

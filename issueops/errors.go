@@ -131,6 +131,12 @@ var ErrPrefixMismatch = errors.New("prefix mismatch")
 // or an open blocking gate). Bypass with CloseIssueOptions.Force.
 var ErrCloseBlocked = errors.New("cannot close blocked issue")
 
+// ErrClaimBlocked is returned by an unforced claim of an issue that is still
+// blocked (is_blocked=1: an open blocking dependency, an open blocking gate, or
+// a block inherited from an ancestor). It is the claim-side counterpart of
+// ErrCloseBlocked and keeps a claim by id in step with `bd ready`, which never
+// lists a blocked issue. UpdateRequest.ForceClosePolicy bypasses it; the
+// Claimer role and the storage-interface ClaimIssue have no bypass.
 var ErrClaimBlocked = errors.New("cannot claim blocked issue")
 
 // Blocker is one live blocker named by a BlockedError: a local issue id, or an
@@ -191,29 +197,48 @@ func ParseBlocker(s string) Blocker {
 // refusal elsewhere (the HTTP surface's `blockers` member) reads the typed list
 // instead of parsing that prose.
 //
-// Err is ErrCloseBlocked for a close-policy refusal. The type is not
-// close-specific: any refusal whose subject is "this issue is blocked by these"
-// can carry its own sentinel.
+// Err is ErrCloseBlocked for a close-policy refusal and ErrClaimBlocked for a
+// refused claim. The type is not close-specific: any refusal whose subject is
+// "this issue is blocked by these" can carry its own sentinel.
+//
+// An empty Blockers list is a block with no live direct edge left: is_blocked
+// is set because an ancestor is blocked, or a stale flag awaits its recheck.
+// The message then points the reader at `bd show` instead of printing an empty
+// list.
 type BlockedError struct {
 	// IssueID names the issue that was refused.
 	IssueID string
 	// Blockers are the live blockers, in the order the check reported them.
 	Blockers []Blocker
-	// Err is the wrapped refusal sentinel, e.g. ErrCloseBlocked.
+	// Err is the wrapped refusal sentinel, e.g. ErrCloseBlocked or
+	// ErrClaimBlocked.
 	Err error
 }
 
 // NewCloseBlockedError builds the close-policy refusal for issueID from the
 // []string blocker list a store's IsBlocked reports (see ParseBlocker).
 func NewCloseBlockedError(issueID string, blockers []string) *BlockedError {
+	return newBlockedError(ErrCloseBlocked, issueID, blockers)
+}
+
+// NewClaimBlockedError builds the claim refusal for issueID from the []string
+// blocker list a store's IsBlocked reports (see ParseBlocker).
+func NewClaimBlockedError(issueID string, blockers []string) *BlockedError {
+	return newBlockedError(ErrClaimBlocked, issueID, blockers)
+}
+
+func newBlockedError(sentinel error, issueID string, blockers []string) *BlockedError {
 	parsed := make([]Blocker, 0, len(blockers))
 	for _, blocker := range blockers {
 		parsed = append(parsed, ParseBlocker(blocker))
 	}
-	return &BlockedError{IssueID: issueID, Blockers: parsed, Err: ErrCloseBlocked}
+	return &BlockedError{IssueID: issueID, Blockers: parsed, Err: sentinel}
 }
 
 func (e *BlockedError) Error() string {
+	if len(e.Blockers) == 0 {
+		return fmt.Sprintf("%v: %s is blocked (inherited from an ancestor; see bd show)", e.Err, e.IssueID)
+	}
 	names := make([]string, 0, len(e.Blockers))
 	for _, blocker := range e.Blockers {
 		names = append(names, blocker.String())

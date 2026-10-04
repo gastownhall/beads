@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scripts/check-versions.sh` and `bd preflight` list the three that work: with
   `cmd/bd/version.go` already at the release version, that re-run rewrites only
   the `.githooks` markers and `uv.lock` and leaves any other drifted file as it was.
+- **A claim by id now respects open blockers.** `bd update <id> --claim`
+  refuses an issue with an open `blocks` dependency with
+  `cannot claim blocked issue: <id> is blocked by [<blockers>]` and writes
+  nothing, the same answer `bd ready` gives by leaving the issue out; before,
+  the claim went through and the agent started work the graph said it could
+  not finish. The guard lives in the one claim primitive, so every claim door
+  gives the same answer: `bd update --claim` on the embedded and the proxied
+  path, `POST /issues/{id}/claim` and `PATCH /issues/{id}` with `claim: true`
+  (both `409 not_claimable`), and the storage-level `ClaimIssue`. `--force`
+  (`force_close_policy` over HTTP) overrides it on `bd update`; the claim role
+  and the HTTP claim endpoint have no override. A block inherited from an
+  ancestor with no live direct edge reads
+  `<id> is blocked (inherited from an ancestor; see bd show)`.
 
 ### Fixed
 

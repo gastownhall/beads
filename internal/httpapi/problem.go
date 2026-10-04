@@ -1123,6 +1123,18 @@ func wireBlockers(blockers []issueops.Blocker) *[]apigen.Blocker {
 	return &out
 }
 
+// claimBlockedDetail is the `detail` of a claim refused for an open blocker.
+// The claim role has no force, so the sentence from the typed refusal is the
+// whole answer: it names the live blockers, or says the block is inherited.
+// The `blockers` member is a not_closable member and stays absent here.
+func claimBlockedDetail(err error) string {
+	var blocked *issueops.BlockedError
+	if !errors.As(err, &blocked) || !errors.Is(blocked.Err, issueops.ErrClaimBlocked) {
+		return "issue is blocked by an open dependency"
+	}
+	return blocked.Error()
+}
+
 // closeBlockedResult is closeBlocked as a problem document: the live-blocker
 // `not_closable` with its `blockers` member when the refusal named them.
 func closeBlockedResult(err error, subject, hint string) Result {
@@ -1461,6 +1473,9 @@ func ClassifyError(err error) Result {
 
 	case errors.Is(err, storage.ErrNotClaimable):
 		return newResult(CodeNotClaimable, "issue is not in a claimable state")
+
+	case errors.Is(err, issueops.ErrClaimBlocked):
+		return newResult(CodeNotClaimable, claimBlockedDetail(err))
 
 	// The two close-policy refusals share one code. They are the same statement
 	// to a client — the close was refused for the state of the graph around

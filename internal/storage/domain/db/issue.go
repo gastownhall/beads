@@ -422,7 +422,7 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 			return domain.ClaimRowResult{}, err
 		}
 		if blocked {
-			return domain.ClaimRowResult{}, fmt.Errorf("%w: %s is blocked by %v", storage.ErrClaimBlocked, id, blockers)
+			return domain.ClaimRowResult{}, publicops.NewClaimBlockedError(id, blockers)
 		}
 	}
 

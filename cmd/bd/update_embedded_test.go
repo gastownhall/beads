@@ -646,6 +646,9 @@ func TestEmbeddedUpdate(t *testing.T) {
 		if !strings.Contains(out, blocker.ID) {
 			t.Errorf("expected claim guard message to name blocker %s, got: %s", blocker.ID, out)
 		}
+		if !strings.Contains(out, "use --force to override") {
+			t.Errorf("expected the --force hint on the embedded path too, got: %s", out)
+		}
 
 		got := bdShow(t, bd, dir, blocked.ID)
 		if got.Status != types.StatusOpen || got.Assignee != "" {
