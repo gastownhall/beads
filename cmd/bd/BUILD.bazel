@@ -557,6 +557,7 @@ go_test(
         "close_proxied_integration_test.go",
         "close_reason_file_test.go",
         "close_routing_test.go",
+        "cobra_flag_reset_test.go",
         "codex_hook_test.go",
         "command_telemetry_test.go",
         "comment_promote_embedded_test.go",

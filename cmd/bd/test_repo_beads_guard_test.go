@@ -244,6 +244,11 @@ func testMainInner(m *testing.M) int {
 	// Also reset viper state that was loaded by main.go's init().
 	config.ResetForTesting()
 
+	// Record every flag's registered state before any test executes a
+	// command, so in-process runners can put the tree back between runs
+	// (resetCommandFlags).
+	snapshotCommandFlags(rootCmd)
+
 	// Enable test mode that forces accessor functions to use legacy globals.
 	// This ensures backward compatibility with tests that manipulate globals directly.
 	enableTestModeGlobals()
