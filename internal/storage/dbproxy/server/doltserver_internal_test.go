@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/procid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -185,5 +186,115 @@ func TestUseRuntimePort_CopiesRawText(t *testing.T) {
 	require.NoError(t, err)
 	if runtime.GOOS != "windows" {
 		assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	}
+}
+
+// newScriptDoltServer builds a DoltServer whose dolt is a shell script that
+// answers `config`/`init` and runs sqlServer (shell) for `sql-server`, with
+// $port set to the --config file's listener.port. Shell scripts start in
+// milliseconds, unlike the fake-mode test binary, which is what the
+// fast-exit cases need.
+func newScriptDoltServer(t *testing.T, sqlServer string) *DoltServer {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("stand-in dolt is a shell script")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "dolt")
+	script := "#!/bin/sh\ncase \"$1\" in\nconfig) echo fake; exit 0 ;;\ninit) exit 0 ;;\nsql-server)\n" +
+		"  port=$(sed -n 's/^ *port: *\\([0-9][0-9]*\\).*/\\1/p' \"$3\" | head -n 1)\n" +
+		sqlServer + "\n ;;\nesac\nexit 2\n"
+	require.NoError(t, os.WriteFile(bin, []byte(script), 0o755))
+	cfg := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(cfg, []byte(fmt.Sprintf("log_level: info\nlistener:\n  host: 127.0.0.1\n  port: %d\n", freeTestPort(t))), 0o600))
+	root := filepath.Join(dir, "root")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	s, err := NewDoltServer(bin, root, cfg, filepath.Join(dir, "server.log"), 0, "")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = s.Stop(ctx)
+	})
+	return s
+}
+
+// captureAfterChildGone makes the birth-identity capture lose the race the
+// way a real fast-exiting dolt can: it waits long enough for the stand-in
+// to have exited, then fails as procid does for a dead pid.
+func captureAfterChildGone(t *testing.T) {
+	t.Helper()
+	old := captureBirth
+	captureBirth = func(pid int) (procid.Token, error) {
+		time.Sleep(300 * time.Millisecond)
+		return "", fmt.Errorf("procid: process is no longer running: no such process")
+	}
+	t.Cleanup(func() { captureBirth = old })
+}
+
+// TestDoltServer_Start_FastPortInUseExitBeatsIdentityCapture pins that a
+// child which reports its port taken and exits before Start captured its
+// identity is still classified as ErrPortInUse (and so still recoverable),
+// not reported as a fatal identity-capture failure.
+func TestDoltServer_Start_FastPortInUseExitBeatsIdentityCapture(t *testing.T) {
+	captureAfterChildGone(t)
+	s := newScriptDoltServer(t, `  echo "Port $port already in use." >&2; exit 1`)
+	err := s.Start(context.Background())
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrPortInUse), "got %v", err)
+	assert.NotContains(t, err.Error(), "capture child birth identity")
+
+	// With a policy, every move hits the same fast exit and Start keeps
+	// recovering until its port budget runs out.
+	s2 := newScriptDoltServer(t, `  echo "Port $port already in use." >&2; exit 1`)
+	s2.SetPortConflictPolicy(func(string, int) error { return nil })
+	err = s2.Start(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), fmt.Sprintf("gave up after %d ports", maxStartPortAttempts))
+}
+
+// TestDoltServer_Start_FastOtherExitBeatsIdentityCapture: a child that exits
+// on its own for another reason is reported as having exited, with its
+// status, not as an identity-capture failure.
+func TestDoltServer_Start_FastOtherExitBeatsIdentityCapture(t *testing.T) {
+	captureAfterChildGone(t)
+	s := newScriptDoltServer(t, `  echo "some other startup failure" >&2; exit 3`)
+	err := s.Start(context.Background())
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, ErrPortInUse), "got %v", err)
+	assert.Contains(t, err.Error(), "exited (status 3) before startup completed")
+}
+
+// TestDoltServer_Start_IdentityCaptureFailsWhileChildAlive: when the child is
+// alive and the capture fails anyway, that failure is fatal, and the child is
+// killed rather than left running.
+func TestDoltServer_Start_IdentityCaptureFailsWhileChildAlive(t *testing.T) {
+	old := captureBirth
+	captureBirth = func(int) (procid.Token, error) { return "", errors.New("capture broke") }
+	t.Cleanup(func() { captureBirth = old })
+
+	s := newScriptDoltServer(t, `  exec sleep 30`)
+	done := make(chan error, 1)
+	go func() { done <- s.Start(context.Background()) }()
+	select {
+	case err := <-done:
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, ErrPortInUse), "got %v", err)
+		assert.Contains(t, err.Error(), "capture child birth identity: capture broke")
+	case <-time.After(20 * time.Second):
+		t.Fatal("Start did not return: the live child was not killed")
+	}
+	assert.False(t, s.Running(context.Background()))
+}
+
+// TestDoltServer_Start_ImmediateExitRealCapture is the same fast port-in-use
+// exit with the real identity capture: whichever of the capture and the
+// child's exit wins, the result is ErrPortInUse.
+func TestDoltServer_Start_ImmediateExitRealCapture(t *testing.T) {
+	for i := 0; i < 10; i++ {
+		s := newScriptDoltServer(t, `  echo "Port $port already in use." >&2; exit 1`)
+		err := s.Start(context.Background())
+		require.Error(t, err)
+		require.True(t, errors.Is(err, ErrPortInUse), "attempt %d: got %v", i, err)
 	}
 }

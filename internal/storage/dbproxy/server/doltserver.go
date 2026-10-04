@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -106,6 +107,18 @@ func doltPortInUseTexts(port int) [][]byte {
 		[]byte(fmt.Sprintf(":%d: bind: address already in use", port)),
 		[]byte(fmt.Sprintf(":%d: bind: Only one usage of each socket address", port)),
 	}
+}
+
+// captureBirth is procid.Capture; tests replace it to make the capture lose
+// the race with a child that exits at once.
+var captureBirth = procid.Capture
+
+// exitedOnItsOwn reports whether a reaped child ended by itself rather than
+// by the Kill failSpawn sends. A killed child reports exit code -1 on unix;
+// Windows reports an ordinary code for a killed process, so there an exit
+// cannot be told from a kill and this reports false.
+func exitedOnItsOwn(ps *os.ProcessState) bool {
+	return ps != nil && runtime.GOOS != "windows" && ps.ExitCode() >= 0
 }
 
 // pickFreePort returns a loopback port that was free a moment ago. Tests
@@ -390,11 +403,11 @@ func (s *DoltServer) useRuntimePort(inUse int) error {
 			return fmt.Errorf("pick free port: %w", err)
 		}
 	}
-	runtime := *yc
-	runtime.ListenerConfig.PortNumber = &port
+	rcfg := *yc
+	rcfg.ListenerConfig.PortNumber = &port
 	body := []byte("# Written by Beads: " + s.configPath + " with listener.port moved to a free port for this run\n" +
 		"# because another process held " + strconv.Itoa(inUse) + ". Removed when the server stops; edit the file above, not this one.\n" +
-		runtime.String())
+		rcfg.String())
 	cfg, err := servercfg.NewYamlConfig(body)
 	if err != nil {
 		return fmt.Errorf("render runtime config: %w", err)
@@ -499,23 +512,40 @@ func (s *DoltServer) startAttempt(ctx context.Context, prepare bool) error {
 	}
 
 	s.pid = cmd.Process.Pid
-	birth, err := procid.Capture(s.pid)
-	if err != nil {
+	// failSpawn tears down a child that Start gave up on before handing it
+	// to the supervising goroutine. A dolt sql-server that finds its port
+	// taken can exit within milliseconds, before the identity capture or
+	// pid record below gets to it, and then those steps fail only because
+	// the child is already gone. So once the child is reaped (cmd.Wait also
+	// drains its output into the watcher), its own exit decides the error:
+	// ErrPortInUse when it reported its port taken, so Start's normal
+	// recovery runs; "exited before ready" when it exited by itself; the
+	// step's error only when the child was still alive and we killed it.
+	failSpawn := func(step string, stepErr error) error {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		s.eg, s.egCtx, s.cancel, s.pid = nil, nil, nil, 0
+		s.eg, s.egCtx, s.cancel = nil, nil, nil
 		cancel()
 		lock.Unlock()
-		return fmt.Errorf("server: DoltServer.Start: capture child birth identity: %w", err)
+		if watch.sawPortInUse() {
+			s.pid = 0
+			return fmt.Errorf("server: DoltServer.Start: %w", s.exitedBeforeReady(watch))
+		}
+		if exitedOnItsOwn(cmd.ProcessState) {
+			code := cmd.ProcessState.ExitCode()
+			s.pid = 0
+			return fmt.Errorf("server: DoltServer.Start: dolt sql-server exited (status %d) before startup completed (%s: %v)", code, step, stepErr)
+		}
+		s.pid = 0
+		return fmt.Errorf("server: DoltServer.Start: %s: %w", step, stepErr)
+	}
+	birth, err := captureBirth(s.pid)
+	if err != nil {
+		return failSpawn("capture child birth identity", err)
 	}
 	rootID, err := identity.RootID(s.rootDir)
 	if err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		s.eg, s.egCtx, s.cancel, s.pid = nil, nil, nil, 0
-		cancel()
-		lock.Unlock()
-		return fmt.Errorf("server: DoltServer.Start: resolve proxy root identity: %w", err)
+		return failSpawn("resolve proxy root identity", err)
 	}
 
 	if err := pidfile.Write(s.rootDir, PIDFileName, pidfile.PidFile{
@@ -526,12 +556,7 @@ func (s *DoltServer) startAttempt(ctx context.Context, prepare bool) error {
 		Birth:  string(birth),
 		RootID: rootID,
 	}); err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		s.eg, s.egCtx, s.cancel, s.pid = nil, nil, nil, 0
-		cancel()
-		lock.Unlock()
-		return fmt.Errorf("server: DoltServer.Start: write pidfile: %w", err)
+		return failSpawn("write pidfile", err)
 	}
 
 	eg.Go(func() error {
