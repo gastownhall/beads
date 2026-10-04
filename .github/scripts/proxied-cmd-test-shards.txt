@@ -28,6 +28,12 @@
 # incremental --write keeps pinned lines where they are; a pin is a
 # reviewed choice, not a regeneration of this block.
 #
+# TestProxiedServerOutageReconnectAcceptanceMatrix is pinned to shard 1
+# (the lightest in recent Main runs, ~6.5 min) instead of hashing onto
+# shard 14, which already runs ~13.5 min of the 15m timeout. These jobs
+# have no socat, so today it skips here; the pin keeps shard 14 safe if
+# socat is ever installed.
+#
 # This file is generated: notes added here are erased by the next
 # regeneration. Add them to the generator instead. Known blind spots
 # of the cost proxy (it counts inits, not the work done per init):
@@ -51,6 +57,7 @@
 15 1 TestProxiedServerDepConcurrent
 15 1 TestProxiedServerListSortRetiresTheWalk
 15 1 TestProxiedServerMolLastActivity
+15 1 TestProxiedServerOutageReconnectAcceptanceMatrix
 15 1 TestProxiedServerReopenConcurrent
 15 1 TestProxiedServerServeReadParity
 15 1 TestProxiedServerServeRefusesAStreamOnADisabledJournal
@@ -289,7 +296,6 @@
 30 7 TestProxiedServerUpdate
 
 30 8 TestProxiedServerInitIfMissing
-30 8 TestProxiedServerOutageReconnectAcceptanceMatrix
 30 8 TestProxiedServerPathHelpers
 30 8 TestProxiedServerReopenConcurrent
 30 8 TestProxiedServerShow2
@@ -310,6 +316,7 @@
 30 10 TestProxiedServerServeEdgeCounts
 
 30 11 TestProxiedServerBatchDefersThenDoltCommitAdvancesHeadOnce
+30 11 TestProxiedServerOutageReconnectAcceptanceMatrix
 30 11 TestProxiedServerReady2
 30 11 TestProxiedServerServeReadsTheJournalItJustWrote
 30 11 TestProxiedServerServeRefusesTheJournalWhenItIsDisabled

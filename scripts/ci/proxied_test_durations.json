@@ -49,9 +49,16 @@
     "//cmd/bd:bd_proxied_test --build_event_json_file=<path>` sweep, then pull",
     "each shard's bazel-testlogs test.xml <testsuite time> per top-level test --",
     "not from downloaded CI artifacts -- so the parallel=4, CI-representative",
-    "methodology above is applied consistently."
+    "methodology above is applied consistently.",
+    "",
+    "Added after that sweep: TestProxiedServerOutageReconnectAcceptanceMatrix (80.0,",
+    "renamed into the discovery pattern once its outage bound was fixed). Not a",
+    "single sweep's value: local --config=doltserver-proxied runs measured it at",
+    "55-79 s alone, 60-70 s inside its shard, and a reviewer's 68-109 s under load;",
+    "80 s is a rounded middle of that spread. seconds_per_init_fallback was",
+    "recomputed to include it."
   ],
-  "seconds_per_init_fallback": 17.1946,
+  "seconds_per_init_fallback": 17.2952,
   "tests": {
     "TestProxiedServerAssign": 38.67,
     "TestProxiedServerAutoPrune": 67.5,
@@ -142,6 +149,7 @@
     "TestProxiedServerMultiStatementSQL": 6.76,
     "TestProxiedServerNote": 11.21,
     "TestProxiedServerOrphans": 12.11,
+    "TestProxiedServerOutageReconnectAcceptanceMatrix": 80.0,
     "TestProxiedServerPathHelpers": 0.0,
     "TestProxiedServerPing": 11.73,
     "TestProxiedServerPour": 253.65,

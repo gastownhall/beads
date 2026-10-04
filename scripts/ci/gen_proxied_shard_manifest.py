@@ -217,7 +217,9 @@ def render(total, shards, weights):
         out.append('# Oct 2026 for TestProxiedServerStorageClass,')
         out.append('# TestProxiedServerServeRefusesAStaleCheckpointWithGone,')
         out.append('# TestProxiedServerListComments and')
-        out.append('# TestProxiedServerServeRefusesAStreamOnADisabledJournal).')
+        out.append('# TestProxiedServerServeRefusesAStreamOnADisabledJournal; and for')
+        out.append('# TestProxiedServerOutageReconnectAcceptanceMatrix, pinned to shard 1')
+        out.append('# instead of hashing onto shard 14).')
     else:
         out.append(f'# {total}-shard split for the Bazel-only proxied-server tier')
         out.append('# (bazel-proxied in .github/workflows/bazel.yml), bin-packed')
