@@ -77,6 +77,8 @@ var ErrPortInUse = errors.New("dolt sql-server listener port is already in use")
 // when the port configPath names (inUsePort) is held by another process. It
 // returns nil to allow it, or an error saying why the port is pinned and what
 // the operator can do; Start then fails with ErrPortInUse and that reason.
+// Start asks once per Start, on the first conflict; ports it picked itself
+// are its own to move again without asking.
 type PortConflictPolicy func(configPath string, inUsePort int) error
 
 // doltReadyLine is what dolt sql-server (go-mysql-server) logs at info level
@@ -320,8 +322,13 @@ func (s *DoltServer) Start(ctx context.Context) error {
 	// A runtime config left by an earlier run is stale: every Start begins
 	// from the operator config's own port.
 	_ = os.Remove(s.runtimeConfigPath())
+	cfg, err := servercfg.YamlConfigFromFile(filesys.LocalFS, s.configPath)
+	if err != nil {
+		return fmt.Errorf("server: DoltServer.Start: parse config %q: %w", s.configPath, err)
+	}
+	s.config = cfg
 	s.launchConfigPath = s.configPath
-	err := s.startWithPortRecovery(ctx)
+	err = s.startWithPortRecovery(ctx)
 	if err != nil {
 		_ = os.Remove(s.runtimeConfigPath())
 	}
@@ -329,6 +336,10 @@ func (s *DoltServer) Start(ctx context.Context) error {
 }
 
 func (s *DoltServer) startWithPortRecovery(ctx context.Context) error {
+	// The policy judges the operator config, so it is asked once, about the
+	// port that config names. Later conflicts are on ports Start picked
+	// itself, which are Start's to move again.
+	operatorPort := s.config.Port()
 	for attempt := 1; ; attempt++ {
 		err := s.startAttempt(ctx, attempt == 1)
 		if err == nil || !errors.Is(err, ErrPortInUse) {
@@ -341,8 +352,10 @@ func (s *DoltServer) startWithPortRecovery(ctx context.Context) error {
 		if attempt >= maxStartPortAttempts {
 			return fmt.Errorf("%w (gave up after %d ports, the last %d; something on this host keeps taking them)", err, attempt, inUse)
 		}
-		if perr := s.portPolicy(s.configPath, inUse); perr != nil {
-			return fmt.Errorf("%w; not moving off port %d: %v", err, inUse, perr)
+		if attempt == 1 {
+			if perr := s.portPolicy(s.configPath, operatorPort); perr != nil {
+				return fmt.Errorf("%w; not moving off port %d: %v", err, inUse, perr)
+			}
 		}
 		if rerr := s.useRuntimePort(inUse); rerr != nil {
 			return fmt.Errorf("%w; could not move off port %d: %v", err, inUse, rerr)
@@ -359,13 +372,17 @@ func portInUseRemedy(configPath string, port int) string {
 // listener.port moved to a fresh port (never inUse), and makes it the config
 // the next attempt launches with and the server dials.
 func (s *DoltServer) useRuntimePort(inUse int) error {
-	base, err := servercfg.YamlConfigFromFile(filesys.LocalFS, s.configPath)
+	// Parse the raw bytes, not YamlConfigFromFile's env-interpolated text:
+	// dolt interpolates the runtime file when it reads it, so placeholders
+	// (and "$$" escapes) must reach it unexpanded, and their values never
+	// land on disk.
+	raw, err := os.ReadFile(s.configPath)
 	if err != nil {
 		return fmt.Errorf("re-read %s: %w", s.configPath, err)
 	}
-	yc, ok := base.(*servercfg.YAMLConfig)
-	if !ok {
-		return fmt.Errorf("%s: unexpected config type %T", s.configPath, base)
+	yc, err := servercfg.NewYamlConfig(raw)
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", s.configPath, err)
 	}
 	port := inUse
 	for port == inUse {
@@ -388,7 +405,13 @@ func (s *DoltServer) useRuntimePort(inUse int) error {
 	if err := writeFileAtomic(s.runtimeConfigPath(), body); err != nil {
 		return fmt.Errorf("write %s: %w", s.runtimeConfigPath(), err)
 	}
-	s.config = cfg
+	// Dial and DSN need the values dolt will see, so read the file back the
+	// way dolt does, with interpolation.
+	effective, err := servercfg.YamlConfigFromFile(filesys.LocalFS, s.runtimeConfigPath())
+	if err != nil {
+		return fmt.Errorf("re-read %s: %w", s.runtimeConfigPath(), err)
+	}
+	s.config = effective
 	s.launchConfigPath = s.runtimeConfigPath()
 	return nil
 }

@@ -389,11 +389,6 @@ func managedPortConflictPolicy(configPath string, inUsePort int) error {
 		return fmt.Errorf("%s is not a Beads-generated config, so its port is pinned; %s", configPath, remedy)
 	}
 	remedy += ", or delete " + configPath + " so Beads regenerates it"
-	// The runtime config is written with environment placeholders already
-	// expanded, which would put their values (often credentials) on disk.
-	if bytes.Contains(body, []byte("${")) {
-		return fmt.Errorf("%s uses environment placeholders, so Beads will not write a runtime copy of it; %s", configPath, remedy)
-	}
 	cfg, err := servercfg.NewYamlConfig(body)
 	if err != nil {
 		return fmt.Errorf("parse %s: %w", configPath, err)

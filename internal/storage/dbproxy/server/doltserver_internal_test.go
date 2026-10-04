@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -117,8 +118,10 @@ func freeTestPort(t *testing.T) int {
 func TestDoltServer_Start_GivesUpAfterMaxPorts(t *testing.T) {
 	s, rootDir := newFakeDoltServer(t, "inuse", freeTestPort(t))
 	asked := 0
-	s.SetPortConflictPolicy(func(string, int) error {
+	operatorPort := s.config.Port()
+	s.SetPortConflictPolicy(func(_ string, inUsePort int) error {
 		asked++
+		assert.Equal(t, operatorPort, inUsePort, "the policy is asked about the operator config's port")
 		return nil
 	})
 
@@ -126,7 +129,7 @@ func TestDoltServer_Start_GivesUpAfterMaxPorts(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrPortInUse), "got %v", err)
 	assert.Contains(t, err.Error(), fmt.Sprintf("gave up after %d ports", maxStartPortAttempts))
-	assert.Equal(t, maxStartPortAttempts-1, asked, "policy is asked before each move")
+	assert.Equal(t, 1, asked, "the policy judges the operator config's port, so it is asked once")
 	_, serr := os.Stat(filepath.Join(rootDir, RuntimeConfigFileName))
 	assert.True(t, os.IsNotExist(serr), "a failed Start must not leave a runtime config")
 }
@@ -137,7 +140,7 @@ func TestDoltServer_Start_GivesUpAfterMaxPorts(t *testing.T) {
 func TestDoltServer_Start_MissingReadyLineIsDiagnosed(t *testing.T) {
 	old := startReadyTimeout
 	// The fake is this test binary, which takes a few seconds to start.
-	startReadyTimeout = 10 * time.Second
+	startReadyTimeout = 30 * time.Second
 	t.Cleanup(func() { startReadyTimeout = old })
 
 	s, _ := newFakeDoltServer(t, "silent", freeTestPort(t))
@@ -153,4 +156,34 @@ func TestDoltServer_Start_FakeReadyLine(t *testing.T) {
 	s, _ := newFakeDoltServer(t, "ready", freeTestPort(t))
 	require.NoError(t, s.Start(context.Background()))
 	assert.True(t, s.Running(context.Background()))
+}
+
+// TestUseRuntimePort_CopiesRawText pins that the runtime config carries the
+// operator config's environment placeholders and "$$" escapes unexpanded:
+// dolt interpolates the runtime file when it reads it, so expanding them here
+// would expand them twice and put their values on disk. The server's own
+// view (Dial, DSN) still uses the interpolated values.
+func TestUseRuntimePort_CopiesRawText(t *testing.T) {
+	t.Setenv("BD_TEST_HOST", "127.0.0.1")
+	rootDir := t.TempDir()
+	cfg := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(cfg, []byte("log_level: info\ndata_dir: \"a$$b\"\nlistener:\n  host: ${BD_TEST_HOST}\n  port: 40001\n"), 0o600))
+	s, err := NewDoltServer(os.Args[0], rootDir, cfg, "", 0, "")
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.1", s.config.Host())
+
+	require.NoError(t, s.useRuntimePort(40001))
+
+	body, err := os.ReadFile(filepath.Join(rootDir, RuntimeConfigFileName))
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "${BD_TEST_HOST}", "placeholder must be copied, not expanded")
+	assert.Contains(t, string(body), "a$$b", "a $$ escape must be copied, not unescaped")
+	assert.Equal(t, "127.0.0.1", s.config.Host(), "the server dials the interpolated host")
+	assert.NotEqual(t, 40001, s.config.Port())
+	assert.Equal(t, filepath.Join(rootDir, RuntimeConfigFileName), s.launchConfigPath)
+	info, err := os.Stat(filepath.Join(rootDir, RuntimeConfigFileName))
+	require.NoError(t, err)
+	if runtime.GOOS != "windows" {
+		assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	}
 }
