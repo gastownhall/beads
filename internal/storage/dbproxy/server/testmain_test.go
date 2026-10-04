@@ -53,12 +53,20 @@ const fakeDoltEnv = "BEADS_TEST_FAKE_DOLT"
 
 var fakeDoltPortRe = regexp.MustCompile(`(?m)^\s+port:\s*(\d+)`)
 
+// fakeDoltGreeting stands in for the MySQL handshake packet a dolt
+// sql-server sends on every accepted connection; readiness probes only count
+// a dial that brings one (see doltserver.DrainAndCloseProbe).
+var fakeDoltGreeting = []byte("\x0a5.7.9-fake\x00")
+
 // fakeDolt answers the dolt invocations DoltServer.Start makes. For
 // `sql-server --config <file>` it reads listener.port from the file and, by
 // mode:
 //   - "inuse": reports dolt's own port-in-use error and exits 1;
 //   - "silent": listens but never logs the ready line;
 //   - "ready": listens and logs the ready line.
+//
+// A listening fake greets every connection, so only the ready line tells
+// "silent" from "ready".
 func fakeDolt(mode string, args []string) int {
 	if len(args) == 0 {
 		return 2
@@ -107,6 +115,7 @@ func fakeDolt(mode string, args []string) int {
 		if err != nil {
 			return 0
 		}
+		_, _ = c.Write(fakeDoltGreeting)
 		defer c.Close()
 	}
 }

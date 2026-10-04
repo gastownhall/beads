@@ -35,6 +35,7 @@ go_test(
         "external_dolt_server_test.go",
         "testmain_test.go",
         "testserver_test.go",
+        "waitready_test.go",
     ],
     embed = [":server"],
     deps = [
@@ -44,6 +45,7 @@ go_test(
         "//internal/procid",
         "//internal/storage/dbproxy/pidfile",
         "//internal/testutil",
+        "@com_github_dolthub_dolt_go//libraries/doltcore/servercfg",
         "@com_github_go_sql_driver_mysql//:mysql",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",

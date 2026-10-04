@@ -18,6 +18,7 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/procid"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
@@ -538,7 +539,18 @@ func waitForServerReady(ctx context.Context, s server.DatabaseServer, timeout ti
 		if err != nil {
 			return err
 		}
-		_ = conn.Close()
+		// The greeting shares the dial's budget: an external upstream may be
+		// remote, so its greeting can trail the dial by more than the
+		// loopback window of DrainAndCloseProbe.
+		if !doltserver.DrainAndCloseProbeContext(dialCtx, conn) {
+			return errors.New("listener accepted the connection but sent no MySQL greeting")
+		}
+		// The greeting wait can take up to the dial budget. Do not let a probe
+		// that started before cancellation or a backend exit publish a stale
+		// ready result.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		// The dial proves something answers on the backend's address, not
 		// that the backend does. A local backend's Start has already proved
 		// its own process owns the port (see server.DoltServer.waitReady),
