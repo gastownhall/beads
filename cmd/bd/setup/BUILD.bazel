@@ -17,7 +17,6 @@ go_library(
         "junie.go",
         "mux.go",
         "opencode.go",
-        "setup_test_helpers.go",
         "utils.go",
     ],
     importpath = "github.com/steveyegge/beads/cmd/bd/setup",
@@ -45,6 +44,7 @@ go_test(
         "mux_test.go",
         "opencode_test.go",
         "plugin_layout_test.go",
+        "setup_test_helpers_test.go",
         "utils_test.go",
     ],
     data = [
