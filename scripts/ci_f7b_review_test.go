@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// F7b review response (~/beads-bazel-plan/f7b/review.md): two cache-safety
+// F7b review response: two cache-safety
 // blockers (B1, B2) and one cache-quota bound (S7) found after F7b moved
 // same-repo PR Linux/Windows/macOS legs onto Blacksmith and added
 // push-to-main Blacksmith cache seeders in main.yml. These tests pin the
