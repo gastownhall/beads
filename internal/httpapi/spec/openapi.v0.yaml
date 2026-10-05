@@ -7962,7 +7962,16 @@ components:
             `issues.count.scope`, which announces that
             `GET /v0/beads/issues:count` accepts `parent`, `no_parent`,
             `exclude_type`, and `exclude_status` (see those parameters) rather
-            than silently answering `unknown_parameter` for all four. The
+            than silently answering `unknown_parameter` for all four,
+            `issues.sweep.wispsPlane`, which announces that
+            `POST /v0/beads/issues:sweep` accepts the `wisps-plane` value of
+            `tier` rather than silently answering `unknown_value`,
+            `issues.sweep.liveDependents`, which announces that the same
+            operation accepts `protect_live_dependents` and answers
+            `skipped.live_dependent` rather than silently answering
+            `unknown_parameter`, and `issues.sweep.limit`, which announces
+            that it accepts `limit` and answers `remaining` rather than
+            silently answering `unknown_parameter`. The
             list grows additively, and an operation never appears here unless
             it is fully implemented. This is how a client checks for an
             operation or a behavior — never the version string.
@@ -8011,7 +8020,25 @@ components:
               had moved underneath it. That silent gap is the whole reason
               this field exists.
             * `2` — the first release whose `ContextResponse` carries
-              `wire_revision` and `min_client_wire_revision` at all (this one).
+              `wire_revision` and `min_client_wire_revision` at all. Still
+              current: S4 widened `SweepRequest.tier`'s enum to add
+              `wisps-plane` and added `protect_live_dependents` and `limit`
+              alongside it, and none of the three bumped this counter.
+              `SweepRequest` is a REQUEST-body-only schema — no response ever
+              carries it — so nothing decodes it out of a server reply; the
+              new enum member and the two new fields are each something only
+              an UPDATED CLIENT chooses to send, behind their own behavior
+              tokens (`issues.sweep.wispsPlane`, `issues.sweep.liveDependents`,
+              `issues.sweep.limit`). An old client that never sends any of the
+              three has nothing to misdecode, which is exactly the additive
+              case this field exists to NOT gate. The wireshape drift gate
+              (`internal/httpapi/wireshape`) tracks, per member, whether it is
+              reachable from a request body, a response, or both, and treats
+              an enum WIDENING as additive only on a request-only member —
+              the identical widening on a response-side (or request+response)
+              member still counts as changed and still demands a bump, since
+              an existing client decoding a response must keep recognizing
+              every value the server might send it.
 
 
             PRESENCE, not just value: a generated client whose JSON decoder
@@ -8506,13 +8533,20 @@ components:
       properties:
         tier:
           type: string
-          enum: [ephemeral, durable]
+          enum: [ephemeral, durable, wisps-plane]
           description: >-
             Which plane to clear. `ephemeral` is the wisp tier (`bd purge`) and
             `durable` is the issue tier (`bd prune`). The two are DISJOINT: a
             sweep of one can never touch a bead of the other. Required, with no
             default — a caller handed the wrong tier has nothing to notice
             until the beads are gone.
+
+
+            `wisps-plane` is a THIRD, wider tier: it clears the whole wisps
+            table (ephemeral beads) AND any durable bead with no history row,
+            in one pass. Behind the `issues.sweep.wispsPlane` behavior token:
+            an older server answers `unknown_value` for this member, since it
+            predates the token and knows only the first two values.
         actor:
           type: string
           minLength: 1
@@ -8574,6 +8608,25 @@ components:
             skips and the refusals are the same ones the real sweep would
             produce, computed against the same snapshot — and nothing is
             recorded in history either.
+        protect_live_dependents:
+          type: boolean
+          default: false
+          description: >-
+            Skip a closed candidate that a LIVE (not-done) bead depends on
+            through a parent/child, tracks, or blocks edge, so closing a
+            dependent's dependency does not erase the row a live bead still
+            points at. Protection is TRANSITIVE and crosses the ephemeral/durable
+            plane boundary. Behind the `issues.sweep.liveDependents` behavior
+            token: an older server answers `unknown_parameter` for this name.
+        limit:
+          type: integer
+          format: int64
+          description: >-
+            Cap how many beads this sweep deletes, OLDEST-CLOSED-FIRST. Absent
+            or zero means unbounded. A negative value is a `400`
+            invalid_argument, the same as the role's own ErrValidation. Behind
+            the `issues.sweep.limit` behavior token: an older server answers
+            `unknown_parameter` for this name.
 
     SweepResult:
       type: object
@@ -8620,6 +8673,15 @@ components:
             protected.
           items:
             type: string
+        remaining:
+          type: integer
+          format: int64
+          description: >-
+            How many beads this sweep's own selection left unswept because
+            `limit` cut it off, oldest-closed-first. Always 0 when `limit` was
+            absent, zero, or at least as large as the matching set — never a
+            dropped count, a 0 here means nothing was left over. Present only
+            behind the `issues.sweep.limit` behavior token.
 
     SweepSkips:
       type: object
@@ -8667,6 +8729,12 @@ components:
           description: >-
             Rows the tier query returned as nothing at all. A defense of the
             same kind, on a shape rather than a value.
+        live_dependent:
+          type: integer
+          description: >-
+            Candidates protected by `protect_live_dependents`. Always 0 when
+            that member is false or absent. Present only behind the
+            `issues.sweep.liveDependents` behavior token.
 
     ReadyPage:
       type: object

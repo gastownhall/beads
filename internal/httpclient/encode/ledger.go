@@ -981,36 +981,22 @@ func writeSideRows() []Row {
 			PinnedBy: pinnedByS3Conformance,
 		},
 		{
-			// S3 reconciliation (2026-10): bd-enterprise's
-			// sweepIssues wire carried a structural-dependent protection
-			// alongside the referenced-citation one; OSS's apigen.SweepRequest
-			// publishes protect_referenced only. There is no
-			// protect_live_dependents member for this field to narrow onto, so
-			// sending `true` and having the client silently drop it would run
-			// an UNPROTECTED sweep while the caller believed the structural
-			// guard was active — the exact widening refuse-not-drop exists to
-			// stop, on the one operation this surface uses to delete rows.
-			ID: "W-SweepRequest.ProtectLiveDependents", Kind: KindRefuse,
+			ID: "W-SweepRequest.ProtectLiveDependents", Kind: KindRetired,
 			Type: tySweepRequest, Field: "ProtectLiveDependents",
-			What:     "protecting live structural dependents during a sweep refuses",
-			Why:      "sweepIssues publishes dry_run, tier, closed_before, pattern, protect_referenced and actor only; no protect_live_dependents member exists for this client to send, and the server has no stored-edge lookup to run on this client's behalf. `bd purge` from a local workspace still gets the protection; over http it must ask without it or not at all",
+			What: "protecting live structural dependents during a sweep used to refuse",
+			Why: "RETIRED by the S4 wire extension that sends it. The gap was always the DOCUMENT's rather than a decision: the local Sweeper role carries a structural-dependent protection alongside the referenced-citation one, and apigen.SweepRequest had no protect_live_dependents member for this client to narrow onto, so sending `true` and silently dropping it would have run an UNPROTECTED sweep while the caller believed the structural guard was active. " +
+				"The spec now publishes `protect_live_dependents` (and SweepSkips.live_dependent on the response) behind its own behavior-capability token, issues.sweep.liveDependents, because it is a parameter added to an operation that already shipped. The client sends it only once the handshake advertises the token and refuses locally, before the dial, when it does not — see refuseUnservedSweep (sweeper.go) and W-SweepRequest.Limit for the sibling member closed the same way",
 			SpecRow:  "D8 refuse-not-drop",
-			PinnedBy: pinnedByS3Conformance,
+			PinnedBy: "TestSweepSendsTheS4MembersOnceTheServerAdvertisesThem",
 		},
 		{
-			// Limit's absence is the same gap on the OTHER half of the request:
-			// bd-enterprise's wire bounded one sweep call and reported the
-			// remainder back; OSS's apigen.SweepRequest and SweepResult carry
-			// neither a limit member to send nor a remaining member to read one
-			// back from. A dropped Limit would run the UNBOUNDED sweep the
-			// caller asked to cap, in one transaction, which is the same
-			// widening the protection row above refuses rather than degrades.
-			ID: "W-SweepRequest.Limit", Kind: KindRefuse,
+			ID: "W-SweepRequest.Limit", Kind: KindRetired,
 			Type: tySweepRequest, Field: "Limit",
-			What:     "bounding one sweep call and draining a backlog over several refuses",
-			Why:      "sweepIssues publishes no limit member and SweepResult publishes no remaining member for a bounded caller to loop on; a non-zero Limit refuses before the dial rather than running the unbounded sweep silently. issueops.SweepResult.Remaining is therefore always zero from this client — not a dropped count, since nothing bounded the call that would have left one",
+			What: "bounding one sweep call and draining a backlog over several used to refuse",
+			Why: "RETIRED by the S4 wire extension that sends it (with W-SweepRequest.ProtectLiveDependents). The local Sweeper role bounds one sweep call and reports the remainder back; apigen.SweepRequest and SweepResult carried neither a limit member to send nor a remaining member to read one back from, so a dropped Limit would have run the UNBOUNDED sweep the caller asked to cap, in one transaction. " +
+				"The spec now publishes `limit` on the request and `remaining` on the response behind issues.sweep.limit. The client sends Limit only once the handshake advertises that token and refuses locally otherwise; issueops.SweepResult.Remaining now carries the server's count rather than always reading zero",
 			SpecRow:  "D8 refuse-not-drop",
-			PinnedBy: pinnedByS3Conformance,
+			PinnedBy: "TestSweepSendsTheS4MembersOnceTheServerAdvertisesThem",
 		},
 	}
 }

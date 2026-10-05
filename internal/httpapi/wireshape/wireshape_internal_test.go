@@ -2,6 +2,7 @@ package wireshape
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -106,6 +107,74 @@ func TestWalkParam(t *testing.T) {
 	}
 }
 
+// sideDoc exercises the three combinations Compute's side-tracking must tell
+// apart: a schema reachable ONLY from a request body (reqOnly's ReqOnly), one
+// reachable ONLY from a response (respOnly's RespOnly), and one reachable
+// from both a request body and a response, on the SAME operation (bothSides'
+// Shared) — the case recordSide's "promote to both" path exists for.
+const sideDoc = `openapi: 3.0.3
+paths:
+  /req-only:
+    post:
+      operationId: reqOnly
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ReqOnly'}
+      responses:
+        '200': {description: ok}
+  /resp-only:
+    get:
+      operationId: respOnly
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RespOnly'}
+  /both:
+    put:
+      operationId: bothSides
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Shared'}
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Shared'}
+components:
+  schemas:
+    ReqOnly: {type: object, properties: {tier: {type: string, enum: [a, b]}}}
+    RespOnly: {type: object, properties: {tier: {type: string, enum: [a, b]}}}
+    Shared: {type: object, properties: {tier: {type: string, enum: [a, b]}}}
+`
+
+// TestSideTracking pins Compute's own Digest.Sides assignment (what
+// widensAdditively's oldSide/newSide lookups rely on): a request-only schema
+// is "request", a response-only schema is "response", and a schema reached
+// from both — even when the already-visited path skips re-walking its
+// properties — is promoted to "both", never stuck at whichever side happened
+// to walk it first.
+func TestSideTracking(t *testing.T) {
+	d, err := computeFrom([]byte(sideDoc), 2)
+	if err != nil {
+		t.Fatalf("computeFrom: %v", err)
+	}
+
+	for schema, wantSide := range map[string]string{
+		"ReqOnly":  "request",
+		"RespOnly": "response",
+		"Shared":   "both",
+	} {
+		if got := d.Sides[schema]; got != wantSide {
+			t.Errorf("Sides[%q] = %q, want %q", schema, got, wantSide)
+		}
+	}
+}
+
 // TestEffectiveSerializationIsCompared is the Compute-level falsification for
 // recording effective style/explode values: changing how a parameter that
 // relied on its defaults is serialized must be a changed entry SafeToWrite
@@ -151,5 +220,164 @@ func TestEffectiveSerializationIsCompared(t *testing.T) {
 				t.Errorf("SafeToWrite at the same revision = %v, want %v", ok, !tc.wantChanged)
 			}
 		})
+	}
+}
+
+// sharedNestedDoc reproduces the shape the MED1 re-review flagged: Parent is
+// a request body (createParent) AND reachable from a response through
+// Wrapper.p (getWrapper) — the same "reached from both sides" case sideDoc's
+// Shared covers at the top level, but with two further wrinkles sideDoc
+// cannot: Child is a NAMED schema nested two levels down (Parent.child,
+// $ref'd), and Parent.inl is an ANONYMOUS nested object (no $ref of its own,
+// so it is only ever identified by its synthetic "Parent.inl" label) with its
+// own enum member. Both sit below the point where the old walk's name-only
+// (not name+side) guard stopped recursing on Parent's SECOND visit, so
+// recordSide was never called on them for whichever side arrived second —
+// and which side that was depended on paths' map iteration order, which is
+// why the bug showed up as a flaky 78/100 rather than a deterministic
+// failure.
+func sharedNestedDoc(kindEnum, modeEnum string) []byte {
+	return []byte(`openapi: 3.0.3
+paths:
+  /parent:
+    post:
+      operationId: createParent
+      requestBody:
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Parent'}
+      responses:
+        '200': {description: ok}
+  /wrapper:
+    get:
+      operationId: getWrapper
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Wrapper'}
+components:
+  schemas:
+    Parent:
+      type: object
+      properties:
+        child: {$ref: '#/components/schemas/Child'}
+        inl:
+          type: object
+          properties:
+            mode: {type: string, enum: [` + modeEnum + `]}
+    Child:
+      type: object
+      properties:
+        kind: {type: string, enum: [` + kindEnum + `]}
+    Wrapper:
+      type: object
+      properties:
+        p: {$ref: '#/components/schemas/Parent'}
+`)
+}
+
+// TestSidePropagatesToNestedChildren pins the MED1 re-review fix directly:
+// Parent is reachable from both createParent's request body and, through
+// Wrapper.p, getWrapper's response, and "both" must reach all the way down
+// to its children — Child (a named, $ref'd grandchild) and Parent.inl (an
+// anonymous nested object) alike — not stop at Parent itself. Before the
+// fix, whichever side's walk reached Parent SECOND found it already in the
+// name-only visited set and returned before ever recursing into Parent's
+// properties with that side, so Child and Parent.inl stayed stuck at
+// whichever single side walked them first.
+func TestSidePropagatesToNestedChildren(t *testing.T) {
+	d, err := computeFrom(sharedNestedDoc("a, b", "a, b"), 2)
+	if err != nil {
+		t.Fatalf("computeFrom: %v", err)
+	}
+	want := map[string]string{
+		"Parent":     "both",
+		"Child":      "both",
+		"Parent.inl": "both",
+		"Wrapper":    "response",
+	}
+	for schema, wantSide := range want {
+		if got := d.Sides[schema]; got != wantSide {
+			t.Errorf("Sides[%q] = %q, want %q", schema, got, wantSide)
+		}
+	}
+}
+
+// TestEnumWideningOnSharedNestedChildIsNotAdditive is the end-to-end
+// Compare-level falsification the re-review asked for: widening an enum on a
+// schema reachable from BOTH sides — whether a named grandchild ($ref'd
+// Child.kind) or an anonymous nested one (Parent.inl.mode) — must be
+// classified as a breaking Changed entry, never as an additive Widened one.
+// An existing client decoding Wrapper out of getWrapper's response has to
+// keep recognizing every value the server might send on either member, so
+// neither widening is something only an updated client opts into the way a
+// request-only widening is.
+func TestEnumWideningOnSharedNestedChildIsNotAdditive(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		beforeKind, afterKind string
+		beforeMode, afterMode string
+		wantKey               string
+	}{
+		{"named grandchild (Child.kind)", "a, b", "a, b, c", "a, b", "a, b", "Child\x00kind"},
+		{"anonymous nested child (Parent.inl.mode)", "a, b", "a, b", "a, b", "a, b, c", "Parent.inl\x00mode"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before, err := computeFrom(sharedNestedDoc(tc.beforeKind, tc.beforeMode), 2)
+			if err != nil {
+				t.Fatalf("computeFrom(before): %v", err)
+			}
+			after, err := computeFrom(sharedNestedDoc(tc.afterKind, tc.afterMode), 2)
+			if err != nil {
+				t.Fatalf("computeFrom(after): %v", err)
+			}
+
+			cmp := Compare(before, after)
+			if !slices.Contains(cmp.Changed, tc.wantKey) {
+				t.Errorf("Changed = %v, want it to include %q: a both-sides enum widening must break", cmp.Changed, tc.wantKey)
+			}
+			if slices.Contains(cmp.Widened, tc.wantKey) {
+				t.Errorf("Widened = %v, must NOT include %q: both sides are reachable, so this is not additive", cmp.Widened, tc.wantKey)
+			}
+
+			if ok, _ := SafeToWrite(before, after); ok {
+				t.Errorf("SafeToWrite at the same revision = true, want false: this widening is breaking and needs a wire_revision bump")
+			}
+			bumped := Digest{WireRevision: before.WireRevision + 1, Entries: after.Entries, Sides: after.Sides}
+			if ok, reason := SafeToWrite(before, bumped); !ok {
+				t.Errorf("SafeToWrite with a bumped revision refused: %s", reason)
+			}
+		})
+	}
+}
+
+// TestComputeFromSideAssignmentIsDeterministic is the order-independence pin
+// the re-review asked for: the bug this MED1 fix closes was map-order
+// dependent (observed failing 78/100 runs), so a single passing run of
+// TestSidePropagatesToNestedChildren does not rule out a regression that is
+// merely less likely than before. Go randomizes map iteration order per
+// range, including paths and properties here, so calling computeFrom many
+// times over the SAME document input exercises many different traversal
+// orders; every one of them must land on the identical Sides assignment and
+// entry set.
+func TestComputeFromSideAssignmentIsDeterministic(t *testing.T) {
+	doc := sharedNestedDoc("a, b", "a, b")
+	first, err := computeFrom(doc, 2)
+	if err != nil {
+		t.Fatalf("computeFrom: %v", err)
+	}
+	for i := 0; i < 200; i++ {
+		got, err := computeFrom(doc, 2)
+		if err != nil {
+			t.Fatalf("computeFrom (run %d): %v", i, err)
+		}
+		if !reflect.DeepEqual(got.Sides, first.Sides) {
+			t.Fatalf("run %d: Sides = %v, want %v (non-deterministic across map iteration orders)", i, got.Sides, first.Sides)
+		}
+		if !reflect.DeepEqual(got.Entries, first.Entries) {
+			t.Fatalf("run %d: Entries = %v, want %v (non-deterministic across map iteration orders)", i, got.Entries, first.Entries)
+		}
 	}
 }

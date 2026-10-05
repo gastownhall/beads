@@ -119,6 +119,36 @@ const CapIssuesListSort = "issues.list.sort"
 // count.
 const CapIssuesCountScope = "issues.count.scope"
 
+// CapIssuesSweepWispsPlane is the behavior capability that advertises the
+// `wisps-plane` value of SweepRequest.tier (sweep.go, spec SweepRequest.tier):
+// a third, wider tier that clears the whole wisps table plus any durable bead
+// with no history row, in one pass (issueops.SweepWispsPlane). An older
+// server predating this token answers the value with a `400
+// invalid_argument`/`unknown_value` naming the member, the same per-value
+// refusal CapIssuesCountScope's doc describes for a whole parameter. The
+// client MUST check this token before sending `tier: "wisps-plane"` to a
+// server that may predate it.
+const CapIssuesSweepWispsPlane = "issues.sweep.wispsPlane"
+
+// CapIssuesSweepLiveDependents is the behavior capability that advertises
+// SweepRequest.protect_live_dependents and the paired SweepSkips.live_dependent
+// response member (sweep.go): skip a closed candidate a live bead still
+// depends on, transitively, across the ephemeral/durable plane boundary
+// (issueops.SweepRequest.ProtectLiveDependents). An older server predating
+// this token answers the request member with `400
+// invalid_argument`/`unknown_parameter`. The client MUST check this token
+// before sending the member to a server that may predate it.
+const CapIssuesSweepLiveDependents = "issues.sweep.liveDependents"
+
+// CapIssuesSweepLimit is the behavior capability that advertises
+// SweepRequest.limit and the paired SweepResult.remaining response member
+// (sweep.go): cap how many beads one sweep deletes, oldest-closed-first
+// (issueops.SweepRequest.Limit / SweepResult.Remaining). An older server
+// predating this token answers the request member with `400
+// invalid_argument`/`unknown_parameter`. The client MUST check this token
+// before sending the member to a server that may predate it.
+const CapIssuesSweepLimit = "issues.sweep.limit"
+
 // customMethodTarget splits the custom method off the segment the router
 // matched, and reports the row that claims it.
 //
@@ -866,7 +896,10 @@ func (r route) specPathOf() string {
 // route. project.enforce announces per-request Bd-Project-Id enforcement
 // (checkProjectStamp): a stamped client reads it to know the refusal is available
 // rather than silently dropped by an older server.
-var behaviorCapabilities = []string{CapProjectEnforce, CapBatchApplyLarge, CapIssuesListSort, CapIssuesCountScope}
+var behaviorCapabilities = []string{
+	CapProjectEnforce, CapBatchApplyLarge, CapIssuesListSort, CapIssuesCountScope,
+	CapIssuesSweepWispsPlane, CapIssuesSweepLiveDependents, CapIssuesSweepLimit,
+}
 
 // Capabilities lists what this build advertises in ContextResponse.capabilities:
 // the operations it actually implements, gated on `implemented` so a stub can

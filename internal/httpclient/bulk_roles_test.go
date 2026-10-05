@@ -14,6 +14,8 @@ import (
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/encode"
+	"github.com/steveyegge/beads/internal/httpclient/wire"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -198,28 +200,150 @@ func TestSweepDoesNotWriteThroughTheCallersCutoff(t *testing.T) {
 // is hand-written and a member the server grows would otherwise be dropped in
 // silence — a result whose numbers are quietly wrong about what was erased.
 func TestSweepResultCarriesEveryWireMember(t *testing.T) {
+	remaining := int64(13)
+	liveDependent := 14
 	w := &stubWire{swept: &apigen.SweepResult{
 		DryRun: true, Swept: 3, Dependencies: 4, Labels: 5, Events: 6,
 		Skipped: apigen.SweepSkips{
 			Pinned: 7, Referenced: 8, NotClosed: 9,
 			UnknownClosedAt: 10, ClosedAtOrAfterCutoff: 11, Unreadable: 12,
+			LiveDependent: &liveDependent,
 		},
 		ReferencedIds: &[]string{"bd-1"},
+		Remaining:     &remaining,
 	}}
 	result, err := bulkSweeper(t, w).Sweep(t.Context(), issueops.SweepRequest{Tier: issueops.SweepEphemeral})
 	if err != nil {
 		t.Fatalf("Sweep(): %v", err)
 	}
-	// Remaining and LiveDependent are skipped: OSS's wire publishes no
-	// `remaining` or structural-dependent skip member for either to decode out
-	// of (W-SweepRequest.Limit, W-SweepRequest.ProtectLiveDependents refuse the
-	// request members that would produce them), so no wire body — fully
-	// populated or not — can ever make this projection set them.
-	assertEveryFieldPopulated(t, "SweepResult", reflect.ValueOf(result), "Remaining")
-	assertEveryFieldPopulated(t, "SweepSkips", reflect.ValueOf(result.Skipped), "LiveDependent")
+	assertEveryFieldPopulated(t, "SweepResult", reflect.ValueOf(result))
+	assertEveryFieldPopulated(t, "SweepSkips", reflect.ValueOf(result.Skipped))
 	if !reflect.DeepEqual(result.ReferencedIDs, []string{"bd-1"}) {
 		t.Errorf("ReferencedIDs = %v, want [bd-1]", result.ReferencedIDs)
 	}
+	if result.Remaining != 13 {
+		t.Errorf("Remaining = %d, want 13", result.Remaining)
+	}
+	if result.Skipped.LiveDependent != 14 {
+		t.Errorf("Skipped.LiveDependent = %d, want 14", result.Skipped.LiveDependent)
+	}
+}
+
+// TestSweepSendsTheS4MembersOnceTheServerAdvertisesThem is the encoding half of
+// the three S4 additions: tier "wisps-plane", protect_live_dependents and limit
+// each reach the wire once the handshake advertises the matching token,
+// mirroring TestCountScopeFieldsEncodeOntoTheQuery's idiom for a request body
+// rather than a query.
+func TestSweepSendsTheS4MembersOnceTheServerAdvertisesThem(t *testing.T) {
+	served := &apigen.ContextResponse{Capabilities: []string{
+		wire.CapSweepWispsPlane, wire.CapSweepLiveDependents, wire.CapSweepLimit,
+	}}
+
+	t.Run("wisps-plane tier", func(t *testing.T) {
+		w := &stubWire{}
+		sweeper, err := New(testTarget(t), w, served).Sweeper()
+		if err != nil {
+			t.Fatalf("Sweeper(): %v", err)
+		}
+		if _, err := sweeper.Sweep(t.Context(), issueops.SweepRequest{Tier: issueops.SweepWispsPlane}); err != nil {
+			t.Fatalf("Sweep(): %v", err)
+		}
+		if w.lastSweep.Tier != apigen.WispsPlane {
+			t.Errorf("tier = %q, want %q", w.lastSweep.Tier, apigen.WispsPlane)
+		}
+	})
+
+	t.Run("protect_live_dependents", func(t *testing.T) {
+		w := &stubWire{}
+		sweeper, err := New(testTarget(t), w, served).Sweeper()
+		if err != nil {
+			t.Fatalf("Sweeper(): %v", err)
+		}
+		if _, err := sweeper.Sweep(t.Context(), issueops.SweepRequest{
+			Tier: issueops.SweepWispsPlane, ProtectLiveDependents: true,
+		}); err != nil {
+			t.Fatalf("Sweep(): %v", err)
+		}
+		if w.lastSweep.ProtectLiveDependents == nil || !*w.lastSweep.ProtectLiveDependents {
+			t.Errorf("protect_live_dependents = %v, want true", w.lastSweep.ProtectLiveDependents)
+		}
+	})
+
+	t.Run("limit", func(t *testing.T) {
+		w := &stubWire{}
+		sweeper, err := New(testTarget(t), w, served).Sweeper()
+		if err != nil {
+			t.Fatalf("Sweeper(): %v", err)
+		}
+		if _, err := sweeper.Sweep(t.Context(), issueops.SweepRequest{
+			Tier: issueops.SweepDurable, Limit: 5,
+		}); err != nil {
+			t.Fatalf("Sweep(): %v", err)
+		}
+		if w.lastSweep.Limit == nil || *w.lastSweep.Limit != 5 {
+			t.Errorf("limit = %v, want 5", w.lastSweep.Limit)
+		}
+	})
+}
+
+// TestSweepRefusesTheS4MembersWhenTheServerLacksTheCapability is the skew half:
+// each of the three S4 additions refuses BEFORE dialing when the handshake does
+// not advertise its token, mirroring
+// TestCountScopeRefusesLocallyWhenTheServerLacksTheCapability.
+func TestSweepRefusesTheS4MembersWhenTheServerLacksTheCapability(t *testing.T) {
+	masked := &apigen.ContextResponse{Capabilities: []string{"issues.sweep"}}
+
+	for _, tc := range []struct {
+		name string
+		req  issueops.SweepRequest
+		cap  string
+	}{
+		{"wisps-plane tier", issueops.SweepRequest{Tier: issueops.SweepWispsPlane}, wire.CapSweepWispsPlane},
+		{"protect_live_dependents", issueops.SweepRequest{Tier: issueops.SweepDurable, ProtectLiveDependents: true}, wire.CapSweepLiveDependents},
+		{"limit", issueops.SweepRequest{Tier: issueops.SweepDurable, Limit: 5}, wire.CapSweepLimit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &stubWire{}
+			sweeper, err := New(testTarget(t), w, masked).Sweeper()
+			if err != nil {
+				t.Fatalf("Sweeper(): %v", err)
+			}
+			_, err = sweeper.Sweep(t.Context(), tc.req)
+			if err == nil {
+				t.Fatal("Sweep returned no error, want a pre-dial capability refusal")
+			}
+			var unsup *storage.ErrUnsupported
+			if !errors.As(err, &unsup) {
+				t.Fatalf("errors.As to *storage.ErrUnsupported failed for %v", err)
+			}
+			if unsup.Capability != tc.cap {
+				t.Errorf("Capability = %q, want %q", unsup.Capability, tc.cap)
+			}
+			if unsup.Op != "Sweeper.Sweep" {
+				t.Errorf("Op = %q, want %q", unsup.Op, "Sweeper.Sweep")
+			}
+			if len(w.calls) != 0 {
+				t.Errorf("dialed %v, want none: a pre-dial refusal must never reach the wire", w.calls)
+			}
+		})
+	}
+
+	// The converse: a plain ephemeral/durable sweep with neither new boolean
+	// nor a limit dials normally against the same masked server — the gate
+	// guards the three additions, not the operation.
+	t.Run("no S4 member set dials normally", func(t *testing.T) {
+		w := &stubWire{}
+		sweeper, err := New(testTarget(t), w, masked).Sweeper()
+		if err != nil {
+			t.Fatalf("Sweeper(): %v", err)
+		}
+		if _, err := sweeper.Sweep(t.Context(), issueops.SweepRequest{Tier: issueops.SweepDurable}); err != nil {
+			t.Fatalf("Sweep(): %v", err)
+		}
+		if len(w.calls) != 1 {
+			t.Errorf("dialed %d times, want 1", len(w.calls))
+		}
+	})
 }
 
 // TestDeleteResultCarriesEveryWireMember is the same guard on the delete, whose

@@ -373,21 +373,23 @@ func writeShapes() []writeShape {
 			},
 		},
 		{
-			// NOT total, unlike bd-enterprise's: OSS's apigen.SweepRequest has
-			// no member for ProtectLiveDependents or Limit, so both are absent
-			// from carried below and the source -> wire arm obliges the two
-			// W-SweepRequest rows (W-SweepRequest.ProtectLiveDependents,
-			// W-SweepRequest.Limit) rather than a member.
+			// S4 extended the sweep carriage: apigen.SweepRequest now
+			// publishes protect_live_dependents and limit too, each carried
+			// by the role field of the same name (behind
+			// CapSweepLiveDependents and CapSweepLimit respectively —
+			// see sweeper.go's refuseUnservedSweep).
 			name:   "sweepIssues",
 			source: reflect.TypeOf(issueops.SweepRequest{}),
 			body:   reflect.TypeOf(apigen.SweepRequest{}),
 			carried: map[string]carriage{
-				"Actor":             member("actor"),
-				"Tier":              member("tier"),
-				"ClosedBefore":      member("closed_before"),
-				"IDPattern":         member("pattern"),
-				"ProtectReferenced": member("protect_referenced"),
-				"DryRun":            member("dry_run"),
+				"Actor":                 member("actor"),
+				"Tier":                  member("tier"),
+				"ClosedBefore":          member("closed_before"),
+				"IDPattern":             member("pattern"),
+				"ProtectReferenced":     member("protect_referenced"),
+				"DryRun":                member("dry_run"),
+				"ProtectLiveDependents": member("protect_live_dependents"),
+				"Limit":                 member("limit"),
 			},
 		},
 		{

@@ -64,6 +64,17 @@ func newServedSweeperFixture(t *testing.T, prefix string) conformance.SweeperFix
 		// served store reaches the shape through the embedded database behind
 		// the server and then exercises the sweep over the wire as usual.
 		Exec: env.exec,
+		AddDependencies: func(ctx context.Context, req issueops.AddDependenciesRequest) error {
+			// Through the DependencyEditor ROLE, which routes each edge to its
+			// source plane's dependency table itself — the same seam
+			// dolt/uow/embeddeddolt's own sweeper fixtures use.
+			editor, err := env.subject.DependencyEditor()
+			if err != nil {
+				return err
+			}
+			_, err = editor.AddDependencies(ctx, req)
+			return err
+		},
 	}
 }
 
@@ -117,6 +128,36 @@ func TestServedSweeperRecordsExactlyOneHistoryEntry(t *testing.T) {
 
 func TestServedSweeperDoesNotMutateTheCallerRequest(t *testing.T) {
 	conformance.RunSweeperDoesNotMutateTheCallerRequest(t, t.Context(), newServedSweeperFixture(t, "hs10"))
+}
+
+// The S4 wire extension: tier: "wisps-plane", ProtectLiveDependents and Limit
+// all now have a round trip (internal/httpapi/sweep.go, internal/httpclient/
+// sweeper.go), each behind its own capability token the served harness's
+// in-process handshake always advertises, so these six run for real rather
+// than parking.
+
+func TestServedSweeperWispsPlaneClearsTheWholeWispsTable(t *testing.T) {
+	conformance.RunSweeperWispsPlaneClearsTheWholeWispsTable(t, t.Context(), newServedSweeperFixture(t, "hs13"))
+}
+
+func TestServedSweeperWispsPlaneRequiresAFilter(t *testing.T) {
+	conformance.RunSweeperWispsPlaneRequiresAFilter(t, t.Context(), newServedSweeperFixture(t, "hs14"))
+}
+
+func TestServedSweeperProtectsLiveDependents(t *testing.T) {
+	conformance.RunSweeperProtectsLiveDependents(t, t.Context(), newServedSweeperFixture(t, "hs15"))
+}
+
+func TestServedSweeperProtectsTransitiveLiveDependents(t *testing.T) {
+	conformance.RunSweeperProtectsTransitiveLiveDependents(t, t.Context(), newServedSweeperFixture(t, "hs16"))
+}
+
+func TestServedSweeperProtectsLiveDependentsAcrossPlanes(t *testing.T) {
+	conformance.RunSweeperProtectsLiveDependentsAcrossPlanes(t, t.Context(), newServedSweeperFixture(t, "hs17"))
+}
+
+func TestServedSweeperLimitTakesTheOldestClosedFirst(t *testing.T) {
+	conformance.RunSweeperLimitTakesTheOldestClosedFirst(t, t.Context(), newServedSweeperFixture(t, "hs18"))
 }
 
 // ── Deleter ─────────────────────────────────────────────────────────────────

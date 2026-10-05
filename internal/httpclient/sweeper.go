@@ -4,25 +4,28 @@ package httpclient
 
 import (
 	"context"
+	"slices"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
-	"github.com/steveyegge/beads/internal/httpclient/encode"
+	"github.com/steveyegge/beads/internal/httpclient/wire"
 	"github.com/steveyegge/beads/issueops"
 )
 
 // httpSweeper serves issueops.Sweeper from the sweepIssues custom method
 // (design D8 row 12) — the capability behind `bd purge` and `bd prune`.
 //
-// The mapping is NOT total, unlike bd-enterprise's: OSS's apigen.SweepRequest
-// publishes tier, closed_before, pattern, protect_referenced, dry_run and
-// actor, with no member for ProtectLiveDependents or Limit, and
-// apigen.SweepResult carries no remaining member for SweepResult.Remaining to
-// decode out of. Both refuse before the dial (W-SweepRequest.ProtectLiveDependents,
-// W-SweepRequest.Limit) rather than silently running an unprotected or
-// unbounded sweep, so SweepResult.Remaining is always zero from this client —
-// never a dropped count, since a Limit refuses before anything could be left
-// over to report.
+// S4 closed three gaps this client had against the local Sweeper role: the
+// wire now carries `tier: "wisps-plane"`, `protect_live_dependents` and
+// `limit` on the
+// request, and `skipped.live_dependent`/`remaining` on the response — each
+// behind its own behavior-capability token (CapSweepWispsPlane,
+// CapSweepLiveDependents, CapSweepLimit), since each is a parameter added to
+// an operation that already shipped. refuseUnservedSweep checks all three
+// before the dial, exactly as counter.go's refuseUnservedScope does for
+// Count's scope fields: a caller asking for something an older server
+// predates learns that LOCALLY, never after a round trip that would 400
+// anyway, and never by way of a silently unprotected or unbounded sweep.
 //
 // WHAT IS NOT DECIDED HERE, deliberately: the require-a-filter gate, the glob's
 // well-formedness and the tier's own predicate. All three are the ROLE's, they
@@ -60,22 +63,23 @@ func (s *httpSweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (res
 	// see (*Store).inexpressible's doc). A non-refusal error passes through
 	// unchanged.
 	defer func() { err = s.store.inexpressible("Sweeper.Sweep", err) }()
-	// Refuse-not-drop on the two members this wire has no place for. Both
-	// checks run before the tier is even validated, for the same reason every
-	// other raw refusal here precedes the dial: a caller who asked for a
-	// protection or a bound this client cannot honor must not learn that only
-	// after an unprotected or unbounded sweep already ran.
-	if req.ProtectLiveDependents {
-		return issueops.SweepResult{}, refuse(encode.OpSweepIssues, "W-SweepRequest.ProtectLiveDependents")
-	}
-	if req.Limit != 0 {
-		return issueops.SweepResult{}, refuse(encode.OpSweepIssues, "W-SweepRequest.Limit")
-	}
-
 	tier := apigen.SweepRequestTier(req.Tier)
 	if !tier.Valid() {
-		return issueops.SweepResult{}, invalid("sweep tier %q is not %q or %q",
-			string(req.Tier), apigen.Ephemeral, apigen.Durable)
+		return issueops.SweepResult{}, invalid("sweep tier %q is not %q, %q, or %q",
+			string(req.Tier), apigen.Ephemeral, apigen.Durable, apigen.WispsPlane)
+	}
+
+	// refuseUnservedSweep is the pre-dial half of the three Sweep behavior
+	// tokens (routes.go, beside CapIssuesSweepWispsPlane): a request naming
+	// the wisps-plane tier, or setting ProtectLiveDependents or Limit, asks
+	// for something only a server advertising the matching token answers, and
+	// an older server predating it answers with a guaranteed 400
+	// unknown_value/unknown_parameter. Checked BEFORE the dial so a caller
+	// never pays for a round trip that 400s anyway, and never silently gets an
+	// unprotected or unbounded sweep from a server too old to honor the
+	// request as asked.
+	if err := s.refuseUnservedSweep(ctx, tier, req); err != nil {
+		return issueops.SweepResult{}, err
 	}
 
 	body := apigen.SweepRequest{
@@ -101,12 +105,45 @@ func (s *httpSweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (res
 		cutoff := *req.ClosedBefore
 		body.ClosedBefore = &cutoff
 	}
+	if req.ProtectLiveDependents {
+		body.ProtectLiveDependents = &req.ProtectLiveDependents
+	}
+	if req.Limit != 0 {
+		limit := int64(req.Limit)
+		body.Limit = &limit
+	}
 
 	res, err := s.wire.SweepIssues(ctx, body)
 	if err != nil {
 		return issueops.SweepResult{}, err
 	}
 	return sweepResult(res), nil
+}
+
+// refuseUnservedSweep checks each of the three S4 additions against the
+// handshake snapshot, independently — a caller may ask for any subset of
+// them, and an older server may serve none, some, or (not yet, but
+// structurally possible) only some of the three. A request using none of
+// them never consults the snapshot at all, the same short-circuit
+// refuseUnservedScope uses for Count.
+func (s *httpSweeper) refuseUnservedSweep(ctx context.Context, tier apigen.SweepRequestTier, req issueops.SweepRequest) error {
+	if tier != apigen.WispsPlane && !req.ProtectLiveDependents && req.Limit == 0 {
+		return nil
+	}
+	snap, err := s.store.snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	if tier == apigen.WispsPlane && !slices.Contains(snap.Capabilities, wire.CapSweepWispsPlane) {
+		return s.store.unsupportedCapability("Sweeper.Sweep", wire.CapSweepWispsPlane)
+	}
+	if req.ProtectLiveDependents && !slices.Contains(snap.Capabilities, wire.CapSweepLiveDependents) {
+		return s.store.unsupportedCapability("Sweeper.Sweep", wire.CapSweepLiveDependents)
+	}
+	if req.Limit != 0 && !slices.Contains(snap.Capabilities, wire.CapSweepLimit) {
+		return s.store.unsupportedCapability("Sweeper.Sweep", wire.CapSweepLimit)
+	}
+	return nil
 }
 
 // sweepResult projects the wire's answer onto the role's.
@@ -131,6 +168,12 @@ func sweepResult(res *apigen.SweepResult) issueops.SweepResult {
 			ClosedAtOrAfterCutoff: res.Skipped.ClosedAtOrAfterCutoff,
 			Unreadable:            res.Skipped.Unreadable,
 		},
+	}
+	if res.Skipped.LiveDependent != nil {
+		out.Skipped.LiveDependent = *res.Skipped.LiveDependent
+	}
+	if res.Remaining != nil {
+		out.Remaining = int(*res.Remaining)
 	}
 	if res.ReferencedIds != nil {
 		out.ReferencedIDs = append([]string(nil), *res.ReferencedIds...)

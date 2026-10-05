@@ -81,8 +81,9 @@ func (e HealthStatus) Valid() bool {
 
 // Defines values for SweepRequestTier.
 const (
-	Durable   SweepRequestTier = "durable"
-	Ephemeral SweepRequestTier = "ephemeral"
+	Durable    SweepRequestTier = "durable"
+	Ephemeral  SweepRequestTier = "ephemeral"
+	WispsPlane SweepRequestTier = "wisps-plane"
 )
 
 // Valid indicates whether the value is a known member of the SweepRequestTier enum.
@@ -91,6 +92,8 @@ func (e SweepRequestTier) Valid() bool {
 	case Durable:
 		return true
 	case Ephemeral:
+		return true
+	case WispsPlane:
 		return true
 	default:
 		return false
@@ -1034,7 +1037,7 @@ type ContextResponse struct {
 	// OPTIONAL, and absent means only that this server does not disclose its filesystem layout — never that it has no workspace. A client MUST NOT require it, MUST NOT treat absence as an error, and has no use for the value beyond display: it is a path on the SERVER's filesystem, which the client cannot open. Identify the workspace by `project_id` and `database`, which are required.
 	BeadsDir *string `json:"beads_dir,omitempty"`
 
-	// Capabilities The tokens this server advertises: the OPERATIONS it implements, derived from its route table, and the server-wide BEHAVIORS it enforces. v0's operation vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.count`, `issues.get`, `issues.related`, `issues.create`, `issues.addComment`, `issues.batchClose`, `issues.claim`, `issues.claimNext`, `issues.release`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchGet`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `config.set`, `config.unset`, `dependencies.cycles`, `dependencies.list`, `dependencies.count`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`; the behavior tokens are `project.enforce`, which announces that a `Bd-Project-Id` stamp for the wrong workspace is refused here rather than silently ignored, `issues.batchApplyLarge`, which announces that `POST /v0/beads/issues:batchApply` accepts the RAISED envelope — up to 1000 items (`ApplyBatchRequest.items.maxItems`), a 16 MiB body, and (for a request over 100 items) a run budget that EXTENDS to an operator-configured ceiling (`bd serve --large-apply-ceiling`, 5 minutes by default) — rather than the original 100-item, 4 MiB bound. The ceiling is a flat whole-run budget, not a value scaled by item count: a 101-item request and a 1000-item request both get the same extended budget. A request at or under 100 items is unaffected either way and keeps the server's ordinary deadline exactly as before. A client that checks for this token before sending a plan over 100 items learns whether THIS server accepts it without paying for a round trip an older server would refuse anyway, and `issues.list.sort`, which announces that `GET /v0/beads/issues` accepts the `sort` query parameter (two closed, pageable total orders — see that parameter) rather than silently answering `unknown_parameter`, and `issues.count.scope`, which announces that `GET /v0/beads/issues:count` accepts `parent`, `no_parent`, `exclude_type`, and `exclude_status` (see those parameters) rather than silently answering `unknown_parameter` for all four. The list grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation or a behavior — never the version string.
+	// Capabilities The tokens this server advertises: the OPERATIONS it implements, derived from its route table, and the server-wide BEHAVIORS it enforces. v0's operation vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.count`, `issues.get`, `issues.related`, `issues.create`, `issues.addComment`, `issues.batchClose`, `issues.claim`, `issues.claimNext`, `issues.release`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchGet`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `config.set`, `config.unset`, `dependencies.cycles`, `dependencies.list`, `dependencies.count`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`; the behavior tokens are `project.enforce`, which announces that a `Bd-Project-Id` stamp for the wrong workspace is refused here rather than silently ignored, `issues.batchApplyLarge`, which announces that `POST /v0/beads/issues:batchApply` accepts the RAISED envelope — up to 1000 items (`ApplyBatchRequest.items.maxItems`), a 16 MiB body, and (for a request over 100 items) a run budget that EXTENDS to an operator-configured ceiling (`bd serve --large-apply-ceiling`, 5 minutes by default) — rather than the original 100-item, 4 MiB bound. The ceiling is a flat whole-run budget, not a value scaled by item count: a 101-item request and a 1000-item request both get the same extended budget. A request at or under 100 items is unaffected either way and keeps the server's ordinary deadline exactly as before. A client that checks for this token before sending a plan over 100 items learns whether THIS server accepts it without paying for a round trip an older server would refuse anyway, and `issues.list.sort`, which announces that `GET /v0/beads/issues` accepts the `sort` query parameter (two closed, pageable total orders — see that parameter) rather than silently answering `unknown_parameter`, and `issues.count.scope`, which announces that `GET /v0/beads/issues:count` accepts `parent`, `no_parent`, `exclude_type`, and `exclude_status` (see those parameters) rather than silently answering `unknown_parameter` for all four, `issues.sweep.wispsPlane`, which announces that `POST /v0/beads/issues:sweep` accepts the `wisps-plane` value of `tier` rather than silently answering `unknown_value`, `issues.sweep.liveDependents`, which announces that the same operation accepts `protect_live_dependents` and answers `skipped.live_dependent` rather than silently answering `unknown_parameter`, and `issues.sweep.limit`, which announces that it accepts `limit` and answers `remaining` rather than silently answering `unknown_parameter`. The list grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation or a behavior — never the version string.
 	//
 	// THIS LIST IS BUILD-LEVEL, NOT WORKSPACE-LEVEL. It says which operations this binary serves, and for every entry but two that is the whole answer. `events.list` and `events.watch` are the exceptions: the durable events journal is a per-workspace setting that is OFF by default, so a server that advertises them may still refuse every request to both with 409 `events_journal_disabled` — correctly, because the operations exist and the workspace has no journal. A consumer of either MUST treat the capability as "this server speaks it" and the 409 as "not on this workspace", and must not read the capability as a promise that records will arrive.
 	Capabilities []string `json:"capabilities"`
@@ -1074,7 +1077,25 @@ type ContextResponse struct {
 	//   had moved underneath it. That silent gap is the whole reason
 	//   this field exists.
 	// * `2` — the first release whose `ContextResponse` carries
-	//   `wire_revision` and `min_client_wire_revision` at all (this one).
+	//   `wire_revision` and `min_client_wire_revision` at all. Still
+	//   current: S4 widened `SweepRequest.tier`'s enum to add
+	//   `wisps-plane` and added `protect_live_dependents` and `limit`
+	//   alongside it, and none of the three bumped this counter.
+	//   `SweepRequest` is a REQUEST-body-only schema — no response ever
+	//   carries it — so nothing decodes it out of a server reply; the
+	//   new enum member and the two new fields are each something only
+	//   an UPDATED CLIENT chooses to send, behind their own behavior
+	//   tokens (`issues.sweep.wispsPlane`, `issues.sweep.liveDependents`,
+	//   `issues.sweep.limit`). An old client that never sends any of the
+	//   three has nothing to misdecode, which is exactly the additive
+	//   case this field exists to NOT gate. The wireshape drift gate
+	//   (`internal/httpapi/wireshape`) tracks, per member, whether it is
+	//   reachable from a request body, a response, or both, and treats
+	//   an enum WIDENING as additive only on a request-only member —
+	//   the identical widening on a response-side (or request+response)
+	//   member still counts as changed and still demands a bump, since
+	//   an existing client decoding a response must keep recognizing
+	//   every value the server might send it.
 	//
 	//
 	// PRESENCE, not just value: a generated client whose JSON decoder zero-values a missing integer field cannot tell, by looking at a decoded `0` alone, whether the server SENT `0` or sent nothing. This is never actually ambiguous in practice, because `0` and `1` are PERMANENTLY RETIRED values — they describe servers that predate this field or carried the brief interim string shape, and no server that implements this field (`CurrentWireRevision` starts at `2` and only increases) will ever legitimately send a literal `0` or `1`. A decoded `0` can therefore only mean "this server omitted the field," and a client inferring from `bd_version` per the paragraph below is doing exactly the right thing in that case, never guessing at a value the field could have meant on its own. A client that wants presence as a first-class fact rather than an inference anyway should decode `wire_revision` into a nullable type, or check for the JSON key's presence directly, instead of relying on this retirement guarantee.
@@ -1937,8 +1958,14 @@ type SweepRequest struct {
 	// DryRun Report what the sweep WOULD do and delete nothing. The counts, the skips and the refusals are the same ones the real sweep would produce, computed against the same snapshot — and nothing is recorded in history either.
 	DryRun *bool `json:"dry_run,omitempty"`
 
+	// Limit Cap how many beads this sweep deletes, OLDEST-CLOSED-FIRST. Absent or zero means unbounded. A negative value is a `400` invalid_argument, the same as the role's own ErrValidation. Behind the `issues.sweep.limit` behavior token: an older server answers `unknown_parameter` for this name.
+	Limit *int64 `json:"limit,omitempty"`
+
 	// Pattern Keep only beads whose id matches this shell glob (`*`, `?`, `[...]`, `\` escapes; `*` also crosses `-` and `.`, since an id is not a path). Absent matches every bead in the tier. A MALFORMED glob is a `400`, never a pattern that matches nothing.
 	Pattern *string `json:"pattern,omitempty"`
+
+	// ProtectLiveDependents Skip a closed candidate that a LIVE (not-done) bead depends on through a parent/child, tracks, or blocks edge, so closing a dependent's dependency does not erase the row a live bead still points at. Protection is TRANSITIVE and crosses the ephemeral/durable plane boundary. Behind the `issues.sweep.liveDependents` behavior token: an older server answers `unknown_parameter` for this name.
+	ProtectLiveDependents *bool `json:"protect_live_dependents,omitempty"`
 
 	// ProtectReferenced Skip candidates whose id is CITED — as a literal, at word boundaries — in the description, notes or comments of any bead that is not done, so a decision trail a live bead still points at is not deleted out from under it.
 	//
@@ -1948,10 +1975,14 @@ type SweepRequest struct {
 	ProtectReferenced *bool `json:"protect_referenced,omitempty"`
 
 	// Tier Which plane to clear. `ephemeral` is the wisp tier (`bd purge`) and `durable` is the issue tier (`bd prune`). The two are DISJOINT: a sweep of one can never touch a bead of the other. Required, with no default — a caller handed the wrong tier has nothing to notice until the beads are gone.
+	//
+	// `wisps-plane` is a THIRD, wider tier: it clears the whole wisps table (ephemeral beads) AND any durable bead with no history row, in one pass. Behind the `issues.sweep.wispsPlane` behavior token: an older server answers `unknown_value` for this member, since it predates the token and knows only the first two values.
 	Tier SweepRequestTier `json:"tier"`
 }
 
 // SweepRequestTier Which plane to clear. `ephemeral` is the wisp tier (`bd purge`) and `durable` is the issue tier (`bd prune`). The two are DISJOINT: a sweep of one can never touch a bead of the other. Required, with no default — a caller handed the wrong tier has nothing to notice until the beads are gone.
+//
+// `wisps-plane` is a THIRD, wider tier: it clears the whole wisps table (ephemeral beads) AND any durable bead with no history row, in one pass. Behind the `issues.sweep.wispsPlane` behavior token: an older server answers `unknown_value` for this member, since it predates the token and knows only the first two values.
 type SweepRequestTier string
 
 // SweepResult What one sweep did. Every number describes the SAME snapshot, because the selection and the deletion ran in one transaction.
@@ -1973,6 +2004,9 @@ type SweepResult struct {
 	// ReferencedIds A BOUNDED SAMPLE of the ids `skipped.referenced` counts — at most 100, in the order the candidate query returned them. It is a sample, not the set: compare its length against 100 to tell a truncated one from a complete one. Absent when nothing was protected.
 	ReferencedIds *[]string `json:"referenced_ids,omitempty"`
 
+	// Remaining How many beads this sweep's own selection left unswept because `limit` cut it off, oldest-closed-first. Always 0 when `limit` was absent, zero, or at least as large as the matching set — never a dropped count, a 0 here means nothing was left over. Present only behind the `issues.sweep.limit` behavior token.
+	Remaining *int64 `json:"remaining,omitempty"`
+
 	// Skipped The candidates a sweep declined to delete, bucketed by WHY. They are separate counters rather than one number because they mean different things: the first two are PROTECTIONS, and the last four are the sweep declining to trust its own input.
 	Skipped SweepSkips `json:"skipped"`
 
@@ -1984,6 +2018,9 @@ type SweepResult struct {
 type SweepSkips struct {
 	// ClosedAtOrAfterCutoff Candidates whose close timestamp did not satisfy `closed_before`. See `not_closed`.
 	ClosedAtOrAfterCutoff int `json:"closed_at_or_after_cutoff"`
+
+	// LiveDependent Candidates protected by `protect_live_dependents`. Always 0 when that member is false or absent. Present only behind the `issues.sweep.liveDependents` behavior token.
+	LiveDependent *int `json:"live_dependent,omitempty"`
 
 	// NotClosed Candidates the tier query returned that the recheck found were not closed. A NON-ZERO VALUE HERE IS A DEFENSE FIRING, not a normal outcome: the query asked for exactly the beads this excludes.
 	NotClosed int `json:"not_closed"`

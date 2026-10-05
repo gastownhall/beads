@@ -161,6 +161,40 @@ const CapCountScope = "issues.count.scope"
 // token gates.
 const CapBatchApplyLarge = "issues.batchApplyLarge"
 
+// CapSweepWispsPlane is the behavior capability announcing that sweepIssues
+// accepts `tier: "wisps-plane"` — a third tier, wider than ephemeral or
+// durable, that clears the whole wisps table plus any durable bead with no
+// history row — spelled exactly as httpapi's constant of the same name (held
+// to it by TestTheProjectIdentityVocabularyMatchesTheServer). sweeper.go's
+// tier mapping checks this token before mapping issueops.SweepWispsPlane onto
+// the wire, refusing locally with a typed capability error rather than
+// dialing a server that would answer the value with unknown_value. See
+// W-SweepRequest.ProtectLiveDependents and W-SweepRequest.Limit (encode/
+// ledger.go) for the sibling S4 members retired the same way; the tier value
+// itself carries no ledger row because it narrows an existing enum rather
+// than adding a request member.
+const CapSweepWispsPlane = "issues.sweep.wispsPlane"
+
+// CapSweepLiveDependents is the behavior capability announcing that
+// sweepIssues honors SweepRequest.protect_live_dependents and answers
+// SweepSkips.live_dependent, spelled exactly as httpapi's constant of the
+// same name (held to it by TestTheProjectIdentityVocabularyMatchesTheServer).
+// sweeper.go reads this token before sending the field, refusing locally with
+// a typed capability error rather than silently dropping the protection
+// against an older server. encode/ledger.go's W-SweepRequest.ProtectLiveDependents
+// row records the S4 closure of what used to be a permanent refusal.
+const CapSweepLiveDependents = "issues.sweep.liveDependents"
+
+// CapSweepLimit is the behavior capability announcing that sweepIssues honors
+// SweepRequest.limit and answers SweepResult.remaining, spelled exactly as
+// httpapi's constant of the same name (held to it by
+// TestTheProjectIdentityVocabularyMatchesTheServer). sweeper.go reads this
+// token before sending the field, refusing locally with a typed capability
+// error rather than silently running an unbounded sweep against an older
+// server. encode/ledger.go's W-SweepRequest.Limit row records the S4 closure
+// of what used to be a permanent refusal.
+const CapSweepLimit = "issues.sweep.limit"
+
 // CapExternalDependencies is the CONDITIONAL behavior capability announcing
 // that the ready, claim and close operations of this server apply bd's
 // external-dependency policy themselves, spelled exactly as httpapi's constant
@@ -193,7 +227,16 @@ const CapExternalDependencies = "policy.external_dependencies"
 // (problem.go's WireRevisionUnsupportedError) instead of answering with a
 // shape this build was never compiled to read. It doubles as the upper bound
 // of the handshake gate below: nothing compiled against revision 2 can
-// promise to decode revision 3.
+// promise to decode a FUTURE, non-additive revision 3.
+//
+// S4 added SweepRequest.protect_live_dependents, SweepRequest.limit and a
+// wisps-plane SweepRequest.tier value, none of which bumped
+// CurrentWireRevision (internal/httpapi/wireshape's drift gate tracks a
+// request-only member's enum widening as additive, not a wire break — see
+// that package's Sides/widensAdditively), so this constant stays 2 too: a
+// revision-2 client (this one, and the S2 client already on main) must keep
+// talking to a revision-2 server rather than refusing it over a bump nothing
+// here required.
 const ClientWireRevision = 2
 
 // ClientMinWireRevision is the oldest SERVER-reported wire_revision this
@@ -289,7 +332,10 @@ func (e *WireRevisionSkewError) Unwrap() error { return ErrWireRevisionSkew }
 // union(opCapability tokens, this) set-equal with httpapi.Capabilities(), which is
 // what makes the server change and this client change land together: the parity
 // test goes red the moment one ships without the other.
-var behaviorCapabilities = []string{CapProjectEnforce, CapBatchApplyLarge, CapListSort, CapCountScope}
+var behaviorCapabilities = []string{
+	CapProjectEnforce, CapBatchApplyLarge, CapListSort, CapCountScope,
+	CapSweepWispsPlane, CapSweepLiveDependents, CapSweepLimit,
+}
 
 // CapabilityFor reports the capability token gating op, and whether op is on
 // this client's map at all. An operation with no token — liveness, the
