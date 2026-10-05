@@ -56,7 +56,35 @@ func init() {
 		"RunIssueOperationsCreateReverseNonBlockingStagesConcreteTables": stagingWaiverReason,
 		"RunIssueOperationsCreateParentChildRecomputesWaitsForClosure":   stagingWaiverReason,
 	})
+	registerContractLegWaivers("http", map[string]string{
+		"RunCycleDetectorIncludeTracksFindsTheMoleculeRootShape":         cycleTracksWireGapWaiverReason,
+		"RunCycleDetectorIncludeTracksIgnoresAPureTracksLoop":            cycleTracksWireGapWaiverReason,
+		"RunCycleDetectorIncludeTracksWalksEachEdgeInItsStoredDirection": cycleTracksWireGapWaiverReason,
+	})
 }
+
+// cycleTracksWireGapWaiverReason covers the one CycleDetector widening option
+// the HTTP wire does not carry at all.
+//
+// issueops.DetectCyclesRequest.IncludeTracks is a WIDENING field consumed
+// today only by `bd dep cycles` in-process. internal/httpapi/cycles.go calls
+// DetectCycles with a bare issueops.DetectCyclesRequest{} — it decodes no
+// query parameter for it — and internal/httpclient's httpCycleDetector takes
+// the request as `_`, forwarding nothing. Neither side of the wire has any
+// plumbing for this field, so the three IncludeTracks cases are structurally
+// unreachable over HTTP rather than failing one.
+//
+// No slice currently scoped (S0-S13 in beads-design/slices.json) adds a query
+// parameter, spec capability token, or handshake entry for this option; S3's
+// own scope lists CycleDetector only for the base walk. Closing this gap is a
+// new slice — a query parameter plus spec/capability plumbing on both ends —
+// not a missing test line, so the waiver stays until that slice exists rather
+// than naming one of S7/S8/S9/S10/S12/S13, none of which touch cycle
+// detection.
+const cycleTracksWireGapWaiverReason = "issueops.DetectCyclesRequest.IncludeTracks has no wire plumbing on " +
+	"either side of internal/httpapi or internal/httpclient today (cycles.go always calls DetectCycles with a " +
+	"zero-value request; the client's DetectCycles ignores its request parameter); no slice through S13 adds " +
+	"one, so closing this is a new, not-yet-numbered slice rather than a missing test line"
 
 // bootstrapSplitWaiverReason covers the one pair of entrypoints that is a
 // RATIFIED PER-LEG SPLIT rather than a gap.

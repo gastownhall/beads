@@ -49,6 +49,18 @@ func init() {
 	registerContractLeg(contractLeg{name: "dolt", wiringRoot: "internal/storage/dolt"})
 	registerContractLeg(contractLeg{name: "embeddeddolt", wiringRoot: "internal/storage/embeddeddolt"})
 	registerContractLeg(contractLeg{name: "uow", wiringRoot: "internal/storage/uow"})
+	registerContractLeg(contractLeg{
+		name:       "http",
+		wiringRoot: "internal/httpclient",
+		adopting: "S3 wires every read role (IssueReader, Counter, ReadyCounter, GraphCounter, EdgeReader, " +
+			"Relations, BlockingAnnotator, TreeWalker, CycleDetector, Querier, StatsReporter, WorkspaceConfig, " +
+			"Memories, Journal minus watch) and the HTTP leg's own CycleDetector.IncludeTracks gap is a named " +
+			"waiver, not part of this ceiling; the skips still counted here are write-role and internal-plumbing " +
+			"entrypoints (lifecycle writes, DependencyEditor, MetadataCAS, Lease, Sweeper, VersionReconciler, " +
+			"Bootstrapper/InitVerifier, and the cross-record invariant suites) that S4 and later write slices " +
+			"wire and ratchet down one tranche at a time",
+		adoptionCeiling: 75,
+	})
 }
 
 // contractLeg is one registered backend leg: what the lock calls it, where its
