@@ -174,6 +174,49 @@ func TestCommitBeadsWorkspaceFiles_LeavesCollateralBeadsContentAlone(t *testing.
 	}
 }
 
+// TestCommitBeadsWorkspaceFiles_IgnoredOwnedFileIsLeftOut covers a project
+// whose tracked .beads/.gitignore ignores one of the files bootstrap owns
+// (metadata.json, kept per clone). `git add` refuses an ignored path, and used
+// to do so after staging the others, leaving the tree half-staged with a
+// warning on every bootstrap (#4791 review). The ignored file is now never
+// passed to git: the others are committed and nothing is left staged.
+func TestCommitBeadsWorkspaceFiles_IgnoredOwnedFileIsLeftOut(t *testing.T) {
+	repo, beadsDir := newBeadsRepo(t)
+	if err := os.WriteFile(filepath.Join(beadsDir, ".gitignore"), []byte("dolt/\nmetadata.json\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repo, "add", ".beads/.gitignore")
+	gitRun(t, repo, "commit", "-m", "ignore metadata.json")
+	before := gitOut(t, repo, "rev-list", "--count", "HEAD")
+
+	// Bootstrap appends a pattern and writes config.yaml and metadata.json.
+	files := map[string]string{
+		".gitignore":    "dolt/\nmetadata.json\nembeddeddolt/\n",
+		"config.yaml":   "backend: dolt\n",
+		"metadata.json": "{}\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(beadsDir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stderr := captureStderr(t, func() { commitBeadsWorkspaceFiles(beadsDir) })
+
+	if strings.Contains(stderr, "Warning") {
+		t.Errorf("expected no warning, got: %s", stderr)
+	}
+	if status := gitPorcelain(t, repo); status != "" {
+		t.Errorf("expected a clean tree with nothing left staged, status:\n%s", status)
+	}
+	if after := gitOut(t, repo, "rev-list", "--count", "HEAD"); after == before {
+		t.Errorf("expected bootstrap's commit, HEAD count still %s", after)
+	}
+	if tracked := gitOut(t, repo, "ls-files", ".beads/metadata.json"); tracked != "" {
+		t.Errorf("the ignored metadata.json must not be committed, ls-files: %q", tracked)
+	}
+}
+
 // TestCommitBeadsWorkspaceFiles_LinkedWorktreeDoesNotTouchMainCheckout
 // verifies the commit lands in the checkout that physically contains the
 // .beads directory, never the main checkout.

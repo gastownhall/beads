@@ -72,11 +72,19 @@ func commitBeadsWorkspaceFiles(beadsDir string) {
 		return append(append(args, "--"), pathspecs...)
 	}
 
-	// Nothing changed in the files bootstrap owns? Then there is nothing to
-	// commit. (A repo that gitignores .beads/ entirely lands here too:
-	// ignored files never show up in status.)
+	// Stage and commit exactly the owned files git reports as changed. Status
+	// never lists an ignored file, so deriving the list from it keeps an owned
+	// file the project gitignores (a tracked .beads/.gitignore naming
+	// metadata.json, say) out of `git add`, which would otherwise refuse it
+	// AFTER staging the others and leave the tree half-staged. Nothing changed?
+	// Then there is nothing to commit; a repo that gitignores .beads/ entirely
+	// lands here too.
 	status, err := gitIn(withPaths("status", "--porcelain")...).Output()
-	if err != nil || strings.TrimSpace(string(status)) == "" {
+	if err != nil {
+		return
+	}
+	pathspecs = changedPorcelainPaths(string(status))
+	if len(pathspecs) == 0 {
 		return
 	}
 
@@ -94,6 +102,19 @@ func commitBeadsWorkspaceFiles(beadsDir string) {
 			fmt.Fprintf(os.Stderr, "Warning: failed to commit beads workspace files: %v\n", err)
 		}
 	}
+}
+
+// changedPorcelainPaths returns the paths in `git status --porcelain` (v1)
+// output, which are relative to the repository root. The callers pass fixed
+// workspace file names, so the rename and quoted forms do not arise.
+func changedPorcelainPaths(status string) []string {
+	var paths []string
+	for _, line := range strings.Split(status, "\n") {
+		if len(line) > 3 {
+			paths = append(paths, line[3:])
+		}
+	}
+	return paths
 }
 
 // gitWorktreeRootContaining returns the root of the git working tree that
