@@ -635,7 +635,7 @@ func TestCapabilitiesAdvertiseEveryImplementedOperation(t *testing.T) {
 	// them; project.enforce and issues.batchApplyLarge are advertised in the
 	// same list. Both are spelled literally here to keep this an independent
 	// oracle rather than a second call to the code under test.
-	want = append(want, "project.enforce", "issues.batchApplyLarge")
+	want = append(want, "project.enforce", "issues.batchApplyLarge", "issues.list.sort", "issues.count.scope")
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		t.Errorf("capabilities = %v, want %v", got, want)

@@ -1,0 +1,81 @@
+{
+  "tables": {
+    "bd_events_journal": {
+      "rows": 113,
+      "sha256": "c2a9b7ad6e65dee7786ed6fa21ac1a5d000b1ce1dec0dfb3bf624609731b9692"
+    },
+    "child_counters": {
+      "rows": 1,
+      "sha256": "f5e17b2526018930f57c3e4481eda9a92c17ecc95d4dbe45547ce1cbf93f6c3e"
+    },
+    "comments": {
+      "rows": 1,
+      "sha256": "1d00eea48c1604c277ef8f3db334b2a2fb88cecc2e4fc93c602aefa4c6cbcbf8"
+    },
+    "dependencies": {
+      "rows": 39,
+      "sha256": "f1104e6cab2ed5c649bc401e736dd3c7c31468b2084b829801e9d9dd2e961454"
+    },
+    "events": {
+      "rows": 107,
+      "sha256": "6647ba6f885c93f0222fccc42b7b356c960e22b94c8f176f5e26342ef7bc2dd0"
+    },
+    "events_ids": {
+      "rows": 1,
+      "sha256": "3ac2e0ef8128f8fd730ed8432446696c1d7b19a6aea38c47dd051df0a3145ba8"
+    },
+    "issue_versions": {
+      "rows": 40,
+      "sha256": "521720fb99afd6620884b3c4f309624339caefa7a9d0f93a8926727918834785"
+    },
+    "issues": {
+      "rows": 42,
+      "sha256": "742c88693fbef407c0648e75ccd42618cb7722ffc6b62546b6a04d3b8dc28254"
+    },
+    "issues_updated_at": {
+      "rows": 41,
+      "sha256": "2b1590dbb503fb2a1dcc71f78261f593f3c9144c4530c80325428b21d5e2164d"
+    },
+    "labels": {
+      "rows": 65,
+      "sha256": "00159813bf11fa4f8a95b29ba51746360d1fcc5f14847c3ac33b46628af07d55"
+    },
+    "wisp_dependencies": {
+      "rows": 2,
+      "sha256": "691b238913b2209274d08a2e3530d74a1d7a7fb2e28b9b0f8f9dc50053da00e7"
+    },
+    "wisp_events": {
+      "rows": 3,
+      "sha256": "f58388b26df82afa9b7b6f98223f6954a80f744ee676cfb6ec7dd5380e4c405a"
+    },
+    "wisp_labels": {
+      "rows": 1,
+      "sha256": "f45f754252b097dbf4e24c97cf2334d288f16b43f0b101dbcada46fa74ca06c5"
+    },
+    "wisps": {
+      "rows": 2,
+      "sha256": "050abfaa2e767f45d66a8f17c5f758f7a0c85bf09e897976a1779bd6834903b8"
+    }
+  },
+  "skipped": [
+    "eq-n30 -\u003e eq-n29: adding dependency would create a cycle",
+    "eq-n32 -\u003e eq-p: eq-n32 cannot be blocked by its ancestor eq-p: eq-p cannot close until its descendants finish, so the gate would never clear",
+    "eq-n34 -\u003e eq-missing: target not found"
+  ],
+  "stale": null,
+  "changed": [
+    "child_counters",
+    "comments",
+    "dependencies",
+    "events",
+    "issues",
+    "labels",
+    "wisp_dependencies",
+    "wisp_events",
+    "wisp_labels",
+    "wisps"
+  ],
+  "counter": [
+    "child_counters"
+  ]
+}

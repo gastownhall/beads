@@ -158,6 +158,204 @@ func TestBuildCountFilterNormalizesLabelsAndIDs(t *testing.T) {
 	}
 }
 
+// TestBuildCountFilterMapsParentAndNoParent pins ParentID/NoParent's mapping
+// into types.IssueFilter, mirroring BuildListFilter's ParentID/NoParent
+// mapping (internal/workapi/list.go) field for field.
+func TestBuildCountFilterMapsParentAndNoParent(t *testing.T) {
+	got, err := BuildCountFilter(issueops.CountRequest{ParentID: "bd-1"}, ListConfig{})
+	if err != nil {
+		t.Fatalf("BuildCountFilter: %v", err)
+	}
+	if got.ParentID == nil || *got.ParentID != "bd-1" {
+		t.Errorf("ParentID = %v, want \"bd-1\"", countPtrStr(got.ParentID))
+	}
+	if got.NoParent {
+		t.Errorf("NoParent = true, want false: request did not set it")
+	}
+
+	got, err = BuildCountFilter(issueops.CountRequest{NoParent: true}, ListConfig{})
+	if err != nil {
+		t.Fatalf("BuildCountFilter: %v", err)
+	}
+	if got.ParentID != nil {
+		t.Errorf("ParentID = %v, want nil: request did not set it", countPtrStr(got.ParentID))
+	}
+	if !got.NoParent {
+		t.Error("NoParent = false, want true")
+	}
+}
+
+// TestBuildCountFilterExcludeTypesSplitsAndNormalizes pins ExcludeTypes'
+// mapping: comma-separated entries split, trim and normalize exactly as
+// BuildListFilter's ExcludeTypes does, and the result APPENDS to (rather than
+// replaces) whatever applyCountIncludeInfra later contributes.
+func TestBuildCountFilterExcludeTypesSplitsAndNormalizes(t *testing.T) {
+	got, err := BuildCountFilter(issueops.CountRequest{
+		// "feat" is an alias (-> "feature", internal/utils/strings.go);
+		// "bug" is not, so it passes through unchanged.
+		ExcludeTypes: []string{" bug , feat", "", "chore"},
+	}, ListConfig{})
+	if err != nil {
+		t.Fatalf("BuildCountFilter: %v", err)
+	}
+	want := []types.IssueType{"bug", "feature", "chore"}
+	if !reflect.DeepEqual(got.ExcludeTypes, want) {
+		t.Errorf("ExcludeTypes = %v, want %v", got.ExcludeTypes, want)
+	}
+
+	// Composes with IncludeInfra's own "gate" exclusion rather than
+	// discarding it.
+	got, err = BuildCountFilter(issueops.CountRequest{
+		ExcludeTypes: []string{"chore"},
+		IncludeInfra: true,
+	}, ListConfig{})
+	if err != nil {
+		t.Fatalf("BuildCountFilter: %v", err)
+	}
+	want = []types.IssueType{"chore", "gate"}
+	if !reflect.DeepEqual(got.ExcludeTypes, want) {
+		t.Errorf("ExcludeTypes = %v, want %v (explicit exclusions composed with IncludeInfra's)", got.ExcludeTypes, want)
+	}
+}
+
+// TestBuildCountFilterParentFieldsMatchListFilter extends the GH#4387
+// count/list cardinality-parity pin to the three new Count fields that DO
+// have a List counterpart: ParentID, NoParent and ExcludeTypes must produce
+// the identical types.IssueFilter contribution BuildListFilter does for the
+// same request, since a filter contract test (backend/conformance) can only
+// show the two AGREE on one backend's rows — this shows WHY, at the one place
+// both builders share.
+func TestBuildCountFilterParentFieldsMatchListFilter(t *testing.T) {
+	cfg := ListConfig{}
+
+	countGot, err := BuildCountFilter(issueops.CountRequest{ParentID: "bd-1"}, cfg)
+	if err != nil {
+		t.Fatalf("BuildCountFilter: %v", err)
+	}
+	listGot, err := BuildListFilter(issueops.ListRequest{ParentID: "bd-1", AllFlag: true}, cfg)
+	if err != nil {
+		t.Fatalf("BuildListFilter: %v", err)
+	}
+	if !reflect.DeepEqual(countGot.ParentID, listGot.ParentID) {
+		t.Errorf("Count ParentID = %v, List ParentID = %v, want equal", countPtrStr(countGot.ParentID), countPtrStr(listGot.ParentID))
+	}
+
+	countGot, err = BuildCountFilter(issueops.CountRequest{NoParent: true}, cfg)
+	if err != nil {
+		t.Fatalf("BuildCountFilter: %v", err)
+	}
+	listGot, err = BuildListFilter(issueops.ListRequest{NoParent: true, AllFlag: true}, cfg)
+	if err != nil {
+		t.Fatalf("BuildListFilter: %v", err)
+	}
+	if countGot.NoParent != listGot.NoParent {
+		t.Errorf("Count NoParent = %v, List NoParent = %v, want equal", countGot.NoParent, listGot.NoParent)
+	}
+
+	countGot, err = BuildCountFilter(issueops.CountRequest{ExcludeTypes: []string{"wisp,feat"}}, cfg)
+	if err != nil {
+		t.Fatalf("BuildCountFilter: %v", err)
+	}
+	// IncludeAllTypes on the list side skips applyTypeSuppressions' OWN
+	// exclusions (template/gate/infra defaults), isolating the one thing this
+	// case compares: the explicit --exclude-type mapping.
+	listGot, err = BuildListFilter(issueops.ListRequest{ExcludeTypes: []string{"wisp,feat"}, AllFlag: true, IncludeAllTypes: true}, cfg)
+	if err != nil {
+		t.Fatalf("BuildListFilter: %v", err)
+	}
+	if !reflect.DeepEqual(countGot.ExcludeTypes, listGot.ExcludeTypes) {
+		t.Errorf("Count ExcludeTypes = %v, List ExcludeTypes = %v, want equal", countGot.ExcludeTypes, listGot.ExcludeTypes)
+	}
+}
+
+// TestBuildCountFilterExcludeStatusTakesNamesAsWritten pins ExcludeStatus: a
+// Count-only field with no List counterpart (ListRequest computes its default
+// exclusions internally and exposes no caller-facing knob for them). Entries
+// split and trim like ExcludeTypes. UNLIKE Status and ExcludeTypes, each name
+// IS validated against the workspace vocabulary (review S8 follow-up #3): a
+// built-in name passes as written, and an unrecognized one is ErrValidation
+// rather than silently excluding nothing.
+func TestBuildCountFilterExcludeStatusTakesNamesAsWritten(t *testing.T) {
+	got, err := BuildCountFilter(issueops.CountRequest{
+		ExcludeStatus: []string{" closed , pinned", ""},
+	}, ListConfig{})
+	if err != nil {
+		t.Fatalf("BuildCountFilter: %v", err)
+	}
+	want := []types.Status{"closed", "pinned"}
+	if !reflect.DeepEqual(got.ExcludeStatus, want) {
+		t.Errorf("ExcludeStatus = %v, want %v", got.ExcludeStatus, want)
+	}
+}
+
+// TestBuildCountFilterExcludeStatusRejectsAnUnknownName pins the ErrValidation
+// refusal (review S8 follow-up #3): a typo'd status name in --exclude-status
+// must fail loudly rather than silently excluding nothing and overcounting.
+func TestBuildCountFilterExcludeStatusRejectsAnUnknownName(t *testing.T) {
+	_, err := BuildCountFilter(issueops.CountRequest{
+		ExcludeStatus: []string{"no-such-status"},
+	}, ListConfig{})
+	if err == nil {
+		t.Fatal("BuildCountFilter accepted an unknown exclude-status name, want ErrValidation")
+	}
+	if !errors.Is(err, issueops.ErrValidation) {
+		t.Errorf("err = %v, want errors.Is(err, issueops.ErrValidation)", err)
+	}
+}
+
+// TestBuildCountFilterExcludeStatusAllowsAWorkspaceCustomStatus pins the other
+// half of #3: a workspace-defined custom status is NOT a typo and must be
+// accepted, following ApplyStatusFilter's own IsValidWithCustom precedent in
+// list.go.
+func TestBuildCountFilterExcludeStatusAllowsAWorkspaceCustomStatus(t *testing.T) {
+	cfg := ListConfig{CustomStatuses: []types.CustomStatus{{Name: "triaged"}}}
+	got, err := BuildCountFilter(issueops.CountRequest{
+		ExcludeStatus: []string{"triaged"},
+	}, cfg)
+	if err != nil {
+		t.Fatalf("BuildCountFilter rejected the workspace's own custom status: %v", err)
+	}
+	want := []types.Status{"triaged"}
+	if !reflect.DeepEqual(got.ExcludeStatus, want) {
+		t.Errorf("ExcludeStatus = %v, want %v", got.ExcludeStatus, want)
+	}
+}
+
+// TestBuildCountFilterRefusesParentAndNoParentTogether pins review S8
+// follow-up #1: the role refuses the combination as ErrValidation, with the
+// same wording `bd list`'s CLI already uses for the same combination
+// (cmd/bd/list_input.go), so a caller reaching this role from any front door
+// gets the identical refusal.
+func TestBuildCountFilterRefusesParentAndNoParentTogether(t *testing.T) {
+	_, err := BuildCountFilter(issueops.CountRequest{ParentID: "bd-1", NoParent: true}, ListConfig{})
+	if err == nil {
+		t.Fatal("BuildCountFilter accepted --parent with --no-parent, want ErrValidation")
+	}
+	if !errors.Is(err, issueops.ErrValidation) {
+		t.Errorf("err = %v, want errors.Is(err, issueops.ErrValidation)", err)
+	}
+	const want = "--parent and --no-parent are mutually exclusive"
+	if err.Error() != want {
+		t.Errorf("err = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestBuildCountFilterStatusAllIsNotValidation pins DESIGN's requirement that
+// Status "all" have well-defined semantics: it is the no-filter spelling
+// (same as empty), NOT ErrValidation, because BuildListFilter's own "all"
+// selector means the same thing and a count must stay able to answer the
+// cardinality of `bd list --status all --all` for the shared predicate
+// (GH#4387 count/list parity).
+func TestBuildCountFilterStatusAllIsNotValidation(t *testing.T) {
+	got, err := BuildCountFilter(issueops.CountRequest{Status: "all"}, ListConfig{})
+	if err != nil {
+		t.Fatalf(`BuildCountFilter(status="all") returned an error, want nil: %v`, err)
+	}
+	if got.Status != nil {
+		t.Errorf(`status "all" produced Status = %v, want no status predicate`, countPtrStr(got.Status))
+	}
+}
+
 func TestBuildCountFilterCarriesMetadataFields(t *testing.T) {
 	fields := map[string]string{"team": "platform", "env": "prod"}
 	got, err := BuildCountFilter(issueops.CountRequest{MetadataFields: fields}, ListConfig{})

@@ -39,6 +39,7 @@ go_library(
         "cleanup.go",
         "close.go",
         "close_direct.go",
+        "close_if_revision.go",
         "close_proxied_server.go",
         "closed_delete_candidates.go",
         "codex_hook.go",
@@ -157,6 +158,7 @@ go_library(
         "hooks.go",
         "human.go",
         "human_proxied_server.go",
+        "if_revision.go",
         "import.go",
         "import_path.go",
         "import_proxied_server.go",
@@ -522,6 +524,7 @@ go_test(
         "backup_dolt_test.go",
         "backup_embedded_test.go",
         "backup_export_failure_test.go",
+        "backup_export_watermark_test.go",
         "backup_lock_test.go",
         "backup_proxied_external_integration_test.go",
         "backup_proxied_local_integration_test.go",
@@ -554,6 +557,8 @@ go_test(
         "close_failure_report_test.go",
         "close_fanin_proxied_integration_test.go",
         "close_gate_test.go",
+        "close_if_revision_embedded_test.go",
+        "close_if_revision_proxied_test.go",
         "close_last_touched_test.go",
         "close_proxied_integration_test.go",
         "close_reason_file_test.go",
@@ -808,6 +813,11 @@ go_test(
         "identity_preview_gate_cgo_test.go",
         "identity_preview_gate_test.go",
         "identity_preview_refusal_test.go",
+        "if_revision_embedded_test.go",
+        "if_revision_proxied_close_delete_test.go",
+        "if_revision_reassign_fence_embedded_test.go",
+        "if_revision_reassign_fence_proxied_test.go",
+        "if_revision_test.go",
         "import_chunking_embedded_test.go",
         "import_chunking_test.go",
         "import_embedded_test.go",
@@ -854,6 +864,7 @@ go_test(
         "jira_test.go",
         "json_flag_shadow_test.go",
         "kv_embedded_test.go",
+        "kv_prefix_test.go",
         "kv_proxied_integration_test.go",
         "kv_test.go",
         "label_embedded_test.go",
@@ -1089,6 +1100,7 @@ go_test(
         "shared_migrate_consent_test.go",
         "shared_server_cfgnil_test.go",
         "shared_server_cleanup_test.go",
+        "shared_server_if_revision_concurrency_test.go",
         "shared_server_integration_test.go",
         "shared_store_migrate_gate_test.go",
         "ship_embedded_test.go",
@@ -1544,6 +1556,13 @@ exports_files(
 exports_files(
     ["init_safety_help.go"],
     visibility = ["//test/docsync:__pkg__"],
+)
+
+# Contributor agent instructions; root AGENTS.md links them and
+# //:docsync_files checks those links.
+exports_files(
+    ["AGENTS.md"],
+    visibility = ["//:__pkg__"],
 )
 
 # Release-metadata surfaces gated by //internal/versioncheck's releaseSources

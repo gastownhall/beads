@@ -367,7 +367,8 @@ func TestSetupBazelRCWriterForkMode(t *testing.T) {
 		cmd := exec.Command(bash, script)
 		cmd.Dir = ws
 		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GITHUB_WORKSPACE=" + ws, "GITHUB_OUTPUT=" + filepath.Join(dir, "out"),
-			"BAZEL_CI_CACHE_DIR=" + filepath.Join(dir, "cache"), "BAZEL_CI_SECRET_DIR=" + secret}
+			"BAZEL_CI_CACHE_DIR=" + filepath.Join(dir, "cache"), "BAZEL_CI_SECRET_DIR=" + secret,
+			"RBE_CACHE_PROBE_URL=" + refusedProbeURL}
 		for k, v := range env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}

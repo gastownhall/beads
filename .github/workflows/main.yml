@@ -770,6 +770,19 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go build -v -tags gms_pure_go ./cmd/bd
 
+      # Seeds the macOS non-race GOCACHE that pr.yml's pr-preflight-platforms
+      # and check-doc-freshness-platforms macOS legs restore with the test
+      # packages they actually compile (./cmd/bd's test variant and its
+      # test-only deps, ./scripts both tag sets, gitattributespolicy). The
+      # Build step above only compiles the non-test ./cmd/bd graph, so the PR
+      # legs otherwise compile every test-only dependency cold on each run.
+      # Same shared script as the Linux and Windows seeders.
+      - name: Warm non-race GOCACHE for macOS preflight/doc-freshness
+        if: matrix.os == 'macos-latest'
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
+        run: bash scripts/ci/warm-non-race-cache.sh
+
       # Both lanes below pass -timeout=30m explicitly. ./cmd/bd has outgrown
       # `go test`'s 10m per-package default (see scripts/ci/pr-core.sh and
       # #6091), and when it trips the alarm the panic names whichever test was

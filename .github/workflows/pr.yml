@@ -5,7 +5,7 @@ on:
     # release/** is here because release-prep and release-fix PRs are based on
     # the release branch, not on main. Without it they run almost no CI and the
     # first full signal is the tag build, where a failure burns the tag.
-    branches: [ main, 'release/**' ]
+    branches: [ main, 'release/**', 'hotfix/**' ]
   merge_group:
 
 concurrency:
@@ -58,8 +58,13 @@ env:
   # BAZEL_CMD_DOLT result. "true" adds BAZEL_CMD_DOLT to CI_GATE_REQUIRED in
   # the "Evaluate CI gate" step's run script; bazel-gate.sh still accepts
   # its skip in modes skip and local. Committed, not a repo variable, for
-  # the same reason as the flags above.
-  BAZEL_CMD_DOLT_REQUIRED: "false"
+  # the same reason as the flags above. The `bazel` job's cmd-dolt-required
+  # input must equal it (a `with:` cannot read env; policy-tested): "true"
+  # also drops //cmd/bd:bd_test from bazel-integration, because the required
+  # lane runs the same integration-build bd_test without the dolt skip, so
+  # each cmd/bd test runs once. Rollback: commit "false" here and false in
+  # that input together; bazel-integration runs bd_test again on the next run.
+  BAZEL_CMD_DOLT_REQUIRED: "true"
 
 jobs:
 
@@ -1033,8 +1038,17 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test '-tags=gms_pure_go' -count=1 -run '^TestGeneratedHookTimeoutProcessBoundary$' ./cmd/bd
 
+      # This step recompiles ./cmd/bd's test binary. It must share the restored
+      # GOCACHE with the hook-timeout step above (same tags, same platform
+      # default CGO_ENABLED, see the script's header) so it is a relink rather
+      # than a second cold compile: without GOCACHE here it fell back to the
+      # runner's empty default cache and cold-compiled all of ./cmd/bd on every
+      # PR (210-240s on macos-latest, ~120s on Windows; the leg's long pole).
+      # TestPRPreflightPlatformsRunStepsUseRestoredGoBuildCache pins this.
       - name: Exercise native init gateway credential shell
         shell: bash
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: bash scripts/ci/test-init-gateway-credential.sh "$RUNNER_OS"
 
       - name: Exercise credential command fixtures on Windows
@@ -1042,6 +1056,7 @@ jobs:
         shell: pwsh
         env:
           CGO_ENABLED: "0"
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: |
           $go = (Get-Command go -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
           $hostInfo = @(& $go env GOHOSTOS GOOS)
@@ -1078,11 +1093,15 @@ jobs:
       - name: Check benchmark environment scrubbing
         if: matrix.os == 'windows-latest'
         shell: bash
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test -tags gms_pure_go -count=1 -run '^(TestCleanEnvUsesHostKeySemantics|TestBenchmarkCommandBuildersStripDoltEnvOverrides)$' ./scripts/repro-dolt-prod-timeouts
 
       - name: Check shared environment key semantics
         if: matrix.os == 'windows-latest'
         shell: bash
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: bash scripts/ci/test-windows-env-helpers.sh
 
   # F3: package-mcp and package-npm (and the detect job that fed them) moved
@@ -2281,6 +2300,9 @@ jobs:
     with:
       build-artifact-name: bazel-ci-build-artifacts
       integration: "on"
+      # Must equal BAZEL_CMD_DOLT_REQUIRED (top of this file; policy-tested):
+      # true leaves //cmd/bd:bd_test to the then-required bazel-cmd-dolt.
+      cmd-dolt-required: true
       # F3: only pr.yml opts in; the package-mcp/package-npm jobs run inside
       # this call, needing only its rbe job.
       package-gates: "on"

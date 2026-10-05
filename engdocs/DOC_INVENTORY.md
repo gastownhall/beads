@@ -63,7 +63,7 @@ Follow-up automation should replace marker-only checks with generated or
 | `BDP_GRAPH_ARCHITECTURE.md` | Keep | Graph-plane design record; ruled contracts and dated dependency sources, not runtime or merge clearance. |
 | `BDP_GRAPH_CLI_AND_STORAGE_SPEC.md` | Keep | Graph-plane design record; ruled contracts and dated dependency sources, not runtime or merge clearance. |
 | `CLAUDE_INTEGRATION.md` | Keep | Design/user guide for Claude setup; paired with `SETUP.md`. |
-| `CLAUDE.md` | Revise | Kept as architecture orientation only; command/workflow duplication was reduced in favour of root `AGENTS.md` and `AGENT_INSTRUCTIONS.md`. |
+| `AGENTS.md` (`CLAUDE.md` is a symlink to it) | Keep | Contributor orientation for `engdocs/`: verified pointers only; workflow rules live in the root `AGENTS.md`. |
 | `CLI_REFERENCE.md` | Keep/generated | Generated command reference from live help output. |
 | `CI_CLEANUP_PLAN.md` | Keep as maintainer context | Dated CI policy, measurements, and implementation roadmap; current commands live in workflows and the `Makefile`. |
 | `CI_REQUIRED_CHECK_TOPOLOGY.md` | Keep as maintainer context | Implemented workflow design record for aggregate-gate policy; branch-protection and ruleset adoption remain pending. Live job membership and display names come from `.github/workflows/*.yml` and their structural tests; copied wiring and rollout steps are historical snapshots. |

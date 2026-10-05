@@ -1941,7 +1941,7 @@ var rootCmd = &cobra.Command{
 				hookRunner = hooks.NewRunner(filepath.Join(beadsDir, "hooks"))
 				uowSinks.Hook = hookRunner
 			}
-			uowProvider = wireExternalDependencyUOWProvider(uow.NewNotifyingProvider(p, uowSinks))
+			uowProvider = wireProxiedUOWProvider(p, uowSinks)
 
 			// Honor dolt.auto-commit for proxied writes the same way
 			// issueOpsContext already does for the direct/SQL-server routes
@@ -2060,7 +2060,7 @@ var rootCmd = &cobra.Command{
 			if renderTypedOpenError(err) {
 				return SilentExit()
 			}
-			return HandleError("failed to open database: %v", err)
+			return HandleError("%v", openStoreError(cfg.GetBackend(), err))
 		}
 
 		// Mark store as active for flush goroutine safety

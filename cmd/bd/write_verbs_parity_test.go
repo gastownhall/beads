@@ -1159,7 +1159,7 @@ func TestParityUpdateGuardsRequireFieldUpdate(t *testing.T) {
 	if res.exitCode != 1 {
 		t.Fatalf("exit = %d, want 1; stderr=%s", res.exitCode, res.stderr)
 	}
-	const want = "Error: --if-assignee/--if-status require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard\n"
+	const want = "Error: --if-assignee/--if-status/--if-revision require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard\n"
 	if res.stderr != want {
 		t.Errorf("stderr = %q, want %q", res.stderr, want)
 	}
@@ -1184,7 +1184,7 @@ func TestParityUpdateGuardsRejectClaim(t *testing.T) {
 	if res.exitCode != 1 {
 		t.Fatalf("exit = %d, want 1; stderr=%s", res.exitCode, res.stderr)
 	}
-	const want = "Error: cannot combine --if-assignee/--if-status with --claim (--claim is already an atomic compare-and-set)\n"
+	const want = "Error: cannot combine --if-assignee/--if-status/--if-revision with --claim (--claim is already an atomic compare-and-set)\n"
 	if res.stderr != want {
 		t.Errorf("stderr = %q, want %q", res.stderr, want)
 	}
@@ -1696,6 +1696,42 @@ func TestParityCloseAlreadyClosedIsIdempotentSuccess(t *testing.T) {
 	}
 	if n := countOf(env.eventTypes("test-cls7"), string(types.EventClosed)); n != closedEventsAfterFirst {
 		t.Errorf("closed events = %d, want %d (a re-close must add none)", n, closedEventsAfterFirst)
+	}
+}
+
+// TestParityCloseIfRevisionRejectsContinueSuggestNextClaimNext pins
+// mc-zndi7.76 (gap 4 / mutant ML): --if-revision's single-id compare-and-swap
+// bypass (cmd/bd/close.go:109-117) never looks at --continue, --suggest-next
+// or --claim-next, so honoring any of them would silently drop what the
+// caller asked for instead of reporting it. Each of the three flags is
+// refused independently, before any write.
+func TestParityCloseIfRevisionRejectsContinueSuggestNextClaimNext(t *testing.T) {
+	for _, flag := range []string{"continue", "suggest-next", "claim-next"} {
+		t.Run(flag, func(t *testing.T) {
+			env := newParityEnv(t)
+			seeded := env.seed("test-clsifr-"+flag, "Guarded close vs "+flag, nil)
+			rev := env.get(seeded.ID).RowVersion
+
+			env.setFlags(closeCmd, map[string]string{
+				"if-revision": fmt.Sprintf("%d", rev),
+				flag:          "true",
+			})
+			res := env.run(closeCmd, seeded.ID)
+
+			if res.exitCode != 1 {
+				t.Fatalf("exit = %d, want 1\nstderr:\n%s", res.exitCode, res.stderr)
+			}
+			const want = "Error: --if-revision does not support --continue, --suggest-next, or --claim-next\n"
+			if res.stderr != want {
+				t.Errorf("stderr = %q, want %q", res.stderr, want)
+			}
+			if got := env.get(seeded.ID); got.Status == types.StatusClosed {
+				t.Error("the issue must not have been closed")
+			}
+			if got := env.store.mutations(); len(got) != 0 {
+				t.Errorf("store mutations = %v, want none (rejected pre-write)", got)
+			}
+		})
 	}
 }
 

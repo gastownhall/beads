@@ -491,6 +491,15 @@ type Server struct {
 	writeStall time.Duration
 	watchPoll  time.Duration
 	watchBeat  time.Duration
+	// minClientWireRevision is the field checkWireRevision enforces against.
+	// It starts at the package constant MinClientWireRevision and exists as
+	// a field, rather than a direct read of that constant, only so a test can
+	// raise the floor in milliseconds the way it shrinks semTimeout above —
+	// production never overrides it. Unlike semTimeout et al it is an int
+	// with no zero-value ambiguity to paper over with orDefault: the
+	// constant's own real-world default is 0, so a freshly zeroed Server
+	// behaves identically whether or not Listen ran yet.
+	minClientWireRevision int
 	// drainTimeout overrides the package-level drainTimeout constant used as
 	// drainBudget's floor. A test shrinks this to prove Serve's drain
 	// actually EXTENDS past it for an in-flight large apply, instead of
@@ -632,11 +641,12 @@ func Listen(cfg Config) (*Server, error) {
 		workspaceMemories: cfg.Memories,
 		eventsJournal:     cfg.EventsJournal,
 
-		sem:               make(chan struct{}, maxInflight),
-		semTimeout:        semAcquireTimeout,
-		semWarn:           saturationWarn,
-		largeApplySem:     make(chan struct{}, 1),
-		largeApplyCeiling: orDefault(cfg.LargeApplyCeiling, DefaultLargeApplyCeiling),
+		sem:                   make(chan struct{}, maxInflight),
+		semTimeout:            semAcquireTimeout,
+		semWarn:               saturationWarn,
+		minClientWireRevision: MinClientWireRevision,
+		largeApplySem:         make(chan struct{}, 1),
+		largeApplyCeiling:     orDefault(cfg.LargeApplyCeiling, DefaultLargeApplyCeiling),
 
 		closing:         make(chan struct{}),
 		maxWatchStreams: maxWatchStreams,
@@ -1867,6 +1877,18 @@ func (s *Server) route(rt route) http.Handler {
 		// behind the authentication gate.
 		if !rt.projectExempt {
 			if res := s.checkProjectStamp(r); res != nil {
+				s.fail(w, r, *res)
+				return
+			}
+		}
+
+		// Wire-floor before resources, same as the project stamp: a client that
+		// has declared a revision this build no longer supports is turned away
+		// before it can buy a database slot or open a unit of work. Checked on
+		// every route but health (see wireRevisionExempt) — including the
+		// identity handshake, where catching the mismatch is cheapest.
+		if !rt.wireRevisionExempt {
+			if res := s.checkWireRevision(r); res != nil {
 				s.fail(w, r, *res)
 				return
 			}

@@ -39,6 +39,7 @@ go_library(
         "sweep.go",
         "tree.go",
         "update.go",
+        "wire_revision.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/httpapi",
     visibility = ["//:__subpackages__"],
@@ -103,12 +104,13 @@ go_test(
         "tree_test.go",
         "update_test.go",
         "wire_bijection_test.go",
+        "wire_revision_test.go",
     ],
     data = [
         "claim.go",
         "//cmd/bd:list.go",
         "//cmd/bd:ready.go",
-    ],
+    ] + glob(["testdata/**"]),
     embed = [":httpapi"],
     deps = [
         "//internal/config",
