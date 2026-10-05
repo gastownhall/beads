@@ -129,6 +129,7 @@ go_test(
         "aggregate_authorize_transfer_test.go",
         "as_of_test.go",
         "batch_apply_test.go",
+        "batchget_test.go",
         "batching_test.go",
         "blocked_consistency_test.go",
         "blocked_recheck_test.go",

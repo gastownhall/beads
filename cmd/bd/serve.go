@@ -849,9 +849,10 @@ type serveRoles struct {
 	edges       issueops.EdgeReader
 	edgeCounter issueops.GraphCounter
 	// batchGetter is the one-snapshot, many-ids read behind
-	// POST /v0/beads/issues:batchGet. Its accessor does NOT recurse through
-	// the hook decorator — it answers no writes — so it is taken off the
-	// peeled store with the rest for uniformity rather than out of necessity.
+	// POST /v0/beads/issues:batchGet. Its hook decorator recurses to the inner
+	// getter WITHOUT wrapping it — a read fires no completion hooks — so it is
+	// taken off the peeled store with the rest for uniformity rather than out
+	// of necessity.
 	batchGetter  issueops.BatchGetter
 	relations    issueops.Relations
 	commenter    issueops.Commenter
