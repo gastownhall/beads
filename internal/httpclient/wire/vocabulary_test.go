@@ -148,6 +148,22 @@ func TestTheProjectIdentityVocabularyMatchesTheServer(t *testing.T) {
 	if ReasonProjectMismatch != string(httpapi.ReasonProjectMismatch) {
 		t.Errorf("ReasonProjectMismatch = %q, server says %q", ReasonProjectMismatch, httpapi.ReasonProjectMismatch)
 	}
+	if WireRevisionHeader != httpapi.WireRevisionHeader {
+		t.Errorf("WireRevisionHeader = %q, server says %q", WireRevisionHeader, httpapi.WireRevisionHeader)
+	}
+	if ReasonWireRevisionUnsupported != string(httpapi.ReasonWireRevisionUnsupported) {
+		t.Errorf("ReasonWireRevisionUnsupported = %q, server says %q", ReasonWireRevisionUnsupported, httpapi.ReasonWireRevisionUnsupported)
+	}
+	// ClientWireRevision is this build's OWN declared revision, not a mirror of
+	// a server constant — but it must never exceed the server's own current
+	// revision, or this client would be declaring a shape it cannot possibly
+	// have been built to decode (CurrentWireRevision is the newest that exists).
+	if ClientWireRevision > httpapi.CurrentWireRevision {
+		t.Errorf("ClientWireRevision = %d, which is newer than the server's own CurrentWireRevision %d", ClientWireRevision, httpapi.CurrentWireRevision)
+	}
+	if ClientWireRevision != httpapi.CurrentWireRevision {
+		t.Errorf("ClientWireRevision = %d, server's CurrentWireRevision = %d; this client's declared revision has drifted from the one it was built against", ClientWireRevision, httpapi.CurrentWireRevision)
+	}
 	// The behavior mirror is exactly the server's, so the union above cannot pass
 	// by coincidence — a behavior token on one side only would fail here. The
 	// literal is spelled out member by member rather than compared against the

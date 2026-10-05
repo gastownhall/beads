@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // APIVersion is the path major this client speaks. ContextResponse.api_version
@@ -150,6 +151,101 @@ const CapBatchApplyLarge = "issues.batchApplyLarge"
 // the policy itself.
 const CapExternalDependencies = "policy.external_dependencies"
 
+// ClientWireRevision is the wire shape this client was built to speak and
+// decode, mirroring internal/httpapi/wire_revision.go's CurrentWireRevision.
+// It is sent as the Bd-Wire-Revision request header on every request
+// (Client.stampRequest), so a server whose own min_client_wire_revision has
+// moved past it refuses with the typed wire_revision_unsupported problem
+// (problem.go's WireRevisionUnsupportedError) instead of answering with a
+// shape this build was never compiled to read. It doubles as the upper bound
+// of the handshake gate below: nothing compiled against revision 2 can
+// promise to decode revision 3.
+const ClientWireRevision = 2
+
+// ClientMinWireRevision is the oldest SERVER-reported wire_revision this
+// client tolerates — the other half of DESIGN.txt sec 4's "Client rule":
+// handshake once per Store and gate on api_version == "v0" AND wire_revision
+// within [client_min, client_max]. It is 0, not 2, because a decoded 0 means
+// only that the server omitted ContextResponse.wire_revision entirely: 0 and
+// 1 are permanently retired values no server implementing the member will
+// ever legitimately send (see that field's doc comment), and the one thing a
+// server old enough to omit it can still do is answer revision/expected_version
+// tokens as bare JSON integers rather than the decimal strings upstream #6053
+// standardized — a shape problem.go's legacyRevisionFields already tolerates.
+// There is therefore nothing on the low end for this client to refuse.
+const ClientMinWireRevision = 0
+
+// checkWireRevision applies the handshake half of the Client rule to a decoded
+// ContextResponse, returning the typed skew refusal when the server's wire
+// shape falls outside what this client build can speak, or nil when it is
+// safe to proceed.
+//
+// Two independent conditions trigger it: the server's own
+// min_client_wire_revision already exceeds what this client declares (so
+// every request would earn the same wire_revision_unsupported 400 the
+// Bd-Wire-Revision header invites — refusing here spends no round trip
+// learning what the handshake already answered), or the server's own
+// wire_revision is past ClientWireRevision (a future, non-additive wire
+// change this build predates). A decoded wire_revision of 0 never trips the
+// second check on its own: per ClientMinWireRevision's doc, that is the
+// "omitted" signal, not a value above range.
+func (c *Client) checkWireRevision(body apigen.ContextResponse) error {
+	switch {
+	case body.MinClientWireRevision > ClientWireRevision:
+		return &WireRevisionSkewError{
+			ServerURL:             c.base.Redacted(),
+			BdVersion:             stripControlRunes(body.BdVersion),
+			ClientWireRevision:    ClientWireRevision,
+			ServerWireRevision:    body.WireRevision,
+			MinClientWireRevision: body.MinClientWireRevision,
+		}
+	case body.WireRevision > ClientWireRevision:
+		return &WireRevisionSkewError{
+			ServerURL:             c.base.Redacted(),
+			BdVersion:             stripControlRunes(body.BdVersion),
+			ClientWireRevision:    ClientWireRevision,
+			ServerWireRevision:    body.WireRevision,
+			MinClientWireRevision: body.MinClientWireRevision,
+		}
+	default:
+		return nil
+	}
+}
+
+// ErrWireRevisionSkew reports a handshake-time wire-shape mismatch this client
+// cannot safely proceed past. See WireRevisionSkewError.
+var ErrWireRevisionSkew = errors.New("bd serve speaks a wire revision this client does not")
+
+// WireRevisionSkewError is DESIGN.txt sec 4's Client rule, violated: the
+// server's wire shape is outside [ClientMinWireRevision, ClientWireRevision].
+// It is raised by Handshake itself, from a 200 ContextResponse, which is what
+// separates it from WireRevisionUnsupportedError (problem.go) — that one is
+// the SERVER refusing a request with a 400 after reading this client's own
+// declared Bd-Wire-Revision header; this one is the CLIENT declining to
+// proceed after reading the server's.
+type WireRevisionSkewError struct {
+	ServerURL string
+	BdVersion string
+	// ClientWireRevision is this build's own declared revision.
+	ClientWireRevision int
+	// ServerWireRevision is the server's ContextResponse.wire_revision, decoded
+	// as-is (0 means the server omitted the member; see ClientMinWireRevision).
+	ServerWireRevision int
+	// MinClientWireRevision is the server's ContextResponse.min_client_wire_revision.
+	MinClientWireRevision int
+}
+
+func (e *WireRevisionSkewError) Error() string {
+	if e.MinClientWireRevision > e.ClientWireRevision {
+		return fmt.Sprintf("bd serve at %s (bd_version %s) requires a client wire revision of at least %d; this client speaks %d",
+			e.ServerURL, e.BdVersion, e.MinClientWireRevision, e.ClientWireRevision)
+	}
+	return fmt.Sprintf("bd serve at %s (bd_version %s) speaks wire revision %d, newer than any shape this client build knows how to decode (max %d)",
+		e.ServerURL, e.BdVersion, e.ServerWireRevision, e.ClientWireRevision)
+}
+
+func (e *WireRevisionSkewError) Unwrap() error { return ErrWireRevisionSkew }
+
 // behaviorCapabilities mirrors the server's own behavior-token set (httpapi's
 // behaviorCapabilities): the advertised tokens that name a server-wide behavior
 // rather than an operation. TestCapabilityTableMatchesTheServerRouteTable proves
@@ -235,6 +331,13 @@ func (c *Client) Handshake(ctx context.Context) (*Snapshot, error) {
 	}
 	if body.ApiVersion != APIVersion {
 		return nil, &APIVersionError{ServerURL: c.base.Redacted(), Got: body.ApiVersion, Want: APIVersion}
+	}
+	// The Client rule's other half (DESIGN.txt sec 4), run right after the
+	// api_version gate and before the identity gate: a server this client
+	// cannot decode is not a server worth reporting a wrong-project diagnosis
+	// against either, and api_version is the coarser, cheaper check of the two.
+	if err := c.checkWireRevision(body); err != nil {
+		return nil, err
 	}
 	if c.expectID != "" && body.ProjectId != c.expectID {
 		// These three are server-controlled and end up in an error rendered to a
@@ -430,3 +533,30 @@ func (e *ProjectMismatchError) Error() string {
 }
 
 func (e *ProjectMismatchError) Unwrap() error { return ErrProjectMismatch }
+
+// BatchTooLargeError is a locally-refused issues:batchApply plan: the item
+// count exceeds issueops.MaxApplyBatchItems, the absolute ceiling every v0
+// server enforces regardless of capability (internal/httpapi's
+// maxApplyBatchItems). ApplyBatch (writes.go) raises it before any network
+// call — never dialing a plan this large — the same way Preflight never
+// dials an operation the server has not advertised. It lives here rather
+// than beside ApplyBatch because every exported method in writes.go is swept
+// by TestEveryOperationMethodRoutesThroughTheSharedDispatch as an operation
+// dispatch method; this type's two methods are not one.
+//
+// It unwraps to issueops.ErrValidation, the sentinel a server's own 400 on
+// the same oversized plan would classify as, had the request been allowed to
+// reach it.
+type BatchTooLargeError struct {
+	Op        string
+	ServerURL string
+	Count     int
+	Limit     int
+}
+
+func (e *BatchTooLargeError) Error() string {
+	return fmt.Sprintf("%s: a plan of %d items exceeds the %d-item ceiling bd serve at %s enforces; split it into requests of %d or fewer",
+		e.Op, e.Count, e.Limit, e.ServerURL, e.Limit)
+}
+
+func (e *BatchTooLargeError) Unwrap() error { return issueops.ErrValidation }

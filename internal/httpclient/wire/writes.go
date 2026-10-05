@@ -8,7 +8,19 @@ import (
 	"net/url"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
+	"github.com/steveyegge/beads/issueops"
 )
+
+// defaultApplyBatchItemCap is the item cap this client enforces against a
+// server that does NOT advertise CapBatchApplyLarge — the original,
+// always-supported shape every v0 server answers regardless of build. It is
+// deliberately not the only cap this client ever applies: see ApplyBatch,
+// which reads the handshake snapshot on every call and raises the ceiling to
+// issueops.MaxApplyBatchItems the moment the server says it can take it. A
+// compiled constant used UNCONDITIONALLY is exactly what task #3 forbids —
+// this one is the floor a server might not have raised, not the client's own
+// opinion of where the line should be.
+const defaultApplyBatchItemCap = 100
 
 // The v0 write operations, one method per operationId.
 //
@@ -428,6 +440,36 @@ type ApplyBatchRequest struct {
 // puts the offender back from `item_issue_id`, which the server reads inside the
 // refusing transaction.
 func (c *Client) ApplyBatch(ctx context.Context, body ApplyBatchRequest) (*apigen.ApplyBatchResponse, error) {
+	// The batch cap, read off the handshake snapshot rather than a bare
+	// compiled constant (task #3): a server that has not raised its own
+	// ceiling only ever promised the original 100-item shape, and sending it
+	// more would earn a 400 this client can refuse before paying the round
+	// trip for. Handshake is cached after the first call, so this costs no
+	// extra dial on the common path — ApplyBatch is never a baseline
+	// operation, so Preflight below would force the same fetch anyway.
+	snap, err := c.Handshake(ctx)
+	if err != nil {
+		return nil, err
+	}
+	limit := defaultApplyBatchItemCap
+	if snap.Has(CapBatchApplyLarge) {
+		limit = issueops.MaxApplyBatchItems
+	}
+	if n := len(body.Items); n > limit {
+		if !snap.Has(CapBatchApplyLarge) && n <= issueops.MaxApplyBatchItems {
+			// Raising the ceiling would admit this plan: the exact "a
+			// capability it does not advertise" shape the skew matrix already
+			// covers (D7 case 2), caught here before the dial instead of read
+			// back off the 400 an unaware server would otherwise answer with
+			// its own un-raised cap.
+			return nil, NewCapabilityError(OpApplyBatch, CapBatchApplyLarge, c.base.Redacted(), &snap.Context)
+		}
+		// Over the absolute ceiling even with the capability present: no
+		// token any server could advertise raises this further, so it is a
+		// validation refusal rather than a skew one — see BatchTooLargeError.
+		return nil, &BatchTooLargeError{Op: OpApplyBatch, ServerURL: c.base.Redacted(), Count: n, Limit: issueops.MaxApplyBatchItems}
+	}
+
 	var out apigen.ApplyBatchResponse
 	r := Request{Op: OpApplyBatch, Method: http.MethodPost, Path: PathIssuesBatchApply, Body: body}
 	if err := c.dispatch(ctx, r, &out); err != nil {

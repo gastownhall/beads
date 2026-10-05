@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +27,13 @@ import (
 // header is redeclared here rather than imported because internal/httpapi is the
 // SERVER — importing it would drag the storage engine into every client process.
 const ProjectIDHeader = "Bd-Project-Id"
+
+// WireRevisionHeader names the per-request wire-shape declaration this client
+// sends on every request, spelled exactly as the server's own
+// httpapi.WireRevisionHeader (held to it by
+// TestTheProjectIdentityVocabularyMatchesTheServer). Redeclared rather than
+// imported for ProjectIDHeader's reason: internal/httpapi is the SERVER.
+const WireRevisionHeader = "Bd-Wire-Revision"
 
 const (
 	// DefaultUserAgent identifies the backend rather than the build. The build
@@ -374,6 +382,12 @@ func (c *Client) roundTrip(ctx context.Context, r Request, u *url.URL, body []by
 // New, so Set cannot corrupt the header.
 func (c *Client) stampRequest(ctx context.Context, op string, req *http.Request) error {
 	req.Header.Set("User-Agent", c.userAgent)
+	// The client's own declared wire shape (see ClientWireRevision's doc),
+	// stamped on every request including the context fetch itself: a server
+	// whose min_client_wire_revision has moved past what this build speaks
+	// refuses with the typed wire_revision_unsupported problem rather than
+	// silently answering a body this client has already said it cannot decode.
+	req.Header.Set(WireRevisionHeader, strconv.Itoa(ClientWireRevision))
 	if c.expectID != "" {
 		req.Header.Set(ProjectIDHeader, c.expectID)
 	}

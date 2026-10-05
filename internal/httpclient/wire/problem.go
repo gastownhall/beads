@@ -290,6 +290,53 @@ func (e *ProblemError) Retryable() bool {
 // that tells this wrong-server refusal from a malformed-argument one.
 const ReasonProjectMismatch = "project_mismatch"
 
+// ReasonWireRevisionUnsupported is the Problem `reason` the server sets when
+// this client's declared Bd-Wire-Revision header named a revision below the
+// server's own min_client_wire_revision, spelled exactly as the server's
+// httpapi.ReasonWireRevisionUnsupported (held to it by
+// TestTheProjectIdentityVocabularyMatchesTheServer). Like ReasonProjectMismatch
+// it rides the generic invalid_argument code, so reason is the only thing that
+// tells this refusal apart from an ordinary malformed argument.
+const ReasonWireRevisionUnsupported = "wire_revision_unsupported"
+
+// ErrWireRevisionUnsupported reports that bd serve refused this client's
+// declared Bd-Wire-Revision header as older than the revision it now
+// requires. See WireRevisionUnsupportedError.
+var ErrWireRevisionUnsupported = errors.New("bd serve requires a newer client wire revision than this client declared")
+
+// WireRevisionUnsupportedError is the per-request mirror of the handshake's
+// own gate (wire.WireRevisionSkewError, handshake.go): the server has read
+// this client's declared Bd-Wire-Revision header (wire.ClientWireRevision,
+// stamped on every request by Client.stampRequest) and refused it as below
+// the floor it enforces now. Unlike WireRevisionSkewError — raised locally,
+// from a 200 ContextResponse, when THIS client decides the SERVER's wire
+// shape is one it cannot speak — this one is the SERVER's own refusal, and it
+// can arrive on any request, including the context fetch the handshake
+// itself makes (ContextResponse.MinClientWireRevision's doc: "raised ... on
+// GET /v0/beads/context too"), in which case it surfaces through
+// Client.Handshake exactly the way any other *ProblemError from GetContext
+// does — no separate handling is needed there.
+type WireRevisionUnsupportedError struct {
+	ServerURL string
+	BdVersion string
+	// ClientWireRevision is this build's own declared revision, which is what
+	// was refused.
+	ClientWireRevision int
+	// MinClientWireRevision is the server's own floor, from the refusal's
+	// min_wire_revision extension member.
+	MinClientWireRevision int
+	// ServerWireRevision is the server's own current wire_revision, from the
+	// refusal's wire_revision extension member.
+	ServerWireRevision int
+}
+
+func (e *WireRevisionUnsupportedError) Error() string {
+	return fmt.Sprintf("bd serve at %s (bd_version %s) requires a client wire revision of at least %d; this client declared %d",
+		e.ServerURL, e.BdVersion, e.MinClientWireRevision, e.ClientWireRevision)
+}
+
+func (e *WireRevisionUnsupportedError) Unwrap() error { return ErrWireRevisionUnsupported }
+
 // target names the ids the wire's conflict members leave out. The server does
 // not echo the issue a claim refused or the edge a dependency_exists collided
 // with — the request already said — so the caller supplies them and the
@@ -377,6 +424,7 @@ func mapProblem(t target, status int, header http.Header, body []byte, maxRetryA
 		ItemIssueID:   stripControlRunesPtr(p.ItemIssueId),
 		DeclaredLater: p.DeclaredLater,
 	}
+	legacyRevisionFields(body, e)
 
 	// The wrong-server arm, discriminated on REASON and taken BEFORE the code
 	// table. A project_mismatch is spelled invalid_argument on the wire, so the
@@ -398,8 +446,85 @@ func mapProblem(t target, status int, header http.Header, body []byte, maxRetryA
 		return e
 	}
 
+	// The other document-level arm, discriminated the same way and for the
+	// same reason: wire_revision_unsupported rides the generic
+	// invalid_argument code too, so reason is what tells it apart. The three
+	// extension members it alone carries are read straight off the problem —
+	// stripped like every other server-controlled field — rather than folded
+	// into the generic ProblemError, because this refusal is a statement about
+	// the SERVER's wire shape, not about the request's arguments.
+	if e.Reason == ReasonWireRevisionUnsupported {
+		e.Err = &WireRevisionUnsupportedError{
+			ServerURL:             t.serverURL,
+			BdVersion:             stripControlRunes(deref(p.BdVersion)),
+			ClientWireRevision:    ClientWireRevision,
+			MinClientWireRevision: deref(p.MinWireRevision),
+			ServerWireRevision:    deref(p.WireRevision),
+		}
+		return e
+	}
+
 	e.Err = sentinelFor(e, t)
 	return e
+}
+
+// decodeRevisionToken reads a revision-bearing problem member that may be
+// encoded either as the decimal string every server since upstream #6053
+// uses (types.RevisionToken) or as the bare JSON integer a server old enough
+// to omit ContextResponse.wire_revision entirely still sends (see
+// ClientMinWireRevision's doc: a decoded 0 means the server omitted the
+// member, and 0 is exactly the pre-#6053 integer-token generation). Both
+// shapes name the same opaque token — this client never parses either one
+// back to int64 (ProblemError.ExpectedVersion's doc) — so tolerating the
+// older shape here is only about surviving the decode, never about deriving a
+// number from it.
+func decodeRevisionToken(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", false
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s, true
+	}
+	var n json.Number
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n.String(), true
+	}
+	return "", false
+}
+
+// legacyRevisionFields backfills expected_version/actual_version when the
+// primary decode above left them nil. Since both are typed *string on the
+// generated Problem, that happens exactly when a pre-#6053 server sent one as
+// a bare JSON integer rather than the decimal string every server since has
+// used: json.Unmarshal(body, &p) already tolerates the mismatch (a bad field
+// does not abort decoding the rest, and mapProblem deliberately discards that
+// error), so the only member actually lost is the one with the wrong shape —
+// and that is exactly what this recovers, from the same bytes, by parsing the
+// two revision keys alone and accepting either shape.
+func legacyRevisionFields(body []byte, e *ProblemError) {
+	if e.ExpectedVersion != nil && e.ActualVersion != nil {
+		return
+	}
+	var raw struct {
+		ExpectedVersion json.RawMessage `json:"expected_version"`
+		ActualVersion   json.RawMessage `json:"actual_version"`
+	}
+	if json.Unmarshal(body, &raw) != nil {
+		return
+	}
+	if e.ExpectedVersion == nil {
+		if v, ok := decodeRevisionToken(raw.ExpectedVersion); ok {
+			v = stripControlRunes(v)
+			e.ExpectedVersion = &v
+		}
+	}
+	if e.ActualVersion == nil {
+		if v, ok := decodeRevisionToken(raw.ActualVersion); ok {
+			v = stripControlRunes(v)
+			e.ActualVersion = &v
+		}
+	}
 }
 
 // codeSentinel is the whole problem-code vocabulary this client knows, and the
