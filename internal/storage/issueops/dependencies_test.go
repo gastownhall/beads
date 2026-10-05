@@ -177,7 +177,7 @@ func TestCycleReachabilityQuerySingleTableJoinsDirectly(t *testing.T) {
 		t.Fatalf("single-table cycle query should not materialize a derived dependency table:\n%s", query)
 	}
 	if !strings.Contains(query, "d.type IN ('blocks', 'conditional-blocks', 'parent-child')") {
-		t.Fatalf("query does not filter scheduling-relevant dependency types at the direct join:\n%s", query)
+		t.Fatalf("query does not filter scheduling-relevant dependency types:\n%s", query)
 	}
 	if strings.Contains(query, "UNION ALL") || strings.Contains(query, "depth") {
 		t.Fatalf("cycle query should traverse unique nodes, not enumerate paths:\n%s", query)
@@ -211,9 +211,17 @@ func TestCycleReachabilityQueryMultipleTablesTraversesUniqueNodes(t *testing.T) 
 func TestAncestorQueryJoinsEachTableOnIssueID(t *testing.T) {
 	query := reachabilityQuery("ancestors", []string{"dependencies", "wisp_dependencies"}, "d.type = 'parent-child'")
 	for _, table := range []string{"dependencies", "wisp_dependencies"} {
-		if !strings.Contains(query, "JOIN "+table+" d ON d.issue_id = r.node AND d.type = 'parent-child'") {
-			t.Fatalf("ancestor query does not join %s directly on issue_id:\n%s", table, query)
+		// issue_id is the join's only predicate: a type equality there could
+		// be planned as a lookup into a type-leading index instead.
+		if !strings.Contains(query, "JOIN "+table+" d ON d.issue_id = r.node\n") {
+			t.Fatalf("ancestor query does not join %s on issue_id alone:\n%s", table, query)
 		}
+	}
+	if strings.Count(query, "CASE WHEN d.type = 'parent-child' THEN") != 2 {
+		t.Fatalf("ancestor query does not filter parent-child rows in each member's projection:\n%s", query)
+	}
+	if strings.Count(query, "JOIN_ORDER(r, d) LOOKUP_JOIN(r, d)") != 2 {
+		t.Fatalf("every recursive member should pin the lookup join:\n%s", query)
 	}
 }
 

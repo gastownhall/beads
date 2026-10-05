@@ -561,17 +561,34 @@ func cycleReachabilityQuery(depTables []string) string {
 
 // reachabilityQuery builds a recursive walk (CTE named cte) from the first
 // placeholder along outgoing dependency rows matching typeFilter, counting
-// whether the second placeholder is reached (the anchor included).
+// whether the second placeholder is reached (the anchor included). Callers
+// pass constants for cte, depTables and typeFilter, which are spliced in
+// verbatim.
 //
 // Each dependency table gets its own recursive member joined directly on
 // d.issue_id, so every recursion step is an index lookup on issue_id. Joining
 // a UNION of the tables instead (the earlier shape) leaves Dolt nothing to
 // index: it rescans every matching edge per step, which on a 100k-edge graph
-// is minutes for one check. The JOIN_ORDER/LOOKUP_JOIN hints pin the lookup
-// plan (as sqlbuild.DescendantWalkQuery does): without them the Dolt
-// sql-server's cost-based planner picks a type-index scan join when table
-// statistics are not yet available (e.g. right after a commit), with the same
-// minutes-long result. MySQL ignores the unknown hints.
+// is minutes for one check.
+//
+// The join hints and the filter placement are both load-bearing, and
+// TestGraphWalkPlansHonorJoinHints (embedded) pins the resulting plans:
+//
+//   - JOIN_ORDER(r, d) LOOKUP_JOIN(r, d) pins the frontier as the outer side
+//     with an index probe into the edge table (as sqlbuild.DescendantWalkQuery
+//     does). Without them the Dolt sql-server's cost-based planner picks a
+//     type-index scan join when table statistics are not yet available (e.g.
+//     right after a commit), and the embedded engine does so for a member
+//     whose table has no statistics, with the same minutes-long result. On
+//     MySQL, JOIN_ORDER is honored (the order it forces is the one wanted) and
+//     the unknown LOOKUP_JOIN hint is ignored with a warning.
+//   - typeFilter is applied in the projection, not the join condition: a row
+//     of another type yields a NULL node, which joins no row and never equals
+//     the goal, so the reachable set is unchanged. Left in the ON clause, a
+//     single-type filter ("d.type = 'parent-child'") is an equality the
+//     planner can satisfy through a type-leading index instead, keyed by the
+//     constant — a lookup that returns every parent-child row of the table
+//     for each frontier node.
 //
 // The reachable set is the same as the single-member walk over the UNION:
 // UNION distinct merges what every member produces per step.
@@ -579,8 +596,8 @@ func reachabilityQuery(cte string, depTables []string, typeFilter string) string
 	members := make([]string, 0, len(depTables))
 	for _, t := range depTables {
 		members = append(members, fmt.Sprintf(
-			"SELECT /*+ JOIN_ORDER(r, d) LOOKUP_JOIN(r, d) */ %s FROM %s r JOIN %s d ON d.issue_id = r.node AND %s",
-			depTargetExpr("d"), cte, t, typeFilter))
+			"SELECT /*+ JOIN_ORDER(r, d) LOOKUP_JOIN(r, d) */ CASE WHEN %s THEN %s END FROM %s r JOIN %s d ON d.issue_id = r.node",
+			typeFilter, depTargetExpr("d"), cte, t))
 	}
 	return fmt.Sprintf(`
 		WITH RECURSIVE %s(node) AS (

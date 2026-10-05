@@ -404,16 +404,18 @@ func shouldBeBlockedIDsUnionSQL(depTable string) string {
 //
 // A scoped union pins each joined leg to drive from the batch's own
 // dependency rows and look the target or parent up by primary key
-// (JOIN_ORDER/LOOKUP_JOIN hints; MySQL ignores them). Left to its cost model,
-// the Dolt sql-server planner intermittently — depending on when its
-// background statistics refresh lands — turned the issues legs around:
-// scanning every open issue through the (is_blocked, status) index and
-// probing dependencies per row. Over an import's ~2000-5000 uncommitted
-// issues that is ~3 s per leg and 6-10 s per mark/unmark statement, where
-// the lookup plan takes ~0.1 s; one plan flip early in an import of 5000 cost
-// most of its 28 minutes and brushed the 10 s read timeout. The unscoped form
-// (full repair, doctor count) walks the whole table and keeps the planner's
-// choice.
+// (JOIN_ORDER/LOOKUP_JOIN hints; on MySQL, JOIN_ORDER is honored — the order
+// it forces is the one wanted — and the unknown LOOKUP_JOIN hint is ignored
+// with a warning). Left to its cost model, the Dolt sql-server planner
+// intermittently — depending on when its background statistics refresh
+// lands — turned the issues legs around: scanning every open issue through
+// the (is_blocked, status) index and probing dependencies per row. Over an
+// import's ~2000-5000 uncommitted issues that is ~3 s per leg and 6-10 s per
+// mark/unmark statement, where the lookup plan takes ~0.1 s; one plan flip
+// early in an import of 5000 cost most of its 28 minutes and brushed the
+// 10 s read timeout. The unscoped form (full repair, doctor count) walks the
+// whole table and keeps the planner's choice. TestGraphWalkPlansHonorJoinHints
+// (embedded) pins the hinted plans.
 //
 //nolint:gosec // G201: depTable and scope are constants; waitsForGateBlockedSQL is a constant template.
 func shouldBeBlockedIDsUnionScopedSQL(depTable, scope string) string {
