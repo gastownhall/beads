@@ -1578,6 +1578,54 @@ func RunBatchApplyStampsSpawnerIDOnlyWhenNamed(t *testing.T, ctx context.Context
 	}
 }
 
+// RunBatchApplyCarriesThreadIDOntoTheStoredEdge pins DepAddItem.ThreadID
+// (the 2026-10 Opus-review HIGH-2 finding): a conversation-threading id named
+// on a dep_add item must land on the stored dependency row's own thread_id
+// column, and an item that names none must store none. ThreadID is a plain
+// column read independently of HasSpawner/Metadata, so this is its own case
+// rather than a clause folded onto the spawner one above.
+//
+// Wired onto the http leg this exercises BOTH halves of the wire at once: the
+// client's applyDepAddItemBody encode (batchapplier.go) and the server's
+// applyDepAddItemMembers decode (internal/httpapi/batch_apply.go) must each
+// carry the field, because either one silently dropping it leaves the stored
+// column blank and fails the assertion below.
+func RunBatchApplyCarriesThreadIDOntoTheStoredEdge(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	source := fixture.IssuePrefix + "-thread-source"
+	target := fixture.IssuePrefix + "-thread-target"
+	batchApplySeedIssue(t, ctx, fixture, source, types.StatusOpen)
+	batchApplySeedIssue(t, ctx, fixture, target, types.StatusOpen)
+
+	const thread = "thread-conv-1"
+	batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+		Actor: "apply-writer",
+		Items: []publicops.ApplyItem{
+			{Kind: publicops.ItemDepAdd, DepAdd: &publicops.DepAddItem{
+				Source: publicops.Ref{ID: source}, Target: publicops.Ref{ID: target},
+				Type: publicops.DepBlocks, ThreadID: thread,
+			}},
+		},
+	})
+	if got := batchApplyEdgeThreadID(t, ctx, fixture, source, target); got != thread {
+		t.Errorf("stored edge thread_id = %q, want %q", got, thread)
+	}
+
+	source2 := fixture.IssuePrefix + "-thread-none-source"
+	target2 := fixture.IssuePrefix + "-thread-none-target"
+	batchApplySeedIssue(t, ctx, fixture, source2, types.StatusOpen)
+	batchApplySeedIssue(t, ctx, fixture, target2, types.StatusOpen)
+	batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+		Actor: "apply-writer",
+		Items: []publicops.ApplyItem{
+			batchApplyDepAdd(publicops.Ref{ID: source2}, publicops.Ref{ID: target2}, publicops.DepBlocks, ""),
+		},
+	})
+	if got := batchApplyEdgeThreadID(t, ctx, fixture, source2, target2); got != "" {
+		t.Errorf("an edge naming no thread must not stamp thread_id, got %q", got)
+	}
+}
+
 // RunBatchApplySplicesAForwardMetadataRef pins the one exception to the
 // backward-only rule (CreateItem.MetadataRefs): "IT IS THE ONE PLACE A KEY MAY
 // REACH FORWARD … Every id is minted before any splice is applied, so the
@@ -2239,6 +2287,20 @@ func batchApplyEdgeMetadata(t *testing.T, ctx context.Context, fixture BatchAppl
 		t.Fatalf("reading edge metadata for %s -> %s: %v", source, target, err)
 	}
 	return blob
+}
+
+// batchApplyEdgeThreadID reads the stored thread_id column of one edge, which
+// is where DepAddItem.ThreadID has to be visible — a plain column, independent
+// of the type-specific Metadata blob batchApplyEdgeMetadata reads.
+func batchApplyEdgeThreadID(t *testing.T, ctx context.Context, fixture BatchApplyFixture, source, target string) string {
+	t.Helper()
+	var value string
+	const query = "SELECT COALESCE(thread_id, '') FROM dependencies WHERE issue_id = ?" +
+		" AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?"
+	if err := fixture.QueryScalar(ctx, query, []any{source, target}, &value); err != nil {
+		t.Fatalf("reading edge thread_id for %s -> %s: %v", source, target, err)
+	}
+	return value
 }
 
 // batchApplyMetadataKey reads the WHOLE metadata blob off a row and reports one

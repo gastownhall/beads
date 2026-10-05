@@ -6,6 +6,8 @@
 package httpclient
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -257,6 +259,16 @@ func TestServedBatchApplyStampsSpawnerIDOnlyWhenNamed(t *testing.T) {
 	conformance.RunBatchApplyStampsSpawnerIDOnlyWhenNamed(t, t.Context(), newServedBatchApplyFixture(t, "hba27"))
 }
 
+// TestServedBatchApplyCarriesThreadIDOntoTheStoredEdge wires
+// DepAddItem.ThreadID's round trip onto the http leg (S5, 2026-10 Opus-review
+// HIGH-2): this is the ONE case that proves the field survives BOTH sides of
+// the wire at once — the client's applyDepAddItemBody encode and the server's
+// applyDepAddItemMembers decode — since either one dropping thread_id leaves
+// the raw dependencies row's thread_id column blank and fails the assertion.
+func TestServedBatchApplyCarriesThreadIDOntoTheStoredEdge(t *testing.T) {
+	conformance.RunBatchApplyCarriesThreadIDOntoTheStoredEdge(t, t.Context(), newServedBatchApplyFixture(t, "hba28"))
+}
+
 // TestServedBatchApplyRefusesAMetadataRefWithoutNamingTheKey is the running pin
 // beside the park above: the same request, driven end to end, asserting
 // everything the contract asserts EXCEPT the key inside the member — the
@@ -455,5 +467,189 @@ func TestServedBatchApplyAnswersEveryItemWithoutASnapshot(t *testing.T) {
 			t.Errorf("items[%d] carries no snapshot on the REFERENCE leg either; this case would then be asserting "+
 				"nothing about the divergence L-apply-snapshot records", i)
 		}
+	}
+}
+
+// TestServedBatchApplyGcCloseWithMetadataIfMatch pins the first of DESIGN
+// §3.8's two gc mappings (2026-10 Opus-review HIGH-3, no new bd surface): gc's
+// RAW-transaction CloseWithMetadataIfMatch maps onto BatchApplier[update{Patch
+// Metadata, ExpectedVersion}, close{}] in ONE request — see the BatchApplier
+// package doc.
+//
+// It is atomic because the whole request is: the matching-version half lands
+// both the metadata write and the close together, and the stale-version half
+// below refuses the update, which refuses the request, so the close beside it
+// never runs and NEITHER change lands.
+func TestServedBatchApplyGcCloseWithMetadataIfMatch(t *testing.T) {
+	ctx := t.Context()
+	fixture := newServedBatchApplyFixture(t, "hbagc0")
+
+	id := fixture.IssuePrefix + "-close-with-metadata"
+	if err := fixture.CreateIssue(ctx, &types.Issue{ID: id, Title: "closed with a metadata guard", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "apply-seed"); err != nil {
+		t.Fatalf("seeding %s: %v", id, err)
+	}
+	var version int64
+	if err := fixture.QueryScalar(ctx, "SELECT row_lock FROM issues WHERE id = ?", []any{id}, &version); err != nil {
+		t.Fatalf("reading row_lock for %s: %v", id, err)
+	}
+
+	_, err := fixture.BatchApplier.ApplyBatch(ctx, issueops.ApplyBatchRequest{
+		Actor: "apply-writer",
+		Items: []issueops.ApplyItem{
+			{Kind: issueops.ItemUpdate, Update: &issueops.UpdateItem{
+				Target: issueops.Ref{ID: id},
+				Patch: issueops.IssuePatch{Metadata: issueops.MetadataPatch{
+					Merge: issueops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{"closed_via":"gc"}`)},
+				}},
+				ExpectedVersion: &version,
+			}},
+			{Kind: issueops.ItemClose, Close: &issueops.CloseItem{Target: issueops.Ref{ID: id}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CloseWithMetadataIfMatch with the current version: %v", err)
+	}
+	if got := batchApplyColumnDirect(t, ctx, &fixture, "status", id); got != string(types.StatusClosed) {
+		t.Errorf("status = %q, want %q", got, types.StatusClosed)
+	}
+	if got := batchApplyColumnDirect(t, ctx, &fixture, "metadata", id); !strings.Contains(got, "closed_via") {
+		t.Errorf("metadata = %q, want it to carry the merged key", got)
+	}
+
+	// The stale half: the same shape, a version that is no longer current. The
+	// WHOLE request refuses and ZERO rows change — neither the metadata merge
+	// nor the close.
+	id2 := fixture.IssuePrefix + "-close-with-metadata-stale"
+	if err := fixture.CreateIssue(ctx, &types.Issue{ID: id2, Title: "a stale guard leaves zero changes", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "apply-seed"); err != nil {
+		t.Fatalf("seeding %s: %v", id2, err)
+	}
+	var version2 int64
+	if err := fixture.QueryScalar(ctx, "SELECT row_lock FROM issues WHERE id = ?", []any{id2}, &version2); err != nil {
+		t.Fatalf("reading row_lock for %s: %v", id2, err)
+	}
+	stale := version2 - 1
+	_, err = fixture.BatchApplier.ApplyBatch(ctx, issueops.ApplyBatchRequest{
+		Actor: "apply-writer",
+		Items: []issueops.ApplyItem{
+			{Kind: issueops.ItemUpdate, Update: &issueops.UpdateItem{
+				Target: issueops.Ref{ID: id2},
+				Patch: issueops.IssuePatch{Metadata: issueops.MetadataPatch{
+					Merge: issueops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{"closed_via":"gc"}`)},
+				}},
+				ExpectedVersion: &stale,
+			}},
+			{Kind: issueops.ItemClose, Close: &issueops.CloseItem{Target: issueops.Ref{ID: id2}}},
+		},
+	})
+	if !errors.Is(err, issueops.ErrVersionMismatch) {
+		t.Fatalf("a stale ExpectedVersion: error = %v, want ErrVersionMismatch", err)
+	}
+	if got := batchApplyColumnDirect(t, ctx, &fixture, "status", id2); got == string(types.StatusClosed) {
+		t.Error("the close landed despite the whole request refusing on the stale guard")
+	}
+	if got := batchApplyColumnDirect(t, ctx, &fixture, "metadata", id2); strings.Contains(got, "closed_via") {
+		t.Error("the metadata merge landed despite the whole request refusing on the stale guard")
+	}
+}
+
+// batchApplyColumnDirect reads one issues column directly, for the two gc-
+// mapping tests above: they are plain package tests rather than
+// conformance.Run* cases (the composition is http-leg-only, DESIGN §3.8), so
+// they cannot reach the conformance package's unexported batchApplyColumn.
+func batchApplyColumnDirect(t *testing.T, ctx context.Context, fixture *conformance.BatchApplyFixture, column, id string) string {
+	t.Helper()
+	var value string
+	//nolint:gosec // G201: column is one of this file's own hardcoded names.
+	query := "SELECT COALESCE(" + column + ", '') FROM issues WHERE id = ?"
+	if err := fixture.QueryScalar(ctx, query, []any{id}, &value); err != nil {
+		t.Fatalf("reading issues.%s for %s: %v", column, id, err)
+	}
+	return value
+}
+
+// TestServedBatchApplyGcApplyGraphPlan pins the second of DESIGN §3.8's two gc
+// mappings (2026-10 Opus-review HIGH-3): gc's RAW RunInTransaction graph-build
+// maps onto one BatchApplier request carrying every item kind the plan needs —
+// a keyed create, a MetadataRefs splice, a dep_add edge, a parent-child
+// dep_add edge, and a trailing update for AssignAfterCreate — landing
+// together as the one plan a caller composed.
+func TestServedBatchApplyGcApplyGraphPlan(t *testing.T) {
+	ctx := t.Context()
+	fixture := newServedBatchApplyFixture(t, "hbagc1")
+
+	epic := fixture.IssuePrefix + "-plan-epic"
+	task := fixture.IssuePrefix + "-plan-task"
+	blocker := fixture.IssuePrefix + "-plan-blocker"
+
+	result, err := fixture.BatchApplier.ApplyBatch(ctx, issueops.ApplyBatchRequest{
+		Actor:         "apply-writer",
+		ForceIDPrefix: true,
+		Items: []issueops.ApplyItem{
+			// A keyed create: the plan's root node.
+			{Kind: issueops.ItemCreate, Create: &issueops.CreateItem{
+				Key:   "epic",
+				Issue: &issueops.Issue{ID: epic, Title: "the plan's root", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+			}},
+			// A second node whose metadata reaches BACKWARD to the epic's minted
+			// id via MetadataRefs — the splice CreateItem.MetadataRefs documents.
+			{Kind: issueops.ItemCreate, Create: &issueops.CreateItem{
+				Key:          "task",
+				Issue:        &issueops.Issue{ID: task, Title: "spliced to its epic", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+				MetadataRefs: map[string]issueops.Ref{"epic_id": {Key: "epic"}},
+			}},
+			{Kind: issueops.ItemCreate, Create: &issueops.CreateItem{
+				Key:   "blocker",
+				Issue: &issueops.Issue{ID: blocker, Title: "blocks the task", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+			}},
+			// A dep_add edge, plain.
+			{Kind: issueops.ItemDepAdd, DepAdd: &issueops.DepAddItem{
+				Source: issueops.Ref{Key: "task"}, Target: issueops.Ref{Key: "blocker"}, Type: issueops.DepBlocks,
+			}},
+			// A dep_add edge of type parent-child — "parent-child included", same
+			// item kind as the one above, a different Type.
+			{Kind: issueops.ItemDepAdd, DepAdd: &issueops.DepAddItem{
+				Source: issueops.Ref{Key: "task"}, Target: issueops.Ref{Key: "epic"}, Type: issueops.DepParentChild,
+			}},
+			// A trailing update for AssignAfterCreate, resolving the key BACKWARD
+			// to the row the first items in this same request just minted.
+			{Kind: issueops.ItemUpdate, Update: &issueops.UpdateItem{
+				Target: issueops.Ref{Key: "task"},
+				Patch:  issueops.IssuePatch{Assignee: issueops.Field[string]{Set: true, Value: "alice"}},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyGraphPlan: %v", err)
+	}
+	if len(result.Items) != 6 {
+		t.Fatalf("ApplyBatch(6 items) returned %d item results", len(result.Items))
+	}
+
+	var metadata string
+	if err := fixture.QueryScalar(ctx, "SELECT COALESCE(metadata, '') FROM issues WHERE id = ?", []any{task}, &metadata); err != nil {
+		t.Fatalf("reading the spliced metadata: %v", err)
+	}
+	if !strings.Contains(metadata, result.Keys["epic"]) {
+		t.Errorf("task metadata = %q, want the epic's minted id %s spliced over epic_id", metadata, result.Keys["epic"])
+	}
+
+	var edges int
+	const edgeQuery = `SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND type = ?
+		AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?`
+	if err := fixture.QueryScalar(ctx, edgeQuery, []any{task, "blocks", blocker}, &edges); err != nil {
+		t.Fatalf("counting the blocks edge: %v", err)
+	}
+	if edges != 1 {
+		t.Errorf("blocks edges task->blocker = %d, want 1", edges)
+	}
+	if err := fixture.QueryScalar(ctx, edgeQuery, []any{task, "parent-child", epic}, &edges); err != nil {
+		t.Fatalf("counting the parent-child edge: %v", err)
+	}
+	if edges != 1 {
+		t.Errorf("parent-child edges task->epic = %d, want 1", edges)
+	}
+
+	if got := batchApplyColumnDirect(t, ctx, &fixture, "assignee", task); got != "alice" {
+		t.Errorf("task assignee = %q, want %q (AssignAfterCreate)", got, "alice")
 	}
 }

@@ -180,6 +180,11 @@ func TestBatchApplyContract(t *testing.T) {
 		defer cancel()
 		conformance.RunBatchApplyStampsSpawnerIDOnlyWhenNamed(t, ctx, fixture)
 	})
+	t.Run("CarriesThreadIDOntoTheStoredEdge", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyCarriesThreadIDOntoTheStoredEdge(t, ctx, fixture)
+	})
 	t.Run("SplicesAForwardMetadataRef", func(t *testing.T) {
 		ctx, cancel := testContext(t)
 		defer cancel()

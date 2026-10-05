@@ -558,6 +558,29 @@ func HasExtendedRetryBudget(ctx context.Context) bool {
 // directly. `bd create --file` and `bd dep add --file` remain the file-shaped
 // front doors for the two homogeneous cases they already serve.
 //
+// TWO EMBEDDER OPERATIONS MAP ONTO THIS ROLE RATHER THAN EARNING THEIR OWN
+// (DESIGN §3.8, "Guarded writes: NO NEW ROLES"). Neither needs a new role or a
+// new wire member; both are a SHAPE of ApplyBatchRequest, pinned by an
+// http-leg conformance case so the shape does not drift under either side
+// independently:
+//
+//   - CloseWithMetadataIfMatch is an update item carrying a Metadata patch and
+//     ExpectedVersion, followed by a close item on the SAME target, in ONE
+//     request: []ApplyItem{{Kind: ItemUpdate, Update: &UpdateItem{Target: t,
+//     Patch: IssuePatch{Metadata: ...}, ExpectedVersion: &v}}, {Kind: ItemClose,
+//     Close: &CloseItem{Target: t}}}. It is atomic because the whole request is:
+//     a stale ExpectedVersion refuses the update, which refuses the request, and
+//     the close never runs — zero rows change. CloseItem itself carries no
+//     metadata member; this composition is the only way to land a metadata
+//     write and a close as one guarded act.
+//   - ApplyGraphPlan is a create item per node (Key, the issue's Labels and
+//     Metadata, Ephemeral, NoHistory, and MetadataRefs for a value only the
+//     plan's own later ids can supply), dep_add items for every edge the plan
+//     names — parent-child included, since a parent is a dep_add item of type
+//     parent-child like any other edge — and trailing update items for an
+//     AssignAfterCreate step, which patches a just-created row's Assignee by
+//     its backward Key reference. One request, declaration order, one outcome.
+//
 // Implementations never mutate caller-owned request values, snapshot the
 // request at method entry, and apply validation and normalization only to
 // attempt-local clones. Deterministic request-validation failures match

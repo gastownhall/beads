@@ -12,9 +12,23 @@ import (
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
+
+// applyRoleWithSnapshot is applyRole's twin for pinning exactly what the
+// handshake advertises, the same idiom counts_test.go's
+// countRoleWithSnapshot uses: passing a snapshot straight through New rather
+// than accepting applyRole's bare stubStore default.
+func applyRoleWithSnapshot(t *testing.T, w *stubWire, snap *apigen.ContextResponse) issueops.BatchApplier {
+	t.Helper()
+	applier, err := New(testTarget(t), w, snap).BatchApplier()
+	if err != nil {
+		t.Fatalf("BatchApplier(): %v", err)
+	}
+	return applier
+}
 
 // The batch-apply role's unit gates: what the client DECIDES before the dial,
 // and what it refuses to believe about the answer.
@@ -987,4 +1001,81 @@ func TestTheApplyLabelPatchIsTheWholeEdit(t *testing.T) {
 	if _, present := labels["add"]; present {
 		t.Error("the clear invented an add member")
 	}
+}
+
+// TestApplyBatchRefusesUnservedDepAddLineageBeforeDialing is the 2026-10
+// Opus-review HIGH-1 finding: refuseUnservedDepAddLineage (batchapplier.go)
+// carried no coverage at all — deleting the function and its call site
+// passed every test that existed before this one.
+//
+// A dep_add item naming HasSpawner or ThreadID, dialed against a server that
+// does not advertise CapBatchApplyDepAddLineage, must refuse BEFORE dialing
+// with *storage.ErrUnsupported naming the capability. A plan that touches
+// neither field must still dial normally against the SAME masked server: the
+// gate scopes the two members, not the operation.
+func TestApplyBatchRefusesUnservedDepAddLineageBeforeDialing(t *testing.T) {
+	masked := &apigen.ContextResponse{BdVersion: "1.2.3"} // no CapBatchApplyDepAddLineage
+	depAddPlan := func(item issueops.DepAddItem) issueops.ApplyBatchRequest {
+		return issueops.ApplyBatchRequest{
+			Actor: "planner",
+			Items: []issueops.ApplyItem{{Kind: issueops.ItemDepAdd, DepAdd: &item}},
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		item issueops.DepAddItem
+	}{
+		{
+			name: "HasSpawner",
+			item: issueops.DepAddItem{
+				Source: issueops.Ref{ID: "bd-1"}, Target: issueops.Ref{ID: "bd-2"},
+				Type: "waits-for", HasSpawner: true,
+			},
+		},
+		{
+			name: "ThreadID",
+			item: issueops.DepAddItem{
+				Source: issueops.Ref{ID: "bd-1"}, Target: issueops.Ref{ID: "bd-2"},
+				Type: "waits-for", ThreadID: "t-1",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &stubWire{}
+			_, err := applyRoleWithSnapshot(t, w, masked).ApplyBatch(t.Context(), depAddPlan(tc.item))
+			if err == nil {
+				t.Fatal("ApplyBatch returned no error, want a pre-dial capability refusal")
+			}
+			var unsup *storage.ErrUnsupported
+			if !errors.As(err, &unsup) {
+				t.Fatalf("errors.As to *storage.ErrUnsupported failed for %v", err)
+			}
+			if unsup.Capability != wire.CapBatchApplyDepAddLineage {
+				t.Errorf("Capability = %q, want %q", unsup.Capability, wire.CapBatchApplyDepAddLineage)
+			}
+			if len(w.calls) != 0 {
+				t.Errorf("dialed %d times, want 0: a pre-dial refusal must never reach the wire", len(w.calls))
+			}
+		})
+	}
+
+	t.Run("neither field set still dials", func(t *testing.T) {
+		dependsOn := "bd-2"
+		w := &stubWire{applied: &apigen.ApplyBatchResponse{
+			Keys: map[string]string{},
+			Items: []apigen.ApplyItemResult{
+				{Kind: "dep_add", IssueId: "bd-1", DependsOnId: &dependsOn, Changed: true, Revision: "0"},
+			},
+		}}
+		_, err := applyRoleWithSnapshot(t, w, masked).ApplyBatch(t.Context(), depAddPlan(issueops.DepAddItem{
+			Source: issueops.Ref{ID: "bd-1"}, Target: issueops.Ref{ID: "bd-2"}, Type: "waits-for",
+		}))
+		if err != nil {
+			t.Fatalf("ApplyBatch with no lineage fields set: %v", err)
+		}
+		if len(w.calls) == 0 {
+			t.Error("the plan never reached the wire, want a dial: the gate scopes HasSpawner/ThreadID, not the operation")
+		}
+	})
 }
