@@ -39,3 +39,11 @@ type ExternalRefHistoryQuerier interface {
 	// column was NULL.
 	PreviousExternalRef(ctx context.Context, issueID string, asOf time.Time) (ref string, found bool, err error)
 }
+
+// ExternalRefHistoryBatchQuerier answers PreviousExternalRef for many issues at one asOf.
+type ExternalRefHistoryBatchQuerier interface {
+	ExternalRefHistoryQuerier
+
+	// PreviousExternalRefs maps each id PreviousExternalRef reports found at asOf to its ref.
+	PreviousExternalRefs(ctx context.Context, ids []string, asOf time.Time) (map[string]string, error)
+}
