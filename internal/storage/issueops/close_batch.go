@@ -115,11 +115,30 @@ func closeOutcomeIsEphemeral(outcome publicops.CloseOutcome) bool {
 // claim, and so does a batch in which nothing landed — landed meaning an item
 // that CHANGED, so a batch whose items were all already closed earns no claim.
 func ExecuteCloseBatch(ctx context.Context, tx *sql.Tx, request publicops.CloseBatchRequest, claimFilter *types.WorkFilter) (publicops.CloseBatchResult, ChangedTables, error) {
+	return ExecuteCloseBatchWithPolicy(ctx, tx, request, claimFilter, storage.BatchClosePolicy{})
+}
+
+// ExecuteCloseBatchWithPolicy applies an externally resolved snapshot without
+// splitting the closes and next claim into separate transactions.
+func ExecuteCloseBatchWithPolicy(ctx context.Context, tx *sql.Tx, request publicops.CloseBatchRequest, claimFilter *types.WorkFilter, policy storage.BatchClosePolicy) (publicops.CloseBatchResult, ChangedTables, error) {
 	result := publicops.CloseBatchResult{Outcomes: make([]publicops.CloseOutcome, len(request.Items))}
 	tables := ChangedTables{}
 	landed := 0
 
 	for i, item := range request.Items {
+		if err := policy.CheckClose(item.IssueID, request.Force); err != nil {
+			// Preserve idempotent re-closes and not-found precedence. Only
+			// a live target can be refused by the external close policy.
+			closed, _, found, readErr := isClosedInTx(ctx, tx, item.IssueID)
+			if readErr != nil {
+				result.Outcomes[i] = publicops.CloseOutcome{IssueID: item.IssueID, Err: readErr}
+				continue
+			}
+			if found && !closed {
+				result.Outcomes[i] = publicops.CloseOutcome{IssueID: item.IssueID, Err: err}
+				continue
+			}
+		}
 		closed, changedTables, err := ExecuteClose(ctx, tx, publicops.CloseRequest{
 			Actor:   request.Actor,
 			IssueID: item.IssueID,
@@ -144,7 +163,7 @@ func ExecuteCloseBatch(ctx context.Context, tx *sql.Tx, request publicops.CloseB
 	}
 
 	if claimFilter != nil && landed > 0 {
-		claim, claimTables, err := ExecuteClaimNext(ctx, tx, request.Actor, *claimFilter)
+		claim, claimTables, err := ExecuteClaimNext(ctx, tx, request.Actor, policy.FilterClaim(*claimFilter))
 		if err != nil {
 			return publicops.CloseBatchResult{}, nil, err
 		}

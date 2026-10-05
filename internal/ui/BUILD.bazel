@@ -1,0 +1,33 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "ui",
+    srcs = [
+        "pager.go",
+        "sanitize.go",
+        "styles.go",
+        "terminal.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/ui",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/types",
+        "@land_charm_lipgloss_v2//:lipgloss",
+        "@org_golang_x_term//:term",
+    ],
+)
+
+go_test(
+    name = "ui_test",
+    srcs = [
+        "pager_test.go",
+        "sanitize_test.go",
+        "styles_test.go",
+        "terminal_test.go",
+    ],
+    embed = [":ui"],
+    deps = [
+        "//internal/types",
+        "@land_charm_lipgloss_v2//:lipgloss",
+    ],
+)

@@ -28,6 +28,14 @@ type batchCreator struct{ store *DoltStore }
 // message is composed inside the body because its default names how much
 // LANDED, which is not knowable until every item has been prepared and routed
 // to its plane.
+//
+// Durability contract: a nil error means the batch's data is durable in the
+// branch working set. The Dolt history commit runs after the SQL transaction
+// (runIssueOperationTxWithMessage) and may be deferred — if it fails after
+// retries the creates still landed and ride the next Dolt commit; the only
+// signal is the bd.db.post_tx_commit_dropped counter, since the batch path has
+// no verify-by-re-read recovery. A nil return is therefore not a retry signal:
+// the creates already applied, and retrying would double-create.
 func (o *batchCreator) CreateBatch(ctx context.Context, request issueops.CreateBatchRequest) (issueops.CreateBatchResult, error) {
 	if err := storageissueops.ValidateCreateBatchRequest(request); err != nil {
 		return issueops.CreateBatchResult{}, err

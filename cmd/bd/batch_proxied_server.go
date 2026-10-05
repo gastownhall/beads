@@ -38,6 +38,9 @@ func runBatchProxiedServer(ctx context.Context, ops []batchOp, commitMsg string)
 	if uowProvider == nil {
 		return nil, HandleErrorRespectJSON("proxied-server UOW provider not initialized")
 	}
+	// Explicit commit point, like `transact` on the direct route: the commit
+	// carries the caller's message whatever dolt.auto-commit says (GH#4995).
+	ctx = explicitCommitPointContext(ctx)
 	return uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) ([]batchOpResult, string, error) {
 		// Built per attempt, not per call: a retried batch must report the
 		// results of the attempt that actually committed.

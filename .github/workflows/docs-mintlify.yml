@@ -19,6 +19,10 @@ on:
       - 'CLAUDE.md'
       - 'RELEASING.md'
       - 'PR_MAINTAINER_GUIDELINES.md'
+      - 'ROADMAP.md'
+      - '**/AGENTS.md'
+      - '**/CLAUDE.md'
+      - '.github/copilot-instructions.md'
       - '.github/scripts/docs-render-check.sh'
       - '.github/workflows/docs-mintlify.yml'
 
@@ -32,22 +36,49 @@ concurrency:
 jobs:
   docsync:
     name: Docs nav/link sync (docsync guard)
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 10
     if: github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: ${{ runner.environment == 'github-hosted' }}
+
+      # F7c review fix S5: this job's own key copy must match main.yml's
+      # seeder key byte-for-byte (TestBlacksmithSetupGoCacheKeysMatchAcrossSeederAndConsumers),
+      # which now keys by UTC calendar day instead of github.sha so main
+      # pushes don't churn a multi-GB cache entry on every commit; this step
+      # computes that same day value locally so the key expression below
+      # resolves (steps.* references only resolve within the same job).
+      - name: Compute cache date
+        id: cache-date
+        if: runner.environment == 'self-hosted'
+        run: echo "today=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Blacksmith setup-go cache
+        if: runner.environment == 'self-hosted'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
+          restore-keys: |
+            blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
+            blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
       - name: Run docsync guard
         run: go test -tags=gms_pure_go ./test/docsync
 
   broken-links:
     name: Mintlify broken-links (baseline-aware)
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    timeout-minutes: 10
     if: github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6

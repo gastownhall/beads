@@ -1,0 +1,62 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "setup",
+    srcs = [
+        "agent_skill.go",
+        "agents.go",
+        "aider.go",
+        "claude.go",
+        "codex.go",
+        "constants.go",
+        "cursor.go",
+        "exit.go",
+        "factory.go",
+        "gemini.go",
+        "hooks_json.go",
+        "junie.go",
+        "mux.go",
+        "opencode.go",
+        "project_output.go",
+        "setup_test_helpers.go",
+        "utils.go",
+    ],
+    importpath = "github.com/steveyegge/beads/cmd/bd/setup",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//internal/config",
+        "//internal/recipes",
+        "//internal/templates",
+        "//internal/templates/agents",
+        "//internal/utils",
+    ],
+)
+
+go_test(
+    name = "setup_test",
+    srcs = [
+        "agents_marker_test.go",
+        "aider_test.go",
+        "claude_test.go",
+        "codex_test.go",
+        "cursor_test.go",
+        "factory_test.go",
+        "gemini_test.go",
+        "junie_test.go",
+        "mux_test.go",
+        "opencode_test.go",
+        "plugin_layout_test.go",
+        "project_output_test.go",
+        "utils_test.go",
+    ],
+    data = [
+        "//:.claude-plugin/marketplace.json",
+        "//plugins/beads:plugin_files",
+    ],
+    embed = [":setup"],
+    deps = [
+        "//internal/templates",
+        "//internal/templates/agents",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)

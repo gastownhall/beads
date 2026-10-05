@@ -24,8 +24,10 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workspacegate"
 )
@@ -36,12 +38,64 @@ import (
 // safe to repeat.
 type Storage = beads.Storage
 
-func configuredBackendUnavailable(backend string) error {
+// OpenOptions carries per-open injections (Credential, HTTPClient,
+// UserAgent) for OpenBestAvailableWith. A registered backend's OpenWith may
+// use these; Dolt and embedded Dolt have no per-open seam and never see
+// them — instead, a non-nil Credential, non-nil HTTPClient, or non-empty
+// UserAgent is always refused rather than silently dropped (see
+// OpenBestAvailableWith). A nil Credential means "use the backend's own
+// default authentication, which may include ambient environment state
+// (env vars, a config file, a logged-in CLI session, ...)"; a multi-tenant
+// embedder (one process serving many workspaces, such as gc, Gas City) MUST
+// pass a non-nil Credential for every open, since ambient auth cannot
+// distinguish one tenant's workspace from another's.
+type OpenOptions = backends.OpenOptions
+
+// Credential is the opaque per-open credential marker OpenOptions.Credential
+// carries. See backends.Credential for the full contract: this package
+// assigns it no methods and performs no assertions against it, so an
+// embedder (for example gc, Gas City) can carry a per-workspace credential
+// through OpenBestAvailableWith without this package knowing its shape.
+type Credential = backends.Credential
+
+// ErrCredentialWithoutOpenWith is returned by OpenBestAvailableWith when
+// opts.Credential is set but nothing can honor it: either a registered
+// backend has no OpenWith, or no backend is registered at all and the
+// workspace is plain Dolt, which has no per-open credential seam. It is
+// aliased here, not just in internal/storage/backends, because that package
+// is unimportable outside this module: an embedder checking this error with
+// errors.Is must do it through the public beads package.
+var ErrCredentialWithoutOpenWith = backends.ErrCredentialWithoutOpenWith
+
+// ErrHTTPClientWithoutOpenWith is returned by OpenBestAvailableWith when
+// opts.HTTPClient is set but nothing can honor it. Same fail-closed family
+// and aliasing rationale as ErrCredentialWithoutOpenWith.
+var ErrHTTPClientWithoutOpenWith = backends.ErrHTTPClientWithoutOpenWith
+
+// ErrUserAgentWithoutOpenWith is returned by OpenBestAvailableWith when
+// opts.UserAgent is set but nothing can honor it. Same fail-closed family
+// and aliasing rationale as ErrCredentialWithoutOpenWith.
+var ErrUserAgentWithoutOpenWith = backends.ErrUserAgentWithoutOpenWith
+
+// ErrUnsupportedCredential is the typed refusal a registered backend's
+// OpenWith returns (directly or wrapped) when opts.Credential is non-nil but
+// does not match the concrete credential type that backend's OpenWith
+// expects. See backends.ErrUnsupportedCredential for the full contract.
+// Aliased here for the same reason as ErrCredentialWithoutOpenWith: callers
+// outside this module cannot import internal/storage/backends directly.
+var ErrUnsupportedCredential = backends.ErrUnsupportedCredential
+
+// configuredBackendUnavailable is the public open path's fail-closed refusal for
+// metadata naming a removed or unrecognized backend. beadsDir and cfg let the
+// refusal detect an already-present Dolt database and name the exact
+// metadata.json edit that heals the workspace, instead of the export-and-
+// reinitialize path that would destroy it.
+func configuredBackendUnavailable(backend, beadsDir string, cfg *configfile.Config) error {
 	switch backend {
 	case configfile.BackendPostgres, configfile.BackendMySQL, configfile.BackendSQLite:
-		return configfile.RemovedBackendError(backend)
+		return configfile.RemovedBackendErrorAt(backend, beadsDir, cfg)
 	default:
-		return configfile.UnknownBackendError(backend)
+		return configfile.UnknownBackendErrorAt(backend, beadsDir, cfg)
 	}
 }
 
@@ -269,6 +323,39 @@ type (
 	VCStatus    = storage.Status
 	StatusEntry = storage.StatusEntry
 )
+
+// AllowSharedSchemaMigration authorizes this process to apply pending schema
+// migrations to a database that is SHARED with other bd clients — a Dolt
+// sql-server, where migrating promotes the schema version for every connected
+// client at once and clients still running an older bd will refuse the
+// database until they are upgraded (gastownhall/beads#5920).
+//
+// Without it, an embedder that upgrades its beads dependency across a schema
+// bump gets a migration-gate error from every writable Open* call, whose
+// guidance names CLI commands (`bd migrate schema`) that mean nothing inside a
+// library process. This is the programmatic equivalent of that command.
+//
+// It is process-local and set-or-clear, which is the point: the alternative —
+// os.Setenv("BD_ALLOW_REMOTE_MIGRATE", "1") — is process-GLOBAL and inherited
+// by every child process the embedder spawns, including git hooks and dolt
+// subprocesses.
+//
+// The parity with that env var is only in the process-local mechanism, not the
+// reach: BD_ALLOW_REMOTE_MIGRATE=1 unlocks BOTH the no-remote and the
+// remote-backed shared arms, while this authorizes ONLY the no-remote arm. A
+// remote-backed shared store still needs --force / AllowRemoteMigrateEnv,
+// because #4259 cross-clone coordination is a stronger, different contract.
+//
+// Call it before the Open* call that should perform the migration, and clear
+// it afterwards. Only grant it once the operator has confirmed that every
+// other client of the server is upgraded; it is a coordination decision the
+// library cannot make, because other clients' versions are not observable from
+// this process.
+//
+// Embedded (single-writer) databases never need it: they still auto-migrate.
+func AllowSharedSchemaMigration(allow bool) {
+	schema.SetSharedMigrateConsent(allow)
+}
 
 // Open opens a Dolt-backed beads database at the given path.
 // This always opens in embedded mode. Use OpenFromConfig to respect

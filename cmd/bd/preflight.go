@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -26,6 +27,13 @@ type CheckResult struct {
 	Warning bool   `json:"warning,omitempty"`
 	Output  string `json:"output,omitempty"`
 	Command string `json:"command"`
+	// Dir is the directory Command was resolved and run in. The --check probes
+	// do not all share one scope: lint and format run at the repository root
+	// while tests run in the caller's working directory, so a run started from
+	// a subdirectory mixes a repo-wide verdict with a subtree-only one.
+	// Reporting the directory keeps the two distinguishable and makes the
+	// reported command reproducible from somewhere other than the root.
+	Dir string `json:"dir,omitempty"`
 }
 
 // PreflightResult represents the overall preflight check results.
@@ -60,10 +68,17 @@ Examples:
 	RunE:          runPreflight,
 }
 
+const beadsPRLintDriverCommand = "go run -mod=readonly -tags=gms_pure_go ./scripts/pr-lint"
+
+// lintCancellationGrace bounds how long Wait keeps reading the output pipe
+// after the lint deadline fires. Descendants of the driver can hold the write
+// end open indefinitely, so this is what turns the deadline into a real bound
+// on the call rather than only on the direct child.
+const lintCancellationGrace = 10 * time.Second
+
 func init() {
 	preflightCmd.Flags().Bool("check", false, "Run checks automatically")
-	preflightCmd.Flags().Bool("fix", false, "Auto-fix issues where possible (vendorHash, version sync)")
-	preflightCmd.Flags().Bool("json", false, "Output results as JSON")
+	preflightCmd.Flags().Bool("fix", false, "Auto-fix issues where possible (vendorHash)")
 	preflightCmd.Flags().Bool("skip-lint", false, "Skip lint check explicitly")
 
 	rootCmd.AddCommand(preflightCmd)
@@ -79,7 +94,6 @@ func runPreflight(cmd *cobra.Command, args []string) error {
 
 	check, _ := cmd.Flags().GetBool("check")
 	fix, _ := cmd.Flags().GetBool("fix")
-	jsonOutput, _ := cmd.Flags().GetBool("json")
 	skipLint, _ := cmd.Flags().GetBool("skip-lint")
 
 	if fix {
@@ -92,12 +106,7 @@ func runPreflight(cmd *cobra.Command, args []string) error {
 
 	// Static checklist mode — tailor the checklist to the detected project
 	// stack so non-Go projects don't get a misleading Go/Nix checklist (GH#4364).
-	root := git.GetRepoRoot()
-	if root == "" {
-		if wd, err := os.Getwd(); err == nil {
-			root = wd
-		}
-	}
+	root := preflightProjectRoot()
 
 	fmt.Println("PR Readiness Checklist:")
 	fmt.Println()
@@ -122,7 +131,7 @@ func fileExists(dir, name string) bool {
 // project's language stack, detected from standard marker files in dir. A
 // project with no recognized stack gets a generic reminder rather than a
 // misleading Go checklist, and the repo's own Go+Nix specific items
-// (gms_pure_go build tags, nix vendorHash, version.go vs default.nix) only
+// (gms_pure_go build tags, nix vendorHash, released metadata versions) only
 // appear where they apply (GH#4364).
 func buildPreflightChecklist(dir string) []string {
 	// Preserve the exact rich checklist when run inside the beads repo itself
@@ -131,11 +140,11 @@ func buildPreflightChecklist(dir string) []string {
 	if isBeadsRepo(dir) {
 		return []string{
 			"Tests pass: go test -tags gms_pure_go -short ./...",
-			"Lint passes: golangci-lint run --build-tags=gms_pure_go ./...",
+			"Lint passes: make ci-pr-lint",
 			"Formatting: gofmt -l .",
 			"No beads pollution: check .beads/issues.jsonl diff",
 			"Nix hash current: go.sum unchanged or vendorHash updated",
-			"Version sync: version.go matches default.nix",
+			"Version sync: released metadata matches version.go",
 		}
 	}
 
@@ -276,6 +285,9 @@ func runChecks(jsonOutput, skipLint bool) error {
 			fmt.Printf("✗ %s\n", r.Name)
 		}
 		fmt.Printf("  Command: %s\n", r.Command)
+		if r.Dir != "" {
+			fmt.Printf("  Directory: %s\n", r.Dir)
+		}
 		if r.Skipped && r.Output != "" {
 			fmt.Printf("  Reason: %s\n", r.Output)
 		} else if r.Warning && r.Output != "" {
@@ -297,23 +309,45 @@ func runChecks(jsonOutput, skipLint bool) error {
 	return nil
 }
 
-// runTestCheck runs go test -short ./... and returns the result.
+// runTestCheck runs go test -short ./... and returns the result. Unlike the
+// lint and format checks it is deliberately left in the caller's working
+// directory, so ./... stays the subtree the caller asked about; the reported
+// Dir is what keeps that narrower scope visible beside the rooted checks.
 func runTestCheck() CheckResult {
 	command := "go test -tags gms_pure_go -short ./..."
 	cmd := exec.Command("go", "test", "-tags", "gms_pure_go", "-short", "./...")
 	output, err := cmd.CombinedOutput()
+
+	dir, err2 := os.Getwd()
+	if err2 != nil {
+		dir = "."
+	}
 
 	return CheckResult{
 		Name:    "Tests pass",
 		Passed:  err == nil,
 		Output:  string(output),
 		Command: command,
+		Dir:     dir,
 	}
 }
 
-// runLintCheck runs golangci-lint and returns the result.
+type lintInvocation struct {
+	display    string
+	executable string
+	args       []string
+	dir        string
+	timeout    time.Duration
+}
+
+// runLintCheck runs the checkout-owned Beads lint driver in the Beads source
+// tree and retains a direct, generic golangci-lint check elsewhere.
 func runLintCheck(skipLint bool) CheckResult {
-	command := "golangci-lint run --build-tags=gms_pure_go ./..."
+	return runLintCheckAt(preflightProjectRoot(), skipLint)
+}
+
+func runLintCheckAt(root string, skipLint bool) CheckResult {
+	invocation := lintInvocationForRoot(root)
 	if skipLint {
 		return CheckResult{
 			Name:    "Lint passes",
@@ -321,33 +355,86 @@ func runLintCheck(skipLint bool) CheckResult {
 			Skipped: true,
 			Warning: true,
 			Output:  "lint check explicitly skipped by --skip-lint",
-			Command: command,
+			Command: invocation.display,
+			Dir:     invocation.dir,
 		}
 	}
 
-	// Check if golangci-lint is available
-	if _, err := exec.LookPath("golangci-lint"); err != nil {
+	if _, err := exec.LookPath(invocation.executable); err != nil {
 		return CheckResult{
 			Name:    "Lint passes",
 			Passed:  false,
-			Output:  "golangci-lint not found in PATH (install it or rerun with --skip-lint)",
-			Command: command,
+			Output:  fmt.Sprintf("%s not found in PATH (install it or rerun with --skip-lint)", invocation.executable),
+			Command: invocation.display,
+			Dir:     invocation.dir,
 		}
 	}
 
-	cmd := exec.Command("golangci-lint", "run", "--build-tags=gms_pure_go", "./...")
+	ctx, cancel := context.WithTimeout(context.Background(), invocation.timeout)
+	defer cancel()
+	// Cancellation targets the direct command. For the Beads go run invocation,
+	// it does not provide process-tree ownership: descendants may outlive it.
+	cmd := exec.CommandContext(ctx, invocation.executable, invocation.args...)
+	cmd.Dir = invocation.dir
+	// CombinedOutput collects through a pipe that every descendant inherits, so
+	// killing the direct child on deadline does not close the write end while a
+	// golangci-lint grandchild still holds it. Without a WaitDelay the deadline
+	// therefore cannot bound this call at all, and the message appended below
+	// never prints in the one case it exists to report.
+	cmd.WaitDelay = lintCancellationGrace
 	output, err := cmd.CombinedOutput()
+	// Report the deadline only when it actually decided the result: a child that
+	// wins the race exits cleanly just as the context expires, and that is a
+	// pass, not a timeout.
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		output = append(output, []byte(fmt.Sprintf("\nlint check exceeded %s", invocation.timeout))...)
+	}
 
 	return CheckResult{
 		Name:    "Lint passes",
 		Passed:  err == nil,
 		Output:  string(output),
-		Command: command,
+		Command: invocation.display,
+		Dir:     invocation.dir,
 	}
+}
+
+func lintInvocationForRoot(root string) lintInvocation {
+	if isBeadsRepo(root) {
+		return lintInvocation{
+			display:    beadsPRLintDriverCommand,
+			executable: "go",
+			args:       []string{"run", "-mod=readonly", "-tags=gms_pure_go", "./scripts/pr-lint"},
+			dir:        root,
+			timeout:    13 * time.Minute,
+		}
+	}
+	return lintInvocation{
+		display:    "golangci-lint run ./...",
+		executable: "golangci-lint",
+		args:       []string{"run", "./..."},
+		dir:        root,
+		timeout:    6 * time.Minute,
+	}
+}
+
+func preflightProjectRoot() string {
+	if root := git.GetRepoRoot(); root != "" {
+		return root
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return wd
 }
 
 // runFmtCheck runs gofmt -l and fails if any files need formatting.
 func runFmtCheck() CheckResult {
+	return runFmtCheckAt(preflightProjectRoot())
+}
+
+func runFmtCheckAt(root string) CheckResult {
 	command := "gofmt -l ."
 
 	// Check if gofmt is available
@@ -357,10 +444,12 @@ func runFmtCheck() CheckResult {
 			Passed:  false,
 			Output:  "gofmt not found in PATH (install Go toolchain)",
 			Command: command,
+			Dir:     root,
 		}
 	}
 
 	cmd := exec.Command("gofmt", "-l", ".")
+	cmd.Dir = root
 	output, err := cmd.CombinedOutput()
 
 	if err != nil {
@@ -369,6 +458,7 @@ func runFmtCheck() CheckResult {
 			Passed:  false,
 			Output:  string(output),
 			Command: command,
+			Dir:     root,
 		}
 	}
 
@@ -379,6 +469,7 @@ func runFmtCheck() CheckResult {
 			Passed:  false,
 			Output:  fmt.Sprintf("Unformatted files:\n%s\nRun: gofmt -w .", unformatted),
 			Command: command,
+			Dir:     root,
 		}
 	}
 
@@ -386,6 +477,7 @@ func runFmtCheck() CheckResult {
 		Name:    "Formatting",
 		Passed:  true,
 		Command: command,
+		Dir:     root,
 	}
 }
 
@@ -515,33 +607,19 @@ func runNixHashCheck() CheckResult {
 	}
 }
 
-// runVersionSyncCheck checks that all version files are in sync.
-// Prefers scripts/check-versions.sh (matches CI) with fallback to inline logic.
+// runVersionSyncCheck checks that all version files are in sync. Beads uses the
+// shared Go authority; unrelated repositories retain the generic Go/Nix check.
 func runVersionSyncCheck() CheckResult {
-	command := "scripts/check-versions.sh"
-
-	// Try using the script (matches CI's check-version-consistency job)
-	if _, err := os.Stat("scripts/check-versions.sh"); err == nil {
-		cmd := exec.Command("bash", "scripts/check-versions.sh")
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return CheckResult{
-				Name:    "Version sync",
-				Passed:  false,
-				Output:  string(output),
-				Command: command,
-			}
-		}
-		return CheckResult{
-			Name:    "Version sync",
-			Passed:  true,
-			Output:  string(output),
-			Command: command,
-		}
+	root, found, rootFailure := resolveBeadsVersionRoot(".")
+	if rootFailure.Name != "" {
+		return rootFailure
+	}
+	if found {
+		return runBeadsVersionSyncCheck(root)
 	}
 
-	// Fallback: inline comparison of version.go and default.nix
-	command = "Compare cmd/bd/version.go and default.nix"
+	// Generic fallback: inline comparison of version.go and default.nix.
+	command := "Compare cmd/bd/version.go and default.nix"
 
 	// Read version.go
 	versionGoContent, err := os.ReadFile("cmd/bd/version.go")
@@ -681,19 +759,6 @@ func runFixes(jsonOutput bool) error {
 	}
 	results = append(results, nr)
 
-	versionFixed, versionOld, versionNew, versionErr := fixVersionSync()
-	vr := fixResult{Name: "Version sync"}
-	if versionErr != nil {
-		vr.Error = versionErr.Error()
-		hasError = true
-	} else if versionFixed {
-		vr.Fixed = true
-		vr.Detail = fmt.Sprintf("version.go: %s → %s", versionOld, versionNew)
-	} else {
-		vr.Skipped = true
-	}
-	results = append(results, vr)
-
 	if jsonOutput {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -817,50 +882,4 @@ func fixNixHash() (bool, string, string, error) {
 	}
 	restored = true
 	return true, oldHash, newHash, nil
-}
-
-// fixVersionSync updates cmd/bd/version.go to match the version in default.nix.
-// default.nix is the source of truth. Returns (fixed, oldVersion, newVersion, err).
-func fixVersionSync() (bool, string, string, error) {
-	vgoPath := "cmd/bd/version.go"
-	vgoInfo, err := os.Stat(vgoPath)
-	if err != nil {
-		return false, "", "", fmt.Errorf("cannot read cmd/bd/version.go: %v", err)
-	}
-	vgoPerm := vgoInfo.Mode().Perm()
-
-	vgoContent, err := os.ReadFile(vgoPath)
-	if err != nil {
-		return false, "", "", fmt.Errorf("cannot read cmd/bd/version.go: %v", err)
-	}
-
-	vgoRe := regexp.MustCompile(`(Version\s*=\s*)"([^"]+)"`)
-	vgoLoc := vgoRe.FindSubmatchIndex(vgoContent)
-	if vgoLoc == nil {
-		return false, "", "", fmt.Errorf("cannot parse Version from cmd/bd/version.go")
-	}
-	oldVersion := string(vgoContent[vgoLoc[4]:vgoLoc[5]])
-
-	nixContent, err := os.ReadFile("default.nix")
-	if err != nil {
-		// No default.nix — nothing to sync against
-		return false, "", "", nil
-	}
-
-	nixRe := regexp.MustCompile(`version\s*=\s*"([^"]+)"`)
-	nixM := nixRe.FindSubmatch(nixContent)
-	if nixM == nil {
-		return false, "", "", fmt.Errorf("cannot parse version from default.nix")
-	}
-	newVersion := string(nixM[1])
-
-	if oldVersion == newVersion {
-		return false, oldVersion, newVersion, nil
-	}
-
-	updated := append(append([]byte{}, vgoContent[:vgoLoc[4]]...), append([]byte(newVersion), vgoContent[vgoLoc[5]:]...)...)
-	if err := os.WriteFile(vgoPath, updated, vgoPerm); err != nil {
-		return false, oldVersion, newVersion, fmt.Errorf("cannot update cmd/bd/version.go: %v", err)
-	}
-	return true, oldVersion, newVersion, nil
 }

@@ -3,13 +3,13 @@ package gitlab
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -36,7 +36,7 @@ const gitLabMilestoneIdentifierPrefix = "milestone:"
 type Tracker struct {
 	client      *Client
 	config      *MappingConfig
-	store       storage.Storage
+	store       tracker.Store
 	filter      *IssueFilter // Optional filters for issue fetching
 	projectPath string       // GitLab project path (e.g., "socwave/socwave") for GraphQL
 }
@@ -48,7 +48,7 @@ func (t *Tracker) ConfigPrefix() string { return "gitlab" }
 // GitLabClient returns the underlying GitLab API client.
 func (t *Tracker) GitLabClient() *Client { return t.client }
 
-func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
+func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	t.store = store
 
 	token, err := t.getConfig(ctx, "gitlab.token", "GITLAB_TOKEN")
@@ -514,10 +514,42 @@ func (t *Tracker) IsExternalRef(ref string) bool {
 	if glShorthandPattern.MatchString(ref) {
 		return true
 	}
-	if !strings.Contains(ref, "gitlab") && !strings.Contains(ref, "milestones") {
+	if !strings.Contains(ref, "gitlab") && !strings.Contains(ref, "milestones") && !t.onConfiguredHost(ref) {
 		return false
 	}
 	return issueIIDPattern.MatchString(ref) || milestoneIDPattern.MatchString(ref)
+}
+
+// onConfiguredHost reports whether ref is a URL on the same host (and base
+// path, for GitLab served from a sub-path) as the configured gitlab.url.
+// Self-hosted instances need not have "gitlab" in their hostname.
+//
+// Matching is host-scoped, not project-scoped: with GitLab at the host root
+// this claims every issue/work-item URL on the host, other projects' included.
+// That is what the "gitlab" substring arm already does for gitlab.com, and
+// keying on the project would silently stop recognizing self-hosted refs,
+// since gitlab.project_path is optional and Init discards its load error.
+//
+// Hosts are compared literally, so gitlab.url must name the host the way
+// GitLab spells it in the web_url values it returns: an explicit default port
+// ("https://host:443") matches none of them, and the ref is left to the legacy
+// substring arms. Scheme is not compared, so an http:// ref on an https://
+// instance is still claimed — leniency only, since the IID patterns below
+// still decide what is ultimately recognized.
+func (t *Tracker) onConfiguredHost(ref string) bool {
+	if t.client == nil || t.client.BaseURL == "" {
+		return false
+	}
+	base, err := url.Parse(t.client.BaseURL)
+	if err != nil || base.Host == "" {
+		return false
+	}
+	u, err := url.Parse(ref)
+	if err != nil || !strings.EqualFold(u.Host, base.Host) {
+		return false
+	}
+	basePath := strings.TrimRight(base.Path, "/")
+	return basePath == "" || u.Path == basePath || strings.HasPrefix(u.Path, basePath+"/")
 }
 
 // ExtractIdentifier extracts the issue IID from a GitLab URL or shorthand ref.

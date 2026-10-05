@@ -1,0 +1,55 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "httpclient",
+    srcs = [
+        "backend_credential.go",
+        "ca.go",
+        "ca_permissions_other.go",
+        "ca_permissions_unix.go",
+        "credential.go",
+        "target.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/httpclient",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/configfile",
+        "//internal/creds",
+        "//internal/httpclient/wire",
+        "//internal/storage/backends",
+        "@org_golang_x_net//http/httpproxy",
+        "@org_golang_x_net//idna",
+    ],
+)
+
+go_test(
+    name = "httpclient_test",
+    srcs = [
+        "backend_credential_test.go",
+        "ca_permissions_unix_test.go",
+        "ca_test.go",
+        "ca_wrong_ca_test.go",
+        "credential_source_test.go",
+        "credential_test.go",
+        "helpers_test.go",
+        "target_test.go",
+    ],
+    embed = [":httpclient"],
+    deps = [
+        "//internal/httpapi/apigen",
+        "//internal/storage/backends",
+    ],
+)
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

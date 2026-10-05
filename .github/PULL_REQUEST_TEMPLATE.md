@@ -1,16 +1,23 @@
 <!--
-This is a starting scaffold to help reviewers (human and agent) parse intent before diff.
-Replace, expand, or delete sections freely. CONTRIBUTING.md has the full hygiene rules.
+Every PR closes a documented issue (file it first or alongside; no approval
+needed). The issue carries the motivation, impact, and risk. See
+CONTRIBUTING.md#issues-and-pull-requests.
 -->
 
-## What
+Closes #
 
-<!-- One or two plain-language sentences: what does this change do? -->
+## What changed
 
-## Why
+<!-- One or two plain-language sentences. -->
 
-<!-- The problem this solves, the motivation, or a link to the issue: e.g. "Fixes #123" -->
+## Evidence it works
 
-## Verification
+<!-- Commands a reviewer can run and what they show, end to end.
+"Unit tests pass" alone is not evidence. -->
 
-<!-- How you tested. Commands a reviewer can run to confirm. -->
+## Checklist
+
+- [ ] The linked issue documents the problem (reproduction or motivation, impact, risk).
+- [ ] Tests and lint selected per `engdocs/TESTING.md` pass locally.
+- [ ] User-facing behavior changes are reflected in `docs/` or the generated CLI reference.
+- [ ] If an invariant or rule changed, the owning `AGENTS.md` is updated.

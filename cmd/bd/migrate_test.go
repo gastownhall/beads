@@ -17,18 +17,19 @@ import (
 // TestFormatDBList removed: formatDBList and dbInfo types were removed.
 
 func TestMigrateSchemaFlagBoundaries(t *testing.T) {
-	// Registration only: strict subprocess tests use the unique root persistent
-	// --format=json alias because duplicate local --json registration can shadow
-	// whether PersistentPreRunE sees the root flag as explicitly set.
+	// Registration only. --json must come from the root persistent flag: a
+	// local duplicate shadows it, so PersistentPreRunE never sees the root
+	// flag as explicitly set and resets jsonOutput from config.
 	for _, name := range []string{"inspect", "dry-run"} {
 		if flag := migrateSchemaCmd.Flags().Lookup(name); flag != nil {
 			t.Errorf("migrate schema unexpectedly registers local --%s", name)
 		}
 	}
-	for _, name := range []string{"json", "force"} {
-		if flag := migrateSchemaCmd.Flags().Lookup(name); flag == nil {
-			t.Errorf("migrate schema must register local --%s", name)
-		}
+	if f := migrateSchemaCmd.Flags().Lookup("json"); f != nil && f != rootCmd.PersistentFlags().Lookup("json") {
+		t.Error("migrate schema must not register a local --json; it inherits the root flag")
+	}
+	if flag := migrateSchemaCmd.Flags().Lookup("force"); flag == nil {
+		t.Error("migrate schema must register local --force")
 	}
 	if flag := rootCmd.PersistentFlags().Lookup("json"); flag == nil {
 		t.Error("root command must register persistent --json")

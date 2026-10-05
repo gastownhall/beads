@@ -55,7 +55,7 @@ func TestPullDoltImageRetriesTransientFailures(t *testing.T) {
 func TestDoltImagePullWorkflowsUseRetryHelper(t *testing.T) {
 	wantCalls := map[string]int{
 		"main.yml":       2,
-		"pr.yml":         2,
+		"pr.yml":         3, // test-domain-uow, contract-corpus, test-dolt-server-fingerprint
 		"pr-risk.yml":    3,
 		"regression.yml": 1,
 	}
@@ -112,10 +112,7 @@ type pullDoltRun struct {
 func runPullDoltImage(t *testing.T, failures int) pullDoltRun {
 	t.Helper()
 
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skipf("bash is required to test pull-dolt-image.sh: %v", err)
-	}
+	bash := requireHostTool(t, "bash")
 
 	bin := t.TempDir()
 	stateDir := t.TempDir()

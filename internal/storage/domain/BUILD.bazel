@@ -1,0 +1,91 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+go_library(
+    name = "domain",
+    srcs = [
+        "adaptive.go",
+        "beads.go",
+        "child_counter.go",
+        "comment.go",
+        "config.go",
+        "context.go",
+        "dependency.go",
+        "events.go",
+        "git.go",
+        "infra_types.go",
+        "issue.go",
+        "issue_delete.go",
+        "journal.go",
+        "label.go",
+        "raw_sql.go",
+        "remote.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/storage/domain",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/config",
+        "//internal/configfile",
+        "//internal/idgen",
+        "//internal/storage",
+        "//internal/storage/dberrors",
+        "//internal/storage/doltutil",
+        "//internal/types",
+        "//internal/validation",
+        "//issueops",
+    ],
+)
+
+go_test(
+    name = "domain_test",
+    srcs = [
+        "context_published_test.go",
+        "context_test.go",
+        "infra_types_test.go",
+        "issue_delete_missing_table_test.go",
+        "remote_test.go",
+    ],
+    embed = [":domain"],
+    deps = [
+        "//internal/configfile",
+        "//internal/types",
+        "@com_github_go_sql_driver_mysql//:mysql",
+    ],
+)
+
+# domain_test without -short, as pr.yml's "Test (storage domain + uow)" job runs
+# its package (--config=ci passes -test.short). It needs no Dolt server; it is
+# in the dolt-server lane so that lane alone runs every package of the job.
+# GOMAXPROCS=4 is the job's runner shape. It still pins the local backend and
+# fails closed like the lane's other targets: a Dolt-server test added to this
+# package later must fail here, not skip into a cached green, while the job
+# runs it.
+#
+# Tags:
+#   dolt-server: part of the dolt-server lane (--config=doltserver), which
+#     runs the whole job without -short; excluded from --config=prcore/ci.
+sh_test(
+    name = "domain_noshort_test",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :domain_test)"],
+    data = [":domain_test"],
+    env = {
+        "BEADS_TEST_DOLT_SERVER": "local",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+        "GOMAXPROCS": "4",
+    },
+    tags = ["dolt-server"],
+)
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

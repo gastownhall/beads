@@ -26,9 +26,21 @@ type fakeStore struct {
 	blockerIDs []string
 	closed     []string
 	lifecycle  publicops.Lifecycle
+	batch      *fakeBatchCloser
 }
 
 func (f *fakeStore) IssueLifecycle() (publicops.Lifecycle, error) { return f.lifecycle, nil }
+
+// BatchCloser without BatchCloserWithPolicy models a backend that predates
+// storage.PolicyBatchCloserSource.
+func (f *fakeStore) BatchCloser() (publicops.BatchCloser, error) { return f.batch, nil }
+
+type fakeBatchCloser struct{ closed int }
+
+func (f *fakeBatchCloser) CloseBatch(_ context.Context, request publicops.CloseBatchRequest) (publicops.CloseBatchResult, error) {
+	f.closed++
+	return publicops.CloseBatchResult{Outcomes: make([]publicops.CloseOutcome, len(request.Items))}, nil
+}
 
 type fakeLifecycle struct {
 	publicops.Lifecycle
@@ -66,6 +78,20 @@ func (f *fakeStore) GetReadyWorkWithCounts(ctx context.Context, filter types.Wor
 		result = append(result, &types.IssueWithCounts{Issue: issue})
 	}
 	return result, nil
+}
+
+func (f *fakeStore) GetReadyWorkWithCountsAndTotal(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, int, error) {
+	items, err := f.GetReadyWorkWithCounts(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	unbounded := filter
+	unbounded.Limit, unbounded.Offset = 0, 0
+	all, err := f.GetReadyWork(ctx, unbounded)
+	if err != nil {
+		return nil, 0, err
+	}
+	return items, len(all), nil
 }
 
 func (f *fakeStore) GetBlockedIssues(_ context.Context, _ types.WorkFilter) ([]*types.BlockedIssue, error) {
@@ -380,6 +406,64 @@ func TestCountReadyWorkUsesExternalPolicy(t *testing.T) {
 	}
 }
 
+// TestReadyPageTotalUsesExternalPolicy: the page `bd ready --json` lists and
+// the total it prints beside it must both exclude externally blocked work. The
+// decorator embeds the inner store, so without its own override this method
+// would pass straight through and count the excluded rows.
+func TestReadyPageTotalUsesExternalPolicy(t *testing.T) {
+	a, b, c := issue("be-a"), issue("be-b"), issue("be-c")
+	raw := &fakeStore{
+		ready: []*types.Issue{a, b, c},
+		deps: map[string][]*types.Dependency{
+			a.ID: {externalDep(a.ID, "external:remote:payments", types.DepBlocks)},
+		},
+	}
+	store := testStore(raw, &fakeStore{}, true)
+
+	items, total, err := store.GetReadyWorkWithCountsAndTotal(t.Context(), types.WorkFilter{Limit: 1})
+	if err != nil {
+		t.Fatalf("GetReadyWorkWithCountsAndTotal: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != b.ID {
+		t.Fatalf("page = %v, want [%s]", items, b.ID)
+	}
+	if total != 2 {
+		t.Fatalf("total = %d, want 2 (be-a is externally blocked)", total)
+	}
+}
+
+// TestReadyTotalsAgreeAcrossOutputModes: text `bd ready` sizes a full page
+// through the ReadyCounter role, `bd ready --json` through the in-band total.
+// With an externally blocked issue present both must exclude it; before the
+// decorator overrode ReadyCounter, the text total passed through to the inner
+// store and counted it.
+func TestReadyTotalsAgreeAcrossOutputModes(t *testing.T) {
+	a, b, c := issue("be-a"), issue("be-b"), issue("be-c")
+	raw := &fakeStore{
+		ready: []*types.Issue{a, b, c},
+		deps: map[string][]*types.Dependency{
+			a.ID: {externalDep(a.ID, "external:remote:payments", types.DepBlocks)},
+		},
+	}
+	store := testStore(raw, &fakeStore{}, true)
+
+	counter, err := store.ReadyCounter()
+	if err != nil {
+		t.Fatalf("ReadyCounter: %v", err)
+	}
+	text, err := counter.CountReady(t.Context(), publicops.ReadyRequest{})
+	if err != nil {
+		t.Fatalf("CountReady: %v", err)
+	}
+	_, jsonTotal, err := store.GetReadyWorkWithCountsAndTotal(t.Context(), types.WorkFilter{Limit: 1})
+	if err != nil {
+		t.Fatalf("GetReadyWorkWithCountsAndTotal: %v", err)
+	}
+	if text.Total != 2 || int(text.Total) != jsonTotal {
+		t.Fatalf("text total = %d, json total = %d; want both 2 (be-a is externally blocked)", text.Total, jsonTotal)
+	}
+}
+
 func TestGetBlockedIssuesAddsUnsatisfiedExternalRefs(t *testing.T) {
 	a, c := issue("be-a"), issue("be-c")
 	raw := &fakeStore{
@@ -427,9 +511,11 @@ func TestIssueLifecycleRefusesExternalCloseAndDoneUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IssueLifecycle: %v", err)
 	}
-	if _, err := ops.Close(t.Context(), publicops.CloseRequest{IssueID: issue.ID}); !errors.Is(err, storage.ErrCloseBlocked) {
+	_, err = ops.Close(t.Context(), publicops.CloseRequest{IssueID: issue.ID})
+	if !errors.Is(err, storage.ErrCloseBlocked) {
 		t.Fatalf("Close error = %v, want ErrCloseBlocked", err)
 	}
+	assertExternalCloseBlockers(t, err, issue.ID, "external:remote:payments")
 	if _, err := ops.Update(t.Context(), publicops.UpdateRequest{IssueID: issue.ID, Patch: publicops.IssuePatch{
 		Status: publicops.Field[types.Status]{Set: true, Value: types.StatusClosed},
 	}}); !errors.Is(err, storage.ErrCloseBlocked) {
@@ -437,6 +523,101 @@ func TestIssueLifecycleRefusesExternalCloseAndDoneUpdate(t *testing.T) {
 	}
 	if lifecycle.closed != 0 || lifecycle.updated != 0 {
 		t.Fatalf("inner lifecycle calls = close:%d update:%d, want zero", lifecycle.closed, lifecycle.updated)
+	}
+}
+
+func TestIssueLifecycleClaimExternalPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		depType        types.DependencyType
+		providerStatus types.Status
+		labelErr       error
+		wantBlocked    bool
+	}{
+		{"unshipped", types.DepBlocks, types.StatusOpen, nil, true},
+		{"shipped", types.DepBlocks, types.StatusClosed, nil, false},
+		{"unreadable", types.DepBlocks, types.StatusClosed, errors.New("foreign read failed"), true},
+		{"nonblocking", types.DepRelated, types.StatusOpen, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lifecycle := &fakeLifecycle{}
+			raw := &fakeStore{lifecycle: lifecycle, deps: map[string][]*types.Dependency{
+				"be-consumer": {externalDep("be-consumer", "external:remote:payments", tc.depType)},
+			}}
+			foreign := &fakeStore{labelErr: tc.labelErr, labels: map[string][]*types.Issue{
+				"provides:payments": {{ID: "remote-provider", Status: tc.providerStatus}},
+			}}
+			ops, err := testStore(raw, foreign, true).IssueLifecycle()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = ops.Update(t.Context(), publicops.UpdateRequest{IssueID: "be-consumer", Actor: "worker", Claim: true})
+			if errors.Is(err, storage.ErrCloseBlocked) != tc.wantBlocked {
+				t.Fatalf("claim error = %v, want blocked=%v", err, tc.wantBlocked)
+			}
+			if !tc.wantBlocked && err != nil {
+				t.Fatal(err)
+			}
+			wantCalls := 1
+			if tc.wantBlocked {
+				wantCalls = 0
+			}
+			if lifecycle.updated != wantCalls {
+				t.Fatalf("inner updates = %d, want %d", lifecycle.updated, wantCalls)
+			}
+		})
+	}
+}
+
+// A backend without policy support still closes a batch that no external
+// blocker touches. A blocked item or a next claim, which must exclude every
+// blocked candidate, still refuses rather than bypassing the policy.
+func TestBatchCloserScopesPolicyWithoutClaim(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		items           []string
+		claimNext       bool
+		wantUnsupported bool
+	}{
+		{"unrelated_blocker", []string{"be-free"}, false, false},
+		{"blocked_item", []string{"be-free", "be-consumer"}, false, true},
+		{"claim_next", []string{"be-free"}, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			batch := &fakeBatchCloser{}
+			raw := &fakeStore{batch: batch, deps: map[string][]*types.Dependency{
+				"be-consumer": {externalDep("be-consumer", "external:remote:payments", types.DepBlocks)},
+			}}
+			foreign := &fakeStore{labels: map[string][]*types.Issue{
+				"provides:payments": {{ID: "remote-provider", Status: types.StatusOpen}},
+			}}
+			closer, err := testStore(raw, foreign, true).BatchCloser()
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := publicops.CloseBatchRequest{Actor: "worker"}
+			for _, id := range tc.items {
+				request.Items = append(request.Items, publicops.BatchCloseItem{IssueID: id})
+			}
+			if tc.claimNext {
+				request.ClaimNext = &publicops.ReadyRequest{}
+			}
+			_, err = closer.CloseBatch(t.Context(), request)
+			var unsupported *storage.ErrUnsupported
+			if errors.As(err, &unsupported) != tc.wantUnsupported {
+				t.Fatalf("close batch error = %v, want unsupported=%v", err, tc.wantUnsupported)
+			}
+			if !tc.wantUnsupported && err != nil {
+				t.Fatal(err)
+			}
+			wantCalls := 1
+			if tc.wantUnsupported {
+				wantCalls = 0
+			}
+			if batch.closed != wantCalls {
+				t.Fatalf("inner batches = %d, want %d", batch.closed, wantCalls)
+			}
+		})
 	}
 }
 
@@ -520,9 +701,11 @@ func TestCloseIssueCheckedRefusesUnsatisfiedExternalRef(t *testing.T) {
 	}}
 	store := testStore(raw, &fakeStore{}, true)
 
-	if _, err := store.CloseIssueChecked(t.Context(), a.ID, "tester", storage.CloseIssueOptions{}); !errors.Is(err, storage.ErrCloseBlocked) {
+	_, err := store.CloseIssueChecked(t.Context(), a.ID, "tester", storage.CloseIssueOptions{})
+	if !errors.Is(err, storage.ErrCloseBlocked) {
 		t.Fatalf("CloseIssueChecked error = %v, want ErrCloseBlocked", err)
 	}
+	assertExternalCloseBlockers(t, err, a.ID, ref)
 	if len(raw.closed) != 0 {
 		t.Fatalf("raw close calls = %v, want none", raw.closed)
 	}
@@ -602,4 +785,22 @@ func issueIDs(issues []*types.Issue) []string {
 		ids = append(ids, issue.ID)
 	}
 	return ids
+}
+
+// assertExternalCloseBlockers checks that an external close refusal carries the
+// typed blocker list — the unsatisfied reference, as an external blocker with no
+// reported edge type — and still spells the historical sentence.
+func assertExternalCloseBlockers(t *testing.T, err error, issueID, ref string) {
+	t.Helper()
+	var blocked *publicops.BlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("close refusal %v carries no *BlockedError", err)
+	}
+	want := []publicops.Blocker{{ID: ref}}
+	if blocked.IssueID != issueID || !slices.Equal(blocked.Blockers, want) || !blocked.Blockers[0].External() {
+		t.Errorf("BlockedError = %+v, want issue %s blocked by %+v (external)", blocked, issueID, want)
+	}
+	if wantText := "cannot close blocked issue: " + issueID + " is blocked by [" + ref + "]"; err.Error() != wantText {
+		t.Errorf("refusal = %q, want %q", err.Error(), wantText)
+	}
 }

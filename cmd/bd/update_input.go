@@ -35,8 +35,12 @@ type updateInput struct {
 	// guard).
 	ifAssignee *string
 	ifStatus   *string
-	// bd-98s5c: --force bypasses the live-claim reassign fence (mutually
-	// exclusive with --if-assignee at the flag-group level).
+	// A8's --if-revision guard (beads#4682); composes with ifAssignee/ifStatus
+	// above, all of which must hold.
+	ifRevision *int64
+	// bd-98s5c: --force bypasses the live-claim reassign fence only when no
+	// --if-assignee guard rides the command; it also opts into the notes
+	// overwrite and close-policy bypasses (runCommandUpdateMutation).
 	force bool
 }
 
@@ -102,7 +106,13 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 	}
 	if cmd.Flags().Changed("notes") {
 		notes, _ := cmd.Flags().GetString("notes")
+		if err := validateNotesUpdate(notes); err != nil {
+			return nil, HandleErrorRespectJSON("%v", err)
+		}
 		in.fields["notes"] = notes
+	}
+	if clearNotesRequested(cmd) {
+		in.fields["notes"] = ""
 	}
 	if cmd.Flags().Changed("append-notes") {
 		in.appendNotes, _ = cmd.Flags().GetString("append-notes")
@@ -176,7 +186,7 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		} else {
 			t, err := timeparsing.ParseRelativeTime(dueStr, time.Now())
 			if err != nil {
-				return nil, HandleErrorRespectJSON("invalid --due format %q. Examples: +6h, tomorrow, next monday, 2025-01-15", dueStr)
+				return nil, HandleErrorRespectJSON("invalid --due format %q. %s", dueStr, deferUntilFormatHint)
 			}
 			in.fields["due_at"] = t
 		}
@@ -192,7 +202,7 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		} else {
 			t, err := timeparsing.ParseRelativeTime(deferStr, time.Now())
 			if err != nil {
-				return nil, HandleErrorRespectJSON("invalid --defer format %q. Examples: +1h, tomorrow, next monday, 2025-01-15", deferStr)
+				return nil, HandleErrorRespectJSON("invalid --defer format %q. %s", deferStr, deferUntilFormatHint)
 			}
 			inPast := t.Before(time.Now())
 			if inPast && !jsonOut {
@@ -233,21 +243,11 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 	}
 	if cmd.Flags().Changed("metadata") {
 		metadataValue, _ := cmd.Flags().GetString("metadata")
-		var metadataJSON string
-		if strings.HasPrefix(metadataValue, "@") {
-			filePath := metadataValue[1:]
-			data, err := os.ReadFile(filePath) //#nosec G304 -- user-supplied path via @file syntax
-			if err != nil {
-				return nil, HandleErrorRespectJSON("failed to read metadata file %s: %v", filePath, err)
-			}
-			metadataJSON = string(data)
-		} else {
-			metadataJSON = metadataValue
+		metadata, err := readMetadataFlag(metadataValue)
+		if err != nil {
+			return nil, HandleErrorRespectJSON("%v", err)
 		}
-		if !json.Valid([]byte(metadataJSON)) {
-			return nil, HandleErrorRespectJSON("invalid JSON in --metadata: must be valid JSON")
-		}
-		in.mergeMetadataIn = json.RawMessage(metadataJSON)
+		in.mergeMetadataIn = metadata
 	}
 	setMetadataFlags, _ := cmd.Flags().GetStringArray("set-metadata")
 	unsetMetadataFlags, _ := cmd.Flags().GetStringArray("unset-metadata")
@@ -275,12 +275,19 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		}
 		in.ifStatus = &v
 	}
-	if in.ifAssignee != nil || in.ifStatus != nil {
+	// A8's --if-revision guard (beads#4682), same Changed()-detected presence
+	// idiom and validated as the decimal int64 types.ParseRevisionToken
+	// expects, mirroring the non-proxied path's updateGuardsFromFlags.
+	in.ifRevision, err = parseIfRevisionFlag(cmd)
+	if err != nil {
+		return nil, err
+	}
+	if in.ifAssignee != nil || in.ifStatus != nil || in.ifRevision != nil {
 		if in.claim {
-			return nil, HandleErrorRespectJSON("cannot combine --if-assignee/--if-status with --claim (--claim is already an atomic compare-and-set)")
+			return nil, HandleErrorRespectJSON("cannot combine --if-assignee/--if-status/--if-revision with --claim (--claim is already an atomic compare-and-set)")
 		}
 		if len(in.fields) == 0 && !in.hasAppendNotes && len(in.mergeMetadataIn) == 0 && len(in.setMetadata) == 0 && len(in.unsetMetadata) == 0 {
-			return nil, HandleErrorRespectJSON("--if-assignee/--if-status require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard")
+			return nil, HandleErrorRespectJSON("--if-assignee/--if-status/--if-revision require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard")
 		}
 	}
 	return in, nil

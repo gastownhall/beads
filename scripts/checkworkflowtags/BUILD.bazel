@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "checkworkflowtags_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/steveyegge/beads/scripts/checkworkflowtags",
+    visibility = ["//visibility:private"],
+    deps = ["//scripts/workflowtags"],
+)
+
+go_binary(
+    name = "checkworkflowtags",
+    embed = [":checkworkflowtags_lib"],
+    visibility = ["//visibility:public"],
+)

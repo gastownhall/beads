@@ -3,7 +3,9 @@ package issueops
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -358,6 +360,9 @@ func TestPersistDependenciesRejectsHierarchyBlocking(t *testing.T) {
 }
 
 func TestPersistDependenciesValidatesPlannedHierarchyBeforeBlocking(t *testing.T) {
+	// This case pins the per-edge read sequence; its batch-lookup twin is
+	// TestPersistDependenciesBatchValidatesPlannedHierarchyBeforeBlocking.
+	t.Cleanup(DisableCreateFastPathsForTest())
 	ctx := context.Background()
 	db, mock, tx := beginMockTx(t)
 	defer db.Close()
@@ -543,6 +548,73 @@ func TestReconcileChildCountersReturnsWispLookupError(t *testing.T) {
 	}
 
 	// A failed wisp lookup must stop routing before any issues or counter query.
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+// TestPersistDependenciesBatchValidatesPlannedHierarchyBeforeBlocking is the
+// batch-lookup twin of TestPersistDependenciesValidatesPlannedHierarchyBeforeBlocking:
+// routing and target presence come from one batch read each, edges are read
+// only for the batch's own endpoints, and the planned ancestry the
+// parent-child phase wrote is what rejects the blocks edge — with no per-edge
+// recursive query.
+func TestPersistDependenciesBatchValidatesPlannedHierarchyBeforeBlocking(t *testing.T) {
+	ctx := context.Background()
+	db, mock, tx := beginMockTx(t)
+	defer db.Close()
+	child := &types.Issue{
+		ID:        "bd-child",
+		IssueType: types.TypeTask,
+		Dependencies: []*types.Dependency{
+			{DependsOnID: "bd-grand", Type: types.DepBlocks}, // Deliberately first.
+			{DependsOnID: "bd-parent", Type: types.DepParentChild},
+		},
+	}
+	parent := &types.Issue{
+		ID:        "bd-parent",
+		IssueType: types.TypeTask,
+		Dependencies: []*types.Dependency{{
+			DependsOnID: "bd-grand",
+			Type:        types.DepParentChild,
+		}},
+	}
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps LIMIT 1")).WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM issues WHERE id IN (?,?)")).
+		WithArgs("bd-grand", "bd-parent").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("bd-grand").AddRow("bd-parent"))
+	ids := []driver.Value{"bd-child", "bd-grand", "bd-parent"}
+	for _, table := range []string{"dependencies", "wisp_dependencies"} {
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, " + DepTargetExpr + ", type FROM " + table + " WHERE issue_id IN (?,?,?)")).
+			WithArgs(ids...).
+			WillReturnRows(sqlmock.NewRows([]string{"issue_id", "target", "type"}))
+	}
+	for _, table := range []string{"dependencies", "wisp_dependencies"} {
+		for _, col := range []string{"depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"} {
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, " + DepTargetExpr + ", type FROM " + table + " WHERE " + col + " IN (?,?,?)")).
+				WithArgs(ids...).
+				WillReturnRows(sqlmock.NewRows([]string{"issue_id", "target", "type"}))
+		}
+	}
+	for _, pair := range [][2]string{{"bd-child", "bd-parent"}, {"bd-parent", "bd-grand"}} {
+		mock.ExpectExec("INSERT INTO dependencies").
+			WithArgs(depid.New(pair[0], pair[1]), pair[0], pair[1], types.DepParentChild, "tester", sqlmock.AnyArg(), "{}", "").
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec("REPLACE INTO local_metadata").
+			WithArgs(dependencyCoordinationKey(pair[1], dependencyCoordinationDurableTier), sqlmock.AnyArg()).
+			WillReturnResult(sqlmock.NewResult(1, 1))
+	}
+
+	_, err := PersistDependenciesWithOptionsResult(ctx, tx, []*types.Issue{child, parent}, "tester", storage.BatchCreateOptions{})
+	if err == nil || !strings.Contains(err.Error(), "cannot be blocked by its ancestor") {
+		t.Fatalf("error = %v, want planned-ancestor rejection", err)
+	}
+
 	mock.ExpectRollback()
 	if err := tx.Rollback(); err != nil {
 		t.Fatalf("rollback: %v", err)

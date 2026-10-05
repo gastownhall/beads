@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -38,6 +39,36 @@ func isBackupAutoEnabled() bool {
 		return false
 	}
 	return primeHasGitRemote()
+}
+
+// backupAutoStatusNote returns the parenthetical `bd backup status`
+// prints after the effective backup.enabled value, or "" when the value
+// speaks for itself. Callers pass the value isBackupAutoEnabled()
+// already computed so the note cannot disagree with the number beside
+// it — and so status does not re-run the git-remote probe.
+//
+// The note narrates the reason the decision actually used. An explicit
+// backup.enabled needs no note: the source explains it, and every shape
+// that reaches `bd backup status` honors it — including a managed-local
+// proxied server, whose post-run arm runs auto-backup (every other proxied
+// shape is refused by requireLocalProxiedBackup before status renders).
+// A server-mode default is OFF whether or not a git remote exists, so it
+// must not be attributed to the remote; before these arms existed, status
+// did exactly that.
+func backupAutoStatusNote(enabled bool) string {
+	if config.GetValueSource("backup.enabled") != config.SourceDefault {
+		return ""
+	}
+	if usesProxiedServer() {
+		return "auto: off in proxied-server mode; set backup.enabled=true to opt in"
+	}
+	if usesSQLServer() {
+		return "auto: off in sql-server mode"
+	}
+	if enabled {
+		return "auto: git remote detected"
+	}
+	return "auto: no git remote"
 }
 
 // clientServerShareFilesystem reports whether the configured Dolt
@@ -88,6 +119,21 @@ func clientServerShareFilesystem() bool {
 // bd sessions don't need a chatty repeat on every command.
 var autoBackupSkipNoticeOnce sync.Once
 
+// autoBackupBackendForCommand returns the storage this command's auto-backup
+// runs against, or ok=false when there is nothing it may back up.
+func autoBackupBackendForCommand() (localBackupBackend, bool) {
+	if usesProxiedServer() {
+		return proxiedAutoBackupBackend()
+	}
+	if store == nil {
+		return nil, false
+	}
+	if lm, ok := storage.UnwrapStore(store).(storage.LifecycleManager); ok && lm.IsClosed() {
+		return nil, false
+	}
+	return directLocalBackup{store: store}, true
+}
+
 // maybeAutoBackup runs a Dolt-native backup if enabled and the throttle interval has passed.
 // Called from PersistentPostRun after auto-commit.
 func maybeAutoBackup(ctx context.Context) {
@@ -102,10 +148,8 @@ func maybeAutoBackup(ctx context.Context) {
 	if !isBackupAutoEnabled() {
 		return
 	}
-	if store == nil {
-		return
-	}
-	if lm, ok := storage.UnwrapStore(store).(storage.LifecycleManager); ok && lm.IsClosed() {
+	backend, ok := autoBackupBackendForCommand()
+	if !ok {
 		return
 	}
 
@@ -115,7 +159,11 @@ func maybeAutoBackup(ctx context.Context) {
 	// constructs is meaningless to the server — register fails on
 	// every command. Skip cleanly with a one-time INFO so operators
 	// know auto-backup is silent on purpose.
-	if !clientServerShareFilesystem() {
+	//
+	// Proxied workspaces do not consult the host: proxiedAutoBackupBackend
+	// has already required managed-local, where bd spawned the server on
+	// this filesystem itself.
+	if !usesProxiedServer() && !clientServerShareFilesystem() {
 		autoBackupSkipNoticeOnce.Do(func() {
 			if !isQuiet() && !jsonOutput {
 				fmt.Fprintln(os.Stderr,
@@ -141,7 +189,12 @@ func maybeAutoBackup(ctx context.Context) {
 		return
 	}
 
-	// Throttle: skip if we backed up recently
+	// Throttle: skip if we backed up recently. Checked before the size-cap
+	// walk below so the common case — the majority of bd invocations,
+	// still inside the interval — pays zero directory-walk cost (ga-y6gjv
+	// PR #6071 review: getDirSize's filepath.Walk cost 65-100ms per
+	// invocation at 20k files when the cap check ran unconditionally,
+	// before this throttle, on every single command).
 	interval := config.GetDuration("backup.interval")
 	if interval == 0 {
 		interval = 15 * time.Minute
@@ -153,7 +206,7 @@ func maybeAutoBackup(ctx context.Context) {
 	}
 
 	// Change detection: skip if nothing changed
-	currentCommit, err := store.GetCurrentCommit(ctx)
+	currentCommit, err := backend.CurrentCommit(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: auto-backup skipped: failed to get current commit: %v\n", err)
 		return
@@ -163,8 +216,47 @@ func maybeAutoBackup(ctx context.Context) {
 		return
 	}
 
+	// Size cap: skip entirely once the destination has grown past
+	// backup.size-cap-mb (ga-y6gjv) — see backupSizeCapExceeded for why a
+	// cap, not an in-place prune, is the safe fix here.
+	//
+	// Placed AFTER change detection, which is the order
+	// docs/reference/configuration.md:"How it works" documents. Ahead of
+	// it, the walk ran on EVERY bd invocation indefinitely in an idle
+	// workspace: nothing on the idle path advances state.Timestamp, so the
+	// interval throttle above can never re-arm while nothing is changing
+	// (ga-y6gjv PR #6071 review). Keep it above any lock acquisition —
+	// a skip should not first take a lock it is about to release.
+	if exceeded, size, err := backupSizeCapExceeded(dir); err != nil {
+		warnBackupSizeCapUnavailable(err)
+		// Re-arm the interval throttle before proceeding uncapped: not
+		// every runBackupExport exit persists state.Timestamp (see
+		// warnBackupSizeCapUnavailable), and without this the walk and
+		// its warning would repeat on every bd command.
+		state.Timestamp = time.Now().UTC()
+		if saveErr := saveBackupState(dir, state); saveErr != nil {
+			debug.Logf("backup: failed to persist throttle state after size cap error: %v\n", saveErr)
+		}
+	} else if exceeded {
+		pauseAutoBackupForSizeCap(dir, state, size)
+		return
+	}
+
+	// One backup at a time per workspace (backup_lock.go). Auto-backup never
+	// waits: a held lock means a backup is already running.
+	release, err := acquireBackupLock(0)
+	if err != nil {
+		if errors.Is(err, errBackupBusy) {
+			debug.Logf("backup: skipping — another backup is running\n")
+			return
+		}
+		fmt.Fprintf(os.Stderr, "Warning: auto-backup skipped: %v\n", err)
+		return
+	}
+	defer release()
+
 	// Run the backup (force=true since we already checked change detection above)
-	if _, err := runBackupExport(ctx, true); err != nil {
+	if _, err := runBackupExport(ctx, backend, true); err != nil {
 		if !isQuiet() && !jsonOutput {
 			fmt.Fprintf(os.Stderr, "Warning: auto-backup failed: %v\n", err)
 		}

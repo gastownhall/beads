@@ -270,7 +270,13 @@ func TestEmbeddedRoutedSiblingWritesCommitTargetHead(t *testing.T) {
 // (#4141). Each subtest creates the bead in the target rig, runs the command
 // from the source rig so resolution must route, and asserts both that the
 // target HEAD advanced and that the mutation persisted in the target store.
-func TestEmbeddedRoutedMutatingSiblingWritesCommitTargetHead(t *testing.T) {
+// TestEmbeddedRoutedMutatingSiblingAssignTagDep was split from
+// TestEmbeddedRoutedMutatingSiblingWritesCommitTargetHead (originally
+// ~245.22s, measured under --config=embedded) into 2 top-level tests over
+// disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedRoutedMutatingSiblingAssignTagDep(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt auto-commit tests")
 	}
@@ -339,6 +345,21 @@ func TestEmbeddedRoutedMutatingSiblingWritesCommitTargetHead(t *testing.T) {
 			t.Fatalf("routed dep add did not persist %s -> %s in target store (deps=%v)", from.ID, to.ID, deps)
 		}
 	})
+}
+
+// TestEmbeddedRoutedMutatingSiblingDeleteClose was split from
+// TestEmbeddedRoutedMutatingSiblingWritesCommitTargetHead (originally
+// ~245.22s, measured under --config=embedded) into 2 top-level tests over
+// disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedRoutedMutatingSiblingDeleteClose(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt auto-commit tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("delete", func(t *testing.T) {
 		sourceDir, targetDir, targetBeadsDir := setupRoutedEmbeddedRepo(t, bd, "sdl", "tdl")

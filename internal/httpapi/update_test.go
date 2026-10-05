@@ -88,7 +88,7 @@ func TestUpdateForwardsEveryDocumentedMember(t *testing.T) {
 		t.Errorf("the role received actor %q id %q", req.Actor, req.IssueID)
 	}
 	// Every precondition and force flag stays zero: unpublished on this surface.
-	if req.Claim || req.ForceAssigneeTransfer || req.ForceClosePolicy ||
+	if req.Claim || req.ForceAssigneeTransfer || req.ForceClosePolicy || req.ForceNotesOverwrite ||
 		req.ExpectedVersion != nil || req.ExpectedAssignee != nil || req.ExpectedStatus != nil {
 		t.Errorf("the handler published a precondition or force flag: %+v", req)
 	}
@@ -320,7 +320,13 @@ func TestUpdateRejectsTheShapesTheDocumentRefuses(t *testing.T) {
 		{"unknown metadata member", `{"actor":"alice","patch":{"metadata":{"clear":true}}}`, "patch.metadata.clear"},
 		{"force_assignee_transfer without an assignee edit", `{"actor":"alice","patch":{"title":"t"},"force_assignee_transfer":true}`, "force_assignee_transfer"},
 		{"force_assignee_transfer beside expected_assignee", `{"actor":"alice","patch":{"assignee":"bob"},"force_assignee_transfer":true,"expected_assignee":"carol"}`, "force_assignee_transfer"},
-		{"expected_version is not a number", `{"actor":"alice","patch":{"title":"t"},"expected_version":"3"}`, "expected_version"},
+		{"force_notes_overwrite without a notes edit", `{"actor":"alice","patch":{"title":"t"},"force_notes_overwrite":true}`, "force_notes_overwrite"},
+		// The guard is a decimal STRING; a bare number is the spelling this
+		// contract deliberately does not also accept, since a double-based
+		// client would have rounded it before it ever arrived.
+		{"expected_version is a number", `{"actor":"alice","patch":{"title":"t"},"expected_version":3}`, "expected_version"},
+		{"expected_version is a number past 2^53", `{"actor":"alice","patch":{"title":"t"},"expected_version":9007199254740993}`, "expected_version"},
+		{"expected_version is not a decimal token", `{"actor":"alice","patch":{"title":"t"},"expected_version":"three"}`, "expected_version"},
 		{"null expected_status", `{"actor":"alice","patch":{"title":"t"},"expected_status":null}`, "expected_status"},
 		{"null force_close_policy", `{"actor":"alice","patch":{"title":"t"},"force_close_policy":null}`, "force_close_policy"},
 		{"blank title", `{"actor":"alice","patch":{"title":"   "}}`, "patch.title"},
@@ -609,7 +615,7 @@ func TestUpdateForwardsTheGuardedMembers(t *testing.T) {
 
 	resp := ts.updateIssue(t, updatePath, `{
 		"actor":"alice",
-		"expected_version": 41,
+		"expected_version": "41",
 		"expected_status": "open",
 		"force_close_policy": true,
 		"patch": {
@@ -640,10 +646,10 @@ func TestUpdateForwardsTheGuardedMembers(t *testing.T) {
 	if !req.ForceClosePolicy || req.ForceAssigneeTransfer {
 		t.Errorf("force flags = %v/%v, want close-policy only", req.ForceClosePolicy, req.ForceAssigneeTransfer)
 	}
-	// Claim stays zero: acquiring work is `{id}:claim`, which has its own
-	// eligibility rules and its own conflict vocabulary.
+	// Claim stays zero when the request sent no `claim`: an absent member is
+	// never a claim.
 	if req.Claim {
-		t.Error("the update claimed the issue; that operation is `{id}:claim`")
+		t.Error("the update claimed the issue though the request sent no `claim`")
 	}
 	if req.IssuePlaneOnly {
 		t.Error("the update narrowed itself to the issue plane; this operation resolves across both")
@@ -757,20 +763,23 @@ func TestUpdateGuardsComposeFromTheRevisionTheWriteAnswered(t *testing.T) {
 	if first.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", first.StatusCode, readAll(t, first))
 	}
-	revision, ok := decodeBody(t, first)["revision"].(float64)
+	revision, ok := decodeBody(t, first)["revision"].(string)
 	if !ok {
-		t.Fatalf("the response carries no `revision`; a guard whose token no response carries cannot be filled")
+		t.Fatalf("the response carries no string `revision`; a guard whose token no response carries cannot be filled")
 	}
 	// The token must be the ROW's, read off the snapshot the role answered
 	// with. Without this the loop below round-trips whatever the handler put
 	// there — including a constant zero — and could not fail against a
 	// `revision` that describes no row.
-	if int64(revision) != stored {
-		t.Fatalf("revision = %d, want the %d the role's row carries", int64(revision), stored)
+	if revision != types.RevisionToken(stored) {
+		t.Fatalf("revision = %q, want the %q the role's row carries", revision, types.RevisionToken(stored))
 	}
 
+	// The guard is the response's token spliced back in VERBATIM, which is the
+	// whole discipline the string spelling exists to make possible: nothing
+	// here parses, re-renders or arithmetics the value.
 	second := ts.updateIssue(t, updatePath,
-		fmt.Sprintf(`{"actor":"alice","expected_version":%d,"patch":{"title":"second"}}`, int64(revision)))
+		fmt.Sprintf(`{"actor":"alice","expected_version":%q,"patch":{"title":"second"}}`, revision))
 	if second.StatusCode != http.StatusOK {
 		t.Fatalf("guarded status = %d, want 200: %s", second.StatusCode, readAll(t, second))
 	}
@@ -778,8 +787,8 @@ func TestUpdateGuardsComposeFromTheRevisionTheWriteAnswered(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("the role was called %d times, want 2", len(got))
 	}
-	if got[1].ExpectedVersion == nil || *got[1].ExpectedVersion != int64(revision) {
-		t.Errorf("expected_version = %v, want the %d the write answered with", got[1].ExpectedVersion, int64(revision))
+	if got[1].ExpectedVersion == nil || *got[1].ExpectedVersion != stored {
+		t.Errorf("expected_version = %v, want the %d the write answered with", got[1].ExpectedVersion, stored)
 	}
 }
 
@@ -798,11 +807,11 @@ func TestUpdateRefusesAStaleGuard(t *testing.T) {
 	}{
 		{
 			name:      "version",
-			body:      `{"actor":"alice","expected_version":7,"patch":{"title":"t"}}`,
+			body:      `{"actor":"alice","expected_version":"7","patch":{"title":"t"}}`,
 			err:       fmt.Errorf("update bd-1: %w", issueops.ErrVersionMismatch),
 			wantParam: "expected_version",
 			wantEcho:  "expected_version",
-			wantValue: float64(7),
+			wantValue: "7",
 		},
 		{
 			name:      "status",
@@ -888,6 +897,23 @@ func TestUpdateAnswersThePolicyRefusalsItsMembersEarned(t *testing.T) {
 			},
 		},
 		{
+			name:       "status crossing with a typed live blocker names it",
+			body:       `{"actor":"alice","patch":{"status":"closed"}}`,
+			err:        fmt.Errorf("close: %w", blockedCloseFixture()),
+			wantStatus: http.StatusConflict,
+			wantCode:   CodeNotClosable,
+			wantParam:  "patch.status",
+			check: func(t *testing.T, body map[string]any) {
+				assertBlockersMember(t, "problem", body["blockers"])
+				if want := blockedCloseSentence + "; clear the blocker, or send `force_close_policy`"; body["detail"] != want {
+					t.Errorf("detail = %q, want %q", body["detail"], want)
+				}
+				if _, present := body["open_children"]; present {
+					t.Error("open_children is present on the blocker refusal")
+				}
+			},
+		},
+		{
 			name:       "assignee transfer off a live owner",
 			body:       `{"actor":"alice","patch":{"assignee":"carol"}}`,
 			err:        fmt.Errorf("update: %w: issue bd-1 is assigned to %q", storage.ErrAlreadyClaimed, "bob"),
@@ -902,6 +928,15 @@ func TestUpdateAnswersThePolicyRefusalsItsMembersEarned(t *testing.T) {
 					t.Errorf("assignee = %v; the fence reports no typed holder, so this must not be scraped from the message", got)
 				}
 			},
+		},
+		{
+			name:       "notes overwrite refused",
+			body:       `{"actor":"alice","patch":{"notes":"replacement"}}`,
+			err:        fmt.Errorf("update: %w: issue bd-1", storage.ErrNotesOverwrite),
+			wantStatus: http.StatusConflict,
+			wantCode:   CodeNotesOverwrite,
+			wantParam:  "patch.notes",
+			check:      func(*testing.T, map[string]any) {},
 		},
 		{
 			// THE DEFENSIVE ARM, driven directly because no reparent can reach
@@ -1162,6 +1197,188 @@ func TestUpdateBoundsEveryLabelMember(t *testing.T) {
 			}
 			if got := lifecycle.updateRequests(); len(got) != 0 {
 				t.Errorf("a refused label reached the role: %+v", got)
+			}
+		})
+	}
+}
+
+// TestUpdateForwardsTheClaimMember pins the pass-through of `claim` onto
+// issueops.UpdateRequest.Claim — the field `bd update --claim` sets on the
+// direct route — both beside a patch and alone, where the claim is the whole
+// write and an empty `patch` is therefore a request rather than a client bug.
+func TestUpdateForwardsTheClaimMember(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		body      string
+		wantTitle bool
+	}{
+		{"beside a patch", `{"actor":"alice","claim":true,"expected_version":"7","force_close_policy":true,"patch":{"title":"t"}}`, true},
+		{"alone, with an empty patch", `{"actor":"alice","claim":true,"patch":{}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lifecycle := &roleLifecycle{updateResult: issueops.UpdateResult{Issue: updatedIssue("bd-1"), Changed: true}}
+			ts := newUpdateServer(t, lifecycle)
+
+			resp := ts.updateIssue(t, updatePath, tc.body)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+			}
+			got := lifecycle.updateRequests()
+			if len(got) != 1 {
+				t.Fatalf("the role was called %d times, want 1", len(got))
+			}
+			req := got[0]
+			if !req.Claim {
+				t.Fatal("`claim: true` did not reach the role as UpdateRequest.Claim")
+			}
+			if req.Actor != "alice" || req.IssueID != "bd-1" {
+				t.Errorf("the role received actor %q id %q", req.Actor, req.IssueID)
+			}
+			if req.Patch.Title.Set != tc.wantTitle {
+				t.Errorf("patch.title set = %v, want %v", req.Patch.Title.Set, tc.wantTitle)
+			}
+			if tc.wantTitle {
+				// The members the claim may ride beside still ride.
+				if req.ExpectedVersion == nil || *req.ExpectedVersion != 7 {
+					t.Errorf("expected_version = %v, want 7 beside the claim", req.ExpectedVersion)
+				}
+				if !req.ForceClosePolicy {
+					t.Error("force_close_policy was dropped beside the claim")
+				}
+			}
+		})
+	}
+}
+
+// TestUpdateClaimFalseIsNoClaim: an explicit false is the absent member, and it
+// does not unlock the empty patch.
+func TestUpdateClaimFalseIsNoClaim(t *testing.T) {
+	lifecycle := &roleLifecycle{updateResult: issueops.UpdateResult{Issue: updatedIssue("bd-1"), Changed: true}}
+	ts := newUpdateServer(t, lifecycle)
+
+	resp := ts.updateIssue(t, updatePath, `{"actor":"alice","claim":false,"patch":{"title":"t"}}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+	if got := lifecycle.updateRequests(); len(got) != 1 || got[0].Claim {
+		t.Fatalf("role requests = %+v, want one with Claim false", got)
+	}
+
+	resp = ts.updateIssue(t, updatePath, `{"actor":"alice","claim":false,"patch":{}}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("empty patch beside claim:false: status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
+	}
+	if body := decodeBody(t, resp); body["param"] != "patch" {
+		t.Errorf("param = %v, want patch", body["param"])
+	}
+}
+
+// TestUpdateRefusesTheClaimShapesTheRoleRefuses: the combinations
+// ValidateUpdateRequest refuses are refused at the edge, naming `claim`, before
+// the role is reached — and a claim that is not a boolean is refused by name.
+func TestUpdateRefusesTheClaimShapesTheRoleRefuses(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		body  string
+		param string
+	}{
+		{"claim beside expected_assignee", `{"actor":"alice","claim":true,"patch":{},"expected_assignee":""}`, "claim"},
+		{"claim beside expected_status", `{"actor":"alice","claim":true,"patch":{},"expected_status":"open"}`, "claim"},
+		{"claim beside force_assignee_transfer", `{"actor":"alice","claim":true,"patch":{"assignee":"bob"},"force_assignee_transfer":true}`, "claim"},
+		{"null claim", `{"actor":"alice","claim":null,"patch":{"title":"t"}}`, "claim"},
+		{"claim is a string", `{"actor":"alice","claim":"yes","patch":{"title":"t"}}`, "claim"},
+		// The claim does not relax the patch's own rules.
+		{"claim with a null patch", `{"actor":"alice","claim":true,"patch":null}`, "patch"},
+		{"claim with no patch", `{"actor":"alice","claim":true}`, "patch"},
+		{"claim with a bad patch member", `{"actor":"alice","claim":true,"patch":{"priority":9}}`, "patch.priority"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lifecycle := &roleLifecycle{updateResult: issueops.UpdateResult{Issue: updatedIssue("bd-1")}}
+			ts := newUpdateServer(t, lifecycle)
+
+			resp := ts.updateIssue(t, updatePath, tc.body)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
+			}
+			body := decodeBody(t, resp)
+			if body["code"] != string(CodeInvalidArgument) {
+				t.Errorf("code = %v, want %s", body["code"], CodeInvalidArgument)
+			}
+			if body["param"] != tc.param {
+				t.Errorf("param = %v, want %q", body["param"], tc.param)
+			}
+			if got := lifecycle.updateRequests(); len(got) != 0 {
+				t.Errorf("a refused body reached the role: %+v", got)
+			}
+		})
+	}
+}
+
+// TestUpdateAnswersARefusedClaimAsTheClaimDoes: a claim refused inside the
+// update is answered with `{id}:claim`'s codes and extension members, naming
+// `claim` — never as the assignee fence, which shares the already_claimed
+// sentinel but blames `patch.assignee` and steers toward a force a claim
+// cannot send.
+func TestUpdateAnswersARefusedClaimAsTheClaimDoes(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		body         string
+		err          error
+		wantCode     Code
+		wantAssignee any
+		wantStatus   any
+	}{
+		{
+			name: "held by another actor",
+			body: `{"actor":"alice","claim":true,"patch":{"title":"t"}}`,
+			err: fmt.Errorf("update: %w", &issueops.ClaimConflictError{IssueID: "bd-1", Assignee: "bob", Status: types.StatusInProgress,
+				Err: fmt.Errorf("%w by bob", storage.ErrAlreadyClaimed)}),
+			wantCode:     CodeAlreadyClaimed,
+			wantAssignee: "bob",
+			wantStatus:   "in_progress",
+		},
+		{
+			name: "status is not claimable",
+			body: `{"actor":"alice","claim":true,"patch":{}}`,
+			err: fmt.Errorf("update: %w", &issueops.ClaimConflictError{IssueID: "bd-1", Assignee: "bob", Status: types.StatusClosed,
+				Err: fmt.Errorf("%w: status closed", storage.ErrNotClaimable)}),
+			wantCode:   CodeNotClaimable,
+			wantStatus: "closed",
+			// No holder on not_claimable: a stale assignee must not read as
+			// someone holding the work.
+		},
+		{
+			// The assignee fence fires before the claim when the claim rides a
+			// patch.assignee; under a claim it is still the claim that refused.
+			name:     "the fence refusing a claim that rides an assignee edit",
+			body:     `{"actor":"alice","claim":true,"patch":{"assignee":"carol"}}`,
+			err:      fmt.Errorf("update: %w: issue bd-1 is assigned to %q", storage.ErrAlreadyClaimed, "bob"),
+			wantCode: CodeAlreadyClaimed,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lifecycle := &roleLifecycle{updateErr: tc.err}
+			ts := newUpdateServer(t, lifecycle)
+
+			resp := ts.updateIssue(t, updatePath, tc.body)
+			if resp.StatusCode != http.StatusConflict {
+				t.Fatalf("status = %d, want 409: %s", resp.StatusCode, readAll(t, resp))
+			}
+			body := decodeBody(t, resp)
+			if body["code"] != string(tc.wantCode) {
+				t.Errorf("code = %v, want %s", body["code"], tc.wantCode)
+			}
+			if body["param"] != "claim" {
+				t.Errorf("param = %v, want claim", body["param"])
+			}
+			if body["assignee"] != tc.wantAssignee {
+				t.Errorf("assignee = %v, want %v", body["assignee"], tc.wantAssignee)
+			}
+			if body["issue_status"] != tc.wantStatus {
+				t.Errorf("issue_status = %v, want %v", body["issue_status"], tc.wantStatus)
+			}
+			if detail, _ := body["detail"].(string); strings.Contains(detail, "force_assignee_transfer") || strings.Contains(detail, "by bob") {
+				t.Errorf("detail = %q; a refused claim must neither steer to the fence's force nor quote the role", detail)
 			}
 		})
 	}

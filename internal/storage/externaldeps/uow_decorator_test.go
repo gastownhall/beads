@@ -211,9 +211,11 @@ func TestWrapUOWProviderRefusesProxiedCheckedClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewUOW: %v", err)
 	}
-	if _, err := uw.IssueUseCase().CloseIssueChecked(t.Context(), blocked.ID, domain.CloseIssueParams{}, "tester", false); !errors.Is(err, storage.ErrCloseBlocked) {
+	_, err = uw.IssueUseCase().CloseIssueChecked(t.Context(), blocked.ID, domain.CloseIssueParams{}, "tester", false)
+	if !errors.Is(err, storage.ErrCloseBlocked) {
 		t.Fatalf("CloseIssueChecked error = %v, want ErrCloseBlocked", err)
 	}
+	assertExternalCloseBlockers(t, err, blocked.ID, "external:remote:payments")
 	if len(issues.closed) != 0 {
 		t.Fatalf("inner close calls = %v, want none", issues.closed)
 	}
@@ -266,6 +268,17 @@ func TestWrapUOWProviderGuardsDoneUpdatesAndWispCloses(t *testing.T) {
 		t.Fatalf("NewUOW: %v", err)
 	}
 	issueUC := uw.IssueUseCase()
+	for _, id := range []string{durable.ID, wisp.ID} {
+		if _, err := issueUC.ApplyUpdate(t.Context(), id, domain.UpdateSpec{Claim: true, Fields: map[string]any{"notes": "must not be written"}}, "tester"); !errors.Is(err, storage.ErrCloseBlocked) {
+			t.Fatalf("ApplyUpdate claim %s: %v, want ErrCloseBlocked", id, err)
+		}
+	}
+	if _, err := issueUC.ClaimIssue(t.Context(), durable.ID, "tester"); !errors.Is(err, storage.ErrCloseBlocked) {
+		t.Fatalf("ClaimIssue error = %v, want ErrCloseBlocked", err)
+	}
+	if _, err := issueUC.ClaimWisp(t.Context(), wisp.ID, "tester"); !errors.Is(err, storage.ErrCloseBlocked) {
+		t.Fatalf("ClaimWisp error = %v, want ErrCloseBlocked", err)
+	}
 	if _, err := issueUC.ApplyUpdate(t.Context(), durable.ID, domain.UpdateSpec{Fields: map[string]any{"status": string(types.StatusClosed)}}, "tester"); !errors.Is(err, storage.ErrCloseBlocked) {
 		t.Fatalf("ApplyUpdate error = %v, want ErrCloseBlocked", err)
 	}
@@ -281,6 +294,16 @@ func TestWrapUOWProviderGuardsDoneUpdatesAndWispCloses(t *testing.T) {
 	}
 	if ids := blockedIssueIDs(blocked); !slices.Equal(ids, []string{durable.ID, wisp.ID}) {
 		t.Fatalf("blocked IDs = %v, want [%s %s]", ids, durable.ID, wisp.ID)
+	}
+	durable.Status, wisp.Status = types.StatusClosed, types.StatusClosed
+	if _, err := issueUC.CloseIssueChecked(t.Context(), durable.ID, domain.CloseIssueParams{}, "tester", false); err != nil {
+		t.Fatalf("durable re-close: %v", err)
+	}
+	if _, err := issueUC.CloseWispChecked(t.Context(), wisp.ID, domain.CloseIssueParams{}, "tester", false); err != nil {
+		t.Fatalf("wisp re-close: %v", err)
+	}
+	if !slices.Equal(issues.closed, []string{durable.ID, wisp.ID}) {
+		t.Fatalf("re-closes did not reach the backend: %v", issues.closed)
 	}
 }
 
@@ -324,4 +347,91 @@ func TestWrapUOWProviderPaginatesCombinedExternalBlockedWork(t *testing.T) {
 	if !errors.As(err, &capErr) {
 		t.Fatalf("GetBlockedIssues MaxRows error = %v, want ErrTooManyRows", err)
 	}
+}
+
+// fakeConfigurableProvider is a provider that implements BOTH optional
+// activation configurers and records what reached it.
+type fakeConfigurableProvider struct {
+	uow.UnitOfWorkProvider
+	journal bool
+	version bool
+}
+
+func (p *fakeConfigurableProvider) SetEventsJournalEnabled(enabled bool) { p.journal = enabled }
+
+func (p *fakeConfigurableProvider) SetVersionedHistoryEnabled(enabled bool) { p.version = enabled }
+
+// TestWrapUOWProviderForwardsActivationConfigurers pins the whole optional
+// activation family through this wrapper, not one member of it.
+//
+// uowProvider is the OUTERMOST provider on both real chains (cmd/bd/main.go
+// and cmd/bd/serve.go each wrap everything else in
+// wireExternalDependencyUOWProvider), and activation discovers its target by
+// type-asserting that outermost value. A configurer the wrapper does not
+// implement therefore fails the assertion on exactly the chains that matter,
+// and any forwarder further in is unreachable — with no error and no log,
+// because a missing optional-interface method is invisible to the compiler.
+// The table is the point: the next configurer added to this family gets one
+// row here and is covered, rather than shipping the same silent gap.
+func TestWrapUOWProviderForwardsActivationConfigurers(t *testing.T) {
+	cases := []struct {
+		name   string
+		enable func(uow.UnitOfWorkProvider) bool
+		got    func(*fakeConfigurableProvider) bool
+	}{
+		{
+			name: "EventsJournalConfigurer",
+			enable: func(p uow.UnitOfWorkProvider) bool {
+				configurer, ok := p.(storage.EventsJournalConfigurer)
+				if ok {
+					configurer.SetEventsJournalEnabled(true)
+				}
+				return ok
+			},
+			got: func(p *fakeConfigurableProvider) bool { return p.journal },
+		},
+		{
+			name: "VersionedHistoryConfigurer",
+			enable: func(p uow.UnitOfWorkProvider) bool {
+				configurer, ok := p.(storage.VersionedHistoryConfigurer)
+				if ok {
+					configurer.SetVersionedHistoryEnabled(true)
+				}
+				return ok
+			},
+			got: func(p *fakeConfigurableProvider) bool { return p.version },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inner := &fakeConfigurableProvider{}
+			provider := WrapUOWProvider(inner, nil, nil)
+			if !tc.enable(provider) {
+				t.Fatalf("wrapped provider %T does not implement %s — activation type-asserts the OUTERMOST provider, so it would silently enable nothing", provider, tc.name)
+			}
+			if !tc.got(inner) {
+				t.Fatalf("%s did not reach the inner provider through the wrapper", tc.name)
+			}
+		})
+	}
+}
+
+// TestWrapUOWProviderToleratesInnerWithoutConfigurers pins the other half of
+// the forwarding contract: an inner provider that implements neither
+// configurer must be a silent no-op, not a panic. The wrapper still satisfies
+// both interfaces (that is what makes activation reach it at all), so the
+// inner type assertion is the only thing standing between a non-configurable
+// store and a nil-method call.
+func TestWrapUOWProviderToleratesInnerWithoutConfigurers(t *testing.T) {
+	provider := WrapUOWProvider(&fakeUOWProvider{uw: &fakeUOW{}}, nil, nil)
+	journal, ok := provider.(storage.EventsJournalConfigurer)
+	if !ok {
+		t.Fatalf("wrapped provider %T does not implement storage.EventsJournalConfigurer", provider)
+	}
+	version, ok := provider.(storage.VersionedHistoryConfigurer)
+	if !ok {
+		t.Fatalf("wrapped provider %T does not implement storage.VersionedHistoryConfigurer", provider)
+	}
+	journal.SetEventsJournalEnabled(true)
+	version.SetVersionedHistoryEnabled(true)
 }

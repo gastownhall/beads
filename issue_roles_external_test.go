@@ -654,6 +654,35 @@ func TestGraphCounterExposesTypedUnsupportedError(t *testing.T) {
 	}
 }
 
+// TestBatchGetterKeepsTelemetryOutermost is the READ answer again: reading
+// issues by id fires no completion hooks, so the hook decorator adds no layer.
+func TestBatchGetterKeepsTelemetryOutermost(t *testing.T) {
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	instrumented, ok := telemetry.WrapStorage(&dolt.DoltStore{}).(*telemetry.InstrumentedStorage)
+	if !ok {
+		t.Fatal("WrapStorage() did not create InstrumentedStorage")
+	}
+
+	getter, err := storage.NewHookFiringStore(instrumented, nil).BatchGetter()
+	if err != nil {
+		t.Fatalf("BatchGetter() error = %v", err)
+	}
+	if got := reflect.TypeOf(getter).String(); got != "*telemetry.instrumentedBatchGetter" {
+		t.Fatalf("outer layer = %s, want the telemetry wrapper unwrapped by the hook decorator", got)
+	}
+}
+
+func TestBatchGetterExposesTypedUnsupportedError(t *testing.T) {
+	getter, err := (*dolt.DoltStore)(nil).BatchGetter()
+	if getter != nil {
+		t.Fatalf("BatchGetter() getter = %T, want nil", getter)
+	}
+	var unsupported *beads.ErrUnsupported
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("BatchGetter() error = %v, want *beads.ErrUnsupported", err)
+	}
+}
+
 func TestCounterExposesTypedUnsupportedError(t *testing.T) {
 	counter, err := (*dolt.DoltStore)(nil).Counter()
 	if counter != nil {

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -134,6 +135,26 @@ func TestCheckConfigValues(t *testing.T) {
 			t.Errorf("expected detail to mention too long, got: %s", check.Detail)
 		}
 	})
+}
+
+func TestCheckConfigValuesWarnsOnFlatAndNestedSpellings(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("create .beads: %v", err)
+	}
+	configContent := "dolt.host: 127.0.0.1\ndolt:\n  host: 10.0.0.1\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(configContent), 0o644); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	check := CheckConfigValues(tmpDir)
+	if check.Status != StatusWarning {
+		t.Fatalf("expected warning, got %s: %s", check.Status, check.Detail)
+	}
+	if !strings.Contains(check.Detail, "dolt.host") || !strings.Contains(check.Detail, "flat and nested") {
+		t.Fatalf("warning does not identify the dual spelling: %s", check.Detail)
+	}
 }
 
 func TestCheckConfigValues_WorktreeFallbackUsesSharedConfig(t *testing.T) {

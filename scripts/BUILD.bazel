@@ -1,0 +1,122 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+# CI and repo-policy tests: they parse the workflows and run the CI shell
+# scripts against fixtures.
+#
+# Tags:
+#   host-tools: the scripts and fixtures run the host's git, python3, awk,
+#     sed, find, grep and timeout (beyond the bash the test wrapper needs).
+#     Under Bazel a missing git or bash fails the test (under go test it
+#     skips).
+#   no-remote-exec: so they always run where that inventory is known (the
+#     developer machine or the CI runner). The farm workers do have these
+#     tools today (the target passes there), so this can be dropped once that
+#     is guaranteed.
+#   no-remote-cache: the action key does not cover the host's tools, so a
+#     result from one host is neither uploaded for nor served to another.
+go_test(
+    name = "scripts_test",
+    srcs = [
+        "bazel_autofix_push_test.go",
+        "bazel_cache_mode_test.go",
+        "bazel_farm_workflow_test.go",
+        "bazel_fork_mode_test.go",
+        "bazel_policy_test.go",
+        "bazel_rbe_prewarm_test.go",
+        "bazel_skip_allowlist_test.go",
+        "check_build_tags_test.go",
+        "check_doc_freshness_test.go",
+        "check_release_cross_compile_test.go",
+        "check_testing_short_test.go",
+        "check_winget_portable_alias_test.go",
+        "ci_actions_policy_test.go",
+        "ci_blacksmith_runner_test.go",
+        "ci_capability_selector_test.go",
+        "ci_f7b_review_test.go",
+        "ci_f7c_advisory_test.go",
+        "ci_workflow_apt_get_timeout_test.go",
+        "ci_workflow_test.go",
+        "complexity_script_test.go",
+        "conformance_script_test.go",
+        "embedded_shard_count_test.go",
+        "host_tools_test.go",
+        "install_dolt_test.go",
+        "pr_lanes_bazel_coverage_test.go",
+        "pr_preflight_test.go",
+        "pr_risk_bazel_coverage_test.go",
+        "pull_dolt_image_test.go",
+        "release_script_test.go",
+        "required_suite_test.go",
+        "test_script_test.go",
+        "upgrade_smoke_loop_test.go",
+        "windows_test_binaries_manifest_test.go",
+    ],
+    data = [
+        ":scripts_files",
+        "//:.githooks/pre-commit",
+        "//:.goreleaser.yml",
+        "//:bazel_policy_files",
+        "//:engdocs/LINTING.md",
+        "//:mcp_package_policy_files",
+        "//:test_sh_files",
+        "//:workflow_files",
+        "//internal/testutil:testdoltcommon.go",
+        "//tools/bazel:dolt.bzl",
+    ],
+    tags = [
+        "host-tools",
+        "no-remote-cache",
+        "no-remote-exec",
+    ],
+    deps = [
+        "//internal/formula",
+        "//internal/testutil/bazeltest",
+        "//scripts/internal/testbash",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)
+
+# The scripts scripts_test reads and runs (CI helpers, check-*.sh, release.sh,
+# test.sh, conformance.sh, ...). Globs stop at subpackages, so this is only
+# this package's own tree.
+filegroup(
+    name = "scripts_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "BUILD.bazel",
+            "**/*_test.go",
+        ],
+    ),
+)
+
+exports_files(
+    ["migration-test/release-catalog.json"],
+    visibility = ["//scripts/migration-test/catalog:__pkg__"],
+)
+
+exports_files(
+    [
+        "ci/fmt-check.sh",
+        "ci/lib/timing.sh",
+        "ci/pr-lint.sh",
+    ],
+    visibility = ["//scripts/prlintmake:__pkg__"],
+)
+
+exports_files(
+    ["README.md"],
+    visibility = ["//:__pkg__"],
+)
+
+exports_files(
+    ["ci/gofmt-bin.sh"],
+    visibility = ["//scripts/prlintmake:__pkg__"],
+)
+
+# The compatibility entrypoint whose exit-status contract
+# //scripts/check-versions:check-versions_test drives.
+exports_files(
+    ["check-versions.sh"],
+    visibility = ["//scripts/check-versions:__pkg__"],
+)

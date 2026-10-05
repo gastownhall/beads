@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
 )
@@ -20,6 +21,8 @@ func runInfoProxiedServer(ctx context.Context, schemaFlag bool) error {
 		"database_path": absDBPath,
 		"mode":          "proxied-server",
 	}
+
+	suppressHookWarning := false
 
 	page, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{})
 	var issues []*types.Issue
@@ -42,6 +45,8 @@ func runInfoProxiedServer(ctx context.Context, schemaFlag bool) error {
 		if filtered := workapi.FilterSettingsEnumeration(configMap); len(filtered) > 0 {
 			info["config"] = filtered
 		}
+		// GH#6027: honor the same doctor.suppress.git-hooks bd doctor does.
+		suppressHookWarning = doctor.SuppressedChecksFromConfig(configMap)[doctor.CheckNameToSlug("Git Hooks")]
 	}
 
 	if schemaFlag {
@@ -53,5 +58,5 @@ func runInfoProxiedServer(ctx context.Context, schemaFlag bool) error {
 		info["schema"] = buildInfoSchema(schemaVersion, prefix, issues)
 	}
 
-	return renderInfo(info, schemaFlag, absDBPath)
+	return renderInfo(info, schemaFlag, absDBPath, suppressHookWarning)
 }
