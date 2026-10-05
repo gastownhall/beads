@@ -196,6 +196,55 @@ func TestIfRevisionMatchAndMismatch(t *testing.T) {
 	})
 }
 
+// TestIfRevisionDeletePreflightGoneIsPreconditionFailed pins mc-zndi7.81: `bd
+// delete`'s single-id path resolves the row with resolveAndGetIssueForMutation
+// BEFORE calling deleter.Delete() and the per-id lock fence #7244 added. On a
+// real Dolt sql-server, a same-token --if-revision racer that loses that fence
+// finds the row already gone right there
+// (TestSharedServerDeleteIfRevisionSingleWinner/same_token, which this test
+// cannot reach without a container) and, pre-fix, exited 1 with an
+// unclassified "not found" instead of the ExitGuardMismatch (13)
+// precondition_failed every other --if-revision loser gets. This
+// reproduces the SAME code path deterministically, without a race or a real
+// Dolt server: delete the row out from under a --if-revision token first (an
+// ordinary, unguarded delete lands the row-gone precondition exactly as a
+// winning racer's delete would), then present that now-stale token. The
+// pre-flight existence check must fail exactly the same way a mid-guard
+// version mismatch does.
+func TestIfRevisionDeletePreflightGoneIsPreconditionFailed(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "pg")
+
+	issue := bdCreate(t, bd, dir, "Preflight gone", "--type", "task")
+	rev0 := bdShowRevision(t, bd, dir, issue.ID)
+
+	// Stand in for the winning racer: an ordinary delete removes the row out
+	// from under rev0 without ever consulting it.
+	bdDelete(t, bd, dir, issue.ID, "--force")
+	bdShowFail(t, bd, dir, issue.ID)
+
+	// The loser's --if-revision now names a row that is not merely stale but
+	// entirely gone. Must classify exactly like a mid-guard version mismatch:
+	// ExitGuardMismatch (13), "precondition failed" -- never the bare,
+	// unclassified "not found" exit 1 the direct-store pre-flight check would
+	// otherwise return on its own.
+	out, code := bdRunFailCode(t, bd, dir, "delete", issue.ID, "--if-revision", revStr(rev0), "--force")
+	if code != ExitGuardMismatch {
+		t.Errorf("preflight-gone --if-revision delete exit code = %d, want %d\n%s", code, ExitGuardMismatch, out)
+	}
+	if !strings.Contains(out, "precondition failed") {
+		t.Errorf("preflight-gone delete should say \"precondition failed\", got:\n%s", out)
+	}
+	if strings.Contains(out, "not found") {
+		t.Errorf("preflight-gone delete leaked the raw, unclassified \"not found\" error instead of the guard envelope:\n%s", out)
+	}
+}
+
 // TestIfRevisionCascadeDelete pins mc-zndi7.76 (gap 4): a single named id with
 // --cascade takes the SAME deleteBatch path a multi-id delete does
 // (cmd/bd/delete.go:105, "len(issueIDs) > 1 || cascade"), which is the only
