@@ -25,6 +25,53 @@ import (
 	"github.com/steveyegge/beads/internal/httpclient/wire"
 )
 
+// warmIPv4OnlyCATransport pre-builds and caches target's CA-scoped transport
+// — the exact (abs path, content hash) cache entry transportForFile would
+// build and cache for it on Handshake's own first dial, per
+// matchesCachedTransport's doc — and forces that cached *http.Transport to
+// dial over tcp4 only.
+//
+// This closes the same Happy-Eyeballs ::1-vs-127.0.0.1 race
+// forceIPv4Loopback documents and fixes for TransportFor's direct callers
+// (ca_wrong_ca_test.go, ca_test.go): every server these tests dial is
+// addressed by the hostname "localhost" (ca.startServer rewrites it there
+// deliberately, so SNI is actually sent), which Go's default dialer races a
+// tcp6 dial to ::1:<port> against the real tcp4 dial to 127.0.0.1:<port>
+// for. An unrelated local process already bound to a colliding ephemeral
+// port on ::1 can occasionally "win" that race before the real dial
+// completes, and the client then speaks TLS to that unrelated process
+// instead of the test server: handshake fails with a misleading "tls: first
+// record does not look like a TLS handshake" instead of exercising anything
+// the test is actually about (observed flake:
+// TestTransportForSucceedsWithEnvCAFile).
+//
+// Unlike forceIPv4Loopback, this test never gets its hands on the
+// *http.Transport Handshake's own DialWith builds internally (DialOptions{}
+// leaves HTTPClient nil deliberately, so DialWith's own nil-HTTPClient
+// branch is what's under test) — so instead of mutating that transport
+// after the fact, this warms the SAME path-and-content-keyed cache entry
+// DialWith's transportForFile call will hit, by calling the public
+// TransportFor with the identical target first. DialWith then finds (and
+// reuses, never rebuilds) the exact pointer already forced to tcp4-only,
+// without changing which of DialWith's branches actually ran.
+//
+// It is a deliberate no-op when target has no CA configured (TransportFor
+// returns nil, nil): that case resolves through the process-wide
+// baselineTransport singleton instead, which this package exposes no cache
+// to pre-warm from outside. The call sites that matter here all configure a
+// CA, so this never silently skips the case it exists for.
+func warmIPv4OnlyCATransport(t *testing.T, target Target) {
+	t.Helper()
+	rt, err := TransportFor(target)
+	if err != nil {
+		t.Fatalf("warmIPv4OnlyCATransport: TransportFor: %v", err)
+	}
+	if rt == nil {
+		return
+	}
+	forceIPv4Loopback(t, rt)
+}
+
 // TestTransportForSucceedsWithSidecarCAFile is the "succeeds with ca_file
 // (sidecar)" case: Target.CAFile, as `bd connect --ca-file` writes it.
 func TestTransportForSucceedsWithSidecarCAFile(t *testing.T) {
@@ -34,6 +81,7 @@ func TestTransportForSucceedsWithSidecarCAFile(t *testing.T) {
 	u := ca.startServer(t, h.handler())
 
 	target := Target{BaseURL: u, CAFile: ca.writePEM(t)}
+	warmIPv4OnlyCATransport(t, target)
 	snap, err := Handshake(context.Background(), target, DialOptions{})
 	if err != nil {
 		t.Fatalf("Handshake with sidecar ca_file: %v", err)
@@ -63,6 +111,7 @@ func TestTransportForSucceedsWithEnvCAFile(t *testing.T) {
 	t.Setenv(CAFileEnv, u.Host+"="+ca.writePEM(t))
 
 	target := Target{BaseURL: u}
+	warmIPv4OnlyCATransport(t, target)
 	snap, err := Handshake(context.Background(), target, DialOptions{})
 	if err != nil {
 		t.Fatalf("Handshake with %s: %v", CAFileEnv, err)
@@ -85,6 +134,7 @@ func TestCAFileEnvAgreeingWithSidecarSucceeds(t *testing.T) {
 	path := ca.writePEM(t)
 	t.Setenv(CAFileEnv, u.Host+"="+path)
 	target := Target{BaseURL: u, CAFile: path}
+	warmIPv4OnlyCATransport(t, target)
 
 	if _, err := Handshake(context.Background(), target, DialOptions{}); err != nil {
 		t.Fatalf("env and sidecar naming the same CA for the same target should succeed: %v", err)
@@ -194,6 +244,7 @@ func TestDialWithNilTransportHTTPClientGetsCAInjectedOnACopy(t *testing.T) {
 
 	callerClient := &http.Client{Timeout: 7 * time.Second}
 	target := Target{BaseURL: u, CAFile: ca.writePEM(t)}
+	warmIPv4OnlyCATransport(t, target)
 
 	snap, err := Handshake(context.Background(), target, DialOptions{HTTPClient: callerClient})
 	if err != nil {
