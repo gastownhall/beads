@@ -130,12 +130,20 @@ func TestSharedServerConcurrent(t *testing.T) {
 	}
 
 	// ── Init project directories ────────────────────────────────────────
-	// One at a time: in shared-server mode every project's physical root is
-	// the one shared dolt dir, and bd init holds that root's workspace gate
-	// EXCLUSIVELY (acquireInitMutationGate), waiting at most
-	// exclusiveGateWait (5s) for it. Concurrent inits therefore refuse each
-	// other ("bd init refuses to run over live bd activity") by design;
-	// what this test exercises is the concurrent workload phase below.
+	// All at once: in shared-server mode every project's physical root is
+	// the one shared dolt dir, and bd init holds that root's gate
+	// EXCLUSIVELY (acquireInitMutationGate), so concurrent inits of
+	// different projects serialize on it. Each waits up to
+	// initGateWaitDefault (30s) for the others, which covers the lane's
+	// small BEADS_TEST_SS_DIRS at ~8s per init. Larger manual runs queue
+	// numDirs inits behind one gate, so raise the bound to match rather
+	// than reintroduce client-side serialization.
+	initEnv := baseEnv
+	if perInit := 15 * time.Second; time.Duration(numDirs)*perInit > initGateWaitDefault {
+		bound := time.Duration(numDirs) * perInit
+		initEnv = append(append([]string{}, baseEnv...), initGateTimeoutEnv+"="+bound.String())
+		t.Logf("init: %d concurrent inits; %s=%s", numDirs, initGateTimeoutEnv, bound)
+	}
 	phase = time.Now()
 	type project struct {
 		dir, prefix string
@@ -143,7 +151,6 @@ func TestSharedServerConcurrent(t *testing.T) {
 	projects := make([]project, numDirs)
 
 	eg, egCtx := errgroup.WithContext(ctx)
-	eg.SetLimit(1)
 	for i := range numDirs {
 		i := i
 		eg.Go(func() error {
@@ -155,7 +162,7 @@ func TestSharedServerConcurrent(t *testing.T) {
 			if err := gitInit(egCtx, dir); err != nil {
 				return fmt.Errorf("project %d git init: %w", i, err)
 			}
-			out, err := ssExec(egCtx, bdBinary, dir, baseEnv,
+			out, err := ssExec(egCtx, bdBinary, dir, initEnv,
 				"init", "--shared-server", "--external",
 				"--prefix", prefix, "--quiet", "--non-interactive")
 			if err != nil {

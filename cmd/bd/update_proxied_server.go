@@ -28,6 +28,11 @@ func runUpdateProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		fmt.Println("No updates specified")
 		return nil
 	}
+	// A8 (beads#4682): "one id only" (T4.8), mirroring the direct route's
+	// requireSingleIfRevisionID call in update.go.
+	if err := requireSingleIfRevisionID(in.ifRevision, args); err != nil {
+		return err
+	}
 
 	// Derive success-output format from the global JSON decision (--json OR
 	// --format json OR config), the same signal reportUpdateFailures uses, so
@@ -129,6 +134,7 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 		force:            in.force,
 		expectedAssignee: in.ifAssignee,
 		expectedStatus:   expectedStatus,
+		expectedVersion:  in.ifRevision,
 		provenance:       fmt.Sprintf("bd: update %s", id),
 	})
 	if err != nil {
@@ -139,6 +145,18 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 		// aborting is the right call for both.
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, nil, err
+		}
+		// A8: an active --if-revision guard reports through gascity's
+		// dedicated conditional-write envelope instead of the generic
+		// updateIDFailure batch shape — requireSingleIfRevisionID already
+		// guarantees args has exactly one id, so returning the reported exit
+		// error here (which the caller's `if err != nil { return err }`
+		// propagates straight out) is equivalent to the generic path for this
+		// one id.
+		if in.ifRevision != nil {
+			if reported, ok := reportIfRevisionFailure("updating", id, err); ok {
+				return nil, nil, reported
+			}
 		}
 		return nil, proxiedUpdateFailure(id, in.claim, err), nil
 	}

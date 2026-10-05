@@ -129,8 +129,7 @@ func deleteInUOW(ctx context.Context, uw UnitOfWork, req publicops.DeleteRequest
 	// duplicates before either ran.
 	if req.ExpectedVersion != nil {
 		if current := present[req.IDs[0]].RowVersion; current != *req.ExpectedVersion {
-			return publicops.DeleteResult{}, fmt.Errorf("%w: expected %d, got %d",
-				publicops.ErrVersionMismatch, *req.ExpectedVersion, current)
+			return publicops.DeleteResult{}, &publicops.VersionMismatchError{Expected: *req.ExpectedVersion, Current: current}
 		}
 	}
 

@@ -1,14 +1,12 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -16,7 +14,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -72,7 +69,7 @@ const RuntimeConfigFileName = "proxy-child.runtime-config.yaml"
 // it was ready because another process holds its listener port. Start
 // returns it, wrapped, when no PortConflictPolicy is set, when the policy
 // declines, or after maxStartPortAttempts ports.
-var ErrPortInUse = errors.New("dolt sql-server listener port is already in use")
+var ErrPortInUse = doltserver.ErrPortInUse
 
 // PortConflictPolicy decides whether Start may run the server on another port
 // when the port configPath names (inUsePort) is held by another process. It
@@ -81,33 +78,6 @@ var ErrPortInUse = errors.New("dolt sql-server listener port is already in use")
 // Start asks once per Start, on the first conflict; ports it picked itself
 // are its own to move again without asking.
 type PortConflictPolicy func(configPath string, inUsePort int) error
-
-// doltReadyLine is what dolt sql-server (go-mysql-server) logs at info level
-// once its listener is bound and accepting. Seeing it on the stdout/stderr of
-// the process Start launched is what proves the port belongs to that process:
-// a dial alone also succeeds against another process that took the port, and
-// in that case dolt logs "Port N already in use." and exits instead.
-const doltReadyLine = "Server ready. Accepting connections."
-
-// doltPortInUseTexts are the ways a dolt sql-server reports that port, its SQL
-// listener port, is taken:
-//   - dolt's own pre-check: "Port 3306 already in use."
-//   - go-mysql-server's pre-check: "Port 127.0.0.1:3306 already in use."
-//   - the bind losing the race after both checks, as Go's net error:
-//     "listen tcp 127.0.0.1:3306: bind: address already in use", or on
-//     Windows "...:3306: bind: Only one usage of each socket address ...".
-//
-// The port is part of every form, so a different listener dolt fails to bind
-// (metrics, MCP) is not mistaken for the SQL port, nor is dolt's non-fatal
-// unix-socket warning ("... is already in use").
-func doltPortInUseTexts(port int) [][]byte {
-	return [][]byte{
-		[]byte(fmt.Sprintf("Port %d already in use", port)),
-		[]byte(fmt.Sprintf(":%d already in use", port)),
-		[]byte(fmt.Sprintf(":%d: bind: address already in use", port)),
-		[]byte(fmt.Sprintf(":%d: bind: Only one usage of each socket address", port)),
-	}
-}
 
 // captureBirth is procid.Capture; tests replace it to make the capture lose
 // the race with a child that exits at once.
@@ -527,7 +497,7 @@ func (s *DoltServer) startAttempt(ctx context.Context, prepare bool) error {
 		s.eg, s.egCtx, s.cancel = nil, nil, nil
 		cancel()
 		lock.Unlock()
-		if watch.sawPortInUse() {
+		if watch.SawPortInUse() {
 			s.pid = 0
 			return fmt.Errorf("server: DoltServer.Start: %w", s.exitedBeforeReady(watch))
 		}
@@ -597,8 +567,8 @@ func (s *DoltServer) startAttempt(ctx context.Context, prepare bool) error {
 // dolt only reaches its port check after its own startup, which under load
 // can take longer than any grace period, and until then a foreign listener
 // answers exactly like a ready server.
-func (s *DoltServer) waitReady(ctx context.Context, watch *startupWatch) error {
-	needReadyLine := logLevelEmitsReadyLine(s.config.LogLevel())
+func (s *DoltServer) waitReady(ctx context.Context, watch *doltserver.StartupWatch) error {
+	needReadyLine := doltserver.LogLevelEmitsReadyLine(s.config.LogLevel())
 	deadline := time.Now().Add(startReadyTimeout)
 	var lastErr error
 	answered := false
@@ -615,7 +585,7 @@ func (s *DoltServer) waitReady(ctx context.Context, watch *startupWatch) error {
 			answered = true
 		}
 		switch {
-		case err == nil && (!needReadyLine || watch.isReady()):
+		case err == nil && (!needReadyLine || watch.IsReady()):
 			if s.egCtx.Err() != nil {
 				return s.exitedBeforeReady(watch)
 			}
@@ -627,14 +597,14 @@ func (s *DoltServer) waitReady(ctx context.Context, watch *startupWatch) error {
 		}
 
 		if time.Now().After(deadline) {
-			if needReadyLine && !watch.isReady() {
+			if needReadyLine && !watch.IsReady() {
 				what := "and nothing answered on " + s.listenAddr()
 				if answered {
 					what = "although something answered on " + s.listenAddr()
 				}
 				return fmt.Errorf("dolt sql-server (pid %d) never logged %q within %s %s; readiness needs that line on dolt's own output: "+
 					"if a wrapper filters dolt's stdout/stderr or this dolt words it differently, set log_level to warning in %s to fall back to dial-only readiness",
-					s.pid, doltReadyLine, startReadyTimeout, what, s.configPath)
+					s.pid, doltserver.DoltReadyLine, startReadyTimeout, what, s.configPath)
 			}
 			return fmt.Errorf("listener not ready after %s: %w", startReadyTimeout, lastErr)
 		}
@@ -644,7 +614,7 @@ func (s *DoltServer) waitReady(ctx context.Context, watch *startupWatch) error {
 			return ctx.Err()
 		case <-s.egCtx.Done():
 			return s.exitedBeforeReady(watch)
-		case <-watch.readyCh():
+		case <-watch.ReadyCh():
 		case <-time.After(startReadyPollInterval):
 		}
 	}
@@ -661,94 +631,19 @@ func (s *DoltServer) listenAddr() string {
 // supervising goroutine's cmd.Wait returns only after the output copy has
 // finished, so by the time egCtx is done the watcher has seen everything the
 // child wrote.
-func (s *DoltServer) exitedBeforeReady(watch *startupWatch) error {
-	if watch.sawPortInUse() {
+func (s *DoltServer) exitedBeforeReady(watch *doltserver.StartupWatch) error {
+	if watch.SawPortInUse() {
 		return fmt.Errorf("%w: dolt sql-server could not bind %s and exited", ErrPortInUse, s.listenAddr())
 	}
 	return errors.New("dolt sql-server exited before listener became ready")
 }
 
-// logLevelEmitsReadyLine reports whether dolt logs doltReadyLine (an info
-// message) at level.
-func logLevelEmitsReadyLine(level servercfg.LogLevel) bool {
-	switch level {
-	case servercfg.LogLevel_Trace, servercfg.LogLevel_Debug, servercfg.LogLevel_Info:
-		return true
+// newStartupWatch watches the child's output, forwarding it to logFile.
+func newStartupWatch(logFile *os.File, port int) *doltserver.StartupWatch {
+	if logFile == nil {
+		return doltserver.NewStartupWatch(nil, port)
 	}
-	return false
-}
-
-// startupWatch receives the dolt sql-server's stdout and stderr. It forwards
-// everything to the log file (if any) and, until the ready line shows up,
-// scans the output for that line and for a port conflict.
-type startupWatch struct {
-	dst io.Writer
-
-	inUse [][]byte
-
-	mu        sync.Mutex
-	tail      []byte
-	scanning  bool
-	portInUse bool
-	ready     chan struct{}
-}
-
-// startupWatchTail is how much recent output the watcher keeps for matching,
-// so a marker split across two writes is still found.
-const startupWatchTail = 4096
-
-func newStartupWatch(logFile *os.File, port int) *startupWatch {
-	w := &startupWatch{inUse: doltPortInUseTexts(port), scanning: true, ready: make(chan struct{})}
-	if logFile != nil {
-		w.dst = logFile
-	}
-	return w
-}
-
-// Write never fails: a log file that cannot be written must not break the
-// pipe the dolt sql-server writes to.
-func (w *startupWatch) Write(p []byte) (int, error) {
-	if w.dst != nil {
-		_, _ = w.dst.Write(p)
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if !w.scanning {
-		return len(p), nil
-	}
-	w.tail = append(w.tail, p...)
-	for _, text := range w.inUse {
-		if bytes.Contains(w.tail, text) {
-			w.portInUse = true
-		}
-	}
-	if bytes.Contains(w.tail, []byte(doltReadyLine)) {
-		w.scanning = false
-		w.tail = nil
-		close(w.ready)
-		return len(p), nil
-	}
-	if over := len(w.tail) - startupWatchTail; over > 0 {
-		w.tail = append(w.tail[:0], w.tail[over:]...)
-	}
-	return len(p), nil
-}
-
-func (w *startupWatch) readyCh() <-chan struct{} { return w.ready }
-
-func (w *startupWatch) isReady() bool {
-	select {
-	case <-w.ready:
-		return true
-	default:
-		return false
-	}
-}
-
-func (w *startupWatch) sawPortInUse() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.portInUse
+	return doltserver.NewStartupWatch(logFile, port)
 }
 
 func (s *DoltServer) Stop(ctx context.Context) error {

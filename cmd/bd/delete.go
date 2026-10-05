@@ -83,6 +83,19 @@ Force: Delete and orphan dependents
 		}
 		issueIDs = uniqueStrings(issueIDs)
 
+		// A8 (beads#4682): issueops.DeleteRequest.ExpectedVersion already refuses
+		// (ErrValidation) a non-nil token beside more than one distinct id, but
+		// that refusal reads differently from the other three verbs' —
+		// requireSingleIfRevisionID gives this one the same wording and the same
+		// "before any write" timing as update/close/assign.
+		ifRevision, err := parseIfRevisionFlag(cmd)
+		if err != nil {
+			return err
+		}
+		if err := requireSingleIfRevisionID(ifRevision, issueIDs); err != nil {
+			return err
+		}
+
 		if store == nil {
 			if err := ensureStoreActive(); err != nil {
 				return HandleError("%v", err)
@@ -90,7 +103,12 @@ Force: Delete and orphan dependents
 		}
 
 		if len(issueIDs) > 1 || cascade {
-			if err := deleteBatch(cmd, issueIDs, force, dryRun, cascade, jsonOutput, false); err != nil {
+			if err := deleteBatch(cmd, issueIDs, force, dryRun, cascade, jsonOutput, false, ifRevision); err != nil {
+				if ifRevision != nil {
+					if reported, ok := reportIfRevisionFailure("deleting", issueIDs[0], err); ok {
+						return reported
+					}
+				}
 				if _, ok := exitCodeFromError(err); ok {
 					return err
 				}
@@ -126,10 +144,11 @@ Force: Delete and orphan dependents
 		// rewrite runs INSIDE the transaction that deletes, because it is the
 		// role's.
 		request := issueops.DeleteRequest{
-			Actor:  actor,
-			IDs:    []string{issueID},
-			Force:  force,
-			DryRun: dryRun || !force,
+			Actor:           actor,
+			IDs:             []string{issueID},
+			Force:           force,
+			DryRun:          dryRun || !force,
+			ExpectedVersion: ifRevision,
 		}
 		opsCtx, err := issueOpsContext(ctx)
 		if err != nil {
@@ -138,6 +157,15 @@ Force: Delete and orphan dependents
 		result, err := deleter.Delete(opsCtx, request)
 		if request.DryRun {
 			if err != nil {
+				// A8 (beads#4682): a guard mismatch is reported through the
+				// dedicated conditional-write envelope instead of the generic
+				// preview-with-error below — same split delete's real run makes,
+				// so --dry-run and the real run answer a stale token identically.
+				if ifRevision != nil {
+					if reported, ok := reportIfRevisionFailure("deleting", issueID, err); ok {
+						return reported
+					}
+				}
 				if previewErr := outputDeletionPreview([]string{issueID}, map[string]*types.Issue{issueID: issue}, false, dryRun, nil, err, jsonOutput); previewErr != nil {
 					return previewErr
 				}
@@ -152,6 +180,11 @@ Force: Delete and orphan dependents
 			return renderSingleDeletePreview(ctx, activeStore, issueID, issue, dryRun, result)
 		}
 		if err != nil {
+			if ifRevision != nil {
+				if reported, ok := reportIfRevisionFailure("deleting", issueID, err); ok {
+					return reported
+				}
+			}
 			return HandleError("deleting issue: %v", err)
 		}
 
@@ -274,8 +307,12 @@ func deleteIssue(ctx context.Context, issueID string) error {
 // cross-repository routing, which issueops.DeleteRequest deliberately does not
 // do - and hands the RESOLVED ids to the role.
 //
+// ifRevision is non-nil only via `bd delete`'s own --if-revision (beads#4682);
+// its other three callers always pass nil, and requireSingleIfRevisionID has
+// already refused this path if it were asked to guard more than one id.
+//
 //nolint:unparam // cmd parameter required for potential future use
-func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, cascade bool, jsonOutput bool, _ bool, _ ...string) error {
+func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, cascade bool, jsonOutput bool, _ bool, ifRevision *int64, _ ...string) error {
 	if store == nil {
 		if err := ensureStoreActive(); err != nil {
 			return err
@@ -322,11 +359,12 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 	// --force is the confirmation as well as the orphan mode, so an unconfirmed
 	// run asks the role what it WOULD do; see the single-id path.
 	request := issueops.DeleteRequest{
-		Actor:   actor,
-		IDs:     resolvedIDs,
-		Cascade: cascade,
-		Force:   force,
-		DryRun:  dryRun || !force,
+		Actor:           actor,
+		IDs:             resolvedIDs,
+		Cascade:         cascade,
+		Force:           force,
+		DryRun:          dryRun || !force,
+		ExpectedVersion: ifRevision,
 	}
 	opsCtx, err := issueOpsContext(ctx)
 	if err != nil {
@@ -335,6 +373,17 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 	result, err := deleter.Delete(opsCtx, request)
 	if request.DryRun {
 		if err != nil {
+			// A8 (beads#4682): let the caller's dedicated conditional-write
+			// envelope report a guard mismatch instead of the generic
+			// preview-with-error below -- see the single-id path's identical
+			// split. classifyIfRevisionFailure, not a bare ifRevision!=nil check,
+			// because an unrelated dry-run failure (not-found, bad request) on a
+			// guarded call still belongs to the generic preview path.
+			if ifRevision != nil {
+				if _, _, _, _, ok := classifyIfRevisionFailure(err); ok {
+					return err
+				}
+			}
 			if previewErr := outputDeletionPreview(resolvedIDs, issues, cascade, dryRun, nil, err, jsonOutput); previewErr != nil {
 				return previewErr
 			}
@@ -501,6 +550,8 @@ func init() {
 	deleteCmd.Flags().String("from-file", "", "Read issue IDs from file (one per line)")
 	deleteCmd.Flags().Bool("dry-run", false, "Preview what would be deleted without making changes")
 	deleteCmd.Flags().Bool("cascade", false, "Recursively delete all dependent issues")
+	// A8 (beads#4682)
+	deleteCmd.Flags().String("if-revision", "", ifRevisionFlagHelp)
 	deleteCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(deleteCmd)
 }

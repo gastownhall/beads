@@ -113,6 +113,16 @@ func RecomputeIsBlockedInTx(ctx context.Context, tx DBTX, issueIDs, wispIDs []st
 func RecomputeIsBlockedInTxWithResult(
 	ctx context.Context, tx DBTX, issueIDs, wispIDs []string,
 ) (RecomputeIsBlockedResult, error) {
+	return recomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs, false)
+}
+
+// recomputeIsBlockedInTxWithResult is RecomputeIsBlockedInTxWithResult with
+// the caller's say on the no-edge shortcut (planRecomputeInTx): a create
+// passes splitEdgeless, because its ids are mostly fresh rows without edges;
+// every other caller leaves it to the chunk size.
+func recomputeIsBlockedInTxWithResult(
+	ctx context.Context, tx DBTX, issueIDs, wispIDs []string, splitEdgeless bool,
+) (RecomputeIsBlockedResult, error) {
 	var result RecomputeIsBlockedResult
 	if len(issueIDs) == 0 && len(wispIDs) == 0 {
 		return result, nil
@@ -121,17 +131,27 @@ func RecomputeIsBlockedInTxWithResult(
 	if err != nil {
 		return result, err
 	}
-	for {
+	issuePlan, err := planRecomputeInTx(ctx, tx, "issues", "dependencies",
+		markBlockedTemplateForIssues(), unmarkBlockedTemplateForIssues(), issueIDs, splitEdgeless)
+	if err != nil {
+		return result, err
+	}
+	wispPlan, err := planRecomputeInTx(ctx, tx, "wisps", "wisp_dependencies",
+		markBlockedTemplateForWisps(), unmarkBlockedTemplateForWisps(), wispIDs, splitEdgeless)
+	if err != nil {
+		return result, err
+	}
+	for pass := 0; ; pass++ {
 		var changed int64
 
-		n, err := recomputeIsBlockedPassForIssuesInTx(ctx, tx, issueIDs)
+		n, err := issuePlan.runPassInTx(ctx, tx, pass == 0)
 		if err != nil {
 			return result, err
 		}
 		changed += n
 		result.IssueRowsChanged = result.IssueRowsChanged || n > 0
 
-		n, err = recomputeIsBlockedPassForWispsInTx(ctx, tx, wispIDs)
+		n, err = wispPlan.runPassInTx(ctx, tx, pass == 0)
 		if err != nil {
 			return result, err
 		}
@@ -179,15 +199,6 @@ func RecomputeIsBlockedForIDsInTx(ctx context.Context, tx DBTX, ids []string) er
 
 func RecomputeIsBlockedForWispIDsInTx(ctx context.Context, tx DBTX, ids []string) error {
 	return RecomputeIsBlockedInTx(ctx, tx, nil, ids)
-}
-
-//nolint:gosec // G201: SQL templates are constant; only IN-clause placeholders are formatted in.
-func recomputeIsBlockedPassForIssuesInTx(ctx context.Context, tx DBTX, ids []string) (int64, error) {
-	if len(ids) == 0 {
-		return 0, nil
-	}
-
-	return runMarkUnmarkBatchedInTx(ctx, tx, markBlockedTemplateForIssues(), unmarkBlockedTemplateForIssues(), ids)
 }
 
 func markIsBlockedPassForIssuesInTx(ctx context.Context, tx DBTX, ids []string) (int64, error) {
@@ -294,14 +305,6 @@ func expandBatchTemplate(tmpl, placeholders string, args []interface{}) (string,
 	return fmt.Sprintf(tmpl, fills...), expanded
 }
 
-func recomputeIsBlockedPassForWispsInTx(ctx context.Context, tx DBTX, ids []string) (int64, error) {
-	if len(ids) == 0 {
-		return 0, nil
-	}
-
-	return runMarkUnmarkBatchedInTx(ctx, tx, markBlockedTemplateForWisps(), unmarkBlockedTemplateForWisps(), ids)
-}
-
 func markIsBlockedPassForWispsInTx(ctx context.Context, tx DBTX, ids []string) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
@@ -341,6 +344,132 @@ func runMarkUnmarkBatchedInTx(ctx context.Context, tx DBTX, markTmpl, unmarkTmpl
 		changed += n
 	}
 	return changed, nil
+}
+
+// recomputeSplitMinChunk is the chunk size from which planRecomputeInTx
+// probes for edgeless ids without being asked to.
+const recomputeSplitMinChunk = 32
+
+// recomputeChunk is one queryBatchSize chunk of a recompute's ids, split by
+// whether each id has a dependency row of its own (see planRecomputeInTx).
+type recomputeChunk struct {
+	withEdges, edgeless []string
+}
+
+// recomputePlan is a recompute's chunks for one table, split once per
+// RecomputeIsBlockedInTxWithResult call: the fixpoint loop writes only
+// is_blocked, never dependency rows, so the split holds for every pass.
+type recomputePlan struct {
+	table, markTmpl, unmarkTmpl string
+	chunks                      []recomputeChunk
+}
+
+// planRecomputeInTx chunks ids exactly as runMarkUnmarkBatchedInTx would and
+// splits each chunk by whether depTable holds a row with that id as its
+// issue_id.
+//
+// Every leg of the should-be-blocked union the mark/unmark templates probe is
+// scoped to `d.issue_id IN (batch)` on depTable
+// (shouldBeBlockedIDsUnionScopedSQL), so an id with no depTable row of its own
+// is never in that union: mark cannot select it, and unmark reduces to
+// "is_blocked = 1 -> 0". Those ids — every freshly created issue without
+// edges, which is most of what a large create or apply-batch recomputes —
+// need not ride the two union statements, whose cost grows with the table.
+//
+// The split costs one probe per chunk, which only pays when the chunk holds
+// edgeless ids worth skipping. So it runs when the caller asks (splitEdgeless:
+// the create paths) or when the chunk is large; the single-issue recomputes of
+// close, reopen, update and dependency edits keep exactly the statements they
+// ran before the shortcut existed.
+func planRecomputeInTx(ctx context.Context, tx DBTX, table, depTable, markTmpl, unmarkTmpl string, ids []string, splitEdgeless bool) (recomputePlan, error) {
+	plan := recomputePlan{table: table, markTmpl: markTmpl, unmarkTmpl: unmarkTmpl}
+	for start := 0; start < len(ids); start += queryBatchSize {
+		end := min(start+queryBatchSize, len(ids))
+		chunk := recomputeChunk{withEdges: ids[start:end]}
+		if !createFastPathsDisabled.Load() && (splitEdgeless || end-start >= recomputeSplitMinChunk) {
+			var err error
+			chunk.withEdges, chunk.edgeless, err = splitByOwnDependencyRowsInTx(ctx, tx, depTable, ids[start:end])
+			if err != nil {
+				return plan, err
+			}
+		}
+		plan.chunks = append(plan.chunks, chunk)
+	}
+	return plan, nil
+}
+
+// runPassInTx is one fixpoint pass over the plan, statement-for-statement
+// equivalent to runMarkUnmarkBatchedInTx over the plan's full ids. Per chunk:
+// the mark and unmark templates run over the ids with edges — the union, scoped
+// to them, holds exactly what it held scoped to the whole chunk — and then, on
+// the first pass only, a plain unmark clears the edgeless ids. It runs after
+// both templates so their unions see the edgeless rows' pre-pass is_blocked,
+// as they did when those rows were cleared by the chunk's own unmark
+// statement; on later passes it would match no row (nothing marks an edgeless
+// id), so it is skipped.
+func (p recomputePlan) runPassInTx(ctx context.Context, tx DBTX, firstPass bool) (int64, error) {
+	var changed int64
+	for _, chunk := range p.chunks {
+		if len(chunk.withEdges) > 0 {
+			n, err := runMarkUnmarkBatchedInTx(ctx, tx, p.markTmpl, p.unmarkTmpl, chunk.withEdges)
+			changed += n
+			if err != nil {
+				return changed, err
+			}
+		}
+		if !firstPass || len(chunk.edgeless) == 0 {
+			continue
+		}
+		placeholders, args := buildSQLInClause(chunk.edgeless)
+		//nolint:gosec // G201: table is one of two constants; only placeholders are formatted in.
+		res, err := tx.ExecContext(ctx, fmt.Sprintf(`
+			UPDATE %[1]s t SET t.is_blocked = 0, t.updated_at = t.updated_at
+			WHERE t.id IN (%[2]s) AND t.is_blocked = 1
+		`, p.table, placeholders), args...)
+		if err != nil {
+			return changed, fmt.Errorf("recompute is_blocked (unmark): %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return changed, fmt.Errorf("recompute is_blocked (unmark rows affected): %w", err)
+		}
+		changed += n
+	}
+	return changed, nil
+}
+
+// splitByOwnDependencyRowsInTx partitions ids by whether depTable holds at
+// least one row with that id as its issue_id, preserving input order.
+//
+//nolint:gosec // G201: depTable is one of two constants; only placeholders are formatted in.
+func splitByOwnDependencyRowsInTx(ctx context.Context, tx DBTX, depTable string, ids []string) (withEdges, withoutEdges []string, err error) {
+	placeholders, args := buildSQLInClause(ids)
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+		"SELECT DISTINCT issue_id FROM %s WHERE issue_id IN (%s)", depTable, placeholders), args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("recompute is_blocked: probe %s: %w", depTable, err)
+	}
+	has := make(map[string]bool, len(ids))
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, nil, fmt.Errorf("recompute is_blocked: probe %s: %w", depTable, err)
+		}
+		has[id] = true
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("recompute is_blocked: probe %s: %w", depTable, err)
+	}
+	for _, id := range ids {
+		if has[id] {
+			withEdges = append(withEdges, id)
+		} else {
+			withoutEdges = append(withoutEdges, id)
+		}
+	}
+	return withEdges, withoutEdges, nil
 }
 
 func runMarkBatchedInTx(ctx context.Context, tx DBTX, markTmpl string, ids []string) (int64, error) {
@@ -617,13 +746,19 @@ func appendChildrenInTx(
 	if len(parentIDs) == 0 {
 		return nil
 	}
-	query := fmt.Sprintf(`
-		SELECT issue_id FROM %s
-		WHERE type = 'parent-child'
-		  AND %s = ?
-	`, depTable, parentCol)
-	for _, parentID := range parentIDs {
-		rows, err := tx.QueryContext(ctx, query, parentID)
+	// One IN-list read per chunk of parents rather than one read per parent.
+	// The set of children found does not depend on how the parents are
+	// grouped; only the order they join the queue can, and every caller
+	// treats the queue as a set to recompute.
+	for start := 0; start < len(parentIDs); start += queryBatchSize {
+		end := min(start+queryBatchSize, len(parentIDs))
+		placeholders, args := buildSQLInClause(parentIDs[start:end])
+		query := fmt.Sprintf(`
+			SELECT issue_id FROM %s
+			WHERE type = 'parent-child'
+			  AND %s IN (%s)
+		`, depTable, parentCol, placeholders)
+		rows, err := tx.QueryContext(ctx, query, args...)
 		if err != nil {
 			return fmt.Errorf("expand children from %s on %s: %w", depTable, parentCol, err)
 		}

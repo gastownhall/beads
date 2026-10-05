@@ -36,6 +36,9 @@ const suiteRootPrefix = "beads-doltserver-tests-"
 // Integration-tagged runs use the stronger suite-root TestMain in
 // testmain_integration_test.go instead.
 func TestMain(m *testing.M) {
+	if os.Getenv(fakeDoltEnv) != "" {
+		os.Exit(fakeDolt(os.Args[1:]))
+	}
 	os.Exit(runTests(m))
 }
 

@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/externaldeps"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/telemetry"
 )
 
@@ -21,6 +25,28 @@ type stubChainStore struct {
 
 func (s *stubChainStore) ActiveDatabaseSize(context.Context) (int64, error) {
 	return s.databaseSize, nil
+}
+
+// stubPrefixChainStore is a concrete store that DOES implement the optional
+// prefix-read capability, standing in for DoltStore/EmbeddedDoltStore in the
+// discovery test below. It records the prefixes it was asked for, and counts
+// full reads, so the test can prove the call reached the raw store's fast path
+// rather than a fallback. The full read returns the same rows the prefix read
+// would, as the real stores do, so only those counters can tell the arms apart.
+type stubPrefixChainStore struct {
+	stubChainStore
+	prefixReads []string
+	fullReads   int
+}
+
+func (s *stubPrefixChainStore) GetConfigByPrefix(_ context.Context, prefix string) (map[string]string, error) {
+	s.prefixReads = append(s.prefixReads, prefix)
+	return map[string]string{prefix + "one": "1"}, nil
+}
+
+func (s *stubPrefixChainStore) GetAllConfig(context.Context) (map[string]string, error) {
+	s.fullReads++
+	return map[string]string{"kv.mail.one": "1"}, nil
 }
 
 // clearTelemetryEnv is defined once for the package, in
@@ -106,6 +132,214 @@ func TestGCStoreSizeUnwrapsStorageDecorators(t *testing.T) {
 
 	if got := storeSizeBytesForStore(t.Context(), wrapped); got != 99 {
 		t.Fatalf("storeSizeBytesForStore = %d, want 99", got)
+	}
+}
+
+// TestKVPrefixReaderUnwrapsStorageDecorators pins the read behind
+// `bd kv list --prefix`. That flag reads only the rows under a prefix when the
+// store offers the optional GetConfigByPrefix capability, and falls back to a
+// full GetAllConfig scan when it does not — a fallback that returns identical
+// rows, so a discovery miss produces no error, no log, and no failing test
+// while costing exactly the full-table serialization the flag exists to avoid.
+// Every decorator wireStorageDecorators installs embeds the
+// storage.DoltStorage interface, which does not declare GetConfigByPrefix, so
+// discovery only works if it peels. Covers every chain configuration, and
+// drives readKVListConfig, the read the command performs, so a bare assertion
+// on that path fails here rather than only one inside the discovery helper.
+func TestKVPrefixReaderUnwrapsStorageDecorators(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		telemetryOn   bool
+		hooksDisabled bool
+	}{
+		{name: "TelemetryOff_HookOn"},
+		{name: "TelemetryOn_HookOn", telemetryOn: true},
+		{name: "TelemetryOff_HookDisabled", hooksDisabled: true},
+		{name: "TelemetryOn_HookDisabled", telemetryOn: true, hooksDisabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearTelemetryEnv(t)
+			if tc.telemetryOn {
+				t.Setenv("BD_OTEL_STDOUT", "true")
+			}
+			raw := &stubPrefixChainStore{}
+			wrapped := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), tc.hooksDisabled)
+
+			got, err := readKVListConfig(t.Context(), wrapped, "mail.")
+			if err != nil {
+				t.Fatalf("readKVListConfig: %v", err)
+			}
+			if raw.fullReads != 0 {
+				t.Fatalf("prefix read fell back to %d full GetAllConfig scan(s) through the wired chain (%T); kv list --prefix would silently full-scan", raw.fullReads, wrapped)
+			}
+			if want := []string{"kv.mail."}; !reflect.DeepEqual(raw.prefixReads, want) {
+				t.Errorf("raw store prefix reads = %v; want %v — the read never reached the concrete store", raw.prefixReads, want)
+			}
+			if want := (map[string]string{"kv.mail.one": "1"}); !reflect.DeepEqual(got, want) {
+				t.Errorf("readKVListConfig = %v; want %v", got, want)
+			}
+		})
+	}
+}
+
+// TestKVPrefixReaderAbsentCapabilityFallsBack keeps the test above honest:
+// discovery must report a store that lacks the capability as incapable, so the
+// caller takes the GetAllConfig fallback. The telemetry-on case also pins the
+// deliberate choice of peel-to-raw over peel-until-implements —
+// InstrumentedStorage does implement GetConfigByPrefix, and we peel past it,
+// trading the storage span on prefix reads for the repo's standard UnwrapStore
+// idiom. Flipping that trade should have to flip this assertion.
+func TestKVPrefixReaderAbsentCapabilityFallsBack(t *testing.T) {
+	for _, telemetryOn := range []bool{false, true} {
+		name := "TelemetryOff"
+		if telemetryOn {
+			name = "TelemetryOn"
+		}
+		t.Run(name, func(t *testing.T) {
+			clearTelemetryEnv(t)
+			if telemetryOn {
+				t.Setenv("BD_OTEL_STDOUT", "true")
+			}
+			raw := &stubChainStore{}
+			wrapped := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+
+			if _, ok := configPrefixReaderFor(wrapped); ok {
+				t.Errorf("store without GetConfigByPrefix reported as prefix-capable through %T", wrapped)
+			}
+		})
+	}
+}
+
+// kvListStubRows is every config row the proxied stubs below serve: two keys
+// under the listed prefix, a sibling key that shares its leading characters, an
+// unrelated kv key, and a non-kv config row.
+var kvListStubRows = map[string]string{
+	"kv.mail.dog.m1":      "1",
+	"kv.mail.dog.m2":      "2",
+	"kv.mail.doggerel.m3": "3",
+	"kv.other":            "4",
+	"issue_prefix":        "bd",
+}
+
+// wantKVListMailDog is what `bd kv list --prefix mail.dog.` prints over
+// kvListStubRows, whichever read served it.
+const wantKVListMailDog = "\nKey-Value Store:\n  mail.dog.m1 = 1\n  mail.dog.m2 = 2\n"
+
+func kvListStubRowsWithPrefix(prefix string) map[string]string {
+	out := make(map[string]string)
+	for k, v := range kvListStubRows {
+		if strings.HasPrefix(k, prefix) {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// stubFullConfigUC is a config use case WITHOUT the optional prefix-read
+// capability: GetAllConfig is its only read, and it counts them.
+type stubFullConfigUC struct {
+	domain.ConfigUseCase // any other method is a nil call: kv list must not reach one
+	fullReads            int
+}
+
+func (s *stubFullConfigUC) GetAllConfig(context.Context) (map[string]string, error) {
+	s.fullReads++
+	return kvListStubRowsWithPrefix(""), nil
+}
+
+// stubPrefixConfigUC is the proxied twin of stubPrefixChainStore: it adds the
+// capability and records the prefixes it was asked for. Like the real use case,
+// the prefix read returns only the rows under the prefix and the full read
+// returns every row, so only the counters can tell the arms apart.
+type stubPrefixConfigUC struct {
+	stubFullConfigUC
+	prefixReads []string
+}
+
+func (s *stubPrefixConfigUC) GetConfigByPrefix(_ context.Context, prefix string) (map[string]string, error) {
+	s.prefixReads = append(s.prefixReads, prefix)
+	return kvListStubRowsWithPrefix(prefix), nil
+}
+
+// configOnlyUOW serves the config use case and nothing else; kv list reads
+// nothing else.
+type configOnlyUOW struct {
+	uow.UnitOfWork
+	cfg domain.ConfigUseCase
+}
+
+func (u configOnlyUOW) Close(context.Context)               {}
+func (u configOnlyUOW) ConfigUseCase() domain.ConfigUseCase { return u.cfg }
+
+type configOnlyProvider struct{ cfg domain.ConfigUseCase }
+
+func (p configOnlyProvider) NewUOW(context.Context) (uow.UnitOfWork, error) {
+	return configOnlyUOW{cfg: p.cfg}, nil
+}
+
+func (p configOnlyProvider) Close(context.Context) error { return nil }
+
+// runKVListProxiedThrough runs the proxied `bd kv list --prefix` command
+// against provider and returns what it printed.
+func runKVListProxiedThrough(t *testing.T, provider uow.UnitOfWorkProvider, prefix string) string {
+	t.Helper()
+	oldProvider, oldJSON := uowProvider, jsonOutput
+	uowProvider, jsonOutput = provider, false
+	t.Cleanup(func() { uowProvider, jsonOutput = oldProvider, oldJSON })
+	return captureStdout(t, func() error {
+		return runKVListProxiedServer(t.Context(), prefix)
+	})
+}
+
+// TestKVListProxiedPrefixReadSurvivesProviderChain is the proxied-server twin
+// of TestKVPrefixReaderUnwrapsStorageDecorators. runKVListProxiedServer
+// discovers the prefix fast path by asserting on the unit of work's config use
+// case, and a miss falls back to GetAllConfig plus kvPairsWithPrefix — the same
+// rows, so a lost capability fails nothing but a read counter. Every layer
+// wireProxiedUOWProvider installs embeds uow.UnitOfWork and passes
+// ConfigUseCase through; a layer that wrapped the use case in a type embedding
+// domain.ConfigUseCase, which does not declare GetConfigByPrefix, would turn
+// every proxied `bd kv list --prefix` into a full scan. Covers both chain
+// configurations and drives the command's own read.
+func TestKVListProxiedPrefixReadSurvivesProviderChain(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		sinks uow.Sinks
+	}{
+		{name: "HookOn", sinks: uow.Sinks{Hook: hooks.NewRunner("/nonexistent")}},
+		{name: "HookDisabled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &stubPrefixConfigUC{}
+			wrapped := wireProxiedUOWProvider(configOnlyProvider{cfg: cfg}, tc.sinks)
+
+			got := runKVListProxiedThrough(t, wrapped, "mail.dog.")
+			if cfg.fullReads != 0 {
+				t.Fatalf("prefix read fell back to %d full GetAllConfig scan(s) through the wired chain (%T); proxied kv list --prefix would silently full-scan", cfg.fullReads, wrapped)
+			}
+			if want := []string{"kv.mail.dog."}; !reflect.DeepEqual(cfg.prefixReads, want) {
+				t.Errorf("use case prefix reads = %v; want %v — the read never reached the use case's fast path", cfg.prefixReads, want)
+			}
+			if got != wantKVListMailDog {
+				t.Errorf("kv list --prefix mail.dog. printed %q; want %q", got, wantKVListMailDog)
+			}
+		})
+	}
+}
+
+// TestKVListProxiedPrefixAbsentCapabilityFallsBack keeps the test above honest:
+// a use case without GetConfigByPrefix must be served by one full read, which
+// the listing narrows to the same rows the fast path returns.
+func TestKVListProxiedPrefixAbsentCapabilityFallsBack(t *testing.T) {
+	cfg := &stubFullConfigUC{}
+	wrapped := wireProxiedUOWProvider(configOnlyProvider{cfg: cfg}, uow.Sinks{Hook: hooks.NewRunner("/nonexistent")})
+
+	got := runKVListProxiedThrough(t, wrapped, "mail.dog.")
+	if cfg.fullReads != 1 {
+		t.Errorf("use case without GetConfigByPrefix served %d full read(s); want exactly 1", cfg.fullReads)
+	}
+	if got != wantKVListMailDog {
+		t.Errorf("kv list --prefix mail.dog. printed %q; want %q", got, wantKVListMailDog)
 	}
 }
 

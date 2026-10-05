@@ -1,0 +1,37 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "createbatchequiv",
+    srcs = [
+        "createbatchequiv.go",
+        "scenario_apply.go",
+        "scenario_import458.go",
+    ],
+    embedsrcs = [
+        "golden/apply.json",
+        "golden/import458-reject-stale.json",
+        "golden/import458.json",
+        "golden/small.json",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/storage/createbatchequiv",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage",
+        "//internal/storage/issueops",
+        "//internal/types",
+        "//issueops",
+    ],
+)
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

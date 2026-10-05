@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +26,7 @@ func resetGateTestEnv(t *testing.T) {
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_PROXIED_SERVER_ROOT_PATH",
 		"BEADS_SHARED_SERVER_DIR",
+		initGateTimeoutEnv,
 	} {
 		t.Setenv(k, "")
 	}
@@ -120,15 +123,16 @@ func TestAcquireInitMutationGateKeepsReplacementExclusiveDuringPreflight(t *test
 	beadsDir := newGateTestWorkspace(t)
 	physicalRoot := filepath.Join(filepath.Dir(beadsDir), "dolt-data")
 
-	oldOnWait := exclusiveGateOnWait
+	oldOnWait, oldDelay := initGateOnWait, initGateNoticeDelay
 	secondWaited := make(chan struct{}, 1)
-	exclusiveGateOnWait = func(string) {
+	initGateNoticeDelay = 0
+	initGateOnWait = func(string) {
 		select {
 		case secondWaited <- struct{}{}:
 		default:
 		}
 	}
-	t.Cleanup(func() { exclusiveGateOnWait = oldOnWait })
+	t.Cleanup(func() { initGateOnWait, initGateNoticeDelay = oldOnWait, oldDelay })
 
 	firstPreflightEntered := make(chan struct{})
 	allowFirstPreflight := make(chan struct{})
@@ -179,6 +183,150 @@ func TestAcquireInitMutationGateKeepsReplacementExclusiveDuringPreflight(t *test
 	}
 	if err := second.h.Release(); err != nil {
 		t.Fatalf("release second init mutation gate: %v", err)
+	}
+}
+
+// holdInitGatesFor takes init's exclusive gate set as a foreign holder would
+// (another project's bd init on the same shared dolt dir) and returns its
+// handle.
+func holdInitGatesFor(t *testing.T, beadsDir, physicalRoot string) *workspacegate.MultiHandle {
+	t.Helper()
+	h, err := acquireExclusiveWorkspaceGates(context.Background(), beadsDir, "test holder init", physicalRoot)
+	if err != nil {
+		t.Fatalf("test holder acquisition: %v", err)
+	}
+	return h
+}
+
+// countInitGateNotices replaces the init wait notice with a counter.
+func countInitGateNotices(t *testing.T) *atomic.Int32 {
+	t.Helper()
+	var n atomic.Int32
+	old := initGateOnWait
+	initGateOnWait = func(string) { n.Add(1) }
+	t.Cleanup(func() { initGateOnWait = old })
+	return &n
+}
+
+// A holder that outlasts the generic 5s exclusive budget but releases within
+// init's bound (a concurrent init takes ~8s on a shared server): init waits,
+// prints exactly one notice, then proceeds.
+func TestAcquireInitMutationGateWaitsPastGenericBudget(t *testing.T) {
+	resetGateTestEnv(t)
+	beadsDir := newGateTestWorkspace(t)
+	physicalRoot := filepath.Join(filepath.Dir(beadsDir), "dolt-data")
+	notices := countInitGateNotices(t)
+
+	if got := initGateWait(); got != initGateWaitDefault || got <= exclusiveGateWait+time.Second {
+		t.Fatalf("initGateWait() = %s, want default %s comfortably above exclusiveGateWait %s", got, initGateWaitDefault, exclusiveGateWait)
+	}
+
+	holder := holdInitGatesFor(t, beadsDir, physicalRoot)
+	const holdFor = 6 * time.Second
+	released := time.AfterFunc(holdFor, func() { _ = holder.Release() })
+	t.Cleanup(func() { released.Stop(); _ = holder.Release() })
+
+	start := time.Now()
+	h, err := acquireInitMutationGate(context.Background(), beadsDir, physicalRoot, nil)
+	if err != nil {
+		t.Fatalf("init gate with holder released after %s: %v", holdFor, err)
+	}
+	defer func() { _ = h.Release() }()
+	if waited := time.Since(start); waited < holdFor-500*time.Millisecond {
+		t.Fatalf("init acquired after %s while the holder held the gate for %s", waited, holdFor)
+	}
+	if got := notices.Load(); got != 1 {
+		t.Fatalf("wait notices = %d, want exactly 1", got)
+	}
+}
+
+// A holder that outlasts the bound: init still refuses, with an error that
+// names the budget and the knob, and keeps ErrBusy in the chain.
+func TestAcquireInitMutationGateFailsClearlyPastBound(t *testing.T) {
+	resetGateTestEnv(t)
+	beadsDir := newGateTestWorkspace(t)
+	physicalRoot := filepath.Join(filepath.Dir(beadsDir), "dolt-data")
+	notices := countInitGateNotices(t)
+	oldDelay := initGateNoticeDelay
+	initGateNoticeDelay = 5 * time.Second // longer than the bound below
+	t.Cleanup(func() { initGateNoticeDelay = oldDelay })
+	t.Setenv(initGateTimeoutEnv, "300ms")
+
+	holder := holdInitGatesFor(t, beadsDir, physicalRoot)
+	t.Cleanup(func() { _ = holder.Release() })
+
+	preflightRan := false
+	start := time.Now()
+	_, err := acquireInitMutationGate(context.Background(), beadsDir, physicalRoot, func() error {
+		preflightRan = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("init gate acquired while a foreign holder kept it past the bound")
+	}
+	if waited := time.Since(start); waited < 250*time.Millisecond || waited > 3*time.Second {
+		t.Fatalf("init gave up after %s, want about the 300ms bound", waited)
+	}
+	if !errors.Is(err, workspacegate.ErrBusy) {
+		t.Fatalf("error %v does not wrap workspacegate.ErrBusy", err)
+	}
+	for _, want := range []string{"bd init refuses to run over live bd activity", "waited 300ms", initGateTimeoutEnv, "test holder init"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err, want)
+		}
+	}
+	if preflightRan {
+		t.Error("preflight ran without the gates")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := notices.Load(); got != 0 {
+		t.Errorf("notice fired %d times for a wait shorter than the notice delay", got)
+	}
+}
+
+func TestAcquireInitMutationGateHonorsCancellation(t *testing.T) {
+	resetGateTestEnv(t)
+	beadsDir := newGateTestWorkspace(t)
+	physicalRoot := filepath.Join(filepath.Dir(beadsDir), "dolt-data")
+	countInitGateNotices(t)
+
+	holder := holdInitGatesFor(t, beadsDir, physicalRoot)
+	t.Cleanup(func() { _ = holder.Release() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := acquireInitMutationGate(ctx, beadsDir, physicalRoot, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want context.DeadlineExceeded", err)
+	}
+	if waited := time.Since(start); waited > 5*time.Second {
+		t.Fatalf("canceled init kept waiting for %s", waited)
+	}
+}
+
+func TestInitGateWaitEnv(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want time.Duration
+	}{
+		{"", initGateWaitDefault},
+		{"90", 90 * time.Second},
+		{"2m", 2 * time.Minute},
+		{"1500ms", 1500 * time.Millisecond},
+		{"0", initGateWaitDefault},
+		{"-5s", initGateWaitDefault},
+		{"soon", initGateWaitDefault},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			t.Setenv(initGateTimeoutEnv, tc.raw)
+			oldQuiet := quietFlag
+			quietFlag = true
+			t.Cleanup(func() { quietFlag = oldQuiet })
+			if got := initGateWait(); got != tc.want {
+				t.Fatalf("initGateWait() with %q = %s, want %s", tc.raw, got, tc.want)
+			}
+		})
 	}
 }
 

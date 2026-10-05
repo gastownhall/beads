@@ -157,6 +157,7 @@
 
 15 2 TestActiveDatabaseSizeScopesToActiveEmbeddedDatabase
 15 2 TestCleanGitRemoteCacheGarbage
+15 2 TestCreateBatchFastPathsMatchPerRow_Embedded
 15 2 TestDepRekeyMarkerStillInIgnoredSeries
 15 2 TestDescendantWalkReachesEveryTargetKindAndStopsOnCycles
 15 2 TestDualWriteFixtureKitIsWired
@@ -260,6 +261,7 @@
 15 5 TestExpectedRevisionContract
 15 5 TestGetDependentRecordsForIssuesEmbedded
 15 5 TestLargeBatchApplyWallClock_Embedded
+15 5 TestLargeGraphCreateTiming_Embedded
 15 5 TestLenientGateWarningBody_BluntRefusalKeepsSharedGuidance
 15 5 TestOpenReturnsCachedStore
 15 5 TestPartitionWispIDs
@@ -320,6 +322,7 @@
 15 8 TestAddLabel
 15 8 TestBuildDSN_NoDatabase
 15 8 TestCleanGitRemoteCacheGarbage_NoCacheDir
+15 8 TestCreateBatchFastPathsMatchPerRowLarge_Embedded
 15 8 TestDoltCommitResponseLossIsIndeterminate
 15 8 TestEmbeddedBatchCloserClaimNextHydratesWhenSomethingClosed
 15 8 TestEmbeddedBatchCloserClaimNextIsNilWhenNothingClosed

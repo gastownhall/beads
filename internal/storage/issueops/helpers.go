@@ -114,9 +114,17 @@ func insertIssueCreateOnly(ctx context.Context, tx DBTX, table string, issue *ty
 	return executeIssueInsert(ctx, tx, table, issue, "")
 }
 
+// issueInsertSQL renders the issue-row INSERT for rows VALUES tuples followed
+// by suffix (an ON DUPLICATE KEY UPDATE clause, or ""). Single-row and
+// multi-row writes share it, so their column list cannot drift.
+//
 //nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
-func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types.Issue, suffix string) error {
-	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
+func issueInsertSQL(table string, rows int, suffix string) string {
+	tuples := make([]string, rows)
+	for i := range tuples {
+		tuples[i] = issueInsertRow
+	}
+	return fmt.Sprintf(`
 		INSERT INTO %s (
 			id, content_hash, title, description, design, acceptance_criteria, notes,
 			status, priority, issue_type, assignee, estimated_minutes,
@@ -128,7 +136,13 @@ func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types
 			await_type, await_id, timeout_ns, waiters,
 			due_at, defer_until, metadata,
 			row_lock, storage_class
-		) VALUES (
+		) VALUES %s
+		%s
+	`, table, strings.Join(tuples, ", "), suffix)
+}
+
+// issueInsertRow is one VALUES tuple for issueInsertSQL's column list.
+const issueInsertRow = `(
 			?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?, ?, ?,
@@ -139,9 +153,12 @@ func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types
 			?, ?, ?, ?,
 			?, ?, ?,
 			?, ?
-		)
-		%s
-	`, table, suffix),
+		)`
+
+// issueInsertArgs binds issue to issueInsertRow. row_lock is minted fresh
+// per row (freshRowLock), as every issues/wisps content write must.
+func issueInsertArgs(issue *types.Issue) []any {
+	return []any{
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes,
 		issue.Status, issue.Priority, issue.IssueType, NullString(issue.Assignee), NullInt(issue.EstimatedMinutes),
 		issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.StartedAt, issue.ClosedAt, NullStringPtr(issue.ExternalRef), issue.SpecID,
@@ -152,9 +169,88 @@ func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), FormatJSONStringArray(issue.Waiters),
 		issue.DueAt, issue.DeferUntil, JSONMetadata(issue.Metadata),
 		freshRowLock(), NullString(string(issue.StorageClass.Normalize())),
-	)
+	}
+}
+
+//nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
+func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types.Issue, suffix string) error {
+	_, err := tx.ExecContext(ctx, issueInsertSQL(table, 1, suffix), issueInsertArgs(issue)...)
 	if err != nil {
 		return fmt.Errorf("insert issue into %s: %w", table, err)
+	}
+	return nil
+}
+
+// issueInsertRowsPerStatement and issueInsertBytesPerStatement bound a
+// multi-row issue INSERT. The row cap keeps a statement far below the
+// 65535-placeholder protocol limit (49 bound columns per row); the byte budget
+// keeps rows with long text (description and notes are LONGTEXT) from
+// building a statement that a lowered max_allowed_packet or a server read
+// timeout would refuse where the single-row inserts would not.
+const (
+	issueInsertRowsPerStatement  = 100
+	issueInsertBytesPerStatement = 16 << 20
+)
+
+// issueInsertRowBytes estimates the bytes issue binds into an INSERT: its
+// free-text and JSON columns plus a fixed allowance for the rest.
+func issueInsertRowBytes(issue *types.Issue) int {
+	n := 1024 + len(issue.Title) + len(issue.Description) + len(issue.Design) +
+		len(issue.AcceptanceCriteria) + len(issue.Notes) + len(issue.Metadata) +
+		len(issue.Payload) + len(issue.CloseReason) + len(issue.Target)
+	for _, w := range issue.Waiters {
+		n += len(w) + 3
+	}
+	return n
+}
+
+// issueInsertChunks splits issues into consecutive statement-sized runs: at
+// most issueInsertRowsPerStatement rows, and no more than
+// issueInsertBytesPerStatement estimated bytes unless a single row alone
+// exceeds it.
+func issueInsertChunks(issues []*types.Issue) [][]*types.Issue {
+	var chunks [][]*types.Issue
+	start, bytes := 0, 0
+	for i, issue := range issues {
+		rowBytes := issueInsertRowBytes(issue)
+		if i > start && (i-start >= issueInsertRowsPerStatement || bytes+rowBytes > issueInsertBytesPerStatement) {
+			chunks = append(chunks, issues[start:i])
+			start, bytes = i, 0
+		}
+		bytes += rowBytes
+	}
+	if start < len(issues) {
+		chunks = append(chunks, issues[start:])
+	}
+	return chunks
+}
+
+// insertIssueRowsIntoTable writes issues into table with multi-row INSERTs
+// carrying the same ON DUPLICATE KEY UPDATE clause insertIssueIntoTable uses,
+// so each row lands exactly as its single-row insert would have.
+//
+// A multi-row statement that fails writes none of its rows (statements are
+// atomic), so its rows are replayed one at a time: the first row that cannot
+// be written fails the batch with the per-row path's own error, and when every
+// row can be written the batch simply continues, as the per-row path would
+// have.
+//
+//nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
+func insertIssueRowsIntoTable(ctx context.Context, tx DBTX, table string, issues []*types.Issue, rejectStaleUpdate bool) error {
+	suffix := "ON DUPLICATE KEY UPDATE\n\t\t\t" + issueUpsertAssignments(table, rejectStaleUpdate)
+	for _, chunk := range issueInsertChunks(issues) {
+		args := make([]any, 0, len(chunk)*49)
+		for _, issue := range chunk {
+			args = append(args, issueInsertArgs(issue)...)
+		}
+		if _, err := tx.ExecContext(ctx, issueInsertSQL(table, len(chunk), suffix), args...); err == nil {
+			continue
+		}
+		for _, issue := range chunk {
+			if err := insertIssueIntoTable(ctx, tx, table, issue, rejectStaleUpdate); err != nil {
+				return fmt.Errorf("failed to insert issue %s: %w", issue.ID, err)
+			}
+		}
 	}
 	return nil
 }

@@ -76,7 +76,7 @@ func TestDeleteBatchDryRunHonorsForce(t *testing.T) {
 	store, rootCtx, jsonOutput, quietFlag = s, ctx, false, true
 	t.Cleanup(func() { store, rootCtx, jsonOutput, quietFlag = oldStore, oldRootCtx, oldJSON, oldQuiet })
 
-	if err := deleteBatch(nil, []string{parent.ID}, true, true, false, false, false); err != nil {
+	if err := deleteBatch(nil, []string{parent.ID}, true, true, false, false, false, nil); err != nil {
 		t.Fatalf("forced dry-run rejected a dependent issue: %v", err)
 	}
 	if issue, err := s.GetIssue(ctx, parent.ID); err != nil || issue == nil {

@@ -1101,8 +1101,10 @@ func TestDoltTestcontainerStepsDisableRyuk(t *testing.T) {
 // TestNightlyFullTestRunsEmbeddedDoltBatchApplySuite pins the nightly
 // full-test job's embedded-Dolt step: it must set BEADS_TEST_EMBEDDED_DOLT=1
 // (the gate skipUnlessEmbeddedDolt checks) and run exactly
-// TestBatchApplyContract, TestLargeBatchApplyWallClock_Embedded and (F1)
-// TestLargeBatchApplyStatementCounts712_Embedded, non-race, after the main
+// TestBatchApplyContract, TestLargeBatchApplyWallClock_Embedded, (F1)
+// TestLargeBatchApplyStatementCounts712_Embedded and the 458-issue
+// batch-create equivalence scenarios
+// (TestCreateBatchFastPathsMatchPerRowLarge_Embedded), non-race, after the main
 // "Full Test Suite" step. That main step never sets BEADS_TEST_EMBEDDED_DOLT,
 // so without this step the nightly job would never exercise a real
 // 1000-item apply through the embedded backend, nor the 712-item shape's
@@ -1111,7 +1113,7 @@ func TestDoltTestcontainerStepsDisableRyuk(t *testing.T) {
 func TestNightlyFullTestRunsEmbeddedDoltBatchApplySuite(t *testing.T) {
 	job := readCIWorkflow(t, "nightly.yml").job(t, "full-test")
 	const stepName = "Embedded Dolt batch-apply suite (non-race)"
-	const wantRun = "go test -tags gms_pure_go -timeout 20m -run '^(TestBatchApplyContract|TestLargeBatchApplyWallClock_Embedded|TestLargeBatchApplyStatementCounts712_Embedded)$' ./internal/storage/embeddeddolt"
+	const wantRun = "go test -tags gms_pure_go -timeout 20m -run '^(TestBatchApplyContract|TestLargeBatchApplyWallClock_Embedded|TestLargeBatchApplyStatementCounts712_Embedded|TestCreateBatchFastPathsMatchPerRowLarge_Embedded)$' ./internal/storage/embeddeddolt"
 	assertStepRunsExactly(t, job, stepName, wantRun)
 	assertStepEnvValue(t, job, stepName, "BEADS_TEST_EMBEDDED_DOLT", "1")
 	assertStepsBefore(t, job, []string{"Full Test Suite (including integration tests)"}, []string{stepName})
@@ -5938,6 +5940,9 @@ func TestSetupBazelRCWriter(t *testing.T) {
 			"GITHUB_OUTPUT=" + out,
 			"BAZEL_CI_CACHE_DIR=" + filepath.Join(dir, "cache"),
 			"BAZEL_CI_SECRET_DIR=" + secret,
+			// The fork cache's zstd probe: a refused port unless extra
+			// names a stand-in rbe-cache; never rbe-cache itself.
+			"RBE_CACHE_PROBE_URL=" + refusedProbeURL,
 		}, extra...)
 		logs, err := cmd.CombinedOutput()
 		outputs, _ := os.ReadFile(out)
@@ -5982,6 +5987,58 @@ func TestSetupBazelRCWriter(t *testing.T) {
 		}
 		if !strings.Contains(logs, "setup-bazel: read-only remote cache (rbe-cache); executing locally") {
 			t.Errorf("log lacks the read-only cache notice:\n%s", logs)
+		}
+	})
+	// The fork cache asks for zstd exactly while rbe-cache advertises it
+	// (cache-zstd-probe.sh against a stand-in; TestCacheZstdProbe runs every
+	// other answer): the line follows --config=fork-cache, and the lane
+	// never fails on the probe. Remote-exec and rbe-fork never probe.
+	t.Run("fork cache zstd follows rbe-cache", func(t *testing.T) {
+		requireCacheZstdProbeTools(t)
+		for answer, wantLine := range map[string]bool{"zstd": true, "identity": false, "refused": false} {
+			env := []string{"BAZEL_FORK_CACHE=true"}
+			if answer != "refused" {
+				body := capsZstd
+				if answer == "identity" {
+					body = capsLive
+				}
+				url, ca, _ := serveCapabilities(t, capsAnswer{grpc: "0", body: grpcMessage(body)})
+				env = append(env, "RBE_CACHE_PROBE_URL="+url, "CURL_CA_BUNDLE="+ca)
+			}
+			outputs, rc, logs, err := run(t, env...)
+			if err != nil {
+				t.Fatalf("%s: err=%v\n%s", answer, err, logs)
+			}
+			if got := strings.Contains(rc, "\nbuild --config=fork-cache\n"+forkCacheZstdLine+"\n"); got != wantLine || strings.Count(rc, "remote_cache_compression") != map[bool]int{true: 1}[wantLine] {
+				t.Errorf("rbe-cache %s: rc = %q; want %q right after --config=fork-cache: %v", answer, rc, forkCacheZstdLine, wantLine)
+			}
+			if strings.Contains(rc, "remote-exec") || !strings.Contains(outputs, "cache=true") {
+				t.Errorf("rbe-cache %s: outputs = %q rc = %q; want cache=true and no remote-exec", answer, outputs, rc)
+			}
+			if !strings.Contains(logs, "rbe-cache zstd probe: ") {
+				t.Errorf("rbe-cache %s: log lacks the probe's verdict:\n%s", answer, logs)
+			}
+		}
+	})
+	t.Run("remote-exec and rbe-fork never ask for zstd", func(t *testing.T) {
+		requireCacheZstdProbeTools(t)
+		url, ca, hits := serveCapabilities(t, capsAnswer{grpc: "0", body: grpcMessage(capsZstd)})
+		probe := []string{"RBE_CACHE_PROBE_URL=" + url, "CURL_CA_BUNDLE=" + ca}
+		for name, env := range map[string][]string{
+			"remote-exec": {executor, "RBE_TLS_CERT=" + pem("CERTIFICATE"), "RBE_TLS_KEY=" + pem("PRIVATE KEY")},
+			"rbe-fork": {"RBE_FORK_CERT_FILE=/tmp/s/fork.crt", "RBE_FORK_KEY_FILE=/tmp/s/fork.key",
+				"RBE_FORK_ENDPOINT=grpcs://rbe-fork.ops.gascity.com:8444", "RBE_FORK_INSTANCE=oss-fork"},
+		} {
+			_, rc, logs, err := run(t, append(env, probe...)...)
+			if err != nil {
+				t.Fatalf("%s: err=%v\n%s", name, err, logs)
+			}
+			if strings.Contains(rc, "remote_cache_compression") {
+				t.Errorf("%s rc asks for compression; rbe-west's schedulers and rbe-fork advertise none:\n%s", name, rc)
+			}
+		}
+		if n := hits.Load(); n != 0 {
+			t.Errorf("remote-exec or rbe-fork probed rbe-cache %d times; only the fork cache may", n)
 		}
 	})
 	t.Run("rejects fork cache with the secrets", func(t *testing.T) {

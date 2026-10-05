@@ -1159,7 +1159,7 @@ func TestParityUpdateGuardsRequireFieldUpdate(t *testing.T) {
 	if res.exitCode != 1 {
 		t.Fatalf("exit = %d, want 1; stderr=%s", res.exitCode, res.stderr)
 	}
-	const want = "Error: --if-assignee/--if-status require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard\n"
+	const want = "Error: --if-assignee/--if-status/--if-revision require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard\n"
 	if res.stderr != want {
 		t.Errorf("stderr = %q, want %q", res.stderr, want)
 	}
@@ -1184,7 +1184,7 @@ func TestParityUpdateGuardsRejectClaim(t *testing.T) {
 	if res.exitCode != 1 {
 		t.Fatalf("exit = %d, want 1; stderr=%s", res.exitCode, res.stderr)
 	}
-	const want = "Error: cannot combine --if-assignee/--if-status with --claim (--claim is already an atomic compare-and-set)\n"
+	const want = "Error: cannot combine --if-assignee/--if-status/--if-revision with --claim (--claim is already an atomic compare-and-set)\n"
 	if res.stderr != want {
 		t.Errorf("stderr = %q, want %q", res.stderr, want)
 	}

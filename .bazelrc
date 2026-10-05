@@ -344,6 +344,9 @@ build:fork-cache --remote_retries=2
 build:fork-cache --experimental_circuit_breaker_strategy=failure
 # The farm admits 16 connections per source IP.
 build:fork-cache --remote_max_connections=8
+# No --remote_cache_compression here: setup-bazel's write-bazelrc.sh adds it
+# for fork-cache while rbe-cache advertises zstd (cache-zstd-probe.sh), so the
+# server decides and rollback needs no change here.
 
 # Remote execution against any REAPI-compatible service. Only generic tuning
 # lives here; the executor endpoint and TLS credentials are never committed.

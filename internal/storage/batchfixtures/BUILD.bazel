@@ -4,6 +4,7 @@ go_library(
     name = "batchfixtures",
     srcs = [
         "batchfixtures.go",
+        "largegraph.go",
         "uncapped_plan.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/storage/batchfixtures",

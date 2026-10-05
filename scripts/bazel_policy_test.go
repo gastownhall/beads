@@ -342,6 +342,13 @@ var publicForkCacheLines = map[string]bool{
 const (
 	forkCacheEndpoint = "grpc" + "s://rbe-cache.ops.gascity.com:8443"
 	forkCacheInstance = "oss"
+	// zstd cache transfers: only the anonymous fork cache can advertise a
+	// compressor, so only fork-cache may ask for one, and only while
+	// write-bazelrc.sh's cache-zstd-probe.sh finds it advertised (a probe,
+	// not a repository variable: fork pull_request runs see no vars).
+	// Trusted remote-exec and rbe-fork never: their schedulers advertise
+	// none, and Bazel then refuses the remote.
+	forkCacheZstdLine = "build:fork-cache --remote_cache_compression"
 )
 
 // publicRBEForkPin: setup-bazel's fork-credential.sh pins the one endpoint
@@ -1258,6 +1265,9 @@ func checkBazelrcForkCache(bazelrc string) []error {
 	var errs []error
 	var opts []bazelrcOption
 	for _, o := range parseBazelrcOptions(bazelrc) {
+		if strings.Contains(o.flag, "remote_cache_compression") {
+			errs = append(errs, errors.New(o.source()+" sets "+o.flag+"; only setup-bazel's generated rc may, for fork-cache while rbe-cache advertises zstd"))
+		}
 		switch {
 		case o.config == "fork-cache":
 			opts = append(opts, o)
@@ -1415,6 +1425,8 @@ func TestBazelForkCacheConfig(t *testing.T) {
 		"slow timeout":               good + "build:fork-cache --remote_timeout=60\n",
 		"zero timeout":               good + "build:fork-cache --remote_timeout=0\n",
 		"duration timeout":           good + "build:fork-cache --remote_timeout=15s\n",
+		"zstd in .bazelrc":           good + "build:fork-cache --remote_cache_compression\n",
+		"trusted zstd in .bazelrc":   good + "build:remote-exec --remote_cache_compression\n",
 		"plain build expands":        good + "build --config=fork-cache\n",
 		"plain common expands":       good + "common --config=fork-cache\n",
 		"plain upload":               good + "build --remote_upload_local_results\n",
@@ -1537,5 +1549,40 @@ func TestBazelrcIntegrationLaneFixtures(t *testing.T) {
 		if err := checkBazelrcIntegrationLane(rc); err == nil {
 			t.Errorf("%s: expected an error for .bazelrc fixture:\n%s", name, rc)
 		}
+	}
+}
+
+// TestBazelRemoteCacheCompressionOnlyForkCache: --remote_cache_compression
+// appears in one place, write-bazelrc.sh's fork-cache line behind
+// the zstd probe. No .bazelrc config, workflow or other action file may set
+// it: every other remote (rbe-west's trusted schedulers on :443, rbe-fork on
+// :8444) advertises no compressor, and Bazel then refuses the remote.
+func TestBazelRemoteCacheCompressionOnlyForkCache(t *testing.T) {
+	root := bazelPolicyRoot(t)
+	files := []string{".bazelrc"}
+	for _, pattern := range []string{".github/workflows/*.yml", ".github/workflows/*.yaml", ".github/actions/*/*"} {
+		m, err := filepath.Glob(filepath.Join(root, pattern))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range m {
+			rel, err := filepath.Rel(root, f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			files = append(files, rel)
+		}
+	}
+	var found []string
+	for _, f := range files {
+		for i, line := range strings.Split(readPolicyFile(t, root, f), "\n") {
+			if strings.Contains(line, "remote_cache_compression") && !strings.HasPrefix(strings.TrimSpace(line), "#") {
+				found = append(found, f+":"+strconv.Itoa(i+1)+": "+strings.TrimSpace(line))
+			}
+		}
+	}
+	want := setupBazelActionDir + "/write-bazelrc.sh:"
+	if len(found) != 1 || !strings.HasPrefix(found[0], want) || !strings.HasSuffix(found[0], `echo "`+forkCacheZstdLine+`"`) {
+		t.Errorf("--remote_cache_compression set at %q; want only %s echo %q", found, want, forkCacheZstdLine)
 	}
 }
