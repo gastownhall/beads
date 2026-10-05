@@ -19,6 +19,10 @@ on:
       - 'CLAUDE.md'
       - 'RELEASING.md'
       - 'PR_MAINTAINER_GUIDELINES.md'
+      - 'ROADMAP.md'
+      - '**/AGENTS.md'
+      - '**/CLAUDE.md'
+      - '.github/copilot-instructions.md'
       - '.github/scripts/docs-render-check.sh'
       - '.github/workflows/docs-mintlify.yml'
 

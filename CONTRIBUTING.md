@@ -2,6 +2,50 @@
 
 Thank you for your interest in contributing to bd! This document provides guidelines and instructions for contributing.
 
+## Issue-first
+
+GitHub Issues is the public tracker, and every change starts as an issue.
+Open one with the bug or feature form before writing code; a pull request
+must close an issue that a maintainer has labeled `status/accepted`. A PR
+without one is a proposal we cannot review yet — the fastest path is to file
+the issue and link it.
+
+### Triage labels
+
+| Label | Meaning | Applied by |
+|---|---|---|
+| `status/needs-triage` | Awaiting initial triage. | Automation, on every new issue |
+| `status/needs-info` | Waiting on essential information from the reporter. | Maintainers |
+| `status/needs-repro` | Needs a reproducible bug report. | Maintainers |
+| `status/needs-design` | The direction needs a design decision before work starts. | Maintainers |
+| `status/accepted` | Approved: a PR that closes this issue is welcome. | Maintainers |
+
+Issues left in `status/needs-info` or `status/needs-repro` are closed after 14
+days without a reply to the request; reply with the details and a
+maintainer will reopen them.
+Priority (`priority/p0`–`priority/p3`) and kind (`kind/bug`, `kind/feature`,
+`kind/docs`, `kind/chore`) labels are set during triage.
+
+### Pull request pipeline labels
+
+These labels drive the maintainers' automated review and merge workflow. They
+are applied by maintainers and automation; contributors don't need to set
+them.
+
+| Label | Meaning |
+|---|---|
+| `status/needs-review` | Request the PR review workflow. |
+| `status/needs-review-auto` | Request the automated PR review workflow. |
+| `status/reviewing` | The PR review workflow is running. |
+| `status/review-failed` | The PR review workflow failed before merge-ready. |
+| `status/merge-ready` | The PR is ready for the merge workflow. |
+| `status/merge-queued` | Queued for deterministic PR-review merge. |
+| `status/merge-failed` | The merge queue needs operator attention. |
+| `status/needs-bugflow` | Request the bugflow investigation workflow. |
+
+The current priorities are on the [roadmap](ROADMAP.md); work in a priority
+area is reviewed first.
+
 ## Development Setup
 
 ### Prerequisites
@@ -90,21 +134,23 @@ engine, or expand the database schema when issue metadata is sufficient.
 
 ### Workflow
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/my-feature`)
+1. Start from an issue labeled `status/accepted` (see [Issue-first](#issue-first))
+2. Fork the repository and create a feature branch (`git checkout -b feature/my-feature`)
 3. Make your changes
 4. Add tests for new functionality
 5. Run tests and linter locally
 6. Commit your changes with clear messages
 7. Push to your fork
-8. Open a pull request
+8. Open a pull request whose description says `Closes #<issue>`
 
 ### Commit Messages
 
-Write clear, concise commit messages:
+Use [Conventional Commits](https://www.conventionalcommits.org/):
+`type(scope): summary`, where type is one of `fix`, `feat`, `docs`, `test`,
+`refactor`, `chore`, `ci`, or `perf`.
 
 ```
-Add cycle detection for dependency graphs
+feat(dep): add cycle detection for dependency graphs
 
 - Implement recursive CTE-based cycle detection
 - Add tests for simple and complex cycles
@@ -114,6 +160,10 @@ Add cycle detection for dependency graphs
 ### Pull Request Hygiene
 
 **One issue per PR, and one PR per issue.** No piggybacking or riders — each PR should address exactly one thing.
+
+Read [CONTRIBUTING_PR_GUIDELINES.md](CONTRIBUTING_PR_GUIDELINES.md) for the
+layering rules (schema → storage/issueops → cmd/bd, one layer per PR) and the
+repro and benchmark evidence reviewers expect.
 
 - Keep PRs focused on a single feature or fix
 - Do not include unrelated changes, cleanup, or "while I'm here" improvements
@@ -178,22 +228,12 @@ round-trip paths should pattern-match on those tests.
 
 ## Feature Requests and Bug Reports
 
-### Reporting Bugs
-
-Include in your bug report:
-- Steps to reproduce
-- Expected behavior
-- Actual behavior
-- Version of bd (`bd version` if implemented)
-- Operating system and Go version
-
-### Feature Requests
-
-When proposing new features:
-- Explain the use case
-- Describe the proposed solution
-- Consider backwards compatibility
-- Discuss alternatives you've considered
+Use the issue forms: [bug report](https://github.com/gastownhall/beads/issues/new?template=bug_report.yml)
+or [feature request](https://github.com/gastownhall/beads/issues/new?template=feature_request.yml).
+The feature form asks for the motivation, impact, risk and compatibility,
+and verification plan up front, so a maintainer can accept the issue without
+a round trip. Questions go to
+[Discussions](https://github.com/gastownhall/beads/discussions).
 
 ## Your PR Will Not Be Overwritten
 
@@ -309,11 +349,7 @@ dlv debug ./cmd/bd -- create "Test issue"
 
 (For maintainers)
 
-1. Update version in code
-2. Update CHANGELOG.md
-3. Tag release: `git tag v0.x.0`
-4. Push tag: `git push origin v0.x.0`
-5. GitHub Actions will build and publish
+Follow [RELEASING.md](RELEASING.md); it is the canonical release process.
 
 The pre-push version gate requires Go and validates each `v*` release tag
 against the checkout's canonical version. A batch containing different release

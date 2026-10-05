@@ -1,16 +1,22 @@
 <!--
-This is a starting scaffold to help reviewers (human and agent) parse intent before diff.
-Replace, expand, or delete sections freely. CONTRIBUTING.md has the full hygiene rules.
+Every PR closes an issue a maintainer has labeled `status/accepted`; the issue
+carries the motivation, impact, and risk. See CONTRIBUTING.md#issue-first.
 -->
 
-## What
+Closes #
 
-<!-- One or two plain-language sentences: what does this change do? -->
+## What changed
 
-## Why
+<!-- One or two plain-language sentences. -->
 
-<!-- The problem this solves, the motivation, or a link to the issue: e.g. "Fixes #123" -->
+## Evidence it works
 
-## Verification
+<!-- Commands a reviewer can run and what they show, end to end.
+"Unit tests pass" alone is not evidence. -->
 
-<!-- How you tested. Commands a reviewer can run to confirm. -->
+## Checklist
+
+- [ ] The linked issue is labeled `status/accepted`.
+- [ ] Tests and lint selected per `engdocs/TESTING.md` pass locally.
+- [ ] User-facing behavior changes are reflected in `docs/` or the generated CLI reference.
+- [ ] If an invariant or rule changed, the owning `AGENTS.md` is updated.

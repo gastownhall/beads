@@ -191,6 +191,12 @@ rm -rf -- "$beads_manual_dir"
 itself redirect `bd init` workspace setup. Never run a manual `bd init` from a
 production workspace merely because `BEADS_DB` points elsewhere.
 
+**Tmpfs hosts:** the `cmd/bd` test suite creates an isolated `$HOME` and several
+test binaries under `$TMPDIR`. They are normally cleaned by the test process,
+but a SIGKILLed or OOMed run can leave orphans behind. On hosts where `/tmp`
+is tmpfs (e.g. Fedora Atomic / Bluefin), run `make clean-test-tmp` between
+test runs if `du -sh /tmp/beads-* /tmp/bd-*` shows accumulation. See bd-3q2u.
+
 `testing.Short()` is for genuine runtime, stress, or large-fixture skips. It
 is not a substitute for declaring an integration, end-to-end, API, Docker, or
 external-dependency boundary. Keep new uses within the repository policy:

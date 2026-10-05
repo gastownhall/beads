@@ -81,6 +81,8 @@ filegroup(
         "engdocs/**",
     ]) + [
         "integrations/beads-mcp/PYPI.md",
+        "//cmd/bd:AGENTS.md",
+        "//internal/storage/schema:migrations/README.md",
         "//scripts:README.md",
     ],
     visibility = ["//test/docsync:__pkg__"],
