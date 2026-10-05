@@ -61,7 +61,10 @@ case "$event_name" in
         # HEAD^: a rebase-method queue entry stacks every commit of the PR,
         # so its first parent would hide all but the last one. With the
         # ALLGREEN grouping strategy every entry of a batch is checked, so
-        # each entry's own diff is enough.
+        # each entry's own diff is enough. (With SQUASH, HEAD^ already was
+        # base_sha; this matters for the merge and rebase methods.) As with
+        # PR-time path filtering, entry N's gate does not re-test entry
+        # N-1's package change combined with N's; N-1's own run tested it.
         if [[ -z "$pr_base_sha" || -z "$pr_head_sha" ]]; then
             run_all "merge-group diff bounds unavailable; running all package gates"
         fi

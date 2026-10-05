@@ -481,6 +481,14 @@ its own pool from inside its own `bazel-test.yml` job, same-repo, with
 `github.token`; beads cannot use its own `GITHUB_TOKEN` against gascity's
 repository, so this job needs its own credential into gascity instead.
 
+Merge queue caveat: a `merge_group` run executes the queued commit's
+workflow files, so once a maintainer queues a fork PR, that PR's own edits
+to `bazel.yml` or `pr.yml` (this job included) run with the shared
+`bazel-allocator` key. The B1 protections below (inlined dispatch logic,
+base-branch workflow, approval-gated workflow edits) hold only for runs of
+the committed file. Review fork PRs' `.github/` changes before queueing
+(see [Merge Queue](#merge-queue)).
+
 **What it does.** A job of its own (not a step inside `rbe`, so it never
 delays the mode decision every lane waits on), gated on
 `needs.rbe.outputs.mode == 'remote'` only - the one mode whose lanes target
@@ -953,15 +961,14 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
     tests with `go list`, not with PR Core's run, so it is unaffected;
     `nightly.yml` still runs PR Core's `go test -json` for the skip-parity
     check.
-  - `--config=sole-run` (`--nocache_test_results`,
-    `--experimental_remote_cache_eviction_retries=0`, the step 1 and 2
-    hardening) is added to every `bazel test` of the three lanes wherever
-    they execute remotely (`BAZEL_SOLE_RUN`: modes `remote`, `fork-ro` and
-    `fork-rw`), which every covered PR runs in. Runs in modes `cache` and
-    `local`, whose legacy jobs still run, keep cached results, which keeps
-    their local runs short. Measured
-    2026-10-02: `bazel test //... --config=ci --nocache_test_results`
-    remotely took 132 s (113 targets).
+  - `--config=sole-run` (`--experimental_remote_cache_eviction_retries=0`,
+    the step 1 and 2 hardening) is added to every `bazel test` of the three
+    lanes wherever they execute remotely (`BAZEL_SOLE_RUN`: modes `remote`,
+    `fork-ro` and `fork-rw`), which every covered PR runs in. It used to
+    carry `--nocache_test_results` too; test results are now cached on every
+    run but nightly's (see [Merge Queue](#merge-queue), "Test result
+    caching"). Measured 2026-10-02: `bazel test //... --config=ci
+    --nocache_test_results` remotely took 132 s (113 targets).
   - Pinned for step 3 (`scripts/pr_lanes_bazel_coverage_test.go`): the
     three lanes' Bazel steps and the `prcore`, `ci`, `doltserver`, `pure`,
     `js-wasm` and `sole-run` rc lines exactly; no other rc line of a config
@@ -1075,14 +1082,14 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
 - Lane hardening that the retirement relies on, for `bazel-embedded`,
   `bazel-proxied` and `bazel-server-storage` alike (policy-tested in
   `scripts/ci_workflow_test.go` and `scripts/pr_risk_bazel_coverage_test.go`):
-  - `--nocache_test_results` in `test:embedded`, `test:doltserver-proxied`
-    and `test:doltserver-integration`: every run executes every test, like
-    the legacy `-test.count=1` jobs, so a stale or poisoned entry in the
-    shared farm action cache cannot stand in for a run. Nothing else in
-    `.bazelrc` sets test result caching except `test:docker` (also off)
-    and `test:reuse-test-results`, which only merge queue runs and PR
-    re-runs append (see [Merge Queue](#merge-queue), "Test result
-    reuse").
+  - Test result caching: originally `--nocache_test_results` in
+    `test:embedded`, `test:doltserver-proxied` and
+    `test:doltserver-integration` (every run executed every test, like the
+    legacy `-test.count=1` jobs). Since merge queue readiness these lanes
+    cache results like every other lane, and nightly's `--config=fresh`
+    re-executes every test once a day (see [Merge Queue](#merge-queue),
+    "Test result caching"). Only `test:docker` and `test:fresh` set result
+    caching in `.bazelrc`.
   - No retries: no `--flaky_test_attempts` or
     `--runs_per_test_detects_flakes` anywhere, and no `flaky =` other than
     a literal `False`. Each lane also runs
@@ -1095,8 +1102,8 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
     By default (5) Bazel re-runs the entire `bazel test` invocation when an
     input was evicted from the remote cache ("Lost inputs ... Found
     transient remote cache error, retrying the build"), and that exit code
-    outranks a test failure. With `--keep_going` and
-    `--nocache_test_results`, a test that failed in the first attempt is
+    outranks a test failure. With `--keep_going` (and a failed test, which
+    is never served from the cache), a test that failed in the first attempt is
     then executed again and only the retry's result (and BEP) is reported,
     so a flaky failure could turn green. With 0, an eviction fails the step
     instead; "Re-run failed jobs" retries it visibly. Reproduced against a
@@ -1354,10 +1361,14 @@ method (squash) decides how it lands. `gh pr merge <number>
 
 Planned queue settings (`merge_queue` rule in the `beads main: required
 CI gates` ruleset): merge method `SQUASH`, grouping strategy `ALLGREEN`,
-`max_entries_to_merge` 5, `max_entries_to_build` 5, `min_entries_to_merge`
+`max_entries_to_merge` 5, `max_entries_to_build` 3, `min_entries_to_merge`
 1, `min_entries_to_merge_wait_minutes` 2 (it only delays merging while
 fewer than `min_entries_to_merge` entries are queued, so at 1 it never
-waits), `check_response_timeout_minutes` 30. The required status checks
+waits), `check_response_timeout_minutes` 60. A same-repo `pr.yml` run takes
+about 10-11 minutes today. The build limit (3) and the timeout (60) leave
+headroom while the farm scales from zero, so a backlog does not time
+entries out and set off a rebuild cascade. Watch the first days'
+`merge_group` durations before raising the build limit. The required status checks
 stay exactly `CI Gate / Required` and `PR Risk Gate / Required` (GitHub
 Actions).
 
@@ -1370,10 +1381,19 @@ workflows run on that commit like a same-repo PR:
 - Trust: same repository, CI secrets present, actor
   `github-merge-queue[bot]`. Every Blacksmith ternary names
   `merge_group` explicitly, `bazel.yml`'s `rbe` job takes mode `remote`
-  (never asks rbe-fork), and `rbe-prewarm` runs (mode `remote`). A fork
-  PR's code therefore runs with the CI secrets once a maintainer queues
-  it; that is the same trust a merge to `main` grants, and queueing is a
-  maintainer action.
+  (never asks rbe-fork), and `rbe-prewarm` runs (mode `remote`).
+  A merge group runs the workflow files and scripts of the queued commit,
+  not of `main`, and no approval gate applies. A queued fork PR's own edits
+  to `.github/`, `.bazelrc`, `tools/bazel/`, `MODULE.bazel`, BUILD files or
+  `scripts/ci/` therefore run with every CI secret: the RBE client
+  certificate and the shared `bazel-allocator` app key (rbe-prewarm). They
+  run even if the entry is later ejected and never merges. A queued
+  Dependabot PR likewise runs with the Actions secrets. That is the trust
+  of merging (a push to `main` would run the same code). **Maintainer
+  rule: review a fork PR's changes to those paths before queueing it,
+  exactly as before merging.** A ruleset `pull_request` rule (1 approval,
+  approval of the most recent push) would enforce a review before queueing.
+  That decision is pending.
 - D2: `bazel-coverage` covers every merge group, so the retired legacy
   tiers (embedded, proxied/server Dolt, pr.yml's PR Core/build/pure-Go/
   domain+uow/contract jobs) stay retired and the gate requires their
@@ -1405,21 +1425,24 @@ workflows run on that commit like a same-repo PR:
 - Autofix: `bazel-autofix.yml` and `docs-autofix.yml` act only on
   `pull_request` runs; a red merge group never gets an autofix push.
 
-### Test result reuse
+### Test result caching
 
-Bazel lanes reuse what has not changed. A merge group run (and attempt 2+
-of a PR run) appends `--config=reuse-test-results` (`.bazelrc`:
-`--cache_test_results=auto`) after the lane's own config in the six lanes
-that otherwise always execute (`test`, `pure`, `doltserver` through
-`sole-run`; `embedded`, `doltserver-proxied`, `doltserver-integration`).
-A test whose action key (test binary, runfiles, test env, platform) is
-unchanged since the PR's own run reuses the PASS the farm recorded then;
-a test whose inputs the merge changed runs. Compiles were always shared
-through the remote cache, and `bazel-integration` and `bazel-cmd-dolt`
-always reused results.
+Bazel lanes rerun only what changed. Test results are cached (read and
+written, Bazel's default) on every run except nightly's: on a PR (any
+attempt), a merge group and a push to `main` alike. A test whose action key
+(test binary, runfiles, test env, platform) is unchanged reuses the PASS
+the farm recorded for it; a test whose inputs changed runs. The PR's own
+run seeds the cache, so a merge group re-runs only the tests the merge
+changed (on a fresh base, those depending on what landed in between).
+`nightly.yml` passes `fresh-test-results: true`, so every `bazel test` in
+`bazel.yml` appends `--config=fresh` (`--nocache_test_results`) last, and
+the whole suite re-executes once a day. A dispatch of `bazel.yml` can ask
+for the same.
 
-Why "always execute" (D2 review F2: `--nocache_test_results`, parity with
-the legacy `-test.count=1` jobs) can relax here:
+This replaces the D2 rule "always execute" (`--nocache_test_results` in the
+retired tiers' configs and `sole-run`, parity with the legacy
+`-test.count=1` jobs, review F2). That rule also stopped Bazel *writing*
+results, so nothing could ever be reused. Why caching is safe:
 
 - A cached PASS is valid for identical inputs: these targets are hermetic
   (dolt and every input are runfiles). The docker-backed lane, whose
@@ -1431,12 +1454,19 @@ the legacy `-test.count=1` jobs) can relax here:
   (client writes are refused, forks are read-only), so a cached PASS is a
   real remote execution, and anyone able to run a same-repo branch already
   holds the CI certificate (accepted risk in `bazel.yml`'s header).
-- What is given up is one more sample of a nondeterministic (-race,
-  timing) test on unchanged inputs. Each PR's first attempt, every push to
-  `main` (the merged commit itself) and nightly still execute every test,
-  so flakes keep being sampled once per change and once per merge.
+- What is given up is re-sampling a nondeterministic (-race, timing) test
+  on unchanged inputs between nightlies. A flaky test fails at most once
+  per change before it is cached as passing, and nightly samples
+  everything again.
 - No retries were added: `--experimental_remote_cache_eviction_retries=0`
-  and the no-`flaky_test_attempts` policy are unchanged.
+  (retired tiers' configs and `sole-run`) and the no-`flaky_test_attempts`
+  policy are unchanged.
+
+To confirm reuse on the farm, count `testResult` events with
+`cachedRemotely` in the BEP of the first few merge-group runs. The same
+check shows that `test.xml` is downloaded for cache hits, which
+`equivalence.py`, `check_testcases.py` and the pure-Go lane's test-count
+check read.
 
 Non-Bazel required jobs re-run in full on every merge group (approximate
 PR timings, 2026-10): `fast-checks` (~40 s), `pr-policy-wrapper`
@@ -1457,7 +1487,8 @@ done here: the advisory native Windows pair (`test-windows-liveness`,
 (platform behavior the PR run already checked on the same inputs). With
 result reuse the merge group's critical path is the Windows
 cross-compile and the Windows matrix legs (~5-7 min), not the Bazel
-lanes.
+lanes once their tests are cached. An entry's first build after a base
+change still compiles what changed.
 
 ### Failures and flakes
 
@@ -1466,11 +1497,16 @@ comments on it); every entry behind it is rebuilt without it and re-runs.
 With ALLGREEN a batch merges only when every entry in it is green. A
 flake therefore costs the flaky PR its place and re-runs everything
 behind it; re-queue the PR (`gh pr merge --auto --squash` again). A
-re-queued entry on unchanged inputs reuses its Bazel lanes' results, so
-the retry mostly re-runs the non-Bazel jobs; a reused PASS cannot hide a
-failure, because failures are never cached. A 30-minute check timeout
-ejects an entry whose gates never report; both gates normally finish in
-about 10 minutes.
+re-queued entry on unchanged inputs reuses its Bazel lanes' passing
+results, so the retry re-runs the failed tests and the non-Bazel jobs; a
+reused PASS cannot hide a failure, because failures are never cached. The
+same holds for "Re-run jobs" on a PR: passing tests are not re-executed.
+To re-sample a suspected flake on unchanged inputs, dispatch `bazel.yml`
+on the branch with `fresh-test-results` checked. Runs of queue entries
+that were invalidated (an entry ahead was ejected) keep running to
+completion and use farm capacity; plan the build limit with that in mind.
+The 60-minute check timeout ejects an entry whose gates never report;
+both gates normally finish in about 10-15 minutes.
 
 Rollback: delete the `merge_queue` rule from the ruleset. Queued PRs fall
 back to the normal merge button; the `merge_group` triggers are inert

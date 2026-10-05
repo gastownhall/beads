@@ -22,23 +22,16 @@ import (
 // and the workflows' real step scripts.
 
 const (
-	// bazel.yml's lanes that otherwise never reuse a test result add
-	// --config=reuse-test-results on a merge_group run and on attempt 2+ of
-	// a pull_request run (never on a PR's first attempt, push or nightly).
-	bazelReuseResultsEnv    = "${{ (github.event_name == 'merge_group' || github.event_name == 'pull_request' && github.run_attempt != '1') && '--config=reuse-test-results' || '' }}"
-	bazelReuseResultsArg    = `${BAZEL_REUSE_RESULTS:+"$BAZEL_REUSE_RESULTS"}`
-	bazelReuseResultsRCLine = "test:reuse-test-results --cache_test_results=auto"
-	mergeQueueActor         = "github-merge-queue[bot]"
-	mergeQueueOwnRepo       = "gastownhall/beads"
+	// Test results are cached (read and written) on every run but
+	// nightly's: nightly.yml passes fresh-test-results: true, and bazel.yml
+	// appends BAZEL_FRESH (--config=fresh, --nocache_test_results) last to
+	// every `bazel test`.
+	bazelFreshEnv     = "${{ inputs.fresh-test-results && '--config=fresh' || '' }}"
+	bazelFreshArg     = `${BAZEL_FRESH:+"$BAZEL_FRESH"}`
+	bazelFreshRCLine  = "test:fresh --nocache_test_results"
+	mergeQueueActor   = "github-merge-queue[bot]"
+	mergeQueueOwnRepo = "gastownhall/beads"
 )
-
-// The retired tiers' configs that set --nocache_test_results themselves (the
-// other three reuse lanes get it from sole-run).
-var bazelReuseResultsConfigs = map[string]bool{"embedded": true, "doltserver-proxied": true, "doltserver-integration": true}
-
-// Every lane whose `bazel test` would otherwise always execute: sole-run's
-// three (test, pure, doltserver) and the retired tiers' three.
-var bazelReuseResultsLanes = []string{bazelJobName, bazelPureJobName, bazelDoltJobName, bazelEmbedJobName, bazelProxiedJobName, bazelServerJobName}
 
 // mergeGroupCtx: an evalGHExpr context for a merge_group run of entry n
 // (no github.event.pull_request.* key: null on this event).
@@ -313,89 +306,119 @@ func TestMergeQueueBazelCoversRetiredTiers(t *testing.T) {
 	}
 }
 
-// Result reuse: exactly the six always-execute lanes take
-// BAZEL_REUSE_RESULTS, it is --config=reuse-test-results only on a merge
-// group or a PR re-run, every `bazel test` in those lanes passes it after
-// the lane's own config and sole-run (so its --cache_test_results=auto
-// wins), and the config is that one line: no retries, no eviction-retry
-// change. Push to main, nightly, dispatch and a PR's first attempt never
-// reuse a result.
-func TestMergeQueueReusesUnchangedTestResults(t *testing.T) {
-	w := readCIWorkflow(t, bazelWorkflowName)
-	lanes := map[string]bool{}
-	for _, lane := range bazelReuseResultsLanes {
-		lanes[lane] = true
+// Test result caching: every `bazel test` in bazel.yml reuses cached
+// results except where the caller asks for fresh ones. BAZEL_FRESH is one
+// workflow-level env, --config=fresh only when inputs.fresh-test-results is
+// true (nightly.yml passes it; nothing else does), appended after every
+// other --config of each `bazel test` so its --nocache_test_results wins;
+// no lane config turns caching off except docker (host state outside the
+// action key); and nothing adds retries (eviction retries stay 0 where
+// set, TestBazelRetiredLanesArePinned / TestBazelPRLanesArePinned).
+func TestBazelTestResultCachingPolicy(t *testing.T) {
+	var doc struct {
+		Env map[string]string `yaml:"env"`
+		On  struct {
+			Dispatch struct {
+				Inputs map[string]struct {
+					Type    string `yaml:"type"`
+					Default any    `yaml:"default"`
+				} `yaml:"inputs"`
+			} `yaml:"workflow_dispatch"`
+			Call struct {
+				Inputs map[string]struct {
+					Type    string `yaml:"type"`
+					Default any    `yaml:"default"`
+				} `yaml:"inputs"`
+			} `yaml:"workflow_call"`
+		} `yaml:"on"`
 	}
+	if err := yaml.Unmarshal([]byte(readPolicyFile(t, sourceRepoRoot(t), ".github/workflows/"+bazelWorkflowName)), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Env["BAZEL_FRESH"] != bazelFreshEnv {
+		t.Errorf("%s env BAZEL_FRESH = %q, want %q", bazelWorkflowName, doc.Env["BAZEL_FRESH"], bazelFreshEnv)
+	}
+	for name, in := range map[string]struct {
+		Type    string `yaml:"type"`
+		Default any    `yaml:"default"`
+	}{"workflow_call": doc.On.Call.Inputs["fresh-test-results"], "workflow_dispatch": doc.On.Dispatch.Inputs["fresh-test-results"]} {
+		if in.Type != "boolean" || in.Default != false {
+			t.Errorf("%s input fresh-test-results: type %q default %v; want boolean, default false", name, in.Type, in.Default)
+		}
+	}
+	for _, c := range []struct {
+		name string
+		v    any
+		want string
+	}{
+		{"nightly (true)", true, "--config=fresh"},
+		{"default (false)", false, ""},
+		{"push (null)", nil, ""},
+	} {
+		got, err := evalGHExprTyped(bazelFreshEnv, map[string]any{"inputs.fresh-test-results": c.v})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != c.want {
+			t.Errorf("%s: BAZEL_FRESH = %#v, want %q", c.name, got, c.want)
+		}
+	}
+
+	w := readCIWorkflow(t, bazelWorkflowName)
 	bazelTest := regexp.MustCompile(`^\s*bazel\s+test\b`)
+	tests := 0
 	for name, job := range w.Jobs {
-		if !lanes[name] {
-			if _, ok := job.Env["BAZEL_REUSE_RESULTS"]; ok {
-				t.Errorf("%s sets BAZEL_REUSE_RESULTS; only %v reuse results this way", name, bazelReuseResultsLanes)
-			}
-			for _, step := range job.Steps {
-				if strings.Contains(step.Run, "reuse-test-results") || strings.Contains(step.Run, "BAZEL_REUSE_RESULTS") || strings.Contains(step.Run, "cache_test_results") {
-					t.Errorf("%s step %q names result reuse", name, step.Name)
-				}
-			}
-			continue
+		if _, ok := job.Env["BAZEL_FRESH"]; ok {
+			t.Errorf("%s sets BAZEL_FRESH; only the workflow env may", name)
 		}
-		if job.Env["BAZEL_REUSE_RESULTS"] != bazelReuseResultsEnv {
-			t.Errorf("%s env BAZEL_REUSE_RESULTS = %q, want %q", name, job.Env["BAZEL_REUSE_RESULTS"], bazelReuseResultsEnv)
-		}
-		tests := 0
 		for _, step := range job.Steps {
-			if strings.Contains(step.Run, "reuse-test-results") || strings.Contains(step.Run, "cache_test_results") {
-				t.Errorf("%s step %q names the config directly; only the env may", name, step.Name)
+			if strings.Contains(step.Run, "--config=fresh") || strings.Contains(step.Run, "cache_test_results") || strings.Contains(step.Run, "BAZEL_REUSE_RESULTS") {
+				t.Errorf("%s step %q names result caching directly; only BAZEL_FRESH may", name, step.Name)
 			}
 			for _, line := range strings.Split(step.Run, "\n") {
 				if !bazelTest.MatchString(line) {
 					continue
 				}
 				tests++
-				i := strings.Index(line, bazelReuseResultsArg)
+				i := strings.Index(line, bazelFreshArg)
 				if i < 0 || strings.Contains(line[i:], "--config") || strings.Contains(line[i:], "SOLE_RUN") {
-					t.Errorf("%s step %q: %q must pass %s after every --config", name, step.Name, line, bazelReuseResultsArg)
+					t.Errorf("%s step %q: %q must pass %s after every --config", name, step.Name, line, bazelFreshArg)
 				}
 			}
 		}
-		if tests == 0 {
-			t.Errorf("%s runs no bazel test", name)
-		}
 	}
-	for _, c := range []struct {
-		name string
-		ctx  map[string]string
-		want string
-	}{
-		{"merge_group", mergeGroupCtx(1, nil), "--config=reuse-test-results"},
-		{"merge_group re-run", mergeGroupCtx(1, map[string]string{"github.run_attempt": "2"}), "--config=reuse-test-results"},
-		{"pull_request, first attempt", pullRequestCtx(1, nil), ""},
-		{"pull_request, re-run", pullRequestCtx(1, map[string]string{"github.run_attempt": "2"}), "--config=reuse-test-results"},
-		{"pull_request, third attempt", pullRequestCtx(1, map[string]string{"github.run_attempt": "3"}), "--config=reuse-test-results"},
-		{"push to main", map[string]string{"github.event_name": "push", "github.run_attempt": "1"}, ""},
-		{"push to main, re-run", map[string]string{"github.event_name": "push", "github.run_attempt": "2"}, ""},
-		{"nightly", map[string]string{"github.event_name": "schedule", "github.run_attempt": "1"}, ""},
-		{"dispatch", map[string]string{"github.event_name": "workflow_dispatch", "github.run_attempt": "2"}, ""},
-		{"bazel-farm", map[string]string{"github.event_name": "pull_request_target", "github.run_attempt": "2"}, ""},
-	} {
-		if got := interpolateGH(t, bazelReuseResultsEnv, c.ctx); got != c.want {
-			t.Errorf("%s: BAZEL_REUSE_RESULTS = %q, want %q", c.name, got, c.want)
+	if tests < 9 {
+		t.Errorf("found %d `bazel test` lines in %s, want every lane's (at least 9)", tests, bazelWorkflowName)
+	}
+	nightly := readCIWorkflow(t, "nightly.yml").job(t, "bazel")
+	if nightly.With["fresh-test-results"] != "true" {
+		t.Errorf("nightly.yml's bazel call with fresh-test-results = %q, want true (the run that samples flakes)", nightly.With["fresh-test-results"])
+	}
+	for _, name := range []string{"pr.yml", "bazel-farm.yml"} {
+		for jobName, job := range readCIWorkflow(t, name).Jobs {
+			if _, ok := job.With["fresh-test-results"]; ok {
+				t.Errorf("%s %s passes fresh-test-results; only nightly re-executes every test", name, jobName)
+			}
 		}
 	}
 	rc := readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc")
 	var lines []string
 	for _, line := range strings.Split(rc, "\n") {
 		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
 		head, _, _ := strings.Cut(line, " ")
-		if strings.HasSuffix(head, ":reuse-test-results") {
+		if strings.HasSuffix(head, ":fresh") {
 			lines = append(lines, line)
 		}
+		if strings.Contains(line, "cache_test_results") && line != bazelFreshRCLine && line != "test:docker --nocache_test_results" {
+			t.Errorf(".bazelrc %q: only test:docker and test:fresh set test result caching", line)
+		}
 	}
-	if strings.Join(lines, "\n") != bazelReuseResultsRCLine {
-		t.Errorf(".bazelrc --config=reuse-test-results = %q, want exactly %q", lines, bazelReuseResultsRCLine)
+	if strings.Join(lines, "\n") != bazelFreshRCLine {
+		t.Errorf(".bazelrc --config=fresh = %q, want exactly %q", lines, bazelFreshRCLine)
 	}
-	// The docker lane (host state outside the action key) never reuses:
-	// dolt-lane docker is a dispatch-only input, where the env is empty.
 	if !strings.Contains(rc, "\ntest:docker --nocache_test_results\n") {
 		t.Error(".bazelrc lost test:docker --nocache_test_results")
 	}
@@ -460,13 +483,34 @@ func TestMergeQueueBeadsGuardRuns(t *testing.T) {
 			"merge_group":  {"MERGE_GROUP_BASE_SHA=" + interpolateGH(t, step.Env["MERGE_GROUP_BASE_SHA"], mergeGroupCtx(1, map[string]string{"github.event.merge_group.base_sha": base}))},
 			"pull_request": {"MERGE_GROUP_BASE_SHA=" + interpolateGH(t, step.Env["MERGE_GROUP_BASE_SHA"], pullRequestCtx(1, nil)), "GITHUB_BASE_REF=main"},
 		} {
-			cmd := exec.Command("bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step.Run)
+			// GitHub's default shell for a run step without `shell:`.
+			cmd := exec.Command("bash", "--noprofile", "--norc", "-e", "-c", step.Run)
 			cmd.Dir = dir
 			cmd.Env = append([]string{"PATH=" + os.Getenv("PATH")}, env...)
 			out, err := cmd.CombinedOutput()
 			if (err == nil) != c.pass {
 				t.Errorf("%s, %s: err %v, want pass %v\n%s", event, c.name, err, c.pass, out)
 			}
+		}
+	}
+}
+
+// The guard fails closed when its diff base is missing (a failed git diff
+// piped into grep -q would otherwise pass).
+func TestMergeQueueBeadsGuardFailsWithoutBase(t *testing.T) {
+	requireHostTool(t, "git")
+	requireHostTool(t, "bash")
+	step := readCIWorkflow(t, "pr.yml").job(t, "fast-checks").step(t, "Check for .beads/issues.jsonl changes")
+	dir, _, _ := mergeQueueRepo(t, []string{"README.md"})
+	for name, env := range map[string][]string{
+		"merge_group, unknown base_sha": {"MERGE_GROUP_BASE_SHA=" + strings.Repeat("e", 40)},
+		"pull_request, no origin/main":  {"GITHUB_BASE_REF=main"},
+	} {
+		cmd := exec.Command("bash", "--noprofile", "--norc", "-e", "-c", step.Run)
+		cmd.Dir = dir
+		cmd.Env = append([]string{"PATH=" + os.Getenv("PATH")}, env...)
+		if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "unavailable") {
+			t.Errorf("%s: err %v, want a failure naming the missing base\n%s", name, err, out)
 		}
 	}
 }
@@ -487,6 +531,34 @@ func TestMergeQueueDocDriftHasDiffBase(t *testing.T) {
 	drift := readPolicyFile(t, sourceRepoRoot(t), "scripts/check-cli-docs-drift.sh")
 	if !strings.Contains(drift, `BASE_REF="${BD_DOCS_DIFF_BASE:-}"`) {
 		t.Error("check-cli-docs-drift.sh no longer reads BD_DOCS_DIFF_BASE")
+	}
+}
+
+// The shared evaluator follows GitHub's loose equality, so a boolean input
+// compared with a string ('true') is false, as on GitHub, instead of
+// masking that classic workflow_call bug.
+func TestGHExprLooseEquality(t *testing.T) {
+	for _, c := range []struct {
+		expr string
+		ctx  map[string]any
+		want bool
+	}{
+		{"${{ inputs.b == 'true' }}", map[string]any{"inputs.b": true}, false},
+		{"${{ inputs.b == true }}", map[string]any{"inputs.b": true}, true},
+		{"${{ inputs.b == false }}", map[string]any{"inputs.b": false}, true},
+		{"${{ inputs.b == '' }}", map[string]any{"inputs.b": false}, true},
+		{"${{ github.event.pull_request.head.repo.fork == true }}", map[string]any{}, false},
+		{"${{ github.event.pull_request.number == '' }}", map[string]any{}, true},
+		{"${{ vars.X == 'true' }}", map[string]any{"vars.X": "TRUE"}, true},
+		{"${{ github.run_attempt != '1' }}", map[string]any{"github.run_attempt": "2"}, true},
+	} {
+		got, err := evalGHExprTyped(c.expr, c.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != c.want {
+			t.Errorf("%s with %v = %v, want %v", c.expr, c.ctx, got, c.want)
+		}
 	}
 }
 

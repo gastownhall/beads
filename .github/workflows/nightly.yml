@@ -115,6 +115,10 @@ jobs:
     with:
       details: true
       go-test-json-artifact: bazel-equivalence-go-test-json
+      # The one run that re-executes every test (no cached test results):
+      # PRs, merge groups and pushes to main reuse unchanged tests' PASSes,
+      # so this keeps sampling flaky and -race failures every night.
+      fresh-test-results: true
 
   full-test:
     name: Full Test Suite

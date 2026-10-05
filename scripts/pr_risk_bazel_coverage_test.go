@@ -1922,8 +1922,8 @@ func bazelTierTestRun(config string) string {
 
 // .bazelrc's --config=doltserver-proxied and --config=doltserver-integration,
 // exactly and in order (D2 step 2, as review F4 for embedded): no
-// --test_filter, no -test.short/-test.run/-test.skip, no retries, no result
-// caching. Their targets' own args (the conformance target's -test.run, the
+// --test_filter, no -test.short/-test.run/-test.skip, no retries (results
+// are cached like every lane's; nightly's --config=fresh re-executes). Their targets' own args (the conformance target's -test.run, the
 // legacy job's) are pinned by TestBazelRetiredLanesCannotBeNarrowed.
 var bazelDoltServerRCLines = map[string][]string{
 	"doltserver-proxied": {
@@ -1937,7 +1937,6 @@ var bazelDoltServerRCLines = map[string][]string{
 		"test:doltserver-proxied --test_arg=-test.parallel=4",
 		"test:doltserver-proxied --local_test_jobs=4",
 		"test:doltserver-proxied --remote_download_regex=.*/test\\.(log|xml)$",
-		"test:doltserver-proxied --nocache_test_results",
 		"test:doltserver-proxied --experimental_remote_cache_eviction_retries=0",
 	},
 	"doltserver-integration": {
@@ -1952,15 +1951,14 @@ var bazelDoltServerRCLines = map[string][]string{
 		"test:doltserver-integration --test_arg=-test.parallel=4",
 		"test:doltserver-integration --local_test_jobs=4",
 		"test:doltserver-integration --remote_download_regex=.*/test\\.(log|xml)$",
-		"test:doltserver-integration --nocache_test_results",
 		"test:doltserver-integration --experimental_remote_cache_eviction_retries=0",
 	},
 }
 
 // D2 step 2, as review F2/F4 for embedded: the proxied and server lanes run
-// exactly `bazel test //... --config=<config>` with a BEP and nothing else,
-// their configs are exactly the pinned lines (results never cached), and no
-// .bazelrc line of any config turns caching back on for them.
+// exactly `bazel test //... --config=<config>` (plus nightly's BAZEL_FRESH)
+// with a BEP and nothing else, their configs are exactly the pinned lines,
+// and only test:docker and test:fresh set result caching.
 func TestBazelRetiredLanesArePinned(t *testing.T) {
 	workflow := readCIWorkflow(t, bazelWorkflowName)
 	for lane, config := range bazelRetiredLaneConfigs {
@@ -1982,9 +1980,8 @@ func TestBazelRetiredLanesArePinned(t *testing.T) {
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf(".bazelrc --config=%s lines changed; want exactly:\n%s\ngot:\n%s", config, strings.Join(want, "\n"), strings.Join(got, "\n"))
 		}
-		if !contains(want, "test:"+config+" --nocache_test_results") {
-			t.Errorf("pinned --config=%s lacks --nocache_test_results: the tier's only pre-merge run must execute", config)
-		}
+		// Results are cached like every lane's; only nightly's
+		// --config=fresh re-executes them (ci_merge_queue_test.go).
 	}
 	// Review F1 (step 2): no whole-invocation retry after a remote cache
 	// eviction in any retired lane (it would re-run, and could turn green,
@@ -2009,16 +2006,13 @@ func TestBazelRetiredLanesArePinned(t *testing.T) {
 		}
 	}
 	// A later --cache_test_results (any config the lanes use) would win.
-	// The one exception, bazelReuseResultsRCLine, is appended only on merge
-	// queue runs and PR re-runs (ci_merge_queue_test.go pins where).
-	allowed := map[string]bool{"test:docker --nocache_test_results": true, "test:embedded --nocache_test_results": true, bazelSoleRunNoCacheLine: true, bazelReuseResultsRCLine: true}
-	for config := range bazelDoltServerRCLines {
-		allowed["test:"+config+" --nocache_test_results"] = true
-	}
+	// Only the docker lane and nightly's --config=fresh (appended only when
+	// the caller asks, ci_merge_queue_test.go) turn result caching off.
+	allowed := map[string]bool{"test:docker --nocache_test_results": true, bazelFreshRCLine: true}
 	for _, line := range strings.Split(rc, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "#") && strings.Contains(line, "cache_test_results") && !allowed[line] {
-			t.Errorf(".bazelrc %q: only the docker and retired tiers' configs set test result caching (to off)", line)
+			t.Errorf(".bazelrc %q: only test:docker and test:fresh set test result caching", line)
 		}
 	}
 }

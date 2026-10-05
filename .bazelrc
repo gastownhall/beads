@@ -99,11 +99,9 @@ test:embedded --test_arg=-test.parallel=4
 test:embedded --test_env=GO_TEST_WRAP_TESTV=1
 test:embedded --remote_download_regex=.*/test\.xml$
 # Since D2 step 1 this lane is the tier's only pre-merge run on same-repo PRs
-# (pr-risk.yml's legacy jobs stand down), and the legacy jobs ran every test
-# every time (-test.count=1). A cached PASS would let a stale or poisoned
-# farm action-cache entry, or an unreproduced -race finding, stand in for a
-# run: always execute, at farm (not runner) cost.
-test:embedded --nocache_test_results
+# (pr-risk.yml's legacy jobs stand down). Its results are cached like every
+# lane's: an unchanged test reuses its recorded PASS, and nightly re-executes
+# everything (--config=fresh below).
 # No whole-invocation retry on a remote cache eviction ("Lost inputs"):
 # Bazel would re-run every test, and a test that failed in the first
 # attempt but passes in the retry would report green, unlike the legacy
@@ -159,9 +157,7 @@ test:doltserver-proxied --test_arg=-test.parallel=4
 test:doltserver-proxied --local_test_jobs=4
 test:doltserver-proxied --remote_download_regex=.*/test\.(log|xml)$
 # Since D2 step 2 this lane is the tier's only pre-merge run on same-repo
-# PRs: execute every time, like the jobs' -test.count=1, never replay a
-# cached result.
-test:doltserver-proxied --nocache_test_results
+# PRs. Results are cached like every lane's (nightly: --config=fresh).
 # No whole-invocation retry on a remote cache eviction ("Lost inputs"):
 # Bazel would re-run every test, and a test that failed in the first
 # attempt but passes in the retry would report green, unlike the legacy
@@ -196,9 +192,7 @@ test:doltserver-integration --test_arg=-test.parallel=4
 test:doltserver-integration --local_test_jobs=4
 test:doltserver-integration --remote_download_regex=.*/test\.(log|xml)$
 # Since D2 step 2 this lane is the tier's only pre-merge run on same-repo
-# PRs: execute every time, like the jobs' -test.count=1, never replay a
-# cached result.
-test:doltserver-integration --nocache_test_results
+# PRs. Results are cached like every lane's (nightly: --config=fresh).
 # No whole-invocation retry on a remote cache eviction ("Lost inputs"):
 # Bazel would re-run every test, and a test that failed in the first
 # attempt but passes in the retry would report green, unlike the legacy
@@ -301,46 +295,36 @@ build:js-wasm --use_target_platform_for_tests
 build:js-wasm --remote_download_outputs=toplevel
 
 # D2 step 3: bazel.yml's bazel-test, bazel-pure and bazel-doltserver lanes
-# add this in mode remote only, where (on same-repo PRs) they are the only
-# pre-merge run of pr.yml's legacy PR Core, pure-Go/js-wasm, domain+uow and
-# contract corpus jobs, which ran every test every time (`go test
-# -count=1`) and never retried. Like the retired PR Risk tiers' configs:
-# always execute (a cached PASS would stand in for a run), and no
-# whole-invocation retry after a remote cache eviction ("Lost inputs"),
-# whose exit code outranks a test failure, so a test that failed in the
-# first attempt and passed in the retry would report green. Local and
-# cache runs (forks, Dependabot; their legacy jobs still run) keep cached
-# results.
-test:sole-run --nocache_test_results
+# add this in the remote modes, where (on same-repo PRs and merge groups)
+# they are the only pre-merge run of pr.yml's legacy PR Core,
+# pure-Go/js-wasm, domain+uow and contract corpus jobs, which never retried.
+# Like the retired PR Risk tiers' configs: no whole-invocation retry after
+# a remote cache eviction ("Lost inputs"), whose exit code outranks a test
+# failure, so a test that failed in the first attempt and passed in the
+# retry would report green.
 test:sole-run --experimental_remote_cache_eviction_retries=0
 
-# Merge queue and PR re-runs: bazel.yml appends this config last (after the
-# lane's own config and sole-run) on a merge_group run and on attempt 2+ of
-# a pull_request run, in the six lanes that otherwise never reuse a result
-# (test, pure, doltserver via sole-run; embedded, doltserver-proxied,
-# doltserver-integration). It turns the --nocache_test_results above back
-# into Bazel's default: a test whose action key (test binary, runfiles,
-# test env, platform) is unchanged reuses a PASS the farm recorded when a
-# run executed it (the PR's own first run, which the queue entry usually
-# matches for every target the merge did not touch); a test the merge
-# changed runs. Why this is safe where "always execute" was the rule:
+# Test result caching. Every lane but docker caches its test results (read
+# and write; Bazel's default): a test whose action key (test binary,
+# runfiles, test env, platform) is unchanged reuses the PASS the farm
+# recorded for it, on a PR (any attempt), a merge group or a push to main,
+# so only what a change touched runs. Why that is safe:
 #  - Identical key, identical test: these targets are hermetic (dolt and
-#    every input are runfiles; docker-backed targets are not in these
-#    configs, and --config=docker keeps --nocache_test_results).
+#    every input are runfiles). The docker lane depends on host state no
+#    key sees and keeps --nocache_test_results above.
 #  - A cached failure is never reused: Bazel treats a failed cached action
 #    as a miss, so whatever failed re-runs.
 #  - Only rbe-west's workers write the action cache (clients' writes are
 #    refused), so a cached PASS is a real remote execution, not a client
 #    upload.
-#  - What is given up is one more sample of a nondeterministic (-race,
-#    timing) test on unchanged inputs. Each PR's first attempt, every push
-#    to main (the merged commit) and nightly still execute every test
-#    (they never add this config), so flakes keep being sampled once per
-#    change and once per merge.
-#  - No retries are added: --experimental_remote_cache_eviction_retries=0
-#    and the no-flaky-attempts policy stay as they are.
+#  - What is given up is re-sampling a nondeterministic (-race, timing)
+#    test on unchanged inputs. nightly.yml passes fresh-test-results: true,
+#    so bazel.yml appends this config last to every `bazel test` and the
+#    whole suite re-executes once a night.
+#  - No retries: --experimental_remote_cache_eviction_retries=0 (the
+#    retired tiers' configs and sole-run) and no flaky attempts anywhere.
 # Policy: scripts/ci_merge_queue_test.go.
-test:reuse-test-results --cache_test_results=auto
+test:fresh --nocache_test_results
 
 # Read-only anonymous cache for fork PRs: rbe-west's rbe-cache endpoint serves
 # action-cache and CAS reads only (writes and Execute are refused by the farm)

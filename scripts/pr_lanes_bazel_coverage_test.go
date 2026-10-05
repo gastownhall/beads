@@ -38,7 +38,6 @@ const (
 	// BAZEL_COVERS_FORKS covers it).
 	bazelSoleRunEnv          = "${{ needs.rbe.outputs.enabled == 'true' && '--config=sole-run' || '' }}"
 	bazelSoleRunArg          = `${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"}`
-	bazelSoleRunNoCacheLine  = "test:sole-run --nocache_test_results"
 	bazelSoleRunEvictionLine = "test:sole-run --experimental_remote_cache_eviction_retries=0"
 )
 
@@ -100,7 +99,7 @@ var bazelPRLaneRCLines = map[string][]string{
 		"build:js-wasm --use_target_platform_for_tests",
 		"build:js-wasm --remote_download_outputs=toplevel",
 	},
-	"sole-run": {bazelSoleRunNoCacheLine, bazelSoleRunEvictionLine},
+	"sole-run": {bazelSoleRunEvictionLine},
 }
 
 // The steps of step 3's lanes that run Bazel, exactly (as review F4 of
@@ -111,7 +110,7 @@ var bazelPRLaneSteps = map[string]map[string]string{
 		"bazel test //... --config=ci": `set -o pipefail
 start=$(date +%s)
 rc=0
-bazel test //... --config=ci ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_REUSE_RESULTS:+"$BAZEL_REUSE_RESULTS"} \
+bazel test //... --config=ci ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
   --profile="$RUNNER_TEMP/bazel-profile.json" \
   --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
   2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
@@ -122,14 +121,14 @@ exit "$rc"`,
 	bazelPureJobName: {
 		"Start every pure-Go artifact (gozstd contamination check)": `set -euo pipefail
 bazel run --config=pure //cmd/bd:bd -- version
-bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_REUSE_RESULTS:+"$BAZEL_REUSE_RESULTS"} \
+bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
   //internal/storage/embeddeddolt:embeddeddolt_test \
   //internal/tracker:tracker_test \
   --test_sharding_strategy=disabled \
   '--test_arg=-test.run=^$' \
   --test_env=BEADS_TEST_SKIP=dolt`,
 		"Run pure-Go cmd/bd test subset (--config=pure)": `set -euo pipefail
-bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_REUSE_RESULTS:+"$BAZEL_REUSE_RESULTS"} //cmd/bd:bd_test \
+bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_FRESH:+"$BAZEL_FRESH"} //cmd/bd:bd_test \
   --test_sharding_strategy=disabled \
   "--test_arg=-test.run=$PURE_CMD_BD_TESTS"
 n="$(grep -c '<testcase ' bazel-testlogs/cmd/bd/bd_test/test.xml || true)"
@@ -140,7 +139,7 @@ echo "pure cmd/bd subset: $n test cases"
 		"bazel test //... --config=doltserver": `set -o pipefail
 start=$(date +%s)
 rc=0
-bazel test //... "--config=$BAZEL_DOLT_LANE" ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_REUSE_RESULTS:+"$BAZEL_REUSE_RESULTS"} 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
+bazel test //... "--config=$BAZEL_DOLT_LANE" ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_FRESH:+"$BAZEL_FRESH"} 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
 echo "bazel test --config=$BAZEL_DOLT_LANE: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
 exit "$rc"`,
 	},

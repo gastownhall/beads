@@ -2,6 +2,8 @@ package scripts_test
 
 import (
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -93,8 +95,8 @@ const sameRepoPlatformsMatrixMarkerRunsOn = "${{ matrix.runner == 'same-repo-lin
 // this repo's same-repo Blacksmith ternaries use: string literals, dotted
 // identifier lookups (resolved from a caller-supplied context map), ==, !=,
 // &&, ||, !, parentheses, and the true/false/null literals. Identifiers may
-// contain '-' (inputs.fork-farm), and == / != compare strings
-// case-insensitively, as GitHub does. It is not a general-purpose GHA
+// contain '-' (inputs.fork-farm), and == / != follow GitHub's loose equality
+// (ghEquals: strings case-insensitively, mixed types as numbers). It is not a general-purpose GHA
 // expression engine - no functions, no numbers, no object/array literals.
 //
 // Merge queue (ci_merge_queue_test.go): callers simulate a merge_group run
@@ -174,7 +176,7 @@ func ghTokenize(s string) ([]ghToken, error) {
 type ghParser struct {
 	toks []ghToken
 	pos  int
-	ctx  map[string]string
+	ctx  map[string]any
 }
 
 func (p *ghParser) peek() (ghToken, bool) {
@@ -302,10 +304,11 @@ func (p *ghParser) parsePrimary() (any, error) {
 		v, ok := p.ctx[tok.val]
 		if !ok {
 			// An identifier the caller's context does not mention (for
-			// example a deleted fork's head.repo.full_name) is null in the
-			// real evaluator; treat it as the empty string, which compares
-			// unequal to every non-empty literal this repo's expressions use.
-			return "", nil
+			// example a deleted fork's head.repo.full_name, or any
+			// github.event.pull_request.* field on merge_group) is null in
+			// the real evaluator: falsy, == null and == '' (both 0), unequal
+			// to every non-empty, non-numeric literal.
+			return nil, nil
 		}
 		return v, nil
 	default:
@@ -327,14 +330,52 @@ func ghTruthy(v any) bool {
 }
 
 // ghEquals: GitHub's loose equality for the operand kinds this evaluator
-// produces. null equals only null (and the empty string a missing context
-// key stands for); strings compare case-insensitively; a boolean equals
-// its string spelling (a context value of "true" == true).
+// produces. Two strings compare case-insensitively; two booleans, or two
+// nulls, directly; otherwise both sides are coerced to numbers (null and ”
+// to 0, true to 1, false to 0, any other string to its numeric value or
+// NaN) and NaN equals nothing. So `true == 'true'` is false, as on GitHub
+// (the classic workflow_call boolean-input bug), and `false == ”` is true.
 func ghEquals(a, b any) bool {
-	if a == nil || b == nil {
-		return (a == nil || a == "") && (b == nil || b == "")
+	if sa, ok := a.(string); ok {
+		if sb, ok := b.(string); ok {
+			return strings.EqualFold(sa, sb)
+		}
 	}
-	return strings.EqualFold(fmt.Sprint(a), fmt.Sprint(b))
+	if ba, ok := a.(bool); ok {
+		if bb, ok := b.(bool); ok {
+			return ba == bb
+		}
+	}
+	if a == nil && b == nil {
+		return true
+	}
+	na, nb := ghNumber(a), ghNumber(b)
+	return !math.IsNaN(na) && !math.IsNaN(nb) && na == nb
+}
+
+// ghNumber: GitHub's coercion of an operand to a number.
+func ghNumber(v any) float64 {
+	switch x := v.(type) {
+	case nil:
+		return 0
+	case bool:
+		if x {
+			return 1
+		}
+		return 0
+	case string:
+		t := strings.TrimSpace(x)
+		if t == "" {
+			return 0
+		}
+		f, err := strconv.ParseFloat(t, 64)
+		if err != nil {
+			return math.NaN()
+		}
+		return f
+	default:
+		return math.NaN()
+	}
 }
 
 // evalGHExpr evaluates a GitHub Actions `${{ ... }}` expression (the wrapper
@@ -342,6 +383,16 @@ func ghEquals(a, b any) bool {
 // "github.event_name") to its string value. See the package comment above
 // for the supported subset.
 func evalGHExpr(expr string, ctx map[string]string) (any, error) {
+	typed := make(map[string]any, len(ctx))
+	for k, v := range ctx {
+		typed[k] = v
+	}
+	return evalGHExprTyped(expr, typed)
+}
+
+// evalGHExprTyped: evalGHExpr with typed context values (a bool for a
+// boolean input such as inputs.fresh-test-results, nil for null).
+func evalGHExprTyped(expr string, ctx map[string]any) (any, error) {
 	expr = strings.TrimSpace(expr)
 	expr = strings.TrimPrefix(expr, "${{")
 	expr = strings.TrimSuffix(expr, "}}")
