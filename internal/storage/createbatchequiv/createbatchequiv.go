@@ -18,6 +18,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -438,6 +439,14 @@ func applyScenario(t *testing.T, open Open, sc scenario, perRow bool) Outcome {
 	} {
 		out.Tables[table] = rowsOf(t, db, query)
 	}
+	// Dependency metadata is a JSON column, and the engines serialize it
+	// differently (key order, spacing); compare it canonicalized.
+	for _, table := range []string{"dependencies", "wisp_dependencies"} {
+		for i, row := range out.Tables[table] {
+			out.Tables[table][i] = canonicalMetadataRow(t, row)
+		}
+		sort.Strings(out.Tables[table])
+	}
 	// An update event's old_value snapshots the row, wall-clock updated_at
 	// included.
 	for _, table := range []string{"events", "wisp_events"} {
@@ -481,6 +490,29 @@ func journalRows(t *testing.T, db *sql.DB) []string {
 		t.Fatalf("read journal: %v", err)
 	}
 	return out
+}
+
+// canonicalMetadataRow re-serializes the last field of a rowsOf row (a
+// dependency's metadata) through encoding/json: sorted keys, no spacing.
+func canonicalMetadataRow(t *testing.T, row string) string {
+	t.Helper()
+	cut := strings.LastIndex(row, " \"")
+	if cut < 0 {
+		return row
+	}
+	raw, err := strconv.Unquote(row[cut+1:])
+	if err != nil {
+		t.Fatalf("metadata field of %s: %v", row, err)
+	}
+	var v any
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return row
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return row[:cut+1] + strconv.Quote(string(b))
 }
 
 func rowsOf(t *testing.T, db *sql.DB, query string) []string {

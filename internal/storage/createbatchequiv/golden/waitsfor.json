@@ -14,7 +14,7 @@
     },
     "dependencies": {
       "rows": 13,
-      "sha256": "f8daa4b59932096e62aa7fa7e2d72b7dc23eea44956fc6ef3e40117ce1f413b5"
+      "sha256": "2c5bc58085525b83b5c605eb0d8b7133a836e5942703ccbfa75836f0888c51d7"
     },
     "events": {
       "rows": 19,
@@ -42,7 +42,7 @@
     },
     "wisp_dependencies": {
       "rows": 8,
-      "sha256": "d7aaa95d08a1c588954bacbf57cb2d2f5dcc1e7574af2dd86732503ea2bc3201"
+      "sha256": "888ec76705c866485ce6ffb497078f8f646cfd5c977c03bf3b39c8490754e263"
     },
     "wisp_events": {
       "rows": 11,
