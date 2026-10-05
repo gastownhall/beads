@@ -178,9 +178,44 @@ func TestSharedServerConcurrent(t *testing.T) {
 	t.Logf("init %d dirs: %s", numDirs, time.Since(phase))
 
 	// ── Fan out client workloads ────────────────────────────────────────
+	// Plus one late `bd init` of a fresh project that starts while the
+	// workloads are running. It holds the shared physical root's gate
+	// EXCLUSIVELY for its whole run, so this exercises both directions of
+	// the gate wait: every client command that lands during the init waits
+	// for it (BEADS_GATE_WAIT_TIMEOUT, default 15s) instead of failing, and
+	// the init gets the gate within its own 30s bound despite the steady
+	// stream of short client commands (workspacegate writer fairness: once
+	// the init is queued, new shared acquirers wait behind it). baseEnv,
+	// not initEnv: a raised init bound would mask a fairness regression.
 	phase = time.Now()
 	eg, egCtx = errgroup.WithContext(ctx)
-	eg.SetLimit(maxProcs)
+	eg.SetLimit(maxProcs + 1) // +1: the late init below must not take a client's slot
+	eg.Go(func() error {
+		select {
+		case <-time.After(time.Second): // let the workloads get going
+		case <-egCtx.Done():
+			return egCtx.Err()
+		}
+		dir := filepath.Join(t.TempDir(), "projlate")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("late project mkdir: %w", err)
+		}
+		if err := gitInit(egCtx, dir); err != nil {
+			return fmt.Errorf("late project git init: %w", err)
+		}
+		start := time.Now()
+		out, err := ssExec(egCtx, bdBinary, dir, baseEnv,
+			"init", "--shared-server", "--external",
+			"--prefix", "projlate", "--quiet", "--non-interactive")
+		if err != nil {
+			return fmt.Errorf("late init during client workloads: %s: %w", out, err)
+		}
+		t.Logf("late init during client workloads: %s", time.Since(start))
+		if out, err := ssExec(egCtx, bdBinary, dir, baseEnv, "list", "--json", "--flat"); err != nil {
+			return fmt.Errorf("list in late project: %s: %w", out, err)
+		}
+		return nil
+	})
 	for c := range numClients {
 		c := c
 		eg.Go(func() error {

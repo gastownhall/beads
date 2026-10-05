@@ -96,6 +96,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `release/**` in all five (#7148).
 
 
+- **Ordinary bd commands now wait out a maintenance operation instead of
+  failing at once.** While `bd init`, `bd backup restore`, `bd migrate` or
+  `bd bootstrap` holds the workspace gate exclusively, every other bd command
+  on that workspace — and, in shared-server mode, on every project sharing
+  the server (another project's ~8s `bd init`) — failed immediately with "a
+  maintenance operation is running". They now wait up to 15s (one "waiting
+  for another bd process" notice after 2s; Ctrl-C aborts), then fail with the
+  same error naming the bound. Override with `BEADS_GATE_WAIT_TIMEOUT` (`1m`,
+  `90`); `0` restores fail-fast. Git hooks stay fail-fast so a commit or
+  checkout is never stalled. Waiting is writer-fair: once a maintenance
+  operation is waiting for the gate, newly started commands queue behind it,
+  so a steady stream of short commands can no longer push `bd init` past its
+  30s bound. The queue marker is an OS lock beside the gate
+  (`*.gate.lock.intent`, covered by the existing `*.gate.lock*` gitignore
+  pattern), so a crashed waiter never leaves a stale queue behind.
+
 - **Concurrent `bd init --shared-server` runs in different projects no
   longer refuse each other.** Every shared-server project gates the one shared
   dolt data dir, and `bd init` holds that gate exclusively for its ~8s run but

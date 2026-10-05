@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -19,6 +20,10 @@ import (
 // central config) cannot change which gates these tests acquire.
 func resetGateTestEnv(t *testing.T) {
 	t.Helper()
+	// Start from no held gates: an earlier in-process command test in the
+	// same binary can leave workspaceGateHandle set (and its shared hold
+	// advertised), which these tests assert on.
+	releaseWorkspaceGates()
 	for _, k := range []string{
 		"BEADS_DOLT_SERVER_MODE",
 		"BEADS_DOLT_SHARED_SERVER",
@@ -27,6 +32,9 @@ func resetGateTestEnv(t *testing.T) {
 		"BEADS_PROXIED_SERVER_ROOT_PATH",
 		"BEADS_SHARED_SERVER_DIR",
 		initGateTimeoutEnv,
+		sharedGateWaitEnv,
+		"BD_GIT_HOOK",
+		workspacegate.InheritedHoldEnv,
 	} {
 		t.Setenv(k, "")
 	}
@@ -93,11 +101,10 @@ func TestAcquireCommandWorkspaceGatesAbsentWorkspace(t *testing.T) {
 	}
 }
 
-func TestAcquireCommandWorkspaceGatesBlockedByExclusiveHolder(t *testing.T) {
-	resetGateTestEnv(t)
-	t.Cleanup(releaseWorkspaceGates)
-	beadsDir := newGateTestWorkspace(t)
-
+// holdWorkspaceGateExclusive takes beadsDir's workspace gate exclusively,
+// as a maintenance operation (init/restore/migrate) would.
+func holdWorkspaceGateExclusive(t *testing.T, beadsDir string) *workspacegate.Handle {
+	t.Helper()
 	gate, err := workspacegate.ForWorkspace(beadsDir)
 	if err != nil {
 		t.Fatal(err)
@@ -107,14 +114,268 @@ func TestAcquireCommandWorkspaceGatesBlockedByExclusiveHolder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = holder.Release() }()
+	t.Cleanup(func() { _ = holder.Release() })
+	return holder
+}
+
+// countGateNotices replaces the gate-wait notice with a counter.
+func countGateNotices(t *testing.T) *atomic.Int32 {
+	t.Helper()
+	var n atomic.Int32
+	old := gateWaitOnWait
+	gateWaitOnWait = func(string) { n.Add(1) }
+	t.Cleanup(func() { gateWaitOnWait = old })
+	return &n
+}
+
+// Past the bound, an ordinary command aborts with an error naming the
+// holder, the budget, and the knob — and never proceeds ungated.
+func TestAcquireCommandWorkspaceGatesBlockedByExclusiveHolder(t *testing.T) {
+	resetGateTestEnv(t)
+	t.Cleanup(releaseWorkspaceGates)
+	beadsDir := newGateTestWorkspace(t)
+	t.Setenv(sharedGateWaitEnv, "300ms")
+	holdWorkspaceGateExclusive(t, beadsDir)
 
 	list := &cobra.Command{Use: "list"}
-	if err := acquireCommandWorkspaceGates(context.Background(), list, beadsDir); err == nil {
+	var err error
+	start := time.Now()
+	stderr := captureStderr(t, func() {
+		err = acquireCommandWorkspaceGates(context.Background(), list, beadsDir)
+	})
+	if err == nil {
 		t.Fatal("SHARED acquisition under a foreign exclusive holder must abort, got nil error")
+	}
+	if waited := time.Since(start); waited < 250*time.Millisecond || waited > 3*time.Second {
+		t.Errorf("gave up after %s, want about the 300ms bound", waited)
+	}
+	for _, want := range []string{"a maintenance operation is running", "waited 300ms", sharedGateWaitEnv, "test maintenance"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr %q missing %q", stderr, want)
+		}
 	}
 	if workspaceGateHandle != nil {
 		t.Error("failed acquisition must leave no gate handle")
+	}
+}
+
+// The core behavior: an ordinary command that lands while a maintenance
+// operation holds the gate waits for it (with one notice) and then runs.
+func TestAcquireCommandWorkspaceGatesWaitsForExclusiveHolder(t *testing.T) {
+	resetGateTestEnv(t)
+	t.Cleanup(releaseWorkspaceGates)
+	beadsDir := newGateTestWorkspace(t)
+	notices := countGateNotices(t)
+	if got := sharedGateWait(); got != sharedGateWaitDefault {
+		t.Fatalf("sharedGateWait() = %s, want default %s", got, sharedGateWaitDefault)
+	}
+
+	holder := holdWorkspaceGateExclusive(t, beadsDir)
+	holdFor := gateWaitNoticeDelay + time.Second
+	released := time.AfterFunc(holdFor, func() { _ = holder.Release() })
+	t.Cleanup(func() { released.Stop() })
+
+	list := &cobra.Command{Use: "list"}
+	start := time.Now()
+	if err := acquireCommandWorkspaceGates(context.Background(), list, beadsDir); err != nil {
+		t.Fatalf("ordinary command with a maintenance holder released after %s: %v", holdFor, err)
+	}
+	if waited := time.Since(start); waited < holdFor-500*time.Millisecond {
+		t.Fatalf("acquired after %s while the holder held the gate for %s", waited, holdFor)
+	}
+	if workspaceGateHandle == nil {
+		t.Fatal("expected a held gate handle")
+	}
+	if got := notices.Load(); got != 1 {
+		t.Fatalf("wait notices = %d, want exactly 1", got)
+	}
+}
+
+// BEADS_GATE_WAIT_TIMEOUT=0 and git-hook context both keep the old
+// fail-fast behavior.
+func TestAcquireCommandWorkspaceGatesFailFastModes(t *testing.T) {
+	for _, tc := range []struct{ name, env, val string }{
+		{"timeout zero", sharedGateWaitEnv, "0"},
+		{"git hook", "BD_GIT_HOOK", "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetGateTestEnv(t)
+			t.Cleanup(releaseWorkspaceGates)
+			beadsDir := newGateTestWorkspace(t)
+			t.Setenv(tc.env, tc.val)
+			holdWorkspaceGateExclusive(t, beadsDir)
+
+			list := &cobra.Command{Use: "list"}
+			var err error
+			start := time.Now()
+			stderr := captureStderr(t, func() {
+				err = acquireCommandWorkspaceGates(context.Background(), list, beadsDir)
+			})
+			if err == nil {
+				t.Fatal("fail-fast SHARED acquisition under an exclusive holder succeeded")
+			}
+			if waited := time.Since(start); waited > time.Second {
+				t.Errorf("fail-fast acquisition took %s", waited)
+			}
+			if strings.Contains(stderr, "waited") {
+				t.Errorf("fail-fast error claims a wait: %q", stderr)
+			}
+		})
+	}
+}
+
+// Ctrl-C (rootCtx cancellation) aborts the wait with an error. It must not
+// fall through to the fail-open "continue ungated" path.
+func TestAcquireCommandWorkspaceGatesHonorsCancellation(t *testing.T) {
+	resetGateTestEnv(t)
+	t.Cleanup(releaseWorkspaceGates)
+	beadsDir := newGateTestWorkspace(t)
+	holdWorkspaceGateExclusive(t, beadsDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	list := &cobra.Command{Use: "list"}
+	var err error
+	start := time.Now()
+	stderr := captureStderr(t, func() {
+		err = acquireCommandWorkspaceGates(ctx, list, beadsDir)
+	})
+	if err == nil {
+		t.Fatal("canceled wait returned nil (proceeded ungated over a maintenance holder)")
+	}
+	if waited := time.Since(start); waited > 5*time.Second {
+		t.Fatalf("canceled wait kept going for %s", waited)
+	}
+	if !strings.Contains(stderr, "interrupted while waiting") || strings.Contains(stderr, "continuing ungated") {
+		t.Errorf("stderr = %q, want an interrupted error and no fail-open warning", stderr)
+	}
+	if workspaceGateHandle != nil {
+		t.Error("canceled acquisition must leave no gate handle")
+	}
+}
+
+// Writer fairness end to end at the chokepoint: while bd init is queued for
+// the gate, a new ordinary command waits behind it rather than slipping in —
+// and an ordinary command spawned by a bd process that already holds the
+// gate shared (InheritedHoldEnv) does slip in, since it cannot deadlock the
+// queue it would otherwise join.
+func TestAcquireCommandWorkspaceGatesQueuesBehindWaitingInit(t *testing.T) {
+	resetGateTestEnv(t)
+	t.Cleanup(releaseWorkspaceGates)
+	beadsDir := newGateTestWorkspace(t)
+	physicalRoot := filepath.Join(filepath.Dir(beadsDir), "dolt-data")
+	countGateNotices(t)
+
+	// An in-flight ordinary command holds the gate shared.
+	inflight, err := workspacegate.ForWorkspace(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sh, err := inflight.Acquire(context.Background(), workspacegate.Shared, workspacegate.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sh.Release() })
+
+	// bd init queues behind it.
+	initDone := make(chan error, 1)
+	var initHandle atomic.Pointer[workspacegate.MultiHandle]
+	go func() {
+		h, err := acquireInitMutationGate(context.Background(), beadsDir, physicalRoot, nil)
+		initHandle.Store(h)
+		initDone <- err
+	}()
+	t.Cleanup(func() {
+		if h := initHandle.Load(); h != nil {
+			_ = h.Release()
+		}
+	})
+	queued := inflight.ExclusiveQueued
+	deadline := time.Now().Add(5 * time.Second)
+	for !queued() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !queued() {
+		t.Fatal("bd init never queued for the gate")
+	}
+
+	// A new ordinary command must not jump the queue.
+	t.Setenv(sharedGateWaitEnv, "300ms")
+	list := &cobra.Command{Use: "list"}
+	var lerr error
+	stderr := captureStderr(t, func() { lerr = acquireCommandWorkspaceGates(context.Background(), list, beadsDir) })
+	if lerr == nil {
+		t.Fatal("ordinary command jumped ahead of a queued bd init")
+	}
+	if !strings.Contains(stderr, "queued for exclusive access") || !strings.Contains(stderr, "bd init") {
+		t.Errorf("stderr %q does not name the queued bd init", stderr)
+	}
+
+	// ...unless its parent bd already holds the gate shared.
+	t.Setenv(workspacegate.InheritedHoldEnv, strconv.Itoa(os.Getppid()))
+	if err := acquireCommandWorkspaceGates(context.Background(), list, beadsDir); err != nil {
+		t.Fatalf("child of a shared holder queued behind init: %v", err)
+	}
+	releaseWorkspaceGates()
+
+	// The in-flight command finishes; init gets the gate.
+	_ = sh.Release()
+	select {
+	case err := <-initDone:
+		if err != nil {
+			t.Fatalf("bd init after the in-flight command drained: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("bd init did not get the gate after the in-flight command released")
+	}
+}
+
+// A successful shared hold advertises this PID to child processes, and
+// release restores whatever value was inherited.
+func TestSharedHoldAdvertisedToChildren(t *testing.T) {
+	resetGateTestEnv(t)
+	t.Cleanup(releaseWorkspaceGates)
+	beadsDir := newGateTestWorkspace(t)
+	t.Setenv(workspacegate.InheritedHoldEnv, "inherited")
+
+	list := &cobra.Command{Use: "list"}
+	if err := acquireCommandWorkspaceGates(context.Background(), list, beadsDir); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := os.Getenv(workspacegate.InheritedHoldEnv), strconv.Itoa(os.Getpid()); got != want {
+		t.Fatalf("%s while holding = %q, want %q", workspacegate.InheritedHoldEnv, got, want)
+	}
+	releaseWorkspaceGates()
+	if got := os.Getenv(workspacegate.InheritedHoldEnv); got != "inherited" {
+		t.Fatalf("%s after release = %q, want the inherited value restored", workspacegate.InheritedHoldEnv, got)
+	}
+}
+
+func TestSharedGateWaitEnv(t *testing.T) {
+	for _, tc := range []struct {
+		raw, hook string
+		want      time.Duration
+	}{
+		{"", "", sharedGateWaitDefault},
+		{"45", "", 45 * time.Second},
+		{"2m", "", 2 * time.Minute},
+		{"0", "", 0},
+		{"0s", "", 0},
+		{"-5s", "", sharedGateWaitDefault},
+		{"soon", "", sharedGateWaitDefault},
+		{"2m", "1", 0},
+		{"", "1", 0},
+	} {
+		t.Run(tc.raw+"/hook="+tc.hook, func(t *testing.T) {
+			t.Setenv(sharedGateWaitEnv, tc.raw)
+			t.Setenv("BD_GIT_HOOK", tc.hook)
+			oldQuiet := quietFlag
+			quietFlag = true
+			t.Cleanup(func() { quietFlag = oldQuiet })
+			if got := sharedGateWait(); got != tc.want {
+				t.Fatalf("sharedGateWait() = %s, want %s", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -123,16 +384,16 @@ func TestAcquireInitMutationGateKeepsReplacementExclusiveDuringPreflight(t *test
 	beadsDir := newGateTestWorkspace(t)
 	physicalRoot := filepath.Join(filepath.Dir(beadsDir), "dolt-data")
 
-	oldOnWait, oldDelay := initGateOnWait, initGateNoticeDelay
+	oldOnWait, oldDelay := gateWaitOnWait, gateWaitNoticeDelay
 	secondWaited := make(chan struct{}, 1)
-	initGateNoticeDelay = 0
-	initGateOnWait = func(string) {
+	gateWaitNoticeDelay = 0
+	gateWaitOnWait = func(string) {
 		select {
 		case secondWaited <- struct{}{}:
 		default:
 		}
 	}
-	t.Cleanup(func() { initGateOnWait, initGateNoticeDelay = oldOnWait, oldDelay })
+	t.Cleanup(func() { gateWaitOnWait, gateWaitNoticeDelay = oldOnWait, oldDelay })
 
 	firstPreflightEntered := make(chan struct{})
 	allowFirstPreflight := make(chan struct{})
@@ -198,16 +459,6 @@ func holdInitGatesFor(t *testing.T, beadsDir, physicalRoot string) *workspacegat
 	return h
 }
 
-// countInitGateNotices replaces the init wait notice with a counter.
-func countInitGateNotices(t *testing.T) *atomic.Int32 {
-	t.Helper()
-	var n atomic.Int32
-	old := initGateOnWait
-	initGateOnWait = func(string) { n.Add(1) }
-	t.Cleanup(func() { initGateOnWait = old })
-	return &n
-}
-
 // A holder that outlasts the generic 5s exclusive budget but releases within
 // init's bound (a concurrent init takes ~8s on a shared server): init waits,
 // prints exactly one notice, then proceeds.
@@ -215,7 +466,7 @@ func TestAcquireInitMutationGateWaitsPastGenericBudget(t *testing.T) {
 	resetGateTestEnv(t)
 	beadsDir := newGateTestWorkspace(t)
 	physicalRoot := filepath.Join(filepath.Dir(beadsDir), "dolt-data")
-	notices := countInitGateNotices(t)
+	notices := countGateNotices(t)
 
 	if got := initGateWait(); got != initGateWaitDefault || got <= exclusiveGateWait+time.Second {
 		t.Fatalf("initGateWait() = %s, want default %s comfortably above exclusiveGateWait %s", got, initGateWaitDefault, exclusiveGateWait)
@@ -246,10 +497,10 @@ func TestAcquireInitMutationGateFailsClearlyPastBound(t *testing.T) {
 	resetGateTestEnv(t)
 	beadsDir := newGateTestWorkspace(t)
 	physicalRoot := filepath.Join(filepath.Dir(beadsDir), "dolt-data")
-	notices := countInitGateNotices(t)
-	oldDelay := initGateNoticeDelay
-	initGateNoticeDelay = 5 * time.Second // longer than the bound below
-	t.Cleanup(func() { initGateNoticeDelay = oldDelay })
+	notices := countGateNotices(t)
+	oldDelay := gateWaitNoticeDelay
+	gateWaitNoticeDelay = 5 * time.Second // longer than the bound below
+	t.Cleanup(func() { gateWaitNoticeDelay = oldDelay })
 	t.Setenv(initGateTimeoutEnv, "300ms")
 
 	holder := holdInitGatesFor(t, beadsDir, physicalRoot)
@@ -288,7 +539,7 @@ func TestAcquireInitMutationGateHonorsCancellation(t *testing.T) {
 	resetGateTestEnv(t)
 	beadsDir := newGateTestWorkspace(t)
 	physicalRoot := filepath.Join(filepath.Dir(beadsDir), "dolt-data")
-	countInitGateNotices(t)
+	countGateNotices(t)
 
 	holder := holdInitGatesFor(t, beadsDir, physicalRoot)
 	t.Cleanup(func() { _ = holder.Release() })
