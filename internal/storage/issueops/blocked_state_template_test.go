@@ -93,3 +93,24 @@ func TestExpandBatchTemplateSingleOccurrenceDegrades(t *testing.T) {
 		t.Errorf("arg count = %d, want %d", len(stmtArgs), len(args))
 	}
 }
+
+// TestBatchedTemplatesPinLookupJoins pins the join hints on the scoped
+// should-be-blocked union's four joined legs: without them the Dolt
+// sql-server planner intermittently drives the issues legs from an index
+// scan of every open issue, 6-10 s per statement over an import's
+// uncommitted working set (see shouldBeBlockedIDsUnionScopedSQL). The
+// unscoped union (full repair, doctor count) keeps the planner's choice.
+func TestBatchedTemplatesPinLookupJoins(t *testing.T) {
+	for name, tmpl := range batchedTemplates() {
+		for _, hint := range []string{"JOIN_ORDER(d, t) LOOKUP_JOIN(d, t)", "JOIN_ORDER(d, p) LOOKUP_JOIN(d, p)"} {
+			if got := strings.Count(tmpl, hint); got != 2 {
+				t.Errorf("%s carries %q %d times, want 2 (one per joined issues/wisps leg)", name, hint, got)
+			}
+		}
+	}
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		if strings.Contains(shouldBeBlockedIDsUnionSQL(depTable), "/*+") {
+			t.Errorf("unscoped union over %s should not carry join hints", depTable)
+		}
+	}
+}
