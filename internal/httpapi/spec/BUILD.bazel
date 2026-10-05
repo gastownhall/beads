@@ -7,3 +7,14 @@ go_library(
     importpath = "github.com/steveyegge/beads/internal/httpapi/spec",
     visibility = ["//:__subpackages__"],
 )
+
+# //internal/httpclient/encode:encode_test's bijection gate reads the wire
+# contract's published parameter set. It reads it through spec.OpenAPIV0()
+# (the go:embed above), not a relative os.ReadFile path, so no `data`
+# dependency on this file is actually needed for that one read -- this export
+# stays as defense in depth for any other reader of the raw YAML that package
+# gains.
+exports_files(
+    ["openapi.v0.yaml"],
+    visibility = ["//internal/httpclient/encode:__pkg__"],
+)

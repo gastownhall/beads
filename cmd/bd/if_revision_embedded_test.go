@@ -196,6 +196,119 @@ func TestIfRevisionMatchAndMismatch(t *testing.T) {
 	})
 }
 
+// TestIfRevisionDeletePreflightGoneIsPreconditionFailed pins mc-zndi7.81: `bd
+// delete`'s single-id path resolves the row with resolveAndGetIssueForMutation
+// BEFORE calling deleter.Delete() and the per-id lock fence #7244 added. On a
+// real Dolt sql-server, a same-token --if-revision racer that loses that fence
+// finds the row already gone right there
+// (TestSharedServerDeleteIfRevisionSingleWinner/same_token, which this test
+// cannot reach without a container) and, pre-fix, exited 1 with an
+// unclassified "not found" instead of the ExitGuardMismatch (13)
+// precondition_failed every other --if-revision loser gets. This
+// reproduces the SAME code path deterministically, without a race or a real
+// Dolt server: delete the row out from under a --if-revision token first (an
+// ordinary, unguarded delete lands the row-gone precondition exactly as a
+// winning racer's delete would), then present that now-stale token. The
+// pre-flight existence check must fail exactly the same way a mid-guard
+// version mismatch does.
+func TestIfRevisionDeletePreflightGoneIsPreconditionFailed(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "pg")
+
+	issue := bdCreate(t, bd, dir, "Preflight gone", "--type", "task")
+	rev0 := bdShowRevision(t, bd, dir, issue.ID)
+
+	// Stand in for the winning racer: an ordinary delete removes the row out
+	// from under rev0 without ever consulting it.
+	bdDelete(t, bd, dir, issue.ID, "--force")
+	bdShowFail(t, bd, dir, issue.ID)
+
+	// The loser's --if-revision now names a row that is not merely stale but
+	// entirely gone. Must classify exactly like a mid-guard version mismatch:
+	// ExitGuardMismatch (13), "precondition failed" -- never the bare,
+	// unclassified "not found" exit 1 the direct-store pre-flight check would
+	// otherwise return on its own.
+	out, code := bdRunFailCode(t, bd, dir, "delete", issue.ID, "--if-revision", revStr(rev0), "--force")
+	if code != ExitGuardMismatch {
+		t.Errorf("preflight-gone --if-revision delete exit code = %d, want %d\n%s", code, ExitGuardMismatch, out)
+	}
+	if !strings.Contains(out, "precondition failed") {
+		t.Errorf("preflight-gone delete should say \"precondition failed\", got:\n%s", out)
+	}
+	if strings.Contains(out, "not found") {
+		t.Errorf("preflight-gone delete leaked the raw, unclassified \"not found\" error instead of the guard envelope:\n%s", out)
+	}
+}
+
+// TestIfRevisionCascadeDelete pins mc-zndi7.76 (gap 4): a single named id with
+// --cascade takes the SAME deleteBatch path a multi-id delete does
+// (cmd/bd/delete.go:105, "len(issueIDs) > 1 || cascade"), which is the only
+// way a single-id --if-revision request ever reaches deleteBatch's own
+// ExpectedVersion wiring (requireSingleIfRevisionID refuses a guard beside
+// more than one explicit id, so a literal multi-id request can never get
+// here). A stale guard must refuse the WHOLE cascade — the dependent survives
+// right alongside the named parent — on both the real run and the unconfirmed
+// --dry-run preview, which reports the same conditional-write envelope rather
+// than falling through to the generic preview-with-error path.
+func TestIfRevisionCascadeDelete(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "cd")
+
+	parent := bdCreate(t, bd, dir, "Cascade parent", "--type", "task")
+	child := bdCreate(t, bd, dir, "Cascade child", "--type", "task")
+	bdDepAdd(t, bd, dir, child.ID, parent.ID)
+
+	rev0 := bdShowRevision(t, bd, dir, parent.ID)
+	bdUpdate(t, bd, dir, parent.ID, "--notes", "bump")
+	rev1 := bdShowRevision(t, bd, dir, parent.ID)
+
+	// A stale guard refuses the preview too: the dedicated conditional-write
+	// envelope, not the generic "here is what cascade would delete" preview.
+	out, code := bdRunFailCode(t, bd, dir, "delete", parent.ID, "--cascade", "--dry-run", "--if-revision", revStr(rev0))
+	if code != ExitGuardMismatch {
+		t.Errorf("stale --if-revision cascade dry-run exit code = %d, want %d\n%s", code, ExitGuardMismatch, out)
+	}
+	if !strings.Contains(out, "revision mismatch") {
+		t.Errorf("cascade dry-run mismatch error should say \"revision mismatch\", got:\n%s", out)
+	}
+	// MO: a stale guard reports the dedicated conditional-write envelope
+	// instead of falling through to the generic "here is what cascade would
+	// delete" preview render -- the two are mutually exclusive outcomes for
+	// the same failed dry-run, not a report-then-preview sequence.
+	if strings.Contains(out, "DELETE PREVIEW") {
+		t.Errorf("stale --if-revision dry-run rendered the generic deletion preview instead of the guard-mismatch envelope:\n%s", out)
+	}
+	bdShow(t, bd, dir, parent.ID)
+	bdShow(t, bd, dir, child.ID)
+
+	// A stale guard refuses the real cascade entirely -- neither the named
+	// parent nor the dependent cascade pulled in alongside it is deleted.
+	out, code = bdRunFailCode(t, bd, dir, "delete", parent.ID, "--cascade", "--force", "--if-revision", revStr(rev0))
+	if code != ExitGuardMismatch {
+		t.Errorf("stale --if-revision cascade delete exit code = %d, want %d\n%s", code, ExitGuardMismatch, out)
+	}
+	if !strings.Contains(out, "revision mismatch") {
+		t.Errorf("cascade delete mismatch error should say \"revision mismatch\", got:\n%s", out)
+	}
+	bdShow(t, bd, dir, parent.ID)
+	bdShow(t, bd, dir, child.ID)
+
+	// The matching token applies the cascade: both rows are gone.
+	bdRunOK(t, bd, dir, "delete", parent.ID, "--cascade", "--force", "--if-revision", revStr(rev1))
+	bdShowFail(t, bd, dir, parent.ID)
+	bdShowFail(t, bd, dir, child.ID)
+}
+
 // TestIfRevisionComposesWithIfAssigneeIfStatus pins T4.5: on `bd update`,
 // --if-revision composes with --if-assignee/--if-status as a conjunction —
 // every guard present must hold, not just one of them, regardless of which

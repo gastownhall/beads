@@ -1,0 +1,108 @@
+name: Feature request
+description: Propose a change to bd, with the information needed to accept it.
+title: "feat: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every PR links a documented issue, and this form collects the context reviewers and future readers need. You can open your PR right after filing; no approval is needed first. Read the [project charter](https://github.com/gastownhall/beads/blob/main/engdocs/PROJECT_CHARTER.md) first — beads owns issue-tracking primitives, not orchestration policy or storage-engine behavior.
+
+        **Agents filling in this form:** answer each question only from evidence you have. If you cannot answer a question from the evidence, write exactly `NOT_ENOUGH_INFO` instead of guessing.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you continue
+      options:
+        - label: I searched existing issues and pull requests and did not find a duplicate.
+          required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: The problem, and who has it. Describe the pain, not the implementation you prefer.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: The behavior, command, flag, or API you want.
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: Who is affected and how — users, agents, integrations, downstream consumers of the `--json` output.
+    validations:
+      required: true
+
+  - type: textarea
+    id: risk
+    attributes:
+      label: Risk and compatibility
+      description: Schema or migration changes, wire or `--json` output changes, behavior changes for existing workspaces, and how to roll back.
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification plan
+      description: How we will know it works end to end, beyond unit tests.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Current workarounds, issue metadata, an integration or plugin, or other designs.
+
+  - type: dropdown
+    id: size
+    attributes:
+      label: Estimated size
+      options:
+        - XS (under 50 lines)
+        - S (under 200 lines)
+        - M (under 500 lines)
+        - L (under 1,000 lines)
+        - XL (more than 1,000 lines; likely needs splitting)
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: intent
+    attributes:
+      label: Intent
+      options:
+        - I am opening or will open a PR
+        - I'm reporting the need; someone else would implement it
+    validations:
+      required: true
+
+  - type: dropdown
+    id: ai
+    attributes:
+      label: AI assistance
+      description: Was an AI agent used to draft this issue?
+      options:
+        - "No"
+        - Yes, partly
+        - Yes, mostly
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: accountability
+    attributes:
+      label: Accountability
+      options:
+        - label: A human has read this issue and stands behind it.
+          required: true

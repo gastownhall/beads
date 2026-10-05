@@ -1,0 +1,94 @@
+name: Bug report
+description: Report broken behavior in bd.
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. This issue is the record a fix PR links to, so the more evidence here, the better. You can open a fix PR right away; no approval is needed first.
+
+        **Agents filling in this form:** answer each question only from evidence you have. If you cannot answer a question from the evidence, write exactly `NOT_ENOUGH_INFO` instead of guessing.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you continue
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: I reproduced this with stock `bd`, without an orchestrator or agent framework in the loop.
+          required: false
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What is broken, in one or two sentences.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands, starting from a fresh directory where possible.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the full error output.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: bd version
+      description: Output of `bd version`.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Storage mode
+      options:
+        - Embedded (default `bd init`)
+        - Server mode (`bd init --server`)
+        - Proxied server
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "macOS 15.5 (arm64), Ubuntu 24.04, Windows 11, ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: Who is affected, how severe it is (data loss, blocked, workaround exists), and how often it happens.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Logs, `bd doctor` output, root-cause notes, or a proposed fix.

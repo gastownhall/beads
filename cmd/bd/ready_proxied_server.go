@@ -330,6 +330,9 @@ func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput
 	for id := range allBlockerIDs {
 		blockerIDList = append(blockerIDList, id)
 	}
+	// TODO(batchgetter): unbounded id list; see issueops.BatchGetter's doc and
+	// the importIssueLookup TODO in import_shared.go for why this is not yet
+	// routed through GetMany.
 	blockerIssues, err := uw.IssueUseCase().GetIssuesByIDs(ctx, blockerIDList)
 	if err != nil {
 		debug.Logf("warning: failed to get blocker issues: %v", err)

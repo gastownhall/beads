@@ -459,6 +459,13 @@ const (
 	// answers about a set of ISSUES described by a predicate, and this one about
 	// EDGES anchored on ids, per anchor.
 	OpCountDependencyEdges = "countDependencyEdges"
+	// OpBatchGetIssues reads several issues by id in ONE snapshot, behind
+	// issueops.BatchGetter. It is NOT getIssue repeated: that operation names
+	// one id and answers 404 on a miss, and this one names many and reports an
+	// absent id in `missing` beside whatever else resolved — the set-read
+	// answer EdgeCountRequest.IDs and EdgeReadRequest already give, applied to
+	// the issues themselves rather than their edges.
+	OpBatchGetIssues = "batchGetIssues"
 	// OpListRelatedIssues reads ONE issue's neighbors in a named direction,
 	// behind issueops.Relations. It is NOT listDependencies narrowed to one
 	// anchor: that operation answers the stored edge ROWS with their targets
@@ -707,6 +714,12 @@ var operationCodes = map[string][]Code{
 	// client as the 400 it is, on the sentinel, with the parameter named in the
 	// validator's own order.
 	OpCountDependencyEdges: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// No not_found, for OpListDependencies' reason restated about issues rather
+	// than edges: an id naming no stored row is reported in `missing`, not
+	// refused, so this operation's only 400s are the role's own — an oversized
+	// `ids` (*issueops.TooManyIDsError) and a blank entry. An empty `ids` is
+	// legal and answers with an empty result, so it earns no refusal at all.
+	OpBatchGetIssues: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The same vocabulary as the stored-edge read beside it, and no not_found
 	// for a stronger version of the same reason: this operation probes no id's
 	// existence at all, so there is nothing it could 404 on.
@@ -741,11 +754,17 @@ var operationCodes = map[string][]Code{
 	// Its 400s come from both the transport and the ROLE. The transport refuses
 	// malformed values, repeated single-valued parameters and a `group_by`
 	// outside the closed set. countGroupOf stops that last case at the edge.
-	// The role has exactly one reachable refusal: BuildCountFilter rejects an
-	// invalid metadata key, from `metadata_field` or `has_metadata_key`.
-	// failReadErr classifies it through invalidFilterParam as a 400 naming the
-	// parameter it came from. An unrecognized status or type is not a refusal;
-	// the role promises it matches nothing and answers 0.
+	// The role has three reachable refusals, all from BuildCountFilter: an
+	// invalid metadata key (`metadata_field` or `has_metadata_key`), an
+	// unrecognized `exclude_status` name, and `parent` set together with
+	// `no_parent` (named `no_parent`). The last two carry ErrValidation; the
+	// metadata-key refusal does not, being a plain error from
+	// ValidateMetadataFilters, which the list and ready builders share.
+	// failReadErr classifies all three through invalidFilterParam by message
+	// prefix, not by sentinel, as a 400 naming the parameter each came from.
+	// An unrecognized `status` or `type` is not a refusal; the role promises
+	// it matches nothing and answers 0. Nor is an unrecognized `exclude_type`,
+	// which excludes nothing.
 	OpCountIssues: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The listing's vocabulary minus the cursor: this operation has none, so
 	// invalid_cursor cannot arise. An unparseable EXPRESSION is an

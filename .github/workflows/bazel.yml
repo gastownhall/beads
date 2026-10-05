@@ -27,7 +27,9 @@
 # BAZEL_INTEGRATION, BAZEL_DOLTSERVER, BAZEL_PROXIED, BAZEL_SERVER_STORAGE);
 # bazel-cmd-dolt (the cmd/bd Dolt-server tier, BAZEL_CMD_DOLT) is advisory:
 # job-level continue-on-error, and pr.yml requires it only while its
-# BAZEL_CMD_DOLT_REQUIRED flag is "true";
+# BAZEL_CMD_DOLT_REQUIRED flag is "true" (pr.yml then also passes
+# cmd-dolt-required: true, and bazel-integration leaves //cmd/bd:bd_test,
+# which bazel-cmd-dolt runs too, to it);
 # .github/scripts/bazel-gate.sh turns the rbe job's rbe-mode output into the
 # skips it accepts, so a lane skipped by its `if:` below passes and one that
 # should have run and failed, was cancelled or reported nothing fails the
@@ -210,6 +212,22 @@ on:
         type: string
         required: false
         default: "on"
+      # true (pr.yml only, policy-tested to equal its committed
+      # BAZEL_CMD_DOLT_REQUIRED flag): pr.yml's ci-gate requires
+      # bazel-cmd-dolt, which runs the whole integration-tagged cmd/bd suite
+      # (//cmd/bd:bd_dolt_server_test wraps the integration build's
+      # bd_test), so bazel-integration leaves //cmd/bd:bd_test to it and
+      # each of those tests runs once. A boolean: on push and dispatch it is
+      # null, which is not == true, so bazel-farm.yml, nightly.yml, push and
+      # dispatch (bazel-cmd-dolt advisory there) keep bd_test in
+      # bazel-integration.
+      cmd-dolt-required:
+        description: >
+          true (pr.yml only) drops //cmd/bd:bd_test from bazel-integration:
+          the required bazel-cmd-dolt lane runs those tests.
+        type: boolean
+        required: false
+        default: false
       build-artifact-name:
         description: >
           Name of the uploaded bd artifact (ci-build-artifacts layout). pr.yml
@@ -1178,6 +1196,17 @@ jobs:
   # which no run here has. check_testcases.py still catches a target or
   # shard that ran no tests. pr.yml's gate requires it (BAZEL_INTEGRATION)
   # on same-repo PRs; see the header.
+  # Exactly-once cmd/bd: where the caller says bazel-cmd-dolt is required
+  # (inputs.cmd-dolt-required true: pr.yml while its
+  # BAZEL_CMD_DOLT_REQUIRED is "true"), the target set is //... minus
+  # //cmd/bd:bd_test. bazel-cmd-dolt has this job's `if:`, so it runs in
+  # every mode this one does (remote, fork-ro, fork-rw, cache; Dependabot
+  # too), bazel-gate.sh accepts the two lanes' skips in the same modes, and
+  # its //cmd/bd:bd_dolt_server_test runs that same integration-build
+  # bd_test without BEADS_TEST_SKIP=dolt (a superset: the skip only skips).
+  # Rollback: commit BAZEL_CMD_DOLT_REQUIRED "false" and pr.yml's
+  # cmd-dolt-required: false together (policy-tested equal); bd_test is
+  # back here on the next run.
   bazel-integration:
     name: integration
     # Remote (modes remote, fork-ro, fork-rw), or local with the read-only
@@ -1227,15 +1256,26 @@ jobs:
       # make Bazel restart the build ("Lost inputs"), and ~30 with the cache
       # closed (the farm's kill switch: everything local, cold), which must
       # still fit so closing the cache does not turn fork PRs red.
+      # Where bazel-cmd-dolt is required, //cmd/bd:bd_test is excluded (see
+      # above): on a PR that changes cmd/bd or what it imports, its race
+      # link and 16 shards were this step's last ~2-3.5 minutes (runs of
+      # 2026-10-05: 215-314s wall, 113-208s of it after every other test
+      # had finished).
       - name: bazel test //... --config=integration
         id: test
         timeout-minutes: 75
+        env:
+          EXCLUDE_TARGETS: ${{ inputs.cmd-dolt-required == true && '-//cmd/bd:bd_test' || '' }}
         run: |
           set -o pipefail
           start=$(date +%s)
           rc=0
+          if [[ -n "$EXCLUDE_TARGETS" ]]; then
+            echo "bazel-cmd-dolt is required: excluding $EXCLUDE_TARGETS (it runs there)" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
           bazel test //... --config=integration \
             --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            ${EXCLUDE_TARGETS:+-- "$EXCLUDE_TARGETS"} \
             2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
           echo "bazel test --config=integration: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$rc"
@@ -1631,7 +1671,9 @@ jobs:
   # call's aggregate result (BAZEL), and pr.yml's ci-gate requires the
   # lane's own result (BAZEL_CMD_DOLT) only while pr.yml's committed
   # BAZEL_CMD_DOLT_REQUIRED flag is "true" (scripts/ci_workflow_test.go,
-  # TestBazelCmdDoltJob).
+  # TestBazelCmdDoltJob); pr.yml then passes cmd-dolt-required: true and
+  # this lane is the integration build's only bd_test run
+  # (TestBazelIntegrationExcludesBdTestOnlyWhereCmdDoltCovers).
   bazel-cmd-dolt:
     name: cmd/bd Dolt-server tier
     needs: rbe

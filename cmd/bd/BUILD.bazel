@@ -654,6 +654,7 @@ go_test(
         "defer_wake_proxied_integration_test.go",
         "defer_wake_server_test.go",
         "delete_embedded_test.go",
+        "delete_if_revision_proxied_concurrency_test.go",
         "delete_input_test.go",
         "delete_proxied_integration_test.go",
         "delete_proxied_server_output_test.go",
@@ -814,6 +815,7 @@ go_test(
         "identity_preview_gate_test.go",
         "identity_preview_refusal_test.go",
         "if_revision_embedded_test.go",
+        "if_revision_proxied_close_delete_test.go",
         "if_revision_reassign_fence_embedded_test.go",
         "if_revision_reassign_fence_proxied_test.go",
         "if_revision_test.go",
@@ -1099,6 +1101,8 @@ go_test(
         "shared_migrate_consent_test.go",
         "shared_server_cfgnil_test.go",
         "shared_server_cleanup_test.go",
+        "shared_server_delete_if_revision_concurrency_test.go",
+        "shared_server_if_revision_concurrency_test.go",
         "shared_server_integration_test.go",
         "shared_store_migrate_gate_test.go",
         "ship_embedded_test.go",
@@ -1554,6 +1558,13 @@ exports_files(
 exports_files(
     ["init_safety_help.go"],
     visibility = ["//test/docsync:__pkg__"],
+)
+
+# Contributor agent instructions; root AGENTS.md links them and
+# //:docsync_files checks those links.
+exports_files(
+    ["AGENTS.md"],
+    visibility = ["//:__pkg__"],
 )
 
 # Release-metadata surfaces gated by //internal/versioncheck's releaseSources

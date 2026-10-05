@@ -1272,6 +1272,10 @@ func tryIncrementalExport(ctx context.Context, fullPath, fromCommit, toCommit st
 	var records map[string][]byte
 	droppedByFilter := make(map[string]bool)
 	if len(upsertIDs) > 0 {
+		// TODO(batchgetter): this read is unbounded; issueops.BatchGetter caps a
+		// request at MaxGetManyIDs (1000) and this call site has not been
+		// audited for id volume or given chunking, so it still goes through
+		// GetIssuesByIDs rather than the role. See issueops.BatchGetter's doc.
 		issues, fetchErr := store.GetIssuesByIDs(ctx, upsertIDs)
 		if fetchErr != nil {
 			return 0, 0, nil, false, fmt.Errorf("GetIssuesByIDs: %w", fetchErr)

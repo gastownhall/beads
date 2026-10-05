@@ -58,7 +58,12 @@ env:
   # BAZEL_CMD_DOLT result. "true" adds BAZEL_CMD_DOLT to CI_GATE_REQUIRED in
   # the "Evaluate CI gate" step's run script; bazel-gate.sh still accepts
   # its skip in modes skip and local. Committed, not a repo variable, for
-  # the same reason as the flags above.
+  # the same reason as the flags above. The `bazel` job's cmd-dolt-required
+  # input must equal it (a `with:` cannot read env; policy-tested): "true"
+  # also drops //cmd/bd:bd_test from bazel-integration, because the required
+  # lane runs the same integration-build bd_test without the dolt skip, so
+  # each cmd/bd test runs once. Rollback: commit "false" here and false in
+  # that input together; bazel-integration runs bd_test again on the next run.
   BAZEL_CMD_DOLT_REQUIRED: "true"
 
 jobs:
@@ -2300,6 +2305,9 @@ jobs:
     with:
       build-artifact-name: bazel-ci-build-artifacts
       integration: "on"
+      # Must equal BAZEL_CMD_DOLT_REQUIRED (top of this file; policy-tested):
+      # true leaves //cmd/bd:bd_test to the then-required bazel-cmd-dolt.
+      cmd-dolt-required: true
       # F3: only pr.yml opts in; the package-mcp/package-npm jobs run inside
       # this call, needing only its rbe job.
       package-gates: "on"
