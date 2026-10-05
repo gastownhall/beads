@@ -1,0 +1,394 @@
+//go:build cgo
+
+// Contributed by gascity from bd-enterprise (internal/enterprise/httpstore/served_batch_apply_test.go@49d1df2f6)
+// to OSS beads under the MIT license.
+
+package httpclient
+
+import (
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
+)
+
+// The BatchApplier contract, run through client -> in-process bd serve ->
+// reference store: the widest role on this surface and the last of the wire
+// wave's three, wired by client wave ga-mijra.
+//
+// WHAT THE COMPOSITION BUYS HERE that the three in-tree legs cannot. Those legs
+// run two bodies through different transaction wrappers; this one adds a fourth
+// wrapper that is a NETWORK, and the states it can lose are exactly the ones
+// this contract is built to separate: the ORDER of a heterogeneous plan, which
+// becomes an array on a JSON wire and comes back positional; the row-version
+// tokens, which are 64-bit and would corrupt through a float; the absent-versus-
+// zero distinction on every guard; a metadata value's source literal; and the
+// identity of the item that refused, which on an all-or-nothing operation
+// exists nowhere but the problem document's item_* members.
+//
+// ONE ENVIRONMENT PER CASE, like the other per-role families here: the contract
+// namespaces its ids by prefix precisely so it can be run that way, and a
+// shared database would turn an id collision between two contracts into a
+// debugging session.
+
+// applyParkBead owns this family's single park and unparks it when the wire
+// grows a typed ref-key member on the problem document.
+const applyParkBead = "ga-mijra"
+
+func newServedBatchApplyFixture(t *testing.T, prefix string) conformance.BatchApplyFixture {
+	t.Helper()
+	env := newServedEnv(t, prefix)
+	applier, err := env.subject.BatchApplier()
+	if err != nil {
+		t.Fatalf("BatchApplier(): %v", err)
+	}
+	return conformance.BatchApplyFixture{
+		IssuePrefix:          env.prefix,
+		BatchApplier:         applier,
+		CreateIssue:          env.createIssue,
+		CreateWisp:           env.createWisp,
+		QueryScalar:          env.queryScalar,
+		CountHistory:         env.countHistory,
+		CountHistoryMatching: env.countHistoryMatching,
+		CommitPending:        env.commitPending,
+	}
+}
+
+func TestServedBatchApplyAppliesEveryItemInDeclarationOrder(t *testing.T) {
+	conformance.RunBatchApplyAppliesEveryItemInDeclarationOrder(t, t.Context(), newServedBatchApplyFixture(t, "hba00"))
+}
+
+func TestServedBatchApplyBindsEachNamedKeyToItsMintedID(t *testing.T) {
+	conformance.RunBatchApplyBindsEachNamedKeyToItsMintedID(t, t.Context(), newServedBatchApplyFixture(t, "hba01"))
+}
+
+func TestServedBatchApplyResolvesABackwardKeyRef(t *testing.T) {
+	conformance.RunBatchApplyResolvesABackwardKeyRef(t, t.Context(), newServedBatchApplyFixture(t, "hba02"))
+}
+
+func TestServedBatchApplyRefusesAKeyDeclaredLater(t *testing.T) {
+	conformance.RunBatchApplyRefusesAKeyDeclaredLater(t, t.Context(), newServedBatchApplyFixture(t, "hba03"))
+}
+
+func TestServedBatchApplyRefusesAKeyNoItemDeclares(t *testing.T) {
+	conformance.RunBatchApplyRefusesAKeyNoItemDeclares(t, t.Context(), newServedBatchApplyFixture(t, "hba04"))
+}
+
+func TestServedBatchApplyRefusesARefNamingNeitherOrBoth(t *testing.T) {
+	conformance.RunBatchApplyRefusesARefNamingNeitherOrBoth(t, t.Context(), newServedBatchApplyFixture(t, "hba05"))
+}
+
+func TestServedBatchApplyRollsBackEverythingWhenTheLastItemRefuses(t *testing.T) {
+	conformance.RunBatchApplyRollsBackEverythingWhenTheLastItemRefuses(t, t.Context(), newServedBatchApplyFixture(t, "hba06"))
+}
+
+func TestServedBatchApplyNeverReordersItsItems(t *testing.T) {
+	conformance.RunBatchApplyNeverReordersItsItems(t, t.Context(), newServedBatchApplyFixture(t, "hba07"))
+}
+
+func TestServedBatchApplyEndGateRefusesAHierarchyTheRequestBuilt(t *testing.T) {
+	conformance.RunBatchApplyEndGateRefusesAHierarchyTheRequestBuilt(t, t.Context(), newServedBatchApplyFixture(t, "hba08"))
+}
+
+func TestServedBatchApplyEndGateCycleSurvivesSkipPerEdgeCycleCheck(t *testing.T) {
+	conformance.RunBatchApplyEndGateCycleSurvivesSkipPerEdgeCycleCheck(t, t.Context(), newServedBatchApplyFixture(t, "hba09"))
+}
+
+func TestServedBatchApplyExpectedVersionThatMatchesLetsTheItemThrough(t *testing.T) {
+	conformance.RunBatchApplyExpectedVersionThatMatchesLetsTheItemThrough(t, t.Context(), newServedBatchApplyFixture(t, "hba0a"))
+}
+
+func TestServedBatchApplyStaleExpectedVersionRefusesTheWholeRequest(t *testing.T) {
+	conformance.RunBatchApplyStaleExpectedVersionRefusesTheWholeRequest(t, t.Context(), newServedBatchApplyFixture(t, "hba0b"))
+}
+
+func TestServedBatchApplyRefusesExpectedVersionOnARowAnEarlierItemTouched(t *testing.T) {
+	conformance.RunBatchApplyRefusesExpectedVersionOnARowAnEarlierItemTouched(t, t.Context(), newServedBatchApplyFixture(t, "hba0c"))
+}
+
+func TestServedBatchApplyRefusesExpectedVersionOnARowAnEarlierItemCreated(t *testing.T) {
+	conformance.RunBatchApplyRefusesExpectedVersionOnARowAnEarlierItemCreated(t, t.Context(), newServedBatchApplyFixture(t, "hba0d"))
+}
+
+func TestServedBatchApplyEvaluatesExpectedStatusAsModified(t *testing.T) {
+	conformance.RunBatchApplyEvaluatesExpectedStatusAsModified(t, t.Context(), newServedBatchApplyFixture(t, "hba0e"))
+}
+
+func TestServedBatchApplyEvaluatesExpectedAssigneeAsModified(t *testing.T) {
+	conformance.RunBatchApplyEvaluatesExpectedAssigneeAsModified(t, t.Context(), newServedBatchApplyFixture(t, "hba0f"))
+}
+
+func TestServedBatchApplyClosePolicyEvaluatesAtTheCloseItem(t *testing.T) {
+	conformance.RunBatchApplyClosePolicyEvaluatesAtTheCloseItem(t, t.Context(), newServedBatchApplyFixture(t, "hba10"))
+}
+
+func TestServedBatchApplyAllowsAClosedParentToGainAnOpenChild(t *testing.T) {
+	conformance.RunBatchApplyAllowsAClosedParentToGainAnOpenChild(t, t.Context(), newServedBatchApplyFixture(t, "hba11"))
+}
+
+func TestServedBatchApplyUpdateAfterCloseInOneRequest(t *testing.T) {
+	conformance.RunBatchApplyUpdateAfterCloseInOneRequest(t, t.Context(), newServedBatchApplyFixture(t, "hba12"))
+}
+
+func TestServedBatchApplyReportsChangedPerItem(t *testing.T) {
+	conformance.RunBatchApplyReportsChangedPerItem(t, t.Context(), newServedBatchApplyFixture(t, "hba13"))
+}
+
+func TestServedBatchApplyANoOpBatchRecordsNoHistory(t *testing.T) {
+	conformance.RunBatchApplyANoOpBatchRecordsNoHistory(t, t.Context(), newServedBatchApplyFixture(t, "hba14"))
+}
+
+func TestServedBatchApplyRecordsOneEntryForAWriteThatLandedNothing(t *testing.T) {
+	conformance.RunBatchApplyRecordsOneEntryForAWriteThatLandedNothing(t, t.Context(), newServedBatchApplyFixture(t, "hba15"))
+}
+
+func TestServedBatchApplyRecordsExactlyOneHistoryEntry(t *testing.T) {
+	conformance.RunBatchApplyRecordsExactlyOneHistoryEntry(t, t.Context(), newServedBatchApplyFixture(t, "hba16"))
+}
+
+func TestServedBatchApplyHistoryNamesTheActorAndReadsTheProvenance(t *testing.T) {
+	conformance.RunBatchApplyHistoryNamesTheActorAndReadsTheProvenance(t, t.Context(), newServedBatchApplyFixture(t, "hba17"))
+}
+
+func TestServedBatchApplyARefusedRequestRecordsNoHistory(t *testing.T) {
+	conformance.RunBatchApplyARefusedRequestRecordsNoHistory(t, t.Context(), newServedBatchApplyFixture(t, "hba18"))
+}
+
+func TestServedBatchApplyAnEphemeralBatchKeepsItsWispsAndRecordsNoDurableHistory(t *testing.T) {
+	conformance.RunBatchApplyAnEphemeralBatchKeepsItsWispsAndRecordsNoDurableHistory(t, t.Context(), newServedBatchApplyFixture(t, "hba19"))
+}
+
+func TestServedBatchApplyRefusesACrossPlaneEdgeBetweenRowsItCreated(t *testing.T) {
+	conformance.RunBatchApplyRefusesACrossPlaneEdgeBetweenRowsItCreated(t, t.Context(), newServedBatchApplyFixture(t, "hba1a"))
+}
+
+func TestServedBatchApplyAcceptsAnExternalEdgeTarget(t *testing.T) {
+	conformance.RunBatchApplyAcceptsAnExternalEdgeTarget(t, t.Context(), newServedBatchApplyFixture(t, "hba1b"))
+}
+
+func TestServedBatchApplyNormalizesTheWaitsForGate(t *testing.T) {
+	conformance.RunBatchApplyNormalizesTheWaitsForGate(t, t.Context(), newServedBatchApplyFixture(t, "hba1c"))
+}
+
+func TestServedBatchApplySplicesAForwardMetadataRef(t *testing.T) {
+	conformance.RunBatchApplySplicesAForwardMetadataRef(t, t.Context(), newServedBatchApplyFixture(t, "hba1d"))
+}
+
+func TestServedBatchApplySplicesASelfMetadataRef(t *testing.T) {
+	conformance.RunBatchApplySplicesASelfMetadataRef(t, t.Context(), newServedBatchApplyFixture(t, "hba1e"))
+}
+
+// TestServedBatchApplyRefusesAMetadataRefNoItemDeclares is the family's ONE
+// park, and it is a response-shape divergence rather than a behavior: the
+// refusal happens, nothing is written, and the diagnosis a caller ACTS on —
+// DeclaredLater — arrives whole. What the wire cannot carry is WHICH entry of
+// the refs map failed.
+func TestServedBatchApplyRefusesAMetadataRefNoItemDeclares(t *testing.T) {
+	skipKnownDivergence(t, "L-apply-ref", applyParkBead,
+		"the case binds RefError.Member to `metadata_ref <key>`, and the wire names the MEMBER that held the bad ref "+
+			"(`items[0].create.metadata_refs`) without saying which entry of it failed — RefError.Member is diagnostic "+
+			"prose on both sides rather than a vocabulary, so the server maps it onto the document's own member names. "+
+			"The refusal itself, the untouched tables and the false DeclaredLater are asserted by "+
+			"TestServedBatchApplyRefusesAMetadataRefWithoutNamingTheKey.")
+	// The call stays BELOW the skip and compiled, which is this package's park
+	// convention and is load-bearing rather than decorative: a parked case that
+	// only named its contract in prose is a dangling reference nothing
+	// type-checks, so a renamed entrypoint or a changed fixture would orphan the
+	// park silently. Here it breaks the build.
+	conformance.RunBatchApplyRefusesAMetadataRefNoItemDeclares(t, t.Context(), newServedBatchApplyFixture(t, "hba1f"))
+}
+
+func TestServedBatchApplyTheSpliceRecordsAnUpdateEvent(t *testing.T) {
+	conformance.RunBatchApplyTheSpliceRecordsAnUpdateEvent(t, t.Context(), newServedBatchApplyFixture(t, "hba20"))
+}
+
+func TestServedBatchApplyKeepsAStoredNullApartFromAnEmptyString(t *testing.T) {
+	conformance.RunBatchApplyKeepsAStoredNullApartFromAnEmptyString(t, t.Context(), newServedBatchApplyFixture(t, "hba21"))
+}
+
+func TestServedBatchApplyLandsAnIdempotencyRecordWithItsWork(t *testing.T) {
+	conformance.RunBatchApplyLandsAnIdempotencyRecordWithItsWork(t, t.Context(), newServedBatchApplyFixture(t, "hba22"))
+}
+
+func TestServedBatchApplyBoundsTheItemCount(t *testing.T) {
+	conformance.RunBatchApplyBoundsTheItemCount(t, t.Context(), newServedBatchApplyFixture(t, "hba23"))
+}
+
+func TestServedBatchApplyReplayMintsANewSetOfRows(t *testing.T) {
+	conformance.RunBatchApplyReplayMintsANewSetOfRows(t, t.Context(), newServedBatchApplyFixture(t, "hba24"))
+}
+
+func TestServedBatchApplyDoesNotMutateTheCallerRequest(t *testing.T) {
+	conformance.RunBatchApplyDoesNotMutateTheCallerRequest(t, t.Context(), newServedBatchApplyFixture(t, "hba25"))
+}
+
+func TestServedBatchApplyRefusesAnUnusableRequest(t *testing.T) {
+	conformance.RunBatchApplyRefusesAnUnusableRequest(t, t.Context(), newServedBatchApplyFixture(t, "hba26"))
+}
+
+// TestServedBatchApplyRefusesAMetadataRefWithoutNamingTheKey is the running pin
+// beside the park above: the same request, driven end to end, asserting
+// everything the contract asserts EXCEPT the key inside the member — the
+// refusal is a *RefError matching ErrValidation, DeclaredLater is false, the
+// item is named, and nothing was written.
+//
+// It is written so it CAN fail: the positive half re-runs the identical plan
+// with the ref pointed at a key the request does declare, and the row lands
+// with the resolved id spliced over the metadata key. A client that refused
+// every metadata ref would pass the refusal half alone.
+func TestServedBatchApplyRefusesAMetadataRefWithoutNamingTheKey(t *testing.T) {
+	ctx := t.Context()
+	fixture := newServedBatchApplyFixture(t, "hbaref")
+
+	id := fixture.IssuePrefix + "-ghostmeta-row"
+	item := issueops.ApplyItem{Kind: issueops.ItemCreate, Create: &issueops.CreateItem{
+		Key:          "only",
+		Issue:        &issueops.Issue{ID: id, Title: "names a key nothing declares", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		MetadataRefs: map[string]issueops.Ref{"gc.retry_of": {Key: "never-declared"}},
+	}}
+
+	_, err := fixture.BatchApplier.ApplyBatch(ctx, issueops.ApplyBatchRequest{
+		Actor: "apply-writer", ForceIDPrefix: true, Items: []issueops.ApplyItem{item},
+	})
+	var refErr *issueops.RefError
+	if !errors.As(err, &refErr) {
+		t.Fatalf("a metadata_ref naming an undeclared key: error = %v, want *RefError", err)
+	}
+	if refErr.DeclaredLater {
+		t.Errorf("RefError = %#v, want DeclaredLater false: no item declares that key at all", refErr)
+	}
+	if refErr.Index != 0 {
+		t.Errorf("RefError.Index = %d, want 0", refErr.Index)
+	}
+	if refErr.Key != "never-declared" {
+		t.Errorf("RefError.Key = %q, want the unresolvable key", refErr.Key)
+	}
+	// The degraded half, asserted rather than left implicit: the member is
+	// named without the key inside it (L-apply-ref). Asserting it here is what
+	// makes the ledger row falsifiable — the day the wire carries the key, this
+	// fails and the park retires with it.
+	if refErr.Member != "metadata_refs" {
+		t.Errorf("RefError.Member = %q, want the member alone; L-apply-ref records that the key is not on the wire", refErr.Member)
+	}
+	if !errors.Is(err, issueops.ErrValidation) {
+		t.Errorf("error = %v, want ErrValidation through RefError.Unwrap", err)
+	}
+	var rows int
+	if err := fixture.QueryScalar(ctx, "SELECT COUNT(*) FROM issues WHERE id = ?", []any{id}, &rows); err != nil {
+		t.Fatalf("counting the refused row: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("the refused plan wrote %s anyway", id)
+	}
+
+	// The positive half. The identical plan with the ref pointed at a key the
+	// request DOES declare lands, and the splice writes the resolved id.
+	peer := fixture.IssuePrefix + "-ghostmeta-peer"
+	item.Create.MetadataRefs = map[string]issueops.Ref{"gc.retry_of": {Key: "peer"}}
+	if _, err := fixture.BatchApplier.ApplyBatch(ctx, issueops.ApplyBatchRequest{
+		Actor: "apply-writer", ForceIDPrefix: true,
+		Items: []issueops.ApplyItem{item, {Kind: issueops.ItemCreate, Create: &issueops.CreateItem{
+			Key:   "peer",
+			Issue: &issueops.Issue{ID: peer, Title: "the key it names", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		}}},
+	}); err != nil {
+		t.Fatalf("the same plan with a declared key refused: %v", err)
+	}
+	var metadata string
+	if err := fixture.QueryScalar(ctx, "SELECT COALESCE(metadata, '') FROM issues WHERE id = ?", []any{id}, &metadata); err != nil {
+		t.Fatalf("reading the spliced metadata: %v", err)
+	}
+	if !strings.Contains(metadata, peer) {
+		t.Errorf("metadata = %q, want the resolved id %s spliced over gc.retry_of", metadata, peer)
+	}
+}
+
+// TestServedBatchApplyAnswersEveryItemWithoutASnapshot is the running pin on
+// ledger row L-apply-snapshot, and it is a DIFFERENTIAL rather than a golden:
+// the same plan is applied through the client and through the reference
+// store's own role, and the two results are compared member for member EXCEPT
+// the snapshot. What the row admits — that Issue is nil on this leg — is
+// asserted beside a local run where it is not, so the divergence is measured
+// rather than declared.
+//
+// The positive half is the whole comparison: a client that answered an empty
+// result, or dropped a revision, or lost the edge's DependsOnID, would satisfy
+// "no snapshot" and fail here.
+func TestServedBatchApplyAnswersEveryItemWithoutASnapshot(t *testing.T) {
+	ctx := t.Context()
+	env := newServedEnv(t, "hbasnap")
+	remote, err := env.subject.BatchApplier()
+	if err != nil {
+		t.Fatalf("BatchApplier(): %v", err)
+	}
+	local, err := env.reference.BatchApplier()
+	if err != nil {
+		t.Fatalf("reference BatchApplier(): %v", err)
+	}
+
+	plan := func(tag string) issueops.ApplyBatchRequest {
+		root := env.prefix + "-snap-" + tag + "-root"
+		leaf := env.prefix + "-snap-" + tag + "-leaf"
+		issue := func(id string) *issueops.Issue {
+			return &issueops.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		}
+		return issueops.ApplyBatchRequest{
+			Actor: "apply-writer", ForceIDPrefix: true,
+			Items: []issueops.ApplyItem{
+				{Kind: issueops.ItemCreate, Create: &issueops.CreateItem{Key: "root", Issue: issue(root)}},
+				{Kind: issueops.ItemCreate, Create: &issueops.CreateItem{Key: "leaf", Issue: issue(leaf)}},
+				{Kind: issueops.ItemDepAdd, DepAdd: &issueops.DepAddItem{
+					Source: issueops.Ref{Key: "leaf"}, Target: issueops.Ref{Key: "root"}, Type: types.DepParentChild,
+				}},
+				{Kind: issueops.ItemClose, Close: &issueops.CloseItem{Target: issueops.Ref{Key: "leaf"}, Reason: "done"}},
+			},
+		}
+	}
+
+	through, err := remote.ApplyBatch(ctx, plan("wire"))
+	if err != nil {
+		t.Fatalf("ApplyBatch over the wire: %v", err)
+	}
+	beside, err := local.ApplyBatch(ctx, plan("local"))
+	if err != nil {
+		t.Fatalf("ApplyBatch through the reference store: %v", err)
+	}
+
+	if len(through.Items) != len(beside.Items) {
+		t.Fatalf("the wire answered %d items and the reference %d", len(through.Items), len(beside.Items))
+	}
+	if len(through.Keys) != len(beside.Keys) {
+		t.Errorf("the wire bound %d keys and the reference %d", len(through.Keys), len(beside.Keys))
+	}
+	for key, id := range through.Keys {
+		if id == "" {
+			t.Errorf("Keys[%q] is empty; the key binding is the one fact the request cannot carry", key)
+		}
+	}
+	for i := range through.Items {
+		remoteItem, localItem := through.Items[i], beside.Items[i]
+		if remoteItem.Kind != localItem.Kind || remoteItem.Changed != localItem.Changed {
+			t.Errorf("items[%d]: wire %s/changed=%v, reference %s/changed=%v",
+				i, remoteItem.Kind, remoteItem.Changed, localItem.Kind, localItem.Changed)
+		}
+		if (remoteItem.DependsOnID == "") != (localItem.DependsOnID == "") {
+			t.Errorf("items[%d]: wire DependsOnID %q, reference %q — the edge target is set for dep_add and absent elsewhere",
+				i, remoteItem.DependsOnID, localItem.DependsOnID)
+		}
+		if (remoteItem.RowVersion == 0) != (localItem.RowVersion == 0) {
+			t.Errorf("items[%d]: wire revision %d, reference %d — a dep_add is 0 on both and a row item is not on either",
+				i, remoteItem.RowVersion, localItem.RowVersion)
+		}
+		// The divergence the row admits, measured in both directions at once.
+		if remoteItem.Issue != nil {
+			t.Errorf("items[%d] came back with a snapshot; the wire result is lean (L-apply-snapshot)", i)
+		}
+		if localItem.Kind != issueops.ItemDepAdd && localItem.Issue == nil {
+			t.Errorf("items[%d] carries no snapshot on the REFERENCE leg either; this case would then be asserting "+
+				"nothing about the divergence L-apply-snapshot records", i)
+		}
+	}
+}
