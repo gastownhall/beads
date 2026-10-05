@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_library(
     name = "unsupportedgen_lib",
@@ -12,6 +12,13 @@ go_binary(
     name = "unsupportedgen",
     embed = [":unsupportedgen_lib"],
     visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "unsupportedgen_test",
+    srcs = ["main_test.go"],
+    data = ["//internal/httpclient:go_srcs"],
+    embed = [":unsupportedgen_lib"],
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
