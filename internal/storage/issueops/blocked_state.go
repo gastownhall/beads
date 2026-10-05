@@ -20,21 +20,46 @@ type DBTX interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
+// waitsForGateBlockedSQL decides whether a waits-for row d (spawner =
+// d.depends_on_issue_id or d.depends_on_wisp_id) still gates its waiter.
+//
+// Each "the spawner has an open / a closed parent-child child" test is split
+// per dependency table AND per spawner column, and pins the child lookup by
+// primary key (JOIN_ORDER/LOOKUP_JOIN; on MySQL, JOIN_ORDER is honored and
+// the unknown LOOKUP_JOIN hint is ignored with a warning). The earlier form
+// matched both spawner columns with one OR inside each EXISTS, which no
+// single index serves, so the engine scanned the whole edge table per
+// correlated evaluation: closing one child of a 1000-child spawner with 20
+// waiters on a 50k-issue / 100k-edge database spent ~39 s in the recompute.
+// Split, each EXISTS is an index lookup on its target column (the
+// idx_*_issue_target / idx_*_wisp_target indexes). EXISTS(a OR b) is
+// EXISTS(a) OR EXISTS(b), so the result is unchanged; the IS NOT NULL guards
+// stay, as before (cd.col = NULL never matches anyway).
 const waitsForGateBlockedSQL = `
 		(
 		  (
 		    EXISTS (
-		      SELECT 1 FROM dependencies cd JOIN issues child ON child.id = cd.issue_id
+		      SELECT /*+ JOIN_ORDER(cd, child) LOOKUP_JOIN(cd, child) */ 1 FROM dependencies cd JOIN issues child ON child.id = cd.issue_id
 		      WHERE cd.type = 'parent-child'
-		        AND ((d.depends_on_issue_id IS NOT NULL AND cd.depends_on_issue_id = d.depends_on_issue_id)
-		          OR (d.depends_on_wisp_id IS NOT NULL AND cd.depends_on_wisp_id = d.depends_on_wisp_id))
+		        AND d.depends_on_issue_id IS NOT NULL AND cd.depends_on_issue_id = d.depends_on_issue_id
 		        AND child.status <> 'closed' AND child.status <> 'pinned'
 		    )
 		    OR EXISTS (
-		      SELECT 1 FROM wisp_dependencies cd JOIN wisps child ON child.id = cd.issue_id
+		      SELECT /*+ JOIN_ORDER(cd, child) LOOKUP_JOIN(cd, child) */ 1 FROM dependencies cd JOIN issues child ON child.id = cd.issue_id
 		      WHERE cd.type = 'parent-child'
-		        AND ((d.depends_on_issue_id IS NOT NULL AND cd.depends_on_issue_id = d.depends_on_issue_id)
-		          OR (d.depends_on_wisp_id IS NOT NULL AND cd.depends_on_wisp_id = d.depends_on_wisp_id))
+		        AND d.depends_on_wisp_id IS NOT NULL AND cd.depends_on_wisp_id = d.depends_on_wisp_id
+		        AND child.status <> 'closed' AND child.status <> 'pinned'
+		    )
+		    OR EXISTS (
+		      SELECT /*+ JOIN_ORDER(cd, child) LOOKUP_JOIN(cd, child) */ 1 FROM wisp_dependencies cd JOIN wisps child ON child.id = cd.issue_id
+		      WHERE cd.type = 'parent-child'
+		        AND d.depends_on_issue_id IS NOT NULL AND cd.depends_on_issue_id = d.depends_on_issue_id
+		        AND child.status <> 'closed' AND child.status <> 'pinned'
+		    )
+		    OR EXISTS (
+		      SELECT /*+ JOIN_ORDER(cd, child) LOOKUP_JOIN(cd, child) */ 1 FROM wisp_dependencies cd JOIN wisps child ON child.id = cd.issue_id
+		      WHERE cd.type = 'parent-child'
+		        AND d.depends_on_wisp_id IS NOT NULL AND cd.depends_on_wisp_id = d.depends_on_wisp_id
 		        AND child.status <> 'closed' AND child.status <> 'pinned'
 		    )
 		  )
@@ -45,17 +70,27 @@ const waitsForGateBlockedSQL = `
 		    COALESCE(JSON_UNQUOTE(JSON_EXTRACT(d.metadata, '$.gate')), 'all-children') = 'any-children'
 		    AND (
 		      EXISTS (
-		        SELECT 1 FROM dependencies cd JOIN issues child ON child.id = cd.issue_id
+		        SELECT /*+ JOIN_ORDER(cd, child) LOOKUP_JOIN(cd, child) */ 1 FROM dependencies cd JOIN issues child ON child.id = cd.issue_id
 		        WHERE cd.type = 'parent-child'
-		          AND ((d.depends_on_issue_id IS NOT NULL AND cd.depends_on_issue_id = d.depends_on_issue_id)
-		            OR (d.depends_on_wisp_id IS NOT NULL AND cd.depends_on_wisp_id = d.depends_on_wisp_id))
+		          AND d.depends_on_issue_id IS NOT NULL AND cd.depends_on_issue_id = d.depends_on_issue_id
 		          AND child.status = 'closed'
 		      )
 		      OR EXISTS (
-		        SELECT 1 FROM wisp_dependencies cd JOIN wisps child ON child.id = cd.issue_id
+		        SELECT /*+ JOIN_ORDER(cd, child) LOOKUP_JOIN(cd, child) */ 1 FROM dependencies cd JOIN issues child ON child.id = cd.issue_id
 		        WHERE cd.type = 'parent-child'
-		          AND ((d.depends_on_issue_id IS NOT NULL AND cd.depends_on_issue_id = d.depends_on_issue_id)
-		            OR (d.depends_on_wisp_id IS NOT NULL AND cd.depends_on_wisp_id = d.depends_on_wisp_id))
+		          AND d.depends_on_wisp_id IS NOT NULL AND cd.depends_on_wisp_id = d.depends_on_wisp_id
+		          AND child.status = 'closed'
+		      )
+		      OR EXISTS (
+		        SELECT /*+ JOIN_ORDER(cd, child) LOOKUP_JOIN(cd, child) */ 1 FROM wisp_dependencies cd JOIN wisps child ON child.id = cd.issue_id
+		        WHERE cd.type = 'parent-child'
+		          AND d.depends_on_issue_id IS NOT NULL AND cd.depends_on_issue_id = d.depends_on_issue_id
+		          AND child.status = 'closed'
+		      )
+		      OR EXISTS (
+		        SELECT /*+ JOIN_ORDER(cd, child) LOOKUP_JOIN(cd, child) */ 1 FROM wisp_dependencies cd JOIN wisps child ON child.id = cd.issue_id
+		        WHERE cd.type = 'parent-child'
+		          AND d.depends_on_wisp_id IS NOT NULL AND cd.depends_on_wisp_id = d.depends_on_wisp_id
 		          AND child.status = 'closed'
 		      )
 		    )
