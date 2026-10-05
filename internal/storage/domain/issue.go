@@ -66,6 +66,12 @@ type IssueSQLRepository interface {
 	Get(ctx context.Context, id string, opts IssueTableOpts) (*types.Issue, error)
 	AsOf(ctx context.Context, id, ref string) (*types.Issue, error)
 	GetByIDs(ctx context.Context, ids []string, opts IssueTableOpts) ([]*types.Issue, error)
+	// GetMany runs the SHARED batch-read body (issueops.ExecuteGetMany) on this
+	// repository's transaction, which is how the unit-of-work provider reaches
+	// the same function the two store backends wrap. It takes no table option:
+	// the body routes both planes itself, the way CompareAndSetMetadataKey's
+	// does.
+	GetMany(ctx context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error)
 	Exists(ctx context.Context, id string, opts IssueTableOpts) (bool, error)
 	CountForPrefix(ctx context.Context, prefix string, opts IssueTableOpts) (int, error)
 	NextCounterID(ctx context.Context, prefix string) (int, error)
@@ -311,6 +317,9 @@ type UpdateSpec struct {
 type IssueUseCase interface {
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)
 	GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error)
+	// GetMany is the shape issueops.BatchGetter publishes; see
+	// IssueSQLRepository.GetMany for why it takes no table option.
+	GetMany(ctx context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error)
 	FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error)
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) (SearchPage, error)
 	SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) (SearchCountsPage, error)
@@ -470,6 +479,14 @@ func (u *issueUseCaseImpl) get(ctx context.Context, id string, useWisp bool) (*t
 
 func (u *issueUseCaseImpl) GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
 	return u.getByIDs(ctx, ids, false)
+}
+
+// GetMany passes straight through to the repository with no pre-check and no
+// error wrapping, CountEdges's reason: the request's whole vocabulary is
+// validated inside the shared body (issueops.ExecuteGetMany), and there is no
+// second implementation for a wrapper here to protect.
+func (u *issueUseCaseImpl) GetMany(ctx context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error) {
+	return u.issueRepo.GetMany(ctx, request)
 }
 
 func (u *issueUseCaseImpl) FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error) {

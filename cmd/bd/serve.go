@@ -317,6 +317,7 @@ func runServe() error {
 			CycleDetector:     roles.cycles,
 			EdgeReader:        roles.edges,
 			GraphCounter:      roles.edgeCounter,
+			BatchGetter:       roles.batchGetter,
 			Relations:         roles.relations,
 			Commenter:         roles.commenter,
 			BlockingAnnotator: roles.blocking,
@@ -672,6 +673,7 @@ type serveRoleSource interface {
 	CycleDetector() (issueops.CycleDetector, error)
 	EdgeReader() (issueops.EdgeReader, error)
 	GraphCounter() (issueops.GraphCounter, error)
+	BatchGetter() (issueops.BatchGetter, error)
 	IssueRelations() (issueops.Relations, error)
 	Commenter() (issueops.Commenter, error)
 	BlockingAnnotator() (issueops.BlockingAnnotator, error)
@@ -738,6 +740,7 @@ func serveIssueRoles(src serveRoleSource, journalEnabled bool) (serveRoles, erro
 		{"cycle detector", func() (err error) { roles.cycles, err = src.CycleDetector(); return }},
 		{"edge reader", func() (err error) { roles.edges, err = src.EdgeReader(); return }},
 		{"graph counter", func() (err error) { roles.edgeCounter, err = src.GraphCounter(); return }},
+		{"batch getter", func() (err error) { roles.batchGetter, err = src.BatchGetter(); return }},
 		{"issue relations", func() (err error) { roles.relations, err = src.IssueRelations(); return }},
 		{"commenter", func() (err error) { roles.commenter, err = src.Commenter(); return }},
 		{"blocking annotator", func() (err error) { roles.blocking, err = src.BlockingAnnotator(); return }},
@@ -838,13 +841,18 @@ type serveRoles struct {
 	// hook decorator like the two below it — a release is an update, so
 	// HookFiringStore.Releaser fires the workspace's on_update script — which
 	// is why it comes off the PEELED store with the rest.
-	releaser     issueops.Releaser
-	lifecycle    issueops.Lifecycle
-	settings     issueops.WorkspaceConfig
-	stats        issueops.StatsReporter
-	cycles       issueops.CycleDetector
-	edges        issueops.EdgeReader
-	edgeCounter  issueops.GraphCounter
+	releaser    issueops.Releaser
+	lifecycle   issueops.Lifecycle
+	settings    issueops.WorkspaceConfig
+	stats       issueops.StatsReporter
+	cycles      issueops.CycleDetector
+	edges       issueops.EdgeReader
+	edgeCounter issueops.GraphCounter
+	// batchGetter is the one-snapshot, many-ids read behind
+	// POST /v0/beads/issues:batchGet. Its accessor does NOT recurse through
+	// the hook decorator — it answers no writes — so it is taken off the
+	// peeled store with the rest for uniformity rather than out of necessity.
+	batchGetter  issueops.BatchGetter
 	relations    issueops.Relations
 	commenter    issueops.Commenter
 	blocking     issueops.BlockingAnnotator

@@ -879,6 +879,9 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 		for id := range childIDs {
 			childIDSlice = append(childIDSlice, id)
 		}
+		// TODO(batchgetter): unbounded id list; see issueops.BatchGetter's doc
+		// and the importIssueLookup TODO in import_shared.go for why this is
+		// not yet routed through the role.
 		childIssues, fetchErr := r.GetIssuesByIDs(ctx, childIDSlice)
 		if fetchErr == nil {
 			abandonedSet := make(map[string]bool, len(abandoned))

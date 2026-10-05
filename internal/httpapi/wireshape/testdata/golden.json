@@ -698,6 +698,27 @@
       "item_type": "object"
     },
     {
+      "schema": "BatchGetIssuesRequest",
+      "member": "ids",
+      "type": "array",
+      "required": true,
+      "item_type": "string"
+    },
+    {
+      "schema": "BatchGetIssuesResult",
+      "member": "issues",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "BatchGetIssuesResult",
+      "member": "missing",
+      "type": "array",
+      "required": true,
+      "item_type": "string"
+    },
+    {
       "schema": "Blocker",
       "member": "id",
       "type": "string",
