@@ -200,6 +200,13 @@ func TestResetCommandFlagsRestoresEveryFlag(t *testing.T) {
 	// shared command tree.
 	t.Cleanup(func() { resetCommandFlags(rootCmd) })
 
+	// Start from the registered baseline, not from whatever an earlier
+	// in-process command left behind: the root pre-run fills flag variables
+	// such as doltAutoCommit from config without marking them Changed, and a
+	// baseline read from that live value is one a reset correctly does not
+	// restore (gastownhall/beads#7190).
+	resetCommandFlags(rootCmd)
+
 	type state struct {
 		value   string
 		changed bool

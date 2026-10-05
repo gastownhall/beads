@@ -524,6 +524,7 @@ go_test(
         "backup_dolt_test.go",
         "backup_embedded_test.go",
         "backup_export_failure_test.go",
+        "backup_export_watermark_test.go",
         "backup_lock_test.go",
         "backup_proxied_external_integration_test.go",
         "backup_proxied_local_integration_test.go",
