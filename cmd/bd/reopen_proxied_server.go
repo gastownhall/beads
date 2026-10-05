@@ -40,7 +40,7 @@ type reopenProxiedTarget struct {
 // ONE CALL PER ID, so one transaction and one history entry per id, where this
 // route used to run every id in one unit of work under a hand-composed
 // "bd: reopen a, b" message.
-func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
+func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []string, ifRevision *int64) error {
 	if len(args) == 0 {
 		return HandleErrorRespectJSON("no issue ID provided")
 	}
@@ -66,14 +66,18 @@ func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	reopenedIssues := []*types.Issue{}
 	for _, target := range targets {
 		result, err := lifecycle.Reopen(ctx, issueops.ReopenRequest{
-			Actor:   actor,
-			IssueID: target.id,
-			Reason:  reason,
+			Actor:           actor,
+			IssueID:         target.id,
+			Reason:          reason,
+			ExpectedVersion: ifRevision,
 			// The label the direct route spells, so one reopen reads the same
 			// in `bd dolt log` whichever route served it.
 			Provenance: "bd: reopen " + target.id,
 		})
 		if err != nil {
+			if reported, ok := reportIfRevisionFailure("reopening", target.id, err); ok {
+				return reported
+			}
 			reportIssueLookupFailure("reopening", target.id, err)
 			hasError = true
 			continue
