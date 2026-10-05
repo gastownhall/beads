@@ -207,6 +207,8 @@ func TestServedStatsReporterContract(t *testing.T) {
 	}{
 		{"CountsEveryDurableRowByStatus", conformance.RunStatsReporterCountsEveryDurableRowByStatus},
 		{"ExcludesTheWispTier", conformance.RunStatsReporterExcludesTheWispTier},
+		{"BreaksOutTheRowsTheDefaultListingSuppresses", conformance.RunStatsReporterBreaksOutTheRowsTheDefaultListingSuppresses},
+		{"BreaksOutAGateThatIsAlsoATemplate", conformance.RunStatsReporterBreaksOutAGateThatIsAlsoATemplate},
 		{"AStatusOutsideTheTalliesIsCountedOnlyInTotal", conformance.RunStatsReporterAStatusOutsideTheTalliesIsCountedOnlyInTotal},
 		{"BlockedCountsTheGraphNotTheStatus", conformance.RunStatsReporterBlockedCountsTheGraphNotTheStatus},
 		{"BlockedExcludesByStatusNotByThePinnedFlag", conformance.RunStatsReporterBlockedExcludesByStatusNotByThePinnedFlag},
@@ -219,6 +221,7 @@ func TestServedStatsReporterContract(t *testing.T) {
 		{"AssigneeBlockedCountsTheStatusNotTheGraph", conformance.RunStatsReporterAssigneeBlockedCountsTheStatusNotTheGraph},
 		{"AssigneeStatsMergesTheWispTier", conformance.RunStatsReporterAssigneeStatsMergesTheWispTier},
 		{"AssigneeStatsPopulatesBothPointers", conformance.RunStatsReporterAssigneeStatsPopulatesBothPointers},
+		{"AssigneeStatsBreaksOutTheSuppressedRows", conformance.RunStatsReporterAssigneeStatsBreaksOutTheSuppressedRows},
 		{"AssigneeStatsRefusesAnEmptyAssignee", conformance.RunStatsReporterAssigneeStatsRefusesAnEmptyAssignee},
 	} {
 		t.Run(tc.name, func(t *testing.T) { tc.run(t, t.Context(), fixture) })
