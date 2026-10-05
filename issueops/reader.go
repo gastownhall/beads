@@ -54,19 +54,15 @@ type ReadyRequest struct {
 	// the other, and P0 has already been lost that way once.
 	Priority *int
 
-	// ParentID restricts to one issue's DIRECT children only: a parent-child
-	// dependency edge, OR (for an issue with no such edge) a dotted-id prefix
-	// match — the same one-level sqlbuild.ParentID clause CountRequest.ParentID
-	// compiles to (internal/storage/sqlbuild/filter.go). It is NOT a recursive
-	// descendants walk, despite this field's name and this comment's own prior
-	// wording (fixed in the S8 review, GH#4387): the recursive tree that
-	// `bd list --parent X` renders by DEFAULT comes from
-	// cmd/bd/list_show_filter_modes.go's findAllDescendants calling this ROLE
-	// once per level and accumulating the results client-side, not from the
-	// role answering a deeper question. `bd list --parent X --flat` (or
-	// --json) skips that client-side recursion and returns exactly this
-	// field's one-level answer, which is the invocation that agrees with
-	// `bd count --parent X`'s cardinality.
+	// ParentID restricts to ALL TRANSITIVE DESCENDANTS of one issue, not just
+	// its direct children: internal/storage/issueops/ready_work.go calls
+	// GetDescendantIDsInTx(ctx, tx, *filter.ParentID, 0), the recursive walk.
+	// GH#3396: this used to be a one-hop subquery against the dependency
+	// table, so grandchildren were silently dropped despite this comment and
+	// the help text both promising "descendants (recursive)" — do not
+	// mistake this for ListRequest.ParentID's one-level clause, which is a
+	// DIFFERENT query (PR #7199 review: an earlier pass here wrongly copied
+	// that one-level wording onto this field).
 	ParentID string
 	// MolType restricts to one molecule type.
 	MolType *MolType
@@ -351,6 +347,19 @@ type ListRequest struct {
 	// ExcludeTypes entries may be comma-separated; splitting happens inside.
 	ExcludeTypes []string
 
+	// ParentID restricts to one issue's DIRECT children only: a parent-child
+	// dependency edge, OR (for an issue with no such edge) a dotted-id prefix
+	// match — the same one-level sqlbuild.ParentID clause CountRequest.ParentID
+	// compiles to (internal/storage/sqlbuild/filter.go). It is NOT a recursive
+	// descendants walk — that is ReadyRequest.ParentID above, a DIFFERENT
+	// field on a different request, backed by GetDescendantIDsInTx (GH#3396).
+	// The recursive tree that `bd list --parent X` renders by DEFAULT comes
+	// from cmd/bd/list_show_filter_modes.go's findAllDescendants calling this
+	// ROLE once per level and accumulating the results client-side, not from
+	// the role answering a deeper question. `bd list --parent X --flat` (or
+	// --json) skips that client-side recursion and returns exactly this
+	// field's one-level answer, which is the invocation that agrees with
+	// `bd count --parent X`'s cardinality.
 	ParentID string
 	NoParent bool
 	MolType  *MolType
