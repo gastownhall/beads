@@ -19,6 +19,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/steveyegge/beads/internal/httpapi/spec"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -719,13 +720,15 @@ func sortedKeys(m map[string]bool) []string {
 // second copy this whole gate exists to avoid; and the document rather than the
 // handlers, because the document is what the source-of-truth ordering names as
 // the surface authority.
+//
+// Read through spec.OpenAPIV0() (a go:embed'd []byte) rather than a relative
+// os.ReadFile path: the embed already carries this exact file as a build
+// input of internal/httpapi/spec, so this gate's own package dependency is
+// what makes the document reachable under `bazel test`'s sandbox -- no
+// `data` attribute naming the YAML's filesystem path is needed here at all.
 func loadPublishedParameters(t *testing.T) map[Op]map[string]bool {
 	t.Helper()
-	path := filepath.Join("..", "..", "httpapi", "spec", "openapi.v0.yaml")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read the wire contract: %v", err)
-	}
+	raw := spec.OpenAPIV0()
 	var doc struct {
 		Paths map[string]map[string]struct {
 			OperationID string `yaml:"operationId"`

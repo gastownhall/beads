@@ -30,9 +30,15 @@ go_test(
         "roundtrip_test.go",
         "skew_test.go",
     ],
+    data = [
+        "//:engdocs/design/http-divergence-ledger.md",
+        "//cmd/bd:go_srcs",
+        "//internal/httpapi/spec:openapi.v0.yaml",
+    ] + glob(["*.go"]),
     embed = [":encode"],
     deps = [
         "//internal/httpapi",
+        "//internal/httpapi/spec",
         "//internal/types",
         "//internal/workapi",
         "//issueops",
