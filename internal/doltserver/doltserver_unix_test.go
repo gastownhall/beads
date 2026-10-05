@@ -3,9 +3,20 @@
 package doltserver
 
 import (
+	"os"
 	"reflect"
 	"testing"
 )
+
+func TestIsProcessAliveTreatsEPERMAsAlive(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root may signal any process, so there is no EPERM to observe")
+	}
+	// PID 1 always exists, and an unprivileged user gets EPERM from kill(1, 0).
+	if !isProcessAlive(1) {
+		t.Error("expected PID 1 to be reported alive")
+	}
+}
 
 func TestParseDoltProcessPIDs(t *testing.T) {
 	tests := []struct {

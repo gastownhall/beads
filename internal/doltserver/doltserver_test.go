@@ -243,6 +243,91 @@ func TestIsRunningCorruptPID(t *testing.T) {
 	}
 }
 
+func TestIsRunningKeepsStateWhenProcessListUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	// This test process is alive, so only the process-list check could reject it.
+	pid := os.Getpid()
+	if err := os.WriteFile(pidPath(dir), []byte(strconv.Itoa(pid)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePortFile(dir, 14567); err != nil {
+		t.Fatal(err)
+	}
+	orig := readDoltProcesses
+	readDoltProcesses = func() ([]int, error) { return nil, errors.New("listing processes: operation not permitted") }
+	t.Cleanup(func() { readDoltProcesses = orig })
+
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatalf("IsRunning error: %v", err)
+	}
+	if !state.Running || state.PID != pid || state.Port != 14567 {
+		t.Errorf("expected the tracked server to be kept, got %+v", state)
+	}
+	for _, path := range []string{pidPath(dir), portPath(dir)} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("expected %s to be kept: %v", filepath.Base(path), err)
+		}
+	}
+}
+
+func TestIsRunningDoesNotStopUnverifiedProcessWithoutPort(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	// The PID is this test process: the orphan-stop path would kill the test.
+	if err := os.WriteFile(pidPath(dir), []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+		t.Fatal(err)
+	}
+	orig := readDoltProcesses
+	readDoltProcesses = func() ([]int, error) { return nil, errors.New("listing processes: operation not permitted") }
+	t.Cleanup(func() { readDoltProcesses = orig })
+
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatalf("IsRunning error: %v", err)
+	}
+	if state.Running {
+		t.Error("expected Running=false when neither the process nor its port can be confirmed")
+	}
+	if _, err := os.Stat(pidPath(dir)); err != nil {
+		t.Errorf("expected the PID file to be kept: %v", err)
+	}
+}
+
+func TestIsRunningRemovesStateWhenPIDIsNotDolt(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	if err := os.WriteFile(pidPath(dir), []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePortFile(dir, 14567); err != nil {
+		t.Fatal(err)
+	}
+	orig := readDoltProcesses
+	readDoltProcesses = func() ([]int, error) { return nil, nil } // read fine, no dolt processes
+	t.Cleanup(func() { readDoltProcesses = orig })
+
+	state, err := IsRunning(dir)
+	if err != nil {
+		t.Fatalf("IsRunning error: %v", err)
+	}
+	if state.Running {
+		t.Error("expected Running=false for a PID that is not a dolt server")
+	}
+	for _, path := range []string{pidPath(dir), portPath(dir)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be removed", filepath.Base(path))
+		}
+	}
+}
+
 func TestIsRunningCorruptPIDRemovesPortFile(t *testing.T) {
 	dir := t.TempDir()
 
