@@ -80,7 +80,10 @@ type CountRequest struct {
 	// ParentID restricts to one issue's children, spelled as
 	// ListRequest.ParentID spells it: a parent-child dependency edge, OR (for
 	// an issue with no such edge) a dotted-id prefix match. NoParent restricts
-	// to rows with neither.
+	// to rows with no parent-child dependency edge. It does not consult the
+	// dotted-id convention, so an edge-less dotted-id child (X.1) still counts
+	// as top-level — it is counted by BOTH ParentID X and NoParent, as it is
+	// listed by both `bd list --parent X --flat` and `bd list --no-parent`.
 	//
 	// Setting both IS refused, as ErrValidation, UNLIKE Assignee/NoAssignee
 	// above: `bd list`'s CLI already refuses `--parent` with `--no-parent`

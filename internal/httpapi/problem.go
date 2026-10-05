@@ -741,11 +741,17 @@ var operationCodes = map[string][]Code{
 	// Its 400s come from both the transport and the ROLE. The transport refuses
 	// malformed values, repeated single-valued parameters and a `group_by`
 	// outside the closed set. countGroupOf stops that last case at the edge.
-	// The role has exactly one reachable refusal: BuildCountFilter rejects an
-	// invalid metadata key, from `metadata_field` or `has_metadata_key`.
-	// failReadErr classifies it through invalidFilterParam as a 400 naming the
-	// parameter it came from. An unrecognized status or type is not a refusal;
-	// the role promises it matches nothing and answers 0.
+	// The role has three reachable refusals, all from BuildCountFilter: an
+	// invalid metadata key (`metadata_field` or `has_metadata_key`), an
+	// unrecognized `exclude_status` name, and `parent` set together with
+	// `no_parent` (named `no_parent`). The last two carry ErrValidation; the
+	// metadata-key refusal does not, being a plain error from
+	// ValidateMetadataFilters, which the list and ready builders share.
+	// failReadErr classifies all three through invalidFilterParam by message
+	// prefix, not by sentinel, as a 400 naming the parameter each came from.
+	// An unrecognized `status` or `type` is not a refusal; the role promises
+	// it matches nothing and answers 0. Nor is an unrecognized `exclude_type`,
+	// which excludes nothing.
 	OpCountIssues: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The listing's vocabulary minus the cursor: this operation has none, so
 	// invalid_cursor cannot arise. An unparseable EXPRESSION is an

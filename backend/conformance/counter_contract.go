@@ -286,8 +286,9 @@ func RunCounterExcludeTypesNarrowsThePredicate(t *testing.T, ctx context.Context
 
 // RunCounterExcludeStatusNarrowsThePredicate pins CountRequest.ExcludeStatus
 // (counter.go, S8): a Count-only field with no List counterpart. Named
-// statuses are excluded, and — like Status — an unrecognized name excludes
-// nothing rather than failing (match-nothing-rather-than-fail, counter.go).
+// statuses are excluded, and — UNLIKE Status — an unrecognized name is
+// refused as ErrValidation rather than excluding nothing, because a typo
+// would silently overcount (counter.go).
 func RunCounterExcludeStatusNarrowsThePredicate(t *testing.T, ctx context.Context, fixture CounterFixture) {
 	t.Helper()
 	open := fixture.IssuePrefix + "-exstatus-open"

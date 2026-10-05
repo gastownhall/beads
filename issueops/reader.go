@@ -60,7 +60,7 @@ type ReadyRequest struct {
 	// GH#3396: this used to be a one-hop subquery against the dependency
 	// table, so grandchildren were silently dropped despite this comment and
 	// the help text both promising "descendants (recursive)" — do not
-	// mistake this for ListRequest.ParentID's one-level clause, which is a
+	// mistake this for ListRequest.ParentID's non-walking clause, which is a
 	// DIFFERENT query (PR #7199 review: an earlier pass here wrongly copied
 	// that one-level wording onto this field).
 	ParentID string
@@ -347,19 +347,29 @@ type ListRequest struct {
 	// ExcludeTypes entries may be comma-separated; splitting happens inside.
 	ExcludeTypes []string
 
-	// ParentID restricts to one issue's DIRECT children only: a parent-child
-	// dependency edge, OR (for an issue with no such edge) a dotted-id prefix
-	// match — the same one-level sqlbuild.ParentID clause CountRequest.ParentID
-	// compiles to (internal/storage/sqlbuild/filter.go). It is NOT a recursive
-	// descendants walk — that is ReadyRequest.ParentID above, a DIFFERENT
-	// field on a different request, backed by GetDescendantIDsInTx (GH#3396).
+	// ParentID restricts to one issue's children through one SQL clause, the
+	// same one CountRequest.ParentID compiles to
+	// (internal/storage/sqlbuild/filter.go): a parent-child dependency edge
+	// onto ParentID, OR, for a row with no parent-child edge at all, an id
+	// under ParentID's dotted prefix ("X.1", "X.1.1"). NEITHER ARM WALKS. The
+	// edge arm stops at one level, so a grandchild with an edge of its own is
+	// not in the answer, while the prefix arm reaches every edge-less dotted
+	// id at any depth (backend/conformance/reader_contract.go pins that arm).
+	// It is NOT the recursive descendants walk — that is ReadyRequest.ParentID
+	// above, a DIFFERENT field on a different request, backed by
+	// GetDescendantIDsInTx (GH#3396); on the ReadyFlag arm this field crosses
+	// to that query and resolves recursively there.
 	// The recursive tree that `bd list --parent X` renders by DEFAULT comes
-	// from cmd/bd/list_show_filter_modes.go's findAllDescendants calling this
-	// ROLE once per level and accumulating the results client-side, not from
-	// the role answering a deeper question. `bd list --parent X --flat` (or
-	// --json) skips that client-side recursion and returns exactly this
-	// field's one-level answer, which is the invocation that agrees with
-	// `bd count --parent X`'s cardinality.
+	// from cmd/bd/list_show_filter_modes.go's findAllDescendants re-running
+	// this clause against the store once per level and accumulating the
+	// results client-side, not from this field answering a deeper question.
+	// --flat, --json and --format skip that walk and return exactly this
+	// field's answer, which is why the flat listing is the invocation that
+	// agrees with `bd count --parent X`'s cardinality.
+	//
+	// NoParent restricts to rows with no parent-child dependency edge. It has
+	// no dotted-id arm, so an edge-less "X.1" matches BOTH ParentID X and
+	// NoParent. The ReadyFlag arm refuses it; see that field.
 	ParentID string
 	NoParent bool
 	MolType  *MolType

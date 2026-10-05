@@ -43,8 +43,11 @@ func ValidateCountGroup(group issueops.CountGroup) (string, error) {
 // pinned by a golden-style test comparing this builder's output against
 // BuildListFilter's for the same request (count_test.go, GH#4387).
 //
-// cfg supplies the workspace's infra vocabulary and is only read under
-// IncludeInfra; a zero ListConfig falls back to the default infra set.
+// cfg supplies the workspace's infra vocabulary and its custom status names.
+// It is read under IncludeInfra AND whenever ExcludeStatus is non-empty (the
+// exclusion is validated against the workspace's statuses), so a caller must
+// load it in both cases; a zero ListConfig falls back to the default infra set
+// and the built-in statuses only.
 func BuildCountFilter(in issueops.CountRequest, cfg ListConfig) (types.IssueFilter, error) {
 	filter := types.IssueFilter{
 		TitleSearch:         in.TitleSearch,

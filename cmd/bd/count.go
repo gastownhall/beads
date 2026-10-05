@@ -284,9 +284,11 @@ func registerCountFlags(cmd *cobra.Command) {
 
 	// Hierarchy and exclusions (same spelling as `bd list`'s flags of the same
 	// name, GH#4387's count/list parity): --parent and --no-parent restrict to
-	// a parent's children or to rows with neither; --exclude-type and
-	// --exclude-status narrow the predicate by type and by status, composing
-	// with --include-infra's own exclusions rather than replacing them.
+	// a parent's children or to rows with no parent-child edge (an edge-less
+	// dotted-id child still counts as top-level, as in `bd list --no-parent`);
+	// --exclude-type and --exclude-status narrow the predicate by type and by
+	// status, composing with --include-infra's own exclusions rather than
+	// replacing them.
 	cmd.Flags().String("parent", "", "Filter by parent issue ID (count children of specified issue)")
 	cmd.Flags().Bool("no-parent", false, "Count only top-level issues (exclude child issues)")
 	cmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from the count (comma-separated or repeatable)")
