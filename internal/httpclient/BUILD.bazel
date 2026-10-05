@@ -99,6 +99,7 @@ go_test(
         "lifecycle_update_test.go",
         "list_sort_test.go",
         "metadatacas_test.go",
+        "roles_graph_cycles_test.go",
         "roles_test.go",
         "served_batch_apply_test.go",
         "served_batch_close_test.go",
