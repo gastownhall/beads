@@ -360,7 +360,7 @@ func countBurstConnections(t *testing.T, client *http.Client, target *url.URL, n
 // TestTransportForRaisesMaxIdleConnsPerHostForBursts is the perf-hardening
 // half of TransportFor: gc's ready-veto fan-out dials one CA-scoped target at
 // concurrency 8, and http.DefaultTransport's MaxIdleConnsPerHost of 2 would
-// force a fresh TLS handshake (~120ms at the cherry-to-AWS RTT this CA exists
+// force a fresh TLS handshake (~120ms at a cross-region round-trip time this CA exists
 // for) on 6 of every 8 requests even once the pool is warm. This asserts the
 // ceiling TransportFor sets, and that a burst run twice — the second after the
 // first has gone idle — reuses every connection the second time, rather than
