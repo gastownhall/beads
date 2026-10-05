@@ -211,6 +211,7 @@
 15 3 TestUpdateMergeOps_DoltEngine_TwoIssues
 15 3 TestWithPeerAuth_RestoresAbsentEnv
 
+15 4 TestCounterExcludeStatusAcceptsAWorkspaceCustomStatusWithoutIncludeInfra
 15 4 TestEmbeddedBatchCloserSettlesTheDependersOfWhatItClosed
 15 4 TestEmbeddedBlockedRecheckSettlesWhatTheWriteRecorded
 15 4 TestEmbeddedClaimIssueWrapperClaimsTheWispPlane
