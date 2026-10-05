@@ -2068,6 +2068,81 @@ paths:
           schema:
             type: boolean
             default: false
+        - name: parent
+          in: query
+          description: >-
+            Restrict to one issue's children: a parent-child dependency edge
+            onto `parent`, OR — for an issue carrying no parent-child edge at
+            all — a dotted-id prefix match (`parent.anything`). It is the
+            same predicate `GET /v0/beads/issues`'s own `parent` applies, so
+            `bd count --parent X` and `bd list --parent X --all` agree on
+            cardinality for the shared part of the predicate. Sending it
+            beside `no_parent` is not refused, for the same reason `assignee`
+            and `no_assignee` are not: the two compose into the empty
+            intersection, which is `0`.
+
+
+            Behind the `issues.count.scope` behavior token: an older server
+            answers `unknown_parameter` for this name.
+          schema:
+            type: string
+        - name: no_parent
+          in: query
+          description: >-
+            Only issues carrying NO parent-child dependency edge. Unlike
+            `parent`, this does NOT consult the dotted-id convention — an
+            issue named `X.1` with no edge to `X` is still counted here, which
+            is the one place `parent` and `no_parent` are not exact opposites
+            of each other.
+
+
+            Behind the `issues.count.scope` behavior token: an older server
+            answers `unknown_parameter` for this name.
+          schema:
+            type: boolean
+            default: false
+        - name: exclude_type
+          in: query
+          description: >-
+            Issue types to exclude from the count. Repeat the parameter, or
+            pass a comma-separated list; entries are split and trimmed inside
+            the role and are NOT validated against this workspace's
+            vocabulary — an unrecognized name excludes nothing rather than
+            failing, `status`'s own treatment. It is NOT ignored when `type`
+            is set (unlike `GET /v0/beads/ready`'s `exclude_type`): the two
+            compose, and it also composes with the exclusions `include_infra`
+            applies on its own rather than replacing them.
+
+
+            Behind the `issues.count.scope` behavior token: an older server
+            answers `unknown_parameter` for this name.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+        - name: exclude_status
+          in: query
+          description: >-
+            Statuses to exclude from the count. Repeat the parameter, or pass
+            a comma-separated list; entries are taken AS WRITTEN — no
+            normalization, no validation against this workspace's vocabulary,
+            `status`'s own match-nothing-rather-than-fail treatment. There is
+            no listing counterpart to this parameter: `GET /v0/beads/issues`
+            computes its default status exclusions internally from workspace
+            configuration and exposes no equivalent knob, so this is a
+            Count-only capability.
+
+
+            Behind the `issues.count.scope` behavior token: an older server
+            answers `unknown_parameter` for this name.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
         - name: group_by
           in: query
           description: >-
@@ -7514,7 +7589,11 @@ components:
             older server would refuse anyway, and `issues.list.sort`, which
             announces that `GET /v0/beads/issues` accepts the `sort` query
             parameter (two closed, pageable total orders — see that
-            parameter) rather than silently answering `unknown_parameter`. The
+            parameter) rather than silently answering `unknown_parameter`, and
+            `issues.count.scope`, which announces that
+            `GET /v0/beads/issues:count` accepts `parent`, `no_parent`,
+            `exclude_type` and `exclude_status` (see those parameters) rather
+            than silently answering `unknown_parameter` for all four. The
             list grows additively, and an operation never appears here unless
             it is fully implemented. This is how a client checks for an
             operation or a behavior — never the version string.

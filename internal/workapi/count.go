@@ -103,6 +103,39 @@ func BuildCountFilter(in issueops.CountRequest, cfg ListConfig) (types.IssueFilt
 		filter.IDs = ids
 	}
 
+	if in.ParentID != "" {
+		parentID := in.ParentID
+		filter.ParentID = &parentID
+	}
+	if in.NoParent {
+		filter.NoParent = true
+	}
+
+	// ExcludeTypes is appended to, not assigned: applyCountIncludeInfra (below)
+	// contributes its own "gate" exclusion, and the two sets must compose
+	// rather than one silently discarding the other, exactly as
+	// BuildListFilter's ExcludeTypes and applyTypeSuppressions compose.
+	for _, raw := range in.ExcludeTypes {
+		for _, t := range strings.Split(raw, ",") {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				filter.ExcludeTypes = append(filter.ExcludeTypes, types.IssueType(utils.NormalizeIssueType(t)))
+			}
+		}
+	}
+
+	// ExcludeStatus takes names as written, with no normalization and no
+	// validation against the workspace vocabulary — the same
+	// match-nothing-rather-than-fail treatment Status and IssueType get above.
+	for _, raw := range in.ExcludeStatus {
+		for _, s := range strings.Split(raw, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				filter.ExcludeStatus = append(filter.ExcludeStatus, types.Status(s))
+			}
+		}
+	}
+
 	if in.IncludeInfra {
 		applyCountIncludeInfra(&filter, in.IssueType, cfg)
 	} else if !in.IncludeEphemeral {

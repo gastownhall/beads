@@ -57,6 +57,13 @@ type CounterFixture struct {
 	// A nil hook means "this backend cannot observe history", and the case
 	// that needs it SKIPS rather than passing quietly.
 	CountHistory func(context.Context) (int, error)
+	// AddDependency seeds one dependency edge, the same hook
+	// ReaderFixture/DependencyEditorFixture take it from (role_fixture_kit's
+	// shared AddDependency). It exists here only for the ParentID/NoParent
+	// scope cases (S8): NoParent excludes by PARENT-CHILD EDGE alone
+	// (sqlbuild/filter.go), unlike ParentID's dotted-id-prefix fallback, so
+	// pinning it needs a real edge and not just a naming convention.
+	AddDependency func(context.Context, *types.Dependency, string) error
 }
 
 // RunCounterCountsTheDurablePlaneByDefault pins counter.go:123-126 from the
@@ -174,6 +181,135 @@ func RunCounterAnUnknownStatusMatchesNothing(t *testing.T, ctx context.Context, 
 
 	scope.Status = "no-such-status"
 	assertCounterTotal(t, ctx, fixture, scope, 0)
+}
+
+// RunCounterParentIDScopesToChildren pins CountRequest.ParentID (counter.go,
+// S8): restricted to ONE issue's children, reached two ways at once, exactly
+// as ListRequest.ParentID is (sqlbuild/filter.go) — a parent-child dependency
+// edge, OR (for a row with no such edge) a dotted-id prefix match. The parent
+// itself, an unrelated row and a same-prefix DECOY (sibling id with no
+// separator, e.g. "parent2") are all seeded so neither arm can pass by
+// over-matching.
+func RunCounterParentIDScopesToChildren(t *testing.T, ctx context.Context, fixture CounterFixture) {
+	t.Helper()
+	parent := fixture.IssuePrefix + "-parentid-parent"
+	byEdge := fixture.IssuePrefix + "-parentid-byedge"
+	byDotted := parent + ".1"
+	decoy := parent + "x"
+	unrelated := fixture.IssuePrefix + "-parentid-unrelated"
+
+	for _, id := range []string{parent, byEdge, byDotted, decoy, unrelated} {
+		seedCounterIssue(t, ctx, fixture, counterSeed(id))
+	}
+	requireCounterAddDependency(t, fixture)
+	if err := fixture.AddDependency(ctx, &types.Dependency{
+		IssueID: byEdge, DependsOnID: parent, Type: types.DepParentChild,
+	}, "seed"); err != nil {
+		t.Fatalf("seed edge %s -> %s: %v", byEdge, parent, err)
+	}
+
+	scope := counterScope(parent, byEdge, byDotted, decoy, unrelated)
+	scope.ParentID = parent
+	// Both children count; the parent, the decoy and the unrelated row do not.
+	assertCounterTotal(t, ctx, fixture, scope, 2)
+}
+
+// RunCounterNoParentExcludesChildren pins CountRequest.NoParent
+// (counter.go, S8): restricted to rows with NO parent-child edge.
+//
+// Unlike ParentID, NoParent's SQL clause (sqlbuild/filter.go) checks ONLY the
+// parent-child dependency table, not the dotted-id convention — a row that is
+// a dotted-id child with no edge at all still passes NoParent. That asymmetry
+// is exactly what the "byDotted" row below pins: it is excluded from
+// ParentID's answer by nothing (RunCounterParentIDScopesToChildren already
+// admits it), but NoParent admits it too, because it carries no edge.
+func RunCounterNoParentExcludesChildren(t *testing.T, ctx context.Context, fixture CounterFixture) {
+	t.Helper()
+	parent := fixture.IssuePrefix + "-noparent-parent"
+	child := fixture.IssuePrefix + "-noparent-child"
+	byDotted := parent + ".1"
+
+	for _, id := range []string{parent, child, byDotted} {
+		seedCounterIssue(t, ctx, fixture, counterSeed(id))
+	}
+	requireCounterAddDependency(t, fixture)
+	if err := fixture.AddDependency(ctx, &types.Dependency{
+		IssueID: child, DependsOnID: parent, Type: types.DepParentChild,
+	}, "seed"); err != nil {
+		t.Fatalf("seed edge %s -> %s: %v", child, parent, err)
+	}
+
+	scope := counterScope(parent, child, byDotted)
+	assertCounterTotal(t, ctx, fixture, scope, 3)
+
+	scope.NoParent = true
+	// child is excluded (has an edge); parent and byDotted remain (neither
+	// carries a parent-child edge, and NoParent does not consult the dotted
+	// naming convention at all).
+	assertCounterTotal(t, ctx, fixture, scope, 2)
+}
+
+// RunCounterExcludeTypesNarrowsThePredicate pins CountRequest.ExcludeTypes
+// (counter.go, S8): named types are excluded from the count, composing with
+// (rather than replacing) IncludeInfra's own "gate" exclusion.
+func RunCounterExcludeTypesNarrowsThePredicate(t *testing.T, ctx context.Context, fixture CounterFixture) {
+	t.Helper()
+	task := fixture.IssuePrefix + "-extype-task"
+	chore := fixture.IssuePrefix + "-extype-chore"
+	gate := fixture.IssuePrefix + "-extype-gate"
+	seedCounterIssue(t, ctx, fixture, counterSeed(task))
+	choreSeed := counterSeed(chore)
+	choreSeed.IssueType = types.TypeChore
+	seedCounterIssue(t, ctx, fixture, choreSeed)
+	gateSeed := counterSeed(gate)
+	gateSeed.IssueType = types.IssueType("gate")
+	seedCounterIssue(t, ctx, fixture, gateSeed)
+
+	scope := counterScope(task, chore, gate)
+	assertCounterTotal(t, ctx, fixture, scope, 3)
+
+	scope.ExcludeTypes = []string{"chore"}
+	assertCounterTotal(t, ctx, fixture, scope, 2)
+
+	// Composes with IncludeInfra's own default gate exclusion: both the
+	// explicit chore exclusion and the include-infra gate exclusion apply at
+	// once, leaving only task.
+	scope.IncludeInfra = true
+	assertCounterTotal(t, ctx, fixture, scope, 1)
+}
+
+// RunCounterExcludeStatusNarrowsThePredicate pins CountRequest.ExcludeStatus
+// (counter.go, S8): a Count-only field with no List counterpart. Named
+// statuses are excluded, and — like Status — an unrecognized name excludes
+// nothing rather than failing (match-nothing-rather-than-fail, counter.go).
+func RunCounterExcludeStatusNarrowsThePredicate(t *testing.T, ctx context.Context, fixture CounterFixture) {
+	t.Helper()
+	open := fixture.IssuePrefix + "-exstatus-open"
+	closed := fixture.IssuePrefix + "-exstatus-closed"
+	seedCounterIssue(t, ctx, fixture, counterSeed(open))
+	closedSeed := counterSeed(closed)
+	closedSeed.Status = types.StatusClosed
+	seedCounterIssue(t, ctx, fixture, closedSeed)
+
+	scope := counterScope(open, closed)
+	assertCounterTotal(t, ctx, fixture, scope, 2)
+
+	scope.ExcludeStatus = []string{"closed"}
+	assertCounterTotal(t, ctx, fixture, scope, 1)
+
+	// An unrecognized status excludes nothing: the set is unchanged.
+	scope.ExcludeStatus = []string{"no-such-status"}
+	assertCounterTotal(t, ctx, fixture, scope, 2)
+}
+
+// requireCounterAddDependency skips a case that needs a real parent-child
+// edge when the fixture offers no way to create one, rather than failing with
+// a nil-pointer call — mirroring counterHistoryCount's optional-hook pattern.
+func requireCounterAddDependency(t *testing.T, fixture CounterFixture) {
+	t.Helper()
+	if fixture.AddDependency == nil {
+		t.Skip("fixture cannot seed a dependency edge: AddDependency is nil")
+	}
 }
 
 // RunCounterGroupsPartitionTheScalarSet pins counter.go:168-169 and :244-245

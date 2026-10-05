@@ -76,6 +76,37 @@ const CapBatchApplyLarge = "issues.batchApplyLarge"
 // baseline is built from.
 const CapIssuesListSort = "issues.list.sort"
 
+// CapIssuesCountScope is the behavior capability that advertises GET
+// /v0/beads/issues:count's `parent`, `no_parent`, `exclude_type` and
+// `exclude_status` parameters (reads.go countFilters, spec OpCountIssues).
+// Like CapIssuesListSort it names FOUR PARAMETERS added to an existing
+// operation rather than a route of its own — `issues.count` is already the
+// per-operation token for the route itself — so it rides the same
+// behaviorCapabilities list and one token covers all four (internal/beads
+// design doc "Count scope", S8): they shipped together, through the one
+// shared workapi.BuildCountFilter builder, so there is no partial-support
+// state a finer-grained token would need to distinguish.
+//
+// This is the TestNewParameterOnExistingOperationHasABehaviorToken gate
+// CapIssuesListSort's doc describes: `issues:count` is a pretoken-baseline
+// operation (internal/httpapi/testdata/pretoken_operations.json), so these
+// four NEW parameters on it must each cite a served token in their own
+// OpenAPI description, and this is that token.
+//
+// CLIENT-SKEW NOTE FOR S3/S4 (no OSS HTTP client exists yet to wire this
+// into): a server predating this token answers any of the four parameters
+// with `400 invalid_argument`/`reason: "unknown_parameter"` naming the
+// parameter — the per-parameter capability probe every behavior token on
+// this operation already relies on (see CapIssuesListSort). When the HTTP
+// client lands, it MUST check `issues.count.scope` against the cached
+// `ContextResponse.capabilities` from the handshake and refuse LOCALLY with
+// a typed `ErrUnsupported{Capability: "issues.count.scope"}` (or an
+// equivalent typed error carrying the token) before sending a request that
+// sets `ParentID`, `NoParent`, `ExcludeTypes` or `ExcludeStatus` to an older
+// server — never let the caller pay for a round trip that 400s anyway, and
+// never silently drop the fields and return a wider count than asked for.
+const CapIssuesCountScope = "issues.count.scope"
+
 // customMethodTarget splits the custom method off the segment the router
 // matched, and reports the row that claims it.
 //
@@ -810,7 +841,7 @@ func (r route) specPathOf() string {
 // route. project.enforce announces per-request Bd-Project-Id enforcement
 // (checkProjectStamp): a stamped client reads it to know the refusal is available
 // rather than silently dropped by an older server.
-var behaviorCapabilities = []string{CapProjectEnforce, CapBatchApplyLarge, CapIssuesListSort}
+var behaviorCapabilities = []string{CapProjectEnforce, CapBatchApplyLarge, CapIssuesListSort, CapIssuesCountScope}
 
 // Capabilities lists what this build advertises in ContextResponse.capabilities:
 // the operations it actually implements, gated on `implemented` so a stub can

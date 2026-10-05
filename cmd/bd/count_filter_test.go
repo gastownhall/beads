@@ -76,6 +76,60 @@ func TestCountIncludeEphemeralFlagShape(t *testing.T) {
 	}
 }
 
+// TestCountScopeFlagsShape pins --parent, --no-parent, --exclude-type and
+// --exclude-status: their existence, their defaults, and that setting one
+// does not leak into another. These are the Counter-scope fields (S8): the
+// behavior token issues.count.scope on the HTTP front door exists because of
+// exactly these four flags.
+func TestCountScopeFlagsShape(t *testing.T) {
+	for flag, defValue := range map[string]string{
+		"parent":         "",
+		"no-parent":      "false",
+		"exclude-type":   "[]",
+		"exclude-status": "[]",
+	} {
+		got := countCmd.Flags().Lookup(flag)
+		if got == nil {
+			t.Fatalf("bd count must expose a --%s flag", flag)
+		}
+		if got.DefValue != defValue {
+			t.Fatalf("--%s must default to %q, got %q", flag, defValue, got.DefValue)
+		}
+	}
+
+	request, _, err := parseCountRequest(newCountFlagSet(t))
+	if err != nil {
+		t.Fatalf("parseCountRequest with no flags set: %v", err)
+	}
+	if request.ParentID != "" || request.NoParent || len(request.ExcludeTypes) != 0 || len(request.ExcludeStatus) != 0 {
+		t.Errorf("parseCountRequest with no flags set = %#v, want all four scope fields at their zero value", request)
+	}
+
+	flags := newCountFlagSet(t)
+	if err := flags.Flags().Set("parent", "bd-1"); err != nil {
+		t.Fatalf("set --parent: %v", err)
+	}
+	if err := flags.Flags().Set("exclude-type", "wisp"); err != nil {
+		t.Fatalf("set --exclude-type: %v", err)
+	}
+	request, _, err = parseCountRequest(flags)
+	if err != nil {
+		t.Fatalf("parseCountRequest --parent --exclude-type: %v", err)
+	}
+	if request.ParentID != "bd-1" {
+		t.Errorf("ParentID = %q, want %q", request.ParentID, "bd-1")
+	}
+	if request.NoParent {
+		t.Error("NoParent = true with only --parent set; the two flags must not leak into each other")
+	}
+	if !reflect.DeepEqual(request.ExcludeTypes, []string{"wisp"}) {
+		t.Errorf("ExcludeTypes = %v, want [wisp]", request.ExcludeTypes)
+	}
+	if len(request.ExcludeStatus) != 0 {
+		t.Errorf("ExcludeStatus = %v, want empty; only --exclude-type was set", request.ExcludeStatus)
+	}
+}
+
 // TestParseCountRequestCarriesEveryFilterFlag is the tripwire for a flag that
 // is registered, documented and silently dropped on the way into the request.
 // Every filter flag is set to a value distinguishable from its zero and read
@@ -109,6 +163,10 @@ func TestParseCountRequestCarriesEveryFilterFlag(t *testing.T) {
 		"priority-max":      "4",
 		"include-infra":     "true",
 		"include-ephemeral": "true",
+		"parent":            "bd-9",
+		"no-parent":         "true",
+		"exclude-type":      "wisp,gate",
+		"exclude-status":    "closed,archived",
 	} {
 		if err := flags.Flags().Set(flag, value); err != nil {
 			t.Fatalf("set --%s=%s: %v", flag, value, err)
@@ -161,6 +219,10 @@ func TestParseCountRequestCarriesEveryFilterFlag(t *testing.T) {
 		HasMetadataKey:   "audit_ref",
 		IncludeInfra:     true,
 		IncludeEphemeral: true,
+		ParentID:         "bd-9",
+		NoParent:         true,
+		ExcludeTypes:     []string{"wisp", "gate"},
+		ExcludeStatus:    []string{"closed", "archived"},
 	}
 	if !reflect.DeepEqual(request, want) {
 		t.Errorf("parseCountRequest built\n %#v\nwant\n %#v", request, want)

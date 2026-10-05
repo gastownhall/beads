@@ -65,6 +65,18 @@ func TestCounterContract(t *testing.T) {
 	t.Run("WritesNothing", func(t *testing.T) {
 		conformance.RunCounterWritesNothing(t, ctx, fixture)
 	})
+	t.Run("ParentIDScopesToChildren", func(t *testing.T) {
+		conformance.RunCounterParentIDScopesToChildren(t, ctx, fixture)
+	})
+	t.Run("NoParentExcludesChildren", func(t *testing.T) {
+		conformance.RunCounterNoParentExcludesChildren(t, ctx, fixture)
+	})
+	t.Run("ExcludeTypesNarrowsThePredicate", func(t *testing.T) {
+		conformance.RunCounterExcludeTypesNarrowsThePredicate(t, ctx, fixture)
+	})
+	t.Run("ExcludeStatusNarrowsThePredicate", func(t *testing.T) {
+		conformance.RunCounterExcludeStatusNarrowsThePredicate(t, ctx, fixture)
+	})
 }
 
 func newUOWCounterFixture(t *testing.T, ctx context.Context, prefix string) conformance.CounterFixture {
@@ -82,10 +94,11 @@ func newUOWCounterFixture(t *testing.T, ctx context.Context, prefix string) conf
 	}
 	kit := newUOWRoleFixtureKit(provider, prefix)
 	return conformance.CounterFixture{
-		IssuePrefix:  kit.IssuePrefix,
-		Counter:      counter,
-		CreateIssue:  kit.CreateIssue,
-		CreateWisp:   kit.CreateWisp,
-		CountHistory: kit.CountHistory,
+		IssuePrefix:   kit.IssuePrefix,
+		Counter:       counter,
+		CreateIssue:   kit.CreateIssue,
+		CreateWisp:    kit.CreateWisp,
+		CountHistory:  kit.CountHistory,
+		AddDependency: kit.AddDependency,
 	}
 }
