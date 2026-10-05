@@ -128,6 +128,22 @@ type syncOutcome struct {
 	// syncStuckTicks. Empty means this run's dirty-stuck status, if any, came
 	// from the tick-count inference instead (wy-mhouc).
 	ConstraintViolations []storage.ConstraintViolation `json:"constraint_violations,omitempty"`
+	// PullHeadBefore and PullHeadAfter are the local branch's commit hash
+	// immediately before and after this run's pull(s) — the currency signal
+	// GH#6671 asks for. Without them, "pulled": true/"status": "ok" reports
+	// only that the pull step ran, not that anything moved, so a replica that
+	// silently drifted for days reads identically to a healthy no-op (a real
+	// incident: pa-ost1p). Both are best-effort and empty when the hash could
+	// not be read, matching GetCurrentCommit's own contract.
+	PullHeadBefore string `json:"pull_head_before,omitempty"`
+	PullHeadAfter  string `json:"pull_head_after,omitempty"`
+	// PullAdvanced reports whether this run's pull(s) actually moved local
+	// HEAD. False is the healthy no-op: the replica was already current.
+	// True covers both a real catch-up and the bookkeeping commit
+	// recomputeBlockedAfterPull makes when the merge changed anything — it
+	// answers "did this run's pull do something", not "how far behind was I".
+	// Unset (false) when either hash could not be read.
+	PullAdvanced bool `json:"pull_advanced"`
 }
 
 // syncTransient is one attempt's transient failure.
@@ -806,6 +822,20 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 	// local-only mirror look broken.
 	noPush := config.GetBool("no-push")
 
+	// Currency signal (GH#6671, GH#4068): snapshot local HEAD before the loop
+	// runs so it can be compared against HEAD once the loop finishes. Commit
+	// pending changes first, mirroring the first step every Pull/PullRemote
+	// variant takes internally (GH#2474) — without this, a locally pending
+	// write unrelated to the remote would fold into the pre-loop snapshot
+	// instead of landing before it, and PullAdvanced below would read true
+	// for a purely local commit that pulled nothing. The repeat call inside
+	// the loop's own pull is then a no-op, same as it already is on every
+	// attempt after the first.
+	if _, err := st.CommitPending(rootCtx, "beads"); err != nil {
+		return HandleErrorRespectJSON("sync failed: committing pending changes: %v", err)
+	}
+	headBefore, _ := st.GetCurrentCommit(rootCtx)
+
 	ops := syncOps{
 		pull: func(ctx context.Context) ([]string, error) {
 			var err error
@@ -850,6 +880,9 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 	}
 
 	out, err := runSyncLoop(rootCtx, ops, attempts)
+	out.PullHeadBefore = headBefore
+	out.PullHeadAfter, _ = st.GetCurrentCommit(rootCtx)
+	out.PullAdvanced = headBefore != "" && out.PullHeadAfter != "" && headBefore != out.PullHeadAfter
 	if noPush && out.Status == syncStatusOK {
 		out.Pushed = false
 		out.PushSkipped = true
@@ -1275,10 +1308,16 @@ func printSyncOutcome(out *syncOutcome, noPush bool) {
 		if out.RowsCorrected > 0 {
 			fmt.Printf("Recomputed is_blocked: %d row(s) corrected.\n", out.RowsCorrected)
 		}
+		// GH#6671: name what the pull actually did, so a healthy no-op and a
+		// silent catch-up no longer print the same line.
+		currency := "already current"
+		if out.PullAdvanced {
+			currency = "pulled changes"
+		}
 		if noPush {
-			fmt.Println("Sync complete (push skipped: rig is local-only, no-push: true).")
+			fmt.Printf("Sync complete (%s; push skipped: rig is local-only, no-push: true).\n", currency)
 			return
 		}
-		fmt.Println("Sync complete.")
+		fmt.Printf("Sync complete (%s).\n", currency)
 	}
 }

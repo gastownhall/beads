@@ -72,6 +72,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   will not send, and value constraints (`maxLength`, `pattern` and the
   like) are outside the digest: such changes need their own review against
   `wire_revision`.
+- `bd sync`'s `--json` (and the plain-text success line) now reports whether
+  the pull actually moved local HEAD, via new `pull_head_before`,
+  `pull_head_after`, and `pull_advanced` fields on the sync outcome.
+  Previously `"pulled": true` reported only that the pull step ran, so a
+  replica that silently drifted for days and one that was already current
+  produced byte-identical output — a supervising process had no way to tell
+  them apart. Closes #6671 and #4068 (`--verbose` for `bd dolt pull`, held
+  open after #3589 as the tracking issue for the storage-layer rewrite that
+  has since landed): `bd sync` is now the supervised entry point that
+  answers both.
 
 ### Changed
 
