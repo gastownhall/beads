@@ -26,6 +26,7 @@ go_test(
         "bazel_skip_allowlist_test.go",
         "check_build_tags_test.go",
         "check_doc_freshness_test.go",
+        "check_migration_hygiene_journal_plane_test.go",
         "check_release_cross_compile_test.go",
         "check_testing_short_test.go",
         "check_winget_portable_alias_test.go",

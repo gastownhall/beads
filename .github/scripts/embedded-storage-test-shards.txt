@@ -154,6 +154,7 @@
 15 1 TestEmbeddedRoleFixtureKitHooksAreUsable
 15 1 TestLifecycleCreateContract
 15 1 TestMergeWithStrategy_OursKeepsLocal
+15 1 TestStoreAtIgnored28WritesAndJournals
 
 15 2 TestActiveDatabaseSizeScopesToActiveEmbeddedDatabase
 15 2 TestAdaptiveInsert_GciShape
@@ -349,6 +350,7 @@
 15 8 TestEmbeddedSQLCommitResponseLossIsIndeterminate
 15 8 TestGetReadyWorkIncludeEphemeralAppliesWispFilters
 15 8 TestHasRepository
+15 8 TestIgnored0028ConvergesAllShapes
 15 8 TestLenientGateWarning_ComposedOutput
 15 8 TestMergeAndSettleWithStrategy_EmptyStrategyMatchesMergeAndSettle
 15 8 TestReclaimExpiredLeaseSurvivesRestartEmbedded
@@ -378,6 +380,7 @@
 15 9 TestMetadataCASContract
 15 9 TestPromoteStillWorksWithCollisionGuard
 15 9 TestReadyWorkWithMissingDeferredParentTables
+15 9 TestReplay22To28NoOpOnHealthyStore
 15 9 TestUpdateMergeOps_DoltEngine
 
 15 10 TestBuildDSN_SpacesInPath
@@ -543,3 +546,4 @@
 15 15 TestIgnoredCursorHealIsIdempotent
 15 15 TestReadyWorkStatementBudget
 15 15 TestReleaserContract
+15 15 TestSentinelJournalColumnsReplay

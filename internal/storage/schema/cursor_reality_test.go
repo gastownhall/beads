@@ -133,9 +133,13 @@ func TestCursorRealityFloor(t *testing.T) {
 			wantLimited: true,
 		},
 		{
-			name:        "schema corroborates the cursor",
-			present:     allSentinelTables(),
-			columns:     map[string]bool{"leases.granted_node": true},
+			name:    "schema corroborates the cursor",
+			present: allSentinelTables(),
+			columns: map[string]bool{
+				"leases.granted_node":            true,
+				"bd_events_journal.comment_json": true,
+				"bd_events_journal.actor":        true,
+			},
 			wantFloor:   0,
 			wantLimited: false,
 		},
@@ -252,8 +256,12 @@ func TestCurrentVersionClampsToSentinelFloor(t *testing.T) {
 			name:    "fully corroborated cursor is believed as read",
 			raw:     latest,
 			present: allSentinelTables(),
-			columns: map[string]bool{"leases.granted_node": true},
-			want:    latest,
+			columns: map[string]bool{
+				"leases.granted_node":            true,
+				"bd_events_journal.comment_json": true,
+				"bd_events_journal.actor":        true,
+			},
+			want: latest,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -583,7 +591,10 @@ func TestMigrateStartsAboveTheFloorUnderColumnContradiction(t *testing.T) {
 			AddRow("content_hash", "char(64)", "YES", "", nil, ""))
 
 	// The guarded read: cursor claims at-latest, both table sentinels
-	// corroborate it, and only the leases column does not.
+	// corroborate it, and only the leases column does not — the
+	// bd_events_journal sentinels (PR A2) are probed too, in the same
+	// sentinelColumns order, and corroborate here so the leases contradiction
+	// stays the only thing driving the floor.
 	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
 	for range ignoredSource.sentinelTables {
@@ -592,6 +603,10 @@ func TestMigrateStartsAboveTheFloorUnderColumnContradiction(t *testing.T) {
 	}
 	mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.COLUMNS")).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	for range 2 {
+		mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.COLUMNS")).
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	}
 
 	boom := errors.New("stop here: the applier resumed above the floor")
 	mock.ExpectExec(".*").WillReturnError(boom)

@@ -682,6 +682,7 @@ go_test(
         "doctor_health_smoke_test.go",
         "doctor_health_test.go",
         "doctor_init_diagnostics_cgo_test.go",
+        "doctor_journal_shape_test.go",
         "doctor_max_rows_test.go",
         "doctor_migrate_fix_test.go",
         "doctor_mutation_gate_test.go",
@@ -1249,6 +1250,7 @@ go_test(
     deps = [
         "//:beads",
         "//cmd/bd/doctor",
+        "//cmd/bd/doctor/fix",
         "//internal/ado",
         "//internal/beads",
         "//internal/ceiling",

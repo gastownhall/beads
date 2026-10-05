@@ -117,6 +117,7 @@ go_library(
         "migrations/ignored/0026_dep_rekey_dedup_marker.up.sql",
         "migrations/ignored/0027_add_wisps_current_revision.up.sql",
         "migrations/0069_widen_issue_versions_datetime_precision.up.sql",
+        "migrations/ignored/0028_converge_events_journal_shape.up.sql",
     ],
     importpath = "github.com/steveyegge/beads/internal/storage/schema",
     visibility = ["//:__subpackages__"],
@@ -151,6 +152,7 @@ go_test(
         "migration_0069_datetime_precision_test.go",
         "migration_body_drain_test.go",
         "migration_watchdog_test.go",
+        "old_ignored_ceiling_test.go",
         "progress_test.go",
         "remote_migrate_gate_test.go",
         "schema_skew_test.go",
@@ -160,6 +162,7 @@ go_test(
     ],
     data = [":migrations"],
     embed = [":schema"],
+    embedsrcs = ["testdata/old_ignored_ceiling_24/0024_placeholder.up.sql"],
     deps = [
         "//internal/debug",
         "//internal/storage/depid",

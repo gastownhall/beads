@@ -405,7 +405,21 @@ var (
 		// 0001–0025 series replays, dragging in ignored/0007 and restamping
 		// wisps.updated_at across the plane. Believing the cursor up to 11
 		// applies exactly the pending tail 0012–0025 instead.
-		sentinelColumns: []schemaSentinelColumn{{table: "leases", column: "granted_node", replayFloor: 11}},
+		//
+		// bd_events_journal carries two more, registered together: a store
+		// whose cursor already reads past 28 but is missing comment_json or
+		// actor (restored from a backup taken between doors, or damaged out
+		// of band) heals itself on the next writable open instead of staying
+		// silently broken forever (BEADS-JOURNAL-PLAN.md §4.2b, PR A2). Floor
+		// 21 satisfies the same two constraints as the leases floor above:
+		// 0022 (the table's creator) and 0028 (comment_json's adder; actor's
+		// adder is 0025, also above 21) both sit strictly above it, and no
+		// unguarded statement in the series sits at or below it.
+		sentinelColumns: []schemaSentinelColumn{
+			{table: "leases", column: "granted_node", replayFloor: 11},
+			{table: "bd_events_journal", column: "comment_json", replayFloor: 21},
+			{table: "bd_events_journal", column: "actor", replayFloor: 21},
+		},
 	}
 )
 
