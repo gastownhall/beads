@@ -123,6 +123,25 @@ const CapProjectEnforce = "project.enforce"
 // server's, so the mirror is what makes the two land together.
 const CapListSort = "issues.list.sort"
 
+// CapCountScope is the behavior capability announcing that countIssues honors
+// the four scope parameters `parent`, `no_parent`, `exclude_type` and
+// `exclude_status` (upstream #7199), spelled exactly as httpapi's
+// CapIssuesCountScope (held to it by TestTheProjectIdentityVocabularyMatchesTheServer).
+// Like CapListSort it names parameters on an existing operation —
+// issues.count is already countIssues' per-operation token — so it rides here
+// rather than on opCapability.
+//
+// Nothing in this package reads it yet: the encoder table maps the four
+// members (encode.countTable), and the count role client that dials
+// countIssues is what must consult it — refusing LOCALLY with a typed
+// capability error naming this token, before any network call, when a request
+// populates ParentID, NoParent, ExcludeTypes or ExcludeStatus and the
+// handshake snapshot does not advertise it (httpapi.CapIssuesCountScope's doc
+// states that obligation and the downstream fallback it protects). It is
+// declared now for the same reason CapListSort was: the capability-union
+// parity gate compares this client's whole vocabulary with the server's.
+const CapCountScope = "issues.count.scope"
+
 // CapBatchApplyLarge is the behavior capability announcing that issues.batchApply
 // accepts a batch larger than the compiled-in floor (100 items), up to the
 // raised ceiling (1000), spelled exactly as httpapi's constant of the same name
@@ -255,7 +274,7 @@ func (e *WireRevisionSkewError) Unwrap() error { return ErrWireRevisionSkew }
 // union(opCapability tokens, this) set-equal with httpapi.Capabilities(), which is
 // what makes the server change and this client change land together: the parity
 // test goes red the moment one ships without the other.
-var behaviorCapabilities = []string{CapProjectEnforce, CapBatchApplyLarge, CapListSort}
+var behaviorCapabilities = []string{CapProjectEnforce, CapBatchApplyLarge, CapListSort, CapCountScope}
 
 // CapabilityFor reports the capability token gating op, and whether op is on
 // this client's map at all. An operation with no token — liveness, the
