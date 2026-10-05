@@ -47,14 +47,14 @@ func decodeIfRevisionBody(t *testing.T, line string, enveloped bool) map[string]
 	return data
 }
 
-// TestIfRevisionEnvelopeDownstreamContract pins T4.3: the stderr JSON a refused
+// TestIfRevisionEnvelopeGascityContract pins T4.3: the stderr JSON a refused
 // --if-revision write emits, in both the flat and the BD_JSON_ENVELOPE=1
 // shapes, must carry integer revisions and a `code` field exactly as
-// a downstream conditional-write classifier decodes them. A string
+// gascity's bdstore_conditional.go classifier decodes them. A string
 // revision -- the most tempting "it's just a big number" mistake -- makes
-// that downstream json.Decoder fail closed on the WHOLE object,
-// discarding even the `code` beside it.
-func TestIfRevisionEnvelopeDownstreamContract(t *testing.T) {
+// gascity's json.Decoder fail closed on the WHOLE object
+// (bdstore_conditional.go:134-139), discarding even the `code` beside it.
+func TestIfRevisionEnvelopeGascityContract(t *testing.T) {
 	oldJSON := jsonOutput
 	t.Cleanup(func() { jsonOutput = oldJSON })
 	jsonOutput = true
@@ -85,7 +85,7 @@ func TestIfRevisionEnvelopeDownstreamContract(t *testing.T) {
 				t.Fatalf("reported error = %#v, want *exitError{Code: %d}", reported, ExitGuardMismatch)
 			}
 			if !strings.Contains(out, "precondition failed") {
-				t.Errorf("human line must contain the downstream code-less-fallback phrase \"precondition failed\", got:\n%s", out)
+				t.Errorf("human line must contain gascity's code-less-fallback phrase \"precondition failed\", got:\n%s", out)
 			}
 			body := decodeIfRevisionBody(t, lastJSONLine(t, out), enveloped)
 			if body["code"] != ifRevisionCodePreconditionFailed {
@@ -96,7 +96,7 @@ func TestIfRevisionEnvelopeDownstreamContract(t *testing.T) {
 			}
 			expected, ok := body["expected_revision"].(float64)
 			if !ok {
-				t.Fatalf("expected_revision is %T (%v), want a JSON number -- a string here makes the downstream decoder fail closed on the whole object", body["expected_revision"], body["expected_revision"])
+				t.Fatalf("expected_revision is %T (%v), want a JSON number -- a string here makes gascity's decoder fail closed on the whole object", body["expected_revision"], body["expected_revision"])
 			}
 			if expected != 5 {
 				t.Errorf("expected_revision = %v, want 5", expected)

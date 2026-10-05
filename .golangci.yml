@@ -160,7 +160,7 @@ linters:
         # guard, finds one, and stops looking.
         #
         # What closes that route is the forbidigo `LabelUseCase` rule below,
-        # and since a later migration that rule is PACKAGE-WIDE across cmd/bd while
+        # and since ga-2ltro.12 that rule is PACKAGE-WIDE across cmd/bd while
         # this one still names one file. The asymmetry is the design, not a
         # gap: forbidigo denies the CALL, which is what a front door has to
         # stop doing, and every file may be held to that today. depguard denies
@@ -170,7 +170,7 @@ linters:
         # reached the domain through some third spelling (a helper returning a
         # use case directly, say) in the one file that has fully migrated, and
         # forbidigo alone covers the call everywhere else. Both were verified
-        # by mutation, one bypass each; that same migration re-verified the forbidigo
+        # by mutation, one bypass each; ga-2ltro.12 re-verified the forbidigo
         # half from a file the depguard half does not name.
         #
         # cmd/bd/label.go holds every label decision now — the arg split, the
@@ -183,7 +183,7 @@ linters:
         #
         # The list grows by one file per command whose front doors reach the
         # roles, the way cmd-bd-role-constructors grows by one package per
-        # shared body. cmd/bd/state.go is the second entry: a later migration moved
+        # shared body. cmd/bd/state.go is the second entry: ga-2ltro.12 moved
         # `bd state`, `bd state list` and `bd set-state` onto Reader.Get and
         # Lifecycle, deleted their proxied twin outright, and left the file
         # importing neither package — so the rule pins a migration that has
@@ -361,9 +361,9 @@ linters:
         linters:
           - forbidigo
       #
-      # THE LABEL-PLANE RULE IS NOW PACKAGE-WIDE ACROSS cmd/bd (as of a later migration).
+      # THE LABEL-PLANE RULE IS NOW PACKAGE-WIDE ACROSS cmd/bd (ga-2ltro.12).
       # It used to be narrowed by a `path-except` to cmd/bd/label.go, the one
-      # file an earlier migration had migrated, on the argument that holding an unmigrated
+      # file ga-26w10 had migrated, on the argument that holding an unmigrated
       # command to a rule written for a migration it had not had would be a lint
       # waived on sight. What that reasoning missed is that the waiver was
       # INVISIBLE: a file outside the exemption got no marker, no reason and no
