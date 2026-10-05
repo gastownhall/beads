@@ -4711,6 +4711,8 @@
       "member": "query:no_parent",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -4725,7 +4727,9 @@
       "schema": "param:countIssues",
       "member": "query:parent",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countIssues",
