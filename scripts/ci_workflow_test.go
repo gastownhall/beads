@@ -2185,21 +2185,21 @@ type ciWorkflow struct {
 }
 
 type ciWorkflowJob struct {
-	Name            string               `yaml:"name"`
-	Uses            string               `yaml:"uses"`
-	With            map[string]string    `yaml:"with"`
-	Secrets         any                  `yaml:"secrets"`
-	Permissions     any                  `yaml:"permissions"`
-	Needs           ciWorkflowStringList `yaml:"needs"`
-	Steps           []ciWorkflowStep     `yaml:"steps"`
-	RunsOn          string               `yaml:"runs-on"`
-	If              string               `yaml:"if"`
-	ContinueOnError bool                 `yaml:"continue-on-error"`
-	TimeoutMinutes  int                  `yaml:"timeout-minutes"`
-	Strategy        ciWorkflowStrategy   `yaml:"strategy"`
-	Env             map[string]string    `yaml:"env"`
-	Outputs         map[string]string    `yaml:"outputs"`
-	Environment     string               `yaml:"environment"`
+	Name            string                `yaml:"name"`
+	Uses            string                `yaml:"uses"`
+	With            map[string]string     `yaml:"with"`
+	Secrets         any                   `yaml:"secrets"`
+	Permissions     any                   `yaml:"permissions"`
+	Needs           ciWorkflowStringList  `yaml:"needs"`
+	Steps           []ciWorkflowStep      `yaml:"steps"`
+	RunsOn          string                `yaml:"runs-on"`
+	If              string                `yaml:"if"`
+	ContinueOnError bool                  `yaml:"continue-on-error"`
+	TimeoutMinutes  int                   `yaml:"timeout-minutes"`
+	Strategy        ciWorkflowStrategy    `yaml:"strategy"`
+	Env             map[string]string     `yaml:"env"`
+	Outputs         map[string]string     `yaml:"outputs"`
+	Environment     ciWorkflowEnvironment `yaml:"environment"`
 }
 
 type ciWorkflowStrategy struct {
@@ -2505,7 +2505,7 @@ const (
 	checkoutSHA         = "3d3c42e5aac5ba805825da76410c181273ba90b1"
 	// Same SHA/comment already used in this repo for this action (rbe-
 	// prewarm's mint step, update-flake-lock.yml).
-	appTokenActionSHA = "bcd2ba49218906704ab6c1aa796996da409d3eb1"
+	appTokenActionSHA   = "bcd2ba49218906704ab6c1aa796996da409d3eb1"
 	bazelCacheKeyPrefix = "bazel-repo-v3-${{ runner.os }}-"
 	bazelCacheKey       = bazelCacheKeyPrefix + "${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}"
 	bazelCachePath      = "${{ runner.temp }}/bazel-ci-cache"
@@ -6193,8 +6193,8 @@ func TestBazelAutofixWorkflowSecurity(t *testing.T) {
 	// The App private key is a secret of this environment; its deployment-
 	// branch policy (configured outside this repo) is what actually
 	// restricts reading it to jobs running on main.
-	if job.Environment != "autofix" {
-		t.Errorf("autofix job environment = %q, want %q", job.Environment, "autofix")
+	if job.Environment.Name != "autofix" {
+		t.Errorf("autofix job environment = %q, want %q", job.Environment.Name, "autofix")
 	}
 
 	var checkouts int
@@ -6748,4 +6748,28 @@ func TestBazelCmdDoltJob(t *testing.T) {
 			t.Errorf("%s does not repeat bd_test's env %s", target, m[0])
 		}
 	}
+}
+
+// ciWorkflowEnvironment is a job's environment, written either as a bare name
+// (environment: autofix) or as a mapping (environment: {name: github-pages,
+// url: ...}, deploy-pages-redirect.yml).
+type ciWorkflowEnvironment struct {
+	Name string
+	URL  string
+}
+
+func (e *ciWorkflowEnvironment) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		e.Name = value.Value
+		return nil
+	}
+	var m struct {
+		Name string `yaml:"name"`
+		URL  string `yaml:"url"`
+	}
+	if err := value.Decode(&m); err != nil {
+		return err
+	}
+	e.Name, e.URL = m.Name, m.URL
+	return nil
 }
