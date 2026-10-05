@@ -314,6 +314,34 @@ build:js-wasm --remote_download_outputs=toplevel
 test:sole-run --nocache_test_results
 test:sole-run --experimental_remote_cache_eviction_retries=0
 
+# Merge queue and PR re-runs: bazel.yml appends this config last (after the
+# lane's own config and sole-run) on a merge_group run and on attempt 2+ of
+# a pull_request run, in the six lanes that otherwise never reuse a result
+# (test, pure, doltserver via sole-run; embedded, doltserver-proxied,
+# doltserver-integration). It turns the --nocache_test_results above back
+# into Bazel's default: a test whose action key (test binary, runfiles,
+# test env, platform) is unchanged reuses a PASS the farm recorded when a
+# run executed it (the PR's own first run, which the queue entry usually
+# matches for every target the merge did not touch); a test the merge
+# changed runs. Why this is safe where "always execute" was the rule:
+#  - Identical key, identical test: these targets are hermetic (dolt and
+#    every input are runfiles; docker-backed targets are not in these
+#    configs, and --config=docker keeps --nocache_test_results).
+#  - A cached failure is never reused: Bazel treats a failed cached action
+#    as a miss, so whatever failed re-runs.
+#  - Only rbe-west's workers write the action cache (clients' writes are
+#    refused), so a cached PASS is a real remote execution, not a client
+#    upload.
+#  - What is given up is one more sample of a nondeterministic (-race,
+#    timing) test on unchanged inputs. Each PR's first attempt, every push
+#    to main (the merged commit) and nightly still execute every test
+#    (they never add this config), so flakes keep being sampled once per
+#    change and once per merge.
+#  - No retries are added: --experimental_remote_cache_eviction_retries=0
+#    and the no-flaky-attempts policy stay as they are.
+# Policy: scripts/ci_merge_queue_test.go.
+test:reuse-test-results --cache_test_results=auto
+
 # Read-only anonymous cache for fork PRs: rbe-west's rbe-cache endpoint serves
 # action-cache and CAS reads only (writes and Execute are refused by the farm)
 # and needs no credentials, so it is committed (scripts/bazel_policy_test.go

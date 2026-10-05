@@ -9,8 +9,8 @@
 # except where their D2 flag retires them: while the committed
 # BAZEL_RETIRES_LEGACY_EMBEDDED / BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS /
 # BAZEL_RETIRES_LEGACY_PR_LANES flag is "true", on a same-repo,
-# non-Dependabot pull_request (whatever the mode), the bazel-coverage job
-# stands down pr-risk.yml's embedded-Dolt test jobs (bazel-embedded runs
+# non-Dependabot pull_request or a merge_group run (whatever the mode), the
+# bazel-coverage job stands down pr-risk.yml's embedded-Dolt test jobs (bazel-embedded runs
 # the tier), its proxied-server and server-Dolt storage test jobs
 # (bazel-proxied, bazel-server-storage), or pr.yml's PR Core,
 # build-artifacts, pure-Go/js-wasm, domain+uow and contract corpus jobs
@@ -18,6 +18,10 @@
 # --config=sole-run); pr.yml's ci-gate then requires those lanes to have run
 # remotely and passed, so modes skip, local and cache are red there
 # (scripts/pr_risk_bazel_coverage_test.go, pr_lanes_bazel_coverage_test.go).
+# On a merge_group run and on attempt 2+ of a pull_request run, those six
+# lanes also append --config=reuse-test-results (BAZEL_REUSE_RESULTS), so a
+# test whose inputs are unchanged reuses the PASS the farm recorded when an
+# earlier run executed it (scripts/ci_merge_queue_test.go, .bazelrc).
 # This file has no pull_request or merge_group trigger of its own, so a PR
 # runs the lane once. Every lane reports its job.status as a workflow_call
 # output (named after the job) from an always() last step. pr.yml's ci-gate
@@ -648,14 +652,21 @@ jobs:
     outputs:
       result: ${{ steps.result.outputs.result }}
     env:
-      # D2 step 3: on covered PRs (always mode remote) this lane is the only
-      # pre-merge run of pr.yml's legacy PR Core job, which ran every test
-      # every time and never retried: --config=sole-run then executes every
-      # test (no cached results) and fails on a remote cache eviction
-      # instead of re-running the whole invocation. Fork modes do the same
-      # (with BAZEL_COVERS_FORKS "true" it is their only run too). Local and
-      # cache runs (the legacy jobs still run) keep cached results.
+      # D2 step 3: on covered PRs and merge groups (always mode remote) this
+      # lane is the only pre-merge run of pr.yml's legacy PR Core job, which
+      # ran every test every time and never retried: --config=sole-run then
+      # executes every test (no cached results) and fails on a remote cache
+      # eviction instead of re-running the whole invocation. Fork modes do the
+      # same (with BAZEL_COVERS_FORKS "true" it is their only run too). Local
+      # and cache runs (the legacy jobs still run) keep cached results.
       BAZEL_SOLE_RUN: ${{ needs.rbe.outputs.enabled == 'true' && '--config=sole-run' || '' }}
+      # Merge queue and PR re-runs: a merge_group run, or attempt 2+ of a
+      # pull_request run, appends --config=reuse-test-results last (.bazelrc),
+      # so a test whose action key is unchanged since a run that executed it
+      # (the PR's own run, or attempt 1) reuses that remote PASS; whatever
+      # the merge changed runs. Push to main, nightly and a PR's first
+      # attempt never add it. Policy: scripts/ci_merge_queue_test.go.
+      BAZEL_REUSE_RESULTS: ${{ (github.event_name == 'merge_group' || github.event_name == 'pull_request' && github.run_attempt != '1') && '--config=reuse-test-results' || '' }}
     steps:
       # inputs.checkout-sha: see the header (empty: the event's default ref).
       # checkout v7 refuses a fork head on pull_request_target unless opted
@@ -730,7 +741,7 @@ jobs:
           set -o pipefail
           start=$(date +%s)
           rc=0
-          bazel test //... --config=ci ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} \
+          bazel test //... --config=ci ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_REUSE_RESULTS:+"$BAZEL_REUSE_RESULTS"} \
             --profile="$RUNNER_TEMP/bazel-profile.json" \
             --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
             2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
@@ -895,14 +906,18 @@ jobs:
       result: ${{ steps.result.outputs.result }}
     env:
       PURE_CMD_BD_TESTS: '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir|NocgoFactoriesHonorSharedServer|NocgoNewDoltStoreFromConfig_ErrorSuggestsCorrectFlag|NocgoNewReadOnlyStoreFromConfig_ErrorSuggestsCorrectFlag)'
-      # D2 step 3: on covered PRs (always mode remote) this lane is the only
-      # pre-merge run of pr.yml's legacy pure-Go and js/wasm job, which ran every test
-      # every time and never retried: --config=sole-run then executes every
-      # test (no cached results) and fails on a remote cache eviction
-      # instead of re-running the whole invocation. Fork modes do the same
-      # (with BAZEL_COVERS_FORKS "true" it is their only run too). Local and
-      # cache runs (the legacy jobs still run) keep cached results.
+      # D2 step 3: on covered PRs and merge groups (always mode remote) this
+      # lane is the only pre-merge run of pr.yml's legacy pure-Go and js/wasm
+      # job, which ran every test every time and never retried:
+      # --config=sole-run then executes every test (no cached results) and
+      # fails on a remote cache eviction instead of re-running the whole
+      # invocation. Fork modes do the same (with BAZEL_COVERS_FORKS "true" it
+      # is their only run too). Local and cache runs (the legacy jobs still
+      # run) keep cached results.
       BAZEL_SOLE_RUN: ${{ needs.rbe.outputs.enabled == 'true' && '--config=sole-run' || '' }}
+      # Merge queue and PR re-runs: reuse unchanged tests' results (see
+      # bazel-test's BAZEL_REUSE_RESULTS).
+      BAZEL_REUSE_RESULTS: ${{ (github.event_name == 'merge_group' || github.event_name == 'pull_request' && github.run_attempt != '1') && '--config=reuse-test-results' || '' }}
     steps:
       # inputs.checkout-sha: see the header (empty: the event's default ref).
       # checkout v7 refuses a fork head on pull_request_target unless opted
@@ -1000,7 +1015,7 @@ jobs:
         run: |
           set -euo pipefail
           bazel run --config=pure //cmd/bd:bd -- version
-          bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} \
+          bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_REUSE_RESULTS:+"$BAZEL_REUSE_RESULTS"} \
             //internal/storage/embeddeddolt:embeddeddolt_test \
             //internal/tracker:tracker_test \
             --test_sharding_strategy=disabled \
@@ -1012,7 +1027,7 @@ jobs:
       - name: Run pure-Go cmd/bd test subset (--config=pure)
         run: |
           set -euo pipefail
-          bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} //cmd/bd:bd_test \
+          bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_REUSE_RESULTS:+"$BAZEL_REUSE_RESULTS"} //cmd/bd:bd_test \
             --test_sharding_strategy=disabled \
             "--test_arg=-test.run=$PURE_CMD_BD_TESTS"
           n="$(grep -c '<testcase ' bazel-testlogs/cmd/bd/bd_test/test.xml || true)"
@@ -1084,6 +1099,10 @@ jobs:
     runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.enabled == 'true' }}
     timeout-minutes: 60
+    env:
+      # Merge queue and PR re-runs: reuse unchanged tests' results (see
+      # bazel-test's BAZEL_REUSE_RESULTS).
+      BAZEL_REUSE_RESULTS: ${{ (github.event_name == 'merge_group' || github.event_name == 'pull_request' && github.run_attempt != '1') && '--config=reuse-test-results' || '' }}
     outputs:
       result: ${{ steps.result.outputs.result }}
     steps:
@@ -1130,7 +1149,7 @@ jobs:
           set -o pipefail
           start=$(date +%s)
           rc=0
-          bazel test //... --config=embedded \
+          bazel test //... --config=embedded ${BAZEL_REUSE_RESULTS:+"$BAZEL_REUSE_RESULTS"} \
             --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
             2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
           echo "bazel test --config=embedded: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -1328,14 +1347,18 @@ jobs:
       result: ${{ steps.result.outputs.result }}
     env:
       BAZEL_DOLT_LANE: ${{ inputs.dolt-lane || 'doltserver' }}
-      # D2 step 3: on covered PRs (always mode remote) this lane is the only
-      # pre-merge run of pr.yml's legacy domain+uow and contract corpus jobs, which ran every test
-      # every time and never retried: --config=sole-run then executes every
-      # test (no cached results) and fails on a remote cache eviction
-      # instead of re-running the whole invocation. Fork modes do the same
-      # (with BAZEL_COVERS_FORKS "true" it is their only run too). Local and
-      # cache runs (the legacy jobs still run) keep cached results.
+      # D2 step 3: on covered PRs and merge groups (always mode remote) this
+      # lane is the only pre-merge run of pr.yml's legacy domain+uow and
+      # contract corpus jobs, which ran every test every time and never
+      # retried: --config=sole-run then executes every test (no cached
+      # results) and fails on a remote cache eviction instead of re-running
+      # the whole invocation. Fork modes do the same (with BAZEL_COVERS_FORKS
+      # "true" it is their only run too). Local and cache runs (the legacy
+      # jobs still run) keep cached results.
       BAZEL_SOLE_RUN: ${{ needs.rbe.outputs.enabled == 'true' && '--config=sole-run' || '' }}
+      # Merge queue and PR re-runs: reuse unchanged tests' results (see
+      # bazel-test's BAZEL_REUSE_RESULTS).
+      BAZEL_REUSE_RESULTS: ${{ (github.event_name == 'merge_group' || github.event_name == 'pull_request' && github.run_attempt != '1') && '--config=reuse-test-results' || '' }}
     steps:
       # inputs.checkout-sha: see the header (empty: the event's default ref).
       # checkout v7 refuses a fork head on pull_request_target unless opted
@@ -1373,7 +1396,7 @@ jobs:
           set -o pipefail
           start=$(date +%s)
           rc=0
-          bazel test //... "--config=$BAZEL_DOLT_LANE" ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
+          bazel test //... "--config=$BAZEL_DOLT_LANE" ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_REUSE_RESULTS:+"$BAZEL_REUSE_RESULTS"} 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
           echo "bazel test --config=$BAZEL_DOLT_LANE: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
@@ -1424,6 +1447,10 @@ jobs:
     runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.enabled == 'true' }}
     timeout-minutes: 30
+    env:
+      # Merge queue and PR re-runs: reuse unchanged tests' results (see
+      # bazel-test's BAZEL_REUSE_RESULTS).
+      BAZEL_REUSE_RESULTS: ${{ (github.event_name == 'merge_group' || github.event_name == 'pull_request' && github.run_attempt != '1') && '--config=reuse-test-results' || '' }}
     outputs:
       result: ${{ steps.result.outputs.result }}
     steps:
@@ -1499,7 +1526,7 @@ jobs:
           set -o pipefail
           start=$(date +%s)
           rc=0
-          bazel test //... --config=doltserver-proxied \
+          bazel test //... --config=doltserver-proxied ${BAZEL_REUSE_RESULTS:+"$BAZEL_REUSE_RESULTS"} \
             --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
             2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
           echo "bazel test --config=doltserver-proxied: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -1563,6 +1590,10 @@ jobs:
     runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.enabled == 'true' }}
     timeout-minutes: 30
+    env:
+      # Merge queue and PR re-runs: reuse unchanged tests' results (see
+      # bazel-test's BAZEL_REUSE_RESULTS).
+      BAZEL_REUSE_RESULTS: ${{ (github.event_name == 'merge_group' || github.event_name == 'pull_request' && github.run_attempt != '1') && '--config=reuse-test-results' || '' }}
     outputs:
       result: ${{ steps.result.outputs.result }}
     steps:
@@ -1610,7 +1641,7 @@ jobs:
           set -o pipefail
           start=$(date +%s)
           rc=0
-          bazel test //... --config=doltserver-integration \
+          bazel test //... --config=doltserver-integration ${BAZEL_REUSE_RESULTS:+"$BAZEL_REUSE_RESULTS"} \
             --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
             2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
           echo "bazel test --config=doltserver-integration: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -1790,8 +1821,8 @@ jobs:
       - name: Decide applicability
         id: detect
         env:
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
           PUSH_BEFORE_SHA: ${{ github.event.before }}
           PUSH_AFTER_SHA: ${{ github.sha }}
         run: ./scripts/ci/detect-package-gates.sh
@@ -1909,8 +1940,8 @@ jobs:
       - name: Decide applicability
         id: detect
         env:
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
           PUSH_BEFORE_SHA: ${{ github.event.before }}
           PUSH_AFTER_SHA: ${{ github.sha }}
         run: ./scripts/ci/detect-package-gates.sh

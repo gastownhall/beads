@@ -34,6 +34,7 @@ go_test(
         "ci_capability_selector_test.go",
         "ci_f7b_review_test.go",
         "ci_f7c_advisory_test.go",
+        "ci_merge_queue_test.go",
         "ci_workflow_apt_get_timeout_test.go",
         "ci_workflow_test.go",
         "complexity_script_test.go",

@@ -92,8 +92,16 @@ const sameRepoPlatformsMatrixMarkerRunsOn = "${{ matrix.runner == 'same-repo-lin
 // string, for the small subset of the GitHub Actions expression language
 // this repo's same-repo Blacksmith ternaries use: string literals, dotted
 // identifier lookups (resolved from a caller-supplied context map), ==, !=,
-// &&, ||, !, and parentheses. It is not a general-purpose GHA expression
-// engine - no functions, no numbers, no object/array literals.
+// &&, ||, !, parentheses, and the true/false/null literals. Identifiers may
+// contain '-' (inputs.fork-farm), and == / != compare strings
+// case-insensitively, as GitHub does. It is not a general-purpose GHA
+// expression engine - no functions, no numbers, no object/array literals.
+//
+// Merge queue (ci_merge_queue_test.go): callers simulate a merge_group run
+// with github.event_name "merge_group", github.actor
+// "github-merge-queue[bot]", github.ref "refs/heads/gh-readonly-queue/...",
+// the github.event.merge_group.* fields, and no github.event.pull_request.*
+// key at all (null on that event).
 //
 // && and || use GitHub's own short-circuit-returns-operand semantics (not
 // strict booleans: `false && 'x'` is `false`, not `false`'s boolean negation
@@ -109,7 +117,7 @@ func ghTokenize(s string) ([]ghToken, error) {
 	var toks []ghToken
 	i := 0
 	isIdentByte := func(b byte) bool {
-		return b == '.' || b == '_' ||
+		return b == '.' || b == '_' || b == '-' ||
 			(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 	}
 	for i < len(s) {
@@ -283,6 +291,14 @@ func (p *ghParser) parsePrimary() (any, error) {
 	case "string":
 		return tok.val, nil
 	case "ident":
+		switch tok.val {
+		case "true":
+			return true, nil
+		case "false":
+			return false, nil
+		case "null":
+			return nil, nil
+		}
 		v, ok := p.ctx[tok.val]
 		if !ok {
 			// An identifier the caller's context does not mention (for
@@ -310,8 +326,15 @@ func ghTruthy(v any) bool {
 	}
 }
 
+// ghEquals: GitHub's loose equality for the operand kinds this evaluator
+// produces. null equals only null (and the empty string a missing context
+// key stands for); strings compare case-insensitively; a boolean equals
+// its string spelling (a context value of "true" == true).
 func ghEquals(a, b any) bool {
-	return fmt.Sprint(a) == fmt.Sprint(b)
+	if a == nil || b == nil {
+		return (a == nil || a == "") && (b == nil || b == "")
+	}
+	return strings.EqualFold(fmt.Sprint(a), fmt.Sprint(b))
 }
 
 // evalGHExpr evaluates a GitHub Actions `${{ ... }}` expression (the wrapper

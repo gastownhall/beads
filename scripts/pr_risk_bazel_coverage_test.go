@@ -33,6 +33,10 @@ const (
 	prRiskWorkflowName     = "pr-risk.yml"
 	prRiskCoverageJobName  = "bazel-coverage"
 	prRiskPullRequestValue = "${{ github.event_name == 'pull_request' }}"
+	// A merge group (merge queue) is covered like a same-repo PR: it runs
+	// on this repository's gh-readonly-queue/* branch with the CI secrets
+	// and its actor is github-merge-queue[bot].
+	prRiskMergeGroupValue = "${{ github.event_name == 'merge_group' }}"
 	// pr-risk.yml's and pr.yml's gate id for the decision job's result.
 	prRiskCoverageGateID = "BAZEL_COVERAGE"
 	// build-embedded's artifact (embedded-test-binaries) feeds exactly the
@@ -160,12 +164,20 @@ func (f rbeFacts) String() string {
 		f.event, f.rbeVar, f.secret != "", f.fork, f.retired, f.dependabot, f.coversForks, f.mint)
 }
 
-// covers: whether a pull_request with tier i's flag set is covered, the
-// decision both workflows must take for tier i: same-repo, non-Dependabot
-// PRs always; fork and Dependabot PRs while BAZEL_COVERS_FORKS is "true".
-// Never what the mint says: a covered fork run it does not serve is red.
+// covers: whether a run with tier i's flag set is covered, the decision
+// both workflows must take for tier i: every merge group (the queue's
+// branch is this repository's, with the CI secrets; bazel.yml's rbe job
+// never treats it as a fork); same-repo, non-Dependabot PRs always; fork
+// and Dependabot PRs while BAZEL_COVERS_FORKS is "true". Never what the
+// mint says: a covered fork run it does not serve is red.
 func (f rbeFacts) covers(i int) bool {
-	return strings.EqualFold(f.retired[i], "true") && f.event == "pull_request" &&
+	if !strings.EqualFold(f.retired[i], "true") {
+		return false
+	}
+	if f.event == "merge_group" {
+		return true
+	}
+	return f.event == "pull_request" &&
 		(!f.fork && !f.dependabot || strings.EqualFold(f.coversForks, "true"))
 }
 
@@ -259,6 +271,8 @@ func evalRBEExpr(t *testing.T, expr string, f rbeFacts, with map[string]string) 
 		return ""
 	case prRiskPullRequestValue:
 		return strconv.FormatBool(f.event == "pull_request")
+	case prRiskMergeGroupValue:
+		return strconv.FormatBool(f.event == "merge_group")
 	case prRiskDependabotValue:
 		return strconv.FormatBool(f.dependabot)
 	case "${{ vars.RBE_WEST_WORKERS == 'true' }}":
@@ -330,7 +344,7 @@ func TestPRRiskBazelCoverageJob(t *testing.T) {
 			prRiskCoverageJobName, job.Needs, job.If, job.RunsOn, job.Env, job.ContinueOnError, job.TimeoutMinutes, sameRepoBlacksmith2vcpu)
 	}
 	wantOutputs := map[string]string{}
-	wantEnv := map[string]string{"PULL_REQUEST": prRiskPullRequestValue, "DEPENDABOT": prRiskDependabotValue, "COVERS_FORKS": prCoversForksValue}
+	wantEnv := map[string]string{"PULL_REQUEST": prRiskPullRequestValue, "MERGE_GROUP": prRiskMergeGroupValue, "DEPENDABOT": prRiskDependabotValue, "COVERS_FORKS": prCoversForksValue}
 	for _, r := range retiredTiers {
 		wantOutputs[r.output] = "${{ steps.decide.outputs." + r.output + " }}"
 		wantEnv[r.envKey] = r.retiredValue()
@@ -708,8 +722,13 @@ func TestPRRiskDecisionMatchesBazelMode(t *testing.T) {
 		{"covered Dependabot PR, rbe-fork ro", rbeFacts{"pull_request", "true", "", false, both, true, "true", "ro"}, "fork-ro", coveredAll("true"), true, nil},
 		{"covered Dependabot PR, rbe-fork closed", rbeFacts{"pull_request", "", "", false, both, true, "true", "closed"}, "cache", coveredAll("true"), false, allRetired},
 		{"covered fork PR, only pr.yml's jobs retired, rbe-fork closed", rbeFacts{"pull_request", "true", "", true, prOnly, false, "true", "closed"}, "cache", map[string]string{"embedded": "false", "dolt_server": "false", "pr_lanes": "true"}, false, []string{"BAZEL_PR_LANES_RETIRED"}},
-		{"merge_group", rbeFacts{"merge_group", "true", "x", false, both, false, "false", ""}, "remote", coveredAll("false"), true, nil},
-		{"merge_group, var unset", rbeFacts{"merge_group", "", "x", false, both, false, "false", ""}, "skip", coveredAll("false"), true, nil},
+		// Merge queue: covered like a same-repo PR (the legacy tiers stay
+		// retired), so the Bazel lanes must run remotely and pass.
+		{"merge_group", rbeFacts{"merge_group", "true", "x", false, both, false, "false", ""}, "remote", coveredAll("true"), true, nil},
+		{"merge_group, kill switch (var unset)", rbeFacts{"merge_group", "", "x", false, both, false, "false", ""}, "skip", coveredAll("true"), false, allRetired},
+		{"merge_group, executor secret missing", rbeFacts{"merge_group", "true", "", false, both, false, "false", ""}, "cache", coveredAll("true"), false, allRetired},
+		{"merge_group, flags reverted, var unset", rbeFacts{"merge_group", "", "x", false, none, false, "false", ""}, "skip", coveredAll("false"), true, nil},
+		{"merge_group, only embedded retired", rbeFacts{"merge_group", "true", "x", false, embOnly, false, "false", ""}, "remote", map[string]string{"embedded": "true", "dolt_server": "false", "pr_lanes": "false"}, true, nil},
 	} {
 		d := decide(t, c.f)
 		if !reflect.DeepEqual(d.covered, c.covered) || d.mode != c.mode {
@@ -1990,7 +2009,9 @@ func TestBazelRetiredLanesArePinned(t *testing.T) {
 		}
 	}
 	// A later --cache_test_results (any config the lanes use) would win.
-	allowed := map[string]bool{"test:docker --nocache_test_results": true, "test:embedded --nocache_test_results": true, bazelSoleRunNoCacheLine: true}
+	// The one exception, bazelReuseResultsRCLine, is appended only on merge
+	// queue runs and PR re-runs (ci_merge_queue_test.go pins where).
+	allowed := map[string]bool{"test:docker --nocache_test_results": true, "test:embedded --nocache_test_results": true, bazelSoleRunNoCacheLine: true, bazelReuseResultsRCLine: true}
 	for config := range bazelDoltServerRCLines {
 		allowed["test:"+config+" --nocache_test_results"] = true
 	}
