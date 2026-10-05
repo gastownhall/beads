@@ -21,6 +21,7 @@ go_library(
         "counts.go",
         "credentials.go",
         "cycle_detector.go",
+        "delete_fence.go",
         "deleter.go",
         "dependencies.go",
         "dependency_editor.go",

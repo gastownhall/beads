@@ -13,6 +13,7 @@ go_library(
         "commenter.go",
         "counter.go",
         "cycle_detector.go",
+        "delete_fence.go",
         "deleter.go",
         "dependency_editor.go",
         "dolt_sql_provider.go",
