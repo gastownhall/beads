@@ -252,6 +252,40 @@ func TestClassifyIfRevisionFailureBareVersionMismatchSentinel(t *testing.T) {
 	}
 }
 
+// TestClassifyIfRevisionFailureNotFoundSentinel pins mc-zndi7.81: a pre-flight
+// existence check that fails with the bare storage.ErrNotFound sentinel --
+// e.g. cmd/bd/delete.go's resolveAndGetIssueForMutation call, which runs
+// before deleter.Delete() and the per-id lock fence #7244 added, so a
+// same-token --if-revision racer that loses that fence can find the row
+// already gone right there -- must classify exactly like a mid-guard version
+// mismatch: "precondition_failed" / ExitGuardMismatch, falling back to the
+// caller's own --if-revision value for expected_revision and omitting
+// current_revision (the row is gone; there is nothing left to report).
+// Without this, that pre-flight path surfaces an unclassified, uncoded exit 1
+// instead of joining every other --if-revision loser at exit 13.
+func TestClassifyIfRevisionFailureNotFoundSentinel(t *testing.T) {
+	ifRevision := int64(7)
+	code, _, expected, current, ok := classifyIfRevisionFailure(storage.ErrNotFound, &ifRevision)
+	if !ok || code != ifRevisionCodePreconditionFailed {
+		t.Fatalf("classifyIfRevisionFailure(ErrNotFound) = %q, %v, want %q, true", code, ok, ifRevisionCodePreconditionFailed)
+	}
+	if expected == nil || *expected != ifRevision {
+		t.Errorf("expected_revision = %v, want &%d (the caller's --if-revision value)", expected, ifRevision)
+	}
+	if current != nil {
+		t.Errorf("current_revision = %v, want nil (the row is gone; nothing to report)", current)
+	}
+
+	reported, ok := reportIfRevisionFailure("deleting", "bd-6", storage.ErrNotFound, &ifRevision)
+	if !ok {
+		t.Fatalf("reportIfRevisionFailure did not recognize storage.ErrNotFound as a guard outcome")
+	}
+	ee, isExitErr := reported.(*exitError)
+	if !isExitErr || ee.Code != ExitGuardMismatch {
+		t.Fatalf("reported error = %#v, want *exitError{Code: %d}", reported, ExitGuardMismatch)
+	}
+}
+
 // TestClassifyIfRevisionFailureTypedBeforeSentinel pins ordering: a typed
 // *issueops.VersionMismatchError (which also satisfies errors.Is against the
 // same ErrVersionMismatch sentinel via Unwrap) must still report its OWN
