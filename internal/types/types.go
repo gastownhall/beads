@@ -1366,6 +1366,27 @@ func NewIssueDetails(issue Issue) *IssueDetails {
 	return &IssueDetails{Issue: issue, Revision: RevisionToken(issue.RowVersion)}
 }
 
+// BatchGetIssue is one entry of BatchGetIssuesResult.issues: a resolved issue
+// plus its current revision token, projected the same way IssueDetails
+// projects one off the embedded Issue's RowVersion (RowVersion is json:"-",
+// so the Issue body alone cannot carry it). Hydration for a batch-get issue
+// is LABELS ONLY — no dependencies, dependents or comments; a caller wanting
+// those reads GET /v0/beads/issues/{id} (IssueDetails) instead.
+//
+// NewBatchGetIssue is the only door, for the same reason NewIssueDetails is:
+// a struct literal with an unset Revision serializes a "0" indistinguishable
+// from a legacy migration-0054 row.
+type BatchGetIssue struct {
+	Issue
+	Revision string `json:"revision"`
+}
+
+// NewBatchGetIssue projects issue with its wire-visible revision token, the
+// BatchGetIssuesResult.issues counterpart of NewIssueDetails.
+func NewBatchGetIssue(issue Issue) BatchGetIssue {
+	return BatchGetIssue{Issue: issue, Revision: RevisionToken(issue.RowVersion)}
+}
+
 // DependencyType categorizes the relationship
 type DependencyType string
 

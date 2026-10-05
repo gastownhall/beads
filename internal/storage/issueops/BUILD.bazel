@@ -6,6 +6,7 @@ go_library(
         "aggregate.go",
         "as_of.go",
         "batch_apply.go",
+        "batchget.go",
         "batching.go",
         "blocked.go",
         "blocked_consistency.go",

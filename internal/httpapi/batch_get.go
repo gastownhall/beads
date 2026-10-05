@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -116,11 +117,13 @@ func batchGetMemberList() string {
 
 // failBatchGetErr answers a failed batch get. The role's only refusal over the
 // wire is ErrValidation — an oversized `ids` (*issueops.TooManyIDsError,
-// counted before deduplication) — because the blank-entry case above already
-// catches the handler's own copy of that check before the role is ever
-// called. Nothing here is a 404 or a 409: a batch read reports a miss in the
-// response body, it does not refuse the request over one, and this operation
-// changes nothing to guard.
+// counted before deduplication); there is no handler-side blank-entry
+// pre-check to catch anything first, so EVERY validation failure, blank
+// entries included, reaches the wire through this function, which is why
+// batchGetRequest above enforces neither the cap nor the per-entry blank
+// check itself. Nothing here is a 404 or a 409: a batch read reports a miss
+// in the response body, it does not refuse the request over one, and this
+// operation changes nothing to guard.
 //
 // UNLIKE failDeleteErr, it takes no request value: this operation has no
 // version-mismatch case (it writes nothing) and only one member to blame, so
@@ -138,20 +141,24 @@ func (s *Server) failBatchGetErr(w http.ResponseWriter, r *http.Request, err err
 //
 // Both members are non-nil so the body carries `[]` rather than `null` on an
 // empty answer, the same promise wireEdges and deleteResponse's `orphaned`
-// make. `issues` holds `*apigen.Issue` dereferenced: GetManyResult.Issues
-// never carries a nil entry for a successful call, and a wire array of
-// pointers would let json encode a `null` element the role's own contract
-// forbids.
+// make. `issues` holds `apigen.BatchGetIssue`, each built by
+// types.NewBatchGetIssue rather than a bare `apigen.Issue`: Issue.RowVersion
+// is `json:"-"`, so the Issue body alone cannot carry the row's revision, and
+// NewBatchGetIssue is the one projection that puts it on the wire the same
+// way NewIssueDetails does for `GET /v0/beads/issues/{id}`.
+// GetManyResult.Issues never carries a nil entry for a successful call, and a
+// wire array of pointers would let json encode a `null` element the role's
+// own contract forbids, so each entry is dereferenced before projection.
 func batchGetResponse(result issueops.GetManyResult) apigen.BatchGetIssuesResult {
 	body := apigen.BatchGetIssuesResult{
-		Issues:  []apigen.Issue{},
+		Issues:  []apigen.BatchGetIssue{},
 		Missing: []string{},
 	}
 	for _, issue := range result.Issues {
 		if issue == nil {
 			continue
 		}
-		body.Issues = append(body.Issues, *issue)
+		body.Issues = append(body.Issues, types.NewBatchGetIssue(*issue))
 	}
 	body.Missing = append(body.Missing, result.Missing...)
 	return body

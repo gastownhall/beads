@@ -83,6 +83,10 @@ func FinishGetMany(ids []string, found map[string]*publicops.Issue) publicops.Ge
 // contract, and there is no second implementation for the check to belong to.
 // It runs before the transaction's one query, so a request over MaxGetManyIDs
 // never reaches storage.
+//
+// HYDRATION IS LABELS ONLY, because that is all GetIssuesByIDsInTx fills: no
+// dependencies, dependents or comments. A caller that needs those reads
+// Reader.Get instead, one id at a time.
 func ExecuteGetMany(ctx context.Context, tx DBTX, request publicops.GetManyRequest) (publicops.GetManyResult, error) {
 	if err := ValidateGetManyRequest(request); err != nil {
 		return publicops.GetManyResult{}, err

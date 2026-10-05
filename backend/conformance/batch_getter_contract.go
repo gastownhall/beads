@@ -3,6 +3,7 @@ package conformance
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -191,6 +192,61 @@ func RunBatchGetterRefusesOverTheCap(t *testing.T, ctx context.Context, fixture 
 	}
 }
 
+// RunBatchGetterAcceptsExactlyTheCap pins the boundary MaxGetManyIDs draws:
+// a request naming EXACTLY the cap's worth of distinct ids is accepted and
+// answered in full, not refused. RunBatchGetterRefusesOverTheCap pins the
+// cap+1 side of this line; without this case a `>` to `>=` mutation on the
+// comparison would still refuse a one-over request (cap+1 is still > cap-1)
+// and pass that case while silently refusing every legitimate cap-sized
+// request.
+func RunBatchGetterAcceptsExactlyTheCap(t *testing.T, ctx context.Context, fixture BatchGetterFixture) {
+	t.Helper()
+	ids := make([]string, publicops.MaxGetManyIDs)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("%s-atcap-%d", fixture.IssuePrefix, i)
+	}
+	seedBatchGetterIssues(t, ctx, fixture, ids...)
+
+	result := getMany(t, ctx, fixture, publicops.GetManyRequest{IDs: ids})
+	if len(result.Issues) != publicops.MaxGetManyIDs {
+		t.Fatalf("GetMany with exactly MaxGetManyIDs (%d) ids returned %d issues, want %d",
+			publicops.MaxGetManyIDs, len(result.Issues), publicops.MaxGetManyIDs)
+	}
+	assertBatchGetterMissingIDs(t, result)
+}
+
+// RunBatchGetterHydratesLabels pins that a resolved issue's Labels come back
+// populated: hydration for this role is LABELS ONLY (no dependencies,
+// dependents or comments — issueops.GetManyResult.Issues documents the
+// scope), so Labels is the one piece of relational data a regression here
+// could silently drop without any other case noticing.
+func RunBatchGetterHydratesLabels(t *testing.T, ctx context.Context, fixture BatchGetterFixture) {
+	t.Helper()
+	id := fixture.IssuePrefix + "-labels-a"
+	seed := batchGetterSeed(id, false)
+	seed.Labels = []string{"alpha", "beta"}
+	if err := fixture.CreateIssue(ctx, seed, "batch-getter-seed"); err != nil {
+		t.Fatalf("seed issue %s: %v", id, err)
+	}
+
+	result := getMany(t, ctx, fixture, publicops.GetManyRequest{IDs: []string{id}})
+	assertBatchGetterIssueIDs(t, result, id)
+	got := result.Issues[0].Labels
+	want := []string{"alpha", "beta"}
+	if len(got) != len(want) {
+		t.Fatalf("GetMany(%s).Labels = %v, want %v", id, got, want)
+	}
+	seen := make(map[string]bool, len(got))
+	for _, l := range got {
+		seen[l] = true
+	}
+	for _, l := range want {
+		if !seen[l] {
+			t.Errorf("GetMany(%s).Labels = %v, want it to include %q", id, got, l)
+		}
+	}
+}
+
 // RunBatchGetterLeavesTheRequestAlone pins the no-mutation clause on
 // BatchGetter: IDs is the one member a body could write through to the caller
 // — de-duplication is exactly the step that would — and the contract says a
@@ -209,15 +265,29 @@ func RunBatchGetterLeavesTheRequestAlone(t *testing.T, ctx context.Context, fixt
 	}
 }
 
-// RunBatchGetterReadsOneSnapshot pins the one-snapshot clause on
-// BatchGetter.GetMany: the existence check and the hydration share one read,
-// so a found id and a missing id resolved by the SAME call answer correctly
-// together. A body that split the probe from the hydration into two
-// round trips could not be told apart from a correct one by any single-field
-// assertion, which is why this case checks both halves of one GetManyResult
-// instead of asserting on two separate calls the way
-// RunBatchGetterFindsRequestedIssues and RunBatchGetterReportsMissingIDs do.
-func RunBatchGetterReadsOneSnapshot(t *testing.T, ctx context.Context, fixture BatchGetterFixture) {
+// RunBatchGetterSharesOneReadStructurally pins the STRUCTURAL half of the
+// one-snapshot clause on BatchGetter.GetMany: the existence check and the
+// hydration are one call answering one found id and one missing id together
+// against a STATIC fixture, which is consistent with — but does not by
+// itself PROVE — the two sharing one transaction under a concurrent writer.
+// A body that split the probe from the hydration into two round trips could
+// still pass this case against a fixture nothing else is mutating, so it
+// checks both halves of one GetManyResult instead of asserting on two
+// separate calls the way RunBatchGetterFindsRequestedIssues and
+// RunBatchGetterReportsMissingIDs do, but it is NOT a concurrency test: no
+// writer races the read here.
+//
+// Renamed from RunBatchGetterReadsOneSnapshot, which overclaimed an
+// atomicity guarantee this case alone does not empirically demonstrate. A
+// real interleaving test — a concurrent writer racing GetMany's transaction
+// so the case can show a found id and a racing create or delete resolve
+// consistently with ONE snapshot boundary — needs a synchronization hook
+// (e.g. "pause this leg's read transaction after its query, before it
+// returns, so a second goroutine can write and commit") that roleFixtureKit
+// does not expose today; that kit is FROZEN (see role_fixture_kit_test.go)
+// and a role slice does not edit it. Adding the hook is tracked as follow-up
+// work rather than done here, so this case stays honestly structural.
+func RunBatchGetterSharesOneReadStructurally(t *testing.T, ctx context.Context, fixture BatchGetterFixture) {
 	t.Helper()
 	present := fixture.IssuePrefix + "-snapshot-present"
 	ghost := fixture.IssuePrefix + "-snapshot-ghost"

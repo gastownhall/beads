@@ -6,6 +6,7 @@ go_library(
         "batchapplier.go",
         "batchcloser.go",
         "batchcreator.go",
+        "batchgetter.go",
         "blockedstate.go",
         "blockingannotator.go",
         "bootstrapper.go",

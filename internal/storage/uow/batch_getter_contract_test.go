@@ -49,11 +49,17 @@ func TestBatchGetterContract(t *testing.T) {
 	t.Run("RefusesOverTheCap", func(t *testing.T) {
 		conformance.RunBatchGetterRefusesOverTheCap(t, ctx, fixture)
 	})
+	t.Run("AcceptsExactlyTheCap", func(t *testing.T) {
+		conformance.RunBatchGetterAcceptsExactlyTheCap(t, ctx, fixture)
+	})
 	t.Run("LeavesTheRequestAlone", func(t *testing.T) {
 		conformance.RunBatchGetterLeavesTheRequestAlone(t, ctx, fixture)
 	})
-	t.Run("ReadsOneSnapshot", func(t *testing.T) {
-		conformance.RunBatchGetterReadsOneSnapshot(t, ctx, fixture)
+	t.Run("SharesOneReadStructurally", func(t *testing.T) {
+		conformance.RunBatchGetterSharesOneReadStructurally(t, ctx, fixture)
+	})
+	t.Run("HydratesLabels", func(t *testing.T) {
+		conformance.RunBatchGetterHydratesLabels(t, ctx, fixture)
 	})
 	t.Run("CrossesBothPlanes", func(t *testing.T) {
 		conformance.RunBatchGetterCrossesBothPlanes(t, ctx, fixture)

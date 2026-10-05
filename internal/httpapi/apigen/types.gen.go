@@ -818,6 +818,9 @@ type BatchCreateResponse struct {
 	Items []Issue `json:"items"`
 }
 
+// BatchGetIssue One resolved entry of `BatchGetIssuesResult.issues`: an `Issue` plus its current `revision`. Property semantics other than `revision` are documented on `Issue`; the spec repeats the list rather than composing it (see the note at the top of this document).
+type BatchGetIssue = types.BatchGetIssue
+
 // BatchGetIssuesRequest Which issues to read, in one snapshot. There is no predicate here — the caller already knows the ids — which is `DeleteIssuesRequest`'s own reason for carrying none.
 //
 // `additionalProperties: false`, so an unknown member is a `400` naming the member.
@@ -831,7 +834,9 @@ type BatchGetIssuesRequest struct {
 // BatchGetIssuesResult The issues that resolved, hydrated, plus the ids that did not — both read from the SAME snapshot. Never a `404`: an id naming no stored row is reported in `missing`, not refused, the same set-read answer `DependencyEdges` and `EdgeCounts` give.
 type BatchGetIssuesResult struct {
 	// Issues One entry per requested id that resolved, in the REQUEST's order (the caller's first mention of each distinct id), never the storage engine's natural order. Each issue carries its current `revision`, so a caller that goes on to write one back has the optimistic-concurrency token a lifecycle write wants without a second round trip. Empty array (never null) when nothing resolved.
-	Issues []Issue `json:"issues"`
+	//
+	// HYDRATION IS LABELS ONLY: no dependencies, dependents or comments — use `GET /v0/beads/issues/{id}` (`IssueDetails`) for those.
+	Issues []BatchGetIssue `json:"issues"`
 
 	// Missing The requested ids that resolved to no stored row, in the same first-mention order as the request. An id here contributes no entry to `issues`, and the two arrays' lengths always sum to the number of DISTINCT ids the request named. Empty array (never null) when every named id resolved.
 	Missing []string `json:"missing"`

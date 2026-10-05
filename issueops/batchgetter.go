@@ -85,6 +85,9 @@ type GetManyResult struct {
 	// optimistic-concurrency token a lifecycle write wants without a second
 	// round trip.
 	//
+	// HYDRATION IS LABELS ONLY: no dependencies, dependents or comments. A
+	// caller that needs those calls Reader.Get instead, one id at a time.
+	//
 	// Never nil for a successful call, even when it is empty: a front door
 	// that marshals this field emits [] rather than null, the same promise
 	// EdgeCountResult.Anchors makes.
@@ -118,13 +121,15 @@ type GetManyResult struct {
 // slice did not migrate, and PR #7247). A later slice updates this doc and the
 // client-side TODOs together once that leg exists.
 //
-// It differs from Reader.Get in arity and in what a miss means: Get answers
-// ONE id with *IssueDetails or ErrNotFound, this answers MANY ids with a
-// result whose Missing field is how a caller tells "this one does not exist"
-// from "the call failed." It differs from EdgeReader and GraphCounter in what
-// it is reading: those answer questions about the EDGES a set of anchors
-// carries; this answers the ISSUES themselves, hydrated, the way Reader.Get
-// does for one.
+// It differs from Reader.Get in arity, in hydration and in what a miss means:
+// Get answers ONE id with *IssueDetails or ErrNotFound, labels, dependencies,
+// dependents and comments included; this answers MANY ids with a result
+// whose Missing field is how a caller tells "this one does not exist" from
+// "the call failed," and whose Issues are hydrated LABELS ONLY — no
+// dependencies, dependents or comments. A caller that needs those calls
+// Reader.Get instead, one id at a time. It differs from EdgeReader and
+// GraphCounter in what it is reading: those answer questions about the EDGES
+// a set of anchors carries; this answers the ISSUES themselves.
 type BatchGetter interface {
 	// GetMany reads every id GetManyRequest.IDs names, in ONE snapshot. The
 	// existence check and the hydration share that snapshot for the reason

@@ -23,6 +23,7 @@ go_library(
         "hook_batch_applier.go",
         "hook_batch_closer.go",
         "hook_batch_creator.go",
+        "hook_batch_getter.go",
         "hook_blockingannotator.go",
         "hook_bootstrapper.go",
         "hook_commenter.go",

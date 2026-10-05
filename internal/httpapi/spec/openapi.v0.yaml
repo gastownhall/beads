@@ -6726,6 +6726,229 @@ components:
         payload:
           type: string
 
+    BatchGetIssue:
+      type: object
+      description: >-
+        One resolved entry of `BatchGetIssuesResult.issues`: an `Issue` plus
+        its current `revision`. Property semantics other than `revision` are
+        documented on `Issue`; the spec repeats the list rather than
+        composing it (see the note at the top of this document).
+      x-go-type: types.BatchGetIssue
+      x-go-type-import:
+        name: types
+        path: github.com/steveyegge/beads/internal/types
+      required: [id, title, priority, created_at, updated_at, revision]
+      properties:
+        id:
+          type: string
+          description: Canonical issue id, e.g. `bd-abc`.
+        title:
+          type: string
+        description:
+          type: string
+        design:
+          type: string
+        acceptance_criteria:
+          type: string
+        notes:
+          type: string
+        spec_id:
+          type: string
+        status:
+          type: string
+          description: >-
+            `open`, `in_progress`, `blocked`, `closed`, or any custom status
+            configured for the workspace. NOT a closed vocabulary: clients must
+            treat an unrecognized value as "some status I do not know".
+        priority:
+          type: integer
+          description: 0 (most urgent) through 4. Always present; 0 is a real value.
+        issue_type:
+          type: string
+          description: >-
+            `bug`, `feature`, `task`, `epic`, `chore`, `gate`, and workspace
+            configured types. Not a closed vocabulary.
+        is_blocked:
+          type: boolean
+          description: >-
+            The persisted readiness projection — true when an open blocking
+            dependency keeps this issue out of the ready set. Derived from the
+            dependency graph; never set by a client.
+
+
+            NOT POPULATED by the /v0 read endpoints today: they hydrate issues
+            without it, so the field is absent from their responses and its
+            absence says nothing about whether an issue is blocked. Use
+            `/v0/beads/ready` or the dependency endpoints to answer that. The
+            field is carried by events-journal snapshots, which is where it is
+            read back, and it is documented here because those snapshots
+            serialize the same type this schema is pinned to.
+        assignee:
+          type: string
+          description: The actor currently holding the issue, if any.
+        owner:
+          type: string
+        estimated_minutes:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        closed_at:
+          type: string
+          format: date-time
+        close_reason:
+          type: string
+        closed_by_session:
+          type: string
+        lease_expires_at:
+          type: string
+          format: date-time
+          description: Expiry of the current claim's lease, when one is active.
+        heartbeat_at:
+          type: string
+          format: date-time
+        lease_granted_node:
+          type: string
+          description: >-
+            The replica that granted the lease. Empty means the provenance is
+            unknown, which is treated as local.
+        due_at:
+          type: string
+          format: date-time
+        defer_until:
+          type: string
+          format: date-time
+        external_ref:
+          type: string
+        source_system:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+          description: >-
+            Arbitrary caller-supplied JSON object. VALUES MAY BE OF ANY JSON
+            TYPE — string, number, boolean, array or nested object — because
+            typed values enter through the explicit JSON metadata path and
+            persist in older rows. Clients MUST NOT decode this into a
+            string-to-string map; a strict decode fails on the first typed
+            value and takes the whole response with it. That prohibition is on
+            assuming a narrower type when reading THIS document: a profile MAY
+            declare a narrower value schema under the rules in **Profiles**,
+            and a client of that profile may rely on the profile's declaration.
+
+
+            The object-at-top-level shape is the contract every producer and
+            every metadata filter (`metadata_field`, `has_metadata_key`)
+            assumes, but be aware the store validates only that the value is
+            WELL-FORMED JSON: a row created with a non-object (e.g.
+            `bd create --metadata '[1,2]'`) can carry an array or a scalar
+            here. That is a storage-side gap, not licence for a producer to
+            emit one — but a tolerant client should skip such a row rather than
+            fail the whole response.
+        compaction_level:
+          type: integer
+        compacted_at:
+          type: string
+          format: date-time
+        compacted_at_commit:
+          type: string
+        original_size:
+          type: integer
+        labels:
+          type: array
+          items:
+            type: string
+        dependencies:
+          type: array
+          description: >-
+            Dependency edges. Populated in export/interchange contexts; the
+            detail endpoint returns richer entries — see `IssueDetails`.
+          items:
+            $ref: '#/components/schemas/Dependency'
+        comments:
+          type: array
+          items:
+            $ref: '#/components/schemas/Comment'
+        sender:
+          type: string
+        ephemeral:
+          type: boolean
+          description: Ephemeral records are not synced.
+        no_history:
+          type: boolean
+        wisp_type:
+          type: string
+        storage_class:
+          type: string
+          description: >-
+            The record's history/replication contract. Empty means unset, which
+            resolves to ephemeral for wisp-plane records and versioned
+            otherwise.
+        pinned:
+          type: boolean
+        is_template:
+          type: boolean
+        bonded_from:
+          type: array
+          items:
+            $ref: '#/components/schemas/BondRef'
+        await_type:
+          type: string
+          description: Gate condition type.
+        await_id:
+          type: string
+        timeout:
+          type: integer
+          format: int64
+          description: >-
+            NANOSECONDS. This is a Go `time.Duration`, which encodes as an
+            int64 nanosecond count — a pre-existing wire fact, not a choice.
+        waiters:
+          type: array
+          items:
+            type: string
+        source_formula:
+          type: string
+        source_location:
+          type: string
+        mol_type:
+          type: string
+        work_type:
+          type: string
+        event_kind:
+          type: string
+        actor:
+          type: string
+          description: >-
+            For event records, the entity that caused the event. Unrelated to
+            the claiming actor in `ClaimRequest`.
+        target:
+          type: string
+        payload:
+          type: string
+        revision:
+          type: string
+          description: >-
+            The row's optimistic-concurrency token, spelled the way
+            `IssueDetails.revision` spells it — a decimal string, never a
+            number (a JSON number loses precision past 2^53 and the token
+            spans the full int64 range). EQUALITY-ONLY: compare it, never
+            order or interpret it. Send it back verbatim as an
+            `expected_version` on a lifecycle write.
+
+
+            NO omitempty: it is ALWAYS PRESENT, including as `"0"` for a
+            legacy migration-0054 row that has not been mutated since, the
+            same rule `IssueDetails.revision` states in full.
+
     IssueWithCounts:
       type: object
       description: >-
@@ -8219,8 +8442,12 @@ components:
             `revision`, so a caller that goes on to write one back has the
             optimistic-concurrency token a lifecycle write wants without a
             second round trip. Empty array (never null) when nothing resolved.
+
+
+            HYDRATION IS LABELS ONLY: no dependencies, dependents or comments
+            — use `GET /v0/beads/issues/{id}` (`IssueDetails`) for those.
           items:
-            $ref: '#/components/schemas/Issue'
+            $ref: '#/components/schemas/BatchGetIssue'
         missing:
           type: array
           description: >-
