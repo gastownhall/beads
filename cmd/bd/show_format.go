@@ -277,7 +277,11 @@ func printRelatedSection(relatedSeen map[string]*types.IssueWithDependencyMetada
 }
 
 // printEpicChildProgress summarizes how much of an epic its children have
-// finished, printed under the CHILDREN section.
+// finished, printed under the CHILDREN section. epicStatus is the epic
+// issue's OWN status, not a child's — it decides whether "eligible for
+// close" still means anything (GH#6816): an epic that is itself already
+// closed has nothing left to act on, so the verdict must say so instead of
+// repeating "eligible for close" at a reader who closed it already.
 //
 // The closed/total progress figure stays raw, mirroring the deliberate raw
 // EpicStatus.ClosedChildren convention, but "eligible for close" is a
@@ -287,7 +291,7 @@ func printRelatedSection(relatedSeen map[string]*types.IssueWithDependencyMetada
 // Deciding that here from a raw closed count would make `bd show` contradict
 // `bd epic`, `bd doctor` and `epic_closeable`, which all read the shared
 // EpicStatus.EligibleForClose computed by GetEpicsEligibleForClosureInTx.
-func printEpicChildProgress(children []*types.IssueWithDependencyMetadata) {
+func printEpicChildProgress(children []*types.IssueWithDependencyMetadata, epicStatus types.Status) {
 	if len(children) == 0 {
 		return
 	}
@@ -307,11 +311,14 @@ func printEpicChildProgress(children []*types.IssueWithDependencyMetadata) {
 	if closed == len(children) {
 		icon = ui.RenderPass("✓")
 	}
-	eligible := ""
-	if completing == len(children) {
-		eligible = " — eligible for close"
+	verdict := ""
+	switch {
+	case epicStatus == types.StatusClosed:
+		verdict = " — epic already closed"
+	case completing == len(children):
+		verdict = " — eligible for close"
 	}
-	fmt.Printf("  %s %d/%d complete (%d%%)%s\n", icon, closed, len(children), pct, eligible)
+	fmt.Printf("  %s %d/%d complete (%d%%)%s\n", icon, closed, len(children), pct, verdict)
 }
 
 // formatSimpleDependencyLine formats a dependency without metadata (fallback)
