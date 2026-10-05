@@ -68,6 +68,7 @@ func scenarios() []scenario {
 		{name: "small", seed: seed, afterSeed: plantStaleBlocked("s4"), batch: batch},
 		{name: "apply", seed: seedApply, apply: applyRequest},
 		{name: "depadd", seed: seedDepAdd, afterSeed: plantParentCycle, run: runDepAdd},
+		{name: "waitsfor", seed: seedWaitsFor, run: runWaitsFor},
 	}
 }
 

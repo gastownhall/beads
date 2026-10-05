@@ -7,6 +7,7 @@ go_library(
         "scenario_apply.go",
         "scenario_depadd.go",
         "scenario_import458.go",
+        "scenario_waitsfor.go",
     ],
     embedsrcs = [
         "golden/apply.json",
@@ -14,6 +15,7 @@ go_library(
         "golden/import458-reject-stale.json",
         "golden/import458.json",
         "golden/small.json",
+        "golden/waitsfor.json",
     ],
     importpath = "github.com/steveyegge/beads/internal/storage/createbatchequiv",
     visibility = ["//:__subpackages__"],

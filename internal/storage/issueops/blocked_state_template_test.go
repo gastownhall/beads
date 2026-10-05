@@ -109,8 +109,27 @@ func TestBatchedTemplatesPinLookupJoins(t *testing.T) {
 		}
 	}
 	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-		if strings.Contains(shouldBeBlockedIDsUnionSQL(depTable), "/*+") {
-			t.Errorf("unscoped union over %s should not carry join hints", depTable)
+		union := shouldBeBlockedIDsUnionSQL(depTable)
+		if strings.Contains(union, "LOOKUP_JOIN(d, t)") || strings.Contains(union, "LOOKUP_JOIN(d, p)") {
+			t.Errorf("unscoped union over %s should not pin its legs' joins", depTable)
+		}
+	}
+}
+
+// TestWaitsForGateSplitsSpawnerColumns pins the waits-for gate's per-column
+// EXISTS split: one OR across both spawner columns inside an EXISTS has no
+// index to use and scans the edge table per evaluation (see
+// waitsForGateBlockedSQL). Two tables x two columns x {open, closed} children.
+func TestWaitsForGateSplitsSpawnerColumns(t *testing.T) {
+	if got := strings.Count(waitsForGateBlockedSQL, "JOIN_ORDER(cd, child) LOOKUP_JOIN(cd, child)"); got != 8 {
+		t.Errorf("gate pins %d child lookups, want 8", got)
+	}
+	if strings.Contains(waitsForGateBlockedSQL, "OR (d.depends_on_wisp_id IS NOT NULL") {
+		t.Errorf("gate still ORs the spawner columns inside one EXISTS")
+	}
+	for _, col := range []string{"depends_on_issue_id", "depends_on_wisp_id"} {
+		if got := strings.Count(waitsForGateBlockedSQL, "cd."+col+" = d."+col); got != 4 {
+			t.Errorf("gate matches cd.%s in %d EXISTS, want 4", col, got)
 		}
 	}
 }
