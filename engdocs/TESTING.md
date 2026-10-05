@@ -130,7 +130,11 @@ init and store-backed suites) that every other lane skips with
 `--config=integration`'s build, passes the binary no test selection (the Go
 binary shards itself over every top-level test, 16 shards), and runs where
 the integration lane runs (remote, or with the read-only cache). pr.yml's
-gate requires it once `BAZEL_CMD_DOLT_REQUIRED` is `"true"`. Locally:
+gate requires it once `BAZEL_CMD_DOLT_REQUIRED` is `"true"`; pr.yml then
+also passes bazel.yml `cmd-dolt-required: true`, and the PR's
+`bazel-integration` lane runs `//... -//cmd/bd:bd_test`, so each cmd/bd
+integration-build test runs once (push, nightly and bazel-farm runs keep
+`bd_test` in the integration lane). Locally:
 `bazel test //cmd/bd:bd_dolt_server_test --config=doltserver-cmd`.
 
 An ambient `BEADS_DOLT_SERVER_PORT` or `BEADS_DOLT_PORT` is never honored by
