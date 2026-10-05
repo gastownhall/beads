@@ -627,6 +627,9 @@ if you want to preserve a summary before garbage collection.
 Use --closed to purge ALL closed wisps (regardless of age). This is the
 fastest way to reclaim space from accumulated wisp bloat. Safe by default:
 requires --force to actually delete.
+Without --force, closed wisps that still gate live work outside the purge
+candidate set are skipped in previews; JSON output includes their IDs and
+blocking dependents.
 
 Note: This uses time-based cleanup, appropriate for ephemeral wisps.
 For graph-pressure staleness detection (blocking other work), see 'bd mol stale'.
@@ -652,6 +655,17 @@ type WispGCResult struct {
 	CleanedCount int      `json:"cleaned_count"`
 	Candidates   int      `json:"candidates,omitempty"`
 	DryRun       bool     `json:"dry_run,omitempty"`
+}
+
+const (
+	noDeletableClosedWispsMessage = "No deletable closed wisps — all have live dependents outside the batch"
+	wispGCSkippedJSONKey          = "skipped"
+	wispGCSkippedCountJSONKey     = "skipped_count"
+)
+
+type wispGCSkippedIssue struct {
+	ID                 string   `json:"id"`
+	BlockingDependents []string `json:"blocking_dependents"`
 }
 
 // protectedWispStatuses returns the statuses whose category means a wisp is
@@ -961,25 +975,28 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 	// that still gate live work instead of failing the whole batch; --force is
 	// unchanged (purges every closed wisp, orphans the live dependents).
 	deletable := ids
+	var protected map[string][]string
 	if !force {
-		safe, protected, err := partitionClosedWispsByLiveDependents(ctx, ids)
+		safe, protectedCandidates, err := partitionClosedWispsByLiveDependents(ctx, ids)
 		if err != nil {
 			return HandleError("checking live dependents of closed wisps: %v", err)
 		}
+		protected = protectedCandidates
 		reportSkippedProtectedWisps(protected)
 		deletable = safe
 	}
 
 	if !force && !dryRun {
 		if jsonOutput {
-			return outputJSON(map[string]interface{}{
+			payload := map[string]interface{}{
 				"candidates": len(deletable),
-				"skipped":    len(ids) - len(deletable),
 				"dry_run":    true,
-			})
+			}
+			addSkippedProtectedWispsJSON(payload, protected)
+			return outputJSON(payload)
 		}
 		if len(deletable) == 0 {
-			fmt.Println("No deletable closed wisps — all have live dependents outside the batch")
+			fmt.Println(noDeletableClosedWispsMessage)
 			return nil
 		}
 		fmt.Printf("Found %d closed wisp(s) to delete\n", len(deletable))
@@ -989,13 +1006,14 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 
 	if len(deletable) == 0 {
 		if jsonOutput {
-			return outputJSON(map[string]interface{}{
+			payload := map[string]interface{}{
 				"candidates": 0,
-				"skipped":    len(ids),
 				"dry_run":    dryRun,
-			})
+			}
+			addSkippedProtectedWispsJSON(payload, protected)
+			return outputJSON(payload)
 		}
-		fmt.Println("No deletable closed wisps — all have live dependents outside the batch")
+		fmt.Println(noDeletableClosedWispsMessage)
 		return nil
 	}
 
@@ -1016,7 +1034,7 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 	// Without cascade, closed wisps are deleted and live dependents are
 	// orphaned (edges dropped, is_blocked recomputed) — the same semantics as
 	// a plain `bd delete`.
-	if err := deleteBatch(nil, deletable, force, dryRun, false, jsonOutput, false, nil, "wisp gc --closed"); err != nil {
+	if err := deleteBatchWithPreviewExtras(nil, deletable, force, dryRun, false, jsonOutput, false, nil, skippedProtectedWispsJSONFields(protected), "wisp gc --closed"); err != nil {
 		return HandleError("%v", err)
 	}
 
@@ -1024,6 +1042,39 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 		fmt.Printf("\nHint: Run 'bd compact --dolt' to reclaim disk space\n")
 	}
 	return nil
+}
+
+func addSkippedProtectedWispsJSON(payload map[string]interface{}, protected map[string][]string) {
+	for key, value := range skippedProtectedWispsJSONFields(protected) {
+		payload[key] = value
+	}
+}
+
+func skippedProtectedWispsJSONFields(protected map[string][]string) map[string]interface{} {
+	fields := map[string]interface{}{
+		wispGCSkippedCountJSONKey: len(protected),
+	}
+	if len(protected) > 0 {
+		fields[wispGCSkippedJSONKey] = skippedProtectedWispsJSON(protected)
+	}
+	return fields
+}
+
+func skippedProtectedWispsJSON(protected map[string][]string) []wispGCSkippedIssue {
+	ids := make([]string, 0, len(protected))
+	for id := range protected {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+
+	skipped := make([]wispGCSkippedIssue, 0, len(ids))
+	for _, id := range ids {
+		skipped = append(skipped, wispGCSkippedIssue{
+			ID:                 id,
+			BlockingDependents: protected[id],
+		})
+	}
+	return skipped
 }
 
 // partitionClosedWispsByLiveDependents splits closed-wisp GC candidates into
@@ -1112,7 +1163,7 @@ func reportSkippedProtectedWisps(protected map[string][]string) {
 	slices.Sort(ids)
 	fmt.Printf("Skipping %d closed wisp(s) that still gate work outside the batch:\n", len(ids))
 	for _, id := range ids {
-		fmt.Printf("  %s (blocked by: %s)\n", id, strings.Join(protected[id], ", "))
+		fmt.Printf("  %s (blocking dependents: %s)\n", id, strings.Join(protected[id], ", "))
 	}
 	fmt.Println("Use --force to delete them anyway (orphans the dependents: edges dropped, is_blocked recomputed).")
 }

@@ -75,6 +75,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd mol wisp gc --closed --dry-run --json` now reports skipped closed
+  wisps with their blocking live dependents** (#5753). Mixed previews already
+  withheld closed wisps that still gate live work, but the JSON dry-run payload
+  only listed the deletable subset. Agents now see `skipped_count` and
+  `skipped` entries with `id` and `blocking_dependents`, matching the text
+  preview's skip notice.
 - `bd preflight --fix --json` no longer returns a `Version sync` fix result:
   version updates must keep all release surfaces aligned via `scripts/update-versions.sh`.
 - Release-tag pushes require Go and reject batches containing different release versions.
