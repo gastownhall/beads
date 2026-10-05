@@ -75,7 +75,7 @@ func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 			Provenance: "bd: reopen " + target.id,
 		})
 		if err != nil {
-			if reported, ok := reportIfRevisionFailure("reopening", target.id, err); ok {
+			if reported, ok := reportIfRevisionFailure("reopening", target.id, err, ifRevision); ok {
 				return reported
 			}
 			reportIssueLookupFailure("reopening", target.id, err)

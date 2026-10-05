@@ -100,7 +100,7 @@ another actor won the race, so retrying the same guard is pointless).`,
 				Provenance: "bd: reopen " + fullID,
 			})
 			if err != nil {
-				if reported, ok := reportIfRevisionFailure("reopening", fullID, err); ok {
+				if reported, ok := reportIfRevisionFailure("reopening", fullID, err, ifRevision); ok {
 					result.Close()
 					return reported
 				}
