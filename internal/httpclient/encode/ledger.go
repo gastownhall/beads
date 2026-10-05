@@ -470,6 +470,15 @@ func designRows() []Row {
 			PinnedBy: pinnedByS3Conformance,
 		},
 		{
+			ID: "L-cycles-tracks", Kind: KindRefuse,
+			Type: reflect.TypeOf(issueops.DetectCyclesRequest{}), Field: "IncludeTracks",
+			What: "issueops.CycleDetector.DetectCycles refuses a request with IncludeTracks set, rather than silently answering the narrower (tracks-excluded) walk",
+			Why: "listDependencyCycles (wire.OpListDependencyCycles) publishes no include_tracks parameter at all — there is no wire member to widen the walk onto, not merely one this client chose not to send. Honoring the request field anyway (by just not sending it, the way a dropped filter would) would answer the DEFAULT walk to a caller who explicitly asked for the wider one that also follows `tracks` edges: a narrower answer with no error, exactly the failure mode ErrUnsupported exists to make loud instead of silent (see its own doc). " +
+				"Upstream ask: an include_tracks query parameter on listDependencyCycles, which retires this row",
+			SpecRow:  "D8 (refuse-not-drop), D9 L16 (the same argument, on a read)",
+			PinnedBy: pinnedByS3Conformance,
+		},
+		{
 			ID: "L-batchcreate-target", Kind: KindDegrade,
 			What:     "a batch create whose edge target names no issue refuses as issueops.ErrValidation alone, not as ErrValidation WRAPPING ErrNotFound",
 			Why:      "the wire answers a dangling edge target with a 400 invalid_argument naming `items` (internal/httpapi's failBatchCreate), and deliberately does not quote the role's own message, which arrives as a driver error naming tables and constraints. The refusal still fails the whole batch and creates nothing — the promise the row is about — and only the second sentinel is lost. Upstream ask: a distinguishing code for the absent-target refusal",

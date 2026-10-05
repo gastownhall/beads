@@ -43,10 +43,22 @@ type httpCycleDetector struct{ store *Store }
 
 // DetectCycles reports every cycle in the blocking graph.
 //
-// The request carries nothing and the operation publishes nothing, which is the
-// same statement from both ends: a cycle is a property of the whole graph and
-// there is no predicate that narrows it.
-func (d httpCycleDetector) DetectCycles(ctx context.Context, _ issueops.DetectCyclesRequest) (issueops.CycleReport, error) {
+// The request carries nothing (beyond IncludeTracks, refused below) and the
+// operation publishes nothing, which is the same statement from both ends: a
+// cycle is a property of the whole graph and there is no predicate that
+// narrows it.
+//
+// req.IncludeTracks is refused rather than silently ignored: listDependencyCycles
+// (wire.OpListDependencyCycles) has no include_tracks parameter at all, so
+// honoring it would mean quietly answering the DEFAULT (narrower) walk to a
+// caller who explicitly asked for the wider one that also follows `tracks`
+// edges. This is the same typed, ledger-cited refusal CountEdges' own bound
+// raises below (refuse/encode.RefusedError, not a bare error) — see
+// "L-cycles-tracks" and engdocs/design/http-divergence-ledger.md.
+func (d httpCycleDetector) DetectCycles(ctx context.Context, req issueops.DetectCyclesRequest) (issueops.CycleReport, error) {
+	if req.IncludeTracks {
+		return issueops.CycleReport{}, refuse(encode.OpListDependencyCycles, "L-cycles-tracks")
+	}
 	var body apigen.CyclesPage
 	if err := d.store.dispatch(ctx, wire.Request{
 		Op:     wire.OpListDependencyCycles,
