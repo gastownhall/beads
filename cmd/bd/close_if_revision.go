@@ -8,9 +8,11 @@ import (
 
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/workapi"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -36,6 +38,20 @@ func runCloseDirectIfRevision(ctx context.Context, id, reason string, force bool
 	if result.Issue == nil {
 		fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
 		return &exitError{Code: 1}
+	}
+
+	// Assignee, pin, and gate checks are CLI policy (close_direct.go). The
+	// batch route runs them in closeDirectCheckOne before Close; this
+	// single-id route was skipping that preflight (beads#7206). The snapshot
+	// from resolveAndGetIssueForMutation carries RowVersion (issueops
+	// ScanIssueFrom of row_lock). When that token already disagrees with
+	// --if-revision, skip the fences so Close reports exit 13 instead of a
+	// policy refusal from a stale read (#7216).
+	if !ifRevisionAlreadyStale(result.Issue, &expectedVersion) {
+		if refusal := closeDirectCheckOne(result.ResolvedID, result.Issue, force); refusal != "" {
+			fmt.Fprintln(os.Stderr, refusal)
+			return &exitError{Code: 1}
+		}
 	}
 
 	opsCtx, err := issueOpsContext(ctx)
@@ -113,6 +129,39 @@ func runCloseProxiedIfRevision(ctx context.Context, id, reason string, force boo
 		if details, gerr := rd.Get(ctx, issueops.GetRequest{ID: id}); gerr == nil {
 			preCloseStatus = string(details.Issue.Status)
 		}
+	}
+
+	// The audit read above stays best-effort. Authorization uses
+	// closeProxiedCheckOne, which fails closed, inside the same read-only
+	// unit of work as closeProxiedRunPreflight. That helper drops the issue
+	// on refusal, so staleness is decided on its GetIssueOrWisp read first.
+	// Domain db Get scans row_lock into RowVersion via issueops.ScanIssueFrom.
+	// A stale snapshot falls through to Close and does not run the fences.
+	var fenceRefusal string
+	_, readErr := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (struct{}, error) {
+		current, _, err := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), id)
+		if errors.Is(err, storage.ErrNotFound) {
+			fenceRefusal = fmt.Sprintf("Issue %s not found", id)
+			return struct{}{}, nil
+		}
+		if err != nil {
+			fenceRefusal = fmt.Sprintf("Error resolving %s: %v", id, err)
+			return struct{}{}, nil
+		}
+		if ifRevisionAlreadyStale(current, &expectedVersion) {
+			return struct{}{}, nil
+		}
+		refusal, _ := closeProxiedCheckOne(ctx, uw, id, closeProxiedInput{force: force})
+		fenceRefusal = refusal
+		return struct{}{}, nil
+	})
+	if readErr != nil {
+		fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, readErr)
+		return &exitError{Code: 1}
+	}
+	if fenceRefusal != "" {
+		fmt.Fprintln(os.Stderr, fenceRefusal)
+		return &exitError{Code: 1}
 	}
 
 	closeResult, closeErr := ops.Close(ctx, issueops.CloseRequest{
