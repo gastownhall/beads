@@ -35,6 +35,7 @@ func TestTransportForWrongCARefusesTheTLSHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TransportFor: %v", err)
 	}
+	forceIPv4Loopback(t, rt)
 	client := &http.Client{Transport: rt}
 
 	resp, err := client.Get(u.String())
@@ -68,10 +69,11 @@ func TestTransportForWrongCAViaEnvRefusesTheTLSHandshake(t *testing.T) {
 
 	t.Setenv(CAFileEnv, u.Host+"="+wrong.writePEM(t))
 
-	rt, err := TransportFor(Target{})
+	rt, err := TransportFor(Target{BaseURL: u})
 	if err != nil {
 		t.Fatalf("TransportFor: %v", err)
 	}
+	forceIPv4Loopback(t, rt)
 	client := &http.Client{Transport: rt}
 
 	resp, err := client.Get(u.String())
@@ -102,6 +104,7 @@ func TestTransportForRightCASucceedsOverTLS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TransportFor: %v", err)
 	}
+	forceIPv4Loopback(t, rt)
 	client := &http.Client{Transport: rt}
 
 	resp, err := client.Get(u.String())

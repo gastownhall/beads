@@ -4,6 +4,7 @@ package httpclient
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -169,6 +170,37 @@ func (ca testCA) startServer(t *testing.T, handler http.HandlerFunc) *url.URL {
 	}
 	u.Host = net.JoinHostPort("localhost", port)
 	return u
+}
+
+// forceIPv4Loopback makes rt (the concrete *http.Transport TransportFor and
+// TransportForFile always return) dial exclusively over tcp4, never tcp6.
+//
+// Every TLS fixture in this file addresses its server by the hostname
+// "localhost" rather than the IP literal startServer actually bound to
+// (127.0.0.1), specifically so SNI is sent. But net/http's default dialer
+// does RFC 6555 Happy Eyeballs for a hostname that resolves to more than one
+// address family, racing a tcp6 dial to ::1:<port> against the real tcp4
+// dial to 127.0.0.1:<port>. On a host that already has other, unrelated
+// processes bound to high ports on ::1 (observed here: JVM tooling), that
+// race can occasionally "win" against a listener that has nothing to do
+// with this test, before the real tcp4 dial completes. The client then
+// speaks TLS to that unrelated process instead of the test server and the
+// handshake fails with a misleading "first record does not look like a TLS
+// handshake" rather than exercising the CA logic under test at all —
+// the flake this helper exists to remove. Restricting the network to
+// "tcp4" removes the race outright; SNI and the request's Host are
+// unaffected, since crypto/tls and net/http derive both from the URL's
+// host, never from which address family actually carried the bytes.
+func forceIPv4Loopback(t *testing.T, rt http.RoundTripper) {
+	t.Helper()
+	transport, ok := rt.(*http.Transport)
+	if !ok {
+		t.Fatalf("forceIPv4Loopback: RoundTripper is %T, want *http.Transport", rt)
+	}
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	transport.DialContext = func(ctx context.Context, _, addr string) (net.Conn, error) {
+		return dialer.DialContext(ctx, "tcp4", addr)
+	}
 }
 
 // caContextHandler answers the handshake like contextServer, and additionally
@@ -591,6 +623,7 @@ func TestTransportForFileRotationClosesSupersededIdleConnections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TransportForFile (before rotation): %v", err)
 	}
+	forceIPv4Loopback(t, before)
 	client := &http.Client{Transport: before}
 	resp, err := client.Get(u.String())
 	if err != nil {
