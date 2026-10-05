@@ -2,6 +2,7 @@ package wireshape
 
 import (
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -10,11 +11,22 @@ import (
 	"github.com/steveyegge/beads/internal/httpapi/spec"
 )
 
-// Entry is one member of one schema reachable from an operation's response.
-// Schema is the component's name (or, for a member whose own value is an
-// inline object or array with no $ref of its own, a synthetic dotted path
-// rooted at the nearest named schema) so that two members with the same name
-// on different schemas are never confused with one another.
+// Entry is one member of one schema reachable from an operation's response OR
+// request body. Schema is the component's name (or, for a member whose own
+// value is an inline object or array with no $ref of its own, a synthetic
+// dotted path rooted at the nearest named schema) so that two members with
+// the same name on different schemas are never confused with one another.
+//
+// The Item* and AdditionalProps* fields exist because a property's own
+// Type/Format/Enum/Nullable describe the CONTAINER, not what it contains: a
+// `type: array` property is always `Type: "array"` whether its items are
+// strings or integers, and a `type: object` property with no `properties` of
+// its own (a map, via `additionalProperties`) is always `Type: "object"`
+// whether its values are strings or integers. Without these fields, changing
+// Issue.labels' item type from string to integer, or IssueCount.groups'
+// value type from integer to string, is invisible to this digest even though
+// it is exactly the non-additive wire change CurrentWireRevision exists to
+// gate — the other half of #6053 alongside the request-body coverage below.
 type Entry struct {
 	Schema   string   `json:"schema"`
 	Member   string   `json:"member"`
@@ -22,6 +34,30 @@ type Entry struct {
 	Format   string   `json:"format,omitempty"`
 	Enum     []string `json:"enum,omitempty"`
 	Required bool     `json:"required"`
+	// Nullable records `nullable: true` on this member's own schema node. A
+	// response member moving from always-present-when-returned to
+	// sometimes-null is exactly as breaking to a client as the type itself
+	// changing, and before this field nothing here could see it.
+	Nullable bool `json:"nullable,omitempty"`
+
+	// ItemType, ItemFormat, ItemEnum and ItemNullable describe a `type: array`
+	// member's own items node. They are set whenever Type == "array" and the
+	// items schema resolves to something, regardless of whether the items are
+	// a scalar (only these fields describe it) or an object with its own
+	// named members (which ALSO get walked and recorded as their own
+	// Entry-ies under schema+"."+member+"[]", same as before).
+	ItemType     string   `json:"item_type,omitempty"`
+	ItemFormat   string   `json:"item_format,omitempty"`
+	ItemEnum     []string `json:"item_enum,omitempty"`
+	ItemNullable bool     `json:"item_nullable,omitempty"`
+
+	// AdditionalPropsType and AdditionalPropsFormat describe a `type: object`
+	// member's `additionalProperties` schema — the map-value shape of a
+	// member like IssueCount.groups, which has no `properties` of its own.
+	// Set only when additionalProperties is a schema (not the boolean `true`
+	// or `false` some operations use for "no constraint" / "sealed").
+	AdditionalPropsType   string `json:"additional_props_type,omitempty"`
+	AdditionalPropsFormat string `json:"additional_props_format,omitempty"`
 }
 
 // Digest is the golden document: the wire revision it was computed against,
@@ -29,6 +65,75 @@ type Entry struct {
 type Digest struct {
 	WireRevision int     `json:"wire_revision"`
 	Entries      []Entry `json:"entries"`
+}
+
+// CompareResult is the outcome of diffing two digests by "schema\x00member"
+// key: Changed holds keys present in both whose Entry differs, Removed holds
+// keys only want has, and Added holds keys only got has.
+type CompareResult struct {
+	Changed []string
+	Removed []string
+	Added   []string
+}
+
+// Compare diffs want (typically the committed golden) against got (typically
+// a fresh Compute()). It is the one comparison TestWireShapeDigest and
+// gendigest's SafeToWrite guard both need, extracted here so the write guard
+// and the test can never disagree about what counts as a change.
+func Compare(want, got Digest) CompareResult {
+	wantByKey := map[string]Entry{}
+	for _, e := range want.Entries {
+		wantByKey[e.Schema+"\x00"+e.Member] = e
+	}
+	gotByKey := map[string]Entry{}
+	for _, e := range got.Entries {
+		gotByKey[e.Schema+"\x00"+e.Member] = e
+	}
+
+	var result CompareResult
+	for key, w := range wantByKey {
+		g, ok := gotByKey[key]
+		if !ok {
+			result.Removed = append(result.Removed, key)
+			continue
+		}
+		if !reflect.DeepEqual(w, g) {
+			result.Changed = append(result.Changed, key)
+		}
+	}
+	for key := range gotByKey {
+		if _, ok := wantByKey[key]; !ok {
+			result.Added = append(result.Added, key)
+		}
+	}
+	sort.Strings(result.Changed)
+	sort.Strings(result.Removed)
+	sort.Strings(result.Added)
+	return result
+}
+
+// SafeToWrite is gendigest's write guard (review MEDIUM: "refuse to write
+// changed or removed entries unless CurrentWireRevision is higher than the
+// golden's recorded revision. Additive entries are allowed."). A pure
+// addition is always safe regardless of revision; a changed or removed entry
+// is only safe when candidate's WireRevision is strictly greater than
+// golden's — the exact bump TestWireShapeDigest itself requires to go green,
+// so gendigest can never be used to silently launder a failing test instead
+// of fixing it.
+func SafeToWrite(golden, candidate Digest) (bool, string) {
+	cmp := Compare(golden, candidate)
+	if len(cmp.Changed) == 0 && len(cmp.Removed) == 0 {
+		return true, ""
+	}
+	if candidate.WireRevision > golden.WireRevision {
+		return true, ""
+	}
+	return false, fmt.Sprintf(
+		"refusing to write: %d changed and %d removed entr(ies) but wire_revision %d is not greater than "+
+			"the existing golden's %d (changed=%v removed=%v) — bump CurrentWireRevision "+
+			"(internal/httpapi/wire_revision.go) and the revision table in openapi.v0.yaml's "+
+			"wire_revision property FIRST, then regenerate",
+		len(cmp.Changed), len(cmp.Removed), candidate.WireRevision, golden.WireRevision, cmp.Changed, cmp.Removed)
 }
 
 var httpVerbs = map[string]bool{
@@ -42,6 +147,12 @@ var httpVerbs = map[string]bool{
 // (which would otherwise be a cycle: internal/httpapi imports nothing from
 // here, and this package must stay that way to run from the standalone
 // gendigest command without pulling in the server).
+//
+// Both RESPONSE and REQUEST BODY schemas are walked. A request-body-only
+// shape change — DeleteIssuesRequest.expected_version moving from string to
+// integer, say — is exactly as much an undocumented break to an existing
+// client as a response change, and the other half of #6053 was invisible
+// here until request bodies were added alongside responses.
 func Compute(wireRevision int) (Digest, error) {
 	var doc map[string]any
 	if err := yaml.Unmarshal(spec.OpenAPIV0(), &doc); err != nil {
@@ -64,6 +175,7 @@ func Compute(wireRevision int) (Digest, error) {
 			if !ok {
 				continue
 			}
+
 			responses, _ := op["responses"].(map[string]any)
 			for _, rawResp := range responses {
 				respMap, ok := rawResp.(map[string]any)
@@ -71,18 +183,12 @@ func Compute(wireRevision int) (Digest, error) {
 					continue
 				}
 				respMap = c.resolveAny(respMap)
-				content, _ := respMap["content"].(map[string]any)
-				for _, rawMedia := range content {
-					media, ok := rawMedia.(map[string]any)
-					if !ok {
-						continue
-					}
-					schemaNode, ok := media["schema"].(map[string]any)
-					if !ok {
-						continue
-					}
-					c.walk(schemaNode, "")
-				}
+				c.walkContent(respMap)
+			}
+
+			if rb, ok := op["requestBody"].(map[string]any); ok {
+				rb = c.resolveAny(rb)
+				c.walkContent(rb)
 			}
 		}
 	}
@@ -98,6 +204,25 @@ func Compute(wireRevision int) (Digest, error) {
 		return entries[i].Member < entries[j].Member
 	})
 	return Digest{WireRevision: wireRevision, Entries: entries}, nil
+}
+
+// walkContent walks every media type's schema under a resolved response or
+// requestBody node's `content` map. Shared by Compute's response and request
+// body loops: a response object and a resolved requestBody object are both
+// shaped `{content: {mediaType: {schema: ...}}}`.
+func (c *collector) walkContent(node map[string]any) {
+	content, _ := node["content"].(map[string]any)
+	for _, rawMedia := range content {
+		media, ok := rawMedia.(map[string]any)
+		if !ok {
+			continue
+		}
+		schemaNode, ok := media["schema"].(map[string]any)
+		if !ok {
+			continue
+		}
+		c.walk(schemaNode, "")
+	}
 }
 
 type collector struct {
@@ -175,10 +300,16 @@ func asString(v any) string {
 	return s
 }
 
+func asBool(v any) bool {
+	b, _ := v.(bool)
+	return b
+}
+
 // walk records every property of the schema node reaches (following $refs and
-// flattening allOf), then recurses into each property's own object or array
-// shape. label names an anonymous (non-$ref) node for entries recorded under
-// it; a $ref always overrides it with the component's own name.
+// flattening allOf and oneOf), then recurses into each property's own object
+// or array shape. label names an anonymous (non-$ref) node for entries
+// recorded under it; a $ref always overrides it with the component's own
+// name.
 //
 // Every NAMED schema is walked at most once (the visited guard), which is
 // what makes a cycle between named schemas (and there is at least the
@@ -202,29 +333,16 @@ func (c *collector) walk(node map[string]any, label string) {
 		node = next
 	}
 
-	if allOf, ok := node["allOf"].([]any); ok {
-		mergedProps := map[string]any{}
-		var mergedRequired []any
-		for _, rawSub := range allOf {
-			subMap, ok := rawSub.(map[string]any)
-			if !ok {
-				continue
-			}
-			sub := c.resolveAny(subMap)
-			if props, ok := sub["properties"].(map[string]any); ok {
-				for k, v := range props {
-					mergedProps[k] = v
-				}
-			}
-			if req, ok := sub["required"].([]any); ok {
-				mergedRequired = append(mergedRequired, req...)
-			}
-		}
-		node = map[string]any{
-			"type":       "object",
-			"properties": mergedProps,
-			"required":   mergedRequired,
-		}
+	if merged, ok := c.mergeCombinator(node, "allOf"); ok {
+		node = merged
+	} else if merged, ok := c.mergeCombinator(node, "oneOf"); ok {
+		// oneOf is a union, not an intersection — merging its branches'
+		// properties together is not semantically a "oneOf" anymore. This
+		// document uses oneOf nowhere today (confirmed by grep), so this
+		// branch is defensive only: a best-effort shape so a future oneOf is
+		// SEEN by the digest rather than silently invisible, not a claim
+		// that the merge is the right model for real union validation.
+		node = merged
 	}
 
 	if name != "" {
@@ -258,15 +376,43 @@ func (c *collector) walk(node map[string]any, label string) {
 				Format:   asString(resolved["format"]),
 				Enum:     toStringSlice(resolved["enum"]),
 				Required: required[member],
+				Nullable: asBool(resolved["nullable"]),
 			}
+
+			var itemsNode, addlPropsNode map[string]any
+			switch entry.Type {
+			case "array":
+				if items, ok := resolved["items"].(map[string]any); ok {
+					resolvedItems := c.resolveAny(items)
+					entry.ItemType = asString(resolvedItems["type"])
+					entry.ItemFormat = asString(resolvedItems["format"])
+					entry.ItemEnum = toStringSlice(resolvedItems["enum"])
+					entry.ItemNullable = asBool(resolvedItems["nullable"])
+					itemsNode = items
+				}
+			case "object":
+				if ap, ok := resolved["additionalProperties"].(map[string]any); ok {
+					resolvedAP := c.resolveAny(ap)
+					entry.AdditionalPropsType = asString(resolvedAP["type"])
+					entry.AdditionalPropsFormat = asString(resolvedAP["format"])
+					addlPropsNode = ap
+				}
+			}
+
 			c.byKey[entry.Schema+"\x00"+entry.Member] = entry
 
 			switch entry.Type {
 			case "object":
 				c.walk(propMap, name+"."+member)
+				if addlPropsNode != nil {
+					// A map value that is itself a named/object schema gets
+					// its own members walked too, under a label distinct
+					// from an array's "[]" so the two can never collide.
+					c.walk(addlPropsNode, name+"."+member+"{}")
+				}
 			case "array":
-				if items, ok := resolved["items"].(map[string]any); ok {
-					c.walk(items, name+"."+member+"[]")
+				if itemsNode != nil {
+					c.walk(itemsNode, name+"."+member+"[]")
 				}
 			}
 		}
@@ -282,4 +428,37 @@ func (c *collector) walk(node map[string]any, label string) {
 			c.walk(items, itemLabel+"[]")
 		}
 	}
+}
+
+// mergeCombinator flattens node[key] (allOf or oneOf: a list of subschemas)
+// into a synthetic object node with merged properties and required lists, the
+// way the pre-existing allOf handling always worked. It reports ok == false
+// when node has no such key, leaving node untouched.
+func (c *collector) mergeCombinator(node map[string]any, key string) (map[string]any, bool) {
+	list, ok := node[key].([]any)
+	if !ok {
+		return nil, false
+	}
+	mergedProps := map[string]any{}
+	var mergedRequired []any
+	for _, rawSub := range list {
+		subMap, ok := rawSub.(map[string]any)
+		if !ok {
+			continue
+		}
+		sub := c.resolveAny(subMap)
+		if props, ok := sub["properties"].(map[string]any); ok {
+			for k, v := range props {
+				mergedProps[k] = v
+			}
+		}
+		if req, ok := sub["required"].([]any); ok {
+			mergedRequired = append(mergedRequired, req...)
+		}
+	}
+	return map[string]any{
+		"type":       "object",
+		"properties": mergedProps,
+		"required":   mergedRequired,
+	}, true
 }

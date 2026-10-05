@@ -26,12 +26,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "gendigest:", err)
 		os.Exit(1)
 	}
-	blob, err := json.MarshalIndent(digest, "", "  ")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "gendigest:", err)
-		os.Exit(1)
-	}
-	blob = append(blob, '\n')
 
 	// Resolve relative to this source file so the command works from any cwd,
 	// the same way `go generate` directives in this repo do.
@@ -41,6 +35,33 @@ func main() {
 		os.Exit(1)
 	}
 	out := filepath.Join(filepath.Dir(thisFile), "..", "..", "testdata", "golden.json")
+
+	// Refuse to overwrite a golden that would silently launder a failing
+	// TestWireShapeDigest: a changed or removed entry must come with a
+	// CurrentWireRevision bump ABOVE what's already committed, never from
+	// just re-running this command. A purely additive diff, or no existing
+	// golden at all (first run), always writes.
+	// #nosec G304 -- out is this command's own source-relative output path,
+	// never request- or argv-influenced; reading it back is the write guard.
+	if existing, err := os.ReadFile(out); err == nil {
+		var golden wireshape.Digest
+		if err := json.Unmarshal(existing, &golden); err != nil {
+			fmt.Fprintln(os.Stderr, "gendigest: decode existing golden:", err)
+			os.Exit(1)
+		}
+		if ok, reason := wireshape.SafeToWrite(golden, digest); !ok {
+			fmt.Fprintln(os.Stderr, "gendigest:", reason)
+			os.Exit(1)
+		}
+	}
+
+	blob, err := json.MarshalIndent(digest, "", "  ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gendigest:", err)
+		os.Exit(1)
+	}
+	blob = append(blob, '\n')
+
 	if err := os.WriteFile(out, blob, 0o600); err != nil {
 		fmt.Fprintln(os.Stderr, "gendigest:", err)
 		os.Exit(1)

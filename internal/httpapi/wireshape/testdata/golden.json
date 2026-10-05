@@ -2,10 +2,36 @@
   "wire_revision": 2,
   "entries": [
     {
+      "schema": "AddCommentRequest",
+      "member": "author",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "AddCommentRequest",
+      "member": "text",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "AddDependenciesRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "AddDependenciesRequest",
+      "member": "edges",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
       "schema": "AddDependenciesResponse",
       "member": "added",
       "type": "array",
-      "required": true
+      "required": true,
+      "item_type": "object"
     },
     {
       "schema": "AnchorEdgeCount",
@@ -27,16 +53,277 @@
       "required": true
     },
     {
+      "schema": "ApplyBatchRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ApplyBatchRequest",
+      "member": "force_id_prefix",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "ApplyBatchRequest",
+      "member": "items",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "ApplyBatchRequest",
+      "member": "provenance",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyBatchRequest",
+      "member": "skip_per_edge_cycle_check",
+      "type": "boolean",
+      "required": false
+    },
+    {
       "schema": "ApplyBatchResponse",
       "member": "items",
       "type": "array",
-      "required": true
+      "required": true,
+      "item_type": "object"
     },
     {
       "schema": "ApplyBatchResponse",
       "member": "keys",
       "type": "object",
+      "required": true,
+      "additional_props_type": "string"
+    },
+    {
+      "schema": "ApplyCloseItem",
+      "member": "expected_version",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCloseItem",
+      "member": "force",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "ApplyCloseItem",
+      "member": "reason",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCloseItem",
+      "member": "session",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCloseItem",
+      "member": "target",
+      "type": "object",
       "required": true
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "acceptance_criteria",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "defer_until",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "description",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "design",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "due_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "ephemeral",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "estimated_minutes",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "external_ref",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "issue_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "key",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "labels",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "metadata",
+      "type": "",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "metadata_refs",
+      "type": "object",
+      "required": false,
+      "additional_props_type": "object"
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "no_history",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "notes",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "owner",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "priority",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "sender",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "title",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ApplyDepAddItem",
+      "member": "metadata",
+      "type": "",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "ApplyDepAddItem",
+      "member": "source",
+      "type": "object",
+      "required": true
+    },
+    {
+      "schema": "ApplyDepAddItem",
+      "member": "target",
+      "type": "object",
+      "required": true
+    },
+    {
+      "schema": "ApplyDepAddItem",
+      "member": "type",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ApplyItem",
+      "member": "close",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "ApplyItem",
+      "member": "create",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "ApplyItem",
+      "member": "dep_add",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "ApplyItem",
+      "member": "kind",
+      "type": "string",
+      "enum": [
+        "close",
+        "create",
+        "dep_add",
+        "update"
+      ],
+      "required": true
+    },
+    {
+      "schema": "ApplyItem",
+      "member": "update",
+      "type": "object",
+      "required": false
     },
     {
       "schema": "ApplyItemResult",
@@ -75,16 +362,340 @@
       "required": true
     },
     {
+      "schema": "ApplyLabelPatch",
+      "member": "add",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "ApplyLabelPatch",
+      "member": "remove",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "ApplyLabelPatch",
+      "member": "replace",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "ApplyMetadataPatch",
+      "member": "merge",
+      "type": "",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "ApplyMetadataPatch",
+      "member": "replace",
+      "type": "",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "ApplyMetadataPatch",
+      "member": "set",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "ApplyMetadataPatch",
+      "member": "unset",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "acceptance_criteria",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "append_notes",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "defer_until",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "description",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "design",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "due_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "estimated_minutes",
+      "type": "integer",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "external_ref",
+      "type": "string",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "issue_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "labels",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "metadata",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "notes",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "owner",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "priority",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "title",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyUpdateItem",
+      "member": "expected_assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyUpdateItem",
+      "member": "expected_status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyUpdateItem",
+      "member": "expected_version",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyUpdateItem",
+      "member": "force_assignee_transfer",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "ApplyUpdateItem",
+      "member": "force_close_policy",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "ApplyUpdateItem",
+      "member": "force_notes_overwrite",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "ApplyUpdateItem",
+      "member": "patch",
+      "type": "object",
+      "required": true
+    },
+    {
+      "schema": "ApplyUpdateItem",
+      "member": "target",
+      "type": "object",
+      "required": true
+    },
+    {
+      "schema": "BatchCloseItem",
+      "member": "id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "BatchCloseItem",
+      "member": "reason",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchCloseRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "BatchCloseRequest",
+      "member": "force",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "BatchCloseRequest",
+      "member": "items",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "BatchCloseRequest",
+      "member": "session",
+      "type": "string",
+      "required": false
+    },
+    {
       "schema": "BatchCloseResponse",
       "member": "outcomes",
       "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "BatchCreateDependency",
+      "member": "target_id",
+      "type": "string",
       "required": true
+    },
+    {
+      "schema": "BatchCreateDependency",
+      "member": "type",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "BatchCreateItem",
+      "member": "acceptance_criteria",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchCreateItem",
+      "member": "assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchCreateItem",
+      "member": "dependencies",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "BatchCreateItem",
+      "member": "description",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchCreateItem",
+      "member": "design",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchCreateItem",
+      "member": "issue_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchCreateItem",
+      "member": "labels",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "BatchCreateItem",
+      "member": "priority",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "BatchCreateItem",
+      "member": "title",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "BatchCreateRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "BatchCreateRequest",
+      "member": "items",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
     },
     {
       "schema": "BatchCreateResponse",
       "member": "items",
       "type": "array",
-      "required": true
+      "required": true,
+      "item_type": "object"
     },
     {
       "schema": "Blocker",
@@ -108,7 +719,8 @@
       "schema": "BlockingAnnotations",
       "member": "items",
       "type": "array",
-      "required": true
+      "required": true,
+      "item_type": "object"
     },
     {
       "schema": "BondRef",
@@ -129,10 +741,22 @@
       "required": true
     },
     {
+      "schema": "ClaimNextRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
       "schema": "ClaimNextResponse",
       "member": "claimed",
       "type": "object",
       "required": false
+    },
+    {
+      "schema": "ClaimRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
     },
     {
       "schema": "ClaimResponse",
@@ -145,6 +769,36 @@
       "member": "issue",
       "type": "object",
       "required": true
+    },
+    {
+      "schema": "CloseIssueRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "CloseIssueRequest",
+      "member": "expected_version",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CloseIssueRequest",
+      "member": "force",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "CloseIssueRequest",
+      "member": "reason",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CloseIssueRequest",
+      "member": "session",
+      "type": "string",
+      "required": false
     },
     {
       "schema": "CloseIssueResponse",
@@ -180,7 +834,8 @@
       "schema": "CloseOutcome",
       "member": "blockers",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "object"
     },
     {
       "schema": "CloseOutcome",
@@ -244,10 +899,37 @@
       "required": true
     },
     {
+      "schema": "CompareAndSetMetadataRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "CompareAndSetMetadataRequest",
+      "member": "expected",
+      "type": "",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "CompareAndSetMetadataRequest",
+      "member": "key",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "CompareAndSetMetadataRequest",
+      "member": "value",
+      "type": "",
+      "required": false,
+      "nullable": true
+    },
+    {
       "schema": "CompareAndSetMetadataResponse",
       "member": "current",
       "type": "",
-      "required": false
+      "required": false,
+      "nullable": true
     },
     {
       "schema": "CompareAndSetMetadataResponse",
@@ -283,7 +965,8 @@
       "schema": "ContextResponse",
       "member": "capabilities",
       "type": "array",
-      "required": true
+      "required": true,
+      "item_type": "string"
     },
     {
       "schema": "ContextResponse",
@@ -328,10 +1011,209 @@
       "required": true
     },
     {
+      "schema": "CreateIssueDependency",
+      "member": "metadata",
+      "type": "",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "CreateIssueDependency",
+      "member": "reverse",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueDependency",
+      "member": "target_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "CreateIssueDependency",
+      "member": "type",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "acceptance_criteria",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "defer_until",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "dependencies",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "description",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "design",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "due_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "ephemeral",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "estimated_minutes",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "external_ref",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "force_id_prefix",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "inherit_labels_from_parent",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "issue_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "labels",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "metadata",
+      "type": "",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "no_history",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "notes",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "owner",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "parent_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "priority",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "sender",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "title",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "waits_for",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueWaitsFor",
+      "member": "gate",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueWaitsFor",
+      "member": "spawner_id",
+      "type": "string",
+      "required": true
+    },
+    {
       "schema": "Cycle",
       "member": "members",
       "type": "array",
-      "required": true
+      "required": true,
+      "item_type": "object"
     },
     {
       "schema": "Cycle",
@@ -361,7 +1243,45 @@
       "schema": "CyclesPage",
       "member": "items",
       "type": "array",
-      "required": true
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "DeleteIssuesRequest",
+      "member": "actor",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "DeleteIssuesRequest",
+      "member": "cascade",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "DeleteIssuesRequest",
+      "member": "dry_run",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "DeleteIssuesRequest",
+      "member": "expected_version",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "DeleteIssuesRequest",
+      "member": "force",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "DeleteIssuesRequest",
+      "member": "ids",
+      "type": "array",
+      "required": true,
+      "item_type": "string"
     },
     {
       "schema": "DeleteIssuesResult",
@@ -397,7 +1317,8 @@
       "schema": "DeleteIssuesResult",
       "member": "orphaned",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "string"
     },
     {
       "schema": "DeleteIssuesResult",
@@ -476,13 +1397,15 @@
       "schema": "DependencyEdges",
       "member": "items",
       "type": "array",
-      "required": true
+      "required": true,
+      "item_type": "object"
     },
     {
       "schema": "DependencyEdges",
       "member": "missing",
       "type": "array",
-      "required": true
+      "required": true,
+      "item_type": "string"
     },
     {
       "schema": "DependencyTreePage",
@@ -494,13 +1417,15 @@
       "schema": "DependencyTreePage",
       "member": "items",
       "type": "array",
-      "required": true
+      "required": true,
+      "item_type": "object"
     },
     {
       "schema": "EdgeCounts",
       "member": "anchors",
       "type": "array",
-      "required": true
+      "required": true,
+      "item_type": "object"
     },
     {
       "schema": "EventRecord",
@@ -524,7 +1449,8 @@
       "schema": "EventRecord",
       "member": "issue",
       "type": "object",
-      "required": true
+      "required": true,
+      "nullable": true
     },
     {
       "schema": "EventRecord",
@@ -562,7 +1488,8 @@
       "schema": "EventsPage",
       "member": "records",
       "type": "array",
-      "required": true
+      "required": true,
+      "item_type": "object"
     },
     {
       "schema": "Health",
@@ -607,7 +1534,8 @@
       "schema": "Issue",
       "member": "bonded_from",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "object"
     },
     {
       "schema": "Issue",
@@ -632,7 +1560,8 @@
       "schema": "Issue",
       "member": "comments",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "object"
     },
     {
       "schema": "Issue",
@@ -677,7 +1606,8 @@
       "schema": "Issue",
       "member": "dependencies",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "object"
     },
     {
       "schema": "Issue",
@@ -757,7 +1687,8 @@
       "schema": "Issue",
       "member": "labels",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "string"
     },
     {
       "schema": "Issue",
@@ -905,7 +1836,8 @@
       "schema": "Issue",
       "member": "waiters",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "string"
     },
     {
       "schema": "Issue",
@@ -923,13 +1855,15 @@
       "schema": "IssueBlocking",
       "member": "blocked_by",
       "type": "array",
-      "required": true
+      "required": true,
+      "item_type": "string"
     },
     {
       "schema": "IssueBlocking",
       "member": "blocks",
       "type": "array",
-      "required": true
+      "required": true,
+      "item_type": "string"
     },
     {
       "schema": "IssueBlocking",
@@ -947,7 +1881,8 @@
       "schema": "IssueCount",
       "member": "groups",
       "type": "object",
-      "required": false
+      "required": false,
+      "additional_props_type": "integer"
     },
     {
       "schema": "IssueCount",
@@ -990,7 +1925,8 @@
       "schema": "IssueDetails",
       "member": "bonded_from",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "object"
     },
     {
       "schema": "IssueDetails",
@@ -1022,7 +1958,8 @@
       "schema": "IssueDetails",
       "member": "comments",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "object"
     },
     {
       "schema": "IssueDetails",
@@ -1073,7 +2010,8 @@
       "schema": "IssueDetails",
       "member": "dependencies",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "object"
     },
     {
       "schema": "IssueDetails",
@@ -1093,7 +2031,8 @@
       "schema": "IssueDetails",
       "member": "dependents",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "object"
     },
     {
       "schema": "IssueDetails",
@@ -1191,7 +2130,8 @@
       "schema": "IssueDetails",
       "member": "labels",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "string"
     },
     {
       "schema": "IssueDetails",
@@ -1365,7 +2305,8 @@
       "schema": "IssueDetails",
       "member": "waiters",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "string"
     },
     {
       "schema": "IssueDetails",
@@ -1376,6 +2317,129 @@
     {
       "schema": "IssueDetails",
       "member": "work_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "acceptance_criteria",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "add_labels",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "append_notes",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "defer_until",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "description",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "design",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "due_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "estimated_minutes",
+      "type": "integer",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "external_ref",
+      "type": "string",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "issue_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "labels",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "metadata",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "notes",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "parent_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "priority",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "remove_labels",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "title",
       "type": "string",
       "required": false
     },
@@ -1413,7 +2477,8 @@
       "schema": "IssueWithCounts",
       "member": "bonded_from",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "object"
     },
     {
       "schema": "IssueWithCounts",
@@ -1444,7 +2509,8 @@
       "schema": "IssueWithCounts",
       "member": "comments",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "object"
     },
     {
       "schema": "IssueWithCounts",
@@ -1495,7 +2561,8 @@
       "schema": "IssueWithCounts",
       "member": "dependencies",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "object"
     },
     {
       "schema": "IssueWithCounts",
@@ -1587,7 +2654,8 @@
       "schema": "IssueWithCounts",
       "member": "labels",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "string"
     },
     {
       "schema": "IssueWithCounts",
@@ -1741,7 +2809,8 @@
       "schema": "IssueWithCounts",
       "member": "waiters",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "string"
     },
     {
       "schema": "IssueWithCounts",
@@ -1789,7 +2858,8 @@
       "schema": "IssueWithDependencyMetadata",
       "member": "bonded_from",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "object"
     },
     {
       "schema": "IssueWithDependencyMetadata",
@@ -1814,7 +2884,8 @@
       "schema": "IssueWithDependencyMetadata",
       "member": "comments",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "object"
     },
     {
       "schema": "IssueWithDependencyMetadata",
@@ -1859,7 +2930,8 @@
       "schema": "IssueWithDependencyMetadata",
       "member": "dependencies",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "object"
     },
     {
       "schema": "IssueWithDependencyMetadata",
@@ -1945,7 +3017,8 @@
       "schema": "IssueWithDependencyMetadata",
       "member": "labels",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "string"
     },
     {
       "schema": "IssueWithDependencyMetadata",
@@ -2093,7 +3166,8 @@
       "schema": "IssueWithDependencyMetadata",
       "member": "waiters",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "string"
     },
     {
       "schema": "IssueWithDependencyMetadata",
@@ -2117,7 +3191,8 @@
       "schema": "IssuesPage",
       "member": "items",
       "type": "array",
-      "required": true
+      "required": true,
+      "item_type": "object"
     },
     {
       "schema": "IssuesPage",
@@ -2135,7 +3210,8 @@
       "schema": "MemoriesPage",
       "member": "items",
       "type": "array",
-      "required": true
+      "required": true,
+      "item_type": "object"
     },
     {
       "schema": "MemoriesPage",
@@ -2195,7 +3271,8 @@
       "schema": "Problem",
       "member": "blockers",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "object"
     },
     {
       "schema": "Problem",
@@ -2367,7 +3444,8 @@
       "schema": "QueryPage",
       "member": "items",
       "type": "array",
-      "required": true
+      "required": true,
+      "item_type": "object"
     },
     {
       "schema": "ReadyCount",
@@ -2386,13 +3464,45 @@
       "schema": "ReadyPage",
       "member": "items",
       "type": "array",
-      "required": true
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "Ref",
+      "member": "id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Ref",
+      "member": "key",
+      "type": "string",
+      "required": false
     },
     {
       "schema": "RelatedIssues",
       "member": "items",
       "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "ReleaseIssueRequest",
+      "member": "actor",
+      "type": "string",
       "required": true
+    },
+    {
+      "schema": "ReleaseIssueRequest",
+      "member": "expected_assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ReleaseIssueRequest",
+      "member": "force",
+      "type": "boolean",
+      "required": false
     },
     {
       "schema": "ReleaseIssueResponse",
@@ -2413,6 +3523,18 @@
       "required": true
     },
     {
+      "schema": "RememberRequest",
+      "member": "content",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "RememberRequest",
+      "member": "key",
+      "type": "string",
+      "required": false
+    },
+    {
       "schema": "RememberedMemory",
       "member": "key",
       "type": "string",
@@ -2431,6 +3553,24 @@
       "required": true
     },
     {
+      "schema": "RemoveDependencyRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "RemoveDependencyRequest",
+      "member": "depends_on_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "RemoveDependencyRequest",
+      "member": "issue_id",
+      "type": "string",
+      "required": true
+    },
+    {
       "schema": "RemoveDependencyResponse",
       "member": "removed",
       "type": "boolean",
@@ -2441,6 +3581,24 @@
       "member": "key",
       "type": "string",
       "required": true
+    },
+    {
+      "schema": "ReopenIssueRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ReopenIssueRequest",
+      "member": "expected_version",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ReopenIssueRequest",
+      "member": "reason",
+      "type": "string",
+      "required": false
     },
     {
       "schema": "ReopenIssueResponse",
@@ -2457,6 +3615,12 @@
     {
       "schema": "ReopenIssueResponse",
       "member": "revision",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "SetSettingRequest",
+      "member": "value",
       "type": "string",
       "required": true
     },
@@ -2488,7 +3652,8 @@
       "schema": "SettingsPage",
       "member": "items",
       "type": "array",
-      "required": true
+      "required": true,
+      "item_type": "object"
     },
     {
       "schema": "SettingsPage",
@@ -2506,7 +3671,8 @@
       "schema": "Statistics",
       "member": "blocked_issues",
       "type": "integer",
-      "required": true
+      "required": true,
+      "nullable": true
     },
     {
       "schema": "Statistics",
@@ -2554,7 +3720,8 @@
       "schema": "Statistics",
       "member": "ready_issues",
       "type": "integer",
-      "required": true
+      "required": true,
+      "nullable": true
     },
     {
       "schema": "Statistics",
@@ -2578,6 +3745,47 @@
       "schema": "StatsResponse",
       "member": "summary",
       "type": "object",
+      "required": true
+    },
+    {
+      "schema": "SweepRequest",
+      "member": "actor",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "SweepRequest",
+      "member": "closed_before",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "SweepRequest",
+      "member": "dry_run",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "SweepRequest",
+      "member": "pattern",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "SweepRequest",
+      "member": "protect_referenced",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "SweepRequest",
+      "member": "tier",
+      "type": "string",
+      "enum": [
+        "durable",
+        "ephemeral"
+      ],
       "required": true
     },
     {
@@ -2608,7 +3816,8 @@
       "schema": "SweepResult",
       "member": "referenced_ids",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "string"
     },
     {
       "schema": "SweepResult",
@@ -2692,7 +3901,8 @@
       "schema": "TreeNode",
       "member": "bonded_from",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "object"
     },
     {
       "schema": "TreeNode",
@@ -2717,7 +3927,8 @@
       "schema": "TreeNode",
       "member": "comments",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "object"
     },
     {
       "schema": "TreeNode",
@@ -2762,7 +3973,8 @@
       "schema": "TreeNode",
       "member": "dependencies",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "object"
     },
     {
       "schema": "TreeNode",
@@ -2854,7 +4066,8 @@
       "schema": "TreeNode",
       "member": "labels",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "string"
     },
     {
       "schema": "TreeNode",
@@ -3014,7 +4227,8 @@
       "schema": "TreeNode",
       "member": "waiters",
       "type": "array",
-      "required": false
+      "required": false,
+      "item_type": "string"
     },
     {
       "schema": "TreeNode",
@@ -3027,6 +4241,60 @@
       "member": "work_type",
       "type": "string",
       "required": false
+    },
+    {
+      "schema": "UpdateIssueRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "UpdateIssueRequest",
+      "member": "claim",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "UpdateIssueRequest",
+      "member": "expected_assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "UpdateIssueRequest",
+      "member": "expected_status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "UpdateIssueRequest",
+      "member": "expected_version",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "UpdateIssueRequest",
+      "member": "force_assignee_transfer",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "UpdateIssueRequest",
+      "member": "force_close_policy",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "UpdateIssueRequest",
+      "member": "force_notes_overwrite",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "UpdateIssueRequest",
+      "member": "patch",
+      "type": "object",
+      "required": true
     },
     {
       "schema": "UpdateIssueResponse",

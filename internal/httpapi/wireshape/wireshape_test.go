@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/httpapi"
@@ -39,31 +38,8 @@ func TestWireShapeDigest(t *testing.T) {
 		t.Fatalf("digest has %d entries, want the full walk", len(got.Entries))
 	}
 
-	wantByKey := map[string]wireshape.Entry{}
-	for _, e := range golden.Entries {
-		wantByKey[e.Schema+"\x00"+e.Member] = e
-	}
-	gotByKey := map[string]wireshape.Entry{}
-	for _, e := range got.Entries {
-		gotByKey[e.Schema+"\x00"+e.Member] = e
-	}
-
-	var changed, removed, added []string
-	for key, want := range wantByKey {
-		got, ok := gotByKey[key]
-		if !ok {
-			removed = append(removed, key)
-			continue
-		}
-		if !reflect.DeepEqual(want, got) {
-			changed = append(changed, key)
-		}
-	}
-	for key := range gotByKey {
-		if _, ok := wantByKey[key]; !ok {
-			added = append(added, key)
-		}
-	}
+	cmp := wireshape.Compare(golden, got)
+	changed, removed, added := cmp.Changed, cmp.Removed, cmp.Added
 
 	if len(changed) > 0 || len(removed) > 0 {
 		if got.WireRevision <= golden.WireRevision {
@@ -88,6 +64,79 @@ func TestWireShapeDigest(t *testing.T) {
 			"either: regenerate with `go run ./internal/httpapi/wireshape/cmd/gendigest`",
 			got.WireRevision, golden.WireRevision)
 	}
+}
+
+// TestSafeToWrite is the gendigest write guard's own falsification (review
+// MEDIUM: "refuse to write changed or removed entries unless
+// CurrentWireRevision is higher than the golden's recorded revision").
+func TestSafeToWrite(t *testing.T) {
+	base := wireshape.Digest{
+		WireRevision: 2,
+		Entries: []wireshape.Entry{
+			{Schema: "Widget", Member: "name", Type: "string", Required: true},
+		},
+	}
+
+	t.Run("pure addition at the same revision is always safe", func(t *testing.T) {
+		candidate := wireshape.Digest{
+			WireRevision: 2,
+			Entries: append(append([]wireshape.Entry{}, base.Entries...),
+				wireshape.Entry{Schema: "Widget", Member: "color", Type: "string"}),
+		}
+		if ok, reason := wireshape.SafeToWrite(base, candidate); !ok {
+			t.Fatalf("pure addition refused: %s", reason)
+		}
+	})
+
+	t.Run("identical digest is always safe", func(t *testing.T) {
+		if ok, reason := wireshape.SafeToWrite(base, base); !ok {
+			t.Fatalf("identical digest refused: %s", reason)
+		}
+	})
+
+	t.Run("changed entry at the same revision is refused", func(t *testing.T) {
+		candidate := wireshape.Digest{
+			WireRevision: 2,
+			Entries:      []wireshape.Entry{{Schema: "Widget", Member: "name", Type: "integer", Required: true}},
+		}
+		if ok, _ := wireshape.SafeToWrite(base, candidate); ok {
+			t.Fatal("changed entry at the same revision was allowed")
+		}
+	})
+
+	t.Run("removed entry at the same revision is refused", func(t *testing.T) {
+		candidate := wireshape.Digest{WireRevision: 2, Entries: nil}
+		if ok, _ := wireshape.SafeToWrite(base, candidate); ok {
+			t.Fatal("removed entry at the same revision was allowed")
+		}
+	})
+
+	t.Run("changed entry with a lower revision is refused", func(t *testing.T) {
+		candidate := wireshape.Digest{
+			WireRevision: 1,
+			Entries:      []wireshape.Entry{{Schema: "Widget", Member: "name", Type: "integer", Required: true}},
+		}
+		if ok, _ := wireshape.SafeToWrite(base, candidate); ok {
+			t.Fatal("changed entry with a LOWER revision was allowed")
+		}
+	})
+
+	t.Run("changed entry with a higher revision is safe", func(t *testing.T) {
+		candidate := wireshape.Digest{
+			WireRevision: 3,
+			Entries:      []wireshape.Entry{{Schema: "Widget", Member: "name", Type: "integer", Required: true}},
+		}
+		if ok, reason := wireshape.SafeToWrite(base, candidate); !ok {
+			t.Fatalf("changed entry with a higher revision refused: %s", reason)
+		}
+	})
+
+	t.Run("removed entry with a higher revision is safe", func(t *testing.T) {
+		candidate := wireshape.Digest{WireRevision: 3, Entries: nil}
+		if ok, reason := wireshape.SafeToWrite(base, candidate); !ok {
+			t.Fatalf("removed entry with a higher revision refused: %s", reason)
+		}
+	})
 }
 
 func loadGolden(t *testing.T) wireshape.Digest {
