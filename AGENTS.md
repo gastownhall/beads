@@ -13,23 +13,28 @@ end lists them. `CLAUDE.md` files are symlinks to their sibling `AGENTS.md`.
 
 ## How work flows here
 
-GitHub Issues is the public tracker. Every change starts as an issue.
+GitHub Issues is the public tracker, and every PR links a documented issue.
+The issue carries the context reviewers and future readers need: for a bug,
+the reproduction, impact, and evidence; for a change, the motivation, impact,
+risk, and verification plan.
 
-1. An issue is opened with the bug or feature form and gets
-   `status/needs-triage`.
-2. Maintainers triage it to `status/needs-info`, `status/needs-repro`, or
-   `status/needs-design`, and finally to **`status/accepted`**.
-3. Only an accepted issue gets a PR. Work on a branch, open a PR against
-   `main` whose body says `Closes #<issue>`, and let CI and review run.
+1. Find or file the issue with the bug or feature form. It does not need
+   maintainer approval first; file it before or alongside the PR.
+2. Work on a branch, open a PR against `main` whose body says
+   `Closes #<issue>`, and let CI and review run.
+3. Maintainers triage issues with `status/needs-triage`, `status/needs-info`,
+   `status/needs-repro`, `status/needs-design`, and `status/accepted`
+   (confirmed); see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Maintainers also keep an internal bd ledger. It is optional for contributors
 and not a substitute for the GitHub issue.
 
 ## Agent contribution policy
 
-- Do not open a PR that does not close an issue labeled `status/accepted`.
-  If no such issue exists, draft the issue (motivation, impact, risk,
-  verification plan) for the human you are working with to file.
+- Every PR closes a documented issue. If none exists for your change, file
+  one with the bug or feature form fields, filling each from evidence and
+  answering `NOT_ENOUGH_INFO` where the evidence runs out, then link it from
+  the PR.
 - A human reviews and stands behind every issue and PR an agent drafts.
   Evidence that the change works end-to-end is required; "unit tests pass"
   alone is not evidence.

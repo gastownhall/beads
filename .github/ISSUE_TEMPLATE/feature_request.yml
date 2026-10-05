@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Every change starts as an issue. A maintainer moves an accepted proposal to `status/accepted`; open a PR only after that. Read the [project charter](https://github.com/gastownhall/beads/blob/main/engdocs/PROJECT_CHARTER.md) first — beads owns issue-tracking primitives, not orchestration policy or storage-engine behavior.
+        Every PR links a documented issue, and this form collects the context reviewers and future readers need. You can open your PR right after filing; no approval is needed first. Read the [project charter](https://github.com/gastownhall/beads/blob/main/engdocs/PROJECT_CHARTER.md) first — beads owns issue-tracking primitives, not orchestration policy or storage-engine behavior.
 
         **Agents filling in this form:** answer each question only from evidence you have. If you cannot answer a question from the evidence, write exactly `NOT_ENOUGH_INFO` instead of guessing.
 
@@ -82,7 +82,7 @@ body:
     attributes:
       label: Intent
       options:
-        - I plan to implement this once it is accepted
+        - I am opening or will open a PR
         - I'm reporting the need; someone else would implement it
     validations:
       required: true

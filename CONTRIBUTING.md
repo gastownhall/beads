@@ -2,13 +2,13 @@
 
 Thank you for your interest in contributing to bd! This document provides guidelines and instructions for contributing.
 
-## Issue-first
+## Issues and pull requests
 
-GitHub Issues is the public tracker, and every change starts as an issue.
-Open one with the bug or feature form before writing code; a pull request
-must close an issue that a maintainer has labeled `status/accepted`. A PR
-without one is a proposal we cannot review yet — the fastest path is to file
-the issue and link it.
+GitHub Issues is the public tracker, and every pull request links a
+documented issue. The issue is where the context lives: why the change is
+needed, what it affects, and how we will know it works. File it with the bug
+or feature form before or alongside your pull request; it does not need
+maintainer approval first.
 
 ### Triage labels
 
@@ -18,7 +18,7 @@ the issue and link it.
 | `status/needs-info` | Waiting on essential information from the reporter. | Maintainers |
 | `status/needs-repro` | Needs a reproducible bug report. | Maintainers |
 | `status/needs-design` | The direction needs a design decision before work starts. | Maintainers |
-| `status/accepted` | Approved: a PR that closes this issue is welcome. | Maintainers |
+| `status/accepted` | Confirmed and on our radar. | Maintainers |
 
 Issues left in `status/needs-info` or `status/needs-repro` are closed after 14
 days without a reply to the request; reply with the details and a
@@ -134,7 +134,7 @@ engine, or expand the database schema when issue metadata is sufficient.
 
 ### Workflow
 
-1. Start from an issue labeled `status/accepted` (see [Issue-first](#issue-first))
+1. Find or file a documented issue (see [Issues and pull requests](#issues-and-pull-requests))
 2. Fork the repository and create a feature branch (`git checkout -b feature/my-feature`)
 3. Make your changes
 4. Add tests for new functionality

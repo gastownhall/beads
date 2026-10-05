@@ -7,7 +7,7 @@ build, test, and scope rules.
 
 The rules most often missed in review:
 
-- A PR must close a GitHub issue labeled `status/accepted`.
+- A PR must close a documented GitHub issue (filed before or alongside it).
 - Build with `make install`, never `go build -o bd ./cmd/bd` or `go install ./cmd/bd`.
 - `make ci-pr-lint` must pass with zero issues; choose tests with
   [engdocs/TESTING.md](../engdocs/TESTING.md).
