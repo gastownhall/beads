@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/workapi"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -65,10 +66,12 @@ func (r *statsReporter) Stats(ctx context.Context, _ publicops.StatsRequest) (pu
 func statsInfraIssues(ctx context.Context, uw UnitOfWork) int {
 	cfg, err := statsListConfig(ctx, uw)
 	if err != nil {
+		debug.Logf("stats: infra breakdown reported as 0, %v\n", err)
 		return 0
 	}
 	byType, err := uw.IssueUseCase().CountIssuesByGroup(ctx, workapi.StatsInfraCountFilter(), "type")
 	if err != nil {
+		debug.Logf("stats: infra breakdown reported as 0, count infra-typed issues: %v\n", err)
 		return 0
 	}
 	return workapi.CountStatsInfraIssues(byType, cfg)
@@ -112,6 +115,7 @@ func (r *statsReporter) AssigneeStats(ctx context.Context, req publicops.Assigne
 		cfg, cfgErr := statsListConfig(ctx, uw)
 		summary := workapi.FoldStatsAssigneeSummary(page.Items, readyCount, cfg)
 		if cfgErr != nil {
+			debug.Logf("stats: --assigned infra breakdown reported as 0, %v\n", cfgErr)
 			summary.InfraIssues = 0
 		}
 		return publicops.StatsResult{Summary: summary}, nil

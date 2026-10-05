@@ -11,6 +11,7 @@ package storestats
 import (
 	"context"
 
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
@@ -75,6 +76,9 @@ func (r *storeStatsReporter) Stats(ctx context.Context, req issueops.StatsReques
 func (r *storeStatsReporter) infraIssues(ctx context.Context) int {
 	byType, err := r.store.CountIssuesByGroup(ctx, workapi.StatsInfraCountFilter(), "type")
 	if err != nil {
+		// Zero reads exactly like "no infra rows" in `bd status`, so leave a
+		// trace for BD_DEBUG rather than none.
+		debug.Logf("stats: infra breakdown reported as 0, count infra-typed issues: %v\n", err)
 		return 0
 	}
 	return workapi.CountStatsInfraIssues(byType, r.listConfig(ctx))
