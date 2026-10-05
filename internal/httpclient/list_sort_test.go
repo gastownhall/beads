@@ -3,14 +3,13 @@
 package httpclient
 
 import (
-	"os"
-	"path/filepath"
 	"slices"
 	"testing"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/steveyegge/beads/internal/httpapi/spec"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
@@ -119,10 +118,14 @@ func flaglessSortCorpus() []*types.IssueWithCounts {
 // contract itself, rather than out of a second copy of the names.
 func publishedParamEnum(t *testing.T, operationID, param string) []string {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "httpapi", "spec", "openapi.v0.yaml"))
-	if err != nil {
-		t.Fatalf("read the wire contract: %v", err)
-	}
+	// S3 reconciliation (gc native-program, 2026-10): spec.OpenAPIV0() rather
+	// than a relative os.ReadFile — the document is go:embed'd into
+	// internal/httpapi/spec precisely so a reader does not depend on a
+	// filesystem layout, and a relative path breaks the moment this runs
+	// under Bazel's test sandbox, which copies in only what a target
+	// declares as `data`. internal/httpclient/encode's own bijection gate
+	// already reads the document this way for the same reason.
+	raw := spec.OpenAPIV0()
 	var doc struct {
 		Paths map[string]map[string]struct {
 			OperationID string `yaml:"operationId"`

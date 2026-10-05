@@ -163,6 +163,7 @@ func (s *Store) walkIssues(ctx context.Context, params url.Values, req issueops.
 	//
 	// The capability probe is last because it is the only one that can dial.
 	if limit > 0 && want == 0 && keep == nil &&
+		listSortPushdownEligible(req) &&
 		!(req.MaxRows > 0 && sqlbuild.IsGoSideSort(req.SortBy)) &&
 		s.servesListSort(ctx) {
 		return s.sortedPage(ctx, params, req, limit)
@@ -209,6 +210,38 @@ func (s *Store) servesListSort(ctx context.Context) bool {
 	return slices.Contains(snap.Capabilities, wire.CapListSort)
 }
 
+// listSortPushdownEligible reports whether req's display order is one
+// listIssues can serve directly.
+//
+// The operation's `sort` enum is closed to the two keyset orders this client
+// names wireListSort and flaglessListSort ("created" and "priority") — the
+// seven other `bd list --sort` orders have no keyset predicate the server can
+// page, so the spec does not publish them here at all; sending one anyway
+// would meet the same `invalid_value` 400 a stale client earns for a value
+// outside the enum.
+//
+// listIssues ALSO publishes no `reverse` parameter — that member exists only
+// on GET /v0/beads/issues:query, a different operation with a different
+// vocabulary (nine orders, used for the Go-side sort case up above, not a
+// keyset order at all). A pushdown request naming `reverse` would not be
+// answered backwards; it would be refused outright as a parameter this
+// operation does not know, since listIssues never reads one. So a reversed
+// request of any order, including the two eligible ones, has to come home
+// over the walk and be re-sorted client-side in sortListRows — the walk and
+// the early-stop leg above both already gate on !req.Reverse for the same
+// reason.
+func listSortPushdownEligible(req issueops.ListRequest) bool {
+	if req.Reverse {
+		return false
+	}
+	switch req.SortBy {
+	case "", wireListSort, flaglessListSort:
+		return true
+	default:
+		return false
+	}
+}
+
 // sortedPage answers a bounded request in the caller's own order with ONE
 // request, by naming that order on the wire.
 //
@@ -234,11 +267,12 @@ func (s *Store) sortedPage(ctx context.Context, params url.Values, req issueops.
 		sortBy = flaglessListSort
 	}
 	page.Set("sort", sortBy)
-	// Emitted whenever `sort` is, including the false spelling: the server
-	// refuses `reverse` on PRESENCE rather than on truth, so the two are a pair,
-	// and saying the direction out loud is what makes the request describe the
-	// order it wants rather than the order a default happens to give it.
-	page.Set("reverse", strconv.FormatBool(req.Reverse))
+	// No `reverse` here: listIssues publishes no such parameter (that member
+	// belongs only to GET /v0/beads/issues:query's nine-order vocabulary), and
+	// listSortPushdownEligible already refused this call before it got here if
+	// req.Reverse were set. Sending it — even spelled false — would meet this
+	// operation's unknown-parameter refusal, since the handler never reads a
+	// `reverse` key at all.
 
 	// The cap, spelled as the storage layer spells it: LIMIT min(Limit,
 	// MaxRows+1). The overage row is what proves the cap fired, and asking for

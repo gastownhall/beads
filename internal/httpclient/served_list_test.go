@@ -12,13 +12,13 @@ import (
 	"net/url"
 	"reflect"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
 	storageops "github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -408,14 +408,19 @@ func TestServedReaderListFallsBackToTheWalkWithoutTheCapability(t *testing.T) {
 	sent := push.sent[0]
 	for _, want := range []struct{ key, value string }{
 		{"sort", "priority"},
-		// Emitted even though it is false: the server refuses `reverse` on
-		// PRESENCE rather than on truth, so the pair travels together.
-		{"reverse", "false"},
 		{"limit", "2"},
 	} {
 		if got := sent.Get(want.key); got != want.value {
 			t.Errorf("the pushdown sent %s=%q, want %q (whole query %v)", want.key, got, want.value, sent)
 		}
+	}
+	// No `reverse` ever, pushdown or not: listIssues publishes no such
+	// parameter at all (S3 reconciliation, gc native-program, 2026-10) — it
+	// belongs only to GET /v0/beads/issues:query's nine-order vocabulary —
+	// so a client that sent one, even spelled false, would meet this
+	// operation's unknown-parameter refusal rather than a direction.
+	if sent.Has("reverse") {
+		t.Errorf("the pushdown sent reverse=%q; listIssues publishes no `reverse` parameter", sent.Get("reverse"))
 	}
 
 	down := c.listSpy(t, downLevel)
@@ -462,11 +467,20 @@ func TestServedReaderListFallsBackToTheWalkWithoutTheCapability(t *testing.T) {
 // accident.
 //
 // The reversed arm is here to keep the conjunct NARROW rather than merely
-// present: created-DESCENDING is not the order the wire serves, the walk cannot
-// stop early on it, and it does push down.
+// present: created-DESCENDING is not the order the wire serves and the walk
+// cannot stop early on it — but it does not push down either (S3
+// reconciliation, gc native-program, 2026-10). listIssues publishes no
+// `reverse` parameter at all, so there is no wire shape for "the other
+// direction of an order this operation does serve"; listSortPushdownEligible
+// refuses every reversed request regardless of SortBy, and this arm walks to
+// exhaustion and re-sorts client-side exactly as an unpublished SortBy would.
 //
 // GOES RED when `want == 0` is dropped from the gate: the first arm sends
 // sort=created and asks for the caller's two rows rather than the walk's three.
+// It also goes red if listSortPushdownEligible ever stopped refusing a
+// reversed request: the second arm's dial count would drop as the walk gave
+// way to a single pushdown request, and the key-by-key absence check below
+// would catch the `reverse` key that request sent.
 func TestServedReaderListWeldedOrderKeepsSendingNoSortParameter(t *testing.T) {
 	ctx := t.Context()
 	c := composition(t)
@@ -508,7 +522,10 @@ func TestServedReaderListWeldedOrderKeepsSendingNoSortParameter(t *testing.T) {
 	}
 
 	// The same key REVERSED is a different order from the one the wire serves,
-	// so it takes the fast leg and says so on the wire.
+	// and listIssues has no parameter that names the reversed direction of
+	// anything — so this walks to exhaustion (one request: four seeded rows
+	// is well under the walk's own page size) and gets re-sorted client-side,
+	// the same leg an unpublished SortBy takes.
 	backward := c.listSpy(t, advertised)
 	page, err = backward.reader(t).List(ctx, issueops.ListRequest{
 		Labels: []string{scope}, SortBy: wireListSort, Reverse: true, Limit: ptrTo(2),
@@ -520,14 +537,17 @@ func TestServedReaderListWeldedOrderKeepsSendingNoSortParameter(t *testing.T) {
 		t.Errorf("List --sort created --reverse --limit 2 = %v, want %v", pageIDs(page), want)
 	}
 	if backward.dials() != 1 {
-		t.Fatalf("the reversed welded order took %d requests, want one", backward.dials())
+		t.Fatalf("the reversed welded order took %d requests, want the one the walk needs to see all four "+
+			"seeded rows", backward.dials())
 	}
 	sent = backward.sent[0]
-	for _, want := range []struct{ key, value string }{{"sort", wireListSort}, {"reverse", "true"}, {"limit", "2"}} {
-		if got := sent.Get(want.key); got != want.value {
-			t.Errorf("the reversed welded order sent %s=%q, want %q (whole query %v)",
-				want.key, got, want.value, sent)
-		}
+	if sent.Has("sort") || sent.Has("reverse") {
+		t.Errorf("the reversed welded order sent sort=%q reverse=%q; listIssues publishes no `reverse` "+
+			"parameter, so a reversed request must walk and sort client-side like any other order this "+
+			"operation cannot push down", sent.Get("sort"), sent.Get("reverse"))
+	}
+	if got := sent.Get("limit"); got != strconv.Itoa(walkPageSize) {
+		t.Errorf("the reversed welded order asked for limit=%q, want the walk's own page size %d", got, walkPageSize)
 	}
 }
 
@@ -747,89 +767,31 @@ func TestServedReaderListMaxRowsUnderPushdown(t *testing.T) {
 		t.Error("a page holding every matching row reported HasMore")
 	}
 
-	// THE MATRIX, over the vocabulary the wire itself publishes rather than a
-	// second copy of the names. Under a cap ABOVE the limit, whether local mode
-	// refuses is decided entirely by whether SQL can express the order:
-	// workapi.SQLLimit pushes the limit down for a sort with an ORDER BY and 0
-	// for one without, so the Go-side keys scan MaxRows+1 rows however small
-	// the limit is and trip the cap on the overage. The http client has to make
-	// the same call on every member.
-	vocabulary := publishedParamEnum(t, wire.OpListIssues, "sort")
-	if len(vocabulary) == 0 {
-		t.Fatalf("%s publishes no `sort` enum; this matrix would range over nothing", wire.OpListIssues)
-	}
-	goSide := 0
-	for _, sortBy := range vocabulary {
-		req := issueops.ListRequest{
-			Labels: []string{scope}, SortBy: sortBy, Limit: ptrTo(3),
-			MaxRows: 4, MaxRowsSource: "--max-rows",
-		}
-		wantPage, wantErr := local.List(ctx, req)
-		var wantTooMany *storageops.ErrTooManyRows
-		refuses := errors.As(wantErr, &wantTooMany)
-		if wantErr != nil && !refuses {
-			t.Fatalf("reference List (sort %q) under a cap above the limit: %v", sortBy, wantErr)
-		}
-		// THE PREMISE, per key. It pins the reason as well as the outcome, so a
-		// change to which keys SQL expresses shows up here rather than as a
-		// silent asymmetry between the two backends.
-		if refuses != sqlbuild.IsGoSideSort(sortBy) {
-			t.Fatalf("sort %q: the reference store refuses a cap above the limit = %v, but IsGoSideSort(%q) = %v; "+
-				"the cap fires locally for exactly the orders SQL cannot express (workapi.SQLLimit pushes 0 for "+
-				"those), and L15's narrowing is scoped to the complement of that set", sortBy, refuses, sortBy,
-				sqlbuild.IsGoSideSort(sortBy))
-		}
-
-		leg := c.listSpy(t, advertised)
-		gotPage, gotErr := leg.reader(t).List(ctx, req)
-		var gotTooMany *storageops.ErrTooManyRows
-		if !refuses {
-			if gotErr != nil {
-				t.Errorf("sort %q: http refused a cap above the limit (%v) where the reference answered %v",
-					sortBy, gotErr, pageIDs(wantPage))
-				continue
-			}
-			if !slices.Equal(pageIDs(gotPage), pageIDs(wantPage)) {
-				t.Errorf("sort %q under a roomy cap: http answered %v, reference answered %v",
-					sortBy, pageIDs(gotPage), pageIDs(wantPage))
-			}
-			if gotPage.HasMore != wantPage.HasMore {
-				t.Errorf("sort %q under a roomy cap: http HasMore = %v, reference = %v",
-					sortBy, gotPage.HasMore, wantPage.HasMore)
-			}
-			continue
-		}
-		goSide++
-		if !errors.As(gotErr, &gotTooMany) {
-			t.Errorf("sort %q: http answered %v (err %v) where the reference refused with %v; the cap bounds an "+
-				"UNBOUNDED local window for this order, and a request bounded by the limit cannot observe the "+
-				"overage that trips it", sortBy, pageIDs(gotPage), gotErr, wantErr)
-			continue
-		}
-		if gotTooMany.Found != wantTooMany.Found || gotTooMany.Cap != wantTooMany.Cap ||
-			gotTooMany.Source != wantTooMany.Source {
-			t.Errorf("sort %q: http refused with {Found %d, Cap %d, Source %q} and the reference with "+
-				"{Found %d, Cap %d, Source %q}", sortBy, gotTooMany.Found, gotTooMany.Cap, gotTooMany.Source,
-				wantTooMany.Found, wantTooMany.Cap, wantTooMany.Source)
-		}
-		// AND IT WAS THE GATE THAT DID IT, not the pushdown coincidentally
-		// agreeing. The walk names no order on the wire, so a request carrying
-		// `sort` under a cap this order can trip is the fast leg taken where it
-		// cannot see what local mode sees.
-		if sent := leg.sortKeys(); slices.ContainsFunc(sent, func(key string) bool { return key != "" }) {
-			t.Errorf("sort %q under a cap above the limit went down the wire as %v; a capped Go-side sort has to "+
-				"stay a walk, and matching the reference here while pushing down means the fixture and not the "+
-				"gate produced the agreement", sortBy, sent)
-		}
-	}
-	// The matrix is only worth running while the vocabulary holds BOTH kinds.
-	// A run in which every key is SQL-expressible asserts nothing about the
-	// exclusion, and one in which every key is Go-side asserts nothing about
-	// the narrowing L15 claims.
-	if goSide == 0 || goSide == len(vocabulary) {
-		t.Errorf("%d of the %d published sort keys are Go-side; the matrix needs both kinds to say anything about "+
-			"either half of L15", goSide, len(vocabulary))
-	}
+	// THE MATRIX THIS RAN AGAINST bd-enterprise's listIssues IS NOT RUNNABLE
+	// HERE (S3 reconciliation, gc native-program, 2026-10): L15's Go-side half
+	// — "a capped Go-side sort has to stay a walk" — needs a published `sort`
+	// value sqlbuild.IsGoSideSort accepts (today, `id`), and
+	// GET /v0/beads/issues's own vocabulary is CLOSED to the two keyset orders
+	// this wire can page at all, `created` and `priority` (see the operation's
+	// `sort` parameter doc: "deliberately smaller than the nine values
+	// `bd list --sort` and GET /v0/beads/issues:query take" — every value this
+	// endpoint accepts is SQL-expressible by construction, so
+	// publishedParamEnum(wire.OpListIssues, "sort") can never contain a
+	// Go-side member for this matrix to range over).
+	//
+	// This does not leave L15's Go-side claim unpinned, and it does not weaken
+	// what the matrix proved for the wire bd-enterprise ran it against: it
+	// narrows the claim to a stronger, unconditional one for the OSS listIssues
+	// operation specifically. listSortPushdownEligible refuses pushdown for any
+	// SortBy outside {"", wireListSort, flaglessListSort} UNCONDITIONALLY — not
+	// only under a cap — so a Go-side order such as "id" never reaches
+	// sortedPage at all, capped or not. TestServedReaderListAppliesTheClientSide
+	// DisplayOrder already pins that walk-and-client-sort path end to end for
+	// SortBy "id", and TestServedReaderListFallsBackToTheWalkWithoutTheCapability
+	// pins the no-`sort`-on-the-wire half of it. What is left of this test is
+	// everything above: the roomy cap, the tight cap and the exact-cap boundary,
+	// all exercised over the one Go-side-free vocabulary this operation actually
+	// publishes.
 }
 
 // TestServedReaderListOrderMatchesTheReferenceStore is the dual run that makes
