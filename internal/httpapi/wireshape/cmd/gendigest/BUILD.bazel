@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_library(
     name = "gendigest_lib",
@@ -15,4 +15,11 @@ go_binary(
     name = "gendigest",
     embed = [":gendigest_lib"],
     visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "gendigest_test",
+    srcs = ["main_test.go"],
+    embed = [":gendigest_lib"],
+    deps = ["//internal/httpapi/wireshape"],
 )

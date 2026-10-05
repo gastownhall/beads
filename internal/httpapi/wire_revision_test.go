@@ -218,6 +218,23 @@ func TestWireRevisionExemptRoutesAreExactlyHealth(t *testing.T) {
 	}
 }
 
+// TestRetiredRevisionsStayBelowTheFloor pins the PRESENCE guarantee
+// documented on the `wire_revision` property: 0 and 1 are permanently
+// retired, so a decoded 0 can only mean "the server omitted the field," never
+// a value a current or future server actually sent. That reading breaks the
+// moment either constant moves the wrong way — CurrentWireRevision dropping
+// below 2 would let a real server send one of the retired values again, and
+// MinClientWireRevision exceeding CurrentWireRevision would make every
+// request refused as unsupported by this build's own floor.
+func TestRetiredRevisionsStayBelowTheFloor(t *testing.T) {
+	if CurrentWireRevision < 2 {
+		t.Errorf("CurrentWireRevision = %d, want >= 2: 0 and 1 are retired and must stay below every revision a server can actually send", CurrentWireRevision)
+	}
+	if MinClientWireRevision > CurrentWireRevision {
+		t.Errorf("MinClientWireRevision = %d, want <= CurrentWireRevision (%d)", MinClientWireRevision, CurrentWireRevision)
+	}
+}
+
 // TestCapabilitiesAdvertiseIssuesListSort: a client learns this server
 // accepts GET /v0/beads/issues' sort parameter from the capability list,
 // never from the version string.

@@ -11,6 +11,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,50 +23,80 @@ import (
 )
 
 func main() {
+	initFlag := flag.Bool("init", false, "create golden.json when none exists yet")
+	flag.Parse()
+
+	out, err := goldenPath()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gendigest:", err)
+		os.Exit(1)
+	}
+
 	digest, err := wireshape.Compute(httpapi.CurrentWireRevision)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gendigest:", err)
 		os.Exit(1)
 	}
 
-	// Resolve relative to this source file so the command works from any cwd,
-	// the same way `go generate` directives in this repo do.
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		fmt.Fprintln(os.Stderr, "gendigest: could not resolve own source path")
-		os.Exit(1)
-	}
-	out := filepath.Join(filepath.Dir(thisFile), "..", "..", "testdata", "golden.json")
-
-	// Refuse to overwrite a golden that would silently launder a failing
-	// TestWireShapeDigest: a changed or removed entry must come with a
-	// CurrentWireRevision bump ABOVE what's already committed, never from
-	// just re-running this command. A purely additive diff, or no existing
-	// golden at all (first run), always writes.
-	// #nosec G304 -- out is this command's own source-relative output path,
-	// never request- or argv-influenced; reading it back is the write guard.
-	if existing, err := os.ReadFile(out); err == nil {
-		var golden wireshape.Digest
-		if err := json.Unmarshal(existing, &golden); err != nil {
-			fmt.Fprintln(os.Stderr, "gendigest: decode existing golden:", err)
-			os.Exit(1)
-		}
-		if ok, reason := wireshape.SafeToWrite(golden, digest); !ok {
-			fmt.Fprintln(os.Stderr, "gendigest:", reason)
-			os.Exit(1)
-		}
-	}
-
-	blob, err := json.MarshalIndent(digest, "", "  ")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "gendigest:", err)
-		os.Exit(1)
-	}
-	blob = append(blob, '\n')
-
-	if err := os.WriteFile(out, blob, 0o600); err != nil {
+	if err := writeGolden(out, digest, *initFlag); err != nil {
 		fmt.Fprintln(os.Stderr, "gendigest:", err)
 		os.Exit(1)
 	}
 	fmt.Println("wrote", out)
+}
+
+// goldenPath resolves testdata/golden.json relative to this source file, so
+// the command works from any cwd, the same way `go generate` directives in
+// this repo do.
+func goldenPath() (string, error) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		return "", errors.New("could not resolve own source path")
+	}
+	return filepath.Join(filepath.Dir(thisFile), "..", "..", "testdata", "golden.json"), nil
+}
+
+// writeGolden writes digest to out, under two guards.
+//
+// First, an EXISTING golden: refuse to overwrite one that would silently
+// launder a failing TestWireShapeDigest. A changed or removed entry must come
+// with a CurrentWireRevision bump ABOVE what's already committed, never from
+// just re-running this command (wireshape.SafeToWrite); a purely additive
+// diff always writes.
+//
+// Second, a MISSING golden: refuse to create one unless initFlag is set. A
+// golden that is merely absent — the testdata file moved, got deleted by
+// accident, or this is being pointed at the wrong path — must not be treated
+// as implicit permission to start a fresh history from whatever the working
+// tree happens to compute right now; -init is the explicit, one-time act of
+// starting that history (the real first run, or a deliberate reset), not
+// gendigest's default behavior for "I don't see a file there."
+func writeGolden(out string, digest wireshape.Digest, initFlag bool) error {
+	// #nosec G304 -- out is this command's own source-relative output path,
+	// never request- or argv-influenced; reading it back is the write guard.
+	existing, err := os.ReadFile(out)
+	switch {
+	case err == nil:
+		var golden wireshape.Digest
+		if err := json.Unmarshal(existing, &golden); err != nil {
+			return fmt.Errorf("decode existing golden: %w", err)
+		}
+		if ok, reason := wireshape.SafeToWrite(golden, digest); !ok {
+			return errors.New(reason)
+		}
+	case os.IsNotExist(err):
+		if !initFlag {
+			return fmt.Errorf("no golden at %s yet; pass -init to create one (a missing file is not this command's default to fill in)", out)
+		}
+	default:
+		return fmt.Errorf("read existing golden: %w", err)
+	}
+
+	blob, err := json.MarshalIndent(digest, "", "  ")
+	if err != nil {
+		return err
+	}
+	blob = append(blob, '\n')
+
+	return os.WriteFile(out, blob, 0o600)
 }
