@@ -134,7 +134,7 @@ func TestSharedServerConcurrent(t *testing.T) {
 	// the one shared dolt dir, and bd init holds that root's gate
 	// EXCLUSIVELY (acquireInitMutationGate), so concurrent inits of
 	// different projects serialize on it. Each waits up to
-	// initGateWaitDefault (30s) for the others, which covers the lane's
+	// initGateWaitDefault (60s) for the others, which covers the lane's
 	// small BEADS_TEST_SS_DIRS at ~8s per init. Larger manual runs queue
 	// numDirs inits behind one gate, so raise the bound to match rather
 	// than reintroduce client-side serialization.
@@ -182,11 +182,12 @@ func TestSharedServerConcurrent(t *testing.T) {
 	// workloads are running. It holds the shared physical root's gate
 	// EXCLUSIVELY for its whole run, so this exercises both directions of
 	// the gate wait: every client command that lands during the init waits
-	// for it (BEADS_GATE_WAIT_TIMEOUT, default 15s) instead of failing, and
-	// the init gets the gate within its own 30s bound despite the steady
-	// stream of short client commands (workspacegate writer fairness: once
-	// the init is queued, new shared acquirers wait behind it). baseEnv,
-	// not initEnv: a raised init bound would mask a fairness regression.
+	// for it (BEADS_GATE_WAIT_TIMEOUT, default 30s) instead of failing, and
+	// the init gets the gate despite the steady stream of short client
+	// commands (workspacegate writer fairness: once the init is queued, new
+	// shared acquirers wait behind it). Its bound is pinned to 30s, half the
+	// 60s default, rather than initEnv's raised one: a generous bound would
+	// mask a fairness regression.
 	phase = time.Now()
 	eg, egCtx = errgroup.WithContext(ctx)
 	eg.SetLimit(maxProcs + 1) // +1: the late init below must not take a client's slot
@@ -204,7 +205,8 @@ func TestSharedServerConcurrent(t *testing.T) {
 			return fmt.Errorf("late project git init: %w", err)
 		}
 		start := time.Now()
-		out, err := ssExec(egCtx, bdBinary, dir, baseEnv,
+		lateEnv := append(append([]string{}, baseEnv...), initGateTimeoutEnv+"=30s")
+		out, err := ssExec(egCtx, bdBinary, dir, lateEnv,
 			"init", "--shared-server", "--external",
 			"--prefix", "projlate", "--quiet", "--non-interactive")
 		if err != nil {

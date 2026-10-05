@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -40,7 +41,7 @@ import (
 //   - SHARED contention means an exclusive maintenance operation is live
 //     (or queued, see workspacegate's writer fairness) on this workspace:
 //     wait for it up to sharedGateWait() (BEADS_GATE_WAIT_TIMEOUT, default
-//     15s; git hooks stay fail-fast), honoring Ctrl-C. ErrBusy past the
+//     30s; git hooks stay fail-fast), honoring Ctrl-C. ErrBusy past the
 //     bound aborts with an actionable error naming the holder (the gate's
 //     busy detail carries pid/reason/host from the advisory sidecar) and
 //     the knob. Proceeding would race a migration/restore mid-replace, and
@@ -80,6 +81,9 @@ var (
 // be waiting on the child, so queueing the child would deadlock until its
 // wait bound expired.
 func advertiseSharedHold() {
+	if !advertiseSharedHoldEnabled {
+		return
+	}
 	own := strconv.Itoa(os.Getpid())
 	cur, had := os.LookupEnv(workspacegate.InheritedHoldEnv)
 	// Save the pre-advertise value unless we are already advertising (a
@@ -92,6 +96,23 @@ func advertiseSharedHold() {
 	inheritedHoldEnvSet = true
 	_ = os.Setenv(workspacegate.InheritedHoldEnv, own)
 }
+
+// envWithoutSharedHoldMarker is os.Environ() minus
+// workspacegate.InheritedHoldEnv, for user-facing children that are not bd
+// (the $EDITOR `bd edit` opens can outlive this process by hours, e.g. a new
+// IDE window). A bd run from such a descendant then queues normally instead
+// of trusting a PID that may since have been recycled. bd's own children
+// keep the marker.
+func envWithoutSharedHoldMarker() []string {
+	return filterEnv(os.Environ(), workspacegate.InheritedHoldEnv)
+}
+
+// advertiseSharedHoldEnabled is off inside test binaries: there in-process
+// command tests run beside tests that spawn bd subprocesses, and a marker
+// naming the (live) test process would let those children skip the queue
+// and weaken their fairness assertions. Tests of the marker itself turn it
+// on.
+var advertiseSharedHoldEnabled = !testing.Testing()
 
 // withdrawSharedHold undoes advertiseSharedHold (no-op if never advertised).
 func withdrawSharedHold() {
@@ -146,12 +167,16 @@ const initGateTimeoutEnv = "BEADS_INIT_GATE_TIMEOUT"
 // dolt data dir, so init in project A contends with init (or any gated
 // command) in project B. A single init holds the gate for ~8s, so the
 // generic 5s budget made two concurrent `bd init --shared-server` runs in
-// different projects refuse each other. 30s rides out a few back-to-back
-// inits while still failing with a clear error on a genuinely stuck holder.
+// different projects refuse each other. Under load a single init holds the
+// gate for 10-15s and each queued init waits for every one ahead of it, so
+// 60s rides out a few back-to-back inits while still failing with a clear
+// error on a genuinely stuck holder. (Waiting this long is only acceptable
+// because a waiting init no longer holds ordinary commands back for its
+// whole budget: workspacegate caps how long it queues them, maxIntentHold.)
 // The other exclusive callers (backup restore, bootstrap, migrate) keep
 // exclusiveGateWait: they are rare, deliberate maintenance operations rather
 // than routine setup that tooling fans out across many projects at once.
-const initGateWaitDefault = 30 * time.Second
+const initGateWaitDefault = 60 * time.Second
 
 // gateWaitNoticeDelay is how long a gate wait (bd init, or an ordinary
 // command waiting out a maintenance operation) stays silent before telling
@@ -224,16 +249,21 @@ const sharedGateWaitEnv = "BEADS_GATE_WAIT_TIMEOUT"
 // before failing. In shared-server mode every project shares one physical
 // root gate, so another project's `bd init` briefly excludes every bd
 // command on the machine; failing those instantly made routine tooling
-// flaky. 15s covers an init with margin; a genuinely long restore or
+// flaky. Queued maintenance operations run one after another (two inits
+// fanned out across projects hold the gate back to back, 10-15s each under
+// load), and a waiting command waits for all of them, so the default matches
+// init's own patience rather than a single init: 30s. Humans see the notice
+// after 2s and can Ctrl-C; agents and CI, the callers that suffered most
+// from fail-fast, just get their command run. A genuinely long restore or
 // migration still fails with a clear error naming the holder and the knob.
-const sharedGateWaitDefault = 15 * time.Second
+const sharedGateWaitDefault = 30 * time.Second
 
 // sharedGateWait resolves an ordinary command's gate budget.
 //
 // Git hooks stay fail-fast (0): the hook paths (`bd hooks run`, and the
 // `bd export` / `bd import` children the pre-commit and post-merge/checkout
 // hooks spawn) all run with BD_GIT_HOOK=1, treat a failure as a warning,
-// and must never stall the user's `git commit` / `git checkout` for 15s
+// and must never stall the user's `git commit` / `git checkout` for 30s
 // behind a maintenance operation. A fail-fast acquisition also skips the
 // writer-fairness queue, so the hook behavior is exactly what it was.
 func sharedGateWait() time.Duration {
@@ -419,10 +449,19 @@ func acquireCommandWorkspaceGates(ctx context.Context, cmd *cobra.Command, beads
 			if exclusive {
 				return HandleErrorRespectJSON("other bd commands are using this workspace; wait for them to finish and retry: %v", err)
 			}
-			if sharedWait > 0 {
-				return HandleErrorRespectJSON("a maintenance operation is running on this workspace; retry when it completes (waited %s; set %s to wait longer): %v", sharedWait, sharedGateWaitEnv, err)
+			// A shared acquisition fails only when the gate itself is held
+			// exclusively (queued maintenance can delay it, never fail it —
+			// workspacegate's final attempt ignores the queue), so "running"
+			// is accurate. In shared-server mode the holder may be another
+			// project's operation; the error detail names it when known.
+			where := "this workspace"
+			if doltserver.IsSharedServerMode() {
+				where = "the shared server (possibly from another project)"
 			}
-			return HandleErrorRespectJSON("a maintenance operation is running on this workspace; retry when it completes: %v", err)
+			if sharedWait > 0 {
+				return HandleErrorRespectJSON("a maintenance operation is running on %s; retry when it completes (waited %s; set %s to wait longer): %v", where, sharedWait, sharedGateWaitEnv, err)
+			}
+			return HandleErrorRespectJSON("a maintenance operation is running on %s; retry when it completes: %v", where, err)
 		}
 		if exclusive {
 			return HandleErrorRespectJSON("workspace gate: %v", err)

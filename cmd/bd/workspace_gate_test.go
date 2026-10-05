@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -170,8 +171,12 @@ func TestAcquireCommandWorkspaceGatesWaitsForExclusiveHolder(t *testing.T) {
 		t.Fatalf("sharedGateWait() = %s, want default %s", got, sharedGateWaitDefault)
 	}
 
+	oldDelay := gateWaitNoticeDelay
+	gateWaitNoticeDelay = 200 * time.Millisecond
+	t.Cleanup(func() { gateWaitNoticeDelay = oldDelay })
+
 	holder := holdWorkspaceGateExclusive(t, beadsDir)
-	holdFor := gateWaitNoticeDelay + time.Second
+	holdFor := time.Second
 	released := time.AfterFunc(holdFor, func() { _ = holder.Release() })
 	t.Cleanup(func() { released.Stop() })
 
@@ -264,7 +269,26 @@ func TestAcquireCommandWorkspaceGatesQueuesBehindWaitingInit(t *testing.T) {
 	t.Cleanup(releaseWorkspaceGates)
 	beadsDir := newGateTestWorkspace(t)
 	physicalRoot := filepath.Join(filepath.Dir(beadsDir), "dolt-data")
-	countGateNotices(t)
+	// Record every notice immediately. Installed before the init goroutine
+	// starts: its notice timer reads these globals.
+	var (
+		noticeMu sync.Mutex
+		notices  []string
+	)
+	oldDelay, oldOnWait := gateWaitNoticeDelay, gateWaitOnWait
+	gateWaitNoticeDelay = 0
+	gateWaitOnWait = func(h string) { noticeMu.Lock(); notices = append(notices, h); noticeMu.Unlock() }
+	t.Cleanup(func() { gateWaitNoticeDelay, gateWaitOnWait = oldDelay, oldOnWait })
+	queuedNotice := func() bool {
+		noticeMu.Lock()
+		defer noticeMu.Unlock()
+		for _, h := range notices {
+			if strings.Contains(h, "queued for exclusive access") && strings.Contains(h, "bd init") {
+				return true
+			}
+		}
+		return false
+	}
 
 	// An in-flight ordinary command holds the gate shared.
 	inflight, err := workspacegate.ForWorkspace(beadsDir)
@@ -299,22 +323,38 @@ func TestAcquireCommandWorkspaceGatesQueuesBehindWaitingInit(t *testing.T) {
 		t.Fatal("bd init never queued for the gate")
 	}
 
-	// A new ordinary command must not jump the queue.
+	// A new ordinary command must not jump the queue: it defers for its
+	// budget (the notice names the queued init), then its final attempt
+	// gets in anyway because nothing holds the gate exclusively — queued
+	// maintenance delays ordinary commands, it never fails them.
 	t.Setenv(sharedGateWaitEnv, "300ms")
 	list := &cobra.Command{Use: "list"}
-	var lerr error
-	stderr := captureStderr(t, func() { lerr = acquireCommandWorkspaceGates(context.Background(), list, beadsDir) })
-	if lerr == nil {
-		t.Fatal("ordinary command jumped ahead of a queued bd init")
+	start := time.Now()
+	if err := acquireCommandWorkspaceGates(context.Background(), list, beadsDir); err != nil {
+		t.Fatalf("ordinary command behind a queued (not running) init failed: %v", err)
 	}
-	if !strings.Contains(stderr, "queued for exclusive access") || !strings.Contains(stderr, "bd init") {
-		t.Errorf("stderr %q does not name the queued bd init", stderr)
+	if waited := time.Since(start); waited < 250*time.Millisecond {
+		t.Errorf("ordinary command jumped ahead of a queued bd init (acquired after %s)", waited)
 	}
+	deadlineN := time.Now().Add(time.Second)
+	for !queuedNotice() && time.Now().Before(deadlineN) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !queuedNotice() {
+		noticeMu.Lock()
+		t.Errorf("no wait notice named the queued bd init; notices: %q", notices)
+		noticeMu.Unlock()
+	}
+	releaseWorkspaceGates()
 
 	// ...unless its parent bd already holds the gate shared.
 	t.Setenv(workspacegate.InheritedHoldEnv, strconv.Itoa(os.Getppid()))
+	start = time.Now()
 	if err := acquireCommandWorkspaceGates(context.Background(), list, beadsDir); err != nil {
 		t.Fatalf("child of a shared holder queued behind init: %v", err)
+	}
+	if waited := time.Since(start); waited > 200*time.Millisecond {
+		t.Errorf("child of a shared holder still deferred to the queue for %s", waited)
 	}
 	releaseWorkspaceGates()
 
@@ -334,6 +374,8 @@ func TestAcquireCommandWorkspaceGatesQueuesBehindWaitingInit(t *testing.T) {
 // release restores whatever value was inherited.
 func TestSharedHoldAdvertisedToChildren(t *testing.T) {
 	resetGateTestEnv(t)
+	advertiseSharedHoldEnabled = true
+	t.Cleanup(func() { advertiseSharedHoldEnabled = false })
 	t.Cleanup(releaseWorkspaceGates)
 	beadsDir := newGateTestWorkspace(t)
 	t.Setenv(workspacegate.InheritedHoldEnv, "inherited")
@@ -683,4 +725,84 @@ func TestChokepointSharedExcludesMigrateExclusive(t *testing.T) {
 		t.Fatalf("migrate acquisition after shared release: %v", err)
 	}
 	release()
+}
+
+// Hooks must never stall the user's git command behind a maintenance
+// operation: the bd subprocesses a hook spawns get BD_GIT_HOOK=1 from
+// hookSubprocessEnv, and that alone makes their gate acquisition fail fast,
+// whatever BEADS_GATE_WAIT_TIMEOUT says.
+func TestHookSubprocessEnvKeepsGateFailFast(t *testing.T) {
+	resetGateTestEnv(t)
+	t.Cleanup(releaseWorkspaceGates)
+	t.Setenv(sharedGateWaitEnv, "2m")
+	var hookVal string
+	for _, kv := range hookSubprocessEnv([]string{"PATH=/bin"}) {
+		if v, ok := strings.CutPrefix(kv, "BD_GIT_HOOK="); ok {
+			hookVal = v
+		}
+	}
+	if hookVal == "" {
+		t.Fatal("hookSubprocessEnv does not set BD_GIT_HOOK; hook subprocesses would wait on the workspace gate")
+	}
+	t.Setenv("BD_GIT_HOOK", hookVal)
+	if got := sharedGateWait(); got != 0 {
+		t.Fatalf("sharedGateWait() in a hook subprocess env = %s, want 0 (fail fast)", got)
+	}
+
+	beadsDir := newGateTestWorkspace(t)
+	holdWorkspaceGateExclusive(t, beadsDir)
+	start := time.Now()
+	var err error
+	captureStderr(t, func() {
+		err = acquireCommandWorkspaceGates(context.Background(), &cobra.Command{Use: "export"}, beadsDir)
+	})
+	if err == nil {
+		t.Fatal("hook subprocess acquired the gate under an exclusive holder")
+	}
+	if waited := time.Since(start); waited > time.Second {
+		t.Fatalf("hook subprocess waited %s on the gate", waited)
+	}
+}
+
+// In shared-server mode the exclusive holder may be another project's
+// operation, so the error must not claim it is on "this workspace".
+func TestAcquireCommandWorkspaceGatesSharedServerErrorText(t *testing.T) {
+	resetGateTestEnv(t)
+	t.Cleanup(releaseWorkspaceGates)
+	beadsDir := newGateTestWorkspace(t)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+	t.Setenv(sharedGateWaitEnv, "200ms")
+	holdWorkspaceGateExclusive(t, beadsDir)
+
+	var err error
+	stderr := captureStderr(t, func() {
+		err = acquireCommandWorkspaceGates(context.Background(), &cobra.Command{Use: "list"}, beadsDir)
+	})
+	if err == nil {
+		t.Fatal("acquired under an exclusive holder")
+	}
+	for _, want := range []string{"running on the shared server (possibly from another project)", "test maintenance"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr %q missing %q", stderr, want)
+		}
+	}
+}
+
+// bd edit's $EDITOR (which can outlive bd by hours) must not inherit the
+// shared-hold marker.
+func TestEnvWithoutSharedHoldMarker(t *testing.T) {
+	t.Setenv(workspacegate.InheritedHoldEnv, "12345")
+	t.Setenv("BEADS_GATE_TEST_KEEP", "1")
+	env := envWithoutSharedHoldMarker()
+	var kept bool
+	for _, kv := range env {
+		if strings.HasPrefix(kv, workspacegate.InheritedHoldEnv+"=") {
+			t.Fatalf("marker leaked into editor env: %q", kv)
+		}
+		kept = kept || kv == "BEADS_GATE_TEST_KEEP=1"
+	}
+	if !kept {
+		t.Fatal("envWithoutSharedHoldMarker dropped unrelated variables")
+	}
 }
