@@ -77,6 +77,21 @@ func TestCounterContract(t *testing.T) {
 	t.Run("ExcludeStatusNarrowsThePredicate", func(t *testing.T) {
 		conformance.RunCounterExcludeStatusNarrowsThePredicate(t, ctx, fixture)
 	})
+	t.Run("ParentIDMatchesListCardinality", func(t *testing.T) {
+		conformance.RunCounterParentIDMatchesListCardinality(t, ctx, fixture)
+	})
+	t.Run("NoParentMatchesListCardinality", func(t *testing.T) {
+		conformance.RunCounterNoParentMatchesListCardinality(t, ctx, fixture)
+	})
+	t.Run("ExcludeTypesMatchesListCardinality", func(t *testing.T) {
+		conformance.RunCounterExcludeTypesMatchesListCardinality(t, ctx, fixture)
+	})
+	t.Run("ParentIDIncludesAWispChild", func(t *testing.T) {
+		conformance.RunCounterParentIDIncludesAWispChild(t, ctx, fixture)
+	})
+	t.Run("ParentIDAndExcludeStatusComposeOnAClosedChild", func(t *testing.T) {
+		conformance.RunCounterParentIDAndExcludeStatusComposeOnAClosedChild(t, ctx, fixture)
+	})
 }
 
 func newDoltCounterFixture(t *testing.T, prefix string) (conformance.CounterFixture, context.Context, func()) {
@@ -90,6 +105,12 @@ func newDoltCounterFixture(t *testing.T, prefix string) (conformance.CounterFixt
 		t.Fatalf("Counter(): %v", err)
 	}
 	kit := newDoltRoleFixtureKit(store, prefix)
+	reader, err := store.IssueReader()
+	if err != nil {
+		cancel()
+		storeCleanup()
+		t.Fatalf("IssueReader(): %v", err)
+	}
 	fixture := conformance.CounterFixture{
 		IssuePrefix:   kit.IssuePrefix,
 		Counter:       counter,
@@ -97,6 +118,7 @@ func newDoltCounterFixture(t *testing.T, prefix string) (conformance.CounterFixt
 		CreateWisp:    kit.CreateWisp,
 		CountHistory:  kit.CountHistory,
 		AddDependency: kit.AddDependency,
+		List:          reader.List,
 	}
 	return fixture, ctx, func() {
 		cancel()

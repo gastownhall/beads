@@ -2071,15 +2071,24 @@ paths:
         - name: parent
           in: query
           description: >-
-            Restrict to one issue's children: a parent-child dependency edge
-            onto `parent`, OR — for an issue carrying no parent-child edge at
-            all — a dotted-id prefix match (`parent.anything`). It is the
-            same predicate `GET /v0/beads/issues`'s own `parent` applies, so
-            `bd count --parent X` and `bd list --parent X --all` agree on
-            cardinality for the shared part of the predicate. Sending it
-            beside `no_parent` is not refused, for the same reason `assignee`
-            and `no_assignee` are not: the two compose into the empty
-            intersection, which is `0`.
+            Restrict to one issue's DIRECT children only: a parent-child
+            dependency edge onto `parent`, OR — for an issue carrying no
+            parent-child edge at all — a dotted-id prefix match
+            (`parent.anything`). It is the same ONE-LEVEL predicate
+            `GET /v0/beads/issues`'s own `parent` applies, so `bd count
+            --parent X` agrees in cardinality with `bd list --parent X --flat
+            --all` (or `--json`) for the shared part of the predicate — NOT
+            with a bare `bd list --parent X --all`, whose default tree mode
+            recursively walks every descendant (grandchildren and below) by
+            re-querying this same one-level predicate once per level
+            client-side (cmd/bd/list_show_filter_modes.go). `--flat` and
+            `--json` both skip that recursion and return this field's
+            one-level answer directly.
+
+
+            Sending it beside `no_parent` IS refused: `invalid_argument` on
+            `no_parent` with `reason: invalid_value`, matching `bd list`'s CLI
+            refusal of the same combination.
 
 
             Behind the `issues.count.scope` behavior token: an older server
@@ -2094,6 +2103,12 @@ paths:
             issue named `X.1` with no edge to `X` is still counted here, which
             is the one place `parent` and `no_parent` are not exact opposites
             of each other.
+
+
+            Sending it beside `parent` IS refused: `invalid_argument` on this
+            parameter with `reason: invalid_value`, matching `bd list`'s CLI
+            refusal of the same combination (cmd/bd/list_input.go) rather than
+            the empty-intersection treatment `assignee`/`no_assignee` get.
 
 
             Behind the `issues.count.scope` behavior token: an older server
@@ -2126,13 +2141,16 @@ paths:
           in: query
           description: >-
             Statuses to exclude from the count. Repeat the parameter, or pass
-            a comma-separated list; entries are taken AS WRITTEN — no
-            normalization, no validation against this workspace's vocabulary,
-            `status`'s own match-nothing-rather-than-fail treatment. There is
-            no listing counterpart to this parameter: `GET /v0/beads/issues`
-            computes its default status exclusions internally from workspace
-            configuration and exposes no equivalent knob, so this is a
-            Count-only capability.
+            a comma-separated list; entries are taken as written (no
+            normalization) but — UNLIKE `status` and `exclude_type` above —
+            each name IS validated against this workspace's vocabulary
+            (built-in statuses plus this workspace's own custom ones): an
+            unrecognized name is `invalid_argument` on this parameter with
+            `reason: invalid_value`, rather than silently excluding nothing
+            and overcounting. There is no listing counterpart to this
+            parameter: `GET /v0/beads/issues` computes its default status
+            exclusions internally from workspace configuration and exposes no
+            equivalent knob, so this is a Count-only capability.
 
 
             Behind the `issues.count.scope` behavior token: an older server
@@ -7592,7 +7610,7 @@ components:
             parameter) rather than silently answering `unknown_parameter`, and
             `issues.count.scope`, which announces that
             `GET /v0/beads/issues:count` accepts `parent`, `no_parent`,
-            `exclude_type` and `exclude_status` (see those parameters) rather
+            `exclude_type`, and `exclude_status` (see those parameters) rather
             than silently answering `unknown_parameter` for all four. The
             list grows additively, and an operation never appears here unless
             it is fully implemented. This is how a client checks for an

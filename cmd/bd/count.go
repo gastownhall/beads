@@ -95,6 +95,9 @@ func parseCountRequest(cmd *cobra.Command) (issueops.CountRequest, issueops.Coun
 	includeEphemeral, _ := cmd.Flags().GetBool("include-ephemeral")
 	parentID, _ := cmd.Flags().GetString("parent")
 	noParent, _ := cmd.Flags().GetBool("no-parent")
+	if parentID != "" && noParent {
+		return issueops.CountRequest{}, "", HandleErrorRespectJSON("--parent and --no-parent are mutually exclusive")
+	}
 	excludeTypes, _ := cmd.Flags().GetStringSlice("exclude-type")
 	excludeStatus, _ := cmd.Flags().GetStringSlice("exclude-status")
 

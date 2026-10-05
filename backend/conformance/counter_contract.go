@@ -64,6 +64,12 @@ type CounterFixture struct {
 	// (sqlbuild/filter.go), unlike ParentID's dotted-id-prefix fallback, so
 	// pinning it needs a real edge and not just a naming convention.
 	AddDependency func(context.Context, *types.Dependency, string) error
+	// List runs the List role's query directly (the store's IssueReader), so
+	// the storage-level parity cases below (S8 review, follow-up #5) can
+	// compare Count's answer against len(List's rows) for the same scope
+	// without going through a second builder. A nil hook skips those cases
+	// rather than failing: not every backend wiring has a Reader to hand.
+	List func(context.Context, publicops.ListRequest) (publicops.IssuePage, error)
 }
 
 // RunCounterCountsTheDurablePlaneByDefault pins counter.go:123-126 from the
@@ -297,9 +303,14 @@ func RunCounterExcludeStatusNarrowsThePredicate(t *testing.T, ctx context.Contex
 	scope.ExcludeStatus = []string{"closed"}
 	assertCounterTotal(t, ctx, fixture, scope, 1)
 
-	// An unrecognized status excludes nothing: the set is unchanged.
+	// Unlike Status and IssueType, ExcludeStatus IS validated (S8 review,
+	// follow-up #3): a misspelled entry would silently exclude nothing and
+	// OVERCOUNT, so an unrecognized name is refused as ErrValidation instead
+	// of treated as a no-op.
 	scope.ExcludeStatus = []string{"no-such-status"}
-	assertCounterTotal(t, ctx, fixture, scope, 2)
+	if _, err := fixture.Counter.Count(ctx, scope); !errors.Is(err, publicops.ErrValidation) {
+		t.Errorf("Count with an unrecognized exclude-status = %v, want ErrValidation", err)
+	}
 }
 
 // requireCounterAddDependency skips a case that needs a real parent-child
@@ -310,6 +321,188 @@ func requireCounterAddDependency(t *testing.T, fixture CounterFixture) {
 	if fixture.AddDependency == nil {
 		t.Skip("fixture cannot seed a dependency edge: AddDependency is nil")
 	}
+}
+
+// requireCounterList skips a case that needs the List role when the fixture
+// offers no way to reach it, mirroring requireCounterAddDependency.
+func requireCounterList(t *testing.T, fixture CounterFixture) {
+	t.Helper()
+	if fixture.List == nil {
+		t.Skip("fixture cannot run the List role: List is nil")
+	}
+}
+
+// assertCounterMatchesList compares Count's Total against len(List's rows)
+// for the same scope, with List's AllFlag and IncludeAllTypes both set so
+// List's own default exclusions (status, pinned, template, gate, infra-plane)
+// are lifted exactly as far as Count's own default lifts none of them
+// (workapi.BuildCountFilter's doc, count.go) — the one combination that
+// makes the two cardinalities comparable at all for an arbitrary scope.
+//
+// This is a DIFFERENT check than
+// TestBuildCountFilterParentFieldsMatchListFilter
+// (internal/workapi/count_test.go), which compares the two FILTERS a shared
+// request builds without touching a store; this one runs both roles against
+// a real backend and compares what they actually return (S8 review, follow-up
+// #5).
+func assertCounterMatchesList(t *testing.T, ctx context.Context, fixture CounterFixture, idFilter, parentID string, noParent bool, excludeTypes []string) {
+	t.Helper()
+	countReq := publicops.CountRequest{
+		IDFilter:     idFilter,
+		ParentID:     parentID,
+		NoParent:     noParent,
+		ExcludeTypes: excludeTypes,
+	}
+	total := counterTotal(t, ctx, fixture, countReq)
+
+	listReq := publicops.ListRequest{
+		IDFilter:        idFilter,
+		ParentID:        parentID,
+		NoParent:        noParent,
+		ExcludeTypes:    excludeTypes,
+		AllFlag:         true,
+		IncludeAllTypes: true,
+	}
+	page, err := fixture.List(ctx, listReq)
+	if err != nil {
+		t.Fatalf("List(%+v): %v", listReq, err)
+	}
+	if got := int64(len(page.Items)); got != total {
+		t.Errorf("Count(%+v) = %d, len(List(%+v).Items) = %d, want equal", countReq, total, listReq, got)
+	}
+}
+
+// RunCounterParentIDMatchesListCardinality pins the storage-level half of
+// CountRequest.ParentID's promise (S8 review, follow-up #5a): for one scope,
+// Count's Total equals len(List's rows) for the equivalent ParentID scope.
+func RunCounterParentIDMatchesListCardinality(t *testing.T, ctx context.Context, fixture CounterFixture) {
+	t.Helper()
+	requireCounterList(t, fixture)
+	requireCounterAddDependency(t, fixture)
+
+	parent := fixture.IssuePrefix + "-parity-parentid-parent"
+	byEdge := fixture.IssuePrefix + "-parity-parentid-byedge"
+	byDotted := parent + ".1"
+	unrelated := fixture.IssuePrefix + "-parity-parentid-unrelated"
+
+	for _, id := range []string{parent, byEdge, byDotted, unrelated} {
+		seedCounterIssue(t, ctx, fixture, counterSeed(id))
+	}
+	if err := fixture.AddDependency(ctx, &types.Dependency{
+		IssueID: byEdge, DependsOnID: parent, Type: types.DepParentChild,
+	}, "seed"); err != nil {
+		t.Fatalf("seed edge %s -> %s: %v", byEdge, parent, err)
+	}
+
+	idFilter := counterScope(parent, byEdge, byDotted, unrelated).IDFilter
+	assertCounterMatchesList(t, ctx, fixture, idFilter, parent, false, nil)
+}
+
+// RunCounterNoParentMatchesListCardinality pins the storage-level half of
+// CountRequest.NoParent's promise (S8 review, follow-up #5a).
+func RunCounterNoParentMatchesListCardinality(t *testing.T, ctx context.Context, fixture CounterFixture) {
+	t.Helper()
+	requireCounterList(t, fixture)
+	requireCounterAddDependency(t, fixture)
+
+	parent := fixture.IssuePrefix + "-parity-noparent-parent"
+	child := fixture.IssuePrefix + "-parity-noparent-child"
+	byDotted := parent + ".1"
+
+	for _, id := range []string{parent, child, byDotted} {
+		seedCounterIssue(t, ctx, fixture, counterSeed(id))
+	}
+	if err := fixture.AddDependency(ctx, &types.Dependency{
+		IssueID: child, DependsOnID: parent, Type: types.DepParentChild,
+	}, "seed"); err != nil {
+		t.Fatalf("seed edge %s -> %s: %v", child, parent, err)
+	}
+
+	idFilter := counterScope(parent, child, byDotted).IDFilter
+	assertCounterMatchesList(t, ctx, fixture, idFilter, "", true, nil)
+}
+
+// RunCounterExcludeTypesMatchesListCardinality pins the storage-level half of
+// CountRequest.ExcludeTypes' promise (S8 review, follow-up #5a). ExcludeStatus
+// has no List counterpart (counter.go) so it is not part of this parity
+// family; RunCounterExcludeStatusNarrowsThePredicate above is its only
+// coverage.
+func RunCounterExcludeTypesMatchesListCardinality(t *testing.T, ctx context.Context, fixture CounterFixture) {
+	t.Helper()
+	requireCounterList(t, fixture)
+
+	task := fixture.IssuePrefix + "-parity-extype-task"
+	chore := fixture.IssuePrefix + "-parity-extype-chore"
+	seedCounterIssue(t, ctx, fixture, counterSeed(task))
+	choreSeed := counterSeed(chore)
+	choreSeed.IssueType = types.TypeChore
+	seedCounterIssue(t, ctx, fixture, choreSeed)
+
+	idFilter := counterScope(task, chore).IDFilter
+	assertCounterMatchesList(t, ctx, fixture, idFilter, "", false, []string{"chore"})
+}
+
+// RunCounterParentIDIncludesAWispChild pins that ParentID's edge match reaches
+// into the wisp tier exactly as IncludeInfra's merge does (S8 review,
+// follow-up #5b): a child seeded in the ephemeral/wisp tier, linked to its
+// parent by the same parent-child edge ParentID matches on, is invisible to
+// Count's durable-only default and counted once IncludeInfra merges the wisps
+// table in.
+func RunCounterParentIDIncludesAWispChild(t *testing.T, ctx context.Context, fixture CounterFixture) {
+	t.Helper()
+	requireCounterAddDependency(t, fixture)
+
+	parent := fixture.IssuePrefix + "-wispchild-parent"
+	wispChild := fixture.IssuePrefix + "-wispchild-child"
+	seedCounterIssue(t, ctx, fixture, counterSeed(parent))
+	seedCounterWisp(t, ctx, fixture, counterSeed(wispChild))
+	if err := fixture.AddDependency(ctx, &types.Dependency{
+		IssueID: wispChild, DependsOnID: parent, Type: types.DepParentChild,
+	}, "seed"); err != nil {
+		t.Fatalf("seed edge %s -> %s: %v", wispChild, parent, err)
+	}
+
+	scope := counterScope(parent, wispChild)
+	scope.ParentID = parent
+	// Durable-only default (counter.go, RunCounterCountsTheDurablePlaneByDefault):
+	// the wisp child is invisible without IncludeInfra.
+	assertCounterTotal(t, ctx, fixture, scope, 0)
+
+	scope.IncludeInfra = true
+	assertCounterTotal(t, ctx, fixture, scope, 1)
+}
+
+// RunCounterParentIDAndExcludeStatusComposeOnAClosedChild pins that ParentID
+// and ExcludeStatus apply as a conjunction, not alternatives (S8 review,
+// follow-up #5b): a closed child under its parent is counted by ParentID
+// alone (Count hides nothing by default), and excluded once ExcludeStatus
+// names its status, leaving only the open child.
+func RunCounterParentIDAndExcludeStatusComposeOnAClosedChild(t *testing.T, ctx context.Context, fixture CounterFixture) {
+	t.Helper()
+	requireCounterAddDependency(t, fixture)
+
+	parent := fixture.IssuePrefix + "-closedchild-parent"
+	openChild := fixture.IssuePrefix + "-closedchild-open"
+	closedChild := fixture.IssuePrefix + "-closedchild-closed"
+	seedCounterIssue(t, ctx, fixture, counterSeed(parent))
+	seedCounterIssue(t, ctx, fixture, counterSeed(openChild))
+	closedSeed := counterSeed(closedChild)
+	closedSeed.Status = types.StatusClosed
+	seedCounterIssue(t, ctx, fixture, closedSeed)
+	for _, child := range []string{openChild, closedChild} {
+		if err := fixture.AddDependency(ctx, &types.Dependency{
+			IssueID: child, DependsOnID: parent, Type: types.DepParentChild,
+		}, "seed"); err != nil {
+			t.Fatalf("seed edge %s -> %s: %v", child, parent, err)
+		}
+	}
+
+	scope := counterScope(parent, openChild, closedChild)
+	scope.ParentID = parent
+	assertCounterTotal(t, ctx, fixture, scope, 2)
+
+	scope.ExcludeStatus = []string{"closed"}
+	assertCounterTotal(t, ctx, fixture, scope, 1)
 }
 
 // RunCounterGroupsPartitionTheScalarSet pins counter.go:168-169 and :244-245

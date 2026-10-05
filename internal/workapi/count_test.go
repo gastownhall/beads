@@ -271,19 +271,72 @@ func TestBuildCountFilterParentFieldsMatchListFilter(t *testing.T) {
 // TestBuildCountFilterExcludeStatusTakesNamesAsWritten pins ExcludeStatus: a
 // Count-only field with no List counterpart (ListRequest computes its default
 // exclusions internally and exposes no caller-facing knob for them). Entries
-// split and trim like ExcludeTypes, but are NOT normalized or validated
-// against the workspace vocabulary — the same match-nothing-rather-than-fail
-// treatment Status gets.
+// split and trim like ExcludeTypes. UNLIKE Status and ExcludeTypes, each name
+// IS validated against the workspace vocabulary (review S8 follow-up #3): a
+// built-in name passes as written, and an unrecognized one is ErrValidation
+// rather than silently excluding nothing.
 func TestBuildCountFilterExcludeStatusTakesNamesAsWritten(t *testing.T) {
 	got, err := BuildCountFilter(issueops.CountRequest{
-		ExcludeStatus: []string{" closed , archived", "", "no-such-status"},
+		ExcludeStatus: []string{" closed , pinned", ""},
 	}, ListConfig{})
 	if err != nil {
 		t.Fatalf("BuildCountFilter: %v", err)
 	}
-	want := []types.Status{"closed", "archived", "no-such-status"}
+	want := []types.Status{"closed", "pinned"}
 	if !reflect.DeepEqual(got.ExcludeStatus, want) {
 		t.Errorf("ExcludeStatus = %v, want %v", got.ExcludeStatus, want)
+	}
+}
+
+// TestBuildCountFilterExcludeStatusRejectsAnUnknownName pins the ErrValidation
+// refusal (review S8 follow-up #3): a typo'd status name in --exclude-status
+// must fail loudly rather than silently excluding nothing and overcounting.
+func TestBuildCountFilterExcludeStatusRejectsAnUnknownName(t *testing.T) {
+	_, err := BuildCountFilter(issueops.CountRequest{
+		ExcludeStatus: []string{"no-such-status"},
+	}, ListConfig{})
+	if err == nil {
+		t.Fatal("BuildCountFilter accepted an unknown exclude-status name, want ErrValidation")
+	}
+	if !errors.Is(err, issueops.ErrValidation) {
+		t.Errorf("err = %v, want errors.Is(err, issueops.ErrValidation)", err)
+	}
+}
+
+// TestBuildCountFilterExcludeStatusAllowsAWorkspaceCustomStatus pins the other
+// half of #3: a workspace-defined custom status is NOT a typo and must be
+// accepted, following ApplyStatusFilter's own IsValidWithCustom precedent in
+// list.go.
+func TestBuildCountFilterExcludeStatusAllowsAWorkspaceCustomStatus(t *testing.T) {
+	cfg := ListConfig{CustomStatuses: []types.CustomStatus{{Name: "triaged"}}}
+	got, err := BuildCountFilter(issueops.CountRequest{
+		ExcludeStatus: []string{"triaged"},
+	}, cfg)
+	if err != nil {
+		t.Fatalf("BuildCountFilter rejected the workspace's own custom status: %v", err)
+	}
+	want := []types.Status{"triaged"}
+	if !reflect.DeepEqual(got.ExcludeStatus, want) {
+		t.Errorf("ExcludeStatus = %v, want %v", got.ExcludeStatus, want)
+	}
+}
+
+// TestBuildCountFilterRefusesParentAndNoParentTogether pins review S8
+// follow-up #1: the role refuses the combination as ErrValidation, with the
+// same wording `bd list`'s CLI already uses for the same combination
+// (cmd/bd/list_input.go), so a caller reaching this role from any front door
+// gets the identical refusal.
+func TestBuildCountFilterRefusesParentAndNoParentTogether(t *testing.T) {
+	_, err := BuildCountFilter(issueops.CountRequest{ParentID: "bd-1", NoParent: true}, ListConfig{})
+	if err == nil {
+		t.Fatal("BuildCountFilter accepted --parent with --no-parent, want ErrValidation")
+	}
+	if !errors.Is(err, issueops.ErrValidation) {
+		t.Errorf("err = %v, want errors.Is(err, issueops.ErrValidation)", err)
+	}
+	const want = "--parent and --no-parent are mutually exclusive"
+	if err.Error() != want {
+		t.Errorf("err = %q, want %q", err.Error(), want)
 	}
 }
 

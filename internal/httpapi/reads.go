@@ -611,6 +611,15 @@ func invalidFilterParam(err error) (string, bool) {
 	switch {
 	case strings.HasPrefix(msg, "invalid status "):
 		return "status", true
+	// The count role's own refusals (S8 review fix): a misspelled
+	// --exclude-status entry, and --parent set together with --no-parent.
+	// Both are the ROLE's ErrValidation, named here exactly as `status` and
+	// the metadata-key rows above are, so the client learns which parameter
+	// to fix rather than reading an unclassified 500.
+	case strings.HasPrefix(msg, "invalid exclude-status "):
+		return "exclude_status", true
+	case strings.HasPrefix(msg, "--parent and --no-parent are mutually exclusive"):
+		return "no_parent", true
 	case strings.HasPrefix(msg, "invalid issue type "):
 		return "type", true
 	case strings.HasPrefix(msg, "invalid sort policy "):

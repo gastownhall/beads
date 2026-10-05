@@ -80,9 +80,15 @@ type CountRequest struct {
 	// ParentID restricts to one issue's children, spelled as
 	// ListRequest.ParentID spells it: a parent-child dependency edge, OR (for
 	// an issue with no such edge) a dotted-id prefix match. NoParent restricts
-	// to rows with neither. Setting both is not refused, for the same reason
-	// Assignee and NoAssignee are not: the filter answers with the empty
-	// intersection rather than failing.
+	// to rows with neither.
+	//
+	// Setting both IS refused, as ErrValidation, UNLIKE Assignee/NoAssignee
+	// above: `bd list`'s CLI already refuses `--parent` with `--no-parent`
+	// (cmd/bd/list_input.go) with this same wording, and a caller reaching
+	// this role directly — over HTTP, or through a future client that skips
+	// the primary CLI's flag parser — gets the identical refusal rather than
+	// a silent empty-intersection answer the primary CLI would never have let
+	// it ask for.
 	ParentID string
 	NoParent bool
 
@@ -117,10 +123,12 @@ type CountRequest struct {
 	// List counterpart — ListRequest computes its default status exclusions
 	// internally from workspace configuration and exposes no caller-facing
 	// knob for them. Here it is a new, Count-only capability (behavior token
-	// `issues.count.scope`): entries may be comma-separated, and — matching
-	// Status and ExcludeTypes — are NOT validated against the workspace
-	// vocabulary, so an unrecognized name excludes nothing rather than
-	// failing.
+	// `issues.count.scope`): entries may be comma-separated, and — UNLIKE
+	// Status and ExcludeTypes above — each name IS validated against the
+	// workspace vocabulary (built-in statuses plus the workspace's own custom
+	// ones). An unrecognized name is ErrValidation rather than excluding
+	// nothing: a caller building an exclusion list by hand gets a loud failure
+	// on a typo instead of a silently wider, overcounted answer.
 	ExcludeStatus []string
 
 	// TitleContains, DescContains and NotesContains are substring matches on

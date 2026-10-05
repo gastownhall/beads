@@ -77,6 +77,21 @@ func TestCounterContract(t *testing.T) {
 	t.Run("ExcludeStatusNarrowsThePredicate", func(t *testing.T) {
 		conformance.RunCounterExcludeStatusNarrowsThePredicate(t, ctx, fixture)
 	})
+	t.Run("ParentIDMatchesListCardinality", func(t *testing.T) {
+		conformance.RunCounterParentIDMatchesListCardinality(t, ctx, fixture)
+	})
+	t.Run("NoParentMatchesListCardinality", func(t *testing.T) {
+		conformance.RunCounterNoParentMatchesListCardinality(t, ctx, fixture)
+	})
+	t.Run("ExcludeTypesMatchesListCardinality", func(t *testing.T) {
+		conformance.RunCounterExcludeTypesMatchesListCardinality(t, ctx, fixture)
+	})
+	t.Run("ParentIDIncludesAWispChild", func(t *testing.T) {
+		conformance.RunCounterParentIDIncludesAWispChild(t, ctx, fixture)
+	})
+	t.Run("ParentIDAndExcludeStatusComposeOnAClosedChild", func(t *testing.T) {
+		conformance.RunCounterParentIDAndExcludeStatusComposeOnAClosedChild(t, ctx, fixture)
+	})
 }
 
 func newUOWCounterFixture(t *testing.T, ctx context.Context, prefix string) conformance.CounterFixture {
@@ -92,6 +107,14 @@ func newUOWCounterFixture(t *testing.T, ctx context.Context, prefix string) conf
 	if err != nil {
 		t.Fatalf("Counter(): %v", err)
 	}
+	readerSource, ok := provider.(IssueReaderSource)
+	if !ok {
+		t.Fatalf("provider %T does not offer the IssueReader accessor", provider)
+	}
+	reader, err := readerSource.IssueReader()
+	if err != nil {
+		t.Fatalf("IssueReader(): %v", err)
+	}
 	kit := newUOWRoleFixtureKit(provider, prefix)
 	return conformance.CounterFixture{
 		IssuePrefix:   kit.IssuePrefix,
@@ -100,5 +123,6 @@ func newUOWCounterFixture(t *testing.T, ctx context.Context, prefix string) conf
 		CreateWisp:    kit.CreateWisp,
 		CountHistory:  kit.CountHistory,
 		AddDependency: kit.AddDependency,
+		List:          reader.List,
 	}
 }

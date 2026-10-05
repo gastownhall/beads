@@ -103,6 +103,15 @@ func BuildCountFilter(in issueops.CountRequest, cfg ListConfig) (types.IssueFilt
 		filter.IDs = ids
 	}
 
+	// ParentID and NoParent are refused together, matching `bd list`'s CLI
+	// refusal of the same combination (cmd/bd/list_input.go) with the same
+	// wording — the role raises it as ErrValidation so a caller reaching this
+	// builder from any front door (HTTP, proxied CLI, a future client) gets
+	// the same refusal the primary CLI's flag parser gives, rather than the
+	// role silently answering the empty intersection.
+	if in.ParentID != "" && in.NoParent {
+		return types.IssueFilter{}, fmt.Errorf("--parent and --no-parent are mutually exclusive%.0w", issueops.ErrValidation)
+	}
 	if in.ParentID != "" {
 		parentID := in.ParentID
 		filter.ParentID = &parentID
@@ -124,15 +133,26 @@ func BuildCountFilter(in issueops.CountRequest, cfg ListConfig) (types.IssueFilt
 		}
 	}
 
-	// ExcludeStatus takes names as written, with no normalization and no
-	// validation against the workspace vocabulary — the same
-	// match-nothing-rather-than-fail treatment Status and IssueType get above.
+	// ExcludeStatus takes names as written but — unlike Status and IssueType
+	// above — IS validated against the workspace vocabulary (built-in statuses
+	// plus cfg's custom ones, the same set ApplyStatusFilter checks in
+	// list.go). An exclusion list is built by hand from a status name, so a
+	// misspelled entry here would silently exclude nothing and OVERCOUNT
+	// rather than undercount, which is a worse failure mode than the
+	// match-nothing treatment Status and IssueType accept above — so a typo
+	// is ErrValidation instead.
 	for _, raw := range in.ExcludeStatus {
 		for _, s := range strings.Split(raw, ",") {
 			s = strings.TrimSpace(s)
-			if s != "" {
-				filter.ExcludeStatus = append(filter.ExcludeStatus, types.Status(s))
+			if s == "" {
+				continue
 			}
+			status := types.Status(s)
+			if !status.IsValidWithCustom(cfg.CustomStatusNames()) {
+				return types.IssueFilter{}, fmt.Errorf("invalid exclude-status %q (valid: %s)%.0w",
+					s, ValidStatusList(cfg.CustomStatusNames()), issueops.ErrValidation)
+			}
+			filter.ExcludeStatus = append(filter.ExcludeStatus, status)
 		}
 	}
 

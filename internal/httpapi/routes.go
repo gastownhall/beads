@@ -77,7 +77,7 @@ const CapBatchApplyLarge = "issues.batchApplyLarge"
 const CapIssuesListSort = "issues.list.sort"
 
 // CapIssuesCountScope is the behavior capability that advertises GET
-// /v0/beads/issues:count's `parent`, `no_parent`, `exclude_type` and
+// /v0/beads/issues:count's `parent`, `no_parent`, `exclude_type`, and
 // `exclude_status` parameters (reads.go countFilters, spec OpCountIssues).
 // Like CapIssuesListSort it names FOUR PARAMETERS added to an existing
 // operation rather than a route of its own — `issues.count` is already the
@@ -105,6 +105,18 @@ const CapIssuesListSort = "issues.list.sort"
 // sets `ParentID`, `NoParent`, `ExcludeTypes` or `ExcludeStatus` to an older
 // server — never let the caller pay for a round trip that 400s anyway, and
 // never silently drop the fields and return a wider count than asked for.
+//
+// THE DOWNSTREAM FALLBACK THIS PROTECTS (S8 review, follow-up #6): gc's own
+// client maps that local `ErrUnsupported{Capability: "issues.count.scope"}`
+// refusal to its own `ErrCountUnsupported` and falls back to the List role for
+// the same predicate (beads-design DESIGN.txt §3.2, "gc maps this to
+// ErrCountUnsupported and falls back to List") rather than surfacing the
+// refusal to its own caller or guessing at a count. S3/S4, when they build
+// that client, MUST add a skew test that masks this token out of a handshake
+// response and asserts the fallback actually fires — not merely that the
+// local refusal is raised — because a fallback that compiles but never runs
+// in CI is indistinguishable from one that silently regressed to a wrong
+// count.
 const CapIssuesCountScope = "issues.count.scope"
 
 // customMethodTarget splits the custom method off the segment the router

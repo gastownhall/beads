@@ -80,6 +80,21 @@ func TestCounterContract(t *testing.T) {
 	t.Run("ExcludeStatusNarrowsThePredicate", func(t *testing.T) {
 		conformance.RunCounterExcludeStatusNarrowsThePredicate(t, ctx, fixture)
 	})
+	t.Run("ParentIDMatchesListCardinality", func(t *testing.T) {
+		conformance.RunCounterParentIDMatchesListCardinality(t, ctx, fixture)
+	})
+	t.Run("NoParentMatchesListCardinality", func(t *testing.T) {
+		conformance.RunCounterNoParentMatchesListCardinality(t, ctx, fixture)
+	})
+	t.Run("ExcludeTypesMatchesListCardinality", func(t *testing.T) {
+		conformance.RunCounterExcludeTypesMatchesListCardinality(t, ctx, fixture)
+	})
+	t.Run("ParentIDIncludesAWispChild", func(t *testing.T) {
+		conformance.RunCounterParentIDIncludesAWispChild(t, ctx, fixture)
+	})
+	t.Run("ParentIDAndExcludeStatusComposeOnAClosedChild", func(t *testing.T) {
+		conformance.RunCounterParentIDAndExcludeStatusComposeOnAClosedChild(t, ctx, fixture)
+	})
 }
 
 func newEmbeddedCounterFixture(t *testing.T, te *testEnv, prefix string) conformance.CounterFixture {
@@ -87,6 +102,10 @@ func newEmbeddedCounterFixture(t *testing.T, te *testEnv, prefix string) conform
 	counter, err := te.store.Counter()
 	if err != nil {
 		t.Fatalf("Counter(): %v", err)
+	}
+	reader, err := te.store.IssueReader()
+	if err != nil {
+		t.Fatalf("IssueReader(): %v", err)
 	}
 	kit := newEmbeddedRoleFixtureKit(te, prefix)
 	return conformance.CounterFixture{
@@ -96,5 +115,6 @@ func newEmbeddedCounterFixture(t *testing.T, te *testEnv, prefix string) conform
 		CreateWisp:    kit.CreateWisp,
 		CountHistory:  kit.CountHistory,
 		AddDependency: kit.AddDependency,
+		List:          reader.List,
 	}
 }
