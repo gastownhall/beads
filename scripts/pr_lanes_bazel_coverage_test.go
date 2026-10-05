@@ -69,7 +69,7 @@ var bazelPRLaneRCLines = map[string][]string{
 		"test:prcore --test_arg=-test.skip=^TestEmbedded",
 		"test:prcore --test_env=BEADS_TEST_SKIP=dolt",
 		"test:prcore --test_env=BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1",
-		"test:prcore --test_tag_filters=-requires-docker,-dolt-server,-dolt-server-proxied,-dolt-server-integration,-embedded,-manual,-integration-only",
+		"test:prcore --test_tag_filters=-requires-docker,-dolt-server,-dolt-server-proxied,-dolt-server-integration,-dolt-server-cmd,-embedded,-manual,-integration-only",
 	},
 	"ci": {
 		"test:ci --config=prcore",

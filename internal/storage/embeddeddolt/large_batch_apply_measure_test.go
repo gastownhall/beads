@@ -215,7 +215,7 @@ const large712ShapeName = "712 (mol 2x)"
 // The 712 (mol 2x) shape alone still measures ~260-300s: it is a single
 // pinned statement-count assertion over one indivisible ApplyBatchInTx
 // transaction (no internal sub-cases to split further), a genuine, CPU-bound
-// cost: 14014 real SQL statement round-trips through the race-instrumented
+// cost: 12790 real SQL statement round-trips through the race-instrumented
 // in-process Dolt engine. It is skipped under -race below, following the
 // exact precedent TestLargeBatchApplyWallClock_Embedded set for its
 // 1000-item shape: the cost here is race-instrumentation overhead on the
@@ -226,7 +226,7 @@ const large712ShapeName = "712 (mol 2x)"
 // this specific regression check — not a weakening of the assertion itself.
 // nightly.yml's "Embedded Dolt batch-apply suite (non-race)" step (the
 // nightly embedded non-race lane from #7128) has its -run regex extended
-// alongside this change to include this test, so the full 14014-statement
+// alongside this change to include this test, so the full 12790-statement
 // pinned baseline still runs, non-race, every night.
 func runLargeBatchApplyStatementCountsShape(t *testing.T, shapeName string) {
 	skipUnlessEmbeddedDolt(t)
@@ -407,10 +407,24 @@ func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 // issued for each measured shape, as last observed on this branch. B2 must
 // lower these; a change for any other reason should be re-measured and
 // re-pinned deliberately, not adjusted to make a failure go away.
+//
+// Re-pinned for the batch-create round-trip work (was 7009 / 14014 / 846):
+//   - ExecuteCreate hands its own BatchContext to the batch body instead of
+//     letting it re-read the same config: -6 statements per create item
+//     (356: 102 creates, -612; 712: 204, -1224; classic: 10, -60).
+//   - A create's blocked-state recompute first probes which of its ids have
+//     a dependency row of their own (+1). An id without one — every freshly
+//     created item — then gets one plain UPDATE instead of the two union
+//     UPDATEs: net 0, and the dropped statements were the expensive ones.
+//     Recomputes outside the create paths (dep adds, updates, closes) run no
+//     probe and are unchanged.
+//
+// Net: 356 -613 (incl. the documented 1-statement jitter), 712 -1224,
+// classic -60.
 var pinnedEmbeddedStatementCounts = map[string]int64{
-	"356 (mol 1x)":    7009,
-	large712ShapeName: 14014,
-	"40 (classic)":    846,
+	"356 (mol 1x)":    6396,
+	large712ShapeName: 12790,
+	"40 (classic)":    786,
 }
 
 // BenchmarkLargeBatchApply_Embedded benchmarks issueops.ApplyBatchInTx on

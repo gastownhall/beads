@@ -155,6 +155,11 @@ func InstallCursor(global bool) error {
 // error instead of exiting. Used by bd init to integrate Cursor setup
 // automatically (parallels InstallClaudeProject / InstallCodexProject).
 func InstallCursorProject() error {
+	return InstallCursorProjectTo(ProjectInstallOutput{})
+}
+
+// InstallCursorProjectTo is InstallCursorProject reporting to out.
+func InstallCursorProjectTo(out ProjectInstallOutput) error {
 	if err := installCursorRules(); err != nil {
 		return err
 	}
@@ -162,13 +167,14 @@ func InstallCursorProject() error {
 	if err != nil {
 		return err
 	}
+	skillEnv.stdout, skillEnv.stderr = out.stdout(), out.stderr()
 	if err := installAgentSkill(skillEnv); err != nil {
 		return err
 	}
 	if err := installCursorHooks(cursorHooksPath); err != nil {
 		return err
 	}
-	fmt.Println("✓ Cursor integration installed (rules + skill + hooks)")
+	_, _ = fmt.Fprintln(out.stdout(), "✓ Cursor integration installed (rules + skill + hooks)")
 	return nil
 }
 

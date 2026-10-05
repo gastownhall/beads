@@ -1220,6 +1220,7 @@ func TestDefaultConfigReturnsZeroForStandalone(t *testing.T) {
 	// giving each project a unique port without hash collisions (GH#2098).
 	t.Setenv("GT_ROOT", "")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	isolateUserConfig(t)
 
 	dir := t.TempDir()
 	cfg := DefaultConfig(dir)
@@ -1243,6 +1244,7 @@ func TestDefaultConfigPortFileTakesPrecedence(t *testing.T) {
 	// Port file (written by Start) should take precedence over ephemeral.
 	t.Setenv("GT_ROOT", "")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	isolateUserConfig(t)
 
 	dir := t.TempDir()
 	if err := writePortFile(dir, 14567); err != nil {
@@ -2850,9 +2852,9 @@ func TestWaitForReady(t *testing.T) {
 	}
 
 	// Spawn a goroutine that delays binding the port. This simulates a
-	// "slow server" -- the TCP listener is not yet bound when waitForReady
+	// "slow server" -- the TCP listener is not yet bound when the readiness probe
 	// is first called. Once bound, each accepted connection is sent a fake
-	// MySQL handshake greeting so waitForReady's post-F7 "must be greeted,
+	// MySQL handshake greeting so the readiness probe's post-F7 "must be greeted,
 	// not just accepted" check is satisfiable.
 	bindAfter := 200 * time.Millisecond
 	listenerReady := make(chan net.Listener, 1)
@@ -2889,14 +2891,14 @@ func TestWaitForReady(t *testing.T) {
 	// the port; "succeeds" runs after.
 	t.Run("times out when server not ready in time", func(t *testing.T) {
 		// 50ms is well under the 200ms bind delay, so this MUST time out.
-		if err := waitForReady(host, port, 50*time.Millisecond); err == nil {
+		if err := awaitGreeting(host, port, 50*time.Millisecond); err == nil {
 			t.Errorf("expected timeout error, got nil")
 		}
 	})
 
 	t.Run("succeeds when server becomes ready in time", func(t *testing.T) {
 		// 2 seconds is well over the remaining bind delay; gives comfortable margin.
-		if err := waitForReady(host, port, 2*time.Second); err != nil {
+		if err := awaitGreeting(host, port, 2*time.Second); err != nil {
 			t.Errorf("expected nil error, got: %v", err)
 		}
 	})

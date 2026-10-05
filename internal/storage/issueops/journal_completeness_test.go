@@ -30,6 +30,7 @@ var derivedReadinessEmitters = map[string]bool{
 	// chain stays connected AND so a mutator cannot inherit emission by calling
 	// one of them either.
 	"recomputeIsBlockedCounting":         true,
+	"recomputeIsBlockedInTxWithResult":   true,
 	"recomputeIsBlockedAfterMergeScoped": true,
 	"recomputeIsBlockedForAll":           true,
 	"MarkIsBlockedInTx":                  true,

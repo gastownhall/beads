@@ -182,6 +182,12 @@ filegroup(
     visibility = ["//internal/storage:__subpackages__"],
 )
 
+# Linked from the root and engdocs AGENTS.md; //:docsync_files checks those links.
+exports_files(
+    ["migrations/README.md"],
+    visibility = ["//:__pkg__"],
+)
+
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(

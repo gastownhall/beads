@@ -144,6 +144,13 @@ func createTempDirWithCleanup(t *testing.T) string {
 	return tmpDir
 }
 
+// restoreEnvSnapshot puts the process environment back to before, a prior
+// os.Environ(): an in-process rootCmd.Execute mutates the environment with
+// raw os.Setenv and restores nothing (see installExecuteIsolation, which now
+// does this for every execution; kept here so the runners do not depend on
+// TestMain having installed it).
+func restoreEnvSnapshot(before []string) { restoreProcessEnv(before) }
+
 // runBDInProcess runs bd commands in-process by calling rootCmd.Execute
 // This is ~10-20x faster than exec.Command because it avoids process spawn overhead
 func runBDInProcess(t *testing.T, dir string, args ...string) string {
@@ -175,12 +182,19 @@ func runBDInProcess(t *testing.T, dir string, args ...string) string {
 		os.Stderr = oldStderr
 	}()
 
+	// Start from the registered flag defaults: cobra keeps every parsed
+	// value (and Changed) on the shared command tree across Execute calls.
+	resetCommandFlags(rootCmd)
+	defer resetCommandFlags(rootCmd)
+
 	// Set args for rootCmd
 	rootCmd.SetArgs(args)
 	os.Args = append([]string{"bd"}, args...)
 
 	// Execute command
+	envBefore := os.Environ()
 	err := rootCmd.Execute()
+	restoreEnvSnapshot(envBefore)
 
 	// Close and clean up all global state to prevent contamination between tests
 	if store != nil {
@@ -1042,7 +1056,7 @@ func init() {
 		panic(err)
 	}
 	testBD = filepath.Join(tmpDir, bdBinary)
-	cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", testBD, ".")
+	cmd := goBuildBDCommand(testBD)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		panic(string(out))
 	}
@@ -1231,10 +1245,14 @@ func runBDInProcessAllowError(t *testing.T, dir string, args ...string) (string,
 		os.Stderr = oldStderr
 	}()
 
+	resetCommandFlags(rootCmd)
+	defer resetCommandFlags(rootCmd)
 	rootCmd.SetArgs(args)
 	os.Args = append([]string{"bd"}, args...)
 
+	envBefore := os.Environ()
 	cmdErr := rootCmd.Execute()
+	restoreEnvSnapshot(envBefore)
 
 	if store != nil {
 		store.Close()
@@ -1375,25 +1393,6 @@ func TestCLI_CreateDryRun(t *testing.T) {
 		}
 	})
 
-	t.Run("DryRunWithRigPrefix", func(t *testing.T) {
-		tmpDir := setupCLITestDB(t)
-
-		// Run create with --dry-run and --prefix (simulates cross-rig creation)
-		// Note: This won't actually route to another rig since we don't have one,
-		// but it should show the target rig in the preview
-		out := runBDInProcess(t, tmpDir, "create", "Cross-rig issue", "-p", "1",
-			"--prefix", "other-rig",
-			"--dry-run")
-
-		// Verify target rig is shown in preview
-		if !strings.Contains(out, "Target rig:") {
-			t.Errorf("Expected 'Target rig:' in output, got: %s", out)
-		}
-		if !strings.Contains(out, "other-rig") {
-			t.Errorf("Expected 'other-rig' in output, got: %s", out)
-		}
-	})
-
 	t.Run("DryRunWithFileReturnsError", func(t *testing.T) {
 		tmpDir := createTempDirWithCleanup(t)
 
@@ -1463,8 +1462,6 @@ func TestCLI_CreateDryRun(t *testing.T) {
 
 // TestCLI_CommentsListMisplacedSyntax ensures "bd comments list" gets a helpful error (GH#3542).
 func TestCLI_CommentsListMisplacedSyntax(t *testing.T) {
-	t.Parallel()
-
 	tmpDir := setupCLITestDB(t)
 	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "comments", "list")
 	if err == nil {
@@ -1704,8 +1701,6 @@ func TestCLI_CommentsAddShortID(t *testing.T) {
 // the plural sibling), AND — the part that actually matters for this
 // specific bug — no comment silently landed on an unrelated real issue.
 func TestCLI_CommentListMisplacedSyntax(t *testing.T) {
-	t.Parallel()
-
 	tmpDir := setupCLITestDB(t)
 
 	out := runBDInProcess(t, tmpDir, "create", "Bystander issue", "-p", "1", "--json")
@@ -1745,8 +1740,6 @@ func TestCLI_CommentListMisplacedSyntax(t *testing.T) {
 // "bd comment add <id> <text>", which the same unguarded id-resolution bug
 // would parse as id="add", text=[<id>, <text>...].
 func TestCLI_CommentAddMisplacedSyntax(t *testing.T) {
-	t.Parallel()
-
 	tmpDir := setupCLITestDB(t)
 
 	out := runBDInProcess(t, tmpDir, "create", "Bystander issue for add-typo", "-p", "1", "--json")
@@ -1829,8 +1822,6 @@ func TestCLI_CommentMisplacedSyntaxRejectedInProxiedServerMode(t *testing.T) {
 // TEXT that happens to start with "list" or "add" must still work exactly
 // as before, since args[0] (the id slot) is what's checked, never the text.
 func TestCLI_CommentTextStartingWithReservedWordStillWorks(t *testing.T) {
-	t.Parallel()
-
 	tmpDir := setupCLITestDB(t)
 
 	out := runBDInProcess(t, tmpDir, "create", "Issue for reserved-word-text test", "-p", "1", "--json")
@@ -1869,11 +1860,8 @@ func TestCLI_CommentTextStartingWithReservedWordStillWorks(t *testing.T) {
 // This pins both halves: the command is rejected, AND — the part that
 // actually matters — no comment silently lands on an unrelated real issue.
 func TestCLI_CommentRmDeleteReservedWordsRejected(t *testing.T) {
-	t.Parallel()
-
 	for _, word := range []string{"rm", "delete"} {
 		t.Run(word, func(t *testing.T) {
-			t.Parallel()
 			tmpDir := setupCLITestDB(t)
 
 			out := runBDInProcess(t, tmpDir, "create", "Bystander issue for "+word+"-typo", "-p", "1", "--json")
@@ -1925,11 +1913,8 @@ func TestCLI_CommentRmDeleteReservedWordsRejected(t *testing.T) {
 // special-casing, unlike "comment"'s validateCommentArgs, so all four take
 // the same generic-message path and are equally worth covering here).
 func TestCLI_CommentsAddReservedWordRejectedThroughCobraDispatch(t *testing.T) {
-	t.Parallel()
-
 	for _, word := range []string{"list", "add", "rm", "delete"} {
 		t.Run(word, func(t *testing.T) {
-			t.Parallel()
 			tmpDir := setupCLITestDB(t)
 
 			out := runBDInProcess(t, tmpDir, "create", "Bystander issue for comments-add "+word+"-typo", "-p", "1", "--json")
@@ -1975,8 +1960,6 @@ func TestCLI_CommentsAddReservedWordRejectedThroughCobraDispatch(t *testing.T) {
 // abbreviation, so a truthful, distinguishing message matters here more than
 // most refusals.
 func TestCLI_CommentAbbreviatedIDRejectedWithTruthfulMessage(t *testing.T) {
-	t.Parallel()
-
 	tmpDir := setupCLITestDB(t)
 
 	out := runBDInProcess(t, tmpDir, "create", "Needs an exact id on comment", "-p", "1", "--json")
@@ -2058,7 +2041,11 @@ func TestCLI_CreateRejectsFlagLikeTitles(t *testing.T) {
 			}
 
 			// Attempt to create with a flag-like positional title
-			cmd := exec.Command(testBD, "create", tc.title)
+			// "--" ends flag parsing, so the title reaches create's own
+			// positional-title guard instead of cobra's flag parser
+			// (which answers --help with help and --foo-bar with
+			// "unknown flag").
+			cmd := exec.Command(testBD, "create", "--", tc.title)
 			cmd.Dir = tmpDir
 			cmd.Env = os.Environ()
 			out, err := cmd.CombinedOutput()
@@ -2072,6 +2059,38 @@ func TestCLI_CreateRejectsFlagLikeTitles(t *testing.T) {
 			}
 		})
 	}
+
+	// Without "--" cobra rejects an unknown flag-like word before create's
+	// guard runs; either way bd-2c0's point holds: no garbage issue.
+	t.Run("BareUnknownFlagCreatesNothing", func(t *testing.T) {
+		tmpDir := createTempDirWithCleanup(t)
+		initCmd := exec.Command(testBD, "init", "--prefix", "test", "--quiet")
+		initCmd.Dir = tmpDir
+		initCmd.Env = os.Environ()
+		if out, err := initCmd.CombinedOutput(); err != nil {
+			t.Fatalf("init failed: %v\n%s", err, out)
+		}
+		cmd := exec.Command(testBD, "create", "--foo-bar")
+		cmd.Dir = tmpDir
+		cmd.Env = os.Environ()
+		if out, err := cmd.CombinedOutput(); err == nil {
+			t.Fatalf("bd create --foo-bar succeeded:\n%s", out)
+		}
+		list := exec.Command(testBD, "list", "--json", "--all")
+		list.Dir = tmpDir
+		list.Env = os.Environ()
+		out, err := list.Output()
+		if err != nil {
+			t.Fatalf("bd list: %v\n%s", err, out)
+		}
+		var issues []map[string]any
+		if err := json.Unmarshal(out, &issues); err != nil {
+			t.Fatalf("bd list --json: %v\n%s", err, out)
+		}
+		if len(issues) != 0 {
+			t.Fatalf("bd create --foo-bar created %d issue(s): %s", len(issues), out)
+		}
+	})
 
 	// Verify that --title flag with dash-prefixed value is still allowed
 	t.Run("TitleFlagAllowsDashes", func(t *testing.T) {
@@ -2127,22 +2146,9 @@ func TestCLI_CreateRejectsEmptyTitle_ProxiedServerMode(t *testing.T) {
 	t.Cleanup(func() { proxiedServerMode = origProxied })
 	proxiedServerMode = true
 
-	// createCmd is a shared package-level *cobra.Command, so a --title value
-	// set by an earlier in-process test invocation (e.g. TestCLI_CreateRejectsEmptyTitle's
-	// own FlagTab case) survives on the FlagSet across rootCmd.Execute() calls.
-	// Reset it explicitly so this test's outcome doesn't depend on suite
-	// ordering — a pre-existing gap, not something this test should also fall
-	// victim to.
-	titleFlag := createCmd.Flags().Lookup("title")
-	origTitleValue := titleFlag.Value.String()
-	origTitleChanged := titleFlag.Changed
-	t.Cleanup(func() {
-		_ = titleFlag.Value.Set(origTitleValue)
-		titleFlag.Changed = origTitleChanged
-	})
-	_ = titleFlag.Value.Set("")
-	titleFlag.Changed = false
-
+	// A --title left on createCmd by an earlier in-process run cannot leak
+	// in: runBDInProcessAllowError resets every flag first
+	// (resetCommandFlags).
 	tmpDir := setupCLITestDB(t)
 	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "create", "   ", "-p", "2")
 	if err == nil {

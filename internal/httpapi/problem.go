@@ -306,6 +306,15 @@ const (
 	// `server_project_id`. The recovery is to stop stamping this server with
 	// another workspace's id, never to retry the same request.
 	ReasonProjectMismatch Reason = "project_mismatch"
+	// ReasonWireRevisionUnsupported means the request's Bd-Wire-Revision header
+	// named a revision below this server's ContextResponse.min_client_wire_revision.
+	// Like ReasonProjectMismatch it is a document-level 400 reachable on every
+	// enforced route — including the identity handshake itself — rather than
+	// per-operation behavior, and it is the one refusal that carries
+	// `min_wire_revision`. The recovery is to stop talking to this server with a
+	// client built for a revision it no longer supports, never to retry the same
+	// request.
+	ReasonWireRevisionUnsupported Reason = "wire_revision_unsupported"
 )
 
 // staticDetail is the set of codes whose `detail` is FIXED, whatever the
@@ -732,11 +741,17 @@ var operationCodes = map[string][]Code{
 	// Its 400s come from both the transport and the ROLE. The transport refuses
 	// malformed values, repeated single-valued parameters and a `group_by`
 	// outside the closed set. countGroupOf stops that last case at the edge.
-	// The role has exactly one reachable refusal: BuildCountFilter rejects an
-	// invalid metadata key, from `metadata_field` or `has_metadata_key`.
-	// failReadErr classifies it through invalidFilterParam as a 400 naming the
-	// parameter it came from. An unrecognized status or type is not a refusal;
-	// the role promises it matches nothing and answers 0.
+	// The role has three reachable refusals, all from BuildCountFilter: an
+	// invalid metadata key (`metadata_field` or `has_metadata_key`), an
+	// unrecognized `exclude_status` name, and `parent` set together with
+	// `no_parent` (named `no_parent`). The last two carry ErrValidation; the
+	// metadata-key refusal does not, being a plain error from
+	// ValidateMetadataFilters, which the list and ready builders share.
+	// failReadErr classifies all three through invalidFilterParam by message
+	// prefix, not by sentinel, as a 400 naming the parameter each came from.
+	// An unrecognized `status` or `type` is not a refusal; the role promises
+	// it matches nothing and answers 0. Nor is an unrecognized `exclude_type`,
+	// which excludes nothing.
 	OpCountIssues: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The listing's vocabulary minus the cursor: this operation has none, so
 	// invalid_cursor cannot arise. An unparseable EXPRESSION is an
@@ -1342,6 +1357,37 @@ func ProjectMismatch(got, own string) Result {
 	res := InvalidArgument(ProjectIDHeader, ReasonProjectMismatch,
 		"the "+ProjectIDHeader+" header names project "+strconv.Quote(got)+", which this server does not serve")
 	res.Problem.ServerProjectId = &own
+	return res
+}
+
+// WireRevisionUnsupported builds the 400 for a request whose Bd-Wire-Revision
+// header names a revision below this server's own
+// ContextResponse.min_client_wire_revision. got is the revision the client
+// declared; min is this server's floor, disclosed in the `min_wire_revision`
+// extension member for the same reason ProjectMismatch discloses
+// `server_project_id`: so a client that already knows it declared a revision
+// can tell exactly how far behind it is without re-deriving the number from
+// `bd_version`. current and bdVersion are this server's own
+// ContextResponse.wire_revision and ContextResponse.bd_version, disclosed in
+// the `wire_revision` and `bd_version` extension members so a client logging
+// or reporting the refusal has the server's full version story without a
+// second request to GET /v0/beads/context (review: "include the server's
+// current wire_revision and bd_version in the refusal problem body").
+//
+// This is the ONLY refusal on the surface that sets `min_wire_revision`,
+// `wire_revision` and `bd_version`, and — unlike ProjectMismatch, which is
+// exempt on the identity handshake because that is where a client LEARNS the
+// id it must stamp with — it is raised on GET /v0/beads/context too: a client
+// that already knows the revision it was built for gains nothing from being
+// served a body it has already said it cannot decode, and loses the chance to
+// fail before acting on it.
+func WireRevisionUnsupported(got, min, current int, bdVersion string) Result {
+	res := InvalidArgument(WireRevisionHeader, ReasonWireRevisionUnsupported,
+		"the "+WireRevisionHeader+" header names revision "+strconv.Itoa(got)+
+			", which is below the "+strconv.Itoa(min)+" this server still answers correctly")
+	res.Problem.MinWireRevision = &min
+	res.Problem.WireRevision = &current
+	res.Problem.BdVersion = &bdVersion
 	return res
 }
 

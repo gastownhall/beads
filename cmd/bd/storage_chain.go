@@ -82,6 +82,18 @@ func waitForCommandHooks() {
 	hookRunner.Wait(hookRunner.Timeout())
 }
 
+// wireProxiedUOWProvider composes the proxied-server provider chain:
+//
+//	caller → externaldeps policy → notifying provider → raw provider
+//
+// It is the unit-of-work twin of wireStorageDecorators, extracted from main.go
+// for the same reason: the composition is only unit-testable as a function.
+// The notifying layer is present only when sinks carry a hook runner;
+// uow.NewNotifyingProvider returns the provider unwrapped otherwise.
+func wireProxiedUOWProvider(provider uow.UnitOfWorkProvider, sinks uow.Sinks) uow.UnitOfWorkProvider {
+	return wireExternalDependencyUOWProvider(uow.NewNotifyingProvider(provider, sinks))
+}
+
 func wireExternalDependencyUOWProvider(provider uow.UnitOfWorkProvider) uow.UnitOfWorkProvider {
 	return externaldeps.WrapUOWProvider(
 		provider,

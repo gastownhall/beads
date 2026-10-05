@@ -10,7 +10,7 @@ on:
   # feedback. Release-targeted PRs are exactly the ones where cross-version
   # upgrade breakage is most expensive to discover at tag time.
   pull_request:
-    branches: [ main, 'release/**' ]
+    branches: [ main, 'release/**', 'hotfix/**' ]
     # "Upgrade-relevant code" allowlist (spec-f7.md §2.4): kept identical
     # (modulo each workflow's own file/script entries) across conformance.yml,
     # migration-test.yml and cross-version-smoke.yml, and pinned by

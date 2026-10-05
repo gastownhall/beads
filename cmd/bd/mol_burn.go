@@ -217,7 +217,7 @@ func burnMultipleMolecules(ctx context.Context, moleculeIDs []string, dryRun, fo
 			issueIDs = append(issueIDs, issue.ID)
 		}
 
-		if err := deleteBatch(nil, issueIDs, true, false, false, false, false, "mol burn"); err != nil {
+		if err := deleteBatch(nil, issueIDs, true, false, false, false, false, nil, "mol burn"); err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
 		batchResult.TotalDeleted += len(issueIDs)
@@ -366,7 +366,7 @@ func burnPersistentMolecule(ctx context.Context, resolvedID string, dryRun, forc
 		}
 	}
 
-	if err := deleteBatch(nil, issueIDs, true, false, false, jsonOutput, false, "mol burn"); err != nil {
+	if err := deleteBatch(nil, issueIDs, true, false, false, jsonOutput, false, nil, "mol burn"); err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
 	return nil

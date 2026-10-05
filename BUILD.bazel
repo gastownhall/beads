@@ -81,6 +81,8 @@ filegroup(
         "engdocs/**",
     ]) + [
         "integrations/beads-mcp/PYPI.md",
+        "//cmd/bd:AGENTS.md",
+        "//internal/storage/schema:migrations/README.md",
         "//scripts:README.md",
     ],
     visibility = ["//test/docsync:__pkg__"],
@@ -249,6 +251,15 @@ go_test(
         "//internal/workspacegate",
         "//issueops",
     ],
+)
+
+# //internal/httpclient/encode:encode_test regenerates and compares the shipped
+# divergence ledger doc (TestDivergenceLedgerDocMatchesLedger), so the doc must
+# be readable as data under `bazel test`. docsync_files above globs it too, but
+# that filegroup's visibility is scoped to //test/docsync alone.
+exports_files(
+    ["engdocs/design/http-divergence-ledger.md"],
+    visibility = ["//internal/httpclient/encode:__pkg__"],
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

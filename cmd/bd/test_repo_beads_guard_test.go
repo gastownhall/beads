@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/testutil/credentialcmd"
+	"github.com/steveyegge/beads/internal/workspacegate"
 )
 
 // beforeTestsHook is set by CGO-tagged test files to perform setup before tests run
@@ -81,6 +82,9 @@ func TestMain(m *testing.M) {
 }
 
 func testMainInner(m *testing.M) int {
+	// A bd parent (say, a git hook or `bd` driving `go test`) must not make
+	// this binary's bd subprocesses skip the workspace gate's writer queue.
+	_ = os.Unsetenv(workspacegate.InheritedHoldEnv)
 	origWD, _ := os.Getwd()
 	// Computed once and reused below for the pin, the ceiling-var boundary,
 	// and the guard's own watch setup, so all three agree on exactly which
@@ -243,6 +247,14 @@ func testMainInner(m *testing.M) int {
 
 	// Also reset viper state that was loaded by main.go's init().
 	config.ResetForTesting()
+
+	// Record every flag's registered state before any test executes a
+	// command, so in-process runners can put the tree back between runs
+	// (resetCommandFlags).
+	snapshotCommandFlags(rootCmd)
+	// And undo what each in-process execution leaves in the process env and
+	// the storage-mode globals (installExecuteIsolation).
+	installExecuteIsolation()
 
 	// Enable test mode that forces accessor functions to use legacy globals.
 	// This ensures backward compatibility with tests that manipulate globals directly.

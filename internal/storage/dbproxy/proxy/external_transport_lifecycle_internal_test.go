@@ -380,12 +380,16 @@ func TestExternalProxyOutageAndRestoreReDialsTCPAndUnix(t *testing.T) {
 			// Close the restored listener to create a deterministic outage, then
 			// rebind it in the same test so the proxy must re-dial the endpoint.
 			fixture.Close()
+			// The outage is reported to the client as a MySQL ERR packet in
+			// place of the greeting (upstream_error.go), then the connection
+			// closes; no upstream data is ever relayed.
 			failed := dialInternalProxy(t, running.port)
 			_ = failed.SetReadDeadline(time.Now().Add(2 * time.Second))
-			var b [1]byte
-			if _, err := failed.Read(b[:]); err == nil {
-				t.Fatal("outage client unexpectedly received data")
+			outage, err := io.ReadAll(failed)
+			if err != nil {
+				t.Fatalf("read outage response: %v", err)
 			}
+			requireUpstreamErrorPacket(t, outage)
 			_ = failed.Close()
 			eventuallyInternal(t, 2*time.Second, func() bool {
 				return running.proxy.stats.Snapshot().BackendDialErrors >= 1

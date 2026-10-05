@@ -1801,6 +1801,14 @@ func TestTryIncrementalExport_FallsBackWhenFileMissing(t *testing.T) {
 }
 
 func TestTryIncrementalExport_ThresholdExceededFallsBack(t *testing.T) {
+	// The behavior under test is "more changes than the threshold -> full
+	// export fallback", not the production value: seeding 5001 issues took
+	// minutes (per-issue statements, under -race). Not parallel, so no other
+	// test reads the threshold meanwhile.
+	origThreshold := incrementalExportThreshold
+	incrementalExportThreshold = 20
+	t.Cleanup(func() { incrementalExportThreshold = origThreshold })
+
 	h, ctx := setupIncrementalExportTestWithReadTimeout(t, bulkSeedPoolReadTimeout)
 
 	// Seed one issue so the file exists; baseline commit.

@@ -1739,7 +1739,7 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 			map[string]string{
 				"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)", "BEADS_TEST_DOLT_SERVER": "local", "BEADS_TEST_GIT_IDENTITY": "1",
 				"BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)", "BEADS_TEST_PROXIED_SERVER": "1",
-				"BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1", "GOMAXPROCS": "4",
+				"BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1", "BEADS_TEST_REQUIRE_SOCAT": "1", "GOMAXPROCS": "4",
 			},
 		},
 		"//internal/storage/dolt:dolt_server_conformance_test": {

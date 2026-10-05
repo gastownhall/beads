@@ -299,12 +299,6 @@ var createCmd = &cobra.Command{
 			// Explicit --repo flag overrides auto-routing
 			repoPath = repoOverride
 		} else {
-			// Auto-routing based on user role
-			userRole, err := routing.DetectUserRole(".")
-			if err != nil {
-				debug.Logf("Warning: failed to detect user role: %v\n", err)
-			}
-
 			// Build routing config with backward compatibility for legacy contributor.* keys.
 			// Prefer config.yaml values, but fall back to DB config values set by bd init --contributor.
 			routingMode := getRoutingConfigValue(rootCtx, store, "routing.mode")
@@ -328,6 +322,9 @@ var createCmd = &cobra.Command{
 				ExplicitOverride: repoOverride,
 			}
 
+			// Auto-routing based on user role, detected only once the resolved
+			// config shows routing will read it.
+			userRole := detectUserRoleForRouting(routingConfig)
 			repoPath = routing.DetermineTargetRepo(routingConfig, userRole, ".")
 		}
 
