@@ -110,16 +110,16 @@ func TestAgainstAFirstSliceServerEveryPostBaselineOperationRefusesWithCaseTwoDat
 		t.Fatalf("post-baseline ops on a first-slice token = %v, want exactly [claimIssue]", compat)
 	}
 	// The dimension is pinned so the matrix cannot shrink silently: the first
-	// slice served six operations and the tip surface has forty-one, so
-	// thirty-five of them are things a first-slice server has never heard of. The
+	// slice served six operations and the tip surface has forty-two, so
+	// thirty-six of them are things a first-slice server has never heard of. The
 	// wire wave moved this from twenty-seven to thirty — claimNext, release and
 	// count — wave 2 to thirty-two, adding the dependency-edge count and the
-	// related read, and the mini-sync to thirty-five: the comment write and the
-	// two config writes. Each is an operation a first-slice server never served
-	// and this client does not yet dial, which is exactly the shape the refusal
-	// matrix is about.
-	if len(refused) != 35 {
-		t.Fatalf("the post-baseline set has %d operations a first-slice server never served, want 35", len(refused))
+	// related read, the mini-sync to thirty-five: the comment write and the two
+	// config writes, and the batch read (upstream #7248) to thirty-six. Each is
+	// an operation a first-slice server never served and this client does not
+	// yet dial, which is exactly the shape the refusal matrix is about.
+	if len(refused) != 36 {
+		t.Fatalf("the post-baseline set has %d operations a first-slice server never served, want 36", len(refused))
 	}
 
 	// The compat op forces the handshake yet preflights clean: issues.claim is on

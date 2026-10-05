@@ -274,6 +274,17 @@ var revisionSchemaCoverage = map[string]any{
 	"UpdateIssueResponse":  &apigen.UpdateIssueResponse{},
 }
 
+// revisionSchemaExempt maps a golden.json schema that carries a `revision`
+// member but needs no legacy-integer tolerance to the reason it needs none. A
+// schema is covered or exempt, never both, and an exemption goes stale the same
+// way a coverage entry does.
+var revisionSchemaExempt = map[string]string{
+	"BatchGetIssue": "BatchGetIssuesResult.issues' element. issues:batchGet (upstream #7248) postdates " +
+		"#6053 and types.BatchGetIssue declares Revision a string, so every server that routes it " +
+		"answers the decimal-string shape; a pre-#6053 server never advertises issues.batchGet, so " +
+		"Preflight refuses the operation with a *CapabilityError before any body is decoded",
+}
+
 // TestRevisionBearingResponseCoversEveryWireShapeSchemaWithARevisionMember is
 // review follow-up HIGH-a's exhaustiveness guard. It derives the set of
 // schemas a legacy server's bare-integer `revision` can appear on from the
@@ -282,9 +293,10 @@ var revisionSchemaCoverage = map[string]any{
 // schema names a second time — the grep this file's first version was
 // written against missed apigen.IssueDetails precisely because it is a type
 // alias for types.IssueDetails, invisible to a grep for "type \w+ struct.*
-// revision". A schema that gains a `revision` member later and is not added
-// to revisionSchemaCoverage now fails HERE, rather than only showing up as a
-// silent decode failure against a real legacy server.
+// revision". A schema that gains a `revision` member later and is neither
+// added to revisionSchemaCoverage nor exempted in revisionSchemaExempt now
+// fails HERE, rather than only showing up as a silent decode failure against a
+// real legacy server.
 func TestRevisionBearingResponseCoversEveryWireShapeSchemaWithARevisionMember(t *testing.T) {
 	path := filepath.Join("..", "..", "httpapi", "wireshape", "testdata", "golden.json")
 	data, err := os.ReadFile(path)
@@ -308,8 +320,14 @@ func TestRevisionBearingResponseCoversEveryWireShapeSchemaWithARevisionMember(t 
 		}
 		seen[e.Schema] = true
 		out, covered := revisionSchemaCoverage[e.Schema]
+		if _, exempt := revisionSchemaExempt[e.Schema]; exempt {
+			if covered {
+				t.Errorf("golden.json schema %q is in both revisionSchemaCoverage and revisionSchemaExempt; keep exactly one", e.Schema)
+			}
+			continue
+		}
 		if !covered {
-			t.Errorf("golden.json schema %q carries a `revision` member with no entry in revisionSchemaCoverage; add one, and extend revisionBearingResponse (or document why it needs no legacy-integer tolerance)", e.Schema)
+			t.Errorf("golden.json schema %q carries a `revision` member with no entry in revisionSchemaCoverage; add one, and extend revisionBearingResponse (or exempt it in revisionSchemaExempt with the reason it needs no legacy-integer tolerance)", e.Schema)
 			continue
 		}
 		if !revisionBearingResponse(out) {
@@ -322,6 +340,14 @@ func TestRevisionBearingResponseCoversEveryWireShapeSchemaWithARevisionMember(t 
 	for schema := range revisionSchemaCoverage {
 		if !seen[schema] {
 			t.Errorf("revisionSchemaCoverage lists %q, but golden.json has no entry for it with member \"revision\" anymore; remove the stale entry", schema)
+		}
+	}
+	for schema, reason := range revisionSchemaExempt {
+		if !seen[schema] {
+			t.Errorf("revisionSchemaExempt lists %q, but golden.json has no entry for it with member \"revision\" anymore; remove the stale exemption", schema)
+		}
+		if strings.TrimSpace(reason) == "" {
+			t.Errorf("revisionSchemaExempt lists %q with no reason; say why it needs no legacy-integer tolerance", schema)
 		}
 	}
 }

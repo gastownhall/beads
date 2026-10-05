@@ -353,6 +353,7 @@
 15 8 TestRemoteVerbPlainRemoteWithoutAuthPresentsNone
 15 8 TestTransactionCleanupAfterSQLCommitIsIndeterminate
 
+15 9 TestBatchGetterContract
 15 9 TestCommenterContract
 15 9 TestEmbeddedBatchCloserBackendFailureReturnsNoOutcomes
 15 9 TestEmbeddedClaimerReclaimsItsOwnInProgressIssueWithoutWriting

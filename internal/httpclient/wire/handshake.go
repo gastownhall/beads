@@ -98,6 +98,10 @@ var opCapability = map[string]string{
 	OpRememberMemory:          "memories.remember",
 	OpGetMemory:               "memories.get",
 	OpForgetMemory:            "memories.forget",
+	// The batch read (upstream #7248) is CLASSIFIED, not wired, for the reason
+	// the block above states: the server publishes it ahead of the accessor
+	// that dials it, and the set-equality gate needs its token here first.
+	OpBatchGetIssues: "issues.batchGet",
 }
 
 // CapProjectEnforce is the behavior capability the server advertises to announce
