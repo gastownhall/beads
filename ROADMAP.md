@@ -19,13 +19,51 @@ and the live state of each item is its tracking issue on GitHub.
 - **Updates.** The owner rewrites this page at each minor release; the date
   above says when it was last reviewed.
 
-## Priority areas — to be filled in by @julianknutsen before merge
+## Priority areas for 1.4
 
-Each area uses this structure:
+### Versioned beads and history
 
-### Area name
+- **Goal:** every change to a bead is recorded as a version. Users can read
+  a bead's history and past versions, and writers can use `expectedRevision`
+  compare-and-swap to avoid lost updates. Everything ships behind a flag, off
+  by default, until the conformance suite and a production-corpus soak say
+  otherwise.
+- **This period:** all six phases, enabled from the CLI by the end of the
+  period: conformance suite
+  ([#6133](https://github.com/gastownhall/beads/issues/6133)), additive
+  schema ([#6134](https://github.com/gastownhall/beads/issues/6134)),
+  dual-write history behind a flag
+  ([#6135](https://github.com/gastownhall/beads/issues/6135)), versioned
+  reads and CAS ([#6136](https://github.com/gastownhall/beads/issues/6136)),
+  production-corpus validation
+  ([#6137](https://github.com/gastownhall/beads/issues/6137)), and CLI
+  surfacing and enablement
+  ([#6138](https://github.com/gastownhall/beads/issues/6138)).
+- **Tracking issue:** [#6132](https://github.com/gastownhall/beads/issues/6132);
+  design discussion stays on
+  [#5898](https://github.com/gastownhall/beads/issues/5898).
 
-- **Goal:** the outcome, in one or two sentences.
-- **This period:** the concrete deliverables in flight, each linking its issue.
-- **Tracking issue:** the parent issue whose sub-issues carry the work.
-- **Out of scope:** what this area deliberately does not cover.
+### Beads Graph Preview 2
+
+- **Goal:** ship Beads Graph Preview 2, the next public checkpoint for the
+  generic Bead-and-Link graph model: a coherent daily-use CLI journey in
+  graph mode that behaves like ordinary `bd`, backed by a complete,
+  reviewable CLI specification.
+- **This period:** the reviewed graph CLI specification, a complete
+  daily-use Issue journey proven through the installed CLI on embedded and
+  shared-server Dolt, and editing around that Issue (labels, notes, Memory
+  and Link edits).
+- **Tracking issue:** [#7170](https://github.com/gastownhall/beads/issues/7170)
+
+### Contributor onboarding
+
+- **Goal:** a new contributor, human or agent, finds the rules for the code
+  they are changing next to that code, understands its intent and
+  invariants, and lands a change through the issue-first flow.
+- **This period:** contributor-only agent instructions and issue-first
+  intake ([#7223](https://github.com/gastownhall/beads/pull/7223));
+  per-package `AGENTS.md` files for the storage packages, naming their
+  guard tests and lint rules; a package-doc linter and package docs for the
+  packages that have none; and a curated set of `help wanted` starter
+  issues.
+- **Tracking issue:** [#7228](https://github.com/gastownhall/beads/issues/7228)
