@@ -336,7 +336,7 @@ func (l *httpLifecycle) Update(ctx context.Context, req issueops.UpdateRequest) 
 		return issueops.UpdateResult{}, invalid("update names no field to write")
 	}
 
-	res, err := l.wire.UpdateIssue(ctx, req.IssueID, req.Actor, patch, updateGuards(req))
+	res, err := l.wire.UpdateIssue(ctx, req.IssueID, req.Actor, patch, updateGuards(req), req.ForceNotesOverwrite)
 	if err != nil {
 		return issueops.UpdateResult{}, err
 	}
@@ -623,6 +623,12 @@ func isWispIssue(issue *types.Issue) bool {
 // because unlike these members a claim is sometimes servable (claimOnlyUpdate)
 // rather than always refused.
 //
+// ForceNotesOverwrite is NOT on this switch: updateIssue publishes
+// force_notes_overwrite (internal/httpapi/apigen's UpdateIssueRequest), the
+// server reads it (internal/httpapi/update.go), and Update sends it alongside
+// the patch. The other two force flags stay refused — ForceAssigneeTransfer
+// and ForceClosePolicy's rows are untouched by this fix and retire separately.
+//
 // The order is the ledger's, and each refusal cites its row rather than a
 // sentence, so the taxonomy renders the same reason the design recorded.
 func refuseUnwirableUpdateMembers(req issueops.UpdateRequest) error {
@@ -631,8 +637,6 @@ func refuseUnwirableUpdateMembers(req issueops.UpdateRequest) error {
 		return refuse(encode.OpUpdateIssue, "W-UpdateRequest.ForceAssigneeTransfer")
 	case req.ForceClosePolicy:
 		return refuse(encode.OpUpdateIssue, "W-UpdateRequest.ForceClosePolicy")
-	case req.ForceNotesOverwrite:
-		return refuse(encode.OpUpdateIssue, "W-UpdateRequest.ForceNotesOverwrite")
 	case req.IssuePlaneOnly:
 		return refuse(encode.OpUpdateIssue, "W-UpdateRequest.IssuePlaneOnly")
 	case req.Provenance != "":

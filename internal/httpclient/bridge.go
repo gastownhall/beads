@@ -183,5 +183,15 @@ func (s *Store) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
 	if len(issue.Labels) == 0 && len(details.Labels) > 0 {
 		issue.Labels = append([]string(nil), details.Labels...)
 	}
+	// Issue.RowVersion is json:"-", so the decode above left it at 0 and
+	// Revision — getIssue's only wire spelling of the token — carries the real
+	// value. A molecule loader (or any other caller of this read) that then
+	// guards a write off issue.RowVersion must see the row's actual token, not
+	// every row's as though none had ever been written.
+	version, err := parseRevision("getIssue", details.Revision)
+	if err != nil {
+		return nil, err
+	}
+	issue.RowVersion = version
 	return &issue, nil
 }

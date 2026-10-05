@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -371,6 +372,64 @@ func TestServedReaderGetOptionalRowListsAreOffByDefault(t *testing.T) {
 
 func TestServedReaderGetDetailShapeMatchesTheSeededIssue(t *testing.T) {
 	conformance.RunReaderGetDetailShapeMatchesTheSeededIssue(t, t.Context(), servedReaderFixture(t, "rdr"))
+}
+
+// TestServedReaderGetPopulatesRowVersionForAGuardedWrite is HIGH 5's pin.
+//
+// types.Issue.RowVersion is json:"-" (internal/types/types.go), so a bare
+// decode of getIssue's response body leaves it at zero; the wire's only
+// spelling of the token is the detail view's sibling `revision` string, which
+// Reader.Get must stitch back on. A read alone cannot tell a stitched zero
+// from a real one that happens to equal it on a fresh table, so this proves it
+// the way a caller actually consumes RowVersion: by GUARDING A WRITE with
+// whatever Get just answered, over the same wire, and requiring the guard to
+// be real rather than decorative.
+//
+// The second Update reuses the SAME (now-stale) token. If Get had answered 0
+// — the bug this pins against — the first Update's own post-write token would
+// also have nothing to do with it, and there would be no way for this case to
+// tell "the guard matched" from "the guard was never checked". Requiring the
+// REUSE to refuse is what rules that out: it only refuses if the first write
+// really did move the row past the exact version Get reported.
+func TestServedReaderGetPopulatesRowVersionForAGuardedWrite(t *testing.T) {
+	env := newServedEnv(t, "rdrv")
+	reader, err := env.subject.IssueReader()
+	if err != nil {
+		t.Fatalf("IssueReader(): %v", err)
+	}
+	lifecycle, err := env.subject.IssueLifecycle()
+	if err != nil {
+		t.Fatalf("IssueLifecycle(): %v", err)
+	}
+
+	issue := &types.Issue{Title: "row version round trip", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := env.createIssue(t.Context(), issue, "seed"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	details, err := reader.Get(t.Context(), issueops.GetRequest{ID: issue.ID})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if details.RowVersion == 0 {
+		t.Fatalf("Get answered RowVersion 0 (Revision %q); want the row's real token", details.Revision)
+	}
+	staleVersion := details.RowVersion
+
+	if _, err := lifecycle.Update(t.Context(), issueops.UpdateRequest{
+		Actor: "writer", IssueID: issue.ID, ExpectedVersion: &staleVersion,
+		Patch: issueops.IssuePatch{Title: set("first guarded write")},
+	}); err != nil {
+		t.Fatalf("Update guarded by the token Get answered: %v", err)
+	}
+
+	_, err = lifecycle.Update(t.Context(), issueops.UpdateRequest{
+		Actor: "writer", IssueID: issue.ID, ExpectedVersion: &staleVersion,
+		Patch: issueops.IssuePatch{Title: set("second guarded write, same stale token")},
+	})
+	if err == nil {
+		t.Fatal("Update reused Get's token after a write moved the row past it; want a version-guard refusal")
+	}
 }
 
 func TestServedReaderDoesNotMutateTheCallerRequest(t *testing.T) {

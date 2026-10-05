@@ -228,6 +228,14 @@ type updateBody struct {
 	Actor string         `json:"actor"`
 	Patch map[string]any `json:"patch"`
 	UpdateGuards
+	// ForceNotesOverwrite bypasses ONLY the refusal on a patch.notes that would
+	// replace existing non-empty notes with different non-empty content.
+	// UpdateIssueRequest publishes it (internal/httpapi/apigen's generated
+	// type), and it is NOT a guard — it carries no comparison value, unlike
+	// every member UpdateGuards holds — so it travels as its own member rather
+	// than joining that struct. Sent only when true, setItemBool's convention:
+	// an explicit false is the default said twice.
+	ForceNotesOverwrite *bool `json:"force_notes_overwrite,omitempty"`
 }
 
 // UpdateIssue patches one issue. It is the only PATCH on this surface: the
@@ -237,13 +245,20 @@ type updateBody struct {
 // The guards ride BESIDE the patch, at the body's top level, which is where the
 // server reads them: one smuggled into the patch document would be an unknown
 // member of `patch` and a 400.
-func (c *Client) UpdateIssue(ctx context.Context, id, actor string, patch map[string]any, guards UpdateGuards) (*apigen.UpdateIssueResponse, error) {
+//
+// forceNotesOverwrite rides the same way, for updateBody.ForceNotesOverwrite's
+// reason: it is sent only when true.
+func (c *Client) UpdateIssue(ctx context.Context, id, actor string, patch map[string]any, guards UpdateGuards, forceNotesOverwrite bool) (*apigen.UpdateIssueResponse, error) {
 	path, err := IssuePath(id)
 	if err != nil {
 		return nil, err
 	}
 	var out apigen.UpdateIssueResponse
 	body := updateBody{Actor: actor, Patch: patch, UpdateGuards: guards}
+	if forceNotesOverwrite {
+		v := true
+		body.ForceNotesOverwrite = &v
+	}
 	r := Request{Op: OpUpdateIssue, Method: http.MethodPatch, Path: path, Body: body, IssueID: id}
 	if err := c.dispatch(ctx, r, &out); err != nil {
 		return nil, err

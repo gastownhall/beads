@@ -63,7 +63,12 @@ func (r *recordingWire) Do(_ context.Context, req wire.Request, out any) error {
 	case *apigen.Setting:
 		*body = apigen.Setting{}
 	case *types.IssueDetails:
-		*body = types.IssueDetails{}
+		// Revision is required on every getIssue response
+		// (openapi.v0.yaml's IssueDetails schema), and Reader.Get now parses it
+		// back onto RowVersion (HIGH 5), so a canned response answering "" would
+		// be a server this client cannot follow, not the empty detail view this
+		// double meant to stand in for.
+		*body = types.IssueDetails{Revision: "1"}
 	}
 	return nil
 }

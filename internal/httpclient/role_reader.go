@@ -82,6 +82,17 @@ func (r httpReader) Get(ctx context.Context, req issueops.GetRequest) (*issueops
 	}, &details); err != nil {
 		return nil, err
 	}
+	// Issue.RowVersion is json:"-"; the wire's only spelling of the token is
+	// Revision (the decimal string getIssue publishes), so a bare decode
+	// leaves RowVersion at its zero value on every read — a guarded write
+	// built off this result would carry a token the row never held, same as
+	// bd-enterprise's (*Store).GetIssue bridge below and the write
+	// responses parseRevision already stitches this way.
+	version, err := parseRevision("getIssue", details.Revision)
+	if err != nil {
+		return nil, err
+	}
+	details.Issue.RowVersion = version
 	return &details, nil
 }
 

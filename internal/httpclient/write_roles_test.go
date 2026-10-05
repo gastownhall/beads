@@ -81,21 +81,22 @@ type stubWire struct {
 	lastClaimNextParams url.Values
 	lastClaimNextBody   apigen.ClaimNextRequest
 
-	lastPatch       map[string]any
-	lastGuards      wire.UpdateGuards
-	lastClose       apigen.CloseIssueRequest
-	lastReopen      apigen.ReopenIssueRequest
-	lastBatchClose  apigen.BatchCloseRequest
-	lastAdd         apigen.AddDependenciesRequest
-	lastSearch      string
-	lastSweep       apigen.SweepRequest
-	lastDelete      apigen.DeleteIssuesRequest
-	lastBatchCreate apigen.BatchCreateRequest
-	lastCreate      apigen.CreateIssueRequest
-	lastCAS         apigen.CompareAndSetMetadataRequest
-	lastApply       wire.ApplyBatchRequest
-	lastRelease     apigen.ReleaseIssueRequest
-	lastComment     apigen.AddCommentRequest
+	lastPatch               map[string]any
+	lastGuards              wire.UpdateGuards
+	lastForceNotesOverwrite bool
+	lastClose               apigen.CloseIssueRequest
+	lastReopen              apigen.ReopenIssueRequest
+	lastBatchClose          apigen.BatchCloseRequest
+	lastAdd                 apigen.AddDependenciesRequest
+	lastSearch              string
+	lastSweep               apigen.SweepRequest
+	lastDelete              apigen.DeleteIssuesRequest
+	lastBatchCreate         apigen.BatchCreateRequest
+	lastCreate              apigen.CreateIssueRequest
+	lastCAS                 apigen.CompareAndSetMetadataRequest
+	lastApply               wire.ApplyBatchRequest
+	lastRelease             apigen.ReleaseIssueRequest
+	lastComment             apigen.AddCommentRequest
 }
 
 func (s *stubWire) ServerContext(context.Context) (*apigen.ContextResponse, error) {
@@ -181,9 +182,10 @@ func (s *stubWire) ReopenIssue(_ context.Context, id string, body apigen.ReopenI
 	return s.reopen, nil
 }
 
-func (s *stubWire) UpdateIssue(_ context.Context, id, _ string, patch map[string]any, guards wire.UpdateGuards) (*apigen.UpdateIssueResponse, error) {
+func (s *stubWire) UpdateIssue(_ context.Context, id, _ string, patch map[string]any, guards wire.UpdateGuards, forceNotesOverwrite bool) (*apigen.UpdateIssueResponse, error) {
 	s.lastPatch = patch
 	s.lastGuards = guards
+	s.lastForceNotesOverwrite = forceNotesOverwrite
 	if err := s.record("updateIssue:" + id); err != nil {
 		return nil, err
 	}
@@ -398,7 +400,6 @@ func TestUpdateRefusesEveryMemberTheWireExcludes(t *testing.T) {
 		"Claim":                 {Claim: true},
 		"ForceAssigneeTransfer": {ForceAssigneeTransfer: true},
 		"ForceClosePolicy":      {ForceClosePolicy: true},
-		"ForceNotesOverwrite":   {ForceNotesOverwrite: true},
 		"IssuePlaneOnly":        {IssuePlaneOnly: true},
 		"Provenance":            {Provenance: "bd: update"},
 
@@ -415,6 +416,13 @@ func TestUpdateRefusesEveryMemberTheWireExcludes(t *testing.T) {
 		// positive assertion — TestUpdateSendsTheWholeOrderedLabelEdit — because
 		// the failure a retired refusal invites is a member that stopped being
 		// refused and never started being sent.
+		//
+		// ForceNotesOverwrite WAS here too, and left for the same reason
+		// (W-UpdateRequest.ForceNotesOverwrite is RETIRED): the single-patch
+		// updateIssue body now sends `force_notes_overwrite` exactly as
+		// issues:batchApply's update item already did. Its positive assertion is
+		// TestUpdateSendsForceNotesOverwriteOnlyWhenRequested, directly below
+		// TestUpdateSendsTheGuardTrio.
 	}
 
 	for name, req := range cases {
@@ -826,6 +834,40 @@ func TestUpdateSendsTheGuardTrio(t *testing.T) {
 				if _, in := w.lastPatch[guard]; in {
 					t.Errorf("the patch document carries %q; the guards are top-level members of the body", guard)
 				}
+			}
+		})
+	}
+}
+
+// TestUpdateSendsForceNotesOverwriteOnlyWhenRequested is the positive half of
+// W-UpdateRequest.ForceNotesOverwrite's retirement: the member is now a wire
+// argument of UpdateIssue rather than a document field, so the role must send
+// `true` when the request asks for the bypass and must send nothing — not
+// `false` — when it does not, matching setItemBool's "only true is written"
+// rule everywhere else this flag travels.
+func TestUpdateSendsForceNotesOverwriteOnlyWhenRequested(t *testing.T) {
+	patch := issueops.IssuePatch{Notes: set("replacement notes")}
+	for _, tc := range []struct {
+		name string
+		req  issueops.UpdateRequest
+		want bool
+	}{
+		{name: "absent leaves the fence enforced", req: issueops.UpdateRequest{}, want: false},
+		{name: "requested bypasses the fence", req: issueops.UpdateRequest{ForceNotesOverwrite: true}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &stubWire{update: &apigen.UpdateIssueResponse{Revision: "0"}}
+			lifecycle, err := stubStore(t, w).IssueLifecycle()
+			if err != nil {
+				t.Fatalf("IssueLifecycle(): %v", err)
+			}
+			req := tc.req
+			req.Actor, req.IssueID, req.Patch = "writer", "bd-1", patch
+			if _, err := lifecycle.Update(t.Context(), req); err != nil {
+				t.Fatalf("Update: %v", err)
+			}
+			if w.lastForceNotesOverwrite != tc.want {
+				t.Errorf("force_notes_overwrite sent as %v, want %v", w.lastForceNotesOverwrite, tc.want)
 			}
 		})
 	}

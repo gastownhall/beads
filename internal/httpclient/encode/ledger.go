@@ -584,20 +584,11 @@ func writeSideRows() []Row {
 			PinnedBy: pinned,
 		},
 		{
-			// S3 reconciliation (gc native-program, 2026-10): the third member of
-			// the same trio, newer to this client's awareness than the other two
-			// — apigen.UpdateIssueRequest.ForceNotesOverwrite has no bd-enterprise
-			// counterpart to have carried a decision about. It is refused rather
-			// than sent for ForceAssigneeTransfer and ForceClosePolicy's own
-			// reason: the single-patch updateIssue body is not this client's wave
-			// to wire yet (batch-apply's ApplyUpdateItem sends it — see
-			// batchapplier.go — because that operation's three force flags were
-			// already carried member for member before this one was found).
-			ID: "W-UpdateRequest.ForceNotesOverwrite", Kind: KindRefuse, Flag: "--force",
+			ID: "W-UpdateRequest.ForceNotesOverwrite", Kind: KindRetired,
 			Type: tyUpdateRequest, Field: "ForceNotesOverwrite",
-			What: "bypassing the notes-overwrite fence on a single update refuses",
-			Why: "updateIssue publishes `force_notes_overwrite` and this client does not send it on the single-patch path, so the fence stays enforced here: a Patch.Notes that would replace existing non-empty notes with different non-empty content refuses rather than silently overwriting. " +
-				"The same flag IS carried on issues:batchApply's update item (W table entry applyBatch/item/update), alongside the other two force members that wave already sends — wiring this path too is tracked as a follow-up to that wave rather than invented here",
+			What: "bypassing the notes-overwrite fence on a single update used to refuse",
+			Why: "RETIRED by the S3 reconciliation that found it (gc native-program, 2026-10). It was discovered refused on the single-patch updateIssue path while the identical flag was already carried on issues:batchApply's update item (W table entry applyBatch/item/update) — the same trio member, wired on one shape and not the other with no decision on record for the gap. " +
+				"Flipping it was a port, not a decision, same as W-UpdateRequest.ExpectedVersion's: the body now sends `force_notes_overwrite` as a pointer set true only on request, so a Patch.Notes that would replace existing non-empty notes with different non-empty content is bypassable here exactly as it already was on the batch path",
 			SpecRow:  updateSpec,
 			PinnedBy: pinnedByS3Conformance,
 		},
@@ -786,7 +777,7 @@ func writeSideRows() []Row {
 			What: "a create whose dependency or waits-for target names no row refuses as issueops.ErrValidation ALONE — not as ErrValidation wrapping ErrNotFound — and does not name the target",
 			Why: "the wire answers a dangling target with a 400 invalid_argument naming `dependencies` and a FIXED detail (internal/httpapi's failCreateIssue), which deliberately does not quote the role's own message: that message arrives as a driver error naming tables and constraints, and 4xx details on this surface reflect the caller's own input back rather than server internals. " +
 				"The refusal still fails the whole request and creates NOTHING — the promise the row is about — and only the second sentinel and the target's name are lost. It is batchCreateIssues' L-batchcreate-notfound on the single create, and it retires the same way: an upstream code that distinguishes the absent-target refusal and carries the target. " +
-				"A missing --parent target already retired out of this row: failCreateIssue's errors.As(&parentNotFound) arm answers it with a distinguishing 404 not_found that names the target, and the client maps that to issueops.ErrNotFound (see TestServedCreateRefusesAnAbsentParentAsNotFound) — the row now covers only dependency and waits-for targets",
+				"A missing --parent target stays on this row beside dependency and waits-for targets, not ahead of them: OpCreateIssue's problem-code table documents NO 404 for ANY edge target on purpose (internal/httpapi/problem.go) — there is no id in the path for parent_id to have missed any more than dependencies[i].target_id or waits_for.spawner_id has, so carving a parent-only not_found out of this row would contradict that design rather than follow it. A prior draft of this row and its pin (TestServedCreateRefusesAnAbsentParentAsNotFound) described that carve-out as already shipped; it never was, and the S3 review that found the drift retired the draft rather than the design",
 			SpecRow:  "D8 row 16",
 			PinnedBy: pinnedByS3Conformance,
 		},

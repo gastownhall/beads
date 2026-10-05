@@ -243,8 +243,16 @@ func writeShapes() []writeShape {
 				"ExpectedVersion":  member("expected_version"),
 				"ExpectedStatus":   member("expected_status"),
 				"ExpectedAssignee": member("expected_assignee"),
+				// The third member of the FORCE trio, now sent (S3
+				// reconciliation, gc native-program, 2026-10): the single-patch
+				// updateIssue body carries `force_notes_overwrite` exactly as
+				// issues:batchApply's update item already did, so the fence a
+				// caller means to bypass is bypassable here too.
+				// W-UpdateRequest.ForceNotesOverwrite is RETIRED, not deleted —
+				// it records that this member was found unwired and then wired.
+				"ForceNotesOverwrite": member("force_notes_overwrite"),
 			},
-			// The two FORCE members of the same upstream change are still
+			// The other two FORCE members of the same upstream change are still
 			// refused, and client wave ga-7i6by changed what that refusal
 			// STANDS ON rather than retiring it: the patch members each bypass
 			// a fence around — `assignee` and `status` — are now sent, so what
@@ -252,15 +260,9 @@ func writeShapes() []writeShape {
 			// See W-UpdateRequest.ForceAssigneeTransfer for the residue and the
 			// bead that owns it.
 			//
-			// `force_notes_overwrite` (S3 reconciliation, gc native-program,
-			// 2026-10) is the third member of that same trio, refused for the
-			// same reason (W-UpdateRequest.ForceNotesOverwrite) — newer to this
-			// client's awareness than the other two, with no decision on record
-			// before this reconciliation found it unwired.
-			//
-			// `claim` is pending for a different reason than the three force
-			// members: it is not a bypass this client declines to carry, but a
-			// whole atomic shape (claim folded into one transaction with a
+			// `claim` is pending for a different reason than the two remaining
+			// force members: it is not a bypass this client declines to carry,
+			// but a whole atomic shape (claim folded into one transaction with a
 			// patch) that W-UpdateRequest.Claim still refuses outright, tracked
 			// against upstream gastownhall/beads#6890. A claim-ALONE request
 			// does not reach this body at all — see claimOnlyUpdate — which is
@@ -269,7 +271,6 @@ func writeShapes() []writeShape {
 			pending: map[string]string{
 				"force_assignee_transfer": "ForceAssigneeTransfer",
 				"force_close_policy":      "ForceClosePolicy",
-				"force_notes_overwrite":   "ForceNotesOverwrite",
 				"claim":                   "Claim",
 			},
 		},

@@ -13,8 +13,31 @@ import (
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/encode"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
+	storageops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/issueops"
 )
+
+// readySortPolicies names the only three sort policies a ClaimNext filter
+// accepts, mirroring internal/workapi.BuildReadyFilter's vocabulary. It is
+// redeclared here rather than imported for the reason list_walk.go, order.go
+// and releaser.go each give: depguard denies internal/workapi to this package.
+//
+// A value outside this list is a deterministic request-validation failure —
+// RunBatchCloserClaimFilterValueFailureIsARequestValidationFailure — and that
+// holds REGARDLESS of whether the v0 wire can carry a ClaimNext at all: a bad
+// sort policy is caught before the capability question is even asked, the same
+// way an empty actor or a blank item id is.
+var readySortPolicies = []string{"hybrid", "oldest", "priority"}
+
+// validateReadySortPolicy refuses a ClaimNext filter's sort policy if it names
+// anything outside readySortPolicies. An empty policy is the caller leaving it
+// to the default and is always legal here.
+func validateReadySortPolicy(policy string) error {
+	if policy == "" || slices.Contains(readySortPolicies, policy) {
+		return nil
+	}
+	return invalid("invalid sort policy '%s'. Valid values: hybrid, priority, oldest", policy)
+}
 
 // maxWireBatchCloseItems is the wire's cap on one batch close: maxBatchCloseItems
 // in internal/httpapi/batch_close.go, redeclared here because importing the
@@ -65,11 +88,25 @@ func (b *httpBatchCloser) CloseBatch(ctx context.Context, req issueops.CloseBatc
 			return issueops.CloseBatchResult{}, invalid("items[%d].issue_id is required", i)
 		}
 	}
-	// ClaimNext refuses unconditionally: OSS's apigen.BatchCloseRequest and
-	// BatchCloseResponse publish no claim_next/claimed_next member at all, so
-	// there is no shape — valid or not — for this field to encode into. See
-	// ledger row W-CloseBatchRequest.ClaimNext.
+	// ClaimNext's OWN request rules run before the capability question is asked,
+	// the same ordering ReadyClaimer.ClaimNext uses: a filter that is invalid on
+	// every backend (a limit, an offset, a brief projection, or an unknown sort
+	// policy) is ErrValidation here, not a refusal of a capability the wire
+	// might have had. RunBatchCloserClaimFilterValueFailureIsARequestValidationFailure
+	// pins this — the item is real and closeable, so a backend that ran the
+	// batch before discovering the bad filter would still have to undo it.
 	if req.ClaimNext != nil {
+		if err := storageops.ValidateClaimNextRequest(issueops.ClaimNextRequest{Actor: req.Actor, Filter: *req.ClaimNext}); err != nil {
+			return issueops.CloseBatchResult{}, err
+		}
+		if err := validateReadySortPolicy(req.ClaimNext.Sort); err != nil {
+			return issueops.CloseBatchResult{}, err
+		}
+		// Past its own validation, ClaimNext still refuses unconditionally: OSS's
+		// apigen.BatchCloseRequest and BatchCloseResponse publish no
+		// claim_next/claimed_next member at all, so there is no shape — valid or
+		// not — for this field to encode into. See ledger row
+		// W-CloseBatchRequest.ClaimNext.
 		return issueops.CloseBatchResult{}, refuse(encode.OpBatchCloseIssues, "W-CloseBatchRequest.ClaimNext")
 	}
 	// The wire's item cap, enforced before the dial and NEVER by chunking: a

@@ -13,12 +13,16 @@ import (
 
 // The BatchCloser contract against the served surface.
 //
-// All twenty cases run: the client sends the whole CloseBatchRequest on one
-// issues:batchClose call, and the reference store answers with the per-item
-// outcomes and the atomic ClaimNext the operation carries. There is nothing left
-// to park — the multi-item batch and the transactional ClaimNext that once had
-// no wire expression now have one, so the same contract the direct and embedded
-// stores satisfy holds byte-shape for the http client too.
+// The client sends the whole CloseBatchRequest on one issues:batchClose call,
+// and the reference store answers with the per-item outcomes. The transactional
+// ClaimNext the storage-level contract composes onto CloseBatch has NO v0 wire
+// expression: BatchCloseRequest/BatchCloseResponse publish no
+// claim_next/claimed_next member, so the client refuses any non-nil
+// req.ClaimNext (D8 refuse-not-drop) rather than silently dropping the claim.
+// The seven cases that exercise a real ClaimNext are parked with
+// skipKnownDivergence citing W-CloseBatchRequest.ClaimNext; everything else —
+// including the two cases that merely validate a ClaimNext filter's shape
+// before any capability question is reached — runs for real.
 //
 // Seeding still never goes through the client: every fixture takes its seed and
 // post-state hooks from the reference store the server serves, and binds only the
@@ -77,6 +81,11 @@ func TestServedBatchCloserIdempotentRecloseIsAPerItemSuccess(t *testing.T) {
 }
 
 func TestServedBatchCloserAllIdempotentBatchLandsNothing(t *testing.T) {
+	skipKnownDivergence(t, "W-CloseBatchRequest.ClaimNext", parkBead,
+		"the case drives a real ClaimNext through CloseBatch; the v0 wire's "+
+			"BatchCloseRequest/BatchCloseResponse publish no claim_next/claimed_next "+
+			"member, so the client refuses it (D8 refuse-not-drop) rather than silently "+
+			"dropping the claim")
 	conformance.RunBatchCloserAllIdempotentBatchLandsNothing(t, t.Context(), newServedBatchCloserFixture(t, "hbcallid"))
 }
 
@@ -85,6 +94,10 @@ func TestServedBatchCloserDuplicateItemRecloseAtItsOwnIndex(t *testing.T) {
 }
 
 func TestServedBatchCloserWispItemClosesAndEarnsTheClaim(t *testing.T) {
+	skipKnownDivergence(t, "W-CloseBatchRequest.ClaimNext", parkBead,
+		"the case asserts the wisp close earns a real ClaimNext; the v0 wire has no "+
+			"claim_next/claimed_next member on BatchClose, so the client refuses the "+
+			"request rather than earning a claim it cannot report back")
 	conformance.RunBatchCloserWispItemClosesAndEarnsTheClaim(t, t.Context(), newServedBatchCloserFixture(t, "hbcwisp"))
 }
 
@@ -97,18 +110,33 @@ func TestServedBatchCloserForceBypassesOnlyClosePolicy(t *testing.T) {
 }
 
 func TestServedBatchCloserClaimNextHydratesWhenSomethingClosed(t *testing.T) {
+	skipKnownDivergence(t, "W-CloseBatchRequest.ClaimNext", parkBead,
+		"the case needs CloseBatch to hydrate a real ClaimNext result; the v0 wire "+
+			"carries no claim_next/claimed_next member, so the client refuses rather "+
+			"than hydrating a claim from nothing")
 	conformance.RunBatchCloserClaimNextHydratesWhenSomethingClosed(t, t.Context(), newServedBatchCloserFixture(t, "hbccnhy"))
 }
 
 func TestServedBatchCloserClaimNextIsNilWhenNothingClosed(t *testing.T) {
+	skipKnownDivergence(t, "W-CloseBatchRequest.ClaimNext", parkBead,
+		"the case asserts a nil ClaimedNext after a real ClaimNext request landed "+
+			"nothing to close; the v0 wire has no member to carry the request at all, "+
+			"so the client refuses it before the nil-vs-populated question is reachable")
 	conformance.RunBatchCloserClaimNextIsNilWhenNothingClosed(t, t.Context(), newServedBatchCloserFixture(t, "hbccnno"))
 }
 
 func TestServedBatchCloserClaimNextIsNilWhenTheFrontIsEmpty(t *testing.T) {
+	skipKnownDivergence(t, "W-CloseBatchRequest.ClaimNext", parkBead,
+		"same as the other ClaimNext-on-CloseBatch cases: the v0 wire has no "+
+			"claim_next/claimed_next member, so the client refuses the request")
 	conformance.RunBatchCloserClaimNextIsNilWhenTheFrontIsEmpty(t, t.Context(), newServedBatchCloserFixture(t, "hbccnempty"))
 }
 
 func TestServedBatchCloserClaimNextSeesAnUnblockingFromItsOwnBatch(t *testing.T) {
+	skipKnownDivergence(t, "W-CloseBatchRequest.ClaimNext", parkBead,
+		"the case needs the batch's own unblocking to be visible to a ClaimNext run "+
+			"in the same request; the v0 wire cannot carry ClaimNext on CloseBatch at "+
+			"all, so the client refuses before the ordering question is reachable")
 	conformance.RunBatchCloserClaimNextSeesAnUnblockingFromItsOwnBatch(t, t.Context(), newServedBatchCloserFixture(t, "hbccnunb"))
 }
 
@@ -121,6 +149,11 @@ func TestServedBatchCloserAllRefusedBatchRecordsNoHistory(t *testing.T) {
 }
 
 func TestServedBatchCloserDoesNotMutateTheCallerRequest(t *testing.T) {
+	skipKnownDivergence(t, "W-CloseBatchRequest.ClaimNext", parkBead,
+		"the case populates req.ClaimNext with a real ready filter and closes for "+
+			"real to prove the caller's request pointer survives untouched; the v0 "+
+			"wire cannot carry ClaimNext on CloseBatch, so the client refuses before "+
+			"any closing happens")
 	conformance.RunBatchCloserDoesNotMutateTheCallerRequest(t, t.Context(), newServedBatchCloserFixture(t, "hbcnomut"))
 }
 

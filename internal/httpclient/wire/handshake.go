@@ -473,7 +473,23 @@ func (e *CapabilityError) Error() string {
 		e.ServerURL, e.BdVersion, e.Capability, e.Op)
 }
 
-func (e *CapabilityError) Unwrap() error { return ErrCapabilityAbsent }
+// Unwrap returns both arms, so a caller holding only a role interface can
+// classify a version-skew refusal the same way as any other unsupported
+// capability.
+//
+// errors.Is(err, ErrCapabilityAbsent) stays the precise diagnosis — this
+// server, this token absent, this op — and errors.As(err, *issueops.ErrUnsupported)
+// (equally storage.ErrUnsupported: both are the SAME aliased type, see
+// beadserrors.ErrUnsupported) now also reaches it, because a backend that
+// cannot serve an operation is exactly what a capability-absent server is from
+// the caller's side of the role contract. The two are not in tension: the
+// ledger-refusal twin of this (InexpressibleError, in package httpclient) earns
+// its *storage.ErrUnsupported arm the same way, off a value this client itself
+// decided to withhold rather than a server's version — Unwrap is what lets one
+// errors.As site in a role catch both without caring which.
+func (e *CapabilityError) Unwrap() []error {
+	return []error{ErrCapabilityAbsent, &issueops.ErrUnsupported{Op: e.Op, Backend: "http", Capability: e.Capability}}
+}
 
 // NewCapabilityError builds the capability-absent refusal for a behavior the
 // caller checked itself, off a handshake it already holds, rather than for an

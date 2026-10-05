@@ -133,11 +133,14 @@ const createParkBead = "ga-jbuyf"
 // the divergence is acceptable: the whole request fails and NOTHING is created —
 // not the issue, and not the edge that named nothing.
 //
-// Only two of the three ways a request can name a target are driven here. The
-// third — an absent --parent — graduated out of this divergence: the wire now
-// answers it with a distinguishing not_found code that also names the target,
-// exactly the event this row's doc comment predicted would retire it "loudly".
-// See TestServedCreateRefusesAnAbsentParentAsNotFound, its dedicated pin.
+// All three ways a request can name a target are driven here, including
+// --parent: OpCreateIssue's own problem-code table (internal/httpapi/problem.go)
+// documents NO 404 for ANY of them, on purpose — "there is no id in this path
+// to have missed" applies to parent_id exactly as it does to a dependency's
+// target_id or a waits-for's spawner_id, none of which are a resource this
+// operation was asked to address. There is no asymmetry to carve a parent-only
+// not_found out of without contradicting that design, so the three stay
+// together on this one row.
 func TestServedCreateRefusesAnAbsentTargetAsValidation(t *testing.T) {
 	env := newServedEnv(t, "hlcn")
 	ctx := t.Context()
@@ -162,6 +165,11 @@ func TestServedCreateRefusesAnAbsentTargetAsValidation(t *testing.T) {
 			id:      "hlcn-waits",
 			request: issueops.CreateRequest{WaitsFor: &issueops.WaitsFor{SpawnerID: missing}},
 		},
+		{
+			name:    "parent",
+			id:      "hlcn-parent",
+			request: issueops.CreateRequest{ParentID: missing},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := tc.request
@@ -185,43 +193,6 @@ func TestServedCreateRefusesAnAbsentTargetAsValidation(t *testing.T) {
 			assertServedWispRows(t, ctx, env, 0, tc.id)
 		})
 	}
-}
-
-// TestServedCreateRefusesAnAbsentParentAsNotFound pins the graduated behavior
-// L-create-notfound's doc comment predicted: a missing --parent target now
-// answers a distinguishing not_found code (internal/httpapi/create.go's
-// failCreateIssue errors.As(&parentNotFound) arm, ahead of the generic
-// ErrValidation catch-all) that names the target in its message. Local
-// backends already refuse a missing parent with issueops.ErrNotFound; this
-// test is what makes the http backend match that, rather than degrading it
-// to a bare ErrValidation the way the dependency and waits-for cases above
-// still (acceptably) do.
-func TestServedCreateRefusesAnAbsentParentAsNotFound(t *testing.T) {
-	env := newServedEnv(t, "hlcnp")
-	ctx := t.Context()
-	lifecycle, err := env.subject.IssueLifecycle()
-	if err != nil {
-		t.Fatalf("IssueLifecycle(): %v", err)
-	}
-
-	const missing = "hlcnp-nosuchrow"
-	req := issueops.CreateRequest{
-		Actor: "writer", ForceIDPrefix: true, ParentID: missing,
-		Issue: &issueops.Issue{
-			ID: "hlcnp-parent", Title: "parent", Status: types.StatusOpen,
-			Priority: 2, IssueType: types.TypeTask,
-		},
-	}
-	_, err = lifecycle.Create(ctx, req)
-	if !errors.Is(err, issueops.ErrNotFound) {
-		t.Fatalf("Create with an absent parent target: err = %v, want ErrNotFound", err)
-	}
-	if !strings.Contains(err.Error(), missing) {
-		t.Errorf("the refusal = %q, want it to name the missing parent target %q", err.Error(), missing)
-	}
-	// The outcome half: neither plane holds the refused id.
-	assertServedIssueRows(t, ctx, env, 0, "hlcnp-parent")
-	assertServedWispRows(t, ctx, env, 0, "hlcnp-parent")
 }
 
 // TestServedCreateRefusesAForeignPrefixAsValidation is L-create-prefix's pin,

@@ -437,6 +437,60 @@ func TestTheParentExistenceProbeCrossesTheWire(t *testing.T) {
 	}
 }
 
+// TestBridgeGetIssuePopulatesRowVersionForAGuardedWrite is HIGH 5's second pin:
+// the raw bridge GetIssue above returns a hit by value with no RowVersion
+// assertion, same as the molecule loader's existence probe
+// (internal/molecules/molecules.go) that is this method's other caller — so a
+// stitched-at-zero regression here would have shipped silently next to the
+// passing test above it.
+//
+// types.Issue.RowVersion is json:"-"; getIssue's wire body carries the same
+// token under Revision instead, and bridge.go's GetIssue must stitch it back
+// onto the issue it returns, exactly as Reader.Get does in role_reader.go
+// (pinned by TestServedReaderGetPopulatesRowVersionForAGuardedWrite). This
+// proves it the same way: by guarding a write with whatever GetIssue just
+// answered, over the same wire, and requiring a second write that reuses the
+// now-stale token to be refused. A read alone cannot tell a stitched zero from
+// a real one that happens to equal it on a fresh table — only a guard that
+// the write actually enforces can.
+func TestBridgeGetIssuePopulatesRowVersionForAGuardedWrite(t *testing.T) {
+	e := newServedEnv(t, "brgv")
+	ctx := t.Context()
+	lifecycle, err := e.subject.IssueLifecycle()
+	if err != nil {
+		t.Fatalf("IssueLifecycle(): %v", err)
+	}
+
+	issue := &types.Issue{Title: "bridge row version round trip", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := e.createIssue(ctx, issue, "seed"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	got, err := e.subject.GetIssue(ctx, issue.ID)
+	if err != nil || got == nil {
+		t.Fatalf("GetIssue: (%v, %v)", got, err)
+	}
+	if got.RowVersion == 0 {
+		t.Fatalf("GetIssue answered RowVersion 0; want the row's real token")
+	}
+	staleVersion := got.RowVersion
+
+	if _, err := lifecycle.Update(ctx, issueops.UpdateRequest{
+		Actor: "writer", IssueID: issue.ID, ExpectedVersion: &staleVersion,
+		Patch: issueops.IssuePatch{Title: set("first guarded write")},
+	}); err != nil {
+		t.Fatalf("Update guarded by the token GetIssue answered: %v", err)
+	}
+
+	_, err = lifecycle.Update(ctx, issueops.UpdateRequest{
+		Actor: "writer", IssueID: issue.ID, ExpectedVersion: &staleVersion,
+		Patch: issueops.IssuePatch{Title: set("second guarded write, same stale token")},
+	})
+	if err == nil {
+		t.Fatal("Update reused GetIssue's token after a write moved the row past it; want a version-guard refusal")
+	}
+}
+
 // TestServedWorkspaceConfigWritesRefuse IS GONE, and what it asserted is worth a
 // line rather than a silent deletion: while D8 row 11 was PARTIAL, the two write
 // verbs refused per METHOD and named themselves, so the accessor could serve the
