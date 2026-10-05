@@ -493,17 +493,33 @@ func decodeRevisionToken(raw json.RawMessage) (string, bool) {
 	return "", false
 }
 
+// revisionNeedsFallback reports whether a *string revision field still needs
+// legacyRevisionFields' integer-tolerant recovery. A genuinely absent member
+// decodes to nil, as expected — but encoding/json's indirect() allocates a
+// pointer to the zero value ("") for a *string field BEFORE it discovers the
+// JSON value's type doesn't match, when the member IS present with the wrong
+// shape (a bare integer). That pre-allocation means a type-mismatched field
+// comes out of the primary json.Unmarshal(body, &p) as a non-nil pointer to
+// "", not nil — so checking only for nil here would never recover exactly the
+// one case this fallback exists for. No legitimate server response uses a
+// literal empty-string revision token (ProblemError.ExpectedVersion's doc:
+// both are opaque, server-defined, non-numeric tokens an operation always
+// names when it fires at all), so treating "" the same as nil costs nothing.
+func revisionNeedsFallback(p *string) bool {
+	return p == nil || *p == ""
+}
+
 // legacyRevisionFields backfills expected_version/actual_version when the
-// primary decode above left them nil. Since both are typed *string on the
-// generated Problem, that happens exactly when a pre-#6053 server sent one as
-// a bare JSON integer rather than the decimal string every server since has
-// used: json.Unmarshal(body, &p) already tolerates the mismatch (a bad field
-// does not abort decoding the rest, and mapProblem deliberately discards that
+// primary decode above left them needing fallback (see revisionNeedsFallback).
+// That happens exactly when a pre-#6053 server sent one as a bare JSON
+// integer rather than the decimal string every server since has used:
+// json.Unmarshal(body, &p) already tolerates the mismatch (a bad field does
+// not abort decoding the rest, and mapProblem deliberately discards that
 // error), so the only member actually lost is the one with the wrong shape —
 // and that is exactly what this recovers, from the same bytes, by parsing the
 // two revision keys alone and accepting either shape.
 func legacyRevisionFields(body []byte, e *ProblemError) {
-	if e.ExpectedVersion != nil && e.ActualVersion != nil {
+	if !revisionNeedsFallback(e.ExpectedVersion) && !revisionNeedsFallback(e.ActualVersion) {
 		return
 	}
 	var raw struct {
@@ -513,13 +529,13 @@ func legacyRevisionFields(body []byte, e *ProblemError) {
 	if json.Unmarshal(body, &raw) != nil {
 		return
 	}
-	if e.ExpectedVersion == nil {
+	if revisionNeedsFallback(e.ExpectedVersion) {
 		if v, ok := decodeRevisionToken(raw.ExpectedVersion); ok {
 			v = stripControlRunes(v)
 			e.ExpectedVersion = &v
 		}
 	}
-	if e.ActualVersion == nil {
+	if revisionNeedsFallback(e.ActualVersion) {
 		if v, ok := decodeRevisionToken(raw.ActualVersion); ok {
 			v = stripControlRunes(v)
 			e.ActualVersion = &v
