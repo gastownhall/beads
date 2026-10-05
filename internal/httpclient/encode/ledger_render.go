@@ -197,10 +197,10 @@ included in this repository.
 A handful of rows still carry a ` + "`TODO`" + ` pin: these are the read-display and
 pre-run residuals (wisp-in-list, the pretty ` + "`bd ready`" + ` parent-epic map, the
 molecule/auto-import pre-run degradations). The
-client core is complete; ` + "`ga-b8ddd.12`" + ` (per-request project-id enforcement)
-closed the read-display escalation, so pinning the remaining fixture corpus is
-deferred work, tracked on ` + "`ga-b8ddd.23`" + ` (the read-display residual)
-and ` + "`ga-b8ddd.19`" + ` (the per-id D7 taxonomy). They are refusals or degradations
+client core is complete; a since-closed per-request project-id enforcement
+follow-up closed the read-display escalation, so pinning the remaining
+fixture corpus is deferred work (tracked as a read-display residual and a
+per-id D7 taxonomy follow-up). They are refusals or degradations
 already in force — the ` + "`TODO`" + ` is on the test that will hold each one, not on
 the behavior.
 

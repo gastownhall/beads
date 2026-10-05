@@ -221,22 +221,22 @@ func designRows() []Row {
 	// auto-load (L5), auto-import (L6), the ready view's parent-epic map (L13) —
 	// whose observable behavior is a cmd/bd invocation's, not a store call's.
 	// They are the subprocess parity tier's, and that tier is the one this wiring
-	// did not build. ga-b8ddd.12 (per-request project-id enforcement) closed the
-	// read-display ESCALATION — every read now carries the stamp, so a drifted
-	// server refuses it rather than rendering another project's rows — but the
-	// remaining fixture corpus that would PIN these pre-run displays is its
-	// follow-up, ga-b8ddd.23, which owns them.
+	// did not build. A since-closed per-request project-id enforcement follow-up
+	// closed the read-display ESCALATION — every read now carries the stamp, so a
+	// drifted server refuses it rather than rendering another project's rows —
+	// but the remaining fixture corpus that would PIN these pre-run displays is
+	// a separate, still-open follow-up that owns them.
 	//
 	// L17 (the conditional dep-remove guard) used to be the one remaining TODO row
 	// that was NOT subprocess-owned. It carried no row of its own once its
-	// condition resolved: the dual run ga-b8ddd.30 wrote
+	// condition resolved: a dual run
 	// (TestServedDependencyRecordsSurfaceUnresolvedRowsVerbatim) showed the wire
 	// surfaces unresolved depends_on_id rows VERBATIM, so the guard does not
 	// degrade and there was nothing to ledger. It is DELETED rather than retired,
 	// because a retirement records a divergence that once existed and this one
 	// never did. L1 is the retirement beside it — a row that WAS live and is kept
 	// as KindRetired for exactly that reason.
-	const pinnedElsewhere = "TODO(ga-b8ddd.23): a pre-run degradation, observable only through a cmd/bd invocation; the subprocess parity corpus pins it"
+	const pinnedElsewhere = "TODO(S3): a pre-run degradation, observable only through a cmd/bd invocation; the subprocess parity corpus pins it"
 	return []Row{
 		{
 			// IT WAS DELETED OUTRIGHT for a while, against this file's own
@@ -494,7 +494,7 @@ func designRows() []Row {
 			PinnedBy: pinnedByS3Conformance,
 		},
 		// L17 (the conditional GH#5005 dep-remove guard) is DELETED, not present as a
-		// row: ga-b8ddd.30's dual run proved the wire surfaces unresolved
+		// row: a dual run proved the wire surfaces unresolved
 		// depends_on_id rows verbatim (see pinnedElsewhere above), so the
 		// degradation it was contingent on never materialized. The L-sequence skips
 		// from L16 to L18 for that reason.
@@ -1058,11 +1058,11 @@ func commandRows() []Row {
 		row("F-ready-explain", "ready", "--explain", "`bd ready --explain` refuses",
 			"it dispatches onto raw GetBlockedIssues/GetIssuesByIDs/GetDependencyCounts/DetectCycles, three of which are on the unsupported allowlist"),
 		row("F-ready-mol", "ready", "--mol", "`bd ready --mol` refuses",
-			"its molecule subgraph load reaches findHierarchicalChildren, an IDPrefix SearchIssues shape the parent-walk bridge cannot express (E-IssueFilter.noShape). GetDependencyRecords and GetDependentsWithMetadata, which the same load also calls, stopped being the blocker when ga-b8ddd.30 flipped them onto the wire"),
+			"its molecule subgraph load reaches findHierarchicalChildren, an IDPrefix SearchIssues shape the parent-walk bridge cannot express (E-IssueFilter.noShape). GetDependencyRecords and GetDependentsWithMetadata, which the same load also calls, stopped being the blocker once they flipped onto the wire"),
 		row("F-ready-gated", "ready", "--gated", "`bd ready --gated` refuses",
 			"it dispatches onto a filtered SearchIssues shape the bridge cannot express, plus GetDependents"),
 		row("F-show-thread", "show", "--thread", "`bd show --thread` refuses",
-			"showMessageThread renders each reply's sender, recipient, body and timestamp off GetDependentsWithMetadata, but ga-b8ddd.30 flipped that read onto getIssue's include_dependents parameter, which carries the collectDependents SHALLOW projection (id/status/type/priority/title + edge type only, be-4d36f2). Those fields come back zeroed over http and zero-timestamp replies sort ahead of the root — a silent-wrong degrade the refuse-over-degrade doctrine forbids. Retires with a full-dependent wire shape, a server-side ask"),
+			"showMessageThread renders each reply's sender, recipient, body and timestamp off GetDependentsWithMetadata, but that read was flipped onto getIssue's include_dependents parameter, which carries the collectDependents SHALLOW projection (id/status/type/priority/title + edge type only, be-4d36f2). Those fields come back zeroed over http and zero-timestamp replies sort ahead of the root — a silent-wrong degrade the refuse-over-degrade doctrine forbids. Retires with a full-dependent wire shape, a server-side ask"),
 		row("F-show-refs", "show", "--refs", "`bd show --refs` refuses",
 			"showIssueRefs's --json marshals the full GetDependentsWithMetadata rows, but the wire answers the same collectDependents shallow projection, so created_at/assignee/description come back zeroed and the JSON differs from a local workspace. The text render consumes only the shallow fields, but the flag cannot be split from its --json mode, so the whole flag refuses rather than serve a divergent JSON silently"),
 		row("F-show-children", "show", "--children", "`bd show --children` refuses",
