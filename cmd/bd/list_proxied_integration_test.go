@@ -228,16 +228,43 @@ func TestProxiedServerList(t *testing.T) {
 	})
 
 	t.Run("ready_parent_tree_excludes_blocked_descendants", func(t *testing.T) {
-		// TODO: re-enable once `bd dep add` is ported to proxied mode.
-		// Currently bd dep add fails with "storage is nil" under proxied
-		// since the dep subcommand has no usesProxiedServer() dispatch.
-		t.Skip("requires bd dep add proxied support")
+		parent := bdProxiedCreate(t, bd, p.dir, "Ready parent tree", "--type", "epic")
+		readyChild := bdProxiedCreate(t, bd, p.dir, "Ready child in tree", "--type", "task", "--parent", parent.ID)
+		blockedChild := bdProxiedCreate(t, bd, p.dir, "Blocked child in tree", "--type", "task", "--parent", parent.ID)
+		blocker := bdProxiedCreate(t, bd, p.dir, "Tree child blocker", "--type", "task")
+		bdProxiedDep(t, bd, p.dir, "add", blockedChild.ID, blocker.ID)
+
+		out := bdProxiedList(t, bd, p, "--ready", "--parent", parent.ID, "--no-pager")
+		if !strings.Contains(out, readyChild.ID) {
+			t.Errorf("ready child %s should appear in ready parent tree:\n%s", readyChild.ID, out)
+		}
+		if strings.Contains(out, blockedChild.ID) {
+			t.Errorf("blocked child %s should not appear in ready parent tree:\n%s", blockedChild.ID, out)
+		}
 	})
 
 	// Regression for gastownhall/beads#3936: relates-to between two epics
-	// must not nest them, and bidirectional relates-to must not drop them.
+	// must not nest them in `bd list` tree mode, and a bidirectional
+	// relates-to must not silently drop both epics from the output.
 	t.Run("tree_relates_to_does_not_nest_or_drop_epics", func(t *testing.T) {
-		t.Skip("requires bd dep add proxied support")
+		epicA := bdProxiedCreate(t, bd, p.dir, "Relates Epic A", "--type", "epic", "--priority", "2")
+		epicB := bdProxiedCreate(t, bd, p.dir, "Relates Epic B", "--type", "epic", "--priority", "2")
+
+		bdProxiedDep(t, bd, p.dir, "add", epicA.ID, epicB.ID, "--type", "relates-to")
+		out := bdProxiedList(t, bd, p, "--no-pager", "--type", "epic")
+		if !strings.Contains(out, epicA.ID) || !strings.Contains(out, epicB.ID) {
+			t.Fatalf("one-direction relates-to should keep both epics visible:\n%s", out)
+		}
+		if strings.Contains(out, "└── "+epicA.ID) || strings.Contains(out, "└── "+epicB.ID) ||
+			strings.Contains(out, "├── "+epicA.ID) || strings.Contains(out, "├── "+epicB.ID) {
+			t.Fatalf("relates-to must not nest epics under each other:\n%s", out)
+		}
+
+		bdProxiedDep(t, bd, p.dir, "add", epicB.ID, epicA.ID, "--type", "relates-to")
+		out = bdProxiedList(t, bd, p, "--no-pager", "--type", "epic")
+		if !strings.Contains(out, epicA.ID) || !strings.Contains(out, epicB.ID) {
+			t.Fatalf("bidirectional relates-to must not drop epics from tree output:\n%s", out)
+		}
 	})
 
 	t.Run("ready_parent_filter_includes_grandchildren", func(t *testing.T) {

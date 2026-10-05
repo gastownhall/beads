@@ -85,7 +85,7 @@ func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) 
 	// pre-existing tables are unstaged, before the dirty-table guards run.
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('dolt_ignore')")).
 		WillReturnRows(sqlmock.NewRows([]string{"status"}))
-	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')")).
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns', '--skip-empty')")).
 		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
 	// committableDirtyTables -> dirtyTables(ctx, db, true): same dirty state.
 	expectDirtyDoltStatusRow(mock, "dependencies", false)
@@ -242,13 +242,13 @@ func TestCheckNoDuplicateVersionsPanicsWithBothFilenames(t *testing.T) {
 	checkNoDuplicateVersions(files)
 }
 
-// TestEmbeddedMigrationSourcesHaveNoDuplicateVersions runs discovery over the
+// TestGoEmbedMigrationSourcesHaveNoDuplicateVersions runs discovery over the
 // real embedded migration tree for both sources. list() panics on duplicate
 // numeric prefixes — at runtime that panic fires at store open, before any
 // command's RunE, so a duplicate bricks every bd command. Tests that read a
 // migration's SQL file directly bypass list() and cannot catch this; this
 // discovery-level check makes the whole failure class fail in CI instead.
-func TestEmbeddedMigrationSourcesHaveNoDuplicateVersions(t *testing.T) {
+func TestGoEmbedMigrationSourcesHaveNoDuplicateVersions(t *testing.T) {
 	for _, src := range []migrationSource{mainSource, ignoredSource} {
 		files := src.list() // panics on duplicate versions
 		if len(files) == 0 {
@@ -1967,6 +1967,10 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		// MODIFY COLUMN (durable_state JSON -> LONGBLOB), same shape as 0065.
 		"ALTER TABLE issue_versions ADD COLUMN attribution_status VARCHAR(20) NOT NULL;",
 		"ALTER TABLE issue_versions MODIFY COLUMN durable_state LONGBLOB;",
+		// 0069: two prepared MODIFY COLUMNs on issue_versions (change_at and
+		// removed_at to DATETIME(6)), same shape as 0068's step 7.
+		"ALTER TABLE issue_versions MODIFY COLUMN change_at DATETIME(6) NOT NULL;",
+		"ALTER TABLE issue_versions MODIFY COLUMN removed_at DATETIME(6);",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("AllMigrationsSQL missing direct CLI DDL %q", want)
@@ -1997,6 +2001,9 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		// carries these probes.
 		"@issue_versions_as_needs_add",
 		"@issue_versions_ds_needs_retype",
+		// 0069 guards both of its MODIFYs the same way.
+		"@issue_versions_change_at_needs_widen",
+		"@issue_versions_removed_at_needs_widen",
 	} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("AllMigrationsSQL contains source prepared-DDL guard %q", forbidden)

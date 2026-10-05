@@ -149,11 +149,13 @@ type UpdateItem struct {
 	ExpectedVersion  *int64
 	ExpectedStatus   *Status
 	ExpectedAssignee *string
-	// ForceClosePolicy and ForceAssigneeTransfer are UpdateRequest's, per item,
-	// with UpdateRequest's rules — including that ForceAssigneeTransfer without
-	// a Patch.Assignee is invalid.
+	// ForceClosePolicy, ForceAssigneeTransfer and ForceNotesOverwrite are
+	// UpdateRequest's, per item, with UpdateRequest's rules — including that
+	// ForceAssigneeTransfer without a Patch.Assignee, and ForceNotesOverwrite
+	// without a Patch.Notes, are each invalid.
 	ForceClosePolicy      bool
 	ForceAssigneeTransfer bool
+	ForceNotesOverwrite   bool
 }
 
 // CloseItem closes one existing issue, under CloseRequest's rules.
@@ -410,11 +412,65 @@ func (e *RefError) Error() string {
 func (e *RefError) Unwrap() error { return ErrValidation }
 
 // MaxApplyBatchItems is the largest request this role accepts. It is a FLAT
-// bound rather than a cost model, and it is the bound the sibling batch roles
-// already run under: a hundred creates and a hundred edges both land inside the
-// server's ordinary request deadline today, so a per-item deadline extension
-// would be new machinery answering a question nothing has asked.
-const MaxApplyBatchItems = 100
+// bound rather than a cost model: ApplyBatchInTx issues roughly one round
+// trip per item resolution plus a handful more per item's own writes, so the
+// bound is really a bound on how long one request may hold a single write
+// transaction open, not on batch semantics (which have no size in them).
+//
+// Raised from 100 to 1000: measured real-world plans —
+// mol-normalized-issue-pr-work-v1, the largest observed shape at 356 items —
+// already exceed the old 100-item bound, and 1000 is roughly 2.8x that
+// measured max. The old doc comment claimed a hundred items "land inside the
+// server's ordinary request deadline"; that is no longer the bound above 100
+// items. Instead, the HTTP edge (internal/httpapi) grants a request over 100
+// items a separate, EXTENDED whole-run budget (an operator-configured
+// ceiling, `bd serve --large-apply-ceiling`, 5 minutes by default) rather
+// than a value scaled by item count, takes a one-wide "large write" semaphore
+// once a request exceeds the old 100-item threshold (so at most one
+// oversized transaction holds a write connection at a time), and advertises
+// all of this via the issues.batchApplyLarge capability token so a caller
+// can tell whether the server it is talking to supports the raised cap
+// before sending a request that size.
+//
+// The role itself still enforces no per-item cost model and still runs the
+// WHOLE plan as ONE transaction no matter its size — raising this bound does
+// not, and must never, change ApplyBatchInTx into something that chunks a
+// plan into multiple transactions. A request either commits in full or
+// changes nothing.
+const MaxApplyBatchItems = 1000
+
+// extendedRetryBudgetKey is the unexported key WithExtendedRetryBudget and
+// HasExtendedRetryBudget share.
+type extendedRetryBudgetKey struct{}
+
+// WithExtendedRetryBudget marks ctx as belonging to a large batch-apply whose
+// commit-retry loop should be allowed to scale with the request's own
+// extended run budget, instead of the ordinary fixed retry ceiling every
+// other write uses.
+//
+// This exists because a BatchApplier implementation's commit-retry budget
+// (internal/storage/uow's DefaultTxRetryMaxElapsed, 15s) must NOT change for
+// an ordinary request just because deriving it from "whatever's left on
+// ctx.Deadline()" would be simpler: an ordinary request's context also
+// carries a real deadline (internal/httpapi's requestDeadline, 60s), and
+// naively extending the retry budget to match ANY sufficiently long
+// remaining deadline silently changed ordinary requests from a 15s retry
+// ceiling to up to 60s — a regression an earlier version of this fix
+// introduced. Marking the context explicitly, only on the one path
+// (internal/httpapi's admitLargeApply) that intentionally grants a request an
+// extended run budget, keeps the two concerns independent: an implementation
+// reads HasExtendedRetryBudget to decide WHETHER to look at the deadline at
+// all, rather than inferring intent from the deadline's mere size.
+func WithExtendedRetryBudget(ctx context.Context) context.Context {
+	return context.WithValue(ctx, extendedRetryBudgetKey{}, true)
+}
+
+// HasExtendedRetryBudget reports whether ctx was marked by
+// WithExtendedRetryBudget.
+func HasExtendedRetryBudget(ctx context.Context) bool {
+	marked, _ := ctx.Value(extendedRetryBudgetKey{}).(bool)
+	return marked
+}
 
 // BatchApplier describes applying a HETEROGENEOUS list of graph mutations as
 // ONE durable act, and — like Lifecycle, BatchCreator, BatchCloser and

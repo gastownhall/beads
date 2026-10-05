@@ -67,15 +67,62 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 	})
 
+	t.Run("notes_overwrite_requires_force", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "unf")
+		issue := bdProxiedCreate(t, bd, p.dir, "Notes force", "--notes", "original notes")
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
+			"update", "--json", issue.ID, "--notes", "replacement notes")
+		if err == nil {
+			t.Fatalf("expected --notes overwrite without --force to fail\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		wantErr := wantNotesRefusal(issue.ID)
+		if !strings.Contains(stderr, wantErr) {
+			t.Errorf("expected stderr to contain %q, got: %s", wantErr, stderr)
+		}
+		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Notes != "original notes" {
+			t.Errorf("notes: got %q, want %q", got.Notes, "original notes")
+		}
+	})
+
+	t.Run("notes_overwrite_with_if_assignee_requires_force", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "unfa")
+		issue := bdProxiedCreate(t, bd, p.dir, "Notes force if-assignee", "--notes", "original notes")
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
+			"update", "--json", issue.ID, "--if-assignee", "", "--notes", "replacement notes")
+		if err == nil {
+			t.Fatalf("expected --notes overwrite without --force to fail\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		wantErr := wantNotesRefusal(issue.ID)
+		if !strings.Contains(stderr, wantErr) {
+			t.Errorf("expected stderr to contain %q, got: %s", wantErr, stderr)
+		}
+		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Notes != "original notes" {
+			t.Errorf("notes: got %q, want %q", got.Notes, "original notes")
+		}
+	})
+
+	t.Run("notes_overwrite_with_if_assignee_and_force_succeeds", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "unfaf")
+		issue := bdProxiedCreate(t, bd, p.dir, "Notes force if-assignee force", "--notes", "original notes")
+		updated := bdProxiedUpdateOne(t, bd, p.dir, issue.ID,
+			"--if-assignee", "", "--notes", "replacement notes", "--force")
+		if updated.Notes != "replacement notes" {
+			t.Errorf("notes: got %q, want %q", updated.Notes, "replacement notes")
+		}
+	})
+
 	t.Run("notes_overwrite_warns_on_stderr", func(t *testing.T) {
 		p := bdProxiedInit(t, bd, "unw")
 		issue := bdProxiedCreate(t, bd, p.dir, "Notes overwrite", "--notes", "original notes")
 		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
-			"update", "--json", issue.ID, "--notes", "replacement notes")
+			"update", "--json", issue.ID, "--notes", "replacement notes", "--force")
 		if err != nil {
 			t.Fatalf("overwrite notes: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 		}
-		warning := fmt.Sprintf("warning: %s: --notes replaced existing notes (use --append-notes to preserve history)", issue.ID)
+		warning := fmt.Sprintf("warning: %s: --force replaced existing notes (--append-notes preserves history)", issue.ID)
 		if !strings.Contains(stderr, warning) {
 			t.Errorf("expected stderr to contain %q, got: %s", warning, stderr)
 		}
@@ -84,6 +131,30 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Notes != "replacement notes" {
 			t.Errorf("notes: got %q, want %q", got.Notes, "replacement notes")
+		}
+	})
+
+	t.Run("empty_notes_refused_clear_notes_clears", func(t *testing.T) {
+		// GH#6021 on the proxied route: the empty-notes refusal fires in
+		// gatherUpdateInput, before any request leaves the CLI, and the
+		// --clear-notes verb (not --force) authorizes the erase.
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "unc")
+		issue := bdProxiedCreate(t, bd, p.dir, "Notes clear guard", "--notes", "original notes")
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
+			"update", issue.ID, "--notes", "")
+		if err == nil {
+			t.Fatalf("expected --notes \"\" to fail\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if !strings.Contains(stderr, "--clear-notes") {
+			t.Errorf("expected stderr to name --clear-notes, got: %s", stderr)
+		}
+		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Notes != "original notes" {
+			t.Errorf("notes: got %q, want %q", got.Notes, "original notes")
+		}
+		updated := bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--clear-notes")
+		if updated.Notes != "" {
+			t.Errorf("notes: got %q, want cleared", updated.Notes)
 		}
 	})
 
@@ -946,7 +1017,7 @@ func TestProxiedServerUpdate3(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "un")
 		issue := bdProxiedCreate(t, bd, p.dir, "Notes test", "--notes", "first")
-		updated := bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--notes", "replacement")
+		updated := bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--notes", "replacement", "--force")
 		if updated.Notes != "replacement" {
 			t.Errorf("notes: got %q, want %q", updated.Notes, "replacement")
 		}

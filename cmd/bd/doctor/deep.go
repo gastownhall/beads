@@ -2,6 +2,7 @@
 package doctor
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // DeepValidationResult holds all deep validation check results
@@ -240,52 +242,38 @@ func checkDependencyIntegrity(db *sql.DB) DoctorCheck {
 	return check
 }
 
-// checkEpicCompleteness finds epics that could be closed (all children closed)
+// checkEpicCompleteness finds epics that could be closed (all children closed
+// as completed work).
+//
+// This routes through the shared eligibility query rather than re-deriving
+// "all children closed" from raw counts in local SQL. A child closed as
+// duplicate/wontfix/superseded redirects the work rather than finishing it and
+// must not make its epic look closeable (GH#5026); a second local classifier
+// here would let `bd doctor --deep` report an epic "ready to close" — with a
+// Fix line prescribing `bd close` — while `bd doctor`'s own Stale Molecules
+// check, which reads EpicStatus.EligibleForClose, reports the same epic on the
+// same repository as not stale.
 func checkEpicCompleteness(db *sql.DB) DoctorCheck {
 	check := DoctorCheck{
 		Name:     "Epic Completeness",
 		Category: CategoryMetadata,
 	}
 
-	// Find epics where all children are closed but epic is still open
-	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
-	query := `
-		SELECT e.id, e.title,
-		       COUNT(COALESCE(c.id, cw.id)) as total_children,
-		       SUM(CASE WHEN COALESCE(c.status, cw.status) = 'closed' THEN 1 ELSE 0 END) as closed_children
-		FROM issues e
-		JOIN (` + doctorDependencyUnionSQL() + `) d ON d.depends_on_id = e.id AND d.type = 'parent-child'
-		LEFT JOIN issues c ON c.id = d.issue_id
-		LEFT JOIN wisps cw ON cw.id = d.issue_id
-		WHERE e.issue_type = 'epic'
-		  AND e.status != 'closed'
-		  AND COALESCE(c.id, cw.id) IS NOT NULL
-		GROUP BY e.id
-		HAVING total_children > 0 AND total_children = closed_children
-		LIMIT 20`
-
-	rows, err := db.Query(query)
+	epicStatuses, err := issueops.GetEpicsEligibleForClosureInTx(context.Background(), db)
 	if err != nil {
 		check.Status = StatusWarning
 		check.Message = "Unable to check epic completeness"
 		check.Detail = err.Error()
 		return check
 	}
-	defer rows.Close()
 
 	var completedEpics []string
-	for rows.Next() {
-		var id, title string
-		var total, closed int
-		if err := rows.Scan(&id, &title, &total, &closed); err == nil {
-			completedEpics = append(completedEpics, fmt.Sprintf("%s (%d/%d)", id, closed, total))
+	for _, es := range epicStatuses {
+		if !es.EligibleForClose || es.Epic == nil {
+			continue
 		}
-	}
-	if err := rows.Err(); err != nil {
-		check.Status = StatusWarning
-		check.Message = "Row iteration error checking epic completeness"
-		check.Detail = err.Error()
-		return check
+		completedEpics = append(completedEpics,
+			fmt.Sprintf("%s (%d/%d)", es.Epic.ID, es.ClosedChildren, es.TotalChildren))
 	}
 
 	if len(completedEpics) == 0 {

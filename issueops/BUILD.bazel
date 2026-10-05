@@ -1,0 +1,69 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "issueops",
+    srcs = [
+        "batchapplier.go",
+        "batchcloser.go",
+        "batchcreator.go",
+        "blockedstate.go",
+        "blockingannotator.go",
+        "bootstrapper.go",
+        "claimer.go",
+        "commenter.go",
+        "counter.go",
+        "cycledetector.go",
+        "deleter.go",
+        "dependencyeditor.go",
+        "edgereader.go",
+        "errors.go",
+        "graphcounter.go",
+        "importer.go",
+        "initverifier.go",
+        "issueops.go",
+        "metadatacas.go",
+        "querier.go",
+        "reader.go",
+        "reader_ready_scope.go",
+        "readyclaimer.go",
+        "readycounter.go",
+        "relations.go",
+        "releaser.go",
+        "statsreporter.go",
+        "sweeper.go",
+        "treewalker.go",
+        "versionreconciler.go",
+        "workspaceconfig.go",
+    ],
+    importpath = "github.com/steveyegge/beads/issueops",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//beadserrors",
+        "//internal/types",
+    ],
+)
+
+go_test(
+    name = "issueops_test",
+    srcs = [
+        "claimer_external_test.go",
+        "issueops_external_test.go",
+    ],
+    deps = [
+        ":issueops",
+        "//:beads",
+    ],
+)
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

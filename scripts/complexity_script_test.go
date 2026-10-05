@@ -102,7 +102,7 @@ func TestComplexityScriptDiffReportsCrossingAndTrueDeletionOnly(t *testing.T) {
 	// The phase file is an explicit head/base discriminator. This keeps the
 	// fixture independent of checkout directory names and worktree layout.
 	writeExecutable(t, fake, "#!/bin/sh\nif [ \"$(cat "+shellQuote(phase)+")\" = head ]; then\nprintf '%s\\n' '31 main Crossing cmd/cross.go:2:1' '10 main Drop cmd/drop.go:2:1'\nprintf '%s\\n' base >"+shellQuote(phase)+"\nelse\nprintf '%s\\n' '25 main Crossing cmd/cross.go:1:1' '58 main Drop cmd/drop.go:1:1' '40 main Gone cmd/gone.go:1:1' '12 main Quiet cmd/quiet.go:1:1'\nprintf '%s\\n' head >"+shellQuote(phase)+"\nfi\n")
-	out, err := runComplexityDiff(t, sourceRepoRoot(t), fake)
+	out, err := runComplexityDiff(t, complexityGitFixture(t), fake)
 	if err != nil {
 		t.Fatalf("diff failed: %v\n%s", err, out)
 	}
@@ -155,6 +155,48 @@ func runComplexityDiff(t *testing.T, repo, tool string) (string, error) {
 	cmd.Env = append(os.Environ(), "COMPLEXITY_TOOL="+tool, "COMPLEXITY_BASE_REF=HEAD", "COMPLEXITY_THRESHOLD=30")
 	data, err := cmd.CombinedOutput()
 	return string(data), err
+}
+
+// complexityGitFixture returns a one-commit git repository holding
+// scripts/ci/complexity.sh, for diff mode (which needs COMPLEXITY_BASE_REF to
+// resolve). The fake analyzer ignores the tree, so the fixture needs no Go
+// source beyond one placeholder; it keeps the test off the real checkout's history, which Bazel's
+// runfiles tree does not have.
+func complexityGitFixture(t *testing.T) string {
+	t.Helper()
+	requireHostTool(t, "git")
+	script, err := os.ReadFile(filepath.Join(sourceRepoRoot(t), "scripts", "ci", "complexity.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, "scripts", "ci"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "scripts", "ci", "complexity.sh"), script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// complexity.sh scans cmd/ etc.; an empty path list trips `set -u` on
+	// bash 3.2 (macOS), so give it one package like the real tree has.
+	if err := os.MkdirAll(filepath.Join(repo, "cmd"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "cmd", "cross.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"add", "-A"},
+		{"-c", "user.name=beads-test", "-c", "user.email=test@beads.local", "-c", "commit.gpgsign=false",
+			"commit", "-q", "-m", "fixture"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	return repo
 }
 
 func shellQuote(s string) string {

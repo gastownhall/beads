@@ -148,6 +148,15 @@ func cliCompatibleMigrationSQL(name, sqlText string) string {
 		// yet, and still has durable_state as the JSON type 0067 gave it, so
 		// both of 0068's steps always fire on a fresh bundle.
 		return cliMigration0068AddAttributionStatus
+	case "0069_widen_issue_versions_datetime_precision.up.sql":
+		// Direct DDL for the same reason as 0068: the source migration's
+		// PREPARE guards (DATETIME_PRECISION probes) are what make the raw
+		// .up.sql idempotent when replayed onto an already-widened store,
+		// and the 2.2.x CLI no-ops a prepared MODIFY COLUMN. Nothing before
+		// 0069 in the fresh-bundle series widens change_at or removed_at --
+		// 0067 creates both as plain DATETIME and 0068 retypes only
+		// durable_state -- so both of 0069's MODIFYs always fire here too.
+		return cliMigration0069WidenIssueVersionsDatetimePrecision
 	default:
 		return sqlText
 	}
@@ -270,6 +279,16 @@ ALTER TABLE wisps ADD COLUMN current_revision BIGINT NOT NULL DEFAULT 1;`
 // the retype always fires here; no wisps twin exists for this table.
 const cliMigration0068AddAttributionStatus = `ALTER TABLE issue_versions ADD COLUMN attribution_status VARCHAR(20) NOT NULL;
 ALTER TABLE issue_versions MODIFY COLUMN durable_state LONGBLOB;`
+
+// cliMigration0069WidenIssueVersionsDatetimePrecision is 0069 with its two
+// guarded PREPARE blocks replaced by the direct MODIFYs they would run on a
+// fresh database: change_at and removed_at from 0067's plain DATETIME to
+// DATETIME(6) (the microsecond widen be-hs42e.8 / gastownhall/beads#6132
+// asks for -- see the migration's header). Neither 0067's override nor
+// 0068's touches either column, so both retypes always fire here; no wisps
+// twin exists for this table.
+const cliMigration0069WidenIssueVersionsDatetimePrecision = `ALTER TABLE issue_versions MODIFY COLUMN change_at DATETIME(6) NOT NULL;
+ALTER TABLE issue_versions MODIFY COLUMN removed_at DATETIME(6);`
 
 const cliMigration0041SplitDependenciesTarget = `DELETE FROM dolt_nonlocal_tables;
 CALL DOLT_COMMIT('-Am', 'disable nonlocal tables for fk migrations');

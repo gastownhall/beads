@@ -69,12 +69,14 @@ func assertDependencyPair(t *testing.T, bd, dir string, env []string, sentinelID
 }
 
 func migrationFrontDoorBinary(t *testing.T) string {
-	if p := os.Getenv("BEADS_TEST_BD_BINARY"); p != "" {
+	if p, err := findPrebuiltBDBinary(); err != nil {
+		t.Fatal(err)
+	} else if p != "" {
 		return p
 	}
 	out := filepath.Join(t.TempDir(), "bd")
-	cmd := exec.Command("go", "build", "-o", out, ".")
-	cmd.Dir = "."
+	cmd := exec.Command("go", "build", "-o", out, bdModulePackage)
+	cmd.Dir = bdSourceDir
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build cgo bd: %v\n%s", err, b)
 	}
@@ -110,6 +112,10 @@ func TestMigrateDoltModeFrontDoor(t *testing.T) {
 	dir := t.TempDir()
 	home := t.TempDir()
 	env := migrationFrontDoorEnv(home)
+	// The closing show/list after the reverse migration auto-start a
+	// repo-local server again; stop it before t.TempDir removes the tree it
+	// serves (the suite fails on a leaked dolt sql-server). Idempotent.
+	t.Cleanup(func() { _, _ = runBDExecWithBinary(t, bd, dir, env, "dolt", "stop") })
 	out, err := runBDExecWithBinary(t, bd, dir, env, "init", "--backend", "dolt", "--server", "--prefix", "fd", "--quiet")
 	if err != nil {
 		t.Fatalf("init: %v\n%s", err, out)

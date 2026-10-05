@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/workapi"
 )
@@ -142,11 +143,40 @@ func compareIssuesByPriority(a, b *types.Issue) int {
 	return utils.NaturalCompareIDs(a.ID, b.ID)
 }
 
+// treeCycleMarker is appended to a tree line whose issue is already an
+// ancestor on the current path. It mirrors the "(shown above)" arm of
+// bd dep tree but means something narrower: an ancestor of this very line,
+// not any node the walk happened to print earlier.
+//
+// It names the edge class rather than a command to run. childrenMap is built
+// from parent-child edges alone, so every cycle this marker can fire on is a
+// parent-child cycle — and no command reports that class today: bd dep cycles
+// and bd doctor both walk the blocking graph (DetectCycles uses
+// AppendBlockingGraphInTx deliberately; see issueops/cycles.go), which admits
+// blocks and conditional-blocks only. Sent there, the reader gets an
+// affirmative "No dependency cycles detected" for the very store that just
+// produced this line. Cite a command here only once one can see these edges.
+const treeCycleMarker = "(cycle: shown above; parent-child cycle in stored edges)"
+
 // printPrettyTree recursively prints the issue tree.
 // Children use the requested list order. With --deps, dependency order takes
 // precedence and the requested order breaks ties. When dr is set, each node's
 // dependency edges are annotated just beneath it.
 func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender, compare func(a, b *types.Issue) int) {
+	printPrettyTreePath(childrenMap, parentID, prefix, dr, compare, map[string]bool{parentID: true})
+}
+
+// printPrettyTreePath is printPrettyTree carrying the set of ancestors on the
+// current root-to-node path. childrenMap comes from stored edges, and a cycle
+// in it (parent-child rows imported without validation, or a build that nested
+// every dependency on an epic, as v1.2.2 did) must not recurse forever: the
+// walk allocates until the host swaps (GH#5887). A child already on the path
+// is printed once with a marker and not descended. The set is scoped to the
+// path, not the whole walk, so a node reachable through two parents still
+// renders under both; only a true ancestor counts as a cycle. Like the
+// "(shown above)" arm of bd dep tree, the marked line carries no --deps
+// annotations: they were printed with the node's first appearance.
+func printPrettyTreePath(childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender, compare func(a, b *types.Issue) int, onPath map[string]bool) {
 	children := childrenMap[parentID]
 
 	if dr != nil {
@@ -161,14 +191,20 @@ func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, pre
 		if isLast {
 			connector = "└── "
 		}
-		fmt.Printf("%s%s%s\n", prefix, connector, formatPrettyIssue(child))
+		if onPath[child.ID] {
+			fmt.Printf("%s%s%s %s\n", prefix, connector, formatPrettyIssue(child), ui.RenderMuted(treeCycleMarker)) //nolint:forbidigo // Pretty-tree output is outside the --format contract.
+			continue
+		}
+		fmt.Printf("%s%s%s\n", prefix, connector, formatPrettyIssue(child)) //nolint:forbidigo // Pretty-tree output is outside the --format contract.
 
 		extension := "│   "
 		if isLast {
 			extension = "    "
 		}
 		dr.annotationsFor(child.ID, prefix+extension)
-		printPrettyTree(childrenMap, child.ID, prefix+extension, dr, compare)
+		onPath[child.ID] = true
+		printPrettyTreePath(childrenMap, child.ID, prefix+extension, dr, compare, onPath)
+		delete(onPath, child.ID)
 	}
 }
 
@@ -251,15 +287,15 @@ func readyFooterScope(statusSelector string) string {
 func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, depsMode string, truncated, readyFiltered bool, statusSelector, sortBy string, reverse bool) {
 	if showHeader {
 		// Clear screen and show header
-		fmt.Print("\033[2J\033[H")
-		fmt.Println(strings.Repeat("=", 80))
-		fmt.Printf("Beads - Open & In Progress (%s)\n", time.Now().Format("15:04:05"))
-		fmt.Println(strings.Repeat("=", 80))
-		fmt.Println()
+		fmt.Print("\033[2J\033[H")                                                     //nolint:forbidigo // Pretty-tree output is outside the --format contract.
+		fmt.Println(strings.Repeat("=", 80))                                           //nolint:forbidigo // Pretty-tree output is outside the --format contract.
+		fmt.Printf("Beads - Open & In Progress (%s)\n", time.Now().Format("15:04:05")) //nolint:forbidigo // Pretty-tree output is outside the --format contract.
+		fmt.Println(strings.Repeat("=", 80))                                           //nolint:forbidigo // Pretty-tree output is outside the --format contract.
+		fmt.Println()                                                                  //nolint:forbidigo // Pretty-tree output is outside the --format contract.
 	}
 
 	if len(issues) == 0 {
-		fmt.Println("No issues found.")
+		fmt.Println("No issues found.") //nolint:forbidigo // Pretty-tree output is outside the --format contract.
 		return
 	}
 
@@ -277,14 +313,14 @@ func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDe
 	}
 
 	for _, issue := range roots {
-		fmt.Println(formatPrettyIssue(issue))
+		fmt.Println(formatPrettyIssue(issue)) //nolint:forbidigo // Pretty-tree output is outside the --format contract.
 		dr.annotationsFor(issue.ID, "")
 		printPrettyTree(childrenMap, issue.ID, "", dr, compare)
 	}
 
 	// Summary — counts describe the shown page; never label a truncated page "Total".
-	fmt.Println()
-	fmt.Println(strings.Repeat("-", 80))
+	fmt.Println()                        //nolint:forbidigo // Pretty-tree output is outside the --format contract.
+	fmt.Println(strings.Repeat("-", 80)) //nolint:forbidigo // Pretty-tree output is outside the --format contract.
 	openCount := 0
 	inProgressCount := 0
 	for _, issue := range issues {
@@ -295,11 +331,11 @@ func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDe
 			inProgressCount++
 		}
 	}
-	fmt.Println(listFooterLine(len(issues), openCount, inProgressCount, truncated, readyFiltered, statusSelector))
-	fmt.Println()
-	fmt.Println("Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
-	fmt.Println("Priority: P0–P4 (label only; not a status icon)")
+	fmt.Println(listFooterLine(len(issues), openCount, inProgressCount, truncated, readyFiltered, statusSelector)) //nolint:forbidigo // Pretty-tree output is outside the --format contract.
+	fmt.Println()                                                                                                  //nolint:forbidigo // Pretty-tree output is outside the --format contract.
+	fmt.Println("Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")                                  //nolint:forbidigo // Pretty-tree output is outside the --format contract.
+	fmt.Println("Priority: P0–P4 (label only; not a status icon)")                                                 //nolint:forbidigo // Pretty-tree output is outside the --format contract.
 	if dr != nil {
-		fmt.Printf("Deps:   %s = depends-on / relationship (points to target); siblings ordered so dependencies come first; ↗ = target outside current view\n", depGlyph)
+		fmt.Printf("Deps:   %s = depends-on / relationship (points to target); siblings ordered so dependencies come first; ↗ = target outside current view\n", depGlyph) //nolint:forbidigo // Pretty-tree output is outside the --format contract.
 	}
 }

@@ -556,34 +556,57 @@ func WouldCreateSchedulingCycleInTx(ctx context.Context, tx DBTX, issueID, depen
 // ready-work computation, so a chain mixing blocks and parent-child edges
 // can form a logical livelock that prevents anything from being ready.
 func cycleReachabilityQuery(depTables []string) string {
-	if len(depTables) == 1 {
-		return fmt.Sprintf(`
-			WITH RECURSIVE reachable(node) AS (
-				SELECT ?
-				UNION
-				SELECT %s
-				FROM reachable r
-				JOIN %s d ON d.issue_id = r.node AND d.type IN ('blocks', 'conditional-blocks', 'parent-child')
-			)
-			SELECT COUNT(*) FROM reachable WHERE node = ?
-		`, DepTargetExpr, depTables[0])
-	}
+	return reachabilityQuery("reachable", depTables, "d.type IN ('blocks', 'conditional-blocks', 'parent-child')")
+}
 
-	var unions []string
+// reachabilityQuery builds a recursive walk (CTE named cte) from the first
+// placeholder along outgoing dependency rows matching typeFilter, counting
+// whether the second placeholder is reached (the anchor included). Callers
+// pass constants for cte, depTables and typeFilter, which are spliced in
+// verbatim.
+//
+// Each dependency table gets its own recursive member joined directly on
+// d.issue_id, so every recursion step is an index lookup on issue_id. Joining
+// a UNION of the tables instead (the earlier shape) leaves Dolt nothing to
+// index: it rescans every matching edge per step, which on a 100k-edge graph
+// is minutes for one check.
+//
+// The join hints and the filter placement are both load-bearing, and
+// TestGraphWalkPlansHonorJoinHints (embedded) pins the resulting plans:
+//
+//   - JOIN_ORDER(r, d) LOOKUP_JOIN(r, d) pins the frontier as the outer side
+//     with an index probe into the edge table (as sqlbuild.DescendantWalkQuery
+//     does). Without them the Dolt sql-server's cost-based planner picks a
+//     type-index scan join when table statistics are not yet available (e.g.
+//     right after a commit), and the embedded engine does so for a member
+//     whose table has no statistics, with the same minutes-long result. On
+//     MySQL, JOIN_ORDER is honored (the order it forces is the one wanted) and
+//     the unknown LOOKUP_JOIN hint is ignored with a warning.
+//   - typeFilter is applied in the projection, not the join condition: a row
+//     of another type yields a NULL node, which joins no row and never equals
+//     the goal, so the reachable set is unchanged. Left in the ON clause, a
+//     single-type filter ("d.type = 'parent-child'") is an equality the
+//     planner can satisfy through a type-leading index instead, keyed by the
+//     constant — a lookup that returns every parent-child row of the table
+//     for each frontier node.
+//
+// The reachable set is the same as the single-member walk over the UNION:
+// UNION distinct merges what every member produces per step.
+func reachabilityQuery(cte string, depTables []string, typeFilter string) string {
+	members := make([]string, 0, len(depTables))
 	for _, t := range depTables {
-		unions = append(unions, fmt.Sprintf("SELECT issue_id, %s AS depends_on_id FROM %s WHERE type IN ('blocks', 'conditional-blocks', 'parent-child')", DepTargetExpr, t))
+		members = append(members, fmt.Sprintf(
+			"SELECT /*+ JOIN_ORDER(r, d) LOOKUP_JOIN(r, d) */ CASE WHEN %s THEN %s END FROM %s r JOIN %s d ON d.issue_id = r.node",
+			typeFilter, depTargetExpr("d"), cte, t))
 	}
-	unionQuery := strings.Join(unions, " UNION ")
 	return fmt.Sprintf(`
-		WITH RECURSIVE reachable(node) AS (
+		WITH RECURSIVE %s(node) AS (
 			SELECT ?
 			UNION
-			SELECT d.depends_on_id
-			FROM reachable r
-			JOIN (%s) d ON d.issue_id = r.node
+			%s
 		)
-		SELECT COUNT(*) FROM reachable WHERE node = ?
-	`, unionQuery)
+		SELECT COUNT(*) FROM %s WHERE node = ?
+	`, cte, strings.Join(members, "\n\t\t\tUNION\n\t\t\t"), cte)
 }
 
 func cycleDetectionTables() []string {
@@ -629,21 +652,7 @@ func CheckBlockingHierarchyInTx(ctx context.Context, tx DBTX, dep *types.Depende
 // and cousins in the same hierarchy do not match). Uses UNION distinct
 // recursion so diamond/cyclic parentage terminates by unique reachable node.
 func isAncestorInTx(ctx context.Context, tx DBTX, node, candidate string, depTables []string) (bool, error) {
-	var unions []string
-	for _, t := range depTables {
-		unions = append(unions, fmt.Sprintf("SELECT issue_id, %s AS parent_id FROM %s WHERE type = 'parent-child'", DepTargetExpr, t))
-	}
-	//nolint:gosec // G201: depTables are fixed dependency table names from cycleDetectionTables/opts.
-	query := fmt.Sprintf(`
-		WITH RECURSIVE ancestors(node) AS (
-			SELECT ?
-			UNION
-			SELECT d.parent_id
-			FROM ancestors a
-			JOIN (%s) d ON d.issue_id = a.node
-		)
-		SELECT COUNT(*) FROM ancestors WHERE node = ?
-	`, strings.Join(unions, " UNION "))
+	query := reachabilityQuery("ancestors", depTables, "d.type = 'parent-child'")
 	var n int
 	if err := tx.QueryRowContext(ctx, query, node, candidate).Scan(&n); err != nil {
 		return false, err
@@ -655,6 +664,20 @@ func DeleteWispFromDependenciesInTx(ctx context.Context, tx *sql.Tx, wispID stri
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM dependencies WHERE depends_on_wisp_id = ?", wispID); err != nil {
 		return fmt.Errorf("delete wisp %s from dependencies: %w", wispID, err)
+	}
+	// wisp_dependencies is part of the wisp deletion set (DeleteCascadeTables),
+	// but no delete path cleaned it: every wisp deletion orphaned its
+	// wisp_dependencies rows on both sides, accumulating dangling parent/child
+	// refs that reaper scans flag as anomalies. Remove the wisp's edges as
+	// child (issue_id) and as parent (depends_on_wisp_id). Two targeted
+	// DELETEs, not one OR query, so each hits its own index (ff-tqm).
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM wisp_dependencies WHERE issue_id = ?", wispID); err != nil {
+		return fmt.Errorf("delete wisp %s child rows from wisp_dependencies: %w", wispID, err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM wisp_dependencies WHERE depends_on_wisp_id = ?", wispID); err != nil {
+		return fmt.Errorf("delete wisp %s parent rows from wisp_dependencies: %w", wispID, err)
 	}
 	return nil
 }
@@ -669,6 +692,19 @@ func DeleteWispsFromDependenciesInTx(ctx context.Context, tx *sql.Tx, wispIDs []
 		fmt.Sprintf("DELETE FROM dependencies WHERE depends_on_wisp_id IN (%s)", inClause),
 		args...); err != nil {
 		return fmt.Errorf("delete wisps from dependencies: %w", err)
+	}
+	// See DeleteWispFromDependenciesInTx: wisp_dependencies rows must go with
+	// the wisps, on both the child and parent side. Two targeted DELETEs, not
+	// one OR query, so each hits its own index (ff-tqm).
+	if _, err := tx.ExecContext(ctx,
+		fmt.Sprintf("DELETE FROM wisp_dependencies WHERE issue_id IN (%s)", inClause),
+		args...); err != nil {
+		return fmt.Errorf("delete wisps child rows from wisp_dependencies: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		fmt.Sprintf("DELETE FROM wisp_dependencies WHERE depends_on_wisp_id IN (%s)", inClause),
+		args...); err != nil {
+		return fmt.Errorf("delete wisps parent rows from wisp_dependencies: %w", err)
 	}
 	return nil
 }
@@ -1116,6 +1152,7 @@ func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID,
 		return false, fmt.Errorf("recompute is_blocked after remove dependency %s -> %s: %w", issueID, dependsOnID, err)
 	}
 	mergeRecomputeIsBlockedResult(recomputeResult, recomputed)
+	NoteDependencyRemovalBlockedRecheck(tx, issueID, dependsOnID, affectedIssues, affectedWisps)
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// Never gated on emitEvent — a structural removal is as real to a replaying
 	// consumer as one from an explicit dep verb. The same holds for the

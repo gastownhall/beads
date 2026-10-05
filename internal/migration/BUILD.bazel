@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "migration",
+    srcs = ["freeze.go"],
+    importpath = "github.com/steveyegge/beads/internal/migration",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "migration_test",
+    srcs = ["freeze_test.go"],
+    embed = [":migration"],
+)

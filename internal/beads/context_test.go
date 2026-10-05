@@ -7,9 +7,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
 )
 
 // TestGetRepoContextForWorkspace_NormalRepo tests context resolution for a normal git repository
@@ -1299,4 +1301,99 @@ func initGitRepoWithCommit(dir string) error {
 	commitCmd := exec.Command("git", "commit", "-m", "Initial commit")
 	commitCmd.Dir = dir
 	return commitCmd.Run()
+}
+
+func TestRoleIgnoresInheritedGitRouting(t *testing.T) {
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	home, target, decoy := t.TempDir(), t.TempDir(), t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	runGit := func(t *testing.T, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Env = gitenv.ScrubRouting(os.Environ())
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("fixture git %v: %v: %s", args, err, out)
+		}
+	}
+	for _, repo := range []string{target, decoy} {
+		runGit(t, "-C", repo, "init", "--quiet")
+	}
+	runGit(t, "-C", target, "config", "beads.role", "maintainer")
+	runGit(t, "-C", decoy, "config", "beads.role", "contributor")
+	t.Chdir(decoy)
+	rc := &RepoContext{RepoRoot: target} // The caller has already selected this repo.
+	for _, inline := range []bool{false, true} {
+		name, generic := "repository", "maintainer"
+		poison := map[string]string{"GIT_DIR": filepath.Join(decoy, ".git"), "GIT_WORK_TREE": decoy}
+		if inline {
+			name, generic = "inline", "injected-role"
+			poison = map[string]string{"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "beads.role", "GIT_CONFIG_VALUE_0": generic}
+		}
+		t.Run(name, func(t *testing.T) {
+			for key, value := range poison {
+				t.Setenv(key, value)
+			}
+			if role, ok := rc.Role(); !ok || role != Maintainer {
+				t.Errorf("Role() = %q, %v; want maintainer, true", role, ok)
+			}
+			if out, err := rc.GitOutput(t.Context(), "config", "--get", "beads.role"); err != nil || strings.TrimSpace(out) != generic {
+				t.Errorf("generic GitOutput = %q, %v; want %q", out, err, generic)
+			}
+			for key, value := range poison {
+				if os.Getenv(key) != value {
+					t.Errorf("Role changed parent environment %s", key)
+				}
+			}
+		})
+	}
+	t.Run("common_dir", func(t *testing.T) {
+		commonDir := filepath.Join(decoy, ".git")
+		t.Setenv("GIT_COMMON_DIR", commonDir)
+		// Unlike GIT_DIR, this key is not overridden by the generic repository pins.
+		if role, ok := rc.Role(); !ok || role != Maintainer {
+			t.Errorf("Role() = %q, %v; want maintainer, true", role, ok)
+		}
+		if out, err := rc.GitOutput(t.Context(), "config", "--get", "beads.role"); err != nil || strings.TrimSpace(out) != string(Contributor) {
+			t.Errorf("generic GitOutput = %q, %v; want contributor", out, err)
+		}
+		if os.Getenv("GIT_COMMON_DIR") != commonDir {
+			t.Error("Role changed parent GIT_COMMON_DIR")
+		}
+	})
+	t.Run("live_values", func(t *testing.T) {
+		for _, value := range []string{"contributor", "invalid", ""} {
+			runGit(t, "-C", target, "config", "beads.role", value)
+			if role, ok := rc.Role(); !ok || role != UserRole(value) {
+				t.Errorf("fresh Role() = %q, %v; want %q, true", role, ok, value)
+			}
+		}
+	})
+	t.Run("absent_and_global", func(t *testing.T) {
+		runGit(t, "-C", target, "config", "--unset", "beads.role")
+		if role, ok := rc.Role(); ok || role != "" {
+			t.Errorf("absent Role() = %q, %v", role, ok)
+		}
+		if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[beads]\nrole = contributor\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if role, ok := rc.Role(); !ok || role != Contributor {
+			t.Errorf("global Role() = %q, %v", role, ok)
+		}
+	})
+	t.Run("redirected", func(t *testing.T) {
+		redirected := &RepoContext{RepoRoot: t.TempDir(), IsRedirected: true}
+		if role, ok := redirected.Role(); !ok || role != Contributor {
+			t.Errorf("redirected Role() = %q, %v", role, ok)
+		}
+	})
 }

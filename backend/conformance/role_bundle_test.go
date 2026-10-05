@@ -9,12 +9,13 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"reflect"
 	"runtime"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // TestRoleContractCasesCoverEveryContractCase is the drift guard on the role
@@ -314,7 +315,7 @@ func TestRoleCasesFailsWhenAFactoryReturnsNil(t *testing.T) {
 func runProbeChild(t *testing.T, mode string) (string, error) {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.v")
-	cmd.Env = append(os.Environ(), roleBundleProbeEnv+"="+mode)
+	cmd.Env = append(bazeltest.ShardFreeEnv(os.Environ()), roleBundleProbeEnv+"="+mode)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -333,7 +334,7 @@ func parseRoleContractCases(t *testing.T) []string {
 		t.Fatal("runtime.Caller failed")
 	}
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, filepath.Dir(thisFile), func(fi fs.FileInfo) bool {
+	pkgs, err := parser.ParseDir(fset, bazeltest.CallerDir(thisFile, "backend/conformance"), func(fi fs.FileInfo) bool {
 		return !strings.HasSuffix(fi.Name(), "_test.go")
 	}, 0)
 	if err != nil {

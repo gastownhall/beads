@@ -1,0 +1,169 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+go_library(
+    name = "fix",
+    srcs = [
+        "artifacts.go",
+        "blocked.go",
+        "clone_local_fks.go",
+        "common.go",
+        "config_values.go",
+        "database_config.go",
+        "database_integrity.go",
+        "dep_keys.go",
+        "dependency_sql.go",
+        "dolt_format.go",
+        "fs.go",
+        "hooks.go",
+        "label_whitespace.go",
+        "locks.go",
+        "maintenance.go",
+        "metadata.go",
+        "metadata_json.go",
+        "migrate.go",
+        "permissions.go",
+        "remotes.go",
+        "repo_fingerprint.go",
+        "store.go",
+        "untracked.go",
+        "validation.go",
+    ],
+    importpath = "github.com/steveyegge/beads/cmd/bd/doctor/fix",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//internal/beads",
+        "//internal/configfile",
+        "//internal/doltserver",
+        "//internal/eventsjournal",
+        "//internal/storage",
+        "//internal/storage/depid",
+        "//internal/storage/dolt",
+        "//internal/storage/doltutil",
+        "//internal/storage/issueops",
+        "//internal/types",
+        "//internal/utils",
+        "@com_github_burntsushi_toml//:toml",
+        "@com_github_go_sql_driver_mysql//:mysql",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)
+
+go_test(
+    name = "fix_test",
+    srcs = [
+        "artifacts_test.go",
+        "clone_local_fks_cgo_test.go",
+        "common_test.go",
+        "database_config_test.go",
+        "database_integrity_test.go",
+        "dep_keys_test.go",
+        "dependency_sql_test.go",
+        "e2e_test.go",
+        "fix_edge_cases_test.go",
+        "fix_test.go",
+        "fs_test.go",
+        "git_repo_template_test.go",
+        "hooks_test.go",
+        "journal_cgo_test.go",
+        "label_whitespace_test.go",
+        "locks_test.go",
+        "maintenance_cgo_test.go",
+        "maintenance_test.go",
+        "metadata_dolt_test.go",
+        "metadata_probe_test.go",
+        "metadata_test.go",
+        "migrate_import_test.go",
+        "remotes_test.go",
+        "repo_fingerprint_test.go",
+        "suite_temp_test.go",
+        "symlink_test.go",
+        "testmain_cgo_test.go",
+        "testmain_nocgo_test.go",
+        "validation_test.go",
+    ],
+    embed = [":fix"],
+    deps = [
+        "//internal/configfile",
+        "//internal/doltserver",
+        "//internal/storage/depid",
+        "//internal/storage/dolt",
+        "//internal/storage/doltutil",
+        "//internal/storage/issueops",
+        "//internal/testutil",
+        "//internal/types",
+        "@com_github_data_dog_go_sqlmock//:go-sqlmock",
+        "@com_github_go_sql_driver_mysql//:mysql",
+    ],
+)
+
+# The Dolt-backed half of fix_test, as pr.yml's "Test doctor/fix (Dolt-backed,
+# hard-require container)" job runs it: TestMain starts a dolt sql-server
+# container through testcontainers, and BEADS_FIX_REQUIRE_DOLT=1 turns a
+# missing container into a failure instead of a silent skip. fix_test itself
+# stays untagged: under --config=prcore (BEADS_TEST_SKIP=dolt, like pr-core's
+# `go test`) it never touches docker and runs anywhere.
+#
+# Tags:
+#   requires-docker: needs a docker daemon; excluded from --config=prcore/ci,
+#     selected by --config=docker.
+#   no-remote-exec: the daemon is on the host, not on remote workers.
+sh_test(
+    name = "fix_docker_test",
+    size = "large",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :fix_test)"],
+    data = [":fix_test"],
+    # Pinned to the container backend (the docker lane is the A/B control);
+    # rule env beats --test_env, so =local on the command line cannot flip it.
+    env = {
+        "BEADS_FIX_REQUIRE_DOLT": "1",
+        "BEADS_TEST_DOLT_SERVER": "container",
+    },
+    tags = [
+        "no-remote-exec",
+        "requires-docker",
+    ],
+)
+
+# The Dolt-backed half of fix_test, as pr.yml's "Test doctor/fix (Dolt-backed,
+# hard-require container)" step runs it, on the dolt-server lane: TestMain's
+# server is a local `dolt sql-server` child of the test process, and
+# BEADS_FIX_REQUIRE_DOLT=1 keeps the suite from skipping when it cannot start.
+# fix_docker_test is the A/B control. 4 shards: unsharded it was the lane's
+# critical path (~4 min remotely).
+#
+# Tags:
+#   dolt-server: starts hermetic dolt sql-servers from the pinned dolt in the
+#     test wrapper's runfiles (BEADS_TEST_DOLT_SERVER=local); excluded from
+#     --config=prcore/ci, selected by --config=doltserver. Runs remotely: no
+#     docker, and a missing server fails (REQUIRE=1) instead of skipping, so
+#     a cached pass is as good as a fresh one.
+sh_test(
+    name = "fix_dolt_test",
+    size = "large",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :fix_test)"],
+    data = [":fix_test"],
+    env = {
+        "BEADS_FIX_REQUIRE_DOLT": "1",
+        "BEADS_TEST_DOLT_SERVER": "local",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+        "GOMAXPROCS": "4",
+    },
+    shard_count = 4,
+    tags = ["dolt-server"],
+)
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

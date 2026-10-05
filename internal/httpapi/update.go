@@ -22,6 +22,10 @@ const (
 	// closed set that can grow without ever colliding with a request-level
 	// member.
 	updatePatchMember = "patch"
+	// updateClaimMember asks the update to CLAIM the issue for `actor` in the
+	// same transaction as the patch: issueops.UpdateRequest.Claim, which is
+	// what `bd update --claim` sends on the direct route.
+	updateClaimMember = "claim"
 	// maxUpdateBodyBytes bounds the request body. A patch can carry a
 	// description, a design and acceptance criteria at once, so the claim's
 	// megabyte is too tight and the batch's four is the right order.
@@ -34,8 +38,8 @@ const (
 // error string.
 var (
 	updateRequestMembers = []string{
-		"actor", "expected_assignee", "expected_status", "expected_version",
-		"force_assignee_transfer", "force_close_policy", updatePatchMember,
+		"actor", updateClaimMember, "expected_assignee", "expected_status", "expected_version",
+		"force_assignee_transfer", "force_close_policy", "force_notes_overwrite", updatePatchMember,
 	}
 	issuePatchMembers = []string{
 		"title", "description", "design", "acceptance_criteria",
@@ -141,7 +145,13 @@ func (s *Server) updateRequest(w http.ResponseWriter, r *http.Request, id string
 	if !ok {
 		return issueops.UpdateRequest{}, false
 	}
-	patch, ok := s.issuePatch(w, r, id, members)
+	// Read BEFORE the patch, because it decides whether an empty patch is a
+	// request: a claim that edits nothing else is `bd update <id> --claim`.
+	claim, ok := s.booleanMember(w, r, members, updateClaimMember)
+	if !ok {
+		return issueops.UpdateRequest{}, false
+	}
+	patch, ok := s.issuePatch(w, r, id, members, claim)
 	if !ok {
 		return issueops.UpdateRequest{}, false
 	}
@@ -167,6 +177,39 @@ func (s *Server) updateRequest(w http.ResponseWriter, r *http.Request, id string
 	if !ok {
 		return issueops.UpdateRequest{}, false
 	}
+	forceNotesOverwrite, ok := s.booleanMember(w, r, members, "force_notes_overwrite")
+	if !ok {
+		return issueops.UpdateRequest{}, false
+	}
+	if forceNotesOverwrite && !patch.Notes.Set {
+		s.fail(w, r, InvalidArgument("force_notes_overwrite", ReasonInvalidValue,
+			"`force_notes_overwrite` bypasses the fence on a NOTES REPLACEMENT; send `patch.notes` with it"))
+		return issueops.UpdateRequest{}, false
+	}
+	// The role refuses a claim beside the assignee and status guards, and a
+	// claim beside the forced transfer (ValidateUpdateRequest): the claim is
+	// its own compare-and-set, with claim-pool eligibility the guards do not
+	// know. Refused HERE, naming `claim`, for the reason the pair below is — a
+	// role ErrValidation would otherwise reach the client as the generic
+	// "a patch value was refused" 400, naming a member the caller never got
+	// wrong. `expected_version` is NOT refused: the role checks it before the
+	// claim, exactly as on the direct route.
+	if claim {
+		for _, conflicting := range []struct {
+			present bool
+			member  string
+		}{
+			{expectedAssignee != nil, "expected_assignee"},
+			{expectedStatus != nil, "expected_status"},
+			{forceAssigneeTransfer, "force_assignee_transfer"},
+		} {
+			if conflicting.present {
+				s.fail(w, r, InvalidArgument(updateClaimMember, ReasonInvalidValue,
+					"`claim` is its own compare-and-set; it cannot be combined with `"+conflicting.member+"`"))
+				return issueops.UpdateRequest{}, false
+			}
+		}
+	}
 	// The role documents both combinations as invalid, and refusing them HERE
 	// keeps the 400 a statement about the request rather than a translated
 	// storage error — the `notes`/`append_notes` rule, applied to the two
@@ -185,18 +228,22 @@ func (s *Server) updateRequest(w http.ResponseWriter, r *http.Request, id string
 		}
 	}
 
-	// Claim stays ZERO — acquiring work is `{id}:claim`, which carries its own
-	// eligibility rules — and so does IssuePlaneOnly, because this operation
-	// resolves across both planes.
+	// Claim is passed through, not re-implemented: the lifecycle role applies
+	// the same claim `bd update --claim` gets on the direct route — eligibility,
+	// claim pools, same-actor idempotence — in the transaction that applies the
+	// patch, so a refused claim writes none of it. IssuePlaneOnly stays ZERO,
+	// because this operation resolves across both planes.
 	return issueops.UpdateRequest{
 		Actor:                 actor,
 		IssueID:               id,
 		Patch:                 patch,
+		Claim:                 claim,
 		ExpectedVersion:       expectedVersion,
 		ExpectedStatus:        expectedStatus,
 		ExpectedAssignee:      expectedAssignee,
 		ForceClosePolicy:      forceClosePolicy,
 		ForceAssigneeTransfer: forceAssigneeTransfer,
+		ForceNotesOverwrite:   forceNotesOverwrite,
 		Provenance:            updateProvenance,
 	}, true
 }
@@ -245,7 +292,10 @@ const updateProvenance = "bd serve: update issue"
 // because it models both as a nil pointer. Explicit `null` is a third state
 // this reads directly off the raw bytes — a clear on the four nullable members,
 // and a 400 naming the member everywhere else.
-func (s *Server) issuePatch(w http.ResponseWriter, r *http.Request, id string, members map[string]json.RawMessage) (issueops.IssuePatch, bool) {
+//
+// An EMPTY patch is a request only beside `claim`: the claim is then the whole
+// write, which is `bd update <id> --claim` with no other flag.
+func (s *Server) issuePatch(w http.ResponseWriter, r *http.Request, id string, members map[string]json.RawMessage, claim bool) (issueops.IssuePatch, bool) {
 	refuse := func(member, detail string) (issueops.IssuePatch, bool) {
 		s.fail(w, r, InvalidArgument(patchParam(member), ReasonInvalidValue, detail))
 		return issueops.IssuePatch{}, false
@@ -260,9 +310,12 @@ func (s *Server) issuePatch(w http.ResponseWriter, r *http.Request, id string, m
 		return refuse("", "`"+updatePatchMember+"` must be a JSON object")
 	}
 	if len(fields) == 0 {
+		if claim {
+			return issueops.IssuePatch{}, true
+		}
 		// A write that writes nothing is a client bug, not a no-op to answer —
 		// the batch-create empty-items judgement, applied to a patch.
-		return refuse("", "`"+updatePatchMember+"` must carry at least one field; an update that updates nothing is refused rather than answered")
+		return refuse("", "`"+updatePatchMember+"` must carry at least one field, or ride beside `"+updateClaimMember+"`; an update that updates nothing is refused rather than answered")
 	}
 	if offender, unknown := unknownMember(fields, issuePatchMembers); unknown {
 		s.failUnknownMember(w, r, patchParam(offender), issuePatchMembers)
@@ -464,15 +517,15 @@ func patchParam(member string) string {
 // EVERY 409 BRANCH READS TYPED FIELDS, never prose, and every one of them is
 // matched BEFORE the ErrValidation and ErrNotFound arms. That order is the
 // whole correctness of this function, and the hazard it avoids is worse than a
-// disagreement between backends: NEITHER LEG WRAPS THESE FIVE FAMILIES IN
+// disagreement between backends: NEITHER LEG WRAPS THESE SIX FAMILIES IN
 // ErrValidation. The store legs return ExecuteUpdate's error through
 // runIssueOperationTx unchanged (internal/storage/dolt/issue_operations.go) and
 // the unit of work returns ApplyUpdate's unchanged
 // (internal/storage/uow/issue_operations.go), so a precondition miss, a close-
-// policy refusal, the assignee fence and both graph refusals reach here as bare
-// sentinels. Below the ErrValidation arm they would all fall into `!Is(...)`
-// and be swallowed into failErr — a generic 500, on BOTH legs, for five
-// conditions this document names by code.
+// policy refusal, the assignee fence, the notes-overwrite fence and both graph
+// refusals reach here as bare sentinels. Below the ErrValidation arm they
+// would all fall into `!Is(...)` and be swallowed into failErr — a generic
+// 500, on BOTH legs, for six conditions this document names by code.
 //
 // NEITHER BRANCH QUOTES THE ROLE'S MESSAGE. A refusal from the workspace's
 // configured vocabulary arrives as prose about statuses and types, and a
@@ -509,6 +562,14 @@ func (s *Server) failUpdate(w http.ResponseWriter, r *http.Request, request issu
 		errors.Is(err, issueops.ErrAssigneeMismatch):
 		s.fail(w, r, updatePreconditionResult(request, err))
 
+	// A REFUSED CLAIM, answered exactly as `{id}:claim` answers it —
+	// `already_claimed` with the holder, `not_claimable` with the status — and
+	// naming `claim`, the member that earned it. Matched BEFORE the assignee
+	// fence's arm below, which shares the `already_claimed` sentinel but blames
+	// `patch.assignee` and steers toward a force this request cannot send.
+	case request.Claim && (errors.Is(err, storage.ErrAlreadyClaimed) || errors.Is(err, storage.ErrNotClaimable)):
+		s.fail(w, r, named(claimRefusal(err), updateClaimMember))
+
 	case errors.Is(err, issueops.ErrCloseOpenChildren):
 		res := named(newResult(CodeNotClosable,
 			"`patch.status` closes an issue with open children; close them first, or send `force_close_policy`"),
@@ -521,8 +582,8 @@ func (s *Server) failUpdate(w http.ResponseWriter, r *http.Request, request issu
 	case errors.Is(err, issueops.ErrCloseBlocked):
 		// No `open_children` member, and its ABSENCE is what tells a client
 		// which of the two close-policy refusals it got.
-		s.fail(w, r, named(newResult(CodeNotClosable,
-			"`patch.status` closes a blocked issue; clear the blocker, or send `force_close_policy`"),
+		s.fail(w, r, named(closeBlockedResult(err,
+			"`patch.status` closes a blocked issue", "clear the blocker, or send `force_close_policy`"),
 			patchParam("status")))
 
 	case errors.Is(err, storage.ErrAlreadyClaimed):
@@ -542,6 +603,11 @@ func (s *Server) failUpdate(w http.ResponseWriter, r *http.Request, request issu
 			}
 		}
 		s.fail(w, r, res)
+
+	case errors.Is(err, storage.ErrNotesOverwrite):
+		s.fail(w, r, named(newResult(CodeNotesOverwrite,
+			"`patch.notes` would replace existing non-empty notes; send `force_notes_overwrite`, or use `patch.append_notes` to preserve history"),
+			patchParam("notes")))
 
 	case errors.As(err, &typeConflict):
 		s.fail(w, r, named(newResult(CodeDependencyExists,

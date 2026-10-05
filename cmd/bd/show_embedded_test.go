@@ -3,13 +3,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -110,7 +113,16 @@ func bdShowFail2(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
-func TestEmbeddedShow(t *testing.T) {
+// TestEmbeddedShowBasicsAndJSON was split from TestEmbeddedShow (originally
+// ~193s, measured under --config=embedded) into 2 top-level tests over
+// disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once. show_current_fallback_to_last_touched
+// (in the second group) only requires that SOME earlier subtest in its own
+// group already created/touched an issue in the shared dir — it is placed
+// after several issue-creating subtests in that group, so the redone,
+// self-contained setup still satisfies it.
+func TestEmbeddedShowBasicsAndJSON(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -146,6 +158,28 @@ func TestEmbeddedShow(t *testing.T) {
 
 	t.Run("show_nonexistent_id", func(t *testing.T) {
 		bdShowFail2(t, bd, dir, "ts-nonexistent999")
+	})
+
+	// A watch on an id that does not exist used to print "Issue not found"
+	// and exit 0 on this route, watching nothing. It now exits 1 like plain
+	// `bd show <missing>`, and like the proxied route.
+	t.Run("show_watch_nonexistent_id_exits_1", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, bd, "show", "ts-nonexistent999", "--watch")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if ctx.Err() != nil {
+			t.Fatalf("bd show --watch on a missing id kept watching:\n%s", out)
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			t.Fatalf("bd show --watch on a missing id: err=%v, want exit 1\n%s", err, out)
+		}
+		if !strings.Contains(string(out), "ts-nonexistent999") {
+			t.Errorf("output does not name the missing id:\n%s", out)
+		}
 	})
 
 	t.Run("show_no_args", func(t *testing.T) {
@@ -264,6 +298,16 @@ func TestEmbeddedShow(t *testing.T) {
 			t.Errorf("expected ID in short output: %s", out)
 		}
 	})
+}
+
+func TestEmbeddedShowDetailAndCurrent(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ts")
 
 	// ===== --long =====
 

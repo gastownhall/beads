@@ -497,3 +497,92 @@ func TestGraphExportDispatchPropagatesWriterErrors(t *testing.T) {
 		}
 	})
 }
+
+func TestGraphHumanRenderModesUseSuppliedWriter(t *testing.T) {
+	oldDOT, oldHTML := graphDOT, graphHTML
+	oldOpen, oldCompact, oldBox := graphOpen, graphCompact, graphBox
+	oldJSON := jsonOutput
+	t.Cleanup(func() {
+		graphDOT, graphHTML = oldDOT, oldHTML
+		graphOpen, graphCompact, graphBox = oldOpen, oldCompact, oldBox
+		jsonOutput = oldJSON
+	})
+
+	modes := []struct {
+		name          string
+		configure     func()
+		want          []string
+		wantSeparator bool
+		composes      bool
+	}{
+		{
+			name: "visual", configure: func() {}, wantSeparator: true, composes: true,
+			want: []string{"Dependency graph for test-a:", "test-c P2", "Total: 4 issues across 3 layers"},
+		},
+		{
+			name: "compact", configure: func() { graphCompact = true }, wantSeparator: true, composes: true,
+			want: []string{"Dependency graph for test-a (4 issues, 3 layers)", "LAYER 2", "test-c P2 Blocked task"},
+		},
+		{
+			name: "box", configure: func() { graphBox = true }, wantSeparator: true, composes: true,
+			want: []string{"Dependency graph for test-a:", "Blocked task", "Total: 4 issues across 3 layers"},
+		},
+		{
+			name: "open", configure: func() { graphOpen = true }, wantSeparator: true, composes: true,
+			want: []string{"Dependency graph for test-a (3 issues, 3 layers)", "LAYER 2", "test-c P2 Blocked task"},
+		},
+		{
+			name: "DOT", configure: func() { graphDOT = true }, composes: true,
+			want: []string{"digraph beads {", "rankdir=LR;", `"test-c"`},
+		},
+		{
+			name: "HTML", configure: func() { graphHTML = true },
+			want: []string{"<!DOCTYPE html>", "const nodes =", `"id":"test-c"`},
+		},
+	}
+
+	for _, mode := range modes {
+		t.Run(mode.name, func(t *testing.T) {
+			graphDOT, graphHTML = false, false
+			graphOpen, graphCompact, graphBox, jsonOutput = false, false, false, false
+			mode.configure()
+
+			subgraph, _ := makeTestSubgraph()
+			var out bytes.Buffer
+			if err := renderGraphAllSubgraphs(&out, []*TemplateSubgraph{subgraph, subgraph}); err != nil {
+				t.Fatalf("renderGraphAllSubgraphs: %v", err)
+			}
+			got := out.String()
+			for _, want := range mode.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("supplied writer did not capture %q in %s output:\n%s", want, mode.name, got)
+				}
+			}
+			if hasSeparator := strings.Contains(got, strings.Repeat("─", 60)); hasSeparator != mode.wantSeparator {
+				t.Fatalf("%s separator present = %v, want %v", mode.name, hasSeparator, mode.wantSeparator)
+			}
+			if mode.composes {
+				var single bytes.Buffer
+				if err := renderGraphSingleSubgraph(&single, subgraph); err != nil {
+					t.Fatalf("renderGraphSingleSubgraph: %v", err)
+				}
+				separator := ""
+				if mode.wantSeparator {
+					separator = strings.Repeat("─", 60) + "\n"
+				}
+				if want := single.String() + separator + single.String(); got != want {
+					t.Fatalf("all-%s output did not compose from two complete single outputs", mode.name)
+				}
+			}
+
+			writer := &graphFailWriter{err: io.ErrClosedPipe, failAt: 1}
+			err := renderGraphSingleSubgraph(writer, subgraph)
+			if !errors.Is(err, io.ErrClosedPipe) {
+				t.Fatalf("renderGraphSingleSubgraph error = %v, want %v", err, io.ErrClosedPipe)
+			}
+			if writer.writes != writer.failAt {
+				t.Fatalf("%s renderer made %d writes after failure at %d", mode.name, writer.writes, writer.failAt)
+			}
+		})
+	}
+}

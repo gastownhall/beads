@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "creds",
+    srcs = [
+        "command.go",
+        "creds.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/creds",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "creds_test",
+    srcs = [
+        "command_test.go",
+        "creds_test.go",
+        "testmain_test.go",
+    ],
+    embed = [":creds"],
+    deps = ["//internal/testutil/credentialcmd"],
+)

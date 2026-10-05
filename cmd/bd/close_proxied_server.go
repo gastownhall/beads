@@ -39,11 +39,22 @@ type closeProxiedInput struct {
 // errors is indexed by ARGUMENT position, not by item, so a refusal reported
 // here and one reported by the batch still print in the order the caller typed
 // the ids.
+//
+// failureErrors is the same list at the same indices, but carries what a --json
+// consumer reads instead of what a person reads: the TYPED error for an engine
+// refusal, where errors holds closeProxiedRefusal's decorated display line. The
+// direct route makes exactly this split (close.go records res.Err.Error() in
+// closeIDFailure while printing closeDirectRefusal), and keeping the decorated
+// line in the machine-readable field made the same refusal answer differently
+// per route — which is the drift this whole close rewire exists to remove. A
+// policy refusal decided here has no separate display form, so both slots hold
+// the one sentence closeProxiedCheckOne returned.
 type closeProxiedPreflight struct {
-	items    []issueops.BatchCloseItem
-	itemArgs []int
-	before   map[string]*types.Issue
-	errors   []string
+	items         []issueops.BatchCloseItem
+	itemArgs      []int
+	before        map[string]*types.Issue
+	errors        []string
+	failureErrors []string
 }
 
 type closeProxiedOutcome struct {
@@ -79,6 +90,27 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 	}
 
 	in := gatherCloseProxiedInput(cmd)
+
+	// A8 (beads#4682): a single-id compare-and-swap close bypasses the batch
+	// below entirely -- see close_if_revision.go for why BatchCloseItem
+	// cannot carry this guard.
+	ifRevision, err := parseIfRevisionFlag(cmd)
+	if err != nil {
+		return err
+	}
+	if err := requireSingleIfRevisionID(ifRevision, args); err != nil {
+		return err
+	}
+	if ifRevision != nil {
+		// The bypass below never looks at these three post-close flags, so
+		// honoring them would mean silently dropping what the caller asked
+		// for. Refuse instead of guessing, the same way --continue and
+		// --suggest-next already refuse a multi-id batch below.
+		if in.continueOn || in.suggestNext || in.claimNext {
+			return HandleErrorRespectJSON("--if-revision does not support --continue, --suggest-next, or --claim-next")
+		}
+		return runCloseProxiedIfRevision(ctx, args[0], reasonForCloseIndex(reasons, 0), in.force, in.session, *ifRevision)
+	}
 
 	if in.continueOn && len(args) > 1 {
 		return HandleErrorRespectJSON("--continue only works when closing a single issue")
@@ -122,15 +154,12 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 	outcomes, closeReasons := closeProxiedOutcomes(&pre, result)
 	post := closeProxiedRunPostClose(ctx, args, in, outcomes)
 
-	// pre.errors is indexed by argument position, so args[i] is the id this
-	// refusal belongs to.
-	var failures []closeIDFailure
-	for i, e := range pre.errors {
+	for _, e := range pre.errors {
 		if e != "" {
 			fmt.Fprintln(os.Stderr, e)
-			failures = append(failures, closeIDFailure{ID: args[i], Error: e})
 		}
 	}
+	failures := closeProxiedFailures(&pre, args)
 	for _, w := range post.warnings {
 		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
 	}
@@ -230,14 +259,19 @@ func proxiedBatchCloser() (issueops.BatchCloser, error) {
 // close policy to it, in one read-only unit of work.
 func closeProxiedRunPreflight(ctx context.Context, args, reasons []string, in closeProxiedInput) (closeProxiedPreflight, error) {
 	pre := closeProxiedPreflight{
-		errors: make([]string, len(args)),
-		before: make(map[string]*types.Issue, len(args)),
+		errors:        make([]string, len(args)),
+		failureErrors: make([]string, len(args)),
+		before:        make(map[string]*types.Issue, len(args)),
 	}
 	_, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (struct{}, error) {
 		for i, id := range args {
 			refusal, current := closeProxiedCheckOne(ctx, uw, id, in)
 			if refusal != "" {
 				pre.errors[i] = refusal
+				// A policy refusal is already the bare sentence, so the human
+				// and machine fields agree; only the engine refusals below have
+				// a decorated display form to strip.
+				pre.failureErrors[i] = refusal
 				continue
 			}
 			pre.before[id] = current
@@ -299,6 +333,10 @@ func closeProxiedOutcomes(pre *closeProxiedPreflight, result issueops.CloseBatch
 		item := pre.items[j]
 		if outcome.Err != nil {
 			pre.errors[pre.itemArgs[j]] = closeProxiedRefusal(item.IssueID, outcome.Err)
+			// The typed error, not the decorated display line: the --force hint
+			// closeProxiedRefusal appends is advice for a human reader, and the
+			// id already has its own field. Same split as the direct route.
+			pre.failureErrors[pre.itemArgs[j]] = closeProxiedTypedRefusal(outcome.Err)
 			continue
 		}
 		before := pre.before[item.IssueID]
@@ -324,6 +362,82 @@ func closeProxiedOutcomes(pre *closeProxiedPreflight, result issueops.CloseBatch
 		reasons = append(reasons, item.Reason)
 	}
 	return outcomes, reasons
+}
+
+// closeProxiedFailures pairs every refused argument with the id it belongs to,
+// for the machine-readable half of the partial-failure report.
+//
+// Both slices are indexed by ARGUMENT position, so args[i] is the id that earned
+// pre.errors[i], and the failures come back in the order the caller typed the
+// ids. errors decides WHICH arguments failed — it is the slot the stderr print
+// consults too, so the two halves of the report can never disagree about that —
+// while failureErrors supplies the reason, because that is the field where the
+// typed error belongs.
+//
+// Every writer of an errors slot fills its failureErrors twin, so the fallback
+// below is unreachable today. It is here because the cost of getting that wrong
+// is asymmetric: a caller that asked why an id failed is better served by the
+// decorated line than by an empty string, so a future writer that forgets the
+// twin degrades the wording instead of dropping the reason.
+func closeProxiedFailures(pre *closeProxiedPreflight, args []string) []closeIDFailure {
+	var failures []closeIDFailure
+	for i, e := range pre.errors {
+		if e == "" {
+			continue
+		}
+		reason := pre.failureErrors[i]
+		if reason == "" {
+			reason = e
+		}
+		failures = append(failures, closeIDFailure{ID: args[i], Error: reason})
+	}
+	return failures
+}
+
+// closeProxiedTypedRefusal is the reason a --json consumer reads for one
+// refused id: the typed error, spelled the way the direct route spells it.
+//
+// Stripping closeProxiedRefusal's decoration is not enough on its own to make
+// the two routes agree, because a refusal reaching this route has also been
+// wrapped by the layers it traveled through — the use case adds "close <id>: "
+// (storage/domain/issue.go) and the SQL repository adds
+// "db: IssueSQLRepository.CloseChecked <id>: " (storage/domain/db/issue.go) —
+// while the direct route hands back the refusal exactly as the engine minted
+// it. So the same blocked id reads
+//
+//	cannot close blocked issue: x-1 is blocked by [x-2]                        (direct)
+//	close x-1: db: IssueSQLRepository.CloseChecked x-1: cannot close blocked …  (proxied)
+//
+// For the refusal classes the CLI already names by sentinel, we report the
+// outermost error that the sentinel itself explains: that is the sentence the
+// engine wrote, and it is byte-identical to the direct route's. Neither wrap
+// tells a caller anything it does not know — it asked to close that id — and
+// one of them leaks an internal repository type name into an operator-facing
+// field.
+//
+// Anything outside those classes keeps its whole chain. There the wrapping is
+// not noise, it is the only thing that says where an unexpected failure came
+// from, and there is no engine sentence to converge on.
+func closeProxiedTypedRefusal(err error) string {
+	for _, sentinel := range []error{storage.ErrCloseBlocked, storage.ErrCloseOpenChildren} {
+		if !errors.Is(err, sentinel) {
+			continue
+		}
+		// Walk in until the next link IS the bare sentinel: that link's parent
+		// is the refusal with its subject filled in ("… x-1 is blocked by
+		// [x-2]"), where the sentinel alone would say only "cannot close
+		// blocked issue".
+		refusal := err
+		for {
+			next := errors.Unwrap(refusal)
+			if next == nil || next == sentinel || !errors.Is(next, sentinel) {
+				break
+			}
+			refusal = next
+		}
+		return refusal.Error()
+	}
+	return err.Error()
 }
 
 // closeProxiedRefusal spells one item's typed refusal the way this route has

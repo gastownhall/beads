@@ -1,0 +1,24 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "prlintmake_test",
+    srcs = [
+        "gofmtbin_test.go",
+        "prlintmake_test.go",
+    ],
+    data = [
+        "//:.buildflags",
+        "//:go.mod",
+        "//scripts:ci/fmt-check.sh",
+        "//scripts:ci/gofmt-bin.sh",
+        "//scripts:ci/lib/timing.sh",
+        "//scripts:ci/pr-lint.sh",
+        "@go_sdk//:bin/go",
+        "@go_sdk//:files",
+    ],
+    # go.mod's toolchain is the registered SDK (scripts/bazel_policy_test.go
+    # pins them together): testGo puts it first on PATH, so gofmt-bin.sh never
+    # downloads a toolchain. Remote actions may have no network (rbe-fork).
+    env = {"BEADS_TEST_GO": "$(rlocationpath @go_sdk//:bin/go)"},
+    deps = ["//internal/testutil/bazeltest"],
+)

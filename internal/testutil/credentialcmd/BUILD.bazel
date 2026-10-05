@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "credentialcmd",
+    srcs = [
+        "credentialcmd.go",
+        "credentialcmd_other.go",
+        "credentialcmd_windows.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/testutil/credentialcmd",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "credentialcmd_test",
+    srcs = ["credentialcmd_test.go"],
+    embed = [":credentialcmd"],
+)

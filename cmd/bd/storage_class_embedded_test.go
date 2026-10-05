@@ -18,7 +18,12 @@ import (
 // Protocol v0.1 §C): create-time resolution (flag > per-type config >
 // unset), the omitted-when-versioned marker rule (C2.4) down to the DB
 // cell, and the ephemeral spelling routing to the wisp plane (C1.4).
-func TestEmbeddedCreateStorageClass(t *testing.T) {
+// TestEmbeddedCreateStorageClassBasic was split from TestEmbeddedCreateStorageClass
+// (originally ~356s, measured under --config=embedded) into 3 top-level tests
+// over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedCreateStorageClassBasic(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
 	}
@@ -40,28 +45,6 @@ func TestEmbeddedCreateStorageClass(t *testing.T) {
 			t.Fatalf("query storage_class: %v", err)
 		}
 		return got
-	}
-
-	// The batch doors mint their own ids, so the DB assertions look rows up by
-	// the title the markdown file gave them. An absent row is "" rather than a
-	// failure: which PLANE a row landed on is the thing under test.
-	issueIDByTitle := func(t *testing.T, beadsDir, prefix, table, title string) string {
-		t.Helper()
-		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), prefix, "main")
-		if err != nil {
-			t.Fatalf("OpenSQL: %v", err)
-		}
-		defer cleanup()
-		var id string
-		//nolint:gosec // G202: table is a test-local literal, never caller input
-		err = db.QueryRowContext(t.Context(), "SELECT id FROM "+table+" WHERE title = ?", title).Scan(&id)
-		if errors.Is(err, sql.ErrNoRows) {
-			return ""
-		}
-		if err != nil {
-			t.Fatalf("query %s by title: %v", table, err)
-		}
-		return id
 	}
 
 	t.Run("explicit_unversioned", func(t *testing.T) {
@@ -132,6 +115,20 @@ func TestEmbeddedCreateStorageClass(t *testing.T) {
 			t.Errorf("ephemeral bead should live in wisps, found %d rows", count)
 		}
 	})
+}
+
+// TestEmbeddedCreateStorageClassConflicts was split from
+// TestEmbeddedCreateStorageClass (originally ~356s, measured under
+// --config=embedded) into 3 top-level tests over disjoint subtest groups,
+// for CI shard balance (see scripts/ci/embedded_cmd_test_durations.json and
+// engdocs/TESTING.md). Every original subtest is preserved exactly once.
+func TestEmbeddedCreateStorageClassConflicts(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	// An explicit durable class combined with a wisp-plane flag is a direct
 	// command-line contradiction: the row would be ephemeral by construction, so
@@ -208,11 +205,63 @@ func TestEmbeddedCreateStorageClass(t *testing.T) {
 			t.Errorf("config-derived unversioned leaked to the no-history wisp row: %q", cell.String)
 		}
 	})
+}
+
+// TestEmbeddedCreateStorageClassBatchAndMisc was split from
+// TestEmbeddedCreateStorageClass (originally ~356s, measured under
+// --config=embedded) into 3 top-level tests over disjoint subtest groups,
+// for CI shard balance (see scripts/ci/embedded_cmd_test_durations.json and
+// engdocs/TESTING.md). Every original subtest is preserved exactly once.
+func TestEmbeddedCreateStorageClassBatchAndMisc(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// storageClassCell reads the raw issues.storage_class cell so the test
+	// pins the at-rest form (NULL vs literal), not just the JSON view.
+	storageClassCell := func(t *testing.T, beadsDir, prefix, id string) sql.NullString {
+		t.Helper()
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), prefix, "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer cleanup()
+		var got sql.NullString
+		if err := db.QueryRowContext(t.Context(), "SELECT storage_class FROM issues WHERE id = ?", id).Scan(&got); err != nil {
+			t.Fatalf("query storage_class: %v", err)
+		}
+		return got
+	}
+
+	// The batch doors mint their own ids, so the DB assertions look rows up by
+	// the title the markdown file gave them. An absent row is "" rather than a
+	// failure: which PLANE a row landed on is the thing under test.
+	issueIDByTitle := func(t *testing.T, beadsDir, prefix, table, title string) string {
+		t.Helper()
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), prefix, "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer cleanup()
+		var id string
+		//nolint:gosec // G202: table is a test-local literal, never caller input
+		err = db.QueryRowContext(t.Context(), "SELECT id FROM "+table+" WHERE title = ?", title).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ""
+		}
+		if err != nil {
+			t.Fatalf("query %s by title: %v", table, err)
+		}
+		return id
+	}
 
 	// `bd create --file` used to accept --storage-class and the per-type config
 	// default and honor neither. buildMarkdownBatchRequest is the ONE projection
 	// both transports use, so these subtests cover the direct half of that fix
-	// and TestStorageClassProxiedServer covers the other.
+	// and TestProxiedServerStorageClass covers the other.
 	t.Run("markdown_batch", func(t *testing.T) {
 		batch := `## Batch one
 

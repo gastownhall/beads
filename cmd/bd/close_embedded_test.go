@@ -58,14 +58,18 @@ func bdDepAdd(t *testing.T, bd, dir string, args ...string) {
 
 // ===== Close tests =====
 
-func TestEmbeddedClose(t *testing.T) {
+// TestEmbeddedCloseBasic was split from TestEmbeddedClose (originally ~404s,
+// measured under --config=embedded) into 3 top-level tests over disjoint
+// subtest groups, for CI shard balance (see scripts/ci/embedded_cmd_test_durations.json and
+// engdocs/TESTING.md). Every original subtest is preserved exactly once.
+func TestEmbeddedCloseBasic(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
 	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
-	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tc")
+	dir, _, _ := bdInit(t, bd, "--prefix", "tc")
 
 	// ===== Basic Close Behavior =====
 
@@ -134,6 +138,76 @@ func TestEmbeddedClose(t *testing.T) {
 		}
 	})
 
+	// The direct-route twin of TestProxiedClose/
+	// close_partial_failure_json_names_the_failed_ids. Two things were asserted
+	// on the proxied route only: that exit 1 comes with a payload naming the
+	// failed ids while stdout keeps the success-shaped closed-issues array, and
+	// that failed[].error is the TYPED error rather than the decorated line
+	// stderr shows a person. This is the default route — what most scripts and
+	// the parity harness exercise — so a regression in reportCloseFailures'
+	// jsonOut branch was previously invisible to CI on the route most callers
+	// are on, and the two routes could drift on the field's contents with
+	// nothing failing.
+	t.Run("close_partial_failure_json_names_the_failed_ids", func(t *testing.T) {
+		jdir, _, _ := bdInit(t, bd, "--prefix", "jf")
+		closable := bdCreate(t, bd, jdir, "JSON closable", "--type", "task")
+		blocker := bdCreate(t, bd, jdir, "JSON blocker", "--type", "task")
+		blocked := bdCreate(t, bd, jdir, "JSON blocked", "--type", "task")
+		bdDepAdd(t, bd, jdir, blocked.ID, blocker.ID)
+
+		cmd := exec.Command(bd, "close", "--json", closable.ID, blocked.ID)
+		cmd.Dir = jdir
+		cmd.Env = bdEnv(jdir)
+		stdoutBuf, stderrBuf, err := runCommandBuffers(t, cmd)
+		stdout, stderr := stdoutBuf.String(), stderrBuf.String()
+		if err == nil {
+			t.Fatalf("expected a partial batch close to exit nonzero\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+
+		// stdout keeps the success shape: just the survivor.
+		start := strings.Index(stdout, "[")
+		if start < 0 {
+			t.Fatalf("expected the closed-issues array on stdout, got:\n%s", stdout)
+		}
+		var closed []*types.Issue
+		if jsonErr := json.Unmarshal([]byte(stdout[start:]), &closed); jsonErr != nil {
+			t.Fatalf("parse closed array: %v\nraw: %s", jsonErr, stdout[start:])
+		}
+		if len(closed) != 1 || closed[0].ID != closable.ID {
+			t.Fatalf("stdout closed array = %d issue(s), want only the survivor %s\nraw: %s", len(closed), closable.ID, stdout[start:])
+		}
+
+		// stderr's last line is the failure report.
+		line := lastJSONObjectLine(stderr)
+		if line == "" {
+			t.Fatalf("expected a compact JSON failure line on stderr, got:\n%s", stderr)
+		}
+		var report struct {
+			Error  string `json:"error"`
+			Failed []struct {
+				ID    string `json:"id"`
+				Error string `json:"error"`
+			} `json:"failed"`
+		}
+		if jsonErr := json.Unmarshal([]byte(line), &report); jsonErr != nil {
+			t.Fatalf("parse failure report: %v\nraw: %s", jsonErr, line)
+		}
+		if report.Error != "1 of 2 issues failed to close" {
+			t.Errorf("failure report error = %q, want the N of M summary", report.Error)
+		}
+		if len(report.Failed) != 1 || report.Failed[0].ID != blocked.ID {
+			t.Fatalf("failure report named %+v, want exactly the refused id %s", report.Failed, blocked.ID)
+		}
+		assertCloseFailedErrorIsTyped(t, report.Failed[0].Error, stderr)
+
+		if got := bdShow(t, bd, jdir, closable.ID); got.Status != types.StatusClosed {
+			t.Errorf("closable issue status = %s, want closed despite the refused sibling", got.Status)
+		}
+		if got := bdShow(t, bd, jdir, blocked.ID); got.Status != types.StatusOpen {
+			t.Errorf("blocked issue status = %s, want open", got.Status)
+		}
+	})
+
 	// The --claim-next × partial-failure interaction, adjudicated rather than
 	// left implicit (#6648). --claim-next rides inside the batch transaction
 	// and fires whenever something LANDED, so a mixed batch claims and then
@@ -190,6 +264,22 @@ func TestEmbeddedClose(t *testing.T) {
 				spare.ID, got.Assignee)
 		}
 	})
+
+}
+
+// TestEmbeddedCloseGuardsAndEpics was split from TestEmbeddedClose (originally
+// ~404s, measured under --config=embedded) into 3 top-level tests over
+// disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedCloseGuardsAndEpics(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tc")
 
 	// Proves the S7 delegation: `bd close` on a blocked issue now surfaces the
 	// engine's atomic guard (storage.ErrCloseBlocked) rather than a duplicated
@@ -298,6 +388,21 @@ func TestEmbeddedClose(t *testing.T) {
 			t.Errorf("expected Dolt commit count to increase after close: before=%d afterCreate=%d afterClose=%d", before, afterCreate, afterClose)
 		}
 	})
+
+}
+
+// TestEmbeddedCloseAlreadyClosed was split from TestEmbeddedClose (originally
+// ~404s, measured under --config=embedded) into 3 top-level tests over
+// disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedCloseAlreadyClosed(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	// The direct route's mirror of the proxied route's
 	// single_transaction_dolt_commit oracle. N ids are ONE request, and the
@@ -519,6 +624,14 @@ func TestEmbeddedClose(t *testing.T) {
 // TestEmbeddedCloseConcurrent exercises create, close, and list operations
 // concurrently to verify EmbeddedDoltStore handles concurrent CLI invocations
 // without panics, data corruption, or deadlocks.
+//
+// issuesPerWorker was 5 (F1 review S1): under real CI-like load this
+// measured ~324s for the same reason documented on
+// TestEmbeddedUpdateConcurrent above (genuine serialized-write contention,
+// not a queueing-delay artifact). issuesPerWorker=2 preserves the same
+// invariants (duplicate-ID detection across all numWorkers concurrent
+// processes, one non-decreasing-list-count check per worker) at 40% of the
+// serialized work.
 func TestEmbeddedCloseConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -530,7 +643,7 @@ func TestEmbeddedCloseConcurrent(t *testing.T) {
 
 	const (
 		numWorkers      = 10
-		issuesPerWorker = 5
+		issuesPerWorker = 2
 	)
 
 	type workerResult struct {
