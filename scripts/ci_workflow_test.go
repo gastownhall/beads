@@ -2639,7 +2639,7 @@ type bazelFlagGate struct {
 var bazelFlagGatedLanes = map[string]bazelFlagGate{
 	// The cmd/bd Dolt-server tier (the Dolt-gated cmd/bd tests no other lane
 	// runs), advisory until its first clean runs.
-	bazelCmdDoltJobName: {id: "BAZEL_CMD_DOLT", flag: "BAZEL_CMD_DOLT_REQUIRED", want: "false"},
+	bazelCmdDoltJobName: {id: "BAZEL_CMD_DOLT", flag: "BAZEL_CMD_DOLT_REQUIRED", want: "true"},
 }
 
 // bazelFlagGateRun is the run-script fragment that adds a flag-gated lane's

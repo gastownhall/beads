@@ -59,7 +59,7 @@ env:
   # the "Evaluate CI gate" step's run script; bazel-gate.sh still accepts
   # its skip in modes skip and local. Committed, not a repo variable, for
   # the same reason as the flags above.
-  BAZEL_CMD_DOLT_REQUIRED: "false"
+  BAZEL_CMD_DOLT_REQUIRED: "true"
 
 jobs:
 
