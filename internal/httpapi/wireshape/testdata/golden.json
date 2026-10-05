@@ -4596,6 +4596,24 @@
     },
     {
       "schema": "param:countIssues",
+      "member": "query:exclude_status",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:exclude_type",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
       "member": "query:group_by",
       "type": "string",
       "enum": [
@@ -4690,11 +4708,24 @@
     },
     {
       "schema": "param:countIssues",
+      "member": "query:no_parent",
+      "type": "boolean",
+      "required": false,
+      "default": "false"
+    },
+    {
+      "schema": "param:countIssues",
       "member": "query:notes_contains",
       "type": "string",
       "required": false,
       "style": "form",
       "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:parent",
+      "type": "string",
+      "required": false
     },
     {
       "schema": "param:countIssues",
