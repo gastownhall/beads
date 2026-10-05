@@ -363,7 +363,9 @@ type schemaSentinelColumn struct {
 	//        restamping every wisp on a plane with no history to restore from
 	//        (#5981 harm class). ignored/0015 is the guarded successor and is
 	//        genuinely pending on those stores, so the recompute still happens
-	//        — just without the timestamp damage.
+	//        — just without the timestamp damage. Statements above the floor
+	//        must be replay-safe, not merely guarded; see
+	//        TestJournalSentinelReplayRangeDMLIsAllowlisted.
 	//   (ii) The migration that creates the column AND the migration that
 	//        creates the table carrying it must both be ABOVE the floor, so the
 	//        replay can still heal both shapes the single INFORMATION_SCHEMA
@@ -413,8 +415,18 @@ var (
 		// silently broken forever (BEADS-JOURNAL-PLAN.md §4.2b, PR A2). Floor
 		// 21 satisfies the same two constraints as the leases floor above:
 		// 0022 (the table's creator) and 0028 (comment_json's adder; actor's
-		// adder is 0025, also above 21) both sit strictly above it, and no
-		// unguarded statement in the series sits at or below it.
+		// adder is 0025, also above 21) both sit strictly above it;
+		// ignored/0007's unguarded restamp sits below it, and the only DML
+		// above it is 0022's INSERT IGNORE seed and GREATEST raise
+		// (TestJournalSentinelReplayRangeDMLIsAllowlisted).
+		//
+		// The actor sentinel alone also fires on every store sitting at
+		// ignored cursor 22-27 that predates 0025, which is every production
+		// Dolt store measured at cursor 24 (BEADS-JOURNAL-PLAN.md §4.1):
+		// those stores replay 22-28 once, on their first open by a binary
+		// carrying this sentinel. 0022's tail is the healEventSeqCounter
+		// statement: a no-op on a counter already at or ahead of the
+		// journal, and a raise to exactly MAX(seq) on one that is behind.
 		sentinelColumns: []schemaSentinelColumn{
 			{table: "leases", column: "granted_node", replayFloor: 11},
 			{table: "bd_events_journal", column: "comment_json", replayFloor: 21},

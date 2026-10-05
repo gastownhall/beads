@@ -42,10 +42,16 @@
 -- reads past 28 but is missing either column — e.g. restored from a backup
 -- taken between the two doors, or damaged out of band — heals itself on the
 -- next writable open instead of staying silently broken forever
--- (TestSentinelJournalColumnsReplay). Floor 21 sits below this file (28) and
--- below the table's creator (ignored/0022), per schema.go's two replay-floor
--- constraints, and above every unguarded statement in the series
--- (TestReplay22To28NoOpOnHealthyStore).
+-- (TestSentinelJournalColumnsReplay). The actor sentinel alone also fires on
+-- every store sitting at ignored cursor 22-27 without it, which is every
+-- production Dolt store measured at cursor 24 (BEADS-JOURNAL-PLAN.md §4.1):
+-- those stores replay 22-28 once, on their first open by a binary carrying
+-- this sentinel. Floor 21 sits below this file (28) and below the table's
+-- creator (ignored/0022), per schema.go's two replay-floor constraints, and
+-- the only DML above it is 0022's INSERT IGNORE seed and GREATEST raise
+-- (TestJournalSentinelReplayRangeDMLIsAllowlisted;
+-- TestReplay22To28NoOpOnHealthyStore pins that nothing else in the range
+-- touches any other table or row).
 --
 -- Journal tables change only on this (ignored) plane: scripts/check-
 -- migration-hygiene.sh fails a main-plane migration that carries DDL against

@@ -108,14 +108,17 @@ func checkEventsJournalShapeWithDB(conn *doltConn) DoctorCheck {
 		hasMissingColumns = true
 	}
 
-	// The counter-behind finding is deliberately NOT claimed as --fix-able:
-	// ignored/0028's own header states it "never reads or writes
-	// bd_events_seq or a single journal row", so reopening the store (what
-	// fix.EventsJournalShape/DatabaseVersion does) cannot repair it. Reseeding
-	// the counter is a data correction, not a DDL convergence, and the plan's
-	// design note (f) only promises "--fix applies the converging DDL" — it
-	// says nothing about reseeding a counter, so this stays a report-only
-	// finding pending an explicit decision on safe reseed semantics.
+	// The counter-behind finding is deliberately NOT claimed as --fix-able,
+	// but that is a scoping choice, not a capability gap: `--fix` (what
+	// fix.EventsJournalShape/DatabaseVersion does) does not target this
+	// finding directly, yet it is repaired as a side effect whenever the same
+	// open replays ignored/0022 (any sentinel contradiction — see
+	// schema.go's bd_events_journal sentinels), by the same GREATEST raise
+	// the writer's own heal uses. A finding about the counter alone, with no
+	// column also missing, triggers no such replay. The plan's design note
+	// (f) only promises "--fix applies the converging DDL" — it says nothing
+	// about reseeding a counter on its own, so this stays a report-only
+	// finding in A2. Making it fixable on its own is an optional follow-up.
 	counterBehind, counterDetail, err := journalCounterBehindMaxSeq(ctx, conn.db)
 	if err != nil {
 		findings = append(findings, fmt.Sprintf("could not compare bd_events_seq to MAX(seq): %v", err))
