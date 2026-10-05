@@ -3257,6 +3257,12 @@
     },
     {
       "schema": "Problem",
+      "member": "bd_version",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Problem",
       "member": "blocker_id",
       "type": "string",
       "required": false
@@ -3432,6 +3438,12 @@
       "member": "type",
       "type": "string",
       "format": "uri",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "wire_revision",
+      "type": "integer",
       "required": false
     },
     {

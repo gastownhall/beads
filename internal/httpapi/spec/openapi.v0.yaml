@@ -7560,6 +7560,24 @@ components:
               `wire_revision` and `min_client_wire_revision` at all (this one).
 
 
+            PRESENCE, not just value: a generated client whose JSON decoder
+            zero-values a missing integer field cannot tell, by looking at a
+            decoded `0` alone, whether the server SENT `0` or sent nothing.
+            This is never actually ambiguous in practice, because `0` and `1`
+            are PERMANENTLY RETIRED values — they describe servers that predate
+            this field or carried the brief interim string shape, and no
+            server that implements this field (`CurrentWireRevision` starts at
+            `2` and only increases) will ever legitimately send a literal `0`
+            or `1`. A decoded `0` can therefore only mean "this server omitted
+            the field," and a client inferring from `bd_version` per the
+            paragraph below is doing exactly the right thing in that case,
+            never guessing at a value the field could have meant on its own. A
+            client that wants presence as a first-class fact rather than an
+            inference anyway should decode `wire_revision` into a nullable
+            type, or check for the JSON key's presence directly, instead of
+            relying on this retirement guarantee.
+
+
             A client talking to a server that omits this member entirely is
             talking to a pre-signal server. `bd_version` is a HINT for that
             case, never proof: compare it as semver WITH PRE-RELEASE
@@ -11626,3 +11644,20 @@ components:
             so a client that declared a `Bd-Wire-Revision` can log exactly how
             far behind it is without re-deriving the number from `bd_version`.
             It is set on that refusal and on no other.
+        wire_revision:
+          type: integer
+          description: >-
+            With `invalid_argument` / `reason: "wire_revision_unsupported"`
+            ONLY: this server's own current `ContextResponse.wire_revision`,
+            alongside `min_wire_revision`, so a client logging the refusal has
+            both ends of the supported range without a second request to
+            `GET /v0/beads/context`. It is set on that refusal and on no
+            other.
+        bd_version:
+          type: string
+          description: >-
+            With `invalid_argument` / `reason: "wire_revision_unsupported"`
+            ONLY: this server's own `ContextResponse.bd_version`, for a client
+            that logs or reports the refusal and wants the release string
+            alongside the two wire-revision numbers rather than a second
+            request to fetch it. It is set on that refusal and on no other.

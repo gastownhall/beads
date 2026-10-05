@@ -58,6 +58,19 @@ func assertWireRevisionUnsupported(t *testing.T, resp *http.Response, wantMin in
 	if !ok || int(min) != wantMin {
 		t.Errorf("min_wire_revision = %#v, want %d", body["min_wire_revision"], wantMin)
 	}
+	// wire_revision and bd_version ride alongside min_wire_revision on this
+	// same refusal, so a client logging it can report what this server
+	// currently is without a second /v0/beads/context round trip.
+	wire, ok := body["wire_revision"].(float64)
+	if !ok || int(wire) != CurrentWireRevision {
+		t.Errorf("wire_revision = %#v, want %d", body["wire_revision"], CurrentWireRevision)
+	}
+	// bd_version mirrors this server's own ContextResponse.bd_version, which a
+	// bare test fixture with no version wired in reports as "" — a string, not
+	// an absence, is what's being pinned here.
+	if _, ok := body["bd_version"].(string); !ok {
+		t.Errorf("bd_version = %#v, want a string", body["bd_version"])
+	}
 }
 
 // wireRevisionReadServer is newReadServer's provider wiring (reads_test.go),
@@ -139,7 +152,7 @@ func TestWireRevisionBelowFloorRefusesEveryEnforcedRoute(t *testing.T) {
 func TestWireRevisionMalformedIsInvalidValueNotUnsupported(t *testing.T) {
 	ts := wireRevisionReadServer(t)
 
-	for _, raw := range []string{"not-a-number", "-1", "1.5", ""} {
+	for _, raw := range []string{"not-a-number", "-1", "1.5", "+1", "01", "007", ""} {
 		if raw == "" {
 			continue // the empty string is the absent-header case, tested elsewhere
 		}

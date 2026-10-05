@@ -1361,19 +1361,27 @@ func ProjectMismatch(got, own string) Result {
 // extension member for the same reason ProjectMismatch discloses
 // `server_project_id`: so a client that already knows it declared a revision
 // can tell exactly how far behind it is without re-deriving the number from
-// `bd_version`.
+// `bd_version`. current and bdVersion are this server's own
+// ContextResponse.wire_revision and ContextResponse.bd_version, disclosed in
+// the `wire_revision` and `bd_version` extension members so a client logging
+// or reporting the refusal has the server's full version story without a
+// second request to GET /v0/beads/context (review: "include the server's
+// current wire_revision and bd_version in the refusal problem body").
 //
-// This is the ONLY refusal on the surface that sets `min_wire_revision`, and —
-// unlike ProjectMismatch, which is exempt on the identity handshake because
-// that is where a client LEARNS the id it must stamp with — it is raised on
-// GET /v0/beads/context too: a client that already knows the revision it was
-// built for gains nothing from being served a body it has already said it
-// cannot decode, and loses the chance to fail before acting on it.
-func WireRevisionUnsupported(got, min int) Result {
+// This is the ONLY refusal on the surface that sets `min_wire_revision`,
+// `wire_revision` and `bd_version`, and — unlike ProjectMismatch, which is
+// exempt on the identity handshake because that is where a client LEARNS the
+// id it must stamp with — it is raised on GET /v0/beads/context too: a client
+// that already knows the revision it was built for gains nothing from being
+// served a body it has already said it cannot decode, and loses the chance to
+// fail before acting on it.
+func WireRevisionUnsupported(got, min, current int, bdVersion string) Result {
 	res := InvalidArgument(WireRevisionHeader, ReasonWireRevisionUnsupported,
 		"the "+WireRevisionHeader+" header names revision "+strconv.Itoa(got)+
 			", which is below the "+strconv.Itoa(min)+" this server still answers correctly")
 	res.Problem.MinWireRevision = &min
+	res.Problem.WireRevision = &current
+	res.Problem.BdVersion = &bdVersion
 	return res
 }
 

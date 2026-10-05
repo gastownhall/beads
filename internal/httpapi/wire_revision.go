@@ -3,6 +3,7 @@ package httpapi
 import (
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // WireRevisionHeader names the optional per-request wire-floor declaration. A
@@ -56,8 +57,8 @@ func (s *Server) checkWireRevision(r *http.Request) *Result {
 	if raw == "" {
 		return nil
 	}
-	got, err := strconv.Atoi(raw)
-	if err != nil || got < 0 {
+	got, ok := parseStrictNonNegativeInt(raw)
+	if !ok {
 		requestInfo(r.Context()).refuse(raw)
 		res := InvalidArgument(WireRevisionHeader, ReasonInvalidValue,
 			"the "+WireRevisionHeader+" header must be a non-negative integer")
@@ -67,6 +68,32 @@ func (s *Server) checkWireRevision(r *http.Request) *Result {
 		return nil
 	}
 	requestInfo(r.Context()).refuse(raw)
-	res := WireRevisionUnsupported(got, s.minClientWireRevision)
+	res := WireRevisionUnsupported(got, s.minClientWireRevision, CurrentWireRevision, s.ctxBody.BdVersion)
 	return &res
+}
+
+// parseStrictNonNegativeInt accepts exactly the plain-decimal shape this
+// header is documented to carry: one or more ASCII digits, no sign, and no
+// leading zero unless the whole value is the single digit "0". strconv.Atoi
+// alone is looser than that — it also accepts a leading "+", and it accepts
+// leading zeros like "007" — both of which would let two different header
+// bytes name the same revision, which is a wire ambiguity this header exists
+// to avoid, not a client convenience to extend to it.
+func parseStrictNonNegativeInt(raw string) (int, bool) {
+	if raw == "" || strings.ContainsAny(raw, "+-") {
+		return 0, false
+	}
+	if len(raw) > 1 && raw[0] == '0' {
+		return 0, false
+	}
+	for _, c := range raw {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+	}
+	got, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, false
+	}
+	return got, true
 }

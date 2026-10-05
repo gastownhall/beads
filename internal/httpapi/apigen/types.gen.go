@@ -1053,6 +1053,8 @@ type ContextResponse struct {
 	//   `wire_revision` and `min_client_wire_revision` at all (this one).
 	//
 	//
+	// PRESENCE, not just value: a generated client whose JSON decoder zero-values a missing integer field cannot tell, by looking at a decoded `0` alone, whether the server SENT `0` or sent nothing. This is never actually ambiguous in practice, because `0` and `1` are PERMANENTLY RETIRED values — they describe servers that predate this field or carried the brief interim string shape, and no server that implements this field (`CurrentWireRevision` starts at `2` and only increases) will ever legitimately send a literal `0` or `1`. A decoded `0` can therefore only mean "this server omitted the field," and a client inferring from `bd_version` per the paragraph below is doing exactly the right thing in that case, never guessing at a value the field could have meant on its own. A client that wants presence as a first-class fact rather than an inference anyway should decode `wire_revision` into a nullable type, or check for the JSON key's presence directly, instead of relying on this retirement guarantee.
+	//
 	// A client talking to a server that omits this member entirely is talking to a pre-signal server. `bd_version` is a HINT for that case, never proof: compare it as semver WITH PRE-RELEASE identifiers, and treat `>= 1.3.0-rc.1` — not the release cutoff `1.3.0` itself — as a hint toward `1`, anything below as a hint toward `0`. The release cutoff is wrong on its own because a `1.3.0-rc.N` pre-release build already carries the `1` shape and sorts BELOW `1.3.0`.
 	//
 	// Known exceptions make even that corrected hint unreliable, which is why it is advisory rather than authoritative:
@@ -1534,6 +1536,9 @@ type Problem struct {
 	// IT IS OPTIONAL ON EVERY OPERATION BUT THE CLAIM. `POST /v0/beads/issues/{id}:claim` always carries it, because its conflict path reads the row it lost to. `PATCH /v0/beads/issues/{id}` and `POST /v0/beads/issues:batchApply` carry it only when the refusing transaction reported a holder, and `POST /v0/beads/issues/{id}:release` never does — the ownership fence refuses without naming anyone. An absent member means "this refusal could not name the holder", never "nobody holds it"; re-read the row.
 	Assignee *string `json:"assignee,omitempty"`
 
+	// BdVersion With `invalid_argument` / `reason: "wire_revision_unsupported"` ONLY: this server's own `ContextResponse.bd_version`, for a client that logs or reports the refusal and wants the release string alongside the two wire-revision numbers rather than a second request to fetch it. It is set on that refusal and on no other.
+	BdVersion *string `json:"bd_version,omitempty"`
+
 	// BlockerId With `dependency_cycle`, hierarchy refusal only: the ancestor or descendant the edge named as blocker. See `issue_id`.
 	BlockerId *string `json:"blocker_id,omitempty"`
 
@@ -1642,6 +1647,9 @@ type Problem struct {
 
 	// Type RFC 9457 problem type. This server never emits it, so `about:blank` is implied. A deployment that hosts problem documentation MAY supply it: one stable URI per status+code pair, dereferencing to documentation for that pair. It restates identity that `code` already carries, so a client MUST NOT dispatch on it and a server MUST NOT use it to subdivide a code.
 	Type *string `json:"type,omitempty"`
+
+	// WireRevision With `invalid_argument` / `reason: "wire_revision_unsupported"` ONLY: this server's own current `ContextResponse.wire_revision`, alongside `min_wire_revision`, so a client logging the refusal has both ends of the supported range without a second request to `GET /v0/beads/context`. It is set on that refusal and on no other.
+	WireRevision *int `json:"wire_revision,omitempty"`
 }
 
 // QueryPage A page of query results. It is `ReadyPage`'s shape rather than `IssuesPage`'s, and the missing member is the point: a page of this operation carries no `next_cursor`, because a cursor is a keyset position in a database order and a predicate query's matching set is assembled outside the database.

@@ -28,24 +28,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   non-additive wire-shape counter for this build) and
   `min_client_wire_revision` (the oldest revision this build still answers
   correctly). A client may declare the revision it was built for on any
-  request via the optional `Bd-Wire-Revision` header; a declared revision
-  below `min_client_wire_revision` is refused with
-  `400 invalid_argument`/`reason: "wire_revision_unsupported"` and a
-  `min_wire_revision` field naming the floor. The header is absent by
-  default and an absent header is served exactly as before — this is
-  additive, not a new precondition on existing clients. See
-  `internal/httpapi/wire_revision.go` and the `wire_revision` property in
-  `internal/httpapi/spec/openapi.v0.yaml` for the full revision history.
+  request via the optional `Bd-Wire-Revision` header (a plain non-negative
+  decimal — no leading `+` or leading zero); a declared revision below
+  `min_client_wire_revision` is refused with `400 invalid_argument`/`reason:
+  "wire_revision_unsupported"` and `min_wire_revision`, `wire_revision`, and
+  `bd_version` fields naming this server's floor, current revision, and
+  release string. The header is absent by default and an absent header is
+  served exactly as before — this is additive, not a new precondition on
+  existing clients. A client with no `wire_revision` signal to read yet may
+  infer one from `bd_version` only as an ADVISORY hint (string-or-number,
+  never a refusal on an inferred `0`) — see the `wire_revision` property's
+  inference notes in `internal/httpapi/spec/openapi.v0.yaml` for the cutoff
+  and known-exception builds. See `internal/httpapi/wire_revision.go` and
+  that same property for the full revision history.
 - `GET /v0/beads/issues`'s `sort` parameter now advertises the
   `issues.list.sort` capability token, the same way an operation itself
   does, and a CI rule
   (`TestNewParameterOnExistingOperationHasABehaviorToken`) requires every
-  new parameter on an existing operation to carry one.
-- A CI golden digest (`internal/httpapi/wireshape`) pins the JSON name and
-  type of every response member across the whole HTTP spec and fails if any
-  changes without `wire_revision` bumping to match; regenerate it with
-  `go run ./internal/httpapi/wireshape/cmd/gendigest` after a deliberate,
-  revision-bumped change.
+  new parameter on an existing operation, or new request body member on an
+  existing operation, to carry a token that `Capabilities()` actually
+  advertises (not just backticked `a.b` text shaped like one). Three frozen
+  baselines (`internal/httpapi/testdata/pretoken_*.json`) grandfather what
+  predates the rule and are pinned never to grow
+  (`TestPretokenBaselinesNeverGrow`); a brand-new operation is exempt until
+  its next change.
+- A CI golden digest (`internal/httpapi/wireshape`) pins the JSON name,
+  type, format, enum, required-ness, and nullability of every response AND
+  request-body member across the whole HTTP spec — including array item
+  shape and `additionalProperties` value shape — recursing through `$ref`,
+  `allOf`, and `oneOf`, and fails if any changes without `wire_revision`
+  bumping to match; `go run ./internal/httpapi/wireshape/cmd/gendigest`
+  refuses to write a changed or removed entry unless `wire_revision` has
+  moved past what the existing golden recorded (purely additive entries
+  always write).
 
 ### Changed
 
