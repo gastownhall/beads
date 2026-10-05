@@ -3,7 +3,9 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -56,5 +58,62 @@ func TestWispGCPurgeClosedPreviewSkipsLiveDependents(t *testing.T) {
 	}
 	if !strings.Contains(got, step3) {
 		t.Errorf("skip notice should name the live dependent %s that protected the chain; output:\n%s", step3, got)
+	}
+}
+
+func TestWispGCPurgeClosedPreviewJSONReportsSkippedLiveDependents(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "pcj")
+
+	step1 := bdCreate(t, bd, dir, "closed chain root", "--ephemeral").ID
+	step2 := bdCreate(t, bd, dir, "closed step gating live work", "--ephemeral").ID
+	step3 := bdCreate(t, bd, dir, "live step", "--ephemeral").ID
+	bdDepAdd(t, bd, dir, step2, step1)
+	bdDepAdd(t, bd, dir, step3, step2)
+	bdClose(t, bd, dir, step1)
+	bdClose(t, bd, dir, step2)
+
+	safeWisp := bdCreate(t, bd, dir, "standalone closed wisp", "--ephemeral").ID
+	bdClose(t, bd, dir, safeWisp)
+
+	out, err := bdRunWithFlockRetry(t, bd, dir, "mol", "wisp", "gc", "--closed", "--dry-run", "--json")
+	if err != nil {
+		t.Fatalf("gc --closed --dry-run --json must not fail the whole batch over per-candidate hazards; got error: %v\n%s", err, out)
+	}
+
+	var got struct {
+		IssueIDs     []string `json:"issue_ids"`
+		SkippedCount int      `json:"skipped_count"`
+		Skipped      []struct {
+			ID                 string   `json:"id"`
+			BlockingDependents []string `json:"blocking_dependents"`
+		} `json:"skipped"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("failed to parse gc preview JSON: %v\n%s", err, out)
+	}
+	if !slices.Contains(got.IssueIDs, safeWisp) {
+		t.Fatalf("preview JSON should list the safe closed wisp %s as deletable; got %#v", safeWisp, got.IssueIDs)
+	}
+	if got.SkippedCount != 2 {
+		t.Fatalf("preview JSON skipped_count = %d, want 2; payload:\n%s", got.SkippedCount, out)
+	}
+
+	skippedDependents := make(map[string][]string, len(got.Skipped))
+	for _, skipped := range got.Skipped {
+		skippedDependents[skipped.ID] = skipped.BlockingDependents
+	}
+	for _, id := range []string{step1, step2} {
+		if _, ok := skippedDependents[id]; !ok {
+			t.Fatalf("preview JSON should report protected closed wisp %s as skipped; payload:\n%s", id, out)
+		}
+	}
+	if !slices.Contains(skippedDependents[step2], step3) {
+		t.Fatalf("preview JSON should name live dependent %s as blocking deletion of %s; got %#v", step3, step2, skippedDependents[step2])
 	}
 }
