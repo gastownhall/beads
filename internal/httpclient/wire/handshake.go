@@ -171,8 +171,11 @@ const ClientWireRevision = 2
 // ever legitimately send (see that field's doc comment), and the one thing a
 // server old enough to omit it can still do is answer revision/expected_version
 // tokens as bare JSON integers rather than the decimal strings upstream #6053
-// standardized — a shape problem.go's legacyRevisionFields already tolerates.
-// There is therefore nothing on the low end for this client to refuse.
+// standardized — a shape this package tolerates on both halves of the wire:
+// problem.go's legacyRevisionFields on the error path, and
+// revision_tolerance.go's serverPredatesRevisionStrings on every success-path
+// response type that carries a `revision` member. There is therefore nothing
+// on the low end for this client to refuse.
 const ClientMinWireRevision = 0
 
 // checkWireRevision applies the handshake half of the Client rule to a decoded

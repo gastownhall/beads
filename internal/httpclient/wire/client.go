@@ -276,7 +276,16 @@ func (c *Client) Do(ctx context.Context, r Request, out any) error {
 	if len(bytes.TrimSpace(res.body)) == 0 {
 		return fmt.Errorf("%s: bd serve at %s answered %d with an empty body", r.Op, c.base.Redacted(), res.status)
 	}
-	if err := json.Unmarshal(res.body, out); err != nil {
+	decodeBody := res.body
+	// A pre-#6053 server's `revision` is still a bare JSON integer; every
+	// apigen response type that carries one declares it `string`, so decoding
+	// straight into out would fail with an untyped json.UnmarshalTypeError on
+	// exactly the servers ClientMinWireRevision exists to keep talking to. See
+	// revision_tolerance.go.
+	if revisionBearingResponse(out) && c.serverPredatesRevisionStrings() {
+		decodeBody = tolerateLegacyRevisionNumbers(decodeBody)
+	}
+	if err := json.Unmarshal(decodeBody, out); err != nil {
 		return fmt.Errorf("%s: decoding the response from bd serve at %s: %w", r.Op, c.base.Redacted(), err)
 	}
 	return nil
