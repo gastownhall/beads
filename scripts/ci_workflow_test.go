@@ -2199,6 +2199,7 @@ type ciWorkflowJob struct {
 	Strategy        ciWorkflowStrategy   `yaml:"strategy"`
 	Env             map[string]string    `yaml:"env"`
 	Outputs         map[string]string    `yaml:"outputs"`
+	Environment     string               `yaml:"environment"`
 }
 
 type ciWorkflowStrategy struct {
@@ -2502,6 +2503,9 @@ const (
 	uploadArtifactSHA   = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 	downloadArtifactSHA = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
 	checkoutSHA         = "3d3c42e5aac5ba805825da76410c181273ba90b1"
+	// Same SHA/comment already used in this repo for this action (rbe-
+	// prewarm's mint step, update-flake-lock.yml).
+	appTokenActionSHA = "bcd2ba49218906704ab6c1aa796996da409d3eb1"
 	bazelCacheKeyPrefix = "bazel-repo-v3-${{ runner.os }}-"
 	bazelCacheKey       = bazelCacheKeyPrefix + "${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}"
 	bazelCachePath      = "${{ runner.temp }}/bazel-ci-cache"
@@ -6186,18 +6190,46 @@ func TestBazelAutofixWorkflowSecurity(t *testing.T) {
 	if job.TimeoutMinutes == 0 {
 		t.Error("autofix job has no timeout-minutes")
 	}
+	// The App private key is a secret of this environment; its deployment-
+	// branch policy (configured outside this repo) is what actually
+	// restricts reading it to jobs running on main.
+	if job.Environment != "autofix" {
+		t.Errorf("autofix job environment = %q, want %q", job.Environment, "autofix")
+	}
 
 	var checkouts int
 	for _, step := range job.Steps {
 		if step.Uses != "" {
 			family, sha, _ := strings.Cut(step.Uses, "@")
-			if family != "actions/checkout" || sha != checkoutSHA {
-				t.Errorf("step %q uses %q; only actions/checkout@%s is allowed", step.Name, step.Uses, checkoutSHA)
+			switch family {
+			case "actions/checkout":
+				if sha != checkoutSHA {
+					t.Errorf("step %q uses %q; only actions/checkout@%s is allowed", step.Name, step.Uses, checkoutSHA)
+				}
+				if !reflect.DeepEqual(step.With, map[string]string{"persist-credentials": "false"}) {
+					t.Errorf("checkout has with %v; want only persist-credentials: false (base default branch, never a PR ref, no token on disk)", step.With)
+				}
+				checkouts++
+			case "actions/create-github-app-token":
+				if want := appTokenActionSHA; sha != want {
+					t.Errorf("step %q uses %q; want actions/create-github-app-token@%s", step.Name, step.Uses, want)
+				}
+				if step.If != "github.event.workflow_run.head_repository.full_name == github.repository" {
+					t.Errorf("app-token step if = %q, want the same-repo check (no token we hold can push to a fork)", step.If)
+				}
+				want := map[string]string{
+					"app-id":              "${{ secrets.AUTOFIX_APP_ID }}",
+					"private-key":         "${{ secrets.AUTOFIX_APP_PRIVATE_KEY }}",
+					"owner":               "${{ github.repository_owner }}",
+					"repositories":        "${{ github.event.repository.name }}",
+					"permission-contents": "write",
+				}
+				if !reflect.DeepEqual(step.With, want) {
+					t.Errorf("app-token step with = %v, want %v", step.With, want)
+				}
+			default:
+				t.Errorf("step %q uses %q; only actions/checkout@%s or actions/create-github-app-token@%s is allowed", step.Name, step.Uses, checkoutSHA, appTokenActionSHA)
 			}
-			if !reflect.DeepEqual(step.With, map[string]string{"persist-credentials": "false"}) {
-				t.Errorf("checkout has with %v; want only persist-credentials: false (base default branch, never a PR ref, no token on disk)", step.With)
-			}
-			checkouts++
 		}
 		// Event fields (branch names, commit messages) are attacker text:
 		// pass them through env, never interpolate them into a script.
@@ -6211,7 +6243,11 @@ func TestBazelAutofixWorkflowSecurity(t *testing.T) {
 	if checkouts != 1 {
 		t.Errorf("want exactly one checkout step, got %d", checkouts)
 	}
+	appToken := job.step(t, "Mint autofix app token")
 	push := job.step(t, "Push sync commit or leave apply recipe")
+	if job.stepIndex(t, appToken.Name) >= job.stepIndex(t, push.Name) {
+		t.Errorf("%q must run before %q", appToken.Name, push.Name)
+	}
 	if strings.TrimSpace(push.Run) != "./"+bazelAutofixPushScript {
 		t.Errorf("push step run = %q, want ./%s", push.Run, bazelAutofixPushScript)
 	}
@@ -6225,21 +6261,27 @@ func TestBazelAutofixWorkflowSecurity(t *testing.T) {
 		"HEAD_BRANCH":        "${{ github.event.workflow_run.head_branch }}",
 		"HEAD_SHA":           "${{ github.event.workflow_run.head_sha }}",
 		"GH_TOKEN":           "${{ github.token }}",
-		"PUSH_TOKEN":         "${{ secrets.DOCS_AUTOFIX_TOKEN || github.token }}",
-		"AUTOFIX_TOKEN_KIND": "${{ secrets.DOCS_AUTOFIX_TOKEN && 'pat' || 'default' }}",
+		"PUSH_TOKEN":         "${{ steps.app-token.outputs.token || github.token }}",
+		"AUTOFIX_TOKEN_KIND": "${{ steps.app-token.outputs.token && 'app' || 'default' }}",
 	} {
 		if got := push.Env[key]; got != want {
 			t.Errorf("push step env %s = %q, want %q", key, got, want)
 		}
 	}
+	// PUSH_TOKEN must never be fed by anything a PR controls: only the
+	// app-token step's output (itself minted from environment secrets) or
+	// the workflow's own token.
+	if regexp.MustCompile(`\bgithub\.event\.(workflow_run|pull_request)\b`).MatchString(push.Env["PUSH_TOKEN"]) {
+		t.Errorf("push step env PUSH_TOKEN = %q reads a PR-controlled event field", push.Env["PUSH_TOKEN"])
+	}
 
-	// Secrets: only the push step's PUSH_TOKEN / AUTOFIX_TOKEN_KIND, and only
-	// the docs autofix token that this workflow shares.
-	pushIndex := job.stepIndex(t, push.Name)
+	// Secrets: only the app-token step's app-id/private-key, and only the
+	// autofix App credentials this workflow shares.
+	appTokenIndex := job.stepIndex(t, appToken.Name)
 	secretRef := regexp.MustCompile(`\bsecrets\s*(\.|\[)`)
 	allowed := map[string]bool{
-		fmt.Sprintf(".jobs.autofix.steps[%d].env.PUSH_TOKEN", pushIndex):         true,
-		fmt.Sprintf(".jobs.autofix.steps[%d].env.AUTOFIX_TOKEN_KIND", pushIndex): true,
+		fmt.Sprintf(".jobs.autofix.steps[%d].with.app-id", appTokenIndex):      true,
+		fmt.Sprintf(".jobs.autofix.steps[%d].with.private-key", appTokenIndex): true,
 	}
 	walkYAML(root, "", func(path string, key bool, value string) {
 		if key || !secretRef.MatchString(value) {
@@ -6252,8 +6294,8 @@ func TestBazelAutofixWorkflowSecurity(t *testing.T) {
 			t.Errorf("%s: %s uses a non-literal secrets reference", bazelAutofixWorkflowName, path)
 		} else {
 			for _, ref := range refs {
-				if ref[1] != "DOCS_AUTOFIX_TOKEN" {
-					t.Errorf("%s: %s reads secret %s; only DOCS_AUTOFIX_TOKEN is shared with this workflow", bazelAutofixWorkflowName, path, ref[1])
+				if ref[1] != "AUTOFIX_APP_ID" && ref[1] != "AUTOFIX_APP_PRIVATE_KEY" {
+					t.Errorf("%s: %s reads secret %s; only AUTOFIX_APP_ID / AUTOFIX_APP_PRIVATE_KEY are shared with this workflow", bazelAutofixWorkflowName, path, ref[1])
 				}
 			}
 		}
