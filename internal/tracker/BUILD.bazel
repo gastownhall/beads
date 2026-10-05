@@ -34,6 +34,7 @@ go_test(
     srcs = [
         "engine_close_policy_test.go",
         "engine_create_only_test.go",
+        "engine_external_ref_batch_test.go",
         "engine_external_ref_history_test.go",
         "engine_history_gate_cgo_test.go",
         "engine_pull_failure_test.go",
