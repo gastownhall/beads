@@ -17,6 +17,13 @@ import (
 // it is still written 0600 like the rest of our per-user state.
 const machineIDCacheName = "machine-id"
 
+// machineIDDataDirName is the ~/.beads directory the machine-id cache lives
+// under. metrics.go's DataDir moved the telemetry queue to ~/.config/bd and
+// dropped its own dataDirName constant (GH#4807), but the machine-id cache
+// stays put in ~/.beads: relocating it would orphan every existing install's
+// cached distinct ID, which this fix does not need to do.
+const machineIDDataDirName = ".beads"
+
 // maxMachineIDLen bounds what the cache read will accept. ProtectedID today is
 // a 64-char hex HMAC; the bound is loose so an upstream format change does not
 // silently invalidate every cache, while still refusing to feed a corrupt or
@@ -28,7 +35,7 @@ func machineIDCachePath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, dataDirName, machineIDCacheName), nil
+	return filepath.Join(home, machineIDDataDirName, machineIDCacheName), nil
 }
 
 // validMachineID accepts a cached or freshly computed ID for (re)use: one
