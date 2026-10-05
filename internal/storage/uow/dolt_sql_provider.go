@@ -57,6 +57,15 @@ type doltSQLProvider struct {
 	// eventsJournalEnabled activates the durable events journal for THIS
 	// provider instance only. See SetEventsJournalEnabled.
 	eventsJournalEnabled atomic.Bool
+	// journalShape caches the ONE INFORMATION_SCHEMA probe SetEventsJournalEnabled
+	// runs on activation (issueops.ProbeJournalShape, PR A1). Nil means either
+	// the journal is disabled or the probe failed — see journalActivationErr.
+	journalShape atomic.Pointer[issueops.JournalShape]
+	// journalActivationErr holds the probe's error when SetEventsJournalEnabled(true)
+	// found a table shape the journal cannot run against (a missing required
+	// column, or a missing table). Nil whenever journalShape is non-nil or the
+	// journal is disabled. See storage.EventsJournalShapeChecker.
+	journalActivationErr atomic.Pointer[error]
 	// versionedHistoryEnabled activates dual-write issue-version history for
 	// THIS provider instance only. See SetVersionedHistoryEnabled.
 	versionedHistoryEnabled atomic.Bool
@@ -72,8 +81,38 @@ type doltSQLProvider struct {
 // BeginTx). Without that binding the uow plumbing writes mutations while
 // journaling nothing — the failure is invisible, because the code runs and the
 // write lands and the journal is simply empty.
+//
+// Activating also probes bd_events_journal's actual shape ONCE
+// (issueops.ProbeJournalShape, PR A1) and caches the result for this
+// instance's lifetime; EventsJournalActivationError reports whether that
+// probe found a shape the journal can actually run against. Deactivating
+// clears both and skips the probe entirely — a disabled provider accepts any
+// shape.
 func (p *doltSQLProvider) SetEventsJournalEnabled(enabled bool) {
 	p.eventsJournalEnabled.Store(enabled)
+	if !enabled {
+		p.journalShape.Store(nil)
+		p.journalActivationErr.Store(nil)
+		return
+	}
+	shape, err := issueops.ProbeJournalShape(context.Background(), p.db)
+	if err != nil {
+		p.journalShape.Store(nil)
+		p.journalActivationErr.Store(&err)
+		return
+	}
+	p.journalShape.Store(shape)
+	p.journalActivationErr.Store(nil)
+}
+
+// EventsJournalActivationError implements storage.EventsJournalShapeChecker:
+// nil unless the last SetEventsJournalEnabled(true) call found a table shape
+// the journal cannot run against (PR A1).
+func (p *doltSQLProvider) EventsJournalActivationError() error {
+	if ptr := p.journalActivationErr.Load(); ptr != nil {
+		return *ptr
+	}
+	return nil
 }
 
 // SetVersionedHistoryEnabled activates dual-write issue-version history for
@@ -160,6 +199,7 @@ var (
 	_ UnitOfWorkProvider                 = (*doltSQLProvider)(nil)
 	_ TxProvider                         = (*doltSQLProvider)(nil)
 	_ storage.EventsJournalConfigurer    = (*doltSQLProvider)(nil)
+	_ storage.EventsJournalShapeChecker  = (*doltSQLProvider)(nil)
 	_ storage.VersionedHistoryConfigurer = (*doltSQLProvider)(nil)
 )
 
@@ -195,9 +235,20 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	// (doltServerTx.releaseConn / poisonConn), so an entry cannot outlive its
 	// transaction. The blocked-recheck scope is bound and released the same
 	// way; Commit takes what it recorded once the transaction has committed.
+	// The activation switch folds in the shape probe's success: a probe that
+	// found an unsupported table (journalShape nil) scopes this transaction as
+	// DISABLED regardless of what SetEventsJournalEnabled was called with, so a
+	// caller that enables the journal directly and ignores the returned
+	// EventsJournalActivationError still never attempts a write against a shape
+	// that cannot support it (storage.EventsJournalShapeChecker). Reads share
+	// this same BeginTx, and are never gated by the activation switch — only by
+	// the shape — since EventsJournalCursor has no enabled/disabled concept of
+	// its own.
+	journalShape := p.journalShape.Load()
 	return &doltServerTx{
 		conn:              conn,
-		clearJournalScope: issueops.ScopeEventsJournalTransaction(conn, p.eventsJournalEnabled.Load()),
+		clearJournalScope: issueops.ScopeEventsJournalTransaction(conn, p.eventsJournalEnabled.Load() && journalShape != nil),
+		clearJournalShape: issueops.ScopeEventsJournalShape(conn, journalShape),
 		clearVersionScope: issueops.ScopeVersionedHistoryTransaction(conn, p.versionedHistoryEnabled.Load()),
 		clearRecheckScope: issueops.ScopeBlockedRecheckTransaction(conn),
 	}, nil

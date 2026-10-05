@@ -22,6 +22,19 @@ import (
 // commits, and the journal is simply empty — so it must be pinned from both
 // directions: enabled emits, disabled does not.
 
+// expectCanonicalJournalShapeProbe arms the one INFORMATION_SCHEMA.COLUMNS
+// query SetEventsJournalEnabled(true) now issues to probe bd_events_journal's
+// shape (issueops.ProbeJournalShape, PR A1), returning every column a
+// canonical table carries so activation succeeds with the shape every test in
+// this file was written against before shape probing existed.
+func expectCanonicalJournalShapeProbe(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS").
+		WithArgs("bd_events_journal").
+		WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME"}).
+			AddRow("seq").AddRow("ts").AddRow("op").AddRow("issue_id").
+			AddRow("actor").AddRow("issue_json").AddRow("dep_json").AddRow("comment_json"))
+}
+
 func TestProviderImplementsEventsJournalConfigurer(t *testing.T) {
 	p, _ := newMockTxProvider(t)
 	var configurer storage.EventsJournalConfigurer = p
@@ -37,7 +50,10 @@ func TestProviderImplementsEventsJournalConfigurer(t *testing.T) {
 // internal bookkeeping.
 func TestBeginTxScopesJournalActivationToThePinnedConn(t *testing.T) {
 	p, mock := newMockTxProvider(t)
+	expectCanonicalJournalShapeProbe(mock)
 	p.SetEventsJournalEnabled(true)
+	require.NoError(t, p.EventsJournalActivationError(),
+		"activation against the canonical shape the probe expectation below describes must succeed")
 
 	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("UPDATE bd_events_seq SET next_seq").WillReturnResult(sqlmock.NewResult(0, 1))

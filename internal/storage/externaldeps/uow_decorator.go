@@ -136,6 +136,20 @@ func (p *uowProvider) SetEventsJournalEnabled(enabled bool) {
 	}
 }
 
+// EventsJournalActivationError forwards the inner provider's shape-probe
+// result (storage.EventsJournalShapeChecker, PR A1). This wrapper is the
+// OUTERMOST provider on both real chains (see SetVersionedHistoryEnabled), so
+// without this forwarder eventsjournal.Apply's type assertion for the checker
+// would fail here even when the inner provider's own probe found an
+// unsupported table shape — the open would then succeed against a shape it
+// cannot journal, the gci failure mode this interface exists to avoid.
+func (p *uowProvider) EventsJournalActivationError() error {
+	if checker, ok := p.UnitOfWorkProvider.(storage.EventsJournalShapeChecker); ok {
+		return checker.EventsJournalActivationError()
+	}
+	return nil
+}
+
 // SetVersionedHistoryEnabled forwards dual-write issue-version activation
 // inward, for the same reason SetEventsJournalEnabled does.
 //
@@ -164,6 +178,7 @@ func (p *uowProvider) RunEventsMaintenanceTx(ctx context.Context, fn func(contex
 var (
 	_ uow.PoolTuner                      = (*uowProvider)(nil)
 	_ storage.EventsJournalConfigurer    = (*uowProvider)(nil)
+	_ storage.EventsJournalShapeChecker  = (*uowProvider)(nil)
 	_ storage.VersionedHistoryConfigurer = (*uowProvider)(nil)
 	_ issueops.EventsMaintenanceRunner   = (*uowProvider)(nil)
 	_ uow.IssueLifecycleSource           = (*uowProvider)(nil)
