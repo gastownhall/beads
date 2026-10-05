@@ -2,10 +2,14 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 // --- Helpers ---
@@ -587,4 +591,272 @@ func rulesContains(s, substr string) bool {
 
 func rulesIndexOf(s, substr string) int {
 	return strings.Index(s, substr)
+}
+
+// --- rules compact apply-path tests ---
+
+func newRulesCompactTestCmd(t *testing.T, args ...string) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{Use: "compact"}
+	cmd.Flags().String("path", "", "")
+	cmd.Flags().StringSlice("group", nil, "")
+	cmd.Flags().Bool("auto", false, "")
+	cmd.Flags().Bool("dry-run", false, "")
+	cmd.Flags().Bool("force", false, "")
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	return cmd
+}
+
+// snapshotRulesDir returns name -> content for every file in dir.
+func snapshotRulesDir(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	files := make(map[string]string, len(entries))
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		files[e.Name()] = string(data)
+	}
+	return files
+}
+
+func assertRulesDirUnchanged(t *testing.T, dir string, before map[string]string) {
+	t.Helper()
+	after := snapshotRulesDir(t, dir)
+	if len(after) != len(before) {
+		t.Fatalf("rules dir changed: before %v, after %v", ruleFileNames(before), ruleFileNames(after))
+	}
+	for name, content := range before {
+		if after[name] != content {
+			t.Errorf("%s changed:\nbefore: %q\nafter:  %q", name, content, after[name])
+		}
+	}
+}
+
+func ruleFileNames(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+const sharedDiskDirective = "# %s\n\n**Do:** validate input before writing to disk\n\n## Rationale\nProse for %s.\n"
+
+func TestRulesCompact_PreviewsWithoutForce(t *testing.T) {
+	for _, args := range [][]string{{"--auto"}, {"--group", "alpha,beta"}, {"--auto", "--dry-run", "--force"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			dir := tempRulesDir(t)
+			writeRule(t, dir, "alpha", fmt.Sprintf(sharedDiskDirective, "Alpha", "alpha"))
+			writeRule(t, dir, "beta", fmt.Sprintf(sharedDiskDirective, "Beta", "beta"))
+			before := snapshotRulesDir(t, dir)
+
+			cmd := newRulesCompactTestCmd(t, append([]string{"--path", dir}, args...)...)
+			out := captureStdout(t, func() error { return runRulesCompact(cmd, nil) })
+
+			assertRulesDirUnchanged(t, dir, before)
+			for _, want := range []string{"Preview merge", "Would delete: alpha.md, beta.md", "--force"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("preview output missing %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+func TestRulesCompact_ForceApplies(t *testing.T) {
+	dir := tempRulesDir(t)
+	writeRule(t, dir, "alpha", fmt.Sprintf(sharedDiskDirective, "Alpha", "alpha"))
+	writeRule(t, dir, "beta", fmt.Sprintf(sharedDiskDirective, "Beta", "beta"))
+
+	cmd := newRulesCompactTestCmd(t, "--path", dir, "--auto", "--force")
+	captureStdout(t, func() error { return runRulesCompact(cmd, nil) })
+
+	after := snapshotRulesDir(t, dir)
+	if len(after) != 1 {
+		t.Fatalf("want only the composite left, got %v", ruleFileNames(after))
+	}
+	for name, content := range after {
+		if !strings.Contains(content, "validate input before writing to disk") || !strings.Contains(content, "Source rules: alpha.md, beta.md") {
+			t.Errorf("%s is not the expected composite: %q", name, content)
+		}
+	}
+}
+
+// A source rule named like the composite used to be overwritten by the
+// composite and then deleted along with the other sources, leaving nothing.
+func TestRulesCompact_RefusesSourceNamedLikeComposite(t *testing.T) {
+	for _, args := range [][]string{{"--auto"}, {"--group", "disk,beta"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			dir := tempRulesDir(t)
+			writeRule(t, dir, "disk", fmt.Sprintf(sharedDiskDirective, "Disk", "disk"))
+			writeRule(t, dir, "beta", fmt.Sprintf(sharedDiskDirective, "Beta", "beta"))
+			before := snapshotRulesDir(t, dir)
+
+			cmd := newRulesCompactTestCmd(t, append([]string{"--path", dir, "--force"}, args...)...)
+			var err error
+			stderr := captureStderr(t, func() {
+				captureStdoutIgnoringError(t, func() { err = runRulesCompact(cmd, nil) })
+			})
+
+			if err == nil {
+				t.Fatal("expected compact to fail when the composite path is a source")
+			}
+			if !strings.Contains(stderr, "disk.md already exists") {
+				t.Errorf("expected the refusal to name disk.md, got: %s", stderr)
+			}
+			assertRulesDirUnchanged(t, dir, before)
+		})
+	}
+}
+
+// An unrelated rule that happens to share the composite's name used to be
+// overwritten silently.
+func TestRulesCompact_RefusesUnrelatedExistingFile(t *testing.T) {
+	for _, args := range [][]string{{"--auto"}, {"--group", "alpha,beta"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			dir := tempRulesDir(t)
+			writeRule(t, dir, "alpha", fmt.Sprintf(sharedDiskDirective, "Alpha", "alpha"))
+			writeRule(t, dir, "beta", fmt.Sprintf(sharedDiskDirective, "Beta", "beta"))
+			writeRule(t, dir, "disk", "# Storage quotas\n\n**Do:** keep quota alarms at eighty percent\n\nUnrelated prose that must survive.\n")
+			before := snapshotRulesDir(t, dir)
+
+			cmd := newRulesCompactTestCmd(t, append([]string{"--path", dir, "--force"}, args...)...)
+			var err error
+			stderr := captureStderr(t, func() {
+				captureStdoutIgnoringError(t, func() { err = runRulesCompact(cmd, nil) })
+			})
+
+			if err == nil {
+				t.Fatal("expected compact to fail rather than overwrite disk.md")
+			}
+			if !strings.Contains(stderr, "disk.md already exists") {
+				t.Errorf("expected the refusal to name disk.md, got: %s", stderr)
+			}
+			assertRulesDirUnchanged(t, dir, before)
+		})
+	}
+}
+
+func TestWriteCompactedRule_ReportsFailedDelete(t *testing.T) {
+	dir := tempRulesDir(t)
+	present := writeRule(t, dir, "alpha", "# Alpha\n")
+	missing := filepath.Join(dir, "gone.md")
+
+	composite := filepath.Join(dir, "composite.md")
+	written, err := writeCompactedRule(composite, "# Composite\n", []RuleFile{{Path: present}, {Path: missing}})
+	if err == nil || !strings.Contains(err.Error(), "could not delete 1 source file") {
+		t.Fatalf("expected the failed delete to be reported, got: %v", err)
+	}
+	if !written {
+		t.Error("expected written=true: the composite was created before the delete failed")
+	}
+	if _, statErr := os.Stat(composite); statErr != nil {
+		t.Errorf("expected the composite to survive a failed source delete: %v", statErr)
+	}
+	if _, statErr := os.Stat(present); !os.IsNotExist(statErr) {
+		t.Errorf("expected %s to be deleted", present)
+	}
+}
+
+// captureStdoutIgnoringError swallows stdout for a call whose error the test
+// inspects itself (captureStdout fails the test on any error).
+func captureStdoutIgnoringError(t *testing.T, fn func()) {
+	t.Helper()
+	old := os.Stdout
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open devnull: %v", err)
+	}
+	defer devnull.Close()
+	os.Stdout = devnull
+	defer func() { os.Stdout = old }()
+	fn()
+}
+
+// captureStdoutWithError captures stdout for a call that may fail, returning
+// both (captureStdout fails the test on any error).
+func captureStdoutWithError(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "stdout-*")
+	if err != nil {
+		t.Fatalf("create temp: %v", err)
+	}
+	defer f.Close()
+	stdioMutex.Lock()
+	old := os.Stdout
+	os.Stdout = f
+	runErr := fn()
+	os.Stdout = old
+	stdioMutex.Unlock()
+	data, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatalf("read captured stdout: %v", err)
+	}
+	return string(data), runErr
+}
+
+func runRulesCompactJSON(t *testing.T, args ...string) (map[string]interface{}, error) {
+	t.Helper()
+	prevJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = prevJSON })
+
+	cmd := newRulesCompactTestCmd(t, args...)
+	out, err := captureStdoutWithError(t, func() error { return runRulesCompact(cmd, nil) })
+	var payload map[string]interface{}
+	if jsonErr := json.Unmarshal([]byte(out), &payload); jsonErr != nil {
+		t.Fatalf("stdout was not a JSON object (%v): %s", jsonErr, out)
+	}
+	return payload, err
+}
+
+func TestRulesCompact_GroupJSONForceApplies(t *testing.T) {
+	dir := tempRulesDir(t)
+	writeRule(t, dir, "alpha", fmt.Sprintf(sharedDiskDirective, "Alpha", "alpha"))
+	writeRule(t, dir, "beta", fmt.Sprintf(sharedDiskDirective, "Beta", "beta"))
+
+	payload, err := runRulesCompactJSON(t, "--path", dir, "--group", "alpha,beta", "--force")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if payload["applied"] != true {
+		t.Errorf("expected applied=true, got: %v", payload)
+	}
+	if after := snapshotRulesDir(t, dir); len(after) != 1 {
+		t.Errorf("want only the composite left, got %v", ruleFileNames(after))
+	}
+}
+
+// When the composite is written but a source delete fails, the --group JSON
+// result must still say the composite was applied, as the --auto results do.
+// Naming alpha twice makes the second delete of alpha.md fail.
+func TestRulesCompact_GroupJSONReportsPartialApply(t *testing.T) {
+	dir := tempRulesDir(t)
+	writeRule(t, dir, "alpha", fmt.Sprintf(sharedDiskDirective, "Alpha", "alpha"))
+	writeRule(t, dir, "beta", fmt.Sprintf(sharedDiskDirective, "Beta", "beta"))
+
+	payload, err := runRulesCompactJSON(t, "--path", dir, "--group", "alpha,beta,alpha", "--force")
+
+	if err == nil {
+		t.Fatal("expected an error for the failed delete")
+	}
+	if payload["applied"] != true {
+		t.Errorf("expected applied=true after the composite was written, got: %v", payload)
+	}
+	if msg, _ := payload["error"].(string); !strings.Contains(msg, "could not delete 1 source file") {
+		t.Errorf("expected the failed delete in the JSON error, got: %v", payload)
+	}
+	after := snapshotRulesDir(t, dir)
+	if len(after) != 1 {
+		t.Errorf("want only the composite left, got %v", ruleFileNames(after))
+	}
 }
