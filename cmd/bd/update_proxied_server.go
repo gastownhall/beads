@@ -154,7 +154,7 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 		// propagates straight out) is equivalent to the generic path for this
 		// one id.
 		if in.ifRevision != nil {
-			if reported, ok := reportIfRevisionFailure("updating", id, err); ok {
+			if reported, ok := reportIfRevisionFailure("updating", id, err, in.ifRevision); ok {
 				return nil, nil, reported
 			}
 		}
@@ -223,7 +223,9 @@ func proxiedUpdateTarget(ctx context.Context, id string, in *updateInput) (*type
 	// same transfer inside the mutation with ErrAlreadyClaimed; this pre-read is
 	// what keeps the advice a user reads identical on both routes. A policy
 	// refusal: terminal per-issue failure, exit 1, never GuardMismatch/13.
-	if newAssignee, ok := in.fields["assignee"].(string); ok && in.ifAssignee == nil && !in.claim {
+	// mc-zndi7.74: also skipped when this pre-read is already stale against an
+	// active --if-revision guard — see ifRevisionAlreadyStale's doc.
+	if newAssignee, ok := in.fields["assignee"].(string); ok && in.ifAssignee == nil && !in.claim && !ifRevisionAlreadyStale(current, in.ifRevision) {
 		if err := validateIssueReassignable(id, current, actor, newAssignee,
 			proxiedClaimPoolAliases(ctx), in.force); err != nil {
 			fmt.Fprintf(os.Stderr, "%s\n", err)

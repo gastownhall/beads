@@ -105,7 +105,7 @@ Force: Delete and orphan dependents
 		if len(issueIDs) > 1 || cascade {
 			if err := deleteBatch(cmd, issueIDs, force, dryRun, cascade, jsonOutput, false, ifRevision); err != nil {
 				if ifRevision != nil {
-					if reported, ok := reportIfRevisionFailure("deleting", issueIDs[0], err); ok {
+					if reported, ok := reportIfRevisionFailure("deleting", issueIDs[0], err, ifRevision); ok {
 						return reported
 					}
 				}
@@ -162,7 +162,7 @@ Force: Delete and orphan dependents
 				// preview-with-error below — same split delete's real run makes,
 				// so --dry-run and the real run answer a stale token identically.
 				if ifRevision != nil {
-					if reported, ok := reportIfRevisionFailure("deleting", issueID, err); ok {
+					if reported, ok := reportIfRevisionFailure("deleting", issueID, err, ifRevision); ok {
 						return reported
 					}
 				}
@@ -181,7 +181,7 @@ Force: Delete and orphan dependents
 		}
 		if err != nil {
 			if ifRevision != nil {
-				if reported, ok := reportIfRevisionFailure("deleting", issueID, err); ok {
+				if reported, ok := reportIfRevisionFailure("deleting", issueID, err, ifRevision); ok {
 					return reported
 				}
 			}
@@ -380,7 +380,7 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 			// because an unrelated dry-run failure (not-found, bad request) on a
 			// guarded call still belongs to the generic preview path.
 			if ifRevision != nil {
-				if _, _, _, _, ok := classifyIfRevisionFailure(err); ok {
+				if _, _, _, _, ok := classifyIfRevisionFailure(err, ifRevision); ok {
 					return err
 				}
 			}

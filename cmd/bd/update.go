@@ -510,7 +510,7 @@ pointless).`,
 			// and an assignee edit that rides a WON claim only ever touches
 			// the actor's own fresh claim. A policy refusal, so it exits 1,
 			// not 13.
-			if newAssignee, ok := updates["assignee"].(string); ok && ifAssignee == nil && !claimFlag {
+			if newAssignee, ok := updates["assignee"].(string); ok && ifAssignee == nil && !claimFlag && !ifRevisionAlreadyStale(issue, ifRevision) {
 				if err := validateIssueReassignable(id, issue, actor, newAssignee,
 					storeClaimPoolAliases(ctx, issueStore), forceFlag); err != nil {
 					fmt.Fprintf(os.Stderr, "%s\n", err)
@@ -570,7 +570,7 @@ pointless).`,
 				// returning here is equivalent to falling through to
 				// reportUpdateFailures for this one failure.
 				if ifRevision != nil {
-					if reported, ok := reportIfRevisionFailure("updating", id, updateErr); ok {
+					if reported, ok := reportIfRevisionFailure("updating", id, updateErr, ifRevision); ok {
 						closeIfUnmutated(result)
 						closePendingResults()
 						return reported

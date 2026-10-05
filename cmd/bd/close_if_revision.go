@@ -57,7 +57,7 @@ func runCloseDirectIfRevision(ctx context.Context, id, reason string, force bool
 		ExpectedVersion: &expectedVersion,
 	})
 	if closeErr != nil {
-		if reported, ok := reportIfRevisionFailure("closing", id, closeErr); ok {
+		if reported, ok := reportIfRevisionFailure("closing", id, closeErr, &expectedVersion); ok {
 			return reported
 		}
 		fmt.Fprintln(os.Stderr, closeDirectRefusal(id, closeErr))
@@ -108,7 +108,7 @@ func runCloseProxiedIfRevision(ctx context.Context, id, reason string, force boo
 		if errors.Is(closeErr, context.Canceled) || errors.Is(closeErr, context.DeadlineExceeded) {
 			return closeErr
 		}
-		if reported, ok := reportIfRevisionFailure("closing", id, closeErr); ok {
+		if reported, ok := reportIfRevisionFailure("closing", id, closeErr, &expectedVersion); ok {
 			return reported
 		}
 		fmt.Fprintln(os.Stderr, closeProxiedRefusal(id, closeErr))

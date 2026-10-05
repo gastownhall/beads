@@ -116,7 +116,7 @@ func runDeleteProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	// caller is not yet in a position to read a dependents refusal it may not
 	// even still apply to.
 	if ifRevision != nil && err != nil {
-		if reported, ok := reportIfRevisionFailure("deleting", in.ids[0], err); ok {
+		if reported, ok := reportIfRevisionFailure("deleting", in.ids[0], err, in.ifRevision); ok {
 			return reported
 		}
 	}

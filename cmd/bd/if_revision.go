@@ -65,7 +65,17 @@ const (
 // "conditional_write_unsupported" for a backend that cannot honor
 // ExpectedVersion at all. ok is false for any other failure, which the
 // caller's own (unrelated) failure handling reports unchanged.
-func classifyIfRevisionFailure(err error) (code, reason string, expected, current *int64, ok bool) {
+//
+// ifRevision is the --if-revision flag's own parsed value, used ONLY as the
+// expected_revision fallback for the bare storage.ErrVersionMismatch sentinel
+// below, which (unlike *issueops.VersionMismatchError) carries no Expected
+// field of its own. Every upstream producer in this repo returns the typed
+// error; the bare sentinel is what bd-enterprise's HTTP client maps a 409
+// precondition_failed onto (internal/enterprise/httpstore/wire/problem.go),
+// since the wire body it decodes carries no current revision either. The
+// fallback keeps that HTTP-backed path classified correctly instead of
+// falling through to the caller's generic (uncoded, exit-1) failure handling.
+func classifyIfRevisionFailure(err error, ifRevision *int64) (code, reason string, expected, current *int64, ok bool) {
 	var vme *issueops.VersionMismatchError
 	switch {
 	case errors.As(err, &vme):
@@ -74,6 +84,11 @@ func classifyIfRevisionFailure(err error) (code, reason string, expected, curren
 		return ifRevisionCodePreconditionFailed, "assignee mismatch", nil, nil, true
 	case errors.Is(err, storage.ErrStatusMismatch):
 		return ifRevisionCodePreconditionFailed, "status mismatch", nil, nil, true
+	case errors.Is(err, storage.ErrVersionMismatch):
+		// current is deliberately omitted (unknown to this sentinel) rather
+		// than guessed — gascity tolerates the omission, decoding only the
+		// fields present in the body.
+		return ifRevisionCodePreconditionFailed, "revision mismatch", ifRevision, nil, true
 	}
 	var unsupported *issueops.ErrUnsupported
 	if errors.As(err, &unsupported) {
@@ -113,8 +128,8 @@ type ifRevisionFailureBody struct {
 // human "error" text always contains "precondition failed" so gascity's
 // code-less fallback (bdstore_conditional.go:320-327) still matches if a
 // caller ever loses the `code` field.
-func reportIfRevisionFailure(action, id string, err error) (reportedErr error, ok bool) {
-	code, reason, expected, current, ok := classifyIfRevisionFailure(err)
+func reportIfRevisionFailure(action, id string, err error, ifRevision *int64) (reportedErr error, ok bool) {
+	code, reason, expected, current, ok := classifyIfRevisionFailure(err, ifRevision)
 	if !ok {
 		return nil, false
 	}

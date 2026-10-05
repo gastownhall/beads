@@ -80,10 +80,15 @@ Examples:
 		}
 
 		// bd-98s5c: bd assign is shorthand for an unguarded assignee update —
-		// same live-claim fence as bd update -a.
-		if err := validateIssueReassignable(id, result.Issue, actor, assignee,
-			storeClaimPoolAliases(ctx, issueStore), force); err != nil {
-			return HandleErrorRespectJSON("%s", err)
+		// same live-claim fence as bd update -a. mc-zndi7.74: skipped when this
+		// pre-read is already stale against an active --if-revision guard, so a
+		// lost race reports precondition_failed from the guarded write below
+		// instead of this policy refusal — see ifRevisionAlreadyStale's doc.
+		if !ifRevisionAlreadyStale(result.Issue, ifRevision) {
+			if err := validateIssueReassignable(id, result.Issue, actor, assignee,
+				storeClaimPoolAliases(ctx, issueStore), force); err != nil {
+				return HandleErrorRespectJSON("%s", err)
+			}
 		}
 
 		// A8 (beads#4682): routed through issueops.Lifecycle.Update (via the
@@ -109,7 +114,7 @@ Examples:
 		})
 		if err != nil {
 			if ifRevision != nil {
-				if reported, ok := reportIfRevisionFailure("assigning", id, err); ok {
+				if reported, ok := reportIfRevisionFailure("assigning", id, err, ifRevision); ok {
 					return reported
 				}
 			}

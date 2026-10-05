@@ -90,9 +90,15 @@ func proxiedAssign(ctx context.Context, id, assignee string, force bool, ifRevis
 		if verr := validateIssueUpdatable(id, current); verr != nil {
 			return struct{}{}, verr
 		}
-		if verr := validateIssueReassignable(id, current, actor, assignee,
-			uowClaimPoolAliases(ctx, uw), force); verr != nil {
-			return struct{}{}, verr
+		// mc-zndi7.74: skipped when this pre-read is already stale against an
+		// active --if-revision guard, so a lost race reports precondition_failed
+		// from the guarded write below instead of this policy refusal — see
+		// ifRevisionAlreadyStale's doc.
+		if !ifRevisionAlreadyStale(current, ifRevision) {
+			if verr := validateIssueReassignable(id, current, actor, assignee,
+				uowClaimPoolAliases(ctx, uw), force); verr != nil {
+				return struct{}{}, verr
+			}
 		}
 		return struct{}{}, nil
 	})
@@ -127,7 +133,7 @@ func runAssignProxiedServer(ctx context.Context, args []string, force bool, ifRe
 	updated, err := proxiedAssign(ctx, id, assignee, force, ifRevision)
 	if err != nil {
 		if ifRevision != nil {
-			if reported, ok := reportIfRevisionFailure("assigning", id, err); ok {
+			if reported, ok := reportIfRevisionFailure("assigning", id, err, ifRevision); ok {
 				return reported
 			}
 		}
