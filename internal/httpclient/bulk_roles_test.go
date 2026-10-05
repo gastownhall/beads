@@ -210,8 +210,13 @@ func TestSweepResultCarriesEveryWireMember(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sweep(): %v", err)
 	}
-	assertEveryFieldPopulated(t, "SweepResult", reflect.ValueOf(result))
-	assertEveryFieldPopulated(t, "SweepSkips", reflect.ValueOf(result.Skipped))
+	// Remaining and LiveDependent are skipped: OSS's wire publishes no
+	// `remaining` or structural-dependent skip member for either to decode out
+	// of (W-SweepRequest.Limit, W-SweepRequest.ProtectLiveDependents refuse the
+	// request members that would produce them), so no wire body — fully
+	// populated or not — can ever make this projection set them.
+	assertEveryFieldPopulated(t, "SweepResult", reflect.ValueOf(result), "Remaining")
+	assertEveryFieldPopulated(t, "SweepSkips", reflect.ValueOf(result.Skipped), "LiveDependent")
 	if !reflect.DeepEqual(result.ReferencedIDs, []string{"bd-1"}) {
 		t.Errorf("ReferencedIDs = %v, want [bd-1]", result.ReferencedIDs)
 	}
@@ -790,16 +795,28 @@ func assertRefusedBy(t *testing.T, err error, row string) {
 
 // assertEveryFieldPopulated fails on any zero-valued field of a projected
 // result, which is how a dropped member of an unpinned wire body shows up.
-func assertEveryFieldPopulated(t *testing.T, name string, value reflect.Value) {
+//
+// skip names fields with no wire-side counterpart AT ALL — not a member this
+// projection dropped, but one the wire body never published in the first
+// place, so a fully populated wire body can never make the field non-zero no
+// matter what the projection does. Each one must be backed by its own
+// divergence-ledger row on the REQUEST side (the member the server would need
+// to be ASKED to produce this answer), or this exemption is just a quieter way
+// to drop it.
+func assertEveryFieldPopulated(t *testing.T, name string, value reflect.Value, skip ...string) {
 	t.Helper()
 	shape := value.Type()
 	for i := range shape.NumField() {
-		if !shape.Field(i).IsExported() {
+		field := shape.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		if slices.Contains(skip, field.Name) {
 			continue
 		}
 		if value.Field(i).IsZero() {
 			t.Errorf("%s.%s is zero after projecting a fully populated wire body; the member was dropped",
-				name, shape.Field(i).Name)
+				name, field.Name)
 		}
 	}
 }

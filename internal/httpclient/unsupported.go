@@ -1,20 +1,26 @@
-// Contributed by gascity from bd-enterprise (internal/enterprise/httpstore/unsupported.go@49d1df2f6)
-// to OSS beads under the MIT license.
 package httpclient
 
-// Regeneration: the http shell is the exact complement of this package's
-// hand-written method set, and the skip list below is design D8's allowlist v1
-// spelled as method names — the wire-backed role accessors
-// (accessors.go, which counts them), the off-role raw methods with a v0 mapping (offrole.go and
-// lifecycle.go's CloseIssue), the commit family and Close (store.go), and the
-// metadata trio (metadata.go).
+// Regeneration: S3 reconciliation (gc native-program, 2026-10) replaced
+// bd-enterprise's lifted generator and its hand-maintained -skip allowlist
+// with internal/storage/unsupportedgen, a from-scratch tool written for this
+// client. It takes no skip list: it parses this package's own non-test
+// sources for every method already declared on *Store (the wire-backed role
+// accessors in accessors.go, the off-role raw methods with a v0 mapping in
+// offrole.go and lifecycle.go's CloseIssue, the commit family and Close in
+// store.go, the metadata trio in metadata.go, and vocabulary.go's reads) and
+// generates a stub for every OTHER storage.DoltStorage method. A hand-written
+// method and a generated one can never collide on the same selector, and
+// there is no allowlist to keep in sync by hand — adding a hand-written
+// override just removes that method from the next regeneration automatically.
 //
-// Never hand-edit unsupported_gen.go. Regenerate with `go generate ./...` after
-// changing the skip list; gen's strict unmatched-skip validation then doubles as
-// a drift tripwire against DoltStorage interface changes, and the regen-
-// idempotence gate in internal/storage/unsupportedgen byte-compares the result.
+// Never hand-edit unsupported_gen.go. Regenerate with `go generate ./...`
+// after adding or removing a hand-written DoltStorage method; store.go's
+// `var _ storage.DoltStorage = (*Store)(nil)` assertion is the drift tripwire
+// against a storage.DoltStorage interface change the regeneration itself
+// doesn't already surface (an interface method neither hand-written nor
+// generated fails that assertion at compile time).
 //
-// -src and the tool path are two levels up because this package sits under
-// internal/enterprise rather than beside internal/storage.
+// The tool path is one level up because this package sits beside
+// internal/storage, both direct children of internal/.
 //
-//go:generate go run ../../storage/unsupportedgen -pkg httpstore -src ../../storage -out unsupported_gen.go -type DoltStorage -skip BatchApplier,BatchCloser,BatchCreator,BlockingAnnotator,Close,CloseIssue,Commenter,Commit,CommitAll,CommitMergeResolution,CommitPending,CommitWithConfig,Counter,CycleDetector,Deleter,DependencyEditor,EdgeReader,GetAllConfig,GetConfig,GetCustomStatuses,GetCustomStatusesDetailed,GetCustomTypes,GetDependenciesWithMetadata,GetDependencyRecords,GetDependencyRecordsForIssues,GetDependentsWithMetadata,GetInfraTypes,GetIssue,GetIssueComments,GetLabels,GetLocalMetadata,GetMetadata,GetReadyWork,GetReadyWorkWithCounts,GetReadyWorkWithCountsAndTotal,GetStatistics,GraphCounter,IsInfraTypeCtx,IssueClaimer,IssueLifecycle,IssueReader,IssueRelations,Memories,MetadataCAS,Querier,ReadyClaimer,ReadyCounter,ReadyLister,Releaser,SearchIssues,SetLocalMetadata,StatsReporter,Sweeper,TreeWalker,WorkspaceConfig
+//go:generate go run ../storage/unsupportedgen -type DoltStorage -pkg httpclient -receiver Store -out unsupported_gen.go

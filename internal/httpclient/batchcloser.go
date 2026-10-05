@@ -13,8 +13,6 @@ import (
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/encode"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
-	storageops "github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -67,13 +65,12 @@ func (b *httpBatchCloser) CloseBatch(ctx context.Context, req issueops.CloseBatc
 			return issueops.CloseBatchResult{}, invalid("items[%d].issue_id is required", i)
 		}
 	}
-	// The ClaimNext filter is validated client-side, because the wire's claim_next
-	// carries neither a page bound nor an order, so the server never sees the
-	// members a bad one would carry. The role contract calls these ErrValidation.
+	// ClaimNext refuses unconditionally: OSS's apigen.BatchCloseRequest and
+	// BatchCloseResponse publish no claim_next/claimed_next member at all, so
+	// there is no shape — valid or not — for this field to encode into. See
+	// ledger row W-CloseBatchRequest.ClaimNext.
 	if req.ClaimNext != nil {
-		if err := validateClaimNext(req.Actor, *req.ClaimNext); err != nil {
-			return issueops.CloseBatchResult{}, err
-		}
+		return issueops.CloseBatchResult{}, refuse(encode.OpBatchCloseIssues, "W-CloseBatchRequest.ClaimNext")
 	}
 	// The wire's item cap, enforced before the dial and NEVER by chunking: a
 	// split batch is N transactions where the caller asked for one. L-close-cap.
@@ -89,29 +86,6 @@ func (b *httpBatchCloser) CloseBatch(ctx context.Context, req issueops.CloseBatc
 		return b.serveBatch(ctx, req)
 	}
 	return b.serveComposedSingle(ctx, req)
-}
-
-// validateClaimNext applies the ClaimNext rules the wire cannot enforce, because
-// its claim_next object carries neither a page bound nor an order: the shared
-// unset-Limit / unset-Offset rule (issueops ValidateClaimNextRequest) plus the
-// sort vocabulary listReadyWork would have refused on the URL query but claim_next
-// never sends. All three are the role contract's ErrValidation, raised before any
-// dial so a refused request closes nothing.
-//
-// MolType is NOT here: it is a legal ready filter the wire simply cannot express,
-// so it refuses through the shared ready builder (encode.ClaimNextBody, ledger
-// row E-ReadyRequest.MolType) rather than as a validation failure.
-func validateClaimNext(actor string, req issueops.ReadyRequest) error {
-	// The shared rules first, from the validator every ReadyClaimer runs, so a
-	// rule upstream adds to a claim reaches this arm too — the fork's claim_next
-	// is the SAME claim, taken in the transaction that committed the closes.
-	if err := storageops.ValidateClaimNextRequest(issueops.ClaimNextRequest{Actor: actor, Filter: req}); err != nil {
-		return err
-	}
-	if req.Sort != "" && !types.SortPolicy(req.Sort).IsValid() {
-		return invalid("claim next sort policy %q is not one of hybrid, priority or oldest", req.Sort)
-	}
-	return nil
 }
 
 // servesBatchClose reports whether the server advertises issues.batchClose. It
@@ -143,10 +117,7 @@ func (b *httpBatchCloser) servesBatchClose(ctx context.Context) (bool, error) {
 // serveBatch sends the whole request on one issues:batchClose call and reads the
 // per-item outcomes back.
 func (b *httpBatchCloser) serveBatch(ctx context.Context, req issueops.CloseBatchRequest) (issueops.CloseBatchResult, error) {
-	body, err := batchCloseBody(req)
-	if err != nil {
-		return issueops.CloseBatchResult{}, err
-	}
+	body := batchCloseBody(req)
 	resp, err := b.wire.BatchCloseIssues(ctx, body)
 	if err != nil {
 		return issueops.CloseBatchResult{}, err
@@ -184,10 +155,11 @@ func (b *httpBatchCloser) serveComposedSingle(ctx context.Context, req issueops.
 }
 
 // batchCloseBody projects the role request onto the wire body. Reasons ride per
-// item, session and force are request-wide, and a nil ClaimNext stays absent —
-// the shared ready builder refuses a claim the wire cannot express before this
-// body is ever sent.
-func batchCloseBody(req issueops.CloseBatchRequest) (apigen.BatchCloseRequest, error) {
+// item, and session and force are request-wide. ClaimNext has no member to
+// project onto — CloseBatch refuses it unconditionally before this body is
+// ever built (W-CloseBatchRequest.ClaimNext), so req.ClaimNext is always nil
+// here.
+func batchCloseBody(req issueops.CloseBatchRequest) apigen.BatchCloseRequest {
 	items := make([]apigen.BatchCloseItem, len(req.Items))
 	for i, item := range req.Items {
 		items[i] = apigen.BatchCloseItem{Id: item.IssueID}
@@ -205,22 +177,20 @@ func batchCloseBody(req issueops.CloseBatchRequest) (apigen.BatchCloseRequest, e
 		force := true
 		body.Force = &force
 	}
-	if req.ClaimNext != nil {
-		claim, err := encode.ClaimNextBody(*req.ClaimNext)
-		if err != nil {
-			return apigen.BatchCloseRequest{}, err
-		}
-		body.ClaimNext = &claim
-	}
-	return body, nil
+	return body
 }
 
 // decodeBatchCloseResult reads the wire response back into the role's result.
 //
 // The server's contract is one outcome per item in request order; a length that
 // disagrees is a broken server, which is the METHOD's failure and carries no
-// outcomes rather than a per-item one the caller might trust. The claim is held
-// to its own half of that contract by checkServedClaim, on the same terms.
+// outcomes rather than a per-item one the caller might trust.
+//
+// The result's ClaimedNext always stays nil: OSS's apigen.BatchCloseResponse
+// publishes no claimed_next member for this client to decode, and CloseBatch
+// refuses any request that asked for one before a body is ever sent (see
+// ledger row W-CloseBatchRequest.ClaimNext), so there is nothing a server
+// could answer here that this client would read.
 func decodeBatchCloseResult(req issueops.CloseBatchRequest, resp *apigen.BatchCloseResponse) (issueops.CloseBatchResult, error) {
 	if len(resp.Outcomes) != len(req.Items) {
 		return issueops.CloseBatchResult{}, fmt.Errorf(
@@ -230,91 +200,7 @@ func decodeBatchCloseResult(req issueops.CloseBatchRequest, resp *apigen.BatchCl
 	for i := range resp.Outcomes {
 		outcomes[i] = decodeBatchCloseOutcome(resp.Outcomes[i])
 	}
-	if err := checkServedClaim(req, resp.ClaimedNext, outcomes); err != nil {
-		return issueops.CloseBatchResult{}, err
-	}
-	// ClaimedNext IS the generated pointer type (the schema is x-go-type-pinned to
-	// types.IssueWithCounts), so it passes through unrewritten: nil means no claim
-	// was asked for, nothing closed, or nothing was eligible.
-	return issueops.CloseBatchResult{Outcomes: outcomes, ClaimedNext: resp.ClaimedNext}, nil
-}
-
-// checkServedClaim holds a served `claimed_next` to the role contract, and
-// answers the outcome count's diagnosis when it does not: a broken server, the
-// METHOD's failure, carrying no outcomes rather than an answer the caller might
-// trust.
-//
-// A CLAIM CARRYING NO ROW is the count's failure one member over, and it is
-// here for a harder reason than the count is. types.IssueWithCounts holds the
-// row as an EMBEDDED POINTER, so a `claimed_next` object that carries the
-// cardinalities and none of the issue's own members decodes to a non-nil claim
-// whose Issue is nil — a shape nothing on the wire tells apart from a claim
-// that landed. Passing it through is not a wrong answer but a PANIC in the
-// caller: this store is a registered storage.DoltStorage, so `bd close
-// --claim-next` takes the direct arm and dereferences the claimed row's ID with
-// no nil check.
-//
-// A CLAIM THE REQUEST NEVER EARNED is refused for a different harm, and the
-// rule is the role contract's own: a claim requires that the request ASKED for
-// one and that at least one item LANDED, Changed being the test for landed. It
-// is the SAME rule `bd serve` holds its own closer to (internal/httpapi's
-// claimCheckedBatchCloser), stated twice on purpose — the server's copy
-// protects that server's clients, and this one protects THIS client from a
-// server that is not it. They must not drift: a rule stricter here than there
-// would refuse a legitimate answer, which is what the served conformance tier's
-// earned/unearned pair pins.
-//
-// WHAT IT PREVENTS IS A WRITE AND A SUBPROCESS, not a bad printout. The row
-// `claimed_next` names is assigned to this actor, and the client's decorator
-// chain puts HookFiringStore above this store: hookBatchCloser fires the
-// workspace's on_update hook on the member's PRESENCE alone, re-deriving
-// nothing, because below the wire it has no view of what was asked or what
-// landed. Refusing here is what denies it both preconditions.
-//
-// THE CLAIMED ID IS CHECKED AGAINST NOTHING, and that absence is the
-// operation's shape rather than an omission. The outcomes are checked against
-// the request because they are POSITIONAL — they answer the ids the caller sent
-// — and the claim answers no id at all: it names the next READY row, which the
-// caller never enumerated and which this client cannot evaluate readiness for,
-// since running the selection inside the closes' transaction is the whole
-// reason the member exists. The one membership rule that LOOKS checkable — "the
-// claim is none of the ids I sent" — is false, and a batch of a parent and one
-// of its children is the counterexample: the child closes, the parent refuses
-// for its remaining open children, and that parent is open, unblocked and
-// eligible, so claiming it is correct. Refusing it would reject a right answer,
-// which is worse than these checks declining to make a promise they cannot
-// keep.
-func checkServedClaim(req issueops.CloseBatchRequest, claimed *types.IssueWithCounts, outcomes []issueops.CloseOutcome) error {
-	if claimed == nil {
-		return nil
-	}
-	// The row FIRST, because the two refusals below NAME it.
-	if claimed.Issue == nil {
-		return fmt.Errorf("bd serve returned a batch-close claim carrying no issue")
-	}
-	if req.ClaimNext == nil {
-		return fmt.Errorf("bd serve returned a batch-close claim of %q for a request that asked for none", claimed.ID)
-	}
-	if !closeBatchLanded(outcomes) {
-		return fmt.Errorf("bd serve returned a batch-close claim of %q for a batch that closed nothing", claimed.ID)
-	}
-	return nil
-}
-
-// closeBatchLanded reports whether any item persisted a mutation, which is what
-// the claim's "at least one item closed" means: an idempotent re-close is a
-// per-item success that wrote nothing, and a refused item wrote nothing either.
-//
-// It is the server-side wrapper's function of the same name, restated rather
-// than shared for the reason maxWireBatchCloseItems is restated: importing the
-// server package to reach it would drag the storage engine into a client.
-func closeBatchLanded(outcomes []issueops.CloseOutcome) bool {
-	for _, outcome := range outcomes {
-		if outcome.Err == nil && outcome.Changed {
-			return true
-		}
-	}
-	return false
+	return issueops.CloseBatchResult{Outcomes: outcomes}, nil
 }
 
 // decodeBatchCloseOutcome reads ONE wire outcome.
@@ -409,12 +295,14 @@ func stripItemControlRunes(s string) string {
 // the refusal says which of the two reasons it is rather than "batch close is
 // unsupported". It survives only in that leg: where issues.batchClose is
 // advertised, every shape is served on one wire call and nothing reaches here.
+//
+// ClaimNext is not checked here: CloseBatch refuses it unconditionally, on
+// both legs, before either serving method is called (see ledger row
+// W-CloseBatchRequest.ClaimNext), so req.ClaimNext is always nil by the time
+// a request reaches this leg.
 func (s *Store) refuseUnservedCloseShape(req issueops.CloseBatchRequest) error {
 	if len(req.Items) > 1 {
 		return s.unsupported("BatchCloser.CloseBatch(multi-item)")
-	}
-	if req.ClaimNext != nil {
-		return s.unsupported("BatchCloser.CloseBatch(ClaimNext)")
 	}
 	return nil
 }

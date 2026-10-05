@@ -7,15 +7,11 @@ import (
 	"github.com/steveyegge/beads/memoryops"
 )
 
-// The TWENTY-SIX wire-backed role accessors of design D8's allowlist v1, as
-// amended by the `bd close` decision that moved row 17 across, by the five
-// the client waves added after it — Counter and GraphCounter (wave 2a),
-// Releaser, Commenter and IssueRelations (wave 2b) — and by ReadyLister, the
-// upstream ready-listing role, served over the listing and count operations
-// IssueReader and ReadyCounter already dial. This sentence said "twenty"
-// long after the ordinals below reached TWENTY-FIFTH and wireBackedAccessors
-// held twenty-five names; a count in prose beside a list in code is a count
-// that goes stale, so read the list. They are
+// The TWENTY-FIVE wire-backed role accessors of design D8's allowlist v1, as
+// amended by the `bd close` decision that moved row 17 across, and by the
+// five the client waves added after it — Counter and GraphCounter (wave 2a),
+// Releaser, Commenter and IssueRelations (wave 2b). A count in prose beside a
+// list in code is a count that goes stale, so read the list. They are
 // off the generated refusing shell — that is what keeps them off the unsupported
 // allowlist and out of RunUnsupportedContract — and hand-written here so a role
 // bead flips one accessor in place, in the same PR as the method that serves it,
@@ -60,6 +56,14 @@ import (
 // #5596 published PUT and DELETE /v0/beads/config/{key} and client wave 2c
 // (ga-jpywb) dials both. THE PARTIAL COLUMN IS EMPTY, for the first time since
 // this file was written.
+//
+// READYLISTER IS NOT AN ACCESSOR HERE, and it is not a removal: this lift
+// carried bd-enterprise's issueops.ReadyLister/ReadyListRequest/ReadyListing
+// over from a fork where upstream had published them, and S3 reconciliation
+// (gc native-program, 2026-10) found OSS has published none of the three —
+// there is no role type to implement and no accessor return type to name.
+// `bd ready`'s listing is unaffected; it already runs on IssueReader. S13
+// schedules the role once upstream publishes it.
 
 // IssueReader serves listReadyWork/listIssues/getIssue (D8 row 1).
 func (s *Store) IssueReader() (issueops.Reader, error) {
@@ -69,12 +73,6 @@ func (s *Store) IssueReader() (issueops.Reader, error) {
 // ReadyCounter serves countReadyWork (D8 row 2).
 func (s *Store) ReadyCounter() (issueops.ReadyCounter, error) {
 	return httpReadyCounter{store: s}, nil
-}
-
-// ReadyLister serves listReadyWork, plus countReadyWork when the page does not
-// settle the total — `bd ready`'s listing (role_readylister.go).
-func (s *Store) ReadyLister() (issueops.ReadyLister, error) {
-	return httpReadyLister{store: s}, nil
 }
 
 // Counter serves countIssues (GET /v0/beads/issues:count) — the TWENTY-FIRST

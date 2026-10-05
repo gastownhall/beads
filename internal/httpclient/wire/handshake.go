@@ -164,14 +164,20 @@ const CapBatchApplyLarge = "issues.batchApplyLarge"
 // CapExternalDependencies is the CONDITIONAL behavior capability announcing
 // that the ready, claim and close operations of this server apply bd's
 // external-dependency policy themselves, spelled exactly as httpapi's constant
-// of the same name (held to it by TestExternalDependencyCapabilityMatchesTheServer).
+// of the same name.
 //
 // It is not in behaviorCapabilities because it is not a property of the build:
-// httpapi advertises it only when the serving process composed its roles through
-// the policy layer, so httpapi.Capabilities() — the build-level list the parity
-// gate compares against — never contains it. The store reads it to answer
-// storage.ServerEnforcedPolicy, which is what decides whether this client layers
-// the policy itself.
+// httpapi advertises it only when the serving process composed its roles
+// through the policy layer, so httpapi.Capabilities() — the build-level list
+// the parity gate compares against — never contains it.
+//
+// UNCONSUMED since S3 reconciliation (gc native-program, 2026-10): this client
+// has no external-dependency policy layer to gate — OSS publishes no
+// storage.ExternalDependencyQueryStore-backed client policy for this store to
+// compose, so bd-enterprise's policy.go (which read this token) was removed
+// rather than reconciled. The token stays declared, because the server-side
+// capability and its wire spelling are real and S10 schedules the client half
+// that reads it.
 const CapExternalDependencies = "policy.external_dependencies"
 
 // ClientWireRevision is the wire shape this client was built to speak and

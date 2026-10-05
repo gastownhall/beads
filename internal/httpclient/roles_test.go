@@ -30,11 +30,9 @@ import (
 // The embedded WriteWire is nil for the reason fakeWire's is: it makes this
 // double satisfy the transport seam however the write beads grow it, and a read
 // role that somehow reached a write operation panics rather than getting a
-// plausible zero. StreamWire is embedded nil for the same reason — a read role
-// that reached the watch stream panics rather than getting a plausible one.
+// plausible zero.
 type recordingWire struct {
 	WriteWire
-	StreamWire
 
 	preflighted []string
 	dispatched  []string

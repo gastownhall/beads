@@ -23,12 +23,9 @@ import (
 // transport seam however the role beads grow it, and it makes calling an
 // operation it does not answer a panic rather than a silent zero — which is what
 // a test that reached for one would deserve. A test that DOES need a write
-// operation embeds its own stub instead (see the role tests). StreamWire is
-// embedded nil on the same terms — this double answers the handshake and nothing
-// else, and a watch through it panics.
+// operation embeds its own stub instead (see the role tests).
 type fakeWire struct {
 	WriteWire
-	StreamWire
 
 	res  *apigen.ContextResponse
 	err  error
@@ -61,7 +58,14 @@ func (f *fakeWire) Do(ctx context.Context, req wire.Request, out any) error {
 	return f.do(ctx, req, out)
 }
 
-func testTarget(t *testing.T) Target {
+// pinnedProjectTarget is this file's own Target builder, distinct from
+// helpers_test.go's testTarget: several tests here assert against this
+// specific URL and ExpectProjectID (the identity-mismatch and GetMetadata
+// project-id tests), so it cannot share the generic "nothing pinned yet"
+// helper. S3 reconciliation (gc native-program, 2026-10) renamed it off
+// testTarget — the lift had declared two package-scope functions under that
+// one name (here and in helpers_test.go), which never compiled.
+func pinnedProjectTarget(t *testing.T) Target {
 	t.Helper()
 	u, err := url.Parse("http://127.0.0.1:7777")
 	if err != nil {
@@ -75,7 +79,7 @@ func testTarget(t *testing.T) Target {
 // the claim path calls Commit, and PostRun turns any Commit error into a failed
 // exit.
 func TestCommitFamilyIsNoOp(t *testing.T) {
-	s := New(testTarget(t), nil, nil)
+	s := New(pinnedProjectTarget(t), nil, nil)
 	ctx := context.Background()
 
 	if err := s.Commit(ctx, "msg"); err != nil {
@@ -117,27 +121,13 @@ func TestCommitFamilyIsNotOnTheUnsupportedMap(t *testing.T) {
 	}
 }
 
-// TestNonCommitGraphMarker pins the marker cmd/bd's PostRun consults to skip the
-// Dolt maintenance tail. It reaches the store through storage.UnwrapStore, so
-// assert it the same way.
-func TestNonCommitGraphMarker(t *testing.T) {
-	var s storage.DoltStorage = New(testTarget(t), nil, nil)
-	marker, ok := storage.UnwrapStore(s).(storage.NonCommitGraphBackend)
-	if !ok {
-		t.Fatal("store does not implement storage.NonCommitGraphBackend")
-	}
-	if !marker.CommitGraphUnsupported() {
-		t.Error("CommitGraphUnsupported() = false, want true")
-	}
-}
-
 // TestRefusalUnwrapsToPortableSentinel is the classification contract the whole
 // refusal surface rests on: errors.As reaches *storage.ErrUnsupported through
 // the richer http sentinel, and Op names the method that refused.
 func TestRefusalUnwrapsToPortableSentinel(t *testing.T) {
 	// The handshake has already run, so the refusal decorates from the cache.
 	// Decorating must never dial: pass no transport at all.
-	s := New(testTarget(t), nil, &apigen.ContextResponse{
+	s := New(pinnedProjectTarget(t), nil, &apigen.ContextResponse{
 		BdVersion:    "1.2.3",
 		Capabilities: []string{"issues.list", "issues.get"},
 	})
@@ -196,7 +186,7 @@ func TestRefusalUnwrapsToPortableSentinel(t *testing.T) {
 // that is both store-bound and permanently refusing.
 func TestRefusalDoesNotDial(t *testing.T) {
 	wire := &fakeWire{res: &apigen.ContextResponse{BdVersion: "1.2.3"}}
-	s := New(testTarget(t), wire, nil)
+	s := New(pinnedProjectTarget(t), wire, nil)
 
 	if _, err := s.GetMetadata(context.Background(), "some-other-key"); err == nil {
 		t.Fatal("GetMetadata on a non-identity key returned no error")
@@ -235,7 +225,7 @@ func TestBackstopRefusalNamesNoEmptyServer(t *testing.T) {
 // silently disarm wrong-server protection.
 func TestGetMetadataServesProjectIdentity(t *testing.T) {
 	wire := &fakeWire{res: &apigen.ContextResponse{ProjectId: "proj-1"}}
-	s := New(testTarget(t), wire, nil)
+	s := New(pinnedProjectTarget(t), wire, nil)
 	ctx := context.Background()
 
 	got, err := s.GetMetadata(ctx, "_project_id")
@@ -265,7 +255,7 @@ func TestGetMetadataServesProjectIdentity(t *testing.T) {
 // "new or pre-identity database" answer, which is the honest state before a
 // handshake has run.
 func TestGetMetadataWithoutHandshakeSkipsValidation(t *testing.T) {
-	s := New(testTarget(t), nil, nil)
+	s := New(pinnedProjectTarget(t), nil, nil)
 	got, err := s.GetMetadata(context.Background(), "_project_id")
 	if err != nil {
 		t.Fatalf("GetMetadata: %v", err)
@@ -279,7 +269,7 @@ func TestGetMetadataWithoutHandshakeSkipsValidation(t *testing.T) {
 // write in PostRun must succeed, and tips-shown timestamps are per-user state.
 func TestLocalMetadataRoundTrips(t *testing.T) {
 	beadsDir := t.TempDir()
-	s := New(testTarget(t), nil, nil)
+	s := New(pinnedProjectTarget(t), nil, nil)
 	s.local = newLocalMetadata(beadsDir)
 	ctx := context.Background()
 
@@ -318,7 +308,7 @@ func TestLocalMetadataRoundTrips(t *testing.T) {
 // TestLocalMetadataWithoutWorkspaceDoesNotError: an ephemeral --server-url
 // workspace has nowhere to write, and PostRun treats a write error as fatal.
 func TestLocalMetadataWithoutWorkspaceDoesNotError(t *testing.T) {
-	s := New(testTarget(t), nil, nil)
+	s := New(pinnedProjectTarget(t), nil, nil)
 	if err := s.SetLocalMetadata(context.Background(), "tip.shown", "now"); err != nil {
 		t.Errorf("SetLocalMetadata with no workspace: %v, want nil", err)
 	}
@@ -333,7 +323,7 @@ func TestLoadTarget(t *testing.T) {
 
 	t.Run("round trip", func(t *testing.T) {
 		dir := t.TempDir()
-		want := testTarget(t)
+		want := pinnedProjectTarget(t)
 		if err := SaveTarget(dir, want); err != nil {
 			t.Fatalf("SaveTarget: %v", err)
 		}
@@ -380,7 +370,7 @@ func swapDialer(t *testing.T, d WireDialer) {
 // so plainly rather than hand back a store that cannot dial.
 func TestOpenWithoutADialerRefuses(t *testing.T) {
 	dir := t.TempDir()
-	if err := SaveTarget(dir, testTarget(t)); err != nil {
+	if err := SaveTarget(dir, pinnedProjectTarget(t)); err != nil {
 		t.Fatalf("SaveTarget: %v", err)
 	}
 	swapDialer(t, nil)
@@ -395,7 +385,7 @@ func TestOpenWithoutADialerRefuses(t *testing.T) {
 // target threaded through and the workspace bound for local metadata.
 func TestOpenDialsThroughTheRegisteredWire(t *testing.T) {
 	dir := t.TempDir()
-	want := testTarget(t)
+	want := pinnedProjectTarget(t)
 	if err := SaveTarget(dir, want); err != nil {
 		t.Fatalf("SaveTarget: %v", err)
 	}

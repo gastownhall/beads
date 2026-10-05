@@ -251,9 +251,26 @@ func writeShapes() []writeShape {
 			// is left is this client's own decision not to carry the bypass.
 			// See W-UpdateRequest.ForceAssigneeTransfer for the residue and the
 			// bead that owns it.
+			//
+			// `force_notes_overwrite` (S3 reconciliation, gc native-program,
+			// 2026-10) is the third member of that same trio, refused for the
+			// same reason (W-UpdateRequest.ForceNotesOverwrite) — newer to this
+			// client's awareness than the other two, with no decision on record
+			// before this reconciliation found it unwired.
+			//
+			// `claim` is pending for a different reason than the three force
+			// members: it is not a bypass this client declines to carry, but a
+			// whole atomic shape (claim folded into one transaction with a
+			// patch) that W-UpdateRequest.Claim still refuses outright, tracked
+			// against upstream gastownhall/beads#6890. A claim-ALONE request
+			// does not reach this body at all — see claimOnlyUpdate — which is
+			// why this entry's refusal is unconditional rather than scoped to
+			// one bypass.
 			pending: map[string]string{
 				"force_assignee_transfer": "ForceAssigneeTransfer",
 				"force_close_policy":      "ForceClosePolicy",
+				"force_notes_overwrite":   "ForceNotesOverwrite",
+				"claim":                   "Claim",
 			},
 		},
 		{
@@ -365,9 +382,11 @@ func writeShapes() []writeShape {
 			},
 		},
 		{
-			// Total in both directions: the sweep is the one write on this
-			// surface whose request the wire carries whole, which is why no W-
-			// row names a SweepRequest member.
+			// NOT total, unlike bd-enterprise's: OSS's apigen.SweepRequest has
+			// no member for ProtectLiveDependents or Limit, so both are absent
+			// from carried below and the source -> wire arm obliges the two
+			// W-SweepRequest rows (W-SweepRequest.ProtectLiveDependents,
+			// W-SweepRequest.Limit) rather than a member.
 			name:   "sweepIssues",
 			source: reflect.TypeOf(issueops.SweepRequest{}),
 			body:   reflect.TypeOf(apigen.SweepRequest{}),
@@ -420,20 +439,20 @@ func writeShapes() []writeShape {
 			},
 		},
 		{
-			// ClaimNext is a WHOLE-body member here: the *ReadyRequest becomes the
-			// claim_next object as one unit (encode.ClaimNextBody). Its own excluded
-			// members — Limit, Offset, MolType — are the READ shape's E-ReadyRequest
-			// rows, held by the encoder bijection, so this shape adds no W- row for
-			// them: the body encoder shares the ready builder.
+			// ClaimNext has no wire member at all: OSS's apigen.BatchCloseRequest
+			// publishes actor, items, session and force only, with no composed
+			// claim_next object for a *ReadyRequest to encode into. It is absent
+			// from carried below, so the wire->source arm obliges a KindRefuse
+			// ledger row naming CloseBatchRequest.ClaimNext
+			// (W-CloseBatchRequest.ClaimNext) rather than a member.
 			name:   "batchCloseIssues",
 			source: reflect.TypeOf(issueops.CloseBatchRequest{}),
 			body:   reflect.TypeOf(apigen.BatchCloseRequest{}),
 			carried: map[string]carriage{
-				"Actor":     member("actor"),
-				"Items":     member("items"),
-				"Session":   member("session"),
-				"Force":     member("force"),
-				"ClaimNext": member("claim_next"),
+				"Actor":   member("actor"),
+				"Items":   member("items"),
+				"Session": member("session"),
+				"Force":   member("force"),
 			},
 		},
 		{
@@ -516,6 +535,10 @@ func writeShapes() []writeShape {
 				"ExpectedAssignee":      member("expected_assignee"),
 				"ForceClosePolicy":      member("force_close_policy"),
 				"ForceAssigneeTransfer": member("force_assignee_transfer"),
+				// All three force flags are published here (S3 reconciliation,
+				// gc native-program, 2026-10 — batchapplier.go now sends it
+				// exactly as it sends the other two).
+				"ForceNotesOverwrite": member("force_notes_overwrite"),
 			},
 		},
 		{

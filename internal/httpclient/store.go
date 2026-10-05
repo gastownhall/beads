@@ -6,10 +6,9 @@
 // with a typed sentinel.
 //
 // This package is the store skeleton — the mechanically generated refusing
-// base, the sentinel, the commit-graph posture, the benign local stubs and the
-// registration glue. It issues no wire calls: transport and encoding live in
-// sibling packages, and each role accessor here refuses until its role bead
-// wires it.
+// base, the sentinel, the benign local stubs and the registration glue. It
+// issues no wire calls: transport and encoding live in sibling packages, and
+// each role accessor here refuses until its role bead wires it.
 //
 // See engdocs/design/http-client-backend.md.
 package httpclient
@@ -21,7 +20,6 @@ import (
 	"sync"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
-	"github.com/steveyegge/beads/internal/httpclient/wire"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -52,10 +50,6 @@ type Store struct {
 	mu     sync.Mutex
 	ctxRes *apigen.ContextResponse
 
-	// policy settles, once per store, whether the server enforces bd's
-	// external-dependency policy itself (policy.go).
-	policy policyProbe
-
 	// vocabularyCache memoizes the workspace's status and type vocabulary, which
 	// the `--parent` walk's derived-default inversion recognizes with
 	// (vocabulary.go). It is embedded rather than a field so the zero Store the
@@ -64,15 +58,19 @@ type Store struct {
 }
 
 // Compile-time proof that the hand-written methods plus the generated shell
-// cover the full storage seam, and that the negative maintenance marker is
-// implemented. The first assertion is the skip-list drift guard: a skipped
-// method this package does not actually implement is a missing method, and a
-// method both implemented and stubbed is an ambiguous selector.
-var (
-	_ storage.DoltStorage            = (*Store)(nil)
-	_ storage.NonCommitGraphBackend  = (*Store)(nil)
-	_ storage.RemoteWorkspaceBackend = (*Store)(nil)
-)
+// cover the full storage seam: a skipped method this package does not
+// actually implement is a missing method, and a method both implemented and
+// stubbed is an ambiguous selector.
+//
+// S3 reconciliation (gc native-program, 2026-10): OSS's storage package
+// defines no storage.NonCommitGraphBackend or storage.RemoteWorkspaceBackend
+// marker interface — those are bd-enterprise additions this client's lift
+// carried over, with no OSS consumer anywhere (cmd/bd's PostRun and the
+// pre-write identity check both run unconditionally here). The marker
+// assertions and the CommitGraphUnsupported/WorkspaceMismatchRecovery methods
+// behind them are removed rather than stubbed, since inventing the OSS
+// interfaces here would assert a maintenance contract no OSS caller checks.
+var _ storage.DoltStorage = (*Store)(nil)
 
 // New builds the store around an already-resolved target and transport.
 //
@@ -163,20 +161,6 @@ func (s *Store) cachedSnapshot() *apigen.ContextResponse {
 // Close releases the store. Nothing local is held open, so this is a no-op
 // (design D4, "Close").
 func (s *Store) Close() error { return nil }
-
-// CommitGraphUnsupported is the negative maintenance marker (see
-// storage.NonCommitGraphBackend): it tells cmd/bd's PostRun to skip the
-// Dolt-only maintenance tail. Only non-Dolt backends implement it, so the
-// default path is unaffected.
-func (s *Store) CommitGraphUnsupported() bool { return true }
-
-// WorkspaceMismatchRecovery names the one action that resolves a wrong-server
-// identity mismatch for an http workspace (storage.RemoteWorkspaceBackend):
-// there is no local database to reconcile, so bd doctor/bootstrap do not apply —
-// reconnecting does. cmd/bd's pre-write identity check renders this in place of
-// the Dolt recovery, sourcing the string from the wire error so the write path
-// and the post-baseline read path say the same thing (design D1/D6).
-func (s *Store) WorkspaceMismatchRecovery() string { return wire.ProjectMismatchRecovery }
 
 // The commit family is a NO-OP on this backend, not unsupported (design D3).
 // The server's writes are durable when it writes the response, so a client-side

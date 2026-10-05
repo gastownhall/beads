@@ -600,6 +600,7 @@ func isClaimOnlyUpdate(req issueops.UpdateRequest) bool {
 	return reflect.DeepEqual(req.Patch, issueops.IssuePatch{}) &&
 		!req.ForceAssigneeTransfer &&
 		!req.ForceClosePolicy &&
+		!req.ForceNotesOverwrite &&
 		!req.IssuePlaneOnly &&
 		req.Provenance == "" &&
 		req.ExpectedVersion == nil &&
@@ -630,6 +631,8 @@ func refuseUnwirableUpdateMembers(req issueops.UpdateRequest) error {
 		return refuse(encode.OpUpdateIssue, "W-UpdateRequest.ForceAssigneeTransfer")
 	case req.ForceClosePolicy:
 		return refuse(encode.OpUpdateIssue, "W-UpdateRequest.ForceClosePolicy")
+	case req.ForceNotesOverwrite:
+		return refuse(encode.OpUpdateIssue, "W-UpdateRequest.ForceNotesOverwrite")
 	case req.IssuePlaneOnly:
 		return refuse(encode.OpUpdateIssue, "W-UpdateRequest.IssuePlaneOnly")
 	case req.Provenance != "":

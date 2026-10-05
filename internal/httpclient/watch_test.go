@@ -16,7 +16,11 @@ import (
 // tracker, and one that dropped the local-workspace recovery would leave them
 // with no way to get the behavior at all.
 func TestTheWatchRefusalReadsExactlyAsTheSpecWroteIt(t *testing.T) {
-	s := New(testTarget(t), nil, nil)
+	// pinnedProjectTarget, not testTarget: the expected text below pins the
+	// literal workspace URL, so it needs the fixed-URL builder (S3
+	// reconciliation, gc native-program, 2026-10 — this file's testTarget
+	// call predated the rename that split the two helpers apart).
+	s := New(pinnedProjectTarget(t), nil, nil)
 
 	const want = "--watch is not supported against HTTP workspace http://127.0.0.1:7777: " +
 		"polling a shared server every 2s amplifies load without change detection; " +

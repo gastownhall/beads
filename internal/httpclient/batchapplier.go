@@ -309,11 +309,12 @@ func applyUpdateItemBody(item *issueops.UpdateItem) (*wire.ApplyUpdateItem, erro
 		assignee := *item.ExpectedAssignee
 		out.ExpectedAssignee = &assignee
 	}
-	// Both force flags ARE published on this operation, unlike updateIssue's
-	// body where they are still refused — so a plan can express what a single
-	// patch over this wire cannot. They are sent only when true.
+	// All three force flags ARE published on this operation, unlike
+	// updateIssue's body where they are still refused — so a plan can express
+	// what a single patch over this wire cannot. They are sent only when true.
 	setItemBool(&out.ForceClosePolicy, item.ForceClosePolicy)
 	setItemBool(&out.ForceAssigneeTransfer, item.ForceAssigneeTransfer)
+	setItemBool(&out.ForceNotesOverwrite, item.ForceNotesOverwrite)
 	return out, nil
 }
 

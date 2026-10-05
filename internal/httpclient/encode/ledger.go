@@ -207,6 +207,9 @@ var (
 	tyCreateDep       = reflect.TypeOf(issueops.CreateDependency{})
 
 	tyApplyCreateItem = reflect.TypeOf(issueops.CreateItem{})
+
+	tyCloseBatchRequest = reflect.TypeOf(issueops.CloseBatchRequest{})
+	tySweepRequest      = reflect.TypeOf(issueops.SweepRequest{})
 )
 
 // designRows are D9's own table, transcribed. They describe behaviors rather
@@ -581,6 +584,24 @@ func writeSideRows() []Row {
 			PinnedBy: pinned,
 		},
 		{
+			// S3 reconciliation (gc native-program, 2026-10): the third member of
+			// the same trio, newer to this client's awareness than the other two
+			// — apigen.UpdateIssueRequest.ForceNotesOverwrite has no bd-enterprise
+			// counterpart to have carried a decision about. It is refused rather
+			// than sent for ForceAssigneeTransfer and ForceClosePolicy's own
+			// reason: the single-patch updateIssue body is not this client's wave
+			// to wire yet (batch-apply's ApplyUpdateItem sends it — see
+			// batchapplier.go — because that operation's three force flags were
+			// already carried member for member before this one was found).
+			ID: "W-UpdateRequest.ForceNotesOverwrite", Kind: KindRefuse, Flag: "--force",
+			Type: tyUpdateRequest, Field: "ForceNotesOverwrite",
+			What: "bypassing the notes-overwrite fence on a single update refuses",
+			Why: "updateIssue publishes `force_notes_overwrite` and this client does not send it on the single-patch path, so the fence stays enforced here: a Patch.Notes that would replace existing non-empty notes with different non-empty content refuses rather than silently overwriting. " +
+				"The same flag IS carried on issues:batchApply's update item (W table entry applyBatch/item/update), alongside the other two force members that wave already sends — wiring this path too is tracked as a follow-up to that wave rather than invented here",
+			SpecRow:  updateSpec,
+			PinnedBy: pinnedByS3Conformance,
+		},
+		{
 			ID: "W-UpdateRequest.ExpectedVersion", Kind: KindRetired,
 			What: "the compare-and-set row-version precondition used to refuse",
 			Why: "RETIRED by the client wave that sends it (ga-jbuyf). The refusal was always the CLIENT's rather than the document's — upstream #5484 published `expected_version` and this client had not been taught to emit it — and the row said so in as many words: 'flipping it is a port, not a decision: send the member, retire this row, and turn the refusal pin into a round-trip pin'. " +
@@ -916,6 +937,53 @@ func writeSideRows() []Row {
 				"WHAT DOES NOT SURVIVE is atomicity across the whole answer: a mutation committing mid-loop appears in a later page of the SAME call rather than in the next one. A consumer cannot observe that as a gap or a duplicate — it reads as records it would have received on its next poll, arriving early — which is why this is a degrade rather than a refusal. " +
 				"IT IS A DEGRADE RATHER THAN A REFUSE for the ordinary reason too: the path proceeds, and the answer cannot be misread as narrower or wider than the caller asked for. Upstream ask: an unlimited spelling on the operation, or a cursor the page can hand back — either retires this row",
 			SpecRow:  "D8 (Journal), D9",
+			PinnedBy: pinnedByS3Conformance,
+		},
+		{
+			// S3 reconciliation (gc native-program, 2026-10): bd-enterprise's
+			// batchCloseIssues composed an atomic claim-after-close onto the
+			// same request; OSS's apigen.BatchCloseRequest and
+			// BatchCloseResponse publish no claim_next/claimed_next member at
+			// all, so there is no shape for this field to narrow INTO. A batch
+			// close without a folded claim is unaffected and stays served
+			// (BatchCloseIssues.go); this row is the ONE field that refuses.
+			ID: "W-CloseBatchRequest.ClaimNext", Kind: KindRefuse,
+			Type: tyCloseBatchRequest, Field: "ClaimNext",
+			What:     "folding an atomic claim-after-close onto a batch close refuses",
+			Why:      "batchCloseIssues publishes actor, force, items and session only — no claim_next member exists for this client to encode a ReadyRequest into, and none exists on the response for a claimed issue to decode back out of. Dropping the field silently would answer a caller's claim-after-close with a close that quietly never claimed anything; see W-CreateBatchRequest.Provenance for the same refuse-not-drop reasoning applied to an absent wire member. Deferred: S13 schedules ReadyLister (and with it, the ready-side plumbing a composed claim would need); no slice currently schedules claim_next itself",
+			SpecRow:  "D8 refuse-not-drop",
+			PinnedBy: pinnedByS3Conformance,
+		},
+		{
+			// S3 reconciliation (gc native-program, 2026-10): bd-enterprise's
+			// sweepIssues wire carried a structural-dependent protection
+			// alongside the referenced-citation one; OSS's apigen.SweepRequest
+			// publishes protect_referenced only. There is no
+			// protect_live_dependents member for this field to narrow onto, so
+			// sending `true` and having the client silently drop it would run
+			// an UNPROTECTED sweep while the caller believed the structural
+			// guard was active — the exact widening refuse-not-drop exists to
+			// stop, on the one operation this surface uses to delete rows.
+			ID: "W-SweepRequest.ProtectLiveDependents", Kind: KindRefuse,
+			Type: tySweepRequest, Field: "ProtectLiveDependents",
+			What:     "protecting live structural dependents during a sweep refuses",
+			Why:      "sweepIssues publishes dry_run, tier, closed_before, pattern, protect_referenced and actor only; no protect_live_dependents member exists for this client to send, and the server has no stored-edge lookup to run on this client's behalf. `bd purge` from a local workspace still gets the protection; over http it must ask without it or not at all",
+			SpecRow:  "D8 refuse-not-drop",
+			PinnedBy: pinnedByS3Conformance,
+		},
+		{
+			// Limit's absence is the same gap on the OTHER half of the request:
+			// bd-enterprise's wire bounded one sweep call and reported the
+			// remainder back; OSS's apigen.SweepRequest and SweepResult carry
+			// neither a limit member to send nor a remaining member to read one
+			// back from. A dropped Limit would run the UNBOUNDED sweep the
+			// caller asked to cap, in one transaction, which is the same
+			// widening the protection row above refuses rather than degrades.
+			ID: "W-SweepRequest.Limit", Kind: KindRefuse,
+			Type: tySweepRequest, Field: "Limit",
+			What:     "bounding one sweep call and draining a backlog over several refuses",
+			Why:      "sweepIssues publishes no limit member and SweepResult publishes no remaining member for a bounded caller to loop on; a non-zero Limit refuses before the dial rather than running the unbounded sweep silently. issueops.SweepResult.Remaining is therefore always zero from this client — not a dropped count, since nothing bounded the call that would have left one",
+			SpecRow:  "D8 refuse-not-drop",
 			PinnedBy: pinnedByS3Conformance,
 		},
 	}

@@ -7,15 +7,22 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
+	"github.com/steveyegge/beads/internal/httpclient/encode"
 	"github.com/steveyegge/beads/issueops"
 )
 
 // httpSweeper serves issueops.Sweeper from the sweepIssues custom method
 // (design D8 row 12) — the capability behind `bd purge` and `bd prune`.
 //
-// The mapping is TOTAL: every one of SweepRequest's six members has a wire
-// member, and every one of SweepResult's fields is published, so nothing here
-// refuses on shape and the ledger carries no W- row for this operation.
+// The mapping is NOT total, unlike bd-enterprise's: OSS's apigen.SweepRequest
+// publishes tier, closed_before, pattern, protect_referenced, dry_run and
+// actor, with no member for ProtectLiveDependents or Limit, and
+// apigen.SweepResult carries no remaining member for SweepResult.Remaining to
+// decode out of. Both refuse before the dial (W-SweepRequest.ProtectLiveDependents,
+// W-SweepRequest.Limit) rather than silently running an unprotected or
+// unbounded sweep, so SweepResult.Remaining is always zero from this client —
+// never a dropped count, since a Limit refuses before anything could be left
+// over to report.
 //
 // WHAT IS NOT DECIDED HERE, deliberately: the require-a-filter gate, the glob's
 // well-formedness and the tier's own predicate. All three are the ROLE's, they
@@ -47,6 +54,18 @@ var _ issueops.Sweeper = (*httpSweeper)(nil)
 // is the same failure class refuse-not-drop exists to stop, in the other
 // direction.
 func (s *httpSweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (issueops.SweepResult, error) {
+	// Refuse-not-drop on the two members this wire has no place for. Both
+	// checks run before the tier is even validated, for the same reason every
+	// other raw refusal here precedes the dial: a caller who asked for a
+	// protection or a bound this client cannot honor must not learn that only
+	// after an unprotected or unbounded sweep already ran.
+	if req.ProtectLiveDependents {
+		return issueops.SweepResult{}, refuse(encode.OpSweepIssues, "W-SweepRequest.ProtectLiveDependents")
+	}
+	if req.Limit != 0 {
+		return issueops.SweepResult{}, refuse(encode.OpSweepIssues, "W-SweepRequest.Limit")
+	}
+
 	tier := apigen.SweepRequestTier(req.Tier)
 	if !tier.Valid() {
 		return issueops.SweepResult{}, invalid("sweep tier %q is not %q or %q",

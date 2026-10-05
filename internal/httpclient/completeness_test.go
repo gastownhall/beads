@@ -53,20 +53,21 @@ var legitimatelyUnsupported = map[string]string{
 	// Remotes and sync. `bd serve` is the sync boundary: the server pushes and
 	// pulls its own database, and a client that did so too would be a second
 	// writer nobody designed.
-	"AddRemote":    "remote",
-	"Fetch":        "remote",
-	"ForcePush":    "remote",
-	"HasRemote":    "remote",
-	"ListRemotes":  "remote",
-	"Pull":         "remote",
-	"PullFrom":     "remote",
-	"PullRemote":   "remote",
-	"Push":         "remote",
-	"PushRemote":   "remote",
-	"PushTo":       "remote",
-	"RemoveRemote": "remote",
-	"Sync":         "sync: server-side concern",
-	"SyncStatus":   "sync: server-side concern",
+	"AddRemote":        "remote",
+	"AddRemoteWithRef": "remote",
+	"Fetch":            "remote",
+	"ForcePush":        "remote",
+	"HasRemote":        "remote",
+	"ListRemotes":      "remote",
+	"Pull":             "remote",
+	"PullFrom":         "remote",
+	"PullRemote":       "remote",
+	"Push":             "remote",
+	"PushRemote":       "remote",
+	"PushTo":           "remote",
+	"RemoveRemote":     "remote",
+	"Sync":             "sync: server-side concern",
+	"SyncStatus":       "sync: server-side concern",
 
 	// Federation, compaction, provenance and the merge slot: whole subsystems
 	// with no v0 route table entry.
@@ -134,6 +135,7 @@ var legitimatelyUnsupported = map[string]string{
 	"RemoveDependency":            "write: raw edge remove (role: DependencyEditor)",
 	"RemoveDependencyWithOptions": "write: raw edge remove (role: DependencyEditor)",
 	"RemoveLabel":                 "write: raw incremental label remove (role: Lifecycle, via IssuePatch.Labels.Remove); AddLabel's reason exactly, on the other half of the same published pair",
+	"RenameLabel":                 "write: no wire operation renames a label across every carrier; v0 publishes no bulk label-rename route, and IssuePatch.Labels is a per-issue add/remove pair with no rename-and-report-merges shape",
 	"ReopenIssue":                 "write: raw reopen (role: Lifecycle)",
 	"UpdateIssue":                 "write: raw update (role: Lifecycle)",
 	"UpdateIssueChecked":          "write: raw checked update (role: Lifecycle)",
@@ -246,22 +248,23 @@ var legitimatelyUnsupported = map[string]string{
 	// anchored (listDependencies takes >=1 issue_id) and role-shaped; these are
 	// the unanchored or off-role shapes. `bd blocked` and `bd ready --explain`
 	// refuse on these, which is why they are named in D7's refused class.
-	"DetectCycles":                 "raw read: role CycleDetector serves this shape",
-	"FindWispDependentsRecursive":  "raw read: no recursive-dependents operation",
-	"GetAllDependencyRecords":      "raw read: listDependencies is anchored (L8, `bd list --deps`)",
-	"GetBlockedIssues":             "raw read: no blocked-set operation (`bd blocked`)",
-	"GetBlockingInfoForIssues":     "raw read: role BlockingAnnotator serves this shape",
-	"GetDependencies":              "raw read: role EdgeReader serves this shape",
-	"GetDependencyCounts":          "raw read: the paired blocks-only batch, expressible as two GraphCounter calls with Types set to the blocking type — the role's own leaf declines to name it as a third method, and re-routing it here would invent the map-of-two-numbers shape no wire operation carries",
-	"GetDependencyTree":            "raw read: role TreeWalker serves this shape",
-	"GetDependentRecords":          "raw read: no dependents operation off getIssue",
-	"GetDependentRecordsForIssues": "raw read: no multi-id dependents operation",
-	"GetDependents":                "raw read: no dependents operation off getIssue",
-	"IsBlocked":                    "raw read: role BlockingAnnotator serves this shape",
-	"IsBlockedBatch":               "raw read: role BlockingAnnotator serves this shape",
-	"IterAllDependencyRecords":     "raw read: streaming has no wire shape",
-	"IterDependenciesWithMetadata": "raw read: streaming has no wire shape",
-	"IterDependentsWithMetadata":   "raw read: streaming has no wire shape",
+	"DetectCycles":                  "raw read: role CycleDetector serves this shape",
+	"FindWispDependentsRecursive":   "raw read: no recursive-dependents operation",
+	"GetAllDependencyRecords":       "raw read: listDependencies is anchored (L8, `bd list --deps`)",
+	"GetBlockedIssues":              "raw read: no blocked-set operation (`bd blocked`)",
+	"GetBlockingInfoForIssues":      "raw read: role BlockingAnnotator serves this shape",
+	"GetDependencies":               "raw read: role EdgeReader serves this shape",
+	"GetDependencyCounts":           "raw read: the paired blocks-only batch, expressible as two GraphCounter calls with Types set to the blocking type — the role's own leaf declines to name it as a third method, and re-routing it here would invent the map-of-two-numbers shape no wire operation carries",
+	"GetDependencyTree":             "raw read: role TreeWalker serves this shape",
+	"GetDependentRecords":           "raw read: no dependents operation off getIssue",
+	"GetDependencyRecordsForIssues": "raw read: no multi-id dependencies operation; the source-keyed, multi-id mirror of GetDependentRecordsForIssues' target-keyed shape — same gap, opposite direction",
+	"GetDependentRecordsForIssues":  "raw read: no multi-id dependents operation",
+	"GetDependents":                 "raw read: no dependents operation off getIssue",
+	"IsBlocked":                     "raw read: role BlockingAnnotator serves this shape",
+	"IsBlockedBatch":                "raw read: role BlockingAnnotator serves this shape",
+	"IterAllDependencyRecords":      "raw read: streaming has no wire shape",
+	"IterDependenciesWithMetadata":  "raw read: streaming has no wire shape",
+	"IterDependentsWithMetadata":    "raw read: streaming has no wire shape",
 
 	// Comment reads beyond getIssue's include_comments.
 	"GetCommentCounts":     "raw read: no comment-count operation",
@@ -280,6 +283,7 @@ var legitimatelyUnsupported = map[string]string{
 	"GetStaleIssues":             "raw read: no staleness operation",
 	"GetStatisticsNoBlocked":     "raw read: getStats has no blocked-suppression variant",
 	"SearchIssueIDs":             "raw read: no partial-id search operation (D11)",
+	"SearchIssueSummaries":       "raw read: no summary-projection search operation; SearchIssues (role: Searcher) hydrates full issues, and the wire publishes no narrower searchIssues projection for list-shaped rendering to drop onto",
 	"SearchIssuesWithCounts":     "raw read: no counts-bearing search operation",
 
 	// Streaming iterators. Every wire read is a page, not a stream.
@@ -400,16 +404,20 @@ func TestUnsupportedContract(t *testing.T) {
 // anonymous post-state, a stored row that must not be discarded, and a
 // single-anchor miss that is a 404 rather than a sentinel.
 //
-// ReadyLister is the twenty-sixth, from upstream's ready-listing role: it dials
-// listReadyWork and, when the page does not settle the total, countReadyWork —
-// the two operations IssueReader and ReadyCounter already serve.
+// ReadyLister is NOT in this list. S3 reconciliation (gc native-program,
+// 2026-10) removed it: bd-enterprise's issueops.ReadyLister/ReadyListRequest/
+// ReadyListing have no OSS counterpart at all — there is no v0 route table
+// entry and no role type to accept one — so there is nothing for an accessor
+// to return. S13 schedules it; until then this is a twenty-fifth row neither
+// here nor in refusingAccessors, because OSS's storage.DoltStorage does not
+// define a ReadyLister method for the matrix to count either way.
 var wireBackedAccessors = []string{
 	"IssueReader", "ReadyCounter", "IssueClaimer", "ReadyClaimer", "Querier",
 	"StatsReporter", "CycleDetector", "TreeWalker", "EdgeReader",
 	"BlockingAnnotator", "WorkspaceConfig", "Sweeper", "Deleter", "BatchCreator",
 	"Memories", "IssueLifecycle", "DependencyEditor", "BatchCloser",
 	"MetadataCAS", "BatchApplier", "Counter", "GraphCounter",
-	"Releaser", "Commenter", "IssueRelations", "ReadyLister",
+	"Releaser", "Commenter", "IssueRelations",
 }
 
 // refusingAccessors is the complement: the ones with no wire operation at all.
@@ -450,7 +458,7 @@ var refusingAccessors = []string{
 // wave lands here for exactly one PR.
 var pendingWireBackedAccessors = []string{}
 
-// TestAccessorMatrixMatchesDesign pins the 26/3 split against the allowlist so a
+// TestAccessorMatrixMatchesDesign pins the 25/3 split against the allowlist so a
 // role accessor cannot change sides without the design row changing with it.
 //
 // The numbers are the LIST's, not a literal: the design page recorded 20/8 when
@@ -458,10 +466,14 @@ var pendingWireBackedAccessors = []string{}
 // with ga-icks1; Releaser, Commenter and IssueRelations with ga-f352s). The
 // three that remain refusing are permanently unservable, so this ratio only
 // moves again if the tier itself grows.
+//
+// S3 reconciliation removed ReadyLister from both sides of this split: OSS has
+// no issueops.ReadyLister at all (S13), so there is no accessor name for the
+// matrix to count on either the wire-backed or the refusing side.
 // This is the capability-matrix flip rule applied to the store: a refuse→served
 // flip lands in the same PR as the method that serves it.
 func TestAccessorMatrixMatchesDesign(t *testing.T) {
-	if got, want := len(wireBackedAccessors)+len(refusingAccessors), 29; got != want {
+	if got, want := len(wireBackedAccessors)+len(refusingAccessors), 28; got != want {
 		t.Fatalf("the matrix covers %d accessors, want %d", got, want)
 	}
 	for _, name := range wireBackedAccessors {

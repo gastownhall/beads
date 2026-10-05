@@ -51,14 +51,14 @@ type WireClient interface {
 	// proves a build linked a complete one, but the operations a role needs are
 	// declared beside the role that needs them.
 	WriteWire
-
-	// StreamWire is the WATCH role's half of the seam (journal_watch.go). It is
-	// embedded rather than folded into the two read primitives above because a
-	// stream is neither a generic Do nor a Preflight: it is one operation-shaped
-	// method whose result is a live *wire.EventStream the role drains, so it
-	// belongs beside the role that opens it, the same rule WriteWire follows.
-	StreamWire
 }
+
+// There is no StreamWire half of this seam. S3 reconciliation (gc
+// native-program, 2026-10) removed it along with journal_watch.go: OSS
+// publishes no journalops.Watcher for a WATCH role to implement, so there is
+// no operation-shaped streaming method for a transport to grow. The paged
+// journal read (journalops.Journal, journal.go) is unaffected — it dispatches
+// through the same two generic primitives every other read role uses.
 
 // WireDialer builds the transport for a resolved target.
 type WireDialer func(ctx context.Context, target Target) (WireClient, error)
