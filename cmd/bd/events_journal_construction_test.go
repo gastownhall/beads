@@ -182,11 +182,11 @@ var constructionExemptions = map[string]string{
 	// applying either per-store switch. They are declared here so that a new SDK
 	// open is noticed rather than missed. Making them apply the switches would
 	// change the library's behavior for every embedder, so it is a separate change.
-	"sdk/beads.go:Open":                    sdkOpenExemptionReason,
-	"sdk/beads.go:OpenFromConfig":          sdkOpenExemptionReason,
-	"sdk/beads.go:OpenGated":               sdkOpenExemptionReason,
-	"sdk/beads_cgo.go:OpenBestAvailable":   sdkOpenExemptionReason,
-	"sdk/beads_nocgo.go:OpenBestAvailable": sdkOpenExemptionReason,
+	"sdk/beads.go:Open":                        sdkOpenExemptionReason,
+	"sdk/beads.go:OpenFromConfig":              sdkOpenExemptionReason,
+	"sdk/beads.go:OpenGated":                   sdkOpenExemptionReason,
+	"sdk/beads_cgo.go:OpenBestAvailableWith":   sdkOpenExemptionReason,
+	"sdk/beads_nocgo.go:OpenBestAvailableWith": sdkOpenExemptionReason,
 }
 
 func TestEveryStoreConstructionActivatesTheEventsJournal(t *testing.T) {
