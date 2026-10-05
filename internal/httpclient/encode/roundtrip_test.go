@@ -274,6 +274,12 @@ func roundTripCases() []roundTripCase {
 
 		MetadataFields: map[string]string{"team": "core", "wave": "3"},
 		HasMetadataKey: "team",
+
+		// The issues.count.scope members (#7199). NoParent is the one left out:
+		// the role refuses it beside ParentID, so it rides its own case below.
+		ParentID:      "bd-epic1",
+		ExcludeTypes:  []string{"gate", "molecule"},
+		ExcludeStatus: []string{"closed", "deferred"},
 	}
 
 	// Values that have to survive percent-encoding, a `=` inside a metadata
@@ -313,6 +319,20 @@ func roundTripCases() []roundTripCase {
 		// `all` is a status the count takes literally and the server forwards
 		// verbatim; it is not the listing's boolean of the same spelling.
 		{"countIssues/the literal all status", OpCountIssues, "", issueops.CountRequest{Status: "all"}},
+		// The issues.count.scope members (#7199). ParentID and NoParent are
+		// mutually exclusive at the ROLE, so they ride separate cases; the two
+		// exclusion lists carry more than one entry each so a decoder that kept
+		// only the first value would be a mismatch rather than a coincidence.
+		{"countIssues/scope under a parent", OpCountIssues, "", issueops.CountRequest{
+			ParentID:      "bd-epic1",
+			ExcludeTypes:  []string{"gate", "molecule"},
+			ExcludeStatus: []string{"closed", "deferred"},
+		}},
+		{"countIssues/scope at the top level", OpCountIssues, "", issueops.CountRequest{
+			NoParent:      true,
+			ExcludeTypes:  []string{"epic"},
+			ExcludeStatus: []string{"blocked"},
+		}},
 		{"countIssues/byGroup/a dimension over an empty predicate", OpCountIssues, "byGroup", issueops.CountByGroupRequest{GroupBy: issueops.CountGroupStatus}},
 		{"countIssues/byGroup/a dimension over the whole predicate", OpCountIssues, "byGroup", issueops.CountByGroupRequest{Filter: countEverything, GroupBy: issueops.CountGroupLabel}},
 

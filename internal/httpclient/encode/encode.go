@@ -415,6 +415,14 @@ func (b *builder) countFilters(req issueops.CountRequest) {
 
 	b.metadata(req.MetadataFields)
 	b.str("has_metadata_key", req.HasMetadataKey)
+
+	// The issues.count.scope members (upstream #7199), in the server's own
+	// countFilters order. Each is emitted only when populated, so a request that
+	// sets none of them stays byte-identical to what a pre-scope server accepts.
+	b.str("parent", req.ParentID)
+	b.boolean("no_parent", req.NoParent)
+	b.list("exclude_type", req.ExcludeTypes)
+	b.list("exclude_status", req.ExcludeStatus)
 }
 
 // GetTarget encodes a detail lookup onto GET /v0/beads/issues/{id}, returning
