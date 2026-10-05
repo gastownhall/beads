@@ -99,6 +99,27 @@ func init() {
 		"RunMaximumEndpointMultiplicityIsAStoreInvariantNotACAS":      crossRecordInvariantNoRoleWaiverReason,
 		"RunMemoryKeyAliasUniquenessIsAStoreInvariantNotACAS":         crossRecordInvariantNoRoleWaiverReason,
 		"RunStoreInvariantTransactionScopesExactlyTheSpanningRecords": crossRecordInvariantNoRoleWaiverReason,
+
+		"RunVersionReconcilerAdvancesBothMarkersOnAnUpgrade":               versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunVersionReconcilerCatchesUpToTheHighWaterMark":                  versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunVersionReconcilerLeavesTheMarkersStandingWhenItCannotComplete": versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunVersionReconcilerRecordsAWorkspaceWithNoMarkers":               versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunVersionReconcilerRecordsNoHistory":                             versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunVersionReconcilerRefusesADowngradeWithoutAnError":              versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunVersionReconcilerRefusesAVersionBelowTheHighWaterMark":         versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunVersionReconcilerRefusesAnEmptyVersion":                        versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunVersionReconcilerTreatsTheSameVersionAsANoOp":                  versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunInitVerifierAnswersEmptyForAnUnidentifiedSubstrate":            versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunInitVerifierReportsAFailedReadAsAnError":                       versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunInitVerifierReportsAPartialIdentityAsItStands":                 versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunInitVerifierWritesNothing":                                     versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+
+		"RunIssueOperationsUpdateClosedFieldsMatchClose":                  issueOperationsUpdateRawSeamWaiverReason,
+		"RunIssueOperationsUpdateRawMetadataTakesTheFunnelsValueShapes":   issueOperationsUpdateRawSeamWaiverReason,
+		"RunIssueOperationsUpdateStampsStartedAtOnceOnTheFirstInProgress": issueOperationsUpdateRawSeamWaiverReason,
+
+		"RunLifecycleUpdateExpectedVersionSingleWinnerWithDisjointColumnsUnderConcurrency":  issuePatchFieldsNotOnUpdateWireWaiverReason,
+		"RunLifecycleUpdateExpectedVersionSingleWinnerAcrossUpdateAndCloseUnderConcurrency": issuePatchFieldsNotOnUpdateWireWaiverReason,
 	})
 }
 
@@ -229,6 +250,84 @@ const bootstrapperPermanentlyUnservableWaiverReason = "internal/httpclient/acces
 const stagingWaiverReason = "the unit-of-work provider commits every unit of work itself, so it has no " +
 	"caller-held working set to stage into and no Commit hook to close one; these two cases assert what a " +
 	"create sweeps into a commit the caller opened"
+
+// versionReconcilerInitVerifierPermanentlyUnservableWaiverReason covers the
+// thirteen VersionReconciler and InitVerifier contracts: PERMANENTLY
+// unservable over http, not merely unwired yet.
+//
+// internal/httpclient/accessors.go names VersionReconciler and InitVerifier,
+// alongside Bootstrapper, as the three accessors still on the generated
+// refusing shell for one reason: "PERMANENTLY UNSERVABLE — no wire operation
+// and none coming." Both share Bootstrapper's own fate and (InitVerifier
+// shares BootstrapperFixture outright) the same cause: `bd init`'s substrate
+// identification and the schema-version reconciliation it drives both run
+// entirely client-side, against the on-disk substrate a server-mediated
+// caller never touches directly, before or instead of any server existing to
+// dial. There is no v0 operation for an http accessor to bind to and none is
+// coming. This waiver was left out of the change that added
+// bootstrapperPermanentlyUnservableWaiverReason (that change's own comment
+// says so) and is added by this one.
+const versionReconcilerInitVerifierPermanentlyUnservableWaiverReason = "internal/httpclient/accessors.go names " +
+	"VersionReconciler and InitVerifier PERMANENTLY UNSERVABLE over http, the same fate as Bootstrapper — no " +
+	"wire operation and none coming — because both run entirely client-side against the on-disk substrate " +
+	"(schema-version reconciliation and `bd init`'s own identity read) before or instead of any server existing " +
+	"to dial"
+
+// issueOperationsUpdateRawSeamWaiverReason covers the three
+// IssueOperationsStagingFixture cases whose SUBJECT is the untyped UpdateRaw
+// funnel itself, not merely a fixture that seeds through it.
+//
+// storage.UpdateIssue is on this client's unsupported allowlist by design
+// (D8: re-routing a raw front door would put a second spelling of the edit
+// beside the role's), so served_issue_operations_test.go binds UpdateRaw only
+// to the REFERENCE store's own untyped funnel (env.reference.UpdateIssue),
+// never to the client — see that file's own doc comment. That binding is
+// sound for every case actually wired there because none of them takes the
+// funnel AS ITS SUBJECT; these three do (RunIssueOperationsUpdateClosedFieldsMatchClose
+// drives a reopen/reclose through it, RunIssueOperationsUpdateStampsStartedAtOnceOnTheFirstInProgress
+// and RunIssueOperationsUpdateRawMetadataTakesTheFunnelsValueShapes assert
+// what it writes). Wiring them against the reference store's funnel would
+// assert a property of the store the server happens to share a process with,
+// never of the client under test — the same kind of empty assertion binding
+// UpdateRaw to the client would be in the other direction. There is no
+// client-side UpdateRaw to bind instead: that is D8's allowlist decision, not
+// a gap.
+const issueOperationsUpdateRawSeamWaiverReason = "these three cases take the untyped UpdateRaw funnel itself as " +
+	"their subject; storage.UpdateIssue is on this client's unsupported allowlist by design (D8), so there is no " +
+	"client-side UpdateRaw to bind, and binding the reference store's own funnel instead (as this leg's other " +
+	"IssueOperationsStagingFixture cases do, to SEED preconditions) would assert a property of the store the " +
+	"server happens to share a process with, never of the client under test"
+
+// issuePatchFieldsNotOnUpdateWireWaiverReason covers the two
+// LifecycleUpdateFixture concurrency cases whose racers patch
+// IssuePatch.SpecID, .AwaitID, and/or .Owner against updateIssue.
+//
+// THIS IS PENDING, NOT PERMANENT: it is unbuilt work waiting on a wire
+// change, not a boundary this leg can never cross. S4 wired the other two
+// ExpectedVersion concurrency races (the plain Update race over
+// Priority/Notes, and the Close race) against the real served HTTP harness,
+// and both pass: precondition_failed decodes to storage.ErrVersionMismatch
+// exactly as the local legs report it. These two cases cannot follow
+// because SOME of their racers patch fields updateIssue refuses outright
+// rather than ever sending — not a race outcome, a refusal before any
+// request leaves the client. internal/httpclient/encode/ledger.go already
+// names this gap per field (W-IssuePatch.SpecID, W-IssuePatch.AwaitID,
+// W-IssuePatch.Owner, D8 refuse-not-drop): neither IssuePatchBody nor
+// ApplyPatchBody publishes spec_id or await_id at all, and Owner is excluded
+// from IssuePatchBody specifically (ApplyPatchBody — issues:batchApply's body
+// — does carry it, which is a different operation from updateIssue). Closing
+// this gap means publishing those fields on IssuePatchBody, a wire change to
+// the write role itself, not a client-side wiring exercise — tracked as a
+// follow-up slice, S4b: publish owner/spec_id/await_id on the wire. Until
+// S4b lands, these two contracts stay off this leg rather than asserting a
+// race outcome against a request three of its own racers never send.
+const issuePatchFieldsNotOnUpdateWireWaiverReason = "PENDING, not permanent (tracked as S4b: publish " +
+	"owner/spec_id/await_id on the wire): two of the four ExpectedVersion concurrency contracts race " +
+	"IssuePatch.SpecID/.AwaitID/.Owner edits against updateIssue, and those three fields are refused outright by " +
+	"IssuePatchBody (W-IssuePatch.SpecID, W-IssuePatch.AwaitID, W-IssuePatch.Owner in " +
+	"internal/httpclient/encode/ledger.go, D8 refuse-not-drop) rather than ever reaching the server, so the race " +
+	"never happens over this wire; closing the gap means publishing those fields on IssuePatchBody, which is a " +
+	"wire change to the write role (S4b), not something this leg's test wiring can bind around today"
 
 // TestEveryLegWiresEveryRoleContract fails when a backend leg skips a role
 // contract the conformance package exports.

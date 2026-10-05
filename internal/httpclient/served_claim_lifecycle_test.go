@@ -431,6 +431,33 @@ func TestServedLifecycleUpdatePreservesTheCreationStamp(t *testing.T) {
 	conformance.RunLifecycleUpdatePreservesTheCreationStamp(t, t.Context(), newServedUpdateFixture(t, "hlcs"))
 }
 
+// Two of the four ExpectedVersion concurrency races, run for real over this
+// wire: N goroutines dial N concurrent HTTP requests against the same
+// in-process server, racing the same --if-revision token.
+// precondition_failed decodes to storage.ErrVersionMismatch
+// (internal/httpclient/wire/problem.go), the same sentinel
+// storage.ErrVersionMismatch aliases to (internal/storage/storage.go), so
+// errors.Is resolves identically whether the loser learned it locally or over
+// http.
+//
+// The other two of the four race IssuePatch.SpecID/.AwaitID/.Owner updates
+// against each other (RunLifecycleUpdateExpectedVersionSingleWinnerWithDisjointColumnsUnderConcurrency,
+// RunLifecycleUpdateExpectedVersionSingleWinnerAcrossUpdateAndCloseUnderConcurrency),
+// and stay off this leg: those three fields are refused on updateIssue by
+// name (W-IssuePatch.SpecID, W-IssuePatch.AwaitID, W-IssuePatch.Owner,
+// internal/httpclient/encode/ledger.go), a pre-existing D8 refuse-not-drop
+// decision this slice does not reopen, not a race outcome the wire could
+// report correctly — see issuePatchFieldsNotOnUpdateWireWaiverReason
+// (internal/storage/leg_contract_wiring_test.go).
+
+func TestServedLifecycleUpdateExpectedVersionSingleWinnerUnderConcurrency(t *testing.T) {
+	conformance.RunLifecycleUpdateExpectedVersionSingleWinnerUnderConcurrency(t, t.Context(), newServedUpdateFixture(t, "hlvu"))
+}
+
+func TestServedLifecycleCloseExpectedVersionSingleWinnerUnderConcurrency(t *testing.T) {
+	conformance.RunLifecycleCloseExpectedVersionSingleWinnerUnderConcurrency(t, t.Context(), newServedUpdateFixture(t, "hlvc"))
+}
+
 // The THREE claim-and-override cases below RUN, and left the park population
 // together, with the #7247 review port: `claim`, `force_assignee_transfer` and
 // `force_close_policy` are top-level members of updateIssue's body (the first
