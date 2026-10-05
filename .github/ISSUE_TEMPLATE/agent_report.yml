@@ -1,0 +1,78 @@
+name: Agent-Discovered Issue
+description: Report an issue found by an AI agent during automated work
+title: "[Agent]: "
+labels: ["agent-discovered"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This template is for issues discovered by AI agents while working on other tasks.
+        Per the [Agentic Covenant](../../CODE_OF_CONDUCT.md), the human operator is accountable for this report's accuracy.
+
+  - type: input
+    id: parent-issue
+    attributes:
+      label: Parent issue
+      description: The issue the agent was working on when this was discovered.
+      placeholder: "bd-42 or #123"
+    validations:
+      required: true
+
+  - type: input
+    id: agent-info
+    attributes:
+      label: Agent and tooling
+      description: What agent/model/IDE discovered this? Uses the Assisted-by format.
+      placeholder: "Claude:claude-opus-4-6 [Cursor]"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: issue-type
+    attributes:
+      label: Issue type
+      options:
+        - Bug
+        - Missing test coverage
+        - Documentation gap
+        - Potential improvement
+        - Security concern
+        - Technical debt
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What did the agent find? Include relevant code locations, error messages, or observations.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: operator-review
+    attributes:
+      label: Operator review status
+      description: Has a human reviewed this report?
+      options:
+        - "Yes — I reviewed and confirmed the finding"
+        - "Partially — I reviewed but could not fully verify"
+        - "No — filing as-is for triage"
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggested-fix
+    attributes:
+      label: Suggested fix
+      description: If the agent (or you) have a proposed fix, describe it here.
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Relevant logs, stack traces, file paths, or reproduction steps.
+    validations:
+      required: false

@@ -1,0 +1,45 @@
+title: "[Question]: "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ask a question about bd (beads). Both human and agent-assisted developers are welcome.
+
+        Before asking, check:
+        - [README.md](../../README.md) and [docs/](../../docs/)
+        - [Existing discussions](https://github.com/gastownhall/beads/discussions)
+        - [FAQ](../../docs/FAQ.md) if it exists
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - Getting started / setup
+        - CLI usage
+        - Agent integration (MCP, hooks, AGENTS.md)
+        - Multi-agent workflows
+        - Dolt / storage
+        - Import / export / sync
+        - Contributing
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What do you need help with?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: What have you tried?
+      description: Any commands run, docs consulted, or errors encountered.
+    validations:
+      required: false
