@@ -660,6 +660,62 @@ func TestPRWorkflowRequiresNativeInitGatewayCredential(t *testing.T) {
 	}
 }
 
+// Every run step in the three-host preflight/doc-freshness jobs invokes Go,
+// and the jobs restore a non-race GOCACHE precisely so those invocations are
+// incremental. A run step without GOCACHE silently falls back to the runner's
+// empty default cache: "Exercise native init gateway credential shell" did,
+// and cold-compiled ./cmd/bd on every PR (210-240s of a ~370s macos-latest
+// leg, ~120s on Windows) right after the hook-timeout step had compiled the
+// same test binary into the restored cache.
+func TestPRPreflightPlatformsRunStepsUseRestoredGoBuildCache(t *testing.T) {
+	workflow := readCIWorkflow(t, "pr.yml")
+	for _, jobName := range []string{"pr-preflight-platforms", "check-doc-freshness-platforms"} {
+		job := workflow.job(t, jobName)
+		restore := job.step(t, "Restore non-race Go build cache")
+		if restore.With["path"] != goBuildCachePath("non-race") {
+			t.Errorf("%s restores the non-race cache to %q, want %q", jobName, restore.With["path"], goBuildCachePath("non-race"))
+		}
+		runSteps := 0
+		for _, step := range job.Steps {
+			if strings.TrimSpace(step.Run) == "" {
+				continue
+			}
+			runSteps++
+			assertGoCacheEnv(t, job, step.Name, "non-race")
+			assertStepsBefore(t, job, []string{restore.Name}, []string{step.Name})
+		}
+		if runSteps == 0 {
+			t.Errorf("%s has no run steps", jobName)
+		}
+	}
+}
+
+// main.yml's test job macOS leg is the only macOS non-race GOCACHE seeder for
+// pr.yml's GitHub-hosted macOS legs. It must compile the same test packages
+// those legs compile (warm-non-race-cache.sh, shared with the Linux and
+// Windows seeders), not only the non-test ./cmd/bd graph its Build step does,
+// and it must do so before the cache is saved.
+func TestMainMacOSTestLegWarmsNonRaceGoBuildCache(t *testing.T) {
+	workflow := readCIWorkflow(t, "main.yml")
+	job := workflow.job(t, "test")
+	const name = "Warm non-race GOCACHE for macOS preflight/doc-freshness"
+	step := job.step(t, name)
+	if step.If != "matrix.os == 'macos-latest'" {
+		t.Errorf("%q if = %q, want the macOS leg only", name, step.If)
+	}
+	if step.ContinueOnError != nil && step.ContinueOnError != false {
+		t.Errorf("%q may not continue on error", name)
+	}
+	assertStepRunsExactly(t, job, name, "bash scripts/ci/warm-non-race-cache.sh")
+	assertGoCacheEnv(t, job, name, "non-race")
+	assertStepsBefore(t, job, []string{"Restore non-race Go build cache"}, []string{name})
+	assertStepsBefore(t, job, []string{name}, []string{"Save non-race Go build cache"})
+	save := job.step(t, "Save non-race Go build cache")
+	if !strings.Contains(save.If, "matrix.os == 'macos-latest'") || save.With["path"] != goBuildCachePath("non-race") {
+		t.Errorf("macOS non-race saver drifted: if=%q path=%q", save.If, save.With["path"])
+	}
+}
+
 func TestPRWorkflowExercisesWindowsBenchmarkEnvScrubbing(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "pr-preflight-platforms")
@@ -2639,7 +2695,7 @@ type bazelFlagGate struct {
 var bazelFlagGatedLanes = map[string]bazelFlagGate{
 	// The cmd/bd Dolt-server tier (the Dolt-gated cmd/bd tests no other lane
 	// runs), advisory until its first clean runs.
-	bazelCmdDoltJobName: {id: "BAZEL_CMD_DOLT", flag: "BAZEL_CMD_DOLT_REQUIRED", want: "false"},
+	bazelCmdDoltJobName: {id: "BAZEL_CMD_DOLT", flag: "BAZEL_CMD_DOLT_REQUIRED", want: "true"},
 }
 
 // bazelFlagGateRun is the run-script fragment that adds a flag-gated lane's
@@ -2757,6 +2813,10 @@ var bazelPRCallWith = map[string]string{
 	// F3: only pr.yml opts in; bazel-farm.yml and nightly.yml keep the
 	// default "off" (TestBazelGateSimulation's other callers).
 	"package-gates": "on",
+	// Mirrors pr.yml's BAZEL_CMD_DOLT_REQUIRED (a `with:` cannot read env):
+	// true leaves //cmd/bd:bd_test to the then-required bazel-cmd-dolt
+	// (TestBazelIntegrationExcludesBdTestOnlyWhereCmdDoltCovers).
+	"cmd-dolt-required": bazelFlagGatedLanes[bazelCmdDoltJobName].want,
 }
 
 // The call's aggregate result (needs.bazel.result, through bazel-gate.sh).
@@ -4742,7 +4802,8 @@ func TestBazelIntegrationJob(t *testing.T) {
 		t.Errorf("%s timeout-minutes = %d, want above the test step's %d by at most 15", bazelIntegJobName, job.TimeoutMinutes, test.TimeoutMinutes)
 	}
 	cmd := regexp.MustCompile(`\s*\\\n\s*`).ReplaceAllString(test.Run, " ")
-	const wantCmd = `bazel test //... --config=integration --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?`
+	// EXCLUDE_TARGETS: TestBazelIntegrationExcludesBdTestOnlyWhereCmdDoltCovers.
+	const wantCmd = `bazel test //... --config=integration --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" ${EXCLUDE_TARGETS:+-- "$EXCLUDE_TARGETS"} 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?`
 	if !strings.Contains(cmd, wantCmd) || !strings.Contains(test.Run, "set -o pipefail") {
 		t.Errorf("%s test step does not run exactly %q:\n%s", bazelIntegJobName, wantCmd, test.Run)
 	}
@@ -6782,6 +6843,115 @@ func TestBazelCmdDoltJob(t *testing.T) {
 	for _, m := range envKey.FindAllStringSubmatch(bdTest, -1) {
 		if !strings.Contains(rule, m[0]) {
 			t.Errorf("%s does not repeat bd_test's env %s", target, m[0])
+		}
+	}
+}
+
+// Exactly-once cmd/bd integration-build tests on PRs: bazel-integration runs
+// //... minus //cmd/bd:bd_test only where the caller says bazel-cmd-dolt is
+// required (inputs.cmd-dolt-required true, which only pr.yml passes and
+// only as its committed BAZEL_CMD_DOLT_REQUIRED flag), and there
+// bazel-cmd-dolt covers it: the same if (so it runs in every mode
+// bazel-integration does, Dependabot and forks included), bazel-gate.sh
+// accepts the two lanes' skips in exactly the same modes, pr.yml's gate then
+// requires its result, and its target wraps the integration build's bd_test
+// with no test selection (TestBazelCmdDoltJob). Everywhere else (bazel-farm,
+// nightly, push, dispatch: bazel-cmd-dolt advisory) bd_test stays in
+// bazel-integration. Rollback is committing "false" in both pr.yml places.
+func TestBazelIntegrationExcludesBdTestOnlyWhereCmdDoltCovers(t *testing.T) {
+	const input, excluded = "cmd-dolt-required", "-//cmd/bd:bd_test"
+	workflow := readCIWorkflow(t, bazelWorkflowName)
+	integ := workflow.job(t, bazelIntegJobName)
+	cmdDolt := workflow.job(t, bazelCmdDoltJobName)
+
+	// The input: a boolean defaulting to false, so a caller that does not
+	// pass it (and push/dispatch, where it is null) keeps bd_test.
+	if in, ok := readBazelWorkflowCall(t).Inputs[input]; !ok || in.Type != "boolean" || in.Default != "false" {
+		t.Errorf("%s workflow_call input %s = %+v (present %v), want type boolean, default false", bazelWorkflowName, input, in, ok)
+	}
+
+	// The step: the exclusion is exactly bd_test, and only when the input is
+	// true; nothing else narrows the target set.
+	test := integ.step(t, "bazel test //... --config=integration")
+	wantEnv := "${{ inputs." + input + " == true && '" + excluded + "' || '' }}"
+	if got := test.Env["EXCLUDE_TARGETS"]; got != wantEnv {
+		t.Errorf("%s EXCLUDE_TARGETS = %q, want %q", bazelIntegJobName, got, wantEnv)
+	}
+	if strings.Count(test.Run, "${EXCLUDE_TARGETS:+-- \"$EXCLUDE_TARGETS\"}") != 1 || strings.Count(test.Run, "EXCLUDE_TARGETS:+") != 1 ||
+		strings.Contains(test.Run, " -- ") || strings.Contains(test.Run, "-//") {
+		t.Errorf("%s test step must narrow //... only through ${EXCLUDE_TARGETS:+-- \"$EXCLUDE_TARGETS\"}:\n%s", bazelIntegJobName, test.Run)
+	}
+	for name, job := range workflow.Jobs {
+		for k, v := range job.Env {
+			if strings.Contains(v, "inputs."+input) {
+				t.Errorf("%s job env %s reads inputs.%s; only %s's test step may", name, k, input, bazelIntegJobName)
+			}
+		}
+		for _, step := range job.Steps {
+			for k, v := range step.Env {
+				if strings.Contains(v, "inputs."+input) && (name != bazelIntegJobName || step.Name != test.Name || k != "EXCLUDE_TARGETS") {
+					t.Errorf("%s step %q env %s reads inputs.%s; only %s's EXCLUDE_TARGETS may", name, step.Name, k, input, bazelIntegJobName)
+				}
+			}
+			if strings.Contains(step.If, "inputs."+input) || strings.Contains(step.Run, "inputs."+input) {
+				t.Errorf("%s step %q reads inputs.%s", name, step.Name, input)
+			}
+		}
+		if strings.Contains(job.If, "inputs."+input) {
+			t.Errorf("%s if reads inputs.%s: the input must not change which lanes run", name, input)
+		}
+	}
+
+	// Coverage where it is dropped: bazel-cmd-dolt runs in every mode
+	// bazel-integration does (same if, for every caller's inputs).
+	if integ.If != bazelIntegIf || cmdDolt.If != integ.If {
+		t.Errorf("%s if = %q, %s if = %q; want both %q (the cmd/bd tier must run wherever integration drops bd_test)",
+			bazelIntegJobName, integ.If, bazelCmdDoltJobName, cmdDolt.If, bazelIntegIf)
+	}
+	// ... and pr.yml's gate accepts their skips in the same modes only.
+	requireHostTool(t, "bash")
+	root := sourceRepoRoot(t)
+	for _, mode := range bazelRBEModes {
+		cmd := exec.Command("bash", bazelGateScript, "skips")
+		cmd.Dir = root
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "BAZEL_RBE_MODE=" + mode, "BAZEL_RBE_ENABLED=" + bazelModeEnabled(mode)}
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("%s skips (mode %s): %v", bazelGateScript, mode, err)
+		}
+		skips := map[string]bool{}
+		for _, id := range strings.Fields(string(out)) {
+			skips[id] = true
+		}
+		if skips["BAZEL_INTEGRATION"] != skips[bazelFlagGatedLanes[bazelCmdDoltJobName].id] {
+			t.Errorf("mode %s: bazel-gate.sh skips BAZEL_INTEGRATION=%v but %s=%v; they must match",
+				mode, skips["BAZEL_INTEGRATION"], bazelFlagGatedLanes[bazelCmdDoltJobName].id, skips[bazelFlagGatedLanes[bazelCmdDoltJobName].id])
+		}
+	}
+
+	// Callers: pr.yml passes the input as exactly its flag (whose "true"
+	// makes the gate require BAZEL_CMD_DOLT: bazelFlagGatedLanes); no other
+	// caller passes it.
+	pr := readCIWorkflow(t, "pr.yml")
+	g := bazelFlagGatedLanes[bazelCmdDoltJobName]
+	if got, flag := pr.job(t, "bazel").With[input], pr.Env[g.flag]; got != flag || (flag != "true" && flag != "false") {
+		t.Errorf("pr.yml bazel job %s = %q, %s = %q; want equal, \"true\" or \"false\" (flip both together)", input, got, g.flag, flag)
+	}
+	if !strings.Contains(pr.job(t, "ci-gate").step(t, "Evaluate CI gate").Run, bazelFlagGateRun(g)) {
+		t.Errorf("pr.yml's gate no longer requires %s when %s is \"true\"; bd_test would then run nowhere required", g.id, g.flag)
+	}
+	entries, err := os.ReadDir(filepath.Join(root, ".github", "workflows"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() == "pr.yml" || !(strings.HasSuffix(e.Name(), ".yml") || strings.HasSuffix(e.Name(), ".yaml")) {
+			continue
+		}
+		for name, job := range readCIWorkflow(t, e.Name()).Jobs {
+			if _, ok := job.With[input]; ok && strings.HasSuffix(job.Uses, "/"+bazelWorkflowName) {
+				t.Errorf("%s job %s passes %s to %s; only pr.yml may (its gate is the one that requires bazel-cmd-dolt)", e.Name(), name, input, bazelWorkflowName)
+			}
 		}
 	}
 }

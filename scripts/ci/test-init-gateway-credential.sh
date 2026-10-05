@@ -28,6 +28,8 @@ source "$repo_root/.buildflags"
 # second cold compile on macOS and Windows. Inheriting the default makes this
 # step incremental, and it also means the natively executed fixtures exercise
 # the same build of cmd/bd that actually ships on those platforms.
+# Incremental only if the caller also shares GOCACHE with that earlier step:
+# pr.yml points both at the restored non-race cache.
 go_executable="$(command -v go)"
 [[ "$go_executable" = /* && -x "$go_executable" ]] || {
     echo 'Go must resolve to an absolute executable' >&2; exit 1;

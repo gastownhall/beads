@@ -18,6 +18,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +55,12 @@ type scenario struct {
 	batch     func() []*types.Issue
 	opts      storage.BatchCreateOptions
 	apply     func() publicops.ApplyBatchRequest
+	// run, when set, replaces the batch: it drives tx itself and returns
+	// the lines to compare (kept in Outcome.Skipped). The create fast paths
+	// do not gate anything a run drives, so a run scenario is applied once
+	// and checked against its golden digest only — the pre-change code's
+	// answers — not fast against per-row.
+	run func(ctx context.Context, tx *sql.Tx) ([]string, error)
 }
 
 // scenarios are the light ones Run drives on every lane.
@@ -61,6 +68,8 @@ func scenarios() []scenario {
 	return []scenario{
 		{name: "small", seed: seed, afterSeed: plantStaleBlocked("s4"), batch: batch},
 		{name: "apply", seed: seedApply, apply: applyRequest},
+		{name: "depadd", seed: seedDepAdd, afterSeed: plantParentCycle, run: runDepAdd},
+		{name: "waitsfor", seed: seedWaitsFor, run: runWaitsFor},
 	}
 }
 
@@ -108,6 +117,13 @@ func runScenarios(t *testing.T, open Open, list []scenario) {
 				return
 			}
 			fast := applyScenario(t, open, sc, false)
+			if sc.run != nil {
+				if len(fast.Skipped) == 0 {
+					t.Fatalf("%s: run recorded nothing", sc.name)
+				}
+				checkGolden(t, sc.name, fast)
+				return
+			}
 			perRow := applyScenario(t, open, sc, true)
 			compareOutcomes(t, fast, perRow)
 			checkGolden(t, sc.name, fast)
@@ -358,6 +374,15 @@ func applyScenario(t *testing.T, open Open, sc scenario, perRow bool) Outcome {
 	}
 	var out Outcome
 	inTx(true, func(tx *sql.Tx) {
+		if sc.run != nil {
+			lines, err := sc.run(ctx, tx)
+			if err != nil {
+				_ = tx.Rollback()
+				t.Fatalf("%s: %v", sc.name, err)
+			}
+			out.Skipped = lines
+			return
+		}
 		if sc.apply != nil {
 			plan, err := storage.PlanApplyBatch(sc.apply())
 			if err != nil {
@@ -414,6 +439,14 @@ func applyScenario(t *testing.T, open Open, sc scenario, perRow bool) Outcome {
 	} {
 		out.Tables[table] = rowsOf(t, db, query)
 	}
+	// Dependency metadata is a JSON column, and the engines serialize it
+	// differently (key order, spacing); compare it canonicalized.
+	for _, table := range []string{"dependencies", "wisp_dependencies"} {
+		for i, row := range out.Tables[table] {
+			out.Tables[table][i] = canonicalMetadataRow(t, row)
+		}
+		sort.Strings(out.Tables[table])
+	}
 	// An update event's old_value snapshots the row, wall-clock updated_at
 	// included.
 	for _, table := range []string{"events", "wisp_events"} {
@@ -457,6 +490,29 @@ func journalRows(t *testing.T, db *sql.DB) []string {
 		t.Fatalf("read journal: %v", err)
 	}
 	return out
+}
+
+// canonicalMetadataRow re-serializes the last field of a rowsOf row (a
+// dependency's metadata) through encoding/json: sorted keys, no spacing.
+func canonicalMetadataRow(t *testing.T, row string) string {
+	t.Helper()
+	cut := strings.LastIndex(row, " \"")
+	if cut < 0 {
+		return row
+	}
+	raw, err := strconv.Unquote(row[cut+1:])
+	if err != nil {
+		t.Fatalf("metadata field of %s: %v", row, err)
+	}
+	var v any
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return row
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return row[:cut+1] + strconv.Quote(string(b))
 }
 
 func rowsOf(t *testing.T, db *sql.DB, query string) []string {

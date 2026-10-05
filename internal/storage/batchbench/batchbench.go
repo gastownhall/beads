@@ -43,6 +43,15 @@ const DefaultCreates = 20
 // recursive checks, which run for minutes per edge on a 100k-edge graph.
 const ApplyCreatesEnvVar = "BEADS_BENCH_LARGE_GRAPH_APPLY_CREATES"
 
+// waitsForChildren and waitsForWaiters size the formula-shaped fan-out
+// (batchfixtures.WaitsForInserts) loaded beside the graph: one spawner with
+// that many parent-child children and waiters each holding a waits-for edge
+// on it, the shape whose blocked state the waits-for gate decides.
+const (
+	waitsForChildren = 1000
+	waitsForWaiters  = 20
+)
+
 // Issues returns the graph size EnvVar asks for, skipping t when unset.
 func Issues(t *testing.T) int {
 	t.Helper()
@@ -64,7 +73,12 @@ func Issues(t *testing.T) int {
 //   - create+2deps: CreateIssuesInTxWithResult with one issue carrying two
 //     blocks edges to existing issues (the store's CreateIssue path);
 //   - apply-batch: one ApplyBatchInTx of that many creates, each followed by a
-//     parent-child and a blocks dep_add to existing issues.
+//     parent-child and a blocks dep_add to existing issues;
+//   - create+waits-for: CreateIssuesInTxWithResult with one issue carrying a
+//     waits-for edge on the fan-out's spawner, so its blocked state is decided
+//     by the waits-for gate over the spawner's children;
+//   - close spawner child: CloseIssueInTx on an open child of the spawner,
+//     which recomputes every waiter through the waits-for gate.
 func Run(t *testing.T, db *sql.DB, counts *sqlcount.Counts, prefix string, issues int) {
 	t.Helper()
 	creates := DefaultCreates
@@ -77,7 +91,9 @@ func Run(t *testing.T, db *sql.DB, counts *sqlcount.Counts, prefix string, issue
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, st := range batchfixtures.LargeGraphInserts(prefix, issues) {
+	inserts := batchfixtures.LargeGraphInserts(prefix, issues)
+	inserts = append(inserts, batchfixtures.WaitsForInserts(prefix, waitsForChildren, waitsForWaiters)...)
+	for _, st := range inserts {
 		if _, err := tx.ExecContext(ctx, st.SQL, st.Args...); err != nil {
 			_ = tx.Rollback()
 			t.Fatalf("populate: %v", err)
@@ -148,6 +164,27 @@ func Run(t *testing.T, db *sql.DB, counts *sqlcount.Counts, prefix string, issue
 						{IssueID: id, DependsOnID: pick(i, 4), Type: types.DepBlocks},
 					},
 				}}, "bench", storage.BatchCreateOptions{})
+				return err
+			})
+		}
+	})
+	measure("create+waits-for", creates, func() {
+		for i := 0; i < creates; i++ {
+			inTx(func(tx *sql.Tx) error {
+				id := fmt.Sprintf("%s-bwf%03d", prefix, i)
+				_, err := issueops.CreateIssuesInTxWithResult(ctx, tx, []*types.Issue{{
+					ID: id, Title: fmt.Sprintf("bench waits-for %d", i), Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+					Dependencies: []*types.Dependency{{IssueID: id, DependsOnID: batchfixtures.WaitsForSpawnerID(prefix), Type: types.DepWaitsFor}},
+				}}, "bench", storage.BatchCreateOptions{})
+				return err
+			})
+		}
+	})
+	measure("close spawner child", creates, func() {
+		for i := 0; i < creates; i++ {
+			inTx(func(tx *sql.Tx) error {
+				// Children 10k+1.. are open (every tenth is fixture-closed).
+				_, err := issueops.CloseIssueInTx(ctx, tx, batchfixtures.WaitsForChildID(prefix, 10*i+1), "bench", "bench", "")
 				return err
 			})
 		}

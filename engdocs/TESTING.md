@@ -130,7 +130,11 @@ init and store-backed suites) that every other lane skips with
 `--config=integration`'s build, passes the binary no test selection (the Go
 binary shards itself over every top-level test, 16 shards), and runs where
 the integration lane runs (remote, or with the read-only cache). pr.yml's
-gate requires it once `BAZEL_CMD_DOLT_REQUIRED` is `"true"`. Locally:
+gate requires it once `BAZEL_CMD_DOLT_REQUIRED` is `"true"`; pr.yml then
+also passes bazel.yml `cmd-dolt-required: true`, and the PR's
+`bazel-integration` lane runs `//... -//cmd/bd:bd_test`, so each cmd/bd
+integration-build test runs once (push, nightly and bazel-farm runs keep
+`bd_test` in the integration lane). Locally:
 `bazel test //cmd/bd:bd_dolt_server_test --config=doltserver-cmd`.
 
 An ambient `BEADS_DOLT_SERVER_PORT` or `BEADS_DOLT_PORT` is never honored by
@@ -190,6 +194,12 @@ rm -rf -- "$beads_manual_dir"
 `BEADS_DB` selects a database for database-opening commands, but it does not by
 itself redirect `bd init` workspace setup. Never run a manual `bd init` from a
 production workspace merely because `BEADS_DB` points elsewhere.
+
+**Tmpfs hosts:** the `cmd/bd` test suite creates an isolated `$HOME` and several
+test binaries under `$TMPDIR`. They are normally cleaned by the test process,
+but a SIGKILLed or OOMed run can leave orphans behind. On hosts where `/tmp`
+is tmpfs (e.g. Fedora Atomic / Bluefin), run `make clean-test-tmp` between
+test runs if `du -sh /tmp/beads-* /tmp/bd-*` shows accumulation. See bd-3q2u.
 
 `testing.Short()` is for genuine runtime, stress, or large-fixture skips. It
 is not a substitute for declaring an integration, end-to-end, API, Docker, or
