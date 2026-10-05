@@ -6,14 +6,28 @@
 // through allOf/oneOf — recording, per member, the (schema, member, type,
 // format, enum, required, nullable) tuple the document promises, plus the
 // item shape of an array member and the value shape of an
-// additionalProperties map. TestWireShapeDigest compares that digest against
-// the committed golden in testdata/golden.json and fails on any difference: a
-// member added is fine (an additive change never bumps wire_revision), but a
-// member's type, format, enum vocabulary, required-ness, or nullability
-// changing — or a member disappearing — is exactly the class of change
-// internal/httpapi/wire_revision.go's CurrentWireRevision exists to gate, and
-// the golden's own "wire_revision" field is compared too, so a shape change
-// recorded against the OLD revision number still fails.
+// additionalProperties map.
+//
+// It ALSO covers every operation PARAMETER (query, path and header) across
+// every operation in the document, keyed by operationId + location + name
+// rather than by schema — two different operations' same-named parameter are
+// two independent wire contracts, even when they happen to share a shape
+// today. Each parameter entry records type, item shape (for an array
+// parameter), enum, required, style, explode and default, so a parameter
+// silently retyped, re-enumerated, narrowed, switched required, or removed is
+// exactly as visible here as the same change to a response or request body
+// member — the gap closed after the first revision of this gate shipped
+// without it.
+//
+// TestWireShapeDigest compares that digest against the committed golden in
+// testdata/golden.json and fails on any difference: a member or parameter
+// added is fine (an additive change never bumps wire_revision), but a
+// member's or parameter's type, format, enum vocabulary, required-ness,
+// nullability, style, explode or default changing — or either disappearing —
+// is exactly the class of change internal/httpapi/wire_revision.go's
+// CurrentWireRevision exists to gate, and the golden's own "wire_revision"
+// field is compared too, so a shape change recorded against the OLD revision
+// number still fails.
 //
 // Regenerate the golden after a deliberate, revision-bumped change with:
 //

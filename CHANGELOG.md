@@ -60,7 +60,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bumping to match; `go run ./internal/httpapi/wireshape/cmd/gendigest`
   refuses to write a changed or removed entry unless `wire_revision` has
   moved past what the existing golden recorded (purely additive entries
-  always write).
+  always write). The same digest also pins every operation PARAMETER
+  (query, path and header), keyed by operationId + location + name, and
+  records its type, item shape, enum, required-ness, style, explode, and
+  default — a parameter retyped, re-enumerated, narrowed, switched
+  required, or removed is non-additive exactly like a response or
+  request-body member.
 
 ### Changed
 

@@ -12,10 +12,15 @@ import (
 )
 
 // Entry is one member of one schema reachable from an operation's response OR
-// request body. Schema is the component's name (or, for a member whose own
-// value is an inline object or array with no $ref of its own, a synthetic
-// dotted path rooted at the nearest named schema) so that two members with
-// the same name on different schemas are never confused with one another.
+// request body, OR one operation parameter (query, path or header). Schema is
+// the component's name (or, for a member whose own value is an inline object
+// or array with no $ref of its own, a synthetic dotted path rooted at the
+// nearest named schema) so that two members with the same name on different
+// schemas are never confused with one another. For a parameter, Schema is
+// instead "param:"+operationId and Member is in+":"+name (see
+// paramKey) — operation-scoped rather than schema-scoped, because two
+// different operations' same-named "status" query parameter are two
+// independent wire contracts even when today they happen to share a shape.
 //
 // The Item* and AdditionalProps* fields exist because a property's own
 // Type/Format/Enum/Nullable describe the CONTAINER, not what it contains: a
@@ -58,6 +63,32 @@ type Entry struct {
 	// or `false` some operations use for "no constraint" / "sealed").
 	AdditionalPropsType   string `json:"additional_props_type,omitempty"`
 	AdditionalPropsFormat string `json:"additional_props_format,omitempty"`
+
+	// Style, Explode and Default are set only for parameter entries (see
+	// paramKey): the serialization style OpenAPI uses to flatten an array or
+	// object parameter into a query/path string, whether it repeats the name
+	// per value or explodes/collapses, and the literal default value. A
+	// client that parses `limit=1,2,3` breaks the moment the server starts
+	// sending `limit=1&limit=2&limit=3` instead, even though neither Type nor
+	// Enum changed — exactly the gap the parameter digest closes.
+	Style   string `json:"style,omitempty"`
+	Explode bool   `json:"explode,omitempty"`
+	Default string `json:"default,omitempty"`
+}
+
+// paramSchemaPrefix marks an Entry.Schema as naming an operation (via
+// operationId) rather than an OpenAPI component schema. Grepping for this
+// prefix is how a reader tells a parameter entry apart from a schema member
+// entry in golden.json.
+const paramSchemaPrefix = "param:"
+
+// paramKey returns the Schema/Member pair a parameter entry is filed under:
+// operation-scoped by operationId, then by location and name. Location is
+// part of the key (not just the name) because OpenAPI allows the same name in
+// two different locations on one operation (a path `id` and a query `id`
+// would otherwise collide).
+func paramKey(operationID, in, name string) (schema, member string) {
+	return paramSchemaPrefix + operationID, in + ":" + name
 }
 
 // Digest is the golden document: the wire revision it was computed against,
@@ -148,11 +179,16 @@ var httpVerbs = map[string]bool{
 // here, and this package must stay that way to run from the standalone
 // gendigest command without pulling in the server).
 //
-// Both RESPONSE and REQUEST BODY schemas are walked. A request-body-only
-// shape change — DeleteIssuesRequest.expected_version moving from string to
+// RESPONSE schemas, REQUEST BODY schemas, and operation PARAMETERS (query,
+// path and header — see paramKey) are all walked. A request-body-only shape
+// change — DeleteIssuesRequest.expected_version moving from string to
 // integer, say — is exactly as much an undocumented break to an existing
 // client as a response change, and the other half of #6053 was invisible
-// here until request bodies were added alongside responses.
+// here until request bodies were added alongside responses. Parameters are
+// the same story again: a `limit` query parameter silently retyped,
+// re-enumerated, or switched from optional to required never touched a
+// response or request body schema, so it was invisible to this digest until
+// parameter coverage was added.
 func Compute(wireRevision int) (Digest, error) {
 	var doc map[string]any
 	if err := yaml.Unmarshal(spec.OpenAPIV0(), &doc); err != nil {
@@ -190,6 +226,16 @@ func Compute(wireRevision int) (Digest, error) {
 				rb = c.resolveAny(rb)
 				c.walkContent(rb)
 			}
+
+			operationID := asString(op["operationId"])
+			params, _ := op["parameters"].([]any)
+			for _, rawParam := range params {
+				paramMap, ok := rawParam.(map[string]any)
+				if !ok {
+					continue
+				}
+				c.walkParam(operationID, c.resolveAny(paramMap))
+			}
 		}
 	}
 
@@ -223,6 +269,55 @@ func (c *collector) walkContent(node map[string]any) {
 		}
 		c.walk(schemaNode, "")
 	}
+}
+
+// walkParam records one resolved parameter object (already $ref-followed by
+// the caller) as a single Entry keyed by paramKey(operationID, in, name). A
+// parameter's own Required/Style/Explode live on the parameter object itself;
+// Type/Format/Enum/Nullable/Default and, for arrays, the Item* fields, live
+// one level down on its `schema` node. Unlike walk, a parameter's schema is
+// never itself filed under its own named Entry — this document's parameter
+// schemas are all inline scalars or inline arrays of scalars (confirmed by
+// grep: no operation parameter uses an object schema), so there is nothing
+// further to recurse into, and ANY future object-shaped parameter schema
+// still gets its Type/Enum/Required seen here even without recursion.
+func (c *collector) walkParam(operationID string, node map[string]any) {
+	name := asString(node["name"])
+	in := asString(node["in"])
+	if name == "" || in == "" {
+		// Not a parameter object this document recognizes (for instance, a
+		// dangling or unresolved $ref) — nothing to record.
+		return
+	}
+
+	schema, _ := node["schema"].(map[string]any)
+	schema = c.resolveAny(schema)
+
+	entrySchema, entryMember := paramKey(operationID, in, name)
+	entry := Entry{
+		Schema:   entrySchema,
+		Member:   entryMember,
+		Type:     asString(schema["type"]),
+		Format:   asString(schema["format"]),
+		Enum:     toStringSlice(schema["enum"]),
+		Required: asBool(node["required"]),
+		Nullable: asBool(schema["nullable"]),
+		Style:    asString(node["style"]),
+		Explode:  asBool(node["explode"]),
+		Default:  defaultString(schema["default"]),
+	}
+
+	if entry.Type == "array" {
+		if items, ok := schema["items"].(map[string]any); ok {
+			resolvedItems := c.resolveAny(items)
+			entry.ItemType = asString(resolvedItems["type"])
+			entry.ItemFormat = asString(resolvedItems["format"])
+			entry.ItemEnum = toStringSlice(resolvedItems["enum"])
+			entry.ItemNullable = asBool(resolvedItems["nullable"])
+		}
+	}
+
+	c.byKey[entry.Schema+"\x00"+entry.Member] = entry
 }
 
 type collector struct {
@@ -303,6 +398,19 @@ func asString(v any) string {
 func asBool(v any) bool {
 	b, _ := v.(bool)
 	return b
+}
+
+// defaultString renders a schema's `default` value (which, unlike enum
+// members, is a single scalar of whatever type the schema declares — string,
+// number or bool) as a comparable string, or "" when the schema has none. A
+// literal "" default and "no default at all" are indistinguishable here,
+// which matches every default this document actually declares (none are the
+// empty string).
+func defaultString(v any) string {
+	if v == nil {
+		return ""
+	}
+	return fmt.Sprint(v)
 }
 
 // walk records every property of the schema node reaches (following $refs and

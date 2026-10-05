@@ -7619,18 +7619,23 @@ components:
             response member AND request body member's (schema, member, type,
             format, enum, required, nullable), plus the item shape of an array
             member and the value shape of an `additionalProperties` map,
-            recursing through `$ref`, `allOf` and `oneOf`, fails CI the moment
-            any one of them changes without this field's Go constant
-            (`CurrentWireRevision`, `internal/httpapi/wire_revision.go`)
-            increasing to match. Regenerate the golden with
+            recursing through `$ref`, `allOf` and `oneOf`. The same digest also
+            covers every operation PARAMETER (query, path and header) across
+            every operation, keyed by operationId + location + name rather
+            than by schema, recording its type, item shape (for an array
+            parameter), enum, required, style, explode and default. It fails
+            CI the moment any one of these — member or parameter — changes
+            without this field's Go constant (`CurrentWireRevision`,
+            `internal/httpapi/wire_revision.go`) increasing to match.
+            Regenerate the golden with
             `go run ./internal/httpapi/wireshape/cmd/gendigest` after a
             deliberate, revision-bumped change, and commit the result — see
             that package's doc.go for the exact command. A purely additive
-            member or operation also changes the golden (it is appended to,
-            never frozen in place) but needs no revision bump to pass; the
-            command itself refuses to write a changed or removed entry at an
-            unbumped revision, and refuses to create a golden that does not
-            exist yet unless run with `-init`.
+            member, parameter or operation also changes the golden (it is
+            appended to, never frozen in place) but needs no revision bump to
+            pass; the command itself refuses to write a changed or removed
+            entry at an unbumped revision, and refuses to create a golden that
+            does not exist yet unless run with `-init`.
 
 
             Every request PARAMETER (query, path or header) and every request
