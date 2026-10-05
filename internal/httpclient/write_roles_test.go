@@ -398,6 +398,7 @@ func TestUpdateRefusesEveryMemberTheWireExcludes(t *testing.T) {
 		"Claim":                 {Claim: true},
 		"ForceAssigneeTransfer": {ForceAssigneeTransfer: true},
 		"ForceClosePolicy":      {ForceClosePolicy: true},
+		"ForceNotesOverwrite":   {ForceNotesOverwrite: true},
 		"IssuePlaneOnly":        {IssuePlaneOnly: true},
 		"Provenance":            {Provenance: "bd: update"},
 
@@ -861,7 +862,9 @@ func assertGuardText(t *testing.T, member string, got, want *string) {
 	}
 }
 
-func ptr[T any](v T) *T { return &v }
+// ptr lives in helpers_test.go; this file used to redeclare it identically
+// (the lift had the same generic helper in two files, which never compiled),
+// removed in S3 reconciliation (gc native-program, 2026-10).
 
 // TestCreateRefusesARequestWithNoIssue keeps the role's own precondition off the
 // wire: a create with nothing to create is a client bug, not a round trip.
@@ -1146,10 +1149,8 @@ func TestBatchCloseServesTheSingleItemShapeAndRefusesTheRest(t *testing.T) {
 	})
 
 	t.Run("the unserved shapes refuse without dialing", func(t *testing.T) {
-		claim := issueops.ReadyRequest{}
 		cases := map[string]issueops.CloseBatchRequest{
 			"multi-item": {Actor: "w", Items: []issueops.BatchCloseItem{{IssueID: "bd-1"}, {IssueID: "bd-2"}}},
-			"claim-next": {Actor: "w", Items: []issueops.BatchCloseItem{{IssueID: "bd-1"}}, ClaimNext: &claim},
 		}
 		for name, req := range cases {
 			t.Run(name, func(t *testing.T) {
@@ -1270,161 +1271,42 @@ func TestBatchCloseRefusesWhatTheWireCannotCarry(t *testing.T) {
 	})
 }
 
-// TestBatchCloseRefusesAServedClaimCarryingNoIssue is the outcome-count
-// refusal's twin, one member over.
-//
-// types.IssueWithCounts carries the row as an EMBEDDED POINTER, so a
-// `claimed_next` object that carries the cardinalities and none of the issue's
-// own members decodes to a NON-NIL claim whose Issue is nil. Nothing on the
-// wire distinguishes it from a claim that landed, and passing it through is not
-// a wrong answer but a client-side PANIC: httpstore is a registered
-// storage.DoltStorage, so `bd close --claim-next` takes the direct arm and
-// dereferences the claimed row's ID with no nil check. A faulty or rogue server
-// would crash the caller instead of being told it is broken.
-//
-// So it refuses at the decode, on the count's terms exactly: it is the METHOD's
-// failure, and it carries no outcomes rather than an answer the caller might
-// trust.
-func TestBatchCloseRefusesAServedClaimCarryingNoIssue(t *testing.T) {
-	w := &stubWire{batchClose: &apigen.BatchCloseResponse{
-		Outcomes: []apigen.CloseOutcome{{IssueId: "bd-1", Issue: &types.Issue{ID: "bd-1"}}},
-		// The counts are present and the row is not — the exact shape a
-		// `"claimed_next": {}` object decodes to.
-		ClaimedNext: &types.IssueWithCounts{DependencyCount: 1},
-	}}
-	closer, err := batchCloseStore(t, w).BatchCloser()
-	if err != nil {
-		t.Fatalf("BatchCloser(): %v", err)
-	}
-
+// TestBatchCloseRefusesClaimNextUnconditionally pins the S3 reconciliation:
+// OSS's apigen.BatchCloseRequest and BatchCloseResponse publish no
+// claim_next/claimed_next member at all (ledger row
+// W-CloseBatchRequest.ClaimNext), so a batch close naming one refuses before
+// any dial -- on BOTH legs, regardless of whether the server advertises
+// issues.batchClose, and regardless of whether the filter it carries would
+// otherwise be valid.
+func TestBatchCloseRefusesClaimNextUnconditionally(t *testing.T) {
 	claim := issueops.ReadyRequest{}
-	res, err := closer.CloseBatch(t.Context(), issueops.CloseBatchRequest{
-		Actor:     "w",
-		Items:     []issueops.BatchCloseItem{{IssueID: "bd-1"}},
-		ClaimNext: &claim,
-	})
-	if err == nil {
-		t.Fatalf("CloseBatch passed a rowless claim through: ClaimedNext = %+v; the caller dereferences it", res.ClaimedNext)
+	req := issueops.CloseBatchRequest{
+		Actor: "w", Items: []issueops.BatchCloseItem{{IssueID: "bd-1"}}, ClaimNext: &claim,
 	}
-	if !strings.Contains(err.Error(), "bd serve returned") {
-		t.Errorf("CloseBatch = %v, want the broken-server diagnosis the outcome count uses", err)
-	}
-	if len(res.Outcomes) != 0 || res.ClaimedNext != nil {
-		t.Errorf("a refused result carried an answer: %+v", res)
-	}
-}
 
-// TestBatchCloseRefusesAServedClaimTheRequestNeverEarned is the rowless
-// refusal's sibling and the same trust class: a server whose answer breaks the
-// role contract is broken, and this client says so rather than passing the
-// answer up.
-//
-// A CLAIM IS A WRITE. The row `claimed_next` names is assigned to this actor,
-// so a claim the request never earned either reports an assignment that never
-// happened or hides one that did — and either way `bd close` prints it and
-// hands it to the agent as its next piece of work. The rule it has to obey is
-// the role contract's, and it is the SAME one `bd serve` now holds its own
-// closer to: a claim requires that the REQUEST asked for one, and that at least
-// one item LANDED. Changed is the test for landed, so a batch of idempotent
-// re-closes earns nothing.
-//
-// THE HOOK IS WHY THE REFUSAL HAS TO HAPPEN HERE. The client's decorator chain
-// puts HookFiringStore above this store, and hookBatchCloser fires the update
-// hook on ClaimedNext's PRESENCE alone — it re-derives nothing. Its two
-// preconditions are a nil error and a non-nil claim, and both assertions below
-// deny it one: the refusal returns before any claim value escapes this decode.
-// TestAnUnearnedClaimNeverReachesTheUpdateHook drives the real decorator and
-// proves it end to end.
-func TestBatchCloseRefusesAServedClaimTheRequestNeverEarned(t *testing.T) {
-	claim := issueops.ReadyRequest{}
-	landed := apigen.CloseOutcome{IssueId: "bd-1", Issue: &types.Issue{ID: "bd-1"}}
-	reclosed := apigen.CloseOutcome{IssueId: "bd-1", Issue: &types.Issue{ID: "bd-1"}, AlreadyClosed: ptr(true)}
-	served := &types.IssueWithCounts{Issue: &types.Issue{ID: "bd-next"}}
-
-	for _, tc := range []struct {
-		name    string
-		request issueops.CloseBatchRequest
-		outcome apigen.CloseOutcome
-		fault   string
-	}{
-		{
-			// The request carried no claim_next at all, so the encoder sent
-			// none: a claim in the answer is one this caller never asked for.
-			name:    "a claim the request never asked for",
-			request: issueops.CloseBatchRequest{Actor: "w", Items: []issueops.BatchCloseItem{{IssueID: "bd-1"}}},
-			outcome: landed,
-			fault:   "asked for none",
-		},
-		{
-			// already_closed: a per-item SUCCESS that persisted nothing, which
-			// is exactly the batch the contract says earns no claim. This is
-			// the case the two rules have to agree on, or a legitimate server
-			// would trip the guard.
-			name: "a claim for a batch that landed nothing",
-			request: issueops.CloseBatchRequest{
-				Actor: "w", Items: []issueops.BatchCloseItem{{IssueID: "bd-1"}}, ClaimNext: &claim,
-			},
-			outcome: reclosed,
-			fault:   "closed nothing",
-		},
+	for name, store := range map[string]func(*testing.T, *stubWire) *Store{
+		"unserved leg": stubStore,
+		"served leg":   batchCloseStore,
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(name, func(t *testing.T) {
 			w := &stubWire{batchClose: &apigen.BatchCloseResponse{
-				Outcomes:    []apigen.CloseOutcome{tc.outcome},
-				ClaimedNext: served,
+				Outcomes: []apigen.CloseOutcome{{IssueId: "bd-1", Issue: &types.Issue{ID: "bd-1"}}},
 			}}
-			closer, err := batchCloseStore(t, w).BatchCloser()
+			closer, err := store(t, w).BatchCloser()
 			if err != nil {
 				t.Fatalf("BatchCloser(): %v", err)
 			}
-
-			res, err := closer.CloseBatch(t.Context(), tc.request)
-			if err == nil {
-				t.Fatalf("CloseBatch passed an unearned claim through: ClaimedNext = %+v", res.ClaimedNext)
-			}
-			if !strings.Contains(err.Error(), "bd serve returned") {
-				t.Errorf("CloseBatch = %v, want the broken-server diagnosis the outcome count uses", err)
-			}
-			if !strings.Contains(err.Error(), tc.fault) {
-				t.Errorf("CloseBatch = %v, want it to say which rule the server broke (%q)", err, tc.fault)
-			}
-			// The hook decorator's two preconditions, denied: a nil error and a
-			// non-nil claim. Nothing it fires on escapes this decode.
-			if res.ClaimedNext != nil {
-				t.Errorf("a refused result still carried the claim the update hook fires on: %+v", res.ClaimedNext)
+			res, err := closer.CloseBatch(t.Context(), req)
+			if !errors.Is(err, encode.ErrRefused) {
+				t.Fatalf("CloseBatch(ClaimNext) = %v, want the ledgered refusal", err)
 			}
 			if len(res.Outcomes) != 0 {
-				t.Errorf("a refused result carried outcomes: %+v", res.Outcomes)
+				t.Errorf("a refused request carried outcomes: %+v", res.Outcomes)
+			}
+			if len(w.calls) != 0 {
+				t.Errorf("a ClaimNext refusal dialed %v; it must never half-serve the close", w.calls)
 			}
 		})
-	}
-}
-
-// TestBatchCloseKeepsTheClaimItEarned is the guard's other half: the shape a
-// correct server sends must still arrive. Without it the two refusals above
-// would be satisfied by a decode that refused every claim.
-func TestBatchCloseKeepsTheClaimItEarned(t *testing.T) {
-	claim := issueops.ReadyRequest{}
-	w := &stubWire{batchClose: &apigen.BatchCloseResponse{
-		Outcomes:    []apigen.CloseOutcome{{IssueId: "bd-1", Issue: &types.Issue{ID: "bd-1"}}},
-		ClaimedNext: &types.IssueWithCounts{Issue: &types.Issue{ID: "bd-next"}, DependencyCount: 2},
-	}}
-	closer, err := batchCloseStore(t, w).BatchCloser()
-	if err != nil {
-		t.Fatalf("BatchCloser(): %v", err)
-	}
-
-	res, err := closer.CloseBatch(t.Context(), issueops.CloseBatchRequest{
-		Actor: "w", Items: []issueops.BatchCloseItem{{IssueID: "bd-1"}}, ClaimNext: &claim,
-	})
-	if err != nil {
-		t.Fatalf("CloseBatch refused a claim the batch earned: %v", err)
-	}
-	if res.ClaimedNext == nil || res.ClaimedNext.ID != "bd-next" {
-		t.Fatalf("ClaimedNext = %+v, want the served row bd-next", res.ClaimedNext)
-	}
-	if res.ClaimedNext.DependencyCount != 2 {
-		t.Errorf("the claim lost its cardinalities: %+v", res.ClaimedNext)
 	}
 }
 
