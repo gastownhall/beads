@@ -822,6 +822,25 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// wispIsAbandoned reports whether a wisp counts as abandoned for GC
+// purposes: it has not been updated within ageThreshold of now.
+//
+// ageThreshold <= 0 (--age 0s and below) always reports true, bypassing
+// the clock comparison entirely — this matches the GC's own documented
+// contract ("hasn't been updated in --age duration"): nothing has been
+// updated in the last zero seconds. It also matters for a reason the
+// comparison alone does not handle: Dolt's DATETIME(0) column rounds
+// fractional seconds half-up on write rather than truncating (#7236), so
+// a wisp created in the second half of a wall-clock second can read back
+// with updatedAt up to 0.5s in the future. now.Sub(updatedAt) is then
+// negative, failing a strict > comparison for a wisp that is, by
+// definition, not yet one second old — exactly what --age 0s's "every
+// wisp qualifies" contract exists to avoid depending on in the first
+// place.
+func wispIsAbandoned(now, updatedAt time.Time, ageThreshold time.Duration) bool {
+	return ageThreshold <= 0 || now.Sub(updatedAt) > ageThreshold
+}
+
 func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThreshold time.Duration, excludeTypes []types.IssueType) ([]*types.Issue, error) {
 	ephemeralFlag := true
 	filter := types.IssueFilter{
@@ -860,7 +879,7 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 		if isProtectedWisp(issue, blockedSet, protectedStatuses) {
 			continue
 		}
-		if now.Sub(issue.UpdatedAt) > ageThreshold {
+		if wispIsAbandoned(now, issue.UpdatedAt, ageThreshold) {
 			abandoned = append(abandoned, issue)
 		}
 	}
