@@ -21,7 +21,7 @@ func TestRequireBootstrapDoltBackendRejectsRegisteredBackend(t *testing.T) {
 	const name = "registry-bootstrap"
 	registerContractBackend(t, name)
 
-	err := requireBootstrapDoltBackend(&configfile.Config{Backend: name})
+	err := requireBootstrapDoltBackend(&configfile.Config{Backend: name}, t.TempDir())
 	if err == nil {
 		t.Fatal("requireBootstrapDoltBackend accepted a registered backend; want fail-closed rejection")
 	}
@@ -40,7 +40,7 @@ func TestRequireBootstrapDoltBackendRejectsRegisteredBackend(t *testing.T) {
 		{"empty backend", &configfile.Config{}},
 		{"explicit dolt", &configfile.Config{Backend: configfile.BackendDolt}},
 	} {
-		if err := requireBootstrapDoltBackend(tc.cfg); err != nil {
+		if err := requireBootstrapDoltBackend(tc.cfg, t.TempDir()); err != nil {
 			t.Errorf("requireBootstrapDoltBackend rejected the %s config: %v", tc.label, err)
 		}
 	}

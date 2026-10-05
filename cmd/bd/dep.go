@@ -107,6 +107,112 @@ func resolveIDForMutation(ctx context.Context, localStore storage.DoltStorage, i
 	return result.ResolvedID, s, func() { result.Close() }, nil
 }
 
+// refuseMalformedDepTarget refuses a dep add target that contains ":" but is
+// not an "external:" ref. This is the half of the target decision that needs no
+// ID resolution, so it is the half every dep add surface can share — including
+// the proxied-server paths, which deliberately resolve nothing and so cannot
+// call resolveUnresolvedDepTarget. A colon-free target is not this helper's
+// business and returns nil; the caller still owns the resolve/cross-prefix
+// decision. Refusing here rather than per-surface is what keeps `bd dep add`
+// from being mode-dependently correct (be-gmdx5 survived in proxied mode and on
+// --file until every site routed through this). The five sites are: the
+// positional and --file direct routes (both via resolveUnresolvedDepTarget),
+// their two proxied twins, and runDepBlocksProxiedServer — the `bd dep <a>
+// --blocks <b>` alias the dep help documents as equivalent to dep add, which
+// passes the blocker as the target and so inverts the operands.
+//
+// The refused shape is be-gmdx5 itself: a "type:id" positional arg (e.g.
+// "discovered-from:ga-x", the spec syntax `bd create --deps` accepts) was read
+// as a foreign-store ID, because ExtractPrefix stops at the first "-" and so
+// returns "discovered-". The type keyword was silently dropped (the edge
+// defaulted to blocks) and the whole string was stored as a bogus external ref.
+// No bd ID contains ":", and callers take the only legal ":" shape
+// ("external:") first, so anything reaching here is malformed regardless of
+// prefix.
+//
+// Two details in the message:
+//
+//   - The `bd create --deps` diagnosis is only asserted when the token before
+//     the ":" is a type --type would actually accept. Otherwise an unrelated
+//     colon-bearing typo ("https://example.com/x") is told a confidently wrong
+//     cause and handed "--type https", which the next validation rejects.
+//   - The suggested command respects direction. parseDepSpec reverses the
+//     endpoints for the literal "blocks:" spelling only (create_deps.go sets
+//     SwapDirection for rawType == DepBlocks), so `--deps blocks:B` on A stores
+//     "B depends on A" and the equivalent dep add has to name B first. The
+//     "depends-on"/"blocked-by" aliases are compared before
+//     canonicalDependencyType and do not swap, so they keep the natural order.
+//     Getting this backwards would hand the user a reversed bd ready/bd blocked
+//     gate (Type.AffectsReadyWork), not just a cosmetically odd command.
+func refuseMalformedDepTarget(sourceID, dependsOnArg string) error {
+	idx := strings.Index(dependsOnArg, ":")
+	if idx < 0 {
+		return nil
+	}
+
+	// Trim both halves the way parseDepSpec does (create_deps.go), or the
+	// diagnosis this branch exists to give degrades on exactly the specs
+	// `bd create --deps` accepts: "blocks : bd-2" parses there, but read
+	// verbatim here the type is "blocks " — neither types.DepBlocks (so the
+	// direction swap is never considered) nor well-known (so the suggestion is
+	// suppressed), and the user is handed the generic refusal instead of the
+	// translation. The refusal itself is correct either way; only the message
+	// is at stake, and it must name a command that actually runs.
+	depType, target := strings.TrimSpace(dependsOnArg[:idx]), strings.TrimSpace(dependsOnArg[idx+1:])
+	if depType == "" || target == "" ||
+		validateDependencyType(canonicalDependencyType(types.DependencyType(depType))) != nil {
+		return fmt.Errorf("invalid dependency target %q: not a bd ID and not a well-formed external:<project>:<capability> reference", dependsOnArg)
+	}
+
+	first, second := sourceID, target
+	if types.DependencyType(depType) == types.DepBlocks {
+		first, second = target, sourceID
+	}
+	return fmt.Errorf("invalid dependency target %q: that is `bd create --deps` <type>:<id> syntax, not a target ID; use: bd dep add %s %s --type %s",
+		dependsOnArg, first, second, depType)
+}
+
+// resolveUnresolvedDepTarget decides what to do when a dep add target could
+// not be resolved locally or via cross-store routing (resolveIDWithRouting's
+// error). Three outcomes, in order:
+//
+//  1. An "external:" ref is validated and passed through, as before.
+//  2. Anything else containing ":" is refused by name, by
+//     refuseMalformedDepTarget — see there for the be-gmdx5 mechanism and the
+//     message's direction/type rules.
+//  3. A bare, differently-prefixed target is passed through unchanged. This is
+//     NOT malformed: issueops.IsExternalDepTarget defines a target "whose id
+//     prefix names ANOTHER REPOSITORY" as belonging in depends_on_external
+//     alongside "external:" refs, and calls that the single rule every backend
+//     classifies by (db.pickDepTargetColumn restates it). It is the multi-rig
+//     "add now, route later" shape — a gt- bead depending on a bd- bead whose
+//     rig is not in routes.jsonl yet — and dep remove (the ExtractPrefix
+//     fallback further down this file) still addresses such an edge. Refusing
+//     it here would make dep add reject an edge the store holds and dep remove
+//     can still delete.
+//
+// A same-prefix target that resolves nowhere is still an error, unchanged.
+func resolveUnresolvedDepTarget(sourceID, dependsOnArg string, resolveErr error) (string, error) {
+	if IsExternalRef(dependsOnArg) {
+		if err := validateExternalRef(dependsOnArg); err != nil {
+			return "", err
+		}
+		return dependsOnArg, nil
+	}
+
+	if err := refuseMalformedDepTarget(sourceID, dependsOnArg); err != nil {
+		return "", err
+	}
+
+	srcPrefix := types.ExtractPrefix(sourceID)
+	tgtPrefix := types.ExtractPrefix(dependsOnArg)
+	if srcPrefix != "" && tgtPrefix != "" && srcPrefix != tgtPrefix {
+		return dependsOnArg, nil
+	}
+
+	return "", fmt.Errorf("resolving dependency ID %s: %v", dependsOnArg, resolveErr)
+}
+
 // isChildOf returns true if childID is a hierarchical child of parentID.
 // For example, "bd-abc.1" is a child of "bd-abc", and "bd-abc.1.2" is a child of "bd-abc.1".
 func isChildOf(childID, parentID string) bool {
@@ -285,7 +391,7 @@ Examples:
   bd dep add bd-42 --blocked-by bd-41                 # Flag syntax (same effect)
   bd dep add bd-42 --depends-on bd-41                 # Alias (same effect)
   bd dep add gt-xyz external:beads:mol-run-assignee   # Cross-project dependency
-  bd dep add bd-42 bd-41 --no-cycle-check             # Skip cycle check (bulk wiring)
+  bd dep add bd-42 bd-41 --no-cycle-check             # Skip the post-add cycle warning
   bd dep add --file deps.jsonl                        # Bulk JSONL: {"from":"bd-42","to":"bd-41"}`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		file, _ := cmd.Flags().GetString("file")
@@ -382,12 +488,9 @@ Examples:
 			var toCleanup func()
 			toID, _, toCleanup, err = resolveIDWithRouting(ctx, store, dependsOnArg)
 			if err != nil {
-				srcPrefix := types.ExtractPrefix(fromID)
-				tgtPrefix := types.ExtractPrefix(dependsOnArg)
-				if srcPrefix != "" && tgtPrefix != "" && srcPrefix != tgtPrefix {
-					toID = dependsOnArg
-				} else {
-					return HandleErrorRespectJSON("resolving dependency ID %s: %v", dependsOnArg, err)
+				toID, err = resolveUnresolvedDepTarget(fromID, dependsOnArg, err)
+				if err != nil {
+					return HandleErrorRespectJSON("%v", err)
 				}
 			} else {
 				defer toCleanup()
@@ -708,12 +811,13 @@ func validateBulkDepEdges(ctx context.Context, edges []bulkDepEdge) ([]bulkDepEd
 		} else {
 			toID, _, toCleanup, err := resolveIDWithRouting(ctx, store, edge.DependsOnID)
 			if err != nil {
-				srcPrefix := types.ExtractPrefix(current.IssueID)
-				tgtPrefix := types.ExtractPrefix(edge.DependsOnID)
-				if srcPrefix != "" && tgtPrefix != "" && srcPrefix != tgtPrefix {
-					toID = edge.DependsOnID
-				} else {
-					errs = append(errs, fmt.Sprintf("line %d: resolving dependency ID %s: %v", edge.Line, edge.DependsOnID, err))
+				// Same decision as the single-edge add, through the same helper:
+				// --file used to carry its own copy of the cross-prefix ladder,
+				// which left the be-gmdx5 "type:id" shape accepted and stored
+				// here after the positional path started refusing it.
+				toID, err = resolveUnresolvedDepTarget(current.IssueID, edge.DependsOnID, err)
+				if err != nil {
+					errs = append(errs, fmt.Sprintf("line %d: %v", edge.Line, err))
 					resolved = append(resolved, current)
 					continue
 				}
@@ -1261,7 +1365,9 @@ var depCyclesCmd = &cobra.Command{
 
 		// Both routes, one body: the only difference between them is which
 		// accessor answers, and that is inside openCycleDetector.
-		return runDepCycles()
+		includeTracks, _ := cmd.Flags().GetBool("include-tracks")
+		limit, _ := cmd.Flags().GetInt("limit")
+		return runDepCycles(includeTracks, limit)
 	},
 }
 
@@ -1536,13 +1642,13 @@ func ParseExternalRef(ref string) (project, capability string) {
 func init() {
 	// dep command shorthand flag
 	depCmd.Flags().StringP("blocks", "b", "", "Issue ID that this issue blocks (shorthand for: bd dep add <blocked> <blocker>)")
-	depCmd.Flags().Bool("no-cycle-check", false, "Skip per-edge cycle checks for speed (bulk wiring); bulk --file adds still run one final whole-graph check before commit")
+	depCmd.Flags().Bool("no-cycle-check", false, "Skip the post-add cycle warning (the per-edge cycle check still runs)")
 
 	depAddCmd.Flags().StringP("type", "t", "blocks", "Dependency type (blocks|tracks|related|parent-child|discovered-from|until|caused-by|validates|relates-to|supersedes); 'blocked-by' and 'depends-on' are accepted as aliases for 'blocks'")
 	depAddCmd.Flags().String("blocked-by", "", "Issue ID that blocks the first issue (alternative to positional arg)")
 	depAddCmd.Flags().String("depends-on", "", "Issue ID that the first issue depends on (alias for --blocked-by)")
 	depAddCmd.Flags().String("file", "", "Read dependency edges from JSONL file, or '-' for stdin")
-	depAddCmd.Flags().Bool("no-cycle-check", false, "Skip per-edge cycle checks for speed (bulk wiring); bulk --file adds still run one final whole-graph check before commit")
+	depAddCmd.Flags().Bool("no-cycle-check", false, "On bulk --file adds, skip per-edge cycle checks and the post-add cycle warning (one final whole-graph check still runs before commit); on a single-edge add, skip only the post-add cycle warning")
 
 	// DEPRECATED NO-OP, and it always was one: nothing has ever read this flag,
 	// so a diamond has always been rendered under one parent only. The role's
@@ -1563,6 +1669,23 @@ func init() {
 
 	depListCmd.Flags().String("direction", "down", "Direction: 'down' (dependencies), 'up' (dependents)")
 	depListCmd.Flags().StringP("type", "t", "", "Filter by dependency type (e.g., tracks, blocks, parent-child)")
+
+	// Widens the report, never narrows it: every cycle the default walk finds is
+	// kept, and cycles that close through tracks edges are added. A loop made
+	// only of tracks edges is still not reported, but that is the only thing
+	// the guard excludes: a tracks loop fuses a component and every scheduling
+	// edge inside it is then reported, so a tracks-dense workspace can print
+	// many cycles here even where the default walk prints none — hence
+	// --limit. See issueops.DetectCyclesRequest.IncludeTracks.
+	depCyclesCmd.Flags().Bool("include-tracks", false, "Also walk 'tracks' edges: reports every cycle the default walk finds plus cycles that close through a tracks edge, never a loop made only of tracks edges (diagnostic for molecule-root deadlocks hidden by tracks-only propagation)")
+	// Caps the RENDERED list only, and on BOTH walks: this does not consult
+	// --include-tracks, so it bounds the default invocation's rendering too.
+	// The widened walk is what makes the cap necessary rather than what scopes
+	// it — bounded by the scheduling-edge count, not by the number of
+	// deadlocks, so a tracks-dense workspace can report more cycles than a
+	// reader can use. The printed total stays the whole report's and --json is
+	// never truncated.
+	depCyclesCmd.Flags().Int("limit", 50, "Maximum cycles to print (0 = no limit); the reported total is always the whole count, and --json is never truncated")
 
 	// Issue ID completions for dep subcommands
 	depAddCmd.ValidArgsFunction = issueIDCompletion

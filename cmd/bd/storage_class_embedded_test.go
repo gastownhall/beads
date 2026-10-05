@@ -4,6 +4,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,7 +18,12 @@ import (
 // Protocol v0.1 §C): create-time resolution (flag > per-type config >
 // unset), the omitted-when-versioned marker rule (C2.4) down to the DB
 // cell, and the ephemeral spelling routing to the wisp plane (C1.4).
-func TestEmbeddedCreateStorageClass(t *testing.T) {
+// TestEmbeddedCreateStorageClassBasic was split from TestEmbeddedCreateStorageClass
+// (originally ~356s, measured under --config=embedded) into 3 top-level tests
+// over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedCreateStorageClassBasic(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
 	}
@@ -109,6 +115,20 @@ func TestEmbeddedCreateStorageClass(t *testing.T) {
 			t.Errorf("ephemeral bead should live in wisps, found %d rows", count)
 		}
 	})
+}
+
+// TestEmbeddedCreateStorageClassConflicts was split from
+// TestEmbeddedCreateStorageClass (originally ~356s, measured under
+// --config=embedded) into 3 top-level tests over disjoint subtest groups,
+// for CI shard balance (see scripts/ci/embedded_cmd_test_durations.json and
+// engdocs/TESTING.md). Every original subtest is preserved exactly once.
+func TestEmbeddedCreateStorageClassConflicts(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	// An explicit durable class combined with a wisp-plane flag is a direct
 	// command-line contradiction: the row would be ephemeral by construction, so
@@ -183,6 +203,170 @@ func TestEmbeddedCreateStorageClass(t *testing.T) {
 		}
 		if cell.Valid && cell.String == string(types.StorageClassUnversioned) {
 			t.Errorf("config-derived unversioned leaked to the no-history wisp row: %q", cell.String)
+		}
+	})
+}
+
+// TestEmbeddedCreateStorageClassBatchAndMisc was split from
+// TestEmbeddedCreateStorageClass (originally ~356s, measured under
+// --config=embedded) into 3 top-level tests over disjoint subtest groups,
+// for CI shard balance (see scripts/ci/embedded_cmd_test_durations.json and
+// engdocs/TESTING.md). Every original subtest is preserved exactly once.
+func TestEmbeddedCreateStorageClassBatchAndMisc(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// storageClassCell reads the raw issues.storage_class cell so the test
+	// pins the at-rest form (NULL vs literal), not just the JSON view.
+	storageClassCell := func(t *testing.T, beadsDir, prefix, id string) sql.NullString {
+		t.Helper()
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), prefix, "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer cleanup()
+		var got sql.NullString
+		if err := db.QueryRowContext(t.Context(), "SELECT storage_class FROM issues WHERE id = ?", id).Scan(&got); err != nil {
+			t.Fatalf("query storage_class: %v", err)
+		}
+		return got
+	}
+
+	// The batch doors mint their own ids, so the DB assertions look rows up by
+	// the title the markdown file gave them. An absent row is "" rather than a
+	// failure: which PLANE a row landed on is the thing under test.
+	issueIDByTitle := func(t *testing.T, beadsDir, prefix, table, title string) string {
+		t.Helper()
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), prefix, "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer cleanup()
+		var id string
+		//nolint:gosec // G202: table is a test-local literal, never caller input
+		err = db.QueryRowContext(t.Context(), "SELECT id FROM "+table+" WHERE title = ?", title).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ""
+		}
+		if err != nil {
+			t.Fatalf("query %s by title: %v", table, err)
+		}
+		return id
+	}
+
+	// `bd create --file` used to accept --storage-class and the per-type config
+	// default and honor neither. buildMarkdownBatchRequest is the ONE projection
+	// both transports use, so these subtests cover the direct half of that fix
+	// and TestProxiedServerStorageClass covers the other.
+	t.Run("markdown_batch", func(t *testing.T) {
+		batch := `## Batch one
+
+### Description
+First.
+
+## Batch two
+
+### Description
+Second.
+`
+		t.Run("explicit_unversioned_on_every_row", func(t *testing.T) {
+			dir, beadsDir, _ := bdInit(t, bd, "--prefix", "sm")
+			plan := writeMarkdownPlan(t, dir, "batch.md", batch)
+			if out, err := bdRunWithFlockRetry(t, bd, dir, "create", "--file", plan, "--storage-class", "unversioned"); err != nil {
+				t.Fatalf("create --file: %v\n%s", err, out)
+			}
+			for _, title := range []string{"Batch one", "Batch two"} {
+				id := issueIDByTitle(t, beadsDir, "sm", "issues", title)
+				if cell := storageClassCell(t, beadsDir, "sm", id); !cell.Valid || cell.String != "unversioned" {
+					t.Errorf("%s (%s): DB cell = %+v, want 'unversioned'", title, id, cell)
+				}
+			}
+		})
+
+		// The per-type default resolves per TEMPLATE, because that is where the
+		// type lives — a file-wide resolution would key on nothing.
+		t.Run("per_type_config_default", func(t *testing.T) {
+			dir, beadsDir, _ := bdInit(t, bd, "--prefix", "sn")
+			if out, err := bdRunWithFlockRetry(t, bd, dir, "config", "set", "storage-class.task", "unversioned"); err != nil {
+				t.Fatalf("config set: %v\n%s", err, out)
+			}
+			// Templates default to type task; the bug template must be untouched.
+			plan := writeMarkdownPlan(t, dir, "batch.md", batch+`
+## Batch bug
+
+### Type
+bug
+
+### Description
+Third.
+`)
+			if out, err := bdRunWithFlockRetry(t, bd, dir, "create", "--file", plan); err != nil {
+				t.Fatalf("create --file: %v\n%s", err, out)
+			}
+			for _, title := range []string{"Batch one", "Batch two"} {
+				id := issueIDByTitle(t, beadsDir, "sn", "issues", title)
+				if cell := storageClassCell(t, beadsDir, "sn", id); !cell.Valid || cell.String != "unversioned" {
+					t.Errorf("%s (%s): DB cell = %+v, want the storage-class.task default", title, id, cell)
+				}
+			}
+			bugID := issueIDByTitle(t, beadsDir, "sn", "issues", "Batch bug")
+			if cell := storageClassCell(t, beadsDir, "sn", bugID); cell.Valid {
+				t.Errorf("Batch bug (%s): DB cell = %q, want NULL (the task default must not spill)", bugID, cell.String)
+			}
+		})
+
+		// C1.4 through the batch door: the spelled-out class moves every row to
+		// the wisp plane, exactly as --ephemeral does.
+		t.Run("ephemeral_spelling_routes_to_wisp_plane", func(t *testing.T) {
+			dir, beadsDir, _ := bdInit(t, bd, "--prefix", "sp")
+			plan := writeMarkdownPlan(t, dir, "batch.md", batch)
+			if out, err := bdRunWithFlockRetry(t, bd, dir, "create", "--file", plan, "--storage-class", "ephemeral"); err != nil {
+				t.Fatalf("create --file: %v\n%s", err, out)
+			}
+			for _, title := range []string{"Batch one", "Batch two"} {
+				id := issueIDByTitle(t, beadsDir, "sp", "wisps", title)
+				if id == "" {
+					t.Errorf("%s should live in wisps", title)
+				}
+			}
+		})
+
+		t.Run("durable_class_with_ephemeral_is_rejected", func(t *testing.T) {
+			dir, beadsDir, _ := bdInit(t, bd, "--prefix", "sq")
+			plan := writeMarkdownPlan(t, dir, "batch.md", batch)
+			out, err := bdRunWithFlockRetry(t, bd, dir, "create", "--file", plan, "--ephemeral", "--storage-class", "versioned")
+			if err == nil {
+				t.Fatalf("durable class with --ephemeral should be refused, got:\n%s", out)
+			}
+			if !strings.Contains(string(out), "conflicts with --ephemeral/--no-history") {
+				t.Errorf("expected the wisp-plane conflict error, got:\n%s", out)
+			}
+			// The whole file is refused before the transaction opens.
+			if id := issueIDByTitle(t, beadsDir, "sq", "issues", "Batch one"); id != "" {
+				t.Errorf("a refused --file left %s behind", id)
+			}
+		})
+	})
+
+	// A plan-wide --storage-class has no meaning next to the per-node
+	// storage_class field that already works, so --graph refuses it the way it
+	// refuses --mol-type rather than accepting and ignoring it.
+	t.Run("graph_rejects_plan_wide_storage_class", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "sh")
+		planPath := filepath.Join(dir, "plan.json")
+		if err := os.WriteFile(planPath, []byte(`{"nodes":[{"key":"a","title":"Graph node","description":"n"}]}`), 0o600); err != nil {
+			t.Fatalf("write graph plan: %v", err)
+		}
+		out, err := bdRunWithFlockRetry(t, bd, dir, "create", "--graph", planPath, "--storage-class", "unversioned")
+		if err == nil {
+			t.Fatalf("--graph with a plan-wide --storage-class should be refused, got:\n%s", out)
+		}
+		if !strings.Contains(string(out), "set storage_class per node in the plan instead") {
+			t.Errorf("error should point at the per-node field, got:\n%s", out)
 		}
 	})
 

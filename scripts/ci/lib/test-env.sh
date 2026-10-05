@@ -66,6 +66,9 @@ beads_test_env_enter() {
     unset BEADS_DOLT_SERVER_DATABASE
     unset BEADS_DOLT_SERVER_SOCKET
     unset BEADS_DOLT_PASSWORD
+    # bazeltest debug override: never let an exported value point source-scan
+    # guards at another checkout.
+    unset BEADS_TEST_REPO_ROOT
 
     if command -v dolt >/dev/null 2>&1; then
         dolt config --global --add user.name "beads-test" >/dev/null 2>&1 || true

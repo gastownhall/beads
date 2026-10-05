@@ -131,3 +131,109 @@ func runGitForCommitConfigTest(t *testing.T, dir string, args ...string) string 
 func shellQuoteForTest(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
+
+// TestRedactRemoteURL pins the credential scrubbing applied to every remote URL
+// bd echoes into an error, a hint, a log line or JSON. CI commonly configures
+// sync.remote as https://x-access-token:<token>@github.com/org/repo.git.
+func TestRedactRemoteURL(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "https token is dropped whole",
+			in:   "https://x-access-token:ghp_secret@github.com/org/repo.git",
+			want: "https://github.com/org/repo.git",
+		},
+		{
+			name: "git+https token is dropped whole",
+			in:   "git+https://user:pass@github.com/org/repo.git",
+			want: "git+https://github.com/org/repo.git",
+		},
+		{
+			name: "http basic auth is dropped whole",
+			in:   "http://user:pass@myserver:7007/mydb",
+			want: "http://myserver:7007/mydb",
+		},
+		{
+			// The conventional SSH account selector is not a secret, and the
+			// ls-remote hint is useless without it.
+			name: "ssh user is kept",
+			in:   "git+ssh://git@github.com/org/repo.git",
+			want: "git+ssh://git@github.com/org/repo.git",
+		},
+		{
+			name: "ssh password is dropped, user kept",
+			in:   "ssh://alice:hunter2@my-dolt.example.com/org/db",
+			want: "ssh://alice@my-dolt.example.com/org/db",
+		},
+		{
+			name: "scp style is untouched",
+			in:   "git@github.com:org/repo.git",
+			want: "git@github.com:org/repo.git",
+		},
+		{name: "no userinfo", in: "https://github.com/org/repo.git", want: "https://github.com/org/repo.git"},
+		{name: "dolt native", in: "dolthub://myorg/mydb", want: "dolthub://myorg/mydb"},
+		{name: "empty", in: "", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := redactRemoteURL(tt.in); got != tt.want {
+				t.Errorf("redactRemoteURL(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestScrubURLCredentials covers the redaction of credential-bearing URLs that
+// arrive embedded in free-form text — most importantly a `git ls-remote` stderr
+// line that echoes the tokenized remote. Credential-free diagnostics must pass
+// through untouched so the probe error keeps git's actual complaint (#5743).
+func TestScrubURLCredentials(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			// The contingent leak Finding 2 guards: a git build that echoes the
+			// full tokenized URL. The token must go; host and path must stay.
+			name: "tokenized git stderr is scrubbed, host and path kept",
+			in:   "fatal: unable to access 'https://x-access-token:ghp_TESTTOKEN@github.com/org/repo.git/': The requested URL returned error: 403",
+			want: "fatal: unable to access 'https://github.com/org/repo.git/': The requested URL returned error: 403",
+		},
+		{
+			name: "ssh password embedded in text is dropped, user kept",
+			in:   "note: not cloning ssh://alice:hunter2@dolt.example.com/org/db right now",
+			want: "note: not cloning ssh://alice@dolt.example.com/org/db right now",
+		},
+		{
+			name: "two credential URLs in one line are both scrubbed",
+			in:   "https://u:p@a.example.com/x and https://v:q@b.example.com/y",
+			want: "https://a.example.com/x and https://b.example.com/y",
+		},
+		{
+			// The common case: modern git already prints host-only, and DNS/repo
+			// errors carry no userinfo. Nothing must be altered.
+			name: "credential-free git stderr is unchanged",
+			in:   "fatal: repository 'https://github.com/org/repo.git/' not found",
+			want: "fatal: repository 'https://github.com/org/repo.git/' not found",
+		},
+		{
+			name: "plain diagnostic without a URL is unchanged",
+			in:   "fatal: Could not read from remote repository.",
+			want: "fatal: Could not read from remote repository.",
+		},
+		{name: "empty", in: "", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := scrubURLCredentials(tt.in); got != tt.want {
+				t.Errorf("scrubURLCredentials(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}

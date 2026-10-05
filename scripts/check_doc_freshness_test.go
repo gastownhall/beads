@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/scripts/internal/testbash"
 )
 
 var freshnessDocuments = []struct {
@@ -20,11 +22,11 @@ var freshnessDocuments = []struct {
 	{"docs/getting-started/ide-setup.md", []string{"cmd/bd/setup*.go", "internal/recipes/"}},
 	{"docs/integrations/azure-devops.md", []string{"cmd/bd/ado*.go", "internal/ado/"}},
 	{"docs/reference/json-schema.md", []string{"cmd/bd/output.go", "cmd/bd/errors.go", "cmd/bd/protocol/json_contract_test.go"}},
-	{"docs/recovery/init-safety.md", []string{"cmd/bd/init.go", "cmd/bd/init_safety.go", "cmd/bd/init_safety_test.go", "cmd/bd/dolt.go"}},
+	{"docs/recovery/init-safety.md", []string{"cmd/bd/init.go", "cmd/bd/init_safety.go", "cmd/bd/init_safety_test.go", "cmd/bd/init_safety_help.go", "cmd/bd/dolt.go"}},
 	{"engdocs/ERROR_HANDLING.md", []string{"cmd/bd/*.go", "cmd/bd/errors.go"}},
 	{"engdocs/SERVE_RUNBOOK.md", []string{"internal/httpapi/server.go", "internal/httpapi/events_watch.go", "cmd/bd/serve.go", "internal/httpapi/auth.go"}},
-	{"engdocs/LINTING.md", []string{".golangci.yml", "scripts/ci/pr-lint.sh", "Makefile", ".github/workflows/pr.yml", ".github/workflows/main.yml"}},
-	{"engdocs/CI_CLEANUP_PLAN.md", []string{"engdocs/CI_TEST_SURFACE_AUDIT.md", ".github/workflows/*.yml", ".buildflags", ".golangci.yml", "scripts/ci/pr-lint.sh", "Makefile"}},
+	{"engdocs/LINTING.md", []string{".golangci.yml", "scripts/ci/pr-lint.sh", "scripts/pr-lint/", "Makefile", ".github/workflows/pr.yml", ".github/workflows/main.yml"}},
+	{"engdocs/CI_CLEANUP_PLAN.md", []string{"engdocs/CI_TEST_SURFACE_AUDIT.md", ".github/workflows/*.yml", ".buildflags", ".golangci.yml", "scripts/ci/pr-lint.sh", "scripts/pr-lint/", "Makefile"}},
 	{"engdocs/design/otel/otel-data-model.md", []string{"internal/telemetry/", "internal/storage/dolt/store.go", "internal/compact/haiku.go", "cmd/bd/find_duplicates.go", "internal/hooks/"}},
 }
 
@@ -62,6 +64,7 @@ date() {
 }
 `
 
+// Register every TestDocFreshness* test in requiredSuiteDefinitions in required_suite_test.go.
 func TestDocFreshnessDoesNotRequirePython(t *testing.T) {
 	run := runDocFreshness(t, "2026-01-15", "2026-01-31", "90")
 	if run.err != nil {
@@ -158,16 +161,59 @@ func TestDocFreshnessBashProbeIgnoresStartupEnvironment(t *testing.T) {
 		t.Skip("Git Bash discovery is Windows-specific")
 	}
 
-	poison := filepath.Join(t.TempDir(), "poison.sh")
-	if err := os.WriteFile(poison, []byte("exit 97\n"), 0o600); err != nil {
-		t.Fatalf("write startup poison: %v", err)
-	}
-	t.Setenv("BASH_ENV", poison)
-	t.Setenv("ENV", poison)
+	t.Run("startup and option controls", func(t *testing.T) {
+		poison := filepath.Join(t.TempDir(), "poison.sh")
+		if err := os.WriteFile(poison, []byte("exit 97\n"), 0o600); err != nil {
+			t.Fatalf("write startup poison: %v", err)
+		}
+		t.Setenv("BASH_ENV", poison)
+		t.Setenv("ENV", poison)
+		t.Setenv("SHELLOPTS", "noexec")
+		t.Setenv("BASHOPTS", "failglob")
+		t.Setenv("BASH_FUNC_uname%%", "() { builtin printf 'Linux\\n'; }")
 
-	if bash := docFreshnessBash(t); bash == "" {
-		t.Fatal("docFreshnessBash returned an empty executable")
-	}
+		if bash := docFreshnessBash(t); bash == "" {
+			t.Fatal("docFreshnessBash returned an empty executable")
+		}
+	})
+
+	t.Run("valid explicit override", func(t *testing.T) {
+		t.Setenv(testbash.OverrideEnv, "")
+		resolved := docFreshnessBash(t)
+		t.Setenv(testbash.OverrideEnv, resolved)
+		if got := docFreshnessBash(t); !strings.EqualFold(filepath.Clean(got), filepath.Clean(resolved)) {
+			t.Fatalf("resolved override = %q, want %q", got, resolved)
+		}
+	})
+
+	t.Run("invalid explicit override is configuration", func(t *testing.T) {
+		t.Setenv(testbash.OverrideEnv, "bash.exe")
+		if _, err := testbash.Resolve(); err == nil {
+			t.Fatal("relative Git Bash override unexpectedly succeeded")
+		} else if !testbash.IsConfigurationError(err) {
+			t.Fatalf("relative override error was not classified as configuration: %v", err)
+		}
+	})
+
+	t.Run("poisoned Git exec path", func(t *testing.T) {
+		t.Setenv(testbash.OverrideEnv, "")
+		t.Setenv("GIT_EXEC_PATH", t.TempDir())
+		if bash := docFreshnessBash(t); bash == "" {
+			t.Fatal("docFreshnessBash returned an empty executable")
+		}
+	})
+
+	t.Run("success without execution sentinel", func(t *testing.T) {
+		t.Setenv(testbash.OverrideEnv, "")
+		bash := docFreshnessBash(t)
+		err := testbash.Probe(bash, "early exit", "exit 0", os.Environ())
+		if err == nil {
+			t.Fatal("early successful exit unexpectedly passed without the execution sentinel")
+		}
+		if !strings.Contains(err.Error(), "without the exact execution sentinel") {
+			t.Fatalf("early-exit error = %v", err)
+		}
+	})
 }
 
 func TestDocFreshnessPreservesDateDiagnostics(t *testing.T) {
@@ -360,6 +406,30 @@ func TestDocFreshnessReportsInvalidTodayOverride(t *testing.T) {
 	}
 }
 
+func TestDocFreshnessRejectsMultipleLastReviewedMarkers(t *testing.T) {
+	tests := []struct {
+		name  string
+		dates []string
+	}{
+		{name: "two markers both fresh", dates: []string{"2026-01-10", "2026-01-12"}},
+		{name: "two markers one stale", dates: []string{"2026-01-15", "2020-01-01"}},
+		{name: "three markers", dates: []string{"2026-01-15", "2026-01-16", "2026-01-17"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			run := runDocFreshnessWithDuplicateMarker(t, "docs/reference/configuration.md", test.dates, "2026-01-31", "90")
+			if exitCode(run.err) != 1 {
+				t.Fatalf("exit = %d, want 1; error=%v\n%s", exitCode(run.err), run.err, run.output)
+			}
+			want := fmt.Sprintf("FAIL: found %d Last reviewed markers; expected exactly one", len(test.dates))
+			if !strings.Contains(run.output, want) {
+				t.Fatalf("missing %q:\n%s", want, run.output)
+			}
+		})
+	}
+}
+
 func runDocFreshness(t *testing.T, reviewed, today, maxAge string) freshnessRun {
 	t.Helper()
 	return runDocFreshnessWithDateFunction(t, reviewed, today, &maxAge, "")
@@ -380,11 +450,22 @@ func runDocFreshnessWithDefaultToday(t *testing.T, reviewed, maxAge, dateFunctio
 	return runDocFreshnessProcess(t, reviewed, nil, &maxAge, dateFunction)
 }
 
+func runDocFreshnessWithDuplicateMarker(t *testing.T, targetPath string, targetReviewedDates []string, today, maxAge string) freshnessRun {
+	t.Helper()
+	root := newDocFreshnessFixtureWithMarkers(t, "2026-01-15", targetPath, targetReviewedDates)
+	return runDocFreshnessProcessInRoot(t, root, &today, &maxAge, "")
+}
+
 func runDocFreshnessProcess(t *testing.T, reviewed string, today, maxAge *string, dateFunction string) freshnessRun {
+	t.Helper()
+	root := newDocFreshnessFixture(t, reviewed)
+	return runDocFreshnessProcessInRoot(t, root, today, maxAge, dateFunction)
+}
+
+func runDocFreshnessProcessInRoot(t *testing.T, root string, today, maxAge *string, dateFunction string) freshnessRun {
 	t.Helper()
 	bash := docFreshnessBash(t)
 
-	root := newDocFreshnessFixture(t, reviewed)
 	markerDir := t.TempDir()
 	pythonMarker := filepath.Join(markerDir, "python-invoked")
 	dateMarker := filepath.Join(markerDir, "date-invoked")
@@ -428,59 +509,23 @@ func runDocFreshnessProcess(t *testing.T, reviewed string, today, maxAge *string
 func docFreshnessBash(t *testing.T) string {
 	t.Helper()
 
+	bash, err := testbash.Resolve()
+	if err != nil {
+		t.Fatalf("bash is required to exercise check-doc-freshness.sh: %v", err)
+	}
 	if runtime.GOOS != "windows" {
-		bash, err := exec.LookPath("bash")
-		if err != nil {
-			t.Fatalf("bash is required to exercise check-doc-freshness.sh: %v", err)
-		}
 		return bash
 	}
 
-	git, err := exec.LookPath("git.exe")
-	if err != nil {
-		t.Fatalf("Git for Windows is required to exercise check-doc-freshness.sh: %v", err)
-	}
-	execPathCommand := exec.Command(git, "--exec-path")
-	execPathCommand.Env = docFreshnessProbeEnv()
-	execPathOutput, err := execPathCommand.CombinedOutput()
-	if err != nil {
-		t.Fatalf("locate the Git for Windows installation: %v: %s", err, strings.TrimSpace(string(execPathOutput)))
-	}
-	execPath := filepath.Clean(strings.TrimSpace(string(execPathOutput)))
-	if !filepath.IsAbs(execPath) {
-		t.Fatalf("Git for Windows returned a non-absolute exec path: %q", execPath)
-	}
-	gitRoot := filepath.Clean(filepath.Join(execPath, "..", "..", ".."))
-	candidates := []string{
-		filepath.Join(gitRoot, "bin", "bash.exe"),
-		filepath.Join(gitRoot, "usr", "bin", "bash.exe"),
-	}
-	var diagnostics []string
-	for _, candidate := range candidates {
-		if _, err := os.Stat(candidate); err != nil {
-			diagnostics = append(diagnostics, fmt.Sprintf("%s: %v", candidate, err))
-			continue
-		}
-		probe := exec.Command(candidate, "--noprofile", "--norc", "-c", `
-export BASH_ENV=
-export ENV=
+	err = testbash.Probe(bash, "Git Bash date environment", `set -eu
 PATH=/usr/bin:/bin
 export PATH
-case "$(uname -s)" in
-    MINGW*|MSYS*) command -v date >/dev/null ;;
-    *) exit 1 ;;
-esac
-`)
-		probe.Env = docFreshnessProbeEnv()
-		if output, err := probe.CombinedOutput(); err == nil {
-			return candidate
-		} else {
-			diagnostics = append(diagnostics, fmt.Sprintf("%s: %v: %s", candidate, err, strings.TrimSpace(string(output))))
-		}
+command -v date >/dev/null
+`, docFreshnessProbeEnv())
+	if err != nil {
+		t.Fatalf("a working Git Bash date environment is required: %v", err)
 	}
-
-	t.Fatalf("a working Git Bash date environment is required: %s", strings.Join(diagnostics, "; "))
-	return ""
+	return bash
 }
 
 func docFreshnessMarkerExists(t *testing.T, path string) bool {
@@ -516,6 +561,45 @@ func newDocFreshnessFixture(t *testing.T, reviewed string) string {
 			reviewed,
 			strings.Join(document.sources, ";"),
 		))
+		for _, source := range document.sources {
+			createFreshnessSource(t, root, source)
+		}
+	}
+	writeFixtureFile(t, root, "engdocs/DOC_INVENTORY.md", inventory.String())
+	return root
+}
+
+// newDocFreshnessFixtureWithMarkers is like newDocFreshnessFixture, but the
+// document at targetPath gets one "Last reviewed:" line per entry in
+// targetReviewedDates instead of exactly one. Every other document keeps the
+// normal single marker at reviewed.
+func newDocFreshnessFixtureWithMarkers(t *testing.T, reviewed, targetPath string, targetReviewedDates []string) string {
+	t.Helper()
+
+	root := t.TempDir()
+	repoRoot := sourceRepoRoot(t)
+	script, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "check-doc-freshness.sh"))
+	if err != nil {
+		t.Fatalf("read check-doc-freshness.sh: %v", err)
+	}
+	writeFixtureFile(t, root, "scripts/check-doc-freshness.sh", string(script))
+
+	var inventory strings.Builder
+	for _, document := range freshnessDocuments {
+		inventoryRef := strings.TrimPrefix(strings.TrimPrefix(document.path, "docs/"), "engdocs/")
+		fmt.Fprintf(&inventory, "- `%s`\n", inventoryRef)
+
+		var body strings.Builder
+		reviewedDates := []string{reviewed}
+		if document.path == targetPath {
+			reviewedDates = targetReviewedDates
+		}
+		for _, date := range reviewedDates {
+			fmt.Fprintf(&body, "Last reviewed: %s\n", date)
+		}
+		fmt.Fprintf(&body, "Freshness source: %s\n", strings.Join(document.sources, ";"))
+		writeFixtureFile(t, root, document.path, body.String())
+
 		for _, source := range document.sources {
 			createFreshnessSource(t, root, source)
 		}

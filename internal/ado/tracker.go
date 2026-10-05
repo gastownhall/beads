@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -37,7 +36,7 @@ var adoShorthandPattern = regexp.MustCompile(`^ado:([1-9]\d*)$`)
 // ADO and the local beads database.
 type Tracker struct {
 	client   *Client
-	store    storage.Storage
+	store    tracker.Store
 	mapper   tracker.FieldMapper
 	baseURL  string // Resolved base URL for external ref matching
 	org      string
@@ -75,7 +74,7 @@ func (t *Tracker) ConfigPrefix() string { return "ado" }
 
 // Init initializes the tracker with configuration from the beads config store.
 // No network calls are made during initialization.
-func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
+func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	t.store = store
 
 	pat := t.getConfig(ctx, "ado.pat", "AZURE_DEVOPS_PAT")

@@ -1,0 +1,40 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "github",
+    srcs = [
+        "client.go",
+        "errors.go",
+        "fieldmapper.go",
+        "links.go",
+        "mapping.go",
+        "tracker.go",
+        "types.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/github",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/config",
+        "//internal/tracker",
+        "//internal/types",
+    ],
+)
+
+go_test(
+    name = "github_test",
+    srcs = [
+        "client_ratelimit_test.go",
+        "links_test.go",
+        "mapping_test.go",
+        "push_dedup_test.go",
+        "review_fixes_test.go",
+        "tracker_test.go",
+        "types_test.go",
+    ],
+    embed = [":github"],
+    deps = [
+        "//internal/config",
+        "//internal/tracker",
+        "//internal/types",
+    ],
+)

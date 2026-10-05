@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/storage"
 )
@@ -256,9 +257,27 @@ func (s *DoltStore) decryptPassword(encrypted []byte) (string, error) {
 	key := s.credentialKey
 	s.mu.RUnlock()
 	if key == nil {
+		// Deliberately not a key mismatch: the key was never initialized on
+		// this store, so the fix is init or file permissions, not re-adding
+		// the peer. Labeling it a mismatch would prescribe the wrong action.
 		return "", fmt.Errorf("credential encryption key not initialized")
 	}
-	return decryptWithKey(encrypted, key)
+	plaintext, err := decryptWithKey(encrypted, key)
+	if err != nil {
+		// federation_peers rows travel with the database, the key file does
+		// not, so a database opened on a second machine reaches here with a
+		// key that cannot read the stored password. Enrich at this single
+		// decrypt funnel, as embeddeddolt does, so every reader reports the
+		// credential problem rather than a bare cipher error. decryptWithKey
+		// stays unwrapped for the key-rotation path, which reads old keys on
+		// purpose and must not report a rotation miss as a mismatch. Name the
+		// resolved path rather than the bare filename: initCredentialKey looks
+		// this same basename up under both beadsDir and the legacy dbPath, so
+		// during the migration window two files carrying different keys can
+		// share the name and the bare one does not say which is meant.
+		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), err)
+	}
+	return plaintext, nil
 }
 
 // AddFederationPeer adds or updates a federation peer with credentials.
@@ -353,7 +372,9 @@ func (s *DoltStore) GetFederationPeer(ctx context.Context, name string) (*storag
 		}
 		peer.Password, err = s.decryptPassword(encryptedPwd)
 		if err != nil {
-			return nil, fmt.Errorf("failed to decrypt password: %w", err)
+			// decryptPassword already classifies the local-key case; name the
+			// peer and preserve the sentinel for errors.Is/As.
+			return nil, fmt.Errorf("failed to decrypt password for peer %s: %w", name, err)
 		}
 	}
 
@@ -396,7 +417,9 @@ func (s *DoltStore) ListFederationPeers(ctx context.Context) ([]*storage.Federat
 			}
 			peer.Password, err = s.decryptPassword(encryptedPwd)
 			if err != nil {
-				return nil, fmt.Errorf("failed to decrypt password: %w", err)
+				// Same as GetFederationPeer: the funnel classified it, the
+				// caller only names which peer failed.
+				return nil, fmt.Errorf("failed to decrypt password for peer %s: %w", peer.Name, err)
 			}
 		}
 
@@ -451,36 +474,29 @@ func (c *remoteCredentials) applyToCmd(cmd *exec.Cmd) {
 	if c.empty() {
 		return
 	}
-	// Start with current process env, filtering out any existing credential vars
+	cmd.Env = c.childEnv(os.Environ())
+}
+
+func (c *remoteCredentials) childEnv(base []string) []string {
+	// Start with the base environment, filtering out any existing credential vars
 	// to prevent stale values from leaking into the subprocess.
-	env := make([]string, 0, len(os.Environ())+2)
-	for _, e := range os.Environ() {
-		if !strings.HasPrefix(e, "DOLT_REMOTE_USER=") && !strings.HasPrefix(e, "DOLT_REMOTE_PASSWORD=") {
-			env = append(env, e)
-		}
-	}
+	env := execenv.Without(base, "DOLT_REMOTE_USER", "DOLT_REMOTE_PASSWORD")
 	if c.username != "" {
 		env = append(env, "DOLT_REMOTE_USER="+c.username)
 	}
 	if c.password != "" {
 		env = append(env, "DOLT_REMOTE_PASSWORD="+c.password)
 	}
-	cmd.Env = env
+	return env
 }
 
 func setCmdEnv(cmd *exec.Cmd, key, value string) {
-	prefix := key + "="
 	base := cmd.Env
 	if base == nil {
 		base = os.Environ()
 	}
-	env := make([]string, 0, len(base)+1)
-	for _, e := range base {
-		if !strings.HasPrefix(e, prefix) {
-			env = append(env, e)
-		}
-	}
-	cmd.Env = append(env, prefix+value)
+	env := execenv.Without(base, key)
+	cmd.Env = append(env, key+"="+value)
 }
 
 func applyS3ChecksumEnvToCmd(cmd *exec.Cmd) {
@@ -512,8 +528,7 @@ func applyNoGitHooksToCmd(cmd *exec.Cmd) {
 	// Append rather than replace: a caller that set its own
 	// GIT_CONFIG_PARAMETERS (a test harness pinning user.email, say) would
 	// otherwise have it silently dropped by this call.
-	setCmdEnv(cmd, githooksenv.ParametersEnv,
-		githooksenv.AppendParameter(githooksenv.Extract(base), githooksenv.NoHooksParam))
+	cmd.Env = githooksenv.DisabledEnv(base)
 }
 
 // saveEnv captures the current state of key and returns a function that puts
@@ -644,7 +659,7 @@ func (s *DoltStore) prepareCLIRouteForPeerCredentials(ctx context.Context, peer 
 	}
 	for _, r := range remotes {
 		if r.Name == peer {
-			if err := s.ensureMatchingCLIRemote(peer, r.URL); err != nil {
+			if err := s.ensureMatchingCLIRemote(peer, r.URL, r.Ref); err != nil {
 				return false, fmt.Errorf("peer remote %q has credentials and requires CLI routing: %w", peer, err)
 			}
 			return true, nil
@@ -694,7 +709,7 @@ func (s *DoltStore) prepareCLIRouteForCredentials(ctx context.Context, remote st
 	}
 	for _, r := range remotes {
 		if r.Name == remote {
-			if err := s.ensureMatchingCLIRemote(remote, r.URL); err != nil {
+			if err := s.ensureMatchingCLIRemote(remote, r.URL, r.Ref); err != nil {
 				return false, fmt.Errorf("remote %q has credentials and requires CLI routing: %w", remote, err)
 			}
 			return true, nil
@@ -720,7 +735,7 @@ func (s *DoltStore) shouldUseCLIForLocalRemoteWithError(ctx context.Context, rem
 	}
 	for _, r := range sqlRemotes {
 		if r.Name == remote {
-			return s.hasMatchingCLIRemote(remote, r.URL), nil
+			return s.hasMatchingCLIRemote(remote, r.URL, r.Ref), nil
 		}
 	}
 	return false, nil
@@ -813,10 +828,11 @@ func (s *DoltStore) prepareCLIRouteForCloudAuth(ctx context.Context, remote stri
 	if err != nil {
 		return false, fmt.Errorf("list Dolt remotes before cloud-auth routing for remote %q: %w", remote, err)
 	}
-	var remoteURL string
+	var remoteURL, remoteRef string
 	for _, r := range remotes {
 		if r.Name == remote {
 			remoteURL = r.URL
+			remoteRef = r.Ref
 			break
 		}
 	}
@@ -827,15 +843,11 @@ func (s *DoltStore) prepareCLIRouteForCloudAuth(ctx context.Context, remote stri
 	if len(prefixes) == 0 {
 		return false, nil // unknown scheme — not a cloud remote
 	}
-	for _, e := range os.Environ() {
-		for _, prefix := range prefixes {
-			if strings.HasPrefix(e, prefix) {
-				if err := s.ensureMatchingCLIRemote(remote, remoteURL); err != nil {
-					return false, fmt.Errorf("remote %q has cloud credentials and requires CLI routing: %w", remote, err)
-				}
-				return true, nil
-			}
+	if execenv.ContainsKeyWithPrefix(os.Environ(), prefixes...) {
+		if err := s.ensureMatchingCLIRemote(remote, remoteURL, remoteRef); err != nil {
+			return false, fmt.Errorf("remote %q has cloud credentials and requires CLI routing: %w", remote, err)
 		}
+		return true, nil
 	}
 	return false, nil
 }

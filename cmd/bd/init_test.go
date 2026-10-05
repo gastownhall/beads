@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -19,6 +20,8 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/steveyegge/beads/internal/utils"
+	"gopkg.in/yaml.v3"
 )
 
 // skipIfNoDolt skips the test when no Dolt server is available.
@@ -33,6 +36,7 @@ func skipIfNoDolt(t *testing.T) {
 
 func TestInitCommand(t *testing.T) {
 	skipIfNoDolt(t)
+	resetInitFlagsForServerInit(t)
 	tests := []struct {
 		name           string
 		prefix         string
@@ -99,7 +103,8 @@ func TestInitCommand(t *testing.T) {
 			}()
 
 			// Build command arguments
-			args := []string{"init"}
+			// A database of its own: the suite shares one test server.
+			args := []string{"init", "--server", "--database", uniqueTestDBName(t)}
 			if tt.prefix != "" {
 				args = append(args, "--prefix", tt.prefix)
 			}
@@ -181,11 +186,48 @@ func TestInitCommand(t *testing.T) {
 	}
 }
 
+func TestInitTargetsRequestedProjectBelowOSTempRoot(t *testing.T) {
+	sandbox := t.TempDir()
+	tempRoot := filepath.Join(sandbox, "tmp")
+	tempBeadsDir := filepath.Join(tempRoot, ".beads")
+	if err := os.MkdirAll(tempBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempBeadsDir, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(tempRoot, "isolated", "project")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(project)
+	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_DB", "")
+	t.Setenv("BD_DB", "")
+
+	originalDBPath := dbPath
+	dbPath = ""
+	t.Cleanup(func() { dbPath = originalDBPath })
+
+	selected := selectedNoDBBeadsDir(initCmd)
+	if selected != "" {
+		t.Fatalf("selectedNoDBBeadsDir(init) = %q, want no inherited temp-root store", selected)
+	}
+	prepareSelectedNoDBContext(selected)
+
+	want := filepath.Join(project, ".beads")
+	if got := resolveInitBeadsDir(); !utils.PathsEqual(got, want) {
+		t.Fatalf("resolveInitBeadsDir() = %q, want requested project %q", got, want)
+	}
+}
+
 // Note: Error case testing is omitted because the init command calls os.Exit()
 // on errors, which makes it difficult to test in a unit test context.
 
 func TestInitAlreadyInitialized(t *testing.T) {
 	skipIfNoDolt(t)
+	resetInitFlagsForServerInit(t)
 	// Reset global state
 	origDBPath := dbPath
 	defer func() { dbPath = origDBPath }()
@@ -195,7 +237,10 @@ func TestInitAlreadyInitialized(t *testing.T) {
 	t.Chdir(tmpDir)
 
 	// Initialize once
-	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
+	// A database of its own: the suite shares one test server, where a
+	// "test" database another test created belongs to another project.
+	database := uniqueTestDBName(t)
+	rootCmd.SetArgs([]string{"init", "--server", "--database", database, "--prefix", "test", "--quiet"})
 
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("First init failed: %v", err)
@@ -203,7 +248,7 @@ func TestInitAlreadyInitialized(t *testing.T) {
 
 	// Initialize again with same prefix and --force flag (bd-emg: safety guard)
 	// Without --force, init should refuse when database already exists
-	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet", "--force"})
+	rootCmd.SetArgs([]string{"init", "--server", "--database", database, "--prefix", "test", "--quiet", "--force"})
 
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("Second init with --force failed: %v", err)
@@ -750,96 +795,6 @@ func TestSetupClaudeSettings_NoExistingFile(t *testing.T) {
 	}
 }
 
-// setupIsolatedGitConfig creates an empty git config in tmpDir and sets GIT_CONFIG_GLOBAL
-// to prevent tests from using the real user's global git config.
-func setupIsolatedGitConfig(t *testing.T, tmpDir string) {
-	t.Helper()
-	gitConfigPath := filepath.Join(tmpDir, ".gitconfig")
-	if err := os.WriteFile(gitConfigPath, []byte(""), 0644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("GIT_CONFIG_GLOBAL", gitConfigPath)
-}
-
-// TestSetupGlobalGitIgnore_ReadOnly verifies graceful handling when the
-// gitignore file cannot be written (prints manual instructions instead of failing).
-func TestSetupGlobalGitIgnore_ReadOnly(t *testing.T) {
-	t.Run("read-only file", func(t *testing.T) {
-		if runtime.GOOS == "darwin" {
-			t.Skip("macOS allows file owner to write to read-only (0444) files")
-		}
-		tmpDir := t.TempDir()
-		setupIsolatedGitConfig(t, tmpDir)
-
-		configDir := filepath.Join(tmpDir, ".config", "git")
-		if err := os.MkdirAll(configDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-
-		ignorePath := filepath.Join(configDir, "ignore")
-		if err := os.WriteFile(ignorePath, []byte("# existing\n"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(ignorePath, 0444); err != nil {
-			t.Fatal(err)
-		}
-		defer os.Chmod(ignorePath, 0644)
-
-		output := captureStdout(t, func() error {
-			return setupGlobalGitIgnore(tmpDir, "/test/project", false)
-		})
-
-		if !strings.Contains(output, "Unable to write") {
-			t.Error("expected instructions for manual addition")
-		}
-		if !strings.Contains(output, "/test/project/.beads/") {
-			t.Error("expected .beads pattern in output")
-		}
-	})
-
-	t.Run("symlink to read-only file", func(t *testing.T) {
-		if runtime.GOOS == "darwin" {
-			t.Skip("macOS allows file owner to write to read-only (0444) files")
-		}
-		tmpDir := t.TempDir()
-		setupIsolatedGitConfig(t, tmpDir)
-
-		// Target file in a separate location
-		targetDir := filepath.Join(tmpDir, "target")
-		if err := os.MkdirAll(targetDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-		targetFile := filepath.Join(targetDir, "ignore")
-		if err := os.WriteFile(targetFile, []byte("# existing\n"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(targetFile, 0444); err != nil {
-			t.Fatal(err)
-		}
-		defer os.Chmod(targetFile, 0644)
-
-		// Symlink from expected location
-		configDir := filepath.Join(tmpDir, ".config", "git")
-		if err := os.MkdirAll(configDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(targetFile, filepath.Join(configDir, "ignore")); err != nil {
-			t.Fatal(err)
-		}
-
-		output := captureStdout(t, func() error {
-			return setupGlobalGitIgnore(tmpDir, "/test/project", false)
-		})
-
-		if !strings.Contains(output, "Unable to write") {
-			t.Error("expected instructions for manual addition")
-		}
-		if !strings.Contains(output, "/test/project/.beads/") {
-			t.Error("expected .beads pattern in output")
-		}
-	})
-}
-
 // TestInitPromptRoleConfig tests the beads.role git config read/write functions
 func TestInitPromptRoleConfig(t *testing.T) {
 	t.Run("getBeadsRole returns empty when not configured", func(t *testing.T) {
@@ -1021,6 +976,8 @@ func TestInitPromptNonGitRepo(t *testing.T) {
 // TestInitPromptExistingRole verifies behavior when beads.role is already set
 func TestInitPromptExistingRole(t *testing.T) {
 	skipIfNoDolt(t)
+	// Reinit publishes its selected workspace into the command environment.
+	t.Setenv("BEADS_DIR", "")
 	t.Run("existing role is preserved on reinit with --force", func(t *testing.T) {
 		// Reset global state
 		origDBPath := dbPath
@@ -1086,6 +1043,30 @@ func TestInitPromptExistingRole(t *testing.T) {
 func TestInitContributorSetsBeadsRoleContributor(t *testing.T) {
 	skipIfNoDolt(t)
 
+	// Serial: this fixture owns command flags, stdin, cwd and process environment.
+	// Do not inherit another in-process command's selected workspace.
+	t.Setenv("BEADS_DIR", "")
+	// The pipe below supplies real wizard answers; explicitly allow interaction
+	// even when CI or terminal detection would normally suppress it.
+	t.Setenv("BD_NON_INTERACTIVE", "0")
+	for _, name := range []string{"contributor", "team", "force", "non-interactive", "role", "prefix", "quiet"} {
+		flag := initCmd.Flags().Lookup(name)
+		if flag == nil {
+			t.Fatalf("missing init flag --%s", name)
+		}
+		value, changed := flag.Value.String(), flag.Changed
+		t.Cleanup(func() {
+			if err := flag.Value.Set(value); err != nil {
+				t.Errorf("restore --%s: %v", name, err)
+			}
+			flag.Changed = changed
+		})
+		if err := flag.Value.Set(flag.DefValue); err != nil {
+			t.Fatalf("reset --%s: %v", name, err)
+		}
+		flag.Changed = false
+	}
+
 	origDBPath := dbPath
 	defer func() { dbPath = origDBPath }()
 	dbPath = ""
@@ -1097,24 +1078,22 @@ func TestInitContributorSetsBeadsRoleContributor(t *testing.T) {
 		git.ResetCaches()
 	}()
 
-	initCmd.Flags().Set("contributor", "false")
-	initCmd.Flags().Set("team", "false")
-	initCmd.Flags().Set("force", "false")
+	// Keep test isolated from the real home/planning repo.
+	testHome := t.TempDir()
+	t.Setenv("HOME", testHome)
+	t.Setenv("USERPROFILE", testHome)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(testHome, ".config"))
 
 	tmpDir := newGitRepo(t)
 	t.Chdir(tmpDir)
 
-	// Keep test isolated from the real home/planning repo.
-	testHome := t.TempDir()
-	t.Setenv("HOME", testHome)
-
-	// Configure remotes so contributor wizard doesn't ask the "continue anyway" prompt.
-	cmd := exec.Command("git", "remote", "add", "origin", "git@github.com:osamu2001/zmx.git")
+	// Owned local remotes prevent network lookups during initialization.
+	cmd := exec.Command("git", "remote", "add", "origin", newGitRepo(t))
 	cmd.Dir = tmpDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to add origin remote: %v", err)
 	}
-	cmd = exec.Command("git", "remote", "add", "upstream", "git@github.com:neurosnap/zmx.git")
+	cmd = exec.Command("git", "remote", "add", "upstream", newGitRepo(t))
 	cmd.Dir = tmpDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to add upstream remote: %v", err)
@@ -1195,6 +1174,7 @@ func TestInitNonInteractiveAlwaysSetsRole(t *testing.T) {
 // TestInitRedirect groups redirect-related init tests.
 func TestInitRedirect(t *testing.T) {
 	skipIfNoDolt(t)
+	resetInitFlagsForServerInit(t)
 	resetRedirectState := func(t *testing.T) {
 		t.Helper()
 		origDBPath := dbPath
@@ -1233,6 +1213,12 @@ func TestInitRedirect(t *testing.T) {
 		if err := os.MkdirAll(targetBeadsDir, 0755); err != nil {
 			t.Fatal(err)
 		}
+		// A provisioned canonical workspace (config.yaml, no database yet):
+		// bd follows a redirect only to a target that holds project files,
+		// and ignores one to a bare directory (gastownhall/beads#4692).
+		if err := os.WriteFile(filepath.Join(targetBeadsDir, "config.yaml"), []byte("# provisioned canonical workspace\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
 
 		redirectPath := filepath.Join(localBeadsDir, beads.RedirectFileName)
 		if err := os.WriteFile(redirectPath, []byte("../canonical/.beads\n"), 0644); err != nil {
@@ -1241,7 +1227,7 @@ func TestInitRedirect(t *testing.T) {
 
 		t.Chdir(projectDir)
 
-		rootCmd.SetArgs([]string{"init", "--prefix", "redirect-test", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--server", "--database", uniqueTestDBName(t), "--prefix", "redirect-test", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init with redirect failed: %v", err)
 		}
@@ -1336,6 +1322,7 @@ func TestInitRedirect(t *testing.T) {
 // Tests requirements FR-001, FR-002, FR-004, NFR-001.
 func TestInitBEADS_DIR(t *testing.T) {
 	skipIfNoDolt(t)
+	resetInitFlagsForServerInit(t)
 	// resetBeadsDirState resets global state and env vars for each subtest.
 	resetBeadsDirState := func(t *testing.T) {
 		t.Helper()
@@ -1451,7 +1438,7 @@ func TestInitBEADS_DIR(t *testing.T) {
 		os.MkdirAll(cwdPath, 0755)
 		t.Chdir(cwdPath)
 
-		rootCmd.SetArgs([]string{"init", "--prefix", "beadsdir-test", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--server", "--database", uniqueTestDBName(t), "--prefix", "beadsdir-test", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init with BEADS_DIR failed: %v", err)
 		}
@@ -1495,7 +1482,7 @@ func TestInitBEADS_DIR(t *testing.T) {
 		tmpDir := t.TempDir()
 		t.Chdir(tmpDir)
 
-		rootCmd.SetArgs([]string{"init", "--prefix", "no-beadsdir", "--quiet"})
+		rootCmd.SetArgs([]string{"init", "--server", "--database", uniqueTestDBName(t), "--prefix", "no-beadsdir", "--quiet"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("Init without BEADS_DIR failed: %v", err)
 		}
@@ -1715,6 +1702,7 @@ func TestInit_WithBEADS_DIR_DoltBackend(t *testing.T) {
 // Covers FR-001, FR-002, FR-003, FR-004.
 func TestInitDoltMetadata(t *testing.T) {
 	skipIfNoDolt(t)
+	resetInitFlagsForServerInit(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("Skipping Dolt metadata test on Windows")
 	}
@@ -1741,7 +1729,8 @@ func TestInitDoltMetadata(t *testing.T) {
 	// Add remote.origin.url so ComputeRepoID succeeds
 	_ = runCommandInDir(tmpDir, "git", "config", "remote.origin.url", "https://github.com/test/repo.git")
 
-	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
+	database := uniqueTestDBName(t)
+	rootCmd.SetArgs([]string{"init", "--server", "--database", database, "--prefix", "test", "--quiet"})
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("init --backend dolt failed: %v", err)
 	}
@@ -1749,7 +1738,7 @@ func TestInitDoltMetadata(t *testing.T) {
 	// Open the dolt store to verify metadata was written
 	ctx := context.Background()
 	doltPath := filepath.Join(tmpDir, ".beads", "dolt")
-	doltStore, err := openDoltStoreForTest(t, ctx, doltPath, "test")
+	doltStore, err := openDoltStoreForTest(t, ctx, doltPath, database)
 	if err != nil {
 		t.Fatalf("failed to open dolt store for verification: %v", err)
 	}
@@ -1826,6 +1815,7 @@ func TestVerifyMetadataSuccess(t *testing.T) {
 // Covers FR-015 (skip repo_id outside git).
 func TestInitDoltMetadataNoGit(t *testing.T) {
 	skipIfNoDolt(t)
+	resetInitFlagsForServerInit(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("Skipping Dolt metadata test on Windows")
 	}
@@ -1851,7 +1841,7 @@ func TestInitDoltMetadataNoGit(t *testing.T) {
 	t.Chdir(tmpDir)
 
 	// Run init in a non-git directory (bd init will create git repo internally)
-	rootCmd.SetArgs([]string{"init", "--prefix", "nogit"})
+	rootCmd.SetArgs([]string{"init", "--server", "--database", uniqueTestDBName(t), "--prefix", "nogit"})
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("init --prefix nogit failed: %v", err)
 	}
@@ -1892,6 +1882,11 @@ func TestInitServerModeWritesDoltCompatibilityMarker(t *testing.T) {
 	}
 	if err := os.MkdirAll(filepath.Join(doltDir, ".dolt"), 0o750); err != nil {
 		t.Fatalf("creating simulated server data dir: %v", err)
+	}
+	// A current-era version witness: without it the legacy-upgrade guard
+	// reads a non-empty .beads/dolt as a pre-1.0 workspace and refuses.
+	if err := writeLocalVersion(filepath.Join(beadsDir, localVersionFile), Version); err != nil {
+		t.Fatalf("writing version witness: %v", err)
 	}
 
 	database := uniqueTestDBName(t)
@@ -1939,6 +1934,11 @@ func TestInitServerModeWarnsOnMarkerFailureInQuietMode(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(doltDir, ".dolt"), []byte("not a dir"), 0o600); err != nil {
 		t.Fatalf("creating invalid dot-dolt marker: %v", err)
+	}
+	// As in TestInitServerModeWritesDoltCompatibilityMarker: a current-era
+	// witness keeps the legacy-upgrade guard from refusing the seeded root.
+	if err := writeLocalVersion(filepath.Join(beadsDir, localVersionFile), Version); err != nil {
+		t.Fatalf("writing version witness: %v", err)
 	}
 
 	database := uniqueTestDBName(t)
@@ -2048,7 +2048,7 @@ func TestInitDatabaseFlag(t *testing.T) {
 		tmpDir := t.TempDir()
 
 		// Run init with --database to specify a pre-existing database name
-		cmd := exec.Command(bd, "init", "--database", "myapp_production", "--quiet")
+		cmd := exec.Command(bd, "init", "--server", "--database", "myapp_production", "--quiet")
 		cmd.Dir = tmpDir
 		cmd.Env = os.Environ()
 		out, err := cmd.CombinedOutput()
@@ -2093,9 +2093,19 @@ func TestInitDatabaseFlag(t *testing.T) {
 		bareDir, worktreeDir := setupBareParentInitWorktree(t)
 		bareBeadsDir := filepath.Join(bareDir, ".beads")
 
+		// Shared-server init daemonizes a dolt sql-server that nothing here
+		// stopped; it outlived the suite whose temp HOME it served
+		// (wy-j2zc8q). Registered before the first subprocess so the
+		// t.Fatalf paths are covered too.
+		stopSharedServerCleanup(t)
+
+		// The shared server's own port: the inherited BEADS_DOLT_SERVER_PORT
+		// is the suite's test server, which a shared-server start refuses as
+		// another project's, and without one it would default to 3308.
+		sharedEnv := sharedServerTestEnv(t)
 		cmd := exec.Command(bd, "init", "--prefix", "bare-fallback", "--skip-hooks", "--quiet")
 		cmd.Dir = worktreeDir
-		cmd.Env = append(os.Environ(), "BEADS_DOLT_SHARED_SERVER=1")
+		cmd.Env = sharedEnv
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("bd init from bare-parent worktree failed: %v\n%s", err, out)
@@ -2110,7 +2120,7 @@ func TestInitDatabaseFlag(t *testing.T) {
 
 		retry := exec.Command(bd, "init", "--prefix", "bare-fallback", "--skip-hooks", "--quiet")
 		retry.Dir = worktreeDir
-		retry.Env = append(os.Environ(), "BEADS_DOLT_SHARED_SERVER=1")
+		retry.Env = sharedEnv
 		retryOut, retryErr := retry.CombinedOutput()
 		if retryErr == nil {
 			t.Fatal("expected second bd init to fail against existing bare-parent .beads")
@@ -2125,7 +2135,7 @@ func TestInitDatabaseFlag(t *testing.T) {
 
 		// Run init with both --database and --prefix
 		// --database should override prefix for DB name, but prefix still sets issue_prefix
-		cmd := exec.Command(bd, "init", "--database", "shared_db", "--prefix", "team-alpha", "--quiet")
+		cmd := exec.Command(bd, "init", "--server", "--database", "shared_db", "--prefix", "team-alpha", "--quiet")
 		cmd.Dir = tmpDir
 		cmd.Env = os.Environ()
 		out, err := cmd.CombinedOutput()
@@ -2171,7 +2181,7 @@ func TestInitDatabaseFlag(t *testing.T) {
 		tmpDir := t.TempDir()
 
 		// Run init with --database
-		cmd := exec.Command(bd, "init", "--database", "test_server_cfg", "--quiet")
+		cmd := exec.Command(bd, "init", "--server", "--database", "test_server_cfg", "--quiet")
 		cmd.Dir = tmpDir
 		cmd.Env = os.Environ()
 		out, err := cmd.CombinedOutput()
@@ -2203,9 +2213,16 @@ func TestInitDatabaseFlag(t *testing.T) {
 	t.Run("shared_server_flag_selects_server_mode", func(t *testing.T) {
 		tmpDir := t.TempDir()
 
+		// --shared-server starts (daemonizes) the shared server: give it a
+		// free port of its own (see sharedServerTestEnv) and stop it after.
+		port, err := testutil.FindFreePort()
+		if err != nil {
+			t.Fatalf("find free port: %v", err)
+		}
+		stopSharedServerCleanup(t)
 		cmd := exec.Command(bd, "init", "--shared-server", "--prefix", "shared-mode-test", "--skip-hooks")
 		cmd.Dir = tmpDir
-		cmd.Env = os.Environ()
+		cmd.Env = append(os.Environ(), "BEADS_DOLT_SERVER_PORT="+strconv.Itoa(port))
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("bd init --shared-server failed: %v\n%s", err, out)
@@ -2228,7 +2245,18 @@ func TestInitDatabaseFlag(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to read config.yaml: %v", err)
 		}
-		if !strings.Contains(string(configYAML), "dolt.shared-server: true") {
+		// SetYamlConfig writes dotted keys as nested YAML (dolt:
+		// shared-server: true); accept the old flat form as well.
+		var parsedYAML struct {
+			Dolt struct {
+				SharedServer bool `yaml:"shared-server"`
+			} `yaml:"dolt"`
+			Flat bool `yaml:"dolt.shared-server"`
+		}
+		if err := yaml.Unmarshal(configYAML, &parsedYAML); err != nil {
+			t.Fatalf("parse config.yaml: %v\n%s", err, configYAML)
+		}
+		if !parsedYAML.Dolt.SharedServer && !parsedYAML.Flat {
 			t.Fatalf("expected config.yaml to enable shared server, got:\n%s", configYAML)
 		}
 
@@ -2314,7 +2342,11 @@ func TestBareParentWorktreeCoreCommandsWithoutRedirect(t *testing.T) {
 	bd := buildBDForInitTests(t)
 	bareDir, worktreeDir := setupBareParentInitWorktree(t)
 	bareBeadsDir := filepath.Join(bareDir, ".beads")
-	sharedEnv := append(os.Environ(), "BEADS_DOLT_SHARED_SERVER=1")
+	// See TestInitDatabaseFlag/BareParentWorktreeAutoInit.
+	sharedEnv := sharedServerTestEnv(t)
+
+	// Same daemonized shared server, same missing stop (wy-j2zc8q).
+	stopSharedServerCleanup(t)
 
 	initCmd := exec.Command(bd, "init", "--prefix", "bare-core", "--skip-hooks", "--quiet")
 	initCmd.Dir = worktreeDir
@@ -2567,4 +2599,32 @@ func TestInitDatabaseAdoptsExistingProjectID(t *testing.T) {
 	if cfg.ProjectID != knownProjectID {
 		t.Errorf("ProjectID = %q, want %q (should adopt existing project_id from server)", cfg.ProjectID, knownProjectID)
 	}
+}
+
+// resetInitFlagsForServerInit puts every rootCmd flag back to its registered
+// default before and after a test that executes `bd init --server ...`
+// in-process: embedded is init's default mode, so the Dolt-server-gated init
+// tests pass --server, and cobra would otherwise carry that (and any other
+// parsed flag) into the next in-process init.
+func resetInitFlagsForServerInit(t *testing.T) {
+	t.Helper()
+	resetCommandFlags(rootCmd)
+	t.Cleanup(func() { resetCommandFlags(rootCmd) })
+}
+
+// sharedServerTestEnv is os.Environ() in shared-server mode with a free port
+// of its own for the shared server (as dolt_worktree_remote_test.go does):
+// the inherited BEADS_DOLT_SERVER_PORT names this suite's test server, which
+// a shared-server start refuses as another project's, and the shared
+// server's default port (3308) may be a developer's live server.
+func sharedServerTestEnv(t *testing.T) []string {
+	t.Helper()
+	port, err := testutil.FindFreePort()
+	if err != nil {
+		t.Fatalf("find free port: %v", err)
+	}
+	return append(os.Environ(),
+		"BEADS_DOLT_SHARED_SERVER=1",
+		"BEADS_DOLT_SERVER_PORT="+strconv.Itoa(port),
+	)
 }

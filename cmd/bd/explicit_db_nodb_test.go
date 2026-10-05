@@ -52,7 +52,7 @@ func buildBDUnderTest(t *testing.T) string {
 			binName = "bd.exe"
 		}
 		buildBDPath = filepath.Join(dir, binName)
-		buildCmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", buildBDPath, ".")
+		buildCmd := goBuildBDCommand(buildBDPath)
 		if out, err := buildCmd.CombinedOutput(); err != nil {
 			buildBDErr = &buildBDError{err: err, output: out}
 			return

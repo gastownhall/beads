@@ -13,29 +13,31 @@ source "$REPO_ROOT/scripts/ci/lib/timing.sh"
 
 cd "$REPO_ROOT"
 
-# The PR lane sets this to the branch it merges into so only the issues the PR
-# introduces are reported; main's push lane leaves it unset and sweeps the
-# whole tree. See the lint comment in .github/workflows/pr.yml.
-lint_scope=()
-if [[ -n "${BD_LINT_NEW_FROM_MERGE_BASE:-}" ]]; then
-    lint_scope=(--new-from-merge-base="$BD_LINT_NEW_FROM_MERGE_BASE")
+# gofmt only has one pass (there is no windows- or darwin-only gofmt target),
+# so it belongs to the native leg of the pr.yml PR Lint matrix. Skip it when
+# BD_LINT_TARGETS names only windows and/or darwin; run it when the variable
+# is unset, empty, or names "native" (matching scripts/pr-lint's own default
+# of all three targets).
+should_run_fmt_check() {
+  local IFS=','
+  local target saw_target=0
+  for target in ${BD_LINT_TARGETS:-}; do
+    target="${target//[[:space:]]/}"
+    [[ -z "$target" ]] && continue
+    saw_target=1
+    [[ "$target" == "native" ]] && return 0
+  done
+  ((saw_target == 0))
+}
+
+if should_run_fmt_check; then
+  ci_time "gofmt check" -- ./scripts/ci/fmt-check.sh
 fi
 
-ci_time "gofmt check" -- ./scripts/ci/fmt-check.sh
-ci_time "golangci-lint" -- \
-    golangci-lint run --config=.golangci.yml --modules-download-mode=readonly \
-        --timeout=5m --build-tags=gms_pure_go \
-        ${lint_scope[@]+"${lint_scope[@]}"} ./...
-
-# Other target tuples may not load files guarded by //go:build windows && !cgo.
-# Cross-lint that non-CGO Windows build too, unless the native target above
-# already matches it exactly.
-native_goos="$(go env GOOS)"
-native_cgo_enabled="$(go env CGO_ENABLED)"
-if [[ "$native_goos" != "windows" || "$native_cgo_enabled" != "0" ]]; then
-    ci_time "golangci-lint (windows)" -- \
-        env GOOS=windows GOARCH=amd64 CGO_ENABLED=0 GOWORK=off \
-            golangci-lint run --config=.golangci.yml --modules-download-mode=readonly \
-                --timeout=5m --build-tags=gms_pure_go \
-                ${lint_scope[@]+"${lint_scope[@]}"} ./...
-fi
+# The checkout-owned Go driver is the single authority for the native and
+# cross-target lint arguments. Files guarded by //go:build windows && !cgo or
+# //go:build darwin are invisible to the Linux runner, so the driver cross-lints
+# those non-CGO targets from the same runner. Keep this wrapper as the supported
+# direct Bash/Make entrypoint and aggregate timing boundary.
+ci_time "golangci-lint (native + windows/darwin non-CGO)" -- \
+    go run -mod=readonly -tags=gms_pure_go ./scripts/pr-lint

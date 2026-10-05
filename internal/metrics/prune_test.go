@@ -1,11 +1,14 @@
 package metrics
 
 import (
+	"container/heap"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -300,39 +303,179 @@ func seedYoung(t *testing.T, dir string, n int, now time.Time) []string {
 	return out
 }
 
-// TestPruneQueueCapsYoungPileWhenTTLMadeNoProgress pins the cap-skip livelock.
-// The caps are the only bound on a queue whose files are all inside the TTL —
-// exactly the 149k-file/1.1GB pile GH#5660 added them for. If the walk simply
-// gave up at its deadline, that pass would drop nothing (nothing is past TTL)
-// AND skip the cap pass (the listing is partial), the next spawn would reopen
-// the directory at offset 0 and repeat, and the file/byte bound would never
-// fire at all while emission kept appending. So: when the budget runs out with
-// zero TTL progress, finish the listing and let the caps run.
+// countingReader counts the ReadDir calls made through it, so a test can
+// assert a walk stayed within its budgeted chunk count directly instead of
+// inferring it from dropped/freed (which, for an all-young pile, can look
+// the same across very different numbers of chunks examined).
+type countingReader struct {
+	r     dirChunkReader
+	calls int
+}
+
+func (cr *countingReader) ReadDir(n int) ([]os.DirEntry, error) {
+	cr.calls++
+	return cr.r.ReadDir(n)
+}
+
+// TestPruneQueueCapsYoungPileWhenTTLMadeNoProgress pins the cap-skip livelock
+// half of be-wwy2.3. The caps are the only bound on a queue whose files are
+// all inside the TTL — exactly the 149k-file/1.1GB pile GH#5660 added them
+// for. Under the bounded-heap design, eviction happens incrementally as each
+// entry is seen, so every chunk boundary is a safe stopping point: the walk
+// must honor the ctx budget unconditionally here too, the same as any other
+// pass, instead of finishing the whole listing just because nothing was
+// TTL-eligible.
 func TestPruneQueueCapsYoungPileWhenTTLMadeNoProgress(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now()
 	const seeded = 200
 	const maxFiles = 10
-	byAge := seedYoung(t, dir, seeded, now)
+	const budgetedChunks = 1
+	seedYoung(t, dir, seeded, now)
 
-	// One chunk of budget, then the deadline is spent — with nothing past TTL
-	// for the first chunk (or any chunk) to have deleted.
-	dropped, _ := pruneQueue(expiringAfter(1), dir, now, 7*24*time.Hour, maxFiles, 64<<20)
-	if dropped == 0 {
-		t.Errorf("pruneQueue dropped 0 of %d young over-cap batches: the deadline skipped the cap pass, so neither drain ran and the next spawn repeats this pass from offset 0", seeded)
+	f, err := os.Open(dir)
+	if err != nil {
+		t.Fatal(err)
 	}
-	got := names(t, dir)
-	if len(got) > maxFiles {
-		t.Errorf("queue holds %d files, want at most maxFiles=%d", len(got), maxFiles)
+	defer f.Close()
+	counting := &countingReader{r: f}
+
+	// One chunk of budget, then the deadline is spent — with nothing past
+	// TTL for the first chunk (or any chunk) to have deleted.
+	dropped, freed := pruneQueueFrom(expiringAfter(budgetedChunks), counting, dir, now, 7*24*time.Hour, maxFiles, 64<<20)
+
+	if counting.calls > budgetedChunks {
+		t.Errorf("pruneQueueFrom made %d ReadDir calls, want at most %d: a young over-cap pile must not force the walk to finish the whole listing just because nothing was TTL-eligible", counting.calls, budgetedChunks)
 	}
-	// Whatever survives must be the youngest batches: the cap is an
-	// oldest-first decision over the whole listing.
-	for _, name := range byAge[maxFiles:] {
-		if got[name] {
-			t.Errorf("older batch %s survived while the cap was over: the cap pass did not see the whole listing", name)
+	// The budget honoring above is also pinned by TestPruneQueueStopsOnExpiredContext;
+	// what is specific to this test is that the caps still fire inside that one
+	// chunk. Without these assertions the test stays green with evict() stubbed
+	// to a no-op, i.e. under exactly the cap-skip livelock it is named for.
+	const wantDropped = pruneChunkSize - maxFiles // 64 - 10 = 54
+	if dropped != wantDropped || freed != int64(wantDropped)*10 {
+		t.Errorf("pruneQueueFrom dropped=%d freed=%d, want %d/%d: the one budgeted chunk's own cap evictions must be applied during the walk, not deferred to a pass that never runs", dropped, freed, wantDropped, int64(wantDropped)*10)
+	}
+	if got, want := len(names(t, dir)), seeded-wantDropped; got != want {
+		t.Errorf("queue holds %d files, want %d (seeded %d - dropped %d)", got, want, seeded, wantDropped)
+	}
+}
+
+// TestPruneQueueConvergesAcrossRepeatedCalls pins be-wwy2.3's actual fix: a
+// young over-cap pile too large to examine within one budget converges to
+// maxFiles across however many separate budget-respecting calls it takes —
+// simulating repeated 5-minutes-apart send-metrics invocations against the
+// same on-disk directory state — with no single call ever exceeding its own
+// budgeted chunk count. This replaces the old single-pass-completeness
+// guarantee (a young over-cap pile fully capped within one, possibly
+// over-budget, call) with the multi-pass convergence the design trades it
+// for.
+func TestPruneQueueConvergesAcrossRepeatedCalls(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	const seeded = 200
+	const maxFiles = 10
+	const budgetedChunks = 1
+	const maxCalls = 50 // generous: a livelock must fail loud, not hang
+	seedYoung(t, dir, seeded, now)
+
+	converged := false
+	for call := 0; call < maxCalls; call++ {
+		f, err := os.Open(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		counting := &countingReader{r: f}
+		pruneQueueFrom(expiringAfter(budgetedChunks), counting, dir, now, 7*24*time.Hour, maxFiles, 64<<20)
+		f.Close()
+
+		if counting.calls > budgetedChunks {
+			t.Fatalf("call %d: pruneQueueFrom made %d ReadDir calls, want at most %d", call, counting.calls, budgetedChunks)
+		}
+		if got := len(names(t, dir)); got <= maxFiles {
+			converged = true
 			break
 		}
 	}
+	if !converged {
+		t.Fatalf("directory did not converge to <= maxFiles=%d within %d budget-respecting calls", maxFiles, maxCalls)
+	}
+}
+
+// TestPruneQueueCapProgressNeedsMoreExaminedThanMaxFiles pins the safety
+// property behind the non-convergent regime PruneQueue's design block
+// discloses, and the exact boundary of it. The cap values are never scaled down
+// to the prefix a budget-truncated pass managed to examine, because nothing
+// about a prefix of at most maxFiles entries can prove any one of them is
+// outside the newest maxFiles of the whole directory — scaling would delete
+// entries a full pass keeps, which is the partial-listing hazard
+// TestPruneQueueCapsOnlyTheExaminedPrefixOnPartialListing guards on the read-error path.
+//
+// The cost of that safety is what the first subtest pins: a pass whose budget
+// examines no more than maxFiles entries evicts nothing at all, no matter how
+// far over the cap the directory actually is, so repeated calls in this regime
+// make no cap progress and pruneTTL is the only bound left. The second subtest
+// is the control that keeps the first non-vacuous: one entry past maxFiles and
+// the same walk evicts, so the first subtest's zero is the cap declining to act
+// on too small a prefix rather than the walk failing to examine one.
+func TestPruneQueueCapProgressNeedsMoreExaminedThanMaxFiles(t *testing.T) {
+	const seeded = 200
+	const budgetedChunks = 1 // so exactly pruneChunkSize entries are examined
+
+	t.Run("inert while examined <= maxFiles", func(t *testing.T) {
+		dir := t.TempDir()
+		now := time.Now()
+		const maxFiles = pruneChunkSize // the tight edge: 64 examined, 64 allowed
+		const repeatedCalls = 3
+		seedYoung(t, dir, seeded, now)
+
+		for call := 0; call < repeatedCalls; call++ {
+			f, err := os.Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			counting := &countingReader{r: f}
+			dropped, freed := pruneQueueFrom(expiringAfter(budgetedChunks), counting, dir, now, 7*24*time.Hour, maxFiles, 64<<20)
+			f.Close()
+
+			if counting.calls > budgetedChunks {
+				t.Fatalf("call %d: pruneQueueFrom made %d ReadDir calls, want at most %d", call, counting.calls, budgetedChunks)
+			}
+			if dropped != 0 || freed != 0 {
+				t.Fatalf("call %d: pruneQueueFrom = (%d dropped, %d freed), want (0, 0): a pass that examined %d of %d entries must not cap that prefix against maxFiles=%d",
+					call, dropped, freed, pruneChunkSize, seeded, maxFiles)
+			}
+			if got := len(names(t, dir)); got != seeded {
+				t.Fatalf("call %d: queue holds %d files, want all %d untouched: repeated calls in this regime make no cap progress by design", call, got, seeded)
+			}
+		}
+	})
+
+	t.Run("evicts once examined exceeds maxFiles", func(t *testing.T) {
+		dir := t.TempDir()
+		now := time.Now()
+		const maxFiles = pruneChunkSize - 1 // one entry past the cap
+		seedYoung(t, dir, seeded, now)
+
+		f, err := os.Open(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		counting := &countingReader{r: f}
+		dropped, freed := pruneQueueFrom(expiringAfter(budgetedChunks), counting, dir, now, 7*24*time.Hour, maxFiles, 64<<20)
+
+		if counting.calls > budgetedChunks {
+			t.Fatalf("pruneQueueFrom made %d ReadDir calls, want at most %d", counting.calls, budgetedChunks)
+		}
+		const wantDropped = pruneChunkSize - maxFiles // exactly 1
+		if dropped != wantDropped || freed != int64(wantDropped)*10 {
+			t.Errorf("pruneQueueFrom dropped=%d freed=%d, want %d/%d: the same walk must evict as soon as the examined prefix exceeds maxFiles",
+				dropped, freed, wantDropped, int64(wantDropped)*10)
+		}
+		if got, want := len(names(t, dir)), seeded-wantDropped; got != want {
+			t.Errorf("queue holds %d files, want %d", got, want)
+		}
+	})
 }
 
 // failAfterChunks serves n real directory chunks and then fails, standing in
@@ -352,16 +495,37 @@ func (f *failAfterChunks) ReadDir(n int) ([]os.DirEntry, error) {
 	return f.r.ReadDir(n)
 }
 
-// TestPruneQueueDoesNotCapOnPartialListing pins the fail-closed half. A
-// non-EOF read error ends the walk holding only a PREFIX of the queue. The
-// oldest-first caps cannot be decided from a prefix — dropping "the oldest of
-// what we happened to see" deletes batches that are not actually the oldest,
-// which is the mistake the truncation path exists to prevent (the os.ReadDir
-// implementation this replaced failed closed by returning 0, 0).
-func TestPruneQueueDoesNotCapOnPartialListing(t *testing.T) {
+// recordingReader wraps a dirChunkReader and records the name of every entry
+// it serves. ReadDir order is filesystem-dependent, not chronological (see
+// prune.go's own comment on the walk), so a test cannot assume which names
+// land in the first chunk — recording them is what lets a test verify claims
+// about "the examined prefix" without depending on iteration order.
+type recordingReader struct {
+	r    dirChunkReader
+	seen []string
+}
+
+func (rr *recordingReader) ReadDir(n int) ([]os.DirEntry, error) {
+	dirents, err := rr.r.ReadDir(n)
+	for _, de := range dirents {
+		rr.seen = append(rr.seen, de.Name())
+	}
+	return dirents, err
+}
+
+// TestPruneQueueCapsOnlyTheExaminedPrefixOnPartialListing pins the fail-closed half, updated
+// for the bounded-heap design's incremental eviction: a non-EOF read error
+// ends the walk holding only a PREFIX of the queue, but under this design
+// that prefix's own eviction decisions were already made and applied as it
+// was examined, so they stand. What must NOT happen is any decision about
+// the un-examined remainder — that part is left exactly as it was, not
+// capped from a guessed-at prefix (the mistake the old truncation path
+// existed to prevent).
+func TestPruneQueueCapsOnlyTheExaminedPrefixOnPartialListing(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now()
 	const seeded = 200
+	const maxFiles = 10
 	seedYoung(t, dir, seeded, now)
 
 	f, err := os.Open(dir)
@@ -370,14 +534,169 @@ func TestPruneQueueDoesNotCapOnPartialListing(t *testing.T) {
 	}
 	defer f.Close()
 
-	// One good chunk, then the listing breaks: everything seen so far is a
-	// prefix, and no cap decision may be made from it.
-	r := &failAfterChunks{r: f, remaining: 1}
-	dropped, freed := pruneQueueFrom(context.Background(), r, dir, now, 7*24*time.Hour, 10, 64<<20)
-	if dropped != 0 || freed != 0 {
-		t.Errorf("pruneQueue over a listing that failed mid-walk = (%d dropped, %d freed), want (0, 0): the caps ran over a partial prefix", dropped, freed)
+	// One good chunk, then the listing breaks.
+	rec := &recordingReader{r: f}
+	failing := &failAfterChunks{r: rec, remaining: 1}
+	dropped, freed := pruneQueueFrom(context.Background(), failing, dir, now, 7*24*time.Hour, maxFiles, 64<<20)
+
+	if len(rec.seen) != pruneChunkSize {
+		t.Fatalf("test setup: examined %d entries, want exactly %d (one full chunk)", len(rec.seen), pruneChunkSize)
 	}
-	if got := len(names(t, dir)); got != seeded {
-		t.Errorf("queue holds %d files after a failed listing, want all %d untouched", got, seeded)
+	const wantDropped = pruneChunkSize - maxFiles // 64 - 10 = 54
+	if dropped != wantDropped || freed != int64(wantDropped)*10 {
+		t.Errorf("dropped=%d freed=%d, want %d/%d: a partial listing's own examined-prefix eviction must stand, not be discarded", dropped, freed, wantDropped, int64(wantDropped)*10)
+	}
+
+	got := names(t, dir)
+	if want := seeded - wantDropped; len(got) != want {
+		t.Fatalf("queue holds %d files, want %d (seeded %d - dropped %d)", len(got), want, seeded, wantDropped)
+	}
+
+	examined := map[string]bool{}
+	for _, name := range rec.seen {
+		examined[name] = true
+	}
+	nameAge := func(name string) time.Duration {
+		trimmed := strings.TrimSuffix(name, queuedEventExt)
+		trimmed = strings.TrimPrefix(trimmed, "b")
+		idx, convErr := strconv.Atoi(trimmed)
+		if convErr != nil {
+			t.Fatalf("parse index from %s: %v", name, convErr)
+		}
+		return time.Duration(idx+1) * time.Minute
+	}
+
+	examinedSurvivors, examinedDropped := 0, 0
+	var oldestSurvivorAge, youngestDroppedAge time.Duration
+	haveSurvivor, haveDropped := false, false
+	for name := range examined {
+		age := nameAge(name)
+		if got[name] {
+			examinedSurvivors++
+			if !haveSurvivor || age > oldestSurvivorAge {
+				oldestSurvivorAge = age
+				haveSurvivor = true
+			}
+		} else {
+			examinedDropped++
+			if !haveDropped || age < youngestDroppedAge {
+				youngestDroppedAge = age
+				haveDropped = true
+			}
+		}
+	}
+	if examinedSurvivors != maxFiles {
+		t.Errorf("examined chunk kept %d survivors, want exactly maxFiles=%d", examinedSurvivors, maxFiles)
+	}
+	if examinedDropped != wantDropped {
+		t.Errorf("examined chunk dropped %d, want %d", examinedDropped, wantDropped)
+	}
+	if haveSurvivor && haveDropped && oldestSurvivorAge > youngestDroppedAge {
+		t.Errorf("a kept survivor (age %v) is older than a dropped entry (age %v): the cap did not keep the newest of the examined chunk", oldestSurvivorAge, youngestDroppedAge)
+	}
+
+	for i := 0; i < seeded; i++ {
+		name := fmt.Sprintf("b%04d%s", i, queuedEventExt)
+		if !examined[name] && !got[name] {
+			t.Errorf("never-examined entry %s was removed: only the examined prefix may be touched", name)
+		}
+	}
+}
+
+// TestQueueMinHeapNeverExceedsCapacity is the heap-invariant regression for
+// be-wwy2.3: pruneQueueFrom's walk pushes one live entry at a time and evicts
+// the oldest whenever the heap grows past maxFiles, so the heap itself must
+// never hold more than maxFiles entries at any point during that sequence —
+// not just after the walk completes. This is what backs the "bounded memory"
+// claim in the design: a single prune pass's peak memory for live candidates
+// is O(maxFiles), not O(every live entry in the directory).
+func TestQueueMinHeapNeverExceedsCapacity(t *testing.T) {
+	const maxFiles = 10
+	const seeded = 200
+	now := time.Now()
+
+	// entry(i) is the i-th newest: modTime now-(i+1)min, so entries 0..maxFiles-1
+	// are the survivors a correct count-capped walk must keep.
+	entry := func(i int) queueEntry {
+		return queueEntry{
+			path:    fmt.Sprintf("q%04d%s", i, queuedEventExt),
+			modTime: now.Add(-time.Duration(i+1) * time.Minute),
+			size:    10,
+		}
+	}
+
+	h := &queueMinHeap{}
+	heap.Init(h)
+	for n := 0; n < seeded; n++ {
+		// Push in a deterministic NON-chronological order (stride 97 is
+		// coprime with 200, so it permutes them): readdir order is the
+		// filesystem's, never age order, so the heap has to reorder rather
+		// than receive its input pre-sorted.
+		heap.Push(h, entry((n*97)%seeded))
+		for h.Len() > maxFiles {
+			// Every pop must hand back the OLDEST entry the heap holds. That
+			// is the contract evict() actually consumes — it unlinks the path
+			// the pop RETURNS — and a Len()-only assertion cannot see a Pop
+			// that returns the wrong entry, because such a Pop still shrinks
+			// the heap by one. This is the assertion that pins queueMinHeap.Pop.
+			popped := heap.Pop(h).(queueEntry)
+			for _, held := range *h {
+				if !popped.modTime.Before(held.modTime) {
+					t.Fatalf("push %d: popped %s (mod %s) while the heap still holds %s (mod %s), which is not newer: evict() would unlink the wrong file",
+						n, popped.path, popped.modTime, held.path, held.modTime)
+				}
+			}
+		}
+		if h.Len() > maxFiles {
+			t.Fatalf("after push %d: heap holds %d entries, want at most %d", n, h.Len(), maxFiles)
+		}
+	}
+
+	// The survivors are the maxFiles newest pushed entries by IDENTITY, not
+	// merely by count: with only the count cap evicting, this is exactly the
+	// "held set is the maxFiles-newest examined so far" claim queueMinHeap's
+	// own doc makes, and it is independent of the push order above.
+	if h.Len() != maxFiles {
+		t.Fatalf("final heap holds %d entries, want exactly %d (seeded %d > maxFiles)", h.Len(), maxFiles, seeded)
+	}
+	held := map[string]bool{}
+	for _, e := range *h {
+		held[e.path] = true
+	}
+	if len(held) != maxFiles {
+		t.Fatalf("final heap holds %d distinct paths across %d entries: an entry is held twice", len(held), h.Len())
+	}
+	for i := 0; i < maxFiles; i++ {
+		if !held[entry(i).path] {
+			t.Errorf("final heap is missing %s: the %d newest pushed entries must be the survivors", entry(i).path, maxFiles)
+		}
+	}
+}
+
+// TestQueueMinHeapCapacityZero pins the maxFiles=0 edge case the design
+// calls out explicitly: every pushed entry must be immediately evictable
+// back off again, with no off-by-one that assumes a non-zero capacity.
+func TestQueueMinHeapCapacityZero(t *testing.T) {
+	const maxFiles = 0
+	now := time.Now()
+
+	h := &queueMinHeap{}
+	heap.Init(h)
+	want := queueEntry{path: "q.evtq", modTime: now, size: 10}
+	heap.Push(h, want)
+	var popped []queueEntry
+	for h.Len() > maxFiles {
+		popped = append(popped, heap.Pop(h).(queueEntry))
+	}
+	if h.Len() != 0 {
+		t.Fatalf("heap holds %d entries after evicting to maxFiles=0, want 0", h.Len())
+	}
+	// evict() unlinks the path and subtracts the size each pop returns, so an
+	// entry pushed under a zero capacity has to come back out identified, not
+	// just counted off. (The wrong-entry Pop contract is pinned by
+	// TestQueueMinHeapNeverExceedsCapacity; with a single held entry the
+	// oldest and the newest are the same one, so it cannot be pinned here.)
+	if len(popped) != 1 || popped[0].path != want.path || popped[0].size != want.size {
+		t.Fatalf("pops returned %+v, want exactly one %+v: a zero-capacity push must hand the pushed entry back for unlinking", popped, want)
 	}
 }

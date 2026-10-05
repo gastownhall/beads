@@ -1,0 +1,41 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "batchfixtures",
+    srcs = [
+        "batchfixtures.go",
+        "largegraph.go",
+        "uncapped_plan.go",
+        "waitsfor.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/storage/batchfixtures",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage",
+        "//internal/types",
+        "//issueops",
+    ],
+)
+
+go_test(
+    name = "batchfixtures_test",
+    srcs = ["batchfixtures_test.go"],
+    deps = [
+        ":batchfixtures",
+        "//internal/storage",
+        "//issueops",
+    ],
+)
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---

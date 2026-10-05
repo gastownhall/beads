@@ -123,6 +123,18 @@ func TestRenderSectionMinimal(t *testing.T) {
 	if strings.Contains(section, "### Priorities") {
 		t.Error("minimal profile should not contain full priorities section")
 	}
+
+	// GH#6111: the memory bullet says which store each content class belongs
+	// in instead of prohibiting MEMORY.md, because harnesses ship a
+	// first-party memory whose index file has exactly that name. Assert the
+	// prohibition's absence rather than the replacement prose, so the pin
+	// survives any future rewording of the sentence.
+	if !strings.Contains(section, "bd remember") {
+		t.Error("minimal profile should still teach bd remember")
+	}
+	if strings.Contains(section, "MEMORY.md") {
+		t.Error("minimal profile should not name MEMORY.md")
+	}
 }
 
 func TestCodexSectionBody(t *testing.T) {
@@ -145,6 +157,16 @@ func TestCodexSectionBody(t *testing.T) {
 	}
 	if strings.Contains(body, "BEGIN BEADS") || strings.Contains(body, "END BEADS") {
 		t.Error("CodexSectionBody should not include managed markers")
+	}
+
+	// GH#6111, as above: the memory bullet describes the split instead of
+	// banning per-tool memory files. This body spelled its prohibition "ad hoc
+	// memory files" and never named MEMORY.md, so checking only the file name
+	// would assert nothing about what this surface used to emit.
+	for _, unwanted := range []string{"MEMORY.md", "ad hoc memory files"} {
+		if strings.Contains(body, unwanted) {
+			t.Errorf("CodexSectionBody should not prohibit %q", unwanted)
+		}
 	}
 }
 

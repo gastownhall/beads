@@ -20,6 +20,12 @@ func runWispCreateProxiedServer(ctx context.Context, in wispCreateInput) error {
 	if uowProvider == nil {
 		return HandleError("proxied-server UOW provider not initialized")
 	}
+	// Explicit commit point, like the `transact` in cloneSubgraph the direct
+	// route reaches through spawnMoleculeWithOptions (GH#4995). The wisp tables
+	// are dolt_ignored, so the commit this preserves is whatever tracked rows
+	// the spawn touches — the class membership is what matters here, not the
+	// size of the commit.
+	ctx = explicitCommitPointContext(ctx)
 
 	vars, err := parseVarFlags(in.varFlags)
 	if err != nil {
@@ -31,9 +37,10 @@ func runWispCreateProxiedServer(ctx context.Context, in wispCreateInput) error {
 	if sg, err := resolveAndCookFormulaWithVars(in.protoArg, nil, vars); err == nil {
 		formulaSubgraph = sg
 		formulaProtoID = sg.Root.ID
-	} else if errors.Is(err, formula.ErrVarValidation) {
-		// in.protoArg IS a formula; the --var values it was given fail
-		// enum/pattern/required-empty constraints. Report that directly
+	} else if errors.Is(err, formula.ErrVarValidation) || errors.Is(err, formula.ErrValidation) {
+		// in.protoArg IS a formula; either the formula itself does not
+		// validate, or the --var values it was given fail enum/pattern/
+		// required-empty constraints. Report that directly
 		// instead of falling through to the proto-ID lookup below, which
 		// would otherwise mask this as "not found as formula or proto".
 		return HandleError("%v", err)
@@ -73,7 +80,7 @@ func runWispCreateProxiedServer(ctx context.Context, in wispCreateInput) error {
 	vars = applyVariableDefaults(vars, subgraph)
 
 	if err := checkRequiredVars(subgraph, vars); err != nil {
-		return HandleErrorWithHint(err.Error(), fmt.Sprintf("Provide them with: --var %s=<value>", firstMissingVar(subgraph, vars)))
+		return handleVarErrorWithHint(err, firstMissingVar(subgraph, vars))
 	}
 
 	if in.dryRun {

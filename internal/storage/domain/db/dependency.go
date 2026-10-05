@@ -110,14 +110,24 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 	table := pickDepTable(opts.UseWispsTable)
 
 	var existingType string
+	var existingMetadataNS sql.NullString
 	err := r.runner.QueryRowContext(ctx,
 		//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
-		fmt.Sprintf("SELECT type FROM %s WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
+		fmt.Sprintf("SELECT type, metadata FROM %s WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
 		dep.IssueID, dep.DependsOnID,
-	).Scan(&existingType)
+	).Scan(&existingType, &existingMetadataNS)
 	switch {
 	case err == nil:
+		existingMetadata := existingMetadataNS.String
+		if !existingMetadataNS.Valid {
+			existingMetadata = "{}"
+		}
 		if existingType == string(dep.Type) {
+			if issueops.DependencyMetadataEqual(existingMetadata, metadata) {
+				// Same type, same metadata: a change-free write. Nothing is
+				// written and nothing is journaled (#5898 R3).
+				return nil
+			}
 			//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
 			if _, err := r.runner.ExecContext(ctx,
 				fmt.Sprintf("UPDATE %s SET metadata = ? WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
@@ -127,7 +137,15 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 			}
 			// A same-type add refreshes edge metadata. It is an observable graph
 			// mutation, so emit the complete replacement edge for replay.
-			return issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
+			if err := issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
+				return err
+			}
+			// The metadata genuinely changed, so this re-add is a real
+			// durable-state mutation of the source issue and mints on the
+			// same terms as a new edge (#5898 leg 2: "a same-type re-add
+			// whose metadata actually changed mints EXACTLY ONE version
+			// carrying the new state").
+			return issueops.RecordVersionInTx(ctx, r.runner, dep.IssueID, actor)
 		}
 		return &domain.DependencyTypeConflictError{
 			IssueID:       dep.IssueID,
@@ -219,15 +237,25 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 			return fmt.Errorf("db: DependencySQLRepository.Insert: recompute is_blocked: %w", err)
 		}
 		// Snapshot only after all derived blocked-state maintenance has completed.
-		return issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
+		if err := issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
+			return err
+		}
+		// A new edge is durable state of the referencing issue: version it,
+		// as issueops.AddDependencyInTx does on the store legs. The same-type
+		// refresh returned above without minting.
+		return issueops.RecordVersionInTx(ctx, r.runner, dep.IssueID, actor)
 	}
 	if err := issueops.MarkIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps); err != nil {
 		return fmt.Errorf("db: DependencySQLRepository.Insert: mark is_blocked (affected): %w", err)
 	}
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// Never gated on opts.EmitEvent: a structurally-wired edge is as real to a
-	// replaying consumer as one added by an explicit dep verb.
-	return issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
+	// replaying consumer as one added by an explicit dep verb — and neither is
+	// the version row minted beside it.
+	if err := issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
+		return err
+	}
+	return issueops.RecordVersionInTx(ctx, r.runner, dep.IssueID, actor)
 }
 
 // classifyMissingEndpoint names the endpoint behind a foreign-key refusal,
@@ -386,11 +414,18 @@ func (r *dependencySQLRepositoryImpl) Delete(ctx context.Context, issueID, depen
 	if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps); err != nil {
 		return domain.DepDeleteResult{}, fmt.Errorf("db: DependencySQLRepository.Delete: recompute is_blocked: %w", err)
 	}
+	issueops.NoteDependencyRemovalBlockedRecheck(r.runner, issueID, dependsOnID, affectedIssues, affectedWisps)
 
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// Never gated on opts.EmitEvent — a structural removal is as real to a
 	// replaying consumer as one from an explicit dep verb.
 	if err := issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepRemove, issueID, depType, dependsOnID, depMetadata, actor); err != nil {
+		return domain.DepDeleteResult{}, err
+	}
+	// The Found:false return above keeps this actually-deleted-only, so the
+	// referencing issue is versioned for a real change, as
+	// issueops.RemoveDependencyInTx does on the store legs.
+	if err := issueops.RecordVersionInTx(ctx, r.runner, issueID, actor); err != nil {
 		return domain.DepDeleteResult{}, err
 	}
 
@@ -761,7 +796,7 @@ func combineArgs(a, b []any) []any {
 	return out
 }
 
-func (r *dependencySQLRepositoryImpl) DeleteAllForIDs(ctx context.Context, ids []string, opts domain.DepInsertOpts) (int, error) {
+func (r *dependencySQLRepositoryImpl) DeleteAllForIDs(ctx context.Context, ids []string, opts domain.DepInsertOpts, actor string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
@@ -788,7 +823,7 @@ func (r *dependencySQLRepositoryImpl) DeleteAllForIDs(ctx context.Context, ids [
 		ph := strings.Join(placeholders, ",")
 		// Journal the edges this batch is about to remove, while they and their
 		// source snapshots are still readable.
-		if err := issueops.RecordDependencyRemovalsForTableInTx(ctx, r.runner, table, batch); err != nil {
+		if err := issueops.RecordDependencyRemovalsForTableInTx(ctx, r.runner, table, batch, actor); err != nil {
 			return total, fmt.Errorf("db: DependencySQLRepository.DeleteAllForIDs journal removals from %s: %w", table, err)
 		}
 		//nolint:gosec // G201: table is one of two hardcoded constants; ? placeholders only.
@@ -915,8 +950,8 @@ func (r *dependencySQLRepositoryImpl) DetectCycles(ctx context.Context) ([][]*ty
 	return out, nil
 }
 
-func (r *dependencySQLRepositoryImpl) DetectCycleReport(ctx context.Context) (publicops.CycleReport, error) {
-	out, err := issueops.DetectCycleReportInTx(ctx, r.runner)
+func (r *dependencySQLRepositoryImpl) DetectCycleReport(ctx context.Context, req publicops.DetectCyclesRequest) (publicops.CycleReport, error) {
+	out, err := issueops.DetectCycleReportInTx(ctx, r.runner, req)
 	if err != nil {
 		return publicops.CycleReport{}, fmt.Errorf("db: DependencySQLRepository.DetectCycleReport: %w", err)
 	}

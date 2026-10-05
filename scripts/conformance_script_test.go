@@ -72,7 +72,7 @@ func TestConformanceWorkflowHasOuterTimeoutBudget(t *testing.T) {
 	want := "  conformance:\n" +
 		"    name: Storage backend conformance (embedded Dolt oracle)\n" +
 		"    timeout-minutes: 45\n" +
-		"    runs-on: ubuntu-latest\n"
+		"    runs-on: " + sameRepoBlacksmith4vcpu + "\n"
 	if !strings.Contains(text, want) {
 		t.Fatalf("conformance job does not declare the maintained 45-minute outer budget:\n%s", text)
 	}
@@ -87,10 +87,7 @@ type conformanceRun struct {
 func runConformanceScript(t *testing.T, failCall, failExit int) conformanceRun {
 	t.Helper()
 
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skipf("bash is required to test conformance.sh: %v", err)
-	}
+	bash := requireHostTool(t, "bash")
 
 	bin := t.TempDir()
 	stateDir := t.TempDir()

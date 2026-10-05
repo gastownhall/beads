@@ -1,0 +1,5572 @@
+{
+  "wire_revision": 2,
+  "entries": [
+    {
+      "schema": "AddCommentRequest",
+      "member": "author",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "AddCommentRequest",
+      "member": "text",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "AddDependenciesRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "AddDependenciesRequest",
+      "member": "edges",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "AddDependenciesResponse",
+      "member": "added",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "AnchorEdgeCount",
+      "member": "count",
+      "type": "integer",
+      "format": "int64",
+      "required": true
+    },
+    {
+      "schema": "AnchorEdgeCount",
+      "member": "id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "AnchorEdgeCount",
+      "member": "missing",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "ApplyBatchRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ApplyBatchRequest",
+      "member": "force_id_prefix",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "ApplyBatchRequest",
+      "member": "items",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "ApplyBatchRequest",
+      "member": "provenance",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyBatchRequest",
+      "member": "skip_per_edge_cycle_check",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "ApplyBatchResponse",
+      "member": "items",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "ApplyBatchResponse",
+      "member": "keys",
+      "type": "object",
+      "required": true,
+      "additional_props_type": "string"
+    },
+    {
+      "schema": "ApplyCloseItem",
+      "member": "expected_version",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCloseItem",
+      "member": "force",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "ApplyCloseItem",
+      "member": "reason",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCloseItem",
+      "member": "session",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCloseItem",
+      "member": "target",
+      "type": "object",
+      "required": true
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "acceptance_criteria",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "defer_until",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "description",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "design",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "due_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "ephemeral",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "estimated_minutes",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "external_ref",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "issue_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "key",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "labels",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "metadata",
+      "type": "",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "metadata_refs",
+      "type": "object",
+      "required": false,
+      "additional_props_type": "object"
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "no_history",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "notes",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "owner",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "priority",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "sender",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyCreateItem",
+      "member": "title",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ApplyDepAddItem",
+      "member": "metadata",
+      "type": "",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "ApplyDepAddItem",
+      "member": "source",
+      "type": "object",
+      "required": true
+    },
+    {
+      "schema": "ApplyDepAddItem",
+      "member": "target",
+      "type": "object",
+      "required": true
+    },
+    {
+      "schema": "ApplyDepAddItem",
+      "member": "type",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ApplyItem",
+      "member": "close",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "ApplyItem",
+      "member": "create",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "ApplyItem",
+      "member": "dep_add",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "ApplyItem",
+      "member": "kind",
+      "type": "string",
+      "enum": [
+        "close",
+        "create",
+        "dep_add",
+        "update"
+      ],
+      "required": true
+    },
+    {
+      "schema": "ApplyItem",
+      "member": "update",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "ApplyItemResult",
+      "member": "changed",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "ApplyItemResult",
+      "member": "depends_on_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyItemResult",
+      "member": "issue_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ApplyItemResult",
+      "member": "kind",
+      "type": "string",
+      "enum": [
+        "close",
+        "create",
+        "dep_add",
+        "update"
+      ],
+      "required": true
+    },
+    {
+      "schema": "ApplyItemResult",
+      "member": "revision",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ApplyLabelPatch",
+      "member": "add",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "ApplyLabelPatch",
+      "member": "remove",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "ApplyLabelPatch",
+      "member": "replace",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "ApplyMetadataPatch",
+      "member": "merge",
+      "type": "",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "ApplyMetadataPatch",
+      "member": "replace",
+      "type": "",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "ApplyMetadataPatch",
+      "member": "set",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "ApplyMetadataPatch",
+      "member": "unset",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "acceptance_criteria",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "append_notes",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "defer_until",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "description",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "design",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "due_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "estimated_minutes",
+      "type": "integer",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "external_ref",
+      "type": "string",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "issue_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "labels",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "metadata",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "notes",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "owner",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "priority",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyPatchBody",
+      "member": "title",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyUpdateItem",
+      "member": "expected_assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyUpdateItem",
+      "member": "expected_status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyUpdateItem",
+      "member": "expected_version",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ApplyUpdateItem",
+      "member": "force_assignee_transfer",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "ApplyUpdateItem",
+      "member": "force_close_policy",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "ApplyUpdateItem",
+      "member": "force_notes_overwrite",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "ApplyUpdateItem",
+      "member": "patch",
+      "type": "object",
+      "required": true
+    },
+    {
+      "schema": "ApplyUpdateItem",
+      "member": "target",
+      "type": "object",
+      "required": true
+    },
+    {
+      "schema": "BatchCloseItem",
+      "member": "id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "BatchCloseItem",
+      "member": "reason",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchCloseRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "BatchCloseRequest",
+      "member": "force",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "BatchCloseRequest",
+      "member": "items",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "BatchCloseRequest",
+      "member": "session",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchCloseResponse",
+      "member": "outcomes",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "BatchCreateDependency",
+      "member": "target_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "BatchCreateDependency",
+      "member": "type",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "BatchCreateItem",
+      "member": "acceptance_criteria",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchCreateItem",
+      "member": "assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchCreateItem",
+      "member": "dependencies",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "BatchCreateItem",
+      "member": "description",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchCreateItem",
+      "member": "design",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchCreateItem",
+      "member": "issue_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchCreateItem",
+      "member": "labels",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "BatchCreateItem",
+      "member": "priority",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "BatchCreateItem",
+      "member": "title",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "BatchCreateRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "BatchCreateRequest",
+      "member": "items",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "BatchCreateResponse",
+      "member": "items",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "Blocker",
+      "member": "id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "Blocker",
+      "member": "kind",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "Blocker",
+      "member": "type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BlockingAnnotations",
+      "member": "items",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "BondRef",
+      "member": "bond_point",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BondRef",
+      "member": "bond_type",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "BondRef",
+      "member": "source_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ClaimNextRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ClaimNextResponse",
+      "member": "claimed",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "ClaimRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ClaimResponse",
+      "member": "already_claimed",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "ClaimResponse",
+      "member": "issue",
+      "type": "object",
+      "required": true
+    },
+    {
+      "schema": "CloseIssueRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "CloseIssueRequest",
+      "member": "expected_version",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CloseIssueRequest",
+      "member": "force",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "CloseIssueRequest",
+      "member": "reason",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CloseIssueRequest",
+      "member": "session",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CloseIssueResponse",
+      "member": "already_closed",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "CloseIssueResponse",
+      "member": "issue",
+      "type": "object",
+      "required": true
+    },
+    {
+      "schema": "CloseIssueResponse",
+      "member": "open_children",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "CloseIssueResponse",
+      "member": "revision",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "CloseOutcome",
+      "member": "already_closed",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "CloseOutcome",
+      "member": "blockers",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "CloseOutcome",
+      "member": "code",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CloseOutcome",
+      "member": "detail",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CloseOutcome",
+      "member": "issue",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "CloseOutcome",
+      "member": "issue_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "CloseOutcome",
+      "member": "open_children",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "Comment",
+      "member": "author",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "Comment",
+      "member": "created_at",
+      "type": "string",
+      "format": "date-time",
+      "required": true
+    },
+    {
+      "schema": "Comment",
+      "member": "id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "Comment",
+      "member": "issue_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "Comment",
+      "member": "text",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "CompareAndSetMetadataRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "CompareAndSetMetadataRequest",
+      "member": "expected",
+      "type": "",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "CompareAndSetMetadataRequest",
+      "member": "key",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "CompareAndSetMetadataRequest",
+      "member": "value",
+      "type": "",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "CompareAndSetMetadataResponse",
+      "member": "current",
+      "type": "",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "CompareAndSetMetadataResponse",
+      "member": "swapped",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "ContextResponse",
+      "member": "api_version",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ContextResponse",
+      "member": "backend",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ContextResponse",
+      "member": "bd_version",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ContextResponse",
+      "member": "beads_dir",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ContextResponse",
+      "member": "capabilities",
+      "type": "array",
+      "required": true,
+      "item_type": "string"
+    },
+    {
+      "schema": "ContextResponse",
+      "member": "database",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ContextResponse",
+      "member": "dolt_mode",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ContextResponse",
+      "member": "min_client_wire_revision",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "ContextResponse",
+      "member": "project_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ContextResponse",
+      "member": "repo_root",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ContextResponse",
+      "member": "schema_version",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "ContextResponse",
+      "member": "wire_revision",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "CreateIssueDependency",
+      "member": "metadata",
+      "type": "",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "CreateIssueDependency",
+      "member": "reverse",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueDependency",
+      "member": "target_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "CreateIssueDependency",
+      "member": "type",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "acceptance_criteria",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "defer_until",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "dependencies",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "description",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "design",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "due_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "ephemeral",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "estimated_minutes",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "external_ref",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "force_id_prefix",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "inherit_labels_from_parent",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "issue_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "labels",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "metadata",
+      "type": "",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "no_history",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "notes",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "owner",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "parent_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "priority",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "sender",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "title",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "CreateIssueRequest",
+      "member": "waits_for",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueWaitsFor",
+      "member": "gate",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CreateIssueWaitsFor",
+      "member": "spawner_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "Cycle",
+      "member": "members",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "Cycle",
+      "member": "partial",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "CycleMember",
+      "member": "id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "CycleMember",
+      "member": "issue",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "CyclesPage",
+      "member": "has_more",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "CyclesPage",
+      "member": "items",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "DeleteIssuesRequest",
+      "member": "actor",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "DeleteIssuesRequest",
+      "member": "cascade",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "DeleteIssuesRequest",
+      "member": "dry_run",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "DeleteIssuesRequest",
+      "member": "expected_version",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "DeleteIssuesRequest",
+      "member": "force",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "DeleteIssuesRequest",
+      "member": "ids",
+      "type": "array",
+      "required": true,
+      "item_type": "string"
+    },
+    {
+      "schema": "DeleteIssuesResult",
+      "member": "deleted",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "DeleteIssuesResult",
+      "member": "dependencies",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "DeleteIssuesResult",
+      "member": "dry_run",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "DeleteIssuesResult",
+      "member": "events",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "DeleteIssuesResult",
+      "member": "labels",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "DeleteIssuesResult",
+      "member": "orphaned",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "DeleteIssuesResult",
+      "member": "references_updated",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "Dependency",
+      "member": "created_at",
+      "type": "string",
+      "format": "date-time",
+      "required": true
+    },
+    {
+      "schema": "Dependency",
+      "member": "created_by",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Dependency",
+      "member": "depends_on_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "Dependency",
+      "member": "id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Dependency",
+      "member": "issue_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "Dependency",
+      "member": "metadata",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Dependency",
+      "member": "thread_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Dependency",
+      "member": "type",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "DependencyEdge",
+      "member": "depends_on_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "DependencyEdge",
+      "member": "issue_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "DependencyEdge",
+      "member": "type",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "DependencyEdges",
+      "member": "items",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "DependencyEdges",
+      "member": "missing",
+      "type": "array",
+      "required": true,
+      "item_type": "string"
+    },
+    {
+      "schema": "DependencyTreePage",
+      "member": "has_more",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "DependencyTreePage",
+      "member": "items",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "EdgeCounts",
+      "member": "anchors",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "EventRecord",
+      "member": "actor",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "EventRecord",
+      "member": "comment",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "EventRecord",
+      "member": "dep",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "EventRecord",
+      "member": "issue",
+      "type": "object",
+      "required": true,
+      "nullable": true
+    },
+    {
+      "schema": "EventRecord",
+      "member": "issue_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "EventRecord",
+      "member": "op",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "EventRecord",
+      "member": "seq",
+      "type": "integer",
+      "format": "int64",
+      "required": true
+    },
+    {
+      "schema": "EventRecord",
+      "member": "ts",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "EventsPage",
+      "member": "head",
+      "type": "integer",
+      "format": "int64",
+      "required": true
+    },
+    {
+      "schema": "EventsPage",
+      "member": "records",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "Health",
+      "member": "status",
+      "type": "string",
+      "enum": [
+        "ok"
+      ],
+      "required": true
+    },
+    {
+      "schema": "Issue",
+      "member": "acceptance_criteria",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "actor",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "await_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "await_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "bonded_from",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "Issue",
+      "member": "close_reason",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "closed_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "closed_by_session",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "comments",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "Issue",
+      "member": "compacted_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "compacted_at_commit",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "compaction_level",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "created_at",
+      "type": "string",
+      "format": "date-time",
+      "required": true
+    },
+    {
+      "schema": "Issue",
+      "member": "created_by",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "defer_until",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "dependencies",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "Issue",
+      "member": "description",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "design",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "due_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "ephemeral",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "estimated_minutes",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "event_kind",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "external_ref",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "heartbeat_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "Issue",
+      "member": "is_blocked",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "is_template",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "issue_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "labels",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "Issue",
+      "member": "lease_expires_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "lease_granted_node",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "metadata",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "mol_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "no_history",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "notes",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "original_size",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "owner",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "payload",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "pinned",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "priority",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "Issue",
+      "member": "sender",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "source_formula",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "source_location",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "source_system",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "spec_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "started_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "storage_class",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "target",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "timeout",
+      "type": "integer",
+      "format": "int64",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "title",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "Issue",
+      "member": "updated_at",
+      "type": "string",
+      "format": "date-time",
+      "required": true
+    },
+    {
+      "schema": "Issue",
+      "member": "waiters",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "Issue",
+      "member": "wisp_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Issue",
+      "member": "work_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueBlocking",
+      "member": "blocked_by",
+      "type": "array",
+      "required": true,
+      "item_type": "string"
+    },
+    {
+      "schema": "IssueBlocking",
+      "member": "blocks",
+      "type": "array",
+      "required": true,
+      "item_type": "string"
+    },
+    {
+      "schema": "IssueBlocking",
+      "member": "id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "IssueBlocking",
+      "member": "parent",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueCount",
+      "member": "groups",
+      "type": "object",
+      "required": false,
+      "additional_props_type": "integer"
+    },
+    {
+      "schema": "IssueCount",
+      "member": "total",
+      "type": "integer",
+      "format": "int64",
+      "required": true
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "acceptance_criteria",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "actor",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "await_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "await_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "bonded_from",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "close_reason",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "closed_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "closed_by_session",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "comment_count",
+      "type": "integer",
+      "format": "int64",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "comments",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "comments_omitted",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "compacted_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "compacted_at_commit",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "compaction_level",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "created_at",
+      "type": "string",
+      "format": "date-time",
+      "required": true
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "created_by",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "defer_until",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "dependencies",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "dependency_count",
+      "type": "integer",
+      "format": "int64",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "dependent_count",
+      "type": "integer",
+      "format": "int64",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "dependents",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "description",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "design",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "due_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "ephemeral",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "epic_closeable",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "epic_closed_children",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "epic_total_children",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "estimated_minutes",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "event_kind",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "external_ref",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "heartbeat_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "is_blocked",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "is_template",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "issue_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "labels",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "lease_expires_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "lease_granted_node",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "metadata",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "mol_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "no_history",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "notes",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "original_size",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "owner",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "parent",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "payload",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "pinned",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "priority",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "revision",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "sender",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "source_formula",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "source_location",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "source_system",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "spec_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "started_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "storage_class",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "target",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "timeout",
+      "type": "integer",
+      "format": "int64",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "title",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "unresolvable_dependencies",
+      "type": "integer",
+      "format": "int64",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "unresolvable_dependents",
+      "type": "integer",
+      "format": "int64",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "updated_at",
+      "type": "string",
+      "format": "date-time",
+      "required": true
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "waiters",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "wisp_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails",
+      "member": "work_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "acceptance_criteria",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "add_labels",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "append_notes",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "defer_until",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "description",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "design",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "due_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "estimated_minutes",
+      "type": "integer",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "external_ref",
+      "type": "string",
+      "required": false,
+      "nullable": true
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "issue_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "labels",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "metadata",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "notes",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "parent_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "priority",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "remove_labels",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuePatchBody",
+      "member": "title",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "acceptance_criteria",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "actor",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "await_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "await_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "bonded_from",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "close_reason",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "closed_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "closed_by_session",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "comment_count",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "comments",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "comments_omitted",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "compacted_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "compacted_at_commit",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "compaction_level",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "created_at",
+      "type": "string",
+      "format": "date-time",
+      "required": true
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "created_by",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "defer_until",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "dependencies",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "dependency_count",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "dependent_count",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "description",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "design",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "due_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "ephemeral",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "estimated_minutes",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "event_kind",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "external_ref",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "heartbeat_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "is_blocked",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "is_template",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "issue_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "labels",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "lease_expires_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "lease_granted_node",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "metadata",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "mol_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "no_history",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "notes",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "original_size",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "owner",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "parent",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "payload",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "pinned",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "priority",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "sender",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "source_formula",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "source_location",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "source_system",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "spec_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "started_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "storage_class",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "target",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "timeout",
+      "type": "integer",
+      "format": "int64",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "title",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "updated_at",
+      "type": "string",
+      "format": "date-time",
+      "required": true
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "waiters",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "wisp_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithCounts",
+      "member": "work_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "acceptance_criteria",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "actor",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "await_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "await_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "bonded_from",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "close_reason",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "closed_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "closed_by_session",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "comments",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "compacted_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "compacted_at_commit",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "compaction_level",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "created_at",
+      "type": "string",
+      "format": "date-time",
+      "required": true
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "created_by",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "defer_until",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "dependencies",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "dependency_type",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "description",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "design",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "due_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "ephemeral",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "estimated_minutes",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "event_kind",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "external_ref",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "heartbeat_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "is_blocked",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "is_template",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "issue_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "labels",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "lease_expires_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "lease_granted_node",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "metadata",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "mol_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "no_history",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "notes",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "original_size",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "owner",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "payload",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "pinned",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "priority",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "sender",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "source_formula",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "source_location",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "source_system",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "spec_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "started_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "storage_class",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "target",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "timeout",
+      "type": "integer",
+      "format": "int64",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "title",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "updated_at",
+      "type": "string",
+      "format": "date-time",
+      "required": true
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "waiters",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "wisp_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
+      "member": "work_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssuesPage",
+      "member": "has_more",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "IssuesPage",
+      "member": "items",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "IssuesPage",
+      "member": "next_cursor",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "MemoriesPage",
+      "member": "has_more",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "MemoriesPage",
+      "member": "items",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "MemoriesPage",
+      "member": "next_cursor",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Memory",
+      "member": "key",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "Memory",
+      "member": "value",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "Problem",
+      "member": "actual_assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "actual_status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "actual_version",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "bd_version",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "blocker_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "blocker_is_ancestor",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "blockers",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "Problem",
+      "member": "code",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "Problem",
+      "member": "declared_later",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "detail",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "existing_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "expected_assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "expected_status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "expected_version",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "floor",
+      "type": "integer",
+      "format": "int64",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "head",
+      "type": "integer",
+      "format": "int64",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "issue_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "issue_status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "item_index",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "item_issue_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "item_key",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "item_kind",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "min_wire_revision",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "open_children",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "param",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "reason",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "request_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "Problem",
+      "member": "requested_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "server_project_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "since",
+      "type": "integer",
+      "format": "int64",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "status",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "Problem",
+      "member": "title",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "Problem",
+      "member": "type",
+      "type": "string",
+      "format": "uri",
+      "required": false
+    },
+    {
+      "schema": "Problem",
+      "member": "wire_revision",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "QueryPage",
+      "member": "has_more",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "QueryPage",
+      "member": "items",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "ReadyCount",
+      "member": "total",
+      "type": "integer",
+      "format": "int64",
+      "required": true
+    },
+    {
+      "schema": "ReadyPage",
+      "member": "has_more",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "ReadyPage",
+      "member": "items",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "Ref",
+      "member": "id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Ref",
+      "member": "key",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "RelatedIssues",
+      "member": "items",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "ReleaseIssueRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ReleaseIssueRequest",
+      "member": "expected_assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ReleaseIssueRequest",
+      "member": "force",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "ReleaseIssueResponse",
+      "member": "changed",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "ReleaseIssueResponse",
+      "member": "issue",
+      "type": "object",
+      "required": true
+    },
+    {
+      "schema": "ReleaseIssueResponse",
+      "member": "revision",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "RememberRequest",
+      "member": "content",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "RememberRequest",
+      "member": "key",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "RememberedMemory",
+      "member": "key",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "RememberedMemory",
+      "member": "replaced",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "RememberedMemory",
+      "member": "value",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "RemoveDependencyRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "RemoveDependencyRequest",
+      "member": "depends_on_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "RemoveDependencyRequest",
+      "member": "issue_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "RemoveDependencyResponse",
+      "member": "removed",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "RemovedSetting",
+      "member": "key",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ReopenIssueRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ReopenIssueRequest",
+      "member": "expected_version",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ReopenIssueRequest",
+      "member": "reason",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "ReopenIssueResponse",
+      "member": "already_open",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "ReopenIssueResponse",
+      "member": "issue",
+      "type": "object",
+      "required": true
+    },
+    {
+      "schema": "ReopenIssueResponse",
+      "member": "revision",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "SetSettingRequest",
+      "member": "value",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "Setting",
+      "member": "key",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "Setting",
+      "member": "redacted",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "Setting",
+      "member": "value",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "SettingsPage",
+      "member": "has_more",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "SettingsPage",
+      "member": "items",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "SettingsPage",
+      "member": "next_cursor",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "Statistics",
+      "member": "average_lead_time_hours",
+      "type": "number",
+      "required": true
+    },
+    {
+      "schema": "Statistics",
+      "member": "blocked_issues",
+      "type": "integer",
+      "required": true,
+      "nullable": true
+    },
+    {
+      "schema": "Statistics",
+      "member": "closed_issues",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "Statistics",
+      "member": "deferred_issues",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "Statistics",
+      "member": "epics_eligible_for_closure",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "Statistics",
+      "member": "gate_issues",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "Statistics",
+      "member": "in_progress_issues",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "Statistics",
+      "member": "open_issues",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "Statistics",
+      "member": "pinned_issues",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "Statistics",
+      "member": "ready_issues",
+      "type": "integer",
+      "required": true,
+      "nullable": true
+    },
+    {
+      "schema": "Statistics",
+      "member": "template_issues",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "Statistics",
+      "member": "total_issues",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "StatsResponse",
+      "member": "blocked_count_skipped",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "StatsResponse",
+      "member": "summary",
+      "type": "object",
+      "required": true
+    },
+    {
+      "schema": "SweepRequest",
+      "member": "actor",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "SweepRequest",
+      "member": "closed_before",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "SweepRequest",
+      "member": "dry_run",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "SweepRequest",
+      "member": "pattern",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "SweepRequest",
+      "member": "protect_referenced",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "SweepRequest",
+      "member": "tier",
+      "type": "string",
+      "enum": [
+        "durable",
+        "ephemeral"
+      ],
+      "required": true
+    },
+    {
+      "schema": "SweepResult",
+      "member": "dependencies",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "SweepResult",
+      "member": "dry_run",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "SweepResult",
+      "member": "events",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "SweepResult",
+      "member": "labels",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "SweepResult",
+      "member": "referenced_ids",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "SweepResult",
+      "member": "skipped",
+      "type": "object",
+      "required": true
+    },
+    {
+      "schema": "SweepResult",
+      "member": "swept",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "SweepSkips",
+      "member": "closed_at_or_after_cutoff",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "SweepSkips",
+      "member": "not_closed",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "SweepSkips",
+      "member": "pinned",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "SweepSkips",
+      "member": "referenced",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "SweepSkips",
+      "member": "unknown_closed_at",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "SweepSkips",
+      "member": "unreadable",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "TreeNode",
+      "member": "acceptance_criteria",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "actor",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "await_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "await_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "bonded_from",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "TreeNode",
+      "member": "close_reason",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "closed_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "closed_by_session",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "comments",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "TreeNode",
+      "member": "compacted_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "compacted_at_commit",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "compaction_level",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "created_at",
+      "type": "string",
+      "format": "date-time",
+      "required": true
+    },
+    {
+      "schema": "TreeNode",
+      "member": "created_by",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "defer_until",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "dependencies",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "TreeNode",
+      "member": "depth",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "TreeNode",
+      "member": "description",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "design",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "due_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "edge_from_parent",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "ephemeral",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "estimated_minutes",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "event_kind",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "external_ref",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "heartbeat_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "TreeNode",
+      "member": "is_blocked",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "is_template",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "issue_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "labels",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "TreeNode",
+      "member": "lease_expires_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "lease_granted_node",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "metadata",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "mol_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "no_history",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "notes",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "original_size",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "owner",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "parent_id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "TreeNode",
+      "member": "payload",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "pinned",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "priority",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "TreeNode",
+      "member": "sender",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "source_formula",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "source_location",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "source_system",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "spec_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "started_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "storage_class",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "target",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "timeout",
+      "type": "integer",
+      "format": "int64",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "title",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "TreeNode",
+      "member": "truncated",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "TreeNode",
+      "member": "updated_at",
+      "type": "string",
+      "format": "date-time",
+      "required": true
+    },
+    {
+      "schema": "TreeNode",
+      "member": "waiters",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "TreeNode",
+      "member": "wisp_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
+      "member": "work_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "UpdateIssueRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "UpdateIssueRequest",
+      "member": "claim",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "UpdateIssueRequest",
+      "member": "expected_assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "UpdateIssueRequest",
+      "member": "expected_status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "UpdateIssueRequest",
+      "member": "expected_version",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "UpdateIssueRequest",
+      "member": "force_assignee_transfer",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "UpdateIssueRequest",
+      "member": "force_close_policy",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "UpdateIssueRequest",
+      "member": "force_notes_overwrite",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "UpdateIssueRequest",
+      "member": "patch",
+      "type": "object",
+      "required": true
+    },
+    {
+      "schema": "UpdateIssueResponse",
+      "member": "changed",
+      "type": "boolean",
+      "required": true
+    },
+    {
+      "schema": "UpdateIssueResponse",
+      "member": "issue",
+      "type": "object",
+      "required": true
+    },
+    {
+      "schema": "UpdateIssueResponse",
+      "member": "revision",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "param:addComment",
+      "member": "path:id",
+      "type": "string",
+      "required": true,
+      "style": "simple"
+    },
+    {
+      "schema": "param:claimIssue",
+      "member": "path:id",
+      "type": "string",
+      "required": true,
+      "style": "simple"
+    },
+    {
+      "schema": "param:claimNextIssue",
+      "member": "query:assignee",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:claimNextIssue",
+      "member": "query:exclude_label",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:claimNextIssue",
+      "member": "query:exclude_type",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:claimNextIssue",
+      "member": "query:has_metadata_key",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:claimNextIssue",
+      "member": "query:include_deferred",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:claimNextIssue",
+      "member": "query:include_ephemeral",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:claimNextIssue",
+      "member": "query:label",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:claimNextIssue",
+      "member": "query:label_any",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:claimNextIssue",
+      "member": "query:label_pattern",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:claimNextIssue",
+      "member": "query:label_regex",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:claimNextIssue",
+      "member": "query:metadata_field",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:claimNextIssue",
+      "member": "query:parent",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:claimNextIssue",
+      "member": "query:priority",
+      "type": "integer",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:claimNextIssue",
+      "member": "query:sort",
+      "type": "string",
+      "enum": [
+        "hybrid",
+        "oldest",
+        "priority"
+      ],
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "priority"
+    },
+    {
+      "schema": "param:claimNextIssue",
+      "member": "query:type",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:claimNextIssue",
+      "member": "query:unassigned",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:closeIssue",
+      "member": "path:id",
+      "type": "string",
+      "required": true,
+      "style": "simple"
+    },
+    {
+      "schema": "param:compareAndSetMetadata",
+      "member": "path:id",
+      "type": "string",
+      "required": true,
+      "style": "simple"
+    },
+    {
+      "schema": "param:countDependencyEdges",
+      "member": "query:direction",
+      "type": "string",
+      "enum": [
+        "in",
+        "out"
+      ],
+      "required": true,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countDependencyEdges",
+      "member": "query:issue_id",
+      "type": "array",
+      "required": true,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countDependencyEdges",
+      "member": "query:status",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countDependencyEdges",
+      "member": "query:type",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:assignee",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:closed_after",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:closed_before",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:created_after",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:created_before",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:desc_contains",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:empty_description",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:exclude_status",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:exclude_type",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:group_by",
+      "type": "string",
+      "enum": [
+        "assignee",
+        "label",
+        "priority",
+        "status",
+        "type"
+      ],
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:has_metadata_key",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:id",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:include_ephemeral",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:include_infra",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:label",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:label_any",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:metadata_field",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:no_assignee",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:no_labels",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:no_parent",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:notes_contains",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:parent",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:priority",
+      "type": "integer",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:priority_max",
+      "type": "integer",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:priority_min",
+      "type": "integer",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:status",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:title",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:title_contains",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:type",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:updated_after",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countIssues",
+      "member": "query:updated_before",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countReadyWork",
+      "member": "query:assignee",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countReadyWork",
+      "member": "query:exclude_label",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countReadyWork",
+      "member": "query:exclude_type",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countReadyWork",
+      "member": "query:has_metadata_key",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countReadyWork",
+      "member": "query:include_deferred",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:countReadyWork",
+      "member": "query:include_ephemeral",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:countReadyWork",
+      "member": "query:label",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countReadyWork",
+      "member": "query:label_any",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countReadyWork",
+      "member": "query:label_pattern",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countReadyWork",
+      "member": "query:label_regex",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countReadyWork",
+      "member": "query:metadata_field",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countReadyWork",
+      "member": "query:parent",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countReadyWork",
+      "member": "query:priority",
+      "type": "integer",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countReadyWork",
+      "member": "query:type",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:countReadyWork",
+      "member": "query:unassigned",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:forgetMemory",
+      "member": "path:key",
+      "type": "string",
+      "required": true,
+      "style": "simple"
+    },
+    {
+      "schema": "param:getDependencyTree",
+      "member": "query:direction",
+      "type": "string",
+      "enum": [
+        "both",
+        "down",
+        "up"
+      ],
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "down"
+    },
+    {
+      "schema": "param:getDependencyTree",
+      "member": "query:max_depth",
+      "type": "integer",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "50"
+    },
+    {
+      "schema": "param:getDependencyTree",
+      "member": "query:root_id",
+      "type": "string",
+      "required": true,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:getDependencyTree",
+      "member": "query:status",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:getIssue",
+      "member": "path:id",
+      "type": "string",
+      "required": true,
+      "style": "simple"
+    },
+    {
+      "schema": "param:getIssue",
+      "member": "query:brief_deps",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:getIssue",
+      "member": "query:include_comments",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:getIssue",
+      "member": "query:include_dependents",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:getMemory",
+      "member": "path:key",
+      "type": "string",
+      "required": true,
+      "style": "simple"
+    },
+    {
+      "schema": "param:getSetting",
+      "member": "path:key",
+      "type": "string",
+      "required": true,
+      "style": "simple"
+    },
+    {
+      "schema": "param:getStats",
+      "member": "query:assignee",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:getStats",
+      "member": "query:skip_blocked",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:listBlockingAnnotations",
+      "member": "query:issue_id",
+      "type": "array",
+      "required": true,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listDependencies",
+      "member": "query:issue_id",
+      "type": "array",
+      "required": true,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listDependencies",
+      "member": "query:type",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listEvents",
+      "member": "query:limit",
+      "type": "integer",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "1000"
+    },
+    {
+      "schema": "param:listEvents",
+      "member": "query:since",
+      "type": "integer",
+      "format": "int64",
+      "required": true,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:all",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:assignee",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:brief",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:created_after",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:created_before",
+      "type": "string",
+      "format": "date-time",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:cursor",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:exclude_label",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:has_metadata_key",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:include_ephemeral",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:include_gates",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:include_infra",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:include_templates",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:label",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:label_any",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:limit",
+      "type": "integer",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "50"
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:metadata_field",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:parent",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:sort",
+      "type": "string",
+      "enum": [
+        "created",
+        "priority"
+      ],
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "created"
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:status",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
+      "member": "query:type",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listMemories",
+      "member": "query:search",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listReadyWork",
+      "member": "query:assignee",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listReadyWork",
+      "member": "query:brief",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:listReadyWork",
+      "member": "query:exclude_label",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listReadyWork",
+      "member": "query:exclude_type",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listReadyWork",
+      "member": "query:has_metadata_key",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listReadyWork",
+      "member": "query:include_deferred",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:listReadyWork",
+      "member": "query:include_ephemeral",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:listReadyWork",
+      "member": "query:label",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listReadyWork",
+      "member": "query:label_any",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listReadyWork",
+      "member": "query:label_pattern",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listReadyWork",
+      "member": "query:label_regex",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listReadyWork",
+      "member": "query:limit",
+      "type": "integer",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "100"
+    },
+    {
+      "schema": "param:listReadyWork",
+      "member": "query:metadata_field",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listReadyWork",
+      "member": "query:parent",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listReadyWork",
+      "member": "query:priority",
+      "type": "integer",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listReadyWork",
+      "member": "query:sort",
+      "type": "string",
+      "enum": [
+        "hybrid",
+        "oldest",
+        "priority"
+      ],
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "priority"
+    },
+    {
+      "schema": "param:listReadyWork",
+      "member": "query:type",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listReadyWork",
+      "member": "query:unassigned",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listRelatedIssues",
+      "member": "path:id",
+      "type": "string",
+      "required": true,
+      "style": "simple"
+    },
+    {
+      "schema": "param:listRelatedIssues",
+      "member": "query:direction",
+      "type": "string",
+      "enum": [
+        "in",
+        "out"
+      ],
+      "required": true,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listRelatedIssues",
+      "member": "query:type",
+      "type": "array",
+      "required": false,
+      "item_type": "string",
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:queryIssues",
+      "member": "query:all",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:queryIssues",
+      "member": "query:limit",
+      "type": "integer",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "50"
+    },
+    {
+      "schema": "param:queryIssues",
+      "member": "query:q",
+      "type": "string",
+      "required": true,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:queryIssues",
+      "member": "query:reverse",
+      "type": "boolean",
+      "required": false,
+      "style": "form",
+      "explode": true,
+      "default": "false"
+    },
+    {
+      "schema": "param:queryIssues",
+      "member": "query:sort",
+      "type": "string",
+      "enum": [
+        "assignee",
+        "closed",
+        "created",
+        "id",
+        "priority",
+        "status",
+        "title",
+        "type",
+        "updated"
+      ],
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:releaseIssue",
+      "member": "path:id",
+      "type": "string",
+      "required": true,
+      "style": "simple"
+    },
+    {
+      "schema": "param:reopenIssue",
+      "member": "path:id",
+      "type": "string",
+      "required": true,
+      "style": "simple"
+    },
+    {
+      "schema": "param:setSetting",
+      "member": "path:key",
+      "type": "string",
+      "required": true,
+      "style": "simple"
+    },
+    {
+      "schema": "param:unsetSetting",
+      "member": "path:key",
+      "type": "string",
+      "required": true,
+      "style": "simple"
+    },
+    {
+      "schema": "param:updateIssue",
+      "member": "path:id",
+      "type": "string",
+      "required": true,
+      "style": "simple"
+    },
+    {
+      "schema": "param:watchEvents",
+      "member": "header:Last-Event-ID",
+      "type": "integer",
+      "format": "int64",
+      "required": false,
+      "style": "simple"
+    },
+    {
+      "schema": "param:watchEvents",
+      "member": "query:since",
+      "type": "integer",
+      "format": "int64",
+      "required": true,
+      "style": "form",
+      "explode": true
+    }
+  ]
+}

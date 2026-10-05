@@ -204,6 +204,17 @@ Configure the connection with flags or environment variables:
 | `--server-user` | `BEADS_DOLT_SERVER_USER` | `root` |
 | | `BEADS_DOLT_PASSWORD` | (none) |
 
+**`BEADS_DOLT_SERVER_PORT` also declares the server externally managed.**
+Setting it — or the legacy `BEADS_DOLT_PORT` — makes `ResolveServerMode`
+classify the workspace as an externally-managed server, so bd will not
+auto-start a server for it: if nothing is listening on that port you get
+`auto-start is suppressed because the server is externally managed` rather
+than a server started on it. Use these vars to point bd at a server you
+already run; they are not a way to choose the port of a bd-owned server. A
+`dolt_mode: proxied-server` workspace is exempt — it reaches its server
+through the proxy, so an ambient port does not describe its lifecycle — and
+a shared-server workspace is already classified external on its own.
+
 **Unix domain sockets:** Use `--server-socket` to connect via a Unix socket
 instead of TCP. This avoids port conflicts between concurrent projects and is
 useful in sandboxed environments (e.g., Claude Code) where file-level access
@@ -252,6 +263,25 @@ merge. On an affected database that hard reset returns
 stop at that step, and an abandoned merge is left without its rollback. See
 [Which Dolt version to install](#which-dolt-version-to-install) for the check
 and the fix.
+
+### Why a garbage collection can reclaim nothing
+
+Dolt's garbage collector is **generational**. Every pass moves the data
+reachable at that moment into an *old generation*, and a default pass only
+examines the *new generation* — data written since the last collection. So the
+second collection on a store never revisits what the first one kept, however
+much of it has since become unreachable. Squashing history and then running a
+default `dolt gc` is the case where this bites: the orphaned commit chain
+usually sits in the old generation, and the pass frees almost nothing.
+
+`dolt gc --full` collects both generations. It frees everything a default pass
+frees, plus the old generation, so it is never worth running a default pass
+first to save time. If a full collection frees nothing, the remaining bytes are
+still referenced — by a branch, a tag, or a cached remote-tracking ref — and
+the fix is to remove the reference, not to collect again. The
+[History Bloat runbook](/recovery/history-squash) walks through that diagnosis;
+[`bd flatten`](/cli-reference/flatten), [`bd compact`](/cli-reference/compact),
+and [`bd gc`](/cli-reference/gc) document the collection each one runs.
 
 ## Migrating Between Backends
 
@@ -545,6 +575,11 @@ dolt:
 | `DOLT_REMOTE_USER` | Clone/push/pull auth user |
 | `DOLT_REMOTE_PASSWORD` | Clone/push/pull auth password |
 | `BD_DOLT_AUTO_COMMIT` | Override auto-commit setting |
+
+**Note:** `BEADS_DOLT_SERVER_PORT` (and the legacy `BEADS_DOLT_PORT`) do more
+than name a port — setting either also marks the workspace as an
+externally-managed server and suppresses auto-start. See **Server Mode**
+above.
 
 ### Credentials File
 

@@ -1,0 +1,30 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "remotecache",
+    srcs = [
+        "cache.go",
+        "url.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/remotecache",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/configfile",
+        "//internal/debug",
+        "//internal/githooksenv",
+        "//internal/gittraceenv",
+        "//internal/lockfile",
+        "//internal/storage",
+    ],
+)
+
+go_test(
+    name = "remotecache_test",
+    srcs = [
+        "cache_test.go",
+        "doltcmd_test.go",
+        "url_test.go",
+    ],
+    embed = [":remotecache"],
+    deps = ["//internal/githooksenv"],
+)

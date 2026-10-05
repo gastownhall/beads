@@ -1,6 +1,7 @@
 package configfile
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -872,6 +873,45 @@ func TestProxiedServerClientInfo_RoundTrip(t *testing.T) {
 	})
 }
 
+func TestSaveProxiedServerClientInfo_WritesEffectiveIdleTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   time.Duration
+		want time.Duration
+	}{
+		{name: "default", in: 0, want: DefaultProxyIdleTimeout},
+		{name: "never", in: -1, want: -1},
+		{name: "positive", in: 45 * time.Second, want: 45 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			info := &ProxiedServerClientInfo{RootPath: "/var/lib/beads/proxieddb", IdleTimeout: tc.in}
+			if err := SaveProxiedServerClientInfo(dir, info); err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+
+			data, err := os.ReadFile(ProxiedServerClientInfoPath(dir))
+			if err != nil {
+				t.Fatalf("ReadFile: %v", err)
+			}
+			var raw map[string]any
+			if err := json.Unmarshal(data, &raw); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			got, ok := raw["idle_timeout"]
+			if !ok {
+				t.Fatalf("idle_timeout is absent from sidecar: %s", data)
+			}
+			if got != float64(tc.want.Nanoseconds()) {
+				t.Fatalf("idle_timeout = %v, want %d: %s", got, tc.want.Nanoseconds(), data)
+			}
+			if info.IdleTimeout != tc.want {
+				t.Fatalf("caller plan IdleTimeout = %s, want effective %s", info.IdleTimeout, tc.want)
+			}
+		})
+	}
+}
+
 func TestProxiedServerClientInfo_ResolvedPaths(t *testing.T) {
 	beadsDir := "/home/user/project/.beads"
 
@@ -1075,6 +1115,7 @@ func TestEnvVarOverrides(t *testing.T) {
 
 	t.Run("invalid port env var falls through to config", func(t *testing.T) {
 		t.Setenv("BEADS_DOLT_SERVER_PORT", "not-a-number")
+		t.Setenv("BEADS_DOLT_PORT", "")
 		cfg := &Config{DoltServerPort: 3308}
 		if got := cfg.GetDoltServerPort(); got != 3308 {
 			t.Errorf("GetDoltServerPort() = %d, want 3308", got)
@@ -1082,6 +1123,7 @@ func TestEnvVarOverrides(t *testing.T) {
 	})
 
 	t.Run("BEADS_DOLT_PORT fallback when SERVER_PORT not set", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 		t.Setenv("BEADS_DOLT_PORT", "3307")
 		cfg := &Config{}
 		if got := cfg.GetDoltServerPort(); got != 3307 {
@@ -1115,6 +1157,7 @@ func TestEnvVarOverrides(t *testing.T) {
 	})
 
 	t.Run("database default", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
 		cfg := &Config{}
 		if got := cfg.GetDoltDatabase(); got != DefaultDoltDatabase {
 			t.Errorf("GetDoltDatabase() = %q, want %q", got, DefaultDoltDatabase)
@@ -1122,6 +1165,7 @@ func TestEnvVarOverrides(t *testing.T) {
 	})
 
 	t.Run("database config value", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
 		cfg := &Config{DoltDatabase: "mydb"}
 		if got := cfg.GetDoltDatabase(); got != "mydb" {
 			t.Errorf("GetDoltDatabase() = %q, want mydb", got)
@@ -1295,5 +1339,54 @@ func TestGlobalDoltDatabase_OmittedFromJSON(t *testing.T) {
 
 	if strings.Contains(string(data), "global_dolt_database") {
 		t.Error("global_dolt_database should be omitted from JSON when empty")
+	}
+}
+
+// TestPortImpliesServerMode covers the predicate doltserver's check 2c
+// delegates to. The precedence it encodes -- proxied exemption first, then a
+// live env var outranking an explicit dolt_mode -- is deliberate and mirrors
+// HostImpliesServerMode, whose own env check runs before its DoltMode
+// suppression and can return first (be-yb2ai).
+func TestPortImpliesServerMode(t *testing.T) {
+	tests := []struct {
+		name       string
+		cfg        *Config
+		serverPort string
+		legacyPort string
+		want       bool
+	}{
+		{"no env, no mode", &Config{}, "", "", false},
+		{"BEADS_DOLT_SERVER_PORT set", &Config{}, "3307", "", true},
+		{"legacy BEADS_DOLT_PORT set", &Config{}, "", "3307", true},
+		{"SERVER_PORT wins over legacy", &Config{}, "3307", "9999", true},
+		{"legacy used when SERVER_PORT empty", &Config{}, "", "3307", true},
+		{"non-numeric port ignored", &Config{}, "notaport", "", false},
+		{"zero port ignored", &Config{}, "0", "", false},
+		{"negative port ignored", &Config{}, "-1", "", false},
+		{"falls back to legacy when SERVER_PORT invalid", &Config{}, "notaport", "3307", true},
+
+		// A live env var outranks an explicit dolt_mode, matching
+		// HostImpliesServerMode's env tier (GH#2949).
+		{"env beats explicit embedded", &Config{DoltMode: DoltModeEmbedded}, "3307", "", true},
+		{"env beats explicit server", &Config{DoltMode: DoltModeServer}, "3307", "", true},
+
+		// ...except for proxied-server, which is exempt outright: it reaches
+		// its server through the proxy, so an ambient port does not describe
+		// its lifecycle.
+		{"proxied-server exempt even with env port", &Config{DoltMode: DoltModeProxiedServer}, "3307", "", false},
+		{"proxied-server exempt, legacy port", &Config{DoltMode: DoltModeProxiedServer}, "", "3307", false},
+		{"proxied-server exempt, case-insensitive", &Config{DoltMode: "Proxied-Server"}, "3307", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("BEADS_DOLT_SERVER_PORT", tt.serverPort)
+			t.Setenv("BEADS_DOLT_PORT", tt.legacyPort)
+
+			if got := tt.cfg.PortImpliesServerMode(); got != tt.want {
+				t.Errorf("PortImpliesServerMode() = %v, want %v (dolt_mode=%q SERVER_PORT=%q PORT=%q)",
+					got, tt.want, tt.cfg.DoltMode, tt.serverPort, tt.legacyPort)
+			}
+		})
 	}
 }

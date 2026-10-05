@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // TestStartDetachedReapsExitedChild is the GH#5900 regression: a child that
@@ -27,7 +29,7 @@ func TestStartDetachedReapsExitedChild(t *testing.T) {
 	}
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestStartDetachedReapsExitedChild$") //nolint:gosec // test binary re-exec
-	cmd.Env = append(os.Environ(), "BD_TEST_FLUSHER_HELPER=1")
+	cmd.Env = append(bazeltest.ShardFreeEnv(os.Environ()), "BD_TEST_FLUSHER_HELPER=1")
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil

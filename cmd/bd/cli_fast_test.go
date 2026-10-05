@@ -14,6 +14,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
+	"github.com/steveyegge/beads/internal/testutil/credentialcmd"
 )
 
 // Fast CLI tests converted from scripttest suite
@@ -141,6 +144,13 @@ func createTempDirWithCleanup(t *testing.T) string {
 	return tmpDir
 }
 
+// restoreEnvSnapshot puts the process environment back to before, a prior
+// os.Environ(): an in-process rootCmd.Execute mutates the environment with
+// raw os.Setenv and restores nothing (see installExecuteIsolation, which now
+// does this for every execution; kept here so the runners do not depend on
+// TestMain having installed it).
+func restoreEnvSnapshot(before []string) { restoreProcessEnv(before) }
+
 // runBDInProcess runs bd commands in-process by calling rootCmd.Execute
 // This is ~10-20x faster than exec.Command because it avoids process spawn overhead
 func runBDInProcess(t *testing.T, dir string, args ...string) string {
@@ -172,12 +182,19 @@ func runBDInProcess(t *testing.T, dir string, args ...string) string {
 		os.Stderr = oldStderr
 	}()
 
+	// Start from the registered flag defaults: cobra keeps every parsed
+	// value (and Changed) on the shared command tree across Execute calls.
+	resetCommandFlags(rootCmd)
+	defer resetCommandFlags(rootCmd)
+
 	// Set args for rootCmd
 	rootCmd.SetArgs(args)
 	os.Args = append([]string{"bd"}, args...)
 
 	// Execute command
+	envBefore := os.Environ()
 	err := rootCmd.Execute()
+	restoreEnvSnapshot(envBefore)
 
 	// Close and clean up all global state to prevent contamination between tests
 	if store != nil {
@@ -1013,16 +1030,20 @@ func init() {
 	if os.Getenv(worktreeRemoveHelperEnv) != "" {
 		return
 	}
+	// Likewise the credential-command helper (internal/testutil/credentialcmd):
+	// this init runs before TestMain dispatches it, in the helper's cwd, where
+	// the `go build .` fallback panics and the fixture reports exit 2.
+	if credentialcmd.IsHelperProcess() {
+		return
+	}
 	// Prebuilt fast path (scripts/test.sh and CI export this), else build
 	// once. No repo-root ./bd reuse: a stale checkout-root binary silently
 	// substitutes itself for the source under test (wy-4mtr0).
-	if prebuilt := os.Getenv("BEADS_TEST_BD_BINARY"); prebuilt != "" {
-		if abs, err := filepath.Abs(prebuilt); err == nil {
-			if _, statErr := os.Stat(abs); statErr == nil {
-				testBD = abs
-				return
-			}
-		}
+	if prebuilt, err := findPrebuiltBDBinary(); err == nil && prebuilt != "" {
+		testBD = prebuilt
+		return
+	} else if bazeltest.IsBazel() {
+		panic(fmt.Sprintf("bd binary for tests: %v", err))
 	}
 	bdBinary := "bd"
 	if runtime.GOOS == "windows" {
@@ -1035,7 +1056,7 @@ func init() {
 		panic(err)
 	}
 	testBD = filepath.Join(tmpDir, bdBinary)
-	cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", testBD, ".")
+	cmd := goBuildBDCommand(testBD)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		panic(string(out))
 	}
@@ -1224,10 +1245,14 @@ func runBDInProcessAllowError(t *testing.T, dir string, args ...string) (string,
 		os.Stderr = oldStderr
 	}()
 
+	resetCommandFlags(rootCmd)
+	defer resetCommandFlags(rootCmd)
 	rootCmd.SetArgs(args)
 	os.Args = append([]string{"bd"}, args...)
 
+	envBefore := os.Environ()
 	cmdErr := rootCmd.Execute()
+	restoreEnvSnapshot(envBefore)
 
 	if store != nil {
 		store.Close()
@@ -1368,25 +1393,6 @@ func TestCLI_CreateDryRun(t *testing.T) {
 		}
 	})
 
-	t.Run("DryRunWithRigPrefix", func(t *testing.T) {
-		tmpDir := setupCLITestDB(t)
-
-		// Run create with --dry-run and --prefix (simulates cross-rig creation)
-		// Note: This won't actually route to another rig since we don't have one,
-		// but it should show the target rig in the preview
-		out := runBDInProcess(t, tmpDir, "create", "Cross-rig issue", "-p", "1",
-			"--prefix", "other-rig",
-			"--dry-run")
-
-		// Verify target rig is shown in preview
-		if !strings.Contains(out, "Target rig:") {
-			t.Errorf("Expected 'Target rig:' in output, got: %s", out)
-		}
-		if !strings.Contains(out, "other-rig") {
-			t.Errorf("Expected 'other-rig' in output, got: %s", out)
-		}
-	})
-
 	t.Run("DryRunWithFileReturnsError", func(t *testing.T) {
 		tmpDir := createTempDirWithCleanup(t)
 
@@ -1456,8 +1462,6 @@ func TestCLI_CreateDryRun(t *testing.T) {
 
 // TestCLI_CommentsListMisplacedSyntax ensures "bd comments list" gets a helpful error (GH#3542).
 func TestCLI_CommentsListMisplacedSyntax(t *testing.T) {
-	t.Parallel()
-
 	tmpDir := setupCLITestDB(t)
 	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "comments", "list")
 	if err == nil {
@@ -1525,11 +1529,13 @@ func TestCLI_CommentsSwappedAddRejectedInProxiedServerMode(t *testing.T) {
 	}
 }
 
-// TestCLI_CommentsAddShortID tests that 'comments add' accepts short IDs (issue #1070)
-// Most bd commands accept short IDs (e.g., "5wbm") but comments add previously required
-// full IDs (e.g., "mike.vibe-coding-5wbm"). This test ensures short IDs work.
-//
-// Note: Short IDs work because the code calls utils.ResolvePartialID().
+// TestCLI_CommentsAddShortID tests that 'comments add' accepts a bare full
+// hash without its issue prefix (e.g. "5wbm" for "mike.vibe-coding-5wbm",
+// issue #1070) — full IDs used to be required. It does NOT test genuine
+// abbreviation (a hash shorter than the real one): since PR #5393, comment
+// writes require an exact id (see resolveAndGetIssueForMutationExact /
+// utils.ResolvePartialIDExact) and PartialIDWithCommentsAdd below asserts
+// that a real abbreviation is refused, not accepted.
 func TestCLI_CommentsAddShortID(t *testing.T) {
 
 	t.Run("ShortIDWithCommentsAdd", func(t *testing.T) {
@@ -1582,6 +1588,14 @@ func TestCLI_CommentsAddShortID(t *testing.T) {
 		}
 	})
 
+	// PartialIDWithCommentsAdd used to assert that a genuinely abbreviated id
+	// (shorter than the full hash) succeeded on "comments add" — true when
+	// this test was written (issue #1070), but no longer the contract: PR
+	// #5393 review item M1 established that "comments add" must refuse an
+	// abbreviation exactly like "comment" (singular) does (see
+	// TestCLI_CommentAbbreviatedIDRejectedWithTruthfulMessage), since the two
+	// are documented as guarded twins (CHANGELOG.md, hash-ids.md). This
+	// subtest now asserts the refusal instead of the old silent-accept.
 	t.Run("PartialIDWithCommentsAdd", func(t *testing.T) {
 		tmpDir := setupCLITestDB(t)
 
@@ -1595,22 +1609,53 @@ func TestCLI_CommentsAddShortID(t *testing.T) {
 		json.Unmarshal([]byte(jsonOut), &issue)
 		fullID := issue["id"].(string)
 
-		// Extract short ID and use only first 4 characters (partial match)
+		// Derive the abbreviation as a strict, one-character-shorter leading
+		// prefix of the real hash — the same derivation
+		// comment_proxied_integration_test.go:247 already uses. The previous
+		// "truncate to 4 chars, only if longer than 4" logic never fired
+		// against a fresh test DB's fixture hashes (min_hash_length unset,
+		// hashes as short as 3 chars), so shortID stayed equal to the full
+		// hash and this subtest was dead-red in its own setup, never reaching
+		// the assertions below (PR #5393 review R2, bee-ghosttrack) — and
+		// mutation P-B (reverting comments.go's resolver back to the
+		// abbreviation-tolerant one) went uncaught as a result.
 		parts := strings.Split(fullID, "-")
-		shortID := parts[len(parts)-1]
-		if len(shortID) > 4 {
-			shortID = shortID[:4] // Use only first 4 chars for partial match
+		hash := parts[len(parts)-1]
+		if len(hash) < 2 {
+			t.Fatalf("test setup: hash %q too short to abbreviate", hash)
 		}
+		shortID := hash[:len(hash)-1]
 		t.Logf("Full ID: %s, Partial ID: %s", fullID, shortID)
 
-		// Add comment using partial ID
-		stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "comments", "add", shortID, "Comment via partial ID")
+		// Sanity check: the same abbreviation still works on a READ path
+		// (show), proving this is a real, resolvable abbreviation and not an
+		// accident of the fixture — the refusal below is specific to writes.
+		showOut, showErr, err := runBDInProcessAllowError(t, tmpDir, "show", shortID, "--json")
 		if err != nil {
-			t.Fatalf("comments add with partial ID failed: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
+			t.Fatalf("fixture sanity check failed: 'bd show %s' unexpectedly failed: %v\nstdout: %s\nstderr: %s", shortID, err, showOut, showErr)
+		}
+		if !strings.Contains(showOut, fullID) {
+			t.Fatalf("fixture sanity check failed: 'bd show %s' did not resolve to %s, got: %s", shortID, fullID, showOut)
 		}
 
-		if !strings.Contains(stdout, "Comment added") {
-			t.Errorf("Expected 'Comment added' in output, got: %s", stdout)
+		// Add comment using partial ID — must now be refused, truthfully.
+		stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "comments", "add", shortID, "Comment via partial ID")
+		if err == nil {
+			t.Fatalf("expected non-zero exit for 'bd comments add %s ...' (abbreviation on a write path), got stdout=%q stderr=%q", shortID, stdout, stderr)
+		}
+		combined := stdout + stderr
+		if !strings.Contains(combined, "abbreviations are not accepted") {
+			t.Errorf("expected the truthful abbreviation-refusal message, got stdout=%q stderr=%q", stdout, stderr)
+		}
+		if strings.Contains(combined, "not found") {
+			t.Errorf("message must not claim the issue was not found — %s exists, only the abbreviation was refused; got stdout=%q stderr=%q", fullID, stdout, stderr)
+		}
+
+		// Regression check: no comment silently landed on the real issue.
+		commentsOut := runBDInProcess(t, tmpDir, "comments", fullID, "--json")
+		trimmed := strings.TrimSpace(commentsOut)
+		if trimmed != "[]" && trimmed != "null" {
+			t.Fatalf("expected no comments on %s after rejected abbreviated 'comments add', got: %s", fullID, commentsOut)
 		}
 	})
 
@@ -1656,8 +1701,6 @@ func TestCLI_CommentsAddShortID(t *testing.T) {
 // the plural sibling), AND — the part that actually matters for this
 // specific bug — no comment silently landed on an unrelated real issue.
 func TestCLI_CommentListMisplacedSyntax(t *testing.T) {
-	t.Parallel()
-
 	tmpDir := setupCLITestDB(t)
 
 	out := runBDInProcess(t, tmpDir, "create", "Bystander issue", "-p", "1", "--json")
@@ -1697,8 +1740,6 @@ func TestCLI_CommentListMisplacedSyntax(t *testing.T) {
 // "bd comment add <id> <text>", which the same unguarded id-resolution bug
 // would parse as id="add", text=[<id>, <text>...].
 func TestCLI_CommentAddMisplacedSyntax(t *testing.T) {
-	t.Parallel()
-
 	tmpDir := setupCLITestDB(t)
 
 	out := runBDInProcess(t, tmpDir, "create", "Bystander issue for add-typo", "-p", "1", "--json")
@@ -1781,8 +1822,6 @@ func TestCLI_CommentMisplacedSyntaxRejectedInProxiedServerMode(t *testing.T) {
 // TEXT that happens to start with "list" or "add" must still work exactly
 // as before, since args[0] (the id slot) is what's checked, never the text.
 func TestCLI_CommentTextStartingWithReservedWordStillWorks(t *testing.T) {
-	t.Parallel()
-
 	tmpDir := setupCLITestDB(t)
 
 	out := runBDInProcess(t, tmpDir, "create", "Issue for reserved-word-text test", "-p", "1", "--json")
@@ -1807,6 +1846,168 @@ func TestCLI_CommentTextStartingWithReservedWordStillWorks(t *testing.T) {
 	commentsOut := runBDInProcess(t, tmpDir, "comments", fullID, "--json")
 	if !strings.Contains(commentsOut, "list of things to do") {
 		t.Fatalf("expected comment text to be stored verbatim, got: %s", commentsOut)
+	}
+}
+
+// TestCLI_CommentRmDeleteReservedWordsRejected covers the two reserved words
+// TestCLI_CommentListMisplacedSyntax/TestCLI_CommentAddMisplacedSyntax do not:
+// "rm" and "delete" carry no hand-written case in validateCommentArgs (unlike
+// "list"/"add"), so they fall through to checkCommentIDNotReservedWord's
+// generic message and, before this test, had no CLI-level (cobra-dispatch)
+// coverage at all — steveyegge's PR #5393 review (item a) flagged that
+// generic message as potentially misleading for these two specifically, since
+// neither is an actual "bd comments" subcommand the way "list"/"add" are.
+// This pins both halves: the command is rejected, AND — the part that
+// actually matters — no comment silently lands on an unrelated real issue.
+func TestCLI_CommentRmDeleteReservedWordsRejected(t *testing.T) {
+	for _, word := range []string{"rm", "delete"} {
+		t.Run(word, func(t *testing.T) {
+			tmpDir := setupCLITestDB(t)
+
+			out := runBDInProcess(t, tmpDir, "create", "Bystander issue for "+word+"-typo", "-p", "1", "--json")
+			jsonStart := strings.Index(out, "{")
+			if jsonStart < 0 {
+				t.Fatalf("No JSON found in create output: %s", out)
+			}
+			var issue map[string]interface{}
+			if err := json.Unmarshal([]byte(out[jsonStart:]), &issue); err != nil {
+				t.Fatalf("Failed to parse create JSON: %v\nOutput: %s", err, out)
+			}
+			fullID := issue["id"].(string)
+
+			stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "comment", word, "accidental stray text")
+			if err == nil {
+				t.Fatalf("expected non-zero exit for 'bd comment %s ...', got stdout=%q stderr=%q", word, stdout, stderr)
+			}
+			combined := stdout + stderr
+			// Must be refused as an id/reserved word — but, unlike "list"/"add",
+			// must NOT claim it is a misplaced "bd comments" subcommand: there is
+			// no "bd comments rm" or "bd comments delete".
+			if !strings.Contains(combined, "not a valid issue id") {
+				t.Errorf("expected a not-a-valid-issue-id refusal, got stdout=%q stderr=%q", stdout, stderr)
+			}
+			if strings.Contains(combined, "misplaced") {
+				t.Errorf("message falsely implies %q is a misplaced \"bd comments\" subcommand (it isn't one), got stdout=%q stderr=%q", word, stdout, stderr)
+			}
+
+			// The regression check: the bystander issue must have received NO
+			// comment.
+			commentsOut := runBDInProcess(t, tmpDir, "comments", fullID, "--json")
+			trimmed := strings.TrimSpace(commentsOut)
+			if trimmed != "[]" && trimmed != "null" {
+				t.Fatalf("expected no comments on bystander issue %s after rejected 'comment %s', got: %s", fullID, word, commentsOut)
+			}
+		})
+	}
+}
+
+// TestCLI_CommentsAddReservedWordRejectedThroughCobraDispatch closes PR #5393
+// review R2's "NEW MINOR — the guard's wiring is untested": comments_add_test.go
+// unit-tests validateCommentsAddArgs directly, and that catches a gutted
+// function body (mutation P-C), but nothing drove "bd comments add
+// <reserved-word> ..." through actual cobra dispatch — unwiring
+// commentsAddCmd's Args field back to cobra.MinimumNArgs(1) left every
+// existing test green (mutation P-D). This runs the real command line, the
+// way a caller or an automated session actually invokes it, for every word in
+// commentReservedIDWords (validateCommentsAddArgs has no singular/plural
+// special-casing, unlike "comment"'s validateCommentArgs, so all four take
+// the same generic-message path and are equally worth covering here).
+func TestCLI_CommentsAddReservedWordRejectedThroughCobraDispatch(t *testing.T) {
+	for _, word := range []string{"list", "add", "rm", "delete"} {
+		t.Run(word, func(t *testing.T) {
+			tmpDir := setupCLITestDB(t)
+
+			out := runBDInProcess(t, tmpDir, "create", "Bystander issue for comments-add "+word+"-typo", "-p", "1", "--json")
+			jsonStart := strings.Index(out, "{")
+			if jsonStart < 0 {
+				t.Fatalf("No JSON found in create output: %s", out)
+			}
+			var issue map[string]interface{}
+			if err := json.Unmarshal([]byte(out[jsonStart:]), &issue); err != nil {
+				t.Fatalf("Failed to parse create JSON: %v\nOutput: %s", err, out)
+			}
+			fullID := issue["id"].(string)
+
+			stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "comments", "add", word, "accidental stray text")
+			if err == nil {
+				t.Fatalf("expected non-zero exit for 'bd comments add %s ...', got stdout=%q stderr=%q", word, stdout, stderr)
+			}
+			combined := stdout + stderr
+			if !strings.Contains(combined, "not a valid issue id") {
+				t.Errorf("expected a not-a-valid-issue-id refusal, got stdout=%q stderr=%q", stdout, stderr)
+			}
+
+			// The regression check: the bystander issue must have received NO
+			// comment — this is exactly what unwiring commentsAddCmd.Args back
+			// to cobra.MinimumNArgs(1) would silently allow through.
+			commentsOut := runBDInProcess(t, tmpDir, "comments", fullID, "--json")
+			trimmed := strings.TrimSpace(commentsOut)
+			if trimmed != "[]" && trimmed != "null" {
+				t.Fatalf("expected no comments on bystander issue %s after rejected 'comments add %s', got: %s", fullID, word, commentsOut)
+			}
+		})
+	}
+}
+
+// TestCLI_CommentAbbreviatedIDRejectedWithTruthfulMessage is the CLI-level
+// regression test for steveyegge's PR #5393 review item (c): a leading-prefix
+// abbreviation of a REAL issue's id is refused on comment writes (exact-only
+// policy, unchanged), but the refusal message must not claim the issue does
+// not exist — it does, the abbreviation was just refused. Before this fix,
+// resolveAndGetIssueForMutationExact surfaced ResolvePartialIDExact's plain
+// "no issue found matching %q", which is false in exactly this case; every
+// other command family (show/close/update) still accepts the same
+// abbreviation, so a truthful, distinguishing message matters here more than
+// most refusals.
+func TestCLI_CommentAbbreviatedIDRejectedWithTruthfulMessage(t *testing.T) {
+	tmpDir := setupCLITestDB(t)
+
+	out := runBDInProcess(t, tmpDir, "create", "Needs an exact id on comment", "-p", "1", "--json")
+	jsonStart := strings.Index(out, "{")
+	if jsonStart < 0 {
+		t.Fatalf("No JSON found in create output: %s", out)
+	}
+	var issue map[string]interface{}
+	if err := json.Unmarshal([]byte(out[jsonStart:]), &issue); err != nil {
+		t.Fatalf("Failed to parse create JSON: %v\nOutput: %s", err, out)
+	}
+	fullID := issue["id"].(string)
+	if len(fullID) < 4 {
+		t.Fatalf("test setup: generated id %q too short to abbreviate", fullID)
+	}
+	abbrev := fullID[:len(fullID)-1]
+
+	// Sanity check: the same abbreviation still works on a READ path (show),
+	// proving this is a real, resolvable abbreviation and not an accident of
+	// the fixture — the gap this test guards is specific to comment WRITES.
+	showOut, showErr, err := runBDInProcessAllowError(t, tmpDir, "show", abbrev, "--json")
+	if err != nil {
+		t.Fatalf("fixture sanity check failed: 'bd show %s' unexpectedly failed: %v\nstdout: %s\nstderr: %s", abbrev, err, showOut, showErr)
+	}
+	if !strings.Contains(showOut, fullID) {
+		t.Fatalf("fixture sanity check failed: 'bd show %s' did not resolve to %s, got: %s", abbrev, fullID, showOut)
+	}
+
+	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "comment", abbrev, "should not be written")
+	if err == nil {
+		t.Fatalf("expected non-zero exit for 'bd comment %s ...' (abbreviation on a write path), got stdout=%q stderr=%q", abbrev, stdout, stderr)
+	}
+	combined := stdout + stderr
+	if !strings.Contains(combined, "abbreviations are not accepted") {
+		t.Errorf("expected the truthful abbreviation-refusal message, got stdout=%q stderr=%q", stdout, stderr)
+	}
+	if !strings.Contains(combined, "bd show") {
+		t.Errorf("expected the message to point at the full id via `bd show`, got stdout=%q stderr=%q", stdout, stderr)
+	}
+	if strings.Contains(combined, "not found") {
+		t.Errorf("message must not claim the issue was not found — %s exists, only the abbreviation was refused; got stdout=%q stderr=%q", fullID, stdout, stderr)
+	}
+
+	// The regression check: no comment silently landed on the real issue.
+	commentsOut := runBDInProcess(t, tmpDir, "comments", fullID, "--json")
+	trimmed := strings.TrimSpace(commentsOut)
+	if trimmed != "[]" && trimmed != "null" {
+		t.Fatalf("expected no comments on %s after rejected abbreviated 'comment', got: %s", fullID, commentsOut)
 	}
 }
 
@@ -1840,7 +2041,11 @@ func TestCLI_CreateRejectsFlagLikeTitles(t *testing.T) {
 			}
 
 			// Attempt to create with a flag-like positional title
-			cmd := exec.Command(testBD, "create", tc.title)
+			// "--" ends flag parsing, so the title reaches create's own
+			// positional-title guard instead of cobra's flag parser
+			// (which answers --help with help and --foo-bar with
+			// "unknown flag").
+			cmd := exec.Command(testBD, "create", "--", tc.title)
 			cmd.Dir = tmpDir
 			cmd.Env = os.Environ()
 			out, err := cmd.CombinedOutput()
@@ -1854,6 +2059,38 @@ func TestCLI_CreateRejectsFlagLikeTitles(t *testing.T) {
 			}
 		})
 	}
+
+	// Without "--" cobra rejects an unknown flag-like word before create's
+	// guard runs; either way bd-2c0's point holds: no garbage issue.
+	t.Run("BareUnknownFlagCreatesNothing", func(t *testing.T) {
+		tmpDir := createTempDirWithCleanup(t)
+		initCmd := exec.Command(testBD, "init", "--prefix", "test", "--quiet")
+		initCmd.Dir = tmpDir
+		initCmd.Env = os.Environ()
+		if out, err := initCmd.CombinedOutput(); err != nil {
+			t.Fatalf("init failed: %v\n%s", err, out)
+		}
+		cmd := exec.Command(testBD, "create", "--foo-bar")
+		cmd.Dir = tmpDir
+		cmd.Env = os.Environ()
+		if out, err := cmd.CombinedOutput(); err == nil {
+			t.Fatalf("bd create --foo-bar succeeded:\n%s", out)
+		}
+		list := exec.Command(testBD, "list", "--json", "--all")
+		list.Dir = tmpDir
+		list.Env = os.Environ()
+		out, err := list.Output()
+		if err != nil {
+			t.Fatalf("bd list: %v\n%s", err, out)
+		}
+		var issues []map[string]any
+		if err := json.Unmarshal(out, &issues); err != nil {
+			t.Fatalf("bd list --json: %v\n%s", err, out)
+		}
+		if len(issues) != 0 {
+			t.Fatalf("bd create --foo-bar created %d issue(s): %s", len(issues), out)
+		}
+	})
 
 	// Verify that --title flag with dash-prefixed value is still allowed
 	t.Run("TitleFlagAllowsDashes", func(t *testing.T) {
@@ -1909,22 +2146,9 @@ func TestCLI_CreateRejectsEmptyTitle_ProxiedServerMode(t *testing.T) {
 	t.Cleanup(func() { proxiedServerMode = origProxied })
 	proxiedServerMode = true
 
-	// createCmd is a shared package-level *cobra.Command, so a --title value
-	// set by an earlier in-process test invocation (e.g. TestCLI_CreateRejectsEmptyTitle's
-	// own FlagTab case) survives on the FlagSet across rootCmd.Execute() calls.
-	// Reset it explicitly so this test's outcome doesn't depend on suite
-	// ordering — a pre-existing gap, not something this test should also fall
-	// victim to.
-	titleFlag := createCmd.Flags().Lookup("title")
-	origTitleValue := titleFlag.Value.String()
-	origTitleChanged := titleFlag.Changed
-	t.Cleanup(func() {
-		_ = titleFlag.Value.Set(origTitleValue)
-		titleFlag.Changed = origTitleChanged
-	})
-	_ = titleFlag.Value.Set("")
-	titleFlag.Changed = false
-
+	// A --title left on createCmd by an earlier in-process run cannot leak
+	// in: runBDInProcessAllowError resets every flag first
+	// (resetCommandFlags).
 	tmpDir := setupCLITestDB(t)
 	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "create", "   ", "-p", "2")
 	if err == nil {

@@ -37,6 +37,9 @@ func TestLifecycleCreateContract(t *testing.T) {
 	t.Run("WritesEveryScalarField", func(t *testing.T) {
 		conformance.RunLifecycleCreateWritesEveryScalarField(t, ctx, fixture)
 	})
+	t.Run("EchoesSubSecondTimestamps", func(t *testing.T) {
+		conformance.RunLifecycleCreateEchoesSubSecondTimestamps(t, ctx, fixture)
+	})
 }
 
 func newUOWLifecycleCreateFixture(t *testing.T, ctx context.Context, prefix string) conformance.LifecycleCreateFixture {

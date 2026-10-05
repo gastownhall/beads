@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -193,5 +194,31 @@ func runGitForSyncTest(t *testing.T, dir string, args ...string) {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v failed: %v\n%s", args, err, string(output))
+	}
+}
+
+// TestGitRemoteHasDoltDataRefStatusSurfacesGitStderr proves the probe failure a
+// user actually sees carries git's own diagnosis. exec.ExitError.Error() is
+// only "exit status 128"; git's complaint sits unread in ExitError.Stderr, and
+// bootstrap's blocked message is built from this error (#5743).
+func TestGitRemoteHasDoltDataRefStatusSurfacesGitStderr(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "not-a-repo")
+
+	hasData, err := gitRemoteHasDoltDataRefStatus(missing)
+
+	if err == nil {
+		t.Fatalf("probe of %q returned hasData=%v and no error; want a failure", missing, hasData)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "ls-remote") {
+		t.Errorf("error %q does not name the command that failed", msg)
+	}
+	// Whatever git's exact wording, the message must be more than the bare
+	// exit status — that is the whole point of reading ExitError.Stderr.
+	if msg == "git ls-remote: exit status 128" {
+		t.Errorf("error %q carries no stderr detail; the ExitError.Stderr thread-through regressed", msg)
+	}
+	if !strings.Contains(msg, "repository") && !strings.Contains(msg, "fatal") {
+		t.Errorf("error %q does not look like it carries git's stderr", msg)
 	}
 }

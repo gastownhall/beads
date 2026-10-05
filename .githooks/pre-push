@@ -26,20 +26,38 @@ if [ "$pushing_version_tag" -eq 1 ]; then
     repo_root="$(git rev-parse --show-toplevel)"
     # Skip on older checkouts without the consistency check; do not block.
     if [ -x "$repo_root/scripts/check-versions.sh" ]; then
-        echo "Release tag push detected — verifying version consistency..."
-        if ! (cd "$repo_root" && ./scripts/check-versions.sh); then
-            echo ""
-            echo "❌ Refusing to push release tag: versions are inconsistent." >&2
-            echo "   Fix with: scripts/update-versions.sh <version>" >&2
-            echo "   Override with --no-verify only if you know what you are doing." >&2
-            exit 1
-        fi
+        while read -r local_ref _local_sha _remote_ref _remote_sha; do
+            case "$local_ref" in
+                refs/tags/v[0-9]*)
+                    tag_version="${local_ref#refs/tags/v}"
+                    echo "Release tag v$tag_version push detected — verifying version consistency..."
+                    checker_status=0
+                    (cd "$repo_root" && ./scripts/check-versions.sh --expect "$tag_version") || checker_status=$?
+                    if [ "$checker_status" -ne 0 ]; then
+                        echo ""
+                        if [ "$checker_status" -eq 1 ]; then
+                            echo "❌ Refusing to push release tag v$tag_version: versions are inconsistent." >&2
+                            echo "   See the checker output above for what is inconsistent and how to fix it." >&2
+                        elif [ "$checker_status" -eq 3 ]; then
+                            echo "❌ Refusing to push release tag v$tag_version: the tag does not match this checkout's release version." >&2
+                            echo "   The release surfaces agree with each other, so do NOT re-run update-versions.sh." >&2
+                            echo "   Push only the tag matching this checkout (see CONTRIBUTING.md)." >&2
+                        else
+                            echo "❌ Refusing to push release tag v$tag_version: version checker unavailable or failed (exit $checker_status)." >&2
+                            echo "   Check the Go toolchain and checker diagnostics above." >&2
+                        fi
+                        echo "   Override with --no-verify only if you know what you are doing." >&2
+                        exit 1
+                    fi
+                    ;;
+            esac
+        done <<< "$push_refs"
     fi
 fi
 
 exec < <(printf '%s\n' "$push_refs")
 
-# --- BEGIN BEADS INTEGRATION v1.2.2 ---
+# --- BEGIN BEADS INTEGRATION v1.3.0 ---
 # This section is managed by beads. Do not remove these markers.
 if command -v bd >/dev/null 2>&1; then
   export BD_GIT_HOOK=1
@@ -59,7 +77,7 @@ if command -v bd >/dev/null 2>&1; then
     if command -v "$_bd_timeout_candidate" >/dev/null 2>&1; then
       if _bd_timeout_version="$("$_bd_timeout_candidate" --version 2>/dev/null)"; then
         case "$_bd_timeout_version" in
-          "timeout (GNU coreutils) "*) _bd_timeout_command=$_bd_timeout_candidate; break ;;
+          "timeout (GNU coreutils) "*|"timeout (uutils coreutils) "*) _bd_timeout_command=$_bd_timeout_candidate; break ;;
         esac
       fi
     fi
@@ -96,4 +114,4 @@ if command -v bd >/dev/null 2>&1; then
   fi
   if [ "$_bd_exit" -ne 0 ]; then exit "$_bd_exit"; fi
 fi
-# --- END BEADS INTEGRATION v1.2.2 ---
+# --- END BEADS INTEGRATION v1.3.0 ---
