@@ -812,6 +812,8 @@ go_test(
         "identity_preview_gate_test.go",
         "identity_preview_refusal_test.go",
         "if_revision_embedded_test.go",
+        "if_revision_reassign_fence_embedded_test.go",
+        "if_revision_reassign_fence_proxied_test.go",
         "if_revision_test.go",
         "import_chunking_embedded_test.go",
         "import_chunking_test.go",
