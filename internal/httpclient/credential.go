@@ -21,8 +21,9 @@ import (
 // CredentialProvider authorizes outbound requests to a bd serve.
 //
 // It is the wire package's interface, aliased here because design D5 places it
-// on this package and because commercial glue (gwauth, DPoP, gateway
-// auto-detection) implements it against this name. One type, two spellings.
+// on this package: any embedder-supplied auth scheme (token sources, mutual
+// TLS helpers, gateway auto-detection) implements it against this name. One
+// type, two spellings.
 type CredentialProvider = wire.CredentialProvider
 
 const (

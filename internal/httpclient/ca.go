@@ -344,11 +344,11 @@ func resolveCAFile(target Target) (resolvedCA, error) {
 //
 // A CA-scoped target is still a single host, so it gets the same
 // keep-alive budget raised elsewhere for this reason: http.DefaultTransport's
-// MaxIdleConnsPerHost is 2, which is too small for a concurrency-8 burst (gc's
-// ready-veto fan-out) against one target — anything past the first 2 idle
-// connections pays a fresh TLS handshake, about 120ms at the cherry-to-AWS
-// RTT this CA exists for. maxIdleConnsPerHost raises that ceiling so a warm
-// burst reuses connections instead of re-handshaking per request.
+// MaxIdleConnsPerHost is 2, which is too small for a concurrency-8 burst
+// against one target — anything past the first 2 idle connections pays a
+// fresh TLS handshake, tens of milliseconds at a typical cross-region RTT.
+// maxIdleConnsPerHost raises that ceiling so a warm burst reuses connections
+// instead of re-handshaking per request.
 //
 // # Caching and root rotation
 //
@@ -390,11 +390,11 @@ func TransportFor(target Target) (http.RoundTripper, error) {
 //
 // It exists for two callers that must not go through env resolution:
 //
-//   - `bd connect --ca-file X` verifies the server with X BEFORE writing
-//     anything (cmd/bd/enterprise_connect.go); if CAFileEnv happened to be set
-//     to a different, valid CA for the same host, resolving through the
-//     normal env-aware path would verify against the WRONG file relative to
-//     what --ca-file names, then write X unchecked.
+//   - A `bd connect --ca-file X`-style command verifies the server with X
+//     BEFORE writing anything; if CAFileEnv happened to be set to a
+//     different, valid CA for the same host, resolving through the normal
+//     env-aware path would verify against the WRONG file relative to what
+//     --ca-file names, then write X unchecked.
 //   - backend/http's public TransportFor (the embedder door) builds from
 //     Target.CAFile alone, because CAFileEnv is this process's ambient,
 //     per-invocation override for the CLI's own dial path, and an embedder

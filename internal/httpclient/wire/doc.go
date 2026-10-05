@@ -25,13 +25,13 @@
 //     post-baseline operation consults the cached capability list first.
 //
 // What it does NOT own: the storage.DoltStorage implementation, the request
-// encoders that turn issueops requests into query parameters, the refusal
-// taxonomy's user-facing text, and the default endpoint/credential sources.
-// Those are separate packages that consume this one — see
-// engdocs/design/http-client-backend.md (D5, D6, D7).
+// encoders that turn issueops requests into query parameters (internal/httpclient/encode;
+// see engdocs/design/http-divergence-ledger.md for the full divergence
+// inventory), the refusal taxonomy's user-facing text, and the default
+// endpoint/credential sources. Those are separate packages that consume this
+// one.
 //
-// The package carries no build tag, matching internal/enterprise/hostedbeads
-// and internal/enterprise/storageprofile: the `enterprise` constraint lives on
-// the cmd/bd files that wire these packages in, which is what keeps their unit
-// gates compiling and running in the default PR lane.
+// The package carries no build tag: it compiles and its unit gates run in the
+// default PR lane regardless of which storage backend a given `bd` build
+// wires in at the command layer.
 package wire

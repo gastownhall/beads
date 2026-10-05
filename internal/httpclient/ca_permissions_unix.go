@@ -98,7 +98,7 @@ var groupHasNoSupplementaryMembersFn = groupHasNoSupplementaryMembers
 // convention: uid's own primary group is gid, that group's name is exactly
 // uid's username, AND the group lists no OTHER member in /etc/group. Under
 // Ubuntu's default user-private-groups scheme this is true for every
-// ordinary account, which is what makes a umask-002 ~/.config/gascity (0775
+// ordinary account, which is what makes a umask-002 ~/.config/bd (0775
 // directories, 0664 files) exactly as private as a umask-022 layout would
 // be — group-write only reaches a group whose sole member, by convention, is
 // the file's own owner. A file whose group is some OTHER group the owner

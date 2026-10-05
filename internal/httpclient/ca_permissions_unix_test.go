@@ -158,7 +158,7 @@ func TestCheckCAFilePermissionsRefusesFileOwnedByAnotherUser(t *testing.T) {
 }
 
 // TestCheckCAFilePermissionsAcceptsRootOwnedLayout is finding 3's positive
-// case: the /etc/gascity-style layout (root-owned, 0755 directories, 0644
+// case: the /etc/bd-style layout (root-owned, 0755 directories, 0644
 // files) must be accepted. Exercised through the injectable statCAPathFn,
 // since this sandbox has no real root-owned tree to point at.
 func TestCheckCAFilePermissionsAcceptsRootOwnedLayout(t *testing.T) {

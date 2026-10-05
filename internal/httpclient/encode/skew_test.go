@@ -163,8 +163,8 @@ func TestASkewSignalAlwaysRendersEvenForAParameterThisClientNeverSent(t *testing
 	// is a request header, not a query parameter, so no flag produced it — and a
 	// refusal that came back empty here would swallow the one 4xx on this
 	// surface whose recovery is a serve-side flag.
-	got := UnknownParameterRefusal("Host", "http://beads.corp:9099", "1.0.4")
-	want := `the "Host" filter is not supported by bd serve at http://beads.corp:9099 (bd_version 1.0.4): parameter "Host" is unknown to the server`
+	got := UnknownParameterRefusal("Host", "http://bd.example.invalid:9099", "1.0.4")
+	want := `the "Host" filter is not supported by bd serve at http://bd.example.invalid:9099 (bd_version 1.0.4): parameter "Host" is unknown to the server`
 	if got != want {
 		t.Errorf("refusal =\n%s\nwant\n%s", got, want)
 	}

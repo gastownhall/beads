@@ -40,7 +40,7 @@ func TestDivergenceLedgerDocMatchesLedger(t *testing.T) {
 
 	got, err := os.ReadFile(ledgerDocPath)
 	if err != nil {
-		t.Fatalf("reading %s: %v\nregenerate with: go test ./internal/enterprise/httpstore/encode -run %s -update-ledger-doc",
+		t.Fatalf("reading %s: %v\nregenerate with: go test ./internal/httpclient/encode -run %s -update-ledger-doc",
 			ledgerDocPath, err, t.Name())
 	}
 
@@ -48,7 +48,7 @@ func TestDivergenceLedgerDocMatchesLedger(t *testing.T) {
 		t.Fatalf("engdocs/design/http-divergence-ledger.md is stale: it no longer matches the ledger in encode.Ledger().\n"+
 			"The shipped divergence ledger is generated from source and must not be hand-edited.\n"+
 			"Regenerate it with:\n"+
-			"    go test ./internal/enterprise/httpstore/encode -run %s -update-ledger-doc\n"+
-			"(or: go generate ./internal/enterprise/httpstore/encode)", t.Name())
+			"    go test ./internal/httpclient/encode -run %s -update-ledger-doc\n"+
+			"(or: go generate ./internal/httpclient/encode)", t.Name())
 	}
 }
