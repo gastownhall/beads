@@ -61,8 +61,9 @@ const (
 // gascity's bdstore_conditional.go classifier expects from a single-id write
 // guarded by --if-revision: "precondition_failed" for a stale --if-revision,
 // --if-assignee or --if-status guard (T4.5 requires all three to report
-// through the one envelope when --if-revision is present), or
-// "conditional_write_unsupported" for a backend that cannot honor
+// through the one envelope when --if-revision is present), for the row
+// having vanished out from under the guard entirely (storage.ErrNotFound),
+// or "conditional_write_unsupported" for a backend that cannot honor
 // ExpectedVersion at all. ok is false for any other failure, which the
 // caller's own (unrelated) failure handling reports unchanged.
 //
@@ -80,6 +81,20 @@ func classifyIfRevisionFailure(err error, ifRevision *int64) (code, reason strin
 	switch {
 	case errors.As(err, &vme):
 		return ifRevisionCodePreconditionFailed, "revision mismatch", &vme.Expected, &vme.Current, true
+	case errors.Is(err, storage.ErrNotFound):
+		// The row named by a single-id --if-revision write no longer exists.
+		// The plain CLI routes refuse a genuine typo earlier, via
+		// resolveAndGetIssueForMutation, before this guard ever runs — so in
+		// practice this fires either on a route with no such pre-check (the
+		// proxied routes) or, for a guarded delete racing an identical delete
+		// on a Dolt sql-server (mc-zndi7.73), on the same-token loser that
+		// re-checks after the winner's delete has already landed. Both are
+		// the same precondition failure from this guard's point of view:
+		// the exact revision the caller named is gone, so there is nothing
+		// left to compare it against. current is omitted (nothing to
+		// report); expected falls back to the caller's own --if-revision
+		// value, same as the bare storage.ErrVersionMismatch case below.
+		return ifRevisionCodePreconditionFailed, "issue no longer exists", ifRevision, nil, true
 	case errors.Is(err, storage.ErrAssigneeMismatch):
 		return ifRevisionCodePreconditionFailed, "assignee mismatch", nil, nil, true
 	case errors.Is(err, storage.ErrStatusMismatch):
