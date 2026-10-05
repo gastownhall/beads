@@ -5,10 +5,12 @@ go_library(
     srcs = [
         "createbatchequiv.go",
         "scenario_apply.go",
+        "scenario_depadd.go",
         "scenario_import458.go",
     ],
     embedsrcs = [
         "golden/apply.json",
+        "golden/depadd.json",
         "golden/import458-reject-stale.json",
         "golden/import458.json",
         "golden/small.json",
