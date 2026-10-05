@@ -142,6 +142,9 @@ func TestTheProjectIdentityVocabularyMatchesTheServer(t *testing.T) {
 	if CapListSort != httpapi.CapIssuesListSort {
 		t.Errorf("CapListSort = %q, server says %q", CapListSort, httpapi.CapIssuesListSort)
 	}
+	if CapCountScope != httpapi.CapIssuesCountScope {
+		t.Errorf("CapCountScope = %q, server says %q", CapCountScope, httpapi.CapIssuesCountScope)
+	}
 	if CapBatchApplyLarge != httpapi.CapBatchApplyLarge {
 		t.Errorf("CapBatchApplyLarge = %q, server says %q", CapBatchApplyLarge, httpapi.CapBatchApplyLarge)
 	}
@@ -179,8 +182,8 @@ func TestTheProjectIdentityVocabularyMatchesTheServer(t *testing.T) {
 	// literal is spelled out member by member rather than compared against the
 	// server's own slice: a mirror checked against the thing it mirrors passes
 	// however both of them move.
-	if !slices.Equal(behaviorCapabilities, []string{httpapi.CapProjectEnforce, httpapi.CapBatchApplyLarge, httpapi.CapIssuesListSort}) {
-		t.Errorf("behaviorCapabilities = %v, want the server's project.enforce, issues.batchApplyLarge and issues.list.sort tokens", behaviorCapabilities)
+	if !slices.Equal(behaviorCapabilities, []string{httpapi.CapProjectEnforce, httpapi.CapBatchApplyLarge, httpapi.CapIssuesListSort, httpapi.CapIssuesCountScope}) {
+		t.Errorf("behaviorCapabilities = %v, want the server's project.enforce, issues.batchApplyLarge, issues.list.sort and issues.count.scope tokens", behaviorCapabilities)
 	}
 }
 
