@@ -62,6 +62,72 @@ func TestEmbeddedIgnoredMigration0023RepairsForkLineageJournalShape(t *testing.T
 	conn, closeConn := newWorkspaceBeforeMigration0023(t, ctx)
 	defer closeConn()
 
+	rowsBefore := seedForkLineageDrift(t, ctx, conn)
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("repair MigrateUp: %v", err)
+	}
+	requireIgnoredCursorAtLatest(t, ctx, conn)
+
+	// Shape converged.
+	for _, column := range []string{"dep_json", "comment_json"} {
+		if got := journalColumnDataType(t, ctx, conn, column); got != "longtext" {
+			t.Errorf("bd_events_journal.%s DATA_TYPE = %q after repair, want %q", column, got, "longtext")
+		}
+	}
+	requireIndex(t, ctx, conn, "bd_events_journal", "idx_bd_events_journal_ts", 1)
+	requireIndex(t, ctx, conn, "bd_events_journal", "idx_bd_events_journal_issue", 1)
+	requireIndex(t, ctx, conn, "wisps", "idx_wisps_defer_until", 1)
+
+	// Data survived byte for byte.
+	assertJournalRowsEqual(t, rowsBefore, readJournalRows(t, ctx, conn))
+	// The pass may raise a counter that is behind the journal to its
+	// high-water mark (ignored/0022's tail, re-run because this fork shape has
+	// no actor column and trips the bd_events_journal.actor sentinel at floor
+	// 21) and must leave it nowhere else: GREATEST(seeded, MAX(seq)).
+	const seeded = 1
+	high := int(rowsBefore[len(rowsBefore)-1].seq)
+	if got := scalarInt(t, ctx, conn, "SELECT next_seq FROM bd_events_seq WHERE id = 0"); got != max(seeded, high) {
+		t.Errorf("bd_events_seq.next_seq = %d after repair, want GREATEST(seeded %d, MAX(seq) %d) = %d: a pass may only raise a behind counter to the high-water mark, never lower it or move it past MAX(seq)",
+			got, seeded, high, max(seeded, high))
+	}
+
+	// The repair is what makes the write that used to roll back a user's
+	// mutation land instead.
+	if _, err := conn.ExecContext(ctx,
+		"INSERT INTO bd_events_journal (seq, ts, op, issue_id, comment_json) VALUES (99, '2026-08-01 00:00:03', 'comment', 'bd-t9ovd', ?)",
+		strings.Repeat("x", 70000)); err != nil {
+		t.Fatalf("oversized comment_json insert still refused after repair: %v", err)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT LENGTH(comment_json) FROM bd_events_journal WHERE seq = 99"); got != 70000 {
+		t.Errorf("stored oversized comment_json length = %d, want 70000", got)
+	}
+	execFrozenGuard(t, ctx, conn, "DELETE FROM bd_events_journal WHERE seq = 99")
+
+	// Crash-replay: the pass can be killed and re-run, so the frozen bytes must
+	// be a clean no-op against the state they just produced. Re-arm the
+	// canary first: if replaying 0023 alone ever wrote the counter, letting it
+	// start already at the high-water mark would hide that.
+	createBefore := showCreateTable(t, ctx, conn, "bd_events_journal")
+	execFrozenGuard(t, ctx, conn, "UPDATE bd_events_seq SET next_seq = 1 WHERE id = 0")
+	execFrozenGuard(t, ctx, conn, ignoredMigration0023SQL(t))
+	if createAfter := showCreateTable(t, ctx, conn, "bd_events_journal"); createAfter != createBefore {
+		t.Errorf("replaying 0023 changed bd_events_journal:\nbefore:\n%s\nafter:\n%s", createBefore, createAfter)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT next_seq FROM bd_events_seq WHERE id = 0"); got != 1 {
+		t.Errorf("next_seq = %d after replaying 0023, want 1: replaying 0023 wrote the counter", got)
+	}
+	assertJournalRowsEqual(t, rowsBefore, readJournalRows(t, ctx, conn))
+}
+
+// seedForkLineageDrift builds the drifted fork-lineage journal shape 0023
+// repairs: the fork's TEXT-column DDL, idx_wisps_defer_until dropped, three
+// journal rows, and a seq counter deliberately set BELOW the journal's own
+// MAX(seq). It also proves the fixture really is drifted before handing it
+// back: an oversized comment_json insert must be refused by the TEXT column.
+func seedForkLineageDrift(t *testing.T, ctx context.Context, conn *sql.Conn) []journalRow {
+	t.Helper()
+
 	// The drift. bd_events_journal and wisps are both clone-local and absent
 	// from HEAD here, so replacing the table and dropping the index leaves the
 	// working set exactly as clean as it was.
@@ -71,9 +137,14 @@ func TestEmbeddedIgnoredMigration0023RepairsForkLineageJournalShape(t *testing.T
 	// Data the repair must not touch: three journal rows whose payloads carry
 	// quotes, backslashes, NULLs, and a multi-KB blob (bound as parameters, so
 	// the column holds the literal Go string), plus a seq counter deliberately
-	// set BELOW the journal's own MAX(seq). Only 0022's seeding raises it to
-	// the high-water mark, so next_seq staying at 1 is proof that 0022 did not
-	// re-run and that 0023 left the counter alone.
+	// set BELOW the journal's own MAX(seq). This seeds two separate claims:
+	// that 0023 alone never touches the counter or a row
+	// (TestEmbeddedIgnoredMigration0023AloneLeavesCounterAndRowsUntouched runs
+	// its frozen bytes directly to check that), and that the full MigrateUp
+	// pass converges the counter to GREATEST(seeded, MAX(seq)) — this fork
+	// shape has no actor column, so it trips the bd_events_journal.actor
+	// sentinel at floor 21, which re-runs ignored/0022, whose tail is the same
+	// statement as issueops.healEventSeqCounter.
 	bigPayload := strings.Repeat(`{"k":"v'\"\\","n":0},`, 400) + `{"end":true}`
 	seed := []struct {
 		seq                             int64
@@ -107,47 +178,36 @@ VALUES (?, ?, ?, 'bd-t9ovd', ?, ?, ?)`, s.seq, s.ts, s.op, s.issueJSON, s.depJSO
 		t.Fatal("oversized comment_json insert succeeded on the drifted TEXT column; the fixture is not reproducing the drift this migration repairs")
 	}
 
-	if _, err := schema.MigrateUp(ctx, conn); err != nil {
-		t.Fatalf("repair MigrateUp: %v", err)
-	}
-	requireIgnoredCursorAtLatest(t, ctx, conn)
+	return rowsBefore
+}
 
-	// Shape converged.
+// TestEmbeddedIgnoredMigration0023AloneLeavesCounterAndRowsUntouched pins
+// 0023's own contract ("neither bd_events_seq nor a single journal row is
+// read or written", its header) with the runner out of the picture: the
+// frozen bytes run directly against the drifted fork shape, so every repair
+// branch fires and no sentinel, floor, or neighbouring migration can cause or
+// mask a counter write. The counter is seeded below MAX(seq), so even a
+// monotone GREATEST-style write would show.
+func TestEmbeddedIgnoredMigration0023AloneLeavesCounterAndRowsUntouched(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	conn, closeConn := newWorkspaceBeforeMigration0023(t, ctx)
+	defer closeConn()
+	rowsBefore := seedForkLineageDrift(t, ctx, conn)
+
+	execFrozenGuard(t, ctx, conn, ignoredMigration0023SQL(t))
+
 	for _, column := range []string{"dep_json", "comment_json"} {
 		if got := journalColumnDataType(t, ctx, conn, column); got != "longtext" {
-			t.Errorf("bd_events_journal.%s DATA_TYPE = %q after repair, want %q", column, got, "longtext")
+			t.Fatalf("0023 did not widen %s (got %q): the fixture no longer exercises its branches", column, got)
 		}
 	}
 	requireIndex(t, ctx, conn, "bd_events_journal", "idx_bd_events_journal_ts", 1)
-	requireIndex(t, ctx, conn, "bd_events_journal", "idx_bd_events_journal_issue", 1)
 	requireIndex(t, ctx, conn, "wisps", "idx_wisps_defer_until", 1)
-
-	// Data survived byte for byte, and the counter was not touched.
 	assertJournalRowsEqual(t, rowsBefore, readJournalRows(t, ctx, conn))
 	if got := scalarInt(t, ctx, conn, "SELECT next_seq FROM bd_events_seq WHERE id = 0"); got != 1 {
-		t.Errorf("bd_events_seq.next_seq = %d after repair, want 1 (0023 must touch neither the counter nor any data)", got)
+		t.Errorf("next_seq = %d after applying 0023 alone, want 1: 0023 must never write the counter", got)
 	}
-
-	// The repair is what makes the write that used to roll back a user's
-	// mutation land instead.
-	if _, err := conn.ExecContext(ctx,
-		"INSERT INTO bd_events_journal (seq, ts, op, issue_id, comment_json) VALUES (99, '2026-08-01 00:00:03', 'comment', 'bd-t9ovd', ?)",
-		strings.Repeat("x", 70000)); err != nil {
-		t.Fatalf("oversized comment_json insert still refused after repair: %v", err)
-	}
-	if got := scalarInt(t, ctx, conn, "SELECT LENGTH(comment_json) FROM bd_events_journal WHERE seq = 99"); got != 70000 {
-		t.Errorf("stored oversized comment_json length = %d, want 70000", got)
-	}
-	execFrozenGuard(t, ctx, conn, "DELETE FROM bd_events_journal WHERE seq = 99")
-
-	// Crash-replay: the pass can be killed and re-run, so the frozen bytes must
-	// be a clean no-op against the state they just produced.
-	createBefore := showCreateTable(t, ctx, conn, "bd_events_journal")
-	execFrozenGuard(t, ctx, conn, ignoredMigration0023SQL(t))
-	if createAfter := showCreateTable(t, ctx, conn, "bd_events_journal"); createAfter != createBefore {
-		t.Errorf("replaying 0023 changed bd_events_journal:\nbefore:\n%s\nafter:\n%s", createBefore, createAfter)
-	}
-	assertJournalRowsEqual(t, rowsBefore, readJournalRows(t, ctx, conn))
 }
 
 // TestEmbeddedIgnoredMigration0023NoopsOnHealthyWorkspace is the insurance
