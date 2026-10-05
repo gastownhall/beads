@@ -108,7 +108,7 @@ const (
 	//
 	// countIssues is why it exists: CountByGroupRequest carries the scalar
 	// predicate BY NAME (`Filter`) plus the dimension, so its table would
-	// otherwise have to restate twenty-three classifications the count table
+	// otherwise have to restate every classification the count table
 	// already makes — two copies of one partition, which is the drift every
 	// other gate here is written to prevent.
 	//
@@ -418,8 +418,7 @@ func queryTable() Table {
 // does the most damage: a listing that widened returns rows a caller can look
 // at, and a count that widened returns a NUMBER, which carries no evidence of
 // the set it came from. So the partition here was measured against the
-// document rather than assumed — every one of CountRequest's twenty-three
-// members is published by GET /v0/beads/issues:count, and the count's
+// document rather than assumed — every one of CountRequest's members is published by GET /v0/beads/issues:count, and the count's
 // vocabulary is total.
 //
 // THE COUNT'S PLANE VOCABULARY IS NARROWER THAN THE LISTING'S — `include_infra`
@@ -496,6 +495,20 @@ func countTable() Table {
 			// ListRequest.HasMetadataKey/ReadyRequest.HasMetadataKey. Missing
 			// here for the same reason IncludeEphemeral was: no entry at all.]
 			param("HasMetadataKey", "has_metadata_key"),
+
+			// [Added: the four scope members of upstream #7199 (behavior token
+			// issues.count.scope). The server decodes them in reads.go
+			// countFilters exactly as spelled here — parent and exclude_type as
+			// the listing reads them, no_parent and exclude_status by this
+			// surface's own boolean/list conventions. Against a server that does
+			// not advertise issues.count.scope these parameters answer 400
+			// unknown_parameter (skew.go case 3); the capability pre-flight that
+			// refuses them LOCALLY before the dial belongs to the count role
+			// client, which reads wire.CapCountScope off the handshake snapshot.]
+			paramTo("ParentID", "parent", "ParentID"),
+			paramTo("NoParent", "no_parent", "NoParent"),
+			paramTo("ExcludeTypes", "exclude_type", "ExcludeTypes"),
+			paramTo("ExcludeStatus", "exclude_status", "ExcludeStatus"),
 		},
 	}
 }
@@ -506,7 +519,7 @@ func countTable() Table {
 // It is NOT primary — the count table above owns the operation's parameter set
 // — and it classifies two members, because that is all CountByGroupRequest has.
 // The predicate travels through the count table by delegation (DispNested)
-// rather than by a second enumeration of the same twenty-three fields.
+// rather than by a second enumeration of the same fields.
 func countByGroupTable() Table {
 	return Table{
 		Op: OpCountIssues, Shape: "byGroup",
