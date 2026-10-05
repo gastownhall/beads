@@ -319,6 +319,14 @@ func (info *Info) describe() string {
 // write or when the write failed.
 func (g Gate) queuedDetail() string {
 	info := readInfoAt(g.intentInfoPath())
+	if info != nil {
+		// A sidecar whose removal failed (Windows refuses to delete a file
+		// another process has open) can outlive its writer; never present
+		// a dead process as the queued operation.
+		if host, _ := os.Hostname(); host == info.Hostname && !pidAlive(info.PID) {
+			info = nil
+		}
+	}
 	if info == nil {
 		return "a bd maintenance operation queued for exclusive access"
 	}
@@ -409,11 +417,26 @@ func (h *Handle) Release() error {
 //   - a waiting Exclusive acquisition (Wait > 0) whose first attempt is
 //     busy takes the intent lock EXCLUSIVELY (non-blocking, retried each
 //     poll), holds it while it polls the gate, and drops it as soon as it
-//     owns the gate or gives up;
+//     owns the gate, gives up, or has held it for maxIntentHold without
+//     getting in (after which it keeps polling unqueued);
 //   - a waiting Shared acquisition (Wait > 0) checks the intent lock before
-//     every attempt (a momentary non-blocking SHARED probe) and, while it
-//     is held, does not touch the gate — it waits, within its own budget,
-//     exactly as if the gate were held exclusively.
+//     every attempt but the last (a momentary non-blocking SHARED probe)
+//     and, while it is held, does not touch the gate — it waits, within its
+//     own budget, exactly as if the gate were held exclusively. Its final
+//     attempt tries the gate regardless.
+//
+// The two bounds keep the queue from ever costing availability. A queue can
+// DELAY a shared acquirer but never FAIL it: the final attempt ignores
+// intent, so a shared acquisition fails only when the gate itself is held
+// exclusively. And a doomed exclusive waiter — one blocked behind a shared
+// holder that will not leave soon (a --watch, a tail --follow, an open
+// editor, a long-lived embedder) — stops queueing everyone else after
+// maxIntentHold instead of for its whole budget. In-flight ordinary commands
+// drain far faster than that, so the fairness win is kept.
+//
+// Queued exclusive operations still run one after another: while they take
+// turns on the gate, a waiting shared acquirer waits for all of them (each
+// new exclusive waiter re-publishes intent), bounded by its own budget.
 //
 // Shared holders that are already in keep running; the exclusive waiter
 // waits only for them to drain, so its wait is bounded by the longest
@@ -464,6 +487,7 @@ func (g Gate) Acquire(ctx context.Context, mode Mode, opts Options) (*Handle, er
 	waiting := opts.Wait > 0
 	defersToIntent := waiting && mode == Shared && !opts.IgnoreQueuedExclusive
 	publishesIntent := waiting && mode == Exclusive
+	var intentSince time.Time
 
 	// intent is the writer-fairness lock while this Exclusive acquisition
 	// holds it. Released on every return path — after writeInfo on success,
@@ -474,7 +498,10 @@ func (g Gate) Acquire(ctx context.Context, mode Mode, opts Options) (*Handle, er
 	notified := false
 	for {
 		var detail string
-		if defersToIntent && g.ExclusiveQueued() {
+		// The final attempt (budget spent) ignores intent: queued
+		// maintenance may delay a shared acquirer, never fail it.
+		final := time.Until(deadline) <= 0
+		if defersToIntent && !final && g.ExclusiveQueued() {
 			detail = g.queuedDetail()
 		} else {
 			err := try(f)
@@ -503,8 +530,16 @@ func (g Gate) Acquire(ctx context.Context, mode Mode, opts Options) (*Handle, er
 			return nil, fmt.Errorf("workspacegate: %s (%s mode) held by %s: %w",
 				g.path, mode, detail, ErrBusy)
 		}
+		if intent != nil && time.Since(intentSince) >= maxIntentHold {
+			// Doomed or very slow: stop holding everyone else back.
+			g.releaseIntent(intent)
+			intent = nil
+			publishesIntent = false
+		}
 		if publishesIntent && intent == nil {
-			intent = g.tryTakeIntent(opts.Reason)
+			if intent = g.tryTakeIntent(opts.Reason); intent != nil {
+				intentSince = time.Now()
+			}
 		}
 		// Never sleep past the wait budget: a Wait shorter than the poll
 		// interval must still come back within (about) Wait, and the
@@ -521,6 +556,13 @@ func (g Gate) Acquire(ctx context.Context, mode Mode, opts Options) (*Handle, er
 		}
 	}
 }
+
+// maxIntentHold caps how long one Exclusive acquisition keeps the intent
+// lock without getting the gate. It must stay well below the shared wait
+// budget callers use (bd: BEADS_GATE_WAIT_TIMEOUT, default 30s) and well
+// above how long ordinary in-flight commands take to drain. A var so tests
+// can shorten it.
+var maxIntentHold = 10 * time.Second
 
 // ExclusiveQueued reports whether a waiting Exclusive acquirer currently
 // holds this gate's intent lock. The probe opens read-only and treats a
@@ -698,12 +740,12 @@ func AcquireAll(ctx context.Context, mode Mode, opts Options, gates ...Gate) (*M
 	m := &MultiHandle{handles: make([]*Handle, 0, len(ordered))}
 	for _, g := range ordered {
 		if opts.Wait > 0 {
-			// Floor at 1ns rather than 0: an exhausted budget still means
-			// one final attempt, but it must stay a WAITING attempt so it
-			// keeps honoring the writer-fairness queue (Wait <= 0 opts out).
+			// An exhausted budget leaves later gates one non-blocking
+			// attempt (Wait 0), which ignores the writer-fairness queue —
+			// the same as the final attempt of a waiting acquisition.
 			perGate.Wait = time.Until(deadline)
-			if perGate.Wait <= 0 {
-				perGate.Wait = time.Nanosecond
+			if perGate.Wait < 0 {
+				perGate.Wait = 0
 			}
 		}
 		h, err := g.Acquire(ctx, mode, perGate)

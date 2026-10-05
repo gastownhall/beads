@@ -38,6 +38,8 @@ func TestMain(m *testing.M) {
 //	    hold until stdin closes, release, print RELEASED.
 //	intent <gate-parent-dir> — hold the gate's writer-fairness intent lock
 //	    (as a queued exclusive acquirer does) until stdin closes.
+//	inherited-acquire <gate-parent-dir> — waiting shared acquisition with
+//	    IgnoreQueuedExclusive = InheritedSharedHold(); prints the outcome.
 //	sleep — sleep long without touching any gate (handle-inheritance probe).
 //	exit — exit immediately, so the caller has a real, now-dead PID (used
 //	    to fabricate a stale holder-info sidecar in tests).
@@ -85,6 +87,26 @@ func helperMain() {
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		g.releaseIntent(f)
 		fmt.Println("RELEASED")
+	case "inherited-acquire":
+		// Waiting shared acquisition the way bd's chokepoint does it,
+		// honoring an inherited shared hold; reports how long it took.
+		g, err := ForWorkspace(filepath.Join(os.Args[1], ".beads"))
+		if err != nil {
+			fmt.Println("ERR", err)
+			os.Exit(1)
+		}
+		inherited := InheritedSharedHold()
+		start := time.Now()
+		h, err := g.Acquire(context.Background(), Shared, Options{
+			Wait: 3 * time.Second, PollInterval: 20 * time.Millisecond,
+			IgnoreQueuedExclusive: inherited,
+		})
+		if err != nil {
+			fmt.Println("ERR", err)
+			os.Exit(1)
+		}
+		_ = h.Release()
+		fmt.Printf("inherited=%v waited_ms=%d\n", inherited, time.Since(start).Milliseconds())
 	case "sleep":
 		time.Sleep(30 * time.Second)
 	}
@@ -854,21 +876,26 @@ func TestSharedWaitDefersToQueuedExclusive(t *testing.T) {
 	}
 	t.Cleanup(func() { g.releaseIntent(intent) })
 
+	// Deferred for its whole budget, then the final attempt ignores the
+	// queue: delayed, never failed, because nothing holds the gate.
 	var holder string
-	_, err := g.Acquire(context.Background(), Shared, Options{
+	start := time.Now()
+	h, err := g.Acquire(context.Background(), Shared, Options{
 		Wait: 300 * time.Millisecond, PollInterval: 20 * time.Millisecond,
 		OnWait: func(h string) { holder = h },
 	})
-	if !errors.Is(err, ErrBusy) {
-		t.Fatalf("waiting shared under queued intent: %v, want ErrBusy", err)
+	if err != nil {
+		t.Fatalf("waiting shared under queued intent with a free gate: %v, want success on the final attempt", err)
 	}
-	for _, s := range []string{err.Error(), holder} {
-		if !strings.Contains(s, "queued for exclusive access") || !strings.Contains(s, "test queued maintenance") {
-			t.Errorf("diagnostic %q does not name the queued exclusive acquirer", s)
-		}
+	_ = h.Release()
+	if waited := time.Since(start); waited < 250*time.Millisecond {
+		t.Errorf("shared acquirer did not defer to queued intent (acquired after %s)", waited)
+	}
+	if !strings.Contains(holder, "queued for exclusive access") || !strings.Contains(holder, "test queued maintenance") {
+		t.Errorf("wait notice %q does not name the queued exclusive acquirer", holder)
 	}
 
-	h := mustAcquire(t, g, Shared, Options{}) // fail-fast: legacy behavior
+	h = mustAcquire(t, g, Shared, Options{}) // fail-fast: legacy behavior
 	_ = h.Release()
 	h = mustAcquire(t, g, Shared, Options{Wait: time.Second, IgnoreQueuedExclusive: true})
 	_ = h.Release()
@@ -921,10 +948,17 @@ func TestStaleIntentFromCrashedProcess(t *testing.T) {
 	}
 	hp := spawnHelperProc(t, "intent", dir)
 
-	_, err = g.Acquire(context.Background(), Shared,
-		Options{Wait: 200 * time.Millisecond, PollInterval: 20 * time.Millisecond})
-	if !errors.Is(err, ErrBusy) || !strings.Contains(err.Error(), fmt.Sprintf("pid %d", hp.cmd.Process.Pid)) {
-		t.Fatalf("shared wait under another process's intent: %v, want ErrBusy naming pid %d", err, hp.cmd.Process.Pid)
+	var holder string
+	h0, err := g.Acquire(context.Background(), Shared, Options{
+		Wait: 200 * time.Millisecond, PollInterval: 20 * time.Millisecond,
+		OnWait: func(h string) { holder = h },
+	})
+	if err != nil {
+		t.Fatalf("shared wait under another process's intent: %v", err)
+	}
+	_ = h0.Release()
+	if !strings.Contains(holder, fmt.Sprintf("pid %d", hp.cmd.Process.Pid)) {
+		t.Fatalf("wait notice %q does not name the intent holder pid %d", holder, hp.cmd.Process.Pid)
 	}
 
 	if err := hp.cmd.Process.Kill(); err != nil {
@@ -991,5 +1025,295 @@ func TestInheritedSharedHold(t *testing.T) {
 				t.Fatalf("InheritedSharedHold() with %s=%q = %v, want %v", InheritedHoldEnv, tc.val, got, tc.want)
 			}
 		})
+	}
+}
+
+// setMaxIntentHold shortens maxIntentHold for one test.
+func setMaxIntentHold(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := maxIntentHold
+	maxIntentHold = d
+	t.Cleanup(func() { maxIntentHold = old })
+}
+
+// acquireAsync runs AcquireAll in a goroutine; the result arrives on the
+// returned channel and any acquired handle is released at test end.
+type acqResult struct {
+	h   *MultiHandle
+	err error
+	at  time.Time
+}
+
+func acquireAsync(t *testing.T, mode Mode, opts Options, gates ...Gate) <-chan acqResult {
+	t.Helper()
+	ch := make(chan acqResult, 1)
+	go func() {
+		h, err := AcquireAll(context.Background(), mode, opts, gates...)
+		ch <- acqResult{h: h, err: err, at: time.Now()}
+	}()
+	return ch
+}
+
+func waitQueued(t *testing.T, g Gate) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !g.ExclusiveQueued() {
+		if time.Now().After(deadline) {
+			t.Fatal("exclusive waiter never published intent")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func recv(t *testing.T, ch <-chan acqResult, what string) acqResult {
+	t.Helper()
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			t.Fatalf("%s: %v", what, r.err)
+		}
+		t.Cleanup(func() { _ = r.h.Release() })
+		return r
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s: no result within 10s (deadlock?)", what)
+	}
+	return acqResult{}
+}
+
+// pending fails the test if the acquisition has already completed.
+func pending(t *testing.T, ch <-chan acqResult, what string) {
+	t.Helper()
+	select {
+	case r := <-ch:
+		if r.h != nil {
+			_ = r.h.Release()
+		}
+		t.Fatalf("%s finished early (err %v)", what, r.err)
+	default:
+	}
+}
+
+// The availability regression this design must not have: a long-lived
+// shared holder (a --watch, an open editor, an embedder) plus an exclusive
+// waiter that therefore cannot get in. NEW shared commands must still run —
+// before the intent cap they failed for the exclusive waiter's whole budget.
+func TestDoomedExclusiveWaiterDoesNotFailNewSharedCommands(t *testing.T) {
+	t.Run("final attempt ignores queue", func(t *testing.T) {
+		g, _ := testGate(t)
+		long := mustAcquire(t, g, Shared, Options{})
+		t.Cleanup(func() { _ = long.Release() })
+		x := acquireAsync(t, Exclusive, Options{Wait: 3 * time.Second, PollInterval: 20 * time.Millisecond, Reason: "test doomed init"}, g)
+		waitQueued(t, g)
+
+		h, err := g.Acquire(context.Background(), Shared, Options{Wait: time.Second, PollInterval: 20 * time.Millisecond})
+		if err != nil {
+			t.Fatalf("new shared command failed behind a doomed exclusive waiter: %v", err)
+		}
+		_ = h.Release()
+		if r := <-x; !errors.Is(r.err, ErrBusy) {
+			t.Fatalf("doomed exclusive waiter: %v, want ErrBusy", r.err)
+		}
+	})
+	t.Run("intent dropped after maxIntentHold", func(t *testing.T) {
+		setMaxIntentHold(t, 300*time.Millisecond)
+		g, _ := testGate(t)
+		long := mustAcquire(t, g, Shared, Options{})
+		t.Cleanup(func() { _ = long.Release() })
+		x := acquireAsync(t, Exclusive, Options{Wait: 3 * time.Second, PollInterval: 20 * time.Millisecond}, g)
+		waitQueued(t, g)
+		time.Sleep(500 * time.Millisecond)
+		if g.ExclusiveQueued() {
+			t.Fatal("exclusive waiter still holds intent past maxIntentHold")
+		}
+		start := time.Now()
+		h, err := g.Acquire(context.Background(), Shared, Options{Wait: time.Second, PollInterval: 20 * time.Millisecond})
+		if err != nil {
+			t.Fatalf("shared after the intent cap: %v", err)
+		}
+		_ = h.Release()
+		if waited := time.Since(start); waited > 200*time.Millisecond {
+			t.Errorf("shared acquirer still deferred %s after the intent was dropped", waited)
+		}
+		pending(t, x, "exclusive waiter") // still waiting, just no longer queueing others
+		_ = long.Release()
+		recv(t, x, "exclusive waiter after the long holder left")
+	})
+}
+
+// Lock order with intent across a gate set (a < b): a shared AcquireAll that
+// holds a and defers on b's intent, while an exclusive waiter on b alone
+// drains b. Nobody deadlocks, and the exclusive waiter goes first.
+func TestIntentLockOrderSharedHoldsEarlierGate(t *testing.T) {
+	dir := t.TempDir()
+	a, _ := ForWorkspace(filepath.Join(dir, "a"))
+	b, _ := ForPhysicalRoot(filepath.Join(dir, "b"))
+	if gateKey(a.Path()) >= gateKey(b.Path()) {
+		t.Fatalf("test assumes %s sorts before %s", a.Path(), b.Path())
+	}
+	hb := mustAcquire(t, b, Shared, Options{})
+	x := acquireAsync(t, Exclusive, Options{Wait: 5 * time.Second, PollInterval: 10 * time.Millisecond}, b)
+	waitQueued(t, b)
+	s := acquireAsync(t, Shared, Options{Wait: 5 * time.Second, PollInterval: 10 * time.Millisecond}, a, b)
+	time.Sleep(150 * time.Millisecond)
+	if held, _, _ := a.ExclusiveHolder(); held {
+		t.Fatal("unexpected exclusive holder on a")
+	}
+	pending(t, s, "shared {a,b}")
+	pending(t, x, "exclusive {b}")
+
+	_ = hb.Release()
+	xr := recv(t, x, "exclusive waiter on b")
+	time.Sleep(100 * time.Millisecond)
+	pending(t, s, "shared {a,b} while the exclusive holder has b")
+	xRelease := time.Now()
+	_ = xr.h.Release()
+	sr := recv(t, s, "shared {a,b} behind the queued exclusive")
+	if sr.at.Before(xRelease) {
+		t.Error("shared acquirer got b while the exclusive holder had it")
+	}
+}
+
+// ...and the other direction: an exclusive AcquireAll holding a and the
+// intent on b, a shared waiter on b alone, and a shared waiter on {a,b}
+// blocked on a. All three complete once b's shared holder leaves.
+func TestIntentLockOrderExclusiveHoldsEarlierGate(t *testing.T) {
+	dir := t.TempDir()
+	a, _ := ForWorkspace(filepath.Join(dir, "a"))
+	b, _ := ForPhysicalRoot(filepath.Join(dir, "b"))
+	hb := mustAcquire(t, b, Shared, Options{})
+	x := acquireAsync(t, Exclusive, Options{Wait: 5 * time.Second, PollInterval: 10 * time.Millisecond}, a, b)
+	waitQueued(t, b)
+	if held, _, _ := a.ExclusiveHolder(); !held {
+		t.Fatal("exclusive waiter should hold a while queued on b")
+	}
+	s1 := acquireAsync(t, Shared, Options{Wait: 5 * time.Second, PollInterval: 10 * time.Millisecond}, b)
+	s2 := acquireAsync(t, Shared, Options{Wait: 5 * time.Second, PollInterval: 10 * time.Millisecond}, a, b)
+	time.Sleep(150 * time.Millisecond)
+	pending(t, s1, "shared {b}")
+	pending(t, s2, "shared {a,b}")
+
+	_ = hb.Release()
+	xr := recv(t, x, "exclusive {a,b}")
+	_ = xr.h.Release()
+	recv(t, s1, "shared {b}")
+	recv(t, s2, "shared {a,b}")
+}
+
+// An exhausted AcquireAll budget leaves later gates exactly one attempt,
+// and queued intent on such a gate cannot fail the set (the gate is free).
+func TestAcquireAllExhaustedBudgetFinalAttemptIgnoresIntent(t *testing.T) {
+	dir := t.TempDir()
+	a, _ := ForWorkspace(filepath.Join(dir, "a"))
+	b, _ := ForPhysicalRoot(filepath.Join(dir, "b"))
+	intent := b.tryTakeIntent("test queued on b")
+	if intent == nil {
+		t.Fatal("tryTakeIntent on b failed")
+	}
+	t.Cleanup(func() { b.releaseIntent(intent) })
+	// a is held exclusively past the whole budget's midpoint and released
+	// only after the budget is spent, so b gets no budget at all.
+	ha := mustAcquire(t, a, Exclusive, Options{})
+	time.AfterFunc(400*time.Millisecond, func() { _ = ha.Release() })
+	_, err := AcquireAll(context.Background(), Shared,
+		Options{Wait: 300 * time.Millisecond, PollInterval: 10 * time.Millisecond}, a, b)
+	if !errors.Is(err, ErrBusy) {
+		t.Fatalf("a held past the budget: %v, want ErrBusy", err)
+	}
+	time.Sleep(200 * time.Millisecond) // a is free now
+	start := time.Now()
+	m, err := AcquireAll(context.Background(), Shared,
+		Options{Wait: 200 * time.Millisecond, PollInterval: 10 * time.Millisecond}, a, b)
+	if err != nil {
+		t.Fatalf("shared set with free gates and queued intent on b: %v", err)
+	}
+	_ = m.Release()
+	if waited := time.Since(start); waited < 150*time.Millisecond {
+		t.Errorf("b's queued intent was not honored before the final attempt (took %s)", waited)
+	}
+}
+
+// Two exclusive waiters behind one shared holder: no deadlock, both get the
+// gate in turn, and the intent is handed off and finally released.
+func TestTwoExclusiveWaiters(t *testing.T) {
+	g, _ := testGate(t)
+	sh := mustAcquire(t, g, Shared, Options{})
+	opts := Options{Wait: 5 * time.Second, PollInterval: 10 * time.Millisecond}
+	x1 := acquireAsync(t, Exclusive, opts, g)
+	x2 := acquireAsync(t, Exclusive, opts, g)
+	waitQueued(t, g)
+	time.AfterFunc(200*time.Millisecond, func() { _ = sh.Release() })
+
+	var second <-chan acqResult
+	var r acqResult
+	select {
+	case r = <-x1:
+		second = x2
+	case r = <-x2:
+		second = x1
+	case <-time.After(5 * time.Second):
+		t.Fatal("neither exclusive waiter got the gate")
+	}
+	if r.err != nil {
+		t.Fatalf("first exclusive waiter: %v", r.err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	_ = r.h.Release()
+	r = recv(t, second, "second exclusive waiter")
+	_ = r.h.Release()
+	if g.ExclusiveQueued() {
+		t.Error("intent still held after both exclusive waiters finished")
+	}
+}
+
+// The nested-bd escape hatch works through a real exec: a child whose
+// environment names a live ancestor skips the queue; without it, it defers.
+func TestInheritedHoldThroughSubprocess(t *testing.T) {
+	dir := t.TempDir()
+	g, err := ForWorkspace(filepath.Join(dir, ".beads"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := g.tryTakeIntent("test queued maintenance")
+	if intent == nil {
+		t.Fatal("tryTakeIntent failed")
+	}
+	t.Cleanup(func() { g.releaseIntent(intent) })
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(extra ...string) string {
+		t.Helper()
+		cmd := exec.Command(exe, dir)
+		env := []string{"WORKSPACEGATE_HELPER=inherited-acquire"}
+		for _, kv := range bazeltest.ShardFreeEnv(os.Environ()) {
+			if !strings.HasPrefix(kv, InheritedHoldEnv+"=") {
+				env = append(env, kv)
+			}
+		}
+		cmd.Env = append(env, extra...)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("helper: %v (%s)", err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	parse := func(out string) (bool, time.Duration) {
+		var inherited bool
+		var ms int64
+		if _, err := fmt.Sscanf(out, "inherited=%t waited_ms=%d", &inherited, &ms); err != nil {
+			t.Fatalf("helper output %q: %v", out, err)
+		}
+		return inherited, time.Duration(ms) * time.Millisecond
+	}
+
+	inh, waited := parse(run(fmt.Sprintf("%s=%d", InheritedHoldEnv, os.Getpid())))
+	if !inh || waited > time.Second {
+		t.Errorf("child of a live shared holder: inherited=%v waited=%s, want true and no queueing", inh, waited)
+	}
+	inh, waited = parse(run())
+	if inh || waited < 2*time.Second {
+		t.Errorf("unrelated child: inherited=%v waited=%s, want false and a full deferral", inh, waited)
 	}
 }
