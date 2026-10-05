@@ -155,9 +155,19 @@ func TestTheProjectIdentityVocabularyMatchesTheServer(t *testing.T) {
 		t.Errorf("ReasonWireRevisionUnsupported = %q, server says %q", ReasonWireRevisionUnsupported, httpapi.ReasonWireRevisionUnsupported)
 	}
 	// ClientWireRevision is this build's OWN declared revision, not a mirror of
-	// a server constant — but it must never exceed the server's own current
-	// revision, or this client would be declaring a shape it cannot possibly
-	// have been built to decode (CurrentWireRevision is the newest that exists).
+	// a server constant — but in this repo client and server ship from the same
+	// commit, so the two are held in LOCKSTEP: ClientWireRevision must equal
+	// httpapi.CurrentWireRevision exactly, not merely satisfy <=. A real
+	// deployment can run an older client against a newer server (that is the
+	// whole reason ClientMinWireRevision and the wire_revision_unsupported
+	// refusal exist), but THIS package's own declared revision has no excuse to
+	// lag the server it ships beside — a PR that bumps CurrentWireRevision
+	// without also bumping ClientWireRevision has shipped a client that cannot
+	// decode its own paired server's new shape, which is exactly the gap the
+	// two checks below catch from both directions: strictly newer is one kind
+	// of bug (a shape this build cannot possibly have been compiled to decode,
+	// since CurrentWireRevision is the newest that exists), and merely
+	// different-in-either-direction is the lockstep rule's own general case.
 	if ClientWireRevision > httpapi.CurrentWireRevision {
 		t.Errorf("ClientWireRevision = %d, which is newer than the server's own CurrentWireRevision %d", ClientWireRevision, httpapi.CurrentWireRevision)
 	}

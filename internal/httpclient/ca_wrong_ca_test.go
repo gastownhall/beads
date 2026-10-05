@@ -48,6 +48,43 @@ func TestTransportForWrongCARefusesTheTLSHandshake(t *testing.T) {
 	}
 }
 
+// TestTransportForWrongCAViaEnvRefusesTheTLSHandshake is the BEADS_HTTP_CA_FILE
+// env-driven sibling of TestTransportForWrongCARefusesTheTLSHandshake: the
+// same wrong-CA negative, but resolved through resolveCAFile's host-scoped env
+// syntax (CAFileEnv, "host[:port]=path") rather than Target.CAFile set
+// directly. The direct-CAFile test above and this one together cover both of
+// TransportFor's two input paths with the same live-TLS proof; neither alone
+// shows the env-resolution path actually reaches the wire enforcement, since
+// resolveCAFile could in principle resolve to the wrong path without the TLS
+// layer ever being exercised against it.
+func TestTransportForWrongCAViaEnvRefusesTheTLSHandshake(t *testing.T) {
+	clearCAEnvironment(t)
+	right := newTestCA(t)
+	wrong := newTestCA(t)
+
+	u := right.startServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	})
+
+	t.Setenv(CAFileEnv, u.Host+"="+wrong.writePEM(t))
+
+	rt, err := TransportFor(Target{})
+	if err != nil {
+		t.Fatalf("TransportFor: %v", err)
+	}
+	client := &http.Client{Transport: rt}
+
+	resp, err := client.Get(u.String())
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("GET succeeded against a server whose leaf the BEADS_HTTP_CA_FILE-named CA did not sign; want the TLS handshake to fail")
+	}
+	var unknownAuthority x509.UnknownAuthorityError
+	if !errors.As(err, &unknownAuthority) {
+		t.Fatalf("GET error = %v, want it to wrap x509.UnknownAuthorityError", err)
+	}
+}
+
 // TestTransportForRightCASucceedsOverTLS is the positive control for the test
 // above: it proves ca.startServer plus a CA file the leaf WAS signed by is a
 // fixture that actually completes a TLS handshake, so the refusal above is

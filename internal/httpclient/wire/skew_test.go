@@ -547,6 +547,12 @@ func TestNoFeatureBranchesOnBdVersionOrSchemaVersion(t *testing.T) {
 				// this gate otherwise guards — that failure mode is an empty
 				// directory read, handled below — so there is nothing to
 				// sweep here yet and that is fine.
+				//
+				// TODO(S3): once cmd/bd wires the store/dial seam to this
+				// client, this branch's cmd/bd scope stops being vacuous —
+				// drop this `continue` (or tighten it) so the sweep actually
+				// covers cmd/bd's own bd_version/schema_version reads instead
+				// of silently passing on an empty intersection.
 				continue
 			}
 			// A relative path that stopped resolving is the failure mode this
