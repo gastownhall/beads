@@ -61,6 +61,16 @@ func init() {
 		"RunCycleDetectorIncludeTracksIgnoresAPureTracksLoop":            cycleTracksWireGapWaiverReason,
 		"RunCycleDetectorIncludeTracksWalksEachEdgeInItsStoredDirection": cycleTracksWireGapWaiverReason,
 
+		"RunBootstrapperIdentifiesAFreshSubstrate":                       bootstrapperPermanentlyUnservableWaiverReason,
+		"RunBootstrapperLeavesTheSubstrateUntouchedWhenItCannotComplete": bootstrapperPermanentlyUnservableWaiverReason,
+		"RunBootstrapperRecordsExactlyOneHistoryEntry":                   bootstrapperPermanentlyUnservableWaiverReason,
+		"RunBootstrapperRecordsNoHistoryEntryOfItsOwn":                   bootstrapperPermanentlyUnservableWaiverReason,
+		"RunBootstrapperRefusesASubstrateCarryingOnlyAPrefix":            bootstrapperPermanentlyUnservableWaiverReason,
+		"RunBootstrapperRefusesASubstrateCarryingOnlyAProjectID":         bootstrapperPermanentlyUnservableWaiverReason,
+		"RunBootstrapperRefusesAnIdentifiedSubstrate":                    bootstrapperPermanentlyUnservableWaiverReason,
+		"RunBootstrapperRefusesAnInvalidRequestWithoutWriting":           bootstrapperPermanentlyUnservableWaiverReason,
+		"RunBootstrapperStoresThePrefixWithoutItsTrailingHyphen":         bootstrapperPermanentlyUnservableWaiverReason,
+
 		"RunImporterRejectsAStaleRowAndNamesIt":           importerOneAccessorWaiverReason,
 		"RunImporterReportsTheAbsentTargetItDroppedOnce":  importerOneAccessorWaiverReason,
 		"RunImporterWiresTheCrossPlaneEdgeBetweenItsRows": importerOneAccessorWaiverReason,
@@ -181,6 +191,24 @@ const crossRecordInvariantNoRoleWaiverReason = "CrossRecordInvariantFixture carr
 const bootstrapSplitWaiverReason = "the bootstrap history contracts are a ratified per-leg split — the store " +
 	"legs pin zero because `bd init` commits the identity itself, the unit-of-work leg pins one because the " +
 	"proxied route has no other commit point; each leg wires its own half and the other half is not its promise"
+
+// bootstrapperPermanentlyUnservableWaiverReason covers the nine Bootstrapper
+// contracts: PERMANENTLY unservable over http, not merely unwired yet.
+//
+// internal/httpclient/accessors.go names Bootstrapper (alongside VersionReconciler
+// and InitVerifier) as one of the THREE accessors still on the generated
+// refusing shell for one reason: "PERMANENTLY UNSERVABLE — no wire operation
+// and none coming." `bd init` runs its substrate-identification walk entirely
+// client-side before any server exists to dial, so there is no v0 operation for
+// an http accessor to bind to and none is coming — closing this gap is not a
+// missing line, it is a wire operation nobody has designed. This waiver covers
+// Bootstrapper only; VersionReconciler and InitVerifier share the same fate in
+// the same comment but are out of scope for the change that added this waiver
+// and remain counted against the ceiling until their own reviewed change
+// names them too.
+const bootstrapperPermanentlyUnservableWaiverReason = "internal/httpclient/accessors.go names Bootstrapper " +
+	"PERMANENTLY UNSERVABLE over http — no wire operation and none coming — because `bd init` resolves the " +
+	"substrate identity entirely client-side, before any server exists to dial"
 
 // stagingWaiverReason is why the two staging contracts stop at the two
 // store-backed legs.

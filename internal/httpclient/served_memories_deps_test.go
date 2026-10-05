@@ -136,10 +136,16 @@ func newServedDependencyEditorFixture(t *testing.T, prefix string) conformance.D
 		CountHistory:  env.countHistory,
 		// The idempotency cases turn journaling on to prove a no-op journals
 		// nothing. Journaling is the SERVER's (the reference store's) switch;
-		// the harness serves the journal-enabled flag already. Dual-write
-		// version history is not wired: the one case that needs it drives the
-		// reference store's raw path, which this tier does not exercise.
+		// the harness serves the journal-enabled flag already.
 		SetJournalEnabled: func(enabled bool) { env.reference.SetEventsJournalEnabled(enabled) },
+		// The same-type re-add cases (ChangedMetadataMintsOneVersion,
+		// IdenticalMetadataIsANoOp) drive their re-add through
+		// fixture.AddDependency — the reference store's own raw path, same as
+		// AddDependency above — rather than through the role, because
+		// publicops.DependencyEdge carries no metadata field. That means dual-write
+		// version history is the reference store's own switch, same as journaling,
+		// so it wires the same way.
+		SetVersionedHistoryEnabled: env.reference.SetVersionedHistoryEnabled,
 	}
 }
 
@@ -408,4 +414,18 @@ func TestServedDependencyEditorMaintainsBlockedStateAcrossPlanes(t *testing.T) {
 // waits-for edge, and the role's own DependencyEdge carries none.
 func TestServedDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate(t *testing.T) {
 	conformance.RunDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate(t, t.Context(), newServedDependencyEditorFixture(t, "hd38"))
+}
+
+// The two same-type re-add cases, newly wired: both drive the re-add through
+// fixture.AddDependency (the reference store's own raw path, same reason
+// ClosedChildAddSatisfiesAnAnyChildrenGate reaches past the role above) and
+// need dual-write version history on, which the fixture now wires onto the
+// same reference store SetJournalEnabled already uses.
+
+func TestServedDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion(t *testing.T) {
+	conformance.RunDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion(t, t.Context(), newServedDependencyEditorFixture(t, "hd39"))
+}
+
+func TestServedDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp(t *testing.T) {
+	conformance.RunDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp(t, t.Context(), newServedDependencyEditorFixture(t, "hd40"))
 }
