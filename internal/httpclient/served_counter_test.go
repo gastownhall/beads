@@ -30,11 +30,22 @@ func servedCounterFixture(t *testing.T, e *servedEnv, prefix string) conformance
 		t.Fatalf("Counter(): %v", err)
 	}
 	return conformance.CounterFixture{
-		IssuePrefix:  prefix,
-		Counter:      counter,
-		CreateIssue:  e.createIssue,
-		CreateWisp:   e.createWisp,
-		CountHistory: e.countHistory,
+		IssuePrefix:   prefix,
+		Counter:       counter,
+		CreateIssue:   e.createIssue,
+		CreateWisp:    e.createWisp,
+		CountHistory:  e.countHistory,
+		AddDependency: e.addDependency,
+		// List is deliberately left nil (unlike the dolt leg's wiring in
+		// internal/storage/dolt/counter_contract_test.go). This client's OWN
+		// ListRequest encoder table (encode/table.go's listTable) has
+		// pre-existing, permanent refusals for NoParent and ExcludeTypes
+		// (E-ListRequest.NoParent, E-ListRequest.ExcludeTypes) — a divergence
+		// on the LISTING operation unrelated to S8 — so wiring List here would
+		// make RunCounterNoParentMatchesListCardinality and
+		// RunCounterExcludeTypesMatchesListCardinality FAIL rather than the
+		// requireCounterList skip this fixture's own documented design
+		// intends for a leg that cannot express the comparison.
 	}
 }
 
@@ -61,6 +72,24 @@ func TestServedCounterContract(t *testing.T) {
 		{"RefusesAnUnknownGroup", conformance.RunCounterRefusesAnUnknownGroup},
 		{"NormalizesLabelsAndLeavesTheRequestAlone", conformance.RunCounterNormalizesLabelsAndLeavesTheRequestAlone},
 		{"WritesNothing", conformance.RunCounterWritesNothing},
+
+		// S8 (#7199) count scope, served for real against a running bd serve:
+		// ParentID, NoParent, ExcludeTypes and ExcludeStatus each narrow the
+		// predicate over the http wire, exercising the client's encoding
+		// (counts_test.go covers the unit-level encoding and the pre-dial
+		// skew refusal; these confirm the served round trip). The three
+		// *MatchesListCardinality cases SKIP here (requireCounterList) rather
+		// than fail, since this fixture leaves List unwired — see
+		// servedCounterFixture's comment.
+		{"ParentIDScopesToChildren", conformance.RunCounterParentIDScopesToChildren},
+		{"NoParentExcludesChildren", conformance.RunCounterNoParentExcludesChildren},
+		{"ExcludeTypesNarrowsThePredicate", conformance.RunCounterExcludeTypesNarrowsThePredicate},
+		{"ExcludeStatusNarrowsThePredicate", conformance.RunCounterExcludeStatusNarrowsThePredicate},
+		{"ParentIDMatchesListCardinality", conformance.RunCounterParentIDMatchesListCardinality},
+		{"NoParentMatchesListCardinality", conformance.RunCounterNoParentMatchesListCardinality},
+		{"ExcludeTypesMatchesListCardinality", conformance.RunCounterExcludeTypesMatchesListCardinality},
+		{"ParentIDIncludesAWispChild", conformance.RunCounterParentIDIncludesAWispChild},
+		{"ParentIDAndExcludeStatusComposeOnAClosedChild", conformance.RunCounterParentIDAndExcludeStatusComposeOnAClosedChild},
 	} {
 		t.Run(tc.name, func(t *testing.T) { tc.run(t, t.Context(), fixture) })
 	}

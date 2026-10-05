@@ -35,6 +35,9 @@ type httpCounter struct{ store *Store }
 
 // Count returns how many issues match.
 func (c httpCounter) Count(ctx context.Context, req issueops.CountRequest) (issueops.CountResult, error) {
+	if err := c.refuseUnservedScope(ctx, "Counter.Count", req); err != nil {
+		return issueops.CountResult{}, err
+	}
 	params, err := encode.CountParams(req)
 	if err != nil {
 		return issueops.CountResult{}, c.store.inexpressible("Counter.Count", err)
@@ -62,6 +65,9 @@ func (c httpCounter) CountByGroup(ctx context.Context, req issueops.CountByGroup
 	if err := validateCountGroup(req.GroupBy); err != nil {
 		return issueops.CountByGroupResult{}, err
 	}
+	if err := c.refuseUnservedScope(ctx, "Counter.CountByGroup", req.Filter); err != nil {
+		return issueops.CountByGroupResult{}, err
+	}
 	params, err := encode.CountByGroupParams(req)
 	if err != nil {
 		return issueops.CountByGroupResult{}, c.store.inexpressible("Counter.CountByGroup", err)
@@ -84,6 +90,39 @@ func (c httpCounter) CountByGroup(ctx context.Context, req issueops.CountByGroup
 	// total and one row in three buckets. The server answers both numbers and
 	// this reads both.
 	return issueops.CountByGroupResult{Groups: groups, Total: body.Total}, nil
+}
+
+// refuseUnservedScope is the pre-dial half of S8's client-skew note
+// (internal/httpapi/routes.go, beside CapIssuesCountScope): a request that
+// sets ParentID, NoParent, ExcludeTypes or ExcludeStatus asks for something
+// only a server advertising issues.count.scope answers, and an older server
+// predating the token answers all four with a guaranteed 400
+// invalid_argument/unknown_parameter.
+//
+// It is called BEFORE encode.CountParams/CountByGroupParams, so a server that
+// cannot serve the scope never sees the request at all — never a wasted round
+// trip for a guaranteed refusal, and never a silent drop of the fields that
+// would answer a wider count than the caller asked for. The dispatch path's
+// own Preflight (dispatch.go) only gates the OPERATION as a whole via its
+// coarse per-op token (issues.count); it has no visibility into which fields
+// a particular request populates, which is why this finer-grained behavior
+// check has to live here, explicitly, rather than ride the generic path.
+//
+// A request with none of the four fields set never dials the handshake for
+// this check at all — snapshot() is only consulted when there is something to
+// gate, so a plain, scope-free count against an old server pays nothing extra.
+func (c httpCounter) refuseUnservedScope(ctx context.Context, op string, req issueops.CountRequest) error {
+	if req.ParentID == "" && !req.NoParent && len(req.ExcludeTypes) == 0 && len(req.ExcludeStatus) == 0 {
+		return nil
+	}
+	snap, err := c.store.snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	if slices.Contains(snap.Capabilities, wire.CapCountScope) {
+		return nil
+	}
+	return c.store.unsupportedCapability(op, wire.CapCountScope)
 }
 
 // countGroups is the closed bucketing vocabulary, spelled with the ROLE's

@@ -13,8 +13,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/encode"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/workapi"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -603,4 +605,134 @@ func TestNeitherCountingRoleWritesThroughTheCallerRequest(t *testing.T) {
 	if after := fmt.Sprint(edges.IDs, edges.Types); after != edgesBefore {
 		t.Errorf("the caller's anchors became %s, want %s", after, edgesBefore)
 	}
+}
+
+// countRoleWithSnapshot is countRole's twin for the S8 (#7199) count-scope
+// tests below, which need to pin exactly what the handshake advertises
+// (CapCountScope present or absent) rather than accept countRole's bare nil —
+// passing a snapshot straight through New is the same idiom
+// wave2c_claimnext_test.go uses to pin a capability set without a live
+// handshake dial.
+func countRoleWithSnapshot(t *testing.T, w *countingWire, snap *apigen.ContextResponse) issueops.Counter {
+	t.Helper()
+	counter, err := New(testTarget(t), w, snap).Counter()
+	if err != nil {
+		t.Fatalf("Counter(): %v", err)
+	}
+	return counter
+}
+
+// TestCountScopeFieldsEncodeOntoTheQuery is S8's client half, the encoding
+// side: each of the four count-scope fields (ParentID, NoParent, ExcludeTypes,
+// ExcludeStatus — internal/httpapi/routes.go's issues.count.scope) reaches the
+// wire once the handshake advertises the token.
+//
+// ParentID and NoParent are exercised in separate cases rather than together:
+// the ROLE (issueops/counter.go) refuses that combination as ErrValidation on
+// every backend, this one included, so a case that set both would be testing a
+// refusal rather than an encoding.
+func TestCountScopeFieldsEncodeOntoTheQuery(t *testing.T) {
+	served := &apigen.ContextResponse{Capabilities: []string{wire.CapCountScope}}
+
+	for _, tc := range []struct {
+		name string
+		req  issueops.CountRequest
+		want url.Values
+	}{
+		{"ParentID", issueops.CountRequest{ParentID: "bd-1"}, url.Values{"parent": {"bd-1"}}},
+		{"NoParent", issueops.CountRequest{NoParent: true}, url.Values{"no_parent": {"true"}}},
+		{"ExcludeTypes", issueops.CountRequest{ExcludeTypes: []string{"wisp", "gate"}}, url.Values{"exclude_type": {"wisp", "gate"}}},
+		{"ExcludeStatus", issueops.CountRequest{ExcludeStatus: []string{"closed", "archived"}}, url.Values{"exclude_status": {"closed", "archived"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newCountingWire(`{"total":3}`)
+			if _, err := countRoleWithSnapshot(t, w, served).Count(t.Context(), tc.req); err != nil {
+				t.Fatalf("Count: %v", err)
+			}
+			q := w.query(t)
+			for param, want := range tc.want {
+				if got := q[param]; !slices.Equal(got, want) {
+					t.Errorf("query[%q] = %v, want %v (full query: %v)", param, got, want, q)
+				}
+			}
+		})
+	}
+}
+
+// TestCountScopeRefusesLocallyWhenTheServerLacksTheCapability is S8's other
+// half, the skew side: internal/httpapi/routes.go's CLIENT-SKEW NOTE beside
+// CapIssuesCountScope requires that a request setting any of the four scope
+// fields refuse BEFORE dialing when the handshake does not advertise
+// issues.count.scope — never a round trip for a guaranteed 400, and never a
+// silent drop that answers a wider count than asked for.
+func TestCountScopeRefusesLocallyWhenTheServerLacksTheCapability(t *testing.T) {
+	masked := &apigen.ContextResponse{Capabilities: []string{"issues.count"}}
+
+	for _, tc := range []struct {
+		name string
+		req  issueops.CountRequest
+	}{
+		{"ParentID", issueops.CountRequest{ParentID: "bd-1"}},
+		{"NoParent", issueops.CountRequest{NoParent: true}},
+		{"ExcludeTypes", issueops.CountRequest{ExcludeTypes: []string{"wisp"}}},
+		{"ExcludeStatus", issueops.CountRequest{ExcludeStatus: []string{"closed"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newCountingWire(`{"total":0}`)
+			_, err := countRoleWithSnapshot(t, w, masked).Count(t.Context(), tc.req)
+			if err == nil {
+				t.Fatal("Count returned no error, want a pre-dial capability refusal")
+			}
+			var unsup *storage.ErrUnsupported
+			if !errors.As(err, &unsup) {
+				t.Fatalf("errors.As to *storage.ErrUnsupported failed for %v", err)
+			}
+			if unsup.Capability != wire.CapCountScope {
+				t.Errorf("Capability = %q, want %q", unsup.Capability, wire.CapCountScope)
+			}
+			if unsup.Op != "Counter.Count" {
+				t.Errorf("Op = %q, want %q", unsup.Op, "Counter.Count")
+			}
+			if len(w.dialed) != 0 {
+				t.Errorf("dialed %d times, want 0: a pre-dial refusal must never reach the wire", len(w.dialed))
+			}
+		})
+
+		t.Run(tc.name+"/CountByGroup", func(t *testing.T) {
+			w := newCountingWire(`{"total":0,"groups":{}}`)
+			counter, err := New(testTarget(t), w, masked).Counter()
+			if err != nil {
+				t.Fatalf("Counter(): %v", err)
+			}
+			_, err = counter.CountByGroup(t.Context(), issueops.CountByGroupRequest{
+				Filter: tc.req, GroupBy: issueops.CountGroupStatus,
+			})
+			if err == nil {
+				t.Fatal("CountByGroup returned no error, want a pre-dial capability refusal")
+			}
+			var unsup *storage.ErrUnsupported
+			if !errors.As(err, &unsup) {
+				t.Fatalf("errors.As to *storage.ErrUnsupported failed for %v", err)
+			}
+			if unsup.Capability != wire.CapCountScope {
+				t.Errorf("Capability = %q, want %q", unsup.Capability, wire.CapCountScope)
+			}
+			if len(w.dialed) != 0 {
+				t.Errorf("dialed %d times, want 0", len(w.dialed))
+			}
+		})
+	}
+
+	// The converse: a scope-free count against the SAME masked server dials
+	// normally. The gate guards the four fields, not the operation — a plain
+	// `bd count` must keep working against a server that predates S8.
+	t.Run("no scope field set dials normally", func(t *testing.T) {
+		w := newCountingWire(`{"total":5}`)
+		if _, err := countRoleWithSnapshot(t, w, masked).Count(t.Context(), issueops.CountRequest{Status: "open"}); err != nil {
+			t.Fatalf("Count: %v", err)
+		}
+		if len(w.dialed) != 1 {
+			t.Errorf("dialed %d times, want exactly 1", len(w.dialed))
+		}
+	})
 }

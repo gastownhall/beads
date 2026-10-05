@@ -74,3 +74,29 @@ func (s *Store) unsupported(op string) error {
 	}
 	return e
 }
+
+// unsupportedCapability is unsupported's sibling for a BEHAVIOR-token refusal
+// rather than a whole-operation one: the operation itself is fine (countIssues
+// exists on every server this client speaks to), but one caller-supplied field
+// requires a behavior the handshake snapshot does not advertise.
+//
+// It fills in Unsup.Capability, which (*Store).unsupported never sets — that
+// one is for a method this build cannot express on this backend at all, and
+// has no single token to name. errors.As(err, &unsupported) reaching
+// unsupported.Capability == capability is what counter.go's pre-dial scope
+// refusal promises the caller (S8's CLIENT-SKEW NOTE in
+// internal/httpapi/routes.go, beside CapIssuesCountScope): refuse before
+// dialing, never drop the fields and answer a wider count than asked for.
+func (s *Store) unsupportedCapability(op, capability string) error {
+	e := &ErrHTTPUnsupported{Unsup: &storage.ErrUnsupported{Op: op, Backend: Backend, Capability: capability}}
+	if s == nil {
+		return e
+	}
+	e.ServerURL = s.target.String()
+	if snap := s.cachedSnapshot(); snap != nil {
+		e.BdVersion = snap.BdVersion
+		e.Capabilities = append([]string(nil), snap.Capabilities...)
+		sort.Strings(e.Capabilities)
+	}
+	return e
+}
