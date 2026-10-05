@@ -60,6 +60,35 @@ func init() {
 		"RunCycleDetectorIncludeTracksFindsTheMoleculeRootShape":         cycleTracksWireGapWaiverReason,
 		"RunCycleDetectorIncludeTracksIgnoresAPureTracksLoop":            cycleTracksWireGapWaiverReason,
 		"RunCycleDetectorIncludeTracksWalksEachEdgeInItsStoredDirection": cycleTracksWireGapWaiverReason,
+
+		"RunImporterRejectsAStaleRowAndNamesIt":           importerOneAccessorWaiverReason,
+		"RunImporterReportsTheAbsentTargetItDroppedOnce":  importerOneAccessorWaiverReason,
+		"RunImporterWiresTheCrossPlaneEdgeBetweenItsRows": importerOneAccessorWaiverReason,
+		"RunImporterReportsTheCycleEdgeItDropped":         importerOneAccessorWaiverReason,
+
+		"RunADestructiveOperationEnumeratesAffectedAddressesFirst":     retentionEpochNoRoleWaiverReason,
+		"RunAHoldPreventsRemovalAndReportsInRetainedBounds":            retentionEpochNoRoleWaiverReason,
+		"RunAStoreThatRemovesStateStillAnswersGoneDurably":             retentionEpochNoRoleWaiverReason,
+		"RunAStoreWithNoLineageKnowledgeAnswersUnknownNotGone":         retentionEpochNoRoleWaiverReason,
+		"RunAnAddressNeverResolvesToADifferentState":                   retentionEpochNoRoleWaiverReason,
+		"RunAnEpochBumpIsTriggeredOnlyByRestoreReinitOrSchemeChange":   retentionEpochNoRoleWaiverReason,
+		"RunEpochBumpVoidsOnlyAddressesOfVersionsNoLongerServed":       retentionEpochNoRoleWaiverReason,
+		"RunErasureMintsACorrectedVersionRatherThanEditingInPlace":     retentionEpochNoRoleWaiverReason,
+		"RunEveryRetentionAnswerNamesItsProducingStore":                retentionEpochNoRoleWaiverReason,
+		"RunForcingAHeldRemovalRecordsWhoWhenWhy":                      retentionEpochNoRoleWaiverReason,
+		"RunGoneIsDistinguishableFromUnknown":                          retentionEpochNoRoleWaiverReason,
+		"RunRemovalLeavesTheAddressAbleToAnswer":                       retentionEpochNoRoleWaiverReason,
+		"RunRemovalNeverReassignsASurvivingAddress":                    retentionEpochNoRoleWaiverReason,
+		"RunRemovalReasonIsRetentionErasureOrReorganizationDistinctly": retentionEpochNoRoleWaiverReason,
+		"RunRemovalReportsTheSurvivingRetainedWindow":                  retentionEpochNoRoleWaiverReason,
+
+		"RunAdvisoryLeaseAloneDoesNotPreventTheInvariantViolation":    crossRecordInvariantNoRoleWaiverReason,
+		"RunCrossRecordInvariantSurvivesTwoPassingPerRecordGuards":    crossRecordInvariantNoRoleWaiverReason,
+		"RunInvariantRefusalNamesTheViolatedInvariant":                crossRecordInvariantNoRoleWaiverReason,
+		"RunLeaseAcquisitionRecordsNoHistoryEntry":                    crossRecordInvariantNoRoleWaiverReason,
+		"RunMaximumEndpointMultiplicityIsAStoreInvariantNotACAS":      crossRecordInvariantNoRoleWaiverReason,
+		"RunMemoryKeyAliasUniquenessIsAStoreInvariantNotACAS":         crossRecordInvariantNoRoleWaiverReason,
+		"RunStoreInvariantTransactionScopesExactlyTheSpanningRecords": crossRecordInvariantNoRoleWaiverReason,
 	})
 }
 
@@ -90,6 +119,48 @@ const cycleTracksWireGapWaiverReason = "issueops.DetectCyclesRequest.IncludeTrac
 	"zero-value request; the client's DetectCycles refuses the request via a typed, ledger-cited error — see " +
 	"\"L-cycles-tracks\" — rather than silently answering the narrower walk); no slice through S13 adds a wire " +
 	"parameter for it, so closing this is a new, not-yet-numbered slice rather than a missing test line"
+
+// retentionEpochNoRoleWaiverReason covers the fifteen RetentionFixture and
+// EpochFixture cases: PERMANENTLY unservable over HTTP, not merely unwired
+// yet.
+//
+// Both fixtures are RAW STORAGE HOOKS, not a publicops role: RetentionFixture
+// and EpochFixture (backend/conformance/retention_epoch_contract.go) carry no
+// publicops.XXX field at all, only closures like Resolve, Remove, Hold,
+// Erase, Mint, CurrentEpoch, and BumpEpoch that reach past every role
+// straight at a backend's own address/epoch/retention bookkeeping — the same
+// bookkeeping a storage engine keeps about itself, not a capability it was
+// ever going to publish to a caller. dolt, embeddeddolt, and uow all wire
+// this contract because all three ARE storage engines with that bookkeeping
+// to show; the http leg is a REMOTE CLIENT of one, with no address table,
+// epoch counter, or retention window of its own to report — there is nothing
+// behind this door for a wire operation to open onto, now or in a later
+// slice, unless some future design gives retention/epoch state its own
+// publicops role and wire surface. That would be a new role, not a missing
+// test line, which is why this is a named waiver rather than a ceiling
+// entry.
+const retentionEpochNoRoleWaiverReason = "RetentionFixture and EpochFixture carry raw address/epoch/retention " +
+	"storage hooks (Resolve, Remove, Hold, Erase, Mint, CurrentEpoch, BumpEpoch, ...) with no publicops role " +
+	"behind them; dolt, embeddeddolt and uow wire this contract because they ARE the storage engine this " +
+	"bookkeeping belongs to, and the http leg is a remote client with no such bookkeeping of its own to report " +
+	"— there is no role or wire surface for this to ever route through unless one is designed from scratch"
+
+// crossRecordInvariantNoRoleWaiverReason covers the seven CrossRecordInvariantFixture
+// cases, for the same shape of reason as retentionEpochNoRoleWaiverReason.
+//
+// CrossRecordInvariantFixture (backend/conformance/cross_record_invariant_contract.go)
+// is likewise raw hooks with no publicops field — GuardedWrite,
+// EnforceCrossRecordInvariant, AcquireAdvisoryLease,
+// CountHistoryForSubject, MemoryKeyAliasWrite, GraphEdgeWrite — that assert a
+// store's OWN invariant enforcement spanning more than one record at once,
+// the kind of guarantee a storage engine's own transaction boundary gives,
+// not a wire operation it exposes. dolt, embeddeddolt and uow wire it as the
+// engines that hold that boundary; the http leg has none of its own to test.
+const crossRecordInvariantNoRoleWaiverReason = "CrossRecordInvariantFixture carries raw per-record/cross-record " +
+	"storage hooks (GuardedWrite, EnforceCrossRecordInvariant, AcquireAdvisoryLease, CountHistoryForSubject, " +
+	"MemoryKeyAliasWrite, GraphEdgeWrite) with no publicops role behind them, asserting a storage engine's own " +
+	"transaction boundary rather than something exposed over a wire; the http leg has no transaction boundary " +
+	"of its own for this to test"
 
 // bootstrapSplitWaiverReason covers the one pair of entrypoints that is a
 // RATIFIED PER-LEG SPLIT rather than a gap.
@@ -400,6 +471,27 @@ func finalParamTypeName(fn *ast.FuncDecl) string {
 // file naming every entrypoint would otherwise satisfy this lock with source no
 // build compiles. Ordinary constraints — cgo, integration — are counted,
 // because a contract wired behind one is still wired.
+//
+// A REFERENCE IS NOT A PASS, and that gap is deliberate rather than a hole in
+// this check. Several contracts (RetentionFixture, EpochFixture, BootstrapperFixture,
+// VersionReconcilerFixture, ...) are written so a nil hook makes the case
+// t.Skip loudly, naming the hook, rather than asserting nothing silently —
+// see each fixture's own doc comment. That lets a leg wire the ENTRYPOINT
+// (call conformance.RunX, satisfying this static check) while leaving some
+// or all of its hooks nil, which runs for real as a skip, not a pass. This
+// check cannot see past the call to know which hooks a wiring supplies, so
+// it counts the reference as wired either way — a leg that did this would
+// read as adopted here while its own `go test -v` output says SKIP. That
+// divergence is this package's to prevent by review, the same way
+// divergence_citation_gate_test.go (internal/httpclient) already holds the
+// served tier's own skipKnownDivergence call sites to a named, ledger-cited
+// reason instead of a bare t.Skip: a reviewer reading a wiring diff that adds
+// a conformance.RunX reference should expect it to pass for real, or to carry
+// a waiver in unwiredContractEntrypoints instead — not to compile a skip and
+// call it adopted. As of this lock's current counts, no leg does this: every
+// entrypoint a leg's sources name either has every hook that entrypoint's own
+// cases need, or the gap is a named waiver here rather than a nil hook left
+// standing behind a call this check would count as wired.
 func conformanceEntrypointsWiredBy(t *testing.T, dir string) (map[string]bool, []string) {
 	t.Helper()
 	files, err := filepath.Glob(filepath.Join(dir, "*_test.go"))
