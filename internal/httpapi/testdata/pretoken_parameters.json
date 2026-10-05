@@ -99,6 +99,9 @@
   "getMemory": [
     "key"
   ],
+  "getSetting": [
+    "key"
+  ],
   "getStats": [
     "assignee",
     "skip_blocked"
@@ -129,6 +132,7 @@
     "include_templates",
     "label",
     "label_any",
+    "limit",
     "metadata_field",
     "parent",
     "status",
@@ -149,6 +153,7 @@
     "label_any",
     "label_pattern",
     "label_regex",
+    "limit",
     "metadata_field",
     "parent",
     "priority",
@@ -157,11 +162,13 @@
     "unassigned"
   ],
   "listRelatedIssues": [
+    "direction",
     "id",
     "type"
   ],
   "queryIssues": [
     "all",
+    "limit",
     "q",
     "reverse",
     "sort"
@@ -171,6 +178,12 @@
   ],
   "reopenIssue": [
     "id"
+  ],
+  "setSetting": [
+    "key"
+  ],
+  "unsetSetting": [
+    "key"
   ],
   "updateIssue": [
     "id"

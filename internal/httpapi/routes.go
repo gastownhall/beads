@@ -74,7 +74,7 @@ const CapBatchApplyLarge = "issues.batchApplyLarge"
 // `sort` predates that rule and would have failed it, so it is the parity fix
 // — ent already advertises the equivalent token — that the rule's own
 // baseline is built from.
-const CapIssuesListSort = "issues.listSort"
+const CapIssuesListSort = "issues.list.sort"
 
 // customMethodTarget splits the custom method off the segment the router
 // matched, and reports the row that claims it.

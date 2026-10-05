@@ -37,7 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `internal/httpapi/wire_revision.go` and the `wire_revision` property in
   `internal/httpapi/spec/openapi.v0.yaml` for the full revision history.
 - `GET /v0/beads/issues`'s `sort` parameter now advertises the
-  `issues.listSort` capability token, the same way an operation itself
+  `issues.list.sort` capability token, the same way an operation itself
   does, and a CI rule
   (`TestNewParameterOnExistingOperationHasABehaviorToken`) requires every
   new parameter on an existing operation to carry one.

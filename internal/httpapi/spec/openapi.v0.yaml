@@ -1313,7 +1313,7 @@ paths:
             `reason: "unknown_parameter"` instead, which is the per-parameter
             capability probe a client can dispatch on to fall back to paging in
             `created` order and sorting client-side. This server also
-            advertises the `issues.listSort` token in
+            advertises the `issues.list.sort` token in
             `ContextResponse.capabilities` for exactly that check, so a client
             with capabilities cached from the handshake never has to pay for
             the round trip an old server's `unknown_parameter` answer costs.
@@ -7507,7 +7507,7 @@ components:
             server's ordinary deadline exactly as before. A client that
             checks for this token before sending a plan over 100 items learns
             whether THIS server accepts it without paying for a round trip an
-            older server would refuse anyway, and `issues.listSort`, which
+            older server would refuse anyway, and `issues.list.sort`, which
             announces that `GET /v0/beads/issues` accepts the `sort` query
             parameter (two closed, pageable total orders — see that
             parameter) rather than silently answering `unknown_parameter`. The
@@ -7576,23 +7576,33 @@ components:
             never frozen in place) but needs no revision bump to pass.
 
 
-            Every request PARAMETER (query, path or header — not a request
-            body member) added to an EXISTING operation after this document
+            Every request PARAMETER (query, path or header) and every request
+            BODY MEMBER, added to an EXISTING operation after this document,
             must carry a capability token in its own description, exactly as
             `capabilities` members do above —
             `TestNewParameterOnExistingOperationHasABehaviorToken` enforces it
-            against a frozen baseline
-            (`internal/httpapi/testdata/pretoken_parameters.json`) of every
-            parameter this document already had the day the rule was written.
-            A parameter on that baseline is grandfathered and never needs one;
-            any parameter not on it — present now or added later — must carry
-            a token today. The baseline is written once and never
-            regenerated: only a pre-existing, untokened parameter ever
-            belongs on it, and a newly tokened parameter satisfies the rule
-            without needing an entry at all. `issues.listSort` is the first
-            deliberate use of the rule; it also closes the one gap the rule
-            was written to catch, since `sort` itself shipped (#5666) with no
-            token at all.
+            against two frozen baselines
+            (`internal/httpapi/testdata/pretoken_parameters.json` for
+            parameters, `pretoken_request_body_members.json` for body
+            members) of every parameter and body member this document already
+            had the day each rule was written. A member on its baseline is
+            grandfathered and never needs a token; any member not on it —
+            present now or added later, on an operation that already existed
+            when the relevant baseline was frozen — must carry one today. A
+            BRAND-NEW operation (one absent from the third frozen file,
+            `pretoken_operations.json`) is exempt entirely: its own review
+            decides its capability story, not a baseline written before it
+            existed. The token itself must also be one `Capabilities()`
+            actually serves — a backticked string merely shaped like a token
+            proves nothing on its own. All three baselines are written once
+            and never regenerated: only a pre-existing, untokened member or
+            operation ever belongs on them, a newly tokened member satisfies
+            the rule without needing an entry at all, and
+            `TestPretokenBaselinesNeverGrow` pins their sizes so nothing can
+            hand-add a new exemption instead of a token. `issues.list.sort` is
+            the first deliberate use of the parameter rule; it also closes the
+            one gap the rule was written to catch, since `sort` itself shipped
+            (#5666) with no token at all.
         min_client_wire_revision:
           type: integer
           description: >-

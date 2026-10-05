@@ -595,7 +595,7 @@ and the `openapi.v0.yaml` history entry it belongs beside.
 `resource.verb` token for a new OPERATION; nothing required one for a new
 PARAMETER on an EXISTING operation, so a client had no single place to learn
 that, say, `GET /v0/beads/issues`'s `sort` parameter had started accepting a
-value. `issues.listSort` is the first deliberate use of the same convention
+value. `issues.list.sort` is the first deliberate use of the same convention
 one level down: the token lives in the parameter's own description, exactly as
 `capabilities` members carry theirs, enforced by
 `TestNewParameterOnExistingOperationHasABehaviorToken` against a frozen
