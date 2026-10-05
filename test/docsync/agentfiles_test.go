@@ -28,6 +28,17 @@ var agentFileSkipDirs = map[string]bool{
 // backtickPathRE matches a backticked token that names a repository file.
 var backtickPathRE = regexp.MustCompile("`([A-Za-z0-9_./-]+\\.(?:md|go|sh|yml|yaml|json|txt))`")
 
+// backtickRepoPathRE matches a backticked repo-relative path under a top-level
+// source or docs directory, with or without an extension (directories and
+// extensionless scripts included). Globs and placeholders are skipped by the
+// caller.
+var backtickRepoPathRE = regexp.MustCompile("`((?:\\.github|backend|cmd|docs|engdocs|internal|issueops|scripts|test|tests)/[^`\\s]*)`")
+
+// backtickTestRE matches a backticked Go test name cited as a guard.
+var backtickTestRE = regexp.MustCompile("`(Test[A-Z][A-Za-z0-9_]*)`")
+
+var goTestFuncRE = regexp.MustCompile(`(?m)^func (Test[A-Za-z0-9_]+)\(`)
+
 func TestRootAgentsFileWithinBudget(t *testing.T) {
 	info, err := os.Stat(filepath.Join(repoRoot(), "AGENTS.md"))
 	if err != nil {
@@ -71,7 +82,8 @@ func contributorAgentFiles(t *testing.T, root string) []string {
 // TestAgentInstructionFilesAreLinkedAndRouted: every contributor AGENTS.md has
 // a sibling CLAUDE.md symlink (Claude Code skips AGENTS.md files when a
 // CLAUDE.md exists above them), every nested one is listed in the root routing
-// table, and every local link or backticked file path in them resolves.
+// table, and every local link, backticked repo path, and backticked guard-test
+// name in them resolves. Make targets are not checked.
 func TestAgentInstructionFilesAreLinkedAndRouted(t *testing.T) {
 	if bazeltest.IsBazel() {
 		t.Skip("walks the source checkout; Bazel runfiles hold only declared data, so this runs under go test")
@@ -109,6 +121,7 @@ func TestAgentInstructionFilesAreLinkedAndRouted(t *testing.T) {
 	}
 
 	checked := append(agentFiles, filepath.ToSlash(filepath.Join(".github", "copilot-instructions.md")))
+	tests := goTestFuncNames(t, root)
 	var broken []string
 	for _, rel := range checked {
 		path := filepath.Join(root, filepath.FromSlash(rel))
@@ -141,6 +154,22 @@ func TestAgentInstructionFilesAreLinkedAndRouted(t *testing.T) {
 			}
 			broken = append(broken, rel+" -> `"+m[1]+"`")
 		}
+		for _, m := range backtickRepoPathRE.FindAllStringSubmatch(content, -1) {
+			ref := m[1]
+			if strings.ContainsAny(ref, "*{}<>$") {
+				continue
+			}
+			// "file.go:Symbol" cites a symbol inside a file; check the file.
+			ref, _, _ = strings.Cut(ref, ":")
+			if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(ref))); err != nil {
+				broken = append(broken, rel+" -> `"+m[1]+"`")
+			}
+		}
+		for _, m := range backtickTestRE.FindAllStringSubmatch(content, -1) {
+			if !tests[m[1]] {
+				broken = append(broken, rel+" -> guard test "+m[1]+" does not exist")
+			}
+		}
 	}
 	if len(broken) > 0 {
 		sort.Strings(broken)
@@ -149,4 +178,37 @@ func TestAgentInstructionFilesAreLinkedAndRouted(t *testing.T) {
 			t.Errorf("  %s", b)
 		}
 	}
+}
+
+// goTestFuncNames returns the names of every top-level Test function in the
+// checkout's Go test files.
+func goTestFuncNames(t *testing.T, root string) map[string]bool {
+	t.Helper()
+	names := make(map[string]bool)
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if path != root && (strings.HasPrefix(d.Name(), ".") || d.Name() == "node_modules") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, m := range goTestFuncRE.FindAllSubmatch(data, -1) {
+			names[string(m[1])] = true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("collecting Go test names: %v", err)
+	}
+	return names
 }

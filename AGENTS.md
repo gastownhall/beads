@@ -118,6 +118,11 @@ make bazel-sync    # after adding/removing/renaming Go files or changing imports
   in Go tests and a disposable working directory for manual `bd` experiments.
 - `make ci-pr-lint` must pass with zero issues; see
   [engdocs/LINTING.md](engdocs/LINTING.md).
+- **Optional shared Bazel cache (opt-in).** `--config=fork-cache` reads the
+  project's anonymous, read-only cache, so results CI already computed are
+  hits and nothing is uploaded. It is off by default; when setting up a dev
+  environment, ask your human before adding `build --config=fork-cache` to
+  `.bazelrc.local`.
 - Without Bazel, let CI sync BUILD files: on same-repo PRs the bazel-autofix
   workflow pushes the fix to your branch (pull before pushing again); fork PRs
   get a comment with an apply recipe.

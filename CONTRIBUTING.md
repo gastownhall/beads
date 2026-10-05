@@ -73,6 +73,12 @@ make test
 make install
 ```
 
+Optional: if you use Bazel, opt in to the project's anonymous, read-only
+build cache by adding `build --config=fork-cache` to your gitignored
+`.bazelrc.local` (or pass `--config=fork-cache` per command). Results CI
+already computed become cache hits, and nothing you build is uploaded. It is
+off by default.
+
 ## Project Structure
 
 ```

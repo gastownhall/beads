@@ -11,12 +11,12 @@ subpackages. Commands decide what to do; storage work belongs below them in
 | Pattern | Meaning |
 |---|---|
 | `<cmd>.go` | The Cobra command, its flags, and the mode-independent body. Registers itself with `rootCmd.AddCommand` in its own `init()` — `main.go` adds no commands. |
-| `<cmd>_proxied_server.go` | The proxied-server route for the same command (59 files). A command that touches the store on a proxied-server workspace needs one. |
+| `<cmd>_proxied_server.go` | The proxied-server route for the same command. A command that touches the store on a proxied-server workspace needs one. |
 | `capability_registry.go` | One table for every command path: what the pre-provider gate does with it on a proxied-server workspace. |
-| `<cmd>_embedded_test.go` | `cgo` tests against embedded Dolt (111 files). |
-| `<cmd>_integration_test.go` | Integration tests, usually `cgo && unix` (115 files). |
-| `<cmd>_proxied_test.go` | Proxied-server tests (7 files). |
-| `<topic>_guard_test.go` | Policy and safety guards (16 files). |
+| `<cmd>_embedded_test.go` | `cgo` tests against embedded Dolt. |
+| `<cmd>_integration_test.go` | Integration tests, usually `cgo && unix`. |
+| `<cmd>_proxied_test.go` | Proxied-server tests. |
+| `<topic>_guard_test.go` | Policy and safety guards. |
 
 Which tier a test belongs in, and which command runs it, is decided by
 [engdocs/TESTING.md](../../engdocs/TESTING.md).
@@ -51,7 +51,8 @@ From `.golangci.yml` (read the rule comments there before changing scope):
   reaches the reader role through store.IssueReader(), never through the
   constructor: the accessor is where each storage decorator adds its layer".
   The same applies to `store.Counter()`, `store.WorkspaceConfig()`,
-  `store.VersionReconciler()`, and `store.StatsReporter()`.
+  `store.VersionReconciler()`, `store.StatsReporter()`,
+  `store.ReadyCounter()`, and `store.Querier()`.
 - **`cmd-bd-domain-boundary` (depguard, `label.go` and `state.go`):** "bd label
   and bd state reach storage through an issueops role accessor, never through
   the domain use cases - see openIssueLifecycle in cmd/bd/label.go".
@@ -68,7 +69,8 @@ From `.golangci.yml` (read the rule comments there before changing scope):
   locally".
 
 A deliberate exception is marked on its line with
-`//nolint:forbidigo // <reason>`; the reason is required.
+`//nolint:forbidigo // <reason>`; the reason is expected (review checks it;
+no linter enforces it).
 
 ## Guard tests
 
