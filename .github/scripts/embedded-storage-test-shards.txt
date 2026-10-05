@@ -401,6 +401,7 @@
 15 10 TestEmbeddedTransactionWispLifecyclePersistsDurableDependent
 15 10 TestEpochContract
 15 10 TestGetReadyWorkMoleculeFilter
+15 10 TestGraphWalkPlansHonorJoinHints
 15 10 TestHelperProcess
 15 10 TestIgnoredCursorHealResumeRespectsOperatorOverride
 15 10 TestReclaimRefusesForeignReplicaLease

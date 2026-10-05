@@ -1699,6 +1699,42 @@ func TestParityCloseAlreadyClosedIsIdempotentSuccess(t *testing.T) {
 	}
 }
 
+// TestParityCloseIfRevisionRejectsContinueSuggestNextClaimNext pins
+// mc-zndi7.76 (gap 4 / mutant ML): --if-revision's single-id compare-and-swap
+// bypass (cmd/bd/close.go:109-117) never looks at --continue, --suggest-next
+// or --claim-next, so honoring any of them would silently drop what the
+// caller asked for instead of reporting it. Each of the three flags is
+// refused independently, before any write.
+func TestParityCloseIfRevisionRejectsContinueSuggestNextClaimNext(t *testing.T) {
+	for _, flag := range []string{"continue", "suggest-next", "claim-next"} {
+		t.Run(flag, func(t *testing.T) {
+			env := newParityEnv(t)
+			seeded := env.seed("test-clsifr-"+flag, "Guarded close vs "+flag, nil)
+			rev := env.get(seeded.ID).RowVersion
+
+			env.setFlags(closeCmd, map[string]string{
+				"if-revision": fmt.Sprintf("%d", rev),
+				flag:          "true",
+			})
+			res := env.run(closeCmd, seeded.ID)
+
+			if res.exitCode != 1 {
+				t.Fatalf("exit = %d, want 1\nstderr:\n%s", res.exitCode, res.stderr)
+			}
+			const want = "Error: --if-revision does not support --continue, --suggest-next, or --claim-next\n"
+			if res.stderr != want {
+				t.Errorf("stderr = %q, want %q", res.stderr, want)
+			}
+			if got := env.get(seeded.ID); got.Status == types.StatusClosed {
+				t.Error("the issue must not have been closed")
+			}
+			if got := env.store.mutations(); len(got) != 0 {
+				t.Errorf("store mutations = %v, want none (rejected pre-write)", got)
+			}
+		})
+	}
+}
+
 // ===== bd reopen =====
 
 // TestParityReopenJSONShape pins `bd reopen --json`: a JSON ARRAY of re-read

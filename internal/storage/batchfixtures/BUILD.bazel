@@ -6,6 +6,7 @@ go_library(
         "batchfixtures.go",
         "largegraph.go",
         "uncapped_plan.go",
+        "waitsfor.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/storage/batchfixtures",
     visibility = ["//:__subpackages__"],
