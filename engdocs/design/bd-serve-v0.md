@@ -547,9 +547,19 @@ property's description in `openapi.v0.yaml` — `0` for every build before this
 field existed (an integer `revision`, pre-#6053), `1` for the brief
 string-typed `revision` (#6053), `2` for the first build carrying
 `wire_revision` itself. A client talking to a build too old to answer this
-field at all infers the value from `bd_version`, which is always present; the
-mapping is documented beside the property rather than assumed, because
-`bd_version` alone does not sort the same way a counter does.
+field at all may use `bd_version` as an ADVISORY hint, never proof: compare it
+as semver with pre-release identifiers and treat `>= 1.3.0-rc.1` (not the
+release cutoff `1.3.0` — a `1.3.0-rc.N` build already carries the string shape
+and sorts below `1.3.0`) as a hint toward `1`, else a hint toward `0`. Two
+known builds defeat even that corrected hint: `main` up to commit
+`b3ef65c85` reports `bd_version: "1.2.2"` while already sending strings, and
+the bd-enterprise compatibility line at `d3ab32773462` reports `"1.1.0"` while
+also sending strings. A client therefore MUST accept `revision` and
+`expected_version` as either a string or a number whenever `wire_revision` is
+absent (or probe the shape directly) rather than let the inferred value
+choose a decoder, and MUST NEVER refuse solely because the inferred revision
+is `0` — see the `wire_revision` property's description for the exact
+language.
 
 `min_client_wire_revision` is the other half: the oldest revision a build
 still answers correctly. A client that knows the revision it was compiled

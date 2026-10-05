@@ -1053,7 +1053,19 @@ type ContextResponse struct {
 	//   `wire_revision` and `min_client_wire_revision` at all (this one).
 	//
 	//
-	// A client talking to a server that omits this member entirely is talking to a pre-signal server and INFERS the revision rather than reading one: `1` when `bd_version` is `>= 1.3.0`, else `0`. A client that does not know how to speak the revision it reads or infers must refuse to proceed rather than guess at the shape.
+	// A client talking to a server that omits this member entirely is talking to a pre-signal server. `bd_version` is a HINT for that case, never proof: compare it as semver WITH PRE-RELEASE identifiers, and treat `>= 1.3.0-rc.1` — not the release cutoff `1.3.0` itself — as a hint toward `1`, anything below as a hint toward `0`. The release cutoff is wrong on its own because a `1.3.0-rc.N` pre-release build already carries the `1` shape and sorts BELOW `1.3.0`.
+	//
+	// Known exceptions make even that corrected hint unreliable, which is why it is advisory rather than authoritative:
+	//
+	// * Builds from `main` up to commit `b3ef65c85` report
+	//   `bd_version: "1.2.2"` — below the `1.3.0-rc.1` hint cutoff —
+	//   while already sending the string-typed shape (`1`, not `0`).
+	// * The bd-enterprise compatibility line at commit `d3ab32773462`
+	//   reports `bd_version: "1.1.0"` while also sending the
+	//   string-typed shape.
+	//
+	//
+	// Because builds like these exist, a client MUST NOT trust the inferred revision to pick a decoder. Instead it MUST do ONE of: accept `revision` and `expected_version` as EITHER a JSON string OR a JSON number whenever `wire_revision` is absent, or probe the actual shape directly (for instance by inspecting the JSON type of a `revision` value already in hand). A client MUST NEVER refuse a request solely because the inferred revision is `0` — `0` here means only "this is an unreliable hint," never a confirmed fact to gate decoding on by itself. A client that still cannot cope with either shape after probing must refuse to proceed rather than guess, exactly as it would for a `wire_revision` it read directly and does not understand.
 	//
 	// This document's own drift gate is `TestWireShapeDigest` (`internal/httpapi/wireshape`): a golden digest of every EXISTING response member's (schema, member, type, format, enum, required) fails CI the moment any one of them changes without this field's Go constant (`CurrentWireRevision`, `internal/httpapi/wire_revision.go`) increasing to match. Regenerate the golden with `go run ./internal/httpapi/wireshape/cmd/gendigest` after a deliberate, revision-bumped change, and commit the result — see that package's doc.go for the exact command. A purely additive member or operation also changes the golden (it is appended to, never frozen in place) but needs no revision bump to pass.
 	//
