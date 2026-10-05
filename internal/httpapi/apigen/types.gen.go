@@ -496,7 +496,7 @@ type ApplyCreateItem struct {
 //
 // THERE IS NO TYPED `waits_for` MEMBER, and that is the shape rather than an omission: every measured caller already carries the gate as metadata, a typed spelling lowers to these same bytes, and the blob carries members a two-field typed member could not express. One spelling, and it is this one.
 //
-// `has_spawner` and `thread_id` require `issues.batchApply.depAddLineage`: a client naming either on a server that has not advertised the token refuses locally before the dial rather than sending bytes the server would silently ignore.
+// `has_spawner` and `thread_id` require `issues.batchApply.depAddLineage`: a client naming either on a server that has not advertised the token refuses locally before the dial rather than sending bytes an older server would answer with its own `400` for an unknown member.
 type ApplyDepAddItem struct {
 	// HasSpawner Gated by `issues.batchApply.depAddLineage`. Ignored for every `type` but `waits-for`: on a `waits-for` edge, `true` stamps `metadata.spawner_id` with this item's `target` (the id `bd create --graph`'s spawner_key/spawner_id resolved to), so a reader learns which spawned row to watch without re-deriving it from the graph plan. Absent or `false` leaves `metadata` exactly as given.
 	HasSpawner *bool `json:"has_spawner,omitempty"`
@@ -557,7 +557,7 @@ type ApplyItem struct {
 	//
 	// THERE IS NO TYPED `waits_for` MEMBER, and that is the shape rather than an omission: every measured caller already carries the gate as metadata, a typed spelling lowers to these same bytes, and the blob carries members a two-field typed member could not express. One spelling, and it is this one.
 	//
-	// `has_spawner` and `thread_id` require `issues.batchApply.depAddLineage`: a client naming either on a server that has not advertised the token refuses locally before the dial rather than sending bytes the server would silently ignore.
+	// `has_spawner` and `thread_id` require `issues.batchApply.depAddLineage`: a client naming either on a server that has not advertised the token refuses locally before the dial rather than sending bytes an older server would answer with its own `400` for an unknown member.
 	DepAdd *ApplyDepAddItem `json:"dep_add,omitempty"`
 
 	// Kind Which member below is read. A CLOSED set, unlike a dependency `type`: every value here is a verb this operation implements, and an unknown one is a request the server cannot execute rather than a workspace's own vocabulary.

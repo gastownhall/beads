@@ -10309,8 +10309,8 @@ components:
 
         `has_spawner` and `thread_id` require `issues.batchApply.depAddLineage`:
         a client naming either on a server that has not advertised the token
-        refuses locally before the dial rather than sending bytes the server
-        would silently ignore.
+        refuses locally before the dial rather than sending bytes an older
+        server would answer with its own `400` for an unknown member.
       properties:
         source:
           $ref: '#/components/schemas/Ref'

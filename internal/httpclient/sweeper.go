@@ -135,13 +135,21 @@ func (s *httpSweeper) refuseUnservedSweep(ctx context.Context, tier apigen.Sweep
 	if err != nil {
 		return err
 	}
-	if tier == apigen.WispsPlane && !slices.Contains(snap.Capabilities, wire.CapSweepWispsPlane) {
+	// snap is nil, nil whenever Store.snapshot has no transport AND no cached
+	// handshake (a Store built with a nil wire): nothing was ever advertised,
+	// so every check below reads a nil capability list rather than
+	// dereferencing a nil *apigen.ContextResponse.
+	var capabilities []string
+	if snap != nil {
+		capabilities = snap.Capabilities
+	}
+	if tier == apigen.WispsPlane && !slices.Contains(capabilities, wire.CapSweepWispsPlane) {
 		return s.store.unsupportedCapability("Sweeper.Sweep", wire.CapSweepWispsPlane)
 	}
-	if req.ProtectLiveDependents && !slices.Contains(snap.Capabilities, wire.CapSweepLiveDependents) {
+	if req.ProtectLiveDependents && !slices.Contains(capabilities, wire.CapSweepLiveDependents) {
 		return s.store.unsupportedCapability("Sweeper.Sweep", wire.CapSweepLiveDependents)
 	}
-	if req.Limit != 0 && !slices.Contains(snap.Capabilities, wire.CapSweepLimit) {
+	if req.Limit != 0 && !slices.Contains(capabilities, wire.CapSweepLimit) {
 		return s.store.unsupportedCapability("Sweeper.Sweep", wire.CapSweepLimit)
 	}
 	return nil

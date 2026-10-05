@@ -736,3 +736,46 @@ func TestCountScopeRefusesLocallyWhenTheServerLacksTheCapability(t *testing.T) {
 		}
 	})
 }
+
+// TestCounterRefusesScopeGracefullyWithNoTransportAndNoSnapshot is the 2026-10
+// Opus-review LOW-6 finding: Store.snapshot returns (nil, nil) when a Store
+// carries neither a wire NOR a cached handshake, and Store.Counter() — unlike
+// Sweeper() and BatchApplier() — never calls roleWire first, so a Counter
+// built this way is reachable through the ordinary public accessor. Before
+// the nil guard in refuseUnservedScope, a scoped count against such a Counter
+// paniced on snap.Capabilities rather than refusing.
+//
+// Passing a nil snapshot through New is the direct, minimal reproduction:
+// Store.Counter() builds on whatever New was given, with no roleWire gate to
+// go through first.
+func TestCounterRefusesScopeGracefullyWithNoTransportAndNoSnapshot(t *testing.T) {
+	counter, err := New(testTarget(t), nil, nil).Counter()
+	if err != nil {
+		t.Fatalf("Counter(): %v", err)
+	}
+
+	_, err = counter.Count(t.Context(), issueops.CountRequest{ParentID: "bd-1"})
+	if err == nil {
+		t.Fatal("Count returned no error, want a graceful capability refusal rather than a panic")
+	}
+	var unsup *storage.ErrUnsupported
+	if !errors.As(err, &unsup) {
+		t.Fatalf("errors.As to *storage.ErrUnsupported failed for %v", err)
+	}
+	if unsup.Capability != wire.CapCountScope {
+		t.Errorf("Capability = %q, want %q", unsup.Capability, wire.CapCountScope)
+	}
+
+	_, err = counter.CountByGroup(t.Context(), issueops.CountByGroupRequest{
+		Filter: issueops.CountRequest{NoParent: true}, GroupBy: issueops.CountGroupStatus,
+	})
+	if err == nil {
+		t.Fatal("CountByGroup returned no error, want a graceful capability refusal rather than a panic")
+	}
+	if !errors.As(err, &unsup) {
+		t.Fatalf("errors.As to *storage.ErrUnsupported failed for %v", err)
+	}
+	if unsup.Capability != wire.CapCountScope {
+		t.Errorf("Capability = %q, want %q", unsup.Capability, wire.CapCountScope)
+	}
+}

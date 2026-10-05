@@ -119,7 +119,11 @@ func (c httpCounter) refuseUnservedScope(ctx context.Context, op string, req iss
 	if err != nil {
 		return err
 	}
-	if slices.Contains(snap.Capabilities, wire.CapCountScope) {
+	// snap is nil, nil whenever Store.snapshot has no transport AND no cached
+	// handshake (a Store built with a nil wire): nothing was ever advertised,
+	// so this falls straight through to the refusal below rather than
+	// dereferencing a nil *apigen.ContextResponse.
+	if snap != nil && slices.Contains(snap.Capabilities, wire.CapCountScope) {
 		return nil
 	}
 	return c.store.unsupportedCapability(op, wire.CapCountScope)
