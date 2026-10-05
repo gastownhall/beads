@@ -770,8 +770,10 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go build -v -tags gms_pure_go ./cmd/bd
 
-      # Seeds the macOS non-race GOCACHE that pr.yml's pr-preflight-platforms
-      # and check-doc-freshness-platforms macOS legs restore with the test
+      # Seeds the GitHub-hosted macOS non-race GOCACHE that pr.yml's
+      # pr-preflight-platforms and check-doc-freshness-platforms macOS legs
+      # restore on the fork/Dependabot path (same-repo PRs run those legs on
+      # Blacksmith macOS, seeded by blacksmith-macos-go-build-cache) with the test
       # packages they actually compile (./cmd/bd's test variant and its
       # test-only deps, ./scripts both tag sets, gitattributespolicy). The
       # Build step above only compiles the non-test ./cmd/bd graph, so the PR
@@ -1688,6 +1690,89 @@ jobs:
 
       - name: Save non-race Go build cache
         if: ${{ !cancelled() && matrix.flavor == 'non-race' && steps.restore-non-race-go-build-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
+
+  # Blacksmith macOS saver: pr.yml's pr-preflight-platforms and
+  # check-doc-freshness-platforms macOS legs run on blacksmith-6vcpu-macos-26
+  # for same-repo PRs/merge_group, and Blacksmith runners cannot see the
+  # macOS caches the GitHub-hosted `test` job's macOS leg saves above (that
+  # leg keeps seeding the fork/Dependabot macos-latest path). This job is
+  # their only seeder, on the exact same label, and runs only the shared
+  # warm-up those legs compile (warm-non-race-cache.sh, the same script the
+  # Linux/Windows/GitHub-macOS seeders use) plus the non-test ./cmd/bd build
+  # the GitHub macOS leg also warms -- no tests, so it stays a few minutes of
+  # Blacksmith macOS time per push. Same push-to-main-only job guard (B2) and
+  # go.sum + UTC-day cache keys (S7) as blacksmith-go-build-cache, so a
+  # same-repo PR can never write this namespace and ordinary push traffic
+  # writes at most one non-race entry per day. Pinned by
+  # TestBlacksmithSaverJobsGuardedAgainstPullRequest,
+  # TestBlacksmithSaverCacheKeysAreNotPerCommit and
+  # TestBlacksmithMacOSSaverMatchesPRLegs.
+  blacksmith-macos-go-build-cache:
+    name: Warm Blacksmith Go build cache (macOS)
+    runs-on: ${{ 'blacksmith-6vcpu-macos-26' }}
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'gastownhall/beads'
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Compute cache date
+        id: cache-date
+        run: echo "today=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Go module cache
+        id: restore-go-module-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Restore non-race Go build cache
+        id: restore-non-race-go-build-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
+
+      # Records the image's toolchain in the log so a Blacksmith image drift
+      # (vs. GitHub's macos-26-arm64) is visible next to the cache it seeds.
+      - name: Check macOS toolchain diagnostics
+        run: |
+          sw_vers
+          go env GOOS GOARCH CGO_ENABLED CC
+          bash --version | head -n 1
+
+      - name: Build
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
+        run: go build -tags gms_pure_go -o /dev/null ./cmd/bd
+
+      - name: Warm non-race GOCACHE for macOS preflight/doc-freshness
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
+        run: bash scripts/ci/warm-non-race-cache.sh
+
+      - name: Save Go module cache
+        if: ${{ !cancelled() && steps.restore-go-module-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+
+      - name: Save non-race Go build cache
+        if: ${{ !cancelled() && steps.restore-non-race-go-build-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/go-cache/non-race

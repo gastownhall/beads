@@ -877,17 +877,21 @@ jobs:
   # non-race Go build cache seeded by main.yml's push-to-main savers on the
   # exact same runner selection (S2 below).
   #
-  # F7b review fix (S3): the macOS leg stays on GitHub-hosted macos-latest
-  # unconditionally -- never Blacksmith -- because Blacksmith bills macOS
-  # runners at roughly 20x its Linux/Windows rate and no push-to-main
-  # Blacksmith-macOS cache saver exists (main.yml's `test` job's macOS leg,
-  # which this job's restore step reads from, already runs on GitHub-hosted
-  # macos-latest). The `runner: same-repo-macos` marker is kept only so this
-  # job's matrix shape stays uniform across all three OSes; its branch in the
-  # chained ternary is a plain `'macos-latest'`, not a same-repo conditional.
+  # The macOS leg moves to same-repo Blacksmith macOS
+  # (blacksmith-6vcpu-macos-26, Apple Silicon) like the other two legs; forks,
+  # Dependabot and any non-PR event keep GitHub-hosted macos-latest. The label
+  # is pinned to macos-26 because that is the image GitHub's macos-latest
+  # resolves to today (macos-26-arm64), so both paths run the same OS and
+  # architecture; bump it together with GitHub's macos-latest migration.
+  # 6 vCPU (vs. macos-latest's 3) is already 2x the GitHub-hosted leg; the
+  # 12 vCPU size is not justified for a leg dominated by one incremental
+  # ./cmd/bd test compile. This reverses F7b review fix S3 (cost accepted):
+  # main.yml's blacksmith-macos-go-build-cache job is the push-to-main
+  # Blacksmith-macOS saver S3 said was missing, on this exact label, and the
+  # GitHub-hosted fork path still restores main.yml's `test` job macOS leg.
   check-doc-freshness-platforms:
     name: Check doc freshness (${{ matrix.os }})
-    runs-on: ${{ matrix.runner == 'same-repo-linux' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest') || matrix.runner == 'same-repo-windows' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest') || matrix.runner == 'same-repo-macos' && 'macos-latest' || matrix.os }}
+    runs-on: ${{ matrix.runner == 'same-repo-linux' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest') || matrix.runner == 'same-repo-windows' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest') || matrix.runner == 'same-repo-macos' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-6vcpu-macos-26' || 'macos-latest') || matrix.os }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -959,7 +963,7 @@ jobs:
   # step) for the fix that actually targets it. Reverted to one leg per OS.
   pr-preflight-platforms:
     name: PR preflight process (${{ matrix.os }})
-    runs-on: ${{ matrix.runner == 'same-repo-linux' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest') || matrix.runner == 'same-repo-windows' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest') || matrix.runner == 'same-repo-macos' && 'macos-latest' || matrix.os }}
+    runs-on: ${{ matrix.runner == 'same-repo-linux' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest') || matrix.runner == 'same-repo-windows' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest') || matrix.runner == 'same-repo-macos' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-6vcpu-macos-26' || 'macos-latest') || matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -994,8 +998,9 @@ jobs:
       # F7b review (S2): restore-only non-race Go build cache, seeded by the
       # push-to-main saver on the exact same runner selection (Linux:
       # main.yml's blacksmith-go-build-cache non-race leg; Windows:
-      # main.yml's test-windows Blacksmith leg; macOS: main.yml's test job's
-      # macOS leg) so the cold cmd/bd compile below (the real long pole,
+      # main.yml's test-windows Blacksmith leg; macOS: main.yml's
+      # blacksmith-macos-go-build-cache on Blacksmith, the test job's macOS
+      # leg on the GitHub-hosted fork path) so the cold cmd/bd compile below (the real long pole,
       # 250-300s uncached) gets a true cache hit instead of starting cold.
       # GOCACHE must match the seeder's exactly, and CGO_ENABLED is left at
       # its platform default (same as the seeder) so the key families line

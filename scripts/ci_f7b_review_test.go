@@ -69,9 +69,10 @@ func TestBlacksmithReachablePRJobsDisableDefaultCachingActions(t *testing.T) {
 // Blacksmith-selection GOCACHE/vet-cache a same-repo PR or merge_group job
 // above restores from. F7c's blacksmith-setup-go-cache is pinned by its own
 // TestBlacksmithSeederGuardedAgainstPullRequest in ci_f7c_advisory_test.go;
-// these are F7b's four (B2).
+// these are F7b's four (B2) plus the Blacksmith macOS saver.
 var blacksmithSaverJobs = []string{
 	"blacksmith-go-build-cache", "pr-lint-wrapper", "go-vet-cache", "test-windows",
+	"blacksmith-macos-go-build-cache",
 }
 
 // TestBlacksmithSaverJobsGuardedAgainstPullRequest is the B2 fix's pin: each
@@ -163,6 +164,11 @@ func TestBlacksmithSaverCacheKeysAreNotPerCommit(t *testing.T) {
 		},
 		{
 			job:              "test-windows",
+			restoreStepNames: []string{"Restore non-race Go build cache"},
+			saveStepNames:    []string{"Save non-race Go build cache"},
+		},
+		{
+			job:              "blacksmith-macos-go-build-cache",
 			restoreStepNames: []string{"Restore non-race Go build cache"},
 			saveStepNames:    []string{"Save non-race Go build cache"},
 		},
@@ -317,5 +323,81 @@ func TestCompileOnlyUsesBuildFlagsConstant(t *testing.T) {
 		if strings.Contains(line, "GO_TEST_FLAGS[-2:]") || strings.Contains(line, "GO_TEST_FLAGS[-2]") {
 			t.Errorf("tools/bazel/run_allowlisted_go_tests.py must not reintroduce slicing GO_TEST_FLAGS to get the build tags (F7b review fix N1): %q", line)
 		}
+	}
+}
+
+// blacksmithMacOSPRLegJobs are pr.yml's mixed-OS matrix jobs whose macOS leg
+// runs on Blacksmith macOS for same-repo PRs/merge_group.
+var blacksmithMacOSPRLegJobs = []string{"pr-preflight-platforms", "check-doc-freshness-platforms"}
+
+// TestBlacksmithMacOSSaverMatchesPRLegs pins the contract between pr.yml's
+// Blacksmith macOS PR legs and their only seeder, main.yml's
+// blacksmith-macos-go-build-cache: Blacksmith cannot see GitHub-saved caches
+// (and vice versa), so the saver must run on exactly the label a same-repo
+// PR's macOS leg resolves to, write the cache path/key family those legs
+// restore, and compile what they compile (the shared warm-up). The PR legs
+// stay restore-only and are inside the default-caching-action sweep.
+func TestBlacksmithMacOSSaverMatchesPRLegs(t *testing.T) {
+	pr := readCIWorkflow(t, "pr.yml")
+	mainWF := readCIWorkflow(t, "main.yml")
+	saver := mainWF.job(t, "blacksmith-macos-go-build-cache")
+
+	const ownRepo = "gastownhall/beads"
+	sameRepoMacOS := map[string]string{
+		"github.event_name":                             "pull_request",
+		"github.event.pull_request.head.repo.full_name": ownRepo,
+		"github.repository":                             ownRepo,
+		"github.actor":                                  "alice",
+		"matrix.runner":                                 "same-repo-macos",
+		"matrix.os":                                     "macos-latest",
+	}
+	if want := "${{ '" + blacksmithMacOSLabel + "' }}"; saver.RunsOn != want {
+		t.Errorf("blacksmith-macos-go-build-cache runs-on = %q, want %q", saver.RunsOn, want)
+	}
+	if saver.TimeoutMinutes == 0 || len(saver.Strategy.Matrix.Include) != 0 {
+		t.Errorf("blacksmith-macos-go-build-cache timeout=%d include=%v, want a timeout and a single leg", saver.TimeoutMinutes, saver.Strategy.Matrix.Include)
+	}
+
+	saverSave := saver.step(t, "Save non-race Go build cache")
+	for _, jobName := range blacksmithMacOSPRLegJobs {
+		job := pr.job(t, jobName)
+		// The default-caching sweep (TestBlacksmithReachablePRJobsDisableDefaultCachingActions)
+		// and the no-secrets sweep select jobs by a blacksmith- runs-on.
+		if !strings.Contains(job.RunsOn, "'"+blacksmithMacOSLabel+"'") || !strings.Contains(job.RunsOn, "blacksmith-") {
+			t.Errorf("pr.yml %s runs-on %q does not name %s", jobName, job.RunsOn, blacksmithMacOSLabel)
+		}
+		if got := mustEvalGHRunsOn(t, job.RunsOn, sameRepoMacOS); got != blacksmithMacOSLabel {
+			t.Errorf("pr.yml %s same-repo macOS leg resolves to %q, want the saver's %q", jobName, got, blacksmithMacOSLabel)
+		}
+		if setup := job.step(t, "Set up Go"); setup.With["cache"] != "false" {
+			t.Errorf("pr.yml %s Set up Go cache = %q, want \"false\"", jobName, setup.With["cache"])
+		}
+		for _, step := range job.Steps {
+			if fam := actionFamily(step.Uses); fam == cacheSaveActionFamily || fam == cacheMonolithicActionFamily {
+				t.Errorf("pr.yml %s step %q uses %s; PR macOS legs are restore-only", jobName, step.Name, fam)
+			}
+		}
+		restore := job.step(t, "Restore non-race Go build cache")
+		if restore.With["path"] != saverSave.With["path"] {
+			t.Errorf("pr.yml %s restores %q, saver writes %q", jobName, restore.With["path"], saverSave.With["path"])
+		}
+		if prefix := restore.With["restore-keys"]; prefix == "" || !strings.HasPrefix(saverSave.With["key"], prefix) {
+			t.Errorf("saver key %q is not reachable from pr.yml %s restore-keys %q", saverSave.With["key"], jobName, prefix)
+		}
+		modRestore := job.step(t, "Restore Go module cache")
+		if modSave := saver.step(t, "Save Go module cache"); !strings.HasPrefix(modSave.With["key"], modRestore.With["restore-keys"]) || modSave.With["path"] != modRestore.With["path"] {
+			t.Errorf("saver module cache %q/%q not reachable from pr.yml %s restore %q/%q",
+				modSave.With["path"], modSave.With["key"], jobName, modRestore.With["path"], modRestore.With["restore-keys"])
+		}
+	}
+
+	const warm = "Warm non-race GOCACHE for macOS preflight/doc-freshness"
+	assertStepRunsExactly(t, saver, warm, "bash scripts/ci/warm-non-race-cache.sh")
+	assertGoCacheEnv(t, saver, warm, "non-race")
+	assertGoCacheEnv(t, saver, "Build", "non-race")
+	assertStepsBefore(t, saver, []string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Build", warm})
+	assertStepsBefore(t, saver, []string{"Build", warm}, []string{"Save Go module cache", "Save non-race Go build cache"})
+	if step := saver.step(t, warm); step.If != "" || (step.ContinueOnError != nil && step.ContinueOnError != false) {
+		t.Errorf("%q if=%q continue-on-error=%v, want unconditional", warm, step.If, step.ContinueOnError)
 	}
 }

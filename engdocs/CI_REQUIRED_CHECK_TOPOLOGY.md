@@ -1218,6 +1218,37 @@ scope, not this slice's.
   Windows job to Blacksmith (there is no Windows Blacksmith pool), and
   neither job is one F4's concurrent Windows-region edits touch.
 
+### Same-Repo Blacksmith macOS Legs
+
+pr.yml's two mixed-OS matrix jobs, `pr-preflight-platforms` and
+`check-doc-freshness-platforms`, run their macOS leg on
+`blacksmith-6vcpu-macos-26` (Apple Silicon) for same-repo PRs and
+merge_group, through the same `runner: same-repo-macos` matrix marker and
+same-repo expression their Linux/Windows legs use. Forks, Dependabot and
+every other event keep GitHub-hosted `macos-latest`. They are the only PR
+macOS jobs; `release.yml`, `nightly.yml` and `ci-measurements.yml` stay on
+`macos-latest`.
+
+- **Label.** Pinned to `macos-26` because GitHub's `macos-latest` resolves to
+  `macos-26-arm64` today, so both paths run the same OS and architecture and
+  the PR legs and their saver never straddle a Blacksmith `-latest` alias
+  move. Bump it when GitHub moves `macos-latest`. 6 vCPU is already twice
+  `macos-latest`'s 3 vCPU; 12 vCPU is not justified for legs dominated by one
+  incremental `./cmd/bd` test compile.
+- **Caches.** The legs stay restore-only (`setup-go` `cache: false`,
+  `actions/cache/restore`). Blacksmith cannot see GitHub-saved caches, so
+  main.yml's `blacksmith-macos-go-build-cache` job is their seeder: same
+  label, push-to-main-only job guard, module cache plus a non-race GOCACHE
+  keyed by `go.sum` and UTC day, warmed by the shared
+  `scripts/ci/warm-non-race-cache.sh`. main.yml's `test` job macOS leg (the
+  GitHub-hosted full suite) is unchanged and still seeds the fork path.
+- **Pins.** `TestSameRepoPlatformsMatrixMarkerRunsOnExpressionSemantics`,
+  `TestBlacksmithMacOSSaverMatchesPRLegs`,
+  `TestBlacksmithSaverJobsGuardedAgainstPullRequest`,
+  `TestBlacksmithSaverCacheKeysAreNotPerCommit`,
+  `TestBlacksmithReachablePRJobsDisableDefaultCachingActions` and
+  `TestGoCacheOwnershipTopology`.
+
 ### Server Dolt Storage Matrix
 
 `test-server-storage-full` mirrors `test-embedded-storage`'s sharding, one
@@ -1365,7 +1396,9 @@ PRs off Blacksmith entirely and back onto `ubuntu-latest`:
    `test-nix`.
 4. **F7b** (cache-dependent moves, once that slice lands) — main.yml's
    Blacksmith cache seeds and the `scripts-go-checks`/`pr-lint-wrapper`/
-   preflight/doc-freshness runner moves.
+   preflight/doc-freshness runner moves, including the preflight/
+   doc-freshness macOS legs and `blacksmith-macos-go-build-cache`
+   ([Same-Repo Blacksmith macOS Legs](#same-repo-blacksmith-macos-legs)).
 
 F7c (the advisory workflows) is excluded from this list: it is advisory only,
 so leaving it on Blacksmith during an outage delays non-required checks but

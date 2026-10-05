@@ -690,8 +690,9 @@ func TestPRPreflightPlatformsRunStepsUseRestoredGoBuildCache(t *testing.T) {
 	}
 }
 
-// main.yml's test job macOS leg is the only macOS non-race GOCACHE seeder for
-// pr.yml's GitHub-hosted macOS legs. It must compile the same test packages
+// main.yml's test job macOS leg is the GitHub-hosted macOS non-race GOCACHE
+// seeder for pr.yml's macOS legs on the fork/Dependabot (macos-latest) path;
+// blacksmith-macos-go-build-cache seeds the same-repo Blacksmith path. It must compile the same test packages
 // those legs compile (warm-non-race-cache.sh, shared with the Linux and
 // Windows seeders), not only the non-test ./cmd/bd graph its Build step does,
 // and it must do so before the cache is saved.
@@ -1375,6 +1376,15 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		saveBuildCacheDayBucketedAfterFailureIf("race", "matrix.flavor == 'race'"),
 		saveBuildCacheDayBucketedAfterFailureIf("non-race", "matrix.flavor == 'non-race'"),
 	})
+	// Blacksmith macOS analogue for pr-preflight-platforms'/
+	// check-doc-freshness-platforms' same-repo macOS legs (the `test` job's
+	// GitHub-hosted macOS leg keeps seeding their fork path).
+	assertGoCacheInventory(t, workflows["main.yml"].job(t, "blacksmith-macos-go-build-cache"), []goCacheStep{
+		mainRestoreModuleCache(),
+		mainRestoreBuildCacheDayBucketedIf("non-race", ""),
+		saveModuleCacheAfterFailure(),
+		saveBuildCacheDayBucketedAfterFailureIf("non-race", ""),
+	})
 
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "build-artifacts"), []goCacheStep{
 		restoreModuleCache(), restoreBuildCache("non-race"),
@@ -1435,6 +1445,7 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		"main.yml": {
 			"build-artifacts": true, "build-embedded": true, "pr-core-wrapper": true, "test": true, "test-windows": true,
 			"pr-lint-wrapper": true, "go-vet-cache": true, "windows-test-binaries-cache": true, "blacksmith-go-build-cache": true,
+			"blacksmith-macos-go-build-cache": true,
 			// F7c: blacksmith-setup-go-cache's own restore/save pair seeds the
 			// self-defined blacksmith-sg-v1- cache namespace every advisory
 			// Blacksmith consumer restores from (B2, F7c implementation
@@ -1547,6 +1558,8 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheWriter(t, workflows["main.yml"], "go-vet-cache", mainVenueBlacksmithUbuntu4vcpuRunsOn, "Save vet Go build cache", failureSurvivingCacheSaveCondition(cacheMissCondition(goVetCacheRestoreID())))
 	assertGoCacheWriter(t, workflows["main.yml"], "blacksmith-go-build-cache", mainBlacksmithGoBuildCacheRunsOn, "Save race Go build cache", saveBuildCacheAfterFailureIf("race", "matrix.flavor == 'race'").ifCondition)
 	assertGoCacheWriter(t, workflows["main.yml"], "blacksmith-go-build-cache", mainBlacksmithGoBuildCacheRunsOn, "Save non-race Go build cache", saveBuildCacheAfterFailureIf("non-race", "matrix.flavor == 'non-race'").ifCondition)
+	assertGoCacheWriter(t, workflows["main.yml"], "blacksmith-macos-go-build-cache", mainBlacksmithMacOSGoBuildCacheRunsOn, "Save Go module cache", saveModuleCacheAfterFailure().ifCondition)
+	assertGoCacheWriter(t, workflows["main.yml"], "blacksmith-macos-go-build-cache", mainBlacksmithMacOSGoBuildCacheRunsOn, "Save non-race Go build cache", saveBuildCacheAfterFailureIf("non-race", "").ifCondition)
 	assertGoCacheWriter(t, workflows["main.yml"], "windows-test-binaries-cache", mainWindowsTestBinariesCacheRunsOn, "Save Go module cache", saveModuleCacheAfterFailure().ifCondition)
 	assertGoCacheWriter(t, workflows["main.yml"], "windows-test-binaries-cache", mainWindowsTestBinariesCacheRunsOn, "Save Go build cache (Windows cross-compile)", saveXCompileCache().ifCondition)
 	for _, target := range []struct{ workflow, job string }{
@@ -1556,6 +1569,7 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		{"main.yml", "test"},
 		{"main.yml", "test-windows"},
 		{"main.yml", "windows-test-binaries-cache"},
+		{"main.yml", "blacksmith-macos-go-build-cache"},
 		{"pr.yml", "build-artifacts"},
 		{"pr.yml", "pr-core-wrapper"},
 		{"pr.yml", "windows-test-binaries"},
@@ -2802,6 +2816,10 @@ const mainVenueBlacksmithUbuntu4vcpuRunsOn = "${{ matrix.venue == 'blacksmith' &
 const mainVenueBlacksmithWindows4vcpuRunsOn = "${{ matrix.venue == 'blacksmith' && 'blacksmith-4vcpu-windows-2025' || 'windows-latest' }}"
 const mainBlacksmithGoBuildCacheRunsOn = "${{ 'blacksmith-4vcpu-ubuntu-2404' }}"
 
+// main.yml's push-to-main-only Blacksmith macOS saver, on the exact label
+// pr.yml's same-repo macOS legs resolve to (blacksmithMacOSLabel).
+const mainBlacksmithMacOSGoBuildCacheRunsOn = "${{ '" + blacksmithMacOSLabel + "' }}"
+
 // pr.yml's call of bazel.yml: exactly these inputs (review D1 v2 N3). An rbe
 // override would put every PR in local mode and ungate the embedded tier
 // while the gate stays self-consistent; integration: "off" would drop the
@@ -3138,6 +3156,8 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 			"go-vet-cache":              mainVenueBlacksmithUbuntu4vcpuRunsOn,
 			"test-windows":              mainVenueBlacksmithWindows4vcpuRunsOn,
 			"blacksmith-go-build-cache": mainBlacksmithGoBuildCacheRunsOn,
+			// Same guard, seeding pr.yml's same-repo macOS legs.
+			"blacksmith-macos-go-build-cache": mainBlacksmithMacOSGoBuildCacheRunsOn,
 		},
 	}
 	// The two required gates' display names are a stable external contract
