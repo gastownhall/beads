@@ -660,6 +660,62 @@ func TestPRWorkflowRequiresNativeInitGatewayCredential(t *testing.T) {
 	}
 }
 
+// Every run step in the three-host preflight/doc-freshness jobs invokes Go,
+// and the jobs restore a non-race GOCACHE precisely so those invocations are
+// incremental. A run step without GOCACHE silently falls back to the runner's
+// empty default cache: "Exercise native init gateway credential shell" did,
+// and cold-compiled ./cmd/bd on every PR (210-240s of a ~370s macos-latest
+// leg, ~120s on Windows) right after the hook-timeout step had compiled the
+// same test binary into the restored cache.
+func TestPRPreflightPlatformsRunStepsUseRestoredGoBuildCache(t *testing.T) {
+	workflow := readCIWorkflow(t, "pr.yml")
+	for _, jobName := range []string{"pr-preflight-platforms", "check-doc-freshness-platforms"} {
+		job := workflow.job(t, jobName)
+		restore := job.step(t, "Restore non-race Go build cache")
+		if restore.With["path"] != goBuildCachePath("non-race") {
+			t.Errorf("%s restores the non-race cache to %q, want %q", jobName, restore.With["path"], goBuildCachePath("non-race"))
+		}
+		runSteps := 0
+		for _, step := range job.Steps {
+			if strings.TrimSpace(step.Run) == "" {
+				continue
+			}
+			runSteps++
+			assertGoCacheEnv(t, job, step.Name, "non-race")
+			assertStepsBefore(t, job, []string{restore.Name}, []string{step.Name})
+		}
+		if runSteps == 0 {
+			t.Errorf("%s has no run steps", jobName)
+		}
+	}
+}
+
+// main.yml's test job macOS leg is the only macOS non-race GOCACHE seeder for
+// pr.yml's GitHub-hosted macOS legs. It must compile the same test packages
+// those legs compile (warm-non-race-cache.sh, shared with the Linux and
+// Windows seeders), not only the non-test ./cmd/bd graph its Build step does,
+// and it must do so before the cache is saved.
+func TestMainMacOSTestLegWarmsNonRaceGoBuildCache(t *testing.T) {
+	workflow := readCIWorkflow(t, "main.yml")
+	job := workflow.job(t, "test")
+	const name = "Warm non-race GOCACHE for macOS preflight/doc-freshness"
+	step := job.step(t, name)
+	if step.If != "matrix.os == 'macos-latest'" {
+		t.Errorf("%q if = %q, want the macOS leg only", name, step.If)
+	}
+	if step.ContinueOnError != nil && step.ContinueOnError != false {
+		t.Errorf("%q may not continue on error", name)
+	}
+	assertStepRunsExactly(t, job, name, "bash scripts/ci/warm-non-race-cache.sh")
+	assertGoCacheEnv(t, job, name, "non-race")
+	assertStepsBefore(t, job, []string{"Restore non-race Go build cache"}, []string{name})
+	assertStepsBefore(t, job, []string{name}, []string{"Save non-race Go build cache"})
+	save := job.step(t, "Save non-race Go build cache")
+	if !strings.Contains(save.If, "matrix.os == 'macos-latest'") || save.With["path"] != goBuildCachePath("non-race") {
+		t.Errorf("macOS non-race saver drifted: if=%q path=%q", save.If, save.With["path"])
+	}
+}
+
 func TestPRWorkflowExercisesWindowsBenchmarkEnvScrubbing(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "pr-preflight-platforms")

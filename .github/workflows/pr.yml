@@ -1033,8 +1033,17 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test '-tags=gms_pure_go' -count=1 -run '^TestGeneratedHookTimeoutProcessBoundary$' ./cmd/bd
 
+      # This step recompiles ./cmd/bd's test binary. It must share the restored
+      # GOCACHE with the hook-timeout step above (same tags, same platform
+      # default CGO_ENABLED, see the script's header) so it is a relink rather
+      # than a second cold compile: without GOCACHE here it fell back to the
+      # runner's empty default cache and cold-compiled all of ./cmd/bd on every
+      # PR (210-240s on macos-latest, ~120s on Windows; the leg's long pole).
+      # TestPRPreflightPlatformsRunStepsUseRestoredGoBuildCache pins this.
       - name: Exercise native init gateway credential shell
         shell: bash
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: bash scripts/ci/test-init-gateway-credential.sh "$RUNNER_OS"
 
       - name: Exercise credential command fixtures on Windows
@@ -1042,6 +1051,7 @@ jobs:
         shell: pwsh
         env:
           CGO_ENABLED: "0"
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: |
           $go = (Get-Command go -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
           $hostInfo = @(& $go env GOHOSTOS GOOS)
@@ -1078,11 +1088,15 @@ jobs:
       - name: Check benchmark environment scrubbing
         if: matrix.os == 'windows-latest'
         shell: bash
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test -tags gms_pure_go -count=1 -run '^(TestCleanEnvUsesHostKeySemantics|TestBenchmarkCommandBuildersStripDoltEnvOverrides)$' ./scripts/repro-dolt-prod-timeouts
 
       - name: Check shared environment key semantics
         if: matrix.os == 'windows-latest'
         shell: bash
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: bash scripts/ci/test-windows-env-helpers.sh
 
   # F3: package-mcp and package-npm (and the detect job that fed them) moved
