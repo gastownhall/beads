@@ -769,7 +769,21 @@ type EpochFixture struct {
 	// Version now resolves to under the new epoch. A nil hook means this
 	// backend cannot report that, and the case that needs it skips with
 	// that reason.
+	//
+	// It only reads: it mints nothing and changes no state. It returns the
+	// address it was given when nothing carried the Version to a new one,
+	// and an error for an address the store does not serve.
 	CurrentAddressFor func(ctx context.Context, storeID string, oldAddress Address) (Address, error)
+
+	// LoseVersion records that storeID no longer serves the Version named by
+	// address. That address, and every address the same Version was carried
+	// to or from by a token-scheme change, resolves GoneReorganization from
+	// then on, in every later epoch: an epoch voids what the store lost,
+	// never what it still serves (R20-n). It is idempotent, never revives
+	// anything, and returns an error for an address storeID never minted. A
+	// nil LoseVersion means this backend cannot record a loss, and the cases
+	// that need one skip with that reason.
+	LoseVersion func(ctx context.Context, storeID string, address Address) error
 }
 
 // RunAnEpochBumpIsTriggeredOnlyByRestoreReinitOrSchemeChange pins R20-m: a
@@ -819,94 +833,258 @@ func RunAnEpochBumpIsTriggeredOnlyByRestoreReinitOrSchemeChange(t *testing.T, ct
 
 // RunEpochBumpVoidsOnlyAddressesOfVersionsNoLongerServed pins R20-n — "Rev7
 // tightening... the clause most likely to be gotten wrong" in the
-// architecture doc's own words. A prior-epoch Address goes
-// GoneReorganization UNLESS the backend still serves that Version, in which
-// case it must stay Live AND additionally report the Address it now
-// resolves to under the new epoch.
+// architecture doc's own words: an epoch voids what the store lost, never
+// what it still serves.
 //
-// StillServes is an ORACLE here, not a control: this case cannot make a real
-// backend keep serving one address and drop another, since Phase 0 wires no
-// real backend. It asks StillServes what the fixture (once real) decided,
-// and checks the rest of the contract's promise against that decision for
-// both outcomes.
+// Survival is RECORDED, never inferred (gastownhall/beads#6664, bee-ghosttrack
+// review 5360880888, Major 1). An earlier form of this case made a Version
+// survive by minting it again in every later epoch, and treated a Version
+// nobody minted again as lost. That reads loss off the absence of a mint, so
+// it could not express a Version the store lost after minting it, and it
+// voided every survivor that nobody happened to mint again. Here a restore or
+// a destructive reinit leaves every address row alone: an address the store
+// still serves stays Live at its own address with no upkeep, and the only way
+// an address goes Gone is LoseVersion saying so.
+//
+// Each phase is a named subtest, so a backend that cannot record a loss skips
+// only the phases that need LoseVersion, and a failure names its phase.
 func RunEpochBumpVoidsOnlyAddressesOfVersionsNoLongerServed(t *testing.T, ctx context.Context, fixture EpochFixture) {
 	t.Helper()
-	if fixture.MintUnderEpoch == nil {
-		t.Skip("this backend has no way to mint a Version under a known epoch (MintUnderEpoch is nil)")
-	}
-	if fixture.BumpEpoch == nil {
-		t.Skip("this backend has no epoch concept yet (BumpEpoch is nil)")
-	}
-	if fixture.StillServes == nil {
-		t.Skip("this backend cannot report whether it still serves a prior-epoch Version (StillServes is nil)")
-	}
-	if fixture.Resolve == nil {
-		t.Skip("this backend does not yet report retention state (Resolve is nil)")
-	}
-	if fixture.CurrentAddressFor == nil {
-		t.Skip("this backend cannot report a still-served Version's new Address (CurrentAddressFor is nil)")
-	}
-	store := epochStore(fixture, "voids")
+	epochSkipUnlessReady(t, fixture, false)
 
-	addrA, err := fixture.MintUnderEpoch(ctx, store, "record-a")
-	if err != nil {
-		t.Fatalf("MintUnderEpoch(record-a): %v", err)
+	// survivor-and-lost: of two Versions minted before a transition, the one
+	// the store loses goes Gone and the other stays Live at the address it
+	// already had, with no re-mint, for both triggers that leave addresses
+	// alone.
+	t.Run("survivor-and-lost", func(t *testing.T) {
+		if fixture.LoseVersion == nil {
+			t.Skip(epochLoseVersionSkip)
+		}
+		for _, trigger := range []EpochBumpTrigger{EpochBumpTriggerRestore, EpochBumpTriggerDestructiveReinit} {
+			t.Run(trigger.String(), func(t *testing.T) {
+				store := epochStore(fixture, "survivor-"+trigger.String())
+				addrA := epochMintAddress(t, ctx, fixture, store, "record-a")
+				addrB := epochMintAddress(t, ctx, fixture, store, "record-b")
+
+				newEpoch := epochBumpTo(t, ctx, fixture, store, trigger)
+				epochLoseAddress(t, ctx, fixture, store, addrB)
+
+				epochRequireLive(t, ctx, fixture, store, addrA, newEpoch,
+					"record-a was never lost, so the transition leaves it served at its own address with no re-mint (R20-n's exception)")
+				epochRequireGone(t, ctx, fixture, store, addrB, newEpoch,
+					"record-b was lost, so the transition voids it (R20-n)")
+
+				current := epochCurrentAddress(t, ctx, fixture, store, addrA)
+				epochRequireLive(t, ctx, fixture, store, current, newEpoch,
+					"the address CurrentAddressFor reports for a survivor must be served")
+				epochRequireLive(t, ctx, fixture, store, addrA, newEpoch,
+					"asking CurrentAddressFor must not retire or move the survivor's address")
+
+				if lostCurrent, err := fixture.CurrentAddressFor(ctx, store, addrB); err == nil {
+					t.Errorf("CurrentAddressFor(a lost address) = %s with no error, want an error: a lost Version has no current address", lostCurrent)
+				}
+				epochRequireGone(t, ctx, fixture, store, addrB, newEpoch,
+					"CurrentAddressFor on a lost address must not bring it back")
+			})
+		}
+	})
+
+	// gone-is-terminal: once an address is lost it stays lost. A later mint of
+	// the same id starts a new lineage under a new address, and neither that
+	// mint nor CurrentAddressFor revives the lost one (bee-ghosttrack's
+	// assertion for Major 1: a read-only lookup must not mint a replacement
+	// that makes a lost address look served).
+	t.Run("gone-is-terminal", func(t *testing.T) {
+		if fixture.LoseVersion == nil {
+			t.Skip(epochLoseVersionSkip)
+		}
+		store := epochStore(fixture, "terminal")
+		lost := epochMintAddress(t, ctx, fixture, store, "record-g")
+		epochBumpTo(t, ctx, fixture, store, EpochBumpTriggerRestore)
+		epochLoseAddress(t, ctx, fixture, store, lost)
+		laterEpoch := epochBumpTo(t, ctx, fixture, store, EpochBumpTriggerRestore)
+
+		fresh := epochMintAddress(t, ctx, fixture, store, "record-g")
+		if fresh == lost {
+			t.Fatalf("MintUnderEpoch(record-g) returned %s, the address already lost: a lost address is never handed out again", lost)
+		}
+		epochRequireLive(t, ctx, fixture, store, fresh, laterEpoch,
+			"a fresh mint of the id is a new lineage and is served")
+		epochRequireGone(t, ctx, fixture, store, lost, laterEpoch,
+			"a later mint of the same id must not revive a lost address")
+
+		if replacement, err := fixture.CurrentAddressFor(ctx, store, lost); err == nil {
+			t.Errorf("CurrentAddressFor(a lost address) = %s with no error, want an error: asking where a lost address resolves must not mint a replacement", replacement)
+		}
+		epochRequireGone(t, ctx, fixture, store, lost, laterEpoch,
+			"CurrentAddressFor on a lost address must not revive it")
+
+		// Losing it a second time is a no-op that leaves the fresh lineage
+		// alone.
+		epochLoseAddress(t, ctx, fixture, store, lost)
+		epochRequireLive(t, ctx, fixture, store, fresh, laterEpoch,
+			"losing the old address again must leave the fresh lineage served")
+	})
+
+	// survival-needs-no-upkeep: with nothing lost, an address stays Live across
+	// any number of counter-only transitions without being minted again, and a
+	// later mint of the same id neither retires it nor revives anything. This
+	// is the phase the earlier, mint-driven form failed: it answered Gone for
+	// every survivor nobody minted again.
+	t.Run("survival-needs-no-upkeep", func(t *testing.T) {
+		store := epochStore(fixture, "upkeep")
+		kept := epochMintAddress(t, ctx, fixture, store, "record-c")
+		epochBumpTo(t, ctx, fixture, store, EpochBumpTriggerRestore)
+		epochBumpTo(t, ctx, fixture, store, EpochBumpTriggerDestructiveReinit)
+		finalEpoch := epochBumpTo(t, ctx, fixture, store, EpochBumpTriggerRestore)
+
+		epochRequireLive(t, ctx, fixture, store, kept, finalEpoch,
+			"nothing was lost, so three counter-only transitions leave the address served without a re-mint")
+
+		fresh := epochMintAddress(t, ctx, fixture, store, "record-c")
+		if fresh == kept {
+			t.Fatalf("MintUnderEpoch(record-c) returned %s again after three bumps, want a new address for the new epoch", kept)
+		}
+		epochRequireLive(t, ctx, fixture, store, kept, finalEpoch,
+			"a later mint of the same id must not retire a served address")
+		epochRequireLive(t, ctx, fixture, store, fresh, finalEpoch,
+			"the fresh mint is served")
+
+		current := epochCurrentAddress(t, ctx, fixture, store, kept)
+		epochRequireLive(t, ctx, fixture, store, current, finalEpoch,
+			"the current address of a survivor must be served")
+		epochRequireLive(t, ctx, fixture, store, kept, finalEpoch,
+			"asking for the current address must not change the survivor")
+	})
+}
+
+// RunTokenSchemeChangeCarriesLiveAddressesAndOnlyThose pins R20-n's retained
+// mapping for the one trigger that changes how addresses are encoded. A
+// token-scheme-change bump gives every Version the store still serves a new
+// address under the new epoch and keeps the old address resolving, so a holder
+// of the old address is neither stranded nor pointed at something else. A
+// Version the store already lost gets no new address and stays Gone.
+func RunTokenSchemeChangeCarriesLiveAddressesAndOnlyThose(t *testing.T, ctx context.Context, fixture EpochFixture) {
+	t.Helper()
+	epochSkipUnlessReady(t, fixture, true)
+	store := epochStore(fixture, "scheme-change")
+
+	addrA := epochMintAddress(t, ctx, fixture, store, "record-a")
+	addrB := epochMintAddress(t, ctx, fixture, store, "record-b")
+	// record-b is lost in the epoch it was minted in, which a store may do.
+	epochLoseAddress(t, ctx, fixture, store, addrB)
+
+	newEpoch := epochBumpTo(t, ctx, fixture, store, EpochBumpTriggerTokenSchemeChange)
+
+	epochRequireLive(t, ctx, fixture, store, addrA, newEpoch,
+		"record-a is still served after the scheme change, through the retained mapping")
+	epochRequireGone(t, ctx, fixture, store, addrB, newEpoch,
+		"record-b was lost before the scheme change, which must not carry it")
+
+	carried := epochCurrentAddress(t, ctx, fixture, store, addrA)
+	if carried == addrA {
+		t.Errorf("CurrentAddressFor(%s) = the same address after a token-scheme change, want a new one: a scheme change re-encodes every served address, which is what tells a carry from a no-op", addrA)
 	}
-	addrB, err := fixture.MintUnderEpoch(ctx, store, "record-b")
-	if err != nil {
-		t.Fatalf("MintUnderEpoch(record-b): %v", err)
+	epochRequireLive(t, ctx, fixture, store, carried, newEpoch,
+		"the carried address must be served under the new epoch")
+	epochRequireLive(t, ctx, fixture, store, addrA, newEpoch,
+		"the old address must keep resolving after its carried address is looked up")
+
+	if again := epochCurrentAddress(t, ctx, fixture, store, carried); again != carried {
+		t.Errorf("CurrentAddressFor(%s) = %s, want the carried address itself: from the newest address the mapping is already current", carried, again)
+	}
+	if lostCurrent, err := fixture.CurrentAddressFor(ctx, store, addrB); err == nil {
+		t.Errorf("CurrentAddressFor(a lost address) = %s with no error, want an error: a lost Version is not carried", lostCurrent)
+	}
+}
+
+// RunACarriedAddressKeepsResolvingAcrossLaterBumps pins that a carried mapping
+// is recorded once and then simply persists: later counter-only transitions do
+// not change it, and a second token-scheme change extends it to the newest
+// address without breaking any older one. Every address of the Version points
+// directly at the newest address (one hop from any member), never along a
+// chain.
+func RunACarriedAddressKeepsResolvingAcrossLaterBumps(t *testing.T, ctx context.Context, fixture EpochFixture) {
+	t.Helper()
+	epochSkipUnlessReady(t, fixture, false)
+	store := epochStore(fixture, "carried-later")
+
+	addrA := epochMintAddress(t, ctx, fixture, store, "record-a")
+	epochBumpTo(t, ctx, fixture, store, EpochBumpTriggerRestore)
+	epochBumpTo(t, ctx, fixture, store, EpochBumpTriggerTokenSchemeChange)
+	addrA1 := epochCurrentAddress(t, ctx, fixture, store, addrA)
+	if addrA1 == addrA {
+		t.Fatalf("CurrentAddressFor(%s) = the same address after a token-scheme change, want a new one", addrA)
 	}
 
-	newEpoch, err := fixture.BumpEpoch(ctx, store, EpochBumpTriggerRestore)
-	if err != nil {
-		t.Fatalf("BumpEpoch: %v", err)
+	// Two counter-only transitions, with nothing minted in between.
+	epochBumpTo(t, ctx, fixture, store, EpochBumpTriggerRestore)
+	counterEpoch := epochBumpTo(t, ctx, fixture, store, EpochBumpTriggerDestructiveReinit)
+	epochRequireLive(t, ctx, fixture, store, addrA, counterEpoch,
+		"the original address must still resolve after counter-only transitions")
+	epochRequireLive(t, ctx, fixture, store, addrA1, counterEpoch,
+		"the carried address must still resolve after counter-only transitions")
+	if got := epochCurrentAddress(t, ctx, fixture, store, addrA); got != addrA1 {
+		t.Errorf("CurrentAddressFor(%s) = %s, want %s: a counter-only transition does not change the mapping", addrA, got, addrA1)
 	}
 
-	servesA, err := fixture.StillServes(ctx, store, addrA)
-	if err != nil {
-		t.Fatalf("StillServes(%s): %v", addrA, err)
+	// A second scheme change carries the Version again.
+	secondEpoch := epochBumpTo(t, ctx, fixture, store, EpochBumpTriggerTokenSchemeChange)
+	addrA2 := epochCurrentAddress(t, ctx, fixture, store, addrA)
+	if addrA2 == addrA || addrA2 == addrA1 {
+		t.Fatalf("CurrentAddressFor(%s) = %s after a second scheme change, want an address different from %s and %s", addrA, addrA2, addrA, addrA1)
 	}
-	servesB, err := fixture.StillServes(ctx, store, addrB)
-	if err != nil {
-		t.Fatalf("StillServes(%s): %v", addrB, err)
+	for _, member := range []Address{addrA, addrA1, addrA2} {
+		epochRequireLive(t, ctx, fixture, store, member, secondEpoch,
+			"every address of a carried Version must resolve after a second scheme change")
 	}
-	if servesA == servesB {
-		t.Skip("this scenario needs one still-served and one no-longer-served address to exercise both halves of R20-n; StillServes reported the same answer for both, so this fixture gives this case nothing to contrast")
-	}
-
-	stillServed, noLongerServed := addrA, addrB
-	if servesB && !servesA {
-		stillServed, noLongerServed = addrB, addrA
+	if got := epochCurrentAddress(t, ctx, fixture, store, addrA1); got != addrA2 {
+		t.Errorf("CurrentAddressFor(%s) = %s, want %s: every address of the Version points straight at the newest one", addrA1, got, addrA2)
 	}
 
-	voidedAnswer, err := fixture.Resolve(ctx, store, noLongerServed)
-	if err != nil {
-		t.Fatalf("Resolve(no-longer-served): %v", err)
-	}
-	if voidedAnswer.Restriction != RestrictionGoneReorganization {
-		t.Errorf("Resolve(a prior-epoch Address no longer served) = %s, want RestrictionGoneReorganization (R20-n)", voidedAnswer.Restriction)
-	}
-	if voidedAnswer.Epoch == nil {
-		t.Fatal("Resolve(a prior-epoch Address no longer served).Epoch = nil, want the current epoch populated (R20-n: the answer must name the current epoch, not just Restriction alone)")
-	} else if *voidedAnswer.Epoch != newEpoch {
-		t.Errorf("Resolve(a prior-epoch Address no longer served).Epoch = %d, want the current epoch %d", *voidedAnswer.Epoch, newEpoch)
+	finalEpoch := epochBumpTo(t, ctx, fixture, store, EpochBumpTriggerRestore)
+	epochRequireLive(t, ctx, fixture, store, addrA2, finalEpoch,
+		"the newest carried address must still resolve after a later restore")
+}
+
+// RunALostAddressStaysGoneAcrossASchemeChange pins that loss is terminal even
+// across a token-scheme change. Losing a Version loses every address of its
+// lineage at once, and a later scheme change must not carry a lost lineage
+// back into service.
+func RunALostAddressStaysGoneAcrossASchemeChange(t *testing.T, ctx context.Context, fixture EpochFixture) {
+	t.Helper()
+	epochSkipUnlessReady(t, fixture, true)
+	store := epochStore(fixture, "lost-scheme-change")
+
+	addrA := epochMintAddress(t, ctx, fixture, store, "record-a")
+	epochBumpTo(t, ctx, fixture, store, EpochBumpTriggerTokenSchemeChange)
+	addrA1 := epochCurrentAddress(t, ctx, fixture, store, addrA)
+	lostEpoch := epochBumpTo(t, ctx, fixture, store, EpochBumpTriggerRestore)
+
+	// One lineage, two addresses: losing either loses both.
+	epochLoseAddress(t, ctx, fixture, store, addrA)
+	epochRequireGone(t, ctx, fixture, store, addrA, lostEpoch,
+		"the original address of a lost Version must be Gone")
+	epochRequireGone(t, ctx, fixture, store, addrA1, lostEpoch,
+		"the carried address of a lost Version must be Gone too")
+
+	schemeEpoch := epochBumpTo(t, ctx, fixture, store, EpochBumpTriggerTokenSchemeChange)
+	epochRequireGone(t, ctx, fixture, store, addrA, schemeEpoch,
+		"a later scheme change must not carry a lost lineage back into service")
+	epochRequireGone(t, ctx, fixture, store, addrA1, schemeEpoch,
+		"a later scheme change must not carry a lost lineage back into service")
+	for _, lostAddress := range []Address{addrA, addrA1} {
+		if current, err := fixture.CurrentAddressFor(ctx, store, lostAddress); err == nil {
+			t.Errorf("CurrentAddressFor(%s) = %s with no error, want an error: a lost lineage has no current address", lostAddress, current)
+		}
 	}
 
-	keptAnswer, err := fixture.Resolve(ctx, store, stillServed)
-	if err != nil {
-		t.Fatalf("Resolve(still-served): %v", err)
+	fresh := epochMintAddress(t, ctx, fixture, store, "record-a")
+	if fresh == addrA || fresh == addrA1 {
+		t.Fatalf("MintUnderEpoch(record-a) returned %s, an address of the lost lineage: a lost address is never handed out again", fresh)
 	}
-	if keptAnswer.Restriction != RestrictionLive {
-		t.Errorf("Resolve(a prior-epoch Address the backend still serves) = %s, want RestrictionLive (R20-n's exception)", keptAnswer.Restriction)
-	}
-
-	newAddr, err := fixture.CurrentAddressFor(ctx, store, stillServed)
-	if err != nil {
-		t.Fatalf("CurrentAddressFor(%s): %v", stillServed, err)
-	}
-	if newAddr == "" {
-		t.Error("CurrentAddressFor(a still-served prior-epoch Address) returned an empty Address, want a real one under the new epoch")
-	}
+	epochRequireLive(t, ctx, fixture, store, fresh, schemeEpoch,
+		"a fresh mint of the id after the loss is a new lineage and is served")
 }
 
 // --- fixture helpers -------------------------------------------------------
@@ -951,6 +1129,137 @@ func retentionMint(t *testing.T, ctx context.Context, fixture RetentionFixture, 
 // epochStore names a storeID namespaced by the fixture's IssuePrefix and tag.
 func epochStore(fixture EpochFixture, tag string) string {
 	return fixture.IssuePrefix + "-epoch-store-" + tag
+}
+
+// epochLoseVersionSkip is the skip reason of every phase that needs
+// EpochFixture.LoseVersion.
+const epochLoseVersionSkip = "this backend cannot record that the store lost a Version (LoseVersion is nil)"
+
+// epochSkipUnlessReady skips the case when the fixture lacks a capability the
+// epoch cases need. The cases that record a loss also need LoseVersion. The
+// all-nil wiring test runs every case against an empty fixture, so each case
+// must call this before it touches any of them.
+func epochSkipUnlessReady(t *testing.T, fixture EpochFixture, needsLoseVersion bool) {
+	t.Helper()
+	if fixture.MintUnderEpoch == nil {
+		t.Skip("this backend has no way to mint a Version under a known epoch (MintUnderEpoch is nil)")
+	}
+	if fixture.BumpEpoch == nil {
+		t.Skip("this backend has no epoch concept yet (BumpEpoch is nil)")
+	}
+	if fixture.StillServes == nil {
+		t.Skip("this backend cannot report whether it still serves a prior-epoch Version (StillServes is nil)")
+	}
+	if fixture.Resolve == nil {
+		t.Skip("this backend does not yet report retention state (Resolve is nil)")
+	}
+	if fixture.CurrentAddressFor == nil {
+		t.Skip("this backend cannot report a still-served Version's new Address (CurrentAddressFor is nil)")
+	}
+	if needsLoseVersion && fixture.LoseVersion == nil {
+		t.Skip(epochLoseVersionSkip)
+	}
+}
+
+// epochMintAddress mints id on store, failing the case if minting fails.
+func epochMintAddress(t *testing.T, ctx context.Context, fixture EpochFixture, store, id string) Address {
+	t.Helper()
+	address, err := fixture.MintUnderEpoch(ctx, store, id)
+	if err != nil {
+		t.Fatalf("MintUnderEpoch(%s, %s): %v", store, id, err)
+	}
+	return address
+}
+
+// epochBumpTo bumps store's epoch for trigger and returns the epoch it
+// reports. Epochs are captured from the return value, never assumed: the
+// counter is one per database, shared by every store the suite uses.
+func epochBumpTo(t *testing.T, ctx context.Context, fixture EpochFixture, store string, trigger EpochBumpTrigger) int {
+	t.Helper()
+	epoch, err := fixture.BumpEpoch(ctx, store, trigger)
+	if err != nil {
+		t.Fatalf("BumpEpoch(%s, %s): %v", store, trigger, err)
+	}
+	return epoch
+}
+
+// epochLoseAddress records that store lost the Version behind address.
+func epochLoseAddress(t *testing.T, ctx context.Context, fixture EpochFixture, store string, address Address) {
+	t.Helper()
+	if err := fixture.LoseVersion(ctx, store, address); err != nil {
+		t.Fatalf("LoseVersion(%s, %s): %v", store, address, err)
+	}
+}
+
+// epochCurrentAddress asks where address now resolves, failing the case on an
+// error or an empty answer.
+func epochCurrentAddress(t *testing.T, ctx context.Context, fixture EpochFixture, store string, address Address) Address {
+	t.Helper()
+	current, err := fixture.CurrentAddressFor(ctx, store, address)
+	if err != nil {
+		t.Fatalf("CurrentAddressFor(%s, %s): %v", store, address, err)
+	}
+	if current == "" {
+		t.Fatalf("CurrentAddressFor(%s, %s) returned an empty Address, want a real one", store, address)
+	}
+	return current
+}
+
+// epochRequireLive asserts that address is served at epoch: StillServes is true
+// and Resolve answers RestrictionLive naming that epoch. why says what the
+// assertion is checking, for the failure message.
+func epochRequireLive(t *testing.T, ctx context.Context, fixture EpochFixture, store string, address Address, epoch int, why string) {
+	t.Helper()
+	serves, err := fixture.StillServes(ctx, store, address)
+	if err != nil {
+		t.Fatalf("StillServes(%s): %v", address, err)
+	}
+	if !serves {
+		t.Errorf("StillServes(%s) = false, want true: %s", address, why)
+	}
+	answer, err := fixture.Resolve(ctx, store, address)
+	if err != nil {
+		t.Fatalf("Resolve(%s): %v", address, err)
+	}
+	if answer.Restriction != RestrictionLive {
+		t.Errorf("Resolve(%s) = %s, want RestrictionLive: %s", address, answer.Restriction, why)
+	}
+	epochRequireAnswerEpoch(t, answer, address, epoch, why)
+}
+
+// epochRequireGone asserts that address is no longer served at epoch:
+// StillServes is false and Resolve answers RestrictionGoneReorganization
+// naming that epoch.
+func epochRequireGone(t *testing.T, ctx context.Context, fixture EpochFixture, store string, address Address, epoch int, why string) {
+	t.Helper()
+	serves, err := fixture.StillServes(ctx, store, address)
+	if err != nil {
+		t.Fatalf("StillServes(%s): %v", address, err)
+	}
+	if serves {
+		t.Errorf("StillServes(%s) = true, want false: %s", address, why)
+	}
+	answer, err := fixture.Resolve(ctx, store, address)
+	if err != nil {
+		t.Fatalf("Resolve(%s): %v", address, err)
+	}
+	if answer.Restriction != RestrictionGoneReorganization {
+		t.Errorf("Resolve(%s) = %s, want RestrictionGoneReorganization: %s", address, answer.Restriction, why)
+	}
+	epochRequireAnswerEpoch(t, answer, address, epoch, why)
+}
+
+// epochRequireAnswerEpoch asserts that a Live or Gone answer names the current
+// epoch (R20-n: the answer carries the epoch, not just the Restriction).
+func epochRequireAnswerEpoch(t *testing.T, answer RetentionAnswer, address Address, epoch int, why string) {
+	t.Helper()
+	if answer.Epoch == nil {
+		t.Errorf("Resolve(%s).Epoch = nil, want the current epoch %d: %s", address, epoch, why)
+		return
+	}
+	if *answer.Epoch != epoch {
+		t.Errorf("Resolve(%s).Epoch = %d, want the current epoch %d: %s", address, *answer.Epoch, epoch, why)
+	}
 }
 
 // sameRetentionAnswer compares two RetentionAnswer values by content rather

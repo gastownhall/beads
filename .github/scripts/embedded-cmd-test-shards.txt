@@ -264,6 +264,7 @@
 50 11 TestEmbeddedDepA
 50 11 TestEmbeddedMaxRowsDepTreeAndDuplicates
 50 11 TestEmbeddedState
+50 11 TestEmbeddedVersionedHistorySwitchScansEveryRowNotOnePage
 
 50 12 TestEmbeddedDirectCommitPathsBatchAutoCommitDoesNotAdvanceHead
 50 12 TestEmbeddedPrimeChangeDirPrimesTarget
@@ -288,6 +289,7 @@
 50 15 TestEmbeddedEpicCloseEligibleReasonFlag
 50 15 TestEmbeddedExplicitHierarchicalParentEdges
 50 15 TestEmbeddedVersionConcurrent
+50 15 TestEmbeddedVersionedHistorySwitchRefusesAnUnrecordableGateTimeout
 
 50 16 TestEmbeddedBlockedLabelFilters
 50 16 TestEmbeddedKV
@@ -296,11 +298,13 @@
 50 16 TestEmbeddedRestoreConcurrent
 50 16 TestEmbeddedVCCommitVariantsAndMerge
 50 16 TestEmbeddedVersion
+50 16 TestEmbeddedVersionedHistorySetManyRefusesUnversionableMetadata
 
 50 17 TestEmbeddedCloseGuardsAndEpics
 50 17 TestEmbeddedCompact
 50 17 TestEmbeddedGateConcurrent
 50 17 TestEmbeddedListComments
+50 17 TestEmbeddedVersionedHistorySwitchRefusesUnversionableMetadata
 
 50 18 TestEmbeddedContext
 50 18 TestEmbeddedContributorCreate
@@ -341,6 +345,7 @@
 50 24 TestEmbeddedImportUpsertAndPrefixSync
 50 24 TestEmbeddedQuery
 50 24 TestEmbeddedUpdateRoutedStoreCommitsTargetHead
+50 24 TestEmbeddedVersionedHistorySwitchRoundTrip
 
 50 25 TestEmbeddedBackupConcurrent
 50 25 TestEmbeddedCreateStorageClassBasic

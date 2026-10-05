@@ -290,7 +290,7 @@ export BEADS_ACTOR="my-github-handle"
 
 ## Project-Level Settings (Database)
 
-These are written to the Dolt database by `bd config set` and have no env var override. Common namespaces:
+These are written to the Dolt database by `bd config set` and have no env var override, with one exception: `versioned-history.enabled` also honors `BD_VERSIONED_HISTORY_ENABLED` (see [Versioned Issue History](#versioned-issue-history)). Common namespaces:
 
 | Namespace | Purpose |
 |---|---|
@@ -310,6 +310,7 @@ These are written to the Dolt database by `bd config set` and have no env var ov
 | `min_hash_length`, `max_hash_length` | Adaptive ID bounds (defaults `3` and `8`) |
 | `max_collision_prob` | Hash ID collision tolerance (default `0.25`) |
 | `claim.pools` | Comma-separated pool aliases: placeholder assignees that any actor can take with `bd update <id> --claim` (see [below](#claim-pools)). Unset by default, which turns pool claiming off |
+| `versioned-history.enabled` | `true` records a version row for every issue write to this store; off by default. Unlike the rest of this table it also honors an environment variable, which can only turn it on (see [below](#versioned-issue-history)) |
 | `doctor.suppress.*` | Suppress specific `bd doctor` warnings by check slug (warnings only; errors always show) |
 
 Issue prefix (`issue_prefix`) is **not** settable via `bd config set` — use `bd init --prefix`, `bd bootstrap`, or `bd rename-prefix`.
@@ -399,6 +400,25 @@ Claiming reads this key from the database only. A `claim.pools` value in `config
 - **Reassigning.** `bd assign` and `bd update <id> --assignee` can move an `in_progress` issue that a pool alias holds without `--force`.
 - **`bd ready --claim`** takes only unassigned issues, so it skips pool-assigned ones even though `bd ready` lists them. Claim those by ID.
 - **Lease expiry.** If the claimer's lease expires, `bd reclaim` sets the issue back to `open` with no assignee. It does not return the issue to the pool alias, so a dispatcher that wants it back in the pool has to reassign it.
+
+### Versioned Issue History
+
+While `versioned-history.enabled` is on, every write to an issue also stores a snapshot of it as a row of `issue_versions`, in the same transaction, and `bd versions <id>` lists them. It is off by default, and it does not backfill: versions are recorded from the moment it is turned on.
+
+```bash
+bd config set versioned-history.enabled true    # turn it on
+bd config set versioned-history.enabled false   # turn it off
+```
+
+- **The switch belongs to the store.** It is a row of the database `config` table, so `bd config set` writes it there and not to `config.yaml`. Every store answers for itself: a write routed into another workspace (a prefix-routed `bd update` or `bd close`, or `bd create --repo`) reads the *target* store's row, never the row of the workspace you launched `bd` from.
+- **It replicates.** The config table travels with `bd dolt push` and `bd dolt pull`, so enabling it on one clone turns it on for every clone that pulls.
+- **Single writer only.** Keep one writer at a time per store, and never two disconnected clones recording. Two writers that each mint the same revision for an issue collide on merge, and the pull fails (`VersionedHistoryConfigurer` in `internal/storage/storage.go`, and [#6379](https://github.com/gastownhall/beads/issues/6379) item 4). Because the setting replicates, turning it on is a decision for the whole store, not for one clone.
+- **Turning it on checks the store first.** `bd config set versioned-history.enabled true` reads every issue the store would version and refuses, writing nothing, while any holds a value a version could not record: a number outside the I-JSON exact-integer range (magnitude above 2^53-1, whatever its spelling, fractions and exponent forms included), in its metadata or in a gate's timeout. A timeout is held as nanoseconds, so a gate that waits longer than about 104.25 days (9007199254740991 ns) is refused. It prints how many issues, which ones (the first 20), what is wrong with each and which field it is in. With history on, a write that introduces such a value already fails at once and commits nothing, and so does a later write to a row that already holds one. The fix depends on the field. For a number in metadata, one command per issue, and it works with history on or off: `bd update <id> --metadata '{"<key>": "<value as a string>"}'` to replace the value, or `bd update <id> --unset-metadata <key>` to remove the key. `bd update` cannot change a gate's timeout, so while history is off, remove the gate with `bd delete <id> --force` (without `--force`, `bd delete` only previews, and removing the gate also unblocks anything it was blocking), or set the `timeout_ns` column of the `issues` table within the limit with `bd sql`, which needs a server-backed store and does not run on an embedded one. Then run the command again. **There is no override**: the check has no flag, and `bd config set versioned-history.enabled false` never runs it.
+- **What that check does not cover.** It runs once, at the moment you turn the setting on. A writer that does not record versions (an older `bd`, `bd sql`, a pull from a clone that had history off) can add such a row at any time afterwards, including right after the switch is on, and the first write to it then fails with the same refusal; the same fix applies. Checking and writing the setting in one transaction would narrow that window, not close it. Turning recording on through `BD_VERSIONED_HISTORY_ENABLED` or `config.yaml` does not go through the command at all, so nothing is checked ahead of time there; a write to such a row is refused when it happens. Duplicate keys in metadata are refused too, but Dolt's JSON column collapses them when it stores a document, so on a Dolt store neither the check nor a write can see one; that refusal is a defense for another backend that keeps them.
+- **The environment can turn it on, never off.** `BD_VERSIONED_HISTORY_ENABLED=1`, or a hand-written `enabled: true` under `versioned-history:` in `config.yaml`, applies to every store the process opens, routed targets included. The environment and the row are OR'd, not ranked, so `BD_VERSIONED_HISTORY_ENABLED=0` does not turn off a store whose row says `true`. Turn it off where it was turned on: `bd config set versioned-history.enabled false`.
+- **Server-backed modes read the same row.** Proxied-server mode, and `bd serve` against a server-mode workspace, write through a unit-of-work provider rather than a store. The provider reads the row from its own database when it is constructed, through a short read-only transaction that is rolled back, so `bd config set versioned-history.enabled true` covers those modes too. It does not fall back to the environment alone.
+- **The Go SDK is not covered.** Writers built on the Go SDK (the `beads` package: `Open`, `OpenFromConfig`, `OpenGated`, `OpenBestAvailable`) do not apply the switch: a write they make to a store whose row says `true` records no version. The `bd` binary's store factories apply it, and the events journal's switch has the same boundary. Opening a store through the SDK and applying both switches is a separate change.
+- **The value is read when a store is opened.** A long-lived process such as `bd serve` keeps the value it read at start until it is restarted, so after changing the setting, restart it.
 
 ## Sync and Federation
 
@@ -496,6 +516,7 @@ Selected commonly-used variables:
 | `BD_DOLT_AUTO_COMMIT` | Override `dolt.auto-commit` (`on`/`off`) |
 | `BD_DOLT_AUTO_PUSH`, `BD_DOLT_AUTO_PUSH_INTERVAL`, `BD_DOLT_AUTO_PUSH_TIMEOUT` | Override auto-push settings |
 | `BD_BACKUP_ENABLED`, `BD_BACKUP_INTERVAL`, `BD_BACKUP_GIT_REPO` | Override backup settings |
+| `BD_VERSIONED_HISTORY_ENABLED` | Turn on `versioned-history.enabled` for every store the process opens. `1` turns recording on; `0` does not turn it off for a store whose row says `true` (see [Versioned Issue History](#versioned-issue-history)) |
 | `BD_AGENT_PROFILE` | Override `agent.profile` |
 | `BD_AI_MODEL` | Override AI model |
 | `BD_FEDERATION_REMOTE`, `BD_FEDERATION_SOVEREIGNTY` | Override federation settings |
