@@ -7969,9 +7969,13 @@ components:
             `issues.sweep.liveDependents`, which announces that the same
             operation accepts `protect_live_dependents` and answers
             `skipped.live_dependent` rather than silently answering
-            `unknown_parameter`, and `issues.sweep.limit`, which announces
+            `unknown_parameter`, `issues.sweep.limit`, which announces
             that it accepts `limit` and answers `remaining` rather than
-            silently answering `unknown_parameter`. The
+            silently answering `unknown_parameter`, and
+            `issues.batchApply.depAddLineage`, which announces that a
+            `dep_add` item on `POST /v0/beads/issues:batchApply` accepts
+            `has_spawner` and `thread_id` (see `ApplyDepAddItem`) rather than
+            a `400` naming the member unknown. The
             list grows additively, and an operation never appears here unless
             it is fully implemented. This is how a client checks for an
             operation or a behavior — never the version string.
@@ -10301,6 +10305,12 @@ components:
         a typed spelling lowers to these same bytes, and the blob carries
         members a two-field typed member could not express. One spelling, and it
         is this one.
+
+
+        `has_spawner` and `thread_id` require `issues.batchApply.depAddLineage`:
+        a client naming either on a server that has not advertised the token
+        refuses locally before the dial rather than sending bytes the server
+        would silently ignore.
       properties:
         source:
           $ref: '#/components/schemas/Ref'
@@ -10316,6 +10326,24 @@ components:
             a known-types list, so a workspace's own type passes.
         metadata:
           $ref: '#/components/schemas/MetadataValue'
+        has_spawner:
+          type: boolean
+          description: >-
+            Gated by `issues.batchApply.depAddLineage`. Ignored for every
+            `type` but `waits-for`: on a `waits-for` edge, `true` stamps
+            `metadata.spawner_id` with this item's `target` (the id `bd create
+            --graph`'s spawner_key/spawner_id resolved to), so a reader learns
+            which spawned row to watch without re-deriving it from the graph
+            plan. Absent or `false` leaves `metadata` exactly as given.
+        thread_id:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: >-
+            Gated by `issues.batchApply.depAddLineage`. A plain column on the
+            stored edge, separate from `metadata`'s blob — the graph-plan
+            thread this edge belongs to, for a reader that groups edges by
+            thread without parsing every edge's metadata.
 
     ApplyBatchResponse:
       type: object

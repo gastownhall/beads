@@ -195,6 +195,15 @@ const CapSweepLiveDependents = "issues.sweep.liveDependents"
 // of what used to be a permanent refusal.
 const CapSweepLimit = "issues.sweep.limit"
 
+// CapBatchApplyDepAddLineage is the behavior capability announcing that
+// issues.batchApply's dep_add items accept `has_spawner` and `thread_id`,
+// spelled exactly as httpapi's constant of the same name (held to it by
+// TestCapabilityTableMatchesTheServerRouteTable). batchapplier.go reads this
+// token before sending either field, refusing locally with a typed
+// capability error rather than silently dropping graph lineage a caller
+// asked to carry against an older server.
+const CapBatchApplyDepAddLineage = "issues.batchApply.depAddLineage"
+
 // CapExternalDependencies is the CONDITIONAL behavior capability announcing
 // that the ready, claim and close operations of this server apply bd's
 // external-dependency policy themselves, spelled exactly as httpapi's constant
@@ -335,6 +344,7 @@ func (e *WireRevisionSkewError) Unwrap() error { return ErrWireRevisionSkew }
 var behaviorCapabilities = []string{
 	CapProjectEnforce, CapBatchApplyLarge, CapListSort, CapCountScope,
 	CapSweepWispsPlane, CapSweepLiveDependents, CapSweepLimit,
+	CapBatchApplyDepAddLineage,
 }
 
 // CapabilityFor reports the capability token gating op, and whether op is on

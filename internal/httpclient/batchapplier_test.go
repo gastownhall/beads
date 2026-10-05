@@ -52,8 +52,12 @@ func applyOneCreate() issueops.ApplyBatchRequest {
 // The create item's issue vocabulary is EXACTLY the single create's, so the
 // partition tables are shared rather than copied and this drives the same sweep
 // against a different operation and a different ledger row. The patch's own
-// excluded member — parent_id — is the second half, and the edge item's two —
-// the spawner flag and the thread — are the third.
+// excluded member — parent_id — is the second half.
+//
+// The edge item's spawner flag and thread were a third population here before
+// issues.batchApply.depAddLineage: both are CARRIED now, gated on the
+// capability rather than refused outright — see
+// TestApplyBatchRefusesUnservedDepAddLineageBeforeDialing.
 func TestApplyBatchRefusesEveryMemberTheWireExcludes(t *testing.T) {
 	t.Run("the create item's carried members are the wire's own", func(t *testing.T) {
 		published := bodyMembers(t, reflect.TypeOf(apigen.ApplyCreateItem{}))
@@ -164,36 +168,23 @@ func TestApplyBatchRefusesEveryMemberTheWireExcludes(t *testing.T) {
 		}
 	})
 
-	t.Run("the edge item's two unpublished members refuse", func(t *testing.T) {
-		for _, test := range []struct {
-			member string
-			row    string
-			set    func(*issueops.DepAddItem)
-		}{
-			{"HasSpawner", "W-DepAddItem.HasSpawner", func(item *issueops.DepAddItem) { item.HasSpawner = true }},
-			{"ThreadID", "W-DepAddItem.ThreadID", func(item *issueops.DepAddItem) { item.ThreadID = "th-1" }},
-		} {
-			t.Run(test.member, func(t *testing.T) {
-				item := &issueops.DepAddItem{
-					Source: issueops.Ref{ID: "bd-1"}, Target: issueops.Ref{ID: "bd-2"}, Type: issueops.DepWaitsFor,
-				}
-				test.set(item)
-				w := &stubWire{}
-				_, err := applyRole(t, w).ApplyBatch(t.Context(), issueops.ApplyBatchRequest{
-					Actor: "planner",
-					Items: []issueops.ApplyItem{{Kind: issueops.ItemDepAdd, DepAdd: item}},
-				})
-				assertRefusedBy(t, err, test.row)
-				if len(w.calls) != 0 {
-					t.Errorf("the refused member reached the wire: %v", w.calls)
-				}
-			})
-		}
-	})
+	// The edge item's HasSpawner/ThreadID used to refuse unconditionally here
+	// (W-DepAddItem.HasSpawner, W-DepAddItem.ThreadID). Both are now CARRIED,
+	// gated by issues.batchApply.depAddLineage — see
+	// TestApplyBatchRefusesUnservedDepAddLineageBeforeDialing for the pre-dial
+	// capability refusal this subtest retired in favor of.
 
 	t.Run("a spawner flag on any other edge type is the role's no-op, and is not refused", func(t *testing.T) {
+		// The capability must be advertised for this to dial at all now:
+		// HasSpawner/ThreadID are gated on every edge type, not only
+		// waits-for — see refuseUnservedDepAddLineage.
+		served := &apigen.ContextResponse{Capabilities: []string{wire.CapBatchApplyDepAddLineage}}
 		w := &stubWire{}
-		_, err := applyRole(t, w).ApplyBatch(t.Context(), issueops.ApplyBatchRequest{
+		applier, err := New(testTarget(t), w, served).BatchApplier()
+		if err != nil {
+			t.Fatalf("BatchApplier(): %v", err)
+		}
+		_, err = applier.ApplyBatch(t.Context(), issueops.ApplyBatchRequest{
 			Actor: "planner",
 			Items: []issueops.ApplyItem{{Kind: issueops.ItemDepAdd, DepAdd: &issueops.DepAddItem{
 				Source: issueops.Ref{ID: "bd-1"}, Target: issueops.Ref{ID: "bd-2"}, Type: issueops.DepBlocks, HasSpawner: true,

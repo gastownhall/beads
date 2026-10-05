@@ -266,6 +266,12 @@
     },
     {
       "schema": "ApplyDepAddItem",
+      "member": "has_spawner",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "ApplyDepAddItem",
       "member": "metadata",
       "type": "",
       "required": false,
@@ -282,6 +288,12 @@
       "member": "target",
       "type": "object",
       "required": true
+    },
+    {
+      "schema": "ApplyDepAddItem",
+      "member": "thread_id",
+      "type": "string",
+      "required": false
     },
     {
       "schema": "ApplyDepAddItem",

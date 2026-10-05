@@ -102,7 +102,7 @@ var (
 	applyLabelPatchMembers    = []string{"add", "remove", "replace"}
 	applyMetadataPatchMembers = []string{"merge", "replace", "set", "unset"}
 	applyCloseItemMembers     = []string{"expected_version", "force", "reason", "session", "target"}
-	applyDepAddItemMembers    = []string{"metadata", "source", "target", "type"}
+	applyDepAddItemMembers    = []string{"has_spawner", "metadata", "source", "target", "thread_id", "type"}
 
 	// applyItemKinds is the tag vocabulary, paired with the payload member each
 	// value names. It is one map rather than a switch so the enum, the member
@@ -831,6 +831,21 @@ func applyDepAddItem(prefix string, raw map[string]json.RawMessage) (*issueops.D
 	if metadata, present := raw["metadata"]; present {
 		item.Metadata = string(metadata)
 	}
+	// has_spawner and thread_id are additive members gated client-side by
+	// issues.batchApply.depAddLineage (routes.go CapBatchApplyDepAddLineage):
+	// the server always understands them once wired, so there is no
+	// capability check here — the gate lives entirely in the client that
+	// decides whether to SEND them against an older server.
+	hasSpawner, res := applyBoolMember(raw, prefix, "has_spawner")
+	if res != nil {
+		return nil, res
+	}
+	item.HasSpawner = hasSpawner
+	threadID, res := applyTextMember(raw, prefix, "thread_id")
+	if res != nil {
+		return nil, res
+	}
+	item.ThreadID = threadID
 	return item, nil
 }
 

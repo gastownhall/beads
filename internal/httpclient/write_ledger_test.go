@@ -594,18 +594,23 @@ func writeShapes() []writeShape {
 			},
 		},
 		{
-			// The edge item. The gate normalization a waits-for edge gets is
-			// the ROLE's and travels inside the blob. HasSpawner and ThreadID
-			// have no wire member, so they are absent from carried below and
-			// refuse under W-DepAddItem.HasSpawner and W-DepAddItem.ThreadID.
+			// The edge item. TOTAL. The gate normalization a waits-for edge
+			// gets is the ROLE's and travels inside the blob. HasSpawner and
+			// ThreadID are carried unconditionally at this structural layer —
+			// CapBatchApplyDepAddLineage is a separate, client-side refusal
+			// (batchapplier.go's refuseUnservedDepAddLineage) gating WHETHER
+			// this client sends either member against an older server, not
+			// whether the field reaches the wire body type at all.
 			name:   "applyBatch/item/dep_add",
 			source: reflect.TypeOf(issueops.DepAddItem{}),
 			body:   reflect.TypeOf(apigen.ApplyDepAddItem{}),
 			carried: map[string]carriage{
-				"Source":   member("source"),
-				"Target":   member("target"),
-				"Type":     member("type"),
-				"Metadata": member("metadata"),
+				"Source":     member("source"),
+				"Target":     member("target"),
+				"Type":       member("type"),
+				"Metadata":   member("metadata"),
+				"HasSpawner": member("has_spawner"),
+				"ThreadID":   member("thread_id"),
 			},
 		},
 		{

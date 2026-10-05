@@ -149,6 +149,17 @@ const CapIssuesSweepLiveDependents = "issues.sweep.liveDependents"
 // before sending the member to a server that may predate it.
 const CapIssuesSweepLimit = "issues.sweep.limit"
 
+// CapBatchApplyDepAddLineage is the behavior capability that advertises
+// ApplyDepAddItem's `has_spawner` and `thread_id` members (batch_apply.go):
+// additive fields a `dep_add` item may carry alongside `source`, `target`,
+// `type` and `metadata`. Like CapBatchApplyLarge it names members of an
+// EXISTING operation (issues.batchApply already has its own per-operation
+// token) rather than a route of its own, so it rides the same
+// behaviorCapabilities list. A client that sets either field without this
+// token advertised refuses locally before the dial rather than sending bytes
+// an older server would silently drop.
+const CapBatchApplyDepAddLineage = "issues.batchApply.depAddLineage"
+
 // customMethodTarget splits the custom method off the segment the router
 // matched, and reports the row that claims it.
 //
@@ -899,6 +910,7 @@ func (r route) specPathOf() string {
 var behaviorCapabilities = []string{
 	CapProjectEnforce, CapBatchApplyLarge, CapIssuesListSort, CapIssuesCountScope,
 	CapIssuesSweepWispsPlane, CapIssuesSweepLiveDependents, CapIssuesSweepLimit,
+	CapBatchApplyDepAddLineage,
 }
 
 // Capabilities lists what this build advertises in ContextResponse.capabilities:

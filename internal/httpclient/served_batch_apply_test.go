@@ -34,9 +34,11 @@ import (
 // shared database would turn an id collision between two contracts into a
 // debugging session.
 
-// applyParkBead owns this family's two parks: L-apply-ref's unparks when the
-// wire grows a typed ref-key member on the problem document, and
-// W-DepAddItem.HasSpawner's when ApplyDepAddItem publishes a spawner member.
+// applyParkBead owns this family's one remaining park: L-apply-ref's unparks
+// when the wire grows a typed ref-key member on the problem document.
+// W-DepAddItem.HasSpawner's park UNPARKED under issues.batchApply.depAddLineage
+// (S5) — ApplyDepAddItem now publishes a spawner member — and
+// TestServedBatchApplyStampsSpawnerIDOnlyWhenNamed runs unskipped below.
 const applyParkBead = "ga-mijra"
 
 func newServedBatchApplyFixture(t *testing.T, prefix string) conformance.BatchApplyFixture {
@@ -174,18 +176,6 @@ func TestServedBatchApplyNormalizesTheWaitsForGate(t *testing.T) {
 	conformance.RunBatchApplyNormalizesTheWaitsForGate(t, t.Context(), newServedBatchApplyFixture(t, "hba1c"))
 }
 
-// TestServedBatchApplyStampsSpawnerIDOnlyWhenNamed parks on the edge item's
-// spawner flag. The case's second half, an edge that names no spawner, is what
-// this wire writes for every waits-for edge; its first half is the item the
-// client refuses.
-func TestServedBatchApplyStampsSpawnerIDOnlyWhenNamed(t *testing.T) {
-	skipKnownDivergence(t, "W-DepAddItem.HasSpawner", applyParkBead,
-		"the case names a spawner on a waits-for edge (DepAddItem.HasSpawner), and ApplyDepAddItem publishes no "+
-			"spawner member, so the client refuses the item rather than letting the server store the edge without "+
-			"the spawner_id the role would stamp from its resolved target.")
-	conformance.RunBatchApplyStampsSpawnerIDOnlyWhenNamed(t, t.Context(), newServedBatchApplyFixture(t, "hba27"))
-}
-
 func TestServedBatchApplySplicesAForwardMetadataRef(t *testing.T) {
 	conformance.RunBatchApplySplicesAForwardMetadataRef(t, t.Context(), newServedBatchApplyFixture(t, "hba1d"))
 }
@@ -253,6 +243,18 @@ func TestServedBatchApplyDoesNotMutateTheCallerRequest(t *testing.T) {
 
 func TestServedBatchApplyRefusesAnUnusableRequest(t *testing.T) {
 	conformance.RunBatchApplyRefusesAnUnusableRequest(t, t.Context(), newServedBatchApplyFixture(t, "hba26"))
+}
+
+// TestServedBatchApplyStampsSpawnerIDOnlyWhenNamed wires the dep_add
+// HasSpawner/ThreadID lineage conformance case onto the http leg (S5): a
+// served default Config always advertises CapBatchApplyDepAddLineage (it is
+// in httpapi's unconditional behaviorCapabilities), so this exercises the
+// member on the WIRE, round-tripping through refuseUnservedDepAddLineage's
+// pre-dial check (which never fires here, since the capability is present)
+// and applyDepAddItemBody's encoding, server-side batch_apply.go decode, and
+// the role's own StampWaitsForSpawnerID.
+func TestServedBatchApplyStampsSpawnerIDOnlyWhenNamed(t *testing.T) {
+	conformance.RunBatchApplyStampsSpawnerIDOnlyWhenNamed(t, t.Context(), newServedBatchApplyFixture(t, "hba27"))
 }
 
 // TestServedBatchApplyRefusesAMetadataRefWithoutNamingTheKey is the running pin

@@ -834,21 +834,20 @@ func writeSideRows() []Row {
 			PinnedBy: applyPin,
 		},
 		{
-			ID: "W-DepAddItem.HasSpawner", Kind: KindRefuse,
+			ID: "W-DepAddItem.HasSpawner", Kind: KindRetired,
 			Type: tyApplyDepAddItem, Field: "HasSpawner",
-			What: "a waits-for edge ITEM that names its spawner refuses",
-			Why: "ApplyDepAddItem publishes source, target, type and metadata and no spawner member, and the flag asks for a write only the ROLE can make: metadata's spawner_id, stamped from the resolved target once every id in the batch exists, because a target named by key has no id before then. " +
-				"Dropping the flag would store the edge's gate-only metadata, so an edge whose caller named a spawner would carry none. On every other edge type the role ignores the flag and stores the same row either way, so there it is dropped rather than refused. Upstream ask: a spawner member on ApplyDepAddItem, which retires this row",
-			SpecRow:  "D8 refuse-not-drop",
+			What: "a waits-for edge ITEM that names its spawner used to refuse",
+			Why: "RETIRED by issues.batchApply.depAddLineage (S5). ApplyDepAddItem now publishes `has_spawner` — the write this row said only the role could make, metadata's spawner_id stamped from the resolved target — gated on the capability rather than dropped: a caller on a server that has not advertised the token refuses locally before the dial (BatchApplier.refuseUnservedDepAddLineage), and a caller on a server that has sends the member exactly as given. " +
+				"The flag is unconditioned on edge type at this layer; the role's own normalization — a no-op off a waits-for edge — is unchanged and still the role's to keep",
+			SpecRow:  "D8 refuse-not-drop (RETIRED)",
 			PinnedBy: applyPin,
 		},
 		{
-			ID: "W-DepAddItem.ThreadID", Kind: KindRefuse,
+			ID: "W-DepAddItem.ThreadID", Kind: KindRetired,
 			Type: tyApplyDepAddItem, Field: "ThreadID",
-			What: "associating an edge ITEM with a discussion thread refuses",
-			Why: "ApplyDepAddItem publishes no thread member, and no operation on this surface does: W-CreateDependency.ThreadID refuses the same column on both create edges. Dropping it would store the edge with no thread, so a replies-to edge would lose the conversation it was written for. " +
-				"It is a row of its own rather than a citation of that one for W-CreateItem.Issue's reason: the operation is different",
-			SpecRow:  "D8 refuse-not-drop",
+			What:     "associating an edge ITEM with a discussion thread used to refuse",
+			Why:      "RETIRED with W-DepAddItem.HasSpawner (S5, issues.batchApply.depAddLineage). ApplyDepAddItem now publishes `thread_id` as a plain column on the stored edge, gated by the same capability and the same pre-dial refusal rather than dropped — a caller naming a thread on an unadvertising server is refused before the dial, never silently stored with no thread",
+			SpecRow:  "D8 refuse-not-drop (RETIRED)",
 			PinnedBy: applyPin,
 		},
 		{
