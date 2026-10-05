@@ -389,6 +389,46 @@ func TestIgnored0028AloneLeavesCounterAndRowsUntouched(t *testing.T) {
 	}
 }
 
+// TestIgnored0028NoopsWithoutItsTables is the 0028 analogue of 0023's
+// TestEmbeddedIgnoredMigration0023NoopsWithoutItsTables
+// (migrate_journal_shape_repair_test.go): 0028 must survive running against a
+// workspace with no bd_events_journal table at all, the same intermediate
+// state 0023 already has to survive. Kills: removing or omitting the
+// table-exists conjunct from 0028's comment_json step.
+func TestIgnored0028NoopsWithoutItsTables(t *testing.T) {
+	te := newTestEnv(t, "i28notab")
+	ctx := context.Background()
+
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, te.dataDir, te.database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer func() { _ = cleanup() }()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("Conn: %v", err)
+	}
+	defer conn.Close()
+
+	execFrozenGuard(t, ctx, conn, "DROP TABLE IF EXISTS bd_events_journal")
+
+	sqlText, err := schema.IgnoredMigrationSQL("0028_converge_events_journal_shape.up.sql")
+	if err != nil {
+		t.Fatalf("read ignored 0028 migration: %v", err)
+	}
+	execFrozenGuard(t, ctx, conn, sqlText)
+
+	var got int
+	if err := conn.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'bd_events_journal'`).Scan(&got); err != nil {
+		t.Fatalf("probe bd_events_journal presence: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("0028 created bd_events_journal out of nothing (count = %d); it must only ever repair an existing table", got)
+	}
+}
+
 // TestSentinelJournalColumnsReplay is T2.6: a store already at the latest
 // ignored cursor that loses comment_json out of band (a backup restored
 // between doors, or damage out of band) floors at exactly 21 and heals on the

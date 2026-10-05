@@ -52,11 +52,12 @@
 -- any bd_events_* table, unconditionally, so this file — not a main-plane
 -- twin — is the only place bd_events_journal's shape can converge.
 
--- comment_json: add as LONGTEXT if missing entirely; widen if it is TEXT.
--- The NULL branch is what 0023 never had: DATA_TYPE reads NULL only when the
--- column (or the table) is absent, and the table-absent case is excluded by
--- the replay-floor constraint above (0022, the table's creator, always runs
--- first in any replay this migration participates in).
+-- comment_json: add as LONGTEXT if missing; widen if TEXT. An absent TABLE
+-- takes the no-op branch explicitly (a COLUMNS probe alone cannot tell "no
+-- column" from "no table"), so this step never depends on 0022 having run
+-- earlier in the same pass.
+SET @journal_exists = (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'bd_events_journal');
 SET @comment_json_type = (
     SELECT DATA_TYPE
     FROM INFORMATION_SCHEMA.COLUMNS
@@ -64,11 +65,12 @@ SET @comment_json_type = (
       AND TABLE_NAME = 'bd_events_journal'
       AND COLUMN_NAME = 'comment_json'
 );
-SET @sql = IF(@comment_json_type IS NULL,
-    'ALTER TABLE bd_events_journal ADD COLUMN comment_json LONGTEXT',
-    IF(@comment_json_type = 'text',
-        'ALTER TABLE bd_events_journal MODIFY COLUMN comment_json LONGTEXT',
-        'SELECT 1'));
+SET @sql = IF(@journal_exists = 0, 'SELECT 1',
+    IF(@comment_json_type IS NULL,
+        'ALTER TABLE bd_events_journal ADD COLUMN comment_json LONGTEXT',
+        IF(@comment_json_type = 'text',
+            'ALTER TABLE bd_events_journal MODIFY COLUMN comment_json LONGTEXT',
+            'SELECT 1')));
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- actor: add VARCHAR(255) NOT NULL DEFAULT '' if missing. ignored/0025
@@ -94,8 +96,9 @@ PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 -- dep_json: widen if TEXT. 0023's own step, repeated here (not removed there:
 -- shipped migrations are frozen, check C) for any lineage that reaches 0028
 -- without ever having run it. Every creator of this table this repo or its
--- fork lineage has ever shipped declares dep_json with SOME type, so NULL
--- here can only mean "no table", which the replay floor rules out.
+-- fork lineage has ever shipped declares dep_json with SOME type, so a
+-- missing table yields NULL here too, which takes the no-op branch (the
+-- comment_json step above makes the same table-absence case explicit).
 SET @dep_json_is_text = (
     SELECT IF(DATA_TYPE = 'text', 1, 0)
     FROM INFORMATION_SCHEMA.COLUMNS
