@@ -142,6 +142,7 @@ go_test(
         "get_issue_test.go",
         "git_ref_pin_test.go",
         "graph_counter_contract_test.go",
+        "graph_walk_plan_test.go",
         "history_presence_contract_test.go",
         "history_test.go",
         "is_blocked_batch_test.go",
