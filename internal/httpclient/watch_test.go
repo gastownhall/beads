@@ -18,7 +18,7 @@ import (
 func TestTheWatchRefusalReadsExactlyAsTheSpecWroteIt(t *testing.T) {
 	// pinnedProjectTarget, not testTarget: the expected text below pins the
 	// literal workspace URL, so it needs the fixed-URL builder (S3
-	// reconciliation, gc native-program, 2026-10 — this file's testTarget
+	// reconciliation, 2026-10 — this file's testTarget
 	// call predated the rename that split the two helpers apart).
 	s := New(pinnedProjectTarget(t), nil, nil)
 

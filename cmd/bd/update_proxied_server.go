@@ -146,7 +146,7 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, nil, err
 		}
-		// A8: an active --if-revision guard reports through gascity's
+		// A8: an active --if-revision guard reports through its own
 		// dedicated conditional-write envelope instead of the generic
 		// updateIDFailure batch shape — requireSingleIfRevisionID already
 		// guarantees args has exactly one id, so returning the reported exit

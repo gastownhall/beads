@@ -118,7 +118,7 @@ func flaglessSortCorpus() []*types.IssueWithCounts {
 // contract itself, rather than out of a second copy of the names.
 func publishedParamEnum(t *testing.T, operationID, param string) []string {
 	t.Helper()
-	// S3 reconciliation (gc native-program, 2026-10): spec.OpenAPIV0() rather
+	// S3 reconciliation (2026-10): spec.OpenAPIV0() rather
 	// than a relative os.ReadFile — the document is go:embed'd into
 	// internal/httpapi/spec precisely so a reader does not depend on a
 	// filesystem layout, and a relative path breaks the moment this runs

@@ -62,7 +62,7 @@ func (f *fakeWire) Do(ctx context.Context, req wire.Request, out any) error {
 // helpers_test.go's testTarget: several tests here assert against this
 // specific URL and ExpectProjectID (the identity-mismatch and GetMetadata
 // project-id tests), so it cannot share the generic "nothing pinned yet"
-// helper. S3 reconciliation (gc native-program, 2026-10) renamed it off
+// helper. S3 reconciliation (2026-10) renamed it off
 // testTarget — the lift had declared two package-scope functions under that
 // one name (here and in helpers_test.go), which never compiled.
 func pinnedProjectTarget(t *testing.T) Target {

@@ -244,7 +244,7 @@ func writeShapes() []writeShape {
 				"ExpectedStatus":   member("expected_status"),
 				"ExpectedAssignee": member("expected_assignee"),
 				// The third member of the FORCE trio, now sent (S3
-				// reconciliation, gc native-program, 2026-10): the single-patch
+				// reconciliation, 2026-10): the single-patch
 				// updateIssue body carries `force_notes_overwrite` exactly as
 				// issues:batchApply's update item already did, so the fence a
 				// caller means to bypass is bypassable here too.
@@ -537,7 +537,7 @@ func writeShapes() []writeShape {
 				"ForceClosePolicy":      member("force_close_policy"),
 				"ForceAssigneeTransfer": member("force_assignee_transfer"),
 				// All three force flags are published here (S3 reconciliation,
-				// gc native-program, 2026-10 — batchapplier.go now sends it
+				// 2026-10 — batchapplier.go now sends it
 				// exactly as it sends the other two).
 				"ForceNotesOverwrite": member("force_notes_overwrite"),
 			},

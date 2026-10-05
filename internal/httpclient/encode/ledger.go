@@ -596,7 +596,7 @@ func writeSideRows() []Row {
 			ID: "W-UpdateRequest.ForceNotesOverwrite", Kind: KindRetired,
 			Type: tyUpdateRequest, Field: "ForceNotesOverwrite",
 			What: "bypassing the notes-overwrite fence on a single update used to refuse",
-			Why: "RETIRED by the S3 reconciliation that found it (gc native-program, 2026-10). It was discovered refused on the single-patch updateIssue path while the identical flag was already carried on issues:batchApply's update item (W table entry applyBatch/item/update) — the same trio member, wired on one shape and not the other with no decision on record for the gap. " +
+			Why: "RETIRED by the S3 reconciliation that found it (2026-10). It was discovered refused on the single-patch updateIssue path while the identical flag was already carried on issues:batchApply's update item (W table entry applyBatch/item/update) — the same trio member, wired on one shape and not the other with no decision on record for the gap. " +
 				"Flipping it was a port, not a decision, same as W-UpdateRequest.ExpectedVersion's: the body now sends `force_notes_overwrite` as a pointer set true only on request, so a Patch.Notes that would replace existing non-empty notes with different non-empty content is bypassable here exactly as it already was on the batch path",
 			SpecRow:  updateSpec,
 			PinnedBy: pinnedByS3Conformance,
@@ -940,7 +940,7 @@ func writeSideRows() []Row {
 			PinnedBy: pinnedByS3Conformance,
 		},
 		{
-			// S3 reconciliation (gc native-program, 2026-10): bd-enterprise's
+			// S3 reconciliation (2026-10): bd-enterprise's
 			// batchCloseIssues composed an atomic claim-after-close onto the
 			// same request; OSS's apigen.BatchCloseRequest and
 			// BatchCloseResponse publish no claim_next/claimed_next member at
@@ -955,7 +955,7 @@ func writeSideRows() []Row {
 			PinnedBy: pinnedByS3Conformance,
 		},
 		{
-			// S3 reconciliation (gc native-program, 2026-10): bd-enterprise's
+			// S3 reconciliation (2026-10): bd-enterprise's
 			// sweepIssues wire carried a structural-dependent protection
 			// alongside the referenced-citation one; OSS's apigen.SweepRequest
 			// publishes protect_referenced only. There is no

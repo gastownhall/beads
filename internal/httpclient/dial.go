@@ -101,8 +101,8 @@ func Dial(target Target, opts DialOptions) (*Conn, error) {
 }
 
 // DialWith is Dial with the credential source chosen by the caller — the other
-// half of the D5 seam, for the layers that ride it: the gateway dialer
-// (internal/enterprise/httpgw) and the public registrant (backend/http), each of
+// half of the D5 seam, for the layers that ride it: a gateway dialer outside
+// this repo and the public registrant (backend/http), each of
 // which binds a provider this package does not know about.
 //
 // It exists so the target-to-client mapping has ONE body. The gateway dialer

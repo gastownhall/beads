@@ -563,7 +563,7 @@ pointless).`,
 			})
 			if updateErr != nil {
 				// A8 (beads#4682): an active --if-revision guard reports
-				// through gascity's dedicated conditional-write envelope
+				// through its own dedicated conditional-write envelope
 				// instead of the generic per-ID batch report below —
 				// requireSingleIfRevisionID already guarantees args has
 				// exactly one id when ifRevision is set, so reporting and

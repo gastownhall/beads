@@ -906,7 +906,7 @@ func assertGuardText(t *testing.T, member string, got, want *string) {
 
 // ptr lives in helpers_test.go; this file used to redeclare it identically
 // (the lift had the same generic helper in two files, which never compiled),
-// removed in S3 reconciliation (gc native-program, 2026-10).
+// removed in S3 reconciliation (2026-10).
 
 // TestCreateRefusesARequestWithNoIssue keeps the role's own precondition off the
 // wire: a create with nothing to create is a client bug, not a round trip.

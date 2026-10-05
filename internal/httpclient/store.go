@@ -62,7 +62,7 @@ type Store struct {
 // actually implement is a missing method, and a method both implemented and
 // stubbed is an ambiguous selector.
 //
-// S3 reconciliation (gc native-program, 2026-10): OSS's storage package
+// S3 reconciliation (2026-10): OSS's storage package
 // defines no storage.NonCommitGraphBackend or storage.RemoteWorkspaceBackend
 // marker interface — those are bd-enterprise additions this client's lift
 // carried over, with no OSS consumer anywhere (cmd/bd's PostRun and the

@@ -60,7 +60,7 @@ import (
 // READYLISTER IS NOT AN ACCESSOR HERE, and it is not a removal: this lift
 // carried bd-enterprise's issueops.ReadyLister/ReadyListRequest/ReadyListing
 // over from a fork where upstream had published them, and S3 reconciliation
-// (gc native-program, 2026-10) found OSS has published none of the three —
+// (2026-10) found OSS has published none of the three —
 // there is no role type to implement and no accessor return type to name.
 // `bd ready`'s listing is unaffected; it already runs on IssueReader. S13
 // schedules the role once upstream publishes it.

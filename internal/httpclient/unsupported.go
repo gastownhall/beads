@@ -1,6 +1,6 @@
 package httpclient
 
-// Regeneration: S3 reconciliation (gc native-program, 2026-10) replaced
+// Regeneration: S3 reconciliation (2026-10) replaced
 // bd-enterprise's lifted generator and its hand-maintained -skip allowlist
 // with internal/storage/unsupportedgen, a from-scratch tool written for this
 // client. It takes no skip list: it parses this package's own non-test

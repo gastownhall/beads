@@ -404,8 +404,7 @@ func TestUnsupportedContract(t *testing.T) {
 // anonymous post-state, a stored row that must not be discarded, and a
 // single-anchor miss that is a 404 rather than a sentinel.
 //
-// ReadyLister is NOT in this list. S3 reconciliation (gc native-program,
-// 2026-10) removed it: bd-enterprise's issueops.ReadyLister/ReadyListRequest/
+// ReadyLister is NOT in this list. S3 reconciliation (2026-10) removed it: bd-enterprise's issueops.ReadyLister/ReadyListRequest/
 // ReadyListing have no OSS counterpart at all — there is no v0 route table
 // entry and no role type to accept one — so there is nothing for an accessor
 // to return. S13 schedules it; until then this is a twenty-fifth row neither

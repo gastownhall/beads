@@ -412,7 +412,7 @@ type ApplyUpdateItem struct {
 	ForceClosePolicy      *bool   `json:"force_close_policy,omitempty"`
 	ForceAssigneeTransfer *bool   `json:"force_assignee_transfer,omitempty"`
 	// ForceNotesOverwrite is the same trio's third member (S3 reconciliation,
-	// gc native-program, 2026-10): apigen.ApplyUpdateItem publishes
+	// 2026-10): apigen.ApplyUpdateItem publishes
 	// force_notes_overwrite exactly as it publishes the other two, and it is
 	// sent only when true, the same as them.
 	ForceNotesOverwrite *bool `json:"force_notes_overwrite,omitempty"`

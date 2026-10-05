@@ -12,8 +12,8 @@ import "github.com/steveyegge/beads/internal/storage/backends"
 // registration is a property of the distribution being built, not of the import
 // graph. An OSS bd that reached this package transitively would gain a
 // selectable "http" backend it must instead hard-fail on with
-// UnknownBackendError. Only the enterprise distribution calls this, from its
-// build-tagged wiring in cmd/bd.
+// UnknownBackendError. Only a distribution that opts in via its own
+// build-tagged wiring in cmd/bd calls this.
 //
 // WorkspaceIsBeadsDir is true: there is no local database to discover, and
 // metadata.json plus the activation sidecar are the whole workspace.

@@ -502,10 +502,9 @@ func closeBody(actor, reason, session string, force bool) apigen.CloseIssueReque
 // claim into updateIssue, which cannot perform one on this wire or any other
 // (W-UpdateRequest.Claim).
 //
-// gc's exclusive claim path, `bd update <id> --claim --json`
-// (gascity's internal/beads/bdstore.go), sends exactly this shape — an actor
-// and an id, nothing else — so this is the route that makes that command work
-// over http. The two roles' result shapes line up member for member (Issue,
+// The exclusive claim path, `bd update <id> --claim --json`, sends exactly
+// this shape — an actor and an id, nothing else — so this is the route that
+// makes that command work over http. The two roles' result shapes line up member for member (Issue,
 // Changed): same-actor re-claim is the idempotent Changed=false Claimer
 // already promises, and a foreign holder or an ineligible status is the same
 // *issueops.ClaimConflictError the direct route raises. CommandUpdateMutation's

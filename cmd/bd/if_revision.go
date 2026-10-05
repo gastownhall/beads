@@ -50,15 +50,15 @@ func requireSingleIfRevisionID(ifRevision *int64, ids []string) error {
 }
 
 // Machine body codes this CLI emits for a refused --if-revision write, shared
-// verbatim with gascity's bdstore_conditional.go classifier, which switches on
+// verbatim with a downstream conditional-write classifier that switches on
 // `code` rather than the exit code.
 const (
 	ifRevisionCodePreconditionFailed = "precondition_failed"
 	ifRevisionCodeUnsupported        = "conditional_write_unsupported"
 )
 
-// classifyIfRevisionFailure maps err to the machine code and human reason
-// gascity's bdstore_conditional.go classifier expects from a single-id write
+// classifyIfRevisionFailure maps err to the machine code and human reason a
+// downstream conditional-write classifier expects from a single-id write
 // guarded by --if-revision: "precondition_failed" for a stale --if-revision,
 // --if-assignee or --if-status guard (T4.5 requires all three to report
 // through the one envelope when --if-revision is present), for the row
@@ -113,13 +113,13 @@ func classifyIfRevisionFailure(err error, ifRevision *int64) (code, reason strin
 }
 
 // ifRevisionFailureBody is the machine JSON this CLI attaches to a refused
-// --if-revision write, decoded by gascity's bdConditionalErrorBody
-// (bdstore_conditional.go). ExpectedRevision/CurrentRevision are pointers so
+// --if-revision write, decoded by a downstream conditional-error-body
+// consumer. ExpectedRevision/CurrentRevision are pointers so
 // an absent field (assignee/status guard, or unsupported) is distinguishable
 // from a legitimate zero revision, and they marshal as JSON INTEGERS — never
-// strings, unlike `bd show --json`'s "revision" — because gascity decodes them
+// strings, unlike `bd show --json`'s "revision" — because that consumer decodes them
 // straight into *int64 and a string there makes its json.Decoder fail closed
-// on the whole object (bdstore_conditional.go:134-139).
+// on the whole object.
 type ifRevisionFailureBody struct {
 	Error            string `json:"error"`
 	Code             string `json:"code"`
@@ -140,9 +140,8 @@ type ifRevisionFailureBody struct {
 //
 // In --json mode the JSON body is the LAST line on stderr, flat or under
 // `data` per jsonEnvelopeEnabled — mirroring reportUpdateFailures — and the
-// human "error" text always contains "precondition failed" so gascity's
-// code-less fallback (bdstore_conditional.go:320-327) still matches if a
-// caller ever loses the `code` field.
+// human "error" text always contains "precondition failed" so a downstream
+// code-less fallback still matches if a caller ever loses the `code` field.
 func reportIfRevisionFailure(action, id string, err error, ifRevision *int64) (reportedErr error, ok bool) {
 	code, reason, expected, current, ok := classifyIfRevisionFailure(err, ifRevision)
 	if !ok {

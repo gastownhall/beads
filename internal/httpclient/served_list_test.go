@@ -415,7 +415,7 @@ func TestServedReaderListFallsBackToTheWalkWithoutTheCapability(t *testing.T) {
 		}
 	}
 	// No `reverse` ever, pushdown or not: listIssues publishes no such
-	// parameter at all (S3 reconciliation, gc native-program, 2026-10) — it
+	// parameter at all (S3 reconciliation, 2026-10) — it
 	// belongs only to GET /v0/beads/issues:query's nine-order vocabulary —
 	// so a client that sent one, even spelled false, would meet this
 	// operation's unknown-parameter refusal rather than a direction.
@@ -469,7 +469,7 @@ func TestServedReaderListFallsBackToTheWalkWithoutTheCapability(t *testing.T) {
 // The reversed arm is here to keep the conjunct NARROW rather than merely
 // present: created-DESCENDING is not the order the wire serves and the walk
 // cannot stop early on it — but it does not push down either (S3
-// reconciliation, gc native-program, 2026-10). listIssues publishes no
+// reconciliation, 2026-10). listIssues publishes no
 // `reverse` parameter at all, so there is no wire shape for "the other
 // direction of an order this operation does serve"; listSortPushdownEligible
 // refuses every reversed request regardless of SortBy, and this arm walks to
@@ -768,7 +768,7 @@ func TestServedReaderListMaxRowsUnderPushdown(t *testing.T) {
 	}
 
 	// THE MATRIX THIS RAN AGAINST bd-enterprise's listIssues IS NOT RUNNABLE
-	// HERE (S3 reconciliation, gc native-program, 2026-10): L15's Go-side half
+	// HERE (S3 reconciliation, 2026-10): L15's Go-side half
 	// — "a capped Go-side sort has to stay a walk" — needs a published `sort`
 	// value sqlbuild.IsGoSideSort accepts (today, `id`), and
 	// GET /v0/beads/issues's own vocabulary is CLOSED to the two keyset orders
