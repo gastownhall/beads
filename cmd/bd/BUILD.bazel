@@ -574,6 +574,7 @@ go_test(
         "comments_add_test.go",
         "comments_cli_embedded_test.go",
         "comments_test.go",
+        "commit_beads_workspace_test.go",
         "compact_embedded_test.go",
         "compact_gc_flag_test.go",
         "compact_gc_size_test.go",
