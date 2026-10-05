@@ -23,12 +23,14 @@ func TestIsProcessAliveTreatsEPERMAsAlive(t *testing.T) {
 	}
 }
 
-func TestStopDoesNotSignalUnverifiedProcess(t *testing.T) {
-	dir := t.TempDir()
+// startStaleServerFiles writes a pid file naming an unrelated process (a
+// sleep child, as if the PID had been reused) and a port file. The returned
+// channel receives the child's exit.
+func startStaleServerFiles(t *testing.T, dir string) chan error {
+	t.Helper()
 	t.Setenv("GT_ROOT", "")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 
-	// A stale pid file whose number now belongs to an unrelated process.
 	child := exec.Command("sleep", "300")
 	if err := child.Start(); err != nil {
 		t.Fatal(err)
@@ -45,6 +47,22 @@ func TestStopDoesNotSignalUnverifiedProcess(t *testing.T) {
 	if err := writePortFile(dir, 14599); err != nil {
 		t.Fatal(err)
 	}
+	return exited
+}
+
+func expectNotSignaled(t *testing.T, exited chan error) {
+	t.Helper()
+	select {
+	case err := <-exited:
+		exited <- err // let the cleanup finish
+		t.Errorf("the unrelated process was signaled: %v", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+func TestStopDoesNotSignalUnverifiedProcess(t *testing.T) {
+	dir := t.TempDir()
+	exited := startStaleServerFiles(t, dir)
 	orig := readDoltProcesses
 	readDoltProcesses = func() ([]int, error) { return nil, errors.New("listing processes: operation not permitted") }
 	t.Cleanup(func() { readDoltProcesses = orig })
@@ -53,15 +71,37 @@ func TestStopDoesNotSignalUnverifiedProcess(t *testing.T) {
 	if err == nil || errors.Is(err, ErrServerNotRunning) {
 		t.Errorf("expected Stop to refuse an unverified PID, got %v", err)
 	}
-	select {
-	case err := <-exited:
-		exited <- err // let the cleanup finish
-		t.Errorf("the unrelated process was signaled: %v", err)
-	case <-time.After(500 * time.Millisecond):
-	}
+	expectNotSignaled(t, exited)
 	for _, path := range []string{pidPath(dir), portPath(dir)} {
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("expected %s to be kept: %v", filepath.Base(path), err)
+		}
+	}
+}
+
+func TestStopDoesNotSignalReusedPIDWhenListBecomesReadable(t *testing.T) {
+	dir := t.TempDir()
+	exited := startStaleServerFiles(t, dir)
+	// The first read (inside IsRunning) fails, the second (in stopLocked) works
+	// and does not contain the PID.
+	calls := 0
+	orig := readDoltProcesses
+	readDoltProcesses = func() ([]int, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("listing processes: resource temporarily unavailable")
+		}
+		return nil, nil
+	}
+	t.Cleanup(func() { readDoltProcesses = orig })
+
+	if err := Stop(dir); !errors.Is(err, ErrServerNotRunning) {
+		t.Errorf("expected ErrServerNotRunning for a reused PID, got %v", err)
+	}
+	expectNotSignaled(t, exited)
+	for _, path := range []string{pidPath(dir), portPath(dir)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be removed", filepath.Base(path))
 		}
 	}
 }
