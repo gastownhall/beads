@@ -557,6 +557,8 @@ go_test(
         "close_failure_report_test.go",
         "close_fanin_proxied_integration_test.go",
         "close_gate_test.go",
+        "close_if_revision_embedded_test.go",
+        "close_if_revision_proxied_test.go",
         "close_last_touched_test.go",
         "close_proxied_integration_test.go",
         "close_reason_file_test.go",
