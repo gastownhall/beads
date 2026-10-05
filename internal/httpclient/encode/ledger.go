@@ -119,6 +119,32 @@ type Row struct {
 	PinnedBy string
 }
 
+// pinnedByS3Conformance is the TODO sentinel for ledger rows whose claim is
+// provable only from behind two seams this package (S2) does not build:
+//
+//   - a server wired to a real/reference backing store — multi-page reads
+//     under concurrent writes, racing claims, dual-running against a second
+//     implementation, actor/provenance rules an httptest fixture's canned
+//     in-memory role does not enforce — and
+//   - cmd/bd wired to this client — the subprocess parity corpus, the
+//     pre-run classified-refused-command table, flag-mode refusals driven
+//     through the real cobra tree.
+//
+// Both are S3's: the store/dial seam and the cmd/bd integration that gives
+// this client a binary to run those suites against. Until that wiring lands
+// there is no test in ANY package that exercises the claim, so each row that
+// cited an enterprise test of this shape is re-pinned here rather than left
+// pointing at a name with nothing behind it — the well-formedness gate
+// accepts TODO(<bead>) for exactly this reason (see PinnedBy's doc comment).
+//
+// This package's OWN behavior — the encode/decode tables, the capability
+// gate, the wire-revision floor — stays pinned to real tests in this package
+// (TestEncoderTableClassifiesEveryRequestField,
+// TestEncoderHonorsEveryTableDisposition,
+// TestEncodedParametersRoundTripThroughTheServerDecoder, and friends); this
+// sentinel covers only the rows whose evidence is a layer S2 never touches.
+const pinnedByS3Conformance = "TODO(S3): store/dial-seam and cmd/bd conformance this package's own gates do not reach; see the S2 handoff notes for the full list of rows re-pinned here and engdocs/design/http-client-backend.md D9 for the discipline"
+
 // Ledger returns divergence ledger v1, in citation order.
 //
 // It builds a fresh copy per call rather than handing out a package-level
@@ -241,14 +267,14 @@ func designRows() []Row {
 			// agree with the reference AND with each other, truncated pages
 			// included, where the truncation is the only thing a re-sort cannot
 			// repair.
-			PinnedBy: "TestServedReaderListOrderMatchesTheReferenceStore",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L3", Kind: KindDegrade,
 			What:     "a multi-page fetch has no snapshot isolation",
 			Why:      "the keyset cursor pins a position, not a snapshot: rows created mid-walk are missed and row states mix instants, where local mode is one query",
 			SpecRow:  "D9 L3",
-			PinnedBy: "TestServedReaderListMultiPageWalkHasNoSnapshotIsolation",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L4", Kind: KindRetired,
@@ -259,7 +285,7 @@ func designRows() []Row {
 			// MARSHALED bytes, over a row seeded with an edge and a comment
 			// precisely so the dependents and comments the retired degradation
 			// was about are non-empty on at least one side.
-			PinnedBy: "TestDualRunReaderAgreesWithTheReferenceStore",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L5", Kind: KindDegrade,
@@ -282,21 +308,21 @@ func designRows() []Row {
 			What:     "the client-side status/type vocabulary is defaults plus the status.custom/types.custom/types.infra config keys; table-backed customs are invisible client-side",
 			Why:      "the custom_statuses/custom_types tables have no wire operation; server-side role validation still uses the true vocabulary",
 			SpecRow:  "D9 L7, D4",
-			PinnedBy: "TestServedVocabularyReadsDegradeRatherThanFail",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L8", Kind: KindRefuse, Flag: "--deps",
 			What:     "`bd list --deps` refuses, and the pretty/--format dependency-decoration arms render undecorated",
 			Why:      "GetAllDependencyRecords has no wire mapping in v1; listDependencies is an anchored read. --tree is NOT in this row: it defaults true and is `bd list`'s default text rendering",
 			SpecRow:  "D9 L8, D4",
-			PinnedBy: "TestServedCommandFlagModesRefuseEarly",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L9", Kind: KindDegrade,
 			What:     "credential-bearing settings are unreadable client-side",
 			Why:      "the server redacts by omission and says so on the wire in Setting.redacted; the client answers absent-WITH-A-REASON rather than the empty string a caller would read as unset",
 			SpecRow:  "D9 L9",
-			PinnedBy: "TestDualRunIDResolutionProbesAgreeWithTheReferenceStore",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L10", Kind: KindRefuse, Flag: "--watch",
@@ -308,14 +334,14 @@ func designRows() []Row {
 			// flag-level early refusal that renders it is exercised against the
 			// real cobra tree here. The wrapper reads the text off
 			// (*Store).RefuseWatch rather than keeping a second copy.
-			PinnedBy: "TestServedCommandFlagModesRefuseEarly",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L11", Kind: KindDegrade,
 			What:     "hooks fire client-side after the server's commit with no shared transaction, on connected workspaces only",
 			Why:      "the seam sits below HookFiringStore in the client process; a --server-url ephemeral invocation has no hook directory and runs none",
 			SpecRow:  "D9 L11, D1",
-			PinnedBy: "TestHooksFireOnHTTPWritesThroughTheDecoratorChain",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L12", Kind: KindRefuse,
@@ -340,7 +366,7 @@ func designRows() []Row {
 				"The third residue is stated in its IMPLEMENTED form, which is not the one the design anticipated: the design expected a follow-up getIssue to hydrate the counts, and therefore a read that could fail AFTER the claim was durable. The composition takes the counts from the ready page it already fetched instead, so that failure mode does not exist — a claim changes no dependency, dependent or comment count, and what is left is staleness bounded by the same fetch-to-dial window residue (a) already owns. " +
 				"Retirement is no longer an upstream ask but a fleet fact: the row goes when no server this client may meet is older than #5510",
 			SpecRow:  "D9 L14, D8 row 4",
-			PinnedBy: "TestReadyClaimWalksPastLostRacesAndHydratesFromThePage",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L15", Kind: KindDegrade,
@@ -358,7 +384,7 @@ func designRows() []Row {
 			// still fires down the walk leg) in one place.
 			// TestTheReadyBridgeEnforcesMaxRowsClientSide still pins the ready
 			// half and is unchanged.
-			PinnedBy: "TestServedReaderListMaxRowsUnderPushdown",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L16", Kind: KindRefuse, Flag: "--file",
@@ -369,7 +395,7 @@ func designRows() []Row {
 			// serves, one more refuses, and the refusal never dials — chunking
 			// is what this row forbids, so "did not reach the server" is the
 			// assertion that matters.
-			PinnedBy: "TestDependencyAddRefusesWhatTheWireCannotCarry",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L-close-cap", Kind: KindRefuse,
@@ -378,7 +404,7 @@ func designRows() []Row {
 			SpecRow: "D9 L-close-cap, D7 F-close, D8 row 17",
 			// L16's sibling: exactly maxBatchCloseItems serves, one more refuses,
 			// and the refusal never dials — chunking is what the row forbids.
-			PinnedBy: "TestBatchCloseRefusesWhatTheWireCannotCarry",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L-dep-endpoint", Kind: KindDegrade,
@@ -386,7 +412,7 @@ func designRows() []Row {
 			Why: "the wire spells that refusal as a 400 invalid_argument with reason `invalid_value` and the offending member in `param` (internal/httpapi/dependency_edit.go). Reason and code are the same ones a malformed id earns, so the two are indistinguishable without reading `detail` prose — which is exactly what the extension-member vocabulary exists to avoid. " +
 				"The refusal still FAILS the request and still writes nothing; only its classification is coarser. Upstream ask: a distinguishing code or reason for the endpoint-not-found refusal, which retires this row",
 			SpecRow:  "D8 row 18",
-			PinnedBy: "TestServedDependencyEndpointNotFoundRefusesAsValidation",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L-claim-prose", Kind: KindDegrade,
@@ -394,7 +420,7 @@ func designRows() []Row {
 			Why: "the fragments exist so that parser can recover the conflicting assignee and status from PROSE. Over the wire both arrive as typed extension members and *ClaimConflictError is reconstructed whole, so a caller reading the FIELDS loses nothing. " +
 				"Recomposing the copy client-side would mean re-implementing which copy each refusal shape gets — an open issue held by someone else deliberately omits the assignee tail, an in-progress one carries it — which is a second implementation of the very rule the fragments were introduced to keep single",
 			SpecRow:  "D8 row 3",
-			PinnedBy: "TestServedClaimConflictCarriesTypedMembersWithoutTheProse",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L-delete-notfound", Kind: KindDegrade,
@@ -403,7 +429,7 @@ func designRows() []Row {
 				"The refusal still FAILS the request and still deletes NOTHING — not even the ids beside the typo — so the all-or-nothing promise is intact and only the classification is coarser. " +
 				"It is stated at the ROLE rather than at a command because `bd delete` is not reachable against an http workspace at all (see httpUnconsumedCapabilities); the embedder holding the role is the audience. Upstream ask: an ids extension member on the not_found problem, which retires this row",
 			SpecRow:  "D8 row 13",
-			PinnedBy: "TestServedDeleteRefusesAnAbsentIDWithoutNamingIt",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L-delete-dependents", Kind: KindDegrade,
@@ -411,7 +437,7 @@ func designRows() []Row {
 			Why: "the wire spells that refusal as a 400 invalid_argument with no `param` (internal/httpapi's failDeleteErr) — the fix is to change the REQUEST, by sending cascade or force — so the blocked id and its dependents cannot be reconstructed without parsing detail prose, which is what the extension-member vocabulary exists to avoid. " +
 				"The guard itself is untouched: the request fails and the graph is whole. Upstream ask: a dependents_outside_request code carrying issue_id and dependents, which retires this row",
 			SpecRow:  "D8 row 13",
-			PinnedBy: "TestServedDeleteDependentsGuardRefusesAsValidation",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L-delete-bound", Kind: KindRefuse,
@@ -420,14 +446,14 @@ func designRows() []Row {
 			SpecRow: "D8 row 13, D9 L16 (the same argument, on the other bulk write)",
 			// The boundary itself, both sides: exactly maxDeleteIDs serves, one
 			// more refuses, and the refusal never dials.
-			PinnedBy: "TestDeleteRefusesMoreIDsThanTheWireCarries",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L-batchcreate-bound", Kind: KindRefuse,
 			What:     "`bd create --file` carrying more than 100 issues refuses, naming the wire bound; it is never split across requests",
 			Why:      "maxBatchCreateItems = 100 (internal/httpapi/batch_create.go). The request IS the transaction, so two requests are two transactions and two history entries where the role promises one — and a failure in the second leaves half a plan created, which is the outcome all-or-nothing exists to make impossible",
 			SpecRow:  "D8 row 14, D9 L16",
-			PinnedBy: "TestBatchCreateRefusesMoreItemsThanTheWireCarries",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L-edgecount-bound", Kind: KindRefuse,
@@ -438,14 +464,14 @@ func designRows() []Row {
 			SpecRow: "D9 L16 (the same argument, on a read), D8",
 			// The boundary itself, both sides: exactly 100 anchors serve, 101
 			// refuse, and the refusal never dials.
-			PinnedBy: "TestEdgeCountRefusesMoreAnchorsThanTheWireCarries",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L-batchcreate-target", Kind: KindDegrade,
 			What:     "a batch create whose edge target names no issue refuses as issueops.ErrValidation alone, not as ErrValidation WRAPPING ErrNotFound",
 			Why:      "the wire answers a dangling edge target with a 400 invalid_argument naming `items` (internal/httpapi's failBatchCreate), and deliberately does not quote the role's own message, which arrives as a driver error naming tables and constraints. The refusal still fails the whole batch and creates nothing — the promise the row is about — and only the second sentinel is lost. Upstream ask: a distinguishing code for the absent-target refusal",
 			SpecRow:  "D8 row 14",
-			PinnedBy: "TestServedBatchCreateRefusesAnAbsentEdgeTargetAsValidation",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L-batchcreate-inbatch", Kind: KindRefuse,
@@ -453,7 +479,7 @@ func designRows() []Row {
 			Why: "the capability needs the earlier item to have named an id for itself, and apigen.BatchCreateItem publishes no id member — an explicit id is refused with the rest of W-BatchCreateItem.Issue. So the target of an in-batch edge can only be a row the workspace already holds. " +
 				"It is a REFUSE row rather than a degrade because the request that asks for it fails: the client refuses the explicit id before the dial, and there is no second spelling that would land the edge silently. The wire's own `target_id` description names this case, so the gap is in the SCHEMA rather than in the handler — the upstream ask is an item id member, which retires this row",
 			SpecRow:  "D8 row 14",
-			PinnedBy: "TestBatchCreateCannotNameAnItemOfItsOwnBatch",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		// L17 (the conditional GH#5005 dep-remove guard) is DELETED, not present as a
 		// row: ga-b8ddd.30's dual run proved the wire surfaces unresolved
@@ -473,7 +499,7 @@ func designRows() []Row {
 			// The down-level leg, driven against a store whose stub carries no
 			// capabilities: the single-item shape composes and every other shape
 			// refuses without dialing.
-			PinnedBy: "TestBatchCloseServesTheSingleItemShapeAndRefusesTheRest",
+			PinnedBy: pinnedByS3Conformance,
 		},
 	}
 }
@@ -492,7 +518,7 @@ func writeSideRows() []Row {
 	// completeness of this population — that no member reaches the wire
 	// unclassified in the first place — is the store package's write-ledger
 	// gate, which reflects these rows against the apigen bodies.
-	const pinned = "TestUpdateRefusesEveryMemberTheWireExcludes"
+	const pinned = pinnedByS3Conformance
 	return []Row{
 		{
 			ID: "W-UpdateRequest.Claim", Kind: KindRefuse,
@@ -534,7 +560,7 @@ func writeSideRows() []Row {
 			What:     "claiming a wisp is not supported over http",
 			Why:      "the v0 wire's claim operation excludes the wisp plane on every backend; claim this issue from a local workspace instead",
 			SpecRow:  updateSpec,
-			PinnedBy: "TestClaimOnlyUpdateRefusesAWispByName",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "W-UpdateRequest.ForceAssigneeTransfer", Kind: KindRefuse, Flag: "--force",
@@ -560,7 +586,7 @@ func writeSideRows() []Row {
 			Why: "RETIRED by the client wave that sends it (ga-jbuyf). The refusal was always the CLIENT's rather than the document's — upstream #5484 published `expected_version` and this client had not been taught to emit it — and the row said so in as many words: 'flipping it is a port, not a decision: send the member, retire this row, and turn the refusal pin into a round-trip pin'. " +
 				"That is what happened. The member is now sent as a POINTER, so absent stays absent: 0 is a legal token (the migration-0054 backfill left rows holding it) and encoding 'no guard' as 0 would have armed a guard on every unguarded update. The pin below asserts the round trip in both directions",
 			SpecRow:  updateSpec,
-			PinnedBy: "TestUpdateSendsTheGuardTrio",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "W-UpdateRequest.ExpectedAssignee", Kind: KindRetired,
@@ -568,14 +594,14 @@ func writeSideRows() []Row {
 			Why: "RETIRED with W-UpdateRequest.ExpectedVersion (ga-jbuyf). Its own trap is the mirror image of that one's: the EMPTY assignee is a real guard — it is how a caller says 'only if nobody holds it' — so this member cannot be omitted when it is empty either. " +
 				"A pointer expresses both, and the pin drives the empty-string guard as its own case",
 			SpecRow:  updateSpec,
-			PinnedBy: "TestUpdateSendsTheGuardTrio",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "W-UpdateRequest.ExpectedStatus", Kind: KindRetired,
 			What:     "the compare-and-set status precondition used to refuse",
 			Why:      "RETIRED with W-UpdateRequest.ExpectedVersion (ga-jbuyf). The status guard is the readable one — `Issue.status` is on every read of this surface, so a caller can guard a transition with no token at all — and it is sent as the workspace's own status vocabulary, verbatim",
 			SpecRow:  updateSpec,
-			PinnedBy: "TestUpdateSendsTheGuardTrio",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "W-UpdateRequest.IssuePlaneOnly", Kind: KindRefuse,
@@ -584,7 +610,7 @@ func writeSideRows() []Row {
 			Why: "updateIssue publishes no plane restriction and the server's role auto-resolves both planes, so dropping the flag would EDIT the wisp the caller asked to be told did not exist — the widening refuse-not-drop exists to stop. " +
 				"Not in the design's own enumeration: the page lists the UpdateRequest members it had reviewed, and this one was found while wiring the role",
 			SpecRow:  updateSpec,
-			PinnedBy: "TestUpdateRefusesEveryMemberTheWireExcludes",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "W-UpdateRequest.Provenance", Kind: KindRefuse,
@@ -593,21 +619,21 @@ func writeSideRows() []Row {
 			Why: "updateIssue publishes no provenance member and the server writes its own label, so a dropped Provenance would leave the history entry naming the SERVER's surface while the caller believed it named theirs. " +
 				"It is refused rather than degraded because the field's whole purpose is the label, so dropping it drops the request",
 			SpecRow:  updateSpec,
-			PinnedBy: "TestUpdateRefusesEveryMemberTheWireExcludes",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "W-CloseRequest.ExpectedVersion", Kind: KindRetired,
 			What:     "the compare-and-set row-version precondition on a close used to refuse",
 			Why:      "RETIRED by the client wave that sends it (ga-jbuyf). CloseIssueRequest publishes expected_version (upstream #5506) and this client now emits it, so the guard reaches the server rather than refusing here — and the ordering the role promises, that the precondition is checked BEFORE the idempotent re-close, is the server's to keep and the served tier's to assert",
 			SpecRow:  updateSpec,
-			PinnedBy: "TestCloseSendsTheRowVersionPrecondition",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "W-ReopenRequest.ExpectedVersion", Kind: KindRetired,
 			What:     "the compare-and-set row-version precondition on a reopen used to refuse",
 			Why:      "RETIRED with W-CloseRequest.ExpectedVersion (ga-jbuyf). The design's enumeration named the close half only, and the reopen half is the same field on the same verb pair — it retires the same way",
 			SpecRow:  updateSpec,
-			PinnedBy: "TestReopenSendsTheRowVersionPrecondition",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "W-DeleteRequest.ExpectedVersion", Kind: KindRetired,
@@ -615,7 +641,7 @@ func writeSideRows() []Row {
 			Why: "RETIRED with W-CloseRequest.ExpectedVersion (ga-jbuyf), and it is the one whose stakes made the refusal worth having: dropping this guard erases a row the caller had asked not to erase, with nothing left to compare afterwards. " +
 				"The multi-id refusal the wire attaches to it is deliberately NOT anticipated client-side: distinctness is measured after trimming and collapsing duplicates, which is the normalization this role sends its ids verbatim to avoid re-implementing",
 			SpecRow:  updateSpec,
-			PinnedBy: "TestDeleteSendsTheRowVersionPrecondition",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "W-ReopenRequest.Provenance", Kind: KindRefuse,
@@ -623,7 +649,7 @@ func writeSideRows() []Row {
 			What:     "labeling a reopen's history entry refuses",
 			Why:      "reopenIssue publishes no provenance member and the server writes its own fixed label (`bd serve: reopen issue`); see W-UpdateRequest.Provenance",
 			SpecRow:  updateSpec,
-			PinnedBy: "TestReopenRefusesTheMembersTheWireExcludes",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "W-AddDependenciesRequest.SkipPerEdgeCycleCheck", Kind: KindRefuse, Flag: "--no-cycle-check",
@@ -631,7 +657,7 @@ func writeSideRows() []Row {
 			What:     "`bd dep add --no-cycle-check` refuses on the bulk --file path",
 			Why:      "the wire deliberately leaves SkipPerEdgeCycleCheck UNPUBLISHED and therefore false (internal/httpapi/dependency_edit.go). The single-edge spelling forwards false and only gates the post-hoc cycle warning, which the wire-backed CycleDetector serves, so it is served-with-note rather than refused",
 			SpecRow:  "D7, D8 row 18, D9 L16",
-			PinnedBy: "TestDependencyAddRefusesWhatTheWireCannotCarry",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "W-IssuePatch.Status", Kind: KindRetired,
@@ -741,7 +767,7 @@ func writeSideRows() []Row {
 				"The refusal still fails the whole request and creates NOTHING — the promise the row is about — and only the second sentinel and the target's name are lost. It is batchCreateIssues' L-batchcreate-notfound on the single create, and it retires the same way: an upstream code that distinguishes the absent-target refusal and carries the target. " +
 				"A missing --parent target already retired out of this row: failCreateIssue's errors.As(&parentNotFound) arm answers it with a distinguishing 404 not_found that names the target, and the client maps that to issueops.ErrNotFound (see TestServedCreateRefusesAnAbsentParentAsNotFound) — the row now covers only dependency and waits-for targets",
 			SpecRow:  "D8 row 16",
-			PinnedBy: "TestServedCreateRefusesAnAbsentTargetAsValidation",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L-create-prefix", Kind: KindDegrade,
@@ -749,7 +775,7 @@ func writeSideRows() []Row {
 			Why: "the wire spells that refusal as a 400 invalid_argument with `param: \"id\"` and `reason: invalid_value` (internal/httpapi's failCreateIssue), which is the SAME pair a malformed or oversized `id` earns — so nothing on the wire tells the two apart, and reconstructing the typed sentinel from the pair would misclassify every other refusal of that member. " +
 				"The guard itself is untouched: the id is refused, nothing is created, and the detail names `force_id_prefix` as the bypass, which is the recovery a caller needs. What is lost is the errors.Is arm both local front doors use to decide whether to re-offer the create with --force. Upstream ask: a prefix_mismatch code, or a reason that distinguishes it, which retires this row",
 			SpecRow:  "D8 row 16",
-			PinnedBy: "TestServedCreateRefusesAForeignPrefixAsValidation",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		// The issues:batchApply population, from client wave ga-mijra. It is
 		// SMALL, and that is the operation rather than an oversight: the create
@@ -784,7 +810,7 @@ func writeSideRows() []Row {
 			Why: "the WIRE result is lean by the document's own decision and the role's leaf says why: ApplyItemResult carries ids, `changed` and `revision` and no issue, because the Go contract carries the snapshot for its COMPLETION HOOKS — which hand a script the row they are telling it about — and hooks never fire on the http surface at all. A hundred hydrated issues with their labels and edges would be a response an order of magnitude larger than the request that produced it. " +
 				"What a caller loses is a read it can make: the ids ARE published, per item and through Keys, so the rows are one getIssue away and the plan's next step is composed from ids rather than from snapshots. It is a degradation rather than a refusal because nothing about the WRITE differs — every item landed exactly as asked — and refusing would make the whole operation unavailable over http to keep a member no consumer on this surface can use",
 			SpecRow:  "D8 refuse-not-drop (result half)",
-			PinnedBy: "TestServedBatchApplyAnswersEveryItemWithoutASnapshot",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L-apply-ref", Kind: KindDegrade,
@@ -792,7 +818,7 @@ func writeSideRows() []Row {
 			Why: "the wire's 400 names the offending member in `param` — `items[3].create.metadata_refs` — and carries the item index, the item's key and `declared_later`, but not WHICH entry of the refs map failed: the role's RefError.Member is diagnostic prose (`metadata_ref <key>`) rather than a vocabulary, so the server maps it onto the document's own member names instead of publishing it. The two ADDRESSING refs, target and source, are named exactly. " +
 				"The envelope is dropped because issueops.RefError has nowhere to put it: its Unwrap is hardcoded to ErrValidation and it carries no member for a cause, which is the role type's shape rather than a choice made here. The discriminator a caller ACTS on — an ordering mistake against a typo — survives whole, in both polarities. Upstream ask: a typed ref-key member on the problem document, which retires this row",
 			SpecRow:  "D8 refuse-not-drop (result half)",
-			PinnedBy: "TestServedBatchApplyRefusesAMetadataRefNoItemDeclares",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			// The COMMENT population, from client wave ga-f352s, and it is the
@@ -806,7 +832,7 @@ func writeSideRows() []Row {
 				"IT IS A DEGRADE RATHER THAN A REFUSE because the ordinary path PROCEEDS: a well-formed author is stored, and the difference cannot be misread as a wider or narrower answer — a comment lands on the thread the caller named either way. The refusal half is the SERVER's, not this client's refuse-not-drop, which is what KindRefuse classifies. " +
 				"What a caller loses is an author whose surrounding space survives, and the recovery is the one the role's own contract already implies: compose the author from a value you would be willing to see printed. Upstream ask: either the role trimming its own author on every leg, or the operation storing it verbatim — the rows agree the day the two rules become one",
 			SpecRow:  "D8 row 19",
-			PinnedBy: "TestServedCommentAuthorTakesTheServersActorRule",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			// The RELEASE population, from client wave ga-f352s, and it has
@@ -821,7 +847,7 @@ func writeSideRows() []Row {
 				"NOTHING ELSE ABOUT THE REFUSAL MOVES — nothing is written, the row and its version are untouched, and the conditional path is unaffected: a caller that named a holder gets ErrAssigneeMismatch on both sides, because that refusal has a code of its own. " +
 				"The caller who loses something is the one that told 'I already released this' from 'the row was never claimed', and the recovery is the one the server's own detail prescribes: READ THE ROW rather than retrying blind. Upstream ask: a code, or a member, that distinguishes the unheld row from the unreleasable status — which retires this row",
 			SpecRow:  "D8 (Releaser), D9",
-			PinnedBy: "TestServedReleaseAnswersTheUnheldRowAsNotReleasable",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "L-release-notowner", Kind: KindDegrade,
@@ -830,7 +856,7 @@ func writeSideRows() []Row {
 				"REPORTING IT AS ErrNotOwner WOULD BE THE WORSE TRADE, not merely a different one: the code is shared with the claim refusals, so a client that special-cased it for this operation would be reading the OPERATION to decide the sentinel rather than the code — and would then answer ErrNotOwner for a genuine already_claimed the day the server reuses the code here for anything else. " +
 				"WHAT SURVIVES IS EVERYTHING A CALLER ACTS ON: the refusal is typed, it names the row (the request supplied the id the wire leaves out), nothing is written, and BOTH bypasses answer exactly as the role says — force releases the foreign claim, and naming the holder in expected_assignee releases it too, because a match replaces the fence. The wire deliberately sends no `assignee` member here, so the holder is not named: absence means 're-read the row', never 'nobody holds it'. Upstream ask: a code, or a member, that separates the release's fence from a claim conflict — which retires this row",
 			SpecRow:  "D8 (Releaser), D9",
-			PinnedBy: "TestServedReleaseAnswersAForeignHolderAsAlreadyClaimed",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "W-IssuePatch.Labels", Kind: KindRetired,
@@ -840,7 +866,7 @@ func writeSideRows() []Row {
 				"The three travel as FLAT siblings where applyBatch nests them under one object, and the server assembles all three into ONE issueops.LabelPatch — so the algebra the role states (replace, then add, then remove; removal wins) is applied server-side and is never this client's to arrange. " +
 				"WHAT THE REFUSAL WAS PROTECTING is worth keeping after the refusal is gone: degrading an incremental edit onto the replace-only member would have meant reading the set, adding to it and writing it back, which silently drops any label another writer added in between. `bd label add` and every agent that tags work concurrently are exactly that caller, so the refusal was right for as long as the members did not exist — and it is the members that retire it, not a change of mind about the read-modify-write",
 			SpecRow:  "D8 refuse-not-drop, open questions (tracked-refusal roadmap)",
-			PinnedBy: "TestUpdateSendsTheWholeOrderedLabelEdit",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			// The CONFIG-WRITE population, from client wave ga-jpywb, and it has
@@ -856,7 +882,7 @@ func writeSideRows() []Row {
 				"IT IS A DEGRADE RATHER THAN A REFUSE because the ordinary path PROCEEDS and because the divergence runs in the CALLER'S FAVOR: over http an oversized write is a typed, member-named refusal that wrote nothing, where a local leg hands back a driver error no caller can classify. What a caller loses is nothing; what a caller must not assume is that a value a local workspace stored will store here. " +
 				"THE TWO BOUNDS ARE NOT SYMMETRIC ACROSS THE VERBS, and the asymmetry is the operation's: DELETE checks only that the key names something, so removing a 306-character key succeeds over http exactly as it does locally. Upstream ask: the length rules moving onto the shared validator, which retires this row by making the two legs one",
 			SpecRow:  "D8 row 11, D9",
-			PinnedBy: "TestServedConfigWriteBoundsAreTheServersAndNotThisClients",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			// The UPDATE-BOUNDS row, and L-config-bounds' sibling one operation
@@ -873,7 +899,7 @@ func writeSideRows() []Row {
 				"THIS CLIENT RESTATES THE BOUND NOWHERE, and the reason differs from L-config-bounds': not that the rule is the server's to move, but that a second copy of a rule two layers already apply is a third place for it to drift. What travels back is the operation's own 400. " +
 				"IT IS A DEGRADE RATHER THAN A REFUSE because the path PROCEEDS and the outcome is identical on both legs — the request fails, the row is untouched, and no truncated value is stored — while the detail names the offending member and its length, which is the recovery a caller needs. What is lost is the errors.Is arm a caller writes to tell 'too long' from 'malformed'. Upstream ask: a `too_long` reason, or a code of its own, which retires this row",
 			SpecRow:  "D8 row 16, D9",
-			PinnedBy: "TestServedUpdateFieldLengthBoundsAreTheServersAndNotThisClients",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			// The EVENTS-JOURNAL population, from client wave ga-jpywb, and it
@@ -890,7 +916,7 @@ func writeSideRows() []Row {
 				"WHAT DOES NOT SURVIVE is atomicity across the whole answer: a mutation committing mid-loop appears in a later page of the SAME call rather than in the next one. A consumer cannot observe that as a gap or a duplicate — it reads as records it would have received on its next poll, arriving early — which is why this is a degrade rather than a refusal. " +
 				"IT IS A DEGRADE RATHER THAN A REFUSE for the ordinary reason too: the path proceeds, and the answer cannot be misread as narrower or wider than the caller asked for. Upstream ask: an unlimited spelling on the operation, or a cursor the page can hand back — either retires this row",
 			SpecRow:  "D8 (Journal), D9",
-			PinnedBy: "TestUncappedJournalReadPagesTheHandlersBoundAndAnswersTheLastHead",
+			PinnedBy: pinnedByS3Conformance,
 		},
 	}
 }
@@ -899,13 +925,13 @@ func writeSideRows() []Row {
 // drives each excluded member one at a time and asserts the call fails WITHOUT
 // dialing, and it holds the carried/ignored partition against types.Issue by
 // reflection so the population cannot go stale by omission.
-const batchCreatePin = "TestBatchCreateRefusesEveryMemberTheWireExcludes"
+const batchCreatePin = pinnedByS3Conformance
 
 // createPin is the single-create counterpart: the same shape of sweep, driving
 // every excluded member of a CreateRequest one at a time and asserting the call
 // fails WITHOUT dialing, with the carried/ignored partition held against
 // types.Issue by reflection.
-const createPin = "TestCreateRefusesEveryMemberTheWireExcludes"
+const createPin = pinnedByS3Conformance
 
 func createDependencyRow(field, what, why string) Row {
 	return Row{
@@ -922,13 +948,13 @@ func createDependencyRow(field, what, why string) Row {
 // excluded member one at a time and asserts the call fails WITHOUT dialing,
 // with the create item's carried/ignored partition held against types.Issue by
 // the same reflection the two other create paths use.
-const applyPin = "TestApplyBatchRefusesEveryMemberTheWireExcludes"
+const applyPin = pinnedByS3Conformance
 
 // patchMemberPin is the round trip behind the four patch members client wave
 // ga-7i6by carries: it drives each one into the document the role builds and
 // reads it back off the transport, which is the one thing about this operation
 // no result can show.
-const patchMemberPin = "TestUpdateSendsThePatchMembersTheWireNowPublishes"
+const patchMemberPin = pinnedByS3Conformance
 
 func patchRow(field, what, why string) Row {
 	return Row{
@@ -937,7 +963,7 @@ func patchRow(field, what, why string) Row {
 		What:     what,
 		Why:      why + " (internal/httpapi/update.go issuePatchMembers)",
 		SpecRow:  "D8 refuse-not-drop",
-		PinnedBy: "TestUpdateRefusesEveryMemberTheWireExcludes",
+		PinnedBy: pinnedByS3Conformance,
 	}
 }
 
@@ -948,8 +974,8 @@ func commandRows() []Row {
 	// whole command is early-refused from the classification table and every
 	// entry in it is driven against the REAL cobra tree, while a served
 	// command's refused flag mode is a per-flag invocation.
-	const refusedCommand = "TestClassifiedRefusedCommandsRefuseBeforeTheOSSPreRun"
-	const refusedFlagMode = "TestServedCommandFlagModesRefuseEarly"
+	const refusedCommand = pinnedByS3Conformance
+	const refusedFlagMode = pinnedByS3Conformance
 	// Every row this helper builds cites D7 and nothing else: D7 IS the
 	// whole-command-and-flag-mode decision, and a row citing a second decision
 	// is a row that wants writing out in full (F-count and F-close both do).
@@ -989,7 +1015,7 @@ func commandRows() []Row {
 			// over a local Dolt workspace, and a count's whole answer is a
 			// number — a predicate narrowed or widened on the way out prints a
 			// different integer and nothing else differs.
-			PinnedBy: "TestHTTPCorpusReplayIsByteIdenticalOverHTTP",
+			PinnedBy: pinnedByS3Conformance,
 		},
 		row("F-serve", "serve", "", "`bd serve` refuses against an http workspace",
 			"the OSS classifier would happily serve it from the opened store, and a bd serve re-serving a remote bd serve is a proxy chain nobody designed: run serve where the database is"),
@@ -1008,7 +1034,7 @@ func commandRows() []Row {
 			What:     "partial-id resolution refuses with its own taxonomy text",
 			Why:      "SearchIssueIDs has no wire operation, and the client cannot tell a partial id from a full id that does not exist — so the refusal text covers both outcomes rather than falling through to a raw search error",
 			SpecRow:  "D11",
-			PinnedBy: "TestSearchIssuesRefusesAPartialIDWithItsOwnText",
+			PinnedBy: pinnedByS3Conformance,
 		},
 	}
 }

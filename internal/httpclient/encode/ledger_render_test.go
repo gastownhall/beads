@@ -15,8 +15,8 @@ var updateLedgerDoc = flag.Bool("update-ledger-doc", false,
 	"rewrite engdocs/design/http-divergence-ledger.md from the ledger instead of comparing")
 
 // ledgerDocPath is the shipped artifact, relative to this package directory:
-// internal/enterprise/httpstore/encode -> repo root is four levels up.
-var ledgerDocPath = filepath.Join("..", "..", "..", "..",
+// internal/httpclient/encode -> repo root is three levels up.
+var ledgerDocPath = filepath.Join("..", "..", "..",
 	"engdocs", "design", "http-divergence-ledger.md")
 
 // TestDivergenceLedgerDocMatchesLedger is the anti-drift half of the ledger's

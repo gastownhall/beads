@@ -262,7 +262,14 @@ func readyFilterEntries() []FieldEntry {
 		paramTo("ExcludeTypes", "exclude_type", "ExcludeTypes"),
 		paramTo("MetadataFields", "metadata_field", "MetadataFields"),
 		param("HasMetadataKey", "has_metadata_key"),
-		refused("ExcludeIDs", "E-ReadyRequest.ExcludeIDs"),
+		// [Removed: an enterprise-only `refused("ExcludeIDs", ...)` row stood
+		// here, naming a field issueops.ReadyRequest does not have in OSS
+		// (confirmed via reflection: TestEncoderTableClassifiesEveryRequestField
+		// fails "names a field that does not exist"). OSS's ReadyRequest
+		// (issueops/reader.go) carries no id-exclusion filter at all — unlike
+		// workapi.WorkFilter, whose own, separate ExcludeIDs refusal stays below
+		// in readyBridgeTable as "E-WorkFilter.ExcludeIDs". Do not re-add this
+		// row unless issueops.ReadyRequest grows the field.]
 	}
 }
 
@@ -308,9 +315,6 @@ func listTable() Table {
 			Name: "sort",
 			Why: "PAGER-OWNED, like cursor beside it. The operation publishes the display order the upstream ask named, but whether a request may carry it depends on the SHAPE OF THE WALK — a caller-supplied keyset position and an unlimited read must stay on the created-order pager — and on the server advertising issues.list.sort. " +
 				"None of that is visible to a per-field encoder, so ListRequest.SortBy stays serverFixed here and the key is written by the pager's pushdown leg (list_walk.go sortedPage), which is the only place that can see all four conditions at once",
-		}, {
-			Name: "reverse",
-			Why:  "the same pager ownership as sort: it qualifies that key and is meaningless without it (the server refuses it alone, on presence rather than on truth), so the pushdown leg emits the two together or neither. ListRequest.Reverse stays clientSide here",
 		}},
 		Fields: []FieldEntry{
 			param("Status", "status"),
@@ -374,7 +378,8 @@ func listTable() Table {
 					"The operation publishes `sort`, but it is a PAGER-OWNED key (see the Reserved row) rather than a per-field one, so THE ENCODER emits nothing for this field and the decoded request carries the server's own `created` whenever the pager stays on the walk. "+
 					"The pager's pushdown leg names the caller's order instead, on the bounded, position-free, capability-advertised requests where the server can serve it in one page; the legs it cannot take keep the client-side comparator and the fetch-to-exhaustion cost L2 now records for them alone"),
 			clientSide("Reverse",
-				"the same disposition as SortBy: the encoder emits nothing, and the direction reaches the wire only through the pager's pushdown leg, which sends `reverse` beside `sort` or neither. On the walk legs it is applied by the client-side comparator afterwards (L2)"),
+				"unlike SortBy, this one never reaches the wire at all: OSS listIssues publishes no `reverse` parameter under any capability — issues.list.sort (routes.go) gates `sort` alone, and handleListIssues (reads.go) never reads a reverse flag, so there is no pushdown leg for this field to ride. "+
+					"[Removed from this table's Reserved set: an enterprise-only `reverse` row previously claimed it was PAGER-OWNED like `sort`, pairing with the upstream ask's sort+reverse pushdown. The published OpenAPI parameter list for GET /v0/beads/issues has no such member, and CapIssuesListSort's own doc says it gates `sort` only — so the row described behavior this OSS server does not serve. ListRequest.Reverse is honored purely by the client-side comparator on every leg (L2), never by the wire, until an upstream ask adds the parameter.]"),
 			param("Limit", "limit"),
 			refused("Offset", "E-ListRequest.Offset"),
 			clientSide("AfterCreatedAt",
@@ -417,16 +422,24 @@ func queryTable() Table {
 // members is published by GET /v0/beads/issues:count, and the count's
 // vocabulary is total.
 //
-// THE COUNT'S PLANE VOCABULARY IS NARROWER THAN THE LISTING'S — one
-// `include_infra` where listIssues has `include_templates`, `include_gates`,
-// `include_infra`, `include_ephemeral` and `all` — and that narrowing is the
-// ROLE's, not the wire's. issueops.CountRequest has no member for the other
-// four, so there is no field here to refuse: `bd count` and `bd list` answer
-// about different sets on EVERY backend, and this client reproduces that
-// difference exactly rather than inventing a wire divergence to describe it.
-// What one flag does move is four things at once, and the role documents them;
-// a caller that wants a plane union the count cannot express is asking a
-// question issueops.Counter does not have.
+// THE COUNT'S PLANE VOCABULARY IS NARROWER THAN THE LISTING'S — `include_infra`
+// and `include_ephemeral` where listIssues additionally has `include_templates`,
+// `include_gates` and `all` — and that narrowing is the ROLE's, not the wire's.
+// issueops.CountRequest has no member for those remaining three, so there is no
+// field here to refuse: `bd count` and `bd list` answer about different sets on
+// EVERY backend, and this client reproduces that difference exactly rather than
+// inventing a wire divergence to describe it. What IncludeInfra alone moves is
+// four things at once, and the role documents them; a caller that wants a plane
+// union the count cannot express is asking a question issueops.Counter does not
+// have.
+//
+// [Corrected: this comment previously claimed CountRequest carried only
+// IncludeInfra from the plane vocabulary ("has no member for the other four"),
+// and the table below sent no `has_metadata_key` or `include_ephemeral` to
+// match. Both are real CountRequest members (issueops/counter.go) and both are
+// published by GET /v0/beads/issues:count in the OSS OpenAPI spec, so the
+// table was silently dropping two caller-supplied filters on every count
+// request. Mapped below as ordinary params; see TestEveryEncoderTableParameterIsPublished.]
 func countTable() Table {
 	return Table{
 		Op: OpCountIssues, Source: tyCountRequest, Target: tyCountRequest, Primary: true,
@@ -470,8 +483,19 @@ func countTable() Table {
 			paramTo("NoLabels", "no_labels", "NoLabels"),
 
 			param("IncludeInfra", "include_infra"),
+			// [Added: OSS publishes `include_ephemeral` on GET
+			// /v0/beads/issues:count (same plane knob ListRequest.IncludeEphemeral
+			// already maps on listIssues) and CountRequest carries the matching
+			// member (issueops/counter.go). The table previously had no entry for
+			// it at all, silently dropping a caller-supplied filter.]
+			param("IncludeEphemeral", "include_ephemeral"),
 
 			paramTo("MetadataFields", "metadata_field", "MetadataFields"),
+			// [Added: OSS publishes `has_metadata_key` on GET
+			// /v0/beads/issues:count, spelled and meaning the same thing as
+			// ListRequest.HasMetadataKey/ReadyRequest.HasMetadataKey. Missing
+			// here for the same reason IncludeEphemeral was: no entry at all.]
+			param("HasMetadataKey", "has_metadata_key"),
 		},
 	}
 }

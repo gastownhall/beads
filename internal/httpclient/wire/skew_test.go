@@ -536,8 +536,19 @@ func TestNoFeatureBranchesOnBdVersionOrSchemaVersion(t *testing.T) {
 	total := 0
 
 	for _, scope := range diagnosticSweepScopes() {
-		files := parseSweepScope(t, fset, scope)
+		files, sawAnyFile := parseSweepScope(t, fset, scope)
 		if len(files) == 0 {
+			if scope.only != nil && sawAnyFile {
+				// The directory parsed real, non-test .go files, but none of
+				// them import the http client yet. That is the honest state
+				// of cmd/bd during S2: the store/dial wiring that makes
+				// cmd/bd a consumer is deferred to S3 (see the httpclient
+				// lift commit's message). It is not the "path moved" failure
+				// this gate otherwise guards — that failure mode is an empty
+				// directory read, handled below — so there is nothing to
+				// sweep here yet and that is fine.
+				continue
+			}
 			// A relative path that stopped resolving is the failure mode this
 			// gate cannot survive quietly: zero files walk clean.
 			t.Errorf("%s (%s): swept no files; the scope's path has moved and this gate went vacuous", scope.label, scope.dir)
@@ -578,7 +589,7 @@ func diagnosticSweepScopes() []sweepScope {
 		{label: "the http store", dir: ".."},
 		{
 			label: "cmd/bd's http-client consumers",
-			dir:   filepath.Join("..", "..", "..", "..", "cmd", "bd"),
+			dir:   filepath.Join("..", "..", "..", "cmd", "bd"),
 			only:  importsHTTPClient,
 		},
 	}
@@ -587,14 +598,19 @@ func diagnosticSweepScopes() []sweepScope {
 func importsHTTPClient(file *ast.File) bool {
 	for _, spec := range file.Imports {
 		path := strings.Trim(spec.Path.Value, `"`)
-		if strings.Contains(path, "internal/enterprise/httpstore") {
+		if strings.Contains(path, "internal/httpclient") {
 			return true
 		}
 	}
 	return false
 }
 
-func parseSweepScope(t *testing.T, fset *token.FileSet, scope sweepScope) map[string]*ast.File {
+// parseSweepScope parses every non-test .go file in scope.dir and applies
+// scope.only. It also reports sawAnyFile: whether the directory yielded any
+// parseable file at all BEFORE the only filter ran, so the caller can tell
+// "the path is broken" (sawAnyFile false) apart from "the path is fine but
+// nothing here is a consumer yet" (sawAnyFile true, out empty).
+func parseSweepScope(t *testing.T, fset *token.FileSet, scope sweepScope) (out map[string]*ast.File, sawAnyFile bool) {
 	t.Helper()
 	// Build constraints are deliberately not honored: this test is untagged, and
 	// the enterprise-only files are precisely the ones that consume a handshake.
@@ -605,16 +621,17 @@ func parseSweepScope(t *testing.T, fset *token.FileSet, scope sweepScope) map[st
 	if err != nil {
 		t.Fatalf("%s (%s): parse: %v", scope.label, scope.dir, err)
 	}
-	out := map[string]*ast.File{}
+	out = map[string]*ast.File{}
 	for _, pkg := range pkgs {
 		for name, file := range pkg.Files {
+			sawAnyFile = true
 			if scope.only != nil && !scope.only(file) {
 				continue
 			}
 			out[name] = file
 		}
 	}
-	return out
+	return out, sawAnyFile
 }
 
 // isDiagnosticRef matches a read of either member.

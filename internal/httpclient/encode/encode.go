@@ -393,8 +393,13 @@ func (b *builder) countFilters(req issueops.CountRequest) {
 	b.boolean("no_labels", req.NoLabels)
 
 	b.boolean("include_infra", req.IncludeInfra)
+	// Added alongside the table.go IncludeEphemeral/HasMetadataKey entries: the
+	// table declared these params but nothing here wrote them, so a populated
+	// field silently vanished before the request left the process.
+	b.boolean("include_ephemeral", req.IncludeEphemeral)
 
 	b.metadata(req.MetadataFields)
+	b.str("has_metadata_key", req.HasMetadataKey)
 }
 
 // GetTarget encodes a detail lookup onto GET /v0/beads/issues/{id}, returning

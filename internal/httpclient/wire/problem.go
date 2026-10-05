@@ -489,6 +489,14 @@ var codeSentinel = map[string]func(*ProblemError, target) error{
 	// and the one whose message does not assert a fact the wire never sent.
 	"not_releasable": func(*ProblemError, target) error { return issueops.ErrNotReleasable },
 
+	// [Added: OSS publishes notes_overwrite_refused (internal/httpapi/problem.go
+	// CodeNotesOverwrite, status 409) for an update whose Patch.Notes would
+	// replace existing notes without an explicit overwrite flag. This code had
+	// no entry at all, so a server sending it fell through to the 4xx default
+	// and reported as an undifferentiated client bug instead of the typed
+	// sentinel callers already switch on locally.]
+	"notes_overwrite_refused": func(*ProblemError, target) error { return issueops.ErrNotesOverwrite },
+
 	// The same rule again: `issue_id` present means the edge named the issue's
 	// own ancestor or descendant, absent means a plain scheduling cycle. The
 	// three hierarchy members travel together and rebuild the typed error whole

@@ -48,16 +48,21 @@ func refusal(id string, ty reflect.Type, field, what, why, spec string) Row {
 	}
 }
 
-// readyRequestRows are the ready vocabulary's three inexpressible members.
+// readyRequestRows are the ready vocabulary's two inexpressible members.
+//
+// [Removed: a third row, "E-ReadyRequest.ExcludeIDs", stood here for an
+// enterprise-only id-exclusion filter. issueops.ReadyRequest carries no
+// ExcludeIDs member in OSS (issueops/reader.go), so the row named a struct
+// field that does not exist and TestEncoderTableClassifiesEveryRequestField
+// failed "names a field that does not exist" against it. The matching table.go
+// entry in readyFilterEntries() was removed alongside this row. The separate,
+// still-real "E-WorkFilter.ExcludeIDs" row below (workFilterBridgeRows) is
+// unaffected: workapi.WorkFilter genuinely carries that field.]
 func readyRequestRows() []Row {
 	return []Row{
 		refusal("E-ReadyRequest.MolType", tyReadyRequest, "MolType",
 			"a molecule-type restriction on ready work refuses",
 			"neither listReadyWork nor countReadyWork publishes a mol-type parameter, and the ready query applies molecule typing inside — so a dropped restriction would answer with the wider set of every molecule type",
-			fieldSpec),
-		refusal("E-ReadyRequest.ExcludeIDs", tyReadyRequest, "ExcludeIDs",
-			"an id exclusion set on ready work refuses",
-			"the set is what bd's external-dependency policy injects to hide issues behind unsatisfied `external:` blockers, and no ready operation publishes an id-exclusion parameter: a server that enforces the policy advertises policy.external_dependencies and applies it itself, so this client never computes the set for it, and a server that does not cannot be handed one. Dropping it would widen the answer to exactly the issues the policy excluded (L12)",
 			fieldSpec),
 		refusal("E-ReadyRequest.Offset", tyReadyRequest, "Offset",
 			"a non-zero Offset on ready work refuses",

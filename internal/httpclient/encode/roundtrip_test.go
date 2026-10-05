@@ -269,9 +269,11 @@ func roundTripCases() []roundTripCase {
 		NoAssignee: true,
 		NoLabels:   true,
 
-		IncludeInfra: true,
+		IncludeInfra:     true,
+		IncludeEphemeral: true,
 
 		MetadataFields: map[string]string{"team": "core", "wave": "3"},
+		HasMetadataKey: "team",
 	}
 
 	// Values that have to survive percent-encoding, a `=` inside a metadata

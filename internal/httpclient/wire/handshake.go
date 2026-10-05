@@ -122,6 +122,21 @@ const CapProjectEnforce = "project.enforce"
 // server's, so the mirror is what makes the two land together.
 const CapListSort = "issues.list.sort"
 
+// CapBatchApplyLarge is the behavior capability announcing that issues.batchApply
+// accepts a batch larger than the compiled-in floor (100 items), up to the
+// raised ceiling (1000), spelled exactly as httpapi's constant of the same name
+// (held to it by TestTheBatchCapVocabularyMatchesTheServer). Like CapListSort it
+// names a property of an existing operation — issues.batchApply already has its
+// own per-operation token in opCapability — rather than a route of its own, so
+// it rides here.
+//
+// Preflight reads this one: a batch over 100 items refuses locally with a typed
+// capability error BEFORE any network call unless the handshake snapshot
+// advertises it, in which case the ceiling is 1000. The cap is never a bare
+// compiled constant for that reason — it is always read off the snapshot this
+// token gates.
+const CapBatchApplyLarge = "issues.batchApplyLarge"
+
 // CapExternalDependencies is the CONDITIONAL behavior capability announcing
 // that the ready, claim and close operations of this server apply bd's
 // external-dependency policy themselves, spelled exactly as httpapi's constant
@@ -141,7 +156,7 @@ const CapExternalDependencies = "policy.external_dependencies"
 // union(opCapability tokens, this) set-equal with httpapi.Capabilities(), which is
 // what makes the server change and this client change land together: the parity
 // test goes red the moment one ships without the other.
-var behaviorCapabilities = []string{CapProjectEnforce, CapListSort}
+var behaviorCapabilities = []string{CapProjectEnforce, CapBatchApplyLarge, CapListSort}
 
 // CapabilityFor reports the capability token gating op, and whether op is on
 // this client's map at all. An operation with no token — liveness, the

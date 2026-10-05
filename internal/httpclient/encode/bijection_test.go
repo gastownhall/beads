@@ -669,7 +669,7 @@ func findRow(t *testing.T, id string) Row {
 func testFunctionsInThisPackage(t *testing.T) map[string]bool {
 	t.Helper()
 	names := map[string]bool{}
-	for _, dir := range []string{".", "..", filepath.Join("..", "..", "..", "..", "cmd", "bd")} {
+	for _, dir := range []string{".", "..", filepath.Join("..", "..", "..", "cmd", "bd")} {
 		collectTestFunctions(t, dir, names)
 	}
 	if len(names) == 0 {
@@ -721,7 +721,7 @@ func sortedKeys(m map[string]bool) []string {
 // the surface authority.
 func loadPublishedParameters(t *testing.T) map[Op]map[string]bool {
 	t.Helper()
-	path := filepath.Join("..", "..", "..", "httpapi", "spec", "openapi.v0.yaml")
+	path := filepath.Join("..", "..", "httpapi", "spec", "openapi.v0.yaml")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read the wire contract: %v", err)
