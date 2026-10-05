@@ -68,6 +68,11 @@ var advisoryPathFilterOwnEntries = map[string][]string{
 		"internal/storage/embeddeddolt/test_fixture_test.go",
 		// Future-proofing: mirrors the existing test/conformance/** re-include.
 		"backend/conformance/**",
+		// Tier 3 (served HTTP client/role conformance): the served_*_test.go
+		// files under internal/httpclient ARE the suite conformance.sh's Tier
+		// 3 runs; re-included wholesale since the shared base's `!**_test.go`
+		// would otherwise exclude every one of them.
+		"internal/httpclient/**",
 	},
 	"migration-test.yml": {
 		".github/workflows/migration-test.yml",

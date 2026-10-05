@@ -1,7 +1,8 @@
 name: Conformance
 
-# Runs the same two-tier storage conformance suite developers run locally:
-# the in-process store corpus and the real-binary CLI harness.
+# Runs the same three-tier storage conformance suite developers run locally:
+# the in-process store corpus, the real-binary CLI harness, and the served
+# HTTP client/role corpus.
 
 on:
   pull_request:
@@ -29,6 +30,11 @@ on:
       # previously excluded by '!**_test.go' with nothing to re-include it.
       - 'internal/storage/embeddeddolt/test_fixture_test.go'
       - 'backend/conformance/**'
+      # Tier 3 (served HTTP client/role conformance): internal/httpclient's
+      # served_*_test.go files are the suite itself, so the whole package is
+      # re-included wholesale rather than carved out file-by-file like the
+      # embeddeddolt entries above.
+      - 'internal/httpclient/**'
   push:
     branches: [ main ]
     paths:
@@ -49,6 +55,9 @@ on:
       # previously excluded by '!**_test.go' with nothing to re-include it.
       - 'internal/storage/embeddeddolt/test_fixture_test.go'
       - 'backend/conformance/**'
+      # Tier 3 (served HTTP client/role conformance): see the matching
+      # pull_request.paths entry above.
+      - 'internal/httpclient/**'
   merge_group:
 
 concurrency:
@@ -62,7 +71,7 @@ env:
 jobs:
   conformance:
     name: Storage backend conformance (embedded Dolt oracle)
-    timeout-minutes: 45
+    timeout-minutes: 100
     runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6

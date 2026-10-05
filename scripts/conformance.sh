@@ -4,8 +4,9 @@
 #
 #   ./scripts/conformance.sh
 #
-# Two tiers exercise the storage conformance contract: the in-process storage
-# corpus against the embedded-Dolt oracle, then the real-binary CLI corpus.
+# Three tiers exercise the storage conformance contract: the in-process
+# storage corpus against the embedded-Dolt oracle, the real-binary CLI
+# corpus, then the served HTTP client/role corpus against a real server.
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -44,5 +45,19 @@ BEADS_TEST_EMBEDDED_DOLT=1 CGO_ENABLED=1 go test -tags "$TAGS" -v \
 assert_conformance_passed "$embedded_dolt_log" "embedded-Dolt reference (need BEADS_TEST_EMBEDDED_DOLT=1)"
 echo "==> Tier 2: end-to-end 'bd init' + CLI conformance (reference round-trip)"
 CGO_ENABLED=1 go test -tags "$TAGS e2e" -timeout 10m ./test/conformance/
+
+echo "==> Tier 3: served HTTP client/role conformance (real server, real wire)"
+# The httpclient package's served_*_test.go files are gated by the `cgo`
+# build tag (set automatically when CGO_ENABLED=1; no -tags entry needed) and
+# self-skip without BEADS_TEST_EMBEDDED_DOLT=1 + BEADS_HTTP_TEST_REQUIRED=1 --
+# the latter is a fail-loud guard (not a silent skip) if it's set without the
+# former, so a misconfigured env can't report a false green here either.
+# This tier is intentionally not sharded: it is a single Go package, and
+# Tier 1 and Tier 2 above are themselves single unsharded invocations: no
+# existing shard pattern in this repo splits a single package's test
+# functions by regex except the embedded-Dolt conformance partition (which
+# this isn't). -timeout=40m matches the budget the review asked for.
+CGO_ENABLED=1 BEADS_TEST_EMBEDDED_DOLT=1 BEADS_HTTP_TEST_REQUIRED=1 \
+  go test -timeout=40m ./internal/httpclient/
 
 echo "==> conformance OK"
