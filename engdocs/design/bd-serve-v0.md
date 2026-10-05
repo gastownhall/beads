@@ -592,21 +592,38 @@ one against the other with a golden digest, `internal/httpapi/wireshape`:
 `wireshape.Compute` walks every response's AND every request body's every
 content-type schema across the whole spec — not only `application/json`, so
 `application/problem+json` and therefore `Problem` itself is covered too —
-recursing through `$ref`, `allOf`, and `oneOf`, and recording, keyed by schema
-and member name, each member's JSON name, type, format, enum values,
-required-ness, and nullability, plus the scalar shape of array items and of
-`additionalProperties` map values. `TestWireShapeDigest` fails one of two
-ways: a changed or removed entry at an UNCHANGED `wire_revision` is drift
-nobody signed off on; a changed `wire_revision` with an unchanged entry set
-means the golden is simply stale. Either way the fix is the same explicit
-command, `go run ./internal/httpapi/wireshape/cmd/gendigest` — never run to
-make a failing test pass on an accidental shape change, only after the
-revision bump and the `openapi.v0.yaml` history entry it belongs beside; the
-command itself refuses to write a changed or removed entry unless
-`wire_revision` has moved past what the existing golden recorded, so running
-it cannot silently launder drift into the baseline. A purely additive diff —
-new members, with no existing entry changed or removed — always writes,
-revision bump or not.
+recursing through `$ref` and through a schema's own `allOf` or `oneOf`, and
+recording, keyed by schema and member name, each member's JSON name, type,
+format, enum values, required-ness, and nullability, plus the scalar shape of
+array items and of `additionalProperties` map values. It records every
+operation parameter (query, path, and header) as well, keyed by
+`operationId`, location, and name rather than by schema — two operations'
+same-named parameters are independent contracts — with its type, item shape,
+enum values, required-ness, style, explode, and default; style and explode
+are the effective values, OpenAPI's defaults filled in where the document
+leaves them unset, so spelling a default out changes nothing while flipping
+one does. The digest is a boundary, not the whole wire: value constraints
+such as `maxLength` or `pattern` (on members and parameters alike) and a
+composition keyword on a single member's own value are outside it, an
+object-typed or `content`-described parameter is recorded only as its
+container, and a new member or parameter always counts as additive — even a
+required one an old client will not send — so each of those needs its own
+review against `wire_revision`. `TestWireShapeDigest` fails on any
+disagreement between golden and spec, and the failure names the fix: a
+changed or removed entry without a `wire_revision` bump is drift nobody
+signed off on; a `wire_revision` LOWER than the golden's means the constant
+itself is wrong, since the revision table only ever grows; any other
+difference — a bumped `wire_revision`, or entries only added — means the
+golden is simply stale. Drift and staleness share one explicit fix,
+`go run ./internal/httpapi/wireshape/cmd/gendigest` — never run to make a
+failing test pass on an accidental shape change, only after the revision
+bump and the `openapi.v0.yaml` history entry it belongs beside; the command
+itself refuses to write a changed or removed entry unless `wire_revision`
+has moved past what the existing golden recorded, and refuses any write at a
+lowered `wire_revision`, so running it cannot silently launder drift into
+the baseline. A purely additive diff — new members or parameters, with no
+existing entry changed or removed — writes at the golden's own
+`wire_revision` or any later one.
 
 **The new-parameter and new-request-body-member token rule.** `capabilities`
 already required a `resource.verb` token for a new OPERATION; nothing
@@ -622,8 +639,9 @@ baselines (`internal/httpapi/testdata/pretoken_parameters.json`,
 every parameter, body member, and operation the document already had the day
 the rule was written — written once and pinned never to grow
 (`TestPretokenBaselinesNeverGrow`), since only something pre-existing and
-untokened ever belongs on them, and a brand-new operation is exempt from the
-rule entirely until its next change. A backticked `a.b`(`.c`)-shaped span in a
+untokened ever belongs on them, and a brand-new operation is permanently
+exempt from the rule: its own review decides its capability story, not a
+baseline written before it existed. A backticked `a.b`(`.c`)-shaped span in a
 description is not enough on its own: the rule also checks the token against
 `Capabilities()`'s own served list, so Go identifiers or example values that
 merely look like a token (`workapi.DefaultReadyLimit`, `status.custom`) do not

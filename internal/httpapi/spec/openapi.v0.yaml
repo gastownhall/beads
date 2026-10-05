@@ -7540,7 +7540,13 @@ components:
             type or meaning changed, or a member was removed or renamed.
             Adding a brand-new member to an existing schema, or a brand-new
             operation, is ADDITIVE and never bumps it — an old client simply
-            never asks for the new member and is unaffected.
+            never asks for the new member and is unaffected. That promise does
+            not extend to a new REQUIRED request input (a request-body member
+            or a parameter): it misdecodes nothing, so it bumps nothing, but an
+            old client that never sends it is refused. The drift gate below
+            records a new required parameter or body member as an ordinary
+            addition and asks for no bump, so keeping old clients working
+            through one is that change's own review's job.
 
 
             Revision history, and it only ever grows by appending a row:
@@ -7619,13 +7625,15 @@ components:
             response member AND request body member's (schema, member, type,
             format, enum, required, nullable), plus the item shape of an array
             member and the value shape of an `additionalProperties` map,
-            recursing through `$ref`, `allOf` and `oneOf`. The same digest also
-            covers every operation PARAMETER (query, path and header) across
-            every operation, keyed by operationId + location + name rather
-            than by schema, recording its type, item shape (for an array
-            parameter), enum, required, style, explode and default. It fails
-            CI the moment any one of these — member or parameter — changes
-            without this field's Go constant (`CurrentWireRevision`,
+            recursing through `$ref` and through a schema's own `allOf` or
+            `oneOf`. The same digest also covers every operation PARAMETER
+            (query, path and header) across every operation, keyed by
+            operationId + location + name rather than by schema, recording its
+            type, item shape (for an array parameter), enum, required, style,
+            explode and default — style and explode as their effective values,
+            OpenAPI's defaults filled in where the document leaves them unset.
+            It fails CI the moment any one of these — member or parameter —
+            changes without this field's Go constant (`CurrentWireRevision`,
             `internal/httpapi/wire_revision.go`) increasing to match.
             Regenerate the golden with
             `go run ./internal/httpapi/wireshape/cmd/gendigest` after a
@@ -7634,8 +7642,17 @@ components:
             member, parameter or operation also changes the golden (it is
             appended to, never frozen in place) but needs no revision bump to
             pass; the command itself refuses to write a changed or removed
-            entry at an unbumped revision, and refuses to create a golden that
-            does not exist yet unless run with `-init`.
+            entry at an unbumped revision, refuses any write at a LOWER
+            revision than the golden records, and refuses to create a golden
+            that does not exist yet unless run with `-init`. The digest is a
+            boundary, not the whole wire: value constraints such as
+            `maxLength`, `maximum`, `pattern` or `maxItems` are outside it, on
+            members and parameters alike, and so is a composition keyword on a
+            single member's own value (this document uses none); an
+            object-typed parameter, or one described by `content` rather than
+            `schema`, is recorded only as its container. Narrowing a
+            constraint trips no gate, so such a change must be weighed against
+            this counter in its own review.
 
 
             Every request PARAMETER (query, path or header) and every request

@@ -16,10 +16,11 @@ go_library(
 
 go_test(
     name = "wireshape_test",
-    srcs = ["wireshape_test.go"],
-    data = glob(["testdata/**"]),
-    deps = [
-        ":wireshape",
-        "//internal/httpapi",
+    srcs = [
+        "wireshape_internal_test.go",
+        "wireshape_test.go",
     ],
+    data = glob(["testdata/**"]),
+    embed = [":wireshape"],
+    deps = ["//internal/httpapi"],
 )

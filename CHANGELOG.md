@@ -50,22 +50,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   advertises (not just backticked `a.b` text shaped like one). Three frozen
   baselines (`internal/httpapi/testdata/pretoken_*.json`) grandfather what
   predates the rule and are pinned never to grow
-  (`TestPretokenBaselinesNeverGrow`); a brand-new operation is exempt until
-  its next change.
+  (`TestPretokenBaselinesNeverGrow`); a brand-new operation is permanently
+  exempt — its own review decides its capability story.
 - A CI golden digest (`internal/httpapi/wireshape`) pins the JSON name,
-  type, format, enum, required-ness, and nullability of every response AND
-  request-body member across the whole HTTP spec — including array item
-  shape and `additionalProperties` value shape — recursing through `$ref`,
-  `allOf`, and `oneOf`, and fails if any changes without `wire_revision`
-  bumping to match; `go run ./internal/httpapi/wireshape/cmd/gendigest`
-  refuses to write a changed or removed entry unless `wire_revision` has
-  moved past what the existing golden recorded (purely additive entries
-  always write). The same digest also pins every operation PARAMETER
-  (query, path and header), keyed by operationId + location + name, and
-  records its type, item shape, enum, required-ness, style, explode, and
-  default — a parameter retyped, re-enumerated, narrowed, switched
-  required, or removed is non-additive exactly like a response or
-  request-body member.
+  type, format, enum, required-ness, and nullability of every EXISTING
+  response AND request-body member across the whole HTTP spec — including
+  array item shape and `additionalProperties` value shape — recursing
+  through `$ref` and through a schema's own `allOf` or `oneOf`, and fails if
+  any changes without `wire_revision` bumping to match;
+  `go run ./internal/httpapi/wireshape/cmd/gendigest` refuses to write a
+  changed or removed entry unless `wire_revision` has moved past what the
+  existing golden recorded, and refuses any write at a lower
+  `wire_revision` (purely additive entries otherwise always write). The
+  same digest also pins every operation PARAMETER (query, path and header),
+  keyed by operationId + location + name, and records its type, item shape,
+  enum, required-ness, effective style and explode (OpenAPI's defaults
+  filled in where unset), and default — a parameter retyped, re-enumerated,
+  narrowed, re-serialized, switched required, or removed is non-additive
+  exactly like a response or request-body member. A new member or
+  parameter always counts as additive, even a REQUIRED one an old client
+  will not send, and value constraints (`maxLength`, `pattern` and the
+  like) are outside the digest: such changes need their own review against
+  `wire_revision`.
 
 ### Changed
 

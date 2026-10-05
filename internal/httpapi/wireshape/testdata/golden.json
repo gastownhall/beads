@@ -4330,19 +4330,23 @@
       "schema": "param:addComment",
       "member": "path:id",
       "type": "string",
-      "required": true
+      "required": true,
+      "style": "simple"
     },
     {
       "schema": "param:claimIssue",
       "member": "path:id",
       "type": "string",
-      "required": true
+      "required": true,
+      "style": "simple"
     },
     {
       "schema": "param:claimNextIssue",
       "member": "query:assignee",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:claimNextIssue",
@@ -4366,13 +4370,17 @@
       "schema": "param:claimNextIssue",
       "member": "query:has_metadata_key",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:claimNextIssue",
       "member": "query:include_deferred",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -4380,6 +4388,8 @@
       "member": "query:include_ephemeral",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -4404,13 +4414,17 @@
       "schema": "param:claimNextIssue",
       "member": "query:label_pattern",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:claimNextIssue",
       "member": "query:label_regex",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:claimNextIssue",
@@ -4425,13 +4439,17 @@
       "schema": "param:claimNextIssue",
       "member": "query:parent",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:claimNextIssue",
       "member": "query:priority",
       "type": "integer",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:claimNextIssue",
@@ -4443,31 +4461,39 @@
         "priority"
       ],
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "priority"
     },
     {
       "schema": "param:claimNextIssue",
       "member": "query:type",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:claimNextIssue",
       "member": "query:unassigned",
       "type": "boolean",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:closeIssue",
       "member": "path:id",
       "type": "string",
-      "required": true
+      "required": true,
+      "style": "simple"
     },
     {
       "schema": "param:compareAndSetMetadata",
       "member": "path:id",
       "type": "string",
-      "required": true
+      "required": true,
+      "style": "simple"
     },
     {
       "schema": "param:countDependencyEdges",
@@ -4477,7 +4503,9 @@
         "in",
         "out"
       ],
-      "required": true
+      "required": true,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countDependencyEdges",
@@ -4492,7 +4520,9 @@
       "schema": "param:countDependencyEdges",
       "member": "query:status",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countDependencyEdges",
@@ -4507,47 +4537,61 @@
       "schema": "param:countIssues",
       "member": "query:assignee",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countIssues",
       "member": "query:closed_after",
       "type": "string",
       "format": "date-time",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countIssues",
       "member": "query:closed_before",
       "type": "string",
       "format": "date-time",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countIssues",
       "member": "query:created_after",
       "type": "string",
       "format": "date-time",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countIssues",
       "member": "query:created_before",
       "type": "string",
       "format": "date-time",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countIssues",
       "member": "query:desc_contains",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countIssues",
       "member": "query:empty_description",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -4561,25 +4605,33 @@
         "status",
         "type"
       ],
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countIssues",
       "member": "query:has_metadata_key",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countIssues",
       "member": "query:id",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countIssues",
       "member": "query:include_ephemeral",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -4587,6 +4639,8 @@
       "member": "query:include_infra",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -4594,14 +4648,18 @@
       "member": "query:label",
       "type": "array",
       "required": false,
-      "item_type": "string"
+      "item_type": "string",
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countIssues",
       "member": "query:label_any",
       "type": "array",
       "required": false,
-      "item_type": "string"
+      "item_type": "string",
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countIssues",
@@ -4617,6 +4675,8 @@
       "member": "query:no_assignee",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -4624,75 +4684,99 @@
       "member": "query:no_labels",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
       "schema": "param:countIssues",
       "member": "query:notes_contains",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countIssues",
       "member": "query:priority",
       "type": "integer",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countIssues",
       "member": "query:priority_max",
       "type": "integer",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countIssues",
       "member": "query:priority_min",
       "type": "integer",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countIssues",
       "member": "query:status",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countIssues",
       "member": "query:title",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countIssues",
       "member": "query:title_contains",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countIssues",
       "member": "query:type",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countIssues",
       "member": "query:updated_after",
       "type": "string",
       "format": "date-time",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countIssues",
       "member": "query:updated_before",
       "type": "string",
       "format": "date-time",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countReadyWork",
       "member": "query:assignee",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countReadyWork",
@@ -4716,13 +4800,17 @@
       "schema": "param:countReadyWork",
       "member": "query:has_metadata_key",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countReadyWork",
       "member": "query:include_deferred",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -4730,6 +4818,8 @@
       "member": "query:include_ephemeral",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -4754,13 +4844,17 @@
       "schema": "param:countReadyWork",
       "member": "query:label_pattern",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countReadyWork",
       "member": "query:label_regex",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countReadyWork",
@@ -4775,31 +4869,40 @@
       "schema": "param:countReadyWork",
       "member": "query:parent",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countReadyWork",
       "member": "query:priority",
       "type": "integer",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countReadyWork",
       "member": "query:type",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:countReadyWork",
       "member": "query:unassigned",
       "type": "boolean",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:forgetMemory",
       "member": "path:key",
       "type": "string",
-      "required": true
+      "required": true,
+      "style": "simple"
     },
     {
       "schema": "param:getDependencyTree",
@@ -4811,6 +4914,8 @@
         "up"
       ],
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "down"
     },
     {
@@ -4818,31 +4923,40 @@
       "member": "query:max_depth",
       "type": "integer",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "50"
     },
     {
       "schema": "param:getDependencyTree",
       "member": "query:root_id",
       "type": "string",
-      "required": true
+      "required": true,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:getDependencyTree",
       "member": "query:status",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:getIssue",
       "member": "path:id",
       "type": "string",
-      "required": true
+      "required": true,
+      "style": "simple"
     },
     {
       "schema": "param:getIssue",
       "member": "query:brief_deps",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -4850,6 +4964,8 @@
       "member": "query:include_comments",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -4857,31 +4973,39 @@
       "member": "query:include_dependents",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
       "schema": "param:getMemory",
       "member": "path:key",
       "type": "string",
-      "required": true
+      "required": true,
+      "style": "simple"
     },
     {
       "schema": "param:getSetting",
       "member": "path:key",
       "type": "string",
-      "required": true
+      "required": true,
+      "style": "simple"
     },
     {
       "schema": "param:getStats",
       "member": "query:assignee",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:getStats",
       "member": "query:skip_blocked",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -4916,6 +5040,8 @@
       "member": "query:limit",
       "type": "integer",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "1000"
     },
     {
@@ -4923,26 +5049,34 @@
       "member": "query:since",
       "type": "integer",
       "format": "int64",
-      "required": true
+      "required": true,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:listIssues",
       "member": "query:all",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
       "schema": "param:listIssues",
       "member": "query:assignee",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:listIssues",
       "member": "query:brief",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -4950,20 +5084,26 @@
       "member": "query:created_after",
       "type": "string",
       "format": "date-time",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:listIssues",
       "member": "query:created_before",
       "type": "string",
       "format": "date-time",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:listIssues",
       "member": "query:cursor",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:listIssues",
@@ -4978,13 +5118,17 @@
       "schema": "param:listIssues",
       "member": "query:has_metadata_key",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:listIssues",
       "member": "query:include_ephemeral",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -4992,6 +5136,8 @@
       "member": "query:include_gates",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -4999,6 +5145,8 @@
       "member": "query:include_infra",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -5006,6 +5154,8 @@
       "member": "query:include_templates",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -5031,6 +5181,8 @@
       "member": "query:limit",
       "type": "integer",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "50"
     },
     {
@@ -5046,7 +5198,9 @@
       "schema": "param:listIssues",
       "member": "query:parent",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:listIssues",
@@ -5057,6 +5211,8 @@
         "priority"
       ],
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "created"
     },
     {
@@ -5072,25 +5228,33 @@
       "schema": "param:listIssues",
       "member": "query:type",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:listMemories",
       "member": "query:search",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:listReadyWork",
       "member": "query:assignee",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:listReadyWork",
       "member": "query:brief",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -5115,13 +5279,17 @@
       "schema": "param:listReadyWork",
       "member": "query:has_metadata_key",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:listReadyWork",
       "member": "query:include_deferred",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -5129,6 +5297,8 @@
       "member": "query:include_ephemeral",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -5153,19 +5323,25 @@
       "schema": "param:listReadyWork",
       "member": "query:label_pattern",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:listReadyWork",
       "member": "query:label_regex",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:listReadyWork",
       "member": "query:limit",
       "type": "integer",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "100"
     },
     {
@@ -5181,13 +5357,17 @@
       "schema": "param:listReadyWork",
       "member": "query:parent",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:listReadyWork",
       "member": "query:priority",
       "type": "integer",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:listReadyWork",
@@ -5199,25 +5379,32 @@
         "priority"
       ],
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "priority"
     },
     {
       "schema": "param:listReadyWork",
       "member": "query:type",
       "type": "string",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:listReadyWork",
       "member": "query:unassigned",
       "type": "boolean",
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:listRelatedIssues",
       "member": "path:id",
       "type": "string",
-      "required": true
+      "required": true,
+      "style": "simple"
     },
     {
       "schema": "param:listRelatedIssues",
@@ -5227,7 +5414,9 @@
         "in",
         "out"
       ],
-      "required": true
+      "required": true,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:listRelatedIssues",
@@ -5243,6 +5432,8 @@
       "member": "query:all",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -5250,19 +5441,25 @@
       "member": "query:limit",
       "type": "integer",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "50"
     },
     {
       "schema": "param:queryIssues",
       "member": "query:q",
       "type": "string",
-      "required": true
+      "required": true,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:queryIssues",
       "member": "query:reverse",
       "type": "boolean",
       "required": false,
+      "style": "form",
+      "explode": true,
       "default": "false"
     },
     {
@@ -5280,51 +5477,61 @@
         "type",
         "updated"
       ],
-      "required": false
+      "required": false,
+      "style": "form",
+      "explode": true
     },
     {
       "schema": "param:releaseIssue",
       "member": "path:id",
       "type": "string",
-      "required": true
+      "required": true,
+      "style": "simple"
     },
     {
       "schema": "param:reopenIssue",
       "member": "path:id",
       "type": "string",
-      "required": true
+      "required": true,
+      "style": "simple"
     },
     {
       "schema": "param:setSetting",
       "member": "path:key",
       "type": "string",
-      "required": true
+      "required": true,
+      "style": "simple"
     },
     {
       "schema": "param:unsetSetting",
       "member": "path:key",
       "type": "string",
-      "required": true
+      "required": true,
+      "style": "simple"
     },
     {
       "schema": "param:updateIssue",
       "member": "path:id",
       "type": "string",
-      "required": true
+      "required": true,
+      "style": "simple"
     },
     {
       "schema": "param:watchEvents",
       "member": "header:Last-Event-ID",
       "type": "integer",
       "format": "int64",
-      "required": false
+      "required": false,
+      "style": "simple"
     },
     {
       "schema": "param:watchEvents",
       "member": "query:since",
       "type": "integer",
       "format": "int64",
-      "required": true
+      "required": true,
+      "style": "form",
+      "explode": true
     }
   ]
 }

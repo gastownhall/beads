@@ -62,7 +62,8 @@ func goldenPath() (string, error) {
 // launder a failing TestWireShapeDigest. A changed or removed entry must come
 // with a CurrentWireRevision bump ABOVE what's already committed, never from
 // just re-running this command (wireshape.SafeToWrite); a purely additive
-// diff always writes.
+// diff always writes, unless digest's wire_revision is LOWER than the
+// golden's, which SafeToWrite refuses whatever the entries.
 //
 // Second, a MISSING golden: refuse to create one unless initFlag is set. A
 // golden that is merely absent — the testdata file moved, got deleted by

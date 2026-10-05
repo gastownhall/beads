@@ -68,9 +68,15 @@ type Entry struct {
 	// paramKey): the serialization style OpenAPI uses to flatten an array or
 	// object parameter into a query/path string, whether it repeats the name
 	// per value or explodes/collapses, and the literal default value. A
-	// client that parses `limit=1,2,3` breaks the moment the server starts
-	// sending `limit=1&limit=2&limit=3` instead, even though neither Type nor
-	// Enum changed — exactly the gap the parameter digest closes.
+	// server that starts expecting `label=a,b` breaks every client still
+	// sending `label=a&label=b`, even though neither Type nor Enum changed —
+	// exactly the gap the parameter digest closes.
+	//
+	// Style and Explode are the EFFECTIVE values, with OpenAPI 3.0's defaults
+	// filled in where the document leaves them unset (see walkParam), so a
+	// parameter that spells out its default is the same entry as one that
+	// relies on it, while `explode: false` added to a form parameter that
+	// relied on the implicit `true` is a changed entry.
 	Style   string `json:"style,omitempty"`
 	Explode bool   `json:"explode,omitempty"`
 	Default string `json:"default,omitempty"`
@@ -150,8 +156,18 @@ func Compare(want, got Digest) CompareResult {
 // is only safe when candidate's WireRevision is strictly greater than
 // golden's — the exact bump TestWireShapeDigest itself requires to go green,
 // so gendigest can never be used to silently launder a failing test instead
-// of fixing it.
+// of fixing it. A candidate whose WireRevision is LOWER than golden's is
+// refused whatever its entries: the revision table is append-only, so writing
+// it would record a rollback the spec forbids.
 func SafeToWrite(golden, candidate Digest) (bool, string) {
+	if candidate.WireRevision < golden.WireRevision {
+		return false, fmt.Sprintf(
+			"refusing to write: wire_revision %d is lower than the existing golden's %d — wire_revision only "+
+				"ever increases (the revision table in openapi.v0.yaml's wire_revision property is append-only), "+
+				"so restore CurrentWireRevision (internal/httpapi/wire_revision.go) instead of writing the "+
+				"golden backwards",
+			candidate.WireRevision, golden.WireRevision)
+	}
 	cmp := Compare(golden, candidate)
 	if len(cmp.Changed) == 0 && len(cmp.Removed) == 0 {
 		return true, ""
@@ -190,9 +206,16 @@ var httpVerbs = map[string]bool{
 // response or request body schema, so it was invisible to this digest until
 // parameter coverage was added.
 func Compute(wireRevision int) (Digest, error) {
+	return computeFrom(spec.OpenAPIV0(), wireRevision)
+}
+
+// computeFrom is Compute over any OpenAPI document, so this package's own
+// tests can drive the walk with a synthetic document instead of the embedded
+// one.
+func computeFrom(document []byte, wireRevision int) (Digest, error) {
 	var doc map[string]any
-	if err := yaml.Unmarshal(spec.OpenAPIV0(), &doc); err != nil {
-		return Digest{}, fmt.Errorf("parse embedded openapi document: %w", err)
+	if err := yaml.Unmarshal(document, &doc); err != nil {
+		return Digest{}, fmt.Errorf("parse openapi document: %w", err)
 	}
 
 	c := &collector{doc: doc, visited: map[string]bool{}, byKey: map[string]Entry{}}
@@ -281,6 +304,16 @@ func (c *collector) walkContent(node map[string]any) {
 // grep: no operation parameter uses an object schema), so there is nothing
 // further to recurse into, and ANY future object-shaped parameter schema
 // still gets its Type/Enum/Required seen here even without recursion.
+//
+// Style and Explode are recorded as OpenAPI 3.0's effective values: an unset
+// style is `form` for a query or cookie parameter and `simple` for a path or
+// header one, and an unset explode is true exactly when the style is `form`.
+// Recording the raw keys instead would file an unset explode and an explicit
+// `explode: false` as the same entry, though one sends `label=a&label=b` and
+// the other `label=a,b`. OpenAPI 3.0 applies style and explode only to a
+// parameter described by `schema`: one described by `content` is serialized
+// by its media type, so the location default recorded for it is a
+// placeholder, not a wire promise (this document has no such parameter).
 func (c *collector) walkParam(operationID string, node map[string]any) {
 	name := asString(node["name"])
 	in := asString(node["in"])
@@ -293,6 +326,15 @@ func (c *collector) walkParam(operationID string, node map[string]any) {
 	schema, _ := node["schema"].(map[string]any)
 	schema = c.resolveAny(schema)
 
+	style := asString(node["style"])
+	if style == "" {
+		style = defaultParamStyle(in)
+	}
+	explode, ok := node["explode"].(bool)
+	if !ok {
+		explode = style == "form"
+	}
+
 	entrySchema, entryMember := paramKey(operationID, in, name)
 	entry := Entry{
 		Schema:   entrySchema,
@@ -302,8 +344,8 @@ func (c *collector) walkParam(operationID string, node map[string]any) {
 		Enum:     toStringSlice(schema["enum"]),
 		Required: asBool(node["required"]),
 		Nullable: asBool(schema["nullable"]),
-		Style:    asString(node["style"]),
-		Explode:  asBool(node["explode"]),
+		Style:    style,
+		Explode:  explode,
 		Default:  defaultString(schema["default"]),
 	}
 
@@ -318,6 +360,18 @@ func (c *collector) walkParam(operationID string, node map[string]any) {
 	}
 
 	c.byKey[entry.Schema+"\x00"+entry.Member] = entry
+}
+
+// defaultParamStyle is OpenAPI 3.0's `style` for a parameter that sets none:
+// `form` in a query or cookie, `simple` in a path or header.
+func defaultParamStyle(in string) string {
+	switch in {
+	case "query", "cookie":
+		return "form"
+	case "path", "header":
+		return "simple"
+	}
+	return ""
 }
 
 type collector struct {

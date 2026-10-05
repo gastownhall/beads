@@ -2,8 +2,10 @@ package wireshape_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/httpapi"
@@ -11,17 +13,20 @@ import (
 )
 
 // TestWireShapeDigest is the drift gate ContextResponse.wire_revision
-// documents: it fails the moment the shape of any EXISTING response member
-// changes without CurrentWireRevision increasing to match.
+// documents: it fails the moment the shape of any EXISTING response member,
+// request-body member or operation parameter changes without
+// CurrentWireRevision increasing to match.
 //
-// It is deliberately two separate comparisons rather than one struct-equal,
-// because the two ways this can go red call for different instructions. A
-// changed or removed entry at the SAME wire_revision is drift nobody signed
-// off on — regenerate only after bumping CurrentWireRevision (see
+// It is deliberately not one struct-equal, because the ways this can go red
+// call for different instructions (goldenDrift picks one). A changed or
+// removed entry at the SAME wire_revision is drift nobody signed off on —
+// regenerate only after bumping CurrentWireRevision (see
 // internal/httpapi/wire_revision.go) and the `wire_revision` property's
-// revision table in openapi.v0.yaml, never before. A changed wire_revision
-// with an unchanged entry set (or only additions) means this golden is simply
-// stale — regenerate it with:
+// revision table in openapi.v0.yaml, never before. A wire_revision LOWER than
+// the golden's is never fixed by regenerating: that table is append-only, so
+// the constant itself is wrong. Any other difference — a bumped
+// wire_revision, or entries only added — means this golden is simply stale;
+// regenerate it with:
 //
 //	go run ./internal/httpapi/wireshape/cmd/gendigest
 func TestWireShapeDigest(t *testing.T) {
@@ -38,37 +43,129 @@ func TestWireShapeDigest(t *testing.T) {
 		t.Fatalf("digest has %d entries, want the full walk", len(got.Entries))
 	}
 
+	if drift := goldenDrift(golden, got); drift != "" {
+		t.Error(drift)
+	}
+}
+
+// goldenDrift is TestWireShapeDigest's verdict, factored out so
+// TestGoldenDrift can drive every arm with synthetic digests. It returns ""
+// only when golden records exactly got — the same entries at the same
+// wire_revision. Every other state fails; the arms only choose which
+// instruction the failure gives.
+func goldenDrift(golden, got wireshape.Digest) string {
+	if got.WireRevision < golden.WireRevision {
+		return fmt.Sprintf("CurrentWireRevision is %d, LOWER than the %d the golden records: wire_revision only "+
+			"ever increases (the revision table in openapi.v0.yaml's `wire_revision` property is append-only), "+
+			"so restore CurrentWireRevision (internal/httpapi/wire_revision.go) — never regenerate the golden "+
+			"backwards", got.WireRevision, golden.WireRevision)
+	}
+
 	cmp := wireshape.Compare(golden, got)
 	changed, removed, added := cmp.Changed, cmp.Removed, cmp.Added
 
-	if len(changed) > 0 || len(removed) > 0 {
+	switch {
+	case len(changed) > 0 || len(removed) > 0:
 		if got.WireRevision <= golden.WireRevision {
-			t.Errorf("response member shape changed without a wire_revision bump: changed=%v removed=%v\n"+
+			return fmt.Sprintf("wire shape (response/request-body member or parameter) changed without a "+
+				"wire_revision bump: changed=%v removed=%v\n"+
 				"bump CurrentWireRevision (internal/httpapi/wire_revision.go) and the revision table "+
 				"in openapi.v0.yaml's `wire_revision` property, THEN regenerate the golden with "+
 				"`go run ./internal/httpapi/wireshape/cmd/gendigest`", changed, removed)
-		} else {
-			t.Errorf("response member shape changed (changed=%v removed=%v) and wire_revision moved "+
-				"%d -> %d, but the golden was not regenerated: run "+
-				"`go run ./internal/httpapi/wireshape/cmd/gendigest` and commit the result",
-				changed, removed, golden.WireRevision, got.WireRevision)
 		}
-	} else if len(added) > 0 && got.WireRevision == golden.WireRevision {
-		t.Errorf("response members were added (%v) but the golden was not regenerated: "+
-			"this is additive and needs no wire_revision bump, but still run "+
-			"`go run ./internal/httpapi/wireshape/cmd/gendigest` and commit the result", added)
-	}
-
-	if got.WireRevision != golden.WireRevision && len(changed) == 0 && len(removed) == 0 && len(added) == 0 {
-		t.Errorf("CurrentWireRevision is %d but the golden still says %d, with no shape change to justify "+
+		return fmt.Sprintf("wire shape (response/request-body member or parameter) changed (changed=%v "+
+			"removed=%v) and wire_revision moved %d -> %d, but the golden was not regenerated: run "+
+			"`go run ./internal/httpapi/wireshape/cmd/gendigest` and commit the result",
+			changed, removed, golden.WireRevision, got.WireRevision)
+	case len(added) > 0:
+		if got.WireRevision == golden.WireRevision {
+			return fmt.Sprintf("wire shape (response/request-body member or parameter) added (%v) but the "+
+				"golden was not regenerated: this is additive and needs no wire_revision bump, but still run "+
+				"`go run ./internal/httpapi/wireshape/cmd/gendigest` and commit the result", added)
+		}
+		// Passing here would leave the golden a revision behind
+		// CurrentWireRevision, and a later non-additive change at that
+		// already-moved constant would then be told only to regenerate (which
+		// SafeToWrite allows) instead of to bump.
+		return fmt.Sprintf("wire shape (response/request-body member or parameter) added (%v) and "+
+			"wire_revision moved %d -> %d, but the golden was not regenerated: run "+
+			"`go run ./internal/httpapi/wireshape/cmd/gendigest` and commit the result",
+			added, golden.WireRevision, got.WireRevision)
+	case got.WireRevision != golden.WireRevision:
+		return fmt.Sprintf("CurrentWireRevision is %d but the golden still says %d, with no shape change to justify "+
 			"either: regenerate with `go run ./internal/httpapi/wireshape/cmd/gendigest`",
 			got.WireRevision, golden.WireRevision)
+	}
+	return ""
+}
+
+// TestGoldenDrift is TestWireShapeDigest's own falsification: every way the
+// committed golden can disagree with a fresh Compute must fail, each with its
+// own instruction. "Added after a bump" is the state review found passing
+// silently — no arm fired when entries were only added and wire_revision had
+// also moved — and a LOWERED wire_revision was told to regenerate, which
+// would have written the golden's revision backwards.
+func TestGoldenDrift(t *testing.T) {
+	golden := wireshape.Digest{
+		WireRevision: 2,
+		Entries: []wireshape.Entry{
+			{Schema: "Widget", Member: "name", Type: "string", Required: true},
+		},
+	}
+	changed := []wireshape.Entry{{Schema: "Widget", Member: "name", Type: "integer", Required: true}}
+	added := append(append([]wireshape.Entry{}, golden.Entries...),
+		wireshape.Entry{Schema: "Widget", Member: "color", Type: "string"})
+
+	for _, tc := range []struct {
+		name string
+		got  wireshape.Digest
+		want []string // phrases the failure must contain; none means the golden is current
+	}{
+		{"identical digest is current",
+			golden, nil},
+		{"changed entry at the same revision asks for a bump",
+			wireshape.Digest{WireRevision: 2, Entries: changed}, []string{"changed without a wire_revision bump"}},
+		{"removed entry at the same revision asks for a bump",
+			wireshape.Digest{WireRevision: 2}, []string{"changed without a wire_revision bump"}},
+		{"changed entry after a bump asks for a regenerate",
+			wireshape.Digest{WireRevision: 3, Entries: changed}, []string{"changed (changed=", "moved 2 -> 3", "not regenerated"}},
+		{"added entry at the same revision asks for a regenerate",
+			wireshape.Digest{WireRevision: 2, Entries: added}, []string{"added (", "needs no wire_revision bump"}},
+		{"added entry after a bump asks for a regenerate",
+			wireshape.Digest{WireRevision: 3, Entries: added}, []string{"added (", "moved 2 -> 3", "not regenerated"}},
+		{"bump with no shape change asks for a regenerate",
+			wireshape.Digest{WireRevision: 3, Entries: golden.Entries}, []string{"no shape change"}},
+		{"lowered revision with no shape change asks to restore the constant",
+			wireshape.Digest{WireRevision: 1, Entries: golden.Entries}, []string{"LOWER than the 2", "never regenerate the golden backwards"}},
+		{"changed entry at a lowered revision asks to restore the constant",
+			wireshape.Digest{WireRevision: 1, Entries: changed}, []string{"LOWER than the 2"}},
+		{"added entry at a lowered revision asks to restore the constant",
+			wireshape.Digest{WireRevision: 1, Entries: added}, []string{"LOWER than the 2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			drift := goldenDrift(golden, tc.got)
+			if len(tc.want) == 0 {
+				if drift != "" {
+					t.Fatalf("current golden reported as drift: %s", drift)
+				}
+				return
+			}
+			if drift == "" {
+				t.Fatal("stale golden passed silently")
+			}
+			for _, phrase := range tc.want {
+				if !strings.Contains(drift, phrase) {
+					t.Errorf("drift %q does not contain %q", drift, phrase)
+				}
+			}
+		})
 	}
 }
 
 // TestSafeToWrite is the gendigest write guard's own falsification (review
 // MEDIUM: "refuse to write changed or removed entries unless
-// CurrentWireRevision is higher than the golden's recorded revision").
+// CurrentWireRevision is higher than the golden's recorded revision"), plus
+// the refusal of any candidate whose revision is LOWER than the golden's.
 func TestSafeToWrite(t *testing.T) {
 	base := wireshape.Digest{
 		WireRevision: 2,
@@ -121,6 +218,28 @@ func TestSafeToWrite(t *testing.T) {
 		}
 	})
 
+	t.Run("unchanged entries with a lower revision are refused", func(t *testing.T) {
+		candidate := wireshape.Digest{WireRevision: 1, Entries: base.Entries}
+		ok, reason := wireshape.SafeToWrite(base, candidate)
+		if ok {
+			t.Fatal("unchanged entries with a LOWER revision were allowed — the golden's revision would move backwards")
+		}
+		if !strings.Contains(reason, "append-only") {
+			t.Errorf("refusal %q does not point at the append-only revision table", reason)
+		}
+	})
+
+	t.Run("pure addition with a lower revision is refused", func(t *testing.T) {
+		candidate := wireshape.Digest{
+			WireRevision: 1,
+			Entries: append(append([]wireshape.Entry{}, base.Entries...),
+				wireshape.Entry{Schema: "Widget", Member: "color", Type: "string"}),
+		}
+		if ok, _ := wireshape.SafeToWrite(base, candidate); ok {
+			t.Fatal("pure addition with a LOWER revision was allowed — the golden's revision would move backwards")
+		}
+	})
+
 	t.Run("changed entry with a higher revision is safe", func(t *testing.T) {
 		candidate := wireshape.Digest{
 			WireRevision: 3,
@@ -139,13 +258,15 @@ func TestSafeToWrite(t *testing.T) {
 	})
 }
 
-// TestParameterMutationsAreCaught is the falsification for the parameter side
-// of the digest (review: "the digest doesn't cover operation PARAMETERS ...
-// so a type, enum, required, or removal change on an existing parameter
-// passes the gate silently"). It mutates real entries out of the committed
-// golden — not a synthetic fixture — so a future rename of the `listIssues`
-// limit/sort parameters breaks this test loudly instead of letting the
-// coverage go stale unnoticed.
+// TestParameterMutationsAreCaught is the falsification for how Compare and
+// SafeToWrite treat the parameter side of the digest (review: "the digest
+// doesn't cover operation PARAMETERS ... so a type, enum, required, or
+// removal change on an existing parameter passes the gate silently"). It
+// mutates real entries out of the committed golden — not a synthetic fixture
+// — so a future rename of the `listIssues` limit/sort parameters breaks this
+// test loudly instead of letting the coverage go stale unnoticed. Because it
+// mutates entries after the fact, it cannot see a field walkParam extracts
+// wrongly; that is TestWalkParam's job (wireshape_internal_test.go).
 //
 // Each case checks the same two things TestSafeToWrite checks for schema
 // members: the mutation is refused at the golden's own wire_revision, and
