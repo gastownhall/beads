@@ -171,11 +171,16 @@ const CapBatchApplyLarge = "issues.batchApplyLarge"
 // through the policy layer, so httpapi.Capabilities() — the build-level list
 // the parity gate compares against — never contains it.
 //
-// UNCONSUMED since S3 reconciliation (gc native-program, 2026-10): this client
-// has no external-dependency policy layer to gate — OSS publishes no
-// storage.ExternalDependencyQueryStore-backed client policy for this store to
-// compose, so bd-enterprise's policy.go (which read this token) was removed
-// rather than reconciled. The token stays declared, because the server-side
+// UNCONSUMED since S3 reconciliation (2026-10): THIS token is unread by this
+// client, not because OSS lacks external-dependency policy enforcement — the
+// externaldeps decorator (internal/storage/externaldeps) exists in OSS and is
+// wired unconditionally into the local storage chain (cmd/bd/storage_chain.go),
+// so a local backend already applies the policy itself. What this http
+// client specifically lacks is a client-side COMPOSITION of that same
+// decorator around a storage.ExternalDependencyQueryStore-backed remote
+// store, because a remote server advertising this capability applies the
+// policy on its own side before answering — there is nothing left for the
+// client to decorate. The token stays declared, because the server-side
 // capability and its wire spelling are real and S10 schedules the client half
 // that reads it.
 const CapExternalDependencies = "policy.external_dependencies"
