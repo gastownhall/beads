@@ -1210,16 +1210,19 @@ func TestAcquireAllExhaustedBudgetFinalAttemptIgnoresIntent(t *testing.T) {
 		t.Fatal("tryTakeIntent on b failed")
 	}
 	t.Cleanup(func() { b.releaseIntent(intent) })
-	// a is held exclusively past the whole budget's midpoint and released
-	// only after the budget is spent, so b gets no budget at all.
+
+	// a held for the whole call (released only after it returns): the set
+	// fails on a, the gate that is really held, never reaching b.
 	ha := mustAcquire(t, a, Exclusive, Options{})
-	time.AfterFunc(400*time.Millisecond, func() { _ = ha.Release() })
 	_, err := AcquireAll(context.Background(), Shared,
-		Options{Wait: 300 * time.Millisecond, PollInterval: 10 * time.Millisecond}, a, b)
-	if !errors.Is(err, ErrBusy) {
-		t.Fatalf("a held past the budget: %v, want ErrBusy", err)
+		Options{Wait: 100 * time.Millisecond, PollInterval: 10 * time.Millisecond}, a, b)
+	_ = ha.Release()
+	if !errors.Is(err, ErrBusy) || !strings.Contains(err.Error(), a.Path()) {
+		t.Fatalf("a held past the budget: %v, want ErrBusy on %s", err, a.Path())
 	}
-	time.Sleep(200 * time.Millisecond) // a is free now
+
+	// Both gates free, intent queued on b: b defers for the rest of the
+	// budget, then its final attempt gets in.
 	start := time.Now()
 	m, err := AcquireAll(context.Background(), Shared,
 		Options{Wait: 200 * time.Millisecond, PollInterval: 10 * time.Millisecond}, a, b)
@@ -1229,6 +1232,52 @@ func TestAcquireAllExhaustedBudgetFinalAttemptIgnoresIntent(t *testing.T) {
 	_ = m.Release()
 	if waited := time.Since(start); waited < 150*time.Millisecond {
 		t.Errorf("b's queued intent was not honored before the final attempt (took %s)", waited)
+	}
+}
+
+// The race behind a farm flake of the test above: the budget can run out
+// DURING the intent probe (a stalled process), after the iteration already
+// decided the attempt was not final. The acquisition must still make its
+// final, queue-ignoring attempt instead of failing on the queue alone. The
+// hook stalls the acquirer past its deadline at exactly that point, so this
+// is deterministic rather than load-dependent.
+func TestSharedFinalAttemptSurvivesStallDuringIntentProbe(t *testing.T) {
+	g, _ := testGate(t)
+	intent := g.tryTakeIntent("test queued maintenance")
+	if intent == nil {
+		t.Fatal("tryTakeIntent failed")
+	}
+	t.Cleanup(func() { g.releaseIntent(intent) })
+
+	// Generous budget: the first probe must happen well inside it even on a
+	// starved runner, or there is no deferral to stall (asserted below).
+	const wait = time.Second
+	var stalls int
+	testHookAfterIntentDefer = func() {
+		stalls++
+		time.Sleep(wait + 50*time.Millisecond) // budget gone before the deadline check
+	}
+	t.Cleanup(func() { testHookAfterIntentDefer = nil })
+
+	h, err := g.Acquire(context.Background(), Shared, Options{Wait: wait, PollInterval: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("queued intent failed a shared acquisition whose budget ran out mid-probe: %v", err)
+	}
+	_ = h.Release()
+	if stalls != 1 {
+		t.Fatalf("intent deferrals = %d, want exactly 1 (then the final attempt)", stalls)
+	}
+
+	// Same through AcquireAll, where later gates get the leftover budget.
+	stalls = 0
+	other, _ := ForPhysicalRoot(filepath.Join(filepath.Dir(g.Path()), "zz"))
+	m, err := AcquireAll(context.Background(), Shared, Options{Wait: wait, PollInterval: 10 * time.Millisecond}, g, other)
+	if err != nil {
+		t.Fatalf("AcquireAll: queued intent failed the set after a mid-probe stall: %v", err)
+	}
+	_ = m.Release()
+	if stalls != 1 {
+		t.Fatalf("AcquireAll intent deferrals = %d, want exactly 1 (then the final attempt)", stalls)
 	}
 }
 

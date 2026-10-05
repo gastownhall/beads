@@ -496,13 +496,22 @@ func (g Gate) Acquire(ctx context.Context, mode Mode, opts Options) (*Handle, er
 	defer func() { g.releaseIntent(intent) }()
 
 	notified := false
+	// finalAttempt is set once the budget ran out while this acquisition was
+	// deferring to queued intent: it then gets exactly one more try at the
+	// gate, ignoring the queue, before it may fail. Deciding finality from
+	// the clock at the top of an iteration is not enough — the intent probe
+	// itself takes time (a loaded machine can stall it for milliseconds), so
+	// "budget not yet spent" before the probe can be "spent" after it, and
+	// failing there would let a mere queue fail a shared acquirer.
+	finalAttempt := false
 	for {
 		var detail string
-		// The final attempt (budget spent) ignores intent: queued
-		// maintenance may delay a shared acquirer, never fail it.
-		final := time.Until(deadline) <= 0
-		if defersToIntent && !final && g.ExclusiveQueued() {
+		deferred := defersToIntent && !finalAttempt && time.Until(deadline) > 0 && g.ExclusiveQueued()
+		if deferred {
 			detail = g.queuedDetail()
+			if testHookAfterIntentDefer != nil {
+				testHookAfterIntentDefer()
+			}
 		} else {
 			err := try(f)
 			if err == nil {
@@ -525,6 +534,12 @@ func (g Gate) Acquire(ctx context.Context, mode Mode, opts Options) (*Handle, er
 			}
 		}
 		remaining := time.Until(deadline)
+		if deferred && remaining <= 0 {
+			// Queued maintenance may delay a shared acquirer, never fail
+			// it: the budget is spent, so try the gate itself once more.
+			finalAttempt = true
+			continue
+		}
 		if !waiting || remaining <= 0 {
 			_ = f.Close()
 			return nil, fmt.Errorf("workspacegate: %s (%s mode) held by %s: %w",
@@ -556,6 +571,11 @@ func (g Gate) Acquire(ctx context.Context, mode Mode, opts Options) (*Handle, er
 		}
 	}
 }
+
+// testHookAfterIntentDefer, when set (tests only), runs right after a
+// waiting shared acquisition decides to defer to queued intent, so tests can
+// stall it past its deadline at exactly the point a loaded machine might.
+var testHookAfterIntentDefer func()
 
 // maxIntentHold caps how long one Exclusive acquisition keeps the intent
 // lock without getting the gate. It must stay well below the shared wait
