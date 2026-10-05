@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"slices"
@@ -470,6 +472,128 @@ func TestSpecCapabilityVocabularyMatchesTheRouteTable(t *testing.T) {
 	}
 }
 
+// untokenedParameters reports "operationId.paramName" for every parameter in
+// ops whose own description carries no capabilityToken and whose
+// (operationId, paramName) pair is not in baseline. doc resolves the $refs a
+// parameter may point at (components.parameters); baseline is keyed by
+// operationId to the list of its parameter names exempt from the rule.
+//
+// Factored out of TestNewParameterOnExistingOperationHasABehaviorToken so
+// TestUntokenedParameterRuleFires can falsify it against a fixture with no
+// dependency on the real document: the rule fires on its own fabricated
+// miss, not just on whatever this spec currently happens to contain.
+func untokenedParameters(t *testing.T, doc map[string]any, ops map[string]specOp, baseline map[string][]string) []string {
+	t.Helper()
+	grandfathered := map[string]bool{}
+	for opID, params := range baseline {
+		for _, p := range params {
+			grandfathered[opID+"\x00"+p] = true
+		}
+	}
+	var missing []string
+	for opID, so := range ops {
+		raw, ok := so.op["parameters"].([]any)
+		if !ok {
+			continue
+		}
+		for _, r := range raw {
+			pm, ok := r.(map[string]any)
+			if !ok {
+				t.Fatalf("%s: parameter is %T, want a mapping", opID, r)
+			}
+			pm = resolveRef(t, doc, pm)
+			name, _ := pm["name"].(string)
+			if name == "" {
+				t.Fatalf("%s: parameter with no name", opID)
+			}
+			if grandfathered[opID+"\x00"+name] {
+				continue
+			}
+			desc, _ := pm["description"].(string)
+			if len(capabilityToken.FindAllString(desc, -1)) == 0 {
+				missing = append(missing, opID+"."+name)
+			}
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+func loadPretokenBaseline(t *testing.T) map[string][]string {
+	t.Helper()
+	blob, err := os.ReadFile(filepath.Join("testdata", "pretoken_parameters.json"))
+	if err != nil {
+		t.Fatalf("read pretoken baseline: %v", err)
+	}
+	var baseline map[string][]string
+	if err := json.Unmarshal(blob, &baseline); err != nil {
+		t.Fatalf("decode %s: %v", "testdata/pretoken_parameters.json", err)
+	}
+	return baseline
+}
+
+// TestNewParameterOnExistingOperationHasABehaviorToken is the lint rule S0
+// item 4 asks for: a parameter on an existing operation with no capability
+// token in its own description is undocumented dispatch surface — a client
+// has no way to learn THIS server accepts it without sending it and risking
+// `unknown_parameter`, which is exactly what happened to `sort` (#5666)
+// before `issues.listSort` closed the gap.
+//
+// The baseline (testdata/pretoken_parameters.json) is a WRITE-ONCE grandfather
+// list: every parameter this document already had the day the rule was
+// written, captured by walking the spec with this same token regex. A
+// parameter on it is exempt permanently, and nothing here ever regenerates
+// the file. Any parameter not on it — present today or added by any later
+// change — must carry a token, which is what makes this a ratchet rather than
+// a one-time sweep: `issues.listSort` is already the parity fix the rule's
+// own baseline is built from, not an exemption to it.
+func TestNewParameterOnExistingOperationHasABehaviorToken(t *testing.T) {
+	doc := loadSpec(t)
+	ops := specOps(t, doc)
+	baseline := loadPretokenBaseline(t)
+
+	if missing := untokenedParameters(t, doc, ops, baseline); len(missing) > 0 {
+		t.Errorf("parameter(s) on an existing operation carry no capability token and are not on the "+
+			"frozen baseline (internal/httpapi/testdata/pretoken_parameters.json): %v\n"+
+			"add a `resource.verb` token to the parameter's own description, the way `sort` on "+
+			"GET /v0/beads/issues advertises `issues.listSort`", missing)
+	}
+}
+
+// TestUntokenedParameterRuleFires is the rule's own falsification, required
+// because TestNewParameterOnExistingOperationHasABehaviorToken is permanently
+// green against a spec written to satisfy it: a synthetic operation proves
+// the CHECK itself still distinguishes the three cases it exists to tell
+// apart, independent of anything the real document currently says.
+func TestUntokenedParameterRuleFires(t *testing.T) {
+	doc := map[string]any{} // no $refs in the fixtures below; resolveRef never consults it
+	newOp := func(desc string) specOp {
+		return specOp{
+			method: "GET",
+			path:   "/synthetic",
+			op: map[string]any{
+				"parameters": []any{
+					map[string]any{"name": "widget", "description": desc},
+				},
+			},
+		}
+	}
+
+	ops := map[string]specOp{"syntheticOp": newOp("plain prose, no token at all")}
+	if got := untokenedParameters(t, doc, ops, map[string][]string{}); !slices.Equal(got, []string{"syntheticOp.widget"}) {
+		t.Fatalf("untokened, non-grandfathered parameter: got %v, want [syntheticOp.widget]", got)
+	}
+
+	if got := untokenedParameters(t, doc, ops, map[string][]string{"syntheticOp": {"widget"}}); len(got) != 0 {
+		t.Fatalf("grandfathered parameter still reported: got %v, want none", got)
+	}
+
+	ops["syntheticOp"] = newOp("carries the `synthetic.widget` token")
+	if got := untokenedParameters(t, doc, ops, map[string][]string{}); len(got) != 0 {
+		t.Fatalf("tokened parameter still reported: got %v, want none", got)
+	}
+}
+
 func specParam(t *testing.T, so specOp, name string) map[string]any {
 	t.Helper()
 	raw, ok := so.op["parameters"].([]any)
@@ -682,7 +806,8 @@ func TestDefaultsMatchCLIFlags(t *testing.T) {
 // re-adding one costs a test edit.
 var contextResponseAllowlist = []string{
 	"api_version", "backend", "bd_version", "beads_dir", "capabilities",
-	"database", "dolt_mode", "project_id", "repo_root", "schema_version",
+	"database", "dolt_mode", "min_client_wire_revision", "project_id",
+	"repo_root", "schema_version", "wire_revision",
 }
 
 // TestContextResponseAllowlist pins that field set from both sides: the

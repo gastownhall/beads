@@ -59,6 +59,23 @@ const CapProjectEnforce = "project.enforce"
 // round trip an old server would refuse anyway.
 const CapBatchApplyLarge = "issues.batchApplyLarge"
 
+// CapIssuesListSort is the behavior capability that advertises GET
+// /v0/beads/issues' `sort` parameter (reads.go, spec `sort` on OpListIssues).
+// Like CapBatchApplyLarge it names a PARAMETER added to an existing operation
+// rather than a route of its own — `issues.list` is already the per-operation
+// token for the route itself — so it rides the same behaviorCapabilities list.
+//
+// The parameter shipped (#5666) with no token at all: a client already had the
+// per-parameter fallback (an old server answers `sort` with 400
+// `unknown_parameter`, which doubles as a capability probe), but that means
+// paying a round trip an old server would refuse anyway. A client that checks
+// this token at handshake time learns the same thing for free. This is also
+// the spec/lint rule in TestNewParameterOnExistingOperationHasABehaviorToken:
+// `sort` predates that rule and would have failed it, so it is the parity fix
+// — ent already advertises the equivalent token — that the rule's own
+// baseline is built from.
+const CapIssuesListSort = "issues.listSort"
+
 // customMethodTarget splits the custom method off the segment the router
 // matched, and reports the row that claims it.
 //
@@ -173,6 +190,17 @@ type route struct {
 	// reads that touch no workspace data are exempt and every other route —
 	// streaming or not — is enforced.
 	projectExempt bool
+	// wireRevisionExempt exempts an operation from the Bd-Wire-Revision floor
+	// check (checkWireRevision). Legitimate only for liveness: a kubelet probe
+	// carries no notion of a wire revision at all, and the check's refusal body
+	// is itself a `ContextResponse`-shaped disclosure the health row must never
+	// grow. It is deliberately NOT set on the identity handshake — unlike
+	// projectExempt, where the handshake is how a client LEARNS the id it must
+	// stamp with, a client that already knows the revision it was built for can
+	// and should declare it on the very first request, and the handshake is
+	// exactly where a floor violation is cheapest to catch: before the client
+	// has acted on anything shaped for a revision it cannot decode.
+	wireRevisionExempt bool
 	// implemented gates the capability list, so a release between slices never
 	// advertises an operation that does not work. Every v0 operation is
 	// implemented as of the read-endpoints slice; the flag stays because the
@@ -203,8 +231,12 @@ var routeTable = []route{
 		// liveness probe gated on a matching project stamp would go dark on a
 		// misconfigured client exactly when an operator needs it most.
 		projectExempt: true,
-		implemented:   true,
-		handler:       (*Server).handleHealth,
+		// Same reasoning extends to the wire-revision floor: a probe carries no
+		// `Bd-Wire-Revision` of its own, and must not be refused for a header it
+		// never had a reason to send.
+		wireRevisionExempt: true,
+		implemented:        true,
+		handler:            (*Server).handleHealth,
 	},
 	{
 		op:      OpGetContext,
@@ -778,7 +810,7 @@ func (r route) specPathOf() string {
 // route. project.enforce announces per-request Bd-Project-Id enforcement
 // (checkProjectStamp): a stamped client reads it to know the refusal is available
 // rather than silently dropped by an older server.
-var behaviorCapabilities = []string{CapProjectEnforce, CapBatchApplyLarge}
+var behaviorCapabilities = []string{CapProjectEnforce, CapBatchApplyLarge, CapIssuesListSort}
 
 // Capabilities lists what this build advertises in ContextResponse.capabilities:
 // the operations it actually implements, gated on `implemented` so a stub can

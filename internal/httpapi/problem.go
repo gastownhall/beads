@@ -306,6 +306,15 @@ const (
 	// `server_project_id`. The recovery is to stop stamping this server with
 	// another workspace's id, never to retry the same request.
 	ReasonProjectMismatch Reason = "project_mismatch"
+	// ReasonWireRevisionUnsupported means the request's Bd-Wire-Revision header
+	// named a revision below this server's ContextResponse.min_client_wire_revision.
+	// Like ReasonProjectMismatch it is a document-level 400 reachable on every
+	// enforced route — including the identity handshake itself — rather than
+	// per-operation behavior, and it is the one refusal that carries
+	// `min_wire_revision`. The recovery is to stop talking to this server with a
+	// client built for a revision it no longer supports, never to retry the same
+	// request.
+	ReasonWireRevisionUnsupported Reason = "wire_revision_unsupported"
 )
 
 // staticDetail is the set of codes whose `detail` is FIXED, whatever the
@@ -1342,6 +1351,29 @@ func ProjectMismatch(got, own string) Result {
 	res := InvalidArgument(ProjectIDHeader, ReasonProjectMismatch,
 		"the "+ProjectIDHeader+" header names project "+strconv.Quote(got)+", which this server does not serve")
 	res.Problem.ServerProjectId = &own
+	return res
+}
+
+// WireRevisionUnsupported builds the 400 for a request whose Bd-Wire-Revision
+// header names a revision below this server's own
+// ContextResponse.min_client_wire_revision. got is the revision the client
+// declared; min is this server's floor, disclosed in the `min_wire_revision`
+// extension member for the same reason ProjectMismatch discloses
+// `server_project_id`: so a client that already knows it declared a revision
+// can tell exactly how far behind it is without re-deriving the number from
+// `bd_version`.
+//
+// This is the ONLY refusal on the surface that sets `min_wire_revision`, and —
+// unlike ProjectMismatch, which is exempt on the identity handshake because
+// that is where a client LEARNS the id it must stamp with — it is raised on
+// GET /v0/beads/context too: a client that already knows the revision it was
+// built for gains nothing from being served a body it has already said it
+// cannot decode, and loses the chance to fail before acting on it.
+func WireRevisionUnsupported(got, min int) Result {
+	res := InvalidArgument(WireRevisionHeader, ReasonWireRevisionUnsupported,
+		"the "+WireRevisionHeader+" header names revision "+strconv.Itoa(got)+
+			", which is below the "+strconv.Itoa(min)+" this server still answers correctly")
+	res.Problem.MinWireRevision = &min
 	return res
 }
 

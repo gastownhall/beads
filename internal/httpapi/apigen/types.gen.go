@@ -1010,7 +1010,7 @@ type ContextResponse struct {
 	// OPTIONAL, and absent means only that this server does not disclose its filesystem layout — never that it has no workspace. A client MUST NOT require it, MUST NOT treat absence as an error, and has no use for the value beyond display: it is a path on the SERVER's filesystem, which the client cannot open. Identify the workspace by `project_id` and `database`, which are required.
 	BeadsDir *string `json:"beads_dir,omitempty"`
 
-	// Capabilities The tokens this server advertises: the OPERATIONS it implements, derived from its route table, and the server-wide BEHAVIORS it enforces. v0's operation vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.count`, `issues.get`, `issues.related`, `issues.create`, `issues.addComment`, `issues.batchClose`, `issues.claim`, `issues.claimNext`, `issues.release`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `config.set`, `config.unset`, `dependencies.cycles`, `dependencies.list`, `dependencies.count`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`; the behavior tokens are `project.enforce`, which announces that a `Bd-Project-Id` stamp for the wrong workspace is refused here rather than silently ignored, and `issues.batchApplyLarge`, which announces that `POST /v0/beads/issues:batchApply` accepts the RAISED envelope — up to 1000 items (`ApplyBatchRequest.items.maxItems`), a 16 MiB body, and (for a request over 100 items) a run budget that EXTENDS to an operator-configured ceiling (`bd serve --large-apply-ceiling`, 5 minutes by default) — rather than the original 100-item, 4 MiB bound. The ceiling is a flat whole-run budget, not a value scaled by item count: a 101-item request and a 1000-item request both get the same extended budget. A request at or under 100 items is unaffected either way and keeps the server's ordinary deadline exactly as before. A client that checks for this token before sending a plan over 100 items learns whether THIS server accepts it without paying for a round trip an older server would refuse anyway. The list grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation or a behavior — never the version string.
+	// Capabilities The tokens this server advertises: the OPERATIONS it implements, derived from its route table, and the server-wide BEHAVIORS it enforces. v0's operation vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.count`, `issues.get`, `issues.related`, `issues.create`, `issues.addComment`, `issues.batchClose`, `issues.claim`, `issues.claimNext`, `issues.release`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `config.set`, `config.unset`, `dependencies.cycles`, `dependencies.list`, `dependencies.count`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`; the behavior tokens are `project.enforce`, which announces that a `Bd-Project-Id` stamp for the wrong workspace is refused here rather than silently ignored, `issues.batchApplyLarge`, which announces that `POST /v0/beads/issues:batchApply` accepts the RAISED envelope — up to 1000 items (`ApplyBatchRequest.items.maxItems`), a 16 MiB body, and (for a request over 100 items) a run budget that EXTENDS to an operator-configured ceiling (`bd serve --large-apply-ceiling`, 5 minutes by default) — rather than the original 100-item, 4 MiB bound. The ceiling is a flat whole-run budget, not a value scaled by item count: a 101-item request and a 1000-item request both get the same extended budget. A request at or under 100 items is unaffected either way and keeps the server's ordinary deadline exactly as before. A client that checks for this token before sending a plan over 100 items learns whether THIS server accepts it without paying for a round trip an older server would refuse anyway, and `issues.listSort`, which announces that `GET /v0/beads/issues` accepts the `sort` query parameter (two closed, pageable total orders — see that parameter) rather than silently answering `unknown_parameter`. The list grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation or a behavior — never the version string.
 	//
 	// THIS LIST IS BUILD-LEVEL, NOT WORKSPACE-LEVEL. It says which operations this binary serves, and for every entry but two that is the whole answer. `events.list` and `events.watch` are the exceptions: the durable events journal is a per-workspace setting that is OFF by default, so a server that advertises them may still refuse every request to both with 409 `events_journal_disabled` — correctly, because the operations exist and the workspace has no journal. A consumer of either MUST treat the capability as "this server speaks it" and the 409 as "not on this workspace", and must not read the capability as a promise that records will arrive.
 	Capabilities []string `json:"capabilities"`
@@ -1021,6 +1021,11 @@ type ContextResponse struct {
 	// DoltMode Which storage mode this workspace is served from.
 	DoltMode string `json:"dolt_mode"`
 
+	// MinClientWireRevision The OLDEST client `wire_revision` this server still answers correctly. A client whose own compiled `wire_revision` is below this number should refuse to dial at all, the same way it refuses an unknown `api_version`: nothing it does with a response shaped for this revision is safe to assume.
+	//
+	// A client MAY declare the revision it was built for on every request with the optional `Bd-Wire-Revision` header (see the document-level rule above). When it does, and the declared value is below this member, the server refuses with `400` / `code: invalid_argument` / `param: "Bd-Wire-Revision"` / `reason: "wire_revision_unsupported"` rather than risk serving a body the caller has already said it cannot decode. The header is OPTIONAL and an absent one is served exactly as today — this is additive wire surface, not a new precondition on requests already in the field, exactly as `Bd-Project-Id` is.
+	MinClientWireRevision int `json:"min_client_wire_revision"`
+
 	// ProjectId Logical project identifier.
 	ProjectId string `json:"project_id"`
 
@@ -1029,6 +1034,31 @@ type ContextResponse struct {
 
 	// SchemaVersion The shared JSON schema version — the same constant the CLI's stdout JSON envelope reports. Diagnostic only: it can move for CLI-only reasons with no HTTP wire change, so clients MUST NOT branch on it.
 	SchemaVersion int `json:"schema_version"`
+
+	// WireRevision A counter bumped on every release whose wire format changed in a way an unaware client could MISDECODE: an existing member's JSON type or meaning changed, or a member was removed or renamed. Adding a brand-new member to an existing schema, or a brand-new operation, is ADDITIVE and never bumps it — an old client simply never asks for the new member and is unaffected.
+	//
+	// Revision history, and it only ever grows by appending a row:
+	//
+	// * `0` — every server before 1.3.0. `revision` and
+	//   `expected_version` were JSON integers, and this field did not
+	//   exist: an absent `wire_revision` together with a `bd_version`
+	//   below `1.3.0` IS a `0`.
+	// * `1` — 1.3.0 up to, but not including, the release that adds this
+	//   field. `revision` and `expected_version` moved to DECIMAL-STRING
+	//   tokens (#6053) under the same `api_version: "v0"`, with nothing
+	//   in the handshake to tell an integer-expecting client the shape
+	//   had moved underneath it. That silent gap is the whole reason
+	//   this field exists.
+	// * `2` — the first release whose `ContextResponse` carries
+	//   `wire_revision` and `min_client_wire_revision` at all (this one).
+	//
+	//
+	// A client talking to a server that omits this member entirely is talking to a pre-signal server and INFERS the revision rather than reading one: `1` when `bd_version` is `>= 1.3.0`, else `0`. A client that does not know how to speak the revision it reads or infers must refuse to proceed rather than guess at the shape.
+	//
+	// This document's own drift gate is `TestWireShapeDigest` (`internal/httpapi/wireshape`): a golden digest of every EXISTING response member's (schema, member, type, format, enum, required) fails CI the moment any one of them changes without this field's Go constant (`CurrentWireRevision`, `internal/httpapi/wire_revision.go`) increasing to match. Regenerate the golden with `go run ./internal/httpapi/wireshape/cmd/gendigest` after a deliberate, revision-bumped change, and commit the result — see that package's doc.go for the exact command. A purely additive member or operation also changes the golden (it is appended to, never frozen in place) but needs no revision bump to pass.
+	//
+	// Every request PARAMETER (query, path or header — not a request body member) added to an EXISTING operation after this document must carry a capability token in its own description, exactly as `capabilities` members do above — `TestNewParameterOnExistingOperationHasABehaviorToken` enforces it against a frozen baseline (`internal/httpapi/testdata/pretoken_parameters.json`) of every parameter this document already had the day the rule was written. A parameter on that baseline is grandfathered and never needs one; any parameter not on it — present now or added later — must carry a token today. The baseline is written once and never regenerated: only a pre-existing, untokened parameter ever belongs on it, and a newly tokened parameter satisfies the rule without needing an entry at all. `issues.listSort` is the first deliberate use of the rule; it also closes the one gap the rule was written to catch, since `sort` itself shipped (#5666) with no token at all.
+	WireRevision int `json:"wire_revision"`
 }
 
 // CreateIssueDependency One edge created with the issue. It carries `reverse` where `BatchCreateDependency` does not, because that operation's items have no id a target could point back at and this one's issue does.
@@ -1562,6 +1592,9 @@ type Problem struct {
 	// ItemKind The `kind` of the item at `item_index`, so a client can dispatch on what the item was doing without walking its own request back.
 	ItemKind *string `json:"item_kind,omitempty"`
 
+	// MinWireRevision With `invalid_argument` / `reason: "wire_revision_unsupported"` ONLY: this server's own `ContextResponse.min_client_wire_revision`, so a client that declared a `Bd-Wire-Revision` can log exactly how far behind it is without re-deriving the number from `bd_version`. It is set on that refusal and on no other.
+	MinWireRevision *int `json:"min_wire_revision,omitempty"`
+
 	// OpenChildren With `not_closable`: how many open children the transaction that refused the close observed, read inside that transaction rather than parsed out of `detail`.
 	//
 	// PRESENT ONLY for the open-children refusal. The other `not_closable` refusal is a live blocker and carries `blockers` instead, so member presence — not prose — is how a client tells the two apart. Both are bypassed by `force`.
@@ -1572,7 +1605,7 @@ type Problem struct {
 	// With `precondition_failed`: the body member carrying the guard that missed. It is the same spelling a 400 on the same operation would use, so a client reads one member to find the offending input whichever way the request was refused.
 	Param *string `json:"param,omitempty"`
 
-	// Reason With `invalid_argument`: `unknown_parameter` (this server does not know that parameter — version skew; degrade or fall back), `invalid_value` (the value is not one this server will act on: malformed, out of vocabulary, or — for `limit=0` under `--allow-non-loopback` — legal but refused in this server's configuration; `detail` says which), or `project_mismatch` (the `Bd-Project-Id` header named a project this server does not serve — a document-level refusal like the Host-header 400, raised on every enforced route, and the one that carries `server_project_id`; see the document-level rule). Either way the recovery is to send something different, never to retry the same request. The set may grow; default-branch on unknown values.
+	// Reason With `invalid_argument`: `unknown_parameter` (this server does not know that parameter — version skew; degrade or fall back), `invalid_value` (the value is not one this server will act on: malformed, out of vocabulary, or — for `limit=0` under `--allow-non-loopback` — legal but refused in this server's configuration; `detail` says which), `project_mismatch` (the `Bd-Project-Id` header named a project this server does not serve — a document-level refusal like the Host-header 400, raised on every enforced route, and the one that carries `server_project_id`; see the document-level rule), or `wire_revision_unsupported` (the `Bd-Wire-Revision` header named a revision below `ContextResponse.min_client_wire_revision` — also a document-level refusal, raised on every route including the identity handshake, and the one that carries `min_wire_revision`; see the document-level rule and `ContextResponse.wire_revision`). Either way the recovery is to send something different, never to retry the same request. The set may grow; default-branch on unknown values.
 	Reason *string `json:"reason,omitempty"`
 
 	// RequestId Opaque correlation id for this request, echoed in the server's request log line. Never a dispatch key and never a retry key. (This server mints per-process ids that do not survive a restart; a deployment may substitute any identifier with the same log-correlation property, such as an edge trace id.)
@@ -2197,7 +2230,7 @@ type ListIssuesParams struct {
 	//
 	// THE VOCABULARY IS CLOSED, and deliberately smaller than the nine values `bd list --sort` and `GET /v0/beads/issues:query` take. Each value here is a cursor contract, not a display preference: it needs a keyset predicate and a key proven total. See the operation description for why the other seven have neither.
 	//
-	// A value outside the enum is a 400 `invalid_argument` with `param: "sort"` and `reason: "invalid_value"`. A server that predates this parameter answers `param: "sort"` with `reason: "unknown_parameter"` instead, which is the per-parameter capability probe a client can dispatch on to fall back to paging in `created` order and sorting client-side.
+	// A value outside the enum is a 400 `invalid_argument` with `param: "sort"` and `reason: "invalid_value"`. A server that predates this parameter answers `param: "sort"` with `reason: "unknown_parameter"` instead, which is the per-parameter capability probe a client can dispatch on to fall back to paging in `created` order and sorting client-side. This server also advertises the `issues.listSort` token in `ContextResponse.capabilities` for exactly that check, so a client with capabilities cached from the handshake never has to pay for the round trip an old server's `unknown_parameter` answer costs.
 	Sort *ListIssuesParamsSort `form:"sort,omitempty" json:"sort,omitempty"`
 
 	// Cursor Opaque keyset position, taken verbatim from a previous response's `next_cursor`. Clients MUST NOT construct, parse or mutate it: its encoding is server-private and versioned, and an undecodable or unknown-version value is refused with 400 `invalid_cursor`. The recovery for that refusal is normative: restart paging with no `cursor` at all — the position cannot be salvaged, and re-sending the same value cannot succeed.
