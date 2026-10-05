@@ -55,7 +55,10 @@ type scenario struct {
 	opts      storage.BatchCreateOptions
 	apply     func() publicops.ApplyBatchRequest
 	// run, when set, replaces the batch: it drives tx itself and returns
-	// the lines to compare (kept in Outcome.Skipped).
+	// the lines to compare (kept in Outcome.Skipped). The create fast paths
+	// do not gate anything a run drives, so a run scenario is applied once
+	// and checked against its golden digest only — the pre-change code's
+	// answers — not fast against per-row.
 	run func(ctx context.Context, tx *sql.Tx) ([]string, error)
 }
 
@@ -64,7 +67,7 @@ func scenarios() []scenario {
 	return []scenario{
 		{name: "small", seed: seed, afterSeed: plantStaleBlocked("s4"), batch: batch},
 		{name: "apply", seed: seedApply, apply: applyRequest},
-		{name: "depadd", seed: seedDepAdd, run: runDepAdd},
+		{name: "depadd", seed: seedDepAdd, afterSeed: plantParentCycle, run: runDepAdd},
 	}
 }
 
@@ -112,10 +115,17 @@ func runScenarios(t *testing.T, open Open, list []scenario) {
 				return
 			}
 			fast := applyScenario(t, open, sc, false)
+			if sc.run != nil {
+				if len(fast.Skipped) == 0 {
+					t.Fatalf("%s: run recorded nothing", sc.name)
+				}
+				checkGolden(t, sc.name, fast)
+				return
+			}
 			perRow := applyScenario(t, open, sc, true)
 			compareOutcomes(t, fast, perRow)
 			checkGolden(t, sc.name, fast)
-			if sc.apply == nil && sc.run == nil && (len(perRow.Skipped) == 0 || len(perRow.Tables["events"]) == 0 ||
+			if sc.apply == nil && (len(perRow.Skipped) == 0 || len(perRow.Tables["events"]) == 0 ||
 				len(perRow.Tables["bd_events_journal"]) == 0 || len(perRow.Tables["issue_versions"]) == 0) {
 				t.Fatalf("scenario exercised nothing: skipped=%d events=%d journal=%d versions=%d", len(perRow.Skipped),
 					len(perRow.Tables["events"]), len(perRow.Tables["bd_events_journal"]), len(perRow.Tables["issue_versions"]))

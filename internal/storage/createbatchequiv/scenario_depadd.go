@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
@@ -44,13 +45,30 @@ func seedDepAdd() []*types.Issue {
 		wisp(withDeps(issue("dw2", "wisp blocked by wisp"), dep(id("dw2"), id("dw1"), types.DepBlocks))),
 		withDeps(issue("dx", "issue blocked by wisp"), dep(id("dx"), "external:proj:cap", types.DepBlocks)),
 		issue("dl", "lone"),
+		issue("dk1", "legacy cyclic parent one"),
+		issue("dk2", "legacy cyclic parent two"),
+	}
+}
+
+// plantParentCycle writes a parent-child 2-cycle (dk1 <-> dk2) straight into
+// dependencies, as legacy or merged data can hold even though every write
+// path refuses it, so the probes show the walks terminate on stored cycles
+// (UNION distinct recursion over unique nodes) and answer across them.
+func plantParentCycle(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, pair := range [][2]string{{id("dk1"), id("dk2")}, {id("dk2"), id("dk1")}} {
+		if _, err := db.Exec(`INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_by, created_at, metadata)
+			VALUES (?, ?, ?, 'parent-child', 'legacy', ?, '{}')`, "legacy-"+pair[0]+"-"+pair[1], pair[0], pair[1], fixedAt); err != nil {
+			t.Fatalf("plant legacy parent cycle: %v", err)
+		}
 	}
 }
 
 func depAddNodes() []string {
 	return []string{
 		id("de"), id("de.1"), id("de.1.1"), id("de.2"), id("db1"), id("db2"), id("db3"), id("db4"),
-		id("dr"), id("dwf"), id("dc"), id("dw1"), id("dw2"), id("dx"), id("dl"), "external:proj:cap", id("dmissing"),
+		id("dr"), id("dwf"), id("dc"), id("dw1"), id("dw2"), id("dx"), id("dl"), id("dk1"), id("dk2"),
+		"external:proj:cap", id("dmissing"),
 	}
 }
 
@@ -106,6 +124,9 @@ func runDepAdd(ctx context.Context, tx *sql.Tx) ([]string, error) {
 		dep(id("dr"), "external:proj:other", types.DepBlocks), // external target
 		dep(id("de.2"), id("de.1"), types.DepParentChild),     // re-parent sideways: accepted
 		dep(id("de.1"), id("de.2"), types.DepBlocks),          // blocker is now a parent
+		dep(id("dk1"), id("dl"), types.DepBlocks),             // source on a stored parent cycle: accepted
+		dep(id("dl"), id("dk2"), types.DepBlocks),             // closes a cycle through dk2 -> dk1 -> dl
+		dep(id("dk2"), id("dk1"), types.DepBlocks),            // blocker is (cyclically) an ancestor
 	}
 	for _, d := range adds {
 		_, err := issueops.AddDependencyInTx(ctx, tx, d, "dep-writer", issueops.AddDependencyOpts{EmitEvent: true})
