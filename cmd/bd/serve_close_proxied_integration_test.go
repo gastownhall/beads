@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -370,18 +369,18 @@ func TestProxiedServerServeClose(t *testing.T) {
 		}
 		first := revisionOf(t, raw)
 
-		status, raw = sp.updateIssueRaw(t, issue.ID, `{"actor":"other-agent","patch":{"notes":"moved"}}`)
+		status, raw = sp.updateIssueRaw(t, issue.ID, `{"actor":"other-agent","patch":{"design":"moved"}}`)
 		if status != http.StatusOK {
 			t.Fatalf("the concurrent write: status = %d, want 200: %s", status, raw)
 		}
 		second := revisionOf(t, raw)
 		if second == first {
-			t.Fatalf("revision = %d after a second write; a write that does not move the token makes every guard vacuous", second)
+			t.Fatalf("revision = %q after a second write; a write that does not move the token makes every guard vacuous", second)
 		}
 
 		// The stale close. Nothing is written, and the 409 names the member.
 		status, problem := sp.closeIssue(t, issue.ID,
-			`{"actor":"http-agent","reason":"never","expected_version":`+strconv.FormatInt(first, 10)+`}`)
+			`{"actor":"http-agent","reason":"never","expected_version":`+revisionGuard(first)+`}`)
 		if status != http.StatusConflict {
 			t.Fatalf("stale close: status = %d, want 409: %v", status, problem)
 		}
@@ -396,7 +395,7 @@ func TestProxiedServerServeClose(t *testing.T) {
 		// about whether this is still the row the caller read, which force says
 		// nothing about.
 		status, problem = sp.closeIssue(t, issue.ID,
-			`{"actor":"http-agent","force":true,"expected_version":`+strconv.FormatInt(first, 10)+`}`)
+			`{"actor":"http-agent","force":true,"expected_version":`+revisionGuard(first)+`}`)
 		if status != http.StatusConflict {
 			t.Fatalf("forced stale close: status = %d, want 409 — force bypasses policy, never a precondition: %v", status, problem)
 		}
@@ -406,13 +405,13 @@ func TestProxiedServerServeClose(t *testing.T) {
 
 		// The fresh guard lands, and answers with the token the close minted.
 		status, raw = sp.closeIssueRaw(t, issue.ID,
-			`{"actor":"http-agent","reason":"shipped","expected_version":`+strconv.FormatInt(second, 10)+`}`)
+			`{"actor":"http-agent","reason":"shipped","expected_version":`+revisionGuard(second)+`}`)
 		if status != http.StatusOK {
 			t.Fatalf("guarded close: status = %d, want 200: %s", status, raw)
 		}
 		closed := revisionOf(t, raw)
 		if closed == second {
-			t.Errorf("revision = %d after a close that wrote; the token did not move", closed)
+			t.Errorf("revision = %q after a close that wrote; the token did not move", closed)
 		}
 		if shown := bdProxiedShow(t, bd, p.dir, issue.ID); string(shown.Status) != "closed" {
 			t.Fatalf("the guarded close did not land: status %q", shown.Status)
@@ -424,7 +423,7 @@ func TestProxiedServerServeClose(t *testing.T) {
 		// itself has already invalidated — which is what lets a client read
 		// `already_closed` as "and nothing has happened here since".
 		status, problem = sp.closeIssue(t, issue.ID,
-			`{"actor":"http-agent","expected_version":`+strconv.FormatInt(second, 10)+`}`)
+			`{"actor":"http-agent","expected_version":`+revisionGuard(second)+`}`)
 		if status != http.StatusConflict {
 			t.Fatalf("guarded re-close with a pre-close token: status = %d, want 409: %v", status, problem)
 		}
@@ -440,13 +439,13 @@ func TestProxiedServerServeClose(t *testing.T) {
 		}
 		afterReplay := revisionOf(t, raw)
 		if afterReplay != closed {
-			t.Errorf("revision = %d after an idempotent re-close, want the unchanged %d: a replay that writes nothing must not move the token",
+			t.Errorf("revision = %q after an idempotent re-close, want the unchanged %q: a replay that writes nothing must not move the token",
 				afterReplay, closed)
 		}
 
 		// The reopen's own guard, on the mirror. Stale first.
 		status, problem = sp.reopenIssue(t, issue.ID,
-			`{"actor":"http-agent","expected_version":`+strconv.FormatInt(second, 10)+`}`)
+			`{"actor":"http-agent","expected_version":`+revisionGuard(second)+`}`)
 		if status != http.StatusConflict {
 			t.Fatalf("stale reopen: status = %d, want 409: %v", status, problem)
 		}
@@ -460,19 +459,90 @@ func TestProxiedServerServeClose(t *testing.T) {
 		// And the loop closes: the token the last successful write answered
 		// with is the one that lands.
 		status, raw = sp.reopenIssueRaw(t, issue.ID,
-			`{"actor":"http-agent","expected_version":`+strconv.FormatInt(afterReplay, 10)+`}`)
+			`{"actor":"http-agent","expected_version":`+revisionGuard(afterReplay)+`}`)
 		if status != http.StatusOK {
 			t.Fatalf("guarded reopen: status = %d, want 200: %s", status, raw)
 		}
 		if reopened := revisionOf(t, raw); reopened == afterReplay {
-			t.Errorf("revision = %d after a reopen that wrote; the token did not move", reopened)
+			t.Errorf("revision = %q after a reopen that wrote; the token did not move", reopened)
 		}
 		if shown := bdProxiedShow(t, bd, p.dir, issue.ID); string(shown.Status) != "open" || shown.CloseReason != "" {
 			t.Errorf("the guarded reopen did not land: status %q reason %q", shown.Status, shown.CloseReason)
 		}
 	})
 
+	// THE BLOCKER-NAMING PROOF, against the CLI's own sentence. A live blocker
+	// refuses with a `blockers` member read from the refusing check's typed
+	// list, and `detail` opens with exactly what `bd close` records in
+	// failed[].error for the same refusal — so an HTTP client can render the
+	// direct route's message instead of an anonymous "blocked".
+	t.Run("a live blocker refusal names its blockers as the CLI does", func(t *testing.T) {
+		blocker := bdProxiedCreate(t, bd, p.dir, "the blocker", "-p", "1")
+		local := bdProxiedCreate(t, bd, p.dir, "blocked locally", "-p", "1")
+		if out, err := bdProxiedRun(t, bd, p.dir, "dep", "add", local.ID, blocker.ID); err != nil {
+			t.Fatalf("bd dep add: %v\n%s", err, out)
+		}
+		external := bdProxiedCreate(t, bd, p.dir, "blocked externally", "-p", "1")
+		const ref = "external:remote:payments"
+		if out, err := bdProxiedRun(t, bd, p.dir, "dep", "add", external.ID, ref); err != nil {
+			t.Fatalf("bd dep add external: %v\n%s", err, out)
+		}
+
+		for _, tc := range []struct {
+			id   string
+			want string
+		}{
+			{local.ID, `[{"id":"` + blocker.ID + `","kind":"local","type":"blocks"}]`},
+			{external.ID, `[{"id":"` + ref + `","kind":"external"}]`},
+		} {
+			status, body := sp.closeIssue(t, tc.id, `{"actor":"http-agent"}`)
+			if status != http.StatusConflict || body["code"] != "not_closable" {
+				t.Fatalf("close %s: status = %d code = %v, want 409 not_closable: %v", tc.id, status, body["code"], body)
+			}
+			if _, present := body["open_children"]; present {
+				t.Errorf("close %s: open_children on the blocker refusal: %v", tc.id, body)
+			}
+			got, err := json.Marshal(body["blockers"])
+			if err != nil {
+				t.Fatalf("re-encode blockers: %v", err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("close %s: blockers = %s, want %s", tc.id, got, tc.want)
+			}
+
+			cli := bdProxiedCloseFailedError(t, bd, p.dir, tc.id)
+			if want := cli + "; clear the blocker or close with force"; body["detail"] != want {
+				t.Errorf("close %s: detail = %q, want the CLI's failed[].error %q plus the HTTP hint", tc.id, body["detail"], cli)
+			}
+		}
+	})
+
 	sp.shutdown(t)
+}
+
+// bdProxiedCloseFailedError runs an unforced `bd close --json` of id that must
+// be refused and returns the failed[].error it reports for id — the
+// route-independent spelling of the refusal (see assertCloseFailedErrorIsTyped).
+// A closable companion rides along because the failure report is the
+// partial-batch shape: a lone refused id prints no failed[] array.
+func bdProxiedCloseFailedError(t *testing.T, bd, dir, id string) string {
+	t.Helper()
+	companion := bdProxiedCreate(t, bd, dir, "closable companion", "-p", "2")
+	stdout, stderr, err := bdProxiedRunBuffers(t, bd, dir, "close", "--json", companion.ID, id)
+	if err == nil {
+		t.Fatalf("bd close %s succeeded; it must be refused\nstdout:\n%s", id, stdout)
+	}
+	var report struct {
+		Failed []struct {
+			ID    string `json:"id"`
+			Error string `json:"error"`
+		} `json:"failed"`
+	}
+	line := lastJSONObjectLine(stderr)
+	if jsonErr := json.Unmarshal([]byte(line), &report); jsonErr != nil || len(report.Failed) != 1 || report.Failed[0].ID != id {
+		t.Fatalf("bd close %s failure report = %+v (%v)\nstderr:\n%s", id, report, jsonErr, stderr)
+	}
+	return report.Failed[0].Error
 }
 
 // bdProxiedCloseOneRaw runs `bd close --json` and decodes the one item it

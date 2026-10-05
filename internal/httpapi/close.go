@@ -76,7 +76,7 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 		Issue:         *result.Issue,
 		AlreadyClosed: !result.Changed,
 		OpenChildren:  result.OpenChildren,
-		Revision:      result.Issue.RowVersion,
+		Revision:      types.RevisionToken(result.Issue.RowVersion),
 	})
 }
 
@@ -236,8 +236,9 @@ func (s *Server) booleanMember(w http.ResponseWriter, r *http.Request, members m
 // classification is what a client adopting this endpoint gets to delete, and it
 // can only delete it if the server never does it either.
 //
-// The live-blocker refusal shares the code and carries NO member, which is what
-// makes member presence the discriminator the document promises.
+// The live-blocker refusal shares the code and carries no `open_children`,
+// which is what makes member presence the discriminator the document promises.
+// It takes ClassifyError's arm, which attaches the typed `blockers` list.
 func (s *Server) failClose(w http.ResponseWriter, r *http.Request, request issueops.CloseRequest, err error) {
 	if errors.Is(err, issueops.ErrVersionMismatch) {
 		s.fail(w, r, versionPreconditionResult(request.ExpectedVersion))

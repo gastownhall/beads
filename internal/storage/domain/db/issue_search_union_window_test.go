@@ -68,11 +68,13 @@ func (s *testSuite) unionGoSideSortKeepsTheRightSubset() {
 // unionCountsGoSideSortKeepsTheRightSubset is the same case on the counts twin,
 // and that is the twin the live callers reach. workapi.BuildQueryPlan pushes
 // SortBy and Limit straight onto the filter for any filter-expressible query —
-// no SQLLimit guard, and DefaultQueryLimit means a limit is always set — so
-// `bd query '<expr>' --sort id` and GET /v0/beads/issues/query?sort=id both
-// arrived here with SortBy "id" and a bound. Its own comment says the pushdown
-// makes "the page the first N in the requested order on every backend", which
-// was true of every key except the one IsGoSideSort names.
+// no SQLLimit guard — so `bd query '<expr>' --sort id` and
+// GET /v0/beads/issues/query?sort=id both arrive here with SortBy "id". The
+// HTTP surface still brings a bound with it, because an absent `limit`
+// parameter resolves to DefaultQueryLimit; the CLI need not, since GH#6229
+// gave a piped `bd query` the unflagged limit 0. Its own comment says the
+// pushdown makes "the page the first N in the requested order on every
+// backend", which was true of every key except the one IsGoSideSort names.
 func (s *testSuite) unionCountsGoSideSortKeepsTheRightSubset() {
 	const prefix = "bd-uw-cgos"
 	ids := s.seedTwoPlanes(prefix, 12)

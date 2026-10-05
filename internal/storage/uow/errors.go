@@ -50,3 +50,41 @@ func isDatabaseExistsError(err error) bool {
 	errLower := strings.ToLower(err.Error())
 	return strings.Contains(errLower, "database exists") || strings.Contains(errLower, "1007")
 }
+
+// isAccessDeniedError reports whether err is the server refusing an operation
+// because the connected credential is not allowed to perform it. MySQL numbers
+// these 1044 (ER_DBACCESS_DENIED_ERROR) and 1045 (ER_ACCESS_DENIED_ERROR); Dolt
+// reports the same refusals under the generic 1105 with the wording intact, so
+// the text fallback is what classifies them there.
+func isAccessDeniedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && (mysqlErr.Number == 1044 || mysqlErr.Number == 1045) {
+		return true
+	}
+	errLower := strings.ToLower(err.Error())
+	return strings.Contains(errLower, "access denied") || strings.Contains(errLower, "command denied")
+}
+
+// isDatabaseNotFoundError reports whether the server said the database does not
+// exist: MySQL 1049 (ER_BAD_DB_ERROR, "Unknown database"), or Dolt's "database
+// not found: <name>".
+//
+// A false answer is NOT evidence the database exists. A server deliberately
+// hides existence from a credential that has not been granted the database,
+// answering access-denied for present and absent names alike, so only a
+// privileged credential can tell the two apart. Callers must report the denial
+// as a denial rather than guessing absence from it.
+func isDatabaseNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1049 {
+		return true
+	}
+	errLower := strings.ToLower(err.Error())
+	return strings.Contains(errLower, "database not found") || strings.Contains(errLower, "unknown database")
+}

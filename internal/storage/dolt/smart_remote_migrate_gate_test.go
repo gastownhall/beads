@@ -141,6 +141,9 @@ func realFastForwardAdopter() *schema.FastForwardAdopter {
 		WorkingSetClean: func(ctx context.Context, db schema.DBConn) (bool, error) {
 			return versioncontrolops.WorkingSetClean(ctx, db)
 		},
+		AheadBehind: func(ctx context.Context, db schema.DBConn, ref string) (int, int, error) {
+			return versioncontrolops.LocalAheadBehind(ctx, db, ref)
+		},
 		FastForward: func(ctx context.Context, db schema.DBConn, ref string) error {
 			return versioncontrolops.FastForwardAdopt(ctx, db, ref)
 		},

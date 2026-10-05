@@ -3,8 +3,13 @@ package creds
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/testutil/credentialcmd"
 )
 
 func TestParseCredential(t *testing.T) {
@@ -108,13 +113,36 @@ func TestResolveCredentialTokenPropagatesHelperError(t *testing.T) {
 }
 
 // A real shell command flows end-to-end through CommandSource (no stub), proving the
-// sh -c runner and the bare-token path work together.
+// platform shell runner and the bare-token path work together.
 func TestCommandSourceRealShell(t *testing.T) {
 	resetCache(t)
-	src := CommandSource{Command: "printf s3cr3t", Kind: KindSecret, Label: "TEST_CMD"}
+
+	// Capture the helper's stdout as the shell actually produced it. The whole
+	// reason Emit exists rather than an echo-style emitter is byte-exact stdout
+	// across sh and the Windows .cmd trampoline — but parseCredential runs
+	// bytes.TrimSpace before every comparison (command.go), so every assertion
+	// on cred.Value is blind to a trailing "\r\n". Without the capture below,
+	// a trampoline changed to `echo %OUT%` would keep this test green while
+	// silently breaking the property the fixture was built for. Wrapping the
+	// existing package seam keeps the real shell in the loop instead of
+	// replacing it, so this stays an end-to-end assertion.
+	var rawStdout []byte
+	origRunner := credRunner
+	t.Cleanup(func() { credRunner = origRunner })
+	credRunner = func(ctx context.Context, command string) ([]byte, error) {
+		out, err := origRunner(ctx, command)
+		rawStdout = append([]byte(nil), out...)
+		return out, err
+	}
+
+	src := CommandSource{Command: credentialcmd.Emit(t, "s3cr3t"), Kind: KindSecret, Label: "TEST_CMD"}
 	cred, ok, err := src.Resolve(context.Background())
 	if err != nil || !ok {
 		t.Fatalf("resolve: ok=%v err=%v", ok, err)
+	}
+	if string(rawStdout) != "s3cr3t" {
+		t.Fatalf("helper raw stdout = %q, want exactly %q: the fixture must emit the payload with no "+
+			"trailing newline on either shell, and parseCredential's TrimSpace hides any that appears", rawStdout, "s3cr3t")
 	}
 	if cred.Value != "s3cr3t" {
 		t.Fatalf("value = %q, want s3cr3t", cred.Value)
@@ -124,5 +152,22 @@ func TestCommandSourceRealShell(t *testing.T) {
 	}
 	if cred.Source != "TEST_CMD" {
 		t.Fatalf("source = %q, want TEST_CMD", cred.Source)
+	}
+}
+
+func TestCredentialCommandFixtureProtocol(t *testing.T) {
+	resetCache(t)
+	marker := filepath.Join(t.TempDir(), "marker path with spaces")
+	src := CommandSource{Command: credentialcmd.Marker(t, marker), Kind: KindSecret, Label: "TEST_MARKER"}
+	_, ok, err := src.Resolve(context.Background())
+	if !ok || err == nil || !strings.Contains(err.Error(), "credential command produced no output") {
+		t.Fatalf("marker resolve: ok=%v err=%v, want configured empty-output error", ok, err)
+	}
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read credential command marker: %v", err)
+	}
+	if string(got) != "invoked" {
+		t.Fatalf("credential command marker = %q, want invoked", got)
 	}
 }

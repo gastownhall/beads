@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "routing",
+    srcs = ["routing.go"],
+    importpath = "github.com/steveyegge/beads/internal/routing",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/git",
+        "//internal/gitenv",
+    ],
+)
+
+go_test(
+    name = "routing_test",
+    srcs = ["routing_test.go"],
+    embed = [":routing"],
+    deps = [
+        "//internal/git",
+        "//internal/gitenv",
+    ],
+)

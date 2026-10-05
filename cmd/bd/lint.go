@@ -36,6 +36,11 @@ Section requirements by type:
   epic:     Success Criteria (or Acceptance Criteria)
   chore:    (none)
 
+Additional per-type sections can be required via config; they are ADDITIVE
+to the built-ins above (built-in requirements are never relaxed):
+
+  bd config set lint.sections.epic "Standards scorecard, Cost"
+
 Examples:
   bd lint                    # Lint all open issues
   bd lint bd-abc             # Lint specific issue

@@ -3,15 +3,19 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // TestNewDoltStoreFromConfig_NoMetadata verifies that newDoltStoreFromConfig
@@ -42,19 +46,266 @@ func TestNewDoltStoreFromConfig_NoMetadata(t *testing.T) {
 	defer store.Close()
 }
 
-// TestEmbeddedOpen_EmptyDatabaseRejected verifies that embeddeddolt.Open fails
-// with a clear error when called with an empty database name, rather than
-// deferring to a confusing "no database selected" SQL error.
-// Belt-and-suspenders defense for be-sy8 / GH#2988.
-func TestEmbeddedOpen_EmptyDatabaseRejected(t *testing.T) {
-	_, err := embeddeddolt.Open(t.Context(), t.TempDir(), "", "main")
-	if err == nil {
-		t.Fatal("expected error for empty database name")
+// TestEffectiveServerMode is a regression test for GH#6551: newDoltStoreFromConfig
+// and its read-only sibling openNonMutatingStoreFromConfig checked only
+// cfg.IsDoltServerMode(), which does not read dolt.shared-server from
+// config.yaml (deliberately, to avoid a circular import with doltserver).
+// A workspace with config.yaml but no metadata.json — the common shape of a
+// linked git worktree, since metadata.json is commonly gitignored as
+// machine-local state — therefore had its only statement of shared-server mode
+// silently ignored on these two paths, even though cmd/bd/main.go's own
+// resolution already compensates for exactly this gap (GH#3817).
+// effectiveServerMode centralizes that compensation so the paths cannot drift
+// from main.go's again.
+//
+// The config.yaml layer is the whole of the gap. BEADS_DOLT_SHARED_SERVER was
+// never ignored at these call sites: configfile.IsDoltServerMode honors it
+// itself, and normalizeLoadedConfig replaces an absent metadata.json with a
+// non-nil DefaultConfig() before the gate runs, so the old gate's `cfg != nil`
+// conjunct never short-circuited here. This test covers the env arm because it
+// is part of the helper's contract, not because it was broken.
+func TestEffectiveServerMode(t *testing.T) {
+	// The false cases assert the ABSENCE of a shared-server signal, and
+	// doltserver.IsSharedServerMode falls through to config.GetBool on the
+	// process-global config singleton, so without this they red spuriously on
+	// any machine or agent rig that enables dolt.shared-server in config.yaml
+	// — or after any earlier test in this package leaves the singleton
+	// initialized with it. The hermetic recipe is the sibling test's below.
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	t.Setenv("HOME", t.TempDir())
+	emptyDir := t.TempDir()
+	t.Setenv("BEADS_DIR", emptyDir)
+
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	if effectiveServerMode(emptyDir, nil) {
+		t.Error("effectiveServerMode(nil) = true with no shared-server signal, want false")
 	}
-	if !strings.Contains(err.Error(), "database name must not be empty") {
-		t.Errorf("unexpected error: %v", err)
+	if effectiveServerMode(emptyDir, &configfile.Config{}) {
+		t.Error("effectiveServerMode(cfg not naming server) = true with no shared-server signal, want false")
+	}
+
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	if !effectiveServerMode(emptyDir, nil) {
+		t.Error("effectiveServerMode(nil) = false under BEADS_DOLT_SHARED_SERVER=1, want true (GH#6551)")
+	}
+	if !effectiveServerMode(emptyDir, &configfile.Config{}) {
+		t.Error("effectiveServerMode(cfg not naming server) = false under BEADS_DOLT_SHARED_SERVER=1, want true (GH#6551)")
 	}
 }
+
+// TestEffectiveServerModeResolvesYamlPerWorkspace pins which config.yaml the
+// dolt.shared-server layer is resolved against. newDoltStoreFromConfig's
+// contract says activation is resolved from beadsDir's own config rather than
+// the launching workspace's, and it is the factory the CROSS-WORKSPACE opens
+// use (routed.go, create.go, init_contributor.go all pass a foreign beadsDir).
+// doltserver.IsSharedServerMode() reads process-global state, so consulting it
+// directly let a launcher whose own config.yaml enables shared-server retarget
+// a foreign workspace that explicitly asked for embedded onto the shared server
+// — a connect failure, or a same-named database holding someone else's rows.
+//
+// The two halves are a matched pair and both are load-bearing: the bound
+// workspace must keep winning over a stale metadata.json that still pins
+// dolt_mode="embedded" (main.go:1710 / shouldUseExternalDoltStatus, GH#2946),
+// so the guard cannot simply be "an explicit dolt_mode always wins".
+func TestEffectiveServerModeResolvesYamlPerWorkspace(t *testing.T) {
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+
+	root := t.TempDir()
+	launcherDir := filepath.Join(root, "launcher", ".beads")
+	foreignDir := filepath.Join(root, "foreign", ".beads")
+	for _, dir := range []string{launcherDir, foreignDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The launcher enables shared-server in its OWN config.yaml. This is the
+	// durable shape: `bd dolt shared-server on` and `bd init --shared-server`
+	// both persist the key through config.SetYamlConfig, which resolves to a
+	// .beads/config.yaml.
+	if err := os.WriteFile(filepath.Join(launcherDir, "config.yaml"), []byte("dolt:\n  shared-server: true\n  auto-start: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both workspaces carry the same explicit metadata.json statement, so the
+	// ONLY thing that differs between the two assertions below is which
+	// workspace the yaml layer is read from.
+	embeddedMeta := []byte(`{"dolt_mode":"embedded","dolt_database":"beads"}`)
+	for _, dir := range []string{launcherDir, foreignDir} {
+		if err := os.WriteFile(filepath.Join(dir, "metadata.json"), embeddedMeta, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BEADS_DIR", launcherDir)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+
+	launcherCfg, err := configfile.Load(launcherDir)
+	if err != nil {
+		t.Fatalf("load launcher metadata.json: %v", err)
+	}
+	foreignCfg, err := configfile.Load(foreignDir)
+	if err != nil {
+		t.Fatalf("load foreign metadata.json: %v", err)
+	}
+	if launcherCfg == nil || foreignCfg == nil {
+		t.Fatal("test setup: metadata.json did not load")
+	}
+
+	if !effectiveServerMode(launcherDir, launcherCfg) {
+		t.Error("effectiveServerMode(bound workspace) = false; shared-server in the workspace's own config.yaml must win over its stale dolt_mode=embedded (GH#2946)")
+	}
+	if effectiveServerMode(foreignDir, foreignCfg) {
+		t.Error("effectiveServerMode(foreign workspace) = true; the LAUNCHER's config.yaml must not retarget a workspace whose own metadata.json asks for embedded")
+	}
+}
+
+// TestEffectiveServerModeHonorsWorkspaceLocalYaml pins the SECOND project-level
+// layer. config.Initialize merges .beads/config.local.yaml last — the documented
+// place for machine-specific settings that must not be committed — so every
+// config.GetBool consumer in the tree (main.go, bootstrap, doctor,
+// migrate-dolt-mode) lets it override the tracked config.yaml. dolt.shared-server
+// is exactly that kind of state and .beads/config.yaml is git-tracked, so "the
+// repo enables it, this machine opts out" is the ordinary use of the escape
+// hatch, not an exotic shape.
+//
+// Resolving these four factories against config.yaml alone would answer that
+// shape differently from every other resolver — the same resolver-divergence
+// class GH#6551 itself is an instance of. Both directions are load-bearing and
+// the enabling one is the silent one: config.yaml false (what `bd dolt
+// shared-server off` persists) plus a local true would fall through to
+// embeddeddolt.Open and re-create the GH#6551 phantom database with no error at
+// all.
+func TestEffectiveServerModeHonorsWorkspaceLocalYaml(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		tracked string
+		local   string
+		want    bool
+	}{
+		{name: "local opts this machine out", tracked: "true", local: "false", want: false},
+		{name: "local opts this machine in", tracked: "false", local: "true", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Same hermetic recipe as the siblings: these arms are answered by
+			// the workspace's own files, but the recipe is what keeps that true
+			// if the layering below them ever changes.
+			config.ResetForTesting()
+			t.Cleanup(config.ResetForTesting)
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+			// The GH#6551 shape: config.yaml tracked, no metadata.json, so cfg
+			// arrives nil and the yaml layer is the workspace's only statement.
+			beadsDir := filepath.Join(t.TempDir(), ".beads")
+			if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("BEADS_DIR", beadsDir)
+			if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+				[]byte("dolt:\n  shared-server: "+tc.tracked+"\n  auto-start: false\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "config.local.yaml"),
+				[]byte("dolt:\n  shared-server: "+tc.local+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			// The merged reader is the oracle: whatever config.GetBool answers
+			// for this workspace is what these factories must answer, so the
+			// assertion cannot drift from the layer order it is pinning.
+			if err := config.Initialize(); err != nil {
+				t.Fatalf("config.Initialize: %v", err)
+			}
+			if got := config.GetBool("dolt.shared-server"); got != tc.want {
+				t.Fatalf("test setup: merged config.GetBool = %v, want %v (config.yaml %s + config.local.yaml %s)",
+					got, tc.want, tc.tracked, tc.local)
+			}
+
+			if got := effectiveServerMode(beadsDir, nil); got != tc.want {
+				t.Errorf("effectiveServerMode = %v, want %v: .beads/config.local.yaml (%s) must override the tracked config.yaml (%s), as config.Initialize merges it last",
+					got, tc.want, tc.local, tc.tracked)
+			}
+		})
+	}
+}
+
+// TestOpenNonMutatingStoreHonorsSharedServerConfig pins the read-only factory
+// call site, not just effectiveServerMode in isolation. A linked worktree can
+// have config.yaml tracked while metadata.json is absent; in that shape the
+// active shared server must win over the embedded read-only fallback.
+func TestOpenNonMutatingStoreHonorsSharedServerConfig(t *testing.T) {
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  shared-server: true\n  auto-start: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", readOnlySharedServerPort)
+	t.Setenv("HOME", t.TempDir())
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	if !effectiveServerMode(beadsDir, nil) {
+		t.Fatal("test setup: config.yaml did not enable shared-server mode")
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	store, err := openNonMutatingStoreFromConfig(ctx, beadsDir, false)
+	if err == nil {
+		if store != nil {
+			_ = store.Close()
+		}
+		t.Fatal("openNonMutatingStoreFromConfig unexpectedly succeeded without a server")
+	}
+	// Positive half: only the server arm dials, so a refused connection to the
+	// port this test pinned is proof the shared-server branch was taken. Both
+	// discriminators are owned outside internal/storage/dolt — a syscall
+	// sentinel and this test's own port — so a reworded connection error in a
+	// package this PR does not own cannot turn a correct implementation red.
+	if !errors.Is(err, syscall.ECONNREFUSED) && !strings.Contains(err.Error(), readOnlySharedServerPort) {
+		t.Fatalf("read-only factory did not dial the shared server; got: %v", err)
+	}
+	// Negative half: the embedded fallback must not have run.
+	if strings.Contains(err.Error(), "embeddeddolt") {
+		t.Fatalf("read-only factory fell through to the embedded store; got: %v", err)
+	}
+}
+
+// readOnlySharedServerPort is a port nothing listens on, pinned through
+// BEADS_DOLT_SERVER_PORT (the highest-priority port source in
+// internal/doltserver, so it wins over DefaultSharedServerPort) and reused by
+// the assertion, so the two cannot drift apart.
+//
+// It must be DISTINCTIVE, not merely unused: the assertion below ORs this
+// substring with errors.Is(ECONNREFUSED), so a short or common value makes that
+// half unfalsifiable — "1" matched any errno, timestamp, or port like 3306, and
+// the OR then held up wherever the dial error was not ECONNREFUSED (a context
+// deadline from the 2s timeout, or a Windows ETIMEDOUT shape), silently
+// collapsing a two-discriminator proof to a tautology. Five distinctive digits,
+// like the prime sibling's sharedServerPrimePort.
+//
+// It must also sit BELOW 32768, outside the kernel's ephemeral range (32768-60999
+// here and on the GitHub runners). Now that the substring half carries real
+// weight, a process that bound :0 and happened to land on this port would answer
+// the dial and turn the expected ECONNREFUSED into a handshake error, reddening
+// a correct implementation.
+const readOnlySharedServerPort = "19998"
 
 // TestNewDoltStoreFromConfig_HyphenatedDBName verifies that
 // newDoltStoreFromConfig auto-sanitizes hyphenated database names for embedded

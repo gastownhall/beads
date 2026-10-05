@@ -66,7 +66,7 @@ jobs:
           go-version-file: 'go.mod'
 
       - name: Install Dolt
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Configure Git and Dolt identity
         run: |
@@ -83,10 +83,18 @@ jobs:
           source ./.buildflags
 
           ci_time "install gotestsum" -- go install gotest.tools/gotestsum@v1.13.0
-          ci_time "install golangci-lint" -- go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
+          ci_time "install golangci-lint" -- ./scripts/ci/install-golangci-lint.sh
+          # install-golangci-lint.sh appends to $GITHUB_PATH, which GitHub
+          # Actions only applies to *later steps*, not later commands in this
+          # same run block. Export it here too so the "pr-lint wrapper" call
+          # below finds golangci-lint on PATH.
+          export PATH="$RUNNER_TEMP/golangci-lint:$PATH"
           status=0
           ci_time "pr-policy wrapper" -- make ci-pr-policy || status=$?
-          ci_time "pr-core gotestsum" -- gotestsum --junitfile artifacts/pr-core-junit.xml --format testdox -- -race -short -skip '^TestEmbedded' ./... || status=$?
+          # -timeout=30m keeps this in step with the lane it measures
+          # (scripts/ci/pr-core.sh). Without it ./cmd/bd can die on `go test`'s
+          # 10m default and the measurement reports a panic instead of a duration.
+          ci_time "pr-core gotestsum" -- gotestsum --junitfile artifacts/pr-core-junit.xml --format testdox -- -race -short -timeout=30m -skip '^TestEmbedded' ./... || status=$?
           ci_time "pr-lint wrapper" -- make ci-pr-lint || status=$?
           exit "$status"
 
@@ -113,7 +121,7 @@ jobs:
           go-version-file: 'go.mod'
 
       - name: Install Dolt
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Configure Git and Dolt identity
         run: |
@@ -128,7 +136,10 @@ jobs:
           source scripts/ci/lib/timing.sh
           source ./.buildflags
 
-          ci_time "macos short go test" -- go test -v -race -short -skip '^TestEmbedded' ./...
+          # -timeout=30m matches the macOS lanes this measures (pr.yml, main.yml).
+          # This is the job that produced the ./cmd/bd duration distribution, and
+          # at 10m it clips its own longest samples into timeout panics.
+          ci_time "macos short go test" -- go test -tags=gms_pure_go -v -race -short -timeout=30m -skip '^TestEmbedded' ./...
 
   macos-candidates:
     name: Measure macOS no-short candidates
@@ -144,7 +155,7 @@ jobs:
           go-version-file: 'go.mod'
 
       - name: Install Dolt
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Configure Git and Dolt identity
         run: |
@@ -177,7 +188,7 @@ jobs:
           go-version-file: 'go.mod'
 
       - name: Install Dolt
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Configure Git and Dolt identity
         run: |
@@ -222,7 +233,7 @@ jobs:
           go-version-file: 'go.mod'
 
       - name: Install Dolt
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Configure Git and Dolt identity
         run: |
@@ -287,7 +298,7 @@ jobs:
           go-version-file: 'go.mod'
 
       - name: Install Dolt
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Configure Git and Dolt identity
         run: |
@@ -355,7 +366,7 @@ jobs:
           go-version-file: 'go.mod'
 
       - name: Install Dolt
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Configure Git and Dolt identity
         run: |
@@ -423,7 +434,7 @@ jobs:
           go-version-file: 'go.mod'
 
       - name: Install Dolt
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Configure Git and Dolt identity
         run: |
@@ -493,7 +504,7 @@ jobs:
           source scripts/ci/lib/timing.sh
           source ./.buildflags
 
-          ci_time "build cmd/bd subprocess binary" -- go build -tags "$BEADS_BUILD_TAGS" -o artifacts/bd ./cmd/bd
+          ci_time "build cmd/bd subprocess binary" -- go build -tags gms_pure_go -o artifacts/bd ./cmd/bd
 
       - name: Upload prebuilt bd
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -528,7 +539,7 @@ jobs:
           path: prebuilt-bd
 
       - name: Install Dolt
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Configure Git and Dolt identity
         run: |
@@ -594,7 +605,7 @@ jobs:
           go-version-file: 'go.mod'
 
       - name: Install Dolt
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Configure Git and Dolt identity
         run: |
@@ -661,7 +672,7 @@ jobs:
           source scripts/ci/lib/timing.sh
           source ./.buildflags
 
-          ci_time "build candidate binary" -- go build -o /tmp/bd-candidate ./cmd/bd
+          ci_time "build candidate binary" -- go build -tags gms_pure_go -o /tmp/bd-candidate ./cmd/bd
           export CANDIDATE_BIN=/tmp/bd-candidate
           if [[ -z "$SMOKE_VERSION" ]]; then
             SMOKE_VERSION="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq '.[0].tagName')"
@@ -681,7 +692,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@61cbfe2efc2d4e7a8a6d56967c3c1058e846c858 # v3
+        uses: DeterminateSystems/determinate-nix-action@527f17dd63d2d60d3e5552934bc84b9a33a14d11 # v3
 
       - name: Measure commands
         run: |
@@ -757,4 +768,3 @@ jobs:
           path: artifacts/
           retention-days: 7
           if-no-files-found: ignore
-

@@ -56,6 +56,11 @@ type proxyServer struct {
 	stats       *Stats
 	stopEpoch   string
 
+	// reportUpstreamOutage answers a connection whose upstream is not
+	// serving with a MySQL error instead of a bare close; see
+	// upstream_error.go. Set for external backends only.
+	reportUpstreamOutage bool
+
 	logger      *log.Logger
 	listener    net.Listener
 	activeConns atomic.Int64
@@ -84,9 +89,11 @@ const (
 	readyDialTimeout       = 2 * time.Second
 	readyInitialBackoff    = 50 * time.Millisecond
 	readyMaxBackoff        = 1 * time.Second
+	backendDialTimeout     = 5 * time.Second
 	idleWatcherMinInterval = 1 * time.Second
 	backendStopTimeout     = 5 * time.Minute
 	tcpKeepAlivePeriod     = 30 * time.Second
+	backendHealthInterval  = 100 * time.Millisecond
 )
 
 var errIdleTimeout = errors.New("idle timeout reached")
@@ -99,6 +106,8 @@ func NewProxyServer(opts ProxyOpts) *proxyServer {
 		server:      opts.Server,
 		stats:       opts.Stats,
 		stopEpoch:   opts.StopEpoch,
+
+		reportUpstreamOutage: reportsUpstreamOutage(opts.Server),
 	}
 }
 
@@ -337,6 +346,20 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 		return nil
 	})
 	g.Go(func() error { return p.idleWatcher(gctx) })
+	g.Go(func() error {
+		t := time.NewTicker(backendHealthInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-gctx.Done():
+				return nil
+			case <-t.C:
+				if !p.server.Running(gctx) {
+					return errors.New("database server exited")
+				}
+			}
+		}
+	})
 	g.Go(func() error { return p.acceptLoop(gctx) })
 
 	runErr := g.Wait()
@@ -437,10 +460,15 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 	}()
 
 	p.stats.IncBackendDialAttempt()
-	backend, err := p.server.Dial(ctx)
+	dialCtx, cancelDial := context.WithTimeout(ctx, backendDialTimeout)
+	backend, err := p.server.Dial(dialCtx)
+	cancelDial()
 	if err != nil {
 		p.tracef("handleConn(%s) backend dial error: %v", addr, err)
 		p.stats.IncBackendDialError()
+		if p.reportUpstreamOutage && isUpstreamUnreachableDialError(err) {
+			p.writeUpstreamOutage(client, dialFailureMessage(err))
+		}
 		_ = client.Close()
 		return err
 	}
@@ -479,6 +507,16 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 		n, err := io.Copy(client, backend)
 		p.stats.AddBytesBackendToClient(n)
 		p.tracef("handleConn(%s) backend→client done (n=%d, err=%v)", addr, n, err)
+		// A MySQL server speaks first, so a backend that reaches EOF having
+		// sent nothing never served this connection: a front whose own
+		// target is gone, or a server at its connection limit or shutting
+		// down. That is not proof of an outage (see upstream_error.go), so
+		// the client retries the report briefly rather than failing on it.
+		// A client that hung up first closes backend, which makes this Copy
+		// fail rather than return a clean EOF, so that case stays silent.
+		if p.reportUpstreamOutage && n == 0 && err == nil {
+			p.writeUpstreamOutage(client, closedBeforeGreetingMessage(backend))
+		}
 		return err
 	})
 	return g.Wait()
@@ -501,6 +539,15 @@ func waitForServerReady(ctx context.Context, s server.DatabaseServer, timeout ti
 			return err
 		}
 		_ = conn.Close()
+		// The dial proves something answers on the backend's address, not
+		// that the backend does. A local backend's Start has already proved
+		// its own process owns the port (see server.DoltServer.waitReady),
+		// and while it runs nobody else can bind it, so re-checking Running
+		// after the dial closes the gap where the backend exited in between
+		// and another process took the port.
+		if !s.Running(ctx) {
+			return errors.New("database server exited during readiness check")
+		}
 		return nil
 	}, backoff.WithContext(bo, ctx))
 }

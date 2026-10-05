@@ -14,6 +14,18 @@ import (
 	"github.com/steveyegge/beads/issueops"
 )
 
+// showNotFoundHint explains that an unresolved issue ID is not proof the ID
+// never existed: bd delete and wisp purge both remove a row (and its
+// events) from the live tables with no trace left behind, so a deleted or
+// purged ID looks identical to one that was never created. bd history can
+// sometimes tell the two apart via Dolt's commit history, but that scan is
+// real, sometimes-slow work (and wisps are never committed to history at
+// all), so it's offered as a pointer rather than run automatically here
+// (ga-m6inyb).
+func showNotFoundHint(id string) string {
+	return fmt.Sprintf("this ID may have never existed, or may reference a deleted/purged record with no trace left in the live database — try 'bd history %s'", id)
+}
+
 var showCmd = &cobra.Command{
 	Use:           "show [id...] [--id=<id>...] [--current]",
 	Aliases:       []string{"view"},
@@ -87,8 +99,7 @@ var showCmd = &cobra.Command{
 			if len(args) != 1 {
 				return HandleErrorRespectJSON("watch mode requires exactly one issue ID")
 			}
-			watchIssue(ctx, args[0])
-			return nil
+			return watchIssue(ctx, args[0])
 		}
 
 		if showThread {
@@ -121,7 +132,12 @@ var showCmd = &cobra.Command{
 				if result != nil {
 					result.Close()
 				}
-				fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id, err)
+				if isNotFoundErr(err) {
+					fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+					fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHint(id))
+				} else {
+					fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id, err)
+				}
 				continue
 			}
 			if result == nil || result.Issue == nil {
@@ -129,6 +145,7 @@ var showCmd = &cobra.Command{
 					result.Close()
 				}
 				fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+				fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHint(id))
 				continue
 			}
 			issue := result.Issue
@@ -213,19 +230,34 @@ var showCmd = &cobra.Command{
 			relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
 
 			// Show dependencies - grouped by dependency type for clarity
-			depsWithMeta, _ := issueStore.GetDependenciesWithMetadata(ctx, issue.ID) // Best effort: show issue even if deps unavailable
+			// Counts first — see readDepCounts for why the order matters.
+			depCountsSnapshot := readDepCounts(ctx, issueStore, issue.ID)
+			// The errors are KEPT, not discarded: rendering stays best
+			// effort, but a FAILED listing and a SHORT one both leave the
+			// slice empty, and only the second is an unresolvable edge.
+			depsWithMeta, depsErr := issueStore.GetDependenciesWithMetadata(ctx, issue.ID) // Best effort: show issue even if deps unavailable
 			for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
 				printDepSection(sec)
 			}
 
 			// Show dependents - grouped by dependency type for clarity
-			dependentsWithMeta, _ := issueStore.GetDependentsWithMetadata(ctx, issue.ID) // Best effort: show issue even if dependents unavailable
+			dependentsWithMeta, dependentsErr := issueStore.GetDependentsWithMetadata(ctx, issue.ID) // Best effort: show issue even if dependents unavailable
 			for _, sec := range groupDepSections(dependentsWithMeta, false, relatedSeen) {
 				printDepSection(sec)
 				if sec.Type == types.DepParentChild && issue.IssueType == types.TypeEpic {
 					printEpicChildProgress(sec.Deps)
 				}
 			}
+
+			// Both listings above drop every edge whose far end has no row in
+			// this database, so a cross-repo or `external:` dependency renders
+			// as no dependency at all — indistinguishable from having none
+			// (be-lpi). --json says so in unresolvable_dependencies; say it
+			// here too, or `bd dep add x liveop-y` reports success and then
+			// `bd show x` shows nothing.
+			warnUnresolvableDepEdges(issue.ID, depCountsSnapshot,
+				depListing{rows: len(depsWithMeta), err: depsErr},
+				depListing{rows: len(dependentsWithMeta), err: dependentsErr})
 
 			printRelatedSection(relatedSeen)
 
@@ -258,7 +290,8 @@ var showCmd = &cobra.Command{
 					return jerr
 				}
 			} else {
-				return HandleErrorRespectJSON("no issues found matching the provided IDs")
+				return HandleErrorWithHintRespectJSON("no issues found matching the provided IDs",
+					"some IDs may reference deleted/purged records with no trace left in the live database — try 'bd history <id>' to check")
 			}
 		} else if foundCount > 0 {
 			maybeShowTip(store)
@@ -282,9 +315,9 @@ func init() {
 	showCmd.Flags().Bool("long", false, "Show all available fields (extended metadata, agent identity, gate fields, etc.)")
 	showCmd.Flags().Bool("refs", false, "Show issues that reference this issue (reverse lookup)")
 	showCmd.Flags().Bool("children", false, "Show only the children of this issue")
-	showCmd.Flags().String("as-of", "", "Show issue as it existed at a specific commit hash or branch (requires Dolt)")
+	showCmd.Flags().String("as-of", "", "Show issue as it existed at a specific commit hash or branch (requires Dolt; commit hashes must be the full 32-character hash from 'bd history', not a prefix)")
 	showCmd.Flags().StringArray("id", nil, "Issue ID (use for IDs that look like flags, e.g., --id=gt--xyz)")
-	showCmd.Flags().Bool("local-time", false, "Show timestamps in local time instead of UTC")
+	showCmd.Flags().Bool("local-time", false, "Show timestamps in local time instead of UTC (date-only fields are always local)")
 	showCmd.Flags().BoolP("watch", "w", false, "Watch for changes and auto-refresh display")
 	showCmd.Flags().Bool("current", false, "Show the currently active issue (in-progress, hooked, or last touched)")
 	showCmd.Flags().Bool("include-dependents", false, "Stream full dependent issues in JSON output (--json only; may be slow on hub beads)")

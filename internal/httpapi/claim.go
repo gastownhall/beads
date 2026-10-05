@@ -298,7 +298,18 @@ func (s *Server) failClaim(w http.ResponseWriter, r *http.Request, err error) {
 		s.failErr(w, r, err)
 		return
 	}
+	s.fail(w, r, claimRefusal(err))
+}
+
+// claimRefusal classifies a refused claim and attaches the extension members
+// the role's typed conflict reports. It is shared with the update's `claim`
+// member, so a claim refused on either operation reads the same.
+func claimRefusal(err error) Result {
 	res := ClassifyError(err)
+	var conflict *issueops.ClaimConflictError
+	if !errors.As(err, &conflict) {
+		return res
+	}
 	// `assignee` is documented with already_claimed only: an issue refused for
 	// its STATUS may well carry a stale assignee, and publishing it there would
 	// tell a client someone holds work they do not.
@@ -308,7 +319,7 @@ func (s *Server) failClaim(w http.ResponseWriter, r *http.Request, err error) {
 	if conflict.Status != "" {
 		res = res.WithIssueStatus(string(conflict.Status))
 	}
-	s.fail(w, r, res)
+	return res
 }
 
 // timedProvider records how long a request spent obtaining units of work, so

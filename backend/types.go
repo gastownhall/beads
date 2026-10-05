@@ -26,6 +26,7 @@ type (
 	IssueDetails                = types.IssueDetails
 	IssueFilter                 = types.IssueFilter
 	IssueSnapshot               = types.IssueSnapshot
+	IssueSummary                = types.IssueSummary
 	IssueType                   = types.IssueType
 	IssueWithCounts             = types.IssueWithCounts
 	IssueWithDependencyMetadata = types.IssueWithDependencyMetadata

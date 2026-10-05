@@ -213,16 +213,35 @@ func countFilters(q *query) issueops.CountRequest {
 		ClosedAfter:   q.timestamp("closed_after"),
 		ClosedBefore:  q.timestamp("closed_before"),
 
-		EmptyDesc:  q.boolean("empty_description"),
-		NoAssignee: q.boolean("no_assignee"),
-		NoLabels:   q.boolean("no_labels"),
+		EmptyDesc:      q.boolean("empty_description"),
+		NoAssignee:     q.boolean("no_assignee"),
+		NoLabels:       q.boolean("no_labels"),
+		MetadataFields: q.metadataFields("metadata_field"),
+		HasMetadataKey: q.str("has_metadata_key"),
 
-		// The plane switch, forwarded as the boolean the caller sent. What it
-		// MEANS — merge the wisps tier, drop templates, drop gates, and route an
-		// infra type to the ephemeral tier — is four decisions the role makes
-		// from the WORKSPACE's own infra vocabulary, which is a config load this
-		// handler must never perform.
+		// The plane switches, each forwarded as the boolean the caller sent.
+		// What include_infra MEANS — merge the wisps tier, drop templates, drop
+		// gates, and route an infra type to the ephemeral tier — is four
+		// decisions the role makes from the WORKSPACE's own infra vocabulary,
+		// which is a config load this handler must never perform.
 		IncludeInfra: q.boolean("include_infra"),
+		// include_ephemeral is the first of those four and none of the rest, so
+		// it reaches the role as its own field and never as IncludeInfra: folded
+		// into it, a plane-only count would also lose its templates and gates.
+		IncludeEphemeral: q.boolean("include_ephemeral"),
+
+		// The four scope fields behind `issues.count.scope` (S8): ParentID and
+		// ExcludeTypes are read exactly as the listing reads them (q.str("parent"),
+		// q.list("exclude_type")), because the role documents its own ParentID and
+		// ExcludeTypes as spelling ListRequest's fields identically. NoParent and
+		// ExcludeStatus have no listing counterpart to mirror — NoParent is a new
+		// boolean switch and ExcludeStatus is a Count-only capability the listing
+		// never exposed — so both are read with this file's own conventions for
+		// their kind (q.boolean, q.list) rather than a listing precedent.
+		ParentID:      q.str("parent"),
+		NoParent:      q.boolean("no_parent"),
+		ExcludeTypes:  q.list("exclude_type"),
+		ExcludeStatus: q.list("exclude_status"),
 	}
 }
 
@@ -356,15 +375,23 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		MetadataFields: q.metadataFields("metadata_field"),
 		HasMetadataKey: q.str("has_metadata_key"),
 
-		// ORDERING IS FIXED AND DIVERGES FROM `bd list` DELIBERATELY, which is
-		// why there is no `sort` parameter to decode. The cursor is a keyset
-		// position in the created order, so a first page under `bd list`'s
-		// priority-first default would make the second page skip and duplicate
-		// rows. The order is welded to the cursor contract.
-		SortBy: "created",
-
 		Limit: q.limit(),
 	}
+
+	// THE ORDER AND THE CURSOR ARE ONE DECISION. Each served order is a keyset
+	// contract — its own position shape and its own strictly-after predicate —
+	// so `sort` selects the ORDER BY and, with it, what a position means. The
+	// vocabulary is closed for that reason and not for tidiness: the seven
+	// other orders `bd list --sort` takes have no proven total key (mutable,
+	// nullable, or not expressible in SQL at all), and serving one behind a
+	// cursor would page a walk that skips and repeats rows.
+	//
+	// SortBy takes the wire value verbatim, which is safe only because the two
+	// vocabularies coincide by construction: sqlbuild.SortDefs already spells
+	// these orders `created` and `priority`, and `priority` there is exactly
+	// (priority ASC, created_at DESC, id ASC) — `bd list`'s flagless order.
+	order := listOrder(q.oneOf("sort", string(listOrderDefault), listOrders...))
+	req.SortBy = string(order)
 
 	token := q.str("cursor")
 
@@ -372,7 +399,11 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if token != "" {
-		pos, ok := decodeCursor(token)
+		// Decoded AGAINST the order this request asked for. A token minted in
+		// the other order is refused rather than reinterpreted: its instant and
+		// its id would decode perfectly and mean something else, which is a
+		// skipped-and-duplicated page served with a 200.
+		pos, ok := decodeCursor(token, order)
 		if !ok {
 			requestInfo(r.Context()).refuse(token)
 			s.fail(w, r, InvalidCursor())
@@ -380,6 +411,7 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		}
 		req.AfterCreatedAt = &pos.CreatedAt
 		req.AfterID = pos.ID
+		req.AfterPriority = pos.Priority
 	}
 	if !s.allowUnlimited(w, r, req.Limit) {
 		return
@@ -404,7 +436,10 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		// Present if and only if has_more, which the document states as a
 		// biconditional: a client that sees one and not the other has no way
 		// to know whether paging is finished.
-		if next := cursorFor(page.Items); next != "" {
+		// Minted in the order this page was SERVED in, so the token a client
+		// hands back is a position the next request can only be read against
+		// the same way.
+		if next := cursorFor(page.Items, order); next != "" {
 			body.NextCursor = &next
 		}
 	}
@@ -576,6 +611,15 @@ func invalidFilterParam(err error) (string, bool) {
 	switch {
 	case strings.HasPrefix(msg, "invalid status "):
 		return "status", true
+	// The count role's own refusals (S8 review fix): a misspelled
+	// --exclude-status entry, and --parent set together with --no-parent.
+	// Both are the ROLE's ErrValidation. They are named here the same way as
+	// the `status` row above and the metadata-key rows below, so the client
+	// learns which parameter to fix rather than reading an unclassified 500.
+	case strings.HasPrefix(msg, "invalid exclude-status "):
+		return "exclude_status", true
+	case strings.HasPrefix(msg, "--parent and --no-parent are mutually exclusive"):
+		return "no_parent", true
 	case strings.HasPrefix(msg, "invalid issue type "):
 		return "type", true
 	case strings.HasPrefix(msg, "invalid sort policy "):

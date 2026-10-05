@@ -98,6 +98,10 @@ func createBatchItem(ctx context.Context, uw UnitOfWork, request publicops.Creat
 	if !prepared.Issue.Ephemeral && !prepared.Issue.NoHistory && createContext.InfraTypes[string(prepared.Issue.IssueType)] {
 		prepared.Issue.Ephemeral = true
 	}
+	// A wisp_type is a claim of ephemerality, same as every other create path.
+	if !prepared.Issue.Ephemeral && !prepared.Issue.NoHistory && prepared.Issue.WispType != "" {
+		prepared.Issue.Ephemeral = true
+	}
 	params, useWisp, err := createParams(prepared)
 	if err != nil {
 		return nil, validationError(err)
@@ -111,5 +115,10 @@ func createBatchItem(ctx context.Context, uw UnitOfWork, request publicops.Creat
 	if err != nil {
 		return nil, storageissueops.ClassifyPublicCreateError(err)
 	}
-	return hydrateIssueOperation(ctx, uw, created.Issue, false, false)
+	hydrated, err := hydrateIssueOperation(ctx, uw, created.Issue, false, false)
+	if err != nil {
+		return nil, err
+	}
+	storageissueops.OverlayCreateTimestamps(hydrated, created.Issue)
+	return hydrated, nil
 }

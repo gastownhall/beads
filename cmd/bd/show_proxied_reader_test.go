@@ -53,8 +53,11 @@ func TestShowProxiedJSONMissingIDKeepsItsContract(t *testing.T) {
 	if err == nil {
 		t.Error("a batch that found nothing exited zero")
 	}
-	if got, want := strings.TrimSpace(stderr), "Issue "+stubMissingID+" not found"; got != want {
-		t.Errorf("stderr = %q, want %q", got, want)
+	if got, want := strings.SplitN(stderr, "\n", 2)[0], "Issue "+stubMissingID+" not found"; got != want {
+		t.Errorf("stderr first line = %q, want %q", got, want)
+	}
+	if !strings.Contains(stderr, "bd history "+stubMissingID) {
+		t.Errorf("expected stderr to hint at checking 'bd history %s', got: %q", stubMissingID, stderr)
 	}
 	if strings.Contains(stderr, stubRawNoRows) {
 		t.Errorf("stderr leaks the raw driver sentinel: %q", stderr)
@@ -99,7 +102,10 @@ func TestShowProxiedTextRouteDoesNotOpenAReader(t *testing.T) {
 	if err == nil {
 		t.Error("a batch that found nothing exited zero")
 	}
-	if got, want := strings.TrimSpace(stderr), "Issue "+stubMissingID+" not found"; got != want {
-		t.Errorf("stderr = %q, want %q", got, want)
+	if got, want := strings.SplitN(stderr, "\n", 2)[0], "Issue "+stubMissingID+" not found"; got != want {
+		t.Errorf("stderr first line = %q, want %q", got, want)
+	}
+	if !strings.Contains(stderr, "bd history "+stubMissingID) {
+		t.Errorf("expected stderr to hint at checking 'bd history %s', got: %q", stubMissingID, stderr)
 	}
 }

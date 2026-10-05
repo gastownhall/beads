@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -32,14 +31,25 @@ var ghShorthandPattern = regexp.MustCompile(`^github:([1-9]\d*)$`)
 type Tracker struct {
 	client *Client
 	config *MappingConfig
-	store  storage.Storage
+	store  tracker.Store
+}
+
+// LinkResolver returns a relationship resolver bound to this tracker's
+// repository, or nil when the tracker has not been initialized. Callers get
+// the resolver (and, through it, the repository ref scope) rather than the raw
+// REST client, so relationship sync cannot reach past the endpoints it needs.
+func (t *Tracker) LinkResolver() *LinkResolver {
+	if t.client == nil {
+		return nil
+	}
+	return NewLinkResolver(t.client)
 }
 
 func (t *Tracker) Name() string         { return "github" }
 func (t *Tracker) DisplayName() string  { return "GitHub" }
 func (t *Tracker) ConfigPrefix() string { return "github" }
 
-func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
+func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	t.store = store
 
 	token := t.getConfig(ctx, "github.token", "GITHUB_TOKEN")
@@ -226,6 +236,16 @@ func (t *Tracker) ExtractIdentifier(ref string) string {
 		return ""
 	}
 	return matches[1]
+}
+
+// RefScope returns the repository scope used to resolve external refs to issue
+// numbers for relationship sync. Refs are deliberately not resolved by issue
+// number alone: see RefScope.
+func (t *Tracker) RefScope() RefScope {
+	if t.client == nil {
+		return RefScope{}
+	}
+	return NewRefScope(t.client.BaseURL, t.client.Owner, t.client.Repo)
 }
 
 func (t *Tracker) BuildExternalRef(issue *tracker.TrackerIssue) string {

@@ -269,7 +269,7 @@ func TestBuildUpdatePatchMapsSupportedFields(t *testing.T) {
 			updates: map[string]any{storageissueops.OpSetMetadata: []string{"one=value", "two=42"}},
 			want: issueops.IssuePatch{Metadata: issueops.MetadataPatch{Set: map[string]json.RawMessage{
 				"one": json.RawMessage(`"value"`),
-				"two": json.RawMessage(`"42"`),
+				"two": json.RawMessage(`42`),
 			}}},
 		},
 		{
@@ -380,6 +380,12 @@ func TestReplacesExistingNotes(t *testing.T) {
 			name:     "same value",
 			existing: "unchanged notes",
 			fields:   map[string]any{"notes": "unchanged notes"},
+			want:     false,
+		},
+		{
+			name:     "explicit clear",
+			existing: "old notes",
+			fields:   map[string]any{"notes": ""},
 			want:     false,
 		},
 	}

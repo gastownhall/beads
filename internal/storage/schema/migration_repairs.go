@@ -31,11 +31,13 @@ type repairKey struct {
 // migration whose frozen body cannot replay on its own (0040/0041, which write
 // dolt_nonlocal_tables and self-commit) has a repair registered here.
 var preMigrationRepairs = map[repairKey]func(context.Context, DBConn) error{
-	{"schema_migrations", 40}: repairPartial0040NonlocalInsert,
-	{"schema_migrations", 41}: repairPartial0041NonlocalDelete,
-	{"schema_migrations", 47}: ensureWispTablesForMixedBlockedRecompute,
-	{"schema_migrations", 53}: repairV53RigAndSplitTargets,
-	{"schema_migrations", 58}: repairWispDependenciesForwardShape,
+	{"schema_migrations", 40}:         repairPartial0040NonlocalInsert,
+	{"schema_migrations", 41}:         repairPartial0041NonlocalDelete,
+	{"schema_migrations", 47}:         ensureWispTablesForMixedBlockedRecompute,
+	{"schema_migrations", 53}:         repairV53RigAndSplitTargets,
+	{"schema_migrations", 58}:         repairWispDependenciesForwardShape,
+	{"ignored_schema_migrations", 7}:  ensureWispIsBlockedForRecompute,
+	{"ignored_schema_migrations", 15}: ensureWispIsBlockedForRecompute,
 }
 
 // preMigrationRepair dispatches any repair registered for (source, version).
@@ -78,8 +80,53 @@ const nonlocalFrozenRowsValues = "('wisps', 'main', 'immediate'), ('wisp_*', 'ma
 // as the pass expects to find it. --skip-empty keeps the commit a clean no-op
 // if the edit staged nothing.
 func commitNonlocalRepair(ctx context.Context, db DBConn, message string) error {
-	if err := DrainCall(ctx, db, "CALL DOLT_ADD(?)", nonlocalTablesName); err != nil {
-		return fmt.Errorf("staging %s: %w", nonlocalTablesName, err)
+	return commitScopedTableChange(ctx, db, nonlocalTablesName, message)
+}
+
+// commitScopedTableChange stages exactly one table by name and commits it.
+// Both the version-40/41 repairs and the #4356 untrack reconcile need the same
+// thing — a labeled commit that carries their table and nothing else — for the
+// same two reasons, so the recipe lives here rather than in each of them:
+// DOLT_COMMIT('-Am', …) would sweep an unrelated working set into a
+// repair-labeled commit, and --skip-empty keeps a replay a clean no-op instead
+// of dying on "nothing to commit".
+//
+// It does NOT clear the staging area; a caller with anything possibly staged
+// must unstage first (see unstagePreExistingTables).
+//
+// The unforced DOLT_ADD is the right default — it keeps a clone-local table
+// out of a repair-labeled commit — but it is WRONG for a table whose own name
+// matches a seeded dolt_ignore pattern; such a caller must use
+// commitScopedIgnoredTableChange instead.
+func commitScopedTableChange(ctx context.Context, db DBConn, table, message string) error {
+	return stageAndCommitScoped(ctx, db, "CALL DOLT_ADD(?)", table, message)
+}
+
+// commitScopedIgnoredTableChange is commitScopedTableChange for the one caller
+// whose table name matches a pattern in doltIgnorePatterns: the #4356 untrack
+// scratch, which "__temp__%" covers.
+//
+// Forcing is not optional there. Unforced staging filters ignore-matched names
+// out of the staging list SILENTLY (no error), and the filter classifies purely
+// by pattern without ever consulting HEAD — so a table that IS committed at HEAD
+// is dropped exactly like a fresh one. --skip-empty then turns the empty staged
+// diff into a successful no-op, and the caller's uncommitted delete delta
+// survives forever: dolt refuses a pull on any non-add unstaged delta whether or
+// not it is ignore-matched, so the store stays wedged while dolt_status hides
+// the cause.
+//
+// Scoping still holds: '-f' widens WHICH names may be staged, never HOW MANY,
+// so this stages exactly the one table named. Like its unforced twin it does not
+// clear the staging area.
+func commitScopedIgnoredTableChange(ctx context.Context, db DBConn, table, message string) error {
+	return stageAndCommitScoped(ctx, db, "CALL DOLT_ADD('-f', ?)", table, message)
+}
+
+// stageAndCommitScoped is the shared body of the two scoped-commit helpers.
+// They differ only in whether stageSQL forces past the dolt_ignore filter.
+func stageAndCommitScoped(ctx context.Context, db DBConn, stageSQL, table, message string) error {
+	if err := DrainCall(ctx, db, stageSQL, table); err != nil {
+		return fmt.Errorf("staging %s: %w", table, err)
 	}
 	return DrainCall(ctx, db, "CALL DOLT_COMMIT('-m', ?, '--skip-empty')", message)
 }
@@ -217,6 +264,84 @@ func ensureWispTablesForMixedBlockedRecompute(ctx context.Context, db DBConn) er
 	}
 
 	return ensureWispDependenciesSplitTargets(ctx, db)
+}
+
+// ensureWispIsBlockedForRecompute repairs a drift shape in ignored/0006's own
+// guard: it no-ops (SELECT 1) when wisps does not exist yet at the moment it
+// runs, and once the ignored cursor advances past 6 that migration is never
+// pending again (pending = version > MAX(cursor); a missing low-numbered row
+// does not lower the high-water mark). wisps can be materialized without
+// is_blocked several ways -- ignored/0001's own CREATE-then-RENAME leaves an
+// existing wisps table untouched, and the main-side 0047 repair above
+// creates wisps at the wispsTableDDLForMigration0047 shape, which has no
+// is_blocked column, whenever the main pass reaches version 47 with wisps
+// entirely missing. Whichever path, a clone that ends up there permanently
+// lacks the column, and BOTH ignored/0007 and ignored/0015's frozen
+// recomputes (each an UPDATE against wisps.is_blocked) hard-fail with
+// "column 'is_blocked' could not be found in any table in scope", masking
+// the real defect behind a generic-looking SQL error.
+//
+// A cursor-6 clone is the sharper case: it reaches 0007 first, and 0007's
+// hard-fail aborts the pass before any later file -- including 0015 -- ever
+// runs. Registering this repair only at {ignored_schema_migrations, 15}
+// left such a clone permanently unrecoverable: every pass re-hits 0007's
+// hard-fail before it can advance far enough to reach the version-15 entry
+// at all. Both 0007 and 0015's shipped bodies are frozen and content-hashed
+// like the repairs above, so neither can be fixed forward with a new
+// migration either. Registering this same function at BOTH
+// {ignored_schema_migrations, 7} and {ignored_schema_migrations, 15} runs it
+// immediately before either frozen file's own SQL, self-healing a clone
+// stuck at either cursor position. The repair is idempotent -- each of its
+// two steps re-probes the live schema and no-ops once its target already
+// exists -- so hitting it twice in one pass (once before 0007, again before
+// 0015) or on a later already-healed pass merely re-confirms the column and
+// index are present rather than re-adding them. It mirrors ignored/0006's
+// own two statements so a clone that never ran 0006 to completion still
+// ends up in the shape 0006 would have produced.
+func ensureWispIsBlockedForRecompute(ctx context.Context, db DBConn) error {
+	hasWisps, err := schemaTableExists(ctx, db, "wisps")
+	if err != nil {
+		return fmt.Errorf("checking wisps table: %w", err)
+	}
+	if !hasWisps {
+		return nil
+	}
+	if err := ensureWispIsBlockedColumn(ctx, db); err != nil {
+		return err
+	}
+	return ensureWispIsBlockedIndex(ctx, db)
+}
+
+// ensureWispIsBlockedColumn is ignored/0006's ADD COLUMN statement,
+// translated to Go for a clone that reached this repair without it.
+func ensureWispIsBlockedColumn(ctx context.Context, db DBConn) error {
+	hasColumn, err := schemaColumnExists(ctx, db, "wisps", "is_blocked")
+	if err != nil {
+		return fmt.Errorf("checking wisps.is_blocked column: %w", err)
+	}
+	if hasColumn {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, "ALTER TABLE wisps ADD COLUMN is_blocked TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("adding wisps.is_blocked: %w", err)
+	}
+	return nil
+}
+
+// ensureWispIsBlockedIndex is ignored/0006's CREATE INDEX statement,
+// translated to Go alongside ensureWispIsBlockedColumn above.
+func ensureWispIsBlockedIndex(ctx context.Context, db DBConn) error {
+	hasIndex, err := schemaIndexExists(ctx, db, "wisps", "idx_wisps_is_blocked")
+	if err != nil {
+		return fmt.Errorf("checking idx_wisps_is_blocked index: %w", err)
+	}
+	if hasIndex {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, "CREATE INDEX idx_wisps_is_blocked ON wisps(is_blocked, status)"); err != nil {
+		return fmt.Errorf("creating idx_wisps_is_blocked: %w", err)
+	}
+	return nil
 }
 
 // wispsTableDDLForMigration0047 is 0020_create_wisps.up.sql's shape plus every

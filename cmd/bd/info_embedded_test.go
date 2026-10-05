@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -81,9 +82,92 @@ func TestEmbeddedInfo(t *testing.T) {
 		}
 	})
 
-	// Note: --json tests skipped — info's local --json flag shadows the
-	// root persistent flag, causing it to not produce JSON output.
-	// This is an existing bug, not related to embedded mode.
+	// ===== --json =====
+
+	infoJSON := func(t *testing.T, args ...string) map[string]interface{} {
+		t.Helper()
+		out := bdInfo(t, bd, dir, append([]string{"--json"}, args...)...)
+		var got map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("info --json %v did not emit JSON: %v\n%s", args, err, out)
+		}
+		return got
+	}
+
+	t.Run("info_json", func(t *testing.T) {
+		got := infoJSON(t)
+		if got["mode"] != "direct" {
+			t.Errorf("mode = %v, want direct", got["mode"])
+		}
+		if path, ok := got["database_path"].(string); !ok || !strings.Contains(path, ".beads") {
+			t.Errorf("database_path missing or not a .beads path: %v", got["database_path"])
+		}
+		if _, ok := got["issue_count"].(float64); !ok {
+			t.Errorf("issue_count missing or not a number: %v", got["issue_count"])
+		}
+	})
+
+	t.Run("info_schema_json", func(t *testing.T) {
+		got := infoJSON(t, "--schema")
+		schema, ok := got["schema"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("schema block missing: %v", got["schema"])
+		}
+		tables, ok := schema["tables"].([]interface{})
+		if !ok {
+			t.Fatalf("schema tables missing: %v", schema["tables"])
+		}
+		foundIssues := false
+		for _, tbl := range tables {
+			if tbl == "issues" {
+				foundIssues = true
+				break
+			}
+		}
+		if !foundIssues {
+			t.Errorf("expected 'issues' in schema tables: %v", tables)
+		}
+	})
+
+	t.Run("info_whats_new_json", func(t *testing.T) {
+		got := infoJSON(t, "--whats-new")
+		if _, ok := got["current_version"].(string); !ok {
+			t.Errorf("current_version missing or not a string: %v", got["current_version"])
+		}
+		changes, ok := got["recent_changes"].([]interface{})
+		if !ok || len(changes) == 0 {
+			t.Errorf("recent_changes missing or empty: %v", got["recent_changes"])
+		}
+	})
+}
+
+// TestEmbeddedInfoSuppressGitHooks pins GH#6027: bd info must honor
+// doctor.suppress.git-hooks the same way bd doctor does, instead of printing
+// the missing-hooks warning unconditionally.
+func TestEmbeddedInfoSuppressGitHooks(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "ih")
+	bdRunOK(t, bd, dir, "hooks", "uninstall")
+
+	const hookWarning = "Git hooks not installed"
+	if out := bdInfo(t, bd, dir); !strings.Contains(out, hookWarning) {
+		t.Fatalf("precondition: expected %q with hooks uninstalled:\n%s", hookWarning, out)
+	}
+
+	bdConfig(t, bd, dir, "set", "doctor.suppress.git-hooks", "true")
+	if out := bdInfo(t, bd, dir); strings.Contains(out, hookWarning) {
+		t.Errorf("doctor.suppress.git-hooks=true should hide %q:\n%s", hookWarning, out)
+	}
+
+	bdConfig(t, bd, dir, "set", "doctor.suppress.git-hooks", "false")
+	if out := bdInfo(t, bd, dir); !strings.Contains(out, hookWarning) {
+		t.Errorf("doctor.suppress.git-hooks=false should keep %q:\n%s", hookWarning, out)
+	}
 }
 
 // TestEmbeddedInfoConcurrent exercises info operations concurrently.

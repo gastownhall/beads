@@ -28,7 +28,9 @@
 // flips one, the assertion is updated IN THAT COMMIT with a comment naming the
 // ruling. Any OTHER assertion in this file changing is a regression, not a
 // refactor. All four have now landed; every remaining assertion is unchanged
-// from the pre-rewire CLI and must stay that way.
+// from the pre-rewire CLI and must stay that way. Waiver: the close exit-code
+// contract (#6648: partial batch failure exits nonzero) intentionally flips
+// the TestParityClose* assertions that pinned exit 0.
 //
 // Harness: the commands' RunE functions are invoked in-process against a real
 // storage.DoltStorage, with stdout/stderr captured and the returned error
@@ -284,6 +286,23 @@ func newParityEnv(t *testing.T) *parityEnv {
 	// the ambient git identity. Pin it: CI commonly sets GIT_AUTHOR_EMAIL, a developer
 	// shell usually does not, and the suite must render the same verdict in both.
 	t.Setenv("GIT_AUTHOR_EMAIL", parityOwnerEmail)
+	// bd create auto-routes by routing.DetectUserRole("."), which reads
+	// `git config beads.role` in the process's working directory and, when it
+	// is unset, prints a "beads.role not configured" warning to stderr before
+	// falling back to a URL heuristic. The pinned stderr contract is the
+	// configured case, so configure the role (maintainer: route to ".") in a
+	// global git config of this test's own, whatever repository, if any, the
+	// test binary runs in. Not GIT_CONFIG_*: the role lookup scrubs every
+	// GIT_CONFIG variable (gitenv.ScrubRoutingAndSuppression), but git also
+	// reads $XDG_CONFIG_HOME/git/config as global config.
+	xdg := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(xdg, "git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(xdg, "git", "config"), []byte("[beads]\n\trole = maintainer\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdg)
 	t.Setenv("BEADS_DIR", beadsDir)
 
 	// Pin every config key the write verbs read. config.Initialize() merges
@@ -1140,7 +1159,7 @@ func TestParityUpdateGuardsRequireFieldUpdate(t *testing.T) {
 	if res.exitCode != 1 {
 		t.Fatalf("exit = %d, want 1; stderr=%s", res.exitCode, res.stderr)
 	}
-	const want = "Error: --if-assignee/--if-status require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard\n"
+	const want = "Error: --if-assignee/--if-status/--if-revision require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard\n"
 	if res.stderr != want {
 		t.Errorf("stderr = %q, want %q", res.stderr, want)
 	}
@@ -1165,7 +1184,7 @@ func TestParityUpdateGuardsRejectClaim(t *testing.T) {
 	if res.exitCode != 1 {
 		t.Fatalf("exit = %d, want 1; stderr=%s", res.exitCode, res.stderr)
 	}
-	const want = "Error: cannot combine --if-assignee/--if-status with --claim (--claim is already an atomic compare-and-set)\n"
+	const want = "Error: cannot combine --if-assignee/--if-status/--if-revision with --claim (--claim is already an atomic compare-and-set)\n"
 	if res.stderr != want {
 		t.Errorf("stderr = %q, want %q", res.stderr, want)
 	}
@@ -1584,11 +1603,10 @@ func TestParityCloseNoIDAndNoLastTouchedExits1(t *testing.T) {
 	}
 }
 
-// TestParityClosePartialFailureExitsZero pins the close exit contract's
-// permissive half (cmd/bd/close.go:377-380): as long as ONE id settled as
-// closed, a batch with refused ids still exits 0. The refusal is reported on
-// stderr only.
-func TestParityClosePartialFailureExitsZero(t *testing.T) {
+// TestParityClosePartialFailureExitsOne pins that a batch with a refused id
+// exits 1 even when other ids closed: the refusal and an `N of M issues failed
+// to close` summary go to stderr, and the closable ids still close.
+func TestParityClosePartialFailureExitsOne(t *testing.T) {
 	env := newParityEnv(t)
 	env.seed("test-cls4", "Closable", nil)
 	env.seed("test-cls5", "Owned by another actor", func(i *types.Issue) {
@@ -1598,11 +1616,11 @@ func TestParityClosePartialFailureExitsZero(t *testing.T) {
 	env.setFlags(closeCmd, nil)
 	res := env.run(closeCmd, "test-cls4", "test-cls5")
 
-	if res.exitCode != 0 {
-		t.Fatalf("exit = %d, want 0 (partial failure is still success today)\nstderr:\n%s", res.exitCode, res.stderr)
+	if res.exitCode != 1 {
+		t.Fatalf("exit = %d, want 1 (a refused id fails the batch)\nstderr:\n%s", res.exitCode, res.stderr)
 	}
 	wantErr := fmt.Sprintf("cannot close %s: assignee is %q, actor is %q; reclaim or use --force to override\n",
-		"test-cls5", "someone-else", actor)
+		"test-cls5", "someone-else", actor) + "Error: 1 of 2 issues failed to close\n"
 	if res.stderr != wantErr {
 		t.Errorf("stderr = %q, want %q", res.stderr, wantErr)
 	}
@@ -1620,7 +1638,7 @@ func TestParityClosePartialFailureExitsZero(t *testing.T) {
 
 // TestParityCloseNothingSettledExits1 pins the strict half of the same
 // contract: when NO id settled as closed, close returns SilentExit() — exit 1
-// with no extra stdout. Source: cmd/bd/close.go:377-380 and
+// with no extra stdout. Source: cmd/bd/close.go:382-384 and
 // cmd/bd/errors.go:119-121.
 func TestParityCloseNothingSettledExits1(t *testing.T) {
 	env := newParityEnv(t)
@@ -1639,6 +1657,12 @@ func TestParityCloseNothingSettledExits1(t *testing.T) {
 	}
 	if res.stdout != "" {
 		t.Errorf("stdout = %q, want empty (SilentExit prints nothing itself)", res.stdout)
+	}
+	// The batch summary is multi-id ONLY. A single refused id already names
+	// itself on stderr, so adding `N of M issues failed to close` to it would
+	// be noise — and this is the sole assertion pinning that suppression.
+	if strings.Contains(res.stderr, "issues failed to close") {
+		t.Errorf("stderr = %q, want no batch summary for a single id", res.stderr)
 	}
 	if got := env.lastTouched(); got != "" {
 		t.Errorf("last-touched = %q, want it untouched when nothing settled", got)
@@ -1672,6 +1696,42 @@ func TestParityCloseAlreadyClosedIsIdempotentSuccess(t *testing.T) {
 	}
 	if n := countOf(env.eventTypes("test-cls7"), string(types.EventClosed)); n != closedEventsAfterFirst {
 		t.Errorf("closed events = %d, want %d (a re-close must add none)", n, closedEventsAfterFirst)
+	}
+}
+
+// TestParityCloseIfRevisionRejectsContinueSuggestNextClaimNext pins
+// mc-zndi7.76 (gap 4 / mutant ML): --if-revision's single-id compare-and-swap
+// bypass (cmd/bd/close.go:109-117) never looks at --continue, --suggest-next
+// or --claim-next, so honoring any of them would silently drop what the
+// caller asked for instead of reporting it. Each of the three flags is
+// refused independently, before any write.
+func TestParityCloseIfRevisionRejectsContinueSuggestNextClaimNext(t *testing.T) {
+	for _, flag := range []string{"continue", "suggest-next", "claim-next"} {
+		t.Run(flag, func(t *testing.T) {
+			env := newParityEnv(t)
+			seeded := env.seed("test-clsifr-"+flag, "Guarded close vs "+flag, nil)
+			rev := env.get(seeded.ID).RowVersion
+
+			env.setFlags(closeCmd, map[string]string{
+				"if-revision": fmt.Sprintf("%d", rev),
+				flag:          "true",
+			})
+			res := env.run(closeCmd, seeded.ID)
+
+			if res.exitCode != 1 {
+				t.Fatalf("exit = %d, want 1\nstderr:\n%s", res.exitCode, res.stderr)
+			}
+			const want = "Error: --if-revision does not support --continue, --suggest-next, or --claim-next\n"
+			if res.stderr != want {
+				t.Errorf("stderr = %q, want %q", res.stderr, want)
+			}
+			if got := env.get(seeded.ID); got.Status == types.StatusClosed {
+				t.Error("the issue must not have been closed")
+			}
+			if got := env.store.mutations(); len(got) != 0 {
+				t.Errorf("store mutations = %v, want none (rejected pre-write)", got)
+			}
+		})
 	}
 }
 

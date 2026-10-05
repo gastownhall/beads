@@ -121,6 +121,32 @@ func IsSharedServerMode() bool {
 	return config.GetBool("dolt.shared-server")
 }
 
+// IsSharedServerModeForDir resolves shared-server mode for a diagnostic target.
+// A process environment override remains authoritative. Otherwise an explicit
+// target config wins over the active workspace's merged config.
+func IsSharedServerModeForDir(beadsDir string) bool {
+	if raw, ok := os.LookupEnv("BEADS_DOLT_SHARED_SERVER"); ok && strings.TrimSpace(raw) != "" {
+		enabled, err := strconv.ParseBool(strings.TrimSpace(raw))
+		return err == nil && enabled
+	}
+	if raw := strings.TrimSpace(config.GetStringFromDir(beadsDir, "dolt.shared-server")); raw != "" {
+		enabled, err := strconv.ParseBool(raw)
+		return err == nil && enabled
+	}
+	return config.GetBool("dolt.shared-server")
+}
+
+// ResolveServerDirForTarget returns the state directory belonging to a
+// diagnostic target rather than whichever workspace launched the process.
+func ResolveServerDirForTarget(beadsDir string) string {
+	if IsSharedServerModeForDir(beadsDir) {
+		if dir, err := SharedServerPath(); err == nil {
+			return dir
+		}
+	}
+	return beadsDir
+}
+
 func IsDebugMode() bool {
 	if v := os.Getenv("BEADS_DOLT_DEBUG"); v == "1" || strings.EqualFold(v, "true") {
 		return true
@@ -220,7 +246,7 @@ func isFalsyBool(s string) bool {
 	return err == nil && !b
 }
 
-// readyTimeout returns the timeout used by waitForReady when starting the
+// readyTimeout returns the timeout awaitOwnedListener uses when starting the
 // dolt sql-server. Defaults to 10 seconds, but can be overridden via the
 // BEADS_DOLT_READY_TIMEOUT environment variable (positive integer seconds).
 // First-run Dolt SQL engine initialization can take ~60s on slower hardware
@@ -336,6 +362,15 @@ type Config struct {
 	Port     int        // MySQL protocol port (0 = allocate ephemeral port on Start)
 	Host     string     // Bind address (default: 127.0.0.1)
 	Mode     ServerMode // Server ownership mode (Owned, External, Embedded)
+	// RemotesAPIPort is the configured Dolt remotesapi listener. Zero means
+	// disabled. Unlike the SQL port, bd never assigns this implicitly: opening a
+	// network replication endpoint must be an explicit operator decision.
+	//
+	// CAVEAT: dolt sql-server binds the remotesapi listener on all interfaces
+	// and serves it unauthenticated, unlike the managed SQL listener on
+	// cfg.Host (normally 127.0.0.1). Only enable it where a firewall, private
+	// interface, or tunnel bounds who can reach the port.
+	RemotesAPIPort int
 
 	// PortSource records which step of the precedence chain (see
 	// portSources) resolved Port. PortSourceUnset when Port == 0. Callers
@@ -360,10 +395,11 @@ type Config struct {
 
 // State holds runtime information about a managed server.
 type State struct {
-	Running bool   `json:"running"`
-	PID     int    `json:"pid"`
-	Port    int    `json:"port"`
-	DataDir string `json:"data_dir"`
+	Running        bool   `json:"running"`
+	PID            int    `json:"pid"`
+	Port           int    `json:"port"`
+	RemotesAPIPort int    `json:"remotesapi_port,omitempty"`
+	DataDir        string `json:"data_dir"`
 }
 
 // file paths within .beads/
@@ -381,8 +417,10 @@ func maxDoltServers() int {
 // allocateEphemeralPort asks the OS for a free TCP port on host.
 // It binds to port 0, reads the assigned port, and closes the listener.
 // The caller should pass the returned port to dolt sql-server promptly
-// to minimize the TOCTOU window.
-func allocateEphemeralPort(host string) (int, error) {
+// to minimize the TOCTOU window; Start still has to prove the server it
+// launched is the one that bound it (see awaitOwnedListener). A var so tests
+// can hand Start a port another process holds.
+var allocateEphemeralPort = func(host string) (int, error) {
 	ln, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
 	if err != nil {
 		return 0, fmt.Errorf("allocating ephemeral port: %w", err)
@@ -542,6 +580,100 @@ func ReadPortFile(beadsDir string) int {
 	return readPortFile(beadsDir)
 }
 
+// ManagesLiveServerOnPort reports whether beadsDir has a dolt sql-server that
+// bd brought under management FOR IT and that is still alive on port. It is
+// the affirmative proof of ownership available from local state: bd writes
+// both state files in Start(), so a workspace that can show a live PID beside
+// a port file naming the port a caller is actually connected on is a workspace
+// whose server bd started — or adopted — for itself. Two file reads and a
+// signal 0 cannot separate those two, which is why the invariant is stated
+// that way; see the residual gaps below.
+//
+// The absence of that proof is what matters at the call sites. An operator who
+// points bd at an endpoint — through BEADS_DOLT_SERVER_PORT, a config.yaml
+// pin, `bd init --server-port`, or a hand-built library Config — produces no
+// state files at all, because bd never started anything. Nothing else about
+// the connection distinguishes the two: both end as "a local TCP dolt
+// sql-server on port N".
+//
+// Read-only, deliberately. IsRunning answers a similar question but repairs as
+// it goes: it deletes stale PID and port files, and will stop an orphaned
+// server whose port it cannot determine. Callers that are merely classifying a
+// connection must not mutate a workspace's server state as a side effect, so
+// this duplicates the two cheap checks rather than reusing IsRunning.
+//
+// Two residual gaps remain, both of which answer "owned" for a server bd did
+// not launch. Both are narrower than what trusting the port file alone — or
+// ResolveServerMode alone — left open, and #6123 owns closing them as part of
+// reconciling the four resolvers that answer "is this dolt server ours?".
+//
+// Adopted server (the wider of the two). Start() writes these same two state
+// files for a server it adopts rather than launches: reclaimPort returns the
+// PID of a dolt process whose CWD is this workspace's dolt dir, and Start
+// records that foreign PID and the port before reporting Running. So an
+// operator running `dolt sql-server` over .beads/dolt under systemd or a
+// container — exactly the operator portConflictDiagnostics addresses — mints
+// this proof by typing `bd dolt start`.
+//
+// Typing it is not required, though, and the effect does not wear off. The
+// storage layer dials with a 500 ms timeout, so any open that times out —
+// under load, or inside a systemd/container restart window — reaches the same
+// adopt branch through its auto-start path with no operator action at all.
+// Nothing suppresses that by default for the topology this predicate exists to
+// gate: when the endpoint comes only from BEADS_DOLT_SERVER_PORT,
+// ResolveServerMode still answers Owned (that is the bug being closed here), so
+// EnsureRunningDetailed's ServerModeExternal branch never fires and Start()
+// proceeds. Once the adopt branch has written the two files they stay:
+// IsRunning clears them only for a PID that is corrupt, dead, or not dolt, and
+// an adopted server is a live dolt process on all three counts. The workspace
+// then answers "owned" from that point on, so a single timed-out dial disarms
+// the gate permanently.
+//
+// One setting does suppress it: `dolt.auto-start: false` (or
+// BEADS_DOLT_AUTO_START=0) fails serverOpenCanAutoStart and IsAutoStartDisabled,
+// so a timed-out open errors instead of adopting. That closes the incidental
+// route only — `bd dolt start` never consults either check, so the deliberate
+// route above stays open. It is the one mitigation an operator has while #6123
+// is open.
+//
+// Closing it means recording adoption distinctly from launch (skip the write on
+// the adopt branch, or mark it so this helper declines it), which is a behavior
+// change on the auto-start path and belongs with #6123 rather than in a
+// gate-hardening patch — though incidental and permanent is a sharper argument
+// for #6123 than a resolver tidy-up would be. It is unix-only in practice:
+// isProcessInDir returns false on Windows, so reclaimPort never takes the
+// CWD-match adopt branch there.
+//
+// Recycled PID (narrower). This stops short of IsRunning's isDoltProcess()
+// command-name check, which shells out to `ps` (PowerShell on Windows) —
+// measured at hundreds of milliseconds on a busy machine, and this runs on
+// every writable open. So: the recorded server died, an unrelated live process
+// inherited its PID number, AND the port file still names the port some other
+// server now answers on. It fails toward "owned" only when all three coincide.
+// Note that isDoltProcess here would close only this gap, not the adopted-server
+// one — reclaimPort already requires isDoltProcess before it will adopt.
+//
+// Callers needing certainty over latency should use IsRunning.
+func ManagesLiveServerOnPort(beadsDir string, port int) bool {
+	if beadsDir == "" || port <= 0 {
+		return false
+	}
+	// The port file first: it is the cheaper read, and a workspace pointed at
+	// somebody else's endpoint usually has no port file at all.
+	if readPortFile(beadsDir) != port {
+		return false
+	}
+	data, err := os.ReadFile(pidPath(beadsDir))
+	if err != nil {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return false
+	}
+	return isProcessAlive(pid)
+}
+
 // PortFileSnapshot captures the exact prior contents of a project's port
 // file, so a caller that speculatively lets EnsureRunningDetailed write a
 // new one can restore the pre-call state exactly if it later decides not to
@@ -605,7 +737,11 @@ func RestorePortFile(beadsDir string, snap PortFileSnapshot) error {
 }
 
 func configYamlPort(beadsDir string) int {
-	path := filepath.Join(ResolveDoltDir(beadsDir), "config.yaml")
+	return configYamlPortAtDoltDir(ResolveDoltDir(beadsDir))
+}
+
+func configYamlPortAtDoltDir(doltDir string) int {
+	path := filepath.Join(doltDir, "config.yaml")
 	if _, err := os.Stat(path); err != nil {
 		return 0
 	}
@@ -649,6 +785,22 @@ const (
 	// resolved (GH#3545): the user asserted a remote host, so bd fills in
 	// the default port rather than dialing :0 or allocating locally.
 	PortSourceExternalHostDefault PortSource = "external_host_default"
+	// PortSourceCallerExplicit is an already-nonzero Config.ServerPort set by
+	// the caller before applyConfigDefaults runs (e.g. `bd init
+	// --server-port`, or initGlobalDatabaseConfig's copy-forward of it) —
+	// a direct user/tooling assertion, outranking the
+	// BEADS_DOLT_SERVER_PORT/BEADS_DOLT_PORT env vars (be-wf9a.1).
+	PortSourceCallerExplicit PortSource = "caller_explicit"
+	// PortSourceSharedServerDefault is DefaultSharedServerPort (3308), filled
+	// in when shared-server mode is on and no other source resolved a port.
+	// NOT authoritative: bd picked it on the user's behalf, exactly like the
+	// port file. It exists so DefaultConfig never returns a nonzero Port with
+	// PortSourceUnset — without it, a bd-chosen shared default is
+	// indistinguishable from a caller assertion and applyConfigDefaults
+	// stamps it PortSourceCallerExplicit, which silently disables the
+	// BEADS_DOLT_SERVER_PORT override and turns a benign auto-start port
+	// change into a hard failure (GH#4052, be-9tju).
+	PortSourceSharedServerDefault PortSource = "shared_server_default"
 )
 
 // IsAuthoritative reports whether this source represents a user (or
@@ -658,7 +810,7 @@ const (
 // authoritative one (GH#4052).
 func (s PortSource) IsAuthoritative() bool {
 	switch s {
-	case PortSourceEnv, PortSourceDoltConfigYaml, PortSourceConfigYaml, PortSourceMetadataJSON:
+	case PortSourceEnv, PortSourceDoltConfigYaml, PortSourceConfigYaml, PortSourceMetadataJSON, PortSourceCallerExplicit:
 		return true
 	default:
 		return false
@@ -752,6 +904,137 @@ func PortSourceLabels() []string {
 	return labels
 }
 
+func resolveServerPortForMode(workspaceBeadsDir, serverDir string, sharedMode, skipPortFile bool) (int, PortSource) {
+	if raw := strings.TrimSpace(os.Getenv("BEADS_DOLT_SERVER_PORT")); raw != "" {
+		if port, err := strconv.Atoi(raw); err == nil && port > 0 {
+			return port, PortSourceEnv
+		}
+	}
+	if !skipPortFile {
+		if port := readPortFile(serverDir); port > 0 {
+			return port, PortSourcePortFile
+		}
+	}
+
+	doltDir := projectDoltDirPath(workspaceBeadsDir)
+	if sharedMode {
+		if sharedDoltDir, err := SharedDoltPath(); err == nil {
+			doltDir = sharedDoltDir
+		}
+	}
+	if port := configYamlPortAtDoltDir(doltDir); port > 0 {
+		return port, PortSourceDoltConfigYaml
+	}
+
+	if !sharedMode {
+		if raw := strings.TrimSpace(config.GetStringFromDir(workspaceBeadsDir, "dolt.port")); raw != "" {
+			if port, err := strconv.Atoi(raw); err == nil && port > 0 {
+				return port, PortSourceConfigYaml
+			}
+		}
+	}
+	if raw := strings.TrimSpace(config.GetUserYamlConfig("dolt.port")); raw != "" {
+		if port, err := strconv.Atoi(raw); err == nil && port > 0 {
+			return port, PortSourceConfigYaml
+		}
+	}
+
+	metadataDir := workspaceBeadsDir
+	if sharedMode {
+		metadataDir = serverDir
+	}
+	if cfg, err := configfile.Load(metadataDir); err == nil && cfg != nil && cfg.DoltServerPort > 0 {
+		return cfg.DoltServerPort, PortSourceMetadataJSON
+	}
+	return 0, PortSourceUnset
+}
+
+type serverPortResolver func(workspaceBeadsDir, serverDir string, sharedMode, skipPortFile bool) (int, PortSource)
+
+func resolveServerPortFromActiveSources(_ string, serverDir string, sharedMode, skipPortFile bool) (int, PortSource) {
+	for _, src := range portSources {
+		if skipPortFile && src.source == PortSourcePortFile {
+			continue
+		}
+		if port, ok := src.resolve(serverDir); ok {
+			return port, src.source
+		}
+	}
+	return 0, PortSourceUnset
+}
+
+const remotesAPIPortConfigKey = "dolt.remotesapi-port"
+
+// ResolveRemotesAPIPort returns the effective port for a target workspace.
+func ResolveRemotesAPIPort(beadsDir string) int {
+	return ResolveRemotesAPIPortForMode(beadsDir, IsSharedServerModeForDir(beadsDir))
+}
+
+// ResolveRemotesAPIPortForMode resolves the effective remotesapi port for an
+// already-classified target. Environment overrides every mode. A shared server
+// then reads its one machine-global value, defaulting to disabled so merely
+// enabling shared-server mode never opens a listener. Non-shared external
+// federation retains the historical configfile default (8080).
+func ResolveRemotesAPIPortForMode(beadsDir string, sharedMode bool) int {
+	if raw, ok := os.LookupEnv("BEADS_DOLT_REMOTESAPI_PORT"); ok && strings.TrimSpace(raw) != "" {
+		if port, valid := parseOptionalPort(raw); valid {
+			return port
+		}
+		// A malformed override is not an instruction to disable a valid
+		// persisted setting; follow the existing configfile getter convention
+		// and fall through.
+	}
+	if sharedMode {
+		if port, valid := parseOptionalPort(config.GetUserYamlConfig(remotesAPIPortConfigKey)); valid {
+			return port
+		}
+		return 0
+	}
+	if _, err := os.Stat(configfile.ConfigPath(beadsDir)); err == nil {
+		if cfg, loadErr := configfile.Load(beadsDir); loadErr == nil && cfg != nil {
+			return cfg.GetDoltRemotesAPIPort()
+		}
+	}
+	return configfile.DefaultDoltRemotesAPIPort
+}
+
+func checkRemotesAPIPortAvailable(port int) error {
+	if port <= 0 {
+		return nil
+	}
+	listener, err := net.Listen("tcp", net.JoinHostPort("", strconv.Itoa(port)))
+	if err != nil {
+		return fmt.Errorf("configured remotesapi port %d is unavailable: %w", port, err)
+	}
+	return listener.Close()
+}
+
+// ProbeRemotesAPI reports whether a local remotesapi listener accepts TCP
+// connections. Unlike ProbeSQLServer there is no MySQL greeting to drain.
+func ProbeRemotesAPI(port int) bool {
+	if port <= 0 {
+		return false
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 500*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+func parseOptionalPort(raw string) (int, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, false
+	}
+	port, err := strconv.Atoi(raw)
+	if err != nil || port < 0 || port > 65535 {
+		return 0, false
+	}
+	return port, true
+}
+
 // DefaultConfig returns config with sensible defaults. Port resolution walks
 // portSources in priority order (see PortSourceLabels) and returns port 0
 // when no source provides one, meaning Start() should allocate an ephemeral
@@ -760,44 +1043,51 @@ func PortSourceLabels() []string {
 // The port file (dolt-server.port) is written by Start() with the actual
 // listening port, so already-running-server connections use the right port.
 func DefaultConfig(beadsDir string) *Config {
-	// In shared mode, use the shared server directory for port resolution
-	sharedMode := false
-	if IsSharedServerMode() {
+	return defaultConfigForMode(beadsDir, IsSharedServerMode(), resolveServerPortFromActiveSources)
+}
+
+// DefaultConfigForMode resolves server configuration for an already-classified
+// target. Diagnostics use this when inspecting a workspace other than the
+// active one so process-global mode cannot change its data/state/port paths.
+func DefaultConfigForMode(beadsDir string, sharedMode bool) *Config {
+	return defaultConfigForMode(beadsDir, sharedMode, resolveServerPortForMode)
+}
+
+func defaultConfigForMode(beadsDir string, sharedMode bool, resolvePort serverPortResolver) *Config {
+	workspaceBeadsDir := beadsDir
+	if sharedMode {
 		if sharedDir, err := SharedServerDir(); err == nil {
 			beadsDir = sharedDir
-			sharedMode = true
 		}
 	}
 
+	mode := ResolveServerModeForMode(workspaceBeadsDir, sharedMode)
 	cfg := &Config{
 		BeadsDir: beadsDir,
 		Host:     "127.0.0.1",
-		Mode:     ResolveServerMode(beadsDir),
+		Mode:     mode,
 	}
-
-	for _, src := range portSources {
-		if port, ok := src.resolve(beadsDir); ok {
-			cfg.Port = port
-			cfg.PortSource = src.source
-			cfg.PortSharedServer = sharedMode
-			break
-		}
+	if sharedMode {
+		cfg.RemotesAPIPort = ResolveRemotesAPIPortForMode(workspaceBeadsDir, true)
 	}
+	cfg.Port, cfg.PortSource = resolvePort(workspaceBeadsDir, beadsDir, sharedMode, false)
+	cfg.PortSharedServer = sharedMode
 
 	// Port 0 means "no configured port". In shared mode, use the fixed
 	// shared server port. In per-project mode, Start() will allocate an
 	// ephemeral port from the OS (GH#2098, GH#2372).
-	if cfg.Port == 0 && IsSharedServerMode() {
+	if cfg.Port == 0 && sharedMode {
 		cfg.Port = DefaultSharedServerPort // 3308 - avoids orchestrator conflict on 3307
+		cfg.PortSource = PortSourceSharedServerDefault
 		cfg.PortSharedServer = true
 	}
 
 	// Host-inferred external config (GH#3545): the server lives on
 	// another machine.
-	if cfg.Mode == ServerModeExternal {
+	if cfg.Mode == ServerModeExternal && !sharedMode {
 		fc := &configfile.Config{}
-		if _, err := os.Stat(configfile.ConfigPath(beadsDir)); err == nil {
-			if loaded, loadErr := configfile.Load(beadsDir); loadErr == nil && loaded != nil {
+		if _, err := os.Stat(configfile.ConfigPath(workspaceBeadsDir)); err == nil {
+			if loaded, loadErr := configfile.Load(workspaceBeadsDir); loadErr == nil && loaded != nil {
 				fc = loaded
 			}
 		}
@@ -821,19 +1111,8 @@ func DefaultConfig(beadsDir string) *Config {
 			// lower-priority authoritative sources (listener.port,
 			// dolt.port, metadata dolt_server_port) still apply.
 			if cfg.PortSource == PortSourcePortFile {
-				cfg.Port = 0
-				cfg.PortSource = PortSourceUnset
-				for _, src := range portSources {
-					if src.source == PortSourcePortFile {
-						continue
-					}
-					if port, ok := src.resolve(beadsDir); ok {
-						cfg.Port = port
-						cfg.PortSource = src.source
-						cfg.PortSharedServer = sharedMode
-						break
-					}
-				}
+				cfg.Port, cfg.PortSource = resolvePort(workspaceBeadsDir, beadsDir, false, true)
+				cfg.PortSharedServer = false
 			}
 			// With no configured port, dial the documented default
 			// 3307, not :0 — there is no local Start() to allocate
@@ -903,11 +1182,13 @@ func IsRunning(beadsDir string) (*State, error) {
 		_ = os.Remove(pidPath(beadsDir))
 		return &State{Running: false}, nil
 	}
+	cfg := DefaultConfig(beadsDir)
 	return &State{
-		Running: true,
-		PID:     pid,
-		Port:    port,
-		DataDir: ResolveDoltDir(beadsDir),
+		Running:        true,
+		PID:            pid,
+		Port:           port,
+		RemotesAPIPort: cfg.RemotesAPIPort,
+		DataDir:        ResolveDoltDir(beadsDir),
 	}, nil
 }
 
@@ -937,13 +1218,45 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 		fmt.Fprintf(os.Stderr, "Info: Orchestrator detected (GT_ROOT set). Shared server uses port %d to avoid conflict.\n", DefaultSharedServerPort)
 	}
 
+	// Steady-state fast path, deliberately lock-free. This is every bd
+	// command's store-open path, and it mutates no lifecycle state. Taking the
+	// exclusive lifecycle flock here would queue every bd command on the
+	// machine behind a single wedged holder, with no timeout and nothing
+	// printed. Racing a concurrent start is safe: the slow path below
+	// re-checks under the lock and startLocked re-checks again, so the worst
+	// case for a stale "not running" read is one wasted acquire.
 	state, err := IsRunning(serverDir)
 	if err != nil {
 		return 0, false, err
 	}
 	if state.Running {
-		_ = EnsurePortFile(serverDir, state.Port)
-		return state.Port, false, nil
+		return adoptRunningServer(serverDir, state), false, nil
+	}
+
+	lockF, lockErr := acquireLifecycleLock(serverDir)
+	if lockErr != nil {
+		return 0, false, lockErr
+	}
+	locked := true
+	defer func() {
+		if locked {
+			releaseLifecycleLock(lockF)
+		}
+	}()
+
+	// Re-check under the lock: another bd process may have started the server
+	// while we were waiting to acquire.
+	state, err = IsRunning(serverDir)
+	if err != nil {
+		return 0, false, err
+	}
+	if state.Running {
+		// Release before adopting. adoptRunningServer dials the remotesapi
+		// listener, and a per-waiter 500ms probe inside the exclusive region
+		// is precisely the serialization the fast path above exists to avoid.
+		releaseLifecycleLock(lockF)
+		locked = false
+		return adoptRunningServer(serverDir, state), false, nil
 	}
 
 	// If the server mode is External (explicit port in metadata.json,
@@ -989,7 +1302,7 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 			"  To check status: bd dolt status", cfg.Port)
 	}
 
-	s, err := Start(serverDir)
+	s, err := startLocked(serverDir)
 	if err != nil {
 		return 0, false, err
 	}
@@ -1037,7 +1350,7 @@ func ServerSpawnEnv() []string {
 // Debug mode also raises --loglevel from the default warning to debug;
 // the connection-log spam concern that motivated the warning floor is
 // the price of opting into debug.
-func buildDoltServerArgs(host string, port int, debug bool, profDir string) []string {
+func buildDoltServerArgs(host string, port, remotesAPIPort int, debug bool, profDir string) []string {
 	var args []string
 	if debug {
 		args = append(args, "--prof", "cpu", "--prof-path", profDir)
@@ -1047,6 +1360,9 @@ func buildDoltServerArgs(host string, port int, debug bool, profDir string) []st
 		"-H", host,
 		"-P", strconv.Itoa(port),
 	)
+	if remotesAPIPort > 0 {
+		args = append(args, "--remotesapi-port", strconv.Itoa(remotesAPIPort))
+	}
 	if debug {
 		args = append(args, "--loglevel=debug")
 	} else {
@@ -1168,7 +1484,7 @@ func resolveCfgDir(doltDir string) (string, error) {
 // this field, and Dolt's YAML loader uses yaml.UnmarshalStrict, so an
 // unrecognized key is a hard parse error at server startup, not a
 // silently-ignored one.
-func buildDoltServerYAMLConfig(host string, port int, debug bool, cfgDir string) ([]byte, error) {
+func buildDoltServerYAMLConfig(host string, port, remotesAPIPort int, debug bool, cfgDir string) ([]byte, error) {
 	logLevel := doltServerLogLevel
 	if debug {
 		logLevel = "debug"
@@ -1186,6 +1502,9 @@ func buildDoltServerYAMLConfig(host string, port int, debug bool, cfgDir string)
 				ArchiveLevel_: &archiveLevel,
 			},
 		},
+	}
+	if remotesAPIPort > 0 {
+		yc.RemotesapiConfig.Port_ = &remotesAPIPort
 	}
 	return yaml.Marshal(yc)
 }
@@ -1206,46 +1525,99 @@ func buildDoltServerArgsWithConfig(configPath string, debug bool, profDir string
 	return args
 }
 
+// acquireLifecycleLock takes the exclusive lifecycle flock for beadsDir.
+//
+// The wait is unbounded, so it follows the two-step pattern the pre-unification
+// Start used: try once without blocking, and only if another bd process holds
+// the lock say so on stderr before blocking. A silent indefinite hang is the
+// one failure mode an untimed flock must not have.
+func acquireLifecycleLock(beadsDir string) (*os.File, error) {
+	lockF, err := os.OpenFile(lockPath(beadsDir), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("creating lifecycle lock: %w", err)
+	}
+	err = lockfile.FlockExclusiveNonBlocking(lockF)
+	if err == nil {
+		return lockF, nil
+	}
+	if !lockfile.IsLocked(err) {
+		_ = lockF.Close()
+		return nil, fmt.Errorf("acquiring lifecycle lock: %w", err)
+	}
+	fmt.Fprintln(os.Stderr, "Info: waiting for dolt lifecycle lock held by another bd process...")
+	if err := lockfile.FlockExclusiveBlocking(lockF); err != nil {
+		_ = lockF.Close()
+		return nil, fmt.Errorf("acquiring lifecycle lock: %w", err)
+	}
+	return lockF, nil
+}
+
+// adoptRunningServer does the already-running bookkeeping for
+// EnsureRunningDetailed and returns the port to serve on. It is called with no
+// lifecycle lock held: verifyRemotesAPIState dials the remotesapi listener,
+// which must not happen inside the exclusive region.
+func adoptRunningServer(serverDir string, state *State) int {
+	if verified, verr := verifyRemotesAPIState(DefaultConfig(serverDir), state); verr != nil {
+		// BEADS_DOLT_REMOTESAPI_PORT predates this listener wiring as a
+		// federation-check knob, so a running server that has not been
+		// restarted since the setting appeared is an expected state, not a
+		// broken install. Keep the auto-start fast path serving SQL and
+		// surface the gap as a warning; the explicit lifecycle paths
+		// (Start, adoption) still fail hard with the stop/start remedy.
+		fmt.Fprintf(os.Stderr, "Warning: %v\n", verr)
+	} else {
+		state = verified
+	}
+	_ = EnsurePortFile(serverDir, state.Port)
+	return state.Port
+}
+
+func releaseLifecycleLock(lockF *os.File) {
+	_ = lockfile.FlockUnlock(lockF)
+	_ = lockF.Close()
+}
+
+func validateDistinctServerPorts(sqlPort, remotesAPIPort int) error {
+	if remotesAPIPort > 0 && remotesAPIPort == sqlPort {
+		return fmt.Errorf("configured remotesapi port %d equals SQL port %d; choose distinct ports", remotesAPIPort, sqlPort)
+	}
+	return nil
+}
+
+func verifyRemotesAPIState(cfg *Config, state *State) (*State, error) {
+	state.RemotesAPIPort = cfg.RemotesAPIPort
+	if err := validateDistinctServerPorts(state.Port, cfg.RemotesAPIPort); err != nil {
+		return nil, fmt.Errorf("%w and run 'bd dolt stop && bd dolt start'", err)
+	}
+	if cfg.RemotesAPIPort > 0 && !ProbeRemotesAPI(cfg.RemotesAPIPort) {
+		return nil, fmt.Errorf(
+			"Dolt server is running on SQL port %d, but configured remotesapi port %d is not reachable; run 'bd dolt stop && bd dolt start' to apply the shared-server setting",
+			state.Port,
+			cfg.RemotesAPIPort,
+		)
+	}
+	return state, nil
+}
+
 // Start explicitly starts a dolt sql-server for the project.
 // Returns the State of the started server, or an error.
 func Start(beadsDir string) (*State, error) {
+	lockF, err := acquireLifecycleLock(beadsDir)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseLifecycleLock(lockF)
+	return startLocked(beadsDir)
+}
+
+func startLocked(beadsDir string) (*State, error) {
 	cfg := DefaultConfig(beadsDir)
 	doltDir := ResolveDoltDir(beadsDir)
 
-	// Acquire exclusive lock to prevent concurrent starts
-	lockF, err := os.OpenFile(lockPath(beadsDir), os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		return nil, fmt.Errorf("creating lock file: %w", err)
-	}
-	defer lockF.Close()
-
-	if err := lockfile.FlockExclusiveNonBlocking(lockF); err != nil {
-		if lockfile.IsLocked(err) {
-			// Another bd process is starting the server — wait for it
-			if err := lockfile.FlockExclusiveBlocking(lockF); err != nil {
-				return nil, fmt.Errorf("waiting for server start lock: %w", err)
-			}
-			defer func() { _ = lockfile.FlockUnlock(lockF) }()
-
-			// Lock acquired — check if server is now running
-			state, err := IsRunning(beadsDir)
-			if err != nil {
-				return nil, err
-			}
-			if state.Running {
-				return state, nil
-			}
-			// Still not running — fall through to start it ourselves
-		} else {
-			return nil, fmt.Errorf("acquiring start lock: %w", err)
-		}
-	} else {
-		defer func() { _ = lockfile.FlockUnlock(lockF) }()
-	}
-
-	// Re-check after acquiring lock (double-check pattern)
+	// Re-check after acquiring the lifecycle lock. A tracked process is only a
+	// successful start when every configured listener is ready.
 	if state, _ := IsRunning(beadsDir); state != nil && state.Running {
-		return state, nil
+		return verifyRemotesAPIState(cfg, state)
 	}
 
 	// Clean up orphaned dolt sql-server processes INSIDE the lock.
@@ -1300,6 +1672,11 @@ func Start(beadsDir string) (*State, error) {
 		actualPort int
 		lastErr    error
 		attempts   int
+		// notReady is set when a launched server neither came up nor
+		// reported a port conflict (it timed out or exited).
+		notReady    error
+		notReadyPID int
+		started     *startedServer
 	)
 	{
 		// Ensure dolt database directory is initialized
@@ -1335,6 +1712,13 @@ func Start(beadsDir string) (*State, error) {
 		// a fresh port from the OS with retry for TOCTOU races.
 		actualPort = cfg.Port
 		explicitPort := actualPort > 0
+		// movable: Start may move to a fresh ephemeral port when the one it
+		// launched on turns out to be held by another process. True for a
+		// port bd chose itself: none configured (ephemeral), or bd's own
+		// port-file record outside shared-server mode (GH#4052: auto-start
+		// may replace non-authoritative ports). Operator-configured ports and
+		// the shared-server port stay pinned.
+		movable := !explicitPort || (cfg.PortSource == PortSourcePortFile && !cfg.PortSharedServer)
 
 		if explicitPort {
 			// Explicit port: check for conflicts and adopt existing servers.
@@ -1345,9 +1729,26 @@ func Start(beadsDir string) (*State, error) {
 			}
 			if adoptPID > 0 {
 				_ = logFile.Close()
-				_ = os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(adoptPID)), 0600)
+				_ = os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(adoptPID)), 0o600)
 				_ = writePortFile(beadsDir, actualPort)
-				return &State{Running: true, PID: adoptPID, Port: actualPort, DataDir: doltDir}, nil
+				return verifyRemotesAPIState(cfg, &State{
+					Running:        true,
+					PID:            adoptPID,
+					Port:           actualPort,
+					RemotesAPIPort: cfg.RemotesAPIPort,
+					DataDir:        doltDir,
+				})
+			}
+		}
+		if err := checkRemotesAPIPortAvailable(cfg.RemotesAPIPort); err != nil {
+			_ = logFile.Close()
+			return nil, err
+		}
+
+		if explicitPort {
+			if err := validateDistinctServerPorts(actualPort, cfg.RemotesAPIPort); err != nil {
+				_ = logFile.Close()
+				return nil, err
 			}
 		}
 
@@ -1355,15 +1756,19 @@ func Start(beadsDir string) (*State, error) {
 		pid = 0
 		lastErr = nil
 		attempts = 1
-		if !explicitPort {
+		if movable {
 			attempts = maxEphemeralPortAttempts
 		}
 
 		for i := range attempts {
-			if !explicitPort {
+			if !explicitPort || i > 0 {
 				p, allocErr := allocateEphemeralPort(cfg.Host)
 				if allocErr != nil {
 					lastErr = allocErr
+					continue
+				}
+				if err := validateDistinctServerPorts(p, cfg.RemotesAPIPort); err != nil {
+					lastErr = err
 					continue
 				}
 				actualPort = p
@@ -1371,10 +1776,10 @@ func Start(beadsDir string) (*State, error) {
 
 			var cmdArgs []string
 			if useArchiveLevelConfig {
-				cfgBody, cfgErr := buildDoltServerYAMLConfig(cfg.Host, actualPort, debug, cfgDir)
+				cfgBody, cfgErr := buildDoltServerYAMLConfig(cfg.Host, actualPort, cfg.RemotesAPIPort, debug, cfgDir)
 				if cfgErr != nil {
 					lastErr = fmt.Errorf("rendering managed sql-server config: %w", cfgErr)
-					if !explicitPort {
+					if movable {
 						continue
 					}
 					break
@@ -1386,21 +1791,21 @@ func Start(beadsDir string) (*State, error) {
 				absConfigPath, absErr := filepath.Abs(doltServerConfigPath(beadsDir))
 				if absErr != nil {
 					lastErr = fmt.Errorf("resolving managed sql-server config path: %w", absErr)
-					if !explicitPort {
+					if movable {
 						continue
 					}
 					break
 				}
 				if werr := os.WriteFile(absConfigPath, cfgBody, 0600); werr != nil {
 					lastErr = fmt.Errorf("writing managed sql-server config: %w", werr)
-					if !explicitPort {
+					if movable {
 						continue
 					}
 					break
 				}
 				cmdArgs = buildDoltServerArgsWithConfig(absConfigPath, debug, profDir)
 			} else {
-				cmdArgs = buildDoltServerArgs(cfg.Host, actualPort, debug, profDir)
+				cmdArgs = buildDoltServerArgs(cfg.Host, actualPort, cfg.RemotesAPIPort, debug, profDir)
 			}
 
 			cmd := exec.Command(doltBin, cmdArgs...) //nolint:gosec // doltBin is resolved from PATH, not user input
@@ -1417,33 +1822,76 @@ func Start(beadsDir string) (*State, error) {
 			// restarted. os/exec does not close those; mark them first.
 			sanitizeInheritedFDs()
 
-			if startErr := cmd.Start(); startErr != nil {
+			logOffset := logSize(logFile)
+			srv, startErr := launchServer(cmd)
+			if startErr != nil {
 				lastErr = startErr
-				if !explicitPort {
+				if movable {
 					continue // retry with a new ephemeral port
 				}
 				break
 			}
 
-			pid = cmd.Process.Pid
-			_ = cmd.Process.Release()
-
-			// Quick check: did the process exit immediately (bind failure)?
-			// Give it a moment to fail on port bind before proceeding.
-			time.Sleep(200 * time.Millisecond)
-			if !isProcessAlive(pid) {
-				lastErr = fmt.Errorf("dolt sql-server exited immediately on port %d (attempt %d/%d)", actualPort, i+1, attempts)
-				pid = 0
-				if !explicitPort {
-					continue
-				}
+			// Record the server before waiting on it, as soon as it exists:
+			// if bd is interrupted during the wait, the next bd (or bd dolt
+			// stop / killall) must still find the dolt that holds the
+			// database lock. Both files, with the real port: IsRunning stops
+			// a tracked server whose port it cannot determine.
+			if werr := writeServerStateFiles(beadsDir, srv.pid, actualPort); werr != nil {
+				srv.killAndWait()
+				removeServerStateFiles(beadsDir)
+				lastErr = werr
 				break
 			}
 
+			// Wait until this child, not whatever else holds the port, is
+			// accepting connections. A port another process holds shows up
+			// as ErrPortInUse: a port bd chose itself moves to a fresh one;
+			// an operator-configured port stays pinned.
+			waitErr := awaitOwnedListener(srv, startupProbe{
+				host:            cfg.Host,
+				port:            actualPort,
+				logPath:         logPath(beadsDir),
+				logOffset:       logOffset,
+				readyLineLogged: debug,
+				timeout:         readyTimeout(),
+			})
+			if waitErr != nil {
+				srv.killAndWait()
+				removeServerStateFiles(beadsDir)
+				if errors.Is(waitErr, ErrPortInUse) {
+					if movable {
+						lastErr = fmt.Errorf("%w (attempt %d/%d)", waitErr, i+1, attempts)
+						continue
+					}
+					lastErr = fmt.Errorf("%w; %s", waitErr, pinnedPortRemedy(cfg, beadsDir, actualPort))
+					break
+				}
+				notReady, notReadyPID = waitErr, srv.pid
+				break
+			}
+
+			started = srv
+			pid = srv.pid
 			lastErr = nil
 			break
 		}
 		_ = logFile.Close()
+
+		if notReady != nil {
+			if hasJournalCorruption, logErr := logHasCorruptJournalError(logPath(beadsDir)); logErr == nil && hasJournalCorruption {
+				return nil, fmt.Errorf("server started (PID %d) but not accepting connections on port %d: %w\n\n%s",
+					notReadyPID, actualPort, notReady, corruptJournalRecoveryHint(beadsDir))
+			}
+			if dirs, detErr := detectCorruptManifest(beadsDir, doltDir); detErr == nil && len(dirs) > 0 {
+				return nil, fmt.Errorf("server started (PID %d) but not accepting connections on port %d: %w\n"+
+					"Corrupt manifest with no recoverable data detected (GH#3290) in:\n  %s\n"+
+					"Run 'bd doctor --fix' to back up the corrupt database(s) and reinitialize.\nCheck logs: %s",
+					notReadyPID, actualPort, notReady, strings.Join(dirs, "\n  "), logPath(beadsDir))
+			}
+			return nil, fmt.Errorf("server started (PID %d) but not accepting connections on port %d: %w\nCheck logs: %s",
+				notReadyPID, actualPort, notReady, logPath(beadsDir))
+		}
 
 		if lastErr != nil {
 			// GH#3290 / bd-6dnrw.6: unclean-shutdown manifest corruption is
@@ -1460,41 +1908,20 @@ func Start(beadsDir string) (*State, error) {
 		}
 	}
 
-	// Write PID and port files
-	if err := os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(pid)), 0600); err != nil {
-		if proc, findErr := os.FindProcess(pid); findErr == nil {
-			_ = proc.Kill()
-		}
-		return nil, fmt.Errorf("writing PID file: %w", err)
-	}
-	if err := writePortFile(beadsDir, actualPort); err != nil {
-		if proc, findErr := os.FindProcess(pid); findErr == nil {
-			_ = proc.Kill()
-		}
-		_ = os.Remove(pidPath(beadsDir))
-		return nil, fmt.Errorf("writing port file: %w", err)
-	}
-
-	// Wait for server to accept connections
-	if err := waitForReady(cfg.Host, actualPort, readyTimeout()); err != nil {
-		if proc, findErr := os.FindProcess(pid); findErr == nil {
-			_ = proc.Kill()
-		}
-		_ = os.Remove(pidPath(beadsDir))
-		_ = os.Remove(portPath(beadsDir))
-		if hasJournalCorruption, logErr := logHasCorruptJournalError(logPath(beadsDir)); logErr == nil && hasJournalCorruption {
-			return nil, fmt.Errorf("server started (PID %d) but not accepting connections on port %d: %w\n\n%s",
-				pid, actualPort, err, corruptJournalRecoveryHint(beadsDir))
-		}
-		return nil, fmt.Errorf("server started (PID %d) but not accepting connections on port %d: %w\nCheck logs: %s",
-			pid, actualPort, err, logPath(beadsDir))
+	// The PID and port files were written when the server was launched.
+	if err := waitForRemotesAPI(cfg.RemotesAPIPort, readyTimeout()); err != nil {
+		started.killAndWait()
+		removeServerStateFiles(beadsDir)
+		return nil, fmt.Errorf("server started (PID %d) but remotesapi is not accepting connections on port %d: %w\nCheck logs: %s",
+			pid, cfg.RemotesAPIPort, err, logPath(beadsDir))
 	}
 
 	return &State{
-		Running: true,
-		PID:     pid,
-		Port:    actualPort,
-		DataDir: doltDir,
+		Running:        true,
+		PID:            pid,
+		Port:           actualPort,
+		RemotesAPIPort: cfg.RemotesAPIPort,
+		DataDir:        doltDir,
 	}, nil
 }
 
@@ -1592,7 +2019,7 @@ func FlushWorkingSet(host string, port int) error {
 	for _, dbName := range databases {
 		// Check for uncommitted changes via dolt_status
 		var hasChanges bool
-		row := db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) > 0 FROM `%s`.dolt_status", dbName))
+		row := db.QueryRowContext(ctx, doltStatusQuery(dbName))
 		if err := row.Scan(&hasChanges); err != nil {
 			// dolt_status may not exist for non-beads databases; skip
 			continue
@@ -1602,7 +2029,7 @@ func FlushWorkingSet(host string, port int) error {
 		}
 
 		// Commit all uncommitted changes
-		_, err := db.ExecContext(ctx, fmt.Sprintf("USE `%s`", dbName))
+		_, err := db.ExecContext(ctx, useDatabaseStatement(dbName))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "flush: failed to USE %s: %v\n", dbName, err)
 			continue
@@ -1633,8 +2060,61 @@ func Stop(beadsDir string) error {
 	return StopWithForce(beadsDir, false)
 }
 
+// Restart gracefully replaces a managed server while holding the lifecycle
+// lock for the entire stop/start transition. The live SQL port is restored as
+// desired state so a per-project ephemeral server does not move merely because
+// it was restarted.
+func Restart(beadsDir string) (*State, error) {
+	lockF, err := acquireLifecycleLock(beadsDir)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseLifecycleLock(lockF)
+
+	previousPort := 0
+	if state, stateErr := IsRunning(beadsDir); stateErr == nil && state != nil {
+		previousPort = state.Port
+	}
+	if err := IgnoreNotRunning(stopLocked(beadsDir)); err != nil {
+		return nil, fmt.Errorf("stopping Dolt server for restart: %w", err)
+	}
+	if previousPort > 0 {
+		if err := EnsurePortFile(beadsDir, previousPort); err != nil {
+			return nil, fmt.Errorf("restoring SQL port %d for restart: %w", previousPort, err)
+		}
+	}
+	state, err := startLocked(beadsDir)
+	if err != nil {
+		var restoreErr error
+		if previousPort > 0 {
+			restoreErr = EnsurePortFile(beadsDir, previousPort)
+		}
+		restartErr := fmt.Errorf("restarting Dolt server (server remains stopped; check %s): %w", logPath(beadsDir), err)
+		if restoreErr != nil {
+			return nil, errors.Join(restartErr, fmt.Errorf("restoring SQL port %d after failed restart: %w", previousPort, restoreErr))
+		}
+		return nil, restartErr
+	}
+	return state, nil
+}
+
 // StopWithForce is like Stop but with an optional force flag.
 func StopWithForce(beadsDir string, force bool) error {
+	lockF, err := acquireLifecycleLock(beadsDir)
+	if err != nil {
+		// Preserve the established idempotent stopped contract when the state
+		// directory itself is unwritable. A live server is never stopped
+		// outside the lock.
+		if state, stateErr := IsRunning(beadsDir); stateErr == nil && (state == nil || !state.Running) {
+			return stopLocked(beadsDir)
+		}
+		return err
+	}
+	defer releaseLifecycleLock(lockF)
+	return stopLocked(beadsDir)
+}
+
+func stopLocked(beadsDir string) error {
 	state, err := IsRunning(beadsDir)
 	if err != nil {
 		return err
@@ -1732,7 +2212,8 @@ func LockPath(beadsDir string) string {
 // eligible for cleanup. Externally-managed servers are never killed.
 //
 // A process is considered "external" (never kill) when any of:
-//   - ResolveServerMode() returns ServerModeExternal (explicit port, shared server, etc.)
+//   - ResolveServerModeIgnoringPortEnv() returns ServerModeExternal (explicit
+//     port/shared server declaration, embedded, etc.)
 //   - No PID file exists (beads has no record of starting a server)
 func killStaleServersForDir(beadsDir string, allPIDs []int, inDir func(int, string) bool, kill func(int) error) ([]int, error) {
 	if len(allPIDs) == 0 {
@@ -1742,9 +2223,19 @@ func killStaleServersForDir(beadsDir string, allPIDs []int, inDir func(int, stri
 	// If auto-start is disabled the server is externally managed (e.g., by
 	// systemd or a manual bd dolt start), so we must not kill any processes.
 	// IsAutoStartDisabled covers the BEADS_DOLT_AUTO_START env var and
-	// dolt.auto-start config; ResolveServerMode covers explicit port/shared
-	// server/embedded configurations. Both indicate "not our server" (GH#2641).
-	if IsAutoStartDisabled() || ResolveServerMode(beadsDir) == ServerModeExternal {
+	// dolt.auto-start config; resolveServerModeIgnoringPortEnv covers explicit
+	// port/shared server/embedded configurations. Both indicate "not our
+	// server" (GH#2641).
+	//
+	// This deliberately uses ResolveServerModeIgnoringPortEnv, not the public
+	// ResolveServerMode: BEADS_DOLT_SERVER_PORT/BEADS_DOLT_PORT are also set
+	// ambiently on multi-agent rigs purely to route bd's own client
+	// connections to a shared coordination server, which says nothing about
+	// who owns beadsDir's own local server lifecycle. Honoring that env var
+	// here would make this guard skip orphan cleanup for a directory beads
+	// still owns, defeating the GH#2430 protection below for every process
+	// on such a rig.
+	if IsAutoStartDisabled() || ResolveServerModeIgnoringPortEnv(beadsDir) == ServerModeExternal {
 		return nil, nil
 	}
 
@@ -1815,28 +2306,18 @@ func KillStaleServers(beadsDir string) ([]int, error) {
 	)
 }
 
-// waitForReady polls until the server accepts TCP connections AND greets
-// with a MySQL handshake. Draining the handshake before closing the probe
-// connection makes Close() send TCP FIN instead of RST, which prevents the
-// dolt sql-server process from interpreting probe closes as aborted MySQL
-// handshakes and crashing (see gastownhall/beads#4132, #4133).
-//
-// A dial that succeeds but never greets (TCP listener accepting, MySQL
-// engine not yet writing) is not treated as ready: this function keeps
-// polling until either a greeting arrives or the deadline is reached.
-func waitForReady(host string, port int, timeout time.Duration) error {
-	addr := net.JoinHostPort(host, strconv.Itoa(port))
+func waitForRemotesAPI(port int, timeout time.Duration) error {
+	if port <= 0 {
+		return nil
+	}
 	deadline := time.Now().Add(timeout)
-
 	for time.Now().Before(deadline) {
-		greeted, err := ProbeSQLServer("tcp", addr, 500*time.Millisecond) //nolint:gosec // G704: addr is built from internal host+port, not user input
-		if err == nil && greeted {
+		if ProbeRemotesAPI(port) {
 			return nil
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(250 * time.Millisecond)
 	}
-
-	return fmt.Errorf("timeout after %s waiting for server at %s", timeout, addr)
+	return fmt.Errorf("timeout after %s waiting for remotesapi at 127.0.0.1:%d", timeout, port)
 }
 
 // ensureDoltIdentity sets dolt global user identity from git config if not already set.
@@ -1985,4 +2466,18 @@ func IsPreV56DoltDir(doltDir string) bool {
 	markerPath := filepath.Join(doltDir, bdDoltMarker)
 	_, err := os.Stat(markerPath)
 	return os.IsNotExist(err)
+}
+
+// doltStatusQuery builds the dolt_status probe for a SHOW DATABASES name,
+// identifier-quoting it so the name cannot break out of the identifier.
+func doltStatusQuery(dbName string) string {
+	//nolint:gosec // G201: identifier quoted+escaped via doltutil.QuoteIdentifierUnvalidated
+	return fmt.Sprintf("SELECT COUNT(*) > 0 FROM %s.dolt_status", doltutil.QuoteIdentifierUnvalidated(dbName))
+}
+
+// useDatabaseStatement builds a USE statement for a SHOW DATABASES name,
+// identifier-quoting it so the name cannot break out of the identifier.
+func useDatabaseStatement(dbName string) string {
+	//nolint:gosec // G201: identifier quoted+escaped via doltutil.QuoteIdentifierUnvalidated
+	return fmt.Sprintf("USE %s", doltutil.QuoteIdentifierUnvalidated(dbName))
 }

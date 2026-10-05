@@ -39,7 +39,7 @@ type ClaimRowResult struct {
 type IssueSQLRepository interface {
 	Insert(ctx context.Context, issue *types.Issue, actor string, opts InsertIssueOpts) error
 	InsertBatch(ctx context.Context, issues []*types.Issue, actor string, opts InsertIssueOpts) error
-	MovePersistence(ctx context.Context, id string, mode types.PersistenceMode) (changed bool, err error)
+	MovePersistence(ctx context.Context, id string, mode types.PersistenceMode, actor string) (changed bool, err error)
 	PromoteFromEphemeral(ctx context.Context, id, actor string) error
 	Update(ctx context.Context, id string, updates map[string]any, actor string, opts IssueTableOpts) error
 	// CompareAndSetMetadataKey runs the SHARED compare-and-set body on this
@@ -72,16 +72,27 @@ type IssueSQLRepository interface {
 	SearchAcrossIssuesAndWisps(ctx context.Context, query string, filter types.IssueFilter) (SearchPage, error)
 	SearchAcrossIssuesAndWispsWithCounts(ctx context.Context, query string, filter types.IssueFilter) (SearchCountsPage, error)
 	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
+	// SearchWispsPlane searches the wisps table ALONE, whatever each row's
+	// ephemeral, no_history or wisp_type values, and never the issues table
+	// (issueops.SearchWispsPlaneInTx).
+	SearchWispsPlane(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
 	GetReadyWork(ctx context.Context, filter types.WorkFilter) (SearchPage, error)
 	GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) (SearchCountsPage, error)
 	GetDescendants(ctx context.Context, rootID string, filter types.IssueFilter) ([]*types.Issue, error)
-	Delete(ctx context.Context, id string, opts IssueTableOpts) error
-	DeleteByIDs(ctx context.Context, ids []string, opts IssueTableOpts) (int, error)
+	// Delete and DeleteByIDs take actor for the reason Close/Reopen/Claim do:
+	// the events journal records one row per removed bead and the identity that
+	// asked for the removal is only known above this seam. A caller with no
+	// request behind it passes "" (system/unknown), never a placeholder.
+	Delete(ctx context.Context, id string, opts IssueTableOpts, actor string) error
+	DeleteByIDs(ctx context.Context, ids []string, opts IssueTableOpts, actor string) (int, error)
 	PartitionWispIDs(ctx context.Context, ids []string) (wispIDs, regularIDs []string, err error)
 	FindAllDependents(ctx context.Context, ids []string) ([]string, error)
 	FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error)
 	AffectedByDeletion(ctx context.Context, issueIDs, wispIDs []string) (affectedIssues, affectedWisps []string, err error)
-	RecomputeIsBlocked(ctx context.Context, issueIDs, wispIDs []string) error
+	// RecomputeIsBlockedAfterDelete recomputes the blocked state of the
+	// dependents a delete of deletedIDs affected, and records them for the
+	// post-commit recheck the unit of work runs (gastownhall/beads#6716).
+	RecomputeIsBlockedAfterDelete(ctx context.Context, deletedIDs, issueIDs, wispIDs []string) error
 	Close(ctx context.Context, id string, params CloseRowParams, actor string, opts IssueTableOpts) (CloseRowResult, error)
 	CloseChecked(ctx context.Context, id string, params CloseRowParams, actor string, force bool) (CloseRowResult, error)
 	Reopen(ctx context.Context, id string, params ReopenRowParams, actor string, opts IssueTableOpts) (ReopenRowResult, error)
@@ -304,6 +315,10 @@ type IssueUseCase interface {
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) (SearchPage, error)
 	SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) (SearchCountsPage, error)
 	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
+	// SearchWispsPlane searches the wisps table ALONE, whatever each row's
+	// ephemeral, no_history or wisp_type values, and never the issues table
+	// (issueops.SearchWispsPlaneInTx).
+	SearchWispsPlane(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
 	GetReadyWork(ctx context.Context, filter types.WorkFilter) (SearchPage, error)
 	GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) (SearchCountsPage, error)
 	GetDescendants(ctx context.Context, rootID string, filter types.IssueFilter) ([]*types.Issue, error)
@@ -693,7 +708,7 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 			return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
 		}
 		if spec.ExpectedVersion != nil && current.RowVersion != *spec.ExpectedVersion {
-			return nil, fmt.Errorf("%w: expected %d, got %d", storage.ErrVersionMismatch, *spec.ExpectedVersion, current.RowVersion)
+			return nil, &storage.VersionMismatchError{Expected: *spec.ExpectedVersion, Current: current.RowVersion}
 		}
 		if spec.ExpectedAssignee != nil && !validation.ActorMatches(current.Assignee, *spec.ExpectedAssignee) {
 			return nil, fmt.Errorf("%w: %s is held by %q, expected %q",
@@ -787,7 +802,7 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 	}
 
 	if spec.Persistence != nil {
-		if _, err := u.issueRepo.MovePersistence(ctx, id, *spec.Persistence); err != nil {
+		if _, err := u.issueRepo.MovePersistence(ctx, id, *spec.Persistence, actor); err != nil {
 			return nil, fmt.Errorf("ApplyUpdate: move persistence for %s: %w", id, err)
 		}
 		useWisp, err = u.isWispID(ctx, id)
@@ -835,6 +850,14 @@ func (u *issueUseCaseImpl) SearchIssues(ctx context.Context, query string, filte
 	out, err := u.issueRepo.SearchAcrossIssuesAndWisps(ctx, query, filter)
 	if err != nil {
 		return SearchPage{}, fmt.Errorf("SearchIssues: %w", err)
+	}
+	return out, nil
+}
+
+func (u *issueUseCaseImpl) SearchWispsPlane(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+	out, err := u.issueRepo.SearchWispsPlane(ctx, query, filter)
+	if err != nil {
+		return nil, fmt.Errorf("SearchWispsPlane: %w", err)
 	}
 	return out, nil
 }

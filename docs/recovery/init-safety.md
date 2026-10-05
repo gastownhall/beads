@@ -3,14 +3,19 @@ title: Recovery Playbooks
 description: Step-by-step recovery for bd init and bd dolt push/pull refusals, including the primary-key fork playbook
 ---
 
-Last reviewed: 2026-06-09
+Last reviewed: 2026-10-01
 
 Freshness source: `cmd/bd/init.go`, `cmd/bd/init_safety.go`,
-`cmd/bd/init_safety_test.go`, and `cmd/bd/dolt.go`.
+`cmd/bd/init_safety_test.go`, `cmd/bd/init_safety_help.go`, and
+`cmd/bd/dolt.go`.
 
 This document lives next to the ADRs and matches the structure of `bd`'s
 error messages: each named refusal in `bd init` and `bd dolt push`/`pull`
-points here to a labeled anchor with step-by-step recovery instructions.
+has a labeled anchor here with step-by-step recovery instructions. The
+`bd dolt push`/`pull` fork refusal deep-links its anchor directly; since
+[#5310](https://github.com/gastownhall/beads/pull/5310) the `bd init`
+refusals point at `bd help init-safety`, which links this document as a
+whole — match those by exit code and symptom text.
 
 See also: `bd help init-safety`, and
 [ADR 0002 — `bd init` safety invariants](https://github.com/gastownhall/beads/blob/main/engdocs/adr/0002-init-safety-invariants.md).
@@ -18,9 +23,11 @@ See also: `bd help init-safety`, and
 ## Table of contents
 
 - [init-force-refused — `bd init --force`/`--reinit-local` refused because origin has Dolt history](#init-force-refused)
-- [init-token-missing — `--discard-remote` refused because `--destroy-token` is missing or wrong](#init-token-missing)
-- [init-local-exists — `bd init` refused because local data already exists](#init-local-exists)
+- [init-token-missing — a destructive re-init refused because `--destroy-token` is missing or wrong](#init-token-missing)
+- [init-local-exists — `bd init --reinit-local` refused because local data already exists](#init-local-exists)
+- [init-missing-server-db — `bd init` refused because the configured server-side database is missing](#init-missing-server-db)
 - [pk-fork-refused — `bd dolt pull`/`push` refused because a table has different primary keys in its common ancestor](#pk-fork-refused)
+- [re-clone-gotchas — two gotchas hit during manual re-clone recovery: damaged stores left inside `data_dir`, and a fresh clone missing clone-local tables](#re-clone-gotchas)
 
 ---
 
@@ -39,9 +46,11 @@ bd init refuses: remote 'origin' already has Dolt history (refs/dolt/data).
 **Why this happens**
 
 `bd init --force` (or `--reinit-local`) tells `bd` to bypass the local
-data-safety guard. `bd init --from-jsonl` selects a local JSONL export as
-the source. But the remote already has project history. Proceeding would
-create an orphan local Dolt branch with no common ancestor on origin. The
+data-safety guard, and only that guard: neither flag bypasses this refusal
+or the [missing server-side database refusal](#init-missing-server-db).
+`bd init --from-jsonl` selects a local JSONL export as the source. But the
+remote already has project history. Proceeding would create an orphan local
+Dolt branch with no common ancestor on origin. The
 next `bd dolt push` would either fail (no common ancestor) or — worse, if
 force-pushed — destroy the team's data.
 
@@ -57,6 +66,10 @@ bd bootstrap
 
 This clones the remote's Dolt database into a fresh local `.beads/`.
 Your local state is ignored; the team's history becomes yours.
+
+If you set aside the old `.beads/dolt` instead of deleting it, or `bd list`
+fails right after this with `table not found: leases`, see
+[re-clone-gotchas](#re-clone-gotchas) below before you do anything else.
 
 ### 2. You want to diagnose what went wrong before deciding
 
@@ -92,11 +105,25 @@ team before doing this.
 bd init refuses: --discard-remote requires an explicit destroy-token in non-interactive mode.
 ```
 
+Or, re-initializing over existing local issues with no TTY:
+
+```
+Refusing to destroy N issues in non-interactive mode.
+  See 'bd help init-safety' for the required --destroy-token format.
+```
+
 **Why this happens**
 
-You're running non-interactively (CI, agent, piped input) and passed
-`--discard-remote`. Destructive cross-boundary operations cannot be
-authorized silently.
+You're running non-interactively (CI, agent, piped input) and asked for a
+destructive re-init. Destructive operations cannot be authorized silently,
+so `bd` requires `--destroy-token` in place of the interactive confirmation
+it cannot prompt for.
+
+Both destructive paths need the token, not just the cross-boundary one:
+
+- `--discard-remote`, which would discard the remote's Dolt history.
+- plain `--reinit-local` over existing local issues, which would destroy
+  them (see [init-local-exists](#init-local-exists)).
 
 **Recovery paths**
 
@@ -111,6 +138,10 @@ The token format is `DESTROY-<issue-prefix>`. For a project whose issue
 prefix is `bd`:
 
 ```
+# Destroys local issues only:
+bd init --reinit-local --destroy-token=DESTROY-bd
+
+# Also discards the remote's Dolt history:
 bd init --reinit-local --discard-remote --destroy-token=DESTROY-bd
 ```
 
@@ -122,22 +153,36 @@ for why the token is never echoed in `bd`'s error messages.
 
 ## init-local-exists
 
-**Exit code:** `11` (`ExitLocalExistsRefused`)
+**Exit code:** `11` (`ExitLocalExistsRefused`) interactively;
+`12` (`ExitDestroyTokenMissing`) non-interactively
 
 **Symptom**
+
+Interactive (TTY): you declined the typed `destroy N issues` confirmation.
+This is the only path that exits `11`.
+
+```
+Type 'destroy N issues' to confirm:
+Aborted. Database was NOT modified.
+```
+
+Non-interactive (CI, agent, piped input) — note this exits `12`, not `11`:
 
 ```
 Refusing to destroy N issues in non-interactive mode.
   See 'bd help init-safety' for the required --destroy-token format.
 ```
 
-Or, in interactive mode, you declined the typed `destroy N issues`
-confirmation.
-
 **Why this happens**
 
-Local `.beads/` has existing issues. `bd init --reinit-local` would
-permanently destroy them.
+Local `.beads/` has existing issues. `bd init --reinit-local` (or its
+deprecated alias `--force`) would permanently destroy them, so `bd` demands
+an explicit confirmation first: the typed prompt in a TTY, and a
+`--destroy-token` when there is no TTY. This applies to `--reinit-local` on
+its own — `--discard-remote` is not required to trigger it.
+
+A plain `bd init` over an initialized workspace does not reach either code:
+the local-safety guard refuses it with an ordinary error before this point.
 
 **Recovery paths**
 
@@ -145,7 +190,13 @@ permanently destroy them.
 
 ```
 bd export > issue-export.jsonl
+
+# Interactive: confirm at the typed prompt.
 bd init --reinit-local
+
+# Non-interactive: the token stands in for the prompt. Without it this
+# re-runs straight back into the exit-12 refusal above.
+bd init --reinit-local --destroy-token=DESTROY-<issue-prefix>
 ```
 
 `issue-export.jsonl` lets you re-import individual issues if needed. It is not
@@ -157,6 +208,129 @@ enough to create a restorable backup before reinitializing.
 If you did NOT expect `bd init` to be the right command here, run
 `bd doctor` first — you may be looking at a server config issue that a
 re-init won't fix.
+
+---
+
+## init-missing-server-db
+
+**Symptom**
+
+```
+⚠ Database "myproject" not found on server at 127.0.0.1:3306 (or the server could not be reached to confirm).
+This workspace was already initialized (metadata.json has a project_id from a prior
+bd init), so this looks like a recovery situation, not a fresh clone
+...
+bd init will NOT create an empty database here — that would strand any existing
+issue data behind a new, empty database of the same name.
+```
+
+**What happened**
+
+This workspace is in server mode and shows evidence of a prior `bd init`:
+`.beads/metadata.json` carries a `project_id`, or (under `--reinit-local` or
+`--force`) a workspace that predates `project_id` still has a local Dolt data
+directory, in which case the message cites that instead of `metadata.json`.
+Yet its configured database is not on the server, or the server could not be
+reached to confirm.
+
+That is treated as a **recovery** situation, not a fresh clone, and the two are
+otherwise indistinguishable from the local filesystem alone: this project's own
+database directory is absent either way, because it was never created here or
+because it was lost with the local storage. `bd init` used to resolve the
+ambiguity by assuming "fresh clone" and creating the database. When the
+assumption was wrong, the result was a new, empty database sitting at the name
+the real one used to occupy — the 2026-08-11 fleet-wide data loss.
+
+`bd init` now refuses instead, and the refusal is **not** bypassed by
+`--force` or `--reinit-local`. Those flags authorize destroying a database
+that exists; they do not authorize inventing an empty one where the configured
+database has gone missing.
+
+### 1. Find out where the database went (do this first)
+
+```
+bd doctor          # check project health
+bd dolt status     # inspect Dolt server state
+```
+
+A stopped server, a server started on the wrong port, or a wrong `--data-dir`
+all present exactly like this — and none of them need a re-init. Fixing the
+server brings the data back untouched.
+
+### 2. Restore from an export
+
+```
+bd backup restore                  # if a local backup snapshot exists
+```
+
+Also check `.beads/backup/` for a JSONL export you can import manually.
+
+### 3. Create a fresh empty database at this name
+
+**Destructive to any unrecovered data.**
+
+Only when you are certain no recoverable data exists:
+
+```
+bd init --recreate-missing --prefix myproject
+```
+
+`--recreate-missing` is per-invocation only. It is deliberately never implied
+by `--force`, `--reinit-local`, a config key, or an environment variable,
+because it authorizes the one thing this guard exists to prevent.
+
+The refusal names `--recreate-missing` but does not print this command: it also
+fires when the server merely could not be reached, so it sends you through
+steps 1 and 2 here instead of handing you a line to paste. See
+[ADR 0002 — Invariant 4](https://github.com/gastownhall/beads/blob/main/engdocs/adr/0002-init-safety-invariants.md).
+
+**Limits worth knowing**
+
+Whether a workspace meets this refusal depends on two pieces of local
+evidence: whether this project's own database directory
+(`<dolt-data-dir>/<database>/.dolt`) exists, and whether `metadata.json`
+carries a `project_id` (introduced by GH#2372). With the configured database
+missing from the server, or the server unreachable:
+
+| Local Dolt storage | `project_id` | `bd init` | `bd init --reinit-local` / `--force` |
+|---|---|---|---|
+| This project's database directory present | Either | Refused as already initialized, not by this guard | Not this guard; the ordinary re-init path |
+| Data dir present, database directory absent | Present | This refusal | This refusal |
+| Data dir present, database directory absent | Absent | Refused as already initialized, not by this guard | This refusal |
+| No Dolt data dir | Present | This refusal | This refusal |
+| No Dolt data dir | Absent | Proceeds, as for a fresh clone | Proceeds, as for a fresh clone |
+
+Adding `--recreate-missing` lifts every refusal in the last four rows,
+including the third row's "already initialized". It changes nothing in the
+first row, where this project's database is still on local disk. In
+shared-server mode the data dir is machine-global (see below), so the last two
+rows rarely apply there.
+
+- `project_id` is also inherited by a **fresh clone**, because
+  `.beads/metadata.json` is git-tracked by default. Cloning a beads-managed
+  repo whose server-side database does not exist yet therefore meets this
+  refusal rather than a plain first init. It fails in the safe direction —
+  nothing is created silently, and no existing data can be stranded — and
+  `--recreate-missing` above is the supported way through it. This is settled,
+  not pending: `engdocs/adr/0004-missing-database-guard-signal.md` records why
+  no purely-local signal can replace `project_id` here (absence of local state
+  cannot tell "never initialized here" from "initialized here, storage since
+  lost"), and why `--recreate-missing` is the permanent resolution path rather
+  than a stopgap.
+- Server mode only, and shared-server mode counts as server mode — the guard
+  tests for *this project's* database directory under the resolved Dolt data
+  dir, not for the data dir itself, which in shared mode is the machine-global
+  `~/.beads/shared-server/dolt` that is created on demand.
+- Proxied-server mode does not reach the `--reinit-local`/`--force` guard —
+  the `--proxied-server` dispatch in `runInit` (`cmd/bd/init.go`) returns
+  before it. It does reach the plain-init guard, because
+  `runInitProxiedServer` calls `checkExistingBeadsData`, so
+  **`--recreate-missing` works under `--proxied-server` too**: the flag is
+  assigned beside its flag read, upstream of every dispatch in `runInit`.
+  Keep it there. It was previously assigned next to the guard it gates, which
+  is downstream of the proxied dispatch, and the flag was therefore inert on
+  that one route while the refusal still told the operator to pass it.
+- `bd bootstrap` has its own separate mode-blind create path.
 
 ---
 
@@ -237,12 +411,20 @@ bd import /tmp/beads-local.jsonl             # re-apply local-only work
 re-created, newer local edits are applied, and rows older than what the
 remote already has are skipped. Spot-check with `bd stats` afterwards.
 
+Doing this by hand (moving `.beads/dolt` aside instead of `rm -rf`, or
+skipping straight to `bd list`) can hit either of two live gotchas — see
+[re-clone-gotchas](#re-clone-gotchas) below.
+
 ### Prevention (upgrades across PK-reshaping migrations)
 
 - **Sync before upgrading**: `bd dolt push` + `bd dolt pull` on every clone
   while all clones still run the *old* version, then stop editing. Once the new
   binary is installed, `bd dolt push`/`bd dolt pull` are gated too, so this must
-  happen first.
+  happen first. The one exception is the *data-behind* stop — a clone level on
+  schema but missing commits the remote has — where `bd dolt pull` **is** the
+  remedy and is allowed through; the gate says so when it fires, and
+  [Clone behind the remote](/getting-started/upgrading#clone-behind-the-remote)
+  has the recipe. Plan for the rule, not the exception.
 - **One designated migrator**: upgrade one machine, let it migrate, then
   `bd dolt push`.
 - **Every other clone adopts, does not pull**: after the migrator pushes, each
@@ -251,3 +433,125 @@ remote already has are skipped. Spot-check with `bd stats` afterwards.
   migrations, so do not rely on it; the "sync before" step above is what
   preserves these clones' work, because `bd bootstrap` replaces the local
   database.
+
+---
+
+## re-clone-gotchas
+
+Two gotchas hit during a live manual re-clone recovery (issue ga-vrq5pu),
+each of which cost real time because the symptom looks nothing like the
+cause. Both
+apply any time you set aside or replace a Dolt database directory by hand —
+during the [pk-fork-refused](#pk-fork-refused) playbook above, the
+[init-force-refused](#init-force-refused) `bd bootstrap` path, or any other
+manual re-clone.
+
+### Gotcha 1 — a damaged/set-aside store must go OUTSIDE data_dir
+
+**Symptom**
+
+```
+root hash doesn't exist: <hash>
+```
+
+...printed repeatedly as the Dolt sql-server crash-loops under its
+supervisor/watchdog. Nothing in that message mentions a stray directory, so
+it does not look like "you left a directory lying around."
+
+**Why this happens**
+
+The sql-server treats *every* subdirectory of its `data_dir` (default
+`.beads/dolt/`, overridable via `BEADS_DOLT_DATA_DIR` or the `dolt_data_dir`
+field in `metadata.json`) as its own database and tries to load it. If you
+move a damaged or superseded database directory aside but leave it *inside*
+`data_dir` (for example, renaming `.beads/dolt/mydb` to
+`.beads/dolt/mydb.bak` instead of moving it out of `.beads/dolt/`
+entirely), the server tries to load the damaged copy too and dies on it —
+even though the healthy database sitting right next to it is fine.
+
+Check which mode you are in before you go looking for `data_dir`: in shared
+server mode (`BEADS_DOLT_SHARED_SERVER=1`, or the `dolt.shared-server` config
+key) it is `~/.beads/shared-server/dolt/` — or `$BEADS_SHARED_SERVER_DIR/dolt/`
+— and that takes precedence over both of the per-project knobs above. That is
+also where this gotcha bites hardest: one shared `data_dir` holds every
+project's database on the machine, so a single stray subdirectory crash-loops
+the server for all of them.
+
+**The fix**
+
+When you set a database directory aside by hand, move it *outside*
+`data_dir` — e.g. up to `/tmp/` or a sibling of `.beads/`, never to a
+sibling path still under `.beads/dolt/`.
+
+Do not wait for an automated repair to do it for you: no `bd doctor --fix`
+repair performs this move here. The two that come closest are:
+
+- The **corrupt-manifest repair** renames the damaged database's own
+  `.dolt/` directory *in place* — `<data_dir>/<db>/.dolt` →
+  `<data_dir>/<db>/.dolt.<ts>.corrupt.backup` — and reinitializes beside
+  it, so in the standard `<data_dir>/<db>/` layout the backup is nested
+  inside the database directory rather than becoming a new direct child of
+  `data_dir`. It also fires only once its scan can prove the store holds no
+  recoverable chunk data, so it will not touch the superseded-but-populated
+  copy this gotcha is about (`internal/doltserver/manifest_recovery.go`).
+- The rename that *does* move a whole `data_dir` to a timestamped sibling
+  (`data_dir` → `data_dir.<ts>.corrupt.backup`) belongs to a different
+  repair, the database-integrity recovery
+  (`cmd/bd/doctor/fix/database_integrity.go`) — and that one refuses
+  outright for a repo configured in Dolt server mode, so if the
+  crash-looping server is your configured backend it is unavailable too.
+
+Make the move by hand, and make sure it lands outside `data_dir`.
+
+### Gotcha 2 — a fresh clone needs `bd migrate schema`
+
+**Symptom**
+
+```
+table not found: leases
+```
+
+(or a similar "table not found" error for `wisps`, `events`,
+`local_metadata`, or another clone-local table). A supervisor or agent
+harness that expects to load session beads right after a fresh clone fails
+here.
+
+**Why this happens**
+
+A handful of tables — `leases`, `wisps`, `wisp_*`, `events`, `bd_events_*`,
+`local_metadata`, `ignored_schema_migrations`, `repo_mtimes` — are
+dolt-ignored, clone-local tables: they exist on a running database but are
+deliberately excluded from what `bd dolt push`/`pull`/clone transfers, so a
+fresh clone starts without them.
+
+A writable open normally re-materializes them on its own, whether it is
+embedded or reaches the database through a server or proxied sql-server: it
+runs the schema migration pass, which replays the clone-local ("ignored")
+series whenever that series' cursor table is behind — and the cursor table,
+`ignored_schema_migrations`, is itself clone-local, so a fresh clone always
+qualifies (`internal/storage/schema/schema.go`,
+`internal/storage/uow/dolt_sql_provider.go`). Reaching the error above
+therefore means the open that hit it was *not* one of those self-healing
+opens. The kinds that skip the pass, or only verify, include a deliberately
+non-mutating read-only or preview open, a team-server open (it checks the
+schema rather than migrating it), the preview-attach path, and any open whose
+open-time migration gate refused. Run the migration explicitly to close the
+gap.
+
+**The fix**
+
+```
+bd migrate schema
+```
+
+No `--force` needed. This replays the clone-local tables and prints:
+
+```
+✓ Schema already at v<N>
+```
+
+**That output is expected and reassuring, not an error** — it means the
+*versioned* schema was already current; the clone-local tables have now
+been (re)created regardless. Run this once after any fresh clone or
+`bd bootstrap`, before relying on `bd list` or any other command that reads
+session state.

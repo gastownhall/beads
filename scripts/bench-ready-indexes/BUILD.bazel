@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "bench-ready-indexes_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/steveyegge/beads/scripts/bench-ready-indexes",
+    visibility = ["//visibility:private"],
+    deps = ["@com_github_go_sql_driver_mysql//:mysql"],
+)
+
+go_binary(
+    name = "bench-ready-indexes",
+    embed = [":bench-ready-indexes_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "bench-ready-indexes_test",
+    srcs = ["main_test.go"],
+    embed = [":bench-ready-indexes_lib"],
+    deps = ["@com_github_data_dog_go_sqlmock//:go-sqlmock"],
+)

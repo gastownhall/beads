@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -33,7 +34,20 @@ type agentEnrichment struct {
 type enricher func(dc DoctorCheck) agentEnrichment
 
 // EnrichForAgent converts a DoctorCheck into an AgentDiagnostic with rich context.
-func EnrichForAgent(dc DoctorCheck) AgentDiagnostic {
+//
+// Enrichers hardcode their own remediation commands (many are literally
+// `bd doctor --fix`) and never read the already-sanitized dc.Fix, so the gate
+// is applied to the finished Commands here, after enrichment (GH#4993). An
+// agent is the consumer most likely to execute that list unattended.
+func EnrichForAgent(dc DoctorCheck, gate FixGate) AgentDiagnostic {
+	ad := enrichForAgent(dc)
+	for i, c := range ad.Commands {
+		ad.Commands[i] = SanitizeFixRecommendation(c, gate)
+	}
+	return ad
+}
+
+func enrichForAgent(dc DoctorCheck) AgentDiagnostic {
 	ad := AgentDiagnostic{
 		Name:     dc.Name,
 		Status:   dc.Status,
@@ -86,6 +100,19 @@ func buildGenericExplanation(dc DoctorCheck) string {
 		s += " To fix: " + dc.Fix
 	}
 	return s
+}
+
+// AgentEnricherNames returns every check name with a specialized agent
+// enricher, sorted. Enrichers hardcode their own remediation commands, so
+// tests that assert on agent output must cover each one rather than a
+// hand-picked name that may fall through to the generic path (GH#4993).
+func AgentEnricherNames() []string {
+	names := make([]string, 0, len(agentEnrichers))
+	for name := range agentEnrichers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // agentEnrichers maps check names to specialized enrichment functions.
@@ -216,7 +243,7 @@ func enrichLargeDatabase(dc DoctorCheck) agentEnrichment {
 		explanation: fmt.Sprintf("The database has accumulated many closed issues: %s. This may cause performance degradation in list/search operations. Pruning is optional and destructive.", dc.Message),
 		observed:    dc.Message,
 		expected:    "Closed issue count below configured threshold",
-		commands:    []string{"bd cleanup --older-than 90"},
+		commands:    []string{"bd prune --older-than 90d"},
 		sourceFiles: []string{"cmd/bd/doctor/database.go:CheckDatabaseSize"},
 	}
 }
@@ -521,7 +548,7 @@ func enrichStaleClosedIssues(dc DoctorCheck) agentEnrichment {
 		explanation: fmt.Sprintf("Stale closed issues: %s. Old closed issues can be pruned to reduce database size and improve query performance.", dc.Message),
 		observed:    dc.Message + "\n" + dc.Detail,
 		expected:    "Closed issues are within acceptable age/count thresholds",
-		commands:    []string{"bd cleanup --older-than 90"},
+		commands:    []string{"bd prune --older-than 90d"},
 		sourceFiles: []string{"cmd/bd/doctor/maintenance.go:CheckStaleClosedIssues"},
 	}
 }

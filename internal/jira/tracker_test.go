@@ -769,6 +769,9 @@ func (s *configStore) SearchIssues(_ context.Context, _ string, _ types.IssueFil
 func (s *configStore) SearchIssueIDs(_ context.Context, _ string, _ types.IssueFilter) ([]string, error) {
 	return nil, nil
 }
+func (s *configStore) SearchIssueSummaries(_ context.Context, _ string, _ types.IssueFilter) ([]*types.IssueSummary, error) {
+	return nil, nil
+}
 func (s *configStore) AddDependency(_ context.Context, _ *types.Dependency, _ string) error {
 	return nil
 }
@@ -801,6 +804,9 @@ func (s *configStore) GetLabels(_ context.Context, _ string) ([]string, error) {
 }
 func (s *configStore) GetIssuesByLabel(_ context.Context, _ string) ([]*types.Issue, error) {
 	return nil, nil
+}
+func (s *configStore) RenameLabel(_ context.Context, _, _, _ string) (int, int, []string, error) {
+	return 0, 0, nil, nil
 }
 func (s *configStore) GetReadyWork(_ context.Context, _ types.WorkFilter) ([]*types.Issue, error) {
 	return nil, nil

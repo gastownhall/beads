@@ -110,8 +110,11 @@ const closeFlushTimeout = 500 * time.Millisecond
 // reachable os.Exit guards (CheckReadonly and the pre-run gates in main), so
 // events already queued earlier in this run are still written to disk and
 // scheduled for upload even when a command exits without returning through the
-// RunE/ExecuteC path. It is a no-op when metrics are disabled or uninitialized,
-// and the BD_IS_FLUSHER guard in MaybeSpawnFlusher keeps it from recursing.
+// RunE/ExecuteC path. When metrics are disabled the collector half is inert
+// (NullEmitter), but the spawn half still runs: a leftover queue from a
+// previously-enabled configuration is drained by prune-only send-metrics
+// children (GH#5712). The BD_IS_FLUSHER guard in MaybeSpawnFlusher keeps it
+// from recursing.
 func CloseAndFlush() {
 	if c := Global(); c != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), closeFlushTimeout)

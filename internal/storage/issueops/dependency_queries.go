@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // GetAllDependencyRecordsInTx returns all dependency records from permanent and
@@ -24,6 +25,49 @@ func GetAllDependencyRecordsInTx(ctx context.Context, tx DBTX) (map[string][]*ty
 		}
 	}
 	return result, nil
+}
+
+// GetExternalBlockingDependencyRecordsInTx returns explicit external: edges
+// whose dependency type can block ready work. Cross-prefix issue IDs may share
+// depends_on_external storage, so the external: prefix check is intentional.
+func GetExternalBlockingDependencyRecordsInTx(ctx context.Context, tx DBTX) (map[string][]*types.Dependency, error) {
+	result := make(map[string][]*types.Dependency)
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		if err := getExternalBlockingDependencyRecordsIntoFromTable(ctx, tx, depTable, result); err != nil {
+			if optionalBlockedTable(depTable) && isTableNotExistError(err) {
+				continue
+			}
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+//nolint:gosec // G201: depTable is "dependencies" or "wisp_dependencies" (hardcoded by caller).
+func getExternalBlockingDependencyRecordsIntoFromTable(ctx context.Context, tx DBTX, depTable string, result map[string][]*types.Dependency) error {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+		SELECT issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id
+		FROM %s
+		WHERE depends_on_external LIKE 'external:%%'
+		  AND type IN ('blocks', 'conditional-blocks', 'waits-for')
+		ORDER BY issue_id
+	`, DepTargetExpr, depTable))
+	if err != nil {
+		return fmt.Errorf("get external blocking dependency records from %s: %w", depTable, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		dep, scanErr := scanDependencyRow(rows)
+		if scanErr != nil {
+			return fmt.Errorf("get external blocking dependency records from %s: %w", depTable, scanErr)
+		}
+		result[dep.IssueID] = append(result[dep.IssueID], dep)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("get external blocking dependency records from %s: %w", depTable, err)
+	}
+	return nil
 }
 
 //nolint:gosec // G201: depTable is "dependencies" or "wisp_dependencies" (hardcoded by caller).
@@ -900,10 +944,25 @@ func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx DBTX, closedIssueID st
 
 // IsBlockedInTx checks if an issue is blocked by active dependencies within
 // an existing transaction. Returns whether the issue is blocked and, if so,
-// a list of blocker descriptions for display.
+// a list of blocker descriptions for display, each spelled by
+// publicops.Blocker.String.
+func IsBlockedInTx(ctx context.Context, tx DBTX, issueID string) (bool, []string, error) {
+	blocked, blockers, err := isBlockedByInTx(ctx, tx, issueID)
+	if err != nil || len(blockers) == 0 {
+		return blocked, nil, err
+	}
+	names := make([]string, 0, len(blockers))
+	for _, blocker := range blockers {
+		names = append(names, blocker.String())
+	}
+	return blocked, names, nil
+}
+
+// isBlockedByInTx is IsBlockedInTx with the live direct blockers kept typed, so
+// a refusal can carry them without re-reading its own display strings.
 //
 //nolint:gosec // G201: table names are hardcoded constants.
-func IsBlockedInTx(ctx context.Context, tx DBTX, issueID string) (bool, []string, error) {
+func isBlockedByInTx(ctx context.Context, tx DBTX, issueID string) (bool, []publicops.Blocker, error) {
 	var blocked bool
 	found := false
 	for _, table := range []string{"issues", "wisps"} {
@@ -967,7 +1026,7 @@ func IsBlockedInTx(ctx context.Context, tx DBTX, issueID string) (bool, []string
 	if err != nil {
 		return false, nil, fmt.Errorf("check blocker status: %w", err)
 	}
-	var blockers []string
+	var blockers []publicops.Blocker
 	for _, e := range edges {
 		status, ok := statusByID[e.dependsOnID]
 		if !ok {
@@ -976,11 +1035,7 @@ func IsBlockedInTx(ctx context.Context, tx DBTX, issueID string) (bool, []string
 		if status == types.StatusClosed || status == types.StatusPinned {
 			continue
 		}
-		if e.depType != "blocks" {
-			blockers = append(blockers, e.dependsOnID+" ("+e.depType+")")
-		} else {
-			blockers = append(blockers, e.dependsOnID)
-		}
+		blockers = append(blockers, publicops.Blocker{ID: e.dependsOnID, Type: types.DependencyType(e.depType)})
 	}
 
 	return true, blockers, nil

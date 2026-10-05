@@ -97,7 +97,17 @@ func bdDepWithInputFail(t *testing.T, bd, dir, input string, args ...string) str
 	return string(out)
 }
 
-func TestEmbeddedDep(t *testing.T) {
+// TestEmbeddedDepA and TestEmbeddedDepB were split from TestEmbeddedDep
+// (originally ~317s, measured under --config=embedded) into 2 top-level
+// tests over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once. The "list_*" subtests (which assert on
+// dependencies added by "add_positional_args" / "add_type_parent_child")
+// stay grouped with the "add_*" cluster in TestEmbeddedDepA rather than a
+// strict half/half split, since they depend on mutations made by those
+// specific earlier subtests that a fresh per-function setup does not
+// reproduce.
+func TestEmbeddedDepA(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -252,38 +262,6 @@ func TestEmbeddedDep(t *testing.T) {
 		}
 	})
 
-	// ===== dep remove =====
-
-	t.Run("remove_basic", func(t *testing.T) {
-		r1 := bdCreate(t, bd, dir, "Remove A", "--type", "task")
-		r2 := bdCreate(t, bd, dir, "Remove B", "--type", "task")
-		bdDep(t, bd, dir, "add", r1.ID, r2.ID)
-		out := bdDep(t, bd, dir, "remove", r1.ID, r2.ID)
-		if !strings.Contains(out, "Removed") {
-			t.Errorf("expected 'Removed' in output: %s", out)
-		}
-	})
-
-	t.Run("remove_rm_alias", func(t *testing.T) {
-		r1 := bdCreate(t, bd, dir, "Rm A", "--type", "task")
-		r2 := bdCreate(t, bd, dir, "Rm B", "--type", "task")
-		bdDep(t, bd, dir, "add", r1.ID, r2.ID)
-		out := bdDep(t, bd, dir, "rm", r1.ID, r2.ID)
-		if !strings.Contains(out, "Removed") {
-			t.Errorf("expected 'Removed' via rm alias: %s", out)
-		}
-	})
-
-	t.Run("remove_json_output", func(t *testing.T) {
-		r1 := bdCreate(t, bd, dir, "RmJSON A", "--type", "task")
-		r2 := bdCreate(t, bd, dir, "RmJSON B", "--type", "task")
-		bdDep(t, bd, dir, "add", r1.ID, r2.ID)
-		m := bdDepJSON(t, bd, dir, "remove", r1.ID, r2.ID)
-		if m["status"] != "removed" {
-			t.Errorf("expected status=removed, got %v", m["status"])
-		}
-	})
-
 	// ===== dep list =====
 
 	t.Run("list_default_direction_down", func(t *testing.T) {
@@ -319,6 +297,81 @@ func TestEmbeddedDep(t *testing.T) {
 		}
 		if !strings.Contains(stdout.String(), issueD.ID) {
 			t.Errorf("expected dependency ID in JSON: %s", stdout.String())
+		}
+	})
+}
+
+func TestEmbeddedDepB(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "dp")
+
+	// Pre-create issues for dependency testing.
+	_ = bdCreate(t, bd, dir, "Dep issue A", "--type", "task")
+	_ = bdCreate(t, bd, dir, "Dep issue B", "--type", "task")
+	issueC := bdCreate(t, bd, dir, "Dep issue C", "--type", "task")
+	issueD := bdCreate(t, bd, dir, "Dep issue D", "--type", "task")
+	epic := bdCreate(t, bd, dir, "Dep epic", "--type", "epic")
+	child1 := bdCreate(t, bd, dir, "Dep child 1", "--type", "task")
+	child2 := bdCreate(t, bd, dir, "Dep child 2", "--type", "task")
+
+	// Wire up the same parent-child/blocks edges TestEmbeddedDepA builds, so
+	// the tree_* subtests below exercise real multi-node traversal instead of
+	// rendering isolated single-node trees (see review S2: these subtests
+	// previously passed vacuously against an edgeless graph).
+	bdDep(t, bd, dir, "add", child1.ID, epic.ID, "--type", "parent-child")
+	bdDep(t, bd, dir, "add", child2.ID, epic.ID, "--type", "parent-child")
+	bdDep(t, bd, dir, "add", issueC.ID, issueD.ID)
+
+	// ===== dep remove =====
+
+	t.Run("remove_basic", func(t *testing.T) {
+		r1 := bdCreate(t, bd, dir, "Remove A", "--type", "task")
+		r2 := bdCreate(t, bd, dir, "Remove B", "--type", "task")
+		bdDep(t, bd, dir, "add", r1.ID, r2.ID)
+		out := bdDep(t, bd, dir, "remove", r1.ID, r2.ID)
+		if !strings.Contains(out, "Removed") {
+			t.Errorf("expected 'Removed' in output: %s", out)
+		}
+	})
+
+	t.Run("remove_rm_alias", func(t *testing.T) {
+		r1 := bdCreate(t, bd, dir, "Rm A", "--type", "task")
+		r2 := bdCreate(t, bd, dir, "Rm B", "--type", "task")
+		bdDep(t, bd, dir, "add", r1.ID, r2.ID)
+		out := bdDep(t, bd, dir, "rm", r1.ID, r2.ID)
+		if !strings.Contains(out, "Removed") {
+			t.Errorf("expected 'Removed' via rm alias: %s", out)
+		}
+	})
+
+	t.Run("remove_json_output", func(t *testing.T) {
+		r1 := bdCreate(t, bd, dir, "RmJSON A", "--type", "task")
+		r2 := bdCreate(t, bd, dir, "RmJSON B", "--type", "task")
+		bdDep(t, bd, dir, "add", r1.ID, r2.ID)
+		m := bdDepJSON(t, bd, dir, "remove", r1.ID, r2.ID)
+		if m["status"] != "removed" {
+			t.Errorf("expected status=removed, got %v", m["status"])
+		}
+		if m["removed"] != true {
+			t.Errorf("expected removed=true, got %v", m["removed"])
+		}
+	})
+
+	t.Run("remove_missing_edge_reports_noop", func(t *testing.T) {
+		r1 := bdCreate(t, bd, dir, "Missing edge A", "--type", "task")
+		r2 := bdCreate(t, bd, dir, "Missing edge B", "--type", "task")
+		out := bdDep(t, bd, dir, "remove", r1.ID, r2.ID)
+		if !strings.Contains(out, "No dependency found") || strings.Contains(out, "✓") {
+			t.Errorf("missing edge should report a no-op, got: %s", out)
+		}
+		m := bdDepJSON(t, bd, dir, "remove", r1.ID, r2.ID)
+		if m["status"] != "not_found" || m["removed"] != false {
+			t.Errorf("missing edge JSON = %v, want status=not_found removed=false", m)
 		}
 	})
 

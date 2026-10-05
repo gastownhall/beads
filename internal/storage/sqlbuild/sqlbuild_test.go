@@ -1,6 +1,9 @@
 package sqlbuild
 
 import (
+	"fmt"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -88,6 +91,126 @@ func TestLessIDHonorsSortDesc(t *testing.T) {
 	}
 }
 
+// TestLessSummaryMirrorsOrderBy is TestLessMirrorsOrderBy's sibling for
+// LessSummary/types.IssueSummary. Less and LessSummary share the lessFields
+// core, so this mostly guards against a future adapter (summarySortFields)
+// dropping or mis-mapping a field rather than the tie-break logic itself.
+func TestLessSummaryMirrorsOrderBy(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	older := now.Add(-time.Hour)
+	a := &types.IssueSummary{ID: "a", Priority: 1, CreatedAt: now}
+	b := &types.IssueSummary{ID: "b", Priority: 2, CreatedAt: now}
+	if !LessSummary(a, b, "", false) || LessSummary(b, a, "", false) {
+		t.Error("default sort must order priority 1 before priority 2")
+	}
+	c := &types.IssueSummary{ID: "c", Priority: 1, CreatedAt: older}
+	if !LessSummary(a, c, "", false) {
+		t.Error("equal priority must order newer created_at first (created_at DESC)")
+	}
+	d := &types.IssueSummary{ID: "d", Priority: 1, CreatedAt: now}
+	if !LessSummary(a, d, "", false) || LessSummary(d, a, "", false) {
+		t.Error("full tie must break by id ASC")
+	}
+}
+
+// TestLessSummaryMatchesLessAcrossSortKeys is TestLessSummaryMirrorsOrderBy's
+// broader sibling: instead of spot-checking only the default tie-break chain,
+// it sorts a parallel Issue/IssueSummary fixture with Less and LessSummary
+// for every SortDefs key (plus "id") in both directions and asserts the two
+// produce identical ID order. Less and LessSummary already share the
+// lessFields core, so this mainly guards summarySortFields: if a future field
+// is added to sortFields without updating summarySortFields, the two
+// adapters silently diverge and this is what would catch it.
+func TestLessSummaryMatchesLessAcrossSortKeys(t *testing.T) {
+	t.Parallel()
+
+	day := func(d int) time.Time { return time.Date(2026, 1, d, 0, 0, 0, 0, time.UTC) }
+	closedOn := func(d int) *time.Time { c := day(d); return &c }
+
+	type row struct {
+		id        string
+		priority  int
+		createdAt time.Time
+		updatedAt time.Time
+		closedAt  *time.Time
+		status    types.Status
+		issueType types.IssueType
+		assignee  string
+		title     string
+	}
+	// Distinct (and, for priority, partially tied) values on every field so
+	// each sort key — including the tie-break chain the "" and "priority"
+	// keys share — produces a non-trivial, checkable order.
+	rows := []row{
+		{"p1", 3, day(1), day(5), nil, types.StatusOpen, types.TypeBug, "alice", "Zebra"},
+		{"p2", 1, day(3), day(2), closedOn(10), types.StatusBlocked, types.TypeEpic, "bob", "apple"},
+		{"p3", 2, day(5), day(4), closedOn(8), types.StatusClosed, types.TypeTask, "carol", "Mango"},
+		{"p4", 1, day(2), day(1), nil, types.StatusInProgress, types.TypeChore, "dave", "banana"},
+		{"p5", 4, day(4), day(3), closedOn(6), types.StatusOpen, types.TypeBug, "eve", "Orange"},
+	}
+
+	issues := make([]*types.Issue, len(rows))
+	summaries := make([]*types.IssueSummary, len(rows))
+	for i, r := range rows {
+		issues[i] = &types.Issue{
+			ID: r.id, Priority: r.priority, CreatedAt: r.createdAt, UpdatedAt: r.updatedAt,
+			ClosedAt: r.closedAt, Status: r.status, IssueType: r.issueType, Assignee: r.assignee, Title: r.title,
+		}
+		summaries[i] = &types.IssueSummary{
+			ID: r.id, Priority: r.priority, CreatedAt: r.createdAt, UpdatedAt: r.updatedAt,
+			ClosedAt: r.closedAt, Status: r.status, IssueType: r.issueType, Assignee: r.assignee, Title: r.title,
+		}
+	}
+
+	keys := make([]string, 0, len(SortDefs)+1)
+	for key := range SortDefs {
+		keys = append(keys, key)
+	}
+	keys = append(keys, "id")
+
+	for _, key := range keys {
+		for _, desc := range []bool{false, true} {
+			name := key
+			if name == "" {
+				name = "default"
+			}
+			if desc {
+				name += "/desc"
+			} else {
+				name += "/asc"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+
+				sortedIssues := append([]*types.Issue(nil), issues...)
+				sort.Slice(sortedIssues, func(i, j int) bool {
+					return Less(sortedIssues[i], sortedIssues[j], key, desc)
+				})
+				sortedSummaries := append([]*types.IssueSummary(nil), summaries...)
+				sort.Slice(sortedSummaries, func(i, j int) bool {
+					return LessSummary(sortedSummaries[i], sortedSummaries[j], key, desc)
+				})
+
+				gotIssues := make([]string, len(sortedIssues))
+				for i, is := range sortedIssues {
+					gotIssues[i] = is.ID
+				}
+				gotSummaries := make([]string, len(sortedSummaries))
+				for i, s := range sortedSummaries {
+					gotSummaries[i] = s.ID
+				}
+
+				if !slices.Equal(gotIssues, gotSummaries) {
+					t.Errorf("Less vs LessSummary order diverge for sortBy=%q sortDesc=%v:\n  Less:        %v\n  LessSummary: %v",
+						key, desc, gotIssues, gotSummaries)
+				}
+			})
+		}
+	}
+}
+
 func TestBuildReadyWorkOrderPriorityFIFO(t *testing.T) {
 	t.Parallel()
 
@@ -159,6 +282,30 @@ func TestBuildReadyWorkWhereBatchesIDSets(t *testing.T) {
 	wantArgs := len(ids) + len(ReadyWorkExcludeTypes(nil))
 	if len(args) != wantArgs {
 		t.Errorf("args = %d, want %d", len(args), wantArgs)
+	}
+}
+
+func TestBuildReadyWorkWhereAppliesPolicyIDExclusions(t *testing.T) {
+	t.Parallel()
+
+	ids := make([]string, QueryBatchSize+1)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("be-external-%d", i)
+	}
+	where, args, err := BuildReadyWorkWhere(
+		types.WorkFilter{ExcludeIDs: ids},
+		IssuesFilterTables,
+		ReadyWorkWhereInputs{},
+	)
+	if err != nil {
+		t.Fatalf("BuildReadyWorkWhere: %v", err)
+	}
+	if got := strings.Count(where, "id NOT IN ("); got != 2 {
+		t.Fatalf("external policy exclusions produced %d NOT IN clauses, want 2", got)
+	}
+	wantArgs := len(ids) + len(ReadyWorkExcludeTypes(nil))
+	if len(args) != wantArgs {
+		t.Fatalf("args = %d, want %d", len(args), wantArgs)
 	}
 }
 
@@ -396,9 +543,23 @@ func TestBuildReadyWorkWhereStatusFilter(t *testing.T) {
 		{
 			name:            "SingularStatusWinsOverStatuses",
 			filter:          types.WorkFilter{Status: "open", Statuses: []types.Status{"blocked", "pinned"}},
-			wantClause:      "status = ?",
+			wantClause:      "(status = ? OR status IN (SELECT name FROM custom_statuses WHERE category = 'active'))",
 			rejectClause:    "status IN (?",
 			wantLeadingArgs: []any{"open"},
+		},
+		{
+			name:            "OpenIncludesCustomActiveCategory",
+			filter:          types.WorkFilter{Status: types.StatusOpen},
+			wantClause:      "status IN (SELECT name FROM custom_statuses WHERE category = 'active')",
+			rejectClause:    "status IN ('open', 'in_progress')",
+			wantLeadingArgs: []any{"open"},
+		},
+		{
+			name:            "NonOpenSingularStatusStaysExact",
+			filter:          types.WorkFilter{Status: types.StatusInProgress},
+			wantClause:      "status = ?",
+			rejectClause:    "custom_statuses",
+			wantLeadingArgs: []any{"in_progress"},
 		},
 		{
 			name:         "EmptyFilterLegacyDefault",
@@ -431,5 +592,24 @@ func TestBuildReadyWorkWhereStatusFilter(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestOptionalWispTable pins the set a wisp query may treat as "no wisps".
+// leases and wisp_labels are joined or hydrated by that query but are not the
+// wisp plane being absent, so tolerating them turns a broken database into an
+// empty result.
+func TestOptionalWispTable(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"wisps", "wisp_dependencies", "WISPS"} {
+		if !OptionalWispTable(name) {
+			t.Errorf("OptionalWispTable(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"leases", "wisp_labels", "issues", "labels", "", "wisp"} {
+		if OptionalWispTable(name) {
+			t.Errorf("OptionalWispTable(%q) = true, want false", name)
+		}
 	}
 }

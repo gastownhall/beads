@@ -332,3 +332,140 @@ func TestEmbeddedStaleConcurrent(t *testing.T) {
 		}
 	}
 }
+
+// idSet reduces bd's JSON rows to the set of issue IDs they name, so a filter
+// assertion can talk about membership rather than ordering or row counts.
+func idSet(entries []map[string]interface{}) map[string]bool {
+	ids := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		if id, ok := e["id"].(string); ok {
+			ids[id] = true
+		}
+	}
+	return ids
+}
+
+// TestEmbeddedStaleLabelFilters covers --label, --label-any and
+// --exclude-label on bd stale. Before these flags a theme-scoped stale sweep
+// had to pull every stale issue and post-filter the JSON, which also silently
+// broke --limit: the limit applied to the unfiltered query, so a caller asking
+// for N issues in one theme could get none.
+func TestEmbeddedStaleLabelFilters(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "sl")
+
+	alpha := bdCreate(t, bd, dir, "Stale alpha", "--type", "task", "--labels", "theme:alpha")
+	beta := bdCreate(t, bd, dir, "Stale beta", "--type", "task", "--labels", "theme:beta")
+	alphaUrgent := bdCreate(t, bd, dir, "Stale alpha urgent", "--type", "task", "--labels", "theme:alpha,urgent")
+	bare := bdCreate(t, bd, dir, "Stale unlabelled", "--type", "task")
+
+	makeIssuesStale(t, beadsDir, "sl", []string{alpha.ID, beta.ID, alphaUrgent.ID, bare.ID})
+
+	t.Run("label_scopes_to_one_theme", func(t *testing.T) {
+		ids := idSet(bdStaleJSON(t, bd, dir, "--label", "theme:alpha"))
+		if !ids[alpha.ID] || !ids[alphaUrgent.ID] {
+			t.Errorf("expected both theme:alpha issues, got %v", ids)
+		}
+		if ids[beta.ID] || ids[bare.ID] {
+			t.Errorf("theme:alpha filter leaked other issues: %v", ids)
+		}
+	})
+
+	t.Run("repeated_label_is_AND", func(t *testing.T) {
+		ids := idSet(bdStaleJSON(t, bd, dir, "--label", "theme:alpha", "--label", "urgent"))
+		if !ids[alphaUrgent.ID] {
+			t.Errorf("expected %s carrying both labels, got %v", alphaUrgent.ID, ids)
+		}
+		if ids[alpha.ID] {
+			t.Errorf("%s carries only theme:alpha and must not match an AND of both: %v", alpha.ID, ids)
+		}
+	})
+
+	t.Run("label_any_is_OR", func(t *testing.T) {
+		ids := idSet(bdStaleJSON(t, bd, dir, "--label-any", "theme:alpha,theme:beta"))
+		if !ids[alpha.ID] || !ids[beta.ID] || !ids[alphaUrgent.ID] {
+			t.Errorf("expected all three themed issues, got %v", ids)
+		}
+		if ids[bare.ID] {
+			t.Errorf("unlabelled issue %s must not match --label-any: %v", bare.ID, ids)
+		}
+	})
+
+	t.Run("exclude_label_drops_matches", func(t *testing.T) {
+		ids := idSet(bdStaleJSON(t, bd, dir, "--exclude-label", "theme:alpha"))
+		if ids[alpha.ID] || ids[alphaUrgent.ID] {
+			t.Errorf("--exclude-label theme:alpha still returned alpha issues: %v", ids)
+		}
+		if !ids[beta.ID] || !ids[bare.ID] {
+			t.Errorf("expected beta and unlabelled issues to survive exclusion, got %v", ids)
+		}
+	})
+
+	t.Run("no_label_flags_returns_everything", func(t *testing.T) {
+		ids := idSet(bdStaleJSON(t, bd, dir))
+		for _, id := range []string{alpha.ID, beta.ID, alphaUrgent.ID, bare.ID} {
+			if !ids[id] {
+				t.Errorf("expected %s in unfiltered stale output, got %v", id, ids)
+			}
+		}
+	})
+
+	t.Run("limit_applies_after_the_label_filter", func(t *testing.T) {
+		// The regression this pins: if labels were applied to the hydrated
+		// results instead of in SQL, LIMIT 1 would take the stalest issue
+		// overall and then drop it for not matching, returning nothing.
+		entries := bdStaleJSON(t, bd, dir, "--label", "theme:alpha", "--limit", "1")
+		if len(entries) != 1 {
+			t.Fatalf("expected exactly 1 result for --label theme:alpha --limit 1, got %d: %v", len(entries), entries)
+		}
+		ids := idSet(entries)
+		if !ids[alpha.ID] && !ids[alphaUrgent.ID] {
+			t.Errorf("the single result should be a theme:alpha issue, got %v", ids)
+		}
+	})
+
+	// These clauses match a label EXACTLY, so an untrimmed flag value returns
+	// nothing and looks exactly like "no stale issues carry that label". Every
+	// sibling filter (list, search, ready, orphans) normalizes its input; these
+	// pin that --label means the same thing here.
+	t.Run("leading_space_is_trimmed_like_every_other_label_filter", func(t *testing.T) {
+		// The everyday form: pflag's CSV split leaves the space on the second
+		// value, so `--label 'theme:beta, theme:alpha'` arrives as
+		// {"theme:beta", " theme:alpha"}.
+		ids := idSet(bdStaleJSON(t, bd, dir, "--label", " theme:alpha"))
+		if !ids[alpha.ID] || !ids[alphaUrgent.ID] {
+			t.Errorf("expected ' theme:alpha' to match theme:alpha, got %v", ids)
+		}
+		if ids[beta.ID] || ids[bare.ID] {
+			t.Errorf("' theme:alpha' matched issues outside the theme: %v", ids)
+		}
+	})
+
+	t.Run("empty_element_does_not_annihilate_the_filter", func(t *testing.T) {
+		// A doubled comma used to AND in a `label = ''` clause, which no row
+		// can satisfy, turning a valid filter into a silent empty result.
+		ids := idSet(bdStaleJSON(t, bd, dir, "--label", "theme:alpha,,urgent"))
+		if !ids[alphaUrgent.ID] {
+			t.Errorf("expected %s to survive an empty label element, got %v", alphaUrgent.ID, ids)
+		}
+	})
+
+	t.Run("normalization_applies_to_label_any_and_exclude_label", func(t *testing.T) {
+		anyIDs := idSet(bdStaleJSON(t, bd, dir, "--label-any", " theme:beta"))
+		if !anyIDs[beta.ID] {
+			t.Errorf("expected ' theme:beta' to match via --label-any, got %v", anyIDs)
+		}
+		excludeIDs := idSet(bdStaleJSON(t, bd, dir, "--exclude-label", " theme:alpha"))
+		if excludeIDs[alpha.ID] || excludeIDs[alphaUrgent.ID] {
+			t.Errorf("' theme:alpha' failed to exclude the alpha issues: %v", excludeIDs)
+		}
+		if !excludeIDs[beta.ID] {
+			t.Errorf("exclusion dropped issues it should have kept: %v", excludeIDs)
+		}
+	})
+}
