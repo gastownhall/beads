@@ -308,6 +308,7 @@ var _ storage.Compactor = (*DoltStore)(nil)
 var _ storage.SchemaMigrator = (*DoltStore)(nil)
 var _ storage.ExternalRefHistoryQuerier = (*DoltStore)(nil)
 var _ storage.EventsJournalConfigurer = (*DoltStore)(nil)
+var _ storage.EventsJournalShapeChecker = (*DoltStore)(nil)
 var _ storage.VersionedHistoryConfigurer = (*DoltStore)(nil)
 
 // DoltStore implements the Storage interface using Dolt
@@ -320,6 +321,17 @@ type DoltStore struct {
 	// eventsJournalEnabled activates the durable events journal for THIS store
 	// instance only (storage.EventsJournalConfigurer); never process-global.
 	eventsJournalEnabled atomic.Bool
+	// journalShape caches the ONE INFORMATION_SCHEMA probe SetEventsJournalEnabled
+	// runs on activation (issueops.ProbeJournalShape, PR A1). Nil means either
+	// the journal is disabled or the probe failed; scopeEventsJournalTransaction
+	// treats nil the same as "do not journal this transaction" — see
+	// journalActivationErr.
+	journalShape atomic.Pointer[issueops.JournalShape]
+	// journalActivationErr holds the probe's error when SetEventsJournalEnabled(true)
+	// found a table shape the journal cannot run against (a missing required
+	// column, or a missing table). Nil whenever journalShape is non-nil or the
+	// journal is disabled. See storage.EventsJournalShapeChecker.
+	journalActivationErr atomic.Pointer[error]
 	// versionedHistoryEnabled activates dual-write issue-version history for
 	// THIS store instance only (storage.VersionedHistoryConfigurer); never
 	// process-global.
@@ -1083,6 +1095,13 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 			return fmt.Errorf("begin read tx: %w", err)
 		}
 		defer func() { _ = tx.Rollback() }()
+		// ReadEventsJournal/ReadEventsJournalPage read through this helper, and
+		// the column list they SELECT depends on the probed shape, not on
+		// whether the journal is enabled for writes — scope the shape only, so
+		// readEventsRowsInTx sees this store's actual table instead of
+		// defaulting to canonicalJournalShape (PR A1).
+		clearShape := issueops.ScopeEventsJournalShape(tx, s.journalShape.Load())
+		defer clearShape()
 		return fn(tx)
 	})
 }
@@ -1379,12 +1398,56 @@ func logBlockedRecheckFailure(ctx context.Context, pending issueops.BlockedReche
 }
 
 // SetEventsJournalEnabled activates the journal for this store instance only.
+//
+// Activating probes bd_events_journal's actual shape ONCE
+// (issueops.ProbeJournalShape, PR A1) and caches the result for this
+// instance's lifetime; EventsJournalActivationError reports whether that
+// probe found a shape the journal can actually run against. Deactivating
+// clears both and skips the probe entirely — a disabled store accepts any
+// shape.
 func (s *DoltStore) SetEventsJournalEnabled(enabled bool) {
 	s.eventsJournalEnabled.Store(enabled)
+	if !enabled {
+		s.journalShape.Store(nil)
+		s.journalActivationErr.Store(nil)
+		return
+	}
+	shape, err := issueops.ProbeJournalShape(context.Background(), s.db)
+	if err != nil {
+		s.journalShape.Store(nil)
+		s.journalActivationErr.Store(&err)
+		return
+	}
+	s.journalShape.Store(shape)
+	s.journalActivationErr.Store(nil)
 }
 
+// EventsJournalActivationError implements storage.EventsJournalShapeChecker:
+// nil unless the last SetEventsJournalEnabled(true) call found a table shape
+// the journal cannot run against.
+func (s *DoltStore) EventsJournalActivationError() error {
+	if p := s.journalActivationErr.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// scopeEventsJournalTransaction binds this store's cached activation state and
+// probed shape to tx. The activation switch folds in the shape probe's
+// success: a probe that found an unsupported table (journalShape nil) scopes
+// the transaction as DISABLED regardless of what SetEventsJournalEnabled was
+// called with, so a caller that enables the journal directly and ignores the
+// returned EventsJournalActivationError still never attempts a write against
+// a shape that cannot support it (storage.EventsJournalShapeChecker).
 func (s *DoltStore) scopeEventsJournalTransaction(tx *sql.Tx) func() {
-	return issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
+	shape := s.journalShape.Load()
+	enabled := s.eventsJournalEnabled.Load() && shape != nil
+	clearActivation := issueops.ScopeEventsJournalTransaction(tx, enabled)
+	clearShape := issueops.ScopeEventsJournalShape(tx, shape)
+	return func() {
+		clearShape()
+		clearActivation()
+	}
 }
 
 // SetVersionedHistoryEnabled activates dual-write issue-version history for

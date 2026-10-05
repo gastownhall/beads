@@ -352,6 +352,18 @@ func (p *notifyingProvider) SetEventsJournalEnabled(enabled bool) {
 	}
 }
 
+// EventsJournalActivationError forwards the inner provider's shape-probe
+// result (storage.EventsJournalShapeChecker, PR A1), for the same reason
+// SetEventsJournalEnabled forwards activation itself: the wrapper holds no
+// journal state of its own, and eventsjournal.Apply must see the inner
+// provider's real probe result through whichever wrapper sits on top of it.
+func (p *notifyingProvider) EventsJournalActivationError() error {
+	if checker, ok := p.inner.(storage.EventsJournalShapeChecker); ok {
+		return checker.EventsJournalActivationError()
+	}
+	return nil
+}
+
 // SetVersionedHistoryEnabled forwards dual-write issue-version history
 // activation to the provider that actually binds it to a transaction
 // (doltSQLProvider.BeginTx), for the same reason and in the same shape as

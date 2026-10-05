@@ -146,6 +146,12 @@ func ActivateStore(beadsDir string, s storage.DoltStorage, err error) (storage.D
 // the journal is that a consumer can trust its cursor, and a plumbing that
 // records nothing while reporting success is the one outcome that breaks that
 // trust invisibly. A disabled workspace accepts any plumbing.
+//
+// It also fails there when the configurer DOES support the journal but its
+// table's shape does not (storage.EventsJournalShapeChecker, PR A1): a missing
+// required column refuses at open, the same way a nil configurer does, rather
+// than letting SetEventsJournalEnabled succeed and every write fail
+// afterward — the gci failure mode this check replaces.
 func Apply(configurer storage.EventsJournalConfigurer, enabled bool) error {
 	if configurer == nil {
 		if enabled {
@@ -154,5 +160,10 @@ func Apply(configurer storage.EventsJournalConfigurer, enabled bool) error {
 		return nil
 	}
 	configurer.SetEventsJournalEnabled(enabled)
+	if checker, ok := configurer.(storage.EventsJournalShapeChecker); ok {
+		if err := checker.EventsJournalActivationError(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
