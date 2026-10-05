@@ -1187,6 +1187,8 @@ func IsRunning(beadsDir string) (*State, error) {
 	// would make each of them try to start a competing server, and reporting it
 	// as not running would make our caller start one and overwrite them, so
 	// keep the tracked state and let the caller find out whether it can connect.
+	// A stale file whose PID was reused then stays until a bd that can read the
+	// process list checks it.
 	isDolt, known := doltProcessStatus(pid)
 	if known && !isDolt {
 		// PID was reused by another process
@@ -2164,6 +2166,15 @@ func stopLocked(beadsDir string) error {
 		// errors.Is(err, ErrServerNotRunning) while operators see filesystem issues.
 		cleanupErr := cleanupStateFiles(beadsDir)
 		return errors.Join(ErrServerNotRunning, cleanupErr)
+	}
+
+	// IsRunning keeps the tracked state when the process list cannot be read,
+	// so the PID is not confirmed to be a dolt server and may be a stale PID
+	// reused by an unrelated process. Do not signal it, and leave the files for
+	// a bd that can read the process list.
+	if _, known := doltProcessStatus(state.PID); !known {
+		return fmt.Errorf("not stopping PID %d: the process list could not be read, "+
+			"so it is not confirmed to be a dolt sql-server", state.PID)
 	}
 
 	// Flush uncommitted working set changes before stopping the server.

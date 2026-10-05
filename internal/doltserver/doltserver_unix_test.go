@@ -3,9 +3,14 @@
 package doltserver
 
 import (
+	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"strconv"
 	"testing"
+	"time"
 )
 
 func TestIsProcessAliveTreatsEPERMAsAlive(t *testing.T) {
@@ -15,6 +20,49 @@ func TestIsProcessAliveTreatsEPERMAsAlive(t *testing.T) {
 	// PID 1 always exists, and an unprivileged user gets EPERM from kill(1, 0).
 	if !isProcessAlive(1) {
 		t.Error("expected PID 1 to be reported alive")
+	}
+}
+
+func TestStopDoesNotSignalUnverifiedProcess(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	// A stale pid file whose number now belongs to an unrelated process.
+	child := exec.Command("sleep", "300")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- child.Wait() }()
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		<-exited
+	})
+	if err := os.WriteFile(pidPath(dir), []byte(strconv.Itoa(child.Process.Pid)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePortFile(dir, 14599); err != nil {
+		t.Fatal(err)
+	}
+	orig := readDoltProcesses
+	readDoltProcesses = func() ([]int, error) { return nil, errors.New("listing processes: operation not permitted") }
+	t.Cleanup(func() { readDoltProcesses = orig })
+
+	err := Stop(dir)
+	if err == nil || errors.Is(err, ErrServerNotRunning) {
+		t.Errorf("expected Stop to refuse an unverified PID, got %v", err)
+	}
+	select {
+	case err := <-exited:
+		exited <- err // let the cleanup finish
+		t.Errorf("the unrelated process was signaled: %v", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	for _, path := range []string{pidPath(dir), portPath(dir)} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("expected %s to be kept: %v", filepath.Base(path), err)
+		}
 	}
 }
 
