@@ -1192,6 +1192,12 @@ func TestCAFileHygieneRefusesGroupWritableFile(t *testing.T) {
 	if err := os.WriteFile(path, ca.pem, 0o660); err != nil {
 		t.Fatalf("write group-writable ca file: %v", err)
 	}
+	// WriteFile's mode passes through the process umask: under umask 022 the
+	// file lands 0640, not group-writable at all, and the refusal under test
+	// is never reached. Set the mode explicitly.
+	if err := os.Chmod(path, 0o660); err != nil {
+		t.Fatalf("chmod ca file 0660: %v", err)
+	}
 	chownToNonPrivateGroup(t, path)
 	_, err := TransportForFile(path)
 	if err == nil {
@@ -1199,31 +1205,6 @@ func TestCAFileHygieneRefusesGroupWritableFile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "writable") {
 		t.Errorf("error %q does not explain the hygiene failure", err)
-	}
-}
-
-// TestCAFileHygieneAcceptsGroupWritableFileUnderUserPrivateGroup is finding
-// 4's availability half: a umask-002 layout (Ubuntu's default
-// user-private-groups scheme) produces 0775 directories and 0664 files owned
-// by the running user's own primary group, which is no more shared than a
-// umask-022 layout — group-write only reaches a group whose sole member, by
-// convention, is the file's own owner. This must be ACCEPTED, not refused.
-func TestCAFileHygieneAcceptsGroupWritableFileUnderUserPrivateGroup(t *testing.T) {
-	if !isUserPrivateGroup(uint32(os.Getuid()), uint32(os.Getgid())) { //nolint:gosec // uid/gid are always non-negative
-		t.Skip("this host's running user does not use the Debian/OpenSSH user-private-group convention")
-	}
-	clearCAEnvironment(t)
-	ca := newTestCA(t)
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o775); err != nil {
-		t.Fatalf("chmod dir 0775: %v", err)
-	}
-	path := filepath.Join(dir, "ca.pem")
-	if err := os.WriteFile(path, ca.pem, 0o664); err != nil {
-		t.Fatalf("write ca file: %v", err)
-	}
-	if _, err := TransportForFile(path); err != nil {
-		t.Fatalf("TransportForFile refused a umask-002 (0775/0664) layout under the owner's own user-private group: %v", err)
 	}
 }
 

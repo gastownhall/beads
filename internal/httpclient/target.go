@@ -34,9 +34,9 @@ type Target struct {
 	// this target — not an addition to the system store — set by
 	// `bd connect --ca-file <path>`. "" leaves this target on the system
 	// roots. MUST BE ABSOLUTE: `bd connect` resolves the flag's path with
-	// filepath.Abs before writing it, and LoadTarget refuses a relative one
-	// rather than resolving it against whatever directory bd happens to run
-	// in. BEADS_HTTP_CA_FILE (see TransportFor / CAFileEnv), when its
+	// filepath.Abs before writing it, and SaveTarget and LoadTarget both
+	// refuse a relative one rather than resolving it against whatever
+	// directory bd happens to run in. BEADS_HTTP_CA_FILE (see TransportFor / CAFileEnv), when its
 	// host-scoped pattern matches this target, overrides this per the
 	// documented precedence — env beats sidecar, the same rung order the
 	// bearer ladder uses, but the two disagreeing is a refusal, not a silent
@@ -101,18 +101,32 @@ func LoadTarget(beadsDir string) (Target, error) {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return Target{}, fmt.Errorf("url in %s has scheme %q; want http or https", TargetFileName, u.Scheme)
 	}
-	if f.CAFile != "" && !filepath.IsAbs(f.CAFile) {
-		return Target{}, fmt.Errorf(
-			"ca_file in %s is %q, a relative path; it must be absolute, because resolving it against the current directory would pick a different file depending on where bd was run — re-run `bd connect --ca-file` to record an absolute path",
-			TargetFileName, f.CAFile)
+	if err := checkCAFileAbsolute(f.CAFile); err != nil {
+		return Target{}, err
 	}
 	return Target{BaseURL: u, ExpectProjectID: f.ExpectProjectID, CAFile: f.CAFile}, nil
 }
 
+// checkCAFileAbsolute refuses a relative ca_file (see Target.CAFile). LoadTarget
+// and SaveTarget share it, so a sidecar can never be written holding a value
+// every later load would refuse.
+func checkCAFileAbsolute(caFile string) error {
+	if caFile != "" && !filepath.IsAbs(caFile) {
+		return fmt.Errorf(
+			"ca_file in %s is %q, a relative path; it must be absolute, because resolving it against the current directory would pick a different file depending on where bd was run — re-run `bd connect --ca-file` to record an absolute path",
+			TargetFileName, caFile)
+	}
+	return nil
+}
+
 // SaveTarget writes the sidecar 0600, beside metadata.json. It exists so tests
 // and the connect command share one encoder; the connect UX itself (gitignore
-// coverage, identity verification, conversion consent) is not here.
+// coverage, identity verification, conversion consent) is not here. It refuses
+// a relative CAFile before writing anything, with LoadTarget's own message.
 func SaveTarget(beadsDir string, t Target) error {
+	if err := checkCAFileAbsolute(t.CAFile); err != nil {
+		return err
+	}
 	f := targetFile{ExpectProjectID: t.ExpectProjectID, API: "v0", CAFile: t.CAFile}
 	if t.BaseURL != nil {
 		f.URL = t.BaseURL.String()

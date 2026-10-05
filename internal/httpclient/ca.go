@@ -366,6 +366,12 @@ func resolveCAFile(target Target) (resolvedCA, error) {
 // to it — with no window where some processes trust only the old certificate
 // and others only the new one.
 //
+// Because it is cached, the returned transport is SHARED: every caller in
+// this process asking for the same file holds the same *http.Transport. Treat
+// it as read-only — wrap it rather than type-asserting and reconfiguring it —
+// since setting its TLSClientConfig, Proxy or DialContext would silently
+// change trust for every other holder.
+//
 // # HTTPS proxies
 //
 // When a CA is configured, the returned transport refuses to reach a target
@@ -402,7 +408,8 @@ func TransportFor(target Target) (http.RoundTripper, error) {
 //     silently renarrowed by a variable it may not even know exists.
 //
 // Like TransportFor, this participates in the (absolute path, content hash)
-// transport cache and refuses loudly (missing file, hygiene, malformed PEM)
+// transport cache — so what it returns is the same shared, read-only
+// transport — and refuses loudly (missing file, hygiene, malformed PEM)
 // rather than falling back to system roots.
 func TransportForFile(path string) (http.RoundTripper, error) {
 	return transportForFile(path, "ca_file")

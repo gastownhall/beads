@@ -76,6 +76,137 @@ func TestCheckCAFilePermissionsRefusesSymlinkItselfInWorldWritableDir(t *testing
 	}
 }
 
+// TestCheckCAFilePermissionsResolvesRelativeLinkAgainstPhysicalDir pins the
+// walk to the kernel's reading of a relative symlink target: with a/link ->
+// ../b/c and b/c/x -> ../y, the path a/link/x names b/y, because ".." is taken
+// from the directory x really lives in. A lexical join collapses it against
+// a/link instead and lands on a/y; the hygienic decoy planted there makes that
+// mistake a wrong-file read rather than just a refusal.
+func TestCheckCAFilePermissionsResolvesRelativeLinkAgainstPhysicalDir(t *testing.T) {
+	root := secureTempDir(t)
+	for _, d := range []string{"a", "b", filepath.Join("b", "c")} {
+		if err := os.Mkdir(filepath.Join(root, d), 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	realPath := filepath.Join(root, "b", "y")
+	if err := os.WriteFile(realPath, []byte("real"), 0o600); err != nil {
+		t.Fatalf("write real file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "a", "y"), []byte("decoy"), 0o600); err != nil {
+		t.Fatalf("write decoy file: %v", err)
+	}
+	if err := os.Symlink(filepath.Join("..", "b", "c"), filepath.Join(root, "a", "link")); err != nil {
+		t.Fatalf("symlink a/link: %v", err)
+	}
+	if err := os.Symlink(filepath.Join("..", "y"), filepath.Join(root, "b", "c", "x")); err != nil {
+		t.Fatalf("symlink b/c/x: %v", err)
+	}
+	path := filepath.Join(root, "a", "link", "x")
+
+	got, _, err := checkCAFilePermissions(path)
+	if err != nil {
+		t.Fatalf("checkCAFilePermissions(%s): %v", path, err)
+	}
+	want, err := filepath.EvalSymlinks(realPath)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", realPath, err)
+	}
+	if got != want {
+		t.Errorf("checkCAFilePermissions resolved %s to %s, want %s", path, got, want)
+	}
+	data, err := readCAFile(path, "ca_file")
+	if err != nil {
+		t.Fatalf("readCAFile(%s): %v", path, err)
+	}
+	if string(data) != "real" {
+		t.Errorf("readCAFile(%s) read %q, want the file the kernel names (%q)", path, data, "real")
+	}
+}
+
+// TestReadCAFileRefusesLinkTargetWithInteriorDotDot pins readLinkTarget's
+// refusal of a target whose ".." follows another component. With x/d ->
+// ../evil/sub, the kernel resolves d/.. to evil, a world-writable directory
+// the walk refuses when it is named directly, but a textual collapse never
+// looks at d: the relative leaf link then reads the hygienic decoy at x/y, and
+// the other three shapes read the file inside evil without evil ever being
+// checked. The targets are spelled as strings because filepath.Join would
+// clean the ".." away.
+func TestReadCAFileRefusesLinkTargetWithInteriorDotDot(t *testing.T) {
+	root := secureTempDir(t)
+	evil := filepath.Join(root, "evil")
+	x := filepath.Join(root, "x")
+	for _, d := range []string{evil, filepath.Join(evil, "sub"), filepath.Join(evil, "dir"), x, filepath.Join(x, "dir")} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	if err := os.Chmod(evil, 0o777); err != nil {
+		t.Fatalf("chmod evil 0777: %v", err)
+	}
+	for path, content := range map[string]string{
+		filepath.Join(evil, "y"):        "evil",
+		filepath.Join(evil, "dir", "y"): "evil",
+		filepath.Join(x, "y"):           "decoy",
+		filepath.Join(x, "dir", "y"):    "decoy",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	if err := os.Symlink(filepath.Join("..", "evil", "sub"), filepath.Join(x, "d")); err != nil {
+		t.Fatalf("symlink x/d: %v", err)
+	}
+	if _, err := readCAFile(filepath.Join(evil, "y"), "ca_file"); err == nil {
+		t.Fatal("readCAFile accepted a file in a world-writable directory named directly, so the cases below prove nothing")
+	}
+
+	for _, tc := range []struct{ name, link, target, path string }{
+		{"relative leaf", "L1", "d/../y", "L1"},
+		{"absolute leaf", "L2", x + "/d/../y", "L2"},
+		{"relative ancestor", "L3", "d/../dir", "L3/y"},
+		{"absolute ancestor", "L4", x + "/d/../dir", "L4/y"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.Symlink(tc.target, filepath.Join(x, tc.link)); err != nil {
+				t.Fatalf("symlink %s: %v", tc.link, err)
+			}
+			path := filepath.Join(x, tc.path)
+			data, err := readCAFile(path, "ca_file")
+			if err == nil {
+				t.Fatalf("readCAFile(%s) through %q read %q, want a refusal", path, tc.target, data)
+			}
+			if !strings.Contains(err.Error(), `whose ".." follows another component`) {
+				t.Errorf("readCAFile(%s) through %q: %v, want the interior \"..\" refusal", path, tc.target, err)
+			}
+		})
+	}
+}
+
+// TestHasInteriorDotDot pins the boundary of that refusal: a ".." after
+// another component is refused, but a leading run of them is not, since
+// readLinkTarget takes it from a physical directory.
+func TestHasInteriorDotDot(t *testing.T) {
+	for target, want := range map[string]bool{
+		"y":          false,
+		"../y":       false,
+		"../../b/c":  false,
+		"./../y":     false,
+		"/r/b/y":     false,
+		"/../y":      false,
+		"d/../y":     true,
+		"d/./../y":   true,
+		"d/..":       true,
+		"../d/../y":  true,
+		"/r/d/../y":  true,
+		"//r/d/../y": true,
+	} {
+		if got := hasInteriorDotDot(target); got != want {
+			t.Errorf("hasInteriorDotDot(%q) = %v, want %v", target, got, want)
+		}
+	}
+}
+
 // TestCheckCAFilePermissionsRefusesWorldWritableGrandparent is finding 3: a
 // world-writable GRANDparent (not just the immediate parent) must be
 // refused — an attacker who can write the grandparent can rename the parent
@@ -388,5 +519,36 @@ func TestIsUserPrivateGroupTrueForRunningUsersOwnGroup(t *testing.T) {
 func TestIsUserPrivateGroupFalseForUnknownIDs(t *testing.T) {
 	if isUserPrivateGroup(0xFFFFFFF0, 0xFFFFFFF1) {
 		t.Error("isUserPrivateGroup reported true for ids that cannot possibly resolve to a real account")
+	}
+}
+
+// TestCAFileHygieneAcceptsGroupWritableFileUnderUserPrivateGroup is finding
+// 4's availability half: a umask-002 layout (Ubuntu's default
+// user-private-groups scheme) produces 0775 directories and 0664 files owned
+// by the running user's own primary group, which is no more shared than a
+// umask-022 layout — group-write only reaches a group whose sole member, by
+// convention, is the file's own owner. This must be ACCEPTED, not refused.
+func TestCAFileHygieneAcceptsGroupWritableFileUnderUserPrivateGroup(t *testing.T) {
+	if !isUserPrivateGroup(uint32(os.Getuid()), uint32(os.Getgid())) { //nolint:gosec // uid/gid are always non-negative
+		t.Skip("this host's running user does not use the Debian/OpenSSH user-private-group convention")
+	}
+	clearCAEnvironment(t)
+	ca := newTestCA(t)
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o775); err != nil {
+		t.Fatalf("chmod dir 0775: %v", err)
+	}
+	path := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(path, ca.pem, 0o664); err != nil {
+		t.Fatalf("write ca file: %v", err)
+	}
+	// WriteFile's mode passes through the umask (see the refusal case in
+	// ca_test.go): under umask 022 the file would land 0644, leaving only the
+	// directory to exercise the user-private-group exception.
+	if err := os.Chmod(path, 0o664); err != nil {
+		t.Fatalf("chmod ca file 0664: %v", err)
+	}
+	if _, err := TransportForFile(path); err != nil {
+		t.Fatalf("TransportForFile refused a umask-002 (0775/0664) layout under the owner's own user-private group: %v", err)
 	}
 }

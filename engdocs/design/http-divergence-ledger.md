@@ -23,8 +23,8 @@ the encoder's reflection **bijection gate** pins the ledger to the wire (a
 request field added upstream lands here or fails CI), and the golden test
 `TestDivergenceLedgerDocMatchesLedger` pins this doc to the ledger. The prose
 rationale, the decision numbers (D-rows) each entry cites, and the full test-lane
-map live in the architecture spec,
-[http-client-backend.md](http-client-backend.md).
+map live in the architecture spec, `http-client-backend.md`, which is not
+included in this repository.
 
 A handful of rows still carry a `TODO` pin: these are the read-display and
 pre-run residuals (wisp-in-list, the pretty `bd ready` parent-epic map, the

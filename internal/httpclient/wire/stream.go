@@ -263,12 +263,7 @@ func (s *EventStream) Close() {
 // deadline, that the caller cancels, or that the connection drops surfaces as an
 // error; a per-event size cap refuses a frame larger than the client's bound.
 func (s *EventStream) Next() (StreamEvent, error) {
-	var (
-		data       []byte
-		name       string
-		seq        int64
-		eventBytes int64
-	)
+	var ev sseEvent
 	for {
 		line, err := s.readLine()
 		if err != nil {
@@ -280,11 +275,11 @@ func (s *EventStream) Next() (StreamEvent, error) {
 			// The blank line dispatches. A frame with no data carries only a retry
 			// advisory or an id and fires no message in SSE, so it is folded into
 			// the next event rather than returned.
-			if len(data) == 0 {
-				data, name, seq, eventBytes = nil, "", 0, 0
+			if len(ev.data) == 0 {
+				ev = sseEvent{}
 				continue
 			}
-			return StreamEvent{Seq: seq, Name: name, Data: data, Retry: s.retry}, nil
+			return StreamEvent{Seq: ev.seq, Name: ev.name, Data: ev.data, Retry: s.retry}, nil
 		}
 
 		if line[0] == ':' {
@@ -294,31 +289,53 @@ func (s *EventStream) Next() (StreamEvent, error) {
 		}
 
 		field, value := splitSSEField(line)
-		eventBytes += int64(len(value))
-		if eventBytes > s.maxBytes {
-			return StreamEvent{}, s.tooLarge()
-		}
-		switch field {
-		case "event":
-			name = value
-		case "data":
-			if len(data) > 0 {
-				data = append(data, '\n')
-			}
-			data = append(data, value...)
-			if int64(len(data)) > s.maxBytes {
-				return StreamEvent{}, s.tooLarge()
-			}
-		case "id":
-			if n, perr := strconv.ParseInt(value, 10, 64); perr == nil {
-				seq = n
-			}
-		case "retry":
-			if ms, perr := strconv.ParseInt(value, 10, 64); perr == nil && ms >= 0 {
-				s.retry = time.Duration(ms) * time.Millisecond
-			}
+		if err := s.applyField(&ev, field, value); err != nil {
+			return StreamEvent{}, err
 		}
 	}
+}
+
+// sseEvent is one event's fields, accumulated by Next until a blank line
+// dispatches them.
+type sseEvent struct {
+	data []byte
+	name string
+	seq  int64
+	// size is every field value read for this event, which is what the
+	// per-event cap measures.
+	size int64
+}
+
+// applyField folds one SSE field line into ev, refusing the event once its
+// values pass the per-event cap. Every field's value counts against the cap,
+// not just data's. retry is the one field that is not the event's: it is a
+// stream-wide advisory, so it lands on s.
+func (s *EventStream) applyField(ev *sseEvent, field, value string) error {
+	ev.size += int64(len(value))
+	if ev.size > s.maxBytes {
+		return s.tooLarge()
+	}
+	switch field {
+	case "event":
+		ev.name = value
+	case "data":
+		if len(ev.data) > 0 {
+			ev.data = append(ev.data, '\n')
+		}
+		ev.data = append(ev.data, value...)
+		if int64(len(ev.data)) > s.maxBytes {
+			return s.tooLarge()
+		}
+	case "id":
+		if n, perr := strconv.ParseInt(value, 10, 64); perr == nil {
+			ev.seq = n
+		}
+	case "retry":
+		if ms, perr := strconv.ParseInt(value, 10, 64); perr == nil && ms >= 0 {
+			s.retry = time.Duration(ms) * time.Millisecond
+		}
+	}
+	return nil
 }
 
 // readLine reads one SSE line, bounded by the per-event cap and armed with the

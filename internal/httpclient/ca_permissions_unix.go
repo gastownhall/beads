@@ -235,12 +235,9 @@ func checkCAFilePermissionsHop(path string, hops int) (string, os.FileInfo, erro
 		if err := checkAncestors(dir); err != nil {
 			return "", nil, err
 		}
-		target, err := os.Readlink(path)
+		target, err := readLinkTarget(path, dir)
 		if err != nil {
-			return "", nil, fmt.Errorf("readlink %s: %w", path, err)
-		}
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(dir, target)
+			return "", nil, err
 		}
 		return checkCAFilePermissionsHop(target, hops+1)
 	}
@@ -284,12 +281,9 @@ func checkAncestorsHop(dir string, hops int) error {
 		if err := checkAncestorsHop(parentOfLink, hops+1); err != nil {
 			return err
 		}
-		target, err := os.Readlink(dir)
+		target, err := readLinkTarget(dir, parentOfLink)
 		if err != nil {
-			return fmt.Errorf("readlink %s: %w", dir, err)
-		}
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(parentOfLink, target)
+			return err
 		}
 		return checkAncestorsHop(target, hops+1)
 	}
@@ -302,6 +296,65 @@ func checkAncestorsHop(dir string, hops int) error {
 		return nil
 	}
 	return checkAncestorsHop(parent, hops+1)
+}
+
+// readLinkTarget reads the symlink at link, whose containing directory dir
+// has already passed checkAncestors, and returns the path it points to. A
+// relative target is joined onto dir's PHYSICAL path, not its text: the
+// kernel resolves the target from the directory the link really lives in, so
+// when dir itself runs through a symlinked directory, a lexical
+// filepath.Join(dir, target) collapses any ".." in the target against the
+// wrong parent (a/link -> b/c with b/c/x -> ../y names b/y, never a/y).
+// Resolving dir in one EvalSymlinks call is safe here because every symlink
+// along it was already checked hop by hop on the way in.
+//
+// A target with a ".." after any other component is refused outright,
+// relative or absolute. The kernel takes that ".." from wherever the
+// component before it really leads, through that component's own symlinks,
+// while filepath.Join and the walk's own filepath.Dir drop the pair
+// textually, so the directories the kernel actually passes through are never
+// checked: with x/d -> ../e/s, x/L -> d/../y names e/y, not x/y, and an
+// absolute x/L -> /r/x/d/../y is even opened at /r/e/y while only /r/x and
+// its ancestors are checked, never /r/e. A leading run of ".." is kept: it is
+// taken from dir's physical path, which has no symlinks left to take it
+// through.
+func readLinkTarget(link, dir string) (string, error) {
+	target, err := os.Readlink(link)
+	if err != nil {
+		return "", fmt.Errorf("readlink %s: %w", link, err)
+	}
+	if hasInteriorDotDot(target) {
+		return "", fmt.Errorf(
+			`symlink %s points at %q, whose ".." follows another component; the kernel resolves that ".." through the earlier component's own symlinks, which this check would skip, so rewrite the link without the inner ".."`,
+			link, target)
+	}
+	if filepath.IsAbs(target) {
+		return target, nil
+	}
+	physical, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", dir, err)
+	}
+	return filepath.Join(physical, target), nil
+}
+
+// hasInteriorDotDot reports whether target has a ".." component after some
+// other component, setting aside "." and the empty components a leading or
+// doubled "/" leaves: the shape readLinkTarget refuses.
+func hasInteriorDotDot(target string) bool {
+	named := false
+	for _, elem := range strings.Split(target, "/") {
+		switch elem {
+		case "", ".":
+		case "..":
+			if named {
+				return true
+			}
+		default:
+			named = true
+		}
+	}
+	return false
 }
 
 // checkOwnerAndMode applies the ownership and writability rules to one path

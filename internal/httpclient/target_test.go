@@ -3,6 +3,7 @@
 package httpclient
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,6 +89,32 @@ func TestLoadTargetRejectsRelativeCAFile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "absolute") {
 		t.Errorf("error %q does not say the path must be absolute", err)
+	}
+}
+
+// TestSaveTargetRejectsRelativeCAFile is LoadTarget's refusal on the write
+// side: a relative ca_file must never reach the sidecar, where every later
+// LoadTarget would refuse it and leave the workspace unopenable. The refusal is
+// LoadTarget's own message, and it writes nothing, so the workspace stays
+// unconnected rather than holding a sidecar it cannot load.
+func TestSaveTargetRejectsRelativeCAFile(t *testing.T) {
+	dir := t.TempDir()
+	saveErr := SaveTarget(dir, Target{BaseURL: mustParseURL(t, "https://example.com"), CAFile: "relative/ca.pem"})
+	if saveErr == nil {
+		t.Fatal("SaveTarget accepted a relative ca_file")
+	}
+	if _, err := LoadTarget(dir); !errors.Is(err, ErrNotConnected) {
+		t.Errorf("LoadTarget after the refused save = %v, want ErrNotConnected: nothing may be written", err)
+	}
+
+	seeded := t.TempDir()
+	sidecar := `{"url":"https://example.com","ca_file":"relative/ca.pem"}`
+	if err := os.WriteFile(TargetPath(seeded), []byte(sidecar), 0o600); err != nil {
+		t.Fatalf("seed sidecar: %v", err)
+	}
+	_, loadErr := LoadTarget(seeded)
+	if loadErr == nil || saveErr.Error() != loadErr.Error() {
+		t.Errorf("SaveTarget refused with %q; want LoadTarget's own refusal %q", saveErr, loadErr)
 	}
 }
 

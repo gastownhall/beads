@@ -94,49 +94,64 @@ type Encoded struct {
 // It exists so the gates can drive every table uniformly. Ordinary callers know
 // which request they hold and use the typed functions below.
 func Encode(op Op, shape string, source any) (Encoded, error) {
-	switch {
-	case op == OpListReadyWork && shape == "":
+	switch (opShape{op, shape}) {
+	case opShape{OpListReadyWork, ""}:
 		return encodeAs(op, shape, source, ReadyParams)
-	case op == OpCountReadyWork && shape == "":
+	case opShape{OpCountReadyWork, ""}:
 		return encodeAs(op, shape, source, ReadyCountParams)
-	case op == OpListIssues && shape == "":
+	case opShape{OpListIssues, ""}:
 		return encodeAs(op, shape, source, ListParams)
-	case op == OpQueryIssues && shape == "":
+	case opShape{OpQueryIssues, ""}:
 		return encodeAs(op, shape, source, QueryParams)
-	case op == OpCountIssues && shape == "":
+	case opShape{OpCountIssues, ""}:
 		return encodeAs(op, shape, source, CountParams)
-	case op == OpCountIssues && shape == "byGroup":
+	case opShape{OpCountIssues, "byGroup"}:
 		return encodeAs(op, shape, source, CountByGroupParams)
-	case op == OpListReadyWork && shape == "workFilterBridge":
+	case opShape{OpListReadyWork, "workFilterBridge"}:
 		return encodeAs(op, shape, source, ReadyBridgeParams)
-
-	case op == OpGetIssue && shape == "":
-		req, err := sourceAs[issueops.GetRequest](op, shape, source)
-		if err != nil {
-			return Encoded{}, err
-		}
-		id, v := GetTarget(req)
-		return Encoded{Params: v, PathIDs: []string{id}}, nil
-
-	case op == OpGetIssue && shape == "searchExactIDs",
-		op == OpListIssues && shape == "searchParentWalk":
-		filter, err := sourceAs[types.IssueFilter](op, shape, source)
-		if err != nil {
-			return Encoded{}, err
-		}
-		// The zero vocabulary, which is what a gate driving the table has: it
-		// falls back to the built-in statuses and the default infra types, the
-		// same reading BuildListFilter gives an unconfigured workspace.
-		plan, err := PlanSearch(filter, ZeroVocabulary)
-		if err != nil {
-			return Encoded{}, err
-		}
-		if string(plan.Shape) != shape {
-			return Encoded{}, fmt.Errorf("encode: the filter is the %q shape, not %q", plan.Shape, shape)
-		}
-		return Encoded{Params: plan.Params, PathIDs: plan.IDs}, nil
+	case opShape{OpGetIssue, ""}:
+		return encodeGetIssue(op, shape, source)
+	case opShape{OpGetIssue, "searchExactIDs"}, opShape{OpListIssues, "searchParentWalk"}:
+		return encodeSearch(op, shape, source)
 	}
 	return Encoded{}, fmt.Errorf("encode: no encoder for operation %q shape %q", op, shape)
+}
+
+// opShape is the (operation, shape) pair Encode dispatches on.
+type opShape struct {
+	op    Op
+	shape string
+}
+
+// encodeGetIssue is Encode's arm for getIssue: GetTarget's id is the one path
+// id the request dials.
+func encodeGetIssue(op Op, shape string, source any) (Encoded, error) {
+	req, err := sourceAs[issueops.GetRequest](op, shape, source)
+	if err != nil {
+		return Encoded{}, err
+	}
+	id, v := GetTarget(req)
+	return Encoded{Params: v, PathIDs: []string{id}}, nil
+}
+
+// encodeSearch is Encode's arm for the two SearchIssues bridge shapes: it plans
+// the filter and refuses one that plans to the other shape.
+func encodeSearch(op Op, shape string, source any) (Encoded, error) {
+	filter, err := sourceAs[types.IssueFilter](op, shape, source)
+	if err != nil {
+		return Encoded{}, err
+	}
+	// The zero vocabulary, which is what a gate driving the table has: it
+	// falls back to the built-in statuses and the default infra types, the
+	// same reading BuildListFilter gives an unconfigured workspace.
+	plan, err := PlanSearch(filter, ZeroVocabulary)
+	if err != nil {
+		return Encoded{}, err
+	}
+	if string(plan.Shape) != shape {
+		return Encoded{}, fmt.Errorf("encode: the filter is the %q shape, not %q", plan.Shape, shape)
+	}
+	return Encoded{Params: plan.Params, PathIDs: plan.IDs}, nil
 }
 
 func encodeAs[T any](op Op, shape string, source any, encoder func(T) (url.Values, error)) (Encoded, error) {
