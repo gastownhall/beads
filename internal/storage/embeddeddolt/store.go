@@ -56,13 +56,15 @@ type EmbeddedDoltStore struct {
 	eventsJournalEnabled atomic.Bool
 	// journalShape caches the ONE INFORMATION_SCHEMA probe SetEventsJournalEnabled
 	// runs on activation (issueops.ProbeJournalShape, PR A1), over a short-lived
-	// connection since this store has no persistent db handle. Nil means either
-	// the journal is disabled or the probe failed — see journalActivationErr.
+	// connection since this store has no persistent db handle. Nil means the
+	// journal is disabled or the probe produced no shape; transactions then get
+	// the canonical column list — see journalActivationErr.
 	journalShape atomic.Pointer[issueops.JournalShape]
-	// journalActivationErr holds the probe's error when SetEventsJournalEnabled(true)
-	// found a table shape the journal cannot run against (a missing required
-	// column, or a missing table). Nil whenever journalShape is non-nil or the
-	// journal is disabled. See storage.EventsJournalShapeChecker.
+	// journalActivationErr holds the probe's *issueops.JournalShapeError when
+	// SetEventsJournalEnabled(true) found a table shape the journal cannot run
+	// against (a missing required column, or a missing table). Nil otherwise,
+	// including when the probe could not run at all
+	// (issueops.JournalActivationError). See storage.EventsJournalShapeChecker.
 	journalActivationErr atomic.Pointer[error]
 	// versionedHistoryEnabled activates dual-write issue-version history for
 	// THIS store instance only (storage.VersionedHistoryConfigurer); never
@@ -468,19 +470,16 @@ func (s *EmbeddedDoltStore) commitConn(ctx context.Context, commit bool, fn func
 		err = fmt.Errorf("embeddeddolt: begin tx: %w", err)
 		return
 	}
-	// The activation switch folds in the shape probe's success: a probe that
-	// found an unsupported table (journalShape nil) scopes this transaction as
-	// DISABLED regardless of what SetEventsJournalEnabled was called with, so a
-	// caller that enables the journal directly and ignores the returned
-	// EventsJournalActivationError still never attempts a write against a shape
-	// that cannot support it (storage.EventsJournalShapeChecker). Reads
-	// (commit=false callers) are never gated by this switch — only by the
-	// shape — since ReadEventsJournal has no enabled/disabled concept of its
-	// own.
-	journalShape := s.journalShape.Load()
-	clearJournalScope := issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load() && journalShape != nil)
+	// The activation switch deliberately does NOT depend on the cached shape:
+	// an enabled store whose probe produced no shape writes with the canonical
+	// column list, so a table the journal cannot run against fails the write
+	// loudly instead of letting the mutation commit with no journal row
+	// (storage.EventsJournalShapeChecker). Reads (commit=false callers) are
+	// never gated by this switch — only by the shape — since ReadEventsJournal
+	// has no enabled/disabled concept of its own.
+	clearJournalScope := issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
 	defer clearJournalScope()
-	clearJournalShapeScope := issueops.ScopeEventsJournalShape(tx, journalShape)
+	clearJournalShapeScope := issueops.ScopeEventsJournalShape(tx, s.journalShape.Load())
 	defer clearJournalShapeScope()
 	clearVersionScope := issueops.ScopeVersionedHistoryTransaction(tx, s.versionedHistoryEnabled.Load())
 	defer clearVersionScope()
@@ -513,8 +512,10 @@ func (s *EmbeddedDoltStore) commitConn(ctx context.Context, commit bool, fn func
 // and closed just for the probe since this store keeps no persistent db
 // handle, and caches the result for this instance's lifetime;
 // EventsJournalActivationError reports whether that probe found a shape the
-// journal can actually run against. Deactivating clears both and skips the
-// probe entirely — a disabled store accepts any shape.
+// journal cannot run against. The open and the probe share one
+// issueops.JournalShapeProbeTimeout, and either failing to run degrades to
+// the canonical shape (issueops.JournalActivationError). Deactivating clears
+// both and skips the probe entirely — a disabled store accepts any shape.
 func (s *EmbeddedDoltStore) SetEventsJournalEnabled(enabled bool) {
 	s.eventsJournalEnabled.Store(enabled)
 	if !enabled {
@@ -522,22 +523,26 @@ func (s *EmbeddedDoltStore) SetEventsJournalEnabled(enabled bool) {
 		s.journalActivationErr.Store(nil)
 		return
 	}
-	db, cleanup, err := OpenSQL(context.Background(), s.dataDir, s.database, s.branch)
-	if err != nil {
-		s.journalShape.Store(nil)
-		wrapped := fmt.Errorf("journal: open connection to probe shape: %w", err)
-		s.journalActivationErr.Store(&wrapped)
+	ctx, cancel := context.WithTimeout(context.Background(), issueops.JournalShapeProbeTimeout)
+	defer cancel()
+	shape, err := s.probeJournalShape(ctx)
+	s.journalShape.Store(shape)
+	if activationErr := issueops.JournalActivationError(err); activationErr != nil {
+		s.journalActivationErr.Store(&activationErr)
 		return
+	}
+	s.journalActivationErr.Store(nil)
+}
+
+// probeJournalShape runs issueops.ProbeJournalShape over a connection opened
+// and closed just for it.
+func (s *EmbeddedDoltStore) probeJournalShape(ctx context.Context) (*issueops.JournalShape, error) {
+	db, cleanup, err := OpenSQL(ctx, s.dataDir, s.database, s.branch)
+	if err != nil {
+		return nil, fmt.Errorf("journal: open connection to probe shape: %w", err)
 	}
 	defer func() { _ = cleanup() }()
-	shape, probeErr := issueops.ProbeJournalShape(context.Background(), db)
-	if probeErr != nil {
-		s.journalShape.Store(nil)
-		s.journalActivationErr.Store(&probeErr)
-		return
-	}
-	s.journalShape.Store(shape)
-	s.journalActivationErr.Store(nil)
+	return issueops.ProbeJournalShape(ctx, db)
 }
 
 // EventsJournalActivationError implements storage.EventsJournalShapeChecker:

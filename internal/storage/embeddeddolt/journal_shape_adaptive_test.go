@@ -19,8 +19,9 @@ import (
 // otherwise-ordinary embedded store, and prove the writer and reader adapt to
 // it instead of failing every journaled write (T2.1/T2.2), that adaptation
 // probes the shape once per activation rather than once per write (T2.3),
-// and that a table missing a REQUIRED column refuses at open rather than
-// silently disabling the journal or failing per write (T2.4).
+// and that a table missing a REQUIRED column reports a typed activation
+// error — which refuses a bead-writing open (eventsjournal.Apply) — rather
+// than silently disabling the journal (T2.4).
 
 // newGciShapeStore returns a store whose bd_events_journal has had
 // comment_json and actor dropped, reproducing gas-city-inc's shape
@@ -174,10 +175,13 @@ func TestJournalShapeProbeOncePerOpen(t *testing.T) {
 // TestMissingRequiredColumnRefusesAtOpen is T2.4: a table missing a REQUIRED
 // column (op) makes activation fail with a typed error when the journal is
 // enabled, but leaves it succeeding when disabled — a disabled workspace
-// accepts any shape. It also pins that a caller who enables the journal
-// anyway (ignoring the returned activation error) still never attempts the
-// INSERT: the mutation itself must not fail, which is the whole point of
-// moving this failure to open time instead of per write.
+// accepts any shape. It also pins what a store enabled anyway (an open that
+// writes no beads, which eventsjournal.Apply does not refuse) does with a
+// write: the journal stays ON and the write fails loudly on its INSERT,
+// rolling the mutation back with it. Treating the failed probe as "journal
+// off" instead would commit the mutation with no journal row — a consumer's
+// cursor silently missing a write, which is the one outcome the journal
+// exists to rule out.
 func TestMissingRequiredColumnRefusesAtOpen(t *testing.T) {
 	te := newTestEnv(t, "mr")
 	ctx := context.Background()
@@ -206,13 +210,12 @@ func TestMissingRequiredColumnRefusesAtOpen(t *testing.T) {
 		t.Errorf("activation with the journal disabled against the same broken shape failed: %v", err)
 	}
 
-	// Re-enable (probe fails again, same cached nil shape) and prove the
-	// mutation itself still lands: this is the gci failure mode A1 exists to
-	// close, where a per-write INSERT against a missing column rolled back the
-	// user's own write.
+	// Re-enable (probe fails again, same cached nil shape) and prove a write
+	// cannot land unrecorded: it must fail, and take its mutation with it.
 	te.store.SetEventsJournalEnabled(true)
-	issue := &types.Issue{Title: "no op column", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
-	if err := te.store.CreateIssue(ctx, issue, "tester"); err != nil {
-		t.Fatalf("CreateIssue must still succeed even though the journal cannot activate on this shape: %v", err)
+	issue := &types.Issue{ID: "mr-1", Title: "no op column", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := te.store.CreateIssue(ctx, issue, "tester"); err == nil {
+		t.Fatal("CreateIssue succeeded on an enabled store whose journal cannot record it; the write must fail loudly, never commit without a journal row")
 	}
+	te.assertRowNotExists(t, ctx, "issues", "mr-1")
 }

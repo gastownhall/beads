@@ -260,6 +260,7 @@ go_test(
         "journal_contract_test.go",
         "journal_coverage_test.go",
         "journal_scope_completeness_test.go",
+        "journal_shape_scope_test.go",
         "journal_test.go",
         "keyset_search_test.go",
         "label_rename_test.go",

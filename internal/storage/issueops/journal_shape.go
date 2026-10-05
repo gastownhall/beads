@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/steveyegge/beads/internal/debug"
 )
@@ -29,9 +30,12 @@ import (
 //   - REQUIRED columns {seq, ts, op, issue_id} have existed on every lineage
 //     this table has ever shipped under; a table missing one of them, or
 //     missing entirely, cannot journal at all. ProbeJournalShape refuses with
-//     a typed error so a store's "enable the journal" step fails at open,
+//     a typed error so an open that is going to write beads fails at open,
 //     before any mutation is attempted — never as a per-write failure after
-//     the work is otherwise done, which is the gci failure mode above.
+//     the work is otherwise done, which is the gci failure mode above
+//     (eventsjournal.Apply decides which opens that is). A probe that could
+//     not run at all is not a shape verdict: JournalActivationError degrades
+//     it to the canonical shape with a warning instead of refusing.
 //   - OPTIONAL columns {actor, issue_json, dep_json, comment_json} may be
 //     missing on an old-lineage table. The writer drops whichever of them the
 //     probe did not find; the reader returns "" for them. One warning is
@@ -118,8 +122,9 @@ var ErrJournalShapeUnsupported = errors.New("events journal: table shape does no
 // JournalShapeError reports that bd_events_journal (or the table itself) is
 // missing one or more REQUIRED columns. It is returned by ProbeJournalShape
 // and is the typed error storage.EventsJournalConfigurer implementations
-// surface from activation, so "enable the journal" fails at open rather than
-// the gci failure mode: succeeding at open and then failing every write thereafter.
+// surface from activation, so an open that is going to write beads fails at
+// open rather than the gci failure mode: succeeding at open and then failing
+// every write thereafter.
 type JournalShapeError struct {
 	Table   string
 	Missing []string
@@ -201,6 +206,48 @@ func ProbeJournalShape(ctx context.Context, q DBTX) (*JournalShape, error) {
 	}
 	warnJournalShapeDegraded(shape)
 	return shape, nil
+}
+
+// JournalShapeProbeTimeout bounds the activation probe, including the
+// connection the embedded store opens just for it. SetEventsJournalEnabled
+// takes no context, so without a ceiling a wedged server — or an embedded
+// open waiting out another handle on the same database — would hang the open
+// that activates the journal indefinitely.
+const JournalShapeProbeTimeout = 30 * time.Second
+
+// JournalActivationError reduces a failed activation probe to the error a
+// store caches for storage.EventsJournalShapeChecker.
+//
+// Only a *JournalShapeError is a verdict about the table, and only that
+// refuses activation. Any other failure — a timeout, a dropped connection, an
+// embedded open that could not get a handle — says nothing about the shape, so
+// it must not refuse an open that would otherwise succeed. It returns nil for
+// those, and the store keeps a nil shape: its transactions then use
+// canonicalJournalShape, the fixed column list every write used before
+// adaptive I/O existed.
+//
+// That guess is wrong on exactly the tables this file exists for: on a lineage
+// that lacks a journal column, every journaled write through the store fails,
+// and nothing re-probes until the store is reopened. So the one warning names
+// that consequence, and quiet mode, which suppresses it on stderr, still
+// leaves it in the debug log.
+func JournalActivationError(probeErr error) error {
+	if probeErr == nil {
+		return nil
+	}
+	var shapeErr *JournalShapeError
+	if errors.As(probeErr, &shapeErr) {
+		return probeErr
+	}
+	warning := fmt.Sprintf(
+		"events journal: could not probe %s shape (%v); assuming the canonical shape, so if the table lacks a journal column every journaled write through this store will fail until it is reopened",
+		journalTableName, probeErr)
+	if debug.IsQuiet() {
+		debug.Logf("%s\n", warning)
+		return nil
+	}
+	fmt.Fprintln(os.Stderr, warning)
+	return nil
 }
 
 // warnJournalShapeDegraded writes one audit line to STDERR, suppressed only

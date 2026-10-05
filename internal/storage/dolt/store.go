@@ -322,15 +322,15 @@ type DoltStore struct {
 	// instance only (storage.EventsJournalConfigurer); never process-global.
 	eventsJournalEnabled atomic.Bool
 	// journalShape caches the ONE INFORMATION_SCHEMA probe SetEventsJournalEnabled
-	// runs on activation (issueops.ProbeJournalShape, PR A1). Nil means either
-	// the journal is disabled or the probe failed; scopeEventsJournalTransaction
-	// treats nil the same as "do not journal this transaction" — see
-	// journalActivationErr.
+	// runs on activation (issueops.ProbeJournalShape, PR A1). Nil means the
+	// journal is disabled or the probe produced no shape; transactions then get
+	// the canonical column list — see journalActivationErr.
 	journalShape atomic.Pointer[issueops.JournalShape]
-	// journalActivationErr holds the probe's error when SetEventsJournalEnabled(true)
-	// found a table shape the journal cannot run against (a missing required
-	// column, or a missing table). Nil whenever journalShape is non-nil or the
-	// journal is disabled. See storage.EventsJournalShapeChecker.
+	// journalActivationErr holds the probe's *issueops.JournalShapeError when
+	// SetEventsJournalEnabled(true) found a table shape the journal cannot run
+	// against (a missing required column, or a missing table). Nil otherwise,
+	// including when the probe could not run at all
+	// (issueops.JournalActivationError). See storage.EventsJournalShapeChecker.
 	journalActivationErr atomic.Pointer[error]
 	// versionedHistoryEnabled activates dual-write issue-version history for
 	// THIS store instance only (storage.VersionedHistoryConfigurer); never
@@ -1416,11 +1416,13 @@ func logBlockedRecheckFailure(ctx context.Context, pending issueops.BlockedReche
 // SetEventsJournalEnabled activates the journal for this store instance only.
 //
 // Activating probes bd_events_journal's actual shape ONCE
-// (issueops.ProbeJournalShape, PR A1) and caches the result for this
+// (issueops.ProbeJournalShape, PR A1), bounded by
+// issueops.JournalShapeProbeTimeout, and caches the result for this
 // instance's lifetime; EventsJournalActivationError reports whether that
-// probe found a shape the journal can actually run against. Deactivating
-// clears both and skips the probe entirely — a disabled store accepts any
-// shape.
+// probe found a shape the journal cannot run against. A probe that could not
+// run degrades to the canonical shape (issueops.JournalActivationError).
+// Deactivating clears both and skips the probe entirely — a disabled store
+// accepts any shape.
 func (s *DoltStore) SetEventsJournalEnabled(enabled bool) {
 	s.eventsJournalEnabled.Store(enabled)
 	if !enabled {
@@ -1428,13 +1430,14 @@ func (s *DoltStore) SetEventsJournalEnabled(enabled bool) {
 		s.journalActivationErr.Store(nil)
 		return
 	}
-	shape, err := issueops.ProbeJournalShape(context.Background(), s.db)
-	if err != nil {
-		s.journalShape.Store(nil)
-		s.journalActivationErr.Store(&err)
+	ctx, cancel := context.WithTimeout(context.Background(), issueops.JournalShapeProbeTimeout)
+	defer cancel()
+	shape, err := issueops.ProbeJournalShape(ctx, s.db)
+	s.journalShape.Store(shape)
+	if activationErr := issueops.JournalActivationError(err); activationErr != nil {
+		s.journalActivationErr.Store(&activationErr)
 		return
 	}
-	s.journalShape.Store(shape)
 	s.journalActivationErr.Store(nil)
 }
 
@@ -1449,17 +1452,14 @@ func (s *DoltStore) EventsJournalActivationError() error {
 }
 
 // scopeEventsJournalTransaction binds this store's cached activation state and
-// probed shape to tx. The activation switch folds in the shape probe's
-// success: a probe that found an unsupported table (journalShape nil) scopes
-// the transaction as DISABLED regardless of what SetEventsJournalEnabled was
-// called with, so a caller that enables the journal directly and ignores the
-// returned EventsJournalActivationError still never attempts a write against
-// a shape that cannot support it (storage.EventsJournalShapeChecker).
+// probed shape to tx. The activation switch deliberately does NOT depend on
+// the shape: an enabled store whose probe produced no shape writes with the
+// canonical column list, so a table the journal cannot run against fails the
+// write loudly instead of letting the mutation commit with no journal row
+// (storage.EventsJournalShapeChecker).
 func (s *DoltStore) scopeEventsJournalTransaction(tx *sql.Tx) func() {
-	shape := s.journalShape.Load()
-	enabled := s.eventsJournalEnabled.Load() && shape != nil
-	clearActivation := issueops.ScopeEventsJournalTransaction(tx, enabled)
-	clearShape := issueops.ScopeEventsJournalShape(tx, shape)
+	clearActivation := issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
+	clearShape := issueops.ScopeEventsJournalShape(tx, s.journalShape.Load())
 	return func() {
 		clearShape()
 		clearActivation()

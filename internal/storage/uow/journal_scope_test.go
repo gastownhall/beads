@@ -2,6 +2,8 @@ package uow
 
 import (
 	"context"
+	"errors"
+	"regexp"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -28,15 +30,24 @@ import (
 // canonical table carries so activation succeeds with the shape every test in
 // this file was written against before shape probing existed.
 func expectCanonicalJournalShapeProbe(mock sqlmock.Sqlmock) {
+	expectJournalShapeProbe(mock,
+		"seq", "ts", "op", "issue_id", "actor", "issue_json", "dep_json", "comment_json")
+}
+
+// expectJournalShapeProbe arms the shape probe to report exactly columns.
+func expectJournalShapeProbe(mock sqlmock.Sqlmock, columns ...string) {
+	rows := sqlmock.NewRows([]string{"COLUMN_NAME"})
+	for _, column := range columns {
+		rows.AddRow(column)
+	}
 	mock.ExpectQuery("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS").
 		WithArgs("bd_events_journal").
-		WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME"}).
-			AddRow("seq").AddRow("ts").AddRow("op").AddRow("issue_id").
-			AddRow("actor").AddRow("issue_json").AddRow("dep_json").AddRow("comment_json"))
+		WillReturnRows(rows)
 }
 
 func TestProviderImplementsEventsJournalConfigurer(t *testing.T) {
-	p, _ := newMockTxProvider(t)
+	p, mock := newMockTxProvider(t)
+	expectCanonicalJournalShapeProbe(mock)
 	var configurer storage.EventsJournalConfigurer = p
 	configurer.SetEventsJournalEnabled(true)
 	require.True(t, p.eventsJournalEnabled.Load(),
@@ -114,7 +125,13 @@ func TestTxEndReleasesJournalScope(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, mock := newMockTxProvider(t)
+			// Arm the shape probe so activation succeeds outright. This test
+			// pins the release, so it must not lean on how a failed probe is
+			// handled: while a failed probe left the transaction unjournaled,
+			// the emit below passed with or without the release.
+			expectCanonicalJournalShapeProbe(mock)
 			p.SetEventsJournalEnabled(true)
+			require.NoError(t, p.EventsJournalActivationError())
 			mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
 
 			tx, err := p.BeginTx(context.Background())
@@ -127,6 +144,7 @@ func TestTxEndReleasesJournalScope(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet())
 
 			require.Nil(t, serverTx.clearJournalScope, "the scope must be released with the connection")
+			require.Nil(t, serverTx.clearJournalShape, "the probed shape must be released with the connection")
 			// Emitting against the released connection must be a no-op. Had the
 			// activation entry survived, the emit would still consider itself
 			// enabled and run SQL on a connection that is back in the pool —
@@ -135,4 +153,94 @@ func TestTxEndReleasesJournalScope(t *testing.T) {
 				"a leaked activation entry makes a released connection journal")
 		})
 	}
+}
+
+// expectJournalSeqAllocation arms the counter round trip an emit makes before
+// its INSERT.
+func expectJournalSeqAllocation(mock sqlmock.Sqlmock) {
+	mock.ExpectExec("UPDATE bd_events_seq SET next_seq").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("SELECT next_seq FROM bd_events_seq").
+		WillReturnRows(sqlmock.NewRows([]string{"next_seq"}).AddRow(7))
+}
+
+// canonicalJournalInsert is the INSERT a table carrying every optional column
+// gets, and the one a store with no probed shape falls back to.
+var canonicalJournalInsert = regexp.QuoteMeta(
+	"INSERT INTO bd_events_journal (seq, ts, op, issue_id, actor, issue_json, dep_json, comment_json) VALUES")
+
+// TestBeginTxWritesTheProbedJournalShape is the proxied-server counterpart of
+// the embedded TestAdaptiveInsert_GciShape: on a table that never gained actor
+// or comment_json (gas-city-inc's lineage), a unit of work's INSERT names only
+// the columns the probe found. Naming either missing column is the 1054 error
+// that rolled back every journaled write on that lineage.
+func TestBeginTxWritesTheProbedJournalShape(t *testing.T) {
+	p, mock := newMockTxProvider(t)
+	expectJournalShapeProbe(mock, "seq", "ts", "op", "issue_id", "issue_json", "dep_json")
+	p.SetEventsJournalEnabled(true)
+	require.NoError(t, p.EventsJournalActivationError(),
+		"a table missing only OPTIONAL columns is degraded, not unsupported")
+
+	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
+	expectJournalSeqAllocation(mock)
+	mock.ExpectExec(regexp.QuoteMeta(
+		"INSERT INTO bd_events_journal (seq, ts, op, issue_id, issue_json, dep_json) VALUES")).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	ctx := context.Background()
+	tx, err := p.BeginTx(ctx)
+	require.NoError(t, err)
+
+	require.NoError(t, issueops.RecordDeleteInTx(ctx, tx.Runner(), "bd-1", "test-actor"))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestUnsupportedJournalShapeStillJournals pins both halves of a shape
+// verdict. A table missing a REQUIRED column is the activation error a
+// bead-writing open is refused with. A provider enabled anyway keeps
+// journaling: the canonical INSERT fails and takes the mutation's transaction
+// with it, rather than the mutation committing with no journal row.
+func TestUnsupportedJournalShapeStillJournals(t *testing.T) {
+	p, mock := newMockTxProvider(t)
+	expectJournalShapeProbe(mock, "seq", "ts", "issue_id", "actor", "issue_json", "dep_json", "comment_json")
+	p.SetEventsJournalEnabled(true)
+	require.ErrorIs(t, p.EventsJournalActivationError(), issueops.ErrJournalShapeUnsupported)
+
+	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
+	expectJournalSeqAllocation(mock)
+	mock.ExpectExec(canonicalJournalInsert).
+		WillReturnError(errors.New("Error 1054 (42S22): Unknown column 'op' in 'field list'"))
+
+	ctx := context.Background()
+	tx, err := p.BeginTx(ctx)
+	require.NoError(t, err)
+
+	require.Error(t, issueops.RecordDeleteInTx(ctx, tx.Runner(), "bd-1", "test-actor"),
+		"a mutation must not commit on a journaling provider without its journal row")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// TestFailedShapeProbeDoesNotRefuseActivation is the other arm: a probe that
+// never reached the table says nothing about its shape, so it must not refuse
+// an open that would otherwise succeed. Activation reports no error and the
+// journal stays on, writing the canonical column list.
+func TestFailedShapeProbeDoesNotRefuseActivation(t *testing.T) {
+	p, mock := newMockTxProvider(t)
+	mock.ExpectQuery("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS").
+		WithArgs("bd_events_journal").
+		WillReturnError(errors.New("dial tcp 127.0.0.1:3307: connect: connection refused"))
+	p.SetEventsJournalEnabled(true)
+	require.NoError(t, p.EventsJournalActivationError(),
+		"only a *JournalShapeError is a verdict about the table")
+
+	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
+	expectJournalSeqAllocation(mock)
+	mock.ExpectExec(canonicalJournalInsert).WillReturnResult(sqlmock.NewResult(0, 1))
+
+	ctx := context.Background()
+	tx, err := p.BeginTx(ctx)
+	require.NoError(t, err)
+
+	require.NoError(t, issueops.RecordDeleteInTx(ctx, tx.Runner(), "bd-1", "test-actor"))
+	require.NoError(t, mock.ExpectationsWereMet(),
+		"a failed probe must leave the journal on; turning it off lets writes commit unrecorded")
 }

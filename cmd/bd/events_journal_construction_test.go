@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io/fs"
 	"path/filepath"
 	"sort"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/journalscan"
 )
 
@@ -206,6 +208,114 @@ func TestEveryStoreConstructionActivatesTheEventsJournal(t *testing.T) {
 			t.Errorf("exemption %q no longer matches a store construction site — remove it", key)
 		}
 	}
+}
+
+// TestOpensForBeadWrites pins which root opens an unsupported journal shape may
+// refuse (eventsjournal.Apply): only one that is going to write beads. Read-only
+// and preview opens are not refused, and neither are the working-set-reconcile
+// and remote-sync opens an operator recovers a workspace with.
+func TestOpensForBeadWrites(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		cfg  dolt.Config
+		want bool
+	}{
+		{name: "ordinary write open", want: true},
+		{name: "read-only", cfg: dolt.Config{ReadOnly: true}},
+		{name: "preview", cfg: dolt.Config{Preview: true}},
+		{name: "working-set reconcile", cfg: dolt.Config{LenientOpen: true}},
+		{name: "remote sync", cfg: dolt.Config{RemoteSyncOpen: true}},
+		// Writable underneath for the defer-wake sweep, but opened read-only:
+		// a sweep write against an unsupported shape fails on its INSERT.
+		{name: "classified read", cfg: dolt.Config{ReadOnly: true, ClassifiedRead: true}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := opensForBeadWrites(&tt.cfg); got != tt.want {
+				t.Fatalf("opensForBeadWrites = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRootOpensPassTheirPostureToActivation pins the posture each root open
+// hands to activation. TestOpensForBeadWrites and the uow package pin the
+// classifiers, and the guard above pins that every site activates — but a site
+// that passed a constant would satisfy both. `true` would refuse every
+// read-only, preview, and recovery open on an unsupported journal shape again;
+// `false` would let a bead-writing open through onto a shape where every
+// journaled write fails. So the argument itself is compared, as source text,
+// in the same syntactic way the guard works.
+//
+// It covers the root opens, whose posture depends on the command. The other
+// activating factories (newDoltStoreFromConfig, the personal-migration
+// planning store, bd doctor's bead-mutating repairs) pass a fixed `true` and
+// are not pinned here.
+func TestRootOpensPassTheirPostureToActivation(t *testing.T) {
+	for _, pin := range []struct {
+		file, fn, call string // fn "" searches the whole file
+		arg            int
+		want           string
+	}{
+		{"store_factory.go", "newDoltStore", "activateEventsJournalStore", 1, "opensForBeadWrites(cfg)"},
+		{"store_factory_nocgo.go", "newDoltStore", "activateEventsJournalStore", 1, "opensForBeadWrites(cfg)"},
+		{"store_factory.go", "newRegisteredBackendStore", "activateEventsJournalStore", 1, "writesBeads"},
+		{"store_factory_nocgo.go", "newRegisteredBackendStore", "activateEventsJournalStore", 1, "writesBeads"},
+		{"uow_factory.go", "newExternalProxiedServerUOWProvider", "activateEventsJournalProvider", 2, "uow.OpensForBeadWrites(opts...)"},
+		{"uow_factory.go", "newManagedProxiedServerUOWProvider", "activateEventsJournalProvider", 2, "uow.OpensForBeadWrites(opts...)"},
+		// The root pre-run, inside rootCmd's literal: the proxied provider reads
+		// its posture back out of these options, and the registry arm is handed
+		// it directly.
+		{"main.go", "", "rootProviderOptions", 2, "isWorkingSetReconcileCommand(cmd)"},
+		{"main.go", "", "newRegisteredBackendStore", 4, "opensForBeadWrites(doltCfg)"},
+	} {
+		where := pin.file
+		if pin.fn != "" {
+			where += ":" + pin.fn
+		}
+		args := callArgs(t, pin.file, pin.fn, pin.call, pin.arg)
+		if len(args) == 0 {
+			t.Errorf("%s: found no call to %s — the pin is checking nothing; update it", where, pin.call)
+		}
+		for _, got := range args {
+			if got != pin.want {
+				t.Errorf("%s: %s is passed %s, want %s — the open's posture must come from what the open does",
+					where, pin.call, got, pin.want)
+			}
+		}
+	}
+}
+
+// callArgs returns argument arg, as source text, of every call to the
+// package-local function call inside file's function fn, or anywhere in file
+// when fn is "".
+func callArgs(t *testing.T, file, fn, call string, arg int) []string {
+	t.Helper()
+	parsed, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", file, err)
+	}
+	var out []string
+	for _, decl := range parsed.Decls {
+		if fn != "" {
+			if fd, ok := decl.(*ast.FuncDecl); !ok || fd.Name.Name != fn {
+				continue
+			}
+		}
+		ast.Inspect(decl, func(n ast.Node) bool {
+			c, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if ident, ok := c.Fun.(*ast.Ident); ok && ident.Name == call {
+				if arg >= len(c.Args) {
+					t.Fatalf("%s: %s has %d arguments; the pin reads argument %d", file, call, len(c.Args), arg)
+				}
+				out = append(out, types.ExprString(c.Args[arg]))
+			}
+			return true
+		})
+	}
+	return out
 }
 
 // exemptionFor resolves a site key against the exemption map: an exact match

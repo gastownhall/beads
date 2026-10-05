@@ -1919,7 +1919,7 @@ var rootCmd = &cobra.Command{
 		// mode is where that is least visible, not where it is acceptable.
 		if proxiedServerMode {
 			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir, databaseOverride,
-				rootProviderOptions(previewMode, useReadOnly)...)
+				rootProviderOptions(previewMode, useReadOnly, isWorkingSetReconcileCommand(cmd))...)
 			if err != nil {
 				// Same typed rendering the store path gets below: a schema
 				// skew or a migration-gate refusal here carries a whole
@@ -2039,7 +2039,7 @@ var rootCmd = &cobra.Command{
 		// Dolt manages these files itself; external interference is never safe.
 
 		if _, ok := backends.Lookup(cfg.GetBackend()); ok {
-			store, err = newRegisteredBackendStore(rootCtx, cfg.GetBackend(), beadsDir, useReadOnly)
+			store, err = newRegisteredBackendStore(rootCtx, cfg.GetBackend(), beadsDir, useReadOnly, opensForBeadWrites(doltCfg))
 		} else {
 			store, err = newDoltStore(rootCtx, doltCfg)
 		}

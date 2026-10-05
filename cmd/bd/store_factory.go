@@ -55,8 +55,9 @@ func usesProxiedServer() bool {
 // construction path. A read-only open still goes through activation: a
 // registered backend decides for itself what read-only means, and refusing to
 // offer it the setting would be this factory guessing on its behalf.
-func newRegisteredBackendStore(ctx context.Context, name, beadsDir string, readOnly bool) (s storage.DoltStorage, err error) {
-	defer func() { s, err = activateEventsJournalStore(beadsDir, s, err) }()
+// writesBeads is the root open's posture (opensForBeadWrites).
+func newRegisteredBackendStore(ctx context.Context, name, beadsDir string, readOnly, writesBeads bool) (s storage.DoltStorage, err error) {
+	defer func() { s, err = activateEventsJournalStore(beadsDir, writesBeads, s, err) }()
 	backend, ok := backends.Lookup(name)
 	if !ok {
 		return nil, fmt.Errorf("storage backend %q is not registered", name)
@@ -68,7 +69,7 @@ func newRegisteredBackendStore(ctx context.Context, name, beadsDir string, readO
 }
 
 func newDoltStore(ctx context.Context, cfg *dolt.Config) (s storage.DoltStorage, err error) {
-	defer func() { s, err = activateEventsJournalStore(cfg.BeadsDir, s, err) }()
+	defer func() { s, err = activateEventsJournalStore(cfg.BeadsDir, opensForBeadWrites(cfg), s, err) }()
 	if cfg.ProxiedServer {
 		return nil, errProxiedStoreUnrouted()
 	}
@@ -155,7 +156,7 @@ func acquireEmbeddedLock(beadsDir string, serverMode bool) (util.Unlocker, error
 // exception is BEADS_DOLT_SHARED_SERVER, which is machine-global in every
 // resolver in the tree (see sharedServerModeForWorkspace).
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (s storage.DoltStorage, err error) {
-	defer func() { s, err = activateEventsJournalStore(beadsDir, s, err) }()
+	defer func() { s, err = activateEventsJournalStore(beadsDir, true, s, err) }()
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		// A present-but-unloadable metadata.json must not degrade to the

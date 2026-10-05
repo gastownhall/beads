@@ -222,14 +222,7 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 	// exists to make impossible. In journal mode both planes therefore share the
 	// pinned regular transaction. The default journal-off path keeps the
 	// established split transactions untouched.
-	// journalShape is folded into journalEnabled the same way
-	// scopeEventsJournalTransaction folds it in for every other raw-tx mutator
-	// (store.go): a probe that found an unsupported shape (journalShape nil)
-	// must pin neither plane together nor attempt a write here, even if a
-	// caller enabled the journal directly and ignored the returned
-	// EventsJournalActivationError (storage.EventsJournalShapeChecker, PR A1).
-	journalShape := s.journalShape.Load()
-	journalEnabled := s.eventsJournalEnabled.Load() && journalShape != nil
+	journalEnabled := s.eventsJournalEnabled.Load()
 	ignoredTx := regularTx
 	if !journalEnabled {
 		// NOTE (GH#3140 metrics skew): the pool-wait bracket above measures only
@@ -255,8 +248,10 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 	// the whole doltTransaction mutator surface reached from
 	// runDoltTransactionRecording — would silently fall back to
 	// canonicalJournalShape and defeat adaptive I/O for this store's main
-	// write path.
-	clearJournalShape := issueops.ScopeEventsJournalShape(regularTx, journalShape)
+	// write path. The switch does not depend on the shape: a nil shape (no
+	// probe result) writes canonically, as scopeEventsJournalTransaction
+	// explains.
+	clearJournalShape := issueops.ScopeEventsJournalShape(regularTx, s.journalShape.Load())
 	defer clearJournalShape()
 	// Versioned history binds to the SAME regular transaction the mutation runs
 	// in, for the same reason the journal does: RecordVersionInTx no-ops unless

@@ -41,9 +41,11 @@ func openBeadMutatingStoreCreating(ctx context.Context, beadsDir string) (*dolt.
 
 // activated applies the workspace's journal setting and closes the store if it
 // cannot be honored. A failed open passes straight through, so the typed-nil
-// store never reaches the activation.
+// store never reaches the activation. Every caller writes beads, so a journal
+// table the journal cannot run against refuses the repair rather than letting
+// it mutate unrecorded.
 func activated(beadsDir string, store *dolt.DoltStore, err error) (*dolt.DoltStore, error) {
-	if _, err = eventsjournal.ActivateStore(beadsDir, store, err); err != nil {
+	if _, err = eventsjournal.ActivateStore(beadsDir, true, store, err); err != nil {
 		return nil, err
 	}
 	return store, nil
