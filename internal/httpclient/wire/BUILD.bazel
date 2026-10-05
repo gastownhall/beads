@@ -44,6 +44,7 @@ go_test(
     ],
     data = [
         "//cmd/bd:go_srcs",
+        "//internal/httpapi/wireshape:testdata/golden.json",
         "//internal/httpclient:go_srcs",
     ] + glob(["*.go"]),
     embed = [":wire"],

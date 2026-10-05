@@ -24,3 +24,13 @@ go_test(
     embed = [":wireshape"],
     deps = ["//internal/httpapi"],
 )
+
+# //internal/httpclient/wire:wire_test's revision-tolerance coverage test
+# (TestRevisionBearingResponseCoversEveryWireShapeSchemaWithARevisionMember)
+# derives the set of schemas a legacy pre-#6053 server's bare-integer
+# `revision` can appear on directly from this committed golden digest, so it
+# must be readable as data under `bazel test`.
+exports_files(
+    ["testdata/golden.json"],
+    visibility = ["//internal/httpclient/wire:__pkg__"],
+)

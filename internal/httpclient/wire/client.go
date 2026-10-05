@@ -283,7 +283,7 @@ func (c *Client) Do(ctx context.Context, r Request, out any) error {
 	// exactly the servers ClientMinWireRevision exists to keep talking to. See
 	// revision_tolerance.go.
 	if revisionBearingResponse(out) && c.serverPredatesRevisionStrings() {
-		decodeBody = tolerateLegacyRevisionNumbers(decodeBody)
+		decodeBody = tolerateLegacyRevisionNumbers(decodeBody, out)
 	}
 	if err := json.Unmarshal(decodeBody, out); err != nil {
 		return fmt.Errorf("%s: decoding the response from bd serve at %s: %w", r.Op, c.base.Redacted(), err)

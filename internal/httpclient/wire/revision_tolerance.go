@@ -14,6 +14,13 @@ import (
 // reach it.
 const revisionKey = "revision"
 
+// itemsKey is ApplyBatchResponse's one array of nested revision-bearing
+// objects (apigen.ApplyItemResult). No other covered type below carries a
+// nested object with a `revision` of its own: every other member here is a
+// plain, top-level one, and tolerateLegacyRevisionNumbers rewrites nothing
+// that is not reached through exactly this key or the top level.
+const itemsKey = "items"
+
 // revisionBearingResponse reports whether out is one of the apigen response
 // types carrying the optimistic-concurrency `revision` member — the member
 // this client always decodes as a JSON string (the post-#6053 decimal-token
@@ -24,6 +31,25 @@ const revisionKey = "revision"
 // pre-#6053 server's `ContextResponse` omits `wire_revision` exactly the way
 // every other old server does, so the one place left to tolerate the shape is
 // here, at the reader, on the small, explicit set of types that carry it.
+//
+// The set is exactly the schemas internal/httpapi/wireshape's digest records
+// with a `revision` member (TestRevisionBearingResponseCoversEveryWireShapeSchemaWithARevisionMember
+// pins this against the same golden.json TestWireShapeDigest guards, so a new
+// revision-bearing schema cannot slip past both without the coverage test
+// failing first):
+//
+//   - apigen.ApplyBatchResponse: no top-level `revision` of its own, but each
+//     of its `items` is an apigen.ApplyItemResult, which does carry one — see
+//     tolerateLegacyRevisionNumbers' items handling below.
+//   - apigen.CloseIssueResponse, apigen.ReleaseIssueResponse,
+//     apigen.ReopenIssueResponse, apigen.UpdateIssueResponse: a top-level
+//     `revision` each.
+//   - apigen.IssueDetails (an alias for types.IssueDetails: GET
+//     /v0/beads/issues/{id}'s body): also a top-level `revision`. getIssue is
+//     a BASELINE operation (dispatched before any post-baseline call would
+//     have forced the handshake that populates serverPredatesRevisionStrings'
+//     cache), which is why that gate treats "no cached handshake at all" as
+//     "tolerate" rather than "skip" — see its doc comment.
 //
 // Keeping the set explicit (rather than walking every response body looking
 // for a stray "revision" key) means a type added later that happens to reuse
@@ -37,7 +63,8 @@ func revisionBearingResponse(out any) bool {
 		*apigen.CloseIssueResponse,
 		*apigen.ReleaseIssueResponse,
 		*apigen.ReopenIssueResponse,
-		*apigen.UpdateIssueResponse:
+		*apigen.UpdateIssueResponse,
+		*apigen.IssueDetails:
 		return true
 	default:
 		return false
@@ -49,97 +76,106 @@ func revisionBearingResponse(out any) bool {
 // be bare JSON integers: one that omitted `ContextResponse.wire_revision`
 // entirely, which ClientMinWireRevision's doc pins as meaning exactly that (0
 // and 1 are permanently retired values no server implementing the field will
-// ever legitimately send). No cached handshake at all — a baseline operation
-// dispatched before any post-baseline call forced one — answers false: every
-// response type this file tolerates belongs to a non-baseline write, so by
-// the time one of them dispatches, Preflight has already forced the
-// handshake that would have populated the cache.
+// ever legitimately send).
+//
+// No cached handshake at all answers true too (review follow-up: it used to
+// answer false, on the reasoning that every revision-bearing response type
+// belongs to a non-baseline write, so the handshake forced ahead of it would
+// already be cached — true for every one of them EXCEPT apigen.IssueDetails,
+// whose operation, getIssue, is itself a baseline op that can dispatch with no
+// handshake ever cached). Answering true unconditionally here is safe exactly
+// because tolerateLegacyRevisionNumbers' rewrite is scoped to the few
+// documented positions a legacy integer can actually appear at (see its doc
+// comment) rather than a generic walk: running it against a modern server's
+// already-string-shaped response, or with no handshake evidence either way,
+// costs one structural no-op walk and touches nothing.
 func (c *Client) serverPredatesRevisionStrings() bool {
 	c.handshake.mu.Lock()
 	defer c.handshake.mu.Unlock()
-	return c.handshake.snap != nil && c.handshake.snap.Context.WireRevision == 0
+	return c.handshake.snap == nil || c.handshake.snap.Context.WireRevision == 0
 }
 
-// tolerateLegacyRevisionNumbers rewrites every bare-JSON-number value held at
-// a "revision" key, anywhere in body's object/array structure, into that
-// number's decimal-string spelling — the shape every apigen response type
-// above declares the member as. It returns body unchanged (the same slice) when
-// nothing needed rewriting, so a modern server's already-string-shaped
-// response pays one no-op structural walk and nothing else.
+// tolerateLegacyRevisionNumbers rewrites a bare-JSON-number value held at
+// body's top-level "revision" key, and — only when out is
+// *apigen.ApplyBatchResponse — at the "revision" key of each element of its
+// top-level "items" array, into that number's decimal-string spelling: the
+// shape every apigen response type above declares the member as. It returns
+// body unchanged (the same slice) when nothing needed rewriting, so a modern
+// server's already-string-shaped response pays one no-op decode and nothing
+// else.
 //
-// It never touches a value that is already a string, null, or any other
-// shape: only a bare number at exactly this key is a pre-#6053 server's
-// doing, and those are the only inputs that fail json.Unmarshal otherwise.
-func tolerateLegacyRevisionNumbers(body []byte) []byte {
-	var raw json.RawMessage = body
-	out, changed := rewriteLegacyRevisionKeys(raw)
+// IT NEVER RECURSES BEYOND THOSE TWO DOCUMENTED POSITIONS (review HIGH:
+// data corruption). An earlier version of this file walked every nested
+// object and array looking for a stray "revision" key, which reached
+// CloseIssueResponse.issue.metadata and every other caller-owned JSON blob
+// this client passes through opaquely — a user's own metadata shaped like
+// `{"revision":3}` came back with that value silently turned into a string,
+// and serverPredatesRevisionStrings' gate (WireRevision == 0, or now no
+// handshake at all) covers every legacy AND unhandshaked request, not just
+// the narrow pre-#6053 population the rewrite exists for. Scoping the rewrite
+// to exactly the documented wire positions — never descending into `issue`,
+// `metadata`, or any other nested object the response carries — is what makes
+// answering true unconditionally above safe: there is no longer a nested
+// object this function would touch by accident.
+func tolerateLegacyRevisionNumbers(body []byte, out any) []byte {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	changed := false
+	if v, ok := obj[revisionKey]; ok && isBareJSONNumber(v) {
+		obj[revisionKey] = quoteJSONNumber(v)
+		changed = true
+	}
+	if _, ok := out.(*apigen.ApplyBatchResponse); ok {
+		if rewritten, ok := rewriteItemRevisions(obj[itemsKey]); ok {
+			obj[itemsKey] = rewritten
+			changed = true
+		}
+	}
 	if !changed {
 		return body
 	}
-	return out
+	rewritten, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return rewritten
 }
 
-// rewriteLegacyRevisionKeys walks one JSON value (object, array, or scalar)
-// looking for a "revision" member whose value is a bare number, rewriting it
-// to a quoted decimal string in place. Every other byte is round-tripped
-// through json.RawMessage rather than decoded into an interface{}, so a
-// sibling field holding an integer past float64's exact range is never at
-// risk of the precision loss a generic decode would introduce — this file
-// only ever interprets the bytes under the one key it rewrites.
-func rewriteLegacyRevisionKeys(raw json.RawMessage) (json.RawMessage, bool) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 {
-		return raw, false
+// rewriteItemRevisions rewrites the top-level "revision" key of each element
+// of items (ApplyBatchResponse.items, each an apigen.ApplyItemResult) that
+// holds a bare JSON number. It reports ok == false when items is absent,
+// malformed, or needed no rewriting at all, in which case the caller must
+// leave the original bytes alone.
+//
+// Like tolerateLegacyRevisionNumbers itself, this never looks past each
+// item's own top-level members: ApplyItemResult carries no nested object of
+// its own a legacy integer could hide inside, but even if a future field
+// added one, only "revision" at this exact level is ever a candidate.
+func rewriteItemRevisions(raw json.RawMessage) (json.RawMessage, bool) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil, false
 	}
-	switch trimmed[0] {
-	case '{':
-		var obj map[string]json.RawMessage
-		if err := json.Unmarshal(trimmed, &obj); err != nil {
-			return raw, false
-		}
-		changed := false
-		for key, val := range obj {
-			if key == revisionKey && isBareJSONNumber(val) {
-				obj[key] = quoteJSONNumber(val)
-				changed = true
-				continue
-			}
-			if nv, ch := rewriteLegacyRevisionKeys(val); ch {
-				obj[key] = nv
-				changed = true
-			}
-		}
-		if !changed {
-			return raw, false
-		}
-		out, err := json.Marshal(obj)
-		if err != nil {
-			return raw, false
-		}
-		return out, true
-	case '[':
-		var arr []json.RawMessage
-		if err := json.Unmarshal(trimmed, &arr); err != nil {
-			return raw, false
-		}
-		changed := false
-		for i, val := range arr {
-			if nv, ch := rewriteLegacyRevisionKeys(val); ch {
-				arr[i] = nv
-				changed = true
-			}
-		}
-		if !changed {
-			return raw, false
-		}
-		out, err := json.Marshal(arr)
-		if err != nil {
-			return raw, false
-		}
-		return out, true
-	default:
-		return raw, false
+	var items []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, false
 	}
+	changed := false
+	for _, item := range items {
+		if v, ok := item[revisionKey]; ok && isBareJSONNumber(v) {
+			item[revisionKey] = quoteJSONNumber(v)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil, false
+	}
+	rewritten, err := json.Marshal(items)
+	if err != nil {
+		return nil, false
+	}
+	return rewritten, true
 }
 
 // isBareJSONNumber reports whether val's first non-space byte starts a JSON
