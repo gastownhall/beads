@@ -14,12 +14,19 @@ import (
 type fakeConfigCommitStore struct {
 	storage.DoltStorage
 	configOnlyCalls int
+	userKVCalls     int
 	messages        []string
 	err             error
 }
 
 func (f *fakeConfigCommitStore) CommitConfigOnly(_ context.Context, message string) error {
 	f.configOnlyCalls++
+	f.messages = append(f.messages, message)
+	return f.err
+}
+
+func (f *fakeConfigCommitStore) CommitConfigUserKVOnly(_ context.Context, message string) error {
+	f.userKVCalls++
 	f.messages = append(f.messages, message)
 	return f.err
 }
@@ -39,8 +46,42 @@ func TestCommitConfigWriteServerModeCommitsScoped(t *testing.T) {
 	if fake.configOnlyCalls != 1 {
 		t.Fatalf("CommitConfigOnly calls = %d, want 1 in server mode", fake.configOnlyCalls)
 	}
+	if fake.userKVCalls != 0 {
+		t.Fatalf("CommitConfigUserKVOnly calls = %d, want 0 for a config write", fake.userKVCalls)
+	}
 	if !strings.HasPrefix(fake.messages[0], "bd: remember (auto-commit) by ") {
 		t.Fatalf("commit message = %q, want prefix %q", fake.messages[0], "bd: remember (auto-commit) by ")
+	}
+}
+
+// A memory write commits through the kv.*-screened variant, so a concurrent
+// writer's dirty internal config key is refused instead of swept in.
+func TestCommitMemoryWriteServerModeCommitsUserKVScreened(t *testing.T) {
+	saveStorageMode(t)
+	serverMode = true
+
+	fake := &fakeConfigCommitStore{}
+	if err := commitMemoryWrite(context.Background(), fake, "remember"); err != nil {
+		t.Fatalf("commitMemoryWrite: %v", err)
+	}
+	if fake.userKVCalls != 1 {
+		t.Fatalf("CommitConfigUserKVOnly calls = %d, want 1 in server mode", fake.userKVCalls)
+	}
+	if fake.configOnlyCalls != 0 {
+		t.Fatalf("CommitConfigOnly calls = %d, want 0 for a memory write", fake.configOnlyCalls)
+	}
+}
+
+// The screen's refusal reaches the user rather than being taken for a
+// nothing-to-commit no-op.
+func TestCommitMemoryWriteSurfacesScreenRefusal(t *testing.T) {
+	saveStorageMode(t)
+	serverMode = true
+
+	fake := &fakeConfigCommitStore{err: errors.New("refusing to commit 1 dirty internal config key(s)")}
+	err := commitMemoryWrite(context.Background(), fake, "forget")
+	if err == nil || !strings.Contains(err.Error(), "refusing to commit") {
+		t.Fatalf("commitMemoryWrite error = %v, want the screen's refusal", err)
 	}
 }
 

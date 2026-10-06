@@ -337,7 +337,7 @@ Examples:
 			return HandleErrorRespectJSON("storing memory: %v", err)
 		}
 		noteDirectMemoryWrite()
-		if err := commitConfigWrite(rootCtx, store, "remember"); err != nil {
+		if err := commitMemoryWrite(rootCtx, store, "remember"); err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
 
@@ -440,7 +440,7 @@ Examples:
 			return printForgetNotFound(result.Key)
 		}
 		noteDirectMemoryWrite()
-		if err := commitConfigWrite(rootCtx, store, "forget"); err != nil {
+		if err := commitMemoryWrite(rootCtx, store, "forget"); err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
 
