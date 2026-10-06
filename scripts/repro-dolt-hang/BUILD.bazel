@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "repro-dolt-hang_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/steveyegge/beads/scripts/repro-dolt-hang",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//internal/storage/doltutil",
+        "@com_github_go_sql_driver_mysql//:mysql",
+    ],
+)
+
+go_binary(
+    name = "repro-dolt-hang",
+    embed = [":repro-dolt-hang_lib"],
+    visibility = ["//visibility:public"],
+)

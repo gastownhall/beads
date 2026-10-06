@@ -43,10 +43,38 @@ func validateIssueClosable(id string, issue *types.Issue, actor string, force bo
 // newAssignee may be "" (unassign), which is fenced the same way. Do NOT call
 // it when the caller passed an explicit --if-assignee guard: that CAS names
 // the holder, so nothing about it is silent, and it is how sanctioned X→Y
-// transfers (park) work without --force (--force and --if-assignee are
-// mutually exclusive).
+// transfers (park) work without needing the fence bypass (under
+// --if-assignee, --force never arms the assignee half).
 func validateIssueReassignable(id string, issue *types.Issue, actor, newAssignee string, poolAliases func() []string, force bool) error {
 	return validation.AssigneeNotStolen(actor, newAssignee, poolAliases, force)(id, issue)
+}
+
+// ifRevisionAlreadyStale reports whether issue's own already-read RowVersion
+// no longer matches ifRevision — that is, whether this pre-write read already
+// knows the write is a foregone --if-revision precondition failure. Every
+// validateIssueReassignable call site that also honors --if-revision
+// (mc-zndi7.74) checks this FIRST and skips the fence when it is true.
+//
+// Why: --if-revision's correctness comes from the atomic compare-and-set
+// inside the guarded write itself, which already orders its own version check
+// ahead of the assignee-transfer fence (ExecuteUpdate checks ExpectedVersion
+// before calling AuthorizeAssigneeTransfer; the uow leg's
+// updatePreconditionsHold stands the fence down the same way before
+// ApplyUpdate's own version check runs). validateIssueReassignable's callers
+// above, though, read the issue in their OWN earlier, separately-timed
+// request — not inside that write's transaction — so a racing winner's commit
+// can land in the gap and leave this read already showing the winner's new
+// assignee. Without this check the loser's pre-read trips the live-claim
+// fence and reports the plain "already claimed" policy refusal (exit 1)
+// before ever reaching the guarded write that would have reported
+// precondition_failed (exit 13) — the wrong outcome for a caller whose whole
+// point in passing --if-revision was to get a crisp, retryable signal that it
+// lost a race rather than an ordinary policy refusal.
+//
+// ifRevision == nil (no active guard) always returns false, leaving every
+// unguarded caller's behavior exactly as before.
+func ifRevisionAlreadyStale(issue *types.Issue, ifRevision *int64) bool {
+	return ifRevision != nil && issue.RowVersion != *ifRevision
 }
 
 // storeClaimPoolAliases returns a lazy claim.pools reader against a direct

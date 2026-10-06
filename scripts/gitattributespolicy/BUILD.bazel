@@ -1,0 +1,11 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "gitattributespolicy_test",
+    srcs = [
+        "git_boundary_test.go",
+        "gitattributes_policy_test.go",
+        "required_host_test.go",
+    ],
+    data = ["//:.gitattributes"],
+)

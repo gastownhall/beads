@@ -22,6 +22,10 @@ type deleteInput struct {
 	dryRun     bool
 	jsonOutput bool
 	quiet      bool
+	// ifRevision is A8's --if-revision guard (beads#4682). requireSingleIfRevisionID
+	// refuses it alongside more than one id before gatherDeleteInput's caller ever
+	// reaches the role.
+	ifRevision *int64
 }
 
 func gatherDeleteInput(cmd *cobra.Command, args []string) (*deleteInput, error) {
@@ -76,6 +80,20 @@ func runDeleteProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		return HandleError("no issue IDs provided")
 	}
 
+	// A8 (beads#4682): parsed directly rather than inside gatherDeleteInput, so
+	// a refusal here returns straight through -- requireSingleIfRevisionID's
+	// error is already a fully reported HandleErrorRespectJSON result, and
+	// wrapping it a second time (the way gatherDeleteInput's other errors are
+	// wrapped above) would print it twice.
+	ifRevision, err := parseIfRevisionFlag(cmd)
+	if err != nil {
+		return err
+	}
+	if err := requireSingleIfRevisionID(ifRevision, in.ids); err != nil {
+		return err
+	}
+	in.ifRevision = ifRevision
+
 	deleter, err := proxiedDeleter()
 	if err != nil {
 		return HandleError("%v", err)
@@ -84,13 +102,24 @@ func runDeleteProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	// --force is the confirmation as well as the orphan mode, exactly as on the
 	// direct route, so an unconfirmed run asks the role what it WOULD do.
 	request := issueops.DeleteRequest{
-		Actor:   actor,
-		IDs:     in.ids,
-		Cascade: in.cascade,
-		Force:   in.force,
-		DryRun:  in.dryRun || !in.force,
+		Actor:           actor,
+		IDs:             in.ids,
+		Cascade:         in.cascade,
+		Force:           in.force,
+		DryRun:          in.dryRun || !in.force,
+		ExpectedVersion: ifRevision,
 	}
 	result, err := deleter.Delete(ctx, request)
+	// A8 (beads#4682): a guard mismatch is reported through the dedicated
+	// conditional-write envelope, win or lose on DryRun alike -- it is checked
+	// before the "blocked" special case below because a stale token means the
+	// caller is not yet in a position to read a dependents refusal it may not
+	// even still apply to.
+	if ifRevision != nil && err != nil {
+		if reported, ok := reportIfRevisionFailure("deleting", in.ids[0], err, in.ifRevision); ok {
+			return reported
+		}
+	}
 	// THE GUARD REFUSAL IS NOT A BARE ERROR HERE. Classic renders the preview
 	// and THEN the refusal, which is what tells the caller both what would go
 	// and how to proceed; returning early would print the second half only.

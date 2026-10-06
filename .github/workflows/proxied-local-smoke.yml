@@ -21,17 +21,27 @@ on:
     paths:
       - 'cmd/bd/proxied_local_*'
       - 'cmd/bd/proxied_server*.go'
+      - 'cmd/bd/dolt*.go'
       - 'cmd/bd/*_proxied_server.go'
+      - 'cmd/bd/backup*.go'
+      - 'cmd/bd/purge*.go'
+      - 'cmd/bd/*managed_local*'
+      - 'cmd/bd/proxied_outage_reconnect_integration_test.go'
       - 'cmd/bd/db_proxy_child.go'
       - 'cmd/bd/init*.go'
       - 'cmd/bd/proxied_integration_helpers_test.go'
       - 'cmd/bd/store_factory*.go'
       - 'cmd/bd/test_dolt_server_cgo_test.go'
+      - 'cmd/bd/tracker_proxy_uow_conformance_integration_test.go'
       - 'cmd/bd/uow_factory.go'
       - 'internal/configfile/**'
       - 'internal/doltserver/**'
       - 'internal/storage/dbproxy/**'
       - 'internal/storage/uow/**'
+      - 'internal/tracker/conformance/**'
+      - 'internal/tracker/uow_store.go'
+      - 'internal/tracker/engine.go'
+      - 'internal/tracker/store.go'
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/proxied-local-smoke.yml'
@@ -39,17 +49,27 @@ on:
     paths:
       - 'cmd/bd/proxied_local_*'
       - 'cmd/bd/proxied_server*.go'
+      - 'cmd/bd/dolt*.go'
       - 'cmd/bd/*_proxied_server.go'
+      - 'cmd/bd/backup*.go'
+      - 'cmd/bd/purge*.go'
+      - 'cmd/bd/*managed_local*'
+      - 'cmd/bd/proxied_outage_reconnect_integration_test.go'
       - 'cmd/bd/db_proxy_child.go'
       - 'cmd/bd/init*.go'
       - 'cmd/bd/proxied_integration_helpers_test.go'
       - 'cmd/bd/store_factory*.go'
       - 'cmd/bd/test_dolt_server_cgo_test.go'
+      - 'cmd/bd/tracker_proxy_uow_conformance_integration_test.go'
       - 'cmd/bd/uow_factory.go'
       - 'internal/configfile/**'
       - 'internal/doltserver/**'
       - 'internal/storage/dbproxy/**'
       - 'internal/storage/uow/**'
+      - 'internal/tracker/conformance/**'
+      - 'internal/tracker/uow_store.go'
+      - 'internal/tracker/engine.go'
+      - 'internal/tracker/store.go'
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/proxied-local-smoke.yml'
@@ -60,7 +80,7 @@ permissions:
 jobs:
   managed-local-smoke:
     name: Managed-local proxied lifecycle (Linux, offline)
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 25
     env:
       CGO_ENABLED: "1"
@@ -73,9 +93,34 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: ${{ runner.environment == 'github-hosted' }}
+
+      # F7c review fix S5: this job's own key copy must match main.yml's
+      # seeder key byte-for-byte (TestBlacksmithSetupGoCacheKeysMatchAcrossSeederAndConsumers),
+      # which now keys by UTC calendar day instead of github.sha so main
+      # pushes don't churn a multi-GB cache entry on every commit; this step
+      # computes that same day value locally so the key expression below
+      # resolves (steps.* references only resolve within the same job).
+      - name: Compute cache date
+        id: cache-date
+        if: runner.environment == 'self-hosted'
+        run: echo "today=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Blacksmith setup-go cache
+        if: runner.environment == 'self-hosted'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
+          restore-keys: |
+            blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
+            blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
       - name: Install pinned Dolt CLI
         run: |
@@ -104,7 +149,17 @@ jobs:
             TestManagedLocalProxiedLegacyRecordFailClosed \
             TestManagedLocalProxiedOrphanBackendReaped \
             TestManagedLocalProxiedNProcessColdStartConvergence \
-            TestManagedLocalProxiedStopStartInterleave
+            TestManagedLocalProxiedStopStartInterleave \
+            TestManagedLocalProxiedDoltStatusReportsLiveTopology \
+            TestManagedLocalProxiedDoltStartRefusesOverLiveProxy \
+            TestManagedLocalProxiedDoltStartRefusesWithProxyDown \
+            TestManagedLocalProxiedDoltLifecycleLeavesOtherTopologiesAlone \
+            TestManagedLocalProxiedTrackerUOWConformance \
+            TestManagedLocalProxiedBackupRoundTrip \
+            TestManagedLocalProxiedAutoBackup \
+            TestManagedLocalProxiedBackupRestoreRefusedWhileAttached \
+            TestManagedLocalProxiedPurgeWispsPlaneRetention \
+            TestManagedLocalProxiedBackendCleanExitRetiresProxy
           do
             if ! grep -qx "$test_name" <<<"$listed"; then
               echo "managed-local lifecycle test $test_name is missing; got: '$listed'" >&2

@@ -40,3 +40,8 @@ func OpenForReadOnlyCommand(_ context.Context, _, _, _ string) (*EmbeddedDoltSto
 func OpenForWorkingSetReconcile(_ context.Context, _, _, _ string) (*EmbeddedDoltStore, error) {
 	return nil, errNoCGO
 }
+
+// OpenForRemoteSync returns an error when CGO is not enabled.
+func OpenForRemoteSync(_ context.Context, _, _, _ string) (*EmbeddedDoltStore, error) {
+	return nil, errNoCGO
+}

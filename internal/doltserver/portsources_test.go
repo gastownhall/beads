@@ -9,12 +9,30 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 )
 
+// isolateUserConfig points the user-level config locations (HOME, XDG, and
+// USERPROFILE) at an empty directory. config.Initialize merges the
+// user-level configs (~/.config/bd/config.yaml, legacy ~/.beads/config.yaml),
+// and the integration TestMain does not redirect HOME, so without this an
+// operator's dolt.shared-server: true switches DefaultConfig to the shared
+// server's state dir and its port file. It also drops any config an earlier
+// test in the run loaded (from the real HOME), and does so again afterwards.
+func isolateUserConfig(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+}
+
 // Asserts the precedence chain against DefaultConfig itself by layering each
 // source on top of the previous ones: env > port file > Dolt server
 // config.yaml > Beads config.yaml > metadata.json (GH#4511).
 func TestDefaultConfigPrecedenceChain(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	isolateUserConfig(t)
 
 	beadsDir := t.TempDir()
 
@@ -81,6 +99,7 @@ func TestDefaultConfigPrecedenceChain(t *testing.T) {
 func TestDefaultConfigPortSource(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	isolateUserConfig(t)
 
 	beadsDir := t.TempDir()
 

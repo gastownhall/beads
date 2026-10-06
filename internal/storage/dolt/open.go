@@ -80,11 +80,13 @@ func ApplyResolvedServerPort(beadsDir string, cfg *Config) {
 // requireDoltBackend keeps metadata-driven callers from bypassing the storage
 // factory and interpreting another backend's workspace as Dolt. Removed backend
 // identifiers deliberately remain recognizable in metadata so this check can fail
-// closed instead of opening a new, empty Dolt database.
-func requireDoltBackend(fileCfg *configfile.Config) error {
+// closed instead of opening a new, empty Dolt database. beadsDir is the workspace
+// the config came from, so the refusal can offer the metadata heal when that
+// workspace already holds a Dolt database.
+func requireDoltBackend(fileCfg *configfile.Config, beadsDir string) error {
 	switch fileCfg.Backend {
 	case configfile.BackendPostgres, configfile.BackendMySQL, configfile.BackendSQLite:
-		return fmt.Errorf("configured storage backend %q is no longer supported and cannot be opened as Dolt: %s", fileCfg.Backend, configfile.RemovedBackendDetail(fileCfg.Backend))
+		return fmt.Errorf("configured storage backend %q is no longer supported and cannot be opened as Dolt: %s", fileCfg.Backend, configfile.RemovedBackendDetailAt(fileCfg.Backend, beadsDir, fileCfg))
 	}
 	if !configfile.IsSupportedBackend(fileCfg.Backend) {
 		return fmt.Errorf("configured storage backend %q in metadata.json is not recognized and cannot be opened as Dolt; %s", fileCfg.Backend, configfile.BackendNotOpenedGuarantee)
@@ -114,7 +116,7 @@ func NewFromConfigWithCLIOptions(ctx context.Context, beadsDir string, cfg *Conf
 	if fileCfg == nil {
 		fileCfg = configfile.DefaultConfig()
 	}
-	if err := requireDoltBackend(fileCfg); err != nil {
+	if err := requireDoltBackend(fileCfg, beadsDir); err != nil {
 		return nil, err
 	}
 
@@ -144,7 +146,7 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 	if fileCfg == nil {
 		fileCfg = configfile.DefaultConfig()
 	}
-	if err := requireDoltBackend(fileCfg); err != nil {
+	if err := requireDoltBackend(fileCfg, beadsDir); err != nil {
 		return nil, err
 	}
 
@@ -313,41 +315,72 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		cfg.ServerTLS = fileCfg.GetDoltServerTLS()
 	}
 
-	// Pool size: env var > config.yaml > caller override > default (10).
-	// Useful for shared-server setups with many worktrees (GH#3140).
-	if cfg.MaxOpenConns == 0 {
-		if v := os.Getenv("BEADS_DOLT_MAX_CONNS"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				cfg.MaxOpenConns = n
-			}
-		}
-	}
-	if cfg.MaxOpenConns == 0 {
-		if v := config.GetString("dolt.max-conns"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				cfg.MaxOpenConns = n
-			}
-		}
-	}
+	applyPoolKnobs(cfg)
 
-	// Pool per-I/O deadlines: caller override > env var > config.yaml > default
-	// (10s, see buildServerDSN). The default fast-fail is right for healthy
-	// local servers; overloaded shared-server deployments raise it so ordinary
-	// queries stop dying with "i/o timeout" under load (bd-vz0y9).
+	return nil
+}
+
+// applyPoolKnobs fills the shared pool's operator knobs when the caller left
+// them unset, each on the ladder caller override > env var > config.yaml >
+// built-in default:
+//
+//   - pool size: BEADS_DOLT_MAX_CONNS / dolt.max-conns (default 10, see
+//     applyPoolLimits). Useful for shared-server setups with many worktrees
+//     (GH#3140).
+//   - per-I/O deadlines: BEADS_DOLT_POOL_READ_TIMEOUT / dolt.pool-read-timeout
+//     and BEADS_DOLT_POOL_WRITE_TIMEOUT / dolt.pool-write-timeout (default 10s
+//     each, see buildServerDSN). The default fast-fail is right for healthy
+//     local servers; overloaded shared-server deployments raise it so ordinary
+//     queries stop dying with "i/o timeout" under load (bd-vz0y9).
+//
+// It is idempotent, and it runs from New (applyConfigDefaults) so every
+// DoltStore open honors the knobs. The CLI's main store open hand-builds its
+// Config and never passes through applyResolvedConfig, so a knob read only
+// there reaches the CLI's NewFromConfig* opens (routed stores, bd doctor) but
+// not ordinary bd commands: that is how the deadlines shipped in #5089 stayed
+// inert in server mode (gastownhall/beads#6144), and the pool size the same
+// way. A new pool knob belongs here, not in applyResolvedConfig.
+func applyPoolKnobs(cfg *Config) {
+	if cfg.MaxOpenConns == 0 {
+		if n, err := strconv.Atoi(os.Getenv("BEADS_DOLT_MAX_CONNS")); err == nil && n > 0 {
+			cfg.MaxOpenConns = n
+		}
+	}
+	if cfg.MaxOpenConns == 0 {
+		if n, err := strconv.Atoi(poolKnobFromConfig(cfg, "dolt.max-conns")); err == nil && n > 0 {
+			cfg.MaxOpenConns = n
+		}
+	}
 	if cfg.PoolReadTimeout == 0 {
 		cfg.PoolReadTimeout = timeoutFromEnv("BEADS_DOLT_POOL_READ_TIMEOUT", 0)
 	}
 	if cfg.PoolReadTimeout == 0 {
-		cfg.PoolReadTimeout = parseTimeout(config.GetString("dolt.pool-read-timeout"), 0)
+		cfg.PoolReadTimeout = parseTimeout(poolKnobFromConfig(cfg, "dolt.pool-read-timeout"), 0)
 	}
 	if cfg.PoolWriteTimeout == 0 {
 		cfg.PoolWriteTimeout = timeoutFromEnv("BEADS_DOLT_POOL_WRITE_TIMEOUT", 0)
 	}
 	if cfg.PoolWriteTimeout == 0 {
-		cfg.PoolWriteTimeout = parseTimeout(config.GetString("dolt.pool-write-timeout"), 0)
+		cfg.PoolWriteTimeout = parseTimeout(poolKnobFromConfig(cfg, "dolt.pool-write-timeout"), 0)
 	}
+}
 
-	return nil
+// poolKnobFromConfig reads a pool-knob key from the initialized config and,
+// like the auto-start ladder above, falls back to the .beads directory's own
+// config.yaml. It needs both reads: config.GetString reads a package-global
+// viper populated only by cmd/bd's config.Initialize(), so for a library
+// consumer it always returns "" and the project's configured values would be
+// silently ignored. The fallback follows GetStringFromDir's ladder, so when
+// cfg.BeadsDir is not the process CWD a user-level ~/.config/bd/config.yaml
+// value outranks that project's file — same behavior as dolt.auto-start.
+func poolKnobFromConfig(cfg *Config, key string) string {
+	if v := config.GetString(key); v != "" {
+		return v
+	}
+	if cfg.BeadsDir == "" {
+		return ""
+	}
+	return config.GetStringFromDir(cfg.BeadsDir, key)
 }
 
 // applyCentralConfigDefaults loads the central server config from

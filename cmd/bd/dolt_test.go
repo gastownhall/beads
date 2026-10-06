@@ -283,7 +283,9 @@ func TestDoltSetConfigValidation(t *testing.T) {
 func TestDoltSetConfigJSONOutput(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+	// 0700: bd warns about a group/world-readable .beads, and the warning
+	// would land in the JSON output under test.
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		t.Fatalf("failed to create .beads dir: %v", err)
 	}
 
@@ -315,7 +317,7 @@ func TestDoltSetConfigJSONOutput(t *testing.T) {
 
 	var result map[string]any
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Skipf("output not pure JSON: %s", output)
+		t.Fatalf("output not pure JSON: %s", output)
 	}
 
 	if result["key"] != "database" {
@@ -332,7 +334,9 @@ func TestDoltSetConfigJSONOutput(t *testing.T) {
 func TestDoltSetConfigWithUpdateConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+	// 0700: bd warns about a group/world-readable .beads, and the warning
+	// would land in the JSON output under test.
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		t.Fatalf("failed to create .beads dir: %v", err)
 	}
 
@@ -371,7 +375,7 @@ func TestDoltSetConfigWithUpdateConfig(t *testing.T) {
 
 	var result map[string]any
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Skipf("output not pure JSON: %s", output)
+		t.Fatalf("output not pure JSON: %s", output)
 	}
 
 	if result["config_yaml_updated"] != true {
@@ -399,11 +403,11 @@ func TestTestServerConnection(t *testing.T) {
 	})
 
 	t.Run("localhost with unlikely port", func(t *testing.T) {
-		// Clear test server port override so GetDoltServerPort() returns 59999
+		// Clear the test server port override so the config's port is used.
 		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 		cfg := configfile.DefaultConfig()
 		cfg.DoltServerHost = "127.0.0.1"
-		cfg.DoltServerPort = 59999 // Unlikely to be in use
+		cfg.DoltServerPort = closedLoopbackPort(t)
 
 		result := testServerConnection(cfg.DoltServerHost, cfg.DoltServerPort)
 		if result {
@@ -493,8 +497,7 @@ func TestDoltConfigEnvironmentOverrides(t *testing.T) {
 	// Only database, host, port, user support env overrides
 
 	t.Run("BEADS_DOLT_SERVER_DATABASE overrides", func(t *testing.T) {
-		os.Setenv("BEADS_DOLT_SERVER_DATABASE", "envdb")
-		defer os.Unsetenv("BEADS_DOLT_SERVER_DATABASE")
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "envdb")
 
 		if cfg.GetDoltDatabase() != "envdb" {
 			t.Errorf("expected env override to 'envdb', got %s", cfg.GetDoltDatabase())
@@ -502,8 +505,7 @@ func TestDoltConfigEnvironmentOverrides(t *testing.T) {
 	})
 
 	t.Run("BEADS_DOLT_SERVER_HOST overrides", func(t *testing.T) {
-		os.Setenv("BEADS_DOLT_SERVER_HOST", "envhost")
-		defer os.Unsetenv("BEADS_DOLT_SERVER_HOST")
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "envhost")
 
 		if cfg.GetDoltServerHost() != "envhost" {
 			t.Errorf("expected env override to 'envhost', got %s", cfg.GetDoltServerHost())
@@ -511,8 +513,7 @@ func TestDoltConfigEnvironmentOverrides(t *testing.T) {
 	})
 
 	t.Run("BEADS_DOLT_SERVER_PORT overrides", func(t *testing.T) {
-		os.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
-		defer os.Unsetenv("BEADS_DOLT_SERVER_PORT")
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
 
 		if cfg.GetDoltServerPort() != 9999 {
 			t.Errorf("expected env override to 9999, got %d", cfg.GetDoltServerPort())
@@ -520,8 +521,7 @@ func TestDoltConfigEnvironmentOverrides(t *testing.T) {
 	})
 
 	t.Run("BEADS_DOLT_SERVER_USER overrides", func(t *testing.T) {
-		os.Setenv("BEADS_DOLT_SERVER_USER", "envuser")
-		defer os.Unsetenv("BEADS_DOLT_SERVER_USER")
+		t.Setenv("BEADS_DOLT_SERVER_USER", "envuser")
 
 		if cfg.GetDoltServerUser() != "envuser" {
 			t.Errorf("expected env override to 'envuser', got %s", cfg.GetDoltServerUser())
@@ -1982,8 +1982,17 @@ func TestNoPushDoesNotSkipDoltPull(t *testing.T) {
 // cmdCtx over the legacy global, so both must be cleared to reproduce the
 // `bd dolt show` no-store diagnostic path), restoring both on cleanup. See
 // TestDoltPushPullCommitNeedStore for the same pattern.
+//
+// It also neutralizes ambient BEADS_DOLT_SHARED_SERVER: resolveDoltShowRemotes
+// now selects the physical root through doltserver.ResolvePhysicalRoots, whose
+// shared-server arm keys off that variable, so a developer or CI shell
+// exporting it would otherwise redden the mode-independent tests below for
+// reasons unrelated to the code under test. The two shared-server tests set it
+// to "1" themselves after calling this helper, so neutralizing here does not
+// weaken them.
 func withNilStoreForShow(t *testing.T) {
 	t.Helper()
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 	originalStore := store
 	originalCmdCtx := cmdCtx
 	t.Cleanup(func() {
@@ -2016,7 +2025,7 @@ func TestResolveDoltShowRemotesFromPersistedState(t *testing.T) {
 		t.Fatalf("default dolt database = %q, want %q for fixture layout", cfg.GetDoltDatabase(), dbName)
 	}
 
-	remotes := resolveDoltShowRemotes(beadsDir, cfg, filepath.Join(beadsDir, "embeddeddolt"), true)
+	remotes := resolveDoltShowRemotes(beadsDir, cfg)
 	if len(remotes) != 1 || remotes[0].Name != "origin" {
 		t.Fatalf("resolveDoltShowRemotes = %+v, want origin", remotes)
 	}
@@ -2025,10 +2034,72 @@ func TestResolveDoltShowRemotesFromPersistedState(t *testing.T) {
 	}
 }
 
+// GH#6685: shared-server mode stores the physical database outside the
+// project, under $BEADS_SHARED_SERVER_DIR/dolt/<database>.  `bd dolt show`
+// must resolve that active root rather than probing project-local paths.
+func TestResolveDoltShowRemotesFromSharedServerState(t *testing.T) {
+	withNilStoreForShow(t)
+
+	beadsDir := t.TempDir()
+	sharedDir := t.TempDir()
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedDir)
+
+	cfg := configfile.DefaultConfig()
+	dbPath := filepath.Join(sharedDir, "dolt", cfg.GetDoltDatabase())
+	if err := os.MkdirAll(filepath.Join(dbPath, ".dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := `{"remotes":{"origin":{"name":"origin","url":"https://doltremoteapi.dolthub.com/org/shared"}}}`
+	if err := os.WriteFile(filepath.Join(dbPath, ".dolt", "repo_state.json"), []byte(state), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	remotes := resolveDoltShowRemotes(beadsDir, cfg)
+	if len(remotes) != 1 || remotes[0].Name != "origin" {
+		t.Fatalf("resolveDoltShowRemotes = %+v, want shared-server origin", remotes)
+	}
+}
+
+// GH#6685: stale project-local state must not mask the active shared-server
+// database.  This reproduces the field report where .beads/dolt existed from
+// an older mode and caused `bd dolt show` to print "(none)".
+func TestResolveDoltShowRemotesSharedServerIgnoresStaleLocalState(t *testing.T) {
+	withNilStoreForShow(t)
+
+	beadsDir := t.TempDir()
+	sharedDir := t.TempDir()
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedDir)
+
+	stalePath := filepath.Join(beadsDir, "dolt", ".dolt")
+	if err := os.MkdirAll(stalePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stalePath, "repo_state.json"), []byte(`{"remotes":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := configfile.DefaultConfig()
+	dbPath := filepath.Join(sharedDir, "dolt", cfg.GetDoltDatabase())
+	if err := os.MkdirAll(filepath.Join(dbPath, ".dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := `{"remotes":{"origin":{"name":"origin","url":"https://doltremoteapi.dolthub.com/org/shared"}}}`
+	if err := os.WriteFile(filepath.Join(dbPath, ".dolt", "repo_state.json"), []byte(state), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	remotes := resolveDoltShowRemotes(beadsDir, cfg)
+	if len(remotes) != 1 || remotes[0].Name != "origin" {
+		t.Fatalf("resolveDoltShowRemotes = %+v, want shared-server origin", remotes)
+	}
+}
+
 func TestResolveDoltShowRemotesNoneWhenNoState(t *testing.T) {
 	withNilStoreForShow(t)
 
-	remotes := resolveDoltShowRemotes(t.TempDir(), configfile.DefaultConfig(), filepath.Join(t.TempDir(), "embeddeddolt"), true)
+	remotes := resolveDoltShowRemotes(t.TempDir(), configfile.DefaultConfig())
 	if len(remotes) != 0 {
 		t.Fatalf("want no remotes, got %+v", remotes)
 	}
@@ -2055,11 +2126,11 @@ func TestResolveDoltShowRemotesModeAppropriate(t *testing.T) {
 	}
 
 	cfg := configfile.DefaultConfig()
-	embeddedDataDir := filepath.Join(beadsDir, "embeddeddolt")
+	writeMetadataConfig(t, beadsDir, configfile.DoltModeServer, dbName)
 
-	// Active mode is server (embedded=false): the embedded-only remotes
+	// Active mode is server: the embedded-only remotes
 	// must not leak through.
-	remotes := resolveDoltShowRemotes(beadsDir, cfg, embeddedDataDir, false)
+	remotes := resolveDoltShowRemotes(beadsDir, cfg)
 	if len(remotes) != 0 {
 		t.Fatalf("server-mode resolve leaked embedded remotes: %+v", remotes)
 	}
@@ -2075,19 +2146,20 @@ func TestResolveDoltShowRemotesAuthoritativeEmpty(t *testing.T) {
 	beadsDir := t.TempDir()
 	dbName := "beads"
 
-	// The bare embedded data dir (checked first) is present but has no
+	// The active database dir (checked first) is present but has no
 	// remotes — this must be treated as authoritative, not skipped in
-	// favor of the dbName-suffixed candidate below.
+	// favor of the root-level cold-start candidate below.
 	barePath := filepath.Join(beadsDir, "embeddeddolt")
-	if err := os.MkdirAll(filepath.Join(barePath, ".dolt"), 0o755); err != nil {
+	activePath := filepath.Join(barePath, dbName)
+	if err := os.MkdirAll(filepath.Join(activePath, ".dolt"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(barePath, ".dolt", "repo_state.json"), []byte(`{"remotes":{}}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(activePath, ".dolt", "repo_state.json"), []byte(`{"remotes":{}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	// A stale candidate with remotes recorded — must not be consulted.
-	stalePath := filepath.Join(barePath, dbName)
+	stalePath := barePath
 	if err := os.MkdirAll(filepath.Join(stalePath, ".dolt"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2097,7 +2169,7 @@ func TestResolveDoltShowRemotesAuthoritativeEmpty(t *testing.T) {
 	}
 
 	cfg := configfile.DefaultConfig()
-	remotes := resolveDoltShowRemotes(beadsDir, cfg, barePath, true)
+	remotes := resolveDoltShowRemotes(beadsDir, cfg)
 	if len(remotes) != 0 {
 		t.Fatalf("authoritative empty result was overridden by stale candidate: %+v", remotes)
 	}
@@ -2128,7 +2200,7 @@ func TestResolveDoltShowRemotesCorruptStateWarns(t *testing.T) {
 	os.Stderr = w
 	defer func() { os.Stderr = origStderr }()
 
-	remotes := resolveDoltShowRemotes(beadsDir, cfg, filepath.Join(beadsDir, "embeddeddolt"), true)
+	remotes := resolveDoltShowRemotes(beadsDir, cfg)
 
 	_ = w.Close()
 	os.Stderr = origStderr

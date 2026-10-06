@@ -2380,7 +2380,7 @@
     "--json"
    ]
   ],
-  "pins": "Error 'invalid --defer format \"not-a-date\". Examples: ...' to STDERR; exit 1.",
+  "pins": "Error 'invalid --defer format \"not-a-date\". Use a relative offset [+-]?<n><unit> with unit min=minutes, h=hours, ...' (shared deferUntilFormatHint) to STDERR; exit 1.",
   "deterministic": true
  },
  {
@@ -2759,7 +2759,7 @@
     "--json"
    ]
   ],
-  "pins": "Error 'invalid --due format \"whenever\". Examples: ...' to STDERR; exit 1.",
+  "pins": "Error 'invalid --due format \"whenever\". Use a relative offset [+-]?<n><unit> with unit min=minutes, h=hours, ...' (shared deferUntilFormatHint) to STDERR; exit 1.",
   "deterministic": true
  },
  {
@@ -6084,7 +6084,7 @@
  },
  {
   "name": "dep_cycles_detected_via_no_cycle_check",
-  "purpose": "Bypass per-edge cycle check with --no-cycle-check to plant a 2-node blocks cycle, then dep cycles reports it.",
+  "purpose": "Show that --no-cycle-check does not bypass the per-edge cycle check on a single-edge add: the edge that would close a 2-node blocks cycle is still rejected, and dep cycles reports none.",
   "prefix": "dep",
   "steps": [
    [
@@ -6133,7 +6133,7 @@
     "--json"
    ]
   ],
-  "pins": "Both adds succeed (single-edge add path honors --no-cycle-check); dep cycles --json returns a non-empty array of cycles containing {dep-1,dep-2}. Cycle member ordering compared as multiset.",
+  "pins": "First add succeeds; second errors 'adding dependency would create a cycle'; exit 1 (on a single-edge add --no-cycle-check skips only the post-add cycle warning, not the per-edge check); dep cycles --json returns [].",
   "deterministic": true
  },
  {
@@ -15495,7 +15495,7 @@
     "--json"
    ]
   ],
-  "pins": "update.go:224-225 'invalid --defer format \"notadate\". Examples: +1h, tomorrow, next monday, 2025-01-15'; exit 1.",
+  "pins": "update.go:224-225 'invalid --defer format \"notadate\". Use a relative offset [+-]?<n><unit> with unit min=minutes, h=hours, d=days, w=weeks, m=months, y=years (+30min, +1h, +3m), natural language (tomorrow, next monday), or a date (2025-01-15)'; exit 1.",
   "deterministic": true
  },
  {
@@ -15606,7 +15606,7 @@
     "--json"
    ]
   ],
-  "pins": "update.go:200-211 invalid -> 'invalid --due format \"garbage\". Examples: +6h, tomorrow, next monday, 2025-01-15' exit 1; empty -> due_at=nil cleared.",
+  "pins": "update.go:200-211 invalid -> 'invalid --due format \"garbage\". Use a relative offset [+-]?<n><unit> with unit min=minutes, h=hours, d=days, w=weeks, m=months, y=years (+30min, +1h, +3m), natural language (tomorrow, next monday), or a date (2025-01-15)' exit 1; empty -> due_at=nil cleared.",
   "deterministic": true
  },
  {

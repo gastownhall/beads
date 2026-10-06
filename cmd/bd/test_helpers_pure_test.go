@@ -29,6 +29,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 const windowsOS = "windows"
@@ -78,6 +79,17 @@ func generateUniqueTestID(t *testing.T, prefix string, index int) string {
 	data := []byte(t.Name() + prefix + string(rune(counter)) + string(rune(index)))
 	hash := sha256.Sum256(data)
 	return prefix + "-" + hex.EncodeToString(hash[:])[:8]
+}
+
+// isolateBeadsDirForTest starts a fresh-workspace fixture without an inherited
+// selection and restores BEADS_DIR exactly after command dispatch, even
+// when dispatch changes BEADS_DIR with raw os.Setenv.
+// Call before fixture setup or dispatch; like t.Setenv, it is not parallel-safe.
+// Tests that intentionally select a workspace should set BEADS_DIR explicitly
+// instead; initConfigForTest and ensureCleanGlobalState preserve that selection.
+func isolateBeadsDirForTest(t *testing.T) {
+	t.Helper()
+	t.Setenv("BEADS_DIR", "")
 }
 
 // initConfigForTest initializes viper config for a test and ensures cleanup.
@@ -304,14 +316,79 @@ var (
 	initTestBDErr  error
 )
 
+// findPrebuiltBDBinary returns the absolute path of the BEADS_TEST_BD_BINARY
+// binary, or "" when none is configured and the caller should `go build` bd.
+// Under Bazel the binary is always injected (//cmd/bd:bd_for_tests) and is
+// resolved through runfiles; see bazeltest.PrebuiltBD.
 func findPrebuiltBDBinary() (string, error) {
-	if configured := os.Getenv("BEADS_TEST_BD_BINARY"); configured != "" {
-		if _, err := os.Stat(configured); err != nil {
-			return "", fmt.Errorf("BEADS_TEST_BD_BINARY %q is not usable: %w", configured, err)
+	return bazeltest.PrebuiltBD()
+}
+
+// bdModulePackage is cmd/bd's import path. The in-test fallback build names
+// it explicitly instead of "." so it can never build whatever package happens
+// to be in the working directory.
+const bdModulePackage = "github.com/steveyegge/beads/cmd/bd"
+
+// bdSourceDir is cmd/bd's source directory, resolved during package
+// initialization, before TestMain or any test can chdir: this file's
+// compiled-in path when it is absolute (not -trimpath) and next to main.go,
+// else the working directory go test starts the binary in (the package
+// directory).
+var bdSourceDir = resolveBDSourceDir()
+
+func resolveBDSourceDir() string {
+	if _, file, _, ok := runtime.Caller(0); ok && filepath.IsAbs(file) {
+		dir := filepath.Dir(file)
+		if _, err := os.Stat(filepath.Join(dir, "main.go")); err == nil {
+			return dir
 		}
-		return filepath.Abs(configured)
 	}
-	return "", nil
+	wd, _ := os.Getwd()
+	return wd
+}
+
+// goBuildBDCommand returns the `go build` that subprocess-test helpers fall
+// back to when BEADS_TEST_BD_BINARY is unset. It is the build CI prebuilds
+// that binary with (main.yml build-artifacts: go build -tags gms_pure_go
+// ./cmd/bd; no -race), and it builds cmd/bd whatever the caller's working
+// directory is: the package is named by import path and the command runs in
+// bdSourceDir, so a helper first reached from a test that chdir'd into a
+// fixture (or a precompiled test binary run from elsewhere) still builds bd.
+func goBuildBDCommand(out string) *exec.Cmd {
+	cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", out, bdModulePackage)
+	cmd.Dir = bdSourceDir
+	return cmd
+}
+
+// TestGoBuildBDCommandIsCWDIndependent pins that the fallback build resolves
+// cmd/bd from any working directory. It resolves the command's package in
+// the command's directory with `go list` rather than paying for a full link.
+func TestGoBuildBDCommandIsCWDIndependent(t *testing.T) {
+	if bazeltest.IsBazel() {
+		t.Skip("Bazel always injects bd through BEADS_TEST_BD_BINARY; the fallback build is unused")
+	}
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skipf("go toolchain not on PATH: %v", err)
+	}
+	t.Chdir(t.TempDir())
+
+	cmd := goBuildBDCommand(filepath.Join(t.TempDir(), "bd"))
+	if got := cmd.Args[len(cmd.Args)-1]; got != bdModulePackage {
+		t.Fatalf("goBuildBDCommand builds %q, want %q", got, bdModulePackage)
+	}
+	if !strings.Contains(strings.Join(cmd.Args, " "), "-tags gms_pure_go") {
+		t.Fatalf("goBuildBDCommand args %q lack CI's -tags gms_pure_go", cmd.Args)
+	}
+
+	list := exec.Command("go", "list", "-tags", "gms_pure_go", "-f", "{{.Name}} {{.ImportPath}}", bdModulePackage)
+	list.Dir = cmd.Dir
+	out, err := list.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list %s in %q: %v\n%s", bdModulePackage, cmd.Dir, err, out)
+	}
+	if got, want := strings.TrimSpace(string(out)), "main "+bdModulePackage; got != want {
+		t.Fatalf("go list in %q = %q, want %q", cmd.Dir, got, want)
+	}
 }
 
 // buildBDForInitTests builds (or locates) a bd binary suitable for subprocess
@@ -350,7 +427,7 @@ func buildBDForInitTests(t *testing.T) string {
 			return
 		}
 		initTestBD = filepath.Join(tmpDir, bdBinary)
-		cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", initTestBD, ".")
+		cmd := goBuildBDCommand(initTestBD)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			initTestBDErr = fmt.Errorf("go build failed: %v\n%s", err, out)
 		}

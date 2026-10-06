@@ -168,10 +168,10 @@ func mustDrain(t *testing.T, ctx context.Context, conn *sql.Conn, sqlText string
 	}
 }
 
-func scalarInt(t *testing.T, ctx context.Context, conn *sql.Conn, query string) int {
+func scalarInt(t *testing.T, ctx context.Context, conn *sql.Conn, query string, args ...any) int {
 	t.Helper()
 	var v int
-	if err := conn.QueryRowContext(ctx, query).Scan(&v); err != nil {
+	if err := conn.QueryRowContext(ctx, query, args...).Scan(&v); err != nil {
 		t.Fatalf("scalar %q: %v", query, err)
 	}
 	return v

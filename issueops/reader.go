@@ -54,7 +54,15 @@ type ReadyRequest struct {
 	// the other, and P0 has already been lost that way once.
 	Priority *int
 
-	// ParentID restricts to recursive descendants of one issue.
+	// ParentID restricts to ALL TRANSITIVE DESCENDANTS of one issue, not just
+	// its direct children: internal/storage/issueops/ready_work.go calls
+	// GetDescendantIDsInTx(ctx, tx, *filter.ParentID, 0), the recursive walk.
+	// GH#3396: this used to be a one-hop subquery against the dependency
+	// table, so grandchildren were silently dropped despite this comment and
+	// the help text both promising "descendants (recursive)" — do not
+	// mistake this for ListRequest.ParentID's non-walking clause, which is a
+	// DIFFERENT query (PR #7199 review: an earlier pass here wrongly copied
+	// that one-level wording onto this field).
 	ParentID string
 	// MolType restricts to one molecule type.
 	MolType *MolType
@@ -187,6 +195,34 @@ type ListRequest struct {
 	// hydrated there either way, which costs time and not correctness.
 	SkipCounts bool
 
+	// IncludeComments populates every row's Issue.Comments with that issue's
+	// full comment bodies, and is the LIST twin of GetRequest.IncludeComments.
+	// Like SkipLabels and SkipCounts it chooses what is HYDRATED, never which
+	// rows match: the rows, their order, Parent and the has-more verdict are
+	// what they would have been.
+	//
+	// IT IS OPT-IN BECAUSE IT COSTS A QUERY PER ROW, which is the same reason
+	// the detail view's twin is. A page of 50 is 50 comment reads; a listing
+	// asking for the whole store is that many. Nothing hydrates comments
+	// unless a caller asks.
+	//
+	// WHY THE KNOB EXISTS AT ALL (be-73x). comment_count has always been on
+	// the row and the bodies never were, so a caller searching a LISTING for
+	// text that lives in a comment gets a well-formed, non-empty, WRONG answer
+	// — the rows that match are simply absent, and no error, no zero and no
+	// short count marks them. That is the failure this knob exists to make
+	// answerable, which is why the unhydrated rows also carry
+	// types.IssueWithCounts.CommentsOmitted rather than staying silent.
+	//
+	// IT APPLIES TO BOTH ARMS, ReadyFlag included, and is neither carried nor
+	// refused by it: hydration runs in the shared page epilogue after the
+	// query, so it is not a filter the ready query has to be able to express.
+	//
+	// A row whose comments could not be read is an ERROR, not a short list.
+	// The detail view's IncludeComments makes the same promise for the same
+	// reason: a caller that asked for the rows gets them or gets told.
+	IncludeComments bool
+
 	// Brief suppresses the FREE-FORM TEXT the way SkipLabels suppresses labels
 	// and SkipCounts the cardinalities: Description, Design,
 	// AcceptanceCriteria, Notes, Payload and Waiters are not selected and come
@@ -311,6 +347,29 @@ type ListRequest struct {
 	// ExcludeTypes entries may be comma-separated; splitting happens inside.
 	ExcludeTypes []string
 
+	// ParentID restricts to one issue's children through one SQL clause, the
+	// same one CountRequest.ParentID compiles to
+	// (internal/storage/sqlbuild/filter.go): a parent-child dependency edge
+	// onto ParentID, OR, for a row with no parent-child edge at all, an id
+	// under ParentID's dotted prefix ("X.1", "X.1.1"). NEITHER ARM WALKS. The
+	// edge arm stops at one level, so a grandchild with an edge of its own is
+	// not in the answer, while the prefix arm reaches every edge-less dotted
+	// id at any depth (backend/conformance/reader_contract.go pins that arm).
+	// It is NOT the recursive descendants walk — that is ReadyRequest.ParentID
+	// above, a DIFFERENT field on a different request, backed by
+	// GetDescendantIDsInTx (GH#3396); on the ReadyFlag arm this field crosses
+	// to that query and resolves recursively there.
+	// The recursive tree that `bd list --parent X` renders by DEFAULT comes
+	// from cmd/bd/list_show_filter_modes.go's findAllDescendants re-running
+	// this clause against the store once per level and accumulating the
+	// results client-side, not from this field answering a deeper question.
+	// --flat, --json and --format skip that walk and return exactly this
+	// field's answer, which is why the flat listing is the invocation that
+	// agrees with `bd count --parent X`'s cardinality.
+	//
+	// NoParent restricts to rows with no parent-child dependency edge. It has
+	// no dotted-id arm, so an edge-less "X.1" matches BOTH ParentID X and
+	// NoParent. The ReadyFlag arm refuses it; see that field.
 	ParentID string
 	NoParent bool
 	MolType  *MolType

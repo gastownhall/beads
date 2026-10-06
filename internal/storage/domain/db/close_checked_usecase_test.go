@@ -6,6 +6,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 func (s *testSuite) TestIssueUseCase_CloseIssueChecked() {
@@ -82,6 +83,13 @@ func (s *testSuite) uccCloseCheckedDirectBlockerRefuses() {
 	s.True(errors.Is(err, storage.ErrCloseBlocked), "refusal must carry the shared sentinel")
 	s.ErrorContains(err, "is blocked by")
 	s.ErrorContains(err, "bd-ucc-clc-tgt", "message must name the live blocker")
+	// The list is typed as well as printed, so the HTTP surface can publish it
+	// without parsing the sentence, and the sentence is unchanged.
+	var blocked *publicops.BlockedError
+	s.Require().True(errors.As(err, &blocked), "refusal must carry *BlockedError: %v", err)
+	s.Equal("bd-ucc-clc-src", blocked.IssueID)
+	s.Equal([]publicops.Blocker{{ID: "bd-ucc-clc-tgt", Type: types.DepBlocks}}, blocked.Blockers)
+	s.Equal("cannot close blocked issue: bd-ucc-clc-src is blocked by [bd-ucc-clc-tgt]", blocked.Error())
 	s.False(res.Closed)
 
 	// The refused issue stays open.

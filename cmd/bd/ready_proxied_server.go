@@ -28,10 +28,12 @@ func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 		return HandleError("--offset must be >= 0")
 	}
 
-	// No cap resolver: the RunE that routed here has already resolved
-	// --max-rows / BEADS_MAX_ROWS, either to reject a live one or to validate
-	// the value it then ignores for --claim. Resolving it again would repeat
-	// the malformed-value warning and stamp a cap this route cannot enforce.
+	// No cap resolver: --max-rows / BEADS_MAX_ROWS has already been resolved
+	// twice before this route runs — once at the proxied front door and once
+	// in the RunE that routed here — and any positive cap was refused by both,
+	// on --claim as much as on a bulk read. Resolving it a third time would
+	// repeat the malformed-value warning and stamp a cap this route cannot
+	// enforce.
 	in, err := gatherReadyInput(cmd, nil)
 	if err != nil {
 		return err
@@ -328,6 +330,9 @@ func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput
 	for id := range allBlockerIDs {
 		blockerIDList = append(blockerIDList, id)
 	}
+	// TODO(batchgetter): unbounded id list; see issueops.BatchGetter's doc and
+	// the importIssueLookup TODO in import_shared.go for why this is not yet
+	// routed through GetMany.
 	blockerIssues, err := uw.IssueUseCase().GetIssuesByIDs(ctx, blockerIDList)
 	if err != nil {
 		debug.Logf("warning: failed to get blocker issues: %v", err)

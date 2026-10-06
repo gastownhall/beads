@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 const closeCheckedSavepointPrefix = "issueops_close_checked_"
@@ -151,12 +152,12 @@ func enforceClosePolicyForTargetInTx(ctx context.Context, tx DBTX, id, targetCol
 		return 0, &storage.CloseOpenChildrenError{IssueID: id, OpenChildren: openChildren}
 	}
 	if !force && !closed {
-		blocked, blockers, err := IsBlockedInTx(ctx, tx, id)
+		blocked, blockers, err := isBlockedByInTx(ctx, tx, id)
 		if err != nil {
 			return 0, err
 		}
 		if blocked && len(blockers) > 0 {
-			return 0, fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
+			return 0, &publicops.BlockedError{IssueID: id, Blockers: blockers, Err: storage.ErrCloseBlocked}
 		}
 	}
 	return openChildren, nil
@@ -381,10 +382,18 @@ func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, sess
 	if err != nil {
 		return nil, fmt.Errorf("recompute is_blocked after close for %s: %w", id, err)
 	}
+	NoteStatusChangeBlockedRecheck(tx, id, string(types.StatusClosed), affectedIssues, affectedWisps)
 
 	// Snapshot only after all derived blocked-state maintenance has completed.
-	// recordEvent gates the human audit event, never the journal.
+	// recordEvent gates the human audit event, never the journal — nor the
+	// version row: a close changes status, closed_at, close_reason and
+	// closed_by_session, all durable state, so it mints whether or not the
+	// audit event was suppressed (as update.go already does). The rows == 0
+	// return above (already closed) wrote nothing and mints nothing.
 	if err := RecordEventInTx(ctx, tx, EventClose, id, actor); err != nil {
+		return nil, err
+	}
+	if err := RecordVersionInTx(ctx, tx, id, actor); err != nil {
 		return nil, err
 	}
 

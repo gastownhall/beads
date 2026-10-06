@@ -12,14 +12,36 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// isDarkBackground stores the detected terminal background, so other
+// packages (e.g. internal/uimd's glamour renderer) can match its color
+// choices to the same probe this package uses for its own adaptive colors,
+// instead of guessing independently. Zero value (false) when color is
+// disabled, since the probe is skipped in that case (see init below).
+var isDarkBackground bool
+
+// IsDarkBackground reports the detected terminal background. See
+// isDarkBackground for how and when it is set.
+func IsDarkBackground() bool {
+	return isDarkBackground
+}
+
+// SetDarkBackgroundForTest overrides the detected background for the
+// duration of a test and returns a function that restores the previous
+// value. Test-only.
+func SetDarkBackgroundForTest(dark bool) func() {
+	prev := isDarkBackground
+	isDarkBackground = dark
+	return func() { isDarkBackground = prev }
+}
+
 func init() {
 	if !ShouldUseColor() {
 		return // all colors remain NoColor, all styles remain empty
 	}
 	// Detect dark background for adaptive colors.
 	// Only probed when color is enabled (prevents OSC 11 leaks in hook contexts).
-	isDark := lipgloss.HasDarkBackground(os.Stdin, os.Stdout)
-	initColors(isDark)
+	isDarkBackground = lipgloss.HasDarkBackground(os.Stdin, os.Stdout)
+	initColors(isDarkBackground)
 	initStyles()
 }
 

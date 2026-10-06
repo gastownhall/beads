@@ -1,0 +1,21 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "doltremote",
+    srcs = ["remote.go"],
+    importpath = "github.com/steveyegge/beads/internal/doltremote",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "doltremote_test",
+    srcs = [
+        "remote_invariant_test.go",
+        "remote_test.go",
+    ],
+    embed = [":doltremote"],
+    deps = [
+        "//internal/remotecache",
+        "//internal/storage/doltutil",
+    ],
+)

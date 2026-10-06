@@ -1,0 +1,45 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "check-versions_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/steveyegge/beads/scripts/check-versions",
+    visibility = ["//visibility:private"],
+    deps = ["//internal/versioncheck"],
+)
+
+go_binary(
+    name = "check-versions",
+    embed = [":check-versions_lib"],
+    visibility = ["//visibility:public"],
+)
+
+# Tags:
+#   host-tools: pre_push_hook_test.go runs the tracked pre-push hook and the
+#     shell entrypoint under the host's /bin/bash, and the hook shells out to
+#     the host's git and coreutils.
+#   no-remote-exec: so it runs where that inventory is known (the developer
+#     machine or the CI runner) rather than on a farm worker.
+#   no-remote-cache: the action key does not cover the host's bash or tools, so
+#     a result from one host is neither uploaded for nor served to another.
+go_test(
+    name = "check-versions_test",
+    srcs = [
+        "main_test.go",
+        "pre_push_hook_test.go",
+    ],
+    data = [
+        "//:release_metadata_files",
+        "//scripts:check-versions.sh",
+    ],
+    embed = [":check-versions_lib"],
+    tags = [
+        "host-tools",
+        "no-remote-cache",
+        "no-remote-exec",
+    ],
+    deps = [
+        "//internal/testutil/bazeltest",
+        "//internal/versioncheck",
+    ],
+)

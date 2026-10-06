@@ -126,3 +126,6 @@ func gracefulStop(pid int, timeout time.Duration) error {
 	time.Sleep(500 * time.Millisecond)
 	return nil
 }
+
+// killProcessGroup is a no-op on Windows; killAndWait kills the child itself.
+func killProcessGroup(int) {}

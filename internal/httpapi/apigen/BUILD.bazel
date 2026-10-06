@@ -1,0 +1,16 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "apigen",
+    srcs = [
+        "doc.go",
+        "types.gen.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/httpapi/apigen",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/eventsjournal",
+        "//internal/types",
+        "//issueops",
+    ],
+)

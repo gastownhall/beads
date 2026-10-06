@@ -17,6 +17,7 @@ import (
 )
 
 func TestIssueIDCompletion(t *testing.T) {
+	saveAndRestoreGlobals(t)
 	// Save original store and restore after test
 	originalStore := store
 	originalRootCtx := rootCtx
@@ -34,6 +35,11 @@ func TestIssueIDCompletion(t *testing.T) {
 	testDB := filepath.Join(tmpDir, "test.db")
 	testStore := newTestStoreWithPrefix(t, testDB, "bd")
 	store = testStore
+	// issueIDCompletion resolves a database path before it looks at the
+	// open store (an unresolvable path means no completions), as the CLI
+	// does; point it at this store's (dbPath is restored by
+	// saveAndRestoreGlobals above).
+	dbPath = testDB
 
 	// Create test issues
 	now := time.Now()
@@ -268,7 +274,10 @@ func TestIssueIDCompletion_UsesWorktreeFallbackWhenStoreNil(t *testing.T) {
 	})
 
 	testDB := filepath.Join(mainRepoDir, ".beads", "beads.db")
-	testStore := newTestStoreWithPrefix(t, testDB, "wt")
+	// Its own database, not a branch of the shared one: completion reopens
+	// the store from .beads/metadata.json, which can name a database but not
+	// a test branch.
+	testStore := newTestStoreIsolatedDB(t, testDB, "wt")
 	if err := testStore.CreateIssue(ctx, &types.Issue{
 		ID:        "wt-abc1",
 		Title:     "Worktree completion target",

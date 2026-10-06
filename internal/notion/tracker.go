@@ -5,12 +5,13 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/tracker"
 	itracker "github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -35,8 +36,8 @@ type notionAPI interface {
 	ArchivePage(ctx context.Context, pageID string, inTrash bool) (*Page, error)
 }
 
-var newNotionClient = func(token string) notionAPI {
-	return NewClient(token)
+var newNotionClient = func(token string, maxQueryPages int) notionAPI {
+	return NewClient(token).WithMaxQueryPages(maxQueryPages)
 }
 
 func init() {
@@ -47,7 +48,7 @@ func init() {
 
 type Tracker struct {
 	client       notionAPI
-	store        storage.Storage
+	store        tracker.Store
 	config       *MappingConfig
 	dataSourceID string
 	viewURL      string
@@ -61,11 +62,32 @@ type Tracker struct {
 	lastCandidates  int
 }
 
+// maxQueryPages reads the pagination bound for the Notion query endpoint.
+// Unset returns 0, which leaves the client on its own default — a data source
+// under the default ceiling needs no configuration. A value that is set but
+// unusable is an error rather than a silent fallback: the operator sets this
+// key precisely because sync is already failing on the bound, and quietly
+// ignoring it would reproduce the identical failure with no clue why.
+func (t *Tracker) maxQueryPages(ctx context.Context) (int, error) {
+	raw := t.getConfig(ctx, "notion.max_query_pages", "NOTION_MAX_QUERY_PAGES")
+	if raw == "" {
+		return 0, nil
+	}
+	pages, err := strconv.Atoi(raw)
+	if err != nil || pages <= 0 {
+		// Name both levers: the value may have come from either, and an operator
+		// told only about the config key will not think to look at their
+		// environment for the value they are being asked to correct.
+		return 0, fmt.Errorf("notion.max_query_pages (or NOTION_MAX_QUERY_PAGES) must be a positive integer, got %q", raw)
+	}
+	return pages, nil
+}
+
 func (t *Tracker) Name() string         { return "notion" }
 func (t *Tracker) DisplayName() string  { return "Notion" }
 func (t *Tracker) ConfigPrefix() string { return "notion" }
 
-func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
+func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	t.store = store
 	t.dataSourceID = t.getConfig(ctx, "notion.data_source_id", "NOTION_DATA_SOURCE_ID")
 	t.viewURL = t.getConfig(ctx, "notion.view_url", "NOTION_VIEW_URL")
@@ -81,8 +103,12 @@ func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
 		return fmt.Errorf("Notion data source not configured (run 'bd notion init --parent <page-id>', 'bd notion connect --url <notion-url>', or set notion.data_source_id)")
 	}
 	t.authSource = auth.Source
+	maxQueryPages, err := t.maxQueryPages(ctx)
+	if err != nil {
+		return err
+	}
 	if t.client == nil {
-		t.client = newNotionClient(auth.Token)
+		t.client = newNotionClient(auth.Token, maxQueryPages)
 	}
 	if t.config == nil {
 		t.config = DefaultMappingConfig()

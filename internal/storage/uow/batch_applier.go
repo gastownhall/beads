@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -40,6 +41,69 @@ func NewBatchApplier(provider UnitOfWorkProvider) (publicops.BatchApplier, error
 
 var _ publicops.BatchApplier = (*batchApplier)(nil)
 
+// retryTxAttemptHeadroom is reserved off the top of an extended retry budget
+// so the FINAL retry attempt still has room to run to completion before the
+// caller's own context deadline arrives. Without it, an extended budget
+// computed as exactly "whatever's left on ctx" could let backoff start one
+// more attempt a moment before ctx expires: that attempt is then killed
+// mid-transaction by ctx cancellation, turning a write that may have been
+// about to succeed into a context-deadline-exceeded error (classified
+// non-retryable, a 500) instead of a clean retry-budget exhaustion (a
+// reported, retryable write conflict). The retry loop's OWN loser case
+// already reports correctly (uow.RunTxResultWithin's IsSerializationError
+// contract) — this headroom exists only to make ctx cancellation not race it.
+const retryTxAttemptHeadroom = 5 * time.Second
+
+// retryTxMinBudget is the floor retryTxBudget returns for a MARKED context
+// whose remaining deadline (after subtracting retryTxAttemptHeadroom) is too
+// small to be a useful retry budget on its own — e.g. an operator-configured
+// --large-apply-ceiling set close to expiry, or a request nearly at its own
+// deadline. It deliberately does NOT fall back to DefaultTxRetryMaxElapsed
+// (15s): claiming a 15s retry budget when ctx itself has only a second or two
+// left would be misleading busywork, since ctx cancellation via
+// backoff.WithContext ends the loop at its own deadline regardless of what
+// MaxElapsedTime says. A small positive floor just guarantees backoff.Retry's
+// unconditional first attempt (and typically one quick retry) rather than a
+// degenerate zero-or-negative MaxElapsedTime, which the backoff library
+// treats as "never stop on elapsed time" — the opposite of what a
+// nearly-expired budget should mean.
+const retryTxMinBudget = time.Second
+
+// retryTxBudget picks ApplyBatch's commit-retry budget. It returns exactly
+// DefaultTxRetryMaxElapsed unless ctx was marked by
+// issueops.WithExtendedRetryBudget, which only internal/httpapi's
+// admitLargeApply does, for a request over the large-apply item threshold.
+//
+// A version of this fix that instead scaled to "any sufficiently long
+// ctx.Deadline()" was wrong: an ORDINARY request also carries a real
+// deadline (internal/httpapi's requestDeadline, 60s), and that heuristic
+// silently raised every ordinary request's retry ceiling from 15s to up to
+// 60s. Gating on the explicit marker keeps ordinary requests at EXACTLY the
+// pre-existing 15s ceiling, and extends only the path that intentionally
+// asked for more room: an over-threshold request gets a context deadline of
+// up to its own largeApplyCeiling (5 minutes by default) precisely so a
+// genuinely large, slow-to-commit write has room to run — but a Dolt
+// commit-time merge conflict on it would otherwise still give up retrying at
+// 15s, with minutes of that budget sitting unused.
+//
+// retryTxAttemptHeadroom is subtracted from the remaining deadline so the
+// scaled budget never lets the last attempt start too late to finish; ctx
+// cancellation via backoff.WithContext is still the final backstop either
+// way, so this can never let a request run past the deadline it already had.
+func retryTxBudget(ctx context.Context) time.Duration {
+	if !publicops.HasExtendedRetryBudget(ctx) {
+		return DefaultTxRetryMaxElapsed
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return DefaultTxRetryMaxElapsed
+	}
+	if budget := time.Until(deadline) - retryTxAttemptHeadroom; budget > retryTxMinBudget {
+		return budget
+	}
+	return retryTxMinBudget
+}
+
 // ApplyBatch applies every item in ONE unit of work and commits them together.
 //
 // THIS LEG IS A GENUINELY INDEPENDENT BODY, unlike the third leg of MetadataCAS
@@ -68,7 +132,7 @@ func (o *batchApplier) ApplyBatch(ctx context.Context, request publicops.ApplyBa
 	if err != nil {
 		return publicops.ApplyBatchResult{}, err
 	}
-	return RunTxResult(ctx, o.provider, func(ctx context.Context, uw UnitOfWork) (publicops.ApplyBatchResult, string, error) {
+	return RunTxResultWithin(ctx, o.provider, retryTxBudget(ctx), func(ctx context.Context, uw UnitOfWork) (publicops.ApplyBatchResult, string, error) {
 		run := &uowApplyRun{
 			plan:   plan,
 			uw:     uw,
@@ -192,6 +256,7 @@ func (r *uowApplyRun) applyCreate(ctx context.Context, index int, item *publicop
 	if err != nil {
 		return err
 	}
+	storageissueops.OverlayCreateTimestamps(issue, created.Issue)
 	if item.Key != "" {
 		r.keys[item.Key] = issue.ID
 		r.result.Keys[item.Key] = issue.ID
@@ -240,6 +305,7 @@ func (r *uowApplyRun) applyUpdate(ctx context.Context, index int, item *publicop
 		ExpectedAssignee:      item.ExpectedAssignee,
 		ForceClosePolicy:      item.ForceClosePolicy,
 		ForceAssigneeTransfer: item.ForceAssigneeTransfer,
+		ForceNotesOverwrite:   item.ForceNotesOverwrite,
 	}
 	if err := validateUpdateRequest(request); err != nil {
 		return itemErr(err)
@@ -281,6 +347,9 @@ func (r *uowApplyRun) runUpdate(ctx context.Context, request publicops.UpdateReq
 	}
 	if updatePreconditionsHold(request, before) {
 		if err := authorizeAssigneeTransfer(ctx, r.uw, before, request); err != nil {
+			return publicops.UpdateResult{}, err
+		}
+		if err := storageissueops.AuthorizeNotesOverwrite(before, request); err != nil {
 			return publicops.UpdateResult{}, err
 		}
 	}

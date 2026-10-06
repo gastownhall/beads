@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -78,7 +79,7 @@ func (s *Server) handleReopen(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, apigen.ReopenIssueResponse{
 		Issue:       *result.Issue,
 		AlreadyOpen: !result.Changed,
-		Revision:    result.Issue.RowVersion,
+		Revision:    types.RevisionToken(result.Issue.RowVersion),
 	})
 }
 

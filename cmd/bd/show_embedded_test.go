@@ -3,13 +3,18 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // bdShowRaw runs "bd show" with the given args and returns raw stdout.
@@ -59,6 +64,41 @@ func bdShowDetails(t *testing.T, bd, dir, id string) map[string]interface{} {
 	return m
 }
 
+// assertLiveRevisionToken holds a `revision` read off a `bd show --json` detail
+// view to the wire contract the token carries: a decimal STRING, never a JSON
+// number.
+//
+// THE TYPE IS ASSERTED BEFORE THE VALUE, and that ordering is the point. The
+// token spans the full int64 range, and a JSON number past 2^53 is rounded by
+// every double-based consumer — jq, JavaScript, Go's own `any` — so a guard
+// composed from one is refused against a row nothing else touched. Decoding a
+// detail view into `map[string]any` is exactly the shape that hides it, which is
+// why both callers here go through this helper instead of a local cast.
+//
+// "LIVE" IS THE SECOND HALF. A row the caller just created carries a freshly
+// minted token, so "0" — the migration-0054 backfill value — means the producer
+// published a member it never filled in: the one failure a legacy-zero row makes
+// otherwise indistinguishable from success.
+func assertLiveRevisionToken(t *testing.T, value any) {
+	t.Helper()
+	token, ok := value.(string)
+	if !ok {
+		t.Errorf("revision = %#v (%T), want the decimal string the wire contract declares", value, value)
+		return
+	}
+	parsed, err := types.ParseRevisionToken(token)
+	if err != nil {
+		t.Errorf("revision = %q, which is not a decimal token: %v", token, err)
+		return
+	}
+	if got := types.RevisionToken(parsed); got != token {
+		t.Errorf("revision = %q does not round-trip through the token codec (got %q back)", token, got)
+	}
+	if parsed == 0 {
+		t.Errorf("revision = %q on a row this test just created; the token was not read off the row", token)
+	}
+}
+
 // bdShowFail2 runs "bd show" expecting failure.
 func bdShowFail2(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
@@ -73,7 +113,16 @@ func bdShowFail2(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
-func TestEmbeddedShow(t *testing.T) {
+// TestEmbeddedShowBasicsAndJSON was split from TestEmbeddedShow (originally
+// ~193s, measured under --config=embedded) into 2 top-level tests over
+// disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once. show_current_fallback_to_last_touched
+// (in the second group) only requires that SOME earlier subtest in its own
+// group already created/touched an issue in the shared dir — it is placed
+// after several issue-creating subtests in that group, so the redone,
+// self-contained setup still satisfies it.
+func TestEmbeddedShowBasicsAndJSON(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -111,6 +160,28 @@ func TestEmbeddedShow(t *testing.T) {
 		bdShowFail2(t, bd, dir, "ts-nonexistent999")
 	})
 
+	// A watch on an id that does not exist used to print "Issue not found"
+	// and exit 0 on this route, watching nothing. It now exits 1 like plain
+	// `bd show <missing>`, and like the proxied route.
+	t.Run("show_watch_nonexistent_id_exits_1", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, bd, "show", "ts-nonexistent999", "--watch")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if ctx.Err() != nil {
+			t.Fatalf("bd show --watch on a missing id kept watching:\n%s", out)
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			t.Fatalf("bd show --watch on a missing id: err=%v, want exit 1\n%s", err, out)
+		}
+		if !strings.Contains(string(out), "ts-nonexistent999") {
+			t.Errorf("output does not name the missing id:\n%s", out)
+		}
+	})
+
 	t.Run("show_no_args", func(t *testing.T) {
 		bdShowFail2(t, bd, dir)
 	})
@@ -129,9 +200,7 @@ func TestEmbeddedShow(t *testing.T) {
 		if m["description"] != "A description" {
 			t.Errorf("expected description, got %v", m["description"])
 		}
-		if revision, ok := m["revision"].(float64); !ok || revision == 0 {
-			t.Errorf("expected non-zero revision, got %v", m["revision"])
-		}
+		assertLiveRevisionToken(t, m["revision"])
 	})
 
 	t.Run("show_json_includes_labels", func(t *testing.T) {
@@ -195,6 +264,26 @@ func TestEmbeddedShow(t *testing.T) {
 		}
 	})
 
+	// GH#5565: the direct/embedded twin of the proxied
+	// show_wisp_comments_default_count_only. A wisp's comments live in
+	// wisp_comments; the default count-only view must count them there.
+	t.Run("show_json_wisp_comment_count", func(t *testing.T) {
+		wisp := bdCreate(t, bd, dir, "Wisp w/comments", "--type", "task", "--ephemeral")
+		for i := 0; i < 2; i++ {
+			if out, err := bdRunWithFlockRetry(t, bd, dir, "comments", "add", wisp.ID, fmt.Sprintf("wisp comment %d", i)); err != nil {
+				t.Fatalf("bd comments add failed: %v\n%s", err, out)
+			}
+		}
+
+		m := bdShowDetails(t, bd, dir, wisp.ID)
+		if got, _ := m["comment_count"].(float64); got != 2 {
+			t.Errorf("comment_count: got %v, want 2", m["comment_count"])
+		}
+		if _, ok := m["comments"]; ok {
+			t.Errorf("comments slice should be absent by default")
+		}
+	})
+
 	// ===== --short =====
 
 	t.Run("show_short", func(t *testing.T) {
@@ -209,6 +298,16 @@ func TestEmbeddedShow(t *testing.T) {
 			t.Errorf("expected ID in short output: %s", out)
 		}
 	})
+}
+
+func TestEmbeddedShowDetailAndCurrent(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ts")
 
 	// ===== --long =====
 
