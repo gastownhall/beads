@@ -576,6 +576,8 @@ func e2eServeConfig(t *testing.T, s storage.DoltStorage, projectID, database str
 	fail("EdgeReader")
 	cfg.GraphCounter, err = s.GraphCounter()
 	fail("GraphCounter")
+	cfg.BatchGetter, err = s.BatchGetter()
+	fail("BatchGetter")
 	cfg.Relations, err = s.IssueRelations()
 	fail("IssueRelations")
 	cfg.Commenter, err = s.Commenter()
