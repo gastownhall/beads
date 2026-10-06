@@ -89,14 +89,14 @@ func TestTransportForSucceedsWithSidecarCAFile(t *testing.T) {
 	if snap.ProjectId != "proj-ca" {
 		t.Errorf("project_id = %q, want proj-ca", snap.ProjectId)
 	}
-	if !h.requestSeen {
+	if !h.sawRequest() {
 		t.Fatal("server never saw a request")
 	}
-	if h.sni != "localhost" {
-		t.Errorf("SNI = %q, want %q; TransportFor must not override ServerName", h.sni, "localhost")
+	if h.seenSNI() != "localhost" {
+		t.Errorf("SNI = %q, want %q; TransportFor must not override ServerName", h.seenSNI(), "localhost")
 	}
-	if wantHost := u.Host; h.host != wantHost {
-		t.Errorf("Host header = %q, want %q", h.host, wantHost)
+	if wantHost := u.Host; h.seenHost() != wantHost {
+		t.Errorf("Host header = %q, want %q", h.seenHost(), wantHost)
 	}
 }
 
@@ -164,7 +164,7 @@ func TestCAFileEnvDisagreeingWithSidecarRefuses(t *testing.T) {
 	if !strings.Contains(err.Error(), CAFileEnv) {
 		t.Errorf("error %q does not name %s", err, CAFileEnv)
 	}
-	if h.requestSeen {
+	if h.sawRequest() {
 		t.Error("server saw a request; a disagreement must be refused before dialing")
 	}
 }
@@ -190,7 +190,7 @@ func TestCAFileEnvNonMatchingHostKeepsSystemRoots(t *testing.T) {
 	if err == nil {
 		t.Fatal("Handshake succeeded against a private-CA server using only system roots; the non-matching env var must not have applied")
 	}
-	if h.requestSeen {
+	if h.sawRequest() {
 		t.Error("server saw a request; TLS verification against system roots should have failed before any HTTP request")
 	}
 }
@@ -208,7 +208,7 @@ func TestTransportForWrongCAFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("Handshake succeeded against a server signed by a CA other than the configured one")
 	}
-	if h.requestSeen {
+	if h.sawRequest() {
 		t.Error("server saw a request; the TLS handshake should have failed before any HTTP request")
 	}
 }
@@ -284,7 +284,7 @@ func TestDialWithOwnTransportHTTPClientAndConfiguredCARefuses(t *testing.T) {
 	if !strings.Contains(err.Error(), "ca_file") && !strings.Contains(err.Error(), CAFileEnv) {
 		t.Errorf("error %q does not name the CA setting at fault", err)
 	}
-	if h.requestSeen {
+	if h.sawRequest() {
 		t.Error("server saw a request; the refusal must fire before dialing")
 	}
 }
