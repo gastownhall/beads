@@ -123,6 +123,7 @@ go_test(
         "counts_missing_table_test.go",
         "counts_wisp_test.go",
         "create_batch_equivalence_test.go",
+        "create_batch_participation_generation_test.go",
         "create_issue_test.go",
         "cross_record_invariant_contract_test.go",
         "cross_table_id_collision_test.go",

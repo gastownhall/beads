@@ -135,6 +135,7 @@
 # regeneration. Add them to the generator or the durations file instead.
 
 15 1 TestBatchApplyContract
+15 1 TestCreateBatchParticipationGeneration
 15 1 TestEmbeddedClaimerClaimsAnUnassignedOpenIssueAndAnswersTheBareRow
 15 1 TestEmbeddedClaimerReclaimsAcrossSpellingWithoutWriting
 15 1 TestEmbeddedDependencyEditorWritesTheTargetIntoItsTypedColumn
@@ -316,6 +317,7 @@
 15 7 TestHistoryPresenceContract
 15 7 TestJournalContract
 15 7 TestLifecycleCloseReopenContract
+15 7 TestParticipationGenerationFixtureKitIsWired
 15 7 TestReclaimAnyReplicaOverride
 15 7 TestTreeWalkerContract
 15 7 TestWithPeerAuth_DivergedRemoteURLFailsClosed
@@ -540,5 +542,6 @@
 15 15 TestGetIssueCommentsPageEmbedded
 15 15 TestGetReadyWorkIncludeEphemeralExcludesNonReadyWisps
 15 15 TestIgnoredCursorHealIsIdempotent
+15 15 TestParticipationGenerationFence
 15 15 TestReadyWorkStatementBudget
 15 15 TestReleaserContract
