@@ -202,14 +202,16 @@ func (s *Server) createIssueRequest(w http.ResponseWriter, r *http.Request) (iss
 		Sender:             derefString(wire.Sender),
 		Ephemeral:          derefBool(wire.Ephemeral),
 		NoHistory:          derefBool(wire.NoHistory),
-		// CreatedBy is stamped from the authenticated actor, matching the local
-		// front door's semantics (cmd/bd/create.go sets issue.CreatedBy from
-		// getActorWithGit() before calling the same role): the role itself never
-		// stamps it, copying whatever the caller already put on types.Issue
-		// (internal/storage/issueops/public_create.go's publicCreateIssue). The
-		// wire's `actor` member is the caller-asserted identity this request
-		// carries, so it is the one value this server has to make that stamp
-		// from.
+		// CreatedBy is stamped from the caller-asserted actor, matching the
+		// local front door's semantics (cmd/bd/create.go sets issue.CreatedBy
+		// from getActorWithGit() before calling the same role): the role
+		// itself never stamps it, copying whatever the caller already put on
+		// types.Issue (internal/storage/issueops/public_create.go's
+		// publicCreateIssue). The wire's `actor` member is the caller-asserted
+		// identity this request carries — provenance for the audit trail, not
+		// authenticated identity, exactly as this file's own doc comment
+		// states above — so it is the one value this server has to make that
+		// stamp from.
 		CreatedBy: actor,
 	}
 	if wire.Priority != nil {
