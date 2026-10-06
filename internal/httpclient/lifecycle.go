@@ -44,7 +44,15 @@ var _ issueops.Lifecycle = (*httpLifecycle)(nil)
 //
 // The RESPONSE is the row as stored — the minted id, the defaulted status, the
 // persisted timestamps — so nothing here echoes the request back.
-func (l *httpLifecycle) Create(ctx context.Context, req issueops.CreateRequest) (issueops.CreateResult, error) {
+func (l *httpLifecycle) Create(ctx context.Context, req issueops.CreateRequest) (result issueops.CreateResult, err error) {
+	// Write-side parity with reads: decorates a bare *encode.RefusedError —
+	// however deeply createBody/refuseUnwirableCreateIssue/createEdge nested it
+	// inside an "Issue.%s:"/"dependencies[%d]:" prefix — into
+	// *InexpressibleError so errors.As(err, &unsupported) reaches
+	// *storage.ErrUnsupported, same as inexpressible does for a read role. The
+	// original composite message (including that prefix) is preserved in the
+	// decorated error's own text.
+	defer func() { err = l.store.inexpressible("Lifecycle.Create", err) }()
 	if err := requireActor(req.Actor); err != nil {
 		return issueops.CreateResult{}, err
 	}
@@ -307,7 +315,15 @@ func copyTime(value *time.Time) *time.Time {
 // patch member is an edit the caller believes landed; a dropped precondition is
 // a conditional write turned unconditional. Both are the failure class the
 // divergence ledger exists to make impossible.
-func (l *httpLifecycle) Update(ctx context.Context, req issueops.UpdateRequest) (issueops.UpdateResult, error) {
+func (l *httpLifecycle) Update(ctx context.Context, req issueops.UpdateRequest) (result issueops.UpdateResult, err error) {
+	// Write-side parity with reads: decorates a bare *encode.RefusedError —
+	// however deeply refuseUnwirableUpdateMembers/encodeIssuePatch/
+	// refuseExcludedPatchMembers nested it, and transitively covering
+	// claimOnlyUpdate's own refusals since every one of its returns flows back
+	// through this method's single call site — into *InexpressibleError so
+	// errors.As(err, &unsupported) reaches *storage.ErrUnsupported, same as
+	// inexpressible does for a read role.
+	defer func() { err = l.store.inexpressible("Lifecycle.Update", err) }()
 	if err := requireActor(req.Actor); err != nil {
 		return issueops.UpdateResult{}, err
 	}
@@ -407,7 +423,11 @@ func (l *httpLifecycle) Close(ctx context.Context, req issueops.CloseRequest) (i
 }
 
 // Reopen dials POST issues/{id}:reopen.
-func (l *httpLifecycle) Reopen(ctx context.Context, req issueops.ReopenRequest) (issueops.ReopenResult, error) {
+func (l *httpLifecycle) Reopen(ctx context.Context, req issueops.ReopenRequest) (result issueops.ReopenResult, err error) {
+	// Write-side parity with reads: decorates a bare *encode.RefusedError into
+	// *InexpressibleError so errors.As(err, &unsupported) reaches
+	// *storage.ErrUnsupported, same as inexpressible does for a read role.
+	defer func() { err = l.store.inexpressible("Lifecycle.Reopen", err) }()
 	if err := requireActor(req.Actor); err != nil {
 		return issueops.ReopenResult{}, err
 	}
@@ -579,6 +599,14 @@ func (l *httpLifecycle) claimOnlyUpdate(ctx context.Context, req issueops.Update
 			withLabels := *issue
 			withLabels.Labels = hydrated.Labels
 			withLabels.CreatedBy = hydrated.CreatedBy
+			// bridge.go's GetIssue already stitched details.Revision onto
+			// hydrated.RowVersion; the claim response itself (issueops.Claimer's
+			// bare-row contract) carries no revision at all, so without this the
+			// claim-only route would hand back RowVersion 0 where the direct,
+			// non-http route returns the real token -- and a caller that feeds
+			// that 0 into the next write's ExpectedVersion would get a spurious
+			// mismatch instead of the real one.
+			withLabels.RowVersion = hydrated.RowVersion
 			issue = &withLabels
 		}
 	}

@@ -1105,23 +1105,45 @@ func RunLifecycleResultsAreHydratedPostStateSnapshots(t *testing.T, ctx context.
 // implementation could answer a nonzero constant, or the PRE-write version,
 // and still clear it). Each step feeds the token the previous write answered
 // with straight into the next write's ExpectedVersion, with no intervening
-// read: Update's token guards Close, and Close's token guards Reopen. A guard
-// only passes if the token it was given equals the row's actual current
-// version at the instant the next write runs, so a wrong or stale token fails
-// closed — the next write refuses with ErrVersionMismatch — rather than
-// silently succeeding. Any one dropped member breaks the chain at that link.
+// read: the claim's token guards the Notes update, Update's token guards
+// Close, and Close's token guards Reopen. A guard only passes if the token it
+// was given equals the row's actual current version at the instant the next
+// write runs, so a wrong or stale token fails closed — the next write
+// refuses with ErrVersionMismatch — rather than silently succeeding. Any one
+// dropped member breaks the chain at that link.
+//
+// The chain's first link is a CLAIM-ONLY request (Claim: true, no Patch),
+// deliberately unguarded (UpdateRequest.Claim forbids combining Claim with
+// ExpectedVersion — see issueops.UpdateRequest's doc): a backend that answers
+// Lifecycle.Update's generic patch wire but special-cases a bare claim onto a
+// different internal path (the http leg's claimOnlyUpdate, which dials the
+// Claimer role directly rather than folding into updateIssue) could easily
+// populate RowVersion on one path and not the other; this exercises the
+// claim-only shape specifically, not just the Patch shape the rest of the
+// chain already covered.
 func RunLifecycleResultsCarryThePostWriteRowVersion(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
 	t.Helper()
 
 	id := fixture.IssuePrefix + "-lcr-rowversion"
 	lifecycleCloseReopenSeedIssue(t, ctx, fixture, id, types.StatusOpen, nil)
 
+	claimed, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{
+		Actor: "writer", IssueID: id, Claim: true,
+	})
+	if err != nil {
+		t.Fatalf("claim %s: %v", id, err)
+	}
+	if claimed.Issue == nil || claimed.Issue.RowVersion == 0 {
+		t.Fatalf("claim result RowVersion = %+v, want a nonzero post-write token", claimed.Issue)
+	}
+	claimVersion := claimed.Issue.RowVersion
+
 	updated, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{
-		Actor: "writer", IssueID: id,
+		Actor: "writer", IssueID: id, ExpectedVersion: &claimVersion,
 		Patch: publicops.IssuePatch{Notes: publicops.Field[string]{Set: true, Value: "rowversion chain"}},
 	})
 	if err != nil {
-		t.Fatalf("update %s: %v", id, err)
+		t.Fatalf("update %s guarded by the claim's own token: %v — the claim result's RowVersion was not the row's real current version", id, err)
 	}
 	if updated.Issue == nil || updated.Issue.RowVersion == 0 {
 		t.Fatalf("update result RowVersion = %+v, want a nonzero post-write token", updated.Issue)
