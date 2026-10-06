@@ -1671,6 +1671,10 @@ func TestPRRiskGateReachesFullServerDoltStorageSuite(t *testing.T) {
 	// and the server it expects isn't reachable -- this job's whole point is
 	// a real PASS/FAIL, not a hidden self-skip if its own setup regresses.
 	assertStepEnvValue(t, job, "Test", "BEADS_TEST_ENV_RUN_DOLT", "1")
+	// SubprocessRunner re-execs the downloaded binary, as
+	// dolt:dolt_server_full_test does, instead of a cold in-test
+	// `go test -tags integration -c` that outgrew its 2-minute budget.
+	assertStepEnvValue(t, job, "Test", "BEADS_TEST_SUBPROCESS_BINARY", "/tmp/dolt-conformance-test")
 
 	// test-server-storage itself is untouched: conformance keeps its own
 	// dedicated job and timeout budget; this is an additive sibling, not a

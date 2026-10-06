@@ -312,6 +312,7 @@ go_test(
         "reopen_category_test.go",
         "reopen_routing_test.go",
         "reopen_staging_test.go",
+        "restore_source_test.go",
         "retention_epoch_contract_test.go",
         "retry_test.go",
         "role_fixture_kit_test.go",
@@ -319,6 +320,7 @@ go_test(
         "route_logging_integration_test.go",
         "route_logging_test.go",
         "row_version_test.go",
+        "s3_minio_integration_test.go",
         "schema_cli_parity_integration_test.go",
         "schema_cli_parity_test.go",
         "schema_init_timeout_test.go",
@@ -397,6 +399,7 @@ go_test(
         "//internal/storage/depid",
         "//internal/storage/doltutil",
         "//internal/storage/domain",
+        "//internal/storage/embeddeddolt",
         "//internal/storage/issueops",
         "//internal/storage/journalscan",
         "//internal/storage/rowid",
@@ -541,9 +544,9 @@ sh_test(
 # but TestConformance, assigned by the committed manifest) against
 # dolt_race_off, with the jobs' BEADS_TEST_ENV_RUN_DOLT=1 and a local dolt
 # sql-server as in dolt_server_conformance_test. SubprocessRunner's helper
-# processes re-exec this same binary (BEADS_TEST_SUBPROCESS_BINARY) where the
-# job compiles the package again with `go test -tags integration -c`; go.mod
-# lets integration.ModuleRoot find the module root it no longer builds in.
+# processes re-exec this same binary (BEADS_TEST_SUBPROCESS_BINARY), as the
+# jobs re-exec their downloaded one; go.mod lets integration.ModuleRoot find
+# the module root it no longer builds in.
 # shard_count must stay equal to the manifest's shard total.
 #
 # Tags:

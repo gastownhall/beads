@@ -204,7 +204,7 @@ func permitted(path string) capabilityRow {
 //
 // The message leads with SERVER-GLOBAL STATE rather than with the filesystem,
 // because only the filesystem half is scheme-specific. `bd backup init` accepts
-// https/aws/gs as well as file:// (resolveDoltBackupURL) and the help text
+// https/aws/gs/s3 as well as file:// (resolveDoltBackupURL) and the help text
 // recommends DoltHub; for those a server-side push over the network with the
 // server's own credentials is a coherent thing to ask for, and "the destination
 // is on the server's disk" says nothing about it. What is true of every scheme
@@ -225,18 +225,25 @@ func backupRefusal(path string) capabilityRow {
 
 // backupRemoteSchemeTracking records the one part of the backup refusal that is
 // a question rather than a verdict, so refusing the family off-host does not
-// silently foreclose it. A remote-scheme destination (DoltHub, aws://, gs://)
-// needs no filesystem bd can see — the server pushes it over the network from
-// its own environment, which is exactly the credential story S4 has to settle
-// for `dolt push` on these same topologies. Whether a per-client backup remote
-// on a shared server is ever acceptable is the open part; the plumbing is not.
+// silently foreclose it. A remote-scheme destination (DoltHub, aws://, gs://,
+// s3://) needs no filesystem bd can see — the server pushes it over the network
+// from its own environment, which is exactly the credential story S4 has to
+// settle for `dolt push` on these same topologies. Whether a per-client backup
+// remote on a shared server is ever acceptable is the open part; the plumbing
+// is not.
 //
-// Note also that the DoltHub story is already half-built in DIRECT mode:
-// `bd backup init https://…` and `bd backup sync` work, but
-// `bd backup restore https://…` does not, because validateBackupRestoreDir
-// os.Stats its argument and rejects anything that is not an existing directory
-// on every topology. Pre-existing, not something this slice changed.
-const backupRemoteSchemeTracking = "open question, not a verdict: remote-scheme (DoltHub/aws/gs) backup on a server " +
+// Note that the DoltHub story is now whole in DIRECT mode: `bd backup init
+// https://…`, `bd backup sync` and `bd backup restore https://…` all work.
+// Restore was the half that did not, because validateBackupRestoreDir os.Stat'ed
+// its argument and rejected anything that was not an existing directory on
+// every topology; it now exempts the schemes versioncontrolops.IsBackupURL
+// recognizes and lets ResolveBackupSource be the single stat point. That says
+// nothing about the refusal above it, which is about WHERE the remote is
+// registered, not about which schemes bd can name. This S3-enablement layer is
+// narrower in PROXIED mode: that route executes restore through the installed
+// Dolt binary rather than the embedded engine upgraded here, so the command
+// refuses a URL before dispatch and continues to accept local directories.
+const backupRemoteSchemeTracking = "open question, not a verdict: remote-scheme (DoltHub/aws/gs/s3) backup on a server " +
 	"bd does not own — revisit with S4, which settles the same server-env credential question for dolt push"
 
 // proxyCapabilityRegistry is the whole path-keyed policy. Rows for permitted
@@ -271,8 +278,8 @@ var proxyCapabilityRegistry = []capabilityRow{
 	// OUTCOME is design — server-global state is not something plumbing on this
 	// side can make per-client, and a backup story for those shapes belongs to
 	// whoever runs the server. The remote-scheme case (DoltHub, aws://, gs://,
-	// which resolveDoltBackupURL accepts and backup.go recommends) is the part
-	// that is a question rather than a verdict, and it is not silently
+	// s3://, which resolveDoltBackupURL accepts and backup.go recommends) is the
+	// part that is a question rather than a verdict, and it is not silently
 	// foreclosed: see backupRemoteSchemeTracking, which every row below carries.
 	backupRefusal("backup").asParentGroup(),
 	backupRefusal("backup init"),
