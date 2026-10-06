@@ -464,14 +464,17 @@ func beginBorrowedTx(ctx context.Context, conn *sql.Conn, branch string) (*sql.T
 	return tx, nil
 }
 
-// beginTxOnConn checks a connection out to branch and begins a transaction on
-// it. Only the fallback path uses it: the fallback owns a dedicated
+// beginTxOnConn puts a connection on branch and begins a transaction on it.
+// Only the fallback path uses it: the fallback owns a dedicated
 // single-connection pool, so checking its session out is safe. Every Dolt SQL
-// session has its own active branch, so the explicit checkout is required on
-// a fresh dial.
+// session has its own active branch, and a fresh dial lands on the database's
+// default branch — usually already the requested one. DOLT_CHECKOUT is issued
+// only when the session is on a different branch: a capped operator user may
+// be granted EXECUTE on dolt_add/dolt_commit alone, and an unconditional no-op
+// checkout would be denied and fail every wisp write on the fallback path.
 func beginTxOnConn(ctx context.Context, conn *sql.Conn, branch string) (*sql.Tx, error) {
-	if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", branch); err != nil {
-		return nil, fmt.Errorf("failed to checkout ignored tx branch %s: %w", branch, err)
+	if err := checkoutBranchIfNeeded(ctx, conn, branch); err != nil {
+		return nil, fmt.Errorf("failed to put ignored tx conn on branch %s: %w", branch, err)
 	}
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {

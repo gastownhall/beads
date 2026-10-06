@@ -1092,6 +1092,25 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 // and a single pinned *sql.Conn (see recomputeAllBlocked/recomputeBlockedTx).
 type execer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// checkoutBranchIfNeeded puts conn's session on branch, issuing DOLT_CHECKOUT
+// only when the session is on a different branch. A fresh session usually
+// already sits on the requested branch, and a least-privilege operator user
+// (EXECUTE on dolt_add/dolt_commit alone) is denied even a no-op checkout. conn
+// must be a single session: on a multi-connection *sql.DB the read and the
+// checkout could land on different connections.
+func checkoutBranchIfNeeded(ctx context.Context, conn execer, branch string) error {
+	var active string
+	if err := conn.QueryRowContext(ctx, "SELECT active_branch()").Scan(&active); err != nil {
+		return fmt.Errorf("read active branch: %w", err)
+	}
+	if active == branch {
+		return nil
+	}
+	_, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", branch)
+	return err
 }
 
 // pinStoreBranch reproduces the store's real active branch on conn. Branch
@@ -1121,18 +1140,22 @@ type execer interface {
 // in practice rather than by construction. The s.branch fallback does not
 // close the gap either: it fires only when the query errors, not when it
 // succeeds with another connection's answer.
+//
+// conn must be a single session (a *sql.Conn, or a *sql.DB capped at one open
+// connection that keeps it idle-cached): the branch read and any checkout
+// must land on the same connection.
 func (s *DoltStore) pinStoreBranch(ctx context.Context, conn execer) error {
 	var branch string
 	if scanErr := s.db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&branch); scanErr == nil {
 		if branch != "" {
-			if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", branch); err != nil {
+			if err := checkoutBranchIfNeeded(ctx, conn, branch); err != nil {
 				return fmt.Errorf("checkout active branch %q: %w", branch, err)
 			}
 		}
 	} else if s.branch != "" {
 		// Fall back to the store's recorded branch rather than failing the
 		// whole call outright.
-		if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", s.branch); err != nil {
+		if err := checkoutBranchIfNeeded(ctx, conn, s.branch); err != nil {
 			return fmt.Errorf("checkout fallback branch %q: %w", s.branch, err)
 		}
 	}
