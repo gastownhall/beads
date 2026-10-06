@@ -85,16 +85,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `.githooks` markers and `uv.lock` and leaves any other drifted file as it was.
 
 ### Fixed
-- **Server-mode config writes commit again — `bd dolt pull` no longer needs a
-  manual flush.** `bd remember`, `bd forget`, and `bd config set|unset|set-many`
-  in server mode left the `config` table dirty forever: `maybeAutoCommit` skips
-  SQL-server modes entirely, and generic `Commit()` excludes config
-  ([#2455](https://github.com/gastownhall/beads/issues/2455)), so the next
-  `bd dolt pull` failed with `cannot merge with uncommitted changes` until the
-  operator ran raw `DOLT_ADD('config')`/`DOLT_COMMIT` SQL. Config writes now
-  commit immediately via the new scoped `CommitConfigOnly` (stages ONLY the
-  config table — concurrent operations' dirty tables are never swept),
-  restoring the v1.0.1 behavior from
+- **Server-mode config writes are committed again.** On the direct SQL-server
+  route, `bd remember`, `bd forget` and `bd config set|unset|set-many` wrote
+  the `config` table but never created a Dolt commit: `maybeAutoCommit`
+  returns early off the embedded route, and plain `Commit()` excludes config
+  (GH#2455). The rows sat in the working set, where `bd dolt push` does not
+  carry them, and a dirty internal key such as `status.custom` made the next
+  `bd dolt pull` refuse until an explicit `bd dolt commit`. With
+  `dolt.auto-commit` on (the default) these writes now commit right away
+  through the scoped `CommitConfigOnly`, which stages only `config` and the
+  lookup tables projected from it, so a concurrent operation's other dirty
+  tables are never swept; `batch` and `off` defer them to `bd dolt commit`
+  like every other write. `bd remember` and `bd forget` commit only user
+  `kv.*` rows, and refuse with the keys named when an internal config key is
+  dirty. This restores the v1.0.1 behavior from
   [#3052](https://github.com/gastownhall/beads/pull/3052)
   ([#4078](https://github.com/gastownhall/beads/issues/4078)).
 
