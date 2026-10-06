@@ -220,12 +220,14 @@ type DepAddItem struct {
 	// not express. One spelling, and it is this one.
 	Metadata string
 	// HasSpawner marks a DepWaitsFor edge whose caller explicitly named a
-	// spawner (bd create --graph's edges[].spawner_key/spawner_id, which the
-	// CLI's own plan validator already forces to equal this edge's own
-	// Target). Only then does the role stamp Metadata's spawner_id from the
-	// resolved Target, once every id in the batch exists (see
-	// StampWaitsForSpawnerID) — a plan-local spawner key cannot be resolved
-	// any earlier than that.
+	// spawner: a graph plan's edges[].spawner_key/spawner_id, which bd create
+	// --graph's plan validator forces to equal the edge's own Target. Its
+	// producer is an embedder lowering such a plan onto this role (gc's
+	// ApplyGraphPlan mapping, on BatchApplier below); bd create --graph writes
+	// its edges without this role and does not set it. Only when it is set
+	// does the role stamp Metadata's spawner_id from the resolved Target, once
+	// every id in the batch exists (see StampWaitsForSpawnerID) — a plan-local
+	// spawner key cannot be resolved any earlier than that.
 	//
 	// AN EDGE WITH NO NAMED SPAWNER MUST KEEP ITS GATE-ONLY METADATA. Stamping
 	// one in regardless of this flag — the 2026-10 Opus-review HIGH-2 finding
@@ -236,9 +238,15 @@ type DepAddItem struct {
 	// Type.
 	HasSpawner bool
 	// ThreadID carries conversation-threading metadata (e.g. a replies-to
-	// edge's originating thread) onto the created dependency row. Empty means
-	// the edge carries none; it is a plain column, not part of Metadata's
-	// type-specific blob.
+	// edge's originating thread) onto the dependency row. Empty means the edge
+	// carries none; it is a plain column, not part of Metadata's type-specific
+	// blob, and one longer than the column holds is ErrValidation.
+	//
+	// A RE-ADD OF AN EDGE THAT ALREADY EXISTS WITH THE SAME TYPE CARRIES IT
+	// TOO. A thread the stored row does not already carry replaces it, and
+	// versions the source on the same terms as a Metadata change; an empty
+	// ThreadID keeps the stored thread rather than clearing it, so a re-apply
+	// that names none cannot erase one.
 	ThreadID string
 }
 

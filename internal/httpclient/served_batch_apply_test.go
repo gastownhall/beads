@@ -269,6 +269,21 @@ func TestServedBatchApplyCarriesThreadIDOntoTheStoredEdge(t *testing.T) {
 	conformance.RunBatchApplyCarriesThreadIDOntoTheStoredEdge(t, t.Context(), newServedBatchApplyFixture(t, "hba28"))
 }
 
+// TestServedBatchApplyCarriesThreadIDOntoAnExistingEdge wires the re-add arm of
+// the same round trip: a thread named on a dep_add whose edge already exists
+// must cross the wire and reach the stored row, not stop at the server's
+// change-free check.
+func TestServedBatchApplyCarriesThreadIDOntoAnExistingEdge(t *testing.T) {
+	conformance.RunBatchApplyCarriesThreadIDOntoAnExistingEdge(t, t.Context(), newServedBatchApplyFixture(t, "hba29"))
+}
+
+// TestServedBatchApplyRefusesAThreadIDLongerThanItsColumn wires the thread_id
+// bound onto the http leg, where the server's decode refuses it before the
+// role's plan would; both have to arrive as the same ErrValidation.
+func TestServedBatchApplyRefusesAThreadIDLongerThanItsColumn(t *testing.T) {
+	conformance.RunBatchApplyRefusesAThreadIDLongerThanItsColumn(t, t.Context(), newServedBatchApplyFixture(t, "hba2a"))
+}
+
 // TestServedBatchApplyRefusesAMetadataRefWithoutNamingTheKey is the running pin
 // beside the park above: the same request, driven end to end, asserting
 // everything the contract asserts EXCEPT the key inside the member — the

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -1524,11 +1525,11 @@ func RunBatchApplyNormalizesTheWaitsForGate(t *testing.T, ctx context.Context, f
 // RunBatchApplyStampsSpawnerIDOnlyWhenNamed is the S11 review fix-up
 // regression for HIGH-2: a waits-for DepAddItem must only acquire
 // metadata.spawner_id when the caller explicitly named a spawner
-// (HasSpawner=true, which bd create --graph sets when the plan declares
-// edges[].spawner_key/spawner_id). An edge with no named spawner must keep
-// its gate-only metadata untouched — stamping it unconditionally from the
-// resolved target caused unnecessary rewrite/version churn when gc
-// re-applies the same edge (see CHANGELOG.md).
+// (HasSpawner=true, which an embedder lowering a graph plan's
+// edges[].spawner_key/spawner_id onto this role sets). An edge with no named
+// spawner must keep its gate-only metadata untouched — stamping it
+// unconditionally from the resolved target would cause a spurious rewrite and
+// version churn each time gc re-applies the same edge.
 func RunBatchApplyStampsSpawnerIDOnlyWhenNamed(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
 	t.Helper()
 	spawner := fixture.IssuePrefix + "-spawner-named"
@@ -1623,6 +1624,109 @@ func RunBatchApplyCarriesThreadIDOntoTheStoredEdge(t *testing.T, ctx context.Con
 	})
 	if got := batchApplyEdgeThreadID(t, ctx, fixture, source2, target2); got != "" {
 		t.Errorf("an edge naming no thread must not stamp thread_id, got %q", got)
+	}
+}
+
+// RunBatchApplyCarriesThreadIDOntoAnExistingEdge pins DepAddItem.ThreadID on
+// the re-add arm: a dep_add naming an edge that already exists with the same
+// type is the idempotent re-add, and a thread it names still has to reach the
+// stored row. That arm once compared and rewrote metadata alone, so a
+// thread-only re-add was a silent no-op and a re-add moving both landed the
+// metadata and dropped the thread — on the very path gc re-applies its plans
+// through.
+//
+// The steps run on ONE edge, each from the state the step before it left: a
+// thread-only re-add puts a thread on an edge that had none, a re-add moving
+// the gate and the thread lands both, and a re-add naming no thread keeps the
+// stored one, because an empty ThreadID names no thread rather than asking for
+// none.
+func RunBatchApplyCarriesThreadIDOntoAnExistingEdge(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	source := fixture.IssuePrefix + "-rethread-source"
+	spawner := fixture.IssuePrefix + "-rethread-spawner"
+	batchApplySeedIssue(t, ctx, fixture, source, types.StatusOpen)
+	batchApplySeedIssue(t, ctx, fixture, spawner, types.StatusOpen)
+
+	add := func(gate, thread string) {
+		t.Helper()
+		batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+			Actor: "apply-writer",
+			Items: []publicops.ApplyItem{
+				{Kind: publicops.ItemDepAdd, DepAdd: &publicops.DepAddItem{
+					Source: publicops.Ref{ID: source}, Target: publicops.Ref{ID: spawner},
+					Type: publicops.DepWaitsFor, Metadata: `{"gate":"` + gate + `"}`, ThreadID: thread,
+				}},
+			},
+		})
+	}
+	assertEdge := func(step, wantGate, wantThread string) {
+		t.Helper()
+		assertBatchApplyEdgeCount(t, ctx, fixture, source, spawner, 1)
+		stored := batchApplyEdgeMetadata(t, ctx, fixture, source, spawner)
+		var meta types.WaitsForMeta
+		if err := json.Unmarshal([]byte(stored), &meta); err != nil {
+			t.Fatalf("%s: stored waits-for metadata %q is not a gate object: %v", step, stored, err)
+		}
+		if meta.Gate != wantGate {
+			t.Errorf("%s: stored gate = %q (metadata %q), want %q", step, meta.Gate, stored, wantGate)
+		}
+		if got := batchApplyEdgeThreadID(t, ctx, fixture, source, spawner); got != wantThread {
+			t.Errorf("%s: stored edge thread_id = %q, want %q", step, got, wantThread)
+		}
+	}
+
+	add(types.WaitsForAllChildren, "")
+	assertEdge("the first add, naming no thread", types.WaitsForAllChildren, "")
+
+	add(types.WaitsForAllChildren, "thread-conv-1")
+	assertEdge("a re-add moving the thread alone", types.WaitsForAllChildren, "thread-conv-1")
+
+	add(types.WaitsForAnyChildren, "thread-conv-2")
+	assertEdge("a re-add moving the gate and the thread", types.WaitsForAnyChildren, "thread-conv-2")
+
+	add(types.WaitsForAnyChildren, "")
+	assertEdge("a re-add naming no thread", types.WaitsForAnyChildren, "thread-conv-2")
+}
+
+// RunBatchApplyRefusesAThreadIDLongerThanItsColumn pins the bound on
+// DepAddItem.ThreadID: one longer than the thread_id column holds is
+// ErrValidation and writes no edge, on every leg alike. The http leg's decode
+// refused it as a typed 400 while the local legs carried it to the write, where
+// it failed as whatever storage error the column raised, mid-transaction — two
+// error classes for one request. The shared plan bounds it now, before any
+// database work.
+//
+// The positive half is the same edge with a thread exactly at the bound, which
+// lands whole; without it, a role refusing every thread id satisfies the
+// refusal.
+func RunBatchApplyRefusesAThreadIDLongerThanItsColumn(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	source := fixture.IssuePrefix + "-longthread-source"
+	target := fixture.IssuePrefix + "-longthread-target"
+	batchApplySeedIssue(t, ctx, fixture, source, types.StatusOpen)
+	batchApplySeedIssue(t, ctx, fixture, target, types.StatusOpen)
+
+	request := func(thread string) publicops.ApplyBatchRequest {
+		return publicops.ApplyBatchRequest{
+			Actor: "apply-writer",
+			Items: []publicops.ApplyItem{
+				{Kind: publicops.ItemDepAdd, DepAdd: &publicops.DepAddItem{
+					Source: publicops.Ref{ID: source}, Target: publicops.Ref{ID: target},
+					Type: publicops.DepBlocks, ThreadID: thread,
+				}},
+			},
+		}
+	}
+	tooLong := strings.Repeat("t", types.MaxFieldLen+1)
+	if _, err := fixture.BatchApplier.ApplyBatch(ctx, request(tooLong)); !errors.Is(err, publicops.ErrValidation) {
+		t.Fatalf("a %d-character thread_id: error = %v, want ErrValidation", len(tooLong), err)
+	}
+	assertBatchApplyEdgeCount(t, ctx, fixture, source, target, 0)
+
+	atBound := strings.Repeat("t", types.MaxFieldLen)
+	batchApplyMust(t, ctx, fixture, request(atBound))
+	if got := batchApplyEdgeThreadID(t, ctx, fixture, source, target); got != atBound {
+		t.Errorf("a %d-character thread_id stored as %d characters, want it whole", len(atBound), len(got))
 	}
 }
 

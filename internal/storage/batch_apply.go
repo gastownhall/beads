@@ -243,8 +243,11 @@ func planApplyBatchClose(item *issueops.CloseItem, index int, keyIndex map[strin
 	return nil
 }
 
-// planApplyBatchDepAdd checks an edge's endpoints and type and normalizes its
-// gate metadata.
+// planApplyBatchDepAdd checks an edge's endpoints, type and thread id and
+// normalizes its gate metadata. The thread id gets its column's bound here, the
+// one the http leg's decode already applies, so an over-long one is
+// ErrValidation before any database work on every leg rather than a storage
+// error mid-transaction on the local ones.
 //
 // IT RECORDS NOTHING AS TOUCHED, and that is a decision rather than an
 // oversight. The ExpectedVersion rule above refuses a guard on a row this
@@ -268,6 +271,9 @@ func planApplyBatchDepAdd(item *issueops.DepAddItem, index int, keyIndex map[str
 	if !item.Type.IsValid() {
 		return fmt.Errorf("%w: apply batch item %d requires a dependency type (max %d chars)",
 			issueops.ErrValidation, index, types.MaxDependencyTypeLen)
+	}
+	if err := types.CheckFieldLen("dependency thread_id", item.ThreadID); err != nil {
+		return fmt.Errorf("%w: apply batch item %d: %v", issueops.ErrValidation, index, err)
 	}
 	metadata, err := normalizeApplyEdgeMetadata(item.Type, item.Metadata)
 	if err != nil {

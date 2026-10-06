@@ -110,12 +110,12 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 	table := pickDepTable(opts.UseWispsTable)
 
 	var existingType string
-	var existingMetadataNS sql.NullString
+	var existingMetadataNS, existingThreadNS sql.NullString
 	err := r.runner.QueryRowContext(ctx,
 		//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
-		fmt.Sprintf("SELECT type, metadata FROM %s WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
+		fmt.Sprintf("SELECT type, metadata, thread_id FROM %s WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
 		dep.IssueID, dep.DependsOnID,
-	).Scan(&existingType, &existingMetadataNS)
+	).Scan(&existingType, &existingMetadataNS, &existingThreadNS)
 	switch {
 	case err == nil:
 		existingMetadata := existingMetadataNS.String
@@ -123,28 +123,35 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 			existingMetadata = "{}"
 		}
 		if existingType == string(dep.Type) {
-			if issueops.DependencyMetadataEqual(existingMetadata, metadata) {
-				// Same type, same metadata: a change-free write. Nothing is
-				// written and nothing is journaled (#5898 R3).
+			// A re-add naming a thread the row does not carry moves it; one
+			// naming none keeps the stored thread (the issueops twin's rule).
+			thread, threadChanged := issueops.ReAddedDependencyThread(existingThreadNS, dep.ThreadID)
+			if !threadChanged && issueops.DependencyMetadataEqual(existingMetadata, metadata) {
+				// Same type, same metadata, same thread: a change-free write.
+				// Nothing is written and nothing is journaled (#5898 R3).
 				return nil
 			}
 			//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
 			if _, err := r.runner.ExecContext(ctx,
-				fmt.Sprintf("UPDATE %s SET metadata = ? WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
-				metadata, dep.IssueID, dep.DependsOnID,
+				fmt.Sprintf("UPDATE %s SET metadata = ?, thread_id = ? WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
+				metadata, thread, dep.IssueID, dep.DependsOnID,
 			); err != nil {
 				return fmt.Errorf("db: DependencySQLRepository.Insert: refresh metadata: %w", err)
 			}
-			// A same-type add refreshes edge metadata. It is an observable graph
-			// mutation, so emit the complete replacement edge for replay.
+			// A same-type add refreshes the edge's metadata or thread. It is an
+			// observable graph mutation, so journal the replacement edge for
+			// replay. EventDep has no thread member, so a thread-only change
+			// journals the same payload as the original add; the source's
+			// version snapshot is what records the new thread.
 			if err := issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
 				return err
 			}
-			// The metadata genuinely changed, so this re-add is a real
-			// durable-state mutation of the source issue and mints on the
-			// same terms as a new edge (#5898 leg 2: "a same-type re-add
-			// whose metadata actually changed mints EXACTLY ONE version
-			// carrying the new state").
+			// The metadata or thread genuinely changed, so this re-add is a
+			// real durable-state mutation of the source issue (its version
+			// snapshot carries each edge's thread_id) and mints on the same
+			// terms as a new edge (#5898 leg 2: "a same-type re-add whose
+			// metadata actually changed mints EXACTLY ONE version carrying the
+			// new state").
 			return issueops.RecordVersionInTx(ctx, r.runner, dep.IssueID, actor)
 		}
 		return &domain.DependencyTypeConflictError{

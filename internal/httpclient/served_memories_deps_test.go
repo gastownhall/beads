@@ -416,7 +416,7 @@ func TestServedDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate(t *testi
 	conformance.RunDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate(t, t.Context(), newServedDependencyEditorFixture(t, "hd38"))
 }
 
-// The two same-type re-add cases, newly wired: both drive the re-add through
+// The same-type re-add cases, newly wired: each drives the re-add through
 // fixture.AddDependency (the reference store's own raw path, same reason
 // ClosedChildAddSatisfiesAnAnyChildrenGate reaches past the role above) and
 // need dual-write version history on, which the fixture now wires onto the
@@ -428,4 +428,8 @@ func TestServedDependencyEditorSameTypeReAddWithChangedMetadataMintsOneVersion(t
 
 func TestServedDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp(t *testing.T) {
 	conformance.RunDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp(t, t.Context(), newServedDependencyEditorFixture(t, "hd40"))
+}
+
+func TestServedDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion(t *testing.T) {
+	conformance.RunDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion(t, t.Context(), newServedDependencyEditorFixture(t, "hd41"))
 }
