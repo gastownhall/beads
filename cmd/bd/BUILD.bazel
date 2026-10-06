@@ -583,6 +583,8 @@ go_test(
         "compact_tier2_embedded_test.go",
         "completions_test.go",
         "config_apply_test.go",
+        "config_commit_server_integration_test.go",
+        "config_commit_write_test.go",
         "config_drift_test.go",
         "config_drift_windows_test.go",
         "config_embedded_test.go",
