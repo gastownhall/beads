@@ -1,6 +1,7 @@
 package dolt
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -152,5 +153,90 @@ func TestCommitExcludesConfigOnlyWorkingSet(t *testing.T) {
 	}
 	if !dirtyTables(t, store)["config"] {
 		t.Fatal("config table no longer dirty after generic Commit()")
+	}
+}
+
+// A memory write commits its own kv.* rows, and with them any other user kv.*
+// rows already dirty: those are this clone's data, the same rows the pre-pull
+// auto-commit would commit.
+func TestCommitConfigUserKVOnlyCommitsUserKVRows(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := store.CommitWithConfig(ctx, "test: baseline"); err != nil {
+		t.Fatalf("baseline commit: %v", err)
+	}
+	before, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("get baseline commit: %v", err)
+	}
+
+	if err := store.SetConfig(ctx, "kv.memory.gh4078-a", "memory a"); err != nil {
+		t.Fatalf("SetConfig memory: %v", err)
+	}
+	if err := store.SetConfig(ctx, "kv.gh4078-flag", "user kv"); err != nil {
+		t.Fatalf("SetConfig kv: %v", err)
+	}
+
+	if err := store.CommitConfigUserKVOnly(ctx, "test: memory commit"); err != nil {
+		t.Fatalf("CommitConfigUserKVOnly: %v", err)
+	}
+
+	after, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("get commit after CommitConfigUserKVOnly: %v", err)
+	}
+	if after == before {
+		t.Fatalf("CommitConfigUserKVOnly created no commit: HEAD still %s", before)
+	}
+	if dirtyTables(t, store)["config"] {
+		t.Fatal("config table still dirty after CommitConfigUserKVOnly")
+	}
+}
+
+// A dirty internal config key is not a memory write's to commit: the scoped
+// commit refuses, names the key, and leaves HEAD and the working set alone.
+func TestCommitConfigUserKVOnlyRefusesInternalConfigKeys(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := store.CommitWithConfig(ctx, "test: baseline"); err != nil {
+		t.Fatalf("baseline commit: %v", err)
+	}
+	before, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("get baseline commit: %v", err)
+	}
+
+	if err := store.SetConfig(ctx, "kv.memory.gh4078-b", "memory b"); err != nil {
+		t.Fatalf("SetConfig memory: %v", err)
+	}
+	if err := store.SetConfig(ctx, "test_gh4078_internal", "concurrent writer"); err != nil {
+		t.Fatalf("SetConfig internal: %v", err)
+	}
+
+	err = store.CommitConfigUserKVOnly(ctx, "test: memory commit")
+	if err == nil {
+		t.Fatal("CommitConfigUserKVOnly committed over a dirty internal config key")
+	}
+	if !strings.Contains(err.Error(), "test_gh4078_internal") {
+		t.Fatalf("error = %q, want it to name the internal key", err)
+	}
+
+	after, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("get commit after refusal: %v", err)
+	}
+	if after != before {
+		t.Fatalf("HEAD moved from %s to %s on a refused commit", before, after)
+	}
+	if !dirtyTables(t, store)["config"] {
+		t.Fatal("config table no longer dirty after a refused commit")
 	}
 }

@@ -206,6 +206,12 @@ func (s *EmbeddedDoltStore) CommitConfigOnly(ctx context.Context, message string
 	return s.Commit(ctx, message)
 }
 
+// CommitConfigUserKVOnly aliases Commit for the reason CommitConfigOnly does:
+// with no concurrent writer, there is no other writer's config row to screen out.
+func (s *EmbeddedDoltStore) CommitConfigUserKVOnly(ctx context.Context, message string) error {
+	return s.Commit(ctx, message)
+}
+
 func (s *EmbeddedDoltStore) AddRemote(ctx context.Context, name, url string) error {
 	return s.AddRemoteWithRef(ctx, name, url, "")
 }
