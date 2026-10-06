@@ -597,8 +597,8 @@ else
         pass "Wisp dependency skipped (old binary could not block a wisp on a task)"
     fi
 
-    # Upgrade.
-    cand_init 2>/dev/null || true
+    # Upgrade: consent + candidate init
+    cand_upgrade
 
     # 1. The wisp survived the 0054-0066 + ignored 0012-0025 replay. --all
     #    because the default listing hides closed wisps.

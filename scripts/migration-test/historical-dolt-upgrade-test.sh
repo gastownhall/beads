@@ -1703,10 +1703,12 @@ run_wisp_plane_upgrade() {
 
     # First candidate touch runs the full MigrateUp under the standard per-op
     # timeout. A dirty-table refusal or a migration error here is the headline
-    # failure class for this lane.
+    # failure class for this lane. Since the migration-consent gate an ordinary
+    # command refuses an un-migrated database, so the explicit schema migration
+    # is that first touch (as in run_embedded_dolt_upgrade); the open follows.
+    migrate_schema_current "$version" wisp-first
     run_in_workspace "$candidate" list --json -n 0 --all > "$workspace/wisp-first-open.json" ||
         die "$version: candidate could not open the seeded wisp workspace"
-    migrate_schema_current "$version" wisp-first
     snapshot_wisp_plane "$version" after
 
     # Read-only assertions first: the events count must be observed before any
@@ -1778,8 +1780,10 @@ run_dirty_tracked_wisp_scenario() {
     before=$(oracle_count "$version" 'SELECT COUNT(*) FROM wisps')
     output="$workspace/dirty-tracked-open.out"
     # run_in_workspace already wraps every call in `timeout`, so a hard-lock
-    # surfaces as a timeout kill rather than hanging the job.
-    if run_in_workspace "$candidate" list --json -n 0 --all > "$output" 2>&1; then
+    # surfaces as a timeout kill rather than hanging the job. The open is the
+    # consented `migrate schema`: an ordinary command now stops at the
+    # migration-consent gate before MigrateUp ever reaches the dirty tables.
+    if run_in_workspace "$candidate" migrate schema > "$output" 2>&1; then
         printf '  · candidate accepted the dirty tracked wisp tables\n'
     else
         grep -Fq 'dirty tables' "$output" ||
