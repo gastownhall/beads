@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,11 @@ type refsDriver struct {
 	history  []historyRow
 	counts   map[string]int
 	maxIDs   int
+	// failHistory fails the history read with that 1-based number with
+	// historyErr, after its rows when failAtRowsErr is set.
+	failHistory   int
+	historyErr    error
+	failAtRowsErr bool
 }
 
 func (d *refsDriver) Open(string) (driver.Conn, error) { return &refsConn{d}, nil }
@@ -41,15 +47,19 @@ func (c *refsConn) QueryContext(_ context.Context, query string, args []driver.N
 	switch {
 	case strings.Contains(query, "dolt_log"):
 		d.counts["dolt_log"]++
-		return &refsRows{[]string{"commit_hash", "date"}, d.commits}, nil
+		return &refsRows{columns: []string{"commit_hash", "date"}, values: d.commits}, nil
 	case strings.Contains(query, "AS OF"):
 		d.counts["as_of"]++
 		if d.asOfErr != nil {
 			return nil, d.asOfErr
 		}
-		return &refsRows{[]string{"id", "external_ref"}, d.atCommit}, nil
+		return &refsRows{columns: []string{"id", "external_ref"}, values: d.atCommit}, nil
 	case strings.Contains(query, "dolt_history_issues"):
 		d.counts["history"]++
+		failing := d.counts["history"] == d.failHistory
+		if failing && !d.failAtRowsErr {
+			return nil, d.historyErr
+		}
 		d.maxIDs = max(d.maxIDs, len(args)-1)
 		asked := make(map[string]bool, len(args))
 		for _, a := range args[:len(args)-1] {
@@ -62,7 +72,11 @@ func (c *refsConn) QueryContext(_ context.Context, query string, args []driver.N
 				out = append(out, []driver.Value{r.id, r.ref, r.date})
 			}
 		}
-		return &refsRows{[]string{"id", "external_ref", "commit_date"}, out}, nil
+		rows := &refsRows{columns: []string{"id", "external_ref", "commit_date"}, values: out}
+		if failing {
+			rows.err = d.historyErr
+		}
+		return rows, nil
 	}
 	return nil, fmt.Errorf("unexpected query: %s", query)
 }
@@ -70,12 +84,16 @@ func (c *refsConn) QueryContext(_ context.Context, query string, args []driver.N
 type refsRows struct {
 	columns []string
 	values  [][]driver.Value
+	err     error
 }
 
 func (r *refsRows) Columns() []string { return r.columns }
 func (r *refsRows) Close() error      { return nil }
 func (r *refsRows) Next(dest []driver.Value) error {
 	if len(r.values) == 0 {
+		if r.err != nil {
+			return r.err
+		}
 		return io.EOF
 	}
 	copy(dest, r.values[0])
@@ -172,15 +190,50 @@ func TestPreviousExternalRefsInTx(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openRefsDB(t, tc.d)
-			got, err := PreviousExternalRefsInTx(context.Background(), db, tc.ids, refsAsOf, queryBatchSize)
-			if err != nil {
-				t.Fatalf("PreviousExternalRefsInTx: %v", err)
+			got, unanswered, err := PreviousExternalRefsInTx(context.Background(), db, tc.ids, refsAsOf, queryBatchSize)
+			if err != nil || unanswered != nil {
+				t.Fatalf("PreviousExternalRefsInTx: %v, unanswered %v", err, unanswered)
 			}
 			if !maps.Equal(got, tc.want) {
 				t.Errorf("refs = %v, want %v", got, tc.want)
 			}
 			if !maps.Equal(tc.d.counts, tc.queries) {
 				t.Errorf("queries = %v, want %v", tc.d.counts, tc.queries)
+			}
+		})
+	}
+}
+
+func TestPreviousExternalRefsInTxHistoryReadFails(t *testing.T) {
+	for _, atRowsErr := range []bool{false, true} {
+		t.Run(fmt.Sprintf("at_rows_err=%v", atRowsErr), func(t *testing.T) {
+			readErr := errors.New("i/o timeout")
+			d := &refsDriver{
+				commits:  [][]driver.Value{commitRow("abcdef0123456789abcdef0123456789", refsNewer)},
+				atCommit: [][]driver.Value{{"bd-at", "at-commit"}},
+				history: []historyRow{
+					{"bd-at", "at-commit", refsNewer},
+					{"bd-1", "one", refsOlder},
+					{"bd-3", "three", refsOlder},
+					{"bd-5", "five", refsOlder},
+				},
+				failHistory:   2,
+				historyErr:    readErr,
+				failAtRowsErr: atRowsErr,
+			}
+			// History chunks of two: [bd-1 bd-2] [bd-3 bd-4] [bd-5]; the second fails.
+			got, unanswered, err := PreviousExternalRefsInTx(context.Background(), openRefsDB(t, d), []string{"bd-1", "bd-at", "bd-2", "bd-3", "bd-4", "bd-5"}, refsAsOf, 2)
+			if !errors.Is(err, readErr) {
+				t.Fatalf("err = %v, want %v", err, readErr)
+			}
+			if want := []string{"bd-3", "bd-4", "bd-5"}; !slices.Equal(unanswered, want) {
+				t.Errorf("unanswered = %v, want %v", unanswered, want)
+			}
+			if want := map[string]string{"bd-at": "at-commit", "bd-1": "one"}; !maps.Equal(got, want) {
+				t.Errorf("refs = %v, want %v", got, want)
+			}
+			if d.counts["history"] != 2 {
+				t.Errorf("%d history reads, want 2: none after the failed one", d.counts["history"])
 			}
 		})
 	}
@@ -195,7 +248,7 @@ func TestPreviousExternalRefsInTxTieKeepsFirstRow(t *testing.T) {
 			{"bd-1", "second", refsNewer},
 		},
 	}
-	got, err := PreviousExternalRefsInTx(context.Background(), openRefsDB(t, d), []string{"bd-1"}, refsAsOf, queryBatchSize)
+	got, _, err := PreviousExternalRefsInTx(context.Background(), openRefsDB(t, d), []string{"bd-1"}, refsAsOf, queryBatchSize)
 	if err != nil || got["bd-1"] != "first" {
 		t.Fatalf("PreviousExternalRefsInTx = (%v, %v), want bd-1 = first", got, err)
 	}
@@ -215,7 +268,7 @@ func TestPreviousExternalRefsInTxQueryCount(t *testing.T) {
 					d.history = append(d.history, historyRow{id, "history", refsOlder})
 				}
 			}
-			got, err := PreviousExternalRefsInTx(context.Background(), openRefsDB(t, d), ids, refsAsOf, chunk)
+			got, _, err := PreviousExternalRefsInTx(context.Background(), openRefsDB(t, d), ids, refsAsOf, chunk)
 			if err != nil {
 				t.Fatalf("PreviousExternalRefsInTx: %v", err)
 			}

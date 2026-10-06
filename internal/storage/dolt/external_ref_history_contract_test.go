@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"slices"
 	"strings"
@@ -58,34 +60,8 @@ func TestPreviousExternalRefsChunksServerHistoryReads(t *testing.T) {
 	ctx, cancel := testContext(t)
 	defer cancel()
 
-	ids := make([]string, 40)
-	for i := range ids {
-		ids[i] = fmt.Sprintf("test-ck%02d", i)
-	}
-	fx := externalRefHistoryFixture(t, store)
-	if err := fx.CreateIssues(ctx, ids); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	if err := fx.CommitOn(ctx, fx.Branch, time.Now().UTC(), "UPDATE issues SET external_ref = CONCAT('ref-', id)"); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	if _, err := store.DeleteIssues(ctx, ids, false, true, false); err != nil {
-		t.Fatalf("delete: %v", err)
-	}
-	asOf := time.Now()
-
-	cfg, err := mysql.ParseDSN(store.connStr)
-	if err != nil {
-		t.Fatalf("parse DSN: %v", err)
-	}
-	connector, err := mysql.NewConnector(cfg)
-	if err != nil {
-		t.Fatalf("connector: %v", err)
-	}
-	rec := &historyReadRecorder{}
-	pooled := store.db
-	store.db = sql.OpenDB(recordingConnector{connector, rec})
-	t.Cleanup(func() { _ = store.db.Close(); store.db = pooled })
+	ids, asOf := deletedLinkedIssues(t, ctx, store, 40)
+	rec := recordHistoryReads(t, store)
 
 	got, err := store.PreviousExternalRefs(ctx, ids, asOf)
 	if err != nil {
@@ -109,7 +85,149 @@ func TestPreviousExternalRefsChunksServerHistoryReads(t *testing.T) {
 	}
 }
 
-type historyReadRecorder struct{ sizes []int }
+var errTimeout = errors.New("read tcp 127.0.0.1:1->127.0.0.1:2: i/o timeout")
+
+func TestPreviousExternalRefsFailedHistoryReadLooksUpUnansweredIDs(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	t.Cleanup(cleanup)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	ids, asOf := deletedLinkedIssues(t, ctx, store, 40)
+	want := previousExternalRefsOneByOne(t, ctx, store, ids, asOf)
+	t.Setenv("BEADS_TEST_MODE", "")
+	store.breaker = newTestCircuitBreaker(t)
+	for range circuitFailureThreshold - 1 {
+		store.breaker.RecordFailure()
+	}
+	rec := recordHistoryReads(t, store)
+	rec.failHistoryFrom = 2
+
+	got, err := store.PreviousExternalRefs(ctx, ids, asOf)
+	if rec.lookups != len(ids)-16 {
+		t.Errorf("%d per-issue lookups, want %d", rec.lookups, len(ids)-16)
+	}
+	if rec.logReads != 1 || len(rec.sizes) != 2 {
+		t.Errorf("%d batch read attempts with %d history reads, want 1 attempt with 2", rec.logReads, len(rec.sizes))
+	}
+	if state := store.breaker.readState(); state.Failures != 0 {
+		t.Errorf("breaker state %+v, want no failures recorded", state)
+	}
+	if err != nil {
+		t.Fatalf("PreviousExternalRefs: %v", err)
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("PreviousExternalRefs = %v, PreviousExternalRef = %v", got, want)
+	}
+}
+
+func TestPreviousExternalRefsRetriesFailedCommitRead(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	t.Cleanup(cleanup)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	ids, asOf := deletedLinkedIssues(t, ctx, store, 4)
+	want := previousExternalRefsOneByOne(t, ctx, store, ids, asOf)
+	store.breaker = newTestCircuitBreaker(t)
+	rec := recordHistoryReads(t, store)
+	rec.failLogReads = 1
+
+	got, err := store.PreviousExternalRefs(ctx, ids, asOf)
+	if err != nil {
+		t.Fatalf("PreviousExternalRefs: %v", err)
+	}
+	if rec.logReads != 2 {
+		t.Errorf("%d batch read attempts, want 2: a failed dolt_log read is retried", rec.logReads)
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("PreviousExternalRefs = %v, PreviousExternalRef = %v", got, want)
+	}
+}
+
+func TestPreviousExternalRefsFailedLookupReturnsNoAnswers(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	t.Cleanup(cleanup)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	ids, asOf := deletedLinkedIssues(t, ctx, store, 40)
+	store.breaker = newTestCircuitBreaker(t)
+	rec := recordHistoryReads(t, store)
+	rec.failHistoryFrom = 2
+	rec.lookupErr = errors.New("lookup refused")
+
+	got, err := store.PreviousExternalRefs(ctx, ids, asOf)
+	if !errors.Is(err, rec.lookupErr) || got != nil {
+		t.Fatalf("PreviousExternalRefs = (%v, %v), want no map and %v", got, err, rec.lookupErr)
+	}
+}
+
+// deletedLinkedIssues creates n linked issues and deletes them, so that
+// every one of them is answered by a history read.
+func deletedLinkedIssues(t *testing.T, ctx context.Context, store *DoltStore, n int) (ids []string, asOf time.Time) {
+	t.Helper()
+	ids = make([]string, n)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("test-ck%02d", i)
+	}
+	fx := externalRefHistoryFixture(t, store)
+	if err := fx.CreateIssues(ctx, ids); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := fx.CommitOn(ctx, fx.Branch, time.Now().UTC(), "UPDATE issues SET external_ref = CONCAT('ref-', id)"); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if _, err := store.DeleteIssues(ctx, ids, false, true, false); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	return ids, time.Now()
+}
+
+func previousExternalRefsOneByOne(t *testing.T, ctx context.Context, store *DoltStore, ids []string, asOf time.Time) map[string]string {
+	t.Helper()
+	refs := make(map[string]string)
+	for _, id := range ids {
+		ref, found, err := store.PreviousExternalRef(ctx, id, asOf)
+		if err != nil || !found {
+			t.Fatalf("PreviousExternalRef(%s) = (%q, %v, %v), want found", id, ref, found, err)
+		}
+		refs[id] = ref
+	}
+	return refs
+}
+
+// recordHistoryReads routes store's pooled reads through a historyReadRecorder.
+func recordHistoryReads(t *testing.T, store *DoltStore) *historyReadRecorder {
+	t.Helper()
+	cfg, err := mysql.ParseDSN(store.connStr)
+	if err != nil {
+		t.Fatalf("parse DSN: %v", err)
+	}
+	connector, err := mysql.NewConnector(cfg)
+	if err != nil {
+		t.Fatalf("connector: %v", err)
+	}
+	rec := &historyReadRecorder{}
+	pooled := store.db
+	store.db = sql.OpenDB(recordingConnector{connector, rec})
+	t.Cleanup(func() { _ = store.db.Close(); store.db = pooled })
+	return rec
+}
+
+// historyReadRecorder records the batch's reads and fails the ones it is told to.
+type historyReadRecorder struct {
+	sizes    []int
+	logReads int
+	lookups  int
+	// failLogReads fails that many dolt_log reads with a retryable error.
+	failLogReads int
+	// failHistoryFrom fails every batch history read from that 1-based
+	// number on with a retryable error.
+	failHistoryFrom int
+	// lookupErr fails every per-issue history read.
+	lookupErr error
+}
 
 type recordingConnector struct {
 	driver.Connector
@@ -147,9 +265,24 @@ type recordingConn struct {
 }
 
 func (c recordingConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if strings.Contains(query, "dolt_log") {
+		c.rec.logReads++
+		if c.rec.logReads <= c.rec.failLogReads {
+			return nil, errTimeout
+		}
+	}
 	if _, in, ok := strings.Cut(query, " IN ("); ok && strings.Contains(query, "dolt_history_issues") {
 		in, _, _ = strings.Cut(in, ")")
 		c.rec.sizes = append(c.rec.sizes, strings.Count(in, "?"))
+		if c.rec.failHistoryFrom > 0 && len(c.rec.sizes) >= c.rec.failHistoryFrom {
+			return nil, errTimeout
+		}
+	}
+	if strings.Contains(query, "h.id = ?") {
+		c.rec.lookups++
+		if c.rec.lookupErr != nil {
+			return nil, c.rec.lookupErr
+		}
 	}
 	return c.mysqlConn.QueryContext(ctx, query, args)
 }

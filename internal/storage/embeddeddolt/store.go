@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -1173,14 +1174,32 @@ func (s *EmbeddedDoltStore) PreviousExternalRef(ctx context.Context, issueID str
 }
 
 // PreviousExternalRefs answers PreviousExternalRef for many issues at one asOf.
+// When a history read fails, the ids it left unanswered are looked up one at
+// a time.
 func (s *EmbeddedDoltStore) PreviousExternalRefs(ctx context.Context, ids []string, asOf time.Time) (map[string]string, error) {
 	var refs map[string]string
+	var unanswered []string
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		refs, err = issueops.PreviousExternalRefsInTx(ctx, tx, ids, asOf, sqlbuild.QueryBatchSize)
+		refs, unanswered, err = issueops.PreviousExternalRefsInTx(ctx, tx, ids, asOf, sqlbuild.QueryBatchSize)
 		return err
 	})
-	return refs, err
+	if err != nil && len(unanswered) == 0 {
+		return nil, err
+	}
+	if err != nil {
+		debug.Logf("embeddeddolt: looking up %d ids one at a time after a failed history read: %v\n", len(unanswered), err)
+	}
+	for _, id := range unanswered {
+		ref, found, err := s.PreviousExternalRef(ctx, id, asOf)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			refs[id] = ref
+		}
+	}
+	return refs, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -132,12 +133,15 @@ func PreviousExternalRefInTx(ctx context.Context, tx *sql.Tx, issueID string, as
 }
 
 // PreviousExternalRefsInTx answers PreviousExternalRefInTx for many ids at one asOf.
+// When a history read fails it stops, since the transaction's connection may
+// be gone, and returns that error with the answers made so far and the ids
+// left unanswered; any other error comes with no unanswered ids.
 //
 // Results are keyed by Go string equality on the ids SQL returns, which
 // matches PreviousExternalRefInTx's `h.id = ?` only under the binary, NO PAD
 // utf8mb4_0900_bin collation every beads table is created with.
-func PreviousExternalRefsInTx(ctx context.Context, tx DBTX, ids []string, asOf time.Time, historyChunk int) (map[string]string, error) {
-	refs := make(map[string]string, len(ids))
+func PreviousExternalRefsInTx(ctx context.Context, tx DBTX, ids []string, asOf time.Time, historyChunk int) (refs map[string]string, unanswered []string, err error) {
+	refs = make(map[string]string, len(ids))
 	pending := make([]string, 0, len(ids))
 	seen := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
@@ -147,17 +151,17 @@ func PreviousExternalRefsInTx(ctx context.Context, tx DBTX, ids []string, asOf t
 		}
 	}
 	if len(pending) == 0 {
-		return refs, nil
+		return refs, nil, nil
 	}
 
 	commit, tied, err := newestCommitAtOrBefore(ctx, tx, asOf)
 	if err != nil || commit == "" {
-		return refs, err
+		return refs, nil, err
 	}
 	if !tied {
 		atCommit, err := externalRefsAtCommit(ctx, tx, commit)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		misses := pending[:0]
 		for _, id := range pending {
@@ -172,11 +176,13 @@ func PreviousExternalRefsInTx(ctx context.Context, tx DBTX, ids []string, asOf t
 
 	for start := 0; start < len(pending); start += historyChunk {
 		end := min(start+historyChunk, len(pending))
-		if err := newestHistoricalExternalRefs(ctx, tx, pending[start:end], asOf, refs); err != nil {
-			return nil, err
+		chunk, err := newestHistoricalExternalRefs(ctx, tx, pending[start:end], asOf)
+		if err != nil {
+			return refs, pending[start:], err
 		}
+		maps.Copy(refs, chunk)
 	}
-	return refs, nil
+	return refs, nil, nil
 }
 
 func newestCommitAtOrBefore(ctx context.Context, tx DBTX, asOf time.Time) (string, bool, error) {
@@ -238,7 +244,7 @@ func externalRefsAtCommit(ctx context.Context, tx DBTX, commit string) (map[stri
 	return refs, nil
 }
 
-func newestHistoricalExternalRefs(ctx context.Context, tx DBTX, ids []string, asOf time.Time, refs map[string]string) error {
+func newestHistoricalExternalRefs(ctx context.Context, tx DBTX, ids []string, asOf time.Time) (map[string]string, error) {
 	args := make([]any, 0, len(ids)+1)
 	for _, id := range ids {
 		args = append(args, id)
@@ -252,16 +258,17 @@ func newestHistoricalExternalRefs(ctx context.Context, tx DBTX, ids []string, as
 		WHERE h.id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")+`) AND h.commit_date <= ?
 	`, args...)
 	if err != nil {
-		return fmt.Errorf("failed to get previous external_refs: %w", err)
+		return nil, fmt.Errorf("failed to get previous external_refs: %w", err)
 	}
 	defer rows.Close()
+	refs := make(map[string]string, len(ids))
 	newest := make(map[string]time.Time, len(ids))
 	for rows.Next() {
 		var id string
 		var ref sql.NullString
 		var date time.Time
 		if err := rows.Scan(&id, &ref, &date); err != nil {
-			return fmt.Errorf("failed to scan previous external_ref: %w", err)
+			return nil, fmt.Errorf("failed to scan previous external_ref: %w", err)
 		}
 		// On a commit_date tie, keep the first row in scan order, as the
 		// per-issue query's TopN does.
@@ -272,7 +279,7 @@ func newestHistoricalExternalRefs(ctx context.Context, tx DBTX, ids []string, as
 		refs[id] = ref.String
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("failed to get previous external_refs: %w", err)
+		return nil, fmt.Errorf("failed to get previous external_refs: %w", err)
 	}
-	return nil
+	return refs, nil
 }
