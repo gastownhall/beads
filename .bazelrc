@@ -133,7 +133,9 @@ test:doltserver --local_test_jobs=4
 test:doltserver --remote_download_regex=.*/test\.(log|xml)$
 
 # Proxied-server tier: PR Risk's "Test (Proxied Dolt Cmd N/15)" jobs, as
-# //cmd/bd:bd_proxied_test (dolt-server-proxied tag). Kept out of
+# //cmd/bd:bd_proxied_test and //cmd/bd:bd_managed_local_test (the
+# managed-local lifecycle in a loopback-only network namespace) (the
+# dolt-server-proxied tag). Kept out of
 # --config=doltserver because bazel.yml runs that lane locally too (forks,
 # rbe=off), where 30 concurrent shards, each with a dolt sql-server busy on
 # ~4 cores, do not fit regardless of any single shard's wall time; bazel.yml

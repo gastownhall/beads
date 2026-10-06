@@ -39,6 +39,7 @@ go_test(
         "embedded_shard_count_test.go",
         "host_tools_test.go",
         "install_dolt_test.go",
+        "managed_local_lane_test.go",
         "pr_lanes_bazel_coverage_test.go",
         "pr_preflight_test.go",
         "pr_risk_bazel_coverage_test.go",

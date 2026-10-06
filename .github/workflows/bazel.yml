@@ -1469,9 +1469,12 @@ jobs:
   # bd_for_tests), shared with bazel-doltserver through the remote cache.
   # PR Risk builds its bd-cmd-test with -race, as here; main.yml's
   # test-proxied-cmd twin uses build-artifacts' non-race bd-cmd-test, so
-  # this lane is the stricter of the two. A job of its own, not gated by
-  # any integration switch: it runs in pr.yml's call and its gate requires
-  # it (BAZEL_PROXIED).
+  # this lane is the stricter of the two. It also runs
+  # //cmd/bd:bd_managed_local_test, the managed-local proxied lifecycle
+  # (formerly proxied-local-smoke.yml) in a loopback-only network
+  # namespace, which needs the workers' unprivileged user namespaces. A job
+  # of its own, not gated by any integration switch: it runs in pr.yml's
+  # call and its gate requires it (BAZEL_PROXIED).
   bazel-proxied:
     name: proxied-server tier
     # Remote execution only, like bazel-embedded: 30 concurrent shards, each

@@ -2464,32 +2464,6 @@ func TestPinnedDoltCLIMatchesContainerImage(t *testing.T) {
 	}
 }
 
-// TestProxiedLocalSmokeMatchesPinnedDoltVersion keeps the proxied-local-smoke
-// lane's standalone Dolt CLI install on the same release as the rest of the
-// suite. That lane downloads its own dolt binary straight from GitHub
-// releases instead of going through scripts/ci/install-dolt.sh, so nothing
-// else catches it drifting off the measured pin (see "Which Dolt version to
-// install" in docs/architecture/dolt.md for why the pin is not just "latest").
-func TestProxiedLocalSmokeMatchesPinnedDoltVersion(t *testing.T) {
-	root := sourceRepoRoot(t)
-
-	installer, err := os.ReadFile(filepath.Join(root, "scripts", "ci", "install-dolt.sh"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cliVersion := captureOne(t, `(?m)^readonly version="([0-9]+\.[0-9]+\.[0-9]+)"$`, string(installer), "scripts/ci/install-dolt.sh")
-
-	workflow, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "proxied-local-smoke.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	smokeVersion := captureOne(t, `(?m)^\s*DOLT_VERSION:\s*([0-9]+\.[0-9]+\.[0-9]+)\s*$`, string(workflow), "proxied-local-smoke.yml:DOLT_VERSION")
-
-	if cliVersion != smokeVersion {
-		t.Errorf("dolt pins disagree: CLI %s, proxied-local-smoke.yml DOLT_VERSION %s", cliVersion, smokeVersion)
-	}
-}
-
 func captureOne(t *testing.T, pattern, body, source string) string {
 	t.Helper()
 
@@ -2716,7 +2690,7 @@ const mainWindowsTestBinariesCacheRunsOn = "${{ matrix.runner == 'blacksmith' &&
 // F7c: used to define its own sameRepoBlacksmith4vcpu here (same expression
 // as sameRepoBlacksmith2vcpu with the 4 vCPU label, for advisory jobs that
 // compile Go: regression.yml, migration-test.yml,
-// cross-version-smoke.yml, proxied-local-smoke.yml). F7a independently
+// cross-version-smoke.yml). F7a independently
 // defined the same const; both are now served by the single shared
 // sameRepoBlacksmith4vcpu in ci_blacksmith_runner_test.go. migration-test.yml's
 // historical-upgrades job uses sameRepoBlacksmith4vcpuNoble instead (below).
@@ -3063,7 +3037,6 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 		"migration-test.yml":      {"historical-upgrades": sameRepoBlacksmith4vcpuNoble},
 		"cross-version-smoke.yml": {"smoke": sameRepoBlacksmith4vcpu, "versions": sameRepoBlacksmith2vcpu},
 		"docs-mintlify.yml":       {"broken-links": sameRepoBlacksmith2vcpu},
-		"proxied-local-smoke.yml": {"managed-local-smoke": sameRepoBlacksmith4vcpu},
 		// main.yml's seeder job (B2, F7c implementation report) is the one
 		// Blacksmith job that is NOT gated by the same-repo-PR expression: it
 		// is push-to-main only (always trusted), so it wraps the literal
@@ -3128,7 +3101,7 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 	for _, file := range []string{
 		"pr.yml", "pr-risk.yml", "main.yml",
 		"regression.yml", "migration-test.yml",
-		"cross-version-smoke.yml", "docs-mintlify.yml", "proxied-local-smoke.yml",
+		"cross-version-smoke.yml", "docs-mintlify.yml",
 	} {
 		workflow := readCIWorkflow(t, file)
 		allowed := want[file]

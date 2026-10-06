@@ -27,6 +27,13 @@ exports_files(
     visibility = ["//visibility:public"],
 )
 
+# sh_test src that runs an existing go_test binary with no network but
+# loopback (see the script header), e.g. //cmd/bd:bd_managed_local_test.
+exports_files(
+    ["go_test_offline.sh"],
+    visibility = ["//visibility:public"],
+)
+
 # Wraps every test process (`test --run_under` in .bazelrc) with the isolated
 # HOME/XDG/Dolt/git environment that scripts/ci/lib/test-env.sh gives `go test`.
 # Bazel merges the run_under target's runfiles into every test's runfiles, so

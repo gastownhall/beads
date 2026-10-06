@@ -693,7 +693,6 @@ var blacksmithAdvisoryWorkflows = []string{
 	"migration-test.yml",
 	"cross-version-smoke.yml",
 	"docs-mintlify.yml",
-	"proxied-local-smoke.yml",
 	"main.yml",
 }
 
@@ -751,7 +750,6 @@ var advisoryBlacksmithRunnerJobs = []struct {
 	{"cross-version-smoke.yml", "smoke", "blacksmith-4vcpu-ubuntu-2404", "ubuntu-latest"},
 	{"cross-version-smoke.yml", "versions", "blacksmith-2vcpu-ubuntu-2404", "ubuntu-latest"},
 	{"docs-mintlify.yml", "broken-links", "blacksmith-2vcpu-ubuntu-2404", "ubuntu-latest"},
-	{"proxied-local-smoke.yml", "managed-local-smoke", "blacksmith-4vcpu-ubuntu-2404", "ubuntu-latest"},
 }
 
 // TestF7cAdvisorySameRepoBlacksmithExpressionSemantics evaluates each F7c
@@ -820,7 +818,6 @@ var blacksmithSetupGoCacheConsumers = map[string][]string{
 	"regression.yml":          {"regression"},
 	"migration-test.yml":      {"historical-upgrades"},
 	"cross-version-smoke.yml": {"smoke"},
-	"proxied-local-smoke.yml": {"managed-local-smoke"},
 }
 
 // blacksmithSetupGoCacheKeyNamespace is the self-defined cache key prefix

@@ -1488,6 +1488,57 @@ sh_test(
     tags = ["dolt-server-proxied"],
 )
 
+# The managed-local proxied lifecycle lane (formerly proxied-local-smoke.yml):
+# the TestManagedLocalProxied* tests, where bd launches its own loopback
+# proxy and the proxy launches the pinned dolt (first on PATH via the test
+# wrapper) as `dolt sql-server`, run inside a user + network namespace with
+# only loopback up (tools/bazel/go_test_offline.sh, the job's `sudo unshare
+# --net`), so they prove the lifecycle needs no outbound network. Against
+# this configuration's (race) bd_test, with the non-race bd_for_tests as the
+# bd under test; BEADS_TEST_SKIP=dolt as in the job (no shared test server:
+# every test supervises its own; BEADS_TEST_DOLT_SERVER/REQUIRE are the
+# dolt-server lanes' convention and start nothing here). Unsharded: Go's
+# sharding counts every test in the binary, not the -test.run matches, so
+# most shards would run none. scripts/managed_local_lane_test.go fails if a
+# test the job pinned is no longer compiled into a linux cgo build. It repeats
+# bd_test's `env`.
+#
+# Tags:
+#   dolt-server-proxied: the proxied-server tier; starts dolt sql-servers;
+#     excluded from --config=prcore/ci, selected by --config=doltserver-proxied
+#     (bazel.yml's bazel-proxied lane, remote execution only: the namespace
+#     needs the workers' unprivileged user namespaces).
+sh_test(
+    name = "bd_managed_local_test",
+    size = "large",
+    # -test.timeout=15m (the job's) fires with a goroutine dump before
+    # Bazel's 1200s action limit (eternal under the lane's --test_timeout).
+    timeout = "eternal",
+    srcs = ["//tools/bazel:go_test_offline.sh"],
+    args = [
+        "$(rootpath :bd_test)",
+        "-test.run=^TestManagedLocalProxied",
+        "-test.timeout=15m",
+    ],
+    data = [
+        ":bd_for_tests",
+        ":bd_test",
+        ":go_srcs",
+        ":preflight_go_fixture",
+        "@go_sdk//:bin/gofmt",
+    ],
+    env = {
+        "BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)",
+        "BEADS_TEST_DOLT_SERVER": "local",
+        "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
+        "BEADS_TEST_PREFLIGHT_GO": "$(rlocationpath :preflight_go_fixture)",
+        "BEADS_TEST_PROXIED_LOCAL": "1",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+        "BEADS_TEST_SKIP": "dolt",
+    },
+    tags = ["dolt-server-proxied"],
+)
+
 # The whole cmd/bd suite, as --config=doltserver-cmd builds it (exactly
 # --config=integration's build: the integration and gms_pure_go build tags,
 # race, so the two lanes share bd_test's compile), against a hermetic dolt sql-server:
