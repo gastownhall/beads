@@ -20,7 +20,7 @@ import (
 // bd's real output. This is the "faithful copy of its decode" alternative the
 // 2026-10 Opus review of f8c7ecf01 asked for, in lieu of vendoring the gc
 // module. If gc's decode logic changes, this port and
-// TestGCConditionalMatcherDecode below must be updated to match — the
+// TestEmbeddedGCConditionalMatcherDecode below must be updated to match — the
 // contract is the string/shape, not this file.
 //
 // Keep this in sync with gc's internal/beads/bdstore_conditional.go.
@@ -106,14 +106,16 @@ func gcClassifyAsPrecondition(out []byte, errText string) (ok bool, expected, cu
 	return true, expected, current, haveExpected, haveCurrent
 }
 
-// TestGCConditionalMatcherDecode runs the ported gc decode (above) against a
-// real --if-revision mismatch from the built bd, for every verb gc's
+// TestEmbeddedGCConditionalMatcherDecode runs the ported gc decode (above)
+// against a real --if-revision mismatch from the built bd, for every verb gc's
 // BdStore.{Update,Close,Delete}IfMatch (and bd's own assign/reopen guards)
 // cover, pinning the 2026-10 Opus-review BLOCKER fix end-to-end: gc's own
 // classifier logic, not just bd's JSON shape in isolation, must recognize the
 // refusal as a precondition with the caller's expected revision and bd's
-// current one.
-func TestGCConditionalMatcherDecode(t *testing.T) {
+// current one. The TestEmbedded name in an *_embedded_test.go file is what
+// puts it in a CI lane: .github/scripts/embedded-test-shard.sh discovers
+// tests by exactly that pair, and under any other name it skips everywhere.
+func TestEmbeddedGCConditionalMatcherDecode(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -123,7 +125,7 @@ func TestGCConditionalMatcherDecode(t *testing.T) {
 
 	cases := []struct {
 		name       string
-		closeFirst bool // reopen's guard only fires on an already-closed issue
+		closeFirst bool // start from a closed issue rather than a fresh open one
 		args       func(id string) []string
 	}{
 		{"update", false, func(id string) []string {
@@ -133,6 +135,12 @@ func TestGCConditionalMatcherDecode(t *testing.T) {
 			return []string{"close", id, "--if-revision", "", "--json"}
 		}},
 		{"reopen", true, func(id string) []string {
+			return []string{"reopen", id, "--if-revision", "", "--json"}
+		}},
+		// The guard is judged before reopen's already-open no-op, so a stale
+		// token on an open issue is still a refusal (exit 13 and the same
+		// body), never an "already open" success that stops fencing.
+		{"reopen_open", false, func(id string) []string {
 			return []string{"reopen", id, "--if-revision", "", "--json"}
 		}},
 		{"delete", false, func(id string) []string {
@@ -146,8 +154,8 @@ func TestGCConditionalMatcherDecode(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Each case gets its own issue so the cases can run (and be
 			// re-run individually with `go test -run`) independent of each
-			// other's order — a guard mismatch never writes, but reopen's
-			// guard specifically only fires on a closed issue.
+			// other's order — a guard mismatch never writes, but the two
+			// reopen rows each need a known starting status.
 			issue := bdCreate(t, bd, dir, "GC matcher target: "+tc.name, "--type", "task")
 			if tc.closeFirst {
 				bdClose(t, bd, dir, issue.ID)

@@ -938,18 +938,6 @@ func (e *GraphApplyTooLargeError) Error() string {
 	return fmt.Sprintf("graph plan has %d BatchApplier item(s) (nodes, edges and deferred assignments combined), which exceeds the %d-item cap; split the plan into multiple `bd create --graph` calls — each is its own atomic transaction, so this command will never chunk one plan into several", e.ItemCount, e.Max)
 }
 
-// GraphApplyUnsupportedFieldError reports a graph-plan field the BatchApplier
-// item vocabulary (issueops.DepAddItem, in practice) has no member to carry,
-// so the plan is refused outright rather than silently dropping the field.
-type GraphApplyUnsupportedFieldError struct {
-	Field  string
-	Detail string
-}
-
-func (e *GraphApplyUnsupportedFieldError) Error() string {
-	return fmt.Sprintf("graph plan: %s is not supported by `bd create --graph` (%s)", e.Field, e.Detail)
-}
-
 // buildGraphApplyBatchRequest translates a GraphApplyPlan into the single
 // issueops.ApplyBatchRequest both the embedded and proxied `bd create --graph`
 // legs now apply, so the two transports cannot drift in how a plan is read.
@@ -970,6 +958,17 @@ func (e *GraphApplyUnsupportedFieldError) Error() string {
 // conflict — both are one shared implementation reached from every leg, so
 // re-deriving them here would be a second, divergeable copy of a check the
 // role already owns.
+//
+// One consequence is accepted on purpose: the end gate walks the scheduling
+// edges only (types.IsSchedulingEdge leaves waits-for out), so a plan whose
+// path from a node's parent to the node runs through a waits-for hop is now
+// stored, where the old in-transaction preflight, which walked every
+// AffectsReadyWork edge, refused it. `bd dep add` and `bd batch apply` store
+// that shape too, and it can stall ready work: once the spawner has an open
+// child, every issue in the shape stays blocked. Refusing it is a change to
+// the shared role, for every front door at once;
+// TestExecuteGraphApplyAcceptsParentToChildPathThroughWaitsFor pins the
+// current behavior until then.
 func buildGraphApplyBatchRequest(plan *GraphApplyPlan, opts GraphApplyOptions, actor, owner string) (issueops.ApplyBatchRequest, error) {
 	if err := opts.Validate(); err != nil {
 		return issueops.ApplyBatchRequest{}, err
@@ -1029,17 +1028,26 @@ func buildGraphApplyBatchRequest(plan *GraphApplyPlan, opts GraphApplyOptions, a
 
 	// Pass 2: parent-child dep_add items, one per node with a parent — added
 	// before any other edge, matching the embedded path's old ordering.
+	//
+	// A node naming both a plan-local parent and a parent_id keeps the old
+	// precedence of both legs: the plan key wins. That is the reverse of ref's
+	// id-first rule for edge endpoints, and it is the parent the dry-run
+	// preview and validateGraphApplyLocalCycles already model.
 	for _, node := range plan.Nodes {
-		parentKey := node.effectiveParentKey()
-		parentID := node.ParentID
-		if parentKey == "" && parentID == "" {
+		var parent issueops.Ref
+		switch parentKey := node.effectiveParentKey(); {
+		case parentKey != "":
+			parent = issueops.Ref{Key: parentKey}
+		case node.ParentID != "":
+			parent = issueops.Ref{ID: node.ParentID}
+		default:
 			continue
 		}
 		items = append(items, issueops.ApplyItem{
 			Kind: issueops.ItemDepAdd,
 			DepAdd: &issueops.DepAddItem{
 				Source: issueops.Ref{Key: node.Key},
-				Target: ref(parentKey, parentID),
+				Target: parent,
 				Type:   types.DepParentChild,
 			},
 		})
@@ -1142,10 +1150,10 @@ func buildGraphApplyBatchRequest(plan *GraphApplyPlan, opts GraphApplyOptions, a
 // edge's own Target (validateGraphApplyPlan already forces SpawnerKey ==
 // ToKey and SpawnerID == ToID — "the waits-for target is the spawner"), so
 // this never needs to resolve one. The role's own
-// issueops.stampWaitsForSpawnerID fills metadata.spawner_id from the resolved
-// target AFTER the batch mints every id, which is the only way a same-batch,
-// plan-local spawner key can land in the blob at all — this function runs
-// before any id in the plan exists. An empty Gate is left for
+// internal/storage/issueops.StampWaitsForSpawnerID fills metadata.spawner_id
+// from the resolved target AFTER the batch mints every id, which is the only
+// way a same-batch, plan-local spawner key can land in the blob at all — this
+// function runs before any id in the plan exists. An empty Gate is left for
 // normalizeApplyEdgeMetadata to default to {"gate":"all-children"}.
 func graphApplyEdgeBatchMetadata(edge GraphApplyEdge, depType types.DependencyType) (string, error) {
 	if depType != types.DepWaitsFor || edge.Gate == "" {
@@ -1203,23 +1211,4 @@ func graphApplySortedKeys(keys map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-func graphApplyParentDepPairs(nodes []GraphApplyNode, keyToID map[string]string) map[string]bool {
-	pairs := make(map[string]bool)
-	for _, node := range nodes {
-		parentID := node.ParentID
-		if parentKey := node.effectiveParentKey(); parentKey != "" {
-			parentID = keyToID[parentKey]
-		}
-		childID := keyToID[node.Key]
-		if childID != "" && parentID != "" {
-			pairs[graphApplyDepPairKey(childID, parentID)] = true
-		}
-	}
-	return pairs
-}
-
-func graphApplyDepPairKey(issueID, dependsOnID string) string {
-	return issueID + "\x00" + dependsOnID
 }

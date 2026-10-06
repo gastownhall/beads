@@ -11,18 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `bd create --graph` now plans its batch through `issueops.BatchApplier`
   instead of the old `buildDomainGraphPlan` path, so a graph create gets the
-  same atomic multi-row semantics as `bd batch apply`. A node's `spawner_id`
-  is stamped only when the node actually names a spawner (never defaulted
-  onto unrelated nodes in the same graph), and `thread_id` now survives
+  same atomic multi-row semantics as `bd batch apply`. A `waits-for` edge's
+  `metadata.spawner_id` is stamped only when that edge names a spawner
+  (never defaulted onto an edge that names none), and `thread_id` now survives
   translation into the batch request alongside every other
   `GraphApplyEdge`/`GraphApplyNodeDep` field — pinned by a reflection-based
   field-coverage test (`TestBuildGraphApplyBatchRequestFieldsSurvive`) that
   fails closed if a future field is added to either struct without an
   explicit decision about where it goes. The hierarchy/cycle rejection
   scenarios this path's local gates cover (blocking through existing or
-  planned hierarchy, transitive external-parent paths, cycles hidden in an
-  inline dep, combined scheduling cycles) are exercised against a real Dolt
-  store, not just skipped placeholders. A graph plan whose translated
+  planned hierarchy, transitive external-parent paths, reverse parent-to-child
+  edges, cycles hidden in an inline dep, combined scheduling cycles, the end
+  gate alone with the per-edge cycle probe skipped) are exercised against a
+  real Dolt store, not just skipped placeholders. A graph plan whose translated
   BatchApplier items (nodes, edges and deferred assignments combined) exceed
   `issueops.MaxApplyBatchItems` (1000) is now refused outright with
   `GraphApplyTooLargeError` rather than silently chunked across several
@@ -34,10 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `issueops.ReopenRequest.ExpectedVersion` field the library already
   exposed and the same `parseIfRevisionFlag` / `requireSingleIfRevisionID`
   / `reportIfRevisionFailure` helpers #7203 introduced for the other four
-  verbs — no new CLI surface, no new JSON body shape. A faithful port of
+  verbs — no new CLI surface, no new JSON body shape. A guarded reopen of an
+  issue that is already open is still judged against the guard on both
+  routes: a stale revision exits 13, and a matching one is the usual
+  "already open" no-op. A faithful port of
   gc's (gascity) `bdstore_conditional.go` decode logic is now run against a
   real built `bd` for all five guarded verbs
-  (`TestGCConditionalMatcherDecode`), confirming gc's matcher decodes
+  (`TestEmbeddedGCConditionalMatcherDecode`), confirming gc's matcher decodes
   #7203's numeric-only `expected_revision`/`current_revision` body exactly
   — no decimal-string twin fields are needed, since `encoding/json` decodes
   a JSON number straight into an `int64` struct field with no lossy
@@ -110,6 +114,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `bd create --graph` now stores a plan whose path from a node's parent to
+  the node runs through a `waits-for` edge; the graph-only preflight that
+  walked every ready-work edge used to refuse it. The plan now goes through
+  the same end gate as `bd dep add` and `bd batch apply`, which walks only
+  the scheduling edges (`blocks`, `conditional-blocks`, `parent-child`) and
+  stores this shape too. Avoid it in plans: once the `waits-for` spawner has
+  an open child, every issue in the shape, that child included, stays
+  blocked and none is ever ready. The same path through scheduling edges
+  alone is still refused.
 - `bd preflight --fix --json` no longer returns a `Version sync` fix result:
   version updates must keep all release surfaces aligned via `scripts/update-versions.sh`.
 - Release-tag pushes require Go and reject batches containing different release versions.

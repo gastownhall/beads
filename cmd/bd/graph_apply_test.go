@@ -529,35 +529,6 @@ func TestGraphApplyEdgeIsLocalCycleRelevantOnlyForLocalBlockingEdges(t *testing.
 	}
 }
 
-func TestGraphApplyParentDepPairs(t *testing.T) {
-	nodes := []GraphApplyNode{
-		{Key: "root", Title: "Root"},
-		{Key: "child", Title: "Child", ParentKey: "root"},
-		{Key: "external-child", Title: "External child", ParentID: "bd-parent"},
-	}
-	keyToID := map[string]string{
-		"root":           "bd-root",
-		"child":          "bd-child",
-		"external-child": "bd-external-child",
-	}
-
-	pairs := graphApplyParentDepPairs(nodes, keyToID)
-	for _, pair := range []struct {
-		child  string
-		parent string
-	}{
-		{"bd-child", "bd-root"},
-		{"bd-external-child", "bd-parent"},
-	} {
-		if !pairs[graphApplyDepPairKey(pair.child, pair.parent)] {
-			t.Fatalf("missing parent dep pair %s -> %s", pair.child, pair.parent)
-		}
-	}
-	if pairs[graphApplyDepPairKey("bd-root", "bd-child")] {
-		t.Fatal("unexpected reverse parent dep pair")
-	}
-}
-
 // TestEmitGraphApplyDryRun_JSON verifies that the dry-run path emits valid
 // JSON with the expected structure when jsonOutput is set. This exercises the
 // code path that `bd create --graph --dry-run --json` takes, confirming the
@@ -1240,6 +1211,40 @@ func TestBuildGraphApplyBatchRequestEdgeRefPrefersExplicitID(t *testing.T) {
 	}
 	if edge.Target != (issueops.Ref{ID: "bd-existing"}) {
 		t.Errorf("edge target = %+v, want explicit id to win over to_key", edge.Target)
+	}
+}
+
+// TestBuildGraphApplyBatchRequestParentKeyWinsOverParentID pins the opposite
+// precedence for a node's parent: a node naming both a plan-local parent
+// (parent_key, or its parent alias) and a parent_id is parented under the
+// plan key, as both legs did before the BatchApplier translation, and as the
+// dry-run preview and the local cycle check already assume.
+func TestBuildGraphApplyBatchRequestParentKeyWinsOverParentID(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "root", Title: "Root", Type: "epic"},
+			{Key: "keyed", Title: "Keyed", ParentKey: "root", ParentID: "bd-existing"},
+			{Key: "aliased", Title: "Aliased", Parent: "root", ParentID: "bd-existing"},
+			{Key: "external", Title: "External", ParentID: "bd-existing"},
+		},
+	}
+	req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "")
+	if err != nil {
+		t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+	}
+	got := map[string]issueops.Ref{}
+	for _, item := range req.Items {
+		if item.Kind == issueops.ItemDepAdd && item.DepAdd.Type == types.DepParentChild {
+			got[item.DepAdd.Source.Key] = item.DepAdd.Target
+		}
+	}
+	want := map[string]issueops.Ref{
+		"keyed":    {Key: "root"},
+		"aliased":  {Key: "root"},
+		"external": {ID: "bd-existing"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("parent-child targets = %+v, want %+v", got, want)
 	}
 }
 

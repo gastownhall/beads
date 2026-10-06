@@ -22,14 +22,16 @@ import (
 //
 // Like every other *_proxied_integration_test.go in this package, this
 // requires BEADS_TEST_PROXIED_SERVER=1 and a reachable Dolt container; it
-// skips otherwise (see requireProxiedServerEnv).
+// skips otherwise (see requireProxiedServerEnv). The TestProxiedServer name
+// prefix is load-bearing: .github/scripts/proxied-test-shard.sh discovers
+// that lane's tests by name, and it is the only lane that sets the env.
 
 // proxiedPreconditionBody mirrors #7203's own ifRevisionFailureBody
 // (if_revision.go): numeric expected_revision/current_revision only, no
-// decimal-string twins -- TestGCConditionalMatcherDecode already confirmed
-// gc's matcher decodes this shape exactly (encoding/json decodes a JSON
-// number straight into an int64 struct field with no float64 intermediate,
-// so there is no precision loss to work around here).
+// decimal-string twins -- TestEmbeddedGCConditionalMatcherDecode already
+// confirmed gc's matcher decodes this shape exactly (encoding/json decodes a
+// JSON number straight into an int64 struct field with no float64
+// intermediate, so there is no precision loss to work around here).
 type proxiedPreconditionBody struct {
 	Code             string `json:"code"`
 	ExpectedRevision *int64 `json:"expected_revision"`
@@ -79,11 +81,11 @@ func staleRevisionFor(rev int64) int64 {
 	return stale
 }
 
-// TestIfRevisionGuardProxiedUpdate pins bd update --if-revision on the
+// TestProxiedServerIfRevisionGuardUpdate pins bd update --if-revision on the
 // proxied-server leg: a stale token refuses with exit 13 and a
 // precondition_failed JSON body naming numeric revisions, writing nothing;
 // the matching token applies.
-func TestIfRevisionGuardProxiedUpdate(t *testing.T) {
+func TestProxiedServerIfRevisionGuardUpdate(t *testing.T) {
 	requireProxiedServerEnv(t)
 	bd := buildEmbeddedBD(t)
 	proj := newSharedProxiedProject(t, bd, "piu")
@@ -115,9 +117,9 @@ func TestIfRevisionGuardProxiedUpdate(t *testing.T) {
 	})
 }
 
-// TestIfRevisionGuardProxiedClose mirrors #7203's embedded close coverage
-// against the proxied-server leg.
-func TestIfRevisionGuardProxiedClose(t *testing.T) {
+// TestProxiedServerIfRevisionGuardClose mirrors #7203's embedded close
+// coverage against the proxied-server leg.
+func TestProxiedServerIfRevisionGuardClose(t *testing.T) {
 	requireProxiedServerEnv(t)
 	bd := buildEmbeddedBD(t)
 	proj := newSharedProxiedProject(t, bd, "pic")
@@ -148,18 +150,19 @@ func TestIfRevisionGuardProxiedClose(t *testing.T) {
 	})
 }
 
-// TestIfRevisionGuardProxiedReopen covers `bd reopen --if-revision` on the
-// proxied-server leg: #7203 did not add --if-revision to reopen at all, so
-// unlike the other four verbs there is no embedded-leg sibling to mirror
-// here -- this is reopen's only --if-revision coverage on either route
-// beyond TestGCConditionalMatcherDecode's embedded smoke case.
+// TestProxiedServerIfRevisionGuardReopen covers `bd reopen --if-revision` on
+// the proxied-server leg: #7203 did not add --if-revision to reopen at all, so
+// unlike the other four verbs there is no #7203 embedded-leg sibling to
+// mirror here; the direct route's coverage is
+// TestEmbeddedIfRevisionReopenGuardDirect and
+// TestEmbeddedGCConditionalMatcherDecode.
 //
 // The already_open_* subtests pin the bee-ghosttrack maintainer-review
 // blocker: a stale --if-revision guard on an already-open issue must still
 // report exit 13 with a precondition_failed body, not the silent
 // already-open no-op. See if_revision_reopen_embedded_test.go for the
 // direct-route twin of this same gap.
-func TestIfRevisionGuardProxiedReopen(t *testing.T) {
+func TestProxiedServerIfRevisionGuardReopen(t *testing.T) {
 	requireProxiedServerEnv(t)
 	bd := buildEmbeddedBD(t)
 	proj := newSharedProxiedProject(t, bd, "pir")
@@ -221,9 +224,9 @@ func TestIfRevisionGuardProxiedReopen(t *testing.T) {
 	})
 }
 
-// TestIfRevisionGuardProxiedDelete mirrors #7203's embedded delete coverage
-// against the proxied-server leg.
-func TestIfRevisionGuardProxiedDelete(t *testing.T) {
+// TestProxiedServerIfRevisionGuardDelete mirrors #7203's embedded delete
+// coverage against the proxied-server leg.
+func TestProxiedServerIfRevisionGuardDelete(t *testing.T) {
 	requireProxiedServerEnv(t)
 	bd := buildEmbeddedBD(t)
 	proj := newSharedProxiedProject(t, bd, "pid")
@@ -253,9 +256,9 @@ func TestIfRevisionGuardProxiedDelete(t *testing.T) {
 	})
 }
 
-// TestIfRevisionGuardProxiedAssign mirrors #7203's embedded assign coverage
-// against the proxied-server leg.
-func TestIfRevisionGuardProxiedAssign(t *testing.T) {
+// TestProxiedServerIfRevisionGuardAssign mirrors #7203's embedded assign
+// coverage against the proxied-server leg.
+func TestProxiedServerIfRevisionGuardAssign(t *testing.T) {
 	requireProxiedServerEnv(t)
 	bd := buildEmbeddedBD(t)
 	proj := newSharedProxiedProject(t, bd, "pia")

@@ -244,9 +244,10 @@ func TestExecuteGraphApplyRejectsBlockingChildToParentDuplicate(t *testing.T) {
 // stored issue (addressed by ParentID, not a plan key), so only a real store
 // walk — now the BatchApplier end gate, reached through executeGraphApply —
 // can catch a blocking edge running the wrong way across that hierarchy. The
-// local-only variant (both ends are plan keys) is covered by
+// local-only variant (both ends are plan keys) is refused up front by
 // TestValidateGraphApplyPlanRejectsImplicitParentChildReverseBlockingCycle in
-// graph_apply_test.go.
+// graph_apply_test.go, and by the end gate in
+// TestExecuteGraphApplyRejectsReverseParentToChildBlockingEdge below.
 func TestExecuteGraphApplyRejectsReverseParentToChildBlockingEdgeExternalParent(t *testing.T) {
 	for _, depType := range []string{"blocks", "conditional-blocks"} {
 		t.Run(depType, func(t *testing.T) {
@@ -285,6 +286,235 @@ func TestExecuteGraphApplyRejectsReverseParentToChildBlockingEdgeExternalParent(
 			// which reads "<id> cannot be blocked by its ancestor/descendant <id>: ...".
 			if !strings.Contains(err.Error(), "cannot be blocked by its") {
 				t.Fatalf("error = %q, want a DependencyHierarchyConflictError rejection", err.Error())
+			}
+		})
+	}
+}
+
+// TestExecuteGraphApplyRejectsReverseParentToChildBlockingEdge restores the
+// local arms of the deleted fake-store
+// TestExecuteGraphApplyUnitRejectsReverseParentToChildBlockingEdge (its
+// external arms are the test above): a blocking edge from a planned parent to
+// its own planned child. validateGraphApplyLocalCycles refuses this plan
+// before `bd create --graph` sends it; calling executeGraphApply directly
+// pins that the role refuses it too (CheckBlockingHierarchyInTx: an ancestor
+// cannot be blocked by its descendant), with nothing written.
+func TestExecuteGraphApplyRejectsReverseParentToChildBlockingEdge(t *testing.T) {
+	for _, depType := range []string{"blocks", "conditional-blocks"} {
+		t.Run(depType, func(t *testing.T) {
+			ctx, db := withGraphApplyTestStore(t)
+
+			plan := &GraphApplyPlan{
+				Nodes: []GraphApplyNode{
+					{Key: "root", Title: "Root", Type: "epic"},
+					{Key: "child", Title: "Child", Type: "task", ParentKey: "root"},
+				},
+				Edges: []GraphApplyEdge{
+					{FromKey: "root", ToKey: "child", Type: depType},
+				},
+			}
+
+			_, err := executeGraphApply(ctx, plan, GraphApplyOptions{})
+			if err == nil || !strings.Contains(err.Error(), "cannot be blocked by its descendant") {
+				t.Fatalf("error = %v, want descendant-blocking rejection", err)
+			}
+
+			var count int
+			if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&count); err != nil {
+				t.Fatalf("query issue rows: %v", err)
+			}
+			if count != 0 {
+				t.Fatalf("issue rows after rejected plan = %d, want 0", count)
+			}
+		})
+	}
+}
+
+// TestExecuteGraphApplyRejectsReverseParentChildEdgeCycle restores the
+// deleted fake-store TestExecuteGraphApplyUnitRejectsReverseParentChildEdgeCycle:
+// an explicit parent-child edge from a planned parent to its own planned child
+// makes each node the other's parent. No local check sees it (a parent-child
+// edge is not "cycle relevant" to validateGraphApplyLocalCycles), so the role
+// is the only refusal. The old preflight worded it as a planned path from the
+// parent; the role reports the cycle.
+func TestExecuteGraphApplyRejectsReverseParentChildEdgeCycle(t *testing.T) {
+	ctx, db := withGraphApplyTestStore(t)
+
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "root", Title: "Root", Type: "epic"},
+			{Key: "child", Title: "Child", Type: "task", ParentKey: "root"},
+		},
+		Edges: []GraphApplyEdge{
+			{FromKey: "root", ToKey: "child", Type: string(types.DepParentChild)},
+		},
+	}
+
+	if err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{}); err != nil {
+		t.Fatalf("validateGraphApplyPlan: %v", err)
+	}
+	_, err := executeGraphApply(ctx, plan, GraphApplyOptions{})
+	if err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("error = %v, want reverse parent-child cycle rejection", err)
+	}
+
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&count); err != nil {
+		t.Fatalf("query issue rows: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("issue rows after rejected plan = %d, want 0", count)
+	}
+}
+
+// TestExecuteGraphApplyAcceptsParentToChildPathThroughWaitsFor pins a
+// deliberate change. The deleted in-transaction preflight
+// (validateGraphApplyPlannedParentBlockingPaths) walked every AffectsReadyWork
+// edge, so it refused a planned path from a parent to its own descendant that
+// ran through a waits-for hop. The role's end gate walks the scheduling edges
+// only (types.IsSchedulingEdge leaves waits-for out on purpose), the same gate
+// `bd dep add` and `bd batch apply` go through, so `bd create --graph` now
+// stores these plans as those commands do. The blocking twins, the same
+// paths with the waits-for hop made a blocks edge, are still refused:
+// TestExecuteGraphApplyRejectsReverseParentToChildBlockingEdge and
+// TestExecuteGraphApplyRejectsExternalParentTransitiveBlockingPath.
+//
+// Accepting the shape is not the same as it being safe. Once the spawner has
+// an open child, every issue in the shape stays blocked and none is ever
+// ready: the parent waits on the spawner's children, and the path from the
+// parent down to its own descendant keeps those children blocked for as long
+// as the parent is. IsSchedulingEdge's "a waits-for edge cannot close a
+// cycle" does not hold here, in either case below. Refusing the shape belongs
+// in the shared role, for every front door at once; this test is the marker
+// to flip when that lands.
+func TestExecuteGraphApplyAcceptsParentToChildPathThroughWaitsFor(t *testing.T) {
+	// A waits-for edge's target is its spawner (validateGraphApplyPlan).
+	waitsFor := func(from, to string) GraphApplyEdge {
+		return GraphApplyEdge{FromKey: from, ToKey: to, Type: string(types.DepWaitsFor), SpawnerKey: to}
+	}
+	tests := []struct {
+		name  string
+		nodes []GraphApplyNode
+		edges []GraphApplyEdge
+		// hop is the node the parent's waits-for edge lands on.
+		hop string
+	}{
+		{
+			name: "direct",
+			nodes: []GraphApplyNode{
+				{Key: "parent", Title: "Parent", Type: "epic"},
+				{Key: "child", Title: "Child", Type: "task", ParentKey: "parent"},
+			},
+			edges: []GraphApplyEdge{waitsFor("parent", "child")},
+			hop:   "child",
+		},
+		{
+			name: "then a blocking edge",
+			nodes: []GraphApplyNode{
+				{Key: "parent", Title: "Parent", Type: "epic"},
+				{Key: "mid", Title: "Middle", Type: "task"},
+				{Key: "child", Title: "Child", Type: "task", ParentKey: "parent"},
+			},
+			edges: []GraphApplyEdge{
+				waitsFor("parent", "mid"),
+				{FromKey: "mid", ToKey: "child", Type: string(types.DepBlocks)},
+			},
+			hop: "mid",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, _ := withGraphApplyTestStore(t)
+
+			plan := &GraphApplyPlan{Nodes: tt.nodes, Edges: tt.edges}
+			if err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{}); err != nil {
+				t.Fatalf("validateGraphApplyPlan: %v", err)
+			}
+			result, err := executeGraphApply(ctx, plan, GraphApplyOptions{})
+			if err != nil {
+				t.Fatalf("executeGraphApply: %v", err)
+			}
+
+			deps, err := store.GetDependenciesWithMetadata(ctx, result.IDs["parent"])
+			if err != nil {
+				t.Fatalf("GetDependenciesWithMetadata(parent): %v", err)
+			}
+			if len(deps) != 1 || deps[0].ID != result.IDs[tt.hop] || deps[0].DependencyType != types.DepWaitsFor {
+				t.Fatalf("parent dependencies = %+v, want one waits-for edge to %s", deps, result.IDs[tt.hop])
+			}
+		})
+	}
+}
+
+// TestExecuteGraphApplyFinalGateCatchesCycleHiddenFromPerEdgeChecks restores
+// the deleted fake-store
+// TestExecuteGraphApplyUnitFinalGateCatchesCycleHiddenFromPerEdgeChecks. That
+// test blinded the fake store's per-edge cycle probe; the real request has the
+// same switch, SkipPerEdgeCycleCheck, which drops the per-edge probe but never
+// the end gate. With it set, the plans TestExecuteGraphApplyRejectsCombinedSchedulingCycle
+// and TestExecuteGraphApplyRejectsCycleHiddenInInlineDep send through
+// executeGraphApply must still be refused, by the end gate alone.
+func TestExecuteGraphApplyFinalGateCatchesCycleHiddenFromPerEdgeChecks(t *testing.T) {
+	tests := []struct {
+		name string
+		plan *GraphApplyPlan
+	}{
+		{
+			name: "explicit parent-child edge",
+			plan: &GraphApplyPlan{
+				Nodes: []GraphApplyNode{
+					{Key: "a", Title: "A", Type: "task"},
+					{Key: "b", Title: "B", Type: "task"},
+					{Key: "c", Title: "C", Type: "task"},
+				},
+				Edges: []GraphApplyEdge{
+					{FromKey: "a", ToKey: "b", Type: string(types.DepBlocks)},
+					{FromKey: "b", ToKey: "c", Type: string(types.DepParentChild)},
+					{FromKey: "c", ToKey: "a", Type: string(types.DepConditionalBlocks)},
+				},
+			},
+		},
+		{
+			name: "inline parent-child dependency",
+			plan: &GraphApplyPlan{
+				Nodes: []GraphApplyNode{
+					{Key: "a", Title: "A", Type: "task"},
+					{Key: "b", Title: "B", Type: "task", Deps: []GraphApplyNodeDep{{Type: string(types.DepParentChild), Target: "c"}}},
+					{Key: "c", Title: "C", Type: "task"},
+				},
+				Edges: []GraphApplyEdge{
+					{FromKey: "a", ToKey: "b", Type: string(types.DepBlocks)},
+					{FromKey: "c", ToKey: "a", Type: string(types.DepConditionalBlocks)},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, db := withGraphApplyTestStore(t)
+
+			req, err := buildGraphApplyBatchRequest(tt.plan, GraphApplyOptions{}, actor, "")
+			if err != nil {
+				t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+			}
+			req.SkipPerEdgeCycleCheck = true
+			applier, err := store.BatchApplier()
+			if err != nil {
+				t.Fatalf("BatchApplier: %v", err)
+			}
+			_, err = applier.ApplyBatch(ctx, req)
+			// The end gate's own wording: the per-edge probe would have said
+			// "adding dependency would create a cycle" against one item.
+			if err == nil || !strings.Contains(err.Error(), "dependency cycle would be created") {
+				t.Fatalf("end gate error = %v, want the whole-graph cycle rejection", err)
+			}
+
+			var count int
+			if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&count); err != nil {
+				t.Fatalf("query issue rows: %v", err)
+			}
+			if count != 0 {
+				t.Fatalf("issue rows after rejected plan = %d, want 0", count)
 			}
 		})
 	}

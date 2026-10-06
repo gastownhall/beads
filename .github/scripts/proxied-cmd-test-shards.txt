@@ -258,6 +258,7 @@
 
 30 2 TestProxiedServerDelete
 30 2 TestProxiedServerDeleteForceOrphans
+30 2 TestProxiedServerIfRevisionGuardAssign
 30 2 TestProxiedServerListComments
 30 2 TestProxiedServerPromote
 30 2 TestProxiedServerTypesAgreeWithCreate
@@ -361,6 +362,7 @@
 30 17 TestProxiedServerClose
 30 17 TestProxiedServerConfigConcurrent
 30 17 TestProxiedServerDeleteConcurrent
+30 17 TestProxiedServerIfRevisionGuardUpdate
 30 17 TestProxiedServerSearch
 30 17 TestProxiedServerServeReadParity
 30 17 TestProxiedServerStatus
@@ -374,6 +376,7 @@
 
 30 19 TestProxiedServerCreate2
 30 19 TestProxiedServerEdit
+30 19 TestProxiedServerIfRevisionGuardReopen
 30 19 TestProxiedServerPourRejectsEnumViolatingVar
 30 19 TestProxiedServerReassignFence
 30 19 TestProxiedServerUpdateWisp
@@ -431,6 +434,7 @@
 30 26 TestProxiedServerState
 
 30 27 TestProxiedServerBlocked
+30 27 TestProxiedServerIfRevisionGuardClose
 30 27 TestProxiedServerMolLastActivity
 30 27 TestProxiedServerMolStale
 30 27 TestProxiedServerMoleculeFrontDoorWriteParity
@@ -448,6 +452,7 @@
 30 29 TestProxiedServerDep
 30 29 TestProxiedServerDepListSingleIDWarnsOnDroppedExternalEdge
 30 29 TestProxiedServerHistoryRemoteRefusalFrontDoorMatrix
+30 29 TestProxiedServerIfRevisionGuardDelete
 30 29 TestProxiedServerTag
 30 29 TestProxiedServerWispList
 

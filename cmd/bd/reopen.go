@@ -106,9 +106,15 @@ another actor won the race, so retrying the same guard is pointless).`,
 				Provenance: "bd: reopen " + fullID,
 			})
 			if err != nil {
-				if reported, ok := reportIfRevisionFailure("reopening", fullID, err, ifRevision); ok {
-					result.Close()
-					return reported
+				// Only a guarded reopen reports through the conditional-write
+				// envelope: the classifier maps storage.ErrNotFound to
+				// precondition_failed, which an unguarded reopen racing a
+				// delete must not claim.
+				if ifRevision != nil {
+					if reported, ok := reportIfRevisionFailure("reopening", fullID, err, ifRevision); ok {
+						result.Close()
+						return reported
+					}
 				}
 				fmt.Fprintf(os.Stderr, "Error reopening %s: %v\n", fullID, err)
 				hasError = true

@@ -815,7 +815,7 @@ go_test(
         "identity_preview_gate_test.go",
         "identity_preview_refusal_test.go",
         "if_revision_embedded_test.go",
-        "if_revision_gc_matcher_test.go",
+        "if_revision_gc_matcher_embedded_test.go",
         "if_revision_proxied_close_delete_test.go",
         "if_revision_proxied_integration_test.go",
         "if_revision_reassign_fence_embedded_test.go",
