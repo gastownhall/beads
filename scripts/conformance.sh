@@ -58,6 +58,6 @@ echo "==> Tier 3: served HTTP client/role conformance (real server, real wire)"
 # functions by regex except the embedded-Dolt conformance partition (which
 # this isn't). -timeout=40m matches the budget the review asked for.
 CGO_ENABLED=1 BEADS_TEST_EMBEDDED_DOLT=1 BEADS_HTTP_TEST_REQUIRED=1 \
-  go test -timeout=40m ./internal/httpclient/
+  go test -tags "$TAGS" -timeout=40m ./internal/httpclient/
 
 echo "==> conformance OK"
