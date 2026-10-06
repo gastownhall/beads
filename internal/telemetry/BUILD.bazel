@@ -6,6 +6,7 @@ go_library(
         "batch_applier.go",
         "batch_closer.go",
         "batch_creator.go",
+        "batch_getter.go",
         "blockingannotator.go",
         "bootstrapper.go",
         "commenter.go",
@@ -61,6 +62,7 @@ go_library(
 go_test(
     name = "telemetry_test",
     srcs = [
+        "batch_close_policy_test.go",
         "issue_claimer_test.go",
         "issue_operations_test.go",
         "issue_reader_test.go",
@@ -71,6 +73,7 @@ go_test(
     embed = [":telemetry"],
     deps = [
         "//internal/storage",
+        "//internal/storage/domain",
         "//internal/storage/externaldeps",
         "//issueops",
         "//memoryops",

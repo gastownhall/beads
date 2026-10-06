@@ -153,6 +153,7 @@ go_test(
         "migration_0069_datetime_precision_test.go",
         "migration_0070_add_participation_generation_test.go",
         "migration_body_drain_test.go",
+        "migration_watchdog_test.go",
         "progress_test.go",
         "remote_migrate_gate_test.go",
         "schema_skew_test.go",
@@ -169,6 +170,7 @@ go_test(
         "//internal/testutil",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
         "@com_github_go_sql_driver_mysql//:mysql",
+        "@org_golang_x_term//:term",
     ],
 )
 
@@ -178,6 +180,12 @@ filegroup(
     name = "migrations",
     srcs = glob(["migrations/**"]),
     visibility = ["//internal/storage:__subpackages__"],
+)
+
+# Linked from the root and engdocs AGENTS.md; //:docsync_files checks those links.
+exports_files(
+    ["migrations/README.md"],
+    visibility = ["//:__pkg__"],
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

@@ -47,6 +47,20 @@ const (
 	// maxInflight bounds handlers that touch the database. Every unit of work
 	// pins one SQL connection, so this is also the steady-state connection
 	// count.
+	//
+	// It also bounds a request body's decode memory, worst case: every
+	// inflight slot is free to decode a full maxApplyBatchBodyBytes body
+	// concurrently before either the large-apply semaphore or anything else
+	// narrows it further, so the raw-bytes ceiling for POST issues:batchApply
+	// alone is maxInflight * maxApplyBatchBodyBytes (16 * 16 MiB = 256 MiB at
+	// today's defaults), and the decoded Go structures (strings, maps, slices
+	// of *CreateItem etc.) cost a further multiple of that on top — operators
+	// sizing this process's memory limit should budget for it. This is not
+	// actively capped narrower than maxInflight itself: only one of those
+	// concurrent decodes can go on to hold the one-wide large-apply slot
+	// (acquireLargeApply), so a decode that loses the race is refused with
+	// ErrBusy and its now-unreferenced ApplyBatchRequest is left for the next
+	// GC cycle — nothing in this file extends its lifetime past that refusal.
 	maxInflight = 16
 	// maxConns bounds ACCEPTED connections. The semaphore does not: Go spawns
 	// a goroutine per connection, and one parked on a full semaphore still
@@ -70,8 +84,29 @@ const (
 	// the commit, so a graceful shutdown does not kill a connection whose write
 	// may already have landed.
 	drainTimeout = 20 * time.Second
+	// drainGrace is added on top of an in-flight large apply's own remaining
+	// deadline when extending the drain budget, so the response has time to
+	// be written back to the client after that apply's transaction commits
+	// right at its deadline, instead of the drain ending the instant the
+	// deadline is reached.
+	drainGrace = 5 * time.Second
 	// uowCloseTimeout bounds the DETACHED close described on WithUOW.
 	uowCloseTimeout = 5 * time.Second
+	// DefaultLargeApplyCeiling is Config.LargeApplyCeiling's default: the
+	// whole-run budget a POST issues:batchApply request over
+	// largeApplyItemThreshold items gets once it holds the one-wide
+	// large-apply slot (acquireLargeApply). It is an operator-configurable
+	// CEILING rather than a per-request formula — every request that clears
+	// the threshold gets this whole budget from the moment it acquires the
+	// slot, whether it carries 101 items or 1000, because scaling it down for
+	// a request well under the envelope's top end would narrow a caller's
+	// budget for a reason unrelated to what it actually sent.
+	//
+	// It is exported so `bd serve --large-apply-ceiling` defaults to this
+	// same value instead of repeating it: bd serve always passes a positive
+	// ceiling, so a second literal there, not this constant, would be the
+	// default every bd serve deployment actually runs with.
+	DefaultLargeApplyCeiling = 5 * time.Minute
 )
 
 // Pool limits for the provider's *sql.DB. The semaphore bounds handlers, not
@@ -135,6 +170,26 @@ type Config struct {
 	// service DNS name, which the rebinding defense would otherwise refuse;
 	// see newHostPolicy. Empty leaves today's policy exactly as it was.
 	AllowedHosts []string
+	// LargeApplyCeiling bounds how long POST /v0/beads/issues:batchApply may
+	// hold a write transaction for a request over largeApplyItemThreshold
+	// items (batch_apply.go). Zero takes DefaultLargeApplyCeiling (5
+	// minutes). It is wired to `bd serve --large-apply-ceiling`.
+	//
+	// It is a CEILING, not a target — see DefaultLargeApplyCeiling for why
+	// every request over the threshold gets the whole budget rather than a
+	// value scaled to its item count. Raising or lowering it is an
+	// operational decision, not a wire change: it does not move
+	// largeApplyItemThreshold, maxApplyBatchBodyBytes or
+	// issueops.MaxApplyBatchItems, which is why TestCapBatchApplyLargeTiesAllThreeLimits
+	// exists — a build that lowers this without also removing the
+	// issues.batchApplyLarge capability token would otherwise advertise a
+	// budget it no longer honors.
+	//
+	// The orchestrator's stop grace must be at least this long plus
+	// drainGrace (5s): Serve's drain extends its budget to an in-flight large
+	// apply's remaining deadline plus drainGrace, but a SIGKILL from outside
+	// this process does not consult it. See engdocs/SERVE_RUNBOOK.md.
+	LargeApplyCeiling time.Duration
 	// Provider is where every database-touching handler opens its one unit of
 	// work per request.
 	Provider uow.UnitOfWorkProvider
@@ -224,6 +279,14 @@ type Config struct {
 	// and neither can answer the other's question. Required on the same terms
 	// as every field here.
 	GraphCounter issueops.GraphCounter
+	// BatchGetter is the one-snapshot, many-ids read behind
+	// POST /v0/beads/issues:batchGet. It is a SEPARATE field from Reader for
+	// the reason EdgeReader and GraphCounter are separate from each other:
+	// Reader.Get answers ONE id with *IssueDetails or ErrNotFound, and this
+	// answers MANY ids with a result whose Missing field reports an absent row
+	// rather than refusing the call. Required on the same terms as every field
+	// here.
+	BatchGetter issueops.BatchGetter
 	// Relations is the single-anchor neighbor read behind
 	// GET /v0/beads/issues/{id}/related. It is a SEPARATE field from EdgeReader
 	// for the reason issueops.EdgeReader's own doc gives at length: that role
@@ -359,6 +422,7 @@ type Server struct {
 	issueCycles       issueops.CycleDetector
 	issueEdges        issueops.EdgeReader
 	issueEdgeCounter  issueops.GraphCounter
+	issueBatchGetter  issueops.BatchGetter
 	issueRelations    issueops.Relations
 	issueCommenter    issueops.Commenter
 	issueBlocking     issueops.BlockingAnnotator
@@ -381,17 +445,76 @@ type Server struct {
 	// sem bounds handlers that touch the database. Buffered channel rather
 	// than sync.Semaphore so the acquisition can select on a timer.
 	sem chan struct{}
+	// largeApplySem is the ONE-WIDE "large write" semaphore: a POST
+	// issues:batchApply request carrying more than largeApplyItemThreshold
+	// items holds this slot for the whole call, so at most one oversized
+	// batch-apply transaction runs at a time no matter how many ordinary
+	// requests sem admits concurrently. It is separate from sem (which
+	// bounds ALL database-touching handlers) because the two answer
+	// different questions: sem is "how many handlers may run", this is "how
+	// many may hold a write transaction open for minutes". A small apply
+	// never touches it.
+	//
+	// The wait to acquire this slot is itself BOUNDED — see
+	// acquireLargeApply — deliberately: a goroutine queued here still holds
+	// its sem slot (route() acquires sem before the handler ever runs), so
+	// an unbounded wait here would starve every other request behind a full
+	// sem the instant enough large applies queued up.
+	largeApplySem chan struct{}
+	// largeApplyCeiling is the resolved Config.LargeApplyCeiling (defaulted
+	// via orDefault to DefaultLargeApplyCeiling). acquireLargeApply builds
+	// each run's deadline from this, fresh, at the moment the slot is
+	// acquired — never before, so time spent queued is never charged against
+	// the run itself.
+	largeApplyCeiling time.Duration
+	// largeApplyDeadline is the wall-clock deadline of the large apply
+	// currently holding largeApplySem, or nil when none is in flight.
+	// Serve's graceful-drain shutdown reads it to decide how long to wait
+	// for that request rather than cutting it off at the ordinary
+	// drainTimeout: a graceful drain waits for an in-flight large apply up to
+	// its own deadline, and — because acquireLargeApply refuses a NEW
+	// acquisition once s.closing fires — that in-flight request is the only
+	// one the budget ever has to cover.
+	largeApplyDeadline atomic.Pointer[time.Time]
+	// largeApplyWaiting gates the BOUNDED wait in acquireLargeApply to at
+	// most one goroutine at a time. Without this, every large request beyond
+	// the one holding largeApplySem would still queue for up to semTimeout
+	// waiting on the slot — and each queued goroutine holds its own sem slot
+	// the whole time it waits (route() acquires sem before the handler runs),
+	// so a burst of large requests could occupy up to semTimeout worth of
+	// general concurrency slots simply queueing, starving ordinary small
+	// requests for that whole window even though only one of them could ever
+	// win the large-apply slot. A second large request arriving while one is
+	// already queued is refused immediately (ErrBusy, no wait at all) instead
+	// of queueing behind it.
+	largeApplyWaiting atomic.Bool
 	// auth is nil on an unauthenticated server, which is the loopback default.
 	auth *TokenFileAuth
-	// semTimeout, semWarn, writeStall, watchPoll and watchBeat default to the
-	// constants above. They are fields rather than constants at the point of use
-	// so the queueing, stalled-write and streaming behavior can be exercised in
-	// milliseconds instead of tens of seconds.
+	// semTimeout, semWarn, writeStall, watchPoll, watchBeat and drainTimeout
+	// default to the constants above. They are fields rather than constants
+	// at the point of use so the queueing, stalled-write, streaming and
+	// drain behavior can be exercised in milliseconds instead of tens of
+	// seconds.
 	semTimeout time.Duration
 	semWarn    time.Duration
 	writeStall time.Duration
 	watchPoll  time.Duration
 	watchBeat  time.Duration
+	// minClientWireRevision is the field checkWireRevision enforces against.
+	// It starts at the package constant MinClientWireRevision and exists as
+	// a field, rather than a direct read of that constant, only so a test can
+	// raise the floor in milliseconds the way it shrinks semTimeout above —
+	// production never overrides it. Unlike semTimeout et al it is an int
+	// with no zero-value ambiguity to paper over with orDefault: the
+	// constant's own real-world default is 0, so a freshly zeroed Server
+	// behaves identically whether or not Listen ran yet.
+	minClientWireRevision int
+	// drainTimeout overrides the package-level drainTimeout constant used as
+	// drainBudget's floor. A test shrinks this to prove Serve's drain
+	// actually EXTENDS past it for an in-flight large apply, instead of
+	// merely asserting the pure drainBudget helper's return value — see
+	// TestServeExtendsDrainPastAFixedFloorForAnInFlightLargeApply.
+	drainTimeout time.Duration
 
 	// closing is closed when a graceful shutdown begins, and it is the ONLY
 	// notice a streaming handler gets: http.Server.Shutdown waits for active
@@ -511,6 +634,7 @@ func Listen(cfg Config) (*Server, error) {
 		issueCycles:       cfg.CycleDetector,
 		issueEdges:        cfg.EdgeReader,
 		issueEdgeCounter:  cfg.GraphCounter,
+		issueBatchGetter:  cfg.BatchGetter,
 		issueRelations:    cfg.Relations,
 		issueCommenter:    cfg.Commenter,
 		issueBlocking:     cfg.BlockingAnnotator,
@@ -527,9 +651,12 @@ func Listen(cfg Config) (*Server, error) {
 		workspaceMemories: cfg.Memories,
 		eventsJournal:     cfg.EventsJournal,
 
-		sem:        make(chan struct{}, maxInflight),
-		semTimeout: semAcquireTimeout,
-		semWarn:    saturationWarn,
+		sem:                   make(chan struct{}, maxInflight),
+		semTimeout:            semAcquireTimeout,
+		semWarn:               saturationWarn,
+		minClientWireRevision: MinClientWireRevision,
+		largeApplySem:         make(chan struct{}, 1),
+		largeApplyCeiling:     orDefault(cfg.LargeApplyCeiling, DefaultLargeApplyCeiling),
 
 		closing:         make(chan struct{}),
 		maxWatchStreams: maxWatchStreams,
@@ -630,12 +757,12 @@ func Listen(cfg Config) (*Server, error) {
 // "all or nothing" would turn an honest condition into a special case inside
 // three functions. It is checked once, on its own, below.
 func sourceRoles(cfg Config) []any {
-	return []any{cfg.Reader, cfg.Claimer, cfg.ReadyClaimer, cfg.Releaser, cfg.Lifecycle, cfg.BatchCloser, cfg.Settings, cfg.Stats, cfg.CycleDetector, cfg.EdgeReader, cfg.GraphCounter, cfg.Relations, cfg.Commenter, cfg.BlockingAnnotator, cfg.TreeWalker, cfg.ReadyCounter, cfg.Counter, cfg.Querier, cfg.Sweeper, cfg.Deleter, cfg.BatchCreator, cfg.DependencyEditor, cfg.BatchApplier, cfg.Memories, cfg.MetadataCAS}
+	return []any{cfg.Reader, cfg.Claimer, cfg.ReadyClaimer, cfg.Releaser, cfg.Lifecycle, cfg.BatchCloser, cfg.Settings, cfg.Stats, cfg.CycleDetector, cfg.EdgeReader, cfg.GraphCounter, cfg.BatchGetter, cfg.Relations, cfg.Commenter, cfg.BlockingAnnotator, cfg.TreeWalker, cfg.ReadyCounter, cfg.Counter, cfg.Querier, cfg.Sweeper, cfg.Deleter, cfg.BatchCreator, cfg.DependencyEditor, cfg.BatchApplier, cfg.Memories, cfg.MetadataCAS}
 }
 
 // roleSourceNames spells sourceRoles for the refusal message, in the same
 // order, so a caller reading the error learns the whole set it must pass.
-const roleSourceNames = "Reader, Claimer, ReadyClaimer, Releaser, Lifecycle, BatchCloser, Settings, Stats, CycleDetector, EdgeReader, GraphCounter, Relations, Commenter, BlockingAnnotator, TreeWalker, ReadyCounter, Counter, Querier, Sweeper, Deleter, BatchCreator, DependencyEditor, BatchApplier, Memories and MetadataCAS"
+const roleSourceNames = "Reader, Claimer, ReadyClaimer, Releaser, Lifecycle, BatchCloser, Settings, Stats, CycleDetector, EdgeReader, GraphCounter, BatchGetter, Relations, Commenter, BlockingAnnotator, TreeWalker, ReadyCounter, Counter, Querier, Sweeper, Deleter, BatchCreator, DependencyEditor, BatchApplier, Memories and MetadataCAS"
 
 func anyRoleSet(cfg Config) bool {
 	return slices.ContainsFunc(sourceRoles(cfg), func(r any) bool { return r != nil })
@@ -683,6 +810,31 @@ func checkDatabaseSource(cfg Config) error {
 // the ephemeral default.
 func (s *Server) Addr() string { return s.listener.Addr().String() }
 
+// drainBudget computes how long Serve should wait for in-flight work to
+// finish once shutdown begins. It is a pure function, pulled out of Serve so
+// the EXTENSION behavior described on Serve's doc comment — a large apply
+// still in flight gets AT LEAST the remainder of its own deadline, not just
+// the ordinary drainTimeout — can be pinned directly by a fast unit test
+// (TestDrainBudget) instead of only indirectly, via a real multi-second wait.
+//
+// base is the floor Serve uses when no large apply is in flight — ordinarily
+// the package-level drainTimeout constant, but overridable per-Server (see
+// Server.drainTimeout) so a test can shrink it and observe Serve's ACTUAL
+// drain genuinely outlasting that floor for an in-flight large apply, rather
+// than only asserting this helper's return value in isolation.
+//
+// largeApplyDeadline is s.largeApplyDeadline.Load()'s result: nil when no
+// large apply holds the slot at the moment shutdown starts.
+func drainBudget(base time.Duration, largeApplyDeadline *time.Time) time.Duration {
+	budget := base
+	if largeApplyDeadline != nil {
+		if remaining := time.Until(*largeApplyDeadline); remaining > budget {
+			budget = remaining + drainGrace
+		}
+	}
+	return budget
+}
+
 // Serve accepts requests until ctx is canceled, then drains. It returns nil
 // on a clean shutdown; a listener failure is returned as-is.
 //
@@ -690,6 +842,32 @@ func (s *Server) Addr() string { return s.listener.Addr().String() }
 // Shutdown does not cancel in-flight handler contexts: killing such a
 // connection early would leave the client unable to tell whether its write
 // landed.
+//
+// A large batch-apply can legitimately still be running at up to its own
+// largeApplyCeiling (an operator flag, 5 minutes by default) when shutdown
+// begins — far past the ordinary drainTimeout — so the budget here EXTENDS to
+// that request's own deadline when one is in flight (s.largeApplyDeadline),
+// instead of killing a transaction that may already be minutes into
+// committing. An ordinary shutdown with no large apply in flight is
+// unaffected: it still drains in drainTimeout.
+//
+// s.closing is closed here, BEFORE the budget is computed, rather than left
+// to fire only when http.Server.Shutdown is called below: RegisterOnShutdown
+// hooks (closeStreams among them) run when Shutdown is CALLED, not before, so
+// computing the budget first would leave a window where a large apply could
+// still start — and admitLargeApply's own post-acquisition recheck of
+// s.closing is the second gate that closes that window from the other side.
+//
+// This is safe to compute ONCE, at shutdown start, because
+// acquireLargeApply refuses every NEW acquisition of the large-apply slot
+// once s.closing fires: the in-flight request this budget was sized for is
+// the only one that can still be holding the slot by now, never a later
+// arrival that queued after the snapshot.
+//
+// The operator's orchestrator stop grace must be AT LEAST largeApplyCeiling
+// plus drainGrace, or a SIGKILL from outside this process can still cut off
+// an in-flight large apply this drain would otherwise have waited out; see
+// engdocs/SERVE_RUNBOOK.md.
 func (s *Server) Serve(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	go func() { errCh <- s.http.Serve(s.listener) }()
@@ -703,10 +881,17 @@ func (s *Server) Serve(ctx context.Context) error {
 	case <-ctx.Done():
 	}
 
-	s.event("shutdown_start", "drain_timeout", drainTimeout.String(), "conns", s.liveConns.Load())
+	// Close s.closing before computing the drain budget (see doc comment
+	// above): closeStreams is idempotent (sync.Once), so it is safe to call
+	// here AND still leave it registered via RegisterOnShutdown for when
+	// Shutdown runs below.
+	s.closeStreams()
+
+	budget := drainBudget(orDefault(s.drainTimeout, drainTimeout), s.largeApplyDeadline.Load())
+	s.event("shutdown_start", "drain_timeout", budget.String(), "conns", s.liveConns.Load())
 
 	// Detached: ctx is already canceled, and the drain is the point.
-	drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), drainTimeout)
+	drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
 	defer cancel()
 
 	if err := s.http.Shutdown(drainCtx); err != nil {
@@ -949,6 +1134,21 @@ func (s *Server) graphCounter(r *http.Request) (issueops.GraphCounter, error) {
 	}
 	var src uow.GraphCounterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
 	return src.GraphCounter()
+}
+
+// batchGetter returns the many-ids read surface for one request, built the
+// same two ways as edgeReader above and held by INTERFACE so
+// uow.BatchGetterSource is load-bearing rather than decorative.
+//
+// It goes out UNWRAPPED, for graphCounter's reason: the role answers with a
+// VALUE whose slices a nil-safe range walks, so no handler dereferences a
+// pointer it returned.
+func (s *Server) batchGetter(r *http.Request) (issueops.BatchGetter, error) {
+	if s.provider == nil {
+		return s.issueBatchGetter, nil
+	}
+	var src uow.BatchGetterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.BatchGetter()
 }
 
 // relations returns the single-anchor neighbor surface for one request, built
@@ -1301,6 +1501,130 @@ func orDefault(v, fallback time.Duration) time.Duration {
 	return fallback
 }
 
+// acquireLargeApply takes the one-wide large-write slot for a POST
+// issues:batchApply request over largeApplyItemThreshold items, and builds
+// that request's run context.
+//
+// THE WAIT IS BOUNDED, on the SAME orDefault(s.semTimeout, semAcquireTimeout)
+// budget acquire uses for the ordinary sem — not the caller's own request
+// deadline, and not unbounded. A goroutine queued here still holds its
+// general sem slot (route() acquires sem before the handler runs, and holds
+// it for the handler's whole lifetime), so an unbounded wait would let enough
+// queued large applies starve every other request behind a saturated sem;
+// see TestLargeApplyQueueDoesNotStarveOrdinaryRequests. Every refusal this
+// function can produce — the bounded wait expiring, s.closing firing because
+// a graceful shutdown began, or the caller's own ctx.Done() firing while
+// queued — answers ErrBusy, never a raw ctx.Err(): nothing was written in any
+// of those cases, so the caller gets a 503 with Retry-After rather than the
+// non-retryable 500 a bare context error would classify as (ClassifyError
+// deliberately excludes context errors from its 503 path for OTHER callers,
+// where a context error can mean a write is in flight — that exclusion does
+// not apply here, because this slot guards nothing but queue position).
+//
+// THE RUN DEADLINE IS STAMPED ONLY ON SUCCESS, and only once the slot is
+// actually held: runCtx is a DETACHED copy of ctx (context.WithoutCancel)
+// given a fresh largeApplyCeiling-wide timeout starting NOW, not narrowed
+// from whatever deadline ctx already carried and not started back when the
+// request first queued. That is what makes this an EXTENSION of the small
+// request's ordinary budget rather than a narrowing of it: every request
+// under largeApplyItemThreshold items runs under route()'s own unconditional
+// requestDeadline and never reaches this function at all, and a request that
+// clears the threshold gets a whole fresh largeApplyCeiling on top of
+// whatever it already spent queued. Detaching from ctx's cancellation means a
+// client disconnect mid-run does not abort an already-admitted large apply —
+// deliberate, because it is a single atomic write that should not be
+// abandoned half-considered merely because the caller stopped reading; the
+// same trade-off WithUOW's own deferred close already makes for a request
+// context.
+//
+// release cancels runCtx, clears s.largeApplyDeadline and frees the slot, in
+// that order, so nothing observes the deadline as cleared while the run
+// context is still live.
+func (s *Server) acquireLargeApply(ctx context.Context) (runCtx context.Context, release func(), err error) {
+	select {
+	case <-s.closing:
+		return nil, nil, ErrBusy
+	default:
+	}
+	select {
+	case s.largeApplySem <- struct{}{}:
+		return s.admitLargeApply(ctx)
+	default:
+	}
+
+	// At most ONE caller may queue for the slot at a time. Without this gate,
+	// every large request beyond the one already holding largeApplySem would
+	// still wait up to semTimeout below — and each of those waiters holds its
+	// own sem slot the whole time (route() acquires sem before the handler
+	// runs) — so a burst of large requests could occupy a semTimeout's worth
+	// of general concurrency slots merely queueing, starving small requests
+	// for that whole window even though only one waiter could ever win the
+	// large-apply slot. A second large request arriving while one is already
+	// queued is refused immediately: no wait, no sem slot held for it.
+	if !s.largeApplyWaiting.CompareAndSwap(false, true) {
+		return nil, nil, ErrBusy
+	}
+	defer s.largeApplyWaiting.Store(false)
+
+	timer := time.NewTimer(orDefault(s.semTimeout, semAcquireTimeout))
+	defer timer.Stop()
+	select {
+	case s.largeApplySem <- struct{}{}:
+		return s.admitLargeApply(ctx)
+	case <-timer.C:
+		return nil, nil, ErrBusy
+	case <-s.closing:
+		return nil, nil, ErrBusy
+	case <-ctx.Done():
+		// The client hung up, or the request's own (unrelated, ordinary)
+		// deadline expired, while still queued for the slot. Nothing was
+		// written — this path never opened a transaction — so it is the same
+		// ErrBusy every other refusal above answers, not ctx.Err().
+		return nil, nil, ErrBusy
+	}
+}
+
+// admitLargeApply runs once acquireLargeApply has actually taken the slot: it
+// builds the run's own detached, freshly-timed context and stamps
+// s.largeApplyDeadline for Serve's graceful-drain budget to read.
+//
+// The run context is also marked with issueops.WithExtendedRetryBudget, and
+// this is the only place that marks one: the marker, not the deadline's size,
+// is what lets a BatchApplier's commit-retry loop scale to the extended
+// budget instead of stopping at its ordinary fixed ceiling. An ordinary
+// request never reaches this function, so it stays unmarked.
+//
+// It re-checks s.closing AFTER taking the slot and storing the deadline,
+// because a select with multiple ready cases (largeApplySem and s.closing
+// both ready at once, in acquireLargeApply above) picks pseudo-randomly: the
+// slot can be won in the same instant a graceful shutdown begins, racing
+// ahead of Serve's drainBudget snapshot. Losing that race here — releasing
+// the slot and refusing with ErrBusy — is what keeps Serve's "the in-flight
+// request this budget was sized for is the only one that can still be
+// holding the slot" invariant true.
+func (s *Server) admitLargeApply(ctx context.Context) (runCtx context.Context, release func(), err error) {
+	runCtx, cancel := context.WithTimeout(
+		issueops.WithExtendedRetryBudget(context.WithoutCancel(ctx)),
+		orDefault(s.largeApplyCeiling, DefaultLargeApplyCeiling),
+	)
+	deadline, _ := runCtx.Deadline()
+	s.largeApplyDeadline.Store(&deadline)
+	release = func() {
+		cancel()
+		s.largeApplyDeadline.Store(nil)
+		<-s.largeApplySem
+	}
+
+	select {
+	case <-s.closing:
+		release()
+		return nil, nil, ErrBusy
+	default:
+	}
+
+	return runCtx, release, nil
+}
+
 // handler builds the whole request path: the route table's registrations, the
 // catch-all that keeps unrouted paths on the same error shape, and the
 // middleware in front of both.
@@ -1578,6 +1902,18 @@ func (s *Server) route(rt route) http.Handler {
 		// behind the authentication gate.
 		if !rt.projectExempt {
 			if res := s.checkProjectStamp(r); res != nil {
+				s.fail(w, r, *res)
+				return
+			}
+		}
+
+		// Wire-floor before resources, same as the project stamp: a client that
+		// has declared a revision this build no longer supports is turned away
+		// before it can buy a database slot or open a unit of work. Checked on
+		// every route but health (see wireRevisionExempt) — including the
+		// identity handshake, where catching the mismatch is cheapest.
+		if !rt.wireRevisionExempt {
+			if res := s.checkWireRevision(r); res != nil {
 				s.fail(w, r, *res)
 				return
 			}
@@ -1956,6 +2292,12 @@ func (s *Server) logStartup() {
 		"max_conns", maxConns,
 		"sem_wait", semAcquireTimeout.String(),
 		"deadline", requestDeadline.String(),
+		// large_apply_ceiling is the PER-ROUTE budget a POST
+		// issues:batchApply request over largeApplyItemThreshold items gets,
+		// separate from the ordinary "deadline" above: an operator reading
+		// this line must not conclude every request here is bounded by the
+		// 60s "deadline" figure just because that is the only one printed.
+		"large_apply_ceiling", orDefault(s.largeApplyCeiling, DefaultLargeApplyCeiling).String(),
 	}
 	// The pool bounds are this server's, applied to the provider above. On the
 	// roles source there is no pool here to bound, and printing the numbers

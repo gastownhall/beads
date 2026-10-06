@@ -29,6 +29,8 @@ go_library(
 go_test(
     name = "server_test",
     srcs = [
+        "doltserver_exit_unix_test.go",
+        "doltserver_internal_test.go",
         "doltserver_test.go",
         "external_dolt_server_test.go",
         "testmain_test.go",

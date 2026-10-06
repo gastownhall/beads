@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_test")
 go_test(
     name = "docsync_test",
     srcs = [
+        "agentfiles_test.go",
         "docsync_test.go",
         "doltpin_test.go",
         "init_safety_recovery_test.go",

@@ -2,6 +2,50 @@
 
 Thank you for your interest in contributing to bd! This document provides guidelines and instructions for contributing.
 
+## Issues and pull requests
+
+GitHub Issues is the public tracker, and every pull request links a
+documented issue. The issue is where the context lives: why the change is
+needed, what it affects, and how we will know it works. File it with the bug
+or feature form before or alongside your pull request; it does not need
+maintainer approval first.
+
+### Triage labels
+
+| Label | Meaning | Applied by |
+|---|---|---|
+| `status/needs-triage` | Awaiting initial triage. | Automation, on every new issue |
+| `status/needs-info` | Waiting on essential information from the reporter. | Maintainers |
+| `status/needs-repro` | Needs a reproducible bug report. | Maintainers |
+| `status/needs-design` | The direction needs a design decision before work starts. | Maintainers |
+| `status/accepted` | Confirmed and on our radar. | Maintainers |
+
+Issues left in `status/needs-info` or `status/needs-repro` are closed after 14
+days without a reply to the request; reply with the details and a
+maintainer will reopen them.
+Priority (`priority/p0`–`priority/p3`) and kind (`kind/bug`, `kind/feature`,
+`kind/docs`, `kind/chore`) labels are set during triage.
+
+### Pull request pipeline labels
+
+These labels drive the maintainers' automated review and merge workflow. They
+are applied by maintainers and automation; contributors don't need to set
+them.
+
+| Label | Meaning |
+|---|---|
+| `status/needs-review` | Request the PR review workflow. |
+| `status/needs-review-auto` | Request the automated PR review workflow. |
+| `status/reviewing` | The PR review workflow is running. |
+| `status/review-failed` | The PR review workflow failed before merge-ready. |
+| `status/merge-ready` | The PR is ready for the merge workflow. |
+| `status/merge-queued` | Queued for deterministic PR-review merge. |
+| `status/merge-failed` | The merge queue needs operator attention. |
+| `status/needs-bugflow` | Request the bugflow investigation workflow. |
+
+The current priorities are on the [roadmap](ROADMAP.md); work in a priority
+area is reviewed first.
+
 ## Development Setup
 
 ### Prerequisites
@@ -28,6 +72,12 @@ make test
 # Build and install locally to ~/.local/bin
 make install
 ```
+
+Optional: if you use Bazel, opt in to the project's anonymous, read-only
+build cache by adding `build --config=fork-cache` to your gitignored
+`.bazelrc.local` (or pass `--config=fork-cache` per command). Results CI
+already computed become cache hits, and nothing you build is uploaded. It is
+off by default.
 
 ## Project Structure
 
@@ -90,21 +140,23 @@ engine, or expand the database schema when issue metadata is sufficient.
 
 ### Workflow
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/my-feature`)
+1. Find or file a documented issue (see [Issues and pull requests](#issues-and-pull-requests))
+2. Fork the repository and create a feature branch (`git checkout -b feature/my-feature`)
 3. Make your changes
 4. Add tests for new functionality
 5. Run tests and linter locally
 6. Commit your changes with clear messages
 7. Push to your fork
-8. Open a pull request
+8. Open a pull request whose description says `Closes #<issue>`
 
 ### Commit Messages
 
-Write clear, concise commit messages:
+Use [Conventional Commits](https://www.conventionalcommits.org/):
+`type(scope): summary`, where type is one of `fix`, `feat`, `docs`, `test`,
+`refactor`, `chore`, `ci`, or `perf`.
 
 ```
-Add cycle detection for dependency graphs
+feat(dep): add cycle detection for dependency graphs
 
 - Implement recursive CTE-based cycle detection
 - Add tests for simple and complex cycles
@@ -114,6 +166,10 @@ Add cycle detection for dependency graphs
 ### Pull Request Hygiene
 
 **One issue per PR, and one PR per issue.** No piggybacking or riders — each PR should address exactly one thing.
+
+Read [CONTRIBUTING_PR_GUIDELINES.md](CONTRIBUTING_PR_GUIDELINES.md) for the
+layering rules (schema → storage/issueops → cmd/bd, one layer per PR) and the
+repro and benchmark evidence reviewers expect.
 
 - Keep PRs focused on a single feature or fix
 - Do not include unrelated changes, cleanup, or "while I'm here" improvements
@@ -178,22 +234,12 @@ round-trip paths should pattern-match on those tests.
 
 ## Feature Requests and Bug Reports
 
-### Reporting Bugs
-
-Include in your bug report:
-- Steps to reproduce
-- Expected behavior
-- Actual behavior
-- Version of bd (`bd version` if implemented)
-- Operating system and Go version
-
-### Feature Requests
-
-When proposing new features:
-- Explain the use case
-- Describe the proposed solution
-- Consider backwards compatibility
-- Discuss alternatives you've considered
+Use the issue forms: [bug report](https://github.com/gastownhall/beads/issues/new?template=bug_report.yml)
+or [feature request](https://github.com/gastownhall/beads/issues/new?template=feature_request.yml).
+The feature form asks for the motivation, impact, risk and compatibility,
+and verification plan up front, so a maintainer can accept the issue without
+a round trip. Questions go to
+[Discussions](https://github.com/gastownhall/beads/discussions).
 
 ## Your PR Will Not Be Overwritten
 
@@ -291,7 +337,7 @@ docker run --rm -v $(pwd):/workspace -w /workspace nixos/nix \
 
 If the build fails with a `vendorHash` mismatch, run `./scripts/update-nix-vendorhash.sh` to recompute and update `default.nix`, or update it manually with the `got:` hash from the error message and rebuild.
 
-The `nix build` CI job (`.github/workflows/nix-build.yml`) runs on any PR that touches `go.mod`, `go.sum`, `default.nix`, `flake.nix`, or `flake.lock`, so dependabot bumps that invalidate `vendorHash` fail loudly instead of silently breaking Nix users on main. For dependabot Go-module bumps specifically, `.github/workflows/update-vendor-hash.yml` runs the same `update-nix-vendorhash.sh` script and pushes the hash bump back to the dependabot branch automatically (note: GitHub does not retrigger `pull_request` workflows for `GITHUB_TOKEN`-authored commits, so a maintainer may need to re-run `nix build .#default` once after the auto-fix push to mark the gate green).
+On a PR, this is covered by PR Risk's required `test-nix` job (`.github/workflows/pr-risk.yml`), which runs `nix run .#default -- --help` plus `nix flake check -L` on every PR touching `go.mod`, `go.sum`, `default.nix`, `flake.nix`, or `flake.lock` -- a superset of plain `nix build .#default`. `.github/workflows/nix-build.yml` dropped its own `pull_request` trigger as redundant (F7c, spec-f7.md §2.4) and now only runs `nix build .#default` on push to `main` and on `workflow_dispatch`, so dependabot bumps that invalidate `vendorHash` still fail loudly post-merge instead of silently breaking Nix users on main. For dependabot Go-module bumps specifically, `.github/workflows/update-vendor-hash.yml` runs the same `update-nix-vendorhash.sh` script and pushes the hash bump back to the dependabot branch automatically (note: GitHub does not retrigger `pull_request` workflows for `GITHUB_TOKEN`-authored commits, so a maintainer may need to re-run PR Risk's `test-nix` once after the auto-fix push to mark the gate green).
 
 ### Debugging
 
@@ -309,11 +355,15 @@ dlv debug ./cmd/bd -- create "Test issue"
 
 (For maintainers)
 
-1. Update version in code
-2. Update CHANGELOG.md
-3. Tag release: `git tag v0.x.0`
-4. Push tag: `git push origin v0.x.0`
-5. GitHub Actions will build and publish
+Follow [RELEASING.md](RELEASING.md); it is the canonical release process.
+
+The pre-push version gate requires Go and validates each `v*` release tag
+against the checkout's canonical version. A batch containing different release
+versions is refused; push only the tag matching this checkout.
+
+`bd preflight` finds the nearest Beads source module by walking ancestor
+directories, checking both source markers and the module identity. Its version
+check runs directly in Go; `scripts/check-versions.sh` remains a Bash entrypoint.
 
 ## Questions?
 

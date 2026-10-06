@@ -8,7 +8,7 @@ import (
 
 // versionScopeCalls are the ways a function binds versioned-history activation
 // to the concrete transaction it just began: the store helper, or the issueops
-// primitive it wraps (runDoltTransaction calls the latter directly).
+// primitive it wraps (runDoltTransactionRecording calls the latter directly).
 var versionScopeCalls = map[string]bool{
 	"scopeVersionedHistoryTransaction": true,
 	"ScopeVersionedHistoryTransaction": true,
@@ -98,7 +98,7 @@ func TestEveryRawTxVersionScopeIsScopedOrExempt(t *testing.T) {
 	for key, f := range doltFns {
 		// In scope: a function that mints its own transaction AND hands it to a
 		// versioning mutator IN ITS OWN BODY. A function given a tx by
-		// withWriteTx/runDoltTransaction inherits their scoping, and those two
+		// commitWriteTx/runDoltTransactionRecording inherits their scoping, and those two
 		// are covered by TestTxMintingWrappersScopeVersionedHistory below.
 		// Reachability is deliberately DIRECT, for the reasons the journal
 		// guard documents at length.
@@ -139,15 +139,24 @@ func TestEveryRawTxVersionScopeIsScopedOrExempt(t *testing.T) {
 // mutator themselves — the callback does, one frame down.
 //
 // They are also where the defect this guard exists for actually lived.
-// runDoltTransaction is the entry point for bd create, batch create/import,
-// bd graph apply, merge_slot and the CLI transact wrappers, so an unscoped
-// runDoltTransaction leaves most of the issues plane unversioned while every
+// runDoltTransaction (whose transaction is runDoltTransactionRecording) is the
+// entry point for bd create, batch create/import, bd graph apply, merge_slot
+// and the CLI transact wrappers, so an unscoped runDoltTransactionRecording
+// leaves most of the issues plane unversioned while every
 // raw-tx site in the scan above still looks perfectly scoped. Deleting its
 // scope call does NOT fail the scan (verified by deleting it) — which is why
 // this second arm exists rather than being folded into the first.
 var txMintingWrappers = []string{
-	"DoltStore.runDoltTransaction",
-	"DoltStore.commitWriteTx",
+	"DoltStore.runDoltTransactionRecording",
+	// withWriteTx and withRetryTx delegate transaction creation and scoping to
+	// commitWriteTx, which itself only delegates to commitWriteTxOn(ctx, s.db,
+	// fn) — the mc-zndi7.73 delete-fence split moved the actual BeginTx call
+	// (and the scope calls beside it) down into commitWriteTxOn so a caller
+	// holding a session-scoped resource (withDeleteFence's GET_LOCK'd
+	// *sql.Conn) could mint the retried transaction on THAT connection
+	// instead of the pool. commitWriteTxOn is therefore the real tx-minting
+	// wrapper now; list it, not its thin commitWriteTx delegate.
+	"DoltStore.commitWriteTxOn",
 }
 
 // TestTxMintingWrappersScopeVersionedHistory covers the half

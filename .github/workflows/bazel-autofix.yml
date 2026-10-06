@@ -10,9 +10,13 @@
 # recipe (fork PRs). Drift elsewhere (third_party/patches, go.mod) is never
 # patched; the failing run lists it for a human.
 #
-# Trigger: only "Bazel" (bazel.yml on pull_request), the one workflow that
-# uploads bazel-sync-patch; pr.yml does not call bazel.yml. A run without the
-# artifact is a no-op. bazel.yml builds the PR MERGE commit, so the patch also
+# Trigger: only "PR" (pr.yml). bazel.yml has no pull_request trigger of its
+# own: PRs run it through pr.yml's `bazel` job (workflow_call), so its
+# bazel-sync-patch upload belongs to the PR run, and a failing sync step
+# fails that run. The "Bazel" workflow's own runs (push to main, dispatch)
+# are never pull_request events, so triggering on them would only ever be a
+# no-op. A PR run without the artifact (it failed for other reasons) is a
+# no-op too. bazel.yml builds the PR MERGE commit, so the patch also
 # carries any drift main has; only files in packages the PR itself changed
 # are pushed (see the script), so main's drift never lands on an unrelated PR.
 #
@@ -21,7 +25,10 @@
 # cancel-in-progress, so the two bots queue instead of racing on one branch
 # or cancelling a fix that is already running. The second one sees the moved
 # head and stops; with the PAT its push retriggers CI, which re-derives the
-# other fix.
+# other fix. Both bots now fire on the same PR run's completion, so one runs
+# while the other waits. GitHub keeps one pending job per group: a later PR
+# run finishing inside that short window can displace a waiting job, whose
+# fix the next failing run re-derives.
 #
 # SECURITY MODEL: this runs with write permissions via workflow_run, so it
 # never checks out or executes PR code. It checks out the base default branch
@@ -33,21 +40,26 @@
 # the disk) and re-checked once staged (scripts/bazel-autofix-push.sh), so a
 # hostile patch can at most rewrite BUILD.bazel / MODULE.bazel /
 # MODULE.bazel.lock on its own PR branch. Pushes are leased to the run's head
-# SHA and skipped for heads that are protected or under a ruleset.
+# SHA and skipped for heads that are protected or under a ruleset. The App
+# private key is a secret of the `autofix` environment, whose deployment-
+# branch policy allows only `main`, so only a job running on main can read
+# it; the minted token itself is scoped to this one repo with contents:write
+# only, so even a hostile patch gains nothing beyond what the job already
+# had.
 #
 # TOKEN NOTE: pushes made with the default GITHUB_TOKEN do not retrigger PR
-# checks. This reuses the DOCS_AUTOFIX_TOKEN repo secret (fine-grained PAT or
-# GitHub App token with contents:write on this repo) rather than adding a
-# second one; without it the pushed fix still lands but checks need a manual
-# re-run. Fork PRs always get the apply-recipe comment - no token we hold can
-# push to a fork. workflow_run always runs this file from the default branch,
-# so edits take effect only after they merge.
+# checks. On same-repo PRs the push step mints a short-lived installation
+# token for the gastownhall-autofix GitHub App (contents:write, scoped to
+# this repo only) and uses that instead. Fork PRs always get the apply-recipe
+# comment - no token we hold can push to a fork, so the mint step is skipped
+# for them. workflow_run always runs this file from the default branch, so
+# edits take effect only after they merge.
 
 name: Bazel Autofix
 
 on:
   workflow_run:
-    workflows: ["Bazel"]
+    workflows: ["PR"]
     types: [completed]
 
 permissions:
@@ -63,6 +75,10 @@ jobs:
       github.event.workflow_run.conclusion == 'failure'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Grants the job read access to this environment's secrets; its
+    # deployment-branch policy restricts that to jobs running on main
+    # (workflow_run always does), not to any PR branch.
+    environment: autofix
     # Shared with docs-autofix.yml; queue, never cancel (see header).
     concurrency:
       group: autofix-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
@@ -107,6 +123,22 @@ jobs:
           fi
           echo "found=true" >> "$GITHUB_OUTPUT"
 
+      # Same-repo PRs only: no token we hold can push to a fork, and a fork's
+      # head_repository can even be absent (deleted fork), so this mints
+      # nothing for it and the push script falls back to the apply-recipe
+      # comment. app-token outputs are empty (not failed) when the step is
+      # skipped, which is what the fallback below relies on.
+      - name: Mint autofix app token
+        id: app-token
+        if: github.event.workflow_run.head_repository.full_name == github.repository
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          app-id: ${{ secrets.AUTOFIX_APP_ID }}
+          private-key: ${{ secrets.AUTOFIX_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
       - name: Push sync commit or leave apply recipe
         if: steps.patch.outputs.found == 'true'
         env:
@@ -120,9 +152,9 @@ jobs:
           RUN_URL: ${{ github.event.workflow_run.html_url }}
           # Split tokens: gh api calls (PR lookup, comments) always use the
           # workflow token, which carries this job's pull-requests:write; the
-          # optional PAT is used ONLY for the git push, so it needs no more
+          # App token is used ONLY for the git push, so it needs no more
           # than contents:write.
           GH_TOKEN: ${{ github.token }}
-          PUSH_TOKEN: ${{ secrets.DOCS_AUTOFIX_TOKEN || github.token }}
-          AUTOFIX_TOKEN_KIND: ${{ secrets.DOCS_AUTOFIX_TOKEN && 'pat' || 'default' }}
+          PUSH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          AUTOFIX_TOKEN_KIND: ${{ steps.app-token.outputs.token && 'app' || 'default' }}
         run: ./scripts/bazel-autofix-push.sh

@@ -3,7 +3,7 @@ title: Recovery Playbooks
 description: Step-by-step recovery for bd init and bd dolt push/pull refusals, including the primary-key fork playbook
 ---
 
-Last reviewed: 2026-09-27
+Last reviewed: 2026-10-01
 
 Freshness source: `cmd/bd/init.go`, `cmd/bd/init_safety.go`,
 `cmd/bd/init_safety_test.go`, `cmd/bd/init_safety_help.go`, and
@@ -25,6 +25,7 @@ See also: `bd help init-safety`, and
 - [init-force-refused — `bd init --force`/`--reinit-local` refused because origin has Dolt history](#init-force-refused)
 - [init-token-missing — a destructive re-init refused because `--destroy-token` is missing or wrong](#init-token-missing)
 - [init-local-exists — `bd init --reinit-local` refused because local data already exists](#init-local-exists)
+- [init-missing-server-db — `bd init` refused because the configured server-side database is missing](#init-missing-server-db)
 - [pk-fork-refused — `bd dolt pull`/`push` refused because a table has different primary keys in its common ancestor](#pk-fork-refused)
 - [re-clone-gotchas — two gotchas hit during manual re-clone recovery: damaged stores left inside `data_dir`, and a fresh clone missing clone-local tables](#re-clone-gotchas)
 
@@ -45,9 +46,11 @@ bd init refuses: remote 'origin' already has Dolt history (refs/dolt/data).
 **Why this happens**
 
 `bd init --force` (or `--reinit-local`) tells `bd` to bypass the local
-data-safety guard. `bd init --from-jsonl` selects a local JSONL export as
-the source. But the remote already has project history. Proceeding would
-create an orphan local Dolt branch with no common ancestor on origin. The
+data-safety guard, and only that guard: neither flag bypasses this refusal
+or the [missing server-side database refusal](#init-missing-server-db).
+`bd init --from-jsonl` selects a local JSONL export as the source. But the
+remote already has project history. Proceeding would create an orphan local
+Dolt branch with no common ancestor on origin. The
 next `bd dolt push` would either fail (no common ancestor) or — worse, if
 force-pushed — destroy the team's data.
 
@@ -205,6 +208,129 @@ enough to create a restorable backup before reinitializing.
 If you did NOT expect `bd init` to be the right command here, run
 `bd doctor` first — you may be looking at a server config issue that a
 re-init won't fix.
+
+---
+
+## init-missing-server-db
+
+**Symptom**
+
+```
+⚠ Database "myproject" not found on server at 127.0.0.1:3306 (or the server could not be reached to confirm).
+This workspace was already initialized (metadata.json has a project_id from a prior
+bd init), so this looks like a recovery situation, not a fresh clone
+...
+bd init will NOT create an empty database here — that would strand any existing
+issue data behind a new, empty database of the same name.
+```
+
+**What happened**
+
+This workspace is in server mode and shows evidence of a prior `bd init`:
+`.beads/metadata.json` carries a `project_id`, or (under `--reinit-local` or
+`--force`) a workspace that predates `project_id` still has a local Dolt data
+directory, in which case the message cites that instead of `metadata.json`.
+Yet its configured database is not on the server, or the server could not be
+reached to confirm.
+
+That is treated as a **recovery** situation, not a fresh clone, and the two are
+otherwise indistinguishable from the local filesystem alone: this project's own
+database directory is absent either way, because it was never created here or
+because it was lost with the local storage. `bd init` used to resolve the
+ambiguity by assuming "fresh clone" and creating the database. When the
+assumption was wrong, the result was a new, empty database sitting at the name
+the real one used to occupy — the 2026-08-11 fleet-wide data loss.
+
+`bd init` now refuses instead, and the refusal is **not** bypassed by
+`--force` or `--reinit-local`. Those flags authorize destroying a database
+that exists; they do not authorize inventing an empty one where the configured
+database has gone missing.
+
+### 1. Find out where the database went (do this first)
+
+```
+bd doctor          # check project health
+bd dolt status     # inspect Dolt server state
+```
+
+A stopped server, a server started on the wrong port, or a wrong `--data-dir`
+all present exactly like this — and none of them need a re-init. Fixing the
+server brings the data back untouched.
+
+### 2. Restore from an export
+
+```
+bd backup restore                  # if a local backup snapshot exists
+```
+
+Also check `.beads/backup/` for a JSONL export you can import manually.
+
+### 3. Create a fresh empty database at this name
+
+**Destructive to any unrecovered data.**
+
+Only when you are certain no recoverable data exists:
+
+```
+bd init --recreate-missing --prefix myproject
+```
+
+`--recreate-missing` is per-invocation only. It is deliberately never implied
+by `--force`, `--reinit-local`, a config key, or an environment variable,
+because it authorizes the one thing this guard exists to prevent.
+
+The refusal names `--recreate-missing` but does not print this command: it also
+fires when the server merely could not be reached, so it sends you through
+steps 1 and 2 here instead of handing you a line to paste. See
+[ADR 0002 — Invariant 4](https://github.com/gastownhall/beads/blob/main/engdocs/adr/0002-init-safety-invariants.md).
+
+**Limits worth knowing**
+
+Whether a workspace meets this refusal depends on two pieces of local
+evidence: whether this project's own database directory
+(`<dolt-data-dir>/<database>/.dolt`) exists, and whether `metadata.json`
+carries a `project_id` (introduced by GH#2372). With the configured database
+missing from the server, or the server unreachable:
+
+| Local Dolt storage | `project_id` | `bd init` | `bd init --reinit-local` / `--force` |
+|---|---|---|---|
+| This project's database directory present | Either | Refused as already initialized, not by this guard | Not this guard; the ordinary re-init path |
+| Data dir present, database directory absent | Present | This refusal | This refusal |
+| Data dir present, database directory absent | Absent | Refused as already initialized, not by this guard | This refusal |
+| No Dolt data dir | Present | This refusal | This refusal |
+| No Dolt data dir | Absent | Proceeds, as for a fresh clone | Proceeds, as for a fresh clone |
+
+Adding `--recreate-missing` lifts every refusal in the last four rows,
+including the third row's "already initialized". It changes nothing in the
+first row, where this project's database is still on local disk. In
+shared-server mode the data dir is machine-global (see below), so the last two
+rows rarely apply there.
+
+- `project_id` is also inherited by a **fresh clone**, because
+  `.beads/metadata.json` is git-tracked by default. Cloning a beads-managed
+  repo whose server-side database does not exist yet therefore meets this
+  refusal rather than a plain first init. It fails in the safe direction —
+  nothing is created silently, and no existing data can be stranded — and
+  `--recreate-missing` above is the supported way through it. This is settled,
+  not pending: `engdocs/adr/0004-missing-database-guard-signal.md` records why
+  no purely-local signal can replace `project_id` here (absence of local state
+  cannot tell "never initialized here" from "initialized here, storage since
+  lost"), and why `--recreate-missing` is the permanent resolution path rather
+  than a stopgap.
+- Server mode only, and shared-server mode counts as server mode — the guard
+  tests for *this project's* database directory under the resolved Dolt data
+  dir, not for the data dir itself, which in shared mode is the machine-global
+  `~/.beads/shared-server/dolt` that is created on demand.
+- Proxied-server mode does not reach the `--reinit-local`/`--force` guard —
+  the `--proxied-server` dispatch in `runInit` (`cmd/bd/init.go`) returns
+  before it. It does reach the plain-init guard, because
+  `runInitProxiedServer` calls `checkExistingBeadsData`, so
+  **`--recreate-missing` works under `--proxied-server` too**: the flag is
+  assigned beside its flag read, upstream of every dispatch in `runInit`.
+  Keep it there. It was previously assigned next to the guard it gates, which
+  is downstream of the proxied dispatch, and the flag was therefore inert on
+  that one route while the refusal still told the operator to pass it.
+- `bd bootstrap` has its own separate mode-blind create path.
 
 ---
 

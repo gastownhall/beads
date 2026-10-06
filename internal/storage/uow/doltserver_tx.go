@@ -22,6 +22,10 @@ type doltServerTx struct {
 	// issue-version history: same binding at BeginTx, same release at
 	// releaseConn/poisonConn.
 	clearVersionScope func()
+	// clearRecheckScope is the same binding for the dependents this
+	// transaction's unblocking writes record for the post-commit
+	// blocked-state recheck (gastownhall/beads#6716).
+	clearRecheckScope func()
 }
 
 var _ Tx = (*doltServerTx)(nil)
@@ -34,6 +38,51 @@ func (t *doltServerTx) Commit(ctx context.Context, message string) error {
 	if t.done {
 		return errors.New("uow: commit: already done")
 	}
+	stmt, args, err := t.commitStatement(ctx, message)
+	if err != nil {
+		if isSerializationError(err) {
+			// As below: the server already rolled the transaction back and
+			// the caller retries the whole unit of work, so leave the
+			// pinned session in place for the retry.
+			return err
+		}
+		// A failed status check leaves the transaction open on the pinned
+		// session, exactly like a failed DOLT_COMMIT below: roll back
+		// before release, or poison the connection.
+		return t.closeOpenTxAfterFailure(ctx, err)
+	}
+	_, err = t.conn.ExecContext(ctx, stmt, args...)
+	if err == nil {
+		t.done = true
+		// The write is durable. Settle the dependents its unblocking writes
+		// recorded on a fresh snapshot before the pinned session goes back
+		// to the pool (gastownhall/beads#6716). A recheck failure is logged,
+		// never returned: the caller must not read a committed write as
+		// failed and replay it.
+		if t.recheckBlockedAfterCommit(ctx, issueops.TakeBlockedRecheck(t.conn)) {
+			t.releaseConn()
+		} else {
+			t.poisonConn()
+		}
+		return nil
+	}
+	if isSerializationError(err) {
+		// Serialization failures guarantee the transaction was already rolled
+		// back and the caller retries them, so leave the pinned session in place
+		// for the retry rather than tearing it down here.
+		return err
+	}
+	// A non-serialization DOLT_COMMIT failure leaves the transaction open on the
+	// pinned session. Roll it back before releasing the connection so the next
+	// borrower cannot inherit and implicitly commit the orphaned writes. If the
+	// rollback also fails the session state is unknown, so poison the connection
+	// and let the pool discard it instead of handing it out again.
+	return t.closeOpenTxAfterFailure(ctx, err)
+}
+
+// commitStatement picks the statement that ends the open transaction on the
+// pinned session for a commit named message.
+func (t *doltServerTx) commitStatement(ctx context.Context, message string) (string, []interface{}, error) {
 	// dolt.auto-commit=batch/off (GH#4995): defer the Dolt version commit to a
 	// later explicit commit point (bd dolt commit), the same as the embedded
 	// and direct SQL-server backends already do at their own commit sites
@@ -90,41 +139,15 @@ func (t *doltServerTx) Commit(ctx context.Context, message string) error {
 		// uow layer lets it surface as a lost-update signal
 		// (lostupdate_dolt_test.go) — swallowing it a layer down could mask a
 		// silently lost write.
-		pending, perr := issueops.HasPendingChanges(ctx, t.conn)
-		if perr != nil {
-			if isSerializationError(perr) {
-				// As below: the server already rolled the transaction back and
-				// the caller retries the whole unit of work, so leave the
-				// pinned session in place for the retry.
-				return perr
-			}
-			// A failed status check leaves the transaction open on the pinned
-			// session, exactly like a failed DOLT_COMMIT below: roll back
-			// before release, or poison the connection.
-			return t.closeOpenTxAfterFailure(ctx, perr)
+		pending, err := issueops.HasPendingChanges(ctx, t.conn)
+		if err != nil {
+			return "", nil, err
 		}
 		if !pending {
 			stmt, args = "COMMIT;", nil
 		}
 	}
-	_, err := t.conn.ExecContext(ctx, stmt, args...)
-	if err == nil {
-		t.done = true
-		t.releaseConn()
-		return nil
-	}
-	if isSerializationError(err) {
-		// Serialization failures guarantee the transaction was already rolled
-		// back and the caller retries them, so leave the pinned session in place
-		// for the retry rather than tearing it down here.
-		return err
-	}
-	// A non-serialization DOLT_COMMIT failure leaves the transaction open on the
-	// pinned session. Roll it back before releasing the connection so the next
-	// borrower cannot inherit and implicitly commit the orphaned writes. If the
-	// rollback also fails the session state is unknown, so poison the connection
-	// and let the pool discard it instead of handing it out again.
-	return t.closeOpenTxAfterFailure(ctx, err)
+	return stmt, args, nil
 }
 
 // closeOpenTxAfterFailure finishes a Commit attempt that failed with the
@@ -175,6 +198,7 @@ func (t *doltServerTx) rollbackConn(ctx context.Context) error {
 func (t *doltServerTx) releaseConn() {
 	t.releaseJournalScope()
 	t.releaseVersionScope()
+	t.releaseRecheckScope()
 	if t.conn != nil {
 		_ = t.conn.Close()
 		t.conn = nil
@@ -200,6 +224,15 @@ func (t *doltServerTx) releaseVersionScope() {
 	}
 }
 
+// releaseRecheckScope is releaseJournalScope's counterpart for the
+// blocked-recheck scope. Idempotent for the same reason.
+func (t *doltServerTx) releaseRecheckScope() {
+	if t.clearRecheckScope != nil {
+		t.clearRecheckScope()
+		t.clearRecheckScope = nil
+	}
+}
+
 // poisonConn discards the pinned session instead of returning it to the pool.
 // A session whose transaction may still be open must never be reused: because
 // go-sql-driver's ResetSession only performs a liveness check (no
@@ -209,6 +242,7 @@ func (t *doltServerTx) releaseVersionScope() {
 func (t *doltServerTx) poisonConn() {
 	t.releaseJournalScope()
 	t.releaseVersionScope()
+	t.releaseRecheckScope()
 	if t.conn == nil {
 		return
 	}

@@ -1397,3 +1397,121 @@ func TestFixHuskyHookLayout_NoHusky(t *testing.T) {
 		t.Error("h should not exist")
 	}
 }
+
+// TestCheckGitHooks_ForeignHookNotInstalled reproduces GH#6084.
+// A hook file that beads never wrote must not be reported as installed by
+// bd hooks list. Previously CheckGitHooks set Installed=true whenever
+// getHookVersion returned without error, but getHookVersion returns a zero-
+// value hookVersionInfo (IsBdHook=false) with a nil error when the file is
+// readable but contains no beads markers.
+func TestCheckGitHooks_ForeignHookNotInstalled(t *testing.T) {
+	tmpDir := newGitRepo(t)
+	runInDir(t, tmpDir, func() {
+		hooksDir := filepath.Join(tmpDir, ".git", "hooks")
+		if err := os.MkdirAll(hooksDir, 0750); err != nil {
+			t.Fatalf("failed to create hooks dir: %v", err)
+		}
+
+		// Write a hook that contains no beads markers whatsoever — exactly
+		// the script from the issue report.
+		foreignHook := "#!/bin/sh\necho hello\nexit 0\n"
+		hookPath := filepath.Join(hooksDir, "pre-commit")
+		if err := os.WriteFile(hookPath, []byte(foreignHook), 0755); err != nil {
+			t.Fatalf("failed to write foreign hook: %v", err)
+		}
+
+		statuses := CheckGitHooks()
+
+		for _, s := range statuses {
+			if s.Name != "pre-commit" {
+				continue
+			}
+			if s.Installed {
+				t.Errorf("pre-commit: got Installed=true for a foreign hook file that beads never wrote; want Installed=false (GH#6084)")
+			}
+			return
+		}
+		t.Error("pre-commit hook status not found in CheckGitHooks result")
+	})
+}
+
+// TestCheckGitHooks_BeadsHookIsInstalled verifies that the IsBdHook gate added
+// in GH#6084 does not regress recognition of genuine beads-managed hooks.
+// Each variant that getHookVersion can recognise must produce Installed=true.
+func TestCheckGitHooks_BeadsHookIsInstalled(t *testing.T) {
+	cases := []struct {
+		name          string
+		body          string
+		wantInstalled bool
+		wantOutdated  bool
+	}{
+		{
+			name: "section-marker",
+			// Minimal hook with a BEGIN BEADS INTEGRATION section marker.
+			body:          "#!/bin/sh\n" + hookSectionBeginPrefix + " v" + Version + " ---\nbd hooks run pre-commit \"$@\"\n" + hookSectionEndPrefix + " v" + Version + " ---\n",
+			wantInstalled: true,
+		},
+		{
+			name:          "legacy-version-marker",
+			body:          "#!/bin/sh\n" + hookVersionPrefix + Version + "\n# bd (beads) pre-commit hook\nbd sync --flush-only\n",
+			wantInstalled: true,
+		},
+		{
+			name:          "shim-marker",
+			body:          "#!/bin/sh\n" + shimVersionPrefix + Version + "\nexec bd hooks run pre-commit \"$@\"\n",
+			wantInstalled: true,
+		},
+		{
+			name: "inline-marker",
+			// Old bd init style: no version line, just the inline comment.
+			// bd wrote this template, so a missing version still means
+			// "re-install me": Outdated stays true (GH#1120).
+			body:          "#!/bin/sh\n# bd (beads) pre-commit hook\nbd sync --flush-only\n",
+			wantInstalled: true,
+			wantOutdated:  true,
+		},
+		{
+			name: "bd-hooks-run-no-marker",
+			// The GH#946 integration: an external hook manager's own hook that
+			// calls bd hooks run and carries no beads marker. bd doctor counts
+			// it as a bd hook (doctor.IsBdHookContent), so bd hooks list must
+			// too, or bd config drift exits 1 on a supported setup. It is not
+			// outdated: bd itself supplies the behavior, and "run bd hooks
+			// install" would overwrite the manager's hook.
+			body:          "#!/bin/sh\nlefthook run pre-commit\nbd hooks run pre-commit \"$@\"\n",
+			wantInstalled: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := newGitRepo(t)
+			runInDir(t, tmpDir, func() {
+				hooksDir := filepath.Join(tmpDir, ".git", "hooks")
+				if err := os.MkdirAll(hooksDir, 0750); err != nil {
+					t.Fatalf("failed to create hooks dir: %v", err)
+				}
+				hookPath := filepath.Join(hooksDir, "pre-commit")
+				if err := os.WriteFile(hookPath, []byte(tc.body), 0755); err != nil {
+					t.Fatalf("failed to write hook: %v", err)
+				}
+
+				statuses := CheckGitHooks()
+
+				for _, s := range statuses {
+					if s.Name != "pre-commit" {
+						continue
+					}
+					if s.Installed != tc.wantInstalled {
+						t.Errorf("pre-commit (%s): got Installed=%v, want %v", tc.name, s.Installed, tc.wantInstalled)
+					}
+					if s.Outdated != tc.wantOutdated {
+						t.Errorf("pre-commit (%s): got Outdated=%v, want %v", tc.name, s.Outdated, tc.wantOutdated)
+					}
+					return
+				}
+				t.Error("pre-commit hook status not found in CheckGitHooks result")
+			})
+		})
+	}
+}

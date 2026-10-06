@@ -13,6 +13,7 @@ go_library(
         "batch_apply_contract.go",
         "batch_closer_contract.go",
         "batch_creator_contract.go",
+        "batch_getter_contract.go",
         "blocked_state.go",
         "blocking_annotator_contract.go",
         "bootstrapper_contract.go",

@@ -1,6 +1,17 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
+# testdata/ holds the compilable preflight fixture below. Left to itself gazelle
+# would make testdata/ its own package, which empties this package's
+# glob(["testdata/**"]) and puts the fixture source across a package boundary.
+# gazelle:exclude testdata
+
+go_binary(
+    name = "preflight_go_fixture",
+    testonly = True,
+    srcs = ["testdata/preflight-go.go"],
+)
+
 go_library(
     name = "bd_lib",
     srcs = [
@@ -13,6 +24,7 @@ go_library(
         "backend_support.go",
         "backup.go",
         "backup_auto.go",
+        "backup_cap.go",
         "backup_dolt.go",
         "backup_export.go",
         "backup_lock.go",
@@ -27,6 +39,7 @@ go_library(
         "cleanup.go",
         "close.go",
         "close_direct.go",
+        "close_if_revision.go",
         "close_proxied_server.go",
         "closed_delete_candidates.go",
         "codex_hook.go",
@@ -145,6 +158,7 @@ go_library(
         "hooks.go",
         "human.go",
         "human_proxied_server.go",
+        "if_revision.go",
         "import.go",
         "import_path.go",
         "import_proxied_server.go",
@@ -179,6 +193,7 @@ go_library(
         "lint.go",
         "lint_proxied_server.go",
         "list.go",
+        "list_filter_flags.go",
         "list_format.go",
         "list_input.go",
         "list_output.go",
@@ -230,6 +245,7 @@ go_library(
         "ping_proxied_server.go",
         "pour.go",
         "preflight.go",
+        "preflight_versions.go",
         "prime.go",
         "prime_divergence.go",
         "prime_proxied_server.go",
@@ -268,6 +284,7 @@ go_library(
         "restore.go",
         "routed.go",
         "routing_read.go",
+        "routing_role.go",
         "rules.go",
         "sandbox_unix.go",
         "sandbox_windows.go",
@@ -284,6 +301,7 @@ go_library(
         "show_display.go",
         "show_format.go",
         "show_proxied_server.go",
+        "show_proxied_watch.go",
         "show_refs.go",
         "show_thread.go",
         "show_unit_helpers.go",
@@ -318,7 +336,6 @@ go_library(
         "todo_proxied_server.go",
         "tracker_store.go",
         "types.go",
-        "types_proxied_server.go",
         "unclaim.go",
         "unclaim_proxied_server.go",
         "undefer.go",
@@ -326,6 +343,7 @@ go_library(
         "update.go",
         "update_description_guard.go",
         "update_input.go",
+        "update_notes_guard.go",
         "update_proxied_server.go",
         "upgrade.go",
         "vc.go",
@@ -404,6 +422,7 @@ go_library(
         "//internal/storage/issueops",
         "//internal/storage/kvkeys",
         "//internal/storage/schema",
+        "//internal/storage/sqlclass",
         "//internal/storage/uow",
         "//internal/storage/versioncontrolops",
         "//internal/telemetry",
@@ -415,6 +434,7 @@ go_library(
         "//internal/uimd",
         "//internal/utils",
         "//internal/validation",
+        "//internal/versioncheck",
         "//internal/workapi",
         "//internal/workspacegate",
         "//internal/worktreeremove",
@@ -438,6 +458,7 @@ go_library(
         "@io_opentelemetry_go_otel_trace//:trace",
         "@land_charm_huh_v2//:huh",
         "@land_charm_lipgloss_v2//:lipgloss",
+        "@org_golang_x_mod//module",
         "@org_golang_x_mod//semver",
         "@org_golang_x_term//:term",
     ] + select({
@@ -492,16 +513,18 @@ go_test(
         "agent_hook_test.go",
         "assign_fence_embedded_test.go",
         "assign_fence_proxied_test.go",
-        "auto_import_upgrade_test.go",
+        "auto_import_upgrade_embedded_test.go",
         "auto_import_upgrade_unit_test.go",
         "autocommit_embedded_test.go",
         "backend_registry_contract_test.go",
         "backup_auto_proxied_local_integration_test.go",
         "backup_auto_proxied_test.go",
         "backup_auto_test.go",
+        "backup_cap_test.go",
         "backup_dolt_test.go",
         "backup_embedded_test.go",
         "backup_export_failure_test.go",
+        "backup_export_watermark_test.go",
         "backup_lock_test.go",
         "backup_proxied_external_integration_test.go",
         "backup_proxied_local_integration_test.go",
@@ -532,20 +555,29 @@ go_test(
         "cli_fast_test.go",
         "close_embedded_test.go",
         "close_failure_report_test.go",
+        "close_fanin_proxied_integration_test.go",
         "close_gate_test.go",
+        "close_if_revision_embedded_test.go",
+        "close_if_revision_proxied_test.go",
         "close_last_touched_test.go",
         "close_proxied_integration_test.go",
         "close_reason_file_test.go",
         "close_routing_test.go",
+        "cobra_flag_reset_test.go",
         "codex_hook_test.go",
         "command_telemetry_test.go",
         "comment_promote_embedded_test.go",
         "comment_proxied_integration_test.go",
+        "comment_reserved_word_test.go",
+        "comment_routed_exact_test.go",
         "comment_test.go",
+        "comments_add_test.go",
         "comments_cli_embedded_test.go",
         "comments_test.go",
         "compact_embedded_test.go",
         "compact_gc_flag_test.go",
+        "compact_gc_size_test.go",
+        "compact_gc_target_test.go",
         "compact_plan_test.go",
         "compact_test.go",
         "compact_tier2_embedded_test.go",
@@ -579,12 +611,14 @@ go_test(
         "context_identity_test.go",
         "context_proxied_integration_test.go",
         "context_test.go",
+        "context_text_test.go",
         "contributor_embedded_test.go",
         "contributor_routing_e2e_test.go",
         "cook_qnt_test.go",
         "cook_test.go",
         "count_embedded_test.go",
         "count_filter_test.go",
+        "count_include_ephemeral_embedded_test.go",
         "count_proxied_integration_test.go",
         "cpu_profile_test.go",
         "create_atomic_test.go",
@@ -615,9 +649,12 @@ go_test(
         "db_proxy_child_test.go",
         "defer_embedded_test.go",
         "defer_proxied_integration_test.go",
+        "defer_until_hint_test.go",
         "defer_wake_embedded_test.go",
         "defer_wake_proxied_integration_test.go",
+        "defer_wake_server_test.go",
         "delete_embedded_test.go",
+        "delete_if_revision_proxied_concurrency_test.go",
         "delete_input_test.go",
         "delete_proxied_integration_test.go",
         "delete_proxied_server_output_test.go",
@@ -628,7 +665,7 @@ go_test(
         "dep_cycles_test.go",
         "dep_edge_reader_test.go",
         "dep_embedded_test.go",
-        "dep_list_cross_db_test.go",
+        "dep_list_cross_db_embedded_test.go",
         "dep_proxied_integration_test.go",
         "dep_relation_test.go",
         "dep_test.go",
@@ -638,9 +675,11 @@ go_test(
         "diff_embedded_test.go",
         "directory_flag_test.go",
         "doctor_backend_guard_test.go",
+        "doctor_check_gate_test.go",
         "doctor_context_test.go",
         "doctor_conventions_test.go",
         "doctor_embedded_test.go",
+        "doctor_fix_gate_wiring_test.go",
         "doctor_fix_order_test.go",
         "doctor_fix_pending_migrations_test.go",
         "doctor_health_integration_test.go",
@@ -713,6 +752,8 @@ go_test(
         "export_proxied_integration_test.go",
         "export_source_wisp_subset_test.go",
         "export_test.go",
+        "external_policy_direct_integration_test.go",
+        "external_policy_embedded_test.go",
         "external_ref_test.go",
         "federation_embedded_test.go",
         "feedback_test.go",
@@ -735,6 +776,8 @@ go_test(
         "gc_embedded_test.go",
         "gc_prune_test.go",
         "git_repo_template_test.go",
+        "git_test_helpers_scope_test.go",
+        "github_link_scope_test.go",
         "gitlab_integration_test.go",
         "gitlab_test.go",
         "global_identity_integration_test.go",
@@ -771,6 +814,11 @@ go_test(
         "identity_preview_gate_cgo_test.go",
         "identity_preview_gate_test.go",
         "identity_preview_refusal_test.go",
+        "if_revision_embedded_test.go",
+        "if_revision_proxied_close_delete_test.go",
+        "if_revision_reassign_fence_embedded_test.go",
+        "if_revision_reassign_fence_proxied_test.go",
+        "if_revision_test.go",
         "import_chunking_embedded_test.go",
         "import_chunking_test.go",
         "import_embedded_test.go",
@@ -790,8 +838,10 @@ go_test(
         "init_cancel_e2e_test.go",
         "init_commit_test.go",
         "init_embedded_test.go",
+        "init_explicit_beads_dir_embedded_test.go",
         "init_gateway_test.go",
         "init_git_bootstrap_routing_test.go",
+        "init_guard_force_e2e_test.go",
         "init_guard_test.go",
         "init_hooks_test.go",
         "init_metrics_test.go",
@@ -813,19 +863,28 @@ go_test(
         "init_worktree_test.go",
         "jira_max_rows_gate_test.go",
         "jira_test.go",
+        "json_flag_shadow_test.go",
         "kv_embedded_test.go",
+        "kv_prefix_test.go",
         "kv_proxied_integration_test.go",
         "kv_test.go",
         "label_embedded_test.go",
         "label_list_all_test.go",
         "label_normalization_test.go",
+        "label_prefix_test.go",
         "label_proxied_integration_test.go",
+        "label_rename_message_test.go",
+        "label_rename_publish_failure_test.go",
+        "label_rename_test.go",
         "label_test.go",
         "label_whitespace_warn_test.go",
         "last_touched_guard_test.go",
+        "last_touched_readonly_test.go",
         "last_touched_test.go",
         "legacy_upgrade_guard_config_yaml_test.go",
         "legacy_upgrade_guard_e2e_test.go",
+        "legacy_upgrade_guard_empty_root_test.go",
+        "legacy_upgrade_guard_external_server_test.go",
         "legacy_upgrade_guard_test.go",
         "legacy_upgrade_guard_witness_test.go",
         "linear_roundtrip_test.go",
@@ -835,6 +894,7 @@ go_test(
         "list_comments_embedded_test.go",
         "list_comments_proxied_integration_test.go",
         "list_embedded_test.go",
+        "list_filter_flags_test.go",
         "list_footer_counts_test.go",
         "list_format_json_test.go",
         "list_helpers_test.go",
@@ -855,6 +915,7 @@ go_test(
         "main_test.go",
         "maintenance_commands_proxied_integration_test.go",
         "markdown_test.go",
+        "max_rows_embedded_test.go",
         "max_rows_test.go",
         "memory_embedded_test.go",
         "memory_proxied_integration_test.go",
@@ -879,8 +940,10 @@ go_test(
         "migrate_test.go",
         "migration_freeze_gate_test.go",
         "mol_bond_compound_label_test.go",
+        "mol_bond_dryrun_validation_test.go",
         "mol_bond_gwn_test.go",
         "mol_bond_proxied_integration_test.go",
+        "mol_bond_ref_attach_test.go",
         "mol_bond_test.go",
         "mol_burn_proxied_integration_test.go",
         "mol_current_proxied_integration_test.go",
@@ -892,6 +955,7 @@ go_test(
         "mol_last_activity_proxied_integration_test.go",
         "mol_progress_proxied_integration_test.go",
         "mol_ready_gated_flag_test.go",
+        "mol_ready_gated_hint_test.go",
         "mol_ready_gated_proxied_integration_test.go",
         "mol_ready_gated_test.go",
         "mol_show_proxied_integration_test.go",
@@ -913,11 +977,14 @@ go_test(
         "orphans_test.go",
         "output_test.go",
         "pour_proxied_integration_test.go",
+        "pour_unknown_vars_pipeline_test.go",
+        "pour_unknown_vars_test.go",
         "pour_wisp_var_validation_test.go",
         "preflight_test.go",
         "prime_divergence_test.go",
         "prime_embedded_test.go",
         "prime_gemini_hook_test.go",
+        "prime_git_remote_test.go",
         "prime_memory_caps_test.go",
         "prime_proxied_integration_test.go",
         "prime_shared_server_test.go",
@@ -928,6 +995,7 @@ go_test(
         "provenance_test.go",
         "proxied_direct_only_refusal_frontdoor_test.go",
         "proxied_integration_helpers_test.go",
+        "proxied_local_backend_exit_test.go",
         "proxied_local_dolt_lifecycle_test.go",
         "proxied_local_helpers_test.go",
         "proxied_local_identity_lifecycle_linux_test.go",
@@ -943,6 +1011,7 @@ go_test(
         "prune_proxied_integration_test.go",
         "purge_embedded_test.go",
         "purge_test.go",
+        "purge_wisps_plane_embedded_test.go",
         "purge_wisps_plane_integration_test.go",
         "purge_wisps_plane_managed_local_test.go",
         "query_embedded_test.go",
@@ -1024,6 +1093,7 @@ go_test(
         "serve_source_test.go",
         "serve_store_identity_test.go",
         "serve_test.go",
+        "serve_update_claim_proxied_integration_test.go",
         "serve_update_proxied_integration_test.go",
         "set_state_proxied_integration_test.go",
         "setup_embedded_test.go",
@@ -1031,6 +1101,8 @@ go_test(
         "shared_migrate_consent_test.go",
         "shared_server_cfgnil_test.go",
         "shared_server_cleanup_test.go",
+        "shared_server_delete_if_revision_concurrency_test.go",
+        "shared_server_if_revision_concurrency_test.go",
         "shared_server_integration_test.go",
         "shared_store_migrate_gate_test.go",
         "ship_embedded_test.go",
@@ -1039,11 +1111,16 @@ go_test(
         "show_details_json_test.go",
         "show_embedded_test.go",
         "show_format_metadata_test.go",
+        "show_format_test.go",
         "show_not_found_hint_test.go",
         "show_proxied_integration_test.go",
         "show_proxied_reader_test.go",
+        "show_proxied_watch_integration_test.go",
         "show_test.go",
         "show_unit_helpers_test.go",
+        "show_unresolvable_deps_embedded_test.go",
+        "show_unresolvable_deps_unit_test.go",
+        "show_watch_loop_test.go",
         "show_watch_test.go",
         "simple_helpers_test.go",
         "skip_store_annotation_test.go",
@@ -1058,6 +1135,7 @@ go_test(
         "state_test.go",
         "status_embedded_test.go",
         "status_proxied_integration_test.go",
+        "status_suppressed_test.go",
         "status_test.go",
         "statuses_types_proxied_integration_test.go",
         "stdio_race_guard_test.go",
@@ -1065,6 +1143,7 @@ go_test(
         "storage_class_embedded_test.go",
         "storage_class_proxied_integration_test.go",
         "storage_class_pure_test.go",
+        "store_factory_embedded_test.go",
         "store_factory_nocgo_test.go",
         "store_factory_test.go",
         "store_reopen_embedded_resolution_test.go",
@@ -1100,6 +1179,9 @@ go_test(
         "todo_embedded_test.go",
         "tracker_frontdoor_proxy_test.go",
         "tracker_proxy_uow_conformance_integration_test.go",
+        "types_builtin_test.go",
+        "types_create_agreement_embedded_test.go",
+        "types_create_agreement_test.go",
         "types_embedded_test.go",
         "unclaim_conditional_embedded_test.go",
         "unclaim_conditional_parity_test.go",
@@ -1110,6 +1192,7 @@ go_test(
         "uninstall_config_test.go",
         "uow_factory_server_mode_test.go",
         "uow_factory_test.go",
+        "update_add_label_shorthand_test.go",
         "update_claim_proxied_test.go",
         "update_close_policy_proxied_integration_test.go",
         "update_close_policy_test.go",
@@ -1120,6 +1203,7 @@ go_test(
         "update_lifecycle_test.go",
         "update_metadata_test.go",
         "update_multi_id_exit_test.go",
+        "update_notes_guard_test.go",
         "update_notes_warning_test.go",
         "update_proxied_integration_test.go",
         "update_proxied_server_test.go",
@@ -1143,6 +1227,7 @@ go_test(
         "workspace_gate_test.go",
         "workspace_identity_test.go",
         "worktree_cmd_test.go",
+        "worktree_gitignore_eol_test.go",
         "worktree_permissions_test.go",
         "worktree_remove_cmd_test.go",
         "worktree_remove_git_test.go",
@@ -1156,6 +1241,7 @@ go_test(
     data = glob(["testdata/**"]) + [
         ":bd_for_tests",
         ":go_srcs",
+        ":preflight_go_fixture",
         "//:bd_test_files",
         "//cmd/bd/doctor:go_srcs",
         "//cmd/bd/doctor/fix:go_srcs",
@@ -1166,6 +1252,7 @@ go_test(
     env = {
         "BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)",
         "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
+        "BEADS_TEST_PREFLIGHT_GO": "$(rlocationpath :preflight_go_fixture)",
     },
     shard_count = 16,
     deps = [
@@ -1173,6 +1260,7 @@ go_test(
         "//cmd/bd/doctor",
         "//internal/ado",
         "//internal/beads",
+        "//internal/ceiling",
         "//internal/config",
         "//internal/configfile",
         "//internal/debug",
@@ -1218,11 +1306,15 @@ go_test(
         "//internal/telemetry",
         "//internal/testutil",
         "//internal/testutil/bazeltest",
+        "//internal/testutil/credentialcmd",
+        "//internal/timeparsing",
         "//internal/tracker",
         "//internal/types",
         "//internal/ui",
         "//internal/uimd",
         "//internal/utils",
+        "//internal/validation",
+        "//internal/versioncheck",
         "//internal/workapi",
         "//internal/workspacegate",
         "//internal/worktreeremove",
@@ -1238,6 +1330,7 @@ go_test(
         "@com_github_spf13_pflag//:pflag",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
+        "@in_gopkg_yaml_v3//:yaml_v3",
         "@land_charm_lipgloss_v2//:lipgloss",
         "@org_golang_x_sync//errgroup",
         "@org_golang_x_term//:term",
@@ -1282,13 +1375,17 @@ go_test(
     }),
 )
 
-# bd_test as PR Risk's "Test (Embedded Dolt Cmd N/20)" jobs run it: shard k
-# runs .github/scripts/embedded-test-shard.sh k 20 (the TestEmbedded* functions
-# of *_embedded_test.go, assigned by the committed manifest) against this
-# configuration's bd_test, with BEADS_TEST_EMBEDDED_DOLT=1 and the race bd
-# (//cmd/bd:bd under --config=embedded) as the subprocess binary, like the
-# jobs' /tmp/bd-embedded-test. It repeats bd_test's `env` (the wrapper cannot
-# inherit it). shard_count must stay equal to the manifest's shard total.
+# Runs 50 Bazel shards against the TestEmbedded* functions of
+# *_embedded_test.go, assigned by the manifest's 50-shard block
+# (duration-balanced; see scripts/ci/embedded_cmd_test_durations.json),
+# against this configuration's bd_test with BEADS_TEST_EMBEDDED_DOLT=1 and
+# the race bd (//cmd/bd:bd under --config=embedded) as the subprocess
+# binary. This is a *different* shard count from PR Risk's legacy fork/push
+# jobs, "Test (Embedded Dolt Cmd N/20)" (pr-risk.yml, main.yml): those keep
+# running 20 shards of their own, frozen hand-assigned block in the same
+# manifest file — shard k here is not the same split as their shard k. It
+# repeats bd_test's `env` (the wrapper cannot inherit it). shard_count must
+# stay equal to this lane's manifest block's shard total.
 #
 # Tags:
 #   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
@@ -1322,8 +1419,130 @@ sh_test(
         "BEADS_TEST_EMBEDDED_DOLT": "1",
         "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
     },
-    shard_count = 20,
+    shard_count = 50,
     tags = ["embedded"],
+)
+
+# Runs 30 Bazel shards against the TestProxiedServer*/TestServerMode*
+# functions, assigned by the manifest's 30-shard block (duration-balanced;
+# see scripts/ci/proxied_test_durations.json), against this configuration's
+# (race) bd_test with BEADS_TEST_PROXIED_SERVER=1 and the non-race
+# bd_for_tests as the subprocess binary. This is a *different* shard count
+# from PR Risk's legacy fork/push jobs, "Test (Proxied Dolt Cmd N/15)"
+# (pr-risk.yml, main.yml): those keep running 15 shards of their own,
+# frozen bd-init-cost-proxy block in the same manifest file — shard k here
+# is not the same split as their shard k. PR Risk builds its bd-cmd-test
+# with -race, as here; main.yml's test-proxied-cmd twin uses
+# build-artifacts' non-race bd-cmd-test, so this lane is the stricter of
+# the two. The shared proxied harness gets its dolt sql-server from
+# internal/testutil's local backend (the pinned dolt in the test
+# wrapper's runfiles) instead of the jobs' container, and fails instead
+# of skipping when it cannot start one. It repeats bd_test's `env`.
+# shard_count must stay equal to the manifest block's shard total.
+#
+# Tags:
+#   dolt-server-proxied: the proxied-server tier; starts hermetic dolt
+#     sql-servers; excluded from --config=prcore/ci, selected by
+#     --config=doltserver-proxied.
+sh_test(
+    name = "bd_proxied_test",
+    size = "large",
+    # The script's -test.timeout=15m fires (with a goroutine dump) before
+    # Bazel's 1200s action limit (eternal under the lane's --test_timeout).
+    timeout = "eternal",
+    srcs = ["//tools/bazel:go_test_manifest_shard.sh"],
+    args = [
+        "$(rootpath //:.github/scripts/proxied-test-shard.sh)",
+        "BEADS_TEST_CMD_BINARY",
+        "$(rootpath :bd_test)",
+    ],
+    data = [
+        ":bd_for_tests",
+        ":bd_test",
+        ":go_srcs",
+        "//:.github/scripts/proxied-cmd-test-shards.txt",
+        "//:.github/scripts/proxied-test-shard.sh",
+        "@go_sdk//:bin/gofmt",
+    ],
+    env = {
+        "BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)",
+        "BEADS_TEST_DOLT_SERVER": "local",
+        # The jobs' "Configure Git and Dolt identity" global git identity
+        # (tools/bazel/test_env.sh).
+        "BEADS_TEST_GIT_IDENTITY": "1",
+        "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
+        "BEADS_TEST_PROXIED_SERVER": "1",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+        # The external-unix / outage-matrix subtests bridge endpoints with
+        # socat, which the workers have: fail rather than skip if it is
+        # missing (requireSocat). The legacy GitHub lane leaves this unset.
+        "BEADS_TEST_REQUIRE_SOCAT": "1",
+        # The 4-vCPU runner shape: -test.parallel defaults to GOMAXPROCS, and
+        # the job runs 4 tests at once, not one per worker core (39
+        # concurrent `bd init --proxied-server` against one server hung a
+        # 192-core worker).
+        "GOMAXPROCS": "4",
+    },
+    shard_count = 30,
+    tags = ["dolt-server-proxied"],
+)
+
+# The whole cmd/bd suite, as --config=doltserver-cmd builds it (exactly
+# --config=integration's build: the integration and gms_pure_go build tags,
+# race, so the two lanes share bd_test's compile), against a hermetic dolt sql-server:
+# TestMain starts the shared test server from the pinned dolt in the test
+# wrapper's runfiles (BEADS_TEST_DOLT_SERVER=local), and a server that
+# cannot start fails the target (BEADS_TEST_REQUIRE_DOLT_CONTAINER=1)
+# instead of skipping every Dolt-gated test into a cached pass. These are
+# the cmd/bd tests no other lane runs: every other configuration of bd_test
+# passes BEADS_TEST_SKIP=dolt (prcore/ci, integration) or runs only its
+# manifest (bd_embedded_test, bd_proxied_test), and so do main.yml's and
+# nightly.yml's go test jobs. No -test.run/-test.skip: the Go binary shards
+# itself over every top-level test (rules_go's TEST_SHARD_INDEX), so each
+# runs in exactly one shard, and check_testcases.py fails a shard that ran
+# none. It repeats bd_test's `env` (the wrapper cannot inherit it).
+#
+# Tags:
+#   dolt-server-cmd: the cmd/bd Dolt-server tier; starts hermetic dolt
+#     sql-servers and needs the integration build tag; excluded from
+#     --config=prcore/ci and --config=integration, selected by
+#     --config=doltserver-cmd.
+sh_test(
+    name = "bd_dolt_server_test",
+    size = "large",
+    # --config=doltserver-cmd's -test.timeout=19m fires (with a goroutine
+    # dump) before Bazel's 1200s action limit (eternal under the lane's
+    # --test_timeout), which kills without one.
+    timeout = "eternal",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :bd_test)"],
+    data = [
+        ":bd_for_tests",
+        ":bd_test",
+        ":preflight_go_fixture",
+        "@go_sdk//:bin/gofmt",
+    ],
+    env = {
+        "BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)",
+        "BEADS_TEST_DOLT_SERVER": "local",
+        # The integration jobs' global git identity (tools/bazel/test_env.sh).
+        "BEADS_TEST_GIT_IDENTITY": "1",
+        "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
+        "BEADS_TEST_PREFLIGHT_GO": "$(rlocationpath :preflight_go_fixture)",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+        # TestSharedServerConcurrent (skipped everywhere else) as a bounded
+        # smoke: 6 concurrent bd clients, 3 per database, against 2
+        # shared-server projects (~1 min; bd init alone is ~8s a project).
+        "BEADS_TEST_SHARED_SERVER_CONCURRENT": "1",
+        "BEADS_TEST_SS_CLIENTS": "6",
+        "BEADS_TEST_SS_DIRS": "2",
+        # The 4-vCPU runner shape, as in bd_proxied_test: -test.parallel
+        # defaults to GOMAXPROCS, and every parallel test opens stores
+        # against the one shared server.
+        "GOMAXPROCS": "4",
+    },
+    shard_count = 16,
+    tags = ["dolt-server-cmd"],
 )
 
 # CLI flag registrations pinned by //internal/httpapi spec parity tests.
@@ -1339,6 +1558,25 @@ exports_files(
 exports_files(
     ["init_safety_help.go"],
     visibility = ["//test/docsync:__pkg__"],
+)
+
+# Contributor agent instructions; root AGENTS.md links them and
+# //:docsync_files checks those links.
+exports_files(
+    ["AGENTS.md"],
+    visibility = ["//:__pkg__"],
+)
+
+# Release-metadata surfaces gated by //internal/versioncheck's releaseSources
+# table: the canonical version and the Windows PE resource files. Aggregated
+# into //:release_metadata_files, which is what the tests declare as data.
+exports_files(
+    [
+        "version.go",
+        "winres/manifest.xml",
+        "winres/winres.json",
+    ],
+    visibility = ["//:__pkg__"],
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

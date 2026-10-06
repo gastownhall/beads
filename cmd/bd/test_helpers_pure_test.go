@@ -324,6 +324,73 @@ func findPrebuiltBDBinary() (string, error) {
 	return bazeltest.PrebuiltBD()
 }
 
+// bdModulePackage is cmd/bd's import path. The in-test fallback build names
+// it explicitly instead of "." so it can never build whatever package happens
+// to be in the working directory.
+const bdModulePackage = "github.com/steveyegge/beads/cmd/bd"
+
+// bdSourceDir is cmd/bd's source directory, resolved during package
+// initialization, before TestMain or any test can chdir: this file's
+// compiled-in path when it is absolute (not -trimpath) and next to main.go,
+// else the working directory go test starts the binary in (the package
+// directory).
+var bdSourceDir = resolveBDSourceDir()
+
+func resolveBDSourceDir() string {
+	if _, file, _, ok := runtime.Caller(0); ok && filepath.IsAbs(file) {
+		dir := filepath.Dir(file)
+		if _, err := os.Stat(filepath.Join(dir, "main.go")); err == nil {
+			return dir
+		}
+	}
+	wd, _ := os.Getwd()
+	return wd
+}
+
+// goBuildBDCommand returns the `go build` that subprocess-test helpers fall
+// back to when BEADS_TEST_BD_BINARY is unset. It is the build CI prebuilds
+// that binary with (main.yml build-artifacts: go build -tags gms_pure_go
+// ./cmd/bd; no -race), and it builds cmd/bd whatever the caller's working
+// directory is: the package is named by import path and the command runs in
+// bdSourceDir, so a helper first reached from a test that chdir'd into a
+// fixture (or a precompiled test binary run from elsewhere) still builds bd.
+func goBuildBDCommand(out string) *exec.Cmd {
+	cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", out, bdModulePackage)
+	cmd.Dir = bdSourceDir
+	return cmd
+}
+
+// TestGoBuildBDCommandIsCWDIndependent pins that the fallback build resolves
+// cmd/bd from any working directory. It resolves the command's package in
+// the command's directory with `go list` rather than paying for a full link.
+func TestGoBuildBDCommandIsCWDIndependent(t *testing.T) {
+	if bazeltest.IsBazel() {
+		t.Skip("Bazel always injects bd through BEADS_TEST_BD_BINARY; the fallback build is unused")
+	}
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skipf("go toolchain not on PATH: %v", err)
+	}
+	t.Chdir(t.TempDir())
+
+	cmd := goBuildBDCommand(filepath.Join(t.TempDir(), "bd"))
+	if got := cmd.Args[len(cmd.Args)-1]; got != bdModulePackage {
+		t.Fatalf("goBuildBDCommand builds %q, want %q", got, bdModulePackage)
+	}
+	if !strings.Contains(strings.Join(cmd.Args, " "), "-tags gms_pure_go") {
+		t.Fatalf("goBuildBDCommand args %q lack CI's -tags gms_pure_go", cmd.Args)
+	}
+
+	list := exec.Command("go", "list", "-tags", "gms_pure_go", "-f", "{{.Name}} {{.ImportPath}}", bdModulePackage)
+	list.Dir = cmd.Dir
+	out, err := list.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list %s in %q: %v\n%s", bdModulePackage, cmd.Dir, err, out)
+	}
+	if got, want := strings.TrimSpace(string(out)), "main "+bdModulePackage; got != want {
+		t.Fatalf("go list in %q = %q, want %q", cmd.Dir, got, want)
+	}
+}
+
 // buildBDForInitTests builds (or locates) a bd binary suitable for subprocess
 // tests. Uses the gms_pure_go tag so the resulting binary works in either
 // CGO mode. Lives in the pure-Go helpers file so subprocess-style tests can
@@ -360,7 +427,7 @@ func buildBDForInitTests(t *testing.T) string {
 			return
 		}
 		initTestBD = filepath.Join(tmpDir, bdBinary)
-		cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", initTestBD, ".")
+		cmd := goBuildBDCommand(initTestBD)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			initTestBDErr = fmt.Errorf("go build failed: %v\n%s", err, out)
 		}

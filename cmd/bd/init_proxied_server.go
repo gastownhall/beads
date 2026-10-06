@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -15,7 +14,6 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	domaingit "github.com/steveyegge/beads/internal/storage/domain/git"
 	"github.com/steveyegge/beads/internal/storage/fs"
@@ -138,6 +136,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 
 	if !hasExplicitBeadsDir {
+		// Bootstrap routing is handled separately in follow-up #6460.
 		res, err := gitUC.EnsureGitRepo(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to initialize git repository: %v", err)
@@ -190,8 +189,11 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 	defer func() { _ = initUOWProvider.Close(ctx) }()
 
-	remoteURL := resolveProxiedInitRemoteURL(ctx, gitUC, in)
+	remoteURL := resolveProxiedInitRemoteURL(ctx, cwd, in)
 
+	// Unlike the origin lookup above, ComputeRepoID and GetCloneID still inherit
+	// Git routing: under an inherited GIT_DIR/GIT_WORK_TREE, repo_id and clone_id
+	// can describe a different repository than remoteURL, or fail to resolve.
 	var repoID, cloneID string
 	if id, err := beads.ComputeRepoID(); err == nil {
 		repoID = id
@@ -318,7 +320,7 @@ func resolveInitPrefix(flagPrefix string) (string, error) {
 	return prefix, nil
 }
 
-func resolveProxiedInitRemoteURL(ctx context.Context, gitUC domain.GitUseCase, in initProxiedServerInput) string {
+func resolveProxiedInitRemoteURL(ctx context.Context, workDir string, in initProxiedServerInput) string {
 	url, source := resolveInitConfiguredSyncRemote(in.initRemote, in.initRemoteChanged, resolveSyncRemote)
 	if url != "" {
 		return url
@@ -327,6 +329,8 @@ func resolveProxiedInitRemoteURL(ctx context.Context, gitUC domain.GitUseCase, i
 		return ""
 	}
 	if !in.stealth {
+		// Origin belongs to the selected project, independently of Beads storage.
+		gitUC := domain.NewGitUseCase(workDir, domaingit.NewInitGitRepository(workDir))
 		if originURL, err := gitUC.OriginRemoteURL(ctx); err == nil && originURL != "" {
 			return normalizeRemoteURL(originURL)
 		}
@@ -521,27 +525,21 @@ type runInitTailContext struct {
 	gitUC         domain.GitUseCase
 }
 
-func (t runInitTailContext) isRoleGitRepo(ctx context.Context, fallback bool) bool {
-	// Isolated tail contexts without a selected path retain their supplied use case.
-	if t.workDir == "" {
-		return fallback
-	}
-	// Dropping discovery ceilings can select a containing parent repository,
-	// matching the role adapter's existing scrubbed reads and writes.
-	probe := exec.CommandContext(ctx, "git", "rev-parse", "--git-dir")
-	probe.Dir, probe.Env = t.workDir, gitenv.ScrubRouting(os.Environ())
-	return probe.Run() == nil
-}
-
 func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initProxiedServerInput, t runInitTailContext) error {
 	gitUC := t.gitUC
 	if t.workDir != "" {
 		// Only the selected tail uses this scope; earlier bootstrap keeps its provider.
+		// NewInitGitRepository runs `git rev-parse --git-dir` with Dir=workDir and
+		// scrubbed routing, so dropping discovery ceilings can select a containing
+		// parent repository, matching the role adapter's scrubbed reads and writes.
 		gitUC = domain.NewGitUseCase(t.workDir, domaingit.NewInitGitRepository(t.workDir))
 	}
+	// One probe answers both the role gate and the artifact gates: gitUC is the
+	// scrubbed selected-directory repository whenever workDir is set, and the
+	// supplied use case otherwise, so a separate role probe could only repeat it.
 	isRepo := gitUC.IsGitRepo(ctx)
 
-	if t.isRoleGitRepo(ctx, isRepo) {
+	if isRepo {
 		role := in.roleFlag
 		if role == "" {
 			role = "maintainer"
@@ -650,7 +648,9 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 				HasRemote:    t.remoteURL != "",
 				NoPush:       config.GetBool("no-push"),
 			})
-			if err := t.fsUseCase.InstallClaudeProject(ctx, in.stealth); err != nil && !in.quiet {
+			// As in direct init: --quiet drops the installer's progress,
+			// a failure still reaches stderr.
+			if err := t.fsUseCase.InstallClaudeProject(ctx, in.stealth, in.quiet); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to setup Claude hooks: %v\n", err)
 			}
 		}

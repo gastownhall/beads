@@ -211,7 +211,7 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 		result.ReferencesUpdated = refs
 	}
 
-	if err := u.issueRepo.RecomputeIsBlocked(ctx, affectedIssues, affectedWisps); err != nil {
+	if err := u.issueRepo.RecomputeIsBlockedAfterDelete(ctx, allIDs, affectedIssues, affectedWisps); err != nil {
 		return result, fmt.Errorf("delete: recompute is_blocked: %w", err)
 	}
 

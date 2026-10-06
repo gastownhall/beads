@@ -472,7 +472,18 @@ func loadBeadsEnvFile(beadsDir string) {
 	if _, err := os.Stat(envFile); err != nil {
 		return
 	}
+	// A .env-provided BEADS_DIR is user-authored selection wherever it is
+	// imported from, not only via loadBeadsSelectionEnvFile: that loader
+	// early-returns whenever BEADS_DB or BD_DB is already exported
+	// (loadSelectionEnvironment), and this broad loader then imports the very
+	// same .env line. Marking provenance here keeps one .env line meaning one
+	// thing, instead of target-role or CWD-role depending on the caller's
+	// unrelated BEADS_DB export.
+	beadsDirWasSet := os.Getenv("BEADS_DIR") != ""
 	_ = gotenv.Load(envFile)
+	if !beadsDirWasSet && os.Getenv("BEADS_DIR") != "" {
+		beadsDirProvidedAtStartup = true
+	}
 }
 
 func logConfigDiscovery(beadsDir, reason string) {
@@ -507,6 +518,12 @@ func loadBeadsSelectionEnvFile(beadsDir string) {
 		}
 		if value, ok := pairs[key]; ok && strings.TrimSpace(value) != "" {
 			_ = os.Setenv(key, value)
+			if key == "BEADS_DIR" {
+				// A .beads/.env that routes commands via BEADS_DIR is
+				// user-authored selection, same as exporting the variable
+				// before running bd; role detection must honor it.
+				beadsDirProvidedAtStartup = true
+			}
 		}
 	}
 }
@@ -623,6 +640,36 @@ func preserveRedirectSourceDatabase(beadsDir string) {
 			fmt.Fprintf(os.Stderr, "[routing] Preserved source dolt_database %q across redirect\n", rInfo.SourceDatabase)
 		}
 	}
+}
+
+// explicitDBTargetGiven reports whether the caller named an explicit database
+// target that overrides the ambient workspace. These are the three routes the
+// PR body for be-fyt names and that selectedNoDBBeadsDir below honors ahead of
+// the ambient repo: a --db value that resolves to a path (which lands in
+// dbPath), BEADS_DB, and BD_DB.
+//
+// Deliberately NOT keyed on PersistentFlags().Changed("db"). A --db value that
+// names a *database* rather than a path is moved to dbNameFromDBFlag and
+// clears dbPath (~line 990), and that value is consumed only on the
+// store-requiring path (~line 1553). On the no-DB path selectedNoDBBeadsDir
+// therefore falls through to the ambient workspace anyway, so the ambient
+// redirect source's database must still be preserved for it. Keying on
+// Changed("db") would suppress that and reopen be-xil for
+// `bd doctor --db <name>` in a redirected repo; see
+// TestDoctorPersistentPreRunBareDBNameStillPreservesAmbientSourceDatabase.
+//
+// KNOWN GAP (be-bf75p): selectedNoDBBeadsDir honors a fourth route this
+// predicate does not — BEADS_DIR != "" -> beads.FindBeadsDir() (~line 551) —
+// so a BEADS_DIR naming a foreign target still inherits the ambient repo's
+// redirect-source database. Reproduces only inside a git repo, because
+// GetRedirectInfo reaches the ambient repo through findLocalBdsDirInRepo
+// (internal/beads/beads.go:394), which keys off git.GetRepoRoot() alone.
+// Emptiness is the wrong test for it: BEADS_DIR pre-set *to the redirect
+// target* is bd-wayc3's own case, where preservation is wanted, so the fix has
+// to compare BEADS_DIR against the redirect target rather than check that it
+// is unset. That comparison is be-bf75p's, not this PR's.
+func explicitDBTargetGiven() bool {
+	return dbPath != "" || os.Getenv("BEADS_DB") != "" || os.Getenv("BD_DB") != ""
 }
 
 func selectedNoDBBeadsDir(cmd *cobra.Command) string {
@@ -940,6 +987,22 @@ func resolveChangeDirBeadsDir(path string) (string, error) {
 		return "", fmt.Errorf("cannot use -C directory %q: no beads project found", path)
 	}
 	return beadsDir, nil
+}
+
+// beadsDirProvidedAtStartup records whether BEADS_DIR carries user intent: it
+// was present in the environment when the process started, or a .beads/.env
+// selector file set it (loadBeadsSelectionEnvFile). Internal rebinds set
+// BEADS_DIR for every command (prepareSelectedCommandContext,
+// applyChangeDirSelection), so by the time role detection runs, the live env
+// var can no longer say who set it.
+var beadsDirProvidedAtStartup = os.Getenv("BEADS_DIR") != ""
+
+// explicitBeadsSelection reports whether the active beads project was selected
+// by the user (bd -C, or BEADS_DIR exported before bd ran) rather than
+// discovered from the CWD — including discovery through a .beads/redirect,
+// which relocates storage but must not move role detection off the workspace.
+func explicitBeadsSelection() bool {
+	return beadsDirProvidedAtStartup || strings.TrimSpace(changeDir) != ""
 }
 
 func applyChangeDirSelection() error {
@@ -1293,7 +1356,46 @@ var rootCmd = &cobra.Command{
 		// setup before they inspect server mode or per-project Dolt settings.
 		// Rebind them to the selected workspace so explicit --db / BEADS_DB
 		// targets behave consistently across doctor/bootstrap/context/dolt.
+		//
+		// Capture redirect info BEFORE selectedNoDBBeadsDir() resolves the
+		// beads dir, mirroring the store-requiring path below (be-xil):
+		// selectedNoDBBeadsDir() always returns the post-redirect target
+		// directory (every branch bottoms out in beads.FindBeadsDir() or a
+		// dbPath already resolved through it, both of which call
+		// FollowRedirect internally). Calling preserveRedirectSourceDatabase
+		// with that already-resolved target means beads.ResolveRedirect finds
+		// no redirect file there and silently never preserves the source's
+		// configured dolt_database — so doctor (and other no-DB commands)
+		// would fall through to the shared target directory's own default
+		// database instead of the source's, producing false "wrong database"
+		// diagnoses against an unrelated rig's schema.
 		if skipsStoreInit {
+			// be-fyt round 1: only preserve when the caller did NOT name an
+			// explicit target. beads.GetRedirectInfo() always resolves from the
+			// ambient CWD repo's local .beads regardless of --db/BEADS_DIR
+			// (bd-wayc3), so calling it unconditionally let an explicit --db/
+			// BEADS_DB/BD_DB target's own database be silently shadowed by the
+			// ambient repo's unrelated redirect-source database — reopening
+			// be-xil's failure mode via a narrower trigger.
+			//
+			// Round 2 (review of PR #5774): the guard was spelled `dbPath == ""`,
+			// but dbPath is populated from BEADS_DB/BD_DB only when those are
+			// *unset* (~line 1002), so both env routes slipped straight through
+			// a guard that claimed to cover them while selectedNoDBBeadsDir
+			// (~lines 519, 523) rebound BEADS_DIR to the explicit target — the
+			// two disagreed. explicitDBTargetGiven now covers all three of the
+			// routes that populate dbPath/BEADS_DB/BD_DB.
+			//
+			// It does NOT cover selectedNoDBBeadsDir's fourth route, BEADS_DIR
+			// (~line 551), so the two predicates still disagree there and a
+			// foreign BEADS_DIR target inherits the ambient repo's
+			// redirect-source database — inside a git repo only. Measured, not
+			// assumed; tracked and specified as be-bf75p. See the KNOWN GAP
+			// paragraph on explicitDBTargetGiven for why emptiness is the wrong
+			// test and what the fix has to compare instead.
+			if !explicitDBTargetGiven() {
+				preserveRedirectSourceDatabase(beads.GetRedirectInfo().LocalDir)
+			}
 			beadsDir := selectedNoDBBeadsDir(cmd)
 			prepareSelectedNoDBContext(beadsDir)
 			refreshBoundCommandConfig(cmd)
@@ -1465,6 +1567,11 @@ var rootCmd = &cobra.Command{
 					// would create a local database instead of using the redirect target.
 					// (GH#bd-0qel)
 					targetBeadsDir := beads.FindBeadsDir()
+					if targetBeadsDir == "" {
+						// An explicit BEADS_DIR is authoritative even
+						// before it holds project files.
+						targetBeadsDir = beads.ExplicitBeadsDir()
+					}
 					if targetBeadsDir == "" {
 						targetBeadsDir = ".beads"
 					}
@@ -1673,6 +1780,10 @@ var rootCmd = &cobra.Command{
 			// Bulk loads outlive the pool's 10s fast-fail on every server
 			// pause (wy-sbgucn); explicit env/config settings still win.
 			PoolReadTimeoutFallback: bulkLoadPoolReadTimeout(cmd),
+			// Classification-only read (GH#804), never strict --readonly or a
+			// preview: the store is genuinely writable underneath, so the
+			// lazy defer-wake sweep may still run (be-vbhpf).
+			ClassifiedRead: policy.readOnly && !readonlyMode && !previewMode,
 		}
 
 		// Load config to get database name and server connection settings.
@@ -1830,7 +1941,7 @@ var rootCmd = &cobra.Command{
 				hookRunner = hooks.NewRunner(filepath.Join(beadsDir, "hooks"))
 				uowSinks.Hook = hookRunner
 			}
-			uowProvider = wireExternalDependencyUOWProvider(uow.NewNotifyingProvider(p, uowSinks))
+			uowProvider = wireProxiedUOWProvider(p, uowSinks)
 
 			// Honor dolt.auto-commit for proxied writes the same way
 			// issueOpsContext already does for the direct/SQL-server routes
@@ -1949,7 +2060,7 @@ var rootCmd = &cobra.Command{
 			if renderTypedOpenError(err) {
 				return SilentExit()
 			}
-			return HandleError("failed to open database: %v", err)
+			return HandleError("%v", openStoreError(cfg.GetBackend(), err))
 		}
 
 		// Mark store as active for flush goroutine safety

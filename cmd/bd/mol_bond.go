@@ -39,6 +39,15 @@ Bond types:
   parallel            - B runs alongside A
   conditional         - B runs only if A fails
 
+  With --ref, the spawned proto arm is nested inside the molecule operand
+  rather than ordered against it - whichever side of the bond that is - so a
+  sequential --ref arm carries no ordering: it is ready as soon as it is
+  spawned. Ordering a nested arm against its own container is unsatisfiable
+  in both directions (the arm waits for the molecule to close; the molecule
+  cannot close while it holds an open arm). --ref is refused with --type
+  conditional, which has no safe degradation - omit --ref to bond a
+  conditional arm as a sibling.
+
 Phase control:
   By default, spawned protos follow the target's phase:
   - Attaching to mol (Ephemeral=false) → spawns as persistent (Ephemeral=false)
@@ -188,6 +197,9 @@ func gatherMolBondInput(cmd *cobra.Command, args []string) (molBondInput, error)
 	}
 	if in.bondType != types.BondTypeSequential && in.bondType != types.BondTypeParallel && in.bondType != types.BondTypeConditional {
 		return in, fmt.Errorf("invalid bond type '%s', must be: sequential, parallel, or conditional", in.bondType)
+	}
+	if err := refuseConditionalRefArm(in.bondType, in.childRef); err != nil {
+		return in, err
 	}
 
 	varFlags, _ := cmd.Flags().GetStringArray("var")
@@ -446,10 +458,49 @@ func bondProtoMolAttachInto(ctx context.Context, w molWriter, protoSubgraph *Tem
 	}, nil
 }
 
+// refuseConditionalRefArm rejects --ref combined with --type conditional.
+//
+// A --ref arm is nested inside its target, so an ordering edge onto that
+// target can never be satisfied (see buildAttachCloneOpts). A sequential bond
+// degrades gracefully: the edge is dropped and the arm carries no ordering. A
+// conditional edge means "run only if the target fails", so dropping it would
+// turn an arm that should almost never run into one that always runs - a
+// silent false dispatch, which is worse than the deadlock it replaced. There
+// is no reading of the two flags together that is both safe and useful, so
+// refuse rather than guess.
+//
+// Both gatherMolBondInput (which also covers --dry-run and the proxied route)
+// and buildAttachCloneOpts consult this, so a caller that skips flag
+// validation cannot construct the arm either.
+//
+// The message has to read correctly for every operand shape, not just the
+// nesting ones. gatherMolBondInput runs before operands are resolved, so this
+// also refuses mol+mol and proto+proto - shapes that never receive a childRef
+// at all, where --ref is inert and nothing nests. It is therefore phrased as
+// what --ref does where it applies rather than as a claim about the bond in
+// front of the user. Keep it that way if you reword it.
+func refuseConditionalRefArm(bondType, childRef string) error {
+	if childRef == "" || bondType != types.BondTypeConditional {
+		return nil
+	}
+	return fmt.Errorf("--ref cannot be combined with --type conditional: where --ref nests an arm, a conditional edge onto the arm's own container cannot be satisfied, and dropping that edge would run the arm unconditionally instead of only on failure. Omit --ref to bond a conditional arm as a sibling, or use --type sequential or --type parallel with --ref")
+}
+
 func buildAttachCloneOpts(subgraph *TemplateSubgraph, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (CloneOptions, error) {
-	requiredVars := extractAllVariables(subgraph)
+	if err := refuseConditionalRefArm(bondType, childRef); err != nil {
+		return CloneOptions{}, err
+	}
+	// Resolve variables the way pour (cmd/bd/pour.go) and wisp (cmd/bd/wisp.go)
+	// do: fill declared defaults first, then demand only the declared vars that
+	// have none. Demanding every handlebar the subgraph mentions would fail the
+	// bond on a proto's documentation placeholders and on declared vars that
+	// carry only a default - and widening the scanned field set (assignee,
+	// labels, metadata) would have widened that refusal too.
+	// extractRequiredVariables returns the unfiltered list when VarDefs is nil,
+	// so a legacy template still requires every var it mentions.
+	vars = applyVariableDefaults(vars, subgraph)
 	var missingVars []string
-	for _, v := range requiredVars {
+	for _, v := range extractRequiredVariables(subgraph) {
 		if _, ok := vars[v]; !ok {
 			missingVars = append(missingVars, v)
 		}
@@ -485,6 +536,34 @@ func buildAttachCloneOpts(subgraph *TemplateSubgraph, mol *types.Issue, bondType
 	if childRef != "" {
 		opts.ParentID = mol.ID
 		opts.ChildRef = childRef
+
+		// A --ref arm is nested INSIDE mol, and its ID already records that.
+		// Blocking it on mol as well is unsatisfiable in both directions: the
+		// arm waits for mol to close, and mol cannot close while it holds an
+		// open arm. Nesting carries the attachment, so the blocking edge is
+		// dropped rather than deadlocking the molecule it was bonded into.
+		//
+		// The arm therefore carries NO ordering relative to mol - it is ready
+		// as soon as it is spawned. That is a real loss of the "B runs after A
+		// completes" promise, documented in the place that makes it: this
+		// command's long help. docs/cli-reference/mol.md is generated from the
+		// release named in docs/cli-docs.pin, so it will carry the same text
+		// once that pin advances past this change - do not hand-write it there.
+		// The loss is the deliberate trade: a nested arm's only satisfiable
+		// relationship to its container is containment.
+		//
+		// Only DepBlocks is dropped. DepConditionalBlocks never arrives here -
+		// refuseConditionalRefArm above rejects it - and keeping the check
+		// narrow means a future bond type that does reach this point is not
+		// silently stripped of its edge as well.
+		if depType == types.DepBlocks {
+			opts.AttachToID = ""
+			opts.AttachDepType = ""
+		}
+		// A parallel arm keeps its DepParentChild edge on top of the ParentID
+		// nesting. The two say the same thing, so the edge is redundant rather
+		// than wrong - but it is what `bd dep list` reports for every parallel
+		// arm bonded so far, and it is satisfiable, so it stays.
 	}
 	return opts, nil
 }
@@ -627,14 +706,28 @@ func resolveOrDescribe(ctx context.Context, s molReader, operand string, vars ma
 		return nil, "", fmt.Errorf("'%s' not found as issue or formula: %w", operand, err)
 	}
 
-	// A dry-run must fail the same way the real bond would: an enum/pattern/
-	// provided-empty violation in --var values fails resolveOrCookToSubgraph,
-	// so reporting "will be cooked" here would be a false preview.
-	if err := formula.ValidateProvidedVars(f, vars); err != nil {
-		return nil, "", err
+	// A dry-run must fail the same way the real bond would, and the real bond
+	// (resolveAndCookFormulaWithVars) resolves inheritance BEFORE it validates
+	// anything. parser.Resolve is what calls Formula.Validate - LoadByName ->
+	// loadFormula -> ParseFile never does - so skipping it here previewed a
+	// successful bond for a formula the real bond rejects, including the
+	// unspawnable waits_for gate this PR adds. Resolving first also means the
+	// --var check runs against the merged formula rather than the unmerged
+	// one, so a var declared only in a parent is checked too.
+	resolved, err := parser.Resolve(f)
+	if err != nil {
+		return nil, "", fmt.Errorf("resolving formula %q: %w", operand, err)
 	}
 
-	return nil, f.Formula, nil
+	// An enum/pattern/provided-empty violation in --var values fails
+	// resolveOrCookToSubgraph, so reporting "will be cooked" here would be a
+	// false preview. Wrapped the same way the real path wraps it, so the two
+	// produce the same message rather than merely the same exit code.
+	if err := formula.ValidateProvidedVars(resolved, vars); err != nil {
+		return nil, "", fmt.Errorf("formula %q: %w", operand, err)
+	}
+
+	return nil, resolved.Formula, nil
 }
 
 // resolveOrCookToSubgraph tries to resolve an operand as an issue ID or formula.
@@ -671,10 +764,10 @@ func resolveOrCookToSubgraph(ctx context.Context, s molReader, operand string, v
 	// condition filtering (bd-7zka.1).
 	subgraph, err := resolveAndCookFormulaWithVars(operand, nil, vars)
 	if err != nil {
-		if errors.Is(err, formula.ErrVarValidation) {
-			// Don't double-wrap: operand IS a formula, and the --var values
-			// it was given fail enum/pattern/required-empty constraints,
-			// which is a distinct condition from "not found".
+		if errors.Is(err, formula.ErrVarValidation) || errors.Is(err, formula.ErrValidation) {
+			// Don't double-wrap: operand IS a formula that either does not
+			// validate or was given --var values failing its enum/pattern/
+			// required-empty constraints, both distinct from "not found".
 			return nil, false, err
 		}
 		return nil, false, fmt.Errorf("'%s' not found as issue or formula: %w", operand, err)
@@ -683,14 +776,21 @@ func resolveOrCookToSubgraph(ctx context.Context, s molReader, operand string, v
 	return subgraph, true, nil
 }
 
+// registerMolBondFlags declares bond's flags on cmd. It exists so a test can
+// build an isolated command with the real flag set rather than mutating the
+// package-level molBondCmd, whose flag values would then leak between tests.
+func registerMolBondFlags(cmd *cobra.Command) {
+	cmd.Flags().String("type", types.BondTypeSequential, "Bond type: sequential, parallel, or conditional")
+	cmd.Flags().String("as", "", "Custom title for compound proto (proto+proto only)")
+	cmd.Flags().Bool("dry-run", false, "Preview what would be created")
+	cmd.Flags().StringArray("var", []string{}, "Variable substitution for spawned protos (key=value)")
+	cmd.Flags().Bool("ephemeral", false, "Force spawn as vapor (ephemeral, Ephemeral=true)")
+	cmd.Flags().Bool("pour", false, "Force spawn as liquid (persistent, Ephemeral=false)")
+	cmd.Flags().String("ref", "", "Custom child reference with {{var}} substitution (e.g., arm-{{polecat_name}})")
+}
+
 func init() {
-	molBondCmd.Flags().String("type", types.BondTypeSequential, "Bond type: sequential, parallel, or conditional")
-	molBondCmd.Flags().String("as", "", "Custom title for compound proto (proto+proto only)")
-	molBondCmd.Flags().Bool("dry-run", false, "Preview what would be created")
-	molBondCmd.Flags().StringArray("var", []string{}, "Variable substitution for spawned protos (key=value)")
-	molBondCmd.Flags().Bool("ephemeral", false, "Force spawn as vapor (ephemeral, Ephemeral=true)")
-	molBondCmd.Flags().Bool("pour", false, "Force spawn as liquid (persistent, Ephemeral=false)")
-	molBondCmd.Flags().String("ref", "", "Custom child reference with {{var}} substitution (e.g., arm-{{polecat_name}})")
+	registerMolBondFlags(molBondCmd)
 
 	molCmd.AddCommand(molBondCmd)
 }

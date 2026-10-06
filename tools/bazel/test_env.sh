@@ -55,6 +55,14 @@ trap 'reap_root_processes 2>/dev/null || true; chmod -R u+w "$root" 2>/dev/null 
 
 mkdir -p "$root/home" "$root/xdg-config" "$root/dolt-root" "$root/tmp"
 : >"$root/gitconfig"
+# The global git identity of the CI jobs that run `git config --global
+# user.name/user.email` before their tests (PR Risk's server-Dolt and
+# proxied-server jobs): a target mirroring such a job sets
+# BEADS_TEST_GIT_IDENTITY=1 in its env. Everything else keeps pr-core's empty
+# global gitconfig.
+if [[ "${BEADS_TEST_GIT_IDENTITY:-}" == 1 ]]; then
+	printf '[user]\n\tname = CI Bot\n\temail = ci@beads.test\n' >"$root/gitconfig"
+fi
 # Dolt identity, as beads_test_env_enter sets with `dolt config --global`:
 # tests that shell out to dolt commit need an author. Written directly so the
 # wrapper does not depend on a dolt binary. The two *.disabled keys stop every

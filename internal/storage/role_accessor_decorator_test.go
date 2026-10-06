@@ -162,6 +162,7 @@ type roleAccessorStore struct {
 	blocking     issueops.BlockingAnnotator
 	tree         issueops.TreeWalker
 	graphCounter issueops.GraphCounter
+	batchGetter  issueops.BatchGetter
 	counter      issueops.Counter
 	settings     issueops.WorkspaceConfig
 	memories     memoryops.Memories
@@ -195,6 +196,7 @@ func newRoleAccessorStore() *roleAccessorStore {
 		edges:        sentinel,
 		blocking:     sentinel,
 		graphCounter: sentinel,
+		batchGetter:  sentinel,
 		counter:      sentinel,
 		settings:     sentinel,
 		versions:     sentinel,
@@ -272,6 +274,9 @@ func (s *roleAccessorStore) DependencyEditor() (issueops.DependencyEditor, error
 func (s *roleAccessorStore) GraphCounter() (issueops.GraphCounter, error) {
 	return s.graphCounter, s.err
 }
+func (s *roleAccessorStore) BatchGetter() (issueops.BatchGetter, error) {
+	return s.batchGetter, s.err
+}
 func (s *roleAccessorStore) MetadataCAS() (issueops.MetadataCAS, error) {
 	return s.metadataCAS, s.err
 }
@@ -326,6 +331,9 @@ func (*roleAccessorSentinel) CountByGroup(context.Context, issueops.CountByGroup
 }
 func (*roleAccessorSentinel) CountEdges(context.Context, issueops.EdgeCountRequest) (issueops.EdgeCountResult, error) {
 	return issueops.EdgeCountResult{}, nil
+}
+func (*roleAccessorSentinel) GetMany(context.Context, issueops.GetManyRequest) (issueops.GetManyResult, error) {
+	return issueops.GetManyResult{}, nil
 }
 func (*roleAccessorSentinel) GetSetting(context.Context, issueops.GetSettingRequest) (issueops.SettingResult, error) {
 	return issueops.SettingResult{}, nil
@@ -472,6 +480,7 @@ func TestHookFiringStoreWrapsTheWriteRolesAndPassesTheReadsThrough(t *testing.T)
 		{"BlockingAnnotator", func() (any, error) { return store.BlockingAnnotator() }, inner.blocking, false},
 		{"TreeWalker", func() (any, error) { return store.TreeWalker() }, inner.tree, false},
 		{"GraphCounter", func() (any, error) { return store.GraphCounter() }, inner.graphCounter, false},
+		{"BatchGetter", func() (any, error) { return store.BatchGetter() }, inner.batchGetter, false},
 		{"Counter", func() (any, error) { return store.Counter() }, inner.counter, false},
 		{"WorkspaceConfig", func() (any, error) { return store.WorkspaceConfig() }, inner.settings, false},
 		{"Memories", func() (any, error) { return store.Memories() }, inner.memories, false},
@@ -529,6 +538,7 @@ func TestHookFiringStoreRoleAccessorsPropagateInnerErrors(t *testing.T) {
 		{"BlockingAnnotator", func() (any, error) { return store.BlockingAnnotator() }},
 		{"TreeWalker", func() (any, error) { return store.TreeWalker() }},
 		{"GraphCounter", func() (any, error) { return store.GraphCounter() }},
+		{"BatchGetter", func() (any, error) { return store.BatchGetter() }},
 		{"Counter", func() (any, error) { return store.Counter() }},
 		{"WorkspaceConfig", func() (any, error) { return store.WorkspaceConfig() }},
 		{"Memories", func() (any, error) { return store.Memories() }},

@@ -567,6 +567,9 @@ func runReadyExplain(_ *cobra.Command) error {
 	}
 
 	// Build ready items with explanations
+	// TODO(batchgetter): unbounded id list; see issueops.BatchGetter's doc and
+	// the importIssueLookup TODO in import_shared.go for why this is not yet
+	// routed through the role.
 	blockerIssues, err := activeStore.GetIssuesByIDs(ctx, blockerIDList)
 	if err != nil {
 		debug.Logf("warning: failed to get blocker issues: %v", err)

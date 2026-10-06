@@ -49,6 +49,13 @@ var allowedSchemes = map[string]bool{
 
 // gitSSHPattern matches SCP-style git remote URLs (user@host:path).
 // The path portion excludes control characters (0x00-0x1f, 0x7f).
+//
+// This is byte-identical to the first alternative of
+// doltremote.scpStyleGitURLPattern in internal/doltremote/remote.go. That one
+// is a superset: it also accepts the user-less dotted-host form
+// ("github.com:org/repo.git"), which IsRemoteURL intentionally reports as false
+// (pinned by TestIsRemoteURLRejectsUserlessDottedHost). The two are one grammar
+// maintained in two places, so keep them in sync.
 var gitSSHPattern = regexp.MustCompile(`^[a-zA-Z0-9._-]+@[a-zA-Z0-9][a-zA-Z0-9._-]*:[^\x00-\x1f\x7f]+$`)
 
 // validRemoteNameRegex matches valid remote names: starts with a letter,

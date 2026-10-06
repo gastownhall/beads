@@ -981,8 +981,8 @@ func TestValidateGraphApplyExplicitIDPrefixes(t *testing.T) {
 // field exists, not that graphApplyNodeIssue actually wires it into its
 // createIssueParams literal. A new field added everywhere but omitted from
 // that literal would still pass here and materialize as a zero value; the
-// value round-trip in TestEmbeddedCreate/graph_full_fields is the wiring
-// backstop.
+// value round-trip in TestEmbeddedCreateGraphAndBulk/graph_create_journey
+// (renamed from graph_full_fields by bd-okxx4, #5291) is the wiring backstop.
 func TestGraphApplyNodeCoversCreateIssueParams(t *testing.T) {
 	renamed := map[string]string{
 		"IssueType":     "Type",

@@ -1,16 +1,27 @@
 name: setup-bazel
 description: >
-  Install a sha256-pinned Bazelisk (Bazel itself comes from .bazelversion),
-  restore the runner Bazel cache (--repository_cache and Bazelisk only),
+  Install a sha256-pinned Bazelisk, have it download the sha256-pinned Bazel
+  release .bazelversion names (never from the runner cache), restore the
+  runner Bazel cache (--repository_cache only, whose entries Bazel re-hashes
+  on use),
   and write a CI bazelrc outside the workspace. When the caller passes all of
   BAZEL_REMOTE_EXECUTOR, RBE_TLS_CERT and RBE_TLS_KEY in the step env, that rc
   enables --config=remote-exec for every bazel command; with none of them the
-  job runs locally (fork PRs); a partial set fails. `bazel` on PATH is a
-  wrapper that always passes the generated rc.
+  job runs locally; with BAZEL_FORK_CACHE=true (and no secrets) it enables
+  the read-only fork cache (--config=fork-cache); with BAZEL_FORK_REMOTE=true
+  (fork and Dependabot PRs, bazel.yml modes fork-ro/fork-rw; needs
+  RBE_FORK_PR and RBE_FORK_TIER) it gets a short-lived certificate from
+  rbe-fork-mint (fork-credential.sh, proving the run with a CSR artifact) and
+  enables remote execution on rbe-fork; a partial set, or two of these
+  together, fails. `bazel` on PATH is a wrapper that always passes the
+  generated rc.
 outputs:
   remote:
     description: '"true" when remote execution is configured'
     value: ${{ steps.rc.outputs.remote }}
+  cache:
+    description: '"true" when the read-only fork cache (rbe-cache) is configured'
+    value: ${{ steps.rc.outputs.cache }}
   cache-restored:
     description: '"true" when a runner Bazel cache was restored (any prefix match)'
     value: ${{ steps.restore.outputs.cache-matched-key != '' }}
@@ -23,15 +34,20 @@ runs:
     # Keyed on what determines its content; saved only by a push to main that
     # missed the exact key (see the caller's "Save Bazel runner cache" step).
     # A lock change restores the previous lock's entry, which still holds most
-    # of the downloads.
+    # of the downloads. It holds only the content-addressable repository cache,
+    # which Bazel checks against each download's sha256 on every hit; the
+    # unverified repo contents cache is off (write-bazelrc.sh) and the Bazel
+    # binary is not cached, so a poisoned entry (a cache written by an
+    # untrusted run) cannot change what executes. v3: v2 also held Bazelisk's
+    # download and the contents cache.
     - name: Restore Bazel runner cache
       id: restore
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ runner.temp }}/bazel-ci-cache
-        key: bazel-repo-v2-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}
+        key: bazel-repo-v3-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}
         restore-keys: |
-          bazel-repo-v2-${{ runner.os }}-
+          bazel-repo-v3-${{ runner.os }}-
 
     - name: Install Bazelisk
       shell: bash
@@ -48,7 +64,55 @@ runs:
         echo "${sha}  $RUNNER_TEMP/bazelisk" | sha256sum -c -
         sudo install -m 755 "$RUNNER_TEMP/bazelisk" /usr/local/bin/bazelisk
         rm -f "$RUNNER_TEMP/bazelisk"
-        echo "BAZELISK_HOME=$RUNNER_TEMP/bazel-ci-cache/bazelisk" >> "$GITHUB_ENV"
+        # The Bazel release .bazelversion names, pinned like Bazelisk above
+        # (the release's bazel-<v>-linux-<arch>.sha256). Bazelisk verifies
+        # only fresh downloads, so its home is a fresh directory outside the
+        # runner cache: every job downloads and verifies Bazel. A .bazelversion
+        # bump adds its pair here (policy-tested).
+        bazel_version="$(tr -d '[:space:]' < .bazelversion)"
+        case "$bazel_version/$arch" in
+          9.2.0/amd64) bazel_sha=7668a95db1250f12c40407251e4e203b4ec8bf39bc495d2f485b2d8c99048694 ;;
+          9.2.0/arm64) bazel_sha=049dd21f40ad979db11c3ee68c96a42ce75f1185e69ac61ab20de1501427a410 ;;
+          *) echo "setup-bazel: no pinned sha256 for Bazel '$bazel_version' ($arch); add it from the release's .sha256 file" >&2; exit 1 ;;
+        esac
+        {
+          echo "BAZELISK_HOME=$RUNNER_TEMP/bazelisk-home"
+          echo "BAZELISK_VERIFY_SHA256=$bazel_sha"
+          echo "BAZEL_CI_BAZEL_SHA256=$bazel_sha"
+        } >> "$GITHUB_ENV"
+
+    # Fork and Dependabot runs (no secrets, no OIDC): a key and a CSR, the CSR
+    # as an artifact of this run (the mint's proof that the request comes
+    # from a running job of it), then the certificate. The key stays in the
+    # secret dir; the CSR and the certificate are public.
+    # fork-credential.sh key does nothing (no outputs) unless the caller set
+    # BAZEL_FORK_REMOTE=true; the next two steps follow its csr output.
+    - name: rbe-fork key and CSR
+      id: fork-key
+      shell: bash
+      env:
+        BAZEL_CI_SECRET_DIR: ${{ runner.temp }}/bazel-ci-secret
+      run: bash "$GITHUB_ACTION_PATH/fork-credential.sh" key
+
+    - name: rbe-fork CSR artifact (proof of this run)
+      id: fork-csr
+      if: steps.fork-key.outputs.csr != ''
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: ${{ steps.fork-key.outputs.artifact-name }}
+        path: ${{ steps.fork-key.outputs.csr }}
+        retention-days: 1
+        if-no-files-found: error
+        compression-level: 0
+
+    - name: rbe-fork certificate (rbe-fork-mint)
+      id: fork-cert
+      if: steps.fork-key.outputs.csr != ''
+      shell: bash
+      env:
+        BAZEL_CI_SECRET_DIR: ${{ runner.temp }}/bazel-ci-secret
+        ARTIFACT_ID: ${{ steps.fork-csr.outputs.artifact-id }}
+      run: bash "$GITHUB_ACTION_PATH/fork-credential.sh" cert
 
     - name: Write CI bazelrc
       id: rc
@@ -56,6 +120,10 @@ runs:
       env:
         BAZEL_CI_CACHE_DIR: ${{ runner.temp }}/bazel-ci-cache
         BAZEL_CI_SECRET_DIR: ${{ runner.temp }}/bazel-ci-secret
+        RBE_FORK_CERT_FILE: ${{ steps.fork-cert.outputs.cert }}
+        RBE_FORK_KEY_FILE: ${{ steps.fork-cert.outputs.key }}
+        RBE_FORK_ENDPOINT: ${{ steps.fork-cert.outputs.endpoint }}
+        RBE_FORK_INSTANCE: ${{ steps.fork-cert.outputs.instance }}
       run: bash "$GITHUB_ACTION_PATH/write-bazelrc.sh"
 
     - name: Install bazel wrapper
@@ -67,4 +135,17 @@ runs:
         printf '%s\n' '#!/usr/bin/env bash' "exec /usr/local/bin/bazelisk --bazelrc=\"$RC\" \"\$@\"" > "$RUNNER_TEMP/bazel-wrapper"
         sudo install -m 755 "$RUNNER_TEMP/bazel-wrapper" /usr/local/bin/bazel
         rm -f "$RUNNER_TEMP/bazel-wrapper"
+        # Downloads Bazel (Bazelisk checks BAZELISK_VERIFY_SHA256; the
+        # wrapper's --bazelrc would make --version an unknown startup
+        # option), then checks again: every Bazel binary in Bazelisk's home
+        # is the pinned release.
         /usr/local/bin/bazelisk --version
+        n=0
+        while IFS= read -r -d '' bin; do
+          echo "${BAZEL_CI_BAZEL_SHA256}  $bin" | sha256sum -c - >/dev/null
+          n=$((n + 1))
+        done < <(find "$BAZELISK_HOME/downloads" -type f -path '*/bin/bazel' -print0)
+        if [ "$n" -eq 0 ]; then
+          echo "setup-bazel: no Bazel binary under $BAZELISK_HOME" >&2
+          exit 1
+        fi

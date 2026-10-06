@@ -14,6 +14,13 @@ import (
 	"github.com/steveyegge/beads/internal/utils"
 )
 
+// deferUntilFormatHint restates the vocabulary of
+// timeparsing.ParseCompactDuration for every flag that reaches it. The unit set
+// and its order track that parser's doc comment, so a unit added there must be
+// added here too -- TestDeferUntilFormatHintCoversCompactUnits only catches
+// units this constant already names.
+const deferUntilFormatHint = "Use a relative offset [+-]?<n><unit> with unit min=minutes, h=hours, d=days, w=weeks, m=months, y=years (+30min, +1h, +3m), natural language (tomorrow, next monday), or a date (2025-01-15)"
+
 var deferCmd = &cobra.Command{
 	Use:   "defer [id...]",
 	Short: "Defer one or more issues for later",
@@ -52,7 +59,7 @@ Examples:
 		if untilStr != "" {
 			t, err := timeparsing.ParseRelativeTime(untilStr, time.Now())
 			if err != nil {
-				return HandleError("invalid --until format %q. Examples: +1h, tomorrow, next monday, 2025-01-15", untilStr)
+				return HandleError("invalid --until format %q. %s", untilStr, deferUntilFormatHint)
 			}
 			if t.Before(time.Now()) && !jsonOutput {
 				fmt.Fprintf(os.Stderr, "%s Defer date %q is in the past. Issue will appear in bd ready immediately.\n",

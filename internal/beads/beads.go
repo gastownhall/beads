@@ -365,6 +365,17 @@ func GetRedirectInfo() RedirectInfo {
 	return redirectInfoFor(findLocalBdsDirInRepo(), findLocalBeadsDir)
 }
 
+// GetDiscoveredRedirectInfo is GetRedirectInfo without the BEADS_DIR override:
+// it reports the redirect that discovery finds from the cwd, the one the cwd's
+// own workspace holds. GetRedirectInfo cannot answer that once BEADS_DIR is
+// set, because when the repo root's .beads holds no redirect it checks
+// BEADS_DIR itself. A workspace redirect nested below the repo root or
+// inherited by a git worktree is then masked, and a BEADS_DIR naming another
+// workspace's redirected .beads reports that redirect as if the cwd held it.
+func GetDiscoveredRedirectInfo() RedirectInfo {
+	return redirectInfoFor(findLocalBdsDirInRepo(), findDiscoveredLocalBeadsDir)
+}
+
 // GetRedirectInfoFrom is GetRedirectInfo for the workspace at dir rather than
 // the process cwd: the .beads directory at dir's git repository root is
 // checked for a redirect first, then the nearest .beads walking up from dir.
@@ -475,7 +486,12 @@ func findLocalBeadsDir() string {
 	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
 		return canonicalizeBeadsDirPath(beadsDir)
 	}
+	return findDiscoveredLocalBeadsDir()
+}
 
+// findDiscoveredLocalBeadsDir is findLocalBeadsDir without the BEADS_DIR
+// override: the local .beads directory discovery finds from the cwd.
+func findDiscoveredLocalBeadsDir() string {
 	// For worktrees, check worktree-local redirect first (per-worktree override).
 	// Returns the raw worktree .beads dir (not the resolved target) since
 	// findLocalBeadsDir doesn't follow redirects — callers use FollowRedirect.
@@ -892,11 +908,26 @@ func hasBeadsDatabase(beadsDir string) bool {
 	return false
 }
 
+// ExplicitBeadsDir returns the .beads directory named by the BEADS_DIR
+// environment variable, canonicalized and with any redirect followed, or ""
+// when BEADS_DIR is unset. Unlike FindBeadsDir it does not require the
+// directory to exist or to hold project files, so commands that create a
+// workspace can target the caller's explicit choice instead of CWD.
+func ExplicitBeadsDir() string {
+	beadsDir := os.Getenv("BEADS_DIR")
+	if beadsDir == "" {
+		return ""
+	}
+	return FollowRedirect(canonicalizeBeadsDirPath(beadsDir))
+}
+
 // FindBeadsDir finds the .beads/ directory in the current directory tree.
 // Returns empty string if not found.
 //
 // Resolution order:
-//  1. BEADS_DIR environment variable (highest priority)
+//  1. BEADS_DIR environment variable (highest priority). An explicit
+//     BEADS_DIR is authoritative: when it does not (yet) hold project files,
+//     FindBeadsDir returns "" instead of discovering some other workspace.
 //  2. Walk up from CWD toward repo root boundary, checking each directory
 //     for .beads/ with valid project files. For worktrees, stops at the
 //     worktree root; for non-worktrees, stops at the git root.
@@ -911,18 +942,20 @@ func hasBeadsDatabase(beadsDir string) bool {
 // contents are used as the actual .beads directory path.
 func FindBeadsDir() string {
 	// 1. Check BEADS_DIR environment variable (preferred)
-	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
-		absBeadsDir := canonicalizeBeadsDirPath(beadsDir)
-
-		// Follow redirect if present
-		absBeadsDir = FollowRedirect(absBeadsDir)
-
+	if absBeadsDir := ExplicitBeadsDir(); absBeadsDir != "" {
 		if info, err := os.Stat(absBeadsDir); err == nil && info.IsDir() {
 			// Validate directory contains actual project files
 			if hasBeadsProjectFiles(absBeadsDir) {
 				return absBeadsDir
 			}
 		}
+
+		// The caller named this directory explicitly. Walking up from CWD
+		// here would bind an unrelated ancestor workspace (and PersistentPreRun
+		// would then rewrite BEADS_DIR to it), so `bd init` and every other
+		// command would act on the wrong store. Report "not found" instead,
+		// matching FindDatabasePath.
+		return ""
 	}
 
 	// 2. Walk up from CWD toward the repo root, checking each directory for .beads/.

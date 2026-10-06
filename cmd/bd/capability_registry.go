@@ -493,7 +493,7 @@ var proxyPermittedPaths = []string{
 	"comments", "comments add", "comments list",
 	"dep", "dep add", "dep cycles", "dep list", "dep relate", "dep remove", "dep tree", "dep unrelate",
 	"kv clear", "kv get", "kv list", "kv set",
-	"label add", "label list", "label list-all", "label propagate", "label remove",
+	"label add", "label list", "label list-all", "label propagate", "label remove", "label rename",
 
 	// molecules, epics, todos, state
 	"epic close-eligible", "epic status",

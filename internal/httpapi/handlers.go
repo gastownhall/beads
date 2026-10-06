@@ -95,9 +95,11 @@ func contextResponse(info domain.ContextInfo, schemaVersion int, capabilities []
 	}
 	published := domain.PublishedContext(info)
 	return apigen.ContextResponse{
-		ApiVersion:    APIVersion,
-		SchemaVersion: schemaVersion,
-		Capabilities:  capabilities,
+		ApiVersion:            APIVersion,
+		SchemaVersion:         schemaVersion,
+		Capabilities:          capabilities,
+		WireRevision:          CurrentWireRevision,
+		MinClientWireRevision: MinClientWireRevision,
 
 		BdVersion: published.BdVersion,
 		Backend:   published.Backend,

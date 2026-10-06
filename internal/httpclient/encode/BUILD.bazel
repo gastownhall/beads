@@ -1,0 +1,48 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "encode",
+    srcs = [
+        "encode.go",
+        "ledger.go",
+        "ledger_fields.go",
+        "ledger_render.go",
+        "parentwalk.go",
+        "skew.go",
+        "table.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/httpclient/encode",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/types",
+        "//internal/workapi",
+        "//issueops",
+    ],
+)
+
+go_test(
+    name = "encode_test",
+    srcs = [
+        "bijection_test.go",
+        "ledger_render_test.go",
+        "oracle_test.go",
+        "parentwalk_test.go",
+        "roundtrip_test.go",
+        "skew_test.go",
+    ],
+    data = [
+        "//:engdocs/design/http-divergence-ledger.md",
+        "//cmd/bd:go_srcs",
+        "//internal/httpapi/spec:openapi.v0.yaml",
+    ] + glob(["*.go"]),
+    embed = [":encode"],
+    deps = [
+        "//internal/httpapi",
+        "//internal/httpapi/spec",
+        "//internal/types",
+        "//internal/workapi",
+        "//issueops",
+        "//memoryops",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)

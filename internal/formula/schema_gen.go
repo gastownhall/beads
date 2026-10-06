@@ -676,7 +676,7 @@ or poured.`,
 				Name:     "Labels",
 				Type:     "[]string",
 				JSONName: "labels",
-				Doc:      `Labels are applied to the created issue.`,
+				Doc:      `Labels are applied to the created issue (supports substitution).`,
 			},
 			{
 				Name:     "Metadata",
@@ -684,7 +684,8 @@ or poured.`,
 				JSONName: "metadata",
 				Doc: `Metadata is carried through to the created issue's Metadata field as
 JSON. Lets formulas pre-declare keys that downstream tooling can project
-without a post-pour compose step.`,
+without a post-pour compose step. String values support substitution at
+any nesting depth; keys are never rewritten.`,
 			},
 			{
 				Name:     "DependsOn",
@@ -705,7 +706,10 @@ Either Needs or DependsOn can be used; they are merged during cooking.`,
 				JSONName: "waits_for",
 				Doc: `WaitsFor specifies a fanout gate type for this step.
 Values: "all-children" (wait for all dynamic children) or "any-children" (wait for first).
-When set, the cooked issue gets a "gate:<value>" label.`,
+When set, the cooked issue gets a "gate:<value>" label.
+Requires needs: the gate waits on the children of the
+step it names, so with nothing to name there is nothing to wait for and
+the cooked gate would carry the label but no dependency edge at all.`,
 			},
 			{
 				Name:     "Assignee",
