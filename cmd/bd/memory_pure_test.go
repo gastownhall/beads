@@ -39,3 +39,20 @@ func TestMatchesKnownCommand(t *testing.T) {
 		})
 	}
 }
+
+func TestIsBareMemoryKey(t *testing.T) {
+	for _, value := range []string{
+		"bd-list-silent-partial-rows-take-decision-counts-with-json",
+		"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz",
+		"memory.v2", "singleword", "123", ".", "-",
+	} {
+		if !isBareMemoryKey(value) {
+			t.Errorf("%q must be a read-shaped key", value)
+		}
+	}
+	for _, value := range []string{"", "two words", " slug", "slug\n", "a\tb", "CAPS", "a_b", "café", "!!!"} {
+		if isBareMemoryKey(value) {
+			t.Errorf("%q must remain on the content path", value)
+		}
+	}
+}

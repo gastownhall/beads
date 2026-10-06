@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/memoryapi"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
@@ -189,6 +190,49 @@ func TestEmbeddedMemory(t *testing.T) {
 		}
 	})
 
+	// Exercise the real CLI and persistence boundary: read-shaped calls must
+	// preserve every row, including an existing derived-key collision.
+	t.Run("remember_noncanonical_keys_are_read_only", func(t *testing.T) {
+		for _, key := range []string{
+			"bd-list-silent-partial-rows-take-decision-counts-with-json",
+			strings.Repeat("x", 61),
+			"memory.v2",
+		} {
+			t.Run(key, func(t *testing.T) {
+				bdRemember(t, bd, dir, "exact memory content", "--key", key)
+				derived := memoryapi.DeriveKey(key)
+				bdRemember(t, bd, dir, "derived memory content", "--key", derived)
+				before := bdMemories(t, bd, dir, "--json")
+				if out := bdRemember(t, bd, dir, key); out != "exact memory content\n" {
+					t.Errorf("exact key recall = %q", out)
+				}
+				if after := bdMemories(t, bd, dir, "--json"); after != before {
+					t.Fatalf("read changed memories: before %s after %s", before, after)
+				}
+
+				bdForget(t, bd, dir, key)
+				before = bdMemories(t, bd, dir, "--json")
+				out := bdRememberFail(t, bd, dir, key)
+				if !strings.Contains(out, "no memory named") || !strings.Contains(out, "did you mean "+derived) {
+					t.Errorf("missing exact key must refuse with suggestion: %s", out)
+				}
+				if after := bdMemories(t, bd, dir, "--json"); after != before {
+					t.Fatalf("miss changed memories: before %s after %s", before, after)
+				}
+
+				bdForget(t, bd, dir, derived)
+				before = bdMemories(t, bd, dir, "--json")
+				out = bdRememberFail(t, bd, dir, key, "--json")
+				if !strings.Contains(out, "no memory named") || strings.Contains(out, "did you mean") {
+					t.Errorf("missing keys must refuse without suggestion: %s", out)
+				}
+				if after := bdMemories(t, bd, dir, "--json"); after != before {
+					t.Fatalf("miss minted a memory: before %s after %s", before, after)
+				}
+			})
+		}
+	})
+
 	t.Run("remember_guard_bypass_with_explicit_key", func(t *testing.T) {
 		bdRemember(t, bd, dir, "original", "--key", "bypass-key")
 		// Explicit --key signals deliberate intent and bypasses the guard.
@@ -210,14 +254,7 @@ func TestEmbeddedMemory(t *testing.T) {
 		bdRecallFail(t, bd, dir, "brand-new-slug-memory")
 	})
 
-	// The two refusals that sit either side of the desire path, and the reason
-	// the bare-slug test is `derived != "" && derived == insight` rather than
-	// the shipped `slugify(insight) == insight`: DeriveKey("") is "", so empty
-	// and underivable content satisfies derived == insight and would be routed
-	// into a "recall" of the empty key instead of being refused. The shipped
-	// code was saved from that by an empty-content check that ran BEFORE the
-	// branch; that check belongs to the role now, so the branch has to exclude
-	// the empty key itself.
+	// Empty and unslugifiable content still receive the role validation errors.
 	t.Run("remember_refuses_content_no_key_derives_from", func(t *testing.T) {
 		for _, tc := range []struct{ insight, want string }{
 			{"", "memory content cannot be empty"},
