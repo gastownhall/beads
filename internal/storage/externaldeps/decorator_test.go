@@ -15,21 +15,32 @@ import (
 
 type fakeStore struct {
 	storage.DoltStorage
-	ready      []*types.Issue
-	blocked    []*types.BlockedIssue
-	tree       []*types.TreeNode
-	deps       map[string][]*types.Dependency
-	labels     map[string][]*types.Issue
-	labelErr   error
-	claimed    []string
-	isBlocked  bool
-	blockerIDs []string
-	closed     []string
-	lifecycle  publicops.Lifecycle
-	batch      *fakeBatchCloser
+	ready       []*types.Issue
+	blocked     []*types.BlockedIssue
+	tree        []*types.TreeNode
+	deps        map[string][]*types.Dependency
+	labels      map[string][]*types.Issue
+	labelErr    error
+	claimed     []string
+	isBlocked   bool
+	blockerIDs  []string
+	closed      []string
+	lifecycle   publicops.Lifecycle
+	batch       *fakeBatchCloser
+	enforced    bool
+	enforcedErr error
 }
 
 func (f *fakeStore) IssueLifecycle() (publicops.Lifecycle, error) { return f.lifecycle, nil }
+
+// ServerEnforcesExternalDependencyPolicy makes every fakeStore satisfy
+// storage.ExternalDependencyPolicyProber. Defaulting to (false, nil) keeps
+// every existing test's raw store on today's client-side-enforcement path
+// unchanged; enforced:true is set explicitly only by the test below that
+// pins loadBlockingState's skip branch.
+func (f *fakeStore) ServerEnforcesExternalDependencyPolicy(_ context.Context) (bool, error) {
+	return f.enforced, f.enforcedErr
+}
 
 // BatchCloser without BatchCloserWithPolicy models a backend that predates
 // storage.PolicyBatchCloserSource.
@@ -318,6 +329,46 @@ func TestGetReadyWorkFailsClosedForUnconfiguredProject(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("ready = %v, want no issues", issueIDs(got))
+	}
+}
+
+// TestLoadBlockingStateSkipsClientSideEnforcementWhenServerReportsItEnforced
+// pins design 3.6's skip branch in loadBlockingState (internal/storage/
+// externaldeps/decorator.go) on its CURRENT shape: a remote store
+// implementing storage.ExternalDependencyPolicyProber that reports
+// enforced=true must stop this decorator from applying its own client-side
+// exclusion at all. The S6 review's M5 mutation targeted an earlier, cruder
+// "skip whenever the backend is remote" implementation that the HIGH-1 fix
+// replaced with this probe-based design, so M5's exact mutation target no
+// longer exists; this test gives the probe's own skip branch equivalent
+// mutation coverage. Nothing else in the suite exercises enforced==true: see
+// internal/httpclient/served_external_dependency_policy_test.go, which
+// documents exercising only enforced==false against a real served server
+// (OSS httpapi never advertises the capability).
+//
+// configured=false on the foreign-project locator reproduces the fail-closed
+// path from TestGetReadyWorkFailsClosedForUnconfiguredProject: if the
+// `if enforced { return blockingState{}, nil }` skip were removed or
+// inverted, this would fall through to ordinary client-side enforcement,
+// which cannot resolve "remote" and would exclude be-a. Seeing be-a survive
+// is therefore proof the skip branch fired.
+func TestLoadBlockingStateSkipsClientSideEnforcementWhenServerReportsItEnforced(t *testing.T) {
+	a := issue("be-a")
+	raw := &fakeStore{
+		ready: []*types.Issue{a},
+		deps: map[string][]*types.Dependency{
+			a.ID: {externalDep(a.ID, "external:remote:payments", types.DepBlocks)},
+		},
+		enforced: true,
+	}
+	store := testStore(raw, &fakeStore{}, false)
+
+	got, err := store.GetReadyWork(t.Context(), types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	if ids := issueIDs(got); !slices.Equal(ids, []string{a.ID}) {
+		t.Fatalf("ready IDs = %v, want [%s] (a server-enforced probe should skip this decorator's own client-side exclusion)", ids, a.ID)
 	}
 }
 

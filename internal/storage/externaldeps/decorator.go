@@ -119,6 +119,25 @@ type blockingState struct {
 }
 
 func (s *Store) loadBlockingState(ctx context.Context) (blockingState, error) {
+	// Design 3.6: a remote server that already enforces this policy itself
+	// (advertised as the handshake's wire.CapExternalDependencies capability,
+	// probed here through storage.ExternalDependencyPolicyProber) has already
+	// applied it before answering, so this decorator's own pass would be
+	// redundant — skip to an empty blocking state. A store that does not
+	// implement the prober, or that implements it and reports false (a remote
+	// server silent on the capability included), falls through to the
+	// ordinary client-side enforcement below: the policy is never silently
+	// skipped merely because the inner store is remote.
+	if prober, ok := storage.UnwrapStore(s.inner).(storage.ExternalDependencyPolicyProber); ok {
+		enforced, err := prober.ServerEnforcesExternalDependencyPolicy(ctx)
+		if err != nil {
+			return blockingState{}, fmt.Errorf("external dependencies: probe server policy: %w", err)
+		}
+		if enforced {
+			return blockingState{}, nil
+		}
+	}
+
 	queryStore, ok := storage.UnwrapStore(s.inner).(storage.ExternalDependencyQueryStore)
 	var allDeps map[string][]*types.Dependency
 	var err error
@@ -176,8 +195,12 @@ func (s *Store) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*t
 	if err != nil {
 		return nil, err
 	}
-	filter = withExternalExclusions(filter, state.refsByIssue)
-	return s.inner.GetReadyWork(ctx, filter)
+	queryFilter, blockedIDs := s.readyExclusion(filter, state.refsByIssue)
+	issues, err := s.inner.GetReadyWork(ctx, queryFilter)
+	if err != nil {
+		return nil, err
+	}
+	return dropBlockedIssues(issues, blockedIDs, filter.Limit), nil
 }
 
 // GetReadyWorkWithCounts is the counts-bearing equivalent of GetReadyWork.
@@ -186,8 +209,12 @@ func (s *Store) GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFil
 	if err != nil {
 		return nil, err
 	}
-	filter = withExternalExclusions(filter, state.refsByIssue)
-	return s.inner.GetReadyWorkWithCounts(ctx, filter)
+	queryFilter, blockedIDs := s.readyExclusion(filter, state.refsByIssue)
+	rows, err := s.inner.GetReadyWorkWithCounts(ctx, queryFilter)
+	if err != nil {
+		return nil, err
+	}
+	return dropBlockedIssuesWithCounts(rows, blockedIDs, filter.Limit), nil
 }
 
 // GetReadyWorkWithCountsAndTotal applies the same external exclusions as
@@ -199,8 +226,77 @@ func (s *Store) GetReadyWorkWithCountsAndTotal(ctx context.Context, filter types
 	if err != nil {
 		return nil, 0, err
 	}
-	filter = withExternalExclusions(filter, state.refsByIssue)
-	return s.inner.GetReadyWorkWithCountsAndTotal(ctx, filter)
+	return s.readyWorkWithCountsAndTotal(ctx, filter, state)
+}
+
+// readyExclusion resolves how this decorator applies its OWN additional
+// exclusions (issues with an unsatisfied external blocker) against s.inner.
+//
+// A store that can express types.WorkFilter.ExcludeIDs over its own
+// transport (every first-party SQL-backed store) gets them folded straight
+// into the filter, exactly as before: the WHERE clause does the exclusion.
+//
+// A store that cannot (storage.ExcludeIDsUnsupportedStore — today only
+// httpclient.Store: design 3.6 / L12 leaves listReadyWork with no
+// id-exclusion parameter on the v0 wire at all) instead gets a bumped Limit
+// and the exclusions applied client-side by the caller. Requesting
+// Limit+len(refsByIssue) rows from the UNFILTERED ready set is provably
+// enough headroom to still surface Limit genuinely-unblocked rows whenever
+// that many exist: refsByIssue cannot hold more entries than the number of
+// issues anywhere with an unsatisfied external blocker, so at most
+// len(refsByIssue) of the bumped window's extra rows can be ones this
+// decorator has to drop. Whichever path is taken, the policy itself is never
+// skipped — only where the exclusion happens differs.
+func (s *Store) readyExclusion(filter types.WorkFilter, refsByIssue map[string][]string) (queryFilter types.WorkFilter, blockedIDs map[string]bool) {
+	if len(refsByIssue) == 0 {
+		return filter, nil
+	}
+	if unsupported, ok := storage.UnwrapStore(s.inner).(storage.ExcludeIDsUnsupportedStore); !ok || !unsupported.ExcludeIDsUnsupported() {
+		return withExternalExclusions(filter, refsByIssue), nil
+	}
+	blockedIDs = make(map[string]bool, len(refsByIssue))
+	for issueID := range refsByIssue {
+		blockedIDs[issueID] = true
+	}
+	queryFilter = filter
+	if queryFilter.Limit > 0 {
+		queryFilter.Limit += len(blockedIDs)
+	}
+	return queryFilter, blockedIDs
+}
+
+func dropBlockedIssues(issues []*types.Issue, blockedIDs map[string]bool, limit int) []*types.Issue {
+	if len(blockedIDs) == 0 {
+		return issues
+	}
+	kept := issues[:0]
+	for _, issue := range issues {
+		if issue != nil && blockedIDs[issue.ID] {
+			continue
+		}
+		kept = append(kept, issue)
+	}
+	if limit > 0 && len(kept) > limit {
+		kept = kept[:limit]
+	}
+	return kept
+}
+
+func dropBlockedIssuesWithCounts(rows []*types.IssueWithCounts, blockedIDs map[string]bool, limit int) []*types.IssueWithCounts {
+	if len(blockedIDs) == 0 {
+		return rows
+	}
+	kept := rows[:0]
+	for _, row := range rows {
+		if row != nil && row.Issue != nil && blockedIDs[row.ID] {
+			continue
+		}
+		kept = append(kept, row)
+	}
+	if limit > 0 && len(kept) > limit {
+		kept = kept[:limit]
+	}
+	return kept
 }
 
 func withExternalExclusions(filter types.WorkFilter, refsByIssue map[string][]string) types.WorkFilter {
@@ -216,6 +312,52 @@ func withExternalExclusions(filter types.WorkFilter, refsByIssue map[string][]st
 	return filter
 }
 
+// readyWorkWithCountsAndTotal is GetReadyWorkWithCountsAndTotal's body, split
+// out so CountReadyWork's fallback (below) can reuse it against an
+// already-loaded blockingState instead of loading it a second time.
+func (s *Store) readyWorkWithCountsAndTotal(ctx context.Context, filter types.WorkFilter, state blockingState) ([]*types.IssueWithCounts, int, error) {
+	queryFilter, blockedIDs := s.readyExclusion(filter, state.refsByIssue)
+	rows, total, err := s.inner.GetReadyWorkWithCountsAndTotal(ctx, queryFilter)
+	if err != nil {
+		return nil, 0, err
+	}
+	kept := dropBlockedIssuesWithCounts(rows, blockedIDs, filter.Limit)
+	if len(blockedIDs) == 0 {
+		return kept, total, nil
+	}
+
+	blockedSeen := 0
+	for _, row := range rows {
+		if row != nil && row.Issue != nil && blockedIDs[row.ID] {
+			blockedSeen++
+		}
+	}
+	var adjustedTotal int
+	if queryFilter.Limit <= 0 || total <= queryFilter.Limit {
+		// The bumped fetch's own reported total says the window already held
+		// the entire ready set, so every blocked row the window contains is
+		// every blocked row the ready set contains: the subtraction is exact.
+		adjustedTotal = total - blockedSeen
+	} else {
+		// The ready set is bigger than even the bumped window: refsByIssue is
+		// a ceiling on how many additional, unseen rows could also be both
+		// blocked and otherwise-ready, so subtracting all of it is the
+		// adjustment least likely to overstate how much ready work remains —
+		// bd ready's own page (above) is exact regardless of this branch;
+		// only this total's precision is bounded here, by the same "ONE
+		// REQUEST, NO PAGING" wire shape that keeps listReadyWork from
+		// expressing ExcludeIDs in the first place.
+		adjustedTotal = total - len(blockedIDs)
+	}
+	if adjustedTotal < len(kept) {
+		adjustedTotal = len(kept)
+	}
+	if adjustedTotal < 0 {
+		adjustedTotal = 0
+	}
+	return kept, adjustedTotal, nil
+}
+
 // CountReadyWork reports the externally filtered ready count.
 func (s *Store) CountReadyWork(ctx context.Context, filter types.WorkFilter) (int, error) {
 	filter.Limit = 0
@@ -224,15 +366,14 @@ func (s *Store) CountReadyWork(ctx context.Context, filter types.WorkFilter) (in
 	if err != nil {
 		return 0, err
 	}
-	filter = withExternalExclusions(filter, state.refsByIssue)
 	if counter, ok := storage.UnwrapStore(s.inner).(storage.ReadyWorkCounter); ok {
-		return counter.CountReadyWork(ctx, filter)
+		return counter.CountReadyWork(ctx, withExternalExclusions(filter, state.refsByIssue))
 	}
-	issues, err := s.inner.GetReadyWork(ctx, filter)
-	if err != nil {
-		return 0, err
-	}
-	return len(issues), nil
+	// s.inner has no indexed counter (httpclient.Store among others): reuse
+	// the counts-and-total path above, which already copes with a store whose
+	// transport cannot express ExcludeIDs at all.
+	_, total, err := s.readyWorkWithCountsAndTotal(ctx, filter, state)
+	return total, err
 }
 
 // ReadyCounter sizes the ready set through CountReadyWork above, so the total

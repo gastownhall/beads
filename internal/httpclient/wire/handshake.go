@@ -240,18 +240,16 @@ const CapIssuesCreateDefaultPriority = "issues.create.defaultPriority"
 // through the policy layer, so httpapi.Capabilities() — the build-level list
 // the parity gate compares against — never contains it.
 //
-// UNCONSUMED since S3 reconciliation (2026-10): THIS token is unread by this
-// client, not because OSS lacks external-dependency policy enforcement — the
-// externaldeps decorator (internal/storage/externaldeps) exists in OSS and is
-// wired unconditionally into the local storage chain (cmd/bd/storage_chain.go),
-// so a local backend already applies the policy itself. What this http
-// client specifically lacks is a client-side COMPOSITION of that same
-// decorator around a storage.ExternalDependencyQueryStore-backed remote
-// store, because a remote server advertising this capability applies the
-// policy on its own side before answering — there is nothing left for the
-// client to decorate. The token stays declared, because the server-side
-// capability and its wire spelling are real and S10 schedules the client half
-// that reads it.
+// Consumed since S6 (design 3.6): the externaldeps decorator
+// (internal/storage/externaldeps) wraps the http store the same as any local
+// backend (cmd/bd/storage_chain.go wires it unconditionally), and consults
+// storage.ExternalDependencyPolicyProber — which httpclient.Store implements
+// by checking for this token in the handshake — before deciding whether to
+// also enforce the policy client-side. A server that advertises this token
+// has already applied the policy itself, so the decorator's own check is
+// redundant there. A server that does NOT advertise it gets the ordinary
+// client-side enforcement: the policy is never silently skipped merely
+// because the store is remote.
 const CapExternalDependencies = "policy.external_dependencies"
 
 // ClientWireRevision is the wire shape this client was built to speak and
