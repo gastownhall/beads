@@ -240,3 +240,41 @@ func TestCommitConfigUserKVOnlyRefusesInternalConfigKeys(t *testing.T) {
 		t.Fatal("config table no longer dirty after a refused commit")
 	}
 }
+
+// SetConfig writes status.custom and types.custom into their lookup tables in
+// the same transaction as the config row, so the scoped commit must take those
+// tables with it: a commit holding the row without its projection would serve
+// the old lookup set to every clone that pulls it.
+func TestCommitConfigOnlyCommitsConfigProjections(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := store.CommitWithConfig(ctx, "test: baseline"); err != nil {
+		t.Fatalf("baseline commit: %v", err)
+	}
+
+	if err := store.SetConfig(ctx, "status.custom", "gh4078review:active"); err != nil {
+		t.Fatalf("SetConfig status.custom: %v", err)
+	}
+	if err := store.SetConfig(ctx, "types.custom", "gh4078kind"); err != nil {
+		t.Fatalf("SetConfig types.custom: %v", err)
+	}
+	pre := dirtyTables(t, store)
+	if !pre["config"] || !pre["custom_statuses"] || !pre["custom_types"] {
+		t.Fatalf("precondition failed: want config+custom_statuses+custom_types dirty, got %v", pre)
+	}
+
+	if err := store.CommitConfigOnly(ctx, "test: scoped config commit"); err != nil {
+		t.Fatalf("CommitConfigOnly: %v", err)
+	}
+
+	post := dirtyTables(t, store)
+	for _, table := range []string{"config", "custom_statuses", "custom_types"} {
+		if post[table] {
+			t.Fatalf("%s still dirty after CommitConfigOnly: got %v", table, post)
+		}
+	}
+}

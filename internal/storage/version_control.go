@@ -190,19 +190,21 @@ type VersionControl interface {
 	// racy HEAD-before/HEAD-after comparison (the interface threading tracked
 	// as bd mybd-z9h7j; CommitPending already had the shape).
 	CommitAll(ctx context.Context, message string) (bool, error)
-	// CommitConfigOnly commits the config table — the scoped commit for
-	// intentional config writes (bd config set) in server mode. There, unlike
-	// CommitWithConfig ('-Am'), it never stages other tables, so a concurrent
-	// operation's dirty working set is not swept (GH#2455). Embedded mode has no
-	// concurrent writer to sweep and commits the whole working set, as its
-	// CommitWithConfig does.
+	// CommitConfigOnly commits the config table, with the lookup tables
+	// SetConfig projects from it (custom_statuses, custom_types) — the scoped
+	// commit for intentional config writes (bd config set) in server mode.
+	// There, unlike CommitWithConfig ('-Am'), it never stages other tables, so
+	// a concurrent operation's dirty working set is not swept (GH#2455).
+	// Embedded mode has no concurrent writer to sweep and commits the whole
+	// working set, as its CommitWithConfig does.
 	// GH#4078: without this, server-mode config writes strand the working
 	// set dirty — generic Commit() excludes config and silently no-ops.
 	CommitConfigOnly(ctx context.Context, message string) error
-	// CommitConfigUserKVOnly is CommitConfigOnly for writes of user kv.* data
-	// (bd remember, bd forget). In server mode it refuses, committing nothing,
-	// when any dirty config row is outside kv.*, the screen the pre-pull
-	// auto-commit applies; embedded mode behaves as CommitConfigOnly.
+	// CommitConfigUserKVOnly is the scoped commit for writes of user kv.* data
+	// (bd remember, bd forget). In server mode it stages the config table alone
+	// and refuses, committing nothing, when any dirty config row is outside
+	// kv.*, the screen the pre-pull auto-commit applies. Embedded mode behaves
+	// as CommitConfigOnly.
 	CommitConfigUserKVOnly(ctx context.Context, message string) error
 	CommitPending(ctx context.Context, actor string) (bool, error)
 	CommitExists(ctx context.Context, commitHash string) (bool, error)

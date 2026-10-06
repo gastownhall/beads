@@ -3848,13 +3848,20 @@ func (s *DoltStore) CommitAll(ctx context.Context, message string) (bool, error)
 	return committed, err
 }
 
-// CommitConfigOnly commits ONLY the config table (GH#4078). Use after
-// intentional config writes (bd remember, bd config set) in server mode,
+// CommitConfigOnly commits the config table (GH#4078). Use after
+// intentional config writes (bd config set) in server mode,
 // where generic Commit() excludes config (GH#2455) and nothing else ever
 // commits it. Scoped staging means a concurrent operation's dirty tables
 // are never swept — the same guarantee that motivated GH#2455.
+//
+// The lookup tables SetConfig projects from config (custom_statuses,
+// custom_types) are staged with it: SetConfig writes them in the same
+// transaction as the row, and a commit holding one without the other is the
+// split that projection exists to prevent. They are written only from config,
+// so staging them sweeps no other kind of work.
 func (s *DoltStore) CommitConfigOnly(ctx context.Context, message string) error {
-	return s.doltAddAndCommit(ctx, []string{"config"}, message)
+	tables := append([]string{"config"}, issueops.ConfigProjectionTables()...)
+	return s.doltAddAndCommit(ctx, tables, message)
 }
 
 // CommitConfigUserKVOnly is the scoped commit for a write of this clone's own
