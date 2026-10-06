@@ -128,7 +128,10 @@ Examples:
 			case restoredBackend != "":
 				fmt.Printf("Removed %s and restored this workspace's backend selection in metadata.json to %q.\n", httpclient.TargetFileName, restoredBackend)
 			case removed:
-				fmt.Printf("Removed %s. This workspace's backend selection in metadata.json is unchanged; open it with http://... connect again, or `bd config set backend dolt` to pick a different backend.\n", httpclient.TargetFileName)
+				// Not `bd config set backend ...`: that writes the database's
+				// own config table, never metadata.json, and must first open
+				// the very store this workspace can no longer reach.
+				fmt.Printf("Removed %s. This workspace's backend selection in metadata.json is unchanged; run `bd connect <url>` to reconnect, or set \"backend\" in %s to pick a different backend.\n", httpclient.TargetFileName, filepath.Join(beadsDir, configfile.ConfigFileName))
 			default:
 				fmt.Println("No http target was configured; nothing to clear.")
 			}
