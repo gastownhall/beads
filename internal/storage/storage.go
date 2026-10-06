@@ -1003,6 +1003,51 @@ type ExternalDependencyQueryStore interface {
 	GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
 }
 
+// RemoteBackendStore is implemented by a DoltStorage that is a pure network
+// client of a remote bd serve process (a registered backend whose
+// backends.Backend.Remote is true — see internal/storage/backends). It is
+// read-only metadata about the store's transport, not a policy decision: see
+// ExternalDependencyPolicyProber for whether a decorator should actually skip
+// client-side enforcement.
+type RemoteBackendStore interface {
+	IsRemoteBackendStore() bool
+}
+
+// ExternalDependencyPolicyProber is implemented by a DoltStorage that can
+// answer whether the remote server it talks to already enforces bd's
+// external-dependency policy itself (design 3.6, "External-dependency server
+// policy": upstream's storage.ServerEnforcedPolicy / PolicyEnforcedByServer).
+// The external-deps decorator consults this — not RemoteBackendStore alone —
+// before skipping its own client-side enforcement: a remote store whose
+// server advertises the capability (httpapi's policy.external_dependencies)
+// has already enforced the policy before answering, so a second client-side
+// pass would be redundant. A store that does not implement this interface, or
+// that implements it and reports false — including a remote store whose
+// server is silent on the capability — gets the ordinary client-side
+// enforcement. The policy is never silently skipped merely because the store
+// is remote.
+type ExternalDependencyPolicyProber interface {
+	ServerEnforcesExternalDependencyPolicy(ctx context.Context) (bool, error)
+}
+
+// ExcludeIDsUnsupportedStore is implemented by a DoltStorage whose ready-work
+// reads cannot express types.WorkFilter.ExcludeIDs over their own transport.
+// Today that is exactly httpclient.Store: the v0 wire's listReadyWork and
+// countReadyWork operations publish no id-exclusion parameter, so the http
+// bridge refuses rather than silently widening the result set whenever a
+// filter carries any (design 3.6 / L12, "every field it cannot express
+// refuses").
+//
+// The external-deps decorator consults this before deciding how to apply its
+// OWN additional exclusions (issues blocked by an unsatisfied
+// external:<project>:<capability> dependency): a store that answers true here
+// gets those exclusions applied client-side in Go instead of folded into the
+// filter handed down, so the policy still runs — design 3.6 says it is never
+// silently skipped — without tripping the wire's own refusal.
+type ExcludeIDsUnsupportedStore interface {
+	ExcludeIDsUnsupported() bool
+}
+
 // Transaction provides atomic multi-operation support within a single database transaction.
 //
 // The Transaction interface exposes a subset of storage methods that execute within

@@ -320,9 +320,9 @@ func designRows() []Row {
 			PinnedBy: pinnedByS3Conformance,
 		},
 		{
-			ID: "L8", Kind: KindRefuse, Flag: "--deps",
-			What:     "`bd list --deps` refuses, and the pretty/--format dependency-decoration arms render undecorated",
-			Why:      "GetAllDependencyRecords has no wire mapping in v1; listDependencies is an anchored read. --tree is NOT in this row: it defaults true and is `bd list`'s default text rendering",
+			ID: "L8", Kind: KindDegrade, Flag: "--deps",
+			What:     "`bd list --deps` and the policy decorator's compatibility fallback (design 3.6) both work, but by a client-side chunked scan rather than a single wire call",
+			Why:      "GetAllDependencyRecords has no 1:1 wire mapping in v1 — listDependencies is anchored at <=100 ids per call (L12's maxEdgeCountAnchors) — so the client enumerates every issue id (fetchIssuePages) and issues it in chunks, grouping the results itself; this is slower and heavier than a local store's single query, not absent. --tree is NOT in this row: it defaults true and is `bd list`'s default text rendering",
 			SpecRow:  "D9 L8, D4",
 			PinnedBy: pinnedByS3Conformance,
 		},
