@@ -383,17 +383,24 @@ func buildMarkdownBatchRequest(templates []*IssueTemplate, in createInput) (issu
 				Description:        template.Description,
 				Design:             template.Design,
 				AcceptanceCriteria: template.AcceptanceCriteria,
-				Status:             types.StatusOpen,
-				Priority:           template.Priority,
-				IssueType:          template.IssueType,
-				Assignee:           template.Assignee,
-				Labels:             template.Labels,
-				Ephemeral:          ephemeral,
-				NoHistory:          in.noHistory,
-				StorageClass:       storageClass,
-				MolType:            in.molType,
-				CreatedBy:          in.createdBy,
-				Owner:              in.owner,
+				// Status is left unset rather than spelled out as
+				// types.StatusOpen: PreparePublicCreateRequest (shared by every
+				// backend, including the http client store's server) already
+				// defaults an empty Status to StatusOpen, so an explicit "open"
+				// here was never a different outcome — only a populated member
+				// the http wire's BatchCreateItem has no slot for and the role
+				// (correctly) refuses rather than drops. Leaving it unset keeps
+				// this path backend-agnostic without changing what gets created.
+				Priority:     template.Priority,
+				IssueType:    template.IssueType,
+				Assignee:     template.Assignee,
+				Labels:       template.Labels,
+				Ephemeral:    ephemeral,
+				NoHistory:    in.noHistory,
+				StorageClass: storageClass,
+				MolType:      in.molType,
+				CreatedBy:    in.createdBy,
+				Owner:        in.owner,
 			},
 			Dependencies: dependencies,
 		})
