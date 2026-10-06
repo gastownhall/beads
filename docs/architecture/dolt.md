@@ -26,7 +26,7 @@ Install a specific version. Do not install `releases/latest` — see
 version to use and why the pin exists.
 
 ```bash
-DOLT_VERSION=2.2.0   # see "Which Dolt version to install" below
+DOLT_VERSION=2.3.5   # see "Which Dolt version to install" below
 
 os=$(uname -s | tr '[:upper:]' '[:lower:]')
 arch=$(uname -m | sed -e 's/^x86_64$/amd64/' -e 's/^aarch64$/arm64/')
@@ -44,14 +44,17 @@ against the pin below.
 
 ### Which Dolt version to install
 
-Beads pins Dolt to **2.2.0**. CI installs that same pin with
+Beads pins Dolt to **2.3.5**. CI installs that same pin with
 `scripts/ci/install-dolt.sh`, which records the per-version measurements and
 the criterion for raising it; raise the pin here and in that script together.
 
 This pin is about the standalone `dolt` CLI, which only server and
 proxied-server mode use. Embedded mode is unaffected either way: it links the
 Dolt engine into `bd` at the version in `go.mod`, currently the commit tagged
-v2.2.0 upstream, no matter which `dolt` CLI is on your PATH.
+v2.3.5 upstream, no matter which `dolt` CLI is on your PATH. **The two must
+move together** — a database written by one engine version and read by an
+older CLI (or vice versa) can fail with `table has unknown fields`, even
+though both are "Dolt"; see the compatibility note in beads#6811.
 
 Dolt 2.3.0 (released 2026-08-13) regressed `CALL DOLT_RESET('--hard')`. A few
 percent of freshly created databases come up with that procedure unusable —
@@ -68,9 +71,17 @@ Measured by creating fresh databases and immediately calling the procedure:
 | 2.1.8        | 0 / 40                                             |
 | 2.2.0        | 0 / 60                                             |
 | 2.3.0        | 3 / 60                                             |
-| 2.3.1        | 3 / 100                                            |
+| 2.3.1        | 3 / 100 (13 / 150 on a second run, different box)  |
+| 2.3.5        | 0 / 150                                            |
 
-Versions after 2.3.1 have not been measured. Raise the pin only once a newer
+The 2.3.5 row (and the second 2.3.1 run alongside it, as its control) is
+@bee-ghosttrack's measurement from reviewing beads#6811, 2026-10-06: two
+`dolt sql-server` instances on the same box, one per version, 150 fresh
+databases each via the same `CREATE DATABASE` + `CALL DOLT_RESET('--hard')`
+probe. One platform, one run; the higher control rate than the original
+3/100 may reflect the box being under heavier load at the time.
+
+Versions after 2.3.5 have not been measured. Raise the pin only once a newer
 release is confirmed clean by that same measurement — not because it is
 newer.
 
