@@ -295,6 +295,7 @@
 30 7 TestProxiedServerGC
 30 7 TestProxiedServerUpdate
 
+30 8 TestProxiedServerBatchJSONGuardedPublicationParity
 30 8 TestProxiedServerInitIfMissing
 30 8 TestProxiedServerPathHelpers
 30 8 TestProxiedServerReopenConcurrent
@@ -316,6 +317,7 @@
 30 10 TestProxiedServerServeEdgeCounts
 
 30 11 TestProxiedServerBatchDefersThenDoltCommitAdvancesHeadOnce
+30 11 TestProxiedServerBatchJSONManagedGuardedPublication
 30 11 TestProxiedServerOutageReconnectAcceptanceMatrix
 30 11 TestProxiedServerReady2
 30 11 TestProxiedServerServeReadsTheJournalItJustWrote

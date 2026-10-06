@@ -1677,6 +1677,12 @@ jobs:
           BEADS_TEST_REQUIRE_DOLT_CONTAINER: "1"
         run: go test -tags gms_pure_go -count=1 -timeout 5m -v -run '^TestDoltServerFingerprint$' ./internal/testutil/
 
+      - name: Test guarded JSON batch provider parity
+        env:
+          BEADS_TEST_REQUIRE_DOLT_CONTAINER: "1"
+          BEADS_TEST_PROXIED_SERVER: "1"
+        run: go test -tags gms_pure_go -count=1 -timeout 5m -v -run '^(TestProxiedServerBatchJSONGuardedPublicationParity|TestBatchJSONEmbeddedGuardedPublication|TestProxiedServerBatchJSONManagedGuardedPublication)$' ./cmd/bd/
+
   # `test-macos` / "Test (macos-latest)" used to run here and is deliberately
   # removed (F4, PR CI -> 5 min). It was a non-required, PR-side mirror of
   # main.yml's `test` job's macOS leg (full `go test -race -short ./...`),
