@@ -131,11 +131,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file, then none). `bd create` suppresses the `created_by` stamp for a
   workspace on a registered remote backend rather than sending one the http
   wire's create role refuses (the creation stamp belongs to the server's own
-  journal entry); the external-dependency policy decorator
-  (`internal/storage/externaldeps`) now skips wrapping a store that reports
-  `storage.RemoteBackendStore` (resolving a sibling project's LOCAL checkout
-  does not apply to a pure network client, and a server that enforces the
-  policy has already applied it before answering).
+  journal entry). The external-dependency policy decorator
+  (`internal/storage/externaldeps`) still wraps an http store, and stands
+  down only when the server's handshake advertises
+  `policy.external_dependencies` (that server has already applied the policy
+  before answering); against any other server it applies the policy
+  client-side, dropping externally blocked issues from `bd ready`'s page,
+  total, and count, because the v0 wire cannot express an id exclusion.
 - The public `backend/http` package (`bdhttp`) is the out-of-tree door onto
   this backend for an embedder that links beads as a library rather than
   running `cmd/bd`: `Register(Options)` adds `"http"` to the registry and

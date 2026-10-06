@@ -75,14 +75,11 @@ type Store struct {
 // interfaces here would assert a maintenance contract no OSS caller checks.
 var _ storage.DoltStorage = (*Store)(nil)
 
-// IsRemoteBackendStore satisfies storage.RemoteBackendStore. cmd/bd's storage
-// chain checks it (after storage.UnwrapStore) before wrapping a store in the
-// external-dependency policy decorator, whose job is resolving references to
-// OTHER LOCAL checkouts on this machine — a concept this backend has no
-// filesystem to apply, and which a server advertising
-// wire.CapExternalDependencies has already enforced on its own side before
-// answering (see that constant's doc for why this client does not also
-// implement storage.ExternalDependencyQueryStore).
+// IsRemoteBackendStore satisfies storage.RemoteBackendStore. The marker is
+// informational: nothing in-tree consults it. In particular cmd/bd's storage
+// chain wraps this store in the external-dependency policy decorator like any
+// other, and the decorator decides whether to stand down through
+// ServerEnforcesExternalDependencyPolicy below, never through this marker.
 func (s *Store) IsRemoteBackendStore() bool { return true }
 
 var _ storage.RemoteBackendStore = (*Store)(nil)

@@ -214,7 +214,8 @@ func (s *Store) GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFil
 	if err != nil {
 		return nil, err
 	}
-	return dropBlockedIssuesWithCounts(rows, blockedIDs, filter.Limit), nil
+	kept, _ := dropBlockedIssuesWithCounts(rows, blockedIDs, filter.Limit)
+	return kept, nil
 }
 
 // GetReadyWorkWithCountsAndTotal applies the same external exclusions as
@@ -265,11 +266,15 @@ func (s *Store) readyExclusion(filter types.WorkFilter, refsByIssue map[string][
 	return queryFilter, blockedIDs
 }
 
+// dropBlockedIssues is readyExclusion's client-side half: it drops the rows
+// blockedIDs names and trims what remains to limit. It copies into a fresh
+// slice rather than compacting issues in place, so the slice s.inner returned
+// still holds every row it fetched.
 func dropBlockedIssues(issues []*types.Issue, blockedIDs map[string]bool, limit int) []*types.Issue {
 	if len(blockedIDs) == 0 {
 		return issues
 	}
-	kept := issues[:0]
+	kept := make([]*types.Issue, 0, len(issues))
 	for _, issue := range issues {
 		if issue != nil && blockedIDs[issue.ID] {
 			continue
@@ -282,13 +287,18 @@ func dropBlockedIssues(issues []*types.Issue, blockedIDs map[string]bool, limit 
 	return kept
 }
 
-func dropBlockedIssuesWithCounts(rows []*types.IssueWithCounts, blockedIDs map[string]bool, limit int) []*types.IssueWithCounts {
+// dropBlockedIssuesWithCounts is dropBlockedIssues for counts-bearing rows. It
+// also reports how many rows it dropped from the whole fetched window (before
+// the limit trim), which is the figure readyWorkWithCountsAndTotal subtracts
+// from the inner store's total.
+func dropBlockedIssuesWithCounts(rows []*types.IssueWithCounts, blockedIDs map[string]bool, limit int) (kept []*types.IssueWithCounts, dropped int) {
 	if len(blockedIDs) == 0 {
-		return rows
+		return rows, 0
 	}
-	kept := rows[:0]
+	kept = make([]*types.IssueWithCounts, 0, len(rows))
 	for _, row := range rows {
 		if row != nil && row.Issue != nil && blockedIDs[row.ID] {
+			dropped++
 			continue
 		}
 		kept = append(kept, row)
@@ -296,7 +306,7 @@ func dropBlockedIssuesWithCounts(rows []*types.IssueWithCounts, blockedIDs map[s
 	if limit > 0 && len(kept) > limit {
 		kept = kept[:limit]
 	}
-	return kept
+	return kept, dropped
 }
 
 func withExternalExclusions(filter types.WorkFilter, refsByIssue map[string][]string) types.WorkFilter {
@@ -321,17 +331,11 @@ func (s *Store) readyWorkWithCountsAndTotal(ctx context.Context, filter types.Wo
 	if err != nil {
 		return nil, 0, err
 	}
-	kept := dropBlockedIssuesWithCounts(rows, blockedIDs, filter.Limit)
+	kept, blockedSeen := dropBlockedIssuesWithCounts(rows, blockedIDs, filter.Limit)
 	if len(blockedIDs) == 0 {
 		return kept, total, nil
 	}
 
-	blockedSeen := 0
-	for _, row := range rows {
-		if row != nil && row.Issue != nil && blockedIDs[row.ID] {
-			blockedSeen++
-		}
-	}
 	var adjustedTotal int
 	if queryFilter.Limit <= 0 || total <= queryFilter.Limit {
 		// The bumped fetch's own reported total says the window already held

@@ -128,12 +128,12 @@ func isRemoteBackendWorkspace() bool {
 // carry. It is getActorWithGit()'s actor for an ordinary local backend, and
 // empty for a registered Remote backend: the http backend's create role
 // deliberately refuses a populated CreatedBy on create (see
-// backend/http/lifecycle.go's refuseUnwirableCreateIssue and the divergence
-// ledger row W-CreateRequest.Issue) because the creation stamp belongs to the
-// journal entry the server itself writes, not a value the caller supplies —
-// re-dating history is what an import is for. Stamping it here for a remote
-// workspace would make every `bd create` against that backend fail instead of
-// deferring attribution to the server.
+// internal/httpclient/lifecycle.go's refuseUnwirableCreateIssue and the
+// divergence ledger row W-CreateRequest.Issue) because the creation stamp
+// belongs to the journal entry the server itself writes, not a value the
+// caller supplies — re-dating history is what an import is for. Stamping it
+// here for a remote workspace would make every `bd create` against that
+// backend fail instead of deferring attribution to the server.
 func creationActorStamp() string {
 	if isRemoteBackendWorkspace() {
 		return ""

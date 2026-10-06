@@ -29,6 +29,8 @@ type fakeStore struct {
 	batch       *fakeBatchCloser
 	enforced    bool
 	enforcedErr error
+
+	excludeIDsUnsupported bool
 }
 
 func (f *fakeStore) IssueLifecycle() (publicops.Lifecycle, error) { return f.lifecycle, nil }
@@ -41,6 +43,13 @@ func (f *fakeStore) IssueLifecycle() (publicops.Lifecycle, error) { return f.lif
 func (f *fakeStore) ServerEnforcesExternalDependencyPolicy(_ context.Context) (bool, error) {
 	return f.enforced, f.enforcedErr
 }
+
+// ExcludeIDsUnsupported likewise makes every fakeStore satisfy
+// storage.ExcludeIDsUnsupportedStore. Defaulting to false keeps every existing
+// test's exclusions folded into WorkFilter.ExcludeIDs; excludeIDsUnsupported:
+// true models httpclient.Store, whose ready listings refuse ExcludeIDs (see
+// GetReadyWork below), so the decorator must drop blocked rows client-side.
+func (f *fakeStore) ExcludeIDsUnsupported() bool { return f.excludeIDsUnsupported }
 
 // BatchCloser without BatchCloserWithPolicy models a backend that predates
 // storage.PolicyBatchCloserSource.
@@ -70,6 +79,9 @@ func (f *fakeLifecycle) Update(context.Context, publicops.UpdateRequest) (public
 }
 
 func (f *fakeStore) GetReadyWork(_ context.Context, filter types.WorkFilter) ([]*types.Issue, error) {
+	if f.excludeIDsUnsupported && len(filter.ExcludeIDs) > 0 {
+		return nil, errors.New("fakeStore: ExcludeIDs cannot be expressed")
+	}
 	candidates := make([]*types.Issue, 0, len(f.ready))
 	for _, issue := range f.ready {
 		if !slices.Contains(filter.ExcludeIDs, issue.ID) {
@@ -512,6 +524,67 @@ func TestReadyTotalsAgreeAcrossOutputModes(t *testing.T) {
 	}
 	if text.Total != 2 || int(text.Total) != jsonTotal {
 		t.Fatalf("text total = %d, json total = %d; want both 2 (be-a is externally blocked)", text.Total, jsonTotal)
+	}
+}
+
+// TestReadyTotalsWhenStoreCannotExpressExcludeIDs pins the path httpclient.Store
+// takes: the decorator bumps Limit and drops externally blocked rows
+// client-side, and the page, its total, and CountReadyWork must all still
+// exclude them. be-a comes back first, ahead of the rows kept — the order in
+// which compacting the fetched rows in place once overwrote be-a before the
+// total's blocked-row count reached it, so the total came out 3, not 2.
+func TestReadyTotalsWhenStoreCannotExpressExcludeIDs(t *testing.T) {
+	a, b, c := issue("be-a"), issue("be-b"), issue("be-c")
+	raw := &fakeStore{
+		ready: []*types.Issue{a, b, c},
+		deps: map[string][]*types.Dependency{
+			a.ID: {externalDep(a.ID, "external:remote:payments", types.DepBlocks)},
+		},
+		excludeIDsUnsupported: true,
+	}
+	store := testStore(raw, &fakeStore{}, true)
+
+	for _, tc := range []struct {
+		name    string
+		limit   int
+		wantIDs []string
+	}{
+		{name: "unlimited", limit: 0, wantIDs: []string{b.ID, c.ID}},
+		// The bumped window (2+1) holds the whole ready set: the total is exact.
+		{name: "window holds the set", limit: 2, wantIDs: []string{b.ID, c.ID}},
+		// The ready set outgrows the bumped window (1+1): the total is the
+		// inner total less every externally blocked issue.
+		{name: "set outgrows the window", limit: 1, wantIDs: []string{b.ID}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			filter := types.WorkFilter{Limit: tc.limit}
+			issues, err := store.GetReadyWork(t.Context(), filter)
+			if err != nil {
+				t.Fatalf("GetReadyWork: %v", err)
+			}
+			if ids := issueIDs(issues); !slices.Equal(ids, tc.wantIDs) {
+				t.Fatalf("GetReadyWork IDs = %v, want %v", ids, tc.wantIDs)
+			}
+			rows, total, err := store.GetReadyWorkWithCountsAndTotal(t.Context(), filter)
+			if err != nil {
+				t.Fatalf("GetReadyWorkWithCountsAndTotal: %v", err)
+			}
+			ids := make([]string, 0, len(rows))
+			for _, row := range rows {
+				ids = append(ids, row.ID)
+			}
+			if !slices.Equal(ids, tc.wantIDs) || total != 2 {
+				t.Fatalf("page = %v, total = %d; want %v, total 2 (be-a is externally blocked)", ids, total, tc.wantIDs)
+			}
+		})
+	}
+
+	got, err := store.CountReadyWork(t.Context(), types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("CountReadyWork: %v", err)
+	}
+	if got != 2 {
+		t.Fatalf("ready count = %d, want 2 (be-a is externally blocked)", got)
 	}
 }
 

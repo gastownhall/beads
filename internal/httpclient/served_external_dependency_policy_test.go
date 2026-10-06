@@ -98,4 +98,20 @@ func TestServedReadyExcludesUnsatisfiedExternalDependencyWithoutServerCapability
 	if !sawFree {
 		t.Errorf("ready over http = %v, want unrelated issue %q present", ids, freeID)
 	}
+
+	// The total `bd ready --json` prints beside the page, and the count
+	// text-mode `bd ready` prints, must exclude the same issue. This store
+	// cannot express ExcludeIDs, so both come from the decorator's client-side
+	// drop, which is where the exclusion has to be subtracted.
+	_, total, err := decorated.GetReadyWorkWithCountsAndTotal(ctx, filter)
+	if err != nil {
+		t.Fatalf("GetReadyWorkWithCountsAndTotal over http: %v", err)
+	}
+	count, err := decorated.CountReadyWork(ctx, filter)
+	if err != nil {
+		t.Fatalf("CountReadyWork over http: %v", err)
+	}
+	if total != len(ids) || count != len(ids) {
+		t.Errorf("ready over http lists %v, but total = %d and CountReadyWork = %d; want both %d (%q excluded)", ids, total, count, len(ids), blockedID)
+	}
 }
