@@ -385,7 +385,7 @@ func TestExecuteGraphApplyRejectsReverseParentChildEdgeCycle(t *testing.T) {
 // parent down to its own descendant keeps those children blocked for as long
 // as the parent is. IsSchedulingEdge's "a waits-for edge cannot close a
 // cycle" does not hold here, in either case below. Refusing the shape belongs
-// in the shared role, for every front door at once; this test is the marker
+// in the shared role, for every front door at once (#7292); this test is the marker
 // to flip when that lands.
 func TestExecuteGraphApplyAcceptsParentToChildPathThroughWaitsFor(t *testing.T) {
 	// A waits-for edge's target is its spawner (validateGraphApplyPlan).
