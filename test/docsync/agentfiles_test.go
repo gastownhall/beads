@@ -9,8 +9,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // rootAgentsMaxBytes caps the root AGENTS.md. Agent tools load it into every
@@ -80,14 +78,14 @@ func contributorAgentFiles(t *testing.T, root string) []string {
 }
 
 // TestAgentInstructionFilesAreLinkedAndRouted: every contributor AGENTS.md has
-// a sibling CLAUDE.md symlink (Claude Code skips AGENTS.md files when a
-// CLAUDE.md exists above them), every nested one is listed in the root routing
-// table, and every local link, backticked repo path, and backticked guard-test
-// name in them resolves. Make targets are not checked.
+// a sibling CLAUDE.md that resolves to it (a symlink, `ln -s AGENTS.md
+// CLAUDE.md`: Claude Code skips AGENTS.md files when a CLAUDE.md exists above
+// them), every nested one is listed in the root routing table, and every
+// local link, backticked repo path, and backticked guard-test name in them
+// resolves. Make targets are not checked. Under Bazel the checkout is
+// //:repo_files, where a source symlink arrives as its target's content, so
+// CLAUDE.md is checked by content: a copy that drifts from AGENTS.md fails.
 func TestAgentInstructionFilesAreLinkedAndRouted(t *testing.T) {
-	if bazeltest.IsBazel() {
-		t.Skip("walks the source checkout; Bazel runfiles hold only declared data, so this runs under go test")
-	}
 	root := repoRoot()
 	agentFiles := contributorAgentFiles(t, root)
 	if len(agentFiles) < 2 {
@@ -102,17 +100,13 @@ func TestAgentInstructionFilesAreLinkedAndRouted(t *testing.T) {
 		agentsPath := filepath.Join(root, filepath.FromSlash(rel))
 		claudePath := filepath.Join(filepath.Dir(agentsPath), "CLAUDE.md")
 		claudeRel := filepath.ToSlash(filepath.Join(filepath.Dir(rel), "CLAUDE.md"))
-		info, err := os.Lstat(claudePath)
-		switch {
-		case err != nil:
+		if _, err := os.Lstat(claudePath); err != nil {
 			t.Errorf("%s has no sibling CLAUDE.md; add one with `ln -s AGENTS.md CLAUDE.md`", rel)
-		case info.Mode()&os.ModeSymlink == 0:
-			t.Errorf("%s is a regular file; replace it with a symlink to AGENTS.md", claudeRel)
-		default:
+		} else {
 			agents, aerr := os.ReadFile(agentsPath)
 			claude, cerr := os.ReadFile(claudePath)
 			if aerr != nil || cerr != nil || !bytes.Equal(agents, claude) {
-				t.Errorf("%s does not resolve to its sibling AGENTS.md", claudeRel)
+				t.Errorf("%s does not resolve to its sibling AGENTS.md; replace it with `ln -s AGENTS.md CLAUDE.md`", claudeRel)
 			}
 		}
 		if rel != "AGENTS.md" && !bytes.Contains(rootAgents, []byte("("+rel+")")) {

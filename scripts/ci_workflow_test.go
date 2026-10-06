@@ -1377,10 +1377,9 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "pr-core-wrapper"), []goCacheStep{
 		restoreModuleCache(), restoreBuildCache("race"),
 	})
-	// D2 step 3: PR Core's environment for ./scripts/..., go vet and the
-	// Bazel-skipped tests; read-only like PR Core.
+	// D2 step 3: PR Core's go vet; read-only like PR Core.
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "scripts-go-checks"), []goCacheStep{
-		restoreModuleCache(), restoreBuildCacheIf("race", "matrix.check == 'scripts-test'"), restoreVetCache(), restoreBuildCacheIf("non-race", "matrix.check == 'allowlisted'"),
+		restoreModuleCache(), restoreVetCache(),
 	})
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "pr-lint-wrapper"), []goCacheStep{restoreModuleCache(), restoreGolangciCache()})
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "worktree-remove-windows"), []goCacheStep{
@@ -4487,11 +4486,7 @@ func TestBazelDoltJobMirrorsContainerJobs(t *testing.T) {
 	// dolt-server target. Every such target, checked on its own, picks the
 	// local backend and fails closed, so a broken backend fails rather than
 	// skipping into a cached pass; the ones whose TestMain owns a server also
-	// set the package's own REQUIRE switch. Only under go test: scripts_test's
-	// runfiles hold no other package's BUILD.
-	if os.Getenv("TEST_SRCDIR") != "" {
-		return
-	}
+	// set the package's own REQUIRE switch.
 	root := sourceRepoRoot(t)
 	for pkg, docker := range map[string]bool{
 		"internal/storage/domain":      false,
@@ -4686,18 +4681,9 @@ func bazelRuleBlock(build, name string) string {
 // bazelProxiedShardCount returns cmd/bd:bd_proxied_test's own shard_count
 // from cmd/bd/BUILD.bazel: the single source of truth for the Bazel-only
 // bazel-proxied lane's shard split, which no longer has to equal PR
-// Risk's/main.yml's legacy test-proxied-cmd jobs' matrix size (F2). Under
-// `bazel test`, scripts_test's runfiles hold no other package's BUILD file,
-// so this falls back to the literal the structural checks below pin under
-// plain `go test` (TestBazelDoltServerTiersMirrorPRRisk and
-// TestBazelRetiredLanesCheckListedTestsRan both fail if cmd/bd/BUILD.bazel's
-// shard_count ever drifts from this fallback).
+// Risk's/main.yml's legacy test-proxied-cmd jobs' matrix size (F2).
 func bazelProxiedShardCount(t *testing.T) int {
 	t.Helper()
-	const bazelTestFallback = 30
-	if os.Getenv("TEST_SRCDIR") != "" {
-		return bazelTestFallback
-	}
 	root := sourceRepoRoot(t)
 	rule := bazelRuleBlock(readPolicyFile(t, root, "cmd/bd/BUILD.bazel"), "bd_proxied_test")
 	m := regexp.MustCompile(`(?m)^    shard_count = (\d+),$`).FindStringSubmatch(rule)
@@ -4936,9 +4922,6 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 		if step.Env[c.env] != "1" {
 			t.Errorf("%s %s no longer sets %s=1; update %s:%s", c.workflow, c.job, c.env, c.pkg, c.target)
 		}
-		if os.Getenv("TEST_SRCDIR") != "" {
-			continue // scripts_test's runfiles hold no other package's BUILD
-		}
 		buildShards := shards
 		root := sourceRepoRoot(t)
 		rule := bazelRuleBlock(readPolicyFile(t, root, c.pkg+"/BUILD.bazel"), c.target)
@@ -4985,37 +4968,35 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 		t.Fatalf("parsed %v from pr-risk.yml test-server-storage %q", wantArgs, conf)
 	}
 
-	if os.Getenv("TEST_SRCDIR") == "" {
-		root := sourceRepoRoot(t)
-		doltBuild := readPolicyFile(t, root, "internal/storage/dolt/BUILD.bazel")
-		rule := bazelRuleBlock(doltBuild, "dolt_server_conformance_test")
-		for _, w := range append(wantArgs, `"$(rootpath :dolt_race_off)",`, `srcs = ["//tools/bazel:go_test_variant.sh"],`) {
-			if !strings.Contains(bazelAttrBlock(rule, "args")+rule, w) {
-				t.Errorf("dolt:dolt_server_conformance_test does not contain %q (pr-risk.yml test-server-storage):\n%s", w, rule)
-			}
+	root := sourceRepoRoot(t)
+	doltBuild := readPolicyFile(t, root, "internal/storage/dolt/BUILD.bazel")
+	rule := bazelRuleBlock(doltBuild, "dolt_server_conformance_test")
+	for _, w := range append(wantArgs, `"$(rootpath :dolt_race_off)",`, `srcs = ["//tools/bazel:go_test_variant.sh"],`) {
+		if !strings.Contains(bazelAttrBlock(rule, "args")+rule, w) {
+			t.Errorf("dolt:dolt_server_conformance_test does not contain %q (pr-risk.yml test-server-storage):\n%s", w, rule)
 		}
-		if strings.Contains(rule, "BEADS_TEST_ENV_RUN_DOLT") {
-			t.Error("dolt:dolt_server_conformance_test sets BEADS_TEST_ENV_RUN_DOLT; test-server-storage does not")
+	}
+	if strings.Contains(rule, "BEADS_TEST_ENV_RUN_DOLT") {
+		t.Error("dolt:dolt_server_conformance_test sets BEADS_TEST_ENV_RUN_DOLT; test-server-storage does not")
+	}
+	if r := bazelRuleBlock(doltBuild, "dolt_race_off"); !strings.Contains(r, "go_test_race_off(") || !strings.Contains(r, `test = ":dolt_test",`) {
+		t.Errorf("dolt:dolt_race_off must be go_test_race_off of :dolt_test (the jobs' binary is not race):\n%s", r)
+	}
+	full := bazelRuleBlock(doltBuild, "dolt_server_full_test")
+	for _, w := range []string{`"$(rootpath :dolt_race_off)",`, `"BEADS_TEST_SUBPROCESS_BINARY": "$(rlocationpath :dolt_race_off)"`, `"//:go.mod",`} {
+		if !strings.Contains(full, w) {
+			t.Errorf("dolt:dolt_server_full_test lacks %q (SubprocessRunner reuses the test binary; ModuleRoot needs go.mod):\n%s", w, full)
 		}
-		if r := bazelRuleBlock(doltBuild, "dolt_race_off"); !strings.Contains(r, "go_test_race_off(") || !strings.Contains(r, `test = ":dolt_test",`) {
-			t.Errorf("dolt:dolt_race_off must be go_test_race_off of :dolt_test (the jobs' binary is not race):\n%s", r)
+	}
+	proxied := bazelRuleBlock(readPolicyFile(t, root, "cmd/bd/BUILD.bazel"), "bd_proxied_test")
+	for _, w := range []string{`"$(rootpath :bd_test)",`, `"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)"`} {
+		if !strings.Contains(proxied, w) {
+			t.Errorf("cmd/bd:bd_proxied_test lacks %q (race bd_test, non-race subprocess bd, like the jobs):\n%s", w, proxied)
 		}
-		full := bazelRuleBlock(doltBuild, "dolt_server_full_test")
-		for _, w := range []string{`"$(rootpath :dolt_race_off)",`, `"BEADS_TEST_SUBPROCESS_BINARY": "$(rlocationpath :dolt_race_off)"`, `"//:go.mod",`} {
-			if !strings.Contains(full, w) {
-				t.Errorf("dolt:dolt_server_full_test lacks %q (SubprocessRunner reuses the test binary; ModuleRoot needs go.mod):\n%s", w, full)
-			}
-		}
-		proxied := bazelRuleBlock(readPolicyFile(t, root, "cmd/bd/BUILD.bazel"), "bd_proxied_test")
-		for _, w := range []string{`"$(rootpath :bd_test)",`, `"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)"`} {
-			if !strings.Contains(proxied, w) {
-				t.Errorf("cmd/bd:bd_proxied_test lacks %q (race bd_test, non-race subprocess bd, like the jobs):\n%s", w, proxied)
-			}
-		}
-		for pkg, build := range map[string]string{"cmd/bd": readPolicyFile(t, root, "cmd/bd/BUILD.bazel"), "internal/storage/dolt": doltBuild} {
-			for _, err := range checkDoltServerRules(pkg, build) {
-				t.Error(err)
-			}
+	}
+	for pkg, build := range map[string]string{"cmd/bd": readPolicyFile(t, root, "cmd/bd/BUILD.bazel"), "internal/storage/dolt": doltBuild} {
+		for _, err := range checkDoltServerRules(pkg, build) {
+			t.Error(err)
 		}
 	}
 
@@ -5193,9 +5174,6 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		if step.Env["BEADS_TEST_EMBEDDED_DOLT"] != "1" {
 			t.Errorf("pr-risk.yml %s no longer sets BEADS_TEST_EMBEDDED_DOLT=1; update %s", c.job, c.target)
 		}
-		if os.Getenv("TEST_SRCDIR") != "" {
-			continue // scripts_test's runfiles hold no other package's BUILD
-		}
 		root := sourceRepoRoot(t)
 		rule := bazelRuleBlock(readPolicyFile(t, root, c.pkg+"/BUILD.bazel"), c.target)
 		// c.target's own shard_count is deliberately NOT asserted to equal
@@ -5242,13 +5220,11 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 			}
 		}
 	}
-	if os.Getenv("TEST_SRCDIR") == "" {
-		// The cmd jobs' subprocess bd is the race build, as //cmd/bd:bd is
-		// under --config=embedded (bd_for_tests never is).
-		rule := bazelRuleBlock(readPolicyFile(t, sourceRepoRoot(t), "cmd/bd/BUILD.bazel"), "bd_embedded_test")
-		if !strings.Contains(rule, `"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd)"`) {
-			t.Errorf("cmd/bd:bd_embedded_test must run the race //cmd/bd:bd as BEADS_TEST_BD_BINARY:\n%s", rule)
-		}
+	// The cmd jobs' subprocess bd is the race build, as //cmd/bd:bd is
+	// under --config=embedded (bd_for_tests never is).
+	rule := bazelRuleBlock(readPolicyFile(t, sourceRepoRoot(t), "cmd/bd/BUILD.bazel"), "bd_embedded_test")
+	if !strings.Contains(rule, `"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd)"`) {
+		t.Errorf("cmd/bd:bd_embedded_test must run the race //cmd/bd:bd as BEADS_TEST_BD_BINARY:\n%s", rule)
 	}
 
 	conformance := risk.job(t, "test-embedded-conformance")
@@ -5280,9 +5256,6 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		}
 		if len(want) < 4 {
 			t.Fatalf("parsed only %v from pr-risk.yml %s conformance %q", want, partition, run)
-		}
-		if os.Getenv("TEST_SRCDIR") != "" {
-			continue
 		}
 		rule := bazelRuleBlock(readPolicyFile(t, sourceRepoRoot(t), "internal/storage/embeddeddolt/BUILD.bazel"), target)
 		for _, w := range append(want, `"BEADS_TEST_EMBEDDED_DOLT": "1"`, `"embedded"`) {
@@ -5350,11 +5323,9 @@ func TestBazelPureJobMirrorsPureGoJob(t *testing.T) {
 			t.Errorf("pure artifact start step does not contain %q:\n%s", required, start)
 		}
 	}
-	if os.Getenv("TEST_SRCDIR") == "" {
-		patch := readPolicyFile(t, sourceRepoRoot(t), "third_party/patches/gozstd_nocgo.patch")
-		if !strings.Contains(patch, "+func init() { panic(") {
-			t.Error("gozstd_nocgo.patch stubs no longer panic in init; a contaminated pure binary would start")
-		}
+	patch := readPolicyFile(t, sourceRepoRoot(t), "third_party/patches/gozstd_nocgo.patch")
+	if !strings.Contains(patch, "+func init() { panic(") {
+		t.Error("gozstd_nocgo.patch stubs no longer panic in init; a contaminated pure binary would start")
 	}
 
 	prWasm := pr.step(t, "Run js/wasm hook boundary").Run
@@ -6568,9 +6539,6 @@ func TestReleaseWorkflowRestoresNoCache(t *testing.T) {
 // BUILD file or macro may mark a target flaky = True (Bazel retries those up
 // to three times by default).
 func TestBazelGatedLanesNeverRetryFlakyTests(t *testing.T) {
-	if os.Getenv("TEST_SRCDIR") != "" {
-		t.Skip("scripts_test's runfiles hold no other package's BUILD files")
-	}
 	root := sourceRepoRoot(t)
 	retry := regexp.MustCompile(`flaky_test_attempts|runs_per_test_detects_flakes`)
 	// Any flaky = other than a literal False/0 (a variable or macro
@@ -6590,7 +6558,7 @@ func TestBazelGatedLanesNeverRetryFlakyTests(t *testing.T) {
 			}
 			return nil
 		}
-		if d.Type()&os.ModeSymlink != 0 {
+		if !isFileOrFileLink(path, d) {
 			return nil // bazel-* convenience symlinks
 		}
 		base := d.Name()
@@ -6622,7 +6590,8 @@ func TestBazelGatedLanesNeverRetryFlakyTests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if checked < 10 {
+	// Every BUILD file: a walk that sees fewer is not looking at the tree.
+	if checked < 100 {
 		t.Fatalf("checked only %d files; is the repository root right?", checked)
 	}
 }
@@ -6724,9 +6693,6 @@ func TestBazelCmdDoltJob(t *testing.T) {
 	// The target: the dolt-server rules (local backend, fail closed, remote),
 	// the integration build's bd_test with no test selection, every env
 	// bd_test's own go_test sets, and the 4-vCPU runner shape.
-	if os.Getenv("TEST_SRCDIR") != "" {
-		return // scripts_test's runfiles hold no other package's BUILD
-	}
 	build := readPolicyFile(t, sourceRepoRoot(t), "cmd/bd/BUILD.bazel")
 	var rule, bdTest string
 	for _, r := range bazelTopRules(stripStarlarkComments(build)) {

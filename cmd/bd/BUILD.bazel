@@ -1552,19 +1552,6 @@ exports_files(
     visibility = ["//internal/httpapi:__pkg__"],
 )
 
-# Init-safety help text pinned by //test/docsync recovery-doc tests.
-exports_files(
-    ["init_safety_help.go"],
-    visibility = ["//test/docsync:__pkg__"],
-)
-
-# Contributor agent instructions; root AGENTS.md links them and
-# //:docsync_files checks those links.
-exports_files(
-    ["AGENTS.md"],
-    visibility = ["//:__pkg__"],
-)
-
 # Release-metadata surfaces gated by //internal/versioncheck's releaseSources
 # table: the canonical version and the Windows PE resource files. Aggregated
 # into //:release_metadata_files, which is what the tests declare as data.
@@ -1589,3 +1576,25 @@ filegroup(
 )
 
 # --- end go_srcs ---
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

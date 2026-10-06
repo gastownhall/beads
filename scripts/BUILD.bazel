@@ -1,19 +1,16 @@
 load("@rules_go//go:def.bzl", "go_test")
 
-# CI and repo-policy tests: they parse the workflows and run the CI shell
-# scripts against fixtures.
+# CI and repo-policy tests: they parse the workflows, run the CI shell scripts
+# against fixtures, and check repository-wide rules (BUILD tag taxonomy, skip
+# allowlist, managed BUILD blocks, shard manifests, tracked-file scans) over
+# //:repo_files, the checkout as Bazel sees it.
 #
-# Tags:
-#   host-tools: the scripts and fixtures run the host's git, python3, awk,
-#     sed, find, grep and timeout (beyond the bash the test wrapper needs).
-#     Under Bazel a missing git or bash fails the test (under go test it
-#     skips).
-#   no-remote-exec: so they always run where that inventory is known (the
-#     developer machine or the CI runner). The farm workers do have these
-#     tools today (the target passes there), so this can be dropped once that
-#     is guaranteed.
-#   no-remote-cache: the action key does not cover the host's tools, so a
-#     result from one host is neither uploaded for nor served to another.
+# No tags: they run remotely like any other target. The scripts and fixtures
+# run bash, git, python3, jq, yq, curl, openssl, unzip and coreutils from the
+# executor (the rbe-west worker image, or the runner in fork-cache mode); a
+# missing tool fails the test under Bazel instead of skipping it
+# (host_tools_test.go), so a cached pass never stands for an executor that
+# could not run it. Go and the release formula come in hermetically.
 go_test(
     name = "scripts_test",
     srcs = [
@@ -53,42 +50,24 @@ go_test(
         "windows_test_binaries_manifest_test.go",
     ],
     data = [
-        ":scripts_files",
-        "//:.githooks/pre-commit",
-        "//:.goreleaser.yml",
-        "//:bazel_policy_files",
-        "//:engdocs/LINTING.md",
-        "//:mcp_package_policy_files",
-        "//:test_sh_files",
-        "//:workflow_files",
-        "//internal/testutil:testdoltcommon.go",
-        "//tools/bazel:dolt.bzl",
+        "//:repo_files",
+        "@beads_formulas//:beads-release.formula.toml",
+        "@go_sdk//:bin/go",
+        "@go_sdk//:files",
     ],
-    tags = [
-        "host-tools",
-        "no-remote-cache",
-        "no-remote-exec",
-    ],
+    # The release formula lives in .beads/ (in .bazelignore: it also holds
+    # live bd data), so it comes in through its own local repository. The Go
+    # SDK is go.mod's toolchain, whatever go the executor has on PATH.
+    env = {
+        "BEADS_TEST_GO": "$(rlocationpath @go_sdk//:bin/go)",
+        "BEADS_TEST_RELEASE_FORMULA": "$(rlocationpath @beads_formulas//:beads-release.formula.toml)",
+    },
     deps = [
         "//internal/formula",
         "//internal/testutil/bazeltest",
         "//scripts/internal/testbash",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
-)
-
-# The scripts scripts_test reads and runs (CI helpers, check-*.sh, release.sh,
-# test.sh, conformance.sh, ...). Globs stop at subpackages, so this is only
-# this package's own tree.
-filegroup(
-    name = "scripts_files",
-    srcs = glob(
-        ["**"],
-        exclude = [
-            "BUILD.bazel",
-            "**/*_test.go",
-        ],
-    ),
 )
 
 exports_files(
@@ -106,11 +85,6 @@ exports_files(
 )
 
 exports_files(
-    ["README.md"],
-    visibility = ["//:__pkg__"],
-)
-
-exports_files(
     ["ci/gofmt-bin.sh"],
     visibility = ["//scripts/prlintmake:__pkg__"],
 )
@@ -121,3 +95,25 @@ exports_files(
     ["check-versions.sh"],
     visibility = ["//scripts/check-versions:__pkg__"],
 )
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

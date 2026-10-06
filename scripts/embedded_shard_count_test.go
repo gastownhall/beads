@@ -1,7 +1,6 @@
 package scripts_test
 
 import (
-	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -20,17 +19,9 @@ var shardCountPattern = regexp.MustCompile(`(?m)^    shard_count = (\d+),$`)
 // longer has to equal PR Risk's/main.yml's legacy "Test (Embedded Dolt Cmd
 // N/20)" fork/push jobs' matrix size — mirrors bazelProxiedShardCount (F2;
 // see that function's doc comment in scripts/ci_workflow_test.go for the
-// shared rationale, not repeated here). Under `bazel test`, scripts_test's
-// runfiles hold no other package's BUILD file, so this falls back to the
-// literal TestBazelRetiredLanesCheckListedTestsRan pins under plain `go
-// test` for //cmd/bd:bd_embedded_test; that test fails if cmd/bd/BUILD.bazel's
-// shard_count ever drifts from this fallback.
+// shared rationale, not repeated here).
 func bazelEmbeddedCmdShardCount(t *testing.T) int {
 	t.Helper()
-	const bazelTestFallback = 50
-	if os.Getenv("TEST_SRCDIR") != "" {
-		return bazelTestFallback
-	}
 	root := sourceRepoRoot(t)
 	rule := bazelRuleBlock(readPolicyFile(t, root, "cmd/bd/BUILD.bazel"), "bd_embedded_test")
 	m := shardCountPattern.FindStringSubmatch(rule)
@@ -53,10 +44,6 @@ func bazelEmbeddedCmdShardCount(t *testing.T) int {
 // bazelEmbeddedCmdShardCount above; see its doc comment.
 func bazelEmbeddedStorageShardCount(t *testing.T) int {
 	t.Helper()
-	const bazelTestFallback = 15
-	if os.Getenv("TEST_SRCDIR") != "" {
-		return bazelTestFallback
-	}
 	root := sourceRepoRoot(t)
 	rule := bazelRuleBlock(readPolicyFile(t, root, "internal/storage/embeddeddolt/BUILD.bazel"), "embeddeddolt_embedded_test")
 	m := shardCountPattern.FindStringSubmatch(rule)
@@ -86,13 +73,7 @@ func bazelEmbeddedStorageShardCount(t *testing.T) int {
 // expected to report "missing" entries by design (see those generators'
 // module docstrings) and is not what this test runs.
 func TestCmdEmbeddedShardManifestGeneratorNotStale(t *testing.T) {
-	if os.Getenv("TEST_SRCDIR") != "" {
-		t.Skip("scripts_test's runfiles hold neither the generator's sources nor cmd/bd")
-	}
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 not available")
-	}
+	python := requireHostTool(t, "python3")
 	root := sourceRepoRoot(t)
 	shards := strconv.Itoa(bazelEmbeddedCmdShardCount(t))
 	cmd := exec.Command(python, "scripts/ci/gen_embedded_cmd_shard_manifest.py", shards, "--weights=duration", "--check")
@@ -106,13 +87,7 @@ func TestCmdEmbeddedShardManifestGeneratorNotStale(t *testing.T) {
 // TestCmdEmbeddedShardManifestGeneratorNotStale above for the storage tier's
 // Bazel-only 15-shard block; see that test's doc comment.
 func TestStorageEmbeddedShardManifestGeneratorNotStale(t *testing.T) {
-	if os.Getenv("TEST_SRCDIR") != "" {
-		t.Skip("scripts_test's runfiles hold neither the generator's sources nor cmd/bd")
-	}
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 not available")
-	}
+	python := requireHostTool(t, "python3")
 	root := sourceRepoRoot(t)
 	shards := strconv.Itoa(bazelEmbeddedStorageShardCount(t))
 	cmd := exec.Command(python, "scripts/ci/gen_embedded_storage_shard_manifest.py", shards, "--weights=duration", "--check")
