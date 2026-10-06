@@ -155,19 +155,33 @@ func commitPendingIfEmbedded(ctx context.Context, st storage.DoltStorage, actor 
 	return maybeAutoCommitStore(ctx, st, p)
 }
 
-// commitConfigWrite commits the config table immediately after an
-// intentional config write (bd remember/forget, bd config set/unset).
-// Server modes only: maybeAutoCommit skips SQL-server modes entirely, and
-// generic Commit() excludes config (GH#2455) — so without this the write
-// strands the working set dirty and the next 'bd dolt pull' fails until a
-// manual flush (GH#4078). The commit is SCOPED to the config table, so a
-// concurrent operation's dirty tables are never swept. Embedded mode is a
-// no-op: its '-Am' auto-commit and the unflagged-writes sweep already
-// include config. Runs regardless of dolt.auto-commit mode — leaving the
-// config write uncommitted is the bug, not a batching feature (this
-// restores the v1.0.1 behavior from PR #3052).
+// commitConfigWrite creates the Dolt commit for an intentional config-table
+// write on the direct SQL-server route (bd remember/forget, bd config
+// set/unset/set-many). Nothing else commits it there (GH#4078): the
+// store-level writes those verbs reach through their roles commit the SQL
+// transaction only, maybeAutoCommit returns early off the embedded route, and
+// plain Commit excludes config anyway (GH#2455). CommitConfigOnly stages ONLY
+// the config table, so a concurrent operation's other dirty tables are never
+// swept.
+//
+// It is a no-op wherever something else already owns that commit: embedded
+// mode (the PersistentPostRun auto-commit stages config with everything
+// else), the proxied route (the role's unit of work commits each write), and
+// dolt.auto-commit batch/off, which defer it to `bd dolt commit` (CommitAll,
+// config included) exactly as they defer every other server-mode write.
+//
+// rename-prefix and migrate also write config (issue_prefix, sync.branch) and
+// are deliberately not wired here: they are multi-step operations, and when
+// their config row should become a commit is the GH#2455 question itself.
 func commitConfigWrite(ctx context.Context, st storage.DoltStorage, command string) error {
-	if isEmbeddedMode() || st == nil {
+	if isEmbeddedMode() || usesProxiedServer() || st == nil {
+		return nil
+	}
+	commitNow, err := writesCommitNow()
+	if err != nil {
+		return err
+	}
+	if !commitNow {
 		return nil
 	}
 	if lm, ok := storage.UnwrapStore(st).(storage.LifecycleManager); ok && lm.IsClosed() {

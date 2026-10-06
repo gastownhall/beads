@@ -44,7 +44,9 @@ func TestCommitConfigWriteServerModeCommitsScoped(t *testing.T) {
 	}
 }
 
-func TestCommitConfigWriteProxiedServerModeCommitsScoped(t *testing.T) {
+// The proxied route's role commits each config write inside its own unit of
+// work, so committing again here would be a second commit for the same write.
+func TestCommitConfigWriteProxiedServerModeIsNoOp(t *testing.T) {
 	saveStorageMode(t)
 	proxiedServerMode = true
 
@@ -52,13 +54,33 @@ func TestCommitConfigWriteProxiedServerModeCommitsScoped(t *testing.T) {
 	if err := commitConfigWrite(context.Background(), fake, "config set"); err != nil {
 		t.Fatalf("commitConfigWrite: %v", err)
 	}
-	if fake.configOnlyCalls != 1 {
-		t.Fatalf("CommitConfigOnly calls = %d, want 1 in proxied server mode", fake.configOnlyCalls)
+	if fake.configOnlyCalls != 0 {
+		t.Fatalf("CommitConfigOnly calls = %d, want 0 in proxied server mode", fake.configOnlyCalls)
 	}
 }
 
-// Embedded mode already commits config via the '-Am' auto-commit and the
-// unflagged-writes sweep — the helper must not double-commit there.
+// batch and off defer server-mode version commits to `bd dolt commit`, whose
+// CommitAll includes config, so a config write must defer with them.
+func TestCommitConfigWriteHonorsBatchAndOffModes(t *testing.T) {
+	for _, mode := range []doltAutoCommitMode{doltAutoCommitBatch, doltAutoCommitOff} {
+		t.Run(string(mode), func(t *testing.T) {
+			saveStorageMode(t)
+			serverMode = true
+			doltAutoCommit = string(mode)
+
+			fake := &fakeConfigCommitStore{}
+			if err := commitConfigWrite(context.Background(), fake, "remember"); err != nil {
+				t.Fatalf("commitConfigWrite: %v", err)
+			}
+			if fake.configOnlyCalls != 0 {
+				t.Fatalf("CommitConfigOnly calls = %d, want 0 in %s mode", fake.configOnlyCalls, mode)
+			}
+		})
+	}
+}
+
+// Embedded mode already commits config through the PersistentPostRun
+// auto-commit, so the helper must not double-commit there.
 func TestCommitConfigWriteEmbeddedModeIsNoOp(t *testing.T) {
 	saveStorageMode(t)
 	serverMode = false
