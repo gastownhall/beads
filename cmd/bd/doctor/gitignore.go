@@ -41,8 +41,12 @@ push-state.json
 
 proxied_server_client_info.json
 
-# http backend activation sidecar (per-user server URL and identity pin)
+# HTTP backend activation sidecar and per-user local metadata (per-user state,
+# never tracked — the server URL and any ca_file path are machine-specific,
+# and the local metadata sidecar mirrors proxied_server_client_info.json's
+# per-user precedent). Written by bd connect.
 http_target.json
+http_local_metadata.json
 
 # Worktree redirect file (contains relative path to main repo's .beads/)
 # Must not be committed as paths would be wrong in other clones
@@ -143,6 +147,7 @@ var requiredPatterns = []string{
 	".beads-credential-key",
 	"proxied_server_client_info.json",
 	"http_target.json",
+	"http_local_metadata.json",
 	".local_version",
 	"backup/",
 }

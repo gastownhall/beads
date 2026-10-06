@@ -1,0 +1,42 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "http",
+    srcs = [
+        "attach.go",
+        "credential.go",
+        "errors.go",
+        "http.go",
+        "target.go",
+    ],
+    importpath = "github.com/steveyegge/beads/backend/http",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//backend",
+        "//internal/configfile",
+        "//internal/gitignore",
+        "//internal/httpapi/apigen",
+        "//internal/httpclient",
+        "//internal/httpclient/wire",
+        "//internal/storage/backends",
+    ],
+)
+
+go_test(
+    name = "http_test",
+    srcs = [
+        "e2e_cli_test.go",
+        "open_test.go",
+        "register_test.go",
+    ],
+    deps = [
+        ":http",
+        "//backend",
+        "//internal/httpapi",
+        "//internal/storage",
+        "//internal/storage/backends",
+        "//internal/storage/domain",
+        "//internal/storage/embeddeddolt",
+        "//internal/testutil/bazeltest",
+    ],
+)

@@ -72,6 +72,17 @@ type DialOptions struct {
 	// an external HTTPClient always goes through one of the two constructors
 	// above, or the normal env-aware resolution.
 	caOverride *resolvedCA
+
+	// AllowInsecureCredential opts THIS dial into sending a credential over
+	// plain http to a non-loopback target (MED-4, S6 review). Left false,
+	// DialWith refuses to let a credential cross such a target at all — see
+	// guardInsecureCredential. connect.go sets this from --allow-plaintext so
+	// its own Handshake probe honors the same opt-in the CLI flag already
+	// granted; every other caller defaults to false and relies on the
+	// process-wide BEADS_HTTP_ALLOW_INSECURE=1 escape hatch instead, since
+	// Open/OpenReadOnly/OpenWith's callers have no flag of their own to set
+	// this through.
+	AllowInsecureCredential bool
 }
 
 // Conn is the store's view of one wire client.
@@ -192,6 +203,8 @@ func DialWith(target Target, creds CredentialProvider, opts DialOptions) (*Conn,
 		// calling. Either way there is nothing to inject and nothing to
 		// refuse.
 	}
+
+	creds = guardInsecureCredential(target, creds, opts.AllowInsecureCredential)
 
 	client, err := wire.New(target.BaseURL, creds, wire.Options{
 		HTTPClient:      opts.HTTPClient,
