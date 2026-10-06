@@ -445,7 +445,7 @@ Upgrade one server's clients like this:
 ```bash
 # 1. Upgrade bd on every client of the server. Reads keep working throughout —
 #    an upgraded client reads the old schema, it just cannot write to it
-#    (unless the server predates 1.2.0; see below).
+#    (unless the server's schema is v53 or older; see below).
 bd version                     # on each client, confirm the new version
 
 # 2. Once, from a workspace already set up against this server: consent.
@@ -459,8 +459,8 @@ Between steps 1 and 2, an upgraded client reads normally and its writes are
 refused with the gate's guidance. Nothing is silently promoted, so there is no
 deadline — but the window is a degraded one, so keep it short.
 
-If the server's schema predates 1.2.0 (an upgrade from 1.1.x or earlier),
-reads can fail too until step 2: `bd list` stops with
+If the server's schema is v53 or older (1.1.x, or 1.2.2, the re-release of
+the 1.1 line), reads can fail too until step 2: `bd list` stops with
 `table not found: leases`
 ([#6929](https://github.com/gastownhall/beads/issues/6929)). Run step 2 as
 soon as the clients are upgraded.
