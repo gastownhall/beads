@@ -170,6 +170,8 @@ func commitPendingIfEmbedded(ctx context.Context, st storage.DoltStorage, actor 
 // dolt.auto-commit batch/off, which defer it to `bd dolt commit` (CommitAll,
 // config included) exactly as they defer every other server-mode write.
 //
+// Unlike commitMemoryWrite it does not screen other dirty config rows: the
+// operator is writing config on purpose, the trust level of `bd dolt commit`.
 // rename-prefix and migrate also write config (issue_prefix, sync.branch) and
 // are deliberately not wired here: they are multi-step operations, and when
 // their config row should become a commit is the GH#2455 question itself.
