@@ -367,6 +367,7 @@ filegroup(
         "//test/conformance:repo_files",
         "//test/docsync:repo_files",
         "//test/testmainconvention:repo_files",
+        "//tests/regression:repo_files",
         "//third_party/cc_toolchain:repo_files",
         "//third_party/patches:repo_files",
         "//tools/bazel:repo_files",

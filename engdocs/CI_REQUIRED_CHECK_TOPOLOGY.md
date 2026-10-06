@@ -151,10 +151,12 @@ Current PR-related workflow names:
   Runs on pushes to `main`. Contains the main branch health checks, package
   gates, platform smoke/short coverage, embedded Dolt coverage, and promoted
   Linux no-short integration shards.
-- `.github/workflows/regression.yml`: `Regression Tests`
-  Runs on `pull_request`, `push` to `main`, and manual dispatch. Does not
-  currently run on `merge_group`. Uses job-level conditional regression
-  execution.
+- The differential regression suite (`tests/regression`, formerly
+  `regression.yml`) is `//tests/regression:regression_test`, tagged
+  `dolt-server-cmd`, so `bazel.yml`'s `bazel-cmd-dolt` lane runs it on every
+  PR, merge group and push to `main` (results cached until its inputs
+  change), against the catalog-pinned `@bd_releases//:v0.49.6` baseline and
+  a hermetic dolt sql-server.
 - `.github/workflows/cross-version-smoke.yml`: `Cross-Version Smoke Tests`
   Runs on every PR to `main`, tag pushes, and manual dispatch. Does not
   currently run on `merge_group`.
@@ -337,8 +339,7 @@ PR. It runs in the default branch's cache scope, which `push` runs on
     binaries);
   - the `beads-go-build-v2-*` GOCACHE entries restored by `main.yml` and
     `pr.yml`;
-  - the executables in `smoke-binaries-*`, `historical-dolt-*` and
-    `regression-baseline-*`.
+  - the executables in `smoke-binaries-*` and `historical-dolt-*`.
 
   GitHub's read-only default covers all of them. Hardening `release.yml`
   with `cache: false` is tracked separately.
@@ -661,7 +662,6 @@ Do not require these existing check names directly:
 - `Test (Windows - smoke)`
 - `PR Lint (native)`, `PR Lint (windows)` and `PR Lint (darwin)`
 - `Test Nix Flake`
-- `Differential Regression (v0.49.6 baseline)`
 - `Upgrade smoke (chunk N)` (F7c: folded from one job per version into one job
   per 5-version chunk; still never require a matrix-expanded chunk job
   directly)
@@ -1316,20 +1316,16 @@ tier down in the same workflow:
 
 ### Regression Tests
 
-`Regression Tests` can stay visible as a non-required workflow. If regression
-becomes branch-protection relevant, do not require
-`Differential Regression (v0.49.6 baseline)` directly.
-
-Use one of these narrow changes instead:
-
-1. Move the regression detector and regression job into the required PR
-   topology, wire them into the relevant aggregate gate, and add `merge_group`
-   behavior that defaults to running regression.
-2. Keep `regression.yml` separate, remove any workflow-level skip filters, add
-   `merge_group`, add a final `Regression Gate / Informational` aggregate, and
-   leave it non-required unless branch protection is intentionally expanded.
-
-The preferred required-check topology keeps only aggregate gates required.
+`regression.yml` is retired. The suite runs as
+`//tests/regression:regression_test` (8 shards) in `bazel.yml`'s
+`bazel-cmd-dolt` lane, which `pr.yml`'s `CI Gate / Required` requires
+(`BAZEL_CMD_DOLT_REQUIRED`), so regression is now part of the aggregate gate
+on PRs and merge groups instead of a separate, path-detected advisory
+workflow. Its path detector is replaced by test result caching: the target
+re-runs only when `bd_for_tests`, the suite or its pinned inputs change. The
+baseline is `@bd_releases//:<BASELINE_VERSION>` (`tools/bazel/bd_releases.bzl`,
+pinned by `scripts/migration-test/release-catalog.json`); `TestMain` fails if
+the binary does not report `BASELINE_VERSION`.
 
 ### Nix Build
 

@@ -54,9 +54,8 @@ func TestPullDoltImageRetriesTransientFailures(t *testing.T) {
 
 func TestDoltImagePullWorkflowsUseRetryHelper(t *testing.T) {
 	wantCalls := map[string]int{
-		"pr.yml":         2, // test-domain-uow, contract-corpus
-		"pr-risk.yml":    3,
-		"regression.yml": 1,
+		"pr.yml":      2, // test-domain-uow, contract-corpus
+		"pr-risk.yml": 3,
 	}
 
 	workflowsDir := filepath.Join(sourceRepoRoot(t), ".github", "workflows")

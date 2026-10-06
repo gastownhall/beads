@@ -1163,9 +1163,6 @@ jobs:
       - name: Build bd
         run: make build
 
-      - name: Compile regression tests
-        run: go test -c -tags regression,gms_pure_go ./tests/regression
-
       # Always save (even if a warm-up step above failed) under a fresh,
       # commit-specific key: the content is still a valid, newer GOCACHE/
       # GOMODCACHE snapshot than whatever was restored, and `cache/save` is a

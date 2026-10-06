@@ -694,7 +694,6 @@ func TestCrossVersionSmokeChunksEveryResolvedVersion(t *testing.T) {
 // blacksmithAdvisoryWorkflows are every workflow file F7c moved a job onto a
 // same-repo-PR (or push-only, for main.yml's seed) Blacksmith runner.
 var blacksmithAdvisoryWorkflows = []string{
-	"regression.yml",
 	"migration-test.yml",
 	"cross-version-smoke.yml",
 	"docs-mintlify.yml",
@@ -750,7 +749,6 @@ var advisoryBlacksmithRunnerJobs = []struct {
 	blacksmithLabel string
 	fallback        string
 }{
-	{"regression.yml", "regression", "blacksmith-4vcpu-ubuntu-2404", "ubuntu-latest"},
 	{"migration-test.yml", "historical-upgrades", "blacksmith-4vcpu-ubuntu-2404", "ubuntu-24.04"},
 	{"cross-version-smoke.yml", "smoke", "blacksmith-4vcpu-ubuntu-2404", "ubuntu-latest"},
 	{"cross-version-smoke.yml", "versions", "blacksmith-2vcpu-ubuntu-2404", "ubuntu-latest"},
@@ -820,7 +818,6 @@ func TestF7cAdvisorySameRepoBlacksmithExpressionSemantics(t *testing.T) {
 // self-defined `blacksmith-sg-v1-` setup-go cache main.yml's
 // blacksmith-setup-go-cache job seeds (B2, F7c implementation report).
 var blacksmithSetupGoCacheConsumers = map[string][]string{
-	"regression.yml":          {"regression"},
 	"migration-test.yml":      {"historical-upgrades"},
 	"cross-version-smoke.yml": {"smoke"},
 }
@@ -886,7 +883,6 @@ func TestBlacksmithSetupGoSeedExistsForAdvisoryConsumers(t *testing.T) {
 
 	wantWarmups := []string{
 		"make build",
-		"go test -c -tags regression,gms_pure_go ./tests/regression",
 	}
 	for _, want := range wantWarmups {
 		found := false
@@ -1161,13 +1157,12 @@ var advisoryBinaryCaches = []struct {
 	wantSaveIf string
 }{
 	{"cross-version-smoke.yml", "smoke", "Restore previous release binaries cache", "Save previous release binaries cache", "smoke-binaries-", "github.event_name == 'push' || github.event_name == 'workflow_dispatch'"},
-	{"regression.yml", "regression", "Restore baseline binary cache", "Save baseline binary cache", "regression-baseline-", "steps.detect.outputs.run_regression == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')"},
 	{"migration-test.yml", "historical-upgrades", "Restore pinned historical release cache", "Save pinned historical release cache", "historical-dolt-", "github.event_name == 'push' || github.event_name == 'workflow_dispatch'"},
 }
 
 // TestAdvisoryBinaryCachesAreRestoreAlwaysSavePRGated pins the restore/save
 // split itself (F7c review fix B2): the restore step always runs (modulo the
-// job's own pre-existing gate, e.g. regression's run_regression detection),
+// job's own pre-existing gate, if any),
 // the save step additionally requires an exact allow-list of
 // `github.event_name == 'push' || github.event_name == 'workflow_dispatch'`
 // (F7c review fix, discovered via the S2 sweep: a deny-list of
@@ -1206,178 +1201,6 @@ func TestAdvisoryBinaryCachesAreRestoreAlwaysSavePRGated(t *testing.T) {
 				if actionFamily(step.Uses) == cacheMonolithicActionFamily && strings.HasPrefix(step.With["key"], c.keyPrefix) {
 					t.Errorf("%s job %s has a monolithic actions/cache step keyed %q; B2 requires an explicit restore/save split here", c.file, c.job, step.With["key"])
 				}
-			}
-		})
-	}
-}
-
-// TestRegressionStepsAfterDetectAreGated pins that every step after
-// regression.yml's "Decide whether to run differential regression tests"
-// (id: detect) stays gated on steps.detect.outputs.run_regression == 'true'
-// (F7c review fix S1, closes an "ungated regression step" mutation): the
-// fold that moved detect-regression-need into this job's own first step
-// means a single dropped `if:` would make an inapplicable PR silently pay
-// for (or worse, run) the rest of the job instead of skipping it.
-func TestRegressionStepsAfterDetectAreGated(t *testing.T) {
-	job := readCIWorkflow(t, "regression.yml").job(t, "regression")
-	detectIndex := job.stepIndex(t, "Decide whether to run differential regression tests")
-	const want = "steps.detect.outputs.run_regression == 'true'"
-	for _, step := range job.Steps[detectIndex+1:] {
-		if !strings.Contains(step.If, want) {
-			t.Errorf("regression.yml step %q has if=%q, want it to contain %q", step.Name, step.If, want)
-		}
-	}
-}
-
-// TestRegressionDetectStepBehavioral runs regression.yml's "Decide whether to
-// run differential regression tests" (id: detect) step for real, the same
-// way TestMigrationHarnessLoopExecutesBehaviorally exercises the migration
-// loop (F7c review fix S1, closes mutation M13: a detect step hardcoded to
-// always emit run_regression=false). TestRegressionStepsAfterDetectAreGated
-// only pins that steps AFTER detect stay gated on its output; it says nothing
-// about whether detect's own logic ever produces "true", so a detect step
-// that always reports false would make every downstream gate vacuously
-// satisfied while regression silently never ran. This executes the step's
-// actual bash against real GITHUB_OUTPUT/GITHUB_EVENT_PATH files and a real
-// two-commit git repo for each input that must change the verdict.
-func TestRegressionDetectStepBehavioral(t *testing.T) {
-	requireHostTool(t, "bash")
-	requireHostTool(t, "jq")
-	requireHostTool(t, "git")
-
-	job := readCIWorkflow(t, "regression.yml").job(t, "regression")
-	step := job.step(t, "Decide whether to run differential regression tests")
-	if step.ID != "detect" {
-		t.Fatalf("detect step id = %q, want %q", step.ID, "detect")
-	}
-
-	// newRepo creates a base commit, then (if any changedFiles are given) a
-	// second commit that adds each of them, and returns the repo dir plus
-	// both commit SHAs for PR_BASE_SHA/PR_HEAD_SHA.
-	newRepo := func(t *testing.T, changedFiles ...string) (dir, base, head string) {
-		t.Helper()
-		dir = t.TempDir()
-		git := func(args ...string) string {
-			t.Helper()
-			cmd := exec.Command("git", args...)
-			cmd.Dir = dir
-			cmd.Env = append(os.Environ(),
-				"GIT_CONFIG_NOSYSTEM=1",
-				"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t.test",
-				"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t.test",
-			)
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				t.Fatalf("git %v: %v\n%s", args, err, out)
-			}
-			return strings.TrimSpace(string(out))
-		}
-		git("init", "-q", "-b", "main")
-		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("base\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		git("add", "README.md")
-		git("commit", "-q", "-m", "base")
-		base = git("rev-parse", "HEAD")
-
-		for _, f := range changedFiles {
-			full := filepath.Join(dir, f)
-			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(full, []byte("x\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			git("add", f)
-		}
-		if len(changedFiles) > 0 {
-			git("commit", "-q", "-m", "head")
-		}
-		head = git("rev-parse", "HEAD")
-		return dir, base, head
-	}
-
-	writeEvent := func(t *testing.T, dir string, labels ...string) string {
-		t.Helper()
-		type label struct {
-			Name string `json:"name"`
-		}
-		type prBody struct {
-			Labels []label `json:"labels"`
-		}
-		type event struct {
-			PullRequest prBody `json:"pull_request"`
-		}
-		e := event{PullRequest: prBody{Labels: []label{}}}
-		for _, l := range labels {
-			e.PullRequest.Labels = append(e.PullRequest.Labels, label{Name: l})
-		}
-		b, err := json.Marshal(e)
-		if err != nil {
-			t.Fatal(err)
-		}
-		p := filepath.Join(dir, "event.json")
-		if err := os.WriteFile(p, b, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return p
-	}
-
-	runDetect := func(t *testing.T, dir, eventPath, eventName, base, head string) (runRegression, reason string) {
-		t.Helper()
-		outFile := filepath.Join(t.TempDir(), "output")
-		if err := os.WriteFile(outFile, nil, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		cmd := exec.Command("bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step.Run)
-		cmd.Dir = dir
-		cmd.Env = append(os.Environ(),
-			"EVENT_NAME="+eventName,
-			"PR_BASE_SHA="+base,
-			"PR_HEAD_SHA="+head,
-			"GITHUB_OUTPUT="+outFile,
-			"GITHUB_EVENT_PATH="+eventPath,
-		)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("detect step: %v\noutput:\n%s", err, out)
-		}
-		outBytes, err := os.ReadFile(outFile)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, line := range strings.Split(string(outBytes), "\n") {
-			if v, ok := strings.CutPrefix(line, "run_regression="); ok {
-				runRegression = v
-			}
-			if v, ok := strings.CutPrefix(line, "reason="); ok {
-				reason = v
-			}
-		}
-		return runRegression, reason
-	}
-
-	cases := []struct {
-		name         string
-		eventName    string
-		labels       []string
-		changedFiles []string
-		want         string
-	}{
-		{"push always runs", "push", nil, nil, "true"},
-		{"run-regression label forces true", "pull_request", []string{"run-regression"}, []string{"docs/unrelated.md"}, "true"},
-		{"skip-regression label forces false", "pull_request", []string{"skip-regression"}, []string{"cmd/bd/x.go"}, "false"},
-		{"cmd/bd non-test change runs", "pull_request", nil, []string{"cmd/bd/x.go"}, "true"},
-		{"only a cmd/bd test file changed skips", "pull_request", nil, []string{"cmd/bd/x_test.go"}, "false"},
-		{"docs-only change skips", "pull_request", nil, []string{"docs/a.md"}, "false"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			dir, base, head := newRepo(t, c.changedFiles...)
-			eventPath := writeEvent(t, dir, c.labels...)
-			got, reason := runDetect(t, dir, eventPath, c.eventName, base, head)
-			if got != c.want {
-				t.Errorf("run_regression = %q (reason %q), want %q", got, reason, c.want)
 			}
 		})
 	}

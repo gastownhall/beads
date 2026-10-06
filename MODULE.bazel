@@ -234,3 +234,11 @@ new_local_repository(
 """,
     path = ".beads/formulas",
 )
+
+# Historical bd releases for the regression, migration and cross-version
+# suites (tools/bazel/bd_releases.bzl): one repository per release in the
+# release catalog that records a linux_amd64 asset digest, behind the
+# @bd_releases hub. Adding a release is a catalog change only.
+bd_releases = use_extension("//tools/bazel:bd_releases.bzl", "bd_releases")
+bd_releases.catalog(path = "//scripts:migration-test/release-catalog.json")
+use_repo(bd_releases, "bd_releases")

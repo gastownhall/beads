@@ -199,7 +199,7 @@ Key jobs preserved by display name:
 
 | Workflow | Triggers | Main validation |
 |---|---|---|
-| `regression.yml` | Push to `main`, PR to `main`, manual | Detector runs regression on push/manual, PR label `run-regression`, or risky paths; test command is `go test -tags=regression,gms_pure_go -timeout=20m -v ./tests/regression/...`. |
+| `bazel.yml` `bazel-cmd-dolt` (formerly `regression.yml`) | PR, merge group, push to `main` | `//tests/regression:regression_test` (8 shards, cached until its inputs change) against the catalog-pinned v0.49.6 baseline; local entrypoint stays `make test-regression`. |
 | `cross-version-smoke.yml` | Tags, PRs, manual | PRs test latest 5 releases, tags test latest 30, via `scripts/upgrade-smoke-test.sh`. |
 | `migration-test.yml` | Tags, PRs touching upgrade-relevant code (advisory, path-filtered), manual | Builds candidate once per shard (3 shards, folded from 14 per-version legs, F7c) and loops `scripts/migration-test/run.sh --version` over each shard's versions; not a required PR/main gate. |
 | `nightly.yml` | Daily schedule, manual | `go test -v -race -tags=integration,gms_pure_go -coverprofile=coverage.out -timeout=30m ./...` with `BEADS_TEST_SKIP=dolt`; checks coverage >= 30%. |

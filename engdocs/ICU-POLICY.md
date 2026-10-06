@@ -58,7 +58,7 @@ Every build path that produces a binary for users must include `-tags gms_pure_g
 | Migration tests | `.github/workflows/migration-test.yml` |
 | Nightly tests | `.github/workflows/nightly.yml` |
 | Cross-version smoke | `.github/workflows/cross-version-smoke.yml` |
-| Regression tests | `.github/workflows/regression.yml` |
+| Regression tests | `//tests/regression:regression_test` (Bazel, `bazel.yml` `bazel-cmd-dolt`) |
 
 ### Canonical pattern: source `.buildflags`
 

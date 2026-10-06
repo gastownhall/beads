@@ -1723,9 +1723,12 @@ jobs:
   # shards) against a hermetic dolt sql-server, i.e. the Dolt-gated cmd/bd
   # tests (TestCLI_*, TestInit*, the store-backed suites) that every other
   # lane and legacy job skips with BEADS_TEST_SKIP=dolt or leaves out of its
-  # manifest. --config=doltserver-cmd has exactly --config=integration's
-  # build flags, so it shares bazel-integration's compile through the
-  # remote cache. Runs exactly where bazel-integration runs (the same if):
+  # manifest; plus the differential regression suite
+  # (//tests/regression:regression_test, 8 shards: the candidate
+  # bd_for_tests against the catalog-pinned v0.49.6 release, formerly
+  # regression.yml). --config=doltserver-cmd has exactly
+  # --config=integration's build flags, so it shares bazel-integration's
+  # compile through the remote cache. Runs exactly where bazel-integration runs (the same if):
   # remotely (modes remote, fork-ro, fork-rw), or locally with the
   # read-only cache (mode cache: fork and Dependabot PRs while rbe-fork is
   # closed), never plain local (rbe=off), and not when a caller passes

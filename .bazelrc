@@ -216,7 +216,9 @@ test:doltserver-integration --experimental_remote_cache_eviction_retries=0
 # tag), the whole integration-tagged cmd/bd suite against a hermetic dolt
 # sql-server, i.e. the Dolt-gated cmd/bd tests every other lane skips
 # (BEADS_TEST_SKIP=dolt in --config=prcore/ci and --config=integration, and
-# in nightly.yml's go test job). The build flags are exactly
+# in nightly.yml's go test job), and //tests/regression:regression_test
+# (the differential regression suite, formerly regression.yml, against the
+# catalog-pinned baseline in @bd_releases). The build flags are exactly
 # --config=integration's, so it compiles nothing bazel-integration does not
 # (shared through the remote cache). bazel.yml runs it where it runs the
 # integration lane (remote, or with the read-only cache in mode cache), in a
