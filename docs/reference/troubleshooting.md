@@ -395,20 +395,17 @@ Managed proxied-server mode spawns an external `dolt` CLI it finds via
 clone-local sidecar setting will slot between the two when the sidecar
 reader lands in contract part 2). On
 startup it probes that binary with `dolt version` and recommends
-**dolt >= 2.0.0**: the 2026-07-25 cross-version compatibility matrix found
-that cross-reading storage written by the beads Dolt Go module (as opposed
-to writing it, which older dolt CLIs can also do) requires dolt >= 2.0.0 —
-dolt 1.85 can *serve* proxied mode but cannot *read* storage the module
-wrote, and dolt 1.52.1 fails at both serving and reading.
+**dolt >= 2.4.1**, matching the embedded Dolt driver and the version used
+for CLI and container tests. Keeping those versions aligned reduces the
+risk of incompatibilities when reading storage written by another mode.
 
 This is a warning, not a hard failure — there is deliberately no hard
 version floor, so an older dolt can still be used at your own risk. To
 resolve it, install the pinned dolt version — see
 [Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install)
 — and either update PATH or set `BEADS_DOLT_BIN` to the new binary's path.
-Install that specific version rather than `latest`: 2.3.x is a newer release
-that satisfies this warning but carries a
-[separate data-operation defect](/architecture/dolt#which-dolt-version-to-install).
+Install that specific version rather than `latest` so the binary matches
+the pinned release.
 
 The advisory repeats at most once per day, not on every command: the probe
 result and the warning timestamp are cached (keyed by the binary's path,

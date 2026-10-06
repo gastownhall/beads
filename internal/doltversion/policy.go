@@ -7,19 +7,12 @@ import (
 )
 
 // RecommendedMin is the dolt version this package recommends for managed
-// proxied-server mode, based on the cross-version compatibility matrix run
-// 2026-07-25: it showed that cross-reading storage written by the beads
-// Dolt Go module (as opposed to writing it, which older dolt CLIs can also
-// do) requires an external dolt >= 2.0.0 — dolt 1.85 can *serve* proxied
-// mode but cannot *read* storage the module wrote, and dolt 1.52.1 fails at
-// both serving and reading. This is deliberately a recommendation, not a
-// hard floor (see CheckRecommended): an earlier design that hard-failed
-// startup below a version floor was rejected in adversarial review as
-// "policy without evidence" — the matrix only establishes an empirical
-// compatibility boundary for the read path, not a product decision to
-// refuse older binaries outright, and rollout should be allowed to proceed
-// on a warning while that policy question is settled.
-var RecommendedMin = MustParse("2.0.0")
+// proxied-server mode. Keep it aligned with the embedded Dolt driver and
+// the CLI/container test pins so external binaries use the same release
+// as the engine that writes beads storage. This is a recommendation, not
+// a hard floor (see CheckRecommended): older binaries produce a warning
+// rather than preventing startup.
+var RecommendedMin = MustParse("2.4.1")
 
 // warningKind distinguishes the two situations ProbeWithPolicy can warn
 // about, so Warning.Message can render the right wording for each without

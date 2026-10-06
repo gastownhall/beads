@@ -9,21 +9,21 @@ import (
 )
 
 func TestCheckRecommended(t *testing.T) {
-	old := Identity{Version: MustParse("1.52.1")}
+	old := Identity{Version: MustParse("2.4.0")}
 	if w := CheckRecommended(old); w == nil {
-		t.Error("CheckRecommended(1.52.1) = nil, want warning (below RecommendedMin)")
-	} else if w.Probed.String() != "1.52.1" || w.Recommended.String() != RecommendedMin.String() {
+		t.Error("CheckRecommended(2.4.0) = nil, want warning (below RecommendedMin)")
+	} else if w.Probed.String() != "2.4.0" || w.Recommended.String() != RecommendedMin.String() {
 		t.Errorf("CheckRecommended warning fields = %+v", w)
 	}
 
-	newEnough := Identity{Version: MustParse("2.0.0")}
+	newEnough := Identity{Version: MustParse("2.4.1")}
 	if w := CheckRecommended(newEnough); w != nil {
-		t.Errorf("CheckRecommended(2.0.0) = %v, want nil", w)
+		t.Errorf("CheckRecommended(2.4.1) = %v, want nil", w)
 	}
 
-	newer := Identity{Version: MustParse("2.1.0")}
+	newer := Identity{Version: MustParse("2.5.0")}
 	if w := CheckRecommended(newer); w != nil {
-		t.Errorf("CheckRecommended(2.1.0) = %v, want nil", w)
+		t.Errorf("CheckRecommended(2.5.0) = %v, want nil", w)
 	}
 }
 
@@ -111,7 +111,7 @@ func TestProbeWithPolicyRecommendedVersion(t *testing.T) {
 	dir := t.TempDir()
 
 	t.Run("recommended version produces no warning", func(t *testing.T) {
-		stub := writeVersionEchoStub(t, dir, "dolt-recent", "dolt version 2.0.0")
+		stub := writeVersionEchoStub(t, dir, "dolt-recent", "dolt version 2.4.1")
 		_, warn, err := ProbeWithPolicy(context.Background(), stub)
 		if err != nil {
 			t.Fatalf("ProbeWithPolicy: %v", err)

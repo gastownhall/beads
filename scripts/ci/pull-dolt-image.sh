@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Keep this tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
-readonly image="dolthub/dolt-sql-server:2.2.0"
+readonly image="dolthub/dolt-sql-server:2.4.1"
 readonly max_attempts=3
 readonly retry_delay_seconds=5
 

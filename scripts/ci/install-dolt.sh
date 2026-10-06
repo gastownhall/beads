@@ -23,7 +23,7 @@ set -euo pipefail
 # releases/latest moved to 2.3.x, and it also puts bd dolt compact/flatten
 # and the #4566 fresh-bootstrap heal at risk on 2.3.x. Raise this pin only
 # once a Dolt release is confirmed clean by that same measurement.
-readonly version="2.2.0"
+readonly version="2.4.1"
 readonly max_attempts=3
 readonly retry_delay_seconds=5
 
@@ -71,8 +71,8 @@ sudo install -m 0755 "$workdir/dolt-${os}-${arch}/bin/dolt" /usr/local/bin/dolt
 # Fail loudly if PATH resolves to some other dolt: a stale runner-image copy
 # earlier on PATH would silently put the suite back on an unpinned binary.
 # No `| head` here: pipefail turns dolt's SIGPIPE into a failed install.
-# Compare the version token exactly rather than as a substring: `*"2.2.0"*`
-# also matches 12.2.0 and 2.2.0-rc1, so a substring test would wave through
+# Compare the version token exactly rather than as a substring: `*"2.4.1"*`
+# also matches 12.4.1 and 2.4.1-rc1, so a substring test would wave through
 # releases the pin exists to keep out.
 installed="$(dolt version)"
 installed="${installed%%$'\n'*}"

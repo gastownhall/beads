@@ -12,7 +12,7 @@ import (
 // pinnedDoltCLIVersion is the version scripts/ci/install-dolt.sh pins.
 // TestPinnedDoltCLIMatchesContainerImage guards the pin itself; this file only
 // needs a value the fake dolt can report back so the drift guard is exercised.
-const pinnedDoltCLIVersion = "2.2.0"
+const pinnedDoltCLIVersion = "2.4.1"
 
 // TestInstallDoltPropagatesDownloadFailure is the regression net for a download
 // that never succeeds exiting 0. The script's whole purpose is keeping CI off an
@@ -70,11 +70,11 @@ func TestInstallDoltPropagatesDownloadFailure(t *testing.T) {
 			wantInstalls:    1,
 		},
 		{
-			// A substring drift guard would wave this through: "12.2.0"
-			// contains "2.2.0".
+			// A substring drift guard would wave this through: "12.4.1"
+			// contains "2.4.1".
 			name:            "installed version merely contains the pin",
 			curlFailures:    0,
-			reportedVersion: "12.2.0",
+			reportedVersion: "12.4.1",
 			wantExit:        1,
 			wantCurls:       1,
 			wantSleeps:      0,
