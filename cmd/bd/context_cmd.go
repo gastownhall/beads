@@ -7,6 +7,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/httpclient"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage/domain"
 )
@@ -135,7 +136,19 @@ Examples:
 // while each held its own copy of `Backend: configfile.BackendDolt`.
 func applyContextBackend(snapshot *domain.ContextInfo, beadsDir string, cfg *configfile.Config) error {
 	snapshot.SetBackendIdentity(cfg.GetBackend(), cfg.GetDoltMode(), cfg.GetDoltDatabase())
-	snapshot.ProjectID = cfg.ProjectID
+	if cfg.GetBackend() == httpclient.Backend {
+		// The http backend's identity lives in the per-user, gitignored
+		// sidecar (`bd connect`'s MED-6 fix stopped mirroring it into the
+		// git-tracked metadata.json), so `bd context` must read it from
+		// there too. A missing sidecar (ErrNotConnected) or any other read
+		// failure just leaves ProjectID empty rather than failing this
+		// otherwise-degraded-state-tolerant command.
+		if target, err := httpclient.LoadTarget(beadsDir); err == nil {
+			snapshot.ProjectID = target.ExpectProjectID
+		}
+	} else {
+		snapshot.ProjectID = cfg.ProjectID
+	}
 
 	if cfg.IsDoltServerMode() {
 		snapshot.ServerHost = cfg.GetDoltServerHost()

@@ -155,7 +155,10 @@ func checkCAFileAbsolute(caFile string) error {
 // and the connect command share one encoder; the connect UX itself (gitignore
 // coverage, identity verification, conversion consent) is not here. It refuses
 // a url carrying userinfo and a relative CAFile before writing anything, with
-// LoadTarget's own messages.
+// LoadTarget's own messages. The write is atomic (temp file in the same
+// directory, then rename): a reader racing this write — LoadTarget, or
+// another process entirely — must never observe a truncated or partial
+// sidecar.
 func SaveTarget(beadsDir string, t Target) error {
 	if err := checkNoUserinfo(t.BaseURL); err != nil {
 		return err
@@ -171,10 +174,36 @@ func SaveTarget(beadsDir string, t Target) error {
 	if err != nil {
 		return fmt.Errorf("marshaling %s: %w", TargetFileName, err)
 	}
-	if err := os.WriteFile(TargetPath(beadsDir), data, 0o600); err != nil {
+	if err := writeFileAtomic(TargetPath(beadsDir), data, 0o600); err != nil {
 		return fmt.Errorf("writing %s: %w", TargetFileName, err)
 	}
 	return nil
+}
+
+// writeFileAtomic writes data to a temp file in path's directory and renames
+// it over path, so a concurrent reader never sees a truncated or partial
+// file. Mirrors internal/configfile's own helper of the same name and shape;
+// not shared directly because that one is package-private to configfile.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) //nolint:errcheck // no-op after successful rename
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // RemoveTarget deletes the activation sidecar, reporting whether one was there.
