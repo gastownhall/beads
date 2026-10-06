@@ -77,7 +77,13 @@ another actor won the race, so retrying the same guard is pointless).`,
 			issueStore := result.Store
 			issue := result.Issue
 
-			if issue.Status == types.StatusOpen {
+			// An active --if-revision guard must be evaluated before this
+			// already-open short-circuit: ops.Reopen below checks
+			// ExpectedVersion first (ExecuteReopen -> CheckVersionInTx), so a
+			// stale revision on an already-open issue still reports exit 13
+			// instead of silently returning the "already open" no-op here.
+			// Without --if-revision, today's pre-check stands unchanged.
+			if ifRevision == nil && issue.Status == types.StatusOpen {
 				fmt.Fprintln(os.Stderr, reopenNoOpMessage(fullID, types.StatusOpen))
 				result.Close()
 				continue

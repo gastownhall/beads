@@ -22,7 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scenarios this path's local gates cover (blocking through existing or
   planned hierarchy, transitive external-parent paths, cycles hidden in an
   inline dep, combined scheduling cycles) are exercised against a real Dolt
-  store, not just skipped placeholders.
+  store, not just skipped placeholders. A graph plan whose translated
+  BatchApplier items (nodes, edges and deferred assignments combined) exceed
+  `issueops.MaxApplyBatchItems` (1000) is now refused outright with
+  `GraphApplyTooLargeError` rather than silently chunked across several
+  transactions — `bd create --graph` promises one atomic request, so a plan
+  over the cap must be split by the caller into multiple `bd create --graph`
+  calls instead.
 - `--if-revision` (gastownhall/beads#4682) is extended to `bd reopen`, the
   one lifecycle verb #7203 did not add it to, reusing the same
   `issueops.ReopenRequest.ExpectedVersion` field the library already

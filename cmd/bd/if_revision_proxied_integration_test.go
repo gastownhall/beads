@@ -153,11 +153,47 @@ func TestIfRevisionGuardProxiedClose(t *testing.T) {
 // unlike the other four verbs there is no embedded-leg sibling to mirror
 // here -- this is reopen's only --if-revision coverage on either route
 // beyond TestGCConditionalMatcherDecode's embedded smoke case.
+//
+// The already_open_* subtests pin the bee-ghosttrack maintainer-review
+// blocker: a stale --if-revision guard on an already-open issue must still
+// report exit 13 with a precondition_failed body, not the silent
+// already-open no-op. See if_revision_reopen_embedded_test.go for the
+// direct-route twin of this same gap.
 func TestIfRevisionGuardProxiedReopen(t *testing.T) {
 	requireProxiedServerEnv(t)
 	bd := buildEmbeddedBD(t)
 	proj := newSharedProxiedProject(t, bd, "pir")
 	env := crossModeEnv{mode: "proxied", bd: bd, dir: proj.dir, env: bdProxiedEnv(proj.dir)}
+
+	alreadyOpen := bdProxiedCreate(t, bd, proj.dir, "Guarded proxied reopen (already open)", "--type", "task")
+	openRev := currentRevisionOfProxied(t, bd, proj.dir, alreadyOpen.ID)
+
+	t.Run("already_open_mismatch_refuses", func(t *testing.T) {
+		stale := staleRevisionFor(openRev)
+		stdout, stderr, code := env.run(t, "reopen", alreadyOpen.ID, "--if-revision", strconv.FormatInt(stale, 10), "--json")
+		if code != ExitGuardMismatch {
+			t.Fatalf("exit = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, ExitGuardMismatch, stdout, stderr)
+		}
+		assertProxiedPreconditionBody(t, stderr, stale)
+		got := bdProxiedShow(t, bd, proj.dir, alreadyOpen.ID)
+		if got.Status != types.StatusOpen {
+			t.Errorf("stale --if-revision reopen of an already-open issue changed status: %s", got.Status)
+		}
+		if gotRev := currentRevisionOfProxied(t, bd, proj.dir, alreadyOpen.ID); gotRev != openRev {
+			t.Errorf("stale --if-revision reopen of an already-open issue advanced the revision: %d, want unchanged %d", gotRev, openRev)
+		}
+	})
+
+	t.Run("already_open_match_is_noop", func(t *testing.T) {
+		stdout, _, code := env.run(t, "reopen", alreadyOpen.ID, "--if-revision", strconv.FormatInt(openRev, 10))
+		if code != 0 {
+			t.Fatalf("matching --if-revision reopen of an already-open issue should succeed as a no-op, exit = %d\nstdout:\n%s", code, stdout)
+		}
+		got := bdProxiedShow(t, bd, proj.dir, alreadyOpen.ID)
+		if got.Status != types.StatusOpen {
+			t.Errorf("matching --if-revision reopen of an already-open issue changed status: %s", got.Status)
+		}
+	})
 
 	issue := bdProxiedCreate(t, bd, proj.dir, "Guarded proxied reopen", "--type", "task")
 	bdProxiedClose(t, bd, proj.dir, issue.ID)

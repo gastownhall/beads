@@ -820,6 +820,7 @@ go_test(
         "if_revision_proxied_integration_test.go",
         "if_revision_reassign_fence_embedded_test.go",
         "if_revision_reassign_fence_proxied_test.go",
+        "if_revision_reopen_embedded_test.go",
         "if_revision_test.go",
         "import_chunking_embedded_test.go",
         "import_chunking_test.go",
