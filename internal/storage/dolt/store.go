@@ -3885,8 +3885,9 @@ func (s *DoltStore) CommitConfigUserKVOnly(ctx context.Context, message string) 
 	}
 	if len(unsafe) > 0 {
 		return fmt.Errorf("refusing to commit %d dirty internal config key(s) with a user %s* write: %s; "+
-			"only user %s* rows commit with it (GH#2455) — commit or revert "+
-			"these explicitly with `bd dolt commit`", len(unsafe), kvkeys.Prefix, strings.Join(unsafe, ", "), kvkeys.Prefix)
+			"only user %s* rows commit with it (GH#2455). The %s* write itself is saved in the "+
+			"working set: `bd dolt commit` publishes it together with those keys, or revert the "+
+			"keys first", len(unsafe), kvkeys.Prefix, strings.Join(unsafe, ", "), kvkeys.Prefix, kvkeys.Prefix)
 	}
 	return s.doltAddAndCommit(ctx, []string{"config"}, message)
 }
