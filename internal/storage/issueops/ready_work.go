@@ -532,9 +532,8 @@ func deferredChildrenQuery(depTable, issueTable string) string {
 				FROM %s dep
 				JOIN %s parent ON parent.id = dep.%s
 				WHERE dep.type = 'parent-child'
-				  AND (parent.status = 'deferred'
-				       OR (parent.defer_until IS NOT NULL AND parent.defer_until > UTC_TIMESTAMP()))
-			`, depTable, issueTable, targetCol)
+				  AND (%s)
+			`, depTable, issueTable, targetCol, sqlbuild.DeferredParentPredicate("parent."))
 }
 
 // getDeferredChildrenAllTablesInTx is getChildrenOfDeferredParentsInTx's
@@ -570,7 +569,8 @@ func getDeferredChildrenAllTablesInTx(ctx context.Context, tx DBTX) ([]string, e
 }
 
 // getChildrenOfDeferredParentsInTx returns IDs of issues whose parent is
-// deferred (status 'deferred' or a future defer_until). Works within an existing transaction.
+// deferred (status 'deferred' or a future defer_until). Works within an
+// existing transaction.
 //
 //nolint:gosec // G201: depTable is selected from a hardcoded list below.
 func getChildrenOfDeferredParentsInTx(ctx context.Context, tx DBTX) ([]string, error) {
@@ -580,10 +580,9 @@ func getChildrenOfDeferredParentsInTx(ctx context.Context, tx DBTX) ([]string, e
 		var exists int
 		err := tx.QueryRowContext(ctx, fmt.Sprintf(`
 			SELECT 1 FROM %s
-			WHERE status = 'deferred'
-			   OR (defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP())
+			WHERE %s
 			LIMIT 1
-		`, issueTable)).Scan(&exists)
+		`, issueTable, deferredParentPredicate)).Scan(&exists)
 		if err == nil {
 			hasDeferredParent = true
 			break
