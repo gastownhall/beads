@@ -443,8 +443,8 @@ configured, though the two cases consent differently
 Upgrade one server's clients like this:
 
 ```bash
-# 1. Upgrade bd on every client of the server. Reads keep working throughout —
-#    an upgraded client reads the old schema, it just cannot write to it.
+# 1. Upgrade bd on every client of the server. Until step 2, an upgraded
+#    client refuses writes and most reads fail (see below).
 bd version                     # on each client, confirm the new version
 
 # 2. Once, from a workspace already set up against this server: consent.
@@ -454,9 +454,11 @@ bd migrate schema              # add --global for the shared global database
 bd doctor
 ```
 
-Between steps 1 and 2, an upgraded client reads normally and its writes are
-refused with the gate's guidance. Nothing is silently promoted, so there is no
-deadline — but the window is a degraded one, so keep it short.
+Between steps 1 and 2, an upgraded client refuses writes with the gate's
+guidance, and most reads fail too: `bd list`, `bd show` and `bd ready` stop
+with `table not found: leases`, because 1.3 reads expect tables the old schema
+lacks. Nothing is silently promoted, so there is no deadline, but nothing works
+in that window either, so run step 2 as soon as the clients are upgraded.
 
 **If the shared server also has a Dolt remote**, step 2 is not enough. Two
 hazards now apply at once — the co-resident lockout above and the cross-clone
