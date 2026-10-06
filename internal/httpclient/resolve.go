@@ -128,6 +128,18 @@ func (s *Store) getIssuesByExactID(ctx context.Context, ids []string) ([]*types.
 		if len(issue.Labels) == 0 && len(details.Labels) > 0 {
 			issue.Labels = append([]string(nil), details.Labels...)
 		}
+		// Issue.RowVersion is json:"-", so the decode above left it at 0;
+		// details.Revision is getIssue's only wire spelling of the token, the
+		// same stitch bridge.go's own GetIssue makes. Without this, an exact-id
+		// hit through SearchIssues (e.g. the resolver's fast path) would carry
+		// a RowVersion of 0 where a getIssue of the same row populates the real
+		// token, and a caller that feeds the search result's RowVersion into a
+		// guarded write would get a spurious mismatch instead of none.
+		version, err := parseRevision("searchIssues(exact id)", details.Revision)
+		if err != nil {
+			return nil, err
+		}
+		issue.RowVersion = version
 		found = append(found, &issue)
 	}
 	return found, nil

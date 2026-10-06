@@ -491,6 +491,58 @@ func TestBridgeGetIssuePopulatesRowVersionForAGuardedWrite(t *testing.T) {
 	}
 }
 
+// TestSearchIssuesExactIDPopulatesRowVersionForAGuardedWrite pins the same
+// stitch as TestBridgeGetIssuePopulatesRowVersionForAGuardedWrite, for
+// SearchIssues' own exact-id fast path (getIssuesByExactID in resolve.go)
+// rather than the raw bridge GetIssue. That path decodes the same
+// apigen.ContextResponse-shaped IssueDetails getIssue does, but — unlike
+// bridge.go's GetIssue and role_reader.go's Reader.Get — it never parsed
+// details.Revision, so SearchIssues(ctx, "", IssueFilter{IDs: ...}) answered
+// RowVersion 0 for a row every other read path reports a real token for. This
+// proves the stitch the same way the bridge test does: by guarding a write
+// with whatever the exact-id search just answered, over the same wire, and
+// requiring a second write that reuses the now-stale token to be refused.
+func TestSearchIssuesExactIDPopulatesRowVersionForAGuardedWrite(t *testing.T) {
+	e := newServedEnv(t, "sixi")
+	ctx := t.Context()
+	lifecycle, err := e.subject.IssueLifecycle()
+	if err != nil {
+		t.Fatalf("IssueLifecycle(): %v", err)
+	}
+
+	issue := &types.Issue{Title: "exact-id search row version round trip", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := e.createIssue(ctx, issue, "seed"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	rows, err := e.subject.SearchIssues(ctx, "", types.IssueFilter{IDs: []string{issue.ID}})
+	if err != nil {
+		t.Fatalf("SearchIssues(exact id): %v", err)
+	}
+	if len(rows) != 1 || rows[0] == nil {
+		t.Fatalf("SearchIssues(exact id) = %+v, want exactly one hit", rows)
+	}
+	if rows[0].RowVersion == 0 {
+		t.Fatalf("SearchIssues(exact id) answered RowVersion 0; want the row's real token")
+	}
+	staleVersion := rows[0].RowVersion
+
+	if _, err := lifecycle.Update(ctx, issueops.UpdateRequest{
+		Actor: "writer", IssueID: issue.ID, ExpectedVersion: &staleVersion,
+		Patch: issueops.IssuePatch{Title: set("first guarded write")},
+	}); err != nil {
+		t.Fatalf("Update guarded by the token SearchIssues answered: %v", err)
+	}
+
+	_, err = lifecycle.Update(ctx, issueops.UpdateRequest{
+		Actor: "writer", IssueID: issue.ID, ExpectedVersion: &staleVersion,
+		Patch: issueops.IssuePatch{Title: set("second guarded write, same stale token")},
+	})
+	if err == nil {
+		t.Fatal("Update reused SearchIssues' token after a write moved the row past it; want a version-guard refusal")
+	}
+}
+
 // TestServedWorkspaceConfigWritesRefuse IS GONE, and what it asserted is worth a
 // line rather than a silent deletion: while D8 row 11 was PARTIAL, the two write
 // verbs refused per METHOD and named themselves, so the accessor could serve the
