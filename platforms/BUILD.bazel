@@ -1,0 +1,49 @@
+# rbe_worker: the execution platform of every build (.bazelrc selects it
+# unconditionally with --extra_execution_platforms, so every action and test
+# executes on it and local, fork-cache and remote runs hash alike).
+#
+# Test actions exec host tools (bash, git, coreutils, ...) and load the
+# shared libraries of every cgo binary they link (glibc, libstdc++), so the
+# worker host is an input to every cached result. Its exec_properties enter
+# each action's key: worker-env is the sha256 of tools/rbe/worker-env.txt,
+# the manifest of the pinned worker host.
+#
+# rbe-west's OSS pool is shared with gastownhall/gascity, which owns the
+# worker image: its tools/rbe/blacksmith-worker.sh advertises the sha256 of
+# the manifest it measures on its own host (gascity tools/rbe/worker-env),
+# and the schedulers match worker-env exactly, so these actions run only on
+# the pinned host. tools/rbe/worker-env.txt is a byte-for-byte copy of
+# gascity's: when gascity moves its pin (a new runner image, a package or Go
+# upgrade), copy its manifest here and update this sha256 in the same
+# commit, which is a new key for every action.
+# scripts/bazel_hermetic_cc_test.go keeps the pin and the manifest in step.
+platform(
+    name = "rbe_worker",
+    exec_properties = {
+        "worker-env": "sha256:f4d6d0460877031a71cd0ddb4dc67e789c4e54fc18c0d888fa818c84f8cf61ed",
+    },
+    parents = ["@bazel_tools//tools:host_platform"],
+    visibility = ["//visibility:public"],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

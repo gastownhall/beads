@@ -3,6 +3,18 @@
 # .bazelversion.
 common --enable_bzlmod
 common --color=no
+# C/C++ (and so cgo, -race and the Go stdlib) builds only with MODULE.bazel's
+# pinned LLVM toolchain: no host-detected local_config_cc to fall back to,
+# which would key actions to the client's gcc and lld and fail remote links
+# on workers without lld (scripts/bazel_hermetic_cc_test.go).
+common --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+
+# The pinned remote-worker host in every action key: //platforms:rbe_worker's
+# worker-env exec property is the sha256 of tools/rbe/worker-env.txt, and
+# rbe-west's schedulers run an action only on a worker that measured that
+# host (platforms/BUILD.bazel). Key-affecting, so unconditional: local,
+# fork-cache and remote runs hash alike.
+build --extra_execution_platforms=//platforms:rbe_worker
 
 # ICU policy (engdocs/ICU-POLICY.md): build go-mysql-server with its pure-Go
 # regex backend so no target links libicu. MODULE.bazel carries the matching
