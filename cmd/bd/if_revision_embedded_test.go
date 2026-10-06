@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
@@ -242,6 +243,76 @@ func TestIfRevisionDeletePreflightGoneIsPreconditionFailed(t *testing.T) {
 	}
 	if strings.Contains(out, "not found") {
 		t.Errorf("preflight-gone delete leaked the raw, unclassified \"not found\" error instead of the guard envelope:\n%s", out)
+	}
+}
+
+// TestIfRevisionPreflightGoneEveryVerb pins mc-zndi7.82 and mc-zndi7.83: the
+// other guarded verbs share delete's pre-flight gap
+// (TestIfRevisionDeletePreflightGoneIsPreconditionFailed). assign, update and
+// the guarded direct close each resolve the row before their guarded write,
+// and delete --cascade resolves it in deleteBatch's own existence loop, so a
+// losing same-token racer finds the row gone there. Each must report
+// precondition_failed / ExitGuardMismatch, in the JSON body gascity decodes
+// too. Without --if-revision the same miss keeps today's exit 1 and text.
+func TestIfRevisionPreflightGoneEveryVerb(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "pv")
+
+	verbs := []struct {
+		name string
+		args func(id string) []string
+		// plain is the error text the unguarded miss has always printed.
+		plain string
+	}{
+		{"assign", func(id string) []string { return []string{"assign", id, "worker"} }, "resolving %s: no issue found matching"},
+		{"update", func(id string) []string { return []string{"update", id, "--priority", "3"} }, "Error resolving %s: no issue found matching"},
+		{"close", func(id string) []string { return []string{"close", id} }, "no issue found matching"},
+		{"delete_cascade", func(id string) []string { return []string{"delete", id, "--cascade", "--force"} }, "issues not found: %s"},
+	}
+	for _, v := range verbs {
+		t.Run(v.name, func(t *testing.T) {
+			issue := bdCreate(t, bd, dir, "Preflight gone "+v.name, "--type", "task")
+			rev0 := bdShowRevision(t, bd, dir, issue.ID)
+			// Stand in for the winning racer.
+			bdDelete(t, bd, dir, issue.ID, "--force")
+			bdShowFail(t, bd, dir, issue.ID)
+
+			args := append(v.args(issue.ID), "--if-revision", revStr(rev0), "--json")
+			out, code := bdRunFailCode(t, bd, dir, args...)
+			if code != ExitGuardMismatch {
+				t.Errorf("preflight-gone --if-revision %s exit code = %d, want %d\n%s", v.name, code, ExitGuardMismatch, out)
+			}
+			if !strings.Contains(out, "precondition failed") {
+				t.Errorf("preflight-gone %s should say \"precondition failed\", got:\n%s", v.name, out)
+			}
+			if !strings.Contains(out, `"code":"precondition_failed"`) {
+				t.Errorf("preflight-gone %s JSON body lacks code precondition_failed, got:\n%s", v.name, out)
+			}
+			if strings.Contains(out, "not found") {
+				t.Errorf("preflight-gone %s leaked the unclassified \"not found\" error:\n%s", v.name, out)
+			}
+
+			// Regression pin: no guard, no classification.
+			out, code = bdRunFailCode(t, bd, dir, v.args(issue.ID)...)
+			if code != 1 {
+				t.Errorf("unguarded %s on a missing id exit code = %d, want 1\n%s", v.name, code, out)
+			}
+			plain := v.plain
+			if strings.Contains(plain, "%s") {
+				plain = fmt.Sprintf(plain, issue.ID)
+			}
+			if !strings.Contains(out, plain) {
+				t.Errorf("unguarded %s on a missing id should still say %q, got:\n%s", v.name, plain, out)
+			}
+			if strings.Contains(out, "precondition failed") {
+				t.Errorf("unguarded %s on a missing id was classified as a guard outcome:\n%s", v.name, out)
+			}
+		})
 	}
 }
 

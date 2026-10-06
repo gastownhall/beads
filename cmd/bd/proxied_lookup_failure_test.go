@@ -464,3 +464,51 @@ func TestUOWMolReaderLookupFailure(t *testing.T) {
 		}
 	})
 }
+
+// TestProxiedAssignIfRevisionPreflightGone pins mc-zndi7.82 on the proxied
+// route: proxiedAssign's pre-read runs before the guarded write, so a
+// same-token --if-revision racer that loses can find the row gone there. That
+// miss must reach reportIfRevisionFailure as storage.ErrNotFound and report
+// precondition_failed / ExitGuardMismatch like every other loser, while a
+// backend failure under the same guard stays an ordinary error.
+func TestProxiedAssignIfRevisionPreflightGone(t *testing.T) {
+	rev := int64(7)
+
+	t.Run("absent id is precondition_failed", func(t *testing.T) {
+		withStubbedProxiedLookup(t, nil)
+		jsonOutput = true
+
+		var err error
+		stderr := captureStderrDuring(t, func() {
+			err = runAssignProxiedServer(context.Background(), []string{stubMissingID, "someone"}, false, &rev)
+		})
+		var ee *exitError
+		if !errors.As(err, &ee) || ee.Code != ExitGuardMismatch {
+			t.Fatalf("err = %#v, want *exitError{Code: %d}\nstderr:\n%s", err, ExitGuardMismatch, stderr)
+		}
+		body := decodeIfRevisionBody(t, lastJSONLine(t, stderr), false)
+		if body["code"] != ifRevisionCodePreconditionFailed {
+			t.Errorf("code = %v, want %q\nstderr:\n%s", body["code"], ifRevisionCodePreconditionFailed, stderr)
+		}
+		if body["expected_revision"] != float64(rev) {
+			t.Errorf("expected_revision = %v, want %d", body["expected_revision"], rev)
+		}
+	})
+
+	t.Run("backend failure is not a guard outcome", func(t *testing.T) {
+		withStubbedProxiedLookup(t, errors.New(stubBackendError))
+
+		var err error
+		stderr := captureStderrDuring(t, func() {
+			err = runAssignProxiedServer(context.Background(), []string{stubMissingID, "someone"}, false, &rev)
+		})
+		var ee *exitError
+		if errors.As(err, &ee) && ee.Code == ExitGuardMismatch {
+			t.Fatalf("backend failure classified as a guard mismatch:\n%s", stderr)
+		}
+		want := "Error: assign bd-missing: resolving bd-missing: " + stubBackendError
+		if got := strings.TrimSpace(stderr); got != want {
+			t.Errorf("stderr = %q, want %q", got, want)
+		}
+	})
+}

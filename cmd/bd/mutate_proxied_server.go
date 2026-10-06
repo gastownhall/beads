@@ -82,7 +82,10 @@ func proxiedAssign(ctx context.Context, id, assignee string, force bool, ifRevis
 	_, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (struct{}, error) {
 		current, _, rerr := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), id)
 		if errors.Is(rerr, storage.ErrNotFound) {
-			return struct{}{}, fmt.Errorf("issue %s not found", id)
+			// mc-zndi7.82: wrapped so runAssignProxiedServer's
+			// reportIfRevisionFailure classifies a guarded miss; the text
+			// ("issue <id> not found") is unchanged.
+			return struct{}{}, fmt.Errorf("issue %s %w", id, storage.ErrNotFound)
 		}
 		if rerr != nil {
 			return struct{}{}, fmt.Errorf("resolving %s: %w", id, rerr)

@@ -58,16 +58,26 @@ Examples:
 
 		ctx := rootCtx
 
+		// mc-zndi7.82: a guarded miss here is a lost race, not a typo; see
+		// reportIfRevisionPreflightGone.
 		result, err := resolveAndGetIssueForMutation(ctx, store, id)
 		if err != nil {
 			if result != nil {
 				result.Close()
+			}
+			if isNotFoundErr(err) {
+				if reported, ok := reportIfRevisionPreflightGone("assigning", id, ifRevision); ok {
+					return reported
+				}
 			}
 			return HandleErrorRespectJSON("resolving %s: %v", id, err)
 		}
 		if result == nil || result.Issue == nil {
 			if result != nil {
 				result.Close()
+			}
+			if reported, ok := reportIfRevisionPreflightGone("assigning", id, ifRevision); ok {
+				return reported
 			}
 			return HandleErrorRespectJSON("issue %s not found", id)
 		}

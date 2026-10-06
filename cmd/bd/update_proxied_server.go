@@ -107,9 +107,9 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 	if err != nil {
 		return nil, nil, HandleError("%v", err)
 	}
-	before, fail := proxiedUpdateTarget(ctx, id, in)
-	if fail != nil {
-		return nil, fail, nil
+	before, fail, err := proxiedUpdateTarget(ctx, id, in)
+	if err != nil || fail != nil {
+		return nil, fail, err
 	}
 	patch, err := proxiedUpdatePatch(in, before)
 	if err != nil {
@@ -196,25 +196,32 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 // longer reads the pre-state to decide a hook: a status-crossing update fires
 // on_update and nothing else, from the plumbing, exactly as it does on the
 // embedded path.
-func proxiedUpdateTarget(ctx context.Context, id string, in *updateInput) (*types.Issue, *updateIDFailure) {
+//
+// The error return carries only a guarded miss's already-reported exit
+// (mc-zndi7.82): under --if-revision a row gone at this pre-read is a lost
+// race, not a typo; see reportIfRevisionPreflightGone.
+func proxiedUpdateTarget(ctx context.Context, id string, in *updateInput) (*types.Issue, *updateIDFailure, error) {
 	rd, err := proxiedIssueReader()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
-		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("resolving issue: %v", err)}
+		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("resolving issue: %v", err)}, nil
 	}
 	details, err := rd.Get(ctx, issueops.GetRequest{ID: id})
 	if err != nil {
 		if errors.Is(err, issueops.ErrNotFound) {
+			if reported, ok := reportIfRevisionPreflightGone("updating", id, in.ifRevision); ok {
+				return nil, nil, reported
+			}
 			fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-			return nil, &updateIDFailure{ID: id, Error: "issue not found"}
+			return nil, &updateIDFailure{ID: id, Error: "issue not found"}, nil
 		}
 		fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
-		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("resolving issue: %v", err)}
+		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("resolving issue: %v", err)}, nil
 	}
 	current := &details.Issue
 	if err := validateIssueUpdatable(id, current); err != nil {
 		fmt.Fprintf(os.Stderr, "%s\n", err)
-		return nil, &updateIDFailure{ID: id, Error: err.Error()}
+		return nil, &updateIDFailure{ID: id, Error: err.Error()}, nil
 	}
 	// bd-98s5c: an unguarded assignee update must not silently overwrite
 	// another actor's live claim. Skipped under --if-assignee, whose CAS names
@@ -229,10 +236,10 @@ func proxiedUpdateTarget(ctx context.Context, id string, in *updateInput) (*type
 		if err := validateIssueReassignable(id, current, actor, newAssignee,
 			proxiedClaimPoolAliases(ctx), in.force); err != nil {
 			fmt.Fprintf(os.Stderr, "%s\n", err)
-			return nil, &updateIDFailure{ID: id, Error: err.Error()}
+			return nil, &updateIDFailure{ID: id, Error: err.Error()}, nil
 		}
 	}
-	return current, nil
+	return current, nil, nil
 }
 
 // proxiedClaimPoolAliases is uowClaimPoolAliases for a caller that owns no unit
