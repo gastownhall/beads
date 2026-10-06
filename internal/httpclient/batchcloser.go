@@ -74,7 +74,11 @@ var _ issueops.BatchCloser = (*httpBatchCloser)(nil)
 
 // CloseBatch closes the batch, on the wire's batchClose operation where the
 // server advertises it and by composing a single closeIssue where it does not.
-func (b *httpBatchCloser) CloseBatch(ctx context.Context, req issueops.CloseBatchRequest) (issueops.CloseBatchResult, error) {
+func (b *httpBatchCloser) CloseBatch(ctx context.Context, req issueops.CloseBatchRequest) (result issueops.CloseBatchResult, err error) {
+	// Write-side parity with reads: decorates a bare *encode.RefusedError into
+	// *InexpressibleError so errors.As(err, &unsupported) reaches
+	// *storage.ErrUnsupported, same as inexpressible does for a read role.
+	defer func() { err = b.store.inexpressible("BatchCloser.CloseBatch", err) }()
 	// Request validation first, and all of it client-side. A non-nil error here
 	// carries no outcomes, which the method's contract requires.
 	if err := requireActor(req.Actor); err != nil {

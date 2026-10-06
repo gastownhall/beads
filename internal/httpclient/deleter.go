@@ -57,7 +57,11 @@ var _ issueops.Deleter = (*httpDeleter)(nil)
 // doing it again here would be a second implementation of a rule that already
 // has one, on the operation where a disagreement about which ids were named
 // deletes the wrong rows.
-func (d *httpDeleter) Delete(ctx context.Context, req issueops.DeleteRequest) (issueops.DeleteResult, error) {
+func (d *httpDeleter) Delete(ctx context.Context, req issueops.DeleteRequest) (result issueops.DeleteResult, err error) {
+	// Write-side parity with reads: decorates a bare *encode.RefusedError into
+	// *InexpressibleError so errors.As(err, &unsupported) reaches
+	// *storage.ErrUnsupported, same as inexpressible does for a read role.
+	defer func() { err = d.store.inexpressible("Deleter.Delete", err) }()
 	if err := checkDeleteIDs(req.IDs); err != nil {
 		return issueops.DeleteResult{}, err
 	}

@@ -43,7 +43,11 @@ var _ issueops.DependencyEditor = (*httpDependencyEditor)(nil)
 // requests would turn one atomic assertion into two and let a cycle gate that
 // can only see one request at a time pass a graph that closes a loop across
 // both. Hence the bound below refuses rather than chunks.
-func (d *httpDependencyEditor) AddDependencies(ctx context.Context, req issueops.AddDependenciesRequest) (issueops.AddDependenciesResult, error) {
+func (d *httpDependencyEditor) AddDependencies(ctx context.Context, req issueops.AddDependenciesRequest) (result issueops.AddDependenciesResult, err error) {
+	// Write-side parity with reads: decorates a bare *encode.RefusedError into
+	// *InexpressibleError so errors.As(err, &unsupported) reaches
+	// *storage.ErrUnsupported, same as inexpressible does for a read role.
+	defer func() { err = d.store.inexpressible("DependencyEditor.AddDependencies", err) }()
 	if err := requireActor(req.Actor); err != nil {
 		return issueops.AddDependenciesResult{}, err
 	}

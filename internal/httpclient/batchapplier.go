@@ -59,7 +59,14 @@ type httpBatchApplier struct {
 var _ issueops.BatchApplier = (*httpBatchApplier)(nil)
 
 // ApplyBatch dials POST /v0/beads/issues:batchApply.
-func (b *httpBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBatchRequest) (issueops.ApplyBatchResult, error) {
+func (b *httpBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBatchRequest) (result issueops.ApplyBatchResult, err error) {
+	// Write-side parity with reads: decorates a bare *encode.RefusedError —
+	// however deeply applyBatchBody/encodeApplyPatch nested it inside an
+	// "items[%d]..." or "Issue.%s:" prefix — into *InexpressibleError so
+	// errors.As(err, &unsupported) reaches *storage.ErrUnsupported, same as
+	// inexpressible does for a read role. The original composite message
+	// (including that prefix) is preserved in the decorated error's own text.
+	defer func() { err = b.store.inexpressible("BatchApplier.ApplyBatch", err) }()
 	if err := requireActor(req.Actor); err != nil {
 		return issueops.ApplyBatchResult{}, err
 	}

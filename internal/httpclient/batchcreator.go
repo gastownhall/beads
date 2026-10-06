@@ -27,6 +27,27 @@ const maxBatchCreateItems = 100
 //
 // It is the ALLOWLIST half of refuse-not-drop for this operation. What it does
 // not name is refused, and there is no third arm — see refuseUnwirableIssue.
+//
+// Status and CreatedBy are deliberately absent, each for its own reason, and
+// neither belongs in roleIgnoredCreateIssueMembers below: both are genuinely
+// ACCEPTED by the role's canonical create rules (CreateRequest.Issue's doc,
+// which BatchCreateItem.Issue inherits without exception), so silently
+// dropping either would be exactly the data loss refuse-not-drop exists to
+// prevent.
+//   - Status: apigen.BatchCreateItem publishes no status member at all, unlike
+//     single create's apigen.CreateIssueRequest (which does, see
+//     createCarriedIssueMembers). A populated value is correctly refused. The
+//     common case is not lost: PreparePublicCreateRequest defaults an empty
+//     Status to StatusOpen on every backend, so a caller that only ever wants
+//     the default (cmd/bd/markdown.go's `bd create --file`) leaves it unset
+//     rather than spelling out "open" and tripping this refusal for free.
+//   - CreatedBy: apigen.BatchCreateItem has no member for it either, and
+//     unlike single create (internal/httpapi/create.go stamps created_by from
+//     the wire's actor), the batch server does not yet stamp it from Actor —
+//     a known gap tracked in this PR's own Follow-ups ("created_by isn't yet
+//     stamped on batchCreate/batchApply"). Until that lands, a populated
+//     CreatedBy is refused rather than silently written as empty or
+//     misattributed.
 var batchCreateCarriedIssueMembers = map[string]string{
 	"Title":              "title",
 	"Description":        "description",
@@ -92,7 +113,14 @@ type httpBatchCreator struct {
 var _ issueops.BatchCreator = (*httpBatchCreator)(nil)
 
 // CreateBatch dials POST /v0/beads/issues:batchCreate.
-func (b *httpBatchCreator) CreateBatch(ctx context.Context, req issueops.CreateBatchRequest) (issueops.CreateBatchResult, error) {
+func (b *httpBatchCreator) CreateBatch(ctx context.Context, req issueops.CreateBatchRequest) (result issueops.CreateBatchResult, err error) {
+	// Write-side parity with reads: decorates a bare *encode.RefusedError —
+	// however deeply batchCreateItem/batchCreateEdge/refuseUnwirableIssue
+	// nested it inside an "items[%d]..." prefix — into *InexpressibleError so
+	// errors.As(err, &unsupported) reaches *storage.ErrUnsupported, same as
+	// inexpressible does for a read role. The original composite message
+	// (including that prefix) is preserved in the decorated error's own text.
+	defer func() { err = b.store.inexpressible("BatchCreator.CreateBatch", err) }()
 	if err := requireActor(req.Actor); err != nil {
 		return issueops.CreateBatchResult{}, err
 	}

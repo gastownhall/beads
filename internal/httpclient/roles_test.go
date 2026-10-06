@@ -268,6 +268,80 @@ func TestReadRolesRefuseWhatTheWireCannotCarry(t *testing.T) {
 	}
 }
 
+// TestWriteRoleRefusalsMatchTheReadShape pins that a write-side refusal now
+// satisfies errors.As(*storage.ErrUnsupported) exactly the way a read's does
+// (TestReadRolesRefuseWhatTheWireCannotCarry, above): Sweeper.Sweep's Limit,
+// CycleDetector.DetectCycles' IncludeTracks, and ReadyClaimer.ClaimNext's
+// filter all raised a bare *encode.RefusedError before this review round and
+// none of the three went through (*Store).inexpressible the way every read
+// role already did. A caller classifying on *storage.ErrUnsupported (rather
+// than reaching into the ledger row directly) got three different answers
+// depending on which role it called; this is what makes it one answer.
+func TestWriteRoleRefusalsMatchTheReadShape(t *testing.T) {
+	ctx := context.Background()
+
+	assertUnsupported := func(t *testing.T, err error, wantOp string) {
+		t.Helper()
+		var inexpressible *InexpressibleError
+		if !errors.As(err, &inexpressible) {
+			t.Fatalf("got %v, want *InexpressibleError", err)
+		}
+		var unsup *storage.ErrUnsupported
+		if !errors.As(err, &unsup) || unsup.Backend != Backend {
+			t.Fatalf("the refusal does not classify as *storage.ErrUnsupported for this backend: %v", err)
+		}
+		if !errors.Is(err, encode.ErrRefused) {
+			t.Errorf("the refusal does not classify as encode.ErrRefused: %v", err)
+		}
+		if unsup.Op != wantOp {
+			t.Errorf("the refusal names Op %q, want %q", unsup.Op, wantOp)
+		}
+	}
+
+	t.Run("Sweeper.Sweep Limit", func(t *testing.T) {
+		s, w := recordingStore(t)
+		sweeper, err := s.Sweeper()
+		if err != nil {
+			t.Fatalf("Sweeper(): %v", err)
+		}
+		_, err = sweeper.Sweep(ctx, issueops.SweepRequest{Tier: "ephemeral", Limit: 5})
+		assertUnsupported(t, err, "Sweeper.Sweep")
+		if len(w.dispatched) != 0 {
+			t.Errorf("a refused sweep dialed %v", w.dispatched)
+		}
+	})
+
+	t.Run("CycleDetector.DetectCycles IncludeTracks", func(t *testing.T) {
+		s, w := recordingStore(t)
+		detector, err := s.CycleDetector()
+		if err != nil {
+			t.Fatalf("CycleDetector(): %v", err)
+		}
+		_, err = detector.DetectCycles(ctx, issueops.DetectCyclesRequest{IncludeTracks: true})
+		assertUnsupported(t, err, "CycleDetector.DetectCycles")
+		if len(w.dispatched) != 0 {
+			t.Errorf("a refused DetectCycles dialed %v", w.dispatched)
+		}
+	})
+
+	t.Run("ReadyClaimer.ClaimNext", func(t *testing.T) {
+		s, w := recordingStore(t)
+		claimer, err := s.ReadyClaimer()
+		if err != nil {
+			t.Fatalf("ReadyClaimer(): %v", err)
+		}
+		molType := issueops.MolType(types.MolTypeWork)
+		_, err = claimer.ClaimNext(ctx, issueops.ClaimNextRequest{
+			Actor:  "ana",
+			Filter: issueops.ReadyRequest{MolType: &molType},
+		})
+		assertUnsupported(t, err, "ReadyClaimer.ClaimNext")
+		if len(w.dispatched) != 0 {
+			t.Errorf("a refused ClaimNext dialed %v", w.dispatched)
+		}
+	})
+}
+
 // TestTheRolesOwnPageRefusalsAreValidationNotCapability separates the two kinds
 // of "no" a caller can get, because the recovery differs: a request the ROLE
 // forbids is the caller's to fix, and a request the WIRE cannot carry is a

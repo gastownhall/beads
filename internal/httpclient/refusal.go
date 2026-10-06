@@ -31,13 +31,23 @@ type InexpressibleError struct {
 	// Refused is the encoder's refusal, carrying the ledger row: the flag or
 	// field, the reason, the design decision and its pin.
 	Refused *encode.RefusedError
+	// detail is the ORIGINAL error's own Error() text, preserved so a refusal
+	// a caller decorated with its own context before it reached inexpressible
+	// (a batch item's index, a dependency's position, a patch member's name)
+	// keeps naming that context. Empty when the original error IS the bare
+	// refusal, which is reads' own shape today — see inexpressible's doc.
+	detail string
 }
 
 func (e *InexpressibleError) Error() string {
-	if e.Unsup == nil || e.Unsup.ServerURL == "" {
-		return e.Refused.Error()
+	msg := e.detail
+	if msg == "" {
+		msg = e.Refused.Error()
 	}
-	return fmt.Sprintf("%s (bd serve at %s)", e.Refused.Error(), e.Unsup.ServerURL)
+	if e.Unsup == nil || e.Unsup.ServerURL == "" {
+		return msg
+	}
+	return fmt.Sprintf("%s (bd serve at %s)", msg, e.Unsup.ServerURL)
 }
 
 // Unwrap returns both arms, so errors.As reaches *storage.ErrUnsupported and
@@ -51,6 +61,15 @@ func (e *InexpressibleError) Unwrap() []error { return []error{e.Unsup, e.Refuse
 // divergences — a table lookup for an operation it does not encode, a source
 // value of the wrong type — and dressing one of those as an unsupported
 // capability would tell a user to upgrade their server over a client bug.
+//
+// A WRITE ROLE calls this at its own exported method's single defer (never
+// at the raw refuse() call inside a nested encoder helper), so a refusal that
+// a deeper helper already decorated with its own "items[%d]" or "Issue.%s"
+// context arrives here as err's own composite message — preserved in detail
+// — rather than as the bare *encode.RefusedError the ledger row alone would
+// render. This is how a write-side refusal comes to satisfy
+// errors.As(*issueops.ErrUnsupported) exactly as a read-side one already
+// does, without rewriting every encoder that builds one.
 func (s *Store) inexpressible(op string, err error) error {
 	var refused *encode.RefusedError
 	if !errors.As(err, &refused) {
@@ -60,5 +79,9 @@ func (s *Store) inexpressible(op string, err error) error {
 	if !ok {
 		return err
 	}
-	return &InexpressibleError{Unsup: unsup, Refused: refused}
+	detail := err.Error()
+	if detail == refused.Error() {
+		detail = ""
+	}
+	return &InexpressibleError{Unsup: unsup, Refused: refused, detail: detail}
 }

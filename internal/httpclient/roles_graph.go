@@ -55,7 +55,11 @@ type httpCycleDetector struct{ store *Store }
 // edges. This is the same typed, ledger-cited refusal CountEdges' own bound
 // raises below (refuse/encode.RefusedError, not a bare error) — see
 // "L-cycles-tracks" and engdocs/design/http-divergence-ledger.md.
-func (d httpCycleDetector) DetectCycles(ctx context.Context, req issueops.DetectCyclesRequest) (issueops.CycleReport, error) {
+func (d httpCycleDetector) DetectCycles(ctx context.Context, req issueops.DetectCyclesRequest) (result issueops.CycleReport, err error) {
+	// Write-side parity with reads: decorates a bare *encode.RefusedError into
+	// *InexpressibleError so errors.As(err, &unsupported) reaches
+	// *storage.ErrUnsupported, same as inexpressible does for a read role.
+	defer func() { err = d.store.inexpressible("CycleDetector.DetectCycles", err) }()
 	if req.IncludeTracks {
 		return issueops.CycleReport{}, refuse(encode.OpListDependencyCycles, "L-cycles-tracks")
 	}

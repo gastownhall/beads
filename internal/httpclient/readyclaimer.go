@@ -88,7 +88,14 @@ func (e *ClaimRacesLostError) Unwrap() error { return ErrClaimRacesLost }
 // listing uses on BOTH legs, so the claim asks exactly the question `bd ready`
 // shows — an inexpressible member refuses there rather than widening the
 // candidate set here.
-func (r *httpReadyClaimer) ClaimNext(ctx context.Context, req issueops.ClaimNextRequest) (issueops.ClaimNextResult, error) {
+func (r *httpReadyClaimer) ClaimNext(ctx context.Context, req issueops.ClaimNextRequest) (result issueops.ClaimNextResult, err error) {
+	// Write-side parity with reads: decorates a bare *encode.RefusedError —
+	// whichever leg raised it, serveClaimNext's encode.ClaimNextParams or
+	// composeClaimNext's encode.ReadyParams — into *InexpressibleError so
+	// errors.As(err, &unsupported) reaches *storage.ErrUnsupported, same as
+	// inexpressible does for a read role. Both legs return directly from this
+	// method's own return statements, so one defer here catches both.
+	defer func() { err = r.store.inexpressible("ReadyClaimer.ClaimNext", err) }()
 	// The role's own request rules, taken from the one place every ReadyClaimer
 	// shares them rather than restated here, and run BEFORE the leg is chosen so
 	// both legs refuse the same set. Restating them is how this leg drifted:

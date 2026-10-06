@@ -53,7 +53,13 @@ var _ issueops.Sweeper = (*httpSweeper)(nil)
 // skips the caller never asked for — a narrower answer than the request, which
 // is the same failure class refuse-not-drop exists to stop, in the other
 // direction.
-func (s *httpSweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (issueops.SweepResult, error) {
+func (s *httpSweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (result issueops.SweepResult, err error) {
+	// Decorates ProtectLiveDependents/Limit's bare *encode.RefusedError into the
+	// same *InexpressibleError shape a read refusal gets, so errors.As(err,
+	// &unsupported) reaches *storage.ErrUnsupported here too (write-side parity,
+	// see (*Store).inexpressible's doc). A non-refusal error passes through
+	// unchanged.
+	defer func() { err = s.store.inexpressible("Sweeper.Sweep", err) }()
 	// Refuse-not-drop on the two members this wire has no place for. Both
 	// checks run before the tier is even validated, for the same reason every
 	// other raw refusal here precedes the dial: a caller who asked for a
