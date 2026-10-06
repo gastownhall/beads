@@ -1,6 +1,7 @@
 <!--
-Every PR closes a documented issue (file it first or alongside; no approval
-needed). The issue carries the motivation, impact, and risk. See
+Link an issue when there is one (`Closes #123`); it is recommended for
+user-visible bugs and changes worth discussing, and optional for small,
+self-explanatory fixes. Either way, say why the change is needed below. See
 CONTRIBUTING.md#issues-and-pull-requests.
 -->
 
@@ -17,7 +18,7 @@ Closes #
 
 ## Checklist
 
-- [ ] The linked issue documents the problem (reproduction or motivation, impact, risk).
+- [ ] The why is documented: in a linked issue (reproduction or motivation, impact, risk) or in this description.
 - [ ] Tests and lint selected per `engdocs/TESTING.md` pass locally.
 - [ ] User-facing behavior changes are reflected in `docs/` or the generated CLI reference.
 - [ ] If an invariant or rule changed, the owning `AGENTS.md` is updated.
