@@ -50,7 +50,7 @@ func runTodoAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 		Status:      types.StatusOpen,
 		Assignee:    getActorWithGit(),
 		Owner:       getOwner(),
-		CreatedBy:   getActorWithGit(),
+		CreatedBy:   creationActorStamp(),
 	}
 
 	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*types.Issue, string, error) {
