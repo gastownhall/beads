@@ -117,13 +117,12 @@ func init() {
 // loudly instead of wiring a narrower answer, which is why these three remain
 // unwired rather than run-and-skipped.
 //
-// No slice currently scoped (S0-S13 in beads-design/slices.json) adds a query
-// parameter, spec capability token, or handshake entry for this option; S3's
-// own scope lists CycleDetector only for the base walk. Closing this gap is a
-// new slice — a query parameter plus spec/capability plumbing on both ends —
-// not a missing test line, so the waiver stays until that slice exists rather
-// than naming one of S7/S8/S9/S10/S12/S13, none of which touch cycle
-// detection.
+// No shipped slice adds a query parameter, spec capability token, or
+// handshake entry for this option — see "L-cycles-tracks" in the in-repo
+// divergence ledger, engdocs/design/http-divergence-ledger.md, which records
+// it as a refuse row rather than a wired one. Closing this gap is a new
+// slice — a query parameter plus spec/capability plumbing on both ends — not
+// a missing test line, so the waiver stays until that slice exists.
 const cycleTracksWireGapWaiverReason = "issueops.DetectCyclesRequest.IncludeTracks has no wire plumbing on " +
 	"either side of internal/httpapi or internal/httpclient today (cycles.go always calls DetectCycles with a " +
 	"zero-value request; the client's DetectCycles refuses the request via a typed, ledger-cited error — see " +

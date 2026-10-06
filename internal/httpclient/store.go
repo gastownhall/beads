@@ -10,7 +10,8 @@
 // issues no wire calls: transport and encoding live in sibling packages, and
 // each role accessor here refuses until its role bead wires it.
 //
-// See engdocs/design/http-client-backend.md.
+// See the in-repo divergence ledger, engdocs/design/http-divergence-ledger.md,
+// for every place this client's behavior knowingly differs from local mode.
 package httpclient
 
 import (

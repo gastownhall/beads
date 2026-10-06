@@ -13,11 +13,13 @@ import (
 
 // The divergence ledger, v1.
 //
-// engdocs/design/http-client-backend.md D9 states the discipline this file
-// instantiates: "Every knowingly-degraded behavior is a ledger row with a
-// pinned test... A degradation not in this table is a bug." The prose table
-// lives in the design; this is the machine-readable copy the client actually
-// consults, and it carries three populations rather than one:
+// The original (bd-enterprise-internal) design's decision log, D9, states the
+// discipline this file instantiates: "Every knowingly-degraded behavior is a
+// ledger row with a pinned test... A degradation not in this table is a
+// bug." That design doc is not included in this repository; this is the
+// machine-readable copy the client actually consults, rendered to
+// engdocs/design/http-divergence-ledger.md (see ledger_render.go), and it
+// carries three populations rather than one:
 //
 //   - The D9 rows themselves (L1-L18, with L17 deleted rather than skipped —
 //     see the L-sequence note in designRows), which describe whole behaviors rather
@@ -110,7 +112,10 @@ type Row struct {
 	// Why is the reason the wire cannot carry it, or the reason the
 	// degradation is the right answer.
 	Why string
-	// SpecRow cites the decision in engdocs/design/http-client-backend.md.
+	// SpecRow cites the decision in the original design's decision log (D-rows
+	// and D9 L-row numbers; the log itself is not in this repository — a D9
+	// L-row resolves in-repo to the same L-row in
+	// engdocs/design/http-divergence-ledger.md, generated from this file).
 	SpecRow string
 	// PinnedBy names the test that holds this row honest, or carries a
 	// TODO(<bead>) when the pinning test is another bead's deliverable. It is
@@ -143,7 +148,7 @@ type Row struct {
 // TestEncoderHonorsEveryTableDisposition,
 // TestEncodedParametersRoundTripThroughTheServerDecoder, and friends); this
 // sentinel covers only the rows whose evidence is a layer S2 never touches.
-const pinnedByS3Conformance = "TODO(S3): store/dial-seam and cmd/bd conformance this package's own gates do not reach; see the S2 handoff notes for the full list of rows re-pinned here and engdocs/design/http-client-backend.md D9 for the discipline"
+const pinnedByS3Conformance = "TODO(S3): store/dial-seam and cmd/bd conformance this package's own gates do not reach; see the in-repo divergence ledger, engdocs/design/http-divergence-ledger.md, for the discipline"
 
 // Ledger returns divergence ledger v1, in citation order.
 //

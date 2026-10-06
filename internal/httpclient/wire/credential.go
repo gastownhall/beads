@@ -16,10 +16,10 @@ import (
 // (internal/storage/postgres/credential.go), and it is the difference between a
 // misconfigured token file and an unauthenticated request nobody noticed.
 //
-// The interface is declared here rather than in the store package the design
-// sketches it in (engdocs/design/http-client-backend.md, D5) because this is the
-// only layer that consumes it; the store package aliases it, so there is still
-// one type.
+// The interface is declared here rather than in the store package the
+// original (bd-enterprise-internal) design sketched it in, because this is
+// the only layer that consumes it; the store package aliases it, so there is
+// still one type.
 type CredentialProvider interface {
 	// Authorize adds credentials to req (Authorization: Bearer, DPoP, ...).
 	// A no-auth deployment — the loopback-trust OSS server, which has no token

@@ -682,7 +682,8 @@ func TestEveryWireExcludedWriteMemberCarriesALedgerRow(t *testing.T) {
 				if !ok {
 					t.Errorf("%s.%s reaches no wire member and has no divergence-ledger row.\n"+
 						"Carry it in the %s table, or refuse it with a W- row — a write member this client drops is an edit "+
-						"the caller believes landed. See engdocs/design/http-client-backend.md D8 (refuse-not-drop) and D9 L12.",
+						"the caller believes landed. See the refuse-not-drop rows and L12 in the in-repo divergence ledger, "+
+						"engdocs/design/http-divergence-ledger.md.",
 						shape.source.Name(), name, shape.name)
 					continue
 				}
