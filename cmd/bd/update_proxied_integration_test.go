@@ -291,6 +291,54 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 	})
 
+	// A refused --claim under --json on the proxied path: the batch report is
+	// the only JSON document the command prints, and its failed entry names the
+	// already-claimed class and the holder — the direct route's contract,
+	// pinned by protocol.TestProtocol_ErrorClass_ClaimFailures_StructuredJSON
+	// (wy-kxgf4).
+	t.Run("claim_conflict_json_reports_holder_in_failed_entry", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "uccj")
+		issue := bdProxiedCreate(t, bd, p.dir, "Contested JSON")
+		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--claim", "--actor", "alice")
+
+		stdout, stderr, err := bdProxiedUpdateRaw(t, bd, p.dir, "--json", issue.ID, "--claim", "--actor", "bob")
+		if err == nil {
+			t.Fatalf("proxied --json claim of an issue alice holds exited 0, want non-zero\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+
+		// A JSON document starts at column 0, whether compact or indented, so
+		// count those lines across both streams: one, not one per refusal.
+		docs := 0
+		for _, line := range strings.Split(stdout+"\n"+stderr, "\n") {
+			if strings.HasPrefix(line, "{") {
+				docs++
+			}
+		}
+		if docs != 1 {
+			t.Errorf("output carries %d JSON documents, want exactly 1 (the batch report)\nstdout:\n%s\nstderr:\n%s", docs, stdout, stderr)
+		}
+
+		lines := strings.Split(strings.TrimSpace(stderr), "\n")
+		last := lines[len(lines)-1]
+		var report struct {
+			Error  string `json:"error"`
+			Failed []struct {
+				ID    string `json:"id"`
+				Error string `json:"error"`
+			} `json:"failed"`
+		}
+		if uerr := json.Unmarshal([]byte(last), &report); uerr != nil {
+			t.Fatalf("last stderr line is not a JSON failure report: %v\nstderr:\n%s", uerr, stderr)
+		}
+		if len(report.Failed) != 1 || report.Failed[0].ID != issue.ID {
+			t.Fatalf("JSON failure report failed list = %+v, want exactly one entry for %s", report.Failed, issue.ID)
+		}
+		if msg := report.Failed[0].Error; !strings.Contains(msg, "already claimed") || !strings.Contains(msg, "alice") {
+			t.Errorf("failed entry error = %q, want the already-claimed class naming the holder alice", msg)
+		}
+	})
+
 	t.Run("add_remove_labels", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "ul")

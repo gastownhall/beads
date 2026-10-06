@@ -584,11 +584,6 @@ pointless).`,
 					refusal := errNotesOverwriteRefusal(id)
 					failureText = refusal.Error()
 					fmt.Fprintf(os.Stderr, "%s\n", refusal)
-				} else if claimFlag && jsonOutput && (errors.Is(updateErr, storage.ErrAlreadyClaimed) || errors.Is(updateErr, storage.ErrNotClaimable)) {
-					// §E5 (wy-kxgf4): under --json a lost claim is a JSON
-					// error naming the class and the holder/state, not a
-					// stderr line to scrape. Text mode keeps the line below.
-					reportClaimFailure(id, updateErr)
 				} else {
 					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, updateErr)
 				}
