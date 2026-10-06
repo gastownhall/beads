@@ -1468,8 +1468,10 @@ func sameTagSet(a, b map[string]bool) bool {
 }
 
 // TestBazelIntegrationLaneMatchesMainWorkflow keeps --config=integration in
-// step with main.yml's "Main Linux integration" jobs: the same build tags,
-// race, BEADS_TEST_SKIP=dolt, and none of the variants those jobs do not run.
+// step with the integration-tagged `go test` it replaced on push to main
+// (main.yml's former "Main Linux integration" jobs), whose one remaining Go
+// twin is nightly.yml's Full Test Suite: the same build tags, race,
+// BEADS_TEST_SKIP=dolt, and none of the variants that run does not use.
 // It also requires gazelle to see the same tags (root BUILD.bazel
 // `gazelle:build_tags`): gazelle drops a file whose build constraint names a
 // tag it does not know, so without it no BUILD file would list the integration
@@ -1478,17 +1480,21 @@ func sameTagSet(a, b map[string]bool) bool {
 // through `make bazel-sync`, whose staleness bazel.yml already fails on.
 func TestBazelIntegrationLaneMatchesMainWorkflow(t *testing.T) {
 	root := bazelPolicyRoot(t)
-	mainYML := readPolicyFile(t, root, ".github/workflows/main.yml")
-	jobTags := regexp.MustCompile(`-race -tags=(\S+) -timeout=30m`).FindAllStringSubmatch(mainYML, -1)
-	if len(jobTags) != 2 {
-		t.Fatalf("main.yml: want the two integration jobs' `go test -race -tags=... -timeout=30m`, found %d", len(jobTags))
+	nightly := readCIWorkflow(t, "nightly.yml").job(t, "full-test")
+	var want map[string]bool
+	for _, step := range nightly.Steps {
+		if m := regexp.MustCompile(`go test .*-race -tags=(\S+) .*-timeout=30m \./\.\.\.`).FindStringSubmatch(step.Run); m != nil {
+			if want != nil {
+				t.Fatalf("nightly.yml full-test: more than one integration `go test -race -tags=...` step")
+			}
+			want = tagSet(m[1])
+			if step.Env["BEADS_TEST_SKIP"] != "dolt" {
+				t.Fatal("nightly.yml full-test no longer runs with BEADS_TEST_SKIP=dolt; update test:integration")
+			}
+		}
 	}
-	want := tagSet(jobTags[0][1])
-	if !want["integration"] || !sameTagSet(want, tagSet(jobTags[1][1])) {
-		t.Fatalf("main.yml integration jobs' tags differ or lack integration: %q, %q", jobTags[0][1], jobTags[1][1])
-	}
-	if strings.Count(mainYML, "env BEADS_TEST_SKIP=dolt gotestsum") < 2 {
-		t.Fatal("main.yml integration jobs no longer run with BEADS_TEST_SKIP=dolt; update test:integration")
+	if !want["integration"] {
+		t.Fatalf("nightly.yml full-test: want one `go test -race -tags=...integration... -timeout=30m ./...` step, got tags %v", want)
 	}
 
 	bazelrc := readPolicyFile(t, root, ".bazelrc")
@@ -1502,7 +1508,7 @@ func TestBazelIntegrationLaneMatchesMainWorkflow(t *testing.T) {
 		}
 	}
 	if !sameTagSet(laneTags, want) {
-		t.Errorf(".bazelrc build:integration tags = %v, want main.yml's %v", laneTags, want)
+		t.Errorf(".bazelrc build:integration tags = %v, want nightly.yml full-test's %v", laneTags, want)
 	}
 	if err := checkBazelrcIntegrationLane(bazelrc); err != nil {
 		t.Error(err)
