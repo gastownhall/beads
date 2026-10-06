@@ -1,11 +1,16 @@
 package metrics
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/storage/filelock"
 )
 
 // The stateful half of the spawn gate (bd-p6o3y): a detached send-metrics
@@ -220,5 +225,188 @@ func TestTouchFlushMarkerCreatesThenBumps(t *testing.T) {
 func TestFlusherMarkerInertToFileFlusher(t *testing.T) {
 	if filepath.Ext(flushMarkerName) == queuedEventExt {
 		t.Fatalf("flushMarkerName %q must not use the queued-event extension %q", flushMarkerName, queuedEventExt)
+	}
+}
+
+// TestClaimFlushExactlyOneWinnerUnderConcurrency is the Factor A regression:
+// concurrent bd invocations racing MaybeSpawnFlusher's spawn decision must
+// produce exactly one winner, not one spawn attempt per invocation. claimFlush
+// is the extracted double-checked-lock decision (TryLock -> re-check the
+// marker under the lock -> touchFlushMarker -> Unlock); this drives it
+// directly with real goroutines, each opening its own fslock fd on the shared
+// dir, so the contention is genuine OS-level flock contention rather than a
+// mocked stand-in (each fslock.New opens its own fd even within one process).
+func TestClaimFlushExactlyOneWinnerUnderConcurrency(t *testing.T) {
+	dir := t.TempDir()
+	writeQueuedEvent(t, dir)
+	now := time.Now()
+
+	const n = 50
+	var wins int32
+	var wg sync.WaitGroup
+	wg.Add(n)
+	start := time.Now()
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			if claimFlush(dir, now) {
+				atomic.AddInt32(&wins, 1)
+			}
+		}()
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+
+	if wins != 1 {
+		t.Fatalf("claimFlush winners = %d across %d goroutines, want exactly 1", wins, n)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("claimFlush race took %v, want well under 2s (lock contention must resolve fast, not block)", elapsed)
+	}
+
+	// The marker must exist: only the winner stamps it. Deliberately NOT
+	// compared against `now` -- on a fresh t.TempDir the marker does not exist
+	// yet, so touchFlushMarker takes its os.WriteFile fallback and the mtime
+	// comes from the kernel's COARSE clock, which lags time.Now(). A
+	// ModTime().Before(now) assertion reds on that lag alone (reproduced at
+	// 4/30 runs here, every observed mtime landing on the same sub-millisecond
+	// tick), and production is immune to the same skew by design -- flusherDue
+	// tolerates negative ages down to -flushInterval. Freshness is already
+	// implied by wins == 1 above: every loser reached its decision through the
+	// same marker, so a stale stamp would have let a second goroutine win.
+	if _, err := os.Stat(filepath.Join(dir, flushMarkerName)); err != nil {
+		t.Fatalf("winner did not touch the flush marker: %v", err)
+	}
+}
+
+// TestClaimFlushWinnerDoesNotRescanTheQueue pins the narrowed under-lock
+// re-check: a winning claim asks only the marker question again (markerFresh),
+// never the queue question MaybeSpawnFlusher's unlocked flusherDue pre-check
+// has already answered. Re-asking it under the lock is the double scan —
+// ~250ms per scan on a backed-up spool, paid in an interactive invocation's
+// exit tail — that claimFlush's doc describes removing, and no other test
+// would notice it coming back, because the claim's outcome is the same either
+// way. The scanQueue seam is stubbed so any scan attempt fails the test
+// outright, the same idiom as TestFlusherDueFreshMarkerSkipsQueueScan.
+func TestClaimFlushWinnerDoesNotRescanTheQueue(t *testing.T) {
+	dir := t.TempDir()
+	writeQueuedEvent(t, dir)
+
+	orig := scanQueue
+	scanQueue = func(string, time.Time) bool {
+		t.Error("claimFlush scanned the queue under the lock; the caller's flusherDue pre-check already did")
+		return true
+	}
+	defer func() { scanQueue = orig }()
+
+	if !claimFlush(dir, time.Now()) {
+		t.Fatal("claimFlush() = false with no marker and no other holder, want true")
+	}
+}
+
+// TestClaimFlushLoserLeavesMarkerUntouched pins the other branch of the claim
+// decision: a caller that cannot take the lock must report "not claimed" and
+// must leave the throttle marker completely alone.
+//
+// Only a lock holder may stamp the marker. Stamping on the TryLock-failure path
+// looks tempting — a live holder is evidence a flush is already underway, so a
+// successor could skip the ~250ms in-band queue scan — but it defeats the
+// under-lock re-check that makes claimFlush a correct double-checked lock: the
+// re-check can no longer tell a real claim from a loser's scribble. Measured
+// with losers stamping, a loser's stamp beats the winner's re-check and the
+// winner returns false too, so NOTHING spawns and the leftover marker suppresses
+// spawns for a full flushInterval. This test fails if that is ever reintroduced:
+// flusherDue must still report due, because no claim actually happened.
+func TestClaimFlushLoserLeavesMarkerUntouched(t *testing.T) {
+	dir := t.TempDir()
+	writeQueuedEvent(t, dir)
+	now := time.Now()
+
+	// A separate holder stands in for the sibling bd invocation, or the
+	// detached child's prune/flush, that already owns the lock.
+	defer holdLock(t, dir)()
+
+	if claimFlush(dir, now) {
+		t.Error("claimFlush() = true while another holder owns the lock, want false")
+	}
+	if _, err := os.Stat(filepath.Join(dir, flushMarkerName)); !os.IsNotExist(err) {
+		t.Errorf("a losing claimFlush stamped the throttle marker (stat err = %v); only the lock holder may stamp it", err)
+	}
+	if !flusherDue(dir, now) {
+		t.Error("flusherDue() = false after a losing claimFlush: a failed claim must not engage the throttle")
+	}
+}
+
+// TestClaimFlushDegradesWhenLockingIsUnavailable is the other half of the
+// claim's error classification, and the opposite-polarity twin of the loser
+// test above: contention means "someone else won", but a lock error that is
+// NOT contention means locking does not work here at all, and answering "lost
+// the race" to that suppresses the spawn — and with it the prune child, the
+// only caller of PruneQueue — permanently and silently on such a host. It also
+// leaves the marker unstamped forever, so every bd invocation re-pays the full
+// in-band queue scan. The classification degrades that case to the pre-lock
+// behavior instead: stamp best-effort and claim.
+//
+// The failure is injected with a real one rather than a stub: a directory
+// where the lock file belongs, which fslock cannot open (O_CREATE|O_RDWR; on
+// Windows NtCreateFile with FILE_NON_DIRECTORY_FILE). That stands in for the
+// ENOLCK/EOPNOTSUPP class an NFS home without lockd, a 9p/drvfs $HOME or some
+// FUSE mounts return, and unlike a stub it proves the real wrapper reports
+// that class as something other than contention.
+func TestClaimFlushDegradesWhenLockingIsUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	writeQueuedEvent(t, dir)
+	now := time.Now()
+
+	if err := os.Mkdir(filepath.Join(dir, lockFilename), 0o700); err != nil {
+		t.Fatalf("mkdir over the lock path: %v", err)
+	}
+
+	// Fixture guard: the injected error must really be a locking failure. If
+	// it were contention (or no error at all) the assertions below would be
+	// exercising the wrong branch and would pass for the wrong reason.
+	probe, err := filelock.New(filepath.Join(dir, lockFilename))
+	if err != nil {
+		t.Fatalf("fixture: filelock.New over a directory lock path: %v", err)
+	}
+	probeErr := probe.TryLock()
+	if probeErr == nil {
+		_ = probe.Unlock()
+	}
+	_ = probe.Close()
+	if probeErr == nil {
+		t.Fatal("fixture: TryLock succeeded on a directory lock path, so this test no longer injects a locking failure")
+	}
+	if errors.Is(probeErr, filelock.ErrLocked) {
+		t.Fatalf("fixture: injected error is contention (%v), not a locking failure", probeErr)
+	}
+
+	if !claimFlush(dir, now) {
+		t.Fatalf("claimFlush() = false where locking is unavailable (%v), want true: a broken lock must not suppress the spawn — and with it the prune — forever", probeErr)
+	}
+	if _, err := os.Stat(filepath.Join(dir, flushMarkerName)); err != nil {
+		t.Fatalf("degraded claim did not stamp the throttle marker (%v): unstamped, every bd invocation re-pays the full queue scan", err)
+	}
+	if flusherDue(dir, now) {
+		t.Error("flusherDue() = true right after a degraded claim: the throttle must still engage when locking is unavailable, or the spawn rate is unbounded")
+	}
+}
+
+// TestClaimFlushDegradesWhenTheLockCannotBeConstructed covers the same
+// classification one step earlier, at filelock.New rather than TryLock: New
+// opens the lock file's parent directory, so it fails on a host where that
+// open fails for any reason. MaybeSpawnFlusher's flusherDue pre-check means
+// production reaches claimFlush only with a readable queue dir, so this drives
+// claimFlush directly; the point is that neither error site may answer "lost
+// the race".
+func TestClaimFlushDegradesWhenTheLockCannotBeConstructed(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "never-created")
+
+	if _, err := filelock.New(filepath.Join(dir, lockFilename)); err == nil {
+		t.Fatal("fixture: filelock.New succeeded on a missing directory, so this test no longer exercises the New-failure branch")
+	}
+
+	if !claimFlush(dir, time.Now()) {
+		t.Fatal("claimFlush() = false when the lock could not be constructed, want true (the pre-lock behavior)")
 	}
 }

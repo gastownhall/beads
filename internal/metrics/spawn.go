@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/execenv"
+	"github.com/steveyegge/beads/internal/storage/filelock"
 )
 
 const SendMetricsSubcommand = "send-metrics"
@@ -76,13 +78,25 @@ const flushMarkerName = ".last-flush"
 // the caller sampled now just before the marker was written) and stay
 // throttled.
 func flusherDue(dir string, now time.Time) bool {
-	if fi, err := os.Stat(filepath.Join(dir, flushMarkerName)); err == nil {
-		age := now.Sub(fi.ModTime())
-		if age < flushInterval && age > -flushInterval {
-			return false
-		}
+	if markerFresh(dir, now) {
+		return false
 	}
 	return scanQueue(dir, now)
+}
+
+// markerFresh reports whether the throttle marker says this interval has
+// already been claimed. It is the cheap half of flusherDue (one stat, never a
+// queue scan), split out so claimFlush's under-lock re-check can ask the
+// marker question without re-paying the scan the unlocked pre-check already
+// paid. Both callers must agree on the skew tolerance, so there is exactly one
+// implementation of it.
+func markerFresh(dir string, now time.Time) bool {
+	fi, err := os.Stat(filepath.Join(dir, flushMarkerName))
+	if err != nil {
+		return false
+	}
+	age := now.Sub(fi.ModTime())
+	return age < flushInterval && age > -flushInterval
 }
 
 // scanQueue is hasQueuedEvents behind a seam so tests can assert the
@@ -163,6 +177,99 @@ func touchFlushMarker(dir string) {
 	_ = os.WriteFile(path, nil, 0o600)
 }
 
+// claimFlush is the locked half of the spawn decision (Factor A): concurrent
+// bd invocations all seeing flusherDue's unlocked pre-check pass must still
+// produce exactly one spawn, not one per invocation. TryLock is non-blocking,
+// so a caller that loses the race returns false immediately instead of
+// queueing behind the winner; a caller that does acquire the lock re-checks the
+// marker, since another caller may have already claimed the interval between
+// the unlocked pre-check and this call. Only the winner touches the marker, and
+// the lock is released before returning — well before the detached child is
+// spawned, so the lock is never held across the child's lifetime.
+//
+// The re-check is markerFresh, NOT the full flusherDue: the queue question was
+// already answered by the caller's pre-check, and re-asking it here made the
+// winner scan the queue twice per claim — unconditionally, ~250ms per scan on
+// the backed-up spool flusherDue's marker-first ordering exists for, paid in an
+// interactive invocation's exit tail. The narrowed re-check does mean a claim
+// still succeeds if the queue drained between the pre-check and here; that
+// costs one no-op child (the pre-PR behavior for every invocation), and a
+// drainer would have stamped the marker at its own claim anyway — on every
+// host, including one where locking is unavailable, because the degraded path
+// below still stamps.
+//
+// Only filelock.ErrLocked means "someone else won". Every other error means
+// locking does not work on this host at all — fslock returns the raw
+// open(2)/flock(2) failure, e.g. ENOLCK/EOPNOTSUPP on an NFS home without
+// lockd, a 9p/drvfs $HOME (WSL /mnt/c), some FUSE mounts — and reading that as
+// a lost race is permanent, total and silent: no caller ever wins, so no child
+// ever spawns, and that child is the only thing that runs PruneQueue, so the
+// unbounded-queue bound this package exists for (bd-ulfod: 149k files / 1.1GB)
+// is gone. The marker is never stamped by anyone either, so every bd
+// invocation also re-pays the full in-band scan the marker-first ordering
+// exists to avoid. Nothing is logged from an interactive exit tail, so the
+// operator would see only a slow bd. Such an error therefore degrades to the
+// pre-lock path — stamp best-effort and claim — which is what this function
+// replaced (MaybeSpawnFlusher called touchFlushMarker unconditionally), so a
+// host that cannot flock keeps the old always-spawn/always-throttle behavior.
+//
+// Rescuing the spawn is only half of that, and the half above is the reason
+// for the other: the child this admits reaches pruneUnderLock, which meets the
+// SAME error on the same host. It degrades the same way (flusher.go), so the
+// prune this paragraph argues from really does run there — unlocked, as at
+// base. The two degrades are one decision and have to be read together;
+// either one alone leaves the bound lost on this host class.
+//
+// Deliberately NOT done here: stamping the marker on the CONTENDED path
+// (filelock.ErrLocked) to spare a losing caller's successor the in-band queue
+// scan. Only a lock holder may write the marker, or the under-lock re-check
+// above — the thing that makes this a correct double-checked lock — stops being
+// able to tell "a real claim happened" from "a loser scribbled". Measured: with
+// losers stamping, a loser's stamp races ahead of the winner's re-check and the
+// winner returns false too, so *nobody* spawns and the marker it left behind
+// suppresses the next flushInterval (observed as wins == 0 in
+// TestClaimFlushExactlyOneWinnerUnderConcurrency). That trades a bounded
+// rescan cost for the suppression bug this package exists to avoid.
+// TestClaimFlushLoserLeavesMarkerUntouched pins the decision.
+//
+// The degraded stamp above is also written without the lock, and the two are
+// not the same trade: an ErrLocked loser has PROOF a winner exists and will
+// stamp under the lock, so stamping there only races that winner; a locking
+// failure implies no winner at all. Its residual is bounded — if the failure is
+// per-process and transient (EMFILE, say) while a real winner is mid-claim, the
+// unlocked stamp can make that winner's re-check return false and cost one
+// flushInterval's spawn, which the next interval heals — against the permanent
+// loss it replaces, and never on the common contended path.
+func claimFlush(dir string, now time.Time) bool {
+	lock, err := filelock.New(filepath.Join(dir, lockFilename))
+	if err != nil {
+		return claimWithoutLock(dir)
+	}
+	defer func() { _ = lock.Close() }()
+	if err := lock.TryLock(); err != nil {
+		if errors.Is(err, filelock.ErrLocked) {
+			return false
+		}
+		return claimWithoutLock(dir)
+	}
+	defer func() { _ = lock.Unlock() }()
+	if markerFresh(dir, now) {
+		return false
+	}
+	touchFlushMarker(dir)
+	return true
+}
+
+// claimWithoutLock is claimFlush's degraded path for a host where the lock
+// itself is unavailable (see claimFlush): behave exactly as the pre-lock code
+// did — stamp the throttle marker best-effort and admit the spawn — rather
+// than letting a broken lock suppress the child, the prune and the throttle
+// together.
+func claimWithoutLock(dir string) bool {
+	touchFlushMarker(dir)
+	return true
+}
+
 func MaybeSpawnFlusher() {
 	if !shouldSpawnFlusher() {
 		return
@@ -174,7 +281,9 @@ func MaybeSpawnFlusher() {
 	if !flusherDue(dir, time.Now()) {
 		return
 	}
-	touchFlushMarker(dir)
+	if !claimFlush(dir, time.Now()) {
+		return
+	}
 	self, err := os.Executable()
 	if err != nil {
 		return

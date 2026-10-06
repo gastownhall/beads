@@ -15,6 +15,7 @@ go_library(
     deps = [
         "//internal/config",
         "//internal/execenv",
+        "//internal/storage/filelock",
         "@com_github_dolthub_eventkit//:eventkit",
         "@com_github_dolthub_eventkit//transport/ga4",
         "@in_gopkg_yaml_v3//:yaml_v3",
@@ -24,6 +25,7 @@ go_library(
 go_test(
     name = "metrics_test",
     srcs = [
+        "flusher_test.go",
         "machineid_test.go",
         "metrics_test.go",
         "prune_test.go",
@@ -34,7 +36,9 @@ go_test(
     ],
     embed = [":metrics"],
     deps = [
+        "//internal/storage/filelock",
         "//internal/testutil/bazeltest",
+        "@com_github_dolthub_eventkit//:eventkit",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
