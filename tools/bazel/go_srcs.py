@@ -34,6 +34,7 @@ import sys
 
 # Packages whose own Go source a test scans.
 PACKAGES = (
+    ".",  # //cmd/bd:bd_test (events-journal construction scan: the Go SDK opens)
     "backend",  # //backend:backend_test (public alias census)
     "backend/conformance",  # //backend/conformance, //internal/storage
     "beadserrors",  # role facade alias targets
