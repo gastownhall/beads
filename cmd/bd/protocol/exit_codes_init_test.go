@@ -13,10 +13,12 @@
 // spelling still has to exit 10 when it refuses a divergent init. New stable
 // codes require a spec revision.
 //
-// The refusal codes (10/11/12) are cheap to drive: `bd init` refuses before it
+// The refusal codes 10 and 12 are cheap to drive: `bd init` refuses before it
 // opens any store, so those tests need only a built binary and a temp git repo.
-// 130 is the exception — cancellation is only reachable on the success path, so
-// that test pays a full store creation before the prompt it interrupts.
+// 11 and 130 each pay for a full store before the prompt they exercise: 11's
+// typed confirmation fires only once --reinit-local has counted the issues in a
+// seeded workspace, and 130's cancellation is only reachable on the success
+// path, after the store is created.
 package protocol
 
 import (
@@ -254,7 +256,15 @@ func TestProtocol_ExitCode11_LocalExistsRefused(t *testing.T) {
 	case <-time.After(promptDeadline):
 		_ = cmd.Process.Kill()
 		<-waitCh
-		t.Fatalf("timed out waiting for the destroy-confirmation prompt\n%s", got())
+		out := got()
+		if !strings.Contains(out, "Re-initializing will destroy") {
+			// runInitReinitPreflight skips the confirmation, without a warning,
+			// when countExistingIssues errors (it has its own 5s timeout) or
+			// counts zero. The reinit then goes on and blocks at init's next
+			// TTY prompt (e.g. "Change role? [y/N]:"), which lands here.
+			t.Fatalf("timed out waiting for the destroy-confirmation prompt: the reinit preflight never warned, so it skipped the confirmation (its issue count failed, e.g. the 5s store timeout lapsed, or found none)\n%s", out)
+		}
+		t.Fatalf("timed out waiting for the destroy-confirmation prompt\n%s", out)
 	}
 
 	// Answer with text that is NOT "destroy N issues": the typed-confirmation
