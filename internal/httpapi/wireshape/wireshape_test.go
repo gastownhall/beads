@@ -359,6 +359,36 @@ func TestEnumWideningAdditivity(t *testing.T) {
 			t.Fatalf("Changed = %v, want exactly one entry", cmp.Changed)
 		}
 	})
+
+	t.Run("going from no enum at all to a fixed enum on a request-only entry is not additive", func(t *testing.T) {
+		// Pinning case for review finding: widensAdditively required
+		// len(new.Enum) > len(old.Enum), which holds vacuously when the old
+		// side has no enum (a free string). That let a request-only member
+		// go from unconstrained to a fixed set at the same wire_revision —
+		// the opposite of widening, since the server now 400s a value an
+		// old client could send yesterday.
+		noEnumBase := wireshape.Digest{
+			WireRevision: 2,
+			Entries: []wireshape.Entry{
+				{Schema: "SweepRequest", Member: "tier", Type: "string", Required: true},
+			},
+			Sides: map[string]string{"SweepRequest": "request"},
+		}
+		cmp := wireshape.Compare(noEnumBase, requestWidened)
+		if len(cmp.Widened) != 0 {
+			t.Fatalf("Widened = %v, want none (no enum before is a new restriction, not a widening)", cmp.Widened)
+		}
+		if len(cmp.Changed) != 1 {
+			t.Fatalf("Changed = %v, want exactly one entry", cmp.Changed)
+		}
+		if ok, _ := wireshape.SafeToWrite(noEnumBase, requestWidened); ok {
+			t.Fatal("no-enum-to-enum tightening at the same revision was allowed")
+		}
+		bumped := wireshape.Digest{WireRevision: 3, Entries: requestWidened.Entries, Sides: requestWidened.Sides}
+		if ok, reason := wireshape.SafeToWrite(noEnumBase, bumped); !ok {
+			t.Fatalf("no-enum-to-enum tightening with a bumped revision refused: %s", reason)
+		}
+	})
 }
 
 // TestParameterMutationsAreCaught is the falsification for how Compare and

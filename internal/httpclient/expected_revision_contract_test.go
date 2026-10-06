@@ -16,7 +16,8 @@ import (
 // phase ships one — is in exactly the same all-nil state every other leg
 // already is. Said honestly: these ten entrypoints are COUNTED here, the
 // hook is UNBUILT ON EVERY LEG (not just this one), and every case below
-// runs ZERO assertions as a result — this file exists so
+// SKIPS as a result (each Run* helper calls t.Skip when
+// CompareAndSetVersion is nil) — this file exists so
 // TestEveryLegWiresEveryRoleContract counts the http leg for these ten
 // entrypoints, and so the cases start running for real the moment a
 // CompareAndSetVersion wire operation exists for this client to bind here.

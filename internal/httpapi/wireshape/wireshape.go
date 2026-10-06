@@ -182,7 +182,11 @@ func Compare(want, got Digest) CompareResult {
 // ordinary non-additive Changed path, as does the identical widening on a
 // "response" or "both" (or unknown/param, "") side, where an existing client
 // decoding a response must still recognize every value the server might
-// send.
+// send. An old side with NO enum at all (a free-form string) is the limit
+// case of a narrowing — going from unconstrained to any fixed set is a new
+// restriction the server did not enforce before, not a widening — so it is
+// excluded too: len(old.Enum) == 0 falls through to Changed just like a
+// strict narrowing does.
 func widensAdditively(old, new Entry, oldSide, newSide string) bool { //nolint:revive // "new" reads clearest paired with "old" here
 	if oldSide != sideRequest || newSide != sideRequest {
 		return false
@@ -192,7 +196,7 @@ func widensAdditively(old, new Entry, oldSide, newSide string) bool { //nolint:r
 	if !reflect.DeepEqual(oldNoEnum, newNoEnum) {
 		return false
 	}
-	if len(new.Enum) <= len(old.Enum) {
+	if len(old.Enum) == 0 || len(new.Enum) <= len(old.Enum) {
 		return false
 	}
 	newSet := make(map[string]bool, len(new.Enum))
