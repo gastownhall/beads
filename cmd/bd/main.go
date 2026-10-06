@@ -30,6 +30,7 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/hooks"
+	"github.com/steveyegge/beads/internal/httpclient"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/molecules"
@@ -2757,6 +2758,28 @@ func validateWorkspaceIdentity(ctx context.Context, s storage.DoltStorage, beads
 		return nil // No config, skip validation (fresh init)
 	}
 	configProjectID := cfg.ProjectID
+	if cfg.GetBackend() == httpclient.Backend {
+		// The http backend's identity pin lives in the per-user, gitignored
+		// sidecar, not in metadata.json: `bd connect` (MED-6) stopped
+		// mirroring project_id into the git-tracked config, so cfg.ProjectID
+		// here is whatever the workspace carried BEFORE connect — generally
+		// a different project's id than the server `bd connect --force`
+		// just pointed it at. Comparing that stale value against the live
+		// database's _project_id below would flag every write as drift.
+		// Read the sidecar instead, exactly as applyContextBackend
+		// (context_cmd.go) does for `bd context`. A missing sidecar
+		// (ErrNotConnected) or any other read failure falls through to the
+		// "no project_id" skip just below, the same as a pre-identity
+		// workspace — the wire handshake's own ExpectProjectID gate (design
+		// D6) is what actually refuses a mismatched server at dial time;
+		// this check only needs to avoid a FALSE mismatch once that gate has
+		// already passed.
+		target, err := httpclient.LoadTarget(beadsDir)
+		if err != nil {
+			return nil
+		}
+		configProjectID = target.ExpectProjectID
+	}
 	if configProjectID == "" {
 		return nil // No project_id in config (pre-identity era)
 	}

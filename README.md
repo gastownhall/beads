@@ -185,7 +185,9 @@ for embedding beads in another program as a library.
 # Point this workspace at a server (verifies the server first; writes nothing on failure)
 bd connect https://bd.example.com --expect-project-id my-project
 
-# Everything else works exactly as with a local database
+# The everyday commands work the same way: create, read, update, close,
+# dependencies, comments, ready/count queries, and batch apply all round-trip
+# over the wire with the same semantics as a local database.
 bd create "Fix auth bug" -p 1 -t bug
 bd ready --json
 bd close bd-a1b2 "Fixed"
@@ -193,9 +195,19 @@ bd close bd-a1b2 "Fixed"
 # Loopback needs no TLS
 bd connect http://127.0.0.1:8080
 
-# Forget the server (metadata.json's backend selection is untouched)
+# Forget the server and restore this workspace's previous backend selection
 bd connect --clear
 ```
+
+HTTP mode is not a byte-for-byte mirror of local mode, though: some
+operations are knowingly refused (the wire has no way to express them) or
+degrade to a different-but-not-misreadable behavior (for example, a few
+unbounded listing shapes lose single-query snapshot isolation and instead
+walk the server page by page). Every one of these is a deliberate, tested
+row, never a silent gap — see
+[`engdocs/design/http-divergence-ledger.md`](engdocs/design/http-divergence-ledger.md)
+for the full, generated list of what differs and why before depending on an
+HTTP-backed workspace for a workflow you haven't checked against it.
 
 `bd connect` writes two things on success: `.beads/metadata.json` gets
 `"backend": "http"`, and a per-user, never-git-tracked sidecar

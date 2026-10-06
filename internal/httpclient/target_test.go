@@ -193,3 +193,64 @@ func TestLoadTargetAcceptsAbsoluteCAFile(t *testing.T) {
 		t.Errorf("CAFile = %q, want %q", got.CAFile, abs)
 	}
 }
+
+// TestSaveTargetRoundTripsPreviousBackendAndAllowInsecureCredential pins the
+// bee-ghosttrack CHANGES_REQUESTED findings on #7288 (should-fix 1 and 2):
+// `bd connect --clear` needs PreviousBackend back to restore metadata.json's
+// backend selection, and an ordinary command's dial needs
+// AllowInsecureCredential back to honor a plaintext grant made at connect
+// time. Neither is useful if the sidecar does not actually carry it through
+// a save/load round trip.
+func TestSaveTargetRoundTripsPreviousBackendAndAllowInsecureCredential(t *testing.T) {
+	dir := t.TempDir()
+	target := Target{
+		BaseURL:                 mustParseURL(t, "http://127.0.0.1:8080"),
+		PreviousBackend:         "dolt",
+		AllowInsecureCredential: true,
+	}
+	if err := SaveTarget(dir, target); err != nil {
+		t.Fatalf("SaveTarget: %v", err)
+	}
+	got, err := LoadTarget(dir)
+	if err != nil {
+		t.Fatalf("LoadTarget: %v", err)
+	}
+	if got.PreviousBackend != "dolt" {
+		t.Errorf("PreviousBackend = %q, want %q", got.PreviousBackend, "dolt")
+	}
+	if !got.AllowInsecureCredential {
+		t.Error("AllowInsecureCredential = false after a round trip, want true")
+	}
+
+	raw, err := os.ReadFile(TargetPath(dir))
+	if err != nil {
+		t.Fatalf("reading sidecar: %v", err)
+	}
+	if !strings.Contains(string(raw), `"previous_backend": "dolt"`) {
+		t.Errorf("sidecar does not carry previous_backend: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"allow_plaintext": true`) {
+		t.Errorf("sidecar does not carry allow_plaintext: %s", raw)
+	}
+}
+
+// TestSaveTargetOmitsPreviousBackendAndAllowInsecureCredentialWhenUnset keeps
+// the common case's sidecar exactly as small as before this fix: a workspace
+// with nothing to restore and no plaintext grant must not gain two new
+// always-present keys.
+func TestSaveTargetOmitsPreviousBackendAndAllowInsecureCredentialWhenUnset(t *testing.T) {
+	dir := t.TempDir()
+	if err := SaveTarget(dir, testTarget(t)); err != nil {
+		t.Fatalf("SaveTarget: %v", err)
+	}
+	raw, err := os.ReadFile(TargetPath(dir))
+	if err != nil {
+		t.Fatalf("reading sidecar: %v", err)
+	}
+	if strings.Contains(string(raw), "previous_backend") {
+		t.Errorf("sidecar carries previous_backend with nothing to restore: %s", raw)
+	}
+	if strings.Contains(string(raw), "allow_plaintext") {
+		t.Errorf("sidecar carries allow_plaintext with no grant: %s", raw)
+	}
+}

@@ -40,8 +40,12 @@ func allowInsecureCredentialFromEnv() bool {
 
 // guardInsecureCredential wraps creds so that, once bound for a plain-http,
 // non-loopback target, it refuses to let ANY credential header it adds reach
-// the wire — unless allowed (DialOptions.AllowInsecureCredential, which
-// connect.go sets from --allow-plaintext) or BEADS_HTTP_ALLOW_INSECURE=1.
+// the wire — unless allowed, which is true when EITHER opts.AllowInsecureCredential
+// (DialOptions, which connect.go's own Handshake probe sets from
+// --allow-plaintext before any sidecar exists) OR target.AllowInsecureCredential
+// (the sidecar's persisted record of that same grant, read back on every
+// LATER dial for this workspace — see Target.AllowInsecureCredential's own
+// doc) is true, or BEADS_HTTP_ALLOW_INSECURE=1 is set in the environment.
 //
 // It wraps the resolved wire.CredentialProvider itself, never switching on
 // its concrete type, so the refusal is uniform across the ambient
@@ -89,7 +93,7 @@ func (g *insecureCredentialGuard) Authorize(ctx context.Context, req *http.Reque
 	}
 	if len(req.Header) > before {
 		return fmt.Errorf(
-			"refusing to send a credential to %s over plain http: %s is not loopback, and the credential would cross the network unencrypted; use https://, or set %s=1 to override",
+			"refusing to send a credential to %s over plain http: %s is not loopback, and the credential would cross the network unencrypted; use https://, run `bd connect --allow-plaintext` to accept the risk knowingly for this server, or set %s=1 to override",
 			g.endpoint, req.URL.Hostname(), AllowInsecureCredentialEnv)
 	}
 	return nil
