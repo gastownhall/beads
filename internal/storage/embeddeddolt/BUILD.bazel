@@ -176,6 +176,7 @@ go_test(
         "merge_blockers_test.go",
         "merge_strategy_test.go",
         "metadata_cas_contract_test.go",
+        "migrate_consent_gate_test.go",
         "migrate_dep_rekey_dedup_test.go",
         "migrate_events_flip_test.go",
         "migrate_frozen_guard_convergence_test.go",

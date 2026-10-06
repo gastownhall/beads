@@ -274,14 +274,20 @@ prev_create --title "Another issue" --type bug || true
 # Migration-consent gate: before consenting, an ordinary candidate command on
 # the old-schema database must either work as-is (previous release already
 # ships the candidate's schema — nothing pending) or refuse WITH the consent
-# guidance. A failure without the guidance is a regression.
-GATE_OUT=$(cand list 2>&1) && GATE_RC=0 || GATE_RC=$?
-if [ "$GATE_RC" -eq 0 ]; then
-    pass "Candidate operates database directly (schema already current)"
-elif echo "$GATE_OUT" | grep -q "bd migrate schema"; then
-    pass "Candidate refuses un-migrated database with consent guidance"
+# guidance. A failure without the guidance is a regression. Graded only when
+# the old binary left a database to gate: releases before v1.0 have no
+# `init --non-interactive`, so prev_init creates nothing there.
+if ! embedded_db_exists; then
+    pass "Consent gate check skipped (old binary could not initialize a database)"
 else
-    fail "Candidate failed on old database without consent guidance"
+    GATE_OUT=$(cand list 2>&1) && GATE_RC=0 || GATE_RC=$?
+    if [ "$GATE_RC" -eq 0 ]; then
+        pass "Candidate operates database directly (schema already current)"
+    elif echo "$GATE_OUT" | grep -q "bd migrate schema"; then
+        pass "Candidate refuses un-migrated database with consent guidance"
+    else
+        fail "Candidate failed on old database without consent guidance"
+    fi
 fi
 
 # Upgrade: consent + candidate init (simulates upgrade)

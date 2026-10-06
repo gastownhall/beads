@@ -936,6 +936,7 @@ go_test(
         "metadata_ready_test.go",
         "metadataless_server_workspace_test.go",
         "metrics_test.go",
+        "migrate_consent_test.go",
         "migrate_dolt_mode_frontdoor_integration_test.go",
         "migrate_dolt_mode_test.go",
         "migrate_embedded_test.go",

@@ -118,3 +118,7 @@ database directory, install v1.2.2, then `bd import backup.jsonl`.
 Caveats: issues deleted after the upgrade come back (import cannot
 re-delete), and audit events recorded while on v1.2.1 are lost. Most users
 should prefer the cursor rollback above.
+
+To rebuild a 1.1.2-compatible workspace from a full export instead, keeping
+the migrated original aside, see
+[Un-migrate from Schema v65](/recovery/unmigrate-schema-v65).

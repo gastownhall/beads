@@ -109,8 +109,8 @@ version: sync remote-backed databases with your current `bd`, back up with
 `bd export --all`, upgrade the binary, then run `bd info --whats-new`,
 `bd hooks install`, and `bd version`. If the upgrade crosses a schema
 migration on a remote-backed database, exactly one designated clone runs
-`bd migrate` and `bd dolt push`; other clones install the new binary
-and run `bd bootstrap`. See the full
+`bd migrate schema` and `bd dolt push`; other clones install the new
+binary and run `bd bootstrap`. See the full
 [upgrade guide](https://beads.gascity.com/getting-started/upgrading)
 or [docs/getting-started/installation.md](docs/getting-started/installation.md#updating-bd).
 

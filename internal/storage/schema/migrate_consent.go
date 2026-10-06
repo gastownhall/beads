@@ -20,23 +20,32 @@ import (
 // initiates a schema migration without explicit operator consent.
 //
 // Consent is any of:
-//   - `bd migrate` / `bd migrate schema` (the explicit migration verbs; the
-//     root command records the intent via SetLocalMigrateConsent before the
-//     store opens),
-//   - `bd migrate --force` (the remote-gate override, a strict superset), or
+//   - `bd migrate schema` (the verb that names the migration; the root
+//     command records the intent via SetLocalMigrateConsent before the store
+//     opens — bare `bd migrate` reconciles metadata and does not consent),
+//   - --force on `bd migrate` or `bd migrate schema` (the remote-gate
+//     override, a strict superset), or
 //   - BD_ALLOW_MIGRATE=1 (scripted/CI form; BD_ALLOW_REMOTE_MIGRATE=1 is
 //     honored as an alias for continuity with the remote gate's hatch).
 //
 // Fresh databases (no schema_migrations table, version 0) are exempt: creating
-// a database is consent for its schema. The same creation principle covers a
-// workspace this invocation just CLONED into existence (`bd init --remote`,
-// `bd bootstrap` sync) — those paths record the consent explicitly, and the
-// #4259 remote-migrate gate still applies to them unchanged. Databases already at this binary's
-// latest version never consult the gate. The ignored (clone-local, dolt_ignored)
-// migration sequence is deliberately NOT gated on its own: it only materializes
-// per-clone bookkeeping tables and runs on every fresh clone — but when the
-// MAIN sequence is pending and unconsented, MigrateUp refuses before ANY write,
+// a database is consent for its schema. A server bootstrap holding
+// fresh-bootstrap heal authority keeps that consent across a retry whose
+// interrupted first pass left a non-zero cursor (MigrateUpWithLock). The same
+// creation principle covers a workspace this invocation just CLONED into
+// existence (`bd init --remote`, `bd bootstrap` sync) — those paths record the
+// consent explicitly, and the #4259 remote-migrate gate still applies to them
+// unchanged. Databases already at this binary's latest version never consult
+// the gate. The ignored (clone-local, dolt_ignored) migration sequence is
+// deliberately NOT gated on its own: it only materializes per-clone
+// bookkeeping tables and runs on every fresh clone — but when the MAIN
+// sequence is pending and unconsented, MigrateUp refuses before ANY write,
 // ignored sequence and dolt_ignore seeding included.
+//
+// A refusal fails the open, except for the working-set-reconcile commands
+// (bd dolt commit, bd vc commit), which commit at the current schema without
+// migrating: the refusal comes before the #4566 dirty-table guard, whose
+// documented recovery is that commit (WorkingSetWarning).
 
 // AllowMigrateEnv, when set to a boolean true ("1", "true", ...), consents to
 // applying pending schema migrations to an existing database. It is consulted
@@ -44,14 +53,15 @@ import (
 // not warn on every store open.
 const AllowMigrateEnv = "BD_ALLOW_MIGRATE"
 
-// localMigrateConsent is the programmatic consent recorded by the explicit
-// migration verbs (`bd migrate`, `bd migrate schema`). Process-local by
-// design, like forceAllowRemoteMigrate: it cannot leak into child processes.
+// localMigrateConsent is the programmatic consent recorded by
+// `bd migrate schema` and by the paths that just cloned the database into
+// existence. Process-local by design, like forceAllowRemoteMigrate: it cannot
+// leak into child processes.
 var localMigrateConsent bool
 
 // SetLocalMigrateConsent records (or clears) the in-process consent to apply
 // pending schema migrations to an existing database. Set by the root command
-// when the invoked command is one of the explicit migration verbs, before both
+// when the invoked command is `bd migrate schema`, before both
 // autoMigrateOnVersionBump and the main store open. External test packages may
 // reset it to false after each test case.
 func SetLocalMigrateConsent(v bool) { localMigrateConsent = v }
@@ -70,9 +80,53 @@ type MigrateConsentError struct {
 }
 
 func (e *MigrateConsentError) Error() string {
+	return fmt.Sprintf("%s — run `bd migrate schema`, or keep using a bd release that matches schema v%d",
+		e.Refusal(), e.CurrentVersion)
+}
+
+// Refusal states what was refused without prescribing a remedy, for surfaces
+// that carry the remedy separately and must not hand an agent a runnable
+// migration (cmd/bd's JSON refusal, whose remedies live in Options).
+func (e *MigrateConsentError) Refusal() string {
 	return fmt.Sprintf(
-		"database schema is at v%d; this bd requires v%d (%d pending migration(s)), and bd no longer migrates a database without explicit consent — run `bd migrate schema`, or keep using a bd release that matches schema v%d",
-		e.CurrentVersion, e.LatestVersion, e.Pending, e.CurrentVersion)
+		"database schema is at v%d; this bd requires v%d (%d pending migration(s)), and bd no longer migrates a database without explicit consent",
+		e.CurrentVersion, e.LatestVersion, e.Pending)
+}
+
+// AgentDirective is the non-runnable instruction surfaced to agents in place
+// of a ready-to-run migrate command, following the remote-migrate gate's
+// convention (RemoteMigrateGateError.AgentDirective). Migrating is one-way,
+// and whether anything still has to open this database with an older bd is
+// not observable from this process, so the decision goes to the operator.
+func (e *MigrateConsentError) AgentDirective() string {
+	return fmt.Sprintf(
+		"Operator decision required: this database is at schema v%d and this bd requires v%d. Migrating is ONE-WAY — "+
+			"bd releases built for an older schema refuse the migrated database, and whether one still has to open it "+
+			"is not observable from this process. Do NOT auto-run the migration or set a consent environment variable "+
+			"to get past this refusal: surface migrate_consent.options to the operator and let them choose.",
+		e.CurrentVersion, e.LatestVersion)
+}
+
+// Options returns the two mutually exclusive paths, migrate or keep the
+// current schema, each gated on its precondition and annotated with its risk.
+// The migrate command is reachable only through the operator's decision,
+// never as a top-level hint. Its verb is the shared-store gate's consent verb
+// too, so cmd/bd retargets both with the same --global rewrite.
+func (e *MigrateConsentError) Options() []GateOption {
+	return []GateOption{
+		{
+			ID:       "migrate",
+			When:     "the operator chooses to upgrade this database, and nothing that still opens it runs a bd release built for an older schema (confirmed with the operator)",
+			Commands: []string{SharedConsentCommand},
+			Risk:     fmt.Sprintf("one-way: v%d -> v%d; bd releases built for an older schema refuse the migrated database", e.CurrentVersion, e.LatestVersion),
+		},
+		{
+			ID:       "keep",
+			When:     fmt.Sprintf("something still has to open this database with a bd release built for schema v%d", e.CurrentVersion),
+			Commands: []string{},
+			Risk:     "none to the database; this bd release refuses it until it is migrated, so keep using the release that matches it",
+		},
+	}
 }
 
 // UserMessage renders the full operator-facing refusal.
@@ -94,6 +148,21 @@ func (e *MigrateConsentError) UserMessage() string {
 			AllowMigrateEnv, e.UnrecognizedEnv)
 	}
 	return msg
+}
+
+// WorkingSetWarning renders the stderr warning for a working-set-reconcile
+// open (bd dolt commit, bd vc commit) that continues past this refusal. The
+// commit needs no migration, and MigrateUp refused before any write, so it
+// runs on the current schema; the migration still waits for consent. Both
+// storage modes print it (embeddeddolt's openWorkingSetReconcile, server
+// mode's LenientOpen).
+func (e *MigrateConsentError) WorkingSetWarning() string {
+	return fmt.Sprintf(
+		"Warning: %s.\n"+
+			"  Working-set reconcile command: continuing on schema v%d without\n"+
+			"  migrating; the commit applies to the working set at the current schema.\n"+
+			"  To upgrade this database afterwards (one-way): bd migrate schema\n",
+		e.Refusal(), e.CurrentVersion)
 }
 
 // IsMigrateConsentError reports whether err (or any error it wraps) is a

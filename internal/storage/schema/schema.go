@@ -741,6 +741,14 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	if err := checkMigrateConsent(ctx, db); err != nil {
 		return 0, err
 	}
+	return migrateUpConsented(ctx, db)
+}
+
+// migrateUpConsented is MigrateUp past its consent gate. It exists for the one
+// caller whose consent the gate's version test cannot see: an open holding
+// fresh-bootstrap heal authority, which proves it created the database it is
+// migrating (see MigrateUpWithLock). Every other caller goes through MigrateUp.
+func migrateUpConsented(ctx context.Context, db DBConn) (int, error) {
 	// Re-assert the canonical dolt_ignore patterns before anything else, and
 	// in particular before the migrationWorkNeeded short-circuit: a database
 	// whose migration cursors arrived at-latest without executing the seeding

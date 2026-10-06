@@ -9,22 +9,24 @@ import (
 
 // Migration freeze (Beads 1.2 release remediation).
 //
-// Migrations 0001–0065 (and ignored/ 0001–0024) are SHIPPED: the 1.2.x
-// releases published schema v65 to thousands of installs, so these files are
-// now the de-facto on-disk contract of every migrated database. Amending a
-// shipped migration forks installed schemas from freshly-migrated ones — the
-// exact skew the smart gate's fork-skew detection exists to catch at runtime.
-// This test catches it in CI instead: the content hash of every shipped
-// up-migration is pinned; any change must land as a NEW migration (0066+ /
-// ignored 0025+) and extend this table in the same commit that ships it.
+// Migrations 0001–0066 (and ignored/ 0001–0026) are SHIPPED: the 1.2.x
+// releases published schema v65 to thousands of installs and the 1.3.x
+// releases added 0066 and ignored/ 0025–0026, so these files are now the
+// de-facto on-disk contract of every migrated database. Amending a shipped
+// migration forks installed schemas from freshly-migrated ones — the exact
+// skew the smart gate's fork-skew detection exists to catch at runtime. This
+// test catches it in CI instead: the content hash of every shipped
+// up-migration is pinned; any change must land as a NEW migration, numbered
+// after the newest file in its directory. When a release ships new
+// migrations, raise the floors below and pin their hashes.
 //
 // If this test fails because you edited a shipped migration: revert the edit
 // and write a new migration. There is no legitimate reason to update a pinned
 // hash for an already-released version.
 
 const (
-	frozenMainThrough    = 65
-	frozenIgnoredThrough = 24
+	frozenMainThrough    = 66
+	frozenIgnoredThrough = 26
 )
 
 var frozenMigrationHashes = map[string]string{
@@ -93,6 +95,7 @@ var frozenMigrationHashes = map[string]string{
 	"0063_create_provenance_events.up.sql":                 "1ef173be07ca58d17cb09ba3b3f5ca0c96edfcace8d52ae3adde2fd27e8248bd",
 	"0064_create_events_journal.up.sql":                    "25ea9ad8e849dc7e32e7c5850631bedc63a5c5da3bdc58ccb2762fd7a6c758fc",
 	"0065_widen_wisp_comments_text.up.sql":                 "c7341bb977daff92e073db2579e63058cef88d43f1e09b13fa153a772caac2a6",
+	"0066_add_events_journal_actor.up.sql":                 "a524d42ba0eced9350edbf6402dc2952957ff8f75a896bc8339c4cbc8596c793",
 }
 
 var frozenIgnoredMigrationHashes = map[string]string{
@@ -120,6 +123,8 @@ var frozenIgnoredMigrationHashes = map[string]string{
 	"0022_create_events_journal.up.sql":                   "3d0adcb9f5833b4ba70fb48f88e1043250796feb7173abe000ea4de85eb8b3a5",
 	"0023_repair_events_journal_shape.up.sql":             "d0edd83ca4cfbc46bd17799c6497a70c8c011d130d08a00c71daf792ee1dcd51",
 	"0024_widen_wisp_comments_text.up.sql":                "69a96330e00643dfeddc4bf6ae9bf3b743a3cfddd86f16dc7b8912758b1b570d",
+	"0025_add_events_journal_actor.up.sql":                "c81ca9edc80c25f6ab4f92d05d6ea412a780b108d1ed83745027440e9723dceb",
+	"0026_dep_rekey_dedup_marker.up.sql":                  "dc5c1b9a74e42184451796068ecba1ca11d8ebd0fe7e8c4bd4900d0cfee30446",
 }
 
 func verifyFrozenMigrations(t *testing.T, fsys fs.FS, dir string, frozen map[string]string, frozenThrough int) {

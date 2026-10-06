@@ -368,7 +368,8 @@ func isForcedMigrate(cmd *cobra.Command) bool {
 // schema.SharedConsentCommandForced), so retargeting the bare form would hand
 // the operator a global-scoped command that still cannot succeed. This mirrors
 // the retarget in handleRemoteMigrateGateJSON. A nil error keeps the
-// pre-existing bare-verb wording.
+// pre-existing bare-verb wording, which is also the verb the
+// migration-consent refusal prescribes, so that refusal passes nil.
 func printGlobalDatabaseConsentHint(w io.Writer, e *schema.RemoteMigrateGateError) {
 	if !globalFlag {
 		return
@@ -424,6 +425,7 @@ func renderTypedOpenError(err error) bool {
 			handleMigrateConsentJSON(consentErr)
 		} else {
 			fmt.Fprint(os.Stderr, consentErr.UserMessage())
+			printGlobalDatabaseConsentHint(os.Stderr, nil)
 		}
 		return true
 	}
@@ -433,7 +435,9 @@ func renderTypedOpenError(err error) bool {
 // isSchemaMigrateVerb reports whether cmd is `bd migrate schema` — the one
 // invocation in which the operator asked for a schema migration by name. That
 // request is the consent the shared-store gate wants for a database with no
-// remote (#5920); see schema.SetSharedMigrateConsent.
+// remote (#5920), and the consent the migration-consent gate wants for any
+// existing database; see schema.SetSharedMigrateConsent and
+// schema.SetLocalMigrateConsent.
 //
 // Deliberately just this one command, not the `bd migrate` tree. Bare
 // `bd migrate` reconciles version/repo-id/clone-id metadata and never applies
@@ -448,17 +452,15 @@ func isSchemaMigrateVerb(cmd *cobra.Command) bool {
 	return cmd == migrateSchemaCmd
 }
 
-// isMigrateConsentCommand reports whether cmd is one of the explicit
-// migration verbs (`bd migrate`, `bd migrate schema`) invoked for real:
-// typing the verb IS the operator consenting to apply pending schema
-// migrations (migrate_consent.go), no --force required. Preview flags
-// withhold the consent — a --dry-run/--inspect must not consent to the work
-// it only inspects.
+// isMigrateConsentCommand reports whether invoking cmd is consent to apply
+// pending schema migrations to an existing database (migrate_consent.go).
+// That is `bd migrate schema` alone, the verb that names the migration: bare
+// `bd migrate` does not consent, for the reasons isSchemaMigrateVerb gives,
+// and --force on either migrate command consents separately, through the gate
+// override. A preview withholds the consent, as it does the shared-store one:
+// a --dry-run/--inspect must not consent to the work it only inspects.
 func isMigrateConsentCommand(cmd *cobra.Command) bool {
-	if cmd != migrateCmd && cmd != migrateSchemaCmd {
-		return false
-	}
-	return forcedMigratePreviewFlag(cmd) == ""
+	return isSchemaMigrateVerb(cmd) && !isPreviewCommand(cmd)
 }
 
 // forcedMigratePreviewFlag returns the name of a preview flag (--dry-run,
@@ -1773,7 +1775,7 @@ var rootCmd = &cobra.Command{
 		// discipline as the --force override above.
 		schema.SetSharedMigrateConsent(isSchemaMigrateVerb(cmd) && !previewMode)
 
-		// The explicit migration verbs carry migration consent on their own
+		// The same verb carries migration consent on its own
 		// (migrate_consent.go): every other command refuses to apply pending
 		// schema migrations to an existing database. Same unconditional
 		// set-or-clear discipline as the gate override above.

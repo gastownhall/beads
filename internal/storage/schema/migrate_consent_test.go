@@ -119,3 +119,46 @@ func TestMigrateConsentDecision_UnparseableEnv_RefusesWithHint(t *testing.T) {
 		t.Fatalf("UserMessage does not surface the unparseable env value:\n%s", consentErr.UserMessage())
 	}
 }
+
+// TestMigrateConsentError_AgentSurfacesNameNoRemedy pins the #4259 directive
+// convention cmd/bd's JSON refusal is built on: Refusal and AgentDirective are
+// the top-level fields an agent reads, so neither may carry a runnable
+// migration or a consent env var; the migrate command lives only in the
+// operator-gated "migrate" option.
+func TestMigrateConsentError_AgentSurfacesNameNoRemedy(t *testing.T) {
+	e := &MigrateConsentError{CurrentVersion: 65, LatestVersion: 69, Pending: 4}
+	for name, s := range map[string]string{"Refusal": e.Refusal(), "AgentDirective": e.AgentDirective()} {
+		for _, unwanted := range []string{SharedConsentCommand, "BD_ALLOW"} {
+			if strings.Contains(s, unwanted) {
+				t.Errorf("%s carries %q:\n%s", name, unwanted, s)
+			}
+		}
+	}
+	opts := e.Options()
+	if len(opts) != 2 || opts[0].ID != "migrate" || opts[1].ID != "keep" {
+		t.Fatalf("Options = %+v, want exactly migrate then keep", opts)
+	}
+	if len(opts[0].Commands) != 1 || opts[0].Commands[0] != SharedConsentCommand {
+		t.Errorf("migrate option commands = %q, want [%q]", opts[0].Commands, SharedConsentCommand)
+	}
+	if len(opts[1].Commands) != 0 {
+		t.Errorf("keep option commands = %q, want none", opts[1].Commands)
+	}
+}
+
+// TestMigrateConsentError_WorkingSetWarning pins the warning a
+// working-set-reconcile open prints when it continues past the refusal: it
+// states the refusal and that the commit runs on the current schema, and it
+// never offers the consent env var as the way forward.
+func TestMigrateConsentError_WorkingSetWarning(t *testing.T) {
+	e := &MigrateConsentError{CurrentVersion: 65, LatestVersion: 69, Pending: 4}
+	w := e.WorkingSetWarning()
+	for _, want := range []string{e.Refusal(), "Working-set reconcile command: continuing on schema v65 without"} {
+		if !strings.Contains(w, want) {
+			t.Errorf("WorkingSetWarning missing %q:\n%s", want, w)
+		}
+	}
+	if strings.Contains(w, "BD_ALLOW") {
+		t.Errorf("WorkingSetWarning offers a consent env var:\n%s", w)
+	}
+}

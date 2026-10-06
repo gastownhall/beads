@@ -11,7 +11,10 @@ to v53`), this runbook rebuilds a 1.1.2-compatible workspace from a full
 export. It is written to be executable by an agent as-is.
 
 There is no in-place down-migration. The procedure is export → set aside →
-fresh init → import.
+fresh init → import. If you only need the 1.1 line to open the database
+again, the cursor rollback in
+[Accidental v1.2.1 Release](/recovery/accidental-1-2-1-release) is shorter
+and keeps the Dolt history in place.
 
 **What survives** (verified): issues with statuses and close reasons,
 dependencies, comments, notes, labels, memories, and wisps (with

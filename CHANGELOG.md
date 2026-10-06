@@ -135,28 +135,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicit consent** (Beads 1.2 release remediation). The 1.2.0/1.2.1 releases
   applied migrations 54–65 at store open on ANY command — including pure reads
   like `bd list` — with no prompt, and older binaries then refuse the migrated
-  database (schema-skew guard). Every command against an existing database with
-  pending main-sequence migrations now refuses with guidance instead of
-  migrating, and the refused open performs ZERO writes (dolt_ignore seeding and
-  clone-local migrations included). Consent is any of: the explicit verbs
-  `bd migrate` / `bd migrate schema` (a preview flag withholds it),
-  `bd migrate --force`, or `BD_ALLOW_MIGRATE=1` for scripts/CI
-  (`BD_ALLOW_REMOTE_MIGRATE=1` is honored as an alias). Fresh databases
-  (`bd init`) still migrate to latest — creating a database is consent for its
-  schema — and the same creation principle covers a workspace the invocation
-  just cloned into existence (`bd init --remote`, `bd bootstrap` sync), so the
-  #4259 behind-remote flows keep their exact behavior. A database already at
-  this binary's latest version never consults the gate, so already-migrated
-  (v65) workspaces see no change. The
-  remote-backed case keeps all of the #4259 remote-migrate gate's additional
-  protections (smart gate, adopt fast-forward, fork-skew analysis) unchanged.
-  JSON consumers: the refusal renders as a structured error carrying a
-  `migrate_consent` object (`current_version`, `required_version`, `pending`).
+  database (schema-skew guard). A command that would apply pending
+  main-sequence migrations to an existing database at store open (in embedded
+  mode that includes reads) now refuses with guidance instead, and the refused
+  open performs ZERO writes (dolt_ignore seeding and clone-local migrations
+  included). Server-mode read commands open without running migrations, so
+  they keep reading at the current schema. `bd dolt commit` and `bd vc commit`
+  warn and commit at the current schema without migrating, so the dirty-table
+  recovery (commit, then `bd migrate schema`) still works on a database that
+  is both behind and dirty. Consent is any of: `bd migrate schema`, the verb
+  that names the migration (a preview flag withholds it); `--force` on
+  `bd migrate` or `bd migrate schema`; or `BD_ALLOW_MIGRATE=1` for scripts/CI
+  (`BD_ALLOW_REMOTE_MIGRATE=1` is honored as an alias). Bare `bd migrate`,
+  including `--update-repo-id`, `--inspect` and `--dry-run`, does not consent.
+  Fresh databases (`bd init`) still migrate to latest — creating a database is
+  consent for its schema, kept across the retry of an interrupted server
+  bootstrap — and the same creation principle covers a workspace the
+  invocation just cloned into existence (`bd init --remote`, `bd bootstrap`
+  sync), so the #4259 behind-remote flows keep their exact behavior. A
+  database already at this binary's latest version never consults the gate;
+  one left at v65 by 1.2.x or at v66 by 1.3.x still has migrations pending
+  under this release, so it asks once. The remote-backed case keeps all of the
+  #4259 remote-migrate gate's additional protections (smart gate, adopt
+  fast-forward, fork-skew analysis) unchanged. JSON consumers: the refusal
+  renders as a structured error whose `error` states the refusal and whose
+  `hint` is a non-runnable operator directive (neither names a migration
+  command or a consent variable), plus a `migrate_consent` object
+  (`current_version`, `required_version`, `pending`, `severity: "blocking"`,
+  `human_decision_required: true`, and `options`: `migrate` runs
+  `bd migrate schema`, or `bd migrate schema --global` under `--global`;
+  `keep` has no command).
 - **Shipped migrations are frozen by CI** (same remediation): the content hash
-  of every released up-migration (main 0001–0065, ignored 0001–0024) is pinned
-  by `TestShippedMigrationsAreFrozen`. Schema v65 is de-facto shipped; any
-  amendment to a released migration must land as a new migration (0066+) so
-  installed schemas and freshly-migrated ones cannot fork.
+  of every released up-migration (main 0001–0066, ignored 0001–0026, through
+  the 1.3.x releases) is pinned by `TestShippedMigrationsAreFrozen`. Any
+  amendment to a released migration must land as a new migration (0070+, or
+  ignored 0028+, as of this change) so installed schemas and freshly-migrated
+  ones cannot fork.
 
 ### Fixed
 - **PRs based on `hotfix/**` branches now run full CI, not just

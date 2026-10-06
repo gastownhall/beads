@@ -1703,8 +1703,8 @@ run_wisp_plane_upgrade() {
 
     # First candidate touch runs the full MigrateUp under the standard per-op
     # timeout. A dirty-table refusal or a migration error here is the headline
-    # failure class for this lane. Since the migration-consent gate an ordinary
-    # command refuses an un-migrated database, so the explicit schema migration
+    # failure class for this lane. The migration-consent gate makes an ordinary
+    # command refuse an un-migrated database, so the explicit schema migration
     # is that first touch (as in run_embedded_dolt_upgrade); the open follows.
     migrate_schema_current "$version" wisp-first
     run_in_workspace "$candidate" list --json -n 0 --all > "$workspace/wisp-first-open.json" ||
