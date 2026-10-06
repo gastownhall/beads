@@ -998,7 +998,8 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
   policy-tested) is `"true"`: their lanes then run remotely through
   rbe-fork (modes `fork-ro`/`fork-rw`), and a run rbe-fork does not serve
   (mode `cache`) turns `CI Gate / Required` red rather than falling back.
-  It ships `"false"`.
+  It is `"true"` (ga-96smfk.15): fork and Dependabot PRs run only the Bazel
+  lanes for the retired tiers.
 - Everyone else keeps the legacy tiers unchanged:
   - fork PRs, while `BAZEL_COVERS_FORKS` is `"false"` (their Bazel lanes
     run beside the legacy tiers: remotely while rbe-fork is open, else in
