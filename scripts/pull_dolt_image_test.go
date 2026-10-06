@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-const doltSQLServerImage = "dolthub/dolt-sql-server:2.2.0"
+const doltSQLServerImage = "dolthub/dolt-sql-server:2.3.5"
 
 func TestPullDoltImageRetriesTransientFailures(t *testing.T) {
 	tests := []struct {
