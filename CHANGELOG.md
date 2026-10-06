@@ -111,6 +111,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   will not send, and value constraints (`maxLength`, `pattern` and the
   like) are outside the digest: such changes need their own review against
   `wire_revision`.
+- `cmd/bd` registers the http client backend built on top of the v0 `bd
+  serve` wire (`internal/httpclient`), so a workspace whose
+  `.beads/metadata.json` selects `"backend": "http"` opens over HTTP through
+  the ordinary `OpenBestAvailable` path, exactly like a registered extension
+  backend does. A new `bd connect <url>` command performs the handshake
+  (`api_version`, wire revision, and — with `--expect-project-id` — workspace
+  identity) and writes nothing until it succeeds; it then records the
+  per-user activation sidecar (`.beads/http_target.json`, never
+  git-tracked — `cmd/bd/doctor/gitignore.go` now requires it and its local
+  metadata sidecar `http_local_metadata.json` be ignored) and sets
+  `metadata.json`'s backend to `"http"`. `bd connect` refuses a plain `http://`
+  URL to a non-loopback host (a bearer credential would cross the network in
+  the clear) unless `--allow-plaintext` is given, and refuses to switch a
+  workspace that already selects a different backend unless `--force`. A
+  credential is never accepted on the command line or written to disk; it
+  comes from the same ladder every http request already uses
+  (`BEADS_HTTP_TOKEN`, then `BEADS_HTTP_TOKEN_COMMAND`, then the credentials
+  file, then none). `bd create` suppresses the `created_by` stamp for a
+  workspace on a registered remote backend rather than sending one the http
+  wire's create role refuses (the creation stamp belongs to the server's own
+  journal entry); the external-dependency policy decorator
+  (`internal/storage/externaldeps`) now skips wrapping a store that reports
+  `storage.RemoteBackendStore` (resolving a sibling project's LOCAL checkout
+  does not apply to a pure network client, and a server that enforces the
+  policy has already applied it before answering).
+- The public `backend/http` package (`bdhttp`) is the out-of-tree door onto
+  this backend for an embedder that links beads as a library rather than
+  running `cmd/bd`: `Register(Options)` adds `"http"` to the registry and
+  installs its transport, `Open`/`Handshake` dial a server directly with no
+  workspace on disk, and the existing public `beads.OpenBestAvailableWith`
+  takes a per-call `OpenOptions.Credential` through it — the case a
+  multi-tenant embedder serving many workspaces needs, where a
+  process-global credential cannot stand in for one tenant's own.
+  EXPERIMENTAL, pin an exact beads version.
 
 ### Changed
 
