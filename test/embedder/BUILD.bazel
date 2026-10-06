@@ -1,0 +1,12 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "embedder_test",
+    srcs = ["embedder_test.go"],
+    deps = [
+        "//:beads",
+        "//backend",
+        "//backend/http",
+        "//issueops",
+    ],
+)
