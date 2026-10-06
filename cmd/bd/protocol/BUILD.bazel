@@ -49,6 +49,7 @@ go_test(
         "//internal/storage/schema",
         "//internal/testutil",
         "//internal/testutil/bazeltest",
+        "@com_github_creack_pty//:pty",
     ],
 )
 
