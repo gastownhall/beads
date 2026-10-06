@@ -1152,10 +1152,19 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
   - Verified on a real remote run before step 2 (2026-10-01): proxied 164
     top-level tests over 15 shards, 0 skipped; server storage 1246 + 1
     conformance, 10 skipped (none all-skipped); both checkers pass.
-- Not changed: `conformance.yml`'s Tier 1 (`scripts/conformance.sh`) runs the
-  embedded-Dolt `TestConformance` again (non-race, unsharded), duplicating
-  `test-embedded-conformance` and the Bazel lane. It is not part of either
-  required gate; retiring it is a separate decision.
+- `conformance.yml` is retired. Its Tier 1 (the embedded-Dolt
+  `TestConformance`) duplicated `test-embedded-conformance` and the
+  embedded lane's `embeddeddolt_conformance_{core,audit}_test`; its Tier 2
+  (the real-binary CLI corpus, `go test -tags 'gms_pure_go e2e'
+  ./test/conformance`) is `//test/conformance:conformance_test` against the
+  injected non-race `bd_for_tests`. Its files build under `e2e ||
+  integration`, so it is `integration-only` and `--config=integration` runs
+  it in `bazel-integration`, which `pr.yml`'s gate requires (PR Core's `go
+  test` builds neither tag). Neither tier was part of a required gate
+  before. `scripts/conformance.sh` stays as the local `go test` entrypoint.
+  `docs-mintlify.yml` likewise drops its docsync job (`go test
+  ./test/docsync`, which `bazel-test` runs as `//test/docsync:docsync_test`)
+  and keeps only Mintlify's network-bound broken-link check.
 
 ### F7a: Same-Repo Blacksmith Moves and Job Folds
 

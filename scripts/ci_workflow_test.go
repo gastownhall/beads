@@ -110,7 +110,7 @@ func TestPullRequestWorkflowsTriggerOnHotfixBranches(t *testing.T) {
 	}
 	root := sourceRepoRoot(t)
 	for _, name := range []string{
-		"pr.yml", prRiskWorkflowName, "conformance.yml", "cross-version-smoke.yml", "regression.yml",
+		"pr.yml", prRiskWorkflowName, "cross-version-smoke.yml", "regression.yml",
 	} {
 		t.Run(name, func(t *testing.T) {
 			var doc triggers
@@ -2715,7 +2715,7 @@ const mainWindowsTestBinariesCacheRunsOn = "${{ matrix.runner == 'blacksmith' &&
 
 // F7c: used to define its own sameRepoBlacksmith4vcpu here (same expression
 // as sameRepoBlacksmith2vcpu with the 4 vCPU label, for advisory jobs that
-// compile Go: conformance.yml, regression.yml, migration-test.yml,
+// compile Go: regression.yml, migration-test.yml,
 // cross-version-smoke.yml, proxied-local-smoke.yml). F7a independently
 // defined the same const; both are now served by the single shared
 // sameRepoBlacksmith4vcpu in ci_blacksmith_runner_test.go. migration-test.yml's
@@ -3055,15 +3055,14 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 			"test-nix": sameRepoBlacksmith4vcpu,
 		},
 		bazelWorkflowName: {bazelRBEJobName: wantRBERunsOn},
-		// F7c: advisory workflows. Each compiles Go (or, for docsync/
-		// broken-links, is cheap enough to size at 2 vCPU per spec-f7.md
-		// §2.2) and moves to Blacksmith for same-repo PRs/merge_group only;
-		// forks, Dependabot and push stay on ubuntu-latest.
-		"conformance.yml":         {"conformance": sameRepoBlacksmith4vcpu},
+		// F7c: advisory workflows. Each compiles Go (or, for broken-links,
+		// is cheap enough to size at 2 vCPU per spec-f7.md §2.2) and moves
+		// to Blacksmith for same-repo PRs/merge_group only; forks,
+		// Dependabot and push stay on ubuntu-latest.
 		"regression.yml":          {"regression": sameRepoBlacksmith4vcpu},
 		"migration-test.yml":      {"historical-upgrades": sameRepoBlacksmith4vcpuNoble},
 		"cross-version-smoke.yml": {"smoke": sameRepoBlacksmith4vcpu, "versions": sameRepoBlacksmith2vcpu},
-		"docs-mintlify.yml":       {"docsync": sameRepoBlacksmith2vcpu, "broken-links": sameRepoBlacksmith2vcpu},
+		"docs-mintlify.yml":       {"broken-links": sameRepoBlacksmith2vcpu},
 		"proxied-local-smoke.yml": {"managed-local-smoke": sameRepoBlacksmith4vcpu},
 		// main.yml's seeder job (B2, F7c implementation report) is the one
 		// Blacksmith job that is NOT gated by the same-repo-PR expression: it
@@ -3128,7 +3127,7 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 	// Blacksmith label beyond the jobs listed in `want` above.
 	for _, file := range []string{
 		"pr.yml", "pr-risk.yml", "main.yml",
-		"conformance.yml", "regression.yml", "migration-test.yml",
+		"regression.yml", "migration-test.yml",
 		"cross-version-smoke.yml", "docs-mintlify.yml", "proxied-local-smoke.yml",
 	} {
 		workflow := readCIWorkflow(t, file)

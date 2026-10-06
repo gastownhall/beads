@@ -27,11 +27,12 @@ import (
 // because it now names a Blacksmith label, and the Blacksmith-side setup-go
 // seed in main.yml actually exists for the jobs that depend on it.
 
-// advisoryPathFilteredWorkflows are the three workflows that share the
+// advisoryPathFilteredWorkflows are the workflows that share the
 // "upgrade-relevant code" allowlist verbatim, save for each one's own
-// workflow-file and script entries (spec-f7.md §2.4).
+// workflow-file and script entries (spec-f7.md §2.4). conformance.yml was
+// the third until its tiers moved to Bazel (embeddeddolt_conformance_*,
+// //test/conformance:conformance_test).
 var advisoryPathFilteredWorkflows = []string{
-	"conformance.yml",
 	"migration-test.yml",
 	"cross-version-smoke.yml",
 }
@@ -51,24 +52,6 @@ var advisoryPathFilterBase = []string{
 // advisoryPathFilterOwnEntries is each workflow's own file/script additions,
 // appended after advisoryPathFilterBase.
 var advisoryPathFilterOwnEntries = map[string][]string{
-	"conformance.yml": {
-		".github/workflows/conformance.yml",
-		"scripts/conformance.sh",
-		"test/conformance/**",
-		// F7c review fix (S3): conformance.sh's own comments name this file
-		// as the Tier-1 embedded-Dolt oracle test it runs under
-		// BEADS_TEST_EMBEDDED_DOLT=1; it was previously excluded from the
-		// filter by the shared base's `!**_test.go` negation.
-		"internal/storage/embeddeddolt/conformance_test.go",
-		// F7c review fix (S4): TestMain for the whole embeddeddolt package
-		// (the fixture conformance_test.go and every sibling test reuse)
-		// lives in test_fixture_test.go, not conformance_test.go; it was
-		// excluded by the same `!**_test.go` negation with nothing to
-		// re-include it until now.
-		"internal/storage/embeddeddolt/test_fixture_test.go",
-		// Future-proofing: mirrors the existing test/conformance/** re-include.
-		"backend/conformance/**",
-	},
 	"migration-test.yml": {
 		".github/workflows/migration-test.yml",
 		"scripts/migration-test/**",
@@ -117,19 +100,6 @@ func readPushPaths(t *testing.T, file string) []string {
 		t.Fatalf("parse %s: %v", file, err)
 	}
 	return parsed.On.Push.Paths
-}
-
-// TestConformancePushPathsMatchPullRequestPaths pins that conformance.yml's
-// push.paths and pull_request.paths stay byte-for-byte identical, in order
-// (F7c review fix S1/S3): a change that updates one list but not the other
-// would silently create a gap where main's push run and a PR's run disagree
-// about what counts as "upgrade-relevant code".
-func TestConformancePushPathsMatchPullRequestPaths(t *testing.T) {
-	pr := readPullRequestPaths(t, "conformance.yml")
-	push := readPushPaths(t, "conformance.yml")
-	if !equalStrings(pr, push) {
-		t.Errorf("conformance.yml pull_request.paths = %v, push.paths = %v; want identical", pr, push)
-	}
 }
 
 // TestAdvisoryWorkflowPathFiltersAreIdentical pins that the shared base of
@@ -719,7 +689,6 @@ func TestCrossVersionSmokeChunksEveryResolvedVersion(t *testing.T) {
 // blacksmithAdvisoryWorkflows are every workflow file F7c moved a job onto a
 // same-repo-PR (or push-only, for main.yml's seed) Blacksmith runner.
 var blacksmithAdvisoryWorkflows = []string{
-	"conformance.yml",
 	"regression.yml",
 	"migration-test.yml",
 	"cross-version-smoke.yml",
@@ -777,12 +746,10 @@ var advisoryBlacksmithRunnerJobs = []struct {
 	blacksmithLabel string
 	fallback        string
 }{
-	{"conformance.yml", "conformance", "blacksmith-4vcpu-ubuntu-2404", "ubuntu-latest"},
 	{"regression.yml", "regression", "blacksmith-4vcpu-ubuntu-2404", "ubuntu-latest"},
 	{"migration-test.yml", "historical-upgrades", "blacksmith-4vcpu-ubuntu-2404", "ubuntu-24.04"},
 	{"cross-version-smoke.yml", "smoke", "blacksmith-4vcpu-ubuntu-2404", "ubuntu-latest"},
 	{"cross-version-smoke.yml", "versions", "blacksmith-2vcpu-ubuntu-2404", "ubuntu-latest"},
-	{"docs-mintlify.yml", "docsync", "blacksmith-2vcpu-ubuntu-2404", "ubuntu-latest"},
 	{"docs-mintlify.yml", "broken-links", "blacksmith-2vcpu-ubuntu-2404", "ubuntu-latest"},
 	{"proxied-local-smoke.yml", "managed-local-smoke", "blacksmith-4vcpu-ubuntu-2404", "ubuntu-latest"},
 }
@@ -850,11 +817,9 @@ func TestF7cAdvisorySameRepoBlacksmithExpressionSemantics(t *testing.T) {
 // self-defined `blacksmith-sg-v1-` setup-go cache main.yml's
 // blacksmith-setup-go-cache job seeds (B2, F7c implementation report).
 var blacksmithSetupGoCacheConsumers = map[string][]string{
-	"conformance.yml":         {"conformance"},
 	"regression.yml":          {"regression"},
 	"migration-test.yml":      {"historical-upgrades"},
 	"cross-version-smoke.yml": {"smoke"},
-	"docs-mintlify.yml":       {"docsync"},
 	"proxied-local-smoke.yml": {"managed-local-smoke"},
 }
 
@@ -920,8 +885,6 @@ func TestBlacksmithSetupGoSeedExistsForAdvisoryConsumers(t *testing.T) {
 	wantWarmups := []string{
 		"make build",
 		"go test -c -tags regression,gms_pure_go ./tests/regression",
-		"go test -c -tags gms_pure_go ./internal/storage/embeddeddolt",
-		"go test -c -tags 'gms_pure_go e2e' ./test/conformance",
 	}
 	for _, want := range wantWarmups {
 		found := false

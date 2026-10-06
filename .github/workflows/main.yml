@@ -1081,9 +1081,9 @@ jobs:
           echo "Help text first line is correct"
 
   # F7c: Blacksmith cannot see GitHub-hosted cache entries, so the advisory
-  # workflows that moved onto a same-repo-PR Blacksmith runner (Conformance,
-  # Regression's PR run, Migration Test Harness, Cross-Version Smoke, Docs
-  # docsync, Proxied Local) need a Blacksmith-side writer for their Go build
+  # workflows that moved onto a same-repo-PR Blacksmith runner (Regression's
+  # PR run, Migration Test Harness, Cross-Version Smoke, Proxied Local) need a
+  # Blacksmith-side writer for their Go build
   # cache. This job is push-to-main only (always trusted), so it is the ONLY
   # writer: it always restores whatever is available, unconditionally re-runs
   # every warm-up command (not gated on a cache hit), and then always saves
@@ -1165,12 +1165,6 @@ jobs:
 
       - name: Compile regression tests
         run: go test -c -tags regression,gms_pure_go ./tests/regression
-
-      - name: Compile embedded Dolt conformance tests
-        run: go test -c -tags gms_pure_go ./internal/storage/embeddeddolt
-
-      - name: Compile e2e conformance tests
-        run: go test -c -tags 'gms_pure_go e2e' ./test/conformance
 
       # Always save (even if a warm-up step above failed) under a fresh,
       # commit-specific key: the content is still a valid, newer GOCACHE/
