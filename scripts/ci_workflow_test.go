@@ -987,10 +987,11 @@ func TestPRCIGateRequiresGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 
 func TestStorageDomainUOWJobsUseNestedTimeoutBudgets(t *testing.T) {
 	const (
+		fingerprintTimeoutMinutes = 5
 		storageTimeoutMinutes     = 15
 		doctorTimeoutMinutes      = 10
 		setupTeardownSlackMinutes = 5
-		jobTimeoutMinutes         = storageTimeoutMinutes + doctorTimeoutMinutes + setupTeardownSlackMinutes
+		jobTimeoutMinutes         = fingerprintTimeoutMinutes + storageTimeoutMinutes + doctorTimeoutMinutes + setupTeardownSlackMinutes
 	)
 	storageCommand := fmt.Sprintf(
 		"go test -tags gms_pure_go -race -count=1 -timeout %dm -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...",
@@ -1008,25 +1009,24 @@ func TestStorageDomainUOWJobsUseNestedTimeoutBudgets(t *testing.T) {
 			// Go's timeout applies per package test binary, so this is a
 			// maintenance tripwire for the declared sequential tier budgets,
 			// not a mathematical upper bound for the multi-package first step.
-			if job.TimeoutMinutes <= storageTimeoutMinutes+doctorTimeoutMinutes {
+			if job.TimeoutMinutes <= fingerprintTimeoutMinutes+storageTimeoutMinutes+doctorTimeoutMinutes {
 				t.Errorf(
 					"test-domain-uow timeout = %d minutes, want more than %d minutes of declared tier budgets",
 					job.TimeoutMinutes,
-					storageTimeoutMinutes+doctorTimeoutMinutes)
+					fingerprintTimeoutMinutes+storageTimeoutMinutes+doctorTimeoutMinutes)
 			}
 			assertStepRunsExactly(t, job, "Test domain + uow + tracker", storageCommand)
 			assertStepRunsExactly(t, job, "Test doctor/fix (Dolt-backed, hard-require container)", doctorCommand)
 		})
 	}
 
-	// The container and local test servers are compared in pr.yml's own
-	// every-PR job (it was test-domain-uow's first step until D2 step 3;
-	// TestPRDoltServerFingerprintRunsOnEveryPR pins it).
+	// The container this job uses is compared with the checked-in
+	// fingerprint in its first test step
+	// (TestDoltServerFingerprintRunsWhereEachBackendRuns pins where).
 	job := readCIWorkflow(t, "pr.yml").job(t, prFingerprintJob)
-	const fingerprintStep = "Test Dolt server fingerprint (container + local)"
-	assertStepRunsExactly(t, job, fingerprintStep,
-		"go test -tags gms_pure_go -count=1 -timeout 5m -v -run '^TestDoltServerFingerprint$' ./internal/testutil/")
-	assertStepEnvValue(t, job, fingerprintStep, "BEADS_TEST_REQUIRE_DOLT_CONTAINER", "1")
+	assertStepRunsExactly(t, job, prFingerprintStep,
+		fmt.Sprintf("go test -tags gms_pure_go -count=1 -timeout %dm -v -run '^TestDoltServerFingerprint$' ./internal/testutil/", fingerprintTimeoutMinutes))
+	assertStepEnvValue(t, job, prFingerprintStep, "BEADS_TEST_REQUIRE_DOLT_CONTAINER", "1")
 
 	gate := readCIWorkflow(t, "pr.yml").job(t, "ci-gate")
 	gateEnv := gate.step(t, "Evaluate CI gate").Env
@@ -3013,7 +3013,6 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 			"bazel-coverage": sameRepoBlacksmith2vcpu, "ci-gate": sameRepoBlacksmith2vcpu,
 			"fast-checks":                            sameRepoBlacksmith2vcpu,
 			"advisory-reports":                       sameRepoBlacksmith2vcpu,
-			"test-dolt-server-fingerprint":           sameRepoBlacksmith2vcpu,
 			"check-doc-flags":                        sameRepoBlacksmith4vcpu,
 			"pr-policy-wrapper":                      sameRepoBlacksmith4vcpu,
 			"check-release-target-cross-compilation": sameRepoBlacksmith8vcpu,

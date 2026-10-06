@@ -54,7 +54,7 @@ func TestPullDoltImageRetriesTransientFailures(t *testing.T) {
 
 func TestDoltImagePullWorkflowsUseRetryHelper(t *testing.T) {
 	wantCalls := map[string]int{
-		"pr.yml":         3, // test-domain-uow, contract-corpus, test-dolt-server-fingerprint
+		"pr.yml":         2, // test-domain-uow, contract-corpus
 		"pr-risk.yml":    3,
 		"regression.yml": 1,
 	}

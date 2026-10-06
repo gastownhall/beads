@@ -1520,8 +1520,10 @@ jobs:
   #
   # D2 step 3: stands down where bazel-coverage says pr_lanes; Bazel's
   # `dolt-server lane` runs the same packages against a local dolt
-  # sql-server, which test-dolt-server-fingerprint (every PR) keeps equal to
-  # the container this job uses.
+  # sql-server, and //internal/testutil:testutil_dolt_test checks that
+  # server against the checked-in fingerprint. Where this job runs, its
+  # first test step checks the container it uses against the same
+  # fingerprint, so the two backends cannot drift apart unnoticed.
   test-domain-uow:
     name: Test (storage domain + uow)
     runs-on: ubuntu-latest
@@ -1529,7 +1531,7 @@ jobs:
     if: needs.bazel-coverage.outputs.pr_lanes != 'true'
     # The race-enabled storage package has outgrown Go's implicit 10-minute
     # timeout. Keep both per-package deadlines inside one finite job budget.
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -1570,6 +1572,14 @@ jobs:
           sha256sum -c SHA256SUMS
           chmod +x bd-linux-gms-pure
 
+      # The container this job's tests use, and the local server (the
+      # pinned dolt CLI installed above), against the checked-in
+      # fingerprint. REQUIRE makes the container half fail, not skip.
+      - name: Test Dolt server fingerprint (container + local)
+        env:
+          BEADS_TEST_REQUIRE_DOLT_CONTAINER: "1"
+        run: go test -tags gms_pure_go -count=1 -timeout 5m -v -run '^TestDoltServerFingerprint$' ./internal/testutil/
+
       - name: Test domain + uow + tracker
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
@@ -1594,52 +1604,6 @@ jobs:
           # step has no sibling test binary to race for the reaper (be-2on).
           TESTCONTAINERS_RYUK_DISABLED: "true"
         run: go test -tags gms_pure_go -race -count=1 -timeout 10m -v ./cmd/bd/doctor/fix/
-
-  # Compares the Dolt sql-server container image the container-backed tests
-  # use and the local test server backend (the pinned dolt CLI, what every
-  # Bazel dolt-server lane starts) against the one checked-in fingerprint,
-  # so an image bump cannot drift the container side unnoticed. REQUIRE
-  # makes the container half fail, not skip. Every PR, whatever bazel-coverage
-  # says: it was test-domain-uow's first step, and the Bazel lanes that
-  # replace that job (D2 step 3) have no docker.
-  #
-  # F7a: moved to Blacksmith for same-repo PRs/merge_group. Restores no
-  # GitHub-saved cache (Dolt CLI and the sql-server image are fetched fresh
-  # every run via scripts/ci/install-dolt.sh and pull-dolt-image.sh).
-  test-dolt-server-fingerprint:
-    name: Test (Dolt server fingerprint)
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Install Dolt CLI
-        run: ./scripts/ci/install-dolt.sh
-
-      - name: Verify dolt on PATH
-        run: dolt version
-
-      - name: Configure Git and Dolt identity
-        run: |
-          git config --global user.name "CI Bot"
-          git config --global user.email "ci@beads.test"
-          dolt config --global --add user.name "CI Bot"
-          dolt config --global --add user.email "ci@beads.test"
-
-      - name: Pull Dolt sql-server image
-        # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
-        run: ./scripts/ci/pull-dolt-image.sh
-
-      - name: Test Dolt server fingerprint (container + local)
-        env:
-          BEADS_TEST_REQUIRE_DOLT_CONTAINER: "1"
-        run: go test -tags gms_pure_go -count=1 -timeout 5m -v -run '^TestDoltServerFingerprint$' ./internal/testutil/
 
   # `test-macos` / "Test (macos-latest)" used to run here and is deliberately
   # removed (F4, PR CI -> 5 min). It was a non-required, PR-side mirror of
@@ -2421,7 +2385,6 @@ jobs:
       - scripts-go-checks
       - pr-lint-wrapper
       - test-domain-uow
-      - test-dolt-server-fingerprint
       - contract-corpus
       - windows-make-shell
       - bazel
@@ -2453,7 +2416,6 @@ jobs:
             SCRIPTS_GO_CHECKS
             PR_LINT_WRAPPER
             TEST_DOMAIN_UOW
-            TEST_DOLT_SERVER_FINGERPRINT
             CONTRACT_CORPUS
             WINDOWS_MAKE_SHELL
             BAZEL
@@ -2509,7 +2471,6 @@ jobs:
           SCRIPTS_GO_CHECKS: ${{ needs.scripts-go-checks.result }}
           PR_LINT_WRAPPER: ${{ needs.pr-lint-wrapper.result }}
           TEST_DOMAIN_UOW: ${{ needs.test-domain-uow.result }}
-          TEST_DOLT_SERVER_FINGERPRINT: ${{ needs.test-dolt-server-fingerprint.result }}
           CONTRACT_CORPUS: ${{ needs.contract-corpus.result }}
           WINDOWS_MAKE_SHELL: ${{ needs.windows-make-shell.result }}
           # bazel.yml's lanes report their job.status as outputs; a lane that

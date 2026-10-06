@@ -646,7 +646,6 @@ Do not require these existing check names directly:
 - `Test (ubuntu-latest)`
 - `Test (macos-latest)`
 - `Test (storage domain + uow)`
-- `Test (Dolt server fingerprint)`
 - `Go checks (vet)`
 - `Contract corpus (golden + determinism + conformance)`
 - `PR Core (wrapper timing)`
@@ -920,11 +919,16 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
     timing measured there), `ubuntu-latest` otherwise. `bazel-test`'s own
     `bazel-ci-build-artifacts` upload is no longer consumed by anything; it
     is kept for the F3.5.3 SHA256SUMS comparison and for debugging.
-  - Kept on every PR: the Dolt server fingerprint (container image vs the
-    pinned dolt CLI the Bazel dolt-server lanes start), formerly
-    `test-domain-uow`'s first step, is its own required job
-    `test-dolt-server-fingerprint` (`Test (Dolt server fingerprint)`,
-    `TEST_DOLT_SERVER_FINGERPRINT`). `check-release-target-cross-compilation`
+  - The Dolt server fingerprint is checked per backend, where that backend
+    runs. The local server (the pinned dolt CLI every Bazel dolt-server lane
+    starts) is checked by `//internal/testutil:testutil_dolt_test` on the
+    dolt-server lane. The container is checked by `test-domain-uow`'s first
+    test step, which runs only where the container-backed jobs run (not
+    covered by `pr_lanes`). The every-PR job `test-dolt-server-fingerprint`
+    (`Test (Dolt server fingerprint)`, `TEST_DOLT_SERVER_FINGERPRINT`)
+    pulled a docker image the workers do not have, so it is retired; the
+    image tag stays pinned to the dolt release by
+    `TestPinnedDoltCLIMatchesContainerImage`. `check-release-target-cross-compilation`
     still `go build`s `./...` with `CGO_ENABLED=0` on every PR.
   - Also kept on every PR, in the required job `scripts-go-checks`
     (`SCRIPTS_GO_CHECKS`, one leg, `Go checks (vet)`): `go test`'s own vet
@@ -1182,8 +1186,9 @@ scope, not this slice's.
   `TestSameRepoBlacksmithRunners` and `TestSameRepoBlacksmithExpressionSemantics`
   in `scripts/ci_workflow_test.go`): pr.yml's `fast-checks`,
   `advisory-reports`, `check-release-target-cross-compilation` (8 vCPU),
-  `check-doc-flags` (4 vCPU), `pr-policy-wrapper` (4 vCPU),
-  `test-dolt-server-fingerprint`; pr-risk.yml's `test-nix` (4 vCPU). Every
+  `check-doc-flags` (4 vCPU), `pr-policy-wrapper` (4 vCPU)
+  (and `test-dolt-server-fingerprint`, since retired); pr-risk.yml's
+  `test-nix` (4 vCPU). Every
   other job keeps the default 2 vCPU label. Forks and Dependabot PRs fall back
   to `ubuntu-latest`, as F3's `bazel-coverage`/`ci-gate`/`detect-ci-tier` jobs
   and bazel.yml's `rbe` job already do; `TestBlacksmithJobsReadNoSecrets`
@@ -1490,7 +1495,7 @@ PR timings, 2026-10): `fast-checks` (~40 s), `pr-policy-wrapper`
 `check-doc-freshness-platforms` and `pr-preflight-platforms` (Linux,
 Windows and macOS legs, up to ~5 min on Windows),
 `check-release-target-cross-compilation` (~5 min),
-`test-dolt-server-fingerprint` (~1 min), `windows-make-shell` (~2.7 min),
+`windows-make-shell` (~2.7 min),
 `windows-test-binaries` plus the prebuilt Windows pair (~7 min end to
 end), the advisory native Windows pair (~5 min; the gate waits for them),
 `test-nix` (~3 min) and the package gates (seconds unless their paths

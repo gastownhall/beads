@@ -20,14 +20,15 @@ import (
 // (BAZEL_PR_LANES_RETIRED, simulated with the other tiers in
 // TestPRRiskDecisionMatchesBazelMode). Everything the retired jobs did
 // besides those tests keeps running on every PR: the package gates take the
-// Bazel-built bd, the Dolt server fingerprint has its own job, and
-// scripts-go-checks runs go test's vet checks.
+// Bazel-built bd, the Dolt server fingerprint runs on the dolt-server lane
+// (its local half) and in test-domain-uow (its container half, where
+// containers are used), and scripts-go-checks runs go test's vet checks.
 
 const (
 	// The legacy jobs' if: not covered.
 	prLaneLegacyIf     = "needs." + prRiskCoverageJobName + ".outputs.pr_lanes != 'true'"
-	prFingerprintJob   = "test-dolt-server-fingerprint"
-	prFingerprintID    = "TEST_DOLT_SERVER_FINGERPRINT"
+	prFingerprintJob   = "test-domain-uow"
+	prFingerprintStep  = "Test Dolt server fingerprint (container + local)"
 	prScriptsChecksJob = "scripts-go-checks"
 	prScriptsChecksID  = "SCRIPTS_GO_CHECKS"
 	// bazel.yml's lanes for the step add --config=sole-run whenever they
@@ -337,7 +338,7 @@ func TestPRLegacyLanesDeferToBazelLanes(t *testing.T) {
 	}
 	for _, c := range []string{"true", "false"} {
 		for _, res := range []string{"skipped", "failure", "cancelled"} {
-			for _, job := range []string{prFingerprintJob, "package-mcp", "package-npm", "pr-preflight-platforms", prScriptsChecksJob} {
+			for _, job := range []string{"package-mcp", "package-npm", "pr-preflight-platforms", prScriptsChecksJob} {
 				sc := prGateFor(t, lanes, "pull_request", "remote", cov(c))
 				// F3: package-mcp/package-npm are bazel.yml call outputs
 				// (needs.bazel.outputs.package-mcp), not pr.yml job
@@ -348,7 +349,7 @@ func TestPRLegacyLanesDeferToBazelLanes(t *testing.T) {
 				} else {
 					sc.results = map[string]string{job: res}
 				}
-				id := map[string]string{prFingerprintJob: prFingerprintID, "pr-preflight-platforms": "PR_PREFLIGHT_PLATFORMS", prScriptsChecksJob: prScriptsChecksID}[job]
+				id := map[string]string{"pr-preflight-platforms": "PR_PREFLIGHT_PLATFORMS", prScriptsChecksJob: prScriptsChecksID}[job]
 				if id == "" {
 					id = prPackageGateIDs[job]
 				}
@@ -545,47 +546,43 @@ func testPackageGateJobs(t *testing.T, prGateRequired []string) {
 	}
 }
 
-// The Dolt server fingerprint (container image vs the pinned dolt CLI the
-// Bazel dolt-server lanes start) runs on every PR in its own required job,
-// whatever bazel-coverage says, and nowhere else in pr.yml.
-func TestPRDoltServerFingerprintRunsOnEveryPR(t *testing.T) {
+// The Dolt server fingerprint is checked once per backend, where that backend
+// runs: the local server (the pinned dolt CLI every Bazel dolt-server lane
+// starts) by //internal/testutil:testutil_dolt_test on the dolt-server lane,
+// whatever the mode (the retired every-PR job, "Test (Dolt server
+// fingerprint)", pulled a docker image the workers do not have); the
+// container by test-domain-uow, the container-backed job that runs only
+// where bazel-coverage does not cover pr_lanes, as its first test step. No
+// other pr.yml job runs it, and ci-gate has no separate fingerprint result.
+func TestDoltServerFingerprintRunsWhereEachBackendRuns(t *testing.T) {
 	pr := readCIWorkflow(t, "pr.yml")
 	job := pr.job(t, prFingerprintJob)
-	// F7a: moved to the same same-repo Blacksmith expression every other
-	// cache-free same-repo pr.yml job uses; forks/Dependabot still fall back
-	// to ubuntu-latest (TestSameRepoBlacksmithRunners covers that fallback).
-	if job.If != "" || len(job.Needs) != 0 || job.ContinueOnError || job.RunsOn != sameRepoBlacksmith2vcpu || job.TimeoutMinutes == 0 {
-		t.Errorf("%s: if %q, needs %v, continue-on-error %v, runs-on %q, timeout %d; want an unconditional same-repo-Blacksmith job with a timeout",
-			prFingerprintJob, job.If, job.Needs, job.ContinueOnError, job.RunsOn, job.TimeoutMinutes)
+	if job.If != prLaneLegacyIf {
+		t.Errorf("%s if %q, want %q (the container-backed tests run only there)", prFingerprintJob, job.If, prLaneLegacyIf)
 	}
-	var names []string
-	for _, s := range job.Steps {
-		if s.If != "" || s.ContinueOnError != nil {
-			t.Errorf("%s step %q: if %q, continue-on-error %v", prFingerprintJob, s.Name, s.If, s.ContinueOnError)
+	step := job.step(t, prFingerprintStep)
+	if step.If != "" || step.ContinueOnError != nil {
+		t.Errorf("%s step %q: if %q, continue-on-error %v", prFingerprintJob, prFingerprintStep, step.If, step.ContinueOnError)
+	}
+	assertStepsBefore(t, job, []string{"Install Dolt CLI", "Pull Dolt sql-server image"}, []string{prFingerprintStep})
+	assertStepsBefore(t, job, []string{prFingerprintStep}, []string{"Test domain + uow + tracker"})
+	for name, j := range pr.Jobs {
+		for _, s := range j.Steps {
+			if strings.Contains(s.Run, "TestDoltServerFingerprint") && (name != prFingerprintJob || s.Name != prFingerprintStep) {
+				t.Errorf("%s step %q runs the fingerprint; only %s's %q does", name, s.Name, prFingerprintJob, prFingerprintStep)
+			}
 		}
-		names = append(names, s.Name)
-	}
-	want := []string{"", "Set up Go", "Install Dolt CLI", "Verify dolt on PATH", "Configure Git and Dolt identity", "Pull Dolt sql-server image", "Test Dolt server fingerprint (container + local)"}
-	if !reflect.DeepEqual(names, want) {
-		t.Errorf("%s steps %q, want %q", prFingerprintJob, names, want)
-	}
-	if got, want := job.step(t, "Pull Dolt sql-server image").Run, pr.job(t, "test-domain-uow").step(t, "Pull Dolt sql-server image").Run; got != want {
-		t.Errorf("%s pulls the image with %q, test-domain-uow with %q", prFingerprintJob, got, want)
-	}
-	if got := job.step(t, "Install Dolt CLI").Run; got != "./scripts/ci/install-dolt.sh" {
-		t.Errorf("%s installs dolt with %q", prFingerprintJob, got)
 	}
 	gate := pr.job(t, "ci-gate")
 	env := gate.step(t, "Evaluate CI gate").Env
-	if !contains(gate.Needs, prFingerprintJob) || env[prFingerprintID] != "${{ needs."+prFingerprintJob+".result }}" ||
-		!contains(strings.Fields(env["CI_GATE_REQUIRED"]), prFingerprintID) {
-		t.Errorf("ci-gate does not require %s", prFingerprintID)
+	if _, ok := env["TEST_DOLT_SERVER_FINGERPRINT"]; ok || strings.Contains(env["CI_GATE_REQUIRED"], "FINGERPRINT") {
+		t.Errorf("ci-gate still evaluates a separate fingerprint result: %q", env["CI_GATE_REQUIRED"])
 	}
-	for name, j := range pr.Jobs {
-		for _, s := range j.Steps {
-			if strings.Contains(s.Run, "TestDoltServerFingerprint") && name != prFingerprintJob {
-				t.Errorf("%s step %q runs the fingerprint; only %s does", name, s.Name, prFingerprintJob)
-			}
+
+	rule := bazelRuleBlock(readPolicyFile(t, sourceRepoRoot(t), "internal/testutil/BUILD.bazel"), "testutil_dolt_test")
+	for _, w := range []string{`"$(rootpath :testutil_test)"`, `"BEADS_TEST_DOLT_SERVER": "local"`, `"BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1"`, `tags = ["dolt-server"]`} {
+		if !strings.Contains(rule, w) {
+			t.Errorf("//internal/testutil:testutil_dolt_test lacks %s (the local half runs on the dolt-server lane):\n%s", w, rule)
 		}
 	}
 }
