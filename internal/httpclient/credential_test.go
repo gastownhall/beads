@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
@@ -292,13 +293,19 @@ type contextServer struct {
 	// test lands the rewrite in the one place it happens in production: between
 	// the refused attempt and the client's re-read.
 	onUnauthorized func()
-	seen           []string
+	// seenMu guards seen: a burst test drives this handler from several
+	// server goroutines at once. Readers look at seen only after their
+	// requests have returned.
+	seenMu sync.Mutex
+	seen   []string
 }
 
 func (s *contextServer) start(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.seenMu.Lock()
 		s.seen = append(s.seen, r.Header.Get("Authorization"))
+		s.seenMu.Unlock()
 		if s.require != "" && r.Header.Get("Authorization") != "Bearer "+s.require {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			w.Header().Set("Content-Type", "application/problem+json")
