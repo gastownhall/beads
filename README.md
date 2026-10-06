@@ -175,6 +175,47 @@ are unaffected.
 the guard with a warning on stderr. Use this only if you know the forward
 migrations are additive and safe for your specific workload.
 
+## 🔌 HTTP Backend (experimental)
+
+A workspace can also talk to a remote `bd serve` over HTTP instead of opening
+a local Dolt database — useful for a thin client against a shared server, or
+for embedding beads in another program as a library.
+
+```bash
+# Point this workspace at a server (verifies the server first; writes nothing on failure)
+bd connect https://bd.example.com --expect-project-id my-project
+
+# Everything else works exactly as with a local database
+bd create "Fix auth bug" -p 1 -t bug
+bd ready --json
+bd close bd-a1b2 "Fixed"
+
+# Loopback needs no TLS
+bd connect http://127.0.0.1:8080
+
+# Forget the server (metadata.json's backend selection is untouched)
+bd connect --clear
+```
+
+`bd connect` writes two things on success: `.beads/metadata.json` gets
+`"backend": "http"`, and a per-user, never-git-tracked sidecar
+(`.beads/http_target.json`) records the server URL and pinned project id. It
+never writes a credential to disk. A bearer credential, if the server
+requires one, comes from `BEADS_HTTP_TOKEN`, then
+`BEADS_HTTP_TOKEN_COMMAND` (a helper that prints a token), then the
+credentials file, then no credential at all. Connecting to a non-loopback
+server over plain `http://` is refused by default (a bearer credential would
+cross the network unencrypted) — pass `--allow-plaintext` to override, or use
+`https://`. Switching a workspace that already selects a different backend
+needs `--force`.
+
+An embedding program that links beads as a library rather than running
+`cmd/bd` registers this backend itself through the public
+[`backend/http`](backend/http) package (`bdhttp.Register`), and can open a
+workspace with a credential scoped to one caller via
+`beads.OpenBestAvailableWith` — see that package's doc comment for the
+multi-tenant case. This surface is EXPERIMENTAL: pin an exact beads version.
+
 ## 🌐 Community Tools
 
 See [docs/community-tools.md](docs/community-tools.md) for a curated list of community-built UIs, extensions, and integrations—including terminal interfaces, web UIs, editor extensions, and native apps.
