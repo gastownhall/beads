@@ -304,8 +304,18 @@ func TestWriteRoleRefusalsMatchTheReadShape(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Sweeper(): %v", err)
 		}
+		// Since S4 the wire carries limit, gated by issues.sweep.limit: a
+		// server that does not advertise it refuses pre-dial with a capability
+		// refusal, which classifies as *storage.ErrUnsupported naming the token
+		// (not an encoder refusal, so not *InexpressibleError).
 		_, err = sweeper.Sweep(ctx, issueops.SweepRequest{Tier: "ephemeral", Limit: 5})
-		assertUnsupported(t, err, "Sweeper.Sweep")
+		var unsup *storage.ErrUnsupported
+		if !errors.As(err, &unsup) || unsup.Backend != Backend {
+			t.Fatalf("got %v, want *storage.ErrUnsupported for this backend", err)
+		}
+		if unsup.Capability != wire.CapSweepLimit {
+			t.Errorf("the refusal names capability %q, want %q", unsup.Capability, wire.CapSweepLimit)
+		}
 		if len(w.dispatched) != 0 {
 			t.Errorf("a refused sweep dialed %v", w.dispatched)
 		}
