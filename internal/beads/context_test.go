@@ -413,6 +413,52 @@ func TestIsPathInSafeBoundary(t *testing.T) {
 	}
 }
 
+func TestPathWithinNonRootHomeSymlinks(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(root, "service")
+	sibling := filepath.Join(root, "service-other")
+	for _, dir := range []string{home, sibling} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outside := t.TempDir()
+	for link, target := range map[string]string{
+		filepath.Join(home, "escape"):       outside,
+		filepath.Join(home, "sibling"):      sibling,
+		filepath.Join(home, "inside"):       home,
+		filepath.Join(root, "escaped-home"): outside,
+		filepath.Join(root, "root-home"):    root,
+		filepath.Join(root, "home-alias"):   home,
+	} {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name, path, home string
+		want             bool
+	}{
+		{"missing descendant", filepath.Join(home, "new", ".beads"), home, true},
+		{"inside symlink", filepath.Join(home, "inside", ".beads"), home, true},
+		{"escape outside root", filepath.Join(home, "escape", ".beads"), home, false},
+		{"escape to sibling", filepath.Join(home, "sibling", ".beads"), home, false},
+		{"sibling prefix", filepath.Join(sibling, ".beads"), home, false},
+		{"home escapes root", filepath.Join(root, "escaped-home", ".beads"), filepath.Join(root, "escaped-home"), false},
+		{"home resolves to root", filepath.Join(root, "root-home", ".beads"), filepath.Join(root, "root-home"), false},
+		{"physical home alias", filepath.Join(home, ".beads"), filepath.Join(root, "home-alias"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pathWithinNonRootHome(tc.path, "991", tc.home, root); got != tc.want {
+				t.Fatalf("pathWithinNonRootHome(%q, 991, %q, %q) = %v, want %v", tc.path, tc.home, root, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPathWithinNonRootVarLibHome(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -467,7 +513,7 @@ func TestPathWithinNonRootVarLibHome(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := pathWithinNonRootVarLibHome(tt.path, tt.uid, tt.home); got != tt.expected {
+			if got := pathWithinNonRootHome(tt.path, tt.uid, tt.home, "/var/lib"); got != tt.expected {
 				t.Fatalf("pathWithinNonRootVarLibHome(%q, %q, %q) = %v, want %v", tt.path, tt.uid, tt.home, got, tt.expected)
 			}
 		})
