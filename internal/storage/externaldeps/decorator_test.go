@@ -28,6 +28,7 @@ type fakeStore struct {
 	closed      []string
 	lifecycle   publicops.Lifecycle
 	batch       *fakeBatchCloser
+	applier     *fakeBatchApplier
 	enforced    bool
 	enforcedErr error
 
@@ -67,6 +68,25 @@ type fakeBatchCloser struct{ closed int }
 func (f *fakeBatchCloser) CloseBatch(_ context.Context, request publicops.CloseBatchRequest) (publicops.CloseBatchResult, error) {
 	f.closed++
 	return publicops.CloseBatchResult{Outcomes: make([]publicops.CloseOutcome, len(request.Items))}, nil
+}
+
+func (f *fakeStore) BatchApplier() (publicops.BatchApplier, error) { return f.applier, nil }
+
+func (f *fakeStore) BatchApplierWithPolicy(policy storage.BatchClosePolicy) (publicops.BatchApplier, error) {
+	f.applier.policy = policy
+	f.applier.policied = true
+	return f.applier, nil
+}
+
+type fakeBatchApplier struct {
+	applied  int
+	policy   storage.BatchClosePolicy
+	policied bool
+}
+
+func (f *fakeBatchApplier) ApplyBatch(_ context.Context, request publicops.ApplyBatchRequest) (publicops.ApplyBatchResult, error) {
+	f.applied++
+	return publicops.ApplyBatchResult{Items: make([]publicops.ItemResult, len(request.Items))}, nil
 }
 
 type fakeLifecycle struct {
@@ -874,6 +894,50 @@ func TestBatchCloserScopesPolicyWithoutClaim(t *testing.T) {
 			}
 			if batch.closed != wantCalls {
 				t.Fatalf("inner batches = %d, want %d", batch.closed, wantCalls)
+			}
+		})
+	}
+}
+
+func TestBatchApplierScopesPolicyToCloseTargets(t *testing.T) {
+	closeItem := func(id string, force bool) publicops.ApplyItem {
+		return publicops.ApplyItem{Kind: publicops.ItemClose, Close: &publicops.CloseItem{Target: publicops.Ref{ID: id}, Force: force}}
+	}
+	updateItem := publicops.ApplyItem{Kind: publicops.ItemUpdate, Update: &publicops.UpdateItem{Target: publicops.Ref{ID: "be-consumer"}}}
+	for _, tc := range []struct {
+		name     string
+		items    []publicops.ApplyItem
+		policied bool
+		refused  bool
+	}{
+		{"update_only", []publicops.ApplyItem{updateItem}, false, false},
+		{"unrelated_close", []publicops.ApplyItem{closeItem("be-free", false)}, false, false},
+		{"forced_close", []publicops.ApplyItem{closeItem("be-consumer", true)}, false, false},
+		{"blocked_close", []publicops.ApplyItem{closeItem("be-free", false), closeItem("be-consumer", false)}, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			applier := &fakeBatchApplier{}
+			raw := &fakeStore{applier: applier, deps: map[string][]*types.Dependency{
+				"be-consumer": {externalDep("be-consumer", "external:remote:payments", types.DepBlocks)},
+			}}
+			foreign := &fakeStore{labels: map[string][]*types.Issue{
+				"provides:payments": {{ID: "remote-provider", Status: types.StatusOpen}},
+			}}
+			batch, err := testStore(raw, foreign, true).BatchApplier()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := batch.ApplyBatch(t.Context(), publicops.ApplyBatchRequest{Actor: "worker", Items: tc.items}); err != nil {
+				t.Fatal(err)
+			}
+			if applier.applied != 1 {
+				t.Fatalf("inner applies = %d, want 1", applier.applied)
+			}
+			if applier.policied != tc.policied {
+				t.Fatalf("policy forwarded = %v, want %v", applier.policied, tc.policied)
+			}
+			if got := errors.Is(applier.policy.CheckClose("be-consumer", false), storage.ErrCloseBlocked); got != tc.refused {
+				t.Fatalf("policy refuses be-consumer = %v, want %v", got, tc.refused)
 			}
 		})
 	}

@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "externaldeps",
     srcs = [
+        "batch_applier.go",
         "batch_closer.go",
         "decorator.go",
         "remote_roles.go",
