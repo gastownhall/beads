@@ -55,10 +55,14 @@ env:
   # flags above then retire their legacy tiers too): rbe-west's mint
   # (rbe-fork) gives their Bazel lanes remote execution, instance oss-fork
   # or, for allowlisted authors, oss, and a run the mint does not serve
-  # (mode cache) is red. "false": they keep the legacy tiers, and the Bazel
-  # lanes run remotely beside them whenever rbe-fork is open (bazel.yml
-  # modes fork-ro/fork-rw), else locally with the read-only cache as before.
-  BAZEL_COVERS_FORKS: "false"
+  # (mode cache) is red, never a silent fall back to the legacy tiers.
+  # "false": they keep the legacy tiers, and the Bazel lanes run remotely
+  # beside them whenever rbe-fork is open (bazel.yml modes
+  # fork-ro/fork-rw), else locally with the read-only cache as before.
+  # "true" since ga-96smfk.15: after the canary every fork and Dependabot
+  # run took fork-ro/fork-rw (none fell to cache). Rollback if the mint
+  # becomes unreliable: commit "false" in both workflows.
+  BAZEL_COVERS_FORKS: "true"
   # bazel.yml's bazel-cmd-dolt lane (the cmd/bd Dolt-server tier: the
   # Dolt-gated cmd/bd tests no other lane runs) is advisory while this is
   # "false": it runs and reports in the bazel call (continue-on-error, so a

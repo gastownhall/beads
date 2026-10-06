@@ -139,10 +139,8 @@ test:doltserver --remote_download_regex=.*/test\.(log|xml)$
 # ~4 cores, do not fit regardless of any single shard's wall time; bazel.yml
 # runs this one only with remote execution, in a job of its own
 # (bazel-proxied). The build is
-# --config=doltserver's: race, like PR Risk's /tmp/bd-cmd-test (main.yml's
-# twin job runs build-artifacts' non-race bd-cmd-test, so this is the
-# stricter of the two); the subprocess bd is the non-race bd_for_tests, like
-# the jobs'. Each shard runs its job's
+# --config=doltserver's: race, like PR Risk's /tmp/bd-cmd-test; the
+# subprocess bd is the non-race bd_for_tests, like the jobs'. Each shard runs its job's
 # shard script, whose -test.timeout=15m is past "long": the target is
 # eternal, which rbe-west caps at 1200s.
 test:doltserver-proxied --@rules_go//go/config:race
@@ -204,7 +202,7 @@ test:doltserver-integration --experimental_remote_cache_eviction_retries=0
 # tag), the whole integration-tagged cmd/bd suite against a hermetic dolt
 # sql-server, i.e. the Dolt-gated cmd/bd tests every other lane skips
 # (BEADS_TEST_SKIP=dolt in --config=prcore/ci and --config=integration, and
-# in main.yml's and nightly.yml's go test jobs). The build flags are exactly
+# in nightly.yml's go test job). The build flags are exactly
 # --config=integration's, so it compiles nothing bazel-integration does not
 # (shared through the remote cache). bazel.yml runs it where it runs the
 # integration lane (remote, or with the read-only cache in mode cache), in a
@@ -228,9 +226,9 @@ test:doltserver-cmd --test_env=GO_TEST_WRAP_TESTV=1
 test:doltserver-cmd --local_test_jobs=4
 test:doltserver-cmd --remote_download_regex=.*/test\.(log|xml)$
 
-# Integration lane: main.yml's "Main Linux integration packages (N/6)" and
-# "Main Linux integration cmd/bd (N/8)" jobs (and nightly.yml's Full Test
-# Suite, which runs the same `go test` over ./... in one job): every package
+# Integration lane: the `go test` main.yml's former "Main Linux integration"
+# jobs ran on push (this lane replaced them; nightly.yml's Full Test Suite
+# still runs the same `go test` over ./... in one job): every package
 # built with -tags=integration,gms_pure_go, race, no -short, no -skip,
 # BEADS_TEST_SKIP=dolt. The tag is set for the whole build, as `go test -tags`
 # does, not per target: gazelle generates srcs/deps with integration files

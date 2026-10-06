@@ -270,8 +270,8 @@ go_test(
 # BEADS_TEST_EMBEDDED_DOLT=1; the wrapper points
 # BEADS_TEST_EMBEDDED_TEST_BINARY at this binary, which the concurrency test
 # re-executes. This is a *different* shard count from PR Risk's legacy
-# fork/push jobs, "Test (Embedded Dolt Storage N/5)" (pr-risk.yml,
-# main.yml): those keep running 5 shards of their own, frozen hand-assigned
+# fork jobs, "Test (Embedded Dolt Storage N/5)" (pr-risk.yml): those keep
+# running 5 shards of their own, frozen hand-assigned
 # block in the same manifest file — shard k here is not the same split as
 # their shard k. shard_count must stay equal to this lane's manifest
 # block's shard total.

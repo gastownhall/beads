@@ -72,7 +72,7 @@ Current PR-related workflow names:
   A lane that should run and fails, is cancelled, or reports no result fails
   the gate, and so does a missing or invalid mode.
   `bazel-integration` (`bazel test //... --config=integration`, the Bazel
-  twin of `main.yml`'s Linux integration shards) is required on every PR:
+  successor of `main.yml`'s former Linux integration shards) is required on every PR:
   `pr.yml` passes `integration: "on"` (policy-pinned), so it runs in modes
   `remote` (same-repo PRs) and `fork-ro`/`fork-rw` (fork and Dependabot PRs
   while rbe-fork is open), and in mode `cache` (fork and Dependabot PRs
@@ -998,7 +998,8 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
   policy-tested) is `"true"`: their lanes then run remotely through
   rbe-fork (modes `fork-ro`/`fork-rw`), and a run rbe-fork does not serve
   (mode `cache`) turns `CI Gate / Required` red rather than falling back.
-  It ships `"false"`.
+  It is `"true"` (ga-96smfk.15): fork and Dependabot PRs run only the Bazel
+  lanes for the retired tiers.
 - Everyone else keeps the legacy tiers unchanged:
   - fork PRs, while `BAZEL_COVERS_FORKS` is `"false"` (their Bazel lanes
     run beside the legacy tiers: remotely while rbe-fork is open, else in
@@ -1015,7 +1016,9 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
   only run of each retired tier and `CI Gate / Required` is red unless they
   ran remotely and passed (see [Merge Queue](#merge-queue)).
 
-  `main.yml`'s embedded and proxied jobs on push to `main` are untouched.
+  On push to `main`, `bazel.yml`'s push run is the only run of these tiers
+  (`main.yml`'s legacy embedded, proxied, integration, domain+uow and Linux
+  unit jobs were removed, ga-96smfk.14).
 - How:
   - `pr-risk.yml` and `pr.yml` each run the identical `bazel-coverage` job
     (policy-tested). The job does no checkout and runs no repository code.
@@ -1076,9 +1079,8 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
   default branch (`main`) only. On PRs into `release/**` both workflows run
   and report, but merging does not wait for them, before or after this
   change. Without the merge queue rule and with `strict` off, no
-  pre-merge run catches a gap; only `main.yml`'s embedded and proxied jobs
-  and `bazel.yml`'s push run do, after merge (`main.yml` has no server-Dolt
-  storage jobs; `bazel.yml`'s push run covers that tier).
+  pre-merge run catches a gap; only `bazel.yml`'s push run does, after
+  merge.
 - Lane hardening that the retirement relies on, for `bazel-embedded`,
   `bazel-proxied` and `bazel-server-storage` alike (policy-tested in
   `scripts/ci_workflow_test.go` and `scripts/pr_risk_bazel_coverage_test.go`):
@@ -1259,8 +1261,10 @@ macOS jobs; `release.yml`, `nightly.yml` and `ci-measurements.yml` stay on
   main.yml's `blacksmith-macos-go-build-cache` job is their seeder: same
   label, push-to-main-only job guard, module cache plus a non-race GOCACHE
   keyed by `go.sum` and UTC day, warmed by the shared
-  `scripts/ci/warm-non-race-cache.sh`. main.yml's `test` job macOS leg (the
-  GitHub-hosted full suite) is unchanged and still seeds the fork path.
+  `scripts/ci/warm-non-race-cache.sh`. Its `github` venue leg seeds the
+  fork path (`macos-latest`) the same way; main.yml's `test` job (the macOS
+  full suite) runs on the same Blacksmith label and restores the Blacksmith
+  leg's caches.
 - **Pins.** `TestSameRepoPlatformsMatrixMarkerRunsOnExpressionSemantics`,
   `TestBlacksmithMacOSSaverMatchesPRLegs`,
   `TestBlacksmithSaverJobsGuardedAgainstPullRequest`,
