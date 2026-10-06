@@ -238,22 +238,47 @@ func formatType(t reflect.Type, imports importSet) string {
 	panic("unreachable")
 }
 
+// reflectAliasCanonical maps a (pkgPath, name) pair that reflect reports for
+// a known language-level alias's underlying type back to the alias's own
+// declared (pkgPath, name), so unsupportedgen's output is stable across Go
+// toolchains that change what an alias's underlying type reflects as.
+//
+// Go 1.27 made encoding/json.RawMessage an alias of
+// encoding/json/jsontext.Value. Aliases have no runtime identity of their
+// own — reflect only ever sees the underlying type — but which type counts as
+// "underlying" moved: on 1.26 and earlier, reflect.TypeOf(json.RawMessage(nil))
+// reports (encoding/json, RawMessage) directly (RawMessage was a defined
+// type, not an alias, at that point); starting in 1.27 it reports the new
+// alias target, (encoding/json/jsontext, Value). storage.DoltStorage's
+// MergeMetadata signature did not change between toolchains, so the
+// generator's output must not either; this table is the fix-up.
+//
+// Add an entry here (never a one-off special case elsewhere in this file) if
+// a future Go stdlib release aliases another type this generator formats.
+var reflectAliasCanonical = map[[2]string][2]string{
+	{"encoding/json/jsontext", "Value"}: {"encoding/json", "RawMessage"},
+}
+
 // namedType renders a DEFINED type (t.Name() != "" && t.PkgPath() != "") as
 // its package-qualified declaration name, desanitizing a generic
 // instantiation's leaked type-argument path the same way formatType's doc
-// comment describes.
+// comment describes, and normalizing a known reflect-visible alias target
+// (reflectAliasCanonical) back to the name a human wrote in source.
 func namedType(t reflect.Type, imports importSet) string {
-	name := t.Name()
+	pkgPath, name := t.PkgPath(), t.Name()
+	if canon, ok := reflectAliasCanonical[[2]string{pkgPath, name}]; ok {
+		pkgPath, name = canon[0], canon[1]
+	}
 	if open := strings.IndexByte(name, '['); open >= 0 && strings.HasSuffix(name, "]") {
 		base := name[:open]
 		args := qualifiedLeak.ReplaceAllStringFunc(name[open+1:len(name)-1], func(leak string) string {
 			dot := strings.LastIndex(leak, ".")
 			return imports.add(leak[:dot]) + leak[dot:]
 		})
-		alias := imports.add(t.PkgPath())
+		alias := imports.add(pkgPath)
 		return fmt.Sprintf("%s.%s[%s]", alias, base, args)
 	}
-	alias := imports.add(t.PkgPath())
+	alias := imports.add(pkgPath)
 	return alias + "." + name
 }
 
