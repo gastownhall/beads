@@ -614,6 +614,14 @@ func (r *issueSQLRepositoryImpl) GetByIDs(ctx context.Context, ids []string, opt
 	return out, nil
 }
 
+// GetMany runs the SHARED batch-read body on r.runner, which publishes
+// exactly the DBTX method set issueops.ExecuteGetMany takes. There is no
+// table option here, the way CompareAndSetMetadataKey has none: the shared
+// body routes both planes itself through GetIssuesByIDsInTx.
+func (r *issueSQLRepositoryImpl) GetMany(ctx context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error) {
+	return issueops.ExecuteGetMany(ctx, r.runner, request)
+}
+
 func (r *issueSQLRepositoryImpl) Exists(ctx context.Context, id string, opts domain.IssueTableOpts) (bool, error) {
 	if id == "" {
 		return false, errors.New("db: Exists: id must not be empty")

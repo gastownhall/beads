@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"slices"
@@ -15,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpapi/spec"
 	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // These tests are the spec drift gates. They are pure — no database, no
@@ -416,14 +419,41 @@ func TestSpecDefaultsMatchSharedConstants(t *testing.T) {
 			t.Errorf("%s: issue_id minItems = %v, want 1", opID, schema["minItems"])
 		}
 	}
+
+	// The id bound on the two request bodies that carry an `ids` list, for the
+	// anchor bound's reason: each is enforced in code — maxDeleteIDs in the
+	// delete handler, issueops.MaxGetManyIDs in the role behind batchGet — and
+	// restated as the member's maxItems, which is where a generated client
+	// learns it. Each body is reached through its operation's own $ref, so a
+	// row cannot go on checking a schema its operation stopped using.
+	for _, tc := range []struct {
+		opID string
+		want int
+	}{
+		{OpBatchGetIssues, issueops.MaxGetManyIDs},
+		{OpDeleteIssues, maxDeleteIDs},
+	} {
+		so, ok := ops[tc.opID]
+		if !ok {
+			t.Fatalf("operation %q missing from the spec", tc.opID)
+		}
+		media := mapAt(t, mapAt(t, mapAt(t, so.op, "requestBody"), "content"), "application/json")
+		body := resolveRef(t, doc, mapAt(t, media, "schema"))
+		ids := resolveRef(t, doc, mapAt(t, mapAt(t, body, "properties"), "ids"))
+		if got, ok := ids["maxItems"].(int); !ok || got != tc.want {
+			t.Errorf("%s: ids maxItems = %v, want the enforced bound %d", tc.opID, ids["maxItems"], tc.want)
+		}
+	}
 }
 
 // capabilityToken matches one backticked capability token in the
-// `capabilities` description. The shape — a lowercase resource, a dot, a
-// lowerCamel verb — is what every token on this surface is, and it is narrow
-// enough that no other backticked word in that paragraph can be mistaken for
-// one.
-var capabilityToken = regexp.MustCompile("`([a-z]+\\.[a-zA-Z]+)`")
+// `capabilities` description. The shape is a lowercase resource, a dot, a
+// lowerCamel verb, and OPTIONALLY a second dot and a third lowerCamel segment
+// (`issues.list.sort`, matching the bd-enterprise client's
+// httpstore/wire/handshake.go:121 and DESIGN.txt §4e) — narrow enough that no
+// other backticked word in that paragraph can be mistaken for one, but wide
+// enough for a sub-capability one level below an operation's own token.
+var capabilityToken = regexp.MustCompile("`([a-z]+\\.[a-zA-Z]+(?:\\.[a-zA-Z]+)?)`")
 
 // TestSpecCapabilityVocabularyMatchesTheRouteTable is the gate for the ONE
 // piece of per-operation plumbing that had no gate.
@@ -467,6 +497,408 @@ func TestSpecCapabilityVocabularyMatchesTheRouteTable(t *testing.T) {
 	}
 	if extra := diff(documented, served); len(extra) > 0 {
 		t.Errorf("the document enumerates capabilities no implemented route contributes: %v", extra)
+	}
+}
+
+// hasValidCapabilityToken reports whether desc carries at least one
+// backticked token that is BOTH shaped like a capability (capabilityToken)
+// AND a member of validTokens. A backticked string that merely looks like a
+// token — `metadata.json`, say — proves nothing: anyone can put backticks
+// around two words. Checking membership against the real advertised set is
+// what makes the token verifiable rather than decorative (review HIGH,
+// "a token must be one advertised by Capabilities(), not any backticked a.b
+// text").
+func hasValidCapabilityToken(desc string, validTokens map[string]bool) bool {
+	for _, m := range capabilityToken.FindAllStringSubmatch(desc, -1) {
+		if validTokens[m[1]] {
+			return true
+		}
+	}
+	return false
+}
+
+// untokenedParameters reports "operationId.paramName" (query/path/header
+// parameters) and "operationId body.memberName" (request body members, one
+// level deep) for every undocumented dispatch surface in ops: one whose own
+// description carries no token that is a member of validTokens, and whose
+// (operationId, name) pair is not in baseline.
+//
+// Two further gates narrow this to a true ratchet rather than a sweep that
+// would also fire on surface this rule did not exist to judge:
+//
+//   - existingOps restricts the rule to operations that existed when the rule
+//     was frozen (testdata/pretoken_operations.json). A parameter or body
+//     member on a BRAND-NEW operation is never "missing" a token under this
+//     rule — a new operation's own review is where its capability story gets
+//     decided, not a baseline file written before it existed.
+//   - validTokens restricts what counts as a token at all: shape is not
+//     enough (hasValidCapabilityToken).
+//
+// doc resolves the $refs a parameter or request body may point at. baseline
+// is keyed by operationId to the list of its parameter names exempt from the
+// rule; bodyBaseline is the same shape for "body.member" names.
+//
+// Factored out of TestNewParameterOnExistingOperationHasABehaviorToken so
+// TestUntokenedParameterRuleFires can falsify it against a fixture with no
+// dependency on the real document: the rule fires on its own fabricated
+// miss, not just on whatever this spec currently happens to contain.
+func untokenedParameters(
+	t *testing.T,
+	doc map[string]any,
+	ops map[string]specOp,
+	baseline map[string][]string,
+	bodyBaseline map[string][]string,
+	existingOps map[string]bool,
+	validTokens map[string]bool,
+) []string {
+	t.Helper()
+	grandfathered := map[string]bool{}
+	for opID, params := range baseline {
+		for _, p := range params {
+			grandfathered[opID+"\x00"+p] = true
+		}
+	}
+	bodyGrandfathered := map[string]bool{}
+	for opID, members := range bodyBaseline {
+		for _, m := range members {
+			bodyGrandfathered[opID+"\x00"+m] = true
+		}
+	}
+
+	var missing []string
+	for opID, so := range ops {
+		if existingOps != nil && !existingOps[opID] {
+			continue // brand-new operation: its own review decides its tokens.
+		}
+
+		if raw, ok := so.op["parameters"].([]any); ok {
+			for _, r := range raw {
+				pm, ok := r.(map[string]any)
+				if !ok {
+					t.Fatalf("%s: parameter is %T, want a mapping", opID, r)
+				}
+				pm = resolveRef(t, doc, pm)
+				name, _ := pm["name"].(string)
+				if name == "" {
+					t.Fatalf("%s: parameter with no name", opID)
+				}
+				if grandfathered[opID+"\x00"+name] {
+					continue
+				}
+				desc, _ := pm["description"].(string)
+				if !hasValidCapabilityToken(desc, validTokens) {
+					missing = append(missing, opID+"."+name)
+				}
+			}
+		}
+
+		for member, desc := range requestBodyMemberDescriptions(t, doc, so) {
+			if bodyGrandfathered[opID+"\x00"+member] {
+				continue
+			}
+			if !hasValidCapabilityToken(desc, validTokens) {
+				missing = append(missing, opID+" body."+member)
+			}
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+// requestBodyMemberDescriptions returns, for so's request body (if any), each
+// top-level member name mapped to its own description. Every request body in
+// this document is `required: true` with a single application/json media
+// type whose schema is a direct $ref to a named object schema with no allOf —
+// simple enough that one level of property-walking covers all of them; a
+// future body shaped any other way will simply report no members here rather
+// than silently miscounting, which TestRequestBodyMembersCoversEveryBody (if
+// that ever becomes necessary) would be the place to pin.
+func requestBodyMemberDescriptions(t *testing.T, doc map[string]any, so specOp) map[string]string {
+	t.Helper()
+	rb, ok := so.op["requestBody"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	content, ok := rb["content"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	media, ok := content["application/json"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	schemaRef, ok := media["schema"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	schema := resolveRef(t, doc, schemaRef)
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	out := map[string]string{}
+	for member, raw := range props {
+		pm, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		pm = resolveRef(t, doc, pm)
+		desc, _ := pm["description"].(string)
+		out[member] = desc
+	}
+	return out
+}
+
+func loadPretokenBaseline(t *testing.T) map[string][]string {
+	t.Helper()
+	return loadJSONStringMap(t, "pretoken_parameters.json")
+}
+
+// loadPretokenBodyBaseline is loadPretokenBaseline's sibling for request body
+// members (review MEDIUM, "extend the rule to request-body members on
+// existing operations"): same write-once-grandfather shape, keyed by
+// operationId to the "body.member" names that already existed, untokened,
+// the day body-member coverage was added.
+func loadPretokenBodyBaseline(t *testing.T) map[string][]string {
+	t.Helper()
+	return loadJSONStringMap(t, "pretoken_request_body_members.json")
+}
+
+func loadJSONStringMap(t *testing.T, filename string) map[string][]string {
+	t.Helper()
+	blob, err := os.ReadFile(filepath.Join("testdata", filename))
+	if err != nil {
+		t.Fatalf("read %s: %v", filename, err)
+	}
+	var out map[string][]string
+	if err := json.Unmarshal(blob, &out); err != nil {
+		t.Fatalf("decode testdata/%s: %v", filename, err)
+	}
+	return out
+}
+
+// loadPretokenOperations is the review's "don't fire on brand-new
+// operations" gate: the set of operationIds that existed the day the
+// untokened-parameter rule (and its body-member extension) was frozen. An
+// operation not in this file is new, and gets no say from either baseline —
+// its own code review decides its capability story.
+func loadPretokenOperations(t *testing.T) map[string]bool {
+	t.Helper()
+	blob, err := os.ReadFile(filepath.Join("testdata", "pretoken_operations.json"))
+	if err != nil {
+		t.Fatalf("read pretoken operations: %v", err)
+	}
+	var list []string
+	if err := json.Unmarshal(blob, &list); err != nil {
+		t.Fatalf("decode testdata/pretoken_operations.json: %v", err)
+	}
+	out := make(map[string]bool, len(list))
+	for _, id := range list {
+		out[id] = true
+	}
+	return out
+}
+
+// servedCapabilities is validTokens for the real document: exactly what
+// Capabilities() advertises right now, which is also what
+// TestSpecCapabilityVocabularyMatchesTheRouteTable pins the spec prose to.
+func servedCapabilities() map[string]bool {
+	out := map[string]bool{}
+	for _, token := range Capabilities() {
+		out[token] = true
+	}
+	return out
+}
+
+// TestNewParameterOnExistingOperationHasABehaviorToken is the lint rule S0
+// item 4 asks for: a parameter on an existing operation with no capability
+// token in its own description is undocumented dispatch surface — a client
+// has no way to learn THIS server accepts it without sending it and risking
+// `unknown_parameter`, which is exactly what happened to `sort` (#5666)
+// before `issues.list.sort` closed the gap.
+//
+// The baseline (testdata/pretoken_parameters.json) is a WRITE-ONCE grandfather
+// list: every parameter this document already had the day the rule was
+// written, captured by walking the spec with this same token regex. A
+// parameter on it is exempt permanently, and nothing here ever regenerates
+// the file. Any parameter not on it — present today or added by any later
+// change — must carry a token, which is what makes this a ratchet rather than
+// a one-time sweep: `issues.list.sort` is already the parity fix the rule's
+// own baseline is built from, not an exemption to it.
+func TestNewParameterOnExistingOperationHasABehaviorToken(t *testing.T) {
+	doc := loadSpec(t)
+	ops := specOps(t, doc)
+	baseline := loadPretokenBaseline(t)
+	bodyBaseline := loadPretokenBodyBaseline(t)
+	existingOps := loadPretokenOperations(t)
+	valid := servedCapabilities()
+
+	if missing := untokenedParameters(t, doc, ops, baseline, bodyBaseline, existingOps, valid); len(missing) > 0 {
+		t.Errorf("parameter(s) or request body member(s) on an existing operation carry no capability token "+
+			"that Capabilities() actually serves, and are not on the frozen baseline "+
+			"(internal/httpapi/testdata/pretoken_parameters.json / pretoken_request_body_members.json): %v\n"+
+			"add a `resource.verb` token to the member's own description, the way `sort` on "+
+			"GET /v0/beads/issues advertises `issues.list.sort`", missing)
+	}
+}
+
+// TestPretokenBaselinesNeverGrow pins the three frozen testdata files at
+// their current size (review MEDIUM, "the baseline must never grow"):
+// nothing here ever regenerates them, so the only way their counts change is
+// someone hand-editing a new exemption in, which is exactly what this guards
+// against. A legitimate new parameter or body member must carry its own
+// token, not an entry on these files; a legitimate new OPERATION is added to
+// pretoken_operations.json never — new operations are simply never members of
+// it, by construction, since nothing regenerates it either.
+func TestPretokenBaselinesNeverGrow(t *testing.T) {
+	const (
+		wantParamEntries = 137
+		wantBodyEntries  = 85
+		wantOps          = 41
+	)
+	baseline := loadPretokenBaseline(t)
+	paramEntries := 0
+	for _, params := range baseline {
+		paramEntries += len(params)
+	}
+	if paramEntries != wantParamEntries {
+		t.Errorf("testdata/pretoken_parameters.json has %d grandfathered parameters, want exactly %d "+
+			"(frozen the day the rule was written); if this moved, something added a new exemption instead "+
+			"of a token", paramEntries, wantParamEntries)
+	}
+
+	bodyBaseline := loadPretokenBodyBaseline(t)
+	bodyEntries := 0
+	for _, members := range bodyBaseline {
+		bodyEntries += len(members)
+	}
+	if bodyEntries != wantBodyEntries {
+		t.Errorf("testdata/pretoken_request_body_members.json has %d grandfathered body members, want exactly %d",
+			bodyEntries, wantBodyEntries)
+	}
+
+	existingOps := loadPretokenOperations(t)
+	if len(existingOps) != wantOps {
+		t.Errorf("testdata/pretoken_operations.json has %d operations, want exactly %d "+
+			"(frozen the day the new-operation exemption was added)", len(existingOps), wantOps)
+	}
+}
+
+// TestUntokenedParameterRuleFires is the rule's own falsification, required
+// because TestNewParameterOnExistingOperationHasABehaviorToken is permanently
+// green against a spec written to satisfy it: a synthetic operation proves
+// the CHECK itself still distinguishes the cases it exists to tell apart,
+// independent of anything the real document currently says.
+func TestUntokenedParameterRuleFires(t *testing.T) {
+	doc := map[string]any{} // no $refs in the fixtures below; resolveRef never consults it
+	newOp := func(desc string) specOp {
+		return specOp{
+			method: "GET",
+			path:   "/synthetic",
+			op: map[string]any{
+				"parameters": []any{
+					map[string]any{"name": "widget", "description": desc},
+				},
+			},
+		}
+	}
+	noBody := map[string][]string{}
+	allExisting := map[string]bool{"syntheticOp": true}
+	validTokens := map[string]bool{"synthetic.widget": true, "issues.list": true}
+
+	ops := map[string]specOp{"syntheticOp": newOp("plain prose, no token at all")}
+	if got := untokenedParameters(t, doc, ops, noBody, noBody, allExisting, validTokens); !slices.Equal(got, []string{"syntheticOp.widget"}) {
+		t.Fatalf("untokened, non-grandfathered parameter: got %v, want [syntheticOp.widget]", got)
+	}
+
+	if got := untokenedParameters(t, doc, ops, map[string][]string{"syntheticOp": {"widget"}}, noBody, allExisting, validTokens); len(got) != 0 {
+		t.Fatalf("grandfathered parameter still reported: got %v, want none", got)
+	}
+
+	ops["syntheticOp"] = newOp("carries the `synthetic.widget` token")
+	if got := untokenedParameters(t, doc, ops, noBody, noBody, allExisting, validTokens); len(got) != 0 {
+		t.Fatalf("tokened parameter still reported: got %v, want none", got)
+	}
+
+	// A backticked string shaped like a token but not one Capabilities()
+	// actually serves must still fire: shape alone is not proof (review HIGH).
+	ops["syntheticOp"] = newOp("see `metadata.json` for details")
+	if got := untokenedParameters(t, doc, ops, noBody, noBody, allExisting, validTokens); !slices.Equal(got, []string{"syntheticOp.widget"}) {
+		t.Fatalf("bogus (unserved) token: got %v, want [syntheticOp.widget]", got)
+	}
+
+	// A REAL token, just not one this parameter actually advertises, passes:
+	// Capabilities() has no per-parameter binding to check against, so
+	// membership in the served set is the full extent of this rule (review
+	// HIGH says "a token must be one advertised by Capabilities()", not that
+	// it must be the specific token for this parameter).
+	ops["syntheticOp"] = newOp("reuses an unrelated real token (`issues.list`)")
+	if got := untokenedParameters(t, doc, ops, noBody, noBody, allExisting, validTokens); len(got) != 0 {
+		t.Fatalf("real-but-unrelated token: got %v, want none", got)
+	}
+
+	// A brand-new operation (absent from the existingOps baseline) is exempt
+	// even with no token at all (review MEDIUM, "don't fire on brand-new
+	// operations"). syntheticOp still carries its real-but-unrelated token
+	// from the previous case, so it reports nothing either.
+	ops["brandNewOp"] = newOp("plain prose, no token at all")
+	if got := untokenedParameters(t, doc, ops, noBody, noBody, allExisting, validTokens); len(got) != 0 {
+		t.Fatalf("brand-new operation must not be reported: got %v", got)
+	}
+	// And a nil existingOps (the behavior with no freeze gate at all) does
+	// catch it, so the gate is additive, not a silent replacement for the
+	// baseline check.
+	if got := untokenedParameters(t, doc, ops, noBody, noBody, nil, validTokens); !slices.Equal(got, []string{"brandNewOp.widget"}) {
+		t.Fatalf("nil existingOps must not exempt anything: got %v", got)
+	}
+}
+
+// TestUntokenedRequestBodyMemberRuleFires is TestUntokenedParameterRuleFires'
+// sibling for request body members (review MEDIUM, "extend the rule to
+// request-body members on existing operations").
+func TestUntokenedRequestBodyMemberRuleFires(t *testing.T) {
+	doc := map[string]any{
+		"components": map[string]any{
+			"schemas": map[string]any{
+				"SyntheticRequest": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"widget": map[string]any{"type": "string", "description": "plain prose, no token at all"},
+					},
+				},
+			},
+		},
+	}
+	so := specOp{
+		method: "POST",
+		path:   "/synthetic",
+		op: map[string]any{
+			"requestBody": map[string]any{
+				"content": map[string]any{
+					"application/json": map[string]any{
+						"schema": map[string]any{"$ref": "#/components/schemas/SyntheticRequest"},
+					},
+				},
+			},
+		},
+	}
+	ops := map[string]specOp{"syntheticOp": so}
+	noParams := map[string][]string{}
+	allExisting := map[string]bool{"syntheticOp": true}
+	validTokens := map[string]bool{"synthetic.widget": true}
+
+	if got := untokenedParameters(t, doc, ops, noParams, noParams, allExisting, validTokens); !slices.Equal(got, []string{"syntheticOp body.widget"}) {
+		t.Fatalf("untokened, non-grandfathered body member: got %v, want [syntheticOp body.widget]", got)
+	}
+
+	if got := untokenedParameters(t, doc, ops, noParams, map[string][]string{"syntheticOp": {"widget"}}, allExisting, validTokens); len(got) != 0 {
+		t.Fatalf("grandfathered body member still reported: got %v, want none", got)
+	}
+
+	props := doc["components"].(map[string]any)["schemas"].(map[string]any)["SyntheticRequest"].(map[string]any)["properties"].(map[string]any)
+	props["widget"] = map[string]any{"type": "string", "description": "carries the `synthetic.widget` token"}
+	if got := untokenedParameters(t, doc, ops, noParams, noParams, allExisting, validTokens); len(got) != 0 {
+		t.Fatalf("tokened body member still reported: got %v, want none", got)
 	}
 }
 
@@ -682,7 +1114,8 @@ func TestDefaultsMatchCLIFlags(t *testing.T) {
 // re-adding one costs a test edit.
 var contextResponseAllowlist = []string{
 	"api_version", "backend", "bd_version", "beads_dir", "capabilities",
-	"database", "dolt_mode", "project_id", "repo_root", "schema_version",
+	"database", "dolt_mode", "min_client_wire_revision", "project_id",
+	"repo_root", "schema_version", "wire_revision",
 }
 
 // TestContextResponseAllowlist pins that field set from both sides: the

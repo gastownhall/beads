@@ -342,6 +342,13 @@ var publicForkCacheLines = map[string]bool{
 const (
 	forkCacheEndpoint = "grpc" + "s://rbe-cache.ops.gascity.com:8443"
 	forkCacheInstance = "oss"
+	// zstd cache transfers: only the anonymous fork cache can advertise a
+	// compressor, so only fork-cache may ask for one, and only while
+	// write-bazelrc.sh's cache-zstd-probe.sh finds it advertised (a probe,
+	// not a repository variable: fork pull_request runs see no vars).
+	// Trusted remote-exec and rbe-fork never: their schedulers advertise
+	// none, and Bazel then refuses the remote.
+	forkCacheZstdLine = "build:fork-cache --remote_cache_compression"
 )
 
 // publicRBEForkPin: setup-bazel's fork-credential.sh pins the one endpoint
@@ -575,6 +582,30 @@ func TestBazelNoRemoteEndpointsInTrackedFiles(t *testing.T) {
 	}
 }
 
+// TestNoLocalPlanPathsInTrackedFiles: tracked files must not point readers
+// at a maintainer's private, out-of-repo planning notes (a home-directory
+// planning-notes tree), which no other contributor can open. Cite an
+// in-repo doc, a bead, or a PR instead. The needle is assembled at runtime so
+// this file does not match itself.
+func TestNoLocalPlanPathsInTrackedFiles(t *testing.T) {
+	root := bazelPolicyRoot(t)
+	if !gitRepoAvailable(root) {
+		t.Skip("not a git checkout (e.g. Bazel sandbox); tracked-file scan runs under go test and CI")
+	}
+	needle := "beads-" + "bazel-plan"
+	out, err := exec.Command("git", "-C", root, "grep", "-n", "-I", "-F", "-e", needle).Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return // no matches
+		}
+		t.Fatalf("git grep: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		t.Errorf("%s: tracked file references a local, non-repo %s path; point at an in-repo doc, bead or PR instead", line, needle)
+	}
+}
+
 // --- generated go_srcs filegroups are current -------------------------------
 
 // These checks walk the source checkout, which is not declared as Bazel data,
@@ -759,10 +790,12 @@ var allowedBazelTestTags = map[string]string{
 	"dolt-server": "starts hermetic dolt sql-servers (or completes the lane's job without -short); excluded from --config=prcore/ci, run by --config=doltserver",
 	// The same rules as dolt-server (hermetic servers, remote, fail-closed:
 	// checkDoltServerRules), for the tiers bazel.yml runs only with remote
-	// execution and, for the server storage tier, under the integration
-	// lane's build flags.
+	// execution (and, for the cmd/bd tier, the read-only cache) and, for the
+	// server storage and cmd/bd tiers, under the integration lane's build
+	// flags.
 	"dolt-server-proxied":     "proxied-server cmd/bd tier: starts hermetic dolt sql-servers; excluded from --config=prcore/ci, run by --config=doltserver-proxied",
 	"dolt-server-integration": "server-Dolt storage tier: starts hermetic dolt sql-servers and needs the integration build tag; excluded from --config=prcore/ci, run by --config=doltserver-integration",
+	"dolt-server-cmd":         "cmd/bd Dolt-server tier: the whole integration-tagged cmd/bd suite against hermetic dolt sql-servers; excluded from --config=prcore/ci, run by --config=doltserver-cmd",
 	"embedded":                "embedded-Dolt tier variant; excluded from --config=prcore/ci, run by --config=embedded",
 	"manual":                  "never part of //...: a repro/bench harness, or a build input only another target needs; excluded from --config=prcore/ci",
 	// For a go_test whose every test file is `//go:build integration`: in any
@@ -778,7 +811,7 @@ var allowedBazelTestTags = map[string]string{
 // and vice versa (TestBazelPRCoreExcludedTagsMatchTaxonomy), so a new lane
 // tag lands here, and through bazelIntegrationExcludedTags in the
 // integration lane's filter too.
-var bazelPRCoreExcludedTags = []string{"requires-docker", "dolt-server", "dolt-server-proxied", "dolt-server-integration", "embedded", "manual", "integration-only"}
+var bazelPRCoreExcludedTags = []string{"requires-docker", "dolt-server", "dolt-server-proxied", "dolt-server-integration", "dolt-server-cmd", "embedded", "manual", "integration-only"}
 
 // bazelIntegrationRunsTags are the PR-core-excluded tags --config=integration
 // runs: the integration lane is main.yml's integration jobs, whose
@@ -1232,6 +1265,9 @@ func checkBazelrcForkCache(bazelrc string) []error {
 	var errs []error
 	var opts []bazelrcOption
 	for _, o := range parseBazelrcOptions(bazelrc) {
+		if strings.Contains(o.flag, "remote_cache_compression") {
+			errs = append(errs, errors.New(o.source()+" sets "+o.flag+"; only setup-bazel's generated rc may, for fork-cache while rbe-cache advertises zstd"))
+		}
 		switch {
 		case o.config == "fork-cache":
 			opts = append(opts, o)
@@ -1389,6 +1425,8 @@ func TestBazelForkCacheConfig(t *testing.T) {
 		"slow timeout":               good + "build:fork-cache --remote_timeout=60\n",
 		"zero timeout":               good + "build:fork-cache --remote_timeout=0\n",
 		"duration timeout":           good + "build:fork-cache --remote_timeout=15s\n",
+		"zstd in .bazelrc":           good + "build:fork-cache --remote_cache_compression\n",
+		"trusted zstd in .bazelrc":   good + "build:remote-exec --remote_cache_compression\n",
 		"plain build expands":        good + "build --config=fork-cache\n",
 		"plain common expands":       good + "common --config=fork-cache\n",
 		"plain upload":               good + "build --remote_upload_local_results\n",
@@ -1511,5 +1549,40 @@ func TestBazelrcIntegrationLaneFixtures(t *testing.T) {
 		if err := checkBazelrcIntegrationLane(rc); err == nil {
 			t.Errorf("%s: expected an error for .bazelrc fixture:\n%s", name, rc)
 		}
+	}
+}
+
+// TestBazelRemoteCacheCompressionOnlyForkCache: --remote_cache_compression
+// appears in one place, write-bazelrc.sh's fork-cache line behind
+// the zstd probe. No .bazelrc config, workflow or other action file may set
+// it: every other remote (rbe-west's trusted schedulers on :443, rbe-fork on
+// :8444) advertises no compressor, and Bazel then refuses the remote.
+func TestBazelRemoteCacheCompressionOnlyForkCache(t *testing.T) {
+	root := bazelPolicyRoot(t)
+	files := []string{".bazelrc"}
+	for _, pattern := range []string{".github/workflows/*.yml", ".github/workflows/*.yaml", ".github/actions/*/*"} {
+		m, err := filepath.Glob(filepath.Join(root, pattern))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range m {
+			rel, err := filepath.Rel(root, f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			files = append(files, rel)
+		}
+	}
+	var found []string
+	for _, f := range files {
+		for i, line := range strings.Split(readPolicyFile(t, root, f), "\n") {
+			if strings.Contains(line, "remote_cache_compression") && !strings.HasPrefix(strings.TrimSpace(line), "#") {
+				found = append(found, f+":"+strconv.Itoa(i+1)+": "+strings.TrimSpace(line))
+			}
+		}
+	}
+	want := setupBazelActionDir + "/write-bazelrc.sh:"
+	if len(found) != 1 || !strings.HasPrefix(found[0], want) || !strings.HasSuffix(found[0], `echo "`+forkCacheZstdLine+`"`) {
+		t.Errorf("--remote_cache_compression set at %q; want only %s echo %q", found, want, forkCacheZstdLine)
 	}
 }

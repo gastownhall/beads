@@ -27,7 +27,12 @@
 #
 # BAZEL_FORK_CACHE=true (bazel.yml mode "cache": rbe=cache dispatches, and
 # fork/Dependabot runs while rbe-fork is closed) appends --config=fork-cache:
-# .bazelrc's credential-free, read-only rbe-west cache.
+# .bazelrc's credential-free, read-only rbe-west cache. While that cache
+# advertises zstd (cache-zstd-probe.sh asks its GetCapabilities; any failure
+# means no) it also asks for zstd transfers (--remote_cache_compression). A
+# probe, not a repository variable: fork pull_request runs see no vars. No
+# other mode ever asks, because only the anonymous cache can advertise zstd,
+# and Bazel refuses a remote that does not.
 #
 # RBE_FORK_CERT_FILE + RBE_FORK_KEY_FILE + RBE_FORK_ENDPOINT + RBE_FORK_INSTANCE
 # (bazel.yml modes fork-ro/fork-rw: fork-credential.sh's outputs, a
@@ -132,6 +137,11 @@ umask 077
 	# Bazel's own downloader (the Go SDK, http_archive) already retries;
 	# give slow TLS handshakes and reads twice the default timeouts.
 	echo "common --http_timeout_scaling=2.0"
+	# The client's JVM heap. Bazel's default caps it at 25% of RAM, about
+	# 2 GB on the 8 GB 2 vCPU runners every remote lane uses; //... analysis
+	# fits today, with little headroom. A startup option: key neutral, it only
+	# restarts the server. Each lane reports peak-heap-size to size this.
+	echo "startup --host_jvm_args=-Xmx4g"
 } >"$rc"
 
 # write_pem DEST VALUE: decode base64 (or accept raw PEM) and check it is PEM.
@@ -217,7 +227,15 @@ elif [[ "$set_fields" -ne 0 ]]; then
 	echo "setup-bazel: remote execution is partially configured; BAZEL_REMOTE_EXECUTOR, RBE_TLS_CERT and RBE_TLS_KEY must be set together (or none, for local execution)" >&2
 	exit 1
 elif [[ "$fork_cache" == true ]]; then
-	echo "build --config=fork-cache" >>"$rc"
+	# zstd for the anonymous cache's transfers while it advertises zstd:
+	# transport only, so action keys are unchanged. The probe never fails
+	# this script; it only decides the line.
+	{
+		echo "build --config=fork-cache"
+		if bash "$(dirname "${BASH_SOURCE[0]}")/cache-zstd-probe.sh"; then
+			echo "build:fork-cache --remote_cache_compression"
+		fi
+	} >>"$rc"
 	cache=true
 	echo "setup-bazel: read-only remote cache (rbe-cache); executing locally"
 else

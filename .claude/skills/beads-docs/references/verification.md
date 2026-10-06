@@ -55,7 +55,7 @@ all of:
 1. **Redirect** — add an entry to the `redirects` array in `docs/docs.json`
    from the old route to the new one.
 2. **Rewrite inbound links** — grep the whole repo, not just `docs/`:
-   README.md, AGENTS.md, AGENT_INSTRUCTIONS.md, engdocs/, examples/,
+   README.md, every AGENTS.md (root and nested), engdocs/, examples/,
    npm-package/, plugins/, integrations/, scripts, and Go comments.
 3. **Check bd's printed output** — if `bd` prints the old path (grep `cmd/`
    and `internal/templates/` for it), fix the Go source to print the new

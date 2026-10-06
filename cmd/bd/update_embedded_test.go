@@ -243,14 +243,19 @@ func TestEmbeddedUpdateRoutedStoreCommitsTargetHead(t *testing.T) {
 	}
 }
 
-func TestEmbeddedUpdate(t *testing.T) {
+// TestEmbeddedUpdateFields and TestEmbeddedUpdateLifecycle were split from
+// TestEmbeddedUpdate (originally ~267s, measured under --config=embedded)
+// into 2 top-level tests over disjoint subtest groups, for CI shard balance
+// (see scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedUpdateFields(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
 	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
-	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tu")
+	dir, _, _ := bdInit(t, bd, "--prefix", "tu")
 
 	t.Run("update_direct_flag_mapping", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Multi update", "--type", "task", "--metadata", `{"remove":"me"}`)
@@ -527,6 +532,16 @@ func TestEmbeddedUpdate(t *testing.T) {
 			t.Errorf("expected status=deferred, got %q", got.Status)
 		}
 	})
+}
+
+func TestEmbeddedUpdateLifecycle(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tu")
 
 	t.Run("relative_defer_is_persisted_in_UTC", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "UTC defer test", "--type", "task")
@@ -726,6 +741,18 @@ func TestEmbeddedUpdate(t *testing.T) {
 // TestEmbeddedUpdateConcurrent exercises create, update, and list operations
 // concurrently to verify EmbeddedDoltStore handles concurrent CLI invocations
 // without panics, data corruption, or deadlocks.
+//
+// issuesPerWorker was 5 (F1 review S1): under real CI-like load (several
+// Bazel shards running concurrently, -test.parallel=4), this test's 10
+// workers x 5 issues x 4 serialized `bd` subprocess invocations each (create,
+// 2 updates, list; writes serialize behind the embedded engine's single-
+// writer lock) measured ~452s -- the queueing-delay explanation once
+// proposed for this and three other outliers was wrong (see
+// scripts/ci/embedded_cmd_test_durations.json's header); this is genuine
+// CPU-bound work under contention. issuesPerWorker=2 keeps the same
+// invariants under test (duplicate-ID detection across all numWorkers
+// concurrent processes; each worker's own list-count-is-non-decreasing check
+// still exercises its loop body once) while cutting serialized work to 40%.
 func TestEmbeddedUpdateConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -737,7 +764,7 @@ func TestEmbeddedUpdateConcurrent(t *testing.T) {
 
 	const (
 		numWorkers      = 10
-		issuesPerWorker = 5
+		issuesPerWorker = 2
 	)
 
 	type workerResult struct {

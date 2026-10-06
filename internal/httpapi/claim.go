@@ -349,6 +349,7 @@ var (
 	_ uow.CycleDetectorSource       = timedProvider{}
 	_ uow.EdgeReaderSource          = timedProvider{}
 	_ uow.GraphCounterSource        = timedProvider{}
+	_ uow.BatchGetterSource         = timedProvider{}
 	_ uow.RelationsSource           = timedProvider{}
 	_ uow.CommenterSource           = timedProvider{}
 	_ uow.BlockingAnnotatorSource   = timedProvider{}
@@ -465,6 +466,12 @@ func (p timedProvider) EdgeReader() (issueops.EdgeReader, error) {
 // reason and with the same hazard as IssueReader.
 func (p timedProvider) GraphCounter() (issueops.GraphCounter, error) {
 	return uow.NewGraphCounter(p)
+}
+
+// BatchGetter builds the batch-read role OVER THIS WRAPPER, for the same
+// reason and with the same hazard as IssueReader.
+func (p timedProvider) BatchGetter() (issueops.BatchGetter, error) {
+	return uow.NewBatchGetter(p)
 }
 
 // IssueRelations builds the single-anchor neighbor role OVER THIS WRAPPER, for

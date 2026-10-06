@@ -40,6 +40,7 @@ go_library(
         "cleanup.go",
         "close.go",
         "close_direct.go",
+        "close_if_revision.go",
         "close_proxied_server.go",
         "closed_delete_candidates.go",
         "codex_hook.go",
@@ -158,6 +159,7 @@ go_library(
         "hooks.go",
         "human.go",
         "human_proxied_server.go",
+        "if_revision.go",
         "import.go",
         "import_path.go",
         "import_proxied_server.go",
@@ -283,6 +285,7 @@ go_library(
         "restore.go",
         "routed.go",
         "routing_read.go",
+        "routing_role.go",
         "rules.go",
         "sandbox_unix.go",
         "sandbox_windows.go",
@@ -522,6 +525,7 @@ go_test(
         "backup_dolt_test.go",
         "backup_embedded_test.go",
         "backup_export_failure_test.go",
+        "backup_export_watermark_test.go",
         "backup_lock_test.go",
         "backup_proxied_external_integration_test.go",
         "backup_proxied_local_integration_test.go",
@@ -556,10 +560,13 @@ go_test(
         "close_failure_report_test.go",
         "close_fanin_proxied_integration_test.go",
         "close_gate_test.go",
+        "close_if_revision_embedded_test.go",
+        "close_if_revision_proxied_test.go",
         "close_last_touched_test.go",
         "close_proxied_integration_test.go",
         "close_reason_file_test.go",
         "close_routing_test.go",
+        "cobra_flag_reset_test.go",
         "codex_hook_test.go",
         "command_telemetry_test.go",
         "comment_promote_embedded_test.go",
@@ -650,6 +657,7 @@ go_test(
         "defer_wake_proxied_integration_test.go",
         "defer_wake_server_test.go",
         "delete_embedded_test.go",
+        "delete_if_revision_proxied_concurrency_test.go",
         "delete_input_test.go",
         "delete_proxied_integration_test.go",
         "delete_proxied_server_output_test.go",
@@ -809,6 +817,11 @@ go_test(
         "identity_preview_gate_cgo_test.go",
         "identity_preview_gate_test.go",
         "identity_preview_refusal_test.go",
+        "if_revision_embedded_test.go",
+        "if_revision_proxied_close_delete_test.go",
+        "if_revision_reassign_fence_embedded_test.go",
+        "if_revision_reassign_fence_proxied_test.go",
+        "if_revision_test.go",
         "import_chunking_embedded_test.go",
         "import_chunking_test.go",
         "import_embedded_test.go",
@@ -855,6 +868,7 @@ go_test(
         "jira_test.go",
         "json_flag_shadow_test.go",
         "kv_embedded_test.go",
+        "kv_prefix_test.go",
         "kv_proxied_integration_test.go",
         "kv_test.go",
         "label_embedded_test.go",
@@ -1090,6 +1104,8 @@ go_test(
         "shared_migrate_consent_test.go",
         "shared_server_cfgnil_test.go",
         "shared_server_cleanup_test.go",
+        "shared_server_delete_if_revision_concurrency_test.go",
+        "shared_server_if_revision_concurrency_test.go",
         "shared_server_integration_test.go",
         "shared_store_migrate_gate_test.go",
         "ship_embedded_test.go",
@@ -1317,6 +1333,7 @@ go_test(
         "@com_github_spf13_pflag//:pflag",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
+        "@in_gopkg_yaml_v3//:yaml_v3",
         "@land_charm_lipgloss_v2//:lipgloss",
         "@org_golang_x_sync//errgroup",
         "@org_golang_x_term//:term",
@@ -1361,13 +1378,17 @@ go_test(
     }),
 )
 
-# bd_test as PR Risk's "Test (Embedded Dolt Cmd N/20)" jobs run it: shard k
-# runs .github/scripts/embedded-test-shard.sh k 20 (the TestEmbedded* functions
-# of *_embedded_test.go, assigned by the committed manifest) against this
-# configuration's bd_test, with BEADS_TEST_EMBEDDED_DOLT=1 and the race bd
-# (//cmd/bd:bd under --config=embedded) as the subprocess binary, like the
-# jobs' /tmp/bd-embedded-test. It repeats bd_test's `env` (the wrapper cannot
-# inherit it). shard_count must stay equal to the manifest's shard total.
+# Runs 50 Bazel shards against the TestEmbedded* functions of
+# *_embedded_test.go, assigned by the manifest's 50-shard block
+# (duration-balanced; see scripts/ci/embedded_cmd_test_durations.json),
+# against this configuration's bd_test with BEADS_TEST_EMBEDDED_DOLT=1 and
+# the race bd (//cmd/bd:bd under --config=embedded) as the subprocess
+# binary. This is a *different* shard count from PR Risk's legacy fork/push
+# jobs, "Test (Embedded Dolt Cmd N/20)" (pr-risk.yml, main.yml): those keep
+# running 20 shards of their own, frozen hand-assigned block in the same
+# manifest file — shard k here is not the same split as their shard k. It
+# repeats bd_test's `env` (the wrapper cannot inherit it). shard_count must
+# stay equal to this lane's manifest block's shard total.
 #
 # Tags:
 #   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
@@ -1401,7 +1422,7 @@ sh_test(
         "BEADS_TEST_EMBEDDED_DOLT": "1",
         "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
     },
-    shard_count = 20,
+    shard_count = 50,
     tags = ["embedded"],
 )
 
@@ -1455,6 +1476,10 @@ sh_test(
         "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
         "BEADS_TEST_PROXIED_SERVER": "1",
         "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+        # The external-unix / outage-matrix subtests bridge endpoints with
+        # socat, which the workers have: fail rather than skip if it is
+        # missing (requireSocat). The legacy GitHub lane leaves this unset.
+        "BEADS_TEST_REQUIRE_SOCAT": "1",
         # The 4-vCPU runner shape: -test.parallel defaults to GOMAXPROCS, and
         # the job runs 4 tests at once, not one per worker core (39
         # concurrent `bd init --proxied-server` against one server hung a
@@ -1463,6 +1488,64 @@ sh_test(
     },
     shard_count = 30,
     tags = ["dolt-server-proxied"],
+)
+
+# The whole cmd/bd suite, as --config=doltserver-cmd builds it (exactly
+# --config=integration's build: the integration and gms_pure_go build tags,
+# race, so the two lanes share bd_test's compile), against a hermetic dolt sql-server:
+# TestMain starts the shared test server from the pinned dolt in the test
+# wrapper's runfiles (BEADS_TEST_DOLT_SERVER=local), and a server that
+# cannot start fails the target (BEADS_TEST_REQUIRE_DOLT_CONTAINER=1)
+# instead of skipping every Dolt-gated test into a cached pass. These are
+# the cmd/bd tests no other lane runs: every other configuration of bd_test
+# passes BEADS_TEST_SKIP=dolt (prcore/ci, integration) or runs only its
+# manifest (bd_embedded_test, bd_proxied_test), and so do main.yml's and
+# nightly.yml's go test jobs. No -test.run/-test.skip: the Go binary shards
+# itself over every top-level test (rules_go's TEST_SHARD_INDEX), so each
+# runs in exactly one shard, and check_testcases.py fails a shard that ran
+# none. It repeats bd_test's `env` (the wrapper cannot inherit it).
+#
+# Tags:
+#   dolt-server-cmd: the cmd/bd Dolt-server tier; starts hermetic dolt
+#     sql-servers and needs the integration build tag; excluded from
+#     --config=prcore/ci and --config=integration, selected by
+#     --config=doltserver-cmd.
+sh_test(
+    name = "bd_dolt_server_test",
+    size = "large",
+    # --config=doltserver-cmd's -test.timeout=19m fires (with a goroutine
+    # dump) before Bazel's 1200s action limit (eternal under the lane's
+    # --test_timeout), which kills without one.
+    timeout = "eternal",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :bd_test)"],
+    data = [
+        ":bd_for_tests",
+        ":bd_test",
+        ":preflight_go_fixture",
+        "@go_sdk//:bin/gofmt",
+    ],
+    env = {
+        "BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)",
+        "BEADS_TEST_DOLT_SERVER": "local",
+        # The integration jobs' global git identity (tools/bazel/test_env.sh).
+        "BEADS_TEST_GIT_IDENTITY": "1",
+        "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
+        "BEADS_TEST_PREFLIGHT_GO": "$(rlocationpath :preflight_go_fixture)",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+        # TestSharedServerConcurrent (skipped everywhere else) as a bounded
+        # smoke: 6 concurrent bd clients, 3 per database, against 2
+        # shared-server projects (~1 min; bd init alone is ~8s a project).
+        "BEADS_TEST_SHARED_SERVER_CONCURRENT": "1",
+        "BEADS_TEST_SS_CLIENTS": "6",
+        "BEADS_TEST_SS_DIRS": "2",
+        # The 4-vCPU runner shape, as in bd_proxied_test: -test.parallel
+        # defaults to GOMAXPROCS, and every parallel test opens stores
+        # against the one shared server.
+        "GOMAXPROCS": "4",
+    },
+    shard_count = 16,
+    tags = ["dolt-server-cmd"],
 )
 
 # CLI flag registrations pinned by //internal/httpapi spec parity tests.
@@ -1478,6 +1561,13 @@ exports_files(
 exports_files(
     ["init_safety_help.go"],
     visibility = ["//test/docsync:__pkg__"],
+)
+
+# Contributor agent instructions; root AGENTS.md links them and
+# //:docsync_files checks those links.
+exports_files(
+    ["AGENTS.md"],
+    visibility = ["//:__pkg__"],
 )
 
 # Release-metadata surfaces gated by //internal/versioncheck's releaseSources

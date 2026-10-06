@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `backends.Backend` gains an optional `OpenWith(ctx, beadsDir, OpenOptions)`
+  and a `Remote bool` field for a registered extension backend (for example
+  an HTTP client registrant). `OpenOptions{Credential, HTTPClient,
+  UserAgent}` carries per-open injections — the motivating case is a single
+  embedder process serving many workspaces with distinct credentials against
+  a backend whose dialer would otherwise be process-global. `Open` keeps
+  working unmodified: a backend with no `OpenWith` falls back to it and
+  ignores `HTTPClient`/`UserAgent`, but refuses rather than silently drops a
+  non-nil `Credential`. The public SDK gains `beads.OpenBestAvailableWith`
+  (and the `backend` package's matching aliases); `beads.OpenBestAvailable`
+  is now that function called with a zero `OpenOptions`, with identical
+  behavior for every existing backend. `doltserver.ResolvePhysicalRoots` now
+  recognizes a registered remote backend (`backends.IsRemote`) before any
+  Dolt-mode check, so a remote-backend workspace is never misclassified as
+  having a local Dolt root to gate.
+- `bd serve`'s `GET /v0/beads/context` now reports `wire_revision` (the
+  non-additive wire-shape counter for this build) and
+  `min_client_wire_revision` (the oldest revision this build still answers
+  correctly). A client may declare the revision it was built for on any
+  request via the optional `Bd-Wire-Revision` header (a plain non-negative
+  decimal — no leading `+` or leading zero); a declared revision below
+  `min_client_wire_revision` is refused with `400 invalid_argument`/`reason:
+  "wire_revision_unsupported"` and `min_wire_revision`, `wire_revision`, and
+  `bd_version` fields naming this server's floor, current revision, and
+  release string. The header is absent by default and an absent header is
+  served exactly as before — this is additive, not a new precondition on
+  existing clients. A client with no `wire_revision` signal to read yet may
+  infer one from `bd_version` only as an ADVISORY hint (string-or-number,
+  never a refusal on an inferred `0`) — see the `wire_revision` property's
+  inference notes in `internal/httpapi/spec/openapi.v0.yaml` for the cutoff
+  and known-exception builds. See `internal/httpapi/wire_revision.go` and
+  that same property for the full revision history.
+- `GET /v0/beads/issues`'s `sort` parameter now advertises the
+  `issues.list.sort` capability token, the same way an operation itself
+  does, and a CI rule
+  (`TestNewParameterOnExistingOperationHasABehaviorToken`) requires every
+  new parameter on an existing operation, or new request body member on an
+  existing operation, to carry a token that `Capabilities()` actually
+  advertises (not just backticked `a.b` text shaped like one). Three frozen
+  baselines (`internal/httpapi/testdata/pretoken_*.json`) grandfather what
+  predates the rule and are pinned never to grow
+  (`TestPretokenBaselinesNeverGrow`); a brand-new operation is permanently
+  exempt — its own review decides its capability story.
+- A CI golden digest (`internal/httpapi/wireshape`) pins the JSON name,
+  type, format, enum, required-ness, and nullability of every EXISTING
+  response AND request-body member across the whole HTTP spec — including
+  array item shape and `additionalProperties` value shape — recursing
+  through `$ref` and through a schema's own `allOf` or `oneOf`, and fails if
+  any changes without `wire_revision` bumping to match;
+  `go run ./internal/httpapi/wireshape/cmd/gendigest` refuses to write a
+  changed or removed entry unless `wire_revision` has moved past what the
+  existing golden recorded, and refuses any write at a lower
+  `wire_revision` (purely additive entries otherwise always write). The
+  same digest also pins every operation PARAMETER (query, path and header),
+  keyed by operationId + location + name, and records its type, item shape,
+  enum, required-ness, effective style and explode (OpenAPI's defaults
+  filled in where unset), and default — a parameter retyped, re-enumerated,
+  narrowed, re-serialized, switched required, or removed is non-additive
+  exactly like a response or request-body member. A new member or
+  parameter always counts as additive, even a REQUIRED one an old client
+  will not send, and value constraints (`maxLength`, `pattern` and the
+  like) are outside the digest: such changes need their own review against
+  `wire_revision`.
+
 ### Changed
 
 - `bd preflight --fix --json` no longer returns a `Version sync` fix result:
@@ -19,7 +85,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `.githooks` markers and `uv.lock` and leaves any other drifted file as it was.
 
 ### Fixed
+- **PRs based on `hotfix/**` branches now run full CI, not just
+  cross-version historical smokes and triage labeling.** `pr.yml`,
+  `pr-risk.yml`, `conformance.yml`, `cross-version-smoke.yml` and
+  `regression.yml` all trigger `pull_request` on `main` and `release/**`,
+  but not on `hotfix/**` — a backport PR based on a hotfix line (the same
+  position `release/**` was added for) got no unit shards, no lint, no
+  risk gate, and no required CI Gate at all: 15 passing cross-version
+  smokes and triage jobs, nothing else. Added `hotfix/**` alongside
+  `release/**` in all five (#7148).
 
+
+- **Ordinary bd commands now wait out a maintenance operation instead of
+  failing at once.** While `bd init`, `bd backup restore`, `bd migrate` or
+  `bd bootstrap` holds the workspace gate exclusively, every other bd command
+  on that workspace — and, in shared-server mode, on every project sharing
+  the server (another project's ~8s `bd init`) — failed immediately with "a
+  maintenance operation is running". They now wait up to 30s (one "waiting
+  for another bd process" notice after 2s; Ctrl-C aborts), then fail with the
+  same error naming the bound (and, in shared-server mode, saying the holder
+  may be another project). Override with `BEADS_GATE_WAIT_TIMEOUT` (`1m`,
+  `90`); scripts that relied on the old fail-fast behavior should set
+  `BEADS_GATE_WAIT_TIMEOUT=0`. Git hooks stay fail-fast so a commit or
+  checkout is never stalled. Waiting is writer-fair: once a maintenance
+  operation is waiting for the gate, newly started commands queue behind it,
+  so a steady stream of short commands can no longer starve `bd init`. The
+  queue only ever delays a command, never fails it, and a maintenance
+  operation that cannot get in (for example behind a `bd list --watch`)
+  stops queueing others after 10s. Queued maintenance operations run one
+  after another, and a waiting command waits for all of them. The queue
+  marker is an OS lock beside the gate (`*.gate.lock.intent`, covered by the
+  existing `*.gate.lock*` gitignore pattern), so a crashed waiter never
+  leaves a stale queue behind. `bd init`'s own wait (`BEADS_INIT_GATE_TIMEOUT`)
+  rises from 30s to 60s, since back-to-back inits under load take 10-15s
+  each.
+
+- **Concurrent `bd init --shared-server` runs in different projects no
+  longer refuse each other.** Every shared-server project gates the one shared
+  dolt data dir, and `bd init` holds that gate exclusively for its ~8s run but
+  waited only 5s for it, so a second init (or an init during another
+  project's long command) failed with "bd init refuses to run over live bd
+  activity". `bd init` now waits (60s by default, see the gate-wait entry
+  above), printing one "waiting for another bd process on the shared server"
+  notice after 2s, then fails with the same refusal naming the bound.
+  Override it with `BEADS_INIT_GATE_TIMEOUT` (`2m`, `90`). Other exclusive
+  operations keep their 5s wait.
+
+- **A proxied-server command against an unreachable external Dolt upstream
+  now fails within about a second with a clear error instead of stalling
+  ~20-30s.** The local db proxy stayed up, so the client only saw a bare
+  close, which the bootstrap ping retried as a transient drop for its whole
+  30s budget before reporting `invalid connection`. The proxy now answers such
+  a connection with a MySQL error (2003, prefixed `beads db proxy:`) saying
+  what happened: the dial was refused / the socket is missing / the host is
+  unreachable, or the upstream closed the connection before the MySQL greeting
+  (down, restarting, or at its connection limit). The client retries that
+  error only for about a second, so an endpoint that is flapping or rebinding
+  is still ridden out within one command. A backend that drops a connection
+  after the greeting, a dial timeout, and every refusal from a managed (local
+  sidecar) backend keep the full transient retry.
 - **`bd list` no longer silently drops all but the last repeated filter flag.**
   `--status`, `--state`, and `--id` were plain string flags, so
   `bd list --status open --status closed --status pinned` kept only `pinned` —

@@ -146,6 +146,9 @@ if [[ -z "$BEADS_TEST_REPO_ROOT" ]]; then
     exit 1
 fi
 
-echo "Running: $BIN (cwd=$PKGDIR_ABS) ${TEST_ARGS[*]} ${PASSTHROUGH[*]}" >&2
+# PASSTHROUGH is usually empty. Expand it with the ${arr[@]+...} guard: under
+# `set -u`, bash < 4.4 (macOS's /bin/bash is 3.2) treats a bare expansion of
+# an empty array as an unbound variable and aborts before the exec.
+echo "Running: $BIN (cwd=$PKGDIR_ABS) ${TEST_ARGS[*]} ${PASSTHROUGH[*]+${PASSTHROUGH[*]}}" >&2
 cd "$PKGDIR_ABS"
-exec "$BIN" "${TEST_ARGS[@]}" "${PASSTHROUGH[@]}"
+exec "$BIN" "${TEST_ARGS[@]}" ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}

@@ -33,6 +33,10 @@ const (
 	prRiskWorkflowName     = "pr-risk.yml"
 	prRiskCoverageJobName  = "bazel-coverage"
 	prRiskPullRequestValue = "${{ github.event_name == 'pull_request' }}"
+	// A merge group (merge queue) is covered like a same-repo PR: it runs
+	// on this repository's gh-readonly-queue/* branch with the CI secrets
+	// and its actor is github-merge-queue[bot].
+	prRiskMergeGroupValue = "${{ github.event_name == 'merge_group' }}"
 	// pr-risk.yml's and pr.yml's gate id for the decision job's result.
 	prRiskCoverageGateID = "BAZEL_COVERAGE"
 	// build-embedded's artifact (embedded-test-binaries) feeds exactly the
@@ -160,12 +164,20 @@ func (f rbeFacts) String() string {
 		f.event, f.rbeVar, f.secret != "", f.fork, f.retired, f.dependabot, f.coversForks, f.mint)
 }
 
-// covers: whether a pull_request with tier i's flag set is covered, the
-// decision both workflows must take for tier i: same-repo, non-Dependabot
-// PRs always; fork and Dependabot PRs while BAZEL_COVERS_FORKS is "true".
-// Never what the mint says: a covered fork run it does not serve is red.
+// covers: whether a run with tier i's flag set is covered, the decision
+// both workflows must take for tier i: every merge group (the queue's
+// branch is this repository's, with the CI secrets; bazel.yml's rbe job
+// never treats it as a fork); same-repo, non-Dependabot PRs always; fork
+// and Dependabot PRs while BAZEL_COVERS_FORKS is "true". Never what the
+// mint says: a covered fork run it does not serve is red.
 func (f rbeFacts) covers(i int) bool {
-	return strings.EqualFold(f.retired[i], "true") && f.event == "pull_request" &&
+	if !strings.EqualFold(f.retired[i], "true") {
+		return false
+	}
+	if f.event == "merge_group" {
+		return true
+	}
+	return f.event == "pull_request" &&
 		(!f.fork && !f.dependabot || strings.EqualFold(f.coversForks, "true"))
 }
 
@@ -259,6 +271,8 @@ func evalRBEExpr(t *testing.T, expr string, f rbeFacts, with map[string]string) 
 		return ""
 	case prRiskPullRequestValue:
 		return strconv.FormatBool(f.event == "pull_request")
+	case prRiskMergeGroupValue:
+		return strconv.FormatBool(f.event == "merge_group")
 	case prRiskDependabotValue:
 		return strconv.FormatBool(f.dependabot)
 	case "${{ vars.RBE_WEST_WORKERS == 'true' }}":
@@ -330,7 +344,7 @@ func TestPRRiskBazelCoverageJob(t *testing.T) {
 			prRiskCoverageJobName, job.Needs, job.If, job.RunsOn, job.Env, job.ContinueOnError, job.TimeoutMinutes, sameRepoBlacksmith2vcpu)
 	}
 	wantOutputs := map[string]string{}
-	wantEnv := map[string]string{"PULL_REQUEST": prRiskPullRequestValue, "DEPENDABOT": prRiskDependabotValue, "COVERS_FORKS": prCoversForksValue}
+	wantEnv := map[string]string{"PULL_REQUEST": prRiskPullRequestValue, "MERGE_GROUP": prRiskMergeGroupValue, "DEPENDABOT": prRiskDependabotValue, "COVERS_FORKS": prCoversForksValue}
 	for _, r := range retiredTiers {
 		wantOutputs[r.output] = "${{ steps.decide.outputs." + r.output + " }}"
 		wantEnv[r.envKey] = r.retiredValue()
@@ -708,8 +722,13 @@ func TestPRRiskDecisionMatchesBazelMode(t *testing.T) {
 		{"covered Dependabot PR, rbe-fork ro", rbeFacts{"pull_request", "true", "", false, both, true, "true", "ro"}, "fork-ro", coveredAll("true"), true, nil},
 		{"covered Dependabot PR, rbe-fork closed", rbeFacts{"pull_request", "", "", false, both, true, "true", "closed"}, "cache", coveredAll("true"), false, allRetired},
 		{"covered fork PR, only pr.yml's jobs retired, rbe-fork closed", rbeFacts{"pull_request", "true", "", true, prOnly, false, "true", "closed"}, "cache", map[string]string{"embedded": "false", "dolt_server": "false", "pr_lanes": "true"}, false, []string{"BAZEL_PR_LANES_RETIRED"}},
-		{"merge_group", rbeFacts{"merge_group", "true", "x", false, both, false, "false", ""}, "remote", coveredAll("false"), true, nil},
-		{"merge_group, var unset", rbeFacts{"merge_group", "", "x", false, both, false, "false", ""}, "skip", coveredAll("false"), true, nil},
+		// Merge queue: covered like a same-repo PR (the legacy tiers stay
+		// retired), so the Bazel lanes must run remotely and pass.
+		{"merge_group", rbeFacts{"merge_group", "true", "x", false, both, false, "false", ""}, "remote", coveredAll("true"), true, nil},
+		{"merge_group, kill switch (var unset)", rbeFacts{"merge_group", "", "x", false, both, false, "false", ""}, "skip", coveredAll("true"), false, allRetired},
+		{"merge_group, executor secret missing", rbeFacts{"merge_group", "true", "", false, both, false, "false", ""}, "cache", coveredAll("true"), false, allRetired},
+		{"merge_group, flags reverted, var unset", rbeFacts{"merge_group", "", "x", false, none, false, "false", ""}, "skip", coveredAll("false"), true, nil},
+		{"merge_group, only embedded retired", rbeFacts{"merge_group", "true", "x", false, embOnly, false, "false", ""}, "remote", map[string]string{"embedded": "true", "dolt_server": "false", "pr_lanes": "false"}, true, nil},
 	} {
 		d := decide(t, c.f)
 		if !reflect.DeepEqual(d.covered, c.covered) || d.mode != c.mode {
@@ -1081,11 +1100,25 @@ func TestBazelRetiredLanesCheckListedTestsRan(t *testing.T) {
 		// a different number of shards than this PR Risk job's matrix. Zero
 		// means "same as this suite's PR Risk job matrix size" (the common
 		// case for a lane that is a drop-in retirement of the legacy job).
-		// -1 means "read cmd/bd:bd_proxied_test's own shard_count from
-		// cmd/bd/BUILD.bazel" (bazelProxiedShardCount); only label ==
-		// "//cmd/bd:bd_proxied_test" may use -1 (enforced below), so
-		// copying this onto another suite needs a reviewed change there.
+		// -1 means "read this suite's label's own shard_count live from its
+		// BUILD.bazel rule", via the liveShardCount dispatch table below
+		// (bazelProxiedShardCount, bazelEmbeddedCmdShardCount,
+		// bazelEmbeddedStorageShardCount); only a label present in that
+		// table may use -1 (enforced below), so copying this onto another
+		// suite needs a reviewed change there.
 		shardCount int
+	}
+	// liveShardCount dispatches a suite's -1 shardCount to the accessor that
+	// reads its target's own shard_count from its BUILD.bazel rule — the
+	// single source of truth for a Bazel-only lane's shard split, which no
+	// longer has to equal the retired PR Risk job's matrix size (F2's
+	// bd_proxied_test; F1's bd_embedded_test and
+	// embeddeddolt_embedded_test). See bazelProxiedShardCount's doc comment
+	// (scripts/ci_workflow_test.go) for the shared rationale.
+	liveShardCount := map[string]func(*testing.T) int{
+		"//cmd/bd:bd_proxied_test":                                   bazelProxiedShardCount,
+		"//cmd/bd:bd_embedded_test":                                  bazelEmbeddedCmdShardCount,
+		"//internal/storage/embeddeddolt:embeddeddolt_embedded_test": bazelEmbeddedStorageShardCount,
 	}
 	for _, c := range []struct {
 		lane, config string
@@ -1093,8 +1126,18 @@ func TestBazelRetiredLanesCheckListedTestsRan(t *testing.T) {
 		whole        []string
 	}{
 		{bazelEmbedJobName, "embedded", []suite{
-			{"test-embedded-cmd", "Test", "//cmd/bd:bd_embedded_test", ".github/scripts/embedded-test-shard.sh", 0},
-			{"test-embedded-storage", "Test", "//internal/storage/embeddeddolt:embeddeddolt_embedded_test", ".github/scripts/embedded-storage-test-shard.sh", 0},
+			// bazel-embedded runs its own duration-balanced manifest blocks
+			// (scripts/ci/embedded_{cmd,storage}_test_durations.json), not
+			// PR Risk's frozen 20- and 5-shard blocks (slice F1): neither is
+			// a drop-in retirement of its legacy job's shard count, just its
+			// tests. bazelEmbeddedCmdShardCount/bazelEmbeddedStorageShardCount
+			// read the real counts from BUILD.bazel, making these suites'
+			// `want` (below) genuine cross-file pins against bazel.yml's own
+			// check_shard_coverage.py arguments, not independently
+			// hard-coded literals that could drift from BUILD.bazel
+			// unnoticed (S1).
+			{"test-embedded-cmd", "Test", "//cmd/bd:bd_embedded_test", ".github/scripts/embedded-test-shard.sh", -1},
+			{"test-embedded-storage", "Test", "//internal/storage/embeddeddolt:embeddeddolt_embedded_test", ".github/scripts/embedded-storage-test-shard.sh", -1},
 		}, []string{"//internal/storage/embeddeddolt:embeddeddolt_conformance_core_test", "//internal/storage/embeddeddolt:embeddeddolt_conformance_audit_test"}},
 		{bazelProxiedJobName, "doltserver-proxied", []suite{
 			// bazel-proxied runs its own duration-balanced manifest block
@@ -1106,9 +1149,7 @@ func TestBazelRetiredLanesCheckListedTestsRan(t *testing.T) {
 			// genuine cross-file pin against bazel.yml's own
 			// check_shard_coverage.py argument, not an independently
 			// hard-coded literal that could drift from BUILD.bazel unnoticed
-			// (S1). This -1 sentinel is deliberately restricted to
-			// bd_proxied_test below: copying it onto another suite requires
-			// touching that guard, not just this literal.
+			// (S1).
 			{"test-proxied-cmd", "Test proxied-server cmd shard", "//cmd/bd:bd_proxied_test", ".github/scripts/proxied-test-shard.sh", -1},
 		}, nil},
 		{bazelServerJobName, "doltserver-integration", []suite{
@@ -1122,10 +1163,11 @@ func TestBazelRetiredLanesCheckListedTestsRan(t *testing.T) {
 			shards := s.shardCount
 			switch {
 			case shards < 0:
-				if s.label != "//cmd/bd:bd_proxied_test" {
-					t.Fatalf("%s: shardCount<0 (read live from BUILD.bazel) is only allowed for //cmd/bd:bd_proxied_test, not %s", s.job, s.label)
+				fn, ok := liveShardCount[s.label]
+				if !ok {
+					t.Fatalf("%s: shardCount<0 (read live from BUILD.bazel) is not configured for %s", s.job, s.label)
 				}
-				shards = bazelProxiedShardCount(t)
+				shards = fn(t)
 			case shards == 0:
 				shards = len(risk.job(t, s.job).Strategy.Matrix.Shard)
 			}
@@ -1394,8 +1436,21 @@ func TestShardScriptsListOnlyRealTests(t *testing.T) {
 				totalsSet[n] = true
 			}
 		}
-		if c.script == ".github/scripts/proxied-test-shard.sh" {
+		switch c.script {
+		case ".github/scripts/proxied-test-shard.sh":
 			totalsSet[bazelProxiedShardCount(t)] = true
+		case ".github/scripts/embedded-test-shard.sh":
+			// F1: the Bazel-only bazel-embedded lane reads a 50-shard cmd
+			// block that no PR-Risk-matrix-only (20-shard) check exercises;
+			// without this, "BUILD.bazel's shard_count and bazel.yml's
+			// check_shard_coverage.py arg both drift to a new total with no
+			// manifest block" passes every policy test (see review S3) --
+			// the lane then silently goes 100% hash fallback and loses its
+			// duration balancing.
+			totalsSet[bazelEmbeddedCmdShardCount(t)] = true
+		case ".github/scripts/embedded-storage-test-shard.sh":
+			// F1: mirrors the cmd case above for the 15-shard storage block.
+			totalsSet[bazelEmbeddedStorageShardCount(t)] = true
 		}
 		totals := make([]int, 0, len(totalsSet))
 		for n := range totalsSet {
@@ -1703,7 +1758,7 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 			map[string]string{
 				"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)", "BEADS_TEST_DOLT_SERVER": "local", "BEADS_TEST_GIT_IDENTITY": "1",
 				"BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)", "BEADS_TEST_PROXIED_SERVER": "1",
-				"BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1", "GOMAXPROCS": "4",
+				"BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1", "BEADS_TEST_REQUIRE_SOCAT": "1", "GOMAXPROCS": "4",
 			},
 		},
 		"//internal/storage/dolt:dolt_server_conformance_test": {
@@ -1867,8 +1922,8 @@ func bazelTierTestRun(config string) string {
 
 // .bazelrc's --config=doltserver-proxied and --config=doltserver-integration,
 // exactly and in order (D2 step 2, as review F4 for embedded): no
-// --test_filter, no -test.short/-test.run/-test.skip, no retries, no result
-// caching. Their targets' own args (the conformance target's -test.run, the
+// --test_filter, no -test.short/-test.run/-test.skip, no retries (results
+// are cached like every lane's; nightly's --config=fresh re-executes). Their targets' own args (the conformance target's -test.run, the
 // legacy job's) are pinned by TestBazelRetiredLanesCannotBeNarrowed.
 var bazelDoltServerRCLines = map[string][]string{
 	"doltserver-proxied": {
@@ -1882,7 +1937,6 @@ var bazelDoltServerRCLines = map[string][]string{
 		"test:doltserver-proxied --test_arg=-test.parallel=4",
 		"test:doltserver-proxied --local_test_jobs=4",
 		"test:doltserver-proxied --remote_download_regex=.*/test\\.(log|xml)$",
-		"test:doltserver-proxied --nocache_test_results",
 		"test:doltserver-proxied --experimental_remote_cache_eviction_retries=0",
 	},
 	"doltserver-integration": {
@@ -1897,15 +1951,14 @@ var bazelDoltServerRCLines = map[string][]string{
 		"test:doltserver-integration --test_arg=-test.parallel=4",
 		"test:doltserver-integration --local_test_jobs=4",
 		"test:doltserver-integration --remote_download_regex=.*/test\\.(log|xml)$",
-		"test:doltserver-integration --nocache_test_results",
 		"test:doltserver-integration --experimental_remote_cache_eviction_retries=0",
 	},
 }
 
 // D2 step 2, as review F2/F4 for embedded: the proxied and server lanes run
-// exactly `bazel test //... --config=<config>` with a BEP and nothing else,
-// their configs are exactly the pinned lines (results never cached), and no
-// .bazelrc line of any config turns caching back on for them.
+// exactly `bazel test //... --config=<config>` (plus nightly's BAZEL_FRESH)
+// with a BEP and nothing else, their configs are exactly the pinned lines,
+// and only test:docker and test:fresh set result caching.
 func TestBazelRetiredLanesArePinned(t *testing.T) {
 	workflow := readCIWorkflow(t, bazelWorkflowName)
 	for lane, config := range bazelRetiredLaneConfigs {
@@ -1927,9 +1980,8 @@ func TestBazelRetiredLanesArePinned(t *testing.T) {
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf(".bazelrc --config=%s lines changed; want exactly:\n%s\ngot:\n%s", config, strings.Join(want, "\n"), strings.Join(got, "\n"))
 		}
-		if !contains(want, "test:"+config+" --nocache_test_results") {
-			t.Errorf("pinned --config=%s lacks --nocache_test_results: the tier's only pre-merge run must execute", config)
-		}
+		// Results are cached like every lane's; only nightly's
+		// --config=fresh re-executes them (ci_merge_queue_test.go).
 	}
 	// Review F1 (step 2): no whole-invocation retry after a remote cache
 	// eviction in any retired lane (it would re-run, and could turn green,
@@ -1954,14 +2006,13 @@ func TestBazelRetiredLanesArePinned(t *testing.T) {
 		}
 	}
 	// A later --cache_test_results (any config the lanes use) would win.
-	allowed := map[string]bool{"test:docker --nocache_test_results": true, "test:embedded --nocache_test_results": true, bazelSoleRunNoCacheLine: true}
-	for config := range bazelDoltServerRCLines {
-		allowed["test:"+config+" --nocache_test_results"] = true
-	}
+	// Only the docker lane and nightly's --config=fresh (appended only when
+	// the caller asks, ci_merge_queue_test.go) turn result caching off.
+	allowed := map[string]bool{"test:docker --nocache_test_results": true, bazelFreshRCLine: true}
 	for _, line := range strings.Split(rc, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "#") && strings.Contains(line, "cache_test_results") && !allowed[line] {
-			t.Errorf(".bazelrc %q: only the docker and retired tiers' configs set test result caching (to off)", line)
+			t.Errorf(".bazelrc %q: only test:docker and test:fresh set test result caching", line)
 		}
 	}
 }

@@ -61,6 +61,39 @@ func normalizeLoadedConfig(cfg *configfile.Config) *configfile.Config {
 	return cfg
 }
 
+// openStoreError frames a failed store-open for the operator. A registered
+// remote backend (backends.IsRemote) is a pure network client of a bd serve
+// with no local database: "failed to open database" misnames the failure, and
+// the "database"-shaped diagnostics the generic path otherwise invites
+// (checking .dolt/ files, a wrong data directory, ...) are the wrong advice
+// for what is really a dial, auth, or protocol failure against a remote
+// server. Every other backend — Dolt, or a registered backend that isn't
+// Remote — keeps the original, unqualified wording. Both framings wrap err
+// with %w, so errors.Is/errors.As consumers (prime's context.DeadlineExceeded
+// check, for one) see the same chain as before: only a Remote backend's
+// message text changes, which is what keeps this additive rather than a
+// behavior change for any existing workspace.
+func openStoreError(backendName string, err error) error {
+	if backends.IsRemote(backendName) {
+		return fmt.Errorf("failed to reach remote backend %q: %w", backendName, err)
+	}
+	return fmt.Errorf("failed to open database: %w", err)
+}
+
+// backendNameForErrorFraming best-effort loads metadata.json to learn which
+// backend a failed open was for, so a caller that does not already have cfg
+// in scope (for example direct mode's single-shot store-open) can still give
+// openStoreError the name it needs. A failure to even read the config
+// degrades to "" — openStoreError's default, Dolt-shaped framing — rather
+// than compounding one error with another.
+func backendNameForErrorFraming(beadsDir string) string {
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return ""
+	}
+	return cfg.GetBackend()
+}
+
 func loadDoltBackendConfig(beadsDir string) (*configfile.Config, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {

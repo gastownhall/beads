@@ -66,11 +66,77 @@ func proxiedUpdateIssueFields(ctx context.Context, id, commitMsg string, updates
 	})
 }
 
-func runAssignProxiedServer(ctx context.Context, args []string, force bool) error {
+// proxiedAssign is bd assign's proxied-server write. A8 (beads#4682) routes
+// the write through issueops.Lifecycle.Update — the same role the direct
+// route's writeOps call uses — instead of the raw
+// proxiedUpdateIssueFields/UpdateIssue path, so --if-revision has a checked
+// write to guard (bd assign had no compare-and-set surface at all before
+// this). The pre-read and the live-claim reassign fence (bd-98s5c) still run
+// first over the same UnitOfWorkProvider surface proxiedMutateIssue always
+// used, rather than the separate issue-query role's accessor, so this verb's
+// capability footprint is unchanged.
+func proxiedAssign(ctx context.Context, id, assignee string, force bool, ifRevision *int64) (*types.Issue, error) {
+	if uowProvider == nil {
+		return nil, fmt.Errorf("proxied-server UOW provider not initialized")
+	}
+	_, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (struct{}, error) {
+		current, _, rerr := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), id)
+		if errors.Is(rerr, storage.ErrNotFound) {
+			return struct{}{}, fmt.Errorf("issue %s not found", id)
+		}
+		if rerr != nil {
+			return struct{}{}, fmt.Errorf("resolving %s: %w", id, rerr)
+		}
+		if verr := validateIssueUpdatable(id, current); verr != nil {
+			return struct{}{}, verr
+		}
+		// mc-zndi7.74: skipped when this pre-read is already stale against an
+		// active --if-revision guard, so a lost race reports precondition_failed
+		// from the guarded write below instead of this policy refusal — see
+		// ifRevisionAlreadyStale's doc.
+		if !ifRevisionAlreadyStale(current, ifRevision) {
+			if verr := validateIssueReassignable(id, current, actor, assignee,
+				uowClaimPoolAliases(ctx, uw), force); verr != nil {
+				return struct{}{}, verr
+			}
+		}
+		return struct{}{}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	ops, err := proxiedIssueLifecycle()
+	if err != nil {
+		return nil, err
+	}
+	result, err := runCommandUpdateMutation(ctx, ops, commandUpdateMutation{
+		actor:   actor,
+		issueID: id,
+		patch: issueops.IssuePatch{
+			Assignee: issueops.Field[string]{Set: true, Value: assignee},
+		},
+		force:           force,
+		expectedVersion: ifRevision,
+		provenance:      "bd: assign " + id,
+	})
+	if err != nil {
+		return nil, err
+	}
+	commandDidWrite.Store(true)
+	return result.Issue, nil
+}
+
+func runAssignProxiedServer(ctx context.Context, args []string, force bool, ifRevision *int64) error {
 	id := args[0]
 	assignee := args[1]
-	updated, err := proxiedUpdateIssueFields(ctx, id, "bd: assign "+id, map[string]any{"assignee": assignee}, force)
+	updated, err := proxiedAssign(ctx, id, assignee, force, ifRevision)
 	if err != nil {
+		if ifRevision != nil {
+			if reported, ok := reportIfRevisionFailure("assigning", id, err, ifRevision); ok {
+				return reported
+			}
+		}
 		return HandleErrorRespectJSON("assign %s: %v", id, err)
 	}
 	if jsonOutput {

@@ -1,0 +1,60 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "wire",
+    srcs = [
+        "client.go",
+        "credential.go",
+        "doc.go",
+        "handshake.go",
+        "paths.go",
+        "problem.go",
+        "revision_tolerance.go",
+        "stream.go",
+        "writes.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/httpclient/wire",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/httpapi/apigen",
+        "//issueops",
+        "@org_golang_x_net//http/httpguts",
+    ],
+)
+
+go_test(
+    name = "wire_test",
+    srcs = [
+        "client_test.go",
+        "credential_source_test.go",
+        "credential_test.go",
+        "handshake_test.go",
+        "handshake_wire_revision_test.go",
+        "helpers_test.go",
+        "paths_test.go",
+        "problem_test.go",
+        "problem_wire_revision_test.go",
+        "project_stamp_test.go",
+        "revision_tolerance_test.go",
+        "skew_test.go",
+        "stream_test.go",
+        "vocabulary_test.go",
+        "writes_batch_cap_test.go",
+        "writes_twospeed_test.go",
+    ],
+    data = [
+        "//cmd/bd:go_srcs",
+        "//internal/httpapi/wireshape:testdata/golden.json",
+        "//internal/httpclient:go_srcs",
+    ] + glob(["*.go"]),
+    embed = [":wire"],
+    deps = [
+        "//internal/httpapi",
+        "//internal/httpapi/apigen",
+        "//internal/httpapi/spec",
+        "//internal/httpclient/encode",
+        "//internal/types",
+        "//issueops",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)

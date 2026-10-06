@@ -109,10 +109,12 @@ var largeBatchApplyDoltShapes = []struct {
 // TestLargeBatchApplyStatementCounts_Dolt pins the ACTUAL number of SQL
 // statements issueops.ApplyBatchInTx issues on the Dolt server (TCP)
 // backend, for each of three measured shapes. Sibling regression baseline to
-// TestLargeBatchApplyStatementCounts_Embedded in the embeddeddolt package —
-// see that test's doc comment for why counts are pinned with a small
-// tolerance rather than exactly, and why a drift beyond it should be
-// re-measured and re-pinned deliberately rather than loosened further.
+// TestLargeBatchApplyStatementCounts{356,712,Classic40}_Embedded in the
+// embeddeddolt package (originally one test, split for CI shard balance;
+// see its doc comment) — see that test's doc comment for why counts are
+// pinned with a small tolerance rather than exactly, and why a drift beyond
+// it should be re-measured and re-pinned deliberately rather than loosened
+// further.
 func TestLargeBatchApplyStatementCounts_Dolt(t *testing.T) {
 	ctx := context.Background()
 
@@ -160,10 +162,14 @@ const statementCountToleranceDolt = 2
 // issued for each measured shape, as last observed on this branch. B2 must
 // lower these; a change for any other reason should be re-measured and
 // re-pinned deliberately, not adjusted to make a failure go away.
+//
+// Re-pinned for the batch-create round-trip work (was 7008 / 14014 / 846);
+// see pinnedEmbeddedStatementCounts in internal/storage/embeddeddolt for the
+// per-change breakdown. The two backends now agree to within the tolerance.
 var pinnedDoltStatementCounts = map[string]int64{
-	"356 (mol 1x)": 7008,
-	"712 (mol 2x)": 14014,
-	"40 (classic)": 846,
+	"356 (mol 1x)": 6396,
+	"712 (mol 2x)": 12791,
+	"40 (classic)": 786,
 }
 
 // BenchmarkLargeBatchApply_Dolt is gated by setupBenchStore's own

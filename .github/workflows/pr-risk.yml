@@ -2,8 +2,16 @@ name: PR Risk
 
 on:
   pull_request:
-    branches: [ main, 'release/**' ]
+    branches: [ main, 'release/**', 'hotfix/**' ]
+  # Merge queue (engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "Merge Queue"):
+  # the ruleset's required gate must also report on each queue entry's
+  # merge-group commit, or a queued PR waits until the queue times it out.
+  # checks_requested is the queue asking for those checks; pinned
+  # explicitly (scripts/ci_merge_queue_test.go). The concurrency group
+  # below keys a merge group on its own gh-readonly-queue/* ref, so queue
+  # runs never cancel each other or a PR's own runs.
   merge_group:
+    types: [ checks_requested ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
@@ -13,7 +21,7 @@ env:
   BD_DISABLE_METRICS: "1"
   BD_DISABLE_EVENT_FLUSH: "1"
   # D2: "true" retires a PR Risk legacy tier on same-repo, non-Dependabot
-  # pull_requests; pr.yml's gated Bazel lane(s) for it are then the tier's
+  # pull_requests and on merge groups (merge queue); pr.yml's gated Bazel lane(s) for it are then the tier's
   # only pre-merge run, and pr.yml's gate goes red unless they ran remotely
   # and passed. Committed, not repo variables, so a re-run can never change
   # them; each must equal pr.yml's / pr-risk.yml's copy
@@ -94,13 +102,15 @@ jobs:
   # test-server-storage* jobs; Bazel `proxied-server tier` and `server-Dolt
   # storage tier`), plus `pr_lanes`, which only pr.yml reads (its own PR
   # Core, build-artifacts, pure-Go, domain+uow and contract corpus jobs).
-  # Each is true only with its committed BAZEL_RETIRES_LEGACY_* flag, on a same-repo (not fork) pull_request whose actor is not
-  # Dependabot. pr.yml runs this same job (policy-tested identical) and its
-  # gate goes red unless the lanes then ran remotely and passed, so neither
-  # the kill switch (mode skip) nor a missing executor secret (mode cache)
-  # can silently drop a tier. Forks and Dependabot (no secrets), merge_group
-  # and every other event keep the legacy tiers. The step reads no secret or
-  # variable and runs no repository code.
+  # Each is true only with its committed BAZEL_RETIRES_LEGACY_* flag, on a
+  # same-repo (not fork) pull_request whose actor is not Dependabot, or on a
+  # merge_group (merge queue) run. pr.yml runs this same job (policy-tested
+  # identical) and its gate goes red unless the lanes then ran remotely and
+  # passed, so neither the kill switch (mode skip) nor a missing executor
+  # secret (mode cache) can silently drop a tier. Forks and Dependabot (no
+  # secrets; unless BAZEL_COVERS_FORKS) and every other event keep the
+  # legacy tiers. The step reads no secret or variable and runs no
+  # repository code.
   bazel-coverage:
     name: Bazel tier coverage
     # F3: same-repo PRs and merge_group get the org's Blacksmith pool; forks,
@@ -135,10 +145,11 @@ jobs:
           RETIRED_PR_LANES: ${{ env.BAZEL_RETIRES_LEGACY_PR_LANES == 'true' }}
           COVERS_FORKS: ${{ env.BAZEL_COVERS_FORKS == 'true' }}
           PULL_REQUEST: ${{ github.event_name == 'pull_request' }}
+          MERGE_GROUP: ${{ github.event_name == 'merge_group' }}
           FORK: ${{ github.event.pull_request.head.repo.fork == true }}
           DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
         run: |
-          for v in RETIRED_EMBEDDED RETIRED_DOLT_SERVER RETIRED_PR_LANES COVERS_FORKS PULL_REQUEST FORK DEPENDABOT; do
+          for v in RETIRED_EMBEDDED RETIRED_DOLT_SERVER RETIRED_PR_LANES COVERS_FORKS PULL_REQUEST MERGE_GROUP FORK DEPENDABOT; do
             case "${!v}" in
               true|false) ;;
               *) echo "::error::$v is '${!v}', want true or false"; exit 1 ;;
@@ -146,9 +157,16 @@ jobs:
           done
           # Covered: the Bazel lanes are this run's only run of the retired
           # tiers. Same-repo PRs (the CI secrets); fork and Dependabot PRs
-          # too while BAZEL_COVERS_FORKS is "true".
+          # too while BAZEL_COVERS_FORKS is "true"; and every merge group: it
+          # runs on the queue's gh-readonly-queue/* branch of this repository
+          # with the CI secrets, its actor is github-merge-queue[bot] (never
+          # Dependabot), and bazel.yml's rbe job takes mode remote for it
+          # like for a same-repo PR, so a missing secret or the farm switch
+          # off turns pr.yml's gate red rather than dropping a tier.
           covered=false
-          if [ "$PULL_REQUEST" = true ]; then
+          if [ "$MERGE_GROUP" = true ]; then
+            covered=true
+          elif [ "$PULL_REQUEST" = true ]; then
             if [ "$FORK" = false ] && [ "$DEPENDABOT" = false ]; then
               covered=true
             elif [ "$COVERS_FORKS" = true ]; then
@@ -172,7 +190,7 @@ jobs:
             echo "dolt_server=$dolt_server"
             echo "pr_lanes=$pr_lanes"
           } >> "$GITHUB_OUTPUT"
-          echo "Legacy tiers retired in favour of the Bazel lanes: embedded Dolt **$embedded**, proxied and server Dolt **$dolt_server**, pr.yml's PR Core/build/pure-Go/domain+uow/contract jobs **$pr_lanes** (pull_request: $PULL_REQUEST, fork: $FORK, dependabot: $DEPENDABOT, forks covered: $COVERS_FORKS, retired embedded: $RETIRED_EMBEDDED, retired proxied/server: $RETIRED_DOLT_SERVER, retired pr.yml jobs: $RETIRED_PR_LANES)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Legacy tiers retired in favour of the Bazel lanes: embedded Dolt **$embedded**, proxied and server Dolt **$dolt_server**, pr.yml's PR Core/build/pure-Go/domain+uow/contract jobs **$pr_lanes** (pull_request: $PULL_REQUEST, merge_group: $MERGE_GROUP, fork: $FORK, dependabot: $DEPENDABOT, forks covered: $COVERS_FORKS, retired embedded: $RETIRED_EMBEDDED, retired proxied/server: $RETIRED_DOLT_SERVER, retired pr.yml jobs: $RETIRED_PR_LANES)" | tee -a "$GITHUB_STEP_SUMMARY"
 
   # End-to-end coverage for proxied-server CLI subcommands, sharded across the
   # CI matrix. Each sub-test drives the bd CLI subprocess against a real dolt

@@ -38,7 +38,6 @@ const (
 	// BAZEL_COVERS_FORKS covers it).
 	bazelSoleRunEnv          = "${{ needs.rbe.outputs.enabled == 'true' && '--config=sole-run' || '' }}"
 	bazelSoleRunArg          = `${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"}`
-	bazelSoleRunNoCacheLine  = "test:sole-run --nocache_test_results"
 	bazelSoleRunEvictionLine = "test:sole-run --experimental_remote_cache_eviction_retries=0"
 )
 
@@ -69,7 +68,7 @@ var bazelPRLaneRCLines = map[string][]string{
 		"test:prcore --test_arg=-test.skip=^TestEmbedded",
 		"test:prcore --test_env=BEADS_TEST_SKIP=dolt",
 		"test:prcore --test_env=BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1",
-		"test:prcore --test_tag_filters=-requires-docker,-dolt-server,-dolt-server-proxied,-dolt-server-integration,-embedded,-manual,-integration-only",
+		"test:prcore --test_tag_filters=-requires-docker,-dolt-server,-dolt-server-proxied,-dolt-server-integration,-dolt-server-cmd,-embedded,-manual,-integration-only",
 	},
 	"ci": {
 		"test:ci --config=prcore",
@@ -100,7 +99,7 @@ var bazelPRLaneRCLines = map[string][]string{
 		"build:js-wasm --use_target_platform_for_tests",
 		"build:js-wasm --remote_download_outputs=toplevel",
 	},
-	"sole-run": {bazelSoleRunNoCacheLine, bazelSoleRunEvictionLine},
+	"sole-run": {bazelSoleRunEvictionLine},
 }
 
 // The steps of step 3's lanes that run Bazel, exactly (as review F4 of
@@ -111,7 +110,7 @@ var bazelPRLaneSteps = map[string]map[string]string{
 		"bazel test //... --config=ci": `set -o pipefail
 start=$(date +%s)
 rc=0
-bazel test //... --config=ci ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} \
+bazel test //... --config=ci ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
   --profile="$RUNNER_TEMP/bazel-profile.json" \
   --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
   2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
@@ -122,14 +121,14 @@ exit "$rc"`,
 	bazelPureJobName: {
 		"Start every pure-Go artifact (gozstd contamination check)": `set -euo pipefail
 bazel run --config=pure //cmd/bd:bd -- version
-bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} \
+bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
   //internal/storage/embeddeddolt:embeddeddolt_test \
   //internal/tracker:tracker_test \
   --test_sharding_strategy=disabled \
   '--test_arg=-test.run=^$' \
   --test_env=BEADS_TEST_SKIP=dolt`,
 		"Run pure-Go cmd/bd test subset (--config=pure)": `set -euo pipefail
-bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} //cmd/bd:bd_test \
+bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_FRESH:+"$BAZEL_FRESH"} //cmd/bd:bd_test \
   --test_sharding_strategy=disabled \
   "--test_arg=-test.run=$PURE_CMD_BD_TESTS"
 n="$(grep -c '<testcase ' bazel-testlogs/cmd/bd/bd_test/test.xml || true)"
@@ -140,7 +139,7 @@ echo "pure cmd/bd subset: $n test cases"
 		"bazel test //... --config=doltserver": `set -o pipefail
 start=$(date +%s)
 rc=0
-bazel test //... "--config=$BAZEL_DOLT_LANE" ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
+bazel test //... "--config=$BAZEL_DOLT_LANE" ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_FRESH:+"$BAZEL_FRESH"} 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
 echo "bazel test --config=$BAZEL_DOLT_LANE: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
 exit "$rc"`,
 	},
@@ -287,6 +286,22 @@ func TestPRLegacyLanesDeferToBazelLanes(t *testing.T) {
 	add("covered, remote, lanes passed, legacy skipped", prGateFor(t, lanes, "pull_request", "remote", cov("true")), true, "")
 	add("not covered, remote, legacy ran", prGateFor(t, lanes, "pull_request", "remote", cov("false")), true, "")
 	add("merge_group, not covered, remote", prGateFor(t, lanes, "merge_group", "remote", cov("false")), true, "")
+	// The merge queue retires the legacy jobs like a same-repo PR
+	// (bazel-coverage covers every merge group): green with the lanes run
+	// remotely, red when a lane failed or the run was not remote.
+	add("merge_group, covered, remote, lanes passed, legacy skipped", prGateFor(t, lanes, "merge_group", "remote", cov("true")), true, "")
+	for _, lane := range tier.bazelLanes {
+		sc := prGateFor(t, lanes, "merge_group", "remote", cov("true"))
+		sc.outputs[lane] = "failure"
+		add("merge_group, covered, "+lane+" failed", sc, false, tier.retiredID)
+	}
+	for _, mode := range []string{"skip", "cache"} {
+		sc := prGateFor(t, lanes, "merge_group", mode, cov("true"))
+		for _, lane := range tier.bazelLanes {
+			sc.outputs[lane] = "success"
+		}
+		add("merge_group, covered, mode "+mode+", lanes reported success", sc, false, tier.retiredID)
+	}
 	// rbe-fork: a covered fork or Dependabot PR (BAZEL_COVERS_FORKS) whose
 	// lanes ran remotely with a mint certificate.
 	for _, mode := range []string{"fork-ro", "fork-rw"} {
@@ -449,8 +464,9 @@ func testPackageGateJobs(t *testing.T, prGateRequired []string) {
 
 		detect := job.step(t, "Decide applicability")
 		wantDetectEnv := map[string]string{
-			"PR_BASE_SHA":     "${{ github.event.pull_request.base.sha }}",
-			"PR_HEAD_SHA":     "${{ github.event.pull_request.head.sha }}",
+			// The merge queue's bounds where there is no pull_request.
+			"PR_BASE_SHA":     "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}",
+			"PR_HEAD_SHA":     "${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}",
 			"PUSH_BEFORE_SHA": "${{ github.event.before }}",
 			"PUSH_AFTER_SHA":  "${{ github.sha }}",
 		}
@@ -594,8 +610,10 @@ func TestPRDoltServerFingerprintRunsOnEveryPR(t *testing.T) {
 func TestPRRunsGoTestsBazelSkips(t *testing.T) {
 	pr := readCIWorkflow(t, "pr.yml")
 	job := pr.job(t, prScriptsChecksJob)
-	if job.If != "" || job.ContinueOnError || len(job.Needs) != 0 || job.RunsOn != "ubuntu-latest" || job.TimeoutMinutes == 0 {
-		t.Errorf("%s: if %q, continue-on-error %v, needs %v, runs-on %q, timeout %d; want an unconditional ubuntu-latest job with a timeout",
+	// F7b: same-repo PRs now run this job on Blacksmith (forks/Dependabot keep
+	// ubuntu-latest); see sameRepoBlacksmith4vcpu in ci_blacksmith_runner_test.go.
+	if job.If != "" || job.ContinueOnError || len(job.Needs) != 0 || job.RunsOn != sameRepoBlacksmith4vcpu || job.TimeoutMinutes == 0 {
+		t.Errorf("%s: if %q, continue-on-error %v, needs %v, runs-on %q, timeout %d; want an unconditional same-repo-Blacksmith job with a timeout",
 			prScriptsChecksJob, job.If, job.ContinueOnError, job.Needs, job.RunsOn, job.TimeoutMinutes)
 	}
 	// F5.3: three legs behind matrix.check, not fail-fast (a vet regression

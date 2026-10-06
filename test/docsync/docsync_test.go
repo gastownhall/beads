@@ -57,6 +57,7 @@ var rootDocFiles = []string{
 	"CLAUDE.md",
 	"RELEASING.md",
 	"PR_MAINTAINER_GUIDELINES.md",
+	"ROADMAP.md",
 }
 
 func collectMintPages(v any, out *[]string) {
