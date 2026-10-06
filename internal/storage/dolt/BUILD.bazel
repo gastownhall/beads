@@ -125,7 +125,7 @@ go_library(
 # this package with a real `go test -c` (integration.SubprocessRunner), which
 # needs the module's source tree and a module cache no action has. They run
 # only against a server: skipped under --config=integration
-# (BEADS_TEST_SKIP=dolt, like main.yml's integration jobs), and run by
+# (BEADS_TEST_SKIP=dolt, like nightly.yml's full test), and run by
 # dolt_server_full_test, which hands SubprocessRunner its own test binary
 # (BEADS_TEST_SUBPROCESS_BINARY) instead.
 go_test(

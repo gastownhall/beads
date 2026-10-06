@@ -10,10 +10,9 @@
 #   - main.yml's blacksmith-go-build-cache (Blacksmith / same-repo-PR path
 #     non-race save)
 #   - main.yml's test-windows (Windows non-race save)
-#   - main.yml's test macOS leg (GitHub-hosted macOS non-race save; the
-#     fork/Dependabot path of pr.yml's macOS legs)
-#   - main.yml's blacksmith-macos-go-build-cache (Blacksmith macOS non-race
-#     save; the same-repo-PR path of pr.yml's macOS legs)
+#   - main.yml's blacksmith-macos-go-build-cache (macOS non-race save: its
+#     github leg the fork/Dependabot path of pr.yml's macOS legs, its
+#     blacksmith leg the same-repo-PR path)
 #
 # Package list mirrors exactly what pr.yml's check-doc-freshness-platforms and
 # pr-preflight-platforms legs compile on every OS:
