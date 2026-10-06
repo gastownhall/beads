@@ -147,19 +147,24 @@ func DialWith(target Target, creds CredentialProvider, opts DialOptions) (*Conn,
 		opts.HTTPClient = &http.Client{Transport: transport, Timeout: wire.DefaultTimeout}
 
 	case opts.HTTPClient.Transport == nil:
-		if resolved.configured() {
-			transport, terr := transportForFile(resolved.path, resolved.label)
-			if terr != nil {
-				return nil, terr
-			}
-			clientCopy := *opts.HTTPClient
-			clientCopy.Transport = transport
-			opts.HTTPClient = &clientCopy
+		// The SAME transport the opts.HTTPClient == nil arm above builds
+		// through dialTransport — the CA-scoped one when resolved names a
+		// file, the shared raised-ceiling baseline otherwise — because the
+		// doc comment above promises that ceiling on EVERY dial "whether or
+		// not a CA is configured", and a caller-supplied client with a nil
+		// Transport is still a dial this package owns the Transport for.
+		// Leaving it nil here would let it default to
+		// http.DefaultTransport's own unraised ceiling at request time
+		// instead, silently exempting this one caller-supplied-client shape
+		// from that promise. Injected onto a COPY, so the caller's own
+		// *http.Client (Timeout, CheckRedirect, Jar) is left untouched.
+		transport, terr := dialTransport(resolved)
+		if terr != nil {
+			return nil, terr
 		}
-		// Else: no CA configured for this target, so the caller's Transport
-		// staying nil (meaning http.DefaultTransport once the *http.Client
-		// runs) is already the system-roots behavior this target has never
-		// asked to change; nothing to inject.
+		clientCopy := *opts.HTTPClient
+		clientCopy.Transport = transport
+		opts.HTTPClient = &clientCopy
 
 	default:
 		if resolved.configured() {
