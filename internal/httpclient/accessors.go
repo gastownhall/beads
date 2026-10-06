@@ -372,3 +372,15 @@ func (s *Store) BatchApplier() (issueops.BatchApplier, error) {
 	}
 	return &httpBatchApplier{store: s, wire: w}, nil
 }
+
+// BatchGetter serves batchGetIssues (POST /v0/beads/issues:batchGet) — the
+// TWENTY-SIXTH wire-backed accessor, and the newest: storage.DoltStorage grew
+// this method when the rebase onto origin/main brought in upstream #7248's
+// issueops.BatchGetter.
+//
+// It takes no roleWire: the operation writes nothing and carries no actor or
+// version guard for a WriteWire method to wrap, so it dials through the
+// store directly, the way Counter and Querier do. See batchgetter.go.
+func (s *Store) BatchGetter() (issueops.BatchGetter, error) {
+	return &httpBatchGetter{store: s}, nil
+}

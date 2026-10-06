@@ -244,6 +244,8 @@ func serveConfig(t *testing.T, s storage.DoltStorage) httpapi.Config {
 	fail("BatchApplier")
 	cfg.Memories, err = s.Memories()
 	fail("Memories")
+	cfg.BatchGetter, err = s.BatchGetter()
+	fail("BatchGetter")
 
 	// THE JOURNAL IS NOT AN ACCESSOR, alone among the roles above: it is reached
 	// by TYPE ASSERTION, because it is not on storage.DoltStorage and a backend

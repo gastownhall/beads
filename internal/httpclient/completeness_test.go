@@ -410,13 +410,22 @@ func TestUnsupportedContract(t *testing.T) {
 // to return. S13 schedules it; until then this is a twenty-fifth row neither
 // here nor in refusingAccessors, because OSS's storage.DoltStorage does not
 // define a ReadyLister method for the matrix to count either way.
+// BatchGetter is the twenty-sixth, and the first accessor added to this
+// matrix since client wave ga-f352s: S3 reconciliation's own rebase onto
+// origin/main brought in upstream #7248's issueops.BatchGetter (the
+// batchGetIssues operation, POST /v0/beads/issues:batchGet), which
+// storage.DoltStorage now requires of every leg. Unlike every accessor
+// before it, it was never a bare interface-completeness stub waiting on a
+// client wave of its own — it arrived as a brand-new role on the SAME PR
+// that wired it, so it spent no PR in pendingWireBackedAccessors below. See
+// batchgetter.go.
 var wireBackedAccessors = []string{
 	"IssueReader", "ReadyCounter", "IssueClaimer", "ReadyClaimer", "Querier",
 	"StatsReporter", "CycleDetector", "TreeWalker", "EdgeReader",
 	"BlockingAnnotator", "WorkspaceConfig", "Sweeper", "Deleter", "BatchCreator",
 	"Memories", "IssueLifecycle", "DependencyEditor", "BatchCloser",
 	"MetadataCAS", "BatchApplier", "Counter", "GraphCounter",
-	"Releaser", "Commenter", "IssueRelations",
+	"Releaser", "Commenter", "IssueRelations", "BatchGetter",
 }
 
 // refusingAccessors is the complement: the ones with no wire operation at all.
@@ -472,7 +481,7 @@ var pendingWireBackedAccessors = []string{}
 // This is the capability-matrix flip rule applied to the store: a refuse→served
 // flip lands in the same PR as the method that serves it.
 func TestAccessorMatrixMatchesDesign(t *testing.T) {
-	if got, want := len(wireBackedAccessors)+len(refusingAccessors), 28; got != want {
+	if got, want := len(wireBackedAccessors)+len(refusingAccessors), 29; got != want {
 		t.Fatalf("the matrix covers %d accessors, want %d", got, want)
 	}
 	for _, name := range wireBackedAccessors {

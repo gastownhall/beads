@@ -234,6 +234,9 @@ func serveRoles(store storage.DoltStorage) (httpapi.Config, error) {
 	if cfg.Memories, err = store.Memories(); err != nil {
 		return cfg, err
 	}
+	if cfg.BatchGetter, err = store.BatchGetter(); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
 }
 
