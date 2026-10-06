@@ -21,6 +21,10 @@ import (
 // when none exists yet. Both files are written atomically (temp file plus
 // rename, 0600): see SaveTarget and configfile.Config.Save.
 //
+// Unless the caller already set target.PreviousBackend, Attach fills it in
+// from the workspace's PRIOR backend selection, so `bd connect --clear` can
+// restore it later; see that field's doc.
+//
 // Attach does NOT verify target itself — it has no network access and takes
 // target on faith. A caller MUST call Handshake (or httpclient.Handshake)
 // against target first and only call Attach once that succeeds; attaching an
@@ -43,18 +47,37 @@ import (
 // test/embedder's linkage proof) can call this instead and stay correct
 // across a future change to either file's shape.
 func Attach(beadsDir string, target Target) error {
-	if err := SaveTarget(beadsDir, target); err != nil {
-		return fmt.Errorf("writing %s: %w", httpclient.TargetFileName, err)
-	}
-	if err := gitignore.EnsurePatternIgnored(beadsDir, httpclient.TargetFileName); err != nil {
-		return fmt.Errorf("ensuring %s is gitignored: %w", httpclient.TargetFileName, err)
-	}
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", configfile.ConfigFileName, err)
 	}
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
+	}
+	// target.PreviousBackend (bee-ghosttrack CHANGES_REQUESTED on #7288,
+	// should-fix 1) is what `bd connect --clear` restores metadata.json's
+	// backend selection to. A caller rarely sets it itself (connect.go
+	// doesn't), so fill it in here unless the workspace is ALREADY on this
+	// backend — a re-connect (a new URL, or re-pinning the same one) must
+	// not overwrite an earlier recorded previous backend with "http" itself,
+	// or a chain of reconnects would forget what to restore and --clear
+	// would land back on http with no sidecar. Carry the ALREADY-recorded
+	// value forward instead; a failed or missing read just leaves it "",
+	// the same as a workspace with nothing to restore.
+	if target.PreviousBackend == "" {
+		if cfg.GetBackend() == httpclient.Backend {
+			if prior, err := httpclient.LoadTarget(beadsDir); err == nil {
+				target.PreviousBackend = prior.PreviousBackend
+			}
+		} else {
+			target.PreviousBackend = cfg.GetBackend()
+		}
+	}
+	if err := SaveTarget(beadsDir, target); err != nil {
+		return fmt.Errorf("writing %s: %w", httpclient.TargetFileName, err)
+	}
+	if err := gitignore.EnsurePatternIgnored(beadsDir, httpclient.TargetFileName); err != nil {
+		return fmt.Errorf("ensuring %s is gitignored: %w", httpclient.TargetFileName, err)
 	}
 	// Only the backend SELECTION changes here. cfg.Database/cfg.ProjectID (if
 	// an existing metadata.json carried them for a different, prior backend)

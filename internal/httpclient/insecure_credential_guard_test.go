@@ -186,6 +186,40 @@ func TestDialWithWiresAllowInsecureCredentialThroughToTheGuard(t *testing.T) {
 	}
 }
 
+// TestDialWithWiresTargetAllowInsecureCredentialThroughToTheGuard is
+// TestDialWithWiresAllowInsecureCredentialThroughToTheGuard's companion for
+// the PERSISTED grant (bee-ghosttrack CHANGES_REQUESTED on #7288,
+// should-fix 2): `bd connect --allow-plaintext` now saves the opt-in onto
+// the sidecar (Target.AllowInsecureCredential, round-tripped through
+// SaveTarget/LoadTarget), so an ORDINARY command's dial — which builds
+// DialOptions fresh with AllowInsecureCredential left false, unlike
+// connect's own Handshake probe — must still get through on target's say
+// alone. Without DialWith also consulting target.AllowInsecureCredential, a
+// workspace connected with the flag would need BEADS_HTTP_ALLOW_INSECURE=1
+// set for every later command too, which is exactly the gap this closes.
+func TestDialWithWiresTargetAllowInsecureCredentialThroughToTheGuard(t *testing.T) {
+	clearCredentialEnvironment(t)
+	t.Setenv(TokenEnv, "integration-token")
+	server := &contextServer{body: v0Context("proj-insecure-wiring-target")}
+	srv := server.start(t)
+
+	redirecting := &http.Client{Transport: &redirectToAddrTransport{addr: strings.TrimPrefix(srv.URL, "http://")}}
+
+	plainTarget := Target{BaseURL: mustParseURL(t, "http://"+nonLoopbackTestHost+"/")}
+	if _, err := Handshake(context.Background(), plainTarget, DialOptions{HTTPClient: redirecting}); err == nil {
+		t.Fatal("Handshake with no grant anywhere succeeded; want the guard to refuse")
+	}
+
+	grantedTarget := Target{BaseURL: mustParseURL(t, "http://"+nonLoopbackTestHost+"/"), AllowInsecureCredential: true}
+	snap, err := Handshake(context.Background(), grantedTarget, DialOptions{HTTPClient: redirecting})
+	if err != nil {
+		t.Fatalf("Handshake with target.AllowInsecureCredential=true (opts left false): %v", err)
+	}
+	if snap.ProjectId != "proj-insecure-wiring-target" {
+		t.Errorf("project_id = %q, want proj-insecure-wiring-target", snap.ProjectId)
+	}
+}
+
 // redirectToAddrTransport sends every request to addr instead of req.URL's
 // own host, so a test can dial a real (loopback) httptest.Server while
 // target.BaseURL carries a different, non-loopback-looking host — the shape

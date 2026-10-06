@@ -30,6 +30,26 @@ type Target struct {
 	// skips the check. It is compared against ContextResponse.project_id at
 	// handshake (D6).
 	ExpectProjectID string
+	// PreviousBackend records the backend selection metadata.json carried
+	// right before THIS connect (bee-ghosttrack CHANGES_REQUESTED on #7288,
+	// should-fix 1): `bd connect --clear` reads it back to restore
+	// metadata.json's backend selection, so detaching from http returns the
+	// workspace to whatever it was attached to before, rather than leaving
+	// it pinned to "http" with no sidecar to dial. "" means there was
+	// nothing to restore (a workspace's first-ever connect, or a value
+	// Attach deliberately left alone — see Attach's own doc).
+	PreviousBackend string
+	// AllowInsecureCredential records `bd connect --allow-plaintext`'s grant
+	// for THIS target (bee-ghosttrack CHANGES_REQUESTED on #7288,
+	// should-fix 2): once connected with the flag, every later dial for this
+	// workspace — not only connect's own Handshake probe — carries the same
+	// opt-in, so an operator who accepted the risk once at connect time does
+	// not also need BEADS_HTTP_ALLOW_INSECURE=1 set for every ordinary `bd`
+	// command afterward. It is scoped to the sidecar it is saved beside: a
+	// `bd connect` to a DIFFERENT url without the flag writes a fresh
+	// sidecar with this false, so the grant never silently carries over to a
+	// server it was never given for. See guardInsecureCredential.
+	AllowInsecureCredential bool
 	// CAFile names a PEM file that becomes the ENTIRE trusted root pool for
 	// this target — not an addition to the system store — set by
 	// `bd connect --ca-file <path>`. "" leaves this target on the system
@@ -81,6 +101,14 @@ type targetFile struct {
 	// CAFile mirrors Target.CAFile; see that field's doc for the trust model
 	// and TransportFor for the env-vs-sidecar precedence.
 	CAFile string `json:"ca_file,omitempty"`
+	// PreviousBackend mirrors Target.PreviousBackend; see that field's doc.
+	PreviousBackend string `json:"previous_backend,omitempty"`
+	// AllowPlaintext mirrors Target.AllowInsecureCredential; see that field's
+	// doc. Named differently on the wire (matching the CLI flag's own
+	// spelling) than the Go field (matching DialOptions.AllowInsecureCredential),
+	// deliberately: this is the one record of what a human typed, and the
+	// JSON key should read that way on disk.
+	AllowPlaintext bool `json:"allow_plaintext,omitempty"`
 }
 
 // TargetPath is the sidecar's location for a workspace.
@@ -122,7 +150,13 @@ func LoadTarget(beadsDir string) (Target, error) {
 	if err := checkCAFileAbsolute(f.CAFile); err != nil {
 		return Target{}, err
 	}
-	return Target{BaseURL: u, ExpectProjectID: f.ExpectProjectID, CAFile: f.CAFile}, nil
+	return Target{
+		BaseURL:                 u,
+		ExpectProjectID:         f.ExpectProjectID,
+		CAFile:                  f.CAFile,
+		PreviousBackend:         f.PreviousBackend,
+		AllowInsecureCredential: f.AllowPlaintext,
+	}, nil
 }
 
 // checkNoUserinfo refuses a url carrying userinfo ("user:secret@host").
@@ -166,7 +200,13 @@ func SaveTarget(beadsDir string, t Target) error {
 	if err := checkCAFileAbsolute(t.CAFile); err != nil {
 		return err
 	}
-	f := targetFile{ExpectProjectID: t.ExpectProjectID, API: "v0", CAFile: t.CAFile}
+	f := targetFile{
+		ExpectProjectID: t.ExpectProjectID,
+		API:             "v0",
+		CAFile:          t.CAFile,
+		PreviousBackend: t.PreviousBackend,
+		AllowPlaintext:  t.AllowInsecureCredential,
+	}
 	if t.BaseURL != nil {
 		f.URL = t.BaseURL.String()
 	}

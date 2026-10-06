@@ -49,11 +49,18 @@ BEADS_HTTP_TOKEN_COMMAND (a helper that prints a token), then the credentials
 file's [host:port] section, then no credential at all — which the tip OSS
 server's loopback-trust posture answers legitimately, not as a failure.
 
+--allow-plaintext IS recorded on disk, in the sidecar alongside the server
+url: once granted here, a credential may cross this one server in the clear
+on every later command too, not only this one, without re-passing the flag
+or setting BEADS_HTTP_ALLOW_INSECURE=1 yourself. A later connect to a
+DIFFERENT url starts that grant over; it is never carried forward to a
+server it was not given for.
+
 Examples:
   bd connect http://127.0.0.1:8080                         # loopback, no TLS needed
   bd connect https://bd.example.com --expect-project-id p1 # pin workspace identity
   bd connect https://bd.example.com --ca-file ./ca.pem     # trust only this CA
-  bd connect --clear                                       # forget the server (metadata.json is untouched)
+  bd connect --clear                                       # forget the server, restoring the previous backend
 `,
 	Args:          cobra.MaximumNArgs(1),
 	SilenceUsage:  true,
@@ -89,16 +96,40 @@ Examples:
 			if len(args) != 0 {
 				return HandleError("connect --clear takes no url argument")
 			}
+			// Read the sidecar's PreviousBackend BEFORE removing it: it is
+			// the backend metadata.json selected right before this
+			// workspace connected (bee-ghosttrack CHANGES_REQUESTED on
+			// #7288, should-fix 1). A missing sidecar (ErrNotConnected) or
+			// any other read failure just means there is nothing to
+			// restore, matching the "nothing was configured" case below.
+			priorTarget, loadErr := httpclient.LoadTarget(beadsDir)
 			removed, err := httpclient.RemoveTarget(beadsDir)
 			if err != nil {
 				return HandleError("clearing %s: %v", httpclient.TargetFileName, err)
 			}
-			if jsonOutput {
-				return outputJSON(map[string]any{"cleared": removed})
+			restoredBackend := ""
+			if removed && loadErr == nil && priorTarget.PreviousBackend != "" {
+				if cfg, cfgErr := configfile.Load(beadsDir); cfgErr == nil && cfg != nil && cfg.GetBackend() == httpclient.Backend {
+					cfg.Backend = priorTarget.PreviousBackend
+					if saveErr := cfg.Save(beadsDir); saveErr == nil {
+						restoredBackend = priorTarget.PreviousBackend
+					}
+					// A save failure is not fatal to --clear: the sidecar is
+					// already gone (or never existed), which is the part
+					// that actually detaches the workspace from the
+					// server; metadata.json just keeps saying "http" and
+					// the manual fallback message below still applies.
+				}
 			}
-			if removed {
+			if jsonOutput {
+				return outputJSON(map[string]any{"cleared": removed, "restored_backend": restoredBackend})
+			}
+			switch {
+			case restoredBackend != "":
+				fmt.Printf("Removed %s and restored this workspace's backend selection in metadata.json to %q.\n", httpclient.TargetFileName, restoredBackend)
+			case removed:
 				fmt.Printf("Removed %s. This workspace's backend selection in metadata.json is unchanged; open it with http://... connect again, or `bd config set backend dolt` to pick a different backend.\n", httpclient.TargetFileName)
-			} else {
+			default:
 				fmt.Println("No http target was configured; nothing to clear.")
 			}
 			return nil
@@ -207,7 +238,7 @@ Examples:
 			}
 		}
 
-		target := httpclient.Target{BaseURL: parsed, ExpectProjectID: effectiveExpectedProjectID, CAFile: caFile}
+		target := httpclient.Target{BaseURL: parsed, ExpectProjectID: effectiveExpectedProjectID, CAFile: caFile, AllowInsecureCredential: connectAllowPlaintext}
 
 		ctx := context.Background()
 		snapshot, err := httpclient.Handshake(ctx, target, dialOpts)
@@ -281,7 +312,7 @@ func init() {
 	connectCmd.Flags().StringVar(&connectExpectProjectID, "expect-project-id", "", "pin the workspace identity the server must present at every handshake")
 	connectCmd.Flags().StringVar(&connectCAFile, "ca-file", "", "trust ONLY this PEM file for this server (resolved and recorded as an absolute path)")
 	connectCmd.Flags().BoolVar(&connectForce, "force", false, "allow switching a workspace that already selects a different backend")
-	connectCmd.Flags().BoolVar(&connectAllowPlaintext, "allow-plaintext", false, "allow a plain http connection to a non-loopback host")
-	connectCmd.Flags().BoolVar(&connectClear, "clear", false, "remove this workspace's http activation sidecar (metadata.json is left untouched)")
+	connectCmd.Flags().BoolVar(&connectAllowPlaintext, "allow-plaintext", false, "allow a plain http connection to a non-loopback host; remembered in the sidecar for every later command against this server")
+	connectCmd.Flags().BoolVar(&connectClear, "clear", false, "remove this workspace's http activation sidecar and restore its previous backend selection in metadata.json")
 	rootCmd.AddCommand(connectCmd)
 }

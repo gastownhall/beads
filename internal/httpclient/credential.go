@@ -206,16 +206,25 @@ func (p *BearerProvider) resolve(ctx context.Context) (token, source string, err
 	return cred.Value, cred.Source, nil
 }
 
-// warnInsecure fires once per provider, and only when a token is actually about
-// to travel. bd serve has no TLS of its own, so a bearer bound anywhere but
-// loopback crosses the network in the clear; that is an operator decision to
-// make knowingly, in front of a reverse proxy that terminates TLS.
+// warnInsecure fires once per provider, and only when a token is actually
+// configured and about to be offered to Authorize's caller. bd serve has no
+// TLS of its own, so a bearer bound anywhere but loopback crosses the network
+// in the clear if it is sent at all; that is an operator decision to make
+// knowingly, in front of a reverse proxy that terminates TLS.
+//
+// This fires BEFORE guardInsecureCredential (insecure_credential_guard.go)
+// gets a chance to refuse the request outright on an unallowed target
+// (bee-ghosttrack CHANGES_REQUESTED on #7288, should-fix 2's warning-text
+// half): the two layers do not coordinate, so the wording here must stay
+// true on EITHER outcome rather than asserting the token is being sent — a
+// claim that used to read as misleading immediately above a refusal error
+// saying the opposite.
 func (p *BearerProvider) warnInsecure() {
 	if !p.insecure {
 		return
 	}
 	p.warnOnce.Do(func() {
-		fmt.Fprintf(p.warnTo, "Warning: sending a bearer token to %s over plain http; the token crosses the network in the clear. Put bd serve behind TLS, or bind it to loopback.\n", p.endpoint)
+		fmt.Fprintf(p.warnTo, "Warning: a bearer token is configured for %s, which is plain http and not loopback; the token would cross the network in the clear unless refused. Put bd serve behind TLS, bind it to loopback, or accept the risk knowingly (bd connect --allow-plaintext, or BEADS_HTTP_ALLOW_INSECURE=1).\n", p.endpoint)
 	})
 }
 

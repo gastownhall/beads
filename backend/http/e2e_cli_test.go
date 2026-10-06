@@ -388,6 +388,74 @@ func TestE2E_SwitchingBackToDoltLeavesOriginalIdentityIntact(t *testing.T) {
 	}
 }
 
+// TestE2E_ForceConnectWritesSucceedDespiteDifferingLocalProjectID pins the
+// bee-ghosttrack CHANGES_REQUESTED finding on #7288: after `bd connect
+// --force` over a workspace that already had a LOCAL (dolt) identity, every
+// write used to fail with "workspace identity mismatch detected". That
+// check compared metadata.json's project_id (the original dolt workspace's
+// identity, left untouched by connect per MED-6 — see
+// TestE2E_SwitchingBackToDoltLeavesOriginalIdentityIntact above) against the
+// live server's _project_id, and those two are legitimately different
+// projects; the check needs the http backend's OWN pin (the sidecar's
+// ExpectProjectID, set by this same connect) instead.
+//
+// This reuses that test's exact setup — a workspace with its own original
+// dolt project_id, forced onto an unrelated server's project — but goes
+// further: it actually writes (create, update, comments add) over the new
+// http connection, which is what the finding says used to fail outright.
+func TestE2E_ForceConnectWritesSucceedDespiteDifferingLocalProjectID(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	bin := buildBD(t)
+	addr := startE2EServer(t) // publishes e2eProjectID, unrelated to the dolt identity below.
+	workspace := t.TempDir()
+	beadsDir := filepath.Join(workspace, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	const (
+		originalProjectID = "dolt-original-project-for-writes"
+		originalDatabase  = "dolt-original-db-for-writes"
+	)
+	metadataPath := filepath.Join(beadsDir, "metadata.json")
+	original := fmt.Sprintf(`{"backend":"dolt","database":%q,"project_id":%q}`, originalDatabase, originalProjectID)
+	if err := os.WriteFile(metadataPath, []byte(original), 0o600); err != nil {
+		t.Fatalf("write metadata.json: %v", err)
+	}
+
+	forced := runBD(t, bin, workspace, nil, "connect", "http://"+addr, "--force", "--json")
+	if forced.code != 0 {
+		t.Fatalf("bd connect --force failed (exit %d): stdout=%s stderr=%s", forced.code, forced.stdout, forced.stderr)
+	}
+
+	create := runBD(t, bin, workspace, nil, "create", "A title over http after forced connect", "--json")
+	if create.code != 0 {
+		t.Fatalf("bd create after forced connect failed (exit %d): stdout=%s stderr=%s", create.code, create.stdout, create.stderr)
+	}
+	if strings.Contains(create.stderr, "workspace identity mismatch") {
+		t.Fatalf("bd create tripped the workspace-identity-mismatch refusal despite connect having just pinned this project: stderr=%s", create.stderr)
+	}
+	id := firstJSONField(t, create.stdout, "id")
+	if id == "" {
+		t.Fatalf("bd create --json produced no id: %s", create.stdout)
+	}
+
+	update := runBD(t, bin, workspace, nil, "update", id, "-a", "alice", "--json")
+	if update.code != 0 {
+		t.Fatalf("bd update after forced connect failed (exit %d): stdout=%s stderr=%s", update.code, update.stdout, update.stderr)
+	}
+	if strings.Contains(update.stderr, "workspace identity mismatch") {
+		t.Fatalf("bd update tripped the workspace-identity-mismatch refusal despite connect having just pinned this project: stderr=%s", update.stderr)
+	}
+
+	comment := runBD(t, bin, workspace, nil, "comments", "add", id, "a comment over http after forced connect", "--json")
+	if comment.code != 0 {
+		t.Fatalf("bd comments add after forced connect failed (exit %d): stdout=%s stderr=%s", comment.code, comment.stdout, comment.stderr)
+	}
+	if strings.Contains(comment.stderr, "workspace identity mismatch") {
+		t.Fatalf("bd comments add tripped the workspace-identity-mismatch refusal despite connect having just pinned this project: stderr=%s", comment.stderr)
+	}
+}
+
 // startE2EServer boots an in-process `bd serve` over embedded Dolt and
 // returns its bound 127.0.0.1 address. It is the same role-binding shape as
 // internal/httpclient's servedEnv harness, kept separate because that one is
