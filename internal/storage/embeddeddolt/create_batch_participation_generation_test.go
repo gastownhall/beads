@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -302,6 +303,39 @@ func TestCreateBatchParticipationGeneration(t *testing.T) {
 			t.Errorf("legacy row %s has issue_versions rows %v after the batch, want none", legacyID, versions)
 		}
 		requireStamped(t, after, newAID, newBID)
+	})
+
+	t.Run("StampKeepsTheCallersUpdatedAt", func(t *testing.T) {
+		ctx := t.Context()
+		te := newTestEnv(t, "pgu")
+		te.store.SetVersionedHistoryEnabled(true)
+
+		// An import supplies each row's timestamps and the batch stores them as
+		// given. issues.updated_at is ON UPDATE CURRENT_TIMESTAMP, so the UPDATE
+		// that stamps a row replaces the supplied value with the clock unless it
+		// sets the column to itself.
+		supplied := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+		ids := batchIDs("pgu", 5)
+		batch := make([]*types.Issue, 0, len(ids))
+		for _, id := range ids {
+			issue := newBatchIssue(id, "imported row "+id)
+			issue.CreatedAt, issue.UpdatedAt = supplied, supplied
+			batch = append(batch, issue)
+		}
+		if err := te.store.CreateIssues(ctx, batch, batchActor); err != nil {
+			t.Fatalf("CreateIssues of %d rows: %v", len(ids), err)
+		}
+
+		// A mint that never ran would leave updated_at alone too, so require the
+		// stamp first.
+		requireStamped(t, snapshotBatch(t, ctx, te), ids...)
+		for _, id := range ids {
+			var got time.Time
+			te.queryScalar(t, ctx, "SELECT updated_at FROM issues WHERE id = ?", []any{id}, &got)
+			if !got.UTC().Equal(supplied) {
+				t.Errorf("%s: updated_at is %v after the batch, want the supplied %v", id, got.UTC(), supplied)
+			}
+		}
 	})
 
 	t.Run("HistoryOffLeavesNull", func(t *testing.T) {

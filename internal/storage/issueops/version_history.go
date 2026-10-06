@@ -350,9 +350,12 @@ func recordVersionInTx(ctx context.Context, tx DBTX, issueID, actor string, isCr
 		// Stamps participation_generation in the same statement that advances
 		// current_revision — design §16.2b's "positive declaration sourced
 		// from store_epoch.epoch," minted here from the epoch already read
-		// above for this same transaction's version row.
+		// above for this same transaction's version row. Setting updated_at to
+		// itself keeps the column's ON UPDATE CURRENT_TIMESTAMP clause from
+		// replacing the timestamp the row was created with, which an import
+		// supplies.
 		if _, err := tx.ExecContext(ctx,
-			"UPDATE issues SET current_revision = ?, participation_generation = ? WHERE id = ?",
+			"UPDATE issues SET current_revision = ?, participation_generation = ?, updated_at = updated_at WHERE id = ?",
 			newRevision, epoch, issueID,
 		); err != nil {
 			return fmt.Errorf("versioned history: advance current_revision for %s: %w", issueID, err)
