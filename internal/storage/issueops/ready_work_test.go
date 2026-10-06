@@ -13,7 +13,7 @@ import (
 )
 
 func deferredParentProbeRegex(issueTable string) string {
-	return `SELECT 1 FROM ` + issueTable + `\s+WHERE defer_until IS NOT NULL\s+AND defer_until > UTC_TIMESTAMP\(\)\s+LIMIT 1`
+	return `SELECT 1 FROM ` + issueTable + `\s+WHERE status = 'deferred'\s+OR \(defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP\(\)\)\s+LIMIT 1`
 }
 
 func deferredChildrenQueryRegex(depTable, issueTable string) string {
@@ -21,7 +21,7 @@ func deferredChildrenQueryRegex(depTable, issueTable string) string {
 	if issueTable == "wisps" {
 		targetCol = "depends_on_wisp_id"
 	}
-	return `SELECT dep\.issue_id\s+FROM ` + depTable + ` dep\s+JOIN ` + issueTable + ` parent ON parent\.id = dep\.` + targetCol + `\s+WHERE dep\.type = 'parent-child'\s+AND parent\.defer_until IS NOT NULL\s+AND parent\.defer_until > UTC_TIMESTAMP\(\)`
+	return `SELECT dep\.issue_id\s+FROM ` + depTable + ` dep\s+JOIN ` + issueTable + ` parent ON parent\.id = dep\.` + targetCol + `\s+WHERE dep\.type = 'parent-child'\s+AND \(parent\.status = 'deferred'\s+OR \(parent\.defer_until IS NOT NULL AND parent\.defer_until > UTC_TIMESTAMP\(\)\)\)`
 }
 
 func beginMockTx(t *testing.T) (*sql.DB, sqlmock.Sqlmock, *sql.Tx) {
@@ -306,5 +306,34 @@ func TestReadyWorkWispIssueFilterPropagatesStatuses(t *testing.T) {
 	want := []types.Status{"open", "blocked"}
 	if !reflect.DeepEqual(filter.Statuses, want) {
 		t.Fatalf("wisp filter Statuses = %v, want %v", filter.Statuses, want)
+	}
+}
+
+func TestGetChildrenOfDeferredParentsInTx_UndatedDeferredParentHidesChildren(t *testing.T) {
+	t.Parallel()
+
+	// An undated deferred parent (status = 'deferred', defer_until NULL) must
+	// pass the probe and have its children excluded from ready work.
+	_, mock, tx := beginMockTx(t)
+	mock.ExpectQuery(deferredParentProbeRegex("issues")).
+		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+	mock.ExpectQuery(deferredChildrenQueryRegex("dependencies", "issues")).
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id"}).AddRow("child-of-undated-deferred"))
+	mock.ExpectQuery(deferredChildrenQueryRegex("dependencies", "wisps")).
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id"}))
+	mock.ExpectQuery(deferredChildrenQueryRegex("wisp_dependencies", "issues")).
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id"}))
+	mock.ExpectQuery(deferredChildrenQueryRegex("wisp_dependencies", "wisps")).
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id"}))
+
+	got, err := getChildrenOfDeferredParentsInTx(context.Background(), tx)
+	if err != nil {
+		t.Fatalf("getChildrenOfDeferredParentsInTx: %v", err)
+	}
+	if want := []string{"child-of-undated-deferred"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("children = %v, want %v", got, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
 	}
 }
