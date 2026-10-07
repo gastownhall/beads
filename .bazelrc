@@ -260,7 +260,9 @@ test:integration --test_env=BEADS_TEST_SKIP=dolt
 # keeps every container- or server-backed test skipped, which is what the
 # untagged base targets already do. scripts/bazel_policy_test.go derives the
 # required exclusions from the PR-core list, so a new lane tag lands here too.
-test:integration --test_tag_filters=-requires-docker,-dolt-server,-dolt-server-proxied,-dolt-server-integration,-dolt-server-cmd,-embedded,-manual
+# pr-core-only targets (the historical-release suites: shell tests against
+# the release-shaped bd, which the PR-core lane already runs) stay out too.
+test:integration --test_tag_filters=-requires-docker,-dolt-server,-dolt-server-proxied,-dolt-server-integration,-dolt-server-cmd,-embedded,-manual,-pr-core-only
 test:integration --build_tests_only
 test:integration --keep_going
 test:integration --test_summary=terse

@@ -11,9 +11,9 @@ load(":defs.bzl", "historical_upgrade_tests")
 # offline below (:bd_source_tag). Where the lanes host a server-Dolt fixture
 # or read the wisp plane, the pinned external Dolt runtime
 # (@dolt_test_runtime_linux_amd64) is DOLT_BIN. Nothing is downloaded at test
-# time, so the targets run remotely like any other; untagged, the PR-core
-# lane (bazel-test) runs them, and a target re-runs only when the candidate,
-# the harness or a pinned binary changes.
+# time, so the targets run remotely like any other, in the PR-core lane
+# (bazel-test), and a target re-runs only when the candidate, the harness or
+# a pinned binary changes.
 #
 # _CORPUS must equal scripts/migration-test/lib/versions.sh's corpus (the
 # SQLite bridges, HISTORICAL_DOLT_VERSIONS and EMBEDDED_DOLT_VERSIONS), and
@@ -56,12 +56,17 @@ _HELPERS = [
     "v0.62.0",
 ]
 
+# Tags:
+#   pr-core-only: shell tests against the release-shaped bd_for_tests (no
+#     integration tag); the integration lane, which requires Go testcases,
+#     leaves them out.
 historical_upgrade_tests(
     corpus = _CORPUS,
     dolt_runtime = _DOLT_RUNTIME,
     helpers = _HELPERS,
     source_tag = _SOURCE_TAG,
     source_tag_bin = ":bd_source_tag",
+    tags = ["pr-core-only"],
 )
 
 exports_files(
@@ -92,10 +97,15 @@ genrule(
 
 # The public sealed-copy SQLite bridge's fast safety checks (fake binaries
 # only), which run.sh ran before every release.
+#
+# Tags:
+#   pr-core-only: a shell test; the integration lane, which requires Go
+#     testcases, leaves it out.
 sh_test(
     name = "legacy_bridge_test",
     srcs = ["legacy_bridge_test.sh"],
     data = ["//scripts:migration_harness"],
+    tags = ["pr-core-only"],
 )
 
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

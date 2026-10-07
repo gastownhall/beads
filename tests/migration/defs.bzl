@@ -6,7 +6,7 @@ load("//tools/bazel:dolt.bzl", "hermetic_bin")
 
 _DOLT_RUNTIME_LABEL = "@dolt_test_runtime_linux_amd64//:dolt"
 
-def historical_upgrade_tests(corpus, dolt_runtime, helpers, source_tag, source_tag_bin):
+def historical_upgrade_tests(corpus, dolt_runtime, helpers, source_tag, source_tag_bin, tags):
     """Declares historical_upgrade_<release>_test and its release directory per corpus release.
 
     Args:
@@ -15,6 +15,7 @@ def historical_upgrade_tests(corpus, dolt_runtime, helpers, source_tag, source_t
       helpers: releases every lane may run besides its own (bridges).
       source_tag: the release built from source (no @bd_releases entry).
       source_tag_bin: the label of that source build.
+      tags: the tests' tags.
     """
     for v in corpus:
         suffix = v.replace(".", "_")
@@ -46,5 +47,6 @@ def historical_upgrade_tests(corpus, dolt_runtime, helpers, source_tag, source_t
             args = [v],
             data = data,
             env = env,
+            tags = tags,
             target_compatible_with = LINUX_AMD64,
         )

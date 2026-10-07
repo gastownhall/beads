@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# build-tags: allow-bare (builds a historical release from its own module
+# source with its own go.mod, exactly as lib/binary.sh does; that release
+# predates gms_pure_go and must not be built with today's tags)
 # Builds a historical bd from its module source, offline, the way
 # scripts/migration-test/lib/binary.sh's build_verified_v091_source_binary
 # does with network access: `go mod download` the module, then `go build
