@@ -1,10 +1,7 @@
 package scripts_test
 
 import (
-	"encoding/json"
 	"fmt"
-	"os/exec"
-	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -13,49 +10,13 @@ import (
 )
 
 // F7c (spec-f7.md §2.4, §4.3): advisory workflows moved onto a same-repo-PR
-// Blacksmith runner, gained a shared "upgrade-relevant code" path filter, and
-// had their matrices folded (Migration Test Harness 14 -> 3, Cross-Version
-// Smoke 6 -> 2). These tests pin the invariants that make those changes safe:
-// the path filter is identical where it should be, no historical version or
-// scenario was dropped by a fold, no advisory job can read a secret just
-// because it now names a Blacksmith label, and the Blacksmith-side setup-go
-// seed in main.yml actually exists for the jobs that depend on it.
-
-// advisoryPathFilteredWorkflows are the workflows that share the
-// "upgrade-relevant code" allowlist verbatim, save for each one's own
-// workflow-file and script entries (spec-f7.md §2.4). conformance.yml and
-// migration-test.yml were the others until their tiers moved to Bazel
-// (embeddeddolt_conformance_*, //test/conformance:conformance_test,
-// //tests/migration).
-var advisoryPathFilteredWorkflows = []string{
-	"cross-version-smoke.yml",
-}
-
-// advisoryPathFilterBase is the shared prefix of the allowlist: any non-test
-// Go change, build input, or embedded schema migration. It must appear, in
-// this order, at the start of each of advisoryPathFilteredWorkflows'
-// pull_request.paths list.
-var advisoryPathFilterBase = []string{
-	"**.go",
-	"!**_test.go",
-	"go.mod",
-	"go.sum",
-	"Makefile",
-	".buildflags",
-	// The .up.sql files are go:embed'd by internal/storage/schema, so they
-	// change upgrade behavior without matching "**.go"; a migration that
-	// ships with only a _test.go beside it would otherwise skip all three.
-	"internal/storage/schema/migrations/**",
-}
-
-// advisoryPathFilterOwnEntries is each workflow's own file/script additions,
-// appended after advisoryPathFilterBase.
-var advisoryPathFilterOwnEntries = map[string][]string{
-	"cross-version-smoke.yml": {
-		".github/workflows/cross-version-smoke.yml",
-		"scripts/upgrade-smoke-test.sh",
-	},
-}
+// Blacksmith runner. These tests pin the invariants that make that safe: no
+// advisory job can read a secret just because it now names a Blacksmith
+// label, and the Blacksmith-side setup-go seed in main.yml actually exists
+// for the jobs that depend on it. The path-filtered upgrade suites F7c folded
+// (Migration Test Harness, Cross-Version Smoke) and their filter and fold
+// checks are gone: those suites run under Bazel (//tests/migration,
+// //tests/upgrade_smoke).
 
 type pullRequestPaths struct {
 	On struct {
@@ -91,42 +52,6 @@ func readPushPaths(t *testing.T, file string) []string {
 		t.Fatalf("parse %s: %v", file, err)
 	}
 	return parsed.On.Push.Paths
-}
-
-// TestAdvisoryWorkflowPathFiltersAreIdentical pins that the shared base of
-// the "upgrade-relevant code" allowlist is byte-for-byte identical, in the
-// same order, across all three workflows it applies to. GitHub Actions has no
-// cross-file include for `on:` triggers, so this is the fallback the spec
-// explicitly allows: identical literal lists plus a policy test asserting
-// they stay identical (spec-f7.md §2.4).
-func TestAdvisoryWorkflowPathFiltersAreIdentical(t *testing.T) {
-	for _, file := range advisoryPathFilteredWorkflows {
-		paths := readPullRequestPaths(t, file)
-		if len(paths) < len(advisoryPathFilterBase) {
-			t.Fatalf("%s pull_request.paths = %v, too short to hold the shared base %v", file, paths, advisoryPathFilterBase)
-		}
-		got := paths[:len(advisoryPathFilterBase)]
-		for i, want := range advisoryPathFilterBase {
-			if got[i] != want {
-				t.Errorf("%s pull_request.paths[%d] = %q, want %q (shared base must match byte-for-byte and in order)", file, i, got[i], want)
-			}
-		}
-	}
-}
-
-// TestAdvisoryWorkflowPathFiltersCoverOwnInputs pins that each workflow also
-// allowlists its own workflow file and the scripts/fixtures it actually
-// exercises, so an edit to e.g. scripts/upgrade-smoke-test.sh is never silently
-// skipped by the filter that was added to cut unrelated-PR load.
-func TestAdvisoryWorkflowPathFiltersCoverOwnInputs(t *testing.T) {
-	for file, want := range advisoryPathFilterOwnEntries {
-		paths := readPullRequestPaths(t, file)
-		for _, entry := range want {
-			if !contains(paths, entry) {
-				t.Errorf("%s pull_request.paths %v does not contain its own entry %q", file, paths, entry)
-			}
-		}
-	}
 }
 
 // TestNixBuildDropsPullRequestTriggerNotPushOrDispatch pins the one
@@ -199,137 +124,11 @@ func sortedCopy(items []string) []string {
 	return out
 }
 
-// --- Cross-Version Smoke: 6 -> 2 jobs, chunks of 5, no version dropped ----
-
-// ghExtractJQProgram pulls the single-quoted jq program out of a standalone
-// `jq -<flags> '<program>'` invocation inside a step's `run:` text, so a test
-// can execute the REAL program with `jq` directly instead of asserting on a
-// substring of the surrounding bash. The flag group is required (one or
-// more) specifically so this does not also match `gh`'s own `--jq
-// '[.[].tagName]'` filter, which has no `-c`/`-r` flag of its own between
-// "jq" and the quoted program. None of this repo's embedded jq programs
-// contain a literal single quote, so a non-greedy single-quote match is
-// sufficient.
-var jqProgramPattern = regexp.MustCompile(`jq(?: -[A-Za-z]+)+ '([^']*)'`)
-
-func ghExtractJQProgram(t *testing.T, run string) string {
-	t.Helper()
-	m := jqProgramPattern.FindStringSubmatch(run)
-	if m == nil {
-		t.Fatalf("no `jq '...'` invocation found in:\n%s", run)
-	}
-	return m[1]
-}
-
-func runJQ(t *testing.T, program string, stdin string) string {
-	t.Helper()
-	requireHostTool(t, "jq")
-	cmd := exec.Command("jq", "-c", program)
-	cmd.Stdin = strings.NewReader(stdin)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("jq -c %q <<<%q: %v\n%s", program, stdin, err, out)
-	}
-	return strings.TrimSpace(string(out))
-}
-
-// TestCrossVersionSmokeChunksEveryResolvedVersion runs the REAL jq programs
-// embedded in the "Resolve release versions" and "Compute chunk cache key"
-// steps against synthetic version lists, instead of asserting on their
-// source text (F7c review fix S1, closes mutation M6 `[range(0; length; 5)
-// as $i | .[$i:$i+4]]` off-by-one and M7 jq-slice-dropping-versions
-// mutations): every resolved version must appear in exactly one chunk, no
-// chunk may exceed 5 versions, and the chunk-key step's join must reproduce
-// every version in its chunk, in order, space-separated.
-func TestCrossVersionSmokeChunksEveryResolvedVersion(t *testing.T) {
-	workflow := readCIWorkflow(t, "cross-version-smoke.yml")
-
-	versionsJob := workflow.job(t, "versions")
-	resolve := versionsJob.step(t, "Resolve release versions")
-	chunkProgram := ghExtractJQProgram(t, resolve.Run)
-	if versionsJob.Outputs["chunks"] == "" {
-		t.Errorf("cross-version-smoke.yml's versions job has no chunks output")
-	}
-
-	for _, n := range []int{0, 1, 4, 5, 6, 9, 10, 29, 30} {
-		versions := make([]string, 0, n)
-		for i := 0; i < n; i++ {
-			versions = append(versions, fmt.Sprintf("v0.%d.0", i))
-		}
-		versionsJSON, err := json.Marshal(versions)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var chunks [][]string
-		if err := json.Unmarshal([]byte(runJQ(t, chunkProgram, string(versionsJSON))), &chunks); err != nil {
-			t.Fatalf("n=%d: chunk output did not parse as [][]string: %v", n, err)
-		}
-		wantChunks := (n + 4) / 5
-		if n == 0 {
-			wantChunks = 0
-		}
-		if len(chunks) != wantChunks {
-			t.Errorf("n=%d: got %d chunks, want %d", n, len(chunks), wantChunks)
-		}
-		var flat []string
-		for _, c := range chunks {
-			if len(c) > 5 {
-				t.Errorf("n=%d: chunk %v has more than 5 versions", n, c)
-			}
-			flat = append(flat, c...)
-		}
-		if !equalStrings(flat, versions) {
-			t.Errorf("n=%d: concatenated chunks = %v, want exactly the resolved version list %v in order", n, flat, versions)
-		}
-	}
-
-	smokeJob := workflow.job(t, "smoke")
-	if !contains(smokeJob.Needs, "versions") {
-		t.Errorf("cross-version-smoke.yml's smoke job does not need versions")
-	}
-
-	chunkKeyStep := smokeJob.step(t, "Compute chunk cache key")
-	joinProgram := ghExtractJQProgram(t, chunkKeyStep.Run)
-	for _, chunk := range [][]string{
-		{"v1.2.2"},
-		{"v1.0.0", "v1.0.1", "v1.1.0", "v1.1.2", "v1.2.2"},
-	} {
-		chunkJSON, err := json.Marshal(chunk)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got := strings.Trim(runJQ(t, joinProgram, string(chunkJSON)), `"`)
-		want := strings.Join(chunk, " ")
-		if got != want {
-			t.Errorf("chunk-key join(%v) = %q, want %q", chunk, got, want)
-		}
-	}
-
-	buildStep := smokeJob.stepIndex(t, "Build candidate binary")
-	runStep := smokeJob.stepIndex(t, "Run upgrade smoke tests")
-	if buildStep >= runStep {
-		t.Errorf("Build candidate binary (index %d) must run before Run upgrade smoke tests (index %d), so the candidate is built once per chunk, not once per version", buildStep, runStep)
-	}
-
-	run := smokeJob.step(t, "Run upgrade smoke tests")
-	if run.Env["SMOKE_VERSIONS"] != "${{ steps.chunk.outputs.versions }}" {
-		t.Errorf("cross-version-smoke.yml's smoke job SMOKE_VERSIONS = %q, want the chunk step's versions output", run.Env["SMOKE_VERSIONS"])
-	}
-	// Exact match (not a substring check, F7c review fix S1): the whole point
-	// of SMOKE_VERSIONS is that upgrade-smoke-test.sh's own loop consumes it;
-	// any extra positional arg (e.g. a reintroduced matrix.prev_version) would
-	// silently make the script test only one version per chunk again.
-	if want := "./scripts/upgrade-smoke-test.sh"; strings.TrimSpace(run.Run) != want {
-		t.Errorf("cross-version-smoke.yml's Run upgrade smoke tests run = %q, want exactly %q", run.Run, want)
-	}
-}
-
 // --- Security: no job gains a secret just by naming a Blacksmith label ----
 
 // blacksmithAdvisoryWorkflows are every workflow file F7c moved a job onto a
 // same-repo-PR (or push-only, for main.yml's seed) Blacksmith runner.
 var blacksmithAdvisoryWorkflows = []string{
-	"cross-version-smoke.yml",
 	"docs-mintlify.yml",
 	"main.yml",
 }
@@ -379,8 +178,6 @@ var advisoryBlacksmithRunnerJobs = []struct {
 	blacksmithLabel string
 	fallback        string
 }{
-	{"cross-version-smoke.yml", "smoke", "blacksmith-4vcpu-ubuntu-2404", "ubuntu-latest"},
-	{"cross-version-smoke.yml", "versions", "blacksmith-2vcpu-ubuntu-2404", "ubuntu-latest"},
 	{"docs-mintlify.yml", "broken-links", "blacksmith-2vcpu-ubuntu-2404", "ubuntu-latest"},
 }
 
@@ -446,16 +243,13 @@ func TestF7cAdvisorySameRepoBlacksmithExpressionSemantics(t *testing.T) {
 // blacksmithSetupGoCacheConsumers is every advisory job that restores the
 // self-defined `blacksmith-sg-v1-` setup-go cache main.yml's
 // blacksmith-setup-go-cache job seeds (B2, F7c implementation report).
-var blacksmithSetupGoCacheConsumers = map[string][]string{
-	"cross-version-smoke.yml": {"smoke"},
-}
+var blacksmithSetupGoCacheConsumers = map[string][]string{}
 
 // blacksmithSetupGoCacheKeyNamespace is the self-defined cache key prefix
 // (not setup-go's own implicit key) that the seeder and every consumer share,
 // so the "no save in a consumer job" checks below can scope to exactly this
-// cache without also flagging an unrelated, legitimately-caching step (a
-// binary cache with a distinct restore/save pair of its own - see
-// advisoryBinaryCaches below).
+// cache without also flagging an unrelated, legitimately-caching step in
+// another namespace.
 const blacksmithSetupGoCacheKeyNamespace = "blacksmith-sg-v1-"
 
 // TestBlacksmithSetupGoSeedExistsForAdvisoryConsumers pins that main.yml's
@@ -636,10 +430,10 @@ func TestMainWorkflowHasNoSameRepoPRReachableTrigger(t *testing.T) {
 // main.yml's seeder may ever write it, so a same-repo PR run can read the
 // cache but never poison what another PR or main's seeder reads back. The
 // "no save" check is scoped to the blacksmith-sg-v1- key namespace
-// specifically (not "no actions/cache/save in this job at all"), since a
-// binary cache in a different namespace is governed by its own
-// restore/save-gated pair below (advisoryBinaryCaches / F7c review fix X1),
-// not an exemption from this one.
+// specifically (not "no actions/cache/save in this job at all"): a cache in
+// another namespace is the general sweep's concern below
+// (TestBlacksmithReachableAdvisoryJobsNeverSaveACache), not an exemption
+// from this one.
 func TestAdvisoryBlacksmithConsumersAreCacheRestoreOnly(t *testing.T) {
 	for file, jobNames := range blacksmithSetupGoCacheConsumers {
 		workflow := readCIWorkflow(t, file)
@@ -754,81 +548,6 @@ func TestBlacksmithSetupGoCacheKeysMatchAcrossSeederAndConsumers(t *testing.T) {
 				t.Errorf("%s job %s restore-keys %q does not contain the seeder's key prefix (without the commit-specific suffix)", file, jobName, restore.With["restore-keys"])
 			}
 		}
-	}
-}
-
-// --- Binary caches: restore-always, save only off pull_request ------------
-
-// advisoryBinaryCaches are the per-binary caches F7c review fixes B2 and X1
-// converted from a monolithic (auto-saving) actions/cache into an explicit
-// restore/save pair, so a same-repo PR can read a previously published
-// binary but never publish its own into a cache another run would trust
-// unverified. migration-test.yml's historical-dolt-* cache was originally
-// exempted here on the theory that scripts/migration-test/lib/binary.sh's
-// sha256 verification of every extracted archive made a bare, auto-saving
-// actions/cache safe regardless of who wrote it. That exemption was unsound
-// (F7c review fix X1): `tar -P` extraction plus lib/binary.sh's `cp -f`
-// following a symlink planted inside the archive can redirect the final copy
-// to an arbitrary path (e.g. over the checked-out workspace or the candidate
-// binary itself) before the checksum check ever runs, so checksum
-// verification alone does not make a same-repo-PR-writable cache entry safe
-// to trust. historical-dolt-* now gets the same restore-always/save-off-PR
-// split as the other two.
-var advisoryBinaryCaches = []struct {
-	file, job, restoreStep, saveStep, keyPrefix string
-	// wantSaveIf is the save step's `if:` condition, required byte-for-byte
-	// (F7c review fix S3): a `strings.Contains` check here would pass under
-	// e.g. `... || true`, which always evaluates true and silently
-	// reintroduces the same-repo-PR poisoning path this whole table exists
-	// to close.
-	wantSaveIf string
-}{
-	{"cross-version-smoke.yml", "smoke", "Restore previous release binaries cache", "Save previous release binaries cache", "smoke-binaries-", "github.event_name == 'push' || github.event_name == 'workflow_dispatch'"},
-}
-
-// TestAdvisoryBinaryCachesAreRestoreAlwaysSavePRGated pins the restore/save
-// split itself (F7c review fix B2): the restore step always runs (modulo the
-// job's own pre-existing gate, if any),
-// the save step additionally requires an exact allow-list of
-// `github.event_name == 'push' || github.event_name == 'workflow_dispatch'`
-// (F7c review fix, discovered via the S2 sweep: a deny-list of
-// `!= 'pull_request'` also admits a hypothetical future merge_group event,
-// which each of these three jobs' runs-on expressions already resolve to
-// Blacksmith for), both steps key off the same cache, and no monolithic
-// (bare) actions/cache step remains for either binary cache - a monolithic
-// step would silently reintroduce the auto-save-on-any-PR poisoning path B2
-// closes.
-func TestAdvisoryBinaryCachesAreRestoreAlwaysSavePRGated(t *testing.T) {
-	for _, c := range advisoryBinaryCaches {
-		t.Run(c.file, func(t *testing.T) {
-			workflow := readCIWorkflow(t, c.file)
-			job := workflow.job(t, c.job)
-
-			restore := job.step(t, c.restoreStep)
-			if actionFamily(restore.Uses) != cacheRestoreActionFamily {
-				t.Errorf("%s job %s step %q uses %q, want family %q", c.file, c.job, c.restoreStep, restore.Uses, cacheRestoreActionFamily)
-			}
-			if !strings.HasPrefix(restore.With["key"], c.keyPrefix) {
-				t.Errorf("%s job %s step %q key = %q, want prefix %q", c.file, c.job, c.restoreStep, restore.With["key"], c.keyPrefix)
-			}
-
-			save := job.step(t, c.saveStep)
-			if actionFamily(save.Uses) != cacheSaveActionFamily {
-				t.Errorf("%s job %s step %q uses %q, want family %q", c.file, c.job, c.saveStep, save.Uses, cacheSaveActionFamily)
-			}
-			if save.If != c.wantSaveIf {
-				t.Errorf("%s job %s step %q has if=%q, want exactly %q", c.file, c.job, c.saveStep, save.If, c.wantSaveIf)
-			}
-			if save.With["key"] != restore.With["key"] {
-				t.Errorf("%s job %s: restore key %q != save key %q", c.file, c.job, restore.With["key"], save.With["key"])
-			}
-
-			for _, step := range job.Steps {
-				if actionFamily(step.Uses) == cacheMonolithicActionFamily && strings.HasPrefix(step.With["key"], c.keyPrefix) {
-					t.Errorf("%s job %s has a monolithic actions/cache step keyed %q; B2 requires an explicit restore/save split here", c.file, c.job, step.With["key"])
-				}
-			}
-		})
 	}
 }
 

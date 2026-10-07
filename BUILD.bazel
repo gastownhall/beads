@@ -24,6 +24,7 @@ exports_files(
     visibility = [
         "//scripts/pr-lint:__pkg__",
         "//scripts/prlintmake:__pkg__",
+        "//tests/upgrade_smoke:__pkg__",
     ],
 )
 
@@ -376,6 +377,7 @@ filegroup(
         "//test/testmainconvention:repo_files",
         "//tests/migration:repo_files",
         "//tests/regression:repo_files",
+        "//tests/upgrade_smoke:repo_files",
         "//third_party/cc_toolchain:repo_files",
         "//third_party/patches:repo_files",
         "//tools/bazel:repo_files",

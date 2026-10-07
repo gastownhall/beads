@@ -157,9 +157,11 @@ Current PR-related workflow names:
   PR, merge group and push to `main` (results cached until its inputs
   change), against the catalog-pinned `@bd_releases//:v0.49.6` baseline and
   a hermetic dolt sql-server.
-- `.github/workflows/cross-version-smoke.yml`: `Cross-Version Smoke Tests`
-  Runs on every PR to `main`, tag pushes, and manual dispatch. Does not
-  currently run on `merge_group`.
+- The upgrade smoke tests (`scripts/upgrade-smoke-test.sh`, formerly
+  `cross-version-smoke.yml`) are `//tests/upgrade_smoke:upgrade_smoke_<release>_test`,
+  one per release in the newest 30 the release catalog pins, which
+  `bazel.yml`'s `bazel-test` lane runs on every PR, merge group and push to
+  `main` (cached until their inputs change).
 - `.github/workflows/nix-build.yml`: `nix build`
   Uses workflow-level `paths` filters on `pull_request` and `push`. This
   workflow must not be directly required.
@@ -339,7 +341,8 @@ PR. It runs in the default branch's cache scope, which `push` runs on
     binaries);
   - the `beads-go-build-v2-*` GOCACHE entries restored by `main.yml` and
     `pr.yml`;
-  - the executables in `smoke-binaries-*` and `historical-dolt-*`.
+  - the executables in `smoke-binaries-*` and `historical-dolt-*` (both
+    retired with their workflows).
 
   GitHub's read-only default covers all of them. Hardening `release.yml`
   with `cache: false` is tracked separately.
@@ -660,10 +663,6 @@ Do not require these existing check names directly:
 - `Test (Windows - smoke)`
 - `PR Lint (native)`, `PR Lint (windows)` and `PR Lint (darwin)`
 - `Test Nix Flake`
-- `Upgrade smoke (chunk N)` (F7c: folded from one job per version into one job
-  per 5-version chunk; still never require a matrix-expanded chunk job
-  directly)
-- `Resolve versions to test`
 - `Bazel / test` and the other jobs of `bazel.yml`
 - `Bazel Farm / *` (`bazel-farm.yml`'s advisory, PR-controlled results)
 
@@ -1386,13 +1385,14 @@ PRs that don't touch Nix or Go module files.
 
 ### Cross-Version Smoke
 
-`Cross-Version Smoke Tests` should remain non-required for ordinary PRs unless
-maintainers explicitly choose to pay that cost in the aggregate gate. If it
-becomes required, add `merge_group` and put it behind a detector plus aggregate
-inside the required topology. Do not require matrix-expanded
-`Upgrade smoke (chunk N)` jobs directly (F7c folded the old one-job-per-version
-matrix into one job per 5-version chunk; the per-chunk job name changed but
-the "do not require individually" guidance is unchanged).
+`cross-version-smoke.yml` is retired. Its suite runs as
+`//tests/upgrade_smoke/...` inside `bazel-test`, which `CI Gate / Required`
+requires, so it now gates PRs and merge groups through the aggregate. Each
+target pins its previous release from the release catalog (`@bd_releases`)
+instead of resolving `gh release list` at run time, so the tested set is
+reviewed: the newest 30 stable releases with a linux/amd64 asset, where the
+workflow tested the newest 5 GitHub releases (prereleases included) on PRs
+and 30 on tag pushes.
 
 ## Merge Queue
 

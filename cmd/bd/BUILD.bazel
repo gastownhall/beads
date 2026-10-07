@@ -497,6 +497,7 @@ go_binary(
         "//test/conformance:__pkg__",
         "//tests/migration:__pkg__",
         "//tests/regression:__pkg__",
+        "//tests/upgrade_smoke:__pkg__",
     ],
 )
 

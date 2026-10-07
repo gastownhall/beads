@@ -126,6 +126,11 @@ filegroup(
 )
 
 exports_files(
+    ["upgrade-smoke-test.sh"],
+    visibility = ["//tests/upgrade_smoke:__pkg__"],
+)
+
+exports_files(
     [
         "ci/fmt-check.sh",
         "ci/lib/timing.sh",
