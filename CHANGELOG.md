@@ -133,6 +133,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `.githooks` markers and `uv.lock` and leaves any other drifted file as it was.
 
 ### Fixed
+- **An explicitly empty `BEADS_DIR`, `BEADS_DB` or `BD_DB` is no longer
+  overwritten by `.beads/.env`.** The selector loader treated a set-but-empty
+  variable as unset, so `BEADS_DIR= bd ...` still followed a `.env` that
+  named another workspace. It now checks whether the variable is set, matching
+  how the rest of `.env` loading behaves (#7303).
+
 - **PRs based on `hotfix/**` branches now run full CI, not just
   cross-version historical smokes and triage labeling.** `pr.yml`,
   `pr-risk.yml`, `conformance.yml`, `cross-version-smoke.yml` and
