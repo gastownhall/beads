@@ -32,7 +32,7 @@ func TestDeletePreviewJSONIsPayloadBlind(t *testing.T) {
 	result := &issueops.DeleteResult{Deleted: 1, Dependencies: 2}
 
 	out := captureStdout(t, func() error {
-		return outputDeletionPreview([]string{"test-delete-1"}, issues, false, true, result, nil, true)
+		return outputDeletionPreview([]string{"test-delete-1"}, issues, false, true, result, nil, true, nil)
 	})
 
 	for _, secret := range []string{"sensitive title", "sensitive payload"} {
@@ -48,7 +48,7 @@ func TestDeletePreviewJSONIsPayloadBlind(t *testing.T) {
 
 	quietFlag = true
 	quietOut := captureStdout(t, func() error {
-		return outputDeletionPreview([]string{"test-delete-1"}, issues, false, true, result, nil, false)
+		return outputDeletionPreview([]string{"test-delete-1"}, issues, false, true, result, nil, false, nil)
 	})
 	if quietOut != "" {
 		t.Fatalf("quiet preview produced output: %s", quietOut)

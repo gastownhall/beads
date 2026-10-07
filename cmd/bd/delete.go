@@ -185,7 +185,7 @@ Force: Delete and orphan dependents
 						return reported
 					}
 				}
-				if previewErr := outputDeletionPreview([]string{issueID}, map[string]*types.Issue{issueID: issue}, false, dryRun, nil, err, jsonOutput); previewErr != nil {
+				if previewErr := outputDeletionPreview([]string{issueID}, map[string]*types.Issue{issueID: issue}, false, dryRun, nil, err, jsonOutput, nil); previewErr != nil {
 					return previewErr
 				}
 				if jsonOutput {
@@ -194,7 +194,7 @@ Force: Delete and orphan dependents
 				return HandleError("previewing deletion: %v", err)
 			}
 			if jsonOutput || isQuiet() {
-				return outputDeletionPreview([]string{issueID}, map[string]*types.Issue{issueID: issue}, false, dryRun, &result, nil, jsonOutput)
+				return outputDeletionPreview([]string{issueID}, map[string]*types.Issue{issueID: issue}, false, dryRun, &result, nil, jsonOutput, nil)
 			}
 			return renderSingleDeletePreview(ctx, activeStore, issueID, issue, dryRun, result)
 		}
@@ -332,6 +332,12 @@ func deleteIssue(ctx context.Context, issueID string) error {
 //
 //nolint:unparam // cmd parameter required for potential future use
 func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, cascade bool, jsonOutput bool, _ bool, ifRevision *int64, _ ...string) error {
+	return deleteBatchWithPreviewExtras(nil, issueIDs, force, dryRun, cascade, jsonOutput, false, ifRevision, nil)
+}
+
+// deleteBatchWithPreviewExtras is deleteBatch with command-owned metadata that
+// belongs in the dry-run JSON preview next to the role's deletion summary.
+func deleteBatchWithPreviewExtras(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, cascade bool, jsonOutput bool, _ bool, ifRevision *int64, previewExtras map[string]interface{}, _ ...string) error {
 	if store == nil {
 		if err := ensureStoreActive(); err != nil {
 			return err
@@ -403,7 +409,7 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 					return err
 				}
 			}
-			if previewErr := outputDeletionPreview(resolvedIDs, issues, cascade, dryRun, nil, err, jsonOutput); previewErr != nil {
+			if previewErr := outputDeletionPreview(resolvedIDs, issues, cascade, dryRun, nil, err, jsonOutput, previewExtras); previewErr != nil {
 				return previewErr
 			}
 			if jsonOutput {
@@ -411,7 +417,7 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 			}
 			return err
 		}
-		if previewErr := outputDeletionPreview(resolvedIDs, issues, cascade, dryRun, &result, nil, jsonOutput); previewErr != nil {
+		if previewErr := outputDeletionPreview(resolvedIDs, issues, cascade, dryRun, &result, nil, jsonOutput, previewExtras); previewErr != nil {
 			return previewErr
 		}
 		if !dryRun && !jsonOutput && !isQuiet() {
@@ -476,7 +482,7 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 // result is the ROLE's dry run, or nil when the role refused: printing zeros
 // beside a refusal would read as "nothing would have been deleted" rather than
 // "we did not get that far".
-func outputDeletionPreview(issueIDs []string, issues map[string]*types.Issue, cascade bool, dryRun bool, result *issueops.DeleteResult, depError error, jsonOutput bool) error {
+func outputDeletionPreview(issueIDs []string, issues map[string]*types.Issue, cascade bool, dryRun bool, result *issueops.DeleteResult, depError error, jsonOutput bool, previewExtras map[string]interface{}) error {
 	if jsonOutput {
 		preview := map[string]interface{}{
 			"preview":   true,
@@ -493,6 +499,9 @@ func outputDeletionPreview(issueIDs []string, issues map[string]*types.Issue, ca
 		}
 		if depError != nil {
 			preview["error"] = depError.Error()
+		}
+		for key, value := range previewExtras {
+			preview[key] = value
 		}
 		return outputJSON(preview)
 	}
