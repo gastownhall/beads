@@ -255,6 +255,51 @@ func TestProxiedServerServeCount(t *testing.T) {
 		}
 	})
 
+	// PR #7199 REVIEW: exclude_status against a WORKSPACE CUSTOM STATUS, over
+	// the wire and with include_infra left unset. The fake-role tests in
+	// internal/httpapi cannot write this case — a fake cannot be asked whether a
+	// custom status is in its own vocabulary — and the bug this pins lived below
+	// the HTTP layer anyway (storecounter and uow's countFilter only loaded the
+	// workspace's list configuration when include_infra was set, so
+	// BuildCountFilter's validation refused a status the workspace itself
+	// defined unless the caller also happened to pass the unrelated flag).
+	t.Run("exclude_status accepts a workspace custom status without include_infra", func(t *testing.T) {
+		label := countSliceLabel + "-customstatus"
+		scopedCustom := "?label=" + label
+
+		if out, err := bdProxiedRun(t, bd, p.dir, "config", "set", "status.custom", "review,qa"); err != nil {
+			t.Fatalf("bd config set status.custom: %v\n%s", err, out)
+		}
+
+		bdProxiedCreate(t, bd, p.dir, "custom status open row", "-p", "2", "-l", label)
+		reviewRow := bdProxiedCreate(t, bd, p.dir, "custom status review row", "-p", "2", "-l", label)
+		if out, err := bdProxiedRun(t, bd, p.dir, "update", reviewRow.ID, "--status", "review"); err != nil {
+			t.Fatalf("bd update --status review: %v\n%s", err, out)
+		}
+
+		_, total, _ := sp.countIssues(t, scopedCustom)
+		if total != 2 {
+			t.Fatalf("total = %d, want 2", total)
+		}
+
+		// include_infra is NOT in this query string. Before the fix this 400'd
+		// with an "invalid exclude-status" refusal because the config load that
+		// feeds BuildCountFilter's vocabulary check was gated on include_infra
+		// alone.
+		status, narrowed, _ := sp.countIssues(t, scopedCustom+"&exclude_status=review")
+		if status != http.StatusOK {
+			t.Fatalf("exclude_status=review (a workspace custom status, include_infra unset): status = %d, want 200", status)
+		}
+		if narrowed != 1 {
+			t.Fatalf("exclude_status=review counted %d, want 1", narrowed)
+		}
+
+		// The parity oracle, same as the sibling cases above.
+		if cli := bdProxiedCountTotal(t, bd, p.dir, "--label", label, "--exclude-status", "review"); cli != narrowed {
+			t.Errorf("bd count --exclude-status review = %d, the server said %d", cli, narrowed)
+		}
+	})
+
 	// The refusals, over the wire: a closed vocabulary and a typed parameter
 	// set, both refused before any query runs.
 	t.Run("the document's refusals are refused", func(t *testing.T) {

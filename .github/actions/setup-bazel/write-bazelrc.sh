@@ -27,7 +27,12 @@
 #
 # BAZEL_FORK_CACHE=true (bazel.yml mode "cache": rbe=cache dispatches, and
 # fork/Dependabot runs while rbe-fork is closed) appends --config=fork-cache:
-# .bazelrc's credential-free, read-only rbe-west cache.
+# .bazelrc's credential-free, read-only rbe-west cache. While that cache
+# advertises zstd (cache-zstd-probe.sh asks its GetCapabilities; any failure
+# means no) it also asks for zstd transfers (--remote_cache_compression). A
+# probe, not a repository variable: fork pull_request runs see no vars. No
+# other mode ever asks, because only the anonymous cache can advertise zstd,
+# and Bazel refuses a remote that does not.
 #
 # RBE_FORK_CERT_FILE + RBE_FORK_KEY_FILE + RBE_FORK_ENDPOINT + RBE_FORK_INSTANCE
 # (bazel.yml modes fork-ro/fork-rw: fork-credential.sh's outputs, a
@@ -222,7 +227,15 @@ elif [[ "$set_fields" -ne 0 ]]; then
 	echo "setup-bazel: remote execution is partially configured; BAZEL_REMOTE_EXECUTOR, RBE_TLS_CERT and RBE_TLS_KEY must be set together (or none, for local execution)" >&2
 	exit 1
 elif [[ "$fork_cache" == true ]]; then
-	echo "build --config=fork-cache" >>"$rc"
+	# zstd for the anonymous cache's transfers while it advertises zstd:
+	# transport only, so action keys are unchanged. The probe never fails
+	# this script; it only decides the line.
+	{
+		echo "build --config=fork-cache"
+		if bash "$(dirname "${BASH_SOURCE[0]}")/cache-zstd-probe.sh"; then
+			echo "build:fork-cache --remote_cache_compression"
+		fi
+	} >>"$rc"
 	cache=true
 	echo "setup-bazel: read-only remote cache (rbe-cache); executing locally"
 else

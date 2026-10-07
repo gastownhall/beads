@@ -39,6 +39,7 @@ go_library(
         "cleanup.go",
         "close.go",
         "close_direct.go",
+        "close_if_revision.go",
         "close_proxied_server.go",
         "closed_delete_candidates.go",
         "codex_hook.go",
@@ -157,6 +158,7 @@ go_library(
         "hooks.go",
         "human.go",
         "human_proxied_server.go",
+        "if_revision.go",
         "import.go",
         "import_path.go",
         "import_proxied_server.go",
@@ -282,6 +284,7 @@ go_library(
         "restore.go",
         "routed.go",
         "routing_read.go",
+        "routing_role.go",
         "rules.go",
         "sandbox_unix.go",
         "sandbox_windows.go",
@@ -492,6 +495,9 @@ go_binary(
         "//internal/beads:__pkg__",
         "//internal/storage/uow:__pkg__",
         "//test/conformance:__pkg__",
+        "//tests/migration:__pkg__",
+        "//tests/regression:__pkg__",
+        "//tests/upgrade_smoke:__pkg__",
     ],
 )
 
@@ -521,6 +527,7 @@ go_test(
         "backup_dolt_test.go",
         "backup_embedded_test.go",
         "backup_export_failure_test.go",
+        "backup_export_watermark_test.go",
         "backup_lock_test.go",
         "backup_proxied_external_integration_test.go",
         "backup_proxied_local_integration_test.go",
@@ -553,6 +560,8 @@ go_test(
         "close_failure_report_test.go",
         "close_fanin_proxied_integration_test.go",
         "close_gate_test.go",
+        "close_if_revision_embedded_test.go",
+        "close_if_revision_proxied_test.go",
         "close_last_touched_test.go",
         "close_proxied_integration_test.go",
         "close_reason_file_test.go",
@@ -648,6 +657,7 @@ go_test(
         "defer_wake_proxied_integration_test.go",
         "defer_wake_server_test.go",
         "delete_embedded_test.go",
+        "delete_if_revision_proxied_concurrency_test.go",
         "delete_input_test.go",
         "delete_proxied_integration_test.go",
         "delete_proxied_server_output_test.go",
@@ -763,6 +773,7 @@ go_test(
         "gate_discover_test.go",
         "gate_embedded_test.go",
         "gate_frontdoor_parity_integration_test.go",
+        "gate_inherit_embedded_test.go",
         "gate_lifecycle_proxied_integration_test.go",
         "gate_routing_test.go",
         "gate_test.go",
@@ -776,8 +787,8 @@ go_test(
         "global_identity_integration_test.go",
         "gomodcache_rehome_test.go",
         "graph_apply_execution_test.go",
-        "graph_apply_execution_unit_test.go",
         "graph_apply_test.go",
+        "graph_apply_thread_spawner_embedded_test.go",
         "graph_embedded_test.go",
         "graph_export_test.go",
         "graph_proxied_integration_test.go",
@@ -807,6 +818,14 @@ go_test(
         "identity_preview_gate_cgo_test.go",
         "identity_preview_gate_test.go",
         "identity_preview_refusal_test.go",
+        "if_revision_embedded_test.go",
+        "if_revision_gc_matcher_embedded_test.go",
+        "if_revision_proxied_close_delete_test.go",
+        "if_revision_proxied_integration_test.go",
+        "if_revision_reassign_fence_embedded_test.go",
+        "if_revision_reassign_fence_proxied_test.go",
+        "if_revision_reopen_embedded_test.go",
+        "if_revision_test.go",
         "import_chunking_embedded_test.go",
         "import_chunking_test.go",
         "import_embedded_test.go",
@@ -853,6 +872,7 @@ go_test(
         "jira_test.go",
         "json_flag_shadow_test.go",
         "kv_embedded_test.go",
+        "kv_prefix_test.go",
         "kv_proxied_integration_test.go",
         "kv_test.go",
         "label_embedded_test.go",
@@ -904,6 +924,7 @@ go_test(
         "markdown_test.go",
         "max_rows_embedded_test.go",
         "max_rows_test.go",
+        "memory_budget_pure_test.go",
         "memory_embedded_test.go",
         "memory_proxied_integration_test.go",
         "memory_pure_test.go",
@@ -1012,6 +1033,7 @@ go_test(
         "readonly_policy_test.go",
         "readonly_test.go",
         "ready_embedded_test.go",
+        "ready_explain_ids_test.go",
         "ready_input_test.go",
         "ready_max_rows_proxied_test.go",
         "ready_max_rows_test.go",
@@ -1088,6 +1110,8 @@ go_test(
         "shared_migrate_consent_test.go",
         "shared_server_cfgnil_test.go",
         "shared_server_cleanup_test.go",
+        "shared_server_delete_if_revision_concurrency_test.go",
+        "shared_server_if_revision_concurrency_test.go",
         "shared_server_integration_test.go",
         "shared_store_migrate_gate_test.go",
         "ship_embedded_test.go",
@@ -1366,7 +1390,7 @@ go_test(
 # against this configuration's bd_test with BEADS_TEST_EMBEDDED_DOLT=1 and
 # the race bd (//cmd/bd:bd under --config=embedded) as the subprocess
 # binary. This is a *different* shard count from PR Risk's legacy fork/push
-# jobs, "Test (Embedded Dolt Cmd N/20)" (pr-risk.yml, main.yml): those keep
+# jobs, "Test (Embedded Dolt Cmd N/20)" (pr-risk.yml): those keep
 # running 20 shards of their own, frozen hand-assigned block in the same
 # manifest file — shard k here is not the same split as their shard k. It
 # repeats bd_test's `env` (the wrapper cannot inherit it). shard_count must
@@ -1414,12 +1438,10 @@ sh_test(
 # (race) bd_test with BEADS_TEST_PROXIED_SERVER=1 and the non-race
 # bd_for_tests as the subprocess binary. This is a *different* shard count
 # from PR Risk's legacy fork/push jobs, "Test (Proxied Dolt Cmd N/15)"
-# (pr-risk.yml, main.yml): those keep running 15 shards of their own,
+# (pr-risk.yml): those keep running 15 shards of their own,
 # frozen bd-init-cost-proxy block in the same manifest file — shard k here
 # is not the same split as their shard k. PR Risk builds its bd-cmd-test
-# with -race, as here; main.yml's test-proxied-cmd twin uses
-# build-artifacts' non-race bd-cmd-test, so this lane is the stricter of
-# the two. The shared proxied harness gets its dolt sql-server from
+# with -race, as here. The shared proxied harness gets its dolt sql-server from
 # internal/testutil's local backend (the pinned dolt in the test
 # wrapper's runfiles) instead of the jobs' container, and fails instead
 # of skipping when it cannot start one. It repeats bd_test's `env`.
@@ -1472,6 +1494,57 @@ sh_test(
     tags = ["dolt-server-proxied"],
 )
 
+# The managed-local proxied lifecycle lane (formerly proxied-local-smoke.yml):
+# the TestManagedLocalProxied* tests, where bd launches its own loopback
+# proxy and the proxy launches the pinned dolt (first on PATH via the test
+# wrapper) as `dolt sql-server`, run inside a user + network namespace with
+# only loopback up (tools/bazel/go_test_offline.sh, the job's `sudo unshare
+# --net`), so they prove the lifecycle needs no outbound network. Against
+# this configuration's (race) bd_test, with the non-race bd_for_tests as the
+# bd under test; BEADS_TEST_SKIP=dolt as in the job (no shared test server:
+# every test supervises its own; BEADS_TEST_DOLT_SERVER/REQUIRE are the
+# dolt-server lanes' convention and start nothing here). Unsharded: Go's
+# sharding counts every test in the binary, not the -test.run matches, so
+# most shards would run none. scripts/managed_local_lane_test.go fails if a
+# test the job pinned is no longer compiled into a linux cgo build. It repeats
+# bd_test's `env`.
+#
+# Tags:
+#   dolt-server-proxied: the proxied-server tier; starts dolt sql-servers;
+#     excluded from --config=prcore/ci, selected by --config=doltserver-proxied
+#     (bazel.yml's bazel-proxied lane, remote execution only: the namespace
+#     needs the workers' unprivileged user namespaces).
+sh_test(
+    name = "bd_managed_local_test",
+    size = "large",
+    # -test.timeout=15m (the job's) fires with a goroutine dump before
+    # Bazel's 1200s action limit (eternal under the lane's --test_timeout).
+    timeout = "eternal",
+    srcs = ["//tools/bazel:go_test_offline.sh"],
+    args = [
+        "$(rootpath :bd_test)",
+        "-test.run=^TestManagedLocalProxied",
+        "-test.timeout=15m",
+    ],
+    data = [
+        ":bd_for_tests",
+        ":bd_test",
+        ":go_srcs",
+        ":preflight_go_fixture",
+        "@go_sdk//:bin/gofmt",
+    ],
+    env = {
+        "BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)",
+        "BEADS_TEST_DOLT_SERVER": "local",
+        "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
+        "BEADS_TEST_PREFLIGHT_GO": "$(rlocationpath :preflight_go_fixture)",
+        "BEADS_TEST_PROXIED_LOCAL": "1",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+        "BEADS_TEST_SKIP": "dolt",
+    },
+    tags = ["dolt-server-proxied"],
+)
+
 # The whole cmd/bd suite, as --config=doltserver-cmd builds it (exactly
 # --config=integration's build: the integration and gms_pure_go build tags,
 # race, so the two lanes share bd_test's compile), against a hermetic dolt sql-server:
@@ -1481,8 +1554,7 @@ sh_test(
 # instead of skipping every Dolt-gated test into a cached pass. These are
 # the cmd/bd tests no other lane runs: every other configuration of bd_test
 # passes BEADS_TEST_SKIP=dolt (prcore/ci, integration) or runs only its
-# manifest (bd_embedded_test, bd_proxied_test), and so do main.yml's and
-# nightly.yml's go test jobs. No -test.run/-test.skip: the Go binary shards
+# manifest (bd_embedded_test, bd_proxied_test). No -test.run/-test.skip: the Go binary shards
 # itself over every top-level test (rules_go's TEST_SHARD_INDEX), so each
 # runs in exactly one shard, and check_testcases.py fails a shard that ran
 # none. It repeats bd_test's `env` (the wrapper cannot inherit it).
@@ -1539,12 +1611,6 @@ exports_files(
     visibility = ["//internal/httpapi:__pkg__"],
 )
 
-# Init-safety help text pinned by //test/docsync recovery-doc tests.
-exports_files(
-    ["init_safety_help.go"],
-    visibility = ["//test/docsync:__pkg__"],
-)
-
 # Release-metadata surfaces gated by //internal/versioncheck's releaseSources
 # table: the canonical version and the Windows PE resource files. Aggregated
 # into //:release_metadata_files, which is what the tests declare as data.
@@ -1569,3 +1635,25 @@ filegroup(
 )
 
 # --- end go_srcs ---
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

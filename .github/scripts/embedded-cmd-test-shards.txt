@@ -287,11 +287,15 @@
 50 15 TestEmbeddedCreateDryRunCrossRepoDoesNotMigrateTarget
 50 15 TestEmbeddedEpicCloseEligibleReasonFlag
 50 15 TestEmbeddedExplicitHierarchicalParentEdges
+50 15 TestEmbeddedIfRevisionReopenGuardDirect
 50 15 TestEmbeddedVersionConcurrent
 
 50 16 TestEmbeddedBlockedLabelFilters
+50 16 TestEmbeddedGCConditionalMatcherDecode
+50 16 TestEmbeddedGateInheritsDownParentChain
 50 16 TestEmbeddedKV
 50 16 TestEmbeddedMaxRowsReady
+50 16 TestEmbeddedMemoryCorpusBudget
 50 16 TestEmbeddedOpen_EmptyDatabaseRejected
 50 16 TestEmbeddedRestoreConcurrent
 50 16 TestEmbeddedVCCommitVariantsAndMerge

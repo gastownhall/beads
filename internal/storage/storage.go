@@ -44,6 +44,10 @@ var (
 // guarded close. See issueops.CloseOpenChildrenError.
 type CloseOpenChildrenError = issueops.CloseOpenChildrenError
 
+// VersionMismatchError reports the expected and current row versions that
+// refused a guarded write. See issueops.VersionMismatchError.
+type VersionMismatchError = issueops.VersionMismatchError
+
 // ErrNotOwner is returned when an actor tries to unclaim an issue that is claimed
 // by a different actor. Releasing another actor's claim requires the force
 // escape hatch (bd unclaim --force), reserved for admin/reaper use.
@@ -282,6 +286,12 @@ type Storage interface {
 	// EdgeReader (that one answers with the stored ROWS, outbound only). Reads
 	// fire no hooks, as for IssueReader.
 	GraphCounter() (issueops.GraphCounter, error)
+	// BatchGetter returns the guarded batch-read surface for this store: many
+	// issues by id, hydrated, in ONE snapshot. Its own role rather than a mode
+	// of IssueReader because a miss here is a RESULT FIELD (Missing) and not
+	// ErrNotFound — a batch GET is a set read, not a precondition on every
+	// member succeeding. Reads fire no hooks, as for IssueReader.
+	BatchGetter() (issueops.BatchGetter, error)
 	// ReadyCounter returns the guarded ready-count surface for this store: the
 	// size of the ready set, which is the number `bd ready`'s pagination
 	// publishes and which no other role answers. Counter's predicate is a

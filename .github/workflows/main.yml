@@ -13,140 +13,6 @@ env:
   BD_DISABLE_EVENT_FLUSH: "1"
 
 jobs:
-  detect-ci-tier:
-    name: Detect CI tier
-    runs-on: ubuntu-latest
-    outputs:
-      full_embedded: ${{ steps.tier.outputs.full_embedded }}
-      reason: ${{ steps.tier.outputs.reason }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          fetch-depth: 0
-
-      - name: Decide embedded Dolt coverage
-        id: tier
-        env:
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: bash .github/scripts/ci-embedded-tier.sh
-
-  # Same guard as pr.yml's check-migration-hygiene: direct pushes to main
-  # (and PR merges whose base moved) must not bypass the migration lints.
-  # BASE_SHA is the pre-push tip; on force pushes or history rewrites the
-  # script warns and skips the frozen-migrations diff but still runs the
-  # duplicate-version and nondeterministic-SQL checks.
-  check-migration-hygiene:
-    name: Check migration hygiene
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          fetch-depth: 0
-
-      - name: Run migration hygiene checks
-        env:
-          BASE_SHA: ${{ github.event.before }}
-        run: ./scripts/check-migration-hygiene.sh
-
-  build-artifacts:
-    name: Build Artifacts
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Restore Go module cache
-        id: restore-go-module-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      # Per `go help cache`, Go's content-addressed build cache includes
-      # compiler options, so this base-tag directory can serve builds with
-      # additional tags. Race builds stay separate; Windows native/cgo
-      # non-race builds share theirs.
-      - name: Restore non-race Go build cache
-        id: restore-non-race-go-build-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/go-cache/non-race
-          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
-          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
-
-      - name: Build reusable Linux artifacts
-        env:
-          GOCACHE: ${{ runner.temp }}/go-cache/non-race
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts
-          source ./.buildflags
-          go_version="$(go version)"
-          commit="$(git rev-parse HEAD)"
-          go build -tags gms_pure_go -o artifacts/bd-linux-gms-pure ./cmd/bd
-          chmod +x artifacts/bd-linux-gms-pure
-          go test -tags gms_pure_go -c -o artifacts/bd-cmd-test ./cmd/bd
-          chmod +x artifacts/bd-cmd-test
-          (
-            cd artifacts
-            sha256sum bd-linux-gms-pure > SHA256SUMS
-          )
-          {
-            echo "commit=${commit}"
-            echo "go_version=${go_version}"
-            echo "build_tags=${BEADS_BUILD_TAGS}"
-            echo "artifact=bd-linux-gms-pure"
-          } > artifacts/build-manifest.txt
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: ci-build-artifacts
-          path: artifacts/
-          retention-days: 1
-          if-no-files-found: error
-
-      # F4.3/F7b: pr.yml's check-doc-freshness-platforms and
-      # pr-preflight-platforms ubuntu legs compile several ./scripts and
-      # ./cmd/bd test binaries but, before this, used no GOCACHE at all (every
-      # run cold-compiled them). This warms the non-race GOCACHE this job
-      # already saves (below) with exactly those packages, plus the
-      # allowlisted-go-tests packages scripts-go-checks' allowlisted leg
-      # needs (--compile-only: the allowlist's own packages, so this can
-      # never drift from what that leg runs). Shared with
-      # blacksmith-go-build-cache's non-race leg (the same-repo-PR path's
-      # seed) so the two paths can never drift apart (F7b spec 4.2).
-      - name: Warm non-race GOCACHE for preflight/doc-freshness/allowlisted
-        env:
-          GOCACHE: ${{ runner.temp }}/go-cache/non-race
-        run: |
-          bash scripts/ci/warm-non-race-cache.sh
-          python3 tools/bazel/run_allowlisted_go_tests.py --compile-only
-
-      - name: Save Go module cache
-        if: steps.restore-go-module-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-
-      - name: Save non-race Go build cache
-        if: steps.restore-non-race-go-build-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/go-cache/non-race
-          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
-
   # F4.7: pr.yml's `windows-test-binaries` job only restores the module cache
   # and the Windows cross-compile GOCACHE; PR workflows never save caches
   # (forks and same-repo PRs alike would otherwise be able to poison a
@@ -239,464 +105,26 @@ jobs:
           path: ${{ runner.temp }}/go-cache/xcompile-windows-amd64
           key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-xcompile-windows-amd64-${{ github.sha }}
 
-  # Fast shell/Make guard for direct source-time build-tag declarations.
-  # Workflow `run` steps are checked structurally in the required policy wrapper.
-  check-build-tags:
-    name: Check build-tag policy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-      - run: ./scripts/check-build-tags.sh
-      - run: ./scripts/check-go-install-guidance.sh
-      - run: ./scripts/check-winget-portable-alias.sh
 
-  # Lock in the cgo-test-contamination fix (mybd-ycx / GH#3683 follow-up).
-  # cmd/bd carries a mix of cgo-only test helpers (embedded Dolt, sql.DB) and
-  # pure-Go tests. Untagged test files that reach for cgo-only helpers break
-  # the entire package's CGO_ENABLED=0 compile, silently neutering pure-Go
-  # tests (the original symptom in PR #3704). This job compiles the cmd/bd
-  # test binary with CGO_ENABLED=0 and runs the pure-Go subset, so a
-  # regression that re-introduces cgo coupling fails fast.
-  check-cmd-bd-puregeo-tests:
-    name: Check cmd/bd pure-Go tests compile (CGO_ENABLED=0)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Build cmd/bd (CGO_ENABLED=0, gms_pure_go)
-        env:
-          CGO_ENABLED: "0"
-        run: go build -tags gms_pure_go -o /tmp/bd-puregeo ./cmd/bd
-
-      - name: Compile pure-Go test binaries (CGO_ENABLED=0, gms_pure_go)
-        env:
-          CGO_ENABLED: "0"
-        run: |
-          go test -tags gms_pure_go -c -o /tmp/bd-cmd-puregeo-test ./cmd/bd
-          go test -tags gms_pure_go -c -o /tmp/bd-embeddeddolt-puregeo-test ./internal/storage/embeddeddolt
-          go test -tags gms_pure_go -c -o /tmp/bd-tracker-puregeo-test ./internal/tracker
-
-      - name: Run pure-Go cmd/bd test subset (CGO_ENABLED=0)
-        env:
-          CGO_ENABLED: "0"
-        # Restrict to tests that exercise pure-Go code paths. Tests that
-        # need a Dolt store skip themselves at runtime when no test server
-        # is available; the goal here is to catch compile-time contamination,
-        # not run the full suite.
-        run: |
-          go test -tags gms_pure_go -count=1 -short -run '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir|NocgoFactoriesHonorSharedServer|NocgoNewDoltStoreFromConfig_ErrorSuggestsCorrectFlag|NocgoNewReadOnlyStoreFromConfig_ErrorSuggestsCorrectFlag)' ./cmd/bd
-
-  # Fast check to ensure all version files are in sync
-  check-version-consistency:
-    name: Check version consistency
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Check all versions match
-        run: ./scripts/check-versions.sh
-
-  # Catch duplicate migration version numbers before any Go build.
-  # Two long-lived branches both claiming 'the next number' produce a silent
-  # under-apply when merged; this job fails at PR time with the conflicting
-  # filenames so it is caught before any test even compiles.
-  check-no-duplicate-migrations:
-    name: Check no duplicate migration versions
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Check for duplicate migration version numbers
-        run: |
-          dup=$(
-            find internal/storage/schema/migrations -maxdepth 1 -name '*.up.sql' -printf '%f\n' \
-              | sed 's/^\([0-9]*\)_.*/\1/' \
-              | sort | uniq -d
-          )
-          if [ -n "$dup" ]; then
-            echo "Duplicate migration version(s) detected: $dup"
-            echo "Conflicting files:"
-            while IFS= read -r v; do
-              find internal/storage/schema/migrations -name "${v}_*.up.sql" -print
-            done <<< "$dup"
-            echo "Renumber one of the colliding files before merging."
-            exit 1
-          fi
-
-  # Check documentation references match actual CLI flags
-  check-doc-flags:
-    name: Check doc flags freshness
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Build bd
-        run: CGO_ENABLED=0 go build -tags gms_pure_go -o bd ./cmd/bd/
-
-      - name: Validate docs against CLI
-        run: |
-          ./scripts/check-doc-flags.sh ./bd
-          ./scripts/check-doc-freshness.sh
-
-  detect-package-gates:
-    name: Detect package gates
-    runs-on: ubuntu-latest
-    outputs:
-      mcp_package: ${{ steps.detect.outputs.mcp_package }}
-      npm_package: ${{ steps.detect.outputs.npm_package }}
-      reason: ${{ steps.detect.outputs.reason }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          fetch-depth: 0
-
-      - name: Decide package gates
-        id: detect
-        env:
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PUSH_BEFORE_SHA: ${{ github.event.before }}
-          PUSH_AFTER_SHA: ${{ github.sha }}
-        run: ./scripts/ci/detect-package-gates.sh
-
-  package-mcp:
-    name: Package Gate (MCP)
-    runs-on: ubuntu-latest
-    needs: [detect-package-gates, build-artifacts]
-    steps:
-      - name: Check applicability
-        id: applicability
-        run: |
-          echo "run=${{ needs.detect-package-gates.outputs.mcp_package }}" >> "$GITHUB_OUTPUT"
-          if [[ "${{ needs.detect-package-gates.outputs.mcp_package }}" != "true" ]]; then
-            echo "MCP package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
-          fi
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        if: steps.applicability.outputs.run == 'true'
-
-      - name: Set up Python
-        if: steps.applicability.outputs.run == 'true'
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.14'
-
-      - name: Install uv
-        if: steps.applicability.outputs.run == 'true'
-        run: python -m pip install uv==0.11.16
-
-      - name: Download build artifacts
-        if: steps.applicability.outputs.run == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: ci-build-artifacts
-          path: ci-build-artifacts
-
-      - name: Verify build artifacts
-        if: steps.applicability.outputs.run == 'true'
-        run: |
-          set -euo pipefail
-          cd ci-build-artifacts
-          sha256sum -c SHA256SUMS
-          chmod +x bd-linux-gms-pure
-
-      - name: Run MCP package gate
-        if: steps.applicability.outputs.run == 'true'
-        env:
-          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
-        run: make ci-package-mcp
-
-  package-npm:
-    name: Package Gate (npm)
-    runs-on: ubuntu-latest
-    needs: [detect-package-gates, build-artifacts]
-    steps:
-      - name: Check applicability
-        id: applicability
-        run: |
-          echo "run=${{ needs.detect-package-gates.outputs.npm_package }}" >> "$GITHUB_OUTPUT"
-          if [[ "${{ needs.detect-package-gates.outputs.npm_package }}" != "true" ]]; then
-            echo "npm package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
-          fi
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        if: steps.applicability.outputs.run == 'true'
-
-      - name: Set up Node.js
-        if: steps.applicability.outputs.run == 'true'
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
-        with:
-          node-version: '24'
-
-      - name: Download build artifacts
-        if: steps.applicability.outputs.run == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: ci-build-artifacts
-          path: ci-build-artifacts
-
-      - name: Verify build artifacts
-        if: steps.applicability.outputs.run == 'true'
-        run: |
-          set -euo pipefail
-          cd ci-build-artifacts
-          sha256sum -c SHA256SUMS
-          chmod +x bd-linux-gms-pure
-
-      - name: Run npm package gate
-        if: steps.applicability.outputs.run == 'true'
-        env:
-          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
-        run: make ci-package-npm
-
-
-  pr-policy-wrapper:
-    name: PR Policy (wrapper timing)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      # Same cold-fetch exposure as pr.yml's pr-policy-wrapper: setup-go above
-      # runs with cache: false, so every run pulls the whole module graph from
-      # the proxy. Retrying it here means a proxy blip costs seconds instead of
-      # failing a required check.
-      #
-      # Deliberately NOT wrapped around the build: `make ci-pr-policy` runs a
-      # `go build ./cmd/bd` (scripts/ci/pr-policy.sh, build_docs_binary), and a
-      # compile error is not transient. See pr.yml's copy for the full rationale.
-      #
-      # 3 attempts x 120s + 2 backoffs x 10s = 380s worst case. 8m leaves ~100s
-      # of headroom, matching the bounded apt-get steps in migration-test.yml.
-      - name: Download modules
-        timeout-minutes: 8
-        run: |
-          downloaded=""
-          for attempt in 1 2 3; do
-            if timeout 120 go mod download; then
-              downloaded=yes
-              break
-            fi
-            echo "::warning::go mod download attempt $attempt failed or timed out"
-            # No backoff after the final attempt - there is nothing left to wait for.
-            if [ "$attempt" -lt 3 ]; then
-              sleep 10
-            fi
-          done
-          # Unlike the best-effort apt-get retries elsewhere in this repo, this
-          # one is load-bearing: nothing downstream can build without the
-          # modules. Fail here, naming the fetch, so a module outage is not
-          # reported as a build failure.
-          if [ -z "$downloaded" ]; then
-            echo "::error::go mod download failed after 3 attempts - module fetch failure, not a build failure"
-            exit 1
-          fi
-
-      - name: Run PR policy wrapper
-        run: make ci-pr-policy
-
-  pr-core-wrapper:
-    name: PR Core (wrapper timing)
-    runs-on: ubuntu-latest
-    needs: build-artifacts
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Restore Go module cache
-        id: restore-go-module-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      - name: Restore race Go build cache
-        id: restore-race-go-build-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/go-cache/race
-          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ github.sha }}
-          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-
-
-      - name: Install Dolt
-        run: ./scripts/ci/install-dolt.sh
-
-      - name: Configure Git and Dolt identity
-        run: |
-          git config --global user.name "CI Bot"
-          git config --global user.email "ci@beads.test"
-          dolt config --global --add user.name "CI Bot"
-          dolt config --global --add user.email "ci@beads.test"
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: ci-build-artifacts
-          path: ci-build-artifacts
-
-      - name: Verify build artifacts
-        run: |
-          set -euo pipefail
-          cd ci-build-artifacts
-          sha256sum -c SHA256SUMS
-          chmod +x bd-linux-gms-pure
-
-      - name: Run PR core wrapper
-        env:
-          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
-          GOCACHE: ${{ runner.temp }}/go-cache/race
-        run: make ci-pr-core
-
-  # F7b: pr.yml's pr-lint-wrapper moved to same-repo Blacksmith
-  # (blacksmith-4vcpu-ubuntu-2404) for same-repo PRs/merge_group, falling back
-  # to ubuntu-latest for forks/Dependabot. golangci-lint's own cache and this
-  # leg's lint GOCACHE are both scoped to the runner infrastructure (not just
-  # the key), so this push-lane saver needs to seed both runner selections —
-  # the `venue` matrix dimension crossed with the existing `target` dimension
-  # (6 legs on push) — the same reason windows-test-binaries-cache above seeds
-  # both `runner: [blacksmith, github]` legs. The ternary form (rather than a
-  # literal Blacksmith label in a matrix array) is required for actionlint,
-  # same as every other Blacksmith `runs-on` in this repo.
-  # F7b review fix (B2): job-level push-to-main-only guard, same rationale as
-  # blacksmith-go-build-cache above -- applied to the whole job (not just the
-  # Blacksmith leg) for simplicity, since the github venue leg is also only
-  # meant to run from main.yml's push trigger. Pinned by
-  # TestBlacksmithSaverJobsGuardedAgainstPullRequest.
-  pr-lint-wrapper:
-    name: PR Lint (${{ matrix.target }})
-    runs-on: ${{ matrix.venue == 'blacksmith' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'gastownhall/beads'
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [native, windows, darwin]
-        venue: [blacksmith, github]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Restore Go module cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      - name: Install golangci-lint
-        run: ./scripts/ci/install-golangci-lint.sh
-
-      # This push lane is the only saver (§0, F5.2): keyed on file content and
-      # the leg; a miss on the exact content key falls back to the leg's most
-      # recent entry, which golangci-lint revalidates against the current
-      # config and inputs. pr.yml only ever restores. The key omits the sha
-      # (SF-4) so a save only happens when .golangci.yml or go.sum change,
-      # not on every push to main.
-      - name: Restore golangci-lint cache
-        id: restore-golangci-lint-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cache/golangci-lint
-            ${{ matrix.target == 'native' && format('{0}/go-cache/lint-{1}', runner.temp, matrix.target) || '' }}
-          key: beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-${{ hashFiles('.golangci.yml', 'go.sum') }}
-          restore-keys: beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-
-
-      # No BD_LINT_NEW_FROM_MERGE_BASE here: the push lane sweeps the whole
-      # tree, including the GOOS=windows and GOOS=darwin cross-lints. pr.yml
-      # scopes the same wrapper to the PR's own diff.
-      - name: Run PR lint wrapper
-        env:
-          BD_LINT_TARGETS: ${{ matrix.target }}
-          GOCACHE: ${{ runner.temp }}/go-cache/lint-${{ matrix.target }}
-        run: make ci-pr-lint
-
-      # !cancelled() (not just a cache-hit check): golangci-lint's own cache is
-      # content-addressed and GOCACHE is unaffected by lint findings, so it is
-      # safe -- and worth keeping -- to save even when the lint step itself
-      # fails (SF-1). Without this, a red lint run on main never warms the
-      # cache and every PR leg stays cold.
-      - name: Save golangci-lint cache
-        if: ${{ !cancelled() && steps.restore-golangci-lint-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cache/golangci-lint
-            ${{ matrix.target == 'native' && format('{0}/go-cache/lint-{1}', runner.temp, matrix.target) || '' }}
-          key: beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-${{ hashFiles('.golangci.yml', 'go.sum') }}
-
-  # Cross-platform test matrix (Linux/macOS only - Windows uses smoke tests)
+  # macOS full -race -short suite. Linux runs the same suite under Bazel
+  # (bazel.yml's `test` lane, on every push to main, executed on rbe-west),
+  # and Windows uses smoke tests below; rbe-west has no macOS workers, so this
+  # is the one lane that still runs the suite on a runner. Blacksmith macOS,
+  # the image pr.yml's same-repo macOS legs use; blacksmith-macos-go-build-cache
+  # seeds its module and non-race caches, and this job saves only its own race
+  # cache (keyed per go.sum and UTC day, F7b review fix S7).
   #
-  # Both legs run every package in one `./...` invocation, so go test's DEFAULT
-  # 10m per-package deadline applied — and cmd/bd outgrew it. scripts/test.sh
-  # already documents the floor for local runs: cmd/bd is the slowest package at
-  # ~18min wall, which is why TEST_TIMEOUT defaults to 25m there. CI was still on
-  # the 10m default and rode the edge: on 2026-09-01 main run 33497003321 failed
-  # twice with `panic: test timed out after 10m0s` in cmd/bd AND, in the same
-  # coverage pass, internal/storage/uow — different tests only 1-12s in flight
-  # each attempt (a package-wide crawl on the 2-core coverage-instrumented
-  # runner, not a hang), while a rerun of the identical tree passed. Match
-  # scripts/test.sh's 25m per-package deadline and keep it inside one finite job
-  # budget, the same shape the storage/uow and conformance jobs below use: the go
-  # deadline fires first and prints goroutine stacks, so a REAL hang is still
-  # diagnosable rather than being cut off by a bare job kill.
+  # ./cmd/bd has outgrown `go test`'s 10m per-package default (see
+  # scripts/test.sh, scripts/ci/pr-core.sh and #6091), and when it trips the
+  # alarm the panic names whichever test was in flight, so it reads like a
+  # hang. -timeout=30m sits on the invocation and inside one finite job
+  # budget: the go deadline fires first and prints goroutine stacks, so a real
+  # hang is still diagnosable rather than cut off by a bare job kill.
   test:
-    name: Test (${{ matrix.os }})
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ${{ matrix.os }}
-    needs: build-artifacts
+    name: Test (macOS)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'gastownhall/beads'
+    runs-on: ${{ 'blacksmith-6vcpu-macos-26' }}
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        include:
-          # Linux: full test suite with coverage
-          - os: ubuntu-latest
-            coverage: true
-            test-flags: '-v -race -short -coverprofile=coverage.out'
-          # macOS: full test suite, no coverage (faster)
-          - os: macos-latest
-            coverage: false
-            test-flags: '-v -race -short'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -706,6 +134,10 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: false
+
+      - name: Compute cache date
+        id: cache-date
+        run: echo "today=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
       - name: Restore Go module cache
         id: restore-go-module-cache
@@ -717,11 +149,10 @@ jobs:
 
       - name: Restore non-race Go build cache
         id: restore-non-race-go-build-cache
-        if: matrix.os == 'macos-latest'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/go-cache/non-race
-          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
           restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
 
       - name: Restore race Go build cache
@@ -729,7 +160,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/go-cache/race
-          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ github.sha }}
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
           restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-
 
       - name: Install Dolt (Linux/macOS)
@@ -745,604 +176,25 @@ jobs:
           dolt config --global --add user.name "CI Bot"
           dolt config --global --add user.email "ci@beads.test"
 
-      - name: Install gotestsum
-        if: matrix.coverage
-        run: go install gotest.tools/gotestsum@v1.13.0
-
-      - name: Download build artifacts
-        if: matrix.os == 'ubuntu-latest'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: ci-build-artifacts
-          path: ci-build-artifacts
-
-      - name: Verify build artifacts
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          set -euo pipefail
-          cd ci-build-artifacts
-          sha256sum -c SHA256SUMS
-          chmod +x bd-linux-gms-pure
-
       - name: Build
-        if: matrix.os != 'ubuntu-latest'
         env:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go build -v -tags gms_pure_go ./cmd/bd
 
-      # Both lanes below pass -timeout=30m explicitly. ./cmd/bd has outgrown
-      # `go test`'s 10m per-package default (see scripts/ci/pr-core.sh and
-      # #6091), and when it trips the alarm the panic names whichever test was
-      # in flight, so it reads like a hang rather than the package running out
-      # of clock. The flag lives on the invocation, not in matrix.test-flags,
-      # so editing the matrix cannot silently drop it. 30m matches every other
-      # -race lane here for this same code.
-      - name: Test (with coverage + JUnit XML)
-        if: matrix.coverage
-        env:
-          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
-          GOCACHE: ${{ runner.temp }}/go-cache/race
-        run: |
-          gotestsum \
-            --junitfile junit.xml \
-            --format testdox \
-            -- -tags gms_pure_go -race -short -timeout=30m -coverprofile=coverage.out -skip '^TestEmbedded' ./...
-
       - name: Test
-        if: ${{ !matrix.coverage }}
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/bd
           GOCACHE: ${{ runner.temp }}/go-cache/race
-        run: go test -tags gms_pure_go ${{ matrix.test-flags }} -timeout=30m -skip '^TestEmbedded' ./...
+        run: go test -tags gms_pure_go -v -race -short -timeout=30m -skip '^TestEmbedded' ./...
 
-      - name: Upload coverage to Codecov
-        if: matrix.coverage && !cancelled()
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
-        continue-on-error: true
-        with:
-          files: coverage.out
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
-
-      - name: Upload test results to Codecov
-        if: matrix.coverage && !cancelled()
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
-        continue-on-error: true
-        with:
-          files: junit.xml
-          token: ${{ secrets.CODECOV_TOKEN }}
-          report_type: test_results
-          fail_ci_if_error: false
-
-      # Only the macOS leg owns macOS generations. The Linux leg restores the
-      # Linux writers above and must never become a second cache publisher.
-      - name: Save Go module cache
-        if: ${{ !cancelled() && matrix.os == 'macos-latest' && steps.restore-go-module-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-
-      - name: Save non-race Go build cache
-        if: ${{ !cancelled() && matrix.os == 'macos-latest' && steps.restore-non-race-go-build-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/go-cache/non-race
-          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
-
+      # Restore-only for the module and non-race caches (the macOS saver
+      # owns them); this job is the race cache's only reader and writer.
       - name: Save race Go build cache
-        if: ${{ !cancelled() && matrix.os == 'macos-latest' && steps.restore-race-go-build-cache.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && steps.restore-race-go-build-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/go-cache/race
-          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ github.sha }}
-
-  # Focused job for the hexagonal storage layer (internal/storage/domain/* and
-  # internal/storage/uow). These packages back the proxied-server init path and
-  # also live behind the existing ./... matrix, but TestDomainDB requires the
-  # Dolt sql-server image cached locally (testcontainers checks `docker image
-  # inspect` and skips otherwise). Pulling the image up front guarantees the
-  # suite actually runs and surfaces failures here with a clear job name.
-  test-domain-uow:
-    name: Test (storage domain + uow)
-    runs-on: ubuntu-latest
-    needs: build-artifacts
-    # The race-enabled storage package has outgrown Go's implicit 10-minute
-    # timeout. Keep both per-package deadlines inside one finite job budget.
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Install Dolt CLI
-        run: ./scripts/ci/install-dolt.sh
-
-      - name: Verify dolt on PATH
-        run: dolt version
-
-      - name: Configure Git and Dolt identity
-        run: |
-          git config --global user.name "CI Bot"
-          git config --global user.email "ci@beads.test"
-          dolt config --global --add user.name "CI Bot"
-          dolt config --global --add user.email "ci@beads.test"
-
-      - name: Pull Dolt sql-server image
-        # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
-        # Without this, RequireDoltContainer reports doltNoImage and TestDomainDB skips.
-        run: ./scripts/ci/pull-dolt-image.sh
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: ci-build-artifacts
-          path: ci-build-artifacts
-
-      - name: Verify build artifacts
-        run: |
-          set -euo pipefail
-          cd ci-build-artifacts
-          sha256sum -c SHA256SUMS
-          chmod +x bd-linux-gms-pure
-
-      - name: Test domain + uow + tracker
-        env:
-          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
-          # internal/storage/domain, internal/storage/uow, and internal/tracker
-          # run as concurrent package test binaries in this one invocation.
-          # testcontainers-go shares one Ryuk reaper per host; a failed
-          # handshake in one process can reap a sibling's live Dolt container
-          # mid-suite (be-2on). The runner is destroyed after the job, so the
-          # reaper buys nothing here and only costs this race.
-          TESTCONTAINERS_RYUK_DISABLED: "true"
-        run: go test -tags gms_pure_go -race -count=1 -timeout 15m -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...
-
-      # The doctor/fix DB-backed suite spins its own Dolt container in
-      # TestMain. BEADS_FIX_REQUIRE_DOLT=1 turns a missing container into a
-      # hard failure so the suite can never silently skip in CI again
-      # (bd-nxt5e: it was dark for months); this job pulls the image above.
-      - name: Test doctor/fix (Dolt-backed, hard-require container)
-        env:
-          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
-          BEADS_FIX_REQUIRE_DOLT: "1"
-          # Pinned for consistency with the step above: this single-package
-          # step has no sibling test binary to race for the reaper (be-2on).
-          TESTCONTAINERS_RYUK_DISABLED: "true"
-        run: go test -tags gms_pure_go -race -count=1 -timeout 10m -v ./cmd/bd/doctor/fix/
-
-  main-linux-integration-packages:
-    name: Main Linux integration packages (${{ matrix.shard }}/6)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    needs: build-artifacts
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: ci-build-artifacts
-          path: ci-build-artifacts
-
-      - name: Verify build artifacts
-        run: |
-          set -euo pipefail
-          cd ci-build-artifacts
-          sha256sum -c SHA256SUMS
-          chmod +x bd-linux-gms-pure
-
-      - name: Install Dolt
-        run: ./scripts/ci/install-dolt.sh
-
-      - name: Configure Git and Dolt identity
-        run: |
-          git config --global user.name "CI Bot"
-          git config --global user.email "ci@beads.test"
-          dolt config --global --add user.name "CI Bot"
-          dolt config --global --add user.email "ci@beads.test"
-
-      - name: Test package shard
-        env:
-          SHARD: ${{ matrix.shard }}
-          TOTAL_SHARDS: 6
-          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts
-          source scripts/ci/lib/timing.sh
-
-          ci_time "install gotestsum" -- go install gotest.tools/gotestsum@v1.13.0
-
-          package_manifest="artifacts/main-linux-integration-packages-${SHARD}-of-${TOTAL_SHARDS}.txt"
-          write_package_manifest() {
-            GO_TEST_SHARD_TAGS=integration,gms_pure_go \
-              GO_TEST_SHARD_EXCLUDE_REGEX="^github.com/steveyegge/beads/cmd/bd$" \
-              scripts/ci/go-test-shard-packages.sh "$SHARD" "$TOTAL_SHARDS" > "$package_manifest"
-          }
-          ci_time "list integration package shard ${SHARD}/${TOTAL_SHARDS}" -- write_package_manifest
-          cat "$package_manifest"
-          mapfile -t packages < "$package_manifest"
-
-          if [[ "${#packages[@]}" -eq 0 ]]; then
-            echo "No packages assigned to shard ${SHARD}/${TOTAL_SHARDS}; skipping go test"
-            exit 0
-          fi
-
-          ci_time "main linux integration package shard ${SHARD}/${TOTAL_SHARDS} go test" -- \
-            env BEADS_TEST_SKIP=dolt gotestsum \
-              --junitfile "artifacts/main-linux-integration-packages-${SHARD}-of-${TOTAL_SHARDS}.xml" \
-              --format testdox \
-              -- -v -race -tags=integration,gms_pure_go -timeout=30m "${packages[@]}"
-
-      - name: Upload integration artifacts
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: main-linux-integration-packages-${{ matrix.shard }}-of-6
-          path: artifacts/
-          retention-days: 7
-          if-no-files-found: ignore
-
-  main-linux-integration-cmd-bd:
-    name: Main Linux integration cmd/bd (${{ matrix.shard }}/8)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    needs: build-artifacts
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: ci-build-artifacts
-          path: ci-build-artifacts
-
-      - name: Verify build artifacts
-        run: |
-          set -euo pipefail
-          cd ci-build-artifacts
-          sha256sum -c SHA256SUMS
-          chmod +x bd-linux-gms-pure
-
-      - name: Install Dolt
-        run: ./scripts/ci/install-dolt.sh
-
-      - name: Configure Git and Dolt identity
-        run: |
-          git config --global user.name "CI Bot"
-          git config --global user.email "ci@beads.test"
-          dolt config --global --add user.name "CI Bot"
-          dolt config --global --add user.email "ci@beads.test"
-
-      - name: Test cmd/bd shard
-        env:
-          SHARD: ${{ matrix.shard }}
-          TOTAL_SHARDS: 8
-          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts
-          source scripts/ci/lib/timing.sh
-
-          ci_time "install gotestsum" -- go install gotest.tools/gotestsum@v1.13.0
-
-          test_manifest="artifacts/main-linux-integration-cmd-bd-tests-${SHARD}-of-${TOTAL_SHARDS}.txt"
-          write_test_manifest() {
-            GO_TEST_SHARD_TAGS=integration,gms_pure_go \
-              scripts/ci/go-test-shard-names.sh "$SHARD" "$TOTAL_SHARDS" ./cmd/bd > "$test_manifest"
-          }
-          ci_time "list cmd/bd test shard ${SHARD}/${TOTAL_SHARDS}" -- write_test_manifest
-          cat "$test_manifest"
-          mapfile -t tests < "$test_manifest"
-
-          if [[ "${#tests[@]}" -eq 0 ]]; then
-            echo "No tests assigned to shard ${SHARD}/${TOTAL_SHARDS}; skipping go test"
-            exit 0
-          fi
-
-          run_regex="^($(IFS='|'; echo "${tests[*]}"))$"
-          ci_time "main linux integration cmd/bd shard ${SHARD}/${TOTAL_SHARDS} go test" -- \
-            env BEADS_TEST_SKIP=dolt gotestsum \
-              --junitfile "artifacts/main-linux-integration-cmd-bd-${SHARD}-of-${TOTAL_SHARDS}.xml" \
-              --format testdox \
-              -- -v -race -tags=integration,gms_pure_go -timeout=30m -run "$run_regex" ./cmd/bd
-
-      - name: Upload integration artifacts
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: main-linux-integration-cmd-bd-${{ matrix.shard }}-of-8
-          path: artifacts/
-          retention-days: 7
-          if-no-files-found: ignore
-
-  # End-to-end coverage for proxied-server CLI subcommands, sharded across the
-  # CI matrix. Each sub-test drives the bd CLI subprocess against a real dolt
-  # sql-server started via testcontainers by the shared proxied harness
-  # (cmd/bd/*_proxied_integration_test.go).
-  #
-  # Reuses the cmd/bd test binary compiled once by build-artifacts (bd-cmd-test):
-  # the proxied tests share the package and are gated at runtime by
-  # BEADS_TEST_PROXIED_SERVER=1. Shard assignment is committed in
-  # .github/scripts/proxied-cmd-test-shards.txt; newly-added
-  # TestProxiedServer*/TestServerMode* tests hash-distribute until listed there.
-  # Prefer the `TestProxiedServer<Subcommand>` naming convention for new entry
-  # points; server-mode-topology suites named TestServerMode* are also
-  # discovered among the cmd/bd/*_test.go entry points, so neither family is
-  # left out of this lane. That glob is non-recursive: a container-gated suite
-  # added under cmd/bd/<subpkg>/ is still never selected here whatever it is
-  # named, so keep new proxied/server-mode entry points at the top level.
-  test-proxied-cmd:
-    name: Test (proxied-server cmd ${{ matrix.shard }}/15)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    needs: build-artifacts
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: ci-build-artifacts
-          path: ci-build-artifacts
-
-      - name: Verify build artifacts
-        run: |
-          set -euo pipefail
-          cd ci-build-artifacts
-          sha256sum -c SHA256SUMS
-          chmod +x bd-linux-gms-pure bd-cmd-test
-
-      - name: Install Dolt CLI
-        # TestProxiedServerExternalCreate needs the dolt binary on PATH; the
-        # shared harness itself uses the dolt sql-server container image.
-        run: ./scripts/ci/install-dolt.sh
-
-      - name: Configure Git and Dolt identity
-        run: |
-          git config --global user.name "CI Bot"
-          git config --global user.email "ci@beads.test"
-          dolt config --global --add user.name "CI Bot"
-          dolt config --global --add user.email "ci@beads.test"
-
-      - name: Pull Dolt sql-server image
-        # The shared proxied harness requires the image cached locally
-        # (isDoltImageCached); without it every proxied test self-skips. Keep the
-        # tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
-        run: ./scripts/ci/pull-dolt-image.sh
-
-      - name: Test proxied-server cmd shard
-        # Timeout ordering, same as pr-risk.yml's twin: the test binary's own
-        # -test.timeout=15m (proxied-test-shard.sh) fires first and dumps
-        # goroutines, this 16m step timeout only backstops a wedged binary, and
-        # the 30m job budget absorbs the download/install/pull steps. Without
-        # the step timeout, slow setup alone can exhaust the job budget and kill
-        # a healthy test run with nothing to diagnose.
-        timeout-minutes: 16
-        env:
-          BEADS_TEST_PROXIED_SERVER: "1"
-          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
-          BEADS_TEST_CMD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-cmd-test
-        run: bash .github/scripts/proxied-test-shard.sh ${{ matrix.shard }} 15
-
-  # Embedded Dolt tests - test the in-process Dolt engine (no server required)
-  #
-  # Split into: build → storage tests + parallel cmd test shards.
-  # cmd/bd embedded tests use a committed shard manifest; newly-added tests
-  # still auto-distribute via hash fallback until the manifest is updated.
-
-  build-embedded:
-    name: Build (Embedded Dolt)
-    needs: detect-ci-tier
-    if: needs.detect-ci-tier.outputs.full_embedded == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Restore Go module cache
-        id: restore-go-module-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      - name: Restore race Go build cache
-        id: restore-race-go-build-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/go-cache/race
-          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ github.sha }}
-          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-
-
-      - name: Build embedded bd binary
-        env:
-          GOCACHE: ${{ runner.temp }}/go-cache/race
-        run: go build -tags gms_pure_go -race -o /tmp/bd-embedded-test ./cmd/bd/
-
-      - name: Build embedded storage test binary
-        env:
-          GOCACHE: ${{ runner.temp }}/go-cache/race
-        run: go test -tags gms_pure_go -race -c -o /tmp/embeddeddolt-test ./internal/storage/embeddeddolt/
-
-      - name: Build embedded cmd test binary
-        env:
-          GOCACHE: ${{ runner.temp }}/go-cache/race
-        run: go test -tags gms_pure_go -race -c -o /tmp/bd-cmd-test ./cmd/bd/
-
-      - name: Upload binaries
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: embedded-test-binaries
-          path: |
-            /tmp/bd-embedded-test
-            /tmp/embeddeddolt-test
-            /tmp/bd-cmd-test
-          retention-days: 1
-
-      - name: Save race Go build cache
-        if: steps.restore-race-go-build-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/go-cache/race
-          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ github.sha }}
-
-  test-embedded-storage:
-    name: Test (Embedded Dolt Storage ${{ matrix.shard }}/${{ strategy.job-total }})
-    needs: [detect-ci-tier, build-embedded]
-    if: needs.detect-ci-tier.outputs.full_embedded == 'true'
-    runs-on: ubuntu-latest
-    # The shard script's -test.timeout=20m plus setup. At 15m the 1000-item
-    # batch-apply cap cancelled shard 2/5: TestBatchApplyContract took 604s
-    # under -race (97s at the 100-item cap, main run 35862663577) and the
-    # shard hit 15m twice (PR Risk run 36807191489). The manifest now pins
-    # the heavy tests apart; the heaviest shard projects to ~13m.
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Download binaries
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: embedded-test-binaries
-          path: /tmp/
-
-      - name: Fix permissions
-        run: chmod +x /tmp/embeddeddolt-test
-
-      - name: Configure Git
-        run: |
-          git config --global user.name "CI Bot"
-          git config --global user.email "ci@beads.test"
-
-      - name: Test
-        env:
-          BEADS_TEST_EMBEDDED_DOLT: "1"
-          BEADS_TEST_EMBEDDED_TEST_BINARY: /tmp/embeddeddolt-test
-        # Manifest-driven shard of the storage suite (mirrors test-embedded-cmd
-        # / embedded-test-shard.sh). Conformance runs separately in the
-        # dedicated test-embedded-conformance job below (mirrors pr-risk.yml);
-        # embedded-storage-test-shard.sh excludes TestConformance from
-        # discovery, so it never lands in one of these shards.
-        run: bash .github/scripts/embedded-storage-test-shard.sh ${{ matrix.shard }} 5
-
-  test-embedded-conformance:
-    name: Test (Embedded Dolt Conformance - ${{ matrix.partition }})
-    needs: [detect-ci-tier, build-embedded]
-    if: needs.detect-ci-tier.outputs.full_embedded == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
-    strategy:
-      fail-fast: false
-      matrix:
-        partition: [core, audit]
-    env:
-      BEADS_TEST_EMBEDDED_DOLT: "1"
-      BEADS_TEST_EMBEDDED_TEST_BINARY: /tmp/embeddeddolt-test
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Download binaries
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: embedded-test-binaries
-          path: /tmp/
-
-      - name: Fix permissions
-        run: chmod +x /tmp/embeddeddolt-test
-
-      - name: Configure Git
-        run: |
-          git config --global user.name "CI Bot"
-          git config --global user.email "ci@beads.test"
-
-      - name: Test core conformance
-        if: matrix.partition == 'core'
-        # RunAll has a natural Audit seam. Run everything except Audit in the
-        # core shard and Audit alone in the other shard. The combined suite has
-        # exceeded 30m under runner variance; each half currently takes ~15m.
-        # Keep the Go timeout below the job timeout so a real stall still emits
-        # a diagnostic goroutine dump before Actions stops the job.
-        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=30m -test.run '^TestConformance$' -test.skip '^TestConformance$/^Audit$'
-
-      - name: Test audit conformance
-        if: matrix.partition == 'audit'
-        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=30m -test.run '^TestConformance$/^Audit$'
-
-  test-embedded-cmd:
-    name: Test (Embedded Dolt Cmd ${{ matrix.shard }}/${{ strategy.job-total }})
-    needs: [detect-ci-tier, build-embedded]
-    if: needs.detect-ci-tier.outputs.full_embedded == 'true'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Download binaries
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: embedded-test-binaries
-          path: /tmp/
-
-      - name: Fix permissions
-        run: chmod +x /tmp/bd-embedded-test /tmp/embeddeddolt-test /tmp/bd-cmd-test
-
-      - name: Configure Git
-        run: |
-          git config --global user.name "CI Bot"
-          git config --global user.email "ci@beads.test"
-
-      - name: Test
-        env:
-          BEADS_TEST_EMBEDDED_DOLT: "1"
-          BEADS_TEST_BD_BINARY: /tmp/bd-embedded-test
-        run: bash .github/scripts/embedded-test-shard.sh ${{ matrix.shard }} 20
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
 
   # Windows smoke tests only - full test suite times out (see bd-bmev)
   # Linux/macOS run comprehensive tests; Windows just verifies binary works
@@ -1357,15 +209,11 @@ jobs:
   # runners cannot see caches `actions/cache` saved from a GitHub-hosted
   # runner (and vice versa) even for an identical key, so the `venue` matrix
   # dimension here seeds the Blacksmith selection too -- same reasoning as
-  # pr-lint-wrapper/go-vet-cache above and windows-test-binaries-cache's
-  # `runner` matrix.
+  # windows-test-binaries-cache's `runner` matrix.
   test-windows:
     name: Test (Windows - smoke, ${{ matrix.venue }})
-    # F7b review fix (B2): added the repository check to match
-    # blacksmith-go-build-cache/pr-lint-wrapper/go-vet-cache's convention
-    # above (this job's push-to-main guard predates F7b and already had the
-    # event/ref check; the repository check closes the same fork gap F7c's
-    # own blacksmith-setup-go-cache guard closes). Pinned by
+    # F7b review fix (B2): push-to-main, same-repo only, like every saver
+    # here (the repository check closes the fork gap). Pinned by
     # TestBlacksmithSaverJobsGuardedAgainstPullRequest.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'gastownhall/beads'
     runs-on: ${{ matrix.venue == 'blacksmith' && 'blacksmith-4vcpu-windows-2025' || 'windows-latest' }}
@@ -1388,8 +236,9 @@ jobs:
           go-version-file: 'go.mod'
           cache: false
 
-      # F7b review fix (S7/Speed): see blacksmith-go-build-cache's identical
-      # step above for the full rationale.
+      # F7b review fix (S7/Speed): cache keys are bucketed by go.sum and UTC
+      # day, not per commit, so ordinary push traffic writes at most one
+      # entry per day (TestBlacksmithSaverCacheKeysAreNotPerCommit).
       - name: Compute cache date
         id: cache-date
         shell: bash
@@ -1466,35 +315,26 @@ jobs:
           path: ${{ runner.temp }}/go-cache/non-race
           key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
 
-  fmt-check:
-    name: Check formatting
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Check gofmt
-        run: make fmt-check
-
-  # Warms the vet cache pr.yml's scripts-go-checks vet leg restores (F5.3).
-  # `go vet` caches successful vet actions, so a warm cache re-vets only
-  # changed packages and their dependents. Restore-only in pr.yml (§0); this
-  # push job is the only saver, on an exact-key miss.
-  # F7b: pr.yml's scripts-go-checks vet leg moved to same-repo Blacksmith; this
-  # seed needs both runner selections for the same reason pr-lint-wrapper
-  # above does (Blacksmith and GitHub-hosted runners cannot see each other's
-  # actions/cache entries, even for an identical key).
-  # F7b review fix (B2): job-level push-to-main-only guard, same rationale and
-  # convention as pr-lint-wrapper above. Pinned by
-  # TestBlacksmithSaverJobsGuardedAgainstPullRequest.
-  go-vet-cache:
-    name: Warm go vet cache
-    runs-on: ${{ matrix.venue == 'blacksmith' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+  # macOS saver: pr.yml's pr-preflight-platforms and
+  # check-doc-freshness-platforms macOS legs run on blacksmith-6vcpu-macos-26
+  # for same-repo PRs/merge_group and on macos-latest for fork/Dependabot PRs,
+  # and Blacksmith and GitHub-hosted runners cannot see each other's
+  # actions/cache entries, so the `venue` matrix seeds both (same convention as
+  # test-windows). This job is their only seeder
+  # (and the Blacksmith leg also seeds the `test` job's module and non-race
+  # caches), and runs only the shared warm-up those legs compile
+  # (warm-non-race-cache.sh, the same script the Windows seeder uses)
+  # plus the non-test ./cmd/bd build -- no tests, so it stays a few minutes of
+  # macOS time per push. Same push-to-main-only job guard (B2) and go.sum +
+  # UTC-day cache keys (S7) as test-windows, so a PR can never
+  # write this namespace and ordinary push traffic writes at most one
+  # non-race entry per day per venue. Pinned by
+  # TestBlacksmithSaverJobsGuardedAgainstPullRequest,
+  # TestBlacksmithSaverCacheKeysAreNotPerCommit and
+  # TestBlacksmithMacOSSaverMatchesPRLegs.
+  blacksmith-macos-go-build-cache:
+    name: Warm macOS Go build cache (${{ matrix.venue }})
+    runs-on: ${{ matrix.venue == 'blacksmith' && 'blacksmith-6vcpu-macos-26' || 'macos-latest' }}
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'gastownhall/beads'
     timeout-minutes: 20
     strategy:
@@ -1511,9 +351,6 @@ jobs:
           go-version-file: 'go.mod'
           cache: false
 
-      # F7b review fix (S7/Speed): see blacksmith-go-build-cache's identical
-      # step above for the full rationale -- bounds this saver's writes to at
-      # most once per UTC calendar day per go.sum, not once per push.
       - name: Compute cache date
         id: cache-date
         run: echo "today=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
@@ -1525,294 +362,44 @@ jobs:
           path: ~/go/pkg/mod
           key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      - name: Restore vet Go build cache
-        id: restore-vet-go-build-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/go-cache/vet
-          key: beads-go-vet-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-vet-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
-          # The non-race build cache fallback this used to list can never hit:
-          # actions/cache versions an entry by its path list, and that cache
-          # saves to a different path (.../go-cache/non-race), so the prefix
-          # match is always filtered out (SF-5).
-          restore-keys: beads-go-vet-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-vet-
-
-      - name: Go vet with go test's checks
-        env:
-          GOCACHE: ${{ runner.temp }}/go-cache/vet
-        run: bash scripts/ci/go-test-vet.sh
-
-      # build-artifacts is the module cache's sole saver (same key); this job
-      # only restores it to warm the vet run, and only saves its own cache.
-      # !cancelled(): go vet's cache is content-addressed, so it is safe to
-      # save even when the vet step itself fails (SF-1).
-      - name: Save vet Go build cache
-        if: ${{ !cancelled() && steps.restore-vet-go-build-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/go-cache/vet
-          key: beads-go-vet-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-vet-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
-
-  # F7b: pr.yml's scripts-go-checks moved to same-repo Blacksmith
-  # (blacksmith-4vcpu-ubuntu-2404); this is that path's saver for the race and
-  # non-race GOCACHEs its scripts-test and allowlisted legs restore (the vet
-  # leg is already covered by go-vet-cache's venue matrix above). Mirrors
-  # build-artifacts (non-race, fork/github path) and build-embedded (race,
-  # fork/github path): Blacksmith runners cannot see caches `actions/cache`
-  # saved from a GitHub-hosted runner (and vice versa) even for an identical
-  # key, so without this every same-repo PR's scripts-go-checks race/non-race
-  # legs would stay cold forever.
-  #
-  # Unlike pr-lint-wrapper/go-vet-cache above, this job has no `venue` matrix
-  # dimension and runs on Blacksmith only: build-artifacts/build-embedded
-  # already seed the ubuntu-latest (fork) leg's non-race/race caches
-  # respectively, so a second ubuntu-latest leg here would be a redundant,
-  # wasted run. `${{ '...' }}` (rather than a bare literal) is required for
-  # actionlint: a literal self-hosted label in `runs-on` fails validation,
-  # but actionlint treats any `${{ }}` expression, even one it could in
-  # principle resolve to a constant, as dynamic and skips the check — the
-  # same reason every other Blacksmith `runs-on` in this repo uses this form.
-  # main.yml only triggers on push to main (already trusted), so this
-  # intentionally has no fork/dependabot fallback branch.
-  #
-  # F7b review fix (B2): pin push-to-main-only at the job level too, not just
-  # via this workflow's current `on: push` trigger (same defense-in-depth
-  # rationale as F7c review fix S2's blacksmith-setup-go-cache guard above --
-  # if main.yml ever gained a pull_request/merge_group trigger, a bare
-  # `on: push` assumption would silently let this job, and the unguarded
-  # saver below it, run on a same-repo PR, making every same-repo PR a writer
-  # of this Blacksmith cache namespace). Pinned by
-  # TestBlacksmithSaverJobsGuardedAgainstPullRequest.
-  blacksmith-go-build-cache:
-    name: Warm Blacksmith Go build cache (${{ matrix.flavor }})
-    runs-on: ${{ 'blacksmith-4vcpu-ubuntu-2404' }}
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'gastownhall/beads'
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        flavor: [race, non-race]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      # F7b review fix (S7/Speed): bounds this saver's writes to at most once
-      # per UTC calendar day per go.sum, not once per push to main. The old
-      # ${{ github.sha }} suffix wrote a brand-new multi-GB race+non-race
-      # build-cache entry on every single push regardless of whether go.sum
-      # changed; on Blacksmith's 25 GB/week/repo quota (LRU eviction, no
-      # per-repo exemption the way GitHub-hosted actions/cache effectively
-      # has) that churn (measured ~1.74GB/push for this job's two flavors
-      # alone) could exhaust the week's budget in a single day of ordinary
-      # push traffic and evict every other Blacksmith-reachable job's cache.
-      # Same convention as F7c review fix S5's blacksmith-setup-go-cache
-      # (main.yml, above). Pinned by TestBlacksmithSaverCacheKeysAreNotPerCommit.
-      - name: Compute cache date
-        id: cache-date
-        run: echo "today=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore Go module cache
-        id: restore-go-module-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      - name: Restore race Go build cache
-        id: restore-race-go-build-cache
-        if: matrix.flavor == 'race'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/go-cache/race
-          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
-          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-
 
       - name: Restore non-race Go build cache
         id: restore-non-race-go-build-cache
-        if: matrix.flavor == 'non-race'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/go-cache/non-race
           key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
           restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
 
-      # scripts-go-checks' scripts-test leg's exact compile set. -run '^$'
-      # selects no tests (only compiles), so this needs no Dolt/test-env setup.
-      - name: Warm race GOCACHE (scripts-go-checks scripts-test leg)
-        if: matrix.flavor == 'race'
-        env:
-          GOCACHE: ${{ runner.temp }}/go-cache/race
-        run: go test -race -run '^$' -tags gms_pure_go ./scripts/...
+      # Records each venue's toolchain in the log so an image drift between
+      # Blacksmith and GitHub's macos-latest is visible next to the cache it
+      # seeds.
+      - name: Check macOS toolchain diagnostics
+        run: |
+          sw_vers
+          go env GOOS GOARCH CGO_ENABLED CC
+          bash --version | head -n 1
 
-      # scripts-go-checks' allowlisted leg (run_allowlisted_go_tests.py
-      # --compile-only: the allowlist's own packages, so this can never drift
-      # from what that leg actually runs) plus pr-preflight-platforms'/
-      # check-doc-freshness-platforms' ubuntu legs via warm-non-race-cache.sh,
-      # shared with build-artifacts' identical steps so the two paths can
-      # never drift apart (F7b spec 4.2).
-      - name: Warm non-race GOCACHE (scripts-go-checks allowlisted leg + preflight/doc-freshness)
-        if: matrix.flavor == 'non-race'
+      - name: Build
         env:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
-        run: |
-          bash scripts/ci/warm-non-race-cache.sh
-          python3 tools/bazel/run_allowlisted_go_tests.py --compile-only
+        run: go build -tags gms_pure_go -o /dev/null ./cmd/bd
 
-      - name: Save race Go build cache
-        if: ${{ !cancelled() && matrix.flavor == 'race' && steps.restore-race-go-build-cache.outputs.cache-hit != 'true' }}
+      - name: Warm non-race GOCACHE for macOS preflight/doc-freshness
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
+        run: bash scripts/ci/warm-non-race-cache.sh
+
+      - name: Save Go module cache
+        if: ${{ !cancelled() && steps.restore-go-module-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/go-cache/race
-          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
 
       - name: Save non-race Go build cache
-        if: ${{ !cancelled() && matrix.flavor == 'non-race' && steps.restore-non-race-go-build-cache.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && steps.restore-non-race-go-build-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/go-cache/non-race
           key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
-
-  test-nix:
-    name: Test Nix Flake
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-      - uses: DeterminateSystems/determinate-nix-action@527f17dd63d2d60d3e5552934bc84b9a33a14d11 # v3
-      - name: Run bd help via Nix
-        id: nix_help
-        run: |
-          nix run .#default -- --help > help.txt
-      # Every flake check for the runner's own system (today: hook-timeout-
-      # backends, checks.nix). `nix flake check` rather than a spelled-out
-      # `.#checks.x86_64-linux.<name>`: no hardcoded system, and a check added
-      # to checks.nix is run without a workflow edit.
-      - name: Run the flake checks
-        run: |
-          nix flake check -L
-      - name: Verify help text
-        if: steps.nix_help.outcome == 'success'
-        run: |
-          FIRST_LINE=$(head -n 1 help.txt)
-          EXPECTED="Issues chained together like beads. A lightweight issue tracker with first-class dependency support."
-          if [ "$FIRST_LINE" != "$EXPECTED" ]; then
-            echo "First line of help.txt doesn't match expected output"
-            echo "Expected: $EXPECTED"
-            echo "Got: $FIRST_LINE"
-            exit 1
-          fi
-          echo "Help text first line is correct"
-
-  # F7c: Blacksmith cannot see GitHub-hosted cache entries, so the advisory
-  # workflows that moved onto a same-repo-PR Blacksmith runner (Conformance,
-  # Regression's PR run, Migration Test Harness, Cross-Version Smoke, Docs
-  # docsync, Proxied Local) need a Blacksmith-side writer for their Go build
-  # cache. This job is push-to-main only (always trusted), so it is the ONLY
-  # writer: it always restores whatever is available, unconditionally re-runs
-  # every warm-up command (not gated on a cache hit), and then always saves
-  # under a key suffixed with this push's commit SHA. Every PR-side consumer
-  # uses `actions/cache/restore` only (never saves) with the same key
-  # prefix/restore-keys below, so a same-repo PR can read this cache but can
-  # never write an entry another PR or main would later read back unverified
-  # (B2, F7c implementation report). This also means the key format is one we
-  # define ourselves (`blacksmith-sg-v1-...`), not setup-go's own implicit
-  # key, so there is no dependency on Blacksmith's `$ImageOS` resolving the
-  # same way setup-go's own cache-action would have assumed.
-  #
-  # Precondition (spec-f7.md §3): an org admin must confirm Blacksmith's
-  # "branch-protected caches" toggle is ON before this seed is trusted to
-  # feed PR-scoped restores; a mismatched or OFF setting only degrades PR
-  # jobs to a cold cache (restore-only, so there is no correctness risk
-  # either way) -- see the F7c implementation report.
-  blacksmith-setup-go-cache:
-    name: Seed setup-go cache (Blacksmith)
-    # A literal (non-expression) Blacksmith label is actionlint's unknown-
-    # runner-label check; every other same-repo Blacksmith job in this repo
-    # routes through a conditional expression instead (actionlint only
-    # validates literal runs-on strings). This job is push-to-main only
-    # (always trusted, so there is nothing to gate on), but it still wraps
-    # the label in a trivial expression to keep actionlint clean and match
-    # repo convention.
-    runs-on: ${{ 'blacksmith-4vcpu-ubuntu-2404' }}
-    # F7c review fix S2: pin push-to-main-only at the job level, not just via
-    # this workflow's current `on: push` trigger. If main.yml ever gained a
-    # pull_request (or merge_group) trigger in the future, a bare
-    # `github.repository == ...` guard would let this job - and the bare,
-    # always-saving cache below it - run on a PR, making every same-repo PR a
-    # writer of the Blacksmith setup-go cache namespace every advisory
-    # consumer trusts. Pinned exactly by
-    # TestBlacksmithSeederGuardedAgainstPullRequest.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'gastownhall/beads'
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      # F7c review fix S5: the old key suffix was ${{ github.sha }}, so every
-      # single push to main - whether or not go.sum changed - saved a brand
-      # new multi-GB ~/go/pkg/mod + ~/.cache/go-build entry under this
-      # namespace. On a cache store with LRU eviction (Blacksmith), that churn
-      # risked evicting F7a's own beads-go-mod-v2-*/beads-go-build-v2-* cache
-      # entries. Keying per UTC day instead still bounds staleness (a go.sum
-      # change is picked up on save on the very next push, and a same-day
-      # restore-keys fallback to yesterday's entry is only ever a prefix
-      # away), while capping writes to at most once per calendar day instead
-      # of once per push. Pinned by TestBlacksmithSeederCacheKeyIsNotPerCommit.
-      - name: Compute cache date
-        id: cache-date
-        run: echo "today=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore Blacksmith setup-go cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
-          restore-keys: |
-            blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
-            blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      # Unconditional (not gated on a cache hit): this job's entire purpose is
-      # to keep the Blacksmith-side cache warm, so it must always repopulate
-      # GOCACHE/GOMODCACHE even when the restore step above already found a
-      # usable entry (a stale or partial restore should still self-heal here).
-      - name: Build bd
-        run: make build
-
-      - name: Compile regression tests
-        run: go test -c -tags regression,gms_pure_go ./tests/regression
-
-      - name: Compile embedded Dolt conformance tests
-        run: go test -c -tags gms_pure_go ./internal/storage/embeddeddolt
-
-      - name: Compile e2e conformance tests
-        run: go test -c -tags 'gms_pure_go e2e' ./test/conformance
-
-      # Always save (even if a warm-up step above failed) under a fresh,
-      # commit-specific key: the content is still a valid, newer GOCACHE/
-      # GOMODCACHE snapshot than whatever was restored, and `cache/save` is a
-      # pure write with no read-back of PR-controlled state, so there is no
-      # poisoning concern in saving unconditionally here.
-      - name: Save Blacksmith setup-go cache
-        if: always()
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: blacksmith-sg-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}

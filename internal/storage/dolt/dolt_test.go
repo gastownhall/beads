@@ -270,6 +270,20 @@ func setupTestStore(t *testing.T) (*DoltStore, func()) {
 	return store, cleanup
 }
 
+// rerunSchemaInitOnTestStore re-runs schema initialization on a
+// setupTestStore store, for tests that set up a schema state and then assert
+// what one more migration pass does to it. Every setupTestStore caller shares
+// testSharedDB, so this pass's GET_LOCK contends with every parallel test's
+// own setup-time init for the same database-scoped lock name, exactly like the
+// branch-local init in setupTestStore. The bare initSchemaOnDB gives up after
+// one 5s wait (migrationLockAcquireTimeoutSeconds) and failed such tests with
+// "schema migration lock unavailable: timeout" on loaded CI runners; the
+// retrying helper retries only a contended lock or a transient connection
+// error, never a migration result, so the outcome under test is unchanged.
+func rerunSchemaInitOnTestStore(ctx context.Context, store *DoltStore) (int, error) {
+	return initSchemaOnDBWithRetry(ctx, store.db)
+}
+
 // setupConcurrentTestStore creates a test store with its own database for
 // concurrent tests that need multiple connections. Branch-per-test isolation
 // requires MaxOpenConns=1, which prevents concurrent transactions.

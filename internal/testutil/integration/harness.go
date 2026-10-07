@@ -183,7 +183,7 @@ func (r *SubprocessRunner) Build(t *testing.T) string {
 			r.buildErr = fmt.Errorf("failed to build test binary: %w\nstderr: %s\nstdout: %s", err, stderr.String(), stdout.String())
 			return
 		}
-		if err := os.Chmod(r.testBin, 0700); err != nil {
+		if err := os.Chmod(r.testBin, 0700); err != nil { //nolint:gosec // G302: the test binary must be executable
 			r.buildErr = fmt.Errorf("failed to chmod test binary: %w", err)
 		}
 	})
@@ -349,7 +349,7 @@ func WaitForPort(t *testing.T, host string, port int, timeout time.Duration) {
 
 // ReadPIDFile reads and parses a PID file, returning 0 if missing or corrupt.
 func ReadPIDFile(path string) int {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: a state file path the harness itself derived
 	if err != nil {
 		return 0
 	}
@@ -362,7 +362,7 @@ func ReadPIDFile(path string) int {
 
 // ReadPortFile reads and parses a port file, returning 0 if missing or corrupt.
 func ReadPortFile(path string) int {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: a state file path the harness itself derived
 	if err != nil {
 		return 0
 	}

@@ -1,3 +1,9 @@
+# Lint policy for nogo (//tools/nogo), which runs these linters beside every
+# Bazel Go compile: tools/nogo/internal/golangci embeds this file and applies
+# it as golangci-lint v2.10.1 would (enabled linters, settings, run.tests,
+# generated files, exclusion rules). Decoding is strict, so a key the nogo
+# wrappers do not implement fails the build. golangci-lint itself still reads
+# it (editors, ad-hoc runs), but CI gates on nogo; see engdocs/LINTING.md.
 version: "2"
 
 run:

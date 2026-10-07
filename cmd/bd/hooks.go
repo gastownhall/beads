@@ -2072,11 +2072,16 @@ func hookLinkedWorktreePrimaryRoot(hookRoot string) string {
 // exportJSONLForCommit.
 //
 // Nothing on either the export or the import path reads BD_GIT_HOOK to decide
-// whether to do its work: its only consumers are maybeAutoExport
-// (export_auto.go), maybeAutoBackup (backup_auto.go), the first-run metrics
-// notice (metrics.go) and terminal color (internal/ui). Setting it therefore
-// suppresses only the post-run writes the hook is doing itself, never the
-// explicit command.
+// whether to do its work: its consumers are maybeAutoExport (export_auto.go),
+// maybeAutoBackup (backup_auto.go), the first-run metrics notice
+// (metrics.go), terminal color (internal/ui), and the workspace gate
+// (sharedGateWait in workspace_gate.go), which makes a hook subprocess fail
+// fast instead of waiting up to BEADS_GATE_WAIT_TIMEOUT behind a maintenance
+// operation. Setting it therefore suppresses only the post-run writes the
+// hook is doing itself and keeps the hook from stalling the user's git
+// command, never the explicit command. Dropping BD_GIT_HOOK here would make
+// every commit/checkout during a bd init or restore hang for the gate wait;
+// TestHookSubprocessEnvKeepsGateFailFast pins it.
 func hookSubprocessEnv(env []string) []string {
 	return append(filterEnv(env, "BD_GIT_HOOK"), "BD_GIT_HOOK=1")
 }
@@ -2226,8 +2231,10 @@ func importJSONLForSync(reason string) {
 	warnJSONLWithoutDoltRemote(reason + " JSONL import")
 
 	// Shell out to `bd import` — same pattern as exportJSONLForCommit,
-	// including BD_GIT_HOOK=1. No import path consults that variable, so
-	// clearing it suppressed nothing the import needs; all it did was let the
+	// including BD_GIT_HOOK=1 (which also keeps the subprocess's workspace
+	// gate acquisition fail-fast; see hookSubprocessEnv). No import path
+	// consults that variable to decide whether to import, so clearing it
+	// suppressed nothing the import needs; all it did was let the
 	// subprocess's PersistentPostRun auto-export fire, and that export
 	// re-resolves its destination from beads.FindBeadsDir() — the *primary*
 	// checkout's JSONL. Harmless while this hook read the primary's copy too,

@@ -462,11 +462,19 @@ func (r *uowApplyRun) applyDepAdd(ctx context.Context, index int, item *publicop
 	if err != nil {
 		return itemErr(err)
 	}
+	metadata := item.Metadata
+	if item.HasSpawner {
+		metadata, err = storageissueops.StampWaitsForSpawnerID(item.Type, item.Metadata, target)
+		if err != nil {
+			return itemErr(fmt.Errorf("%w: %v", publicops.ErrValidation, err))
+		}
+	}
 	dep := &types.Dependency{
 		IssueID:     source,
 		DependsOnID: target,
 		Type:        item.Type,
-		Metadata:    item.Metadata,
+		Metadata:    metadata,
+		ThreadID:    item.ThreadID,
 	}
 	if _, err := r.uw.DependencyUseCase().AddDependencies(ctx, []*types.Dependency{dep}, r.plan.Actor, domain.BulkAddDepsOpts{
 		SkipPerEdgeCycleCheck: r.plan.SkipPerEdgeCycleCheck,

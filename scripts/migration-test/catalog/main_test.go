@@ -13,9 +13,9 @@ import (
 
 func TestCheckedCatalogIsCanonicalAndComplete(t *testing.T) {
 	catalog := readCheckedCatalog(t)
-	if len(catalog.Versions) != 122 || len(catalog.Exclusions.RepositoryOnlyStable) != 49 ||
+	if len(catalog.Versions) != 127 || len(catalog.Exclusions.RepositoryOnlyStable) != 49 ||
 		len(catalog.Exclusions.RepositoryOnlyPrereleases) != 3 {
-		t.Fatalf("catalog counts = %d/%d/%d, want 122/49/3",
+		t.Fatalf("catalog counts = %d/%d/%d, want 127/49/3",
 			len(catalog.Versions), len(catalog.Exclusions.RepositoryOnlyStable),
 			len(catalog.Exclusions.RepositoryOnlyPrereleases))
 	}
@@ -64,7 +64,7 @@ func TestCheckedCatalogRejectsWellFormedIdentitySubstitution(t *testing.T) {
 
 func TestClassifyVersionsUsesProxyAsStableUniverse(t *testing.T) {
 	stable, excluded, err := classifyVersions(
-		[]string{"v1.1.2", "v1.1.0-rc.2", "v0.56.0", "v1.1.0-rc.1", "v0.9.1", "v1.2.0"},
+		[]string{"v1.1.2", "v1.1.0-rc.2", "v0.56.0", "v1.1.0-rc.1", "v0.9.1", "v1.4.0"},
 		[]string{"v0.9.1", "v0.57.12", "v0.58.8-nosqlite", "v1.1.0-rc.1", "v1.1.2", "2026.218.0"},
 	)
 	if err != nil {

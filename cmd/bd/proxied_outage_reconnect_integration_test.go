@@ -82,17 +82,25 @@ func TestProxiedServerOutageReconnectAcceptanceMatrix(t *testing.T) {
 			newPort, err := upstream.CurrentPort(ctx)
 			cancel()
 			require.NoError(t, err)
-			require.NoError(t, bridge.Process.Kill())
+			// Re-point the front at the restored upstream. stop reaps the old
+			// socat, so its listener is gone before the replacement binds the
+			// same TCP port; start returns only once the replacement is
+			// listening.
+			bridge.stop(t)
 			bridge = startOutageBridge(t, endpoint, newPort, topology.socket)
 			var after *types.Issue
-			require.Eventually(t, func() bool {
-				stdout, _, runErr := bdProxiedRunBuffers(t, bd, p.dir, "show", sentinel.ID, "--json")
-				if runErr != nil {
-					return false
+			for deadline := time.Now().Add(10 * time.Second); ; {
+				stdout, stderr, runErr := bdProxiedRunBuffers(t, bd, p.dir, "show", sentinel.ID, "--json")
+				if runErr == nil {
+					after = parseIssueJSON(t, []byte(stdout))
+					break
 				}
-				after = parseIssueJSON(t, []byte(stdout))
-				return true
-			}, 10*time.Second, 100*time.Millisecond, "bd reconnect after upstream restart")
+				if time.Now().After(deadline) {
+					t.Fatalf("bd did not reconnect within 10s of the upstream restart; last error: %v: %s\nbridge log:\n%s",
+						runErr, strings.TrimSpace(stderr), bridge.stderr)
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
 			if after.ID != before.ID || after.Title != before.Title {
 				t.Fatalf("sentinel changed after reconnect: before=%q/%q after=%q/%q", before.ID, before.Title, after.ID, after.Title)
 			}
@@ -201,34 +209,90 @@ func actionableTransportError(s string) bool {
 	return false
 }
 
-func waitForSocket(t *testing.T, path string) {
-	t.Helper()
-	require.Eventually(t, func() bool { _, err := os.Stat(path); return err == nil }, 3*time.Second, 20*time.Millisecond,
-		"unix socket did not appear")
+// outageBridge is the socat front standing in for the external endpoint. The
+// test swaps it when the upstream comes back, so it tracks the process's exit:
+// a replacement must not bind until the old listener is gone, and a
+// replacement that failed to bind must not pass for a live front.
+type outageBridge struct {
+	cmd    *exec.Cmd
+	stderr *syncBuffer
+	exited chan struct{}
 }
 
-func startOutageBridge(t *testing.T, endpoint, upstreamPort string, socket bool) *exec.Cmd {
+// stop kills the bridge and waits for it to exit, which is when the kernel
+// has released its listener. Kill alone only queues SIGKILL: on a loaded host
+// the old socat can still own the TCP port when the replacement calls bind,
+// and the replacement then exits with EADDRINUSE, leaving the endpoint
+// refusing connections for the rest of the test.
+func (b *outageBridge) stop(t *testing.T) {
+	t.Helper()
+	_ = b.cmd.Process.Kill()
+	select {
+	case <-b.exited:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("outage bridge (pid %d) did not exit after SIGKILL", b.cmd.Process.Pid)
+	}
+}
+
+// socatListeningMarker is what socat logs at notice level (-d -d) once its
+// listen() has succeeded; socat 1.7 and 1.8 both print it.
+const socatListeningMarker = "listening on"
+
+// startOutageBridge starts a socat front on endpoint (a TCP port on 127.0.0.1,
+// or a unix socket path) forwarding to the upstream's TCP port, and returns
+// once socat reports that it is listening. A socat that exits before then
+// (its bind lost a race for the port) is retried a few times.
+func startOutageBridge(t *testing.T, endpoint, upstreamPort string, socket bool) *outageBridge {
 	t.Helper()
 	var listen string
 	if socket {
-		// socat refuses to bind over a stale pathname after an outage.
-		_ = os.Remove(endpoint)
 		listen = "UNIX-LISTEN:" + endpoint + ",fork"
 	} else {
 		listen = "TCP-LISTEN:" + endpoint + ",bind=127.0.0.1,reuseaddr,fork"
 	}
-	cmd := exec.Command("socat", listen, "TCP:127.0.0.1:"+upstreamPort)
-	require.NoError(t, cmd.Start())
-	require.Eventually(t, func() bool { return processAlive(cmd.Process.Pid) }, time.Second, 20*time.Millisecond, "outage bridge process did not remain alive")
-	if socket {
-		waitForSocket(t, endpoint)
-	}
-	t.Cleanup(func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
+	const attempts = 5
+	var lastLog string
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if socket {
+			// socat refuses to bind over a stale pathname after an outage.
+			_ = os.Remove(endpoint)
 		}
-	})
-	return cmd
+		b := &outageBridge{stderr: &syncBuffer{}, exited: make(chan struct{})}
+		b.cmd = exec.Command("socat", "-d", "-d", listen, "TCP:127.0.0.1:"+upstreamPort)
+		b.cmd.Stderr = b.stderr
+		require.NoError(t, b.cmd.Start())
+		go func() {
+			_ = b.cmd.Wait()
+			close(b.exited)
+		}()
+		t.Cleanup(func() {
+			_ = b.cmd.Process.Kill()
+			<-b.exited
+		})
+		deadline := time.After(10 * time.Second)
+	waitListening:
+		for !strings.Contains(b.stderr.String(), socatListeningMarker) {
+			select {
+			case <-b.exited:
+				break waitListening
+			case <-deadline:
+				b.stop(t)
+				t.Fatalf("outage bridge on %s did not start listening within 10s:\n%s", endpoint, b.stderr)
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+		select {
+		case <-b.exited:
+			lastLog = b.stderr.String()
+			t.Logf("outage bridge on %s exited before listening (attempt %d/%d):\n%s", endpoint, attempt, attempts, lastLog)
+			time.Sleep(100 * time.Millisecond)
+			continue
+		default:
+		}
+		return b
+	}
+	t.Fatalf("outage bridge on %s never started listening after %d attempts; last log:\n%s", endpoint, attempts, lastLog)
+	return nil
 }
 
 // shortSocketPath returns a unix-socket path under a short private directory:

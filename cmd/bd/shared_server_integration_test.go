@@ -130,12 +130,20 @@ func TestSharedServerConcurrent(t *testing.T) {
 	}
 
 	// ── Init project directories ────────────────────────────────────────
-	// One at a time: in shared-server mode every project's physical root is
-	// the one shared dolt dir, and bd init holds that root's workspace gate
-	// EXCLUSIVELY (acquireInitMutationGate), waiting at most
-	// exclusiveGateWait (5s) for it. Concurrent inits therefore refuse each
-	// other ("bd init refuses to run over live bd activity") by design;
-	// what this test exercises is the concurrent workload phase below.
+	// All at once: in shared-server mode every project's physical root is
+	// the one shared dolt dir, and bd init holds that root's gate
+	// EXCLUSIVELY (acquireInitMutationGate), so concurrent inits of
+	// different projects serialize on it. Each waits up to
+	// initGateWaitDefault (60s) for the others, which covers the lane's
+	// small BEADS_TEST_SS_DIRS at ~8s per init. Larger manual runs queue
+	// numDirs inits behind one gate, so raise the bound to match rather
+	// than reintroduce client-side serialization.
+	initEnv := baseEnv
+	if perInit := 15 * time.Second; time.Duration(numDirs)*perInit > initGateWaitDefault {
+		bound := time.Duration(numDirs) * perInit
+		initEnv = append(append([]string{}, baseEnv...), initGateTimeoutEnv+"="+bound.String())
+		t.Logf("init: %d concurrent inits; %s=%s", numDirs, initGateTimeoutEnv, bound)
+	}
 	phase = time.Now()
 	type project struct {
 		dir, prefix string
@@ -143,7 +151,6 @@ func TestSharedServerConcurrent(t *testing.T) {
 	projects := make([]project, numDirs)
 
 	eg, egCtx := errgroup.WithContext(ctx)
-	eg.SetLimit(1)
 	for i := range numDirs {
 		i := i
 		eg.Go(func() error {
@@ -155,7 +162,7 @@ func TestSharedServerConcurrent(t *testing.T) {
 			if err := gitInit(egCtx, dir); err != nil {
 				return fmt.Errorf("project %d git init: %w", i, err)
 			}
-			out, err := ssExec(egCtx, bdBinary, dir, baseEnv,
+			out, err := ssExec(egCtx, bdBinary, dir, initEnv,
 				"init", "--shared-server", "--external",
 				"--prefix", prefix, "--quiet", "--non-interactive")
 			if err != nil {
@@ -171,9 +178,46 @@ func TestSharedServerConcurrent(t *testing.T) {
 	t.Logf("init %d dirs: %s", numDirs, time.Since(phase))
 
 	// ── Fan out client workloads ────────────────────────────────────────
+	// Plus one late `bd init` of a fresh project that starts while the
+	// workloads are running. It holds the shared physical root's gate
+	// EXCLUSIVELY for its whole run, so this exercises both directions of
+	// the gate wait: every client command that lands during the init waits
+	// for it (BEADS_GATE_WAIT_TIMEOUT, default 30s) instead of failing, and
+	// the init gets the gate despite the steady stream of short client
+	// commands (workspacegate writer fairness: once the init is queued, new
+	// shared acquirers wait behind it). Its bound is pinned to 30s, half the
+	// 60s default, rather than initEnv's raised one: a generous bound would
+	// mask a fairness regression.
 	phase = time.Now()
 	eg, egCtx = errgroup.WithContext(ctx)
-	eg.SetLimit(maxProcs)
+	eg.SetLimit(maxProcs + 1) // +1: the late init below must not take a client's slot
+	eg.Go(func() error {
+		select {
+		case <-time.After(time.Second): // let the workloads get going
+		case <-egCtx.Done():
+			return egCtx.Err()
+		}
+		dir := filepath.Join(t.TempDir(), "projlate")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("late project mkdir: %w", err)
+		}
+		if err := gitInit(egCtx, dir); err != nil {
+			return fmt.Errorf("late project git init: %w", err)
+		}
+		start := time.Now()
+		lateEnv := append(append([]string{}, baseEnv...), initGateTimeoutEnv+"=30s")
+		out, err := ssExec(egCtx, bdBinary, dir, lateEnv,
+			"init", "--shared-server", "--external",
+			"--prefix", "projlate", "--quiet", "--non-interactive")
+		if err != nil {
+			return fmt.Errorf("late init during client workloads: %s: %w", out, err)
+		}
+		t.Logf("late init during client workloads: %s", time.Since(start))
+		if out, err := ssExec(egCtx, bdBinary, dir, baseEnv, "list", "--json", "--flat"); err != nil {
+			return fmt.Errorf("list in late project: %s: %w", out, err)
+		}
+		return nil
+	})
 	for c := range numClients {
 		c := c
 		eg.Go(func() error {
