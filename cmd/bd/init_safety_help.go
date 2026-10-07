@@ -31,15 +31,18 @@ FLAG SURFACE
                                 local data. Does NOT authorize discarding
                                 remote history. If origin has Dolt data
                                 this will refuse — pair with
-                                --discard-remote to override.
+                                --discard-remote to override. Nor does it
+                                authorize recreating a missing server-mode
+                                database; that takes --recreate-missing.
 
   bd init --reinit-local \      Discard the remote's Dolt history and
       --discard-remote          replace it with the local reinit. First
                                 bd dolt push after this will be a
                                 history-replacing force-push.
 
-  bd init --force               Deprecated alias for --reinit-local.
-                                Kept working for ≥2 releases.
+  bd init --force               Deprecated alias for --reinit-local, with
+                                the same limits. Kept working for ≥2
+                                releases.
 
   bd init --recreate-missing    Authorize creating a fresh, empty database
                                 when this project's configured server-mode
@@ -48,7 +51,14 @@ FLAG SURFACE
                                 --force/--reinit-local, config, or env.
                                 Without it, bd init REFUSES rather than
                                 silently recreating a lost database as
-                                empty (be-5up5).
+                                empty (be-5up5). First rule out a stopped
+                                server or a wrong port or data dir, and
+                                restore if you can; the playbook is
+                                init-missing-server-db in
+                                docs/recovery/init-safety.md. Only when
+                                nothing is recoverable:
+
+                                  bd init --recreate-missing --prefix <prefix>
 
   bd init --from-jsonl          Import from configured import.path. If
                                 origin has Dolt data, this refuses unless

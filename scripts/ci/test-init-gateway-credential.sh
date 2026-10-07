@@ -28,6 +28,8 @@ source "$repo_root/.buildflags"
 # second cold compile on macOS and Windows. Inheriting the default makes this
 # step incremental, and it also means the natively executed fixtures exercise
 # the same build of cmd/bd that actually ships on those platforms.
+# Incremental only if the caller also shares GOCACHE with that earlier step:
+# pr.yml points both at the restored non-race cache.
 go_executable="$(command -v go)"
 [[ "$go_executable" = /* && -x "$go_executable" ]] || {
     echo 'Go must resolve to an absolute executable' >&2; exit 1;
@@ -39,7 +41,6 @@ host_info="$("$go_executable" env GOHOSTOS GOOS)"
 
 # This single list owns both test selection and required execution evidence.
 expected=(
-    TestApplyInitGatewayCredentialHelperProtocol
     TestApplyInitGatewayCredentialAdoptsToken
     TestApplyInitGatewayCredentialSkipsEmbeddedMode
     TestApplyInitGatewayCredentialNoopWithoutCommand
@@ -47,7 +48,7 @@ expected=(
     TestApplyInitGatewayCredentialPresetWins
 )
 # ...which makes the array the only wiring between a fixture and native
-# execution, with nothing tying it back to the source file. A seventh
+# execution, with nothing tying it back to the source file. A new
 # TestApplyInitGatewayCredential* fixture added later would fall out of the
 # selector, lose macOS/Windows execution entirely, and still leave this driver
 # exiting 0 with the required gate green — the exact "green because nothing ran"

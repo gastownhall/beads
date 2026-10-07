@@ -1,0 +1,102 @@
+{
+  "tables": {
+    "bd_events_journal": {
+      "rows": 32,
+      "sha256": "7f170b6134c7686d771197203eb2b53828b6b8df26e632339da42628b4d6aab4"
+    },
+    "child_counters": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "comments": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "dependencies": {
+      "rows": 19,
+      "sha256": "30491db934ce218ca1054925bc30b2041cb3f1927a36ca41fffc1609ef759dc4"
+    },
+    "events": {
+      "rows": 41,
+      "sha256": "6738a7e74b5164d19d450390efbeaee6471136b69dcf2a560c5f418c00545e6d"
+    },
+    "events_ids": {
+      "rows": 1,
+      "sha256": "aad1224bbf184c91c0fd10a7534529d8aa1a3485b489d7b27ff8fe9e4786c8c1"
+    },
+    "issue_versions": {
+      "rows": 31,
+      "sha256": "cd5bae2e19b479f3c61fcb04b9929a958eddc1643cc7dbf1aebf44d25fbabcdf"
+    },
+    "issues": {
+      "rows": 15,
+      "sha256": "4715873ec097361b74eef201b3411b1fd13f55e5c039be17e5bc636d39dd3412"
+    },
+    "issues_updated_at": {
+      "rows": 4,
+      "sha256": "5b1ae48809d6216ed5943345b0e3720d8fd205b98195fc1901ec28e7b99998f2"
+    },
+    "labels": {
+      "rows": 6,
+      "sha256": "311abde715c2fdb96190c5fb23368c69775d74b62f84abe71dbcc925a007e2e7"
+    },
+    "wisp_dependencies": {
+      "rows": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wisp_events": {
+      "rows": 3,
+      "sha256": "71f6fa496b3eb72634bc0afd90c4ee31aa2b137582e7dc8296a363715d39e242"
+    },
+    "wisp_labels": {
+      "rows": 2,
+      "sha256": "18c75c35719dcda649bbb8d59d28c04004fa4472a6246769e2c30d04cae85967"
+    },
+    "wisps": {
+      "rows": 1,
+      "sha256": "d0f049baac21bd46b8cc71703d63921387cf94e236cbd235eb384794d484df13"
+    }
+  },
+  "skipped": [
+    "create eq-a1 changed=true",
+    "create eq-a2 changed=true",
+    "create eq-a3 changed=true",
+    "create eq-a4 changed=true",
+    "create eq-a5 changed=true",
+    "create eq-a6 changed=true",
+    "create eq-a7 changed=true",
+    "create eq-a8 changed=true",
+    "create eq-a9 changed=true",
+    "create eq-a10 changed=true",
+    "create eq-a11 changed=true",
+    "create eq-a12 changed=true",
+    "dep_add eq-a2 changed=true",
+    "dep_add eq-a3 changed=true",
+    "dep_add eq-a4 changed=true",
+    "dep_add eq-a5 changed=true",
+    "dep_add eq-a6 changed=true",
+    "dep_add eq-a7 changed=true",
+    "dep_add eq-a8 changed=true",
+    "dep_add eq-a9 changed=true",
+    "dep_add eq-a10 changed=true",
+    "dep_add eq-a11 changed=true",
+    "dep_add eq-a1 changed=true",
+    "dep_add eq-a3 changed=true",
+    "dep_add eq-a5 changed=true",
+    "dep_add eq-a7 changed=true",
+    "dep_add eq-a9 changed=true",
+    "dep_add eq-a11 changed=true",
+    "dep_add eq-a1 changed=true",
+    "dep_add eq-a4 changed=true",
+    "dep_add eq-a5 changed=true",
+    "update eq-a2 changed=true"
+  ],
+  "stale": null,
+  "changed": [
+    "dependencies",
+    "events",
+    "issues",
+    "labels"
+  ],
+  "counter": null
+}

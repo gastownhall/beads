@@ -52,16 +52,31 @@ type preparedFixture struct {
 // without the sentinel is simply not ours, so it falls through to its own
 // TestMain rather than being refused.
 func Dispatch() (int, bool) {
-	if os.Getenv(helperProcessEnv) != "1" {
-		return 0, false
-	}
-
-	for i, arg := range os.Args {
-		if arg == helperSentinel {
-			return runProtocol(os.Args[i+1:], os.Stdout, os.Stderr), true
-		}
+	if i := helperArgIndex(); i >= 0 {
+		return runProtocol(os.Args[i+1:], os.Stdout, os.Stderr), true
 	}
 	return 0, false
+}
+
+// IsHelperProcess reports whether this process is a credential helper
+// re-exec (the same two gates as Dispatch). Package init functions, which run
+// before TestMain can call Dispatch, use it to skip suite setup the helper
+// never needs: cmd/bd's integration-tagged init would otherwise try to build
+// bd from the helper's working directory and panic.
+func IsHelperProcess() bool {
+	return helperArgIndex() >= 0
+}
+
+func helperArgIndex() int {
+	if os.Getenv(helperProcessEnv) != "1" {
+		return -1
+	}
+	for i, arg := range os.Args {
+		if arg == helperSentinel {
+			return i
+		}
+	}
+	return -1
 }
 
 // Constructor contract — Emit, Exit23 and Marker all share it, and it is more

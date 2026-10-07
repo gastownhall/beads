@@ -212,7 +212,7 @@ func findOutdatedBDHookVersions(
 			// No version comment found. If this is a bd hook (has shim marker,
 			// inline marker, or calls bd hooks run), treat it as outdated since
 			// all current hook templates include a version comment. (GH#1466)
-			if isBdHookContent(contentStr) {
+			if IsBdHookContent(contentStr) {
 				outdated = append(outdated, fmt.Sprintf("%s@unknown", hookName))
 				if oldest == "" {
 					oldest = "0.0.0"
@@ -230,8 +230,11 @@ func findOutdatedBDHookVersions(
 	return outdated, oldest
 }
 
-// isBdHookContent checks if hook content is a bd hook (shim, inline, section-marker, or calls bd hooks run).
-func isBdHookContent(content string) bool {
+// IsBdHookContent checks if hook content is a bd hook (shim, inline, section-marker, or calls bd hooks run).
+// It is exported because cmd/bd's getHookVersion classifies the same files for
+// bd hooks list / bd info / bd config drift; sharing one predicate is what keeps
+// those surfaces from disagreeing with bd doctor about the same hook (GH#6084).
+func IsBdHookContent(content string) bool {
 	return strings.Contains(content, bdShimMarker) ||
 		strings.Contains(content, bdInlineHookMarker) ||
 		strings.Contains(content, bdSectionMarkerPrefix) ||

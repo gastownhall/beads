@@ -872,10 +872,23 @@ func setupRegularWorktreeRepo(t *testing.T) (string, string) {
 	return mainRepoDir, worktreeDir
 }
 
+// noAutoMaintenance keeps a fixture's git commit from starting the detached
+// "git maintenance run --auto" (gc --auto on git before 2.29). Its worktree-prune
+// task removes a worktree admin dir that has neither gitdir nor locked yet, which
+// is exactly the window between "git worktree add"'s mkdir and its locked write,
+// so a later "git worktree add" in the same repo can die with "could not open
+// .git/worktrees/<name>/locked for writing". Seen on ubuntu-latest with git 2.55.0.
+var noAutoMaintenance = []string{"-c", "maintenance.auto=false", "-c", "gc.auto=0"}
+
+// gitCommand builds a git command for a fixture with noAutoMaintenance applied.
+func gitCommand(args ...string) *exec.Cmd {
+	return exec.Command("git", append(append([]string{}, noAutoMaintenance...), args...)...)
+}
+
 func runGitInDir(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 
-	cmd := exec.Command("git", args...)
+	cmd := gitCommand(args...)
 	cmd.Dir = dir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1454,7 +1467,7 @@ func TestFindGitRoot_Worktree(t *testing.T) {
 	if err := cmd.Run(); err != nil {
 		t.Fatal(err)
 	}
-	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd = gitCommand("commit", "-m", "Initial commit")
 	cmd.Dir = mainRepoDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git commit failed: %v", err)
@@ -1575,7 +1588,7 @@ func TestFindBeadsDir_Worktree(t *testing.T) {
 	cmd = exec.Command("git", "add", "-A")
 	cmd.Dir = mainRepoDir
 	_ = cmd.Run()
-	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd = gitCommand("commit", "-m", "Initial commit")
 	cmd.Dir = mainRepoDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git commit failed: %v", err)
@@ -1676,7 +1689,7 @@ func TestFindBeadsDir_WorktreeRedirectOverride(t *testing.T) {
 	cmd = exec.Command("git", "add", "-A")
 	cmd.Dir = mainRepoDir
 	_ = cmd.Run()
-	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd = gitCommand("commit", "-m", "Initial commit")
 	cmd.Dir = mainRepoDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git commit failed: %v", err)
@@ -1785,7 +1798,7 @@ func TestFindDatabasePath_WorktreeRedirectOverride(t *testing.T) {
 	cmd = exec.Command("git", "add", "-A")
 	cmd.Dir = mainRepoDir
 	_ = cmd.Run()
-	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd = gitCommand("commit", "-m", "Initial commit")
 	cmd.Dir = mainRepoDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git commit failed: %v", err)
@@ -1908,7 +1921,7 @@ func TestFindBeadsDir_SiblingWorktree(t *testing.T) {
 	cmd = exec.Command("git", "add", "-A")
 	cmd.Dir = mainRepoDir
 	_ = cmd.Run()
-	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd = gitCommand("commit", "-m", "Initial commit")
 	cmd.Dir = mainRepoDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git commit failed: %v", err)
@@ -2029,7 +2042,7 @@ func TestFindDatabasePath_Worktree(t *testing.T) {
 	cmd = exec.Command("git", "add", "-A")
 	cmd.Dir = mainRepoDir
 	_ = cmd.Run()
-	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd = gitCommand("commit", "-m", "Initial commit")
 	cmd.Dir = mainRepoDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git commit failed: %v", err)
@@ -2134,7 +2147,7 @@ func TestFindDatabasePath_WorktreeSeparateDB(t *testing.T) {
 	cmd = exec.Command("git", "add", "-A")
 	cmd.Dir = mainRepoDir
 	_ = cmd.Run()
-	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd = gitCommand("commit", "-m", "Initial commit")
 	cmd.Dir = mainRepoDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git commit failed: %v", err)
@@ -2250,7 +2263,7 @@ func TestFindDatabasePath_WorktreeNoLocalDB(t *testing.T) {
 	cmd = exec.Command("git", "add", "-A")
 	cmd.Dir = mainRepoDir
 	_ = cmd.Run()
-	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd = gitCommand("commit", "-m", "Initial commit")
 	cmd.Dir = mainRepoDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git commit failed: %v", err)

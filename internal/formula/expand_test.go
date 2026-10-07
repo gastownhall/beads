@@ -87,7 +87,7 @@ func TestExpandStep(t *testing.T) {
 		},
 	}
 
-	result, err := expandStep(target, template, 0, nil)
+	result, err := expandStep(target, template, nil)
 	if err != nil {
 		t.Fatalf("expandStep failed: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestExpandStepDepthLimit(t *testing.T) {
 
 	// With depth 0 start, going to level 6 means 7 levels total (0-6)
 	// DefaultMaxExpansionDepth is 5, so this should fail
-	_, err := expandStep(target, template, 0, nil)
+	_, err := expandStep(target, template, nil)
 	if err == nil {
 		t.Fatal("expected depth limit error, got nil")
 	}
@@ -159,7 +159,7 @@ func TestExpandStepDepthLimit(t *testing.T) {
 	}
 
 	shallowTemplate := []*Step{shallowChild}
-	result, err := expandStep(target, shallowTemplate, 0, nil)
+	result, err := expandStep(target, shallowTemplate, nil)
 	if err != nil {
 		t.Fatalf("expected shallow template to succeed, got: %v", err)
 	}
@@ -1194,6 +1194,80 @@ func TestMaterializeExpansion(t *testing.T) {
 		}
 		if f.Steps[0].Description != "Build {{feature}} with brief: {{brief}}" {
 			t.Errorf("Description = %q, want double-brace vars preserved", f.Steps[0].Description)
+		}
+	})
+}
+
+func TestExpansionVarRefs(t *testing.T) {
+	t.Run("reports every name the expansion substitutes", func(t *testing.T) {
+		f := &Formula{
+			Formula:     "deploy",
+			Description: "Ship {release}",
+			Type:        TypeExpansion,
+			Template: []*Step{
+				{
+					ID:          "{target}.build-{env}",
+					Title:       "Build {component} for {target.title}",
+					Description: "{target.description}",
+					Assignee:    "{owner}",
+					Labels:      []string{"team:{team}"},
+					DependsOn:   []string{"{target}.prep-{stage}"},
+					Needs:       []string{"{target.id}.gate-{gate}"},
+					// Neither field is carried into the expanded step, so
+					// nothing in them is ever substituted.
+					Notes:     "{notes_only}",
+					Condition: "{{condition_only}}",
+					Children: []*Step{
+						{ID: "{target}.child", Title: "Work on {{feature}}"},
+					},
+				},
+			},
+		}
+
+		// {target}, {target.id} and {target.title} are replaced before any
+		// variable is, so none of them is a name; {target.description} pulls
+		// in the formula's description, whose {release} IS substituted. The
+		// single-brace pattern also matches inside {{feature}}, so a
+		// --var feature=x is consumed there too.
+		got := strings.Join(ExpansionVarRefs(f, "main"), " ")
+		if want := "component env feature gate owner release stage team"; got != want {
+			t.Errorf("ExpansionVarRefs() = %q, want %q", got, want)
+		}
+		if f.Steps != nil {
+			t.Errorf("ExpansionVarRefs materialized the formula: Steps = %v", f.Steps)
+		}
+	})
+
+	t.Run("reported even when the formula already has steps", func(t *testing.T) {
+		// MaterializeExpansion skips this formula as it stands, but condition
+		// filtering can remove every step first, and then the template is
+		// materialized after all.
+		f := &Formula{
+			Formula:  "exp",
+			Type:     TypeExpansion,
+			Steps:    []*Step{{ID: "only", Title: "Only", Condition: "{{flag}}"}},
+			Template: []*Step{{ID: "{target}.build", Title: "Build {component}"}},
+		}
+
+		got := strings.Join(ExpansionVarRefs(f, "main"), " ")
+		if want := "component"; got != want {
+			t.Errorf("ExpansionVarRefs() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("nil unless the formula is an expansion with a template", func(t *testing.T) {
+		workflow := &Formula{
+			Formula:  "wf",
+			Type:     TypeWorkflow,
+			Template: []*Step{{ID: "{target}.build", Title: "Build {component}"}},
+		}
+		if got := ExpansionVarRefs(workflow, "main"); got != nil {
+			t.Errorf("workflow formula: ExpansionVarRefs() = %v, want nil", got)
+		}
+
+		noTemplate := &Formula{Formula: "exp", Type: TypeExpansion}
+		if got := ExpansionVarRefs(noTemplate, "main"); got != nil {
+			t.Errorf("expansion without a template: ExpansionVarRefs() = %v, want nil", got)
 		}
 	})
 }

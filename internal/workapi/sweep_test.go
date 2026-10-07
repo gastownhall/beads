@@ -430,6 +430,30 @@ func TestSweepLiveDependentsCountOnlyProtectingEdgesFromLiveSources(t *testing.T
 	}
 }
 
+func TestSweepLiveDependentTargetsPropagatesThroughProtectedCandidates(t *testing.T) {
+	dep := func(source, target string) *types.Dependency {
+		return &types.Dependency{IssueID: source, DependsOnID: target, Type: types.DepParentChild}
+	}
+	incoming := map[string][]*types.Dependency{
+		"root":    {dep("middle", "root")},
+		"middle":  {dep("leaf", "middle")},
+		"cycle-a": {dep("cycle-b", "cycle-a")},
+		"cycle-b": {dep("cycle-a", "cycle-b")},
+	}
+
+	protected := SweepLiveDependentTargets(incoming, map[string]bool{"leaf": true})
+	for _, id := range []string{"middle", "root"} {
+		if !protected[id] {
+			t.Errorf("%s not protected; it is transitively depended on by a live source", id)
+		}
+	}
+	for _, id := range []string{"cycle-a", "cycle-b"} {
+		if protected[id] {
+			t.Errorf("%s protected without a live path into its closed cycle", id)
+		}
+	}
+}
+
 func TestValidateSweepRequestRefusesANegativeLimit(t *testing.T) {
 	err := ValidateSweepRequest(issueops.SweepRequest{Tier: issueops.SweepEphemeral, Limit: -1})
 	if !errors.Is(err, issueops.ErrValidation) {

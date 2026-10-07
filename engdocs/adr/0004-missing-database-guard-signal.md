@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed — 2026-09-16.
+Accepted — 2026-10-01, landed with #5791 (proposed 2026-09-16).
 
 Extends [ADR 0002](0002-init-safety-invariants.md), which established the
 `bd init` safety invariants and the scope-bound `--force` / `--reinit-local`
@@ -133,7 +133,10 @@ would need new mechanism for no safety gain.
   pre-GH#2372 workspace whose local database was lost was protected under
   plain `bd init` but waved through under `--reinit-local` / `--force` — the
   flags an operator reaches for in a panic were the weaker path.
-- `checkExistingBeadsDataAt` does not change.
+- `checkExistingBeadsDataAt` needs no further change for this decision. The
+  probe fix described under Context, which landed in the same PR (#5791),
+  already gave it the Tier 1 probe ahead of `project_id` and the
+  coarse-directory permit condition.
 - The fresh-clone false positive (GH#2433) remains by design for the cells
   where it is unavoidable.
 - Both guards cite this ADR, so the question stops being re-litigated each

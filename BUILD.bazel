@@ -8,15 +8,22 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 # out of every build except --config=integration (.bazelrc), which sets the tag.
 # gazelle:build_tags gms_pure_go,integration
 # integrations/ holds no Go; it stays visible to Bazel (not in .bazelignore)
-# only so //test/docsync can declare the markdown its link checks resolve.
+# so //:repo_files covers it for //test/docsync's link checks and the
+# repository-policy tests in //scripts.
 # gazelle:exclude integrations
+# The two example Go modules (own go.mod, built against a released beads) are
+# not part of this build either, but they are tracked files the repository
+# guards (gofmt, build-tag and install-guidance checks in
+# //scripts/repochecks) must see, so they are not in .bazelignore.
+# gazelle:exclude examples/library-usage
+# gazelle:exclude examples/bd-example-extension-go
 gazelle(name = "gazelle")
 
 exports_files(
     [".buildflags"],
     visibility = [
-        "//scripts/pr-lint:__pkg__",
         "//scripts/prlintmake:__pkg__",
+        "//tests/upgrade_smoke:__pkg__",
     ],
 )
 
@@ -25,6 +32,15 @@ exports_files([
     "go.sum",
 ])
 
+# The golangci-lint configuration nogo applies (//tools/nogo), and its test.
+exports_files(
+    [".golangci.yml"],
+    visibility = [
+        "//tools/nogo:__pkg__",
+        "//tools/nogo/internal/golangci:__pkg__",
+    ],
+)
+
 # Repository files read by source-scanning tests, declared as their `data` so
 # the tests run under `bazel test` and remote execution.
 exports_files(
@@ -32,11 +48,17 @@ exports_files(
     visibility = ["//scripts/gitattributespolicy:__pkg__"],
 )
 
-# //scripts:scripts_test keeps pr.yml's release-target cross-compilation matrix
-# in lockstep with the release targets .goreleaser.yml declares.
+# //tests/hook_timeout_backends: the tracked git hooks whose managed section
+# it runs against real timeout implementations.
 exports_files(
-    [".goreleaser.yml"],
-    visibility = ["//scripts:__pkg__"],
+    [
+        ".githooks/post-checkout",
+        ".githooks/post-merge",
+        ".githooks/pre-commit",
+        ".githooks/pre-push",
+        ".githooks/prepare-commit-msg",
+    ],
+    visibility = ["//tests/hook_timeout_backends:__pkg__"],
 )
 
 # //cmd/bd:bd_test: tracked git hooks (generator parity) and the formula
@@ -53,35 +75,6 @@ filegroup(
 exports_files(
     [".claude-plugin/marketplace.json"],
     visibility = ["//cmd/bd/setup:__pkg__"],
-)
-
-# //test/docsync: the Mintlify site, engdocs, root markdown, and the files
-# outside those trees that their local links point at.
-#
-# The out-of-tree link targets are hand-listed: a new docs/engdocs link to a
-# file outside these globs passes `go test` but fails under Bazel until the
-# target is added here. The globs stop at package boundaries, so no BUILD file
-# may live under docs/ or engdocs/ (enforced by scripts/bazel_policy_test.go).
-filegroup(
-    name = "docsync_files",
-    srcs = glob([
-        "*.md",
-        "docs/**",
-        "engdocs/**",
-    ]) + [
-        "integrations/beads-mcp/PYPI.md",
-        "//scripts:README.md",
-    ],
-    visibility = ["//test/docsync:__pkg__"],
-)
-
-# //scripts:scripts_test workflow-policy and CI-script tests: the whole
-# .github tree (workflows, composite actions, CI helper scripts) they parse
-# and run. The one whole-tree input the plan allows (it is small).
-filegroup(
-    name = "workflow_files",
-    srcs = glob([".github/**"]),
-    visibility = ["//scripts:__pkg__"],
 )
 
 # PR Risk's manifest-sharded tiers' shard scripts and their committed
@@ -109,30 +102,33 @@ exports_files(
     ],
 )
 
-# //scripts:scripts_test runs scripts/test.sh, which sources the canonical
-# build flags and reads the known-broken-test skip list.
+# //internal/versioncheck and //scripts/check-versions release-gate tests: the
+# metadata surfaces versioncheck.releaseSources gates, plus the canonical
+# version it compares them against and the tracked git hooks whose version
+# markers it checks.
+#
+# Hand-listed rather than globbed because releaseSources is itself a closed
+# list: a newly gated surface must be added here too, and until it is the test
+# fails under Bazel (it passes under `go test`, which sees the whole checkout).
 filegroup(
-    name = "test_sh_files",
+    name = "release_metadata_files",
     srcs = [
-        ".buildflags",
-        ".test-skip",
+        ".claude-plugin/marketplace.json",
+        "integrations/beads-mcp/pyproject.toml",
+        "integrations/beads-mcp/src/beads_mcp/__init__.py",
+        "integrations/beads-mcp/uv.lock",
+        "npm-package/package.json",
+        "//cmd/bd:version.go",
+        "//cmd/bd:winres/manifest.xml",
+        "//cmd/bd:winres/winres.json",
+        "//plugins/beads:.claude-plugin/plugin.json",
+        "//plugins/beads:.codex-plugin/plugin.json",
+        "//plugins/beads:.copilot-plugin/plugin.json",
+    ] + glob([".githooks/*"]),
+    visibility = [
+        "//internal/versioncheck:__pkg__",
+        "//scripts/check-versions:__pkg__",
     ],
-    visibility = ["//scripts:__pkg__"],
-)
-
-# Inputs of the Bazel policy tests in //scripts (bazel_policy_test.go), so they
-# run under `bazel test` as well as `go test`.
-filegroup(
-    name = "bazel_policy_files",
-    srcs = [
-        ".bazelrc",
-        ".bazelversion",
-        ".gitignore",
-        "BUILD.bazel",
-        "MODULE.bazel",
-        "go.mod",
-    ],
-    visibility = ["//scripts:__pkg__"],
 )
 
 go_library(
@@ -191,3 +187,241 @@ go_test(
         "//issueops",
     ],
 )
+
+# //internal/httpclient/encode:encode_test regenerates and compares the shipped
+# divergence ledger doc (TestDivergenceLedgerDocMatchesLedger), so the doc must
+# be readable as data under `bazel test`. docsync_files above globs it too, but
+# that filegroup's visibility is scoped to //test/docsync alone.
+exports_files(
+    ["engdocs/design/http-divergence-ledger.md"],
+    visibility = ["//internal/httpclient/encode:__pkg__"],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+            ".agents/**",
+            ".amp/**",
+            ".augment/**",
+            ".bazelrc.local",
+            ".claude/*.lock",
+            ".claude/*.log",
+            ".claude/settings.local.json",
+            ".codex/**",
+            ".cursor/**",
+            ".direnv/**",
+            ".envrc",
+            ".git/**",
+            ".idea/**",
+            ".logs/**",
+            ".vscode/**",
+            "bazel-*/**",
+            "bd",
+            "bd-fixed",
+            "bd-original",
+            "bd-test",
+            "bd_test",
+            "beads",
+            "go.work",
+            "go.work.sum",
+            "history/**",
+            "mcp_agent_mail/**",
+            "npm-package/bin/*.tar.gz",
+            "npm-package/bin/*.zip",
+            "npm-package/bin/CHANGELOG.md",
+            "npm-package/bin/LICENSE",
+            "npm-package/bin/README.md",
+            "npm-package/bin/bd",
+            "npm-package/package-lock.json",
+            "output",
+            "result",
+            "state.json",
+            "user.bazelrc",
+        ],
+    ) + [
+        "//backend:repo_files",
+        "//backend/conformance:repo_files",
+        "//beadserrors:repo_files",
+        "//cmd/bd:repo_files",
+        "//cmd/bd/doctor:repo_files",
+        "//cmd/bd/doctor/fix:repo_files",
+        "//cmd/bd/protocol:repo_files",
+        "//cmd/bd/setup:repo_files",
+        "//format:repo_files",
+        "//internal/ado:repo_files",
+        "//internal/atomicfile:repo_files",
+        "//internal/audit:repo_files",
+        "//internal/beads:repo_files",
+        "//internal/ceiling:repo_files",
+        "//internal/compact:repo_files",
+        "//internal/config:repo_files",
+        "//internal/configfile:repo_files",
+        "//internal/creds:repo_files",
+        "//internal/debug:repo_files",
+        "//internal/doltremote:repo_files",
+        "//internal/doltserver:repo_files",
+        "//internal/doltversion:repo_files",
+        "//internal/eventsjournal:repo_files",
+        "//internal/execenv:repo_files",
+        "//internal/fdhygiene:repo_files",
+        "//internal/formula:repo_files",
+        "//internal/formula/cmd/schemagen:repo_files",
+        "//internal/formula/schemagen:repo_files",
+        "//internal/git:repo_files",
+        "//internal/gitenv:repo_files",
+        "//internal/githooksenv:repo_files",
+        "//internal/github:repo_files",
+        "//internal/gitignore:repo_files",
+        "//internal/gitlab:repo_files",
+        "//internal/gittraceenv:repo_files",
+        "//internal/hooks:repo_files",
+        "//internal/httpapi:repo_files",
+        "//internal/httpapi/apigen:repo_files",
+        "//internal/httpapi/spec:repo_files",
+        "//internal/httpapi/wireshape:repo_files",
+        "//internal/httpapi/wireshape/cmd/gendigest:repo_files",
+        "//internal/httpclient:repo_files",
+        "//internal/httpclient/encode:repo_files",
+        "//internal/httpclient/wire:repo_files",
+        "//internal/idgen:repo_files",
+        "//internal/jira:repo_files",
+        "//internal/linear:repo_files",
+        "//internal/lockfile:repo_files",
+        "//internal/memoryapi:repo_files",
+        "//internal/metrics:repo_files",
+        "//internal/migration:repo_files",
+        "//internal/migration/legacysqlite:repo_files",
+        "//internal/molecules:repo_files",
+        "//internal/notion:repo_files",
+        "//internal/procid:repo_files",
+        "//internal/query:repo_files",
+        "//internal/recipes:repo_files",
+        "//internal/remotecache:repo_files",
+        "//internal/routing:repo_files",
+        "//internal/storage:repo_files",
+        "//internal/storage/backendnames:repo_files",
+        "//internal/storage/backends:repo_files",
+        "//internal/storage/batchbench:repo_files",
+        "//internal/storage/batchfixtures:repo_files",
+        "//internal/storage/contextinfo:repo_files",
+        "//internal/storage/createbatchequiv:repo_files",
+        "//internal/storage/dberrors:repo_files",
+        "//internal/storage/dbproxy/identity:repo_files",
+        "//internal/storage/dbproxy/pidfile:repo_files",
+        "//internal/storage/dbproxy/proxy:repo_files",
+        "//internal/storage/dbproxy/server:repo_files",
+        "//internal/storage/dbproxy/util:repo_files",
+        "//internal/storage/depid:repo_files",
+        "//internal/storage/dolt:repo_files",
+        "//internal/storage/doltutil:repo_files",
+        "//internal/storage/domain:repo_files",
+        "//internal/storage/domain/db:repo_files",
+        "//internal/storage/domain/fs:repo_files",
+        "//internal/storage/domain/git:repo_files",
+        "//internal/storage/embeddeddolt:repo_files",
+        "//internal/storage/embeddeddolt/cmd:repo_files",
+        "//internal/storage/externaldeps:repo_files",
+        "//internal/storage/fs:repo_files",
+        "//internal/storage/git:repo_files",
+        "//internal/storage/issueops:repo_files",
+        "//internal/storage/journalscan:repo_files",
+        "//internal/storage/kvkeys:repo_files",
+        "//internal/storage/memoryops:repo_files",
+        "//internal/storage/rowid:repo_files",
+        "//internal/storage/schema:repo_files",
+        "//internal/storage/sqlbuild:repo_files",
+        "//internal/storage/sqlclass:repo_files",
+        "//internal/storage/sqlcount:repo_files",
+        "//internal/storage/storagecontract:repo_files",
+        "//internal/storage/uow:repo_files",
+        "//internal/storage/versioncontrolops:repo_files",
+        "//internal/telemetry:repo_files",
+        "//internal/templates:repo_files",
+        "//internal/templates/agents:repo_files",
+        "//internal/testutil:repo_files",
+        "//internal/testutil/bazeltest:repo_files",
+        "//internal/testutil/credentialcmd:repo_files",
+        "//internal/testutil/fixtures:repo_files",
+        "//internal/testutil/integration:repo_files",
+        "//internal/timeparsing:repo_files",
+        "//internal/tracker:repo_files",
+        "//internal/tracker/conformance:repo_files",
+        "//internal/types:repo_files",
+        "//internal/ui:repo_files",
+        "//internal/uimd:repo_files",
+        "//internal/utils:repo_files",
+        "//internal/validation:repo_files",
+        "//internal/versioncheck:repo_files",
+        "//internal/workapi:repo_files",
+        "//internal/workapi/storecounter:repo_files",
+        "//internal/workapi/storequerier:repo_files",
+        "//internal/workapi/storereader:repo_files",
+        "//internal/workapi/storereadycounter:repo_files",
+        "//internal/workapi/storestats:repo_files",
+        "//internal/workapi/storeversionreconciler:repo_files",
+        "//internal/workapi/storeworkspaceconfig:repo_files",
+        "//internal/workspacegate:repo_files",
+        "//internal/worktreeremove:repo_files",
+        "//issueops:repo_files",
+        "//journalops:repo_files",
+        "//memoryops:repo_files",
+        "//platforms:repo_files",
+        "//plugins/beads:repo_files",
+        "//schema:repo_files",
+        "//scripts:repo_files",
+        "//scripts/bench-ready-indexes:repo_files",
+        "//scripts/check-versions:repo_files",
+        "//scripts/checkworkflowtags:repo_files",
+        "//scripts/gitattributespolicy:repo_files",
+        "//scripts/internal/testbash:repo_files",
+        "//scripts/migration-test/catalog:repo_files",
+        "//scripts/pr-lint:repo_files",
+        "//scripts/prlintmake:repo_files",
+        "//scripts/repochecks:repo_files",
+        "//scripts/repro-dolt-hang:repo_files",
+        "//scripts/repro-dolt-prod-timeouts:repo_files",
+        "//scripts/workflowtags:repo_files",
+        "//test/conformance:repo_files",
+        "//test/docsync:repo_files",
+        "//test/testmainconvention:repo_files",
+        "//tests/hook_timeout_backends:repo_files",
+        "//tests/migration:repo_files",
+        "//tests/regression:repo_files",
+        "//tests/upgrade_smoke:repo_files",
+        "//third_party/cc_toolchain:repo_files",
+        "//third_party/patches:repo_files",
+        "//tools/bazel:repo_files",
+        "//tools/docsmint:repo_files",
+        "//tools/nogo:repo_files",
+        "//tools/nogo/analyzers/depguard:repo_files",
+        "//tools/nogo/analyzers/errcheck:repo_files",
+        "//tools/nogo/analyzers/forbidigo:repo_files",
+        "//tools/nogo/analyzers/gosec:repo_files",
+        "//tools/nogo/analyzers/misspell:repo_files",
+        "//tools/nogo/analyzers/sloglint:repo_files",
+        "//tools/nogo/analyzers/unconvert:repo_files",
+        "//tools/nogo/analyzers/unparam:repo_files",
+        "//tools/nogo/internal/analyzertest:repo_files",
+        "//tools/nogo/internal/golangci:repo_files",
+        "//tools/nogo/internal/position:repo_files",
+    ],
+    visibility = [
+        "//scripts:__pkg__",
+        "//scripts/repochecks:__pkg__",
+        "//test/docsync:__pkg__",
+    ],
+)
+
+# --- end repo_files ---

@@ -451,7 +451,7 @@ func TestProxiedServerClose(t *testing.T) {
 		}
 
 		// failed[].error is the TYPED error, the same on this route as on the
-		// direct one — see the twin assertions in TestEmbeddedClose/
+		// direct one — see the twin assertions in TestEmbeddedCloseBasic/
 		// close_partial_failure_json_names_the_failed_ids. The --force hint is
 		// advice for a human reader, so it belongs on the stderr line above and
 		// not in the field a --json consumer keys off; recording the decorated
@@ -484,9 +484,14 @@ func TestProxiedServerClose(t *testing.T) {
 		}
 	})
 
-	// ga-ktn9pe.4.8: twin of TestEmbeddedClose/close_boolean_pinned_reclose_is_idempotent.
-	// Both close paths must agree — a fix on one only is the divergence class #5217
-	// just closed.
+	// ga-ktn9pe.4.8: this used to have an embedded twin
+	// (TestEmbeddedClose/close_boolean_pinned_reclose_is_idempotent), but
+	// bd-1rh.1 (#5287) trimmed it along with the embedded suite's other
+	// pinned-close subtests as redundant with this proxied coverage, so this
+	// is now the sole owner of the boolean-pinned-reclose contract. Both
+	// close paths had to agree before the trim — a fix on one only was the
+	// divergence class #5217 just closed — so treat any future embedded
+	// pinned-close test as needing to stay consistent with this one.
 	t.Run("close_boolean_pinned_reclose_is_idempotent", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "cbpr")

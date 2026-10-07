@@ -95,6 +95,28 @@ the flags appear in the command line.`,
 		}
 
 		ctx := rootCtx
+
+		// A8 (beads#4682): a single-id compare-and-swap close bypasses the
+		// batch below entirely -- see close_if_revision.go for why
+		// BatchCloseItem cannot carry this guard.
+		ifRevision, err := parseIfRevisionFlag(cmd)
+		if err != nil {
+			return err
+		}
+		if err := requireSingleIfRevisionID(ifRevision, args); err != nil {
+			return err
+		}
+		if ifRevision != nil {
+			// The bypass below never looks at these three post-close flags, so
+			// honoring them would mean silently dropping what the caller asked
+			// for. Refuse instead of guessing, the same way --continue and
+			// --suggest-next already refuse a multi-id batch below.
+			if continueFlag || suggestNext || claimNext {
+				return HandleErrorRespectJSON("--if-revision does not support --continue, --suggest-next, or --claim-next")
+			}
+			return runCloseDirectIfRevision(ctx, args[0], reasonForCloseIndex(reasons, 0), force, session, *ifRevision)
+		}
+
 		opsCtx, err := issueOpsContext(ctx)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
@@ -495,6 +517,8 @@ func init() {
 	closeCmd.Flags().Bool("suggest-next", false, "Show newly unblocked issues after closing")
 	closeCmd.Flags().Bool("claim-next", false, "Automatically claim the next highest priority available issue")
 	closeCmd.Flags().String("session", "", "Claude Code session ID (or set CLAUDE_SESSION_ID env var)")
+	// A8 (beads#4682): bypasses the N-id batch above for a single guarded close.
+	closeCmd.Flags().String("if-revision", "", ifRevisionFlagHelp)
 	closeCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(closeCmd)
 }
@@ -671,7 +695,13 @@ func checkGateSatisfaction(issue *types.Issue) error {
 	case issue.AwaitType == "timer":
 		resolved, escalated, reason, err = checkTimer(issue, time.Now())
 	case issue.AwaitType == "bead":
-		resolved, reason = checkBeadGate(rootCtx, routedBeadGateGetter{localStore: store}, issue.AwaitID)
+		resolved, reason, err = checkBeadGate(rootCtx, routedBeadGateGetter{localStore: store}, issue.AwaitID)
+		if err != nil {
+			// Unlike the gh:* and timer arms above, a bead gate whose store
+			// cannot be read stays closed: the close would need that same
+			// store, and "could not read" must not pass as "satisfied".
+			return fmt.Errorf("gate condition not satisfied: could not check bead gate: %v (use --force to override)", err)
+		}
 		if resolved {
 			return nil
 		}
@@ -843,7 +873,7 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 		// Write-intent: a prefix-routed target opens writable so the close
 		// commits on the target head (#4141). Contributor auto-routing below
 		// stays read-only: it hydrates foreign projects that must not be mutated.
-		if r, err := resolveViaPrefixRoutingWithAccess(ctx, id, true); err == nil {
+		if r, err := resolveViaPrefixRoutingWithAccess(ctx, id, true, false); err == nil {
 			results = append(results, r)
 			continue
 		}

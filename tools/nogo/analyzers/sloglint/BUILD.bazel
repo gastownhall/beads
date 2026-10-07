@@ -1,0 +1,46 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "sloglint",
+    srcs = ["sloglint.go"],
+    importpath = "github.com/steveyegge/beads/tools/nogo/analyzers/sloglint",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/nogo/internal/golangci",
+        "@org_go_simpler_sloglint//:sloglint",
+        "@org_golang_x_tools//go/analysis",
+        "@org_golang_x_tools//go/analysis/passes/inspect",
+    ],
+)
+
+go_test(
+    name = "sloglint_test",
+    srcs = ["sloglint_test.go"],
+    deps = [
+        ":sloglint",
+        "//tools/nogo/internal/analyzertest",
+        "//tools/nogo/internal/golangci",
+    ],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

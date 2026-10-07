@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# worker-env-sync: check that beads' worker-env pin is gascity's.
+#
+#   tools/rbe/worker-env-sync [REF]
+#
+# rbe-west's OSS pool workers are gastownhall/gascity's: each advertises the
+# sha256 of the toolchain manifest it measures (gascity tools/rbe/worker-env),
+# and the schedulers match worker-env exactly. beads' actions request
+# //platforms:rbe_worker's pin, the sha256 of tools/rbe/worker-env.txt, a
+# byte-for-byte copy of gascity's. If the copies part, beads' remote actions
+# queue on a pin no worker serves. This compares the manifest and the pin
+# with gascity's at REF (default main) and, if either differs, prints the
+# diff and what to commit (stdout and $GITHUB_STEP_SUMMARY) and exits 1.
+# Run from the repository root.
+#
+# Env (tests only): WORKER_ENV_SYNC_URL, gascity's raw-content base (default
+# https://raw.githubusercontent.com/gastownhall/gascity).
+set -euo pipefail
+
+ref=${1:-main}
+base=${WORKER_ENV_SYNC_URL:-https://raw.githubusercontent.com/gastownhall/gascity}/$ref
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+summary() {
+	if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then cat >>"$GITHUB_STEP_SUMMARY"; else cat >/dev/null; fi
+}
+
+# pin_of FILE: the worker-env pin in a platforms/BUILD.bazel ("none" if none).
+pin_of() {
+	local pin
+	pin=$(sed -n 's/^ *"worker-env": "\(sha256:[0-9a-f]\{64\}\)",$/\1/p' "$1")
+	echo "${pin:-none}"
+}
+
+curl -fsSL --retry 3 -o "$tmp/worker-env.txt" "$base/tools/rbe/worker-env.txt"
+curl -fsSL --retry 3 -o "$tmp/BUILD.bazel" "$base/platforms/BUILD.bazel"
+ours=$(pin_of platforms/BUILD.bazel)
+theirs=$(pin_of "$tmp/BUILD.bazel")
+if cmp -s tools/rbe/worker-env.txt "$tmp/worker-env.txt" && [ "$ours" = "$theirs" ]; then
+	echo "worker-env: in step with gascity $ref ($ours)"
+	exit 0
+fi
+
+diff -u --label beads --label "gascity $ref" tools/rbe/worker-env.txt "$tmp/worker-env.txt" >"$tmp/diff" || true
+{
+	cat <<-EOF
+		### rbe worker-env out of step with gascity
+
+		beads pins \`worker-env=$ours\`; gascity \`$ref\` pins \`$theirs\`. rbe-west's pool workers advertise gascity's, so beads' remote actions on another pin only queue. Copy gascity's \`tools/rbe/worker-env.txt\` here byte for byte, and in \`platforms/BUILD.bazel\` set:
+
+		\`\`\`
+		        "worker-env": "$theirs",
+		\`\`\`
+
+		<details><summary>diff (beads to gascity $ref)</summary>
+
+		\`\`\`diff
+		$(cat "$tmp/diff")
+		\`\`\`
+		</details>
+	EOF
+} >"$tmp/report.md"
+cat "$tmp/report.md"
+summary <"$tmp/report.md"
+echo "::error title=rbe worker-env out of step::beads pins worker-env=$ours, gascity $ref pins $theirs: copy gascity's tools/rbe/worker-env.txt and its pin (the step summary has the diff)."
+exit 1

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -774,6 +775,20 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 		}
 	}
 
+	// Record which variables the formula's steps reference, before the filter
+	// below removes steps. Both a condition var and a handlebar that lives only
+	// inside a dropped step leave no trace in the cooked subgraph, so this is
+	// the only point at which those names are still visible. Collected
+	// unconditionally: the names are a property of the formula, not of this
+	// pour's --var values.
+	formulaVarNames := formulaVarRefs(resolved.Steps)
+	// A standalone expansion formula's steps are materialized from its template
+	// below, against this synthetic target, and that substitutes --var values
+	// into the template's {name} placeholders as it builds them: a name used
+	// only there is consumed without leaving a trace either.
+	const expansionTarget = "main"
+	formulaVarNames = append(formulaVarNames, formula.ExpansionVarRefs(resolved, expansionTarget)...)
+
 	// Apply step condition filtering if vars provided (bd-7zka.1)
 	// This filters out steps whose conditions evaluate to false
 	if conditionVars != nil {
@@ -811,13 +826,83 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 				expansionVars[k] = v
 			}
 		}
-		if err := formula.MaterializeExpansion(resolved, "main", expansionVars); err != nil {
+		if err := formula.MaterializeExpansion(resolved, expansionTarget, expansionVars); err != nil {
 			return nil, fmt.Errorf("standalone expansion %q: %w", formulaName, err)
 		}
 	}
 
 	// Cook to in-memory subgraph, including variable definitions for default handling
-	return cookFormulaToSubgraphWithVars(resolved, resolved.Formula, resolved.Vars)
+	subgraph, err := cookFormulaToSubgraphWithVars(resolved, resolved.Formula, resolved.Vars)
+	if err != nil {
+		return nil, err
+	}
+	subgraph.FormulaVarRefs = formulaVarNames
+	return subgraph, nil
+}
+
+// formulaVarRefs returns the variable names the steps reference, walking
+// children, deduplicated and sorted. Call it on the UNFILTERED steps: every
+// name it finds can be erased by formula.FilterStepsByCondition.
+//
+// Two kinds of reference are collected, and both are consumable:
+//
+//   - step conditions, which the filter consumes and never copies to an issue
+//     field. These are handlebar expressions - `{{spike}}`, `!{{spike}}`,
+//     `{{env}} == "prod"` (internal/formula/stepcondition.go) - so the same
+//     extractor the substitutable fields use finds their names.
+//   - the substitutable fields of the steps themselves - prose, assignee,
+//     labels and metadata values - which vanish when the filter drops the
+//     step. Without them, `--var deploy=false --var deploy_target=prod` would
+//     reject deploy_target while `deploy=true` accepted it, making one name's
+//     validity depend on another name's value.
+//
+// The step fields read here are the ones processStepToIssue copies into a
+// substituted issue field, plus the gate fields createGateIssue derives from
+// step.Gate; keep them in sync with those two functions and with
+// substitutedIssueFields, which is the same question asked of a cooked issue.
+func formulaVarRefs(steps []*formula.Step) []string {
+	seen := make(map[string]bool)
+	var walk func([]*formula.Step)
+	walk = func(ss []*formula.Step) {
+		for _, step := range ss {
+			if step == nil {
+				continue
+			}
+			texts := []string{step.Condition, step.Title, step.Description, step.Notes, step.Assignee}
+			texts = append(texts, step.Labels...)
+			// processStepToIssue carries the metadata onto the issue as JSON,
+			// and the pour substitutes every string value in it but never a
+			// key, so read it back the way substitutedIssueFields does.
+			if len(step.Metadata) > 0 {
+				if metaJSON, err := json.Marshal(step.Metadata); err == nil {
+					texts = append(texts, metadataVarStrings(metaJSON)...)
+				}
+			}
+			if step.Gate != nil {
+				// createGateIssue mirrors the awaitID into the gate issue's
+				// Title and AwaitID, and writes Repo to metadata.repo only for
+				// gh:* gate types.
+				texts = append(texts, gateAwaitID(step.Gate))
+				if isGitHubGateType(step.Gate.Type) {
+					texts = append(texts, step.Gate.Repo)
+				}
+			}
+			for _, text := range texts {
+				for _, name := range extractVariables(text) {
+					seen[name] = true
+				}
+			}
+			walk(step.Children)
+		}
+	}
+	walk(steps)
+
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // cookFormulaToSubgraphWithVars creates an in-memory subgraph with variable info attached
@@ -826,6 +911,13 @@ func cookFormulaToSubgraphWithVars(f *formula.Formula, protoID string, vars map[
 	if err != nil {
 		return nil, err
 	}
+	// The formula is in hand here, so whatever VarDefs ends up being IS its
+	// complete declared-variable set - including the nil map a formula with no
+	// [vars] section produces. Persistence is what loses the declarations, so
+	// only this path may claim they are known (see TemplateSubgraph.
+	// DeclaredVarsKnown).
+	subgraph.DeclaredVarsKnown = true
+
 	// Attach variable definitions to the subgraph for default handling during pour
 	// Convert from *VarDef to VarDef for simpler handling
 	if vars != nil {

@@ -78,7 +78,11 @@ It:
 - Defaults to `go test -timeout 3m ./...`.
 - Supports `-v`, `-timeout`, `-run`, package arguments, and extra `-skip`.
 - Enables coverage when `TEST_COVER=1`.
-- Can start one shared Dolt test server when `BEADS_TEST_SHARED_SERVER=1`.
+- Can start one shared Dolt test server when `BEADS_TEST_SHARED_SERVER=1`,
+  exporting its port together with `BEADS_TEST_SHARED_DOLT_SERVER` set to that
+  same port, so the `testutil` TestMain helpers honor that port -- and only
+  that port -- instead of clearing it as an ambient one (see
+  `engdocs/TESTING.md`).
 
 At this audit point, `.test-skip` contains only comments and no active skip
 patterns.
@@ -177,7 +181,8 @@ Key jobs preserved by display name:
 - `Check version consistency`, `Check no duplicate migration versions`,
   `Check doc flags freshness`, and PR-only `Check for .beads changes`.
 - `PR Policy (wrapper timing)`, `PR Core (wrapper timing)`, and
-  `PR Lint (wrapper timing)`.
+  `PR Lint (wrapper timing)` (superseded by F5's 3-leg `PR Lint (native|windows|darwin)`
+  matrix; this is a dated snapshot).
 - `Package Gate (MCP)`, `Package Gate (npm)`, and `Package Gate (website)`.
 - `Test (storage domain + uow)`.
 - `Build (Embedded Dolt)`, `Test (Embedded Dolt Storage N/5)`, and
@@ -194,11 +199,11 @@ Key jobs preserved by display name:
 
 | Workflow | Triggers | Main validation |
 |---|---|---|
-| `regression.yml` | Push to `main`, PR to `main`, manual | Detector runs regression on push/manual, PR label `run-regression`, or risky paths; test command is `go test -tags=regression,gms_pure_go -timeout=20m -v ./tests/regression/...`. |
-| `cross-version-smoke.yml` | Tags, PRs, manual | PRs test latest 5 releases, tags test latest 30, via `scripts/upgrade-smoke-test.sh`. |
-| `migration-test.yml` | Tags, manual | Builds candidate and runs `scripts/migration-test/run.sh`; not a PR/main gate. |
+| `bazel.yml` `bazel-cmd-dolt` (formerly `regression.yml`) | PR, merge group, push to `main` | `//tests/regression:regression_test` (8 shards, cached until its inputs change) against the catalog-pinned v0.49.6 baseline; local entrypoint stays `make test-regression`. |
+| `bazel.yml` `bazel-test` (formerly `cross-version-smoke.yml`) | PR, merge group, push to `main` | `//tests/upgrade_smoke:upgrade_smoke_<release>_test` for the newest 30 catalog-pinned releases, via `scripts/upgrade-smoke-test.sh` with `PREV_BIN`; cached until their inputs change. |
+| `bazel.yml` `bazel-test` (formerly `migration-test.yml`) | PR, merge group, push to `main` | `//tests/migration:historical_upgrade_<release>_test`, one target per reviewed release (14, v0.9.1 source-built offline) plus `legacy_bridge_test`, against catalog-pinned release binaries; cached until their inputs change. Local entrypoint stays `scripts/migration-test/run.sh`. |
 | `nightly.yml` | Daily schedule, manual | `go test -v -race -tags=integration,gms_pure_go -coverprofile=coverage.out -timeout=30m ./...` with `BEADS_TEST_SKIP=dolt`; checks coverage >= 30%. |
-| `nix-build.yml` | PR/push paths for Nix or Go module files, manual | `nix build .#default --print-build-logs`. |
+| `nix-build.yml` | Push to `main` paths for Nix or Go module files, manual | `nix build .#default --print-build-logs`; no longer runs on `pull_request` (F7c, spec-f7.md §2.4) since PR Risk's required `test-nix` job (`nix run .#default` plus `nix flake check -L`) is a superset. |
 | `deploy-docs.yml` | Push to `main` paths `website/**` or `scripts/generate-llms-full.sh`, manual | `npm ci`, generate `llms-full.txt`, `npm run build`, internal link check, non-blocking external link check, deploy Pages. |
 | `release.yml` | Tags, manual from tag | GoReleaser, native macOS builds, macOS embedded smoke, release attestations/SBOM, Homebrew formula update, PyPI build/publish, npm publish. |
 | `test-pypi.yml` | Manual | Builds MCP package and publishes to TestPyPI. |

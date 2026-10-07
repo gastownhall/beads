@@ -27,6 +27,7 @@ var (
 	_ apigen.Issue                       = types.Issue{}
 	_ apigen.IssueWithCounts             = types.IssueWithCounts{}
 	_ apigen.IssueDetails                = types.IssueDetails{}
+	_ apigen.BatchGetIssue               = types.BatchGetIssue{}
 	_ apigen.IssueWithDependencyMetadata = types.IssueWithDependencyMetadata{}
 	_ apigen.Dependency                  = types.Dependency{}
 	_ apigen.TreeNode                    = types.TreeNode{}
@@ -71,6 +72,7 @@ var (
 	_ []types.Dependency       = apigen.DependencyEdges{}.Items
 	_ []issueops.IssueBlocking = apigen.BlockingAnnotations{}.Items
 	_ []types.Issue            = apigen.BatchCreateResponse{}.Items
+	_ []types.BatchGetIssue    = apigen.BatchGetIssuesResult{}.Issues
 
 	_ []eventsjournal.Record = apigen.EventsPage{}.Records
 )

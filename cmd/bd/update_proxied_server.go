@@ -28,6 +28,11 @@ func runUpdateProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		fmt.Println("No updates specified")
 		return nil
 	}
+	// A8 (beads#4682): "one id only" (T4.8), mirroring the direct route's
+	// requireSingleIfRevisionID call in update.go.
+	if err := requireSingleIfRevisionID(in.ifRevision, args); err != nil {
+		return err
+	}
 
 	// Derive success-output format from the global JSON decision (--json OR
 	// --format json OR config), the same signal reportUpdateFailures uses, so
@@ -129,6 +134,7 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 		force:            in.force,
 		expectedAssignee: in.ifAssignee,
 		expectedStatus:   expectedStatus,
+		expectedVersion:  in.ifRevision,
 		provenance:       fmt.Sprintf("bd: update %s", id),
 	})
 	if err != nil {
@@ -139,6 +145,18 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 		// aborting is the right call for both.
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, nil, err
+		}
+		// A8: an active --if-revision guard reports through gascity's
+		// dedicated conditional-write envelope instead of the generic
+		// updateIDFailure batch shape — requireSingleIfRevisionID already
+		// guarantees args has exactly one id, so returning the reported exit
+		// error here (which the caller's `if err != nil { return err }`
+		// propagates straight out) is equivalent to the generic path for this
+		// one id.
+		if in.ifRevision != nil {
+			if reported, ok := reportIfRevisionFailure("updating", id, err, in.ifRevision); ok {
+				return nil, nil, reported
+			}
 		}
 		return nil, proxiedUpdateFailure(id, in.claim, err), nil
 	}
@@ -205,7 +223,9 @@ func proxiedUpdateTarget(ctx context.Context, id string, in *updateInput) (*type
 	// same transfer inside the mutation with ErrAlreadyClaimed; this pre-read is
 	// what keeps the advice a user reads identical on both routes. A policy
 	// refusal: terminal per-issue failure, exit 1, never GuardMismatch/13.
-	if newAssignee, ok := in.fields["assignee"].(string); ok && in.ifAssignee == nil && !in.claim {
+	// mc-zndi7.74: also skipped when this pre-read is already stale against an
+	// active --if-revision guard — see ifRevisionAlreadyStale's doc.
+	if newAssignee, ok := in.fields["assignee"].(string); ok && in.ifAssignee == nil && !in.claim && !ifRevisionAlreadyStale(current, in.ifRevision) {
 		if err := validateIssueReassignable(id, current, actor, newAssignee,
 			proxiedClaimPoolAliases(ctx), in.force); err != nil {
 			fmt.Fprintf(os.Stderr, "%s\n", err)
@@ -259,6 +279,12 @@ func proxiedUpdateFailure(id string, claim bool, err error) *updateIDFailure {
 	case errors.Is(err, storage.ErrCloseBlocked) && !claim:
 		fmt.Fprintf(os.Stderr, "%v (use --force to override)\n", err)
 		return &updateIDFailure{ID: id, Error: fmt.Sprintf("%v (use --force to override)", err)}
+	case errors.Is(err, storage.ErrNotesOverwrite):
+		// The contract's AuthorizeNotesOverwrite fence refused inside the
+		// mutation transaction. Print the advice, not the raw sentinel.
+		refusal := errNotesOverwriteRefusal(id)
+		fmt.Fprintf(os.Stderr, "%s\n", refusal)
+		return &updateIDFailure{ID: id, Error: refusal.Error()}
 	case uow.IsSerializationError(err):
 		// The contract spent its retry budget losing Dolt's commit-time merge.
 		// The write did NOT land; fail loudly instead of exiting 0.

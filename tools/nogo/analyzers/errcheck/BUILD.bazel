@@ -1,0 +1,46 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "errcheck",
+    srcs = ["errcheck.go"],
+    importpath = "github.com/steveyegge/beads/tools/nogo/analyzers/errcheck",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/nogo/internal/golangci",
+        "//tools/nogo/internal/position",
+        "@com_github_kisielk_errcheck//errcheck",
+        "@org_golang_x_tools//go/analysis",
+        "@org_golang_x_tools//go/packages",
+    ],
+)
+
+go_test(
+    name = "errcheck_test",
+    srcs = ["errcheck_test.go"],
+    deps = [
+        ":errcheck",
+        "//tools/nogo/internal/analyzertest",
+    ],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

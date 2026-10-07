@@ -141,7 +141,16 @@ var initAllowRecreateMissing bool
 // project_id (GH#2372) and is proven only by its local Dolt storage. Naming
 // metadata.json in that cell would assert evidence the caller does not have,
 // misdirecting an operator who audits metadata.json mid-recovery.
-func initGuardMissingServerDBMessage(dbName, host string, port int, prefix string, haveProjectID bool) error {
+//
+// The --recreate-missing opt-in is named by flag only, never as a paste-ready
+// command line (ADR 0002 Invariant 4). This refusal also fires when the server
+// merely could not be reached to confirm, so whoever reads it may not yet know
+// which case they are in, and a one-liner copied out of the error skips the
+// diagnosis it asks for. The full invocation lives in `bd help init-safety` and
+// docs/recovery/init-safety.md. The blank string parameter is the raw --prefix
+// value that one-liner used to echo; it is ignored now, and kept only so the
+// guard call sites stay unchanged.
+func initGuardMissingServerDBMessage(dbName, host string, port int, _ string, haveProjectID bool) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n%s Database %q not found on server at %s:%d (or the server could not be reached to confirm).\n", ui.RenderWarn("⚠"), dbName, host, port)
 	if haveProjectID {
@@ -166,9 +175,9 @@ func initGuardMissingServerDBMessage(dbName, host string, port int, prefix strin
 	b.WriteString("  bd backup restore                  # if a local backup snapshot exists\n")
 	b.WriteString("  Check .beads/backup/ for a JSONL export you can import manually.\n")
 
-	b.WriteString("\nIf you are certain no recoverable data exists and want a fresh, empty database at\n")
-	b.WriteString("this name, opt in explicitly for this one invocation:\n")
-	fmt.Fprintf(&b, "  bd init --recreate-missing --prefix %s\n", prefix)
+	b.WriteString("\nCreate a fresh, empty database at this name (only if you are certain no\n")
+	b.WriteString("recoverable data exists):\n")
+	b.WriteString("  See 'bd help init-safety' for the --recreate-missing workflow.\n")
 
 	b.WriteString("\nAborting.")
 	return errors.New(b.String())
