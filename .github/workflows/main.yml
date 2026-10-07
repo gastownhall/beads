@@ -102,18 +102,13 @@ jobs:
       # pr-preflight-platforms ubuntu legs compile several ./scripts and
       # ./cmd/bd test binaries but, before this, used no GOCACHE at all (every
       # run cold-compiled them). This warms the non-race GOCACHE this job
-      # already saves (below) with exactly those packages, plus the
-      # allowlisted-go-tests packages scripts-go-checks' allowlisted leg
-      # needs (--compile-only: the allowlist's own packages, so this can
-      # never drift from what that leg runs). Shared with
+      # already saves (below) with exactly those packages. Shared with
       # blacksmith-go-build-cache's non-race leg (the same-repo-PR path's
       # seed) so the two paths can never drift apart (F7b spec 4.2).
-      - name: Warm non-race GOCACHE for preflight/doc-freshness/allowlisted
+      - name: Warm non-race GOCACHE for preflight/doc-freshness
         env:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
-        run: |
-          bash scripts/ci/warm-non-race-cache.sh
-          python3 tools/bazel/run_allowlisted_go_tests.py --compile-only
+        run: bash scripts/ci/warm-non-race-cache.sh
 
       - name: Save Go module cache
         if: steps.restore-go-module-cache.outputs.cache-hit != 'true'
@@ -844,14 +839,14 @@ jobs:
           path: ${{ runner.temp }}/go-cache/vet
           key: beads-go-vet-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-vet-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
 
-  # F7b: pr.yml's scripts-go-checks moved to same-repo Blacksmith
-  # (blacksmith-4vcpu-ubuntu-2404); this is that path's saver for the race and
-  # non-race GOCACHEs its scripts-test and allowlisted legs restore (the vet
-  # leg is already covered by go-vet-cache's venue matrix above). Blacksmith
-  # runners cannot see caches `actions/cache` saved from a GitHub-hosted
-  # runner (and vice versa) even for an identical key, so without this every
-  # same-repo PR's scripts-go-checks race/non-race legs would stay cold
-  # forever.
+  # F7b: the saver for the race and non-race GOCACHEs that same-repo-PR
+  # (Blacksmith, blacksmith-4vcpu-ubuntu-2404) jobs restore: the non-race one
+  # for pr-preflight-platforms' and check-doc-freshness-platforms' ubuntu
+  # legs; the race one compiles ./scripts/... with -race (once the compile
+  # set of scripts-go-checks' retired scripts-test leg). Blacksmith runners
+  # cannot see caches `actions/cache` saved from a GitHub-hosted runner (and
+  # vice versa) even for an identical key, so without this those legs would
+  # stay cold forever.
   #
   # The `venue` matrix also seeds the ubuntu-latest (fork/Dependabot) path's
   # race cache, which the legacy embedded build used to save before Bazel
@@ -934,27 +929,22 @@ jobs:
           key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
           restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
 
-      # scripts-go-checks' scripts-test leg's exact compile set. -run '^$'
-      # selects no tests (only compiles), so this needs no Dolt/test-env setup.
-      - name: Warm race GOCACHE (scripts-go-checks scripts-test leg)
+      # -run '^$' selects no tests (only compiles), so this needs no
+      # Dolt/test-env setup.
+      - name: Warm race GOCACHE
         if: matrix.flavor == 'race'
         env:
           GOCACHE: ${{ runner.temp }}/go-cache/race
         run: go test -race -run '^$' -tags gms_pure_go ./scripts/...
 
-      # scripts-go-checks' allowlisted leg (run_allowlisted_go_tests.py
-      # --compile-only: the allowlist's own packages, so this can never drift
-      # from what that leg actually runs) plus pr-preflight-platforms'/
-      # check-doc-freshness-platforms' ubuntu legs via warm-non-race-cache.sh,
-      # shared with build-artifacts' identical steps so the two paths can
-      # never drift apart (F7b spec 4.2).
-      - name: Warm non-race GOCACHE (scripts-go-checks allowlisted leg + preflight/doc-freshness)
+      # pr-preflight-platforms'/check-doc-freshness-platforms' ubuntu legs via
+      # warm-non-race-cache.sh, shared with build-artifacts' identical step so
+      # the two paths can never drift apart (F7b spec 4.2).
+      - name: Warm non-race GOCACHE (preflight/doc-freshness)
         if: matrix.flavor == 'non-race'
         env:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
-        run: |
-          bash scripts/ci/warm-non-race-cache.sh
-          python3 tools/bazel/run_allowlisted_go_tests.py --compile-only
+        run: bash scripts/ci/warm-non-race-cache.sh
 
       - name: Save race Go build cache
         if: ${{ !cancelled() && matrix.flavor == 'race' && steps.restore-race-go-build-cache.outputs.cache-hit != 'true' }}
@@ -1091,9 +1081,9 @@ jobs:
           echo "Help text first line is correct"
 
   # F7c: Blacksmith cannot see GitHub-hosted cache entries, so the advisory
-  # workflows that moved onto a same-repo-PR Blacksmith runner (Conformance,
-  # Regression's PR run, Migration Test Harness, Cross-Version Smoke, Docs
-  # docsync, Proxied Local) need a Blacksmith-side writer for their Go build
+  # workflows that moved onto a same-repo-PR Blacksmith runner (Regression's
+  # PR run, Migration Test Harness, Cross-Version Smoke, Proxied Local) need a
+  # Blacksmith-side writer for their Go build
   # cache. This job is push-to-main only (always trusted), so it is the ONLY
   # writer: it always restores whatever is available, unconditionally re-runs
   # every warm-up command (not gated on a cache hit), and then always saves
@@ -1175,12 +1165,6 @@ jobs:
 
       - name: Compile regression tests
         run: go test -c -tags regression,gms_pure_go ./tests/regression
-
-      - name: Compile embedded Dolt conformance tests
-        run: go test -c -tags gms_pure_go ./internal/storage/embeddeddolt
-
-      - name: Compile e2e conformance tests
-        run: go test -c -tags 'gms_pure_go e2e' ./test/conformance
 
       # Always save (even if a warm-up step above failed) under a fresh,
       # commit-specific key: the content is still a valid, newer GOCACHE/

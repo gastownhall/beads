@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // Policy tests for the side-by-side Bazel configuration. They are plain Go
@@ -443,6 +445,68 @@ func gitRepoAvailable(root string) bool {
 	return exec.Command("git", "-C", root, "rev-parse", "--is-inside-work-tree").Run() == nil
 }
 
+// repoFiles lists the repository's tracked files under root, repo-relative and
+// slash-separated, each a regular file (or, in a local runfiles tree, a
+// symlink to one). Under `go test` in a git checkout that is `git ls-files`
+// less what the working tree no longer holds; under Bazel it is the runfiles
+// tree, whose repository part is //:repo_files (every tracked file outside
+// .bazelignore, tools/bazel/go_srcs.py); elsewhere every file under root.
+func repoFiles(t *testing.T, root string) []string {
+	t.Helper()
+	var files []string
+	if bazeltest.IsBazel() || !gitRepoAvailable(root) {
+		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !isFileOrFileLink(path, d) {
+				return nil
+			}
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			files = append(files, filepath.ToSlash(rel))
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+	} else {
+		out, err := exec.Command("git", "-C", root, "ls-files", "-z").Output()
+		if err != nil {
+			t.Fatalf("git ls-files: %v", err)
+		}
+		for _, rel := range strings.Split(strings.TrimRight(string(out), "\x00"), "\x00") {
+			info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(rel)))
+			if err != nil || !info.Mode().IsRegular() {
+				continue // deleted in the worktree, submodule, or symlink
+			}
+			files = append(files, rel)
+		}
+	}
+	// Sanity: an empty or partial runfiles tree would pass every scan.
+	if len(files) < 1000 {
+		t.Fatalf("found only %d repository files under %s; the listing is broken", len(files), root)
+	}
+	return files
+}
+
+// isFileOrFileLink reports whether a WalkDir entry is a regular file or a
+// symlink to one. Bazel's local runfiles trees are symlink forests, so a walk
+// that skipped symlinks would see no file there; a symlink to a directory
+// (Bazel's bazel-* convenience links in a checkout) is never followed.
+func isFileOrFileLink(path string, d os.DirEntry) bool {
+	if d.Type().IsRegular() {
+		return true
+	}
+	if d.Type()&os.ModeSymlink == 0 {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
 func TestBazelNoRemoteEndpointsInTrackedFiles(t *testing.T) {
 	// Fixtures are assembled at runtime so this file never contains a literal
 	// endpoint itself.
@@ -554,22 +618,11 @@ func TestBazelNoRemoteEndpointsInTrackedFiles(t *testing.T) {
 	}
 
 	root := bazelPolicyRoot(t)
-	if !gitRepoAvailable(root) {
-		t.Skip("not a git checkout (e.g. Bazel sandbox); tracked-file scan runs under go test and CI")
-	}
-	out, err := exec.Command("git", "-C", root, "ls-files", "-z", "--", "*bazelrc*", "*.md", ".github").Output()
-	if err != nil {
-		t.Fatalf("git ls-files: %v", err)
-	}
 	var hits []endpointHit
-	for _, rel := range strings.Split(strings.TrimRight(string(out), "\x00"), "\x00") {
+	for _, rel := range repoFiles(t, root) {
 		scan, strict := remoteScanKind(rel)
 		if !scan {
 			continue
-		}
-		info, err := os.Lstat(filepath.Join(root, rel))
-		if err != nil || !info.Mode().IsRegular() {
-			continue // deleted in the worktree, submodule, or symlink
 		}
 		content, err := os.ReadFile(filepath.Join(root, rel))
 		if err != nil {
@@ -589,27 +642,28 @@ func TestBazelNoRemoteEndpointsInTrackedFiles(t *testing.T) {
 // this file does not match itself.
 func TestNoLocalPlanPathsInTrackedFiles(t *testing.T) {
 	root := bazelPolicyRoot(t)
-	if !gitRepoAvailable(root) {
-		t.Skip("not a git checkout (e.g. Bazel sandbox); tracked-file scan runs under go test and CI")
-	}
-	needle := "beads-" + "bazel-plan"
-	out, err := exec.Command("git", "-C", root, "grep", "-n", "-I", "-F", "-e", needle).Output()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-			return // no matches
+	needle := []byte("beads-" + "bazel-plan")
+	for _, rel := range repoFiles(t, root) {
+		content, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
 		}
-		t.Fatalf("git grep: %v", err)
-	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		t.Errorf("%s: tracked file references a local, non-repo %s path; point at an in-repo doc, bead or PR instead", line, needle)
+		if bytes.IndexByte(content, 0) >= 0 {
+			continue // binary, as git grep -I
+		}
+		for n, line := range bytes.Split(content, []byte("\n")) {
+			if bytes.Contains(line, needle) {
+				t.Errorf("%s:%d: tracked file references a local, non-repo %s path; point at an in-repo doc, bead or PR instead", rel, n+1, needle)
+			}
+		}
 	}
 }
 
 // --- generated go_srcs filegroups are current -------------------------------
 
-// These checks walk the source checkout, which is not declared as Bazel data,
-// so they run under plain `go test` (the gating lane) and skip under Bazel.
+// These checks walk the source checkout: under Bazel, //:repo_files, which
+// holds every package's BUILD.bazel (a package missing its repo_files block
+// is what `make bazel-sync-check` fails on).
 
 var (
 	treeGoSrcsRe  = regexp.MustCompile(`(?s)filegroup\(\s*name\s*=\s*"tree_go_srcs",\s*srcs\s*=\s*\[(.*?)\]`)
@@ -682,8 +736,8 @@ func diffStringSets(want, got []string) (missing, extra []string) {
 }
 
 // goSrcsTrees are the tools/bazel/go_srcs.py TREES roots. A test that walks
-// one of these trees under Bazel sees only the packages its tree_go_srcs
-// lists, so an unlisted package makes the walk pass vacuously.
+// one of these trees through its tree_go_srcs sees only the packages listed
+// there, so an unlisted package makes that walk pass vacuously.
 var goSrcsTrees = []string{"internal/storage"}
 
 func TestBazelTreeGoSrcsListsEveryPackage(t *testing.T) {
@@ -695,9 +749,6 @@ func TestBazelTreeGoSrcsListsEveryPackage(t *testing.T) {
 		t.Errorf("diffStringSets fixture: missing=%v extra=%v", missing, extra)
 	}
 
-	if os.Getenv("TEST_SRCDIR") != "" {
-		t.Skip("walks the source checkout; runs under go test")
-	}
 	root := sourceRepoRoot(t)
 	script := readPolicyFile(t, root, "tools/bazel/go_srcs.py")
 	for _, tree := range goSrcsTrees {
@@ -729,13 +780,7 @@ func TestBazelTreeGoSrcsListsEveryPackage(t *testing.T) {
 // TestBazelGoSrcsBlocksCurrent runs `tools/bazel/go_srcs.py --check`, which
 // compares every managed block with what the script would generate.
 func TestBazelGoSrcsBlocksCurrent(t *testing.T) {
-	if os.Getenv("TEST_SRCDIR") != "" {
-		t.Skip("reads the source checkout; runs under go test")
-	}
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 not available; TestBazelTreeGoSrcsListsEveryPackage still guards tree membership")
-	}
+	python := requireHostTool(t, "python3")
 	cmd := exec.Command(python, filepath.Join("tools", "bazel", "go_srcs.py"), "--check")
 	cmd.Dir = sourceRepoRoot(t)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -745,13 +790,11 @@ func TestBazelGoSrcsBlocksCurrent(t *testing.T) {
 
 // --- no Bazel packages under the docs trees ---------------------------------
 
-// //:docsync_files globs docs/** and engdocs/**; a glob stops at a package
-// boundary, so a BUILD file under either tree would silently drop that
-// subtree from //test/docsync's orphan and link checks.
+// docs/ and engdocs/ are content (the Mintlify site and the engineering docs)
+// that the root package's repo_files glob covers; they hold no code, so a
+// BUILD file under either tree is a mistake (it would also split the subtree
+// into a package of its own).
 func TestBazelNoPackagesUnderDocsTrees(t *testing.T) {
-	if os.Getenv("TEST_SRCDIR") != "" {
-		t.Skip("walks the source checkout; runs under go test")
-	}
 	root := sourceRepoRoot(t)
 	for _, tree := range []string{"docs", "engdocs"} {
 		err := filepath.WalkDir(filepath.Join(root, tree), func(path string, d os.DirEntry, err error) error {
@@ -763,7 +806,7 @@ func TestBazelNoPackagesUnderDocsTrees(t *testing.T) {
 			}
 			if !d.IsDir() && (d.Name() == "BUILD.bazel" || d.Name() == "BUILD") {
 				rel, _ := filepath.Rel(root, path)
-				t.Errorf("%s: no Bazel package may live under %s/ (it would cut that subtree out of //:docsync_files)", filepath.ToSlash(rel), tree)
+				t.Errorf("%s: no Bazel package may live under %s/ (docs trees are content, not code)", filepath.ToSlash(rel), tree)
 			}
 			return nil
 		})
@@ -960,9 +1003,6 @@ func TestBazelTestTagsFollowTaxonomy(t *testing.T) {
 		}
 	}
 
-	if os.Getenv("TEST_SRCDIR") != "" {
-		t.Skip("walks every BUILD file in the source checkout; runs under go test")
-	}
 	root := sourceRepoRoot(t)
 	pkgs, err := bazelPackagesUnder(root, ".")
 	if err != nil {

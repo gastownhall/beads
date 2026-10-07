@@ -7,6 +7,7 @@ go_library(
         "doltserver_unix.go",
         "doltserver_windows.go",
         "gc_config.go",
+        "listenerowner_darwin.go",
         "listenerowner_linux.go",
         "listenerowner_other.go",
         "logrotate.go",
@@ -63,6 +64,7 @@ go_test(
         "fdleak_integration_test.go",
         "gc_config_test.go",
         "lifecycle_integration_test.go",
+        "listenerowner_darwin_test.go",
         "listenerowner_linux_test.go",
         "logrotate_test.go",
         "managed_server_proof_test.go",
@@ -191,3 +193,25 @@ go_test(
         "//conditions:default": [],
     }),
 )
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

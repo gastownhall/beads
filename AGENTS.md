@@ -13,15 +13,19 @@ end lists them. `CLAUDE.md` files are symlinks to their sibling `AGENTS.md`.
 
 ## How work flows here
 
-GitHub Issues is the public tracker, and every PR links a documented issue.
-The issue carries the context reviewers and future readers need: for a bug,
-the reproduction, impact, and evidence; for a change, the motivation, impact,
-risk, and verification plan.
+GitHub Issues is the public tracker. Use an issue when it adds context
+reviewers need: a user-visible bug, a behavior or design change worth
+discussing, or work that spans several PRs. The issue carries the
+reproduction, impact, and evidence for a bug, or the motivation, impact, risk,
+and verification plan for a change. Small, self-explanatory changes (typos,
+flaky tests, refactors, CI or docs tweaks) can go straight to a PR whose body
+explains the why.
 
-1. Find or file the issue with the bug or feature form. It does not need
-   maintainer approval first; file it before or alongside the PR.
-2. Work on a branch, open a PR against `main` whose body says
-   `Closes #<issue>`, and let CI and review run.
+1. If the change warrants an issue, find or file one with the bug or feature
+   form. It does not need maintainer approval first; file it before or
+   alongside the PR.
+2. Work on a branch, open a PR against `main` (its body says
+   `Closes #<issue>` when there is one), and let CI and review run.
 3. Maintainers triage issues with `status/needs-triage`, `status/needs-info`,
    `status/needs-repro`, `status/needs-design`, and `status/accepted`
    (confirmed); see [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -31,10 +35,9 @@ and not a substitute for the GitHub issue.
 
 ## Agent contribution policy
 
-- Every PR closes a documented issue. If none exists for your change, file
-  one with the bug or feature form fields, filling each from evidence and
-  answering `NOT_ENOUGH_INFO` where the evidence runs out, then link it from
-  the PR.
+- File an issue when the change warrants one (see above). When you do, use
+  the bug or feature form fields, fill each from evidence, and answer
+  `NOT_ENOUGH_INFO` where the evidence runs out.
 - A human reviews and stands behind every issue and PR an agent drafts.
   Evidence that the change works end-to-end is required; "unit tests pass"
   alone is not evidence.

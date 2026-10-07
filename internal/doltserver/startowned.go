@@ -142,8 +142,8 @@ const (
 // own startup, which under load takes longer than any fixed grace period, so
 // a greeting only counts once the listener is shown to be the child's: by
 // dolt's ready line in the child's output when its log level emits one, or
-// else by the listening socket belonging to the child's process tree (Linux,
-// via /proc). When the socket is shown to belong to someone else the wait
+// else by the listening socket belonging to the child's process tree (Linux
+// via /proc, darwin via lsof and ps). When the socket is shown to belong to someone else the wait
 // ends at once with ErrPortInUse. Where neither proof is available the
 // greeting decides, as before, unless the log level promises a ready line.
 // Either way a child that exits, or says its port is taken, ends the wait,

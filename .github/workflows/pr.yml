@@ -1070,6 +1070,16 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test '-tags=gms_pure_go' -count=1 -run '^TestGeneratedHookTimeoutProcessBoundary$' ./cmd/bd
 
+      # Plain go test's own bd build fallback (BEADS_TEST_BD_BINARY unset),
+      # which Bazel never takes, on every OS developers run go test on: the
+      # tests tools/bazel/equivalence_allowlist.txt lists as skipped under
+      # Bazel. Same build as the step above, so no second compile.
+      - name: Exercise go test's bd build fallback
+        shell: bash
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
+        run: go test '-tags=gms_pure_go' -count=1 -run '^(TestGOMODCACHENotUnderTestHome|TestGoBuildBDCommandIsCWDIndependent)$' ./cmd/bd
+
       # This step recompiles ./cmd/bd's test binary. It must share the restored
       # GOCACHE with the hook-timeout step above (same tags, same platform
       # default CGO_ENABLED, see the script's header) so it is a relink rather
@@ -1202,7 +1212,7 @@ jobs:
   # D2 step 3: stands down where bazel-coverage says pr_lanes; Bazel /
   # test (`bazel test //... --config=ci`, the same selection, checked by its
   # equivalence step) runs it, and scripts-go-checks runs what Bazel does not
-  # (./scripts/... and the allowlisted tests under go test, go test's vet).
+  # (go test's vet).
   pr-core-wrapper:
     name: PR Core (wrapper timing)
     runs-on: ubuntu-latest
@@ -1262,20 +1272,15 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/race
         run: make ci-pr-core
 
-  # PR Core's duties the Bazel lanes do not take over (D2 step 3), on every
-  # PR whatever bazel-coverage says, in PR Core's environment (dolt, git and
-  # dolt identity, scripts/ci/lib/test-env.sh):
-  # - `go test ./scripts/...` with PR Core's flags: the repository policy
-  #   tests, several of which check part or all of their rules under go test
-  #   only (scripts/bazel_skip_allowlist_test.go keeps such parts there);
-  # - go test's own vet checks over ./... (rules_go's go_test runs none);
-  # - the Go tests `bazel test --config=ci` does not run or skips
-  #   (tools/bazel/equivalence_allowlist.txt), each required to pass.
+  # PR Core's duty the Bazel lanes do not take over (D2 step 3), on every PR
+  # whatever bazel-coverage says: go test's own vet checks over ./...
+  # (rules_go's go_test runs none). The repository policy tests in
+  # ./scripts/... and the source-walking tests run under Bazel
+  # (//scripts:scripts_test, //test/docsync over //:repo_files), remotely.
   # F7b: same-repo Blacksmith (blacksmith-4vcpu-ubuntu-2404) for same-repo
   # PRs/merge_group, falling back to ubuntu-latest for forks/Dependabot, same
   # pattern as advisory-reports/pr-policy-wrapper/pr-core-wrapper above.
-  # main.yml's blacksmith-go-build-cache job seeds this leg's race and
-  # non-race GOCACHEs; go-vet-cache's venue matrix seeds the vet leg's.
+  # main.yml's go-vet-cache venue matrix seeds the vet leg's GOCACHE.
   scripts-go-checks:
     name: Go checks (${{ matrix.check }})
     runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
@@ -1283,7 +1288,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        check: [scripts-test, vet, allowlisted]
+        check: [vet]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -1301,14 +1306,6 @@ jobs:
           key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
-      - name: Restore race Go build cache
-        if: matrix.check == 'scripts-test'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/go-cache/race
-          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ github.sha }}
-          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-
-
       - name: Restore vet Go build cache
         if: matrix.check == 'vet'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1321,44 +1318,11 @@ jobs:
           # match is always filtered out (SF-5).
           restore-keys: beads-go-vet-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-vet-
 
-      - name: Restore non-race Go build cache
-        if: matrix.check == 'allowlisted'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/go-cache/non-race
-          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
-          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
-
-      - name: Install Dolt
-        if: matrix.check == 'scripts-test' || matrix.check == 'allowlisted'
-        run: ./scripts/ci/install-dolt.sh
-
-      - name: Configure Git and Dolt identity
-        if: matrix.check == 'scripts-test' || matrix.check == 'allowlisted'
-        run: |
-          git config --global user.name "CI Bot"
-          git config --global user.email "ci@beads.test"
-          dolt config --global --add user.name "CI Bot"
-          dolt config --global --add user.email "ci@beads.test"
-
-      - name: Go test the scripts packages
-        if: matrix.check == 'scripts-test'
-        env:
-          BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION: '1'
-          GOCACHE: ${{ runner.temp }}/go-cache/race
-        run: bash scripts/ci/scripts-go-test.sh
-
       - name: Go vet with go test's checks
         if: ${{ !cancelled() && steps.setup-go.outcome == 'success' && matrix.check == 'vet' }}
         env:
           GOCACHE: ${{ runner.temp }}/go-cache/vet
         run: bash scripts/ci/go-test-vet.sh
-
-      - name: Run the Go tests the Bazel lane skips
-        if: ${{ !cancelled() && steps.setup-go.outcome == 'success' && matrix.check == 'allowlisted' }}
-        env:
-          GOCACHE: ${{ runner.temp }}/go-cache/non-race
-        run: bash scripts/ci/allowlisted-go-tests.sh
 
   # F7b: same-repo Blacksmith (blacksmith-4vcpu-ubuntu-2404) for same-repo
   # PRs/merge_group, falling back to ubuntu-latest for forks/Dependabot.

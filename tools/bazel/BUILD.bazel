@@ -12,12 +12,6 @@ _DOLT_PLATFORMS_ONLY = select({
     "//conditions:default": ["@platforms//:incompatible"],
 })
 
-# DOLT_VERSION is read as text by the dolt pin tests in //scripts.
-exports_files(
-    ["dolt.bzl"],
-    visibility = ["//scripts:__pkg__"],
-)
-
 # sh_test src for a second test target over an existing go_test binary (see
 # the script header), e.g. //cmd/bd/doctor/fix:fix_docker_test.
 exports_files(
@@ -97,3 +91,25 @@ filegroup(
     for os in ("darwin", "linux")
     for cpu in ("amd64", "arm64")
 ]
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

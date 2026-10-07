@@ -647,7 +647,7 @@ Do not require these existing check names directly:
 - `Test (macos-latest)`
 - `Test (storage domain + uow)`
 - `Test (Dolt server fingerprint)`
-- `Go checks (scripts-test)`, `Go checks (vet)` and `Go checks (allowlisted)`
+- `Go checks (vet)`
 - `Contract corpus (golden + determinism + conformance)`
 - `PR Core (wrapper timing)`
 - `Build Artifacts`
@@ -927,28 +927,30 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
     `TEST_DOLT_SERVER_FINGERPRINT`). `check-release-target-cross-compilation`
     still `go build`s `./...` with `CGO_ENABLED=0` on every PR.
   - Also kept on every PR, in the required job `scripts-go-checks`
-    (`SCRIPTS_GO_CHECKS`; PR Core's environment: dolt, git and dolt
-    identity, `scripts/ci/lib/test-env.sh`):
-    - `go test ./scripts/...` with PR Core's flags
-      (`scripts/ci/scripts-go-test.sh`). The repository policy tests,
-      including the D2 guards, check part or all of their rules under
-      `go test` only (their inputs are not in `//scripts:scripts_test`'s
-      runfiles), so without this they would have no required pre-merge run
-      on covered PRs.
-    - `go test`'s own vet checks (cmd/go's `defaultVetFlags`, policy-tested
-      equal to the toolchain's) over `./...` (`scripts/ci/go-test-vet.sh`):
-      rules_go's `go_test` runs no vet, so a `go test` vet finding would
-      otherwise first fail on `main` and then on every fork PR.
-    - the Go tests `bazel test --config=ci` does not run or skips
-      (`tools/bazel/equivalence_allowlist.txt`), under `go test`
-      (`scripts/ci/allowlisted-go-tests.sh`); each entry must match a test
-      that ran and passed.
+    (`SCRIPTS_GO_CHECKS`, one leg, `Go checks (vet)`): `go test`'s own vet
+    checks (cmd/go's `defaultVetFlags`, policy-tested equal to the
+    toolchain's) over `./...` (`scripts/ci/go-test-vet.sh`): rules_go's
+    `go_test` runs no vet, so a `go test` vet finding would otherwise first
+    fail on `main` and then on every fork PR.
+  - The repository policy tests (`./scripts/...`, including the D2 guards)
+    and the tests that walk the checkout run only under Bazel, remotely:
+    `//scripts:scripts_test` and `//test/docsync:docsync_test` take
+    `//:repo_files` as data, the checkout as Bazel sees it (every tracked
+    file outside `.bazelignore`, aggregated from the `repo_files` block
+    `tools/bazel/go_srcs.py` keeps in every package; the BUILD sync step's
+    `make bazel-sync-check` fails on a package without it). The release
+    formula under `.bazelignore`d `.beads/` comes in as `@beads_formulas`.
+    Their former `go test` legs (`Go checks (scripts-test)` and
+    `Go checks (allowlisted)`) are gone.
 
-    `TestBazelOnlySkipsAreAllowlisted` (itself go-test-only, so in that
-    job) requires every top-level test with a `TEST_SRCDIR`- or
+    `tools/bazel/equivalence_allowlist.txt` holds only the two `cmd/bd`
+    tests of plain `go test`'s own bd build fallback, which Bazel never
+    takes; `pr-preflight-platforms` runs them on every OS ("Exercise go
+    test's bd build fallback"). `TestBazelOnlySkipsAreAllowlisted` (under
+    Bazel too) requires every top-level test with a `TEST_SRCDIR`- or
     `bazeltest.IsBazel()`-guarded `t.Skip` to have an allowlist `skip`
-    entry, and every test that runs part of its checks under `go test`
-    only to live under `./scripts`.
+    entry, and no test anywhere to run part of its checks under `go test`
+    only.
   - Package gates on a covered PR in a non-remote mode (the farm switch off)
     fail in their own "Check the Bazel-built bd exists" step, naming
     `BAZEL_PR_LANES_RETIRED`, instead of on a missing artifact.
@@ -1150,10 +1152,19 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
   - Verified on a real remote run before step 2 (2026-10-01): proxied 164
     top-level tests over 15 shards, 0 skipped; server storage 1246 + 1
     conformance, 10 skipped (none all-skipped); both checkers pass.
-- Not changed: `conformance.yml`'s Tier 1 (`scripts/conformance.sh`) runs the
-  embedded-Dolt `TestConformance` again (non-race, unsharded), duplicating
-  `test-embedded-conformance` and the Bazel lane. It is not part of either
-  required gate; retiring it is a separate decision.
+- `conformance.yml` is retired. Its Tier 1 (the embedded-Dolt
+  `TestConformance`) duplicated `test-embedded-conformance` and the
+  embedded lane's `embeddeddolt_conformance_{core,audit}_test`; its Tier 2
+  (the real-binary CLI corpus, `go test -tags 'gms_pure_go e2e'
+  ./test/conformance`) is `//test/conformance:conformance_test` against the
+  injected non-race `bd_for_tests`. Its files build under `e2e ||
+  integration`, so it is `integration-only` and `--config=integration` runs
+  it in `bazel-integration`, which `pr.yml`'s gate requires (PR Core's `go
+  test` builds neither tag). Neither tier was part of a required gate
+  before. `scripts/conformance.sh` stays as the local `go test` entrypoint.
+  `docs-mintlify.yml` likewise drops its docsync job (`go test
+  ./test/docsync`, which `bazel-test` runs as `//test/docsync:docsync_test`)
+  and keeps only Mintlify's network-bound broken-link check.
 
 ### F7a: Same-Repo Blacksmith Moves and Job Folds
 
@@ -1474,7 +1485,7 @@ check read.
 
 Non-Bazel required jobs re-run in full on every merge group (approximate
 PR timings, 2026-10): `fast-checks` (~40 s), `pr-policy-wrapper`
-(~2.5 min), `scripts-go-checks` (3 legs, up to ~3.5 min), `pr-lint-wrapper`
+(~2.5 min), `scripts-go-checks` (vet only), `pr-lint-wrapper`
 (native/darwin/windows, up to ~4 min), `check-doc-flags` (~1.7 min),
 `check-doc-freshness-platforms` and `pr-preflight-platforms` (Linux,
 Windows and macOS legs, up to ~5 min on Windows),

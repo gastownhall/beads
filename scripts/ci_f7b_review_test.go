@@ -238,23 +238,22 @@ func TestBlacksmithSaverVenueAndFlavorMatricesAreComplete(t *testing.T) {
 // worse, hit a non-race-compiled cache under the race key).
 func TestBlacksmithGoBuildCacheRaceLegActuallyUsesRace(t *testing.T) {
 	job := readCIWorkflow(t, "main.yml").job(t, "blacksmith-go-build-cache")
-	step := job.step(t, "Warm race GOCACHE (scripts-go-checks scripts-test leg)")
+	step := job.step(t, "Warm race GOCACHE")
 	if !strings.Contains(step.Run, "-race") {
 		t.Errorf("blacksmith-go-build-cache's race-leg warm step run = %q, want it to pass -race", step.Run)
 	}
 }
 
-// TestBlacksmithGoBuildCacheNonRaceLegWarmsAllowlistedCompileOnly re-pins
-// mutation M7: the non-race flavor's warm step must still invoke
-// run_allowlisted_go_tests.py --compile-only (not just warm-non-race-cache.sh)
-// -- scripts-go-checks' allowlisted leg's own packages, so the seed can never
-// silently stop covering what that PR-blocking leg actually compiles.
-func TestBlacksmithGoBuildCacheNonRaceLegWarmsAllowlistedCompileOnly(t *testing.T) {
+// TestBlacksmithGoBuildCacheNonRaceLegWarmsPreflightPackages re-pins mutation
+// M7: the non-race flavor's warm step must run the shared
+// warm-non-race-cache.sh, so the same-repo-PR seed can never silently stop
+// covering what pr-preflight-platforms' and check-doc-freshness-platforms'
+// ubuntu legs compile.
+func TestBlacksmithGoBuildCacheNonRaceLegWarmsPreflightPackages(t *testing.T) {
 	job := readCIWorkflow(t, "main.yml").job(t, "blacksmith-go-build-cache")
-	step := job.step(t, "Warm non-race GOCACHE (scripts-go-checks allowlisted leg + preflight/doc-freshness)")
-	if !strings.Contains(step.Run, "bash scripts/ci/warm-non-race-cache.sh") ||
-		!strings.Contains(step.Run, "python3 tools/bazel/run_allowlisted_go_tests.py --compile-only") {
-		t.Errorf("blacksmith-go-build-cache's non-race-leg warm step run = %q, want both warm-non-race-cache.sh and run_allowlisted_go_tests.py --compile-only", step.Run)
+	step := job.step(t, "Warm non-race GOCACHE (preflight/doc-freshness)")
+	if step.Run != "bash scripts/ci/warm-non-race-cache.sh" {
+		t.Errorf("blacksmith-go-build-cache's non-race-leg warm step run = %q, want bash scripts/ci/warm-non-race-cache.sh", step.Run)
 	}
 }
 
@@ -289,47 +288,6 @@ func TestWindowsSaverAndLivenessTimeoutsAreTwentyMinutes(t *testing.T) {
 	}
 	if job := readCIWorkflow(t, "pr.yml").job(t, "test-windows-liveness"); job.TimeoutMinutes != 20 {
 		t.Errorf("pr.yml test-windows-liveness timeout-minutes = %d, want 20", job.TimeoutMinutes)
-	}
-}
-
-// TestCompileOnlyUsesBuildFlagsConstant re-pins mutation M14 (N1 fix): the
-// reviewer's original mutation flipped a fragile `GO_TEST_FLAGS[-2:]` slice
-// in the --compile-only path to nothing, silently dropping the
-// gms_pure_go build tag from every warmed test binary. N1 replaced the slice
-// with an explicit BUILD_FLAGS constant reused by both GO_TEST_FLAGS and the
-// --compile-only `go test -c` command directly, which structurally removes
-// the slice-drift vector mutate.py's M14 exploited; this test pins that the
-// constant still exists and is still the thing actually passed to `-c`, so a
-// future edit cannot quietly reintroduce the same slicing fragility.
-func TestCompileOnlyUsesBuildFlagsConstant(t *testing.T) {
-	if os.Getenv("TEST_SRCDIR") != "" {
-		return // scripts_test's runfiles hold none of tools/bazel's scripts (see TestPRRunsGoTestsBazelSkips)
-	}
-	root := sourceRepoRoot(t)
-	data, err := os.ReadFile(filepath.Join(root, "tools", "bazel", "run_allowlisted_go_tests.py"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	src := string(data)
-	const wantConst = `BUILD_FLAGS = ["-tags", "gms_pure_go"]`
-	if !strings.Contains(src, wantConst) {
-		t.Errorf("tools/bazel/run_allowlisted_go_tests.py is missing %q", wantConst)
-	}
-	const wantUse = `cmd = [args.go, "test", "-c", *BUILD_FLAGS, "-o", os.devnull, "./" + pkg]`
-	if !strings.Contains(src, wantUse) {
-		t.Errorf("tools/bazel/run_allowlisted_go_tests.py's --compile-only path does not pass *BUILD_FLAGS to go test -c (want %q)", wantUse)
-	}
-	// N1's bug was live slicing code (GO_TEST_FLAGS[-2:] used as part of the
-	// actual `-c` command), not the historical mention of it in BUILD_FLAGS'
-	// own doc comment above -- only flag the pattern outside a `#` comment line.
-	for _, line := range strings.Split(src, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		if strings.Contains(line, "GO_TEST_FLAGS[-2:]") || strings.Contains(line, "GO_TEST_FLAGS[-2]") {
-			t.Errorf("tools/bazel/run_allowlisted_go_tests.py must not reintroduce slicing GO_TEST_FLAGS to get the build tags (F7b review fix N1): %q", line)
-		}
 	}
 }
 

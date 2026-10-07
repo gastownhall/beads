@@ -85,9 +85,7 @@ echo '{"source":"/tmp/stale.formula.toml"}'
 }
 
 func TestReleaseFormulaCleanupStaleDoltOrphansHandlesLocalModeWithoutJQ(t *testing.T) {
-	skipReleaseFormulaUnderBazel(t)
-	repoRoot := sourceRepoRoot(t)
-	formulaPath := filepath.Join(repoRoot, ".beads", "formulas", "beads-release.formula.toml")
+	formulaPath := releaseFormulaPath(t)
 	if _, err := formula.NewParser().ParseFile(formulaPath); err != nil {
 		t.Fatalf("beads-release formula does not parse: %v", err)
 	}
@@ -119,9 +117,7 @@ func TestReleaseFormulaCleanupStaleDoltOrphansHandlesLocalModeWithoutJQ(t *testi
 }
 
 func TestReleaseFormulaHomebrewCoreProcedureCoversTemplateAndBottles(t *testing.T) {
-	skipReleaseFormulaUnderBazel(t)
-	repoRoot := sourceRepoRoot(t)
-	formulaPath := filepath.Join(repoRoot, ".beads", "formulas", "beads-release.formula.toml")
+	formulaPath := releaseFormulaPath(t)
 	if _, err := formula.NewParser().ParseFile(formulaPath); err != nil {
 		t.Fatalf("beads-release formula does not parse: %v", err)
 	}
@@ -206,15 +202,20 @@ func releaseTestTempDir(t *testing.T) string {
 	return t.TempDir()
 }
 
-// skipReleaseFormulaUnderBazel skips tests that read
-// .beads/formulas/beads-release.formula.toml under Bazel: .beads holds live
-// Dolt data and is in .bazelignore, so no target can declare the formula.
-// These tests run under `go test`.
-func skipReleaseFormulaUnderBazel(t *testing.T) {
+// releaseFormulaPath returns the checked-in beads-release formula. Under
+// Bazel it comes from BEADS_TEST_RELEASE_FORMULA: .beads/ also holds live bd
+// data and is in .bazelignore, so the formula is not under //:repo_files but
+// in its own local repository (@beads_formulas, MODULE.bazel).
+func releaseFormulaPath(t *testing.T) string {
 	t.Helper()
 	if bazeltest.IsBazel() {
-		t.Skip(".beads/ is in .bazelignore, so the release formula cannot be declared as data; runs under go test")
+		path, err := bazeltest.RunfileEnv("BEADS_TEST_RELEASE_FORMULA")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return path
 	}
+	return filepath.Join(sourceRepoRoot(t), ".beads", "formulas", "beads-release.formula.toml")
 }
 
 func sourceRepoRoot(t *testing.T) string {

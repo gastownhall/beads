@@ -4,11 +4,14 @@ Thank you for your interest in contributing to bd! This document provides guidel
 
 ## Issues and pull requests
 
-GitHub Issues is the public tracker, and every pull request links a
-documented issue. The issue is where the context lives: why the change is
-needed, what it affects, and how we will know it works. File it with the bug
-or feature form before or alongside your pull request; it does not need
-maintainer approval first.
+GitHub Issues is the public tracker. Use an issue when it adds context
+reviewers need: a user-visible bug, a behavior or design change worth
+discussing first, or work that spans several pull requests. The issue holds
+why the change is needed, what it affects, and how we will know it works; file
+it with the bug or feature form before or alongside your pull request, and it
+does not need maintainer approval first. Small, self-explanatory changes
+(typos, flaky tests, refactors, CI or docs tweaks) can go straight to a pull
+request whose description explains the why.
 
 ### Triage labels
 
@@ -140,14 +143,14 @@ engine, or expand the database schema when issue metadata is sufficient.
 
 ### Workflow
 
-1. Find or file a documented issue (see [Issues and pull requests](#issues-and-pull-requests))
+1. If the change warrants one, find or file an issue (see [Issues and pull requests](#issues-and-pull-requests))
 2. Fork the repository and create a feature branch (`git checkout -b feature/my-feature`)
 3. Make your changes
 4. Add tests for new functionality
 5. Run tests and linter locally
 6. Commit your changes with clear messages
 7. Push to your fork
-8. Open a pull request whose description says `Closes #<issue>`
+8. Open a pull request that explains the change and says `Closes #<issue>` when there is one
 
 ### Commit Messages
 

@@ -1,12 +1,14 @@
 package scripts_test
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // This file exists alongside ci_workflow_test.go's broader structural checks
@@ -494,7 +496,14 @@ exit 127
 		if err := os.WriteFile(callLog, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		cmd := exec.Command("bash", scriptPath)
+		// Actions runs a run: step with no shell: as "bash -e {0}", so the
+		// script is run the same way here: a command that fails outside an
+		// if/||/&& ends the step before any warning below it can print.
+		// The deadline bounds a regression in the dispatch loop's clamp,
+		// which would otherwise dispatch (and log) without end.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "bash", "-e", scriptPath)
 		// fakeGHDir first so it shadows any real gh on PATH; the rest of the
 		// inherited PATH stays so the fake gh's own "#!/usr/bin/env bash"
 		// shebang can still find env and bash.
@@ -574,6 +583,22 @@ exit 127
 		}
 		if r.calls != "" {
 			t.Errorf("calls = %q, want no gh workflow run calls", r.calls)
+		}
+	})
+
+	t.Run("an over-long RBE_PREWARM_WORKERS is clamped to 4", func(t *testing.T) {
+		// 20 digits overflows the shell's integer compare; the clamp must
+		// not depend on it.
+		r := run(t, map[string]string{
+			"GH_TOKEN":                "tok",
+			"RBE_PREWARM_WORKERS":     "99999999999999999999",
+			"FAKE_GH_RUN_LIST_OUTPUT": "1",
+		})
+		if r.code != 0 {
+			t.Errorf("exit code = %d, want 0\nstdout: %s", r.code, r.stdout)
+		}
+		if got := strings.Count(r.calls, "workflow run"); got != 3 {
+			t.Errorf("gh workflow run calls = %d, want 3 (cap 4, 1 active)\nstdout: %s", got, r.stdout)
 		}
 	})
 

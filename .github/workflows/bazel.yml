@@ -621,6 +621,16 @@ jobs:
           case "$n" in
             '') n=1 ;;
             *[!0-9]*) n=1 ;;
+            # Two or more digits is over the cap unless they are all zeros
+            # (still the kill switch); deciding it here keeps a string too
+            # long for the shell's integer compare from slipping past the
+            # -gt below unclamped.
+            ??*)
+              case "$n" in
+                *[!0]*) n=4 ;;
+                *) n=0 ;;
+              esac
+              ;;
           esac
           if [ "$n" -gt 4 ]; then
             n=4
@@ -637,7 +647,7 @@ jobs:
           fi
 
           active="$(gh run list -R "$POOL_REPO" --workflow "$POOL_WORKFLOW" --limit 50 \
-            --json status --jq '[.[] | select(.status != "completed")] | length' 2>/dev/null)"
+            --json status --jq '[.[] | select(.status != "completed")] | length' 2>/dev/null)" || true
           case "$active" in
             '' | *[!0-9]*)
               echo "::warning title=rbe-west pre-warm::could not read $POOL_REPO/$POOL_WORKFLOW run status; skipping dispatch"

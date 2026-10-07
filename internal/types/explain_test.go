@@ -62,6 +62,9 @@ func TestBuildReadyExplanation_ReadyWithResolvedBlockers(t *testing.T) {
 		},
 	}
 
+	// A nil blockerMap supplies no statuses: the ready set's verdict is the
+	// only word, so every blocking edge counts as resolved (the pre-#6066
+	// shape, kept for callers that fetch nothing).
 	result := BuildReadyExplanation(issues, nil, depCounts, allDeps, nil, nil)
 
 	if len(result.Ready) != 1 {
@@ -75,11 +78,111 @@ func TestBuildReadyExplanation_ReadyWithResolvedBlockers(t *testing.T) {
 	if len(item.ResolvedBlockers) != 2 {
 		t.Errorf("expected 2 resolved blockers, got %d", len(item.ResolvedBlockers))
 	}
+	if len(item.PinnedDependencies) != 0 || len(item.OpenDependencies) != 0 {
+		t.Errorf("expected no pinned/open dependencies without statuses, got %v / %v", item.PinnedDependencies, item.OpenDependencies)
+	}
 	if item.DependencyCount != 2 {
 		t.Errorf("expected DependencyCount=2, got %d", item.DependencyCount)
 	}
 	if item.DependentCount != 1 {
 		t.Errorf("expected DependentCount=1, got %d", item.DependentCount)
+	}
+}
+
+// A ready issue's blocking edges are sorted by the target's status: closed is
+// a resolved blocker, pinned never blocked (the ready query skips pinned
+// targets as it skips closed ones), anything else is an open dependency the
+// ready set admitted anyway. Before this every edge printed as "resolved",
+// so a dependency wired onto a pinned bead reported itself satisfied.
+func TestBuildReadyExplanation_ReadyDependencyStatuses(t *testing.T) {
+	issues := []*Issue{
+		{ID: "bd-1", Title: "Ready", Priority: 1, Status: StatusOpen},
+	}
+	allDeps := map[string][]*Dependency{
+		"bd-1": {
+			{IssueID: "bd-1", DependsOnID: "bd-closed", Type: DepBlocks},
+			{IssueID: "bd-1", DependsOnID: "bd-pinned", Type: DepBlocks},
+			{IssueID: "bd-1", DependsOnID: "bd-open", Type: DepBlocks},
+			{IssueID: "bd-1", DependsOnID: "bd-spawner", Type: DepWaitsFor},
+			{IssueID: "bd-1", DependsOnID: "bd-unknown", Type: DepConditionalBlocks},
+			{IssueID: "bd-1", DependsOnID: "bd-epic", Type: DepParentChild},
+			{IssueID: "bd-1", DependsOnID: "bd-related", Type: DepRelated},
+		},
+	}
+	blockerMap := map[string]*Issue{
+		"bd-closed":  {ID: "bd-closed", Status: StatusClosed},
+		"bd-pinned":  {ID: "bd-pinned", Status: StatusPinned},
+		"bd-open":    {ID: "bd-open", Status: StatusOpen},
+		"bd-spawner": {ID: "bd-spawner", Status: StatusInProgress},
+		"bd-epic":    {ID: "bd-epic", Status: StatusOpen},
+	}
+
+	result := BuildReadyExplanation(issues, nil, nil, allDeps, blockerMap, nil)
+	if len(result.Ready) != 1 {
+		t.Fatalf("expected 1 ready item, got %d", len(result.Ready))
+	}
+	item := result.Ready[0]
+
+	// bd-unknown has no status in the map and so joins the resolved set.
+	assertIDs(t, "ResolvedBlockers", item.ResolvedBlockers, "bd-closed", "bd-unknown")
+	assertIDs(t, "PinnedDependencies", item.PinnedDependencies, "bd-pinned")
+	assertIDs(t, "OpenDependencies", item.OpenDependencies, "bd-open", "bd-spawner")
+	want := "2 blocker(s) resolved; 1 pinned dependency(ies), never blocking; 2 open dependency(ies), not blocking"
+	if item.Reason != want {
+		t.Errorf("reason:\n got %q\nwant %q", item.Reason, want)
+	}
+	if item.Parent == nil || *item.Parent != "bd-epic" {
+		t.Errorf("expected Parent=bd-epic, got %v", item.Parent)
+	}
+}
+
+// Only pinned edges: the reason must not claim anything was resolved.
+func TestBuildReadyExplanation_ReadyWithOnlyPinnedDependency(t *testing.T) {
+	issues := []*Issue{{ID: "bd-1", Title: "Ready", Priority: 1, Status: StatusOpen}}
+	allDeps := map[string][]*Dependency{
+		"bd-1": {{IssueID: "bd-1", DependsOnID: "bd-pinned", Type: DepBlocks}},
+	}
+	blockerMap := map[string]*Issue{"bd-pinned": {ID: "bd-pinned", Status: StatusPinned}}
+
+	item := BuildReadyExplanation(issues, nil, nil, allDeps, blockerMap, nil).Ready[0]
+	if item.Reason != "1 pinned dependency(ies), never blocking" {
+		t.Errorf("unexpected reason %q", item.Reason)
+	}
+	if len(item.ResolvedBlockers) != 0 {
+		t.Errorf("expected no resolved blockers, got %v", item.ResolvedBlockers)
+	}
+	assertIDs(t, "PinnedDependencies", item.PinnedDependencies, "bd-pinned")
+}
+
+func TestReadyReason(t *testing.T) {
+	cases := []struct {
+		resolved, pinned, open int
+		want                   string
+	}{
+		{0, 0, 0, "no blocking dependencies"},
+		{2, 0, 0, "2 blocker(s) resolved"},
+		{0, 1, 0, "1 pinned dependency(ies), never blocking"},
+		{0, 0, 3, "3 open dependency(ies), not blocking"},
+		{1, 1, 1, "1 blocker(s) resolved; 1 pinned dependency(ies), never blocking; 1 open dependency(ies), not blocking"},
+	}
+	for _, c := range cases {
+		if got := readyReason(c.resolved, c.pinned, c.open); got != c.want {
+			t.Errorf("readyReason(%d,%d,%d) = %q, want %q", c.resolved, c.pinned, c.open, got, c.want)
+		}
+	}
+}
+
+func assertIDs(t *testing.T, field string, got []string, want ...string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Errorf("%s = %v, want %v", field, got, want)
+		return
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("%s = %v, want %v", field, got, want)
+			return
+		}
 	}
 }
 
