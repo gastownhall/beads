@@ -172,3 +172,65 @@ outer:
 	}
 	return out
 }
+
+// BDBinaryEnv names the environment variable that points subprocess tests at a
+// prebuilt bd binary instead of a per-package `go build`. Under plain `go test`
+// it holds a filesystem path (scripts/test.sh and CI export it). Under Bazel a
+// go_test sets it from its BUILD file:
+//
+//	data = ["//cmd/bd:bd_for_tests"],
+//	env = {"BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)"},
+const BDBinaryEnv = "BEADS_TEST_BD_BINARY"
+
+// PrebuiltBD resolves BEADS_TEST_BD_BINARY to an absolute path. It is the one
+// resolver every bd-building test helper consults before running `go build`.
+//
+// Under plain `go test` it returns "" when the variable is unset (the caller
+// builds bd itself, exactly as before) and the absolute form of the value
+// otherwise. Under Bazel there is no Go toolchain or module tree to build
+// from, so the variable is required: its value is an rlocationpath resolved
+// through the runfiles tree. A set but unusable value is an error in both
+// modes.
+func PrebuiltBD() (string, error) {
+	if IsBazel() {
+		return RunfileEnv(BDBinaryEnv)
+	}
+	val := os.Getenv(BDBinaryEnv)
+	if val == "" {
+		return "", nil
+	}
+	path, err := filepath.Abs(val)
+	if err != nil {
+		return "", fmt.Errorf("%s=%q: %w", BDBinaryEnv, val, err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		return "", fmt.Errorf("%s=%q is not usable: %w", BDBinaryEnv, val, err)
+	}
+	return path, nil
+}
+
+// RunfileEnv resolves an environment variable that a go_test sets from its
+// BUILD file to a declared data file, for example
+//
+//	env = {"BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)"},
+//
+// to an absolute path. A relative value is an rlocationpath resolved through
+// the runfiles tree; an absolute one must exist. It is an error for the
+// variable to be unset, so a BUILD file that forgot the wiring fails loudly.
+func RunfileEnv(key string) (string, error) {
+	val := os.Getenv(key)
+	if val == "" {
+		return "", fmt.Errorf("%s is not set: declare the file as data of this go_test and set env = {%q: \"$(rlocationpath <label>)\"}", key, key)
+	}
+	if filepath.IsAbs(val) {
+		if _, err := os.Stat(val); err != nil {
+			return "", fmt.Errorf("%s=%q is not usable: %w", key, val, err)
+		}
+		return val, nil
+	}
+	path, err := Runfile(val)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", key, err)
+	}
+	return path, nil
+}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -78,6 +79,10 @@ func TestGitRevParse(t *testing.T) {
 func TestGitCmdInDirSuppressesHooksViaGitConfig(t *testing.T) {
 	t.Setenv("GIT_DIR", "/wrong")
 	t.Setenv("GIT_OPTIONAL_LOCKS", "1")
+	suppression := map[string]string{"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.DevNull, "GIT_CONFIG_SYSTEM": os.DevNull}
+	for key, value := range suppression {
+		t.Setenv(key, value)
+	}
 	cmd := gitCmdInDir(t.Context(), "/tmp/example", "status", "--porcelain")
 	if cmd.Dir != "/tmp/example" {
 		t.Fatalf("cmd.Dir = %q, want /tmp/example", cmd.Dir)
@@ -103,6 +108,14 @@ func TestGitCmdInDirSuppressesHooksViaGitConfig(t *testing.T) {
 		if env == "GIT_OPTIONAL_LOCKS=1" {
 			hasOptionalLocks = true
 		}
+		key := worktreeGitEnvKey(env)
+		if want, ok := suppression[key]; ok {
+			if env != key+"="+want {
+				t.Fatalf("changed config suppression: %q", env)
+			}
+			delete(suppression, key)
+			continue
+		}
 		if gitenv.IsRoutingKeyForOS(worktreeGitEnvKey(env), runtime.GOOS) && env != "GIT_TEMPLATE_DIR=" {
 			t.Fatalf("cmd.Env retains Git routing state: %q", env)
 		}
@@ -112,6 +125,23 @@ func TestGitCmdInDirSuppressesHooksViaGitConfig(t *testing.T) {
 	}
 	if !hasOptionalLocks {
 		t.Fatal("cmd.Env did not preserve GIT_OPTIONAL_LOCKS")
+	}
+	if len(suppression) != 0 {
+		t.Fatalf("cmd.Env dropped explicit config suppression: %v", suppression)
+	}
+}
+
+func TestScrubWorktreeRemovalGitEnvUsesSharedWindowsKeyIdentity(t *testing.T) {
+	// os/exec identifies Windows keys with ToLower, which keeps the dotless i
+	// distinct. A ToUpper fold would map GıT_OPTIONAL_LOCKS onto
+	// GIT_OPTIONAL_LOCKS and strip an unrelated variable from the child.
+	input := []string{
+		"GıT_OPTIONAL_LOCKS=1", "git_optional_locks=1",
+		"GIT_NO_REPLACE_OBJECTS=1", "KEEP=value",
+	}
+	want := []string{"GıT_OPTIONAL_LOCKS=1", "KEEP=value"}
+	if got := scrubWorktreeRemovalGitEnvForOS(input, "windows"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("scrubWorktreeRemovalGitEnvForOS(windows) = %q, want %q", got, want)
 	}
 }
 

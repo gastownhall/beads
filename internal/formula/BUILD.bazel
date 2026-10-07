@@ -36,6 +36,7 @@ go_test(
         "schema_gen_test.go",
         "schema_test.go",
         "stepcondition_test.go",
+        "validation_sentinel_test.go",
     ],
     data = [
         "schema_gen.go",
@@ -50,3 +51,25 @@ go_test(
         "//internal/testutil/bazeltest",
     ],
 )
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

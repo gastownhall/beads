@@ -45,6 +45,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -64,20 +65,15 @@ const (
 	// Shared is held by normal commands for the lifetime of their open
 	// store or UOW provider. Any number of shared holders coexist.
 	//
-	// Starvation note: a rolling sequence of shared holders (e.g. one bd
-	// command after another against a busy workspace) can starve an
-	// Exclusive acquirer indefinitely — acquisition is LOCK_NB polling
-	// with no intent signal, so a new shared holder has no way to know an
-	// exclusive attempt is queued and back off. A future extension could
-	// have Exclusive publish an advisory "waiting" marker (parallel to
-	// the holder-info sidecar) that new Shared acquisitions check and
-	// voluntarily defer to, but that does not exist yet: Options.Wait on
-	// an Exclusive acquisition is not a fairness guarantee.
+	// Fairness: a waiting Shared acquisition (Options.Wait > 0) defers to a
+	// queued Exclusive acquirer — see "Writer fairness" on Acquire — so a
+	// rolling sequence of short shared holders cannot starve maintenance.
+	// A fail-fast Shared attempt (Wait <= 0) does not consult the queue.
 	Shared Mode = iota
 	// Exclusive is held by maintenance operations. It conflicts with
-	// every other holder, shared or exclusive. See the starvation note
-	// on Shared: nothing here prevents shared holders from starving an
-	// Exclusive acquirer.
+	// every other holder, shared or exclusive. A waiting Exclusive
+	// acquisition publishes its intent so new waiting Shared acquisitions
+	// queue behind it (see Acquire).
 	Exclusive
 )
 
@@ -98,14 +94,12 @@ var ErrBusy = errors.New("workspace gate busy")
 // attempt with no diagnostics callback.
 type Options struct {
 	// Wait bounds how long Acquire keeps retrying after the first busy
-	// attempt. Zero or negative means exactly one non-blocking try.
-	// The underlying blocking lock primitives have no deadline support,
-	// so waiting is implemented as timed polling of the non-blocking
-	// primitive. This is not a fairness guarantee: see the starvation
-	// note on Exclusive — a Wait on an Exclusive acquisition can still
-	// exhaust its budget against a rolling sequence of Shared holders
-	// that each individually released before it, none of which had any
-	// signal that an exclusive acquirer was waiting.
+	// attempt. Zero or negative means exactly one non-blocking try (which
+	// also opts out of the writer-fairness queue in both directions: a
+	// fail-fast Exclusive publishes no intent, and a fail-fast Shared
+	// ignores published intent). The underlying blocking lock primitives
+	// have no deadline support, so waiting is implemented as timed polling
+	// of the non-blocking primitive.
 	Wait time.Duration
 	// PollInterval is the retry cadence while waiting (default 100ms).
 	PollInterval time.Duration
@@ -118,6 +112,14 @@ type Options struct {
 	// effort, from the advisory sidecar). AcquireAll fires it at most
 	// once across the whole gate set.
 	OnWait func(holder string)
+	// IgnoreQueuedExclusive makes a waiting Shared acquisition skip the
+	// writer-fairness check. Set it only when an ANCESTOR process already
+	// holds this gate shared (see InheritedSharedHold): the queued
+	// exclusive acquirer cannot proceed until that ancestor releases, and
+	// the ancestor may be waiting on this process, so queueing would turn
+	// a nested bd invocation into a deadlock that only the wait bound
+	// breaks. Ignored for Exclusive.
+	IgnoreQueuedExclusive bool
 }
 
 // Gate identifies one gate file. Construct via ForWorkspace or
@@ -231,8 +233,19 @@ type Info struct {
 
 func (g Gate) infoPath() string { return g.path + ".info" }
 
-func (g Gate) readInfo() *Info {
-	data, err := os.ReadFile(g.infoPath())
+// intentPath is the writer-fairness lock: a waiting Exclusive acquirer
+// holds it exclusively while it polls the gate, and waiting Shared
+// acquirers defer while it is held. intentInfoPath is its advisory
+// holder-info sidecar (a separate file because Windows LockFileEx locks
+// are mandatory byte-range locks: other processes cannot read a locked
+// file's contents). Both match the "*.gate.lock*" gitignore pattern.
+func (g Gate) intentPath() string     { return g.path + ".intent" }
+func (g Gate) intentInfoPath() string { return g.path + ".intent.info" }
+
+func (g Gate) readInfo() *Info { return readInfoAt(g.infoPath()) }
+
+func readInfoAt(path string) *Info {
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path derives from the gate location this package computed
 	if err != nil {
 		return nil
 	}
@@ -262,16 +275,7 @@ func (g Gate) busyDetail(mode Mode) string {
 		}
 		return "another bd process (no holder info recorded)"
 	}
-	desc := fmt.Sprintf("pid %d", info.PID)
-	if info.Hostname != "" {
-		desc += " on " + info.Hostname
-	}
-	if info.Reason != "" {
-		desc += " (" + info.Reason + ")"
-	}
-	if !info.StartedAt.IsZero() {
-		desc += " since " + info.StartedAt.UTC().Format(time.RFC3339)
-	}
+	desc := info.describe()
 	stale := func() bool {
 		host, _ := os.Hostname()
 		return host == info.Hostname && !pidAlive(info.PID)
@@ -291,6 +295,42 @@ func (g Gate) busyDetail(mode Mode) string {
 		return fmt.Sprintf("other bd processes (a stale exclusive-holder record from dead pid %d was ignored)", info.PID)
 	}
 	return "possibly " + desc + ", or shared holders"
+}
+
+// describe renders a holder record as "pid N on host (reason) since T".
+func (info *Info) describe() string {
+	desc := fmt.Sprintf("pid %d", info.PID)
+	if info.Hostname != "" {
+		desc += " on " + info.Hostname
+	}
+	if info.Reason != "" {
+		desc += " (" + info.Reason + ")"
+	}
+	if !info.StartedAt.IsZero() {
+		desc += " since " + info.StartedAt.UTC().Format(time.RFC3339)
+	}
+	return desc
+}
+
+// queuedDetail describes the queued exclusive acquirer a waiting Shared
+// attempt is deferring to. The intent lock is held whenever this is
+// called, so the sidecar (written right after the lock is taken) normally
+// names a live process; it is only absent in the brief window before the
+// write or when the write failed.
+func (g Gate) queuedDetail() string {
+	info := readInfoAt(g.intentInfoPath())
+	if info != nil {
+		// A sidecar whose removal failed (Windows refuses to delete a file
+		// another process has open) can outlive its writer; never present
+		// a dead process as the queued operation.
+		if host, _ := os.Hostname(); host == info.Hostname && !pidAlive(info.PID) {
+			info = nil
+		}
+	}
+	if info == nil {
+		return "a bd maintenance operation queued for exclusive access"
+	}
+	return "a bd maintenance operation queued for exclusive access: " + info.describe()
 }
 
 // pidAlive reports best-effort process liveness via the zero-signal
@@ -367,6 +407,54 @@ func (h *Handle) Release() error {
 // inherited by spawned children (Go opens files close-on-exec on Unix and
 // non-inheritable on Windows), so a dolt child outliving its bd parent
 // does not keep the gate held.
+//
+// Writer fairness. flock and LockFileEx grant no queueing guarantees, and
+// acquisition is non-blocking polling anyway, so without help a steady
+// stream of short shared holders — each overlapping the next — would keep
+// an Exclusive waiter out until its budget ran dry. A second lock file,
+// the intent lock (<gate>.intent), fixes that:
+//
+//   - a waiting Exclusive acquisition (Wait > 0) whose first attempt is
+//     busy takes the intent lock EXCLUSIVELY (non-blocking, retried each
+//     poll), holds it while it polls the gate, and drops it as soon as it
+//     owns the gate, gives up, or has held it for maxIntentHold without
+//     getting in (after which it keeps polling unqueued);
+//   - a waiting Shared acquisition (Wait > 0) checks the intent lock before
+//     every attempt but the last (a momentary non-blocking SHARED probe)
+//     and, while it is held, does not touch the gate — it waits, within its
+//     own budget, exactly as if the gate were held exclusively. Its final
+//     attempt tries the gate regardless.
+//
+// The two bounds keep the queue from ever costing availability. A queue can
+// DELAY a shared acquirer but never FAIL it: the final attempt ignores
+// intent, so a shared acquisition fails only when the gate itself is held
+// exclusively. And a doomed exclusive waiter — one blocked behind a shared
+// holder that will not leave soon (a --watch, a tail --follow, an open
+// editor, a long-lived embedder) — stops queueing everyone else after
+// maxIntentHold instead of for its whole budget. In-flight ordinary commands
+// drain far faster than that, so the fairness win is kept.
+//
+// Queued exclusive operations still run one after another: while they take
+// turns on the gate, a waiting shared acquirer waits for all of them (each
+// new exclusive waiter re-publishes intent), bounded by its own budget.
+//
+// Shared holders that are already in keep running; the exclusive waiter
+// waits only for them to drain, so its wait is bounded by the longest
+// in-flight command rather than by the arrival rate. A shared acquirer that
+// probed just before the intent was published can still slip in once, which
+// costs at most one more command's duration.
+//
+// Stale intent cannot outlive its owner: it is an OS advisory lock, released
+// by the kernel when the process exits or crashes (on every platform), never
+// a marker file whose existence means anything. The intent file and its
+// holder-info sidecar may linger; both are ignored whenever the lock itself
+// is free. Every intent-lock failure other than "busy" (unsupported
+// filesystem, permissions) degrades to the pre-fairness behavior instead of
+// failing the acquisition: fairness is advisory, the gate is the authority.
+//
+// Lock order is unchanged in substance: the intent lock of a gate is taken
+// only while acquiring that gate, so it slots directly before the gate in
+// AcquireAll's sorted total order and cannot form a cycle.
 func (g Gate) Acquire(ctx context.Context, mode Mode, opts Options) (*Handle, error) {
 	if g.path == "" {
 		return nil, errors.New("workspacegate: zero Gate; use ForWorkspace/ForPhysicalRoot")
@@ -396,32 +484,77 @@ func (g Gate) Acquire(ctx context.Context, mode Mode, opts Options) (*Handle, er
 	if mode == Exclusive {
 		try = lockfile.FlockExclusiveNonBlock
 	}
+	waiting := opts.Wait > 0
+	defersToIntent := waiting && mode == Shared && !opts.IgnoreQueuedExclusive
+	publishesIntent := waiting && mode == Exclusive
+	var intentSince time.Time
+
+	// intent is the writer-fairness lock while this Exclusive acquisition
+	// holds it. Released on every return path — after writeInfo on success,
+	// so a shared waiter never sees the gate unqueued-but-unclaimed.
+	var intent *os.File
+	defer func() { g.releaseIntent(intent) }()
 
 	notified := false
+	// finalAttempt is set once the budget ran out while this acquisition was
+	// deferring to queued intent: it then gets exactly one more try at the
+	// gate, ignoring the queue, before it may fail. Deciding finality from
+	// the clock at the top of an iteration is not enough — the intent probe
+	// itself takes time (a loaded machine can stall it for milliseconds), so
+	// "budget not yet spent" before the probe can be "spent" after it, and
+	// failing there would let a mere queue fail a shared acquirer.
+	finalAttempt := false
 	for {
-		err := try(f)
-		if err == nil {
-			h := &Handle{gate: g, mode: mode, f: f}
-			if mode == Exclusive {
-				g.writeInfo(opts.Reason)
+		var detail string
+		deferred := defersToIntent && !finalAttempt && time.Until(deadline) > 0 && g.ExclusiveQueued()
+		if deferred {
+			detail = g.queuedDetail()
+			if testHookAfterIntentDefer != nil {
+				testHookAfterIntentDefer()
 			}
-			return h, nil
-		}
-		if !errors.Is(err, lockfile.ErrLockBusy) && !lockfile.IsLocked(err) {
-			_ = f.Close()
-			return nil, fmt.Errorf("workspacegate: lock %s: %w", g.path, err)
+		} else {
+			err := try(f)
+			if err == nil {
+				h := &Handle{gate: g, mode: mode, f: f}
+				if mode == Exclusive {
+					g.writeInfo(opts.Reason)
+				}
+				return h, nil
+			}
+			if !errors.Is(err, lockfile.ErrLockBusy) && !lockfile.IsLocked(err) {
+				_ = f.Close()
+				return nil, fmt.Errorf("workspacegate: lock %s: %w", g.path, err)
+			}
+			detail = g.busyDetail(mode)
 		}
 		if !notified {
 			notified = true
 			if opts.OnWait != nil {
-				opts.OnWait(g.busyDetail(mode))
+				opts.OnWait(detail)
 			}
 		}
 		remaining := time.Until(deadline)
-		if opts.Wait <= 0 || remaining <= 0 {
+		if deferred && remaining <= 0 {
+			// Queued maintenance may delay a shared acquirer, never fail
+			// it: the budget is spent, so try the gate itself once more.
+			finalAttempt = true
+			continue
+		}
+		if !waiting || remaining <= 0 {
 			_ = f.Close()
 			return nil, fmt.Errorf("workspacegate: %s (%s mode) held by %s: %w",
-				g.path, mode, g.busyDetail(mode), ErrBusy)
+				g.path, mode, detail, ErrBusy)
+		}
+		if intent != nil && time.Since(intentSince) >= maxIntentHold {
+			// Doomed or very slow: stop holding everyone else back.
+			g.releaseIntent(intent)
+			intent = nil
+			publishesIntent = false
+		}
+		if publishesIntent && intent == nil {
+			if intent = g.tryTakeIntent(opts.Reason); intent != nil {
+				intentSince = time.Now()
+			}
 		}
 		// Never sleep past the wait budget: a Wait shorter than the poll
 		// interval must still come back within (about) Wait, and the
@@ -439,13 +572,76 @@ func (g Gate) Acquire(ctx context.Context, mode Mode, opts Options) (*Handle, er
 	}
 }
 
-// writeInfo records the advisory exclusive-holder sidecar. Failures are
+// testHookAfterIntentDefer, when set (tests only), runs right after a
+// waiting shared acquisition decides to defer to queued intent, so tests can
+// stall it past its deadline at exactly the point a loaded machine might.
+var testHookAfterIntentDefer func()
+
+// maxIntentHold caps how long one Exclusive acquisition keeps the intent
+// lock without getting the gate. It must stay well below the shared wait
+// budget callers use (bd: BEADS_GATE_WAIT_TIMEOUT, default 30s) and well
+// above how long ordinary in-flight commands take to drain. A var so tests
+// can shorten it.
+var maxIntentHold = 10 * time.Second
+
+// ExclusiveQueued reports whether a waiting Exclusive acquirer currently
+// holds this gate's intent lock. The probe opens read-only and treats a
+// missing file as "no intent", so ordinary shared commands never create
+// intent files; any error other than "busy" reads as "not queued" (see the
+// degradation rule on Acquire).
+func (g Gate) ExclusiveQueued() bool {
+	f, err := os.OpenFile(g.intentPath(), os.O_RDONLY, 0o600)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	lerr := lockfile.FlockSharedNonBlock(f)
+	if lerr == nil {
+		_ = lockfile.FlockUnlock(f)
+		return false
+	}
+	return errors.Is(lerr, lockfile.ErrLockBusy) || lockfile.IsLocked(lerr)
+}
+
+// tryTakeIntent makes one non-blocking attempt at the intent lock and, on
+// success, records the advisory intent sidecar. It returns nil when the
+// lock is busy (another exclusive waiter is queued first; this acquirer
+// keeps polling the gate and retries the intent next round) or unusable.
+func (g Gate) tryTakeIntent(reason string) *os.File {
+	f, err := os.OpenFile(g.intentPath(), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil
+	}
+	if err := lockfile.FlockExclusiveNonBlock(f); err != nil {
+		_ = f.Close()
+		return nil
+	}
+	writeInfoAt(g.intentInfoPath(), reason)
+	return f
+}
+
+// releaseIntent drops a held intent lock (nil-safe). As with the gate's own
+// sidecar, the intent sidecar is removed BEFORE unlocking so a late removal
+// can never delete the next waiter's record.
+func (g Gate) releaseIntent(f *os.File) {
+	if f == nil {
+		return
+	}
+	_ = os.Remove(g.intentInfoPath())
+	_ = lockfile.FlockUnlock(f)
+	_ = f.Close()
+}
+
+// writeInfo records the advisory exclusive-holder sidecar.
+func (g Gate) writeInfo(reason string) { writeInfoAt(g.infoPath(), reason) }
+
+// writeInfoAt writes an advisory holder-info sidecar. Failures are
 // deliberately swallowed: diagnostics must never block the operation that
 // already holds the authoritative lock. The write goes to an O_EXCL temp
 // file renamed into place, which (a) never follows a pre-planted symlink
 // at either path — plain WriteFile would truncate the symlink's target —
 // and (b) is atomic, so concurrent readers cannot see torn JSON.
-func (g Gate) writeInfo(reason string) {
+func writeInfoAt(path, reason string) {
 	host, _ := os.Hostname()
 	data, err := json.Marshal(Info{
 		PID:       os.Getpid(),
@@ -456,7 +652,7 @@ func (g Gate) writeInfo(reason string) {
 	if err != nil {
 		return
 	}
-	tmp := fmt.Sprintf("%s.%d.tmp", g.infoPath(), os.Getpid())
+	tmp := fmt.Sprintf("%s.%d.tmp", path, os.Getpid())
 	_ = os.Remove(tmp)
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // G304: path derives from the gate location this package computed, not request input; the preceding os.Remove clears a pre-planted file, and O_EXCL closes the remove-then-open window so a symlink replanted in between is refused rather than followed
 	if err != nil {
@@ -469,14 +665,38 @@ func (g Gate) writeInfo(reason string) {
 		return
 	}
 	// Rename replaces a symlink itself rather than following it.
-	if err := os.Rename(tmp, g.infoPath()); err != nil {
+	if err := os.Rename(tmp, path); err != nil {
 		// Windows can refuse to replace an existing file; retry once
 		// after removing the destination. Still best effort.
-		_ = os.Remove(g.infoPath())
-		if err := os.Rename(tmp, g.infoPath()); err != nil {
+		_ = os.Remove(path)
+		if err := os.Rename(tmp, path); err != nil {
 			_ = os.Remove(tmp)
 		}
 	}
+}
+
+// InheritedHoldEnv names the environment variable a bd process sets (to its
+// PID) while it holds its command's gates SHARED, so that bd processes it
+// spawns — `bd orphans` running `bd close`, git hooks under a bd-driven
+// commit — can tell that an ancestor already holds the gate. See
+// Options.IgnoreQueuedExclusive and InheritedSharedHold.
+const InheritedHoldEnv = "BEADS_GATE_SHARED_HOLDER_PID"
+
+// InheritedSharedHold reports whether InheritedHoldEnv names a live process
+// other than this one, i.e. whether this process was (probably) spawned by a
+// bd command that still holds its gates shared. A stale or recycled PID only
+// costs fairness, never safety: the flag merely skips the writer queue, and
+// the gate itself still excludes every exclusive holder.
+func InheritedSharedHold() bool {
+	raw := strings.TrimSpace(os.Getenv(InheritedHoldEnv))
+	if raw == "" {
+		return false
+	}
+	pid, err := strconv.Atoi(raw)
+	if err != nil || pid == os.Getpid() {
+		return false
+	}
+	return pidAlive(pid)
 }
 
 // MultiHandle holds several gates acquired by AcquireAll and releases
@@ -540,6 +760,9 @@ func AcquireAll(ctx context.Context, mode Mode, opts Options, gates ...Gate) (*M
 	m := &MultiHandle{handles: make([]*Handle, 0, len(ordered))}
 	for _, g := range ordered {
 		if opts.Wait > 0 {
+			// An exhausted budget leaves later gates one non-blocking
+			// attempt (Wait 0), which ignores the writer-fairness queue —
+			// the same as the final attempt of a waiting acquisition.
 			perGate.Wait = time.Until(deadline)
 			if perGate.Wait < 0 {
 				perGate.Wait = 0

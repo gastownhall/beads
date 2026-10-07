@@ -42,10 +42,10 @@ Auto-backup default:
   coordinate destinations). 'bd config get backup.enabled' shows the effective
   value and its source.
 
-  On a proxied-server workspace that opt-in does not apply: auto-backup has
-  no post-command hook on that path, so backup.enabled=true is inert there.
-  The five backup verbs above are honored on a managed-local proxied server —
-  run 'bd backup sync' explicitly to back one up.`,
+  A proxied-server workspace is server mode too: auto-backup is OFF by
+  default and backup.enabled=true opts in. Both the opt-in and the five
+  backup verbs above are honored only on a managed-local proxied server —
+  one bd started itself; on a Dolt server bd does not own they are refused.`,
 	GroupID: "sync",
 }
 
@@ -88,8 +88,9 @@ func newBackupStatusCommand(sizeDatabase backupSizeFunc) *cobra.Command {
 
 			if jsonOutput {
 				result := map[string]interface{}{
-					"backup": state,
-					"dolt":   showDoltBackupStatusJSON(),
+					"backup":   state,
+					"dolt":     showDoltBackupStatusJSON(),
+					"size_cap": showSizeCapStatusJSON(dir),
 				}
 				if sizeAvailable {
 					result["database_size"] = showDBSizeJSON(databaseSize)
@@ -137,6 +138,7 @@ func newBackupStatusCommand(sizeDatabase backupSizeFunc) *cobra.Command {
 			}
 			fmt.Printf("\nConfig: enabled=%v%s interval=%s\n",
 				enabled, enabledNote, interval)
+			showSizeCapStatus(dir)
 
 			// Show Dolt backup info
 			showDoltBackupStatus()

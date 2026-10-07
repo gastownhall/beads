@@ -38,10 +38,109 @@ func TestCountIncludeInfraFlagShape(t *testing.T) {
 	}
 }
 
+// TestCountIncludeEphemeralFlagShape is the same pin for --include-ephemeral,
+// plus the case TestParseCountRequestCarriesEveryFilterFlag cannot see because
+// it sets both plane flags at once: --include-ephemeral ALONE must not reach
+// the role as IncludeInfra, which would also drop templates and gates from
+// the count.
+func TestCountIncludeEphemeralFlagShape(t *testing.T) {
+	flag := countCmd.Flags().Lookup("include-ephemeral")
+	if flag == nil {
+		t.Fatal("bd count must expose an --include-ephemeral flag")
+	}
+	if flag.DefValue != "false" {
+		t.Fatalf("--include-ephemeral must default to false, got %q", flag.DefValue)
+	}
+
+	request, _, err := parseCountRequest(newCountFlagSet(t))
+	if err != nil {
+		t.Fatalf("parseCountRequest with no flags set: %v", err)
+	}
+	if request.IncludeEphemeral {
+		t.Error("IncludeEphemeral = true with no flags set, want the durable-only default")
+	}
+
+	flags := newCountFlagSet(t)
+	if err := flags.Flags().Set("include-ephemeral", "true"); err != nil {
+		t.Fatalf("set --include-ephemeral: %v", err)
+	}
+	request, _, err = parseCountRequest(flags)
+	if err != nil {
+		t.Fatalf("parseCountRequest --include-ephemeral: %v", err)
+	}
+	if !request.IncludeEphemeral {
+		t.Error("IncludeEphemeral = false with --include-ephemeral set; the flag was dropped on the way into the request")
+	}
+	if request.IncludeInfra {
+		t.Error("IncludeInfra = true with only --include-ephemeral set; it is the plane bit and nothing else")
+	}
+}
+
+// TestCountScopeFlagsShape pins --parent, --no-parent, --exclude-type and
+// --exclude-status: their existence, their defaults, and that setting one
+// does not leak into another. These are the Counter-scope fields (S8): the
+// behavior token issues.count.scope on the HTTP front door exists because of
+// exactly these four flags.
+func TestCountScopeFlagsShape(t *testing.T) {
+	for flag, defValue := range map[string]string{
+		"parent":         "",
+		"no-parent":      "false",
+		"exclude-type":   "[]",
+		"exclude-status": "[]",
+	} {
+		got := countCmd.Flags().Lookup(flag)
+		if got == nil {
+			t.Fatalf("bd count must expose a --%s flag", flag)
+		}
+		if got.DefValue != defValue {
+			t.Fatalf("--%s must default to %q, got %q", flag, defValue, got.DefValue)
+		}
+	}
+
+	request, _, err := parseCountRequest(newCountFlagSet(t))
+	if err != nil {
+		t.Fatalf("parseCountRequest with no flags set: %v", err)
+	}
+	if request.ParentID != "" || request.NoParent || len(request.ExcludeTypes) != 0 || len(request.ExcludeStatus) != 0 {
+		t.Errorf("parseCountRequest with no flags set = %#v, want all four scope fields at their zero value", request)
+	}
+
+	flags := newCountFlagSet(t)
+	if err := flags.Flags().Set("parent", "bd-1"); err != nil {
+		t.Fatalf("set --parent: %v", err)
+	}
+	if err := flags.Flags().Set("exclude-type", "wisp"); err != nil {
+		t.Fatalf("set --exclude-type: %v", err)
+	}
+	request, _, err = parseCountRequest(flags)
+	if err != nil {
+		t.Fatalf("parseCountRequest --parent --exclude-type: %v", err)
+	}
+	if request.ParentID != "bd-1" {
+		t.Errorf("ParentID = %q, want %q", request.ParentID, "bd-1")
+	}
+	if request.NoParent {
+		t.Error("NoParent = true with only --parent set; the two flags must not leak into each other")
+	}
+	if !reflect.DeepEqual(request.ExcludeTypes, []string{"wisp"}) {
+		t.Errorf("ExcludeTypes = %v, want [wisp]", request.ExcludeTypes)
+	}
+	if len(request.ExcludeStatus) != 0 {
+		t.Errorf("ExcludeStatus = %v, want empty; only --exclude-type was set", request.ExcludeStatus)
+	}
+}
+
 // TestParseCountRequestCarriesEveryFilterFlag is the tripwire for a flag that
 // is registered, documented and silently dropped on the way into the request.
 // Every filter flag is set to a value distinguishable from its zero and read
 // back off the request.
+//
+// --no-parent is NOT in this matrix: review S8 follow-up #1 made --parent and
+// --no-parent mutually exclusive, and this test already sets --parent to
+// cover that field, so setting --no-parent alongside it would refuse the
+// whole request instead of pinning a mapping. --no-parent's carriage into the
+// request is pinned on its own in TestParseCountRequestRefusesParentAndNoParentTogether's
+// sibling cases below and in TestCountScopeFlagsShape above.
 func TestParseCountRequestCarriesEveryFilterFlag(t *testing.T) {
 	flags := newCountFlagSet(t)
 	for flag, value := range map[string]string{
@@ -65,10 +164,15 @@ func TestParseCountRequestCarriesEveryFilterFlag(t *testing.T) {
 		"no-assignee":       "true",
 		"no-labels":         "true",
 		"metadata-field":    "team=platform",
+		"has-metadata-key":  "audit_ref",
 		"priority":          "1",
 		"priority-min":      "0",
 		"priority-max":      "4",
 		"include-infra":     "true",
+		"include-ephemeral": "true",
+		"parent":            "bd-9",
+		"exclude-type":      "wisp,gate",
+		"exclude-status":    "closed,archived",
 	} {
 		if err := flags.Flags().Set(flag, value); err != nil {
 			t.Fatalf("set --%s=%s: %v", flag, value, err)
@@ -95,33 +199,82 @@ func TestParseCountRequestCarriesEveryFilterFlag(t *testing.T) {
 	}
 	priority, min, max := 1, 0, 4
 	want := issueops.CountRequest{
-		Status:         "closed",
-		IssueType:      "bug",
-		Assignee:       "alice",
-		Priority:       &priority,
-		PriorityMin:    &min,
-		PriorityMax:    &max,
-		Labels:         []string{"alpha", "beta"},
-		LabelsAny:      []string{"gamma"},
-		TitleSearch:    "needle",
-		IDFilter:       "bd-1,bd-2",
-		TitleContains:  "tc",
-		DescContains:   "dc",
-		NotesContains:  "nc",
-		CreatedAfter:   day(1),
-		CreatedBefore:  day(2),
-		UpdatedAfter:   day(3),
-		UpdatedBefore:  day(4),
-		ClosedAfter:    day(5),
-		ClosedBefore:   day(6),
-		EmptyDesc:      true,
-		NoAssignee:     true,
-		NoLabels:       true,
-		MetadataFields: map[string]string{"team": "platform"},
-		IncludeInfra:   true,
+		Status:           "closed",
+		IssueType:        "bug",
+		Assignee:         "alice",
+		Priority:         &priority,
+		PriorityMin:      &min,
+		PriorityMax:      &max,
+		Labels:           []string{"alpha", "beta"},
+		LabelsAny:        []string{"gamma"},
+		TitleSearch:      "needle",
+		IDFilter:         "bd-1,bd-2",
+		TitleContains:    "tc",
+		DescContains:     "dc",
+		NotesContains:    "nc",
+		CreatedAfter:     day(1),
+		CreatedBefore:    day(2),
+		UpdatedAfter:     day(3),
+		UpdatedBefore:    day(4),
+		ClosedAfter:      day(5),
+		ClosedBefore:     day(6),
+		EmptyDesc:        true,
+		NoAssignee:       true,
+		NoLabels:         true,
+		MetadataFields:   map[string]string{"team": "platform"},
+		HasMetadataKey:   "audit_ref",
+		IncludeInfra:     true,
+		IncludeEphemeral: true,
+		ParentID:         "bd-9",
+		ExcludeTypes:     []string{"wisp", "gate"},
+		ExcludeStatus:    []string{"closed", "archived"},
 	}
 	if !reflect.DeepEqual(request, want) {
 		t.Errorf("parseCountRequest built\n %#v\nwant\n %#v", request, want)
+	}
+}
+
+// TestParseCountRequestRefusesParentAndNoParentTogether pins review S8
+// follow-up #1: `bd count --parent X --no-parent` is refused at the CLI flag
+// layer, before a request is even built — the same early-refusal shape every
+// other mutually-exclusive pair on this CLI gets (e.g. --pinned/--no-pinned).
+//
+// HandleErrorRespectJSON prints "--parent and --no-parent are mutually
+// exclusive" (`bd list`'s own wording, cmd/bd/list_input.go) to stderr/JSON
+// and returns an opaque exit error, so — as every other parseCountRequest
+// refusal test in this file does — only the refusal itself is asserted here,
+// not the string inside the returned error.
+func TestParseCountRequestRefusesParentAndNoParentTogether(t *testing.T) {
+	flags := newCountFlagSet(t)
+	if err := flags.Flags().Set("parent", "bd-1"); err != nil {
+		t.Fatalf("set --parent: %v", err)
+	}
+	if err := flags.Flags().Set("no-parent", "true"); err != nil {
+		t.Fatalf("set --no-parent: %v", err)
+	}
+	if _, _, err := parseCountRequest(flags); err == nil {
+		t.Fatal("parseCountRequest accepted --parent with --no-parent, want a refusal")
+	}
+}
+
+// TestParseCountRequestCarriesNoParentAlone pins --no-parent's own mapping,
+// split out of TestParseCountRequestCarriesEveryFilterFlag because that test's
+// --parent case cannot also set --no-parent now that the two refuse each
+// other.
+func TestParseCountRequestCarriesNoParentAlone(t *testing.T) {
+	flags := newCountFlagSet(t)
+	if err := flags.Flags().Set("no-parent", "true"); err != nil {
+		t.Fatalf("set --no-parent: %v", err)
+	}
+	request, _, err := parseCountRequest(flags)
+	if err != nil {
+		t.Fatalf("parseCountRequest --no-parent: %v", err)
+	}
+	if !request.NoParent {
+		t.Error("NoParent = false, want true")
+	}
+	if request.ParentID != "" {
+		t.Errorf("ParentID = %q, want empty: --parent was not set", request.ParentID)
 	}
 }
 
@@ -136,6 +289,16 @@ func TestParseCountRequestRejectsInvalidMetadataField(t *testing.T) {
 				t.Fatalf("parseCountRequest accepted --metadata-field %q", value)
 			}
 		})
+	}
+}
+
+func TestParseCountRequestRejectsInvalidHasMetadataKey(t *testing.T) {
+	flags := newCountFlagSet(t)
+	if err := flags.Flags().Set("has-metadata-key", "1bad"); err != nil {
+		t.Fatalf("set --has-metadata-key: %v", err)
+	}
+	if _, _, err := parseCountRequest(flags); err == nil {
+		t.Fatal("parseCountRequest accepted --has-metadata-key 1bad")
 	}
 }
 

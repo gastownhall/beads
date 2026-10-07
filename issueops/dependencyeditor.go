@@ -29,6 +29,7 @@ const (
 	DepDiscoveredFrom = types.DepDiscoveredFrom
 	DepRepliesTo      = types.DepRepliesTo
 	DepWaitsFor       = types.DepWaitsFor
+	DepTracks         = types.DepTracks
 )
 
 // DependencyEdge is one directed edge: IssueID depends on DependsOnID, with

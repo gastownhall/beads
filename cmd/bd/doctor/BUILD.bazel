@@ -19,6 +19,7 @@ go_library(
         "dependency_sql.go",
         "dolt.go",
         "federation.go",
+        "fix_gate.go",
         "fresh_clone_server.go",
         "git.go",
         "gitignore.go",
@@ -62,6 +63,7 @@ go_library(
         "//internal/doltremote",
         "//internal/doltserver",
         "//internal/git",
+        "//internal/gitenv",
         "//internal/gitignore",
         "//internal/storage",
         "//internal/storage/dberrors",
@@ -73,6 +75,7 @@ go_library(
         "//internal/storage/schema",
         "//internal/types",
         "//internal/utils",
+        "//schema",
         "@com_github_go_sql_driver_mysql//:mysql",
         "@com_github_spf13_viper//:viper",
         "@in_gopkg_yaml_v3//:yaml_v3",
@@ -104,6 +107,9 @@ go_test(
         "dolt_phantom_test.go",
         "dolt_test.go",
         "federation_test.go",
+        "fix_gate_assess_dolt_test.go",
+        "fix_gate_assess_test.go",
+        "fix_gate_test.go",
         "fresh_clone_server_test.go",
         "git_hygiene_test.go",
         "git_repo_template_test.go",
@@ -146,20 +152,60 @@ go_test(
         "validation_test.go",
         "version_test.go",
     ],
+    data = ["//cmd/bd:bd_for_tests"],
     embed = [":doctor"],
+    env = {"BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)"},
     deps = [
         "//internal/beads",
         "//internal/configfile",
         "//internal/doltserver",
         "//internal/git",
+        "//internal/gitenv",
         "//internal/storage/dolt",
         "//internal/storage/doltutil",
         "//internal/storage/embeddeddolt",
         "//internal/storage/issueops",
         "//internal/testutil",
+        "//internal/testutil/bazeltest",
         "//internal/types",
         "//internal/utils",
+        "//schema",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
         "@com_github_go_sql_driver_mysql//:mysql",
     ],
 )
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

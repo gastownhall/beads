@@ -1,4 +1,7 @@
-//go:build e2e
+//go:build e2e || integration
+
+// Built under e2e (scripts/conformance.sh) or integration (Bazel's
+// --config=integration lane, //test/conformance:conformance_test).
 
 package conformance
 
@@ -15,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // scenario is a named sequence of bd CLI invocations. IDs are pinned with --id so
@@ -479,6 +484,12 @@ func TestMain(m *testing.M) {
 func buildBD(t *testing.T) string {
 	t.Helper()
 	buildOnce.Do(func() {
+		// Under Bazel the binary is injected (//cmd/bd:bd_for_tests); there is
+		// no toolchain or module tree to build from. Plain go test is unchanged.
+		if bazeltest.IsBazel() {
+			bdBin, bdErr = bazeltest.PrebuiltBD()
+			return
+		}
 		dir, err := os.MkdirTemp("", "bd-e2e")
 		if err != nil {
 			bdErr = fmt.Errorf("mkdir temp for bd binary: %v", err)

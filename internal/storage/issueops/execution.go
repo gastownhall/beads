@@ -87,12 +87,17 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 	}
 	issue.Dependencies = storage.CreatePublicCreateDependencies(issue.ID, attempt)
 	var skipped []skippedDependency
-	created, err := CreateIssuesInTxWithResult(ctx, tx, []*types.Issue{issue}, attempt.Actor, storage.BatchCreateOptions{
+	// Reuse the context read above: same transaction, same options, and
+	// nothing since has written config, so re-reading it (as
+	// CreateIssuesInTxWithResult would) only repeats the same reads.
+	createContext := *batch
+	createContext.Opts = storage.BatchCreateOptions{
 		CreateOnly: true, SkipPrefixValidation: attempt.ForceIDPrefix,
 		OnSkippedDependency: func(issueID, dependsOnID, reason string) {
 			skipped = append(skipped, skippedDependency{issueID: issueID, dependsOnID: dependsOnID, reason: reason})
 		},
-	})
+	}
+	created, err := CreateIssuesInTxWithContext(ctx, tx, &createContext, []*types.Issue{issue}, attempt.Actor)
 	if err != nil {
 		return publicops.CreateResult{}, nil, ClassifyPublicCreateError(err)
 	}
@@ -167,6 +172,9 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 		return publicops.UpdateResult{}, nil, err
 	}
 	if err := AuthorizeAssigneeTransfer(ctx, tx, before, attempt); err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	if err := AuthorizeNotesOverwrite(before, attempt); err != nil {
 		return publicops.UpdateResult{}, nil, err
 	}
 	// Every constituent below runs its no-mint variant: one guarded update is

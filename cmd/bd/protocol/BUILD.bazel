@@ -1,4 +1,6 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//tools/bazel:race.bzl", "go_test_race_off")
 
 go_library(
     name = "protocol",
@@ -40,10 +42,88 @@ go_test(
         "versioning_contract_test.go",
         "wp4_helpers_test.go",
     ],
-    data = glob(["testdata/**"]),
+    data = glob(["testdata/**"]) + ["//cmd/bd:bd_for_tests"],
     embed = [":protocol"],
+    env = {"BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)"},
     deps = [
         "//internal/storage/schema",
         "//internal/testutil",
+        "//internal/testutil/bazeltest",
+        "@com_github_creack_pty//:pty",
     ],
 )
+
+# protocol_test without the race detector, which --config=doltserver
+# otherwise turns on for every target: the contract corpus has always run
+# `go test ./cmd/bd/protocol` without -race (PR Core covers the race build).
+# Matching it is cheap: tools/bazel/race.bzl lands protocol_test's deps in
+# the configuration the non-race //cmd/bd:bd_for_tests already builds them in,
+# so the extra work is protocol_test's test-only libraries and one link.
+# Racing it instead would also be acceptable (a race-only failure is a real
+# bug); then drop this target and point protocol_dolt_test back at
+# :protocol_test.
+#
+# Tags:
+#   manual: only protocol_dolt_test's input, never a build target of its
+#     own. `bazel test //...` in every lane still builds it through
+#     protocol_dolt_test (a test tag filter does not stop the build).
+go_test_race_off(
+    name = "protocol_race_off",
+    tags = ["manual"],
+    test = ":protocol_test",
+)
+
+# protocol_test as the retired "Contract corpus" job ran it (non-race, like
+# the job; see protocol_race_off), on the dolt-server lane: TestMain's server is a
+# local `dolt sql-server` child of the test process, and
+# BEADS_PROTOCOL_REQUIRE_DOLT=1 turns a server that cannot start into a
+# failure, so the golden and double-run determinism tests cannot skip. It
+# repeats protocol_test's `env`.
+#
+# Tags:
+#   dolt-server: starts hermetic dolt sql-servers from the pinned dolt in the
+#     test wrapper's runfiles (BEADS_TEST_DOLT_SERVER=local); excluded from
+#     --config=prcore/ci, selected by --config=doltserver. Runs remotely: no
+#     docker, and a missing server fails (REQUIRE=1) instead of skipping, so
+#     a cached pass is as good as a fresh one.
+sh_test(
+    name = "protocol_dolt_test",
+    size = "large",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :protocol_race_off)"],
+    data = [
+        ":protocol_race_off",
+        "//cmd/bd:bd_for_tests",
+    ],
+    env = {
+        "BEADS_PROTOCOL_REQUIRE_DOLT": "1",
+        "BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)",
+        "BEADS_TEST_DOLT_SERVER": "local",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+        "GOMAXPROCS": "4",
+    },
+    shard_count = 8,
+    tags = ["dolt-server"],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

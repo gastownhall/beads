@@ -83,8 +83,7 @@ func TestContextRoutesNameOneWorkspaceTheSameWay(t *testing.T) {
 			}
 			t.Chdir(dir)
 			t.Setenv("BEADS_DIR", beadsDir)
-			beads.ResetCaches()
-			t.Cleanup(beads.ResetCaches)
+			resetRepoCachesForTest(t)
 
 			provider, err := contextinfo.NewContextProvider(dir, Version).ContextUseCase().GetContextInfo(t.Context())
 			if err != nil {

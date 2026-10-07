@@ -94,33 +94,28 @@ func proxiedIssueReader() (issueops.Reader, error) {
 func runShowProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
 	in := gatherShowProxiedInput(cmd, args)
 
-	if in.watchMode {
-		// Defense in depth, like create's --repo fallback: the pre-provider
-		// gate refuses `show --watch` first. Typed so all three refusals render
-		// identically if one ever becomes reachable.
-		return HandleProxyCapabilityError(AssertProxyCommandCapability("show", ProxyModeProxied, ProxyCapWatch))
-	}
-
 	uw, err := proxiedOpenReadUOW(ctx)
 	if err != nil {
 		return err
 	}
+
+	if err := resolveShowProxiedIDs(ctx, uw, in); err != nil {
+		uw.Close(ctx)
+		return err
+	}
+
+	// Same precedence as the direct route: --as-of answers a point-in-time
+	// read, which has nothing to watch.
+	if in.watchMode && in.asOfRef == "" {
+		// The watch opens a fresh unit of work per poll; holding this one
+		// would pin a transaction for as long as the user watches.
+		uw.Close(ctx)
+		if len(in.ids) != 1 {
+			return HandleErrorRespectJSON("watch mode requires exactly one issue ID")
+		}
+		return runIssueWatch(ctx, proxiedIssueWatchSource(in))
+	}
 	defer uw.Close(ctx)
-
-	if in.currentMode {
-		if len(in.ids) > 0 {
-			return HandleErrorRespectJSON("--current cannot be combined with explicit issue IDs")
-		}
-		currentID := resolveCurrentIssueIDProxied(ctx, uw)
-		if currentID == "" {
-			return HandleErrorRespectJSON("no current issue found (no in-progress, hooked, or recently touched issues)")
-		}
-		in.ids = []string{currentID}
-	}
-
-	if len(in.ids) == 0 {
-		return HandleErrorRespectJSON("at least one issue ID is required (use positional args, --id flag, or --current)")
-	}
 
 	switch {
 	case in.asOfRef != "":
@@ -137,6 +132,26 @@ func runShowProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 	return nil
 }
 
+// resolveShowProxiedIDs turns --current into an explicit id and rejects an
+// empty id list, the same checks the direct route makes before dispatching.
+func resolveShowProxiedIDs(ctx context.Context, uw uow.UnitOfWork, in *showProxiedInput) error {
+	if in.currentMode {
+		if len(in.ids) > 0 {
+			return HandleErrorRespectJSON("--current cannot be combined with explicit issue IDs")
+		}
+		currentID := resolveCurrentIssueIDProxied(ctx, uw)
+		if currentID == "" {
+			return HandleErrorRespectJSON("no current issue found (no in-progress, hooked, or recently touched issues)")
+		}
+		in.ids = []string{currentID}
+	}
+
+	if len(in.ids) == 0 {
+		return HandleErrorRespectJSON("at least one issue ID is required (use positional args, --id flag, or --current)")
+	}
+	return nil
+}
+
 // proxiedListDeps and proxiedGetComments stay CLI-local: they feed the
 // terminal rendering below, which is presentation, not the shared detail
 // shape. The domain-shaped reads live in internal/workapi.
@@ -145,6 +160,31 @@ func proxiedListDeps(ctx context.Context, uw uow.UnitOfWork, id string, isWisp b
 		return uw.DependencyUseCase().ListWispWithIssueMetadata(ctx, id, filter)
 	}
 	return uw.DependencyUseCase().ListWithIssueMetadata(ctx, id, filter)
+}
+
+// proxiedDepCounter adapts the detail source's dependency aggregates onto
+// unresolvableDepCounter, which the direct route satisfies with the store and
+// which therefore carries no isWisp flag: the store seam resolves that routing
+// internally, while the domain use cases behind a proxied unit of work are
+// per-table and have to be told which side to read.
+//
+// The two queries are the same arithmetic either way — CountDependencyEdgesInTx
+// counts `dependencies` plus `wisp_dependencies` with no join to `issues`,
+// while the listing behind proxiedListDeps runs the very
+// GetDependenciesWithMetadataInTx / GetDependentsWithMetadataInTx the direct
+// route runs, so it drops the same unrenderable far ends. The difference
+// therefore means here exactly what it means there.
+type proxiedDepCounter struct {
+	src    workapi.DetailSource
+	isWisp bool
+}
+
+func (c proxiedDepCounter) CountDependencies(ctx context.Context, id string) (int64, error) {
+	return c.src.CountDependencies(ctx, id, c.isWisp)
+}
+
+func (c proxiedDepCounter) CountDependents(ctx context.Context, id string) (int64, error) {
+	return c.src.CountDependents(ctx, id, c.isWisp)
 }
 
 func proxiedGetComments(ctx context.Context, uw uow.UnitOfWork, id string, isWisp bool) ([]*types.Comment, error) {
@@ -507,9 +547,10 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 
 	// A READ on an ALTERNATE view. `bd show`'s detail view is on
 	// issueops.Reader on both routes and gets its labels hydrated there; this
-	// renderer serves --refs, --children, --thread and --as-of, which answer
-	// with shapes the Reader contract does not describe, from a unit of work
-	// the caller already holds and has already read the issue from. Asking the
+	// renderer serves the text views the Reader contract does not describe —
+	// --refs, --children, --thread, --as-of, and every render of --watch
+	// (show_proxied_watch.go) — from a unit of work the caller already holds
+	// and has already read the issue from. Asking the
 	// role here would open a second transaction to re-fetch a row this function
 	// was handed. Alternate views reaching roles of their own is the follow-up
 	// (ga-2ltro.12).
@@ -529,18 +570,39 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 
 	relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
 
-	depsWithMeta, _ := proxiedListDeps(ctx, uw, issue.ID, isWisp, domain.DepListFilter{Direction: domain.DepDirectionOut})
+	// Counts first — see readDepCounts for why the order matters.
+	depCountsSnapshot := readDepCounts(ctx, proxiedDepCounter{src: workapi.NewUOWDetailSource(uw), isWisp: isWisp}, issue.ID)
+
+	// The errors are KEPT, not discarded: rendering stays best effort, but a
+	// FAILED listing and a SHORT one both leave the slice empty, and only the
+	// second is an unresolvable edge.
+	depsWithMeta, depsErr := proxiedListDeps(ctx, uw, issue.ID, isWisp, domain.DepListFilter{Direction: domain.DepDirectionOut})
 	for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
 		printDepSection(sec)
 	}
 
-	dependentsWithMeta, _ := proxiedListDeps(ctx, uw, issue.ID, isWisp, domain.DepListFilter{Direction: domain.DepDirectionIn})
+	dependentsWithMeta, dependentsErr := proxiedListDeps(ctx, uw, issue.ID, isWisp, domain.DepListFilter{Direction: domain.DepDirectionIn})
 	for _, sec := range groupDepSections(dependentsWithMeta, false, relatedSeen) {
 		printDepSection(sec)
 		if sec.Type == types.DepParentChild && issue.IssueType == types.TypeEpic {
 			printEpicChildProgress(sec.Deps)
 		}
 	}
+
+	// The THIRD text render of `bd show`, and the one the first cut of be-lpi
+	// missed. usesProxiedServer() returns at show.go:45 before any of the
+	// direct-path code, and runShowProxiedDefault binds the shared
+	// issueops.Reader — hence BuildIssueDetails, hence
+	// unresolvable_dependencies — only `if jsonOutput && !in.shortMode`, so
+	// plain text falls through to here. Without this call a proxied
+	// `bd show <id>` still renders a cross-repo or `external:` dependency as
+	// no dependency at all: the exact symptom this change exists to remove,
+	// surviving on the route a server-backed repo actually uses. The
+	// precedent this design follows covers both of its own routes the same
+	// way — warnDroppedDepEdges at dep.go:1148 and dep_proxied_server.go:457.
+	warnUnresolvableDepEdges(issue.ID, depCountsSnapshot,
+		depListing{rows: len(depsWithMeta), err: depsErr},
+		depListing{rows: len(dependentsWithMeta), err: dependentsErr})
 
 	printRelatedSection(relatedSeen)
 

@@ -50,7 +50,7 @@ if [ -n "${SMOKE_VERSIONS:-}" ]; then
     # Run ourselves once per version, collecting exit codes
     OVERALL_FAIL=0
     for _ver in $SMOKE_VERSIONS; do
-        if ! CANDIDATE_BIN="${CANDIDATE_BIN:-}" "$0" "$_ver"; then
+        if ! SMOKE_VERSIONS= CANDIDATE_BIN="${CANDIDATE_BIN:-}" "$0" "$_ver"; then
             OVERALL_FAIL=1
         fi
     done
@@ -103,6 +103,17 @@ case "$ARCH" in
 esac
 
 get_previous_binary() {
+    # PREV_BIN (set by //tests/upgrade_smoke's targets) is the previous
+    # release already pinned and sha256-verified against the release catalog,
+    # so nothing is downloaded; it must report PREV_VERSION.
+    if [ -n "${PREV_BIN:-}" ]; then
+        if ! "$PREV_BIN" version 2>/dev/null | grep -qF " ${PREV_VER_BARE} "; then
+            echo -e "${RED}PREV_BIN=${PREV_BIN} does not report ${PREV_VERSION}${NC}" >&2
+            exit 1
+        fi
+        echo "$PREV_BIN"
+        return
+    fi
     local cached="$CACHE_DIR/bd-${PREV_VER_BARE}"
     if [ -x "$cached" ]; then
         echo "$cached"

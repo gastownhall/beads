@@ -267,11 +267,38 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 		}
 	}
 
-	// Server is running and peers are configured - check if remotesapi port is accessible.
-	// Read port from config instead of hardcoding 8080.
-	remotesAPIPort := configfile.DefaultDoltRemotesAPIPort
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
-		remotesAPIPort = cfg.GetDoltRemotesAPIPort()
+	// Server is running and peers are configured - check if remotesapi port is
+	// accessible.
+	return checkRemotesAPIListener(beadsDir, serverState.PID)
+}
+
+// checkRemotesAPIListener probes the remotesapi listener of a running server.
+// It resolves the port through the same chain the launcher uses
+// (BEADS_DOLT_REMOTESAPI_PORT -> user-global dolt.remotesapi-port for a shared
+// server -> the per-project configfile), not configfile alone: reading
+// configfile alone diagnoses port 8080 while a shared server launched from the
+// user-global key is listening somewhere else.
+//
+// The mode is classified once because it also decides the remedy. bd opens a
+// remotesapi listener only for the shared server it launches, so restarting is
+// the fix there; restarting a per-project server reproduces the same error.
+func checkRemotesAPIListener(beadsDir string, pid int) DoctorCheck {
+	sharedMode := doltserver.IsSharedServerModeForDir(beadsDir)
+	remotesAPIPort := doltserver.ResolveRemotesAPIPortForMode(beadsDir, sharedMode)
+	if remotesAPIPort <= 0 {
+		// Resolved zero means no listener was requested. Dialing port 0 would
+		// report a spurious federation error for a correct configuration.
+		detail := "The remotesapi port resolves to 0, so no remotesapi listener is expected."
+		if sharedMode {
+			detail = "No remotesapi port is configured, so the shared dolt sql-server does not open a remotesapi listener."
+		}
+		return DoctorCheck{
+			Name:     "Federation remotesapi",
+			Status:   StatusOK,
+			Message:  "N/A (remotesapi listener disabled)",
+			Detail:   detail,
+			Category: CategoryFederation,
+		}
 	}
 	host := "127.0.0.1"
 
@@ -281,12 +308,16 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 	// greeting to drain here.
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
+		fix := fmt.Sprintf("bd opens a remotesapi listener only for the shared server: run dolt sql-server with --remotesapi-port %d, or enable dolt.shared-server and set dolt.remotesapi-port in the user-global config", remotesAPIPort)
+		if sharedMode {
+			fix = "Restart the shared server so it picks up the resolved remotesapi port: bd dolt stop && bd dolt start"
+		}
 		return DoctorCheck{
 			Name:     "Federation remotesapi",
 			Status:   StatusError,
 			Message:  fmt.Sprintf("remotesapi port %d not accessible", remotesAPIPort),
-			Detail:   fmt.Sprintf("Server running (PID %d) but remotesapi port unreachable: %v", serverState.PID, err),
-			Fix:      "Check if dolt sql-server is running with --remotesapi-port flag",
+			Detail:   fmt.Sprintf("Server running (PID %d) but remotesapi port unreachable: %v", pid, err),
+			Fix:      fix,
 			Category: CategoryFederation,
 		}
 	}

@@ -1,0 +1,324 @@
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load(":dolt.bzl", "hermetic_bin")
+load(":release_cross.bzl", "release_cross_build", "string_list_flag")
+
+# Platforms with a pinned dolt release; elsewhere (e.g. windows) the hermetic
+# test wrapper is skipped by `bazel build //...` instead of failing analysis.
+_DOLT_PLATFORMS_ONLY = select({
+    ":darwin_amd64": [],
+    ":darwin_arm64": [],
+    ":linux_amd64": [],
+    ":linux_arm64": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
+# sh_test src for a second test target over an existing go_test binary (see
+# the script header), e.g. //cmd/bd/doctor/fix:fix_dolt_test.
+exports_files(
+    ["go_test_variant.sh"],
+    visibility = ["//visibility:public"],
+)
+
+# sh_test src that runs one Bazel shard of an existing go_test binary through
+# a PR Risk manifest shard script (see the script header), e.g.
+# //cmd/bd:bd_embedded_test.
+exports_files(
+    ["go_test_manifest_shard.sh"],
+    visibility = ["//visibility:public"],
+)
+
+# sh_test src that runs an existing go_test binary with no network but
+# loopback (see the script header), e.g. //cmd/bd:bd_managed_local_test.
+exports_files(
+    ["go_test_offline.sh"],
+    visibility = ["//visibility:public"],
+)
+
+# Wraps every test process (`test --run_under` in .bazelrc) with the isolated
+# HOME/XDG/Dolt/git environment that scripts/ci/lib/test-env.sh gives `go test`.
+# Bazel merges the run_under target's runfiles into every test's runfiles, so
+# each test action declares the pinned dolt as an input and the wrapper puts
+# it first on PATH.
+sh_binary(
+    name = "test_env",
+    srcs = ["test_env.sh"],
+    data = [":hermetic_bin"],
+    target_compatible_with = _DOLT_PLATFORMS_ONLY,
+    visibility = ["//visibility:public"],
+)
+
+# The dolt tests actually run (via test_env) reports DOLT_VERSION. Guards
+# against a stale download (or a mismatched digest table) the text-only pin
+# tests in //scripts cannot see.
+sh_test(
+    name = "dolt_version_test",
+    srcs = ["dolt_version_test.sh"],
+    data = ["dolt.bzl"],
+    target_compatible_with = _DOLT_PLATFORMS_ONLY,
+)
+
+# PATH directory holding the hermetic host tools, at
+# <runfiles>/_main/tools/bazel/hermetic_bin/.
+hermetic_bin(
+    name = "hermetic_bin",
+    target_compatible_with = _DOLT_PLATFORMS_ONLY,
+    tools = {":dolt": "dolt"},
+)
+
+# The pinned Dolt CLI (tools/bazel/dolt.bzl) for the platform tests run on.
+alias(
+    name = "dolt",
+    actual = select(
+        {
+            ":darwin_amd64": "@dolt_darwin_amd64//:dolt",
+            ":darwin_arm64": "@dolt_darwin_arm64//:dolt",
+            ":linux_amd64": "@dolt_linux_amd64//:dolt",
+            ":linux_arm64": "@dolt_linux_arm64//:dolt",
+            "//conditions:default": ":no_pinned_dolt",
+        },
+    ),
+    visibility = ["//visibility:public"],
+)
+
+# Stand-in on platforms without a pinned dolt release: incompatible, so
+# `bazel build //...` skips its dependents there instead of failing analysis.
+filegroup(
+    name = "no_pinned_dolt",
+    target_compatible_with = ["@platforms//:incompatible"],
+)
+
+[
+    config_setting(
+        name = "{}_{}".format(os, cpu),
+        constraint_values = [
+            "@platforms//os:" + ("osx" if os == "darwin" else os),
+            "@platforms//cpu:" + ("x86_64" if cpu == "amd64" else "aarch64"),
+        ],
+    )
+    for os in ("darwin", "linux")
+    for cpu in ("amd64", "arm64")
+]
+
+# On when rules_go builds pure Go (--@rules_go//go/config:pure, as
+# --config=pure and :release_cross's transition set it): cgo is off.
+config_setting(
+    name = "pure",
+    flag_values = {"@rules_go//go/config:pure": "true"},
+    visibility = ["//:__subpackages__"],
+)
+
+# Bazel compiles gozstd's pure stubs (third_party/patches/gozstd_nocgo.patch)
+# where `go build` with CGO_ENABLED=0 rejects any import of it, so a pure bd
+# that links gozstd still builds. Go binaries keep their function names
+# (pclntab) even when stripped, so this fails the build of a pure bd that
+# links gozstd for whatever platform it targets, without running it:
+# :release_cross builds it for every release platform. "main.main" proves the name table
+# was readable. Pure builds only: a cgo bd links gozstd by design.
+genrule(
+    name = "pure_bd_has_no_cgo_only_deps",
+    srcs = ["//cmd/bd"],
+    outs = ["pure_bd_has_no_cgo_only_deps.txt"],
+    cmd = """
+if grep -qaF 'github.com/dolthub/gozstd.' $<; then
+  echo "$< links github.com/dolthub/gozstd (cgo-only) in a pure build; CGO_ENABLED=0 go build would reject it" >&2
+  exit 1
+fi
+grep -qaF 'main.main' $< || { echo "$<: no Go function names found" >&2; exit 1; }
+echo "no cgo-only deps: $<" > $@
+""",
+    target_compatible_with = select({
+        ":pure": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+# The rules_go platforms (<os>_<arch>) :release_cross builds for.
+# scripts/ci/bazel-release-cross-compile.sh sets it from
+# scripts/ci/release-targets.txt, the single source of truth; empty fails
+# :release_cross's analysis.
+string_list_flag(
+    name = "release_platforms",
+    build_setting_default = [],
+)
+
+# :release_cross (the managed block below) is the release-target
+# cross-compilation: every go_library and go_binary, cgo off, once per
+# platform in :release_platforms, all in one invocation. It is the Bazel
+# form of `CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> go build -tags gms_pure_go
+# ./...` per release target, plus :pure_bd_has_no_cgo_only_deps. Manual: it
+# needs :release_platforms, which `bazel build //...` does not set.
+
+# --- begin release_cross (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+# manual: needs --//tools/bazel:release_platforms (see above).
+release_cross_build(
+    name = "release_cross",
+    tags = ["manual"],
+    targets = [
+        ":pure_bd_has_no_cgo_only_deps",
+        "//:beads",
+        "//backend/conformance:conformance",
+        "//backend:backend",
+        "//beadserrors:beadserrors",
+        "//cmd/bd/doctor/fix:fix",
+        "//cmd/bd/doctor:doctor",
+        "//cmd/bd/protocol:protocol",
+        "//cmd/bd/setup:setup",
+        "//cmd/bd:bd",
+        "//format:format",
+        "//internal/ado:ado",
+        "//internal/atomicfile:atomicfile",
+        "//internal/audit:audit",
+        "//internal/beads:beads",
+        "//internal/ceiling:ceiling",
+        "//internal/compact:compact",
+        "//internal/config:config",
+        "//internal/configfile:configfile",
+        "//internal/creds:creds",
+        "//internal/debug:debug",
+        "//internal/doltremote:doltremote",
+        "//internal/doltserver:doltserver",
+        "//internal/doltversion:doltversion",
+        "//internal/eventsjournal:eventsjournal",
+        "//internal/execenv:execenv",
+        "//internal/fdhygiene:fdhygiene",
+        "//internal/formula/cmd/schemagen:schemagen",
+        "//internal/formula/schemagen:schemagen",
+        "//internal/formula:formula",
+        "//internal/git:git",
+        "//internal/gitenv:gitenv",
+        "//internal/githooksenv:githooksenv",
+        "//internal/github:github",
+        "//internal/gitignore:gitignore",
+        "//internal/gitlab:gitlab",
+        "//internal/gittraceenv:gittraceenv",
+        "//internal/hooks:hooks",
+        "//internal/httpapi/apigen:apigen",
+        "//internal/httpapi/spec:spec",
+        "//internal/httpapi/wireshape/cmd/gendigest:gendigest",
+        "//internal/httpapi/wireshape:wireshape",
+        "//internal/httpapi:httpapi",
+        "//internal/httpclient/encode:encode",
+        "//internal/httpclient/wire:wire",
+        "//internal/httpclient:httpclient",
+        "//internal/idgen:idgen",
+        "//internal/jira:jira",
+        "//internal/linear:linear",
+        "//internal/lockfile:lockfile",
+        "//internal/memoryapi:memoryapi",
+        "//internal/metrics:metrics",
+        "//internal/migration/legacysqlite:legacysqlite",
+        "//internal/migration:migration",
+        "//internal/molecules:molecules",
+        "//internal/notion:notion",
+        "//internal/procid:procid",
+        "//internal/query:query",
+        "//internal/recipes:recipes",
+        "//internal/remotecache:remotecache",
+        "//internal/routing:routing",
+        "//internal/storage/backendnames:backendnames",
+        "//internal/storage/backends:backends",
+        "//internal/storage/batchbench:batchbench",
+        "//internal/storage/batchfixtures:batchfixtures",
+        "//internal/storage/contextinfo:contextinfo",
+        "//internal/storage/createbatchequiv:createbatchequiv",
+        "//internal/storage/dberrors:dberrors",
+        "//internal/storage/dbproxy/identity:identity",
+        "//internal/storage/dbproxy/pidfile:pidfile",
+        "//internal/storage/dbproxy/proxy:proxy",
+        "//internal/storage/dbproxy/server:server",
+        "//internal/storage/dbproxy/util:util",
+        "//internal/storage/depid:depid",
+        "//internal/storage/dolt:dolt",
+        "//internal/storage/doltutil:doltutil",
+        "//internal/storage/domain/db:db",
+        "//internal/storage/domain/fs:fs",
+        "//internal/storage/domain/git:git",
+        "//internal/storage/domain:domain",
+        "//internal/storage/embeddeddolt:embeddeddolt",
+        "//internal/storage/externaldeps:externaldeps",
+        "//internal/storage/fs:fs",
+        "//internal/storage/git:git",
+        "//internal/storage/issueops:issueops",
+        "//internal/storage/journalscan:journalscan",
+        "//internal/storage/kvkeys:kvkeys",
+        "//internal/storage/memoryops:memoryops",
+        "//internal/storage/rowid:rowid",
+        "//internal/storage/schema:schema",
+        "//internal/storage/sqlbuild:sqlbuild",
+        "//internal/storage/sqlclass:sqlclass",
+        "//internal/storage/sqlcount:sqlcount",
+        "//internal/storage/storagecontract:storagecontract",
+        "//internal/storage/uow:uow",
+        "//internal/storage/versioncontrolops:versioncontrolops",
+        "//internal/storage:storage",
+        "//internal/telemetry:telemetry",
+        "//internal/templates/agents:agents",
+        "//internal/templates:templates",
+        "//internal/testutil/bazeltest:bazeltest",
+        "//internal/testutil/credentialcmd:credentialcmd",
+        "//internal/testutil/fixtures:fixtures",
+        "//internal/testutil/integration:integration",
+        "//internal/testutil:testutil",
+        "//internal/timeparsing:timeparsing",
+        "//internal/tracker/conformance:conformance",
+        "//internal/tracker:tracker",
+        "//internal/types:types",
+        "//internal/ui:ui",
+        "//internal/uimd:uimd",
+        "//internal/utils:utils",
+        "//internal/validation:validation",
+        "//internal/versioncheck:versioncheck",
+        "//internal/workapi/storecounter:storecounter",
+        "//internal/workapi/storequerier:storequerier",
+        "//internal/workapi/storereader:storereader",
+        "//internal/workapi/storereadycounter:storereadycounter",
+        "//internal/workapi/storestats:storestats",
+        "//internal/workapi/storeversionreconciler:storeversionreconciler",
+        "//internal/workapi/storeworkspaceconfig:storeworkspaceconfig",
+        "//internal/workapi:workapi",
+        "//internal/workspacegate:workspacegate",
+        "//internal/worktreeremove:worktreeremove",
+        "//issueops:issueops",
+        "//journalops:journalops",
+        "//memoryops:memoryops",
+        "//plugins/beads:beads",
+        "//schema:schema",
+        "//scripts/bench-ready-indexes:bench-ready-indexes",
+        "//scripts/check-versions:check-versions",
+        "//scripts/checkworkflowtags:checkworkflowtags",
+        "//scripts/internal/testbash:testbash",
+        "//scripts/migration-test/catalog:catalog",
+        "//scripts/pr-lint:pr-lint",
+        "//scripts/repro-dolt-hang:repro-dolt-hang",
+        "//scripts/repro-dolt-prod-timeouts:repro-dolt-prod-timeouts",
+        "//scripts/workflowtags:workflowtags",
+        "//test/conformance:conformance",
+        "//tools/docsmint:docsmint",
+    ],
+)
+
+# --- end release_cross ---
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

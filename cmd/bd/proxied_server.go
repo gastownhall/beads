@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/servercfg"
@@ -337,10 +338,108 @@ func renderProxiedServerConfig(port int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append([]byte(managedProxiedServerConfigMarker), body...), nil
+	out := []byte(managedProxiedServerConfigMarker + managedPortRecordLine(port))
+	return append(out, body...), nil
 }
 
 const proxiedServerListenerHost = "127.0.0.1"
+
+// managedPortRecordPrefix starts the comment line, right after the managed
+// marker, that records the listener port Beads chose. The dolt sql-server
+// binds that port only after the proxy child starts it, so another process
+// can take it first; the record lets the child tell a port Beads chose from
+// one an operator set (see managedPortConflictPolicy). The file itself is
+// still never rewritten: a moved port lives only in the proxy child's runtime
+// config (server.RuntimeConfigFileName).
+const managedPortRecordPrefix = "# beads-chosen-listener-port: "
+
+func managedPortRecordLine(port int) string {
+	return fmt.Sprintf("%s%d (Beads chose this port. If another process holds it when the server starts, Beads runs the server on a free port for that run, without editing this file. To pin a port, set listener.port to another value or delete this line.)\n",
+		managedPortRecordPrefix, port)
+}
+
+// renderLegacyProxiedServerConfig is renderProxiedServerConfig as it was
+// before the port record existed: the marker followed directly by the YAML.
+func renderLegacyProxiedServerConfig(port int) ([]byte, error) {
+	body, err := renderProxiedServerConfig(port)
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(managedProxiedServerConfigMarker), body[len(managedProxiedServerConfigMarker)+len(managedPortRecordLine(port)):]...), nil
+}
+
+// managedPortConflictPolicy is the managed-local backend's
+// server.PortConflictPolicy. It lets the proxy child run the dolt sql-server
+// on a free port (through a runtime config; configPath is never modified)
+// only when configPath's listener.port is a port Beads chose:
+//   - the file carries the managed marker and the port record, and
+//     listener.port still equals the recorded port; or
+//   - the file is byte-identical to a config Beads generated before the
+//     record existed (any hand edit makes the bytes differ).
+//
+// Anything else (an operator's own config, a hand-set port, a hand-edited
+// legacy config) is pinned, and the error says what to do.
+func managedPortConflictPolicy(configPath string, inUsePort int) error {
+	body, err := os.ReadFile(configPath) // #nosec G304 -- the proxy child's own --config path
+	if err != nil {
+		return fmt.Errorf("read %s: %w", configPath, err)
+	}
+	remedy := fmt.Sprintf("free port %d, or set listener.port in %s to a free port", inUsePort, configPath)
+	if !isManagedProxiedServerConfig(body) {
+		return fmt.Errorf("%s is not a Beads-generated config, so its port is pinned; %s", configPath, remedy)
+	}
+	remedy += ", or delete " + configPath + " so Beads regenerates it"
+	cfg, err := servercfg.NewYamlConfig(body)
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", configPath, err)
+	}
+	current := cfg.Port()
+	if current != inUsePort {
+		return fmt.Errorf("%s: listener.port is %d, not the in-use port %d; %s", configPath, current, inUsePort, remedy)
+	}
+	if recorded, _, ok := cutManagedPortRecord(body[len(managedProxiedServerConfigMarker):]); ok {
+		if current != recorded {
+			return fmt.Errorf("%s: listener.port %d was set by hand (Beads chose %d), so it is pinned; %s", configPath, current, recorded, remedy)
+		}
+		return nil
+	}
+	legacy, err := renderLegacyProxiedServerConfig(current)
+	if err != nil {
+		return fmt.Errorf("render legacy config: %w", err)
+	}
+	if bytes.Equal(body, legacy) {
+		return nil
+	}
+	return fmt.Errorf("%s was edited by hand and has no %q record, so its listener.port is pinned; %s",
+		configPath, strings.TrimSpace(managedPortRecordPrefix), remedy)
+}
+
+// cutManagedPortRecord splits the port record line off the front of rest
+// (the managed config after its marker) and returns the recorded port and
+// the remaining YAML. The digits must end at a space or the line end and
+// name a valid TCP port.
+func cutManagedPortRecord(rest []byte) (port int, yamlBody []byte, ok bool) {
+	if !bytes.HasPrefix(rest, []byte(managedPortRecordPrefix)) {
+		return 0, nil, false
+	}
+	line, after, found := bytes.Cut(rest, []byte("\n"))
+	if !found {
+		return 0, nil, false
+	}
+	digits := line[len(managedPortRecordPrefix):]
+	end := 0
+	for end < len(digits) && digits[end] >= '0' && digits[end] <= '9' {
+		end++
+	}
+	if end == 0 || (end < len(digits) && digits[end] != ' ') {
+		return 0, nil, false
+	}
+	port, err := strconv.Atoi(string(digits[:end]))
+	if err != nil || port < 1 || port > 65535 {
+		return 0, nil, false
+	}
+	return port, after, true
+}
 
 // TODO: this needs to return a dolt server uow provider as the global
 // uow provider used by all commands

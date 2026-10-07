@@ -12,10 +12,30 @@ separate from Git branch commits.
 All worktrees in the same repository use the same beads workspace unless you
 override discovery with `BEADS_DIR`.
 
-Startup Git discovery probes for every `bd` command scrub inherited Git routing
-variables such as `GIT_DIR` and `GIT_WORK_TREE` from their subprocess environment.
-Clearing those variables from the `bd` process environment applies only to
-`bd worktree` commands.
+Startup *config* discovery — the `rev-parse` probe in `internal/config`'s
+`gitDirsForRepo`, which locates a linked worktree's shared `.beads` config —
+scrubs inherited Git routing variables such as `GIT_DIR` and `GIT_WORK_TREE`
+from its subprocess environment whenever it runs, so a routed environment cannot
+point that one lookup at another repository. The scrub is unconditional for that
+probe, but the probe is a fallback, not a per-command step: it runs only when
+nothing earlier in startup has already resolved a config path
+(`internal/config/config.go`), so an ancestor `.beads/config.yaml` or an explicit
+`BEADS_DIR` short-circuits it. It is a single probe, not a general guarantee:
+other startup Git probes still honor inherited routing, including `internal/git`'s
+process-cached repository context backing repository-root and hooks-directory
+lookups and the `.beads` database discovery probes in `internal/beads`, so those
+variables can still select which workspace `bd` opens. Scrubbing also drops any
+inherited `GIT_CEILING_DIRECTORIES`, which *widens* upward discovery rather than
+narrowing it: the explicit working directory fixes where that probe's search
+starts, not where it stops, so the probe can select a containing parent
+repository above that directory. Clearing those variables from the `bd` process
+environment applies only to `bd worktree` commands.
+
+`GIT_CEILING_DIRECTORIES` is scrubbed along with the redirects. That removes a
+*bound* rather than a redirect, so discovery from the working directory is
+widened, not narrowed: run in a directory that is not itself a repository, `bd`
+can select a containing parent repository that an inherited ceiling would have
+hidden.
 
 ```
 project/

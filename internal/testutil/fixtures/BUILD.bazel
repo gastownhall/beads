@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "fixtures",
@@ -10,3 +10,40 @@ go_library(
         "//internal/types",
     ],
 )
+
+# integration-only: fixtures_test.go is `//go:build integration`, so outside
+# --config=integration this target has no tests; the tag keeps it out of
+# --config=prcore/ci (hand-written, gazelle keeps it).
+go_test(
+    name = "fixtures_test",
+    srcs = ["fixtures_test.go"],
+    embed = [":fixtures"],
+    tags = ["integration-only"],
+    deps = [
+        "//internal/storage/dolt",
+        "//internal/testutil",
+        "//internal/types",
+    ],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // e2eDoctorResult mirrors the JSON output struct from cmd/bd/doctor.go.
@@ -88,7 +89,9 @@ func testMainInner(m *testing.M) int {
 	}
 
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
-		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
+		if testutil.DoltUnavailableForTestMain(err) {
+			return 1
+		}
 	} else {
 		defer testutil.TerminateDoltContainer()
 		port := testutil.DoltContainerPortInt()
@@ -169,6 +172,12 @@ func buildTestBD(t *testing.T) string {
 	t.Helper()
 
 	testBDOnce.Do(func() {
+		// Under Bazel the binary is injected (//cmd/bd:bd_for_tests); there is
+		// no toolchain or module tree to build from. Plain go test is unchanged.
+		if bazeltest.IsBazel() {
+			testBDPath, testBDErr = bazeltest.PrebuiltBD()
+			return
+		}
 		bdBinary := "bd-test"
 		if runtime.GOOS == "windows" {
 			bdBinary = "bd-test.exe"
@@ -210,6 +219,9 @@ func buildTestBD(t *testing.T) string {
 		}
 	})
 
+	if testBDErr != nil && bazeltest.IsBazel() {
+		t.Fatalf("bd binary for tests: %v", testBDErr) // a wiring bug, never a skip
+	}
 	if testBDErr != nil {
 		t.Skipf("skipping E2E test: failed to build bd binary: %v", testBDErr)
 	}

@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/steveyegge/beads/internal/gitenv"
+	"github.com/stretchr/testify/require"
 )
 
 // TestSetupGitExclude_Worktree verifies that setupGitExclude writes to the main
@@ -144,6 +146,40 @@ func TestSetupForkExclude_Worktree(t *testing.T) {
 		if strings.Contains(string(worktreeContent), ".beads/") {
 			t.Errorf("worktree exclude should not have .beads/ pattern (it was written to wrong location)")
 		}
+	}
+}
+
+// TestSetupForkExcludeIgnoresInheritedGitRouting pins the fork exclude writer to the repository the
+// command selected. detectForkSetup scrubs inherited Git routing, so under an inherited GIT_DIR bd
+// detects the fork in the selected repository; an unscrubbed writer would then append the beads
+// patterns to the inherited repository's .git/info/exclude instead — a write into an unrelated
+// repository, performed automatically in non-interactive mode.
+func TestSetupForkExcludeIgnoresInheritedGitRouting(t *testing.T) {
+	selected := newGitRepo(t)
+	foreign := newGitRepo(t)
+	foreignExcludePath := filepath.Join(foreign, ".git", "info", "exclude")
+	foreignBefore, _ := os.ReadFile(foreignExcludePath) // may not exist yet
+
+	t.Chdir(selected)
+	t.Setenv("GIT_DIR", filepath.Join(foreign, ".git"))
+
+	if err := setupForkExclude(false); err != nil {
+		t.Fatalf("setupForkExclude failed: %v", err)
+	}
+
+	selectedExcludePath := filepath.Join(selected, ".git", "info", "exclude")
+	content, err := os.ReadFile(selectedExcludePath)
+	if err != nil {
+		t.Fatalf("selected repo exclude %s not written: %v", selectedExcludePath, err)
+	}
+	if !strings.Contains(string(content), ".beads/") {
+		t.Errorf("selected repo exclude missing .beads/ pattern: %s", content)
+	}
+
+	foreignAfter, _ := os.ReadFile(foreignExcludePath)
+	if string(foreignAfter) != string(foreignBefore) {
+		t.Errorf("inherited GIT_DIR repository was written: %s changed from %q to %q",
+			foreignExcludePath, foreignBefore, foreignAfter)
 	}
 }
 
@@ -583,6 +619,77 @@ func TestAddExcludePatternsCreatesMissingFile(t *testing.T) {
 	const want = "# managed\n.beads/\n"
 	if got, err := os.ReadFile(path); err != nil || string(got) != want {
 		t.Errorf("created exclude = %q, want %q: %v", got, want, err)
+	}
+}
+
+func initExcludeGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "fixture git %v: %s", args, out)
+	return strings.TrimSpace(string(out))
+}
+
+func newInitExcludeRepos(t *testing.T) (worktree, decoy, commonExclude, privateExclude string) {
+	t.Helper()
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			// Setenv registers restoration; Unsetenv then makes the key absent during the test.
+			t.Setenv(key, "")
+			require.NoError(t, os.Unsetenv(key))
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	mainDir, decoy := t.TempDir(), t.TempDir()
+	for _, dir := range []string{mainDir, decoy} {
+		initExcludeGit(t, dir, "init", "--quiet")
+		for key, value := range map[string]string{"user.name": "Fixture", "user.email": "fixture@example.test", "commit.gpgSign": "false", "core.hooksPath": filepath.Join(home, "hooks")} {
+			initExcludeGit(t, dir, "config", "--local", key, value)
+		}
+		require.NoError(t, os.WriteFile(filepath.Join(dir, ".git", "info", "exclude"), []byte("# preserved\r\n"), 0600))
+	}
+	initExcludeGit(t, mainDir, "commit", "--allow-empty", "-m", "fixture")
+	worktree = filepath.Join(t.TempDir(), "selected worktree")
+	initExcludeGit(t, mainDir, "worktree", "add", "--quiet", "-b", "selected", worktree)
+	commonExclude = filepath.Join(mainDir, ".git", "info", "exclude")
+	privateExclude = filepath.Join(initExcludeGit(t, worktree, "rev-parse", "--absolute-git-dir"), "info", "exclude")
+	t.Chdir(decoy)
+	return worktree, decoy, commonExclude, privateExclude
+}
+
+func TestGitExcludeExplicitPathSelectsCommonDir(t *testing.T) {
+	for _, key := range []string{"GIT_DIR", "GIT_COMMON_DIR"} {
+		t.Run(key, func(t *testing.T) {
+			worktree, decoy, commonExclude, privateExclude := newInitExcludeRepos(t)
+			t.Setenv(key, filepath.Join(decoy, ".git"))
+			t.Setenv("GIT_WORK_TREE", decoy)
+			// The empty-path API resolves against the current directory, which is the
+			// decoy here; the probe scrubs inherited routing, so that selection comes
+			// from the working directory rather than from the key set above.
+			inherited, err := resolveGitExcludePath("")
+			require.NoError(t, err)
+			got, err := os.Stat(inherited)
+			require.NoError(t, err)
+			want, err := os.Stat(filepath.Join(decoy, ".git", "info", "exclude"))
+			require.NoError(t, err)
+			require.True(t, os.SameFile(got, want))
+			added, _, err := addExcludePatterns(worktree, "# selected", []string{".beads/"})
+			require.NoError(t, err)
+			require.Equal(t, []string{".beads/"}, added)
+			data, err := os.ReadFile(commonExclude)
+			require.NoError(t, err)
+			require.Equal(t, "# preserved\r\n\r\n# selected\r\n.beads/\r\n", string(data))
+			data, err = os.ReadFile(filepath.Join(decoy, ".git", "info", "exclude"))
+			require.NoError(t, err)
+			require.Equal(t, "# preserved\r\n", string(data))
+			_, err = os.Stat(privateExclude)
+			require.ErrorIs(t, err, os.ErrNotExist)
+		})
 	}
 }
 

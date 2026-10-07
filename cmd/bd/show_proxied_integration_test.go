@@ -430,6 +430,58 @@ func TestProxiedServerShow2(t *testing.T) {
 		}
 	})
 
+	// be-lpi ROUTE COVERAGE. `bd show` has three text renders and this is the
+	// one a server-backed repo actually takes: usesProxiedServer() returns at
+	// show.go:45 before any of the direct path, and the shared issueops.Reader
+	// that carries unresolvable_dependencies is bound only for --json, so
+	// without an explicit call in proxiedRenderIssue plain text renders a
+	// cross-repo edge as no dependency at all — the exact symptom the change
+	// exists to remove, surviving on the route most exposed to it. The
+	// precedent this design follows, warnDroppedDepEdges, covers both of its
+	// own routes (dep.go:1148 and dep_proxied_server.go:457).
+	t.Run("show_discloses_unresolvable_dep_edges", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sud")
+		subject := bdProxiedCreate(t, bd, p.dir, "Subject with a cross-repo edge", "--type", "task")
+		bdProxiedDep(t, bd, p.dir, "add", subject.ID, "liveop-kmf", "--type", "blocks")
+
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "show", subject.ID)
+		if err != nil {
+			t.Fatalf("bd show failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if !strings.Contains(stderr, "no row in this database") {
+			t.Errorf("proxied bd show did not disclose the unrenderable edge:\nstderr:\n%s", stderr)
+		}
+		// Same contract as the direct route: stdout stays byte-identical for
+		// scripts, so assert on the streams apart or this passes on a build
+		// that prints the notice in the wrong place.
+		if strings.Contains(stdout, "no row in this database") {
+			t.Errorf("the notice reached stdout, which must stay unchanged:\n%s", stdout)
+		}
+	})
+
+	// The negative control for the case above, and the load-bearing half:
+	// without it every assertion there is satisfied by a build that warns
+	// unconditionally.
+	t.Run("show_stays_silent_on_a_fully_local_edge", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sul")
+		blocker := bdProxiedCreate(t, bd, p.dir, "Local blocker", "--type", "task")
+		subject := bdProxiedCreate(t, bd, p.dir, "Fully local subject", "--type", "task")
+		bdProxiedDep(t, bd, p.dir, "add", subject.ID, blocker.ID, "--type", "blocks")
+
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "show", subject.ID)
+		if err != nil {
+			t.Fatalf("bd show failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if strings.Contains(stderr, "no row in this database") {
+			t.Errorf("proxied bd show warned about a fully local edge:\nstderr:\n%s", stderr)
+		}
+		if !strings.Contains(stdout, blocker.ID) {
+			t.Errorf("expected the local dependency rendered on stdout:\n%s", stdout)
+		}
+	})
+
 	t.Run("show_not_found_json_envelope", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "snj")
@@ -905,17 +957,6 @@ func TestProxiedServerShow3(t *testing.T) {
 		combined := stdout + stderr
 		if !strings.Contains(combined, "no current issue found") {
 			t.Errorf("expected 'no current issue found' error, got: %s", combined)
-		}
-	})
-
-	t.Run("show_watch_rejected_in_proxied_mode", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "swt")
-		issue := bdProxiedCreate(t, bd, p.dir, "Watch test", "--type", "task")
-		stdout, stderr := bdProxiedShowFail(t, bd, p.dir, issue.ID, "--watch")
-		combined := stdout + stderr
-		if !strings.Contains(combined, "watch mode not supported in proxied-server mode") {
-			t.Errorf("expected proxied watch-rejection error, got: %s", combined)
 		}
 	})
 

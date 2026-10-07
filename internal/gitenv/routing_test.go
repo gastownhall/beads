@@ -2,8 +2,11 @@ package gitenv
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -45,6 +48,130 @@ func TestScrubRoutingForOSUsesHostKeySemantics(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestScrubRoutingPreservesConfigSuppression(t *testing.T) {
+	for _, goos := range []string{"linux", "windows"} {
+		for _, tc := range []struct {
+			entry          string
+			linux, windows bool
+		}{
+			{"GIT_CONFIG_NOSYSTEM=1", true, true},
+			{"GIT_CONFIG_NOSYSTEM=false", true, true},
+			{"GIT_CONFIG_NOSYSTEM=invalid", true, true},
+			{"GIT_CONFIG_NOSYSTEM", false, false},
+			{"GIT_CONFIG_GLOBAL=/dev/null", true, true},
+			{"GIT_CONFIG_SYSTEM=/dev/null", true, true},
+			{"GIT_CONFIG_GLOBAL=nUl", false, true},
+			{"git_config_system=NUL", true, true}, // Lowercase is a distinct POSIX key.
+			{"GIT_CONFIG_GLOBAL=", false, false},
+			{"GIT_CONFIG_SYSTEM=custom.conf", false, false},
+			{"GIT_CONFIG_GLOBAL=custom.conf", false, false},
+			{"GIT_CONFIG_COUNT=1", false, false},
+		} {
+			t.Run(goos+"/"+tc.entry, func(t *testing.T) {
+				input := []string{tc.entry, "GIT_DIR=decoy", "KEEP=value"}
+				want := []string{"KEEP=value"}
+				if (goos == "linux" && tc.linux) || (goos == "windows" && tc.windows) {
+					want = append([]string{tc.entry}, want...)
+				}
+				if got := ScrubRoutingForOS(input, goos); !reflect.DeepEqual(got, want) || input[0] != tc.entry {
+					t.Fatalf("filtered environment = %q, want %q; input %q", got, want, input)
+				}
+			})
+		}
+	}
+}
+
+// TestScrubRoutingAndSuppressionDropsSuppression is the inverse of the table
+// above: every entry ScrubRouting preserves as suppression must lose its effect
+// on the authority boundary, because a caller who can blind an authority lookup
+// can steer its miss-handler. Non-routing controls still survive both scrubs.
+func TestScrubRoutingAndSuppressionDropsSuppression(t *testing.T) {
+	for _, goos := range []string{"linux", "windows"} {
+		for _, entry := range []string{
+			"GIT_CONFIG_NOSYSTEM=1",
+			"GIT_CONFIG_NOSYSTEM=false",
+			"GIT_CONFIG_NOSYSTEM=invalid",
+			"GIT_CONFIG_GLOBAL=/dev/null",
+			"GIT_CONFIG_SYSTEM=/dev/null",
+			"GIT_CONFIG_GLOBAL=custom.conf",
+			"GIT_CONFIG_COUNT=1",
+			"GIT_DIR=decoy",
+		} {
+			t.Run(goos+"/"+entry, func(t *testing.T) {
+				input := []string{entry, "GIT_OPTIONAL_LOCKS=1", "KEEP=value"}
+				want := []string{"GIT_OPTIONAL_LOCKS=1", "KEEP=value"}
+				// Lowercase POSIX keys are distinct names, so only the
+				// case-insensitive host drops a folded spelling.
+				if goos == "linux" && strings.HasPrefix(entry, "git_") {
+					want = append([]string{entry}, want...)
+				}
+				got := ScrubRoutingAndSuppressionForOS(input, goos)
+				if !reflect.DeepEqual(got, want) || input[0] != entry {
+					t.Fatalf("filtered environment = %q, want %q; input %q", got, want, input)
+				}
+				// The suppression-preserving scrub must be unaffected.
+				if kept := ScrubRoutingForOS(input, goos); len(kept) < len(got) {
+					t.Fatalf("ScrubRoutingForOS() = %q dropped more than the authority scrub %q", kept, got)
+				}
+			})
+		}
+	}
+}
+
+func TestScrubRoutingGitConfigSuppressionEffects(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("real Git config isolation test requires Git")
+	}
+	for _, entry := range os.Environ() {
+		key := EntryKey(entry)
+		if IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	custom := filepath.Join(home, "custom.config")
+	for path, value := range map[string]string{filepath.Join(home, ".gitconfig"): "home", custom: "custom"} {
+		if err := os.WriteFile(path, []byte("[beads-isolation-fixture]\n\tvalue = "+value+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	query := func(t *testing.T, env []string, want string) {
+		t.Helper()
+		cmd := exec.Command("git", "config", "--get", "beads-isolation-fixture.value")
+		cmd.Dir, cmd.Env = home, env
+		out, err := cmd.Output()
+		if want == "" {
+			if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 || len(out) != 0 {
+				t.Fatalf("suppressed config = %q (%v), want absence", out, err)
+			}
+		} else if err != nil || strings.TrimSpace(string(out)) != want {
+			t.Fatalf("config value = %q (%v), want %q", out, err, want)
+		}
+	}
+	base := ScrubRouting(os.Environ())
+	t.Run("global_null", func(t *testing.T) {
+		// Pin a null system file separately so the HOME observation is owned.
+		query(t, append(base, "GIT_CONFIG_SYSTEM="+os.DevNull), "home")
+		query(t, append(ScrubRouting(append(base, "GIT_CONFIG_GLOBAL="+os.DevNull)), "GIT_CONFIG_SYSTEM="+os.DevNull), "")
+	})
+	t.Run("custom_global_still_rejected", func(t *testing.T) {
+		query(t, append(base, "GIT_CONFIG_GLOBAL="+custom, "GIT_CONFIG_SYSTEM="+os.DevNull), "custom")
+		query(t, append(ScrubRouting(append(base, "GIT_CONFIG_GLOBAL="+custom)), "GIT_CONFIG_SYSTEM="+os.DevNull), "home")
+	})
+	t.Run("nosystem", func(t *testing.T) {
+		// An owned system-file override models system config after filtering;
+		// only NOSYSTEM's preservation is under test in this real Git query.
+		query(t, append(base, "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+custom, "GIT_CONFIG_NOSYSTEM=0"), "custom")
+		query(t, append(ScrubRouting(append(base, "GIT_CONFIG_NOSYSTEM=1")), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+custom), "")
+	})
 }
 
 func TestRoutingUnicodeKeysFollowSubprocessIdentity(t *testing.T) {
@@ -98,6 +225,9 @@ func TestScrubRoutingUsesHostKeySemantics(t *testing.T) {
 		"GIT_DIR=canonical", "git_dir=mixed", "GİT_DİR=conservative",
 		"GIT_WORK_TREE=lookup-alias", "gİt_config_count=conservative",
 		"GıT_DIR=distinct", "GIT_ſHALLOW_FILE=distinct", "GIT_CONFIG",
+		// A legitimate discovery ceiling is scrubbed too: it can fence off the
+		// working directory's own repository, so IsRoutingKeyForOS counts it.
+		"GIT_CEILING_DIRECTORIES=/fence",
 		"KEEP=first", "KEEP=second", "KEEP=GIT_DIR=value",
 		"GIT_OPTIONAL_LOCKS=1", "GIT_NO_REPLACE_OBJECTS=1", "MALFORMED", `=C:=C:\work`,
 	}
@@ -153,6 +283,9 @@ func TestClearRoutingPreservesNonRoutingGitControls(t *testing.T) {
 	t.Setenv("GIT_CONFIG_COUNT", "1")
 	t.Setenv("GIT_OPTIONAL_LOCKS", "1")
 	t.Setenv("GIT_NO_REPLACE_OBJECTS", "1")
+	for key, value := range map[string]string{"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.DevNull, "GIT_CONFIG_SYSTEM": os.DevNull} {
+		t.Setenv(key, value)
+	}
 
 	removed, err := ClearRouting()
 	if err != nil {
@@ -169,6 +302,11 @@ func TestClearRoutingPreservesNonRoutingGitControls(t *testing.T) {
 	for _, key := range []string{"GIT_OPTIONAL_LOCKS", "GIT_NO_REPLACE_OBJECTS"} {
 		if value := os.Getenv(key); value != "1" {
 			t.Fatalf("%s = %q, want 1", key, value)
+		}
+	}
+	for key, want := range map[string]string{"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.DevNull, "GIT_CONFIG_SYSTEM": os.DevNull} {
+		if got := os.Getenv(key); got != want {
+			t.Errorf("config suppression %s = %q, want %q", key, got, want)
 		}
 	}
 }

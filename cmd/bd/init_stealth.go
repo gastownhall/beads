@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/gitignore"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -22,8 +24,12 @@ import (
 // - .git/info/exclude is designed for user-specific, repo-local ignores
 // - Patterns are relative to repo root, so ".beads/" works correctly
 func setupStealthMode(verbose bool) error {
+	return setupStealthModeAt("", verbose)
+}
+
+func setupStealthModeAt(repoPath string, verbose bool) error {
 	// Setup per-repository git exclude file (skip if not in a git repo)
-	if err := setupGitExclude(verbose); err != nil {
+	if err := setupGitExcludeAt(repoPath, verbose); err != nil {
 		if strings.Contains(err.Error(), "not a git repository") {
 			if verbose {
 				fmt.Printf("Not in a git repository — skipping git exclude setup\n")
@@ -47,7 +53,11 @@ func setupStealthMode(verbose bool) error {
 // This is the correct approach for per-repository user-specific ignores (GitHub #704).
 // Unlike global gitignore, patterns here are relative to the repo root.
 func setupGitExclude(verbose bool) error {
-	added, excludePath, err := addExcludePatterns("",
+	return setupGitExcludeAt("", verbose)
+}
+
+func setupGitExcludeAt(repoPath string, verbose bool) error {
+	added, excludePath, err := addExcludePatterns(repoPath,
 		"# Beads stealth mode (added by bd init --stealth)",
 		[]string{".beads/", ".claude/settings.local.json"})
 	if err != nil {
@@ -66,6 +76,11 @@ func setupGitExclude(verbose bool) error {
 // resolveGitExcludePath returns the path to .git/info/exclude for repoPath, using --git-common-dir
 // so worktrees resolve to the main repo's exclude file (GH#1053). An empty repoPath resolves
 // against the current directory.
+//
+// The probe scrubs inherited Git routing so the exclude file always belongs to repoPath (or the
+// current directory) rather than to an inherited GIT_DIR. The fork detector that gates the fork
+// caller is scrubbed the same way, and a split between the two halves appends beads patterns to an
+// unrelated repository's exclude file.
 func resolveGitExcludePath(repoPath string) (string, error) {
 	args := make([]string, 0, 3)
 	if repoPath != "" {
@@ -74,9 +89,23 @@ func resolveGitExcludePath(repoPath string) (string, error) {
 	args = append(args, "rev-parse", "--git-common-dir")
 	// #nosec G702 - fixed "git" command; args are constant subcommands plus an internal repoPath,
 	// never attacker-controlled input.
-	out, err := exec.Command("git", args...).Output()
+	probe := exec.Command("git", args...)
+	probe.Env = gitenv.ScrubRouting(os.Environ())
+	out, err := probe.Output()
 	if err != nil {
-		return "", fmt.Errorf("not a git repository")
+		// "not a git repository" stays the prefix: setupStealthMode matches it with
+		// strings.Contains to treat this as a skip rather than a failure. Because the probe
+		// deliberately ignores inherited routing, the operator needs to be told so — and
+		// git's own reason ("not a git repository (or any of the parent directories)",
+		// dubious ownership) is what distinguishes the cases. exec.ExitError.Error() is only
+		// "exit status 128"; Output() leaves that reason unread in ExitError.Stderr.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if detail := firstNonEmptyLine(string(exitErr.Stderr)); detail != "" {
+				return "", fmt.Errorf("not a git repository (inherited Git routing is ignored here): %s", detail)
+			}
+		}
+		return "", fmt.Errorf("not a git repository (inherited Git routing is ignored here): %w", err)
 	}
 	gitDir := strings.TrimSpace(string(out))
 	// git prints --git-common-dir relative to its working directory (repoPath when -C is used), so
@@ -322,7 +351,11 @@ func checkProjectExcludeStealth(repoPath string) doctor.DoctorCheck {
 // This is separate from stealth mode - fork protection is specifically about
 // preventing beads/Claude files from appearing in upstream PRs.
 func setupForkExclude(verbose bool) error {
-	added, _, err := addExcludePatterns("",
+	return setupForkExcludeAt("", verbose)
+}
+
+func setupForkExcludeAt(repoPath string, verbose bool) error {
+	added, _, err := addExcludePatterns(repoPath,
 		"# Beads fork protection (bd init)",
 		[]string{".beads/", "**/RECOVERY*.md", "**/SESSION*.md"})
 	if err != nil {

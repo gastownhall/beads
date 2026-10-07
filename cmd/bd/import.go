@@ -76,6 +76,13 @@ an import is visible. To deliberately restore an older snapshot, pass
 --allow-stale, which imports every row even when it overwrites newer
 local state.
 
+The staleness guard is import's ONLY overwrite guard: the per-field
+fences that bd update enforces (notes overwrite, live-claim reassign,
+close policy) do not apply to imported rows. Import replaces rows
+wholesale by design — a restore must not fail field-by-field — so
+--allow-stale is the single deliberate-overwrite opt-in, and
+updated_issues is where to look for what an import rewrote.
+
 Large imports are written in bounded transactions (a few hundred issues
 each, with a short pause between commits) with progress on stderr, so
 concurrent bd commands keep working while the import runs instead of

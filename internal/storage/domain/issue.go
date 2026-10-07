@@ -66,12 +66,22 @@ type IssueSQLRepository interface {
 	Get(ctx context.Context, id string, opts IssueTableOpts) (*types.Issue, error)
 	AsOf(ctx context.Context, id, ref string) (*types.Issue, error)
 	GetByIDs(ctx context.Context, ids []string, opts IssueTableOpts) ([]*types.Issue, error)
+	// GetMany runs the SHARED batch-read body (issueops.ExecuteGetMany) on this
+	// repository's transaction, which is how the unit-of-work provider reaches
+	// the same function the two store backends wrap. It takes no table option:
+	// the body routes both planes itself, the way CompareAndSetMetadataKey's
+	// does.
+	GetMany(ctx context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error)
 	Exists(ctx context.Context, id string, opts IssueTableOpts) (bool, error)
 	CountForPrefix(ctx context.Context, prefix string, opts IssueTableOpts) (int, error)
 	NextCounterID(ctx context.Context, prefix string) (int, error)
 	SearchAcrossIssuesAndWisps(ctx context.Context, query string, filter types.IssueFilter) (SearchPage, error)
 	SearchAcrossIssuesAndWispsWithCounts(ctx context.Context, query string, filter types.IssueFilter) (SearchCountsPage, error)
 	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
+	// SearchWispsPlane searches the wisps table ALONE, whatever each row's
+	// ephemeral, no_history or wisp_type values, and never the issues table
+	// (issueops.SearchWispsPlaneInTx).
+	SearchWispsPlane(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
 	GetReadyWork(ctx context.Context, filter types.WorkFilter) (SearchPage, error)
 	GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) (SearchCountsPage, error)
 	GetDescendants(ctx context.Context, rootID string, filter types.IssueFilter) ([]*types.Issue, error)
@@ -85,7 +95,10 @@ type IssueSQLRepository interface {
 	FindAllDependents(ctx context.Context, ids []string) ([]string, error)
 	FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error)
 	AffectedByDeletion(ctx context.Context, issueIDs, wispIDs []string) (affectedIssues, affectedWisps []string, err error)
-	RecomputeIsBlocked(ctx context.Context, issueIDs, wispIDs []string) error
+	// RecomputeIsBlockedAfterDelete recomputes the blocked state of the
+	// dependents a delete of deletedIDs affected, and records them for the
+	// post-commit recheck the unit of work runs (gastownhall/beads#6716).
+	RecomputeIsBlockedAfterDelete(ctx context.Context, deletedIDs, issueIDs, wispIDs []string) error
 	Close(ctx context.Context, id string, params CloseRowParams, actor string, opts IssueTableOpts) (CloseRowResult, error)
 	CloseChecked(ctx context.Context, id string, params CloseRowParams, actor string, force bool) (CloseRowResult, error)
 	Reopen(ctx context.Context, id string, params ReopenRowParams, actor string, opts IssueTableOpts) (ReopenRowResult, error)
@@ -304,10 +317,17 @@ type UpdateSpec struct {
 type IssueUseCase interface {
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)
 	GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error)
+	// GetMany is the shape issueops.BatchGetter publishes; see
+	// IssueSQLRepository.GetMany for why it takes no table option.
+	GetMany(ctx context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error)
 	FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error)
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) (SearchPage, error)
 	SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) (SearchCountsPage, error)
 	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
+	// SearchWispsPlane searches the wisps table ALONE, whatever each row's
+	// ephemeral, no_history or wisp_type values, and never the issues table
+	// (issueops.SearchWispsPlaneInTx).
+	SearchWispsPlane(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
 	GetReadyWork(ctx context.Context, filter types.WorkFilter) (SearchPage, error)
 	GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) (SearchCountsPage, error)
 	GetDescendants(ctx context.Context, rootID string, filter types.IssueFilter) ([]*types.Issue, error)
@@ -459,6 +479,14 @@ func (u *issueUseCaseImpl) get(ctx context.Context, id string, useWisp bool) (*t
 
 func (u *issueUseCaseImpl) GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
 	return u.getByIDs(ctx, ids, false)
+}
+
+// GetMany passes straight through to the repository with no pre-check and no
+// error wrapping, CountEdges's reason: the request's whole vocabulary is
+// validated inside the shared body (issueops.ExecuteGetMany), and there is no
+// second implementation for a wrapper here to protect.
+func (u *issueUseCaseImpl) GetMany(ctx context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error) {
+	return u.issueRepo.GetMany(ctx, request)
 }
 
 func (u *issueUseCaseImpl) FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error) {
@@ -697,7 +725,7 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 			return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
 		}
 		if spec.ExpectedVersion != nil && current.RowVersion != *spec.ExpectedVersion {
-			return nil, fmt.Errorf("%w: expected %d, got %d", storage.ErrVersionMismatch, *spec.ExpectedVersion, current.RowVersion)
+			return nil, &storage.VersionMismatchError{Expected: *spec.ExpectedVersion, Current: current.RowVersion}
 		}
 		if spec.ExpectedAssignee != nil && !validation.ActorMatches(current.Assignee, *spec.ExpectedAssignee) {
 			return nil, fmt.Errorf("%w: %s is held by %q, expected %q",
@@ -839,6 +867,14 @@ func (u *issueUseCaseImpl) SearchIssues(ctx context.Context, query string, filte
 	out, err := u.issueRepo.SearchAcrossIssuesAndWisps(ctx, query, filter)
 	if err != nil {
 		return SearchPage{}, fmt.Errorf("SearchIssues: %w", err)
+	}
+	return out, nil
+}
+
+func (u *issueUseCaseImpl) SearchWispsPlane(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+	out, err := u.issueRepo.SearchWispsPlane(ctx, query, filter)
+	if err != nil {
+		return nil, fmt.Errorf("SearchWispsPlane: %w", err)
 	}
 	return out, nil
 }

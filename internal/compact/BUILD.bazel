@@ -26,6 +26,7 @@ go_library(
 go_test(
     name = "compact_test",
     srcs = [
+        "compactor_test.go",
         "compactor_unit_test.go",
         "git_test.go",
         "haiku_test.go",
@@ -33,7 +34,31 @@ go_test(
     embed = [":compact"],
     deps = [
         "//internal/config",
+        "//internal/storage/dolt",
+        "//internal/testutil",
         "//internal/types",
         "@com_github_anthropics_anthropic_sdk_go//:anthropic-sdk-go",
     ],
 )
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

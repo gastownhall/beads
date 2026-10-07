@@ -117,3 +117,47 @@ func TestShardFreeEnvStripsShardingVariables(t *testing.T) {
 		t.Fatalf("ShardFreeEnv() = %q, want %q", got, want)
 	}
 }
+
+func TestPrebuiltBD(t *testing.T) {
+	probe := filepath.Join(RepoRoot(t), filepath.FromSlash(probeRel))
+
+	t.Setenv(BDBinaryEnv, "")
+	got, err := PrebuiltBD()
+	if IsBazel() {
+		if err == nil {
+			t.Fatalf("PrebuiltBD() with %s unset under bazel = %q, want an error", BDBinaryEnv, got)
+		}
+	} else if err != nil || got != "" {
+		t.Fatalf("PrebuiltBD() with %s unset = %q, %v; want \"\", nil", BDBinaryEnv, got, err)
+	}
+
+	// An absolute path is honored in both modes.
+	t.Setenv(BDBinaryEnv, probe)
+	if got, err := PrebuiltBD(); err != nil || got != probe {
+		t.Fatalf("PrebuiltBD() = %q, %v; want %q", got, err, probe)
+	}
+
+	// Under bazel a relative value is an rlocationpath; under go test it is
+	// relative to the working directory (the package directory).
+	rel := "testdata/probe.txt"
+	if IsBazel() {
+		ws := os.Getenv("TEST_WORKSPACE")
+		if ws == "" {
+			ws = "_main"
+		}
+		rel = ws + "/" + probeRel
+	}
+	t.Setenv(BDBinaryEnv, rel)
+	got, err = PrebuiltBD()
+	if err != nil || !filepath.IsAbs(got) {
+		t.Fatalf("PrebuiltBD() with %s=%q = %q, %v; want an absolute path", BDBinaryEnv, rel, got, err)
+	}
+	if _, err := os.Stat(got); err != nil {
+		t.Fatalf("PrebuiltBD() = %q does not exist: %v", got, err)
+	}
+
+	t.Setenv(BDBinaryEnv, "no/such/bd")
+	if got, err := PrebuiltBD(); err == nil {
+		t.Fatalf("PrebuiltBD() with a missing binary = %q, want an error", got)
+	}
+}

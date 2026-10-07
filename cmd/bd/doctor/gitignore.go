@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/gitignore"
@@ -154,7 +155,7 @@ func CheckGitignore(repoPath string) DoctorCheck {
 			Name:    "Gitignore",
 			Status:  "warning",
 			Message: ".beads/.gitignore not found",
-			Fix:     "Run: bd init (safe to re-run) or bd doctor --fix",
+			Fix:     "Run: bd doctor --fix",
 		}
 	}
 
@@ -167,7 +168,22 @@ func CheckGitignore(repoPath string) DoctorCheck {
 			Status:  "warning",
 			Message: "Outdated .beads/.gitignore (missing required patterns)",
 			Detail:  "Missing: " + strings.Join(missing, ", "),
-			Fix:     "Run: bd doctor --fix or bd init (safe to re-run)",
+			Fix:     "Run: bd doctor --fix",
+		}
+	}
+
+	// A pattern-complete file with loose permissions must still surface as a
+	// warning: doctor --fix only schedules FixGitignore for non-ok checks, so
+	// an ok here would leave the permission repair unreachable.
+	if runtime.GOOS != "windows" {
+		if info, err := os.Stat(gitignorePath); err == nil && info.Mode().Perm() != 0600 {
+			return DoctorCheck{
+				Name:    "Gitignore",
+				Status:  "warning",
+				Message: "Unexpected permissions on .beads/.gitignore",
+				Detail:  fmt.Sprintf("Mode is %04o, want 0600", info.Mode().Perm()),
+				Fix:     "Run: bd doctor --fix",
+			}
 		}
 	}
 
@@ -193,17 +209,20 @@ func EnsureGitignoreForBeadsDir(beadsDir string) error {
 		return fmt.Errorf("read .beads/.gitignore: %w", err)
 	}
 
-	missing := missingGitignorePatterns(string(content))
-	if len(missing) == 0 {
-		return nil
-	}
-
+	// Tighten permissions before the pattern check so a pattern-complete
+	// file with loose perms (e.g. 0644) still gets locked down; the
+	// early return below must not skip this (flagged post-#5285).
 	if info, err := os.Stat(gitignorePath); err == nil {
-		if info.Mode().Perm()&0200 == 0 {
+		if info.Mode().Perm() != 0600 {
 			if err := os.Chmod(gitignorePath, 0600); err != nil {
 				return fmt.Errorf("chmod .beads/.gitignore: %w", err)
 			}
 		}
+	}
+
+	missing := missingGitignorePatterns(string(content))
+	if len(missing) == 0 {
+		return nil
 	}
 
 	existingContent := string(content)
@@ -221,8 +240,11 @@ func EnsureGitignoreForBeadsDir(beadsDir string) error {
 		return fmt.Errorf("ensure .beads/.gitignore: %w", err)
 	}
 
-	// Tighten permissions on pre-existing files: os.WriteFile's mode argument
-	// only applies at creation, and the file may predate the 0600 policy.
+	// Residual guard for the one case the hoisted block above cannot cover: if
+	// its os.Stat failed, no chmod ran. Either the file was removed between the
+	// ReadFile and that Stat -- os.WriteFile then creates it, and its 0600 mode
+	// argument is filtered by umask -- or it still exists at its old mode, which
+	// os.WriteFile leaves untouched. Both converge to 0600 here.
 	if err := os.Chmod(gitignorePath, 0600); err != nil {
 		return fmt.Errorf("chmod .beads/.gitignore: %w", err)
 	}
@@ -727,7 +749,7 @@ func CheckProjectGitignore(repoPath string) DoctorCheck {
 				Name:    "Project Gitignore",
 				Status:  StatusWarning,
 				Message: "No project .gitignore found — Dolt/credential files may be committed accidentally",
-				Fix:     "Run: bd init (safe to re-run) or bd doctor --fix",
+				Fix:     "Run: bd doctor --fix",
 			}
 		}
 		return DoctorCheck{
@@ -751,7 +773,7 @@ func CheckProjectGitignore(repoPath string) DoctorCheck {
 			Status:  StatusWarning,
 			Message: "Project .gitignore missing required exclusion patterns",
 			Detail:  "Missing: " + strings.Join(missing, ", "),
-			Fix:     "Run: bd doctor --fix or bd init (safe to re-run)",
+			Fix:     "Run: bd doctor --fix",
 		}
 	}
 
@@ -764,7 +786,9 @@ func CheckProjectGitignore(repoPath string) DoctorCheck {
 
 // EnsureProjectGitignore adds .dolt/, *.db, and .beads-credential-key patterns
 // to the project-root .gitignore if they are not already present. Creates the
-// file if it doesn't exist. This prevents users from accidentally committing
+// file if it doesn't exist. Empty or missing files start with the header;
+// nonempty files retain their bytes and receive a blank separator before it.
+// This prevents users from accidentally committing
 // Dolt database files or the credential encryption key.
 // repoPath is the project root directory.
 func EnsureProjectGitignore(repoPath string) error {
@@ -788,7 +812,14 @@ func EnsureProjectGitignore(repoPath string) error {
 		return nil // All patterns already present
 	}
 
-	lines := append([]string{"", ProjectGitignoreHeader}, toAdd...)
+	// A fresh .gitignore must not start with a blank line; the separator only
+	// belongs between existing content and the appended block.
+	lines := make([]string, 0, len(toAdd)+2)
+	if len(content) > 0 {
+		lines = append(lines, "")
+	}
+	lines = append(lines, ProjectGitignoreHeader)
+	lines = append(lines, toAdd...)
 	newContent := gitignore.AppendLines(content, lines)
 
 	// #nosec G306 -- gitignore needs to be readable by git and collaborators

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
 )
 
 func setupConfigWorktree(t *testing.T) (mainRepoDir, worktreeDir, mainConfigPath string) {
@@ -19,9 +20,12 @@ func setupConfigWorktree(t *testing.T) (mainRepoDir, worktreeDir, mainConfigPath
 		t.Fatalf("failed to create main repo dir: %v", err)
 	}
 
+	// maintenance.auto=false (gc.auto=0 on git before 2.29) keeps the commit from
+	// starting the detached "git maintenance run --auto" whose worktree-prune can
+	// remove the admin dir "git worktree add" is still writing (its locked file).
 	run := func(dir string, args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := exec.Command("git", append([]string{"-c", "maintenance.auto=false", "-c", "gc.auto=0"}, args...)...)
 		cmd.Dir = dir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v failed: %v\n%s", args, err, out)
@@ -314,6 +318,57 @@ func TestWorktreeFallbackConfigPathIgnoresInheritedGitRouting(t *testing.T) {
 	}
 	if gotResolved != wantResolved {
 		t.Fatalf("worktreeFallbackConfigPath() = %q, want target repository config %q", gotResolved, wantResolved)
+	}
+}
+
+// TestWorktreeFallbackConfigPathWidensPastLegitimateCeiling pins the other half of the
+// GIT_CEILING_DIRECTORIES membership decision documented at gitenv.IsRoutingKeyForOS. The
+// sibling cases above poison the environment and assert the routing is ignored; here the
+// inherited routing is *legitimate* — an operator fenced off the worktree — and scrubbing it
+// widens the upward search instead of narrowing it, so startup config discovery still reaches
+// the main repository's shared config. That widening is the user-visible consequence the
+// contract comment promises, and the half a future change to routingKeys would break silently.
+func TestWorktreeFallbackConfigPathWidensPastLegitimateCeiling(t *testing.T) {
+	_, worktreeDir, want := setupConfigWorktree(t)
+
+	nested := filepath.Join(worktreeDir, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// git resolves symlinks in ceiling entries before comparing, and a temp root can be
+	// symlinked (/tmp -> /private/tmp), so fence with the real path.
+	ceiling, err := filepath.EvalSymlinks(worktreeDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", worktreeDir, err)
+	}
+
+	// Control: the same environment except the ceiling is left in place, which is what the
+	// probe did before this change. It must fail — otherwise the ceiling never bit and the
+	// assertion below would pass for the wrong reason.
+	fenced := exec.Command("git", "-C", nested, "rev-parse", "--git-dir")
+	fenced.Env = append(gitenv.ScrubRouting(os.Environ()), "GIT_CEILING_DIRECTORIES="+ceiling)
+	if out, ferr := fenced.Output(); ferr == nil {
+		t.Fatalf("ceiling %q did not fence off %q (git found %q); the widening case is vacuous",
+			ceiling, nested, strings.TrimSpace(string(out)))
+	}
+
+	t.Setenv("GIT_CEILING_DIRECTORIES", ceiling)
+
+	got := worktreeFallbackConfigPath(nested)
+	if got == "" {
+		t.Fatalf("worktreeFallbackConfigPath(%q) = %q under a legitimate ceiling; the inherited "+
+			"ceiling was honored and startup discovery lost the shared worktree config", nested, got)
+	}
+	gotResolved, err := filepath.EvalSymlinks(filepath.Clean(got))
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", got, err)
+	}
+	wantResolved, err := filepath.EvalSymlinks(filepath.Clean(want))
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", want, err)
+	}
+	if gotResolved != wantResolved {
+		t.Fatalf("worktreeFallbackConfigPath() = %q, want main repository config %q", gotResolved, wantResolved)
 	}
 }
 

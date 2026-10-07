@@ -35,6 +35,8 @@ required=(
     TestScrubEnvDoesNotEqualFoldUnicodeKeys
     TestStderrDirectedWindowsLeadingSlashIsFileTarget
     TestScrubRoutingUsesHostKeySemantics
+    TestScrubRoutingPreservesConfigSuppression
+    TestScrubRoutingAndSuppressionDropsSuppression
 )
 for name in "${required[@]}"; do
     count=$(grep -Ec "^[[:space:]]*--- PASS: $name \\(" "$log" || true)

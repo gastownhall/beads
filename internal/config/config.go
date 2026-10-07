@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/gitenv"
 	"gopkg.in/yaml.v3"
@@ -139,10 +140,12 @@ func Initialize() error {
 
 	cwd, err := os.Getwd()
 	if err == nil {
+		// BEADS_CEILING_DIRECTORIES bounds both upward walks below.
+		bound := ceiling.For(cwd)
 		var moduleRoot string
 		if ignoreRepoConfig {
 			// Find module root by walking up to go.mod.
-			for dir := cwd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+			for dir := cwd; dir != filepath.Dir(dir) && !bound.Excludes(dir); dir = filepath.Dir(dir) {
 				if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
 					moduleRoot = dir
 					break
@@ -172,7 +175,7 @@ func Initialize() error {
 		}
 
 		// Walk up parent directories to find .beads/config.yaml.
-		for dir := cwd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		for dir := cwd; dir != filepath.Dir(dir) && !bound.Excludes(dir); dir = filepath.Dir(dir) {
 			p := filepath.Join(dir, ".beads", "config.yaml")
 			if _, err := os.Stat(p); err == nil {
 				// When BEADS_DIR points at a different runtime workspace, do not
@@ -338,6 +341,17 @@ func Initialize() error {
 	// Backup configuration defaults (JSONL export to .beads/backup/)
 	v.SetDefault("backup.enabled", false)
 	v.SetDefault("backup.interval", "15m")
+	// size-cap-mb pauses auto-backup once the destination exceeds this size
+	// (ga-y6gjv). BackupSync only ever transfers new chunks — it never
+	// prunes ones that became unreachable on the source DB — and Dolt
+	// exposes no way to GC a backup destination in place (it is a bare
+	// chunk-store directory with no .dolt repo-root marker, so neither the
+	// standalone dolt CLI nor CALL DOLT_GC can operate on it directly), so
+	// without a hard cap the directory can only grow forever. Default
+	// 2048MB; size-warn-interval throttles how often the pause is
+	// re-announced once the cap is hit, so it doesn't spam every command.
+	v.SetDefault("backup.size-cap-mb", 2048)
+	v.SetDefault("backup.size-warn-interval", "24h")
 	v.SetDefault("backup.git-push", false)
 	v.SetDefault("backup.git-repo", "")
 
@@ -436,8 +450,15 @@ func gitDirsForRepo(repoPath string) (gitDir, commonDir string, ok bool) {
 	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--git-dir", "--git-common-dir")
 	// repoPath is the authority for this probe. Inherited Git routing such as
 	// GIT_DIR overrides -C and can make startup read another repository's
-	// shared-worktree config before command dispatch has begun.
-	cmd.Env = gitenv.ScrubRouting(os.Environ())
+	// shared-worktree config before command dispatch has begun. Scrubbing also
+	// drops an inherited GIT_CEILING_DIRECTORIES, which widens rather than
+	// narrows discovery: -C repoPath fixes where the search starts, not where it
+	// stops, so dropping discovery ceilings can select a containing parent
+	// repository above repoPath. That is the intended trade, and it applies here
+	// too -- repoPath is the process working directory, not a proven repository
+	// root. An explicit BEADS_CEILING_DIRECTORIES is the exception: it is
+	// reapplied as the git ceiling (a no-op when unset).
+	cmd.Env = ceiling.GitEnv(gitenv.ScrubRouting(os.Environ()))
 	output, err := cmd.Output()
 	if err != nil {
 		return "", "", false
@@ -1031,9 +1052,9 @@ func ResolveExternalProjectPath(projectName string) string {
 //  3. git config user.name
 //  4. hostname
 //
-// The Git lookup discards inherited routing overrides, including
-// GIT_CONFIG_GLOBAL. Set user.name in the default global config location
-// rather than selecting a different file through that environment override.
+// The Git lookup discards custom GIT_CONFIG_GLOBAL paths and other routing
+// overrides, while retaining explicit config suppression. Set user.name in
+// the default global config location when global config is enabled.
 func GetIdentity(flagValue string) string {
 	// 1. Command-line flag takes precedence
 	if flagValue != "" {

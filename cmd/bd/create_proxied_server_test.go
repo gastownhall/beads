@@ -2,14 +2,10 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -281,150 +277,6 @@ func TestGraphApplyNodeIssue_DefaultsAndOpts(t *testing.T) {
 	})
 }
 
-func TestBuildDomainGraphPlan(t *testing.T) {
-	plan := GraphApplyPlan{
-		Nodes: []GraphApplyNode{
-			{Key: "root", Title: "Root", Type: "epic"},
-			{Key: "child", Title: "Child", ParentKey: "root", Assignee: "bob", AssignAfterCreate: true,
-				MetadataRefs: map[string]string{"parent_id": "root"}, Labels: []string{"a", "b"}},
-		},
-		Edges: []GraphApplyEdge{
-			{FromKey: "child", ToKey: "root", Type: ""},
-			{FromKey: "child", ToKey: "root", Type: "related"},
-			{FromID: "ext-1", ToID: "ext-2", Type: "blocks"},
-		},
-	}
-
-	got, err := buildDomainGraphPlan(plan, createInput{createdBy: "t"})
-	if err != nil {
-		t.Fatalf("buildDomainGraphPlan: %v", err)
-	}
-
-	if len(got.Nodes) != 2 {
-		t.Fatalf("nodes len = %d", len(got.Nodes))
-	}
-	if got.Nodes[0].Key != "root" || got.Nodes[0].Issue == nil || got.Nodes[0].Issue.IssueType != types.TypeEpic {
-		t.Errorf("root node wrong: %+v", got.Nodes[0])
-	}
-	c := got.Nodes[1]
-	if c.ParentKey != "root" {
-		t.Errorf("child ParentKey = %q", c.ParentKey)
-	}
-	if c.Assignee != "bob" || !c.AssignAfterCreate {
-		t.Errorf("child assignee/defer wrong: %+v", c)
-	}
-	if !reflect.DeepEqual(c.Labels, []string{"a", "b"}) {
-		t.Errorf("child labels = %v", c.Labels)
-	}
-	if c.MetadataRefs["parent_id"] != "root" {
-		t.Errorf("child metadata_refs lost: %v", c.MetadataRefs)
-	}
-
-	if len(got.Edges) != 3 {
-		t.Fatalf("edges len = %d", len(got.Edges))
-	}
-	if got.Edges[0].Type != types.DepBlocks {
-		t.Errorf("empty edge type = %q, want blocks", got.Edges[0].Type)
-	}
-	if got.Edges[1].Type != types.DependencyType("related") {
-		t.Errorf("typed edge = %q", got.Edges[1].Type)
-	}
-	if got.Edges[2].FromID != "ext-1" || got.Edges[2].ToID != "ext-2" {
-		t.Errorf("ID edge lost: %+v", got.Edges[2])
-	}
-}
-
-// TestBuildDomainGraphPlan_AliasesAndDeps pins the proxied path's handling of
-// the parent/estimate aliases and per-node deps — all three were silently
-// dropped before reaching the domain apply (review finding).
-func TestBuildDomainGraphPlan_AliasesAndDeps(t *testing.T) {
-	est := 90
-	canonical := 30
-	plan := GraphApplyPlan{
-		Nodes: []GraphApplyNode{
-			{Key: "root", Title: "Root"},
-			{Key: "child", Title: "Child", Parent: "root", Estimate: &est,
-				Deps: []GraphApplyNodeDep{{Target: "root"}, {Target: "ext-1", Type: "related"}}},
-			{Key: "both", Title: "Both", EstimatedMinutes: &canonical, Estimate: &est},
-		},
-	}
-
-	got, err := buildDomainGraphPlan(plan, createInput{createdBy: "t"})
-	if err != nil {
-		t.Fatalf("buildDomainGraphPlan: %v", err)
-	}
-
-	c := got.Nodes[1]
-	if c.ParentKey != "root" {
-		t.Errorf("parent alias not folded into ParentKey: %q", c.ParentKey)
-	}
-	if c.Issue.EstimatedMinutes == nil || *c.Issue.EstimatedMinutes != 90 {
-		t.Errorf("estimate alias lost: %v", c.Issue.EstimatedMinutes)
-	}
-	if len(c.Deps) != 2 {
-		t.Fatalf("deps len = %d, want 2", len(c.Deps))
-	}
-	if c.Deps[0].Target != "root" || c.Deps[0].Type != types.DepBlocks {
-		t.Errorf("dep 0 = %+v, want target root type blocks", c.Deps[0])
-	}
-	if c.Deps[1].Target != "ext-1" || c.Deps[1].Type != types.DependencyType("related") {
-		t.Errorf("dep 1 = %+v", c.Deps[1])
-	}
-
-	b := got.Nodes[2]
-	if b.Issue.EstimatedMinutes == nil || *b.Issue.EstimatedMinutes != 30 {
-		t.Errorf("estimated_minutes should win over the alias: %v", b.Issue.EstimatedMinutes)
-	}
-}
-
-// TestBuildDomainGraphPlanCoversEdgeFields pins the hand-maintained field
-// copies in buildDomainGraphPlan: every GraphApplyEdge and GraphApplyNodeDep
-// field must survive the projection into its domain counterpart. This is the
-// edge-side twin of TestGraphApplyNodeCoversCreateIssueParams — the proxied
-// path silently dropping fields (gate/spawner/thread, node deps) is the
-// regression class this branch fixes.
-func TestBuildDomainGraphPlanCoversEdgeFields(t *testing.T) {
-	fill := func(typ reflect.Type) reflect.Value {
-		v := reflect.New(typ).Elem()
-		for i := 0; i < typ.NumField(); i++ {
-			f := typ.Field(i)
-			if f.Type.Kind() != reflect.String {
-				t.Fatalf("%s field %s: unhandled kind %s; extend this parity test", typ.Name(), f.Name, f.Type.Kind())
-			}
-			v.Field(i).SetString(fmt.Sprintf("v%d", i))
-		}
-		return v
-	}
-	assertCopied := func(src reflect.Value, dst reflect.Value) {
-		typ := src.Type()
-		for i := 0; i < typ.NumField(); i++ {
-			name := typ.Field(i).Name
-			df := dst.FieldByName(name)
-			if !df.IsValid() {
-				t.Errorf("domain.%s has no field %q for %s.%s", dst.Type().Name(), name, typ.Name(), name)
-				continue
-			}
-			if got, want := df.String(), src.Field(i).String(); got != want {
-				t.Errorf("%s.%s = %q after projection, want %q (dropped in buildDomainGraphPlan?)", dst.Type().Name(), name, got, want)
-			}
-		}
-	}
-
-	edge := fill(reflect.TypeOf(GraphApplyEdge{}))
-	dep := fill(reflect.TypeOf(GraphApplyNodeDep{}))
-	plan := GraphApplyPlan{
-		Nodes: []GraphApplyNode{{Key: "k", Title: "T",
-			Deps: []GraphApplyNodeDep{dep.Interface().(GraphApplyNodeDep)}}},
-		Edges: []GraphApplyEdge{edge.Interface().(GraphApplyEdge)},
-	}
-	got, err := buildDomainGraphPlan(plan, createInput{createdBy: "t"})
-	if err != nil {
-		t.Fatalf("buildDomainGraphPlan: %v", err)
-	}
-	assertCopied(edge, reflect.ValueOf(got.Edges[0]))
-	assertCopied(dep, reflect.ValueOf(got.Nodes[0].Deps[0]))
-}
-
 func TestParseMarkdownDependencies(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -472,56 +324,4 @@ func TestParseMarkdownDependencies_DoesNotSwapBlocks(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %#v, want %#v (no swap-direction)", got, want)
 	}
-}
-
-func TestResolveProxiedCustomTypes_PrefersDBTypes(t *testing.T) {
-	got := resolveProxiedCustomTypes([]string{"db-a", "db-b"})
-	if !reflect.DeepEqual(got, []string{"db-a", "db-b"}) {
-		t.Errorf("got %#v, want [db-a db-b] — DB types must win when non-empty", got)
-	}
-}
-
-func TestResolveProxiedCustomTypes_FallsBackToYAML(t *testing.T) {
-	restore := withTestYAMLCustomTypes(t, "molecule,gate,convoy")
-	defer restore()
-
-	for _, dbTypes := range [][]string{nil, {}} {
-		got := resolveProxiedCustomTypes(dbTypes)
-		if !reflect.DeepEqual(got, []string{"molecule", "gate", "convoy"}) {
-			t.Errorf("dbTypes=%v: got %#v, want YAML fallback [molecule gate convoy]", dbTypes, got)
-		}
-	}
-}
-
-func TestResolveProxiedCustomTypes_EmptyEverywhere(t *testing.T) {
-	restore := withTestYAMLCustomTypes(t, "")
-	defer restore()
-
-	got := resolveProxiedCustomTypes(nil)
-	if len(got) != 0 {
-		t.Errorf("expected empty result, got %#v", got)
-	}
-}
-
-func withTestYAMLCustomTypes(t *testing.T, customCSV string) func() {
-	t.Helper()
-	tmpDir := t.TempDir()
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	var content string
-	if customCSV != "" {
-		content = "types:\n  custom: \"" + customCSV + "\"\n"
-	}
-	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(content), 0o644); err != nil {
-		t.Fatalf("write config.yaml: %v", err)
-	}
-	t.Chdir(tmpDir)
-
-	config.ResetForTesting()
-	if err := config.Initialize(); err != nil {
-		t.Fatalf("config.Initialize: %v", err)
-	}
-	return func() { config.ResetForTesting() }
 }

@@ -180,7 +180,12 @@ func assertDepExistsWithType(t *testing.T, beadsDir, database, issueID, dependsO
 	}
 }
 
-func TestEmbeddedCreate(t *testing.T) {
+// TestEmbeddedCreateScalarAndRelationships was split from TestEmbeddedCreate
+// (originally ~266.68s, measured under --config=embedded) into 2 top-level
+// tests over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedCreateScalarAndRelationships(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
 	}
@@ -361,6 +366,20 @@ func TestEmbeddedCreate(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestEmbeddedCreateGraphAndBulk was split from TestEmbeddedCreate
+// (originally ~266.68s, measured under --config=embedded) into 2 top-level
+// tests over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedCreateGraphAndBulk(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("graph_create_journey", func(t *testing.T) {
 		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gr")

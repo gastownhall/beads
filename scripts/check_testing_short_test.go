@@ -71,6 +71,13 @@ func TestCheckTestingShortPassesOnCleanRepoTree(t *testing.T) {
 		t.Skip("checker is a Bash boundary")
 	}
 	repo := sourceRepoRoot(t)
+	// Under Bazel the tree is //:repo_files; a tree missing the allowlisted
+	// call sites would let the scan pass vacuously.
+	for _, rel := range []string{"internal/hooks/hooks_test.go", "internal/storage/dolt/concurrent_test.go", "internal/workapi/sweep_test.go"} {
+		if _, err := os.Stat(filepath.Join(repo, filepath.FromSlash(rel))); err != nil {
+			t.Fatalf("the scanned tree lacks %s, which holds an allowlisted call: %v", rel, err)
+		}
+	}
 	cmd := exec.Command("bash", filepath.Join(repo, "scripts", "check-testing-short.sh"))
 	cmd.Dir = repo
 	out, err := cmd.CombinedOutput()

@@ -233,7 +233,7 @@ var createCmd = &cobra.Command{
 		if dueStr != "" {
 			t, err := timeparsing.ParseRelativeTime(dueStr, time.Now())
 			if err != nil {
-				return HandleError("invalid --due format %q. Examples: +6h, tomorrow, next monday, 2025-01-15", dueStr)
+				return HandleError("invalid --due format %q. %s", dueStr, deferUntilFormatHint)
 			}
 			dueAt = &t
 		}
@@ -243,7 +243,7 @@ var createCmd = &cobra.Command{
 		if deferStr != "" {
 			t, err := timeparsing.ParseRelativeTime(deferStr, time.Now())
 			if err != nil {
-				return HandleError("invalid --defer format %q. Examples: +1h, tomorrow, next monday, 2025-01-15", deferStr)
+				return HandleError("invalid --defer format %q. %s", deferStr, deferUntilFormatHint)
 			}
 			// Warn if defer date is in the past (user probably meant future)
 			if t.Before(time.Now()) && !silent && !debug.IsQuiet() {
@@ -299,12 +299,6 @@ var createCmd = &cobra.Command{
 			// Explicit --repo flag overrides auto-routing
 			repoPath = repoOverride
 		} else {
-			// Auto-routing based on user role
-			userRole, err := routing.DetectUserRole(".")
-			if err != nil {
-				debug.Logf("Warning: failed to detect user role: %v\n", err)
-			}
-
 			// Build routing config with backward compatibility for legacy contributor.* keys.
 			// Prefer config.yaml values, but fall back to DB config values set by bd init --contributor.
 			routingMode := getRoutingConfigValue(rootCtx, store, "routing.mode")
@@ -328,6 +322,9 @@ var createCmd = &cobra.Command{
 				ExplicitOverride: repoOverride,
 			}
 
+			// Auto-routing based on user role, detected only once the resolved
+			// config shows routing will read it.
+			userRole := detectUserRoleForRouting(routingConfig)
 			repoPath = routing.DetermineTargetRepo(routingConfig, userRole, ".")
 		}
 

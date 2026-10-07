@@ -198,9 +198,14 @@ func (s *EmbeddedDoltStore) CommitMergeResolution(ctx context.Context, message s
 }
 
 func (s *EmbeddedDoltStore) AddRemote(ctx context.Context, name, url string) error {
+	return s.AddRemoteWithRef(ctx, name, url, "")
+}
+
+// AddRemoteWithRef adds a remote whose Dolt data lives on the git ref ref;
+// see storage.RemoteStore.
+func (s *EmbeddedDoltStore) AddRemoteWithRef(ctx context.Context, name, url, ref string) error {
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		_, err := db.ExecContext(ctx, "CALL DOLT_REMOTE('add', ?, ?)", name, url)
-		return err
+		return versioncontrolops.AddRemote(ctx, db, name, url, ref)
 	})
 }
 
@@ -533,6 +538,14 @@ func (s *EmbeddedDoltStore) ListRemotes(ctx context.Context) ([]storage.RemoteIn
 // where before it read it holding no lock at all.
 
 func (s *EmbeddedDoltStore) Push(ctx context.Context) error {
+	// GH#5433: every Pull variant below auto-commits pending changes first;
+	// push never did, so a working set with pending-but-uncommitted changes
+	// (auto-commit off, or a session that ended right after a write with no
+	// intervening commit) silently pushed nothing new and still reported
+	// success.
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		return fmt.Errorf("commit pending before push: %w", err)
+	}
 	return s.withPeerAuth(ctx, defaultRemote, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 			return vcPush(ctx, db, defaultRemote, s.branch, user)
@@ -598,6 +611,10 @@ func (s *EmbeddedDoltStore) PullRemoteWithStrategy(ctx context.Context, remote, 
 }
 
 func (s *EmbeddedDoltStore) ForcePush(ctx context.Context) error {
+	// GH#5433: see Push.
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		return fmt.Errorf("commit pending before push: %w", err)
+	}
 	return s.withPeerAuth(ctx, defaultRemote, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 			return vcForcePush(ctx, db, defaultRemote, s.branch, user)
@@ -606,6 +623,10 @@ func (s *EmbeddedDoltStore) ForcePush(ctx context.Context) error {
 }
 
 func (s *EmbeddedDoltStore) PushRemote(ctx context.Context, remote string, force bool) error {
+	// GH#5433: see Push.
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		return fmt.Errorf("commit pending before push: %w", err)
+	}
 	return s.withPeerAuth(ctx, remote, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 			if force {
@@ -642,6 +663,10 @@ func (s *EmbeddedDoltStore) Fetch(ctx context.Context, peer string) error {
 }
 
 func (s *EmbeddedDoltStore) PushTo(ctx context.Context, peer string) error {
+	// GH#5433: see Push.
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		return fmt.Errorf("commit pending before push: %w", err)
+	}
 	return s.withPeerAuth(ctx, peer, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 			return versioncontrolops.Push(ctx, db, peer, s.branch, user)
@@ -749,39 +774,8 @@ func (s *EmbeddedDoltStore) BackupRemove(ctx context.Context, name string) error
 // the database to it. The dir must exist locally. This preserves full Dolt
 // commit history.
 func (s *EmbeddedDoltStore) BackupDatabase(ctx context.Context, dir string) error {
-	info, err := os.Stat(dir)
-	if err != nil {
-		return fmt.Errorf("backup destination does not exist: %w", err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("backup destination is not a directory: %s", dir)
-	}
-
-	backupURL, err := versioncontrolops.DirToFileURL(dir)
-	if err != nil {
-		return err
-	}
-	backupName := "backup_export"
-
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		// Register as a backup remote (idempotent — remove first if exists).
-		_ = versioncontrolops.BackupRemove(ctx, db, backupName)
-		if err := versioncontrolops.BackupAdd(ctx, db, backupName, backupURL); err != nil {
-			// Another backup (e.g. "default" registered by `bd backup init`) may
-			// already point to this URL. In that case, sync using the existing
-			// remote name rather than failing.
-			if conflict := versioncontrolops.ExtractAddressConflictName(err); conflict != "" {
-				if syncErr := versioncontrolops.BackupSync(ctx, db, conflict); syncErr != nil {
-					return fmt.Errorf("sync to backup: %w", syncErr)
-				}
-				return nil
-			}
-			return fmt.Errorf("register backup remote: %w", err)
-		}
-		if err := versioncontrolops.BackupSync(ctx, db, backupName); err != nil {
-			return fmt.Errorf("sync to backup: %w", err)
-		}
-		return nil
+		return versioncontrolops.BackupToDir(ctx, db, db, dir)
 	})
 }
 

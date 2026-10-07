@@ -320,16 +320,10 @@ func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput
 		debug.Logf("warning: failed to detect cycles: %v", err)
 	}
 
-	allBlockerIDs := make(map[string]bool)
-	for _, bi := range blockedIssues {
-		for _, blockerID := range bi.BlockedBy {
-			allBlockerIDs[blockerID] = true
-		}
-	}
-	blockerIDList := make([]string, 0, len(allBlockerIDs))
-	for id := range allBlockerIDs {
-		blockerIDList = append(blockerIDList, id)
-	}
+	blockerIDList := explainBlockerIDs(blockedIssues, readyIssues, allDeps)
+	// TODO(batchgetter): unbounded id list; see issueops.BatchGetter's doc and
+	// the importIssueLookup TODO in import_shared.go for why this is not yet
+	// routed through GetMany.
 	blockerIssues, err := uw.IssueUseCase().GetIssuesByIDs(ctx, blockerIDList)
 	if err != nil {
 		debug.Logf("warning: failed to get blocker issues: %v", err)
@@ -362,9 +356,7 @@ func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput
 				ui.RenderPriority(item.Priority),
 				item.Title)
 			fmt.Printf("    Reason: %s\n", item.Reason)
-			if len(item.ResolvedBlockers) > 0 {
-				fmt.Printf("    Resolved blockers: %s\n", strings.Join(item.ResolvedBlockers, ", "))
-			}
+			printReadyItemDependencies(item)
 			if item.DependentCount > 0 {
 				fmt.Printf("    Unblocks: %d issue(s)\n", item.DependentCount)
 			}

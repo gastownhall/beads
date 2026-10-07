@@ -3,7 +3,6 @@
 package scripts_test
 
 import (
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/scripts/internal/testbash"
 )
 
 const (
@@ -244,6 +245,26 @@ func TestPRPreflightSupportsGitHubCLIWithoutClosingIssuesReferences(t *testing.T
 
 func TestPRPreflightFixtureIgnoresHostShellAndGitHubState(t *testing.T) {
 	hostState := t.TempDir()
+	var pathShadowMarker string
+	if runtime.GOOS == "windows" {
+		shadowDir := t.TempDir()
+		shadowBash := filepath.Join(shadowDir, "bash.cmd")
+		pathShadowMarker = filepath.Join(shadowDir, "invoked")
+		body := "@echo off\r\n> \"%~dp0invoked\" echo invoked\r\nexit /b 97\r\n"
+		if err := os.WriteFile(shadowBash, []byte(body), 0o600); err != nil {
+			t.Fatalf("write PATH-first Bash launcher: %v", err)
+		}
+		t.Setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+		t.Setenv("PATH", shadowDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		ambient, err := exec.LookPath("bash")
+		if err != nil {
+			t.Fatalf("locate PATH-first Bash launcher: %v", err)
+		}
+		if !strings.EqualFold(filepath.Clean(ambient), filepath.Clean(shadowBash)) {
+			t.Fatalf("ambient bash = %q, want PATH-first launcher %q", ambient, shadowBash)
+		}
+	}
+
 	startupMarker := filepath.Join(hostState, "startup-invoked")
 	hostStartup := filepath.Join(hostState, "host-startup.sh")
 	if err := os.WriteFile(
@@ -273,6 +294,13 @@ func TestPRPreflightFixtureIgnoresHostShellAndGitHubState(t *testing.T) {
 	}
 	if len(run.calls) == 0 {
 		t.Fatal("controlled gh function did not intercept any calls")
+	}
+	if pathShadowMarker != "" {
+		if _, err := os.Stat(pathShadowMarker); err == nil {
+			t.Fatal("preflight fixture executed the PATH-first Bash launcher")
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("inspect PATH-first Bash launcher marker: %v", err)
+		}
 	}
 }
 
@@ -601,7 +629,7 @@ func runPRPreflightWithFakeGH(t *testing.T, fixture preflightFixture) preflightR
 func prPreflightProcessTools(t *testing.T) (string, string) {
 	t.Helper()
 
-	bash, err := exec.LookPath("bash")
+	bash, err := testbash.Resolve()
 	if err != nil {
 		t.Fatalf("bash is required to exercise pr-preflight.sh: %v", err)
 	}
@@ -633,20 +661,17 @@ command -v jq >/dev/null
 esac
 `
 	}
-	probe := exec.Command(bash, "--noprofile", "--norc", "-c", probeScript)
-	probe.Env = append(prPreflightWindowsRuntimeEnv(),
+	probeEnvironment := append(prPreflightWindowsRuntimeEnv(),
 		"PATH="+path,
 		"HOME="+msysPath(t.TempDir()),
 		"LC_ALL=C",
 		"LANG=C",
-		"BASH_ENV=",
-		"ENV=",
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_SYSTEM=/dev/null",
 	)
-	if output, err := probe.CombinedOutput(); err != nil {
-		t.Fatalf("selected Bash cannot provide the required preflight boundary: %v\n%s", err, output)
+	if err := testbash.Probe(bash, "preflight process boundary", probeScript, probeEnvironment); err != nil {
+		t.Fatalf("selected Bash cannot provide the required preflight boundary: %v", err)
 	}
 	return bash, path
 }
@@ -739,15 +764,4 @@ func requireFlagValue(t *testing.T, args []string, flag string) string {
 	}
 	t.Fatalf("missing %s value in %q", flag, args)
 	return ""
-}
-
-func exitCode(err error) int {
-	if err == nil {
-		return 0
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return exitErr.ExitCode()
-	}
-	return -1
 }

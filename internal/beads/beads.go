@@ -19,8 +19,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/utils"
@@ -228,12 +230,12 @@ func preferStableBranchWorktreeBeadsDir(beadsDir string) string {
 		return ""
 	}
 
-	branch, err := gitOutput(repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
+	branch, err := selectedBeadsGitOutput(repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil || branch != "HEAD" {
 		return ""
 	}
 
-	head, err := gitOutput(repoRoot, "rev-parse", "HEAD")
+	head, err := selectedBeadsGitOutput(repoRoot, "rev-parse", "HEAD")
 	if err != nil || head == "" {
 		return ""
 	}
@@ -282,9 +284,21 @@ func isDetachedCommitWorktreePath(path string) bool {
 }
 
 func gitOutput(dir string, args ...string) (string, error) {
+	return gitOutputEnv(nil, dir, args...)
+}
+
+// selectedBeadsGitOutput probes the repository of an already selected .beads path.
+// The shared filter retains NOSYSTEM and null GLOBAL/SYSTEM suppression,
+// while discarding custom config paths and inline config overrides.
+func selectedBeadsGitOutput(dir string, args ...string) (string, error) {
+	return gitOutputEnv(gitenv.ScrubRouting(os.Environ()), dir, args...)
+}
+
+func gitOutputEnv(env []string, dir string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...) //nolint:gosec // args are internal, not user-supplied
+	cmd.Env = env
 	output, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -293,7 +307,7 @@ func gitOutput(dir string, args ...string) (string, error) {
 }
 
 func listWorktrees(repoRoot string) ([]worktreeInfo, error) {
-	output, err := gitOutput(repoRoot, "worktree", "list", "--porcelain")
+	output, err := selectedBeadsGitOutput(repoRoot, "worktree", "list", "--porcelain")
 	if err != nil {
 		return nil, err
 	}
@@ -349,6 +363,17 @@ type RedirectInfo struct {
 // (e.g., by shell environment or tooling), but we still need to detect that a redirect exists.
 func GetRedirectInfo() RedirectInfo {
 	return redirectInfoFor(findLocalBdsDirInRepo(), findLocalBeadsDir)
+}
+
+// GetDiscoveredRedirectInfo is GetRedirectInfo without the BEADS_DIR override:
+// it reports the redirect that discovery finds from the cwd, the one the cwd's
+// own workspace holds. GetRedirectInfo cannot answer that once BEADS_DIR is
+// set, because when the repo root's .beads holds no redirect it checks
+// BEADS_DIR itself. A workspace redirect nested below the repo root or
+// inherited by a git worktree is then masked, and a BEADS_DIR naming another
+// workspace's redirected .beads reports that redirect as if the cwd held it.
+func GetDiscoveredRedirectInfo() RedirectInfo {
+	return redirectInfoFor(findLocalBdsDirInRepo(), findDiscoveredLocalBeadsDir)
 }
 
 // GetRedirectInfoFrom is GetRedirectInfo for the workspace at dir rather than
@@ -461,7 +486,12 @@ func findLocalBeadsDir() string {
 	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
 		return canonicalizeBeadsDirPath(beadsDir)
 	}
+	return findDiscoveredLocalBeadsDir()
+}
 
+// findDiscoveredLocalBeadsDir is findLocalBeadsDir without the BEADS_DIR
+// override: the local .beads directory discovery finds from the cwd.
+func findDiscoveredLocalBeadsDir() string {
 	// For worktrees, check worktree-local redirect first (per-worktree override).
 	// Returns the raw worktree .beads dir (not the resolved target) since
 	// findLocalBeadsDir doesn't follow redirects — callers use FollowRedirect.
@@ -643,7 +673,7 @@ func FindBeadsDirFrom(startDir string) string {
 
 	startDir = utils.CanonicalizePath(startDir)
 	repoRoot := ""
-	if out, err := gitOutput(startDir, "rev-parse", "--show-toplevel"); err == nil {
+	if out, err := selectedBeadsGitOutput(startDir, "rev-parse", "--show-toplevel"); err == nil {
 		repoRoot = utils.CanonicalizePath(out)
 	}
 
@@ -773,10 +803,14 @@ func hasBeadsProjectFiles(beadsDir string) bool {
 // when they agree on which ancestors exist. The ceiling is not extended to "/"
 // because it guards against ambient state in a world-writable shared root,
 // which the filesystem root is not.
+//
+// BEADS_CEILING_DIRECTORIES (package ceiling) also ends the walk: no directory
+// at or above a ceiling containing the origin is yielded.
 type AncestorDirWalk struct {
 	next     string
 	origin   string
 	tempRoot string
+	bound    *ceiling.Bound
 	done     bool
 }
 
@@ -784,10 +818,12 @@ type AncestorDirWalk struct {
 // caller's actual discovery start even when startDir begins a later segment of
 // a bounded walk.
 func NewAncestorDirWalk(startDir, originDir string) *AncestorDirWalk {
+	origin := canonicalizeAncestorWalkPath(originDir)
 	return &AncestorDirWalk{
 		next:     canonicalizeAncestorWalkPath(startDir),
-		origin:   canonicalizeAncestorWalkPath(originDir),
+		origin:   origin,
 		tempRoot: canonicalizeAncestorWalkPath(os.TempDir()),
+		bound:    ceiling.For(origin),
 	}
 }
 
@@ -819,12 +855,17 @@ func canonicalizeAncestorWalkPath(path string) string {
 	}
 }
 
-// Next returns the next directory permitted by the temp-root ceiling.
+// Next returns the next directory permitted by the temp-root and
+// BEADS_CEILING_DIRECTORIES ceilings.
 func (w *AncestorDirWalk) Next() (string, bool) {
 	if w == nil || w.done || w.next == "" || w.next == "." {
 		return "", false
 	}
 	dir := w.next
+	if w.bound.Excludes(dir) {
+		w.done = true
+		return "", false
+	}
 	if w.tempRoot != "" && dir == w.tempRoot && dir != w.origin {
 		w.done = true
 		return "", false
@@ -867,11 +908,26 @@ func hasBeadsDatabase(beadsDir string) bool {
 	return false
 }
 
+// ExplicitBeadsDir returns the .beads directory named by the BEADS_DIR
+// environment variable, canonicalized and with any redirect followed, or ""
+// when BEADS_DIR is unset. Unlike FindBeadsDir it does not require the
+// directory to exist or to hold project files, so commands that create a
+// workspace can target the caller's explicit choice instead of CWD.
+func ExplicitBeadsDir() string {
+	beadsDir := os.Getenv("BEADS_DIR")
+	if beadsDir == "" {
+		return ""
+	}
+	return FollowRedirect(canonicalizeBeadsDirPath(beadsDir))
+}
+
 // FindBeadsDir finds the .beads/ directory in the current directory tree.
 // Returns empty string if not found.
 //
 // Resolution order:
-//  1. BEADS_DIR environment variable (highest priority)
+//  1. BEADS_DIR environment variable (highest priority). An explicit
+//     BEADS_DIR is authoritative: when it does not (yet) hold project files,
+//     FindBeadsDir returns "" instead of discovering some other workspace.
 //  2. Walk up from CWD toward repo root boundary, checking each directory
 //     for .beads/ with valid project files. For worktrees, stops at the
 //     worktree root; for non-worktrees, stops at the git root.
@@ -886,18 +942,20 @@ func hasBeadsDatabase(beadsDir string) bool {
 // contents are used as the actual .beads directory path.
 func FindBeadsDir() string {
 	// 1. Check BEADS_DIR environment variable (preferred)
-	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
-		absBeadsDir := canonicalizeBeadsDirPath(beadsDir)
-
-		// Follow redirect if present
-		absBeadsDir = FollowRedirect(absBeadsDir)
-
+	if absBeadsDir := ExplicitBeadsDir(); absBeadsDir != "" {
 		if info, err := os.Stat(absBeadsDir); err == nil && info.IsDir() {
 			// Validate directory contains actual project files
 			if hasBeadsProjectFiles(absBeadsDir) {
 				return absBeadsDir
 			}
 		}
+
+		// The caller named this directory explicitly. Walking up from CWD
+		// here would bind an unrelated ancestor workspace (and PersistentPreRun
+		// would then rewrite BEADS_DIR to it), so `bd init` and every other
+		// command would act on the wrong store. Report "not found" instead,
+		// matching FindDatabasePath.
+		return ""
 	}
 
 	// 2. Walk up from CWD toward the repo root, checking each directory for .beads/.
@@ -1174,6 +1232,7 @@ func ResolveBeadsDirForRepo(repoPath string) string {
 
 func worktreeFallbackBeadsDirForRepo(repoPath string) string {
 	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--git-dir", "--git-common-dir")
+	cmd.Env = gitenv.ScrubRouting(os.Environ())
 	output, err := cmd.Output()
 	if err != nil {
 		return ""

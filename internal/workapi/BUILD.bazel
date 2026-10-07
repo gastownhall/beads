@@ -39,9 +39,11 @@ go_test(
     name = "workapi_test",
     srcs = [
         "bootstrap_test.go",
+        "count_skipwisps_test.go",
         "count_test.go",
         "delete_test.go",
         "detail_test.go",
+        "detail_unresolvable_test.go",
         "list_comments_test.go",
         "list_ephemeral_test.go",
         "list_golden_test.go",
@@ -71,3 +73,25 @@ go_test(
         "//issueops",
     ],
 )
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---
