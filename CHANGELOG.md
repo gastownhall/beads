@@ -192,6 +192,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is still ridden out within one command. A backend that drops a connection
   after the greeting, a dial timeout, and every refusal from a managed (local
   sidecar) backend keep the full transient retry.
+- **`bd init` in a git worktree no longer suggests `--reinit-local`.** A
+  worktree shares the main checkout's `.beads`, so init correctly refuses, but
+  the refusal told users a "genuinely corrupt" database could be rebuilt with
+  `bd init --reinit-local`, which would wipe the database every worktree
+  shares. Inside a worktree (with no caller-supplied `BEADS_DIR`) it now says
+  the worktree already uses the main checkout's database and no init is
+  needed (#6956).
+
 - **`bd ready --explain` no longer reports a pinned dependency as a resolved
   blocker.** The ready query skips a pinned target exactly as it skips a closed
   one, so a `blocks` edge onto a pinned bead never fences its dependent — but
