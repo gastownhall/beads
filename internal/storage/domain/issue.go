@@ -3,10 +3,12 @@ package domain
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/idgen"
+	"github.com/steveyegge/beads/internal/labelns"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/types"
@@ -772,38 +774,8 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 		}
 	}
 
-	if spec.SetLabels != nil {
-		if useWisp {
-			if err := u.labelUC.SetWispLabels(ctx, id, *spec.SetLabels, actor); err != nil {
-				return nil, err
-			}
-		} else {
-			if err := u.labelUC.SetLabels(ctx, id, *spec.SetLabels, actor); err != nil {
-				return nil, err
-			}
-		}
-	}
-	if len(spec.AddLabels) > 0 {
-		if useWisp {
-			if err := u.labelUC.AddWispLabels(ctx, id, spec.AddLabels, actor); err != nil {
-				return nil, err
-			}
-		} else {
-			if err := u.labelUC.AddLabels(ctx, id, spec.AddLabels, actor); err != nil {
-				return nil, err
-			}
-		}
-	}
-	if len(spec.RemoveLabels) > 0 {
-		if useWisp {
-			if err := u.labelUC.RemoveWispLabels(ctx, id, spec.RemoveLabels, actor); err != nil {
-				return nil, err
-			}
-		} else {
-			if err := u.labelUC.RemoveLabels(ctx, id, spec.RemoveLabels, actor); err != nil {
-				return nil, err
-			}
-		}
+	if err := u.applyLabelSpec(ctx, id, spec, actor, useWisp); err != nil {
+		return nil, err
 	}
 
 	if spec.Reparent != nil {
@@ -838,6 +810,48 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 		return nil, fmt.Errorf("ApplyUpdate: re-fetch %s: %w", id, err)
 	}
 	return issue, nil
+}
+
+// applyLabelSpec applies an update's label edits: SetLabels, then
+// RemoveLabels, then AddLabels minus anything also being removed. Removing
+// before adding is what lets a swap inside an exclusive namespace
+// (labels.exclusive-prefixes) - --remove-label tier:a --add-label tier:b, or
+// bd label add --replace - pass the insert guard, the order the direct
+// route's label patch uses too. Dropping removed labels from the adds keeps
+// that route's answer for a label both added and removed: it ends up absent.
+func (u *issueUseCaseImpl) applyLabelSpec(ctx context.Context, id string, spec UpdateSpec, actor string, useWisp bool) error {
+	if spec.SetLabels != nil {
+		set := u.labelUC.SetLabels
+		if useWisp {
+			set = u.labelUC.SetWispLabels
+		}
+		if err := set(ctx, id, *spec.SetLabels, actor); err != nil {
+			return err
+		}
+	}
+	if len(spec.RemoveLabels) > 0 {
+		remove := u.labelUC.RemoveLabels
+		if useWisp {
+			remove = u.labelUC.RemoveWispLabels
+		}
+		if err := remove(ctx, id, spec.RemoveLabels, actor); err != nil {
+			return err
+		}
+	}
+	adds := make([]string, 0, len(spec.AddLabels))
+	for _, label := range spec.AddLabels {
+		if !slices.Contains(spec.RemoveLabels, label) {
+			adds = append(adds, label)
+		}
+	}
+	if len(adds) == 0 {
+		return nil
+	}
+	add := u.labelUC.AddLabels
+	if useWisp {
+		add = u.labelUC.AddWispLabels
+	}
+	return add(ctx, id, adds, actor)
 }
 
 func (u *issueUseCaseImpl) isWispID(ctx context.Context, id string) (bool, error) {
@@ -1023,32 +1037,11 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 		result.PostCreateWrites = true
 	}
 
-	if params.InheritLabelsFromParent && params.ParentID != "" {
-		parentIsWisp, err := u.isWispID(ctx, params.ParentID)
-		if err != nil {
-			return result, fmt.Errorf("create: determine parent tier for label inheritance from %s: %w", params.ParentID, err)
-		}
-		parentLabels, err := u.labelRepo.List(ctx, params.ParentID, LabelOpts{UseWispsTable: parentIsWisp})
-		switch {
-		case dberrors.IsTableNotExist(err):
-			// Older schemas may lack the wisp label table; nothing to inherit.
-		case err != nil:
-			// Swallowing this silently created children missing their
-			// inherited labels (bd-6dnrw.44 P3); the create is transactional,
-			// so failing loud is safe.
-			return result, fmt.Errorf("create: read parent labels for inheritance from %s: %w", params.ParentID, err)
-		default:
-			existing := make(map[string]bool, len(params.Labels))
-			for _, l := range params.Labels {
-				existing[l] = true
-			}
-			for _, l := range parentLabels {
-				if !existing[l] {
-					result.InheritedLabels = append(result.InheritedLabels, l)
-				}
-			}
-		}
+	inherited, err := u.inheritedCreateLabels(ctx, params)
+	if err != nil {
+		return result, err
 	}
+	result.InheritedLabels = inherited
 
 	for _, label := range params.Labels {
 		if err := u.labelRepo.Insert(ctx, issue.ID, label, actor, LabelOpts{UseWispsTable: useWisp}); err != nil {
@@ -1097,6 +1090,52 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 	}
 
 	return result, nil
+}
+
+// inheritedCreateLabels returns the parent labels a create inherits: the
+// parent's labels not already among params.Labels, settled against the
+// workspace's exclusive label namespaces (labels.exclusive-prefixes) the way
+// the direct route's bd create front door settles them. An explicit label
+// drops an inherited one in its namespace; explicit labels that collide, or
+// inherited ones that do, refuse the create with an error that says which,
+// before the per-label insert guard would refuse it naming only the second
+// label.
+func (u *issueUseCaseImpl) inheritedCreateLabels(ctx context.Context, params CreateIssueParams) ([]string, error) {
+	var inherited []string
+	if params.InheritLabelsFromParent && params.ParentID != "" {
+		parentIsWisp, err := u.isWispID(ctx, params.ParentID)
+		if err != nil {
+			return nil, fmt.Errorf("create: determine parent tier for label inheritance from %s: %w", params.ParentID, err)
+		}
+		parentLabels, err := u.labelRepo.List(ctx, params.ParentID, LabelOpts{UseWispsTable: parentIsWisp})
+		switch {
+		case dberrors.IsTableNotExist(err):
+			// Older schemas may lack the wisp label table; nothing to inherit.
+		case err != nil:
+			// Swallowing this silently created children missing their
+			// inherited labels (bd-6dnrw.44 P3); the create is transactional,
+			// so failing loud is safe.
+			return nil, fmt.Errorf("create: read parent labels for inheritance from %s: %w", params.ParentID, err)
+		default:
+			for _, l := range parentLabels {
+				if !slices.Contains(params.Labels, l) {
+					inherited = append(inherited, l)
+				}
+			}
+		}
+	}
+	if len(params.Labels)+len(inherited) < 2 {
+		return inherited, nil
+	}
+	raw, err := u.cfgRepo.GetConfig(ctx, labelns.ConfigKey)
+	if err != nil {
+		return nil, fmt.Errorf("create: read %s: %w", labelns.ConfigKey, err)
+	}
+	inherited, err = labelns.ResolveCreateLabels(labelns.ParsePrefixes(raw), params.Labels, inherited, params.ParentID)
+	if err != nil {
+		return nil, fmt.Errorf("create: %w", err)
+	}
+	return inherited, nil
 }
 
 func validateExplicitIDPrefix(id, prefix, allowedPrefixes string) error {

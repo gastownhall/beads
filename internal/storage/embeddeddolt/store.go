@@ -1013,6 +1013,10 @@ func (s *EmbeddedDoltStore) ImportJSONLData(
 			// that check cannot clobber live rows — matching the server-mode
 			// fallback's conflict-skip behavior.
 			ConflictSkip: true,
+			// Replays existing data, and the exclusive-prefixes config above
+			// lands in this same transaction: exclusive-label violations warn
+			// via bd doctor instead of failing the hydration (bd-7u5ki).
+			ExclusiveLabelConflictWarn: true,
 		}); err != nil {
 			return err
 		}

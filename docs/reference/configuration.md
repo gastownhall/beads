@@ -350,7 +350,7 @@ Labels are free-form, but conventions like `tier:<model>` treat a prefix as sing
 bd config set labels.exclusive-prefixes "tier:,review:"
 ```
 
-With a namespace configured, every write path rejects a second label in it — `bd create -l`, `bd update --add-label`, `bd label add`, and `bd label propagate` — naming the existing label in the error. To swap instead of remove-then-add:
+With a namespace configured, every write path rejects a second label in it — `bd create -l`, `bd update --add-label`, `bd label add`, `bd label propagate`, and `bd label rename` — naming the existing label in the error. To swap instead of remove-then-add:
 
 ```bash
 bd label add bd-a1b2 tier:opus --replace   # removes tier:fable, adds tier:opus
@@ -359,9 +359,10 @@ bd label add bd-a1b2 tier:opus --replace   # removes tier:fable, adds tier:opus
 Boundary behavior:
 
 - **Off by default.** An empty or unset key leaves all labels free-form; multi-valued prefixes like `area:` keep working unless you list them.
-- **Explicit beats inherited.** A child created with `--parent` and an explicit label in an exclusive namespace drops the parent's label in that namespace instead of failing.
-- **Import warns instead of failing.** `bd import` replays history that may predate the config, so violations are kept and reported, not rejected.
-- **`bd doctor` reports existing violations** (server mode), so you can clean up before or after turning enforcement on.
+- **Explicit beats inherited.** A child created with `--parent` and an explicit label in an exclusive namespace drops the parent's label in that namespace instead of failing. A parent that already carries two labels in one namespace fails the create with an error naming the parent: pick one with `-l`, or skip inheritance with `--no-inherit-labels`.
+- **Rename refuses only new violations.** `bd label rename` fails when an issue carrying the old label already has a different label in the new label's namespace. Renaming within one namespace (`tier:fable` to `tier:opus`) or onto a label the issue already has goes through.
+- **Import warns instead of failing.** `bd import` replays history that may predate the config, so violations are kept and reported (`exclusive_label_conflicts` in `--json` output), not rejected. The empty-database auto-import from `.beads/issues.jsonl` keeps them the same way.
+- **`bd doctor` reports existing violations** (server mode), so you can clean up before or after turning enforcement on. It also catches the violations the write check cannot see: two concurrent writes each adding one label in the same namespace, or a Dolt merge combining both sides' labels.
 
 ### Sequential Counter IDs
 

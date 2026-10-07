@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/labelns"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
@@ -67,11 +68,9 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 		issue.Ephemeral = true
 	}
 	if attempt.InheritLabelsFromParent && attempt.ParentID != "" {
-		labels, err := GetLabelsInTx(ctx, tx, "", attempt.ParentID)
-		if err != nil {
+		if err := inheritParentLabelsInTx(ctx, tx, batch.ExclusiveLabelPrefixes, issue, attempt.ParentID); err != nil {
 			return publicops.CreateResult{}, nil, err
 		}
-		issue.Labels = append(issue.Labels, labels...)
 	}
 	childCounterChanged := false
 	if issue.ID == "" && attempt.ParentID != "" {
@@ -115,6 +114,24 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 	}
 	OverlayCreateTimestamps(hydrated, issue)
 	return publicops.CreateResult{Issue: hydrated}, tables, nil
+}
+
+// inheritParentLabelsInTx appends the parent's labels to a create that asked
+// to inherit them. An explicit label wins over an inherited one in its
+// exclusive namespace (labels.exclusive-prefixes), the rule bd create's front
+// door applies before it asks for a create; refusing instead would fail every
+// child that overrides its parent's tier: label.
+func inheritParentLabelsInTx(ctx context.Context, tx *sql.Tx, prefixes []string, issue *types.Issue, parentID string) error {
+	labels, err := GetLabelsInTx(ctx, tx, "", parentID)
+	if err != nil {
+		return err
+	}
+	labels, err = labelns.ResolveCreateLabels(prefixes, issue.Labels, labels, parentID)
+	if err != nil {
+		return err
+	}
+	issue.Labels = append(issue.Labels, labels...)
+	return nil
 }
 
 // skippedDependency records an edge the batch engine declined to write.

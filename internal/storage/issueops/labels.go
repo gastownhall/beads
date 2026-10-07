@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/labelns"
@@ -160,7 +161,7 @@ func addLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 			eventTable = et
 		}
 	}
-	if err := checkExclusiveLabelInTx(ctx, tx, labelTable, issueID, label); err != nil {
+	if err := CheckExclusiveLabelInTx(ctx, tx, labelTable, issueID, label); err != nil {
 		return err
 	}
 	//nolint:gosec // G201: labelTable is from WispTableRouting ("labels" or "wisp_labels")
@@ -195,20 +196,26 @@ func addLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 	return RecordVersionInTx(ctx, tx, issueID, actor)
 }
 
-// checkExclusiveLabelInTx rejects the add when the label falls in a
+// CheckExclusiveLabelInTx rejects the add when the label falls in a
 // configured exclusive namespace (labels.exclusive-prefixes, bd-7u5ki) the
-// issue already carries a different label in. It lives at the shared insert
-// choke point so every interactive mutation path — bd label add, bd update
-// --add-label, bd label propagate — gets the same guard. With no prefixes
-// configured (the default) only the config lookup runs.
-func checkExclusiveLabelInTx(ctx context.Context, tx DBTX, labelTable, issueID, label string) error {
-	raw, err := GetConfigInTx(ctx, tx, labelns.ConfigKey)
+// issue already carries a different label in. It runs at both insert choke
+// points: addLabelInTx here, which every direct and embedded mutation path
+// reaches (bd label add, bd update --add-label, bd label propagate), and the
+// proxied server's LabelSQLRepository.Insert. With no prefixes configured (the
+// default) only the config lookup runs. Re-adding a label the issue already
+// carries passes even on an issue that already violates the namespace: the
+// INSERT IGNORE is a no-op there, and refusing it would only fail a write that
+// changes nothing.
+//
+// The guard is a read-then-insert with no row lock, so two transactions adding
+// different labels in one namespace to the same issue can each pass and both
+// commit, and a Dolt merge can union two individually valid label sets into a
+// violation. Neither is caught here; the bd doctor exclusive-label check
+// (FindExclusiveLabelViolations) is the backstop that reports them.
+func CheckExclusiveLabelInTx(ctx context.Context, tx DBTX, labelTable, issueID, label string) error {
+	prefixes, err := exclusiveLabelPrefixesInTx(ctx, tx)
 	if err != nil {
 		return fmt.Errorf("add label: %w", err)
-	}
-	prefixes := labelns.ParsePrefixes(raw)
-	if len(prefixes) == 0 {
-		return nil
 	}
 	prefix := labelns.Match(prefixes, label)
 	if prefix == "" {
@@ -218,13 +225,80 @@ func checkExclusiveLabelInTx(ctx context.Context, tx DBTX, labelTable, issueID, 
 	if err != nil {
 		return fmt.Errorf("add label: %w", err)
 	}
+	if slices.Contains(existing, label) {
+		return nil
+	}
 	for _, have := range existing {
-		if have != label && labelns.Match(prefixes, have) == prefix {
+		if labelns.Match(prefixes, have) == prefix {
 			return fmt.Errorf("cannot add label %q to %s: namespace %q is exclusive (%s) and the issue already has %q — remove it first, or swap in one step with 'bd label add --replace'",
 				label, issueID, prefix, labelns.ConfigKey, have)
 		}
 	}
 	return nil
+}
+
+// exclusiveLabelPrefixesInTx reads and parses the workspace's exclusive label
+// prefixes. A missing key reads as no prefixes, so an unconfigured workspace
+// gets nil.
+func exclusiveLabelPrefixesInTx(ctx context.Context, tx DBTX) ([]string, error) {
+	raw, err := GetConfigInTx(ctx, tx, labelns.ConfigKey)
+	if err != nil {
+		return nil, err
+	}
+	return labelns.ParsePrefixes(raw), nil
+}
+
+// checkExclusiveRenameInTx refuses a rename that would give an issue a second
+// label in an exclusive namespace: newLabel falls in one, oldLabel does not,
+// and a carrier of oldLabel already holds a different label in newLabel's
+// namespace. A rename within one namespace swaps one label for another and
+// never adds one, and a carrier already holding newLabel merges into it, so
+// neither can create a violation and both pass. Carriers are checked in id
+// order, so the error names the same offender on every run.
+func checkExclusiveRenameInTx(ctx context.Context, tx DBTX, oldLabel, newLabel string) error {
+	prefixes, err := exclusiveLabelPrefixesInTx(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("rename label: %w", err)
+	}
+	prefix := labelns.Match(prefixes, newLabel)
+	if prefix == "" || labelns.Match(prefixes, oldLabel) == prefix {
+		return nil
+	}
+	for _, plane := range renameLabelPlanes {
+		carriers, err := issueIDsWithLabelInTx(ctx, tx, plane.labelTable, oldLabel)
+		if err != nil {
+			return fmt.Errorf("rename label: query issues carrying %q: %w", oldLabel, err)
+		}
+		if len(carriers) == 0 {
+			continue
+		}
+		slices.Sort(carriers)
+		labelsByID, err := GetLabelsForIssuesFromTableInTx(ctx, tx, plane.labelTable, carriers)
+		if err != nil {
+			return fmt.Errorf("rename label: %w", err)
+		}
+		for _, id := range carriers {
+			if have := exclusiveRenameBlocker(prefixes, prefix, newLabel, labelsByID[id]); have != "" {
+				return fmt.Errorf("cannot rename label %q to %q: namespace %q is exclusive (%s) and %s already has %q — remove it first",
+					oldLabel, newLabel, prefix, labelns.ConfigKey, id, have)
+			}
+		}
+	}
+	return nil
+}
+
+// exclusiveRenameBlocker returns the label in prefix's namespace that keeps a
+// carrier from taking newLabel, or "" when the rename is safe for it.
+func exclusiveRenameBlocker(prefixes []string, prefix, newLabel string, labels []string) string {
+	if slices.Contains(labels, newLabel) {
+		return ""
+	}
+	for _, have := range labels {
+		if labelns.Match(prefixes, have) == prefix {
+			return have
+		}
+	}
+	return ""
 }
 
 // ExclusiveLabelViolation reports an issue carrying more than one label in a
@@ -361,12 +435,18 @@ var ErrRenameLabelSameName = errors.New("rename label: old and new label are the
 // rename mints nothing. oldLabel and
 // newLabel equal after trimming is refused with ErrRenameLabelSameName
 // rather than treated as a no-op -- see that error's doc for why silently
-// proceeding would wipe the label instead of leaving it alone.
+// proceeding would wipe the label instead of leaving it alone. A rename that
+// would give a carrier a second label in an exclusive namespace
+// (labels.exclusive-prefixes) is refused before any write; see
+// checkExclusiveRenameInTx.
 func RenameLabelInTx(ctx context.Context, tx DBTX, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error) {
 	if strings.TrimSpace(oldLabel) == strings.TrimSpace(newLabel) {
 		return 0, 0, nil, ErrRenameLabelSameName
 	}
 	if err := types.CheckFieldLen("label", newLabel); err != nil {
+		return 0, 0, nil, err
+	}
+	if err := checkExclusiveRenameInTx(ctx, tx, oldLabel, newLabel); err != nil {
 		return 0, 0, nil, err
 	}
 	for _, plane := range renameLabelPlanes {

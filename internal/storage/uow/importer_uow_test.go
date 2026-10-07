@@ -2,10 +2,12 @@ package uow
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/labelns"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -380,6 +382,43 @@ func TestImporterUOW(t *testing.T) {
 		// Restore for any later subtest.
 		if err := kit.SetConfig(ctx, "issue_prefix", "imp"); err != nil {
 			t.Fatalf("restore issue_prefix: %v", err)
+		}
+	})
+
+	t.Run("ExclusiveLabelViolationsWarnAndKeepLabels", func(t *testing.T) {
+		// Import replays history that may predate labels.exclusive-prefixes
+		// (bd-7u5ki): a violation lands as written and is reported in the
+		// result, the proxied twin of the classic import's callback.
+		if err := kit.SetConfig(ctx, labelns.ConfigKey, "tier:"); err != nil {
+			t.Fatalf("set %s: %v", labelns.ConfigKey, err)
+		}
+		t.Cleanup(func() {
+			if err := kit.SetConfig(ctx, labelns.ConfigKey, ""); err != nil {
+				t.Errorf("clear %s: %v", labelns.ConfigKey, err)
+			}
+		})
+
+		when := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+		result, err := imp.ImportBatch(ctx, publicops.ImportBatchRequest{
+			Actor: "importer-test",
+			Issues: []*types.Issue{{
+				ID: "imp-excl", Title: "Carries two tiers", Status: types.StatusOpen,
+				IssueType: types.TypeTask, Priority: 2,
+				Labels:    []string{"tier:fable", "tier:opus"},
+				CreatedAt: when, UpdatedAt: when,
+			}},
+			SkipPrefixValidation: true,
+			Source:               "exclusive.jsonl",
+		})
+		if err != nil {
+			t.Fatalf("ImportBatch must warn, not fail, on an exclusive-label violation: %v", err)
+		}
+		want := []publicops.ExclusiveLabelConflict{{IssueID: "imp-excl", Prefix: "tier:", Labels: []string{"tier:fable", "tier:opus"}}}
+		if !reflect.DeepEqual(result.ExclusiveLabelConflicts, want) {
+			t.Fatalf("ExclusiveLabelConflicts = %#v, want %#v", result.ExclusiveLabelConflicts, want)
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM labels WHERE issue_id = ?", "imp-excl"); got != 2 {
+			t.Fatalf("labels kept = %d, want 2", got)
 		}
 	})
 

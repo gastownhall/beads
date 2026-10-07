@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -220,44 +219,5 @@ func TestFindExclusiveLabelViolations(t *testing.T) {
 	none, err := storageissueops.FindExclusiveLabelViolations(ctx, st.UnderlyingDB(), nil)
 	if err != nil || none != nil {
 		t.Fatalf("expected nil, nil for empty prefixes, got %v, %v", none, err)
-	}
-}
-
-func TestExclusiveLabelEvictions(t *testing.T) {
-	prefixes := []string{"tier:", "review:"}
-
-	got := exclusiveLabelEvictions(prefixes, []string{"tier:fable", "area:x", "review:opus"}, []string{"tier:opus"})
-	if !slices.Equal(got, []string{"tier:fable"}) {
-		t.Fatalf("only the added label's namespace is swapped, got %v", got)
-	}
-	// A label being added is never evicted, even when the issue already has it.
-	got = exclusiveLabelEvictions(prefixes, []string{"tier:opus", "tier:fable"}, []string{"tier:opus"})
-	if !slices.Equal(got, []string{"tier:fable"}) {
-		t.Fatalf("re-adding a present label still evicts its siblings, got %v", got)
-	}
-	got = exclusiveLabelEvictions(prefixes, []string{"tier:fable", "review:opus"}, []string{"area:x"})
-	if len(got) != 0 {
-		t.Fatalf("a label outside every exclusive namespace evicts nothing, got %v", got)
-	}
-	got = exclusiveLabelEvictions(nil, []string{"tier:fable"}, []string{"tier:opus"})
-	if len(got) != 0 {
-		t.Fatalf("no exclusive prefixes configured: a plain add, got %v", got)
-	}
-}
-
-func TestDropConflictingInheritedLabels(t *testing.T) {
-	prefixes := []string{"tier:"}
-
-	got := dropConflictingInheritedLabels([]string{"tier:opus"}, []string{"tier:fable", "area:x"}, prefixes)
-	if len(got) != 1 || got[0] != "area:x" {
-		t.Fatalf("explicit tier: label should evict inherited one, got %v", got)
-	}
-	got = dropConflictingInheritedLabels([]string{"area:y"}, []string{"tier:fable"}, prefixes)
-	if len(got) != 1 || got[0] != "tier:fable" {
-		t.Fatalf("inherited label without explicit conflict should survive, got %v", got)
-	}
-	got = dropConflictingInheritedLabels([]string{"tier:opus"}, []string{"tier:fable"}, nil)
-	if len(got) != 1 || got[0] != "tier:fable" {
-		t.Fatalf("no exclusive prefixes: inheritance unchanged, got %v", got)
 	}
 }

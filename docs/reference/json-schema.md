@@ -222,6 +222,9 @@ Returns a summary object when `--json` is active:
 - `tie_kept_local_ids` (string[]): Equal-`updated_at` rows where local state won
 - `stale_skipped_ids` (string[]): Rows older than the local issue, skipped
 - `skipped_dependencies` (string[]): Dependency edges whose target id was absent
+- `exclusive_label_conflicts` (string[], optional): Imported issues carrying more
+  than one label in an exclusive namespace (`labels.exclusive-prefixes`), one
+  entry per issue and namespace; import keeps the labels as written
 - `dry_run` (boolean): Whether `--dry-run` was active
 
 ### bd export --json

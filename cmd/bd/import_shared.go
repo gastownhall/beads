@@ -200,7 +200,7 @@ func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, 
 		},
 		ExclusiveLabelConflictWarn: true,
 		OnExclusiveLabelConflict: func(issueID, prefix string, labels []string) {
-			conflict := fmt.Sprintf("%s: namespace %q has %s", issueID, prefix, strings.Join(labels, ", "))
+			conflict := formatExclusiveLabelConflict(issueID, prefix, labels)
 			if _, ok := exclusiveLabelConflictSet[conflict]; ok {
 				return
 			}
@@ -226,6 +226,12 @@ func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, 
 	result := assembleImportResult(issues, staleSkippedIDs, changePlan, staleRejectedSet, skippedDependencies)
 	result.ExclusiveLabelConflicts = exclusiveLabelConflicts
 	return result, nil
+}
+
+// formatExclusiveLabelConflict renders one exclusive-namespace violation the
+// way both import modes report it in exclusive_label_conflicts.
+func formatExclusiveLabelConflict(issueID, prefix string, labels []string) string {
+	return fmt.Sprintf("%s: namespace %q has %s", issueID, prefix, strings.Join(labels, ", "))
 }
 
 // assembleImportResult folds the batch write's in-transaction outcomes (stale

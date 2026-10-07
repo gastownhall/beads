@@ -206,6 +206,9 @@ func applyLabelEdit(ctx context.Context, issueIDs []string, labels []string, ope
 				outcome.changed[i] = !before[label]
 			}
 		}
+		if len(exclusivePrefixes) > 0 && result.Changed {
+			outcome.evicted = issuePatch.Labels.Remove
+		}
 		outcomes = append(outcomes, outcome)
 	}
 	return reportLabelEdit(outcomes, operation, jsonOutput)
@@ -263,11 +266,14 @@ const (
 // moved. The label set is per issue rather than one shared slice because
 // --prefix resolves a different set for each issue from its own current
 // labels; applyLabelEdit's fixed caller-supplied set is the degenerate case
-// where every outcome repeats it.
+// where every outcome repeats it. evicted lists the labels `bd label add
+// --replace` swapped out to make room (bd-7u5ki), taken from the same pre-edit
+// read as changed.
 type labelEditOutcome struct {
 	issueID string
 	labels  []string
 	changed []bool
+	evicted []string
 }
 
 // labelOperationGerund returns the present-participle form of a
@@ -293,6 +299,8 @@ func labelOperationGerund(operation string) string {
 // as such — status "unchanged", and a line of its own — rather than as the
 // operation, so a no-op cannot be read as a confirmation (GH#5988). It is
 // still not an error: the exit code stays 0 so idempotent callers keep working.
+// Labels --replace evicted are reported as removals, so a swap never drops a
+// label without saying so.
 func reportLabelEdit(outcomes []labelEditOutcome, operation string, jsonOut bool) error {
 	if jsonOut {
 		// One row per (issue, label) pair; the hint is the one-label-per-issue
@@ -307,6 +315,13 @@ func reportLabelEdit(outcomes []labelEditOutcome, operation string, jsonOut bool
 				}
 				results = append(results, map[string]interface{}{
 					"status":   status,
+					"issue_id": outcome.issueID,
+					"label":    label,
+				})
+			}
+			for _, label := range outcome.evicted {
+				results = append(results, map[string]interface{}{
+					"status":   labelOperationRemoved,
 					"issue_id": outcome.issueID,
 					"label":    label,
 				})
@@ -330,6 +345,10 @@ func reportLabelEdit(outcomes []labelEditOutcome, operation string, jsonOut bool
 		if len(moved) > 0 {
 			fmt.Printf("%s %s %s '%s' %s %s\n", ui.RenderPass("✓"), verb,
 				labelNoun(moved, "label", "labels"), strings.Join(moved, "', '"), prep, outcome.issueID)
+		}
+		if len(outcome.evicted) > 0 {
+			fmt.Printf("%s Removed %s '%s' from %s\n", ui.RenderPass("✓"),
+				labelNoun(outcome.evicted, "label", "labels"), strings.Join(outcome.evicted, "', '"), outcome.issueID)
 		}
 		if len(unmoved) == 0 {
 			continue
@@ -1031,7 +1050,7 @@ func reportLabelRename(oldLabel, newLabel string, renamed, merged int, jsonOut b
 }
 
 func init() {
-	labelAddCmd.Flags().Bool("replace", false, "In exclusive label namespaces (labels.exclusive-prefixes), swap out any existing label in the same namespace instead of failing")
+	labelAddCmd.Flags().Bool("replace", false, "In exclusive label namespaces (labels.exclusive-prefixes), swap out any existing label in the same namespace instead of failing; swapped-out labels are reported as removals (status \"removed\" in --json output)")
 
 	// Issue ID completions
 	labelAddCmd.ValidArgsFunction = issueIDCompletion

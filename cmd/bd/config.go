@@ -99,9 +99,10 @@ Exclusive Label Namespaces:
     bd config set labels.exclusive-prefixes "tier:,review:"
 
   Adding a second label in an exclusive namespace is then rejected on every
-  write path ('bd label add --replace' swaps instead). Import warns and keeps
-  violating labels; 'bd doctor' reports existing violations. Unset the key to
-  restore fully free-form labels (the default).
+  write path, 'bd label rename' included ('bd label add --replace' swaps
+  instead). Import warns and keeps violating labels; 'bd doctor' reports
+  existing violations, including any that concurrent writes or a Dolt merge
+  let through. Unset the key to restore fully free-form labels (the default).
 
 Suppressing Doctor Warnings:
   Suppress specific bd doctor warnings by check name slug:

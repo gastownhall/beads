@@ -73,6 +73,10 @@ Example:
 			}
 			inheritedLabels, _ = store.GetLabels(ctx, parentID)
 		}
+		inheritedLabels, err = resolveInheritedLabels(ctx, store, labels, inheritedLabels, parentID)
+		if err != nil {
+			return HandleError("%v", err)
+		}
 
 		issue := &types.Issue{
 			Title:     title,

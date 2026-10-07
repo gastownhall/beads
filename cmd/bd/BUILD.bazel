@@ -878,6 +878,7 @@ go_test(
         "kv_test.go",
         "label_embedded_test.go",
         "label_exclusive_test.go",
+        "label_exclusive_unit_test.go",
         "label_list_all_test.go",
         "label_normalization_test.go",
         "label_prefix_test.go",

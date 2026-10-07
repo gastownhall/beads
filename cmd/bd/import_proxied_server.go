@@ -171,7 +171,12 @@ func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memorie
 		for _, dep := range batch.SkippedDependencies {
 			skippedDependencies = append(skippedDependencies, fmt.Sprintf("%s -> %s: %s", dep.IssueID, dep.DependsOnID, dep.Reason))
 		}
-		applyImportOutcome(&result, assembleImportResult(issues, staleSkippedIDs, changePlan, staleRejectedSet, skippedDependencies))
+		outcome := assembleImportResult(issues, staleSkippedIDs, changePlan, staleRejectedSet, skippedDependencies)
+		for _, conflict := range batch.ExclusiveLabelConflicts {
+			outcome.ExclusiveLabelConflicts = append(outcome.ExclusiveLabelConflicts,
+				formatExclusiveLabelConflict(conflict.IssueID, conflict.Prefix, conflict.Labels))
+		}
+		applyImportOutcome(&result, outcome)
 	} else {
 		result.Skipped += len(staleSkippedIDs)
 		result.StaleSkippedIDs = append(result.StaleSkippedIDs, staleSkippedIDs...)

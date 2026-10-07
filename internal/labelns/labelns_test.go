@@ -2,6 +2,7 @@ package labelns
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -88,5 +89,43 @@ func TestConflicts(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Conflicts = %v, want %v", got, want)
+	}
+}
+
+func TestResolveCreateLabels(t *testing.T) {
+	prefixes := []string{"tier:", "review:"}
+
+	got, err := ResolveCreateLabels(prefixes, []string{"tier:opus"}, []string{"tier:fable", "area:x"}, "bd-p")
+	if err != nil || !reflect.DeepEqual(got, []string{"area:x"}) {
+		t.Fatalf("explicit tier: label should evict the inherited one, got %v, %v", got, err)
+	}
+	got, err = ResolveCreateLabels(prefixes, []string{"area:y"}, []string{"tier:fable"}, "bd-p")
+	if err != nil || !reflect.DeepEqual(got, []string{"tier:fable"}) {
+		t.Fatalf("inherited label without an explicit conflict should survive, got %v, %v", got, err)
+	}
+	got, err = ResolveCreateLabels(nil, []string{"tier:opus"}, []string{"tier:fable"}, "bd-p")
+	if err != nil || !reflect.DeepEqual(got, []string{"tier:fable"}) {
+		t.Fatalf("no exclusive prefixes: inheritance unchanged, got %v, %v", got, err)
+	}
+
+	// Explicit labels that collide among themselves are the caller's own
+	// mistake: refused, naming both.
+	_, err = ResolveCreateLabels(prefixes, []string{"tier:opus", "tier:fable"}, nil, "bd-p")
+	if err == nil || !strings.Contains(err.Error(), "tier:opus, tier:fable") || strings.Contains(err.Error(), "bd-p") {
+		t.Fatalf("explicit conflict should be refused without blaming the parent, got %v", err)
+	}
+
+	// A violating parent: the error says the labels came from the parent and
+	// how to get past it, instead of naming labels the caller never typed as
+	// if they had.
+	_, err = ResolveCreateLabels(prefixes, []string{"area:y"}, []string{"tier:fable", "tier:opus"}, "bd-p")
+	if err == nil || !strings.Contains(err.Error(), "parent bd-p carries tier:fable, tier:opus") ||
+		!strings.Contains(err.Error(), "--no-inherit-labels") {
+		t.Fatalf("inherited conflict should name the parent and the escape hatch, got %v", err)
+	}
+	// ...unless an explicit label settles that namespace, which drops both.
+	got, err = ResolveCreateLabels(prefixes, []string{"tier:haiku"}, []string{"tier:fable", "tier:opus"}, "bd-p")
+	if err != nil || len(got) != 0 {
+		t.Fatalf("explicit label should settle a violating parent's namespace, got %v, %v", got, err)
 	}
 }

@@ -178,6 +178,7 @@ go_test(
         "//internal/configfile",
         "//internal/doltserver",
         "//internal/hooks",
+        "//internal/labelns",
         "//internal/procid",
         "//internal/storage",
         "//internal/storage/dberrors",

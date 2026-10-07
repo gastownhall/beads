@@ -124,3 +124,47 @@ func Conflicts(prefixes, labels []string) []Conflict {
 	}
 	return conflicts
 }
+
+// ResolveCreateLabels settles exclusive-namespace collisions for a create
+// that inherits labels from a parent. An explicit label wins over an
+// inherited one in the same namespace: the inherited label is dropped, so a
+// child can override e.g. a tier: routing label without needing
+// --no-inherit-labels. It returns the inherited labels to keep, in their
+// input order.
+//
+// Two collisions are refused instead: explicit labels that conflict among
+// themselves, and inherited labels that conflict among themselves (a parent
+// labeled before the namespace became exclusive, or imported with a kept
+// violation). parentID only names the parent in the second error, so the
+// caller learns which labels it never typed. After the drop no namespace
+// holds both explicit and inherited labels, so a nil error means the merged
+// label set is conflict-free.
+func ResolveCreateLabels(prefixes, explicit, inherited []string, parentID string) ([]string, error) {
+	if len(prefixes) == 0 {
+		return inherited, nil
+	}
+	if conflicts := Conflicts(prefixes, explicit); len(conflicts) > 0 {
+		c := conflicts[0]
+		return nil, fmt.Errorf("namespace %q is exclusive (%s) and allows at most one label, got %s",
+			c.Prefix, ConfigKey, strings.Join(c.Labels, ", "))
+	}
+	taken := make(map[string]bool)
+	for _, label := range explicit {
+		if prefix := Match(prefixes, label); prefix != "" {
+			taken[prefix] = true
+		}
+	}
+	kept := make([]string, 0, len(inherited))
+	for _, label := range inherited {
+		if prefix := Match(prefixes, label); prefix != "" && taken[prefix] {
+			continue
+		}
+		kept = append(kept, label)
+	}
+	if conflicts := Conflicts(prefixes, kept); len(conflicts) > 0 {
+		c := conflicts[0]
+		return nil, fmt.Errorf("namespace %q is exclusive (%s) and allows at most one label, but parent %s carries %s — choose one with -l, or skip inheritance with --no-inherit-labels",
+			c.Prefix, ConfigKey, parentID, strings.Join(c.Labels, ", "))
+	}
+	return kept, nil
+}
