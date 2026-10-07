@@ -5030,21 +5030,36 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 	// require) or of bazel-integration (which a caller may switch off,
 	// while the server tier always runs remotely).
 	workflow := readCIWorkflow(t, bazelWorkflowName)
-	for _, c := range []struct{ job, config, logs string }{
-		{bazelProxiedJobName, "doltserver-proxied", "bazel-proxied-testlogs"},
-		{bazelServerJobName, "doltserver-integration", "bazel-server-storage-testlogs"},
+	for _, c := range []struct {
+		job, config, logs string
+		wantSteps         int
+	}{
+		{bazelProxiedJobName, "doltserver-proxied", "bazel-proxied-testlogs", 8},
+		// One more than bazel-proxied: a "Shard balance" step (rbe-ci-cost-
+		// latency-study.md recommendation 4), since this is the tier whose
+		// last shard has trailed the rest by 4.3-4.5 min in 2 of 8 runs.
+		{bazelServerJobName, "doltserver-integration", "bazel-server-storage-testlogs", 9},
 	} {
 		job := workflow.job(t, c.job)
 		if job.TimeoutMinutes == 0 || job.TimeoutMinutes > 30 {
 			t.Errorf("%s timeout-minutes = %d; it runs remotely only (longest shard ~2-8 min), keep it at most 30", c.job, job.TimeoutMinutes)
 		}
 		assertBazelTierStep(t, job, c.job, c.config)
-		if n := len(job.Steps); n != 8 {
-			t.Errorf("%s has %d steps, want checkout, setup-bazel, the flaky query, the tier, check_testcases.py, check_shard_coverage.py, log upload, result recorder", c.job, n)
+		if n := len(job.Steps); n != c.wantSteps {
+			t.Errorf("%s has %d steps, want %d (checkout, setup-bazel, the flaky query, the tier, check_testcases.py, check_shard_coverage.py, [shard_budget.py,] log upload, result recorder)", c.job, n, c.wantSteps)
 		}
 		logs := job.step(t, "Upload test logs")
 		if logs.If != "${{ failure() && steps.test.outcome != 'skipped' }}" || logs.With["name"] != c.logs || !strings.HasPrefix(logs.Uses, "actions/upload-artifact@") {
 			t.Errorf("%s test-log upload: if=%q name=%q uses=%q", c.job, logs.If, logs.With["name"], logs.Uses)
+		}
+	}
+	if serverStorage := workflow.job(t, bazelServerJobName); true {
+		budget := serverStorage.step(t, "Shard balance")
+		if budget.If != "${{ always() && steps.test.outcome != 'skipped' }}" {
+			t.Errorf("%s Shard balance step if=%q", bazelServerJobName, budget.If)
+		}
+		if want := `python3 tools/bazel/shard_budget.py --bep "$RUNNER_TEMP/bazel-bep.json"`; strings.TrimSpace(budget.Run) != want {
+			t.Errorf("%s Shard balance step runs %q, want %q", bazelServerJobName, strings.TrimSpace(budget.Run), want)
 		}
 	}
 	for name, j := range workflow.Jobs {

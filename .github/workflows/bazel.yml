@@ -1707,6 +1707,15 @@ jobs:
           --suite //internal/storage/dolt:dolt_server_full_test .github/scripts/server-storage-test-shard.sh 16
           --whole //internal/storage/dolt:dolt_server_conformance_test
 
+      # rbe-ci-cost-latency-study.md recommendation 4: this tier's last
+      # shard has trailed the rest by 4.3-4.5 min in 2 of 8 runs. Warns
+      # (::warning) when the slowest shard this run is far above the
+      # median; does not fail the job yet (--fail-on-imbalance switches
+      # that on once the budget has run clean for a while).
+      - name: Shard balance
+        if: ${{ always() && steps.test.outcome != 'skipped' }}
+        run: python3 tools/bazel/shard_budget.py --bep "$RUNNER_TEMP/bazel-bep.json"
+
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
