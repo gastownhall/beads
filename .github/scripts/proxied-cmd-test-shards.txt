@@ -258,6 +258,7 @@
 
 30 2 TestProxiedServerDelete
 30 2 TestProxiedServerDeleteForceOrphans
+30 2 TestProxiedServerIfRevisionCloseRestoresPerIDFences
 30 2 TestProxiedServerListComments
 30 2 TestProxiedServerPromote
 30 2 TestProxiedServerTypesAgreeWithCreate
