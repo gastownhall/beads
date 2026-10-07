@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	neturl "net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -112,8 +114,8 @@ func usableSyncRemoteRef(value string) string {
 // NormalizeGitRemoteUrl: an explicit git+ scheme (file, http, https, ssh),
 // or, when the URL ends in .git, a file/http/https/ssh URL, an scp-style
 // [user@]host:path whose host carries a dot or an @, a local path
-// (absolute, or relative with ./ or ../), or a scheme-less host/path, all
-// of which dolt rewrites to the matching git+ scheme.
+// (absolute on this platform, or relative with ./ or ../), or a scheme-less
+// host/path, all of which dolt rewrites to the matching git+ scheme.
 func isGitBackedDoltRemoteURL(url string) bool {
 	url = strings.TrimSpace(url)
 	lower := strings.ToLower(url)
@@ -136,15 +138,43 @@ func isGitBackedDoltRemoteURL(url string) bool {
 		}
 		return false
 	}
-	if colon := strings.IndexByte(url, ':'); colon > 0 {
-		host := url[:colon]
+	if strings.IndexByte(url, ':') > 0 {
 		// scp-style: dolt takes the host only with a dot or an @ in it, so a
-		// Windows drive letter is not mistaken for a host.
-		return !strings.Contains(host, "/") && (strings.Contains(host, ".") || strings.Contains(host, "@")) && colon < len(url)-1
+		// Windows drive letter is not mistaken for a host. Anything else with
+		// a colon falls through to the path rules, as it does in dolt.
+		if isScpLikeForDolt(url) || looksLikeLocalPathForDolt(url) {
+			return true
+		}
+		// Scheme-less host/path becomes git+https when it parses as a URL; a
+		// colon that is not a port (host:org/repo.git) does not.
+		u, err := neturl.Parse("git+https://" + url)
+		return err == nil && u.Host != ""
 	}
 	// A local path (absolute, ./ or ../) becomes git+file; anything else
 	// scheme-less is host/path and becomes git+https.
 	return true
+}
+
+// isScpLikeForDolt mirrors dolt's isScpLikeGitRemote: no scheme, a host
+// before the first colon with no slash in it and a dot or an @, and a path
+// after it.
+func isScpLikeForDolt(url string) bool {
+	if strings.Contains(url, "://") {
+		return false
+	}
+	colon := strings.IndexByte(url, ':')
+	if colon <= 0 || colon == len(url)-1 {
+		return false
+	}
+	host := url[:colon]
+	return !strings.Contains(host, "/") && (strings.Contains(host, ".") || strings.Contains(host, "@"))
+}
+
+// looksLikeLocalPathForDolt mirrors dolt's looksLikeLocalPath: absolute on
+// this platform (a drive-letter or UNC path on Windows), or relative with ./
+// or ../.
+func looksLikeLocalPathForDolt(url string) bool {
+	return filepath.IsAbs(url) || strings.HasPrefix(url, "./") || strings.HasPrefix(url, "../")
 }
 
 var warnedRefOnNonGitRemote sync.Once
@@ -290,11 +320,27 @@ func doltRemoteURL(remote string) string {
 //
 // HTTP(S) userinfo is transport credentials and is dropped whole. SSH userinfo
 // selects the remote account (git@host is not a secret and is needed for the
-// hint to be runnable), so only a password component is dropped.
+// hint to be runnable), so only a password component is dropped. A
+// scheme-less host/path is https for dolt (NormalizeGitRemoteUrl), so its
+// userinfo is dropped whole too, and the result is spelled https://: the
+// userinfo was what kept a dotted host from reading as an scp address
+// (x-access-token:tok@host.example:443/repo.git is https for dolt and git
+// both; host.example:443/repo.git would be ssh for both), and the result is
+// persisted and pasted as a URL, not only shown. An scp form and a local
+// path have no place for a password.
 func redactRemoteURL(raw string) string {
 	sep := strings.Index(raw, "://")
 	if sep < 0 {
-		// scp-style (git@host:path) or a bare path: no place for a password.
+		if isScpLikeForDolt(raw) || looksLikeLocalPathForDolt(raw) {
+			return raw
+		}
+		authority, tail := raw, ""
+		if slash := strings.Index(raw, "/"); slash >= 0 {
+			authority, tail = raw[:slash], raw[slash:]
+		}
+		if at := strings.LastIndex(authority, "@"); at >= 0 {
+			return "https://" + authority[at+1:] + tail
+		}
 		return raw
 	}
 	scheme, rest := raw[:sep], raw[sep+3:]

@@ -265,20 +265,82 @@ type originRemoteWriter interface {
 	AddRemoteWithRef(ctx context.Context, name, url, ref string) error
 }
 
-// replaceOriginRemote moves origin from current to newURL, keeping the git
-// data ref current lives on when newURL can carry one. removed reports
-// whether the old remote was taken down: a failed add restores it on its own
-// URL and ref before returning the error.
-func replaceOriginRemote(ctx context.Context, st originRemoteWriter, current storage.RemoteInfo, newURL string) (ref string, removed bool, err error) {
-	ref, _ = refForAdoptedRemote(newURL, current.Ref)
+// replaceOriginRef is the ref origin moves to along with newURL: the ref it
+// lives on when newURL can carry one, checked against the new repository by
+// the target guard, since the guard that admitted the ref ran against the
+// old one and a branch of that name on the new repository may hold source.
+func replaceOriginRef(current storage.RemoteInfo, newURL string) (string, error) {
+	ref, _ := refForAdoptedRemote(newURL, current.Ref)
+	if err := refuseGitDataRefTarget(newURL, ref, replaceOriginRemedies); err != nil {
+		return "", err
+	}
+	return ref, nil
+}
+
+// replaceOriginRemote moves origin from current to newURL on ref, the value
+// replaceOriginRef admitted. removed reports whether the old remote was
+// taken down: a failed add restores it on its own URL and ref before
+// returning the error.
+func replaceOriginRemote(ctx context.Context, st originRemoteWriter, current storage.RemoteInfo, newURL, ref string) (removed bool, err error) {
 	if err := st.RemoveRemote(ctx, "origin"); err != nil {
-		return "", false, err
+		return false, err
 	}
 	if err := st.AddRemoteWithRef(ctx, "origin", newURL, ref); err != nil {
 		_ = st.AddRemoteWithRef(ctx, "origin", current.URL, current.Ref)
-		return "", true, err
+		return true, err
 	}
-	return ref, true, nil
+	return true, nil
+}
+
+// dryRunRemoteApply is the dry run of applyRemote's remote step for an
+// origin currently at current (none when current.URL is empty) and a
+// configured federationRemote. It runs the same target guard as the live
+// run, a read-only git ls-remote, so it reports the refusal the live run
+// would make instead of promising an add; a refusal is an error result, so
+// the dry run exits non-zero as the live run would.
+func dryRunRemoteApply(current storage.RemoteInfo, federationRemote string) ApplyResult {
+	if current.URL == "" {
+		ref, err := guardedSyncRemoteRef(federationRemote, remoteAddRemedies)
+		if err != nil {
+			return ApplyResult{
+				Check:   "remote",
+				Action:  "add_remote",
+				Status:  applyStatusError,
+				Message: "Would refuse to add Dolt origin remote",
+				Error:   err.Error(),
+			}
+		}
+		return ApplyResult{
+			Check:   "remote",
+			Action:  "add_remote",
+			Status:  applyStatusDryRun,
+			Message: fmt.Sprintf("Would add Dolt origin remote: %s", describeAppliedRemote(federationRemote, ref)),
+		}
+	}
+	if remoteURLMatchesConfig(current.URL, federationRemote) {
+		return ApplyResult{
+			Check:   "remote",
+			Action:  "none",
+			Status:  applyStatusOK,
+			Message: "Dolt remote configuration is consistent",
+		}
+	}
+	ref, err := replaceOriginRef(current, federationRemote)
+	if err != nil {
+		return ApplyResult{
+			Check:   "remote",
+			Action:  "update_remote",
+			Status:  applyStatusError,
+			Message: "Would refuse to move Dolt origin remote onto its git data ref",
+			Error:   err.Error(),
+		}
+	}
+	return ApplyResult{
+		Check:   "remote",
+		Action:  "update_remote",
+		Status:  applyStatusDryRun,
+		Message: fmt.Sprintf("Would update Dolt origin remote from %s to %s", describeAppliedRemote(current.URL, current.Ref), describeAppliedRemote(federationRemote, ref)),
+	}
 }
 
 func applyRemote(drifted bool, dryRun bool) ApplyResult {
@@ -337,35 +399,12 @@ func applyRemote(drifted bool, dryRun bool) ApplyResult {
 	}
 
 	if dryRun {
-		if currentURL == "" {
-			return ApplyResult{
-				Check:   "remote",
-				Action:  "add_remote",
-				Status:  applyStatusDryRun,
-				Message: fmt.Sprintf("Would add Dolt origin remote: %s", federationRemote),
-			}
-		}
-		if remoteURLMatchesConfig(currentURL, federationRemote) {
-			return ApplyResult{
-				Check:   "remote",
-				Action:  "none",
-				Status:  applyStatusOK,
-				Message: "Dolt remote configuration is consistent",
-			}
-		}
-		return ApplyResult{
-			Check:   "remote",
-			Action:  "update_remote",
-			Status:  applyStatusDryRun,
-			Message: fmt.Sprintf("Would update Dolt origin remote from %s to %s", currentURL, federationRemote),
-		}
+		return dryRunRemoteApply(current, federationRemote)
 	}
 
 	if currentURL == "" {
-		// A fresh origin follows sync.remote-ref like every other path that
-		// creates one (init, bootstrap, push-time adoption).
-		ref := syncRemoteRefForURL(federationRemote)
-		if err := st.AddRemoteWithRef(ctx, "origin", federationRemote, ref); err != nil {
+		ref, err := addOriginRemote(ctx, st, federationRemote)
+		if err != nil {
 			return ApplyResult{
 				Check:   "remote",
 				Action:  "add_remote",
@@ -392,7 +431,17 @@ func applyRemote(drifted bool, dryRun bool) ApplyResult {
 	}
 
 	oldURL := currentURL
-	ref, removed, err := replaceOriginRemote(ctx, st, current, federationRemote)
+	ref, err := replaceOriginRef(current, federationRemote)
+	if err != nil {
+		return ApplyResult{
+			Check:   "remote",
+			Action:  "update_remote",
+			Status:  applyStatusError,
+			Message: "Refused to move Dolt origin remote onto its git data ref (nothing was changed)",
+			Error:   err.Error(),
+		}
+	}
+	removed, err := replaceOriginRemote(ctx, st, current, federationRemote, ref)
 	if err != nil && !removed {
 		return ApplyResult{
 			Check:   "remote",
@@ -418,6 +467,27 @@ func applyRemote(drifted bool, dryRun bool) ApplyResult {
 		Status:  applyStatusApplied,
 		Message: fmt.Sprintf("Updated Dolt origin remote from %s to %s", describeAppliedRemote(oldURL, current.Ref), describeAppliedRemote(federationRemote, ref)),
 	}
+}
+
+// originRemoteAdder is the store surface addOriginRemote needs.
+type originRemoteAdder interface {
+	AddRemoteWithRef(ctx context.Context, name, url, ref string) error
+}
+
+// addOriginRemote wires a fresh origin at url on the configured
+// sync.remote-ref, like every other path that creates one (init, bootstrap,
+// push-time adoption), and like them it runs the target guard first. apply
+// never prompts, so the remote's default branch, a ref that already exists,
+// or a ref the probe cannot read is refused and nothing is added.
+func addOriginRemote(ctx context.Context, st originRemoteAdder, url string) (ref string, err error) {
+	ref, err = guardedSyncRemoteRef(url, remoteAddRemedies)
+	if err != nil {
+		return "", err
+	}
+	if err := st.AddRemoteWithRef(ctx, "origin", url, ref); err != nil {
+		return "", err
+	}
+	return ref, nil
 }
 
 // describeAppliedRemote renders a remote URL with its git data ref when one
