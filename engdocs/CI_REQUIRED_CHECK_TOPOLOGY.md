@@ -636,8 +636,6 @@ Do not require these existing check names directly:
   [Repository Guards as Bazel Tests](#repository-guards-as-bazel-tests))
 - `Check pure-Go and js/wasm boundaries (CGO_ENABLED=0)`
 - `Check doc flags freshness`
-- `Check release target cross-compilation (unix)` and `(desktop)` (F7a fold
-  of the former eight-target `check-release-target-cross-compilation` matrix)
 - `Windows Make shell (native, msys2, cygwin)` (F7a fold of the former
   `host: [native, msys2, cygwin]` three-job matrix)
 - `Test (Windows) small packages (doltversion, dbproxy server)` (F7a fold of
@@ -926,8 +924,16 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
     (`Test (Dolt server fingerprint)`, `TEST_DOLT_SERVER_FINGERPRINT`)
     pulled a docker image the workers do not have, so it is retired; the
     image tag stays pinned to the dolt release by
-    `TestPinnedDoltCLIMatchesContainerImage`. `check-release-target-cross-compilation`
-    still `go build`s `./...` with `CGO_ENABLED=0` on every PR.
+    `TestPinnedDoltCLIMatchesContainerImage`. The release-target
+    cross-compilation (formerly pr.yml's
+    `check-release-target-cross-compilation`, `go build ./...` with
+    `CGO_ENABLED=0` per target) is a step of bazel.yml's `bazel-pure` lane
+    (`BAZEL_PURE`): `scripts/ci/bazel-release-cross-compile.sh` runs one
+    remote `bazel build //tools/bazel:release_cross`, every `go_library` and
+    `go_binary` for each row of `scripts/ci/release-targets.txt`, plus
+    `//tools/bazel:pure_bd_has_no_cgo_only_deps` (a pure bd must not link
+    gozstd, which `go build` rejects with cgo off). Same cgo-off boundary as
+    the job it replaces.
   - Also kept on every PR, in the required job `scripts-go-checks`
     (`SCRIPTS_GO_CHECKS`, one leg, `Go checks (vet)`): `go test`'s own vet
     checks (cmd/go's `defaultVetFlags`, policy-tested equal to the
@@ -1220,7 +1226,8 @@ scope, not this slice's.
   `scripts/ci/check-release-cross-compile.sh <group>`, which builds every
   target in its group sequentially and reports every failure before exiting
   non-zero, so a PR touching two platforms at once sees both failures in one
-  log instead of needing a per-target re-run.
+  log instead of needing a per-target re-run. (Since retired: bazel.yml's `bazel-pure`
+  lane builds the same manifest with Bazel, `--platforms` per target.)
 - **`advisory-reports` fold.** `build-examples` and `complexity-report` (both
   already advisory: neither was in ci-gate's `needs`/`CI_GATE_REQUIRED`)
   became one job's steps. Each keeps its pre-fold step-level
@@ -1531,7 +1538,6 @@ PR timings, 2026-10): `fast-checks` (~40 s), `pr-policy-wrapper`
 (native/darwin/windows, up to ~4 min), `check-doc-flags` (~1.7 min),
 `check-doc-freshness-platforms` and `pr-preflight-platforms` (Linux,
 Windows and macOS legs, up to ~5 min on Windows),
-`check-release-target-cross-compilation` (~5 min),
 `windows-make-shell` (~2.7 min),
 `windows-test-binaries` plus the prebuilt Windows pair (~7 min end to
 end), the advisory native Windows pair (~5 min; the gate waits for them),

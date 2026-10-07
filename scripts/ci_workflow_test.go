@@ -393,42 +393,63 @@ esac
 	}
 }
 
-// TestPRCIGateRequiresReleaseTargetCrossCompilation pins the cross-compilation
-// check into the gate. Wiring a job into ci-gate takes three separate edits --
-// needs:, the CI_GATE_REQUIRED token list, and the CHECK_* env mapping -- and
-// the gate silently ignores a token that is missing any one of them. Every
-// other load-bearing check in this file is pinned by name for that reason.
-func TestPRCIGateRequiresReleaseTargetCrossCompilation(t *testing.T) {
+// TestReleaseCrossCompileRunsInBazelPureLane pins the release-target
+// cross-compilation gate into bazel.yml's pure-Go lane, whose job.status
+// ci-gate requires (BAZEL_PURE), and keeps the retired pr.yml job from
+// coming back beside it: a second, `go build` copy of the gate would run
+// every target twice.
+func TestReleaseCrossCompileRunsInBazelPureLane(t *testing.T) {
 	const (
-		jobName = "check-release-target-cross-compilation"
-		token   = "CHECK_RELEASE_TARGET_CROSS_COMPILATION"
+		retiredJob   = "check-release-target-cross-compilation"
+		retiredToken = "CHECK_RELEASE_TARGET_CROSS_COMPILATION"
+		stepName     = "Cross-compile every release target (--config=release-cross)"
 	)
-
-	gate := readCIWorkflow(t, "pr.yml").job(t, "ci-gate")
+	pr := readCIWorkflow(t, "pr.yml")
+	if _, ok := pr.Jobs[retiredJob]; ok {
+		t.Errorf("pr.yml still defines %s; bazel.yml's %s lane runs the release cross-compilation", retiredJob, bazelPureJobName)
+	}
+	gate := pr.job(t, "ci-gate")
 	gateEnv := gate.step(t, "Evaluate CI gate").Env
+	if contains(gate.Needs, retiredJob) || gateEnv[retiredToken] != "" || contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), retiredToken) {
+		t.Errorf("ci-gate still wires the retired %s job", retiredJob)
+	}
+	if !contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), "BAZEL_PURE") {
+		t.Errorf("ci-gate CI_GATE_REQUIRED does not include BAZEL_PURE, the lane that cross-compiles the release targets")
+	}
 
-	if !contains(gate.Needs, jobName) {
-		t.Errorf("ci-gate needs %q: %v", jobName, gate.Needs)
+	run := readCIWorkflow(t, bazelWorkflowName).job(t, bazelPureJobName).step(t, stepName).Run
+	for _, required := range []string{
+		"set -euo pipefail",
+		"./scripts/ci/bazel-release-cross-compile.sh",
+	} {
+		if !strings.Contains(run, required) {
+			t.Errorf("%s step %q does not contain %q:\n%s", bazelPureJobName, stepName, required, run)
+		}
 	}
-	if got, want := gateEnv[token], "${{ needs."+jobName+".result }}"; got != want {
-		t.Errorf("ci-gate env %s = %q, want %q", token, got, want)
-	}
-	if !contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), token) {
-		t.Errorf("ci-gate CI_GATE_REQUIRED does not include %q", token)
+
+	// The transition is what makes every platform's build pure Go (cgo off,
+	// as CGO_ENABLED=0 go build) for the platform the script names.
+	bzl := readPolicyFile(t, bazelPolicyRoot(t), "tools/bazel/release_cross.bzl")
+	for _, required := range []string{
+		`"//command_line_option:platforms": ["@rules_go//go/toolchain:" + platform],`,
+		`"@rules_go//go/config:pure": True,`,
+		`inputs = ["//tools/bazel:release_platforms"],`,
+	} {
+		if !strings.Contains(bzl, required) {
+			t.Errorf("tools/bazel/release_cross.bzl does not contain %q", required)
+		}
 	}
 }
 
 // TestReleaseTargetCrossCompilationMatrixMatchesGoreleaser keeps
-// scripts/ci/release-targets.txt (F7a: the single source of truth for the
-// pr.yml cross-compilation job's two matrix legs, read by
-// scripts/ci/check-release-cross-compile.sh) and the set of shipped release
-// targets in lockstep. Without a guard a newly added release target -- the
-// way freebsd/amd64 once was -- is silently uncovered while a green "release
-// target cross-compilation" check still stands. That is worse than having no
-// check at all, because the check's existence implies the coverage it has
-// quietly lost.
+// scripts/ci/release-targets.txt (the single source of truth for the
+// platforms scripts/ci/bazel-release-cross-compile.sh builds in bazel.yml's
+// pure-Go lane) and the set of shipped release targets in lockstep. Without
+// a guard a newly added release target -- the way freebsd/amd64 once was --
+// is silently uncovered while a green cross-compilation check still stands.
+// That is worse than having no check at all, because the check's existence
+// implies the coverage it has quietly lost.
 func TestReleaseTargetCrossCompilationMatrixMatchesGoreleaser(t *testing.T) {
-	const jobName = "check-release-target-cross-compilation"
 	const manifestPath = "scripts/ci/release-targets.txt"
 
 	// darwin/amd64 and darwin/arm64 are shipped release targets that are
@@ -447,51 +468,21 @@ func TestReleaseTargetCrossCompilationMatrixMatchesGoreleaser(t *testing.T) {
 		}
 	}
 
-	// The job itself must still read the manifest, so a future rewrite of the
-	// job that stops threading matrix.group through to the script cannot pass
-	// silently.
-	job := readCIWorkflow(t, "pr.yml").job(t, jobName)
-	groups := append([]string(nil), job.Strategy.Matrix.Group...)
-	sort.Strings(groups)
-	if !reflect.DeepEqual(groups, []string{"desktop", "unix"}) {
-		t.Errorf("%s matrix groups = %v, want [desktop unix]", jobName, groups)
-	}
-	var ranScript bool
-	for _, step := range job.Steps {
-		if strings.Contains(step.Run, "check-release-cross-compile.sh ${{ matrix.group }}") {
-			ranScript = true
-		}
-	}
-	if !ranScript {
-		t.Errorf("%s does not run check-release-cross-compile.sh with matrix.group", jobName)
-	}
-
 	raw, err := os.ReadFile(filepath.Join(sourceRepoRoot(t), manifestPath))
 	if err != nil {
 		t.Fatalf("read %s: %v", manifestPath, err)
 	}
 	got := make(map[string]bool)
-	seenGroups := make(map[string]bool)
 	for _, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		fields := strings.Fields(line)
-		if len(fields) != 3 {
-			t.Fatalf("%s: malformed row %q, want 'GOOS GOARCH GROUP'", manifestPath, line)
+		if len(fields) != 2 {
+			t.Fatalf("%s: malformed row %q, want 'GOOS GOARCH'", manifestPath, line)
 		}
-		goos, goarch, group := fields[0], fields[1], fields[2]
-		if group != "unix" && group != "desktop" {
-			t.Fatalf("%s: row %q has unknown group %q", manifestPath, line, group)
-		}
-		seenGroups[group] = true
-		got[goos+"/"+goarch] = true
-	}
-	for _, g := range []string{"unix", "desktop"} {
-		if !seenGroups[g] {
-			t.Errorf("%s: no targets in group %q", manifestPath, g)
-		}
+		got[fields[0]+"/"+fields[1]] = true
 	}
 
 	for target, source := range want {
@@ -1421,11 +1412,7 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "test-windows-liveness"), []goCacheStep{
 		restoreModuleCache(), restoreBuildCache("non-race"),
 	})
-	for _, jobName := range []string{
-		"advisory-reports", "check-release-target-cross-compilation",
-	} {
-		assertGoCacheInventory(t, workflows["pr.yml"].job(t, jobName), []goCacheStep{restoreModuleCache()})
-	}
+	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "advisory-reports"), []goCacheStep{restoreModuleCache()})
 	// F7b review (S2): check-doc-freshness-platforms additionally restores a
 	// restore-only non-race Go build cache, seeded by the same push-to-main
 	// savers pr-preflight-platforms' leg restores below (see that job's own
@@ -1462,7 +1449,7 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		"pr.yml": {
 			"build-artifacts": true, "pr-core-wrapper": true, "scripts-go-checks": true, "worktree-remove-windows": true,
 			"check-doc-freshness-platforms": true, "pr-preflight-platforms": true, "advisory-reports": true,
-			"check-release-target-cross-compilation": true, "pr-lint-wrapper": true, "windows-test-binaries": true,
+			"pr-lint-wrapper": true, "windows-test-binaries": true,
 			"test-windows-liveness": true,
 		},
 		"pr-risk.yml": {"build-embedded": true},
@@ -2988,15 +2975,13 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 		// size (module-cache misses on the Blacksmith pool are acceptable
 		// per spec; jobs that need a Blacksmith-side build-cache saver are
 		// F7b's scope, not this one). windows-test-binaries is F4's Linux
-		// mingw cross-compile job, sized at 8vcpu like the cross-compilation
-		// matrix fold below.
+		// mingw cross-compile job, sized at 8vcpu.
 		"pr.yml": {
 			"bazel-coverage": sameRepoBlacksmith2vcpu, "ci-gate": sameRepoBlacksmith2vcpu,
-			"fast-checks":                            sameRepoBlacksmith2vcpu,
-			"advisory-reports":                       sameRepoBlacksmith2vcpu,
-			"check-doc-flags":                        sameRepoBlacksmith4vcpu,
-			"check-release-target-cross-compilation": sameRepoBlacksmith8vcpu,
-			"windows-test-binaries":                  sameRepoBlacksmith8vcpu,
+			"fast-checks":           sameRepoBlacksmith2vcpu,
+			"advisory-reports":      sameRepoBlacksmith2vcpu,
+			"check-doc-flags":       sameRepoBlacksmith4vcpu,
+			"windows-test-binaries": sameRepoBlacksmith8vcpu,
 			// F7b: scripts-go-checks/pr-lint-wrapper moved to same-repo
 			// Blacksmith now that main.yml's blacksmith-go-build-cache and
 			// pr-lint-wrapper `venue` matrix seed their Blacksmith-selection

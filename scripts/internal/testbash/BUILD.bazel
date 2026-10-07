@@ -8,7 +8,12 @@ go_library(
         "resolver_windows.go",
     ],
     importpath = "github.com/steveyegge/beads/scripts/internal/testbash",
-    visibility = ["//scripts:__subpackages__"],
+    # //tools/bazel:release_cross cross-compiles it like every package
+    # `go build ./...` compiles.
+    visibility = [
+        "//scripts:__subpackages__",
+        "//tools/bazel:__pkg__",
+    ],
 )
 
 go_test(

@@ -143,9 +143,9 @@ Before starting a release:
 - [ ] **Upgrade smoke tests pass** (`make test-upgrade`) — see [Release Stability Gate](engdocs/RELEASE-STABILITY-GATE.md)
 - [ ] **Regression tests pass** (`make test-regression`)
 - [ ] **Every release target cross-compiles** — see
-      [Cross-compile before tagging](#cross-compile-before-tagging). PR CI does
-      not build them ([#5662](https://github.com/gastownhall/beads/issues/5662)),
-      and a target that fails at tag time burns the tag.
+      [Cross-compile before tagging](#cross-compile-before-tagging). PR CI
+      builds them only with cgo off, and a target that fails at tag time
+      burns the tag.
 - [ ] **CHANGELOG.md updated with release notes** (see format below)
 - [ ] **CHANGELOG rollup checked** — nothing left under `[Unreleased]` that
       belongs in this release, and nothing filed under a *previous* release's
@@ -163,12 +163,15 @@ Before starting a release:
 
 ### Cross-compile before tagging
 
-`.goreleaser.yml` builds darwin, linux, windows **and freebsd**, but PR CI
-builds none of the cross targets — the v1.2.0 tag burned on a freebsd
-compilation failure that no pre-tag gate could have caught
-([#5661](https://github.com/gastownhall/beads/pull/5661) fixed the break,
-[#5662](https://github.com/gastownhall/beads/issues/5662) tracks the CI gap).
-Until that gap is closed, build them by hand before tagging:
+`.goreleaser.yml` builds darwin, linux, windows **and freebsd**; the v1.2.0
+tag burned on a freebsd compilation failure no pre-tag gate caught
+([#5661](https://github.com/gastownhall/beads/pull/5661),
+[#5662](https://github.com/gastownhall/beads/issues/5662)). PR CI now builds
+the whole tree for every target in `scripts/ci/release-targets.txt` with Bazel
+(`scripts/ci/bazel-release-cross-compile.sh`, in bazel.yml's pure-Go lane),
+but with cgo off, while linux/amd64, linux/arm64, windows/amd64 and the darwin
+pair ship with `CGO_ENABLED=1`. Build the real release configuration by hand
+before tagging:
 
 ```bash
 goreleaser build --snapshot --clean

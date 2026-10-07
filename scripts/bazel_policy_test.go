@@ -852,6 +852,12 @@ var allowedBazelTestTags = map[string]string{
 	// integration tag, as releases are, and running it again under the
 	// integration build would only repeat it against a test-shaped bd.
 	"pr-core-only": "runs only in --config=prcore/ci; excluded from --config=integration",
+	// For a go_binary whose every source file is `//go:build cgo`: it also
+	// sets target_compatible_with incompatible under //tools/bazel:pure, and
+	// tools/bazel/go_srcs.py and scripts/ci/bazel-release-cross-compile.sh
+	// leave it out of //tools/bazel:release_cross by this tag (`go build
+	// ./...` skips the package with CGO_ENABLED=0).
+	"cgo-only": "a go_binary with only cgo sources: incompatible with pure builds and left out of //tools/bazel:release_cross",
 }
 
 // bazelPRCoreExcludedTags are the tags whose targets never run in the PR-core

@@ -233,8 +233,8 @@ jobs:
   #
   # D2 step 3: stands down where bazel-coverage says pr_lanes; Bazel's
   # `pure-Go and js/wasm` lane (bazel-pure) runs the same boundaries, and
-  # check-release-target-cross-compilation still `go build`s ./... with
-  # CGO_ENABLED=0 on every PR.
+  # also builds the whole tree with cgo off for every release target
+  # (scripts/ci/bazel-release-cross-compile.sh).
   check-cmd-bd-puregeo-tests:
     name: Check pure-Go and js/wasm boundaries (CGO_ENABLED=0)
     runs-on: ubuntu-latest
@@ -317,61 +317,6 @@ jobs:
         # not run the full suite.
         run: |
           go test -tags gms_pure_go -count=1 -short -run '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir|NocgoFactoriesHonorSharedServer|NocgoNewDoltStoreFromConfig_ErrorSuggestsCorrectFlag|NocgoNewReadOnlyStoreFromConfig_ErrorSuggestsCorrectFlag)' ./cmd/bd
-
-  # Compile every shipped release target on every PR, so a platform-gating
-  # mistake is caught here instead of at tag time (#5662).
-  #
-  # Coverage boundary, recorded so the green is not over-read: every leg below
-  # builds CGO_ENABLED=0, but .goreleaser.yml builds bd-linux-amd64,
-  # bd-linux-arm64 and bd-windows-amd64 with CGO_ENABLED=1, and the darwin pair
-  # is built natively at CGO_ENABLED=1 by release.yml's goreleaser-macos job.
-  # Five of these eight legs are therefore a weaker proxy than the binary they
-  # stand for: the cgo half of the tree (beads_cgo.go ->
-  # internal/storage/embeddeddolt) is never compiled here, so a break confined
-  # to it still passes this check. Only android/arm64, windows/arm64 and
-  # freebsd/amd64 replicate their release configuration exactly.
-  #
-  # The build scope is deliberately ./... and not the ./cmd/bd that every
-  # .goreleaser.yml build id declares as main:. Compiling the whole tree per
-  # platform is intentional extra coverage, not an oversight.
-  #
-  # F7a: folded from 8 per-target jobs into 2 per-group jobs. The target list
-  # moved out of this matrix and into scripts/ci/release-targets.txt, which
-  # scripts/ci/check-release-cross-compile.sh reads and
-  # TestReleaseTargetCrossCompilationMatrixMatchesGoreleaser pins against
-  # .goreleaser.yml, so the manifest (not this YAML) is now the single
-  # source of truth for the target set. Moved to Blacksmith for same-repo
-  # PRs/merge_group: this job restores no GitHub-saved build cache (only a
-  # best-effort module-cache restore, whose misses are cheap network
-  # fetches, not lost compute). Runner choice must match the
-  # TestSameRepoBlacksmithRunners pin.
-  check-release-target-cross-compilation:
-    name: Check release target cross-compilation (${{ matrix.group }})
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        group: [unix, desktop]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Restore Go module cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      - name: Build complete release target tree for group ${{ matrix.group }}
-        run: ./scripts/ci/check-release-cross-compile.sh ${{ matrix.group }}
 
   # The lingering-handle liveness regression test is //go:build windows: the
   # Ubuntu job above selects it by name but compiles it out, and main.yml's
@@ -2290,7 +2235,6 @@ jobs:
       - build-artifacts
       - fast-checks
       - check-cmd-bd-puregeo-tests
-      - check-release-target-cross-compilation
       - test-windows-liveness
       - worktree-remove-windows
       - test-windows-liveness-prebuilt
@@ -2319,7 +2263,6 @@ jobs:
             CHECK_MIGRATION_HYGIENE
             CHECK_NO_BEADS_CHANGES
             CHECK_CMD_BD_PUREGEO_TESTS
-            CHECK_RELEASE_TARGET_CROSS_COMPILATION
             CHECK_DOC_FLAGS
             CHECK_DOC_FRESHNESS_PLATFORMS
             PR_PREFLIGHT_PLATFORMS
@@ -2359,7 +2302,6 @@ jobs:
           # job.
           FAST_CHECKS: ${{ needs.fast-checks.result }}
           CHECK_CMD_BD_PUREGEO_TESTS: ${{ needs.check-cmd-bd-puregeo-tests.result }}
-          CHECK_RELEASE_TARGET_CROSS_COMPILATION: ${{ needs.check-release-target-cross-compilation.result }}
           TEST_WINDOWS_LIVENESS: ${{ needs.test-windows-liveness.result }}
           WORKTREE_REMOVE_WINDOWS: ${{ needs.worktree-remove-windows.result }}
           # F4 side-by-side rollout: always evaluated, like the native pair

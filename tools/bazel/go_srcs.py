@@ -32,6 +32,17 @@ sync step, on every PR) fails on a missing or stale block. Trees in
 .bazelignore (.beads, website, the nested example modules, agent worktrees,
 node_modules) are outside Bazel and so outside //:repo_files.
 
+tools/bazel/BUILD.bazel also gets a managed `release_cross` block: the
+release_cross_build (tools/bazel/release_cross.bzl) that
+scripts/ci/bazel-release-cross-compile.sh builds for every release platform,
+listing every go_library and go_binary it can see (the packages `go build
+./...` compiles; a private library is compiled by the go_binary that embeds
+it) except the cgo-only ones a pure build cannot link (tagged "cgo-only" and
+incompatible with //tools/bazel:pure) and testonly fixtures. The script checks
+against `bazel query` before it builds that every Bazel package holding Go
+targets is reached, so a package this parser misses fails CI instead of
+going uncompiled.
+
 With --check nothing is written: stale blocks are printed as a diff and the
 exit status is 1 (see `make bazel-sync-check`).
 """
@@ -65,11 +76,24 @@ TREES = (
 
 BEGIN = "# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---"
 END = "# --- end go_srcs ---"
+RELEASE_BEGIN = "# --- begin release_cross (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---"
+RELEASE_END = "# --- end release_cross ---"
+RELEASE_PKG = "tools/bazel"
+# Built in every release configuration besides the Go targets.
+RELEASE_EXTRA_TARGETS = (":pure_bd_has_no_cgo_only_deps",)
+# Visibilities that let //tools/bazel:release_cross depend on a target.
+RELEASE_VISIBLE = ('"//visibility:public"', '"//:__subpackages__"', '"//tools/bazel:__pkg__"')
+# A buildifier-formatted go_library/go_binary call and its name.
+GO_RULE_RE = re.compile(r'^(go_library|go_binary)\(\n    name = "([^"]+)",\n(.*?)^\)', re.DOTALL | re.MULTILINE)
+# How a cgo-only target opts out of pure builds (see
+# internal/storage/embeddeddolt/cmd/BUILD.bazel and the "cgo-only" tag in
+# scripts/bazel_policy_test.go).
+CGO_ONLY_TAG = '"cgo-only"'
 REPO_BEGIN = "# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---"
 REPO_END = "# --- end repo_files ---"
 BLOCK_RES = tuple(
     re.compile(r"\n*" + re.escape(begin) + r".*?" + re.escape(end) + r"\n*", re.DOTALL)
-    for begin, end in ((BEGIN, END), (REPO_BEGIN, REPO_END))
+    for begin, end in ((BEGIN, END), (RELEASE_BEGIN, RELEASE_END), (REPO_BEGIN, REPO_END))
 )
 SKIP_DIRS = {"testdata", "node_modules"}
 
@@ -206,6 +230,43 @@ def repo_files_block(pkg: str, packages: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def go_targets(packages: list[str]) -> list[str]:
+    """Every go_library and go_binary that a pure build can compile."""
+    labels = []
+    for pkg in packages:
+        with open(os.path.join(pkg, "BUILD.bazel")) as f:
+            src = f.read()
+        for kind, name, body in GO_RULE_RE.findall(src):
+            # cgo-only: `go build ./...` skips it with CGO_ENABLED=0.
+            # testonly: a fixture under testdata/, which `./...` excludes.
+            # Not visible here: a main package's private embedded library
+            # or a package-restricted helper; its package is covered by a
+            # visible target (or the script's package check fails).
+            if CGO_ONLY_TAG in body or "testonly = True" in body:
+                continue
+            vis = re.search(r"^    visibility = \[(.*?)\]", body, re.DOTALL | re.MULTILINE)
+            if not vis or not any(v in vis.group(1) for v in RELEASE_VISIBLE):
+                continue
+            path = "" if pkg == "." else pkg
+            labels.append(f"//{path}:{name}")
+    return sorted(labels)
+
+
+def release_cross_block(targets: list[str]) -> str:
+    lines = [
+        RELEASE_BEGIN,
+        "",
+        "# manual: needs --//tools/bazel:release_platforms (see above).",
+        "release_cross_build(",
+        '    name = "release_cross",',
+        '    tags = ["manual"],',
+        "    targets = [",
+    ]
+    lines += [f'        "{t}",' for t in sorted(RELEASE_EXTRA_TARGETS) + targets]
+    lines += ["    ],", ")", "", RELEASE_END]
+    return "\n".join(lines) + "\n"
+
+
 def rewrite(path: str, new_blocks: list[str], check: bool) -> bool:
     """Bring path's managed blocks up to date; return True if any was stale.
 
@@ -266,6 +327,8 @@ def main(argv: list[str]) -> int:
     for pkg in packages:
         path = os.path.join(pkg, "BUILD.bazel")
         blocks = [block(pkg, wanted[pkg])] if pkg in wanted else []
+        if pkg == RELEASE_PKG:
+            blocks.append(release_cross_block(go_targets(packages)))
         blocks.append(repo_files_block(pkg, packages))
         changed = rewrite(path, blocks, check)
         if changed:
