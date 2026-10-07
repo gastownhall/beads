@@ -135,6 +135,7 @@
 # regeneration. Add them to the generator or the durations file instead.
 
 15 1 TestBatchApplyContract
+15 1 TestDetailBatchReaderValidatesBeforeOpen
 15 1 TestEmbeddedClaimerClaimsAnUnassignedOpenIssueAndAnswersTheBareRow
 15 1 TestEmbeddedClaimerReclaimsAcrossSpellingWithoutWriting
 15 1 TestEmbeddedDependencyEditorWritesTheTargetIntoItsTypedColumn
@@ -518,6 +519,7 @@
 15 14 TestUnknownProvenanceLeaseStaysReclaimable
 
 15 15 TestCreateIssue
+15 15 TestDetailBatchReaderContract
 15 15 TestEdgeReaderContract
 15 15 TestEmbeddedBatchCloserAllRefusedBatchRecordsNoHistory
 15 15 TestEmbeddedBatchCloserDuplicateItemRecloseAtItsOwnIndex
