@@ -100,6 +100,37 @@ func TestIssueOperationsClaimVerifyPostcondition(t *testing.T) {
 			rejects:      [][2]string{{"bob", "open"}},
 		},
 		{
+			// be-vc51/ga-2vy9p2: the CAS authorizes a reclaim under a
+			// different spelling of the same identity without rewriting the
+			// stored spelling (issueops.ClaimIssueInTx's idempotent-reclaim
+			// branch), so the postcondition must recognize the stored
+			// spelling as the same actor rather than requiring a byte-exact
+			// match against the requested one — and must still reject a
+			// genuinely different identity (gastown.dog-3) or a widened
+			// cross-axis spelling (gastown--mayor, the rig-qualified slash
+			// axis, is not gastown__mayor, the dot axis).
+			name:         "bare claim accepts a respelled identity of the same actor (ga-2vy9p2)",
+			request:      publicops.UpdateRequest{Actor: "gastown.mayor", IssueID: "bd-1", Claim: true},
+			wantVerified: true,
+			wantDesc:     `assignee="gastown.mayor" status="in_progress"`,
+			holds:        [][2]string{{"gastown.mayor", "in_progress"}, {"gastown__mayor", "in_progress"}},
+			rejects:      [][2]string{{"gastown--mayor", "in_progress"}, {"gastown.dog-3", "in_progress"}, {"someone-else", "in_progress"}},
+		},
+		{
+			// Same asymmetry as above, at the guarded-update site
+			// (claim_verify.go's guardedUpdatePostcondition): a coordination
+			// write that sets assignee to a respelling of an identity must
+			// verify against identity equivalence, not byte equality.
+			name: "guarded assignee transfer accepts a respelled identity of the written value (ga-2vy9p2)",
+			request: publicops.UpdateRequest{Actor: "alice", IssueID: "bd-1", ExpectedAssignee: assignee("bob"), Patch: publicops.IssuePatch{
+				Assignee: publicops.Field[string]{Set: true, Value: "gastown.mayor"},
+			}},
+			wantVerified: true,
+			wantDesc:     `assignee="gastown.mayor"`,
+			holds:        [][2]string{{"gastown.mayor", "open"}, {"gastown__mayor", "in_progress"}},
+			rejects:      [][2]string{{"gastown--mayor", "open"}, {"bob", "open"}},
+		},
+		{
 			name: "guarded status write",
 			request: publicops.UpdateRequest{Actor: "alice", IssueID: "bd-1", ExpectedStatus: status(types.StatusOpen), Patch: publicops.IssuePatch{
 				Status: publicops.Field[publicops.Status]{Set: true, Value: types.StatusInProgress},

@@ -155,12 +155,23 @@ func runGCProxiedServer(ctx context.Context) error {
 		}
 		if gcDryRun {
 			if !jsonOutput {
-				fmt.Println("  Would run DOLT_GC() and DOLT_STATS_GC()")
+				if gcFull {
+					fmt.Println("  Would run a full DOLT_GC() (all storage generations) and DOLT_STATS_GC()")
+				} else {
+					fmt.Println("  Would run DOLT_GC() and DOLT_STATS_GC()")
+				}
 			}
 			results = append(results, phaseResult{name: "Dolt GC", detail: "dry-run"})
 		} else {
+			if gcFull && !jsonOutput {
+				fmt.Println("  Running full Dolt GC (all generations; can take minutes on large stores)...")
+			}
 			err := runProxiedNonTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
-				if err := versioncontrolops.DoltGC(ctx, conn); err != nil {
+				doltGC := versioncontrolops.DoltGC
+				if gcFull {
+					doltGC = versioncontrolops.DoltGCFull
+				}
+				if err := doltGC(ctx, conn); err != nil {
 					return err
 				}
 				if _, err := conn.ExecContext(ctx, "CALL DOLT_STATS_GC()"); err != nil {

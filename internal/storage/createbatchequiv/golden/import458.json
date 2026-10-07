@@ -1,0 +1,82 @@
+{
+  "tables": {
+    "bd_events_journal": {
+      "rows": 1367,
+      "sha256": "48548860cbea94cfbfee078602951af3a3dce03efc3d4b0cb7e99dffa0d39b93"
+    },
+    "child_counters": {
+      "rows": 4,
+      "sha256": "022f5aada343b5f51fee453ca34b96f66c2c4036eafca9e4056686554cf92dd1"
+    },
+    "comments": {
+      "rows": 20,
+      "sha256": "0d00e3fcaa1ef6770cf35a1355a220726d0a7a1d1556aa81938a6697324cec8d"
+    },
+    "dependencies": {
+      "rows": 446,
+      "sha256": "ee3f672f609a0171532a483d17ecbffb940cb29ad7cf1317d213dcc75a48c1a3"
+    },
+    "events": {
+      "rows": 1570,
+      "sha256": "c9574684c89aaa71799ac0ee2907424e46b0799d7e153696fa84382df3dd0063"
+    },
+    "events_ids": {
+      "rows": 1,
+      "sha256": "9fd68da3b9386eec784e7aa73e4a84c00f5eac6d0cd5189baebc4a6889fb8b69"
+    },
+    "issue_versions": {
+      "rows": 398,
+      "sha256": "92a48b220cd3ccf4348a0879729e00f2a76f365c8861e527964fd7787043d013"
+    },
+    "issues": {
+      "rows": 404,
+      "sha256": "d4245c8b62b007795d9c7f293f30ac0f341ffc541cf50aa319a24c8cbed3505a"
+    },
+    "issues_updated_at": {
+      "rows": 401,
+      "sha256": "a256b57e6a67ca0717d1200b4ad867abc1ccff8f9b088bc6c331c18fa6915c7f"
+    },
+    "labels": {
+      "rows": 1166,
+      "sha256": "feb9c491f5c5c26f00f1b05027803bd09c0a8bafacd4a57564268c25979edd3b"
+    },
+    "wisp_dependencies": {
+      "rows": 71,
+      "sha256": "d420e651f8f73db1264bad6f7e82792f512d191231f4ba79c3cf371cc44f6cf4"
+    },
+    "wisp_events": {
+      "rows": 321,
+      "sha256": "0ef46baef2b6de2eba0e60e5717b435e7a7f47aa08a65917e62d5595f02cbfef"
+    },
+    "wisp_labels": {
+      "rows": 256,
+      "sha256": "09e5e47a0a2b758fee09077cf8da25e1a1d315602b4b5f838011e90865ab6477"
+    },
+    "wisps": {
+      "rows": 65,
+      "sha256": "493bc7c0803453f4e450838a9e915f44ac08a3f6972afa842379a4cef1cfff13"
+    }
+  },
+  "skipped": [
+    "eq-b4 -\u003e eq-b3: adding dependency would create a cycle",
+    "eq-b20 -\u003e eq-bp: eq-b20 cannot be blocked by its ancestor eq-bp: eq-bp cannot close until its descendants finish, so the gate would never clear",
+    "eq-b51 -\u003e eq-nope: target not found"
+  ],
+  "stale": null,
+  "changed": [
+    "child_counters",
+    "comments",
+    "dependencies",
+    "events",
+    "issues",
+    "labels",
+    "wisp_comments",
+    "wisp_dependencies",
+    "wisp_events",
+    "wisp_labels",
+    "wisps"
+  ],
+  "counter": [
+    "child_counters"
+  ]
+}

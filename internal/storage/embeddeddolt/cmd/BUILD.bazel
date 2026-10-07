@@ -1,0 +1,58 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "cmd_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/steveyegge/beads/internal/storage/embeddeddolt/cmd",
+    visibility = ["//visibility:private"],
+    deps = ["//internal/storage/embeddeddolt"],
+)
+
+# main.go is //go:build cgo: without cgo the package is empty, which
+# `go build ./...` skips and a go_binary cannot link. cgo-only: left out of
+# //tools/bazel:release_cross (tools/bazel/go_srcs.py).
+go_binary(
+    name = "cmd",
+    embed = [":cmd_lib"],
+    tags = ["cgo-only"],
+    target_compatible_with = select({
+        "//tools/bazel:pure": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end go_srcs ---
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

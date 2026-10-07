@@ -1,0 +1,46 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "spec",
+    srcs = ["embed.go"],
+    embedsrcs = ["openapi.v0.yaml"],
+    importpath = "github.com/steveyegge/beads/internal/httpapi/spec",
+    visibility = ["//:__subpackages__"],
+)
+
+# //internal/httpclient/encode:encode_test's bijection gate reads the wire
+# contract's published parameter set. It reads it through spec.OpenAPIV0()
+# (the go:embed above), not a relative os.ReadFile path, so no `data`
+# dependency on this file is actually needed for that one read -- this export
+# stays as defense in depth for any other reader of the raw YAML that package
+# gains. //scripts/repochecks:types_gen_drift_test regenerates the wire
+# types from it.
+exports_files(
+    ["openapi.v0.yaml"],
+    visibility = [
+        "//internal/httpclient/encode:__pkg__",
+        "//scripts/repochecks:__pkg__",
+    ],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

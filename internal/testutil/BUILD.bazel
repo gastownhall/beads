@@ -1,0 +1,177 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+go_library(
+    name = "testutil",
+    srcs = [
+        "container_provider.go",
+        "container_provider_windows.go",
+        "dockercontext.go",
+        "git_test_hooks.go",
+        "localdoltserver.go",
+        "localdoltserver_linux.go",
+        "localdoltserver_other.go",
+        "suite_temp.go",
+        "testdoltbranch.go",
+        "testdoltcommon.go",
+        "testdoltserver.go",
+        "testdoltserver_windows.go",
+        "tmpfs.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/testutil",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage/doltutil",
+        "//internal/testutil/bazeltest",
+        "@com_github_go_sql_driver_mysql//:mysql",
+    ] + select({
+        "@rules_go//go/platform:aix": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go//exec",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:android": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go//exec",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:darwin": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go//exec",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:dragonfly": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go//exec",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:freebsd": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go//exec",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:illumos": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go//exec",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:ios": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go//exec",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:js": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go//exec",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:linux": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go//exec",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:netbsd": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go//exec",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:openbsd": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go//exec",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:osx": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go//exec",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:plan9": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go//exec",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:qnx": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go//exec",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:solaris": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go//exec",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+go_test(
+    name = "testutil_test",
+    srcs = [
+        "dockercontext_test.go",
+        "gm2g3g5r_failopen_test.go",
+        "gm2g3g5r_failopen_unix_test.go",
+        "gm2g3g5r_failopen_windows_test.go",
+        "localdoltserver_test.go",
+        "suite_temp_test.go",
+        "testdoltbranch_test.go",
+        "testdoltserver_env_test.go",
+        "testdoltserver_unreachable_test.go",
+        "tmpfs_test.go",
+    ],
+    data = glob(["testdata/**"]),
+    embed = [":testutil"],
+    deps = [
+        "//internal/storage/doltutil",
+        "@com_github_go_sql_driver_mysql//:mysql",
+    ],
+)
+
+# testutil_test on the dolt-server lane: the package's own tests of the
+# test-server backends, with the local backend selected and required, so
+# TestDoltServerFingerprint's local half (formerly pr.yml's "Test (Dolt
+# server fingerprint)" job, every PR) and the TestLocalDoltServer_* tests run
+# against the pinned dolt in the test wrapper's runfiles. Every other
+# configuration of testutil_test passes BEADS_TEST_SKIP=dolt and skips them.
+# The container half needs docker and the image, so no Bazel target runs it:
+# it runs under plain `go test` (the container backend is the default there)
+# on a host that has both, and TestPinnedDoltCLIMatchesContainerImage
+# (//scripts) keeps the image tag on the pinned release.
+#
+# Tags:
+#   dolt-server: starts hermetic dolt sql-servers from the pinned dolt in the
+#     test wrapper's runfiles (BEADS_TEST_DOLT_SERVER=local); excluded from
+#     --config=prcore/ci, selected by --config=doltserver.
+sh_test(
+    name = "testutil_dolt_test",
+    size = "medium",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :testutil_test)"],
+    data = [":testutil_test"],
+    env = {
+        "BEADS_TEST_DOLT_SERVER": "local",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+    },
+    tags = ["dolt-server"],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

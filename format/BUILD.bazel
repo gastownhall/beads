@@ -1,0 +1,41 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "format",
+    srcs = ["format.go"],
+    importpath = "github.com/steveyegge/beads/format",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//internal/types",
+        "//internal/ui",
+    ],
+)
+
+go_test(
+    name = "format_test",
+    srcs = ["format_test.go"],
+    embed = [":format"],
+    deps = ["//internal/types"],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

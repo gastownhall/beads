@@ -1,0 +1,44 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "depguard",
+    srcs = ["depguard.go"],
+    importpath = "github.com/steveyegge/beads/tools/nogo/analyzers/depguard",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/nogo/internal/golangci",
+        "@com_github_openpeedeep_depguard_v2//:depguard",
+        "@org_golang_x_tools//go/analysis",
+    ],
+)
+
+go_test(
+    name = "depguard_test",
+    srcs = ["depguard_test.go"],
+    deps = [
+        ":depguard",
+        "//tools/nogo/internal/analyzertest",
+    ],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

@@ -1,0 +1,20 @@
+# Expected divergences between the Go tests `go test` runs (pr.yml) and the
+# ones `bazel test //... --config=ci` runs, for tools/bazel/equivalence.py.
+#
+# One entry per line, each with a justification:
+#
+#   <package dir> <TestName or glob>        # why Bazel does not run it
+#   <package dir> <TestName or glob> skip   # why Bazel skips a test go test runs
+#
+# `*` as the test name covers the whole package, including a package with no
+# go_test target. `skip` entries are checked only when go test statuses are
+# supplied (--go-test-json, the nightly run). Keep this list short: every entry
+# is a test the Bazel lane does not exercise. The checker reports entries that
+# no longer match anything.
+
+# Plain go test's own bd build fallback (BEADS_TEST_BD_BINARY unset), which
+# Bazel never takes (bd comes in through BEADS_TEST_BD_BINARY). pr.yml's
+# pr-preflight-platforms runs both on Linux, macOS and Windows ("Exercise go
+# test's bd build fallback").
+cmd/bd TestGOMODCACHENotUnderTestHome skip  # no in-test go build under Bazel; pr-preflight-platforms runs it
+cmd/bd TestGoBuildBDCommandIsCWDIndependent skip  # no in-test go build under Bazel; pr-preflight-platforms runs it

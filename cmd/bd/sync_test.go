@@ -18,6 +18,33 @@ import (
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
+func TestSyncFailureTextDistinguishesSSHDialTimeoutFromAuth(t *testing.T) {
+	const timeoutLine = "ssh: connect to host blackhole.example port 22: Operation timed out"
+	gitText := timeoutLine + "\nfatal: Could not read from remote repository.\nPlease make sure you have the correct access rights and the repository exists.\nhint: run `ssh-add <key>` to pre-load your key for SSH remotes"
+	timeout := fmt.Errorf("pull: %w", errors.New(gitText))
+	if !strings.Contains(timeout.Error(), "ssh-add") {
+		t.Fatal("fixture did not reproduce Dolt's misleading auth hint")
+	}
+	got := syncFailureText(timeout)
+	if !strings.Contains(got, timeoutLine) || !strings.Contains(got, "could not be reached") {
+		t.Fatalf("dial timeout not explained: %q", got)
+	}
+	for _, misleading := range []string{"access rights", "ssh-add", "fatal: Could not read"} {
+		if strings.Contains(got, misleading) {
+			t.Errorf("dial timeout retained auth hint %q: %q", misleading, got)
+		}
+	}
+
+	auth := fmt.Errorf("pull: %w", errors.New("git@host: Permission denied (publickey).\nhint: run `ssh-add <key>` to pre-load your key for SSH remotes"))
+	if got := syncFailureText(auth); got != auth.Error() {
+		t.Errorf("real auth failure changed: got %q, want %q", got, auth.Error())
+	}
+	plainTimeout := errors.New("database query: Operation timed out")
+	if got := syncFailureText(plainTimeout); got != plainTimeout.Error() {
+		t.Errorf("non-SSH timeout changed: got %q, want %q", got, plainTimeout.Error())
+	}
+}
+
 // syncOpsRecorder builds a syncOps whose steps are scripted per attempt and
 // which records how many times each step ran. Scripts are indexed by call
 // number; a call past the end of a script reuses the script's last entry, so a
@@ -146,6 +173,15 @@ func (r *syncOpsRecorder) ops() syncOps {
 }
 
 func raceErr() error { return errors.New("push rejected: remote is ahead (non-fast-forward)") }
+
+// behindErr mirrors what verifyPullLanded returns for the benign
+// fast-forwardable-behind race: the typed sentinel wrapped around the
+// merged-nothing diagnosis. The loop must classify it from the wrap, not the
+// message.
+func behindErr() error {
+	return fmt.Errorf("%w: pull from origin/main reported success but merged nothing",
+		versioncontrolops.ErrPullBehindFastForwardable)
+}
 
 func TestRunSyncLoopHappyPath(t *testing.T) {
 	r := &syncOpsRecorder{recomputeVals: []int{4}}
@@ -293,8 +329,10 @@ func TestRunSyncLoopConflictWinsOverPullError(t *testing.T) {
 // `merged` empty — the conflict branch still fires (from the live check), and
 // the unrelated error must not vanish silently.
 func TestRunSyncLoopDiscardedPullErrorOnLiveConflict(t *testing.T) {
+	const timeoutLine = "ssh: connect to host blackhole.example port 22: Operation timed out"
+	pullErr := errors.New(timeoutLine + "\nfatal: Could not read from remote repository.\nPlease make sure you have the correct access rights and the repository exists.\nhint: run `ssh-add <key>` to pre-load your key for SSH remotes")
 	r := &syncOpsRecorder{
-		pullErrs:     []error{errors.New("dial tcp: connection refused")},
+		pullErrs:     []error{pullErr},
 		conflictsSeq: [][]string{nil, {"issues"}},
 	}
 	out, err := runSyncLoop(context.Background(), r.ops(), defaultSyncAttempts)
@@ -304,8 +342,13 @@ func TestRunSyncLoopDiscardedPullErrorOnLiveConflict(t *testing.T) {
 	if out.Status != syncStatusConflict {
 		t.Fatalf("status = %q, want %q", out.Status, syncStatusConflict)
 	}
-	if out.DiscardedPullError != "dial tcp: connection refused" {
-		t.Errorf("DiscardedPullError = %q, want the unrelated pull error preserved", out.DiscardedPullError)
+	if !strings.Contains(out.DiscardedPullError, "could not be reached") || !strings.Contains(out.DiscardedPullError, timeoutLine) {
+		t.Errorf("DiscardedPullError does not explain the dial timeout: %q", out.DiscardedPullError)
+	}
+	for _, misleading := range []string{"access rights", "ssh-add", "fatal: Could not read"} {
+		if strings.Contains(out.DiscardedPullError, misleading) {
+			t.Errorf("DiscardedPullError retained auth hint %q: %q", misleading, out.DiscardedPullError)
+		}
 	}
 }
 
@@ -346,6 +389,78 @@ func TestRunSyncLoopPullErrorWithoutConflicts(t *testing.T) {
 	}
 	if r.pulls != 1 {
 		t.Errorf("pulls = %d, want 1 (no retry on a non-race failure)", r.pulls)
+	}
+}
+
+// A pull that merged nothing only because the branch is behind a fast-forwardable
+// remote tip (a peer pushed after our fetch) is the pull-side twin of a push
+// race: re-entering the loop re-pulls and merges the commits that beat us, and it
+// converges.
+func TestRunSyncLoopPullBehindFastForwardableRetriesAndSucceeds(t *testing.T) {
+	r := &syncOpsRecorder{
+		pullErrs:      []error{behindErr(), nil},
+		recomputeVals: []int{5},
+	}
+	out, err := runSyncLoop(context.Background(), r.ops(), defaultSyncAttempts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Status != syncStatusOK {
+		t.Fatalf("status = %q, want %q", out.Status, syncStatusOK)
+	}
+	if out.Attempts != 2 {
+		t.Errorf("Attempts = %d, want 2", out.Attempts)
+	}
+	if r.pulls != 2 {
+		t.Errorf("pulls = %d, want 2 (a fast-forwardable-behind pull must re-pull)", r.pulls)
+	}
+	if !out.Pushed {
+		t.Error("Pushed = false, want true after the retry converged")
+	}
+	if !out.sawTransient(syncTransientPullBehind) {
+		t.Errorf("Transients = %v, want a %q entry", out.Transients, syncTransientPullBehind)
+	}
+}
+
+// When the fast-forwardable-behind race never clears within the attempt budget,
+// the loop exits retries-exhausted (exit 3, "transient — retry next tick"), NOT a
+// hard error, and never pushes on a pull that landed nothing.
+func TestRunSyncLoopPullBehindFastForwardableRetriesExhausted(t *testing.T) {
+	r := &syncOpsRecorder{pullErrs: []error{behindErr()}}
+	out, err := runSyncLoop(context.Background(), r.ops(), 2)
+	if err != nil {
+		t.Fatalf("a self-healing fast-forwardable-behind pull must not hard-fail: %v", err)
+	}
+	if out.Status != syncStatusRetriesExhausted {
+		t.Fatalf("status = %q, want %q", out.Status, syncStatusRetriesExhausted)
+	}
+	if out.Attempts != 2 {
+		t.Errorf("Attempts = %d, want 2", out.Attempts)
+	}
+	if r.pulls != 2 {
+		t.Errorf("pulls = %d, want 2 (bounded by --attempts)", r.pulls)
+	}
+	if r.pushes != 0 {
+		t.Errorf("pushes = %d, want 0 (never push when no pull landed)", r.pushes)
+	}
+	if !out.sawTransient(syncTransientPullBehind) {
+		t.Errorf("Transients = %v, want a %q entry", out.Transients, syncTransientPullBehind)
+	}
+}
+
+// The classification is from the typed sentinel, never the message: a genuine
+// divergence carries the same "merged nothing" wording but must stay a hard
+// error, so a message match would demote it into the retry budget and burn every
+// tick on a divergence that can never fast-forward.
+func TestIsPullBehindFastForwardableErr(t *testing.T) {
+	if !isPullBehindFastForwardableErr(behindErr()) {
+		t.Error("the wrapped sentinel must classify as fast-forwardable-behind")
+	}
+	if isPullBehindFastForwardableErr(errors.New("pull reported success but merged nothing")) {
+		t.Error("a message-only lookalike must NOT classify as fast-forwardable-behind")
+	}
+	if isPullBehindFastForwardableErr(nil) {
+		t.Error("nil must not classify")
 	}
 }
 

@@ -210,3 +210,21 @@ func setupDoctorBareParentWorktree(t *testing.T) (string, string) {
 
 	return bareDir, featureWorktreeDir
 }
+
+// TestLargeDatabaseWarningRecommendsRealCommand pins the Large Database
+// remedy to a command that exists: the check used to recommend 'bd cleanup',
+// which is not a root-level command in this build (cleanup lives under
+// 'bd admin cleanup'); the operator-facing lifecycle command is 'bd prune'.
+func TestLargeDatabaseWarningRecommendsRealCommand(t *testing.T) {
+	dc := largeDatabaseWarning(6000, 5000)
+
+	if dc.Status != StatusWarning {
+		t.Fatalf("expected StatusWarning, got %v", dc.Status)
+	}
+	if strings.Contains(dc.Fix, "bd cleanup") {
+		t.Fatalf("Large Database fix recommends nonexistent 'bd cleanup': %q", dc.Fix)
+	}
+	if !strings.Contains(dc.Fix, "bd prune") {
+		t.Fatalf("Large Database fix should recommend 'bd prune': %q", dc.Fix)
+	}
+}

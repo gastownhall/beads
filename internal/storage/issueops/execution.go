@@ -59,6 +59,13 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 	if !issue.Ephemeral && !issue.NoHistory && ResolveInfraTypesInTx(ctx, tx)[string(issue.IssueType)] {
 		issue.Ephemeral = true
 	}
+	// A wisp_type IS a claim of ephemerality: a typed wisp minted without the
+	// flag lands in the issues plane where no TTL, GC, or purge tier owns it
+	// (858 such rows / 7.3 MB survived every sweep in one production DB before
+	// this line). NoHistory keeps its own retention mode, same as above.
+	if !issue.Ephemeral && !issue.NoHistory && issue.WispType != "" {
+		issue.Ephemeral = true
+	}
 	if attempt.InheritLabelsFromParent && attempt.ParentID != "" {
 		labels, err := GetLabelsInTx(ctx, tx, "", attempt.ParentID)
 		if err != nil {
@@ -80,12 +87,17 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 	}
 	issue.Dependencies = storage.CreatePublicCreateDependencies(issue.ID, attempt)
 	var skipped []skippedDependency
-	created, err := CreateIssuesInTxWithResult(ctx, tx, []*types.Issue{issue}, attempt.Actor, storage.BatchCreateOptions{
+	// Reuse the context read above: same transaction, same options, and
+	// nothing since has written config, so re-reading it (as
+	// CreateIssuesInTxWithResult would) only repeats the same reads.
+	createContext := *batch
+	createContext.Opts = storage.BatchCreateOptions{
 		CreateOnly: true, SkipPrefixValidation: attempt.ForceIDPrefix,
 		OnSkippedDependency: func(issueID, dependsOnID, reason string) {
 			skipped = append(skipped, skippedDependency{issueID: issueID, dependsOnID: dependsOnID, reason: reason})
 		},
-	})
+	}
+	created, err := CreateIssuesInTxWithContext(ctx, tx, &createContext, []*types.Issue{issue}, attempt.Actor)
 	if err != nil {
 		return publicops.CreateResult{}, nil, ClassifyPublicCreateError(err)
 	}
@@ -101,6 +113,7 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 	if err != nil {
 		return publicops.CreateResult{}, nil, err
 	}
+	OverlayCreateTimestamps(hydrated, issue)
 	return publicops.CreateResult{Issue: hydrated}, tables, nil
 }
 
@@ -161,9 +174,17 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 	if err := AuthorizeAssigneeTransfer(ctx, tx, before, attempt); err != nil {
 		return publicops.UpdateResult{}, nil, err
 	}
+	if err := AuthorizeNotesOverwrite(before, attempt); err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	// Every constituent below runs its no-mint variant: one guarded update is
+	// one caller-visible mutation, and its version is minted exactly once at
+	// the end, after the last patch, so durable_state carries the final row,
+	// label set and edge set rather than whichever write happened to run
+	// first.
 	changedAny := false
 	if attempt.Claim {
-		claimed, err := ClaimIssueInTx(ctx, tx, attempt.IssueID, attempt.Actor)
+		claimed, err := claimIssueInTx(ctx, tx, attempt.IssueID, attempt.Actor, false)
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}
@@ -201,7 +222,7 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 		updates[OpForceClosePolicy] = true
 	}
 	if len(updates) > 0 {
-		updated, err := UpdateIssueInTx(ctx, tx, attempt.IssueID, updates, attempt.Actor)
+		updated, err := updateIssueInTx(ctx, tx, attempt.IssueID, updates, attempt.Actor, true, false)
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}
@@ -214,7 +235,7 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 			}
 		}
 	}
-	labelsChanged, err := ApplyLabelPatch(ctx, tx, current, attempt.Patch.Labels, attempt.Actor)
+	labelsChanged, err := applyLabelPatch(ctx, tx, current, attempt.Patch.Labels, attempt.Actor, false)
 	if err != nil {
 		return publicops.UpdateResult{}, nil, err
 	}
@@ -223,7 +244,7 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 		_, labelTable, eventTable, _ := WispTableRouting(IsActiveWispInTx(ctx, tx, attempt.IssueID))
 		tables.Add(labelTable, eventTable)
 	}
-	parentResult, err := ApplyParentPatch(ctx, tx, current, attempt.Patch.ParentID, attempt.Actor)
+	parentResult, err := applyParentPatch(ctx, tx, current, attempt.Patch.ParentID, attempt.Actor, false)
 	if err != nil {
 		return publicops.UpdateResult{}, nil, err
 	}
@@ -240,13 +261,22 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}
-		moved, err := MoveIssuePersistenceInTx(ctx, tx, current, attempt.Patch.Persistence.Value)
+		moved, err := moveIssuePersistenceInTx(ctx, tx, current, attempt.Patch.Persistence.Value, attempt.Actor, false)
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}
 		if moved.Changed {
 			changedAny = true
 			tables.Merge(moved.ChangedTables)
+		}
+	}
+	// The one mint for this guarded update, LAST: after the claim, the row
+	// write, the label and parent patches and the persistence move. Nothing
+	// changed means nothing to version (the FR-2 no-op case), and a row that
+	// moved to the wisp plane is excluded by the seam itself.
+	if changedAny {
+		if err := RecordVersionInTx(ctx, tx, attempt.IssueID, attempt.Actor); err != nil {
+			return publicops.UpdateResult{}, nil, err
 		}
 	}
 	hydrated, err := HydrateIssueOperationResult(ctx, tx, attempt.IssueID, false)

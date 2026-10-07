@@ -1,4 +1,4 @@
-//go:build regression
+//go:build regression || integration
 
 // Package regression implements differential testing between a pinned baseline
 // bd binary (v0.49.6) and the current worktree build. Each test scenario runs
@@ -8,6 +8,15 @@
 //
 // Run: go test -tags=regression -timeout=10m ./tests/regression/...
 // Or:  make test-regression
+// CI:  bazel test //tests/regression:regression_test --config=doltserver-cmd
+//
+// Under Bazel the files build under the integration tag (gazelle generates
+// the target from them) and both binaries are declared inputs: the candidate
+// is //cmd/bd:bd_for_tests (BEADS_TEST_BD_BINARY) and the baseline is the
+// catalog-pinned release @bd_releases//:<BASELINE_VERSION>
+// (BD_REGRESSION_BASELINE_BIN), so the suite needs no Go toolchain and no
+// network. A plain `go test -tags=integration ./...` compiles the files too
+// but skips the suite: only -tags=regression (or Bazel) runs it.
 package regression
 
 import (
@@ -31,7 +40,12 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
+
+// builtWithRegressionTag is set by regression_tag_test.go, which only
+// -tags=regression compiles.
+var builtWithRegressionTag bool
 
 // baselineBin is the path to the pinned baseline bd binary.
 var baselineBin string
@@ -43,9 +57,20 @@ var candidateBin string
 var testDoltServerPort int
 
 func TestMain(m *testing.M) {
+	os.Exit(testMainInner(m))
+}
+
+// testMainInner holds TestMain's body so its defer runs before the process
+// exits — os.Exit skips deferred calls, so TestMain itself must never defer
+// anything (be-5kkk6).
+func testMainInner(m *testing.M) int {
 	if runtime.GOOS == "windows" {
 		fmt.Fprintln(os.Stderr, "regression tests not yet supported on Windows (zip extraction needed)")
-		os.Exit(0)
+		return 0
+	}
+	if !builtWithRegressionTag && !bazeltest.IsBazel() {
+		fmt.Fprintln(os.Stderr, "SKIP: differential regression suite runs only with -tags=regression or under Bazel")
+		return 0
 	}
 
 	// Start an isolated Dolt server so regression tests don't pollute
@@ -53,16 +78,18 @@ func TestMain(m *testing.M) {
 	if _, err := exec.LookPath("dolt"); err != nil {
 		if os.Getenv("GITHUB_ACTIONS") == "true" {
 			fmt.Fprintln(os.Stderr, "FAIL: dolt missing under GITHUB_ACTIONS — CI workflow must install dolt")
-			os.Exit(1)
+			return 1
 		}
 		fmt.Fprintln(os.Stderr, "SKIP: dolt not found in PATH; regression tests require dolt")
-		os.Exit(0)
+		return 0
 	}
 	os.Setenv("BEADS_TEST_MODE", "1")
 	// AD-01 (be-c5p): allow regression tests to connect to the test container.
 	os.Setenv("BEADS_TEST_SERVER", "1")
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
-		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
+		if testutil.DoltUnavailableForTestMain(err) {
+			return 1
+		}
 	} else {
 		defer testutil.TerminateDoltContainer()
 		testDoltServerPort = testutil.DoltContainerPortInt()
@@ -72,16 +99,25 @@ func TestMain(m *testing.M) {
 	tmpDir, err := os.MkdirTemp("", "bd-regression-bin-*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "creating temp dir: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
-	// Build candidate from current worktree
-	candidateBin = filepath.Join(tmpDir, "bd-candidate")
-	fmt.Fprintln(os.Stderr, "Building candidate binary...")
-	if err := buildCandidate(candidateBin); err != nil {
-		fmt.Fprintf(os.Stderr, "building candidate: %v\n", err)
+	// Candidate: the prebuilt bd (required under Bazel), else a build of the
+	// current worktree.
+	candidateBin, err = bazeltest.PrebuiltBD()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "candidate binary: %v\n", err)
 		os.RemoveAll(tmpDir)
-		os.Exit(1)
+		return 1
+	}
+	if candidateBin == "" {
+		candidateBin = filepath.Join(tmpDir, "bd-candidate")
+		fmt.Fprintln(os.Stderr, "Building candidate binary...")
+		if err := buildCandidate(candidateBin); err != nil {
+			fmt.Fprintf(os.Stderr, "building candidate: %v\n", err)
+			os.RemoveAll(tmpDir)
+			return 1
+		}
 	}
 
 	// Get baseline (env override > cache > download)
@@ -90,13 +126,13 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "getting baseline: %v\n", err)
 		os.RemoveAll(tmpDir)
-		os.Exit(1)
+		return 1
 	}
 
 	fmt.Fprintf(os.Stderr, "Baseline:  %s\nCandidate: %s\n\n", baselineBin, candidateBin)
 	code := m.Run()
 	os.RemoveAll(tmpDir)
-	os.Exit(code)
+	return code
 }
 
 // ---------------------------------------------------------------------------
@@ -154,20 +190,25 @@ func icuPrefixPath() string {
 	return strings.TrimSpace(string(out))
 }
 
+// baselineBinEnv overrides the baseline binary. Under Bazel it is required
+// and holds the rlocationpath of the pinned release.
+const baselineBinEnv = "BD_REGRESSION_BASELINE_BIN"
+
 func getBaseline() (string, error) {
-	if bin := os.Getenv("BD_REGRESSION_BASELINE_BIN"); bin != "" {
+	if bazeltest.IsBazel() {
+		return pinnedBaseline()
+	}
+	if bin := os.Getenv(baselineBinEnv); bin != "" {
 		if _, err := os.Stat(bin); err != nil {
-			return "", fmt.Errorf("BD_REGRESSION_BASELINE_BIN=%q: %w", bin, err)
+			return "", fmt.Errorf("%s=%q: %w", baselineBinEnv, bin, err)
 		}
 		return bin, nil
 	}
 
-	versionFile := filepath.Join(findModuleRoot(), "tests", "regression", "BASELINE_VERSION")
-	data, err := os.ReadFile(versionFile)
+	version, err := baselineVersion(findModuleRoot())
 	if err != nil {
-		return "", fmt.Errorf("reading BASELINE_VERSION: %w", err)
+		return "", err
 	}
-	version := strings.TrimSpace(string(data))
 
 	cacheDir, err := os.UserCacheDir()
 	if err != nil {
@@ -194,6 +235,41 @@ func getBaseline() (string, error) {
 	}
 
 	return cachedBin, nil
+}
+
+// baselineVersion reads tests/regression/BASELINE_VERSION under root.
+func baselineVersion(root string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(root, "tests", "regression", "BASELINE_VERSION"))
+	if err != nil {
+		return "", fmt.Errorf("reading BASELINE_VERSION: %w", err)
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+// pinnedBaseline resolves the Bazel-declared baseline release and checks that
+// it is the release BASELINE_VERSION names, so the BUILD label and the file
+// cannot drift apart.
+func pinnedBaseline() (string, error) {
+	bin, err := bazeltest.RunfileEnv(baselineBinEnv)
+	if err != nil {
+		return "", err
+	}
+	root := bazeltest.OverrideRoot()
+	if root == "" {
+		return "", fmt.Errorf("no repository root in the runfiles for BASELINE_VERSION")
+	}
+	version, err := baselineVersion(root)
+	if err != nil {
+		return "", err
+	}
+	out, err := exec.Command(bin, "version").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%s version: %w\n%s", bin, err, out)
+	}
+	if bare := strings.TrimPrefix(version, "v"); !strings.Contains(" "+string(out)+" ", " "+bare+" ") {
+		return "", fmt.Errorf("baseline %s reports %q, want BASELINE_VERSION %s", bin, strings.TrimSpace(string(out)), version)
+	}
+	return bin, nil
 }
 
 func downloadAndExtract(url, destPath string) error {
@@ -465,8 +541,23 @@ func (w *workspace) showJSONForSnapshot(id string) string {
 	return w.run(args...)
 }
 
-func (w *workspace) supportsStreamedShowPayloads() bool {
+// isCandidate reports whether this workspace runs the candidate binary rather
+// than the pinned baseline. Intent-named feature gates below delegate here so
+// candidate detection lives in one place.
+func (w *workspace) isCandidate() bool {
 	return candidateBin != "" && w.bdPath == candidateBin
+}
+
+func (w *workspace) supportsStreamedShowPayloads() bool {
+	return w.isCandidate()
+}
+
+// requiresNotesOverwriteForce reports whether this binary refuses `update
+// --notes` over existing notes without --force. The pinned baseline predates
+// both the refusal and the flag (its update has no --force at all), so shared
+// scenarios pass --force only to the candidate.
+func (w *workspace) requiresNotesOverwriteForce() bool {
+	return w.isCandidate()
 }
 
 // export returns a JSONL snapshot of the workspace. This replaces the removed

@@ -2397,6 +2397,141 @@ func RunReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing(t 
 	assertReaderPageIDs(t, `List from (the group's second, "")`, fromGroupStart, append(slices.Clone(group), older))
 }
 
+// RunReaderListPriorityKeysetWalkOverAnOversizedEqualKeyRunLosesNothingAndRepeatsNothing
+// is the walk over the SECOND served order, (priority ASC, created_at DESC,
+// id ASC), and the proof that its three-part key is total.
+//
+// WHY A SECOND WALK CASE AND NOT A PARAMETER ON THE FIRST: the created order's
+// key is (created_at, id) and this one's is (priority, created_at, id), so the
+// property at risk is different. There the tie-break is reached whenever two
+// rows share a second; here it is reached only when two rows share BOTH a
+// priority and a second, and the leg above it — created_at DESC WITHIN one
+// priority — does not exist there at all. A body can pass the created walk and
+// still get this one wrong in two ways that both look like a correct page:
+// carrying only the (created_at, id) half of the position, which drops every
+// row of a higher-numbered priority created after the cursor; or flattening the
+// predicate's priority-equal arm, which re-delivers rows at the cursor's own
+// priority created after it.
+//
+// THE FIXTURE IS BUILT SO THE PAGE BREAK LANDS INSIDE THE EQUAL-KEY RUN, which
+// is the input that makes totality observable rather than merely asserted.
+// Five rows share one (priority, created_at) and the page is two, so two of the
+// three boundaries fall mid-run and the walk can only continue on `id`. A
+// fixture whose runs happened to align with its pages would pass against a
+// two-part key and prove nothing.
+//
+// THE NEIGHBORS ARE THE OTHER HALF OF THE FIXTURE. `sooner` shares the run's
+// priority and is NEWER, so it must be delivered before the run and never
+// again after it — it is the row a flattened predicate re-delivers. `worse` is
+// a higher-numbered priority and is OLDER than nothing in particular; it must
+// come last however its timestamp compares, which is what fails when only the
+// created half of the position survives.
+//
+// WHAT IT DEPENDS ON FROM OUTSIDE ITSELF: the id set it scopes on, and nothing
+// about the workspace. Every timestamp is a whole second, deliberately: the
+// column has no fractional part, so a fixture written in milliseconds would
+// have the engine, not the case, decide which rows tie.
+func RunReaderListPriorityKeysetWalkOverAnOversizedEqualKeyRunLosesNothingAndRepeatsNothing(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	id := func(name string) string { return readerID(fixture, "pkswalk", name) }
+	better, sooner, worse := id("better"), id("sooner"), id("worse")
+	run := []string{id("a1"), id("a2"), id("a3"), id("a4"), id("a5")}
+
+	runSecond := time.Now().UTC().Truncate(time.Second).Add(-1 * time.Hour)
+	seed := func(memberID string, priority int, at time.Time) {
+		issue := readerIssue(memberID, types.TypeTask, "")
+		issue.Priority = priority
+		issue.CreatedAt = at
+		issue.UpdatedAt = at
+		seedReaderIssue(t, ctx, fixture, issue)
+	}
+	// A lower-numbered priority sorts FIRST, whatever its instant: this row is
+	// the OLDEST in the fixture and must still lead the answer.
+	seed(better, 1, runSecond.Add(-time.Hour))
+	// Same priority as the run, one second newer — the row a priority-equal arm
+	// that forgot its created_at bound would hand out twice.
+	seed(sooner, 2, runSecond.Add(time.Second))
+	for _, member := range run {
+		seed(member, 2, runSecond)
+	}
+	// A higher-numbered priority sorts LAST, and it is the NEWEST row in the
+	// fixture so that a body carrying only the created half of the position
+	// cannot reach it at all.
+	seed(worse, 3, runSecond.Add(time.Hour))
+
+	want := append([]string{better, sooner}, run...)
+	want = append(want, worse)
+	idScope := readerIDFilter(want...)
+
+	// THE ONE-SHOT ORDER IS READ FIRST, so a backend that agrees with itself
+	// but orders differently from the reference fails on the sequence rather
+	// than on the walk — two different defects that would otherwise report the
+	// same way.
+	oneShot, err := fixture.Reader.List(ctx, publicops.ListRequest{IDFilter: idScope, SortBy: "priority"})
+	if err != nil {
+		t.Fatalf("List unpaged: %v", err)
+	}
+	assertReaderPageIDs(t, "List unpaged", oneShot, want)
+
+	const pageSize = 2
+	var walked []string
+	seen := make(map[string]bool, len(want))
+	var afterPriority *int
+	var afterCreatedAt *time.Time
+	afterID := ""
+	for page := 0; page <= len(want); page++ {
+		got, pageErr := fixture.Reader.List(ctx, publicops.ListRequest{
+			IDFilter: idScope, SortBy: "priority", Limit: readerLimit(pageSize),
+			AfterPriority: afterPriority, AfterCreatedAt: afterCreatedAt, AfterID: afterID,
+		})
+		if pageErr != nil {
+			t.Fatalf("List page %d: %v", page, pageErr)
+		}
+		if len(got.Items) == 0 {
+			if got.HasMore {
+				t.Errorf("List page %d came back empty with HasMore set", page)
+			}
+			break
+		}
+		if len(got.Items) > pageSize {
+			t.Fatalf("List page %d answered %d rows over a Limit of %d", page, len(got.Items), pageSize)
+		}
+		for _, item := range got.Items {
+			if item == nil || item.Issue == nil {
+				t.Fatalf("List page %d returned a nil row", page)
+			}
+			if seen[item.ID] {
+				t.Fatalf("List page %d repeated %s: the equal-key run is larger than the page, and the position re-delivered a row it had already handed out",
+					page, item.ID)
+			}
+			seen[item.ID] = true
+			walked = append(walked, item.ID)
+		}
+		last := got.Items[len(got.Items)-1]
+		at := last.CreatedAt.UTC()
+		priority := last.Priority
+		afterPriority, afterCreatedAt, afterID = &priority, &at, last.ID
+	}
+	if !slices.Equal(walked, want) {
+		t.Errorf("the priority keyset walk delivered %v, want the one-shot sequence %v with nothing dropped and nothing repeated", walked, want)
+	}
+
+	// The position is a CONJUNCT here too: resuming from the run's first member
+	// keeps the rest of the run and the higher-numbered priority behind it, and
+	// drops the two rows that sort ahead of it — including `sooner`, which
+	// shares the cursor's priority and is only excluded by the created_at leg.
+	cursorAt := runSecond
+	cursorPriority := 2
+	resumed, err := fixture.Reader.List(ctx, publicops.ListRequest{
+		IDFilter: idScope, SortBy: "priority",
+		AfterPriority: &cursorPriority, AfterCreatedAt: &cursorAt, AfterID: run[0],
+	})
+	if err != nil {
+		t.Fatalf("List resumed from inside the run: %v", err)
+	}
+	assertReaderPageIDs(t, "List resumed from inside the run", resumed, append(slices.Clone(run[1:]), worse))
+}
+
 // RunReaderListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates pins the
 // keyset position as a CONJUNCT. It narrows what the rest of the request
 // matched; it does not become the request.

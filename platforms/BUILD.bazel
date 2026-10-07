@@ -1,0 +1,52 @@
+# rbe_worker: the execution platform of every build (.bazelrc selects it
+# unconditionally with --extra_execution_platforms, so every action and test
+# executes on it and local, fork-cache and remote runs hash alike).
+#
+# Test actions exec host tools (bash, git, python3, coreutils, ...) and load
+# the shared libraries of every cgo binary they link (glibc, libstdc++), so
+# the worker host is an input to every cached result. Its exec_properties
+# enter each action's key: worker-env is the sha256 of
+# tools/rbe/worker-env.txt, the toolchain manifest of the pinned worker host
+# (arch, OS release, Go, dolt, and the upstream releases of the libraries and
+# tools actions reach; not the image's security patch revisions).
+#
+# rbe-west's OSS pool is shared with gastownhall/gascity, which owns the
+# worker image: its tools/rbe/blacksmith-worker.sh advertises the sha256 of
+# the manifest it measures on its own host (gascity tools/rbe/worker-env),
+# and the schedulers match worker-env exactly, so these actions run only on
+# the pinned toolchain. tools/rbe/worker-env.txt is a byte-for-byte copy of
+# gascity's: when gascity moves its pin (a toolchain change: a distribution,
+# library or tool release, Go or dolt), copy its manifest here and update
+# this sha256 in the same commit, which is a new key for every action.
+# scripts/rbe_worker_env_test.go keeps the pin and the manifest in step, and
+# tools/rbe/worker-env-sync (nightly) compares both with gascity's main.
+platform(
+    name = "rbe_worker",
+    exec_properties = {
+        "worker-env": "sha256:6be1381cf08e7fd66684cfce6f26aca57de2561e722c505d1f2f578e9fdeafa7",
+    },
+    parents = ["@bazel_tools//tools:host_platform"],
+    visibility = ["//visibility:public"],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

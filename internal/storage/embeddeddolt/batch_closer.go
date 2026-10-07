@@ -26,7 +26,20 @@ func NewBatchCloser(store *EmbeddedDoltStore) (issueops.BatchCloser, error) {
 	return &batchCloser{store: store}, nil
 }
 
-type batchCloser struct{ store *EmbeddedDoltStore }
+// BatchCloserWithPolicy retains externally resolved blockers inside the batch.
+func (s *EmbeddedDoltStore) BatchCloserWithPolicy(policy storage.BatchClosePolicy) (issueops.BatchCloser, error) {
+	if s == nil {
+		return nil, &storage.ErrUnsupported{Op: "BatchCloserWithPolicy", Backend: "nil"}
+	}
+	return &batchCloser{store: s, policy: policy}, nil
+}
+
+type batchCloser struct {
+	store  *EmbeddedDoltStore
+	policy storage.BatchClosePolicy
+}
+
+var _ storage.PolicyBatchCloserSource = (*EmbeddedDoltStore)(nil)
 
 // CloseBatch runs every close, and the optional claim, in ONE transaction with
 // one commit. The message is composed inside the body because it names what
@@ -42,7 +55,7 @@ func (o *batchCloser) CloseBatch(ctx context.Context, request issueops.CloseBatc
 
 	var result issueops.CloseBatchResult
 	err = o.store.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (storageissueops.ChangedTables, string, error) {
-		attempt, tables, err := storageissueops.ExecuteCloseBatch(ctx, tx, request, claimFilter)
+		attempt, tables, err := storageissueops.ExecuteCloseBatchWithPolicy(ctx, tx, request, claimFilter, o.policy)
 		if err != nil {
 			return nil, "", err
 		}

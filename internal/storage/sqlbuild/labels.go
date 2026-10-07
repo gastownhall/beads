@@ -73,3 +73,44 @@ func BuildLabelDrivenSearch(filter types.IssueFilter, tables FilterTables) Label
 		Filter:   filterForClauses,
 	}
 }
+
+// LabelSetClauses builds the AND / OR / NOT label predicates as IN-subqueries
+// against tables.Labels, keyed on idExpr. Semantics are the ones users already
+// know from bd list and bd ready: labels is AND (carry all of them), labelsAny
+// is OR (carry at least one), exclude drops an issue carrying any. Clause and
+// arg ordering, and the treatment of empty entries, mirror the equivalent
+// blocks in BuildIssueFilterClauses so every listing command filters labels
+// identically.
+//
+// BuildLabelDrivenSearch rewrites the AND/OR pair into JOINs for the search
+// path, which the optimizer prefers on large corpora. This is the subquery
+// form, for callers whose FROM clause is fixed and cannot take a join.
+func LabelSetClauses(idExpr string, tables FilterTables, labels, labelsAny, exclude []string) ([]string, []any) {
+	var where []string
+	var args []any
+
+	for _, label := range labels {
+		where = append(where, fmt.Sprintf("%s IN (SELECT issue_id FROM %s WHERE label = ?)", idExpr, tables.Labels))
+		args = append(args, label)
+	}
+	if len(labelsAny) > 0 {
+		placeholders := make([]string, len(labelsAny))
+		for i, label := range labelsAny {
+			placeholders[i] = "?"
+			args = append(args, label)
+		}
+		where = append(where, fmt.Sprintf("%s IN (SELECT issue_id FROM %s WHERE label IN (%s))",
+			idExpr, tables.Labels, strings.Join(placeholders, ", ")))
+	}
+	if len(exclude) > 0 {
+		placeholders := make([]string, len(exclude))
+		for i, label := range exclude {
+			placeholders[i] = "?"
+			args = append(args, label)
+		}
+		where = append(where, fmt.Sprintf("%s NOT IN (SELECT issue_id FROM %s WHERE label IN (%s))",
+			idExpr, tables.Labels, strings.Join(placeholders, ", ")))
+	}
+
+	return where, args
+}

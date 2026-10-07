@@ -180,7 +180,12 @@ func assertDepExistsWithType(t *testing.T, beadsDir, database, issueID, dependsO
 	}
 }
 
-func TestEmbeddedCreate(t *testing.T) {
+// TestEmbeddedCreateScalarAndRelationships was split from TestEmbeddedCreate
+// (originally ~266.68s, measured under --config=embedded) into 2 top-level
+// tests over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedCreateScalarAndRelationships(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
 	}
@@ -238,6 +243,31 @@ func TestEmbeddedCreate(t *testing.T) {
 		}
 		if out := bdCreateFail(t, bd, dir); !strings.Contains(out, "title") {
 			t.Fatalf("missing title output = %s", out)
+		}
+	})
+
+	// GH#6035: create stored a bare JSON string/array/number as metadata,
+	// and update rejected the same value only late, in the storage merge.
+	t.Run("metadata_must_be_object_GH6035", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "mo")
+		const want = "invalid --metadata: must be a JSON object"
+		target := bdCreate(t, bd, dir, "Metadata target", "--metadata", `{"a":1}`)
+		var metadata map[string]any
+		if err := json.Unmarshal(target.Metadata, &metadata); err != nil || metadata["a"] != float64(1) {
+			t.Fatalf("object metadata = %q, err = %v", target.Metadata, err)
+		}
+		for _, value := range []string{`"oops"`, `[1,2]`, `42`, `true`, `null`} {
+			if out := bdCreateFail(t, bd, dir, "Bad metadata", "--metadata", value); !strings.Contains(out, want) {
+				t.Fatalf("create --metadata %s output = %s, want %q", value, out, want)
+			}
+			if out := bdUpdateFail(t, bd, dir, target.ID, "--metadata", value); !strings.Contains(out, want) {
+				t.Fatalf("update --metadata %s output = %s, want %q", value, out, want)
+			}
+		}
+		got := bdShow(t, bd, dir, target.ID)
+		var after map[string]any
+		if err := json.Unmarshal(got.Metadata, &after); err != nil || len(after) != 1 || after["a"] != float64(1) {
+			t.Fatalf("rejected updates changed metadata to %q, err = %v", got.Metadata, err)
 		}
 	})
 
@@ -336,6 +366,20 @@ func TestEmbeddedCreate(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestEmbeddedCreateGraphAndBulk was split from TestEmbeddedCreate
+// (originally ~266.68s, measured under --config=embedded) into 2 top-level
+// tests over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedCreateGraphAndBulk(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("graph_create_journey", func(t *testing.T) {
 		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gr")
@@ -1117,6 +1161,74 @@ func TestEmbeddedCreateCrossRepoUninit(t *testing.T) {
 	}
 	if got.Title != "Issue in uninit target" {
 		t.Errorf("title: got %q, want %q", got.Title, "Issue in uninit target")
+	}
+}
+
+// TestEmbeddedCreateRepoRelativeUninitRefused is a regression test for
+// bd-8d3f: a bare/relative --repo value with no existing workspace resolves
+// silently against the current working directory (routing.ExpandPath has no
+// concept of an external rig/alias registry), so it must be refused instead
+// of auto-creating a disconnected database that the caller never intended
+// and nothing else will ever route to. Contrast with
+// TestEmbeddedCreateCrossRepoUninit, which uses an absolute --repo path and
+// must still succeed.
+func TestEmbeddedCreateRepoRelativeUninitRefused(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "src")
+
+	relTarget := "some-other-rig"
+	out, err := bdRunWithFlockRetry(t, bd, dir, "create", "--json", "Should not land anywhere", "--repo", relTarget)
+	if err == nil {
+		t.Fatalf("expected bd create --repo %q to fail for an uninitialized relative target, got success: %s", relTarget, out)
+	}
+	if !strings.Contains(string(out), "absolute") {
+		t.Errorf("expected error to explain the absolute/~-prefixed path requirement, got: %s", out)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(dir, relTarget, ".beads")); !os.IsNotExist(statErr) {
+		t.Errorf("expected no .beads directory to be fabricated at %s, stat err = %v", filepath.Join(dir, relTarget), statErr)
+	}
+}
+
+// TestEmbeddedCreateRepoRelativeExistingWorkspaceUnaffected verifies the
+// bd-8d3f gate only blocks *fabricating* a new workspace: a relative --repo
+// value that already has an initialized workspace at the resolved path must
+// keep working exactly as before, since ensureBeadsDirForPath's existing
+// os.Stat(metadata.json) check returns early before the new gate runs.
+func TestEmbeddedCreateRepoRelativeExistingWorkspaceUnaffected(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "src")
+
+	relTarget := "already-initialized-sibling"
+	absTarget := filepath.Join(dir, relTarget)
+	if err := os.MkdirAll(absTarget, 0750); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, absTarget)
+
+	// Initialize the target workspace first via an absolute --repo path
+	// (the already-covered, unambiguous case).
+	first := bdCreate(t, bd, dir, "Seed issue", "--repo", absTarget)
+	if first.ID == "" {
+		t.Fatal("expected issue ID for absolute --repo seed create")
+	}
+
+	// A relative --repo pointing at that SAME, now-initialized workspace
+	// must succeed unaffected by the bd-8d3f gate: the gate only blocks
+	// fabricating a workspace that doesn't exist yet.
+	second := bdCreate(t, bd, dir, "Should land in the pre-existing workspace", "--repo", relTarget)
+	if second.ID == "" {
+		t.Fatal("expected issue ID for relative --repo pointing at an existing workspace")
 	}
 }
 

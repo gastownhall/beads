@@ -22,6 +22,7 @@ func TestCheckSchemaSkew_FreshDB_NoError(t *testing.T) {
 	}
 	defer db.Close()
 
+	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(0))
 
@@ -40,6 +41,7 @@ func TestCheckSchemaSkew_EqualVersion_NoError(t *testing.T) {
 	}
 	defer db.Close()
 
+	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(LatestVersion()))
 
@@ -59,6 +61,7 @@ func TestCheckSchemaSkew_OneAhead_ReturnsSchemaSkewError(t *testing.T) {
 	defer db.Close()
 
 	dbVersion := LatestVersion() + 1
+	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(dbVersion))
 
@@ -89,6 +92,7 @@ func TestCheckSchemaSkew_ThreeAhead_ReturnsSchemaSkewError(t *testing.T) {
 	defer db.Close()
 
 	dbVersion := LatestVersion() + 3
+	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(dbVersion))
 
@@ -121,6 +125,7 @@ func TestCheckSchemaSkew_EscapeHatch_ReturnsNilAndWarns(t *testing.T) {
 	defer db.Close()
 
 	dbVersion := LatestVersion() + 3
+	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(dbVersion))
 
@@ -170,8 +175,9 @@ func TestCheckSchemaSkew_MissingTable_NoError(t *testing.T) {
 	}
 	defer db.Close()
 
-	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
-		WillReturnError(errors.New("Error 1146 (42S02): Table 'beads.schema_migrations' doesn't exist"))
+	// With the be-bv7x probe in front, an absent cursor table is reported by
+	// the probe returning 0 rather than by the cursor read erroring out.
+	expectCursorProbe(mock, "schema_migrations", false)
 
 	if err := checkSchemaSkew(context.Background(), db); err != nil {
 		t.Fatalf("checkSchemaSkew = %v, want nil when schema_migrations is absent (fresh DB)", err)
@@ -200,6 +206,7 @@ func TestCheckForwardDrift_Conn_Ahead(t *testing.T) {
 	defer conn.Close()
 
 	dbVersion := LatestVersion() + 2
+	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(dbVersion))
 
@@ -281,5 +288,37 @@ func TestIsSchemaSkewError_OtherError(t *testing.T) {
 	err := errors.New("some unrelated error")
 	if IsSchemaSkewError(err) {
 		t.Error("IsSchemaSkewError(non-SchemaSkewError) = true, want false")
+	}
+}
+
+// -- CheckBehindDrift unit tests (mock DB) --
+
+func TestCheckBehindDrift_FreshDB_ReturnsSchemaBehindError(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	// On a fresh database where schema_migrations does not exist, the cursor probe
+	// returns 0 and no bare SELECT against schema_migrations is issued.
+	expectCursorProbe(mock, "schema_migrations", false)
+
+	got := CheckBehindDrift(context.Background(), db)
+	if got == nil {
+		t.Fatal("CheckBehindDrift = nil, want *SchemaBehindError for fresh DB (version=0)")
+	}
+	var behindErr *SchemaBehindError
+	if !errors.As(got, &behindErr) {
+		t.Fatalf("error type = %T (%v), want *SchemaBehindError", got, got)
+	}
+	if behindErr.DBVersion != 0 {
+		t.Errorf("DBVersion = %d, want 0", behindErr.DBVersion)
+	}
+	if behindErr.BinaryVersion != LatestVersion() {
+		t.Errorf("BinaryVersion = %d, want %d", behindErr.BinaryVersion, LatestVersion())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }

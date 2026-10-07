@@ -19,6 +19,18 @@ func WithDeferredVersionCommit(ctx context.Context) context.Context {
 	return context.WithValue(ctx, deferVersionCommitKey{}, true)
 }
 
+// WithImmediateVersionCommit returns a context that creates its Dolt version
+// commit even when an ancestor context deferred it.
+//
+// A route that applies the deferral once, for every command it dispatches —
+// the proxied-server CLI sets it on the root context (GH#4995) — needs this to
+// re-express the exemption the per-verb routes get by not being wrapped at all:
+// an explicit commit point ("commit these writes now, with this message") is
+// not a write whose versioning is policy, so it must not inherit the deferral.
+func WithImmediateVersionCommit(ctx context.Context) context.Context {
+	return context.WithValue(ctx, deferVersionCommitKey{}, false)
+}
+
 // VersionCommitDeferred reports whether ctx defers version commits.
 func VersionCommitDeferred(ctx context.Context) bool {
 	deferred, _ := ctx.Value(deferVersionCommitKey{}).(bool)

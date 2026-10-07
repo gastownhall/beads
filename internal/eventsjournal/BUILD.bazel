@@ -1,0 +1,53 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "eventsjournal",
+    srcs = [
+        "activation.go",
+        "autoprune.go",
+        "record.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/eventsjournal",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/config",
+        "//internal/storage",
+        "//internal/storage/issueops",
+    ],
+)
+
+go_test(
+    name = "eventsjournal_test",
+    srcs = [
+        "activation_test.go",
+        "autoprune_test.go",
+    ],
+    embed = [":eventsjournal"],
+    deps = [
+        "//internal/storage",
+        "//internal/storage/issueops",
+        "@com_github_data_dog_go_sqlmock//:go-sqlmock",
+    ],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

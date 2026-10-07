@@ -1,0 +1,44 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "timeparsing",
+    srcs = ["parser.go"],
+    importpath = "github.com/steveyegge/beads/internal/timeparsing",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "@com_github_olebedev_when//:when",
+        "@com_github_olebedev_when//rules/common",
+        "@com_github_olebedev_when//rules/en",
+    ],
+)
+
+go_test(
+    name = "timeparsing_test",
+    srcs = [
+        "duration_test.go",
+        "nlp_test.go",
+    ],
+    embed = [":timeparsing"],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

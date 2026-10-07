@@ -1,0 +1,37 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "schemagen_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/steveyegge/beads/internal/formula/cmd/schemagen",
+    visibility = ["//visibility:private"],
+    deps = ["//internal/formula/schemagen"],
+)
+
+go_binary(
+    name = "schemagen",
+    embed = [":schemagen_lib"],
+    visibility = ["//:__subpackages__"],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

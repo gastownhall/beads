@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -199,5 +202,42 @@ func TestCheckGateSatisfaction_ErrorMessageFormat(t *testing.T) {
 	}
 	if !strings.Contains(errMsg, "gate condition not satisfied") {
 		t.Errorf("error message should mention 'gate condition not satisfied', got: %s", errMsg)
+	}
+}
+
+// unreadableGateStore is a DoltStorage stand-in whose GetIssue always fails
+// with err. It embeds a nil DoltStorage and overrides only the read the bead
+// arm of checkGateSatisfaction makes.
+type unreadableGateStore struct {
+	storage.DoltStorage
+	err error
+}
+
+func (s *unreadableGateStore) GetIssue(context.Context, string) (*types.Issue, error) {
+	return nil, s.err
+}
+
+func TestCheckGateSatisfaction_BeadGateUnreadableStoreRefuses(t *testing.T) {
+	// A bead gate whose store read fails (anything but not-found) must refuse
+	// the close with the read error, not fall through to the fail-open
+	// warning the gh:* and timer arms use.
+	saveAndRestoreGlobals(t)
+	store = &unreadableGateStore{err: errors.New("dolt exploded")}
+
+	issue := &types.Issue{
+		IssueType: "gate",
+		AwaitType: "bead",
+		AwaitID:   "bd-abc",
+		Title:     "Bead gate on an unreadable store",
+	}
+
+	err := checkGateSatisfaction(issue)
+	if err == nil {
+		t.Fatal("checkGateSatisfaction() let a bead gate close although its store could not be read")
+	}
+	for _, want := range []string{"could not check bead gate", "dolt exploded", "--force"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q, got: %v", want, err)
+		}
 	}
 }

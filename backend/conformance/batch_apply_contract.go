@@ -1521,6 +1521,63 @@ func RunBatchApplyNormalizesTheWaitsForGate(t *testing.T, ctx context.Context, f
 	})
 }
 
+// RunBatchApplyStampsSpawnerIDOnlyWhenNamed is the S11 review fix-up
+// regression for HIGH-2: a waits-for DepAddItem must only acquire
+// metadata.spawner_id when the caller explicitly named a spawner
+// (HasSpawner=true, which bd create --graph sets when the plan declares
+// edges[].spawner_key/spawner_id). An edge with no named spawner must keep
+// its gate-only metadata untouched — stamping it unconditionally from the
+// resolved target caused unnecessary rewrite/version churn when gc
+// re-applies the same edge (see CHANGELOG.md).
+func RunBatchApplyStampsSpawnerIDOnlyWhenNamed(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	spawner := fixture.IssuePrefix + "-spawner-named"
+	waiter := fixture.IssuePrefix + "-waiter-named"
+	batchApplySeedIssue(t, ctx, fixture, spawner, types.StatusOpen)
+	batchApplySeedIssue(t, ctx, fixture, waiter, types.StatusOpen)
+
+	batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+		Actor: "apply-writer",
+		Items: []publicops.ApplyItem{
+			{Kind: publicops.ItemDepAdd, DepAdd: &publicops.DepAddItem{
+				Source:     publicops.Ref{ID: waiter},
+				Target:     publicops.Ref{ID: spawner},
+				Type:       publicops.DepWaitsFor,
+				Metadata:   `{"gate":"any-children"}`,
+				HasSpawner: true,
+			}},
+		},
+	})
+	stored := batchApplyEdgeMetadata(t, ctx, fixture, waiter, spawner)
+	var meta types.WaitsForMeta
+	if err := json.Unmarshal([]byte(stored), &meta); err != nil {
+		t.Fatalf("stored named-spawner metadata %q: %v", stored, err)
+	}
+	if meta.SpawnerID != spawner {
+		t.Errorf("named-spawner edge spawner_id = %q, want %q (metadata %q)", meta.SpawnerID, spawner, stored)
+	}
+
+	spawner2 := fixture.IssuePrefix + "-spawner-unnamed"
+	waiter2 := fixture.IssuePrefix + "-waiter-unnamed"
+	batchApplySeedIssue(t, ctx, fixture, spawner2, types.StatusOpen)
+	batchApplySeedIssue(t, ctx, fixture, waiter2, types.StatusOpen)
+
+	batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+		Actor: "apply-writer",
+		Items: []publicops.ApplyItem{
+			batchApplyDepAdd(publicops.Ref{ID: waiter2}, publicops.Ref{ID: spawner2}, publicops.DepWaitsFor, `{"gate":"any-children"}`),
+		},
+	})
+	stored2 := batchApplyEdgeMetadata(t, ctx, fixture, waiter2, spawner2)
+	var meta2 types.WaitsForMeta
+	if err := json.Unmarshal([]byte(stored2), &meta2); err != nil {
+		t.Fatalf("stored unnamed-spawner metadata %q: %v", stored2, err)
+	}
+	if meta2.SpawnerID != "" {
+		t.Errorf("unnamed-spawner edge must not stamp spawner_id, got %q (metadata %q)", meta2.SpawnerID, stored2)
+	}
+}
+
 // RunBatchApplySplicesAForwardMetadataRef pins the one exception to the
 // backward-only rule (CreateItem.MetadataRefs): "IT IS THE ONE PLACE A KEY MAY
 // REACH FORWARD … Every id is minted before any splice is applied, so the
@@ -1782,21 +1839,56 @@ func RunBatchApplyLandsAnIdempotencyRecordWithItsWork(t *testing.T, ctx context.
 // alone is satisfied by a bound one step away.
 func RunBatchApplyBoundsTheItemCount(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
 	t.Helper()
+	RunBatchApplyBoundsTheItemCountAtScale(t, ctx, fixture, publicops.MaxApplyBatchItems)
+}
+
+// RunBatchApplyBoundsTheItemCountAtScale is RunBatchApplyBoundsTheItemCount
+// with the "at bound" half's REAL applied count overridable to fewer than
+// issueops.MaxApplyBatchItems, for a backend whose real engine makes
+// applying a full MaxApplyBatchItems batch prohibitively slow in one CI
+// configuration (embedded-dolt under the race detector: this subtest alone
+// measured 903-945s there, because the in-process Dolt engine's own
+// goroutine/lock machinery runs inside the instrumented binary).
+//
+// This does NOT weaken the boundary this contract pins. The production
+// bound itself — exactly issueops.MaxApplyBatchItems accepted, one more
+// refused — is independent of atBoundItems and is NOT re-derived from a
+// real apply here: every backend's ApplyBatch calls the SAME
+// storage.PlanApplyBatch to decide accept-vs-refuse, before touching
+// storage at all (batch_applier.go: "VALIDATION HAPPENS BEFORE THE
+// TRANSACTION"), and that shared function's own boundary is independently
+// pinned, for real, pure and sub-millisecond, by
+// TestPlanApplyBatchAcceptsTheBoundary and its "too many items" sibling in
+// internal/storage/batch_apply_test.go — run on every `go test`, every
+// backend, every PR, unaffected by atBoundItems. The refusing half below is
+// UNCHANGED regardless of atBoundItems: it still sends the true
+// MaxApplyBatchItems+1 count, because that half is already O(1) (the same
+// pre-transaction length check, no backend ever reaches a write). Only the
+// "at bound" half's REAL applied count is adjustable, to prove a backend's
+// own write body does not drop, double or truncate a large accepted batch
+// without paying for the full MaxApplyBatchItems every time one backend's
+// real engine makes that unusually expensive.
+func RunBatchApplyBoundsTheItemCountAtScale(t *testing.T, ctx context.Context, fixture BatchApplyFixture, atBoundItems int) {
+	t.Helper()
+	if atBoundItems < 1 || atBoundItems > publicops.MaxApplyBatchItems {
+		t.Fatalf("atBoundItems = %d, want 1..%d (the production bound this contract pins)", atBoundItems, publicops.MaxApplyBatchItems)
+	}
 	const accepted = "batch apply at the item bound"
 	const refused = "batch apply over the item bound"
 
-	atBound := make([]publicops.ApplyItem, publicops.MaxApplyBatchItems)
+	atBound := make([]publicops.ApplyItem, atBoundItems)
 	for i := range atBound {
 		atBound[i] = batchApplyCreate("", batchApplyMintedIssue(accepted))
 	}
 	result := batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{Actor: "apply-writer", Items: atBound})
-	if len(result.Items) != publicops.MaxApplyBatchItems {
-		t.Fatalf("a request of exactly MaxApplyBatchItems returned %d item results, want %d", len(result.Items), publicops.MaxApplyBatchItems)
+	if len(result.Items) != atBoundItems {
+		t.Fatalf("a request of %d items returned %d item results, want %d", atBoundItems, len(result.Items), atBoundItems)
 	}
-	if got := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM issues WHERE title = ?", []any{accepted}); got != publicops.MaxApplyBatchItems {
-		t.Errorf("%d row(s) landed for a request of exactly MaxApplyBatchItems, want %d", got, publicops.MaxApplyBatchItems)
+	if got := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM issues WHERE title = ?", []any{accepted}); got != atBoundItems {
+		t.Errorf("%d row(s) landed for a request of %d items, want %d", got, atBoundItems, atBoundItems)
 	}
 
+	// Unchanged: the true production bound, regardless of atBoundItems.
 	overBound := make([]publicops.ApplyItem, publicops.MaxApplyBatchItems+1)
 	for i := range overBound {
 		overBound[i] = batchApplyCreate("", batchApplyMintedIssue(refused))

@@ -69,7 +69,11 @@ func (s *deleter) Delete(ctx context.Context, req issueops.DeleteRequest) (issue
 		return result, nil
 	}
 
-	if err := s.store.withWriteTx(ctx, func(tx *sql.Tx) error {
+	write := func(tx *sql.Tx) error {
+		// withRetryTx/withDeleteFence may replay this body on a serialization
+		// failure: reset so a rolled-back attempt's result never leaks into
+		// the value returned below (the withRetryTx closure contract).
+		result = issueops.DeleteResult{}
 		if err := run(tx); err != nil {
 			return err
 		}
@@ -83,7 +87,17 @@ func (s *deleter) Delete(ctx context.Context, req issueops.DeleteRequest) (issue
 		}
 		// The same tables a sweep stages; the neighbor rewrite lands in
 		// `issues`, which is already on the list.
-		for _, table := range sweptTables {
+		//
+		// THE VERSIONED-HISTORY TABLES ARE NOT on that list, and the rewrite
+		// writes them: RewriteDeletedReferencesInTx updates every surviving
+		// neighbor through UpdateIssueInTx, the seam's minting entry point, and
+		// this transaction is scoped for minting because commitWriteTx scopes
+		// the transaction withRetryTx hands to the body above. Staging the
+		// fixed list alone would leave those rows in the working set, outside
+		// the commit that describes them — the exact loss withVersionedHistoryTables
+		// exists to prevent, and for store_epoch the unrecoverable kind (see the
+		// append-only note in doltAddAndCommitInTx's HAZARD block).
+		for _, table := range s.store.withVersionedHistoryTables(sweptTables) {
 			_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
 		}
 		msg := fmt.Sprintf("bd: delete %d issue(s)", result.Deleted)
@@ -92,7 +106,26 @@ func (s *deleter) Delete(ctx context.Context, req issueops.DeleteRequest) (issue
 			return fmt.Errorf("dolt commit: %w", err)
 		}
 		return nil
-	}); err != nil {
+	}
+
+	// A guarded (ExpectedVersion-checked) delete on a real Dolt sql-server
+	// additionally runs under the per-id delete fence (mc-zndi7.73): without
+	// it, two same-token deletes race to identical "row absent" diffs that
+	// Dolt's commit-time merge lands with no conflict, so every racer exits
+	// 0. Embedded Dolt has no concurrent sql-server sessions to race this
+	// way, and Postgres's own serializable isolation already turns an
+	// identical concurrent delete into a real conflict, so the fence is
+	// scoped to serverMode only. See withDeleteFence's doc for the full
+	// design and why one pinned connection, rather than a pool-sourced one,
+	// is required.
+	if req.ExpectedVersion != nil && s.store.serverMode {
+		if err := s.store.withDeleteFence(ctx, req.IDs[0], write); err != nil {
+			return issueops.DeleteResult{}, err
+		}
+		return result, nil
+	}
+
+	if err := s.store.withRetryTx(ctx, write); err != nil {
 		return issueops.DeleteResult{}, err
 	}
 	return result, nil

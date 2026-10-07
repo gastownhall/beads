@@ -34,8 +34,8 @@ func TestImporterContract(t *testing.T) {
 	t.Run("ReportsTheAbsentTargetItDroppedOnce", func(t *testing.T) {
 		conformance.RunImporterReportsTheAbsentTargetItDroppedOnce(t, ctx, fixture)
 	})
-	t.Run("ReportsTheCrossPlaneEdgeItDropped", func(t *testing.T) {
-		conformance.RunImporterReportsTheCrossPlaneEdgeItDropped(t, ctx, fixture)
+	t.Run("WiresTheCrossPlaneEdgeBetweenItsRows", func(t *testing.T) {
+		conformance.RunImporterWiresTheCrossPlaneEdgeBetweenItsRows(t, ctx, fixture)
 	})
 	t.Run("ReportsTheCycleEdgeItDropped", func(t *testing.T) {
 		conformance.RunImporterReportsTheCycleEdgeItDropped(t, ctx, fixture)

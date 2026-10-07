@@ -117,15 +117,44 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 	details := types.NewIssueDetails(*issue)
 
 	details.Labels, _ = src.Labels(ctx, id, isWisp)
-	details.Dependencies, _ = src.Dependencies(ctx, id, isWisp)
 
 	// Aggregate counts - O(1) queries, no row materialization.
-	dependentCount, _ := src.CountDependents(ctx, id, isWisp)
+	//
+	// THE COUNTS ARE READ BEFORE THE ROW LISTS, and the order is load-bearing
+	// wherever the source is not snapshot-consistent. The UOW source runs the
+	// whole build inside one read transaction and is immune; the store-backed
+	// source issues a connection per call, so a concurrent write can land
+	// between the two reads and skew the delta below. Counting first puts that
+	// skew on the safe side: an edge ADDED in the window leaves the count
+	// stale-LOW, so the delta goes negative and is suppressed, where the
+	// reverse order would have announced a fresh local edge as unresolvable.
+	// A concurrent DELETE still produces a spurious report, which is the
+	// residual and is why this is an ordering mitigation rather than a fix —
+	// only a shared snapshot or a direct count of unresolvable edges closes
+	// it (be-lpi).
+	dependentCount, dependentCountErr := src.CountDependents(ctx, id, isWisp)
 	details.DependentCount = &dependentCount
-	dependencyCount, _ := src.CountDependencies(ctx, id, isWisp)
+	dependencyCount, dependencyCountErr := src.CountDependencies(ctx, id, isWisp)
 	details.DependencyCount = &dependencyCount
 	commentCount, _ := src.CountComments(ctx, id, isWisp)
 	details.CommentCount = &commentCount
+
+	// depsErr is kept rather than discarded: it is what separates "the edge
+	// list came back short" from "the edge list never came back", and the
+	// unresolvable-edge delta below is only meaningful in the first case.
+	deps, depsErr := src.Dependencies(ctx, id, isWisp)
+	details.Dependencies = deps
+
+	// The count counts edge ROWS; the slice carries the issues on the far
+	// end, and drops any whose id has no row in this database. The two
+	// therefore disagree by exactly the cross-repo and `external:` edges,
+	// which is real stored data rather than a phantom count (be-lpi).
+	// Publish the difference instead of leaving the caller to infer it.
+	if depsErr == nil && dependencyCountErr == nil {
+		if n := dependencyCount - int64(len(details.Dependencies)); n > 0 {
+			details.UnresolvableDependencies = &n
+		}
+	}
 
 	if opts.IncludeDependents {
 		dependents, err := collectDependents(ctx, src, id, isWisp)
@@ -134,6 +163,14 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 		}
 		details.Dependents = dependents
 		applyEpicProgress(details, dependents)
+		// Same asymmetry as the outgoing side, and only computable here:
+		// without IncludeDependents the slice is nil by design, so a delta
+		// against it would report the whole count as unresolvable.
+		if dependentCountErr == nil {
+			if n := dependentCount - int64(len(dependents)); n > 0 {
+				details.UnresolvableDependents = &n
+			}
+		}
 	}
 
 	if opts.IncludeComments {
@@ -176,14 +213,20 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 
 // shallowDep keeps the identity-and-shape fields callers consume and drops the
 // free-form text, which is the shape collectDependents settled on in be-4d36f2.
+// CloseReason rides along despite being "text": it is short (a sentence, not
+// a hub-scale blob like Description/Design/Notes), and applyEpicProgress
+// needs it on every epic dependent to classify a completing vs. a
+// duplicate/wontfix/superseded close (GH#5138 review) — dropping it here
+// would silently starve that classifier on the very rows it runs against.
 func shallowDep(item *types.IssueWithDependencyMetadata) *types.IssueWithDependencyMetadata {
 	return &types.IssueWithDependencyMetadata{
 		Issue: types.Issue{
-			ID:        item.Issue.ID,
-			Status:    item.Issue.Status,
-			IssueType: item.Issue.IssueType,
-			Priority:  item.Issue.Priority,
-			Title:     item.Issue.Title,
+			ID:          item.Issue.ID,
+			Status:      item.Issue.Status,
+			IssueType:   item.Issue.IssueType,
+			Priority:    item.Issue.Priority,
+			Title:       item.Issue.Title,
+			CloseReason: item.Issue.CloseReason,
 		},
 		DependencyType: item.DependencyType,
 	}
@@ -218,7 +261,11 @@ func collectDependents(ctx context.Context, src DetailSource, id string, isWisp 
 	return out, nil
 }
 
-func collectComments(ctx context.Context, src DetailSource, id string, isWisp bool) ([]*types.Comment, error) {
+// collectComments takes the narrow CommentStreamer rather than the whole
+// DetailSource because it reads exactly one method, and because the list-page
+// hydration in list_comments.go calls the same body. DetailSource satisfies
+// CommentStreamer, so BuildIssueDetails passes its source unchanged.
+func collectComments(ctx context.Context, src CommentStreamer, id string, isWisp bool) ([]*types.Comment, error) {
 	iter, err := src.IterComments(ctx, id, isWisp)
 	if err != nil {
 		return nil, fmt.Errorf("iter comments %s: %w", id, err)
@@ -249,7 +296,7 @@ func applyEpicProgress(details *types.IssueDetails, dependents []*types.IssueWit
 	if details.IssueType != types.TypeEpic || len(dependents) == 0 {
 		return
 	}
-	total, closed := 0, 0
+	total, closed, completingClosed := 0, 0, 0
 	for _, dep := range dependents {
 		if dep.DependencyType != types.DepParentChild {
 			continue
@@ -257,12 +304,20 @@ func applyEpicProgress(details *types.IssueDetails, dependents []*types.IssueWit
 		total++
 		if dep.Status == types.StatusClosed {
 			closed++
+			// A duplicate/wontfix/superseded close redirects or abandons the
+			// child rather than finishing it, so it must not make the epic
+			// closeable (GH#5138 review) — this mirrors the classifier
+			// GetEpicsEligibleForClosureInTx already applies; the two must
+			// not disagree on the same close_reason.
+			if !types.IsNonCompletingClose(dep.CloseReason) {
+				completingClosed++
+			}
 		}
 	}
 	if total == 0 {
 		return
 	}
-	closeable := total == closed
+	closeable := total == completingClosed
 	details.EpicTotalChildren = &total
 	details.EpicClosedChildren = &closed
 	details.EpicCloseable = &closeable

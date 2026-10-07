@@ -1,0 +1,45 @@
+# Patches applied to third-party Go modules via go_deps.module_override in
+# MODULE.bazel. They replace WORKSPACE-era BUILD files shipped by some dolt
+# dependencies that do not resolve under bzlmod + gazelle.
+#
+# eventsapi_schema_build.patch, flatbuffers_v23_importpath.patch and
+# dolt_go_serial.patch are adapted from the gascity project
+# (github.com/gastownhall/gascity, third_party/patches). Keep them in sync
+# when bumping the pinned dolt versions in go.mod.
+#
+# gozstd_nocgo.patch is beads' own: panicking !cgo stubs for the gozstd API
+# dolt uses, so `--config=pure` (CGO off) can compile store/nbs, which rules_go
+# builds as a declared dep even though no pure-Go file imports it. Their init
+# panics, so a pure binary that does link gozstd fails when started.
+#
+# rules_go_nogo_golangci_nolint.patch and x_tools_ctrlflow_stdlib_noreturn.patch
+# are gascity's (third_party/patches there), byte-identical: nogo (//tools/nogo)
+# honors //nolint with golangci-lint's ranges, and ctrlflow knows the standard
+# library's no-return functions, which nogo has no facts for. Upstreaming is
+# tracked in gascity's ga-96smfk.44.
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(glob(["*.patch"]))
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

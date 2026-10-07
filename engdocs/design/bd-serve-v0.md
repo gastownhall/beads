@@ -160,27 +160,64 @@ which is legible enough that someone will read it — so the contract is enforce
 by the version prefix rather than by obscurity. A client that mints its own
 token gets `invalid_cursor` the moment the encoding moves.
 
-**No lifetime.** The token carries a position and a private encoding version,
-and nothing else. The server keeps no state for it, so it does not expire, does
-not become invalid across a restart, and is not tied to the connection that
-issued it. The only thing that invalidates one is an encoding change.
+**No lifetime.** The token carries a position, the ORDER that position is in,
+and a private encoding version — and nothing else. The server keeps no state
+for it, so it does not expire, does not become invalid across a restart, and is
+not tied to the connection that issued it. The only thing that invalidates one
+is an encoding change, and the one encoding change made so far (`v1` → `v2`,
+adding the order tag) kept every outstanding `v1` token readable as the
+`created`-order position it is, so no traversal in flight had to restart.
 
 **One recovery.** Every failure mode — wrong version, undecodable base64,
-malformed JSON, an empty position — is the same answer, because it is the same
-client situation: restart paging with no `cursor`. Re-sending the value cannot
-succeed.
+malformed JSON, an empty position, a position in another order — is the same
+answer, because it is the same client situation: restart paging with no
+`cursor`. Re-sending the value cannot succeed.
 
-**Misuse is not detectable.** Because the token carries no filters, a page
-fetched with a cursor minted under different filters is *not* refused. The
-server applies the current request's filters from the old request's position,
-silently skipping every row the new filter set would have placed before it.
-Repeat every filter verbatim for the whole traversal, and start a new traversal
-when they change.
+**Filter misuse is not detectable; ORDER misuse is.** Those are two different
+properties and the difference is the whole of the design here.
 
-That last property is a deliberate trade. Embedding the filters would make the
-token a second, opaque copy of the request that can disagree with the request
-itself; keeping it a bare position makes the failure mode a documented client
-obligation instead of a hidden server-side reconciliation.
+Because the token carries no filters, a page fetched with a cursor minted under
+different filters is *not* refused. The server applies the current request's
+filters from the old request's position, silently skipping every row the new
+filter set would have placed before it. Repeat every filter verbatim for the
+whole traversal, and start a new traversal when they change. That is a
+deliberate trade: embedding the filters would make the token a second, opaque
+copy of the request that can disagree with the request itself, and keeping it a
+bare position makes the failure mode a documented client obligation instead of
+a hidden server-side reconciliation.
+
+The ORDER is not a filter, and it does not get the same treatment. A filter
+selects the SET; the order decides what the position MEANS. The same instant
+and id name one row's place under `sort=created` and a different row's place
+under `sort=priority`, and there is nothing in the bytes to say which was
+intended — so a token replayed under a different `sort` is refused with
+`invalid_cursor` rather than reinterpreted. This is not a second copy of the
+request; it is the position's own type tag, and without it adding `sort` at all
+would mean serving skipped-and-duplicated pages with a 200 and no way for a
+client to notice.
+
+**Only orders with a proven total key are served.** `sort` takes `created` and
+`priority` and nothing else, because each value is a keyset contract — a
+position shape, a strictly-after predicate, an index — rather than a display
+preference. Both of these keys are total (`priority` and `created_at` are
+non-null, `id` is unique), so a page boundary inside a run of equal keys
+resolves on `id` with no dropped and no repeated row. The seven other orders
+`bd list --sort` accepts have no such key: `id` is a natural-numeric order no
+database expresses, `updated` moves on every write, `closed` is nullable, and
+`status`/`title`/`type`/`assignee` are mutable and unindexed. A client that
+wants one of those still pages in `created` order and sorts what it received.
+
+`priority` is itself mutable, which `created_at` is not, and the consequence is
+stated rather than hidden: under `created` only new rows move relative to a
+walk, while under `priority` a priority update moves an existing row too, so it
+can be seen twice or missed. That is the same "a cursor pins a position, not a
+snapshot" caveat reached by a second route, not a new class of error —
+unchanged data never skips or repeats under either order.
+
+`GET /v0/beads/ready` still publishes a `sort` with a wider vocabulary and no
+cursor at all, which is consistent rather than contradictory: without a cursor
+an order is only a display decision, and nothing has to be able to resume into
+the middle of it.
 
 ## The loopback posture
 
@@ -492,3 +529,127 @@ it cannot discover before connecting. Refusing keeps the published surface a
 property of the build, and matches how `bd` already answers this question one
 layer down, where a backend that cannot guarantee mutation-free access is turned
 away rather than opened anyway.
+
+## The wire-shape signal
+
+`capabilities` answers which OPERATIONS a build serves. Nothing answered
+whether an operation's response SHAPE had changed underneath a client already
+built against it — a client decoding a strict schema against a future server
+that renamed or retyped a field it depends on would fail wherever it happened
+to read that field, with no single place to check first. `wire_revision` and
+`min_client_wire_revision`, both on `GET /v0/beads/context`, are that single
+place.
+
+`wire_revision` is a counter, not a semver: it bumps only for a NON-ADDITIVE
+change to an existing response member's JSON name or type (a new, purely
+additive member needs no bump). The full history is the `wire_revision`
+property's description in `openapi.v0.yaml` — `0` for every build before this
+field existed (an integer `revision`, pre-#6053), `1` for the brief
+string-typed `revision` (#6053), `2` for the first build carrying
+`wire_revision` itself. A client talking to a build too old to answer this
+field at all may use `bd_version` as an ADVISORY hint, never proof: compare it
+as semver with pre-release identifiers and treat `>= 1.3.0-rc.1` (not the
+release cutoff `1.3.0` — a `1.3.0-rc.N` build already carries the string shape
+and sorts below `1.3.0`) as a hint toward `1`, else a hint toward `0`. Two
+known builds defeat even that corrected hint: `main` up to commit
+`b3ef65c85` reports `bd_version: "1.2.2"` while already sending strings, and
+the bd-enterprise compatibility line at `d3ab32773462` reports `"1.1.0"` while
+also sending strings. A client therefore MUST accept `revision` and
+`expected_version` as either a string or a number whenever `wire_revision` is
+absent (or probe the shape directly) rather than let the inferred value
+choose a decoder, and MUST NEVER refuse solely because the inferred revision
+is `0` — see the `wire_revision` property's description for the exact
+language.
+
+`min_client_wire_revision` is the other half: the oldest revision a build
+still answers correctly. A client that knows the revision it was compiled
+against may assert it on ANY request via the optional `Bd-Wire-Revision`
+header — not only the handshake — and `checkWireRevision` refuses a request
+naming a revision below the floor with `400 invalid_argument`/
+`reason: "wire_revision_unsupported"` and a `min_wire_revision` field pinning
+the floor that was violated, before the server does any work building a body
+shaped for a revision the client has already said it cannot decode. The header
+is optional and absent by default, which is what keeps this additive: an older
+client that never sends it is served exactly as before. A malformed value
+(not a non-negative integer) is a different mistake — `reason: "invalid_value"`
+— and must never disclose `min_wire_revision`, which is reserved for a
+revision the server actually read and understood to be too old.
+
+The check runs on every route but `GET /healthz` (`wireRevisionExempt`,
+`routes.go`) — including the identity handshake itself, unlike the
+`Bd-Project-Id` stamp, which exempts the handshake because that is how a
+client LEARNS the id it must stamp with. A client that already knows the wire
+revision it was built for has no equivalent reason to omit it on the very
+first request, and the handshake is where a floor violation is cheapest to
+catch: before the client has acted on anything shaped for a revision it
+cannot decode. Liveness is exempt for the same reason `Bd-Project-Id` is: a
+probe carries no notion of either header, and refusing it for one it never
+had a reason to send would make `/healthz` lie about the process being alive.
+
+**The golden digest.** A revision bump is a promise a human makes; nothing
+enforced that the promise was kept, or that it was even necessary. CI pins
+one against the other with a golden digest, `internal/httpapi/wireshape`:
+`wireshape.Compute` walks every response's AND every request body's every
+content-type schema across the whole spec — not only `application/json`, so
+`application/problem+json` and therefore `Problem` itself is covered too —
+recursing through `$ref` and through a schema's own `allOf` or `oneOf`, and
+recording, keyed by schema and member name, each member's JSON name, type,
+format, enum values, required-ness, and nullability, plus the scalar shape of
+array items and of `additionalProperties` map values. It records every
+operation parameter (query, path, and header) as well, keyed by
+`operationId`, location, and name rather than by schema — two operations'
+same-named parameters are independent contracts — with its type, item shape,
+enum values, required-ness, style, explode, and default; style and explode
+are the effective values, OpenAPI's defaults filled in where the document
+leaves them unset, so spelling a default out changes nothing while flipping
+one does. The digest is a boundary, not the whole wire: value constraints
+such as `maxLength` or `pattern` (on members and parameters alike) and a
+composition keyword on a single member's own value are outside it, an
+object-typed or `content`-described parameter is recorded only as its
+container, and a new member or parameter always counts as additive — even a
+required one an old client will not send — so each of those needs its own
+review against `wire_revision`. `TestWireShapeDigest` fails on any
+disagreement between golden and spec, and the failure names the fix: a
+changed or removed entry without a `wire_revision` bump is drift nobody
+signed off on; a `wire_revision` LOWER than the golden's means the constant
+itself is wrong, since the revision table only ever grows; any other
+difference — a bumped `wire_revision`, or entries only added — means the
+golden is simply stale. Drift and staleness share one explicit fix,
+`go run ./internal/httpapi/wireshape/cmd/gendigest` — never run to make a
+failing test pass on an accidental shape change, only after the revision
+bump and the `openapi.v0.yaml` history entry it belongs beside; the command
+itself refuses to write a changed or removed entry unless `wire_revision`
+has moved past what the existing golden recorded, and refuses any write at a
+lowered `wire_revision`, so running it cannot silently launder drift into
+the baseline. A purely additive diff — new members or parameters, with no
+existing entry changed or removed — writes at the golden's own
+`wire_revision` or any later one.
+
+**The new-parameter and new-request-body-member token rule.** `capabilities`
+already required a `resource.verb` token for a new OPERATION; nothing
+required one for a new PARAMETER, or new JSON request body member, on an
+EXISTING operation, so a client had no single place to learn that, say, `GET
+/v0/beads/issues`'s `sort` parameter had started accepting a value.
+`issues.list.sort` is the first deliberate use of the same convention one
+level down: the token lives in the parameter's (or body member's) own
+description, exactly as `capabilities` members carry theirs, enforced by
+`TestNewParameterOnExistingOperationHasABehaviorToken` against three frozen
+baselines (`internal/httpapi/testdata/pretoken_parameters.json`,
+`pretoken_request_body_members.json`, `pretoken_operations.json`) describing
+every parameter, body member, and operation the document already had the day
+the rule was written — written once and pinned never to grow
+(`TestPretokenBaselinesNeverGrow`), since only something pre-existing and
+untokened ever belongs on them, and a brand-new operation is permanently
+exempt from the rule: its own review decides its capability story, not a
+baseline written before it existed. A backticked `a.b`(`.c`)-shaped span in a
+description is not enough on its own: the rule also checks the token against
+`Capabilities()`'s own served list, so Go identifiers or example values that
+merely look like a token (`workapi.DefaultReadyLimit`, `status.custom`) do not
+satisfy it. `TestUntokenedParameterRuleFires` and
+`TestUntokenedRequestBodyMemberRuleFires` prove the checker itself still
+distinguishes tokened, grandfathered, and untokened parameters and body
+members — including a real-but-unrelated token, which correctly passes, since
+`Capabilities()` has no per-parameter binding to check a token's relevance
+against, only its existence — against synthetic fixtures rather than the real
+spec, so the rule's own logic is covered independently of whether the current
+document happens to exercise every branch.

@@ -14,6 +14,12 @@ import (
 	"github.com/steveyegge/beads/internal/workapi"
 )
 
+// TODO(batchgetter): GetIssuesByIDs below reads an unbounded id list;
+// issueops.BatchGetter caps a request at MaxGetManyIDs (1000) and this
+// interface's one implementation (uowMolReader) has not been audited for id
+// volume or given chunking, so it still forwards to
+// IssueUseCase().GetIssuesByIDs rather than GetMany. See
+// issueops.BatchGetter's doc.
 type molReader interface {
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)
 	GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error)

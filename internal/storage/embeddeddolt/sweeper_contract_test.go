@@ -4,9 +4,11 @@ package embeddeddolt_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -34,6 +36,30 @@ func TestSweeperContract(t *testing.T) {
 	})
 	t.Run("ClearsOneTierAndLeavesTheOther", func(t *testing.T) {
 		conformance.RunSweeperClearsOneTierAndLeavesTheOther(t, ctx, fixture)
+	})
+	t.Run("TreatsALegacyTypedWispAsEphemeralTier", func(t *testing.T) {
+		conformance.RunSweeperTreatsALegacyTypedWispAsEphemeralTier(t, ctx, fixture)
+	})
+	t.Run("WispsPlaneClearsTheWholeWispsTable", func(t *testing.T) {
+		conformance.RunSweeperWispsPlaneClearsTheWholeWispsTable(t, ctx, fixture)
+	})
+	t.Run("WispsPlaneRequiresAFilter", func(t *testing.T) {
+		conformance.RunSweeperWispsPlaneRequiresAFilter(t, ctx, fixture)
+	})
+	t.Run("ProtectsLiveDependents", func(t *testing.T) {
+		conformance.RunSweeperProtectsLiveDependents(t, ctx, fixture)
+	})
+	t.Run("ProtectsTransitiveLiveDependents", func(t *testing.T) {
+		conformance.RunSweeperProtectsTransitiveLiveDependents(t, ctx, fixture)
+	})
+	t.Run("ProtectsLiveDependentsAcrossPlanes", func(t *testing.T) {
+		conformance.RunSweeperProtectsLiveDependentsAcrossPlanes(t, ctx, fixture)
+	})
+	t.Run("LimitTakesTheOldestClosedFirst", func(t *testing.T) {
+		conformance.RunSweeperLimitTakesTheOldestClosedFirst(t, ctx, fixture)
+	})
+	t.Run("LeavesNoHistoryBeadsToTheDurableTier", func(t *testing.T) {
+		conformance.RunSweeperLeavesNoHistoryBeadsToTheDurableTier(t, ctx, fixture)
 	})
 	t.Run("ProtectsPinnedRows", func(t *testing.T) {
 		conformance.RunSweeperProtectsPinnedRows(t, ctx, fixture)
@@ -76,6 +102,31 @@ func newEmbeddedSweeperFixture(t *testing.T, te *testEnv, prefix string) conform
 		QueryScalar:   kit.QueryScalar,
 		CountHistory:  kit.CountHistory,
 		CommitPending: embeddedCommitPending(te),
+		// The write half of the same short-lived raw connection the kit's
+		// QueryScalar opens, mirroring the cycle-detector wiring.
+		Exec: func(ctx context.Context, statements []conformance.SQLStatement) error {
+			db, cleanup, err := embeddeddolt.OpenSQL(ctx, te.dataDir, te.database, "main")
+			if err != nil {
+				return err
+			}
+			defer func() { _ = cleanup() }()
+			for _, stmt := range statements {
+				if _, err := db.ExecContext(ctx, stmt.Query, stmt.Args...); err != nil {
+					return fmt.Errorf("%s: %w", stmt.Query, err)
+				}
+			}
+			return nil
+		},
+		AddDependencies: func(ctx context.Context, req issueops.AddDependenciesRequest) error {
+			// Through the DependencyEditor ROLE, which routes each edge to its
+			// source plane's dependency table itself.
+			editor, err := te.store.DependencyEditor()
+			if err != nil {
+				return err
+			}
+			_, err = editor.AddDependencies(ctx, req)
+			return err
+		},
 		AddComment: func(ctx context.Context, issueID, author, text string) error {
 			// Through the Commenter ROLE, which resolves the plane itself, so
 			// the case can cite from a wisp's comment without knowing how this

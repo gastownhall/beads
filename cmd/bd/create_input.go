@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
 )
 
@@ -45,6 +46,8 @@ type createInput struct {
 	validate           bool
 	ephemeral          bool
 	noHistory          bool
+	storageClass       types.StorageClass
+	storageClassFlag   string
 	molType            types.MolType
 	wispType           types.WispType
 	eventCategory      string
@@ -94,7 +97,7 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	}
 	if in.markdownFile != "" {
 		if len(args) > 0 {
-			return in, HandleError("cannot specify both title and --file flag")
+			return in, HandleError("cannot specify both title and --file flag; for a single issue's description from a file, use --body-file")
 		}
 		if in.dryRun {
 			return in, HandleError("--dry-run is not supported with --file flag")
@@ -179,6 +182,21 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	in.priority = priority
 
 	in.issueType, _ = cmd.Flags().GetString("type")
+
+	// The raw flag rides along for the --file batch, which resolves the class
+	// per template (the per-type config default needs a type to key on, and only
+	// a template has one). --graph rejects the flag outright, so the only route
+	// that resolves it here is the single-issue create, on both transports.
+	in.storageClassFlag, _ = cmd.Flags().GetString("storage-class")
+	if in.markdownFile == "" && in.graphFile == "" {
+		class, wisp, err := resolveCreateStorageClass(in.storageClassFlag, types.IssueType(in.issueType), in.ephemeral, in.noHistory)
+		if err != nil {
+			return in, HandleError("%v", err)
+		}
+		in.storageClass = class
+		in.ephemeral = wisp
+	}
+
 	in.status, _ = cmd.Flags().GetString("status")
 	in.assignee, _ = cmd.Flags().GetString("assignee")
 	in.externalRef, _ = cmd.Flags().GetString("external-ref")
@@ -197,6 +215,12 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	if len(labelAlias) > 0 {
 		in.labels = append(in.labels, labelAlias...)
 	}
+	// Normalize after merging the alias so dedupe spans both flags. Read paths
+	// (list, search, ready, orphans) already do this; without it here, `--labels
+	// 'a, b'` stores " b" with pflag's leading space and can never match its own
+	// filter.
+	in.labels = utils.NormalizeLabels(in.labels)
+	warnLabelsContainingWhitespace(in.labels)
 	in.deps, _ = cmd.Flags().GetStringSlice("deps")
 
 	in.repoOverride, _ = cmd.Flags().GetString("repo")
@@ -228,7 +252,7 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	if dueStr, _ := cmd.Flags().GetString("due"); dueStr != "" {
 		t, err := timeparsing.ParseRelativeTime(dueStr, time.Now())
 		if err != nil {
-			return in, HandleError("invalid --due format %q. Examples: +6h, tomorrow, next monday, 2025-01-15", dueStr)
+			return in, HandleError("invalid --due format %q. %s", dueStr, deferUntilFormatHint)
 		}
 		in.dueAt = &t
 	}
@@ -236,7 +260,7 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	if deferStr, _ := cmd.Flags().GetString("defer"); deferStr != "" {
 		t, err := timeparsing.ParseRelativeTime(deferStr, time.Now())
 		if err != nil {
-			return in, HandleError("invalid --defer format %q. Examples: +1h, tomorrow, next monday, 2025-01-15", deferStr)
+			return in, HandleError("invalid --defer format %q. %s", deferStr, deferUntilFormatHint)
 		}
 		if t.Before(time.Now()) && !in.silent && !debug.IsQuiet() {
 			fmt.Fprintf(os.Stderr, "%s Defer date %q is in the past. Issue will appear in bd ready immediately.\n",
@@ -248,22 +272,11 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 
 	if cmd.Flags().Changed("metadata") {
 		metadataValue, _ := cmd.Flags().GetString("metadata")
-		var metadataJSON string
-		if strings.HasPrefix(metadataValue, "@") {
-			filePath := metadataValue[1:]
-			// #nosec G304 -- user explicitly provides file path via @file.json syntax
-			data, err := os.ReadFile(filePath)
-			if err != nil {
-				return in, HandleError("failed to read metadata file %s: %v", filePath, err)
-			}
-			metadataJSON = string(data)
-		} else {
-			metadataJSON = metadataValue
+		metadata, err := readMetadataFlag(metadataValue)
+		if err != nil {
+			return in, HandleError("%v", err)
 		}
-		if !json.Valid([]byte(metadataJSON)) {
-			return in, HandleError("invalid JSON in --metadata: must be valid JSON")
-		}
-		in.metadata = json.RawMessage(metadataJSON)
+		in.metadata = metadata
 		in.metadataSet = true
 	}
 
@@ -326,6 +339,12 @@ func rejectSingleIssueFlagsForGraph(cmd *cobra.Command) error {
 	}
 	if cmd.Flags().Changed("mol-type") {
 		return HandleError("--mol-type is not valid with --graph (set mol_type per node in the plan instead)")
+	}
+	// Same shape as --mol-type: a plan-wide class would duplicate the per-node
+	// storage_class field (plus its per-type config default) that graph-apply
+	// already honors, so the flag is refused rather than accepted and ignored.
+	if cmd.Flags().Changed("storage-class") {
+		return HandleError("--storage-class is not valid with --graph (set storage_class per node in the plan instead)")
 	}
 	return nil
 }

@@ -8,7 +8,7 @@ import (
 
 // scopeCalls are the ways a function binds journal activation to the concrete
 // transaction it just began: the store helper, or the issueops primitive it
-// wraps (runDoltTransaction calls the latter directly).
+// wraps (runDoltTransactionRecording calls the latter directly).
 var scopeCalls = map[string]bool{
 	"scopeEventsJournalTransaction": true,
 	"ScopeEventsJournalTransaction": true,
@@ -88,7 +88,7 @@ func TestEveryRawTxJournalScopeIsScopedOrExempt(t *testing.T) {
 	for key, f := range doltFns {
 		// In scope: a function that mints its own transaction AND hands it to a
 		// journaling mutator IN ITS OWN BODY. A function given a tx by
-		// withWriteTx/runDoltTransaction inherits their scoping, and those two
+		// withWriteTx/runDoltTransactionRecording inherits their scoping, and those two
 		// are checked here in their own right.
 		//
 		// Reachability is deliberately DIRECT rather than a call-graph fixpoint.

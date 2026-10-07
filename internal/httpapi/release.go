@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -84,7 +85,7 @@ func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, apigen.ReleaseIssueResponse{
 		Issue:    *result.Issue,
 		Changed:  result.Changed,
-		Revision: result.Issue.RowVersion,
+		Revision: types.RevisionToken(result.Issue.RowVersion),
 	})
 }
 

@@ -63,6 +63,9 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 	in.Brief, _ = cmd.Flags().GetBool("brief")
 	in.prettyFormat, _ = cmd.Flags().GetBool("pretty")
 	in.plainFormat, _ = cmd.Flags().GetBool("plain")
+	if flat, _ := cmd.Flags().GetBool("flat"); flat {
+		in.plainFormat = true
+	}
 	in.jsonOut = jsonOutput
 
 	limit, _ := cmd.Flags().GetInt("limit")

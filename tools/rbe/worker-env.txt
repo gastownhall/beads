@@ -1,0 +1,33 @@
+arch x86_64
+dolt dolt version 2.1.8
+go go version go1.26.6 linux/amd64
+os ubuntu 24.04
+pkg bash 5.2
+pkg coreutils 9.4
+pkg curl 8.5
+pkg dash 0.5
+pkg diffutils 3.10
+pkg findutils 4.9
+pkg git 2
+pkg grep 3.11
+pkg jq 1.7
+pkg libc6 2.39
+pkg libgcc-s1 14.2
+pkg libicu74 74.2
+pkg liblzma5 5.4
+pkg libstdc++6 14.2
+pkg libxml2 2.9
+pkg lsof 4.95
+pkg make 4.3
+pkg openssl 3.0
+pkg procps 4.0
+pkg python3 3.12
+pkg sed 4.9
+pkg sqlite3 3.45
+pkg tar 1.35
+pkg tmux 3.4
+pkg unzip 6.0
+pkg util-linux 2.39
+pkg xz-utils 5.4
+pkg zlib1g 1.3
+tool yq 4

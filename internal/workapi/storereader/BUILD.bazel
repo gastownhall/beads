@@ -1,0 +1,47 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "storereader",
+    srcs = ["reader.go"],
+    importpath = "github.com/steveyegge/beads/internal/workapi/storereader",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/storage",
+        "//internal/types",
+        "//internal/workapi",
+        "//issueops",
+    ],
+)
+
+go_test(
+    name = "storereader_test",
+    srcs = ["reader_test.go"],
+    embed = [":storereader"],
+    deps = [
+        "//internal/storage",
+        "//internal/types",
+        "//issueops",
+    ],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

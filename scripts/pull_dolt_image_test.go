@@ -53,25 +53,13 @@ func TestPullDoltImageRetriesTransientFailures(t *testing.T) {
 }
 
 func TestDoltImagePullWorkflowsUseRetryHelper(t *testing.T) {
-	wantCalls := map[string]int{
-		"main.yml":       2,
-		"pr.yml":         2,
-		"pr-risk.yml":    2,
-		"regression.yml": 1,
-	}
+	// No workflow pulls the image: every Dolt suite runs on hermetic dolt
+	// sql-servers (bazel.yml's dolt-server lanes) and needs no docker, since
+	// pr-risk.yml's container-backed legacy tiers were retired
+	// (ga-96smfk.22). The helper stays for local container-backed runs.
+	wantCalls := map[string]int{}
 
 	workflowsDir := filepath.Join(sourceRepoRoot(t), ".github", "workflows")
-	for name, want := range wantCalls {
-		data, err := os.ReadFile(filepath.Join(workflowsDir, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := string(data)
-		if got := strings.Count(text, "run: ./scripts/ci/pull-dolt-image.sh"); got != want {
-			t.Errorf("%s retry-helper calls = %d, want %d", name, got, want)
-		}
-	}
-
 	workflowPaths, err := filepath.Glob(filepath.Join(workflowsDir, "*.y*ml"))
 	if err != nil {
 		t.Fatal(err)
@@ -81,8 +69,13 @@ func TestDoltImagePullWorkflowsUseRetryHelper(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(data), "docker pull "+doltSQLServerImage) {
-			t.Errorf("%s still pulls the Dolt image without retries", filepath.Base(path))
+		text := string(data)
+		name := filepath.Base(path)
+		if got, want := strings.Count(text, "run: ./scripts/ci/pull-dolt-image.sh"), wantCalls[name]; got != want {
+			t.Errorf("%s retry-helper calls = %d, want %d", name, got, want)
+		}
+		if strings.Contains(text, "docker pull "+doltSQLServerImage) {
+			t.Errorf("%s still pulls the Dolt image without retries", name)
 		}
 	}
 }
@@ -112,10 +105,7 @@ type pullDoltRun struct {
 func runPullDoltImage(t *testing.T, failures int) pullDoltRun {
 	t.Helper()
 
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skipf("bash is required to test pull-dolt-image.sh: %v", err)
-	}
+	bash := requireHostTool(t, "bash")
 
 	bin := t.TempDir()
 	stateDir := t.TempDir()

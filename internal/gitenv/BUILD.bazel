@@ -1,0 +1,37 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "gitenv",
+    srcs = ["routing.go"],
+    importpath = "github.com/steveyegge/beads/internal/gitenv",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/execenv"],
+)
+
+go_test(
+    name = "gitenv_test",
+    srcs = ["routing_test.go"],
+    embed = [":gitenv"],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

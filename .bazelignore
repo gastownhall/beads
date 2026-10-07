@@ -1,0 +1,10 @@
+npm-package/node_modules
+website
+node_modules
+.claude/worktrees
+.worktrees
+.beads
+.dolt
+dist
+.runtime
+tmp

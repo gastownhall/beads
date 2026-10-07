@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/steveyegge/beads/internal/debug"
 )
 
 const (
@@ -19,6 +21,14 @@ const (
 	// lock wait can time out and still leave room for a real retry.
 	migrationLockAcquireTimeoutSeconds = 5
 	migrationLockCleanupTimeout        = 5 * time.Second
+	// freshBootstrapResetAttempts bounds the heal path's DOLT_RESET retries.
+	// Small on purpose: this is a last-chance recovery, not a general retry
+	// budget, and a reset that is genuinely refused must still fail fast.
+	freshBootstrapResetAttempts = 3
+	// freshBootstrapResetRetryDelay spaces those attempts. The aborts this
+	// absorbs land within a millisecond, so the delay only has to let the
+	// session settle, not to wait out load.
+	freshBootstrapResetRetryDelay = 50 * time.Millisecond
 )
 
 var (
@@ -55,6 +65,8 @@ type MigrateLockOption func(*migrateLockOptions)
 type migrateLockOptions struct {
 	freshBootstrapHeal *freshBootstrapHealRequest
 	lockedPreparation  *lockedPreparationRequest
+	databaseSelector   DatabaseSelector
+	migrationGate      MigrationGate
 }
 
 type freshBootstrapHealRequest struct {
@@ -169,6 +181,66 @@ func WithLockedPreparation(endpoint string, fn LockedPreparation) MigrateLockOpt
 	}
 }
 
+// DatabaseSelector puts a pinned session on databaseName for the pre-lock
+// convergence probe and returns the identifier-quoted name the probe uses to
+// schema-qualify its reads. Returning an error, like everything else in the
+// probe, fails closed onto the locked path.
+//
+// It is injected rather than implemented here on purpose. Selecting a database
+// and quoting an identifier belong to the DDL repository in
+// internal/storage/domain/db — but that package's own test suite migrates a
+// scratch database with this package, so a schema -> domain/db import compiles
+// as a library and then fails the domain/db TEST build with "import cycle not
+// allowed in test". Inverting the dependency lets the one caller that needs
+// the probe to reach an unselected session hand in the repository's real
+// implementation, so the fast path still issues preparation's exact statement
+// without this package depending on it.
+type DatabaseSelector func(ctx context.Context, conn DBConn, databaseName string) (quotedName string, err error)
+
+// MigrationGate decides whether MigrateUpWithLock may apply the migrations it
+// found pending. A non-nil error refuses the migration and is returned to the
+// caller unchanged, so a typed refusal (*RemoteMigrateGateError) survives
+// errors.As at the CLI boundary.
+type MigrationGate func(context.Context, *sql.Conn) error
+
+// WithMigrationGate installs a pre-migration gate for callers whose migration
+// runs entirely inside MigrateUpWithLock — the proxied/`bd serve` provider,
+// which has no separate pre-open gate hook of the kind internal/storage/dolt
+// runs in its own retry loop.
+//
+// It runs after the migration lock is acquired and after any locked
+// preparation, immediately before MigrateUp. That placement is the whole
+// design:
+//
+//   - the steady-state alreadyConverged fast path above returns before the
+//     lock is ever taken, so a converged open pays the gate zero statements;
+//   - preparation has already CREATEd and USEd the database, so a fresh
+//     bootstrap reads CurrentVersion == 0 and passes (creating a database is
+//     consent for its schema);
+//   - a refusal propagates out through the deferred lock release, so refusing
+//     cannot leak the lock.
+func WithMigrationGate(fn MigrationGate) MigrateLockOption {
+	return func(o *migrateLockOptions) {
+		o.migrationGate = fn
+	}
+}
+
+// WithDatabaseSelector lets the convergence probe put the pinned session on
+// the target database itself.
+//
+// Without it the probe cannot issue USE, so it declines unless the session is
+// already on databaseName — correct for callers whose pool DSN already names
+// the database (internal/storage/dolt). The proxied CLI open is the caller
+// that needs it: it pins its schema-init pool with an EMPTY DSN database and
+// USEs only inside the locked preparation, so an uninjected probe would read
+// NULL from DATABASE() and decline on every single invocation, which is
+// exactly the defect this option exists to close.
+func WithDatabaseSelector(fn DatabaseSelector) MigrateLockOption {
+	return func(o *migrateLockOptions) {
+		o.databaseSelector = fn
+	}
+}
+
 // MigrateUpWithLock serializes schema migrations for a single Dolt sql-server
 // database. conn must be a pinned *sql.Conn because MySQL/Dolt named locks are
 // session-scoped; GET_LOCK, migrations, and RELEASE_LOCK must run on the same
@@ -181,13 +253,51 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		opt(&o)
 	}
 
+	// Steady-state fast path. In the overwhelmingly common case the database
+	// is already at this binary's schema and the whole locked pass is a probe
+	// that finds nothing to do — but running that probe under the
+	// database-scoped GET_LOCK serialized every bd invocation on a shared Dolt
+	// server behind every other one (96.7% lock saturation on an 18-seat rig;
+	// see alreadyConverged). Answer the same question first, without the lock,
+	// and take the lock only on the path that can actually migrate.
+	//
+	// Skipped when the caller carries fresh-bootstrap heal authority: that
+	// capability is issued only to the init that just created the database, so
+	// there is nothing converged to detect and the bootstrap path stays
+	// exactly as it was. A caller's locked preparation is skipped only once
+	// alreadyConverged has proved the database already existed and put the
+	// session on it — preparation's CREATE DATABASE would then have failed
+	// with "database exists" and captured no authority, and its USE is the
+	// statement alreadyConverged itself issued.
+	if o.freshBootstrapHeal == nil {
+		converged, convergedErr := alreadyConverged(ctx, conn, databaseName, o.databaseSelector)
+		switch {
+		case convergedErr != nil:
+			// Advisory only: the probe fails closed onto the locked path
+			// below, so this is never fatal. But a silently discarded error is
+			// a fast path that has quietly stopped firing — the exact failure
+			// mode that leaves the GET_LOCK saturation this exists to remove
+			// looking like a mystery. Say so where BD_DEBUG/-v can see it.
+			debug.Logf("schema: convergence fast path unavailable for %q, taking the migration lock: %v\n",
+				databaseName, convergedErr)
+		case converged:
+			return 0, nil
+		}
+	}
+
 	lockName := MigrationLockName(databaseName)
 	if err := AcquireMigrationLock(ctx, conn, lockName); err != nil {
 		return 0, err
 	}
 	defer func() {
 		if releaseErr := ReleaseMigrationLock(conn, lockName); releaseErr != nil {
-			err = errors.Join(err, releaseErr)
+			if err != nil {
+				// Two %w verbs keep errors.Is/As working for both errors
+				// without errors.Join's separator newline, primary first.
+				err = fmt.Errorf("%w (lock release also failed: %w)", err, releaseErr)
+			} else {
+				err = errors.Join(err, releaseErr)
+			}
 		}
 	}()
 	if o.lockedPreparation != nil && o.lockedPreparation.fn != nil {
@@ -200,6 +310,19 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 				capability: capability,
 				endpoint:   o.lockedPreparation.endpoint,
 			}
+		}
+	}
+
+	// Fresh-bootstrap heal authority is proof that THIS logical open performed
+	// the exact bare CREATE DATABASE for the incarnation now being migrated —
+	// so creating it was consent for its schema, and the gate has nothing to
+	// protect. Checking the capability rather than re-reading the version is
+	// what makes that hold across a retry: a first pass that died part-way
+	// leaves a non-zero cursor behind, and a version-only test would then have
+	// the init refuse to finish migrating the database it just created.
+	if o.migrationGate != nil && o.freshBootstrapHeal == nil {
+		if gateErr := o.migrationGate(ctx, conn); gateErr != nil {
+			return 0, gateErr
 		}
 	}
 
@@ -221,15 +344,61 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		// second reset in the caller's outer retry loop.
 		fmt.Fprintf(stderr, "Discarding interrupted-bootstrap working set (%s) and re-running migrations…\n",
 			strings.Join(dirtyErr.Tables, ", "))
-		// Drained, not Exec'd: the very next thing this path does is re-run the
-		// whole MigrateUp pass on this same pinned connection, so an
-		// undrained proc result set here would poison every statement of it.
-		if resetErr := DrainCall(ctx, conn, "CALL DOLT_RESET('--hard')"); resetErr != nil {
+		if resetErr := drainFreshBootstrapReset(ctx, conn); resetErr != nil {
 			return applied, errors.Join(err, fmt.Errorf("schema: fresh-bootstrap reset: %w", resetErr))
 		}
 		applied, err = MigrateUp(ctx, conn)
 	}
 	return applied, err
+}
+
+// drainFreshBootstrapReset discards an interrupted bootstrap's working set,
+// retrying an attempt that the server refused for a reason that is not the
+// caller's own cancellation.
+//
+// Retrying matters here specifically because the capability is already spent.
+// consumeIfCurrentIncarnation consumes it before the first attempt so that no
+// later pass can re-arm a second destructive reset, which also means whatever
+// this call returns is final for the database: a reset that fails leaves the
+// interrupted bootstrap refusing every future migration with DirtyTablesError,
+// and the only way back is a human running 'bd dolt commit'. Treating a single
+// refusal as final spends that one chance on a failure the next attempt would
+// not have hit.
+//
+// Dolt does abort a statement that way. On a healthy pinned session, with no
+// other session on the server and the statements either side of it succeeding,
+// CALL DOLT_RESET can come back as Error 1105 "context canceled" about a
+// millisecond after the server logs it starting — an abort from inside the
+// server, not a cancellation from this process (gastownhall/beads#5836 lane,
+// TestFreshBootstrapHealIncarnation).
+//
+// Retrying is safe: DOLT_RESET('--hard') is idempotent, and this stays inside
+// one authorized heal — same locked session, same incarnation, one consumed
+// capability. ctx.Err() is what separates the server aborting us from us being
+// canceled; the latter is not transient and must not spend the attempts left.
+func drainFreshBootstrapReset(ctx context.Context, conn *sql.Conn) error {
+	var err error
+	for attempt := range freshBootstrapResetAttempts {
+		if attempt > 0 {
+			fmt.Fprintf(stderr, "Bootstrap reset attempt %d/%d failed (%v); retrying…\n",
+				attempt, freshBootstrapResetAttempts, err)
+			select {
+			case <-ctx.Done():
+				return err
+			case <-time.After(freshBootstrapResetRetryDelay):
+			}
+		}
+		// Drained, not Exec'd: the very next thing this path does is re-run the
+		// whole MigrateUp pass on this same pinned connection, so an
+		// undrained proc result set here would poison every statement of it.
+		if err = DrainCall(ctx, conn, "CALL DOLT_RESET('--hard')"); err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return err
+		}
+	}
+	return err
 }
 
 // consumeIfCurrentIncarnation validates and atomically consumes c. All probes

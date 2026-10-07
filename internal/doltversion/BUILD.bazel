@@ -1,0 +1,50 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "doltversion",
+    srcs = [
+        "cache.go",
+        "errors.go",
+        "policy.go",
+        "probe.go",
+        "resolve.go",
+        "version.go",
+    ],
+    importpath = "github.com/steveyegge/beads/internal/doltversion",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "doltversion_test",
+    srcs = [
+        "cache_test.go",
+        "policy_test.go",
+        "probe_test.go",
+        "resolve_test.go",
+        "stubs_test.go",
+        "version_test.go",
+    ],
+    embed = [":doltversion"],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

@@ -24,11 +24,33 @@ func NewBatchCloser(store *DoltStore) (issueops.BatchCloser, error) {
 	return &batchCloser{store: store}, nil
 }
 
-type batchCloser struct{ store *DoltStore }
+// BatchCloserWithPolicy retains externally resolved blockers inside the batch.
+func (s *DoltStore) BatchCloserWithPolicy(policy storage.BatchClosePolicy) (issueops.BatchCloser, error) {
+	if s == nil {
+		return nil, &storage.ErrUnsupported{Op: "BatchCloserWithPolicy", Backend: "nil"}
+	}
+	return &batchCloser{store: s, policy: policy}, nil
+}
+
+type batchCloser struct {
+	store  *DoltStore
+	policy storage.BatchClosePolicy
+}
+
+var _ storage.PolicyBatchCloserSource = (*DoltStore)(nil)
 
 // CloseBatch runs every close, and the optional claim, in ONE transaction with
 // one commit. The message is composed inside the body because it names what
 // LANDED, which is not knowable until the last item has been tried.
+//
+// Durability contract: a nil error means the closes (and the optional claim)
+// are durable in the branch working set. The Dolt history commit runs after
+// the SQL transaction (runIssueOperationTxWithMessage) and may be deferred — if
+// it fails after retries the change still landed and rides the next Dolt
+// commit; the only signal is the bd.db.post_tx_commit_dropped counter, since
+// the batch path has no verify-by-re-read recovery. A nil return is therefore
+// not a retry signal: the closes already applied, and retrying would
+// double-apply.
 func (o *batchCloser) CloseBatch(ctx context.Context, request issueops.CloseBatchRequest) (issueops.CloseBatchResult, error) {
 	if err := storageissueops.ValidateCloseBatchRequest(request); err != nil {
 		return issueops.CloseBatchResult{}, err
@@ -40,7 +62,7 @@ func (o *batchCloser) CloseBatch(ctx context.Context, request issueops.CloseBatc
 
 	var result issueops.CloseBatchResult
 	err = o.store.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (storageissueops.ChangedTables, string, error) {
-		attempt, tables, err := storageissueops.ExecuteCloseBatch(ctx, tx, request, claimFilter)
+		attempt, tables, err := storageissueops.ExecuteCloseBatchWithPolicy(ctx, tx, request, claimFilter, o.policy)
 		if err != nil {
 			return nil, "", err
 		}

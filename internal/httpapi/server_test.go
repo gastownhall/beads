@@ -84,7 +84,7 @@ func (emptyDeps) GetIssueDependencyRecords(context.Context, []string) (map[strin
 // DetectCycleReport answers for a workspace with no cycles. Without it the
 // promoted method on the embedded nil interface panics, and the provider-backed
 // cycle route would 500 through the panic recovery rather than answering.
-func (emptyDeps) DetectCycleReport(context.Context) (issueops.CycleReport, error) {
+func (emptyDeps) DetectCycleReport(context.Context, issueops.DetectCyclesRequest) (issueops.CycleReport, error) {
 	return issueops.CycleReport{Cycles: []issueops.Cycle{}}, nil
 }
 
@@ -632,10 +632,10 @@ func TestCapabilitiesAdvertiseEveryImplementedOperation(t *testing.T) {
 		t.Fatal("the route table contributed no capabilities; this case would pass against a server that advertises nothing")
 	}
 	// The behavior tokens name no route, so the table walk above cannot reach
-	// them; project.enforce is advertised in the same list. It is spelled
-	// literally here to keep this an independent oracle rather than a second
-	// call to the code under test.
-	want = append(want, "project.enforce")
+	// them; project.enforce and issues.batchApplyLarge are advertised in the
+	// same list. Both are spelled literally here to keep this an independent
+	// oracle rather than a second call to the code under test.
+	want = append(want, "project.enforce", "issues.batchApplyLarge", "issues.list.sort", "issues.count.scope")
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		t.Errorf("capabilities = %v, want %v", got, want)
@@ -758,9 +758,16 @@ func TestSemaphoreShedsLoadInsteadOfQueueingForever(t *testing.T) {
 		t.Error("a saturation 503 must carry Retry-After")
 	}
 
-	// A wait that eventually succeeds is still a saturation datapoint.
+	// A wait that eventually succeeds is still a saturation datapoint. This
+	// section widens the timeout so the assertion is about a release that
+	// beats a generous window, not a race against the tight one the shed
+	// check above needs to stay fast (be-qczn): a loaded CI runner can
+	// overshoot a 5ms sleep by more than the ~15ms margin a shared 20ms
+	// timeout left, which produced ErrBusy instead of a recorded saturation
+	// event.
+	s.semTimeout = 2 * time.Second
 	go func() {
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(25 * time.Millisecond)
 		held()
 	}()
 	slow := &reqInfo{id: "slow"}
@@ -1225,6 +1232,10 @@ func TestStartupLines(t *testing.T) {
 	}
 	if provider.limits.ConnMaxIdleTime <= 0 || provider.limits.ConnMaxLifetime <= 0 {
 		t.Errorf("idle/lifetime caps unset: %+v", provider.limits)
+	}
+	if provider.limits.ConnMaxIdleTime != 20*time.Second {
+		t.Errorf("ConnMaxIdleTime = %s, want 20s below Dolt's supported 30s wait_timeout",
+			provider.limits.ConnMaxIdleTime)
 	}
 }
 
