@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd query` accepts `no_history=true|false`.** No-history rows live in the
+  wisps table with `ephemeral=0`, so `bd query` could select the ephemeral rows
+  but not the no-history ones, and a caller that wanted them had to list the
+  whole store and filter. In an AND expression the field becomes
+  `IssueFilter.NoHistory` and the database returns only the matching rows from
+  both tables; in an OR expression it is a predicate on `Issue.NoHistory`, like
+  `ephemeral`.
 - `bd create --graph` now plans its batch through `issueops.BatchApplier`
   instead of the old `buildDomainGraphPlan` path, so a graph create gets the
   same atomic multi-row semantics as `bd batch apply`. A `waits-for` edge's

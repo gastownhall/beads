@@ -2224,6 +2224,13 @@ type IssueFilter struct {
 	// Ephemeral filtering
 	Ephemeral *bool // Filter by ephemeral flag (nil = any, true = only ephemeral, false = only persistent)
 
+	// NoHistory filters by the no_history flag (nil = any, true = only
+	// no-history rows, false = only rows without it). No-history rows live
+	// in the wisps table with ephemeral=0, so together with Ephemeral=true
+	// this lets a caller read the whole wisp plane without listing every
+	// row of the issues table.
+	NoHistory *bool
+
 	// EphemeralTier selects a SWEEP TIER rather than the raw ephemeral flag:
 	// a row is ephemeral-tier when ephemeral=1 OR it carries a wisp_type.
 	// The distinction exists because the flag alone misses typed wisps minted

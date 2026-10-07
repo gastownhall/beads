@@ -335,9 +335,10 @@ var KnownFields = map[string]bool{
 	"labels": true, // alias
 
 	// Flags
-	"pinned":    true,
-	"ephemeral": true,
-	"template":  true,
+	"pinned":     true,
+	"ephemeral":  true,
+	"no_history": true,
+	"template":   true,
 
 	// Other
 	"spec":             true,

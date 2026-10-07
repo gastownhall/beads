@@ -192,6 +192,8 @@ func (e *Evaluator) applyComparison(comp *ComparisonNode, filter *types.IssueFil
 		return e.applyBoolFilter(comp, filter, "pinned")
 	case "ephemeral":
 		return e.applyBoolFilter(comp, filter, "ephemeral")
+	case "no_history":
+		return e.applyBoolFilter(comp, filter, "no_history")
 	case "template":
 		return e.applyBoolFilter(comp, filter, "template")
 	case "mol_type":
@@ -478,6 +480,8 @@ func (e *Evaluator) applyBoolFilter(comp *ComparisonNode, filter *types.IssueFil
 		filter.Pinned = &boolVal
 	case "ephemeral":
 		filter.Ephemeral = &boolVal
+	case "no_history":
+		filter.NoHistory = &boolVal
 	case "template":
 		filter.IsTemplate = &boolVal
 	}
@@ -723,6 +727,8 @@ func (e *Evaluator) buildComparisonPredicate(comp *ComparisonNode) (func(*types.
 		return e.buildBoolPredicate(comp, func(i *types.Issue) bool { return i.Pinned })
 	case "ephemeral":
 		return e.buildBoolPredicate(comp, func(i *types.Issue) bool { return i.Ephemeral })
+	case "no_history":
+		return e.buildBoolPredicate(comp, func(i *types.Issue) bool { return i.NoHistory })
 	case "template":
 		return e.buildBoolPredicate(comp, func(i *types.Issue) bool { return i.IsTemplate })
 	case "has_metadata_key":
