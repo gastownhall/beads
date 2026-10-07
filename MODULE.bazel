@@ -319,3 +319,35 @@ filegroup(
     sha256 = "2852af0cb20a13139b3448992e69b868e50ed0f8a1e5940ee1de9e19a123b613",
     urls = ["https://go.dev/dl/go1.25.0.linux-amd64.tar.gz"],
 )
+
+# The timeout implementations //tests/hook_timeout_backends runs the tracked
+# git hook shims against (formerly checks.nix's hook-timeout-backends, which
+# took them from nixpkgs): static x86_64 builds, so the test needs nothing
+# from the executor beyond a shell, perl and GNU coreutils.
+http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+
+http_file(
+    name = "busybox_static",
+    executable = True,
+    sha256 = "6e123e7f3202a8c1e9b1f94d8941580a25135382b99e8d3e34fb858bba311348",
+    urls = ["https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"],
+)
+
+http_file(
+    name = "toybox_static",
+    executable = True,
+    sha256 = "38e03ffd8aead8ca26833e1e5c90a9ea7250f3719c29d779ebff7aa55c9d2dac",
+    urls = ["https://landley.net/toybox/downloads/binaries/0.8.15/toybox-x86_64"],
+)
+
+http_archive(
+    name = "uutils_coreutils",
+    build_file_content = """exports_files(
+    ["coreutils"],
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "9b555b01457279bcc3e46753f0ef324fd3d02a0535111200a4632d1297263b54",
+    strip_prefix = "coreutils-0.12.0-x86_64-unknown-linux-musl",
+    urls = ["https://github.com/uutils/coreutils/releases/download/0.12.0/coreutils-0.12.0-x86_64-unknown-linux-musl.tar.gz"],
+)
