@@ -208,6 +208,7 @@
 
 50 1 TestEmbeddedCommentsCLI
 50 1 TestEmbeddedDepAddWispSource
+50 1 TestEmbeddedGQLDetailParity
 50 1 TestEmbeddedListFiltering
 50 1 TestEmbeddedPrimeChangeDirDefaultTemplateMatchesTarget
 
@@ -262,6 +263,7 @@
 
 50 11 TestEmbeddedBlockedConcurrent
 50 11 TestEmbeddedDepA
+50 11 TestEmbeddedGQLBatchAndUnfiltered
 50 11 TestEmbeddedMaxRowsDepTreeAndDuplicates
 50 11 TestEmbeddedState
 
@@ -303,6 +305,7 @@
 
 50 17 TestEmbeddedCloseGuardsAndEpics
 50 17 TestEmbeddedCompact
+50 17 TestEmbeddedGQLTracer
 50 17 TestEmbeddedGateConcurrent
 50 17 TestEmbeddedListComments
 
@@ -320,6 +323,7 @@
 
 50 20 TestEmbeddedCreateStorageClassBatchAndMisc
 50 20 TestEmbeddedDepListSingleIDWarnsOnDroppedExternalEdge
+50 20 TestEmbeddedGQLPagesAndRows
 50 20 TestEmbeddedKVConcurrent
 50 20 TestEmbeddedSetup
 
@@ -342,6 +346,7 @@
 50 23 TestEmbeddedShip
 
 50 24 TestEmbeddedCloseBasic
+50 24 TestEmbeddedGQLInputAndRejections
 50 24 TestEmbeddedImportUpsertAndPrefixSync
 50 24 TestEmbeddedQuery
 50 24 TestEmbeddedUpdateRoutedStoreCommitsTargetHead

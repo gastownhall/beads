@@ -427,6 +427,7 @@
 30 25 TestProxiedServerWispCreateRejectsEnumViolatingVar
 
 30 26 TestProxiedServerFindDuplicates
+30 26 TestProxiedServerGQLParity
 30 26 TestProxiedServerGateCheck
 30 26 TestProxiedServerGateFrontDoorDirectServerProxyParity
 30 26 TestProxiedServerServeAddComment
