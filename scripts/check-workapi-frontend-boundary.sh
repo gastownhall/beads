@@ -8,8 +8,7 @@
 # derived from a client's cwd or environment are meaningless in a long-lived
 # server and must not leak into the shared contract.
 #
-# Runs in scripts/ci/pr-policy.sh and as
-# //scripts/repochecks:workapi_frontend_boundary_test.
+# Runs as //scripts/repochecks:workapi_frontend_boundary_test.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

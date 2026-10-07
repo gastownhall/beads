@@ -82,8 +82,7 @@ repo_subset(
     include = [".github/workflows/*.yml"],
 )
 
-# scripts/checkworkflowtags (`go run ./scripts/checkworkflowtags` in
-# scripts/ci/pr-policy.sh): the workflows' direct go commands declare
+# scripts/checkworkflowtags: the workflows' direct go commands declare
 # gms_pure_go.
 sh_test(
     name = "workflow_tags_test",

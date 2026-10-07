@@ -23,41 +23,21 @@ func TestCIWorkflowArtifactOwnership(t *testing.T) {
 		t.Run(workflowName, func(t *testing.T) {
 			workflow := readCIWorkflow(t, workflowName)
 
-			for _, forbidden := range []string{
-				"golangci-lint",
-				"make ci-pr-policy",
-				"make ci-pr-lint",
-			} {
-				for _, step := range workflow.Jobs["build-artifacts"].Steps {
-					if strings.Contains(step.Run, forbidden) {
-						t.Errorf("build-artifacts runs %q in step %q", forbidden, step.Name)
-					}
-				}
-			}
-
-			// pr.yml's PR Policy job is retired: its checks are Bazel tests
-			// (TestPRPolicyChecksRunAsBazelTargets). main.yml keeps its own
-			// copy until main.yml's legacy jobs go.
-			if workflowName == "pr.yml" {
-				if _, found := workflow.Jobs["pr-policy-wrapper"]; found {
-					t.Errorf("pr.yml has a pr-policy-wrapper job; its checks run as Bazel tests")
-				}
-				for name, job := range workflow.Jobs {
-					for _, step := range job.Steps {
-						if strings.Contains(step.Run, "make ci-pr-policy") {
-							t.Errorf("pr.yml job %s step %q runs make ci-pr-policy; its checks run as Bazel tests", name, step.Name)
+			// The PR Policy and lint wrappers are retired: their checks are
+			// Bazel tests (TestPRPolicyChecksRunAsBazelTargets) and nogo
+			// (TestLintAndVetRunAsNogo), so no job may run them.
+			for name, job := range workflow.Jobs {
+				for _, step := range job.Steps {
+					for _, forbidden := range []string{"golangci-lint", "make ci-pr-policy", "make ci-pr-lint"} {
+						if strings.Contains(step.Run, forbidden) {
+							t.Errorf("%s job %s step %q runs %q; its checks run as Bazel tests", workflowName, name, step.Name, forbidden)
 						}
 					}
 				}
-			} else {
-				assertJobRunsExactly(t, workflow.job(t, "pr-policy-wrapper"), "make ci-pr-policy")
 			}
-			// Lint and vet are nogo inside Bazel (TestLintAndVetRunAsNogo):
-			// no workflow job runs golangci-lint or the retired lint and vet
-			// jobs.
-			for _, retired := range []string{"pr-lint-wrapper", "go-vet-cache", "scripts-go-checks", "lint"} {
+			for _, retired := range []string{"pr-policy-wrapper", "pr-lint-wrapper", "go-vet-cache", "scripts-go-checks", "lint"} {
 				if _, found := workflow.Jobs[retired]; found {
-					t.Errorf("%s has a %q job; lint and vet run as nogo in bazel.yml's test lane", workflowName, retired)
+					t.Errorf("%s has a %q job; its checks run in bazel.yml's test lane", workflowName, retired)
 				}
 			}
 		})
@@ -708,33 +688,61 @@ func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 	}
 }
 
-// TestNightlyFullTestRunsEmbeddedDoltBatchApplySuite pins the nightly
-// full-test job's embedded-Dolt step: it must set BEADS_TEST_EMBEDDED_DOLT=1
-// (the gate skipUnlessEmbeddedDolt checks) and run exactly
-// TestBatchApplyContract, TestLargeBatchApplyWallClock_Embedded, (F1)
-// TestLargeBatchApplyStatementCounts712_Embedded and the 458-issue
-// batch-create equivalence scenarios
-// (TestCreateBatchFastPathsMatchPerRowLarge_Embedded), non-race, after the main
-// "Full Test Suite" step. That main step never sets BEADS_TEST_EMBEDDED_DOLT,
-// so without this step the nightly job would never exercise a real
-// 1000-item apply through the embedded backend, nor the 712-item shape's
-// pinned statement-count baseline, at all — see the step's own comment in
-// nightly.yml for why non-race and why these tests specifically.
-func TestNightlyFullTestRunsEmbeddedDoltBatchApplySuite(t *testing.T) {
-	job := readCIWorkflow(t, "nightly.yml").job(t, "full-test")
-	const stepName = "Embedded Dolt batch-apply suite (non-race)"
-	const wantRun = "go test -tags gms_pure_go -timeout 20m -run '^(TestBatchApplyContract|TestLargeBatchApplyWallClock_Embedded|TestLargeBatchApplyStatementCounts712_Embedded|TestCreateBatchFastPathsMatchPerRowLarge_Embedded)$' ./internal/storage/embeddeddolt"
-	assertStepRunsExactly(t, job, stepName, wantRun)
-	assertStepEnvValue(t, job, stepName, "BEADS_TEST_EMBEDDED_DOLT", "1")
-	assertStepsBefore(t, job, []string{"Full Test Suite (including integration tests)"}, []string{stepName})
-	if strings.Contains(wantRun, "-race") {
-		t.Errorf("embedded-dolt nightly step run = %q, must stay non-race (race dramatically inflates this backend's own wall-clock)", wantRun)
+// TestEmbeddedDoltBatchApplySuiteRunsNonRaceUnderBazel pins the non-race
+// embedded batch-apply variant that replaced nightly.yml's retired go test
+// step: every race lane shrinks or skips the 1000-item apply, the 712-item
+// statement-count baseline and the 458-issue batch-create equivalence
+// scenarios (raceEnabled), so this target is their only full-size run. It
+// must stay non-race (go_test_race_off over embeddeddolt_test; race inflates
+// the embedded engine's own wall-clock), set BEADS_TEST_EMBEDDED_DOLT=1 (the
+// gate skipUnlessEmbeddedDolt checks), select exactly these tests, and stay in
+// the embedded tier (tag embedded), which bazel.yml runs on every PR, merge
+// group, push to main and night.
+func TestEmbeddedDoltBatchApplySuiteRunsNonRaceUnderBazel(t *testing.T) {
+	build := readPolicyFile(t, sourceRepoRoot(t), "internal/storage/embeddeddolt/BUILD.bazel")
+	rules := map[string]string{}
+	for _, r := range bazelTopRules(build) {
+		if m := regexp.MustCompile(`(?m)^    name = "([^"]+)",$`).FindStringSubmatch(r); m != nil {
+			rules[m[1]] = r
+		}
 	}
-	// N4 (F1 review): this step must still run (and report) even if an
-	// earlier nightly step failed, and must carry its own explicit Go
-	// timeout independent of the job-level timeout-minutes.
-	if got := job.step(t, stepName).If; got != "${{ !cancelled() }}" {
-		t.Errorf("embedded-dolt nightly step if = %q, want ${{ !cancelled() }}", got)
+	raceOff := rules["embeddeddolt_race_off"]
+	if !strings.HasPrefix(raceOff, "go_test_race_off(") || !strings.Contains(raceOff, `test = ":embeddeddolt_test",`) {
+		t.Fatalf("embeddeddolt_race_off = %q, want go_test_race_off over :embeddeddolt_test", raceOff)
+	}
+	suite := rules["embeddeddolt_batch_apply_nonrace_test"]
+	for _, want := range []string{
+		`"$(rootpath :embeddeddolt_race_off)",`,
+		`"-test.run=^(TestBatchApplyContract|TestLargeBatchApplyWallClock_Embedded|TestLargeBatchApplyStatementCounts712_Embedded|TestCreateBatchFastPathsMatchPerRowLarge_Embedded)$$",`,
+		`env = {"BEADS_TEST_EMBEDDED_DOLT": "1"},`,
+		`tags = ["embedded"],`,
+	} {
+		if !strings.Contains(suite, want) {
+			t.Errorf("embeddeddolt_batch_apply_nonrace_test lacks %s:\n%s", want, suite)
+		}
+	}
+	if strings.Contains(suite, ":embeddeddolt_test)") {
+		t.Errorf("embeddeddolt_batch_apply_nonrace_test runs the race-configured :embeddeddolt_test; want :embeddeddolt_race_off")
+	}
+}
+
+// TestNightlyRunsNoGoTestOnARunner: nightly.yml's only test run is the
+// fresh Bazel call on rbe-west (ga-96smfk.22); its retired full-test,
+// bazel-go-test-json and measure jobs ran go test on GitHub runners.
+func TestNightlyRunsNoGoTestOnARunner(t *testing.T) {
+	nightly := readCIWorkflow(t, "nightly.yml")
+	for name, job := range nightly.Jobs {
+		for _, step := range job.Steps {
+			if regexp.MustCompile(`\bgo (test|build)\b|make ci-`).MatchString(step.Run) {
+				t.Errorf("nightly.yml job %s step %q runs %q on a runner; run it under Bazel", name, step.Name, step.Run)
+			}
+		}
+		if job.Uses != "" && job.Uses != "./.github/workflows/"+bazelWorkflowName {
+			t.Errorf("nightly.yml job %s calls %s; only %s may be called", name, job.Uses, bazelWorkflowName)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(sourceRepoRoot(t), ".github/workflows/ci-measurements.yml")); !os.IsNotExist(err) {
+		t.Errorf("ci-measurements.yml is back (stat err %v); its go test measurement suites ran on GitHub runners", err)
 	}
 }
 
@@ -889,9 +897,6 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		}
 	})
 
-	assertGoCacheInventory(t, workflows["main.yml"].job(t, "build-artifacts"), []goCacheStep{
-		mainRestoreModuleCache(), mainRestoreBuildCache("non-race"), saveModuleCache(), saveBuildCache("non-race"),
-	})
 	// Blacksmith macOS: restores what blacksmith-macos-go-build-cache's
 	// Blacksmith leg saves and owns only its race cache (day-bucketed, S7).
 	assertGoCacheInventory(t, workflows["main.yml"].job(t, "test"), []goCacheStep{
@@ -905,18 +910,6 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	// job only restores (PR workflows never save).
 	assertGoCacheInventory(t, workflows["main.yml"].job(t, "windows-test-binaries-cache"), []goCacheStep{
 		mainRestoreModuleCache(), mainRestoreXCompileCache(), saveModuleCacheAfterFailure(), saveXCompileCache(),
-	})
-	// F7b: race/non-race GOCACHE saves for same-repo PR consumers
-	// (pr-preflight-platforms, check-doc-freshness-platforms)
-	// that run on Blacksmith, whose cache namespace is invisible to
-	// GitHub-hosted build-artifacts; its github venue leg seeds the fork
-	// path's race cache (build-artifacts seeds its non-race one).
-	assertGoCacheInventory(t, workflows["main.yml"].job(t, "blacksmith-go-build-cache"), []goCacheStep{
-		mainRestoreModuleCache(),
-		mainRestoreBuildCacheDayBucketedIf("race", "matrix.flavor == 'race'"),
-		mainRestoreBuildCacheDayBucketedIf("non-race", "matrix.flavor == 'non-race'"),
-		saveBuildCacheDayBucketedAfterFailureIf("race", "matrix.flavor == 'race'"),
-		saveBuildCacheDayBucketedAfterFailureIf("non-race", "matrix.flavor == 'non-race'"),
 	})
 	// macOS saver for pr-preflight-platforms'/check-doc-freshness-platforms'
 	// macOS legs: its blacksmith venue leg seeds the same-repo path (and the
@@ -966,17 +959,9 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	})
 	assertNoUnmanagedGoCacheSteps(t, workflows, map[string]map[string]bool{
 		"main.yml": {
-			"build-artifacts": true, "test": true, "test-windows": true,
-			"windows-test-binaries-cache": true, "blacksmith-go-build-cache": true,
+			"test": true, "test-windows": true,
+			"windows-test-binaries-cache":     true,
 			"blacksmith-macos-go-build-cache": true,
-			// F7c: blacksmith-setup-go-cache's own restore/save pair seeds the
-			// self-defined blacksmith-sg-v1- cache namespace every advisory
-			// Blacksmith consumer restores from (B2, F7c implementation
-			// report); it is covered by its own
-			// TestBlacksmithSetupGoSeedExistsForAdvisoryConsumers and
-			// TestBlacksmithSetupGoCacheKeysMatchAcrossSeederAndConsumers in
-			// ci_f7c_advisory_test.go, not by assertGoCacheInventory above.
-			"blacksmith-setup-go-cache": true,
 		},
 		"pr.yml": {
 			"worktree-remove-windows":       true,
@@ -986,10 +971,6 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		},
 		"pr-risk.yml": {},
 	})
-
-	mainArtifacts := workflows["main.yml"].job(t, "build-artifacts")
-	assertStepsBefore(t, mainArtifacts, []string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Build reusable Linux artifacts"})
-	assertStepsBefore(t, mainArtifacts, []string{"Build reusable Linux artifacts", "Upload build artifacts"}, []string{"Save Go module cache", "Save non-race Go build cache"})
 
 	mainTest := workflows["main.yml"].job(t, "test")
 	assertStepsBefore(t, mainTest, []string{"Restore Go module cache"}, []string{"Build", "Test"})
@@ -1020,7 +1001,6 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "advisory-reports"),
 		[]string{"Restore Go module cache"}, []string{"Type-check every module under examples/"})
 
-	assertGoCacheEnv(t, workflows["main.yml"].job(t, "build-artifacts"), "Build reusable Linux artifacts", "non-race")
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test"), "Build", "non-race")
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test"), "Test", "race")
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test-windows"), "Build (pure Go regex)", "non-race")
@@ -1038,19 +1018,14 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		}
 	}
 
-	assertGoCacheWriter(t, workflows["main.yml"], "build-artifacts", "ubuntu-latest", "Save Go module cache", cacheMissCondition(goModuleCacheRestoreID))
-	assertGoCacheWriter(t, workflows["main.yml"], "build-artifacts", "ubuntu-latest", "Save non-race Go build cache", cacheMissCondition(goBuildCacheRestoreID("non-race")))
 	assertGoCacheWriter(t, workflows["main.yml"], "test", mainBlacksmithMacOSTestRunsOn, "Save race Go build cache", failureSurvivingCacheSaveCondition(cacheMissCondition(goBuildCacheRestoreID("race"))))
 	assertGoCacheWriter(t, workflows["main.yml"], "test-windows", mainVenueBlacksmithWindows4vcpuRunsOn, "Save Go module cache", cacheMissCondition(goModuleCacheRestoreID))
 	assertGoCacheWriter(t, workflows["main.yml"], "test-windows", mainVenueBlacksmithWindows4vcpuRunsOn, "Save non-race Go build cache", cacheMissCondition(goBuildCacheRestoreID("non-race")))
-	assertGoCacheWriter(t, workflows["main.yml"], "blacksmith-go-build-cache", mainBlacksmithGoBuildCacheRunsOn, "Save race Go build cache", saveBuildCacheAfterFailureIf("race", "matrix.flavor == 'race'").ifCondition)
-	assertGoCacheWriter(t, workflows["main.yml"], "blacksmith-go-build-cache", mainBlacksmithGoBuildCacheRunsOn, "Save non-race Go build cache", saveBuildCacheAfterFailureIf("non-race", "matrix.flavor == 'non-race'").ifCondition)
 	assertGoCacheWriter(t, workflows["main.yml"], "blacksmith-macos-go-build-cache", mainBlacksmithMacOSGoBuildCacheRunsOn, "Save Go module cache", saveModuleCacheAfterFailure().ifCondition)
 	assertGoCacheWriter(t, workflows["main.yml"], "blacksmith-macos-go-build-cache", mainBlacksmithMacOSGoBuildCacheRunsOn, "Save non-race Go build cache", saveBuildCacheAfterFailureIf("non-race", "").ifCondition)
 	assertGoCacheWriter(t, workflows["main.yml"], "windows-test-binaries-cache", mainWindowsTestBinariesCacheRunsOn, "Save Go module cache", saveModuleCacheAfterFailure().ifCondition)
 	assertGoCacheWriter(t, workflows["main.yml"], "windows-test-binaries-cache", mainWindowsTestBinariesCacheRunsOn, "Save Go build cache (Windows cross-compile)", saveXCompileCache().ifCondition)
 	for _, target := range []struct{ workflow, job string }{
-		{"main.yml", "build-artifacts"},
 		{"main.yml", "test"},
 		{"main.yml", "test-windows"},
 		{"main.yml", "windows-test-binaries-cache"},
@@ -2086,11 +2061,8 @@ const mainWindowsTestBinariesCacheRunsOn = "${{ matrix.runner == 'blacksmith' &&
 
 // F7b: venue-matrix runs-on for main.yml jobs that seed a Blacksmith GOCACHE
 // alongside their GitHub-hosted seed ("venue: [blacksmith, github]"):
-// test-windows, blacksmith-go-build-cache and
-// blacksmith-macos-go-build-cache.
-const mainVenueBlacksmithUbuntu4vcpuRunsOn = "${{ matrix.venue == 'blacksmith' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
+// test-windows and blacksmith-macos-go-build-cache.
 const mainVenueBlacksmithWindows4vcpuRunsOn = "${{ matrix.venue == 'blacksmith' && 'blacksmith-4vcpu-windows-2025' || 'windows-latest' }}"
-const mainBlacksmithGoBuildCacheRunsOn = mainVenueBlacksmithUbuntu4vcpuRunsOn
 
 // main.yml's push-to-main-only macOS saver, on the exact labels pr.yml's
 // same-repo (blacksmithMacOSLabel) and fork (macOSRunner) macOS legs resolve to.
@@ -2402,26 +2374,19 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 		// to Blacksmith for same-repo PRs/merge_group only; forks,
 		// Dependabot and push stay on ubuntu-latest.
 		"docs-mintlify.yml": {"broken-links": sameRepoBlacksmith2vcpu},
-		// main.yml's seeder job (B2, F7c implementation report) is the one
-		// Blacksmith job that is NOT gated by the same-repo-PR expression: it
-		// is push-to-main only (always trusted), so it wraps the literal
-		// label in a trivial expression instead (see the job's own comment).
-		// Tracked here so the "no other Blacksmith label leaks" sweep below
-		// also covers main.yml.
+		// main.yml's push-to-main-only jobs. Tracked here so the "no other
+		// Blacksmith label leaks" sweep below also covers main.yml.
 		"main.yml": {
-			"blacksmith-setup-go-cache":   "${{ 'blacksmith-4vcpu-ubuntu-2404' }}",
 			"windows-test-binaries-cache": mainWindowsTestBinariesCacheRunsOn,
 			// F7b review (B2): these push-to-main-only jobs seed the
 			// Blacksmith-selection GOCACHEs same-repo PR/merge_group jobs
-			// above restore from (test-windows's "venue" matrix,
-			// blacksmith-go-build-cache's own single leg).
+			// above restore from (test-windows's "venue" matrix).
 			// Each is additionally guarded by a job-level
 			// github.event_name == 'push' && github.ref ==
 			// 'refs/heads/main' && github.repository == 'gastownhall/beads'
 			// if: (TestBlacksmithSaverJobsGuardedAgainstPullRequest below),
 			// matching F7c's own saver convention.
-			"test-windows":              mainVenueBlacksmithWindows4vcpuRunsOn,
-			"blacksmith-go-build-cache": mainBlacksmithGoBuildCacheRunsOn,
+			"test-windows": mainVenueBlacksmithWindows4vcpuRunsOn,
 			// Same guard, seeding pr.yml's same-repo macOS legs.
 			"blacksmith-macos-go-build-cache": mainBlacksmithMacOSGoBuildCacheRunsOn,
 			// The macOS -race -short suite (Linux runs it under Bazel).
@@ -2671,19 +2636,24 @@ func TestPRPolicyChecksRunAsBazelTargets(t *testing.T) {
 			t.Errorf("%s:%s tags = %v, want %s", c.build, c.target, tags, c.tags)
 		}
 	}
-	pr := readCIWorkflow(t, "pr.yml")
-	for name, job := range pr.Jobs {
-		for _, step := range job.Steps {
-			for _, moved := range []string{
-				"check-build-tags.sh", "check-go-install-guidance.sh", "check-winget-portable-alias.sh",
-				"check-versions.sh", "make fmt-check", "check-doc-freshness.sh", "make ci-pr-policy", "make api-check",
-			} {
-				if strings.Contains(step.Run, moved) {
-					t.Errorf("pr.yml job %s step %q still runs %s, which is a Bazel test", name, step.Name, moved)
+	// main.yml (push to main) too: bazel.yml's push run gates the same
+	// targets, so no runner re-runs them after the merge.
+	for _, wfName := range []string{"pr.yml", "main.yml"} {
+		for name, job := range readCIWorkflow(t, wfName).Jobs {
+			for _, step := range job.Steps {
+				for _, moved := range []string{
+					"check-build-tags.sh", "check-go-install-guidance.sh", "check-winget-portable-alias.sh",
+					"check-versions.sh", "make fmt-check", "check-doc-freshness.sh", "make ci-pr-policy", "make api-check",
+					"check-migration-hygiene.sh",
+				} {
+					if strings.Contains(step.Run, moved) && !(wfName == "pr.yml" && moved == "check-migration-hygiene.sh") {
+						t.Errorf("%s job %s step %q still runs %s, which is a Bazel test", wfName, name, step.Name, moved)
+					}
 				}
 			}
 		}
 	}
+	pr := readCIWorkflow(t, "pr.yml")
 	freshness := pr.job(t, "check-doc-freshness-platforms")
 	for _, tuple := range freshness.Strategy.Matrix.Include {
 		if tuple.ExpectedGOOS == "linux" {

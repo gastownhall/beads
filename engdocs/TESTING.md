@@ -73,7 +73,7 @@ a unit test: use the real boundary when the defect could live there.
 | Affected-package confidence | `bazel test //path/to/package/... --config=ci` | After the focused test passes; include directly affected neighbors when their contract changed. |
 | Final gate | `make test` | Once after focused work on Go code is green: the whole test lane, mostly cache hits. |
 | Another lane's risk | that lane's command from the table above | When the change touches what that lane covers (integration-tagged files, the Dolt server path, embedded Dolt, pure-Go builds). |
-| Named CI wrapper | `make ci-pr-core`, `make ci-pr-policy`, or `make ci-pr-lint` | Run the wrapper whose risk or surface is affected, or use it to reproduce that CI check. Do not run all three routinely for every edit. |
+| Named CI wrapper | `make ci-pr-core` or `make ci-pr-lint` | Run the wrapper whose risk or surface is affected, or use it to reproduce that CI check. Do not run all three routinely for every edit. |
 | Hook shims against real timeout implementations | `nix flake check -L` (or `nix build .#checks.<system>.hook-timeout-backends -L`) | After changing the hook generator in `cmd/bd/hooks.go` (then `make githooks-regen`) or anything under `.githooks/`. Runs the tracked managed sections against GNU coreutils, uutils, busybox and toybox `timeout` — the multicalls also installed as `gtimeout` alone — with and without Perl, under dash, bash and busybox ash. About one deadline of wall time; needs no Go build. |
 
 Do not replace the focused loop with repeated full-suite runs. Run the final

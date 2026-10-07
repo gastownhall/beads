@@ -209,14 +209,6 @@ on:
         type: boolean
         required: false
         default: true
-      go-test-json-artifact:
-        description: >
-          Artifact (from the calling run) holding go-test.json, PR Core's
-          `go-test -json` on this commit; enables the equivalence skip-parity
-          check. nightly.yml sets it.
-        type: string
-        required: false
-        default: ""
       # A string, not a boolean: on push and dispatch inputs.integration is
       # null, and null == false in GitHub's loose comparison, so a boolean
       # test would silently stop the lane on main.
@@ -815,18 +807,8 @@ jobs:
           python3 tools/bazel/critpath.py "$RUNNER_TEMP/bazel-profile.json" \
             --tier "$TIER" --log "$RUNNER_TEMP/bazel-test.log" "${budget[@]}"
 
-      # nightly.yml's PR Core `go test -json` on the same commit.
-      - name: Download go-test results
-        if: ${{ always() && inputs.go-test-json-artifact != '' && steps.test.outcome != 'skipped' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: ${{ inputs.go-test-json-artifact }}
-          path: ${{ runner.temp }}/go-test-json
-
       # Fails on any Go test that `go test` runs and Bazel did not (tag filter,
-      # manual, missing target, empty shard) unless it is allowlisted. With
-      # go test results (nightly) it also fails on tests that passed under go
-      # test and were skipped under Bazel; a PR run cannot see those.
+      # manual, missing target, empty shard) unless it is allowlisted.
       # It reads test.xml from bazel-testlogs, which --config=integration
       # shares with --config=ci (same output directory): if a job ever runs
       # both lanes, run each lane's equivalence right after its own
@@ -836,11 +818,9 @@ jobs:
         timeout-minutes: 15
         env:
           DETAILS: ${{ inputs.details && '--details' || '' }}
-          GO_TEST_JSON: ${{ inputs.go-test-json-artifact != '' && format('{0}/go-test-json/go-test.json', runner.temp) || '' }}
         run: |
           args=()
           if [ -n "$DETAILS" ]; then args+=("$DETAILS"); fi
-          if [ -n "$GO_TEST_JSON" ]; then args+=(--go-test-json "$GO_TEST_JSON"); fi
           python3 tools/bazel/equivalence.py --bep "$RUNNER_TEMP/bazel-bep.json" "${args[@]}"
 
       # Runs last: it rewrites BUILD files in the checkout. main moves BUILD
@@ -1370,8 +1350,8 @@ jobs:
         run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
 
   # main.yml's "Main Linux integration packages (N/6)" and "Main Linux
-  # integration cmd/bd (N/8)" jobs (nightly.yml's Full Test Suite runs the
-  # same go test in one job) as --config=integration: every package with
+  # integration cmd/bd (N/8)" jobs (and nightly.yml's retired Full Test
+  # Suite, the same go test in one job) as --config=integration: every package with
   # -tags=integration,gms_pure_go, race, no -short, BEADS_TEST_SKIP=dolt (see
   # .bazelrc). A job of its own: ci and integration share bazel-testlogs, so
   # bazel-test's equivalence step would read this lane's test.xml if both ran

@@ -94,15 +94,19 @@ release-critical gates do not all run on every PR, so "tag the tip of main"
 means tagging a SHA nobody has fully tested. A burned tag is never reused
 (the v1.1.1 and v1.2.0 precedents), so that gamble is expensive.
 
-**Cut the branch from a SHA that is green on both `Main` and
-`Nightly Full Tests`.** The `Main` workflow runs on push to `main` and the
-`Nightly Full Tests` workflow runs on a 2am UTC schedule, so the newest SHA
-with both is usually a few hours behind the tip:
+**Cut the branch from a SHA that is green on `Bazel`, `Main` and
+`Nightly`.** The `Bazel` workflow (every Linux test lane, on rbe-west) and
+the `Main` workflow (the macOS and Windows jobs) run on push to `main`, and
+the `Nightly` workflow (the full Bazel suite with no cached test results)
+runs on a 2am UTC schedule, so the newest SHA with all three is usually a
+few hours behind the tip:
 
 ```bash
+gh run list --workflow Bazel --branch main --event push --status success --limit 5 \
+  --json headSha,conclusion,createdAt
 gh run list --workflow Main --branch main --status success --limit 5 \
   --json headSha,conclusion,createdAt
-gh run list --workflow "Nightly Full Tests" --status success --limit 3 \
+gh run list --workflow Nightly --status success --limit 3 \
   --json headSha,conclusion,createdAt
 
 git fetch origin
@@ -136,8 +140,8 @@ git log --oneline main..release/1.3.0
 
 Before starting a release:
 
-- [ ] `release/x.y.z` branch cut from a SHA green on `Main` **and**
-      `Nightly Full Tests` (see [Release Branches](#release-branches))
+- [ ] `release/x.y.z` branch cut from a SHA green on `Bazel`, `Main` **and**
+      `Nightly` (see [Release Branches](#release-branches))
 - [ ] All tests passing (`make test`, the Bazel test lane)
 - [ ] npm package tests passing (`cd npm-package && npm run test:all`)
 - [ ] **Upgrade smoke tests pass** (`make test-upgrade`) — see [Release Stability Gate](engdocs/RELEASE-STABILITY-GATE.md)

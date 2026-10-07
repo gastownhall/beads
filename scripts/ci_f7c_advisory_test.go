@@ -2,6 +2,8 @@ package scripts_test
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -12,8 +14,7 @@ import (
 // F7c (spec-f7.md §2.4, §4.3): advisory workflows moved onto a same-repo-PR
 // Blacksmith runner. These tests pin the invariants that make that safe: no
 // advisory job can read a secret just because it now names a Blacksmith
-// label, and the Blacksmith-side setup-go seed in main.yml actually exists
-// for the jobs that depend on it. The path-filtered upgrade suites F7c folded
+// label, and no Blacksmith-reachable job saves a cache. The path-filtered upgrade suites F7c folded
 // (Migration Test Harness, Cross-Version Smoke) and their filter and fold
 // checks are gone: those suites run under Bazel (//tests/migration,
 // //tests/upgrade_smoke).
@@ -108,14 +109,6 @@ func TestNixBuildDropsPullRequestTriggerNotPushOrDispatch(t *testing.T) {
 	if !sawFlakeCheck {
 		t.Error("pr-risk.yml's test-nix no longer runs the flake checks")
 	}
-}
-
-func mapKeys[K comparable, V any](m map[K]V) []K {
-	keys := make([]K, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
 }
 
 func sortedCopy(items []string) []string {
@@ -238,165 +231,36 @@ func TestF7cAdvisorySameRepoBlacksmithExpressionSemantics(t *testing.T) {
 	}
 }
 
-// --- Blacksmith cache-visibility precondition (spec-f7.md §2.2 Group B) ---
+// --- Retired setup-go seeder (ga-96smfk.58) --------------------------------
 
-// blacksmithSetupGoCacheConsumers is every advisory job that restores the
-// self-defined `blacksmith-sg-v1-` setup-go cache main.yml's
-// blacksmith-setup-go-cache job seeds (B2, F7c implementation report).
-var blacksmithSetupGoCacheConsumers = map[string][]string{}
-
-// blacksmithSetupGoCacheKeyNamespace is the self-defined cache key prefix
-// (not setup-go's own implicit key) that the seeder and every consumer share,
-// so the "no save in a consumer job" checks below can scope to exactly this
-// cache without also flagging an unrelated, legitimately-caching step in
-// another namespace.
-const blacksmithSetupGoCacheKeyNamespace = "blacksmith-sg-v1-"
-
-// TestBlacksmithSetupGoSeedExistsForAdvisoryConsumers pins that main.yml's
-// blacksmith-setup-go-cache job exists, restores whatever is already cached,
-// unconditionally re-runs every warm-up command (not gated on a cache hit,
-// since a stale or partial restore must still self-heal), and then always
-// saves - the "always warm, always save" design B2 requires so this job can
-// safely be the ONLY writer of the Blacksmith-side setup-go cache every
-// advisory consumer below reads from.
-func TestBlacksmithSetupGoSeedExistsForAdvisoryConsumers(t *testing.T) {
-	job := readCIWorkflow(t, "main.yml").job(t, "blacksmith-setup-go-cache")
-
-	if !strings.Contains(job.RunsOn, "blacksmith-") {
-		t.Errorf("main.yml's blacksmith-setup-go-cache runs-on = %q, want a Blacksmith label", job.RunsOn)
+// TestNoBlacksmithSetupGoCacheNamespace: main.yml's blacksmith-setup-go-cache
+// seeder warmed the self-keyed blacksmith-sg-v1- cache for the F7c advisory
+// workflows (regression, migration-test, cross-version-smoke,
+// proxied-local-smoke). All four are Bazel targets now, so nothing restores
+// that namespace; a workflow naming it again would be a writer or reader with
+// no counterpart.
+func TestNoBlacksmithSetupGoCacheNamespace(t *testing.T) {
+	root := sourceRepoRoot(t)
+	entries, err := os.ReadDir(filepath.Join(root, ".github", "workflows"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if job.TimeoutMinutes == 0 {
-		t.Error("main.yml's blacksmith-setup-go-cache has no timeout-minutes")
-	}
-
-	setupGoIndex := -1
-	for i, step := range job.Steps {
-		if actionFamily(step.Uses) != setupGoActionFamily {
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".yml") {
 			continue
 		}
-		setupGoIndex = i
-		if step.ID != "setup-go" {
-			t.Errorf("main.yml's blacksmith-setup-go-cache setup-go step has id %q, want \"setup-go\"", step.ID)
-		}
-		// The seeder disables setup-go's OWN implicit cache (which would try
-		// to use a GitHub-hosted cache entry Blacksmith can't see) in favor of
-		// the explicit, self-keyed restore/save steps below.
-		if step.With["cache"] != "false" {
-			t.Errorf("main.yml's blacksmith-setup-go-cache setup-go cache = %q, want \"false\" (this job manages its own cache explicitly)", step.With["cache"])
-		}
-		if step.With["go-version-file"] != "go.mod" {
-			t.Errorf("main.yml's blacksmith-setup-go-cache setup-go go-version-file = %q, want go.mod", step.With["go-version-file"])
+		if strings.Contains(readPolicyFile(t, root, ".github/workflows/"+entry.Name()), "blacksmith-sg-v1-") {
+			t.Errorf("%s names the retired blacksmith-sg-v1- setup-go cache namespace", entry.Name())
 		}
 	}
-	if setupGoIndex < 0 {
-		t.Fatal("main.yml's blacksmith-setup-go-cache has no actions/setup-go step")
-	}
-
-	restore := job.step(t, "Restore Blacksmith setup-go cache")
-	if actionFamily(restore.Uses) != cacheRestoreActionFamily {
-		t.Errorf("main.yml's blacksmith-setup-go-cache Restore step uses %q, want family %q", restore.Uses, cacheRestoreActionFamily)
-	}
-	if restore.If != "" {
-		t.Errorf("main.yml's blacksmith-setup-go-cache Restore step has if=%q, want unconditional (push-to-main only job, always trusted)", restore.If)
-	}
-	if !strings.HasPrefix(restore.With["key"], blacksmithSetupGoCacheKeyNamespace) {
-		t.Errorf("main.yml's blacksmith-setup-go-cache Restore key = %q, want it to start with %q", restore.With["key"], blacksmithSetupGoCacheKeyNamespace)
-	}
-
-	wantWarmups := []string{
-		"make build",
-	}
-	for _, want := range wantWarmups {
-		found := false
-		for i, step := range job.Steps[setupGoIndex+1:] {
-			if strings.TrimSpace(step.Run) != want {
-				continue
-			}
-			found = true
-			// Unconditional, not gated on a cache hit (F7c review fix B2):
-			// the whole point of this job is to keep the cache warm, so it
-			// must always repopulate GOCACHE/GOMODCACHE.
-			if step.If != "" {
-				t.Errorf("main.yml's blacksmith-setup-go-cache step %q (index %d) has if=%q, want it unconditional",
-					want, setupGoIndex+1+i, step.If)
-			}
-		}
-		if !found {
-			t.Errorf("main.yml's blacksmith-setup-go-cache has no step that runs exactly %q", want)
-		}
-	}
-
-	save := job.step(t, "Save Blacksmith setup-go cache")
-	if actionFamily(save.Uses) != cacheSaveActionFamily {
-		t.Errorf("main.yml's blacksmith-setup-go-cache Save step uses %q, want family %q", save.Uses, cacheSaveActionFamily)
-	}
-	if save.If != "always()" {
-		t.Errorf("main.yml's blacksmith-setup-go-cache Save step has if=%q, want \"always()\" (save even if a warm-up step above failed)", save.If)
-	}
-	if !strings.HasPrefix(save.With["key"], blacksmithSetupGoCacheKeyNamespace) {
-		t.Errorf("main.yml's blacksmith-setup-go-cache Save key = %q, want it to start with %q", save.With["key"], blacksmithSetupGoCacheKeyNamespace)
-	}
-	if save.With["key"] != restore.With["key"] {
-		t.Errorf("main.yml's blacksmith-setup-go-cache Save key = %q, Restore key = %q; the seeder must save under the exact key it restores from", save.With["key"], restore.With["key"])
-	}
-}
-
-// TestBlacksmithSeederGuardedAgainstPullRequest pins main.yml's
-// blacksmith-setup-go-cache job `if:` byte-for-byte (F7c review fix S2): this
-// job is the ONLY writer every advisory consumer's blacksmith-sg-v1- restore
-// trusts, so it must stay push-to-main-only even in the counterfactual where
-// main.yml's `on:` trigger set grows a pull_request (or merge_group) entry
-// someday. A guard that only checks github.repository (the pre-fix state)
-// would not catch that: every same-repo PR also satisfies
-// github.repository == 'gastownhall/beads'. The real regression this closes
-// is evaluated below via evalGHExpr, not just a string match, so the job is
-// also proven actually unreachable under a same-repo pull_request event.
-func TestBlacksmithSeederGuardedAgainstPullRequest(t *testing.T) {
-	const wantIf = "github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'gastownhall/beads'"
-	job := readCIWorkflow(t, "main.yml").job(t, "blacksmith-setup-go-cache")
-	if job.If != wantIf {
-		t.Fatalf("main.yml's blacksmith-setup-go-cache if=%q, want exactly %q", job.If, wantIf)
-	}
-
-	const ownRepo = "gastownhall/beads"
-	cases := []struct {
-		name string
-		ctx  map[string]string
-		want bool
-	}{
-		{"actual push to main", map[string]string{
-			"github.event_name": "push", "github.ref": "refs/heads/main", "github.repository": ownRepo,
-		}, true},
-		{"same-repo pull_request stays excluded", map[string]string{
-			"github.event_name": "pull_request", "github.ref": "refs/pull/1/merge", "github.repository": ownRepo,
-			"github.event.pull_request.head.repo.full_name": ownRepo,
-		}, false},
-		{"merge_group stays excluded", map[string]string{
-			"github.event_name": "merge_group", "github.ref": "refs/heads/gh-readonly-queue/main/pr-1", "github.repository": ownRepo,
-		}, false},
-		{"push to a non-main branch stays excluded", map[string]string{
-			"github.event_name": "push", "github.ref": "refs/heads/not-main", "github.repository": ownRepo,
-		}, false},
-		{"push from a fork stays excluded", map[string]string{
-			"github.event_name": "push", "github.ref": "refs/heads/main", "github.repository": "someone-else/beads",
-		}, false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got, err := evalGHExpr(job.If, c.ctx)
-			if err != nil {
-				t.Fatalf("evalGHExpr(%q): %v", job.If, err)
-			}
-			if ghTruthy(got) != c.want {
-				t.Errorf("evalGHExpr(%q) under %+v = %#v, want truthy=%v", job.If, c.ctx, got, c.want)
-			}
-		})
+	if _, found := readCIWorkflow(t, "main.yml").Jobs["blacksmith-setup-go-cache"]; found {
+		t.Error("main.yml has a blacksmith-setup-go-cache job again; it seeds a cache nothing restores")
 	}
 }
 
 // TestMainWorkflowHasNoSameRepoPRReachableTrigger is the direct half of F7c
-// review fix S2's "pin the seeder's trust boundary" ask: belt-and-suspenders
-// alongside the job-level guard in TestBlacksmithSeederGuardedAgainstPullRequest.
+// review fix S2's "pin the savers' trust boundary" ask: belt-and-suspenders
+// alongside the job-level guard in TestBlacksmithSaverJobsGuardedAgainstPullRequest.
 // The guard defuses the vulnerability even if one of these triggers is added
 // to main.yml's `on:` block, but this test catches the trigger addition
 // itself at the workflow-trust-surface level, so a future edit here gets
@@ -414,140 +278,11 @@ func TestMainWorkflowHasNoSameRepoPRReachableTrigger(t *testing.T) {
 	}
 	for _, forbidden := range []string{"pull_request", "pull_request_target", "merge_group", "workflow_run"} {
 		if _, ok := parsed.On[forbidden]; ok {
-			t.Errorf("main.yml's on: has a %q trigger; its blacksmith-setup-go-cache seeder is the ONLY writer every advisory consumer trusts, so this workflow must never become reachable from a same-repo PR/merge-queue event even with the job-level guard as a second layer", forbidden)
+			t.Errorf("main.yml's on: has a %q trigger; its push-to-main cache savers are the only writers PR jobs trust, so this workflow must never become reachable from a same-repo PR/merge-queue event even with the job-level guard as a second layer", forbidden)
 		}
 	}
 	if _, ok := parsed.On["push"]; !ok {
 		t.Errorf("main.yml's on: has no push trigger: %+v", parsed.On)
-	}
-}
-
-// TestAdvisoryBlacksmithConsumersAreCacheRestoreOnly replaces the pre-review
-// TestAdvisoryBlacksmithConsumersKeepImplicitSetupGoCache (F7c review fix
-// B2): each consumer must disable setup-go's own implicit cache on a
-// self-hosted (Blacksmith) runner and restore-only from the self-keyed
-// `blacksmith-sg-v1-` namespace, with NO save step in that namespace - only
-// main.yml's seeder may ever write it, so a same-repo PR run can read the
-// cache but never poison what another PR or main's seeder reads back. The
-// "no save" check is scoped to the blacksmith-sg-v1- key namespace
-// specifically (not "no actions/cache/save in this job at all"): a cache in
-// another namespace is the general sweep's concern below
-// (TestBlacksmithReachableAdvisoryJobsNeverSaveACache), not an exemption
-// from this one.
-func TestAdvisoryBlacksmithConsumersAreCacheRestoreOnly(t *testing.T) {
-	for file, jobNames := range blacksmithSetupGoCacheConsumers {
-		workflow := readCIWorkflow(t, file)
-		for _, jobName := range jobNames {
-			t.Run(file+"/"+jobName, func(t *testing.T) {
-				job := workflow.job(t, jobName)
-
-				var sawSetupGo, sawRestore bool
-				for _, step := range job.Steps {
-					switch actionFamily(step.Uses) {
-					case setupGoActionFamily:
-						sawSetupGo = true
-						// F7c review fix N1: fail-closed. Pinned to the
-						// "== 'github-hosted'" form (not "!= 'self-hosted'")
-						// so an empty/unknown runner.environment value keeps
-						// caching OFF instead of turning it on.
-						if step.With["cache"] != "${{ runner.environment == 'github-hosted' }}" {
-							t.Errorf("%s job %s setup-go cache = %q, want it disabled on self-hosted runners (fail-closed)", file, jobName, step.With["cache"])
-						}
-					case cacheRestoreActionFamily:
-						if strings.HasPrefix(step.With["key"], blacksmithSetupGoCacheKeyNamespace) {
-							sawRestore = true
-							if !strings.Contains(step.If, "runner.environment == 'self-hosted'") {
-								t.Errorf("%s job %s setup-go cache Restore step has if=%q, want it gated on runner.environment == 'self-hosted'", file, jobName, step.If)
-							}
-						}
-					case cacheSaveActionFamily, cacheMonolithicActionFamily:
-						if strings.HasPrefix(step.With["key"], blacksmithSetupGoCacheKeyNamespace) {
-							t.Errorf("%s job %s has a %s step keyed in the blacksmith-sg-v1- namespace (%q); only main.yml's seeder may save this cache", file, jobName, actionFamily(step.Uses), step.With["key"])
-						}
-					}
-				}
-				if !sawSetupGo {
-					t.Errorf("%s job %s has no actions/setup-go step", file, jobName)
-				}
-				if !sawRestore {
-					t.Errorf("%s job %s has no blacksmith-sg-v1- cache restore step", file, jobName)
-				}
-			})
-		}
-	}
-}
-
-// TestBlacksmithSeederCacheKeyIsNotPerCommit pins F7c review fix S5: the
-// seeder's save/restore key suffix must be a UTC calendar day
-// (steps.cache-date.outputs.today), not github.sha. Keying per commit meant
-// every single push to main - whether or not go.sum changed - wrote a new
-// multi-GB ~/go/pkg/mod + ~/.cache/go-build entry under this namespace; on a
-// cache store with LRU eviction (Blacksmith) that churn risked evicting
-// F7a's own beads-go-mod-v2-*/beads-go-build-v2-* entries. Keying per day
-// instead caps writes to at most once per calendar day while still picking
-// up a go.sum change on the very next push.
-func TestBlacksmithSeederCacheKeyIsNotPerCommit(t *testing.T) {
-	job := readCIWorkflow(t, "main.yml").job(t, "blacksmith-setup-go-cache")
-
-	dateStep := job.step(t, "Compute cache date")
-	if dateStep.ID != "cache-date" {
-		t.Errorf("main.yml's blacksmith-setup-go-cache Compute cache date step has id %q, want \"cache-date\"", dateStep.ID)
-	}
-	if !strings.Contains(dateStep.Run, "date -u") {
-		t.Errorf("main.yml's blacksmith-setup-go-cache Compute cache date step run = %q, want it to compute a UTC date", dateStep.Run)
-	}
-
-	restore := job.step(t, "Restore Blacksmith setup-go cache")
-	save := job.step(t, "Save Blacksmith setup-go cache")
-	for name, step := range map[string]ciWorkflowStep{"Restore": restore, "Save": save} {
-		key := step.With["key"]
-		if strings.Contains(key, "github.sha") {
-			t.Errorf("main.yml's blacksmith-setup-go-cache %s step key = %q, must not key per-commit (github.sha) - see F7c review fix S5", name, key)
-		}
-		if !strings.Contains(key, "steps.cache-date.outputs.today") {
-			t.Errorf("main.yml's blacksmith-setup-go-cache %s step key = %q, want it keyed by steps.cache-date.outputs.today", name, key)
-		}
-	}
-}
-
-// TestBlacksmithSetupGoCacheKeysMatchAcrossSeederAndConsumers pins that every
-// consumer's restore key/restore-keys are textually identical to main.yml
-// seeder's save key (F7c review fix B2, closes a seeder/consumer key-mismatch
-// mutation): if a consumer's key format ever drifted from the seeder's (a
-// different hash segment order, a missing runner.arch, etc.) the seeder would
-// keep writing entries no consumer could ever restore, silently degrading
-// every advisory Blacksmith job back to a cold cache.
-func TestBlacksmithSetupGoCacheKeysMatchAcrossSeederAndConsumers(t *testing.T) {
-	seeder := readCIWorkflow(t, "main.yml").job(t, "blacksmith-setup-go-cache")
-	seederSave := seeder.step(t, "Save Blacksmith setup-go cache")
-	seederKey := seederSave.With["key"]
-	if seederKey == "" {
-		t.Fatal("main.yml's blacksmith-setup-go-cache Save step has no key")
-	}
-
-	for file, jobNames := range blacksmithSetupGoCacheConsumers {
-		workflow := readCIWorkflow(t, file)
-		for _, jobName := range jobNames {
-			job := workflow.job(t, jobName)
-			var restore *ciWorkflowStep
-			for i := range job.Steps {
-				step := &job.Steps[i]
-				if actionFamily(step.Uses) == cacheRestoreActionFamily && strings.HasPrefix(step.With["key"], blacksmithSetupGoCacheKeyNamespace) {
-					restore = step
-					break
-				}
-			}
-			if restore == nil {
-				t.Errorf("%s job %s has no blacksmith-sg-v1- restore step", file, jobName)
-				continue
-			}
-			if restore.With["key"] != seederKey {
-				t.Errorf("%s job %s restore key = %q, want it identical to the seeder's save key %q", file, jobName, restore.With["key"], seederKey)
-			}
-			if !strings.Contains(restore.With["restore-keys"], strings.TrimSuffix(seederKey, "${{ steps.cache-date.outputs.today }}")) {
-				t.Errorf("%s job %s restore-keys %q does not contain the seeder's key prefix (without the commit-specific suffix)", file, jobName, restore.With["restore-keys"])
-			}
-		}
 	}
 }
 
@@ -565,7 +300,7 @@ func TestBlacksmithSetupGoCacheKeysMatchAcrossSeederAndConsumers(t *testing.T) {
 // machinery. This list is every workflow this F7c round can actually edit
 // plus the one workflow (main.yml) whose seeder job this round added a new
 // guard to.
-var generalCacheSweepWorkflows = append(mapKeys(blacksmithSetupGoCacheConsumers), "main.yml")
+var generalCacheSweepWorkflows = []string{"main.yml"}
 
 // blacksmithTrustContexts are the two event shapes a same-repo Blacksmith
 // `runs-on` ternary can route onto a `blacksmith-*` label for (F7c review fix

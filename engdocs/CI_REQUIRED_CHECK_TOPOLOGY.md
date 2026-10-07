@@ -140,9 +140,22 @@ Current PR-related workflow names:
   detection and the `bazel-coverage` decision were retired (ga-96smfk.22):
   `pr.yml`'s Bazel lanes run those tests.
 - `.github/workflows/main.yml`: `Main`
-  Runs on pushes to `main`. Contains the main branch health checks, package
-  gates, platform smoke/short coverage, embedded Dolt coverage, and promoted
-  Linux no-short integration shards.
+  Runs on pushes to `main`. Contains only what rbe-west cannot run: the macOS
+  `go test -race -short` suite and the Windows smoke build on Blacksmith, and
+  the push-to-main savers of the GOCACHEs pr.yml's Windows and macOS jobs
+  restore. Every Linux check it used to repeat (migration hygiene, build
+  tags, versions, doc flags, gofmt, the PR policy wrapper, the package gates,
+  the Nix flake check and the Linux cache seeders) is gated before the merge
+  by the merge queue's `pr.yml`/`pr-risk.yml` run of the same commit, and
+  `bazel.yml`'s push run re-runs the Bazel targets (ga-96smfk.22).
+- `.github/workflows/nightly.yml`: `Nightly`
+  Runs at 02:00 UTC. Calls `bazel.yml` with `fresh-test-results: true` (every
+  test re-executed, no cached results) and checks the rbe-west worker-env
+  pin against gascity. It runs no `go test` on a runner: its former Full Test
+  Suite, PR Core `go test -json` equivalence side and `ci-measurements.yml`
+  dispatch suites are retired; the non-race embedded batch-apply step is
+  `//internal/storage/embeddeddolt:embeddeddolt_batch_apply_nonrace_test` in
+  the embedded tier.
 - The differential regression suite (`tests/regression`, formerly
   `regression.yml`) is `//tests/regression:regression_test`, tagged
   `dolt-server-cmd`, so `bazel.yml`'s `bazel-cmd-dolt` lane runs it on every
@@ -926,9 +939,10 @@ Required` requires them to have run remotely and passed.
   - PR Core's other work: `scripts/ci/pr-core.sh` is the one `go test` (plus
     a timing summary); its `BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1` is
     `test:prcore`'s too. `bazel-test`'s equivalence step compares Bazel's
-    tests with `go list`, not with PR Core's run, so it is unaffected;
-    `nightly.yml` still runs PR Core's `go test -json` for the skip-parity
-    check.
+    tests with `go list`, not with PR Core's run, so it is unaffected. The
+    skip-parity check (`equivalence.py --go-test-json`) has no CI caller
+    since nightly's go-test side was retired (ga-96smfk.22); run it by hand
+    with `BEADS_PR_CORE_GO_TEST_JSON` when auditing a skip.
   - `--config=sole-run` (`--experimental_remote_cache_eviction_retries=0`,
     the step 1 and 2 hardening) is added to every `bazel test` of the three
     lanes wherever they execute remotely (`BAZEL_SOLE_RUN`: modes `remote`,
@@ -1186,8 +1200,7 @@ pr.yml's two mixed-OS matrix jobs, `pr-preflight-platforms` and
 merge_group, through the same `runner: same-repo-macos` matrix marker and
 same-repo expression their Linux/Windows legs use. Forks, Dependabot and
 every other event keep GitHub-hosted `macos-latest`. They are the only PR
-macOS jobs; `release.yml`, `nightly.yml` and `ci-measurements.yml` stay on
-`macos-latest`.
+macOS jobs; `release.yml` stays on `macos-latest`.
 
 - **Label.** Pinned to `macos-26` because GitHub's `macos-latest` resolves to
   `macos-26-arm64` today, so both paths run the same OS and architecture and

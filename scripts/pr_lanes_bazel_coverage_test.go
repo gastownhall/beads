@@ -235,10 +235,10 @@ func sortedKeys[V any](m map[string]V) []string {
 func testPackageGateJobs(t *testing.T, prGateRequired []string) {
 	t.Helper()
 	workflow := readCIWorkflow(t, bazelWorkflowName)
-	// main.yml's own package-mcp/package-npm jobs (nightly, not gated by
-	// rbe) run the same language setup; bazel.yml's copy must not drift
-	// from it.
-	mainWorkflow := readCIWorkflow(t, "main.yml")
+	// release.yml's release-package-mcp/release-package-npm jobs (the tag
+	// build's package gates) run the same language setup; bazel.yml's copy
+	// must not drift from it.
+	mainWorkflow := readCIWorkflow(t, "release.yml")
 	type pkgLane struct {
 		job, detectOutput, langStepName, makeTarget string
 	}
@@ -352,22 +352,22 @@ func testPackageGateJobs(t *testing.T, prGateRequired []string) {
 			t.Errorf("%s step %q: if %q, want %q", lane.job, lane.langStepName, st.If, detectIf)
 		}
 
-		// The language setup itself must not drift from main.yml's copy of
-		// the same job (python-version / Node version / the uv install
-		// command): main.yml's jobs are ungated by rbe, so they are the one
-		// other place this exact setup is pinned.
-		mainJob := mainWorkflow.job(t, lane.job)
+		// The language setup itself must not drift from release.yml's copy
+		// of the same gate (python-version / Node version / the uv install
+		// command): the tag build is the one other place this exact setup
+		// is pinned.
+		mainJob := mainWorkflow.job(t, "release-"+lane.job)
 		langStep := job.step(t, lane.langStepName)
 		mainLangStep := mainJob.step(t, lane.langStepName)
 		if langStep.Uses != mainLangStep.Uses || !reflect.DeepEqual(langStep.With, mainLangStep.With) {
-			t.Errorf("%s %q: uses %q, with %v; main.yml's %s has uses %q, with %v",
+			t.Errorf("%s %q: uses %q, with %v; release.yml's release-%s has uses %q, with %v",
 				lane.job, lane.langStepName, langStep.Uses, langStep.With, lane.job, mainLangStep.Uses, mainLangStep.With)
 		}
 		if lane.job == bazelPackageMCPJobName {
 			installUv := job.step(t, "Install uv")
 			mainInstallUv := mainJob.step(t, "Install uv")
 			if installUv.Run != mainInstallUv.Run {
-				t.Errorf("%s Install uv: run %q; main.yml's has run %q", lane.job, installUv.Run, mainInstallUv.Run)
+				t.Errorf("%s Install uv: run %q; release.yml's has run %q", lane.job, installUv.Run, mainInstallUv.Run)
 			}
 		}
 		gateName := "Run " + map[string]string{bazelPackageMCPJobName: "MCP", bazelPackageNPMJobName: "npm"}[lane.job] + " package gate"

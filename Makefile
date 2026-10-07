@@ -46,7 +46,7 @@ endif
 .PHONY: all build doctor-build test test-icu-path test-full-cgo test-regression test-upgrade test-cross-version test-migration corpus-regen githooks-regen bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check check-testing-short
 .PHONY: lint lint-changed vet
 .PHONY: check check-go test-go check-docs-go
-.PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-complexity ci-complexity-diff ci-complexity-check ci-package-mcp ci-package-npm
+.PHONY: ci-pr-core ci-pr-lint ci-complexity ci-complexity-diff ci-complexity-check ci-package-mcp ci-package-npm
 .PHONY: api-gen api-check
 .PHONY: bazel-sync bazel-sync-check
 
@@ -229,9 +229,6 @@ test-full-cgo:
 ci-pr-core:
 	@./scripts/ci/pr-core.sh
 
-ci-pr-policy:
-	@./scripts/ci/pr-policy.sh
-
 # Lint and vet are nogo (//tools/nogo): go test's vet checks plus the
 # golangci-lint linters .golangci.yml enables, validated beside every Go
 # compile, so any `bazel build`/`bazel test` (local or on rbe-west) fails on a
@@ -295,9 +292,8 @@ api-gen:
 	go generate -tags "$(BUILD_TAGS)" ./internal/httpapi/apigen
 
 # Two-part spec drift gate: regenerate and fail if regeneration CHANGED
-# anything, then run the spec tests. Runs in the PR workflow's policy job
-# (scripts/ci/pr-policy.sh), on every pull request, never only on
-# push-to-main.
+# anything, then run the spec tests. CI runs the drift half as
+# //scripts/repochecks:types_gen_drift_test.
 #
 # The drift question is "do the checked-out types already match the checked-out
 # spec", so the comparison is before-vs-after regeneration rather than
@@ -544,7 +540,6 @@ help:
 	@echo "  make test-icu-path - Run opt-in ICU regex path tests (maintainer-only)"
 	@echo "  make test-full-cgo - Deprecated alias for make test-icu-path"
 	@echo "  make ci-pr-core  - Run required PR core Go test wrapper"
-	@echo "  make ci-pr-policy - Run required PR policy wrapper"
 	@echo "  make ci-pr-lint  - Run the required lint gate: nogo (vet + golangci-lint's linters) under Bazel, native + windows/darwin"
 	@echo "  make lint        - Same as ci-pr-lint (make vet too)"
 	@echo "  make lint-changed - nogo over the Bazel packages of changed Go files (LINT_CHANGED_SCOPE=staged|worktree)"

@@ -1554,8 +1554,7 @@ sh_test(
 # instead of skipping every Dolt-gated test into a cached pass. These are
 # the cmd/bd tests no other lane runs: every other configuration of bd_test
 # passes BEADS_TEST_SKIP=dolt (prcore/ci, integration) or runs only its
-# manifest (bd_embedded_test, bd_proxied_test), and so does nightly.yml's
-# go test job. No -test.run/-test.skip: the Go binary shards
+# manifest (bd_embedded_test, bd_proxied_test). No -test.run/-test.skip: the Go binary shards
 # itself over every top-level test (rules_go's TEST_SHARD_INDEX), so each
 # runs in exactly one shard, and check_testcases.py fails a shard that ran
 # none. It repeats bd_test's `env` (the wrapper cannot inherit it).

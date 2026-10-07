@@ -919,6 +919,12 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 			[]string{"$(rootpath :embeddeddolt_test)", "-test.v", "-test.count=1", "-test.timeout=19m", "-test.run=^TestConformance$$/^Audit$$"},
 			map[string]string{"BEADS_TEST_EMBEDDED_DOLT": "1"},
 		},
+		// nightly.yml's retired non-race embedded batch-apply step: the large
+		// shapes every race lane shrinks or skips (raceEnabled).
+		"//internal/storage/embeddeddolt:embeddeddolt_batch_apply_nonrace_test": {
+			[]string{"$(rootpath :embeddeddolt_race_off)", "-test.v", "-test.count=1", "-test.timeout=19m", "-test.run=^(TestBatchApplyContract|TestLargeBatchApplyWallClock_Embedded|TestLargeBatchApplyStatementCounts712_Embedded|TestCreateBatchFastPathsMatchPerRowLarge_Embedded)$$"},
+			map[string]string{"BEADS_TEST_EMBEDDED_DOLT": "1"},
+		},
 		"//cmd/bd:bd_proxied_test": {
 			[]string{"$(rootpath //:.github/scripts/proxied-test-shard.sh)", "BEADS_TEST_CMD_BINARY", "$(rootpath :bd_test)"},
 			map[string]string{

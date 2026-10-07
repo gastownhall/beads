@@ -6,9 +6,6 @@
 # Dolt/test-env setup required).
 #
 # Shared by every non-race seeder so they can never drift apart (F7b spec 4.2):
-#   - main.yml's build-artifacts (ubuntu-latest / fork-PR path non-race save)
-#   - main.yml's blacksmith-go-build-cache (Blacksmith / same-repo-PR path
-#     non-race save)
 #   - main.yml's test-windows (Windows non-race save)
 #   - main.yml's blacksmith-macos-go-build-cache (macOS non-race save: its
 #     github leg the fork/Dependabot path of pr.yml's macOS legs, its

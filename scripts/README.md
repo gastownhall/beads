@@ -9,7 +9,6 @@ the target CI tiers; Make targets are aliases for local discoverability.
 
 ```bash
 make ci-pr-core
-make ci-pr-policy
 make ci-pr-lint
 make ci-package-mcp
 make ci-package-npm
@@ -38,7 +37,8 @@ The broad Go wrappers also cap package and test parallelism to `4` by default
 (`GO_TEST_PKG_PARALLEL` and `GO_TEST_PARALLEL`). This avoids turning high-core
 shared hosts into a different test topology than GitHub Actions.
 
-`make ci-pr-policy` includes `scripts/check-testing-short.sh`, which enforces
+`scripts/check-testing-short.sh` (`make check-testing-short`; CI runs it in
+`//scripts:scripts_test`) enforces
 that `testing.Short()` is only used for runtime, stress, or large-fixture skips.
 Use build tags, environment checks, or named wrappers for integration/e2e/API
 boundaries.

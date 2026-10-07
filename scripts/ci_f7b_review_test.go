@@ -66,14 +66,11 @@ func TestBlacksmithReachablePRJobsDisableDefaultCachingActions(t *testing.T) {
 }
 
 // blacksmithSaverJobs are main.yml's push-to-main-only jobs that seed a
-// Blacksmith-selection GOCACHE/vet-cache a same-repo PR or merge_group job
-// above restores from. F7c's blacksmith-setup-go-cache is pinned by its own
-// TestBlacksmithSeederGuardedAgainstPullRequest in ci_f7c_advisory_test.go;
-// these are F7b's remaining savers (B2), the macOS saver, and the Blacksmith macOS
+// Blacksmith-selection GOCACHE a same-repo PR or merge_group job restores
+// from: F7b's Windows saver (B2), the macOS saver, and the Blacksmith macOS
 // `test` job (which saves its own race cache).
 var blacksmithSaverJobs = []string{
-	"blacksmith-go-build-cache", "test-windows",
-	"blacksmith-macos-go-build-cache", "test",
+	"test-windows", "blacksmith-macos-go-build-cache", "test",
 }
 
 // TestBlacksmithSaverJobsGuardedAgainstPullRequest is the B2 fix's pin: each
@@ -135,7 +132,7 @@ func TestBlacksmithSaverJobsGuardedAgainstPullRequest(t *testing.T) {
 }
 
 // TestBlacksmithSaverCacheKeysAreNotPerCommit is the S7 fix's pin: each of
-// blacksmith-go-build-cache's and test-windows' Go-cache
+// main.yml's Blacksmith savers' Go-cache
 // restore/save key pairs is bounded by go.sum content plus a UTC calendar day
 // (via that job's own "Compute cache date" step, id: cache-date), not by
 // github.sha, so an ordinary day of push traffic to main cannot mint a new
@@ -153,11 +150,6 @@ func TestBlacksmithSaverCacheKeysAreNotPerCommit(t *testing.T) {
 		saveStepNames    []string
 	}
 	cases := []saverSteps{
-		{
-			job:              "blacksmith-go-build-cache",
-			restoreStepNames: []string{"Restore race Go build cache", "Restore non-race Go build cache"},
-			saveStepNames:    []string{"Save race Go build cache", "Save non-race Go build cache"},
-		},
 		{
 			job:              "test-windows",
 			restoreStepNames: []string{"Restore non-race Go build cache"},
@@ -203,52 +195,19 @@ func TestBlacksmithSaverCacheKeysAreNotPerCommit(t *testing.T) {
 
 // TestBlacksmithSaverVenueAndFlavorMatricesAreComplete re-pins mutations the
 // reviewer's mutate.py found surviving against pre-fix code (M8, M9): main.yml's
-// "venue matrix" savers (test-windows and the
-// Linux and macOS Go build cache savers)
+// "venue matrix" savers (test-windows and the macOS Go build cache saver)
 // must each keep BOTH the `blacksmith` leg (the actual same-repo-PR seed) and
-// the `github` leg (that job's pre-existing fork-PR/GitHub-hosted coverage),
-// and blacksmith-go-build-cache's `flavor` matrix must keep both `race` and
-// `non-race` -- dropping either silently loses a cache seed or a whole
-// coverage flavor with no test noticing (TestSameRepoBlacksmithRunners only
-// pins the runs-on ternary string, which does not change shape if a matrix
-// axis's value list shrinks).
+// the `github` leg (that job's pre-existing fork-PR/GitHub-hosted coverage)
+// -- dropping either silently loses a cache seed with no test noticing
+// (TestSameRepoBlacksmithRunners only pins the runs-on ternary string, which
+// does not change shape if a matrix axis's value list shrinks).
 func TestBlacksmithSaverVenueAndFlavorMatricesAreComplete(t *testing.T) {
 	workflow := readCIWorkflow(t, "main.yml")
-	for _, jobName := range []string{"test-windows", "blacksmith-go-build-cache", "blacksmith-macos-go-build-cache"} {
+	for _, jobName := range []string{"test-windows", "blacksmith-macos-go-build-cache"} {
 		job := workflow.job(t, jobName)
 		if got := job.Strategy.Matrix.Venue; !equalStrings(got, []string{"blacksmith", "github"}) {
 			t.Errorf("main.yml's %s matrix.venue = %v, want [blacksmith github]", jobName, got)
 		}
-	}
-	job := workflow.job(t, "blacksmith-go-build-cache")
-	if got := job.Strategy.Matrix.Flavor; !equalStrings(got, []string{"race", "non-race"}) {
-		t.Errorf("main.yml's blacksmith-go-build-cache matrix.flavor = %v, want [race non-race]", got)
-	}
-}
-
-// TestBlacksmithGoBuildCacheRaceLegActuallyUsesRace re-pins mutation M6: the
-// race flavor's GOCACHE-warming step must actually pass `-race` to `go test`,
-// or the "race" leg's saved cache would silently warm a non-race build
-// instead and every race-flavor restore downstream would cache-miss (or
-// worse, hit a non-race-compiled cache under the race key).
-func TestBlacksmithGoBuildCacheRaceLegActuallyUsesRace(t *testing.T) {
-	job := readCIWorkflow(t, "main.yml").job(t, "blacksmith-go-build-cache")
-	step := job.step(t, "Warm race GOCACHE")
-	if !strings.Contains(step.Run, "-race") {
-		t.Errorf("blacksmith-go-build-cache's race-leg warm step run = %q, want it to pass -race", step.Run)
-	}
-}
-
-// TestBlacksmithGoBuildCacheNonRaceLegWarmsPreflightPackages re-pins mutation
-// M7: the non-race flavor's warm step must run the shared
-// warm-non-race-cache.sh, so the same-repo-PR seed can never silently stop
-// covering what pr-preflight-platforms' and check-doc-freshness-platforms'
-// ubuntu legs compile.
-func TestBlacksmithGoBuildCacheNonRaceLegWarmsPreflightPackages(t *testing.T) {
-	job := readCIWorkflow(t, "main.yml").job(t, "blacksmith-go-build-cache")
-	step := job.step(t, "Warm non-race GOCACHE (preflight/doc-freshness)")
-	if step.Run != "bash scripts/ci/warm-non-race-cache.sh" {
-		t.Errorf("blacksmith-go-build-cache's non-race-leg warm step run = %q, want bash scripts/ci/warm-non-race-cache.sh", step.Run)
 	}
 }
 
