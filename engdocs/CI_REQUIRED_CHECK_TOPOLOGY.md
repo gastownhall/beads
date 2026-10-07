@@ -657,7 +657,6 @@ Do not require these existing check names directly:
 - `Test (Server Dolt Conformance)`
 - `Test (Server Dolt Full Suite 1/16)` through `Test (Server Dolt Full Suite 16/16)`
 - `Test (Windows - smoke)`
-- `PR Lint (native)`, `PR Lint (windows)` and `PR Lint (darwin)`
 - `Test Nix Flake`
 - `Bazel / test` and the other jobs of `bazel.yml`
 - `Bazel Farm / *` (`bazel-farm.yml`'s advisory, PR-controlled results)
@@ -929,12 +928,14 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
     `//tools/bazel:pure_bd_has_no_cgo_only_deps` (a pure bd must not link
     gozstd, which `go build` rejects with cgo off). Same cgo-off boundary as
     the job it replaces.
-  - Also kept on every PR, in the required job `scripts-go-checks`
-    (`SCRIPTS_GO_CHECKS`, one leg, `Go checks (vet)`): `go test`'s own vet
-    checks (cmd/go's `defaultVetFlags`, policy-tested equal to the
-    toolchain's) over `./...` (`scripts/ci/go-test-vet.sh`): rules_go's
-    `go_test` runs no vet, so a `go test` vet finding would otherwise first
-    fail on `main` and then on every fork PR.
+  - `go test`'s own vet checks (cmd/go's `defaultVetFlags`, policy-tested
+    equal to the toolchain's) and the golangci-lint linters `.golangci.yml`
+    enables run as nogo (`//tools/nogo`) beside every compile of every Bazel
+    lane: natively in `bazel test //... --config=ci`, and for every release
+    platform in the `bazel-pure` lane's release cross-compile
+    (engdocs/LINTING.md). The former
+    `scripts-go-checks` (`Go checks (vet)`) and `pr-lint-wrapper`
+    (`PR Lint (native|windows|darwin)`) jobs are retired.
   - The repository policy tests (`./scripts/...`, including the D2 guards)
     and the tests that walk the checkout run only under Bazel, remotely:
     `//scripts:scripts_test` and `//test/docsync:docsync_test` take
@@ -1528,8 +1529,7 @@ check read.
 
 Non-Bazel required jobs re-run in full on every merge group (approximate
 PR timings, 2026-10): `fast-checks` (~40 s), `pr-policy-wrapper`
-(~2.5 min), `scripts-go-checks` (vet only), `pr-lint-wrapper`
-(native/darwin/windows, up to ~4 min), `check-doc-flags` (~1.7 min),
+(~2.5 min), `check-doc-flags` (~1.7 min),
 `check-doc-freshness-platforms` and `pr-preflight-platforms` (Linux,
 Windows and macOS legs, up to ~5 min on Windows),
 `windows-make-shell` (~2.7 min),

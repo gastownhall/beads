@@ -455,90 +455,6 @@ jobs:
       - name: Run PR policy wrapper
         run: make ci-pr-policy
 
-  # F7b: pr.yml's pr-lint-wrapper moved to same-repo Blacksmith
-  # (blacksmith-4vcpu-ubuntu-2404) for same-repo PRs/merge_group, falling back
-  # to ubuntu-latest for forks/Dependabot. golangci-lint's own cache and this
-  # leg's lint GOCACHE are both scoped to the runner infrastructure (not just
-  # the key), so this push-lane saver needs to seed both runner selections —
-  # the `venue` matrix dimension crossed with the existing `target` dimension
-  # (6 legs on push) — the same reason windows-test-binaries-cache above seeds
-  # both `runner: [blacksmith, github]` legs. The ternary form (rather than a
-  # literal Blacksmith label in a matrix array) is required for actionlint,
-  # same as every other Blacksmith `runs-on` in this repo.
-  # F7b review fix (B2): job-level push-to-main-only guard, same rationale as
-  # blacksmith-go-build-cache above -- applied to the whole job (not just the
-  # Blacksmith leg) for simplicity, since the github venue leg is also only
-  # meant to run from main.yml's push trigger. Pinned by
-  # TestBlacksmithSaverJobsGuardedAgainstPullRequest.
-  pr-lint-wrapper:
-    name: PR Lint (${{ matrix.target }})
-    runs-on: ${{ matrix.venue == 'blacksmith' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'gastownhall/beads'
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [native, windows, darwin]
-        venue: [blacksmith, github]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Restore Go module cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      - name: Install golangci-lint
-        run: ./scripts/ci/install-golangci-lint.sh
-
-      # This push lane is the only saver (§0, F5.2): keyed on file content and
-      # the leg; a miss on the exact content key falls back to the leg's most
-      # recent entry, which golangci-lint revalidates against the current
-      # config and inputs. pr.yml only ever restores. The key omits the sha
-      # (SF-4) so a save only happens when .golangci.yml or go.sum change,
-      # not on every push to main.
-      - name: Restore golangci-lint cache
-        id: restore-golangci-lint-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cache/golangci-lint
-            ${{ matrix.target == 'native' && format('{0}/go-cache/lint-{1}', runner.temp, matrix.target) || '' }}
-          key: beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-${{ hashFiles('.golangci.yml', 'go.sum') }}
-          restore-keys: beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-
-
-      # No BD_LINT_NEW_FROM_MERGE_BASE here: the push lane sweeps the whole
-      # tree, including the GOOS=windows and GOOS=darwin cross-lints. pr.yml
-      # scopes the same wrapper to the PR's own diff.
-      - name: Run PR lint wrapper
-        env:
-          BD_LINT_TARGETS: ${{ matrix.target }}
-          GOCACHE: ${{ runner.temp }}/go-cache/lint-${{ matrix.target }}
-        run: make ci-pr-lint
-
-      # !cancelled() (not just a cache-hit check): golangci-lint's own cache is
-      # content-addressed and GOCACHE is unaffected by lint findings, so it is
-      # safe -- and worth keeping -- to save even when the lint step itself
-      # fails (SF-1). Without this, a red lint run on main never warms the
-      # cache and every PR leg stays cold.
-      - name: Save golangci-lint cache
-        if: ${{ !cancelled() && steps.restore-golangci-lint-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cache/golangci-lint
-            ${{ matrix.target == 'native' && format('{0}/go-cache/lint-{1}', runner.temp, matrix.target) || '' }}
-          key: beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-${{ hashFiles('.golangci.yml', 'go.sum') }}
-
   # macOS full -race -short suite. Linux runs the same suite under Bazel
   # (bazel.yml's `test` lane, on every push to main, executed on rbe-west),
   # and Windows uses smoke tests below; rbe-west has no macOS workers, so this
@@ -642,12 +558,11 @@ jobs:
   # runners cannot see caches `actions/cache` saved from a GitHub-hosted
   # runner (and vice versa) even for an identical key, so the `venue` matrix
   # dimension here seeds the Blacksmith selection too -- same reasoning as
-  # pr-lint-wrapper/go-vet-cache above and windows-test-binaries-cache's
-  # `runner` matrix.
+  # windows-test-binaries-cache's `runner` matrix.
   test-windows:
     name: Test (Windows - smoke, ${{ matrix.venue }})
     # F7b review fix (B2): added the repository check to match
-    # blacksmith-go-build-cache/pr-lint-wrapper/go-vet-cache's convention
+    # blacksmith-go-build-cache's convention
     # above (this job's push-to-main guard predates F7b and already had the
     # event/ref check; the repository check closes the same fork gap F7c's
     # own blacksmith-setup-go-cache guard closes). Pinned by
@@ -765,79 +680,6 @@ jobs:
 
       - name: Check gofmt
         run: make fmt-check
-
-  # Warms the vet cache pr.yml's scripts-go-checks vet leg restores (F5.3).
-  # `go vet` caches successful vet actions, so a warm cache re-vets only
-  # changed packages and their dependents. Restore-only in pr.yml (§0); this
-  # push job is the only saver, on an exact-key miss.
-  # F7b: pr.yml's scripts-go-checks vet leg moved to same-repo Blacksmith; this
-  # seed needs both runner selections for the same reason pr-lint-wrapper
-  # above does (Blacksmith and GitHub-hosted runners cannot see each other's
-  # actions/cache entries, even for an identical key).
-  # F7b review fix (B2): job-level push-to-main-only guard, same rationale and
-  # convention as pr-lint-wrapper above. Pinned by
-  # TestBlacksmithSaverJobsGuardedAgainstPullRequest.
-  go-vet-cache:
-    name: Warm go vet cache
-    runs-on: ${{ matrix.venue == 'blacksmith' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'gastownhall/beads'
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        venue: [blacksmith, github]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      # F7b review fix (S7/Speed): see blacksmith-go-build-cache's identical
-      # step above for the full rationale -- bounds this saver's writes to at
-      # most once per UTC calendar day per go.sum, not once per push.
-      - name: Compute cache date
-        id: cache-date
-        run: echo "today=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore Go module cache
-        id: restore-go-module-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      - name: Restore vet Go build cache
-        id: restore-vet-go-build-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/go-cache/vet
-          key: beads-go-vet-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-vet-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
-          # The non-race build cache fallback this used to list can never hit:
-          # actions/cache versions an entry by its path list, and that cache
-          # saves to a different path (.../go-cache/non-race), so the prefix
-          # match is always filtered out (SF-5).
-          restore-keys: beads-go-vet-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-vet-
-
-      - name: Go vet with go test's checks
-        env:
-          GOCACHE: ${{ runner.temp }}/go-cache/vet
-        run: bash scripts/ci/go-test-vet.sh
-
-      # build-artifacts is the module cache's sole saver (same key); this job
-      # only restores it to warm the vet run, and only saves its own cache.
-      # !cancelled(): go vet's cache is content-addressed, so it is safe to
-      # save even when the vet step itself fails (SF-1).
-      - name: Save vet Go build cache
-        if: ${{ !cancelled() && steps.restore-vet-go-build-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/go-cache/vet
-          key: beads-go-vet-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-vet-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
 
   # F7b: the saver for the race and non-race GOCACHEs that same-repo-PR
   # (Blacksmith, blacksmith-4vcpu-ubuntu-2404) jobs restore: the non-race one
@@ -965,7 +807,7 @@ jobs:
   # for same-repo PRs/merge_group and on macos-latest for fork/Dependabot PRs,
   # and Blacksmith and GitHub-hosted runners cannot see each other's
   # actions/cache entries, so the `venue` matrix seeds both (same convention as
-  # pr-lint-wrapper/go-vet-cache/test-windows). This job is their only seeder
+  # test-windows). This job is their only seeder
   # (and the Blacksmith leg also seeds the `test` job's module and non-race
   # caches), and runs only the shared warm-up those legs compile
   # (warm-non-race-cache.sh, the same script the Linux/Windows seeders use)

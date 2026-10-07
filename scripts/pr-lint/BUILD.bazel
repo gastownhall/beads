@@ -16,9 +16,7 @@ go_binary(
 go_test(
     name = "pr-lint_test",
     srcs = ["main_test.go"],
-    data = ["//:.buildflags"],
     embed = [":pr-lint_lib"],
-    deps = ["//internal/testutil/bazeltest"],
 )
 
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

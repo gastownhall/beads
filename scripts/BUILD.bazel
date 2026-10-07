@@ -42,6 +42,7 @@ go_test(
         "install_dolt_test.go",
         "managed_local_lane_test.go",
         "migration_corpus_bazel_test.go",
+        "nogo_lint_policy_test.go",
         "pr_lanes_bazel_coverage_test.go",
         "pr_preflight_test.go",
         "pr_risk_bazel_coverage_test.go",

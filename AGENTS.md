@@ -105,7 +105,7 @@ spans layers. See
 ```bash
 make install       # build and install bd to ~/.local/bin (canonical)
 make test          # unit tests with the right build tags
-make ci-pr-lint    # required zero-finding formatting + lint contract
+make ci-pr-lint    # required zero-finding lint + vet contract (nogo under Bazel)
 make check-docs    # doc flag, freshness, and docsync checks
 make bazel-sync    # after adding/removing/renaming Go files or changing imports/go.mod
 ```

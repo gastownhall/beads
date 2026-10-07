@@ -83,19 +83,12 @@ jobs:
           source ./.buildflags
 
           ci_time "install gotestsum" -- go install gotest.tools/gotestsum@v1.13.0
-          ci_time "install golangci-lint" -- ./scripts/ci/install-golangci-lint.sh
-          # install-golangci-lint.sh appends to $GITHUB_PATH, which GitHub
-          # Actions only applies to *later steps*, not later commands in this
-          # same run block. Export it here too so the "pr-lint wrapper" call
-          # below finds golangci-lint on PATH.
-          export PATH="$RUNNER_TEMP/golangci-lint:$PATH"
           status=0
           ci_time "pr-policy wrapper" -- make ci-pr-policy || status=$?
           # -timeout=30m keeps this in step with the lane it measures
           # (scripts/ci/pr-core.sh). Without it ./cmd/bd can die on `go test`'s
           # 10m default and the measurement reports a panic instead of a duration.
           ci_time "pr-core gotestsum" -- gotestsum --junitfile artifacts/pr-core-junit.xml --format testdox -- -race -short -timeout=30m -skip '^TestEmbedded' ./... || status=$?
-          ci_time "pr-lint wrapper" -- make ci-pr-lint || status=$?
           exit "$status"
 
       - name: Upload measurement artifacts

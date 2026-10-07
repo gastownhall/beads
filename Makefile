@@ -44,6 +44,7 @@ endif
 endif
 
 .PHONY: all build doctor-build test test-icu-path test-full-cgo test-regression test-upgrade test-cross-version test-migration corpus-regen githooks-regen bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check check-testing-short
+.PHONY: lint lint-changed vet
 .PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-complexity ci-complexity-diff ci-complexity-check ci-package-mcp ci-package-npm
 .PHONY: api-gen api-check
 .PHONY: bazel-sync bazel-sync-check
@@ -197,8 +198,48 @@ ci-pr-core:
 ci-pr-policy:
 	@./scripts/ci/pr-policy.sh
 
+# Lint and vet are nogo (//tools/nogo): go test's vet checks plus the
+# golangci-lint linters .golangci.yml enables, validated beside every Go
+# compile, so any `bazel build`/`bazel test` (local or on rbe-west) fails on a
+# finding. These targets ask Bazel for the analysis alone (.bazelrc's
+# --config=nogo; nothing is linked).
 ci-pr-lint:
 	@./scripts/ci/pr-lint.sh
+
+# The CI lint gate: native, plus //tools/bazel:release_cross for windows/amd64
+# and darwin/arm64 (BD_LINT_TARGETS selects; scripts/pr-lint).
+lint: ci-pr-lint
+
+# go test's vet checks run inside nogo; same as lint.
+vet: lint
+
+# nogo over the Bazel packages of changed Go files, natively (the pre-commit
+# hook's lint). LINT_CHANGED_SCOPE: staged, or worktree (changed against
+# LINT_CHANGED_REF, staged, and untracked).
+LINT_CHANGED_SCOPE ?= worktree
+LINT_CHANGED_REF ?= HEAD
+lint-changed:
+	@case "$(LINT_CHANGED_SCOPE)" in \
+		staged) files="$$(git diff --cached --name-only --diff-filter=ACMRT -- '*.go')" ;; \
+		worktree) files="$$( \
+			git diff --name-only --diff-filter=ACMRT "$(LINT_CHANGED_REF)" -- '*.go'; \
+			git diff --cached --name-only --diff-filter=ACMRT -- '*.go'; \
+			git ls-files --others --exclude-standard -- '*.go')" ;; \
+		*) echo "unknown LINT_CHANGED_SCOPE=$(LINT_CHANGED_SCOPE); expected staged or worktree" >&2; exit 2 ;; \
+	esac; \
+	packages=""; missing=""; \
+	for file in $$files; do \
+		dir="$$(dirname "$$file")"; \
+		case "/$$dir/" in */testdata/*) continue ;; esac; \
+		if [ -f "$$dir/BUILD.bazel" ]; then packages="$$packages //$${dir#.}:all"; else missing="$$missing $$dir"; fi; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		echo "lint-changed: no BUILD.bazel in$$missing; run 'make bazel-sync'" >&2; exit 1; \
+	fi; \
+	packages="$$(printf '%s\n' $$packages | sort -u | sed 's#^///#//#; s#^//\.:#//:#')"; \
+	if [ -z "$$packages" ]; then echo "lint-changed: no changed Go packages"; exit 0; fi; \
+	echo "lint-changed:" $$packages; \
+	$(BAZEL) build --config=nogo -- $$packages
 
 # Opt-in architecture experiment. Install gocyclo v0.6.0 first;
 # report is advisory while check exercises the local baseline guard.
@@ -462,7 +503,9 @@ help:
 	@echo "  make test-full-cgo - Deprecated alias for make test-icu-path"
 	@echo "  make ci-pr-core  - Run required PR core Go test wrapper"
 	@echo "  make ci-pr-policy - Run required PR policy wrapper"
-	@echo "  make ci-pr-lint  - Run required PR formatting and lint wrapper"
+	@echo "  make ci-pr-lint  - Run the required lint gate: nogo (vet + golangci-lint's linters) under Bazel, native + windows/darwin"
+	@echo "  make lint        - Same as ci-pr-lint (make vet too)"
+	@echo "  make lint-changed - nogo over the Bazel packages of changed Go files (LINT_CHANGED_SCOPE=staged|worktree)"
 	@echo "  make ci-complexity - Report production cyclomatic complexity (advisory)"
 	@echo "  make ci-complexity-diff - Compare complexity with COMPLEXITY_BASE_REF"
 	@echo "  make ci-complexity-check - Check complexity against the local baseline"

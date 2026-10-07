@@ -22,7 +22,6 @@ gazelle(name = "gazelle")
 exports_files(
     [".buildflags"],
     visibility = [
-        "//scripts/pr-lint:__pkg__",
         "//scripts/prlintmake:__pkg__",
         "//tests/upgrade_smoke:__pkg__",
     ],
@@ -32,6 +31,15 @@ exports_files([
     "go.mod",
     "go.sum",
 ])
+
+# The golangci-lint configuration nogo applies (//tools/nogo), and its test.
+exports_files(
+    [".golangci.yml"],
+    visibility = [
+        "//tools/nogo:__pkg__",
+        "//tools/nogo/internal/golangci:__pkg__",
+    ],
+)
 
 # Repository files read by source-scanning tests, declared as their `data` so
 # the tests run under `bazel test` and remote execution.
@@ -382,6 +390,18 @@ filegroup(
         "//third_party/patches:repo_files",
         "//tools/bazel:repo_files",
         "//tools/docsmint:repo_files",
+        "//tools/nogo:repo_files",
+        "//tools/nogo/analyzers/depguard:repo_files",
+        "//tools/nogo/analyzers/errcheck:repo_files",
+        "//tools/nogo/analyzers/forbidigo:repo_files",
+        "//tools/nogo/analyzers/gosec:repo_files",
+        "//tools/nogo/analyzers/misspell:repo_files",
+        "//tools/nogo/analyzers/sloglint:repo_files",
+        "//tools/nogo/analyzers/unconvert:repo_files",
+        "//tools/nogo/analyzers/unparam:repo_files",
+        "//tools/nogo/internal/analyzertest:repo_files",
+        "//tools/nogo/internal/golangci:repo_files",
+        "//tools/nogo/internal/position:repo_files",
     ],
     visibility = [
         "//scripts:__pkg__",

@@ -1535,7 +1535,7 @@ func TestShardScriptsListOnlyRealTests(t *testing.T) {
 // otherwise force a full repack and conflict on unrelated shard lines (see
 // --repack below for the explicit opt-in to that). Run --check here so a
 // block with missing/stale/duplicate names fails go test ./scripts/...
-// (and so scripts-go-checks, which runs on fork PRs) instead of only
+// (//scripts:scripts_test under Bazel) instead of only
 // surfacing as a test silently never running in any shard. The legacy
 // 15-shard block is deliberately excluded: its header documents that it is
 // frozen and must not be regenerated (see

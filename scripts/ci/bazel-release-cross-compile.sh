@@ -50,11 +50,13 @@ for target in "${targets[@]}"; do
     platforms+=("${target%/*}_${target#*/}")
 done
 
-# Every Bazel package holding a Go target (less testonly targets and the
-# packages of cgo-only ones) must be reached by //tools/bazel:release_cross;
+# Every Bazel package holding a Go target (less testonly targets, the
+# packages of cgo-only ones, and //tools/nogo, the nogo analyzers' own Go
+# module, which `go build ./...` skips) must be reached by
+# //tools/bazel:release_cross;
 # a listed label that no longer exists fails the build itself.
 universe='kind("go_library|go_binary", //...)'
-wanted="$universe except siblings(attr(tags, \"\\bcgo-only\\b\", $universe)) except attr(testonly, 1, $universe)"
+wanted="$universe except siblings(attr(tags, \"\\bcgo-only\\b\", $universe)) except attr(testonly, 1, $universe) except //tools/nogo/..."
 # One query at a time: they share the Bazel server.
 want_pkgs="$(bazel query "$wanted" --output=package | LC_ALL=C sort -u)"
 built_pkgs="$(bazel query 'deps(//tools/bazel:release_cross)' --output=package | LC_ALL=C sort -u)"

@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -53,58 +52,15 @@ func TestCIWorkflowArtifactOwnership(t *testing.T) {
 			} else {
 				assertJobRunsExactly(t, workflow.job(t, "pr-policy-wrapper"), "make ci-pr-policy")
 			}
-			assertJobRunsExactly(t, workflow.job(t, "pr-lint-wrapper"), "make ci-pr-lint")
-
-			// F5.1: the duplicate whole-tree/diff-scoped `Lint` job (and its
-			// LINT gate id, pr.yml only) is folded into pr-lint-wrapper.
-			if _, found := workflow.Jobs["lint"]; found {
-				t.Errorf("%s has a %q job; its only-new-issues pass duplicates pr-lint-wrapper's native leg (H7) and was folded into it", workflowName, "lint")
-			}
-
-			// F5.2: pr-lint-wrapper is a 3-leg matrix keyed on matrix.target,
-			// with BD_LINT_TARGETS telling scripts/pr-lint which legs to run.
-			lintWrapper := workflow.job(t, "pr-lint-wrapper")
-			if lintWrapper.Strategy.FailFast {
-				t.Errorf("%s pr-lint-wrapper strategy.fail-fast = true, want false", workflowName)
-			}
-			if want := []string{"native", "windows", "darwin"}; !equalStrings(lintWrapper.Strategy.Matrix.Target, want) {
-				t.Errorf("%s pr-lint-wrapper matrix.target = %v, want %v", workflowName, lintWrapper.Strategy.Matrix.Target, want)
-			}
-			if got := lintWrapper.step(t, "Run PR lint wrapper").Env["BD_LINT_TARGETS"]; got != "${{ matrix.target }}" {
-				t.Errorf("%s pr-lint-wrapper BD_LINT_TARGETS = %q, want %q", workflowName, got, "${{ matrix.target }}")
-			}
-			// N-5: a dropped GOCACHE env here silently stops the lint cache
-			// from doing anything (the step still passes; it just never
-			// reuses or populates the restored/saved directory).
-			if got, want := lintWrapper.step(t, "Run PR lint wrapper").Env["GOCACHE"], "${{ runner.temp }}/go-cache/lint-${{ matrix.target }}"; got != want {
-				t.Errorf("%s pr-lint-wrapper GOCACHE = %q, want %q", workflowName, got, want)
-			}
-			if got := lintWrapper.step(t, "Install golangci-lint").Run; got != "./scripts/ci/install-golangci-lint.sh" {
-				t.Errorf("%s pr-lint-wrapper installs golangci-lint with %q, want the pinned install script", workflowName, got)
-			}
-			// N-7.
-			if lintWrapper.TimeoutMinutes != 20 {
-				t.Errorf("%s pr-lint-wrapper timeout-minutes = %d, want 20 (matches scripts-go-checks)", workflowName, lintWrapper.TimeoutMinutes)
+			// Lint and vet are nogo inside Bazel (TestLintAndVetRunAsNogo):
+			// no workflow job runs golangci-lint or the retired lint and vet
+			// jobs.
+			for _, retired := range []string{"pr-lint-wrapper", "go-vet-cache", "scripts-go-checks", "lint"} {
+				if _, found := workflow.Jobs[retired]; found {
+					t.Errorf("%s has a %q job; lint and vet run as nogo in bazel.yml's test lane", workflowName, retired)
+				}
 			}
 		})
-	}
-
-	if got := readCIWorkflow(t, "pr.yml").job(t, "pr-lint-wrapper").step(t, "Run PR lint wrapper").Env["BD_LINT_NEW_FROM_MERGE_BASE"]; got != "origin/main" {
-		t.Errorf("pr.yml pr-lint-wrapper BD_LINT_NEW_FROM_MERGE_BASE = %q, want origin/main (PR lane stays diff-scoped)", got)
-	}
-	if got := readCIWorkflow(t, "main.yml").job(t, "pr-lint-wrapper").step(t, "Run PR lint wrapper").Env["BD_LINT_NEW_FROM_MERGE_BASE"]; got != "" {
-		t.Errorf("main.yml pr-lint-wrapper BD_LINT_NEW_FROM_MERGE_BASE = %q, want unset", got)
-	}
-	// N-5: --new-from-merge-base in pr.yml's pr-lint-wrapper needs real
-	// history; a dropped fetch-depth: 0 would fail loudly (M3, a NIT-grade
-	// mutation per the review), but pin it anyway since it is part of the
-	// same wrapper contract as the GOCACHE pin above.
-	if got := readCIWorkflow(t, "pr.yml").job(t, "pr-lint-wrapper").Steps[0].With["fetch-depth"]; got != "0" {
-		t.Errorf("pr.yml pr-lint-wrapper checkout fetch-depth = %q, want %q", got, "0")
-	}
-	// go-vet-cache (N-7).
-	if job := readCIWorkflow(t, "main.yml").job(t, "go-vet-cache"); job.TimeoutMinutes != 20 {
-		t.Errorf("main.yml go-vet-cache timeout-minutes = %d, want 20 (matches scripts-go-checks)", job.TimeoutMinutes)
 	}
 }
 
@@ -144,18 +100,22 @@ func TestPullRequestWorkflowsTriggerOnHotfixBranches(t *testing.T) {
 	}
 }
 
-func TestPRCIGateRequiresPolicyAndLintWrappers(t *testing.T) {
+func TestPRCIGateDropsRetiredPolicyAndLintJobs(t *testing.T) {
 	gate := readCIWorkflow(t, "pr.yml").job(t, "ci-gate")
 	gateEnv := gate.step(t, "Evaluate CI gate").Env
 
-	if !contains(gate.Needs, "pr-lint-wrapper") {
-		t.Errorf("ci-gate needs %q: %v", "pr-lint-wrapper", gate.Needs)
-	}
-	if got, want := gateEnv["PR_LINT_WRAPPER"], "${{ needs.pr-lint-wrapper.result }}"; got != want {
-		t.Errorf("ci-gate env PR_LINT_WRAPPER = %q, want %q", got, want)
-	}
-	if !strings.Contains(gateEnv["CI_GATE_REQUIRED"], "PR_LINT_WRAPPER") {
-		t.Errorf("ci-gate CI_GATE_REQUIRED does not include %q", "PR_LINT_WRAPPER")
+	// The retired lint and vet jobs (now nogo in the Bazel test lane, which
+	// gates through BAZEL_TEST) must not linger in the gate.
+	for job, token := range map[string]string{"pr-lint-wrapper": "PR_LINT_WRAPPER", "scripts-go-checks": "SCRIPTS_GO_CHECKS"} {
+		if contains(gate.Needs, job) {
+			t.Errorf("ci-gate needs the retired %s: %v", job, gate.Needs)
+		}
+		if _, found := gateEnv[token]; found {
+			t.Errorf("ci-gate env still sets %s", token)
+		}
+		if contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), token) {
+			t.Errorf("ci-gate CI_GATE_REQUIRED still lists %s", token)
+		}
 	}
 
 	// The retired PR Policy job's checks gate through BAZEL_TEST (the Bazel
@@ -182,214 +142,6 @@ func TestPRCIGateRequiresPolicyAndLintWrappers(t *testing.T) {
 	}
 	if _, found := gateEnv["LINT"]; found {
 		t.Error("ci-gate env still sets LINT")
-	}
-}
-
-// F5.2/F5.7: the pinned golangci-lint install script's version and sha256
-// values must stay in sync with LINTING.md's documented version and with
-// .githooks/pre-commit's `go run ...@<version>`, and the three workflows that
-// use the script (pr.yml, main.yml, ci-measurements.yml) must all call it
-// instead of `go install`.
-func TestGolangciLintInstallScriptPinned(t *testing.T) {
-	root := sourceRepoRoot(t)
-	script := readPolicyFile(t, root, "scripts/ci/install-golangci-lint.sh")
-
-	const version = "2.10.1"
-	wantSHA256 := map[string]string{
-		"amd64": "dfa775874cf0561b404a02a8f4481fc69b28091da95aa697259820d429b09c99",
-		"arm64": "6652b42ae02915eb2f9cb2a2e0cac99514c8eded8388d88ae3e06e1a52c00de8",
-	}
-
-	if !strings.Contains(script, `readonly version="`+version+`"`) {
-		t.Errorf("install-golangci-lint.sh does not pin version %q", version)
-	}
-	for arch, sha := range wantSHA256 {
-		// The script maps arch to sha256 with a case arm, not `declare -A`,
-		// so it still parses under macOS's bash 3.2.
-		if !strings.Contains(script, arch+") printf '%s' \""+sha+"\"") {
-			t.Errorf("install-golangci-lint.sh does not pin %s sha256 %q", arch, sha)
-		}
-	}
-
-	linting := readPolicyFile(t, root, "engdocs/LINTING.md")
-	if !strings.Contains(linting, "v"+version) {
-		t.Errorf("engdocs/LINTING.md does not mention v%s", version)
-	}
-
-	preCommit := readPolicyFile(t, root, ".githooks/pre-commit")
-	if !strings.Contains(preCommit, "golangci-lint/v2/cmd/golangci-lint@v"+version) {
-		t.Errorf(".githooks/pre-commit does not pin golangci-lint @v%s", version)
-	}
-	// The hook stays on `go run` deliberately (CI-only RUNNER_TEMP/GITHUB_PATH
-	// requirement); it must not switch to the install script.
-	if strings.Contains(preCommit, "install-golangci-lint.sh") {
-		t.Error(".githooks/pre-commit must keep using `go run`, not the CI-only install script")
-	}
-
-	for _, workflow := range []string{"pr.yml", "main.yml"} {
-		job := readCIWorkflow(t, workflow).job(t, "pr-lint-wrapper")
-		if got := job.step(t, "Install golangci-lint").Run; got != "./scripts/ci/install-golangci-lint.sh" {
-			t.Errorf("%s pr-lint-wrapper installs golangci-lint with %q, want the pinned install script", workflow, got)
-		}
-	}
-	measurements := readPolicyFile(t, root, ".github/workflows/ci-measurements.yml")
-	if strings.Contains(measurements, "go install github.com/golangci/golangci-lint") {
-		t.Error("ci-measurements.yml still uses go install for golangci-lint; use scripts/ci/install-golangci-lint.sh")
-	}
-	if !strings.Contains(measurements, "install-golangci-lint.sh") {
-		t.Error("ci-measurements.yml does not call scripts/ci/install-golangci-lint.sh")
-	}
-
-	// SF-2: install-golangci-lint.sh and the "pr-lint wrapper" measurement run
-	// in the same shell block (not separate steps), so appending to
-	// $GITHUB_PATH (which only takes effect in later *steps*) is not enough;
-	// the script's install_dir must also be exported into this step's own
-	// PATH, after the install call and before the wrapper that needs it.
-	const (
-		installMarker = "install-golangci-lint.sh"
-		pathExport    = `export PATH="$RUNNER_TEMP/golangci-lint:$PATH"`
-		wrapperMarker = `ci_time "pr-lint wrapper"`
-	)
-	installIdx := strings.Index(measurements, installMarker)
-	pathIdx := strings.Index(measurements, pathExport)
-	wrapperIdx := strings.Index(measurements, wrapperMarker)
-	if pathIdx < 0 {
-		t.Errorf("ci-measurements.yml does not export golangci-lint's install dir onto PATH in the same step (want %q)", pathExport)
-	}
-	if installIdx < 0 || wrapperIdx < 0 {
-		t.Fatalf("ci-measurements.yml missing expected markers: install=%d wrapper=%d", installIdx, wrapperIdx)
-	}
-	if !(installIdx < pathIdx && pathIdx < wrapperIdx) {
-		t.Errorf("ci-measurements.yml PATH export must sit between the golangci-lint install (%d) and the pr-lint wrapper call (%d); got PATH export at %d", installIdx, wrapperIdx, pathIdx)
-	}
-}
-
-// TestInstallGolangciLintFailsClosedOnChecksumMismatch is the regression net
-// for install-golangci-lint.sh's supply-chain gate (SF-3). Without it, nothing
-// exercises the sha256 comparison's behavior -- TestGolangciLintInstallScriptPinned
-// above only pins the hash strings as text, so e.g. replacing the comparison
-// with an always-false condition passes every other test in this package. A
-// fake curl hands the script a tarball whose content never matches either
-// pinned hash; a fake tar makes extraction succeed anyway (so a bypassed check
-// is exposed cleanly as "installed the wrong thing", not masked by tar
-// choking on bad bytes), which is exactly the gap a real supply-chain attack
-// (a compromised release asset, a MITM'd download) would exploit if the
-// comparison were missing or broken.
-func TestInstallGolangciLintFailsClosedOnChecksumMismatch(t *testing.T) {
-	bash := requireHostTool(t, "bash")
-
-	bin := t.TempDir()
-	stateDir := t.TempDir()
-	runnerTemp := t.TempDir()
-	curlLog := filepath.Join(stateDir, "curl-calls")
-	tarLog := filepath.Join(stateDir, "tar-calls")
-	githubPath := filepath.Join(stateDir, "github-path")
-	for _, path := range []string{curlLog, tarLog, githubPath} {
-		if err := os.WriteFile(path, nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// Writes fixed, wrong-checksum bytes to curl's -o target. Any download
-	// (first attempt or a retry) "succeeds" the same way, so the script
-	// reaches the sha256 comparison deterministically.
-	writeExecutable(t, filepath.Join(bin, "curl"), `#!/bin/sh
-set -eu
-printf '%s\n' "$*" >>"$GOLANGCI_INSTALL_CURL_LOG"
-out=""
-prev=""
-for arg in "$@"; do
-  if [ "$prev" = "-o" ]; then
-    out="$arg"
-  fi
-  prev="$arg"
-done
-if [ -n "$out" ]; then
-  printf 'not the real golangci-lint release asset\n' >"$out"
-fi
-`)
-	// Materializes a plausible-looking extracted binary unconditionally, the
-	// way a real tarball's contents would after a successful `tar -xzf`. The
-	// script's sha256 check -- not tar's own format validation -- must be
-	// what stands between this fake binary and $RUNNER_TEMP/golangci-lint.
-	writeExecutable(t, filepath.Join(bin, "tar"), `#!/bin/sh
-set -eu
-printf '%s\n' "$*" >>"$GOLANGCI_INSTALL_TAR_LOG"
-outdir=""
-prev=""
-for arg in "$@"; do
-  if [ "$prev" = "-C" ]; then
-    outdir="$arg"
-  fi
-  prev="$arg"
-done
-mkdir -p "$outdir/golangci-lint-2.10.1-linux-amd64"
-cat >"$outdir/golangci-lint-2.10.1-linux-amd64/golangci-lint" <<'SCRIPT'
-#!/bin/sh
-printf 'golangci-lint has version 2.10.1 built from unknown\n'
-SCRIPT
-chmod +x "$outdir/golangci-lint-2.10.1-linux-amd64/golangci-lint"
-`)
-	// Pins the platform so the asset name, arch lookup and extracted layout
-	// are fixed regardless of the machine running the test.
-	writeExecutable(t, filepath.Join(bin, "uname"), `#!/bin/sh
-set -eu
-case "${1:-}" in
-  -m) printf 'x86_64\n' ;;
-  *) printf 'Linux\n' ;;
-esac
-`)
-
-	pathEnv := shellPathEnv()
-	binPath := shellPathUnderEnv(t, bash, bin, pathEnv)
-	statePath := shellPathUnderEnv(t, bash, stateDir, pathEnv)
-	commandPath := binPath + ":" + os.Getenv("PATH") + ":/usr/bin:/bin"
-	if runtime.GOOS == "windows" {
-		commandPath = binPath + ":/usr/bin:/bin"
-	}
-	root := sourceRepoRoot(t)
-	env := []string{
-		"PATH=" + os.Getenv("PATH"),
-		"BEADS_TEST_COMMAND_PATH=" + commandPath,
-		"LC_ALL=C",
-		"LANG=C",
-		"BASH_ENV=",
-		"ENV=",
-		"RUNNER_TEMP=" + shellPathUnderEnv(t, bash, runnerTemp, pathEnv),
-		"GITHUB_PATH=" + statePath + "/github-path",
-		"GOLANGCI_INSTALL_CURL_LOG=" + statePath + "/curl-calls",
-		"GOLANGCI_INSTALL_TAR_LOG=" + statePath + "/tar-calls",
-	}
-	for _, name := range []string{"curl", "tar", "uname"} {
-		requireShellCommandPath(t, bash, root, env, name, binPath+"/"+name)
-	}
-
-	cmd := bashScriptCommand(bash, "scripts/ci/install-golangci-lint.sh")
-	cmd.Dir = root
-	cmd.Env = env
-	output, runErr := cmd.CombinedOutput()
-
-	if code := pullDoltExitCode(runErr); code == 0 {
-		t.Fatalf("exit = 0, want non-zero; output:\n%s", output)
-	}
-	if !strings.Contains(string(output), "sha256 mismatch") {
-		t.Errorf("output does not contain %q:\n%s", "sha256 mismatch", output)
-	}
-	if calls := readCallLines(t, tarLog); len(calls) != 0 {
-		t.Errorf("tar was invoked %d time(s), want 0 (the sha256 check must reject the download before extraction): %q", len(calls), calls)
-	}
-	if calls := readCallLines(t, curlLog); len(calls) == 0 {
-		t.Fatalf("curl was never invoked; test did not exercise the script's download path")
-	}
-	if entries, err := os.ReadDir(runnerTemp); err != nil {
-		t.Fatal(err)
-	} else if len(entries) != 0 {
-		t.Errorf("RUNNER_TEMP = %v, want empty (nothing installed on a checksum mismatch)", entries)
-	}
-	if data, err := os.ReadFile(githubPath); err != nil {
-		t.Fatal(err)
-	} else if len(data) != 0 {
-		t.Errorf("GITHUB_PATH = %q, want empty (nothing appended on a checksum mismatch)", data)
 	}
 }
 
@@ -1236,19 +988,13 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheInventory(t, workflows["main.yml"].job(t, "test-windows"), []goCacheStep{
 		mainRestoreModuleCache(), mainRestoreBuildCacheDayBucketedIf("non-race", ""), saveModuleCache(), saveBuildCacheDayBucketed("non-race"),
 	})
-	assertGoCacheInventory(t, workflows["main.yml"].job(t, "pr-lint-wrapper"), []goCacheStep{
-		restoreModuleCache(), mainRestoreGolangciCache(), saveGolangciCache(),
-	})
-	assertGoCacheInventory(t, workflows["main.yml"].job(t, "go-vet-cache"), []goCacheStep{
-		mainRestoreModuleCache(), mainRestoreVetCache(), saveVetCache(),
-	})
 	// F4.7: seeds the module and xcompile caches pr.yml's windows-test-binaries
 	// job only restores (PR workflows never save).
 	assertGoCacheInventory(t, workflows["main.yml"].job(t, "windows-test-binaries-cache"), []goCacheStep{
 		mainRestoreModuleCache(), mainRestoreXCompileCache(), saveModuleCacheAfterFailure(), saveXCompileCache(),
 	})
 	// F7b: race/non-race GOCACHE saves for same-repo PR consumers
-	// (scripts-go-checks, pr-preflight-platforms, check-doc-freshness-platforms)
+	// (pr-preflight-platforms, check-doc-freshness-platforms)
 	// that run on Blacksmith, whose cache namespace is invisible to
 	// GitHub-hosted build-artifacts; its github venue leg seeds the fork
 	// path's race cache (build-artifacts seeds its non-race one).
@@ -1275,11 +1021,6 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "pr-core-wrapper"), []goCacheStep{
 		restoreModuleCache(), restoreBuildCache("race"),
 	})
-	// D2 step 3: PR Core's go vet; read-only like PR Core.
-	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "scripts-go-checks"), []goCacheStep{
-		restoreModuleCache(), restoreVetCache(),
-	})
-	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "pr-lint-wrapper"), []goCacheStep{restoreModuleCache(), restoreGolangciCache()})
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "worktree-remove-windows"), []goCacheStep{
 		restoreModuleCache(), restoreBuildCache("non-race"),
 	})
@@ -1322,7 +1063,7 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertNoUnmanagedGoCacheSteps(t, workflows, map[string]map[string]bool{
 		"main.yml": {
 			"build-artifacts": true, "test": true, "test-windows": true,
-			"pr-lint-wrapper": true, "go-vet-cache": true, "windows-test-binaries-cache": true, "blacksmith-go-build-cache": true,
+			"windows-test-binaries-cache": true, "blacksmith-go-build-cache": true,
 			"blacksmith-macos-go-build-cache": true,
 			// F7c: blacksmith-setup-go-cache's own restore/save pair seeds the
 			// self-defined blacksmith-sg-v1- cache namespace every advisory
@@ -1334,9 +1075,9 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 			"blacksmith-setup-go-cache": true,
 		},
 		"pr.yml": {
-			"build-artifacts": true, "pr-core-wrapper": true, "scripts-go-checks": true, "worktree-remove-windows": true,
+			"build-artifacts": true, "pr-core-wrapper": true, "worktree-remove-windows": true,
 			"check-doc-freshness-platforms": true, "pr-preflight-platforms": true, "advisory-reports": true,
-			"pr-lint-wrapper": true, "windows-test-binaries": true,
+			"windows-test-binaries": true,
 			"test-windows-liveness": true,
 		},
 		"pr-risk.yml": {"build-embedded": true},
@@ -1418,8 +1159,6 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheWriter(t, workflows["main.yml"], "test", mainBlacksmithMacOSTestRunsOn, "Save race Go build cache", failureSurvivingCacheSaveCondition(cacheMissCondition(goBuildCacheRestoreID("race"))))
 	assertGoCacheWriter(t, workflows["main.yml"], "test-windows", mainVenueBlacksmithWindows4vcpuRunsOn, "Save Go module cache", cacheMissCondition(goModuleCacheRestoreID))
 	assertGoCacheWriter(t, workflows["main.yml"], "test-windows", mainVenueBlacksmithWindows4vcpuRunsOn, "Save non-race Go build cache", cacheMissCondition(goBuildCacheRestoreID("non-race")))
-	assertGoCacheWriter(t, workflows["main.yml"], "pr-lint-wrapper", mainVenueBlacksmithUbuntu4vcpuRunsOn, "Save golangci-lint cache", failureSurvivingCacheSaveCondition(cacheMissCondition(golangciCacheRestoreID())))
-	assertGoCacheWriter(t, workflows["main.yml"], "go-vet-cache", mainVenueBlacksmithUbuntu4vcpuRunsOn, "Save vet Go build cache", failureSurvivingCacheSaveCondition(cacheMissCondition(goVetCacheRestoreID())))
 	assertGoCacheWriter(t, workflows["main.yml"], "blacksmith-go-build-cache", mainBlacksmithGoBuildCacheRunsOn, "Save race Go build cache", saveBuildCacheAfterFailureIf("race", "matrix.flavor == 'race'").ifCondition)
 	assertGoCacheWriter(t, workflows["main.yml"], "blacksmith-go-build-cache", mainBlacksmithGoBuildCacheRunsOn, "Save non-race Go build cache", saveBuildCacheAfterFailureIf("non-race", "matrix.flavor == 'non-race'").ifCondition)
 	assertGoCacheWriter(t, workflows["main.yml"], "blacksmith-macos-go-build-cache", mainBlacksmithMacOSGoBuildCacheRunsOn, "Save Go module cache", saveModuleCacheAfterFailure().ifCondition)
@@ -1703,7 +1442,7 @@ func goBuildCacheKey(profile string) string {
 
 // goCacheDateSuffix is the key suffix for the day-bucketed caches saved by
 // main.yml's push-to-main-only Blacksmith seeders (blacksmith-go-build-cache,
-// go-vet-cache, test-windows): bounded by go.sum content plus a UTC calendar
+// test-windows): bounded by go.sum content plus a UTC calendar
 // day, not by commit sha, so an ordinary day of push traffic cannot exhaust
 // Blacksmith's 25 GB/week/repo cache quota the way a brand-new multi-GB entry
 // per push did (F7b review fix S7; measured ~1.74-2.4GB/push under the old
@@ -1828,88 +1567,6 @@ func saveBuildCacheAfterFailureIf(profile, condition string) goCacheStep {
 	step := saveBuildCache(profile)
 	step.ifCondition = failureSurvivingCacheSaveCondition(condition, cacheMissCondition(goBuildCacheRestoreID(profile)))
 	return step
-}
-
-// The go-vet-cache family (F5.3): a dedicated, go-vet-only GOCACHE restored
-// by pr.yml's scripts-go-checks vet leg and warmed by main.yml's go-vet-cache
-// job on push. There is deliberately no non-race-build-cache fallback restore
-// key (SF-5): actions/cache versions each entry by its path list, and that
-// cache saves to a different path, so a prefix fallback naming it could never
-// hit.
-const goVetCacheSchema = "v1"
-
-func goVetCachePrefix() string {
-	return "beads-go-vet-" + goVetCacheSchema + "-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-" + goBaseTag + "-vet-"
-}
-
-func goVetCacheKey() string { return goVetCachePrefix() + "${{ github.sha }}" }
-
-// goVetCacheDayBucketedKey is goVetCacheKey with the S7 day-bucketed suffix
-// (see goCacheDateSuffix), for main.yml's go-vet-cache seeder.
-func goVetCacheDayBucketedKey() string { return goVetCachePrefix() + goCacheDateSuffix() }
-
-func goVetCacheRestoreKeys() string { return goVetCachePrefix() }
-
-func goVetCachePath() string { return "${{ runner.temp }}/go-cache/vet" }
-
-func goVetCacheRestoreID() string { return "restore-vet-go-build-cache" }
-
-func restoreVetCache() goCacheStep {
-	return goCacheStep{name: "Restore vet Go build cache", family: cacheRestoreActionFamily, key: goVetCacheKey(), restoreKeys: goVetCacheRestoreKeys(), path: goVetCachePath(), ifCondition: "matrix.check == 'vet'"}
-}
-
-func mainRestoreVetCache() goCacheStep {
-	step := restoreVetCache()
-	step.id = goVetCacheRestoreID()
-	step.ifCondition = ""
-	step.key = goVetCacheDayBucketedKey()
-	return step
-}
-
-func saveVetCache() goCacheStep {
-	return goCacheStep{name: "Save vet Go build cache", family: cacheSaveActionFamily, key: goVetCacheDayBucketedKey(), path: goVetCachePath(), ifCondition: failureSurvivingCacheSaveCondition(cacheMissCondition(goVetCacheRestoreID()))}
-}
-
-// The golangci-lint cache family (F5.2): one cache per PR Lint matrix leg,
-// keyed on file content and the leg. A miss on the exact content key falls
-// back to the leg's prefix (its most recent entry); golangci-lint revalidates
-// a restored cache against the current config and inputs, so a stale restore
-// cannot mask an issue. pr.yml only ever restores; main.yml's matrix is the
-// only saver. The key deliberately omits the commit sha (SF-4): with it,
-// every green push to main saved a new multi-GB entry per leg regardless of
-// whether lint's inputs changed; keying on content alone means a save only
-// happens when .golangci.yml or go.sum change. Only the native leg's path
-// includes the lint GOCACHE (SF-4): the windows/darwin legs cross-compile and
-// their GOCACHE is large relative to the small golangci-lint result cache
-// that is the part actually worth keeping warm for them.
-func golangciCachePrefix() string {
-	return "beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-"
-}
-
-func golangciCacheKey() string {
-	return golangciCachePrefix() + "${{ hashFiles('.golangci.yml', 'go.sum') }}"
-}
-
-func golangciCacheRestoreKeys() string { return golangciCachePrefix() }
-
-func golangciCachePath() string {
-	return "~/.cache/golangci-lint\n${{ matrix.target == 'native' && format('{0}/go-cache/lint-{1}', runner.temp, matrix.target) || '' }}\n"
-}
-
-func golangciCacheRestoreID() string { return "restore-golangci-lint-cache" }
-
-func restoreGolangciCache() goCacheStep {
-	return goCacheStep{name: "Restore golangci-lint cache", family: cacheRestoreActionFamily, key: golangciCacheKey(), restoreKeys: golangciCacheRestoreKeys(), path: golangciCachePath()}
-}
-
-func mainRestoreGolangciCache() goCacheStep {
-	step := restoreGolangciCache()
-	step.id = golangciCacheRestoreID()
-	return step
-}
-
-func saveGolangciCache() goCacheStep {
-	return goCacheStep{name: "Save golangci-lint cache", family: cacheSaveActionFamily, key: golangciCacheKey(), path: golangciCachePath(), ifCondition: failureSurvivingCacheSaveCondition(cacheMissCondition(golangciCacheRestoreID()))}
 }
 
 // The Windows cross-compile GOCACHE (F4.4) is a separate cache dimension from
@@ -2140,8 +1797,8 @@ type ciWorkflowMatrix struct {
 	Check  []string `yaml:"check"`
 	Group  []string `yaml:"group"`
 	// Venue and Flavor back main.yml's "venue matrix" (F7b spec §4) push-to-
-	// main-only Blacksmith cache savers: pr-lint-wrapper/go-vet-cache/
-	// test-windows's `venue: [blacksmith, github]` and
+	// main-only Blacksmith cache savers: test-windows's
+	// `venue: [blacksmith, github]` and
 	// blacksmith-go-build-cache's `flavor: [race, non-race]`. Pinned by
 	// TestBlacksmithSaverVenueAndFlavorMatricesAreComplete (F7b review B2/S7
 	// follow-up) so dropping either leg from these lists -- silently losing
@@ -2588,7 +2245,7 @@ const mainWindowsTestBinariesCacheRunsOn = "${{ matrix.runner == 'blacksmith' &&
 
 // F7b: venue-matrix runs-on for main.yml jobs that seed a Blacksmith GOCACHE
 // alongside their GitHub-hosted seed ("venue: [blacksmith, github]"):
-// pr-lint-wrapper, go-vet-cache, test-windows, blacksmith-go-build-cache and
+// test-windows, blacksmith-go-build-cache and
 // blacksmith-macos-go-build-cache.
 const mainVenueBlacksmithUbuntu4vcpuRunsOn = "${{ matrix.venue == 'blacksmith' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
 const mainVenueBlacksmithWindows4vcpuRunsOn = "${{ matrix.venue == 'blacksmith' && 'blacksmith-4vcpu-windows-2025' || 'windows-latest' }}"
@@ -2868,12 +2525,6 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 			"advisory-reports":      sameRepoBlacksmith2vcpu,
 			"check-doc-flags":       sameRepoBlacksmith4vcpu,
 			"windows-test-binaries": sameRepoBlacksmith8vcpu,
-			// F7b: scripts-go-checks/pr-lint-wrapper moved to same-repo
-			// Blacksmith now that main.yml's blacksmith-go-build-cache and
-			// pr-lint-wrapper `venue` matrix seed their Blacksmith-selection
-			// GOCACHEs.
-			"scripts-go-checks": sameRepoBlacksmith4vcpu,
-			"pr-lint-wrapper":   sameRepoBlacksmith4vcpu,
 			// F7b: same-repo Blacksmith Windows (blacksmith-*vcpu-windows-2025,
 			// public beta). test-windows-liveness and worktree-remove-windows are
 			// sized at 4vcpu (a build plus a focused test run each);
@@ -2919,17 +2570,15 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 		"main.yml": {
 			"blacksmith-setup-go-cache":   "${{ 'blacksmith-4vcpu-ubuntu-2404' }}",
 			"windows-test-binaries-cache": mainWindowsTestBinariesCacheRunsOn,
-			// F7b review (B2): these four push-to-main-only jobs seed the
+			// F7b review (B2): these push-to-main-only jobs seed the
 			// Blacksmith-selection GOCACHEs same-repo PR/merge_group jobs
-			// above restore from (pr-lint-wrapper/go-vet-cache/test-windows's
-			// "venue" matrix, blacksmith-go-build-cache's own single leg).
+			// above restore from (test-windows's "venue" matrix,
+			// blacksmith-go-build-cache's own single leg).
 			// Each is additionally guarded by a job-level
 			// github.event_name == 'push' && github.ref ==
 			// 'refs/heads/main' && github.repository == 'gastownhall/beads'
 			// if: (TestBlacksmithSaverJobsGuardedAgainstPullRequest below),
 			// matching F7c's own saver convention.
-			"pr-lint-wrapper":           mainVenueBlacksmithUbuntu4vcpuRunsOn,
-			"go-vet-cache":              mainVenueBlacksmithUbuntu4vcpuRunsOn,
 			"test-windows":              mainVenueBlacksmithWindows4vcpuRunsOn,
 			"blacksmith-go-build-cache": mainBlacksmithGoBuildCacheRunsOn,
 			// Same guard, seeding pr.yml's same-repo macOS legs.

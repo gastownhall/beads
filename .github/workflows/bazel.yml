@@ -1047,7 +1047,10 @@ jobs:
       # a platform-gating mistake is caught here instead of at tag time
       # (#5662): the whole tree, cgo off, one remote `bazel build
       # --platforms=...` per target (the script's header has the coverage
-      # boundary: the cgo release builds are not compiled here).
+      # boundary: the cgo release builds are not compiled here). nogo
+      # (//tools/nogo) validates every one of those compiles, so this is also
+      # the lint and vet gate for files only other platforms build
+      # (//go:build windows, darwin, !linux ...; engdocs/LINTING.md).
       - name: Cross-compile every release target (--config=release-cross)
         run: |
           set -euo pipefail

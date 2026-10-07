@@ -287,6 +287,25 @@ build:js-wasm --platforms=@rules_go//go/toolchain:js_wasm
 build:js-wasm --use_target_platform_for_tests
 build:js-wasm --remote_download_outputs=toplevel
 
+# nogo (//tools/nogo: go test's vet checks plus the golangci-lint linters
+# .golangci.yml enables) runs beside every Go compile of every lane, so any
+# `bazel build`/`bazel test` fails on a finding. --config=nogo asks for the
+# analysis alone (the nogo_fix output group; nothing is linked), in the race
+# configuration bazel.yml's unit lane (test:ci) builds, so a local run reuses
+# CI's remote cache. make lint, scripts/pr-lint and the pre-commit hook use it.
+build:nogo --@rules_go//go/config:race
+build:nogo --keep_going
+build:nogo --output_groups=nogo_fix
+# The same analyzers over the files only other platforms compile
+# (//go:build windows, darwin, !linux ...): scripts/pr-lint builds
+# //tools/bazel:release_cross, every go_library and go_binary split-transitioned
+# to rules_go's non-cgo platforms, for its windows/amd64 and darwin/arm64
+# passes (golangci-lint's former GOOS=windows/darwin legs). bazel.yml's pure
+# lane builds the same target for every release platform, which validates
+# nogo there too.
+build:nogo-cross --keep_going
+build:nogo-cross --output_groups=nogo_fix
+
 # D2 step 3: bazel.yml's bazel-test, bazel-pure and bazel-doltserver lanes
 # add this in the remote modes, where (on same-repo PRs and merge groups)
 # they are the only pre-merge run of pr.yml's legacy PR Core,

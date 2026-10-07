@@ -19,10 +19,11 @@ Each wrapper auto-detects the repository root, sources `.buildflags` when it
 invokes Go in the default build mode, and records per-command timing through
 `scripts/ci/lib/timing.sh`.
 
-`ci-pr-lint` keeps its supported Bash/Make entrypoint but delegates native and
-Windows/non-CGO target selection to the checkout-owned `scripts/pr-lint` Go
-driver. This is the same shell-free lint authority used by `bd preflight` in a
-Beads source checkout.
+`ci-pr-lint` keeps its supported Bash/Make entrypoint but delegates to the
+checkout-owned `scripts/pr-lint` Go driver, which runs nogo (`//tools/nogo`)
+under Bazel natively and cross-configured for windows/amd64 and darwin/arm64
+(see [engdocs/LINTING.md](../engdocs/LINTING.md)). This is the same shell-free
+lint authority used by `bd preflight` in a Beads source checkout.
 
 Broad Go test wrappers also source `scripts/ci/lib/test-env.sh`, which creates a
 temporary HOME/XDG/Dolt root, isolates Git global/system config, clears runtime
@@ -136,7 +137,6 @@ This master script automates the **entire release process**:
 
 - Clean git working directory
 - All changes committed
-- golangci-lint installed
 - Homebrew installed (for local upgrade)
 - Push access to gastownhall/beads
 

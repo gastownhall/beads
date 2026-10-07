@@ -1075,8 +1075,8 @@ jobs:
 
   # D2 step 3: stands down where bazel-coverage says pr_lanes; Bazel /
   # test (`bazel test //... --config=ci`, the same selection, checked by its
-  # equivalence step) runs it, and scripts-go-checks runs what Bazel does not
-  # (go test's vet).
+  # equivalence step) runs it, and nogo (//tools/nogo) runs go test's vet
+  # checks beside every compile of that lane.
   pr-core-wrapper:
     name: PR Core (wrapper timing)
     runs-on: ubuntu-latest
@@ -1135,122 +1135,6 @@ jobs:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
           GOCACHE: ${{ runner.temp }}/go-cache/race
         run: make ci-pr-core
-
-  # PR Core's duty the Bazel lanes do not take over (D2 step 3), on every PR
-  # whatever bazel-coverage says: go test's own vet checks over ./...
-  # (rules_go's go_test runs none). The repository policy tests in
-  # ./scripts/... and the source-walking tests run under Bazel
-  # (//scripts:scripts_test, //test/docsync over //:repo_files), remotely.
-  # F7b: same-repo Blacksmith (blacksmith-4vcpu-ubuntu-2404) for same-repo
-  # PRs/merge_group, falling back to ubuntu-latest for forks/Dependabot, same
-  # pattern as advisory-reports/pr-core-wrapper above.
-  # main.yml's go-vet-cache venue matrix seeds the vet leg's GOCACHE.
-  scripts-go-checks:
-    name: Go checks (${{ matrix.check }})
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        check: [vet]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Restore Go module cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      - name: Restore vet Go build cache
-        if: matrix.check == 'vet'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/go-cache/vet
-          key: beads-go-vet-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-vet-${{ github.sha }}
-          # The non-race build cache fallback this used to list can never hit:
-          # actions/cache versions an entry by its path list, and that cache
-          # saves to a different path (.../go-cache/non-race), so the prefix
-          # match is always filtered out (SF-5).
-          restore-keys: beads-go-vet-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-vet-
-
-      - name: Go vet with go test's checks
-        if: ${{ !cancelled() && steps.setup-go.outcome == 'success' && matrix.check == 'vet' }}
-        env:
-          GOCACHE: ${{ runner.temp }}/go-cache/vet
-        run: bash scripts/ci/go-test-vet.sh
-
-  # F7b: same-repo Blacksmith (blacksmith-4vcpu-ubuntu-2404) for same-repo
-  # PRs/merge_group, falling back to ubuntu-latest for forks/Dependabot.
-  # main.yml's pr-lint-wrapper `venue` matrix seeds this leg's golangci-lint
-  # and lint-native GOCACHEs.
-  pr-lint-wrapper:
-    name: PR Lint (${{ matrix.target }})
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [native, windows, darwin]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          # --new-from-merge-base below walks real history.
-          fetch-depth: 0
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Restore Go module cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      - name: Install golangci-lint
-        run: ./scripts/ci/install-golangci-lint.sh
-
-      # Keyed on file content and the leg; a miss on the exact content key
-      # falls back to the leg's most recent entry, which golangci-lint
-      # revalidates against the current config and inputs. pr.yml never saves
-      # this cache (§0); main.yml's pr-lint-wrapper matrix is the only saver,
-      # on an exact-key miss. The key omits the sha (SF-4) so main.yml only
-      # saves when .golangci.yml or go.sum change.
-      - name: Restore golangci-lint cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cache/golangci-lint
-            ${{ matrix.target == 'native' && format('{0}/go-cache/lint-{1}', runner.temp, matrix.target) || '' }}
-          key: beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-${{ hashFiles('.golangci.yml', 'go.sum') }}
-          restore-keys: beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-
-
-      # Scope the wrapper's lint to what this PR introduces, matching the
-      # (now-deleted) `lint` job's only-new-issues scope. main.yml runs the
-      # same wrapper with this unset, so the whole tree is still swept on
-      # every push to main. Both PR triggers (pull_request, merge_group)
-      # target main.
-      - name: Run PR lint wrapper
-        env:
-          BD_LINT_NEW_FROM_MERGE_BASE: origin/main
-          BD_LINT_TARGETS: ${{ matrix.target }}
-          GOCACHE: ${{ runner.temp }}/go-cache/lint-${{ matrix.target }}
-        run: make ci-pr-lint
 
   # F7a: fold of build-examples + complexity-report, the two pr.yml jobs that
   # are advisory-only (not in ci-gate's needs/CI_GATE_REQUIRED) and restore no
@@ -2089,8 +1973,6 @@ jobs:
       - check-doc-freshness-platforms
       - pr-preflight-platforms
       - pr-core-wrapper
-      - scripts-go-checks
-      - pr-lint-wrapper
       - windows-make-shell
       - bazel
       - bazel-coverage
@@ -2113,8 +1995,6 @@ jobs:
             PACKAGE_MCP
             PACKAGE_NPM
             PR_CORE_WRAPPER
-            SCRIPTS_GO_CHECKS
-            PR_LINT_WRAPPER
             WINDOWS_MAKE_SHELL
             BAZEL
             BAZEL_TEST
@@ -2162,8 +2042,6 @@ jobs:
           PACKAGE_MCP: ${{ needs.bazel.outputs.package-mcp || 'skipped' }}
           PACKAGE_NPM: ${{ needs.bazel.outputs.package-npm || 'skipped' }}
           PR_CORE_WRAPPER: ${{ needs.pr-core-wrapper.result }}
-          SCRIPTS_GO_CHECKS: ${{ needs.scripts-go-checks.result }}
-          PR_LINT_WRAPPER: ${{ needs.pr-lint-wrapper.result }}
           WINDOWS_MAKE_SHELL: ${{ needs.windows-make-shell.result }}
           # bazel.yml's lanes report their job.status as outputs; a lane that
           # did not report (skipped, or lost before its last step) reads as

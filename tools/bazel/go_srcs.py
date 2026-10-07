@@ -38,7 +38,8 @@ scripts/ci/bazel-release-cross-compile.sh builds for every release platform,
 listing every go_library and go_binary it can see (the packages `go build
 ./...` compiles; a private library is compiled by the go_binary that embeds
 it) except the cgo-only ones a pure build cannot link (tagged "cgo-only" and
-incompatible with //tools/bazel:pure) and testonly fixtures. The script checks
+incompatible with //tools/bazel:pure), testonly fixtures, and the packages of
+nested Go modules (tools/nogo), which `go build ./...` skips. The script checks
 against `bazel query` before it builds that every Bazel package holding Go
 targets is reached, so a package this parser misses fails CI instead of
 going uncompiled.
@@ -230,10 +231,21 @@ def repo_files_block(pkg: str, packages: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def in_nested_module(pkg: str) -> bool:
+    """Whether pkg belongs to a Go module other than the root one (its own
+    go.mod at or above it, below the root), which `go build ./...` skips."""
+    parts = [] if pkg == "." else pkg.split("/")
+    return any(os.path.exists(os.path.join(*parts[:i], "go.mod")) for i in range(1, len(parts) + 1))
+
+
 def go_targets(packages: list[str]) -> list[str]:
     """Every go_library and go_binary that a pure build can compile."""
     labels = []
     for pkg in packages:
+        # tools/nogo (the nogo analyzers' own module) is not part of
+        # `go build ./...` or of any release.
+        if in_nested_module(pkg):
+            continue
         with open(os.path.join(pkg, "BUILD.bazel")) as f:
             src = f.read()
         for kind, name, body in GO_RULE_RE.findall(src):

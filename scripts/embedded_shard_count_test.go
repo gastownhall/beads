@@ -65,7 +65,7 @@ func bazelEmbeddedStorageShardCount(t *testing.T) int {
 // --check verifies only that the committed block names every discovered
 // test exactly once, failing with the exact command to fix it when a name
 // is missing, stale, or duplicated — run here so a drifted block fails `go
-// test ./scripts/...` (and scripts-go-checks on fork PRs) instead of only
+// test ./scripts/...` (//scripts:scripts_test under Bazel) instead of only
 // surfacing as a test silently never running in any shard. The legacy
 // blocks are deliberately excluded: both files document that their 20- and
 // 5-shard blocks are frozen (see .github/scripts/embedded-{cmd,storage}-
