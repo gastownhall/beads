@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -216,5 +217,65 @@ func TestCountExistingIssues_WorktreeNoBeadsAnywhere(t *testing.T) {
 	found := beads.FindBeadsDir()
 	if found != "" {
 		t.Errorf("FindBeadsDir() = %q, want empty string when no .beads exists anywhere", found)
+	}
+}
+
+// GH#6956: in a worktree the "already initialized" refusal must explain that
+// the worktree shares the main checkout's database, not steer the user toward
+// --reinit-local (which would destroy that shared database). The main
+// checkout keeps the original message.
+func TestCheckExistingBeadsData_WorktreeExplainsSharedDB(t *testing.T) {
+	isolateBeadsDirForTest(t)
+	tmpDir := t.TempDir()
+	mainRepoDir := filepath.Join(tmpDir, "main-repo")
+	worktreeDir := filepath.Join(tmpDir, "worktree")
+	if err := os.MkdirAll(filepath.Join(mainRepoDir, ".beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(dir string, args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+	run(mainRepoDir, "init")
+	run(mainRepoDir, "-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "--allow-empty", "-m", "init")
+	run(mainRepoDir, "worktree", "add", worktreeDir, "HEAD")
+	t.Cleanup(func() {
+		cmd := exec.Command("git", "worktree", "remove", "--force", worktreeDir)
+		cmd.Dir = mainRepoDir
+		_ = cmd.Run()
+	})
+	if err := os.WriteFile(filepath.Join(mainRepoDir, ".beads", beads.CanonicalDatabaseName), nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mirror a real run: the pre-run hook exports the selected BEADS_DIR for
+	// every command, so only the startup snapshot says whether the caller set it.
+	prevProvided := beadsDirProvidedAtStartup
+	beadsDirProvidedAtStartup = false
+	t.Cleanup(func() { beadsDirProvidedAtStartup = prevProvided })
+	t.Setenv("BEADS_DIR", filepath.Join(mainRepoDir, ".beads"))
+
+	check := func(dir string) string {
+		t.Chdir(dir)
+		git.ResetCaches()
+		t.Cleanup(git.ResetCaches)
+		err := checkExistingBeadsData("bd")
+		if !errors.Is(err, errWorkspaceAlreadyInitialized) {
+			t.Fatalf("checkExistingBeadsData in %s = %v, want errWorkspaceAlreadyInitialized", dir, err)
+		}
+		return err.Error()
+	}
+
+	msg := check(worktreeDir)
+	if strings.Contains(msg, "--reinit-local") || !strings.Contains(msg, "shares the main checkout's beads database") {
+		t.Errorf("worktree message should explain the shared database without --reinit-local, got:\n%s", msg)
+	}
+
+	msg = check(mainRepoDir)
+	if !strings.Contains(msg, "This workspace is already initialized.") || !strings.Contains(msg, "--reinit-local") {
+		t.Errorf("main checkout message changed unexpectedly:\n%s", msg)
 	}
 }
