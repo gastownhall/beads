@@ -270,7 +270,7 @@ func TestCheckExistingBeadsData_WorktreeExplainsSharedDB(t *testing.T) {
 	}
 
 	msg := check(worktreeDir)
-	if strings.Contains(msg, "--reinit-local") || !strings.Contains(msg, "shares the main checkout's beads database") {
+	if strings.Contains(msg, "--reinit-local") || !strings.Contains(msg, "already initialized") || !strings.Contains(msg, "shares the main\nrepository's beads database") {
 		t.Errorf("worktree message should explain the shared database without --reinit-local, got:\n%s", msg)
 	}
 
