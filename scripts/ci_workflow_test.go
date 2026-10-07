@@ -2106,6 +2106,45 @@ const (
 	bazelRBEPrewarmContinueOnErrorPath = ".jobs." + bazelRBEPrewarmJobName + ".continue-on-error"
 )
 
+// rbe-ci-bep-analytics-design.md (S3) adds two steps to every lane job
+// ("CI analytics summary" and "Upload CI analytics summary"): reporting
+// only (the extracted summary feeds a follow-on analysis pipeline, nothing
+// in bazel.yml or pr.yml reads its output), so both carry a deliberate
+// step-level continue-on-error - the only step-level exception
+// TestBazelWorkflowSecretsAndFailureSurface allows, matched below by job,
+// step name and content (ciAnalyticsContinueOnErrorPaths) rather than by a
+// single fixed path the way rbe-prewarm's job-level one is, since every
+// lane job has its own copy of these two steps at a different index.
+
+// ciAnalyticsContinueOnErrorPaths returns the walkYAML path of every CI
+// analytics step's continue-on-error key, so
+// TestBazelWorkflowSecretsAndFailureSurface can allow exactly those and
+// nothing else. Scoped three ways, not just by step name: the job must be
+// one of ciAnalyticsLaneJobs (ci_analytics_workflow_test.go), the summary
+// step's run must actually invoke ci_analytics_extract.py, and the upload
+// step's artifact name must start with "ci-analytics-" - so a future step
+// that happens to share one of these two names, in a job this design never
+// touched, can't ride along on the exception unnoticed.
+func ciAnalyticsContinueOnErrorPaths(t *testing.T) map[string]bool {
+	t.Helper()
+	paths := map[string]bool{}
+	for name, job := range readCIWorkflow(t, bazelWorkflowName).Jobs {
+		if _, ok := ciAnalyticsLaneJobs[name]; !ok {
+			continue
+		}
+		for i, step := range job.Steps {
+			switch {
+			case step.Name == "CI analytics summary" && strings.Contains(step.Run, "ci_analytics_extract.py"):
+			case step.Name == "Upload CI analytics summary" && strings.HasPrefix(step.With["name"], "ci-analytics-"):
+			default:
+				continue
+			}
+			paths[fmt.Sprintf(".jobs.%s.steps[%d].continue-on-error", name, i)] = true
+		}
+	}
+	return paths
+}
+
 // rbe-fork: the lanes' setup-bazel env that asks it for a certificate (modes
 // fork-ro and fork-rw only), and the mint's status URL the rbe job probes.
 const (
@@ -4300,7 +4339,7 @@ func TestBazelIntegrationJob(t *testing.T) {
 	}
 	cmd := regexp.MustCompile(`\s*\\\n\s*`).ReplaceAllString(test.Run, " ")
 	// EXCLUDE_TARGETS: TestBazelIntegrationExcludesBdTestOnlyWhereCmdDoltCovers.
-	const wantCmd = `bazel test //... --config=integration ` + bazelFreshArg + ` --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" ${EXCLUDE_TARGETS:+-- "$EXCLUDE_TARGETS"} 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?`
+	const wantCmd = `bazel test //... --config=integration ` + bazelFreshArg + ` --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" --execution_log_compact_file="$RUNNER_TEMP/bazel-exec.log.zst" --profile="$RUNNER_TEMP/bazel-profile.json" --experimental_build_event_upload_strategy=local ${EXCLUDE_TARGETS:+-- "$EXCLUDE_TARGETS"} 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?`
 	if !strings.Contains(cmd, wantCmd) || !strings.Contains(test.Run, "set -o pipefail") {
 		t.Errorf("%s test step does not run exactly %q:\n%s", bazelIntegJobName, wantCmd, test.Run)
 	}
@@ -4569,11 +4608,14 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 		job, config, logs string
 		wantSteps         int
 	}{
-		{bazelProxiedJobName, "doltserver-proxied", "bazel-proxied-testlogs", 8},
+		// +2 over the earlier counts: the CI analytics summary/upload steps
+		// (S3; see bazel-test's "CI analytics summary" comment), added to
+		// every lane job ahead of the result recorder.
+		{bazelProxiedJobName, "doltserver-proxied", "bazel-proxied-testlogs", 10},
 		// One more than bazel-proxied: a "Shard balance" step (rbe-ci-cost-
 		// latency-study.md recommendation 4), since this is the tier whose
 		// last shard has trailed the rest by 4.3-4.5 min in 2 of 8 runs.
-		{bazelServerJobName, "doltserver-integration", "bazel-server-storage-testlogs", 9},
+		{bazelServerJobName, "doltserver-integration", "bazel-server-storage-testlogs", 11},
 	} {
 		job := workflow.job(t, c.job)
 		if job.TimeoutMinutes == 0 || job.TimeoutMinutes > 30 {
@@ -4581,7 +4623,7 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 		}
 		assertBazelTierStep(t, job, c.job, c.config)
 		if n := len(job.Steps); n != c.wantSteps {
-			t.Errorf("%s has %d steps, want %d (checkout, setup-bazel, the flaky query, the tier, check_testcases.py, check_shard_coverage.py, [shard_budget.py,] log upload, result recorder)", c.job, n, c.wantSteps)
+			t.Errorf("%s has %d steps, want %d (checkout, setup-bazel, the flaky query, the tier, check_testcases.py, check_shard_coverage.py, [shard_budget.py,] log upload, CI analytics summary, CI analytics upload, result recorder)", c.job, n, c.wantSteps)
 		}
 		logs := job.step(t, "Upload test logs")
 		if logs.If != "${{ failure() && steps.test.outcome != 'skipped' }}" || logs.With["name"] != c.logs || !strings.HasPrefix(logs.Uses, "actions/upload-artifact@") {
@@ -4621,6 +4663,9 @@ start=$(date +%s)
 rc=0
 bazel test //... --config=embedded ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
   --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+  --execution_log_compact_file="$RUNNER_TEMP/bazel-exec.log.zst" \
+  --profile="$RUNNER_TEMP/bazel-profile.json" \
+  --experimental_build_event_upload_strategy=local \
   2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
 echo "bazel test --config=embedded: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
 exit "$rc"`
@@ -5092,6 +5137,7 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 			t.Errorf("%s job %s has %d setup-bazel steps, want 1", bazelWorkflowName, name, n)
 		}
 	}
+	ciAnalyticsPaths := ciAnalyticsContinueOnErrorPaths(t)
 	secretRef := regexp.MustCompile(`\bsecrets\s*(\.|\[)`)
 	walkYAML(root, "", func(path string, key bool, value string) {
 		if key && value == "continue-on-error" {
@@ -5101,9 +5147,13 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 			// job's failure would still fail bazel.yml's own run and
 			// cascade into pr.yml's ci-gate. So is each flag-gated lane's
 			// (bazelFlagGatedLanes): advisory until its pr.yml flag is
-			// "true", and required then through its own gate id.
+			// "true", and required then through its own gate id. So are the
+			// two CI analytics steps in every lane job
+			// (bazelCIAnalyticsStepNames): reporting only, never a `needs`
+			// of anything and never read back by this workflow or its
+			// callers.
 			_, flagGated := bazelFlagGatedLanes[strings.TrimSuffix(strings.TrimPrefix(path, ".jobs."), ".continue-on-error")]
-			if path != bazelRBEPrewarmContinueOnErrorPath && !flagGated {
+			if path != bazelRBEPrewarmContinueOnErrorPath && !flagGated && !ciAnalyticsPaths[path] {
 				t.Errorf("%s: %s hides failures from pr.yml's ci-gate", bazelWorkflowName, path)
 			}
 		}

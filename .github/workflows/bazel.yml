@@ -785,6 +785,8 @@ jobs:
           bazel test //... --config=ci ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
             --profile="$RUNNER_TEMP/bazel-profile.json" \
             --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec.log.zst" \
+            --experimental_build_event_upload_strategy=local \
             2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
           echo "bazel test: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
           echo >> "$GITHUB_STEP_SUMMARY"
@@ -919,6 +921,42 @@ jobs:
           path: ${{ runner.temp }}/bazel-ci-cache
           key: bazel-repo-v3-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}
 
+      # A redacted, schema'd summary of this invocation's BEP, exec log and
+      # profile: timing, per-mnemonic cache classes, cold actions, test
+      # results, repo-fetch time. tools/bazel/ci_analytics_extract.py reads
+      # only a field whitelist and validates every emitted string, so this
+      # (unlike the raw BEP file) is safe to upload unredacted; see its
+      # module docstring. Mirrors gascity's ci/analytics-extractor lane step.
+      - name: CI analytics summary
+        id: ci-analytics
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          LANE: test
+          MODE: ${{ needs.rbe.outputs.mode }}
+          CHECK_RUN_ID: ${{ job.check_run_id }}
+          PR_HINT: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          [ -f "$RUNNER_TEMP/bazel-bep.json" ] || exit 0
+          zstd --version || echo "::warning::zstd missing: no per-mnemonic data in this lane's summary"
+          python3 tools/bazel/ci_analytics_extract.py \
+            --lane "$LANE" --mode "$MODE" --check-run-id "$CHECK_RUN_ID" --pr-hint "$PR_HINT" \
+            --invocation test "$RUNNER_TEMP/bazel-bep.json" "$RUNNER_TEMP/bazel-exec.log.zst" "$RUNNER_TEMP/bazel-profile.json" \
+            --out "$RUNNER_TEMP/ci-analytics/ci-analytics.json"
+
+      - name: Upload CI analytics summary
+        if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: ci-analytics-test-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
+          retention-days: 7
+          if-no-files-found: ignore
+
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
       # cancellation too.
@@ -994,9 +1032,14 @@ jobs:
           RBE_FORK_PR: ${{ github.event.pull_request.number }}
 
       - name: Run js/wasm hook boundary
+        id: build-wasm
         run: |
           set -euo pipefail
-          bazel build --config=js-wasm //internal/hooks:hooks_test
+          bazel build --config=js-wasm //internal/hooks:hooks_test \
+            --profile="$RUNNER_TEMP/bazel-profile-build-wasm.json" \
+            --build_event_json_file="$RUNNER_TEMP/bazel-bep-build-wasm.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec-build-wasm.log.zst" \
+            --experimental_build_event_upload_strategy=local
           bin="$(bazel cquery --config=js-wasm --output=files //internal/hooks:hooks_test)"
           cd internal/hooks
 
@@ -1036,12 +1079,17 @@ jobs:
           fi
 
       - name: Build cmd/bd and pure-Go test binaries (--config=pure)
+        id: build-pure
         run: >-
           bazel build --config=pure
           //cmd/bd:bd
           //cmd/bd:bd_test
           //internal/storage/embeddeddolt:embeddeddolt_test
           //internal/tracker:tracker_test
+          --profile="$RUNNER_TEMP/bazel-profile-build-pure.json"
+          --build_event_json_file="$RUNNER_TEMP/bazel-bep-build-pure.json"
+          --execution_log_compact_file="$RUNNER_TEMP/bazel-exec-build-pure.log.zst"
+          --experimental_build_event_upload_strategy=local
 
       # Every release target (scripts/ci/release-targets.txt) on every PR, so
       # a platform-gating mistake is caught here instead of at tag time
@@ -1063,27 +1111,80 @@ jobs:
       # starts in the next step. -test.run=^$ runs no test (TestMain still
       # runs; BEADS_TEST_SKIP=dolt keeps tracker's from starting a container).
       - name: Start every pure-Go artifact (gozstd contamination check)
+        id: test-pure
         run: |
           set -euo pipefail
+          # Not instrumented: no BEP/exec-log/profile is captured for this
+          # one-off smoke invocation (design's bazel-pure invocation list
+          # names build-wasm, build-pure, test-pure and test-bd only).
           bazel run --config=pure //cmd/bd:bd -- version
           bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
             //internal/storage/embeddeddolt:embeddeddolt_test \
             //internal/tracker:tracker_test \
             --test_sharding_strategy=disabled \
             '--test_arg=-test.run=^$' \
-            --test_env=BEADS_TEST_SKIP=dolt
+            --test_env=BEADS_TEST_SKIP=dolt \
+            --profile="$RUNNER_TEMP/bazel-profile-test-pure.json" \
+            --build_event_json_file="$RUNNER_TEMP/bazel-bep-test-pure.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec-test-pure.log.zst" \
+            --experimental_build_event_upload_strategy=local
 
       # One unsharded process, like `go test -run`; the test.xml check keeps a
       # selector that matches nothing from passing.
       - name: Run pure-Go cmd/bd test subset (--config=pure)
+        id: test-bd
         run: |
           set -euo pipefail
           bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_FRESH:+"$BAZEL_FRESH"} //cmd/bd:bd_test \
             --test_sharding_strategy=disabled \
-            "--test_arg=-test.run=$PURE_CMD_BD_TESTS"
+            "--test_arg=-test.run=$PURE_CMD_BD_TESTS" \
+            --profile="$RUNNER_TEMP/bazel-profile-test-bd.json" \
+            --build_event_json_file="$RUNNER_TEMP/bazel-bep-test-bd.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec-test-bd.log.zst" \
+            --experimental_build_event_upload_strategy=local
           n="$(grep -c '<testcase ' bazel-testlogs/cmd/bd/bd_test/test.xml || true)"
           echo "pure cmd/bd subset: $n test cases"
           (( n > 0 ))
+
+      # A redacted, schema'd summary of this job's four BEP-tracked
+      # invocations (build-wasm, build-pure, test-pure, test-bd; `bazel run
+      # ... -- version` above is deliberately not tracked, see its comment).
+      # Same contract as bazel-test's step; see its comment.
+      - name: CI analytics summary
+        id: ci-analytics
+        if: "!cancelled()"
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          LANE: pure
+          MODE: ${{ needs.rbe.outputs.mode }}
+          CHECK_RUN_ID: ${{ job.check_run_id }}
+          PR_HINT: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          args=()
+          for step in build-wasm build-pure test-pure test-bd; do
+            bep="$RUNNER_TEMP/bazel-bep-$step.json"
+            [ -f "$bep" ] || continue
+            args+=(--invocation "$step" "$bep" "$RUNNER_TEMP/bazel-exec-$step.log.zst" "$RUNNER_TEMP/bazel-profile-$step.json")
+          done
+          [ "${#args[@]}" -gt 0 ] || exit 0
+          zstd --version || echo "::warning::zstd missing: no per-mnemonic data in this lane's summary"
+          python3 tools/bazel/ci_analytics_extract.py \
+            --lane "$LANE" --mode "$MODE" --check-run-id "$CHECK_RUN_ID" --pr-hint "$PR_HINT" \
+            "${args[@]}" \
+            --out "$RUNNER_TEMP/ci-analytics/ci-analytics.json"
+
+      - name: Upload CI analytics summary
+        if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: ci-analytics-pure-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
+          retention-days: 7
+          if-no-files-found: ignore
 
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
@@ -1198,6 +1299,9 @@ jobs:
           rc=0
           bazel test //... --config=embedded ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
             --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec.log.zst" \
+            --profile="$RUNNER_TEMP/bazel-profile.json" \
+            --experimental_build_event_upload_strategy=local \
             2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
           echo "bazel test --config=embedded: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$rc"
@@ -1238,6 +1342,37 @@ jobs:
             bazel-testlogs/**/test.xml
           if-no-files-found: ignore
           retention-days: 7
+
+      # Same redacted summary as bazel-test's; see its comment.
+      - name: CI analytics summary
+        id: ci-analytics
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          LANE: embedded
+          MODE: ${{ needs.rbe.outputs.mode }}
+          CHECK_RUN_ID: ${{ job.check_run_id }}
+          PR_HINT: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          [ -f "$RUNNER_TEMP/bazel-bep.json" ] || exit 0
+          zstd --version || echo "::warning::zstd missing: no per-mnemonic data in this lane's summary"
+          python3 tools/bazel/ci_analytics_extract.py \
+            --lane "$LANE" --mode "$MODE" --check-run-id "$CHECK_RUN_ID" --pr-hint "$PR_HINT" \
+            --invocation test "$RUNNER_TEMP/bazel-bep.json" "$RUNNER_TEMP/bazel-exec.log.zst" "$RUNNER_TEMP/bazel-profile.json" \
+            --out "$RUNNER_TEMP/ci-analytics/ci-analytics.json"
+
+      - name: Upload CI analytics summary
+        if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: ci-analytics-embedded-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
+          retention-days: 7
+          if-no-files-found: ignore
 
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
@@ -1341,6 +1476,9 @@ jobs:
           fi
           bazel test //... --config=integration ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
             --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec.log.zst" \
+            --profile="$RUNNER_TEMP/bazel-profile.json" \
+            --experimental_build_event_upload_strategy=local \
             ${EXCLUDE_TARGETS:+-- "$EXCLUDE_TARGETS"} \
             2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
           echo "bazel test --config=integration: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -1365,6 +1503,37 @@ jobs:
             bazel-testlogs/**/test.xml
           if-no-files-found: ignore
           retention-days: 7
+
+      # Same redacted summary as bazel-test's; see its comment.
+      - name: CI analytics summary
+        id: ci-analytics
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          LANE: integration
+          MODE: ${{ needs.rbe.outputs.mode }}
+          CHECK_RUN_ID: ${{ job.check_run_id }}
+          PR_HINT: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          [ -f "$RUNNER_TEMP/bazel-bep.json" ] || exit 0
+          zstd --version || echo "::warning::zstd missing: no per-mnemonic data in this lane's summary"
+          python3 tools/bazel/ci_analytics_extract.py \
+            --lane "$LANE" --mode "$MODE" --check-run-id "$CHECK_RUN_ID" --pr-hint "$PR_HINT" \
+            --invocation test "$RUNNER_TEMP/bazel-bep.json" "$RUNNER_TEMP/bazel-exec.log.zst" "$RUNNER_TEMP/bazel-profile.json" \
+            --out "$RUNNER_TEMP/ci-analytics/ci-analytics.json"
+
+      - name: Upload CI analytics summary
+        if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: ci-analytics-integration-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
+          retention-days: 7
+          if-no-files-found: ignore
 
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
@@ -1431,7 +1600,12 @@ jobs:
           set -o pipefail
           start=$(date +%s)
           rc=0
-          bazel test //... --config=doltserver ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_FRESH:+"$BAZEL_FRESH"} 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
+          bazel test //... --config=doltserver ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
+            --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec.log.zst" \
+            --profile="$RUNNER_TEMP/bazel-profile.json" \
+            --experimental_build_event_upload_strategy=local \
+            2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
           echo "bazel test --config=doltserver: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
@@ -1446,6 +1620,37 @@ jobs:
             bazel-testlogs/**/test.xml
           if-no-files-found: ignore
           retention-days: 7
+
+      # Same redacted summary as bazel-test's; see its comment.
+      - name: CI analytics summary
+        id: ci-analytics
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          LANE: doltserver
+          MODE: ${{ needs.rbe.outputs.mode }}
+          CHECK_RUN_ID: ${{ job.check_run_id }}
+          PR_HINT: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          [ -f "$RUNNER_TEMP/bazel-bep.json" ] || exit 0
+          zstd --version || echo "::warning::zstd missing: no per-mnemonic data in this lane's summary"
+          python3 tools/bazel/ci_analytics_extract.py \
+            --lane "$LANE" --mode "$MODE" --check-run-id "$CHECK_RUN_ID" --pr-hint "$PR_HINT" \
+            --invocation test "$RUNNER_TEMP/bazel-bep.json" "$RUNNER_TEMP/bazel-exec.log.zst" "$RUNNER_TEMP/bazel-profile.json" \
+            --out "$RUNNER_TEMP/ci-analytics/ci-analytics.json"
+
+      - name: Upload CI analytics summary
+        if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: ci-analytics-doltserver-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
+          retention-days: 7
+          if-no-files-found: ignore
 
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
@@ -1562,6 +1767,9 @@ jobs:
           rc=0
           bazel test //... --config=doltserver-proxied ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
             --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec.log.zst" \
+            --profile="$RUNNER_TEMP/bazel-profile.json" \
+            --experimental_build_event_upload_strategy=local \
             2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
           echo "bazel test --config=doltserver-proxied: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$rc"
@@ -1592,6 +1800,37 @@ jobs:
             bazel-testlogs/**/test.xml
           if-no-files-found: ignore
           retention-days: 7
+
+      # Same redacted summary as bazel-test's; see its comment.
+      - name: CI analytics summary
+        id: ci-analytics
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          LANE: proxied-server
+          MODE: ${{ needs.rbe.outputs.mode }}
+          CHECK_RUN_ID: ${{ job.check_run_id }}
+          PR_HINT: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          [ -f "$RUNNER_TEMP/bazel-bep.json" ] || exit 0
+          zstd --version || echo "::warning::zstd missing: no per-mnemonic data in this lane's summary"
+          python3 tools/bazel/ci_analytics_extract.py \
+            --lane "$LANE" --mode "$MODE" --check-run-id "$CHECK_RUN_ID" --pr-hint "$PR_HINT" \
+            --invocation test "$RUNNER_TEMP/bazel-bep.json" "$RUNNER_TEMP/bazel-exec.log.zst" "$RUNNER_TEMP/bazel-profile.json" \
+            --out "$RUNNER_TEMP/ci-analytics/ci-analytics.json"
+
+      - name: Upload CI analytics summary
+        if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: ci-analytics-proxied-server-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
+          retention-days: 7
+          if-no-files-found: ignore
 
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
@@ -1673,6 +1912,9 @@ jobs:
           rc=0
           bazel test //... --config=doltserver-integration ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
             --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec.log.zst" \
+            --profile="$RUNNER_TEMP/bazel-profile.json" \
+            --experimental_build_event_upload_strategy=local \
             2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
           echo "bazel test --config=doltserver-integration: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$rc"
@@ -1714,6 +1956,37 @@ jobs:
             bazel-testlogs/**/test.xml
           if-no-files-found: ignore
           retention-days: 7
+
+      # Same redacted summary as bazel-test's; see its comment.
+      - name: CI analytics summary
+        id: ci-analytics
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          LANE: server-storage
+          MODE: ${{ needs.rbe.outputs.mode }}
+          CHECK_RUN_ID: ${{ job.check_run_id }}
+          PR_HINT: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          [ -f "$RUNNER_TEMP/bazel-bep.json" ] || exit 0
+          zstd --version || echo "::warning::zstd missing: no per-mnemonic data in this lane's summary"
+          python3 tools/bazel/ci_analytics_extract.py \
+            --lane "$LANE" --mode "$MODE" --check-run-id "$CHECK_RUN_ID" --pr-hint "$PR_HINT" \
+            --invocation test "$RUNNER_TEMP/bazel-bep.json" "$RUNNER_TEMP/bazel-exec.log.zst" "$RUNNER_TEMP/bazel-profile.json" \
+            --out "$RUNNER_TEMP/ci-analytics/ci-analytics.json"
+
+      - name: Upload CI analytics summary
+        if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: ci-analytics-server-storage-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
+          retention-days: 7
+          if-no-files-found: ignore
 
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
@@ -1797,6 +2070,9 @@ jobs:
           rc=0
           bazel test //... --config=doltserver-cmd ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
             --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec.log.zst" \
+            --profile="$RUNNER_TEMP/bazel-profile.json" \
+            --experimental_build_event_upload_strategy=local \
             2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
           echo "bazel test --config=doltserver-cmd: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$rc"
@@ -1819,6 +2095,37 @@ jobs:
             bazel-testlogs/**/test.xml
           if-no-files-found: ignore
           retention-days: 7
+
+      # Same redacted summary as bazel-test's; see its comment.
+      - name: CI analytics summary
+        id: ci-analytics
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          LANE: cmd-dolt
+          MODE: ${{ needs.rbe.outputs.mode }}
+          CHECK_RUN_ID: ${{ job.check_run_id }}
+          PR_HINT: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          [ -f "$RUNNER_TEMP/bazel-bep.json" ] || exit 0
+          zstd --version || echo "::warning::zstd missing: no per-mnemonic data in this lane's summary"
+          python3 tools/bazel/ci_analytics_extract.py \
+            --lane "$LANE" --mode "$MODE" --check-run-id "$CHECK_RUN_ID" --pr-hint "$PR_HINT" \
+            --invocation test "$RUNNER_TEMP/bazel-bep.json" "$RUNNER_TEMP/bazel-exec.log.zst" "$RUNNER_TEMP/bazel-profile.json" \
+            --out "$RUNNER_TEMP/ci-analytics/ci-analytics.json"
+
+      - name: Upload CI analytics summary
+        if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: ci-analytics-cmd-dolt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
+          retention-days: 7
+          if-no-files-found: ignore
 
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a

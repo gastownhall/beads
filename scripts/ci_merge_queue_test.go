@@ -199,6 +199,19 @@ func TestMergeQueuePullRequestFieldsHandleMergeGroup(t *testing.T) {
 		"detect-ci-tier.steps[2].env.PR_HEAD_SHA": "advisory shadow selector; merge_group selects everything",
 		"bazel-test.steps[*].env.PR_NUMBER":       "bazel-sync patch metadata; bazel-autofix.yml ignores non-pull_request runs",
 		"bazel-test.steps[*].env.PR_HEAD_SHA":     "bazel-sync patch metadata; bazel-autofix.yml ignores non-pull_request runs",
+		// bazel.yml's CI analytics summary step (rbe-ci-bep-analytics-
+		// design.md, S3), one entry per lane job (ciAnalyticsLaneJobs in
+		// ci_analytics_workflow_test.go) rather than a bare "steps[*]...",
+		// so this stays scoped to bazel.yml's own PR_HINT and can't
+		// silently also cover a future PR_HINT read elsewhere.
+		"bazel-test.steps[*].env.PR_HINT":           "ci-analytics-summary metadata only (--pr-hint); `|| 0` already covers merge_group same as a non-PR push",
+		"bazel-pure.steps[*].env.PR_HINT":           "ci-analytics-summary metadata only (--pr-hint); `|| 0` already covers merge_group same as a non-PR push",
+		"bazel-embedded.steps[*].env.PR_HINT":       "ci-analytics-summary metadata only (--pr-hint); `|| 0` already covers merge_group same as a non-PR push",
+		"bazel-integration.steps[*].env.PR_HINT":    "ci-analytics-summary metadata only (--pr-hint); `|| 0` already covers merge_group same as a non-PR push",
+		"bazel-doltserver.steps[*].env.PR_HINT":     "ci-analytics-summary metadata only (--pr-hint); `|| 0` already covers merge_group same as a non-PR push",
+		"bazel-proxied.steps[*].env.PR_HINT":        "ci-analytics-summary metadata only (--pr-hint); `|| 0` already covers merge_group same as a non-PR push",
+		"bazel-server-storage.steps[*].env.PR_HINT": "ci-analytics-summary metadata only (--pr-hint); `|| 0` already covers merge_group same as a non-PR push",
+		"bazel-cmd-dolt.steps[*].env.PR_HINT":       "ci-analytics-summary metadata only (--pr-hint); `|| 0` already covers merge_group same as a non-PR push",
 	}
 	used := map[string]bool{}
 	var fallbacks []string
