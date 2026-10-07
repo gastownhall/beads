@@ -235,6 +235,14 @@ func (*serveIdentityStore) GraphCounter() (issueops.GraphCounter, error) {
 	return serveIdentityRole{}, nil
 }
 
+// BatchGetter is declared at depth 1 for GraphCounter's reason: the many-ids
+// read is also a read, so its hook decorator (hook_batch_getter.go) recurses
+// and the recursion would land on a nil-embedded promotion if this were not
+// here.
+func (*serveIdentityStore) BatchGetter() (issueops.BatchGetter, error) {
+	return serveIdentityRole{}, nil
+}
+
 // IssueRelations is the first role added to serveIssueRoles since this stub
 // stopped embedding a nil store, so the comment above it is now a record of the
 // old regime rather than a warning about this one: GraphCounter had to be found
@@ -297,6 +305,7 @@ type serveIdentityRole struct {
 	issueops.CycleDetector
 	issueops.EdgeReader
 	issueops.GraphCounter
+	issueops.BatchGetter
 	issueops.Relations
 	issueops.Commenter
 	issueops.BlockingAnnotator

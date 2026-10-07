@@ -729,6 +729,19 @@ var routeTable = []route{
 		handler:     (*Server).handleDelete,
 	},
 	{
+		op:     OpBatchGetIssues,
+		method: http.MethodPost,
+		// A literal collection-level custom method, registered and preferred
+		// over the claim's wildcard for the sweep row's reason. POST rather
+		// than GET: the request names up to MaxGetManyIDs ids, which does not
+		// fit a query string reliably, and the delete beside it makes the same
+		// choice for the same reason.
+		pattern:     "/v0/beads/issues:batchGet",
+		capability:  "issues.batchGet",
+		implemented: true,
+		handler:     (*Server).handleBatchGetIssues,
+	},
+	{
 		op:     OpAddDependencies,
 		method: http.MethodPost,
 		// A collection-level custom method beside :remove below, and a LITERAL

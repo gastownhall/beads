@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpapi/spec"
 	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // These tests are the spec drift gates. They are pure — no database, no
@@ -416,6 +417,31 @@ func TestSpecDefaultsMatchSharedConstants(t *testing.T) {
 		// generated client learns it.
 		if got, ok := schema["minItems"].(int); !ok || got != 1 {
 			t.Errorf("%s: issue_id minItems = %v, want 1", opID, schema["minItems"])
+		}
+	}
+
+	// The id bound on the two request bodies that carry an `ids` list, for the
+	// anchor bound's reason: each is enforced in code — maxDeleteIDs in the
+	// delete handler, issueops.MaxGetManyIDs in the role behind batchGet — and
+	// restated as the member's maxItems, which is where a generated client
+	// learns it. Each body is reached through its operation's own $ref, so a
+	// row cannot go on checking a schema its operation stopped using.
+	for _, tc := range []struct {
+		opID string
+		want int
+	}{
+		{OpBatchGetIssues, issueops.MaxGetManyIDs},
+		{OpDeleteIssues, maxDeleteIDs},
+	} {
+		so, ok := ops[tc.opID]
+		if !ok {
+			t.Fatalf("operation %q missing from the spec", tc.opID)
+		}
+		media := mapAt(t, mapAt(t, mapAt(t, so.op, "requestBody"), "content"), "application/json")
+		body := resolveRef(t, doc, mapAt(t, media, "schema"))
+		ids := resolveRef(t, doc, mapAt(t, mapAt(t, body, "properties"), "ids"))
+		if got, ok := ids["maxItems"].(int); !ok || got != tc.want {
+			t.Errorf("%s: ids maxItems = %v, want the enforced bound %d", tc.opID, ids["maxItems"], tc.want)
 		}
 	}
 }

@@ -55,10 +55,10 @@ Every build path that produces a binary for users must include `-tags gms_pure_g
 | PR CI | `.github/workflows/pr.yml`, `.github/workflows/pr-risk.yml` |
 | Main CI test matrix | `.github/workflows/main.yml` (Linux, macOS, Windows) |
 | macOS release | `.github/workflows/release.yml` |
-| Migration tests | `.github/workflows/migration-test.yml` |
+| Migration tests | `//tests/migration/...` (Bazel, `bazel.yml` `bazel-test`) |
 | Nightly tests | `.github/workflows/nightly.yml` |
-| Cross-version smoke | `.github/workflows/cross-version-smoke.yml` |
-| Regression tests | `.github/workflows/regression.yml` |
+| Cross-version smoke | `//tests/upgrade_smoke/...` (Bazel, `bazel.yml` `bazel-test`) |
+| Regression tests | `//tests/regression:regression_test` (Bazel, `bazel.yml` `bazel-cmd-dolt`) |
 
 ### Canonical pattern: source `.buildflags`
 

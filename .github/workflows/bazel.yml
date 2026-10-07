@@ -1,23 +1,25 @@
-# Bazel side-by-side lane, gated alongside the legacy go test jobs. Runs
-# `bazel test //... --config=ci`, the PR Core-parity selection (race, -short,
-# dolt skip, -requires-docker), plus one job per mirrored CI job (pure-Go and
-# js/wasm, the dolt-server lane, pr-risk.yml's embedded-Dolt, proxied-server
-# and server-Dolt storage tiers, main.yml's integration jobs).
+# The Bazel lanes: the only CI run of the Linux Go test tiers. Runs
+# `bazel test //... --config=ci`, the PR-core selection (race, -short, dolt
+# skip), plus one job per tier (pure-Go and js/wasm, the dolt-server lane,
+# the embedded-Dolt, proxied-server and server-Dolt storage tiers that
+# pr-risk.yml used to run, integration, the cmd/bd Dolt-server tier).
 #
-# PRs and merge groups run it through pr.yml's `bazel` job (workflow_call),
-# in the same run as the legacy jobs it mirrors, which stay required too,
-# except where their D2 flag retires them: while the committed
-# BAZEL_RETIRES_LEGACY_EMBEDDED / BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS /
-# BAZEL_RETIRES_LEGACY_PR_LANES flag is "true", on a same-repo,
-# non-Dependabot pull_request (whatever the mode), the bazel-coverage job
-# stands down pr-risk.yml's embedded-Dolt test jobs (bazel-embedded runs
-# the tier), its proxied-server and server-Dolt storage test jobs
-# (bazel-proxied, bazel-server-storage), or pr.yml's PR Core,
-# build-artifacts, pure-Go/js-wasm, domain+uow and contract corpus jobs
-# (bazel-test, bazel-pure, bazel-doltserver; their `bazel test`s then add
-# --config=sole-run); pr.yml's ci-gate then requires those lanes to have run
-# remotely and passed, so modes skip, local and cache are red there
-# (scripts/pr_risk_bazel_coverage_test.go, pr_lanes_bazel_coverage_test.go).
+# PRs and merge groups run it through pr.yml's `bazel` job (workflow_call).
+# The legacy go test jobs these lanes mirrored are retired (ga-96smfk.22),
+# so pr.yml's ci-gate requires the lanes to have run remotely on rbe-west
+# and passed on every pull_request and merge group (BAZEL_REMOTE): modes
+# skip, local and cache are red there (scripts/pr_risk_bazel_coverage_test.go).
+# Where a lane executes remotely its `bazel test`s add --config=sole-run: it
+# is the tier's only run, so a remote cache eviction fails it rather than
+# re-running the invocation (whose retry could turn a failed test green).
+# Test results are cached (read and written) on every run but nightly's: a
+# test whose action key is unchanged reuses the PASS the farm recorded for
+# it, on a PR, a merge group (merge queue) or a push to main alike, and only
+# what changed runs. nightly.yml passes fresh-test-results: true, so every
+# `bazel test` here appends --config=fresh (BAZEL_FRESH below;
+# --nocache_test_results) and re-executes every test once a night, which
+# keeps sampling flaky and -race failures. A cached failure is never reused.
+# Policy: scripts/ci_merge_queue_test.go.
 # This file has no pull_request or merge_group trigger of its own, so a PR
 # runs the lane once. Every lane reports its job.status as a workflow_call
 # output (named after the job) from an always() last step. pr.yml's ci-gate
@@ -111,9 +113,18 @@
 # by every later step and by locally executed Bazel actions, and a .bazelrc
 # edit can point the BEP or the executor anywhere. Anyone who can push a
 # branch here can therefore use or copy the certificate and write to the
-# farm's cache. Fork PRs never get it, except those bazel-farm.yml
-# authorizes (allowlisted author and sender, accepted as same-repo-level
-# trust; that workflow's header lists what it adds): pull_request from a
+# farm's cache. Fork PRs never get it on their own runs, except those
+# bazel-farm.yml authorizes (allowlisted author and sender, accepted as
+# same-repo-level trust; that workflow's header lists what it adds), and
+# except once queued: a merge_group run loads every workflow file and
+# script from the queue entry's commit, so a fork (or Dependabot) PR that a
+# maintainer queues runs its own edits to .github/, .bazelrc, tools/bazel,
+# MODULE.bazel, BUILD files and CI scripts with all CI secrets, the
+# pre-warm app key included, even if the entry is later ejected. That is
+# the trust of merging it (push to main would run the same code), so the
+# maintainer rule is: review a fork PR's changes to those paths before
+# queueing it, as before merging (engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md,
+# "Merge Queue"). Otherwise: pull_request from a
 # fork receives no secrets, bazel-farm.yml is the only pull_request_target
 # caller (policy-tested), and forks cannot write the runner cache. Nor do
 # Dependabot PRs, which run as same-repo but get no Actions secrets. Fork
@@ -141,7 +152,11 @@
 # runs - the only contexts that ever receive RBE_POOL_APP_PRIVATE_KEY - each
 # reach that shared key for the duration of the mint step alone (nothing
 # executes from the checked-out repository tree while it, or the token it
-# produces, is in scope: see the rbe-prewarm job below). Unlike the RBE
+# produces, is in scope: see the rbe-prewarm job below). That holds only for
+# this file as committed: a merge_group run uses the queued commit's copy,
+# so a queued fork PR that edits this job (or pr.yml) reaches the key with
+# whatever it wrote. Queueing a fork PR is therefore merging-level trust;
+# review its .github/ changes first (see the header above). Unlike the RBE
 # client certificate above, this key cannot be rotated or revoked for beads
 # alone without also breaking gascity's scaler; the kill switch
 # (RBE_POOL_APP_PRIVATE_KEY unset, or RBE_PREWARM_WORKERS=0) disables
@@ -159,7 +174,8 @@
 # remote cache, and local runs would need about 7 GB more.
 #
 # Workflow-file changes suppress pull_request runs under the org approval
-# policy; validate edits to this file with workflow_dispatch on the branch.
+# policy (merge_group runs are not suppressed: they run the queued copy);
+# validate edits to this file with workflow_dispatch on the branch.
 name: Bazel
 
 on:
@@ -178,12 +194,11 @@ on:
         required: false
         type: boolean
         default: false
-      dolt-lane:
-        description: "Dolt-backed lane: doltserver (hermetic, remote) or docker (testcontainers A/B control)"
+      fresh-test-results:
+        description: "Re-execute every test (--config=fresh: no cached test results), as nightly does"
         required: false
-        type: choice
-        default: "doltserver"
-        options: [ "doltserver", "docker" ]
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       rbe:
@@ -194,14 +209,6 @@ on:
         type: boolean
         required: false
         default: true
-      go-test-json-artifact:
-        description: >
-          Artifact (from the calling run) holding go-test.json, PR Core's
-          `go-test -json` on this commit; enables the equivalence skip-parity
-          check. nightly.yml sets it.
-        type: string
-        required: false
-        default: ""
       # A string, not a boolean: on push and dispatch inputs.integration is
       # null, and null == false in GitHub's loose comparison, so a boolean
       # test would silently stop the lane on main.
@@ -225,6 +232,16 @@ on:
         description: >
           true (pr.yml only) drops //cmd/bd:bd_test from bazel-integration:
           the required bazel-cmd-dolt lane runs those tests.
+        type: boolean
+        required: false
+        default: false
+      # true (nightly.yml only): every `bazel test` re-executes every test
+      # (--config=fresh), the run that samples flaky and -race failures.
+      # Everyone else reuses cached results for unchanged tests. A boolean:
+      # null on push, so push to main reuses too.
+      fresh-test-results:
+        description: >
+          true (nightly.yml) re-executes every test: no cached test results.
         type: boolean
         required: false
         default: false
@@ -255,9 +272,7 @@ on:
         required: false
         default: "off"
       # "on" (pr.yml only) runs package-mcp and package-npm in this call,
-      # which waits on nothing but the rbe job (F3: the legacy pr.yml jobs
-      # those gates used to need: detect-package-gates, build-artifacts,
-      # bazel-coverage, and the whole bazel call). bazel-farm.yml, nightly.yml
+      # which waits on nothing but the rbe job. bazel-farm.yml, nightly.yml
       # and direct runs (push, dispatch) keep the default "off": main.yml
       # keeps its own package jobs, and a fork-farm run has no bd artifact
       # consumer waiting on these.
@@ -290,9 +305,12 @@ on:
       # request it, but no caller ever does: pr.yml and nightly.yml pass it
       # straight through (both are same-repo/trusted triggers only);
       # bazel-farm.yml's pull_request_target call does not, so no pre-warm
-      # credential ever reaches a fork-authored run (B1, security review of
-      # bdef342d5 - accepted risk is same-repo runs reaching the shared
-      # gascity scaler key, not forks). See
+      # credential reaches a fork-authored run before a maintainer queues
+      # it (B1, security review of bdef342d5 - accepted risk is same-repo
+      # runs reaching the shared gascity scaler key, not forks). Exception:
+      # a merge_group run executes the queued commit's workflows, so a
+      # queued fork PR's edits run with this key (merging-level trust; see
+      # the header). See
       # engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md, "rbe-west Pre-warm".
       RBE_POOL_APP_PRIVATE_KEY:
         required: false
@@ -354,6 +372,11 @@ permissions:
 env:
   BD_DISABLE_METRICS: "1"
   BD_DISABLE_EVENT_FLUSH: "1"
+  # Appended last to every `bazel test` (after the lane's config and
+  # sole-run): --config=fresh (.bazelrc, --nocache_test_results) only when
+  # the caller asks for fresh results (nightly.yml, or a dispatch); empty
+  # otherwise, so results are cached and reused. See the header.
+  BAZEL_FRESH: ${{ inputs.fresh-test-results && '--config=fresh' || '' }}
   # Phase B report-only budget for T1/T2 (tools/bazel/critpath.py).
   BAZEL_BUDGET_SECONDS: "420"
 
@@ -554,7 +577,10 @@ jobs:
       # above): every byte this step executes comes from this workflow
       # definition, which pull_request_target always loads from the base
       # branch and which editing suppresses pull_request runs under the
-      # org's approval policy (see the header). steps.mint.outputs.token
+      # org's approval policy (see the header). Not on merge_group: a queue
+      # entry runs its own commit's copy of this file with no approval
+      # gate, so a queued fork PR's edit here runs with the key (review
+      # .github/ changes before queueing). steps.mint.outputs.token
       # appears nowhere else in this file (policy-tested): this is the only
       # step with the credential in its environment, and no step after it
       # touches a repository path or runs a local composite action.
@@ -573,6 +599,16 @@ jobs:
           case "$n" in
             '') n=1 ;;
             *[!0-9]*) n=1 ;;
+            # Two or more digits is over the cap unless they are all zeros
+            # (still the kill switch); deciding it here keeps a string too
+            # long for the shell's integer compare from slipping past the
+            # -gt below unclamped.
+            ??*)
+              case "$n" in
+                *[!0]*) n=4 ;;
+                *) n=0 ;;
+              esac
+              ;;
           esac
           if [ "$n" -gt 4 ]; then
             n=4
@@ -589,7 +625,7 @@ jobs:
           fi
 
           active="$(gh run list -R "$POOL_REPO" --workflow "$POOL_WORKFLOW" --limit 50 \
-            --json status --jq '[.[] | select(.status != "completed")] | length' 2>/dev/null)"
+            --json status --jq '[.[] | select(.status != "completed")] | length' 2>/dev/null)" || true
           case "$active" in
             '' | *[!0-9]*)
               echo "::warning title=rbe-west pre-warm::could not read $POOL_REPO/$POOL_WORKFLOW run status; skipping dispatch"
@@ -648,13 +684,13 @@ jobs:
     outputs:
       result: ${{ steps.result.outputs.result }}
     env:
-      # D2 step 3: on covered PRs (always mode remote) this lane is the only
-      # pre-merge run of pr.yml's legacy PR Core job, which ran every test
-      # every time and never retried: --config=sole-run then executes every
-      # test (no cached results) and fails on a remote cache eviction
-      # instead of re-running the whole invocation. Fork modes do the same
-      # (with BAZEL_COVERS_FORKS "true" it is their only run too). Local and
-      # cache runs (the legacy jobs still run) keep cached results.
+      # This lane is the only pre-merge run of the PR-core tests (pr.yml's
+      # retired PR Core job never retried): where it executes remotely
+      # (mode remote, and the fork modes) --config=sole-run fails on a
+      # remote cache eviction instead of re-running the whole invocation
+      # (whose retry could turn a failed test green). Test results are
+      # cached and reused like every lane's; only nightly re-executes them
+      # all (BAZEL_FRESH).
       BAZEL_SOLE_RUN: ${{ needs.rbe.outputs.enabled == 'true' && '--config=sole-run' || '' }}
     steps:
       # inputs.checkout-sha: see the header (empty: the event's default ref).
@@ -730,18 +766,19 @@ jobs:
           set -o pipefail
           start=$(date +%s)
           rc=0
-          bazel test //... --config=ci ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} \
+          bazel test //... --config=ci ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
             --profile="$RUNNER_TEMP/bazel-profile.json" \
             --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec.log.zst" \
+            --experimental_build_event_upload_strategy=local \
             2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
           echo "bazel test: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
           echo >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
-      # pr.yml's build-artifacts job, built by Bazel: the same artifact name
-      # and layout (bd-linux-gms-pure, SHA256SUMS, build-manifest.txt). Where
-      # build-artifacts stands down (D2 step 3), its other consumers (PR
-      # Core, domain+uow) stand down there too. F3: the package gates build
+      # pr.yml's retired build-artifacts job, built by Bazel: the same
+      # artifact name and layout (bd-linux-gms-pure, SHA256SUMS,
+      # build-manifest.txt). F3: the package gates build
       # their own bd and no longer consume this artifact; it is kept for the
       # F3.5.3 SHA256SUMS comparison and for debugging. The script documents
       # which binary and how it differs from `go build`'s.
@@ -770,18 +807,8 @@ jobs:
           python3 tools/bazel/critpath.py "$RUNNER_TEMP/bazel-profile.json" \
             --tier "$TIER" --log "$RUNNER_TEMP/bazel-test.log" "${budget[@]}"
 
-      # nightly.yml's PR Core `go test -json` on the same commit.
-      - name: Download go-test results
-        if: ${{ always() && inputs.go-test-json-artifact != '' && steps.test.outcome != 'skipped' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: ${{ inputs.go-test-json-artifact }}
-          path: ${{ runner.temp }}/go-test-json
-
       # Fails on any Go test that `go test` runs and Bazel did not (tag filter,
-      # manual, missing target, empty shard) unless it is allowlisted. With
-      # go test results (nightly) it also fails on tests that passed under go
-      # test and were skipped under Bazel; a PR run cannot see those.
+      # manual, missing target, empty shard) unless it is allowlisted.
       # It reads test.xml from bazel-testlogs, which --config=integration
       # shares with --config=ci (same output directory): if a job ever runs
       # both lanes, run each lane's equivalence right after its own
@@ -791,11 +818,9 @@ jobs:
         timeout-minutes: 15
         env:
           DETAILS: ${{ inputs.details && '--details' || '' }}
-          GO_TEST_JSON: ${{ inputs.go-test-json-artifact != '' && format('{0}/go-test-json/go-test.json', runner.temp) || '' }}
         run: |
           args=()
           if [ -n "$DETAILS" ]; then args+=("$DETAILS"); fi
-          if [ -n "$GO_TEST_JSON" ]; then args+=(--go-test-json "$GO_TEST_JSON"); fi
           python3 tools/bazel/equivalence.py --bep "$RUNNER_TEMP/bazel-bep.json" "${args[@]}"
 
       # Runs last: it rewrites BUILD files in the checkout. main moves BUILD
@@ -867,6 +892,42 @@ jobs:
           path: ${{ runner.temp }}/bazel-ci-cache
           key: bazel-repo-v3-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}
 
+      # A redacted, schema'd summary of this invocation's BEP, exec log and
+      # profile: timing, per-mnemonic cache classes, cold actions, test
+      # results, repo-fetch time. tools/bazel/ci_analytics_extract.py reads
+      # only a field whitelist and validates every emitted string, so this
+      # (unlike the raw BEP file) is safe to upload unredacted; see its
+      # module docstring. Mirrors gascity's ci/analytics-extractor lane step.
+      - name: CI analytics summary
+        id: ci-analytics
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          LANE: test
+          MODE: ${{ needs.rbe.outputs.mode }}
+          CHECK_RUN_ID: ${{ job.check_run_id }}
+          PR_HINT: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          [ -f "$RUNNER_TEMP/bazel-bep.json" ] || exit 0
+          zstd --version || echo "::warning::zstd missing: no per-mnemonic data in this lane's summary"
+          python3 tools/bazel/ci_analytics_extract.py \
+            --lane "$LANE" --mode "$MODE" --check-run-id "$CHECK_RUN_ID" --pr-hint "$PR_HINT" \
+            --invocation test "$RUNNER_TEMP/bazel-bep.json" "$RUNNER_TEMP/bazel-exec.log.zst" "$RUNNER_TEMP/bazel-profile.json" \
+            --out "$RUNNER_TEMP/ci-analytics/ci-analytics.json"
+
+      - name: Upload CI analytics summary
+        if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: ci-analytics-test-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
+          retention-days: 7
+          if-no-files-found: ignore
+
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
       # cancellation too.
@@ -877,13 +938,12 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
 
-  # pr.yml's check-cmd-bd-puregeo-tests job ("Check pure-Go and js/wasm
-  # boundaries (CGO_ENABLED=0)") with Bazel-built binaries: --config=pure
-  # builds bd and the job's three pure test binaries and runs its -short
-  # cmd/bd subset (PURE_CMD_BD_TESTS, kept equal to the job's -run selector by
-  # scripts/ci_workflow_test.go); --config=js-wasm builds the hooks test for
-  # js/wasm, which the Go SDK's go_js_wasm_exec runs under node with the job's
-  # exact pass-count guard.
+  # The CGO_ENABLED=0 portability boundaries (pr.yml's retired
+  # check-cmd-bd-puregeo-tests job) with Bazel-built binaries: --config=pure
+  # builds bd and three pure test binaries and runs the -short cmd/bd subset
+  # (PURE_CMD_BD_TESTS, pinned by scripts/ci_workflow_test.go);
+  # --config=js-wasm builds the hooks test for js/wasm, which the Go SDK's
+  # go_js_wasm_exec runs under node with an exact pass-count guard.
   bazel-pure:
     name: pure-Go and js/wasm
     # Same runner and skip rule as bazel-test.
@@ -895,13 +955,11 @@ jobs:
       result: ${{ steps.result.outputs.result }}
     env:
       PURE_CMD_BD_TESTS: '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir|NocgoFactoriesHonorSharedServer|NocgoNewDoltStoreFromConfig_ErrorSuggestsCorrectFlag|NocgoNewReadOnlyStoreFromConfig_ErrorSuggestsCorrectFlag)'
-      # D2 step 3: on covered PRs (always mode remote) this lane is the only
-      # pre-merge run of pr.yml's legacy pure-Go and js/wasm job, which ran every test
-      # every time and never retried: --config=sole-run then executes every
-      # test (no cached results) and fails on a remote cache eviction
-      # instead of re-running the whole invocation. Fork modes do the same
-      # (with BAZEL_COVERS_FORKS "true" it is their only run too). Local and
-      # cache runs (the legacy jobs still run) keep cached results.
+      # The only pre-merge run of these boundaries: where it executes
+      # remotely --config=sole-run fails on a remote cache eviction instead
+      # of re-running the whole invocation (whose retry could turn a failed
+      # test green). Test results are cached and reused like every lane's;
+      # only nightly re-executes them all (BAZEL_FRESH).
       BAZEL_SOLE_RUN: ${{ needs.rbe.outputs.enabled == 'true' && '--config=sole-run' || '' }}
     steps:
       # inputs.checkout-sha: see the header (empty: the event's default ref).
@@ -941,9 +999,14 @@ jobs:
           RBE_FORK_PR: ${{ github.event.pull_request.number }}
 
       - name: Run js/wasm hook boundary
+        id: build-wasm
         run: |
           set -euo pipefail
-          bazel build --config=js-wasm //internal/hooks:hooks_test
+          bazel build --config=js-wasm //internal/hooks:hooks_test \
+            --profile="$RUNNER_TEMP/bazel-profile-build-wasm.json" \
+            --build_event_json_file="$RUNNER_TEMP/bazel-bep-build-wasm.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec-build-wasm.log.zst" \
+            --experimental_build_event_upload_strategy=local
           bin="$(bazel cquery --config=js-wasm --output=files //internal/hooks:hooks_test)"
           cd internal/hooks
 
@@ -983,12 +1046,30 @@ jobs:
           fi
 
       - name: Build cmd/bd and pure-Go test binaries (--config=pure)
+        id: build-pure
         run: >-
           bazel build --config=pure
           //cmd/bd:bd
           //cmd/bd:bd_test
           //internal/storage/embeddeddolt:embeddeddolt_test
           //internal/tracker:tracker_test
+          --profile="$RUNNER_TEMP/bazel-profile-build-pure.json"
+          --build_event_json_file="$RUNNER_TEMP/bazel-bep-build-pure.json"
+          --execution_log_compact_file="$RUNNER_TEMP/bazel-exec-build-pure.log.zst"
+          --experimental_build_event_upload_strategy=local
+
+      # Every release target (scripts/ci/release-targets.txt) on every PR, so
+      # a platform-gating mistake is caught here instead of at tag time
+      # (#5662): the whole tree, cgo off, one remote `bazel build
+      # --platforms=...` per target (the script's header has the coverage
+      # boundary: the cgo release builds are not compiled here). nogo
+      # (//tools/nogo) validates every one of those compiles, so this is also
+      # the lint and vet gate for files only other platforms build
+      # (//go:build windows, darwin, !linux ...; engdocs/LINTING.md).
+      - name: Cross-compile every release target (--config=release-cross)
+        run: |
+          set -euo pipefail
+          ./scripts/ci/bazel-release-cross-compile.sh
 
       # `go build` with CGO_ENABLED=0 rejects a pure binary whose imports reach
       # dolt's cgo-only store/nbs (gozstd). Bazel compiles gozstd's pure stubs
@@ -997,27 +1078,80 @@ jobs:
       # starts in the next step. -test.run=^$ runs no test (TestMain still
       # runs; BEADS_TEST_SKIP=dolt keeps tracker's from starting a container).
       - name: Start every pure-Go artifact (gozstd contamination check)
+        id: test-pure
         run: |
           set -euo pipefail
+          # Not instrumented: no BEP/exec-log/profile is captured for this
+          # one-off smoke invocation (design's bazel-pure invocation list
+          # names build-wasm, build-pure, test-pure and test-bd only).
           bazel run --config=pure //cmd/bd:bd -- version
-          bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} \
+          bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
             //internal/storage/embeddeddolt:embeddeddolt_test \
             //internal/tracker:tracker_test \
             --test_sharding_strategy=disabled \
             '--test_arg=-test.run=^$' \
-            --test_env=BEADS_TEST_SKIP=dolt
+            --test_env=BEADS_TEST_SKIP=dolt \
+            --profile="$RUNNER_TEMP/bazel-profile-test-pure.json" \
+            --build_event_json_file="$RUNNER_TEMP/bazel-bep-test-pure.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec-test-pure.log.zst" \
+            --experimental_build_event_upload_strategy=local
 
       # One unsharded process, like `go test -run`; the test.xml check keeps a
       # selector that matches nothing from passing.
       - name: Run pure-Go cmd/bd test subset (--config=pure)
+        id: test-bd
         run: |
           set -euo pipefail
-          bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} //cmd/bd:bd_test \
+          bazel test --config=pure ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_FRESH:+"$BAZEL_FRESH"} //cmd/bd:bd_test \
             --test_sharding_strategy=disabled \
-            "--test_arg=-test.run=$PURE_CMD_BD_TESTS"
+            "--test_arg=-test.run=$PURE_CMD_BD_TESTS" \
+            --profile="$RUNNER_TEMP/bazel-profile-test-bd.json" \
+            --build_event_json_file="$RUNNER_TEMP/bazel-bep-test-bd.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec-test-bd.log.zst" \
+            --experimental_build_event_upload_strategy=local
           n="$(grep -c '<testcase ' bazel-testlogs/cmd/bd/bd_test/test.xml || true)"
           echo "pure cmd/bd subset: $n test cases"
           (( n > 0 ))
+
+      # A redacted, schema'd summary of this job's four BEP-tracked
+      # invocations (build-wasm, build-pure, test-pure, test-bd; `bazel run
+      # ... -- version` above is deliberately not tracked, see its comment).
+      # Same contract as bazel-test's step; see its comment.
+      - name: CI analytics summary
+        id: ci-analytics
+        if: "!cancelled()"
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          LANE: pure
+          MODE: ${{ needs.rbe.outputs.mode }}
+          CHECK_RUN_ID: ${{ job.check_run_id }}
+          PR_HINT: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          args=()
+          for step in build-wasm build-pure test-pure test-bd; do
+            bep="$RUNNER_TEMP/bazel-bep-$step.json"
+            [ -f "$bep" ] || continue
+            args+=(--invocation "$step" "$bep" "$RUNNER_TEMP/bazel-exec-$step.log.zst" "$RUNNER_TEMP/bazel-profile-$step.json")
+          done
+          [ "${#args[@]}" -gt 0 ] || exit 0
+          zstd --version || echo "::warning::zstd missing: no per-mnemonic data in this lane's summary"
+          python3 tools/bazel/ci_analytics_extract.py \
+            --lane "$LANE" --mode "$MODE" --check-run-id "$CHECK_RUN_ID" --pr-hint "$PR_HINT" \
+            "${args[@]}" \
+            --out "$RUNNER_TEMP/ci-analytics/ci-analytics.json"
+
+      - name: Upload CI analytics summary
+        if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: ci-analytics-pure-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
+          retention-days: 7
+          if-no-files-found: ignore
 
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
@@ -1075,9 +1209,8 @@ jobs:
     # sum(durations)/shard_count the way a CPU-core-bound local sweep is --
     # each shard is its own remote action and runs concurrently with every
     # other shard, farm capacity permitting.
-    # On same-repo pull_requests those jobs stand down (pr-risk.yml's
-    # bazel-coverage), so this lane is then the tier's only PR run
-    # and pr.yml's gate requires it to have run here and passed.
+    # This lane is the tier's only PR run (pr-risk.yml's legacy jobs are
+    # retired) and pr.yml's gate requires it to have run here and passed.
     # The runs-on expression is the shared one: Blacksmith in mode remote,
     # GitHub-hosted in the fork modes (a client only).
     needs: rbe
@@ -1130,8 +1263,11 @@ jobs:
           set -o pipefail
           start=$(date +%s)
           rc=0
-          bazel test //... --config=embedded \
+          bazel test //... --config=embedded ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
             --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec.log.zst" \
+            --profile="$RUNNER_TEMP/bazel-profile.json" \
+            --experimental_build_event_upload_strategy=local \
             2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
           echo "bazel test --config=embedded: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$rc"
@@ -1143,8 +1279,7 @@ jobs:
         if: ${{ always() && steps.test.outcome != 'skipped' }}
         run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
 
-      # Since D2 step 1 this lane is the tier's only pre-merge run on
-      # same-repo PRs. The shard scripts discover tests from source, but each
+      # This lane is the tier's only pre-merge run. The shard scripts discover tests from source, but each
       # Bazel binary holds only its target's srcs: a listed test the binary
       # lacks matches nothing and passes silently. Fail unless every Bazel
       # shard ran exactly the tests its script lists (list-only mode, cheap),
@@ -1173,6 +1308,37 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      # Same redacted summary as bazel-test's; see its comment.
+      - name: CI analytics summary
+        id: ci-analytics
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          LANE: embedded
+          MODE: ${{ needs.rbe.outputs.mode }}
+          CHECK_RUN_ID: ${{ job.check_run_id }}
+          PR_HINT: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          [ -f "$RUNNER_TEMP/bazel-bep.json" ] || exit 0
+          zstd --version || echo "::warning::zstd missing: no per-mnemonic data in this lane's summary"
+          python3 tools/bazel/ci_analytics_extract.py \
+            --lane "$LANE" --mode "$MODE" --check-run-id "$CHECK_RUN_ID" --pr-hint "$PR_HINT" \
+            --invocation test "$RUNNER_TEMP/bazel-bep.json" "$RUNNER_TEMP/bazel-exec.log.zst" "$RUNNER_TEMP/bazel-profile.json" \
+            --out "$RUNNER_TEMP/ci-analytics/ci-analytics.json"
+
+      - name: Upload CI analytics summary
+        if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: ci-analytics-embedded-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
+          retention-days: 7
+          if-no-files-found: ignore
+
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
       # cancellation too.
@@ -1184,8 +1350,8 @@ jobs:
         run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
 
   # main.yml's "Main Linux integration packages (N/6)" and "Main Linux
-  # integration cmd/bd (N/8)" jobs (nightly.yml's Full Test Suite runs the
-  # same go test in one job) as --config=integration: every package with
+  # integration cmd/bd (N/8)" jobs (and nightly.yml's retired Full Test
+  # Suite, the same go test in one job) as --config=integration: every package with
   # -tags=integration,gms_pure_go, race, no -short, BEADS_TEST_SKIP=dolt (see
   # .bazelrc). A job of its own: ci and integration share bazel-testlogs, so
   # bazel-test's equivalence step would read this lane's test.xml if both ran
@@ -1273,19 +1439,23 @@ jobs:
           if [[ -n "$EXCLUDE_TARGETS" ]]; then
             echo "bazel-cmd-dolt is required: excluding $EXCLUDE_TARGETS (it runs there)" | tee -a "$GITHUB_STEP_SUMMARY"
           fi
-          bazel test //... --config=integration \
+          bazel test //... --config=integration ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
             --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec.log.zst" \
+            --profile="$RUNNER_TEMP/bazel-profile.json" \
+            --experimental_build_event_upload_strategy=local \
             ${EXCLUDE_TARGETS:+-- "$EXCLUDE_TARGETS"} \
             2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
           echo "bazel test --config=integration: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
-      # As in bazel-embedded. dolt_version_test is a plain sh_test (no Go
-      # testcases in its test.xml), which --config=integration's tag filter
-      # keeps, unlike the embedded one.
+      # As in bazel-embedded. dolt_version_test and the repository guards in
+      # //scripts/repochecks are plain sh_tests (no Go testcases in their
+      # test.xml), which --config=integration's tag filter keeps, unlike the
+      # embedded one.
       - name: Every target and shard ran tests
         if: ${{ always() && steps.test.outcome != 'skipped' }}
-        run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json" --not-go //tools/bazel:dolt_version_test
+        run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json" --not-go //tools/bazel:dolt_version_test --not-go //scripts/repochecks:all
 
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
@@ -1299,6 +1469,37 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      # Same redacted summary as bazel-test's; see its comment.
+      - name: CI analytics summary
+        id: ci-analytics
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          LANE: integration
+          MODE: ${{ needs.rbe.outputs.mode }}
+          CHECK_RUN_ID: ${{ job.check_run_id }}
+          PR_HINT: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          [ -f "$RUNNER_TEMP/bazel-bep.json" ] || exit 0
+          zstd --version || echo "::warning::zstd missing: no per-mnemonic data in this lane's summary"
+          python3 tools/bazel/ci_analytics_extract.py \
+            --lane "$LANE" --mode "$MODE" --check-run-id "$CHECK_RUN_ID" --pr-hint "$PR_HINT" \
+            --invocation test "$RUNNER_TEMP/bazel-bep.json" "$RUNNER_TEMP/bazel-exec.log.zst" "$RUNNER_TEMP/bazel-profile.json" \
+            --out "$RUNNER_TEMP/ci-analytics/ci-analytics.json"
+
+      - name: Upload CI analytics summary
+        if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: ci-analytics-integration-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
+          retention-days: 7
+          if-no-files-found: ignore
+
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
       # cancellation too.
@@ -1309,14 +1510,12 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
 
-  # pr.yml's container-backed jobs, "Test (storage domain + uow)" and
-  # "Contract corpus", as Bazel's dolt-server lane: --config=doltserver runs
-  # the dolt-server variants (domain/..., uow in 8 shards, tracker/...,
-  # doctor/fix, protocol in 8 shards), each of which starts its own dolt
-  # sql-server from the pinned dolt, so they execute on the remote workers
-  # like any other test (locally for forks and rbe=off). The docker lane
-  # (--config=docker: the same suites against testcontainers on this runner,
-  # no-remote-exec) stays the A/B control: dispatch with dolt-lane=docker.
+  # pr.yml's retired container-backed jobs, "Test (storage domain + uow)"
+  # and "Contract corpus", as Bazel's dolt-server lane: --config=doltserver
+  # runs the dolt-server variants (domain/..., uow in 8 shards, tracker/...,
+  # doctor/fix, protocol in 8 shards, testutil), each of which starts its
+  # own dolt sql-server from the pinned dolt, so they execute on the remote
+  # workers like any other test (locally with rbe=off).
   bazel-doltserver:
     name: dolt-server lane
     # Same runner and skip rule as bazel-test.
@@ -1327,14 +1526,13 @@ jobs:
     outputs:
       result: ${{ steps.result.outputs.result }}
     env:
-      BAZEL_DOLT_LANE: ${{ inputs.dolt-lane || 'doltserver' }}
-      # D2 step 3: on covered PRs (always mode remote) this lane is the only
-      # pre-merge run of pr.yml's legacy domain+uow and contract corpus jobs, which ran every test
-      # every time and never retried: --config=sole-run then executes every
-      # test (no cached results) and fails on a remote cache eviction
-      # instead of re-running the whole invocation. Fork modes do the same
-      # (with BAZEL_COVERS_FORKS "true" it is their only run too). Local and
-      # cache runs (the legacy jobs still run) keep cached results.
+      # This lane is the only pre-merge run of these suites (the go test
+      # jobs it replaced never retried): where it executes remotely
+      # --config=sole-run fails on a remote cache eviction instead of
+      # re-running the whole invocation (whose retry could turn a failed
+      # test green).
+      # Test results are cached and reused like every lane's; only nightly
+      # re-executes them all (BAZEL_FRESH).
       BAZEL_SOLE_RUN: ${{ needs.rbe.outputs.enabled == 'true' && '--config=sole-run' || '' }}
     steps:
       # inputs.checkout-sha: see the header (empty: the event's default ref).
@@ -1360,12 +1558,6 @@ jobs:
           RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
           RBE_FORK_PR: ${{ github.event.pull_request.number }}
 
-      # Docker lane only (the A/B control), as in the mirrored jobs; its
-      # tests fail rather than skip without the image.
-      - name: Pull Dolt sql-server image
-        if: ${{ env.BAZEL_DOLT_LANE == 'docker' }}
-        run: ./scripts/ci/pull-dolt-image.sh
-
       - name: bazel test //... --config=doltserver
         id: test
         timeout-minutes: 80
@@ -1373,8 +1565,13 @@ jobs:
           set -o pipefail
           start=$(date +%s)
           rc=0
-          bazel test //... "--config=$BAZEL_DOLT_LANE" ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
-          echo "bazel test --config=$BAZEL_DOLT_LANE: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
+          bazel test //... --config=doltserver ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
+            --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec.log.zst" \
+            --profile="$RUNNER_TEMP/bazel-profile.json" \
+            --experimental_build_event_upload_strategy=local \
+            2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
+          echo "bazel test --config=doltserver: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
       - name: Upload test logs
@@ -1382,12 +1579,43 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
-          name: bazel-${{ env.BAZEL_DOLT_LANE }}-testlogs
+          name: bazel-doltserver-testlogs
           path: |
             bazel-testlogs/**/test.log
             bazel-testlogs/**/test.xml
           if-no-files-found: ignore
           retention-days: 7
+
+      # Same redacted summary as bazel-test's; see its comment.
+      - name: CI analytics summary
+        id: ci-analytics
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          LANE: doltserver
+          MODE: ${{ needs.rbe.outputs.mode }}
+          CHECK_RUN_ID: ${{ job.check_run_id }}
+          PR_HINT: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          [ -f "$RUNNER_TEMP/bazel-bep.json" ] || exit 0
+          zstd --version || echo "::warning::zstd missing: no per-mnemonic data in this lane's summary"
+          python3 tools/bazel/ci_analytics_extract.py \
+            --lane "$LANE" --mode "$MODE" --check-run-id "$CHECK_RUN_ID" --pr-hint "$PR_HINT" \
+            --invocation test "$RUNNER_TEMP/bazel-bep.json" "$RUNNER_TEMP/bazel-exec.log.zst" "$RUNNER_TEMP/bazel-profile.json" \
+            --out "$RUNNER_TEMP/ci-analytics/ci-analytics.json"
+
+      - name: Upload CI analytics summary
+        if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: ci-analytics-doltserver-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
+          retention-days: 7
+          if-no-files-found: ignore
 
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
@@ -1407,19 +1635,19 @@ jobs:
   # not the legacy jobs' 15 — shard k here is not the same split as their
   # shard k. Same build as --config=doltserver (race bd_test, non-race
   # bd_for_tests), shared with bazel-doltserver through the remote cache.
-  # PR Risk builds its bd-cmd-test with -race, as here; main.yml's
-  # test-proxied-cmd twin uses build-artifacts' non-race bd-cmd-test, so
-  # this lane is the stricter of the two. A job of its own, not gated by
-  # any integration switch: it runs in pr.yml's call and its gate requires
-  # it (BAZEL_PROXIED).
+  # The test binary is race, as PR Risk's retired jobs built it. It also runs
+  # //cmd/bd:bd_managed_local_test, the managed-local proxied lifecycle
+  # (formerly proxied-local-smoke.yml) in a loopback-only network
+  # namespace, which needs the workers' unprivileged user namespaces. A job
+  # of its own, not gated by any integration switch: it runs in pr.yml's
+  # call and its gate requires it (BAZEL_PROXIED).
   bazel-proxied:
     name: proxied-server tier
     # Remote execution only, like bazel-embedded: 30 concurrent shards, each
     # running its own dolt sql-server busy on ~4 cores, do not fit a
     # GitHub-hosted runner regardless of any single shard's wall time.
-    # On same-repo pull_requests the legacy jobs stand down (pr-risk.yml's
-    # bazel-coverage; D2 step 2), so this lane is then the tier's only PR
-    # run and pr.yml's gate requires it to have run here and passed.
+    # This lane is the tier's only PR run (pr-risk.yml's legacy jobs are
+    # retired) and pr.yml's gate requires it to have run here and passed.
     needs: rbe
     runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.enabled == 'true' }}
@@ -1499,8 +1727,11 @@ jobs:
           set -o pipefail
           start=$(date +%s)
           rc=0
-          bazel test //... --config=doltserver-proxied \
+          bazel test //... --config=doltserver-proxied ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
             --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec.log.zst" \
+            --profile="$RUNNER_TEMP/bazel-profile.json" \
+            --experimental_build_event_upload_strategy=local \
             2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
           echo "bazel test --config=doltserver-proxied: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$rc"
@@ -1510,8 +1741,7 @@ jobs:
         if: ${{ always() && steps.test.outcome != 'skipped' }}
         run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
 
-      # Since D2 step 2 this lane is the tier's only pre-merge run on
-      # same-repo PRs: as in bazel-embedded, every Bazel shard must run
+      # This lane is the tier's only pre-merge run: as in bazel-embedded, every Bazel shard must run
       # exactly the tests its shard script lists, and not only skips.
       - name: Every listed test ran in its shard
         if: ${{ always() && steps.test.outcome != 'skipped' }}
@@ -1531,6 +1761,37 @@ jobs:
             bazel-testlogs/**/test.xml
           if-no-files-found: ignore
           retention-days: 7
+
+      # Same redacted summary as bazel-test's; see its comment.
+      - name: CI analytics summary
+        id: ci-analytics
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          LANE: proxied-server
+          MODE: ${{ needs.rbe.outputs.mode }}
+          CHECK_RUN_ID: ${{ job.check_run_id }}
+          PR_HINT: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          [ -f "$RUNNER_TEMP/bazel-bep.json" ] || exit 0
+          zstd --version || echo "::warning::zstd missing: no per-mnemonic data in this lane's summary"
+          python3 tools/bazel/ci_analytics_extract.py \
+            --lane "$LANE" --mode "$MODE" --check-run-id "$CHECK_RUN_ID" --pr-hint "$PR_HINT" \
+            --invocation test "$RUNNER_TEMP/bazel-bep.json" "$RUNNER_TEMP/bazel-exec.log.zst" "$RUNNER_TEMP/bazel-profile.json" \
+            --out "$RUNNER_TEMP/ci-analytics/ci-analytics.json"
+
+      - name: Upload CI analytics summary
+        if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: ci-analytics-proxied-server-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
+          retention-days: 7
+          if-no-files-found: ignore
 
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
@@ -1556,9 +1817,8 @@ jobs:
     name: server-Dolt storage tier
     # Remote execution only, like bazel-integration: locally the tagged race
     # build of //... alone is most of the timeout.
-    # On same-repo pull_requests the legacy jobs stand down (pr-risk.yml's
-    # bazel-coverage; D2 step 2), so this lane is then the tier's only PR
-    # run and pr.yml's gate requires it to have run here and passed.
+    # This lane is the tier's only PR run (pr-risk.yml's legacy jobs are
+    # retired) and pr.yml's gate requires it to have run here and passed.
     needs: rbe
     runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.enabled == 'true' }}
@@ -1610,8 +1870,11 @@ jobs:
           set -o pipefail
           start=$(date +%s)
           rc=0
-          bazel test //... --config=doltserver-integration \
+          bazel test //... --config=doltserver-integration ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
             --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec.log.zst" \
+            --profile="$RUNNER_TEMP/bazel-profile.json" \
+            --experimental_build_event_upload_strategy=local \
             2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
           echo "bazel test --config=doltserver-integration: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$rc"
@@ -1621,8 +1884,7 @@ jobs:
         if: ${{ always() && steps.test.outcome != 'skipped' }}
         run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
 
-      # Since D2 step 2 this lane is the tier's only pre-merge run on
-      # same-repo PRs: as in bazel-embedded, every full-suite shard must run
+      # This lane is the tier's only pre-merge run: as in bazel-embedded, every full-suite shard must run
       # exactly the tests its shard script lists, and neither it nor the
       # conformance target only skips.
       - name: Every listed test ran in its shard
@@ -1632,6 +1894,15 @@ jobs:
           --bep "$RUNNER_TEMP/bazel-bep.json"
           --suite //internal/storage/dolt:dolt_server_full_test .github/scripts/server-storage-test-shard.sh 16
           --whole //internal/storage/dolt:dolt_server_conformance_test
+
+      # rbe-ci-cost-latency-study.md recommendation 4: this tier's last
+      # shard has trailed the rest by 4.3-4.5 min in 2 of 8 runs. Warns
+      # (::warning) when the slowest shard this run is far above the
+      # median; does not fail the job yet (--fail-on-imbalance switches
+      # that on once the budget has run clean for a while).
+      - name: Shard balance
+        if: ${{ always() && steps.test.outcome != 'skipped' }}
+        run: python3 tools/bazel/shard_budget.py --bep "$RUNNER_TEMP/bazel-bep.json"
 
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
@@ -1644,6 +1915,37 @@ jobs:
             bazel-testlogs/**/test.xml
           if-no-files-found: ignore
           retention-days: 7
+
+      # Same redacted summary as bazel-test's; see its comment.
+      - name: CI analytics summary
+        id: ci-analytics
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          LANE: server-storage
+          MODE: ${{ needs.rbe.outputs.mode }}
+          CHECK_RUN_ID: ${{ job.check_run_id }}
+          PR_HINT: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          [ -f "$RUNNER_TEMP/bazel-bep.json" ] || exit 0
+          zstd --version || echo "::warning::zstd missing: no per-mnemonic data in this lane's summary"
+          python3 tools/bazel/ci_analytics_extract.py \
+            --lane "$LANE" --mode "$MODE" --check-run-id "$CHECK_RUN_ID" --pr-hint "$PR_HINT" \
+            --invocation test "$RUNNER_TEMP/bazel-bep.json" "$RUNNER_TEMP/bazel-exec.log.zst" "$RUNNER_TEMP/bazel-profile.json" \
+            --out "$RUNNER_TEMP/ci-analytics/ci-analytics.json"
+
+      - name: Upload CI analytics summary
+        if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: ci-analytics-server-storage-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
+          retention-days: 7
+          if-no-files-found: ignore
 
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
@@ -1660,9 +1962,12 @@ jobs:
   # shards) against a hermetic dolt sql-server, i.e. the Dolt-gated cmd/bd
   # tests (TestCLI_*, TestInit*, the store-backed suites) that every other
   # lane and legacy job skips with BEADS_TEST_SKIP=dolt or leaves out of its
-  # manifest. --config=doltserver-cmd has exactly --config=integration's
-  # build flags, so it shares bazel-integration's compile through the
-  # remote cache. Runs exactly where bazel-integration runs (the same if):
+  # manifest; plus the differential regression suite
+  # (//tests/regression:regression_test, 8 shards: the candidate
+  # bd_for_tests against the catalog-pinned v0.49.6 release, formerly
+  # regression.yml). --config=doltserver-cmd has exactly
+  # --config=integration's build flags, so it shares bazel-integration's
+  # compile through the remote cache. Runs exactly where bazel-integration runs (the same if):
   # remotely (modes remote, fork-ro, fork-rw), or locally with the
   # read-only cache (mode cache: fork and Dependabot PRs while rbe-fork is
   # closed), never plain local (rbe=off), and not when a caller passes
@@ -1722,8 +2027,11 @@ jobs:
           set -o pipefail
           start=$(date +%s)
           rc=0
-          bazel test //... --config=doltserver-cmd \
+          bazel test //... --config=doltserver-cmd ${BAZEL_FRESH:+"$BAZEL_FRESH"} \
             --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
+            --execution_log_compact_file="$RUNNER_TEMP/bazel-exec.log.zst" \
+            --profile="$RUNNER_TEMP/bazel-profile.json" \
+            --experimental_build_event_upload_strategy=local \
             2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
           echo "bazel test --config=doltserver-cmd: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$rc"
@@ -1747,6 +2055,37 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      # Same redacted summary as bazel-test's; see its comment.
+      - name: CI analytics summary
+        id: ci-analytics
+        if: "!cancelled() && steps.test.outcome != 'skipped'"
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          LANE: cmd-dolt
+          MODE: ${{ needs.rbe.outputs.mode }}
+          CHECK_RUN_ID: ${{ job.check_run_id }}
+          PR_HINT: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          [ -f "$RUNNER_TEMP/bazel-bep.json" ] || exit 0
+          zstd --version || echo "::warning::zstd missing: no per-mnemonic data in this lane's summary"
+          python3 tools/bazel/ci_analytics_extract.py \
+            --lane "$LANE" --mode "$MODE" --check-run-id "$CHECK_RUN_ID" --pr-hint "$PR_HINT" \
+            --invocation test "$RUNNER_TEMP/bazel-bep.json" "$RUNNER_TEMP/bazel-exec.log.zst" "$RUNNER_TEMP/bazel-profile.json" \
+            --out "$RUNNER_TEMP/ci-analytics/ci-analytics.json"
+
+      - name: Upload CI analytics summary
+        if: "!cancelled() && steps.ci-analytics.outcome == 'success'"
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          overwrite: true # a job re-run is the same run: replace, not 409
+          name: ci-analytics-cmd-dolt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-analytics/ci-analytics.json
+          retention-days: 7
+          if-no-files-found: ignore
+
       # Last step: the job's result as a workflow_call output for pr.yml's
       # ci-gate. always() runs it after a failure, a timeout or a
       # cancellation too; job.status is the steps' status, unaffected by the
@@ -1759,8 +2098,7 @@ jobs:
         run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
 
   # F3: moved here from pr.yml so the gate depends on nothing but the rbe
-  # job's decision (not detect-package-gates, build-artifacts, bazel-coverage
-  # or the whole bazel call). Only pr.yml opts in (package-gates: "on");
+  # job's decision (not the whole bazel call). Only pr.yml opts in (package-gates: "on");
   # bazel-farm.yml and nightly.yml keep the default "off" and this job does
   # not run for them. Same-repo PRs get a Bazel-built bd (no --config=ci:
   # only test:ci is defined in .bazelrc, so bazel build //cmd/bd:bd_for_tests
@@ -1790,8 +2128,8 @@ jobs:
       - name: Decide applicability
         id: detect
         env:
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
           PUSH_BEFORE_SHA: ${{ github.event.before }}
           PUSH_AFTER_SHA: ${{ github.sha }}
         run: ./scripts/ci/detect-package-gates.sh
@@ -1909,8 +2247,8 @@ jobs:
       - name: Decide applicability
         id: detect
         env:
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
           PUSH_BEFORE_SHA: ${{ github.event.before }}
           PUSH_AFTER_SHA: ${{ github.sha }}
         run: ./scripts/ci/detect-package-gates.sh

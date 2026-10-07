@@ -1521,6 +1521,63 @@ func RunBatchApplyNormalizesTheWaitsForGate(t *testing.T, ctx context.Context, f
 	})
 }
 
+// RunBatchApplyStampsSpawnerIDOnlyWhenNamed is the S11 review fix-up
+// regression for HIGH-2: a waits-for DepAddItem must only acquire
+// metadata.spawner_id when the caller explicitly named a spawner
+// (HasSpawner=true, which bd create --graph sets when the plan declares
+// edges[].spawner_key/spawner_id). An edge with no named spawner must keep
+// its gate-only metadata untouched — stamping it unconditionally from the
+// resolved target caused unnecessary rewrite/version churn when gc
+// re-applies the same edge (see CHANGELOG.md).
+func RunBatchApplyStampsSpawnerIDOnlyWhenNamed(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	spawner := fixture.IssuePrefix + "-spawner-named"
+	waiter := fixture.IssuePrefix + "-waiter-named"
+	batchApplySeedIssue(t, ctx, fixture, spawner, types.StatusOpen)
+	batchApplySeedIssue(t, ctx, fixture, waiter, types.StatusOpen)
+
+	batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+		Actor: "apply-writer",
+		Items: []publicops.ApplyItem{
+			{Kind: publicops.ItemDepAdd, DepAdd: &publicops.DepAddItem{
+				Source:     publicops.Ref{ID: waiter},
+				Target:     publicops.Ref{ID: spawner},
+				Type:       publicops.DepWaitsFor,
+				Metadata:   `{"gate":"any-children"}`,
+				HasSpawner: true,
+			}},
+		},
+	})
+	stored := batchApplyEdgeMetadata(t, ctx, fixture, waiter, spawner)
+	var meta types.WaitsForMeta
+	if err := json.Unmarshal([]byte(stored), &meta); err != nil {
+		t.Fatalf("stored named-spawner metadata %q: %v", stored, err)
+	}
+	if meta.SpawnerID != spawner {
+		t.Errorf("named-spawner edge spawner_id = %q, want %q (metadata %q)", meta.SpawnerID, spawner, stored)
+	}
+
+	spawner2 := fixture.IssuePrefix + "-spawner-unnamed"
+	waiter2 := fixture.IssuePrefix + "-waiter-unnamed"
+	batchApplySeedIssue(t, ctx, fixture, spawner2, types.StatusOpen)
+	batchApplySeedIssue(t, ctx, fixture, waiter2, types.StatusOpen)
+
+	batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+		Actor: "apply-writer",
+		Items: []publicops.ApplyItem{
+			batchApplyDepAdd(publicops.Ref{ID: waiter2}, publicops.Ref{ID: spawner2}, publicops.DepWaitsFor, `{"gate":"any-children"}`),
+		},
+	})
+	stored2 := batchApplyEdgeMetadata(t, ctx, fixture, waiter2, spawner2)
+	var meta2 types.WaitsForMeta
+	if err := json.Unmarshal([]byte(stored2), &meta2); err != nil {
+		t.Fatalf("stored unnamed-spawner metadata %q: %v", stored2, err)
+	}
+	if meta2.SpawnerID != "" {
+		t.Errorf("unnamed-spawner edge must not stamp spawner_id, got %q (metadata %q)", meta2.SpawnerID, stored2)
+	}
+}
+
 // RunBatchApplySplicesAForwardMetadataRef pins the one exception to the
 // backward-only rule (CreateItem.MetadataRefs): "IT IS THE ONE PLACE A KEY MAY
 // REACH FORWARD … Every id is minted before any splice is applied, so the

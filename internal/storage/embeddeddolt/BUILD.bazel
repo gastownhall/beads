@@ -1,5 +1,6 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//tools/bazel:race.bzl", "go_test_race_off")
 
 go_library(
     name = "embeddeddolt",
@@ -7,6 +8,7 @@ go_library(
         "batch_applier.go",
         "batch_closer.go",
         "batch_creator.go",
+        "batchgetter.go",
         "blockingannotator.go",
         "bootstrapper.go",
         "cache.go",
@@ -100,6 +102,7 @@ go_test(
         "batch_apply_contract_test.go",
         "batch_closer_contract_test.go",
         "batch_creator_contract_test.go",
+        "batch_getter_contract_test.go",
         "blocked_recheck_internal_test.go",
         "blocked_recompute_test.go",
         "blocking_annotator_contract_test.go",
@@ -268,8 +271,8 @@ go_test(
 # BEADS_TEST_EMBEDDED_DOLT=1; the wrapper points
 # BEADS_TEST_EMBEDDED_TEST_BINARY at this binary, which the concurrency test
 # re-executes. This is a *different* shard count from PR Risk's legacy
-# fork/push jobs, "Test (Embedded Dolt Storage N/5)" (pr-risk.yml,
-# main.yml): those keep running 5 shards of their own, frozen hand-assigned
+# fork jobs, "Test (Embedded Dolt Storage N/5)" (pr-risk.yml): those keep
+# running 5 shards of their own, frozen hand-assigned
 # block in the same manifest file — shard k here is not the same split as
 # their shard k. shard_count must stay equal to this lane's manifest
 # block's shard total.
@@ -359,6 +362,49 @@ sh_test(
     tags = ["embedded"],
 )
 
+# embeddeddolt_test without the race detector: the input of
+# embeddeddolt_batch_apply_nonrace_test below.
+#
+# Tags:
+#   manual: only that variant's input, never a build target of its own.
+go_test_race_off(
+    name = "embeddeddolt_race_off",
+    tags = ["manual"],
+    test = ":embeddeddolt_test",
+)
+
+# The large embedded batch applies at full size, which every race lane
+# shrinks or skips (raceEnabled; see large_batch_apply_measure_test.go): the
+# 1000-item TestBatchApplyContract/BoundsTheItemCount and wall-clock shapes,
+# the pinned 712-item statement counts, and the 458-issue batch-create
+# equivalence scenarios. Non-race, BEADS_TEST_EMBEDDED_DOLT=1, the selection
+# nightly.yml's retired "Embedded Dolt batch-apply suite (non-race)" step ran
+# with `go test` on a runner. The wall-clock test only logs its timings, so
+# a shared executor cannot fail it.
+#
+# Tags:
+#   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
+#     selected by --config=embedded.
+sh_test(
+    name = "embeddeddolt_batch_apply_nonrace_test",
+    size = "large",
+    # The step's -timeout 20m, with the same -test.timeout=19m deviation as
+    # the conformance variants above, so Go's timeout fires (with a goroutine
+    # dump) before Bazel's 1200s action limit.
+    timeout = "eternal",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = [
+        "$(rootpath :embeddeddolt_race_off)",
+        "-test.v",
+        "-test.count=1",
+        "-test.timeout=19m",
+        "-test.run=^(TestBatchApplyContract|TestLargeBatchApplyWallClock_Embedded|TestLargeBatchApplyStatementCounts712_Embedded|TestCreateBatchFastPathsMatchPerRowLarge_Embedded)$$",
+    ],
+    data = [":embeddeddolt_race_off"],
+    env = {"BEADS_TEST_EMBEDDED_DOLT": "1"},
+    tags = ["embedded"],
+)
+
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(
@@ -371,3 +417,25 @@ filegroup(
 )
 
 # --- end go_srcs ---
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

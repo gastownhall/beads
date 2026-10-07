@@ -133,6 +133,9 @@ func (s *roleAccessorStore) TreeWalker() (issueops.TreeWalker, error) { return s
 func (s *roleAccessorStore) GraphCounter() (issueops.GraphCounter, error) {
 	return s.surface, s.err
 }
+func (s *roleAccessorStore) BatchGetter() (issueops.BatchGetter, error) {
+	return s.surface, s.err
+}
 func (s *roleAccessorStore) BlockingAnnotator() (issueops.BlockingAnnotator, error) {
 	return s.surface, s.err
 }
@@ -258,6 +261,9 @@ func (*roleAccessorSentinel) CountReady(context.Context, issueops.ReadyRequest) 
 func (*roleAccessorSentinel) CountEdges(context.Context, issueops.EdgeCountRequest) (issueops.EdgeCountResult, error) {
 	return issueops.EdgeCountResult{}, nil
 }
+func (*roleAccessorSentinel) GetMany(context.Context, issueops.GetManyRequest) (issueops.GetManyResult, error) {
+	return issueops.GetManyResult{}, nil
+}
 
 func (*roleAccessorSentinel) Query(context.Context, issueops.QueryRequest) (issueops.IssuePage, error) {
 	return issueops.IssuePage{}, nil
@@ -355,6 +361,7 @@ func TestInstrumentedStorageInstrumentsEveryRoleAccessor(t *testing.T) {
 		{"BlockingAnnotator", func() (any, error) { return wrapped.BlockingAnnotator() }, sentinel},
 		{"TreeWalker", func() (any, error) { return wrapped.TreeWalker() }, sentinel},
 		{"GraphCounter", func() (any, error) { return wrapped.GraphCounter() }, sentinel},
+		{"BatchGetter", func() (any, error) { return wrapped.BatchGetter() }, sentinel},
 		{"Counter", func() (any, error) { return wrapped.Counter() }, sentinel},
 		{"WorkspaceConfig", func() (any, error) { return wrapped.WorkspaceConfig() }, sentinel},
 		{"Memories", func() (any, error) { return wrapped.Memories() }, memorySentinel},
@@ -440,6 +447,7 @@ func TestInstrumentedStorageRoleAccessorsPropagateInnerErrors(t *testing.T) {
 		{"BlockingAnnotator", func() (any, error) { return wrapped.BlockingAnnotator() }},
 		{"TreeWalker", func() (any, error) { return wrapped.TreeWalker() }},
 		{"GraphCounter", func() (any, error) { return wrapped.GraphCounter() }},
+		{"BatchGetter", func() (any, error) { return wrapped.BatchGetter() }},
 		{"Counter", func() (any, error) { return wrapped.Counter() }},
 		{"WorkspaceConfig", func() (any, error) { return wrapped.WorkspaceConfig() }},
 		{"Memories", func() (any, error) { return wrapped.Memories() }},

@@ -7,6 +7,7 @@ go_library(
         "batch_apply.go",
         "batch_close.go",
         "batch_create.go",
+        "batch_get.go",
         "blocking.go",
         "claim.go",
         "claim_next.go",
@@ -65,6 +66,7 @@ go_test(
         "batch_apply_test.go",
         "batch_close_test.go",
         "batch_create_test.go",
+        "batch_get_test.go",
         "blocking_test.go",
         "brief_projection_test.go",
         "claim_next_test.go",
@@ -128,3 +130,25 @@ go_test(
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

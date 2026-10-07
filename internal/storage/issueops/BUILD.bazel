@@ -6,6 +6,7 @@ go_library(
         "aggregate.go",
         "as_of.go",
         "batch_apply.go",
+        "batchget.go",
         "batching.go",
         "blocked.go",
         "blocked_consistency.go",
@@ -128,6 +129,7 @@ go_test(
         "aggregate_authorize_transfer_test.go",
         "as_of_test.go",
         "batch_apply_test.go",
+        "batchget_test.go",
         "batching_test.go",
         "blocked_consistency_test.go",
         "blocked_recheck_test.go",
@@ -228,3 +230,25 @@ filegroup(
 )
 
 # --- end go_srcs ---
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

@@ -63,7 +63,7 @@ info:
       outside its own parameter table with `400` / `code: invalid_argument` /
       `reason: "unknown_parameter"` and `param` naming the offending key.
       Operations that declare no QUERY parameter at all reject every query key
-      the same way. Today that is twenty-five of the forty-one operations
+      the same way. Today that is twenty-six of the forty-two operations
       here — `GET /healthz`, `GET /v0/beads/context`,
       `GET /v0/beads/dependencies/cycles`, `POST /v0/beads/issues`,
       `PATCH /v0/beads/issues/{id}`,
@@ -74,6 +74,7 @@ info:
       `POST /v0/beads/issues/{id}:reopen`,
       `POST /v0/beads/issues/{id}:casMetadata`, `POST /v0/beads/issues:sweep`,
       `POST /v0/beads/issues:delete`,
+      `POST /v0/beads/issues:batchGet`,
       `POST /v0/beads/issues:batchCreate`,
       `POST /v0/beads/issues:batchApply`,
       `POST /v0/beads/issues:batchClose`, `GET /v0/beads/config`,
@@ -3795,6 +3796,101 @@ paths:
         '503':
           $ref: '#/components/responses/Unavailable'
 
+  /v0/beads/issues:batchGet:
+    post:
+      operationId: batchGetIssues
+      summary: Read many issues by id in one snapshot
+      description: >-
+        Reads every issue the request NAMES, hydrated, in ONE snapshot. It is
+        the operation behind `issueops.BatchGetter`, and exists because the
+        obvious way to read N issues — `GET /v0/beads/issues/{id}` repeated N
+        times — costs N round trips to answer a question a caller already
+        knows the shape of: "which of these ids exist, and what do they look
+        like right now."
+
+
+        A POST rather than a `GET` with a repeated query parameter: the request
+        names up to 1000 ids, which does not fit a query string reliably, and
+        `issues:delete` beside it makes the same choice for the same reason.
+
+
+        ## What a miss means
+
+
+        AN ID THAT NAMES NO STORED ROW IS NOT AN ERROR. It is reported in
+        `missing`, in the order it was first named, beside whatever else
+        resolved — the same answer `GET /v0/beads/dependencies` and
+        `GET /v0/beads/dependencies:count` give a miss on their own anchors,
+        and the opposite of `GET /v0/beads/issues/{id}`, which answers ONE id
+        with the issue or a `404`. There is no `404` on this operation: a
+        batch read that discarded the ids that DID resolve because one did not
+        would be strictly worse than reporting both.
+
+
+        DUPLICATES COLLAPSE. A request naming the same id twice gets it back
+        once, in `issues` or in `missing`, in the position of its FIRST
+        mention — never both. `issues` and `missing` partition the DISTINCT
+        ids the request named; their lengths always sum to that count.
+
+
+        An empty `ids` is legal and answers with both arrays empty — the same
+        empty-request answer `EdgeCountRequest.ids` documents, because "no
+        ids" is a legitimate thing to ask for 0 issues about.
+
+
+        ## One snapshot
+
+
+        The existence check and the hydration share ONE transaction, so a
+        response never reports an id missing while a concurrent write was
+        creating it, or hands back a row for an id a concurrent write had
+        already deleted. Each returned issue carries its current `revision`,
+        so a caller that goes on to write one back has the
+        optimistic-concurrency token a lifecycle write wants without a second
+        round trip.
+
+
+        ## No HTTP client leg yet
+
+
+        This operation ships a server and a library role on every leg (dolt,
+        embedded dolt, the unit-of-work provider), but no generated HTTP
+        CLIENT method. A caller on the wrong side of that door reaches it
+        through the raw request this document describes rather than through a
+        typed client call, until the client generator lands.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchGetIssuesRequest'
+      security:
+        - bearerToken: []
+      responses:
+        '200':
+          description: >-
+            The ids that resolved, hydrated, plus the ids that did not.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchGetIssuesResult'
+        '400':
+          description: >-
+            Invalid request: an unparseable or oversized body, an unknown body
+            member, an `ids` carrying more than 1000 entries (counted before
+            deduplication), or a blank entry.
+          x-bd-codes: [invalid_argument]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
   /v0/beads/issues:batchCreate:
     post:
       operationId: batchCreateIssues
@@ -6630,6 +6726,229 @@ components:
         payload:
           type: string
 
+    BatchGetIssue:
+      type: object
+      description: >-
+        One resolved entry of `BatchGetIssuesResult.issues`: an `Issue` plus
+        its current `revision`. Property semantics other than `revision` are
+        documented on `Issue`; the spec repeats the list rather than
+        composing it (see the note at the top of this document).
+      x-go-type: types.BatchGetIssue
+      x-go-type-import:
+        name: types
+        path: github.com/steveyegge/beads/internal/types
+      required: [id, title, priority, created_at, updated_at, revision]
+      properties:
+        id:
+          type: string
+          description: Canonical issue id, e.g. `bd-abc`.
+        title:
+          type: string
+        description:
+          type: string
+        design:
+          type: string
+        acceptance_criteria:
+          type: string
+        notes:
+          type: string
+        spec_id:
+          type: string
+        status:
+          type: string
+          description: >-
+            `open`, `in_progress`, `blocked`, `closed`, or any custom status
+            configured for the workspace. NOT a closed vocabulary: clients must
+            treat an unrecognized value as "some status I do not know".
+        priority:
+          type: integer
+          description: 0 (most urgent) through 4. Always present; 0 is a real value.
+        issue_type:
+          type: string
+          description: >-
+            `bug`, `feature`, `task`, `epic`, `chore`, `gate`, and workspace
+            configured types. Not a closed vocabulary.
+        is_blocked:
+          type: boolean
+          description: >-
+            The persisted readiness projection — true when an open blocking
+            dependency keeps this issue out of the ready set. Derived from the
+            dependency graph; never set by a client.
+
+
+            NOT POPULATED by the /v0 read endpoints today: they hydrate issues
+            without it, so the field is absent from their responses and its
+            absence says nothing about whether an issue is blocked. Use
+            `/v0/beads/ready` or the dependency endpoints to answer that. The
+            field is carried by events-journal snapshots, which is where it is
+            read back, and it is documented here because those snapshots
+            serialize the same type this schema is pinned to.
+        assignee:
+          type: string
+          description: The actor currently holding the issue, if any.
+        owner:
+          type: string
+        estimated_minutes:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        closed_at:
+          type: string
+          format: date-time
+        close_reason:
+          type: string
+        closed_by_session:
+          type: string
+        lease_expires_at:
+          type: string
+          format: date-time
+          description: Expiry of the current claim's lease, when one is active.
+        heartbeat_at:
+          type: string
+          format: date-time
+        lease_granted_node:
+          type: string
+          description: >-
+            The replica that granted the lease. Empty means the provenance is
+            unknown, which is treated as local.
+        due_at:
+          type: string
+          format: date-time
+        defer_until:
+          type: string
+          format: date-time
+        external_ref:
+          type: string
+        source_system:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+          description: >-
+            Arbitrary caller-supplied JSON object. VALUES MAY BE OF ANY JSON
+            TYPE — string, number, boolean, array or nested object — because
+            typed values enter through the explicit JSON metadata path and
+            persist in older rows. Clients MUST NOT decode this into a
+            string-to-string map; a strict decode fails on the first typed
+            value and takes the whole response with it. That prohibition is on
+            assuming a narrower type when reading THIS document: a profile MAY
+            declare a narrower value schema under the rules in **Profiles**,
+            and a client of that profile may rely on the profile's declaration.
+
+
+            The object-at-top-level shape is the contract every producer and
+            every metadata filter (`metadata_field`, `has_metadata_key`)
+            assumes, but be aware the store validates only that the value is
+            WELL-FORMED JSON: a row created with a non-object (e.g.
+            `bd create --metadata '[1,2]'`) can carry an array or a scalar
+            here. That is a storage-side gap, not licence for a producer to
+            emit one — but a tolerant client should skip such a row rather than
+            fail the whole response.
+        compaction_level:
+          type: integer
+        compacted_at:
+          type: string
+          format: date-time
+        compacted_at_commit:
+          type: string
+        original_size:
+          type: integer
+        labels:
+          type: array
+          items:
+            type: string
+        dependencies:
+          type: array
+          description: >-
+            Dependency edges. Populated in export/interchange contexts; the
+            detail endpoint returns richer entries — see `IssueDetails`.
+          items:
+            $ref: '#/components/schemas/Dependency'
+        comments:
+          type: array
+          items:
+            $ref: '#/components/schemas/Comment'
+        sender:
+          type: string
+        ephemeral:
+          type: boolean
+          description: Ephemeral records are not synced.
+        no_history:
+          type: boolean
+        wisp_type:
+          type: string
+        storage_class:
+          type: string
+          description: >-
+            The record's history/replication contract. Empty means unset, which
+            resolves to ephemeral for wisp-plane records and versioned
+            otherwise.
+        pinned:
+          type: boolean
+        is_template:
+          type: boolean
+        bonded_from:
+          type: array
+          items:
+            $ref: '#/components/schemas/BondRef'
+        await_type:
+          type: string
+          description: Gate condition type.
+        await_id:
+          type: string
+        timeout:
+          type: integer
+          format: int64
+          description: >-
+            NANOSECONDS. This is a Go `time.Duration`, which encodes as an
+            int64 nanosecond count — a pre-existing wire fact, not a choice.
+        waiters:
+          type: array
+          items:
+            type: string
+        source_formula:
+          type: string
+        source_location:
+          type: string
+        mol_type:
+          type: string
+        work_type:
+          type: string
+        event_kind:
+          type: string
+        actor:
+          type: string
+          description: >-
+            For event records, the entity that caused the event. Unrelated to
+            the claiming actor in `ClaimRequest`.
+        target:
+          type: string
+        payload:
+          type: string
+        revision:
+          type: string
+          description: >-
+            The row's optimistic-concurrency token, spelled the way
+            `IssueDetails.revision` spells it — a decimal string, never a
+            number (a JSON number loses precision past 2^53 and the token
+            spans the full int64 range). EQUALITY-ONLY: compare it, never
+            order or interpret it. Send it back verbatim as an
+            `expected_version` on a lifecycle write.
+
+
+            NO omitempty: it is ALWAYS PRESENT, including as `"0"` for a
+            legacy migration-0054 row that has not been mutated since, the
+            same rule `IssueDetails.revision` states in full.
+
     IssueWithCounts:
       type: object
       description: >-
@@ -7582,7 +7901,8 @@ components:
             `issues.batchClose`,
             `issues.claim`, `issues.claimNext`, `issues.release`,
             `issues.close`, `issues.reopen`, `issues.update`,
-            `issues.sweep`, `issues.delete`, `issues.batchCreate`,
+            `issues.sweep`, `issues.delete`, `issues.batchGet`,
+            `issues.batchCreate`,
             `issues.batchApply`,
             `stats.get`, `config.list`, `config.get`, `config.set`,
             `config.unset`, `dependencies.cycles`,
@@ -8068,6 +8388,74 @@ components:
 
 
             DIRECT dependents only. A bead two edges away lost no edge.
+          items:
+            type: string
+
+    BatchGetIssuesRequest:
+      type: object
+      additionalProperties: false
+      required: [ids]
+      description: >-
+        Which issues to read, in one snapshot. There is no predicate here —
+        the caller already knows the ids — which is `DeleteIssuesRequest`'s
+        own reason for carrying none.
+
+
+        `additionalProperties: false`, so an unknown member is a `400` naming
+        the member.
+      properties:
+        ids:
+          type: array
+          maxItems: 1000
+          description: >-
+            The issues to read, exact ids, in either plane. DUPLICATES
+            COLLAPSE: a repeated id is answered once, in the position of its
+            first mention. An EMPTY array is legal and answers with both
+            `issues` and `missing` empty — it is not refused the way
+            `DeleteIssuesRequest.ids` refuses one, because a read that found
+            nothing to read is not a mistake the way a delete that erased
+            nothing usually is.
+
+
+            The cap is on the REQUEST, counted before deduplication: a caller
+            sending 1500 mentions of 3 distinct ids still names a request this
+            operation refuses, because the obligation the cap bounds is
+            reading the request apart, not reading the rows it resolves to.
+          items:
+            type: string
+
+    BatchGetIssuesResult:
+      type: object
+      required: [issues, missing]
+      description: >-
+        The issues that resolved, hydrated, plus the ids that did not — both
+        read from the SAME snapshot. Never a `404`: an id naming no stored row
+        is reported in `missing`, not refused, the same set-read answer
+        `DependencyEdges` and `EdgeCounts` give.
+      properties:
+        issues:
+          type: array
+          description: >-
+            One entry per requested id that resolved, in the REQUEST's order
+            (the caller's first mention of each distinct id), never the
+            storage engine's natural order. Each issue carries its current
+            `revision`, so a caller that goes on to write one back has the
+            optimistic-concurrency token a lifecycle write wants without a
+            second round trip. Empty array (never null) when nothing resolved.
+
+
+            HYDRATION IS LABELS ONLY: no dependencies, dependents or comments
+            — use `GET /v0/beads/issues/{id}` (`IssueDetails`) for those.
+          items:
+            $ref: '#/components/schemas/BatchGetIssue'
+        missing:
+          type: array
+          description: >-
+            The requested ids that resolved to no stored row, in the same
+            first-mention order as the request. An id here contributes no
+            entry to `issues`, and the two arrays' lengths always sum to the
+            number of DISTINCT ids the request named. Empty array (never null)
+            when every named id resolved.
           items:
             type: string
 

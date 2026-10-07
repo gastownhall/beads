@@ -175,6 +175,11 @@ func TestBatchApplyContract(t *testing.T) {
 		defer cancel()
 		conformance.RunBatchApplyNormalizesTheWaitsForGate(t, ctx, fixture)
 	})
+	t.Run("StampsSpawnerIDOnlyWhenNamed", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyStampsSpawnerIDOnlyWhenNamed(t, ctx, fixture)
+	})
 	t.Run("SplicesAForwardMetadataRef", func(t *testing.T) {
 		ctx, cancel := testContext(t)
 		defer cancel()

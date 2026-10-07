@@ -1,0 +1,46 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "unparam",
+    srcs = ["unparam.go"],
+    importpath = "github.com/steveyegge/beads/tools/nogo/analyzers/unparam",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/nogo/internal/golangci",
+        "@cc_mvdan_unparam//check",
+        "@org_golang_x_tools//go/analysis",
+        "@org_golang_x_tools//go/analysis/passes/buildssa",
+        "@org_golang_x_tools//go/packages",
+    ],
+)
+
+go_test(
+    name = "unparam_test",
+    srcs = ["unparam_test.go"],
+    deps = [
+        ":unparam",
+        "//tools/nogo/internal/analyzertest",
+    ],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

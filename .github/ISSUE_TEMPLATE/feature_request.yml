@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Every PR links a documented issue, and this form collects the context reviewers and future readers need. You can open your PR right after filing; no approval is needed first. Read the [project charter](https://github.com/gastownhall/beads/blob/main/engdocs/PROJECT_CHARTER.md) first — beads owns issue-tracking primitives, not orchestration policy or storage-engine behavior.
+        This form collects the context reviewers and future readers need for a change worth discussing. You can open your PR right after filing; no approval is needed first. Small, self-explanatory changes can skip the issue and go straight to a PR. Read the [project charter](https://github.com/gastownhall/beads/blob/main/engdocs/PROJECT_CHARTER.md) first — beads owns issue-tracking primitives, not orchestration policy or storage-engine behavior.
 
         **Agents filling in this form:** answer each question only from evidence you have. If you cannot answer a question from the evidence, write exactly `NOT_ENOUGH_INFO` instead of guessing.
 

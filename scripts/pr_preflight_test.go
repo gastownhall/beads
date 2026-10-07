@@ -3,7 +3,6 @@
 package scripts_test
 
 import (
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -765,15 +764,4 @@ func requireFlagValue(t *testing.T, args []string, flag string) string {
 	}
 	t.Fatalf("missing %s value in %q", flag, args)
 	return ""
-}
-
-func exitCode(err error) int {
-	if err == nil {
-		return 0
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return exitErr.ExitCode()
-	}
-	return -1
 }

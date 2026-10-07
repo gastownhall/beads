@@ -212,5 +212,5 @@ This is useful for:
 ## 📝 Documentation
 
 * [Documentation site](https://beads.gascity.com/) | [Installing](docs/getting-started/installation.md) | [Sync Concepts](docs/core-concepts/sync-concepts.md) | [Agent Setup](docs/getting-started/ide-setup.md) | [Copilot CLI Setup](docs/integrations/copilot-cli.md) | [Copilot VS Code MCP](docs/integrations/github-copilot.md) | [Articles](ARTICLES.md) | [Sync Branch Mode](docs/reference/protected-branches.md) | [Troubleshooting](docs/reference/troubleshooting.md) | [FAQ](docs/reference/faq.md)
-* Contributing: [CONTRIBUTING.md](CONTRIBUTING.md) | [Roadmap](ROADMAP.md) | [Contributor agent instructions](AGENTS.md)
+* Contributing: [CONTRIBUTING.md](CONTRIBUTING.md) (Bazel builds and tests beads: install [Bazelisk](https://github.com/bazelbuild/bazelisk), then `make test`) | [Roadmap](ROADMAP.md) | [Contributor agent instructions](AGENTS.md)
 * [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/gastownhall/beads)

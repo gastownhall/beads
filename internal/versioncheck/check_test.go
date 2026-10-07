@@ -12,7 +12,7 @@ import (
 func TestRepositoryReleaseVersionsMatch(t *testing.T) {
 	root := bazeltest.RepoRoot(t)
 	report, err := Check(root)
-	if err != nil && !(bazeltest.IsBazel() && onlyNPMManifestUndeclared(t, root, report)) {
+	if err != nil {
 		t.Fatalf("repository release metadata is inconsistent: %v", err)
 	}
 	if report.CheckedSources != 12 {
@@ -622,29 +622,4 @@ func writeFixtureAt(t *testing.T, root, version string) {
 
 func stringPointer(value string) *string {
 	return &value
-}
-
-// onlyNPMManifestUndeclared reports, and logs, whether the npm manifest is the
-// one failing release surface and it failed because it is absent. npm-package/
-// is in .bazelignore, so no target can declare npm-package/package.json as data
-// and a Bazel run never sees it; `go test` checks it against the real checkout.
-func onlyNPMManifestUndeclared(t *testing.T, root string, report Report) bool {
-	t.Helper()
-	if _, err := os.Stat(filepath.Join(root, "npm-package", "package.json")); !os.IsNotExist(err) {
-		return false
-	}
-	npmMissing := false
-	for _, source := range report.Sources {
-		switch {
-		case source.Problem == "":
-		case source.Description == "npm package.json":
-			npmMissing = true
-		default:
-			return false
-		}
-	}
-	if npmMissing {
-		t.Log("npm-package/ is in .bazelignore, so npm-package/package.json cannot be declared as data; checked under go test")
-	}
-	return npmMissing
 }

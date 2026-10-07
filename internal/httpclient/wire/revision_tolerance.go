@@ -33,7 +33,9 @@ const itemsKey = "items"
 // here, at the reader, on the small, explicit set of types that carry it.
 //
 // The set is exactly the schemas internal/httpapi/wireshape's digest records
-// with a `revision` member (TestRevisionBearingResponseCoversEveryWireShapeSchemaWithARevisionMember
+// with a `revision` member, less the ones revision_tolerance_test.go's
+// revisionSchemaExempt documents as unreachable by a legacy server
+// (TestRevisionBearingResponseCoversEveryWireShapeSchemaWithARevisionMember
 // pins this against the same golden.json TestWireShapeDigest guards, so a new
 // revision-bearing schema cannot slip past both without the coverage test
 // failing first):

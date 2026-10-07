@@ -818,6 +818,30 @@ type BatchCreateResponse struct {
 	Items []Issue `json:"items"`
 }
 
+// BatchGetIssue One resolved entry of `BatchGetIssuesResult.issues`: an `Issue` plus its current `revision`. Property semantics other than `revision` are documented on `Issue`; the spec repeats the list rather than composing it (see the note at the top of this document).
+type BatchGetIssue = types.BatchGetIssue
+
+// BatchGetIssuesRequest Which issues to read, in one snapshot. There is no predicate here — the caller already knows the ids — which is `DeleteIssuesRequest`'s own reason for carrying none.
+//
+// `additionalProperties: false`, so an unknown member is a `400` naming the member.
+type BatchGetIssuesRequest struct {
+	// Ids The issues to read, exact ids, in either plane. DUPLICATES COLLAPSE: a repeated id is answered once, in the position of its first mention. An EMPTY array is legal and answers with both `issues` and `missing` empty — it is not refused the way `DeleteIssuesRequest.ids` refuses one, because a read that found nothing to read is not a mistake the way a delete that erased nothing usually is.
+	//
+	// The cap is on the REQUEST, counted before deduplication: a caller sending 1500 mentions of 3 distinct ids still names a request this operation refuses, because the obligation the cap bounds is reading the request apart, not reading the rows it resolves to.
+	Ids []string `json:"ids"`
+}
+
+// BatchGetIssuesResult The issues that resolved, hydrated, plus the ids that did not — both read from the SAME snapshot. Never a `404`: an id naming no stored row is reported in `missing`, not refused, the same set-read answer `DependencyEdges` and `EdgeCounts` give.
+type BatchGetIssuesResult struct {
+	// Issues One entry per requested id that resolved, in the REQUEST's order (the caller's first mention of each distinct id), never the storage engine's natural order. Each issue carries its current `revision`, so a caller that goes on to write one back has the optimistic-concurrency token a lifecycle write wants without a second round trip. Empty array (never null) when nothing resolved.
+	//
+	// HYDRATION IS LABELS ONLY: no dependencies, dependents or comments — use `GET /v0/beads/issues/{id}` (`IssueDetails`) for those.
+	Issues []BatchGetIssue `json:"issues"`
+
+	// Missing The requested ids that resolved to no stored row, in the same first-mention order as the request. An id here contributes no entry to `issues`, and the two arrays' lengths always sum to the number of DISTINCT ids the request named. Empty array (never null) when every named id resolved.
+	Missing []string `json:"missing"`
+}
+
 // Blocker One live blocker named by a blocked-issue refusal.
 type Blocker struct {
 	// Id The blocker: a local issue id, or the full `external:<project>:<capability>` reference.
@@ -1010,7 +1034,7 @@ type ContextResponse struct {
 	// OPTIONAL, and absent means only that this server does not disclose its filesystem layout — never that it has no workspace. A client MUST NOT require it, MUST NOT treat absence as an error, and has no use for the value beyond display: it is a path on the SERVER's filesystem, which the client cannot open. Identify the workspace by `project_id` and `database`, which are required.
 	BeadsDir *string `json:"beads_dir,omitempty"`
 
-	// Capabilities The tokens this server advertises: the OPERATIONS it implements, derived from its route table, and the server-wide BEHAVIORS it enforces. v0's operation vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.count`, `issues.get`, `issues.related`, `issues.create`, `issues.addComment`, `issues.batchClose`, `issues.claim`, `issues.claimNext`, `issues.release`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `config.set`, `config.unset`, `dependencies.cycles`, `dependencies.list`, `dependencies.count`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`; the behavior tokens are `project.enforce`, which announces that a `Bd-Project-Id` stamp for the wrong workspace is refused here rather than silently ignored, `issues.batchApplyLarge`, which announces that `POST /v0/beads/issues:batchApply` accepts the RAISED envelope — up to 1000 items (`ApplyBatchRequest.items.maxItems`), a 16 MiB body, and (for a request over 100 items) a run budget that EXTENDS to an operator-configured ceiling (`bd serve --large-apply-ceiling`, 5 minutes by default) — rather than the original 100-item, 4 MiB bound. The ceiling is a flat whole-run budget, not a value scaled by item count: a 101-item request and a 1000-item request both get the same extended budget. A request at or under 100 items is unaffected either way and keeps the server's ordinary deadline exactly as before. A client that checks for this token before sending a plan over 100 items learns whether THIS server accepts it without paying for a round trip an older server would refuse anyway, and `issues.list.sort`, which announces that `GET /v0/beads/issues` accepts the `sort` query parameter (two closed, pageable total orders — see that parameter) rather than silently answering `unknown_parameter`, and `issues.count.scope`, which announces that `GET /v0/beads/issues:count` accepts `parent`, `no_parent`, `exclude_type`, and `exclude_status` (see those parameters) rather than silently answering `unknown_parameter` for all four. The list grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation or a behavior — never the version string.
+	// Capabilities The tokens this server advertises: the OPERATIONS it implements, derived from its route table, and the server-wide BEHAVIORS it enforces. v0's operation vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.count`, `issues.get`, `issues.related`, `issues.create`, `issues.addComment`, `issues.batchClose`, `issues.claim`, `issues.claimNext`, `issues.release`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchGet`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `config.set`, `config.unset`, `dependencies.cycles`, `dependencies.list`, `dependencies.count`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`; the behavior tokens are `project.enforce`, which announces that a `Bd-Project-Id` stamp for the wrong workspace is refused here rather than silently ignored, `issues.batchApplyLarge`, which announces that `POST /v0/beads/issues:batchApply` accepts the RAISED envelope — up to 1000 items (`ApplyBatchRequest.items.maxItems`), a 16 MiB body, and (for a request over 100 items) a run budget that EXTENDS to an operator-configured ceiling (`bd serve --large-apply-ceiling`, 5 minutes by default) — rather than the original 100-item, 4 MiB bound. The ceiling is a flat whole-run budget, not a value scaled by item count: a 101-item request and a 1000-item request both get the same extended budget. A request at or under 100 items is unaffected either way and keeps the server's ordinary deadline exactly as before. A client that checks for this token before sending a plan over 100 items learns whether THIS server accepts it without paying for a round trip an older server would refuse anyway, and `issues.list.sort`, which announces that `GET /v0/beads/issues` accepts the `sort` query parameter (two closed, pageable total orders — see that parameter) rather than silently answering `unknown_parameter`, and `issues.count.scope`, which announces that `GET /v0/beads/issues:count` accepts `parent`, `no_parent`, `exclude_type`, and `exclude_status` (see those parameters) rather than silently answering `unknown_parameter` for all four. The list grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation or a behavior — never the version string.
 	//
 	// THIS LIST IS BUILD-LEVEL, NOT WORKSPACE-LEVEL. It says which operations this binary serves, and for every entry but two that is the whole answer. `events.list` and `events.watch` are the exceptions: the durable events journal is a per-workspace setting that is OFF by default, so a server that advertises them may still refuse every request to both with 409 `events_journal_disabled` — correctly, because the operations exist and the workspace has no journal. A consumer of either MUST treat the capability as "this server speaks it" and the 409 as "not on this workspace", and must not read the capability as a promise that records will arrive.
 	Capabilities []string `json:"capabilities"`
@@ -2712,6 +2736,9 @@ type BatchCloseIssuesJSONRequestBody = BatchCloseRequest
 
 // BatchCreateIssuesJSONRequestBody defines body for BatchCreateIssues for application/json ContentType.
 type BatchCreateIssuesJSONRequestBody = BatchCreateRequest
+
+// BatchGetIssuesJSONRequestBody defines body for BatchGetIssues for application/json ContentType.
+type BatchGetIssuesJSONRequestBody = BatchGetIssuesRequest
 
 // ClaimNextIssueJSONRequestBody defines body for ClaimNextIssue for application/json ContentType.
 type ClaimNextIssueJSONRequestBody = ClaimNextRequest

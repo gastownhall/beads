@@ -10,9 +10,9 @@
 # differently, e.g. jq's `any(cond)` against mikefarah's `any_c`.
 set -euo pipefail
 
-# yq is outside the host-tools inventory declared in scripts/BUILD.bazel and no
-# workflow job installs it, so name the missing tool instead of reporting every
-# manifest as missing its alias.
+# No workflow job installs yq (ubuntu-latest and the rbe-west workers ship
+# it), so name a missing tool instead of reporting every manifest as missing
+# its alias.
 if ! command -v yq >/dev/null 2>&1; then
   echo "FAIL: yq is required by this guard but is not installed"
   exit 1

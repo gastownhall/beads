@@ -56,6 +56,7 @@ const (
 	OpRememberMemory          = "rememberMemory"
 	OpGetMemory               = "getMemory"
 	OpForgetMemory            = "forgetMemory"
+	OpBatchGetIssues          = "batchGetIssues"
 )
 
 // The paths that carry no caller-supplied segment. A path with one is built by

@@ -698,6 +698,384 @@
       "item_type": "object"
     },
     {
+      "schema": "BatchGetIssue",
+      "member": "acceptance_criteria",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "actor",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "await_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "await_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "bonded_from",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "close_reason",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "closed_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "closed_by_session",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "comments",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "compacted_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "compacted_at_commit",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "compaction_level",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "created_at",
+      "type": "string",
+      "format": "date-time",
+      "required": true
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "created_by",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "defer_until",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "dependencies",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "description",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "design",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "due_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "ephemeral",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "estimated_minutes",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "event_kind",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "external_ref",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "heartbeat_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "is_blocked",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "is_template",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "issue_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "labels",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "lease_expires_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "lease_granted_node",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "metadata",
+      "type": "object",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "mol_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "no_history",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "notes",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "original_size",
+      "type": "integer",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "owner",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "payload",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "pinned",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "priority",
+      "type": "integer",
+      "required": true
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "revision",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "sender",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "source_formula",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "source_location",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "source_system",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "spec_id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "started_at",
+      "type": "string",
+      "format": "date-time",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "status",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "storage_class",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "target",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "timeout",
+      "type": "integer",
+      "format": "int64",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "title",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "updated_at",
+      "type": "string",
+      "format": "date-time",
+      "required": true
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "waiters",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "wisp_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssue",
+      "member": "work_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "BatchGetIssuesRequest",
+      "member": "ids",
+      "type": "array",
+      "required": true,
+      "item_type": "string"
+    },
+    {
+      "schema": "BatchGetIssuesResult",
+      "member": "issues",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "BatchGetIssuesResult",
+      "member": "missing",
+      "type": "array",
+      "required": true,
+      "item_type": "string"
+    },
+    {
       "schema": "Blocker",
       "member": "id",
       "type": "string",

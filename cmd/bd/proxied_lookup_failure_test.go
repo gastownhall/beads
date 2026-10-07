@@ -239,7 +239,7 @@ var proxiedLookupCommands = []struct {
 	{
 		name: "reopen",
 		run: func(ctx context.Context) error {
-			return runReopenProxiedServer(&cobra.Command{}, ctx, []string{stubMissingID})
+			return runReopenProxiedServer(&cobra.Command{}, ctx, []string{stubMissingID}, nil)
 		},
 		wantNotFound: "Issue " + stubMissingID + " not found\nHint: " + showNotFoundHint(stubMissingID),
 		wantHardErr:  "Error resolving bd-missing: connection reset by peer",

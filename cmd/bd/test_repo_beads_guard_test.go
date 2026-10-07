@@ -54,8 +54,14 @@ type testRunner interface {
 	Run() int
 }
 
+// preRunStdout and preRunStderr are os.Stdout/os.Stderr as runTestsAndSweep
+// saw them before m.Run: TestZZStdioNotLeaked's baseline when
+// TestAAAStdioBaseline did not run in this process.
+var preRunStdout, preRunStderr *os.File
+
 func runTestsAndSweep(m testRunner) int {
 	stdout, stderr := os.Stdout, os.Stderr
+	preRunStdout, preRunStderr = stdout, stderr
 	code := m.Run()
 	code = checkStdioAfterRun(code, stdout, stderr)
 	swept := doltserver.SweepSuiteTestServers(testTempRoot)

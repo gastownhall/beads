@@ -70,6 +70,7 @@ func startOracle(t *testing.T) *oracle {
 		CycleDetector:     stubCycles{},
 		EdgeReader:        stubEdges{},
 		GraphCounter:      stubGraphCounter{},
+		BatchGetter:       stubBatchGetter{},
 		Relations:         stubRelations{},
 		Commenter:         stubCommenter{},
 		BlockingAnnotator: stubBlocking{},
@@ -268,6 +269,7 @@ type (
 	stubCycles           struct{ issueops.CycleDetector }
 	stubEdges            struct{ issueops.EdgeReader }
 	stubGraphCounter     struct{ issueops.GraphCounter }
+	stubBatchGetter      struct{ issueops.BatchGetter }
 	stubRelations        struct{ issueops.Relations }
 	stubCommenter        struct{ issueops.Commenter }
 	stubBlocking         struct{ issueops.BlockingAnnotator }

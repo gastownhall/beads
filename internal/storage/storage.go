@@ -286,6 +286,12 @@ type Storage interface {
 	// EdgeReader (that one answers with the stored ROWS, outbound only). Reads
 	// fire no hooks, as for IssueReader.
 	GraphCounter() (issueops.GraphCounter, error)
+	// BatchGetter returns the guarded batch-read surface for this store: many
+	// issues by id, hydrated, in ONE snapshot. Its own role rather than a mode
+	// of IssueReader because a miss here is a RESULT FIELD (Missing) and not
+	// ErrNotFound — a batch GET is a set read, not a precondition on every
+	// member succeeding. Reads fire no hooks, as for IssueReader.
+	BatchGetter() (issueops.BatchGetter, error)
 	// ReadyCounter returns the guarded ready-count surface for this store: the
 	// size of the ready set, which is the number `bd ready`'s pagination
 	// publishes and which no other role answers. Counter's predicate is a
