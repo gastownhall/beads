@@ -449,8 +449,14 @@ func requireBootstrapDoltBackend(cfg *configfile.Config, beadsDir string) error 
 // exactly one place. Blocked is never hand-set by a detection branch: it is a
 // function of the finished plan ("took no action AND found no database"), so no
 // branch can leave a stale flag behind for a later branch to inherit.
+//
+// The ref is resolved for beadsDir, the workspace being planned, with the
+// process's merged configuration as the last fallback, not rediscovered
+// from the working directory: discovery would read another workspace's
+// sync.remote-ref when the two differ, and it primes the process-wide git
+// context from wherever the caller stands.
 func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPlan {
-	return detectBootstrapActionWithRef(beadsDir, cfg, resolveSyncRemoteRef())
+	return detectBootstrapActionWithRef(beadsDir, cfg, resolveSyncRemoteRefIn(beadsDir))
 }
 
 // detectBootstrapActionWithRef is detectBootstrapActionForRef for a ref that
