@@ -90,11 +90,11 @@ func TestIfRevisionCloseWarnsOnForcedOpenChildren(t *testing.T) {
 	}
 }
 
-// TestIfRevisionCloseRestoresPerIDFences pins beads#7206 on the direct route:
+// TestEmbeddedIfRevisionCloseRestoresPerIDFences pins beads#7206 on the direct route:
 // bd close --if-revision must refuse another actor's bead, a pin, and an
 // unsatisfied bead gate the same way the unguarded route does, while a stale
 // token still exits 13 before those refusals.
-func TestIfRevisionCloseRestoresPerIDFences(t *testing.T) {
+func TestEmbeddedIfRevisionCloseRestoresPerIDFences(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}

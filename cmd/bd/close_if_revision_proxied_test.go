@@ -82,9 +82,9 @@ func TestProxiedIfRevisionCloseWarnsOnForcedOpenChildren(t *testing.T) {
 	}
 }
 
-// TestProxiedIfRevisionCloseRestoresPerIDFences is the proxied twin of
-// TestIfRevisionCloseRestoresPerIDFences (beads#7206).
-func TestProxiedIfRevisionCloseRestoresPerIDFences(t *testing.T) {
+// TestProxiedServerIfRevisionCloseRestoresPerIDFences is the proxied twin of
+// TestEmbeddedIfRevisionCloseRestoresPerIDFences (beads#7206).
+func TestProxiedServerIfRevisionCloseRestoresPerIDFences(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)
