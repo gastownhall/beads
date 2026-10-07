@@ -41,6 +41,7 @@ go_test(
         "host_tools_test.go",
         "install_dolt_test.go",
         "managed_local_lane_test.go",
+        "migration_corpus_bazel_test.go",
         "pr_lanes_bazel_coverage_test.go",
         "pr_preflight_test.go",
         "pr_risk_bazel_coverage_test.go",
@@ -108,6 +109,20 @@ go_test(
 exports_files(
     ["migration-test/release-catalog.json"],
     visibility = ["//scripts/migration-test/catalog:__pkg__"],
+)
+
+# The historical-upgrade harness (scripts/migration-test) and the public
+# SQLite bridge it drives, for //tests/migration's per-release targets.
+filegroup(
+    name = "migration_harness",
+    srcs = [
+        "migrate-legacy-to-current.sh",
+        "migration-test/historical-dolt-upgrade-test.sh",
+        "migration-test/legacy-bridge-test.sh",
+        "migration-test/lib/binary.sh",
+        "migration-test/lib/versions.sh",
+    ],
+    visibility = ["//tests/migration:__pkg__"],
 )
 
 exports_files(

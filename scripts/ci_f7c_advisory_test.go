@@ -1,19 +1,13 @@
 package scripts_test
 
 import (
-	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -29,11 +23,11 @@ import (
 
 // advisoryPathFilteredWorkflows are the workflows that share the
 // "upgrade-relevant code" allowlist verbatim, save for each one's own
-// workflow-file and script entries (spec-f7.md §2.4). conformance.yml was
-// the third until its tiers moved to Bazel (embeddeddolt_conformance_*,
-// //test/conformance:conformance_test).
+// workflow-file and script entries (spec-f7.md §2.4). conformance.yml and
+// migration-test.yml were the others until their tiers moved to Bazel
+// (embeddeddolt_conformance_*, //test/conformance:conformance_test,
+// //tests/migration).
 var advisoryPathFilteredWorkflows = []string{
-	"migration-test.yml",
 	"cross-version-smoke.yml",
 }
 
@@ -57,14 +51,6 @@ var advisoryPathFilterBase = []string{
 // advisoryPathFilterOwnEntries is each workflow's own file/script additions,
 // appended after advisoryPathFilterBase.
 var advisoryPathFilterOwnEntries = map[string][]string{
-	"migration-test.yml": {
-		".github/workflows/migration-test.yml",
-		"scripts/migration-test/**",
-		// F7c review fix (S3): the migration harness invokes this script
-		// directly, but it lives at scripts/ root, not under
-		// scripts/migration-test/, so it was not covered by the filter.
-		"scripts/migrate-legacy-to-current.sh",
-	},
 	"cross-version-smoke.yml": {
 		".github/workflows/cross-version-smoke.yml",
 		"scripts/upgrade-smoke-test.sh",
@@ -130,7 +116,7 @@ func TestAdvisoryWorkflowPathFiltersAreIdentical(t *testing.T) {
 
 // TestAdvisoryWorkflowPathFiltersCoverOwnInputs pins that each workflow also
 // allowlists its own workflow file and the scripts/fixtures it actually
-// exercises, so an edit to e.g. scripts/migration-test/** is never silently
+// exercises, so an edit to e.g. scripts/upgrade-smoke-test.sh is never silently
 // skipped by the filter that was added to cut unrelated-PR load.
 func TestAdvisoryWorkflowPathFiltersCoverOwnInputs(t *testing.T) {
 	for file, want := range advisoryPathFilterOwnEntries {
@@ -196,357 +182,6 @@ func TestNixBuildDropsPullRequestTriggerNotPushOrDispatch(t *testing.T) {
 	}
 	if !sawFlakeCheck {
 		t.Error("pr-risk.yml's test-nix no longer runs the flake checks")
-	}
-}
-
-// --- Migration Test Harness: 14 -> 3 shards, no version dropped -----------
-
-// migrationHarnessOriginalVersions is the pre-F7c 14-leg matrix's version
-// list, captured verbatim so a shard rebalance can be checked against it
-// without re-deriving it from the (now folded) workflow file.
-var migrationHarnessOriginalVersions = []string{
-	"v0.9.1", "v0.17.0", "v0.49.6", "v0.50.3", "v0.55.4", "v0.56.1",
-	"v0.57.0", "v0.62.0", "v0.63.3", "v1.0.0", "v1.0.1", "v1.1.0",
-	"v1.1.2", "v1.2.2",
-}
-
-// migrationHarnessDoltRuntimeVersions is the old per-version
-// `contains(fromJSON('[...]'), matrix.version)` list that gated the "Install
-// Dolt test runtime" step. It must become exactly the dolt-runtime shard.
-var migrationHarnessDoltRuntimeVersions = []string{
-	"v0.55.4", "v0.56.1", "v0.57.0", "v0.62.0", "v1.0.1", "v1.1.0", "v1.1.2", "v1.2.2",
-}
-
-func migrationHarnessShards(t *testing.T) map[string][]string {
-	t.Helper()
-	workflow := readCIWorkflow(t, "migration-test.yml")
-	job := workflow.job(t, "historical-upgrades")
-	shards := map[string][]string{}
-	for _, leg := range job.Strategy.Matrix.Include {
-		shardAny, ok := leg.Extra["shard"]
-		if !ok {
-			t.Fatalf("migration-test.yml matrix leg %+v has no shard field", leg.Extra)
-		}
-		shard, ok := shardAny.(string)
-		if !ok {
-			t.Fatalf("migration-test.yml matrix leg shard = %#v, not a string", shardAny)
-		}
-		versionsAny, ok := leg.Extra["versions"]
-		if !ok {
-			t.Fatalf("migration-test.yml shard %q has no versions field", shard)
-		}
-		versionsJSON, ok := versionsAny.(string)
-		if !ok {
-			t.Fatalf("migration-test.yml shard %q versions = %#v, not a string", shard, versionsAny)
-		}
-		var versions []string
-		if err := json.Unmarshal([]byte(versionsJSON), &versions); err != nil {
-			t.Fatalf("migration-test.yml shard %q versions %q does not parse as a JSON string array: %v", shard, versionsJSON, err)
-		}
-		if _, dup := shards[shard]; dup {
-			t.Fatalf("migration-test.yml declares shard %q more than once", shard)
-		}
-		shards[shard] = versions
-	}
-	return shards
-}
-
-// TestMigrationHarnessShardsCoverAllHistoricalVersions is the equivalence
-// check the fold requires: the union of the 3 shards' version lists must be
-// exactly the old 14-version set, with no duplicates and nothing dropped.
-func TestMigrationHarnessShardsCoverAllHistoricalVersions(t *testing.T) {
-	shards := migrationHarnessShards(t)
-
-	wantShardNames := []string{"src", "pre-dolt", "dolt-runtime"}
-	for _, name := range wantShardNames {
-		if _, ok := shards[name]; !ok {
-			t.Errorf("migration-test.yml is missing shard %q", name)
-		}
-	}
-	if len(shards) != len(wantShardNames) {
-		t.Errorf("migration-test.yml has shards %v, want exactly %v", mapKeys(shards), wantShardNames)
-	}
-
-	seen := map[string]string{} // version -> owning shard
-	var union []string
-	for shard, versions := range shards {
-		for _, v := range versions {
-			if owner, dup := seen[v]; dup {
-				t.Errorf("version %s is claimed by both shard %q and shard %q", v, owner, shard)
-				continue
-			}
-			seen[v] = shard
-			union = append(union, v)
-		}
-	}
-	sort.Strings(union)
-	want := append([]string(nil), migrationHarnessOriginalVersions...)
-	sort.Strings(want)
-	if !equalStrings(union, want) {
-		t.Fatalf("shard union = %v, want exactly the old 14-version set %v", union, want)
-	}
-
-	if !equalStrings(sortedCopy(shards["dolt-runtime"]), sortedCopy(migrationHarnessDoltRuntimeVersions)) {
-		t.Errorf("dolt-runtime shard = %v, want exactly the old Dolt-runtime contains() list %v", shards["dolt-runtime"], migrationHarnessDoltRuntimeVersions)
-	}
-	if !equalStrings(shards["src"], []string{"v0.9.1"}) {
-		t.Errorf("src shard = %v, want exactly [v0.9.1]", shards["src"])
-	}
-}
-
-// TestMigrationHarnessLoopExecutesBehaviorally runs the actual "Verify
-// explicit historical upgrades" bash against a stub run.sh, proving the
-// loop's real behavior instead of its source text (F7c review fix S1/S4/S5,
-// closes mutations M1 `exit 0`, M2 `break`, M14 `| head -1`, and pins the
-// fail-closed and per-version-timeout fixes the reviewer required):
-//   - every version in the shard is attempted even after an earlier one
-//     fails (a short-circuiting `exit 0`/`break` would hide the rest);
-//   - the step's own exit code reflects any failure;
-//   - failures are both ::error:: annotated and written to
-//     $GITHUB_STEP_SUMMARY;
-//   - an empty or unparsable SHARD_VERSIONS fails closed instead of
-//     reporting a false pass, without ever invoking run.sh;
-//   - a hung version is bounded by `timeout`, and the loop still reaches the
-//     version queued after it.
-//
-// A bare `./scripts/migration-test/run.sh --version "$HISTORICAL_VERSION"`
-// (the pre-fold single-version invocation) must also be gone: if it came
-// back, the shard would silently only test one version again.
-func TestMigrationHarnessLoopExecutesBehaviorally(t *testing.T) {
-	requireHostTool(t, "bash")
-	requireHostTool(t, "jq")
-	requireHostTool(t, "timeout")
-
-	job := readCIWorkflow(t, "migration-test.yml").job(t, "historical-upgrades")
-	step := job.step(t, "Verify explicit historical upgrades")
-
-	if strings.Contains(step.Run, "$HISTORICAL_VERSION") {
-		t.Errorf("migration-test.yml's Verify step still references the old single-version $HISTORICAL_VERSION env var")
-	}
-
-	writeHarness := func(t *testing.T, runSh string) (dir, summaryFile string) {
-		t.Helper()
-		dir = t.TempDir()
-		scriptDir := filepath.Join(dir, "scripts", "migration-test")
-		if err := os.MkdirAll(scriptDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(scriptDir, "run.sh"), []byte(runSh), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		summaryFile = filepath.Join(dir, "summary.md")
-		if err := os.WriteFile(summaryFile, nil, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return dir, summaryFile
-	}
-
-	baseEnv := func(shardVersions, summaryFile string) []string {
-		return append(os.Environ(),
-			"CANDIDATE_BIN=./bd",
-			"GIT_CONFIG_NOSYSTEM=1",
-			"DOLT_BIN=/nonexistent/dolt",
-			"SHARD_VERSIONS="+shardVersions,
-			"SHARD=test-shard",
-			"GITHUB_STEP_SUMMARY="+summaryFile,
-		)
-	}
-
-	run := func(t *testing.T, script, shardVersions, runSh string) (exitCode int, out, summary string) {
-		t.Helper()
-		dir, summaryFile := writeHarness(t, runSh)
-		cmd := exec.Command("bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script)
-		cmd.Dir = dir
-		cmd.Env = baseEnv(shardVersions, summaryFile)
-		outBytes, err := cmd.CombinedOutput()
-		code := 0
-		if err != nil {
-			exitErr, ok := err.(*exec.ExitError)
-			if !ok {
-				t.Fatalf("run loop: %v\noutput:\n%s", err, outBytes)
-			}
-			code = exitErr.ExitCode()
-		}
-		summaryBytes, readErr := os.ReadFile(summaryFile)
-		if readErr != nil {
-			t.Fatal(readErr)
-		}
-		return code, string(outBytes), string(summaryBytes)
-	}
-
-	t.Run("every version runs even after an early failure, and the step fails", func(t *testing.T) {
-		const stub = `#!/usr/bin/env bash
-set -euo pipefail
-v=""
-while [ $# -gt 0 ]; do
-  if [ "$1" = "--version" ]; then v="$2"; fi
-  shift
-done
-echo "stub-ran:$v"
-[ "$v" = "v2" ] && exit 1
-exit 0
-`
-		code, out, summary := run(t, step.Run, `["v1","v2","v3"]`, stub)
-		for _, v := range []string{"v1", "v2", "v3"} {
-			if !strings.Contains(out, "stub-ran:"+v) {
-				t.Errorf("version %s never ran; output:\n%s", v, out)
-			}
-		}
-		if code != 1 {
-			t.Errorf("exit code = %d, want 1 (v2 failed)", code)
-		}
-		if !strings.Contains(out, "::error::historical upgrade failed for v2") {
-			t.Errorf("missing ::error:: for v2; output:\n%s", out)
-		}
-		if strings.Contains(out, "::error::historical upgrade failed for v1") || strings.Contains(out, "::error::historical upgrade failed for v3") {
-			t.Errorf("v1/v3 must not be reported as failed; output:\n%s", out)
-		}
-		if !strings.Contains(summary, "v2") {
-			t.Errorf("GITHUB_STEP_SUMMARY does not mention the failed version v2:\n%s", summary)
-		}
-		if strings.Contains(summary, "v1") || strings.Contains(summary, "v3") {
-			t.Errorf("GITHUB_STEP_SUMMARY must only list failed versions:\n%s", summary)
-		}
-	})
-
-	t.Run("all versions pass, step exits 0", func(t *testing.T) {
-		const stub = "#!/usr/bin/env bash\nexit 0\n"
-		code, out, summary := run(t, step.Run, `["v1","v2"]`, stub)
-		if code != 0 {
-			t.Errorf("exit code = %d, want 0, output:\n%s", code, out)
-		}
-		if strings.TrimSpace(summary) != "" {
-			t.Errorf("GITHUB_STEP_SUMMARY should be untouched on an all-pass run, got:\n%s", summary)
-		}
-	})
-
-	for _, badInput := range []string{`[]`, `null`, `not-json`, `"a string, not an array"`} {
-		t.Run("fails closed on "+badInput, func(t *testing.T) {
-			const stub = "#!/usr/bin/env bash\necho ran >&2\nexit 1\n"
-			code, out, _ := run(t, step.Run, badInput, stub)
-			if code != 1 {
-				t.Errorf("SHARD_VERSIONS=%s: exit code = %d, want 1 (fail closed)", badInput, code)
-			}
-			if !strings.Contains(out, "::error::shard test-shard resolved to zero versions") {
-				t.Errorf("SHARD_VERSIONS=%s: missing the fail-closed ::error::; output:\n%s", badInput, out)
-			}
-			if strings.Contains(out, "ran") {
-				t.Errorf("SHARD_VERSIONS=%s: run.sh must never be invoked when the version list fails closed; output:\n%s", badInput, out)
-			}
-		})
-	}
-
-	t.Run("a hung version is bounded by timeout and does not hide the next version", func(t *testing.T) {
-		// Exercise the REAL timeout/kill-after wiring, just at durations a
-		// unit test can afford: substitute the pinned 8m/30s for 2s/1s. If a
-		// mutation removed the `timeout` wrapper entirely, this substitution
-		// is a no-op and the stub's 10s sleep would make this subtest's own
-		// assertions fail well before a developer-visible hang, bounded by
-		// the 20s context below.
-		fastStep := strings.NewReplacer("8m", "2s", "30s", "1s").Replace(step.Run)
-		const stub = `#!/usr/bin/env bash
-v=""
-while [ $# -gt 0 ]; do
-  if [ "$1" = "--version" ]; then v="$2"; fi
-  shift
-done
-if [ "$v" = "hangs" ]; then
-  sleep 10
-  exit 0
-fi
-echo "stub-ran:$v"
-exit 0
-`
-		dir, summaryFile := writeHarness(t, stub)
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, "bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", fastStep)
-		cmd.Dir = dir
-		cmd.Env = baseEnv(`["hangs","after"]`, summaryFile)
-		start := time.Now()
-		out, err := cmd.CombinedOutput()
-		elapsed := time.Since(start)
-		if ctx.Err() == context.DeadlineExceeded {
-			t.Fatalf("loop did not return within 20s; the timeout wrapper did not bound the hang. output:\n%s", out)
-		}
-		if elapsed > 8*time.Second {
-			t.Errorf("loop took %s to process a version meant to be killed after ~3s; output:\n%s", elapsed, out)
-		}
-		if _, ok := err.(*exec.ExitError); !ok && err != nil {
-			t.Fatalf("run loop: %v\noutput:\n%s", err, out)
-		}
-		if !strings.Contains(string(out), "stub-ran:after") {
-			t.Errorf("the version after the hang never ran; output:\n%s", out)
-		}
-		if !strings.Contains(string(out), "::error::historical upgrade failed for hangs") {
-			t.Errorf("the killed version was not reported as failed; output:\n%s", out)
-		}
-	})
-}
-
-// TestMigrationHarnessDoltRuntimeStepGatedByShard pins that the "Install Dolt
-// test runtime" step's gate is exactly `matrix.shard == 'dolt-runtime'`, not
-// some other formulation that might accidentally also match (or exclude) a
-// different shard (F7c review fix S1, closes mutation M3).
-func TestMigrationHarnessDoltRuntimeStepGatedByShard(t *testing.T) {
-	job := readCIWorkflow(t, "migration-test.yml").job(t, "historical-upgrades")
-	step := job.step(t, "Install Dolt test runtime")
-	const want = "matrix.shard == 'dolt-runtime'"
-	if step.If != want {
-		t.Errorf("migration-test.yml's Install Dolt test runtime if = %q, want %q", step.If, want)
-	}
-}
-
-// TestMigrationHarnessCacheHashMatchesDerivation pins that each shard's
-// cache-hash is still sha256(join(",", <shard's per-version cache-identity
-// strings>))[:16], computed from the pre-fold 14-entry identity table that
-// existed before the 14 -> 3 shard fold (git show
-// 362eecc6bf:.github/workflows/migration-test.yml), so a future shard
-// rebalance or version-list edit can't silently leave a stale cache key
-// behind (F7c review fix S1, closes mutation M5).
-func TestMigrationHarnessCacheHashMatchesDerivation(t *testing.T) {
-	identities := map[string]string{
-		"v0.9.1":  "v0.9.1-source-e3c8554fa2c3e4b9caf7e296e9c8abbe24211a72-go1.25.0-cgo1",
-		"v0.17.0": "v0.17.0-d4d08617a324c85b45c9628bc519d659a9ff9c7c37da67aa48727e0af7f19a75",
-		"v0.49.6": "v0.49.6-8546dc9a47e11dc31ac2bc9a0224a9c690975e91850932cbb62623053fbb7db8",
-		"v0.50.3": "v0.50.3-e94b09e0b6a9324bbc0e81ea36bccaaa42172a926bfedfb389e9a26dedb63184",
-		"v0.55.4": "v0.55.4-e0fa25456dd82890230eef17653448a0bf995104c78864be91c5ed84426a5f49",
-		"v0.56.1": "v0.56.1-4f9f6cc44465a11613ff529009901eaaf841c6b1f91c15e002b0ecda2015a15c",
-		"v0.57.0": "v0.57.0-f8629d5627bed7d25f06f92334addc171d679f9aed9d08c5d42a9684205dc04b",
-		"v0.62.0": "v0.62.0-4cca7265b22e5c3ca8d62ab0b9752bec31f68b7f5fa636282a4c7e5454c35535",
-		"v0.63.3": "v0.63.3-5f4efd2e010209b3f381dbcd783b2a3a652f50ea72f40ef04c8ba434d408bf9e",
-		"v1.0.0":  "v1.0.0-7057db1e92428fcf5c08d5dc6b07ead57e588b262cba78b9a26893d55bd29fdb",
-		"v1.0.1":  "v1.0.1-1d2364d5d7083a4634a9e734ca87822fb79c2b6625988f9f791e3376313b1b77",
-		"v1.1.0":  "v1.1.0-b0f3dd607c3fb989ee08d0a6854fba80d0402971eb108f9af6170bc14d491a34",
-		"v1.1.2":  "v1.1.2-a72d71ed374955dc9f83a0f90b54bd7b6a0016709dd1676ae2e368651ed401c2",
-		"v1.2.2":  "v1.2.2-8140098a51d3b81d5548d1c5e6db1a2d9930e5d141efe2a4bff7d079c4d321e8",
-	}
-
-	job := readCIWorkflow(t, "migration-test.yml").job(t, "historical-upgrades")
-	for _, leg := range job.Strategy.Matrix.Include {
-		shard, _ := leg.Extra["shard"].(string)
-		versionsJSON, _ := leg.Extra["versions"].(string)
-		var versions []string
-		if err := json.Unmarshal([]byte(versionsJSON), &versions); err != nil {
-			t.Fatalf("shard %q versions %q: %v", shard, versionsJSON, err)
-		}
-		var parts []string
-		for _, v := range versions {
-			id, ok := identities[v]
-			if !ok {
-				t.Fatalf("shard %q version %q has no known pre-fold cache-identity; update the table in this test", shard, v)
-			}
-			parts = append(parts, id)
-		}
-		sum := sha256.Sum256([]byte(strings.Join(parts, ",")))
-		want := hex.EncodeToString(sum[:])[:16]
-		gotAny, ok := leg.Extra["cache-hash"]
-		if !ok {
-			t.Fatalf("shard %q has no cache-hash field", shard)
-		}
-		if got := fmt.Sprint(gotAny); got != want {
-			t.Errorf("shard %q cache-hash = %q, want sha256(join(\",\", identities))[:16] = %q", shard, got, want)
-		}
 	}
 }
 
@@ -694,7 +329,6 @@ func TestCrossVersionSmokeChunksEveryResolvedVersion(t *testing.T) {
 // blacksmithAdvisoryWorkflows are every workflow file F7c moved a job onto a
 // same-repo-PR (or push-only, for main.yml's seed) Blacksmith runner.
 var blacksmithAdvisoryWorkflows = []string{
-	"migration-test.yml",
 	"cross-version-smoke.yml",
 	"docs-mintlify.yml",
 	"main.yml",
@@ -738,18 +372,13 @@ func containsSecretRef(s string) bool {
 
 // advisoryBlacksmithRunnerJobs pins which F7c advisory job runs on which
 // same-repo Blacksmith expression, and what label each falls back to when
-// the same-repo/merge_group condition is false. migration-test.yml's
-// historical-upgrades job is the one case with a non-ubuntu-latest fallback
-// (sameRepoBlacksmith4vcpuNoble, F7c review fix B1): it must still resolve to
-// the literal ubuntu-24.04 label, not the usual ubuntu-latest, for forks/
-// Dependabot/push.
+// the same-repo/merge_group condition is false.
 var advisoryBlacksmithRunnerJobs = []struct {
 	file            string
 	job             string
 	blacksmithLabel string
 	fallback        string
 }{
-	{"migration-test.yml", "historical-upgrades", "blacksmith-4vcpu-ubuntu-2404", "ubuntu-24.04"},
 	{"cross-version-smoke.yml", "smoke", "blacksmith-4vcpu-ubuntu-2404", "ubuntu-latest"},
 	{"cross-version-smoke.yml", "versions", "blacksmith-2vcpu-ubuntu-2404", "ubuntu-latest"},
 	{"docs-mintlify.yml", "broken-links", "blacksmith-2vcpu-ubuntu-2404", "ubuntu-latest"},
@@ -818,16 +447,15 @@ func TestF7cAdvisorySameRepoBlacksmithExpressionSemantics(t *testing.T) {
 // self-defined `blacksmith-sg-v1-` setup-go cache main.yml's
 // blacksmith-setup-go-cache job seeds (B2, F7c implementation report).
 var blacksmithSetupGoCacheConsumers = map[string][]string{
-	"migration-test.yml":      {"historical-upgrades"},
 	"cross-version-smoke.yml": {"smoke"},
 }
 
 // blacksmithSetupGoCacheKeyNamespace is the self-defined cache key prefix
 // (not setup-go's own implicit key) that the seeder and every consumer share,
 // so the "no save in a consumer job" checks below can scope to exactly this
-// cache without also flagging an unrelated, legitimately-caching step (e.g.
-// migration-test.yml's historical-dolt-* cache, which is a distinct
-// restore/save pair of its own - see advisoryBinaryCaches below).
+// cache without also flagging an unrelated, legitimately-caching step (a
+// binary cache with a distinct restore/save pair of its own - see
+// advisoryBinaryCaches below).
 const blacksmithSetupGoCacheKeyNamespace = "blacksmith-sg-v1-"
 
 // TestBlacksmithSetupGoSeedExistsForAdvisoryConsumers pins that main.yml's
@@ -1008,11 +636,10 @@ func TestMainWorkflowHasNoSameRepoPRReachableTrigger(t *testing.T) {
 // main.yml's seeder may ever write it, so a same-repo PR run can read the
 // cache but never poison what another PR or main's seeder reads back. The
 // "no save" check is scoped to the blacksmith-sg-v1- key namespace
-// specifically (not "no actions/cache/save in this job at all"), since
-// migration-test.yml's historical-upgrades job keeps its own historical-dolt-*
-// cache in a different namespace - governed by its own restore/save-gated
-// pair below (advisoryBinaryCaches / F7c review fix X1), not an exemption
-// from this one.
+// specifically (not "no actions/cache/save in this job at all"), since a
+// binary cache in a different namespace is governed by its own
+// restore/save-gated pair below (advisoryBinaryCaches / F7c review fix X1),
+// not an exemption from this one.
 func TestAdvisoryBlacksmithConsumersAreCacheRestoreOnly(t *testing.T) {
 	for file, jobNames := range blacksmithSetupGoCacheConsumers {
 		workflow := readCIWorkflow(t, file)
@@ -1157,7 +784,6 @@ var advisoryBinaryCaches = []struct {
 	wantSaveIf string
 }{
 	{"cross-version-smoke.yml", "smoke", "Restore previous release binaries cache", "Save previous release binaries cache", "smoke-binaries-", "github.event_name == 'push' || github.event_name == 'workflow_dispatch'"},
-	{"migration-test.yml", "historical-upgrades", "Restore pinned historical release cache", "Save pinned historical release cache", "historical-dolt-", "github.event_name == 'push' || github.event_name == 'workflow_dispatch'"},
 }
 
 // TestAdvisoryBinaryCachesAreRestoreAlwaysSavePRGated pins the restore/save

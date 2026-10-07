@@ -1,0 +1,121 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//tools/bazel:bd_releases.bzl", "LINUX_AMD64")
+load(":defs.bzl", "historical_upgrade_tests")
+
+# The historical-upgrade corpus (formerly migration-test.yml), one target per
+# reviewed release: historical_upgrade_test.sh runs
+# scripts/migration-test/historical-dolt-upgrade-test.sh --version <release>
+# against the non-race bd_for_tests. Every historical bd a release's lanes run
+# is pinned: the published releases from the release catalog (@bd_releases,
+# sha256-verified when Bazel fetches them), the source-tag v0.9.1 built
+# offline below (:bd_source_tag). Where the lanes host a server-Dolt fixture
+# or read the wisp plane, the pinned external Dolt runtime
+# (@dolt_test_runtime_linux_amd64) is DOLT_BIN. Nothing is downloaded at test
+# time, so the targets run remotely like any other; untagged, the PR-core
+# lane (bazel-test) runs them, and a target re-runs only when the candidate,
+# the harness or a pinned binary changes.
+#
+# _CORPUS must equal scripts/migration-test/lib/versions.sh's corpus (the
+# SQLite bridges, HISTORICAL_DOLT_VERSIONS and EMBEDDED_DOLT_VERSIONS), and
+# _DOLT_RUNTIME its HISTORICAL_DOLT_VERSIONS plus WISP_PLANE_VERSIONS
+# (scripts/migration_corpus_bazel_test.go). _HELPERS are the releases a lane
+# runs besides its own: the classic SQLite bridge (v0.49.6) and the
+# server-Dolt canonicalizer (v0.62.0).
+_SOURCE_TAG = "v0.9.1"
+
+_CORPUS = [
+    "v0.9.1",
+    "v0.17.0",
+    "v0.49.6",
+    "v0.50.3",
+    "v0.55.4",
+    "v0.56.1",
+    "v0.57.0",
+    "v0.62.0",
+    "v0.63.3",
+    "v1.0.0",
+    "v1.0.1",
+    "v1.1.0",
+    "v1.1.2",
+    "v1.2.2",
+]
+
+_DOLT_RUNTIME = [
+    "v0.55.4",
+    "v0.56.1",
+    "v0.57.0",
+    "v0.62.0",
+    "v1.0.1",
+    "v1.1.0",
+    "v1.1.2",
+    "v1.2.2",
+]
+
+_HELPERS = [
+    "v0.49.6",
+    "v0.62.0",
+]
+
+historical_upgrade_tests(
+    corpus = _CORPUS,
+    dolt_runtime = _DOLT_RUNTIME,
+    helpers = _HELPERS,
+    source_tag = _SOURCE_TAG,
+    source_tag_bin = ":bd_source_tag",
+)
+
+exports_files(
+    ["source_tag_modules.json"],
+    visibility = ["//visibility:public"],
+)
+
+# The source-tag SQLite release (v0.9.1: no release asset; its CLI reports
+# 0.9.0 (dev)), built from its module source with Go 1.25.0 and CGO like
+# lib/binary.sh's build_verified_v091_source_binary, but offline: the module
+# zips and go.mod files come from source_tag_modules.json (the release's own
+# zip is the catalog's source_zip), and go checks them against the release's
+# go.sum. Regenerate the lock with gen_source_tag_lock.py.
+genrule(
+    name = "bd_source_tag",
+    srcs = [
+        "@bd_source_tag_goproxy//:proxy",
+        "@go_1_25_0_linux_amd64//:go/bin/go",
+        "@go_1_25_0_linux_amd64//:sdk",
+    ],
+    outs = ["bd_source_tag/bd"],
+    cmd = "$(execpath build_source_tag.sh) $@ $(execpath @go_1_25_0_linux_amd64//:go/bin/go) " +
+          "$$(echo $(execpaths @bd_source_tag_goproxy//:proxy) | cut -d' ' -f1) " +
+          "github.com/steveyegge/beads v0.9.1 go1.25.0",
+    target_compatible_with = LINUX_AMD64,
+    tools = ["build_source_tag.sh"],
+)
+
+# The public sealed-copy SQLite bridge's fast safety checks (fake binaries
+# only), which run.sh ran before every release.
+sh_test(
+    name = "legacy_bridge_test",
+    srcs = ["legacy_bridge_test.sh"],
+    data = ["//scripts:migration_harness"],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

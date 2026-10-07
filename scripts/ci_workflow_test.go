@@ -2286,10 +2286,10 @@ type ciWorkflowMatrixInclude struct {
 	// F7b review fix (S1): no typed `shard` field here. pr-preflight-
 	// platforms' Windows shard split (the one thing in this file that ever
 	// used it) was reverted as not measurably helpful, and a typed field
-	// here is shared by every workflow's `strategy.matrix.include` tuples —
-	// migration-test.yml's shard: src/pre-dolt/dolt-runtime entries use a
-	// STRING, not an int, so a mismatched type here would break parsing of
-	// an unrelated workflow. Untyped matrix keys fall through to Extra.
+	// here is shared by every workflow's `strategy.matrix.include` tuples,
+	// whose keys may be any type, so a mismatched type here would break
+	// parsing of an unrelated workflow. Untyped matrix keys fall through to
+	// Extra.
 	Extra map[string]any `yaml:",inline"`
 }
 
@@ -2709,22 +2709,9 @@ const mainWindowsTestBinariesCacheRunsOn = "${{ matrix.runner == 'blacksmith' &&
 
 // F7c: used to define its own sameRepoBlacksmith4vcpu here (same expression
 // as sameRepoBlacksmith2vcpu with the 4 vCPU label, for advisory jobs that
-// compile Go: migration-test.yml,
-// cross-version-smoke.yml). F7a independently
-// defined the same const; both are now served by the single shared
-// sameRepoBlacksmith4vcpu in ci_blacksmith_runner_test.go. migration-test.yml's
-// historical-upgrades job uses sameRepoBlacksmith4vcpuNoble instead (below).
-
-// F7c review fix (B1): migration-test.yml's historical-upgrades job cannot
-// use the plain ubuntu-latest fallback that sameRepoBlacksmith4vcpu uses,
-// because the v0.55.4 fixture is dynamically linked against the ICU ABI
-// shipped by Ubuntu 24.04's libicu74 package, and GitHub's ubuntu-latest
-// label is scheduled to move from 24.04 to 26.04 starting 2026-10-19 (see
-// actions/runner-images#14748); 26.04 drops libicu74 entirely. The fallback
-// here is pinned to the literal `ubuntu-24.04` label instead so the
-// non-Blacksmith path keeps working after that migration regardless of when
-// it lands. Do not fold this back into sameRepoBlacksmith4vcpu.
-const sameRepoBlacksmith4vcpuNoble = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}"
+// compile Go: cross-version-smoke.yml). F7a independently defined the same
+// const; both are now served by the single shared sameRepoBlacksmith4vcpu in
+// ci_blacksmith_runner_test.go.
 
 // F7b: venue-matrix runs-on for main.yml jobs that seed a Blacksmith GOCACHE
 // alongside their GitHub-hosted seed ("venue: [blacksmith, github]"):
@@ -3051,7 +3038,6 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 		// is cheap enough to size at 2 vCPU per spec-f7.md §2.2) and moves
 		// to Blacksmith for same-repo PRs/merge_group only; forks,
 		// Dependabot and push stay on ubuntu-latest.
-		"migration-test.yml":      {"historical-upgrades": sameRepoBlacksmith4vcpuNoble},
 		"cross-version-smoke.yml": {"smoke": sameRepoBlacksmith4vcpu, "versions": sameRepoBlacksmith2vcpu},
 		"docs-mintlify.yml":       {"broken-links": sameRepoBlacksmith2vcpu},
 		// main.yml's seeder job (B2, F7c implementation report) is the one
@@ -3117,7 +3103,6 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 	// Blacksmith label beyond the jobs listed in `want` above.
 	for _, file := range []string{
 		"pr.yml", "pr-risk.yml", "main.yml",
-		"migration-test.yml",
 		"cross-version-smoke.yml", "docs-mintlify.yml",
 	} {
 		workflow := readCIWorkflow(t, file)

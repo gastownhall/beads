@@ -220,6 +220,15 @@ dolt_release(
     platform = "darwin-arm64",
 )
 
+# The migration corpus's external Dolt runtime (scripts/migration-test/lib/
+# versions.sh DOLT_TEST_RUNTIME_VERSION): an older release than DOLT_VERSION,
+# deliberately, as the historical server-Dolt fixtures' host.
+dolt_release(
+    name = "dolt_test_runtime_linux_amd64",
+    platform = "linux-amd64",
+    version = "2.1.8",
+)
+
 # The tracked release formula, for //scripts:scripts_test and the
 # whole-checkout guard //scripts/repochecks:go_install_guidance_test. .beads/
 # also holds live bd data and is in .bazelignore, so no main-repo target can
@@ -246,3 +255,33 @@ new_local_repository(
 bd_releases = use_extension("//tools/bazel:bd_releases.bzl", "bd_releases")
 bd_releases.catalog(path = "//scripts:migration-test/release-catalog.json")
 use_repo(bd_releases, "bd_releases")
+
+# The source-tag SQLite release (v0.9.1) has no release asset: the migration
+# corpus builds it from its module source with the Go release it was
+# qualified on, offline (//tests/migration:bd_source_tag). The proxy files
+# are pinned in tests/migration/source_tag_modules.json, the toolchain here.
+go_module_proxy = use_repo_rule("//tools/bazel:go_module_proxy.bzl", "go_module_proxy")
+
+go_module_proxy(
+    name = "bd_source_tag_goproxy",
+    lock = "//tests/migration:source_tag_modules.json",
+)
+
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "go_1_25_0_linux_amd64",
+    build_file_content = """exports_files(
+    ["go/bin/go"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "sdk",
+    srcs = glob(["go/**"]),
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "2852af0cb20a13139b3448992e69b868e50ed0f8a1e5940ee1de9e19a123b613",
+    urls = ["https://go.dev/dl/go1.25.0.linux-amd64.tar.gz"],
+)
