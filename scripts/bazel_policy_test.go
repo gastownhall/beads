@@ -846,6 +846,18 @@ var allowedBazelTestTags = map[string]string{
 	// zero tests, which check_testcases.py rejects and equivalence.py can
 	// only note. gazelle keeps the hand-written tags attribute.
 	"integration-only": "holds tests only under the integration build tag; excluded from --config=prcore/ci, run by --config=integration",
+	// For a non-Go sh_test (no Go testcases in its test.xml, which the
+	// integration lane's check_testcases.py would reject) that runs the
+	// release-shaped bd_for_tests: the PR-core lane builds bd without the
+	// integration tag, as releases are, and running it again under the
+	// integration build would only repeat it against a test-shaped bd.
+	"pr-core-only": "runs only in --config=prcore/ci; excluded from --config=integration",
+	// For a go_binary whose every source file is `//go:build cgo`: it also
+	// sets target_compatible_with incompatible under //tools/bazel:pure, and
+	// tools/bazel/go_srcs.py and scripts/ci/bazel-release-cross-compile.sh
+	// leave it out of //tools/bazel:release_cross by this tag (`go build
+	// ./...` skips the package with CGO_ENABLED=0).
+	"cgo-only": "a go_binary with only cgo sources: incompatible with pure builds and left out of //tools/bazel:release_cross",
 }
 
 // bazelPRCoreExcludedTags are the tags whose targets never run in the PR-core
@@ -862,10 +874,14 @@ var bazelPRCoreExcludedTags = []string{"requires-docker", "dolt-server", "dolt-s
 // other lane's variant stays out of it.
 var bazelIntegrationRunsTags = map[string]bool{"integration-only": true}
 
+// bazelPRCoreOnlyTags are the tags the PR-core lane runs and the integration
+// lane does not.
+var bazelPRCoreOnlyTags = []string{"pr-core-only"}
+
 // bazelIntegrationExcludedTags is bazelPRCoreExcludedTags less the tags the
-// integration lane runs.
+// integration lane runs, plus bazelPRCoreOnlyTags.
 func bazelIntegrationExcludedTags() []string {
-	var tags []string
+	tags := append([]string(nil), bazelPRCoreOnlyTags...)
 	for _, tag := range bazelPRCoreExcludedTags {
 		if !bazelIntegrationRunsTags[tag] {
 			tags = append(tags, tag)

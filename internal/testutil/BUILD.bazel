@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 go_library(
     name = "testutil",
@@ -122,6 +123,57 @@ go_test(
     deps = [
         "//internal/storage/doltutil",
         "@com_github_go_sql_driver_mysql//:mysql",
+    ],
+)
+
+# testutil_test on the dolt-server lane: the package's own tests of the
+# test-server backends, with the local backend selected and required, so
+# TestDoltServerFingerprint's local half (formerly pr.yml's "Test (Dolt
+# server fingerprint)" job, every PR) and the TestLocalDoltServer_* tests run
+# against the pinned dolt in the test wrapper's runfiles. Every other
+# configuration of testutil_test passes BEADS_TEST_SKIP=dolt and skips them.
+# The container half needs docker: testutil_docker_test below runs it on the
+# docker lane, and TestPinnedDoltCLIMatchesContainerImage (//scripts) keeps
+# the image tag on the pinned release.
+#
+# Tags:
+#   dolt-server: starts hermetic dolt sql-servers from the pinned dolt in the
+#     test wrapper's runfiles (BEADS_TEST_DOLT_SERVER=local); excluded from
+#     --config=prcore/ci, selected by --config=doltserver.
+sh_test(
+    name = "testutil_dolt_test",
+    size = "medium",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :testutil_test)"],
+    data = [":testutil_test"],
+    env = {
+        "BEADS_TEST_DOLT_SERVER": "local",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+    },
+    tags = ["dolt-server"],
+)
+
+# The same tests with the container backend selected and required: the A/B
+# control for testutil_dolt_test, and the only place TestDoltServerFingerprint's
+# container half runs in CI (bazel.yml's docker lane, dolt-lane=docker).
+#
+# Tags:
+#   requires-docker: needs a docker daemon and the cached dolt-sql-server
+#     image; selected by --config=docker.
+#   no-remote-exec: the docker lane runs on the host.
+sh_test(
+    name = "testutil_docker_test",
+    size = "medium",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :testutil_test)"],
+    data = [":testutil_test"],
+    env = {
+        "BEADS_TEST_DOLT_SERVER": "container",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+    },
+    tags = [
+        "no-remote-exec",
+        "requires-docker",
     ],
 )
 

@@ -8,9 +8,17 @@ go_library(
     deps = ["//internal/storage/embeddeddolt"],
 )
 
+# main.go is //go:build cgo: without cgo the package is empty, which
+# `go build ./...` skips and a go_binary cannot link. cgo-only: left out of
+# //tools/bazel:release_cross (tools/bazel/go_srcs.py).
 go_binary(
     name = "cmd",
     embed = [":cmd_lib"],
+    tags = ["cgo-only"],
+    target_compatible_with = select({
+        "//tools/bazel:pure": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
     visibility = ["//:__subpackages__"],
 )
 

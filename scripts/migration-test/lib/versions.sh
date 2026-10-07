@@ -49,8 +49,8 @@ declare -ar EMBEDDED_DOLT_VERSIONS=(
 # ignored-0011. Both regimes are replayed over populated rows by the candidate's
 # main 0054-0066 + ignored 0012-0025 chain. v1.2.2 is the v1.1.2 tree re-tagged
 # by the recovery release, so it adds no new regime — it is here because it is
-# the tag people in the field actually upgrade from. Also gates the external
-# Dolt oracle download in migration-test.yml.
+# the tag people in the field actually upgrade from. Also selects the
+# external Dolt oracle (DOLT_BIN) in tests/migration's targets.
 declare -ar WISP_PLANE_VERSIONS=(
     "v1.0.1"
     "v1.1.0"

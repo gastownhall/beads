@@ -1734,6 +1734,14 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 				"BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1", "BEADS_TEST_REQUIRE_SOCAT": "1", "GOMAXPROCS": "4",
 			},
 		},
+		"//cmd/bd:bd_managed_local_test": {
+			[]string{"$(rootpath :bd_test)", "-test.run=^TestManagedLocalProxied", "-test.timeout=15m"},
+			map[string]string{
+				"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)", "BEADS_TEST_DOLT_SERVER": "local",
+				"BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)", "BEADS_TEST_PREFLIGHT_GO": "$(rlocationpath :preflight_go_fixture)",
+				"BEADS_TEST_PROXIED_LOCAL": "1", "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1", "BEADS_TEST_SKIP": "dolt",
+			},
+		},
 		"//internal/storage/dolt:dolt_server_conformance_test": {
 			[]string{"$(rootpath :dolt_race_off)", "-test.v", "-test.count=1", "-test.timeout=15m", "-test.run=^TestConformance$$"},
 			map[string]string{"BEADS_TEST_DOLT_SERVER": "local", "BEADS_TEST_GIT_IDENTITY": "1", "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1", "GOMAXPROCS": "4"},
@@ -1811,6 +1819,18 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 	// pinned ones above, and no .bzl macro, may select, skip or switch off
 	// tests through its args, env or anything else.
 	ruleNarrow := regexp.MustCompile(`-test\.(short|run|skip|list|bench)|BEADS_TEST_SKIP|BEADS_TEST_EMBEDDED_DOLT|TESTBRIDGE_TEST_ONLY|test_filter|flaky\s*=\s*(True|1|[A-Za-z_])`)
+	// Second runs over tests another target already runs in full: the
+	// selection is the point (a required-suite contract that checks it), and
+	// nothing leaves the lanes. Pinned to exactly these args.
+	extraRunVariants := map[string][]string{
+		// The doc-freshness suite (also run by //scripts:scripts_test) under
+		// -required-suite, as pr.yml's former Linux doc-freshness leg ran it.
+		"//scripts:doc_freshness_required_test": {
+			"-test.count=1",
+			"-test.run=^(TestDocFreshness.*|TestRequiredSuiteContract)$$",
+			"-required-suite=doc-freshness",
+		},
+	}
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -1841,7 +1861,18 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 		for _, unit := range units {
 			if !isBzl {
 				if name := nameRe.FindStringSubmatch(unit); name != nil {
-					if _, pinned := want["//"+pkg+":"+name[1]]; pinned {
+					label := "//" + pkg + ":" + name[1]
+					if _, pinned := want[label]; pinned {
+						continue
+					}
+					if wantArgs, ok := extraRunVariants[label]; ok {
+						var args []string
+						for _, q := range quoted.FindAllStringSubmatch(bazelAttrBlock(unit, "args"), -1) {
+							args = append(args, q[1])
+						}
+						if !reflect.DeepEqual(args, wantArgs) {
+							t.Errorf("%s args = %q, want exactly %q", label, args, wantArgs)
+						}
 						continue
 					}
 				}

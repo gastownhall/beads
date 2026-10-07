@@ -18,6 +18,7 @@ go_test(
         "bazel_cache_mode_test.go",
         "bazel_farm_workflow_test.go",
         "bazel_fork_mode_test.go",
+        "bazel_hermetic_cc_test.go",
         "bazel_policy_test.go",
         "bazel_rbe_prewarm_test.go",
         "bazel_skip_allowlist_test.go",
@@ -39,11 +40,15 @@ go_test(
         "embedded_shard_count_test.go",
         "host_tools_test.go",
         "install_dolt_test.go",
+        "managed_local_lane_test.go",
+        "migration_corpus_bazel_test.go",
         "pr_lanes_bazel_coverage_test.go",
         "pr_preflight_test.go",
         "pr_risk_bazel_coverage_test.go",
         "pull_dolt_image_test.go",
+        "rbe_worker_env_test.go",
         "release_script_test.go",
+        "repo_helpers_test.go",
         "required_suite_test.go",
         "test_script_test.go",
         "upgrade_smoke_loop_test.go",
@@ -70,9 +75,59 @@ go_test(
     ],
 )
 
+# pr.yml's check-doc-freshness-platforms Linux leg: `go test
+# -tags integration ./scripts -count=1 -run '^(TestDocFreshness.*|
+# TestRequiredSuiteContract)$' -args -required-suite=doc-freshness`, whose
+# TestMain fails unless exactly the doc-freshness inventory is compiled and
+# selected. scripts_test runs those tests too (in the integration lane); this
+# target adds the inventory and selection contract, over only the files the
+# suite reads (its fixtures copy check-doc-freshness.sh). The macOS and
+# Windows legs stay in pr.yml.
+# Tags:
+#   integration-only: every TestDocFreshness test is //go:build integration,
+#     so --config=integration's lane runs it.
+go_test(
+    name = "doc_freshness_required_test",
+    srcs = [
+        "check_doc_freshness_test.go",
+        "repo_helpers_test.go",
+        "required_suite_test.go",
+    ],
+    args = [
+        "-test.count=1",
+        "-test.run=^(TestDocFreshness.*|TestRequiredSuiteContract)$$",
+        "-required-suite=doc-freshness",
+    ],
+    data = ["check-doc-freshness.sh"],
+    tags = ["integration-only"],
+    deps = [
+        "//internal/testutil/bazeltest",
+        "//scripts/internal/testbash",
+    ],
+)
+
 exports_files(
     ["migration-test/release-catalog.json"],
     visibility = ["//scripts/migration-test/catalog:__pkg__"],
+)
+
+# The historical-upgrade harness (scripts/migration-test) and the public
+# SQLite bridge it drives, for //tests/migration's per-release targets.
+filegroup(
+    name = "migration_harness",
+    srcs = [
+        "migrate-legacy-to-current.sh",
+        "migration-test/historical-dolt-upgrade-test.sh",
+        "migration-test/legacy-bridge-test.sh",
+        "migration-test/lib/binary.sh",
+        "migration-test/lib/versions.sh",
+    ],
+    visibility = ["//tests/migration:__pkg__"],
+)
+
+exports_files(
+    ["upgrade-smoke-test.sh"],
+    visibility = ["//tests/upgrade_smoke:__pkg__"],
 )
 
 exports_files(

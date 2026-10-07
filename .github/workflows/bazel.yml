@@ -1049,6 +1049,16 @@ jobs:
           //internal/storage/embeddeddolt:embeddeddolt_test
           //internal/tracker:tracker_test
 
+      # Every release target (scripts/ci/release-targets.txt) on every PR, so
+      # a platform-gating mistake is caught here instead of at tag time
+      # (#5662): the whole tree, cgo off, one remote `bazel build
+      # --platforms=...` per target (the script's header has the coverage
+      # boundary: the cgo release builds are not compiled here).
+      - name: Cross-compile every release target (--config=release-cross)
+        run: |
+          set -euo pipefail
+          ./scripts/ci/bazel-release-cross-compile.sh
+
       # `go build` with CGO_ENABLED=0 rejects a pure binary whose imports reach
       # dolt's cgo-only store/nbs (gozstd). Bazel compiles gozstd's pure stubs
       # instead, whose init panics (third_party/patches/gozstd_nocgo.patch), so
@@ -1339,12 +1349,13 @@ jobs:
           echo "bazel test --config=integration: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
-      # As in bazel-embedded. dolt_version_test is a plain sh_test (no Go
-      # testcases in its test.xml), which --config=integration's tag filter
-      # keeps, unlike the embedded one.
+      # As in bazel-embedded. dolt_version_test and the repository guards in
+      # //scripts/repochecks are plain sh_tests (no Go testcases in their
+      # test.xml), which --config=integration's tag filter keeps, unlike the
+      # embedded one.
       - name: Every target and shard ran tests
         if: ${{ always() && steps.test.outcome != 'skipped' }}
-        run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json" --not-go //tools/bazel:dolt_version_test
+        run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json" --not-go //tools/bazel:dolt_version_test --not-go //scripts/repochecks:all
 
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
@@ -1469,9 +1480,12 @@ jobs:
   # bd_for_tests), shared with bazel-doltserver through the remote cache.
   # PR Risk builds its bd-cmd-test with -race, as here; main.yml's
   # test-proxied-cmd twin uses build-artifacts' non-race bd-cmd-test, so
-  # this lane is the stricter of the two. A job of its own, not gated by
-  # any integration switch: it runs in pr.yml's call and its gate requires
-  # it (BAZEL_PROXIED).
+  # this lane is the stricter of the two. It also runs
+  # //cmd/bd:bd_managed_local_test, the managed-local proxied lifecycle
+  # (formerly proxied-local-smoke.yml) in a loopback-only network
+  # namespace, which needs the workers' unprivileged user namespaces. A job
+  # of its own, not gated by any integration switch: it runs in pr.yml's
+  # call and its gate requires it (BAZEL_PROXIED).
   bazel-proxied:
     name: proxied-server tier
     # Remote execution only, like bazel-embedded: 30 concurrent shards, each
@@ -1720,9 +1734,12 @@ jobs:
   # shards) against a hermetic dolt sql-server, i.e. the Dolt-gated cmd/bd
   # tests (TestCLI_*, TestInit*, the store-backed suites) that every other
   # lane and legacy job skips with BEADS_TEST_SKIP=dolt or leaves out of its
-  # manifest. --config=doltserver-cmd has exactly --config=integration's
-  # build flags, so it shares bazel-integration's compile through the
-  # remote cache. Runs exactly where bazel-integration runs (the same if):
+  # manifest; plus the differential regression suite
+  # (//tests/regression:regression_test, 8 shards: the candidate
+  # bd_for_tests against the catalog-pinned v0.49.6 release, formerly
+  # regression.yml). --config=doltserver-cmd has exactly
+  # --config=integration's build flags, so it shares bazel-integration's
+  # compile through the remote cache. Runs exactly where bazel-integration runs (the same if):
   # remotely (modes remote, fork-ro, fork-rw), or locally with the
   # read-only cache (mode cache: fork and Dependabot PRs while rbe-fork is
   # closed), never plain local (rbe=off), and not when a caller passes

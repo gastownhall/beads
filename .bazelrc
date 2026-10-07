@@ -3,6 +3,18 @@
 # .bazelversion.
 common --enable_bzlmod
 common --color=no
+# C/C++ (and so cgo, -race and the Go stdlib) builds only with MODULE.bazel's
+# pinned LLVM toolchain: no host-detected local_config_cc to fall back to,
+# which would key actions to the client's gcc and lld and fail remote links
+# on workers without lld (scripts/bazel_hermetic_cc_test.go).
+common --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+
+# The pinned remote-worker host in every action key: //platforms:rbe_worker's
+# worker-env exec property is the sha256 of tools/rbe/worker-env.txt, and
+# rbe-west's schedulers run an action only on a worker that measured that
+# host (platforms/BUILD.bazel). Key-affecting, so unconditional: local,
+# fork-cache and remote runs hash alike.
+build --extra_execution_platforms=//platforms:rbe_worker
 
 # ICU policy (engdocs/ICU-POLICY.md): build go-mysql-server with its pure-Go
 # regex backend so no target links libicu. MODULE.bazel carries the matching
@@ -133,7 +145,9 @@ test:doltserver --local_test_jobs=4
 test:doltserver --remote_download_regex=.*/test\.(log|xml)$
 
 # Proxied-server tier: PR Risk's "Test (Proxied Dolt Cmd N/15)" jobs, as
-# //cmd/bd:bd_proxied_test (dolt-server-proxied tag). Kept out of
+# //cmd/bd:bd_proxied_test and //cmd/bd:bd_managed_local_test (the
+# managed-local lifecycle in a loopback-only network namespace) (the
+# dolt-server-proxied tag). Kept out of
 # --config=doltserver because bazel.yml runs that lane locally too (forks,
 # rbe=off), where 30 concurrent shards, each with a dolt sql-server busy on
 # ~4 cores, do not fit regardless of any single shard's wall time; bazel.yml
@@ -202,7 +216,9 @@ test:doltserver-integration --experimental_remote_cache_eviction_retries=0
 # tag), the whole integration-tagged cmd/bd suite against a hermetic dolt
 # sql-server, i.e. the Dolt-gated cmd/bd tests every other lane skips
 # (BEADS_TEST_SKIP=dolt in --config=prcore/ci and --config=integration, and
-# in nightly.yml's go test job). The build flags are exactly
+# in nightly.yml's go test job), and //tests/regression:regression_test
+# (the differential regression suite, formerly regression.yml, against the
+# catalog-pinned baseline in @bd_releases). The build flags are exactly
 # --config=integration's, so it compiles nothing bazel-integration does not
 # (shared through the remote cache). bazel.yml runs it where it runs the
 # integration lane (remote, or with the read-only cache in mode cache), in a
@@ -244,7 +260,9 @@ test:integration --test_env=BEADS_TEST_SKIP=dolt
 # keeps every container- or server-backed test skipped, which is what the
 # untagged base targets already do. scripts/bazel_policy_test.go derives the
 # required exclusions from the PR-core list, so a new lane tag lands here too.
-test:integration --test_tag_filters=-requires-docker,-dolt-server,-dolt-server-proxied,-dolt-server-integration,-dolt-server-cmd,-embedded,-manual
+# pr-core-only targets (the historical-release suites: shell tests against
+# the release-shaped bd, which the PR-core lane already runs) stay out too.
+test:integration --test_tag_filters=-requires-docker,-dolt-server,-dolt-server-proxied,-dolt-server-integration,-dolt-server-cmd,-embedded,-manual,-pr-core-only
 test:integration --build_tests_only
 test:integration --keep_going
 test:integration --test_summary=terse

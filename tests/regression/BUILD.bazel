@@ -1,0 +1,71 @@
+load("@rules_go//go:def.bzl", "go_test")
+load("//tools/bazel:bd_releases.bzl", "LINUX_AMD64")
+
+# The differential regression suite (formerly regression.yml, which ran
+# ./tests/regression with the regression build tag): every scenario runs against the
+# catalog-pinned baseline release and against the candidate, and their
+# normalized state is diffed. The baseline label must name the release in
+# BASELINE_VERSION (TestMain checks the binary's own version against it). The
+# candidate is the non-race bd_for_tests, built like the job's
+# `go build -tags gms_pure_go ./cmd/bd`. Both bd's talk to a hermetic dolt
+# sql-server TestMain starts from the pinned dolt (BEADS_TEST_DOLT_SERVER=local)
+# where the job pulled the dolt-sql-server image; a server that cannot start
+# fails the target (BEADS_TEST_REQUIRE_DOLT_CONTAINER=1). The Go binary shards
+# itself over the top-level tests, so each runs in exactly one shard.
+#
+# Tags:
+#   dolt-server-cmd: starts a hermetic dolt sql-server and needs the
+#     integration build tag; selected by --config=doltserver-cmd (bazel.yml's
+#     bazel-cmd-dolt lane) and excluded from every other lane, whose
+#     configurations either drop both test files or set BEADS_TEST_SKIP=dolt.
+go_test(
+    name = "regression_test",
+    size = "large",
+    # --config=doltserver-cmd's -test.timeout=19m fires (with a goroutine
+    # dump) before Bazel's 1200s action limit.
+    timeout = "eternal",
+    srcs = [
+        "regression_test.go",
+        "scenarios_test.go",
+    ],
+    data = [
+        "BASELINE_VERSION",
+        "//cmd/bd:bd_for_tests",
+        "@bd_releases//:v0.49.6",
+    ],
+    env = {
+        "BD_REGRESSION_BASELINE_BIN": "$(rlocationpath @bd_releases//:v0.49.6)",
+        "BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)",
+        "BEADS_TEST_DOLT_SERVER": "local",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+    },
+    shard_count = 8,
+    tags = ["dolt-server-cmd"],
+    target_compatible_with = LINUX_AMD64,
+    deps = [
+        "//internal/testutil",
+        "//internal/testutil/bazeltest",
+    ],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

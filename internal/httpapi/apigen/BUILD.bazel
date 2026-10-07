@@ -15,6 +15,13 @@ go_library(
     ],
 )
 
+# //scripts/repochecks:types_gen_drift_test regenerates types.gen.go from the
+# spec (`make api-check`'s drift half).
+exports_files(
+    ["types.gen.go"],
+    visibility = ["//scripts/repochecks:__pkg__"],
+)
+
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(

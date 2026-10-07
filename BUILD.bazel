@@ -11,6 +11,12 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 # so //:repo_files covers it for //test/docsync's link checks and the
 # repository-policy tests in //scripts.
 # gazelle:exclude integrations
+# The two example Go modules (own go.mod, built against a released beads) are
+# not part of this build either, but they are tracked files the repository
+# guards (gofmt, build-tag and install-guidance checks in
+# //scripts/repochecks) must see, so they are not in .bazelignore.
+# gazelle:exclude examples/library-usage
+# gazelle:exclude examples/bd-example-extension-go
 gazelle(name = "gazelle")
 
 exports_files(
@@ -18,6 +24,7 @@ exports_files(
     visibility = [
         "//scripts/pr-lint:__pkg__",
         "//scripts/prlintmake:__pkg__",
+        "//tests/upgrade_smoke:__pkg__",
     ],
 )
 
@@ -349,6 +356,7 @@ filegroup(
         "//issueops:repo_files",
         "//journalops:repo_files",
         "//memoryops:repo_files",
+        "//platforms:repo_files",
         "//plugins/beads:repo_files",
         "//schema:repo_files",
         "//scripts:repo_files",
@@ -360,18 +368,24 @@ filegroup(
         "//scripts/migration-test/catalog:repo_files",
         "//scripts/pr-lint:repo_files",
         "//scripts/prlintmake:repo_files",
+        "//scripts/repochecks:repo_files",
         "//scripts/repro-dolt-hang:repo_files",
         "//scripts/repro-dolt-prod-timeouts:repo_files",
         "//scripts/workflowtags:repo_files",
         "//test/conformance:repo_files",
         "//test/docsync:repo_files",
         "//test/testmainconvention:repo_files",
+        "//tests/migration:repo_files",
+        "//tests/regression:repo_files",
+        "//tests/upgrade_smoke:repo_files",
+        "//third_party/cc_toolchain:repo_files",
         "//third_party/patches:repo_files",
         "//tools/bazel:repo_files",
         "//tools/docsmint:repo_files",
     ],
     visibility = [
         "//scripts:__pkg__",
+        "//scripts/repochecks:__pkg__",
         "//test/docsync:__pkg__",
     ],
 )

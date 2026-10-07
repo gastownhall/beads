@@ -6,8 +6,8 @@ package main
 // MANAGED-LOCAL proxied workspace, plus the direct/embedded control that keeps
 // the proxied guard from leaking into topologies bd really does manage.
 //
-// These live in the managed-local lane (TestManagedLocalProxied* runs under
-// proxied-local-smoke.yml) because they are the only lane with a real proxy
+// These live in the managed-local lane (TestManagedLocalProxied* runs in
+// //cmd/bd:bd_managed_local_test) because they are the only lane with a real proxy
 // supervising a real dolt child: the defects being covered are about which
 // process record bd reads and which process bd spawns, and neither is
 // observable against an external testcontainer.
