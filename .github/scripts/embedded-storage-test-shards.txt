@@ -537,6 +537,7 @@
 15 15 TestEmbeddedTransactionStandaloneWispLifecyclePersistsWithoutDoltCommit
 15 15 TestEventsJournalPruneNeverSplitsASkewedPair
 15 15 TestEventsJournal_ActorMatrixOnEmbedded
+15 15 TestGetDescendantsCycles
 15 15 TestGetIssueCommentsPageEmbedded
 15 15 TestGetReadyWorkIncludeEphemeralExcludesNonReadyWisps
 15 15 TestIgnoredCursorHealIsIdempotent
