@@ -193,6 +193,7 @@ release_cross_build(
         "//internal/gitignore:gitignore",
         "//internal/gitlab:gitlab",
         "//internal/gittraceenv:gittraceenv",
+        "//internal/gqlapi:gqlapi",
         "//internal/hooks:hooks",
         "//internal/httpapi/apigen:apigen",
         "//internal/httpapi/spec:spec",

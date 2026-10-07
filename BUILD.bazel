@@ -286,6 +286,7 @@ filegroup(
         "//internal/gitignore:repo_files",
         "//internal/gitlab:repo_files",
         "//internal/gittraceenv:repo_files",
+        "//internal/gqlapi:repo_files",
         "//internal/hooks:repo_files",
         "//internal/httpapi:repo_files",
         "//internal/httpapi/apigen:repo_files",
