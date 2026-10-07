@@ -311,8 +311,7 @@ func TestMergeQueueBazelCoversRetiredTiers(t *testing.T) {
 // workflow-level env, --config=fresh only when inputs.fresh-test-results is
 // true (nightly.yml passes it; nothing else does), appended after every
 // other --config of each `bazel test` so its --nocache_test_results wins;
-// no lane config turns caching off except docker (host state outside the
-// action key); and nothing adds retries (eviction retries stay 0 where
+// no lane config turns caching off; and nothing adds retries (eviction retries stay 0 where
 // set, TestBazelRetiredLanesArePinned / TestBazelPRLanesArePinned).
 func TestBazelTestResultCachingPolicy(t *testing.T) {
 	var doc struct {
@@ -412,15 +411,12 @@ func TestBazelTestResultCachingPolicy(t *testing.T) {
 		if strings.HasSuffix(head, ":fresh") {
 			lines = append(lines, line)
 		}
-		if strings.Contains(line, "cache_test_results") && line != bazelFreshRCLine && line != "test:docker --nocache_test_results" {
-			t.Errorf(".bazelrc %q: only test:docker and test:fresh set test result caching", line)
+		if strings.Contains(line, "cache_test_results") && line != bazelFreshRCLine {
+			t.Errorf(".bazelrc %q: only test:fresh sets test result caching", line)
 		}
 	}
 	if strings.Join(lines, "\n") != bazelFreshRCLine {
 		t.Errorf(".bazelrc --config=fresh = %q, want exactly %q", lines, bazelFreshRCLine)
-	}
-	if !strings.Contains(rc, "\ntest:docker --nocache_test_results\n") {
-		t.Error(".bazelrc lost test:docker --nocache_test_results")
 	}
 }
 

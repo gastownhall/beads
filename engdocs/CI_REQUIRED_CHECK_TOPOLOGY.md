@@ -645,9 +645,7 @@ Do not require these existing check names directly:
   the former `test-windows-doltversion` and `test-windows-dbproxy-server`)
 - `Test (ubuntu-latest)`
 - `Test (macos-latest)`
-- `Test (storage domain + uow)`
 - `Go checks (vet)`
-- `Contract corpus (golden + determinism + conformance)`
 - `PR Core (wrapper timing)`
 - `Build Artifacts`
 - `Bazel tier coverage`
@@ -790,9 +788,9 @@ intentionally absent for that event or risk tier:
   `TEST_SERVER_STORAGE_FULL` when it reported `dolt_server=true`; and
   `BUILD_EMBEDDED` when it reported both. `BAZEL_COVERAGE` (that job's
   result) must be `success`.
-- In the baseline aggregate, `BUILD_ARTIFACTS`, `PR_CORE_WRAPPER`,
-  `CHECK_CMD_BD_PUREGEO_TESTS`, `TEST_DOMAIN_UOW` and `CONTRACT_CORPUS` may
-  be `skipped` when `bazel-coverage` reported `pr_lanes=true`.
+- In the baseline aggregate, `BUILD_ARTIFACTS`, `PR_CORE_WRAPPER` and
+  `CHECK_CMD_BD_PUREGEO_TESTS` may be `skipped` when `bazel-coverage`
+  reported `pr_lanes=true`.
 - In the baseline aggregate, `BAZEL_COVERAGE` must be `success`;
   `BAZEL_EMBEDDED_RETIRED` is red when `embedded=true` but the Bazel embedded
   lane did not run remotely and pass, `BAZEL_DOLT_SERVER_RETIRED` when
@@ -870,7 +868,7 @@ D2 retires legacy test jobs on same-repo PRs, one step at a time, where
 | --- | --- | --- | --- | --- |
 | 1 | `test-embedded-storage` x5, `test-embedded-conformance` x2, `test-embedded-cmd` x20 | `bazel-embedded` (`--config=embedded`) | `BAZEL_RETIRES_LEGACY_EMBEDDED` | `BAZEL_EMBEDDED_RETIRED` |
 | 2 | `test-proxied-cmd` x15, `test-server-storage`, `test-server-storage-full` x16 | `bazel-proxied` (`--config=doltserver-proxied`), `bazel-server-storage` (`--config=doltserver-integration`) | `BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS` | `BAZEL_DOLT_SERVER_RETIRED` |
-| 3 | `pr.yml`: `pr-core-wrapper` (PR Core), `build-artifacts`, `check-cmd-bd-puregeo-tests` (pure-Go and js/wasm), `test-domain-uow`, `contract-corpus` | `bazel-test` (`--config=ci`, which also publishes `bazel-ci-build-artifacts`), `bazel-pure` (`--config=pure`, `--config=js-wasm`), `bazel-doltserver` (`--config=doltserver`) | `BAZEL_RETIRES_LEGACY_PR_LANES` | `BAZEL_PR_LANES_RETIRED` |
+| 3 | `pr.yml`: `pr-core-wrapper` (PR Core), `build-artifacts`, `check-cmd-bd-puregeo-tests` (pure-Go and js/wasm) | `bazel-test` (`--config=ci`, which also publishes `bazel-ci-build-artifacts`), `bazel-pure` (`--config=pure`, `--config=js-wasm`), `bazel-doltserver` (`--config=doltserver`; the only run of the former `test-domain-uow` and `contract-corpus` suites) | `BAZEL_RETIRES_LEGACY_PR_LANES` | `BAZEL_PR_LANES_RETIRED` |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -882,16 +880,15 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
 
 - Step 3 specifics (`pr.yml`'s own jobs, so the legacy jobs and their Bazel
   lanes run in the same `pr.yml` run):
-  - The five jobs add `needs: bazel-coverage` and
+  - The three jobs add `needs: bazel-coverage` and
     `if: needs.bazel-coverage.outputs.pr_lanes != 'true'`; `pr.yml`'s gate
     accepts their skips only when `pr_lanes` is exactly `true`, and then
     requires `BAZEL_TEST`, `BAZEL_PURE` and `BAZEL_DOLTSERVER` to have run
     remotely and passed (`BAZEL_PR_LANES_RETIRED`). `pr-risk.yml` commits
     the flag too, only so the shared `bazel-coverage` job stays identical;
     nothing in PR Risk reads `pr_lanes`.
-  - Artifact consumers: `build-artifacts`' `ci-build-artifacts` fed PR Core,
-    domain+uow and (before F3) the package gates; all three now stand down
-    with it. No other job in any workflow reads `pr.yml`'s artifacts
+  - Artifact consumers: `build-artifacts`' `ci-build-artifacts` feeds PR
+    Core, which stands down with it. No other job in any workflow reads `pr.yml`'s artifacts
     (`docs-autofix.yml` reads `check-doc-flags`'
     `cli-docs-freshness-patch`, which is unaffected).
   - F3: the package gates (`package-mcp`, `package-npm`) moved into
@@ -914,15 +911,14 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
     timing measured there), `ubuntu-latest` otherwise. `bazel-test`'s own
     `bazel-ci-build-artifacts` upload is no longer consumed by anything; it
     is kept for the F3.5.3 SHA256SUMS comparison and for debugging.
-  - The Dolt server fingerprint is checked per backend, where that backend
-    runs. The local server (the pinned dolt CLI every Bazel dolt-server lane
-    starts) is checked by `//internal/testutil:testutil_dolt_test` on the
-    dolt-server lane. The container is checked by `test-domain-uow`'s first
-    test step, which runs only where the container-backed jobs run (not
-    covered by `pr_lanes`). The every-PR job `test-dolt-server-fingerprint`
-    (`Test (Dolt server fingerprint)`, `TEST_DOLT_SERVER_FINGERPRINT`)
-    pulled a docker image the workers do not have, so it is retired; the
-    image tag stays pinned to the dolt release by
+  - The Dolt-backed domain, uow, tracker, doctor/fix and protocol suites
+    run only on the dolt-server lane, against hermetic `dolt sql-server`s
+    started from the pinned dolt; no CI job runs them against the
+    testcontainers backend (no `requires-docker` targets, no
+    `--config=docker`). The Dolt server fingerprint is checked in CI on that
+    local backend by `//internal/testutil:testutil_dolt_test`; its container
+    half runs under plain `go test` wherever docker and the image are
+    present, and the image tag stays pinned to the dolt release by
     `TestPinnedDoltCLIMatchesContainerImage`. The release-target
     cross-compilation (formerly pr.yml's
     `check-release-target-cross-compilation`, `go build ./...` with
@@ -1099,8 +1095,8 @@ manifests. On those PRs they are the tiers' only pre-merge run, and
     legacy `-test.count=1` jobs). Since merge queue readiness these lanes
     cache results like every other lane, and nightly's `--config=fresh`
     re-executes every test once a day (see [Merge Queue](#merge-queue),
-    "Test result caching"). Only `test:docker` and `test:fresh` set result
-    caching in `.bazelrc`.
+    "Test result caching"). Only `test:fresh` sets result caching in
+    `.bazelrc`.
   - No retries: no `--flaky_test_attempts` or
     `--runs_per_test_detects_flakes` anywhere, and no `flaky =` other than
     a literal `False`. Each lane also runs
@@ -1509,9 +1505,7 @@ retired tiers' configs and `sole-run`, parity with the legacy
 results, so nothing could ever be reused. Why caching is safe:
 
 - A cached PASS is valid for identical inputs: these targets are hermetic
-  (dolt and every input are runfiles). The docker-backed lane, whose
-  result depends on host state outside the key, keeps
-  `--nocache_test_results` and is dispatch-only.
+  (dolt and every input are runfiles).
 - A cached failure is never reused: Bazel treats a failed cached action
   as a miss, so whatever failed before runs again.
 - Poisoning is bounded: only rbe-west's workers write the action cache

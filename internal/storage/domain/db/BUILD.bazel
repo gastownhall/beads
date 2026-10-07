@@ -126,40 +126,11 @@ go_test(
     ],
 )
 
-# The Dolt-backed db suite (TestDomainDB) as pr.yml's "Test (storage domain +
-# uow)" job runs it: the suite starts a dolt sql-server container through
-# testcontainers, and BEADS_TEST_REQUIRE_DOLT_CONTAINER=1 turns a missing
-# container into a failure instead of a silent skip. db_test itself stays
-# untagged: under --config=prcore (BEADS_TEST_SKIP=dolt) the suite skips, as in
-# pr-core's `go test`.
-#
-# Tags:
-#   requires-docker: needs a docker daemon; excluded from --config=prcore/ci,
-#     selected by --config=docker.
-#   no-remote-exec: the daemon is on the host, not on remote workers.
-sh_test(
-    name = "db_docker_test",
-    size = "large",
-    srcs = ["//tools/bazel:go_test_variant.sh"],
-    args = ["$(rootpath :db_test)"],
-    data = [":db_test"],
-    # Pinned to the container backend (the docker lane is the A/B control);
-    # rule env beats --test_env, so =local on the command line cannot flip it.
-    env = {
-        "BEADS_TEST_DOLT_SERVER": "container",
-        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
-    },
-    tags = [
-        "no-remote-exec",
-        "requires-docker",
-    ],
-)
-
-# db_test as pr.yml's "Test (storage domain + uow)" job runs it, on the
+# db_test as the retired "Test (storage domain + uow)" job ran it, on the
 # dolt-server lane: TestDomainDB's server is a `dolt sql-server` the test
 # process starts itself (the local backend of internal/testutil) instead of a
 # testcontainers container. GOMAXPROCS=4 is the job's runner shape (the
-# executor may have far more cores). db_docker_test is the A/B control.
+# executor may have far more cores).
 #
 # Tags:
 #   dolt-server: starts hermetic dolt sql-servers from the pinned dolt in the

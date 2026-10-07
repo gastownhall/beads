@@ -86,7 +86,7 @@ go_library(
 # ~6-8s apiece, and the package needs ~7 min serially (TestBatchApplyContract
 # alone ~1 min: BoundsTheItemCount applies 1000+1001 real items), past the
 # default medium 300s. size/shard_count cover that configless run, the same
-# workload uow_dolt_test (8 shards) and uow_docker_test (4 shards) run.
+# workload uow_dolt_test (8 shards) runs.
 go_test(
     name = "uow_test",
     size = "large",
@@ -202,45 +202,11 @@ go_test(
     ],
 )
 
-# The container-backed uow tests as pr.yml's "Test (storage domain + uow)" job
-# runs them (no -short; each test starts its own dolt sql-server container),
-# with BEADS_TEST_REQUIRE_DOLT_CONTAINER=1 so a missing container fails instead
-# of skipping. It repeats uow_test's `env` (go_test_variant.sh cannot inherit
-# it). uow_test itself stays untagged: under --config=prcore those tests skip.
-#
-# Tags:
-#   requires-docker: needs a docker daemon; excluded from --config=prcore/ci,
-#     selected by --config=docker.
-#   no-remote-exec: the daemon is on the host, not on remote workers.
-sh_test(
-    name = "uow_docker_test",
-    size = "large",
-    srcs = ["//tools/bazel:go_test_variant.sh"],
-    args = ["$(rootpath :uow_test)"],
-    data = [
-        ":uow_test",
-        "//cmd/bd:bd_for_tests",
-    ],
-    # Pinned to the container backend (the docker lane is the A/B control);
-    # rule env beats --test_env, so =local on the command line cannot flip it.
-    env = {
-        "BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)",
-        "BEADS_TEST_DOLT_SERVER": "container",
-        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
-    },
-    # ~12 min unsharded under -race on a loaded host (large allows 15).
-    shard_count = 4,
-    tags = [
-        "no-remote-exec",
-        "requires-docker",
-    ],
-)
-
-# uow_test as pr.yml's "Test (storage domain + uow)" job runs it (no -short),
+# uow_test as the retired "Test (storage domain + uow)" job ran it (no -short),
 # on the dolt-server lane: every server the tests ask internal/testutil for is
 # a `dolt sql-server` child of the test process, so the target runs on remote
 # workers. It repeats uow_test's `env` (go_test_variant.sh cannot inherit it).
-# GOMAXPROCS=4 is the job's runner shape. uow_docker_test is the A/B control.
+# GOMAXPROCS=4 is the job's runner shape.
 # 8 shards keep each under ~2 min remotely (the package is ~7 min in the job).
 #
 # Tags:

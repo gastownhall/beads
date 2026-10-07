@@ -14,7 +14,7 @@ _DOLT_PLATFORMS_ONLY = select({
 })
 
 # sh_test src for a second test target over an existing go_test binary (see
-# the script header), e.g. //cmd/bd/doctor/fix:fix_docker_test.
+# the script header), e.g. //cmd/bd/doctor/fix:fix_dolt_test.
 exports_files(
     ["go_test_variant.sh"],
     visibility = ["//visibility:public"],

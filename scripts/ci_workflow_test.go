@@ -996,62 +996,6 @@ func TestPRCIGateRequiresGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 	}
 }
 
-func TestStorageDomainUOWJobsUseNestedTimeoutBudgets(t *testing.T) {
-	const (
-		fingerprintTimeoutMinutes = 5
-		storageTimeoutMinutes     = 15
-		doctorTimeoutMinutes      = 10
-		setupTeardownSlackMinutes = 5
-		jobTimeoutMinutes         = fingerprintTimeoutMinutes + storageTimeoutMinutes + doctorTimeoutMinutes + setupTeardownSlackMinutes
-	)
-	storageCommand := fmt.Sprintf(
-		"go test -tags gms_pure_go -race -count=1 -timeout %dm -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...",
-		storageTimeoutMinutes)
-	doctorCommand := fmt.Sprintf(
-		"go test -tags gms_pure_go -race -count=1 -timeout %dm -v ./cmd/bd/doctor/fix/",
-		doctorTimeoutMinutes)
-
-	for _, workflowName := range []string{"pr.yml"} {
-		t.Run(workflowName, func(t *testing.T) {
-			job := readCIWorkflow(t, workflowName).job(t, "test-domain-uow")
-			if job.TimeoutMinutes != jobTimeoutMinutes {
-				t.Errorf("test-domain-uow timeout = %d minutes, want %d", job.TimeoutMinutes, jobTimeoutMinutes)
-			}
-			// Go's timeout applies per package test binary, so this is a
-			// maintenance tripwire for the declared sequential tier budgets,
-			// not a mathematical upper bound for the multi-package first step.
-			if job.TimeoutMinutes <= fingerprintTimeoutMinutes+storageTimeoutMinutes+doctorTimeoutMinutes {
-				t.Errorf(
-					"test-domain-uow timeout = %d minutes, want more than %d minutes of declared tier budgets",
-					job.TimeoutMinutes,
-					fingerprintTimeoutMinutes+storageTimeoutMinutes+doctorTimeoutMinutes)
-			}
-			assertStepRunsExactly(t, job, "Test domain + uow + tracker", storageCommand)
-			assertStepRunsExactly(t, job, "Test doctor/fix (Dolt-backed, hard-require container)", doctorCommand)
-		})
-	}
-
-	// The container this job uses is compared with the checked-in
-	// fingerprint in its first test step
-	// (TestDoltServerFingerprintRunsWhereEachBackendRuns pins where).
-	job := readCIWorkflow(t, "pr.yml").job(t, prFingerprintJob)
-	assertStepRunsExactly(t, job, prFingerprintStep,
-		fmt.Sprintf("go test -tags gms_pure_go -count=1 -timeout %dm -v -run '^TestDoltServerFingerprint$' ./internal/testutil/", fingerprintTimeoutMinutes))
-	assertStepEnvValue(t, job, prFingerprintStep, "BEADS_TEST_REQUIRE_DOLT_CONTAINER", "1")
-
-	gate := readCIWorkflow(t, "pr.yml").job(t, "ci-gate")
-	gateEnv := gate.step(t, "Evaluate CI gate").Env
-	if !contains(gate.Needs, "test-domain-uow") {
-		t.Errorf("ci-gate needs test-domain-uow: %v", gate.Needs)
-	}
-	if got, want := gateEnv["TEST_DOMAIN_UOW"], "${{ needs.test-domain-uow.result }}"; got != want {
-		t.Errorf("ci-gate TEST_DOMAIN_UOW = %q, want %q", got, want)
-	}
-	if !contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), "TEST_DOMAIN_UOW") {
-		t.Errorf("ci-gate CI_GATE_REQUIRED does not include TEST_DOMAIN_UOW: %q", gateEnv["CI_GATE_REQUIRED"])
-	}
-}
-
 func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 	const (
 		workspaceBDBinary = "${{ github.workspace }}/bd"
@@ -1096,63 +1040,6 @@ func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 				}
 			}
 		}
-	}
-}
-
-// TestDoltTestcontainerStepsDisableRyuk pins TESTCONTAINERS_RYUK_DISABLED on
-// the steps enumerated in the table below — the two Dolt-backed steps of
-// pr.yml's test-domain-uow job. It is an allow-list of
-// literal (workflow, job, step) triples, so it catches an un-pinning
-// regression on those steps only; it does not detect the class, and a
-// newly added container-starting step passes it unpinned.
-//
-// Why the pin: testcontainers-go shares one Ryuk reaper per host; when a step
-// runs several container-starting packages as concurrent test binaries (plain
-// "go test" parallelizes across packages), they race to attach to that shared
-// reaper, and a failed handshake from one process reaps a sibling's live
-// container mid-suite (be-2on). A GitHub Actions runner is destroyed after the
-// job, so the reaper buys nothing there and only costs this race.
-//
-// The scope is the job, not a per-step predicate: "Test domain + uow +
-// tracker" runs three container-starting package trees in one invocation and
-// is the step the race is concrete on, while "Test doctor/fix" runs the single
-// ./cmd/bd/doctor/fix/ package and is pinned for consistency inside the same
-// job rather than because it has an in-step sibling.
-//
-// Left unpinned, deliberately. A step can only start a Dolt container if its
-// job pre-caches the image via scripts/ci/pull-dolt-image.sh: checkDolt in
-// internal/testutil gates on `docker image inspect` and never auto-pulls. The
-// other jobs that do pull it are pr.yml/contract-corpus,
-// pr-risk.yml/test-proxied-cmd,
-// pr-risk.yml/test-server-storage and -full, and
-// bazel.yml's --config=docker lane. They are out of scope for this change, not
-// immune: no reap has been attributed to them, and the docker lane would
-// additionally need --test_env=TESTCONTAINERS_RYUK_DISABLED=true because bazel
-// does not forward ambient environment into tests. Extending the pin — and
-// teaching this guard to scan for the class, the way assertGoCacheWriter below
-// walks every job and step — is follow-up work on be-2on.
-//
-// Steps that run under BEADS_TEST_SKIP=dolt (pr-core.sh's hermetic wrapper,
-// nightly.yml's full-test) never start a container at all
-// and are correctly excluded: internal/testutil's readiness check treats
-// BEADS_TEST_SKIP=dolt as an explicit opt-out before it ever reaches Docker.
-func TestDoltTestcontainerStepsDisableRyuk(t *testing.T) {
-	type doltContainerStep struct {
-		workflow string
-		job      string
-		step     string
-	}
-
-	steps := []doltContainerStep{
-		{"pr.yml", "test-domain-uow", "Test domain + uow + tracker"},
-		{"pr.yml", "test-domain-uow", "Test doctor/fix (Dolt-backed, hard-require container)"},
-	}
-
-	for _, tc := range steps {
-		t.Run(tc.workflow+"/"+tc.job+"/"+tc.step, func(t *testing.T) {
-			job := readCIWorkflow(t, tc.workflow).job(t, tc.job)
-			assertStepEnvValue(t, job, tc.step, "TESTCONTAINERS_RYUK_DISABLED", "true")
-		})
 	}
 }
 
@@ -3689,8 +3576,6 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 		"BUILD_ARTIFACTS":            "build-artifacts",
 		"PR_CORE_WRAPPER":            "pr-core-wrapper",
 		"CHECK_CMD_BD_PUREGEO_TESTS": "check-cmd-bd-puregeo-tests",
-		"TEST_DOMAIN_UOW":            "test-domain-uow",
-		"CONTRACT_CORPUS":            "contract-corpus",
 	} {
 		if !contains(required, id) || !contains(gate.Needs, job) {
 			t.Errorf("pr.yml ci-gate no longer requires legacy %s (%s)", job, id)
@@ -4469,27 +4354,30 @@ func TestBazelWorkflowPublishesBuildArtifacts(t *testing.T) {
 	}
 }
 
-// bazel-doltserver replaces pr.yml's container-backed jobs: --config=doltserver
-// (hermetic dolt sql-servers, remote-executable) by default, and a dolt-server
-// target in every package those jobs run. --config=docker stays reachable as
-// the A/B control (dispatch dolt-lane=docker), with the jobs' image pull.
+// bazel-doltserver is the only run of what pr.yml's container-backed jobs
+// ("Test (storage domain + uow)", "Contract corpus") ran: --config=doltserver
+// (hermetic dolt sql-servers, remote-executable), with a dolt-server target
+// in every package those jobs ran. Nothing runs those suites against
+// testcontainers any more: no docker lane, no requires-docker target, no
+// image pull in bazel.yml, and neither job in pr.yml.
 func TestBazelDoltJobMirrorsContainerJobs(t *testing.T) {
 	pr := readCIWorkflow(t, "pr.yml")
-	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelDoltJobName)
-	pull := job.step(t, "Pull Dolt sql-server image")
 	for _, name := range []string{"test-domain-uow", "contract-corpus"} {
-		if want := pr.job(t, name).step(t, "Pull Dolt sql-server image").Run; pull.Run != want {
-			t.Errorf("%s pulls the dolt image differently from %s (%q)", bazelDoltJobName, name, want)
+		if _, ok := pr.Jobs[name]; ok {
+			t.Errorf("pr.yml has job %s again; //...:*_dolt_test on the dolt-server lane runs its tests", name)
 		}
 	}
-	if pull.If != "${{ env.BAZEL_DOLT_LANE == 'docker' }}" {
-		t.Errorf("%s pulls the dolt image with if %q; only the docker lane needs it", bazelDoltJobName, pull.If)
+	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelDoltJobName)
+	for _, st := range job.Steps {
+		if strings.Contains(st.Run, "pull-dolt-image") || strings.Contains(st.Run, "docker") {
+			t.Errorf("%s step %q uses docker; the dolt-server lane needs none", bazelDoltJobName, st.Name)
+		}
 	}
-	if got := job.Env["BAZEL_DOLT_LANE"]; got != "${{ inputs.dolt-lane || 'doltserver' }}" {
-		t.Errorf("%s BAZEL_DOLT_LANE = %q, want the doltserver lane unless dispatched otherwise", bazelDoltJobName, got)
+	if _, ok := job.Env["BAZEL_DOLT_LANE"]; ok {
+		t.Errorf("%s still selects its lane from BAZEL_DOLT_LANE; it runs --config=doltserver only", bazelDoltJobName)
 	}
 	test := job.step(t, "bazel test //... --config=doltserver")
-	if !strings.Contains(test.Run, `bazel test //... "--config=$BAZEL_DOLT_LANE"`) || !strings.Contains(test.Run, "set -o pipefail") {
+	if !strings.Contains(test.Run, "bazel test //... --config=doltserver ") || !strings.Contains(test.Run, "set -o pipefail") {
 		t.Errorf("dolt lane step does not run the lane over //...:\n%s", test.Run)
 	}
 	if strings.Contains(test.Run, "--config=remote-exec") {
@@ -4498,36 +4386,35 @@ func TestBazelDoltJobMirrorsContainerJobs(t *testing.T) {
 	assertTestStepKeepsExitStatus(t, test)
 
 	rc := readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc")
-	for _, want := range []string{"test:doltserver --test_tag_filters=dolt-server", "test:docker --test_tag_filters=requires-docker"} {
-		if !strings.Contains(rc, want+"\n") {
-			t.Errorf(".bazelrc lacks %q", want)
-		}
+	if !strings.Contains(rc, "test:doltserver --test_tag_filters=dolt-server\n") {
+		t.Errorf(".bazelrc lacks %q", "test:doltserver --test_tag_filters=dolt-server")
+	}
+	if regexp.MustCompile(`(?m)^(build|test):docker\b`).MatchString(rc) {
+		t.Error(".bazelrc defines a docker config again; the dolt-server lane is hermetic")
 	}
 
-	// The packages those jobs run (test-domain-uow: domain/..., uow,
-	// tracker/... and doctor/fix; contract-corpus: protocol) each need a
+	// The packages those jobs ran (test-domain-uow: domain/..., uow,
+	// tracker/... and doctor/fix, and the server fingerprint, whose local
+	// half testutil's target runs; contract-corpus: protocol) each need a
 	// dolt-server target. Every such target, checked on its own, picks the
 	// local backend and fails closed, so a broken backend fails rather than
 	// skipping into a cached pass; the ones whose TestMain owns a server also
 	// set the package's own REQUIRE switch.
 	root := sourceRepoRoot(t)
-	for pkg, docker := range map[string]bool{
-		"internal/storage/domain":      false,
-		"internal/storage/domain/db":   true,
-		"internal/storage/domain/fs":   false,
-		"internal/storage/domain/git":  false,
-		"internal/storage/uow":         true,
-		"internal/tracker":             true,
-		"internal/tracker/conformance": false,
-		"cmd/bd/doctor/fix":            true,
-		"cmd/bd/protocol":              true,
+	for _, pkg := range []string{
+		"internal/storage/domain",
+		"internal/storage/domain/db",
+		"internal/storage/domain/fs",
+		"internal/storage/domain/git",
+		"internal/storage/uow",
+		"internal/testutil",
+		"internal/tracker",
+		"internal/tracker/conformance",
+		"cmd/bd/doctor/fix",
+		"cmd/bd/protocol",
 	} {
-		build := readPolicyFile(t, root, pkg+"/BUILD.bazel")
-		for _, err := range checkDoltServerRules(pkg, build) {
+		for _, err := range checkDoltServerRules(pkg, readPolicyFile(t, root, pkg+"/BUILD.bazel")) {
 			t.Error(err)
-		}
-		if docker && !strings.Contains(build, `"requires-docker"`) {
-			t.Errorf("%s/BUILD.bazel has no requires-docker variant for the docker A/B lane", pkg)
 		}
 	}
 }
@@ -4617,15 +4504,14 @@ func checkDoltServerRules(pkg, build string) []error {
 }
 
 // A dolt-server rule is checked on its own: another target in the same file
-// (the docker variant) carrying the env must not cover for it.
+// (here an untagged variant) carrying the env must not cover for it.
 func TestCheckDoltServerRulesPerTarget(t *testing.T) {
 	const docker = `sh_test(
-    name = "uow_docker_test",
+    name = "uow_container_test",
     env = {
         "BEADS_TEST_DOLT_SERVER": "container",
         "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
     },
-    tags = ["requires-docker", "no-remote-exec"],
 )
 `
 	good := `load("@rules_shell//shell:sh_test.bzl", "sh_test")
@@ -5030,21 +4916,36 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 	// require) or of bazel-integration (which a caller may switch off,
 	// while the server tier always runs remotely).
 	workflow := readCIWorkflow(t, bazelWorkflowName)
-	for _, c := range []struct{ job, config, logs string }{
-		{bazelProxiedJobName, "doltserver-proxied", "bazel-proxied-testlogs"},
-		{bazelServerJobName, "doltserver-integration", "bazel-server-storage-testlogs"},
+	for _, c := range []struct {
+		job, config, logs string
+		wantSteps         int
+	}{
+		{bazelProxiedJobName, "doltserver-proxied", "bazel-proxied-testlogs", 8},
+		// One more than bazel-proxied: a "Shard balance" step (rbe-ci-cost-
+		// latency-study.md recommendation 4), since this is the tier whose
+		// last shard has trailed the rest by 4.3-4.5 min in 2 of 8 runs.
+		{bazelServerJobName, "doltserver-integration", "bazel-server-storage-testlogs", 9},
 	} {
 		job := workflow.job(t, c.job)
 		if job.TimeoutMinutes == 0 || job.TimeoutMinutes > 30 {
 			t.Errorf("%s timeout-minutes = %d; it runs remotely only (longest shard ~2-8 min), keep it at most 30", c.job, job.TimeoutMinutes)
 		}
 		assertBazelTierStep(t, job, c.job, c.config)
-		if n := len(job.Steps); n != 8 {
-			t.Errorf("%s has %d steps, want checkout, setup-bazel, the flaky query, the tier, check_testcases.py, check_shard_coverage.py, log upload, result recorder", c.job, n)
+		if n := len(job.Steps); n != c.wantSteps {
+			t.Errorf("%s has %d steps, want %d (checkout, setup-bazel, the flaky query, the tier, check_testcases.py, check_shard_coverage.py, [shard_budget.py,] log upload, result recorder)", c.job, n, c.wantSteps)
 		}
 		logs := job.step(t, "Upload test logs")
 		if logs.If != "${{ failure() && steps.test.outcome != 'skipped' }}" || logs.With["name"] != c.logs || !strings.HasPrefix(logs.Uses, "actions/upload-artifact@") {
 			t.Errorf("%s test-log upload: if=%q name=%q uses=%q", c.job, logs.If, logs.With["name"], logs.Uses)
+		}
+	}
+	if serverStorage := workflow.job(t, bazelServerJobName); true {
+		budget := serverStorage.step(t, "Shard balance")
+		if budget.If != "${{ always() && steps.test.outcome != 'skipped' }}" {
+			t.Errorf("%s Shard balance step if=%q", bazelServerJobName, budget.If)
+		}
+		if want := `python3 tools/bazel/shard_budget.py --bep "$RUNNER_TEMP/bazel-bep.json"`; strings.TrimSpace(budget.Run) != want {
+			t.Errorf("%s Shard balance step runs %q, want %q", bazelServerJobName, strings.TrimSpace(budget.Run), want)
 		}
 	}
 	for name, j := range workflow.Jobs {
@@ -5158,11 +5059,10 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		t.Errorf("setup-bazel's generated rc selects or narrows tests; it may only configure remote execution")
 	}
 	for line := range rc {
-		// Result caching: only the docker lane and nightly's fresh config
-		// turn it off (ci_merge_queue_test.go).
-		if !strings.HasPrefix(line, "#") && strings.Contains(line, "cache_test_results") &&
-			line != "test:docker --nocache_test_results" && line != bazelFreshRCLine {
-			t.Errorf(".bazelrc %q: only test:docker and test:fresh set test result caching", line)
+		// Result caching: only nightly's fresh config turns it off
+		// (ci_merge_queue_test.go).
+		if !strings.HasPrefix(line, "#") && strings.Contains(line, "cache_test_results") && line != bazelFreshRCLine {
+			t.Errorf(".bazelrc %q: only test:fresh sets test result caching", line)
 		}
 		if strings.HasPrefix(line, "test:embedded ") && (strings.Contains(line, "-test.short") || strings.Contains(line, "BEADS_TEST_SKIP")) {
 			t.Errorf(".bazelrc %q: the embedded jobs run without -short and BEADS_TEST_SKIP", line)

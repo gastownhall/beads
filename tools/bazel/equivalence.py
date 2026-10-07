@@ -32,7 +32,7 @@ Two checks always run, a third when `go test -json` output is supplied:
 
 Job mode (--job, with --go-test-json): the go test JSON is the whole expected
 set instead of `go list ./...`. Use it to prove that a Bazel selection (one or
-more --bep runs, e.g. --config=ci plus --config=docker) replaces one specific
+more --bep runs, e.g. --config=ci plus --config=doltserver) replaces one specific
 CI job: every top-level test the job's command ran must have run under Bazel,
 Bazel must run no other test in those packages (TestEmbedded* included: job
 mode has no implicit ^TestEmbedded skip, so it can check the embedded tier), and no test the job passed may

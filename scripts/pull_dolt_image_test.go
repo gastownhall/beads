@@ -53,23 +53,14 @@ func TestPullDoltImageRetriesTransientFailures(t *testing.T) {
 }
 
 func TestDoltImagePullWorkflowsUseRetryHelper(t *testing.T) {
+	// Only pr-risk.yml's legacy container-backed tiers pull the image; every
+	// pr.yml and bazel.yml Dolt suite runs on hermetic dolt sql-servers
+	// (the dolt-server lanes) and needs no docker.
 	wantCalls := map[string]int{
-		"pr.yml":      2, // test-domain-uow, contract-corpus
 		"pr-risk.yml": 3,
 	}
 
 	workflowsDir := filepath.Join(sourceRepoRoot(t), ".github", "workflows")
-	for name, want := range wantCalls {
-		data, err := os.ReadFile(filepath.Join(workflowsDir, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := string(data)
-		if got := strings.Count(text, "run: ./scripts/ci/pull-dolt-image.sh"); got != want {
-			t.Errorf("%s retry-helper calls = %d, want %d", name, got, want)
-		}
-	}
-
 	workflowPaths, err := filepath.Glob(filepath.Join(workflowsDir, "*.y*ml"))
 	if err != nil {
 		t.Fatal(err)
@@ -79,8 +70,13 @@ func TestDoltImagePullWorkflowsUseRetryHelper(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(data), "docker pull "+doltSQLServerImage) {
-			t.Errorf("%s still pulls the Dolt image without retries", filepath.Base(path))
+		text := string(data)
+		name := filepath.Base(path)
+		if got, want := strings.Count(text, "run: ./scripts/ci/pull-dolt-image.sh"), wantCalls[name]; got != want {
+			t.Errorf("%s retry-helper calls = %d, want %d", name, got, want)
+		}
+		if strings.Contains(text, "docker pull "+doltSQLServerImage) {
+			t.Errorf("%s still pulls the Dolt image without retries", name)
 		}
 	}
 }

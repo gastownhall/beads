@@ -14,21 +14,19 @@ import (
 
 // D2 step 3: pr.yml's own legacy jobs whose Bazel lanes run in the same
 // pr.yml run stand down on the PRs bazel-coverage covers (pr_lanes):
-// build-artifacts, PR Core, the pure-Go/js-wasm check, domain+uow and
-// contract corpus, for Bazel / test, pure-Go and js/wasm and dolt-server
-// lane. ci-gate then requires those lanes to have run remotely and passed
+// build-artifacts, PR Core and the pure-Go/js-wasm check, for Bazel / test
+// and pure-Go and js/wasm. ci-gate then requires those lanes, and the
+// dolt-server lane (the only run of the Dolt-backed domain, uow, tracker,
+// doctor/fix and protocol suites), to have run remotely and passed
 // (BAZEL_PR_LANES_RETIRED, simulated with the other tiers in
 // TestPRRiskDecisionMatchesBazelMode). Everything the retired jobs did
 // besides those tests keeps running on every PR: the package gates take the
-// Bazel-built bd, the Dolt server fingerprint runs on the dolt-server lane
-// (its local half) and in test-domain-uow (its container half, where
-// containers are used), and scripts-go-checks runs go test's vet checks.
+// Bazel-built bd, the Dolt server fingerprint runs on the dolt-server lane,
+// and scripts-go-checks runs go test's vet checks.
 
 const (
 	// The legacy jobs' if: not covered.
 	prLaneLegacyIf     = "needs." + prRiskCoverageJobName + ".outputs.pr_lanes != 'true'"
-	prFingerprintJob   = "test-domain-uow"
-	prFingerprintStep  = "Test Dolt server fingerprint (container + local)"
 	prScriptsChecksJob = "scripts-go-checks"
 	prScriptsChecksID  = "SCRIPTS_GO_CHECKS"
 	// bazel.yml's lanes for the step add --config=sole-run whenever they
@@ -51,9 +49,7 @@ var prPackageGateIDs = map[string]string{"package-mcp": "PACKAGE_MCP", "package-
 var prLaneLegacyNeeds = map[string][]string{
 	"build-artifacts":            {prRiskCoverageJobName},
 	"check-cmd-bd-puregeo-tests": {prRiskCoverageJobName},
-	"contract-corpus":            {prRiskCoverageJobName},
 	"pr-core-wrapper":            {"build-artifacts", prRiskCoverageJobName},
-	"test-domain-uow":            {"build-artifacts", prRiskCoverageJobName},
 }
 
 // .bazelrc's lines for the configs step 3's lanes run, exactly: the
@@ -67,7 +63,7 @@ var bazelPRLaneRCLines = map[string][]string{
 		"test:prcore --test_arg=-test.skip=^TestEmbedded",
 		"test:prcore --test_env=BEADS_TEST_SKIP=dolt",
 		"test:prcore --test_env=BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1",
-		"test:prcore --test_tag_filters=-requires-docker,-dolt-server,-dolt-server-proxied,-dolt-server-integration,-dolt-server-cmd,-embedded,-manual,-integration-only",
+		"test:prcore --test_tag_filters=-dolt-server,-dolt-server-proxied,-dolt-server-integration,-dolt-server-cmd,-embedded,-manual,-integration-only",
 	},
 	"ci": {
 		"test:ci --config=prcore",
@@ -138,8 +134,8 @@ echo "pure cmd/bd subset: $n test cases"
 		"bazel test //... --config=doltserver": `set -o pipefail
 start=$(date +%s)
 rc=0
-bazel test //... "--config=$BAZEL_DOLT_LANE" ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_FRESH:+"$BAZEL_FRESH"} 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
-echo "bazel test --config=$BAZEL_DOLT_LANE: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
+bazel test //... --config=doltserver ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_FRESH:+"$BAZEL_FRESH"} 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
+echo "bazel test --config=doltserver: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
 exit "$rc"`,
 	},
 }
@@ -546,30 +542,19 @@ func testPackageGateJobs(t *testing.T, prGateRequired []string) {
 	}
 }
 
-// The Dolt server fingerprint is checked once per backend, where that backend
-// runs: the local server (the pinned dolt CLI every Bazel dolt-server lane
-// starts) by //internal/testutil:testutil_dolt_test on the dolt-server lane,
-// whatever the mode (the retired every-PR job, "Test (Dolt server
-// fingerprint)", pulled a docker image the workers do not have); the
-// container by test-domain-uow, the container-backed job that runs only
-// where bazel-coverage does not cover pr_lanes, as its first test step. No
-// other pr.yml job runs it, and ci-gate has no separate fingerprint result.
-func TestDoltServerFingerprintRunsWhereEachBackendRuns(t *testing.T) {
+// The Dolt server fingerprint runs in CI on the local backend only: the
+// pinned dolt CLI every Bazel dolt-server lane starts, checked by
+// //internal/testutil:testutil_dolt_test on the dolt-server lane whatever the
+// mode. No CI job runs the Dolt-backed suites against the container backend
+// any more, so none runs its container half (plain `go test` does, wherever
+// docker and the image are present), and no pr.yml job runs the fingerprint
+// or reports a separate fingerprint result.
+func TestDoltServerFingerprintRunsOnTheDoltServerLane(t *testing.T) {
 	pr := readCIWorkflow(t, "pr.yml")
-	job := pr.job(t, prFingerprintJob)
-	if job.If != prLaneLegacyIf {
-		t.Errorf("%s if %q, want %q (the container-backed tests run only there)", prFingerprintJob, job.If, prLaneLegacyIf)
-	}
-	step := job.step(t, prFingerprintStep)
-	if step.If != "" || step.ContinueOnError != nil {
-		t.Errorf("%s step %q: if %q, continue-on-error %v", prFingerprintJob, prFingerprintStep, step.If, step.ContinueOnError)
-	}
-	assertStepsBefore(t, job, []string{"Install Dolt CLI", "Pull Dolt sql-server image"}, []string{prFingerprintStep})
-	assertStepsBefore(t, job, []string{prFingerprintStep}, []string{"Test domain + uow + tracker"})
 	for name, j := range pr.Jobs {
 		for _, s := range j.Steps {
-			if strings.Contains(s.Run, "TestDoltServerFingerprint") && (name != prFingerprintJob || s.Name != prFingerprintStep) {
-				t.Errorf("%s step %q runs the fingerprint; only %s's %q does", name, s.Name, prFingerprintJob, prFingerprintStep)
+			if strings.Contains(s.Run, "TestDoltServerFingerprint") {
+				t.Errorf("%s step %q runs the fingerprint; //internal/testutil:testutil_dolt_test does", name, s.Name)
 			}
 		}
 	}

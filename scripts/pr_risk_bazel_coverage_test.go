@@ -88,8 +88,6 @@ var retiredTiers = []retiredTier{
 			"build-artifacts":            "BUILD_ARTIFACTS",
 			"pr-core-wrapper":            "PR_CORE_WRAPPER",
 			"check-cmd-bd-puregeo-tests": "CHECK_CMD_BD_PUREGEO_TESTS",
-			"test-domain-uow":            "TEST_DOMAIN_UOW",
-			"contract-corpus":            "CONTRACT_CORPUS",
 		},
 		bazelLanes: []string{bazelJobName, bazelPureJobName, bazelDoltJobName},
 	},
@@ -1962,7 +1960,7 @@ var bazelDoltServerRCLines = map[string][]string{
 // D2 step 2, as review F2/F4 for embedded: the proxied and server lanes run
 // exactly `bazel test //... --config=<config>` (plus nightly's BAZEL_FRESH)
 // with a BEP and nothing else, their configs are exactly the pinned lines,
-// and only test:docker and test:fresh set result caching.
+// and only test:fresh sets result caching.
 func TestBazelRetiredLanesArePinned(t *testing.T) {
 	workflow := readCIWorkflow(t, bazelWorkflowName)
 	for lane, config := range bazelRetiredLaneConfigs {
@@ -2010,13 +2008,13 @@ func TestBazelRetiredLanesArePinned(t *testing.T) {
 		}
 	}
 	// A later --cache_test_results (any config the lanes use) would win.
-	// Only the docker lane and nightly's --config=fresh (appended only when
-	// the caller asks, ci_merge_queue_test.go) turn result caching off.
-	allowed := map[string]bool{"test:docker --nocache_test_results": true, bazelFreshRCLine: true}
+	// Only nightly's --config=fresh (appended only when the caller asks,
+	// ci_merge_queue_test.go) turns result caching off.
+	allowed := map[string]bool{bazelFreshRCLine: true}
 	for _, line := range strings.Split(rc, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "#") && strings.Contains(line, "cache_test_results") && !allowed[line] {
-			t.Errorf(".bazelrc %q: only test:docker and test:fresh set test result caching", line)
+			t.Errorf(".bazelrc %q: only test:fresh sets test result caching", line)
 		}
 	}
 }
