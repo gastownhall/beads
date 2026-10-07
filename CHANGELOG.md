@@ -168,6 +168,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rises from 30s to 60s, since back-to-back inits under load take 10-15s
   each.
 
+- **`bd info --whats-new` help no longer claims it shows only the last 3
+  versions.** It prints the whole documented release history; the `bd info`
+  description, the `--whats-new` flag help and `bd upgrade review` now say so
+  (#6714).
+
 - **Concurrent `bd init --shared-server` runs in different projects no
   longer refuse each other.** Every shared-server project gates the one shared
   dolt data dir, and `bd init` holds that gate exclusively for its ~8s run but
