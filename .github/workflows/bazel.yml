@@ -1,6 +1,6 @@
 # Bazel side-by-side lane, gated alongside the legacy go test jobs. Runs
 # `bazel test //... --config=ci`, the PR Core-parity selection (race, -short,
-# dolt skip, -requires-docker), plus one job per mirrored CI job (pure-Go and
+# dolt skip), plus one job per mirrored CI job (pure-Go and
 # js/wasm, the dolt-server lane, pr-risk.yml's embedded-Dolt, proxied-server
 # and server-Dolt storage tiers, main.yml's integration jobs).
 #
@@ -13,9 +13,9 @@
 # bazel-coverage job stands down pr-risk.yml's embedded-Dolt test jobs (bazel-embedded runs
 # the tier), its proxied-server and server-Dolt storage test jobs
 # (bazel-proxied, bazel-server-storage), or pr.yml's PR Core,
-# build-artifacts, pure-Go/js-wasm, domain+uow and contract corpus jobs
-# (bazel-test, bazel-pure, bazel-doltserver; their `bazel test`s then add
-# --config=sole-run); pr.yml's ci-gate then requires those lanes to have run
+# build-artifacts and pure-Go/js-wasm jobs (bazel-test, bazel-pure; their
+# `bazel test`s then add --config=sole-run, as bazel-doltserver's does: it
+# is the only run of the retired domain+uow and contract corpus jobs' tests); pr.yml's ci-gate then requires those lanes to have run
 # remotely and passed, so modes skip, local and cache are red there
 # (scripts/pr_risk_bazel_coverage_test.go, pr_lanes_bazel_coverage_test.go).
 # Test results are cached (read and written) on every run but nightly's: a
@@ -200,12 +200,6 @@ on:
         required: false
         type: boolean
         default: false
-      dolt-lane:
-        description: "Dolt-backed lane: doltserver (hermetic, remote) or docker (testcontainers A/B control)"
-        required: false
-        type: choice
-        default: "doltserver"
-        options: [ "doltserver", "docker" ]
       fresh-test-results:
         description: "Re-execute every test (--config=fresh: no cached test results), as nightly does"
         required: false
@@ -798,8 +792,8 @@ jobs:
 
       # pr.yml's build-artifacts job, built by Bazel: the same artifact name
       # and layout (bd-linux-gms-pure, SHA256SUMS, build-manifest.txt). Where
-      # build-artifacts stands down (D2 step 3), its other consumers (PR
-      # Core, domain+uow) stand down there too. F3: the package gates build
+      # build-artifacts stands down (D2 step 3), its other consumer (PR
+      # Core) stands down there too. F3: the package gates build
       # their own bd and no longer consume this artifact; it is kept for the
       # F3.5.3 SHA256SUMS comparison and for debugging. The script documents
       # which binary and how it differs from `go build`'s.
@@ -1379,14 +1373,12 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
 
-  # pr.yml's container-backed jobs, "Test (storage domain + uow)" and
-  # "Contract corpus", as Bazel's dolt-server lane: --config=doltserver runs
-  # the dolt-server variants (domain/..., uow in 8 shards, tracker/...,
-  # doctor/fix, protocol in 8 shards), each of which starts its own dolt
-  # sql-server from the pinned dolt, so they execute on the remote workers
-  # like any other test (locally for forks and rbe=off). The docker lane
-  # (--config=docker: the same suites against testcontainers on this runner,
-  # no-remote-exec) stays the A/B control: dispatch with dolt-lane=docker.
+  # pr.yml's retired container-backed jobs, "Test (storage domain + uow)"
+  # and "Contract corpus", as Bazel's dolt-server lane: --config=doltserver
+  # runs the dolt-server variants (domain/..., uow in 8 shards, tracker/...,
+  # doctor/fix, protocol in 8 shards, testutil), each of which starts its
+  # own dolt sql-server from the pinned dolt, so they execute on the remote
+  # workers like any other test (locally with rbe=off).
   bazel-doltserver:
     name: dolt-server lane
     # Same runner and skip rule as bazel-test.
@@ -1397,13 +1389,11 @@ jobs:
     outputs:
       result: ${{ steps.result.outputs.result }}
     env:
-      BAZEL_DOLT_LANE: ${{ inputs.dolt-lane || 'doltserver' }}
-      # D2 step 3: on covered PRs and merge groups (always mode remote) this
-      # lane is the only pre-merge run of pr.yml's legacy domain+uow and
-      # contract corpus jobs, which never retried: --config=sole-run then
-      # fails on a remote cache eviction instead of re-running the whole
-      # invocation (whose retry could turn a failed test green). Fork modes do
-      # the same (with BAZEL_COVERS_FORKS "true" it is their only run too).
+      # This lane is the only pre-merge run of these suites (the go test
+      # jobs it replaced never retried): where it executes remotely
+      # --config=sole-run fails on a remote cache eviction instead of
+      # re-running the whole invocation (whose retry could turn a failed
+      # test green).
       # Test results are cached and reused like every lane's; only nightly
       # re-executes them all (BAZEL_FRESH).
       BAZEL_SOLE_RUN: ${{ needs.rbe.outputs.enabled == 'true' && '--config=sole-run' || '' }}
@@ -1431,12 +1421,6 @@ jobs:
           RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
           RBE_FORK_PR: ${{ github.event.pull_request.number }}
 
-      # Docker lane only (the A/B control), as in the mirrored jobs; its
-      # tests fail rather than skip without the image.
-      - name: Pull Dolt sql-server image
-        if: ${{ env.BAZEL_DOLT_LANE == 'docker' }}
-        run: ./scripts/ci/pull-dolt-image.sh
-
       - name: bazel test //... --config=doltserver
         id: test
         timeout-minutes: 80
@@ -1444,8 +1428,8 @@ jobs:
           set -o pipefail
           start=$(date +%s)
           rc=0
-          bazel test //... "--config=$BAZEL_DOLT_LANE" ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_FRESH:+"$BAZEL_FRESH"} 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
-          echo "bazel test --config=$BAZEL_DOLT_LANE: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
+          bazel test //... --config=doltserver ${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"} ${BAZEL_FRESH:+"$BAZEL_FRESH"} 2>&1 | tee "$RUNNER_TEMP/bazel-test.log" || rc=$?
+          echo "bazel test --config=doltserver: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
       - name: Upload test logs
@@ -1453,7 +1437,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
-          name: bazel-${{ env.BAZEL_DOLT_LANE }}-testlogs
+          name: bazel-doltserver-testlogs
           path: |
             bazel-testlogs/**/test.log
             bazel-testlogs/**/test.xml

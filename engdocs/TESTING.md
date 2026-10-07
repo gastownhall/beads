@@ -103,10 +103,10 @@ same for the proxied subtests that bridge an external endpoint with `socat`
 sets it, and the legacy GitHub proxied jobs, which have no `socat`, do not.
 
 Under Bazel, `bazel test //... --config=doltserver` runs the Dolt-backed
-suites of pr.yml's "Test (storage domain + uow)" and "Contract corpus" jobs
-on the `local` backend (the `dolt-server` targets); they need no docker and
-execute remotely with `--config=remote-exec`. `--config=docker` runs the same
-suites on the `container` backend (host docker) as the A/B control.
+domain, uow, tracker, doctor/fix, protocol and testutil suites on the `local`
+backend (the `dolt-server` targets); they need no docker and execute
+remotely with `--config=remote-exec`. No Bazel target uses the `container`
+backend; run `go test` with docker and the pulled image to exercise it.
 PR Risk's heavier server tiers have configs of their own, run by bazel.yml
 only with remote execution, each in a job of its own (`bazel-proxied`,
 `bazel-server-storage`): `--config=doltserver-proxied` is the
