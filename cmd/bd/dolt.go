@@ -493,7 +493,7 @@ func adoptGitOriginRemoteForPush(ctx context.Context, st storage.DoltStorage, po
 	case ref != "":
 		fmt.Fprintf(os.Stderr, "Dolt remote origin uses the git data ref %s (%s).\n", ref, syncRemoteRefKey)
 	case !applies:
-		fmt.Fprintf(os.Stderr, "Warning: %s is set but %s is not a git-backed remote; origin is on the default ref.\n", syncRemoteRefKey, remoteURL)
+		fmt.Fprintf(os.Stderr, "Warning: %s is set but %s is not a git-backed remote; origin is on the default ref.\n", syncRemoteRefKey, redactRemoteURL(remoteURL))
 	}
 
 	if err := config.SetYamlConfigInDir(beadsDir, "sync.remote", remoteURL); err != nil {

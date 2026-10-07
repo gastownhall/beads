@@ -158,7 +158,7 @@ func applyAdoptionConsent(remoteURL string, policy adoptPolicy, optIn adoptOptIn
 	default: // adoptProceed
 		// --yes: consent given ahead of time. Still announce the target, so a
 		// scripted run leaves a record of where it uploaded.
-		fmt.Fprintf(os.Stderr, "Adopting Dolt remote origin from git origin: %s\n", remoteURL)
+		fmt.Fprintf(os.Stderr, "Adopting Dolt remote origin from git origin: %s\n", redactRemoteURL(remoteURL))
 		return true, nil
 	}
 }

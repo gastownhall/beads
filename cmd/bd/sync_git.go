@@ -144,7 +144,8 @@ func gitRemoteHasDoltDataRefAtStatus(remote, ref string) (bool, error) {
 	// data ref, local operator state rather than request data; gosec only
 	// reaches them because config discovery is routed through env-derived
 	// paths (see testSSHConnectivity in dolt.go for the same taint path).
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", gitRemoteURLForLsRemote(remote), dataRef)
+	// -- keeps a URL from reading as an option.
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--", gitRemoteURLForLsRemote(remote), dataRef)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	output, err := cmd.Output()
 	if err != nil {
@@ -190,8 +191,28 @@ func firstNonEmptyLine(s string) string {
 	return ""
 }
 
+// gitRemoteURLForLsRemote is what git reads for a Dolt remote URL: the git+
+// prefix dropped, and a scheme-less host/path ending in .git given the
+// https:// that dolt's NormalizeGitRemoteUrl gives it, so a probe reads the
+// repository dolt will push to; git on its own would read host:1234/repo.git
+// as an scp address, a different endpoint. Everything else is what git reads
+// already: a URL with a scheme, an scp form dolt recognizes (a dot or an @ in
+// the host), a local path, and a git remote name such as origin.
 func gitRemoteURLForLsRemote(remote string) string {
-	return strings.TrimPrefix(remote, "git+")
+	if strings.HasPrefix(strings.ToLower(remote), "git+") {
+		return remote[len("git+"):]
+	}
+	if strings.Contains(remote, "://") || isScpLikeForDolt(remote) || looksLikeLocalPathForDolt(remote) {
+		return remote
+	}
+	base := remote
+	if i := strings.IndexAny(base, "?#"); i >= 0 {
+		base = base[:i]
+	}
+	if !strings.HasSuffix(base, ".git") {
+		return remote
+	}
+	return "https://" + remote
 }
 
 // gitURLToDoltRemote converts a git remote URL to dolt's remote format.

@@ -925,6 +925,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it creates is wired to `origin` on it. `bd dolt remote list` shows the ref
   and `bd dolt remote reset-data` rebuilds the configured one. Re-adding a
   remote on a different ref asks first and needs `--yes` without a terminal.
+  A ref under `refs/heads/` or `refs/tags/` is checked against the repository
+  before `origin` is created or moved on it, by `remote add`, push-time
+  adoption, `bd init`, and `bd config apply`: the repository's default branch
+  is refused, an existing branch is taken only with `--yes` or a confirmed
+  prompt, and a path that cannot ask (`config apply`, its dry run included,
+  proxied or non-interactive `init`) refuses and names the remedy.
 
 - **Auto-backup runs on a managed-local proxied-server workspace.** The
   proxied arm of the post-command hook now calls auto-backup, so an explicit

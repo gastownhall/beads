@@ -147,6 +147,36 @@ func TestRedactRemoteURL(t *testing.T) {
 			want: "https://github.com/org/repo.git",
 		},
 		{
+			// dolt reads a scheme-less host/path as https, userinfo included;
+			// the result says so, since it is persisted and pasted as a URL.
+			name: "scheme-less https token is dropped whole",
+			in:   "x-access-token:ghp_secret@github.com/org/repo.git",
+			want: "https://github.com/org/repo.git",
+		},
+		{
+			// Bare, host.example:443/org/repo.git would read as an scp address
+			// (a dot before the first colon) for dolt and git alike, a transport
+			// change, not a redaction.
+			name: "scheme-less https token on a dotted host and port keeps the transport",
+			in:   "x-access-token:ghp_secret@review.example:443/org/repo.git",
+			want: "https://review.example:443/org/repo.git",
+		},
+		{
+			name: "scp form is left alone",
+			in:   "git@github.com:org/repo.git",
+			want: "git@github.com:org/repo.git",
+		},
+		{
+			name: "scheme-less host and port without userinfo is left alone",
+			in:   "host:1234/repo.git",
+			want: "host:1234/repo.git",
+		},
+		{
+			name: "local path is left alone",
+			in:   "/srv/ledgers.git",
+			want: "/srv/ledgers.git",
+		},
+		{
 			name: "git+https token is dropped whole",
 			in:   "git+https://user:pass@github.com/org/repo.git",
 			want: "git+https://github.com/org/repo.git",

@@ -421,12 +421,27 @@ func configureProxiedInitDoltRemote(ctx context.Context, provider uow.UnitOfWork
 				return "", nil
 			}
 		}
-		routed := proxiedInitDoltRemoteURL(remoteURL)
-		if err := uw.DoltRemoteUseCase().CreateRemoteWithRef(ctx, "origin", routed, syncRemoteRefForURL(routed)); err != nil {
-			return "", fmt.Errorf("create remote origin: %w", err)
-		}
-		return "", nil
+		return "", createProxiedOriginRemote(ctx, uw.DoltRemoteUseCase().CreateRemoteWithRef, remoteURL)
 	})
+}
+
+// createProxiedOriginRemote wires origin at remoteURL through create, the
+// proxied store's CreateRemoteWithRef: on the routed form of the URL, on the
+// configured sync.remote-ref, and behind the target guard like every other
+// path that creates origin on that ref. init over the proxy never prompts,
+// so the remote's default branch, a ref that already exists, or a ref the
+// probe cannot read is refused and nothing is created; the remedy is the SQL
+// route, since bd dolt remote add is refused over the proxy.
+func createProxiedOriginRemote(ctx context.Context, create func(ctx context.Context, name, url, ref string) error, remoteURL string) error {
+	routed := proxiedInitDoltRemoteURL(remoteURL)
+	ref, err := guardedSyncRemoteRef(routed, sqlRemoteAddRemedies)
+	if err != nil {
+		return fmt.Errorf("origin on the configured git data ref: %w", err)
+	}
+	if err := create(ctx, "origin", routed, ref); err != nil {
+		return fmt.Errorf("create remote origin: %w", err)
+	}
+	return nil
 }
 
 // adoptTeamServerIdentity reads the bts-provisioned identity out of the shared

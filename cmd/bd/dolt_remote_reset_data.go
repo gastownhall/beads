@@ -13,19 +13,26 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
-// Ref names anchoring a git-backed Dolt remote's data plane, as published by
-// dolt's git blobstore (store/blobstore/git_refs.go: DoltDataRef and
-// DefaultInfoBranch). Pinned locally so the binary does not import that
-// package; TestResetDataRefNamesMatchDolt keeps the pin honest.
-const (
-	gitDoltDataRef = "refs/dolt/data"
-	gitDoltInfoRef = "refs/heads/__dolt_remote_info__"
-)
+// gitDoltDataRef is the default data ref of a git-backed Dolt remote, as
+// published by dolt's git blobstore (store/blobstore/git_refs.go:
+// DoltDataRef). Pinned locally so the binary does not import that package;
+// TestResetDataRefNamesMatchDolt keeps this pin and the info branch's
+// (config.DefaultDoltRemoteInfoBranch) honest.
+const gitDoltDataRef = "refs/dolt/data"
+
+// doltInfoRef is the marker ref dolt force-pushes on every push: the
+// DOLT_REMOTE_INFO_BRANCH override when one is set, dolt's default otherwise,
+// and "" when an empty override disables the marker, in which case the
+// default name is an ordinary branch that may hold data and is left alone.
+func doltInfoRef() string {
+	return config.DoltRemoteInfoRef()
+}
 
 // resetDataKind classifies how reset-data can replace the data plane behind
 // a remote URL.
@@ -122,7 +129,11 @@ func lsRemoteDoltDataRefs(ctx context.Context, gitURL, dataRef string) ([]string
 	want := storage.EffectiveGitDataRef(dataRef)
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", gitURL, want, gitDoltInfoRef) // #nosec G204 -- URL and ref from the configured remote
+	args := []string{"ls-remote", "--", gitURL, want}
+	if info := doltInfoRef(); info != "" {
+		args = append(args, info)
+	}
+	cmd := exec.CommandContext(ctx, "git", args...) // #nosec G204 -- URL and ref from the configured remote; -- keeps a URL from reading as an option
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("git ls-remote %s failed: %s: %w", gitURL, strings.TrimSpace(string(out)), err)
@@ -131,13 +142,14 @@ func lsRemoteDoltDataRefs(ctx context.Context, gitURL, dataRef string) ([]string
 }
 
 // parseDoltDataRefs keeps, out of ls-remote output, only the exact data ref
-// and the info ref: git ls-remote matches its arguments as patterns, and
-// only those two refs may ever be deleted.
+// and the info ref (none when the marker is disabled): git ls-remote matches
+// its arguments as patterns, and only those refs may ever be deleted.
 func parseDoltDataRefs(out []byte, dataRef string) []string {
 	var refs []string
+	infoRef := doltInfoRef()
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) == 2 && (fields[1] == dataRef || fields[1] == gitDoltInfoRef) {
+		if len(fields) == 2 && (fields[1] == dataRef || (infoRef != "" && fields[1] == infoRef)) {
 			refs = append(refs, fields[1])
 		}
 	}
@@ -176,7 +188,7 @@ func resetDataJSONRef(kind resetDataKind, dataRef string) string {
 // git invocations (GH#3724 class: a user's templated pre-push hook must not
 // break — or observe — bd's data-plane plumbing).
 func deleteGitDoltDataRefs(ctx context.Context, gitURL string, refs []string) error {
-	args := []string{"push", gitURL}
+	args := []string{"push", "--", gitURL}
 	for _, ref := range refs {
 		args = append(args, ":"+ref)
 	}

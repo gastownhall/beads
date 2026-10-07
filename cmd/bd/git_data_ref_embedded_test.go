@@ -356,6 +356,44 @@ func TestEmbeddedGitDataRefRemoteAddPushesToRefAndBootstrapReadsIt(t *testing.T)
 					t.Fatalf("bd context after init should show the ref: %v\n%s\n%s", err, stdout, stderr)
 				}
 			})
+			// The committed key names the origin's default branch, which holds
+			// source. The origin probe finds the ref, the clone of it reports no
+			// Dolt data, and init falls back to a fresh database; the target
+			// guard then refuses to wire origin on that branch, so the first
+			// push cannot replace its tip. init itself succeeds, says so, and the
+			// branch is untouched.
+			t.Run("bd init refuses the key on the origin's default branch", func(t *testing.T) {
+				headRef := strings.TrimSpace(resetDataRunGit(t, remoteDir, "symbolic-ref", "HEAD"))
+				before := lsRemoteRef(t, remoteDir, headRef)
+				if before == "" {
+					t.Fatalf("the origin's default branch %s must exist for this case", headRef)
+				}
+				clone := filepath.Join(t.TempDir(), "clone")
+				resetDataRunGit(t, filepath.Dir(clone), "clone", remoteDir, clone)
+				resetDataRunGit(t, clone, "config", "core.hooksPath", ".git/hooks")
+				if err := os.MkdirAll(filepath.Join(clone, ".beads"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(clone, ".beads", "config.yaml"), nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := config.SetYamlConfigInDir(filepath.Join(clone, ".beads"), syncRemoteRefKey, headRef); err != nil {
+					t.Fatalf("record %s: %v", syncRemoteRefKey, err)
+				}
+				_, stderr, err := runBDIn(t, bd, clone, "init", "--quiet", "--prefix", "db", "--non-interactive")
+				if err != nil {
+					t.Fatalf("bd init with the key on the default branch should still initialize: %v\n%s", err, stderr)
+				}
+				if !strings.Contains(stderr, "default branch") || !strings.Contains(stderr, "not configuring Dolt remote origin") {
+					t.Errorf("bd init should say it refused to wire origin on the default branch, got:\n%s", stderr)
+				}
+				if refs := remoteRefsOf(t, bd, clone); len(refs) != 0 {
+					t.Errorf("no remote must be configured after the refusal, got %v", refs)
+				}
+				if after := lsRemoteRef(t, remoteDir, headRef); after != before {
+					t.Errorf("%s changed under bd init: %q -> %q", headRef, before, after)
+				}
+			})
 			_ = beadsDir
 		})
 	}

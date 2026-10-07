@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -66,18 +67,25 @@ func TestValidateGitDataRef(t *testing.T) {
 	}
 }
 
-// The info-branch pin bd refuses as a data ref is dolt's, the same one
-// reset-data deletes and rebuilds.
+// The info ref reset-data deletes beside the data ref is the one the
+// validator reserves, so no accepted data ref can ever be the marker, with
+// or without an override.
 func TestDoltRemoteInfoRefPinsAgree(t *testing.T) {
-	t.Setenv(config.DoltRemoteInfoBranchEnvVar, config.DefaultDoltRemoteInfoBranch)
-	if got := config.DoltRemoteInfoRef(); got != gitDoltInfoRef {
-		t.Fatalf("config.DoltRemoteInfoRef() = %q, reset-data pins %q", got, gitDoltInfoRef)
+	for _, override := range []string{config.DefaultDoltRemoteInfoBranch, "marker"} {
+		t.Setenv(config.DoltRemoteInfoBranchEnvVar, override)
+		info := doltInfoRef()
+		if info == "" || config.ValidateGitDataRef(info) == nil {
+			t.Fatalf("override %q: the info ref %q must be refused as a data ref", override, info)
+		}
 	}
 }
 
 // Only URLs dolt treats as git-backed can carry a ref: git+ schemes, and
 // ssh:// or scp-style URLs ending in .git (normalized to git+ssh by dolt).
-// Everything else, git:// included, is refused before dolt sees it.
+// Everything else, git:// included, is refused before dolt sees it. A colon
+// that does not make an scp host (a Windows drive letter, a colon inside a
+// path) falls through to the path rules, so a drive-letter or UNC path is
+// git-backed on Windows, as dolt reads it there, and nowhere else.
 func TestIsGitBackedDoltRemoteURL(t *testing.T) {
 	yes := []string{
 		"git+https://github.com/org/repo.git", "git+http://host/repo", "git+ssh://git@host/org/repo.git",
@@ -91,6 +99,15 @@ func TestIsGitBackedDoltRemoteURL(t *testing.T) {
 		"https://github.com/org/repo", "git://host/repo.git", "ssh://git@host/org/repo", "git@host:org/repo",
 		"host:org/repo.git", "C:repo.git", "/srv/ledgers", "dolthub://org/repo", "dolthub://org/repo.git", "file:///tmp/db", "aws://bucket/db.git", "",
 	}
+	if runtime.GOOS == "windows" {
+		yes = append(yes, `C:\repo\data.git`, `C:/repo/data.git`, `\\server\share\data.git`)
+	} else {
+		// C:/repo/data.git is a scheme-less host:port form here, and dolt
+		// reads it as git+https like any other; the backslash form parses as
+		// nothing.
+		yes = append(yes, "/srv/le:dgers.git", "./le:dgers.git", "C:/repo/data.git")
+		no = append(no, `C:\repo\data.git`)
+	}
 	for _, u := range yes {
 		if !isGitBackedDoltRemoteURL(u) {
 			t.Errorf("isGitBackedDoltRemoteURL(%q) = false, want true", u)
@@ -99,6 +116,30 @@ func TestIsGitBackedDoltRemoteURL(t *testing.T) {
 	for _, u := range no {
 		if isGitBackedDoltRemoteURL(u) {
 			t.Errorf("isGitBackedDoltRemoteURL(%q) = true, want false", u)
+		}
+	}
+}
+
+// The URL git reads for a Dolt remote URL: the git+ prefix dropped, a
+// scheme-less host/path given dolt's https://, and everything git already
+// reads (a scheme, an scp form, a local path) left alone.
+func TestGitRemoteURLForLsRemote(t *testing.T) {
+	for in, want := range map[string]string{
+		"git+file:///srv/ledgers.git":         "file:///srv/ledgers.git",
+		"git+https://github.com/org/repo.git": "https://github.com/org/repo.git",
+		"https://github.com/org/repo.git":     "https://github.com/org/repo.git",
+		"ssh://git@host/org/repo.git":         "ssh://git@host/org/repo.git",
+		"git@github.com:org/repo.git":         "git@github.com:org/repo.git",
+		"host.example:org/repo.git":           "host.example:org/repo.git",
+		"/srv/ledgers.git":                    "/srv/ledgers.git",
+		"./ledgers.git":                       "./ledgers.git",
+		"host:1234/repo.git":                  "https://host:1234/repo.git",
+		"github.com/org/repo.git":             "https://github.com/org/repo.git",
+		"origin":                              "origin",
+		"github.com/org/repo":                 "github.com/org/repo",
+	} {
+		if got := gitRemoteURLForLsRemote(in); got != want {
+			t.Errorf("gitRemoteURLForLsRemote(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
