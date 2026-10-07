@@ -28,9 +28,9 @@ import (
 // than kept as independent copies.
 
 // F3: the same "same-repo PR, or merge_group" Blacksmith expression used by
-// pr.yml's and pr-risk.yml's bazel-coverage/ci-gate/detect-ci-tier jobs - a
-// package-level const so every test that needs it (TestSameRepoBlacksmithRunners,
-// TestPRRiskBazelCoverageJob, ...) reads the one literal.
+// pr.yml's and pr-risk.yml's ci-gate jobs - a package-level const so every
+// test that needs it (TestSameRepoBlacksmithRunners, ...) reads the one
+// literal.
 const sameRepoBlacksmith2vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
 
 // F7a: the same same-repo expression at 4 vCPU and 8 vCPU, for jobs sized

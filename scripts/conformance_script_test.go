@@ -64,7 +64,7 @@ func conformanceExitCode(err error) int {
 
 // The conformance tiers CI runs are Bazel targets, not this script: Tier 1
 // is the embedded lane's embeddeddolt_conformance_{core,audit}_test
-// (TestBazelEmbeddedJobMirrorsEmbeddedTier pins their flags), Tier 2 the
+// (TestBazelEmbeddedJobRunsEmbeddedTier pins their flags), Tier 2 the
 // integration lane's //test/conformance:conformance_test, pinned here to the
 // script's tier: both harness files, built under the e2e or integration tag,
 // against the injected non-race bd. conformance.yml, which ran the script on

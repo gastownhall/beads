@@ -53,12 +53,11 @@ func TestPullDoltImageRetriesTransientFailures(t *testing.T) {
 }
 
 func TestDoltImagePullWorkflowsUseRetryHelper(t *testing.T) {
-	// Only pr-risk.yml's legacy container-backed tiers pull the image; every
-	// pr.yml and bazel.yml Dolt suite runs on hermetic dolt sql-servers
-	// (the dolt-server lanes) and needs no docker.
-	wantCalls := map[string]int{
-		"pr-risk.yml": 3,
-	}
+	// No workflow pulls the image: every Dolt suite runs on hermetic dolt
+	// sql-servers (bazel.yml's dolt-server lanes) and needs no docker, since
+	// pr-risk.yml's container-backed legacy tiers were retired
+	// (ga-96smfk.22). The helper stays for local container-backed runs.
+	wantCalls := map[string]int{}
 
 	workflowsDir := filepath.Join(sourceRepoRoot(t), ".github", "workflows")
 	workflowPaths, err := filepath.Glob(filepath.Join(workflowsDir, "*.y*ml"))

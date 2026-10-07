@@ -31,7 +31,6 @@ go_test(
         "ci_analytics_extract_test.go",
         "ci_analytics_workflow_test.go",
         "ci_blacksmith_runner_test.go",
-        "ci_capability_selector_test.go",
         "ci_f7b_review_test.go",
         "ci_f7c_advisory_test.go",
         "ci_merge_queue_test.go",

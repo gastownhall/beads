@@ -1,23 +1,17 @@
-# Bazel side-by-side lane, gated alongside the legacy go test jobs. Runs
-# `bazel test //... --config=ci`, the PR Core-parity selection (race, -short,
-# dolt skip), plus one job per mirrored CI job (pure-Go and
-# js/wasm, the dolt-server lane, pr-risk.yml's embedded-Dolt, proxied-server
-# and server-Dolt storage tiers, main.yml's integration jobs).
+# The Bazel lanes: the only CI run of the Linux Go test tiers. Runs
+# `bazel test //... --config=ci`, the PR-core selection (race, -short, dolt
+# skip), plus one job per tier (pure-Go and js/wasm, the dolt-server lane,
+# the embedded-Dolt, proxied-server and server-Dolt storage tiers that
+# pr-risk.yml used to run, integration, the cmd/bd Dolt-server tier).
 #
-# PRs and merge groups run it through pr.yml's `bazel` job (workflow_call),
-# in the same run as the legacy jobs it mirrors, which stay required too,
-# except where their D2 flag retires them: while the committed
-# BAZEL_RETIRES_LEGACY_EMBEDDED / BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS /
-# BAZEL_RETIRES_LEGACY_PR_LANES flag is "true", on a same-repo,
-# non-Dependabot pull_request or a merge_group run (whatever the mode), the
-# bazel-coverage job stands down pr-risk.yml's embedded-Dolt test jobs (bazel-embedded runs
-# the tier), its proxied-server and server-Dolt storage test jobs
-# (bazel-proxied, bazel-server-storage), or pr.yml's PR Core,
-# build-artifacts and pure-Go/js-wasm jobs (bazel-test, bazel-pure; their
-# `bazel test`s then add --config=sole-run, as bazel-doltserver's does: it
-# is the only run of the retired domain+uow and contract corpus jobs' tests); pr.yml's ci-gate then requires those lanes to have run
-# remotely and passed, so modes skip, local and cache are red there
-# (scripts/pr_risk_bazel_coverage_test.go, pr_lanes_bazel_coverage_test.go).
+# PRs and merge groups run it through pr.yml's `bazel` job (workflow_call).
+# The legacy go test jobs these lanes mirrored are retired (ga-96smfk.22),
+# so pr.yml's ci-gate requires the lanes to have run remotely on rbe-west
+# and passed on every pull_request and merge group (BAZEL_REMOTE): modes
+# skip, local and cache are red there (scripts/pr_risk_bazel_coverage_test.go).
+# Where a lane executes remotely its `bazel test`s add --config=sole-run: it
+# is the tier's only run, so a remote cache eviction fails it rather than
+# re-running the invocation (whose retry could turn a failed test green).
 # Test results are cached (read and written) on every run but nightly's: a
 # test whose action key is unchanged reuses the PASS the farm recorded for
 # it, on a PR, a merge group (merge queue) or a push to main alike, and only
@@ -286,9 +280,7 @@ on:
         required: false
         default: "off"
       # "on" (pr.yml only) runs package-mcp and package-npm in this call,
-      # which waits on nothing but the rbe job (F3: the legacy pr.yml jobs
-      # those gates used to need: detect-package-gates, build-artifacts,
-      # bazel-coverage, and the whole bazel call). bazel-farm.yml, nightly.yml
+      # which waits on nothing but the rbe job. bazel-farm.yml, nightly.yml
       # and direct runs (push, dispatch) keep the default "off": main.yml
       # keeps its own package jobs, and a fork-farm run has no bd artifact
       # consumer waiting on these.
@@ -700,13 +692,13 @@ jobs:
     outputs:
       result: ${{ steps.result.outputs.result }}
     env:
-      # D2 step 3: on covered PRs and merge groups (always mode remote) this
-      # lane is the only pre-merge run of pr.yml's legacy PR Core job, which
-      # never retried: --config=sole-run then fails on a remote cache eviction
-      # instead of re-running the whole invocation (whose retry could turn a
-      # failed test green). Fork modes do the same (with BAZEL_COVERS_FORKS
-      # "true" it is their only run too). Test results are cached and reused
-      # like every lane's; only nightly re-executes them all (BAZEL_FRESH).
+      # This lane is the only pre-merge run of the PR-core tests (pr.yml's
+      # retired PR Core job never retried): where it executes remotely
+      # (mode remote, and the fork modes) --config=sole-run fails on a
+      # remote cache eviction instead of re-running the whole invocation
+      # (whose retry could turn a failed test green). Test results are
+      # cached and reused like every lane's; only nightly re-executes them
+      # all (BAZEL_FRESH).
       BAZEL_SOLE_RUN: ${{ needs.rbe.outputs.enabled == 'true' && '--config=sole-run' || '' }}
     steps:
       # inputs.checkout-sha: see the header (empty: the event's default ref).
@@ -792,10 +784,9 @@ jobs:
           echo >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
-      # pr.yml's build-artifacts job, built by Bazel: the same artifact name
-      # and layout (bd-linux-gms-pure, SHA256SUMS, build-manifest.txt). Where
-      # build-artifacts stands down (D2 step 3), its other consumer (PR
-      # Core) stands down there too. F3: the package gates build
+      # pr.yml's retired build-artifacts job, built by Bazel: the same
+      # artifact name and layout (bd-linux-gms-pure, SHA256SUMS,
+      # build-manifest.txt). F3: the package gates build
       # their own bd and no longer consume this artifact; it is kept for the
       # F3.5.3 SHA256SUMS comparison and for debugging. The script documents
       # which binary and how it differs from `go build`'s.
@@ -967,13 +958,12 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
 
-  # pr.yml's check-cmd-bd-puregeo-tests job ("Check pure-Go and js/wasm
-  # boundaries (CGO_ENABLED=0)") with Bazel-built binaries: --config=pure
-  # builds bd and the job's three pure test binaries and runs its -short
-  # cmd/bd subset (PURE_CMD_BD_TESTS, kept equal to the job's -run selector by
-  # scripts/ci_workflow_test.go); --config=js-wasm builds the hooks test for
-  # js/wasm, which the Go SDK's go_js_wasm_exec runs under node with the job's
-  # exact pass-count guard.
+  # The CGO_ENABLED=0 portability boundaries (pr.yml's retired
+  # check-cmd-bd-puregeo-tests job) with Bazel-built binaries: --config=pure
+  # builds bd and three pure test binaries and runs the -short cmd/bd subset
+  # (PURE_CMD_BD_TESTS, pinned by scripts/ci_workflow_test.go);
+  # --config=js-wasm builds the hooks test for js/wasm, which the Go SDK's
+  # go_js_wasm_exec runs under node with an exact pass-count guard.
   bazel-pure:
     name: pure-Go and js/wasm
     # Same runner and skip rule as bazel-test.
@@ -985,14 +975,11 @@ jobs:
       result: ${{ steps.result.outputs.result }}
     env:
       PURE_CMD_BD_TESTS: '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir|NocgoFactoriesHonorSharedServer|NocgoNewDoltStoreFromConfig_ErrorSuggestsCorrectFlag|NocgoNewReadOnlyStoreFromConfig_ErrorSuggestsCorrectFlag)'
-      # D2 step 3: on covered PRs and merge groups (always mode remote) this
-      # lane is the only pre-merge run of pr.yml's legacy pure-Go and js/wasm
-      # job, which never retried: --config=sole-run then fails on a remote
-      # cache eviction instead of re-running the whole invocation (whose retry
-      # could turn a failed test green). Fork modes do the same (with
-      # BAZEL_COVERS_FORKS "true" it is their only run too). Test results are
-      # cached and reused like every lane's; only nightly re-executes them all
-      # (BAZEL_FRESH).
+      # The only pre-merge run of these boundaries: where it executes
+      # remotely --config=sole-run fails on a remote cache eviction instead
+      # of re-running the whole invocation (whose retry could turn a failed
+      # test green). Test results are cached and reused like every lane's;
+      # only nightly re-executes them all (BAZEL_FRESH).
       BAZEL_SOLE_RUN: ${{ needs.rbe.outputs.enabled == 'true' && '--config=sole-run' || '' }}
     steps:
       # inputs.checkout-sha: see the header (empty: the event's default ref).
@@ -1242,9 +1229,8 @@ jobs:
     # sum(durations)/shard_count the way a CPU-core-bound local sweep is --
     # each shard is its own remote action and runs concurrently with every
     # other shard, farm capacity permitting.
-    # On same-repo pull_requests those jobs stand down (pr-risk.yml's
-    # bazel-coverage), so this lane is then the tier's only PR run
-    # and pr.yml's gate requires it to have run here and passed.
+    # This lane is the tier's only PR run (pr-risk.yml's legacy jobs are
+    # retired) and pr.yml's gate requires it to have run here and passed.
     # The runs-on expression is the shared one: Blacksmith in mode remote,
     # GitHub-hosted in the fork modes (a client only).
     needs: rbe
@@ -1313,8 +1299,7 @@ jobs:
         if: ${{ always() && steps.test.outcome != 'skipped' }}
         run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
 
-      # Since D2 step 1 this lane is the tier's only pre-merge run on
-      # same-repo PRs. The shard scripts discover tests from source, but each
+      # This lane is the tier's only pre-merge run. The shard scripts discover tests from source, but each
       # Bazel binary holds only its target's srcs: a listed test the binary
       # lacks matches nothing and passes silently. Fail unless every Bazel
       # shard ran exactly the tests its script lists (list-only mode, cheap),
@@ -1670,9 +1655,7 @@ jobs:
   # not the legacy jobs' 15 — shard k here is not the same split as their
   # shard k. Same build as --config=doltserver (race bd_test, non-race
   # bd_for_tests), shared with bazel-doltserver through the remote cache.
-  # PR Risk builds its bd-cmd-test with -race, as here; main.yml's
-  # test-proxied-cmd twin uses build-artifacts' non-race bd-cmd-test, so
-  # this lane is the stricter of the two. It also runs
+  # The test binary is race, as PR Risk's retired jobs built it. It also runs
   # //cmd/bd:bd_managed_local_test, the managed-local proxied lifecycle
   # (formerly proxied-local-smoke.yml) in a loopback-only network
   # namespace, which needs the workers' unprivileged user namespaces. A job
@@ -1683,9 +1666,8 @@ jobs:
     # Remote execution only, like bazel-embedded: 30 concurrent shards, each
     # running its own dolt sql-server busy on ~4 cores, do not fit a
     # GitHub-hosted runner regardless of any single shard's wall time.
-    # On same-repo pull_requests the legacy jobs stand down (pr-risk.yml's
-    # bazel-coverage; D2 step 2), so this lane is then the tier's only PR
-    # run and pr.yml's gate requires it to have run here and passed.
+    # This lane is the tier's only PR run (pr-risk.yml's legacy jobs are
+    # retired) and pr.yml's gate requires it to have run here and passed.
     needs: rbe
     runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.enabled == 'true' }}
@@ -1779,8 +1761,7 @@ jobs:
         if: ${{ always() && steps.test.outcome != 'skipped' }}
         run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
 
-      # Since D2 step 2 this lane is the tier's only pre-merge run on
-      # same-repo PRs: as in bazel-embedded, every Bazel shard must run
+      # This lane is the tier's only pre-merge run: as in bazel-embedded, every Bazel shard must run
       # exactly the tests its shard script lists, and not only skips.
       - name: Every listed test ran in its shard
         if: ${{ always() && steps.test.outcome != 'skipped' }}
@@ -1856,9 +1837,8 @@ jobs:
     name: server-Dolt storage tier
     # Remote execution only, like bazel-integration: locally the tagged race
     # build of //... alone is most of the timeout.
-    # On same-repo pull_requests the legacy jobs stand down (pr-risk.yml's
-    # bazel-coverage; D2 step 2), so this lane is then the tier's only PR
-    # run and pr.yml's gate requires it to have run here and passed.
+    # This lane is the tier's only PR run (pr-risk.yml's legacy jobs are
+    # retired) and pr.yml's gate requires it to have run here and passed.
     needs: rbe
     runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.enabled == 'true' }}
@@ -1924,8 +1904,7 @@ jobs:
         if: ${{ always() && steps.test.outcome != 'skipped' }}
         run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
 
-      # Since D2 step 2 this lane is the tier's only pre-merge run on
-      # same-repo PRs: as in bazel-embedded, every full-suite shard must run
+      # This lane is the tier's only pre-merge run: as in bazel-embedded, every full-suite shard must run
       # exactly the tests its shard script lists, and neither it nor the
       # conformance target only skips.
       - name: Every listed test ran in its shard
@@ -2139,8 +2118,7 @@ jobs:
         run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
 
   # F3: moved here from pr.yml so the gate depends on nothing but the rbe
-  # job's decision (not detect-package-gates, build-artifacts, bazel-coverage
-  # or the whole bazel call). Only pr.yml opts in (package-gates: "on");
+  # job's decision (not the whole bazel call). Only pr.yml opts in (package-gates: "on");
   # bazel-farm.yml and nightly.yml keep the default "off" and this job does
   # not run for them. Same-repo PRs get a Bazel-built bd (no --config=ci:
   # only test:ci is defined in .bazelrc, so bazel build //cmd/bd:bd_for_tests

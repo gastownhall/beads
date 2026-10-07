@@ -1,7 +1,6 @@
 package scripts_test
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,44 +11,29 @@ import (
 	"testing"
 )
 
-// D2 step 3: pr.yml's own legacy jobs whose Bazel lanes run in the same
-// pr.yml run stand down on the PRs bazel-coverage covers (pr_lanes):
-// build-artifacts, PR Core and the pure-Go/js-wasm check, for Bazel / test
-// and pure-Go and js/wasm. ci-gate then requires those lanes, and the
-// dolt-server lane (the only run of the Dolt-backed domain, uow, tracker,
-// doctor/fix and protocol suites), to have run remotely and passed
-// (BAZEL_PR_LANES_RETIRED, simulated with the other tiers in
-// TestPRRiskDecisionMatchesBazelMode). Everything the retired jobs did
-// besides those tests keeps running on every PR: the package gates take the
-// Bazel-built bd, the Dolt server fingerprint runs on the dolt-server lane,
-// and nogo (//tools/nogo) runs go test's vet checks beside every compile of
-// the Bazel lanes.
+// pr.yml's PR Core, build-artifacts and pure-Go/js-wasm jobs are retired
+// (ga-96smfk.22): Bazel / test, pure-Go and js/wasm and the dolt-server lane
+// are their only run, and pr.yml's gate requires them to have run remotely
+// and passed (TestPRGateRequiresRemoteBazelLanes). Everything the retired
+// jobs did besides those tests keeps running on every PR: the package gates
+// take the Bazel-built bd, the Dolt server fingerprint runs on the
+// dolt-server lane, and nogo (//tools/nogo) runs go test's vet checks beside
+// every compile of the Bazel lanes.
 
 const (
-	// The legacy jobs' if: not covered.
-	prLaneLegacyIf = "needs." + prRiskCoverageJobName + ".outputs.pr_lanes != 'true'"
 	// bazel.yml's lanes for the step add --config=sole-run whenever they
 	// execute remotely (enabled: mode remote, and the rbe-fork modes
-	// fork-ro/fork-rw, whose lanes are a fork's only run once
-	// BAZEL_COVERS_FORKS covers it).
+	// fork-ro/fork-rw, a fork's or Dependabot PR's only run).
 	bazelSoleRunEnv          = "${{ needs.rbe.outputs.enabled == 'true' && '--config=sole-run' || '' }}"
 	bazelSoleRunArg          = `${BAZEL_SOLE_RUN:+"$BAZEL_SOLE_RUN"}`
 	bazelSoleRunEvictionLine = "test:sole-run --experimental_remote_cache_eviction_retries=0"
 )
 
 // F3: the package gates moved into bazel.yml (package-mcp, package-npm);
-// they depend only on the caller's package-gates input, not on
-// bazel-coverage's decision or build-artifacts (TestPackageGateJobs). This
+// they depend only on the caller's package-gates input (TestPackageGateJobs). This
 // map is only their CI_GATE_REQUIRED ids, for the gate-simulation scenarios
 // below (pr.yml no longer has jobs by these names).
 var prPackageGateIDs = map[string]string{"package-mcp": "PACKAGE_MCP", "package-npm": "PACKAGE_NPM"}
-
-// Each retired job's needs, exactly.
-var prLaneLegacyNeeds = map[string][]string{
-	"build-artifacts":            {prRiskCoverageJobName},
-	"check-cmd-bd-puregeo-tests": {prRiskCoverageJobName},
-	"pr-core-wrapper":            {"build-artifacts", prRiskCoverageJobName},
-}
 
 // .bazelrc's lines for the configs step 3's lanes run, exactly: the
 // PR-core selection (test:ci), the dolt-server lane, the pure-Go and js/wasm
@@ -157,94 +141,30 @@ exit "$rc"`,
 	},
 }
 
-// prLanesTier: retiredTiers' pr.yml entry.
-func prLanesTier(t *testing.T) retiredTier {
-	t.Helper()
-	for _, r := range retiredTiers {
-		if r.workflow == "pr.yml" {
-			return r
-		}
-	}
-	t.Fatal("retiredTiers has no pr.yml tier")
-	return retiredTier{}
-}
-
-// prLegacyJobResult: a non-Bazel pr.yml need's result in a gate scenario,
-// as the jobs' if: produce it (sc.results overrides): a retired job skips
-// where its tier is covered (GitHub's == is case-insensitive) or the
-// decision failed; a package gate skips where the decision failed.
+// prLegacyJobResult: a non-Bazel pr.yml need's result in a gate scenario:
+// success unless sc.results overrides it. (package-mcp/package-npm are
+// bazel.yml call outputs, simulated through sc.outputs.)
 func prLegacyJobResult(job string, sc bazelGateScenario) string {
 	if r, ok := sc.results[job]; ok {
 		return r
 	}
-	decided := sc.coverage == "" || sc.coverage == "success"
-	for _, r := range retiredTiers {
-		if _, ok := r.jobs[job]; ok && r.workflow == "pr.yml" && (!decided || strings.EqualFold(sc.covered[r.output], "true")) {
-			return "skipped"
-		}
-	}
-	// F3: package-mcp/package-npm are bazel.yml call outputs now
-	// (needs.bazel.outputs.package-mcp), not pr.yml job results, so
-	// runPRGateStep never calls this helper for them - they are simulated
-	// through sc.outputs instead (see the scenario loop below).
 	return "success"
 }
 
-// The retired jobs' wiring, the artifact consumers, and pr.yml's actual
-// gate step over the covered and uncovered cases.
-func TestPRLegacyLanesDeferToBazelLanes(t *testing.T) {
+// pr.yml's non-Bazel jobs and artifacts around the lanes: nothing needs or
+// downloads the retired build-artifacts job's artifact, the package gates
+// are pinned, Bazel publishes bd under the name pr.yml passes, and a failed
+// package gate or preflight leg reds pr.yml's actual gate step.
+func TestPRGateNonBazelNeeds(t *testing.T) {
 	requireHostTool(t, "bash")
 	pr := readCIWorkflow(t, "pr.yml")
-	tier := prLanesTier(t)
-	gate := pr.job(t, "ci-gate")
-	gateStep := gate.step(t, "Evaluate CI gate")
+	gateStep := pr.job(t, "ci-gate").step(t, "Evaluate CI gate")
 	required := strings.Fields(gateStep.Env["CI_GATE_REQUIRED"])
 
-	var names []string
-	for name := range tier.jobs {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	if !reflect.DeepEqual(names, sortedKeys(prLaneLegacyNeeds)) {
-		t.Fatalf("pr.yml tier jobs %v, want %v", names, sortedKeys(prLaneLegacyNeeds))
-	}
-	for name, id := range tier.jobs {
-		job := pr.job(t, name)
-		if job.If != prLaneLegacyIf || !reflect.DeepEqual([]string(job.Needs), prLaneLegacyNeeds[name]) || job.ContinueOnError {
-			t.Errorf("%s: if %q, needs %v, continue-on-error %v; want if %q, needs %v", name, job.If, job.Needs, job.ContinueOnError, prLaneLegacyIf, prLaneLegacyNeeds[name])
-		}
-		// Still required: it runs wherever the Bazel lanes do not cover it.
-		if !contains(required, id) || !contains(gate.Needs, name) || gateStep.Env[id] != "${{ needs."+name+".result }}" {
-			t.Errorf("ci-gate does not require %s's result as %s", name, id)
-		}
-	}
-	// The lanes that replace them run in this workflow's bazel call.
-	if !reflect.DeepEqual(tier.bazelLanes, []string{bazelJobName, bazelPureJobName, bazelDoltJobName}) {
-		t.Errorf("pr.yml tier lanes = %v", tier.bazelLanes)
-	}
-
-	// Only the retired jobs and the gate read the decision; only they and
-	// the gate need build-artifacts. The package gates moved into bazel.yml
-	// (F3) and never depend on this decision or on build-artifacts at all -
-	// they build bd for themselves, via Bazel or a go build fallback
-	// (TestPackageGateJobs).
 	for name, job := range pr.Jobs {
-		_, retired := tier.jobs[name]
-		if retired || name == "ci-gate" || name == prRiskCoverageJobName {
-			continue
-		}
-		if strings.Contains(job.If, prRiskCoverageJobName) || contains(job.Needs, prRiskCoverageJobName) {
-			t.Errorf("%s depends on %s; only the retired jobs may", name, prRiskCoverageJobName)
-		}
 		if contains(job.Needs, "build-artifacts") {
-			t.Errorf("%s needs build-artifacts, which stands down on covered PRs", name)
+			t.Errorf("%s needs the retired build-artifacts job", name)
 		}
-	}
-
-	// Artifact consumers: only the retired jobs read build-artifacts'
-	// artifact (they only run where it does). Nothing downloads by pattern
-	// or without a name.
-	for name, job := range pr.Jobs {
 		for _, step := range job.Steps {
 			if !strings.HasPrefix(step.Uses, "actions/download-artifact@") {
 				continue
@@ -252,23 +172,15 @@ func TestPRLegacyLanesDeferToBazelLanes(t *testing.T) {
 			art := step.With["name"]
 			if art == "" || step.With["pattern"] != "" {
 				t.Errorf("%s downloads an artifact by pattern or without a name: %v", name, step.With)
-				continue
 			}
-			if !strings.Contains(art, "ci-build-artifacts") {
-				continue
-			}
-			if _, retired := tier.jobs[name]; !retired || art != "ci-build-artifacts" {
-				t.Errorf("%s downloads %q; only the retired jobs (ci-build-artifacts) may", name, art)
-			}
-			if step.With["path"] != "ci-build-artifacts" {
-				t.Errorf("%s downloads into %q, want ci-build-artifacts (the layout its steps read)", name, step.With["path"])
+			if strings.Contains(art, "ci-build-artifacts") {
+				t.Errorf("%s downloads %q; nothing in pr.yml consumes the bd artifact", name, art)
 			}
 		}
 	}
 	testPackageGateJobs(t, required)
 	// Bazel's artifact: bazel-test publishes it (always, after its tests)
-	// under the name pr.yml passes, with build-artifacts' layout
-	// (TestBazelWorkflowPublishesBuildArtifacts).
+	// under the name pr.yml passes (TestBazelWorkflowPublishesBuildArtifacts).
 	if pr.job(t, "bazel").With["build-artifact-name"] != "bazel-ci-build-artifacts" {
 		t.Errorf("pr.yml's bazel call no longer names its artifact bazel-ci-build-artifacts")
 	}
@@ -278,115 +190,27 @@ func TestPRLegacyLanesDeferToBazelLanes(t *testing.T) {
 		t.Errorf("bazel-test packages bd with %q (continue-on-error %v)", pkgStep.Run, pkgStep.ContinueOnError)
 	}
 
-	// The gate. Other tiers not covered, so only this step's rules apply.
-	cov := func(v string) map[string]string {
-		c := coveredAll("false")
-		c[tier.output] = v
-		return c
-	}
 	lanes := bazelPRCallLanes(t, pr.job(t, "bazel").With)
-	type scenario struct {
-		name    string
-		sc      bazelGateScenario
-		pass    bool
-		mention string
+	if pass, out := runPRGateStep(t, gateStep, prGateFor(t, lanes, "pull_request", "remote")); !pass {
+		t.Errorf("remote, every lane and job passed: gate red\n%s", out)
 	}
-	var scenarios []scenario
-	add := func(name string, sc bazelGateScenario, pass bool, mention string) {
-		scenarios = append(scenarios, scenario{name, sc, pass, mention})
-	}
-	add("covered, remote, lanes passed, legacy skipped", prGateFor(t, lanes, "pull_request", "remote", cov("true")), true, "")
-	add("not covered, remote, legacy ran", prGateFor(t, lanes, "pull_request", "remote", cov("false")), true, "")
-	add("merge_group, not covered, remote", prGateFor(t, lanes, "merge_group", "remote", cov("false")), true, "")
-	// The merge queue retires the legacy jobs like a same-repo PR
-	// (bazel-coverage covers every merge group): green with the lanes run
-	// remotely, red when a lane failed or the run was not remote.
-	add("merge_group, covered, remote, lanes passed, legacy skipped", prGateFor(t, lanes, "merge_group", "remote", cov("true")), true, "")
-	for _, lane := range tier.bazelLanes {
-		sc := prGateFor(t, lanes, "merge_group", "remote", cov("true"))
-		sc.outputs[lane] = "failure"
-		add("merge_group, covered, "+lane+" failed", sc, false, tier.retiredID)
-	}
-	for _, mode := range []string{"skip", "cache"} {
-		sc := prGateFor(t, lanes, "merge_group", mode, cov("true"))
-		for _, lane := range tier.bazelLanes {
-			sc.outputs[lane] = "success"
-		}
-		add("merge_group, covered, mode "+mode+", lanes reported success", sc, false, tier.retiredID)
-	}
-	// rbe-fork: a covered fork or Dependabot PR (BAZEL_COVERS_FORKS) whose
-	// lanes ran remotely with a mint certificate.
-	for _, mode := range []string{"fork-ro", "fork-rw"} {
-		add("covered, mode "+mode+", lanes passed, legacy skipped", prGateFor(t, lanes, "pull_request", mode, cov("true")), true, "")
-		add("not covered, mode "+mode+", legacy ran", prGateFor(t, lanes, "pull_request", mode, cov("false")), true, "")
-	}
-	for _, mode := range []string{"local", "cache"} {
-		add("not covered, mode "+mode+", legacy ran", prGateFor(t, lanes, "pull_request", mode, cov("false")), true, "")
-	}
-	for job, id := range tier.jobs {
-		// Covered, but the job ran anyway and failed: red.
-		sc := prGateFor(t, lanes, "pull_request", "remote", cov("true"))
-		sc.results = map[string]string{job: "failure"}
-		add("covered, "+job+" ran and failed", sc, false, id)
-		// Not exactly covered: its skip is not excused.
-		for _, c := range []string{"false", "", "TRUE ", "yes", "1", "True\n"} {
-			sc := prGateFor(t, lanes, "pull_request", "remote", cov(c))
-			sc.results = map[string]string{job: "skipped"}
-			add(fmt.Sprintf("covered=%q, %s skipped", c, job), sc, false, id)
-		}
-	}
-	for _, lane := range tier.bazelLanes {
-		for _, res := range []string{"failure", "cancelled", "skipped", ""} {
-			sc := prGateFor(t, lanes, "pull_request", "remote", cov("true"))
-			sc.outputs[lane] = res
-			add(fmt.Sprintf("covered, %s %q", lane, res), sc, false, tier.retiredID)
-		}
-	}
-	for _, mode := range []string{"skip", "local", "cache"} {
-		sc := prGateFor(t, lanes, "pull_request", mode, cov("true"))
-		for _, lane := range tier.bazelLanes {
-			sc.outputs[lane] = "success"
-		}
-		add("covered, mode "+mode+", lanes reported success", sc, false, tier.retiredID)
-	}
-	for _, c := range []string{"true", "false"} {
-		for _, res := range []string{"skipped", "failure", "cancelled"} {
-			for _, job := range []string{"package-mcp", "package-npm", "pr-preflight-platforms"} {
-				sc := prGateFor(t, lanes, "pull_request", "remote", cov(c))
-				// F3: package-mcp/package-npm are bazel.yml call outputs
-				// (needs.bazel.outputs.package-mcp), not pr.yml job
-				// results, so the gate simulation overrides sc.outputs for
-				// them instead of sc.results.
-				if _, pkg := prPackageGateIDs[job]; pkg {
-					sc.outputs[job] = res
-				} else {
-					sc.results = map[string]string{job: res}
-				}
-				id := map[string]string{"pr-preflight-platforms": "PR_PREFLIGHT_PLATFORMS"}[job]
-				if id == "" {
-					id = prPackageGateIDs[job]
-				}
-				add(fmt.Sprintf("covered=%s, %s %s", c, job, res), sc, false, id)
+	for _, res := range []string{"skipped", "failure", "cancelled"} {
+		for _, job := range []string{"package-mcp", "package-npm", "pr-preflight-platforms"} {
+			sc := prGateFor(t, lanes, "pull_request", "remote")
+			// F3: package-mcp/package-npm are bazel.yml call outputs
+			// (needs.bazel.outputs.package-mcp), not pr.yml job results.
+			id := prPackageGateIDs[job]
+			if id != "" {
+				sc.outputs[job] = res
+			} else {
+				id = "PR_PREFLIGHT_PLATFORMS"
+				sc.results = map[string]string{job: res}
+			}
+			pass, out := runPRGateStep(t, gateStep, sc)
+			if pass || !regexp.MustCompile(`::error::`+regexp.QuoteMeta(id)+`\b`).MatchString(out) {
+				t.Errorf("%s %s: gate pass = %v, want red naming %s\n%s", job, res, pass, id, out)
 			}
 		}
-	}
-	// A failed decision: the retired jobs skip through needs (the package
-	// gates do not depend on the decision at all, F3), and the gate is red.
-	for _, res := range []string{"failure", "cancelled", "skipped"} {
-		sc := prGateFor(t, lanes, "pull_request", "remote", cov(""))
-		sc.coverage = res
-		add("decision "+res, sc, false, prRiskCoverageGateID)
-	}
-	for _, s := range scenarios {
-		t.Run(s.name, func(t *testing.T) {
-			pass, out := runPRGateStep(t, gateStep, s.sc)
-			if pass != s.pass {
-				t.Errorf("gate pass = %v, want %v\n%s", pass, s.pass, out)
-			}
-			if !s.pass && s.mention != "" && !regexp.MustCompile(`::error::`+regexp.QuoteMeta(s.mention)+`\b`).MatchString(out) {
-				t.Errorf("red gate does not name %s:\n%s", s.mention, out)
-			}
-		})
 	}
 }
 
@@ -400,15 +224,13 @@ func sortedKeys[V any](m map[string]V) []string {
 }
 
 // F3: the package gates (bazel.yml's package-mcp, package-npm). They depend
-// only on the caller turning package-gates on (never on bazel-coverage or
-// build-artifacts: TestPRLegacyLanesDeferToBazelLanes already checked that
-// nothing but the retired jobs reads either), build bd for themselves - via
+// only on the caller turning package-gates on, build bd for themselves - via
 // the Bazel lane's binary when the farm is up, a go build fallback
 // otherwise (package-mcp.sh/package-npm.sh's prepare_bd_binary) - and are
 // structurally identical apart from their language setup and `make` target.
 // Their runs-on/if/needs/result-recorder are already pinned for every
 // bazel.yml job by TestBazelWorkflowJobsAndExecutionMode and
-// TestBazelLaneIsGatedAlongsideLegacy; this test pins the step-by-step
+// TestBazelLaneIsGated; this test pins the step-by-step
 // detail those generic checks do not.
 func testPackageGateJobs(t *testing.T, prGateRequired []string) {
 	t.Helper()

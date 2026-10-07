@@ -28,7 +28,7 @@ func TestCIWorkflowArtifactOwnership(t *testing.T) {
 				"make ci-pr-policy",
 				"make ci-pr-lint",
 			} {
-				for _, step := range workflow.job(t, "build-artifacts").Steps {
+				for _, step := range workflow.Jobs["build-artifacts"].Steps {
 					if strings.Contains(step.Run, forbidden) {
 						t.Errorf("build-artifacts runs %q in step %q", forbidden, step.Name)
 					}
@@ -277,31 +277,20 @@ func readGoreleaserBuilds(t *testing.T) []goreleaserBuild {
 	return config.Builds
 }
 
+// Exclude read-permission coverage is required, not best effort: Bazel's
+// PR-core lane (bazel.yml's `test`, the only PR run of PR Core's tests)
+// requires it, and pr.yml's gate requires that lane.
 func TestPRCoreRequiresExcludeReadPermissionCoverage(t *testing.T) {
-	workflow := readCIWorkflow(t, "pr.yml")
-	job := workflow.job(t, "pr-core-wrapper")
-	// Its only condition is D2 step 3's stand-down, where Bazel's PR-core
-	// lane (required instead) runs the test with the same requirement.
-	if job.RunsOn != "ubuntu-latest" || job.If != prLaneLegacyIf || job.ContinueOnError {
-		t.Error("exclude permission coverage must remain in the required Linux PR Core job")
-	}
 	if !contains(bazelPRLaneRCLines["prcore"], "test:prcore --test_env=BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION=1") {
-		t.Error("Bazel's PR-core lane must require actual exclude read-permission coverage where PR Core stands down")
+		t.Error("Bazel's PR-core lane must require actual exclude read-permission coverage")
 	}
-	step := job.Steps[job.stepIndex(t, "Run PR core wrapper")]
-	if step.If != "" || (step.ContinueOnError != nil && step.ContinueOnError != false) || strings.TrimSpace(step.Run) != "make ci-pr-core" {
-		t.Error("exclude permission coverage must run through the nonoptional PR Core wrapper")
-	}
-	if step.Env["BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION"] != "1" {
-		t.Error("PR Core must require actual exclude read-permission coverage")
-	}
-	gate := workflow.job(t, "ci-gate")
+	gate := readCIWorkflow(t, "pr.yml").job(t, "ci-gate")
 	evaluate := gate.step(t, "Evaluate CI gate")
 	if gate.If != "${{ always() }}" || gate.ContinueOnError || evaluate.If != "" || (evaluate.ContinueOnError != nil && evaluate.ContinueOnError != false) {
-		t.Error("CI gate must propagate required PR Core failures")
+		t.Error("CI gate must propagate required Bazel PR-core failures")
 	}
-	if !contains(gate.Needs, "pr-core-wrapper") || evaluate.Env["PR_CORE_WRAPPER"] != "${{ needs.pr-core-wrapper.result }}" || !contains(strings.Fields(evaluate.Env["CI_GATE_REQUIRED"]), "PR_CORE_WRAPPER") {
-		t.Error("CI gate must require the PR Core result")
+	if !contains(gate.Needs, "bazel") || !contains(strings.Fields(evaluate.Env["CI_GATE_REQUIRED"]), "BAZEL_TEST") {
+		t.Error("CI gate must require the Bazel PR-core lane (BAZEL_TEST)")
 	}
 }
 
@@ -637,82 +626,6 @@ func TestPRCIGateRequiresWindowsGlobalPrimeOverride(t *testing.T) {
 	}
 }
 
-func TestPRCIGateRequiresJSWasmHookExecution(t *testing.T) {
-	workflow := readCIWorkflow(t, "pr.yml")
-	job := workflow.job(t, "check-cmd-bd-puregeo-tests")
-	if job.RunsOn != "ubuntu-latest" {
-		t.Errorf("js/wasm hook job runs-on = %q, want ubuntu-latest", job.RunsOn)
-	}
-	// Only D2 step 3's stand-down, where Bazel's pure-Go and js/wasm lane
-	// (TestBazelPureJobMirrorsPureGoJob) is required instead
-	// (TestPRLegacyLanesDeferToBazelLanes).
-	if job.If != prLaneLegacyIf {
-		t.Errorf("js/wasm hook job is conditional: %q", job.If)
-	}
-
-	setupGo := job.step(t, "Set up Go")
-	if setupGo.Uses != setupGoActionFamily+"@"+setupGoSHA {
-		t.Errorf("setup-go action = %q", setupGo.Uses)
-	}
-	if setupGo.With["go-version-file"] != "go.mod" || setupGo.With["cache"] != "false" {
-		t.Errorf("setup-go inputs = %v", setupGo.With)
-	}
-
-	setupNode := job.step(t, "Set up Node.js")
-	if setupNode.Uses != setupNodeActionFamily+"@"+setupNodeSHA {
-		t.Errorf("setup-node action = %q", setupNode.Uses)
-	}
-	if setupNode.With["node-version"] != "24" {
-		t.Errorf("setup-node version = %q, want 24", setupNode.With["node-version"])
-	}
-
-	execute := job.step(t, "Run js/wasm hook boundary")
-	if execute.If != "" {
-		t.Errorf("js/wasm hook step is conditional: %q", execute.If)
-	}
-	for key, want := range map[string]string{
-		"CGO_ENABLED": "0",
-		"GOARCH":      "wasm",
-		"GOOS":        "js",
-	} {
-		got, ok := execute.Env[key]
-		if !ok || got != want {
-			t.Errorf("js/wasm hook env %s = %q (present=%v), want %q", key, got, ok, want)
-		}
-	}
-	for _, required := range []string{
-		`go test -tags gms_pure_go -count=1 -timeout=2m`,
-		`-exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec"`,
-		`-run '^TestRunHookReportsUnsupportedExecution$'`,
-		`-v ./internal/hooks`,
-		`|| test_status=$?`,
-		`=== RUN   TestRunHookReportsUnsupportedExecution`,
-		`^--- PASS: TestRunHookReportsUnsupportedExecution`,
-		`nonpass_pattern='^[[:space:]]*--- (FAIL|SKIP): '`,
-		`[[ "$line" =~ $nonpass_pattern ]]`,
-		`run_count != 1 || pass_count != 1 || nonpass_count != 0`,
-	} {
-		if !strings.Contains(execute.Run, required) {
-			t.Errorf("js/wasm hook command does not contain %q", required)
-		}
-	}
-	if regexp.MustCompile(`\bgo1\.[0-9]`).MatchString(execute.Run) {
-		t.Errorf("js/wasm hook command duplicates the Go version owned by go.mod")
-	}
-
-	gate := workflow.job(t, "ci-gate")
-	gateEnv := gate.step(t, "Evaluate CI gate").Env
-	if !contains(gate.Needs, "check-cmd-bd-puregeo-tests") {
-		t.Errorf("ci-gate does not require js/wasm hook job: %v", gate.Needs)
-	}
-	if got := gateEnv["CHECK_CMD_BD_PUREGEO_TESTS"]; got != "${{ needs.check-cmd-bd-puregeo-tests.result }}" {
-		t.Errorf("ci-gate js/wasm hook result = %q", got)
-	}
-	if !strings.Contains(gateEnv["CI_GATE_REQUIRED"], "CHECK_CMD_BD_PUREGEO_TESTS") {
-		t.Errorf("ci-gate required set omits js/wasm hook job")
-	}
-}
-
 func TestPRCIGateRequiresGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 	const (
 		jobName     = "pr-preflight-platforms"
@@ -1015,12 +928,6 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		saveBuildCacheDayBucketedAfterFailureIf("non-race", ""),
 	})
 
-	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "build-artifacts"), []goCacheStep{
-		restoreModuleCache(), restoreBuildCache("non-race"),
-	})
-	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "pr-core-wrapper"), []goCacheStep{
-		restoreModuleCache(), restoreBuildCache("race"),
-	})
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "worktree-remove-windows"), []goCacheStep{
 		restoreModuleCache(), restoreBuildCache("non-race"),
 	})
@@ -1057,9 +964,6 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "pr-preflight-platforms"), []goCacheStep{
 		restoreModuleCache(), restoreBuildCache("non-race"),
 	})
-	assertGoCacheInventory(t, workflows["pr-risk.yml"].job(t, "build-embedded"), []goCacheStep{
-		restoreModuleCache(), restoreBuildCache("race"), restoreBuildCache("non-race"),
-	})
 	assertNoUnmanagedGoCacheSteps(t, workflows, map[string]map[string]bool{
 		"main.yml": {
 			"build-artifacts": true, "test": true, "test-windows": true,
@@ -1075,19 +979,17 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 			"blacksmith-setup-go-cache": true,
 		},
 		"pr.yml": {
-			"build-artifacts": true, "pr-core-wrapper": true, "worktree-remove-windows": true,
+			"worktree-remove-windows":       true,
 			"check-doc-freshness-platforms": true, "pr-preflight-platforms": true, "advisory-reports": true,
 			"windows-test-binaries": true,
 			"test-windows-liveness": true,
 		},
-		"pr-risk.yml": {"build-embedded": true},
+		"pr-risk.yml": {},
 	})
 
 	mainArtifacts := workflows["main.yml"].job(t, "build-artifacts")
 	assertStepsBefore(t, mainArtifacts, []string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Build reusable Linux artifacts"})
 	assertStepsBefore(t, mainArtifacts, []string{"Build reusable Linux artifacts", "Upload build artifacts"}, []string{"Save Go module cache", "Save non-race Go build cache"})
-
-	embeddedRaceBuilds := []string{"Build embedded bd binary", "Build embedded storage test binary", "Build embedded cmd test binary"}
 
 	mainTest := workflows["main.yml"].job(t, "test")
 	assertStepsBefore(t, mainTest, []string{"Restore Go module cache"}, []string{"Build", "Test"})
@@ -1099,10 +1001,6 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertStepsBefore(t, mainWindows, []string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Build (pure Go regex)"})
 	assertStepsBefore(t, mainWindows, []string{"Build (pure Go regex)", "Smoke test - version", "Smoke test - help"}, []string{"Save Go module cache", "Save non-race Go build cache"})
 
-	assertStepsBefore(t, workflows["pr.yml"].job(t, "build-artifacts"),
-		[]string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Build reusable Linux artifacts"})
-	assertStepsBefore(t, workflows["pr.yml"].job(t, "pr-core-wrapper"),
-		[]string{"Restore Go module cache", "Restore race Go build cache"}, []string{"Run PR core wrapper"})
 	prXCompile := workflows["pr.yml"].job(t, "windows-test-binaries")
 	assertStepsBefore(t, prXCompile, []string{"Restore Go module cache"}, []string{"Verify Go module checksums", "Build Windows test binaries"})
 	assertStepsBefore(t, prXCompile, []string{"Install mingw cross-compiler", "Restore Go build cache (Windows cross-compile)"}, []string{"Build Windows test binaries"})
@@ -1122,27 +1020,13 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "advisory-reports"),
 		[]string{"Restore Go module cache"}, []string{"Type-check every module under examples/"})
 
-	prRiskEmbedded := workflows["pr-risk.yml"].job(t, "build-embedded")
-	prRiskNonRaceBuilds := []string{"Build proxied bd subprocess binary", "Build server Dolt conformance test binary"}
-	assertStepsBefore(t, prRiskEmbedded, []string{"Restore Go module cache"}, append(append([]string{}, embeddedRaceBuilds...), prRiskNonRaceBuilds...))
-	assertStepsBefore(t, prRiskEmbedded, []string{"Restore race Go build cache"}, embeddedRaceBuilds)
-	assertStepsBefore(t, prRiskEmbedded, []string{"Restore non-race Go build cache"}, prRiskNonRaceBuilds)
-
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "build-artifacts"), "Build reusable Linux artifacts", "non-race")
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test"), "Build", "non-race")
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test"), "Test", "race")
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test-windows"), "Build (pure Go regex)", "non-race")
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "windows-test-binaries-cache"), "Build Windows test binaries", xcompileCacheProfile())
-	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "build-artifacts"), "Build reusable Linux artifacts", "non-race")
-	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "pr-core-wrapper"), "Run PR core wrapper", "race")
 	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "windows-test-binaries"), "Build Windows test binaries", xcompileCacheProfile())
 	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "worktree-remove-windows"), "Run native Windows worktree removal boundary tests", "non-race")
-	for _, stepName := range []string{"Build embedded bd binary", "Build embedded storage test binary", "Build embedded cmd test binary"} {
-		assertGoCacheEnv(t, workflows["pr-risk.yml"].job(t, "build-embedded"), stepName, "race")
-	}
-	for _, stepName := range []string{"Build proxied bd subprocess binary", "Build server Dolt conformance test binary"} {
-		assertGoCacheEnv(t, workflows["pr-risk.yml"].job(t, "build-embedded"), stepName, "non-race")
-	}
 	for _, workflowName := range []string{"pr.yml", "pr-risk.yml"} {
 		for jobName, job := range workflows[workflowName].Jobs {
 			for _, step := range job.Steps {
@@ -1171,14 +1055,11 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		{"main.yml", "test-windows"},
 		{"main.yml", "windows-test-binaries-cache"},
 		{"main.yml", "blacksmith-macos-go-build-cache"},
-		{"pr.yml", "build-artifacts"},
-		{"pr.yml", "pr-core-wrapper"},
 		{"pr.yml", "windows-test-binaries"},
 		{"pr.yml", "worktree-remove-windows"},
 		{"pr.yml", "check-doc-freshness-platforms"},
 		{"pr.yml", "pr-preflight-platforms"},
 		{"pr.yml", "advisory-reports"},
-		{"pr-risk.yml", "build-embedded"},
 	} {
 		if got := workflows[target.workflow].job(t, target.job).step(t, "Set up Go").ID; got != "setup-go" {
 			t.Errorf("%s job %q setup-go id = %q, want setup-go", target.workflow, target.job, got)
@@ -1214,92 +1095,13 @@ func TestMainWindowsTestBinariesCacheSeedsBothRunnerSelections(t *testing.T) {
 	}
 }
 
-// TestPRRiskGateReachesFullServerDoltStorageSuite is the regression test for
-// be-aiy5: test-server-storage already keeps a live Dolt server up (via
-// build-embedded's /tmp/dolt-conformance-test binary, which compiles every
-// top-level test in package internal/storage/dolt, not just conformance),
-// but restricts execution to -test.run '^TestConformance$'. Every other
-// server-gated test in that same binary -- TestCreateGuard_*,
-// TestFederationPeerCredentialLifecycleLazyKeyInit, and diff-owned tests
-// such as TestBenchDBPurgeDoesNotLeak on PR #5792 -- is reached by no
-// PR-triggered lane, so it silently SKIPs instead of producing a real
-// PASS/FAIL. A sibling job must run everything else in the same binary
-// against the same live server, without a new build step, and must be wired
-// into ci-gate as required so a SKIP there can no longer hide behind green.
-func TestPRRiskGateReachesFullServerDoltStorageSuite(t *testing.T) {
-	const jobName = "test-server-storage-full"
-
-	workflow := readCIWorkflow(t, "pr-risk.yml")
-	job := workflow.job(t, jobName)
-
-	if job.RunsOn != "ubuntu-latest" {
-		t.Errorf("%s runs-on = %q, want ubuntu-latest", jobName, job.RunsOn)
-	}
-	if job.TimeoutMinutes != 20 {
-		t.Errorf("%s timeout = %d minutes, want 20 (matches test-server-storage)", jobName, job.TimeoutMinutes)
-	}
-	if !contains(job.Needs, "detect-ci-tier") || !contains(job.Needs, "build-embedded") {
-		t.Errorf("%s needs = %v, want detect-ci-tier and build-embedded (reuse the existing artifact, no new build)", jobName, job.Needs)
-	}
-	if sibling := workflow.job(t, "test-server-storage").If; job.If != sibling || !strings.HasPrefix(job.If, "needs.detect-ci-tier.outputs.full_embedded == 'true'") {
-		t.Errorf("%s if = %q, want the same tier gate as test-server-storage (%q)", jobName, job.If, sibling)
-	}
-
-	download := job.step(t, "Download binaries")
-	if download.With["name"] != "embedded-test-binaries" {
-		t.Errorf("%s does not download the existing embedded-test-binaries artifact (would require a new build step): %v", jobName, download.With)
-	}
-
-	// Pro-rata against the embedded lane (75 shard-minutes / 324 tests):
-	// 1126 tests at the same per-test cost is ~260 shard-minutes; 16 shards
-	// x 15m = 240 shard-minutes, with the ~9.5-minute TestCloudAuthCLIRouting
-	// outlier isolated on its own shard via the shard manifest.
-	const totalShards = 16
-	wantShards := make([]int, totalShards)
-	for i := range wantShards {
-		wantShards[i] = i + 1
-	}
-	if !reflect.DeepEqual(job.Strategy.Matrix.Shard, wantShards) {
-		t.Errorf("%s strategy.matrix.shard = %v, want %v", jobName, job.Strategy.Matrix.Shard, wantShards)
-	}
-	if job.Strategy.FailFast {
-		t.Errorf("%s strategy.fail-fast = true, want false (one slow/flaky shard should not cancel the others)", jobName)
-	}
-
-	wantTestCommand := fmt.Sprintf("bash .github/scripts/server-storage-test-shard.sh ${{ matrix.shard }} %d", totalShards)
-	assertStepRunsExactly(t, job, "Test", wantTestCommand)
-	// federation_test.go Fatals instead of silently skipping when this is set
-	// and the server it expects isn't reachable -- this job's whole point is
-	// a real PASS/FAIL, not a hidden self-skip if its own setup regresses.
-	assertStepEnvValue(t, job, "Test", "BEADS_TEST_ENV_RUN_DOLT", "1")
-
-	// test-server-storage itself is untouched: conformance keeps its own
-	// dedicated job and timeout budget; this is an additive sibling, not a
-	// widened filter on the existing job.
-	existing := workflow.job(t, "test-server-storage")
-	assertStepRunsExactly(t, existing, "Test", `/tmp/dolt-conformance-test -test.v -test.count=1 -test.timeout=15m -test.run '^TestConformance$'`)
-
-	gate := workflow.job(t, "ci-gate")
-	gateEnv := gate.step(t, "Evaluate CI gate").Env
-	const gateKey = "TEST_SERVER_STORAGE_FULL"
-	if !contains(gate.Needs, jobName) {
-		t.Errorf("ci-gate does not need %q: %v", jobName, gate.Needs)
-	}
-	if got, want := gateEnv[gateKey], fmt.Sprintf("${{ needs.%s.result }}", jobName); got != want {
-		t.Errorf("ci-gate env %s = %q, want %q", gateKey, got, want)
-	}
-	if !contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), gateKey) {
-		t.Errorf("ci-gate CI_GATE_REQUIRED does not include %q", gateKey)
-	}
-}
-
 func TestServerStorageShardScriptRunsPrebuiltBinaryFromPackageDir(t *testing.T) {
 	// pr4107_corruption_test.go and journal_scope_completeness_test.go use
 	// paths relative to internal/storage/dolt (e.g. ../schema/migrations,
 	// ../issueops). `go test` runs a package's tests with cwd = the package
 	// dir, so those resolve; a prebuilt test binary inherits the invoking
 	// shell's cwd instead. server-storage-test-shard.sh is invoked from the
-	// repo root (see TestPRRiskGateReachesFullServerDoltStorageSuite above),
+	// repo root (//internal/storage/dolt's server-storage variants),
 	// so the prebuilt-binary branch must cd into the package dir itself,
 	// immediately before exec -- any earlier and it breaks the repo-root-
 	// relative manifest/discovery above it; any later, or absent, and the 6
@@ -1353,7 +1155,7 @@ func TestServerStorageShardScriptRunsPrebuiltBinaryFromPackageDir(t *testing.T) 
 	if cdIndex < 0 {
 		t.Fatal(`script does not "cd internal/storage/dolt" before running the prebuilt binary -- ` +
 			`relative-path tests (../schema/migrations, ../issueops) will fail when this script ` +
-			`is invoked from the repo root, as pr-risk.yml's test-server-storage-full job does`)
+			`is invoked from the repo root, as //internal/storage/dolt:dolt_server_full_test does`)
 	}
 	if cdIndex <= discoveryIndex {
 		t.Fatalf("cd internal/storage/dolt at line %d is at or before the repo-root-relative test "+
@@ -2559,7 +2361,7 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 		// F7b's scope, not this one). windows-test-binaries is F4's Linux
 		// mingw cross-compile job, sized at 8vcpu.
 		"pr.yml": {
-			"bazel-coverage": sameRepoBlacksmith2vcpu, "ci-gate": sameRepoBlacksmith2vcpu,
+			"ci-gate":               sameRepoBlacksmith2vcpu,
 			"fast-checks":           sameRepoBlacksmith2vcpu,
 			"advisory-reports":      sameRepoBlacksmith2vcpu,
 			"check-doc-flags":       sameRepoBlacksmith4vcpu,
@@ -2591,7 +2393,7 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 			"pr-preflight-platforms":        sameRepoPlatformsMatrixMarkerRunsOn,
 		},
 		"pr-risk.yml": {
-			"bazel-coverage": sameRepoBlacksmith2vcpu, "ci-gate": sameRepoBlacksmith2vcpu, "detect-ci-tier": sameRepoBlacksmith2vcpu,
+			"ci-gate":  sameRepoBlacksmith2vcpu,
 			"test-nix": sameRepoBlacksmith4vcpu,
 		},
 		bazelWorkflowName: {bazelRBEJobName: wantRBERunsOn},
@@ -3019,10 +2821,11 @@ func readBazelWorkflowCall(t *testing.T) bazelWorkflowCall {
 	return doc.On.WorkflowCall
 }
 
-// Slice D1: pr.yml calls bazel.yml once per PR and merge group, and its
-// ci-gate requires the Bazel lanes in addition to (not instead of) the legacy
-// jobs they mirror, which stay required in pr.yml and pr-risk.yml.
-func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
+// pr.yml calls bazel.yml once per PR and merge group, and its ci-gate
+// requires the Bazel lanes, which are the only run of the Linux Go test tiers
+// (ga-96smfk.22 retired the legacy jobs they mirrored in pr.yml and
+// pr-risk.yml).
+func TestBazelLaneIsGated(t *testing.T) {
 	workflow := readCIWorkflow(t, bazelWorkflowName)
 	call := readBazelWorkflowCall(t)
 
@@ -3172,11 +2975,8 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 	if !contains(gate.Needs, "bazel") {
 		t.Errorf("ci-gate needs = %v, want bazel", gate.Needs)
 	}
-	// Plus D2's decision and retirement checks (TestPRRiskDecisionMatchesBazelMode).
-	wantBazelIDs := []string{bazelAggregateGateID, prRiskCoverageGateID}
-	for _, r := range retiredTiers {
-		wantBazelIDs = append(wantBazelIDs, r.retiredID)
-	}
+	// Plus the remote-execution check (TestPRGateRequiresRemoteBazelLanes).
+	wantBazelIDs := []string{bazelAggregateGateID, bazelRemoteGateID}
 	for lane, id := range bazelLaneGateIDs {
 		// F3: package-mcp/package-npm's ids (PACKAGE_MCP, PACKAGE_NPM) do not
 		// follow the "BAZEL" naming convention the prefix filter below
@@ -3256,26 +3056,16 @@ func TestBazelLaneIsGatedAlongsideLegacy(t *testing.T) {
 		}
 	}
 
-	// Legacy jobs stay required: D1 adds, D2 removes. (D2 lets
-	// pr-risk.yml's embedded, proxied and server Dolt test jobs, and
-	// build-embedded, skip where the gated lanes run remotely, but they stay
-	// required ids: TestPRRiskLegacyTiersDeferToBazelLanes.)
-	for id, job := range map[string]string{
-		"BUILD_ARTIFACTS":            "build-artifacts",
-		"PR_CORE_WRAPPER":            "pr-core-wrapper",
-		"CHECK_CMD_BD_PUREGEO_TESTS": "check-cmd-bd-puregeo-tests",
-	} {
-		if !contains(required, id) || !contains(gate.Needs, job) {
-			t.Errorf("pr.yml ci-gate no longer requires legacy %s (%s)", job, id)
+	// The retired legacy jobs stay retired: nothing in pr.yml or
+	// pr-risk.yml runs the Go test tiers beside the Bazel lanes.
+	for _, job := range []string{"build-artifacts", "pr-core-wrapper", "check-cmd-bd-puregeo-tests", "bazel-coverage"} {
+		if _, ok := pr.Jobs[job]; ok || contains(gate.Needs, job) {
+			t.Errorf("pr.yml has retired job %s; the Bazel lanes run its tests", job)
 		}
 	}
 	risk := readCIWorkflow(t, "pr-risk.yml")
-	riskGate := risk.job(t, "ci-gate")
-	riskRequired := strings.Fields(riskGate.step(t, "Evaluate CI gate").Env["CI_GATE_REQUIRED"])
-	for _, id := range []string{"BUILD_EMBEDDED", "TEST_EMBEDDED_STORAGE", "TEST_EMBEDDED_CONFORMANCE", "TEST_EMBEDDED_CMD", "TEST_PROXIED_CMD", "TEST_SERVER_STORAGE", "TEST_SERVER_STORAGE_FULL"} {
-		if !contains(riskRequired, id) {
-			t.Errorf("pr-risk.yml ci-gate no longer requires legacy %s", id)
-		}
+	if got := sortedKeys(risk.Jobs); !reflect.DeepEqual(got, []string{"ci-gate", "test-nix"}) {
+		t.Errorf("pr-risk.yml jobs = %v, want only [ci-gate test-nix]; the Bazel lanes in pr.yml run the Go test tiers", got)
 	}
 	// PR Risk does not run the lane a second time.
 	for jobName, job := range risk.Jobs {
@@ -3386,13 +3176,7 @@ type bazelGateScenario struct {
 	mode, enabled string            // the call's rbe-mode / rbe-enabled outputs
 	call          string            // needs.bazel.result
 	outputs       map[string]string // the lanes' outputs ("" = not reported)
-	// pr.yml's bazel-coverage job (D2): its outputs, per retiredTiers
-	// output name ("" = not reported), and its result ("" = success).
-	covered  map[string]string
-	coverage string
-	// Non-Bazel needs' results that differ from what the jobs' if: give
-	// (success, or skipped for pr.yml's legacy jobs that bazel-coverage
-	// retired, D2 step 3).
+	// Non-Bazel needs' results that differ from success.
 	results map[string]string
 	// pr.yml's top-level flags the run script reads (the workflow env is
 	// not part of the step's env): bazelFlagGatedLanes' flags.
@@ -3436,20 +3220,6 @@ func runPRGateStep(t *testing.T, step ciWorkflowStep, sc bazelGateScenario) (boo
 		}
 		var got string
 		switch {
-		case m[1] == prRiskCoverageJobName && m[2] == "result":
-			got = sc.coverage
-			if got == "" {
-				got = "success"
-			}
-		case m[1] == prRiskCoverageJobName:
-			known := false
-			for _, r := range retiredTiers {
-				known = known || r.output == m[3]
-			}
-			if !known {
-				t.Fatalf("ci-gate env %s = %q: %s has no such tier output", key, value, prRiskCoverageJobName)
-			}
-			got = sc.covered[m[3]]
 		case m[1] == "fast-checks" && m[2] != "result":
 			// F7a: fast-checks folds five formerly-standalone jobs into one
 			// job's steps; ci-gate reads each step's outcome via the job's
@@ -3490,10 +3260,10 @@ func runPRGateStep(t *testing.T, step ciWorkflowStep, sc bazelGateScenario) (boo
 // The gate over every execution mode (review D1 F3): the skip script allows
 // exactly the skips the lanes' own `if:`s produce in that mode, and for every
 // lane that should run, that lane alone skipped, failed or cancelled turns
-// pr.yml's actual gate step red, whatever the aggregate says (in mode remote
-// that includes the integration lane, which skips green in mode local); a
-// missing or inconsistent mode, or an aggregate failure no lane explains,
-// turns it red.
+// pr.yml's actual gate step red, whatever the aggregate says; a missing or
+// inconsistent mode, or an aggregate failure no lane explains, turns it red;
+// and a mode that did not execute the lanes on rbe-west (skip, local, cache)
+// is red even when everything that ran passed (BAZEL_REMOTE).
 func TestBazelGateSimulation(t *testing.T) {
 	requireHostTool(t, "bash")
 	root := sourceRepoRoot(t)
@@ -3590,6 +3360,15 @@ func TestBazelGateSimulation(t *testing.T) {
 			committedFlags[g.flag] = pr.Env[g.flag]
 		}
 		scFlags := func(name, call string, outputs map[string]string, flags map[string]string, pass bool, mention string) {
+			// The lanes are the Linux Go test tiers' only run: a mode that
+			// executed nothing on rbe-west is red whatever else holds
+			// (BAZEL_REMOTE, TestPRGateRequiresRemoteBazelLanes).
+			if !bazelRemoteModes[mode] {
+				if pass || mention == "" {
+					mention = bazelRemoteGateID
+				}
+				pass = false
+			}
 			all := copyMap(committedFlags)
 			for k, v := range flags {
 				all[k] = v
@@ -3992,26 +3771,25 @@ func TestBazelWorkflowRunsCIConfigWithReports(t *testing.T) {
 // (artifact name, file names, checksum file, retention), so the jobs that
 // download ci-build-artifacts can switch to it without other edits.
 func TestBazelWorkflowPublishesBuildArtifacts(t *testing.T) {
-	var prUpload ciWorkflowStep
-	for _, step := range readCIWorkflow(t, "pr.yml").job(t, "build-artifacts").Steps {
-		if actionFamily(step.Uses) == "actions/upload-artifact" {
-			prUpload = step
-		}
-	}
+	// The layout and upload settings of the retired build-artifacts job
+	// (ga-96smfk.22), which bazel-test's artifact replaced.
+	prUpload := ciWorkflowStep{With: map[string]string{
+		"name":              "ci-build-artifacts",
+		"retention-days":    "1",
+		"if-no-files-found": "error",
+	}}
 	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelJobName)
 	pkg := job.step(t, "Package bd (ci-build-artifacts layout)")
 	upload := job.step(t, "Upload build artifacts")
-	// Named by the build-artifact-name input, pr.yml's name by default; the
-	// run inside pr.yml renames it (TestBazelLaneIsGatedAlongsideLegacy) so
-	// the two uploads cannot collide.
-	if prUpload.With["name"] != "ci-build-artifacts" ||
-		upload.With["name"] != "${{ inputs.build-artifact-name || '"+prUpload.With["name"]+"' }}" ||
+	// Named by the build-artifact-name input, ci-build-artifacts by default;
+	// the run inside pr.yml renames it (TestBazelLaneIsGated).
+	if upload.With["name"] != "${{ inputs.build-artifact-name || '"+prUpload.With["name"]+"' }}" ||
 		readBazelWorkflowCall(t).Inputs["build-artifact-name"].Default != prUpload.With["name"] {
-		t.Errorf("artifact name = %q, want the build-artifact-name input defaulting to pr.yml's %q", upload.With["name"], prUpload.With["name"])
+		t.Errorf("artifact name = %q, want the build-artifact-name input defaulting to %q", upload.With["name"], prUpload.With["name"])
 	}
 	for _, key := range []string{"retention-days", "if-no-files-found"} {
 		if upload.With[key] != prUpload.With[key] {
-			t.Errorf("upload %s = %q, want pr.yml's %q", key, upload.With[key], prUpload.With[key])
+			t.Errorf("upload %s = %q, want %q", key, upload.With[key], prUpload.With[key])
 		}
 	}
 	if pkg.ID == "" || upload.If != "${{ always() && steps."+pkg.ID+".outcome == 'success' }}" {
@@ -4427,7 +4205,7 @@ func assertBazelTierStep(t *testing.T, job ciWorkflowJob, jobName, config string
 // setting, subprocess binaries and switches; the lanes' configs keep the
 // jobs' selection, and the storage lane shares --config=integration's build.
 // bazel.yml runs both tiers remotely only.
-func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
+func TestBazelDoltServerTiers(t *testing.T) {
 	rc := bazelrcLines(t)
 	for _, want := range []string{
 		"test:doltserver-proxied --@rules_go//go/config:race",
@@ -4464,76 +4242,31 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 		t.Error(".bazelrc: test:doltserver-integration and test:integration differ in race; they must share their build")
 	}
 
-	risk := readCIWorkflow(t, "pr-risk.yml")
-	build := risk.job(t, "build-embedded")
-	for step, want := range map[string]string{
-		// The proxied jobs' test binary is this race build (--config=
-		// doltserver-proxied's bd_test), their subprocess bd the non-race one
-		// (bd_for_tests).
-		"Build embedded cmd test binary":     "go test -tags gms_pure_go -race -c -o /tmp/bd-cmd-test ./cmd/bd/",
-		"Build proxied bd subprocess binary": "go build -tags gms_pure_go -o /tmp/bd-proxied ./cmd/bd/",
-	} {
-		if got := strings.TrimSpace(build.step(t, step).Run); got != want {
-			t.Errorf("pr-risk.yml %q = %q, want %q", step, got, want)
-		}
-	}
-	// The server jobs' binary: integration-tagged (the lane's build tags) and
-	// not race (dolt_race_off).
-	m := regexp.MustCompile(`^go test -tags=(\S+) -c -o /tmp/dolt-conformance-test \./internal/storage/dolt/$`).
-		FindStringSubmatch(strings.TrimSpace(build.step(t, "Build server Dolt conformance test binary").Run))
-	if m == nil || !sameTagSet(tagSet(m[1]), tierTags) {
-		t.Errorf("pr-risk.yml's server Dolt test binary is no longer the non-race `go test -tags=<build:doltserver-integration tags> -c`: %v", m)
-	}
-
+	// The manifest-sharded tiers PR Risk's retired "Test (Proxied Dolt Cmd
+	// N/15)" and "Test (Server Dolt Full Suite N/16)" jobs ran
+	// (ga-96smfk.22): the same shard scripts, test binaries and env, now
+	// sharded by each target's own BUILD.bazel shard_count
+	// (TestBazelRetiredLanesCheckListedTestsRan pins it against bazel.yml's
+	// check_shard_coverage.py argument).
 	type shardTier struct {
-		workflow, job, step, script, binVar, pkg, target, env string
-		// noBuildShardPin is true when this tier's target's BUILD.bazel
-		// shard_count is allowed to differ from this workflow/job's own
-		// matrix size, because a separate Bazel-only lane shards that same
-		// target on its own manifest block (F2). Reading the expected value
-		// back out of the same BUILD.bazel file we are about to check would
-		// be tautological, so these tiers skip the `shard_count = N,`
-		// sub-assertion below entirely; the real cross-file pin for them
-		// lives in pr_risk_bazel_coverage_test.go, which ties BUILD.bazel's
-		// shard_count to bazel.yml's check_shard_coverage.py argument.
-		noBuildShardPin bool
+		script, binVar, pkg, target, env string
 	}
 	tiers := []shardTier{
-		// pr-risk.yml's own "Test (Proxied Dolt Cmd N/15)" matrix
-		// stays 15 (the legacy, frozen bd-init-cost-proxy manifest block),
-		// but cmd/bd:bd_proxied_test's shard_count need not match: the
-		// Bazel-only bazel-proxied job (bazel.yml) runs that target with its
-		// own duration-balanced manifest block, not these jobs'. Shard k in
-		// one split is not shard k in the other; see cmd/bd/BUILD.bazel's
-		// bd_proxied_test comment and bazel.yml's bazel-proxied comment.
-		{"pr-risk.yml", "test-proxied-cmd", "Test proxied-server cmd shard", ".github/scripts/proxied-test-shard.sh", "BEADS_TEST_CMD_BINARY", "cmd/bd", "bd_proxied_test", "BEADS_TEST_PROXIED_SERVER", true},
-		{"pr-risk.yml", "test-server-storage-full", "Test", ".github/scripts/server-storage-test-shard.sh", "BEADS_TEST_SERVER_TEST_BINARY", "internal/storage/dolt", "dolt_server_full_test", "BEADS_TEST_ENV_RUN_DOLT", false},
+		{".github/scripts/proxied-test-shard.sh", "BEADS_TEST_CMD_BINARY", "cmd/bd", "bd_proxied_test", "BEADS_TEST_PROXIED_SERVER"},
+		{".github/scripts/server-storage-test-shard.sh", "BEADS_TEST_SERVER_TEST_BINARY", "internal/storage/dolt", "dolt_server_full_test", "BEADS_TEST_ENV_RUN_DOLT"},
 	}
 	for _, c := range tiers {
-		j := readCIWorkflow(t, c.workflow).job(t, c.job)
-		shards := len(j.Strategy.Matrix.Shard)
-		step := j.step(t, c.step)
-		if want := "bash " + c.script + " ${{ matrix.shard }} " + strconv.Itoa(shards); strings.TrimSpace(step.Run) != want {
-			t.Errorf("%s %s runs %q, want %q", c.workflow, c.job, step.Run, want)
-		}
-		if step.Env[c.env] != "1" {
-			t.Errorf("%s %s no longer sets %s=1; update %s:%s", c.workflow, c.job, c.env, c.pkg, c.target)
-		}
-		buildShards := shards
 		root := sourceRepoRoot(t)
 		rule := bazelRuleBlock(readPolicyFile(t, root, c.pkg+"/BUILD.bazel"), c.target)
-		want := []string{
+		for _, w := range []string{
 			`srcs = ["//tools/bazel:go_test_manifest_shard.sh"],`,
 			`"$(rootpath //:` + c.script + `)",`,
 			`"` + c.binVar + `",`,
 			`timeout = "eternal",`,
-		}
-		if !c.noBuildShardPin {
-			want = append(want, "shard_count = "+strconv.Itoa(buildShards)+",")
-		}
-		for _, w := range want {
+			`"` + c.env + `": "1"`,
+		} {
 			if !strings.Contains(rule, w) {
-				t.Errorf("%s:%s does not contain %q (%s %s):\n%s", c.pkg, c.target, w, c.workflow, c.job, rule)
+				t.Errorf("%s:%s does not contain %q:\n%s", c.pkg, c.target, w, rule)
 			}
 		}
 		mm := shardManifestDefault.FindStringSubmatch(readPolicyFile(t, root, c.script))
@@ -4547,11 +4280,12 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 			}
 		}
 	}
-	conf := risk.job(t, "test-server-storage").step(t, "Test").Run
+	// PR Risk's retired test-server-storage job's command, frozen.
+	const conf = `/tmp/dolt-conformance-test -test.v -test.count=1 -test.timeout=15m -test.run '^TestConformance$'`
 	quoted := regexp.MustCompile(`(-test\.[a-z]+) '([^']*)'|(-test\.[a-z]+=\S+|-test\.v)`)
 	fields := strings.Fields(conf)
 	if len(fields) == 0 || fields[0] != "/tmp/dolt-conformance-test" {
-		t.Fatalf("pr-risk.yml test-server-storage no longer runs /tmp/dolt-conformance-test: %q", conf)
+		t.Fatalf("conformance command %q does not run /tmp/dolt-conformance-test", conf)
 	}
 	var wantArgs []string
 	for _, m := range quoted.FindAllStringSubmatch(conf, -1) {
@@ -4562,7 +4296,7 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 		}
 	}
 	if len(wantArgs) != 4 {
-		t.Fatalf("parsed %v from pr-risk.yml test-server-storage %q", wantArgs, conf)
+		t.Fatalf("parsed %v from %q", wantArgs, conf)
 	}
 
 	root := sourceRepoRoot(t)
@@ -4570,7 +4304,7 @@ func TestBazelDoltServerTiersMirrorPRRisk(t *testing.T) {
 	rule := bazelRuleBlock(doltBuild, "dolt_server_conformance_test")
 	for _, w := range append(wantArgs, `"$(rootpath :dolt_race_off)",`, `srcs = ["//tools/bazel:go_test_variant.sh"],`) {
 		if !strings.Contains(bazelAttrBlock(rule, "args")+rule, w) {
-			t.Errorf("dolt:dolt_server_conformance_test does not contain %q (pr-risk.yml test-server-storage):\n%s", w, rule)
+			t.Errorf("dolt:dolt_server_conformance_test does not contain %q (the retired test-server-storage job's selection):\n%s", w, rule)
 		}
 	}
 	if strings.Contains(rule, "BEADS_TEST_ENV_RUN_DOLT") {
@@ -4687,7 +4421,7 @@ var bazelEmbeddedRCLines = []string{
 	"test:embedded --experimental_remote_cache_eviction_retries=0",
 }
 
-func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
+func TestBazelEmbeddedJobRunsEmbeddedTier(t *testing.T) {
 	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelEmbedJobName)
 	test := job.step(t, "bazel test //... --config=embedded")
 	if !strings.Contains(test.Run, "bazel test //... --config=embedded") || !strings.Contains(test.Run, "set -o pipefail") {
@@ -4763,18 +4497,8 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		}
 	}
 
-	risk := readCIWorkflow(t, "pr-risk.yml")
-	build := risk.job(t, "build-embedded")
-	for step, want := range map[string]string{
-		"Build embedded bd binary":           "go build -tags gms_pure_go -race -o /tmp/bd-embedded-test ./cmd/bd/",
-		"Build embedded storage test binary": "go test -tags gms_pure_go -race -c -o /tmp/embeddeddolt-test ./internal/storage/embeddeddolt/",
-		"Build embedded cmd test binary":     "go test -tags gms_pure_go -race -c -o /tmp/bd-cmd-test ./cmd/bd/",
-	} {
-		if got := strings.TrimSpace(build.step(t, step).Run); got != want {
-			t.Errorf("pr-risk.yml %q = %q, want %q (the race build --config=embedded mirrors)", step, got, want)
-		}
-	}
-
+	// PR Risk's retired embedded tier (ga-96smfk.22): its shard scripts,
+	// conformance partitions and env, which the Bazel targets below run.
 	sharded := []struct {
 		job, script, pkg, target string
 	}{
@@ -4782,28 +4506,11 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		{"test-embedded-storage", ".github/scripts/embedded-storage-test-shard.sh", "internal/storage/embeddeddolt", "embeddeddolt_embedded_test"},
 	}
 	for _, c := range sharded {
-		j := risk.job(t, c.job)
-		shards := len(j.Strategy.Matrix.Shard)
-		step := j.step(t, "Test")
-		if want := "bash " + c.script + " ${{ matrix.shard }} " + strconv.Itoa(shards); strings.TrimSpace(step.Run) != want {
-			t.Errorf("pr-risk.yml %s runs %q, want %q", c.job, step.Run, want)
-		}
-		if step.Env["BEADS_TEST_EMBEDDED_DOLT"] != "1" {
-			t.Errorf("pr-risk.yml %s no longer sets BEADS_TEST_EMBEDDED_DOLT=1; update %s", c.job, c.target)
-		}
 		root := sourceRepoRoot(t)
 		rule := bazelRuleBlock(readPolicyFile(t, root, c.pkg+"/BUILD.bazel"), c.target)
-		// c.target's own shard_count is deliberately NOT asserted to equal
-		// shards (pr-risk.yml's matrix size) here: since slice F1, the
-		// Bazel-only bazel-embedded job (bazel.yml) shards both of these
-		// targets on its own duration-balanced manifest block, a different
-		// total from PR Risk's/main.yml's legacy "Test (Embedded Dolt {Cmd
-		// N/20,Storage N/5})" jobs' frozen block (same reasoning as
-		// cmd/bd:bd_proxied_test's noBuildShardPin above, F2). The real
-		// cross-file pin for c.target's shard_count lives in
-		// pr_risk_bazel_coverage_test.go's TestBazelRetiredLanesCheckListedTestsRan,
-		// which ties it to bazel.yml's check_shard_coverage.py argument via
-		// bazelEmbeddedCmdShardCount/bazelEmbeddedStorageShardCount.
+		// c.target's own shard_count is the lane's source of truth;
+		// TestBazelRetiredLanesCheckListedTestsRan ties it to bazel.yml's
+		// check_shard_coverage.py argument.
 		for _, want := range []string{
 			`srcs = ["//tools/bazel:go_test_manifest_shard.sh"],`,
 			`"$(rootpath //:` + c.script + `)",`,
@@ -4811,7 +4518,7 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 			`"embedded"`,
 		} {
 			if !strings.Contains(rule, want) {
-				t.Errorf("%s:%s does not contain %q (pr-risk.yml %s):\n%s", c.pkg, c.target, want, c.job, rule)
+				t.Errorf("%s:%s does not contain %q (%s):\n%s", c.pkg, c.target, want, c.job, rule)
 			}
 		}
 		// The script's -test.timeout=20m equals Bazel's 1200s action limit,
@@ -4844,16 +4551,17 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 		t.Errorf("cmd/bd:bd_embedded_test must run the race //cmd/bd:bd as BEADS_TEST_BD_BINARY:\n%s", rule)
 	}
 
-	conformance := risk.job(t, "test-embedded-conformance")
-	if conformance.Env["BEADS_TEST_EMBEDDED_DOLT"] != "1" {
-		t.Error("pr-risk.yml test-embedded-conformance no longer sets BEADS_TEST_EMBEDDED_DOLT=1")
+	// The retired test-embedded-conformance job's two partitions, frozen.
+	conformance := map[string]string{
+		"core":  `/tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=30m -test.run '^TestConformance$' -test.skip '^TestConformance$/^Audit$'`,
+		"audit": `/tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=30m -test.run '^TestConformance$/^Audit$'`,
 	}
 	quoted := regexp.MustCompile(`(-test\.[a-z]+) '([^']*)'|(-test\.[a-z]+=\S+|-test\.v)`)
 	for partition, target := range map[string]string{"core": "embeddeddolt_conformance_core_test", "audit": "embeddeddolt_conformance_audit_test"} {
-		run := conformance.step(t, "Test "+partition+" conformance").Run
+		run := conformance[partition]
 		fields := strings.Fields(run)
 		if len(fields) == 0 || fields[0] != "/tmp/embeddeddolt-test" {
-			t.Fatalf("pr-risk.yml %s conformance no longer runs /tmp/embeddeddolt-test: %q", partition, run)
+			t.Fatalf("%s conformance does not run /tmp/embeddeddolt-test: %q", partition, run)
 		}
 		var want []string
 		for _, m := range quoted.FindAllStringSubmatch(run, -1) {
@@ -4863,21 +4571,18 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 			case strings.HasPrefix(m[3], "-test.timeout="):
 				// Documented deviation: Bazel kills at 1200s without a
 				// goroutine dump, so the variant's Go timeout is 19m.
-				if m[3] != "-test.timeout=30m" {
-					t.Errorf("pr-risk.yml %s conformance timeout is now %q; revisit the variant's -test.timeout=19m", partition, m[3])
-				}
 				want = append(want, `"-test.timeout=19m",`)
 			default:
 				want = append(want, `"`+m[3]+`",`)
 			}
 		}
 		if len(want) < 4 {
-			t.Fatalf("parsed only %v from pr-risk.yml %s conformance %q", want, partition, run)
+			t.Fatalf("parsed only %v from %s conformance %q", want, partition, run)
 		}
 		rule := bazelRuleBlock(readPolicyFile(t, sourceRepoRoot(t), "internal/storage/embeddeddolt/BUILD.bazel"), target)
 		for _, w := range append(want, `"BEADS_TEST_EMBEDDED_DOLT": "1"`, `"embedded"`) {
 			if !strings.Contains(rule, w) {
-				t.Errorf("embeddeddolt:%s does not contain %q (pr-risk.yml %s conformance):\n%s", target, w, partition, rule)
+				t.Errorf("embeddeddolt:%s does not contain %q (the retired %s conformance partition):\n%s", target, w, partition, rule)
 			}
 		}
 	}
@@ -4886,17 +4591,17 @@ func TestBazelEmbeddedJobMirrorsEmbeddedTier(t *testing.T) {
 // bazel-pure replaces pr.yml's check-cmd-bd-puregeo-tests job: the same pure
 // cmd/bd test selector, the same pure build set, and the js/wasm hook test
 // under the same exact-count guard.
+// bazel.yml's pure-Go and js/wasm lane is the only run of the CGO_ENABLED=0
+// portability boundaries pr.yml's retired check-cmd-bd-puregeo-tests job
+// owned (ga-96smfk.22): the same -short cmd/bd subset, the same cmd/bd and
+// test-binary builds, and the exact js/wasm refusal contract with its count
+// guard. The selectors below are that job's, frozen.
 func TestBazelPureJobMirrorsPureGoJob(t *testing.T) {
-	pr := readCIWorkflow(t, "pr.yml").job(t, "check-cmd-bd-puregeo-tests")
 	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelPureJobName)
 
-	prSubset := pr.step(t, "Run pure-Go cmd/bd test subset (CGO_ENABLED=0)").Run
-	m := regexp.MustCompile(`-run '([^']+)' \./cmd/bd`).FindStringSubmatch(prSubset)
-	if m == nil {
-		t.Fatalf("cannot find the -run selector in pr.yml's pure subset step:\n%s", prSubset)
-	}
-	if job.Env["PURE_CMD_BD_TESTS"] != m[1] || !strings.Contains(prSubset, "-short") {
-		t.Errorf("%s PURE_CMD_BD_TESTS = %q, want pr.yml's -short -run selector %q", bazelPureJobName, job.Env["PURE_CMD_BD_TESTS"], m[1])
+	const pureCmdBDTests = "^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir|NocgoFactoriesHonorSharedServer|NocgoNewDoltStoreFromConfig_ErrorSuggestsCorrectFlag|NocgoNewReadOnlyStoreFromConfig_ErrorSuggestsCorrectFlag)"
+	if job.Env["PURE_CMD_BD_TESTS"] != pureCmdBDTests {
+		t.Errorf("%s PURE_CMD_BD_TESTS = %q, want the pure cmd/bd -run selector %q", bazelPureJobName, job.Env["PURE_CMD_BD_TESTS"], pureCmdBDTests)
 	}
 	run := job.step(t, "Run pure-Go cmd/bd test subset (--config=pure)").Run
 	for _, required := range []string{"bazel test --config=pure " + bazelSoleRunArg + " " + bazelFreshArg + " //cmd/bd:bd_test", `"--test_arg=-test.run=$PURE_CMD_BD_TESTS"`, "(( n > 0 ))"} {
@@ -4909,16 +4614,12 @@ func TestBazelPureJobMirrorsPureGoJob(t *testing.T) {
 	}
 
 	build := job.step(t, "Build cmd/bd and pure-Go test binaries (--config=pure)").Run
-	prBuild := pr.step(t, "Build cmd/bd (CGO_ENABLED=0, gms_pure_go)").Run + pr.step(t, "Compile pure-Go test binaries (CGO_ENABLED=0, gms_pure_go)").Run
-	for pkg, target := range map[string]string{
-		"go build -tags gms_pure_go -o /tmp/bd-puregeo ./cmd/bd":               "//cmd/bd:bd",
-		"-o /tmp/bd-cmd-puregeo-test ./cmd/bd":                                 "//cmd/bd:bd_test",
-		"-o /tmp/bd-embeddeddolt-puregeo-test ./internal/storage/embeddeddolt": "//internal/storage/embeddeddolt:embeddeddolt_test",
-		"-o /tmp/bd-tracker-puregeo-test ./internal/tracker":                   "//internal/tracker:tracker_test",
+	for _, target := range []string{
+		"//cmd/bd:bd",
+		"//cmd/bd:bd_test",
+		"//internal/storage/embeddeddolt:embeddeddolt_test",
+		"//internal/tracker:tracker_test",
 	} {
-		if !strings.Contains(prBuild, pkg) {
-			t.Errorf("pr.yml pure build steps no longer contain %q; update %s to match", pkg, bazelPureJobName)
-		}
 		if !strings.Contains(build, target) || !strings.Contains(build, "bazel build --config=pure") {
 			t.Errorf("pure build step does not build %s:\n%s", target, build)
 		}
@@ -4945,27 +4646,26 @@ func TestBazelPureJobMirrorsPureGoJob(t *testing.T) {
 		t.Error("gozstd_nocgo.patch stubs no longer panic in init; a contaminated pure binary would start")
 	}
 
-	prWasm := pr.step(t, "Run js/wasm hook boundary").Run
 	wasm := job.step(t, "Run js/wasm hook boundary").Run
 	for _, required := range []string{"bazel build --config=js-wasm //internal/hooks:hooks_test", "go_js_wasm_exec"} {
 		if !strings.Contains(wasm, required) {
 			t.Errorf("js/wasm step does not contain %q:\n%s", required, wasm)
 		}
 	}
-	// The selector and everything from the count guard on are pr.yml's.
-	const selector = "run '^TestRunHookReportsUnsupportedExecution$'"
-	if !strings.Contains(prWasm, " -"+selector) || !strings.Contains(wasm, " -test."+selector) {
-		t.Errorf("js/wasm selector drifted from pr.yml's %q", selector)
-	}
-	guard := func(script string) string {
-		i := strings.Index(script, "run_count=0")
-		if i < 0 {
-			return ""
+	// Exactly one run and one pass of the refusal contract, no failure or
+	// skip: compiling the package alone would not execute it.
+	for _, required := range []string{
+		" -test.run '^TestRunHookReportsUnsupportedExecution$'",
+		"run_count=0",
+		`=== RUN   TestRunHookReportsUnsupportedExecution`,
+		`^--- PASS: TestRunHookReportsUnsupportedExecution`,
+		`nonpass_pattern='^[[:space:]]*--- (FAIL|SKIP): '`,
+		`[[ "$line" =~ $nonpass_pattern ]]`,
+		`run_count != 1 || pass_count != 1 || nonpass_count != 0`,
+	} {
+		if !strings.Contains(wasm, required) {
+			t.Errorf("js/wasm step does not contain %q:\n%s", required, wasm)
 		}
-		return script[i:]
-	}
-	if guard(wasm) == "" || guard(wasm) != guard(prWasm) {
-		t.Errorf("js/wasm count guard differs from pr.yml's:\n--- pr.yml\n%s\n--- %s\n%s", guard(prWasm), bazelPureJobName, guard(wasm))
 	}
 }
 
