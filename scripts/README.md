@@ -28,7 +28,7 @@ lint authority used by `bd preflight` in a Beads source checkout.
 Broad Go test wrappers also source `scripts/ci/lib/test-env.sh`, which creates a
 temporary HOME/XDG/Dolt root, isolates Git global/system config, clears runtime
 Beads/Dolt environment variables, and sets `BEADS_TEST_SKIP=dolt` before tests
-run. This keeps local `make test` and `make ci-pr-core` results comparable to
+run. This keeps local `make test-go` and `make ci-pr-core` results comparable to
 the fast PR-core contract even on shared agent hosts. Set
 `BEADS_TEST_ENV_RUN_DOLT=1` only when intentionally running the Dolt-dependent
 tests through these broad wrappers, or `BEADS_TEST_ENV_DISABLE=1` when debugging

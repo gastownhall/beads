@@ -138,7 +138,7 @@ Before starting a release:
 
 - [ ] `release/x.y.z` branch cut from a SHA green on `Main` **and**
       `Nightly Full Tests` (see [Release Branches](#release-branches))
-- [ ] All tests passing (`go test ./...`)
+- [ ] All tests passing (`make test`, the Bazel test lane)
 - [ ] npm package tests passing (`cd npm-package && npm run test:all`)
 - [ ] **Upgrade smoke tests pass** (`make test-upgrade`) — see [Release Stability Gate](engdocs/RELEASE-STABILITY-GATE.md)
 - [ ] **Regression tests pass** (`make test-regression`)

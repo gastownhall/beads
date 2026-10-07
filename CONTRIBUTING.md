@@ -53,11 +53,14 @@ area is reviewed first.
 
 ### Prerequisites
 
-- Go (see `go.mod` for the required version; currently 1.26+)
+- [Bazelisk](https://github.com/bazelbuild/bazelisk), installed as `bazel`
+  (it reads `.bazelversion`). **Required:** Bazel is the build and test system
+  CI gates on, and the pre-commit (nogo lint) and pre-push (test suite) hooks
+  run it.
+- Go (see `go.mod` for the required version; currently 1.26+), for `make
+  install` and the `go test` inner loop
 - Git
 - A C compiler (CGO is required for the embedded Dolt database)
-- [Bazelisk](https://github.com/bazelbuild/bazelisk) (installed as `bazel`) for
-  the required lint and vet gate (`make ci-pr-lint`) and the pre-commit hook
 - ICU headers are **not required** for building -- see [engdocs/ICU-POLICY.md](engdocs/ICU-POLICY.md)
 
 ### Getting Started
@@ -67,21 +70,43 @@ area is reviewed first.
 git clone https://github.com/gastownhall/beads
 cd beads
 
-# Build the project (uses gms_pure_go tag via Makefile)
-make build
+# Read rbe-west's anonymous, read-only cache: everything CI already built and
+# tested is a cache hit, and nothing you build is uploaded.
+echo 'build --config=fork-cache' >> .bazelrc.local
 
-# Run tests (uses correct build tags automatically)
+# Run the test suite CI gates on (bazel test //... --config=ci)
 make test
 
-# Build and install locally to ~/.local/bin
+# Build and install bd to ~/.local/bin (also enables the git hooks)
 make install
 ```
 
-Optional: if you use Bazel, opt in to the project's anonymous, read-only
-build cache by adding `build --config=fork-cache` to your gitignored
-`.bazelrc.local` (or pass `--config=fork-cache` per command). Results CI
-already computed become cache hits, and nothing you build is uploaded. It is
-off by default.
+### Building and Testing
+
+Bazel is the gate: `.github/workflows/bazel.yml` runs every pull request's
+tests as `bazel test` lanes, and nogo (lint + vet), gofmt and the repository
+guards exist only as Bazel targets. The make targets run the same commands:
+
+| Command | Runs |
+|---|---|
+| `make test` | `bazel test //... --config=ci`: the test lane (unit tests, nogo, gofmt, repository guards) |
+| `make check` | the testing.Short policy, `make ci-pr-lint` and `make test` |
+| `make ci-pr-lint` | nogo natively plus the windows/amd64 and darwin/arm64 passes |
+| `make check-docs` | the Bazel docsync and doc-freshness tests, then the CLI flag check |
+| `bazel test //... --config=integration` | the integration lane; [engdocs/TESTING.md](engdocs/TESTING.md) lists every other lane's command |
+
+Where actions run is your choice, set in the gitignored `.bazelrc.local` (or
+per command with `make test BAZEL_FLAGS=--config=...`):
+
+- `--config=fork-cache` (contributors): reads the anonymous cache, runs misses
+  on your machine, uploads nothing.
+- `--config=remote-exec` (maintainers with an rbe-west client certificate):
+  executes remotely; the executor and TLS lines stay in your `user.bazelrc` or
+  `.bazelrc.local`.
+
+`go test` (`./scripts/test.sh`, or `make test-go` / `make check-go` /
+`make check-docs-go`) still works as an inner-loop convenience, but CI does not
+enforce it and it skips nogo, gofmt and the guards. Finish with `make test`.
 
 ## Project Structure
 
@@ -199,7 +224,8 @@ For test commands, test design, and PR-readiness gates, see the canonical
 
 - Follow the proportional validation budget in
   [engdocs/TESTING.md](engdocs/TESTING.md): docs-only changes use docs checks;
-  Go changes use focused and affected-package tests plus one final `make test`.
+  Go changes use focused and affected-package tests plus one final `make test`
+  (the Bazel test lane).
 - If you hit a test failure unrelated to your change, don't silently skip
   it -- check `.test-skip` and file an issue if it's not already tracked
   (see [engdocs/TESTING.md](engdocs/TESTING.md#failures-skips-and-review)).

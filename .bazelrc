@@ -1,6 +1,13 @@
-# Bazel configuration for beads (side-by-side with the Go toolchain; `go build`
-# and `go test` are unaffected). Bzlmod only; Bazel version is pinned in
-# .bazelversion.
+# Bazel configuration for beads. Bazel is beads' build and test system: CI
+# gates on the `bazel test` lanes in .github/workflows/bazel.yml, and
+# `make test`/`make check` run the same commands (engdocs/TESTING.md
+# "Building and Testing"). Plain `go build`/`go test` still work as an
+# inner-loop convenience but are not what CI enforces. Where actions run is
+# per machine, never committed here: contributors read the anonymous,
+# read-only cache with --config=fork-cache (defined below); maintainers with
+# an rbe-west client certificate execute remotely with --config=remote-exec.
+# Make either the default with a `build --config=...` line in the gitignored
+# .bazelrc.local. Bzlmod only; Bazel version is pinned in .bazelversion.
 common --enable_bzlmod
 common --color=no
 # C/C++ (and so cgo, -race and the Go stdlib) builds only with MODULE.bazel's

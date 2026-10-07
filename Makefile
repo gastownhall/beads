@@ -45,12 +45,30 @@ endif
 
 .PHONY: all build doctor-build test test-icu-path test-full-cgo test-regression test-upgrade test-cross-version test-migration corpus-regen githooks-regen bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check check-testing-short
 .PHONY: lint lint-changed vet
+.PHONY: check check-go test-go check-docs-go
 .PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-complexity ci-complexity-diff ci-complexity-check ci-package-mcp ci-package-npm
 .PHONY: api-gen api-check
 .PHONY: bazel-sync bazel-sync-check
 
 # Default target
 all: build
+
+# Build and test engine. Bazel is what CI gates on: .github/workflows/bazel.yml
+# runs `bazel test` lanes on rbe-west, and nogo (lint + vet), formatting and
+# the repository guards are Bazel targets there. The primary targets (test,
+# check, check-docs) run the same `bazel test` commands as those lanes, so a
+# local run shares CI's action keys and its remote cache (engdocs/TESTING.md
+# "Building and testing"). Each keeps a plain go twin under an explicit -go
+# name (test-go, check-go, check-docs-go) for offline work and hosts Bazel does
+# not serve; that twin is an inner-loop convenience, not what CI enforces.
+# GitHub Actions jobs that still run Go-native suites call the -go names.
+BAZEL ?= bazel
+# Extra flags for every `bazel test` below: --config=fork-cache (contributors:
+# the anonymous read-only cache) or --config=remote-exec (maintainers with an
+# rbe-west client certificate). Hosts whose ~/.bazelrc names the executor need
+# neither. Better: put `build --config=...` in the gitignored .bazelrc.local.
+BAZEL_FLAGS ?=
+BAZEL_TEST = $(BAZEL) test $(BAZEL_FLAGS)
 
 BUILD_DIR := .
 BD_BUILD_OUTPUT := $(BUILD_DIR)/bd$(if $(filter Windows_NT,$(OS)),.exe)
@@ -174,10 +192,26 @@ doctor-build:
 			echo "        CGO_ENABLED=1 go build -tags gms_pure_go ./cmd/bd" ;; \
 	esac
 
-# Run all tests (skips known broken tests listed in .test-skip)
+# bazel.yml's test lane (`bazel test //... --config=ci`): every untagged
+# go_test with PR Core's selection (race, -short, skips), plus nogo lint/vet,
+# formatting and the repository guards. The other lanes' commands are in
+# engdocs/TESTING.md "Building and testing".
 test:
+	$(BAZEL_TEST) //... --config=ci
+
+# Plain go test (skips known broken tests listed in .test-skip): an inner-loop
+# convenience without Bazel; CI does not run it.
+test-go:
 	@echo "Running tests..."
 	@TEST_COVER=1 ./scripts/test.sh
+
+# Fast quality gates: the testing.Short policy, the full nogo lint gate
+# (native plus the windows/darwin passes) and `make test`.
+check: check-testing-short ci-pr-lint test
+
+# The same gates without Bazel where they have a Go form: gofmt and go test.
+# nogo has no go twin, so this is a convenience CI does not enforce.
+check-go: fmt-check check-testing-short test-go
 
 # Run the opt-in ICU regex path test suite (no skip list).
 # This is a local developer workflow for intentionally exercising the leftover
@@ -421,8 +455,15 @@ fmt:
 fmt-check:
 	@./scripts/ci/fmt-check.sh
 
-# Validate documentation references against actual CLI flags
+# Docs checks: docsync and doc freshness as bazel.yml's test lane runs them,
+# then the CLI flag check, which validates against bd built from the release in
+# docs/cli-docs.pin (so it stays a script, like pr.yml's check-doc-flags job).
 check-docs:
+	$(BAZEL_TEST) //test/docsync:docsync_test //scripts/repochecks:doc_freshness_test --config=ci
+	@./scripts/check-doc-flags.sh
+
+# The same docs checks with plain go test and a go-built bd.
+check-docs-go:
 	@echo "Building bd for docs checks..."
 	@CGO_ENABLED=0 go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o "$(BUILD_DIR)/bd" ./cmd/bd
 	@./scripts/check-doc-flags.sh "$(BUILD_DIR)/bd"
@@ -457,12 +498,10 @@ diagrams-excalidraw:
 docs-dev:
 	./mint.sh dev
 
-# Bazel (side-by-side with the Go toolchain; `go build`/`go test` do not need
-# it). Regenerate BUILD.bazel files with gazelle and refresh the MODULE.bazel
+# Regenerate BUILD.bazel files with gazelle and refresh the MODULE.bazel
 # use_repo list + MODULE.bazel.lock, then refresh the go_srcs filegroups that
 # source-scanning tests declare as data (tools/bazel/go_srcs.py). Run after
 # changing Go imports, go.mod, or packages.
-BAZEL ?= bazel
 bazel-sync:
 	$(BAZEL) run //:gazelle
 	python3 tools/bazel/go_srcs.py
@@ -498,7 +537,10 @@ help:
 	@echo "Beads Makefile targets:"
 	@echo "  make build        - Build the bd binary"
 	@echo "  make doctor-build - Diagnose build env (GOFLAGS/CGO/CC) for the ICU build trap"
-	@echo "  make test         - Run all tests"
+	@echo "  make test         - bazel test //... --config=ci (bazel.yml's test lane; BAZEL_FLAGS adds flags)"
+	@echo "  make test-go      - Plain go test via scripts/test.sh (inner loop; not what CI enforces)"
+	@echo "  make check        - testing.Short policy + nogo lint gate + make test"
+	@echo "  make check-go     - gofmt + testing.Short policy + make test-go (no Bazel)"
 	@echo "  make test-icu-path - Run opt-in ICU regex path tests (maintainer-only)"
 	@echo "  make test-full-cgo - Deprecated alias for make test-icu-path"
 	@echo "  make ci-pr-core  - Run required PR core Go test wrapper"
@@ -521,7 +563,8 @@ help:
 	@echo "  make install-force - Install bd, skipping the origin/main update check"
 	@echo "  make fmt          - Format all Go files with gofmt"
 	@echo "  make fmt-check    - Check Go formatting (for CI)"
-	@echo "  make check-docs   - Validate docs against CLI flags"
+	@echo "  make check-docs   - Bazel docsync + doc freshness tests, then the CLI flag check"
+	@echo "  make check-docs-go - The same docs checks with plain go test"
 	@echo "  make api-gen      - Regenerate HTTP API types from the OpenAPI spec"
 	@echo "  make api-check    - OpenAPI drift gate (regenerate, diff-or-fail, spec tests)"
 	@echo "  make bazel-sync   - Regenerate Bazel BUILD files and tidy MODULE.bazel (gazelle + mod tidy)"
