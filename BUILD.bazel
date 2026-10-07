@@ -11,6 +11,12 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 # so //:repo_files covers it for //test/docsync's link checks and the
 # repository-policy tests in //scripts.
 # gazelle:exclude integrations
+# The two example Go modules (own go.mod, built against a released beads) are
+# not part of this build either, but they are tracked files the repository
+# guards (gofmt, build-tag and install-guidance checks in
+# //scripts/repochecks) must see, so they are not in .bazelignore.
+# gazelle:exclude examples/library-usage
+# gazelle:exclude examples/bd-example-extension-go
 gazelle(name = "gazelle")
 
 exports_files(
@@ -360,6 +366,7 @@ filegroup(
         "//scripts/migration-test/catalog:repo_files",
         "//scripts/pr-lint:repo_files",
         "//scripts/prlintmake:repo_files",
+        "//scripts/repochecks:repo_files",
         "//scripts/repro-dolt-hang:repo_files",
         "//scripts/repro-dolt-prod-timeouts:repo_files",
         "//scripts/workflowtags:repo_files",
@@ -372,6 +379,7 @@ filegroup(
     ],
     visibility = [
         "//scripts:__pkg__",
+        "//scripts/repochecks:__pkg__",
         "//test/docsync:__pkg__",
     ],
 )

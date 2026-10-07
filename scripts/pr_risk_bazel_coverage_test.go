@@ -1811,6 +1811,18 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 	// pinned ones above, and no .bzl macro, may select, skip or switch off
 	// tests through its args, env or anything else.
 	ruleNarrow := regexp.MustCompile(`-test\.(short|run|skip|list|bench)|BEADS_TEST_SKIP|BEADS_TEST_EMBEDDED_DOLT|TESTBRIDGE_TEST_ONLY|test_filter|flaky\s*=\s*(True|1|[A-Za-z_])`)
+	// Second runs over tests another target already runs in full: the
+	// selection is the point (a required-suite contract that checks it), and
+	// nothing leaves the lanes. Pinned to exactly these args.
+	extraRunVariants := map[string][]string{
+		// The doc-freshness suite (also run by //scripts:scripts_test) under
+		// -required-suite, as pr.yml's former Linux doc-freshness leg ran it.
+		"//scripts:doc_freshness_required_test": {
+			"-test.count=1",
+			"-test.run=^(TestDocFreshness.*|TestRequiredSuiteContract)$$",
+			"-required-suite=doc-freshness",
+		},
+	}
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -1841,7 +1853,18 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 		for _, unit := range units {
 			if !isBzl {
 				if name := nameRe.FindStringSubmatch(unit); name != nil {
-					if _, pinned := want["//"+pkg+":"+name[1]]; pinned {
+					label := "//" + pkg + ":" + name[1]
+					if _, pinned := want[label]; pinned {
+						continue
+					}
+					if wantArgs, ok := extraRunVariants[label]; ok {
+						var args []string
+						for _, q := range quoted.FindAllStringSubmatch(bazelAttrBlock(unit, "args"), -1) {
+							args = append(args, q[1])
+						}
+						if !reflect.DeepEqual(args, wantArgs) {
+							t.Errorf("%s args = %q, want exactly %q", label, args, wantArgs)
+						}
 						continue
 					}
 				}

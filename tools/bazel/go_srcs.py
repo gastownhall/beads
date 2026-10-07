@@ -133,6 +133,7 @@ ROOT_REPO_FILES_EXCLUDE = (
 # Who may read //:repo_files: the repository-policy tests.
 REPO_FILES_VISIBILITY = (
     "//scripts:__pkg__",
+    "//scripts/repochecks:__pkg__",
     "//test/docsync:__pkg__",
 )
 

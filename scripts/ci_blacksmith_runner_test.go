@@ -34,7 +34,7 @@ import (
 const sameRepoBlacksmith2vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
 
 // F7a: the same same-repo expression at 4 vCPU and 8 vCPU, for jobs sized
-// larger than the 2 vCPU default (check-doc-flags, pr-policy-wrapper,
+// larger than the 2 vCPU default (check-doc-flags,
 // pr-risk.yml's test-nix at 4 vCPU; check-release-target-cross-compilation at
 // 8 vCPU). F7c's advisory workflows also use the 4 vCPU size.
 const sameRepoBlacksmith4vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}"

@@ -218,17 +218,6 @@ func releaseFormulaPath(t *testing.T) string {
 	return filepath.Join(sourceRepoRoot(t), ".beads", "formulas", "beads-release.formula.toml")
 }
 
-func sourceRepoRoot(t *testing.T) string {
-	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	// Under Bazel the caller path is workspace-relative; CallerDir rebuilds it
-	// under the runfiles root, which holds the files scripts_test declares.
-	return filepath.Dir(bazeltest.CallerDir(file, "scripts"))
-}
-
 func runReleaseDryRun(t *testing.T, repo, bin string) (string, error) {
 	t.Helper()
 	return runReleaseDryRunWithEnv(t, repo, bin, "BD=")
@@ -257,15 +246,6 @@ func runReleaseDryRunWithEnv(t *testing.T, repo, bin string, extraEnv ...string)
 	cmd.Dir = repo
 	out, err := cmd.CombinedOutput()
 	return string(out), err
-}
-
-func msysPath(path string) string {
-	path = filepath.Clean(path)
-	path = filepath.ToSlash(path)
-	if len(path) >= 3 && path[1] == ':' && path[2] == '/' {
-		return "/" + strings.ToLower(path[:1]) + path[2:]
-	}
-	return path
 }
 
 func shellPath(t *testing.T, path string) string {

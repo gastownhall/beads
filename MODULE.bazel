@@ -77,16 +77,20 @@ dolt_release(
     platform = "darwin-arm64",
 )
 
-# The tracked release formula, for //scripts:scripts_test. .beads/ also holds
-# live bd data and is in .bazelignore, so no main-repo target can declare the
-# formula; this local repository exposes only .beads/formulas.
+# The tracked release formula, for //scripts:scripts_test and the
+# whole-checkout guard //scripts/repochecks:go_install_guidance_test. .beads/
+# also holds live bd data and is in .bazelignore, so no main-repo target can
+# declare the formula; this local repository exposes only .beads/formulas.
 new_local_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
 
 new_local_repository(
     name = "beads_formulas",
     build_file_content = """exports_files(
     glob(["*.formula.toml"]),
-    visibility = ["@@//scripts:__pkg__"],
+    visibility = [
+        "@@//scripts:__pkg__",
+        "@@//scripts/repochecks:__pkg__",
+    ],
 )
 """,
     path = ".beads/formulas",

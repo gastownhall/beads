@@ -10,6 +10,26 @@ go_test(
     data = ["//:.gitattributes"],
 )
 
+# pr.yml's check-doc-freshness-platforms Linux leg: `go test
+# -tags integration ./scripts/gitattributespolicy -args -required-host
+# -expected-goos linux` (the macOS and Windows legs stay in pr.yml): TestMain
+# fails unless the EOL boundary test ran exactly once and passed on a Linux
+# host. No file here is integration-tagged, so it runs in the ci lane.
+go_test(
+    name = "gitattributespolicy_required_host_test",
+    srcs = [
+        "git_boundary_test.go",
+        "gitattributes_policy_test.go",
+        "required_host_test.go",
+    ],
+    args = [
+        "-required-host",
+        "-expected-goos",
+        "linux",
+    ],
+    data = ["//:.gitattributes"],
+)
+
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(

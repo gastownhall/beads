@@ -44,6 +44,7 @@ go_test(
         "pr_risk_bazel_coverage_test.go",
         "pull_dolt_image_test.go",
         "release_script_test.go",
+        "repo_helpers_test.go",
         "required_suite_test.go",
         "test_script_test.go",
         "upgrade_smoke_loop_test.go",
@@ -67,6 +68,37 @@ go_test(
         "//internal/testutil/bazeltest",
         "//scripts/internal/testbash",
         "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)
+
+# pr.yml's check-doc-freshness-platforms Linux leg: `go test
+# -tags integration ./scripts -count=1 -run '^(TestDocFreshness.*|
+# TestRequiredSuiteContract)$' -args -required-suite=doc-freshness`, whose
+# TestMain fails unless exactly the doc-freshness inventory is compiled and
+# selected. scripts_test runs those tests too (in the integration lane); this
+# target adds the inventory and selection contract, over only the files the
+# suite reads (its fixtures copy check-doc-freshness.sh). The macOS and
+# Windows legs stay in pr.yml.
+# Tags:
+#   integration-only: every TestDocFreshness test is //go:build integration,
+#     so --config=integration's lane runs it.
+go_test(
+    name = "doc_freshness_required_test",
+    srcs = [
+        "check_doc_freshness_test.go",
+        "repo_helpers_test.go",
+        "required_suite_test.go",
+    ],
+    args = [
+        "-test.count=1",
+        "-test.run=^(TestDocFreshness.*|TestRequiredSuiteContract)$$",
+        "-required-suite=doc-freshness",
+    ],
+    data = ["check-doc-freshness.sh"],
+    tags = ["integration-only"],
+    deps = [
+        "//internal/testutil/bazeltest",
+        "//scripts/internal/testbash",
     ],
 )
 

@@ -630,11 +630,9 @@ would only be needed if maintainers still want exactly one required check.
 Do not require these existing check names directly:
 
 - `Detect CI tier`
-- `Fast checks (build tags, versions, migrations, beads diff, fmt)` (F7a fold
-  of the former standalone `Check build-tag policy`, `Check version
-  consistency`, `Check for .beads changes` and `Check formatting` checks into
-  one job's steps; see
-  [F7a: Same-Repo Blacksmith Moves and Job Folds](#f7a-same-repo-blacksmith-moves-and-job-folds))
+- `Fast checks (frozen migrations, .beads diff)` (the base-diff checks; the
+  tree checks it used to run are Bazel tests, see
+  [Repository Guards as Bazel Tests](#repository-guards-as-bazel-tests))
 - `Check pure-Go and js/wasm boundaries (CGO_ENABLED=0)`
 - `Check doc flags freshness`
 - `Check release target cross-compilation (unix)` and `(desktop)` (F7a fold
@@ -1249,6 +1247,49 @@ scope, not this slice's.
   steps. Both folded jobs stay on `windows-latest` — F7a does not move any
   Windows job to Blacksmith (there is no Windows Blacksmith pool), and
   neither job is one F4's concurrent Windows-region edits touch.
+
+### Repository Guards as Bazel Tests
+
+ga-96smfk.20 moved the repository guards that pr.yml ran on GitHub runners
+into Bazel tests over narrow slices of the checkout
+(`tools/bazel/repo_subset.bzl`, laid out as a throwaway git checkout by
+`scripts/repochecks/run_check.sh`), so they run remotely in bazel.yml's
+`test` lane and a pass is reused until one of the files the guard reads
+changes. They gate through `BAZEL_TEST`; pinned by
+`TestPRPolicyChecksRunAsBazelTargets`.
+
+| Former job / step | Bazel target |
+| --- | --- |
+| fast-checks: `check-build-tags.sh` | `//scripts/repochecks:build_tags_test` |
+| fast-checks: `check-go-install-guidance.sh` | `//scripts/repochecks:go_install_guidance_test` |
+| fast-checks: `check-winget-portable-alias.sh` | `//scripts/repochecks:winget_portable_alias_test` |
+| fast-checks: `check-versions.sh` | `//internal/versioncheck:versioncheck_test` (same `versioncheck.Check` over the release metadata) |
+| fast-checks: migration hygiene checks A and B | `//scripts/repochecks:migration_hygiene_test` (`MIGRATION_HYGIENE_SCOPE=tree`) |
+| fast-checks: `make fmt-check` | `//scripts/repochecks:fmt_test` (the registered SDK's gofmt) |
+| PR Policy: `checkworkflowtags` | `//scripts/repochecks:workflow_tags_test` |
+| PR Policy: `check-testing-short.sh` | `//scripts:scripts_test` (`TestCheckTestingShortPassesOnCleanRepoTree`) |
+| PR Policy: workapi frontend boundary | `//scripts/repochecks:workapi_frontend_boundary_test` |
+| PR Policy: `make api-check` drift | `//scripts/repochecks:types_gen_drift_test`; its `go test ./internal/httpapi/...` half is the httpapi targets in the same lane |
+| PR Policy / check-doc-flags: `check-doc-freshness.sh` | `//scripts/repochecks:doc_freshness_test` |
+| check-doc-freshness-platforms, Linux leg | `//scripts:doc_freshness_required_test` (integration lane) and `//scripts/gitattributespolicy:gitattributespolicy_required_host_test` |
+
+What stays a job, and why:
+
+- `fast-checks` keeps the two checks that need the PR's base commit:
+  check-migration-hygiene.sh's delta half (`MIGRATION_HYGIENE_SCOPE=delta`:
+  frozen shipped migrations, ignored-plane twins, prepared DML in new
+  migrations) and the `.beads/issues.jsonl` guard. No action key can hold a
+  base commit.
+- `check-doc-flags` validates the generated CLI docs against bd built from
+  the release tag in `docs/cli-docs.pin` (git fetch plus a pure-Go
+  `go build`), and attributes drift against the merge-base. Releases publish
+  no pure-Go Linux binary a Bazel repository could pin by sha256.
+- The macOS and Windows legs of `check-doc-freshness-platforms` (no remote
+  workers for those hosts), on Blacksmith for same-repo PRs and merge groups.
+
+`check-doc-freshness.sh` compares review dates with today's date, which is
+not in the action key: a cached pass stands until one of its inputs changes,
+and nightly's `--config=fresh` run re-checks it against the date.
 
 ### Same-Repo Blacksmith macOS Legs
 

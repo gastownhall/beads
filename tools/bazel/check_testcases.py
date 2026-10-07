@@ -18,7 +18,9 @@ target's test.xml, and every shard's, to list at least one top-level
 as //tools/bazel:dolt_version_test, whose test.xml Bazel writes with no Go
 testcases) from the count. The label must still be in the BEP: an
 exemption for a target the run did not test is an error, so a stale one
-cannot linger.
+cannot linger. //pkg:all exempts every test in that package (one that holds
+only non-Go tests, such as //scripts/repochecks), and must match at least one
+tested target.
 
 Exit status: 0 if every test.xml lists a test, 1 otherwise (including a BEP
 with no test results at all).
@@ -48,10 +50,16 @@ def check(tested, testlogs, not_go=()):
     counts, problems = [], []
     if not tested:
         problems.append("the BEP lists no test results")
-    for label in sorted(set(not_go) - set(tested)):
-        problems.append(f"{label}: --not-go, but the BEP has no result for it")
+    def exempt(label, entry):
+        if entry.endswith(":all"):
+            return label.split(":", 1)[0] == entry[: -len(":all")]
+        return label == entry
+
+    for entry in sorted(set(not_go)):
+        if not any(exempt(label, entry) for label in tested):
+            problems.append(f"{entry}: --not-go, but the BEP has no result for it")
     for label, shards in sorted(tested.items()):
-        if label in not_go:
+        if any(exempt(label, entry) for entry in not_go):
             continue
         for xml_path in testlog_xmls(testlogs, label, shards):
             rel = os.path.relpath(xml_path, testlogs)

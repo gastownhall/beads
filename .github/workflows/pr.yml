@@ -148,31 +148,29 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  # F7a: fold of five independent, no-cache pr.yml checks that previously ran
-  # as five separate ubuntu-latest jobs (check-build-tags,
-  # check-version-consistency, check-migration-hygiene,
-  # check-no-beads-changes, fmt-check) into one Blacksmith job with five
-  # steps. Each step gets its own id and `if: ${{ !cancelled() }}` so one
-  # check's failure does not block the others from running, and the job
-  # exposes each step's outcome as a job output so ci-gate can still red the
-  # exact same CI_GATE_REQUIRED token it did before the fold -
-  # TestPRCIGateFastChecksTokens pins the mapping. FAST_CHECKS (the job's own
-  # `result`) is an added backstop token: if the whole job is lost (e.g. a
-  # cancelled runner) before any step sets its output, the per-check outputs
-  # read empty and the CI_GATE_REQUIRED fallback below treats that as
-  # "skipped" - which is NOT skipped_ok, so the gate still reds, but
-  # FAST_CHECKS gives ci-gate.sh one clear error line ("FAST_CHECKS=cancelled")
-  # instead of five confusing ones.
+  # The checks that need the PR's base commit, so no hermetic Bazel target
+  # can hold them: check-migration-hygiene.sh's delta half (C: shipped
+  # migrations are frozen, D: ignored-plane twins, E: no prepared DML in new
+  # migrations, all over `git diff <merge-base>`) and the .beads/issues.jsonl
+  # guard. Everything else this job ran is a Bazel test in bazel.yml's `test`
+  # lane (ga-96smfk.20): //scripts/repochecks:build_tags_test,
+  # :go_install_guidance_test, :winget_portable_alias_test,
+  # :migration_hygiene_test (checks A and B) and :fmt_test, and
+  # //internal/versioncheck:versioncheck_test for check-versions.sh. No Go:
+  # both steps are bash and git.
+  #
+  # Each step has its own id and `if: ${{ !cancelled() }}`, so one failure
+  # does not hide the other, and its outcome is a job output that ci-gate
+  # requires (TestPRCIGateFastChecksTokens). FAST_CHECKS (the job's own
+  # `result`) is the backstop token for a job lost before any step set its
+  # output.
   fast-checks:
-    name: Fast checks (build tags, versions, migrations, beads diff, fmt)
+    name: Fast checks (frozen migrations, .beads diff)
     runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 10
     outputs:
-      build-tags: ${{ steps.build-tags.outcome }}
-      version-consistency: ${{ steps.version-consistency.outcome }}
       migration-hygiene: ${{ steps.migration-hygiene.outcome }}
       no-beads-changes: ${{ steps.no-beads-changes.outcome }}
-      fmt: ${{ steps.fmt.outcome }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
@@ -180,40 +178,18 @@ jobs:
           # the base branch; a shallow checkout starves both.
           fetch-depth: 0
 
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      # Fast shell/Make guard for direct source-time build-tag declarations.
-      # Workflow `run` steps are checked structurally in the required policy
-      # wrapper.
-      - name: Check build-tag policy
-        id: build-tags
-        if: ${{ !cancelled() }}
-        run: |
-          ./scripts/check-build-tags.sh
-          ./scripts/check-go-install-guidance.sh
-          ./scripts/check-winget-portable-alias.sh
-
-      # Fast check to ensure all version files are in sync
-      - name: Check all versions match
-        id: version-consistency
-        if: ${{ !cancelled() }}
-        run: ./scripts/check-versions.sh
-
-      # Migration hygiene: duplicate version numbers, nondeterministic SQL
-      # (UUID()/NOW()/RAND(), the #4259 root-cause class), and edits to
-      # migration files that already exist on the base branch (shipped
-      # migrations are frozen; fix forward with a new version). Fails at PR
-      # time, before any test even compiles. Details:
+      # Migration hygiene, delta half: edits to migration files that already
+      # exist on the base branch (shipped migrations are frozen; fix forward
+      # with a new version), and the twin and prepared-DML rules for new
+      # migrations. Checks A and B (duplicate versions, nondeterministic SQL)
+      # read only the tree and run in Bazel. Details:
       # scripts/check-migration-hygiene.sh.
       - name: Run migration hygiene checks
         id: migration-hygiene
         if: ${{ !cancelled() }}
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          MIGRATION_HYGIENE_SCOPE: delta
         run: ./scripts/check-migration-hygiene.sh
 
       # Fast check to catch accidental .beads/issues.jsonl changes from
@@ -246,11 +222,6 @@ jobs:
             exit 1
           fi
           echo "No .beads/issues.jsonl changes detected"
-
-      - name: Check gofmt
-        id: fmt
-        if: ${{ !cancelled() }}
-        run: make fmt-check
 
   # Lock in two CGO-disabled portability boundaries. cmd/bd carries a mix of
   # cgo-only test helpers (embedded Dolt, sql.DB) and pure-Go tests; compiling
@@ -849,6 +820,14 @@ jobs:
 
   # Check documentation references match actual CLI flags
   #
+  # Stays a job: the generated CLI docs describe the release pinned in
+  # docs/cli-docs.pin, and check-doc-flags.sh validates them against bd built
+  # from that tag (scripts/resolve-docs-bd.sh: git fetch the tag, pure-Go go
+  # build), attributing drift against the merge-base. Neither input can enter
+  # a Bazel action key: releases publish no pure-Go linux binary to pin, and
+  # the attribution needs the PR's base. check-doc-freshness.sh, which this
+  # job also ran, is //scripts/repochecks:doc_freshness_test.
+  #
   # F7a: moved to Blacksmith for same-repo PRs/merge_group. This job's module
   # cache restore step was already absent before the fold (every run cold-
   # builds bd), so there is no GitHub-saved cache to lose here.
@@ -881,9 +860,7 @@ jobs:
           # would eject every queued PR. Diff against the queue's base
           # commit instead (empty on pull_request: origin/$GITHUB_BASE_REF).
           BD_DOCS_DIFF_BASE: ${{ github.event.merge_group.base_sha }}
-        run: |
-          ./scripts/check-doc-flags.sh ./bd
-          ./scripts/check-doc-freshness.sh
+        run: ./scripts/check-doc-flags.sh ./bd
 
       # When the drift check fails, it writes the exact regenerated-docs fix
       # (produced with CI's canonical build) so contributors can apply it with
@@ -898,6 +875,13 @@ jobs:
           path: ${{ runner.temp }}/cli-docs-freshness.patch
           if-no-files-found: ignore
 
+  # The Linux leg is Bazel's (ga-96smfk.20): //scripts:doc_freshness_required_test
+  # (integration lane: the doc-freshness suite under -required-suite) and
+  # //scripts/gitattributespolicy:gitattributespolicy_required_host_test
+  # (-required-host -expected-goos linux), both on rbe-west's Linux workers.
+  # The macOS and Windows legs stay here, on Blacksmith for same-repo PRs and
+  # merge groups (GitHub-hosted for forks and Dependabot).
+  #
   # F7b: same-repo Blacksmith for the Linux/Windows legs via the "matrix
   # marker" form (spec F7/F7b §2.1): Actions does not expand `${{ }}` inside a
   # matrix array/include value, so each leg's `include` entry instead carries
@@ -929,9 +913,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            expected_goos: linux
-            runner: same-repo-linux
           - os: macos-latest
             expected_goos: darwin
             runner: same-repo-macos
@@ -1146,69 +1127,6 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: bash scripts/ci/test-windows-env-helpers.sh
 
-  # F3: package-mcp and package-npm (and the detect job that fed them) moved
-  # into bazel.yml, which pr.yml calls with package-gates: "on" below. They
-  # now depend on nothing but the rbe job's decision, so they no longer wait
-  # on build-artifacts, bazel-coverage or the rest of the bazel call.
-  #
-  # F7a: moved to Blacksmith for same-repo PRs/merge_group. setup-go runs with
-  # cache: false and the module download step below always hits the network,
-  # so this job restores no GitHub-saved cache.
-  pr-policy-wrapper:
-    name: PR Policy (wrapper timing)
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      # The module fetch is the only part of this job that talks to the network,
-      # and setup-go above runs with cache: false, so every run pulls the whole
-      # module graph from the proxy. Doing it here, retried, means a proxy blip
-      # costs seconds instead of failing a required check.
-      #
-      # Deliberately NOT wrapped around the build: `make ci-pr-policy` runs a
-      # `go build ./cmd/bd` (scripts/ci/pr-policy.sh, build_docs_binary), and a
-      # compile error is not transient. Retrying it would make a genuinely broken
-      # build take three attempts to report and look like a slow one. The fetch
-      # has a legitimate transient failure mode; the build does not.
-      #
-      # 3 attempts x 120s + 2 backoffs x 10s = 380s worst case. 8m leaves ~100s
-      # of headroom, matching the bounded apt-get steps in migration-test.yml.
-      - name: Download modules
-        timeout-minutes: 8
-        run: |
-          downloaded=""
-          for attempt in 1 2 3; do
-            if timeout 120 go mod download; then
-              downloaded=yes
-              break
-            fi
-            echo "::warning::go mod download attempt $attempt failed or timed out"
-            # No backoff after the final attempt - there is nothing left to wait for.
-            if [ "$attempt" -lt 3 ]; then
-              sleep 10
-            fi
-          done
-          # Unlike the best-effort apt-get retries elsewhere in this repo, this
-          # one is load-bearing: nothing downstream can build without the
-          # modules. Fail here, naming the fetch, so a module outage is not
-          # reported as a build failure.
-          if [ -z "$downloaded" ]; then
-            echo "::error::go mod download failed after 3 attempts - module fetch failure, not a build failure"
-            exit 1
-          fi
-
-      - name: Run PR policy wrapper
-        run: make ci-pr-policy
-
   # D2 step 3: stands down where bazel-coverage says pr_lanes; Bazel /
   # test (`bazel test //... --config=ci`, the same selection, checked by its
   # equivalence step) runs it, and scripts-go-checks runs what Bazel does not
@@ -1279,7 +1197,7 @@ jobs:
   # (//scripts:scripts_test, //test/docsync over //:repo_files), remotely.
   # F7b: same-repo Blacksmith (blacksmith-4vcpu-ubuntu-2404) for same-repo
   # PRs/merge_group, falling back to ubuntu-latest for forks/Dependabot, same
-  # pattern as advisory-reports/pr-policy-wrapper/pr-core-wrapper above.
+  # pattern as advisory-reports/pr-core-wrapper above.
   # main.yml's go-vet-cache venue matrix seeds the vet leg's GOCACHE.
   scripts-go-checks:
     name: Go checks (${{ matrix.check }})
@@ -2416,7 +2334,6 @@ jobs:
       - check-doc-flags
       - check-doc-freshness-platforms
       - pr-preflight-platforms
-      - pr-policy-wrapper
       - pr-core-wrapper
       - scripts-go-checks
       - pr-lint-wrapper
@@ -2436,11 +2353,8 @@ jobs:
           CI_GATE_REQUIRED: >-
             BUILD_ARTIFACTS
             FAST_CHECKS
-            CHECK_BUILD_TAGS
-            CHECK_VERSION_CONSISTENCY
             CHECK_MIGRATION_HYGIENE
             CHECK_NO_BEADS_CHANGES
-            FMT_CHECK
             CHECK_CMD_BD_PUREGEO_TESTS
             CHECK_RELEASE_TARGET_CROSS_COMPILATION
             CHECK_DOC_FLAGS
@@ -2448,7 +2362,6 @@ jobs:
             PR_PREFLIGHT_PLATFORMS
             PACKAGE_MCP
             PACKAGE_NPM
-            PR_POLICY_WRAPPER
             PR_CORE_WRAPPER
             SCRIPTS_GO_CHECKS
             PR_LINT_WRAPPER
@@ -2469,21 +2382,19 @@ jobs:
             BAZEL_DOLT_SERVER_RETIRED
             BAZEL_PR_LANES_RETIRED
           BUILD_ARTIFACTS: ${{ needs.build-artifacts.result }}
-          # F7a: fast-checks folds five formerly-separate jobs into one job
-          # with five steps; each token below now reads that step's outcome
-          # (via the job's outputs) instead of a sibling job's result, with a
-          # 'skipped' fallback for a lost job (see FAST_CHECKS below).
-          # TestPRCIGateFastChecksTokens pins this mapping.
-          CHECK_BUILD_TAGS: ${{ needs.fast-checks.outputs.build-tags || 'skipped' }}
-          CHECK_VERSION_CONSISTENCY: ${{ needs.fast-checks.outputs.version-consistency || 'skipped' }}
+          # fast-checks' two base-diff steps; each token reads that step's
+          # outcome (via the job's outputs), with a 'skipped' fallback for a
+          # lost job (see FAST_CHECKS below). TestPRCIGateFastChecksTokens
+          # pins this mapping. The repository guards the job used to run
+          # (build tags, versions, migration checks A and B, gofmt) are Bazel
+          # tests and gate through BAZEL_TEST.
           CHECK_MIGRATION_HYGIENE: ${{ needs.fast-checks.outputs.migration-hygiene || 'skipped' }}
           CHECK_NO_BEADS_CHANGES: ${{ needs.fast-checks.outputs.no-beads-changes || 'skipped' }}
-          FMT_CHECK: ${{ needs.fast-checks.outputs.fmt || 'skipped' }}
           # Backstop: if fast-checks itself is lost (e.g. a cancelled runner)
-          # before any step sets an output, the five tokens above all read
-          # 'skipped' (none are in CI_GATE_SKIPPED_OK by default, so the gate
-          # still reds) - FAST_CHECKS gives ci-gate.sh one clear line naming
-          # the job instead of five step-shaped ones.
+          # before any step sets an output, the two tokens above read
+          # 'skipped' (neither is in CI_GATE_SKIPPED_OK, so the gate still
+          # reds) - FAST_CHECKS gives ci-gate.sh one clear line naming the
+          # job.
           FAST_CHECKS: ${{ needs.fast-checks.result }}
           CHECK_CMD_BD_PUREGEO_TESTS: ${{ needs.check-cmd-bd-puregeo-tests.result }}
           CHECK_RELEASE_TARGET_CROSS_COMPILATION: ${{ needs.check-release-target-cross-compilation.result }}
@@ -2504,7 +2415,6 @@ jobs:
           # here).
           PACKAGE_MCP: ${{ needs.bazel.outputs.package-mcp || 'skipped' }}
           PACKAGE_NPM: ${{ needs.bazel.outputs.package-npm || 'skipped' }}
-          PR_POLICY_WRAPPER: ${{ needs.pr-policy-wrapper.result }}
           PR_CORE_WRAPPER: ${{ needs.pr-core-wrapper.result }}
           SCRIPTS_GO_CHECKS: ${{ needs.scripts-go-checks.result }}
           PR_LINT_WRAPPER: ${{ needs.pr-lint-wrapper.result }}
