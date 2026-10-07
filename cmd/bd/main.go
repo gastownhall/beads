@@ -513,7 +513,10 @@ func loadBeadsSelectionEnvFile(beadsDir string) {
 		return
 	}
 	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB"} {
-		if os.Getenv(key) != "" {
+		// Presence, not value: an operator who exports a selector as empty
+		// chose local discovery, and gotenv.Load in loadBeadsEnvFile
+		// already honors presence the same way (GH#7303).
+		if _, ok := os.LookupEnv(key); ok {
 			continue
 		}
 		if value, ok := pairs[key]; ok && strings.TrimSpace(value) != "" {
