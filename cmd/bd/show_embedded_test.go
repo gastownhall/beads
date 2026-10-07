@@ -113,7 +113,16 @@ func bdShowFail2(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
-func TestEmbeddedShow(t *testing.T) {
+// TestEmbeddedShowBasicsAndJSON was split from TestEmbeddedShow (originally
+// ~193s, measured under --config=embedded) into 2 top-level tests over
+// disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once. show_current_fallback_to_last_touched
+// (in the second group) only requires that SOME earlier subtest in its own
+// group already created/touched an issue in the shared dir — it is placed
+// after several issue-creating subtests in that group, so the redone,
+// self-contained setup still satisfies it.
+func TestEmbeddedShowBasicsAndJSON(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -289,6 +298,16 @@ func TestEmbeddedShow(t *testing.T) {
 			t.Errorf("expected ID in short output: %s", out)
 		}
 	})
+}
+
+func TestEmbeddedShowDetailAndCurrent(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ts")
 
 	// ===== --long =====
 

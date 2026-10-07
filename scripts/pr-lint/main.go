@@ -27,6 +27,11 @@ const (
 	lintReportedTimeout = "5m"
 )
 
+// defaultLintTargets is BD_LINT_TARGETS' value when unset or empty: the
+// no-argument usage contract (`make ci-pr-lint`, `bd preflight`) must keep
+// running all three passes locally and from the pre-commit hook.
+var defaultLintTargets = []string{"native", "windows", "darwin"}
+
 type commandSpec struct {
 	name string
 	args []string
@@ -89,6 +94,16 @@ func run(args []string, dir string, environ []string, stdout, stderr io.Writer, 
 		return 2
 	}
 
+	rawTargets, _ := environmentValue(environ, "BD_LINT_TARGETS", runtime.GOOS == "windows")
+	targets, err := parseLintTargets(rawTargets)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+	runNative := containsTarget(targets, "native")
+	runWindows := containsTarget(targets, "windows")
+	runDarwin := containsTarget(targets, "darwin")
+
 	goPath, err := runner.lookPath("go")
 	if err != nil {
 		fmt.Fprintf(stderr, "Go toolchain not found in PATH: %v\n", err)
@@ -130,7 +145,7 @@ func run(args []string, dir string, environ []string, stdout, stderr io.Writer, 
 	nativeEnv := effectiveEnv
 	if runtime.GOOS == "windows" {
 		nativeEnv = preferSelectedGo(probeCtx, dir, effectiveEnv, native, stderr, runner)
-		if !skipWindows {
+		if runWindows && !skipWindows {
 			// GOWORK=off can select a different toolchain. Probe the original
 			// Go executable and PATH again, before either lint pass starts.
 			selected, code := readNativeGoEnvironment(probeCtx, dir, windowsEnv, goPath, stderr, runner)
@@ -138,7 +153,7 @@ func run(args []string, dir string, environ []string, stdout, stderr io.Writer, 
 				windowsEnv = preferSelectedGo(probeCtx, dir, windowsEnv, selected, stderr, runner)
 			}
 		}
-		if !skipDarwin {
+		if runDarwin && !skipDarwin {
 			selected, code := readNativeGoEnvironment(probeCtx, dir, darwinEnv, goPath, stderr, runner)
 			if code == 0 {
 				darwinEnv = preferSelectedGo(probeCtx, dir, darwinEnv, selected, stderr, runner)
@@ -146,28 +161,36 @@ func run(args []string, dir string, environ []string, stdout, stderr io.Writer, 
 		}
 	}
 	cancel() // All discovery shares the existing 30-second probe budget.
-	if code := runLintPass(
-		"golangci-lint (native)",
-		commandSpec{name: lintPath, args: argsForLint, dir: dir, env: nativeEnv},
-		stdout,
-		stderr,
-		runner,
-	); code != 0 {
-		return code
+
+	if runNative {
+		if code := runLintPass(
+			"golangci-lint (native)",
+			commandSpec{name: lintPath, args: argsForLint, dir: dir, env: nativeEnv},
+			stdout,
+			stderr,
+			runner,
+		); code != 0 {
+			return code
+		}
 	}
 
-	if skipWindows {
-		fmt.Fprintln(stdout, "==> golangci-lint (windows/amd64, non-CGO) already covered by native pass")
-	} else if code := runLintPass(
-		"golangci-lint (windows/amd64, non-CGO)",
-		commandSpec{name: lintPath, args: argsForLint, dir: dir, env: windowsEnv},
-		stdout,
-		stderr,
-		runner,
-	); code != 0 {
-		return code
+	if runWindows {
+		if skipWindows {
+			fmt.Fprintln(stdout, "==> golangci-lint (windows/amd64, non-CGO) already covered by native pass")
+		} else if code := runLintPass(
+			"golangci-lint (windows/amd64, non-CGO)",
+			commandSpec{name: lintPath, args: argsForLint, dir: dir, env: windowsEnv},
+			stdout,
+			stderr,
+			runner,
+		); code != 0 {
+			return code
+		}
 	}
 
+	if !runDarwin {
+		return 0
+	}
 	if skipDarwin {
 		fmt.Fprintln(stdout, "==> golangci-lint (darwin/arm64, non-CGO) already covered by native pass")
 		return 0
@@ -180,6 +203,39 @@ func run(args []string, dir string, environ []string, stdout, stderr io.Writer, 
 		stderr,
 		runner,
 	)
+}
+
+// parseLintTargets parses BD_LINT_TARGETS: a comma-separated list of
+// "native", "windows" and "darwin", in any order and with any repetition.
+// An empty value (the variable unset, or set to only whitespace and commas)
+// selects all three, so the no-argument usage contract is unchanged. Any
+// other token is an error: callers exit 2, matching the usage-error exit
+// code above.
+func parseLintTargets(raw string) ([]string, error) {
+	var targets []string
+	for _, field := range strings.Split(raw, ",") {
+		target := strings.TrimSpace(field)
+		if target == "" {
+			continue
+		}
+		if !containsTarget(defaultLintTargets, target) {
+			return nil, fmt.Errorf("BD_LINT_TARGETS: unknown target %q (want a comma list of native, windows, darwin)", target)
+		}
+		targets = append(targets, target)
+	}
+	if len(targets) == 0 {
+		return defaultLintTargets, nil
+	}
+	return targets, nil
+}
+
+func containsTarget(targets []string, target string) bool {
+	for _, candidate := range targets {
+		if candidate == target {
+			return true
+		}
+	}
+	return false
 }
 
 func readNativeGoEnvironment(

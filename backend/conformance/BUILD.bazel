@@ -13,6 +13,7 @@ go_library(
         "batch_apply_contract.go",
         "batch_closer_contract.go",
         "batch_creator_contract.go",
+        "batch_getter_contract.go",
         "blocked_state.go",
         "blocking_annotator_contract.go",
         "bootstrapper_contract.go",
@@ -111,3 +112,25 @@ filegroup(
 )
 
 # --- end go_srcs ---
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

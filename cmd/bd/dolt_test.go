@@ -283,7 +283,9 @@ func TestDoltSetConfigValidation(t *testing.T) {
 func TestDoltSetConfigJSONOutput(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+	// 0700: bd warns about a group/world-readable .beads, and the warning
+	// would land in the JSON output under test.
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		t.Fatalf("failed to create .beads dir: %v", err)
 	}
 
@@ -315,7 +317,7 @@ func TestDoltSetConfigJSONOutput(t *testing.T) {
 
 	var result map[string]any
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Skipf("output not pure JSON: %s", output)
+		t.Fatalf("output not pure JSON: %s", output)
 	}
 
 	if result["key"] != "database" {
@@ -332,7 +334,9 @@ func TestDoltSetConfigJSONOutput(t *testing.T) {
 func TestDoltSetConfigWithUpdateConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+	// 0700: bd warns about a group/world-readable .beads, and the warning
+	// would land in the JSON output under test.
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		t.Fatalf("failed to create .beads dir: %v", err)
 	}
 
@@ -371,7 +375,7 @@ func TestDoltSetConfigWithUpdateConfig(t *testing.T) {
 
 	var result map[string]any
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Skipf("output not pure JSON: %s", output)
+		t.Fatalf("output not pure JSON: %s", output)
 	}
 
 	if result["config_yaml_updated"] != true {
@@ -399,11 +403,11 @@ func TestTestServerConnection(t *testing.T) {
 	})
 
 	t.Run("localhost with unlikely port", func(t *testing.T) {
-		// Clear test server port override so GetDoltServerPort() returns 59999
+		// Clear the test server port override so the config's port is used.
 		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 		cfg := configfile.DefaultConfig()
 		cfg.DoltServerHost = "127.0.0.1"
-		cfg.DoltServerPort = 59999 // Unlikely to be in use
+		cfg.DoltServerPort = closedLoopbackPort(t)
 
 		result := testServerConnection(cfg.DoltServerHost, cfg.DoltServerPort)
 		if result {
@@ -493,8 +497,7 @@ func TestDoltConfigEnvironmentOverrides(t *testing.T) {
 	// Only database, host, port, user support env overrides
 
 	t.Run("BEADS_DOLT_SERVER_DATABASE overrides", func(t *testing.T) {
-		os.Setenv("BEADS_DOLT_SERVER_DATABASE", "envdb")
-		defer os.Unsetenv("BEADS_DOLT_SERVER_DATABASE")
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "envdb")
 
 		if cfg.GetDoltDatabase() != "envdb" {
 			t.Errorf("expected env override to 'envdb', got %s", cfg.GetDoltDatabase())
@@ -502,8 +505,7 @@ func TestDoltConfigEnvironmentOverrides(t *testing.T) {
 	})
 
 	t.Run("BEADS_DOLT_SERVER_HOST overrides", func(t *testing.T) {
-		os.Setenv("BEADS_DOLT_SERVER_HOST", "envhost")
-		defer os.Unsetenv("BEADS_DOLT_SERVER_HOST")
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "envhost")
 
 		if cfg.GetDoltServerHost() != "envhost" {
 			t.Errorf("expected env override to 'envhost', got %s", cfg.GetDoltServerHost())
@@ -511,8 +513,7 @@ func TestDoltConfigEnvironmentOverrides(t *testing.T) {
 	})
 
 	t.Run("BEADS_DOLT_SERVER_PORT overrides", func(t *testing.T) {
-		os.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
-		defer os.Unsetenv("BEADS_DOLT_SERVER_PORT")
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
 
 		if cfg.GetDoltServerPort() != 9999 {
 			t.Errorf("expected env override to 9999, got %d", cfg.GetDoltServerPort())
@@ -520,8 +521,7 @@ func TestDoltConfigEnvironmentOverrides(t *testing.T) {
 	})
 
 	t.Run("BEADS_DOLT_SERVER_USER overrides", func(t *testing.T) {
-		os.Setenv("BEADS_DOLT_SERVER_USER", "envuser")
-		defer os.Unsetenv("BEADS_DOLT_SERVER_USER")
+		t.Setenv("BEADS_DOLT_SERVER_USER", "envuser")
 
 		if cfg.GetDoltServerUser() != "envuser" {
 			t.Errorf("expected env override to 'envuser', got %s", cfg.GetDoltServerUser())

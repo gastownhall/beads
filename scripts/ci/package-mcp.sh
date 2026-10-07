@@ -52,7 +52,11 @@ mcp_mypy() {
 
 mcp_pytest() {
     cd "$MCP_DIR"
-    uv run pytest --durations=50
+    # Explicit worker count, not "auto": CI runners' reported CPU count
+    # doesn't always match the cgroup quota, and -n 8 is pinned to measured
+    # timing (tools/f3, 2026-10) on both 2 vCPU (2.7x) and 4 vCPU (~3x)
+    # runners. pytest-xdist is a pinned dev dependency (pyproject.toml).
+    uv run pytest -n 8 --durations=50
 }
 
 mcp_build() {

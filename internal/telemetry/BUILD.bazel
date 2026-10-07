@@ -6,6 +6,7 @@ go_library(
         "batch_applier.go",
         "batch_closer.go",
         "batch_creator.go",
+        "batch_getter.go",
         "blockingannotator.go",
         "bootstrapper.go",
         "commenter.go",
@@ -73,6 +74,7 @@ go_test(
     embed = [":telemetry"],
     deps = [
         "//internal/storage",
+        "//internal/storage/domain",
         "//internal/storage/externaldeps",
         "//issueops",
         "//memoryops",
@@ -82,3 +84,25 @@ go_test(
         "@io_opentelemetry_go_otel_trace//noop",
     ],
 )
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

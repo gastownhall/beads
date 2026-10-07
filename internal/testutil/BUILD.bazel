@@ -125,12 +125,24 @@ go_test(
     ],
 )
 
-# Dolt image pin read as text by //test/docsync and the dolt pin tests in
-# //scripts.
-exports_files(
-    ["testdoltcommon.go"],
-    visibility = [
-        "//scripts:__pkg__",
-        "//test/docsync:__pkg__",
-    ],
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
 )
+
+# --- end repo_files ---

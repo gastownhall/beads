@@ -239,7 +239,22 @@ func setupTestStore(t *testing.T) (*DoltStore, func()) {
 
 	// Create an isolated branch for this test
 	_, branchCleanup := testutil.StartTestBranch(t, store.db, testSharedDB)
-	if _, err := initSchemaOnDB(ctx, store.db); err != nil {
+	// This second, branch-local schema init contends with every other
+	// parallel subtest's own branch-local init for the SAME GET_LOCK name:
+	// MigrateUpWithLock's named lock is scoped to the database
+	// (schema.MigrationLockName(databaseName)), not to the branch, and all of
+	// setupTestStore's callers share one database (testSharedDB). That
+	// collision is exactly what production handles by retrying a contended
+	// migration-lock wait instead of failing the one unlucky caller (see
+	// initSchemaOnDBWithRetry and isRetryableError's schema.IsMigrationLockError
+	// case) — New() above already goes through that retrying path for the
+	// store's initial schema init. Calling the bare, non-retrying
+	// initSchemaOnDB here for the branch-local pass skipped that resilience
+	// and let transient GET_LOCK timeouts (5s budget, see
+	// migrationLockAcquireTimeoutSeconds) fail the test outright under
+	// parallel load. Use the same retrying helper production uses so a
+	// contended lock wait is retried (30s budget) instead of failing fast.
+	if _, err := initSchemaOnDBWithRetry(ctx, store.db); err != nil {
 		branchCleanup()
 		store.Close()
 		os.RemoveAll(tmpDir)
@@ -253,6 +268,20 @@ func setupTestStore(t *testing.T) (*DoltStore, func()) {
 	}
 
 	return store, cleanup
+}
+
+// rerunSchemaInitOnTestStore re-runs schema initialization on a
+// setupTestStore store, for tests that set up a schema state and then assert
+// what one more migration pass does to it. Every setupTestStore caller shares
+// testSharedDB, so this pass's GET_LOCK contends with every parallel test's
+// own setup-time init for the same database-scoped lock name, exactly like the
+// branch-local init in setupTestStore. The bare initSchemaOnDB gives up after
+// one 5s wait (migrationLockAcquireTimeoutSeconds) and failed such tests with
+// "schema migration lock unavailable: timeout" on loaded CI runners; the
+// retrying helper retries only a contended lock or a transient connection
+// error, never a migration result, so the outcome under test is unchanged.
+func rerunSchemaInitOnTestStore(ctx context.Context, store *DoltStore) (int, error) {
+	return initSchemaOnDBWithRetry(ctx, store.db)
 }
 
 // setupConcurrentTestStore creates a test store with its own database for

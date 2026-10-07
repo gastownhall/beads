@@ -177,7 +177,12 @@ type testSeedData struct {
 	readyTask     string // P0, labels: backend, no blockers
 }
 
-func TestEmbeddedList(t *testing.T) {
+// TestEmbeddedListFiltering and TestEmbeddedListSearchAndOutput were split
+// from TestEmbeddedList (originally ~298s, measured under --config=embedded)
+// into 2 top-level tests over disjoint subtest groups, for CI shard balance
+// (see scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedListFiltering(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -605,6 +610,19 @@ func TestEmbeddedList(t *testing.T) {
 			t.Error("--flat should not contain tree characters")
 		}
 	})
+}
+
+func TestEmbeddedListSearchAndOutput(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tl")
+
+	// Seed test data
+	seed := seedTestData(t, bd, dir)
 
 	// --- E. Content search ---
 

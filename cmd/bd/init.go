@@ -2126,22 +2126,23 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// Auto-setup Claude hooks, Codex, and Cursor project integration. Skip in
 		// stealth mode or when agents are skipped.
 		if !stealth && !skipAgents && !isBareGitRepo() {
-			if err := setup.InstallClaudeProject(stealth); err != nil {
-				if !quiet {
-					fmt.Fprintf(os.Stderr, "Warning: failed to setup Claude hooks: %v\n", err)
-				}
+			// --quiet drops the installers' progress like every other init
+			// message; failures still reach stderr (the installers' own
+			// error lines and the warnings below), quiet or not.
+			installOut := setup.ProjectInstallOutput{}
+			if quiet {
+				installOut = setup.QuietProjectInstallOutput()
+			}
+			if err := setup.InstallClaudeProjectTo(stealth, installOut); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to setup Claude hooks: %v\n", err)
 				// Non-fatal - continue with init
 			}
-			if err := setup.InstallCodexProject(); err != nil {
-				if !quiet {
-					fmt.Fprintf(os.Stderr, "Warning: failed to setup Codex integration: %v\n", err)
-				}
+			if err := setup.InstallCodexProjectTo(installOut); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to setup Codex integration: %v\n", err)
 				// Non-fatal - continue with init
 			}
-			if err := setup.InstallCursorProject(); err != nil {
-				if !quiet {
-					fmt.Fprintf(os.Stderr, "Warning: failed to setup Cursor integration: %v\n", err)
-				}
+			if err := setup.InstallCursorProjectTo(installOut); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to setup Cursor integration: %v\n", err)
 				// Non-fatal - continue with init
 			}
 		}

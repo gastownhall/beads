@@ -181,7 +181,8 @@ Key jobs preserved by display name:
 - `Check version consistency`, `Check no duplicate migration versions`,
   `Check doc flags freshness`, and PR-only `Check for .beads changes`.
 - `PR Policy (wrapper timing)`, `PR Core (wrapper timing)`, and
-  `PR Lint (wrapper timing)`.
+  `PR Lint (wrapper timing)` (superseded by F5's 3-leg `PR Lint (native|windows|darwin)`
+  matrix; this is a dated snapshot).
 - `Package Gate (MCP)`, `Package Gate (npm)`, and `Package Gate (website)`.
 - `Test (storage domain + uow)`.
 - `Build (Embedded Dolt)`, `Test (Embedded Dolt Storage N/5)`, and
@@ -200,9 +201,9 @@ Key jobs preserved by display name:
 |---|---|---|
 | `regression.yml` | Push to `main`, PR to `main`, manual | Detector runs regression on push/manual, PR label `run-regression`, or risky paths; test command is `go test -tags=regression,gms_pure_go -timeout=20m -v ./tests/regression/...`. |
 | `cross-version-smoke.yml` | Tags, PRs, manual | PRs test latest 5 releases, tags test latest 30, via `scripts/upgrade-smoke-test.sh`. |
-| `migration-test.yml` | Tags, manual | Builds candidate and runs `scripts/migration-test/run.sh`; not a PR/main gate. |
+| `migration-test.yml` | Tags, PRs touching upgrade-relevant code (advisory, path-filtered), manual | Builds candidate once per shard (3 shards, folded from 14 per-version legs, F7c) and loops `scripts/migration-test/run.sh --version` over each shard's versions; not a required PR/main gate. |
 | `nightly.yml` | Daily schedule, manual | `go test -v -race -tags=integration,gms_pure_go -coverprofile=coverage.out -timeout=30m ./...` with `BEADS_TEST_SKIP=dolt`; checks coverage >= 30%. |
-| `nix-build.yml` | PR/push paths for Nix or Go module files, manual | `nix build .#default --print-build-logs`. |
+| `nix-build.yml` | Push to `main` paths for Nix or Go module files, manual | `nix build .#default --print-build-logs`; no longer runs on `pull_request` (F7c, spec-f7.md §2.4) since PR Risk's required `test-nix` job (`nix run .#default` plus `nix flake check -L`) is a superset. |
 | `deploy-docs.yml` | Push to `main` paths `website/**` or `scripts/generate-llms-full.sh`, manual | `npm ci`, generate `llms-full.txt`, `npm run build`, internal link check, non-blocking external link check, deploy Pages. |
 | `release.yml` | Tags, manual from tag | GoReleaser, native macOS builds, macOS embedded smoke, release attestations/SBOM, Homebrew formula update, PyPI build/publish, npm publish. |
 | `test-pypi.yml` | Manual | Builds MCP package and publishes to TestPyPI. |

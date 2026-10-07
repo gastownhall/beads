@@ -77,11 +77,7 @@ func run(
 	if err != nil {
 		fmt.Fprintf(stderr, "\n%s❌ %v%s\n", red, err, reset)
 		if report.CanonicalVersion != "" {
-			fmt.Fprintf(
-				stderr,
-				"Run: scripts/update-versions.sh %s\nOr manually update the mismatched files.\n",
-				report.CanonicalVersion,
-			)
+			fmt.Fprintf(stderr, "\n%s\n", report.MismatchRemedy())
 		}
 		return 1
 	}

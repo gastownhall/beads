@@ -1,6 +1,6 @@
 # Linting Policy
 
-Last reviewed: 2026-09-13
+Last reviewed: 2026-10-03
 
 Freshness source: `.golangci.yml`, `scripts/ci/pr-lint.sh`, `scripts/pr-lint/`,
 `Makefile`, `.github/workflows/pr.yml`, and `.github/workflows/main.yml`.
@@ -9,18 +9,36 @@ This document explains the required Go lint gate for this codebase.
 
 ## Current Status
 
-Lint is a required CI gate, and it runs in TWO LANES over the same pinned
-golangci-lint v2.10.1 release and the same `.golangci.yml`. Each must pass with
-zero issues in its own scope.
+Lint is a required CI gate: ONE job per lane (`pr-lint-wrapper`), over the same
+pinned golangci-lint v2.10.1 release and the same `.golangci.yml`. Each lane
+must pass with zero issues in its own scope.
 
-- **The PR lane reports only what the PR introduces.** Both of its jobs are
-  scoped to the diff against the merge base with `main`: the `lint` job passes
-  `only-new-issues`, and `pr-lint-wrapper` runs the repository-owned
-  `ci-pr-lint` wrapper with `BD_LINT_NEW_FROM_MERGE_BASE`. A finding in code the
-  PR did not touch does not block it.
-- **The main lane sweeps the whole tree.** Both jobs run unscoped on every push
-  to `main`, so a finding that lands there reds main's own run rather than every
-  open PR.
+- **The PR lane reports only what the PR introduces.** `pr-lint-wrapper` runs
+  the repository-owned `ci-pr-lint` wrapper with `BD_LINT_NEW_FROM_MERGE_BASE`
+  set to the diff against the merge base with `main`. A finding in code the PR
+  did not touch does not block it. "New" is measured off the diff, so MOVED
+  CODE READS AS NEW: a pre-existing violation carried into a PR by a move or a
+  rename is reported against that PR and blocks it. Fix it or `//nolint` it
+  there — that is the accepted cost of the diff-scoped trade.
+- **The main lane sweeps the whole tree.** The same job runs on every push to
+  `main` with `BD_LINT_NEW_FROM_MERGE_BASE` unset, so a finding that lands
+  there reds main's own run rather than every open PR.
+
+`pr-lint-wrapper` is a 3-leg matrix, `matrix.target: [native, windows, darwin]`
+(`fail-fast: false`), one leg per `scripts/pr-lint` pass (see below); the gate
+requires the matrix's aggregate result under the same `PR_LINT_WRAPPER` id as
+before. A former separate `Lint` job (the `golangci-lint-action` with
+`only-new-issues`) was functionally identical to this matrix's native leg
+(same binary, config, flags and diff scope) and was folded into it; see #5629.
+
+Each leg installs golangci-lint from the pinned release binary
+(`scripts/ci/install-golangci-lint.sh`, sha256-verified) instead of
+`go install`, and restores a per-leg cache
+(`~/.cache/golangci-lint` plus a leg-specific `GOCACHE`) keyed on
+`.golangci.yml`, `go.sum` and the leg. A miss on the exact content key falls
+back to the leg's most recent entry; golangci-lint revalidates it against the
+current config and inputs, so a stale restore cannot mask an issue. pr.yml
+only ever restores; main.yml's matrix is the only saver, on an exact-key miss.
 
 Run the wrapper locally with:
 
@@ -52,9 +70,12 @@ failures remain attributable without duplicating target-selection policy in
 Bash.
 
 The shared driver owns the lint passes used by `scripts/ci/pr-lint.sh` and
-Beads-source `bd preflight`. The standalone workflow lint action and pre-commit
-hook do not call it. The hook uses changed-lines scope, adds `--fix`, and omits
-the Windows cross-lint pass. Workflow consolidation remains tracked in #5629.
+Beads-source `bd preflight`. The pre-commit hook does not call it: the hook
+uses changed-lines scope, adds `--fix`, and omits the Windows cross-lint pass.
+The driver honors `BD_LINT_TARGETS` (a comma list of `native`, `windows` and
+`darwin`; default all three) so each CI matrix leg can run just its own pass;
+`make ci-pr-lint` and `bd preflight` both leave it unset and keep running all
+three.
 
 The driver matches `.buildflags` when preparing `GOFLAGS`: appending
 `-tags=gms_pure_go` can override an inherited bare-Go tags value; it does not

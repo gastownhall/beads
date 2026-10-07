@@ -49,6 +49,7 @@ go_test(
         "//internal/storage/schema",
         "//internal/testutil",
         "//internal/testutil/bazeltest",
+        "@com_github_creack_pty//:pty",
     ],
 )
 
@@ -139,3 +140,25 @@ sh_test(
     shard_count = 8,
     tags = ["dolt-server"],
 )
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

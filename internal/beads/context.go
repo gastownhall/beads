@@ -348,6 +348,22 @@ func repoRootForBeadsDir(beadsDir string) string {
 	return filepath.Dir(beadsDir)
 }
 
+// RepoRootFor returns the git repository root containing dir, or "" when dir is
+// not inside a git repository (or when dir is empty). An empty result therefore
+// answers two questions at once: callers that need a path-scoped repo root get
+// it, and callers that only need to know whether a path is a repository at all
+// can test for "".
+func RepoRootFor(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	repoRoot, err := getRepoRootFromPath(dir)
+	if err != nil {
+		return ""
+	}
+	return repoRoot
+}
+
 // getRepoRootFromPath returns the git repository root for a given path.
 func getRepoRootFromPath(path string) (string, error) {
 	cmd := exec.Command("git", "-C", path, "rev-parse", "--show-toplevel")

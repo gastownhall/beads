@@ -56,12 +56,20 @@ case "$event_name" in
         fi
         ;;
     merge_group)
-        if git rev-parse --verify --quiet HEAD^ >/dev/null; then
-            if ! changed_files="$(git diff --name-only HEAD^ HEAD)"; then
-                run_all "merge-group diff failed; running all package gates"
-            fi
-        else
-            run_all "merge-group parent unavailable; running all package gates"
+        # PR_BASE_SHA/PR_HEAD_SHA carry merge_group.base_sha/head_sha here:
+        # the commit the queue entry is built on and the entry itself. Not
+        # HEAD^: a rebase-method queue entry stacks every commit of the PR,
+        # so its first parent would hide all but the last one. With the
+        # ALLGREEN grouping strategy every entry of a batch is checked, so
+        # each entry's own diff is enough. (With SQUASH, HEAD^ already was
+        # base_sha; this matters for the merge and rebase methods.) As with
+        # PR-time path filtering, entry N's gate does not re-test entry
+        # N-1's package change combined with N's; N-1's own run tested it.
+        if [[ -z "$pr_base_sha" || -z "$pr_head_sha" ]]; then
+            run_all "merge-group diff bounds unavailable; running all package gates"
+        fi
+        if ! changed_files="$(git diff --name-only "$pr_base_sha" "$pr_head_sha")"; then
+            run_all "merge-group diff failed; running all package gates"
         fi
         ;;
     *)
@@ -82,7 +90,12 @@ while IFS= read -r path; do
             ;;
     esac
     case "$path" in
-        scripts/ci/detect-package-gates.sh|.github/workflows/pr.yml|.github/workflows/main.yml|.github/workflows/pr-risk.yml|.github/workflows/ci-measurements.yml|Makefile)
+        # F3: package-mcp/package-npm's job definitions (this detect step
+        # included) now live in bazel.yml, not pr.yml, so a change there
+        # must run both gates the same way a pr.yml/main.yml change does.
+        # package-bazel-bd.sh packages the Bazel-built bd both gates use on
+        # the remote-execution path.
+        scripts/ci/detect-package-gates.sh|scripts/ci/package-bazel-bd.sh|.github/workflows/bazel.yml|.github/workflows/pr.yml|.github/workflows/main.yml|.github/workflows/pr-risk.yml|.github/workflows/ci-measurements.yml|Makefile)
             mcp_package=true
             npm_package=true
             ;;

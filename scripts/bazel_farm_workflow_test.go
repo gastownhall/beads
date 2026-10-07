@@ -209,8 +209,12 @@ func TestBazelFarmWorkflowSecurity(t *testing.T) {
 			gotSecrets[k] = fmt.Sprint(v)
 		}
 	}
-	if !reflect.DeepEqual(gotSecrets, bazelCallSecrets) {
-		t.Errorf("farm secrets = %v, want exactly %v", farm.Secrets, bazelCallSecrets)
+	// Exactly the four RBE secrets, never rbe-prewarm's two bazel-allocator
+	// app secrets (B1, security review of bdef342d5): this run executes an
+	// allowlisted fork author's own PR code, and those two secrets mint a
+	// token with write access to gastownhall/gascity.
+	if !reflect.DeepEqual(gotSecrets, bazelFarmCallSecrets) {
+		t.Errorf("farm secrets = %v, want exactly %v (no RBE_POOL_APP_*)", farm.Secrets, bazelFarmCallSecrets)
 	}
 	wantWith := map[string]string{
 		"checkout-sha":        "${{ github.event.pull_request.head.sha }}",
@@ -244,13 +248,25 @@ func TestBazelWorkflowForkFarmInputs(t *testing.T) {
 			}
 			checkouts++
 			want := map[string]string{"ref": bazelCheckoutRef, "persist-credentials": "false", "allow-unsafe-pr-checkout": bazelAllowUnsafeCheckout}
+			// F3: package-mcp/package-npm's detect step diffs PR_BASE_SHA
+			// against PR_HEAD_SHA (scripts/ci/detect-package-gates.sh, same
+			// as pr.yml's legacy detect job used); that needs full history,
+			// unlike every other lane's shallow, history-free checkout.
+			if bazelPackageJobs[name] {
+				want["fetch-depth"] = "0"
+			}
 			if !reflect.DeepEqual(step.With, want) {
 				t.Errorf("%s job %s checkout with = %v, want %v", bazelWorkflowName, name, step.With, want)
 			}
 		}
 	}
-	if checkouts != len(workflow.Jobs)-1 {
-		t.Errorf("%d checkouts in %s, want one per lane (%d)", checkouts, bazelWorkflowName, len(workflow.Jobs)-1)
+	// Every lane checks out the PR except rbe (decides the mode before any
+	// checkout) and rbe-prewarm (no checkout at all, by design: B1, security
+	// review of bdef342d5 - its dispatch logic is inlined into the job's own
+	// `run:` instead of a checked-out script file, so no step in this job
+	// ever reads repository content under the shared gascity credential).
+	if checkouts != len(workflow.Jobs)-2 {
+		t.Errorf("%d checkouts in %s, want one per lane excluding %s and %s (%d)", checkouts, bazelWorkflowName, bazelRBEJobName, bazelRBEPrewarmJobName, len(workflow.Jobs)-2)
 	}
 	if got := workflow.job(t, bazelRBEJobName).Steps[0].Env["FORK_FARM"]; got != bazelForkFarmValue {
 		t.Errorf("rbe FORK_FARM = %q, want %q", got, bazelForkFarmValue)

@@ -87,7 +87,7 @@ func TestExpandStep(t *testing.T) {
 		},
 	}
 
-	result, err := expandStep(target, template, 0, nil)
+	result, err := expandStep(target, template, nil)
 	if err != nil {
 		t.Fatalf("expandStep failed: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestExpandStepDepthLimit(t *testing.T) {
 
 	// With depth 0 start, going to level 6 means 7 levels total (0-6)
 	// DefaultMaxExpansionDepth is 5, so this should fail
-	_, err := expandStep(target, template, 0, nil)
+	_, err := expandStep(target, template, nil)
 	if err == nil {
 		t.Fatal("expected depth limit error, got nil")
 	}
@@ -159,7 +159,7 @@ func TestExpandStepDepthLimit(t *testing.T) {
 	}
 
 	shallowTemplate := []*Step{shallowChild}
-	result, err := expandStep(target, shallowTemplate, 0, nil)
+	result, err := expandStep(target, shallowTemplate, nil)
 	if err != nil {
 		t.Fatalf("expected shallow template to succeed, got: %v", err)
 	}

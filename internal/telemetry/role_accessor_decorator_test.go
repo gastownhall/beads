@@ -133,6 +133,9 @@ func (s *roleAccessorStore) TreeWalker() (issueops.TreeWalker, error) { return s
 func (s *roleAccessorStore) GraphCounter() (issueops.GraphCounter, error) {
 	return s.surface, s.err
 }
+func (s *roleAccessorStore) BatchGetter() (issueops.BatchGetter, error) {
+	return s.surface, s.err
+}
 func (s *roleAccessorStore) DetailBatchReader() (issueops.DetailBatchReader, error) {
 	return s.surface, s.err
 }
@@ -261,6 +264,9 @@ func (*roleAccessorSentinel) CountReady(context.Context, issueops.ReadyRequest) 
 func (*roleAccessorSentinel) CountEdges(context.Context, issueops.EdgeCountRequest) (issueops.EdgeCountResult, error) {
 	return issueops.EdgeCountResult{}, nil
 }
+func (*roleAccessorSentinel) GetMany(context.Context, issueops.GetManyRequest) (issueops.GetManyResult, error) {
+	return issueops.GetManyResult{}, nil
+}
 func (*roleAccessorSentinel) GetBatch(context.Context, issueops.DetailBatchRequest) (issueops.DetailBatchResult, error) {
 	return issueops.DetailBatchResult{}, nil
 }
@@ -361,6 +367,7 @@ func TestInstrumentedStorageInstrumentsEveryRoleAccessor(t *testing.T) {
 		{"BlockingAnnotator", func() (any, error) { return wrapped.BlockingAnnotator() }, sentinel},
 		{"TreeWalker", func() (any, error) { return wrapped.TreeWalker() }, sentinel},
 		{"GraphCounter", func() (any, error) { return wrapped.GraphCounter() }, sentinel},
+		{"BatchGetter", func() (any, error) { return wrapped.BatchGetter() }, sentinel},
 		{"DetailBatchReader", func() (any, error) { return wrapped.DetailBatchReader() }, sentinel},
 		{"Counter", func() (any, error) { return wrapped.Counter() }, sentinel},
 		{"WorkspaceConfig", func() (any, error) { return wrapped.WorkspaceConfig() }, sentinel},
@@ -447,6 +454,7 @@ func TestInstrumentedStorageRoleAccessorsPropagateInnerErrors(t *testing.T) {
 		{"BlockingAnnotator", func() (any, error) { return wrapped.BlockingAnnotator() }},
 		{"TreeWalker", func() (any, error) { return wrapped.TreeWalker() }},
 		{"GraphCounter", func() (any, error) { return wrapped.GraphCounter() }},
+		{"BatchGetter", func() (any, error) { return wrapped.BatchGetter() }},
 		{"DetailBatchReader", func() (any, error) { return wrapped.DetailBatchReader() }},
 		{"Counter", func() (any, error) { return wrapped.Counter() }},
 		{"WorkspaceConfig", func() (any, error) { return wrapped.WorkspaceConfig() }},

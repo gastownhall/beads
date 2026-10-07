@@ -93,6 +93,13 @@ func parseCountRequest(cmd *cobra.Command) (issueops.CountRequest, issueops.Coun
 	includeInfra, _ := cmd.Flags().GetBool("include-infra")
 	metadataFieldFlags, _ := cmd.Flags().GetStringArray("metadata-field")
 	includeEphemeral, _ := cmd.Flags().GetBool("include-ephemeral")
+	parentID, _ := cmd.Flags().GetString("parent")
+	noParent, _ := cmd.Flags().GetBool("no-parent")
+	if parentID != "" && noParent {
+		return issueops.CountRequest{}, "", HandleErrorRespectJSON("--parent and --no-parent are mutually exclusive")
+	}
+	excludeTypes, _ := cmd.Flags().GetStringSlice("exclude-type")
+	excludeStatus, _ := cmd.Flags().GetStringSlice("exclude-status")
 
 	request := issueops.CountRequest{
 		Status:        status,
@@ -111,6 +118,10 @@ func parseCountRequest(cmd *cobra.Command) (issueops.CountRequest, issueops.Coun
 		IncludeInfra:  includeInfra,
 
 		IncludeEphemeral: includeEphemeral,
+		ParentID:         parentID,
+		NoParent:         noParent,
+		ExcludeTypes:     excludeTypes,
+		ExcludeStatus:    excludeStatus,
 	}
 	if len(metadataFieldFlags) > 0 {
 		request.MetadataFields = make(map[string]string, len(metadataFieldFlags))
@@ -270,6 +281,18 @@ func registerCountFlags(cmd *cobra.Command) {
 	cmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE)")
 	cmd.Flags().String("title", "", "Filter by title text (case-insensitive substring match)")
 	cmd.Flags().String("id", "", "Filter by specific issue IDs (comma-separated)")
+
+	// Hierarchy and exclusions (same spelling as `bd list`'s flags of the same
+	// name, GH#4387's count/list parity): --parent and --no-parent restrict to
+	// a parent's children or to rows with no parent-child edge (an edge-less
+	// dotted-id child still counts as top-level, as in `bd list --no-parent`);
+	// --exclude-type and --exclude-status narrow the predicate by type and by
+	// status, composing with --include-infra's own exclusions rather than
+	// replacing them.
+	cmd.Flags().String("parent", "", "Filter by parent issue ID (count children of specified issue)")
+	cmd.Flags().Bool("no-parent", false, "Count only top-level issues (exclude child issues)")
+	cmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from the count (comma-separated or repeatable)")
+	cmd.Flags().StringSlice("exclude-status", nil, "Exclude statuses from the count (comma-separated or repeatable)")
 
 	// Pattern matching
 	cmd.Flags().String("title-contains", "", "Filter by title substring")

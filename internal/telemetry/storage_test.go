@@ -5,7 +5,15 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
 )
+
+// InstrumentedStorage forwards the optional prefix-read capability, which
+// callers find by type assertion — so a drifting method set would degrade
+// them to full scans silently. Pinned from the test build rather than
+// storage.go to keep the telemetry package free of a production dependency on
+// storage/domain.
+var _ domain.ConfigPrefixReader = (*InstrumentedStorage)(nil)
 
 // fakeDoltStore is a stub DoltStorage used to assert wrapper identity and
 // type chain. The embedded interface is nil; tests must not call any of its
