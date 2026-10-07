@@ -95,9 +95,13 @@ if `types.infra` is set in the configuration, exclude those types instead.
 - Counts are `dependency_count`, `dependent_count` and `comment_count`.
 - `revision` and the epic progress fields `epic_total_children`,
   `epic_closed_children` and `epic_closeable` come from the detail view.
+- `unresolvable_dependencies` and `unresolvable_dependents` also come from the
+  detail view. As in `bd show --json`, each counts the edges the relation list
+  cannot show, such as cross-repo and `external:` edges, and is null when
+  there are none.
 
 A field the row does not carry (relations, `comments`, `revision`, the epic
-fields) costs one extra issue read per issue. Within one request, a repeated
+and unresolvable fields) costs one extra issue read per issue. Within one request, a repeated
 read of the same issue for the same selection is served from a cache.
 
 ## Relations

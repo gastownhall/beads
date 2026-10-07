@@ -291,6 +291,18 @@ func TestGQLSelectionOptionsAndCache(t *testing.T) {
 	if len(rd.gets) != 1 || !rd.gets[0].IncludeDependents || rd.gets[0].IncludeComments {
 		t.Fatalf("epic options = %+v", rd.gets)
 	}
+	rd.gets = nil
+	unresolved := int64(2)
+	source.UnresolvableDependents = &unresolved
+	data, errs := run(t, rd, `{ issue(id:"a") { unresolvable_dependents unresolvable_dependencies } }`)
+	assertNoErrors(t, errs)
+	if len(rd.gets) != 1 || !rd.gets[0].IncludeDependents || rd.gets[0].IncludeComments {
+		t.Fatalf("unresolvable options = %+v", rd.gets)
+	}
+	got := data["issue"].(map[string]any)
+	if got["unresolvable_dependents"] != float64(2) || got["unresolvable_dependencies"] != nil {
+		t.Fatalf("unresolvable fields = %v", got)
+	}
 }
 func TestGQLPerSelectionCacheKeys(t *testing.T) {
 	rd := &fakeReader{issues: map[string]*types.IssueDetails{"a": detail("a")}}

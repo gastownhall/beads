@@ -69,7 +69,7 @@ func (q *queryResolver) longText(s string) (string, error) {
 
 func options(ctx context.Context) (bool, bool) {
 	dependents := graphql.HasSelectedField(ctx, "dependents")
-	for _, field := range []string{"epic_total_children", "epic_closed_children", "epic_closeable"} {
+	for _, field := range []string{"epic_total_children", "epic_closed_children", "epic_closeable", "unresolvable_dependents"} {
 		dependents = dependents || graphql.HasSelectedField(ctx, field)
 	}
 	return dependents, graphql.HasSelectedField(ctx, "comments")
@@ -471,6 +471,28 @@ func (r *issueResolver) EpicCloseable(ctx context.Context) (*bool, error) {
 	}
 	return d.EpicCloseable, nil
 }
+func (r *issueResolver) UnresolvableDependencies(ctx context.Context) (*int32, error) {
+	d, e := r.detail(ctx)
+	if e != nil {
+		return nil, e
+	}
+	if d.UnresolvableDependencies == nil {
+		return nil, nil
+	}
+	n, e := toInt32("unresolvable_dependencies", *d.UnresolvableDependencies)
+	return &n, e
+}
+func (r *issueResolver) UnresolvableDependents(ctx context.Context) (*int32, error) {
+	d, e := r.detail(ctx)
+	if e != nil {
+		return nil, e
+	}
+	if d.UnresolvableDependents == nil {
+		return nil, nil
+	}
+	n, e := toInt32("unresolvable_dependents", *d.UnresolvableDependents)
+	return &n, e
+}
 
 type relationResolver struct {
 	row *types.IssueWithDependencyMetadata
@@ -521,7 +543,7 @@ func (r *commentResolver) CreatedAt() graphql.Time { return graphql.Time{Time: r
 
 // toInt32 converts a count or level to GraphQL's 32-bit Int. A value that
 // does not fit is an error, never a truncated number.
-func toInt32(field string, v int) (int32, error) {
+func toInt32[T int | int64](field string, v T) (int32, error) {
 	if v < math.MinInt32 || v > math.MaxInt32 {
 		return 0, fmt.Errorf("%s value %d does not fit in a GraphQL Int", field, v)
 	}

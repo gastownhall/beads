@@ -72,6 +72,8 @@ type Issue {
   estimated_minutes: Int
   epic_total_children: Int
   epic_closed_children: Int
+  unresolvable_dependencies: Int
+  unresolvable_dependents: Int
   is_blocked: Boolean!
   ephemeral: Boolean!
   no_history: Boolean!
