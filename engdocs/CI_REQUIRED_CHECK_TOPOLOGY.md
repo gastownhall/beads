@@ -1186,38 +1186,53 @@ What stays a job, and why:
   `go build`), and attributes drift against the merge-base. Releases publish
   no pure-Go Linux binary a Bazel repository could pin by sha256.
 - The macOS and Windows legs of `check-doc-freshness-platforms` (no remote
-  workers for those hosts), on Blacksmith for same-repo PRs and merge groups.
+  workers for those hosts), on Blacksmith for every PR and merge group.
 
 `check-doc-freshness.sh` compares review dates with today's date, which is
 not in the action key: a cached pass stands until one of its inputs changes,
 and nightly's `--config=fresh` run re-checks it against the date.
 
-### Same-Repo Blacksmith macOS Legs
+### Blacksmith Windows and macOS Jobs
 
-pr.yml's two mixed-OS matrix jobs, `pr-preflight-platforms` and
-`check-doc-freshness-platforms`, run their macOS leg on
-`blacksmith-6vcpu-macos-26` (Apple Silicon) for same-repo PRs and
-merge_group, through the same `runner: same-repo-macos` matrix marker and
-same-repo expression their Linux/Windows legs use. Forks, Dependabot and
-every other event keep GitHub-hosted `macos-latest`. They are the only PR
+Every Windows and macOS job runs on Blacksmith for every PR and merge group,
+forks and Dependabot included (ga-96smfk.22); everything Linux runs under
+Bazel on rbe-west. pr.yml's Windows jobs (`test-windows-liveness`,
+`test-windows-small`, `worktree-remove-windows`, `windows-make-shell`) name
+their `blacksmith-*vcpu-windows-2025` label literally; the two mixed-OS
+matrix jobs, `pr-preflight-platforms` and `check-doc-freshness-platforms`,
+run a macOS leg on `blacksmith-6vcpu-macos-26` (Apple Silicon) and a Windows
+leg on `blacksmith-4vcpu-windows-2025`, each leg naming its label in the
+matrix (`runs-on: ${{ matrix.runner }}`). There is no GitHub-hosted fallback:
+Blacksmith serves this org's fork PRs (gascity's fork PRs run their CI on
+`blacksmith-*` labels). Fork runs get no secrets and a read-only token
+(`TestBlacksmithJobsReadNoSecrets` keeps every Blacksmith job free of secret
+reads), each job runs in a fresh VM, and the repository's fork-PR approval
+setting stays the boundary for who may run code there (a fork's own workflow
+file controls `runs-on` anyway). `release.yml` and `nightly.yml` are not PR
+checks and keep their own runners.
+
+The Linux leg of `pr-preflight-platforms` and the Linux-cross-compiled
+Windows test binaries (`windows-test-binaries`, its "-prebuilt" twins,
+main.yml's `windows-test-binaries-cache` and the `WINDOWS_PREBUILT_REQUIRED`
+flag) are retired: Bazel runs the Linux leg's tests, and the native Windows
+pair (`test-windows-liveness`, `worktree-remove-windows`) is the required
+run of the twins' tests.
 macOS jobs; `release.yml` stays on `macos-latest`.
 
 - **Label.** Pinned to `macos-26` because GitHub's `macos-latest` resolves to
   `macos-26-arm64` today, so both paths run the same OS and architecture and
   the PR legs and their saver never straddle a Blacksmith `-latest` alias
-  move. Bump it when GitHub moves `macos-latest`. 6 vCPU is already twice
-  `macos-latest`'s 3 vCPU; 12 vCPU is not justified for legs dominated by one
-  incremental `./cmd/bd` test compile.
+  move. Bump it when GitHub moves `macos-latest`. 12 vCPU is not justified
+  for legs dominated by one incremental `./cmd/bd` test compile.
 - **Caches.** The legs stay restore-only (`setup-go` `cache: false`,
   `actions/cache/restore`). Blacksmith cannot see GitHub-saved caches, so
   main.yml's `blacksmith-macos-go-build-cache` job is their seeder: same
   label, push-to-main-only job guard, module cache plus a non-race GOCACHE
   keyed by `go.sum` and UTC day, warmed by the shared
-  `scripts/ci/warm-non-race-cache.sh`. Its `github` venue leg seeds the
-  fork path (`macos-latest`) the same way; main.yml's `test` job (the macOS
-  full suite) runs on the same Blacksmith label and restores the Blacksmith
-  leg's caches.
-- **Pins.** `TestSameRepoPlatformsMatrixMarkerRunsOnExpressionSemantics`,
+  `scripts/ci/warm-non-race-cache.sh`. main.yml's `test` job (the macOS
+  full suite) runs on the same label and restores its caches. main.yml's
+  `test-windows` seeds the Windows legs the same way.
+- **Pins.** `TestBlacksmithWindowsMacOSRunsOnEveryEvent`,
   `TestBlacksmithMacOSSaverMatchesPRLegs`,
   `TestBlacksmithSaverJobsGuardedAgainstPullRequest`,
   `TestBlacksmithSaverCacheKeysAreNotPerCommit`,
@@ -1408,21 +1423,17 @@ check read.
 Non-Bazel required jobs re-run in full on every merge group (approximate
 PR timings, 2026-10): `fast-checks` (~40 s), `pr-policy-wrapper`
 (~2.5 min), `check-doc-flags` (~1.7 min),
-`check-doc-freshness-platforms` and `pr-preflight-platforms` (Linux,
-Windows and macOS legs, up to ~5 min on Windows),
-`windows-make-shell` (~2.7 min),
-`windows-test-binaries` plus the prebuilt Windows pair (~7 min end to
-end), the advisory native Windows pair (~5 min; the gate waits for them),
+`check-doc-freshness-platforms` and `pr-preflight-platforms` (Windows and
+macOS legs, up to ~5 min on Windows),
+`windows-make-shell` (~2.7 min), the native Windows pair
+(`test-windows-liveness`, `worktree-remove-windows`, ~1-5 min),
 `test-nix` (~3 min) and the package gates (seconds unless their paths
 changed). None caches results the way Bazel does; most are cheap or
-already path- or tier-gated. Candidates to skip on `merge_group`, not
-done here: the advisory native Windows pair (`test-windows-liveness`,
-`worktree-remove-windows`, advisory while `WINDOWS_PREBUILT_REQUIRED` is
-`"true"`), and the macOS legs of the preflight/doc-freshness matrices
+already path- or tier-gated. A candidate to skip on `merge_group`, not
+done here: the macOS legs of the preflight/doc-freshness matrices
 (platform behavior the PR run already checked on the same inputs). With
-result reuse the merge group's critical path is the Windows
-cross-compile and the Windows matrix legs (~5-7 min), not the Bazel
-lanes once their tests are cached. An entry's first build after a base
+result reuse the merge group's critical path is the Windows legs
+(~5 min), not the Bazel lanes once their tests are cached. An entry's first build after a base
 change still compiles what changed.
 
 ### Failures and flakes
@@ -1516,7 +1527,10 @@ PRs off Blacksmith entirely and back onto `ubuntu-latest`:
    Blacksmith cache seeds and the `scripts-go-checks`/`pr-lint-wrapper`/
    preflight/doc-freshness runner moves, including the preflight/
    doc-freshness macOS legs and `blacksmith-macos-go-build-cache`
-   ([Same-Repo Blacksmith macOS Legs](#same-repo-blacksmith-macos-legs)).
+   ([Blacksmith Windows and macOS Jobs](#blacksmith-windows-and-macos-jobs)).
+5. **ga-96smfk.22** — the Windows and macOS jobs' literal Blacksmith labels
+   ([Blacksmith Windows and macOS Jobs](#blacksmith-windows-and-macos-jobs)):
+   during an outage point them back at `windows-latest` / `macos-latest`.
 
 F7c (the advisory workflows) is excluded from this list: it is advisory only,
 so leaving it on Blacksmith during an outage delays non-required checks but

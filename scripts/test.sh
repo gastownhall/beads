@@ -205,8 +205,7 @@ elif [[ "${BEADS_TEST_SHARED_SERVER:-}" == "1" ]]; then
 fi
 
 # BEADS_TEST_PREBUILT_TEST_BINARY short-circuits straight to a `go test -c`
-# binary (typically cross-compiled on a different host; see
-# scripts/ci/build-windows-test-binaries.sh and
+# binary (for example one cross-compiled on a different host; see
 # scripts/ci/run-go-test-binary.sh) instead of invoking `go test`. It still
 # gets test.sh's env isolation (beads_test_env_enter above), the .test-skip
 # pattern, and the -p/-parallel/-timeout defaults -- only the final

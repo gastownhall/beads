@@ -194,19 +194,15 @@ func TestBlacksmithSaverCacheKeysAreNotPerCommit(t *testing.T) {
 }
 
 // TestBlacksmithSaverVenueAndFlavorMatricesAreComplete re-pins mutations the
-// reviewer's mutate.py found surviving against pre-fix code (M8, M9): main.yml's
-// "venue matrix" savers (test-windows and the macOS Go build cache saver)
-// must each keep BOTH the `blacksmith` leg (the actual same-repo-PR seed) and
-// the `github` leg (that job's pre-existing fork-PR/GitHub-hosted coverage)
-// -- dropping either silently loses a cache seed with no test noticing
-// (TestSameRepoBlacksmithRunners only pins the runs-on ternary string, which
-// does not change shape if a matrix axis's value list shrinks).
+// reviewer's mutate.py found surviving against pre-fix code (M8, M9). The
+// Windows and macOS savers (test-windows, blacksmith-macos-go-build-cache)
+// run one Blacksmith leg only: no GitHub-hosted Windows or macOS PR leg is
+// left to seed (ga-96smfk.22).
 func TestBlacksmithSaverVenueAndFlavorMatricesAreComplete(t *testing.T) {
 	workflow := readCIWorkflow(t, "main.yml")
 	for _, jobName := range []string{"test-windows", "blacksmith-macos-go-build-cache"} {
-		job := workflow.job(t, jobName)
-		if got := job.Strategy.Matrix.Venue; !equalStrings(got, []string{"blacksmith", "github"}) {
-			t.Errorf("main.yml's %s matrix.venue = %v, want [blacksmith github]", jobName, got)
+		if m := workflow.job(t, jobName).Strategy.Matrix; len(m.Venue) != 0 || len(m.Include) != 0 {
+			t.Errorf("main.yml's %s has a matrix %+v; it seeds the one Blacksmith label its PR legs run on", jobName, m)
 		}
 	}
 }
@@ -252,55 +248,38 @@ var blacksmithMacOSPRLegJobs = []string{"pr-preflight-platforms", "check-doc-fre
 // TestBlacksmithMacOSSaverMatchesPRLegs pins the contract between pr.yml's
 // macOS PR legs and their only seeder, main.yml's
 // blacksmith-macos-go-build-cache: Blacksmith cannot see GitHub-saved caches
-// (and vice versa), so the saver must run on exactly the labels a same-repo
-// and a fork PR's macOS leg resolve to, write the cache path/key family those legs
-// restore, and compile what they compile (the shared warm-up). The PR legs
-// stay restore-only and are inside the default-caching-action sweep.
+// (and vice versa), so the saver must run on exactly the label every PR's
+// macOS leg runs on (forks included), write the cache path/key family those
+// legs restore, and compile what they compile (the shared warm-up). The PR
+// legs stay restore-only and are inside the default-caching-action sweep.
 func TestBlacksmithMacOSSaverMatchesPRLegs(t *testing.T) {
 	pr := readCIWorkflow(t, "pr.yml")
 	mainWF := readCIWorkflow(t, "main.yml")
 	saver := mainWF.job(t, "blacksmith-macos-go-build-cache")
 
-	const ownRepo = "gastownhall/beads"
-	sameRepoMacOS := map[string]string{
-		"github.event_name":                             "pull_request",
-		"github.event.pull_request.head.repo.full_name": ownRepo,
-		"github.repository":                             ownRepo,
-		"github.actor":                                  "alice",
-		"matrix.runner":                                 "same-repo-macos",
-		"matrix.os":                                     "macos-latest",
-	}
-	forkMacOS := map[string]string{
-		"github.event_name":                             "pull_request",
-		"github.event.pull_request.head.repo.full_name": "someone/beads",
-		"github.repository":                             ownRepo,
-		"github.actor":                                  "someone",
-		"matrix.runner":                                 "same-repo-macos",
-		"matrix.os":                                     macOSRunner,
-	}
-	// One leg per venue: the Blacksmith leg seeds same-repo PRs, the github
-	// leg the fork/Dependabot macos-latest path.
-	if want := "${{ matrix.venue == 'blacksmith' && '" + blacksmithMacOSLabel + "' || '" + macOSRunner + "' }}"; saver.RunsOn != want {
+	if want := "${{ '" + blacksmithMacOSLabel + "' }}"; saver.RunsOn != want {
 		t.Errorf("blacksmith-macos-go-build-cache runs-on = %q, want %q", saver.RunsOn, want)
 	}
-	if saver.TimeoutMinutes == 0 || len(saver.Strategy.Matrix.Include) != 0 || !equalStrings(saver.Strategy.Matrix.Venue, []string{"blacksmith", "github"}) {
-		t.Errorf("blacksmith-macos-go-build-cache timeout=%d include=%v venue=%v, want a timeout and one leg per venue [blacksmith github]",
-			saver.TimeoutMinutes, saver.Strategy.Matrix.Include, saver.Strategy.Matrix.Venue)
+	if saver.TimeoutMinutes == 0 {
+		t.Error("blacksmith-macos-go-build-cache has no timeout-minutes")
 	}
 
 	saverSave := saver.step(t, "Save non-race Go build cache")
 	for _, jobName := range blacksmithMacOSPRLegJobs {
 		job := pr.job(t, jobName)
-		// The default-caching sweep (TestBlacksmithReachablePRJobsDisableDefaultCachingActions)
-		// and the no-secrets sweep select jobs by a blacksmith- runs-on.
-		if !strings.Contains(job.RunsOn, "'"+blacksmithMacOSLabel+"'") || !strings.Contains(job.RunsOn, "blacksmith-") {
-			t.Errorf("pr.yml %s runs-on %q does not name %s", jobName, job.RunsOn, blacksmithMacOSLabel)
+		// Every PR's macOS leg, forks included, runs on the saver's label.
+		macOSLegs := 0
+		for _, leg := range job.Strategy.Matrix.Include {
+			if leg.OS != macOSRunner {
+				continue
+			}
+			macOSLegs++
+			if got := mustEvalGHRunsOn(t, job.RunsOn, map[string]string{"matrix.runner": leg.Runner, "matrix.os": leg.OS}); got != blacksmithMacOSLabel {
+				t.Errorf("pr.yml %s macOS leg resolves to %q, want the saver's %q", jobName, got, blacksmithMacOSLabel)
+			}
 		}
-		if got := mustEvalGHRunsOn(t, job.RunsOn, sameRepoMacOS); got != blacksmithMacOSLabel {
-			t.Errorf("pr.yml %s same-repo macOS leg resolves to %q, want the saver's %q", jobName, got, blacksmithMacOSLabel)
-		}
-		if got := mustEvalGHRunsOn(t, job.RunsOn, forkMacOS); got != macOSRunner {
-			t.Errorf("pr.yml %s fork macOS leg resolves to %q, want the saver's github leg %q", jobName, got, macOSRunner)
+		if macOSLegs != 1 {
+			t.Errorf("pr.yml %s has %d macOS legs, want 1", jobName, macOSLegs)
 		}
 		if setup := job.step(t, "Set up Go"); setup.With["cache"] != "false" {
 			t.Errorf("pr.yml %s Set up Go cache = %q, want \"false\"", jobName, setup.With["cache"])

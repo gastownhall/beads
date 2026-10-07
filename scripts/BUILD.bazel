@@ -56,7 +56,6 @@ go_test(
         "required_suite_test.go",
         "test_script_test.go",
         "upgrade_smoke_loop_test.go",
-        "windows_test_binaries_manifest_test.go",
     ],
     data = [
         "//:repo_files",

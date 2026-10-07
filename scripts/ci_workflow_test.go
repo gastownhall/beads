@@ -316,7 +316,7 @@ func TestPRWorkflowExercisesNativeUserConfigDiagnostics(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "pr-preflight-platforms")
 	// The benchmark-environment test owns the shared job and matrix shape.
-	wantHosts := map[string]string{"ubuntu-latest": "linux", "macos-latest": "darwin", "windows-latest": "windows"}
+	wantHosts := map[string]string{"macos-latest": "darwin", "windows-latest": "windows"}
 	gotHosts := make(map[string][]string)
 	for _, tuple := range job.Strategy.Matrix.Include {
 		gotHosts[tuple.OS] = append(gotHosts[tuple.OS], tuple.ExpectedGOOS)
@@ -356,8 +356,8 @@ func TestPRWorkflowRequiresNativeInitGatewayCredential(t *testing.T) {
 
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, jobName)
-	if job.RunsOn != sameRepoPlatformsMatrixMarkerRunsOn || !equalStrings(matrixIncludeHosts(job.Strategy.Matrix.Include), []string{"macos-latest", "ubuntu-latest", "windows-latest"}) {
-		t.Errorf("credential shell boundary requires the native three-host matrix: runner=%q include=%v", job.RunsOn, job.Strategy.Matrix.Include)
+	if job.RunsOn != platformsMatrixRunsOn || !equalStrings(matrixIncludeHosts(job.Strategy.Matrix.Include), []string{"macos-latest", "windows-latest"}) {
+		t.Errorf("credential shell boundary requires the native macOS/Windows matrix: runner=%q include=%v", job.RunsOn, job.Strategy.Matrix.Include)
 	}
 	if job.If != "" || job.ContinueOnError {
 		t.Errorf("credential process job is bypassable: if=%q continue-on-error=%v", job.If, job.ContinueOnError)
@@ -458,11 +458,16 @@ func TestPRWorkflowExercisesWindowsBenchmarkEnvScrubbing(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "pr-preflight-platforms")
 
-	if job.RunsOn != sameRepoPlatformsMatrixMarkerRunsOn {
-		t.Errorf("pr-preflight-platforms runs-on = %q, want the matrix-marker chained ternary", job.RunsOn)
+	if job.RunsOn != platformsMatrixRunsOn {
+		t.Errorf("pr-preflight-platforms runs-on = %q, want the per-leg Blacksmith label", job.RunsOn)
 	}
-	if got := matrixIncludeHosts(job.Strategy.Matrix.Include); !equalStrings(got, []string{"macos-latest", "ubuntu-latest", "windows-latest"}) {
-		t.Errorf("pr-preflight-platforms matrix os = %v, want required three-host matrix", got)
+	if got := matrixIncludeHosts(job.Strategy.Matrix.Include); !equalStrings(got, []string{"macos-latest", "windows-latest"}) {
+		t.Errorf("pr-preflight-platforms matrix os = %v, want the macOS and Windows hosts (Linux runs under Bazel)", got)
+	}
+	for _, tuple := range job.Strategy.Matrix.Include {
+		if tuple.Runner != platformsMatrixRunners[tuple.OS] {
+			t.Errorf("pr-preflight-platforms %s leg runner = %q, want %q", tuple.OS, tuple.Runner, platformsMatrixRunners[tuple.OS])
+		}
 	}
 	if job.If != "" {
 		t.Errorf("pr-preflight-platforms job is conditional: %q", job.If)
@@ -589,20 +594,22 @@ func TestPRCIGateRequiresWindowsGlobalPrimeOverride(t *testing.T) {
 	gate := workflow.job(t, "ci-gate")
 	evaluate := gate.step(t, "Evaluate CI gate")
 	env := evaluate.Env
-	// F4 side-by-side rollout (SF-5): TEST_WINDOWS_LIVENESS is no longer in
-	// the static CI_GATE_REQUIRED list -- the WINDOWS_PREBUILT_REQUIRED flag
-	// mechanism (TestWindowsPrebuiltRequiredFlagMechanism,
-	// scripts/windows_test_binaries_manifest_test.go) adds it dynamically in
-	// the run script. Since the rollout finished the flag is "true": the
-	// prebuilt pair is required and the native pair stays wired (advisory)
-	// for a one-line rollback. Check that wiring here instead of the old
-	// static list membership.
-	if !contains(gate.Needs, "test-windows-liveness") ||
-		env["TEST_WINDOWS_LIVENESS"] != "${{ needs.test-windows-liveness.result }}" ||
-		workflow.Env["WINDOWS_PREBUILT_REQUIRED"] != "true" ||
-		!strings.Contains(evaluate.Run, `CI_GATE_REQUIRED="$CI_GATE_REQUIRED TEST_WINDOWS_LIVENESS WORKTREE_REMOVE_WINDOWS"`) ||
-		!strings.Contains(evaluate.Run, `CI_GATE_REQUIRED="$CI_GATE_REQUIRED TEST_WINDOWS_LIVENESS_PREBUILT WORKTREE_REMOVE_WINDOWS_PREBUILT"`) {
-		t.Fatal("CI gate must keep both Windows pairs wired and require the prebuilt pair (WINDOWS_PREBUILT_REQUIRED=\"true\"); the native pair stays wired for rollback")
+	// The native pair is the required run of these tests (ga-96smfk.22
+	// retired the Linux-cross-compiled "-prebuilt" twins and the
+	// WINDOWS_PREBUILT_REQUIRED flag): statically in CI_GATE_REQUIRED.
+	required := strings.Fields(env["CI_GATE_REQUIRED"])
+	for job, id := range map[string]string{"test-windows-liveness": "TEST_WINDOWS_LIVENESS", "worktree-remove-windows": "WORKTREE_REMOVE_WINDOWS"} {
+		if !contains(gate.Needs, job) || env[id] != "${{ needs."+job+".result }}" || !contains(required, id) {
+			t.Errorf("CI gate must require %s (%s)", job, id)
+		}
+	}
+	for _, retired := range []string{"windows-test-binaries", "test-windows-liveness-prebuilt", "worktree-remove-windows-prebuilt"} {
+		if _, ok := workflow.Jobs[retired]; ok || contains(gate.Needs, retired) {
+			t.Errorf("pr.yml has retired job %s", retired)
+		}
+	}
+	if _, ok := workflow.Env["WINDOWS_PREBUILT_REQUIRED"]; ok || strings.Contains(evaluate.Run, "PREBUILT") {
+		t.Error("pr.yml still carries the retired WINDOWS_PREBUILT_REQUIRED switch")
 	}
 }
 
@@ -616,8 +623,8 @@ func TestPRCIGateRequiresGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, jobName)
-	if job.RunsOn != sameRepoPlatformsMatrixMarkerRunsOn || !equalStrings(matrixIncludeHosts(job.Strategy.Matrix.Include), []string{"macos-latest", "ubuntu-latest", "windows-latest"}) {
-		t.Errorf("generated-hook process job is not the required three-host matrix: runs-on=%q include=%v", job.RunsOn, job.Strategy.Matrix.Include)
+	if job.RunsOn != platformsMatrixRunsOn || !equalStrings(matrixIncludeHosts(job.Strategy.Matrix.Include), []string{"macos-latest", "windows-latest"}) {
+		t.Errorf("generated-hook process job is not the required macOS/Windows matrix: runs-on=%q include=%v", job.RunsOn, job.Strategy.Matrix.Include)
 	}
 	if job.TimeoutMinutes != 20 {
 		t.Errorf("generated-hook process job timeout = %d minutes, want 20", job.TimeoutMinutes)
@@ -749,15 +756,15 @@ func TestNightlyRunsNoGoTestOnARunner(t *testing.T) {
 func TestPRPreflightPlatformsRunsTestScriptPrebuiltBinaryContract(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "pr-preflight-platforms")
-	if job.RunsOn != sameRepoPlatformsMatrixMarkerRunsOn {
-		t.Errorf("pr-preflight-platforms runs-on = %q, want the matrix-marker chained ternary", job.RunsOn)
+	if job.RunsOn != platformsMatrixRunsOn {
+		t.Errorf("pr-preflight-platforms runs-on = %q, want the per-leg Blacksmith label", job.RunsOn)
 	}
 	if job.If != "" || job.TimeoutMinutes != 20 {
 		t.Errorf("pr-preflight-platforms condition/timeout = %q/%d, want unconditional/20",
 			job.If, job.TimeoutMinutes)
 	}
-	if got := matrixIncludeHosts(job.Strategy.Matrix.Include); !equalStrings(got, []string{"macos-latest", "ubuntu-latest", "windows-latest"}) {
-		t.Errorf("pr-preflight-platforms matrix os = %v, want all three hosted platforms", got)
+	if got := matrixIncludeHosts(job.Strategy.Matrix.Include); !equalStrings(got, []string{"macos-latest", "windows-latest"}) {
+		t.Errorf("pr-preflight-platforms matrix os = %v, want the macOS and Windows hosts", got)
 	}
 
 	const stepName = "Exercise test.sh prebuilt binary path"
@@ -789,7 +796,7 @@ func TestRepositoryTextEOLPolicyWorkflow(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "check-doc-freshness-platforms")
 
-	if want := sameRepoPlatformsMatrixMarkerRunsOn; job.RunsOn != want {
+	if want := platformsMatrixRunsOn; job.RunsOn != want {
 		t.Errorf("check-doc-freshness-platforms runs-on = %q, want %q", job.RunsOn, want)
 	}
 	// The Linux leg runs in Bazel (TestDocFreshnessLinuxLegRunsInBazel);
@@ -798,14 +805,9 @@ func TestRepositoryTextEOLPolicyWorkflow(t *testing.T) {
 		"macos-latest":   "darwin",
 		"windows-latest": "windows",
 	}
-	// F7b: each host's include tuple also carries a "runner" marker
-	// (same-repo-macos/-windows) that sameRepoPlatformsMatrixMarkerRunsOn
-	// resolves against; check it matches the host instead of treating it as an
-	// unexpected field.
-	wantRunnerMarker := map[string]string{
-		"macos-latest":   "same-repo-macos",
-		"windows-latest": "same-repo-windows",
-	}
+	// Each host's include tuple names its Blacksmith label in "runner"
+	// (platformsMatrixRunsOn), for every PR, forks included.
+	wantRunnerMarker := platformsMatrixRunners
 	if len(job.Strategy.Matrix.OS) != 0 {
 		t.Errorf("check-doc-freshness-platforms retains an unbound os-list matrix: %v", job.Strategy.Matrix.OS)
 	}
@@ -827,7 +829,7 @@ func TestRepositoryTextEOLPolicyWorkflow(t *testing.T) {
 			t.Errorf("runner %q expected_goos = %q, want %q", tuple.OS, tuple.ExpectedGOOS, wantGOOS)
 		}
 		if tuple.Runner != wantRunnerMarker[tuple.OS] {
-			t.Errorf("runner %q matrix runner marker = %q, want %q", tuple.OS, tuple.Runner, wantRunnerMarker[tuple.OS])
+			t.Errorf("runner %q matrix runner label = %q, want %q", tuple.OS, tuple.Runner, wantRunnerMarker[tuple.OS])
 		}
 		if tuple.Coverage || tuple.TestFlags != "" {
 			t.Errorf(
@@ -906,11 +908,6 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheInventory(t, workflows["main.yml"].job(t, "test-windows"), []goCacheStep{
 		mainRestoreModuleCache(), mainRestoreBuildCacheDayBucketedIf("non-race", ""), saveModuleCache(), saveBuildCacheDayBucketed("non-race"),
 	})
-	// F4.7: seeds the module and xcompile caches pr.yml's windows-test-binaries
-	// job only restores (PR workflows never save).
-	assertGoCacheInventory(t, workflows["main.yml"].job(t, "windows-test-binaries-cache"), []goCacheStep{
-		mainRestoreModuleCache(), mainRestoreXCompileCache(), saveModuleCacheAfterFailure(), saveXCompileCache(),
-	})
 	// macOS saver for pr-preflight-platforms'/check-doc-freshness-platforms'
 	// macOS legs: its blacksmith venue leg seeds the same-repo path (and the
 	// `test` job), its github leg the fork path.
@@ -923,15 +920,6 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "worktree-remove-windows"), []goCacheStep{
 		restoreModuleCache(), restoreBuildCache("non-race"),
-	})
-	// F4.4 advisory phase: windows-test-binaries cross-compiles on Linux and
-	// only restores (never saves; main.yml's windows-test-binaries-cache job
-	// is the saver). Its "-prebuilt" twins (test-windows-liveness-prebuilt,
-	// worktree-remove-windows-prebuilt) download the resulting artifact and
-	// run the binaries directly, so they use no Go cache action at all and
-	// need no entry here or in the managed map below.
-	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "windows-test-binaries"), []goCacheStep{
-		restoreModuleCache(), restoreXCompileCache(),
 	})
 	// F7b review (S2): restore-only non-race Go build cache seeded by
 	// main.yml's test-windows Blacksmith leg (warm-non-race-cache.sh) on the
@@ -960,13 +948,11 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertNoUnmanagedGoCacheSteps(t, workflows, map[string]map[string]bool{
 		"main.yml": {
 			"test": true, "test-windows": true,
-			"windows-test-binaries-cache":     true,
 			"blacksmith-macos-go-build-cache": true,
 		},
 		"pr.yml": {
 			"worktree-remove-windows":       true,
 			"check-doc-freshness-platforms": true, "pr-preflight-platforms": true, "advisory-reports": true,
-			"windows-test-binaries": true,
 			"test-windows-liveness": true,
 		},
 		"pr-risk.yml": {},
@@ -982,16 +968,6 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertStepsBefore(t, mainWindows, []string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Build (pure Go regex)"})
 	assertStepsBefore(t, mainWindows, []string{"Build (pure Go regex)", "Smoke test - version", "Smoke test - help"}, []string{"Save Go module cache", "Save non-race Go build cache"})
 
-	prXCompile := workflows["pr.yml"].job(t, "windows-test-binaries")
-	assertStepsBefore(t, prXCompile, []string{"Restore Go module cache"}, []string{"Verify Go module checksums", "Build Windows test binaries"})
-	assertStepsBefore(t, prXCompile, []string{"Install mingw cross-compiler", "Restore Go build cache (Windows cross-compile)"}, []string{"Build Windows test binaries"})
-	assertStepsBefore(t, prXCompile, []string{"Build Windows test binaries"}, []string{"Upload Windows test binaries"})
-
-	mainXCompileCache := workflows["main.yml"].job(t, "windows-test-binaries-cache")
-	assertStepsBefore(t, mainXCompileCache, []string{"Restore Go module cache"}, []string{"Install mingw cross-compiler", "Build Windows test binaries"})
-	assertStepsBefore(t, mainXCompileCache, []string{"Install mingw cross-compiler", "Restore Go build cache (Windows cross-compile)"}, []string{"Build Windows test binaries"})
-	assertStepsBefore(t, mainXCompileCache, []string{"Build Windows test binaries"}, []string{"Save Go module cache", "Save Go build cache (Windows cross-compile)"})
-
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "worktree-remove-windows"),
 		[]string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Run native Windows worktree removal boundary tests"})
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "check-doc-freshness-platforms"),
@@ -1004,8 +980,6 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test"), "Build", "non-race")
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test"), "Test", "race")
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test-windows"), "Build (pure Go regex)", "non-race")
-	assertGoCacheEnv(t, workflows["main.yml"].job(t, "windows-test-binaries-cache"), "Build Windows test binaries", xcompileCacheProfile())
-	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "windows-test-binaries"), "Build Windows test binaries", xcompileCacheProfile())
 	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "worktree-remove-windows"), "Run native Windows worktree removal boundary tests", "non-race")
 	for _, workflowName := range []string{"pr.yml", "pr-risk.yml"} {
 		for jobName, job := range workflows[workflowName].Jobs {
@@ -1019,18 +993,14 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	}
 
 	assertGoCacheWriter(t, workflows["main.yml"], "test", mainBlacksmithMacOSTestRunsOn, "Save race Go build cache", failureSurvivingCacheSaveCondition(cacheMissCondition(goBuildCacheRestoreID("race"))))
-	assertGoCacheWriter(t, workflows["main.yml"], "test-windows", mainVenueBlacksmithWindows4vcpuRunsOn, "Save Go module cache", cacheMissCondition(goModuleCacheRestoreID))
-	assertGoCacheWriter(t, workflows["main.yml"], "test-windows", mainVenueBlacksmithWindows4vcpuRunsOn, "Save non-race Go build cache", cacheMissCondition(goBuildCacheRestoreID("non-race")))
+	assertGoCacheWriter(t, workflows["main.yml"], "test-windows", mainBlacksmithWindows4vcpuRunsOn, "Save Go module cache", cacheMissCondition(goModuleCacheRestoreID))
+	assertGoCacheWriter(t, workflows["main.yml"], "test-windows", mainBlacksmithWindows4vcpuRunsOn, "Save non-race Go build cache", cacheMissCondition(goBuildCacheRestoreID("non-race")))
 	assertGoCacheWriter(t, workflows["main.yml"], "blacksmith-macos-go-build-cache", mainBlacksmithMacOSGoBuildCacheRunsOn, "Save Go module cache", saveModuleCacheAfterFailure().ifCondition)
 	assertGoCacheWriter(t, workflows["main.yml"], "blacksmith-macos-go-build-cache", mainBlacksmithMacOSGoBuildCacheRunsOn, "Save non-race Go build cache", saveBuildCacheAfterFailureIf("non-race", "").ifCondition)
-	assertGoCacheWriter(t, workflows["main.yml"], "windows-test-binaries-cache", mainWindowsTestBinariesCacheRunsOn, "Save Go module cache", saveModuleCacheAfterFailure().ifCondition)
-	assertGoCacheWriter(t, workflows["main.yml"], "windows-test-binaries-cache", mainWindowsTestBinariesCacheRunsOn, "Save Go build cache (Windows cross-compile)", saveXCompileCache().ifCondition)
 	for _, target := range []struct{ workflow, job string }{
 		{"main.yml", "test"},
 		{"main.yml", "test-windows"},
-		{"main.yml", "windows-test-binaries-cache"},
 		{"main.yml", "blacksmith-macos-go-build-cache"},
-		{"pr.yml", "windows-test-binaries"},
 		{"pr.yml", "worktree-remove-windows"},
 		{"pr.yml", "check-doc-freshness-platforms"},
 		{"pr.yml", "pr-preflight-platforms"},
@@ -1039,34 +1009,6 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		if got := workflows[target.workflow].job(t, target.job).step(t, "Set up Go").ID; got != "setup-go" {
 			t.Errorf("%s job %q setup-go id = %q, want setup-go", target.workflow, target.job, got)
 		}
-	}
-}
-
-// TestMainWindowsTestBinariesCacheSeedsBothRunnerSelections is the regression
-// test for F4 review SF-1: main.yml's windows-test-binaries-cache job must
-// seed its cache keys from both runner selections pr.yml's windows-test-
-// binaries job can land on (Blacksmith for same-repo PRs/merge_group,
-// ubuntu-latest for forks/Dependabot), because Blacksmith and GitHub-hosted
-// runners cannot see each other's actions/cache entries even for an
-// identical key. A single-leg seeder would silently leave one of the two
-// consumer paths permanently cold.
-func TestMainWindowsTestBinariesCacheSeedsBothRunnerSelections(t *testing.T) {
-	job := readCIWorkflow(t, "main.yml").job(t, "windows-test-binaries-cache")
-
-	if job.RunsOn != mainWindowsTestBinariesCacheRunsOn {
-		t.Errorf("windows-test-binaries-cache runs-on = %q, want %q", job.RunsOn, mainWindowsTestBinariesCacheRunsOn)
-	}
-	wantRunners := []string{"blacksmith", "github"}
-	if !equalStrings(job.Strategy.Matrix.Runner, wantRunners) {
-		t.Errorf("windows-test-binaries-cache strategy.matrix.runner = %v, want %v", job.Strategy.Matrix.Runner, wantRunners)
-	}
-	if job.Strategy.FailFast {
-		t.Error("windows-test-binaries-cache strategy.fail-fast must be false: one runner selection being unavailable must not cancel the other's seed")
-	}
-	// Mirrors pr.yml's windows-test-binaries job (pr.yml:522's timeout is 30
-	// too): this job runs the same mingw install + cross-compile.
-	if job.TimeoutMinutes != 30 {
-		t.Errorf("windows-test-binaries-cache timeout-minutes = %d, want 30", job.TimeoutMinutes)
 	}
 }
 
@@ -1303,9 +1245,8 @@ func saveModuleCacheIf(condition string) goCacheStep {
 }
 
 // saveModuleCacheAfterFailure is saveModuleCache with a failure-surviving
-// condition, for single-runner saver jobs (windows-test-binaries-
-// cache) where a flaky mid-build step (e.g. the mingw apt-get install)
-// should not prevent the module cache fetched before it from being saved.
+// condition, for saver jobs where a flaky mid-build step should not
+// prevent the module cache fetched before it from being saved.
 func saveModuleCacheAfterFailure() goCacheStep {
 	step := saveModuleCache()
 	step.ifCondition = failureSurvivingCacheSaveCondition(cacheMissCondition(goModuleCacheRestoreID))
@@ -1344,40 +1285,6 @@ func saveBuildCacheAfterFailureIf(profile, condition string) goCacheStep {
 	step := saveBuildCache(profile)
 	step.ifCondition = failureSurvivingCacheSaveCondition(condition, cacheMissCondition(goBuildCacheRestoreID(profile)))
 	return step
-}
-
-// The Windows cross-compile GOCACHE (F4.4) is a separate cache dimension from
-// goBuildCache*'s base/race/non-race profiles: it is never shared with a
-// native build on the runner's own OS, so it gets its own key shape (no
-// "-base-<tag>-" segment) and its own fixed restore/save id, rather than
-// reusing goBuildCacheRestoreID's "restore-<profile>-go-build-cache" pattern.
-func xcompileCacheProfile() string { return "xcompile-windows-amd64" }
-
-func xcompileCachePrefix() string {
-	return "beads-go-build-" + goCacheSchema + "-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-" + xcompileCacheProfile() + "-"
-}
-
-func xcompileCacheKey() string { return xcompileCachePrefix() + "${{ github.sha }}" }
-
-func xcompileCachePath() string { return goBuildCachePath(xcompileCacheProfile()) }
-
-func xcompileCacheRestoreID() string { return "restore-xcompile-go-build-cache" }
-
-// restoreXCompileCache is the PR-side (restore-only, no id needed since
-// pr.yml never saves) shape; mainRestoreXCompileCache is main.yml's
-// saver-side shape, which needs the id for its Save step's cache-miss `if`.
-func restoreXCompileCache() goCacheStep {
-	return goCacheStep{name: "Restore Go build cache (Windows cross-compile)", family: cacheRestoreActionFamily, key: xcompileCacheKey(), restoreKeys: xcompileCachePrefix(), path: xcompileCachePath()}
-}
-
-func mainRestoreXCompileCache() goCacheStep {
-	step := restoreXCompileCache()
-	step.id = xcompileCacheRestoreID()
-	return step
-}
-
-func saveXCompileCache() goCacheStep {
-	return goCacheStep{name: "Save Go build cache (Windows cross-compile)", family: cacheSaveActionFamily, key: xcompileCacheKey(), path: xcompileCachePath(), ifCondition: failureSurvivingCacheSaveCondition(cacheMissCondition(xcompileCacheRestoreID()))}
 }
 
 func assertGoCacheInventory(t *testing.T, job ciWorkflowJob, want []goCacheStep) {
@@ -2040,33 +1947,16 @@ const wantRBERunsOn = "${{ (github.event_name == 'push' || github.event_name == 
 // that checks them now live in ci_blacksmith_runner_test.go (shared with
 // F7c; see that file's doc comment for the API F7c rebases onto).
 
-// F4 review SF-1: main.yml's windows-test-binaries-cache job seeds the same
-// cache keys/paths from both runner selections pr.yml's windows-test-binaries
-// job can land on (sameRepoBlacksmith8vcpu, defined in
-// ci_blacksmith_runner_test.go, for same-repo PRs/merge_group; ubuntu-latest
-// for forks/Dependabot). Blacksmith runners can't
-// see a GitHub-hosted runner's actions/cache entries (and vice versa) even
-// though both report the same runner.os/runner.arch, so a single-leg seeder
-// only ever warms one of the two consumer paths. matrix.runner (not a
-// literal Blacksmith label substituted directly into runs-on) keeps
-// actionlint from trying and failing to resolve an undeclared self-hosted
-// label: it treats this ternary form as a dynamic value and skips it, same
-// as every other Blacksmith runs-on in this repo.
-const mainWindowsTestBinariesCacheRunsOn = "${{ matrix.runner == 'blacksmith' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
-
 // F7c: used to define its own sameRepoBlacksmith4vcpu here (same expression
 // as sameRepoBlacksmith2vcpu with the 4 vCPU label, for advisory jobs that
 // compile Go). F7a independently defined the same const; both are now served
 // by the single shared sameRepoBlacksmith4vcpu in ci_blacksmith_runner_test.go.
 
-// F7b: venue-matrix runs-on for main.yml jobs that seed a Blacksmith GOCACHE
-// alongside their GitHub-hosted seed ("venue: [blacksmith, github]"):
-// test-windows and blacksmith-macos-go-build-cache.
-const mainVenueBlacksmithWindows4vcpuRunsOn = "${{ matrix.venue == 'blacksmith' && 'blacksmith-4vcpu-windows-2025' || 'windows-latest' }}"
-
-// main.yml's push-to-main-only macOS saver, on the exact labels pr.yml's
-// same-repo (blacksmithMacOSLabel) and fork (macOSRunner) macOS legs resolve to.
-const mainBlacksmithMacOSGoBuildCacheRunsOn = "${{ matrix.venue == 'blacksmith' && '" + blacksmithMacOSLabel + "' || '" + macOSRunner + "' }}"
+// main.yml's push-to-main-only Windows and macOS savers, on the exact labels
+// pr.yml's Windows and macOS legs run on (no GitHub-hosted leg is left to
+// seed, ga-96smfk.22).
+const mainBlacksmithWindows4vcpuRunsOn = blacksmithWindows4vcpuRunsOn
+const mainBlacksmithMacOSGoBuildCacheRunsOn = "${{ '" + blacksmithMacOSLabel + "' }}"
 
 // main.yml's push-to-main-only macOS test job, on Blacksmith macOS.
 const mainBlacksmithMacOSTestRunsOn = "${{ '" + blacksmithMacOSLabel + "' }}"
@@ -2329,40 +2219,26 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 		// F7a: cache-free same-repo Linux jobs that restore no GitHub-saved
 		// build cache moved onto same-repo Blacksmith at their measured vCPU
 		// size (module-cache misses on the Blacksmith pool are acceptable
-		// per spec; jobs that need a Blacksmith-side build-cache saver are
-		// F7b's scope, not this one). windows-test-binaries is F4's Linux
-		// mingw cross-compile job, sized at 8vcpu.
+		// per spec).
 		"pr.yml": {
-			"ci-gate":               sameRepoBlacksmith2vcpu,
-			"fast-checks":           sameRepoBlacksmith2vcpu,
-			"advisory-reports":      sameRepoBlacksmith2vcpu,
-			"check-doc-flags":       sameRepoBlacksmith4vcpu,
-			"windows-test-binaries": sameRepoBlacksmith8vcpu,
-			// F7b: same-repo Blacksmith Windows (blacksmith-*vcpu-windows-2025,
-			// public beta). test-windows-liveness and worktree-remove-windows are
-			// sized at 4vcpu (a build plus a focused test run each);
-			// test-windows-small and the two "-prebuilt" twins (which only run an
-			// already-cross-compiled binary) are sized at 2vcpu; windows-make-shell
-			// is sized at 4vcpu (installs three separate Make toolchains). See the
-			// report's risk notes for test-windows-liveness (cgo/mingw on
-			// windows-2025, unverified) and windows-make-shell (Chocolatey
-			// preinstalled, unverified).
-			"test-windows-liveness":            sameRepoBlacksmithWindows4vcpu,
-			"worktree-remove-windows":          sameRepoBlacksmithWindows4vcpu,
-			"test-windows-small":               sameRepoBlacksmithWindows2vcpu,
-			"test-windows-liveness-prebuilt":   sameRepoBlacksmithWindows2vcpu,
-			"worktree-remove-windows-prebuilt": sameRepoBlacksmithWindows2vcpu,
-			"windows-make-shell":               sameRepoBlacksmithWindows4vcpu,
-			// F7b: mixed-OS matrix jobs using the "matrix marker" chained-ternary
-			// form (spec §2.1) instead of a flat same-repo ternary - see
-			// sameRepoPlatformsMatrixMarkerRunsOn's doc comment in
-			// scripts/ci_blacksmith_runner_test.go. (F7b review fix S1: an
-			// earlier revision additionally split pr-preflight-platforms' Windows
-			// leg into two `shard` matrix entries; that split was reverted as not
-			// measurably helpful, so this single map entry now covers exactly
-			// three matrix legs, one per OS.)
-			"check-doc-freshness-platforms": sameRepoPlatformsMatrixMarkerRunsOn,
-			"pr-preflight-platforms":        sameRepoPlatformsMatrixMarkerRunsOn,
+			"ci-gate":          sameRepoBlacksmith2vcpu,
+			"fast-checks":      sameRepoBlacksmith2vcpu,
+			"advisory-reports": sameRepoBlacksmith2vcpu,
+			"check-doc-flags":  sameRepoBlacksmith4vcpu,
+			// Windows and macOS: Blacksmith for every PR, forks and Dependabot
+			// included (ga-96smfk.22). test-windows-liveness and
+			// worktree-remove-windows are sized at 4vcpu (a build plus a
+			// focused test run each); test-windows-small at 2vcpu;
+			// windows-make-shell at 4vcpu (installs three separate Make
+			// toolchains).
+			"test-windows-liveness":   blacksmithWindows4vcpuRunsOn,
+			"worktree-remove-windows": blacksmithWindows4vcpuRunsOn,
+			"test-windows-small":      blacksmithWindows2vcpuRunsOn,
+			"windows-make-shell":      blacksmithWindows4vcpuRunsOn,
+			// Mixed-OS matrix jobs: each leg names its Blacksmith label
+			// (platformsMatrixRunners, pinned by their own tests).
+			"check-doc-freshness-platforms": platformsMatrixRunsOn,
+			"pr-preflight-platforms":        platformsMatrixRunsOn,
 		},
 		"pr-risk.yml": {
 			"ci-gate":  sameRepoBlacksmith2vcpu,
@@ -2377,17 +2253,15 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 		// main.yml's push-to-main-only jobs. Tracked here so the "no other
 		// Blacksmith label leaks" sweep below also covers main.yml.
 		"main.yml": {
-			"windows-test-binaries-cache": mainWindowsTestBinariesCacheRunsOn,
 			// F7b review (B2): these push-to-main-only jobs seed the
-			// Blacksmith-selection GOCACHEs same-repo PR/merge_group jobs
-			// above restore from (test-windows's "venue" matrix).
+			// Blacksmith-selection GOCACHEs the PR jobs above restore from.
 			// Each is additionally guarded by a job-level
 			// github.event_name == 'push' && github.ref ==
 			// 'refs/heads/main' && github.repository == 'gastownhall/beads'
 			// if: (TestBlacksmithSaverJobsGuardedAgainstPullRequest below),
 			// matching F7c's own saver convention.
-			"test-windows": mainVenueBlacksmithWindows4vcpuRunsOn,
-			// Same guard, seeding pr.yml's same-repo macOS legs.
+			"test-windows": mainBlacksmithWindows4vcpuRunsOn,
+			// Same guard, seeding pr.yml's macOS legs.
 			"blacksmith-macos-go-build-cache": mainBlacksmithMacOSGoBuildCacheRunsOn,
 			// The macOS -race -short suite (Linux runs it under Bazel).
 			"test": mainBlacksmithMacOSTestRunsOn,
@@ -2423,7 +2297,7 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 		}
 	}
 	// No other job in pr.yml or pr-risk.yml may name a Blacksmith label beyond
-	// the ones enumerated in `want` above (F4 added windows-test-binaries).
+	// the ones enumerated in `want` above.
 	// Same sweep for the F7c advisory workflows: nothing in them may name a
 	// Blacksmith label beyond the jobs listed in `want` above.
 	for _, file := range []string{
