@@ -315,74 +315,65 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		cfg.ServerTLS = fileCfg.GetDoltServerTLS()
 	}
 
-	// config.yaml rung for the pool-size knob below. It needs both reads:
-	// config.GetString reads a package-global viper populated only by
-	// cmd/bd's config.Initialize(), so for a library consumer it always
-	// returns "" and the project's configured values were silently ignored.
-	// Fall back to a direct read of the project's config.yaml, the same
-	// fallback dolt.auto-start carries above for this exact hole. The
-	// fallback follows GetStringFromDir's ladder, so when beadsDir is not
-	// the process CWD a user-level ~/.config/bd/config.yaml value outranks
-	// that project's file — same behavior as dolt.auto-start. The pool
-	// deadlines carry the same rung in poolTimeoutFromConfig, which runs
-	// from applyPoolTimeouts so every DoltStore open gets it.
-	poolCfg := func(key string) string {
-		if v := config.GetString(key); v != "" {
-			return v
-		}
-		return config.GetStringFromDir(beadsDir, key)
-	}
-
-	// Pool size: env var > config.yaml > caller override > default (10).
-	// Useful for shared-server setups with many worktrees (GH#3140).
-	if cfg.MaxOpenConns == 0 {
-		if v := os.Getenv("BEADS_DOLT_MAX_CONNS"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				cfg.MaxOpenConns = n
-			}
-		}
-	}
-	if cfg.MaxOpenConns == 0 {
-		if v := poolCfg("dolt.max-conns"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				cfg.MaxOpenConns = n
-			}
-		}
-	}
-
-	applyPoolTimeouts(cfg)
+	applyPoolKnobs(cfg)
 
 	return nil
 }
 
-// applyPoolTimeouts fills the shared pool's per-I/O deadlines when the caller
-// left them unset: caller override > env var > config.yaml > default (10s, see
-// buildServerDSN). The default fast-fail is right for healthy local servers;
-// overloaded shared-server deployments raise it so ordinary queries stop dying
-// with "i/o timeout" under load (bd-vz0y9). It is idempotent, and it runs from
-// New (applyConfigDefaults) so every DoltStore open honors the knob — the CLI's own
-// store open hand-builds its Config and never passes through
-// applyResolvedConfig, which is how the knob shipped in #5089 stayed
-// inert for every bd command in server mode (gastownhall/beads#6144).
-func applyPoolTimeouts(cfg *Config) {
+// applyPoolKnobs fills the shared pool's operator knobs when the caller left
+// them unset, each on the ladder caller override > env var > config.yaml >
+// built-in default:
+//
+//   - pool size: BEADS_DOLT_MAX_CONNS / dolt.max-conns (default 10, see
+//     applyPoolLimits). Useful for shared-server setups with many worktrees
+//     (GH#3140).
+//   - per-I/O deadlines: BEADS_DOLT_POOL_READ_TIMEOUT / dolt.pool-read-timeout
+//     and BEADS_DOLT_POOL_WRITE_TIMEOUT / dolt.pool-write-timeout (default 10s
+//     each, see buildServerDSN). The default fast-fail is right for healthy
+//     local servers; overloaded shared-server deployments raise it so ordinary
+//     queries stop dying with "i/o timeout" under load (bd-vz0y9).
+//
+// It is idempotent, and it runs from New (applyConfigDefaults) so every
+// DoltStore open honors the knobs. The CLI's main store open hand-builds its
+// Config and never passes through applyResolvedConfig, so a knob read only
+// there reaches the CLI's NewFromConfig* opens (routed stores, bd doctor) but
+// not ordinary bd commands: that is how the deadlines shipped in #5089 stayed
+// inert in server mode (gastownhall/beads#6144), and the pool size the same
+// way. A new pool knob belongs here, not in applyResolvedConfig.
+func applyPoolKnobs(cfg *Config) {
+	if cfg.MaxOpenConns == 0 {
+		if n, err := strconv.Atoi(os.Getenv("BEADS_DOLT_MAX_CONNS")); err == nil && n > 0 {
+			cfg.MaxOpenConns = n
+		}
+	}
+	if cfg.MaxOpenConns == 0 {
+		if n, err := strconv.Atoi(poolKnobFromConfig(cfg, "dolt.max-conns")); err == nil && n > 0 {
+			cfg.MaxOpenConns = n
+		}
+	}
 	if cfg.PoolReadTimeout == 0 {
 		cfg.PoolReadTimeout = timeoutFromEnv("BEADS_DOLT_POOL_READ_TIMEOUT", 0)
 	}
 	if cfg.PoolReadTimeout == 0 {
-		cfg.PoolReadTimeout = parseTimeout(poolTimeoutFromConfig(cfg, "dolt.pool-read-timeout"), 0)
+		cfg.PoolReadTimeout = parseTimeout(poolKnobFromConfig(cfg, "dolt.pool-read-timeout"), 0)
 	}
 	if cfg.PoolWriteTimeout == 0 {
 		cfg.PoolWriteTimeout = timeoutFromEnv("BEADS_DOLT_POOL_WRITE_TIMEOUT", 0)
 	}
 	if cfg.PoolWriteTimeout == 0 {
-		cfg.PoolWriteTimeout = parseTimeout(poolTimeoutFromConfig(cfg, "dolt.pool-write-timeout"), 0)
+		cfg.PoolWriteTimeout = parseTimeout(poolKnobFromConfig(cfg, "dolt.pool-write-timeout"), 0)
 	}
 }
 
-// poolTimeoutFromConfig reads a pool-deadline key from the initialized config
-// and, like the auto-start ladder above, falls back to the .beads directory's
-// own config.yaml for library consumers that never called config.Initialize.
-func poolTimeoutFromConfig(cfg *Config, key string) string {
+// poolKnobFromConfig reads a pool-knob key from the initialized config and,
+// like the auto-start ladder above, falls back to the .beads directory's own
+// config.yaml. It needs both reads: config.GetString reads a package-global
+// viper populated only by cmd/bd's config.Initialize(), so for a library
+// consumer it always returns "" and the project's configured values would be
+// silently ignored. The fallback follows GetStringFromDir's ladder, so when
+// cfg.BeadsDir is not the process CWD a user-level ~/.config/bd/config.yaml
+// value outranks that project's file — same behavior as dolt.auto-start.
+func poolKnobFromConfig(cfg *Config, key string) string {
 	if v := config.GetString(key); v != "" {
 		return v
 	}

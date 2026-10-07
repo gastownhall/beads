@@ -19,6 +19,9 @@ EOF
 
 status=0
 
+# Symlinked .go files count too: under Bazel the tree is a runfiles symlink
+# forest. find does not descend into symlinked directories (bazel-* links).
+
 while IFS=: read -r file line _; do
   file="${file#./}"
   if [[ -z "$file" || -z "$line" ]]; then
@@ -49,7 +52,7 @@ while IFS=: read -r file line _; do
     printf 'Disallowed testing.Short() at %s:%s in %s\n' "$file" "$line" "${func:-unknown}" >&2
     status=1
   fi
-done < <(find . -type f -name '*.go' -not -path './.git/*' -exec grep -n 'testing\.Short()' {} + || true)
+done < <(find . \( -type f -o -type l \) -name '*.go' -not -path './.git/*' -exec grep -n 'testing\.Short()' {} + || true)
 
 if (( status != 0 )); then
   cat >&2 <<'EOF'

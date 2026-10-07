@@ -1366,6 +1366,27 @@ func NewIssueDetails(issue Issue) *IssueDetails {
 	return &IssueDetails{Issue: issue, Revision: RevisionToken(issue.RowVersion)}
 }
 
+// BatchGetIssue is one entry of BatchGetIssuesResult.issues: a resolved issue
+// plus its current revision token, projected the same way IssueDetails
+// projects one off the embedded Issue's RowVersion (RowVersion is json:"-",
+// so the Issue body alone cannot carry it). Hydration for a batch-get issue
+// is LABELS ONLY — no dependencies, dependents or comments; a caller wanting
+// those reads GET /v0/beads/issues/{id} (IssueDetails) instead.
+//
+// NewBatchGetIssue is the only door, for the same reason NewIssueDetails is:
+// a struct literal with an unset Revision serializes a "0" indistinguishable
+// from a legacy migration-0054 row.
+type BatchGetIssue struct {
+	Issue
+	Revision string `json:"revision"`
+}
+
+// NewBatchGetIssue projects issue with its wire-visible revision token, the
+// BatchGetIssuesResult.issues counterpart of NewIssueDetails.
+func NewBatchGetIssue(issue Issue) BatchGetIssue {
+	return BatchGetIssue{Issue: issue, Revision: RevisionToken(issue.RowVersion)}
+}
+
 // DependencyType categorizes the relationship
 type DependencyType string
 
@@ -1848,13 +1869,26 @@ type ReadyExplanation struct {
 }
 
 // ReadyItem explains why a specific issue is ready for work.
+//
+// The issue's blocking dependencies (blocks, conditional-blocks, waits-for)
+// are sorted by the target's status as the caller supplied it in blockerMap:
+// ResolvedBlockers holds closed targets, PinnedDependencies holds pinned ones
+// (a pinned bead never blocks, so a dependency on one never fenced this
+// issue — it is reported as what it is, not as a blocker that was resolved),
+// and OpenDependencies holds targets in any other status — a blocks edge
+// here means the ready set and the edge disagree (foreign-prefix ids, #6066);
+// a waits-for edge here is the ordinary spawner-still-open case. A target the
+// caller did not supply a status for is counted under ResolvedBlockers, the
+// ready set's own verdict being the only word available.
 type ReadyItem struct {
 	*Issue
-	Reason           string   `json:"reason"`
-	ResolvedBlockers []string `json:"resolved_blockers"`
-	DependencyCount  int      `json:"dependency_count"`
-	DependentCount   int      `json:"dependent_count"`
-	Parent           *string  `json:"parent,omitempty"`
+	Reason             string   `json:"reason"`
+	ResolvedBlockers   []string `json:"resolved_blockers"`
+	PinnedDependencies []string `json:"pinned_dependencies,omitempty"`
+	OpenDependencies   []string `json:"open_dependencies,omitempty"`
+	DependencyCount    int      `json:"dependency_count"`
+	DependentCount     int      `json:"dependent_count"`
+	Parent             *string  `json:"parent,omitempty"`
 }
 
 // BlockedItem explains why a specific issue is blocked.
@@ -1897,18 +1931,29 @@ func BuildReadyExplanation(
 			counts = &DependencyCounts{}
 		}
 
-		// Find resolved blockers (closed issues that this depended on)
-		var resolvedBlockers []string
-		reason := "no blocking dependencies"
+		// Sort the blocking dependencies by the target's status. Before this
+		// every blocking edge of a ready issue was printed as a resolved
+		// blocker, which is wrong for a pinned target: the ready query skips
+		// pinned targets exactly as it skips closed ones, so a dependency on
+		// a pinned bead never blocked anything and nothing about it was
+		// resolved. --explain is the one place a reader can see that.
+		var resolvedBlockers, pinnedDeps, openDeps []string
 		deps := allDeps[issue.ID]
 		for _, dep := range deps {
-			if dep.Type == DepBlocks || dep.Type == DepConditionalBlocks || dep.Type == DepWaitsFor {
+			if dep.Type != DepBlocks && dep.Type != DepConditionalBlocks && dep.Type != DepWaitsFor {
+				continue
+			}
+			target, known := blockerMap[dep.DependsOnID]
+			switch {
+			case !known || target == nil || target.Status == StatusClosed:
 				resolvedBlockers = append(resolvedBlockers, dep.DependsOnID)
+			case target.Status == StatusPinned:
+				pinnedDeps = append(pinnedDeps, dep.DependsOnID)
+			default:
+				openDeps = append(openDeps, dep.DependsOnID)
 			}
 		}
-		if len(resolvedBlockers) > 0 {
-			reason = fmt.Sprintf("%d blocker(s) resolved", len(resolvedBlockers))
-		}
+		reason := readyReason(len(resolvedBlockers), len(pinnedDeps), len(openDeps))
 
 		// Compute parent
 		var parent *string
@@ -1920,12 +1965,14 @@ func BuildReadyExplanation(
 		}
 
 		readyItems = append(readyItems, ReadyItem{
-			Issue:            issue,
-			Reason:           reason,
-			ResolvedBlockers: resolvedBlockers,
-			DependencyCount:  counts.DependencyCount,
-			DependentCount:   counts.DependentCount,
-			Parent:           parent,
+			Issue:              issue,
+			Reason:             reason,
+			ResolvedBlockers:   resolvedBlockers,
+			PinnedDependencies: pinnedDeps,
+			OpenDependencies:   openDeps,
+			DependencyCount:    counts.DependencyCount,
+			DependentCount:     counts.DependentCount,
+			Parent:             parent,
 		})
 	}
 
@@ -1969,6 +2016,28 @@ func BuildReadyExplanation(
 			CycleCount:   len(cycleIDs),
 		},
 	}
+}
+
+// readyReason words a ReadyItem's Reason from the three dependency counts.
+// "no blocking dependencies" is kept verbatim for the no-edge case; a resolved
+// count keeps the historical "N blocker(s) resolved" lead so scripts that
+// match on it still do; pinned and open counts are appended as clauses rather
+// than folded into the resolved count.
+func readyReason(resolved, pinned, open int) string {
+	var parts []string
+	if resolved > 0 {
+		parts = append(parts, fmt.Sprintf("%d blocker(s) resolved", resolved))
+	}
+	if pinned > 0 {
+		parts = append(parts, fmt.Sprintf("%d pinned dependency(ies), never blocking", pinned))
+	}
+	if open > 0 {
+		parts = append(parts, fmt.Sprintf("%d open dependency(ies), not blocking", open))
+	}
+	if len(parts) == 0 {
+		return "no blocking dependencies"
+	}
+	return strings.Join(parts, "; ")
 }
 
 // TreeNode represents a node in a dependency tree

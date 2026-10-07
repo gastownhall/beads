@@ -17,7 +17,11 @@ var reopenCmd = &cobra.Command{
 	GroupID: "issues",
 	Short:   "Reopen one or more closed issues",
 	Long: `Reopen closed issues by setting status to 'open' and clearing the closed_at timestamp.
-This is more explicit than 'bd update --status open' and emits a Reopened event.`,
+This is more explicit than 'bd update --status open' and emits a Reopened event.
+
+Exit codes: 1 for general failures; 13 when the failure is a stale
+--if-revision guard (the precondition no longer held, nothing was written —
+another actor won the race, so retrying the same guard is pointless).`,
 	Args:          cobra.MinimumNArgs(1),
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -31,8 +35,20 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 			}
 		}()
 
+		// beads#4682: an independent OCC precondition on the single issue it
+		// names, so (unlike the batch of ids this command otherwise accepts)
+		// it requires exactly one target — same rule update/close/delete
+		// enforce via requireSingleIfRevisionID.
+		ifRevision, err := parseIfRevisionFlag(cmd)
+		if err != nil {
+			return err
+		}
+		if err := requireSingleIfRevisionID(ifRevision, args); err != nil {
+			return err
+		}
+
 		if usesProxiedServer() {
-			return runReopenProxiedServer(cmd, rootCtx, args)
+			return runReopenProxiedServer(cmd, rootCtx, args, ifRevision)
 		}
 
 		reason, _ := cmd.Flags().GetString("reason")
@@ -61,7 +77,13 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 			issueStore := result.Store
 			issue := result.Issue
 
-			if issue.Status == types.StatusOpen {
+			// An active --if-revision guard must be evaluated before this
+			// already-open short-circuit: ops.Reopen below checks
+			// ExpectedVersion first (ExecuteReopen -> CheckVersionInTx), so a
+			// stale revision on an already-open issue still reports exit 13
+			// instead of silently returning the "already open" no-op here.
+			// Without --if-revision, today's pre-check stands unchanged.
+			if ifRevision == nil && issue.Status == types.StatusOpen {
 				fmt.Fprintln(os.Stderr, reopenNoOpMessage(fullID, types.StatusOpen))
 				result.Close()
 				continue
@@ -74,15 +96,26 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 				continue
 			}
 			reopened, err := ops.Reopen(opsCtx, issueops.ReopenRequest{
-				Actor:   actor,
-				IssueID: fullID,
-				Reason:  reason,
+				Actor:           actor,
+				IssueID:         fullID,
+				Reason:          reason,
+				ExpectedVersion: ifRevision,
 				// Names the issue for the reason `bd close`'s does, and keeps
 				// the entry identical across backends: the proxied route
 				// already writes "bd: reopen <ids>".
 				Provenance: "bd: reopen " + fullID,
 			})
 			if err != nil {
+				// Only a guarded reopen reports through the conditional-write
+				// envelope: the classifier maps storage.ErrNotFound to
+				// precondition_failed, which an unguarded reopen racing a
+				// delete must not claim.
+				if ifRevision != nil {
+					if reported, ok := reportIfRevisionFailure("reopening", fullID, err, ifRevision); ok {
+						result.Close()
+						return reported
+					}
+				}
 				fmt.Fprintf(os.Stderr, "Error reopening %s: %v\n", fullID, err)
 				hasError = true
 				result.Close()
@@ -170,6 +203,10 @@ func reopenStatusOf(post, pre *types.Issue) types.Status {
 
 func init() {
 	reopenCmd.Flags().StringP("reason", "r", "", "Reason for reopening")
+	// beads#4682: not part of #7203's original four verbs (update/close/
+	// assign/delete); reopen gets the same guard since it is the same kind
+	// of single-id lifecycle write.
+	reopenCmd.Flags().String("if-revision", "", ifRevisionFlagHelp)
 	reopenCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(reopenCmd)
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/backends"
 )
 
 // PhysicalRoots describes the local physical database root(s) a store open
@@ -29,14 +30,17 @@ type PhysicalRoots struct {
 	// the workspace gate applies.
 	Roots []string
 	// Mode is the connection mode the open path will actually use:
-	// "embedded" | "server" | "shared-server" | "proxied-server".
+	// "embedded" | "server" | "shared-server" | "proxied-server" |
+	// "remote-backend" (a registered backend that backends.IsRemote).
 	Mode string
 	// Provenance is a one-line human explanation of how Mode and Roots
 	// were decided, for busy/diagnostic messages ("why is bd gating that
 	// directory?").
 	Provenance string
-	// RemoteBackend is true when the backend is a server on a non-local
-	// host: workspace gate only, no physical gate.
+	// RemoteBackend is true when bd opens no local files for the workspace:
+	// either a Dolt server on a non-local host (Mode "server") or a
+	// registered remote backend (backends.IsRemote, Mode "remote-backend")
+	// that owns its own connection. Workspace gate only, no physical gate.
 	RemoteBackend bool
 }
 
@@ -206,6 +210,12 @@ func isRemoteServerHost(host string) bool {
 // Mode decision (ordering is significant and each step cites the CLI
 // behavior it mirrors):
 //
+//  0. registered remote backend: backends.IsRemote(cfg.GetBackend()) wins
+//     outright, before every Dolt-mode check below — including
+//     IsSharedServerMode, which reads only process env/config.yaml and does
+//     not consult cfg, so it would otherwise misclassify a remote-backend
+//     workspace under an active global shared-server setting. RemoteBackend
+//     = true, no local roots: the backend owns its own connection, not bd.
 //  1. proxied-server: metadata dolt_mode=proxied-server wins outright —
 //     main.go routes proxied workspaces to the proxy provider before the
 //     shared-server rescue, which explicitly excludes ProxiedServer. Root
@@ -275,6 +285,20 @@ func ResolvePhysicalRoots(beadsDir string) (PhysicalRoots, error) {
 	}
 
 	switch {
+	case cfg != nil && backends.IsRemote(cfg.GetBackend()):
+		// A registered remote backend (for example the http client) is a
+		// pure network client with no local database: bd opens no local
+		// files for it, so there is nothing physical to gate here, only the
+		// workspace gate applies. This must be checked before every Dolt
+		// mode branch below — IsSharedServerMode in particular reads only
+		// process env/config.yaml and does not consult cfg at all, so
+		// without this case a global shared-server setting would hijack a
+		// remote-backend workspace into reporting a bogus Dolt root it will
+		// never open.
+		pr.Mode = "remote-backend"
+		pr.RemoteBackend = true
+		pr.Provenance = fmt.Sprintf("metadata.json backend=%q is a registered remote backend; no local physical root", cfg.GetBackend())
+
 	case cfg != nil && cfg.IsDoltProxiedServerMode():
 		pr.Mode = "proxied-server"
 		root, perr := ResolveProxiedServerRootPath(abs)

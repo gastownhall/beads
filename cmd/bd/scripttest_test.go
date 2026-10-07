@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -32,7 +31,7 @@ func TestScripts(t *testing.T) {
 	if prebuilt, err := findPrebuiltBDBinary(); err == nil && prebuilt != "" && filepath.Base(prebuilt) == exeName {
 		exe = prebuilt
 		binDir = filepath.Dir(prebuilt)
-	} else if err := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", exe, ".").Run(); err != nil {
+	} else if err := goBuildBDCommand(exe).Run(); err != nil {
 		t.Fatal(err)
 	}
 

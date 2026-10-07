@@ -106,6 +106,7 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 			metadataCAS:  &serveStubMetadataCAS{},
 			counter:      &serveStubCounter{},
 			edgeCounter:  &serveStubGraphCounter{},
+			batchGetter:  &serveStubBatchGetter{},
 			relations:    &serveStubRelations{},
 			commenter:    &serveStubCommenter{},
 			batchCreator: &serveStubBatchCreator{},
@@ -411,6 +412,7 @@ type serveRolesStore struct {
 	metadataCAS  *serveStubMetadataCAS
 	counter      *serveStubCounter
 	edgeCounter  *serveStubGraphCounter
+	batchGetter  *serveStubBatchGetter
 	relations    *serveStubRelations
 	commenter    *serveStubCommenter
 	batchCreator *serveStubBatchCreator
@@ -519,6 +521,10 @@ func (s *serveRolesStore) Counter() (issueops.Counter, error) { return s.counter
 // moment the binding landed.
 func (s *serveRolesStore) GraphCounter() (issueops.GraphCounter, error) { return s.edgeCounter, nil }
 
+// BatchGetter is declared for GraphCounter's reason: the many-ids read is also
+// a read, so hook_batch_getter.go recurses and the recursion lands here.
+func (s *serveRolesStore) BatchGetter() (issueops.BatchGetter, error) { return s.batchGetter, nil }
+
 // IssueRelations is the FIRST role added to serveIssueRoles since this type
 // stopped embedding a nil store, and it is worth recording what that changed —
 // because the two comments above it describe the old regime and are now history
@@ -585,6 +591,14 @@ type serveStubGraphCounter struct{}
 
 func (*serveStubGraphCounter) CountEdges(context.Context, issueops.EdgeCountRequest) (issueops.EdgeCountResult, error) {
 	return issueops.EdgeCountResult{}, errors.ErrUnsupported
+}
+
+// serveStubBatchGetter is the many-ids read role's stand-in, ErrUnsupported
+// like every stub here.
+type serveStubBatchGetter struct{}
+
+func (*serveStubBatchGetter) GetMany(context.Context, issueops.GetManyRequest) (issueops.GetManyResult, error) {
+	return issueops.GetManyResult{}, errors.ErrUnsupported
 }
 
 // serveStubCounter is the count role's stand-in. It answers ErrUnsupported like

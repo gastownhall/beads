@@ -229,6 +229,19 @@ func countFilters(q *query) issueops.CountRequest {
 		// it reaches the role as its own field and never as IncludeInfra: folded
 		// into it, a plane-only count would also lose its templates and gates.
 		IncludeEphemeral: q.boolean("include_ephemeral"),
+
+		// The four scope fields behind `issues.count.scope` (S8): ParentID and
+		// ExcludeTypes are read exactly as the listing reads them (q.str("parent"),
+		// q.list("exclude_type")), because the role documents its own ParentID and
+		// ExcludeTypes as spelling ListRequest's fields identically. NoParent and
+		// ExcludeStatus have no listing counterpart to mirror — NoParent is a new
+		// boolean switch and ExcludeStatus is a Count-only capability the listing
+		// never exposed — so both are read with this file's own conventions for
+		// their kind (q.boolean, q.list) rather than a listing precedent.
+		ParentID:      q.str("parent"),
+		NoParent:      q.boolean("no_parent"),
+		ExcludeTypes:  q.list("exclude_type"),
+		ExcludeStatus: q.list("exclude_status"),
 	}
 }
 
@@ -598,6 +611,15 @@ func invalidFilterParam(err error) (string, bool) {
 	switch {
 	case strings.HasPrefix(msg, "invalid status "):
 		return "status", true
+	// The count role's own refusals (S8 review fix): a misspelled
+	// --exclude-status entry, and --parent set together with --no-parent.
+	// Both are the ROLE's ErrValidation. They are named here the same way as
+	// the `status` row above and the metadata-key rows below, so the client
+	// learns which parameter to fix rather than reading an unclassified 500.
+	case strings.HasPrefix(msg, "invalid exclude-status "):
+		return "exclude_status", true
+	case strings.HasPrefix(msg, "--parent and --no-parent are mutually exclusive"):
+		return "no_parent", true
 	case strings.HasPrefix(msg, "invalid issue type "):
 		return "type", true
 	case strings.HasPrefix(msg, "invalid sort policy "):

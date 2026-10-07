@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sort"
@@ -9,6 +10,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
 )
 
@@ -108,6 +111,70 @@ func kvPairsFromConfig(allConfig map[string]string) map[string]string {
 		}
 	}
 	return kvPairs
+}
+
+// configPrefixReader mirrors domain.ConfigPrefixReader structurally: the
+// optional store fast path that reads only the keys under a prefix. Both
+// list paths discover it by assertion and fall back to the full read plus
+// kvPairsWithPrefix when the store predates it.
+type configPrefixReader interface {
+	GetConfigByPrefix(ctx context.Context, prefix string) (map[string]string, error)
+}
+
+// The mirror above is structural, so this assignment is what ties it to the
+// domain interface the stores are pinned to. The check is one-way: it stops
+// compiling once the mirror no longer covers domain's method set, but a method
+// added only to the mirror still compiles — and would silently fail discovery
+// against the stores. TestKVPrefixReaderUnwrapsStorageDecorators covers that
+// direction: its stub implements only DoltStorage plus the domain method.
+var _ domain.ConfigPrefixReader = configPrefixReader(nil)
+
+// configPrefixReaderFor discovers the optional prefix-read capability on a
+// store, peeling the decorator chain first.
+//
+// The peel is load-bearing, not defensive: cmd/bd's store is always decorated
+// (wireStorageDecorators interposes externaldeps.Store and, by default,
+// HookFiringStore), and those wrappers embed the storage.DoltStorage
+// *interface* — which deliberately does not declare GetConfigByPrefix. A bare
+// assertion on the outermost layer therefore can never succeed, and because
+// the fallback returns identical rows it would silently full-scan forever.
+// storage.UnwrapStore is the repo's documented idiom for reaching the concrete
+// store behind optional-interface assertions; every wrapper implements
+// Unwrap(), so it lands on the raw store in every chain configuration.
+func configPrefixReaderFor(s storage.DoltStorage) (configPrefixReader, bool) {
+	pr, ok := storage.UnwrapStore(s).(configPrefixReader)
+	return pr, ok
+}
+
+// readKVListConfig is the direct-mode store read behind `bd kv list`: only the
+// rows under kvPrefix+userPrefix when the store offers the prefix fast path,
+// the whole config table otherwise. kvPairsWithPrefix narrows the result
+// either way, so the two arms differ only in cost — which is why
+// TestKVPrefixReaderUnwrapsStorageDecorators drives this function rather than
+// configPrefixReaderFor alone.
+func readKVListConfig(ctx context.Context, s storage.DoltStorage, userPrefix string) (map[string]string, error) {
+	if pr, ok := configPrefixReaderFor(s); ok && userPrefix != "" {
+		return pr.GetConfigByPrefix(ctx, kvPrefix+userPrefix)
+	}
+	return s.GetAllConfig(ctx)
+}
+
+// kvPairsWithPrefix is kvPairsFromConfig narrowed to user keys starting with
+// userPrefix. It runs on every listing: after a SQL-side prefix read it is a
+// no-op re-check, and on the GetAllConfig fallback it IS the filter — so the
+// output is identical whichever path served the read.
+func kvPairsWithPrefix(allConfig map[string]string, userPrefix string) map[string]string {
+	kvPairs := kvPairsFromConfig(allConfig)
+	if userPrefix == "" {
+		return kvPairs
+	}
+	out := make(map[string]string)
+	for k, v := range kvPairs {
+		if strings.HasPrefix(k, userPrefix) {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // printKVListResult renders the `bd kv list` output. Shared by the classic
@@ -292,15 +359,23 @@ Examples:
 	},
 }
 
+// kvListPrefix is the --prefix flag: list only keys starting with it.
+var kvListPrefix string
+
 // kvListCmd lists all key-value pairs
 var kvListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all key-value pairs",
 	Long: `List all key-value pairs in the beads key-value store.
 
+With --prefix, list only the keys starting with that prefix. The filter is
+pushed into SQL on stores that support it, so a scoped read of a large kv
+store does not serialize the whole table.
+
 Examples:
   bd kv list
-  bd kv list --json`,
+  bd kv list --json
+  bd kv list --prefix mail.dog. --json`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -312,7 +387,7 @@ Examples:
 		}()
 
 		if usesProxiedServer() {
-			return runKVListProxiedServer(rootCtx)
+			return runKVListProxiedServer(rootCtx, kvListPrefix)
 		}
 
 		if err := ensureDirectMode("kv list requires direct database access"); err != nil {
@@ -320,16 +395,18 @@ Examples:
 		}
 
 		ctx := rootCtx
-		allConfig, err := store.GetAllConfig(ctx)
+		allConfig, err := readKVListConfig(ctx, store, kvListPrefix)
 		if err != nil {
 			return HandleErrorRespectJSON("listing keys: %v", err)
 		}
 
-		return printKVListResult(kvPairsFromConfig(allConfig))
+		return printKVListResult(kvPairsWithPrefix(allConfig, kvListPrefix))
 	},
 }
 
 func init() {
+	kvListCmd.Flags().StringVar(&kvListPrefix, "prefix", "", "list only keys starting with this prefix (filtered in SQL where supported)")
+
 	// Register all kv subcommands under kvCmd
 	kvCmd.AddCommand(kvSetCmd)
 	kvCmd.AddCommand(kvGetCmd)

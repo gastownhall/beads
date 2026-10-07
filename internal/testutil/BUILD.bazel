@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 go_library(
     name = "testutil",
@@ -107,6 +108,9 @@ go_test(
     name = "testutil_test",
     srcs = [
         "dockercontext_test.go",
+        "gm2g3g5r_failopen_test.go",
+        "gm2g3g5r_failopen_unix_test.go",
+        "gm2g3g5r_failopen_windows_test.go",
         "localdoltserver_test.go",
         "suite_temp_test.go",
         "testdoltbranch_test.go",
@@ -122,12 +126,52 @@ go_test(
     ],
 )
 
-# Dolt image pin read as text by //test/docsync and the dolt pin tests in
-# //scripts.
-exports_files(
-    ["testdoltcommon.go"],
-    visibility = [
-        "//scripts:__pkg__",
-        "//test/docsync:__pkg__",
-    ],
+# testutil_test on the dolt-server lane: the package's own tests of the
+# test-server backends, with the local backend selected and required, so
+# TestDoltServerFingerprint's local half (formerly pr.yml's "Test (Dolt
+# server fingerprint)" job, every PR) and the TestLocalDoltServer_* tests run
+# against the pinned dolt in the test wrapper's runfiles. Every other
+# configuration of testutil_test passes BEADS_TEST_SKIP=dolt and skips them.
+# The container half needs docker and the image, so no Bazel target runs it:
+# it runs under plain `go test` (the container backend is the default there)
+# on a host that has both, and TestPinnedDoltCLIMatchesContainerImage
+# (//scripts) keeps the image tag on the pinned release.
+#
+# Tags:
+#   dolt-server: starts hermetic dolt sql-servers from the pinned dolt in the
+#     test wrapper's runfiles (BEADS_TEST_DOLT_SERVER=local); excluded from
+#     --config=prcore/ci, selected by --config=doltserver.
+sh_test(
+    name = "testutil_dolt_test",
+    size = "medium",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = ["$(rootpath :testutil_test)"],
+    data = [":testutil_test"],
+    env = {
+        "BEADS_TEST_DOLT_SERVER": "local",
+        "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
+    },
+    tags = ["dolt-server"],
 )
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

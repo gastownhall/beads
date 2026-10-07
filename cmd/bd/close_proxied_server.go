@@ -91,6 +91,27 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 
 	in := gatherCloseProxiedInput(cmd)
 
+	// A8 (beads#4682): a single-id compare-and-swap close bypasses the batch
+	// below entirely -- see close_if_revision.go for why BatchCloseItem
+	// cannot carry this guard.
+	ifRevision, err := parseIfRevisionFlag(cmd)
+	if err != nil {
+		return err
+	}
+	if err := requireSingleIfRevisionID(ifRevision, args); err != nil {
+		return err
+	}
+	if ifRevision != nil {
+		// The bypass below never looks at these three post-close flags, so
+		// honoring them would mean silently dropping what the caller asked
+		// for. Refuse instead of guessing, the same way --continue and
+		// --suggest-next already refuse a multi-id batch below.
+		if in.continueOn || in.suggestNext || in.claimNext {
+			return HandleErrorRespectJSON("--if-revision does not support --continue, --suggest-next, or --claim-next")
+		}
+		return runCloseProxiedIfRevision(ctx, args[0], reasonForCloseIndex(reasons, 0), in.force, in.session, *ifRevision)
+	}
+
 	if in.continueOn && len(args) > 1 {
 		return HandleErrorRespectJSON("--continue only works when closing a single issue")
 	}

@@ -25,7 +25,24 @@
 # cert path) and outside BAZEL_CI_CACHE_DIR (the runner cache must never store
 # credentials). The endpoint is masked in the job log.
 #
-# Outputs (to $GITHUB_OUTPUT when set, else stdout): rc=<path>, remote=true|false.
+# BAZEL_FORK_CACHE=true (bazel.yml mode "cache": rbe=cache dispatches, and
+# fork/Dependabot runs while rbe-fork is closed) appends --config=fork-cache:
+# .bazelrc's credential-free, read-only rbe-west cache. While that cache
+# advertises zstd (cache-zstd-probe.sh asks its GetCapabilities; any failure
+# means no) it also asks for zstd transfers (--remote_cache_compression). A
+# probe, not a repository variable: fork pull_request runs see no vars. No
+# other mode ever asks, because only the anonymous cache can advertise zstd,
+# and Bazel refuses a remote that does not.
+#
+# RBE_FORK_CERT_FILE + RBE_FORK_KEY_FILE + RBE_FORK_ENDPOINT + RBE_FORK_INSTANCE
+# (bazel.yml modes fork-ro/fork-rw: fork-credential.sh's outputs, a
+# short-lived rbe-fork-mint certificate) enable --config=remote-exec against
+# rbe-fork: instance oss-fork (the fork pool, nothing cached) or oss
+# (allowlisted authors: the OSS pool, results cached by the workers). The
+# three modes are mutually exclusive.
+#
+# Outputs (to $GITHUB_OUTPUT when set, else stdout): rc=<path>,
+# remote=true|false, cache=true|false.
 set -euo pipefail
 
 cache_dir="${BAZEL_CI_CACHE_DIR:?BAZEL_CI_CACHE_DIR is required}"
@@ -76,6 +93,29 @@ cert="${RBE_TLS_CERT:-}"
 key="${RBE_TLS_KEY:-}"
 ca="${RBE_TLS_CA:-}"
 instance="${RBE_INSTANCE:-}"
+fork_cache="${BAZEL_FORK_CACHE:-}"
+fork_cert="${RBE_FORK_CERT_FILE:-}"
+fork_key="${RBE_FORK_KEY_FILE:-}"
+fork_endpoint="${RBE_FORK_ENDPOINT:-}"
+fork_instance="${RBE_FORK_INSTANCE:-}"
+fork_fields=0
+for v in "$fork_cert" "$fork_key" "$fork_endpoint" "$fork_instance"; do
+	[[ -n "$v" ]] && fork_fields=$((fork_fields + 1))
+done
+case "$fork_fields/$fork_instance" in
+0/ | 4/oss | 4/oss-fork) ;;
+*)
+	echo "setup-bazel: RBE_FORK_CERT_FILE, RBE_FORK_KEY_FILE, RBE_FORK_ENDPOINT and RBE_FORK_INSTANCE (oss or oss-fork) go together" >&2
+	exit 1
+	;;
+esac
+case "$fork_cache" in
+"" | true) ;;
+*)
+	echo "setup-bazel: BAZEL_FORK_CACHE must be \"true\" or empty, got \"$fork_cache\"" >&2
+	exit 1
+	;;
+esac
 
 rc="$secret_dir/ci.bazelrc"
 umask 077
@@ -85,6 +125,23 @@ umask 077
 	# The repo contents cache (default: under the repository cache, so in
 	# the runner cache) holds extracted repos Bazel never re-verifies; off.
 	echo "common --repo_contents_cache="
+	# Every mode fetches external repositories on the runner. gazelle's
+	# go_repository fetches Go modules with the go command (fetch_repo), not
+	# Bazel's downloader, and the go command never retries: one TLS
+	# handshake timeout against proxy.golang.org failed a whole lane. With
+	# "|" the go command moves to the next entry on any error (a ","
+	# list only on 404/410): the proxy twice, then the module's origin.
+	# fetch_repo checks every module against its go.sum hash whatever the
+	# source. Key neutral: repository fetching only, no action reads it.
+	echo "common --repo_env=GOPROXY=https://proxy.golang.org|https://proxy.golang.org|direct"
+	# Bazel's own downloader (the Go SDK, http_archive) already retries;
+	# give slow TLS handshakes and reads twice the default timeouts.
+	echo "common --http_timeout_scaling=2.0"
+	# The client's JVM heap. Bazel's default caps it at 25% of RAM, about
+	# 2 GB on the 8 GB 2 vCPU runners every remote lane uses; //... analysis
+	# fits today, with little headroom. A startup option: key neutral, it only
+	# restarts the server. Each lane reports peak-heap-size to size this.
+	echo "startup --host_jvm_args=-Xmx4g"
 } >"$rc"
 
 # write_pem DEST VALUE: decode base64 (or accept raw PEM) and check it is PEM.
@@ -116,7 +173,30 @@ for v in "$executor" "$cert" "$key"; do
 done
 
 remote=false
-if [[ "$set_fields" -eq 3 ]]; then
+cache=false
+if [[ "$fork_fields" -eq 4 ]]; then
+	if [[ "$set_fields" -ne 0 || "$fork_cache" == true ]]; then
+		echo "setup-bazel: the rbe-fork certificate, the remote execution secrets and BAZEL_FORK_CACHE are mutually exclusive" >&2
+		exit 1
+	fi
+	{
+		echo "build:remote-exec --remote_executor=$fork_endpoint"
+		echo "build:remote-exec --tls_client_certificate=$fork_cert"
+		echo "build:remote-exec --tls_client_key=$fork_key"
+		echo "build:remote-exec --remote_instance_name=$fork_instance"
+		echo "build:remote-exec --noremote_upload_local_results"
+		# The farm admits 128 connections per source IP (Blacksmith runners
+		# share addresses). Key-neutral, like everything in this rc.
+		echo "build:remote-exec --remote_max_connections=8"
+		echo "build --config=remote-exec"
+	} >>"$rc"
+	remote=true
+	echo "setup-bazel: remote execution on rbe-fork (instance $fork_instance, short-lived certificate)"
+elif [[ "$set_fields" -eq 3 ]]; then
+	if [[ "$fork_cache" == true ]]; then
+		echo "setup-bazel: BAZEL_FORK_CACHE and the remote execution secrets are mutually exclusive" >&2
+		exit 1
+	fi
 	write_pem "$secret_dir/client.crt" "$cert"
 	write_pem "$secret_dir/client.key" "$key"
 	# Outside the rc block below: write_pem's mask commands go to the log.
@@ -146,6 +226,18 @@ if [[ "$set_fields" -eq 3 ]]; then
 elif [[ "$set_fields" -ne 0 ]]; then
 	echo "setup-bazel: remote execution is partially configured; BAZEL_REMOTE_EXECUTOR, RBE_TLS_CERT and RBE_TLS_KEY must be set together (or none, for local execution)" >&2
 	exit 1
+elif [[ "$fork_cache" == true ]]; then
+	# zstd for the anonymous cache's transfers while it advertises zstd:
+	# transport only, so action keys are unchanged. The probe never fails
+	# this script; it only decides the line.
+	{
+		echo "build --config=fork-cache"
+		if bash "$(dirname "${BASH_SOURCE[0]}")/cache-zstd-probe.sh"; then
+			echo "build:fork-cache --remote_cache_compression"
+		fi
+	} >>"$rc"
+	cache=true
+	echo "setup-bazel: read-only remote cache (rbe-cache); executing locally"
 else
 	echo "setup-bazel: no remote execution secrets; running locally"
 fi
@@ -154,4 +246,5 @@ out="${GITHUB_OUTPUT:-/dev/stdout}"
 {
 	echo "rc=$rc"
 	echo "remote=$remote"
+	echo "cache=$cache"
 } >>"$out"

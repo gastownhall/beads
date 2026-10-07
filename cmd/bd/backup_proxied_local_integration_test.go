@@ -29,9 +29,9 @@ import (
 // gone. Both directions are load-bearing — a restore that changed nothing would
 // pass the first check alone.
 //
-// Named TestManagedLocalProxied* so the proxied-local smoke lane
-// (.github/workflows/proxied-local-smoke.yml) runs it; that lane is the only
-// one that sets BEADS_TEST_PROXIED_LOCAL.
+// Named TestManagedLocalProxied* so the managed-local lane
+// (//cmd/bd:bd_managed_local_test) runs it; that lane is the only one that
+// sets BEADS_TEST_PROXIED_LOCAL.
 func TestManagedLocalProxiedBackupRoundTrip(t *testing.T) {
 	requireManagedLocalProxiedEnv(t)
 

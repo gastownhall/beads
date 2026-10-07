@@ -57,8 +57,10 @@ func TestValidateCheck_AllClean(t *testing.T) {
 			t.Errorf("%s: status = %q, want %q (message: %s)", cr.check.Name, cr.check.Status, statusOK, cr.check.Message)
 		}
 	}
-	if len(checks) != 4 {
-		t.Errorf("Expected 4 checks, got %d", len(checks))
+	// Cross-table duplicates, duplicate issues, orphaned dependencies, test
+	// pollution, git conflicts.
+	if len(checks) != 5 {
+		t.Errorf("Expected 5 checks, got %d", len(checks))
 	}
 }
 

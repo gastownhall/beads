@@ -28,8 +28,9 @@ import (
 // incrementalExportThreshold caps the number of changed issue IDs we'll
 // incrementally re-encode before falling back to a full export. At high
 // change counts the per-issue SQL work (bulk loaders × changed set) stops
-// being cheaper than one `SearchIssues(Limit:0)` sweep.
-const incrementalExportThreshold = 5000
+// being cheaper than one `SearchIssues(Limit:0)` sweep. A var only so a
+// test can exercise the fallback without seeding 5000 issues.
+var incrementalExportThreshold = 5000
 
 // doltWorkingRef is the literal dolt_diff() accepts as an endpoint meaning
 // "the current working set", including uncommitted writes. Passing this
@@ -1271,6 +1272,10 @@ func tryIncrementalExport(ctx context.Context, fullPath, fromCommit, toCommit st
 	var records map[string][]byte
 	droppedByFilter := make(map[string]bool)
 	if len(upsertIDs) > 0 {
+		// TODO(batchgetter): this read is unbounded; issueops.BatchGetter caps a
+		// request at MaxGetManyIDs (1000) and this call site has not been
+		// audited for id volume or given chunking, so it still goes through
+		// GetIssuesByIDs rather than the role. See issueops.BatchGetter's doc.
 		issues, fetchErr := store.GetIssuesByIDs(ctx, upsertIDs)
 		if fetchErr != nil {
 			return 0, 0, nil, false, fmt.Errorf("GetIssuesByIDs: %w", fetchErr)

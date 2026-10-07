@@ -93,3 +93,43 @@ func TestExpandBatchTemplateSingleOccurrenceDegrades(t *testing.T) {
 		t.Errorf("arg count = %d, want %d", len(stmtArgs), len(args))
 	}
 }
+
+// TestBatchedTemplatesPinLookupJoins pins the join hints on the scoped
+// should-be-blocked union's four joined legs: without them the Dolt
+// sql-server planner intermittently drives the issues legs from an index
+// scan of every open issue, 6-10 s per statement over an import's
+// uncommitted working set (see shouldBeBlockedIDsUnionScopedSQL). The
+// unscoped union (full repair, doctor count) keeps the planner's choice.
+func TestBatchedTemplatesPinLookupJoins(t *testing.T) {
+	for name, tmpl := range batchedTemplates() {
+		for _, hint := range []string{"JOIN_ORDER(d, t) LOOKUP_JOIN(d, t)", "JOIN_ORDER(d, p) LOOKUP_JOIN(d, p)"} {
+			if got := strings.Count(tmpl, hint); got != 2 {
+				t.Errorf("%s carries %q %d times, want 2 (one per joined issues/wisps leg)", name, hint, got)
+			}
+		}
+	}
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		union := shouldBeBlockedIDsUnionSQL(depTable)
+		if strings.Contains(union, "LOOKUP_JOIN(d, t)") || strings.Contains(union, "LOOKUP_JOIN(d, p)") {
+			t.Errorf("unscoped union over %s should not pin its legs' joins", depTable)
+		}
+	}
+}
+
+// TestWaitsForGateSplitsSpawnerColumns pins the waits-for gate's per-column
+// EXISTS split: one OR across both spawner columns inside an EXISTS has no
+// index to use and scans the edge table per evaluation (see
+// waitsForGateBlockedSQL). Two tables x two columns x {open, closed} children.
+func TestWaitsForGateSplitsSpawnerColumns(t *testing.T) {
+	if got := strings.Count(waitsForGateBlockedSQL, "JOIN_ORDER(cd, child) LOOKUP_JOIN(cd, child)"); got != 8 {
+		t.Errorf("gate pins %d child lookups, want 8", got)
+	}
+	if strings.Contains(waitsForGateBlockedSQL, "OR (d.depends_on_wisp_id IS NOT NULL") {
+		t.Errorf("gate still ORs the spawner columns inside one EXISTS")
+	}
+	for _, col := range []string{"depends_on_issue_id", "depends_on_wisp_id"} {
+		if got := strings.Count(waitsForGateBlockedSQL, "cd."+col+" = d."+col); got != 4 {
+			t.Errorf("gate matches cd.%s in %d EXISTS, want 4", col, got)
+		}
+	}
+}

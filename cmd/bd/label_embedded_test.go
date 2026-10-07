@@ -99,7 +99,12 @@ func bdLabelListAllJSON(t *testing.T, bd, dir string) []map[string]interface{} {
 	return results
 }
 
-func TestEmbeddedLabel(t *testing.T) {
+// TestEmbeddedLabelAddRemove was split from TestEmbeddedLabel (originally
+// ~360s, measured under --config=embedded) into 3 top-level tests over
+// disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedLabelAddRemove(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -238,6 +243,192 @@ func TestEmbeddedLabel(t *testing.T) {
 					t.Errorf("label should have been removed from %s", id)
 				}
 			}
+		}
+	})
+
+	t.Run("label_remove_prefix", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Prefix remove", "--type", "task",
+			"--label", "pool:refused:reason-a", "--label", "pool:refused:reason-b", "--label", "needs-human")
+		bdLabel(t, bd, dir, "remove", issue.ID, "--prefix", "pool:refused:")
+		labels := bdLabelListJSON(t, bd, dir, issue.ID)
+		for _, l := range labels {
+			if strings.HasPrefix(l, "pool:refused:") {
+				t.Errorf("label %q should have been removed by prefix: %v", l, labels)
+			}
+		}
+		found := false
+		for _, l := range labels {
+			if l == "needs-human" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected 'needs-human' to survive: %v", labels)
+		}
+	})
+
+	t.Run("label_remove_prefix_no_match_is_noop", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Prefix remove no match", "--type", "task", "--label", "keep-me")
+		bdLabel(t, bd, dir, "remove", issue.ID, "--prefix", "does-not-exist:")
+		labels := bdLabelListJSON(t, bd, dir, issue.ID)
+		if len(labels) != 1 || labels[0] != "keep-me" {
+			t.Errorf("expected only 'keep-me' to survive a no-match prefix removal: %v", labels)
+		}
+	})
+
+	// --prefix takes no trailing label argument (every positional is an issue
+	// ID), so a caller who reflexively keeps the plain-remove habit of ending
+	// with a label — `bd label remove <id> stale-label --prefix x` — must get
+	// an explicit, unambiguous rejection rather than a confusing "could not
+	// resolve issue ID" error that then recommends the very label-argument
+	// syntax --prefix does not accept.
+	t.Run("label_remove_prefix_rejects_label_shaped_positional", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Prefix remove mixed args", "--type", "task",
+			"--label", "pool:refused:reason-a")
+		out := bdLabelFail(t, bd, dir, "remove", issue.ID, "definitely-not-an-issue-id", "--prefix", "pool:refused:")
+		if !strings.Contains(out, "cannot combine --prefix with label arguments") {
+			t.Errorf("expected the --prefix + label-argument rejection message, got: %s", out)
+		}
+		// Resolution must fail before any mutation — the valid issue's labels
+		// must be untouched by the rejected call, not partially applied.
+		labels := bdLabelListJSON(t, bd, dir, issue.ID)
+		found := false
+		for _, l := range labels {
+			if l == "pool:refused:reason-a" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("rejected --prefix call must not remove labels from the valid issue id first: %v", labels)
+		}
+	})
+
+	// A LONE positional that does not resolve is just a bad issue ID, so it
+	// must NOT be blamed on the label-argument habit the subtest above covers:
+	// the speculative hint is gated on there being more than one positional,
+	// the same way resolveLabelIssueIDs gates its own.
+	t.Run("label_remove_prefix_single_bad_id_is_not_blamed_on_arguments", func(t *testing.T) {
+		out := bdLabelFail(t, bd, dir, "remove", "bd-definitely-absent", "--prefix", "pool:refused:")
+		if strings.Contains(out, "cannot combine --prefix with label arguments") {
+			t.Errorf("a lone unresolvable id must not be reported as an argument mistake: %s", out)
+		}
+		if !strings.Contains(out, `resolving issue ID "bd-definitely-absent"`) {
+			t.Errorf("expected the plain resolution error, got: %s", out)
+		}
+	})
+
+	// The prefix path's OUTPUT surfaces, which is where the GH#5988
+	// false-confirmation class lives: it reports removals it did not make if
+	// the report is driven from the pre-read snapshot instead of from the
+	// UpdateResult. Asserting the stored labels alone cannot see that.
+	t.Run("label_remove_prefix_reports_json_rows", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Prefix JSON rows", "--type", "task",
+			"--label", "pool:refused:reason-a", "--label", "pool:refused:reason-b", "--label", "needs-human")
+		rows := bdLabelEditJSON(t, bd, dir, "remove", issue.ID, "--prefix", "pool:refused:")
+		if len(rows) != 2 {
+			t.Fatalf("prefix remove JSON = %v, want one row per matching label", rows)
+		}
+		got := map[interface{}]interface{}{}
+		for _, r := range rows {
+			if r["issue_id"] != issue.ID {
+				t.Errorf("row %v has issue_id %v, want %s", r, r["issue_id"], issue.ID)
+			}
+			got[r["label"]] = r["status"]
+		}
+		if got["pool:refused:reason-a"] != "removed" || got["pool:refused:reason-b"] != "removed" {
+			t.Errorf("prefix remove JSON = %v, want both matching labels status=removed", rows)
+		}
+	})
+
+	t.Run("label_remove_prefix_no_match_reports_empty_json", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Prefix JSON no match", "--type", "task", "--label", "keep-me")
+		rows := bdLabelEditJSON(t, bd, dir, "remove", issue.ID, "--prefix", "does-not-exist:")
+		if len(rows) != 0 {
+			t.Errorf("no-match prefix remove JSON = %v, want an empty array", rows)
+		}
+	})
+}
+
+// TestEmbeddedLabelEditReports was split from TestEmbeddedLabel (originally
+// ~360s, measured under --config=embedded) into 3 top-level tests over
+// disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedLabelEditReports(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tl")
+
+	// Two issues carrying DIFFERENT matching sets: the report is per issue and
+	// each issue's set is resolved from its own labels, so a refactor that
+	// shared one label set across the ids — or reused one issue's outcome for
+	// the other — would show up here and nowhere else.
+	t.Run("label_remove_prefix_two_issues", func(t *testing.T) {
+		both := bdCreate(t, bd, dir, "Prefix two-issue both", "--type", "task",
+			"--label", "pool:refused:reason-a", "--label", "pool:refused:reason-b")
+		one := bdCreate(t, bd, dir, "Prefix two-issue one", "--type", "task",
+			"--label", "pool:refused:reason-c", "--label", "needs-human")
+		rows := bdLabelEditJSON(t, bd, dir, "remove", both.ID, one.ID, "--prefix", "pool:refused:")
+		byIssue := map[interface{}][]string{}
+		for _, r := range rows {
+			if r["status"] != "removed" {
+				t.Errorf("row %v: want status=removed", r)
+			}
+			byIssue[r["issue_id"]] = append(byIssue[r["issue_id"]], r["label"].(string))
+		}
+		if len(byIssue[both.ID]) != 2 || len(byIssue[one.ID]) != 1 {
+			t.Errorf("prefix remove over two issues = %v, want 2 rows for %s and 1 for %s", rows, both.ID, one.ID)
+		}
+		if labels := bdLabelListJSON(t, bd, dir, one.ID); len(labels) != 1 || labels[0] != "needs-human" {
+			t.Errorf("non-matching label on the second issue should survive: %v", labels)
+		}
+	})
+
+	// THE pin for the false-confirmation defect, and it needs no concurrency:
+	// naming the same issue twice used to produce one Update and TWO "removed"
+	// rows per label, because the report iterated the pre-read (issue, label)
+	// pairs rather than what the write returned. The ids collapse to one, so
+	// one edit reports one row per label — exactly the single-id result.
+	t.Run("label_remove_prefix_duplicate_id_reports_each_label_once", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Prefix duplicate id", "--type", "task",
+			"--label", "pool:refused:reason-a", "--label", "pool:refused:reason-b", "--label", "needs-human")
+		rows := bdLabelEditJSON(t, bd, dir, "remove", issue.ID, issue.ID, "--prefix", "pool:refused:")
+		if len(rows) != 2 {
+			t.Errorf("duplicated issue id = %v rows, want one per matching label (2), not one per (id,label) pair", rows)
+		}
+		for _, r := range rows {
+			if r["status"] != "removed" {
+				t.Errorf("row %v: want status=removed", r)
+			}
+		}
+		if labels := bdLabelListJSON(t, bd, dir, issue.ID); len(labels) != 1 || labels[0] != "needs-human" {
+			t.Errorf("labels after duplicated-id prefix remove = %v, want [needs-human]", labels)
+		}
+	})
+
+	// Re-running a prefix removal must not claim a second removal. This pins
+	// the no-match branch only: the "unchanged" arm of the shared
+	// reportLabelEdit needs the matched set to vanish between the Get and the
+	// Update, which a single caller cannot arrange, and
+	// label_remove_absent_reports_noop covers that arm of the handler through
+	// the plain path.
+	t.Run("label_remove_prefix_rerun_takes_no_match_branch", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Prefix rerun", "--type", "task",
+			"--label", "pool:refused:reason-a", "--label", "needs-human")
+		bdLabel(t, bd, dir, "remove", issue.ID, "--prefix", "pool:refused:")
+		// The prefix no longer matches anything, so the second call resolves an
+		// empty set and takes the no-match branch rather than reporting a
+		// removal.
+		out := bdLabel(t, bd, dir, "remove", issue.ID, "--prefix", "pool:refused:")
+		if strings.Contains(out, "Removed") {
+			t.Errorf("re-running a prefix removal claimed a second removal: %s", out)
+		}
+		if !strings.Contains(out, "No labels matching prefix 'pool:refused:' found") {
+			t.Errorf("expected the no-match line on re-run, got: %s", out)
 		}
 	})
 
@@ -423,6 +614,21 @@ func TestEmbeddedLabel(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestEmbeddedLabelPropagateRename was split from TestEmbeddedLabel
+// (originally ~360s, measured under --config=embedded) into 3 top-level
+// tests over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedLabelPropagateRename(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tl")
 
 	// ===== Label Propagate =====
 

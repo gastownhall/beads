@@ -1,0 +1,66 @@
+load("@rules_go//go:def.bzl", "go_test", "nogo")
+load(":analyzers.bzl", "NOGO_ANALYZERS")
+
+# gazelle:prefix github.com/steveyegge/beads/tools/nogo
+
+# nogo: lint and vet as part of every Go compile. MODULE.bazel registers this
+# target with go_sdk.nogo, so `bazel build //...` (locally or on RBE) fails on
+# any finding. Replaces `go vet` (go test's checks) and golangci-lint; gofmt
+# stays with //scripts/repochecks:fmt_test.
+nogo(
+    name = "nogo",
+    config = "config.json",
+    visibility = ["//visibility:public"],
+    deps = NOGO_ANALYZERS,
+)
+
+go_test(
+    name = "nogo_test",
+    srcs = [
+        "analyzers_test.go",
+        "modules_test.go",
+    ],
+    data = [
+        "analyzers.bzl",
+        "config.json",
+        "go.mod",
+        "//:.golangci.yml",
+        "//:go.mod",
+    ],  # keep
+    deps = [
+        "//tools/nogo/analyzers/depguard",
+        "//tools/nogo/analyzers/errcheck",
+        "//tools/nogo/analyzers/forbidigo",
+        "//tools/nogo/analyzers/gosec",
+        "//tools/nogo/analyzers/misspell",
+        "//tools/nogo/analyzers/sloglint",
+        "//tools/nogo/analyzers/unconvert",
+        "//tools/nogo/analyzers/unparam",
+        "//tools/nogo/internal/golangci",
+        "@org_golang_x_mod//modfile",
+        "@org_golang_x_mod//semver",
+        "@org_golang_x_tools//go/analysis",
+    ],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

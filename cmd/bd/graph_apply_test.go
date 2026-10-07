@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -10,7 +11,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // TestDocsGraphPlanExampleValidates pins the --graph doc supplement's example
@@ -526,35 +529,6 @@ func TestGraphApplyEdgeIsLocalCycleRelevantOnlyForLocalBlockingEdges(t *testing.
 	}
 }
 
-func TestGraphApplyParentDepPairs(t *testing.T) {
-	nodes := []GraphApplyNode{
-		{Key: "root", Title: "Root"},
-		{Key: "child", Title: "Child", ParentKey: "root"},
-		{Key: "external-child", Title: "External child", ParentID: "bd-parent"},
-	}
-	keyToID := map[string]string{
-		"root":           "bd-root",
-		"child":          "bd-child",
-		"external-child": "bd-external-child",
-	}
-
-	pairs := graphApplyParentDepPairs(nodes, keyToID)
-	for _, pair := range []struct {
-		child  string
-		parent string
-	}{
-		{"bd-child", "bd-root"},
-		{"bd-external-child", "bd-parent"},
-	} {
-		if !pairs[graphApplyDepPairKey(pair.child, pair.parent)] {
-			t.Fatalf("missing parent dep pair %s -> %s", pair.child, pair.parent)
-		}
-	}
-	if pairs[graphApplyDepPairKey("bd-root", "bd-child")] {
-		t.Fatal("unexpected reverse parent dep pair")
-	}
-}
-
 // TestEmitGraphApplyDryRun_JSON verifies that the dry-run path emits valid
 // JSON with the expected structure when jsonOutput is set. This exercises the
 // code path that `bd create --graph --dry-run --json` takes, confirming the
@@ -981,8 +955,8 @@ func TestValidateGraphApplyExplicitIDPrefixes(t *testing.T) {
 // field exists, not that graphApplyNodeIssue actually wires it into its
 // createIssueParams literal. A new field added everywhere but omitted from
 // that literal would still pass here and materialize as a zero value; the
-// value round-trip in TestEmbeddedCreate/graph_full_fields is the wiring
-// backstop.
+// value round-trip in TestEmbeddedCreateGraphAndBulk/graph_create_journey
+// (renamed from graph_full_fields by bd-okxx4, #5291) is the wiring backstop.
 func TestGraphApplyNodeCoversCreateIssueParams(t *testing.T) {
 	renamed := map[string]string{
 		"IssueType":     "Type",
@@ -1006,4 +980,639 @@ func TestGraphApplyNodeCoversCreateIssueParams(t *testing.T) {
 			t.Errorf("createIssueParams field %q is not addressable from graph plans; add it to GraphApplyNode (or the exclusion list with a reason)", name)
 		}
 	}
+}
+
+// An explicit durable storage_class on an effective wisp-plane node must be
+// rejected, not silently erased into an effective-ephemeral record
+// (Protocol v0.1 §C1.3). versioned is normalized to the unset marker (C2.4)
+// only after that conflict check. Cases pin an explicit class so resolution
+// never reads the config global and the test stays hermetic; config-default
+// interaction is covered by the embedded create tests.
+func TestGraphApplyNodeStorageClassConflicts(t *testing.T) {
+	boolPtr := func(b bool) *bool { return &b }
+
+	tests := []struct {
+		name      string
+		node      GraphApplyNode
+		opts      GraphApplyOptions
+		wantErr   string // substring; "" means no error expected
+		wantEphem bool
+		wantClass types.StorageClass
+	}{
+		{
+			name:    "explicit versioned with node ephemeral is rejected",
+			node:    GraphApplyNode{Key: "n1", Type: "task", StorageClass: "versioned", Ephemeral: boolPtr(true)},
+			wantErr: "storage_class versioned conflicts with ephemeral/no_history",
+		},
+		{
+			name:    "explicit versioned with node no_history is rejected",
+			node:    GraphApplyNode{Key: "n2", Type: "task", StorageClass: "versioned", NoHistory: boolPtr(true)},
+			wantErr: "storage_class versioned conflicts with ephemeral/no_history",
+		},
+		{
+			name:    "explicit unversioned with plan-wide ephemeral is rejected",
+			node:    GraphApplyNode{Key: "n3", Type: "task", StorageClass: "unversioned"},
+			opts:    GraphApplyOptions{Ephemeral: true},
+			wantErr: "storage_class unversioned conflicts with ephemeral/no_history",
+		},
+		{
+			name:      "explicit versioned alone normalizes to unset",
+			node:      GraphApplyNode{Key: "n4", Type: "task", StorageClass: "versioned"},
+			wantClass: "",
+		},
+		{
+			name:      "storage_class ephemeral spelling routes to wisp",
+			node:      GraphApplyNode{Key: "n5", Type: "task", StorageClass: "ephemeral"},
+			wantEphem: true,
+			wantClass: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ephemeral, _, class, err := graphApplyNodeStorageClass(tt.node, tt.opts)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil (ephemeral=%v class=%q)", tt.wantErr, ephemeral, class)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %q, want substring %q", err.Error(), tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if ephemeral != tt.wantEphem {
+				t.Errorf("ephemeral = %v, want %v", ephemeral, tt.wantEphem)
+			}
+			if class != tt.wantClass {
+				t.Errorf("class = %q, want %q", class, tt.wantClass)
+			}
+		})
+	}
+}
+
+// A per-type config default (storage-class.<type>=unversioned) must yield to an
+// effective wisp plane rather than reaching validation and blocking the node
+// (flag > config, Protocol v0.1 §C1.3). Unlike the hermetic conflict cases
+// above, these leave node.StorageClass unset so resolution reads the config
+// global, so the subtests share one process-wide config and cannot run in
+// parallel. The precondition assert guards against a silent pass if config
+// never initialized (Set is a no-op on an uninitialized viper).
+func TestGraphApplyNodeStorageClassConfigDefaultYieldsToWispPlane(t *testing.T) {
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	config.Set("storage-class.task", "unversioned")
+	if got := config.GetString("storage-class.task"); got != "unversioned" {
+		t.Fatalf("precondition: storage-class.task = %q, want unversioned", got)
+	}
+
+	boolPtr := func(b bool) *bool { return &b }
+
+	tests := []struct {
+		name      string
+		node      GraphApplyNode
+		opts      GraphApplyOptions
+		wantEphem bool
+		wantNoHis bool
+	}{
+		{
+			name:      "plan-wide ephemeral clears config-derived unversioned",
+			node:      GraphApplyNode{Key: "n1", Type: "task"},
+			opts:      GraphApplyOptions{Ephemeral: true},
+			wantEphem: true,
+		},
+		{
+			name:      "node-level ephemeral clears config-derived unversioned",
+			node:      GraphApplyNode{Key: "n2", Type: "task", Ephemeral: boolPtr(true)},
+			wantEphem: true,
+		},
+		{
+			name:      "plan-wide no_history clears config-derived unversioned",
+			node:      GraphApplyNode{Key: "n3", Type: "task"},
+			opts:      GraphApplyOptions{NoHistory: true},
+			wantNoHis: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ephemeral, noHistory, class, err := graphApplyNodeStorageClass(tt.node, tt.opts)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if class != "" {
+				t.Errorf("class = %q, want empty (config default yields to wisp plane)", class)
+			}
+			if ephemeral != tt.wantEphem {
+				t.Errorf("ephemeral = %v, want %v", ephemeral, tt.wantEphem)
+			}
+			if noHistory != tt.wantNoHis {
+				t.Errorf("noHistory = %v, want %v", noHistory, tt.wantNoHis)
+			}
+		})
+	}
+}
+
+// TestBuildGraphApplyBatchRequestItemOrderAndRefs pins the translation
+// buildGraphApplyBatchRequest performs for both the embedded and proxied
+// `bd create --graph` legs: every create lands first (plan order), then
+// parent-child dep_adds, then explicit edges, then inline node deps, then
+// trailing assign_after_create updates — so every Ref below resolves
+// backward regardless of the plan's own declaration order.
+func TestBuildGraphApplyBatchRequestItemOrderAndRefs(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "root", Title: "Root", Type: "epic"},
+			{Key: "child", Title: "Child", ParentKey: "root", Deps: []GraphApplyNodeDep{{Target: "root", Type: "blocks"}}},
+			{Key: "deferred", Title: "Deferred assignee", Assignee: "worker", AssignAfterCreate: true},
+		},
+		Edges: []GraphApplyEdge{
+			{FromKey: "child", ToKey: "deferred", Type: "related-to"},
+		},
+	}
+
+	req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "owner@example.com")
+	if err != nil {
+		t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+	}
+
+	var gotKinds []issueops.ItemKind
+	for _, item := range req.Items {
+		gotKinds = append(gotKinds, item.Kind)
+	}
+	wantKinds := []issueops.ItemKind{
+		issueops.ItemCreate, issueops.ItemCreate, issueops.ItemCreate, // root, child, deferred
+		issueops.ItemDepAdd, // child -> root (parent-child)
+		issueops.ItemDepAdd, // child -> deferred (explicit edge)
+		issueops.ItemDepAdd, // child -> root (inline dep)
+		issueops.ItemUpdate, // deferred's assign_after_create
+	}
+	if len(gotKinds) != len(wantKinds) {
+		t.Fatalf("item kinds = %v, want %v", gotKinds, wantKinds)
+	}
+	for i := range wantKinds {
+		if gotKinds[i] != wantKinds[i] {
+			t.Errorf("item %d kind = %q, want %q", i, gotKinds[i], wantKinds[i])
+		}
+	}
+
+	parentDep := req.Items[3].DepAdd
+	if parentDep.Source != (issueops.Ref{Key: "child"}) || parentDep.Target != (issueops.Ref{Key: "root"}) || parentDep.Type != types.DepParentChild {
+		t.Errorf("parent-child dep_add = %+v", parentDep)
+	}
+	explicitEdge := req.Items[4].DepAdd
+	if explicitEdge.Source != (issueops.Ref{Key: "child"}) || explicitEdge.Target != (issueops.Ref{Key: "deferred"}) || explicitEdge.Type != types.DependencyType("related-to") {
+		t.Errorf("explicit edge dep_add = %+v", explicitEdge)
+	}
+	inlineDep := req.Items[5].DepAdd
+	if inlineDep.Source != (issueops.Ref{Key: "child"}) || inlineDep.Target != (issueops.Ref{Key: "root"}) || inlineDep.Type != types.DepBlocks {
+		t.Errorf("inline dep_add = %+v", inlineDep)
+	}
+	update := req.Items[6].Update
+	if update.Target != (issueops.Ref{Key: "deferred"}) || !update.Patch.Assignee.Set || update.Patch.Assignee.Value != "worker" {
+		t.Errorf("deferred assignee update = %+v", update)
+	}
+
+	if req.Actor != "actor" || req.Provenance == "" {
+		t.Errorf("request actor/provenance = %q/%q", req.Actor, req.Provenance)
+	}
+}
+
+// TestBuildGraphApplyBatchRequestEdgeRefPrefersExplicitID pins resolveEdgeRef's
+// old precedence, now inlined as the `ref` closure: an edge endpoint carrying
+// both a plan key and an explicit id resolves to the id.
+func TestBuildGraphApplyBatchRequestEdgeRefPrefersExplicitID(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "a", Title: "A"},
+			{Key: "b", Title: "B"},
+		},
+		Edges: []GraphApplyEdge{
+			{FromKey: "a", ToKey: "b", ToID: "bd-existing", Type: "blocks"},
+		},
+	}
+	req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "")
+	if err != nil {
+		t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+	}
+	var edge *issueops.DepAddItem
+	for _, item := range req.Items {
+		if item.Kind == issueops.ItemDepAdd {
+			edge = item.DepAdd
+		}
+	}
+	if edge == nil {
+		t.Fatal("no dep_add item found")
+	}
+	if edge.Target != (issueops.Ref{ID: "bd-existing"}) {
+		t.Errorf("edge target = %+v, want explicit id to win over to_key", edge.Target)
+	}
+}
+
+// TestBuildGraphApplyBatchRequestParentKeyWinsOverParentID pins the opposite
+// precedence for a node's parent: a node naming both a plan-local parent
+// (parent_key, or its parent alias) and a parent_id is parented under the
+// plan key, as both legs did before the BatchApplier translation, and as the
+// dry-run preview and the local cycle check already assume.
+func TestBuildGraphApplyBatchRequestParentKeyWinsOverParentID(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "root", Title: "Root", Type: "epic"},
+			{Key: "keyed", Title: "Keyed", ParentKey: "root", ParentID: "bd-existing"},
+			{Key: "aliased", Title: "Aliased", Parent: "root", ParentID: "bd-existing"},
+			{Key: "external", Title: "External", ParentID: "bd-existing"},
+		},
+	}
+	req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "")
+	if err != nil {
+		t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+	}
+	got := map[string]issueops.Ref{}
+	for _, item := range req.Items {
+		if item.Kind == issueops.ItemDepAdd && item.DepAdd.Type == types.DepParentChild {
+			got[item.DepAdd.Source.Key] = item.DepAdd.Target
+		}
+	}
+	want := map[string]issueops.Ref{
+		"keyed":    {Key: "root"},
+		"aliased":  {Key: "root"},
+		"external": {ID: "bd-existing"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("parent-child targets = %+v, want %+v", got, want)
+	}
+}
+
+// TestBuildGraphApplyBatchRequestWaitsForGateMetadataCarriesGateOnly pins that
+// this translation only ever writes the gate into a waits-for edge's
+// Metadata: SpawnerKey/SpawnerID are validated elsewhere to equal the edge's
+// own target, and issueops.StampWaitsForSpawnerID (the role's own end, not
+// this translation) is what fills metadata.spawner_id once the batch mints
+// every id — see graphApplyEdgeBatchMetadata's doc.
+func TestBuildGraphApplyBatchRequestWaitsForGateMetadataCarriesGateOnly(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "gate", Title: "Gate"},
+			{Key: "spawner", Title: "Spawner"},
+		},
+		Edges: []GraphApplyEdge{
+			{FromKey: "gate", ToKey: "spawner", Type: "waits-for", Gate: "any-children", SpawnerKey: "spawner"},
+		},
+	}
+	req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "")
+	if err != nil {
+		t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+	}
+	var edge *issueops.DepAddItem
+	for _, item := range req.Items {
+		if item.Kind == issueops.ItemDepAdd {
+			edge = item.DepAdd
+		}
+	}
+	if edge == nil {
+		t.Fatal("no dep_add item found")
+	}
+	var meta types.WaitsForMeta
+	if err := json.Unmarshal([]byte(edge.Metadata), &meta); err != nil {
+		t.Fatalf("edge.Metadata = %q not valid WaitsForMeta JSON: %v", edge.Metadata, err)
+	}
+	if meta.Gate != types.WaitsForAnyChildren {
+		t.Errorf("meta.Gate = %q, want any-children", meta.Gate)
+	}
+	if meta.SpawnerID != "" {
+		t.Errorf("meta.SpawnerID = %q, want empty: the role stamps it after ids are minted", meta.SpawnerID)
+	}
+	if !edge.HasSpawner {
+		t.Errorf("edge.HasSpawner = false, want true: the edge named spawner_key %q", "spawner")
+	}
+}
+
+// TestBuildGraphApplyBatchRequestWaitsForNoSpawnerLeavesHasSpawnerFalse pins
+// the 2026-10 Opus-review HIGH-2 fix's other half: a waits-for edge that names
+// NO spawner_key/spawner_id must translate to HasSpawner false, so the role
+// (StampWaitsForSpawnerID's caller in both BatchApplier legs) leaves its
+// stored metadata gate-only rather than stamping in a spawner_id the plan
+// never asked for.
+func TestBuildGraphApplyBatchRequestWaitsForNoSpawnerLeavesHasSpawnerFalse(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "gate", Title: "Gate"},
+			{Key: "spawner", Title: "Spawner"},
+		},
+		Edges: []GraphApplyEdge{
+			{FromKey: "gate", ToKey: "spawner", Type: "waits-for"},
+		},
+	}
+	req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "")
+	if err != nil {
+		t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+	}
+	var edge *issueops.DepAddItem
+	for _, item := range req.Items {
+		if item.Kind == issueops.ItemDepAdd {
+			edge = item.DepAdd
+		}
+	}
+	if edge == nil {
+		t.Fatal("no dep_add item found")
+	}
+	if edge.HasSpawner {
+		t.Errorf("edge.HasSpawner = true, want false: the edge named no spawner_key/spawner_id")
+	}
+}
+
+// TestBuildGraphApplyBatchRequestCarriesEdgeThreadID pins that edges[].thread_id
+// — previously rejected outright because issueops.DepAddItem had no member to
+// carry it (the 2026-10 Opus-review HIGH-1 finding) — now reaches the dep_add
+// item's own ThreadID field unchanged, so both BatchApplier legs can stamp it
+// onto the stored dependency row (see TestGraphApplyThreadIDGoldenParity for
+// the stored-row assertion).
+func TestBuildGraphApplyBatchRequestCarriesEdgeThreadID(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "a", Title: "A"},
+			{Key: "b", Title: "B"},
+		},
+		Edges: []GraphApplyEdge{
+			{FromKey: "a", ToKey: "b", Type: "replies-to", ThreadID: "thread-1"},
+		},
+	}
+	req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "")
+	if err != nil {
+		t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+	}
+	var edge *issueops.DepAddItem
+	for _, item := range req.Items {
+		if item.Kind == issueops.ItemDepAdd {
+			edge = item.DepAdd
+		}
+	}
+	if edge == nil {
+		t.Fatal("no dep_add item found")
+	}
+	if edge.ThreadID != "thread-1" {
+		t.Errorf("edge.ThreadID = %q, want %q", edge.ThreadID, "thread-1")
+	}
+}
+
+// TestBuildGraphApplyBatchRequestCapBoundary pins the exact boundary of the
+// "atomic, never chunked" refusal: a plan whose translated item count sits at
+// issueops.MaxApplyBatchItems is accepted, and one item over is refused with
+// *GraphApplyTooLargeError rather than being split across more than one
+// transaction.
+func TestBuildGraphApplyBatchRequestCapBoundary(t *testing.T) {
+	buildPlanWithNodeCount := func(n int) *GraphApplyPlan {
+		nodes := make([]GraphApplyNode, n)
+		for i := range nodes {
+			nodes[i] = GraphApplyNode{Key: fmt.Sprintf("n%d", i), Title: "N"}
+		}
+		return &GraphApplyPlan{Nodes: nodes}
+	}
+
+	t.Run("exactly the cap succeeds", func(t *testing.T) {
+		plan := buildPlanWithNodeCount(issueops.MaxApplyBatchItems)
+		req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "")
+		if err != nil {
+			t.Fatalf("buildGraphApplyBatchRequest at the cap: %v", err)
+		}
+		if len(req.Items) != issueops.MaxApplyBatchItems {
+			t.Fatalf("item count = %d, want %d", len(req.Items), issueops.MaxApplyBatchItems)
+		}
+	})
+
+	t.Run("one over the cap is refused", func(t *testing.T) {
+		plan := buildPlanWithNodeCount(issueops.MaxApplyBatchItems + 1)
+		_, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "")
+		var tooLarge *GraphApplyTooLargeError
+		if !errors.As(err, &tooLarge) {
+			t.Fatalf("err = %v, want *GraphApplyTooLargeError", err)
+		}
+		if tooLarge.ItemCount != issueops.MaxApplyBatchItems+1 || tooLarge.Max != issueops.MaxApplyBatchItems {
+			t.Errorf("tooLarge = %+v, want ItemCount=%d Max=%d", tooLarge, issueops.MaxApplyBatchItems+1, issueops.MaxApplyBatchItems)
+		}
+	})
+}
+
+// wantCoveredGraphApplyEdgeFields and wantCoveredGraphApplyNodeDepFields are
+// the field-name allowlists TestBuildGraphApplyBatchRequestFieldsSurvive
+// checks every GraphApplyEdge/GraphApplyNodeDep field against. A field
+// missing from its allowlist fails the test immediately: this is the guard
+// against a future field silently riding through buildGraphApplyBatchRequest
+// untested, which is exactly how edges[].thread_id (2026-10 Opus-review
+// HIGH-1) and the spawner_key/spawner_id -> HasSpawner translation (HIGH-2)
+// went unverified before. Adding a field to either struct means adding it
+// here AND adding a subtest below that proves it reaches (or is deliberately
+// dropped from) the built issueops.ApplyBatchRequest.
+var wantCoveredGraphApplyEdgeFields = map[string]bool{
+	"FromKey": true, "FromID": true, "ToKey": true, "ToID": true,
+	"Type": true, "Gate": true, "SpawnerKey": true, "SpawnerID": true,
+	"ThreadID": true,
+}
+
+var wantCoveredGraphApplyNodeDepFields = map[string]bool{
+	"Type": true, "Target": true,
+}
+
+// TestBuildGraphApplyBatchRequestFieldsSurvive is the field-check test the
+// coordinator's 2026-10 re-review asked for: it fails if any graph-plan edge
+// or inline-dep field — including thread_id, the spawner fields and gate
+// metadata — is dropped when buildGraphApplyBatchRequest translates a plan
+// into issueops.DepAddItem entries for the BatchApplier request.
+//
+// This cannot be the old (now-deleted) TestBuildDomainGraphPlanCoversEdgeFields
+// reflection trick of copying every source field onto a same-named destination
+// field: GraphApplyEdge and issueops.DepAddItem do not share field names.
+// FromKey/FromID collapse into one Source Ref, ToKey/ToID into one Target Ref,
+// Gate is JSON-encoded into Metadata only for waits-for edges, and
+// SpawnerKey/SpawnerID collapse into the derived HasSpawner bool. So instead
+// this enumerates GraphApplyEdge/GraphApplyNodeDep's fields by reflection and
+// requires each one to be claimed in wantCoveredGraphApplyEdgeFields /
+// wantCoveredGraphApplyNodeDepFields above (an unclaimed field fails outright,
+// forcing a conscious update here), then independently proves each claimed
+// field actually reaches the built request.
+func TestBuildGraphApplyBatchRequestFieldsSurvive(t *testing.T) {
+	assertAllFieldsClaimed := func(t *testing.T, typ reflect.Type, claimed map[string]bool) {
+		t.Helper()
+		for i := 0; i < typ.NumField(); i++ {
+			name := typ.Field(i).Name
+			if !claimed[name] {
+				t.Errorf("%s.%s has no coverage claim in this test; add it to the allowlist and prove it survives buildGraphApplyBatchRequest", typ.Name(), name)
+			}
+		}
+		for name := range claimed {
+			if _, ok := typ.FieldByName(name); !ok {
+				t.Errorf("allowlist claims %s.%s but no such field exists; stale entry", typ.Name(), name)
+			}
+		}
+	}
+	assertAllFieldsClaimed(t, reflect.TypeOf(GraphApplyEdge{}), wantCoveredGraphApplyEdgeFields)
+	assertAllFieldsClaimed(t, reflect.TypeOf(GraphApplyNodeDep{}), wantCoveredGraphApplyNodeDepFields)
+
+	// lastDepAdd returns the last dep_add item's payload, matching the
+	// pattern every sibling test in this file already uses to pick out the
+	// one edge a single-edge plan produces.
+	lastDepAdd := func(t *testing.T, req issueops.ApplyBatchRequest) *issueops.DepAddItem {
+		t.Helper()
+		var got *issueops.DepAddItem
+		for _, item := range req.Items {
+			if item.Kind == issueops.ItemDepAdd {
+				got = item.DepAdd
+			}
+		}
+		if got == nil {
+			t.Fatal("no dep_add item found in built request")
+		}
+		return got
+	}
+
+	t.Run("FromKey and ToKey resolve to plan-key refs", func(t *testing.T) {
+		plan := &GraphApplyPlan{
+			Nodes: []GraphApplyNode{{Key: "a", Title: "A"}, {Key: "b", Title: "B"}},
+			Edges: []GraphApplyEdge{{FromKey: "a", ToKey: "b", Type: "related-to"}},
+		}
+		req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "")
+		if err != nil {
+			t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+		}
+		edge := lastDepAdd(t, req)
+		if edge.Source != (issueops.Ref{Key: "a"}) {
+			t.Errorf("Source = %+v, want key ref a (FromKey dropped?)", edge.Source)
+		}
+		if edge.Target != (issueops.Ref{Key: "b"}) {
+			t.Errorf("Target = %+v, want key ref b (ToKey dropped?)", edge.Target)
+		}
+	})
+
+	t.Run("FromID and ToID resolve to id refs", func(t *testing.T) {
+		plan := &GraphApplyPlan{
+			Nodes: []GraphApplyNode{{Key: "placeholder", Title: "unused except to keep the plan non-empty"}},
+			Edges: []GraphApplyEdge{{FromID: "bd-from-1", ToID: "bd-to-1", Type: "blocks"}},
+		}
+		req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "")
+		if err != nil {
+			t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+		}
+		edge := lastDepAdd(t, req)
+		if edge.Source != (issueops.Ref{ID: "bd-from-1"}) {
+			t.Errorf("Source = %+v, want id ref bd-from-1 (FromID dropped?)", edge.Source)
+		}
+		if edge.Target != (issueops.Ref{ID: "bd-to-1"}) {
+			t.Errorf("Target = %+v, want id ref bd-to-1 (ToID dropped?)", edge.Target)
+		}
+	})
+
+	t.Run("Type carries through to DepAddItem.Type", func(t *testing.T) {
+		plan := &GraphApplyPlan{
+			Nodes: []GraphApplyNode{{Key: "a", Title: "A"}, {Key: "b", Title: "B"}},
+			Edges: []GraphApplyEdge{{FromKey: "a", ToKey: "b", Type: "custom-edge-type"}},
+		}
+		req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "")
+		if err != nil {
+			t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+		}
+		edge := lastDepAdd(t, req)
+		if edge.Type != types.DependencyType("custom-edge-type") {
+			t.Errorf("Type = %q, want %q (Type dropped?)", edge.Type, "custom-edge-type")
+		}
+	})
+
+	t.Run("Gate is JSON-encoded into Metadata for a waits-for edge", func(t *testing.T) {
+		plan := &GraphApplyPlan{
+			Nodes: []GraphApplyNode{{Key: "gate", Title: "Gate"}, {Key: "spawner", Title: "Spawner"}},
+			Edges: []GraphApplyEdge{{FromKey: "gate", ToKey: "spawner", Type: string(types.DepWaitsFor), Gate: string(types.WaitsForAnyChildren), SpawnerKey: "spawner"}},
+		}
+		req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "")
+		if err != nil {
+			t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+		}
+		edge := lastDepAdd(t, req)
+		var meta types.WaitsForMeta
+		if err := json.Unmarshal([]byte(edge.Metadata), &meta); err != nil {
+			t.Fatalf("Metadata = %q not valid WaitsForMeta JSON: %v (Gate dropped?)", edge.Metadata, err)
+		}
+		if meta.Gate != types.WaitsForAnyChildren {
+			t.Errorf("meta.Gate = %q, want %q (Gate dropped?)", meta.Gate, types.WaitsForAnyChildren)
+		}
+	})
+
+	t.Run("SpawnerKey sets HasSpawner true", func(t *testing.T) {
+		plan := &GraphApplyPlan{
+			Nodes: []GraphApplyNode{{Key: "gate", Title: "Gate"}, {Key: "spawner", Title: "Spawner"}},
+			Edges: []GraphApplyEdge{{FromKey: "gate", ToKey: "spawner", Type: string(types.DepWaitsFor), SpawnerKey: "spawner"}},
+		}
+		req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "")
+		if err != nil {
+			t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+		}
+		if edge := lastDepAdd(t, req); !edge.HasSpawner {
+			t.Error("HasSpawner = false, want true (SpawnerKey dropped?)")
+		}
+	})
+
+	t.Run("SpawnerID sets HasSpawner true", func(t *testing.T) {
+		plan := &GraphApplyPlan{
+			Nodes: []GraphApplyNode{{Key: "gate", Title: "Gate"}},
+			Edges: []GraphApplyEdge{{FromKey: "gate", ToID: "bd-spawner-1", Type: string(types.DepWaitsFor), SpawnerID: "bd-spawner-1"}},
+		}
+		req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "")
+		if err != nil {
+			t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+		}
+		if edge := lastDepAdd(t, req); !edge.HasSpawner {
+			t.Error("HasSpawner = false, want true (SpawnerID dropped?)")
+		}
+	})
+
+	t.Run("no spawner field leaves HasSpawner false", func(t *testing.T) {
+		plan := &GraphApplyPlan{
+			Nodes: []GraphApplyNode{{Key: "gate", Title: "Gate"}, {Key: "spawner", Title: "Spawner"}},
+			Edges: []GraphApplyEdge{{FromKey: "gate", ToKey: "spawner", Type: string(types.DepWaitsFor)}},
+		}
+		req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "")
+		if err != nil {
+			t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+		}
+		if edge := lastDepAdd(t, req); edge.HasSpawner {
+			t.Error("HasSpawner = true, want false: edge named no spawner_key/spawner_id")
+		}
+	})
+
+	t.Run("ThreadID carries through unchanged", func(t *testing.T) {
+		plan := &GraphApplyPlan{
+			Nodes: []GraphApplyNode{{Key: "a", Title: "A"}, {Key: "b", Title: "B"}},
+			Edges: []GraphApplyEdge{{FromKey: "a", ToKey: "b", Type: "replies-to", ThreadID: "thread-field-check"}},
+		}
+		req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "")
+		if err != nil {
+			t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+		}
+		if edge := lastDepAdd(t, req); edge.ThreadID != "thread-field-check" {
+			t.Errorf("ThreadID = %q, want %q (ThreadID dropped?)", edge.ThreadID, "thread-field-check")
+		}
+	})
+
+	t.Run("inline dep Type and Target carry through", func(t *testing.T) {
+		plan := &GraphApplyPlan{
+			Nodes: []GraphApplyNode{
+				{Key: "parent", Title: "Parent"},
+				{Key: "child", Title: "Child", Deps: []GraphApplyNodeDep{{Type: "field-check-dep-type", Target: "parent"}}},
+			},
+		}
+		req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "")
+		if err != nil {
+			t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+		}
+		edge := lastDepAdd(t, req)
+		if edge.Source != (issueops.Ref{Key: "child"}) || edge.Target != (issueops.Ref{Key: "parent"}) {
+			t.Errorf("Source/Target = %+v/%+v, want child/parent key refs (Target dropped?)", edge.Source, edge.Target)
+		}
+		if edge.Type != types.DependencyType("field-check-dep-type") {
+			t.Errorf("Type = %q, want %q (inline dep Type dropped?)", edge.Type, "field-check-dep-type")
+		}
+	})
 }

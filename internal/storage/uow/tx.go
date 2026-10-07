@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/domain/db"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 type Tx interface {
@@ -86,11 +87,63 @@ func RunTxResultWithin[T any](ctx context.Context, p UnitOfWorkProvider, maxElap
 	bo.InitialInterval = txRetryInitialInterval
 	bo.MaxElapsedTime = maxElapsed
 
+	// lastAttemptDuration and lastErr let the loop decide, BEFORE starting a
+	// new attempt, whether there is realistically enough time left to finish
+	// one. maxElapsed is a BUDGET fixed once at the top of the call; it says
+	// nothing about how long any individual attempt actually takes. A slow
+	// attempt (a large apply's commit can run well past a minute) can lose
+	// the race against ctx's own absolute deadline mid-transaction: the retry
+	// loop would start another attempt because elapsed-so-far is still under
+	// maxElapsed, that attempt gets killed by ctx cancellation partway
+	// through, and the caller sees context.DeadlineExceeded — classified a
+	// generic 500 — instead of the exhausted-write-conflict outcome this loop
+	// already reports correctly when it gives up for its own reasons
+	// (classified a retryable 503). Comparing the time left to the PREVIOUS
+	// attempt's own duration is a cheap, evidence-based stand-in for
+	// predicting the next one, since a Dolt commit's cost is driven by the
+	// same plan on every attempt.
+	//
+	// This look-ahead is gated on publicops.HasExtendedRetryBudget(ctx), the
+	// same marker retryTxBudget itself checks, and for the same reason: an
+	// ordinary (unmarked) caller's attempts are cheap, and its ctx deadline
+	// is meant to be the thing that ends the loop — see
+	// TestApplyBatchHonorsAnExtendedRetryBudgetFromContext's "unmarked"
+	// case. Applying this check unconditionally would fire for those callers
+	// too: retryTxAttemptHeadroom is sized for a large apply's multi-minute
+	// commits, so for a near-instant failing attempt it would treat almost
+	// any ctx with less than retryTxAttemptHeadroom left as too tight,
+	// cutting the loop short well before ctx's own deadline and turning what
+	// should be ctx's DeadlineExceeded into a serialization error instead.
+	// Scoping this to the extended-budget (large apply) path keeps ordinary
+	// callers' retry-until-ctx-ends-it behavior exactly as before.
+	var lastAttemptDuration time.Duration
+	var lastErr error
+	haveAttempted := false
+	lookAhead := publicops.HasExtendedRetryBudget(ctx)
+
 	err := backoff.Retry(func() error {
+		if haveAttempted && lookAhead {
+			if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < lastAttemptDuration+retryTxAttemptHeadroom {
+				// A retry this long would almost certainly be cut off by
+				// ctx's own deadline rather than finish and report its own
+				// outcome. Stop now and surface the LAST attempt's real
+				// error — still a retryable conflict — rather than start a
+				// doomed attempt that ends in ctx.Err().
+				return backoff.Permanent(lastErr)
+			}
+		}
+		attemptStart := time.Now()
+		fail := func(err error) error {
+			lastAttemptDuration = time.Since(attemptStart)
+			lastErr = err
+			haveAttempted = true
+			return err
+		}
+
 		uw, err := p.NewUOW(ctx)
 		if err != nil {
 			if isSerializationError(err) {
-				return err
+				return fail(err)
 			}
 			return backoff.Permanent(err)
 		}
@@ -99,7 +152,7 @@ func RunTxResultWithin[T any](ctx context.Context, p UnitOfWorkProvider, maxElap
 		r, commitMsg, err := work(ctx, uw)
 		if err != nil {
 			if isSerializationError(err) {
-				return err
+				return fail(err)
 			}
 			return backoff.Permanent(err)
 		}
@@ -115,7 +168,7 @@ func RunTxResultWithin[T any](ctx context.Context, p UnitOfWorkProvider, maxElap
 				return nil
 			}
 			if isSerializationError(err) {
-				return err
+				return fail(err)
 			}
 			return backoff.Permanent(err)
 		}

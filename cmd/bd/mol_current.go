@@ -457,6 +457,9 @@ func findParentMolecules(ctx context.Context, s molReader, issueIDs []string) ma
 		rootIDs = append(rootIDs, id)
 	}
 
+	// TODO(batchgetter): unbounded id list; see issueops.BatchGetter's doc and
+	// the importIssueLookup TODO in import_shared.go for why this is not yet
+	// routed through the role.
 	rootIssues, err := s.GetIssuesByIDs(ctx, rootIDs)
 	if err != nil {
 		return nil

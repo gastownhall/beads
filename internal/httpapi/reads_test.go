@@ -161,6 +161,8 @@ func TestABuilderRefusalIsTheDocumentedBadRequest(t *testing.T) {
 		{"a has-metadata key on the ready surface", "/v0/beads/ready?has_metadata_key=1bad", "has_metadata_key"},
 		{"a metadata field key on the count surface", "/v0/beads/issues:count?metadata_field=1bad=x", "metadata_field"},
 		{"a has-metadata key on the count surface", "/v0/beads/issues:count?has_metadata_key=1bad", "has_metadata_key"},
+		{"an unknown exclude-status name on the count surface", "/v0/beads/issues:count?exclude_status=bogus", "exclude_status"},
+		{"parent and no_parent together on the count surface", "/v0/beads/issues:count?parent=bd-1&no_parent=true", "no_parent"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ts, _ := newReadServer(t, Config{})

@@ -1,0 +1,62 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "check-versions_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/steveyegge/beads/scripts/check-versions",
+    visibility = ["//visibility:private"],
+    deps = ["//internal/versioncheck"],
+)
+
+go_binary(
+    name = "check-versions",
+    embed = [":check-versions_lib"],
+    visibility = ["//visibility:public"],
+)
+
+# pre_push_hook_test.go runs the tracked pre-push hook and the shell
+# entrypoint under the executor's /bin/bash and coreutils. Under Bazel the
+# entrypoint's `go build` is stood in for by the checker built here
+# (BEADS_TEST_CHECK_VERSIONS): there is no module checkout or Go toolchain in
+# the runfiles to build it from.
+go_test(
+    name = "check-versions_test",
+    srcs = [
+        "main_test.go",
+        "pre_push_hook_test.go",
+    ],
+    data = [
+        ":check-versions",
+        "//:go.mod",
+        "//:release_metadata_files",
+        "//scripts:check-versions.sh",
+    ],
+    embed = [":check-versions_lib"],
+    env = {"BEADS_TEST_CHECK_VERSIONS": "$(rlocationpath :check-versions)"},
+    deps = [
+        "//internal/testutil/bazeltest",
+        "//internal/versioncheck",
+    ],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

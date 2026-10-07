@@ -1,0 +1,11 @@
+// Bazel-only Go workspace: go_deps (MODULE.bazel) resolves the beads module
+// and the nogo analyzers' module (tools/nogo) as one dependency graph, so the
+// analyzers link against the same golang.org/x/tools as rules_go's nogo
+// runner. Not named go.work on purpose: the go command never picks it up, and
+// `go build`/`go list -m all` in the repository root keep seeing only go.mod.
+go 1.26.5
+
+use (
+	.
+	./tools/nogo
+)

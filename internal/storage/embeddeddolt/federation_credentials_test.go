@@ -3,6 +3,7 @@
 package embeddeddolt
 
 import (
+	"bytes"
 	"crypto/rand"
 	"database/sql"
 	"errors"
@@ -20,6 +21,14 @@ import (
 func newPeerAuthTestStore(t *testing.T) *EmbeddedDoltStore {
 	t.Helper()
 	ctx := t.Context()
+
+	// Several cases here deliberately build the state that warns about a
+	// suppressed ambient password; keep that off the test log unless a test
+	// installs its own writer to assert on it.
+	prevWarn := federationWarnWriter
+	federationWarnWriter = io.Discard
+	t.Cleanup(func() { federationWarnWriter = prevWarn })
+
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	store, err := Open(ctx, beadsDir, "fedauth", "main")
 	if err != nil {
@@ -140,6 +149,146 @@ func TestWithPeerAuth(t *testing.T) {
 			}
 			if got := os.Getenv("DOLT_REMOTE_USER"); got != "envuser" {
 				t.Errorf("DOLT_REMOTE_USER after fn = %q, want restored %q", got, "envuser")
+			}
+		})
+	}
+}
+
+func TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPassword(t *testing.T) {
+	// Pinned verbatim, not matched by substring: the peer name, the username,
+	// the stored tier, and the Warning: prefix are the parts an operator
+	// reads, so a wording change has to be made here deliberately.
+	const wantOpenPwdWarning = `Warning: peer "open-pwd" stores a username with an empty password, ` +
+		`which overrides the ambient DOLT_REMOTE_PASSWORD for this operation; ` +
+		`store a password by re-running 'bd federation add-peer open-pwd <url> ` +
+		`--user peeruser' and entering it at the prompt.` + "\n"
+	const wantTieredWarning = `Warning: peer "tiered" stores a username with an empty password, ` +
+		`which overrides the ambient DOLT_REMOTE_PASSWORD for this operation; ` +
+		`store a password by re-running 'bd federation add-peer tiered <url> ` +
+		`--user peeruser --sovereignty T2' and entering it at the prompt.` + "\n"
+
+	cases := []struct {
+		name       string
+		peer       *storage.FederationPeer
+		remote     string
+		ambient    string
+		ambientSet bool
+		// directPeer, when set, calls the warning helper itself instead of
+		// going through withPeerAuth, pinning the helper's own boundary.
+		directPeer *storage.FederationPeer
+		wantLine   string
+	}{
+		{
+			name: "username with empty stored password suppresses ambient password",
+			peer: &storage.FederationPeer{
+				Name:      "open-pwd",
+				RemoteURL: "https://peer.example/peerdb",
+				Username:  "peeruser",
+			},
+			remote: "open-pwd", ambient: "envpass", ambientSet: true,
+			wantLine: wantOpenPwdWarning,
+		},
+		{
+			// add-peer upserts sovereignty along with the credentials, so the
+			// suggested re-run must carry the stored tier or it clears it.
+			name: "suggested re-add keeps the stored sovereignty tier",
+			peer: &storage.FederationPeer{
+				Name:        "tiered",
+				RemoteURL:   "https://peer.example/peerdb",
+				Username:    "peeruser",
+				Sovereignty: "T2",
+			},
+			remote: "tiered", ambient: "envpass", ambientSet: true,
+			wantLine: wantTieredWarning,
+		},
+		{
+			name: "stored password suppresses nothing the operator can act on",
+			peer: &storage.FederationPeer{
+				Name:      "team",
+				RemoteURL: "https://peer.example/peerdb",
+				Username:  "peeruser",
+				Password:  "peerpass",
+			},
+			remote: "team", ambient: "envpass", ambientSet: true,
+		},
+		{
+			name: "no ambient password to suppress",
+			peer: &storage.FederationPeer{
+				Name:      "open-pwd",
+				RemoteURL: "https://peer.example/peerdb",
+				Username:  "peeruser",
+			},
+			remote: "open-pwd",
+		},
+		{
+			name: "empty ambient password reads as no ambient password",
+			peer: &storage.FederationPeer{
+				Name:      "open-pwd",
+				RemoteURL: "https://peer.example/peerdb",
+				Username:  "peeruser",
+			},
+			remote: "open-pwd", ambient: "", ambientSet: true,
+		},
+		{
+			name: "peer without a username keeps the password puzzle out of scope",
+			peer: &storage.FederationPeer{
+				Name:      "open-usr",
+				RemoteURL: "https://peer.example/peerdb",
+				Password:  "peerpass",
+			},
+			remote: "open-usr", ambient: "envpass", ambientSet: true,
+		},
+		{
+			name:   "unknown remote keeps the environment fallback",
+			remote: "not-a-peer", ambient: "envpass", ambientSet: true,
+		},
+		{
+			// withPeerAuth returns before the helper when a peer stores
+			// neither field, so a direct call is the only way to reach the
+			// helper's defensive empty-username clause.
+			name:       "helper called directly with an all-empty peer stays silent",
+			directPeer: &storage.FederationPeer{},
+			remote:     "empty-peer", ambient: "envpass", ambientSet: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+
+			t.Setenv("DOLT_REMOTE_USER", "envuser")
+			t.Setenv("DOLT_REMOTE_PASSWORD", tc.ambient)
+			if !tc.ambientSet {
+				_ = os.Unsetenv("DOLT_REMOTE_PASSWORD")
+			}
+
+			var warnings bytes.Buffer
+			captureWarnings := func() {
+				// Installed after any store: newPeerAuthTestStore points the
+				// writer at io.Discard for the rest of the suite.
+				prev := federationWarnWriter
+				federationWarnWriter = &warnings
+				t.Cleanup(func() { federationWarnWriter = prev })
+			}
+
+			if tc.directPeer != nil {
+				captureWarnings()
+				warnStoredPeerSuppressesAmbientPassword(tc.remote, tc.directPeer)
+			} else {
+				store := newPeerAuthTestStore(t)
+				if tc.peer != nil {
+					if err := store.AddFederationPeer(ctx, tc.peer); err != nil {
+						t.Fatalf("AddFederationPeer: %v", err)
+					}
+				}
+				captureWarnings()
+				if err := store.withPeerAuth(ctx, tc.remote, func(string) error { return nil }); err != nil {
+					t.Fatalf("withPeerAuth: %v", err)
+				}
+			}
+
+			if got := warnings.String(); got != tc.wantLine {
+				t.Errorf("warning = %q, want %q", got, tc.wantLine)
 			}
 		})
 	}

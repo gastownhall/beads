@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -14,42 +13,14 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// setupGatedTestDB creates a temporary file-based test database
+// setupGatedTestDB creates a test store on the suite's Dolt test server
+// (skipped when it is not running), with the orchestrator custom types
+// newTestStore configures. Closed by t.Cleanup; the returned cleanup is a
+// no-op kept for the callers' defer.
 func setupGatedTestDB(t *testing.T) (*dolt.DoltStore, func()) {
 	t.Helper()
-	tmpDir, err := os.MkdirTemp("", "bd-test-gated-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-
-	testDB := filepath.Join(tmpDir, "test.db")
-	store, err := dolt.New(context.Background(), &dolt.Config{Path: testDB})
-	if err != nil {
-		os.RemoveAll(tmpDir)
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-
-	// Set issue_prefix (required for beads)
-	ctx := context.Background()
-	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		store.Close()
-		os.RemoveAll(tmpDir)
-		t.Fatalf("Failed to set issue_prefix: %v", err)
-	}
-
-	// Configure orchestrator custom types for test compatibility (bd-find4)
-	if err := store.SetConfig(ctx, "types.custom", "molecule,gate,convoy,merge-request,slot,agent,role,rig,event,message"); err != nil {
-		store.Close()
-		os.RemoveAll(tmpDir)
-		t.Fatalf("Failed to set types.custom: %v", err)
-	}
-
-	cleanup := func() {
-		store.Close()
-		os.RemoveAll(tmpDir)
-	}
-
-	return store, cleanup
+	store := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+	return store, func() {}
 }
 
 // =============================================================================

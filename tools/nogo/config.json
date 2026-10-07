@@ -1,0 +1,10 @@
+{
+  "_base": {
+    "description": "Scope every analyzer to first-party code as `go vet ./...` and golangci-lint loaded it: no external repos, Bazel-generated sources or testdata trees (./... skips them). The golangci-lint linters additionally apply .golangci.yml's run.tests, generated-file and exclusion rules themselves (analyzers/internal/golangci).",
+    "exclude_files": {
+      "^external/": "third-party module repositories",
+      "(^|/)bazel-out/": "Bazel-generated sources (test mains, cgo, embedcfg)",
+      "(^|/)testdata/": "fixtures; ./... never loaded them"
+    }
+  }
+}

@@ -145,6 +145,7 @@ func TestRecordingIssueUseCaseCoversItsSurface(t *testing.T) {
 			"GetEpicsEligibleForClosure":   reads,
 			"GetIssue":                     reads,
 			"GetIssuesByIDs":               reads,
+			"GetMany":                      reads,
 			"GetNewlyUnblockedByClose":     reads,
 			"GetNewlyUnblockedByCloseWisp": reads,
 			"GetReadyWork":                 reads,
