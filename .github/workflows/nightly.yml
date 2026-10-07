@@ -120,6 +120,23 @@ jobs:
       # so this keeps sampling flaky and -race failures every night.
       fresh-test-results: true
 
+  # rbe-west's pool workers are gascity's and advertise the sha256 of
+  # gascity's worker-env manifest; beads' tools/rbe/worker-env.txt is a
+  # byte-for-byte copy and platforms/BUILD.bazel carries the same pin. A copy
+  # that falls behind queues every remote action, so say so every night.
+  rbe-worker-env-sync:
+    name: rbe worker-env in step with gascity
+    if: ${{ github.event_name == 'schedule' || inputs.suite == 'bazel' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+
+      - name: Compare the worker-env manifest and pin with gascity's main
+        run: tools/rbe/worker-env-sync main
+
   full-test:
     name: Full Test Suite
     if: ${{ github.event_name == 'schedule' || inputs.suite == 'full-test' }}
