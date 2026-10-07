@@ -219,6 +219,27 @@ type DepAddItem struct {
 	// members — a spawner, an also-blocks flag — a two-field typed member could
 	// not express. One spelling, and it is this one.
 	Metadata string
+	// HasSpawner marks a DepWaitsFor edge whose caller explicitly named a
+	// spawner (bd create --graph's edges[].spawner_key/spawner_id, which the
+	// CLI's own plan validator already forces to equal this edge's own
+	// Target). Only then does the role stamp Metadata's spawner_id from the
+	// resolved Target, once every id in the batch exists (see
+	// StampWaitsForSpawnerID) — a plan-local spawner key cannot be resolved
+	// any earlier than that.
+	//
+	// AN EDGE WITH NO NAMED SPAWNER MUST KEEP ITS GATE-ONLY METADATA. Stamping
+	// one in regardless of this flag — the 2026-10 Opus-review HIGH-2 finding
+	// — produces metadata an unspawnered edge's caller never asked for, which
+	// is a stored row a later re-apply of the same plan (e.g. by gc) will see
+	// disagree with what it sent, causing a spurious rewrite and version
+	// churn the role must not manufacture on its own. Ignored for every other
+	// Type.
+	HasSpawner bool
+	// ThreadID carries conversation-threading metadata (e.g. a replies-to
+	// edge's originating thread) onto the created dependency row. Empty means
+	// the edge carries none; it is a plain column, not part of Metadata's
+	// type-specific blob.
+	ThreadID string
 }
 
 // ApplyItem is ONE item of a batch: a kind plus exactly one member matching it.

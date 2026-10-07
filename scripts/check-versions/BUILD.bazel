@@ -14,14 +14,11 @@ go_binary(
     visibility = ["//visibility:public"],
 )
 
-# Tags:
-#   host-tools: pre_push_hook_test.go runs the tracked pre-push hook and the
-#     shell entrypoint under the host's /bin/bash, and the hook shells out to
-#     the host's git and coreutils.
-#   no-remote-exec: so it runs where that inventory is known (the developer
-#     machine or the CI runner) rather than on a farm worker.
-#   no-remote-cache: the action key does not cover the host's bash or tools, so
-#     a result from one host is neither uploaded for nor served to another.
+# pre_push_hook_test.go runs the tracked pre-push hook and the shell
+# entrypoint under the executor's /bin/bash and coreutils. Under Bazel the
+# entrypoint's `go build` is stood in for by the checker built here
+# (BEADS_TEST_CHECK_VERSIONS): there is no module checkout or Go toolchain in
+# the runfiles to build it from.
 go_test(
     name = "check-versions_test",
     srcs = [
@@ -29,17 +26,37 @@ go_test(
         "pre_push_hook_test.go",
     ],
     data = [
+        ":check-versions",
+        "//:go.mod",
         "//:release_metadata_files",
         "//scripts:check-versions.sh",
     ],
     embed = [":check-versions_lib"],
-    tags = [
-        "host-tools",
-        "no-remote-cache",
-        "no-remote-exec",
-    ],
+    env = {"BEADS_TEST_CHECK_VERSIONS": "$(rlocationpath :check-versions)"},
     deps = [
         "//internal/testutil/bazeltest",
         "//internal/versioncheck",
     ],
 )
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

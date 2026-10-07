@@ -2,6 +2,8 @@ package scripts_test
 
 import (
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -26,20 +28,19 @@ import (
 // than kept as independent copies.
 
 // F3: the same "same-repo PR, or merge_group" Blacksmith expression used by
-// pr.yml's and pr-risk.yml's bazel-coverage/ci-gate/detect-ci-tier jobs - a
-// package-level const so every test that needs it (TestSameRepoBlacksmithRunners,
-// TestPRRiskBazelCoverageJob, ...) reads the one literal.
+// pr.yml's and pr-risk.yml's ci-gate jobs - a package-level const so every
+// test that needs it (TestSameRepoBlacksmithRunners, ...) reads the one
+// literal.
 const sameRepoBlacksmith2vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
 
 // F7a: the same same-repo expression at 4 vCPU and 8 vCPU, for jobs sized
-// larger than the 2 vCPU default (check-doc-flags, pr-policy-wrapper,
-// pr-risk.yml's test-nix at 4 vCPU; check-release-target-cross-compilation at
-// 8 vCPU). F7c's advisory workflows also use the 4 vCPU size.
+// larger than the 2 vCPU default (check-doc-flags,
+// pr-risk.yml's test-nix at 4 vCPU; windows-test-binaries at 8 vCPU). F7c's advisory workflows also use the 4 vCPU size.
 const sameRepoBlacksmith4vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
 const sameRepoBlacksmith8vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
 
 // F7b: same-repo Blacksmith Windows (blacksmith-*vcpu-windows-2025, public
-// beta) and macOS (blacksmith-*vcpu-macos-latest) labels, same ternary shape
+// beta) and macOS (blacksmith-*vcpu-macos-26) labels, same ternary shape
 // as the Linux consts above - forks/Dependabot keep the current GitHub-hosted
 // windows-latest/macos-latest label. windows-2025 is GitHub's windows-2025
 // image minus the full Visual Studio IDE, EdgeDriver and WinAppDriver; VS
@@ -51,8 +52,17 @@ const sameRepoBlacksmithWindows2vcpu = "${{ (github.event_name == 'merge_group' 
 const sameRepoBlacksmithWindows4vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest' }}"
 const sameRepoBlacksmithWindows8vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-8vcpu-windows-2025' || 'windows-latest' }}"
 const sameRepoBlacksmithWindows16vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-16vcpu-windows-2025' || 'windows-latest' }}"
-const sameRepoBlacksmithMacOS6vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-6vcpu-macos-latest' || 'macos-latest' }}"
-const sameRepoBlacksmithMacOS12vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-12vcpu-macos-latest' || 'macos-latest' }}"
+
+// Same-repo Blacksmith macOS (Apple Silicon M4, ARM64). Pinned to macos-26
+// rather than blacksmith-*-macos-latest because GitHub's macos-latest (the
+// fork/Dependabot fallback) resolves to macos-26-arm64 today; pinning keeps
+// both paths on the same OS/arch and keeps the PR legs and main.yml's
+// blacksmith-macos-go-build-cache saver on one image regardless of when
+// Blacksmith moves its own -latest alias. Bump these (and
+// blacksmithMacOSLabel) when GitHub moves macos-latest.
+const blacksmithMacOSLabel = "blacksmith-6vcpu-macos-26"
+const sameRepoBlacksmithMacOS6vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-6vcpu-macos-26' || 'macos-latest' }}"
+const sameRepoBlacksmithMacOS12vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-12vcpu-macos-26' || 'macos-latest' }}"
 
 // sameRepoPlatformsMatrixMarkerRunsOn is the "matrix marker" form (spec
 // F7/F7b §2.1) used by mixed-OS matrix jobs (pr-preflight-platforms,
@@ -63,12 +73,13 @@ const sameRepoBlacksmithMacOS12vcpu = "${{ (github.event_name == 'merge_group' |
 // current leg carries, falling back to `matrix.os` for legs with no marker or
 // when the marker's own same-repo condition is false.
 //
-// F7b review fix (S3): the macOS branch is a plain 'macos-latest', never
-// Blacksmith - Blacksmith macOS runners bill at roughly 20x Linux/Windows
-// rates and no push-to-main Blacksmith-macOS cache saver exists. The
-// `same-repo-macos` marker itself is kept (only its resolved value changed)
-// so the job's matrix shape stays uniform across all three OSes.
-const sameRepoPlatformsMatrixMarkerRunsOn = "${{ matrix.runner == 'same-repo-linux' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest') || matrix.runner == 'same-repo-windows' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest') || matrix.runner == 'same-repo-macos' && 'macos-latest' || matrix.os }}"
+// The macOS branch resolves like the other two: blacksmith-6vcpu-macos-26
+// (sameRepoBlacksmithMacOS6vcpu's label) for a trusted same-repo PR or
+// merge_group, GitHub-hosted macos-latest otherwise. F7b review fix S3 kept
+// it a plain 'macos-latest' (cost, and no push-to-main Blacksmith-macOS
+// saver); the cost is now accepted and main.yml's
+// blacksmith-macos-go-build-cache is that saver.
+const sameRepoPlatformsMatrixMarkerRunsOn = "${{ matrix.runner == 'same-repo-linux' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest') || matrix.runner == 'same-repo-windows' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest') || matrix.runner == 'same-repo-macos' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-6vcpu-macos-26' || 'macos-latest') || matrix.os }}"
 
 // --- a minimal GitHub Actions expression evaluator -------------------------
 //
@@ -82,8 +93,16 @@ const sameRepoPlatformsMatrixMarkerRunsOn = "${{ matrix.runner == 'same-repo-lin
 // string, for the small subset of the GitHub Actions expression language
 // this repo's same-repo Blacksmith ternaries use: string literals, dotted
 // identifier lookups (resolved from a caller-supplied context map), ==, !=,
-// &&, ||, !, and parentheses. It is not a general-purpose GHA expression
-// engine - no functions, no numbers, no object/array literals.
+// &&, ||, !, parentheses, and the true/false/null literals. Identifiers may
+// contain '-' (inputs.fork-farm), and == / != follow GitHub's loose equality
+// (ghEquals: strings case-insensitively, mixed types as numbers). It is not a general-purpose GHA
+// expression engine - no functions, no numbers, no object/array literals.
+//
+// Merge queue (ci_merge_queue_test.go): callers simulate a merge_group run
+// with github.event_name "merge_group", github.actor
+// "github-merge-queue[bot]", github.ref "refs/heads/gh-readonly-queue/...",
+// the github.event.merge_group.* fields, and no github.event.pull_request.*
+// key at all (null on that event).
 //
 // && and || use GitHub's own short-circuit-returns-operand semantics (not
 // strict booleans: `false && 'x'` is `false`, not `false`'s boolean negation
@@ -99,7 +118,7 @@ func ghTokenize(s string) ([]ghToken, error) {
 	var toks []ghToken
 	i := 0
 	isIdentByte := func(b byte) bool {
-		return b == '.' || b == '_' ||
+		return b == '.' || b == '_' || b == '-' ||
 			(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 	}
 	for i < len(s) {
@@ -156,7 +175,7 @@ func ghTokenize(s string) ([]ghToken, error) {
 type ghParser struct {
 	toks []ghToken
 	pos  int
-	ctx  map[string]string
+	ctx  map[string]any
 }
 
 func (p *ghParser) peek() (ghToken, bool) {
@@ -273,13 +292,22 @@ func (p *ghParser) parsePrimary() (any, error) {
 	case "string":
 		return tok.val, nil
 	case "ident":
+		switch tok.val {
+		case "true":
+			return true, nil
+		case "false":
+			return false, nil
+		case "null":
+			return nil, nil
+		}
 		v, ok := p.ctx[tok.val]
 		if !ok {
 			// An identifier the caller's context does not mention (for
-			// example a deleted fork's head.repo.full_name) is null in the
-			// real evaluator; treat it as the empty string, which compares
-			// unequal to every non-empty literal this repo's expressions use.
-			return "", nil
+			// example a deleted fork's head.repo.full_name, or any
+			// github.event.pull_request.* field on merge_group) is null in
+			// the real evaluator: falsy, == null and == '' (both 0), unequal
+			// to every non-empty, non-numeric literal.
+			return nil, nil
 		}
 		return v, nil
 	default:
@@ -300,8 +328,53 @@ func ghTruthy(v any) bool {
 	}
 }
 
+// ghEquals: GitHub's loose equality for the operand kinds this evaluator
+// produces. Two strings compare case-insensitively; two booleans, or two
+// nulls, directly; otherwise both sides are coerced to numbers (null and ”
+// to 0, true to 1, false to 0, any other string to its numeric value or
+// NaN) and NaN equals nothing. So `true == 'true'` is false, as on GitHub
+// (the classic workflow_call boolean-input bug), and `false == ”` is true.
 func ghEquals(a, b any) bool {
-	return fmt.Sprint(a) == fmt.Sprint(b)
+	if sa, ok := a.(string); ok {
+		if sb, ok := b.(string); ok {
+			return strings.EqualFold(sa, sb)
+		}
+	}
+	if ba, ok := a.(bool); ok {
+		if bb, ok := b.(bool); ok {
+			return ba == bb
+		}
+	}
+	if a == nil && b == nil {
+		return true
+	}
+	na, nb := ghNumber(a), ghNumber(b)
+	return !math.IsNaN(na) && !math.IsNaN(nb) && na == nb
+}
+
+// ghNumber: GitHub's coercion of an operand to a number.
+func ghNumber(v any) float64 {
+	switch x := v.(type) {
+	case nil:
+		return 0
+	case bool:
+		if x {
+			return 1
+		}
+		return 0
+	case string:
+		t := strings.TrimSpace(x)
+		if t == "" {
+			return 0
+		}
+		f, err := strconv.ParseFloat(t, 64)
+		if err != nil {
+			return math.NaN()
+		}
+		return f
+	default:
+		return math.NaN()
+	}
 }
 
 // evalGHExpr evaluates a GitHub Actions `${{ ... }}` expression (the wrapper
@@ -309,6 +382,16 @@ func ghEquals(a, b any) bool {
 // "github.event_name") to its string value. See the package comment above
 // for the supported subset.
 func evalGHExpr(expr string, ctx map[string]string) (any, error) {
+	typed := make(map[string]any, len(ctx))
+	for k, v := range ctx {
+		typed[k] = v
+	}
+	return evalGHExprTyped(expr, typed)
+}
+
+// evalGHExprTyped: evalGHExpr with typed context values (a bool for a
+// boolean input such as inputs.fresh-test-results, nil for null).
+func evalGHExprTyped(expr string, ctx map[string]any) (any, error) {
 	expr = strings.TrimSpace(expr)
 	expr = strings.TrimPrefix(expr, "${{")
 	expr = strings.TrimSuffix(expr, "}}")
@@ -386,8 +469,8 @@ func TestSameRepoBlacksmithExpressionSemantics(t *testing.T) {
 		{"blacksmith-4vcpu-windows-2025", "windows-latest", sameRepoBlacksmithWindows4vcpu},
 		{"blacksmith-8vcpu-windows-2025", "windows-latest", sameRepoBlacksmithWindows8vcpu},
 		{"blacksmith-16vcpu-windows-2025", "windows-latest", sameRepoBlacksmithWindows16vcpu},
-		{"blacksmith-6vcpu-macos-latest", "macos-latest", sameRepoBlacksmithMacOS6vcpu},
-		{"blacksmith-12vcpu-macos-latest", "macos-latest", sameRepoBlacksmithMacOS12vcpu},
+		{"blacksmith-6vcpu-macos-26", "macos-latest", sameRepoBlacksmithMacOS6vcpu},
+		{"blacksmith-12vcpu-macos-26", "macos-latest", sameRepoBlacksmithMacOS12vcpu},
 	}
 	for _, c := range cases {
 		ctx := map[string]string{
@@ -417,11 +500,12 @@ func TestSameRepoBlacksmithExpressionSemantics(t *testing.T) {
 // §2.1) through evalGHExpr for every (marker, event) combination the policy
 // cares about: the linux/windows `runner` markers resolve to that OS's
 // Blacksmith label only on a trusted same-repo PR/merge_group, falling back
-// to that OS's GitHub-hosted label otherwise; the macos marker always
-// resolves to GitHub-hosted macos-latest regardless of trust (F7b review fix
-// S3: Blacksmith macOS is ~20x the Linux/Windows rate and has no push-to-main
-// cache saver); and a leg with no marker at all (there is none today, but the
-// fallback must still be safe) falls back to matrix.os.
+// to that OS's GitHub-hosted label otherwise (the macos marker included:
+// blacksmith-6vcpu-macos-26 vs. macos-latest); and a leg with no marker at
+// all (there is none today, but the fallback must still be safe) falls back
+// to matrix.os. Every marker is additionally checked against its flat
+// same-repo const for every event shape, so the chained ternary's per-OS
+// arms cannot drift from the single-OS expressions.
 func TestSameRepoPlatformsMatrixMarkerRunsOnExpressionSemantics(t *testing.T) {
 	const ownRepo = "steveyegge/beads"
 	trustedCtx := map[string]string{
@@ -447,8 +531,7 @@ func TestSameRepoPlatformsMatrixMarkerRunsOnExpressionSemantics(t *testing.T) {
 		{"linux marker, fork", "same-repo-linux", "ubuntu-latest", forkCtx, "ubuntu-latest"},
 		{"windows marker, trusted", "same-repo-windows", "windows-latest", trustedCtx, "blacksmith-4vcpu-windows-2025"},
 		{"windows marker, fork", "same-repo-windows", "windows-latest", forkCtx, "windows-latest"},
-		// F7b review fix (S3): macOS never resolves to Blacksmith, trusted or not.
-		{"macos marker, trusted", "same-repo-macos", "macos-latest", trustedCtx, "macos-latest"},
+		{"macos marker, trusted", "same-repo-macos", "macos-latest", trustedCtx, blacksmithMacOSLabel},
 		{"macos marker, fork", "same-repo-macos", "macos-latest", forkCtx, "macos-latest"},
 		{"no marker falls back to matrix.os", "", "some-other-os", trustedCtx, "some-other-os"},
 	}
@@ -465,5 +548,43 @@ func TestSameRepoPlatformsMatrixMarkerRunsOnExpressionSemantics(t *testing.T) {
 				t.Errorf("%s: runs-on = %q, want %q", c.name, got, c.wantRunsOn)
 			}
 		})
+	}
+
+	// Each marker arm must resolve exactly like its flat single-OS const for
+	// every event shape: same-repo PR and merge_group get Blacksmith; fork,
+	// deleted fork head, Dependabot, push and every other event keep the
+	// GitHub-hosted label.
+	markerConsts := []struct{ marker, os, flat string }{
+		{"same-repo-linux", "ubuntu-latest", sameRepoBlacksmith4vcpu},
+		{"same-repo-windows", "windows-latest", sameRepoBlacksmithWindows4vcpu},
+		{"same-repo-macos", "macos-latest", sameRepoBlacksmithMacOS6vcpu},
+	}
+	events := []struct{ name, event, headRepo, actor string }{
+		{"same-repo PR", "pull_request", ownRepo, "alice"},
+		{"merge_group", "merge_group", "", ""},
+		{"fork PR", "pull_request", "someone-else/beads", "alice"},
+		{"deleted fork head", "pull_request", "", "alice"},
+		{"dependabot", "pull_request", ownRepo, "dependabot[bot]"},
+		{"push", "push", "", "alice"},
+		{"schedule", "schedule", "", ""},
+	}
+	for _, m := range markerConsts {
+		for _, e := range events {
+			t.Run(m.marker+"/"+e.name, func(t *testing.T) {
+				ctx := map[string]string{
+					"github.event_name":                             e.event,
+					"github.event.pull_request.head.repo.full_name": e.headRepo,
+					"github.repository":                             ownRepo,
+					"github.actor":                                  e.actor,
+					"matrix.runner":                                 m.marker,
+					"matrix.os":                                     m.os,
+				}
+				got := mustEvalGHRunsOn(t, sameRepoPlatformsMatrixMarkerRunsOn, ctx)
+				want := mustEvalGHRunsOn(t, m.flat, ctx)
+				if got != want {
+					t.Errorf("marker %s under %s: runs-on = %q, flat const resolves to %q", m.marker, e.name, got, want)
+				}
+			})
+		}
 	}
 }

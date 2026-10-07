@@ -816,7 +816,7 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	// protection is only enforced in the pre-filter; cascade bypasses it).
 	// Without cascade the list is deleted exactly as filtered and live
 	// dependents are orphaned (edges dropped, is_blocked recomputed).
-	if err := deleteBatch(nil, ids, true, false, false, jsonOutput, false, "wisp gc"); err != nil {
+	if err := deleteBatch(nil, ids, true, false, false, jsonOutput, false, nil, "wisp gc"); err != nil {
 		return HandleError("%v", err)
 	}
 	return nil
@@ -879,6 +879,9 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 		for id := range childIDs {
 			childIDSlice = append(childIDSlice, id)
 		}
+		// TODO(batchgetter): unbounded id list; see issueops.BatchGetter's doc
+		// and the importIssueLookup TODO in import_shared.go for why this is
+		// not yet routed through the role.
 		childIssues, fetchErr := r.GetIssuesByIDs(ctx, childIDSlice)
 		if fetchErr == nil {
 			abandonedSet := make(map[string]bool, len(abandoned))
@@ -986,7 +989,7 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 	// Without cascade, closed wisps are deleted and live dependents are
 	// orphaned (edges dropped, is_blocked recomputed) — the same semantics as
 	// a plain `bd delete`.
-	if err := deleteBatch(nil, ids, force, dryRun, false, jsonOutput, false, "wisp gc --closed"); err != nil {
+	if err := deleteBatch(nil, ids, force, dryRun, false, jsonOutput, false, nil, "wisp gc --closed"); err != nil {
 		return HandleError("%v", err)
 	}
 

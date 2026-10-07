@@ -317,47 +317,47 @@ func runCreateProxiedGraph(_ *cobra.Command, ctx context.Context, in createInput
 		return nil
 	}
 
-	domainPlan, err := buildDomainGraphPlan(plan, in)
+	// Live apply runs the same shared validation the dry-run branch above just
+	// ran, through its own short-lived unit of work (the collision preflight
+	// in this pass is therefore NOT atomic with the apply below — a real
+	// explicit-ID collision is still caught, because BatchApplier's own
+	// create item independently raises storage.ErrAlreadyExists; this preflight
+	// just gives that case a clearer "invalid graph plan" message up front).
+	// BatchApplier manages its own transaction and commit-retry budget (see
+	// internal/storage/uow/batch_applier.go), so the apply itself is NOT
+	// wrapped in uow.RunTxResult the way the old domain.GraphPlan path was.
+	validateUW, err := uowProvider.NewUOW(ctx)
 	if err != nil {
-		return err
+		return HandleError("open unit of work: %v", err)
+	}
+	cctx, err := validateUW.ConfigUseCase().LoadCreateContext(ctx)
+	if err != nil {
+		validateUW.Close(ctx)
+		return HandleError("load create context: %v", err)
+	}
+	_, err = validateProxiedGraphPlan(&plan, in, cctx, uowIssueExists(ctx, validateUW))
+	validateUW.Close(ctx)
+	if err != nil {
+		return HandleError("invalid graph plan: %v", err)
 	}
 
-	commitMsg := plan.CommitMessage
-	if commitMsg == "" {
-		commitMsg = fmt.Sprintf("bd: graph-apply %d nodes", len(plan.Nodes))
+	src, ok := uowProvider.(uow.BatchApplierSource)
+	if !ok {
+		return HandleError("proxied-server provider %T does not offer the batch-apply surface", uowProvider)
 	}
-
-	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (map[string]string, string, error) {
-		cctx, err := uw.ConfigUseCase().LoadCreateContext(ctx)
-		if err != nil {
-			return nil, "", fmt.Errorf("load create context: %w", err)
-		}
-
-		// validateProxiedGraphPlan enforces a uniform storage class, so its
-		// resolved useWisp decides which table the whole plan routes to. The
-		// collision preflight runs inside this transaction, so it cannot race
-		// a concurrent create of the same explicit ID.
-		useWisp, err := validateProxiedGraphPlan(&plan, in, cctx, uowIssueExists(ctx, uw))
-		if err != nil {
-			return nil, "", fmt.Errorf("invalid graph plan: %w", err)
-		}
-
-		var result domain.GraphApplyResult
-		var applyErr error
-		if useWisp {
-			result, applyErr = uw.IssueUseCase().ApplyWispGraph(ctx, domainPlan, in.createdBy)
-		} else {
-			result, applyErr = uw.IssueUseCase().ApplyIssueGraph(ctx, domainPlan, in.createdBy)
-		}
-		if applyErr != nil {
-			return nil, "", fmt.Errorf("graph create: %w", applyErr)
-		}
-
-		return result.IDs, commitMsg, nil
-	})
+	applier, err := src.BatchApplier()
 	if err != nil {
 		return HandleError("%v", err)
 	}
+	req, err := buildGraphApplyBatchRequest(&plan, in.graphApplyOptions(), in.createdBy, in.owner)
+	if err != nil {
+		return HandleError("%v", err)
+	}
+	result, err := applier.ApplyBatch(ctx, req)
+	if err != nil {
+		return HandleError("graph create: %v", err)
+	}
+	res := result.Keys
 
 	if in.jsonOutput {
 		if err := outputJSON(GraphApplyResult{IDs: res}); err != nil {
@@ -420,49 +420,4 @@ func uowIssueExists(ctx context.Context, uw uow.UnitOfWork) func(id string) (boo
 		}
 		return false, nil
 	}
-}
-
-// graphApplyNodeIssue path (full issue-model parity with `bd create`).
-func buildDomainGraphPlan(plan GraphApplyPlan, in createInput) (domain.GraphPlan, error) {
-	opts := in.graphApplyOptions()
-	nodes := make([]domain.GraphNode, 0, len(plan.Nodes))
-	for _, n := range plan.Nodes {
-		issue, err := graphApplyNodeIssue(n, opts, in.createdBy, in.owner)
-		if err != nil {
-			return domain.GraphPlan{}, fmt.Errorf("invalid graph plan: %w", err)
-		}
-		deps := make([]domain.GraphNodeDep, 0, len(n.Deps))
-		for _, d := range n.Deps {
-			deps = append(deps, domain.GraphNodeDep{
-				Type:   graphApplyDependencyType(d.Type),
-				Target: d.Target,
-			})
-		}
-		nodes = append(nodes, domain.GraphNode{
-			Key:               n.Key,
-			Issue:             issue,
-			ParentKey:         n.effectiveParentKey(),
-			ParentID:          n.ParentID,
-			Assignee:          n.Assignee,
-			AssignAfterCreate: n.AssignAfterCreate,
-			MetadataRefs:      n.MetadataRefs,
-			Labels:            n.Labels,
-			Deps:              deps,
-		})
-	}
-	edges := make([]domain.GraphEdge, 0, len(plan.Edges))
-	for _, e := range plan.Edges {
-		edges = append(edges, domain.GraphEdge{
-			FromKey:    e.FromKey,
-			FromID:     e.FromID,
-			ToKey:      e.ToKey,
-			ToID:       e.ToID,
-			Type:       graphApplyDependencyType(e.Type),
-			Gate:       e.Gate,
-			SpawnerKey: e.SpawnerKey,
-			SpawnerID:  e.SpawnerID,
-			ThreadID:   e.ThreadID,
-		})
-	}
-	return domain.GraphPlan{Nodes: nodes, Edges: edges}, nil
 }

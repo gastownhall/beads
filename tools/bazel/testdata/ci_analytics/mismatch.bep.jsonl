@@ -1,0 +1,3 @@
+{"started": {"uuid": "99999999-0000-1111-2222-333333333333", "command": "test", "buildToolVersion": "9.2.0", "startTimeMillis": "2000"}}
+{"buildMetrics": {"timingMetrics": {"wallTimeInMs": "15"}, "actionSummary": {"actionsCreated": "1", "actionsExecuted": "1"}}}
+{"finished": {"exitCode": {"code": 0, "name": "SUCCESS"}, "finishTimeMillis": "2015"}}

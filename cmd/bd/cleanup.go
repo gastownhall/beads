@@ -176,7 +176,7 @@ SEE ALSO:
 			fmt.Println()
 		}
 
-		if err := deleteBatch(cmd, issueIDs, force, dryRun, cascade, jsonOutput, false, "cleanup"); err != nil {
+		if err := deleteBatch(cmd, issueIDs, force, dryRun, cascade, jsonOutput, false, nil, "cleanup"); err != nil {
 			return HandleError("%v", err)
 		}
 		return nil

@@ -134,6 +134,34 @@ func (c *roleGraphCounter) countRequests() []issueops.EdgeCountRequest {
 	return append([]issueops.EdgeCountRequest(nil), c.counts...)
 }
 
+// roleBatchGetter is the many-ids read role of the store-shaped source, its own
+// fake beside roleGraphCounter for its same reason: a separate role on a
+// separate accessor, so one fake answering both would let a test pass on a
+// server that had wired the batch-get handler to the wrong role.
+type roleBatchGetter struct {
+	result issueops.GetManyResult
+	err    error
+
+	mu    sync.Mutex
+	calls []issueops.GetManyRequest
+}
+
+func (g *roleBatchGetter) GetMany(_ context.Context, req issueops.GetManyRequest) (issueops.GetManyResult, error) {
+	g.mu.Lock()
+	g.calls = append(g.calls, req)
+	g.mu.Unlock()
+	if g.err != nil {
+		return issueops.GetManyResult{}, g.err
+	}
+	return g.result, nil
+}
+
+func (g *roleBatchGetter) getManyRequests() []issueops.GetManyRequest {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]issueops.GetManyRequest(nil), g.calls...)
+}
+
 // roleRelations is the single-anchor NEIGHBOR role of the store-shaped source,
 // its own fake beside roleEdgeReader for roleGraphCounter's reason: the two sit
 // on adjacent accessors and answer about the same edges, so one fake serving
@@ -928,6 +956,9 @@ func rolesConfig(cfg Config) Config {
 	}
 	if cfg.GraphCounter == nil {
 		cfg.GraphCounter = &roleGraphCounter{}
+	}
+	if cfg.BatchGetter == nil {
+		cfg.BatchGetter = &roleBatchGetter{}
 	}
 	if cfg.Relations == nil {
 		cfg.Relations = &roleRelations{}

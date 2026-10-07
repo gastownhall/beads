@@ -365,6 +365,17 @@ func GetRedirectInfo() RedirectInfo {
 	return redirectInfoFor(findLocalBdsDirInRepo(), findLocalBeadsDir)
 }
 
+// GetDiscoveredRedirectInfo is GetRedirectInfo without the BEADS_DIR override:
+// it reports the redirect that discovery finds from the cwd, the one the cwd's
+// own workspace holds. GetRedirectInfo cannot answer that once BEADS_DIR is
+// set, because when the repo root's .beads holds no redirect it checks
+// BEADS_DIR itself. A workspace redirect nested below the repo root or
+// inherited by a git worktree is then masked, and a BEADS_DIR naming another
+// workspace's redirected .beads reports that redirect as if the cwd held it.
+func GetDiscoveredRedirectInfo() RedirectInfo {
+	return redirectInfoFor(findLocalBdsDirInRepo(), findDiscoveredLocalBeadsDir)
+}
+
 // GetRedirectInfoFrom is GetRedirectInfo for the workspace at dir rather than
 // the process cwd: the .beads directory at dir's git repository root is
 // checked for a redirect first, then the nearest .beads walking up from dir.
@@ -475,7 +486,12 @@ func findLocalBeadsDir() string {
 	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
 		return canonicalizeBeadsDirPath(beadsDir)
 	}
+	return findDiscoveredLocalBeadsDir()
+}
 
+// findDiscoveredLocalBeadsDir is findLocalBeadsDir without the BEADS_DIR
+// override: the local .beads directory discovery finds from the cwd.
+func findDiscoveredLocalBeadsDir() string {
 	// For worktrees, check worktree-local redirect first (per-worktree override).
 	// Returns the raw worktree .beads dir (not the resolved target) since
 	// findLocalBeadsDir doesn't follow redirects — callers use FollowRedirect.

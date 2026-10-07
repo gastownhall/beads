@@ -18,8 +18,9 @@ import (
 // runs a subprocess `bd init` with BEADS_DOLT_SHARED_SERVER=1 owes.
 //
 // That init takes the shared-global branch in init.go, which calls
-// doltserver.Start(sharedDir) — and Start DAEMONIZES: cmd.Process.Release(),
-// no Wait, cmd.Dir = <sharedDir>/dolt (doltserver.go:1443-1446). The `bd`
+// doltserver.Start(sharedDir) — and Start DAEMONIZES: the server is its own
+// process group (Setpgid) with cmd.Dir = <sharedDir>/dolt, and outlives bd (bd
+// only reaps it if it exits while bd is still running). The `bd`
 // subprocess then exits and the sql-server keeps running, serving a directory
 // under the suite's temp HOME that TestMain deletes on the way out. Nothing in
 // those fixtures ever stopped it, so a full cmd/bd run finished with a live

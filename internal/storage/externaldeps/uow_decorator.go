@@ -69,7 +69,9 @@ func (p *uowProvider) EdgeReader() (publicops.EdgeReader, error)    { return uow
 func (p *uowProvider) BlockingAnnotator() (publicops.BlockingAnnotator, error) {
 	return uow.NewBlockingAnnotator(p)
 }
-func (p *uowProvider) TreeWalker() (publicops.TreeWalker, error) { return uow.NewTreeWalker(p) }
+func (p *uowProvider) TreeWalker() (publicops.TreeWalker, error)   { return uow.NewTreeWalker(p) }
+func (p *uowProvider) BatchGetter() (publicops.BatchGetter, error) { return uow.NewBatchGetter(p) }
+
 func (p *uowProvider) GraphCounter() (publicops.GraphCounter, error) {
 	return uow.NewGraphCounter(p)
 }
@@ -172,6 +174,7 @@ var (
 	_ uow.BlockingAnnotatorSource        = (*uowProvider)(nil)
 	_ uow.TreeWalkerSource               = (*uowProvider)(nil)
 	_ uow.GraphCounterSource             = (*uowProvider)(nil)
+	_ uow.BatchGetterSource              = (*uowProvider)(nil)
 	_ uow.CounterSource                  = (*uowProvider)(nil)
 	_ uow.ReadyCounterSource             = (*uowProvider)(nil)
 	_ uow.ReadyClaimerSource             = (*uowProvider)(nil)

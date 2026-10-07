@@ -1,19 +1,16 @@
 load("@rules_go//go:def.bzl", "go_test")
 
-# CI and repo-policy tests: they parse the workflows and run the CI shell
-# scripts against fixtures.
+# CI and repo-policy tests: they parse the workflows, run the CI shell scripts
+# against fixtures, and check repository-wide rules (BUILD tag taxonomy, skip
+# allowlist, managed BUILD blocks, shard manifests, tracked-file scans) over
+# //:repo_files, the checkout as Bazel sees it.
 #
-# Tags:
-#   host-tools: the scripts and fixtures run the host's git, python3, awk,
-#     sed, find, grep and timeout (beyond the bash the test wrapper needs).
-#     Under Bazel a missing git or bash fails the test (under go test it
-#     skips).
-#   no-remote-exec: so they always run where that inventory is known (the
-#     developer machine or the CI runner). The farm workers do have these
-#     tools today (the target passes there), so this can be dropped once that
-#     is guaranteed.
-#   no-remote-cache: the action key does not cover the host's tools, so a
-#     result from one host is neither uploaded for nor served to another.
+# No tags: they run remotely like any other target. The scripts and fixtures
+# run bash, git, python3, jq, yq, curl, openssl, unzip and coreutils from the
+# executor (the rbe-west worker image, or the runner in fork-cache mode); a
+# missing tool fails the test under Bazel instead of skipping it
+# (host_tools_test.go), so a cached pass never stands for an executor that
+# could not run it. Go and the release formula come in hermetically.
 go_test(
     name = "scripts_test",
     srcs = [
@@ -21,6 +18,7 @@ go_test(
         "bazel_cache_mode_test.go",
         "bazel_farm_workflow_test.go",
         "bazel_fork_mode_test.go",
+        "bazel_hermetic_cc_test.go",
         "bazel_policy_test.go",
         "bazel_rbe_prewarm_test.go",
         "bazel_skip_allowlist_test.go",
@@ -30,10 +28,12 @@ go_test(
         "check_testing_short_test.go",
         "check_winget_portable_alias_test.go",
         "ci_actions_policy_test.go",
+        "ci_analytics_extract_test.go",
+        "ci_analytics_workflow_test.go",
         "ci_blacksmith_runner_test.go",
-        "ci_capability_selector_test.go",
         "ci_f7b_review_test.go",
         "ci_f7c_advisory_test.go",
+        "ci_merge_queue_test.go",
         "ci_workflow_apt_get_timeout_test.go",
         "ci_workflow_test.go",
         "complexity_script_test.go",
@@ -41,33 +41,36 @@ go_test(
         "embedded_shard_count_test.go",
         "host_tools_test.go",
         "install_dolt_test.go",
+        "makefile_bazel_primary_test.go",
+        "managed_local_lane_test.go",
+        "migration_corpus_bazel_test.go",
+        "nogo_lint_policy_test.go",
         "pr_lanes_bazel_coverage_test.go",
         "pr_preflight_test.go",
         "pr_risk_bazel_coverage_test.go",
+        "pre_push_suite_test.go",
         "pull_dolt_image_test.go",
+        "rbe_worker_env_test.go",
         "release_script_test.go",
+        "repo_helpers_test.go",
         "required_suite_test.go",
         "test_script_test.go",
         "upgrade_smoke_loop_test.go",
         "windows_test_binaries_manifest_test.go",
     ],
     data = [
-        ":scripts_files",
-        "//:.githooks/pre-commit",
-        "//:.goreleaser.yml",
-        "//:bazel_policy_files",
-        "//:engdocs/LINTING.md",
-        "//:mcp_package_policy_files",
-        "//:test_sh_files",
-        "//:workflow_files",
-        "//internal/testutil:testdoltcommon.go",
-        "//tools/bazel:dolt.bzl",
+        "//:repo_files",
+        "@beads_formulas//:beads-release.formula.toml",
+        "@go_sdk//:bin/go",
+        "@go_sdk//:files",
     ],
-    tags = [
-        "host-tools",
-        "no-remote-cache",
-        "no-remote-exec",
-    ],
+    # The release formula lives in .beads/ (in .bazelignore: it also holds
+    # live bd data), so it comes in through its own local repository. The Go
+    # SDK is go.mod's toolchain, whatever go the executor has on PATH.
+    env = {
+        "BEADS_TEST_GO": "$(rlocationpath @go_sdk//:bin/go)",
+        "BEADS_TEST_RELEASE_FORMULA": "$(rlocationpath @beads_formulas//:beads-release.formula.toml)",
+    },
     deps = [
         "//internal/formula",
         "//internal/testutil/bazeltest",
@@ -76,23 +79,59 @@ go_test(
     ],
 )
 
-# The scripts scripts_test reads and runs (CI helpers, check-*.sh, release.sh,
-# test.sh, conformance.sh, ...). Globs stop at subpackages, so this is only
-# this package's own tree.
-filegroup(
-    name = "scripts_files",
-    srcs = glob(
-        ["**"],
-        exclude = [
-            "BUILD.bazel",
-            "**/*_test.go",
-        ],
-    ),
+# pr.yml's check-doc-freshness-platforms Linux leg: `go test
+# -tags integration ./scripts -count=1 -run '^(TestDocFreshness.*|
+# TestRequiredSuiteContract)$' -args -required-suite=doc-freshness`, whose
+# TestMain fails unless exactly the doc-freshness inventory is compiled and
+# selected. scripts_test runs those tests too (in the integration lane); this
+# target adds the inventory and selection contract, over only the files the
+# suite reads (its fixtures copy check-doc-freshness.sh). The macOS and
+# Windows legs stay in pr.yml.
+# Tags:
+#   integration-only: every TestDocFreshness test is //go:build integration,
+#     so --config=integration's lane runs it.
+go_test(
+    name = "doc_freshness_required_test",
+    srcs = [
+        "check_doc_freshness_test.go",
+        "repo_helpers_test.go",
+        "required_suite_test.go",
+    ],
+    args = [
+        "-test.count=1",
+        "-test.run=^(TestDocFreshness.*|TestRequiredSuiteContract)$$",
+        "-required-suite=doc-freshness",
+    ],
+    data = ["check-doc-freshness.sh"],
+    tags = ["integration-only"],
+    deps = [
+        "//internal/testutil/bazeltest",
+        "//scripts/internal/testbash",
+    ],
 )
 
 exports_files(
     ["migration-test/release-catalog.json"],
     visibility = ["//scripts/migration-test/catalog:__pkg__"],
+)
+
+# The historical-upgrade harness (scripts/migration-test) and the public
+# SQLite bridge it drives, for //tests/migration's per-release targets.
+filegroup(
+    name = "migration_harness",
+    srcs = [
+        "migrate-legacy-to-current.sh",
+        "migration-test/historical-dolt-upgrade-test.sh",
+        "migration-test/legacy-bridge-test.sh",
+        "migration-test/lib/binary.sh",
+        "migration-test/lib/versions.sh",
+    ],
+    visibility = ["//tests/migration:__pkg__"],
+)
+
+exports_files(
+    ["upgrade-smoke-test.sh"],
+    visibility = ["//tests/upgrade_smoke:__pkg__"],
 )
 
 exports_files(
@@ -102,11 +141,6 @@ exports_files(
         "ci/pr-lint.sh",
     ],
     visibility = ["//scripts/prlintmake:__pkg__"],
-)
-
-exports_files(
-    ["README.md"],
-    visibility = ["//:__pkg__"],
 )
 
 exports_files(
@@ -120,3 +154,25 @@ exports_files(
     ["check-versions.sh"],
     visibility = ["//scripts/check-versions:__pkg__"],
 )
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

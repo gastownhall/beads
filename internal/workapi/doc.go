@@ -14,5 +14,5 @@
 //
 // The boundary is enforced mechanically, not by review: see the
 // workapi-frontend-boundary depguard rule in .golangci.yml and the
-// banned-accessor check in scripts/ci/pr-policy.sh.
+// banned-accessor check in scripts/check-workapi-frontend-boundary.sh.
 package workapi

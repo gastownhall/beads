@@ -427,12 +427,14 @@ skipping straight to `bd list`) can hit either of two live gotchas — see
   has the recipe. Plan for the rule, not the exception.
 - **One designated migrator**: upgrade one machine, let it migrate, then
   `bd dolt push`.
-- **Every other clone adopts, does not pull**: after the migrator pushes, each
-  other clone upgrades the binary and runs `bd bootstrap` to adopt the migrated
-  database. `bd dolt pull` is *refused* while the clone still has pending
-  migrations, so do not rely on it; the "sync before" step above is what
-  preserves these clones' work, because `bd bootstrap` replaces the local
-  database.
+- **Every other clone takes the migrated database, does not migrate**: after
+  the migrator pushes, each other clone runs `bd dolt pull` while still on the
+  *old* binary, then upgrades. Once the new binary is installed that pull is
+  *refused* while the clone has pending migrations, and `bd bootstrap` never
+  replaces an existing database — on its own it reports `Nothing to do.` — so
+  a clone that upgraded first must move its local database aside before
+  `bd bootstrap` can re-clone. The recipe is in
+  [Remote-backed databases and multiple clones](/getting-started/upgrading#remote-backed-databases-and-multiple-clones).
 
 ---
 
