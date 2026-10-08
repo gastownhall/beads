@@ -290,6 +290,32 @@ func (e *AlreadyIdentifiedError) Unwrap() error { return ErrAlreadyIdentified }
 // precondition from other errors.
 var ErrVersionMismatch = errors.New("version mismatch")
 
+// VersionMismatchError reports the expected and current row versions that
+// refused a guarded write, read inside the same transaction the guard
+// checked. It wraps ErrVersionMismatch rather than replacing it — the
+// ClaimConflictError arrangement — so errors.Is(err, ErrVersionMismatch)
+// still matches and the message stays byte-identical to the historical
+// "version mismatch: expected %d, got %d", while a caller that reports the
+// refusal elsewhere (a command's --json envelope, the HTTP surface) reads the
+// typed pair instead of parsing that prose.
+//
+// Both fields are the opaque row_lock token: compared for equality only,
+// carrying no order.
+type VersionMismatchError struct {
+	// Expected is the version the caller required.
+	Expected int64
+	// Current is the version the guard found instead, read inside the same
+	// transaction as the check — never a post-rollback re-read.
+	Current int64
+}
+
+func (e *VersionMismatchError) Error() string {
+	return fmt.Sprintf("%v: expected %d, got %d", ErrVersionMismatch, e.Expected, e.Current)
+}
+
+// Unwrap makes VersionMismatchError match ErrVersionMismatch.
+func (e *VersionMismatchError) Unwrap() error { return ErrVersionMismatch }
+
 // ErrStatusMismatch is returned by UpdateIssueChecked given an ExpectedStatus
 // that no longer matches the issue's current status. The caller's view of the
 // issue was stale; the issue is left untouched. The assignee analog is

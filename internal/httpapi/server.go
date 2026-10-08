@@ -279,6 +279,14 @@ type Config struct {
 	// and neither can answer the other's question. Required on the same terms
 	// as every field here.
 	GraphCounter issueops.GraphCounter
+	// BatchGetter is the one-snapshot, many-ids read behind
+	// POST /v0/beads/issues:batchGet. It is a SEPARATE field from Reader for
+	// the reason EdgeReader and GraphCounter are separate from each other:
+	// Reader.Get answers ONE id with *IssueDetails or ErrNotFound, and this
+	// answers MANY ids with a result whose Missing field reports an absent row
+	// rather than refusing the call. Required on the same terms as every field
+	// here.
+	BatchGetter issueops.BatchGetter
 	// Relations is the single-anchor neighbor read behind
 	// GET /v0/beads/issues/{id}/related. It is a SEPARATE field from EdgeReader
 	// for the reason issueops.EdgeReader's own doc gives at length: that role
@@ -414,6 +422,7 @@ type Server struct {
 	issueCycles       issueops.CycleDetector
 	issueEdges        issueops.EdgeReader
 	issueEdgeCounter  issueops.GraphCounter
+	issueBatchGetter  issueops.BatchGetter
 	issueRelations    issueops.Relations
 	issueCommenter    issueops.Commenter
 	issueBlocking     issueops.BlockingAnnotator
@@ -491,6 +500,15 @@ type Server struct {
 	writeStall time.Duration
 	watchPoll  time.Duration
 	watchBeat  time.Duration
+	// minClientWireRevision is the field checkWireRevision enforces against.
+	// It starts at the package constant MinClientWireRevision and exists as
+	// a field, rather than a direct read of that constant, only so a test can
+	// raise the floor in milliseconds the way it shrinks semTimeout above —
+	// production never overrides it. Unlike semTimeout et al it is an int
+	// with no zero-value ambiguity to paper over with orDefault: the
+	// constant's own real-world default is 0, so a freshly zeroed Server
+	// behaves identically whether or not Listen ran yet.
+	minClientWireRevision int
 	// drainTimeout overrides the package-level drainTimeout constant used as
 	// drainBudget's floor. A test shrinks this to prove Serve's drain
 	// actually EXTENDS past it for an in-flight large apply, instead of
@@ -616,6 +634,7 @@ func Listen(cfg Config) (*Server, error) {
 		issueCycles:       cfg.CycleDetector,
 		issueEdges:        cfg.EdgeReader,
 		issueEdgeCounter:  cfg.GraphCounter,
+		issueBatchGetter:  cfg.BatchGetter,
 		issueRelations:    cfg.Relations,
 		issueCommenter:    cfg.Commenter,
 		issueBlocking:     cfg.BlockingAnnotator,
@@ -632,11 +651,12 @@ func Listen(cfg Config) (*Server, error) {
 		workspaceMemories: cfg.Memories,
 		eventsJournal:     cfg.EventsJournal,
 
-		sem:               make(chan struct{}, maxInflight),
-		semTimeout:        semAcquireTimeout,
-		semWarn:           saturationWarn,
-		largeApplySem:     make(chan struct{}, 1),
-		largeApplyCeiling: orDefault(cfg.LargeApplyCeiling, DefaultLargeApplyCeiling),
+		sem:                   make(chan struct{}, maxInflight),
+		semTimeout:            semAcquireTimeout,
+		semWarn:               saturationWarn,
+		minClientWireRevision: MinClientWireRevision,
+		largeApplySem:         make(chan struct{}, 1),
+		largeApplyCeiling:     orDefault(cfg.LargeApplyCeiling, DefaultLargeApplyCeiling),
 
 		closing:         make(chan struct{}),
 		maxWatchStreams: maxWatchStreams,
@@ -737,12 +757,12 @@ func Listen(cfg Config) (*Server, error) {
 // "all or nothing" would turn an honest condition into a special case inside
 // three functions. It is checked once, on its own, below.
 func sourceRoles(cfg Config) []any {
-	return []any{cfg.Reader, cfg.Claimer, cfg.ReadyClaimer, cfg.Releaser, cfg.Lifecycle, cfg.BatchCloser, cfg.Settings, cfg.Stats, cfg.CycleDetector, cfg.EdgeReader, cfg.GraphCounter, cfg.Relations, cfg.Commenter, cfg.BlockingAnnotator, cfg.TreeWalker, cfg.ReadyCounter, cfg.Counter, cfg.Querier, cfg.Sweeper, cfg.Deleter, cfg.BatchCreator, cfg.DependencyEditor, cfg.BatchApplier, cfg.Memories, cfg.MetadataCAS}
+	return []any{cfg.Reader, cfg.Claimer, cfg.ReadyClaimer, cfg.Releaser, cfg.Lifecycle, cfg.BatchCloser, cfg.Settings, cfg.Stats, cfg.CycleDetector, cfg.EdgeReader, cfg.GraphCounter, cfg.BatchGetter, cfg.Relations, cfg.Commenter, cfg.BlockingAnnotator, cfg.TreeWalker, cfg.ReadyCounter, cfg.Counter, cfg.Querier, cfg.Sweeper, cfg.Deleter, cfg.BatchCreator, cfg.DependencyEditor, cfg.BatchApplier, cfg.Memories, cfg.MetadataCAS}
 }
 
 // roleSourceNames spells sourceRoles for the refusal message, in the same
 // order, so a caller reading the error learns the whole set it must pass.
-const roleSourceNames = "Reader, Claimer, ReadyClaimer, Releaser, Lifecycle, BatchCloser, Settings, Stats, CycleDetector, EdgeReader, GraphCounter, Relations, Commenter, BlockingAnnotator, TreeWalker, ReadyCounter, Counter, Querier, Sweeper, Deleter, BatchCreator, DependencyEditor, BatchApplier, Memories and MetadataCAS"
+const roleSourceNames = "Reader, Claimer, ReadyClaimer, Releaser, Lifecycle, BatchCloser, Settings, Stats, CycleDetector, EdgeReader, GraphCounter, BatchGetter, Relations, Commenter, BlockingAnnotator, TreeWalker, ReadyCounter, Counter, Querier, Sweeper, Deleter, BatchCreator, DependencyEditor, BatchApplier, Memories and MetadataCAS"
 
 func anyRoleSet(cfg Config) bool {
 	return slices.ContainsFunc(sourceRoles(cfg), func(r any) bool { return r != nil })
@@ -1114,6 +1134,21 @@ func (s *Server) graphCounter(r *http.Request) (issueops.GraphCounter, error) {
 	}
 	var src uow.GraphCounterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
 	return src.GraphCounter()
+}
+
+// batchGetter returns the many-ids read surface for one request, built the
+// same two ways as edgeReader above and held by INTERFACE so
+// uow.BatchGetterSource is load-bearing rather than decorative.
+//
+// It goes out UNWRAPPED, for graphCounter's reason: the role answers with a
+// VALUE whose slices a nil-safe range walks, so no handler dereferences a
+// pointer it returned.
+func (s *Server) batchGetter(r *http.Request) (issueops.BatchGetter, error) {
+	if s.provider == nil {
+		return s.issueBatchGetter, nil
+	}
+	var src uow.BatchGetterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.BatchGetter()
 }
 
 // relations returns the single-anchor neighbor surface for one request, built
@@ -1867,6 +1902,18 @@ func (s *Server) route(rt route) http.Handler {
 		// behind the authentication gate.
 		if !rt.projectExempt {
 			if res := s.checkProjectStamp(r); res != nil {
+				s.fail(w, r, *res)
+				return
+			}
+		}
+
+		// Wire-floor before resources, same as the project stamp: a client that
+		// has declared a revision this build no longer supports is turned away
+		// before it can buy a database slot or open a unit of work. Checked on
+		// every route but health (see wireRevisionExempt) — including the
+		// identity handshake, where catching the mismatch is cheapest.
+		if !rt.wireRevisionExempt {
+			if res := s.checkWireRevision(r); res != nil {
 				s.fail(w, r, *res)
 				return
 			}

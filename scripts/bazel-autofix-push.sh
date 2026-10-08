@@ -36,12 +36,13 @@
 #   RUN_ID       workflow run id that produced the patch (for comment text)
 #   RUN_URL      html url of that run (for commit/comment provenance)
 #   GH_TOKEN     token for gh api calls (PR lookup, comments) - needs the
-#                workflow's pull-requests:write; never the PAT
+#                workflow's pull-requests:write; never the App token
 #   PUSH_TOKEN   token for git fetch/push only (optional; defaults to
-#                GH_TOKEN), so the shared DOCS_AUTOFIX_TOKEN needs
-#                contents:write only
-#   AUTOFIX_TOKEN_KIND  "pat" when a dedicated push token is in use, "default"
-#                       for the workflow's GITHUB_TOKEN (retrigger caveat)
+#                GH_TOKEN), so the minted gastownhall-autofix App token
+#                needs contents:write only
+#   AUTOFIX_TOKEN_KIND  "app" when the minted App push token is in use,
+#                       "default" for the workflow's GITHUB_TOKEN (retrigger
+#                       caveat)
 #
 # Exit 0 on every non-actionable outcome (PR closed, head moved, no patch);
 # exit 1 on a refused patch or a genuine error so the workflow surfaces them.
@@ -486,7 +487,7 @@ fi
 if [ "$AUTOFIX_TOKEN_KIND" = "default" ]; then
     cat >> "$BODY" <<'EOF'
 
-Note: this commit was pushed with the default workflow token, which does **not** retrigger PR checks - re-run them (or push any commit) to refresh the gate. Configuring the `DOCS_AUTOFIX_TOKEN` repo secret (shared with the docs autofix) removes this step.
+Note: this commit was pushed with the default workflow token, which does **not** retrigger PR checks - re-run them (or push any commit) to refresh the gate. This only happens if the gastownhall-autofix App token could not be minted for this push.
 EOF
 fi
 post_or_update_comment "$BODY"

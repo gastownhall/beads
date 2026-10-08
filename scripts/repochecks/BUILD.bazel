@@ -1,0 +1,352 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//tools/bazel:repo_subset.bzl", "repo_subset")
+
+# Repository guards that pr.yml's fast-checks and PR Policy jobs ran with
+# `./scripts/check-*.sh` on a full checkout, as Bazel tests over exactly the
+# files each guard reads (tools/bazel/repo_subset.bzl), so a cached pass is
+# reused until one of those files changes. run_check.sh lays each slice out as
+# a throwaway git checkout (the guards use git ls-files / git grep) and runs
+# the guard from its root. No tags: they run in bazel.yml's `test` lane
+# (--config=ci), remotely, and gate through CI Gate / Required. None of them
+# is a Go test binary, so every target here is exempt from
+# tools/bazel/check_testcases.py's Go testcase count (--not-go
+# //scripts/repochecks:all in bazel.yml's integration lane).
+#
+# What each slice holds must cover what its guard reads: a renamed input fails
+# the build (repo_subset rejects a pattern that matches nothing), and a guard
+# over a slice missing a file it names fails rather than passing (e.g.
+# check-doc-freshness.sh's "missing document" / "path does not exist").
+
+# run_check.sh and repo_subset themselves: include and exclude patterns, the
+# checkout layout and --env (testdata/assert_tree.sh says what it expects).
+repo_subset(
+    name = "run_check_fixture",
+    srcs = ["//:repo_files"],
+    include = [
+        "scripts/repochecks/testdata/*.txt",
+        "scripts/repochecks/testdata/assert_tree.sh",
+        "scripts/repochecks/testdata/sub/**",
+    ],
+    exclude = ["scripts/repochecks/testdata/sub/deep/**"],
+)
+
+sh_test(
+    name = "run_check_test",
+    srcs = ["run_check.sh"],
+    args = [
+        "--tree",
+        "$(rlocationpath :run_check_fixture)",
+        "--env",
+        "PROBE=$(rlocationpath testdata/a.txt)",
+        "--",
+        "scripts/repochecks/testdata/assert_tree.sh",
+    ],
+    data = [
+        "testdata/a.txt",
+        ":run_check_fixture",
+    ],
+)
+
+# check-build-tags.sh: every `go build|test|run|generate|install` in a shell
+# script, hook or the Makefile builds with gms_pure_go, and every Bazel user
+# (incl. the workflows) is covered by .bazelrc's tag. Its git ls-files
+# pathspecs, as a slice.
+repo_subset(
+    name = "build_tags_files",
+    srcs = ["//:repo_files"],
+    include = [
+        "**/*.sh",
+        ".bazelrc",
+        ".github/scripts/**",
+        ".github/workflows/*.yml",
+        ".githooks/**",
+        "Makefile",
+    ],
+)
+
+sh_test(
+    name = "build_tags_test",
+    srcs = ["run_check.sh"],
+    args = [
+        "--tree",
+        "$(rlocationpath :build_tags_files)",
+        "--",
+        "scripts/check-build-tags.sh",
+    ],
+    data = [":build_tags_files"],
+)
+
+repo_subset(
+    name = "workflow_files",
+    srcs = ["//:repo_files"],
+    include = [".github/workflows/*.yml"],
+)
+
+# scripts/checkworkflowtags: the workflows' direct go commands declare
+# gms_pure_go.
+sh_test(
+    name = "workflow_tags_test",
+    srcs = ["run_check.sh"],
+    args = [
+        "--tree",
+        "$(rlocationpath :workflow_files)",
+        "--",
+        "$(rlocationpath //scripts/checkworkflowtags)",
+    ],
+    data = [
+        ":workflow_files",
+        "//scripts/checkworkflowtags",
+    ],
+)
+
+# check-go-install-guidance.sh `git grep`s every tracked file, so its slice is
+# the whole checkout: //:repo_files plus the one tracked file under the
+# .bazelignore'd .beads/.
+repo_subset(
+    name = "all_files",
+    srcs = ["//:repo_files"],
+    include = ["**/*"],
+)
+
+repo_subset(
+    name = "beads_formula_files",
+    srcs = ["@beads_formulas//:beads-release.formula.toml"],
+    include = ["beads-release.formula.toml"],
+    tree_prefix = ".beads/formulas/",
+)
+
+sh_test(
+    name = "go_install_guidance_test",
+    srcs = ["run_check.sh"],
+    args = [
+        "--tree",
+        "$(rlocationpath :all_files)",
+        "--tree",
+        "$(rlocationpath :beads_formula_files)",
+        "--",
+        "scripts/check-go-install-guidance.sh",
+    ],
+    data = [
+        ":all_files",
+        ":beads_formula_files",
+    ],
+)
+
+repo_subset(
+    name = "winget_files",
+    srcs = ["//:repo_files"],
+    include = [
+        "scripts/check-winget-portable-alias.sh",
+        "winget/*.installer.yaml",
+    ],
+)
+
+# check-winget-portable-alias.sh: every nested-portable winget installer
+# carries PortableCommandAlias: bd (GH#4908). yq comes from the executor, as
+# for //scripts:scripts_test.
+sh_test(
+    name = "winget_portable_alias_test",
+    srcs = ["run_check.sh"],
+    args = [
+        "--tree",
+        "$(rlocationpath :winget_files)",
+        "--",
+        "scripts/check-winget-portable-alias.sh",
+    ],
+    data = [":winget_files"],
+)
+
+repo_subset(
+    name = "migration_files",
+    srcs = ["//:repo_files"],
+    include = [
+        "internal/storage/schema/migrations/**",
+        "scripts/check-migration-hygiene.sh",
+    ],
+)
+
+# check-migration-hygiene.sh's tree half (checks A and B: duplicate versions,
+# nondeterministic SQL and its allowlist). The delta half (C, D and E, which
+# diff against the PR's base) stays in pr.yml's pr-diff-checks job.
+sh_test(
+    name = "migration_hygiene_test",
+    srcs = ["run_check.sh"],
+    args = [
+        "--tree",
+        "$(rlocationpath :migration_files)",
+        "--",
+        "scripts/check-migration-hygiene.sh",
+    ],
+    data = [":migration_files"],
+    env = {"MIGRATION_HYGIENE_SCOPE": "tree"},
+)
+
+repo_subset(
+    name = "go_files",
+    srcs = ["//:repo_files"],
+    include = [
+        "**/*.go",
+        "scripts/ci/fmt-check.sh",
+        "scripts/ci/gofmt-bin.sh",
+    ],
+)
+
+# `make fmt-check` (scripts/ci/fmt-check.sh): gofmt -l over every Go file,
+# with the registered SDK's gofmt (go.mod's toolchain; the policy tests pin
+# the two together), which is what gofmt-bin.sh resolves from go.mod.
+sh_test(
+    name = "fmt_test",
+    srcs = ["run_check.sh"],
+    args = [
+        "--tree",
+        "$(rlocationpath :go_files)",
+        "--env",
+        "GOFMT=$(rlocationpath @go_sdk//:bin/gofmt)",
+        "--",
+        "scripts/ci/fmt-check.sh",
+    ],
+    data = [
+        ":go_files",
+        "@go_sdk//:bin/gofmt",
+    ],
+)
+
+# check-doc-freshness.sh: the reference docs it lists, DOC_INVENTORY.md, and
+# each doc's freshness sources, whose existence it checks (a Bazel package's
+# BUILD.bazel stands in for a directory source). Keep in step with its DOCS
+# list; a doc or source missing here fails the test.
+#
+# The guard compares Last reviewed markers with today's date, which is not in
+# the action key: a cached pass stands until one of these files changes, and
+# nightly (--config=fresh) re-runs it against the date.
+repo_subset(
+    name = "doc_freshness_files",
+    srcs = ["//:repo_files"],
+    include = [
+        ".buildflags",
+        ".github/workflows/main.yml",
+        ".github/workflows/pr.yml",
+        ".golangci.yml",
+        "Makefile",
+        "cmd/bd/ado*.go",
+        "cmd/bd/config.go",
+        "cmd/bd/dolt.go",
+        "cmd/bd/errors.go",
+        "cmd/bd/find_duplicates.go",
+        "cmd/bd/init.go",
+        "cmd/bd/init_safety.go",
+        "cmd/bd/init_safety_help.go",
+        "cmd/bd/init_safety_test.go",
+        "cmd/bd/main.go",
+        "cmd/bd/output.go",
+        "cmd/bd/protocol/json_contract_test.go",
+        "cmd/bd/serve.go",
+        "cmd/bd/setup*.go",
+        "docs/getting-started/ide-setup.md",
+        "docs/integrations/azure-devops.md",
+        "docs/recovery/init-safety.md",
+        "docs/reference/configuration.md",
+        "docs/reference/json-schema.md",
+        "engdocs/CI_CLEANUP_PLAN.md",
+        "engdocs/CI_TEST_SURFACE_AUDIT.md",
+        "engdocs/DOC_INVENTORY.md",
+        "engdocs/ERROR_HANDLING.md",
+        "engdocs/LINTING.md",
+        "engdocs/SERVE_RUNBOOK.md",
+        "engdocs/design/otel/otel-data-model.md",
+        "internal/ado/BUILD.bazel",
+        "internal/compact/haiku.go",
+        "internal/configfile/BUILD.bazel",
+        "internal/hooks/BUILD.bazel",
+        "internal/httpapi/auth.go",
+        "internal/httpapi/events_watch.go",
+        "internal/httpapi/server.go",
+        "internal/recipes/BUILD.bazel",
+        "internal/storage/dolt/store.go",
+        "internal/telemetry/BUILD.bazel",
+        "scripts/check-doc-freshness.sh",
+        "scripts/ci/pr-lint.sh",
+        "scripts/pr-lint/BUILD.bazel",
+    ],
+)
+
+sh_test(
+    name = "doc_freshness_test",
+    srcs = ["run_check.sh"],
+    args = [
+        "--tree",
+        "$(rlocationpath :doc_freshness_files)",
+        "--",
+        "scripts/check-doc-freshness.sh",
+    ],
+    data = [":doc_freshness_files"],
+)
+
+repo_subset(
+    name = "workapi_files",
+    srcs = ["//:repo_files"],
+    include = [
+        "internal/workapi/**",
+        "scripts/check-workapi-frontend-boundary.sh",
+    ],
+)
+
+# check-workapi-frontend-boundary.sh: internal/workapi reads no cwd- or
+# environment-derived state (the symbol half of the depguard rule).
+sh_test(
+    name = "workapi_frontend_boundary_test",
+    srcs = ["run_check.sh"],
+    args = [
+        "--tree",
+        "$(rlocationpath :workapi_files)",
+        "--",
+        "scripts/check-workapi-frontend-boundary.sh",
+    ],
+    data = [":workapi_files"],
+)
+
+# `make api-check`'s drift half: internal/httpapi/apigen/types.gen.go is
+# exactly what oapi-codegen (go.mod's version, the `go tool` doc.go's
+# go:generate runs) makes of the spec. Its `go test ./internal/httpapi/...`
+# half is the httpapi targets in the same lane.
+sh_test(
+    name = "types_gen_drift_test",
+    srcs = ["types_gen_drift_test.sh"],
+    data = [
+        "//:go.mod",
+        "//internal/httpapi/apigen:types.gen.go",
+        "//internal/httpapi/spec:openapi.v0.yaml",
+        "@com_github_oapi_codegen_oapi_codegen_v2//cmd/oapi-codegen",
+        "@go_sdk//:bin/go",
+        "@go_sdk//:files",
+    ],
+    env = {
+        "COMMITTED": "$(rlocationpath //internal/httpapi/apigen:types.gen.go)",
+        "GO": "$(rlocationpath @go_sdk//:bin/go)",
+        "GO_MOD": "$(rlocationpath //:go.mod)",
+        "OAPI_CODEGEN": "$(rlocationpath @com_github_oapi_codegen_oapi_codegen_v2//cmd/oapi-codegen)",
+        "SPEC": "$(rlocationpath //internal/httpapi/spec:openapi.v0.yaml)",
+    },
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

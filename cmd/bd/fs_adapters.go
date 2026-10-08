@@ -32,8 +32,14 @@ func newFileSystemAdapters() domain.BeadsDirFSAdapters {
 		AddAgentsInstructions: func(p domain.AgentsFileParams) {
 			addAgentsInstructions(p.File, p.Verbose, p.TemplatePath, agents.Profile(p.Profile), agents.RenderOpts{HasRemote: p.HasRemote, NoPush: p.NoPush})
 		},
-		InstallClaudeProject: setup.InstallClaudeProject,
-		SetYAMLConfig:        config.SetYamlConfig,
+		InstallClaudeProject: func(stealth, quiet bool) error {
+			out := setup.ProjectInstallOutput{}
+			if quiet {
+				out = setup.QuietProjectInstallOutput()
+			}
+			return setup.InstallClaudeProjectTo(stealth, out)
+		},
+		SetYAMLConfig: config.SetYamlConfig,
 	}
 }
 

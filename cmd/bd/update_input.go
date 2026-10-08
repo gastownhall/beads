@@ -35,6 +35,9 @@ type updateInput struct {
 	// guard).
 	ifAssignee *string
 	ifStatus   *string
+	// A8's --if-revision guard (beads#4682); composes with ifAssignee/ifStatus
+	// above, all of which must hold.
+	ifRevision *int64
 	// bd-98s5c: --force bypasses the live-claim reassign fence only when no
 	// --if-assignee guard rides the command; it also opts into the notes
 	// overwrite and close-policy bypasses (runCommandUpdateMutation).
@@ -272,12 +275,19 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		}
 		in.ifStatus = &v
 	}
-	if in.ifAssignee != nil || in.ifStatus != nil {
+	// A8's --if-revision guard (beads#4682), same Changed()-detected presence
+	// idiom and validated as the decimal int64 types.ParseRevisionToken
+	// expects, mirroring the non-proxied path's updateGuardsFromFlags.
+	in.ifRevision, err = parseIfRevisionFlag(cmd)
+	if err != nil {
+		return nil, err
+	}
+	if in.ifAssignee != nil || in.ifStatus != nil || in.ifRevision != nil {
 		if in.claim {
-			return nil, HandleErrorRespectJSON("cannot combine --if-assignee/--if-status with --claim (--claim is already an atomic compare-and-set)")
+			return nil, HandleErrorRespectJSON("cannot combine --if-assignee/--if-status/--if-revision with --claim (--claim is already an atomic compare-and-set)")
 		}
 		if len(in.fields) == 0 && !in.hasAppendNotes && len(in.mergeMetadataIn) == 0 && len(in.setMetadata) == 0 && len(in.unsetMetadata) == 0 {
-			return nil, HandleErrorRespectJSON("--if-assignee/--if-status require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard")
+			return nil, HandleErrorRespectJSON("--if-assignee/--if-status/--if-revision require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard")
 		}
 	}
 	return in, nil

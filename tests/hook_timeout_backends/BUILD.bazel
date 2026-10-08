@@ -1,0 +1,60 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+# The tracked git hook shims (.githooks/*, managed section only) against real
+# timeout implementations: GNU coreutils and perl from the executor, and
+# static uutils coreutils, busybox and toybox builds pinned in MODULE.bazel,
+# under dash, bash and busybox ash. Formerly checks.nix's flake check
+# hook-timeout-backends, which only PR Risk's test-nix job ran. See the
+# script's header for the matrix and what each case asserts.
+#
+# Tags:
+#   pr-core-only: a non-Go sh_test (no Go testcases for the integration
+#     lane's check_testcases.py); the PR-core lane runs it.
+sh_test(
+    name = "hook_timeout_backends_test",
+    size = "small",
+    srcs = ["hook_timeout_backends_test.sh"],
+    args = [
+        "$(rootpath @busybox_static//file)",
+        "$(rootpath @toybox_static//file)",
+        "$(rootpath @uutils_coreutils//:coreutils)",
+        "$(rootpath //:.githooks/pre-commit)",
+        "$(rootpath //:.githooks/post-merge)",
+        "$(rootpath //:.githooks/pre-push)",
+        "$(rootpath //:.githooks/post-checkout)",
+        "$(rootpath //:.githooks/prepare-commit-msg)",
+    ],
+    data = [
+        "//:.githooks/post-checkout",
+        "//:.githooks/post-merge",
+        "//:.githooks/pre-commit",
+        "//:.githooks/pre-push",
+        "//:.githooks/prepare-commit-msg",
+        "@busybox_static//file",
+        "@toybox_static//file",
+        "@uutils_coreutils//:coreutils",
+    ],
+    tags = ["pr-core-only"],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

@@ -95,7 +95,7 @@ func buildEmbeddedBD(t *testing.T) string {
 			name = "bd.exe"
 		}
 		embeddedBD = filepath.Join(tmpDir, name)
-		cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", embeddedBD, ".")
+		cmd := goBuildBDCommand(embeddedBD)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			embeddedBDErr = fmt.Errorf("go build failed: %v\n%s", err, out)
 		}
@@ -329,7 +329,12 @@ func requireNoFile(t *testing.T, path string) {
 	}
 }
 
-func TestEmbeddedInit(t *testing.T) {
+// TestEmbeddedInitA, TestEmbeddedInitB, and TestEmbeddedInitC were split from
+// TestEmbeddedInit (originally ~356s, measured under --config=embedded) into
+// 3 top-level tests over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedInitA(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
 	}
@@ -363,6 +368,14 @@ func TestEmbeddedInit(t *testing.T) {
 		}
 		if strings.Contains(out, "bd initialized") {
 			t.Error("--quiet should suppress success message")
+		}
+		// The project installers (Claude, Codex, Cursor) run here (agents
+		// are not skipped); --quiet drops their progress too.
+		requireFile(t, filepath.Join(dir, ".claude", "settings.json"))
+		for _, chatter := range []string{"Installing Claude hooks", "Beads agent skill installed", "Cursor integration installed"} {
+			if strings.Contains(out, chatter) {
+				t.Errorf("--quiet should suppress installer output %q, got:\n%s", chatter, out)
+			}
 		}
 
 		// bd_version is in local_metadata (dolt-ignored), not metadata
@@ -744,6 +757,15 @@ func TestEmbeddedInit(t *testing.T) {
 			t.Fatalf("config.yaml should persist --remote URL %q:\n%s", remoteURL, configYAML)
 		}
 	})
+}
+
+func TestEmbeddedInitB(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("remote_behind_schema_gate", func(t *testing.T) {
 		// bd-4mpy7 / #4516: bootstrapping from a remote whose database is
@@ -1167,6 +1189,15 @@ func TestEmbeddedInit(t *testing.T) {
 			t.Fatalf("imported issue title missing from show output:\n%s", out)
 		}
 	})
+}
+
+func TestEmbeddedInitC(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("server_flags_ignored", func(t *testing.T) {
 		_, beadsDir, _ := bdInit(t, bd, "--prefix", "sv",

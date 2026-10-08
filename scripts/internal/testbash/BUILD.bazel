@@ -8,7 +8,12 @@ go_library(
         "resolver_windows.go",
     ],
     importpath = "github.com/steveyegge/beads/scripts/internal/testbash",
-    visibility = ["//scripts:__subpackages__"],
+    # //tools/bazel:release_cross cross-compiles it like every package
+    # `go build ./...` compiles.
+    visibility = [
+        "//scripts:__subpackages__",
+        "//tools/bazel:__pkg__",
+    ],
 )
 
 go_test(
@@ -20,3 +25,25 @@ go_test(
     ],
     embed = [":testbash"],
 )
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

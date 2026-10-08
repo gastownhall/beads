@@ -225,10 +225,16 @@ func InstallClaude(global bool, stealth bool) error {
 // InstallClaudeProject installs project-local Claude hooks, returning an error
 // instead of exiting. Used by bd init to integrate Claude setup automatically.
 func InstallClaudeProject(stealth bool) error {
+	return InstallClaudeProjectTo(stealth, ProjectInstallOutput{})
+}
+
+// InstallClaudeProjectTo is InstallClaudeProject reporting to out.
+func InstallClaudeProjectTo(stealth bool, out ProjectInstallOutput) error {
 	env, err := claudeEnvProvider()
 	if err != nil {
 		return err
 	}
+	env.stdout, env.stderr = out.stdout(), out.stderr()
 	return installClaude(env, false, stealth)
 }
 

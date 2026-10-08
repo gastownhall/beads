@@ -468,7 +468,7 @@ func TestLegacyGuardUsesSelectedTargetSharedServerConfig(t *testing.T) {
 					"BD_DISABLE_METRICS=1",
 					"BD_DISABLE_EVENT_FLUSH=1",
 					"BEADS_DOLT_AUTO_START=0",
-					"BEADS_DOLT_SERVER_PORT=59999",
+					"BEADS_DOLT_SERVER_PORT="+strconv.Itoa(closedLoopbackPort(t)),
 					"BEADS_DOLT_SHARED_SERVER=0",
 					"HOME="+t.TempDir(),
 				)
@@ -533,7 +533,7 @@ func TestLegacyGuardAdmitsConfigYamlServerWorkspace(t *testing.T) {
 				"BD_DISABLE_METRICS=1",
 				"BD_DISABLE_EVENT_FLUSH=1",
 				"BEADS_DOLT_AUTO_START=0",
-				"BEADS_DOLT_SERVER_PORT=59999",
+				"BEADS_DOLT_SERVER_PORT="+strconv.Itoa(closedLoopbackPort(t)),
 				"BEADS_DOLT_SHARED_SERVER=0",
 				"HOME="+t.TempDir(),
 			)

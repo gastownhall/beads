@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Pre-push hook: when pushing a release tag (refs/tags/v*), refuse the push if
-# version constants disagree. This stops a release from being tagged/published
-# with drifted versions (the failure mode that left main red after the 1.0.5
-# release) before it ever reaches CI.
+# Pre-push hook: run the Bazel test suite for branch pushes that change Go or
+# Bazel inputs (scripts/pre-push-suite.sh), and when pushing a release tag
+# (refs/tags/v*), refuse the push if version constants disagree. The version
+# check stops a release from being tagged/published with drifted versions (the
+# failure mode that left main red after the 1.0.5 release) before it ever
+# reaches CI.
 #
 # Installed via: git config core.hooksPath .githooks
 # See also: make install (sets hooksPath automatically)
@@ -53,6 +55,36 @@ if [ "$pushing_version_tag" -eq 1 ]; then
             esac
         done <<< "$push_refs"
     fi
+fi
+
+# The push-time test suite (scripts/pre-push-suite.sh): bazel.yml's test lane,
+# `bazel test //... --config=ci`, for branch pushes whose new commits change
+# Go or Bazel inputs. A tag push, a deletion, or a docs-only push skips it.
+# BD_PREPUSH_SUITE=go runs plain go test instead, under a banner.
+zero_sha=0000000000000000000000000000000000000000
+suite_needed=0
+while read -r local_ref local_sha _remote_ref remote_sha; do
+    case "$local_ref" in
+        refs/heads/*) ;;
+        *) continue ;;
+    esac
+    if [ "$local_sha" = "$zero_sha" ] || ! git cat-file -e "$local_sha^{commit}" 2>/dev/null; then
+        continue
+    fi
+    base="$remote_sha"
+    if [ "$base" = "$zero_sha" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+        # A new remote branch: compare against main's merge-base.
+        base="$(git merge-base "$local_sha" origin/main 2>/dev/null || true)"
+    fi
+    if [ -z "$base" ] || git diff --name-only "$base" "$local_sha" -- \
+        '*.go' 'go.mod' 'go.sum' '*.bazel' '*.bzl' '.bazelrc' '.bazelversion' 'MODULE.bazel.lock' | grep -q .; then
+        suite_needed=1
+    fi
+done <<< "$push_refs"
+
+if [ "$suite_needed" -eq 1 ]; then
+    repo_root="$(git rev-parse --show-toplevel)"
+    "$repo_root/scripts/pre-push-suite.sh" </dev/null
 fi
 
 exec < <(printf '%s\n' "$push_refs")

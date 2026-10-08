@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestEmbeddedDefault(t *testing.T) {
+func TestGoEmbedDefault(t *testing.T) {
 	content := EmbeddedDefault()
 
 	if content == "" {
@@ -28,13 +28,13 @@ func TestEmbeddedDefault(t *testing.T) {
 	}
 }
 
-// TestEmbeddedDefaultArchitectureSummary guards GH#3683: agents reading the
+// TestGoEmbedDefaultArchitectureSummary guards GH#3683: agents reading the
 // generated AGENTS.md need an architecture statement at the top so they don't
 // build wrong mental models (treating JSONL as source of truth, manually
 // running bd import, etc.) and have to discover the four deeper architecture
 // docs the hard way. The summary must appear before the Quick Reference and
 // link to the canonical sync-concepts entry-point.
-func TestEmbeddedDefaultArchitectureSummary(t *testing.T) {
+func TestGoEmbedDefaultArchitectureSummary(t *testing.T) {
 	content := EmbeddedDefault()
 
 	required := []string{
@@ -59,7 +59,7 @@ func TestEmbeddedDefaultArchitectureSummary(t *testing.T) {
 	}
 }
 
-func TestEmbeddedBeadsSection(t *testing.T) {
+func TestGoEmbedBeadsSection(t *testing.T) {
 	section := EmbeddedBeadsSection()
 
 	if section == "" {
@@ -113,7 +113,7 @@ func TestDefaultContainsBothSections(t *testing.T) {
 	}
 }
 
-func TestEmbeddedDefaultManagedMarkerIsCurrent(t *testing.T) {
+func TestGoEmbedDefaultManagedMarkerIsCurrent(t *testing.T) {
 	content := EmbeddedDefault()
 
 	idx := strings.Index(content, "<!-- BEGIN BEADS INTEGRATION")

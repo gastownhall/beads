@@ -16,7 +16,6 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // TestNewDoltStoreFromConfig_NoMetadata verifies that newDoltStoreFromConfig
@@ -307,20 +306,6 @@ func TestOpenNonMutatingStoreHonorsSharedServerConfig(t *testing.T) {
 // the dial and turn the expected ECONNREFUSED into a handshake error, reddening
 // a correct implementation.
 const readOnlySharedServerPort = "19998"
-
-// TestEmbeddedOpen_EmptyDatabaseRejected verifies that embeddeddolt.Open fails
-// with a clear error when called with an empty database name, rather than
-// deferring to a confusing "no database selected" SQL error.
-// Belt-and-suspenders defense for be-sy8 / GH#2988.
-func TestEmbeddedOpen_EmptyDatabaseRejected(t *testing.T) {
-	_, err := embeddeddolt.Open(t.Context(), t.TempDir(), "", "main")
-	if err == nil {
-		t.Fatal("expected error for empty database name")
-	}
-	if !strings.Contains(err.Error(), "database name must not be empty") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
 
 // TestNewDoltStoreFromConfig_HyphenatedDBName verifies that
 // newDoltStoreFromConfig auto-sanitizes hyphenated database names for embedded

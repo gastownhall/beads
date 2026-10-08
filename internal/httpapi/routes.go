@@ -59,6 +59,66 @@ const CapProjectEnforce = "project.enforce"
 // round trip an old server would refuse anyway.
 const CapBatchApplyLarge = "issues.batchApplyLarge"
 
+// CapIssuesListSort is the behavior capability that advertises GET
+// /v0/beads/issues' `sort` parameter (reads.go, spec `sort` on OpListIssues).
+// Like CapBatchApplyLarge it names a PARAMETER added to an existing operation
+// rather than a route of its own — `issues.list` is already the per-operation
+// token for the route itself — so it rides the same behaviorCapabilities list.
+//
+// The parameter shipped (#5666) with no token at all: a client already had the
+// per-parameter fallback (an old server answers `sort` with 400
+// `unknown_parameter`, which doubles as a capability probe), but that means
+// paying a round trip an old server would refuse anyway. A client that checks
+// this token at handshake time learns the same thing for free. This is also
+// the spec/lint rule in TestNewParameterOnExistingOperationHasABehaviorToken:
+// `sort` predates that rule and would have failed it, so it is the parity fix
+// — ent already advertises the equivalent token — that the rule's own
+// baseline is built from.
+const CapIssuesListSort = "issues.list.sort"
+
+// CapIssuesCountScope is the behavior capability that advertises GET
+// /v0/beads/issues:count's `parent`, `no_parent`, `exclude_type`, and
+// `exclude_status` parameters (reads.go countFilters, spec OpCountIssues).
+// Like CapIssuesListSort it names FOUR PARAMETERS added to an existing
+// operation rather than a route of its own — `issues.count` is already the
+// per-operation token for the route itself — so it rides the same
+// behaviorCapabilities list and one token covers all four (internal/beads
+// design doc "Count scope", S8): they shipped together, through the one
+// shared workapi.BuildCountFilter builder, so there is no partial-support
+// state a finer-grained token would need to distinguish.
+//
+// This is the TestNewParameterOnExistingOperationHasABehaviorToken gate
+// CapIssuesListSort's doc describes: `issues:count` is a pretoken-baseline
+// operation (internal/httpapi/testdata/pretoken_operations.json), so these
+// four NEW parameters on it must each cite a served token in their own
+// OpenAPI description, and this is that token.
+//
+// CLIENT-SKEW NOTE FOR S3/S4 (no OSS HTTP client exists yet to wire this
+// into): a server predating this token answers any of the four parameters
+// with `400 invalid_argument`/`reason: "unknown_parameter"` naming the
+// parameter — the per-parameter capability probe every behavior token on
+// this operation already relies on (see CapIssuesListSort). When the HTTP
+// client lands, it MUST check `issues.count.scope` against the cached
+// `ContextResponse.capabilities` from the handshake and refuse LOCALLY with
+// a typed `ErrUnsupported{Capability: "issues.count.scope"}` (or an
+// equivalent typed error carrying the token) before sending a request that
+// sets `ParentID`, `NoParent`, `ExcludeTypes` or `ExcludeStatus` to an older
+// server — never let the caller pay for a round trip that 400s anyway, and
+// never silently drop the fields and return a wider count than asked for.
+//
+// THE DOWNSTREAM FALLBACK THIS PROTECTS (S8 review, follow-up #6): gc's own
+// client maps that local `ErrUnsupported{Capability: "issues.count.scope"}`
+// refusal to its own `ErrCountUnsupported` and falls back to the List role for
+// the same predicate (beads-design DESIGN.txt §3.2, "gc maps this to
+// ErrCountUnsupported and falls back to List") rather than surfacing the
+// refusal to its own caller or guessing at a count. S3/S4, when they build
+// that client, MUST add a skew test that masks this token out of a handshake
+// response and asserts the fallback actually fires — not merely that the
+// local refusal is raised — because a fallback that compiles but never runs
+// in CI is indistinguishable from one that silently regressed to a wrong
+// count.
+const CapIssuesCountScope = "issues.count.scope"
+
 // customMethodTarget splits the custom method off the segment the router
 // matched, and reports the row that claims it.
 //
@@ -173,6 +233,17 @@ type route struct {
 	// reads that touch no workspace data are exempt and every other route —
 	// streaming or not — is enforced.
 	projectExempt bool
+	// wireRevisionExempt exempts an operation from the Bd-Wire-Revision floor
+	// check (checkWireRevision). Legitimate only for liveness: a kubelet probe
+	// carries no notion of a wire revision at all, and the check's refusal body
+	// is itself a `ContextResponse`-shaped disclosure the health row must never
+	// grow. It is deliberately NOT set on the identity handshake — unlike
+	// projectExempt, where the handshake is how a client LEARNS the id it must
+	// stamp with, a client that already knows the revision it was built for can
+	// and should declare it on the very first request, and the handshake is
+	// exactly where a floor violation is cheapest to catch: before the client
+	// has acted on anything shaped for a revision it cannot decode.
+	wireRevisionExempt bool
 	// implemented gates the capability list, so a release between slices never
 	// advertises an operation that does not work. Every v0 operation is
 	// implemented as of the read-endpoints slice; the flag stays because the
@@ -203,8 +274,12 @@ var routeTable = []route{
 		// liveness probe gated on a matching project stamp would go dark on a
 		// misconfigured client exactly when an operator needs it most.
 		projectExempt: true,
-		implemented:   true,
-		handler:       (*Server).handleHealth,
+		// Same reasoning extends to the wire-revision floor: a probe carries no
+		// `Bd-Wire-Revision` of its own, and must not be refused for a header it
+		// never had a reason to send.
+		wireRevisionExempt: true,
+		implemented:        true,
+		handler:            (*Server).handleHealth,
 	},
 	{
 		op:      OpGetContext,
@@ -654,6 +729,19 @@ var routeTable = []route{
 		handler:     (*Server).handleDelete,
 	},
 	{
+		op:     OpBatchGetIssues,
+		method: http.MethodPost,
+		// A literal collection-level custom method, registered and preferred
+		// over the claim's wildcard for the sweep row's reason. POST rather
+		// than GET: the request names up to MaxGetManyIDs ids, which does not
+		// fit a query string reliably, and the delete beside it makes the same
+		// choice for the same reason.
+		pattern:     "/v0/beads/issues:batchGet",
+		capability:  "issues.batchGet",
+		implemented: true,
+		handler:     (*Server).handleBatchGetIssues,
+	},
+	{
 		op:     OpAddDependencies,
 		method: http.MethodPost,
 		// A collection-level custom method beside :remove below, and a LITERAL
@@ -778,7 +866,7 @@ func (r route) specPathOf() string {
 // route. project.enforce announces per-request Bd-Project-Id enforcement
 // (checkProjectStamp): a stamped client reads it to know the refusal is available
 // rather than silently dropped by an older server.
-var behaviorCapabilities = []string{CapProjectEnforce, CapBatchApplyLarge}
+var behaviorCapabilities = []string{CapProjectEnforce, CapBatchApplyLarge, CapIssuesListSort, CapIssuesCountScope}
 
 // Capabilities lists what this build advertises in ContextResponse.capabilities:
 // the operations it actually implements, gated on `implemented` so a stub can

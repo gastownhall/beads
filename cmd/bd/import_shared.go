@@ -110,6 +110,11 @@ type ImportChange struct {
 // classifiers need. The classic storage.DoltStorage satisfies it, and so does
 // the proxied unit of work's domain.IssueUseCase, so both modes classify
 // incoming rows against local state with the same code.
+// TODO(batchgetter): both callers below read an unbounded id list through
+// this interface; issueops.BatchGetter caps a request at MaxGetManyIDs
+// (1000) and neither call site has been audited for id volume or given
+// chunking, so this interface still names GetIssuesByIDs rather than the
+// role. See issueops.BatchGetter's doc.
 type importIssueLookup interface {
 	GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error)
 }

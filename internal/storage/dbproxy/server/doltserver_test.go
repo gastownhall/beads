@@ -641,3 +641,166 @@ func TestDoltServer_DoltInit_Idempotent(t *testing.T) {
 	require.NoError(t, s.Start(ctx), "Start against pre-initialized rootDir should succeed")
 	t.Cleanup(func() { stopWithTimeout(t, s) })
 }
+
+// holdPort occupies a loopback port with a listener that accepts and then
+// ignores connections: a stand-in for another process that took the port the
+// config names before dolt could bind it. It returns the port.
+func holdPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	var mu sync.Mutex
+	var conns []net.Conn
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	})
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// newDoltServerOnPort is newDoltServer with the listener port chosen by the
+// caller. It returns the server, its root dir and its config path.
+func newDoltServerOnPort(t *testing.T, port int) (*server.DoltServer, string, string) {
+	t.Helper()
+	bin := requireDolt(t)
+	t.Setenv("HOME", t.TempDir())
+	rootDir := t.TempDir()
+	cfg := writeConfig(t, port)
+	log := filepath.Join(t.TempDir(), "server.log")
+	s, err := server.NewDoltServer(bin, rootDir, cfg, log, 0, "")
+	require.NoError(t, err)
+	verifiedStopCleanup(t, s, rootDir)
+	return s, rootDir, cfg
+}
+
+// TestDoltServer_Start_ForeignListenerIsNotReady pins that a port another
+// process holds is not mistaken for the started server. A dial to the port
+// succeeds, but the dolt sql-server Start launched cannot bind it and exits;
+// Start used to accept the dial and report a running server that was already
+// gone.
+func TestDoltServer_Start_ForeignListenerIsNotReady(t *testing.T) {
+	held := holdPort(t)
+	s, rootDir, _ := newDoltServerOnPort(t, held)
+	ctx := context.Background()
+
+	err := s.Start(ctx)
+	require.Error(t, err, "Start must not report ready against another process's listener")
+	assert.ErrorIs(t, err, server.ErrPortInUse)
+	assert.False(t, s.Running(ctx))
+	left, rerr := pidfile.Read(rootDir, server.PIDFileName)
+	require.NoError(t, rerr)
+	assert.Nil(t, left, "a failed Start must not leave a backend pid record")
+}
+
+// TestDoltServer_Start_NoPolicyNamesRemedy verifies the ErrPortInUse a
+// server without a PortConflictPolicy returns tells the operator what to do.
+func TestDoltServer_Start_NoPolicyNamesRemedy(t *testing.T) {
+	held := holdPort(t)
+	s, _, cfgPath := newDoltServerOnPort(t, held)
+	err := s.Start(context.Background())
+	require.ErrorIs(t, err, server.ErrPortInUse)
+	assert.Contains(t, err.Error(), fmt.Sprintf("free port %d, or set listener.port in %s", held, cfgPath))
+}
+
+// TestDoltServer_Start_MovesOffPortHeldByAnotherProcess verifies Start
+// recovers when its PortConflictPolicy allows it: the server comes up on a
+// fresh port through the runtime config, the operator config is left
+// byte-for-byte alone, and the runtime config goes away with the server.
+func TestDoltServer_Start_MovesOffPortHeldByAnotherProcess(t *testing.T) {
+	held := holdPort(t)
+	s, rootDir, cfgPath := newDoltServerOnPort(t, held)
+	ctx := context.Background()
+	before, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+
+	var calls []int
+	s.SetPortConflictPolicy(func(configPath string, inUsePort int) error {
+		calls = append(calls, inUsePort)
+		assert.Equal(t, cfgPath, configPath)
+		return nil
+	})
+
+	require.NoError(t, s.Start(ctx))
+	t.Cleanup(func() { stopWithTimeout(t, s) })
+	assert.Equal(t, []int{held}, calls, "policy must be asked once, about the held port")
+
+	after, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	assert.Equal(t, string(before), string(after), "the operator config must never be modified")
+
+	pf, err := pidfile.Read(rootDir, server.PIDFileName)
+	require.NoError(t, err)
+	require.NotNil(t, pf)
+	assert.NotEqual(t, held, pf.Port, "backend record must advertise the port the server actually uses")
+	runtimePath := filepath.Join(rootDir, server.RuntimeConfigFileName)
+	runtimeBody, err := os.ReadFile(runtimePath)
+	require.NoError(t, err, "a moved server runs from the runtime config")
+	assert.Contains(t, string(runtimeBody), fmt.Sprintf("port: %d", pf.Port))
+
+	qctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	db, err := sql.Open("mysql", s.DSN(ctx, "", "root", ""))
+	require.NoError(t, err)
+	var got int
+	require.NoError(t, db.QueryRowContext(qctx, "SELECT 1").Scan(&got), "DSN must reach the server on its new port")
+	assert.Equal(t, 1, got)
+	require.NoError(t, db.Close())
+
+	require.NoError(t, s.Stop(ctx))
+	_, err = os.Stat(runtimePath)
+	assert.True(t, os.IsNotExist(err), "Stop must remove the runtime config, got %v", err)
+}
+
+// TestDoltServer_Start_PolicyDeclines verifies a policy that pins the port
+// ends Start with ErrPortInUse carrying the policy's reason.
+func TestDoltServer_Start_PolicyDeclines(t *testing.T) {
+	held := holdPort(t)
+	s, rootDir, _ := newDoltServerOnPort(t, held)
+	ctx := context.Background()
+	s.SetPortConflictPolicy(func(string, int) error {
+		return errors.New("port is pinned")
+	})
+
+	err := s.Start(ctx)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, server.ErrPortInUse)
+	assert.Contains(t, err.Error(), "port is pinned")
+	assert.False(t, s.Running(ctx))
+	_, serr := os.Stat(filepath.Join(rootDir, server.RuntimeConfigFileName))
+	assert.True(t, os.IsNotExist(serr), "a declined move must not leave a runtime config")
+}
+
+// TestDoltServer_Start_QuietLogLevelUsesDialReadiness pins the fallback: at
+// log_level warning dolt never logs its (info-level) ready line, so Start
+// must accept a dial alone rather than wait for a line that cannot come.
+func TestDoltServer_Start_QuietLogLevelUsesDialReadiness(t *testing.T) {
+	bin := requireDolt(t)
+	t.Setenv("HOME", t.TempDir())
+	rootDir := t.TempDir()
+	cfg := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(cfg, []byte(fmt.Sprintf("log_level: warning\nlistener:\n  host: 127.0.0.1\n  port: %d\n", freePort(t))), 0o600))
+	s, err := server.NewDoltServer(bin, rootDir, cfg, filepath.Join(t.TempDir(), "server.log"), 0, "")
+	require.NoError(t, err)
+	verifiedStopCleanup(t, s, rootDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	require.NoError(t, s.Start(ctx))
+	t.Cleanup(func() { stopWithTimeout(t, s) })
+	assert.True(t, s.Running(ctx))
+}
