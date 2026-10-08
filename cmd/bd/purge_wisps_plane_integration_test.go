@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
@@ -55,6 +56,33 @@ func (r purgeScenarioRunner) purgeJSON(t *testing.T, args ...string) map[string]
 		t.Fatalf("%s: parse purge JSON: %v\n%s", r.mode, err, out)
 	}
 	return result
+}
+
+// confirmHint runs a purge without --force, which must refuse, and returns how
+// many beads the refusal says it would purge and the arguments of the
+// `bd purge --force ...` command its hint suggests. That hint is what an
+// operator or agent pastes to confirm, so running exactly those arguments runs
+// the hint as printed.
+func (r purgeScenarioRunner) confirmHint(t *testing.T, args ...string) (wouldPurge int, hint []string) {
+	t.Helper()
+	stdout, stderr, err := r.run(t, append([]string{"purge"}, args...)...)
+	if err == nil {
+		t.Fatalf("%s: bd purge %s without --force succeeded; want a refusal\nstdout:\n%s",
+			r.mode, strings.Join(args, " "), stdout)
+	}
+	wouldPurge = -1
+	for _, line := range strings.Split(stderr, "\n") {
+		if fields := strings.Fields(line); len(fields) > 2 && fields[0] == "bd" && fields[1] == "purge" {
+			hint = fields[2:]
+		} else if strings.HasPrefix(line, "Error: would purge ") {
+			_, _ = fmt.Sscanf(line, "Error: would purge %d", &wouldPurge)
+		}
+	}
+	if wouldPurge < 0 || hint == nil {
+		t.Fatalf("%s: bd purge %s without --force printed no count or no suggested command\nstderr:\n%s",
+			r.mode, strings.Join(args, " "), stderr)
+	}
+	return wouldPurge, hint
 }
 
 func jsonCount(result map[string]any, key string) int {
@@ -163,6 +191,62 @@ func runPurgeRetentionScenario(t *testing.T, r purgeScenarioRunner) {
 	}
 }
 
+// runPurgeProtectedLabelScenario pins the protected-label guard on BOTH of
+// `bd purge`'s selections: wisp.protected_labels and --exclude-label hold on
+// the default ephemeral selection and on --wisps-plane alike. The plane
+// selection used to drop the guard — it was keyed on the ephemeral tier, and
+// --wisps-plane switches the tier — so every labeled row it reached was
+// deleted and no skip was reported.
+//
+// The unlabeled --no-history bead is the plane run's negative control: it
+// goes, so the labeled one surviving is the guard holding, not a selection
+// that never reached the row.
+//
+// Each confirmed purge is the hint its unconfirmed run printed, run as
+// printed, and must delete what that preview counted: the hint used to drop
+// --exclude-label, so pasting it deleted the beads the preview had just
+// reported as skipped.
+func runPurgeProtectedLabelScenario(t *testing.T, r purgeScenarioRunner) {
+	t.Helper()
+
+	r.must(t, "config", "set", "wisp.protected_labels", "gt:message,gt:escalation")
+
+	plain := r.create(t, "plain wisp", "--ephemeral")
+	thread := r.create(t, "unprotected label", "--ephemeral", "--label", "gt:thread")
+	mail := r.create(t, "configured label", "--ephemeral", "--label", "gt:message")
+	escalation := r.create(t, "second configured label", "--ephemeral", "--label", "gt:escalation")
+	adHoc := r.create(t, "ad-hoc protected label", "--ephemeral", "--label", "keep:me")
+	noHistory := r.create(t, "plain no-history bead", "--no-history")
+	noHistoryMail := r.create(t, "labeled no-history bead", "--no-history", "--label", "gt:message")
+	r.must(t, "close", plain, thread, mail, escalation, adHoc, noHistory, noHistoryMail)
+
+	// The default selection: the ephemeral tier, both --no-history beads untouched.
+	previewed, hint := r.confirmHint(t, "--exclude-label", "keep:me")
+	first := r.purgeJSON(t, hint...)
+	if previewed != 2 || jsonCount(first, "purged_count") != 2 || jsonCount(first, "labeled_skipped") != 3 {
+		t.Fatalf("%s: preview would purge %d, its hint `bd purge %s` = %v; want 2, then purged_count 2 (plain + gt:thread) and labeled_skipped 3",
+			r.mode, previewed, strings.Join(hint, " "), first)
+	}
+
+	// The plane selection reaches the --no-history beads too, and keeps every
+	// labeled row it reaches, configured and --exclude-label alike.
+	previewed, hint = r.confirmHint(t, "--wisps-plane", "--pattern", "*", "--exclude-label", "keep:me")
+	plane := r.purgeJSON(t, hint...)
+	if previewed != 1 || jsonCount(plane, "purged_count") != 1 || jsonCount(plane, "labeled_skipped") != 4 {
+		t.Fatalf("%s: preview would purge %d, its hint `bd purge %s` = %v; want 1, then purged_count 1 (the unlabeled no-history bead) and labeled_skipped 4",
+			r.mode, previewed, strings.Join(hint, " "), plane)
+	}
+
+	for id, want := range map[string]bool{
+		plain: false, thread: false, noHistory: false,
+		mail: true, escalation: true, adHoc: true, noHistoryMail: true,
+	} {
+		if got := r.exists(t, id); got != want {
+			t.Errorf("%s: after both purges, %s exists = %v, want %v", r.mode, id, got, want)
+		}
+	}
+}
+
 func embeddedPurgeScenarioRunner(bd, dir string) purgeScenarioRunner {
 	return purgeScenarioRunner{
 		mode: "embedded",
@@ -193,4 +277,12 @@ func TestProxiedServerPurgeWispsPlaneRetention(t *testing.T) {
 	bd := buildEmbeddedBD(t)
 	p := newSharedProxiedProject(t, bd, "pwx")
 	runPurgeRetentionScenario(t, proxiedPurgeScenarioRunner(bd, p))
+}
+
+func TestProxiedServerPurgeProtectedLabels(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	p := newSharedProxiedProject(t, bd, "pwy")
+	runPurgeProtectedLabelScenario(t, proxiedPurgeScenarioRunner(bd, p))
 }

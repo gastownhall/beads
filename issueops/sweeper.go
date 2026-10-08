@@ -48,12 +48,20 @@ const (
 // of its closed rows, and whether to do it or only report it.
 //
 // IT IS NOT A FILTER-SHAPED READ REQUEST with a delete attached. The predicate
-// is FIXED at "closed rows of one tier" and the two fields below only narrow
-// it; there is no status, no assignee, no label and no free-text query,
-// because every one of those would be a way to spell a destructive selection
-// that no front door asks for and that a caller could get subtly wrong. What
-// this request can express is exactly what `bd purge` and `bd prune` expose,
-// and widening it is a decision rather than an omission to be filled in.
+// is FIXED at "closed rows of one tier" and the fields below only narrow it;
+// there is no status, no assignee and no free-text query, because every one of
+// those would be a way to spell a destructive selection that no front door
+// asks for and that a caller could get subtly wrong. What this request can
+// express is exactly what `bd purge` and `bd prune` expose, and widening it is
+// a decision rather than an omission to be filled in.
+//
+// THE LABEL FIELD IS NOT A COUNTEREXAMPLE TO THAT, and the direction is what
+// makes it safe: ProtectedLabels can only SUBTRACT rows from the deletion.
+// There is deliberately no label SELECTOR — no way to say "delete the rows
+// carrying this label" — because that would be exactly the spellable
+// destructive selection this paragraph refuses. A field that can only protect
+// fails toward keeping a row; a field that can select fails toward deleting
+// one.
 //
 // Implementations never mutate caller-owned request values: ClosedBefore is
 // read, never written through.
@@ -153,6 +161,28 @@ type SweepRequest struct {
 	// every protection, so it caps rows that would actually go. Zero means no
 	// cap; a negative value is ErrValidation.
 	Limit int
+	// ProtectedLabels skips candidates carrying ANY of these labels. Empty
+	// protects nothing, which is what every caller that does not opt in gets.
+	//
+	// IT IS A REQUEST FIELD RATHER THAN A FIXED RULE because which records are
+	// irreplaceable is the CALLER'S policy, not this package's. An
+	// orchestration layer that stores mail, escalations or any other
+	// write-once record as an ephemeral bead has no status it could set that
+	// would not lie about the record's state — an unread message is genuinely
+	// open — and open is exactly what the ephemeral tier exists to clear. A
+	// label is the only handle that survives that, and the set of labels that
+	// carries the meaning belongs to whoever mints the records.
+	//
+	// IT IS THE SAME PROTECTION `bd mol wisp gc` HONORS, and that is the point
+	// of it being here. The two commands delete the same rows — closed
+	// ephemeral beads — and `bd purge` protected only the pinned flag, so a
+	// workspace that configured the guard got it on one command and not on the
+	// other, with no warning from either.
+	//
+	// Matching is on the WHOLE label, exactly, after the normalization the
+	// caller applies; there is no prefix or glob form, because a destructive
+	// selection is not a place to be clever about matching.
+	ProtectedLabels []string
 	// DryRun reports what the sweep WOULD do and deletes nothing. The result
 	// is otherwise the same result — the same counts, the same skips, the same
 	// refusals — computed against the same snapshot the real sweep would have
@@ -165,9 +195,9 @@ type SweepRequest struct {
 // held back, so the buckets and SweepResult.Swept describe one candidate set.
 //
 // They are separate counters rather than one number because they mean
-// different things to the person reading them: Pinned and Referenced are
-// PROTECTIONS a user can override or re-express, and the other three are the
-// sweep declining to trust its own input.
+// different things to the person reading them: Pinned, Referenced and Labeled
+// are PROTECTIONS a user can override or re-express, and the other three are
+// the sweep declining to trust its own input.
 type SweepSkips struct {
 	// Pinned counts candidates protected by the pinned flag. Pinning is the
 	// workspace's own "never sweep this", and no request field overrides it —
@@ -180,6 +210,10 @@ type SweepSkips struct {
 	// LiveDependent counts candidates skipped by ProtectLiveDependents, under
 	// the same always-0-when-not-asked rule as Referenced.
 	LiveDependent int
+	// Labeled counts candidates skipped by ProtectedLabels. Like Referenced it
+	// is always 0 when nothing was asked for, so a 0 read without having set
+	// ProtectedLabels says nothing about whether protected rows exist.
+	Labeled int
 	// NotClosed, UnknownClosedAt and ClosedAtOrAfterCutoff count candidates
 	// the tier's own query returned and the sweep rechecked and rejected: a
 	// status that is not closed, a closed row with no closed_at stamp at all,
@@ -312,12 +346,17 @@ type Sweeper interface {
 	//
 	// THE ORDER THE NARROWING HAPPENS IN IS PART OF THE ANSWER, because the
 	// skip counters are counted along the way: the tier's closed rows, then
-	// IDPattern, then the pinned and closed_at rechecks, then the
-	// live-dependent protection, then the reference protection, then Limit
-	// (oldest-closed first). A pinned row
-	// excluded by the pattern is therefore NOT counted in Skipped.Pinned — it
-	// was never a candidate — and the counters describe the set the request
-	// actually reached.
+	// IDPattern, then the pinned and label protections, then the closed_at
+	// rechecks, then the live-dependent protection, then the reference
+	// protection, then Limit (oldest-closed first). A pinned row excluded by
+	// the pattern is therefore NOT counted in Skipped.Pinned — it was never a
+	// candidate — and the counters describe the set the request actually
+	// reached.
+	//
+	// THE TWO CHEAP PROTECTIONS COME BEFORE THE RECHECKS, which is the shape
+	// pinned already had: a protected row is reported as PROTECTED rather than
+	// as a defense firing, because that is the fact its owner needs. A row is
+	// counted in exactly one bucket.
 	//
 	// REFUSALS, all ErrValidation and all before anything is read:
 	//

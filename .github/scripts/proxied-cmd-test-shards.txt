@@ -261,6 +261,7 @@
 30 2 TestProxiedServerIfRevisionGuardAssign
 30 2 TestProxiedServerListComments
 30 2 TestProxiedServerPromote
+30 2 TestProxiedServerPurgeProtectedLabels
 30 2 TestProxiedServerTypesAgreeWithCreate
 
 30 3 TestProxiedServerDuplicates
