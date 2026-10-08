@@ -927,8 +927,9 @@ Required` requires them to have run remotely and passed.
 
     `tools/bazel/equivalence_allowlist.txt` holds only the two `cmd/bd`
     tests of plain `go test`'s own bd build fallback, which Bazel never
-    takes; `pr-preflight-platforms` runs them on every OS ("Exercise go
-    test's bd build fallback"). `TestBazelOnlySkipsAreAllowlisted` (under
+    takes; `pr-preflight-platforms` runs them on macOS and Windows
+    ("Exercise generated Git hook timeout process boundary and go test's bd
+    build fallback"). `TestBazelOnlySkipsAreAllowlisted` (under
     Bazel too) requires every top-level test with a `TEST_SRCDIR`- or
     `bazeltest.IsBazel()`-guarded `t.Skip` to have an allowlist `skip`
     entry, and no test anywhere to run part of its checks under `go test`

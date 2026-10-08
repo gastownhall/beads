@@ -481,7 +481,7 @@ func TestPRRunsGoTestsBazelSkips(t *testing.T) {
 	}
 	// The allowlist's remaining skip entries run in pr-preflight-platforms
 	// (every OS), each named in its go test selector.
-	fallback := pr.job(t, "pr-preflight-platforms").step(t, "Exercise go test's bd build fallback").Run
+	fallback := pr.job(t, "pr-preflight-platforms").step(t, "Exercise generated Git hook timeout process boundary and go test's bd build fallback").Run
 	for _, line := range strings.Split(readPolicyFile(t, root, "tools/bazel/equivalence_allowlist.txt"), "\n") {
 		body, _, _ := strings.Cut(line, "#")
 		f := strings.Fields(body)
