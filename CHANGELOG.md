@@ -219,6 +219,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Override it with `BEADS_INIT_GATE_TIMEOUT` (`2m`, `90`). Other exclusive
   operations keep their 5s wait.
 
+- **`bd rename` now rewrites the old ID in `close_reason` and in the renamed
+  issue's own text.** It rewrote references only in other issues' title,
+  description, design, notes and acceptance criteria, so a closed issue's
+  "duplicate of <old>" reason and the renamed issue's self-references kept the
+  dead ID. Renaming a parent also no longer rewrites a dotted child ID such as
+  `<old>.1` in text. Comments and short-form IDs are still not rewritten
+  (#7040).
+
 - **A proxied-server command against an unreachable external Dolt upstream
   now fails within about a second with a clear error instead of stalling
   ~20-30s.** The local db proxy stayed up, so the client only saw a bare
