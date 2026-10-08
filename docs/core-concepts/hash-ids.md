@@ -137,11 +137,12 @@ bd comment a1b2 "text"     # refused — comment writes require the full id
 bd comment bd-a1b2c3d4 "text"   # OK — use the full id from `bd show`
 ```
 
-A reserved word (`list`, `add`, `rm`, `delete`) as the id positional is
-refused the same way, for a related reason: `bd comment list "text"` almost
+A reserved word (`list`, `add`, `show`, `rm`, `delete`) as the id positional
+is refused the same way, for a related reason: `bd comment list "text"` almost
 always means the caller confused the singular shorthand with the plural `bd
-comments list`/`bd comments add <id> "text"`, not that an issue is literally
-named `list`.
+comments list`/`bd comments add <id> "text"`, and `bd comment show <id>` means
+the caller wanted to read the comments (`bd comments <id>`), not that an issue
+is literally named `list` or `show`.
 
 ## Migration from Sequential IDs
 

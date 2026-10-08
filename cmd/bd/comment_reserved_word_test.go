@@ -9,7 +9,7 @@ import (
 // <id>", a typo for "bd comments list", must be rejected before any id
 // resolution is attempted — not silently treat "list" as the id.
 func TestCheckCommentIDNotReservedWord(t *testing.T) {
-	reserved := []string{"list", "add", "rm", "delete"}
+	reserved := []string{"list", "add", "show", "rm", "delete"}
 	for _, word := range reserved {
 		t.Run("rejects reserved word "+word, func(t *testing.T) {
 			var err error
@@ -30,6 +30,7 @@ func TestCheckCommentIDNotReservedWord(t *testing.T) {
 		"a3f8e9",
 		"ga-wisp-list3t0", // full id containing "list" as a substring must NOT be rejected
 		"listicle-42",     // starts with "list" but is not the literal reserved word
+		"ga-wisp-show2k9", // full id containing "show" as a substring must NOT be rejected
 		"LIST",            // reserved-word check is intentionally case-sensitive: real ids are lowercase hashes
 	}
 	for _, id := range happyPath {

@@ -173,6 +173,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ones cannot fork.
 
 ### Fixed
+- **`bd comment show <id>` is refused instead of treating `show` as the
+  issue id.** A caller who meant to read the comments typed the singular
+  `comment` with a `show` verb; bd took `show` as the id and `<id>` as the
+  comment text, so the command either failed with a resolver error that never
+  names `bd comments`, or posted the id as a comment on an issue whose id is
+  exactly `<prefix>-show`. `show` joins `list`, `add`, `rm` and `delete` as a
+  word the id positional of `bd comment` and `bd comments add` refuses before
+  any lookup, on both the embedded and proxied-server paths, with a hint
+  toward `bd comments <id>` and `bd show <id>` (`bd note` already refuses it).
+
 - **PRs based on `hotfix/**` branches now run full CI, not just
   cross-version historical smokes and triage labeling.** `pr.yml`,
   `pr-risk.yml`, `conformance.yml`, `cross-version-smoke.yml` and
