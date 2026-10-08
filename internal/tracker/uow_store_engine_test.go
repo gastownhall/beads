@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -22,6 +23,9 @@ type engineUOWState struct {
 	// uows counts units of work handed out by the provider, so a test can pin
 	// how many read transactions one logical lookup is allowed to span.
 	uows int
+	// creates records every CreateIssueParams the domain create received, so a
+	// test can pin what the adapter passes beyond the issue itself.
+	creates []domain.CreateIssueParams
 }
 
 type engineIssueUC struct {
@@ -75,6 +79,7 @@ func (u *engineIssueUC) GetIssue(_ context.Context, id string) (*types.Issue, er
 	return u.s.issues[id], nil
 }
 func (u *engineIssueUC) CreateIssue(_ context.Context, p domain.CreateIssueParams, _ string) (domain.CreateIssueResult, error) {
+	u.s.creates = append(u.s.creates, p)
 	u.s.issues[p.Issue.ID] = p.Issue
 	return domain.CreateIssueResult{Issue: p.Issue}, nil
 }
@@ -280,6 +285,56 @@ func TestUOWStoreGetIssueByExternalRefUsesOneReadTransaction(t *testing.T) {
 				t.Fatalf("both plane reads must share one unit of work: opened %d, want 1", state.uows)
 			}
 		})
+	}
+}
+
+// TestUOWStorePullCreatePassesCommentThread pins the proxied create to the
+// direct store's: a pull that creates a commented issue must hand the thread
+// to the domain create, which persists comments only from
+// CreateIssueParams.Comments. The proxied store has no CommentReader, so a
+// later pull never reports the thread pending and a thread dropped here is
+// never recovered.
+//
+// It asserts on the recorded params rather than the stored issue: the issue
+// the engine creates already carries the thread, so it would pass either way.
+func TestUOWStorePullCreatePassesCommentThread(t *testing.T) {
+	at := time.Date(2026, 2, 2, 12, 0, 0, 0, time.UTC)
+	tr := newMockTracker("test")
+	tr.issues = []TrackerIssue{{ID: "ext-1", Identifier: "1", URL: "https://test.test/1", Title: "remote"}}
+	tr.fieldMapper = &mockMapper{issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+		return &IssueConversion{Issue: &types.Issue{
+			Title:     ti.Title,
+			Priority:  2,
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+			Comments: []*types.Comment{
+				{Author: "alice", Text: "first", CreatedAt: at},
+				{Author: "bob", Text: "second", CreatedAt: at.Add(time.Hour)},
+			},
+		}}
+	}}
+	state := &engineUOWState{issues: map[string]*types.Issue{}, configs: map[string]string{"issue_prefix": "bd"}}
+	engine := NewEngine(tr, NewUOWStore(&engineUOWProvider{state: state}), "test-actor")
+
+	result, err := engine.Sync(context.Background(), SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.Stats.Created != 1 || len(state.creates) != 1 {
+		t.Fatalf("Stats.Created = %d, domain creates = %d, want 1 and 1", result.Stats.Created, len(state.creates))
+	}
+
+	type tuple struct {
+		Author, Text string
+		CreatedAt    time.Time
+	}
+	var got []tuple
+	for _, c := range state.creates[0].Comments {
+		got = append(got, tuple{c.Author, c.Text, c.CreatedAt})
+	}
+	want := []tuple{{"alice", "first", at}, {"bob", "second", at.Add(time.Hour)}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("CreateIssueParams.Comments = %v, want %v (the domain create persists no other copy of the thread)", got, want)
 	}
 }
 

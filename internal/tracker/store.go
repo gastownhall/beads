@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -35,6 +36,32 @@ type IssueUpdater interface {
 // relink/conflict detection.
 type ExternalRefHistoryStore interface {
 	PreviousExternalRef(context.Context, string, time.Time) (string, bool, error)
+}
+
+// PulledComment is one remote comment the pull path merges into an issue's
+// local thread. It carries only the tuple the import dedups on, already
+// resolved: the engine has applied its zero-timestamp policy by the time a
+// comment reaches this type.
+type PulledComment struct {
+	Author    string
+	Text      string
+	CreatedAt time.Time
+}
+
+// CommentReader is the optional capability for reading an issue's local
+// comment thread. Pull uses it to decide whether a remote thread still holds
+// comments the local copy lacks.
+type CommentReader interface {
+	GetIssueComments(context.Context, string) ([]*types.Comment, error)
+}
+
+// CommentImporter is the optional capability for applying a pulled issue
+// update and merging the remote comment thread in the same transaction, so a
+// failed comment import cannot leave the issue updated without its thread.
+// Stores that cannot offer that do not implement it, and the pull path falls
+// back to IssueUpdater and reports the comments it could not import.
+type CommentImporter interface {
+	ApplyIssueUpdateWithComments(ctx context.Context, id string, updates map[string]interface{}, labels []string, actor string, comments []PulledComment) error
 }
 
 // NewStore adapts a classic storage.Storage to the tracker contract. Values
@@ -76,8 +103,20 @@ type directStore struct{ storage.Storage }
 
 var _ Store = (*directStore)(nil)
 var _ IssueUpdater = (*directStore)(nil)
+var _ CommentImporter = (*directStore)(nil)
 
 func (s *directStore) ApplyIssueUpdate(ctx context.Context, id string, updates map[string]interface{}, labels []string, actor string) error {
+	return s.ApplyIssueUpdateWithComments(ctx, id, updates, labels, actor, nil)
+}
+
+// ApplyIssueUpdateWithComments is ApplyIssueUpdate plus the pulled comment
+// thread, merged inside the same lifecycle transaction. With no comments it is
+// exactly the update-then-labels path, so the plain update route is unchanged.
+//
+// Without a lifecycle store the comments are dropped along with the labels,
+// which is the degradation NewStore already documents for that case; the
+// engine reports what it could not import.
+func (s *directStore) ApplyIssueUpdateWithComments(ctx context.Context, id string, updates map[string]interface{}, labels []string, actor string, comments []PulledComment) error {
 	dolt, ok := s.Storage.(storage.IssueLifecycleStore)
 	if !ok {
 		return s.Storage.UpdateIssue(ctx, id, updates, actor)
@@ -86,15 +125,25 @@ func (s *directStore) ApplyIssueUpdate(ctx context.Context, id string, updates m
 		if err := tx.UpdateIssue(ctx, id, updates, actor); err != nil {
 			return err
 		}
-		if labels == nil {
-			return nil
+		if labels != nil {
+			// syncIssueLabels, not a local copy: it normalizes both label sets
+			// (trim + drop empty), which is the semantics the pull path had before
+			// this seam moved behind ApplyIssueUpdate. Comparing raw strings makes
+			// a whitespace-only difference churn remove+add on every sync and lets
+			// an empty label reach AddLabel.
+			if err := syncIssueLabels(ctx, tx, id, labels, actor); err != nil {
+				return err
+			}
 		}
-		// syncIssueLabels, not a local copy: it normalizes both label sets
-		// (trim + drop empty), which is the semantics the pull path had before
-		// this seam moved behind ApplyIssueUpdate. Comparing raw strings makes
-		// a whitespace-only difference churn remove+add on every sync and lets
-		// an empty label reach AddLabel.
-		return syncIssueLabels(ctx, tx, id, labels, actor)
+		// ImportIssueComment derives the row id from (author, text, created_at),
+		// collapsing onto an identical existing row, so repeated pulls only add
+		// genuinely new comments.
+		for _, c := range comments {
+			if _, err := tx.ImportIssueComment(ctx, id, c.Author, c.Text, c.CreatedAt); err != nil {
+				return fmt.Errorf("importing comment by %s: %w", c.Author, err)
+			}
+		}
+		return nil
 	})
 }
 
