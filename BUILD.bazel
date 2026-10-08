@@ -345,6 +345,7 @@ filegroup(
         "//internal/storage/sqlclass:repo_files",
         "//internal/storage/sqlcount:repo_files",
         "//internal/storage/storagecontract:repo_files",
+        "//internal/storage/unsupportedgen:repo_files",
         "//internal/storage/uow:repo_files",
         "//internal/storage/versioncontrolops:repo_files",
         "//internal/telemetry:repo_files",
