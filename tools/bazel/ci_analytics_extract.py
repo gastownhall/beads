@@ -60,7 +60,18 @@ import time
 
 FORMAT = "ci-analytics-summary"
 SCHEMA_VERSION = 1
-EXTRACTOR_VERSION = "1.0.0"
+# Bumped alongside the signed-duration fix below, so S4 can tell a
+# fixed-up artifact (no more 2^63/2^64-scale decoy durations from a
+# negative queue/exec/setup/upload time decoded as unsigned) from one
+# produced by the earlier, buggy extractor.
+EXTRACTOR_VERSION = "1.1.0"
+
+# A per-spawn duration (Duration.seconds*1000 + Duration.nanos//1e6, after
+# signed decoding) above this is treated as corrupt, not a real build: a
+# single spawn cannot legitimately run for more than a day. Also the upper
+# clamp for the other duration/int fields this file decodes (see
+# _clamp_duration_ms below).
+MAX_SANE_DURATION_MS = 24 * 60 * 60 * 1000
 
 MAX_INVOCATIONS = 8
 MAX_MNEMONICS = 200
@@ -368,17 +379,56 @@ def fields(b, deadline=None):
         yield f, t, v
 
 
+def _to_signed64(v):
+    """varint()/fields() decode a wire-type-0 field's raw bits as an
+    unsigned 64-bit value; protobuf's int64 (and int32 -- see
+    _to_signed32) are the two's-complement bit pattern of a *signed*
+    value, re-encoded with the same unsigned-varint algorithm. A real
+    negative int64 (e.g. a Duration whose seconds/nanos went negative from
+    clock skew between the NativeLink scheduler and a worker) is written
+    as a 10-byte varint of its 64-bit two's complement form, which this
+    recovers: values with the top bit set (>= 2^63) are negative."""
+    return v - (1 << 64) if v >= (1 << 63) else v
+
+
+def _to_signed32(v):
+    """Same, for an int32 field (Duration.nanos): proto encoders sign-
+    extend a negative int32 to 64 bits before varint-encoding it, so
+    _to_signed64(v) alone already recovers the right numeric value for a
+    well-formed input. This additionally truncates to the low 32 bits
+    first, so a corrupt/hostile encoder that puts a value outside the
+    int32 range on an int32-typed field degrades to *some* signed 32-bit
+    value instead of silently keeping 64 bits of it."""
+    v &= 0xFFFFFFFF
+    return v - (1 << 32) if v >= (1 << 31) else v
+
+
+def _clamp_duration_ms(ms):
+    """Clamps a decoded duration to [0, MAX_SANE_DURATION_MS]. A negative
+    duration -- the whole point of this fix: clock skew between the
+    NativeLink scheduler and a worker can make a remote spawn's queue time
+    read slightly negative, which _to_signed64() now decodes correctly
+    instead of as a near-2^63 positive decoy -- counts as 0, and so does
+    anything implausibly large (not a real build, so probably corrupt).
+    Applied per spawn/per field, before any sum: one poisoned spawn can
+    never poison a mnemonic's or label's total."""
+    if not isinstance(ms, (int, float)) or not math.isfinite(ms) or ms < 0 or ms > MAX_SANE_DURATION_MS:
+        return 0
+    return ms
+
+
 def dur_ms(v, deadline=None):
-    """Decodes a Duration submessage's bytes (fields 1 seconds, 2 nanos)."""
+    """Decodes a Duration submessage's bytes (fields 1 seconds, 2 nanos) to
+    a signed-then-clamped millisecond count."""
     seconds = nanos = 0
     for f, t, val in fields(v, deadline):
         if t != 0:
             continue
         if f == 1:
-            seconds = val
+            seconds = _to_signed64(val)
         elif f == 2:
-            nanos = val
-    return seconds * 1000 + nanos // 1_000_000
+            nanos = _to_signed32(val)
+    return _clamp_duration_ms(seconds * 1000 + nanos // 1_000_000)
 
 
 def spawns(raw, deadline):
@@ -425,7 +475,12 @@ def spawns(raw, deadline):
                             if mf in SPAWN_METRIC and mt == 2 and isinstance(mv, bytes):
                                 s["m"][SPAWN_METRIC[mf]] = dur_ms(mv, deadline)
                             elif mf == 11 and mt == 0:
-                                s["m"]["input_bytes"] = mv
+                                # Also int64; not a duration, but still
+                                # decoded as unsigned bits -- a negative
+                                # value here is nonsensical, so clamp to 0
+                                # rather than letting it decode to a huge
+                                # positive "byte count" either.
+                                s["m"]["input_bytes"] = max(0, _to_signed64(mv))
                 yield inv, s
 
 
@@ -858,8 +913,14 @@ def build_action_data(events):
                 )
                 d["bep_executed"] += as_int(ad.get("actionsExecuted"))
                 d["bep_created"] += as_int(ad.get("actionsCreated"))
-                d["user_ms"] += as_duration_ms(ad.get("userTime")) or 0
-                d["system_ms"] += as_duration_ms(ad.get("systemTime")) or 0
+                # BEP's own Duration strings ("3.14s") aren't subject to the
+                # unsigned-varint bug (DURATION_RE allows a leading "-", so
+                # a legitimately negative one would already parse), but the
+                # same sane-duration clamp is applied here too, for the same
+                # reason: one corrupt/adversarial value should never poison
+                # this mnemonic's running total.
+                d["user_ms"] += _clamp_duration_ms(as_duration_ms(ad.get("userTime")) or 0)
+                d["system_ms"] += _clamp_duration_ms(as_duration_ms(ad.get("systemTime")) or 0)
         except Exception:
             continue
     return data
