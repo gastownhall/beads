@@ -358,11 +358,13 @@ func TestProxiedServerCloseB(t *testing.T) {
 	})
 }
 
-// TestProxiedServerClose3 is the second half of TestProxiedServerClose,
-// split off (as TestProxiedServerClose2 was before it) so that no single
-// top-level suite carries 23 bd-init subtests: that one parent alone cost
-// ~2060 slot-seconds under -test.parallel=4 and pushed its 15-shard legacy
-// shard past go test's 15m timeout on every run (gastownhall/beads#7151).
+// TestProxiedServerClose3 is the middle of the three parents
+// TestProxiedServerClose was split into (Close, Close3, Close4), split off
+// (as TestProxiedServerClose2 was before it) so that no single top-level
+// suite carries 23 bd-init subtests: that one parent alone cost ~2060
+// slot-seconds under -test.parallel=4 and pushed its 15-shard legacy shard
+// past go test's 15m timeout on every run (gastownhall/beads#7151). Its
+// own second half is TestProxiedServerClose4.
 func TestProxiedServerClose3(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()

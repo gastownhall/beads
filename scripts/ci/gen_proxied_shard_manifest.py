@@ -222,7 +222,9 @@ def render(total, shards, weights):
         out.append('# TestProxiedServerListComments and')
         out.append('# TestProxiedServerServeRefusesAStreamOnADisabledJournal; and for')
         out.append('# TestProxiedServerOutageReconnectAcceptanceMatrix, pinned to shard 1')
-        out.append('# instead of hashing onto shard 14).')
+        out.append('# instead of hashing onto shard 14; and for TestProxiedServerClose3')
+        out.append('# and TestProxiedServerClose4, the parents #7173 split off')
+        out.append('# TestProxiedServerClose, pinned to shards 13 and 2).')
     else:
         out.append(f'# {total}-shard split for the Bazel-only proxied-server tier')
         out.append('# (bazel-proxied in .github/workflows/bazel.yml), bin-packed')

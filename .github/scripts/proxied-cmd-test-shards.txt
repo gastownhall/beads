@@ -34,6 +34,12 @@
 # have no socat, so today it skips here; the pin keeps shard 14 safe if
 # socat is ever installed.
 #
+# TestProxiedServerClose3 (shard 13) and TestProxiedServerClose4 (shard 2)
+# are the two parents gastownhall/beads#7173 split off TestProxiedServerClose
+# to pull shard 5 (15m+) back under the timeout, pinned onto the two
+# lightest shards of that PR's own run (6m51s and 7m57s) rather than
+# hashed; the lines are listed under their shards like every other pin.
+#
 # This file is generated: notes added here are erased by the next
 # regeneration. Add them to the generator instead. Known blind spots
 # of the cost proxy (it counts inits, not the work done per init):
@@ -51,7 +57,6 @@
 #   a doc comment.
 
 15 1 TestProxiedServerBlocked
-15 13 TestProxiedServerClose3
 15 1 TestProxiedServerCompactDolt
 15 1 TestProxiedServerCreate
 15 1 TestProxiedServerDep2
@@ -64,6 +69,7 @@
 15 1 TestProxiedServerServeRefusesAStreamOnADisabledJournal
 15 1 TestProxiedServerUpdateConcurrentClaim
 
+15 2 TestProxiedServerClose4
 15 2 TestProxiedServerCompactHistory
 15 2 TestProxiedServerCreate2
 15 2 TestProxiedServerDepListSingleIDWarnsOnDroppedExternalEdge
@@ -119,7 +125,6 @@
 
 15 7 TestProxiedServerAssign
 15 7 TestProxiedServerBackupRefusedOnExternalTopology
-15 2 TestProxiedServerClose4
 15 7 TestProxiedServerCount
 15 7 TestProxiedServerGC
 15 7 TestProxiedServerList
@@ -185,6 +190,7 @@
 15 12 TestProxiedServerTypes
 15 12 TestProxiedServerUpdateClosePolicy
 
+15 13 TestProxiedServerClose3
 15 13 TestProxiedServerDeleteConcurrent
 15 13 TestProxiedServerInfo
 15 13 TestProxiedServerMolSquash
