@@ -166,10 +166,14 @@ const statementCountToleranceDolt = 2
 // Re-pinned for the batch-create round-trip work (was 7008 / 14014 / 846);
 // see pinnedEmbeddedStatementCounts in internal/storage/embeddeddolt for the
 // per-change breakdown. The two backends now agree to within the tolerance.
+//
+// Re-pinned for exclusive label namespaces (was 6396 / 12791 / 786): +1
+// statement per create item, the labels.exclusive-prefixes read in
+// NewBatchContext; see pinnedEmbeddedStatementCounts for the breakdown.
 var pinnedDoltStatementCounts = map[string]int64{
-	"356 (mol 1x)": 6396,
-	"712 (mol 2x)": 12791,
-	"40 (classic)": 786,
+	"356 (mol 1x)": 6498,
+	"712 (mol 2x)": 12995,
+	"40 (classic)": 796,
 }
 
 // BenchmarkLargeBatchApply_Dolt is gated by setupBenchStore's own

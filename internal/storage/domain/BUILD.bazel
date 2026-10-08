@@ -27,6 +27,7 @@ go_library(
         "//internal/config",
         "//internal/configfile",
         "//internal/idgen",
+        "//internal/labelns",
         "//internal/storage",
         "//internal/storage/dberrors",
         "//internal/storage/doltutil",

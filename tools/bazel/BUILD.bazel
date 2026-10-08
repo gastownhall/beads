@@ -204,6 +204,7 @@ release_cross_build(
         "//internal/httpclient:httpclient",
         "//internal/idgen:idgen",
         "//internal/jira:jira",
+        "//internal/labelns:labelns",
         "//internal/linear:linear",
         "//internal/lockfile:lockfile",
         "//internal/memoryapi:memoryapi",

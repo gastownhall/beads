@@ -55,6 +55,16 @@ type SkippedDependency struct {
 	Reason      string
 }
 
+// ExclusiveLabelConflict reports one imported issue that carries more than
+// one label in an exclusive namespace (labels.exclusive-prefixes). Import
+// replays history, so the batch keeps the labels as written; bd doctor
+// reports them for cleanup.
+type ExclusiveLabelConflict struct {
+	IssueID string
+	Prefix  string
+	Labels  []string
+}
+
 // ImportBatchResult reports what one import batch landed.
 type ImportBatchResult struct {
 	// Created counts the rows the batch wrote — inserts and rewrites alike —
@@ -67,6 +77,9 @@ type ImportBatchResult struct {
 	StaleRejectedIDs []string
 	// SkippedDependencies lists the edges dropped by the batch, deduplicated.
 	SkippedDependencies []SkippedDependency
+	// ExclusiveLabelConflicts lists the batch's exclusive-namespace
+	// violations, deduplicated. Their labels landed as written.
+	ExclusiveLabelConflicts []ExclusiveLabelConflict
 	// PrefixSynced reports that the batch wrote the stored issue_prefix to
 	// SyncIssuePrefix — either seeding it, when the config table carried no
 	// prefix at all, or rewriting a stored value that disagreed.

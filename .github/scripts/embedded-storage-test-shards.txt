@@ -152,6 +152,7 @@
 15 1 TestEmbeddedRelationsAnswersAWispTargetInTheOutDirection
 15 1 TestEmbeddedRelationsLeavesAnExternalTargetOutOfTheAnswer
 15 1 TestEmbeddedRoleFixtureKitHooksAreUsable
+15 1 TestImportJSONLData_KeepsExclusiveLabelViolations
 15 1 TestLifecycleCreateContract
 15 1 TestMergeWithStrategy_OursKeepsLocal
 
@@ -537,6 +538,7 @@
 15 15 TestEmbeddedTransactionStandaloneWispLifecyclePersistsWithoutDoltCommit
 15 15 TestEventsJournalPruneNeverSplitsASkewedPair
 15 15 TestEventsJournal_ActorMatrixOnEmbedded
+15 15 TestExclusiveLabels_CreateAndRename
 15 15 TestGetIssueCommentsPageEmbedded
 15 15 TestGetReadyWorkIncludeEphemeralExcludesNonReadyWisps
 15 15 TestIgnoredCursorHealIsIdempotent

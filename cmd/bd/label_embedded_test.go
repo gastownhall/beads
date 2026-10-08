@@ -519,6 +519,31 @@ func TestEmbeddedLabelEditReports(t *testing.T) {
 		}
 	})
 
+	// --replace swaps a label out of an exclusive namespace (bd-7u5ki). The
+	// eviction is a real removal, so the report names it next to the add
+	// rather than letting the old label vanish unmentioned.
+	t.Run("label_add_replace_reports_eviction", func(t *testing.T) {
+		bdRunOK(t, bd, dir, "config", "set", "labels.exclusive-prefixes", "tier:")
+		t.Cleanup(func() { bdRunOK(t, bd, dir, "config", "unset", "labels.exclusive-prefixes") })
+		issue := bdCreate(t, bd, dir, "Replace tier", "--type", "task", "--label", "tier:fable", "--label", "area:x")
+
+		out := bdLabel(t, bd, dir, "add", issue.ID, "tier:opus", "--replace")
+		if !strings.Contains(out, "Added label 'tier:opus' to "+issue.ID) || !strings.Contains(out, "Removed label 'tier:fable' from "+issue.ID) {
+			t.Errorf("replace text = %s", out)
+		}
+		rows := bdLabelEditJSON(t, bd, dir, "add", issue.ID, "tier:sonnet", "--replace")
+		got := map[interface{}]interface{}{}
+		for _, r := range rows {
+			got[r["label"]] = r["status"]
+		}
+		if len(rows) != 2 || got["tier:sonnet"] != "added" || got["tier:opus"] != "removed" {
+			t.Errorf("replace JSON = %v, want tier:sonnet=added tier:opus=removed", rows)
+		}
+		if labels := bdLabelListJSON(t, bd, dir, issue.ID); strings.Join(labels, ",") != "area:x,tier:sonnet" {
+			t.Errorf("labels after replace = %v, want [area:x tier:sonnet]", labels)
+		}
+	})
+
 	// One label, two issues, only one of which has it: the divergence is
 	// BETWEEN the issues, so this pins the per-issue derivation the way
 	// label_edit_mixed_reports_each_label pins the per-label one. The outcome

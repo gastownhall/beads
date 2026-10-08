@@ -61,6 +61,7 @@ go_test(
         "dependency_usecase_metadata_test.go",
         "dependency_usecase_test.go",
         "events_test.go",
+        "exclusive_labels_test.go",
         "field_length_test.go",
         "is_blocked_test.go",
         "issue_as_of_test.go",
@@ -105,6 +106,7 @@ go_test(
     data = [":go_srcs"],
     embed = [":db"],
     deps = [
+        "//internal/labelns",
         "//internal/storage",
         "//internal/storage/dberrors",
         "//internal/storage/depid",

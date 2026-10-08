@@ -443,6 +443,46 @@ func TestProxiedServerLabel(t *testing.T) {
 		}
 	})
 
+	// labels.exclusive-prefixes (bd-7u5ki) holds on this route too: the
+	// server-side label writes refuse what the direct route's issueops guard
+	// refuses.
+	t.Run("exclusive_namespace_guard", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ex")
+		bdProxiedConfig(t, bd, p.dir, "set", "labels.exclusive-prefixes", "tier:")
+		issue := bdProxiedCreate(t, bd, p.dir, "Exclusive target", "-l", "tier:fable")
+
+		out := bdProxiedLabelFail(t, bd, p.dir, "add", issue.ID, "tier:opus")
+		if !strings.Contains(out, `namespace "tier:" is exclusive`) {
+			t.Errorf("expected the exclusive-namespace refusal, got:\n%s", out)
+		}
+		if got := bdProxiedLabelListJSON(t, bd, p.dir, issue.ID); len(got) != 1 || got[0] != "tier:fable" {
+			t.Fatalf("labels after refused add = %v, want [tier:fable]", got)
+		}
+
+		out = bdProxiedLabel(t, bd, p.dir, "add", issue.ID, "tier:opus", "--replace")
+		if !strings.Contains(out, "Removed label 'tier:fable'") {
+			t.Errorf("expected --replace to report the eviction, got:\n%s", out)
+		}
+		if got := bdProxiedLabelListJSON(t, bd, p.dir, issue.ID); len(got) != 1 || got[0] != "tier:opus" {
+			t.Fatalf("labels after --replace = %v, want [tier:opus]", got)
+		}
+
+		bdProxiedLabel(t, bd, p.dir, "add", issue.ID, "legacy")
+		out = bdProxiedLabelFail(t, bd, p.dir, "rename", "legacy", "tier:sonnet")
+		if !strings.Contains(out, `already has "tier:opus"`) {
+			t.Errorf("expected the rename refusal to name the held label, got:\n%s", out)
+		}
+		if got := bdProxiedLabelListJSON(t, bd, p.dir, issue.ID); len(got) != 2 || got[0] != "legacy" || got[1] != "tier:opus" {
+			t.Fatalf("labels after refused rename = %v, want [legacy tier:opus]", got)
+		}
+
+		child := bdProxiedCreate(t, bd, p.dir, "Child overriding tier", "--parent", issue.ID, "-l", "tier:haiku")
+		if got := bdProxiedLabelListJSON(t, bd, p.dir, child.ID); len(got) != 2 || got[0] != "legacy" || got[1] != "tier:haiku" {
+			t.Fatalf("child labels = %v, want [legacy tier:haiku] (explicit tier:haiku beats inherited tier:opus)", got)
+		}
+	})
+
 	t.Run("wisp_label_routes_to_wisp_labels", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "lw")

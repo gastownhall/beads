@@ -297,6 +297,7 @@ filegroup(
         "//internal/httpclient/wire:repo_files",
         "//internal/idgen:repo_files",
         "//internal/jira:repo_files",
+        "//internal/labelns:repo_files",
         "//internal/linear:repo_files",
         "//internal/lockfile:repo_files",
         "//internal/memoryapi:repo_files",

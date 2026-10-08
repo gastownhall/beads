@@ -3,6 +3,8 @@ package uow
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
 	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
@@ -89,10 +91,26 @@ func (o *importer) ImportBatch(ctx context.Context, request publicops.ImportBatc
 			}
 			staleRejected := make(map[string]struct{})
 			skippedSeen := make(map[string]struct{})
+			conflictSeen := make(map[string]struct{})
 			opts := storage.BatchCreateOptions{
 				SkipPrefixValidation:           request.SkipPrefixValidation,
 				RejectStaleUpserts:             !request.AllowStale,
 				SkipDependencyValidationErrors: true,
+				// Replays existing data: exclusive-label violations warn via bd
+				// doctor instead of failing the replay (bd-7u5ki).
+				ExclusiveLabelConflictWarn: true,
+				OnExclusiveLabelConflict: func(issueID, prefix string, labels []string) {
+					key := issueID + "\x00" + prefix + "\x00" + strings.Join(labels, "\x00")
+					if _, ok := conflictSeen[key]; ok {
+						return
+					}
+					conflictSeen[key] = struct{}{}
+					result.ExclusiveLabelConflicts = append(result.ExclusiveLabelConflicts, publicops.ExclusiveLabelConflict{
+						IssueID: issueID,
+						Prefix:  prefix,
+						Labels:  slices.Clone(labels),
+					})
+				},
 				OnSkippedDependency: func(issueID, dependsOnID, reason string) {
 					key := issueID + "\x00" + dependsOnID + "\x00" + reason
 					if _, ok := skippedSeen[key]; ok {

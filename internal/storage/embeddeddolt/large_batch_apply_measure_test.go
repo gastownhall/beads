@@ -215,7 +215,7 @@ const large712ShapeName = "712 (mol 2x)"
 // The 712 (mol 2x) shape alone still measures ~260-300s: it is a single
 // pinned statement-count assertion over one indivisible ApplyBatchInTx
 // transaction (no internal sub-cases to split further), a genuine, CPU-bound
-// cost: 12790 real SQL statement round-trips through the race-instrumented
+// cost: 12994 real SQL statement round-trips through the race-instrumented
 // in-process Dolt engine. It is skipped under -race below, following the
 // exact precedent TestLargeBatchApplyWallClock_Embedded set for its
 // 1000-item shape: the cost here is race-instrumentation overhead on the
@@ -224,7 +224,7 @@ const large712ShapeName = "712 (mol 2x)"
 // real pass/fail assertion (the pinned Total() above), so skipping it under
 // race moves this regression check to the non-race embedded variant — not a
 // weakening of the assertion itself. //internal/storage/embeddeddolt:embeddeddolt_batch_apply_nonrace_test
-// (the Bazel embedded tier) selects this test, so the full 12790-statement
+// (the Bazel embedded tier) selects this test, so the full 12994-statement
 // pinned baseline still runs, non-race.
 func runLargeBatchApplyStatementCountsShape(t *testing.T, shapeName string) {
 	skipUnlessEmbeddedDolt(t)
@@ -419,10 +419,17 @@ func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 //
 // Net: 356 -613 (incl. the documented 1-statement jitter), 712 -1224,
 // classic -60.
+//
+// Re-pinned for exclusive label namespaces (bd-7u5ki; was 6396 / 12790 /
+// 786): NewBatchContext also reads labels.exclusive-prefixes, and
+// ExecuteCreate builds one BatchContext per create item, so +1 statement per
+// create (356: +102, 712: +204, classic: +10). Nothing else in these plans
+// reads the key: no item adds a label, so addLabelInTx's guard read never
+// runs here.
 var pinnedEmbeddedStatementCounts = map[string]int64{
-	"356 (mol 1x)":    6396,
-	large712ShapeName: 12790,
-	"40 (classic)":    786,
+	"356 (mol 1x)":    6498,
+	large712ShapeName: 12994,
+	"40 (classic)":    796,
 }
 
 // BenchmarkLargeBatchApply_Embedded benchmarks issueops.ApplyBatchInTx on

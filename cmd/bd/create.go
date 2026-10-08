@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/labelns"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/routing"
@@ -458,6 +459,12 @@ var createCmd = &cobra.Command{
 			}
 		}
 
+		// The parent was read from the store the create writes to, so its
+		// exclusive namespaces are the ones that apply.
+		inheritedLabels, err = resolveInheritedLabels(rootCtx, parentLookupStore, labels, inheritedLabels, parentID)
+		if err != nil {
+			return HandleError("%v", err)
+		}
 		labels = mergeCreateLabels(labels, inheritedLabels)
 
 		if dryRun {
@@ -812,6 +819,26 @@ func buildCreateIssue(params createIssueParams) *types.Issue {
 		DeferUntil:         params.DeferUntil,
 		Metadata:           params.Metadata,
 	}
+}
+
+// resolveInheritedLabels settles the labels a create inherits from parentID
+// against the target store's exclusive label namespaces (bd-7u5ki): an
+// explicit label wins over an inherited one in its namespace, and a collision
+// among the explicit or among the inherited labels is refused with an error
+// saying which (see labelns.ResolveCreateLabels). bd create, bd q, and the
+// create form share it so every direct front door settles a child's labels
+// the same way the proxied server does. A config read error is returned, not
+// read as "no namespaces": that would skip the drop and leave the store's own
+// guard to refuse the create, naming labels nobody typed.
+func resolveInheritedLabels(ctx context.Context, s storage.DoltStorage, explicit, inherited []string, parentID string) ([]string, error) {
+	if s == nil || len(explicit)+len(inherited) < 2 {
+		return inherited, nil
+	}
+	raw, err := s.GetConfig(ctx, labelns.ConfigKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read %s: %w", labelns.ConfigKey, err)
+	}
+	return labelns.ResolveCreateLabels(labelns.ParsePrefixes(raw), explicit, inherited, parentID)
 }
 
 func mergeCreateLabels(labels, inheritedLabels []string) []string {

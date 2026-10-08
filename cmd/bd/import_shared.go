@@ -98,6 +98,11 @@ type ImportResult struct {
 	// row for these (second-granularity timestamp ties, bd-hj85c); their
 	// aux data still merges.
 	TieKeptLocalIDs []string
+	// ExclusiveLabelConflicts lists issues that violate a configured
+	// exclusive label namespace (labels.exclusive-prefixes, bd-7u5ki).
+	// Import replays history, so violations warn instead of failing and the
+	// labels are kept as written; bd doctor reports them for cleanup.
+	ExclusiveLabelConflicts []string
 }
 
 // ImportChange describes how an import row modified an existing local issue.
@@ -174,6 +179,8 @@ func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, 
 	// (local update committed between the pre-filter read and the batch
 	// write). The transaction may retry, so dedup by ID.
 	staleRejectedSet := make(map[string]struct{})
+	var exclusiveLabelConflicts []string
+	exclusiveLabelConflictSet := make(map[string]struct{})
 	actor := getActorWithGit()
 	batchOpts := storage.BatchCreateOptions{
 		SkipPrefixValidation:           opts.SkipPrefixValidation,
@@ -191,6 +198,15 @@ func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, 
 		OnStaleRejected: func(issueID string) {
 			staleRejectedSet[issueID] = struct{}{}
 		},
+		ExclusiveLabelConflictWarn: true,
+		OnExclusiveLabelConflict: func(issueID, prefix string, labels []string) {
+			conflict := formatExclusiveLabelConflict(issueID, prefix, labels)
+			if _, ok := exclusiveLabelConflictSet[conflict]; ok {
+				return
+			}
+			exclusiveLabelConflictSet[conflict] = struct{}{}
+			exclusiveLabelConflicts = append(exclusiveLabelConflicts, conflict)
+		},
 	}
 	var err error
 	if len(issues) <= importChunkSize {
@@ -207,7 +223,15 @@ func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, 
 		return nil, err
 	}
 
-	return assembleImportResult(issues, staleSkippedIDs, changePlan, staleRejectedSet, skippedDependencies), nil
+	result := assembleImportResult(issues, staleSkippedIDs, changePlan, staleRejectedSet, skippedDependencies)
+	result.ExclusiveLabelConflicts = exclusiveLabelConflicts
+	return result, nil
+}
+
+// formatExclusiveLabelConflict renders one exclusive-namespace violation the
+// way both import modes report it in exclusive_label_conflicts.
+func formatExclusiveLabelConflict(issueID, prefix string, labels []string) string {
+	return fmt.Sprintf("%s: namespace %q has %s", issueID, prefix, strings.Join(labels, ", "))
 }
 
 // assembleImportResult folds the batch write's in-transaction outcomes (stale

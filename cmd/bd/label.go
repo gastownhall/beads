@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/labelns"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -106,7 +107,17 @@ func resolveLabelTarget(ctx context.Context, id string) (string, error) {
 // one history entry with no new role and no new request type. It is not in this
 // slice because it needs a cmd/bd accessor of its own and because its end gate
 // runs a hierarchy and cycle walk a label-only request has no use for.
-func applyLabelEdit(ctx context.Context, issueIDs []string, labels []string, operation string) error {
+//
+// --replace (bd-7u5ki) rides in the same patch. exclusivePrefixes is non-empty
+// only for `bd label add --replace` on a workspace that configured
+// labels.exclusive-prefixes: each issue's other labels under an added label's
+// exclusive prefix go into that issue's LabelPatch.Remove, so the add swaps
+// instead of tripping the exclusivity guard, which runs after the patch's
+// removals. The evictions come from the pre-edit read described below, so a
+// label a concurrent edit adds in between is not evicted; the guard checks
+// again inside the write transaction and refuses the add rather than store
+// two labels in one exclusive namespace.
+func applyLabelEdit(ctx context.Context, issueIDs []string, labels []string, operation string, exclusivePrefixes []string) error {
 	lifecycle, err := openIssueLifecycle()
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
@@ -145,7 +156,7 @@ func applyLabelEdit(ctx context.Context, issueIDs []string, labels []string, ope
 	// structurally by collapsing the read and the write into one
 	// transaction; it is not worth a second read protocol before then.
 	var reader issueops.Reader
-	if len(labels) > 1 {
+	if len(labels) > 1 || len(exclusivePrefixes) > 0 {
 		if reader, err = openIssueReader(); err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
@@ -153,6 +164,7 @@ func applyLabelEdit(ctx context.Context, issueIDs []string, labels []string, ope
 	outcomes := make([]labelEditOutcome, 0, len(issueIDs))
 	for _, issueID := range issueIDs {
 		var before map[string]bool
+		issuePatch := patch
 		if reader != nil {
 			details, gerr := reader.Get(ctx, issueops.GetRequest{ID: issueID})
 			if gerr != nil {
@@ -163,11 +175,14 @@ func applyLabelEdit(ctx context.Context, issueIDs []string, labels []string, ope
 			for _, label := range details.Labels {
 				before[label] = true
 			}
+			if len(exclusivePrefixes) > 0 {
+				issuePatch.Labels.Remove = exclusiveLabelEvictions(exclusivePrefixes, details.Labels, labels)
+			}
 		}
 		result, uerr := lifecycle.Update(ctx, issueops.UpdateRequest{
 			Actor:   actor,
 			IssueID: issueID,
-			Patch:   patch,
+			Patch:   issuePatch,
 		})
 		if uerr != nil {
 			gerund := labelOperationGerund(operation)
@@ -191,9 +206,48 @@ func applyLabelEdit(ctx context.Context, issueIDs []string, labels []string, ope
 				outcome.changed[i] = !before[label]
 			}
 		}
+		if len(exclusivePrefixes) > 0 && result.Changed {
+			outcome.evicted = issuePatch.Labels.Remove
+		}
 		outcomes = append(outcomes, outcome)
 	}
 	return reportLabelEdit(outcomes, operation, jsonOutput)
+}
+
+// readExclusiveLabelPrefixes reads labels.exclusive-prefixes through the
+// workspace-settings role, on whichever route this invocation is on.
+func readExclusiveLabelPrefixes(ctx context.Context) ([]string, error) {
+	settings, err := openWorkspaceConfig("label add --replace requires direct database access")
+	if err != nil {
+		return nil, err
+	}
+	setting, err := settings.GetSetting(ctx, issueops.GetSettingRequest{Key: labelns.ConfigKey})
+	if err != nil {
+		return nil, err
+	}
+	return labelns.ParsePrefixes(setting.Value), nil
+}
+
+// exclusiveLabelEvictions returns the labels `bd label add --replace` removes
+// so that the add swaps instead of tripping the exclusive-namespace guard
+// (bd-7u5ki): every current label that shares an exclusive prefix with a label
+// being added, other than the added labels themselves.
+func exclusiveLabelEvictions(prefixes, current, added []string) []string {
+	namespaces := make(map[string]bool, len(added))
+	adding := make(map[string]bool, len(added))
+	for _, label := range added {
+		adding[label] = true
+		if prefix := labelns.Match(prefixes, label); prefix != "" {
+			namespaces[prefix] = true
+		}
+	}
+	var evictions []string
+	for _, label := range current {
+		if !adding[label] && namespaces[labelns.Match(prefixes, label)] {
+			evictions = append(evictions, label)
+		}
+	}
+	return evictions
 }
 
 // The two label edits this command performs, spelled once. They are the words
@@ -212,11 +266,14 @@ const (
 // moved. The label set is per issue rather than one shared slice because
 // --prefix resolves a different set for each issue from its own current
 // labels; applyLabelEdit's fixed caller-supplied set is the degenerate case
-// where every outcome repeats it.
+// where every outcome repeats it. evicted lists the labels `bd label add
+// --replace` swapped out to make room (bd-7u5ki), taken from the same pre-edit
+// read as changed.
 type labelEditOutcome struct {
 	issueID string
 	labels  []string
 	changed []bool
+	evicted []string
 }
 
 // labelOperationGerund returns the present-participle form of a
@@ -242,6 +299,8 @@ func labelOperationGerund(operation string) string {
 // as such — status "unchanged", and a line of its own — rather than as the
 // operation, so a no-op cannot be read as a confirmation (GH#5988). It is
 // still not an error: the exit code stays 0 so idempotent callers keep working.
+// Labels --replace evicted are reported as removals, so a swap never drops a
+// label without saying so.
 func reportLabelEdit(outcomes []labelEditOutcome, operation string, jsonOut bool) error {
 	if jsonOut {
 		// One row per (issue, label) pair; the hint is the one-label-per-issue
@@ -256,6 +315,13 @@ func reportLabelEdit(outcomes []labelEditOutcome, operation string, jsonOut bool
 				}
 				results = append(results, map[string]interface{}{
 					"status":   status,
+					"issue_id": outcome.issueID,
+					"label":    label,
+				})
+			}
+			for _, label := range outcome.evicted {
+				results = append(results, map[string]interface{}{
+					"status":   labelOperationRemoved,
 					"issue_id": outcome.issueID,
 					"label":    label,
 				})
@@ -279,6 +345,10 @@ func reportLabelEdit(outcomes []labelEditOutcome, operation string, jsonOut bool
 		if len(moved) > 0 {
 			fmt.Printf("%s %s %s '%s' %s %s\n", ui.RenderPass("✓"), verb,
 				labelNoun(moved, "label", "labels"), strings.Join(moved, "', '"), prep, outcome.issueID)
+		}
+		if len(outcome.evicted) > 0 {
+			fmt.Printf("%s Removed %s '%s' from %s\n", ui.RenderPass("✓"),
+				labelNoun(outcome.evicted, "label", "labels"), strings.Join(outcome.evicted, "', '"), outcome.issueID)
 		}
 		if len(unmoved) == 0 {
 			continue
@@ -512,7 +582,8 @@ var labelAddCmd = &cobra.Command{
 			}
 		}()
 
-		return runLabelAdd(rootCtx, args)
+		replace, _ := cmd.Flags().GetBool("replace")
+		return runLabelAdd(rootCtx, args, replace)
 	},
 }
 
@@ -979,6 +1050,8 @@ func reportLabelRename(oldLabel, newLabel string, renamed, merged int, jsonOut b
 }
 
 func init() {
+	labelAddCmd.Flags().Bool("replace", false, "In exclusive label namespaces (labels.exclusive-prefixes), swap out any existing label in the same namespace instead of failing; swapped-out labels are reported as removals (status \"removed\" in --json output)")
+
 	// Issue ID completions
 	labelAddCmd.ValidArgsFunction = issueIDCompletion
 	labelRemoveCmd.ValidArgsFunction = issueIDCompletion
@@ -1004,7 +1077,7 @@ func init() {
 // RunE — with a second, separately-maintained implementation on the other side
 // of it — is now a fork inside resolveLabelTarget and inside the accessor, and
 // both arms end at the same role.
-func runLabelAdd(ctx context.Context, args []string) error {
+func runLabelAdd(ctx context.Context, args []string, replace bool) error {
 	issueIDs, labels := parseLabelArgs(args)
 	if len(labels) == 0 {
 		return HandleErrorRespectJSON("label cannot be empty")
@@ -1032,7 +1105,13 @@ func runLabelAdd(ctx context.Context, args []string) error {
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-	return applyLabelEdit(ctx, issueIDs, labels, labelOperationAdded)
+	var exclusivePrefixes []string
+	if replace {
+		if exclusivePrefixes, err = readExclusiveLabelPrefixes(ctx); err != nil {
+			return HandleErrorRespectJSON("label add --replace: reading %s: %v", labelns.ConfigKey, err)
+		}
+	}
+	return applyLabelEdit(ctx, issueIDs, labels, labelOperationAdded, exclusivePrefixes)
 }
 
 func runLabelRemove(ctx context.Context, args []string) error {
@@ -1044,7 +1123,7 @@ func runLabelRemove(ctx context.Context, args []string) error {
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-	return applyLabelEdit(ctx, issueIDs, labels, labelOperationRemoved)
+	return applyLabelEdit(ctx, issueIDs, labels, labelOperationRemoved, nil)
 }
 
 func runLabelList(ctx context.Context, args []string) error {

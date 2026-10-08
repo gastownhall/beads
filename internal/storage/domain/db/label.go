@@ -47,6 +47,13 @@ func (r *labelSQLRepositoryImpl) Insert(ctx context.Context, issueID, label, act
 		return err
 	}
 	table := pickLabelTable(opts.UseWispsTable)
+	// The same exclusive-namespace guard (labels.exclusive-prefixes) the
+	// direct route runs in issueops.addLabelInTx, so every proxied label write
+	// - label add, update --add-label, label propagate, create - refuses a
+	// second label in an exclusive namespace too.
+	if err := issueops.CheckExclusiveLabelInTx(ctx, r.runner, table, issueID, label); err != nil {
+		return err
+	}
 	//nolint:gosec // G201: table is one of two hardcoded constants
 	result, err := r.runner.ExecContext(ctx,
 		fmt.Sprintf("INSERT IGNORE INTO %s (issue_id, label) VALUES (?, ?)", table),

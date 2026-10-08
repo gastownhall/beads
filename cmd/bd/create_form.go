@@ -126,6 +126,10 @@ func CreateIssueFromFormValues(ctx context.Context, s storage.DoltStorage, fv *c
 		externalRefPtr = &fv.ExternalRef
 	}
 
+	inheritedLabels, err := resolveInheritedLabels(ctx, s, fv.Labels, inheritedLabels, fv.ParentID)
+	if err != nil {
+		return nil, err
+	}
 	labels := mergeCreateLabels(fv.Labels, inheritedLabels)
 
 	issue := &types.Issue{
