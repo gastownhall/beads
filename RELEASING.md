@@ -94,15 +94,19 @@ release-critical gates do not all run on every PR, so "tag the tip of main"
 means tagging a SHA nobody has fully tested. A burned tag is never reused
 (the v1.1.1 and v1.2.0 precedents), so that gamble is expensive.
 
-**Cut the branch from a SHA that is green on both `Main` and
-`Nightly Full Tests`.** The `Main` workflow runs on push to `main` and the
-`Nightly Full Tests` workflow runs on a 2am UTC schedule, so the newest SHA
-with both is usually a few hours behind the tip:
+**Cut the branch from a SHA that is green on `Bazel`, `Main` and
+`Nightly`.** The `Bazel` workflow (every Linux test lane, on rbe-west) and
+the `Main` workflow (the macOS and Windows jobs) run on push to `main`, and
+the `Nightly` workflow (the full Bazel suite with no cached test results)
+runs on a 2am UTC schedule, so the newest SHA with all three is usually a
+few hours behind the tip:
 
 ```bash
+gh run list --workflow Bazel --branch main --event push --status success --limit 5 \
+  --json headSha,conclusion,createdAt
 gh run list --workflow Main --branch main --status success --limit 5 \
   --json headSha,conclusion,createdAt
-gh run list --workflow "Nightly Full Tests" --status success --limit 3 \
+gh run list --workflow Nightly --status success --limit 3 \
   --json headSha,conclusion,createdAt
 
 git fetch origin
@@ -136,16 +140,16 @@ git log --oneline main..release/1.3.0
 
 Before starting a release:
 
-- [ ] `release/x.y.z` branch cut from a SHA green on `Main` **and**
-      `Nightly Full Tests` (see [Release Branches](#release-branches))
-- [ ] All tests passing (`go test ./...`)
+- [ ] `release/x.y.z` branch cut from a SHA green on `Bazel`, `Main` **and**
+      `Nightly` (see [Release Branches](#release-branches))
+- [ ] All tests passing (`make test`, the Bazel test lane)
 - [ ] npm package tests passing (`cd npm-package && npm run test:all`)
 - [ ] **Upgrade smoke tests pass** (`make test-upgrade`) — see [Release Stability Gate](engdocs/RELEASE-STABILITY-GATE.md)
 - [ ] **Regression tests pass** (`make test-regression`)
 - [ ] **Every release target cross-compiles** — see
-      [Cross-compile before tagging](#cross-compile-before-tagging). PR CI does
-      not build them ([#5662](https://github.com/gastownhall/beads/issues/5662)),
-      and a target that fails at tag time burns the tag.
+      [Cross-compile before tagging](#cross-compile-before-tagging). PR CI
+      builds them only with cgo off, and a target that fails at tag time
+      burns the tag.
 - [ ] **CHANGELOG.md updated with release notes** (see format below)
 - [ ] **CHANGELOG rollup checked** — nothing left under `[Unreleased]` that
       belongs in this release, and nothing filed under a *previous* release's
@@ -163,12 +167,15 @@ Before starting a release:
 
 ### Cross-compile before tagging
 
-`.goreleaser.yml` builds darwin, linux, windows **and freebsd**, but PR CI
-builds none of the cross targets — the v1.2.0 tag burned on a freebsd
-compilation failure that no pre-tag gate could have caught
-([#5661](https://github.com/gastownhall/beads/pull/5661) fixed the break,
-[#5662](https://github.com/gastownhall/beads/issues/5662) tracks the CI gap).
-Until that gap is closed, build them by hand before tagging:
+`.goreleaser.yml` builds darwin, linux, windows **and freebsd**; the v1.2.0
+tag burned on a freebsd compilation failure no pre-tag gate caught
+([#5661](https://github.com/gastownhall/beads/pull/5661),
+[#5662](https://github.com/gastownhall/beads/issues/5662)). PR CI now builds
+the whole tree for every target in `scripts/ci/release-targets.txt` with Bazel
+(`scripts/ci/bazel-release-cross-compile.sh`, in bazel.yml's pure-Go lane),
+but with cgo off, while linux/amd64, linux/arm64, windows/amd64 and the darwin
+pair ship with `CGO_ENABLED=1`. Build the real release configuration by hand
+before tagging:
 
 ```bash
 goreleaser build --snapshot --clean

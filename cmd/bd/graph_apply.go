@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/validation"
 	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // GraphApplyPlan describes a symbolic bead graph to create atomically.
@@ -923,325 +924,262 @@ func graphApplyNodeStorageClass(node GraphApplyNode, opts GraphApplyOptions) (ep
 	return ephemeral, noHistory, class, nil
 }
 
-func executeGraphApply(ctx context.Context, plan *GraphApplyPlan, opts GraphApplyOptions) (*GraphApplyResult, error) {
+// GraphApplyTooLargeError reports a graph plan whose translated BatchApplier
+// item count exceeds the role's own flat ceiling (issueops.MaxApplyBatchItems).
+// `bd create --graph` refuses outright rather than splitting the plan across
+// more than one transaction, which would abandon the "atomic, all or nothing"
+// guarantee the role and this command both promise.
+type GraphApplyTooLargeError struct {
+	ItemCount int
+	Max       int
+}
+
+func (e *GraphApplyTooLargeError) Error() string {
+	return fmt.Sprintf("graph plan has %d BatchApplier item(s) (nodes, edges and deferred assignments combined), which exceeds the %d-item cap; split the plan into multiple `bd create --graph` calls — each is its own atomic transaction, so this command will never chunk one plan into several", e.ItemCount, e.Max)
+}
+
+// buildGraphApplyBatchRequest translates a GraphApplyPlan into the single
+// issueops.ApplyBatchRequest both the embedded and proxied `bd create --graph`
+// legs now apply, so the two transports cannot drift in how a plan is read.
+//
+// Item order is: every node's create item first (plan order), then
+// parent-child dep_add items, then explicit top-level edges (plan order),
+// then per-node inline deps (plan order), then trailing update items for
+// assign_after_create. Every create lands before any dep_add or update item
+// references it, so every Ref below resolves backward regardless of which
+// order the plan itself declares nodes and edges in (Ref.Key "reaches
+// backward only" — issueops/batchapplier.go).
+//
+// What this function does NOT do, deliberately: re-check for dependency
+// cycles, parent-child blocking paths, or duplicate/reverse parent-child
+// pairs. BatchApplier's own end gate re-validates the whole scheduling graph
+// after every item, and its per-edge insert already raises
+// *issueops.DependencyTypeConflictError for a same-pair, different-type
+// conflict — both are one shared implementation reached from every leg, so
+// re-deriving them here would be a second, divergeable copy of a check the
+// role already owns.
+//
+// One consequence is accepted on purpose: the end gate walks the scheduling
+// edges only (types.IsSchedulingEdge leaves waits-for out), so a plan whose
+// path from a node's parent to the node runs through a waits-for hop is now
+// stored, where the old in-transaction preflight, which walked every
+// AffectsReadyWork edge, refused it. `bd dep add` and `bd batch apply` store
+// that shape too, and it can stall ready work: once the spawner has an open
+// child, every issue in the shape stays blocked. Refusing it is a change to
+// the shared role, for every front door at once;
+// TestExecuteGraphApplyAcceptsParentToChildPathThroughWaitsFor pins the
+// current behavior until then.
+func buildGraphApplyBatchRequest(plan *GraphApplyPlan, opts GraphApplyOptions, actor, owner string) (issueops.ApplyBatchRequest, error) {
 	if err := opts.Validate(); err != nil {
-		return nil, err
+		return issueops.ApplyBatchRequest{}, err
 	}
 
-	keyToID := make(map[string]string, len(plan.Nodes))
-	owner := getOwner()
+	planKeys := make(map[string]bool, len(plan.Nodes))
+	for _, node := range plan.Nodes {
+		planKeys[node.Key] = true
+	}
+
+	// ref mirrors the old resolveEdgeRef precedence: an explicit id wins over
+	// a plan key when an edge endpoint carries both.
+	ref := func(key, id string) issueops.Ref {
+		if id != "" {
+			return issueops.Ref{ID: id}
+		}
+		return issueops.Ref{Key: key}
+	}
+
+	items := make([]issueops.ApplyItem, 0, len(plan.Nodes)*2+len(plan.Edges))
+	pendingAssignees := make(map[string]string, len(plan.Nodes))
+
+	// Pass 1: create every node. ALL creates land before any dep_add/update
+	// item below, so backward-only Ref resolution never depends on the plan's
+	// own node order.
+	for _, node := range plan.Nodes {
+		issue, err := graphApplyNodeIssue(node, opts, actor, owner)
+		if err != nil {
+			return issueops.ApplyBatchRequest{}, err
+		}
+		if node.Assignee != "" {
+			if node.AssignAfterCreate {
+				pendingAssignees[node.Key] = node.Assignee
+			} else {
+				issue.Assignee = node.Assignee
+			}
+		}
+		var metadataRefs map[string]issueops.Ref
+		if len(node.MetadataRefs) > 0 {
+			metadataRefs = make(map[string]issueops.Ref, len(node.MetadataRefs))
+			for metaKey, refKey := range node.MetadataRefs {
+				// CreateItem.MetadataRefs is the one ref member allowed to reach
+				// forward (or to itself); refKey is always a plan-local key
+				// (validateGraphApplyPlan already rejected an unknown one).
+				metadataRefs[metaKey] = issueops.Ref{Key: refKey}
+			}
+		}
+		items = append(items, issueops.ApplyItem{
+			Kind: issueops.ItemCreate,
+			Create: &issueops.CreateItem{
+				Key:          node.Key,
+				Issue:        issue,
+				MetadataRefs: metadataRefs,
+			},
+		})
+	}
+
+	// Pass 2: parent-child dep_add items, one per node with a parent — added
+	// before any other edge, matching the embedded path's old ordering.
+	//
+	// A node naming both a plan-local parent and a parent_id keeps the old
+	// precedence of both legs: the plan key wins. That is the reverse of ref's
+	// id-first rule for edge endpoints, and it is the parent the dry-run
+	// preview and validateGraphApplyLocalCycles already model.
+	for _, node := range plan.Nodes {
+		var parent issueops.Ref
+		switch parentKey := node.effectiveParentKey(); {
+		case parentKey != "":
+			parent = issueops.Ref{Key: parentKey}
+		case node.ParentID != "":
+			parent = issueops.Ref{ID: node.ParentID}
+		default:
+			continue
+		}
+		items = append(items, issueops.ApplyItem{
+			Kind: issueops.ItemDepAdd,
+			DepAdd: &issueops.DepAddItem{
+				Source: issueops.Ref{Key: node.Key},
+				Target: parent,
+				Type:   types.DepParentChild,
+			},
+		})
+	}
+
+	// Pass 3: explicit top-level edges, in plan order.
+	for _, edge := range plan.Edges {
+		depType := graphApplyDependencyType(edge.Type)
+		metadata, err := graphApplyEdgeBatchMetadata(edge, depType)
+		if err != nil {
+			return issueops.ApplyBatchRequest{}, err
+		}
+		items = append(items, issueops.ApplyItem{
+			Kind: issueops.ItemDepAdd,
+			DepAdd: &issueops.DepAddItem{
+				Source:     ref(edge.FromKey, edge.FromID),
+				Target:     ref(edge.ToKey, edge.ToID),
+				Type:       depType,
+				Metadata:   metadata,
+				HasSpawner: edge.SpawnerKey != "" || edge.SpawnerID != "",
+				ThreadID:   edge.ThreadID,
+			},
+		})
+	}
+
+	// Pass 4: per-node inline deps, in plan order. Target resolves as a plan
+	// key first, then falls back to a literal issue id — the same precedence
+	// types.NewGraphNodeDependency applied on the old embedded path.
+	for _, node := range plan.Nodes {
+		for _, dep := range node.Deps {
+			depType := types.DependencyType(dep.Type)
+			if depType == "" {
+				depType = types.DepBlocks
+			}
+			target := issueops.Ref{ID: dep.Target}
+			if planKeys[dep.Target] {
+				target = issueops.Ref{Key: dep.Target}
+			}
+			items = append(items, issueops.ApplyItem{
+				Kind: issueops.ItemDepAdd,
+				DepAdd: &issueops.DepAddItem{
+					Source: issueops.Ref{Key: node.Key},
+					Target: target,
+					Type:   depType,
+				},
+			})
+		}
+	}
+
+	// Pass 5: deferred assignees (assign_after_create), trailing update items
+	// in plan order.
+	for _, node := range plan.Nodes {
+		assignee, ok := pendingAssignees[node.Key]
+		if !ok {
+			continue
+		}
+		items = append(items, issueops.ApplyItem{
+			Kind: issueops.ItemUpdate,
+			Update: &issueops.UpdateItem{
+				Target: issueops.Ref{Key: node.Key},
+				Patch:  issueops.IssuePatch{Assignee: issueops.Field[string]{Set: true, Value: assignee}},
+			},
+		})
+	}
+
+	// This check is the CLIENT's own compiled copy of the role's flat ceiling
+	// (issueops.MaxApplyBatchItems, currently 1000 — see its doc comment for
+	// the 100-item legacy threshold and the issues.batchApplyLarge capability
+	// token). It is only correct when the embedded role IS this binary's own
+	// compiled copy, which is true for both BatchApplier legs this command
+	// reaches directly (issueops/embeddeddolt, uow/proxied-same-build).
+	//
+	// DESIGN NOTE for any future client that can reach a remote `bd serve` of
+	// a DIFFERENT version (e.g. a prospective S5 HTTP client): that client
+	// must NOT assume the remote accepts up to MaxApplyBatchItems. An older
+	// server may still enforce the legacy 100-item bound. Such a client must
+	// refuse locally at 100 unless the server has first advertised the
+	// issues.batchApplyLarge capability (internal/httpapi), or — if one
+	// becomes available — read the cap the store itself advertises, rather
+	// than trusting the requesting binary's own compiled constant.
+	if len(items) > issueops.MaxApplyBatchItems {
+		return issueops.ApplyBatchRequest{}, &GraphApplyTooLargeError{ItemCount: len(items), Max: issueops.MaxApplyBatchItems}
+	}
 
 	commitMsg := plan.CommitMessage
 	if commitMsg == "" {
 		commitMsg = fmt.Sprintf("bd: graph-apply %d nodes", len(plan.Nodes))
 	}
 
-	if err := store.RunInTransaction(ctx, commitMsg, func(tx storage.Transaction) error {
-		issues := make([]*types.Issue, 0, len(plan.Nodes))
-		pendingAssignees := make(map[int]string)
+	return issueops.ApplyBatchRequest{
+		Actor:         actor,
+		Items:         items,
+		Provenance:    commitMsg,
+		ForceIDPrefix: opts.Force,
+	}, nil
+}
 
-		for i, node := range plan.Nodes {
-			issue, err := graphApplyNodeIssue(node, opts, actor, owner)
-			if err != nil {
-				return err
-			}
-			if node.Assignee != "" {
-				if node.AssignAfterCreate {
-					pendingAssignees[i] = node.Assignee
-				} else {
-					issue.Assignee = node.Assignee
-				}
-			}
+// graphApplyEdgeBatchMetadata builds a dep_add item's Metadata for a waits-for
+// edge. Only Gate is carried here: SpawnerKey/SpawnerID are redundant with the
+// edge's own Target (validateGraphApplyPlan already forces SpawnerKey ==
+// ToKey and SpawnerID == ToID — "the waits-for target is the spawner"), so
+// this never needs to resolve one. The role's own
+// internal/storage/issueops.StampWaitsForSpawnerID fills metadata.spawner_id
+// from the resolved target AFTER the batch mints every id, which is the only
+// way a same-batch, plan-local spawner key can land in the blob at all — this
+// function runs before any id in the plan exists. An empty Gate is left for
+// normalizeApplyEdgeMetadata to default to {"gate":"all-children"}.
+func graphApplyEdgeBatchMetadata(edge GraphApplyEdge, depType types.DependencyType) (string, error) {
+	if depType != types.DepWaitsFor || edge.Gate == "" {
+		return "", nil
+	}
+	raw, err := json.Marshal(types.WaitsForMeta{Gate: edge.Gate})
+	if err != nil {
+		return "", fmt.Errorf("edge %s%s -> %s%s: marshaling gate metadata: %w", edge.FromKey, edge.FromID, edge.ToKey, edge.ToID, err)
+	}
+	return string(raw), nil
+}
 
-			issues = append(issues, issue)
-		}
-
-		if err := tx.CreateIssues(ctx, issues, actor); err != nil {
-			return fmt.Errorf("batch create: %w", err)
-		}
-
-		for i, node := range plan.Nodes {
-			keyToID[node.Key] = issues[i].ID
-		}
-
-		// Resolve MetadataRefs now that all IDs are known.
-		for i, node := range plan.Nodes {
-			if len(node.MetadataRefs) == 0 {
-				continue
-			}
-			metaJSON, err := types.MergeMetadataRefs(issues[i].Metadata, node.MetadataRefs, keyToID)
-			if err != nil {
-				return fmt.Errorf("node %q: %w", node.Key, err)
-			}
-			updates := map[string]interface{}{
-				"metadata": metaJSON,
-			}
-			if err := tx.UpdateIssue(ctx, issues[i].ID, updates, actor); err != nil {
-				return fmt.Errorf("node %q: updating metadata refs: %w", node.Key, err)
-			}
-		}
-
-		parentDepPairs := graphApplyParentDepPairs(plan.Nodes, keyToID)
-		newSchedulingEdges := make([][2]string, 0, len(plan.Nodes)+len(plan.Edges))
-		if err := validateGraphApplyPlannedParentBlockingPaths(ctx, tx, plan, keyToID, parentDepPairs); err != nil {
-			return err
-		}
-		if err := validateGraphApplyPlannedBlockingCycles(ctx, tx, plan, keyToID); err != nil {
-			return err
-		}
-		for i, edge := range plan.Edges {
-			fromID := resolveEdgeRef(edge.FromKey, edge.FromID, keyToID)
-			toID := resolveEdgeRef(edge.ToKey, edge.ToID, keyToID)
-			depType := graphApplyDependencyType(edge.Type)
-			if parentDepPairs[graphApplyDepPairKey(fromID, toID)] && depType != types.DepParentChild {
-				return fmt.Errorf("edge %d %s->%s duplicates a parent-child relationship with dependency type %q", i, fromID, toID, depType)
-			}
-			if parentDepPairs[graphApplyDepPairKey(toID, fromID)] && graphApplyCycleRelevantDependencyType(depType) {
-				return fmt.Errorf("edge %d %s->%s creates a blocking reverse of a parent-child relationship", i, fromID, toID)
-			}
-		}
-
-		// Add node parent-child dependencies first. The explicit and inline
-		// dependency sources below are also processed parent-first, so every
-		// blocking edge sees the plan's full hierarchy in storage.
-		for i, node := range plan.Nodes {
-			parentKey := node.effectiveParentKey()
-			parentID := node.ParentID
-			if parentKey != "" {
-				parentID = keyToID[parentKey]
-			}
-			if parentID != "" {
-				dep := &types.Dependency{
-					IssueID:     issues[i].ID,
-					DependsOnID: parentID,
-					Type:        types.DepParentChild,
-				}
-				if err := tx.AddDependency(ctx, dep, actor); err != nil {
-					return fmt.Errorf("node %q: adding parent-child dep: %w", node.Key, err)
-				}
-				newSchedulingEdges = append(newSchedulingEdges, [2]string{dep.IssueID, dep.DependsOnID})
-			}
-		}
-
-		for phase := 0; phase < 2; phase++ {
-			parentPhase := phase == 0
-			// Add explicit edges in stable order for this phase.
-			for i, edge := range plan.Edges {
-				fromID := resolveEdgeRef(edge.FromKey, edge.FromID, keyToID)
-				toID := resolveEdgeRef(edge.ToKey, edge.ToID, keyToID)
-				depType := graphApplyDependencyType(edge.Type)
-				if (depType == types.DepParentChild) != parentPhase {
-					continue
-				}
-				if parentDepPairs[graphApplyDepPairKey(fromID, toID)] {
-					if depType == types.DepParentChild {
-						continue
-					}
-					return fmt.Errorf("edge %d %s->%s duplicates a parent-child relationship with dependency type %q", i, fromID, toID, depType)
-				}
-				if parentDepPairs[graphApplyDepPairKey(toID, fromID)] && graphApplyCycleRelevantDependencyType(depType) {
-					return fmt.Errorf("edge %d %s->%s creates a blocking reverse of a parent-child relationship", i, fromID, toID)
-				}
-				dep, err := types.NewGraphEdgeDependency(fromID, toID, depType, edge.Gate, edge.SpawnerKey, edge.SpawnerID, edge.ThreadID, keyToID)
-				if err != nil {
-					return fmt.Errorf("edge %s->%s: %w", fromID, toID, err)
-				}
-				if err := tx.AddDependencyWithOptions(ctx, dep, actor, storage.DependencyAddOptions{}); err != nil {
-					return fmt.Errorf("adding edge %s->%s: %w", fromID, toID, err)
-				}
-				if graphApplySchedulingDependencyType(depType) {
-					newSchedulingEdges = append(newSchedulingEdges, [2]string{fromID, toID})
-				}
-			}
-
-			// Add per-node inline dependencies in stable order for this phase.
-			for i, node := range plan.Nodes {
-				for _, dep := range node.Deps {
-					depType := types.DependencyType(dep.Type)
-					if depType == "" {
-						depType = types.DepBlocks
-					}
-					if (depType == types.DepParentChild) != parentPhase {
-						continue
-					}
-					d, err := types.NewGraphNodeDependency(issues[i].ID, depType, dep.Target, keyToID)
-					if err != nil {
-						return fmt.Errorf("node %q: %w", node.Key, err)
-					}
-					if err := tx.AddDependency(ctx, d, actor); err != nil {
-						return fmt.Errorf("node %q: adding dep to %q: %w", node.Key, dep.Target, err)
-					}
-					if graphApplySchedulingDependencyType(d.Type) {
-						newSchedulingEdges = append(newSchedulingEdges, [2]string{d.IssueID, d.DependsOnID})
-					}
-				}
-			}
-		}
-		if cyclePath, err := tx.CycleThroughEdges(ctx, newSchedulingEdges); err != nil {
-			return fmt.Errorf("final graph cycle check: %w", err)
-		} else if cyclePath != "" {
-			return fmt.Errorf("graph dependency cycle would be created: %s", cyclePath)
-		}
-
-		// Apply deferred assignees.
-		for i, assignee := range pendingAssignees {
-			updates := map[string]interface{}{
-				"assignee": assignee,
-			}
-			if err := tx.UpdateIssue(ctx, issues[i].ID, updates, actor); err != nil {
-				return fmt.Errorf("node %q: setting assignee: %w", plan.Nodes[i].Key, err)
-			}
-		}
-
-		return nil
-	}); err != nil {
+func executeGraphApply(ctx context.Context, plan *GraphApplyPlan, opts GraphApplyOptions) (*GraphApplyResult, error) {
+	req, err := buildGraphApplyBatchRequest(plan, opts, actor, getOwner())
+	if err != nil {
 		return nil, err
 	}
-
-	return &GraphApplyResult{IDs: keyToID}, nil
-}
-
-// validateGraphApplyPlannedBlockingCycles rejects planned blocking edges that
-// would close a blocking-dependency cycle, evaluated whole-graph before any
-// insert. This early preflight is restricted to blocking edges for precise
-// plan errors. Each stored edge still runs issueops.CheckDependencyCycleInTx,
-// which enforces the combined blocks + conditional-blocks + parent-child graph.
-func validateGraphApplyPlannedBlockingCycles(ctx context.Context, tx storage.Transaction, plan *GraphApplyPlan, keyToID map[string]string) error {
-	type plannedEdge struct {
-		index  int
-		fromID string
-		toID   string
+	applier, err := store.BatchApplier()
+	if err != nil {
+		return nil, err
 	}
-
-	adj := make(map[string][]string)
-	checks := make([]plannedEdge, 0, len(plan.Edges))
-	for i, edge := range plan.Edges {
-		depType := graphApplyDependencyType(edge.Type)
-		if !graphApplyCycleRelevantDependencyType(depType) {
-			continue
-		}
-		fromID := resolveEdgeRef(edge.FromKey, edge.FromID, keyToID)
-		toID := resolveEdgeRef(edge.ToKey, edge.ToID, keyToID)
-		if fromID == "" || toID == "" {
-			continue
-		}
-		if fromID == toID {
-			return fmt.Errorf("edge %d %s->%s creates a blocking dependency cycle", i, fromID, toID)
-		}
-		adj[fromID] = append(adj[fromID], toID)
-		checks = append(checks, plannedEdge{index: i, fromID: fromID, toID: toID})
+	result, err := applier.ApplyBatch(ctx, req)
+	if err != nil {
+		return nil, err
 	}
-
-	depCache := make(map[string][]*types.Dependency)
-	for _, edge := range checks {
-		hasPath, err := graphApplyHasPath(ctx, tx, adj, depCache, edge.toID, edge.fromID, graphApplyCycleRelevantDependencyType)
-		if err != nil {
-			return fmt.Errorf("edge %d %s->%s: checking planned blocking cycle: %w", edge.index, edge.fromID, edge.toID, err)
-		}
-		if hasPath {
-			return fmt.Errorf("edge %d %s->%s creates a blocking dependency cycle", edge.index, edge.fromID, edge.toID)
-		}
-	}
-	return nil
-}
-
-// validateGraphApplyPlannedParentBlockingPaths rejects plans where a planned
-// blocking edge would create a path from a parent to its child. Unlike
-// validateGraphApplyPlannedBlockingCycles, its existing-dep walk follows the
-// full AffectsReadyWork set (blocks, conditional-blocks, parent-child,
-// waits-for) because a parent→child path closed through any ready-affecting
-// dependency is a real ready-work deadlock. The two predicates must stay
-// distinct: narrowing this one would miss real deadlocks, while this broader
-// walk may additionally reject a return path through waits-for.
-func validateGraphApplyPlannedParentBlockingPaths(ctx context.Context, tx storage.Transaction, plan *GraphApplyPlan, keyToID map[string]string, parentDepPairs map[string]bool) error {
-	adj := make(map[string][]string)
-	for pair := range parentDepPairs {
-		fromID, toID, ok := graphApplyDepPairIDs(pair)
-		if ok {
-			adj[fromID] = append(adj[fromID], toID)
-		}
-	}
-	for _, edge := range plan.Edges {
-		depType := graphApplyDependencyType(edge.Type)
-		if !graphApplyReadyPathDependencyType(depType) {
-			continue
-		}
-		fromID := resolveEdgeRef(edge.FromKey, edge.FromID, keyToID)
-		toID := resolveEdgeRef(edge.ToKey, edge.ToID, keyToID)
-		if fromID == "" || toID == "" {
-			continue
-		}
-		// Direct parent -> child blocking edges have a dedicated error below.
-		// This prewrite pass covers transitive parent -> ... -> child paths.
-		if graphApplyCycleRelevantDependencyType(depType) && parentDepPairs[graphApplyDepPairKey(toID, fromID)] {
-			continue
-		}
-		adj[fromID] = append(adj[fromID], toID)
-	}
-
-	depCache := make(map[string][]*types.Dependency)
-	for _, node := range plan.Nodes {
-		childID := keyToID[node.Key]
-		parentID := node.ParentID
-		if parentKey := node.effectiveParentKey(); parentKey != "" {
-			parentID = keyToID[parentKey]
-		}
-		if childID == "" || parentID == "" {
-			continue
-		}
-		hasPath, err := graphApplyHasPath(ctx, tx, adj, depCache, parentID, childID, graphApplyReadyPathDependencyType)
-		if err != nil {
-			return err
-		}
-		if hasPath {
-			return fmt.Errorf("node %q: planned blocking dependencies create a path from parent %q to child %q", node.Key, parentID, childID)
-		}
-	}
-	return nil
-}
-
-// graphApplyHasPath reports whether fromID can reach toID by following the
-// in-memory planned adjacency plus existing store dependencies. followExistingDep
-// selects which existing dep types the walk traverses, letting callers mirror
-// either the early blocking-only preflight or the broader ready-work graph.
-func graphApplyHasPath(ctx context.Context, tx storage.Transaction, adj map[string][]string, depCache map[string][]*types.Dependency, fromID, toID string, followExistingDep func(types.DependencyType) bool) (bool, error) {
-	seen := make(map[string]bool)
-	var visit func(string) (bool, error)
-	visit = func(id string) (bool, error) {
-		if id == toID {
-			return true, nil
-		}
-		if seen[id] {
-			return false, nil
-		}
-		seen[id] = true
-		for _, next := range adj[id] {
-			found, err := visit(next)
-			if err != nil || found {
-				return found, err
-			}
-		}
-		deps, ok := depCache[id]
-		if !ok {
-			var err error
-			deps, err = tx.GetDependencyRecords(ctx, id)
-			if err != nil {
-				return false, fmt.Errorf("reading existing dependencies for %s: %w", id, err)
-			}
-			depCache[id] = deps
-		}
-		for _, dep := range deps {
-			if !followExistingDep(dep.Type) {
-				continue
-			}
-			found, err := visit(dep.DependsOnID)
-			if err != nil || found {
-				return found, err
-			}
-		}
-		return false, nil
-	}
-	return visit(fromID)
+	return &GraphApplyResult{IDs: result.Keys}, nil
 }
 
 // graphApplyEdgeIsLocalCycleRelevant reports whether an edge participates in the
@@ -1266,14 +1204,6 @@ func graphApplyCycleRelevantDependencyType(depType types.DependencyType) bool {
 	return depType == types.DepBlocks || depType == types.DepConditionalBlocks
 }
 
-func graphApplySchedulingDependencyType(depType types.DependencyType) bool {
-	return graphApplyCycleRelevantDependencyType(depType) || depType == types.DepParentChild
-}
-
-func graphApplyReadyPathDependencyType(depType types.DependencyType) bool {
-	return depType.AffectsReadyWork()
-}
-
 func graphApplySortedKeys(keys map[string]bool) []string {
 	out := make([]string, 0, len(keys))
 	for key := range keys {
@@ -1281,42 +1211,4 @@ func graphApplySortedKeys(keys map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-func graphApplyParentDepPairs(nodes []GraphApplyNode, keyToID map[string]string) map[string]bool {
-	pairs := make(map[string]bool)
-	for _, node := range nodes {
-		parentID := node.ParentID
-		if parentKey := node.effectiveParentKey(); parentKey != "" {
-			parentID = keyToID[parentKey]
-		}
-		childID := keyToID[node.Key]
-		if childID != "" && parentID != "" {
-			pairs[graphApplyDepPairKey(childID, parentID)] = true
-		}
-	}
-	return pairs
-}
-
-func graphApplyDepPairKey(issueID, dependsOnID string) string {
-	return issueID + "\x00" + dependsOnID
-}
-
-func graphApplyDepPairIDs(pair string) (string, string, bool) {
-	for i := 0; i < len(pair); i++ {
-		if pair[i] == 0 {
-			return pair[:i], pair[i+1:], true
-		}
-	}
-	return "", "", false
-}
-
-func resolveEdgeRef(key, id string, keyToID map[string]string) string {
-	if id != "" {
-		return id
-	}
-	if key != "" {
-		return keyToID[key]
-	}
-	return ""
 }

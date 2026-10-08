@@ -21,6 +21,29 @@ Blocks in packages that are no longer listed are removed.
 Run from the repository root after gazelle (see `make bazel-sync`). Output is
 deterministic and gazelle-stable, so a clean sync leaves git clean.
 
+Every package also gets a managed `repo_files` block: a filegroup of all of
+the package's own files (`glob(["**"])` less local build and editor debris),
+and the root package's aggregates every package's into `//:repo_files`. That
+is the checkout as Bazel sees it, the `data` of the repository-policy tests
+that walk the whole tree (every BUILD file, every test file, every tracked
+Markdown file). A package without the block would drop out of their view and
+pass them vacuously, which is why `make bazel-sync-check` (bazel.yml's BUILD
+sync step, on every PR) fails on a missing or stale block. Trees in
+.bazelignore (.beads, website, the nested example modules, agent worktrees,
+node_modules) are outside Bazel and so outside //:repo_files.
+
+tools/bazel/BUILD.bazel also gets a managed `release_cross` block: the
+release_cross_build (tools/bazel/release_cross.bzl) that
+scripts/ci/bazel-release-cross-compile.sh builds for every release platform,
+listing every go_library and go_binary it can see (the packages `go build
+./...` compiles; a private library is compiled by the go_binary that embeds
+it) except the cgo-only ones a pure build cannot link (tagged "cgo-only" and
+incompatible with //tools/bazel:pure), testonly fixtures, and the packages of
+nested Go modules (tools/nogo), which `go build ./...` skips. The script checks
+against `bazel query` before it builds that every Bazel package holding Go
+targets is reached, so a package this parser misses fails CI instead of
+going uncompiled.
+
 With --check nothing is written: stale blocks are printed as a diff and the
 exit status is 1 (see `make bazel-sync-check`).
 """
@@ -54,8 +77,90 @@ TREES = (
 
 BEGIN = "# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---"
 END = "# --- end go_srcs ---"
-BLOCK_RE = re.compile(r"\n*" + re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n*", re.DOTALL)
+RELEASE_BEGIN = "# --- begin release_cross (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---"
+RELEASE_END = "# --- end release_cross ---"
+RELEASE_PKG = "tools/bazel"
+# Built in every release configuration besides the Go targets.
+RELEASE_EXTRA_TARGETS = (":pure_bd_has_no_cgo_only_deps",)
+# Visibilities that let //tools/bazel:release_cross depend on a target.
+RELEASE_VISIBLE = ('"//visibility:public"', '"//:__subpackages__"', '"//tools/bazel:__pkg__"')
+# A buildifier-formatted go_library/go_binary call and its name.
+GO_RULE_RE = re.compile(r'^(go_library|go_binary)\(\n    name = "([^"]+)",\n(.*?)^\)', re.DOTALL | re.MULTILINE)
+# How a cgo-only target opts out of pure builds (see
+# internal/storage/embeddeddolt/cmd/BUILD.bazel and the "cgo-only" tag in
+# scripts/bazel_policy_test.go).
+CGO_ONLY_TAG = '"cgo-only"'
+REPO_BEGIN = "# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---"
+REPO_END = "# --- end repo_files ---"
+BLOCK_RES = tuple(
+    re.compile(r"\n*" + re.escape(begin) + r".*?" + re.escape(end) + r"\n*", re.DOTALL)
+    for begin, end in ((BEGIN, END), (RELEASE_BEGIN, RELEASE_END), (REPO_BEGIN, REPO_END))
+)
 SKIP_DIRS = {"testdata", "node_modules"}
+
+# Untracked build output and debris (.gitignore's patterns that can appear in
+# any directory) that must not become test inputs on a developer machine. No
+# tracked file matches them.
+REPO_FILES_EXCLUDE = (
+    "**/*.db",
+    "**/*.exe",
+    "**/*.out",
+    "**/*.prof",
+    "**/*.pyc",
+    "**/*.test",
+    "**/__pycache__/**",
+    "**/node_modules/**",
+)
+
+# The same at the repository root only: the git directory, Bazel's convenience
+# symlinks (a glob follows them into the output tree), local binaries,
+# per-developer Bazel rc files (they hold remote endpoints) and tool state.
+ROOT_REPO_FILES_EXCLUDE = (
+    ".agents/**",
+    ".claude/*.lock",
+    ".claude/*.log",
+    ".claude/settings.local.json",
+    ".amp/**",
+    ".augment/**",
+    ".bazelrc.local",
+    ".codex/**",
+    ".cursor/**",
+    ".direnv/**",
+    ".envrc",
+    ".git/**",
+    ".idea/**",
+    ".logs/**",
+    ".vscode/**",
+    "bazel-*/**",
+    "bd",
+    "bd-fixed",
+    "bd-original",
+    "bd-test",
+    "bd_test",
+    "beads",
+    "go.work",
+    "go.work.sum",
+    "history/**",
+    "mcp_agent_mail/**",
+    "npm-package/bin/*.tar.gz",
+    "npm-package/bin/*.zip",
+    "npm-package/bin/CHANGELOG.md",
+    "npm-package/bin/LICENSE",
+    "npm-package/bin/README.md",
+    "npm-package/bin/bd",
+    "npm-package/package-lock.json",
+    "output",
+    "result",
+    "state.json",
+    "user.bazelrc",
+)
+
+# Who may read //:repo_files: the repository-policy tests.
+REPO_FILES_VISIBILITY = (
+    "//scripts:__pkg__",
+    "//scripts/repochecks:__pkg__",
+    "//test/docsync:__pkg__",
+)
 
 
 def packages_under(root: str) -> list[str]:
@@ -98,15 +203,95 @@ def block(pkg: str, tree_members: list[str] | None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def rewrite(path: str, new_block: str | None, check: bool) -> bool:
-    """Bring path's managed block up to date; return True if it was stale.
+def repo_files_block(pkg: str, packages: list[str]) -> str:
+    """The repo_files block of pkg ("." is the root, which aggregates)."""
+    root = pkg == "."
+    exclude = REPO_FILES_EXCLUDE + (ROOT_REPO_FILES_EXCLUDE if root else ())
+    lines = [
+        REPO_BEGIN,
+        "",
+        "filegroup(",
+        '    name = "repo_files",',
+        "    srcs = glob(",
+        '        ["**"],',
+        "        exclude = [",
+    ]
+    lines += [f'            "{e}",' for e in sorted(exclude)]
+    # No allow_empty: every package holds at least its BUILD.bazel.
+    lines += ["        ],"]
+    if root:
+        lines += ["    ) + ["]
+        lines += [f'        "//{p}:repo_files",' for p in packages if p != "."]
+        lines += ["    ],", "    visibility = ["]
+        lines += [f'        "{v}",' for v in REPO_FILES_VISIBILITY]
+        lines += ["    ],"]
+    else:
+        lines += ["    ),", '    visibility = ["//:__pkg__"],']
+    lines += [")", "", REPO_END]
+    return "\n".join(lines) + "\n"
+
+
+def in_nested_module(pkg: str) -> bool:
+    """Whether pkg belongs to a Go module other than the root one (its own
+    go.mod at or above it, below the root), which `go build ./...` skips."""
+    parts = [] if pkg == "." else pkg.split("/")
+    return any(os.path.exists(os.path.join(*parts[:i], "go.mod")) for i in range(1, len(parts) + 1))
+
+
+def go_targets(packages: list[str]) -> list[str]:
+    """Every go_library and go_binary that a pure build can compile."""
+    labels = []
+    for pkg in packages:
+        # tools/nogo (the nogo analyzers' own module) is not part of
+        # `go build ./...` or of any release.
+        if in_nested_module(pkg):
+            continue
+        with open(os.path.join(pkg, "BUILD.bazel")) as f:
+            src = f.read()
+        for kind, name, body in GO_RULE_RE.findall(src):
+            # cgo-only: `go build ./...` skips it with CGO_ENABLED=0.
+            # testonly: a fixture under testdata/, which `./...` excludes.
+            # Not visible here: a main package's private embedded library
+            # or a package-restricted helper; its package is covered by a
+            # visible target (or the script's package check fails).
+            if CGO_ONLY_TAG in body or "testonly = True" in body:
+                continue
+            vis = re.search(r"^    visibility = \[(.*?)\]", body, re.DOTALL | re.MULTILINE)
+            if not vis or not any(v in vis.group(1) for v in RELEASE_VISIBLE):
+                continue
+            path = "" if pkg == "." else pkg
+            labels.append(f"//{path}:{name}")
+    return sorted(labels)
+
+
+def release_cross_block(targets: list[str]) -> str:
+    lines = [
+        RELEASE_BEGIN,
+        "",
+        "# manual: needs --//tools/bazel:release_platforms (see above).",
+        "release_cross_build(",
+        '    name = "release_cross",',
+        '    tags = ["manual"],',
+        "    targets = [",
+    ]
+    lines += [f'        "{t}",' for t in sorted(RELEASE_EXTRA_TARGETS) + targets]
+    lines += ["    ],", ")", "", RELEASE_END]
+    return "\n".join(lines) + "\n"
+
+
+def rewrite(path: str, new_blocks: list[str], check: bool) -> bool:
+    """Bring path's managed blocks up to date; return True if any was stale.
 
     In check mode the file is left alone and the needed change is printed.
     """
     with open(path) as f:
         src = f.read()
-    stripped = BLOCK_RE.sub("\n", src).rstrip("\n") + "\n"
-    out = stripped if new_block is None else stripped + "\n" + new_block
+    stripped = src
+    for block_re in BLOCK_RES:
+        stripped = block_re.sub("\n", stripped)
+    out = stripped.rstrip("\n") + "\n"
+    for new_block in new_blocks:
+        out += "\n" + new_block
     if out == src:
         return False
     if check:
@@ -150,18 +335,19 @@ def main(argv: list[str]) -> int:
             wanted.setdefault(pkg, None)
         wanted[root] = members
     stale = []
-    for pkg in packages_under("."):
+    packages = packages_under(".")
+    for pkg in packages:
         path = os.path.join(pkg, "BUILD.bazel")
-        if pkg in wanted:
-            changed = rewrite(path, block(pkg, wanted[pkg]), check)
-        else:
-            with open(path) as f:
-                changed = BEGIN in f.read() and rewrite(path, None, check)
+        blocks = [block(pkg, wanted[pkg])] if pkg in wanted else []
+        if pkg == RELEASE_PKG:
+            blocks.append(release_cross_block(go_targets(packages)))
+        blocks.append(repo_files_block(pkg, packages))
+        changed = rewrite(path, blocks, check)
         if changed:
             stale.append(path)
     if check and stale:
         print(
-            f"go_srcs.py: {len(stale)} stale go_srcs block(s): {', '.join(stale)}; run `make bazel-sync`",
+            f"go_srcs.py: {len(stale)} stale managed block(s): {', '.join(stale)}; run `make bazel-sync`",
             file=sys.stderr,
         )
         return 1

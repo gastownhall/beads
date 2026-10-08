@@ -1,0 +1,57 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+# config.go embeds .golangci.yml; go:embed cannot reach outside the package,
+# so Bazel copies it in. (The tools/nogo module is built by Bazel only.)
+genrule(
+    name = "golangci_yml",
+    srcs = ["//:.golangci.yml"],
+    outs = ["golangci.yml"],
+    cmd = "cp $< $@",
+)
+
+go_library(
+    name = "golangci",
+    srcs = [
+        "config.go",
+        "wrap.go",
+    ],
+    embedsrcs = [":golangci.yml"],  # keep
+    importpath = "github.com/steveyegge/beads/tools/nogo/internal/golangci",
+    visibility = ["//tools/nogo:__subpackages__"],
+    deps = [
+        "@in_gopkg_yaml_v3//:yaml_v3",
+        "@org_golang_x_tools//go/analysis",
+    ],
+)
+
+go_test(
+    name = "golangci_test",
+    srcs = ["wrap_test.go"],
+    deps = [
+        ":golangci",
+        "//tools/nogo/internal/analyzertest",
+        "@org_golang_x_tools//go/analysis",
+    ],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

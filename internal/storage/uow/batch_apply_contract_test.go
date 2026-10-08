@@ -115,6 +115,9 @@ func TestBatchApplyContract(t *testing.T) {
 	t.Run("NormalizesTheWaitsForGate", func(t *testing.T) {
 		conformance.RunBatchApplyNormalizesTheWaitsForGate(t, ctx, fixture)
 	})
+	t.Run("StampsSpawnerIDOnlyWhenNamed", func(t *testing.T) {
+		conformance.RunBatchApplyStampsSpawnerIDOnlyWhenNamed(t, ctx, fixture)
+	})
 	t.Run("SplicesAForwardMetadataRef", func(t *testing.T) {
 		conformance.RunBatchApplySplicesAForwardMetadataRef(t, ctx, fixture)
 	})

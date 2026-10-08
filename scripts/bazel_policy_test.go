@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // Policy tests for the side-by-side Bazel configuration. They are plain Go
@@ -443,6 +445,68 @@ func gitRepoAvailable(root string) bool {
 	return exec.Command("git", "-C", root, "rev-parse", "--is-inside-work-tree").Run() == nil
 }
 
+// repoFiles lists the repository's tracked files under root, repo-relative and
+// slash-separated, each a regular file (or, in a local runfiles tree, a
+// symlink to one). Under `go test` in a git checkout that is `git ls-files`
+// less what the working tree no longer holds; under Bazel it is the runfiles
+// tree, whose repository part is //:repo_files (every tracked file outside
+// .bazelignore, tools/bazel/go_srcs.py); elsewhere every file under root.
+func repoFiles(t *testing.T, root string) []string {
+	t.Helper()
+	var files []string
+	if bazeltest.IsBazel() || !gitRepoAvailable(root) {
+		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !isFileOrFileLink(path, d) {
+				return nil
+			}
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			files = append(files, filepath.ToSlash(rel))
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+	} else {
+		out, err := exec.Command("git", "-C", root, "ls-files", "-z").Output()
+		if err != nil {
+			t.Fatalf("git ls-files: %v", err)
+		}
+		for _, rel := range strings.Split(strings.TrimRight(string(out), "\x00"), "\x00") {
+			info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(rel)))
+			if err != nil || !info.Mode().IsRegular() {
+				continue // deleted in the worktree, submodule, or symlink
+			}
+			files = append(files, rel)
+		}
+	}
+	// Sanity: an empty or partial runfiles tree would pass every scan.
+	if len(files) < 1000 {
+		t.Fatalf("found only %d repository files under %s; the listing is broken", len(files), root)
+	}
+	return files
+}
+
+// isFileOrFileLink reports whether a WalkDir entry is a regular file or a
+// symlink to one. Bazel's local runfiles trees are symlink forests, so a walk
+// that skipped symlinks would see no file there; a symlink to a directory
+// (Bazel's bazel-* convenience links in a checkout) is never followed.
+func isFileOrFileLink(path string, d os.DirEntry) bool {
+	if d.Type().IsRegular() {
+		return true
+	}
+	if d.Type()&os.ModeSymlink == 0 {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
 func TestBazelNoRemoteEndpointsInTrackedFiles(t *testing.T) {
 	// Fixtures are assembled at runtime so this file never contains a literal
 	// endpoint itself.
@@ -554,22 +618,11 @@ func TestBazelNoRemoteEndpointsInTrackedFiles(t *testing.T) {
 	}
 
 	root := bazelPolicyRoot(t)
-	if !gitRepoAvailable(root) {
-		t.Skip("not a git checkout (e.g. Bazel sandbox); tracked-file scan runs under go test and CI")
-	}
-	out, err := exec.Command("git", "-C", root, "ls-files", "-z", "--", "*bazelrc*", "*.md", ".github").Output()
-	if err != nil {
-		t.Fatalf("git ls-files: %v", err)
-	}
 	var hits []endpointHit
-	for _, rel := range strings.Split(strings.TrimRight(string(out), "\x00"), "\x00") {
+	for _, rel := range repoFiles(t, root) {
 		scan, strict := remoteScanKind(rel)
 		if !scan {
 			continue
-		}
-		info, err := os.Lstat(filepath.Join(root, rel))
-		if err != nil || !info.Mode().IsRegular() {
-			continue // deleted in the worktree, submodule, or symlink
 		}
 		content, err := os.ReadFile(filepath.Join(root, rel))
 		if err != nil {
@@ -589,27 +642,28 @@ func TestBazelNoRemoteEndpointsInTrackedFiles(t *testing.T) {
 // this file does not match itself.
 func TestNoLocalPlanPathsInTrackedFiles(t *testing.T) {
 	root := bazelPolicyRoot(t)
-	if !gitRepoAvailable(root) {
-		t.Skip("not a git checkout (e.g. Bazel sandbox); tracked-file scan runs under go test and CI")
-	}
-	needle := "beads-" + "bazel-plan"
-	out, err := exec.Command("git", "-C", root, "grep", "-n", "-I", "-F", "-e", needle).Output()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-			return // no matches
+	needle := []byte("beads-" + "bazel-plan")
+	for _, rel := range repoFiles(t, root) {
+		content, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
 		}
-		t.Fatalf("git grep: %v", err)
-	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		t.Errorf("%s: tracked file references a local, non-repo %s path; point at an in-repo doc, bead or PR instead", line, needle)
+		if bytes.IndexByte(content, 0) >= 0 {
+			continue // binary, as git grep -I
+		}
+		for n, line := range bytes.Split(content, []byte("\n")) {
+			if bytes.Contains(line, needle) {
+				t.Errorf("%s:%d: tracked file references a local, non-repo %s path; point at an in-repo doc, bead or PR instead", rel, n+1, needle)
+			}
+		}
 	}
 }
 
 // --- generated go_srcs filegroups are current -------------------------------
 
-// These checks walk the source checkout, which is not declared as Bazel data,
-// so they run under plain `go test` (the gating lane) and skip under Bazel.
+// These checks walk the source checkout: under Bazel, //:repo_files, which
+// holds every package's BUILD.bazel (a package missing its repo_files block
+// is what `make bazel-sync-check` fails on).
 
 var (
 	treeGoSrcsRe  = regexp.MustCompile(`(?s)filegroup\(\s*name\s*=\s*"tree_go_srcs",\s*srcs\s*=\s*\[(.*?)\]`)
@@ -682,8 +736,8 @@ func diffStringSets(want, got []string) (missing, extra []string) {
 }
 
 // goSrcsTrees are the tools/bazel/go_srcs.py TREES roots. A test that walks
-// one of these trees under Bazel sees only the packages its tree_go_srcs
-// lists, so an unlisted package makes the walk pass vacuously.
+// one of these trees through its tree_go_srcs sees only the packages listed
+// there, so an unlisted package makes that walk pass vacuously.
 var goSrcsTrees = []string{"internal/storage"}
 
 func TestBazelTreeGoSrcsListsEveryPackage(t *testing.T) {
@@ -695,9 +749,6 @@ func TestBazelTreeGoSrcsListsEveryPackage(t *testing.T) {
 		t.Errorf("diffStringSets fixture: missing=%v extra=%v", missing, extra)
 	}
 
-	if os.Getenv("TEST_SRCDIR") != "" {
-		t.Skip("walks the source checkout; runs under go test")
-	}
 	root := sourceRepoRoot(t)
 	script := readPolicyFile(t, root, "tools/bazel/go_srcs.py")
 	for _, tree := range goSrcsTrees {
@@ -729,13 +780,7 @@ func TestBazelTreeGoSrcsListsEveryPackage(t *testing.T) {
 // TestBazelGoSrcsBlocksCurrent runs `tools/bazel/go_srcs.py --check`, which
 // compares every managed block with what the script would generate.
 func TestBazelGoSrcsBlocksCurrent(t *testing.T) {
-	if os.Getenv("TEST_SRCDIR") != "" {
-		t.Skip("reads the source checkout; runs under go test")
-	}
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 not available; TestBazelTreeGoSrcsListsEveryPackage still guards tree membership")
-	}
+	python := requireHostTool(t, "python3")
 	cmd := exec.Command(python, filepath.Join("tools", "bazel", "go_srcs.py"), "--check")
 	cmd.Dir = sourceRepoRoot(t)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -745,13 +790,11 @@ func TestBazelGoSrcsBlocksCurrent(t *testing.T) {
 
 // --- no Bazel packages under the docs trees ---------------------------------
 
-// //:docsync_files globs docs/** and engdocs/**; a glob stops at a package
-// boundary, so a BUILD file under either tree would silently drop that
-// subtree from //test/docsync's orphan and link checks.
+// docs/ and engdocs/ are content (the Mintlify site and the engineering docs)
+// that the root package's repo_files glob covers; they hold no code, so a
+// BUILD file under either tree is a mistake (it would also split the subtree
+// into a package of its own).
 func TestBazelNoPackagesUnderDocsTrees(t *testing.T) {
-	if os.Getenv("TEST_SRCDIR") != "" {
-		t.Skip("walks the source checkout; runs under go test")
-	}
 	root := sourceRepoRoot(t)
 	for _, tree := range []string{"docs", "engdocs"} {
 		err := filepath.WalkDir(filepath.Join(root, tree), func(path string, d os.DirEntry, err error) error {
@@ -763,7 +806,7 @@ func TestBazelNoPackagesUnderDocsTrees(t *testing.T) {
 			}
 			if !d.IsDir() && (d.Name() == "BUILD.bazel" || d.Name() == "BUILD") {
 				rel, _ := filepath.Rel(root, path)
-				t.Errorf("%s: no Bazel package may live under %s/ (it would cut that subtree out of //:docsync_files)", filepath.ToSlash(rel), tree)
+				t.Errorf("%s: no Bazel package may live under %s/ (docs trees are content, not code)", filepath.ToSlash(rel), tree)
 			}
 			return nil
 		})
@@ -783,7 +826,6 @@ var allowedBazelTestTags = map[string]string{
 	"host-tools":      "needs host tools (bash/git/make/jq/...) beyond the test wrapper's",
 	"no-remote-exec":  "must run on the Bazel client's host, never on a remote worker",
 	"no-remote-cache": "result depends on the host, so it is neither read from nor uploaded to the remote cache",
-	"requires-docker": "needs a docker daemon; excluded from --config=prcore/ci, run by --config=docker",
 	// No no-remote-exec: the target starts its own dolt sql-server from the
 	// pinned dolt in its runfiles, so it runs on any worker, and a server that
 	// cannot start fails it rather than skipping, so its cached result holds.
@@ -803,6 +845,18 @@ var allowedBazelTestTags = map[string]string{
 	// zero tests, which check_testcases.py rejects and equivalence.py can
 	// only note. gazelle keeps the hand-written tags attribute.
 	"integration-only": "holds tests only under the integration build tag; excluded from --config=prcore/ci, run by --config=integration",
+	// For a non-Go sh_test (no Go testcases in its test.xml, which the
+	// integration lane's check_testcases.py would reject) that runs the
+	// release-shaped bd_for_tests: the PR-core lane builds bd without the
+	// integration tag, as releases are, and running it again under the
+	// integration build would only repeat it against a test-shaped bd.
+	"pr-core-only": "runs only in --config=prcore/ci; excluded from --config=integration",
+	// For a go_binary whose every source file is `//go:build cgo`: it also
+	// sets target_compatible_with incompatible under //tools/bazel:pure, and
+	// tools/bazel/go_srcs.py and scripts/ci/bazel-release-cross-compile.sh
+	// leave it out of //tools/bazel:release_cross by this tag (`go build
+	// ./...` skips the package with CGO_ENABLED=0).
+	"cgo-only": "a go_binary with only cgo sources: incompatible with pure builds and left out of //tools/bazel:release_cross",
 }
 
 // bazelPRCoreExcludedTags are the tags whose targets never run in the PR-core
@@ -811,7 +865,7 @@ var allowedBazelTestTags = map[string]string{
 // and vice versa (TestBazelPRCoreExcludedTagsMatchTaxonomy), so a new lane
 // tag lands here, and through bazelIntegrationExcludedTags in the
 // integration lane's filter too.
-var bazelPRCoreExcludedTags = []string{"requires-docker", "dolt-server", "dolt-server-proxied", "dolt-server-integration", "dolt-server-cmd", "embedded", "manual", "integration-only"}
+var bazelPRCoreExcludedTags = []string{"dolt-server", "dolt-server-proxied", "dolt-server-integration", "dolt-server-cmd", "embedded", "manual", "integration-only"}
 
 // bazelIntegrationRunsTags are the PR-core-excluded tags --config=integration
 // runs: the integration lane is main.yml's integration jobs, whose
@@ -819,10 +873,14 @@ var bazelPRCoreExcludedTags = []string{"requires-docker", "dolt-server", "dolt-s
 // other lane's variant stays out of it.
 var bazelIntegrationRunsTags = map[string]bool{"integration-only": true}
 
+// bazelPRCoreOnlyTags are the tags the PR-core lane runs and the integration
+// lane does not.
+var bazelPRCoreOnlyTags = []string{"pr-core-only"}
+
 // bazelIntegrationExcludedTags is bazelPRCoreExcludedTags less the tags the
-// integration lane runs.
+// integration lane runs, plus bazelPRCoreOnlyTags.
 func bazelIntegrationExcludedTags() []string {
-	var tags []string
+	tags := append([]string(nil), bazelPRCoreOnlyTags...)
 	for _, tag := range bazelPRCoreExcludedTags {
 		if !bazelIntegrationRunsTags[tag] {
 			tags = append(tags, tag)
@@ -855,12 +913,9 @@ func TestBazelPRCoreExcludedTagsMatchTaxonomy(t *testing.T) {
 // they must also carry: no-remote-exec, or remote execution would run them on a
 // worker that lacks the tool or daemon; and for host-tools, no-remote-cache,
 // because the action key does not cover the host's tool inventory, so a result
-// produced on one host must not be served to another. (requires-docker
-// targets fail rather than skip without their daemon, so their passes are
-// safe to share.)
+// produced on one host must not be served to another.
 var bazelTagsRequiring = map[string][]string{
-	"host-tools":      {"no-remote-exec", "no-remote-cache"},
-	"requires-docker": {"no-remote-exec"},
+	"host-tools": {"no-remote-exec", "no-remote-cache"},
 }
 
 var (
@@ -935,8 +990,8 @@ func checkBazelBuildTags(name, build string) []error {
 
 func TestBazelTestTagsFollowTaxonomy(t *testing.T) {
 	for name, good := range map[string]string{
-		"docker": "# Tags:\n#   requires-docker: needs a daemon.\n#   no-remote-exec: the daemon is local.\n" +
-			"sh_test(\n    name = \"x\",\n    tags = [\n        \"no-remote-exec\",\n        \"requires-docker\",\n    ],\n)\n",
+		"multi-line": "# Tags:\n#   dolt-server: hermetic servers.\n#   manual: a build input.\n" +
+			"sh_test(\n    name = \"x\",\n    tags = [\n        \"dolt-server\",\n        \"manual\",\n    ],\n)\n",
 		"host-tools": "# host-tools, no-remote-exec, no-remote-cache: git.\n" +
 			"go_test(\n    name = \"x\",\n    tags = [\"host-tools\", \"no-remote-exec\", \"no-remote-cache\"],  # why\n)\n",
 	} {
@@ -949,7 +1004,7 @@ func TestBazelTestTagsFollowTaxonomy(t *testing.T) {
 		"no comment":      "go_test(\n    name = \"x\",\n    tags = [\"manual\"],\n)\n",
 		"comment too far": "# manual: harness\n\ngo_test(\n    name = \"x\",\n    tags = [\"manual\"],\n)\n",
 		"other rule's":    "# manual: harness\ngo_test(name = \"a\", tags = [\"manual\"])\n\ngo_test(\n    name = \"b\",\n    tags = [\"manual\"],\n)\n",
-		"docker unpinned": "# requires-docker: daemon\ngo_test(\n    name = \"x\",\n    tags = [\"requires-docker\"],\n)\n",
+		"docker tag":      "# requires-docker, no-remote-exec: daemon\ngo_test(\n    name = \"x\",\n    tags = [\"requires-docker\", \"no-remote-exec\"],\n)\n",
 		"not a literal":   "# manual\ngo_test(\n    name = \"x\",\n    tags = MANUAL,\n)\n",
 		"literal plus":    "# manual\ngo_test(\n    name = \"x\",\n    tags = [\"manual\"] + MORE,\n)\n",
 		"host cacheable":  "# host-tools no-remote-exec\ngo_test(\n    name = \"x\",\n    tags = [\"host-tools\", \"no-remote-exec\"],\n)\n",
@@ -960,9 +1015,6 @@ func TestBazelTestTagsFollowTaxonomy(t *testing.T) {
 		}
 	}
 
-	if os.Getenv("TEST_SRCDIR") != "" {
-		t.Skip("walks every BUILD file in the source checkout; runs under go test")
-	}
 	root := sourceRepoRoot(t)
 	pkgs, err := bazelPackagesUnder(root, ".")
 	if err != nil {
@@ -1103,13 +1155,13 @@ func TestBazelrcPrcoreExcludesNonPRTags(t *testing.T) {
 	}
 	for name, rc := range map[string]string{
 		"missing":        "test:ci --keep_going\n",
-		"no docker":      "test:prcore --test_tag_filters=-dolt-server,-embedded,-manual\n",
-		"no dolt-server": "test:prcore --test_tag_filters=-requires-docker,-embedded,-manual\n",
-		"ci override": "test:prcore --test_tag_filters=-requires-docker,-embedded,-manual\n" +
-			"test:ci --config=prcore\ntest:ci --test_tag_filters=requires-docker\n",
-		"second prcore line": "test:prcore --test_tag_filters=-requires-docker,-embedded,-manual\n" +
+		"no embedded":    "test:prcore --test_tag_filters=-dolt-server,-manual\n",
+		"no dolt-server": "test:prcore --test_tag_filters=-embedded,-manual\n",
+		"ci override": "test:prcore --test_tag_filters=-dolt-server,-embedded,-manual\n" +
+			"test:ci --config=prcore\ntest:ci --test_tag_filters=dolt-server\n",
+		"second prcore line": "test:prcore --test_tag_filters=-dolt-server,-embedded,-manual\n" +
 			"test:prcore --test_tag_filters=-manual\n",
-		"transitive": "test:prcore --test_tag_filters=-requires-docker,-embedded,-manual\n" +
+		"transitive": "test:prcore --test_tag_filters=-dolt-server,-embedded,-manual\n" +
 			"test:ci --config=prcore\nbuild:nightly --config ci --test_tag_filters=\n",
 	} {
 		if err := checkBazelrcPrcoreTagFilter(rc); err == nil {
@@ -1150,23 +1202,16 @@ func TestBazelrcPrcoreMatchesPRCoreParallel(t *testing.T) {
 	t.Fatalf(".bazelrc lacks %q (pr-core.sh runs go test -parallel %s)", want, m[1])
 }
 
-// Docker-lane results depend on host state no action key sees (daemon, dolt
-// image, network), so they must always execute, like the container jobs'
-// -count=1; and no remote-exec run may upload a locally executed result to
-// the shared cache.
-func TestBazelrcDockerLaneNeverCached(t *testing.T) {
-	lines := map[string]bool{}
+// No remote-exec run may upload a locally executed result (a no-remote-exec
+// test's, which depends on the host) to the shared cache.
+func TestBazelrcRemoteExecUploadsNoLocalResults(t *testing.T) {
+	const want = "build:remote-exec --noremote_upload_local_results"
 	for _, line := range strings.Split(readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc"), "\n") {
-		lines[strings.TrimSpace(line)] = true
-	}
-	for _, want := range []string{
-		"test:docker --nocache_test_results",
-		"build:remote-exec --noremote_upload_local_results",
-	} {
-		if !lines[want] {
-			t.Errorf(".bazelrc lacks %q", want)
+		if strings.TrimSpace(line) == want {
+			return
 		}
 	}
+	t.Errorf(".bazelrc lacks %q", want)
 }
 
 // --- fork cache --------------------------------------------------------------
@@ -1468,10 +1513,11 @@ func sameTagSet(a, b map[string]bool) bool {
 }
 
 // TestBazelIntegrationLaneMatchesMainWorkflow keeps --config=integration in
-// step with the integration-tagged `go test` it replaced on push to main
-// (main.yml's former "Main Linux integration" jobs), whose one remaining Go
-// twin is nightly.yml's Full Test Suite: the same build tags, race,
-// BEADS_TEST_SKIP=dolt, and none of the variants that run does not use.
+// step with the integration-tagged `go test` it replaced (main.yml's former
+// "Main Linux integration" jobs and nightly.yml's retired Full Test Suite,
+// `go test -race -tags=integration,gms_pure_go ./...` with
+// BEADS_TEST_SKIP=dolt): the same build tags, race, BEADS_TEST_SKIP=dolt, and
+// none of the variants that run does not use.
 // It also requires gazelle to see the same tags (root BUILD.bazel
 // `gazelle:build_tags`): gazelle drops a file whose build constraint names a
 // tag it does not know, so without it no BUILD file would list the integration
@@ -1480,22 +1526,7 @@ func sameTagSet(a, b map[string]bool) bool {
 // through `make bazel-sync`, whose staleness bazel.yml already fails on.
 func TestBazelIntegrationLaneMatchesMainWorkflow(t *testing.T) {
 	root := bazelPolicyRoot(t)
-	nightly := readCIWorkflow(t, "nightly.yml").job(t, "full-test")
-	var want map[string]bool
-	for _, step := range nightly.Steps {
-		if m := regexp.MustCompile(`go test .*-race -tags=(\S+) .*-timeout=30m \./\.\.\.`).FindStringSubmatch(step.Run); m != nil {
-			if want != nil {
-				t.Fatalf("nightly.yml full-test: more than one integration `go test -race -tags=...` step")
-			}
-			want = tagSet(m[1])
-			if step.Env["BEADS_TEST_SKIP"] != "dolt" {
-				t.Fatal("nightly.yml full-test no longer runs with BEADS_TEST_SKIP=dolt; update test:integration")
-			}
-		}
-	}
-	if !want["integration"] {
-		t.Fatalf("nightly.yml full-test: want one `go test -race -tags=...integration... -timeout=30m ./...` step, got tags %v", want)
-	}
+	want := tagSet("integration,gms_pure_go")
 
 	bazelrc := readPolicyFile(t, root, ".bazelrc")
 	lines := map[string]bool{}
@@ -1508,7 +1539,7 @@ func TestBazelIntegrationLaneMatchesMainWorkflow(t *testing.T) {
 		}
 	}
 	if !sameTagSet(laneTags, want) {
-		t.Errorf(".bazelrc build:integration tags = %v, want nightly.yml full-test's %v", laneTags, want)
+		t.Errorf(".bazelrc build:integration tags = %v, want %v", laneTags, want)
 	}
 	if err := checkBazelrcIntegrationLane(bazelrc); err != nil {
 		t.Error(err)

@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 #
-# Single conformance entrypoint. CI runs this verbatim; run it locally the same way:
+# Local conformance entrypoint, under plain go test:
 #
 #   ./scripts/conformance.sh
 #
 # Three tiers exercise the storage conformance contract: the in-process
 # storage corpus against the embedded-Dolt oracle, the real-binary CLI
 # corpus, then the served HTTP client/role corpus against a real server.
+# CI runs the first two tiers as Bazel targets, remotely:
+#
+#   bazel test --config=embedded //internal/storage/embeddeddolt:embeddeddolt_conformance_core_test \
+#     //internal/storage/embeddeddolt:embeddeddolt_conformance_audit_test
+#   bazel test --config=integration //test/conformance:conformance_test
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."

@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `bd create --graph` now plans its batch through `issueops.BatchApplier`
+  instead of the old `buildDomainGraphPlan` path, so a graph create gets the
+  same atomic multi-row semantics as `bd batch apply`. A `waits-for` edge's
+  `metadata.spawner_id` is stamped only when that edge names a spawner
+  (never defaulted onto an edge that names none), and `thread_id` now survives
+  translation into the batch request alongside every other
+  `GraphApplyEdge`/`GraphApplyNodeDep` field — pinned by a reflection-based
+  field-coverage test (`TestBuildGraphApplyBatchRequestFieldsSurvive`) that
+  fails closed if a future field is added to either struct without an
+  explicit decision about where it goes. The hierarchy/cycle rejection
+  scenarios this path's local gates cover (blocking through existing or
+  planned hierarchy, transitive external-parent paths, reverse parent-to-child
+  edges, cycles hidden in an inline dep, combined scheduling cycles, the end
+  gate alone with the per-edge cycle probe skipped) are exercised against a
+  real Dolt store, not just skipped placeholders. A graph plan whose translated
+  BatchApplier items (nodes, edges and deferred assignments combined) exceed
+  `issueops.MaxApplyBatchItems` (1000) is now refused outright with
+  `GraphApplyTooLargeError` rather than silently chunked across several
+  transactions — `bd create --graph` promises one atomic request, so a plan
+  over the cap must be split by the caller into multiple `bd create --graph`
+  calls instead.
+- `--if-revision` (gastownhall/beads#4682) is extended to `bd reopen`, the
+  one lifecycle verb #7203 did not add it to, reusing the same
+  `issueops.ReopenRequest.ExpectedVersion` field the library already
+  exposed and the same `parseIfRevisionFlag` / `requireSingleIfRevisionID`
+  / `reportIfRevisionFailure` helpers #7203 introduced for the other four
+  verbs — no new CLI surface, no new JSON body shape. A guarded reopen of an
+  issue that is already open is still judged against the guard on both
+  routes: a stale revision exits 13, and a matching one is the usual
+  "already open" no-op. A faithful port of
+  gc's (gascity) `bdstore_conditional.go` decode logic is now run against a
+  real built `bd` for all five guarded verbs
+  (`TestEmbeddedGCConditionalMatcherDecode`), confirming gc's matcher decodes
+  #7203's numeric-only `expected_revision`/`current_revision` body exactly
+  — no decimal-string twin fields are needed, since `encoding/json` decodes
+  a JSON number straight into an `int64` struct field with no lossy
+  `float64` intermediate. The proxied-server route (`*_proxied_server.go`'s
+  uow-backed preflight/apply path), previously untested for `--if-revision`
+  on any verb, now has coverage for all five.
 - `backends.Backend` gains an optional `OpenWith(ctx, beadsDir, OpenOptions)`
   and a `Remote bool` field for a registered extension backend (for example
   an HTTP client registrant). `OpenOptions{Credential, HTTPClient,
@@ -75,6 +114,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `bd create --graph` now stores a plan whose path from a node's parent to
+  the node runs through a `waits-for` edge; the graph-only preflight that
+  walked every ready-work edge used to refuse it. The plan now goes through
+  the same end gate as `bd dep add` and `bd batch apply`, which walks only
+  the scheduling edges (`blocks`, `conditional-blocks`, `parent-child`) and
+  stores this shape too. Avoid it in plans: once the `waits-for` spawner has
+  an open child, every issue in the shape, that child included, stays
+  blocked and none is ever ready. The same path through scheduling edges
+  alone is still refused.
 - `bd preflight --fix --json` no longer returns a `Version sync` fix result:
   version updates must keep all release surfaces aligned via `scripts/update-versions.sh`.
 - Release-tag pushes require Go and reject batches containing different release versions.
@@ -144,6 +192,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is still ridden out within one command. A backend that drops a connection
   after the greeting, a dial timeout, and every refusal from a managed (local
   sidecar) backend keep the full transient retry.
+- **`bd ready --explain` no longer reports a pinned dependency as a resolved
+  blocker.** The ready query skips a pinned target exactly as it skips a closed
+  one, so a `blocks` edge onto a pinned bead never fences its dependent — but
+  the explanation listed every blocking edge of a ready issue under
+  `Resolved blockers`, status unread, and a bead wired behind a long-lived
+  pinned bring-up reported itself satisfied while its precondition was unmet.
+  Each blocking edge is now sorted by the target's status: closed under
+  `Resolved blockers` (and `resolved_blockers`), pinned under
+  `Pinned dependencies (never block)` (`pinned_dependencies`), and any other
+  status under `Open dependencies (not blocking)` (`open_dependencies`) — the
+  shape #6066 reports for a foreign-prefix blocker, now visible instead of
+  passing as resolved. `Reason` keeps its `N blocker(s) resolved` lead and
+  appends the pinned and open counts as clauses. Both routes fetch the ready
+  issues' dependency targets alongside the blockers they already fetched.
+  Pinned-never-blocks itself is unchanged.
+
 - **`bd list` no longer silently drops all but the last repeated filter flag.**
   `--status`, `--state`, and `--id` were plain string flags, so
   `bd list --status open --status closed --status pinned` kept only `pinned` —
@@ -1357,6 +1421,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `<rig>:<bead-id>` await value remains accepted for compatibility.
 
 ### Fixed
+
+- **`bd gate check` no longer reports an unreadable store as "pending".** The
+  bead arm of the check dropped the lookup error on the floor, so with dolt
+  down (or any backend or transport failure on the awaited bead's read) every
+  bead gate printed as still waiting and the command exited 0 — the same
+  output as a healthy, genuinely pending gate. A read of the workspace's own
+  store that fails for any reason other than not-found is now an error row
+  (`✗ <gate>: error checking - ...`), counted in the summary, and `bd close`
+  on such a gate keeps refusing (`could not check bead gate`, `--force` to
+  override) rather than letting a dead store read as satisfied. On the
+  classic and proxied routes alike, `bd gate check` now exits non-zero
+  whenever any gate it checks (gh, timer, or bead) could not be checked or
+  closed. A missing bead still stays pending, and for now so does a bead in
+  a prefix-routed rig whose store cannot be read: routing still reports that
+  failure as not-found.
 
 - **`routes.jsonl` prefixes containing a hyphen now route**
   ([#5048](https://github.com/gastownhall/beads/issues/5048)). Prefix routing

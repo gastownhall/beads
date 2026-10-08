@@ -44,6 +44,7 @@ var roleContractCases = []roleContract{
 		RunBatchApplyRefusesACrossPlaneEdgeBetweenRowsItCreated,
 		RunBatchApplyAcceptsAnExternalEdgeTarget,
 		RunBatchApplyNormalizesTheWaitsForGate,
+		RunBatchApplyStampsSpawnerIDOnlyWhenNamed,
 		RunBatchApplySplicesAForwardMetadataRef,
 		RunBatchApplySplicesASelfMetadataRef,
 		RunBatchApplyRefusesAMetadataRefNoItemDeclares,

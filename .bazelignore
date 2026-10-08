@@ -1,9 +1,7 @@
-examples/library-usage
-examples/bd-example-extension-go
-npm-package
+npm-package/node_modules
 website
 node_modules
-.claude
+.claude/worktrees
 .worktrees
 .beads
 .dolt

@@ -125,7 +125,7 @@ go_library(
 # this package with a real `go test -c` (integration.SubprocessRunner), which
 # needs the module's source tree and a module cache no action has. They run
 # only against a server: skipped under --config=integration
-# (BEADS_TEST_SKIP=dolt, like nightly.yml's full test), and run by
+# (BEADS_TEST_SKIP=dolt), and run by
 # dolt_server_full_test, which hands SubprocessRunner its own test binary
 # (BEADS_TEST_SUBPROCESS_BINARY) instead.
 go_test(
@@ -347,6 +347,7 @@ go_test(
         "testmain_helper_sentinel_test.go",
         "testmain_test.go",
         "transaction_borrow_test.go",
+        "transaction_ignored_checkout_test.go",
         "transaction_phase_test.go",
         "transaction_test.go",
         "transaction_wisp_lifecycle_persistence_test.go",
@@ -590,3 +591,25 @@ filegroup(
 )
 
 # --- end go_srcs ---
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__pkg__"],
+)
+
+# --- end repo_files ---

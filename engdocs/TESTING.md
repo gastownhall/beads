@@ -1,9 +1,61 @@
 # Testing Guide
 
 `TESTING.md` is the single authority for test commands, test selection, and
-test design in this repository. Use the commands here for local work. For the
-exact command behind a current CI check, inspect its workflow and corresponding
-`Makefile` target; the CI audit and cleanup plan are dated maintainer context.
+test design in this repository. Use the commands here for local work.
+
+## Building and Testing: Bazel Is the Gate
+
+Bazel is beads' build and test system. CI gates every pull request on the
+`bazel test` lanes in `.github/workflows/bazel.yml`, and several checks exist
+only as Bazel targets: nogo (go test's vet checks plus the golangci-lint
+linters, `tools/nogo`), gofmt (`//scripts/repochecks:fmt_test`) and the
+repository guards under `scripts/repochecks`. A plain `go test` runs none of
+them, so it is an inner-loop convenience CI does not enforce; a change is
+ready when its Bazel lanes pass.
+
+Install [Bazelisk](https://github.com/bazelbuild/bazelisk) as `bazel`; it
+reads `.bazelversion`. The pre-commit hook (nogo on staged packages) and the
+pre-push hook (the test lane) both need it.
+
+Where actions run is per machine, never committed:
+
+- **Contributors** read rbe-west's anonymous, read-only cache with
+  `--config=fork-cache`: everything CI already executed is a cache hit, misses
+  run on your machine, and nothing is uploaded. Make it the default with
+  `build --config=fork-cache` in your gitignored `.bazelrc.local`, or pass it
+  per command (`make test BAZEL_FLAGS=--config=fork-cache`).
+- **Maintainers** with an rbe-west client certificate execute remotely with
+  `--config=remote-exec`; the executor endpoint and TLS lines go in the
+  gitignored `user.bazelrc` or `.bazelrc.local` (see the `.bazelrc` comments).
+- **Agent hosts** whose `~/.bazelrc` names the executor need neither flag.
+
+Each lane, as bazel.yml runs it (add your `--config=fork-cache` or
+`--config=remote-exec` when it is not your default):
+
+| Lane (bazel.yml job) | Command | Notes |
+|---|---|---|
+| Test (`bazel-test`) | `make test`, i.e. `bazel test //... --config=ci` | PR Core's selection: race, `-short`, skips. Includes nogo, gofmt and the repository guards. The default gate for every Go change. |
+| Lint, all platforms | `make ci-pr-lint` | nogo natively plus the windows/amd64 and darwin/arm64 passes. `make lint-changed` covers only your changed packages. |
+| Pure-Go (`bazel-pure`) | `bazel build --config=pure //cmd/bd:bd //cmd/bd:bd_test` | cgo off. The job's cmd/bd test subset (`PURE_CMD_BD_TESTS`) and js/wasm step are in bazel.yml. |
+| Release cross-compile (`bazel-release-cross`) | `./scripts/ci/bazel-release-cross-compile.sh` | Every `go_library`/`go_binary` for each row of `scripts/ci/release-targets.txt`, cgo off, with nogo. |
+| Integration (`bazel-integration`) | `bazel test //... --config=integration` | The `integration`-tagged build. Runs with the read-only cache too. |
+| Dolt server (`bazel-doltserver`) | `bazel test //... --config=doltserver` | Starts its own `dolt sql-server` from the pinned binary; no docker. |
+| cmd/bd Dolt server (`bazel-cmd-dolt`) | `bazel test //cmd/bd:bd_dolt_server_test --config=doltserver-cmd` | 16 shards of the integration-tagged cmd/bd suite. |
+| Embedded Dolt (`bazel-embedded`) | `bazel test //... --config=embedded` | Remote execution only in CI; locally it is slow. |
+| Proxied server (`bazel-proxied`) | `bazel test //... --config=doltserver-proxied` | Remote execution only: 30 shards, each with a Dolt server. |
+| Server-Dolt storage (`bazel-server-storage`) | `bazel test //... --config=doltserver-integration` | Remote execution only. |
+| Docs | `make check-docs` | `//test/docsync:docsync_test` and `//scripts/repochecks:doc_freshness_test` in the test lane's configuration, then `scripts/check-doc-flags.sh` against the pinned release. |
+
+`make check` runs the testing.Short policy, `make ci-pr-lint` and
+`make test`. After adding, removing or renaming Go files or changing imports
+or `go.mod`, run `make bazel-sync` (gazelle, the `go_srcs` filegroups and
+`MODULE.bazel`).
+
+The Makefile keeps plain-Go twins under explicit `-go` names: `make test-go`
+(`./scripts/test.sh`), `make check-go` and `make check-docs-go`. They work
+offline and without Bazel, but they are not what CI enforces. GitHub Actions
+jobs that still run Go-native suites call the `-go` names, never `make test`
+(`TestWorkflowsNameTheirTestEngine`).
 
 ## Choose the Smallest Useful Test
 
@@ -17,23 +69,37 @@ a unit test: use the real boundary when the defect could live there.
 
 | Need | Run | When |
 |---|---|---|
-| Docs-only validation | `git diff --check`, `go test -tags=gms_pure_go ./test/docsync`, and `./scripts/check-doc-freshness.sh` | For prose-only changes; add any generated-doc or surface-specific link check the changed paths require. Do not run the full Go suite merely because a Markdown file changed. |
-| Focused red/green loop | `./scripts/test.sh -run '^TestExactName$' ./path/to/package/...` | While writing or fixing one behavior. |
-| Affected-package confidence | `./scripts/test.sh ./path/to/package/...` | After the focused test passes; include directly affected neighbors when their contract changed. |
-| Final Go baseline | `make test` | Once after focused work on Go code is green. It applies the normal local build flags, coverage, and local skip handling. |
-| Named CI wrapper | `make ci-pr-core`, `make ci-pr-policy`, or `make ci-pr-lint` | Run the wrapper whose risk or surface is affected, or use it to reproduce that CI check. Do not run all three routinely for every edit. |
-| Hook shims against real timeout implementations | `nix flake check -L` (or `nix build .#checks.<system>.hook-timeout-backends -L`) | After changing the hook generator in `cmd/bd/hooks.go` (then `make githooks-regen`) or anything under `.githooks/`. Runs the tracked managed sections against GNU coreutils, uutils, busybox and toybox `timeout` — the multicalls also installed as `gtimeout` alone — with and without Perl, under dash, bash and busybox ash. About one deadline of wall time; needs no Go build. |
+| Docs-only validation | `git diff --check` and `make check-docs` | For prose-only changes; add any generated-doc or surface-specific link check the changed paths require. Do not run the full suite merely because a Markdown file changed. |
+| Focused red/green loop | `bazel test //path/to/package:package_test --config=ci --test_filter='^TestExactName$'`, or the plain-Go `./scripts/test.sh -run '^TestExactName$' ./path/to/package/...` | While writing or fixing one behavior. The `go test` loop is fine here; the Bazel targets below are the gate. |
+| Affected-package confidence | `bazel test //path/to/package/... --config=ci` | After the focused test passes; include directly affected neighbors when their contract changed. |
+| Final gate | `make test` | Once after focused work on Go code is green: the whole test lane, mostly cache hits. |
+| Another lane's risk | that lane's command from the table above | When the change touches what that lane covers (integration-tagged files, the Dolt server path, embedded Dolt, pure-Go builds). |
+| Named CI wrapper | `make ci-pr-core` or `make ci-pr-lint` | Run the wrapper whose risk or surface is affected, or use it to reproduce that CI check. Do not run all three routinely for every edit. |
+| Hook shims against real timeout implementations | `bazel test //tests/hook_timeout_backends:hook_timeout_backends_test` | After changing the hook generator in `cmd/bd/hooks.go` (then `make githooks-regen`) or anything under `.githooks/`. Runs the tracked managed sections against GNU coreutils, uutils, busybox and toybox `timeout` — the multicalls also installed as `gtimeout` alone — with and without Perl, under dash, bash and busybox ash (240 cases). About one deadline of wall time; needs no Go build. The PR-core lane runs it on every PR. |
 
 Do not replace the focused loop with repeated full-suite runs. Run the final
-`make test` once the affected Go tests are green. For docs-only changes, use
+`make test` once the affected tests are green. For docs-only changes, use
 the docs, link, and diff checks instead.
 
-## Commands and Local Environment
+### Git Hooks
 
-`./scripts/test.sh` is the normal runner. It sources `.buildflags`, creates an
-isolated test environment, applies `.test-skip`, and defaults to a **25m
-per-package** Go-test timeout. The timeout is a hang backstop, not a target
-runtime. Override it only when diagnosing a legitimate slow path:
+`make install` points `core.hooksPath` at `.githooks`. The pre-commit hook
+formats staged Go files and runs nogo on their packages
+(`make lint-changed LINT_CHANGED_SCOPE=staged`). The pre-push hook runs
+`scripts/pre-push-suite.sh` for branch pushes whose commits change Go or
+Bazel inputs: `bazel test //... --config=ci`, with `--config=remote-exec`
+when some rc file names an executor and `--config=fork-cache` otherwise.
+`BD_PREPUSH_SUITE=rbe|cache|go` picks the mode; `go` (and the fallback when
+bazel is not installed) runs `make test-go` under a banner saying it is not
+the suite CI gates on.
+
+## Plain `go test` (Inner Loop)
+
+`./scripts/test.sh` is the plain-Go runner behind `make test-go`. It sources
+`.buildflags`, creates an isolated test environment, applies `.test-skip`, and
+defaults to a **25m per-package** Go-test timeout. The timeout is a hang
+backstop, not a target runtime. Override it only when diagnosing a legitimate
+slow path:
 
 ```bash
 TEST_TIMEOUT=30m ./scripts/test.sh ./cmd/bd/...
@@ -63,9 +129,9 @@ make test-cross-version
 make test-migration
 ```
 
-For a failing GitHub Actions check, follow the current workflow and its
-`Makefile` target when exact reproduction matters. The local runner and CI
-intentionally have different contracts in some cases.
+For a failing GitHub Actions check, run the command of its bazel.yml lane
+from the table above; for the jobs that are not Bazel lanes, follow the
+workflow and its `Makefile` target.
 
 ### Test Environment and Readiness
 
@@ -103,10 +169,10 @@ same for the proxied subtests that bridge an external endpoint with `socat`
 sets it, and the legacy GitHub proxied jobs, which have no `socat`, do not.
 
 Under Bazel, `bazel test //... --config=doltserver` runs the Dolt-backed
-suites of pr.yml's "Test (storage domain + uow)" and "Contract corpus" jobs
-on the `local` backend (the `dolt-server` targets); they need no docker and
-execute remotely with `--config=remote-exec`. `--config=docker` runs the same
-suites on the `container` backend (host docker) as the A/B control.
+domain, uow, tracker, doctor/fix, protocol and testutil suites on the `local`
+backend (the `dolt-server` targets); they need no docker and execute
+remotely with `--config=remote-exec`. No Bazel target uses the `container`
+backend; run `go test` with docker and the pulled image to exercise it.
 PR Risk's heavier server tiers have configs of their own, run by bazel.yml
 only with remote execution, each in a job of its own (`bazel-proxied`,
 `bazel-server-storage`): `--config=doltserver-proxied` is the
@@ -339,9 +405,10 @@ underlying failure is fixed.
 Before opening a PR:
 
 1. For docs-only changes, run the applicable docs, link, freshness, and diff
-   checks; do not run the full Go suite by default.
+   checks; do not run the full suite by default.
 2. For Go code, keep the focused and affected-package tests green, then run one
-   final `make test`.
+   final `make test` (the Bazel test lane), plus the lane of any other tier
+   the change touches.
 3. Run only the named CI wrapper, specialized target, or risk gate required by
    the changed surface, or the one needed to reproduce a CI result.
 

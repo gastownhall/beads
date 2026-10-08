@@ -1,99 +1,88 @@
 # Linting Policy
 
-Last reviewed: 2026-10-03
+Last reviewed: 2026-10-07
 
-Freshness source: `.golangci.yml`, `scripts/ci/pr-lint.sh`, `scripts/pr-lint/`,
-`Makefile`, `.github/workflows/pr.yml`, and `.github/workflows/main.yml`.
+Freshness source: `.golangci.yml`, `tools/nogo/`, `scripts/ci/pr-lint.sh`,
+`scripts/pr-lint/`, `Makefile`, `.github/workflows/pr.yml`, and
+`.github/workflows/main.yml`.
 
-This document explains the required Go lint gate for this codebase.
+This document explains the required Go lint and vet gate for this codebase.
 
 ## Current Status
 
-Lint is a required CI gate: ONE job per lane (`pr-lint-wrapper`), over the same
-pinned golangci-lint v2.10.1 release and the same `.golangci.yml`. Each lane
-must pass with zero issues in its own scope.
+Lint and vet run as **nogo** (`//tools/nogo`) inside the Bazel build. rules_go
+runs the analyzers beside every first-party Go compile, so any `bazel build`
+or `bazel test`, locally or on rbe-west, fails on a finding. The analyzers are:
 
-- **The PR lane reports only what the PR introduces.** `pr-lint-wrapper` runs
-  the repository-owned `ci-pr-lint` wrapper with `BD_LINT_NEW_FROM_MERGE_BASE`
-  set to the diff against the merge base with `main`. A finding in code the PR
-  did not touch does not block it. "New" is measured off the diff, so MOVED
-  CODE READS AS NEW: a pre-existing violation carried into a PR by a move or a
-  rename is reported against that PR and blocks it. Fix it or `//nolint` it
-  there — that is the accepted cost of the diff-scoped trade.
-- **The main lane sweeps the whole tree.** The same job runs on every push to
-  `main` with `BD_LINT_NEW_FROM_MERGE_BASE` unset, so a finding that lands
-  there reds main's own run rather than every open PR.
+- **go test's vet checks**: the passes cmd/go's `defaultVetFlags` give
+  `go test` (`atomic`, `bools`, `buildtag`, `directive`, `errorsas`,
+  `ifaceassert`, `nilfunc`, `printf`, `slog`, `stringintconv`, `tests`). They
+  see every file, tests included, as the former `go vet ./...` did.
+- **The golangci-lint linters `.golangci.yml` enables** (depguard, errcheck,
+  forbidigo, gosec, misspell, sloglint, unconvert, unparam), each a thin
+  wrapper in `tools/nogo/analyzers/` over the same library version
+  golangci-lint v2.10.1 uses.
 
-`pr-lint-wrapper` is a 3-leg matrix, `matrix.target: [native, windows, darwin]`
-(`fail-fast: false`), one leg per `scripts/pr-lint` pass (see below); the gate
-requires the matrix's aggregate result under the same `PR_LINT_WRAPPER` id as
-before. A former separate `Lint` job (the `golangci-lint-action` with
-`only-new-issues`) was functionally identical to this matrix's native leg
-(same binary, config, flags and diff scope) and was folded into it; see #5629.
+`.golangci.yml` is still the one place lint policy lives. Bazel embeds it into
+the analyzers, and `tools/nogo/internal/golangci` applies it as golangci-lint
+did: which linters are enabled, their settings, `run.tests: false` (only the
+library compile unit of a package is linted, never its test unit),
+generated-file handling, and the path/text exclusion rules. Decoding is
+strict: a key the wrappers do not implement fails the build instead of being
+ignored. `//nolint:<linter>` directives keep working; a rules_go patch
+(`third_party/patches/rules_go_nogo_golangci_nolint.patch`, shared with
+gascity) gives them golangci-lint's line ranges.
 
-Each leg installs golangci-lint from the pinned release binary
-(`scripts/ci/install-golangci-lint.sh`, sha256-verified) instead of
-`go install`, and restores a per-leg cache
-(`~/.cache/golangci-lint` plus a leg-specific `GOCACHE`) keyed on
-`.golangci.yml`, `go.sum` and the leg. A miss on the exact content key falls
-back to the leg's most recent entry; golangci-lint revalidates it against the
-current config and inputs, so a stale restore cannot mask an issue. pr.yml
-only ever restores; main.yml's matrix is the only saver, on an exact-key miss.
+Parity with golangci-lint was proved on the whole tree: with the exclusion
+rules removed, golangci-lint and nogo report the same 3,916 findings (file,
+line, linter and text) natively and the same 3,859 for windows/amd64 and
+darwin/arm64; with `.golangci.yml` as committed, both report none.
 
-Run the wrapper locally with:
+Where it gates:
+
+- **bazel.yml's `test` lane** (required through `CI Gate / Required`):
+  `bazel test //... --config=ci` validates every package natively.
+- **bazel.yml's `release cross-compile` lane** (`bazel-release-cross`,
+  required): `scripts/ci/bazel-release-cross-compile.sh` builds
+  `//tools/bazel:release_cross`, every `go_library` and `go_binary`
+  split-transitioned to each release platform without cgo, and nogo
+  validates each of those compiles. So `//go:build windows`, `darwin`,
+  `!linux` (and freebsd, android, arm64) files are analyzed from Linux: a
+  superset of golangci-lint's former `GOOS=windows`/`GOOS=darwin` legs.
+- **Every other Bazel lane** (integration, embedded, dolt-server) validates
+  what it compiles, including files only its build tags select.
+
+Every PR is checked against the whole tree, not only its diff: the tree has
+no findings, so there is no baseline to scope against.
+
+Run the gate locally with:
 
 ```bash
-make ci-pr-lint
+make ci-pr-lint      # native + windows + darwin (also: make lint, make vet)
+make lint-changed    # native, only the Bazel packages of changed Go files
 ```
 
-That is the MAIN lane's contract, not the PR lane's: with
-`BD_LINT_NEW_FROM_MERGE_BASE` unset it sweeps the whole tree, so it is
-deliberately STRICTER than the gate your PR has to clear and may report findings
-you are not required to fix. Fix the ones that are yours; the PR gate is the
-authority on what blocks a merge, and main's own run is where the rest is
-answered.
+Both need `bazel` (or `bazelisk`) on PATH. With remote execution configured
+(`.bazelrc.local` or `user.bazelrc`), a warm run takes seconds: the native
+pass uses the race configuration of the CI test lane, so it reuses CI's
+remote cache. `--config=nogo` asks for the analysis output group alone, so
+nothing is linked.
 
-The wrapper runs:
-
-- the shared `scripts/ci/fmt-check.sh` formatting check; and
-- the checkout-owned `scripts/pr-lint` Go driver, which runs golangci-lint with
-  `.golangci.yml`, readonly module downloads, a five-minute timeout, the
-  `gms_pure_go` build tag, and `--new-from-merge-base` when
-  `BD_LINT_NEW_FROM_MERGE_BASE` names a ref, then runs the same scope for the
-  non-CGO Windows target and the non-CGO darwin (arm64) target when the native
-  host does not already cover them, so `//go:build windows && !cgo` and
-  `//go:build darwin` files are linted from the Linux runner.
-
-The shell wrapper records one aggregate timing for the Go lint driver. The
-driver prints a heading and result for each native or cross-target pass so
-failures remain attributable without duplicating target-selection policy in
-Bash.
-
-The shared driver owns the lint passes used by `scripts/ci/pr-lint.sh` and
-Beads-source `bd preflight`. The pre-commit hook does not call it: the hook
-uses changed-lines scope, adds `--fix`, and omits the Windows cross-lint pass.
-The driver honors `BD_LINT_TARGETS` (a comma list of `native`, `windows` and
-`darwin`; default all three) so each CI matrix leg can run just its own pass;
-`make ci-pr-lint` and `bd preflight` both leave it unset and keep running all
-three.
-
-The driver matches `.buildflags` when preparing `GOFLAGS`: appending
-`-tags=gms_pure_go` can override an inherited bare-Go tags value; it does not
-merge tag lists. Each lint process has a six-minute context and a five-minute
-golangci-lint timeout. Cancelling preflight's outer `go run` command does not
-guarantee immediate descendant cleanup.
-
-On Windows, the driver checks each pass's selected Go SDK and prefers its
-`bin` directory only in that linter child's PATH. This avoids an extra Go
-auto-selection process surviving cancellation. Discovery shares the existing
-30-second probe budget; custom SDKs that cannot be verified retain the original
-PATH. Toolchain requests, formatting, and lint deadlines are unchanged. This
-does not guarantee cleanup of compiler descendants or fix slow package loading.
+`make ci-pr-lint` runs `scripts/ci/pr-lint.sh`, which times the checkout-owned
+`scripts/pr-lint` Go driver: `bazel build --config=nogo //...`, then
+`//tools/bazel:release_cross` for windows/amd64 and darwin/arm64
+(`--config=nogo-cross`). The driver honors `BD_LINT_TARGETS` (a comma list of
+`native`, `windows` and `darwin`; default all three), prints a heading and
+result per pass, and is what Beads-source `bd preflight` runs. The pre-commit
+hook (and `.pre-commit-config.yaml`) runs `make lint-changed
+LINT_CHANGED_SCOPE=staged`. Formatting is not part of lint:
+`//scripts/repochecks:fmt_test` gates gofmt, and the hook formats staged files
+before linting them.
 
 ## Policy
 
-Treat new lint findings as defects to fix before merge. Do not add a tolerated
-failing baseline, and do not configure CI with `--issues-exit-code=0`.
+Treat lint findings as defects to fix before merge. Do not add a tolerated
+failing baseline.
 
 When a linter reports an intentional or false-positive pattern:
 
@@ -102,16 +91,18 @@ When a linter reports an intentional or false-positive pattern:
   the comment explains why the warning is not actionable.
 - Keep broad linter disables as a last resort.
 
-The current configuration already encodes accepted exclusions for intentional
-patterns such as deferred cleanup errors, controlled subprocess execution,
-test-fixture file reads, and documented security false positives.
+To enable another golangci-lint linter, add it to `.golangci.yml`, add a
+wrapper under `tools/nogo/analyzers/` (with its settings in
+`tools/nogo/internal/golangci`), and list it in `tools/nogo/analyzers.bzl`;
+`//tools/nogo:nogo_test` fails until the enabled list and the analyzer list
+agree.
 
 ## CI Cleanup Decision
 
-`pr-lint` stays separate from `pr-policy` and `pr-core` so failures are easy to
-identify and rerun. Its repository-owned wrapper is
-`scripts/ci/pr-lint.sh`, exposed as `make ci-pr-lint`; its lint policy is owned
-by the shell-free `scripts/pr-lint` Go driver.
+The former `PR Lint (native|windows|darwin)` and `Go checks (vet)` jobs, and
+main.yml's lint and vet cache seeders, are retired: nogo runs the same checks
+in the Bazel lanes on rbe-west. When the farm is switched off (bazel.yml mode
+`skip`), no lane runs, so neither does lint.
 
 See [`CI_CLEANUP_PLAN.md`](CI_CLEANUP_PLAN.md) for the full CI tier policy.
 

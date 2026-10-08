@@ -42,12 +42,16 @@ func TestPrePushHookOrdinaryPushWorksWithSystemBash(t *testing.T) {
 	// alongside the ordinary-push compatibility that brought us here.
 	//
 	// Unlike the ordinary push above, the entrypoint builds the Go checker from
-	// source at the repository root, so it needs a full module checkout there.
-	// Under Bazel the tree the test sees is its runfiles, which holds only the
-	// declared data and no go.mod, so the wrapper could only ever report its
-	// build failure (127); `go test` runs against the real checkout. The guard
-	// sits inside each subtest, not above the loop, so that the ordinary-push
-	// assertion above still reports as run rather than hiding behind a skip.
+	// source at the repository root (`go build ./scripts/check-versions`),
+	// which needs a module checkout and a Go toolchain. Under Bazel there is
+	// neither, so a stand-in `go` first on PATH "builds" by copying the checker
+	// Bazel built from the same source (BEADS_TEST_CHECK_VERSIONS); everything
+	// the contract covers (status passthrough, no launcher diagnostic, temp
+	// cleanup) is the entrypoint's own.
+	path := os.Getenv("PATH")
+	if bazeltest.IsBazel() {
+		path = fakeGoBuildDir(t) + string(os.PathListSeparator) + path
+	}
 	for _, tc := range []struct {
 		name string
 		args []string
@@ -58,11 +62,9 @@ func TestPrePushHookOrdinaryPushWorksWithSystemBash(t *testing.T) {
 		{"version mismatch", []string{"--expect", "0.0.0-checker-test"}, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if bazeltest.IsBazel() {
-				t.Skip("entrypoint builds from source: needs the real module checkout, not runfiles")
-			}
 			scratch := t.TempDir()
 			t.Setenv("TMPDIR", scratch)
+			t.Setenv("PATH", path)
 			checker := filepath.Join(repoRoot, "scripts", "check-versions.sh")
 			cmd := exec.Command(bash, append([]string{checker}, tc.args...)...)
 			cmd.Dir = repoRoot
@@ -136,4 +138,31 @@ func TestPrePushHookDriftRefusalPointsAtCheckerRemedy(t *testing.T) {
 	if strings.Contains(string(output), "update-versions.sh") {
 		t.Errorf("hook prescribes update-versions.sh for drift:\n%s", output)
 	}
+}
+
+// fakeGoBuildDir returns a directory holding a stand-in `go` whose `build ...
+// -o OUT ...` copies the Bazel-built checker (BEADS_TEST_CHECK_VERSIONS) to
+// OUT, for check-versions.sh under Bazel, where there is no module checkout
+// or Go toolchain to build it from.
+func fakeGoBuildDir(t *testing.T) string {
+	t.Helper()
+	built, err := bazeltest.RunfileEnv("BEADS_TEST_CHECK_VERSIONS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	script := `#!/bin/sh
+[ "$1" = build ] || { echo "stand-in go: only build is supported" >&2; exit 2; }
+out=
+while [ $# -gt 0 ]; do
+	if [ "$1" = -o ]; then out=$2; shift; fi
+	shift
+done
+[ -n "$out" ] || { echo "stand-in go: no -o" >&2; exit 2; }
+exec cp "` + built + `" "$out"
+`
+	if err := os.WriteFile(filepath.Join(dir, "go"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }

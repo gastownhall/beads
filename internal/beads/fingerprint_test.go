@@ -339,7 +339,7 @@ func TestComputeRepoID_WorktreeMatchesMainRepo(t *testing.T) {
 	// Create main repo (no remote — forces path-based fingerprint)
 	initFingerprintGitRepo(t, mainRepo, "")
 	// Need at least one commit for worktree creation
-	cmd := exec.Command("git", "commit", "--allow-empty", "-m", "init")
+	cmd := gitCommand("commit", "--allow-empty", "-m", "init")
 	cmd.Dir = mainRepo
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git commit failed: %v", err)
@@ -381,7 +381,7 @@ func TestComputeRepoID_WorktreeWithRemoteMatchesMainRepo(t *testing.T) {
 	mainRepo := t.TempDir()
 
 	initFingerprintGitRepo(t, mainRepo, "https://github.com/test/repo.git")
-	cmd := exec.Command("git", "commit", "--allow-empty", "-m", "init")
+	cmd := gitCommand("commit", "--allow-empty", "-m", "init")
 	cmd.Dir = mainRepo
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git commit failed: %v", err)
@@ -419,7 +419,7 @@ func TestGetCloneID_WorktreeMatchesMainRepo(t *testing.T) {
 	mainRepo := t.TempDir()
 
 	initFingerprintGitRepo(t, mainRepo, "")
-	cmd := exec.Command("git", "commit", "--allow-empty", "-m", "init")
+	cmd := gitCommand("commit", "--allow-empty", "-m", "init")
 	cmd.Dir = mainRepo
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("git commit failed: %v", err)

@@ -1,110 +1,30 @@
-name: Nightly Full Tests
+name: Nightly
 
+# Every nightly test runs under Bazel on rbe-west: the `bazel` call below is
+# the full suite with no cached test results. Nothing here runs go test on a
+# runner (ga-96smfk.22).
 on:
   schedule:
     # Run at 2am UTC daily
     - cron: '0 2 * * *'
   workflow_dispatch:
-    inputs:
-      suite:
-        description: "Nightly suite or measurement suite"
-        required: true
-        type: choice
-        default: full-test
-        options:
-          - full-test
-          - pr-linux
-          - macos-short
-          - macos-candidates
-          - linux-integration
-          - linux-integration-sharded
-          - linux-integration-hybrid-sharded
-          - linux-integration-hybrid-16-sharded
-          - linux-integration-hybrid-prebuilt-sharded
-          - linux-integration-coverage
-          - cross-version-smoke
-          - nix
-          - mcp-package
-          - npm-package
-          - bazel
-      smoke_version:
-        description: "Optional previous release for cross-version-smoke"
-        required: false
-        default: ""
+
+permissions:
+  contents: read
 
 env:
   BD_DISABLE_METRICS: "1"
   BD_DISABLE_EVENT_FLUSH: "1"
 
 jobs:
-  measure:
-    name: Measure selected CI suite
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.suite != 'full-test' && inputs.suite != 'bazel' }}
-    uses: ./.github/workflows/ci-measurements.yml
-    with:
-      suite: ${{ inputs.suite }}
-      smoke_version: ${{ inputs.smoke_version }}
-
-  # PR Core's go test (scripts/ci/pr-core.sh) with -json output, so the Bazel
-  # job below can compare per-test status: a test that passes here and skips
-  # under Bazel fails the equivalence check unless allowlisted.
-  bazel-go-test-json:
-    name: Bazel equivalence (go-test side)
-    if: ${{ github.event_name == 'schedule' || inputs.suite == 'bazel' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Restore Go module cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      - name: Install Dolt
-        run: ./scripts/ci/install-dolt.sh
-
-      - name: Configure Git and Dolt identity
-        run: |
-          git config --global user.name "CI Bot"
-          git config --global user.email "ci@beads.test"
-          dolt config --global --add user.name "CI Bot"
-          dolt config --global --add user.email "ci@beads.test"
-
-      - name: Run PR core go-test (JSON)
-        env:
-          BEADS_PR_CORE_GO_TEST_JSON: ${{ runner.temp }}/go-test.json
-        run: make ci-pr-core
-
-      # Uploaded even when tests fail: the status comparison still applies.
-      - name: Upload go-test results
-        if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: bazel-equivalence-go-test-json
-          path: ${{ runner.temp }}/go-test.json
-          if-no-files-found: error
-          retention-days: 7
-
-  # Bazel lane with the full go test equivalence listing and the skip-parity
-  # check (reported here; PRs gate on it through pr.yml). Remote execution
-  # when the repo secrets are present; bazel.yml gets the four RBE secrets
-  # plus rbe-prewarm's bazel-allocator app private key (same-repo/scheduled
-  # trigger only, so pre-warming is safe here - see bazel.yml's
-  # "rbe-west Pre-warm" header and engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md).
+  # Bazel lane with the full equivalence listing (package and test-name sets;
+  # PRs gate on it through pr.yml). Remote execution when the repo secrets
+  # are present; bazel.yml gets the four RBE secrets plus rbe-prewarm's
+  # bazel-allocator app private key (same-repo/scheduled trigger only, so
+  # pre-warming is safe here - see bazel.yml's "rbe-west Pre-warm" header and
+  # engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md).
   bazel:
-    name: Bazel equivalence (full detail)
-    needs: bazel-go-test-json
-    if: ${{ !cancelled() && (github.event_name == 'schedule' || inputs.suite == 'bazel') }}
+    name: Bazel (fresh, full detail)
     uses: ./.github/workflows/bazel.yml
     secrets:
       RBE_WEST_EXECUTOR: ${{ secrets.RBE_WEST_EXECUTOR }}
@@ -114,98 +34,46 @@ jobs:
       RBE_POOL_APP_PRIVATE_KEY: ${{ secrets.RBE_POOL_APP_PRIVATE_KEY }}
     with:
       details: true
-      go-test-json-artifact: bazel-equivalence-go-test-json
       # The one run that re-executes every test (no cached test results):
       # PRs, merge groups and pushes to main reuse unchanged tests' PASSes,
       # so this keeps sampling flaky and -race failures every night.
       fresh-test-results: true
 
-  full-test:
-    name: Full Test Suite
-    if: ${{ github.event_name == 'schedule' || inputs.suite == 'full-test' }}
+  # rbe-west's pool workers are gascity's and advertise the sha256 of
+  # gascity's worker-env manifest; beads' tools/rbe/worker-env.txt is a
+  # byte-for-byte copy and platforms/BUILD.bazel carries the same pin. A copy
+  # that falls behind queues every remote action (bazel.yml's rbe job runs
+  # the same check before each remote run and fails it fast), so check every
+  # night and, out of step, open or update a ci/infra issue with the diff and
+  # the pin to commit (tools/rbe/worker-env-sync-issue). The only job here
+  # with issues: write, and only its last step uses the token. gascity
+  # unreachable (exit 2) fails the job without an issue.
+  rbe-worker-env-sync:
+    name: rbe worker-env in step with gascity
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: 'go.mod'
+          persist-credentials: false
 
-      - name: Install Dolt
-        run: |
-          ./scripts/ci/install-dolt.sh
-
-      - name: Configure Git and Dolt identity
-        run: |
-          git config --global user.name "CI Bot"
-          git config --global user.email "ci@beads.test"
-          dolt config --global --add user.name "CI Bot"
-          dolt config --global --add user.email "ci@beads.test"
-
-      - name: Build
-        run: go build -v -tags gms_pure_go ./cmd/bd
-
-      - name: Full Test Suite (including integration tests)
+      - name: Compare the worker-env manifest and pin with gascity's main
+        id: sync
         env:
-          # Skip Docker-based Dolt testcontainer tests — they hang in
-          # GitHub Actions (known issue, see scripts/repro-dolt-hang/).
-          # Non-Docker integration tests still run via the installed dolt binary.
-          BEADS_TEST_SKIP: dolt
-        run: go test -v -race -tags=integration,gms_pure_go -coverprofile=coverage.out -timeout=30m ./...
-
-      # The suite above never sets BEADS_TEST_EMBEDDED_DOLT, so every
-      # skipUnlessEmbeddedDolt-gated test in internal/storage/embeddeddolt
-      # (including TestBatchApplyContract, the 1000-item case of
-      # TestLargeBatchApplyWallClock_Embedded, and — F1 — the 712-item case of
-      # TestLargeBatchApplyStatementCounts712_Embedded) is skipped there, on
-      # every lane, not just this one. This step is their only non-race
-      # coverage of a real 1000-item apply through the embedded backend, and
-      # (F1) the only coverage at all of the 712-item shape's pinned
-      # statement-count regression baseline on a per-PR race lane: the race
-      # lanes (main.yml, pr-risk.yml) shrink/skip those cases under
-      # raceEnabled — see
-      # internal/storage/embeddeddolt/large_batch_apply_measure_test.go — and
-      # the PR-conditional server-Dolt full suite (full_embedded in
-      # .github/scripts/ci-embedded-tier.sh) covers the SAME write body
-      # (internal/storage/issueops.ApplyBatchInTx) through a different
-      # backend, not this one. Non-race here because the embedded engine's
-      # own goroutine/lock machinery runs inside this test binary and the
-      # race detector dramatically inflates its wall-clock (see
-      # race_detector_on_test.go), which is exactly what
-      # TestLargeBatchApplyWallClock_Embedded is measuring and exactly why
-      # TestLargeBatchApplyStatementCounts712_Embedded's 712-item case takes
-      # ~260-300s under -race (genuine engine-internal race overhead, not
-      # test logic — see that test's doc comment). The same holds for the
-      # 458-issue batch-create equivalence scenarios
-      # (TestCreateBatchFastPathsMatchPerRowLarge_Embedded).
-      - name: Embedded Dolt batch-apply suite (non-race)
-        if: ${{ !cancelled() }}
-        env:
-          BEADS_TEST_EMBEDDED_DOLT: "1"
-        run: go test -tags gms_pure_go -timeout 20m -run '^(TestBatchApplyContract|TestLargeBatchApplyWallClock_Embedded|TestLargeBatchApplyStatementCounts712_Embedded|TestCreateBatchFastPathsMatchPerRowLarge_Embedded)$' ./internal/storage/embeddeddolt
-
-      - name: Check coverage threshold
+          WORKER_ENV_SYNC_REPORT: ${{ runner.temp }}/worker-env-sync.md
         run: |
-          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
-          echo "Coverage: $COVERAGE%"
-          # Threshold is lower (30%) because Docker-based Dolt integration
-          # tests are skipped in CI (BEADS_TEST_SKIP=dolt). With Docker
-          # tests included, coverage would be ~50%+.
-          if (( $(echo "$COVERAGE < 30" | bc -l) )); then
-            echo "❌ Coverage is below 30% threshold"
-            exit 1
-          elif (( $(echo "$COVERAGE < 40" | bc -l) )); then
-            echo "⚠️  Coverage is below 40% (warning threshold)"
-          else
-            echo "✅ Coverage meets threshold"
-          fi
+          rc=0
+          tools/rbe/worker-env-sync main || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
 
-      - name: Upload coverage
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
-        if: success()
-        continue-on-error: true
-        with:
-          file: ./coverage.out
-          fail_ci_if_error: false
+      - name: Open or update the out-of-step issue
+        if: ${{ failure() && steps.sync.outputs.rc == '1' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT: ${{ runner.temp }}/worker-env-sync.md
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: tools/rbe/worker-env-sync-issue "$REPORT" "$RUN_URL"

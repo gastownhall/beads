@@ -199,9 +199,9 @@ Key jobs preserved by display name:
 
 | Workflow | Triggers | Main validation |
 |---|---|---|
-| `regression.yml` | Push to `main`, PR to `main`, manual | Detector runs regression on push/manual, PR label `run-regression`, or risky paths; test command is `go test -tags=regression,gms_pure_go -timeout=20m -v ./tests/regression/...`. |
-| `cross-version-smoke.yml` | Tags, PRs, manual | PRs test latest 5 releases, tags test latest 30, via `scripts/upgrade-smoke-test.sh`. |
-| `migration-test.yml` | Tags, PRs touching upgrade-relevant code (advisory, path-filtered), manual | Builds candidate once per shard (3 shards, folded from 14 per-version legs, F7c) and loops `scripts/migration-test/run.sh --version` over each shard's versions; not a required PR/main gate. |
+| `bazel.yml` `bazel-cmd-dolt` (formerly `regression.yml`) | PR, merge group, push to `main` | `//tests/regression:regression_test` (8 shards, cached until its inputs change) against the catalog-pinned v0.49.6 baseline; local entrypoint stays `make test-regression`. |
+| `bazel.yml` `bazel-test` (formerly `cross-version-smoke.yml`) | PR, merge group, push to `main` | `//tests/upgrade_smoke:upgrade_smoke_<release>_test` for the newest 30 catalog-pinned releases, via `scripts/upgrade-smoke-test.sh` with `PREV_BIN`; cached until their inputs change. |
+| `bazel.yml` `bazel-test` (formerly `migration-test.yml`) | PR, merge group, push to `main` | `//tests/migration:historical_upgrade_<release>_test`, one target per reviewed release (14, v0.9.1 source-built offline) plus `legacy_bridge_test`, against catalog-pinned release binaries; cached until their inputs change. Local entrypoint stays `scripts/migration-test/run.sh`. |
 | `nightly.yml` | Daily schedule, manual | `go test -v -race -tags=integration,gms_pure_go -coverprofile=coverage.out -timeout=30m ./...` with `BEADS_TEST_SKIP=dolt`; checks coverage >= 30%. |
 | `nix-build.yml` | Push to `main` paths for Nix or Go module files, manual | `nix build .#default --print-build-logs`; no longer runs on `pull_request` (F7c, spec-f7.md §2.4) since PR Risk's required `test-nix` job (`nix run .#default` plus `nix flake check -L`) is a superset. |
 | `deploy-docs.yml` | Push to `main` paths `website/**` or `scripts/generate-llms-full.sh`, manual | `npm ci`, generate `llms-full.txt`, `npm run build`, internal link check, non-blocking external link check, deploy Pages. |

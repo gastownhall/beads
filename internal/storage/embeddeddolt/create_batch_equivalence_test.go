@@ -22,13 +22,13 @@ func TestCreateBatchFastPathsMatchPerRow_Embedded(t *testing.T) {
 // TestCreateBatchFastPathsMatchPerRowLarge_Embedded runs the 458-issue
 // equivalence scenarios. It is skipped under -race, where the in-process
 // engine's own instrumentation makes each scenario take many minutes;
-// nightly.yml's "Embedded Dolt batch-apply suite (non-race)" step runs it,
+// //internal/storage/embeddeddolt:embeddeddolt_batch_apply_nonrace_test (non-race) runs it,
 // and the server backend's full suite (non-race) runs the same scenarios on
 // every PR that takes that tier.
 func TestCreateBatchFastPathsMatchPerRowLarge_Embedded(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	if raceEnabled {
-		t.Skip("458-issue equivalence scenarios skipped under -race; nightly.yml's non-race embedded step runs them")
+		t.Skip("458-issue equivalence scenarios skipped under -race; embeddeddolt_batch_apply_nonrace_test runs them")
 	}
 	createbatchequiv.RunLarge(t, openEquivalenceDB)
 }
