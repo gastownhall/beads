@@ -95,37 +95,21 @@ const bazelMCPPytestWorkers = "${{ needs.rbe.outputs.mode == 'remote' && '16' ||
 const blacksmithMacOSLabel = "blacksmith-6vcpu-macos-26"
 const blacksmithWindowsLabel = "blacksmith-4vcpu-windows-2025"
 
-// Runner-size A/B (ci/bigger-runners-ab, 2026-10-08): pr-preflight-platforms'
-// Windows leg, the slowest Windows check (129 s in merge group 37721729916),
-// runs on 8 vCPU; its setup-go/cache extraction and the ./cmd/bd test
-// compile and link are CPU-bound. It keeps restoring the non-race GOCACHE
-// main.yml's test-windows saves on blacksmith-4vcpu-windows-2025: the cache
-// key names runner.os and runner.arch, never the label, and actions/cache's
-// version hash covers only the paths and compression method, so nothing in
-// the entry is size-specific (Blacksmith documents branch scoping only).
-// The saver stays on 4 vCPU so the other Windows consumers keep restoring
-// from their exact label. Revert to blacksmithWindowsLabel if the PR run
-// does not save at least 15 s or the leg's "Restore non-race Go build
-// cache" step misses.
-const blacksmithWindowsPreflightLabel = "blacksmith-8vcpu-windows-2025"
-
 // platformsMatrixRunsOn: the mixed-OS matrix jobs (pr-preflight-platforms,
 // check-doc-freshness-platforms) name each leg's Blacksmith label in its
 // `include` entry's `runner` field.
 const platformsMatrixRunsOn = "${{ matrix.runner }}"
 
-// platformsMatrixRunners: check-doc-freshness-platforms' legs, `os` (which
-// keeps the check names stable) -> its Blacksmith label.
+// platformsMatrixRunners: each mixed-OS matrix leg's `os` (which keeps the
+// check names stable) -> its Blacksmith label.
+//
+// Runner-size A/B (#7381, 2026-10-08): pr-preflight-platforms' Windows leg on
+// blacksmith-8vcpu-windows-2025 restored the 4 vCPU saver's cache fine, but
+// waited 63s for an 8 vCPU Windows runner and finished at 144s against 129s
+// on 4 vCPU, so it stays on blacksmithWindowsLabel.
 var platformsMatrixRunners = map[string]string{
 	"macos-latest":   blacksmithMacOSLabel,
 	"windows-latest": blacksmithWindowsLabel,
-}
-
-// preflightMatrixRunners: pr-preflight-platforms' legs, the same shape with
-// the larger Windows label.
-var preflightMatrixRunners = map[string]string{
-	"macos-latest":   blacksmithMacOSLabel,
-	"windows-latest": blacksmithWindowsPreflightLabel,
 }
 
 // --- a minimal GitHub Actions expression evaluator -------------------------
@@ -566,7 +550,7 @@ func TestBlacksmithWindowsMacOSRunsOnEveryEvent(t *testing.T) {
 			}
 		}
 	}
-	for _, leg := range []string{blacksmithMacOSLabel, blacksmithWindowsLabel, blacksmithWindowsPreflightLabel} {
+	for _, leg := range []string{blacksmithMacOSLabel, blacksmithWindowsLabel} {
 		if got := mustEvalGHRunsOn(t, platformsMatrixRunsOn, map[string]string{"matrix.runner": leg}); got != leg {
 			t.Errorf("%s with matrix.runner %q = %q", platformsMatrixRunsOn, leg, got)
 		}
@@ -612,54 +596,6 @@ func TestBlacksmithBazelRunnerSizes(t *testing.T) {
 		}
 		if got := mustEvalGHRunsOn(t, mcpGate.Env["BEADS_MCP_PYTEST_WORKERS"], ctx); got != wantWorkers {
 			t.Errorf("package-mcp BEADS_MCP_PYTEST_WORKERS under mode %s = %q, want %q", mode, got, wantWorkers)
-		}
-	}
-}
-
-// TestWindowsPreflightLegReachesSaverAcrossSizes: pr-preflight-platforms'
-// Windows leg runs on a larger Blacksmith Windows size than main.yml's
-// test-windows saver. That only works because nothing in the cache entry
-// names the runner size: same OS image, the same cache path, and key
-// templates built from runner.os/runner.arch (never the label, the matrix
-// runner or a vCPU count), with the saver's key reachable from the leg's
-// restore-keys prefix.
-func TestWindowsPreflightLegReachesSaverAcrossSizes(t *testing.T) {
-	pr := readCIWorkflow(t, "pr.yml")
-	saver := readCIWorkflow(t, "main.yml").job(t, "test-windows")
-	leg := pr.job(t, "pr-preflight-platforms")
-
-	saverLabel := mustEvalGHRunsOn(t, saver.RunsOn, nil)
-	var legLabel string
-	for _, tuple := range leg.Strategy.Matrix.Include {
-		if tuple.OS == "windows-latest" {
-			legLabel = mustEvalGHRunsOn(t, leg.RunsOn, map[string]string{"matrix.runner": tuple.Runner, "matrix.os": tuple.OS})
-		}
-	}
-	if legLabel != blacksmithWindowsPreflightLabel || saverLabel != blacksmithWindowsLabel {
-		t.Fatalf("Windows preflight leg = %q, saver = %q; want %q and %q", legLabel, saverLabel, blacksmithWindowsPreflightLabel, blacksmithWindowsLabel)
-	}
-	image := func(label string) string { return label[strings.LastIndex(label, "-windows-"):] }
-	if image(legLabel) != image(saverLabel) {
-		t.Errorf("Windows preflight leg image %q differs from the saver's %q; a different image may not share cache versions", image(legLabel), image(saverLabel))
-	}
-	sizeSpecific := []string{"matrix.runner", "runner.name", "vcpu", "blacksmith"}
-	for _, pair := range [][2]string{
-		{"Restore Go module cache", "Save Go module cache"},
-		{"Restore non-race Go build cache", "Save non-race Go build cache"},
-	} {
-		restore, save := leg.step(t, pair[0]), saver.step(t, pair[1])
-		if restore.With["path"] != save.With["path"] {
-			t.Errorf("%q path %q != saver %q path %q", pair[0], restore.With["path"], pair[1], save.With["path"])
-		}
-		if prefix := restore.With["restore-keys"]; prefix == "" || !strings.HasPrefix(save.With["key"], prefix) {
-			t.Errorf("saver %q key %q is not reachable from %q restore-keys %q", pair[1], save.With["key"], pair[0], prefix)
-		}
-		for _, s := range []string{restore.With["key"], restore.With["restore-keys"], save.With["key"]} {
-			for _, bad := range sizeSpecific {
-				if strings.Contains(strings.ToLower(s), bad) {
-					t.Errorf("cache key %q names %q; keys must not depend on the runner size", s, bad)
-				}
-			}
 		}
 	}
 }

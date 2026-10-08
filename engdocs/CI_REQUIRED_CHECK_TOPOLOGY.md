@@ -1205,12 +1205,10 @@ Bazel on rbe-west. pr.yml's Windows jobs (`test-windows-liveness`,
 their `blacksmith-*vcpu-windows-2025` label literally; the two mixed-OS
 matrix jobs, `pr-preflight-platforms` and `check-doc-freshness-platforms`,
 run a macOS leg on `blacksmith-6vcpu-macos-26` (Apple Silicon) and a Windows
-leg (`blacksmith-8vcpu-windows-2025` for `pr-preflight-platforms`,
-`blacksmith-4vcpu-windows-2025` for `check-doc-freshness-platforms`), each
-leg naming its label in the matrix (`runs-on: ${{ matrix.runner }}`). The
-8 vCPU leg restores main.yml's `test-windows` entries saved on 4 vCPU: the
-cache keys name `runner.os` and `runner.arch`, never the label, and
-`actions/cache`'s version hash covers only the paths and compression method. There is no GitHub-hosted fallback:
+leg on `blacksmith-4vcpu-windows-2025`, each leg naming its label in the
+matrix (`runs-on: ${{ matrix.runner }}`). An 8 vCPU Windows preflight leg
+was tried (#7381): it restored the 4 vCPU saver's cache, but queued 63s for
+the larger runner and finished slower (144s vs 129s), so it stays on 4 vCPU. There is no GitHub-hosted fallback:
 Blacksmith serves this org's fork PRs (gascity's fork PRs run their CI on
 `blacksmith-*` labels). Fork runs get no secrets and a read-only token
 (`TestBlacksmithJobsReadNoSecrets` keeps every Blacksmith job free of secret

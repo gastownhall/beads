@@ -483,8 +483,8 @@ func TestPRWorkflowExercisesWindowsBenchmarkEnvScrubbing(t *testing.T) {
 		t.Errorf("pr-preflight-platforms matrix os = %v, want the macOS and Windows hosts (Linux runs under Bazel)", got)
 	}
 	for _, tuple := range job.Strategy.Matrix.Include {
-		if tuple.Runner != preflightMatrixRunners[tuple.OS] {
-			t.Errorf("pr-preflight-platforms %s leg runner = %q, want %q", tuple.OS, tuple.Runner, preflightMatrixRunners[tuple.OS])
+		if tuple.Runner != platformsMatrixRunners[tuple.OS] {
+			t.Errorf("pr-preflight-platforms %s leg runner = %q, want %q", tuple.OS, tuple.Runner, platformsMatrixRunners[tuple.OS])
 		}
 	}
 	if job.If != "" {
