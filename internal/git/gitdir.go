@@ -111,6 +111,7 @@ func initGitContext() {
 type revParseResult struct {
 	gitDir, commonDir, topLevel string
 	notRepo                     bool
+	notRepoErr                  error // why, when notRepo; nil means errNotGitRepository
 }
 
 // errNotGitRepository stands in for git's exit status when in-process
@@ -154,7 +155,11 @@ func loadGitContext(workDir string, env []string) gitContext {
 func gitContextFromRevParse(workDir string, raw revParseResult) gitContext {
 	var ctx gitContext
 	if raw.notRepo {
-		ctx.err = fmt.Errorf("not a git repository: %w", errNotGitRepository)
+		reason := raw.notRepoErr
+		if reason == nil {
+			reason = errNotGitRepository
+		}
+		ctx.err = fmt.Errorf("not a git repository: %w", reason)
 		return ctx
 	}
 	ctx.gitDirRaw = raw.gitDir

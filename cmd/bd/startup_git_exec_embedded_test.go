@@ -41,9 +41,20 @@ func (r *gitExecRecorder) run(t *testing.T, bd, dir string, args ...string) (str
 	}
 	cmd := exec.Command(bd, args...)
 	cmd.Dir = dir
-	env := envWithout(envWithout(bdEnv(dir), "BD_ACTOR"), "PATH")
-	for _, name := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES"} {
-		env = envWithout(env, name)
+	// Drop every GIT_* variable but the config-file selectors: any of
+	// internal/git's discovery overrides (GIT_DIR, GIT_WORK_TREE,
+	// GIT_COMMON_DIR, GIT_CEILING_DIRECTORIES, GIT_DISCOVERY_ACROSS_FILESYSTEM,
+	// GIT_OBJECT_DIRECTORY, GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT with its
+	// GIT_CONFIG_KEY_n/VALUE_n, ...) exported by the runner — a `git -c`
+	// wrapper, a hook context — would rightly send bd back to git rev-parse.
+	var env []string
+	for _, kv := range envWithout(envWithout(bdEnv(dir), "BD_ACTOR"), "PATH") {
+		name, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(name, "GIT_") && name != "GIT_CONFIG_GLOBAL" &&
+			name != "GIT_CONFIG_SYSTEM" && name != "GIT_CONFIG_NOSYSTEM" {
+			continue
+		}
+		env = append(env, kv)
 	}
 	// backup.enabled is set explicitly: left at its default, embedded-mode
 	// auto-backup decides per command whether a git remote exists, which is

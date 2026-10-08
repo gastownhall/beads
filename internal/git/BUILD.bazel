@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "discover_linux.go",
         "discover_other.go",
+        "gitconfig_linux.go",
         "gitdir.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/git",

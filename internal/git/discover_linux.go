@@ -3,8 +3,8 @@
 package git
 
 import (
-	"bufio"
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -38,12 +38,23 @@ func discoverGitInProcess() (revParseResult, bool) {
 			return revParseResult{}, false
 		}
 	}
-	wd, err := os.Getwd()
+	wd, err := processCwd()
 	if err != nil {
 		return revParseResult{}, false
 	}
 	return discoverGitFrom(wd)
 }
+
+// processCwd is getcwd(2), as Git uses. os.Getwd prefers $PWD whenever it
+// names the same inode as ".", which under bind-mount aliases (same device
+// and inode, different ancestors) would walk a different path than git.
+func processCwd() (string, error) {
+	return syscall.Getwd()
+}
+
+// errNotGitRepositoryMountBoundary is the in-process counterpart of Git's
+// "not a git repository (or any parent up to mount point ...)".
+var errNotGitRepositoryMountBoundary = errors.New("no .git found in the working directory or any parent up to the filesystem boundary")
 
 // discoverGitFrom mirrors setup_git_directory_gently's discovery walk (Git
 // 2.x) from cwd. Git walks the physical directory (getcwd), checks each
@@ -91,7 +102,7 @@ func discoverGitFrom(cwd string) (revParseResult, bool) {
 		if parentStat.Dev != cwdStat.Dev {
 			// Git stops at a mount point unless
 			// GIT_DISCOVERY_ACROSS_FILESYSTEM is set (handled by the caller).
-			return revParseResult{notRepo: true}, true
+			return revParseResult{notRepo: true, notRepoErr: errNotGitRepositoryMountBoundary}, true
 		}
 		dir = parent
 	}
@@ -143,7 +154,10 @@ func discoveredGitFile(top, gitFile string) (revParseResult, bool) {
 		return revParseResult{}, false
 	}
 	if !filepath.IsAbs(target) {
-		target = filepath.Join(top, target)
+		// Not filepath.Join: its lexical Clean would fold "link/.." before
+		// symlinks resolve, where Git's realpath resolves them physically
+		// (as EvalSymlinks does for ".." after a resolved component).
+		target = top + string(filepath.Separator) + target
 	}
 	gitDir, err := filepath.EvalSymlinks(target)
 	if err != nil {
@@ -156,7 +170,7 @@ func discoveredGitFile(top, gitFile string) (revParseResult, bool) {
 			return revParseResult{}, false
 		}
 		if !filepath.IsAbs(common) {
-			common = filepath.Join(gitDir, common)
+			common = gitDir + string(filepath.Separator) + common // physical "..", as above
 		}
 		if commonDir, err = filepath.EvalSymlinks(common); err != nil {
 			return revParseResult{}, false
@@ -259,75 +273,43 @@ func submoduleWorktreeIs(gitDir, commonDir, worktree, top string) bool {
 // (read_repository_format), so global and system config cannot move the work
 // tree. Anything else that could — core.bare, extensions (worktreeConfig,
 // unknown ones Git rejects), a format version Git refuses, include
-// directives, a repeated core.worktree, syntax this scanner does not model —
-// sends discovery to git.
+// directives, a repeated core.worktree, or any line scanGitConfig does not
+// fully understand (where Git might honor or reject it) — sends discovery to
+// git.
 func repoConfigAllowsDiscovery(commonDir string) (worktree string, ok bool) {
-	f, err := os.Open(filepath.Join(commonDir, "config")) // #nosec G304 -- the discovered repository config
-	if os.IsNotExist(err) {
-		return "", true
-	}
-	if err != nil {
-		return "", false
-	}
-	defer f.Close()
-
-	section := ""
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || line[0] == '#' || line[0] == ';' {
-			continue
+	ok = scanGitConfig(filepath.Join(commonDir, "config"), func(e gitConfigEntry) bool {
+		if strings.HasPrefix(e.section, "include") || e.section == "extensions" {
+			return false
 		}
-		if strings.HasSuffix(line, "\\") {
-			return "", false // continuation lines are not modeled
+		if e.section != "core" || e.subsection != nil {
+			return true
 		}
-		if line[0] == '[' {
-			end := strings.IndexByte(line, ']')
-			if end < 0 {
-				return "", false
-			}
-			header := strings.TrimSpace(line[1:end])
-			if strings.ContainsAny(header, " \t\"") {
-				section = "" // a subsection: [remote "origin"], [branch "main"], ...
-				if name := strings.ToLower(strings.Fields(header)[0]); strings.HasPrefix(name, "include") {
-					return "", false
-				}
-			} else {
-				section = strings.ToLower(header)
-			}
-			if strings.HasPrefix(section, "include") || section == "extensions" {
-				return "", false
-			}
-			line = strings.TrimSpace(line[end+1:])
-			if line == "" || line[0] == '#' || line[0] == ';' {
-				continue
-			}
-		}
-		if section != "core" {
-			continue
-		}
-		key, value, _ := strings.Cut(line, "=")
-		key = strings.ToLower(strings.TrimSpace(key))
-		rawValue := value
-		value = strings.ToLower(strings.Trim(strings.TrimSpace(value), "\""))
-		switch key {
+		switch e.key {
 		case "worktree":
-			rawValue = strings.TrimSpace(rawValue)
-			if worktree != "" || rawValue == "" || strings.ContainsAny(rawValue, "\\\"#;") {
-				return "", false
+			if worktree != "" || !e.hasValue || e.value == "" || strings.ContainsAny(e.rawValue, "\"#;") {
+				return false
 			}
-			worktree = rawValue
+			worktree = e.value
 		case "bare":
-			if value != "false" && value != "no" && value != "off" && value != "0" {
-				return "", false
+			if !e.hasValue {
+				return false // a bare "bare" key means true
+			}
+			switch strings.ToLower(e.value) {
+			case "false", "no", "off", "0":
+			default:
+				return false
 			}
 		case "repositoryformatversion":
-			if v, err := strconv.Atoi(value); err != nil || v < 0 || v > 1 {
-				return "", false
+			if v, err := strconv.Atoi(e.value); err != nil || v < 0 || v > 1 {
+				return false
 			}
 		}
+		return true
+	})
+	if !ok {
+		return "", false
 	}
-	return worktree, scanner.Err() == nil
+	return worktree, true
 }
 
 // ownedByCurrentUser mirrors Git's is_path_owned_by_current_uid (lstat, owner

@@ -115,6 +115,43 @@ func newDiscoveryFixture(t *testing.T) discoveryFixture {
 	return f
 }
 
+// resolvedLikeStartup is what bd's startup derives for dir: the in-process
+// answer when discovery gives one, else git's.
+func resolvedLikeStartup(dir string, env []string) (gitContext, bool) {
+	if raw, ok := discoverGitFrom(dir); ok {
+		return gitContextFromRevParse(dir, raw), true
+	}
+	return loadGitContext(dir, env), false
+}
+
+// assertSameAsGit checks the startup-derived context for dir against the git
+// subprocess's: same failure, or the same paths.
+func assertSameAsGit(t *testing.T, env []string, dir string) {
+	t.Helper()
+	got, _ := resolvedLikeStartup(dir, env)
+	want := loadGitContext(dir, env)
+	if (got.err != nil) != (want.err != nil) {
+		t.Fatalf("in %s: startup err %v, git err %v", dir, got.err, want.err)
+	}
+	if got.gitDirRaw != want.gitDirRaw || got.commonDir != want.commonDir ||
+		got.repoRoot != want.repoRoot || got.isWorktree != want.isWorktree {
+		t.Fatalf("in %s: startup %+v, git %+v", dir, got, want)
+	}
+}
+
+// repoWithRawConfig makes a repository and replaces its config file.
+func repoWithRawConfig(t *testing.T, env []string, config string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "r")
+	runFixtureGit(t, env, t.TempDir(), "init", "-q", dir)
+	if err := os.WriteFile(filepath.Join(dir, ".git", "config"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+const plainRepoConfig = "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n"
+
 // TestDiscoverGitFromMatchesRevParse is the equivalence contract: wherever
 // in-process discovery answers, its answer is byte-for-byte what `git
 // rev-parse --git-dir --git-common-dir --show-toplevel` prints there.
@@ -134,27 +171,29 @@ func TestDiscoverGitFromMatchesRevParse(t *testing.T) {
 		{"nested repo subdir", filepath.Join(f.nested, "deep")},
 		{"symlinked path to repo top", filepath.Join(f.root, "link")},
 		{"symlinked path to repo subdir", filepath.Join(f.root, "link", "a", "b")},
+		// No ancestor of a fresh temp directory is a repository, so this is
+		// answered in-process (by the walk reaching / or a mount boundary).
 		{"no repository", filepath.Join(f.root, "norepo", "x")},
+		{"config with a UTF-8 BOM", repoWithRawConfig(t, f.env, "\xef\xbb\xbf"+plainRepoConfig)},
+		{"config with CRLF and comments", repoWithRawConfig(t, f.env,
+			"# leading comment\r\n[core] ; header comment\r\n\tbare = false # trailing\r\n[remote \"origin\"]\r\n\turl = \"/x y\"\r\n")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, ok := discoverGitFrom(tc.dir)
 			if !ok {
-				if tc.name == "no repository" {
-					// An ancestor of the temp dir may be unusual (a bare
-					// repository, a foreign owner); declining is always safe.
-					t.Skip("in-process discovery declined above the fixture root")
-				}
 				t.Fatalf("discoverGitFrom(%s) declined; want an in-process answer", tc.dir)
 			}
 			if want := gitRevParse(t, f.env, tc.dir); got != want {
 				t.Fatalf("discoverGitFrom(%s) = %+v, git rev-parse = %+v", tc.dir, got, want)
 			}
+			assertSameAsGit(t, f.env, tc.dir)
 		})
 	}
 }
 
 // TestDiscoverGitFromDeclinesUnmodeledLayouts covers the layouts in-process
-// discovery must hand to git rather than guess.
+// discovery must hand to git rather than guess, and checks that what startup
+// then derives (from git) is git's answer.
 func TestDiscoverGitFromDeclinesUnmodeledLayouts(t *testing.T) {
 	f := newDiscoveryFixture(t)
 	repoWithConfig := func(t *testing.T, args ...string) string {
@@ -164,18 +203,27 @@ func TestDiscoverGitFromDeclinesUnmodeledLayouts(t *testing.T) {
 		runFixtureGit(t, f.env, dir, append([]string{"config"}, args...)...)
 		return dir
 	}
-	invalidGitfile := filepath.Join(t.TempDir(), "badfile")
-	if err := os.MkdirAll(invalidGitfile, 0o750); err != nil {
-		t.Fatal(err)
+	mkdir := func(t *testing.T, parts ...string) string {
+		t.Helper()
+		dir := filepath.Join(parts...)
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		return dir
 	}
+	invalidGitfile := mkdir(t, t.TempDir(), "badfile")
 	if err := os.WriteFile(filepath.Join(invalidGitfile, ".git"), []byte("not a gitfile\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	symlinkedDotGit := filepath.Join(t.TempDir(), "symlinked")
-	if err := os.MkdirAll(symlinkedDotGit, 0o750); err != nil {
+	symlinkedDotGit := mkdir(t, t.TempDir(), "symlinked")
+	if err := os.Symlink(filepath.Join(f.main, ".git"), filepath.Join(symlinkedDotGit, ".git")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(f.main, ".git"), filepath.Join(symlinkedDotGit, ".git")); err != nil {
+	bare := filepath.Join(t.TempDir(), "bare.git")
+	runFixtureGit(t, f.env, t.TempDir(), "init", "-q", "--bare", bare)
+	bareSub := mkdir(t, bare, "sub") // below a bare repository: the walk meets HEAD+objects
+	commondirInDotGit := repoWithConfig(t, "core.filemode", "true")
+	if err := os.WriteFile(filepath.Join(commondirInDotGit, ".git", "commondir"), []byte(".\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct{ name, dir string }{
@@ -183,7 +231,21 @@ func TestDiscoverGitFromDeclinesUnmodeledLayouts(t *testing.T) {
 		{"core.bare", repoWithConfig(t, "core.bare", "true")},
 		{"extensions.worktreeConfig", repoWithConfig(t, "extensions.worktreeConfig", "true")},
 		{"include directive", repoWithConfig(t, "include.path", "/dev/null")},
+		// Git skips a leading BOM and honors the section after it.
+		{"BOM then core.worktree", repoWithRawConfig(t, f.env, "\xef\xbb\xbf[core]\n\tworktree = "+t.TempDir()+"\n")},
+		{"header with inner spaces", repoWithRawConfig(t, f.env, "[ core ]\n\tbare = false\n")},
+		{"header with leading whitespace", repoWithRawConfig(t, f.env, "  [core]\n\tbare = false\n")},
+		{"malformed key line", repoWithRawConfig(t, f.env, plainRepoConfig+"!!! = x\n")},
+		{"key before any section", repoWithRawConfig(t, f.env, "bare = false\n"+plainRepoConfig)},
+		{"key on the header line", repoWithRawConfig(t, f.env, "[core] bare = false\n")},
+		{"escaped value", repoWithRawConfig(t, f.env, plainRepoConfig+"[alias]\n\tx = \"a\\tb\"\n")},
+		{"unterminated quote", repoWithRawConfig(t, f.env, plainRepoConfig+"[alias]\n\tx = \"a\n")},
+		{"continuation line", repoWithRawConfig(t, f.env, plainRepoConfig+"[alias]\n\tx = a \\\n b\n")},
+		{"dotted section", repoWithRawConfig(t, f.env, "[core.x]\n\ty = 1\n"+plainRepoConfig)},
 		{"inside the git directory", filepath.Join(f.main, ".git", "refs")},
+		{"bare repository", bare},
+		{"below a bare repository", bareSub},
+		{"commondir inside .git", commondirInDotGit},
 		{"invalid gitfile", invalidGitfile},
 		{"symlinked .git", symlinkedDotGit},
 	} {
@@ -191,7 +253,40 @@ func TestDiscoverGitFromDeclinesUnmodeledLayouts(t *testing.T) {
 			if got, ok := discoverGitFrom(tc.dir); ok {
 				t.Fatalf("discoverGitFrom(%s) = %+v; want it to defer to git", tc.dir, got)
 			}
+			assertSameAsGit(t, f.env, tc.dir)
 		})
+	}
+}
+
+// TestDiscoverGitInProcessUsesPhysicalCwd: Git walks from getcwd(2); a $PWD
+// naming the same directory through another path (a symlink here; a bind
+// mount alias in containers) must not change the walk.
+func TestDiscoverGitInProcessUsesPhysicalCwd(t *testing.T) {
+	f := newDiscoveryFixture(t)
+	physical := filepath.Join(f.main, "a", "b")
+	alias := filepath.Join(f.root, "link", "a", "b")
+	t.Chdir(physical)
+	t.Setenv("PWD", alias)
+	if wd, err := os.Getwd(); err != nil || wd != alias {
+		t.Fatalf("os.Getwd() = %q, %v; this test needs it to report the $PWD alias %q", wd, err, alias)
+	}
+	if wd, err := processCwd(); err != nil || wd != physical {
+		t.Fatalf("processCwd() = %q, %v; want getcwd's %q", wd, err, physical)
+	}
+	for _, k := range discoveryEnvOverrides {
+		if _, set := os.LookupEnv(k); set {
+			t.Setenv(k, "")
+			if err := os.Unsetenv(k); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	got, ok := discoverGitInProcess()
+	if !ok {
+		t.Fatal("discoverGitInProcess declined")
+	}
+	if want := gitRevParse(t, f.env, physical); got != want {
+		t.Fatalf("discoverGitInProcess() = %+v, git rev-parse = %+v", got, want)
 	}
 }
 

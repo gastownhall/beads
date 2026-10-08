@@ -840,6 +840,10 @@ func refreshBoundCommandConfig(cmd *cobra.Command) {
 		readonlyMode = config.GetBool("readonly")
 	}
 	if !root.PersistentFlags().Changed("actor") {
+		// Raw write, not setActor: every caller runs in PersistentPreRunE
+		// BEFORE deferActorGitFallback, which then decides from this value
+		// whether the git user.name fallback is pending. A call after it would
+		// need setActor (and the deferral re-run) to keep that decision true.
 		actor = resolveConfiguredActor()
 	}
 	if !root.PersistentFlags().Changed("dolt-auto-commit") {
@@ -1302,6 +1306,10 @@ var rootCmd = &cobra.Command{
 				WasSet bool
 			}{dbPath, true}
 		}
+		// Reads and writes the raw global on purpose: this runs before
+		// deferActorGitFallback, so no fallback is pending yet and the value
+		// is only the flag/env/config actor. currentActor() here would resolve
+		// git user.name eagerly, which is what the deferral exists to avoid.
 		if !cmd.Root().PersistentFlags().Changed("actor") && actor == "" {
 			actor = resolveConfiguredActor()
 		} else if cmd.Root().PersistentFlags().Changed("actor") {
