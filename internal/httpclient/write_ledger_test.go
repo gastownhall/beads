@@ -603,8 +603,10 @@ func writeShapes() []writeShape {
 			},
 		},
 		{
-			// The edge item. TOTAL. The gate normalization a waits-for edge
-			// gets is the ROLE's and travels inside the blob.
+			// The edge item. The gate normalization a waits-for edge gets is
+			// the ROLE's and travels inside the blob. HasSpawner and ThreadID
+			// have no wire member, so they are absent from carried below and
+			// refuse under W-DepAddItem.HasSpawner and W-DepAddItem.ThreadID.
 			name:   "applyBatch/item/dep_add",
 			source: reflect.TypeOf(issueops.DepAddItem{}),
 			body:   reflect.TypeOf(apigen.ApplyDepAddItem{}),

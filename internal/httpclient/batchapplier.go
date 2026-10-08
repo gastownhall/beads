@@ -368,6 +368,15 @@ func applyDepAddItemBody(item *issueops.DepAddItem) (*apigen.ApplyDepAddItem, er
 	if item.Type == "" {
 		return nil, invalid("a dep_add item names no edge type")
 	}
+	// ApplyDepAddItem publishes neither member below, so each refuses where the
+	// role would store something the wire cannot say. The spawner flag only
+	// does that on a waits-for edge; the role ignores it on every other type.
+	switch {
+	case item.HasSpawner && item.Type == issueops.DepWaitsFor:
+		return nil, refuse(encode.OpApplyBatch, "W-DepAddItem.HasSpawner")
+	case item.ThreadID != "":
+		return nil, refuse(encode.OpApplyBatch, "W-DepAddItem.ThreadID")
+	}
 	out := &apigen.ApplyDepAddItem{Source: source, Target: target, Type: string(item.Type)}
 	// A BLANK blob is ABSENT, not malformed, and reading it any other way is a
 	// real bug rather than strictness: the role's own rule is that an absent,

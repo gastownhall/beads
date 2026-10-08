@@ -34,8 +34,9 @@ import (
 // shared database would turn an id collision between two contracts into a
 // debugging session.
 
-// applyParkBead owns this family's single park and unparks it when the wire
-// grows a typed ref-key member on the problem document.
+// applyParkBead owns this family's two parks: L-apply-ref's unparks when the
+// wire grows a typed ref-key member on the problem document, and
+// W-DepAddItem.HasSpawner's when ApplyDepAddItem publishes a spawner member.
 const applyParkBead = "ga-mijra"
 
 func newServedBatchApplyFixture(t *testing.T, prefix string) conformance.BatchApplyFixture {
@@ -173,6 +174,18 @@ func TestServedBatchApplyNormalizesTheWaitsForGate(t *testing.T) {
 	conformance.RunBatchApplyNormalizesTheWaitsForGate(t, t.Context(), newServedBatchApplyFixture(t, "hba1c"))
 }
 
+// TestServedBatchApplyStampsSpawnerIDOnlyWhenNamed parks on the edge item's
+// spawner flag. The case's second half, an edge that names no spawner, is what
+// this wire writes for every waits-for edge; its first half is the item the
+// client refuses.
+func TestServedBatchApplyStampsSpawnerIDOnlyWhenNamed(t *testing.T) {
+	skipKnownDivergence(t, "W-DepAddItem.HasSpawner", applyParkBead,
+		"the case names a spawner on a waits-for edge (DepAddItem.HasSpawner), and ApplyDepAddItem publishes no "+
+			"spawner member, so the client refuses the item rather than letting the server store the edge without "+
+			"the spawner_id the role would stamp from its resolved target.")
+	conformance.RunBatchApplyStampsSpawnerIDOnlyWhenNamed(t, t.Context(), newServedBatchApplyFixture(t, "hba27"))
+}
+
 func TestServedBatchApplySplicesAForwardMetadataRef(t *testing.T) {
 	conformance.RunBatchApplySplicesAForwardMetadataRef(t, t.Context(), newServedBatchApplyFixture(t, "hba1d"))
 }
@@ -181,8 +194,8 @@ func TestServedBatchApplySplicesASelfMetadataRef(t *testing.T) {
 	conformance.RunBatchApplySplicesASelfMetadataRef(t, t.Context(), newServedBatchApplyFixture(t, "hba1e"))
 }
 
-// TestServedBatchApplyRefusesAMetadataRefNoItemDeclares is the family's ONE
-// park, and it is a response-shape divergence rather than a behavior: the
+// TestServedBatchApplyRefusesAMetadataRefNoItemDeclares is the family's
+// response-shape park, a divergence of shape rather than of behavior: the
 // refusal happens, nothing is written, and the diagnosis a caller ACTS on —
 // DeclaredLater — arrives whole. What the wire cannot carry is WHICH entry of
 // the refs map failed.

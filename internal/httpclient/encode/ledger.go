@@ -212,6 +212,7 @@ var (
 	tyCreateDep       = reflect.TypeOf(issueops.CreateDependency{})
 
 	tyApplyCreateItem = reflect.TypeOf(issueops.CreateItem{})
+	tyApplyDepAddItem = reflect.TypeOf(issueops.DepAddItem{})
 
 	tyCloseBatchRequest = reflect.TypeOf(issueops.CloseBatchRequest{})
 	tySweepRequest      = reflect.TypeOf(issueops.SweepRequest{})
@@ -806,10 +807,11 @@ func writeSideRows() []Row {
 		// The issues:batchApply population, from client wave ga-mijra. It is
 		// SMALL, and that is the operation rather than an oversight: the create
 		// item publishes createIssue's whole twenty, the close item maps whole,
-		// the edge item maps whole, and the update item's patch is WIDER than
-		// updateIssue's in the two places that matter to a plan (a full label
-		// patch, and `owner`). What is left is one patch member and two facts
-		// about the RESULT.
+		// the edge item maps whole but for the spawner flag and the thread the
+		// role gained after the wire was written, and the update item's patch
+		// is WIDER than updateIssue's in the two places that matter to a plan (a
+		// full label patch, and `owner`). What is left is one patch member, those
+		// two edge members and two facts about the RESULT.
 		{
 			ID: "W-CreateItem.Issue", Kind: KindRefuse,
 			Type: tyApplyCreateItem, Field: "Issue",
@@ -827,6 +829,24 @@ func writeSideRows() []Row {
 			Why: "ApplyPatchBody deliberately publishes no parent_id, and the absence is this operation's ONE-EDGE-ONE-SPELLING rule rather than a gap: a parent is a dep_add item of type parent-child, so the ORDER of every edge in a plan stays total and there is exactly one place an edge is written. " +
 				"The single patch has no ordering to express and publishes the member directly (W-IssuePatch.ParentID, retired by client wave ga-7i6by), which is why the same Go field is carried by one document and refused by the other. " +
 				"Refusing is not a loss of capability, only of spelling: a plan re-hangs a parent with a dep_add item, which is the atomic replacement in the position the caller declared it",
+			SpecRow:  "D8 refuse-not-drop",
+			PinnedBy: applyPin,
+		},
+		{
+			ID: "W-DepAddItem.HasSpawner", Kind: KindRefuse,
+			Type: tyApplyDepAddItem, Field: "HasSpawner",
+			What: "a waits-for edge ITEM that names its spawner refuses",
+			Why: "ApplyDepAddItem publishes source, target, type and metadata and no spawner member, and the flag asks for a write only the ROLE can make: metadata's spawner_id, stamped from the resolved target once every id in the batch exists, because a target named by key has no id before then. " +
+				"Dropping the flag would store the edge's gate-only metadata, so an edge whose caller named a spawner would carry none. On every other edge type the role ignores the flag and stores the same row either way, so there it is dropped rather than refused. Upstream ask: a spawner member on ApplyDepAddItem, which retires this row",
+			SpecRow:  "D8 refuse-not-drop",
+			PinnedBy: applyPin,
+		},
+		{
+			ID: "W-DepAddItem.ThreadID", Kind: KindRefuse,
+			Type: tyApplyDepAddItem, Field: "ThreadID",
+			What: "associating an edge ITEM with a discussion thread refuses",
+			Why: "ApplyDepAddItem publishes no thread member, and no operation on this surface does: W-CreateDependency.ThreadID refuses the same column on both create edges. Dropping it would store the edge with no thread, so a replies-to edge would lose the conversation it was written for. " +
+				"It is a row of its own rather than a citation of that one for W-CreateItem.Issue's reason: the operation is different",
 			SpecRow:  "D8 refuse-not-drop",
 			PinnedBy: applyPin,
 		},
