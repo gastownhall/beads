@@ -392,14 +392,15 @@ type Config struct {
 	// would make it eligible to sweep.
 	ClassifiedRead bool
 
-	// LenientOpen opens the store leniently: a migration gate refusal (#4259)
-	// or a dirty-working-set refusal (#4566) skips the migration instead of
-	// failing the open. Set for working-set-reconcile commands (bd dolt
-	// commit, bd vc commit; #4566), whose entire purpose is to clear the
-	// working set that the migration would otherwise refuse to touch.
-	// Honored in embedded and server mode alike. Migrations still RUN on a
-	// lenient open — only those two refusals are tolerated — so a lenient
-	// open of a clean database converges normally.
+	// LenientOpen opens the store leniently: a migration gate refusal (#4259),
+	// a dirty-working-set refusal (#4566) or a migration-consent refusal
+	// skips the migration instead of failing the open. Set for
+	// working-set-reconcile commands (bd dolt commit, bd vc commit; #4566),
+	// whose entire purpose is to clear the working set that the migration
+	// would otherwise refuse to touch. Honored in embedded and server mode
+	// alike. Migrations still RUN on a lenient open — only those refusals are
+	// tolerated — so a lenient open of a clean database with consent to
+	// migrate converges normally.
 	LenientOpen bool
 
 	// RemoteSyncOpen is LenientOpen's narrow sibling for the #6575
@@ -1092,6 +1093,25 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 // and a single pinned *sql.Conn (see recomputeAllBlocked/recomputeBlockedTx).
 type execer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// checkoutBranchIfNeeded puts conn's session on branch, issuing DOLT_CHECKOUT
+// only when the session is on a different branch. A fresh session usually
+// already sits on the requested branch, and a least-privilege operator user
+// (EXECUTE on dolt_add/dolt_commit alone) is denied even a no-op checkout. conn
+// must be a single session: on a multi-connection *sql.DB the read and the
+// checkout could land on different connections.
+func checkoutBranchIfNeeded(ctx context.Context, conn execer, branch string) error {
+	var active string
+	if err := conn.QueryRowContext(ctx, "SELECT active_branch()").Scan(&active); err != nil {
+		return fmt.Errorf("read active branch: %w", err)
+	}
+	if active == branch {
+		return nil
+	}
+	_, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", branch)
+	return err
 }
 
 // pinStoreBranch reproduces the store's real active branch on conn. Branch
@@ -1121,18 +1141,22 @@ type execer interface {
 // in practice rather than by construction. The s.branch fallback does not
 // close the gap either: it fires only when the query errors, not when it
 // succeeds with another connection's answer.
+//
+// conn must be a single session (a *sql.Conn, or a *sql.DB capped at one open
+// connection that keeps it idle-cached): the branch read and any checkout
+// must land on the same connection.
 func (s *DoltStore) pinStoreBranch(ctx context.Context, conn execer) error {
 	var branch string
 	if scanErr := s.db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&branch); scanErr == nil {
 		if branch != "" {
-			if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", branch); err != nil {
+			if err := checkoutBranchIfNeeded(ctx, conn, branch); err != nil {
 				return fmt.Errorf("checkout active branch %q: %w", branch, err)
 			}
 		}
 	} else if s.branch != "" {
 		// Fall back to the store's recorded branch rather than failing the
 		// whole call outright.
-		if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", s.branch); err != nil {
+		if err := checkoutBranchIfNeeded(ctx, conn, s.branch); err != nil {
 			return fmt.Errorf("checkout fallback branch %q: %w", s.branch, err)
 		}
 	}
@@ -2238,8 +2262,9 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 				return nil, fmt.Errorf("failed to initialize schema: %w", err)
 			}
 			// A tolerated refusal still reports what the aborted pass
-			// applied (0 for both guards today, since each refuses before
-			// migrating), so the rebuild below stays correct either way.
+			// applied (0 for every tolerated refusal today, since each
+			// refuses before migrating), so the rebuild below stays correct
+			// either way.
 		}
 		// initSchema runs migrations over a separate pool (openMigrationDB).
 		// The Ping above already pinned a connection in store.db to the
@@ -2277,14 +2302,15 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 // warnLenientOpenRefusal reports whether a lenient open (Config.LenientOpen)
 // may continue past err instead of failing, warning on stderr when it may.
 //
-// Server mode reaches the same two pending-migration refusals embedded mode
+// Server mode reaches the same pending-migration refusals embedded mode
 // relaxes for this intent (embeddeddolt's openWorkingSetReconcile): the #4566
 // dirty-table guard, whose documented recovery IS the commit these opens exist
-// to run, and the #4259 remote-migrate gate, a coordination stop with no
-// business blocking a commit of the local working set. Against an external
-// server the operator cannot sidestep either by deleting a local database, so
-// leaving them fatal here left the refusals with no in-band recovery at all
-// (#5781).
+// to run; the migration-consent refusal, which fires before that guard and so
+// would rebuild the same deadlock on a database both behind and dirty; and
+// the #4259 remote-migrate gate, a coordination stop with no business blocking
+// a commit of the local working set. Against an external server the operator
+// cannot sidestep any of them by deleting a local database, so leaving them
+// fatal here left the refusals with no in-band recovery at all (#5781).
 //
 // Every other migration failure still fails the open, and the schema-skew and
 // identity guards run before this point either way: lenient relaxes migration,
@@ -2295,8 +2321,13 @@ func warnLenientOpenRefusal(err error) bool {
 		fmt.Fprintf(os.Stderr,
 			"Warning: %v\n"+
 				"  Committing the working set at the current schema; when it completes,\n"+
-				"  re-run 'bd migrate'.\n",
+				"  re-run 'bd migrate schema'.\n",
 			dirtyErr)
+		return true
+	}
+	var consentErr *schema.MigrateConsentError
+	if errors.As(err, &consentErr) {
+		fmt.Fprint(os.Stderr, consentErr.WorkingSetWarning())
 		return true
 	}
 	var gateErr *schema.RemoteMigrateGateError

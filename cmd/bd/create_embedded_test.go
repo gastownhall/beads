@@ -1245,7 +1245,7 @@ func TestEmbeddedCreateWithGitRemote(t *testing.T) {
 	dir, _, _ := bdInit(t, bd, "--prefix", "gr")
 
 	// Add a fake git remote so isBackupAutoEnabled returns true
-	cmd := exec.Command("git", "remote", "add", "origin", "https://example.com/fake.git")
+	cmd := gitCommand("remote", "add", "origin", "https://example.com/fake.git")
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git remote add failed: %v\n%s", err, out)

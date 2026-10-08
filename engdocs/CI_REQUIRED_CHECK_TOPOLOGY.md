@@ -55,9 +55,9 @@ Current PR-related workflow names:
   outputs (`rbe-enabled` is `true` in `remote`, `fork-ro` and `fork-rw`);
   every lane exports its
   `job.status` as an output named after the job. `pr.yml`'s gate requires the
-  call's result (`BAZEL`) and `BAZEL_TEST`, `BAZEL_PURE`, `BAZEL_EMBEDDED`,
-  `BAZEL_INTEGRATION`, `BAZEL_DOLTSERVER`, `BAZEL_PROXIED` and
-  `BAZEL_SERVER_STORAGE`. These lanes are the only CI run of the Linux Go
+  call's result (`BAZEL`) and `BAZEL_TEST`, `BAZEL_PURE`,
+  `BAZEL_RELEASE_CROSS`, `BAZEL_EMBEDDED`, `BAZEL_INTEGRATION`,
+  `BAZEL_DOLTSERVER`, `BAZEL_PROXIED` and `BAZEL_SERVER_STORAGE`. These lanes are the only CI run of the Linux Go
   test tiers: the legacy jobs they mirrored in `pr.yml` and `pr-risk.yml`
   are retired (ga-96smfk.22; see
   [Legacy Tier Retirement](#legacy-tier-retirement-d2)), so the gate also
@@ -883,9 +883,11 @@ Required` requires them to have run remotely and passed.
     `1.3.0 (dev)`, no commit); no consumer reads it. Verified 2026-10-02:
     both package gates pass with the Bazel-built bd (MCP: 228 passed, 5
     skipped; npm: all tests and the pack dry run), the same as with a
-    `go build` bd. Both run on `blacksmith-4vcpu-ubuntu-2404` when
-    `rbe.outputs.enabled == 'true'` (4 vCPU: `pytest -n 8` is pinned to
-    timing measured there), `ubuntu-latest` otherwise. `bazel-test`'s own
+    `go build` bd. In mode remote, package-npm runs on
+    `blacksmith-4vcpu-ubuntu-2404` and package-mcp on
+    `blacksmith-8vcpu-ubuntu-2404` with `pytest -n 16`
+    (`BEADS_MCP_PYTEST_WORKERS`; the script's default is `-n 8`);
+    `ubuntu-latest` (and `-n 8`) otherwise. `bazel-test`'s own
     `bazel-ci-build-artifacts` upload is no longer consumed by anything; it
     is kept for the F3.5.3 SHA256SUMS comparison and for debugging.
   - The Dolt-backed domain, uow, tracker, doctor/fix and protocol suites
@@ -899,8 +901,9 @@ Required` requires them to have run remotely and passed.
     `TestPinnedDoltCLIMatchesContainerImage`. The release-target
     cross-compilation (formerly pr.yml's
     `check-release-target-cross-compilation`, `go build ./...` with
-    `CGO_ENABLED=0` per target) is a step of bazel.yml's `bazel-pure` lane
-    (`BAZEL_PURE`): `scripts/ci/bazel-release-cross-compile.sh` runs one
+    `CGO_ENABLED=0` per target) is bazel.yml's `bazel-release-cross` lane
+    (`BAZEL_RELEASE_CROSS`), split out of `bazel-pure` so it runs in
+    parallel with it: `scripts/ci/bazel-release-cross-compile.sh` runs one
     remote `bazel build //tools/bazel:release_cross`, every `go_library` and
     `go_binary` for each row of `scripts/ci/release-targets.txt`, plus
     `//tools/bazel:pure_bd_has_no_cgo_only_deps` (a pure bd must not link
@@ -910,7 +913,7 @@ Required` requires them to have run remotely and passed.
     equal to the toolchain's) and the golangci-lint linters `.golangci.yml`
     enables run as nogo (`//tools/nogo`) beside every compile of every Bazel
     lane: natively in `bazel test //... --config=ci`, and for every release
-    platform in the `bazel-pure` lane's release cross-compile
+    platform in the `bazel-release-cross` lane
     (engdocs/LINTING.md). The former
     `scripts-go-checks` (`Go checks (vet)`) and `pr-lint-wrapper`
     (`PR Lint (native|windows|darwin)`) jobs are retired.
@@ -927,8 +930,9 @@ Required` requires them to have run remotely and passed.
 
     `tools/bazel/equivalence_allowlist.txt` holds only the two `cmd/bd`
     tests of plain `go test`'s own bd build fallback, which Bazel never
-    takes; `pr-preflight-platforms` runs them on every OS ("Exercise go
-    test's bd build fallback"). `TestBazelOnlySkipsAreAllowlisted` (under
+    takes; `pr-preflight-platforms` runs them on macOS and Windows
+    ("Exercise generated Git hook timeout process boundary and go test's bd
+    build fallback"). `TestBazelOnlySkipsAreAllowlisted` (under
     Bazel too) requires every top-level test with a `TEST_SRCDIR`- or
     `bazeltest.IsBazel()`-guarded `t.Skip` to have an allowlist `skip`
     entry, and no test anywhere to run part of its checks under `go test`
@@ -1115,7 +1119,7 @@ scope, not this slice's.
   `scripts/ci/check-release-cross-compile.sh <group>`, which builds every
   target in its group sequentially and reports every failure before exiting
   non-zero, so a PR touching two platforms at once sees both failures in one
-  log instead of needing a per-target re-run. (Since retired: bazel.yml's `bazel-pure`
+  log instead of needing a per-target re-run. (Since retired: bazel.yml's `bazel-release-cross`
   lane builds the same manifest with Bazel, `--platforms` per target.)
 - **`advisory-reports` fold.** `build-examples` and `complexity-report` (both
   already advisory: neither was in ci-gate's `needs`/`CI_GATE_REQUIRED`)
@@ -1202,7 +1206,9 @@ their `blacksmith-*vcpu-windows-2025` label literally; the two mixed-OS
 matrix jobs, `pr-preflight-platforms` and `check-doc-freshness-platforms`,
 run a macOS leg on `blacksmith-6vcpu-macos-26` (Apple Silicon) and a Windows
 leg on `blacksmith-4vcpu-windows-2025`, each leg naming its label in the
-matrix (`runs-on: ${{ matrix.runner }}`). There is no GitHub-hosted fallback:
+matrix (`runs-on: ${{ matrix.runner }}`). An 8 vCPU Windows preflight leg
+was tried (#7381): it restored the 4 vCPU saver's cache, but queued 63s for
+the larger runner and finished slower (144s vs 129s), so it stays on 4 vCPU. There is no GitHub-hosted fallback:
 Blacksmith serves this org's fork PRs (gascity's fork PRs run their CI on
 `blacksmith-*` labels). Fork runs get no secrets and a read-only token
 (`TestBlacksmithJobsReadNoSecrets` keeps every Blacksmith job free of secret

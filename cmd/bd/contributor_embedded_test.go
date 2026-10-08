@@ -109,7 +109,7 @@ func initContributor(t *testing.T, bd, prefix string) (projectDir, planningDir s
 	requireFile(t, planningBeadsDir)
 
 	// Sanity: beads.role should be "contributor".
-	roleCmd := exec.Command("git", "config", "beads.role")
+	roleCmd := gitCommand("config", "beads.role")
 	roleCmd.Dir = projectDir
 	roleOut, err := roleCmd.Output()
 	if err != nil {

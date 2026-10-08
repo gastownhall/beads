@@ -241,7 +241,7 @@ func TestTeamServerMode_Integration(t *testing.T) {
 		require.Error(t, err)
 		assert.Nil(t, p)
 		assert.Contains(t, err.Error(), "bts migrate")
-		assert.NotContains(t, err.Error(), "run any bd write command",
+		assert.NotContains(t, err.Error(), "bd migrate schema",
 			"must not suggest bd-driven migration on a bts-owned schema")
 
 		assert.Equal(t, rolledBack, snapshotMigrations(t, ctx, direct),

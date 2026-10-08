@@ -111,15 +111,24 @@ llvm_dist(
         # which pulls in compiler-rt's profile runtime (~170KB).
         "lib/clang/22/lib/x86_64-unknown-linux-gnu/libclang_rt.profile.a",
     ],
-    sha256 = "df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384",
-    strip_prefix = "LLVM-22.1.8-Linux-X64",
+    # LLVM-22.1.8-Linux-X64.tar.xz (sha256 df0e1ecf...0006384), sliced to the
+    # members above by tools/cc_toolchain/repack_llvm.sh: 149 MB instead of
+    # 1.94 GB, and no single-threaded xz pass on every cold runner. The files
+    # are byte-identical to the release's, so no action key changes.
+    # tools/cc_toolchain/llvm_members.txt must list the same members.
+    sha256 = "de6147773999137b70ef3d7bd8ecb1e5b91f2a161d02fd09aec591b84516bec5",
+    sliced = True,
     stub_tools = [
         "clang-format",
         "clang-tidy",
         "clangd",
         "llvm-dwp",
     ],
-    urls = ["https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz"],
+    # The sha256 pin, not the host, guarantees the bytes. gascity's release
+    # asset for now; a beads mirror of the same bytes can be listed first.
+    urls = [
+        "https://github.com/gastownhall/gascity/releases/download/toolchain-llvm-22.1.8-slice-1/LLVM-22.1.8-Linux-X64-slice.tar.zst",
+    ],
 )
 
 # Every other host (macOS arm64, Linux arm64) runs toolchains_llvm's stock
@@ -194,6 +203,23 @@ go_deps.gazelle_override(
         "gazelle:exclude internal/regex/regex_cgo.go",
     ],
     path = "github.com/dolthub/go-mysql-server",
+)
+
+# protoc-gen-validate ships validate/validate.pb.go, so its Go library can
+# compile from the checked-in code. Its own validate/BUILD instead makes the
+# Go library a go_proto_library, so every lane built protoc from source just
+# to regenerate that file: about 4.5k C++ compile, link and archive actions,
+# each carrying the LLVM toolchain as inputs. The module reaches the graph
+# only through grpc xds and the cloud SDKs. Gazelle regenerates its BUILD
+# files with proto rules off; build_file_name makes it write BUILD.bazel (which
+# Bazel prefers) rather than merge into the upstream BUILD files.
+go_deps.gazelle_override(
+    build_file_generation = "on",
+    directives = [
+        "gazelle:build_file_name BUILD.bazel",
+        "gazelle:proto disable",
+    ],
+    path = "github.com/envoyproxy/protoc-gen-validate",
 )
 go_deps.module_override(
     patch_strip = 1,

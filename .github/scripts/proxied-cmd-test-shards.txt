@@ -51,6 +51,7 @@
 #   a doc comment.
 
 15 1 TestProxiedServerBlocked
+15 13 TestProxiedServerClose3
 15 1 TestProxiedServerCompactDolt
 15 1 TestProxiedServerCreate
 15 1 TestProxiedServerDep2
@@ -118,6 +119,7 @@
 
 15 7 TestProxiedServerAssign
 15 7 TestProxiedServerBackupRefusedOnExternalTopology
+15 2 TestProxiedServerClose4
 15 7 TestProxiedServerCount
 15 7 TestProxiedServerGC
 15 7 TestProxiedServerList
@@ -256,6 +258,7 @@
 30 1 TestProxiedServerSQLStatementRouting
 30 1 TestProxiedServerServeLifecycle
 
+30 2 TestProxiedServerCloseBeadGate
 30 2 TestProxiedServerDelete
 30 2 TestProxiedServerDeleteForceOrphans
 30 2 TestProxiedServerIfRevisionGuardAssign
@@ -360,6 +363,8 @@
 30 16 TestProxiedServerUpdateConcurrentMetadata
 
 30 17 TestProxiedServerClose
+30 17 TestProxiedServerClose3
+30 17 TestProxiedServerClose4
 30 17 TestProxiedServerConfigConcurrent
 30 17 TestProxiedServerDeleteConcurrent
 30 17 TestProxiedServerIfRevisionGuardUpdate
@@ -429,6 +434,7 @@
 30 26 TestProxiedServerFindDuplicates
 30 26 TestProxiedServerGateCheck
 30 26 TestProxiedServerGateFrontDoorDirectServerProxyParity
+30 26 TestProxiedServerGatedRendering
 30 26 TestProxiedServerServeAddComment
 30 26 TestProxiedServerServeSettingsWrites
 30 26 TestProxiedServerState

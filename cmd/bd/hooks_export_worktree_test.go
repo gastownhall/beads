@@ -27,7 +27,7 @@ func mkdirs(t *testing.T, dirs ...string) {
 // scrubbed because the test process may itself be running under a git hook.
 func runGitForWorktreeTest(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := gitCommand(args...)
 	cmd.Dir = dir
 	cmd.Env = scrubGitHookEnv(os.Environ())
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -396,7 +396,7 @@ func readFileForWorktreeTest(t *testing.T, path string) string {
 // can tell "the hook staged this" from "the fixture did".
 func stagedPathsForWorktreeTest(t *testing.T, dir string) []string {
 	t.Helper()
-	cmd := exec.Command("git", "diff", "--cached", "--name-only")
+	cmd := gitCommand("diff", "--cached", "--name-only")
 	cmd.Dir = dir
 	cmd.Env = scrubGitHookEnv(os.Environ())
 	out, err := cmd.CombinedOutput()

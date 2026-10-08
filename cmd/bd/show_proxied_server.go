@@ -36,6 +36,7 @@ type showProxiedInput struct {
 	includeDepends  bool
 	briefDeps       bool
 	includeComments bool
+	commentsTail    int
 }
 
 func gatherShowProxiedInput(cmd *cobra.Command, args []string) *showProxiedInput {
@@ -52,6 +53,7 @@ func gatherShowProxiedInput(cmd *cobra.Command, args []string) *showProxiedInput
 	in.includeDepends, _ = cmd.Flags().GetBool("include-dependents")
 	in.briefDeps, _ = cmd.Flags().GetBool("brief-deps")
 	in.includeComments, _ = cmd.Flags().GetBool("include-comments")
+	in.commentsTail, _ = cmd.Flags().GetInt("comments-tail")
 
 	idFlags, _ := cmd.Flags().GetStringArray("id")
 	in.ids = append(in.ids, args...)
@@ -93,6 +95,10 @@ func proxiedIssueReader() (issueops.Reader, error) {
 
 func runShowProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
 	in := gatherShowProxiedInput(cmd, args)
+
+	if err := validateCommentsTail(in.commentsTail); err != nil {
+		return err
+	}
 
 	uw, err := proxiedOpenReadUOW(ctx)
 	if err != nil {
@@ -522,13 +528,27 @@ func runShowProxiedDefault(ctx context.Context, uw uow.UnitOfWork, in *showProxi
 }
 
 func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Issue, isWisp bool, in *showProxiedInput, idx int, formatTime func(time.Time) string) {
+	// The outgoing edges are read here rather than at the DEPENDS ON section
+	// below because the header needs them: the derived GATED marker
+	// (wy-j2upyy) is the gate-typed subset of this very set. Without it the
+	// proxied text route renders a plain OPEN header for a bead whose own
+	// --json already publishes gated_by. Best effort, as it always was.
+	//
+	// Counts first — see readDepCounts for why the order matters. The
+	// listing's error is KEPT, not discarded: rendering stays best effort,
+	// but a FAILED listing and a SHORT one both leave the slice empty, and
+	// only the second is an unresolvable edge.
+	depCountsSnapshot := readDepCounts(ctx, proxiedDepCounter{src: workapi.NewUOWDetailSource(uw), isWisp: isWisp}, issue.ID)
+	depsWithMeta, depsErr := proxiedListDeps(ctx, uw, issue.ID, isWisp, domain.DepListFilter{Direction: domain.DepDirectionOut})
+	gates := types.GatesHolding(issue, depsWithMeta)
+
 	if idx > 0 {
 		fmt.Println("\n" + ui.RenderMuted(strings.Repeat("─", 60)))
-		fmt.Printf("\n%s\n", formatIssueHeader(issue))
+		fmt.Printf("\n%s\n", formatIssueHeaderWithGates(issue, gates))
 	} else {
-		fmt.Printf("%s\n", formatIssueHeader(issue))
+		fmt.Printf("%s\n", formatIssueHeaderWithGates(issue, gates))
 	}
-	fmt.Println(formatIssueMetadata(issue))
+	fmt.Println(formatIssueMetadataWithGates(issue, gates))
 
 	if issue.Description != "" {
 		fmt.Printf("\n%s\n%s\n", ui.RenderBold("DESCRIPTION"), uimd.RenderMarkdown(issue.Description))
@@ -570,13 +590,7 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 
 	relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
 
-	// Counts first — see readDepCounts for why the order matters.
-	depCountsSnapshot := readDepCounts(ctx, proxiedDepCounter{src: workapi.NewUOWDetailSource(uw), isWisp: isWisp}, issue.ID)
-
-	// The errors are KEPT, not discarded: rendering stays best effort, but a
-	// FAILED listing and a SHORT one both leave the slice empty, and only the
-	// second is an unresolvable edge.
-	depsWithMeta, depsErr := proxiedListDeps(ctx, uw, issue.ID, isWisp, domain.DepListFilter{Direction: domain.DepDirectionOut})
+	// (read above, with the header's gate decoration).
 	for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
 		printDepSection(sec)
 	}
@@ -607,16 +621,7 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 	printRelatedSection(relatedSeen)
 
 	comments, _ := proxiedGetComments(ctx, uw, issue.ID, isWisp)
-	if len(comments) > 0 {
-		fmt.Printf("\n%s\n", ui.RenderBold("COMMENTS"))
-		for _, c := range comments {
-			fmt.Printf("  %s %s\n", ui.RenderMuted(formatTime(c.CreatedAt)), c.Author)
-			rendered := uimd.RenderMarkdown(c.Text)
-			for _, line := range strings.Split(strings.TrimRight(rendered, "\n"), "\n") {
-				fmt.Printf("    %s\n", line)
-			}
-		}
-	}
+	printComments(comments, in.commentsTail, formatTime, issue.ID)
 
 	if in.longMode {
 		fmt.Print(formatIssueLongExtras(issue, formatTime))

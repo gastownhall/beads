@@ -185,7 +185,7 @@ func primeChangeDirRedirectClone(t *testing.T, storeBeadsDir string) string {
 
 func primeChangeDirGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := gitCommand(args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"GIT_AUTHOR_NAME=bd-test", "GIT_AUTHOR_EMAIL=bd-test@example.com",

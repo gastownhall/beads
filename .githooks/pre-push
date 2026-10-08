@@ -61,12 +61,15 @@ fi
 # `bazel test //... --config=ci`, for branch pushes whose new commits change
 # Go or Bazel inputs. A tag push, a deletion, or a docs-only push skips it.
 # BD_PREPUSH_SUITE=go runs plain go test instead, under a banner.
+#
+# The decision keys on the remote ref and the shas, never on the local ref's
+# shape: for `git push origin HEAD` and `HEAD:refs/heads/x` git passes the
+# literal local ref `HEAD`, which a `refs/heads/*` match would skip (#7351).
 zero_sha=0000000000000000000000000000000000000000
 suite_needed=0
-while read -r local_ref local_sha _remote_ref remote_sha; do
-    case "$local_ref" in
-        refs/heads/*) ;;
-        *) continue ;;
+while read -r _local_ref local_sha remote_ref remote_sha; do
+    case "$remote_ref" in
+        refs/tags/*) continue ;;
     esac
     if [ "$local_sha" = "$zero_sha" ] || ! git cat-file -e "$local_sha^{commit}" 2>/dev/null; then
         continue

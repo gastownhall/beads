@@ -468,6 +468,49 @@ func TestEmbeddedGateCreate(t *testing.T) {
 		}
 	})
 
+	t.Run("create_gate_with_repo", func(t *testing.T) {
+		task := bdCreate(t, bd, dir, "Task for cross-repo PR gate", "--type", "task")
+
+		cmd := exec.Command(bd, "gate", "create", "--blocks", task.ID,
+			"--type", "gh:pr", "--await-id", "7173", "--repo", "gastownhall/beads", "--json")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd gate create --repo failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+
+		var gate types.Issue
+		s := strings.TrimSpace(stdout.String())
+		start := strings.Index(s, "{")
+		if err := json.Unmarshal([]byte(s[start:]), &gate); err != nil {
+			t.Fatalf("parse gate JSON: %v\n%s", err, s)
+		}
+		var m map[string]string
+		if err := json.Unmarshal(gate.Metadata, &m); err != nil {
+			t.Fatalf("gate metadata %s is not a string map: %v", gate.Metadata, err)
+		}
+		if m["repo"] != "gastownhall/beads" {
+			t.Errorf("gate metadata repo = %q, want gastownhall/beads", m["repo"])
+		}
+	})
+
+	t.Run("repo_flag_on_human_gate_is_refused", func(t *testing.T) {
+		task := bdCreate(t, bd, dir, "Task for human gate", "--type", "task")
+
+		cmd := exec.Command(bd, "gate", "create", "--blocks", task.ID,
+			"--type", "human", "--repo", "gastownhall/beads")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err == nil {
+			t.Fatalf("--repo on a human gate must be refused; got:\n%s", stdout.String())
+		}
+		if combined := stdout.String() + stderr.String(); !strings.Contains(combined, "--repo applies only to gh:run and gh:pr gates") {
+			t.Errorf("refusal text missing from output:\n%s", combined)
+		}
+	})
+
 	t.Run("create_gate_blocks_ready", func(t *testing.T) {
 		// Use a fresh db so ready output isn't polluted by other subtests
 		freshDir, freshBeads, _ := bdInit(t, bd, "--prefix", "gr")

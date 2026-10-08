@@ -341,9 +341,9 @@ func runGateCreateProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 		}
 
 		gate := buildGateIssue(in, target.ID)
-		metadata, metaErr := repoMetadataForGate(in.gateType, target)
+		metadata, metaErr := gateMetadataForCreate(in, target)
 		if metaErr != nil {
-			return out, "", fmt.Errorf("invalid GitHub repository metadata on %s: %v", target.ID, metaErr)
+			return out, "", metaErr
 		}
 		gate.Metadata = metadata
 

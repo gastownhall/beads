@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -795,7 +794,7 @@ func TestConfigureBeadsHooksPath_AbsolutePath(t *testing.T) {
 		}
 
 		// Read back core.hooksPath
-		out, err := exec.Command("git", "config", "--get", "core.hooksPath").Output()
+		out, err := gitCommand("config", "--get", "core.hooksPath").Output()
 		if err != nil {
 			t.Fatalf("git config --get core.hooksPath failed: %v", err)
 		}
@@ -827,7 +826,7 @@ func TestInstallHooksBeads_WorktreeAccess(t *testing.T) {
 			t.Fatalf("Failed to create metadata.json: %v", err)
 		}
 
-		cmd := exec.Command("git", "commit", "--allow-empty", "--no-verify", "-m", "init")
+		cmd := gitCommand("commit", "--allow-empty", "--no-verify", "-m", "init")
 		cmd.Dir = tmpDir
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git commit failed: %v\n%s", err, string(output))
@@ -847,7 +846,7 @@ func TestInstallHooksBeads_WorktreeAccess(t *testing.T) {
 		}
 
 		// Read core.hooksPath and verify it's absolute
-		out, err := exec.Command("git", "config", "--get", "core.hooksPath").Output()
+		out, err := gitCommand("config", "--get", "core.hooksPath").Output()
 		if err != nil {
 			t.Fatalf("core.hooksPath not set after --beads install: %v", err)
 		}
@@ -858,17 +857,17 @@ func TestInstallHooksBeads_WorktreeAccess(t *testing.T) {
 
 		// Create a worktree and verify hooks are accessible from it
 		worktreeDir := filepath.Join(t.TempDir(), "worktree")
-		cmd = exec.Command("git", "worktree", "add", worktreeDir, "-b", "test-worktree")
+		cmd = gitCommand("worktree", "add", worktreeDir, "-b", "test-worktree")
 		cmd.Dir = tmpDir
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git worktree add failed: %v\n%s", err, string(output))
 		}
 		defer func() {
-			exec.Command("git", "worktree", "remove", worktreeDir).Run()
+			gitCommand("worktree", "remove", worktreeDir).Run()
 		}()
 
 		// From the worktree, core.hooksPath should resolve to the same hooks
-		cmd = exec.Command("git", "config", "--get", "core.hooksPath")
+		cmd = gitCommand("config", "--get", "core.hooksPath")
 		cmd.Dir = worktreeDir
 		wtOut, err := cmd.Output()
 		if err != nil {
@@ -924,14 +923,14 @@ func TestInstallHooksBeads_PreservesGlobalHooks(t *testing.T) {
 		t.Fatalf("failed to write global pre-commit hook: %v", err)
 	}
 
-	setGlobal := exec.Command("git", "config", "--global", "core.hooksPath", globalHooksDir)
+	setGlobal := gitCommand("config", "--global", "core.hooksPath", globalHooksDir)
 	if out, err := setGlobal.CombinedOutput(); err != nil {
 		t.Fatalf("failed to set global core.hooksPath: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
 
 	// Manual repo init (can't use newGitRepo which sets a local core.hooksPath).
 	repoDir := t.TempDir()
-	initCmd := exec.Command("git", "init", "--initial-branch=main")
+	initCmd := gitCommand("init", "--initial-branch=main")
 	initCmd.Dir = repoDir
 	if err := initCmd.Run(); err != nil {
 		t.Fatalf("git init failed: %v", err)
@@ -940,7 +939,7 @@ func TestInstallHooksBeads_PreservesGlobalHooks(t *testing.T) {
 		{"config", "user.email", "test@test.com"},
 		{"config", "user.name", "Test User"},
 	} {
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = repoDir
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("git config %v failed: %v", args, err)
@@ -987,7 +986,7 @@ func TestInstallHooksBeads_PreservesDefaultGitHooks(t *testing.T) {
 		}
 
 		// Unset the local core.hooksPath that newGitRepo sets so git falls back to .git/hooks/.
-		exec.Command("git", "config", "--unset", "core.hooksPath").Run()
+		gitCommand("config", "--unset", "core.hooksPath").Run()
 
 		beadsDir := setupBeadsDir(t, repoDir)
 
@@ -1202,13 +1201,13 @@ func TestInstallHooksBeads_HuskyV8Helper(t *testing.T) {
 	}
 
 	// Set as global hooks path (simulating husky v8)
-	setGlobal := exec.Command("git", "config", "--global", "core.hooksPath", huskyDir)
+	setGlobal := gitCommand("config", "--global", "core.hooksPath", huskyDir)
 	if out, err := setGlobal.CombinedOutput(); err != nil {
 		t.Fatalf("set global core.hooksPath: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
 
 	repoDir := t.TempDir()
-	initCmd := exec.Command("git", "init", "--initial-branch=main")
+	initCmd := gitCommand("init", "--initial-branch=main")
 	initCmd.Dir = repoDir
 	if err := initCmd.Run(); err != nil {
 		t.Fatalf("git init: %v", err)
@@ -1217,7 +1216,7 @@ func TestInstallHooksBeads_HuskyV8Helper(t *testing.T) {
 		{"config", "user.email", "test@test.com"},
 		{"config", "user.name", "Test"},
 	} {
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = repoDir
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("git config %v: %v", args, err)
@@ -1308,13 +1307,13 @@ s=$(dirname "$(dirname "$0")")/$n
 	}
 
 	// Set core.hooksPath to .husky/_/ (husky v9 style)
-	setGlobal := exec.Command("git", "config", "--global", "core.hooksPath", huskyInner)
+	setGlobal := gitCommand("config", "--global", "core.hooksPath", huskyInner)
 	if out, err := setGlobal.CombinedOutput(); err != nil {
 		t.Fatalf("set global core.hooksPath: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
 
 	repoDir := t.TempDir()
-	initCmd := exec.Command("git", "init", "--initial-branch=main")
+	initCmd := gitCommand("init", "--initial-branch=main")
 	initCmd.Dir = repoDir
 	if err := initCmd.Run(); err != nil {
 		t.Fatalf("git init: %v", err)
@@ -1323,7 +1322,7 @@ s=$(dirname "$(dirname "$0")")/$n
 		{"config", "user.email", "test@test.com"},
 		{"config", "user.name", "Test"},
 	} {
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = repoDir
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("git config %v: %v", args, err)

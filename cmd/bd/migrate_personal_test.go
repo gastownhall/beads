@@ -31,7 +31,7 @@ func setupContributorRouting(t *testing.T, bd, dir string) string {
 	t.Helper()
 	planningDir := t.TempDir()
 	// Init a minimal git repo in the planning dir.
-	exec.Command("git", "init", planningDir).Run() //nolint:errcheck
+	gitCommand("init", planningDir).Run() //nolint:errcheck
 	// Initialize beads in planning dir.
 	initCmd := exec.Command(bd, "init", "--prefix", "pl", "--quiet")
 	initCmd.Dir = planningDir
@@ -84,7 +84,7 @@ func TestMigratePersonal_movesIssues(t *testing.T) {
 	planningDir := setupContributorRouting(t, bd, dir)
 
 	// Create issues with the git identity (getActorWithGit will use git user.name).
-	gitName, _ := exec.Command("git", "config", "--global", "user.name").Output()
+	gitName, _ := gitCommand("config", "--global", "user.name").Output()
 	actor := strings.TrimSpace(string(gitName))
 	if actor == "" {
 		actor = "Test"
@@ -132,7 +132,7 @@ func TestMigratePersonal_abortOnNoConfirm(t *testing.T) {
 	setupContributorRouting(t, bd, dir)
 
 	// Create an issue owned by current git user.
-	gitName, _ := exec.Command("git", "config", "--global", "user.name").Output()
+	gitName, _ := gitCommand("config", "--global", "user.name").Output()
 	actor := strings.TrimSpace(string(gitName))
 	if actor == "" {
 		actor = "Test"
@@ -178,7 +178,7 @@ func TestMigratePersonal_preservesComments(t *testing.T) {
 	dir, _, _ := bdInit(t, bd, "--prefix", "mpc")
 	planningDir := setupContributorRouting(t, bd, dir)
 
-	gitName, _ := exec.Command("git", "config", "--global", "user.name").Output()
+	gitName, _ := gitCommand("config", "--global", "user.name").Output()
 	actor := strings.TrimSpace(string(gitName))
 	if actor == "" {
 		actor = "Test"

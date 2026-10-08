@@ -499,6 +499,15 @@ jobs:
   # cold `cmd/bd` test compile in "Exercise generated Git hook timeout
   # process boundary" (250-300s); see S2 below (the restore-non-race-cache
   # step) for the fix that actually targets it. Reverted to one leg per OS.
+  #
+  # Windows leg budget with the caches warm (merge group 37710264475 and PR
+  # runs, 2026-10-07/08): 45-115s setup (setup-go, then the two cache
+  # restores, mostly tar extraction), 33-71s for TestPRPreflight (Git Bash
+  # process creation, now parallel subtests), 27-58s to compile and link
+  # ./cmd/bd's test binary, and about 25s for the rest. A second Windows leg
+  # would pay the setup again to save about 20s, so it stays one leg. An
+  # 8 vCPU Windows leg was tried (#7381): cache restores still hit, but it
+  # queued 63s for the larger runner and finished at 144s vs 129s here.
   pr-preflight-platforms:
     name: PR preflight process (${{ matrix.os }})
     runs-on: ${{ matrix.runner }}
@@ -565,24 +574,21 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test '-tags=gms_pure_go' -count=1 -run '^TestTestScriptPrebuiltBinaryContract$' ./scripts
 
-      - name: Exercise generated Git hook timeout process boundary
-        shell: bash
-        env:
-          GOCACHE: ${{ runner.temp }}/go-cache/non-race
-        run: go test '-tags=gms_pure_go' -count=1 -run '^TestGeneratedHookTimeoutProcessBoundary$' ./cmd/bd
-
-      # Plain go test's own bd build fallback (BEADS_TEST_BD_BINARY unset),
+      # One go test of ./cmd/bd runs the generated hook timeout boundary and
+      # plain go test's own bd build fallback (BEADS_TEST_BD_BINARY unset),
       # which Bazel never takes, on every OS developers run go test on: the
       # tests tools/bazel/equivalence_allowlist.txt lists as skipped under
-      # Bazel. Same build as the step above, so no second compile.
-      - name: Exercise go test's bd build fallback
+      # Bazel. They were two steps; each go test of ./cmd/bd re-hashes its
+      # ~1500 packages and relinks the test binary, which cost 5-9s on
+      # Windows for a fallback run of under one second.
+      - name: Exercise generated Git hook timeout process boundary and go test's bd build fallback
         shell: bash
         env:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
-        run: go test '-tags=gms_pure_go' -count=1 -run '^(TestGOMODCACHENotUnderTestHome|TestGoBuildBDCommandIsCWDIndependent)$' ./cmd/bd
+        run: go test '-tags=gms_pure_go' -count=1 -run '^(TestGeneratedHookTimeoutProcessBoundary|TestGOMODCACHENotUnderTestHome|TestGoBuildBDCommandIsCWDIndependent)$' ./cmd/bd
 
       # This step recompiles ./cmd/bd's test binary. It must share the restored
-      # GOCACHE with the hook-timeout step above (same tags, same platform
+      # GOCACHE with the hook-timeout/bd-build-fallback step above (same tags, same platform
       # default CGO_ENABLED, see the script's header) so it is a relink rather
       # than a second cold compile: without GOCACHE here it fell back to the
       # runner's empty default cache and cold-compiled all of ./cmd/bd on every
@@ -1323,9 +1329,10 @@ jobs:
           }
 
   # The Bazel lanes (bazel.yml): the only pre-merge run of every Linux Go
-  # test tier (PR core, pure-Go and js/wasm, the dolt-server lane, the
-  # embedded-Dolt, proxied-server and server-Dolt storage tiers that
-  # pr-risk.yml used to run, integration and the cmd/bd Dolt-server tier).
+  # test tier (PR core, pure-Go and js/wasm, the release cross-compile, the
+  # dolt-server lane, the embedded-Dolt, proxied-server and server-Dolt
+  # storage tiers that pr-risk.yml used to run, integration and the cmd/bd
+  # Dolt-server tier).
   # ci-gate requires each of them to have run remotely on rbe-west and
   # passed, on every pull_request and merge group: same-repo PRs and merge
   # groups in mode remote, fork and Dependabot PRs through rbe-west's mint
@@ -1402,6 +1409,7 @@ jobs:
             BAZEL
             BAZEL_TEST
             BAZEL_PURE
+            BAZEL_RELEASE_CROSS
             BAZEL_EMBEDDED
             BAZEL_INTEGRATION
             BAZEL_DOLTSERVER
@@ -1439,6 +1447,7 @@ jobs:
           # skipped, which passes only in the modes bazel-gate.sh allows.
           BAZEL_TEST: ${{ needs.bazel.outputs.bazel-test || 'skipped' }}
           BAZEL_PURE: ${{ needs.bazel.outputs.bazel-pure || 'skipped' }}
+          BAZEL_RELEASE_CROSS: ${{ needs.bazel.outputs.bazel-release-cross || 'skipped' }}
           BAZEL_EMBEDDED: ${{ needs.bazel.outputs.bazel-embedded || 'skipped' }}
           BAZEL_INTEGRATION: ${{ needs.bazel.outputs.bazel-integration || 'skipped' }}
           BAZEL_DOLTSERVER: ${{ needs.bazel.outputs.bazel-doltserver || 'skipped' }}

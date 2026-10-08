@@ -419,10 +419,25 @@ func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 //
 // Net: 356 -613 (incl. the documented 1-statement jitter), 712 -1224,
 // classic -60.
+//
+// Re-pinned for the parent-child cascade (gastownhall/beads#6506; classic
+// was 786). A parent-child edge now carries only a parent's exogenous
+// blockedness, and in this shape each parent-child dep add pays seven more
+// reads:
+//   - appendSiblingsUnderAncestorsInTx reseeds the parent's other children:
+//     one ancestorChainInTx walk and four child probes (both dependency
+//     tables, both parent columns), +5.
+//   - The batched mark/unmark reads its exogeneity set first
+//     (batchExogeneity): the parent-kind probe and the issue-parent read,
+//     +2. The probe skips the wisp-parent read, and the ancestry prune costs
+//     nothing while that read is empty.
+//
+// Net: classic +49 (seven distinct parent-child adds; the eighth repeats a
+// pair and is a no-op). 356 and 712 are unchanged.
 var pinnedEmbeddedStatementCounts = map[string]int64{
 	"356 (mol 1x)":    6396,
 	large712ShapeName: 12790,
-	"40 (classic)":    786,
+	"40 (classic)":    835,
 }
 
 // BenchmarkLargeBatchApply_Embedded benchmarks issueops.ApplyBatchInTx on

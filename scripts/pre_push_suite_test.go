@@ -141,7 +141,7 @@ func TestPrePushHookRunsSuiteOnlyForGoChanges(t *testing.T) {
 	body := readPolicyFile(t, sourceRepoRoot(t), ".githooks/pre-push")
 	for _, want := range []string{
 		`"$repo_root/scripts/pre-push-suite.sh" </dev/null`,
-		"refs/heads/*)",
+		"refs/tags/*) continue ;;",
 		"'*.go'",
 		"'*.bazel'",
 	} {
@@ -149,8 +149,10 @@ func TestPrePushHookRunsSuiteOnlyForGoChanges(t *testing.T) {
 			t.Errorf(".githooks/pre-push lacks %q", want)
 		}
 	}
+	// Index the call line: the header comment names pre-push-suite.sh too, and
+	// sits before the managed section wherever the call block is.
 	managed := strings.Index(body, "# --- BEGIN BEADS INTEGRATION")
-	suite := strings.Index(body, "pre-push-suite.sh")
+	suite := strings.Index(body, `"$repo_root/scripts/pre-push-suite.sh" </dev/null`)
 	if managed < 0 || suite < 0 || suite > managed {
 		t.Errorf(".githooks/pre-push must run the suite before the managed beads section")
 	}

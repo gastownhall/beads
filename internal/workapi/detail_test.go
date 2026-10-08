@@ -819,3 +819,58 @@ func deref(t *testing.T, v *int64) int64 {
 	}
 	return *v
 }
+
+// TestBuildIssueDetailsGatedByReadsTheDependencies pins the ORDER of the
+// build: gated_by is derived from the Dependencies slice, so it must be
+// computed after that slice is read and before BriefDeps rewrites it. The
+// be-lpi merge moved the read below the counts and silently left gated_by
+// computed on a nil slice (wy-j2upyy, PR #6606 CI).
+func TestBuildIssueDetailsGatedByReadsTheDependencies(t *testing.T) {
+	ctx := context.Background()
+	heavy := strings.Repeat("x", 1024)
+
+	newFixture := func() *detailFixture {
+		fx := newDetailFixture()
+		fx.deps["bd-1"] = []*types.IssueWithDependencyMetadata{
+			{
+				Issue: types.Issue{
+					ID: "bd-gate", Title: "Gate: human", Status: types.StatusOpen,
+					IssueType: types.TypeGate, Priority: 2, Description: heavy,
+				},
+				DependencyType: types.DepBlocks,
+			},
+			{
+				Issue:          types.Issue{ID: "bd-blocker", Title: "Blocker", Status: types.StatusOpen, IssueType: types.TypeTask},
+				DependencyType: types.DepBlocks,
+			},
+		}
+		return fx
+	}
+
+	wantGate := func(t *testing.T, details *types.IssueDetails) {
+		t.Helper()
+		if len(details.GatedBy) != 1 {
+			t.Fatalf("gated_by = %#v, want exactly the one open gate", details.GatedBy)
+		}
+		if got := details.GatedBy[0].ID; got != "bd-gate" {
+			t.Fatalf("gated_by[0].ID = %q, want bd-gate", got)
+		}
+	}
+
+	for _, opts := range []DetailOptions{{}, {BriefDeps: true}} {
+		t.Run(fmt.Sprintf("BriefDeps=%v", opts.BriefDeps), func(t *testing.T) {
+			fx := newFixture()
+			store, useCase := fixtureSources(fx)
+			for name, src := range map[string]DetailSource{"store": store, "usecase": useCase} {
+				details, err := BuildIssueDetails(ctx, src, fx.issues["bd-1"], false, opts)
+				if err != nil {
+					t.Fatalf("%s: BuildIssueDetails: %v", name, err)
+				}
+				wantGate(t, details)
+				if len(details.Dependencies) != 2 {
+					t.Fatalf("%s: dependencies = %d rows, want 2", name, len(details.Dependencies))
+				}
+			}
+		})
+	}
+}

@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -221,14 +220,14 @@ func TestBeadsRoleGitConfig(t *testing.T) {
 	tmpDir := newGitRepo(t)
 
 	t.Run("set contributor role writes to git config", func(t *testing.T) {
-		cmd := exec.Command("git", "config", "beads.role", "contributor")
+		cmd := gitCommand("config", "beads.role", "contributor")
 		cmd.Dir = tmpDir
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("git config set failed: %v", err)
 		}
 
 		// Verify it's readable from git config
-		cmd = exec.Command("git", "config", "--get", "beads.role")
+		cmd = gitCommand("config", "--get", "beads.role")
 		cmd.Dir = tmpDir
 		output, err := cmd.Output()
 		if err != nil {
@@ -240,13 +239,13 @@ func TestBeadsRoleGitConfig(t *testing.T) {
 	})
 
 	t.Run("set maintainer role writes to git config", func(t *testing.T) {
-		cmd := exec.Command("git", "config", "beads.role", "maintainer")
+		cmd := gitCommand("config", "beads.role", "maintainer")
 		cmd.Dir = tmpDir
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("git config set failed: %v", err)
 		}
 
-		cmd = exec.Command("git", "config", "--get", "beads.role")
+		cmd = gitCommand("config", "--get", "beads.role")
 		cmd.Dir = tmpDir
 		output, err := cmd.Output()
 		if err != nil {
@@ -275,7 +274,7 @@ func TestBeadsRoleCommandsIgnoreInheritedGitRouting(t *testing.T) {
 	pinJSONOutput(t, false)
 	runGit := func(t *testing.T, repo string, args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = repo
 		cmd.Env = gitenv.ScrubRouting(os.Environ())
 		out, err := cmd.CombinedOutput()
@@ -406,7 +405,7 @@ func TestBeadsRoleWritesUseFreshCommonConfig(t *testing.T) {
 				t.Setenv(key, home)
 			}
 			run := func(dir string, args ...string) string {
-				cmd := exec.Command("git", args...)
+				cmd := gitCommand(args...)
 				cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
 				out, err := cmd.CombinedOutput()
 				require.NoError(t, err, "fixture git %v: %s", args, out)
@@ -1155,7 +1154,7 @@ func TestBeadsRoleWriteErrorsRetainGitDiagnostics(t *testing.T) {
 				repo := newGitRepo(t)
 				t.Chdir(repo)
 				run := func(args ...string) {
-					cmd := exec.Command("git", args...)
+					cmd := gitCommand(args...)
 					out, err := cmd.CombinedOutput()
 					require.NoError(t, err, "%s", out)
 				}
