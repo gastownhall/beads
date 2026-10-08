@@ -360,6 +360,28 @@ func TestProxiedServerFindDuplicates(t *testing.T) {
 		}
 	})
 
+	// The cap is HONORED on this route now. It used to be refused outright
+	// ("not supported in proxied-server mode"); the filter carries it into the
+	// unit-of-work search, which enforces it.
+	t.Run("max_rows_is_honored", func(t *testing.T) {
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "find-duplicates", "--max-rows", "2")
+		if err == nil {
+			t.Fatalf("find-duplicates over the cap succeeded:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		out := stdout + stderr
+		if strings.Contains(out, "not supported in proxied-server mode") {
+			t.Fatalf("the cap is still being refused rather than enforced: %s", out)
+		}
+		if !strings.Contains(out, "too many rows") || !strings.Contains(out, "--max-rows=2") {
+			t.Errorf("expected the cap to fire naming its source, got: %s", out)
+		}
+
+		// Six issues fit inside a cap of ten, so the search answers normally.
+		if m := fdJSON(t, "--max-rows", "10", "--threshold", "0.15"); m["method"] != "mechanical" {
+			t.Errorf("find-duplicates under the cap: method = %v, want mechanical", m["method"])
+		}
+	})
+
 	t.Run("fewer_than_2_issues", func(t *testing.T) {
 		p2 := newSharedProxiedProject(t, bd, "fd1")
 		bdProxiedCreate(t, bd, p2.dir, "Only one issue", "--type", "task")

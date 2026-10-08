@@ -122,13 +122,8 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 	}
 
 	if usesProxiedServer() {
-		// maxRows was already resolved above (to build filter); reject using
-		// that value directly instead of re-resolving via
-		// rejectMaxRowsUnderProxiedServer, which would call resolveMaxRows a
-		// second time and double any malformed-env warning it emits.
-		if err := rejectResolvedMaxRowsUnderProxiedServer(maxRows); err != nil {
-			return err
-		}
+		// The filter carries the cap, and the proxied SearchIssues seam
+		// enforces it, so both routes run the same capped search.
 		return runFindDuplicatesProxiedServer(rootCtx, filter, status, method, threshold, limit, model)
 	}
 

@@ -21,63 +21,23 @@ const maxRowsFlagName = "max-rows"
 
 // addMaxRowsFlag registers the --max-rows int flag on cmd. Use on every
 // user-facing command that should honor the per-invocation cap override
-// (designer §2.2 / §4). Help text matches the designer spec verbatim.
-func addMaxRowsFlag(cmd *cobra.Command) {
-	cmd.Flags().Int(maxRowsFlagName, 0,
-		"Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) "+
-			"and an error to stderr if exceeded. 0 disables (the default). Overrides "+
-			"BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a "+
-			"circuit breaker against pathological queries. Not supported under "+
-			"--proxied-server: an explicit --max-rows or BEADS_MAX_ROWS cap errors out "+
-			"rather than silently going unenforced.")
-}
-
-// addRoutedMaxRowsFlag registers --max-rows on a command whose cap is HONORED on
-// both routes, so the help text must not repeat the proxied-server refusal above.
+// (designer §2.2 / §4).
 //
-// It exists because that refusal is a fact about a command's implementation
-// rather than about the flag: a command whose cap reaches a query path that
-// threads one is honored on both routes. `bd dep tree` was the first and `bd
-// list` the second — its cap used to be rejected under --proxied-server because
-// the unit-of-work query path read no MaxRows at all. The next command to move
-// onto a role that threads it calls this instead of the function above and
-// deletes its rejectMaxRowsUnderProxiedServer call in the same edit.
-func addRoutedMaxRowsFlag(cmd *cobra.Command) {
+// The cap is honored on both the direct and the --proxied-server route for
+// every command that registers it. It used to be refused under
+// --proxied-server, a fact about each command's implementation rather than
+// about the flag: `bd dep tree` and `bd list` were moved first, then `bd
+// ready`, `bd graph` and `bd find-duplicates`, whose proxied routes already
+// reached a seam that enforces it. A new command that registers the flag must
+// thread the cap on both routes; one that cannot is refused at the front door
+// by the mode-wide max-rows rule in proxy_capability.go until it does.
+func addMaxRowsFlag(cmd *cobra.Command) {
 	cmd.Flags().Int(maxRowsFlagName, 0,
 		"Hard upper bound on rows returned. Returns a non-zero exit (code 2) "+
 			"and an error to stderr if exceeded. 0 disables (the default). Overrides "+
 			"BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a "+
 			"circuit breaker against pathological queries. Honored on both the direct "+
 			"and the --proxied-server route.")
-}
-
-// rejectMaxRowsUnderProxiedServer errors out when an explicit --max-rows
-// flag or BEADS_MAX_ROWS env cap resolves to a nonzero cap but the command
-// is about to divert to proxied-server mode. The proxied repository path
-// (internal/storage/domain/db) doesn't thread MaxRows through the UOW
-// pipeline, so silently ignoring the cap there would be the worst outcome
-// for a safety flag — reject explicitly instead of no-oping. Call this
-// after usesProxiedServer() is known true but before diverting to the
-// *ProxiedServer function, on every command that calls addMaxRowsFlag.
-func rejectMaxRowsUnderProxiedServer(cmd *cobra.Command) error {
-	maxRows, _, err := resolveMaxRows(cmd)
-	if err != nil {
-		return err
-	}
-	return rejectResolvedMaxRowsUnderProxiedServer(maxRows)
-}
-
-// rejectResolvedMaxRowsUnderProxiedServer is rejectMaxRowsUnderProxiedServer
-// split out for callers that have already resolved the cap for their own
-// purposes (e.g. to build a filter) and would otherwise call resolveMaxRows
-// a second time — resolveMaxRowsEnvOnly emits a stderr warning on a
-// malformed BEADS_MAX_ROWS every time it runs, so a second resolve doubles
-// that warning under proxied mode (be-x42v.4 round-4 follow-up).
-func rejectResolvedMaxRowsUnderProxiedServer(maxRows int) error {
-	if maxRows > 0 {
-		return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapMaxRows))
-	}
-	return nil
 }
 
 // resolveMaxRows picks the effective cap from --max-rows then BEADS_MAX_ROWS.
@@ -150,35 +110,6 @@ func parseMaxRowsEnv() (int, string, string, bool) {
 		return 0, "", raw, false
 	}
 	return n, maxRowsEnvVar, raw, true
-}
-
-// resolveMaxRowsQuiet resolves the effective cap like resolveMaxRows but never
-// emits the malformed-BEADS_MAX_ROWS advisory.
-//
-// It exists for the proxied capability front door, which resolves the cap in
-// PersistentPreRunE to decide a refusal before the provider is constructed.
-// Every command that reads the cap resolves it again in its own body, and the
-// advisory is a side effect of resolving, so warning in the front door too
-// would print one typo twice. The body's resolution stays the one that warns:
-// the message keeps appearing exactly once, at the same point in the output it
-// appeared at before the front door existed. A malformed value disables the
-// cap, so the front door reaching the same "no cap" conclusion silently is the
-// correct decision, not a suppressed one.
-//
-// An explicit --max-rows is still resolved through resolveMaxRows: that path
-// never reads the environment, and rejecting a negative flag before the
-// provider opens is the front door's job.
-//
-// No source string, unlike resolveMaxRows: the front door decides whether a
-// cap is set, not how to attribute one in a message. The command body resolves
-// the source for the message it prints.
-func resolveMaxRowsQuiet(cmd *cobra.Command) (int, error) {
-	if cmd != nil && cmd.Flags().Changed(maxRowsFlagName) {
-		n, _, err := resolveMaxRows(cmd)
-		return n, err
-	}
-	n, _, _, _ := parseMaxRowsEnv()
-	return n, nil
 }
 
 // handleMaxRowsError checks whether err is a *issueops.ErrTooManyRows from

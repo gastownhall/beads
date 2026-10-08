@@ -163,9 +163,12 @@ func LookupProxyCapabilityFor(command, argument string, mode ProxyMode) (proxyCa
 // Shared by the mode-wide rule and its per-command overrides, so a command that
 // refuses one of these refuses it with the same words and the same reason.
 var (
-	// The cap is refused rather than silently dropped, which is right; the fix
-	// is threading it through the UOW reader the way `list` already does, so
-	// the refusal itself is the gap.
+	// The mode-wide default for a --max-rows that has not been wired to the
+	// provider. Every command that registers the flag (`list`, `dep tree`,
+	// `ready`, `graph`, `find-duplicates`) threads the cap into a seam that
+	// enforces it and is honored per-command below, so this refuses only a
+	// future --max-rows until someone routes it: refused rather than silently
+	// dropped.
 	maxRowsRefusal = refused("proxy.max_rows.unsupported", "--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode", ProxyReasonUnimplemented, trackLongTail)
 	// The mode-wide default for a --watch that has not been wired to the
 	// provider. Both commands that register the flag (`list`, `show`) poll the
@@ -208,11 +211,10 @@ var proxyCapabilityMatrix = map[ProxyMode]map[ProxyCapability]proxyCapabilityRul
 // proxyCommandCapabilities overrides the mode-wide default for one command.
 // Keys are command paths (commandRegistryPath), so a row lands on the command it
 // was written for and on nothing else. The "mol ready" row is a documentation
-// pin rather than the guard: path keying is what stops `bd mol ready --gated`
-// from inheriting the refusal `bd ready` carries on their shared leaf name
-// "ready", and the row records that the command has no --max-rows flag to
-// refuse. TestProxyCapabilityPolicyKeysResolveInRealCommandTree keeps the pin
-// honest by failing if the path it names stops existing.
+// pin: it records that the command has no --max-rows flag, and path keying is
+// what keeps it apart from `bd ready` on their shared leaf name "ready".
+// TestProxyCapabilityPolicyKeysResolveInRealCommandTree keeps the pin honest by
+// failing if the path it names stops existing.
 //
 // A row must describe a flag the command actually registers. `list`'s
 // ProxyCapRepo is notApplicable() for that reason and not as a hedge: listCmd
@@ -224,10 +226,10 @@ var proxyCommandCapabilities = map[string]map[ProxyMode]map[ProxyCapability]prox
 	"show":            {ProxyModeProxied: {ProxyCapWatch: honored()}},
 	"list":            {ProxyModeProxied: {ProxyCapWatch: honored(), ProxyCapMaxRows: honored(), ProxyCapRepo: notApplicable()}},
 	"dep tree":        {ProxyModeProxied: {ProxyCapMaxRows: honored()}},
-	"ready":           {ProxyModeProxied: {ProxyCapMaxRows: maxRowsRefusal}},
+	"ready":           {ProxyModeProxied: {ProxyCapMaxRows: honored()}},
 	"mol ready":       {ProxyModeProxied: {ProxyCapMaxRows: notApplicable()}},
-	"graph":           {ProxyModeProxied: {ProxyCapMaxRows: maxRowsRefusal}},
-	"find-duplicates": {ProxyModeProxied: {ProxyCapMaxRows: maxRowsRefusal}},
+	"graph":           {ProxyModeProxied: {ProxyCapMaxRows: honored()}},
+	"find-duplicates": {ProxyModeProxied: {ProxyCapMaxRows: honored()}},
 }
 
 // proxyCapabilityRows materializes the policy for every supported proxied
@@ -349,37 +351,6 @@ func validateProxyCapabilitiesBeforeProvider(cmd *cobra.Command) error {
 	path := commandRegistryPath(cmd)
 	if path == "create" && cmd.Flags().Changed("repo") {
 		return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapRepo))
-	}
-	if path == "ready" && !readyGatedArm(cmd) {
-		// --claim is NOT exempt. The proxied ready role cannot enforce a row
-		// cap on either arm, and ready.go refuses a positive cap on both (see
-		// its comment above rejectMaxRowsUnderProxiedServer) — so exempting
-		// the claim here would not have let it through, only downgraded the
-		// same refusal to an untyped one raised after the provider opened.
-		// A malformed or negative value is still rejected here, before any
-		// provider work, which is what the claim path gained.
-		//
-		// --gated IS exempt, and the guard sits on the branch rather than
-		// inside it so the arm skips the resolver too: the direct route never
-		// resolves a cap before dispatching --gated, so resolving one here
-		// would make a malformed or negative value fail on the proxied route
-		// alone. See readyGatedArm for why the arm takes no cap at all.
-		maxRows, err := resolveMaxRowsQuiet(cmd)
-		if err != nil {
-			return err
-		}
-		if maxRows > 0 {
-			return HandleProxyCapabilityError(AssertProxyCommandCapability(path, ProxyModeProxied, ProxyCapMaxRows))
-		}
-	}
-	if path == "graph" || path == "find-duplicates" {
-		maxRows, err := resolveMaxRowsQuiet(cmd)
-		if err != nil {
-			return err
-		}
-		if maxRows > 0 {
-			return HandleProxyCapabilityError(AssertProxyCommandCapability(path, ProxyModeProxied, ProxyCapMaxRows))
-		}
 	}
 	return nil
 }

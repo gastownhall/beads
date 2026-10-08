@@ -195,7 +195,7 @@ func TestProxyCapabilityRowsNameFlagsTheCommandRegisters(t *testing.T) {
 // name is also `bd mol ready --gated`.
 func TestProxyFrontDoorBranchesUseRealCommandPaths(t *testing.T) {
 	paths := realCommandPaths(t)
-	for _, path := range []string{"create", "show", "ready", "graph", "find-duplicates", "admin compact", "mol ready", "doctor"} {
+	for _, path := range []string{"create", "show", "admin compact", "mol ready", "doctor"} {
 		if !paths[path] {
 			t.Errorf("front door branches on %q, which is not a real command path", path)
 		}
@@ -212,10 +212,9 @@ func TestProxyCapabilityFrontDoorAllowsSupportedCommands(t *testing.T) {
 	jsonOutput = false
 	t.Cleanup(func() { jsonOutput = oldJSON })
 	for _, tc := range []struct {
-		path       string
-		flags      []string
-		cappedEnv  bool
-		wantRefuse bool
+		path      string
+		flags     []string
+		cappedEnv bool
 	}{
 		// `bd mol ready --gated` is the regression: proxy-supported, accepts
 		// no --max-rows, and shares its leaf name with `bd ready`.
@@ -234,15 +233,16 @@ func TestProxyCapabilityFrontDoorAllowsSupportedCommands(t *testing.T) {
 		// on the command rather than the arm split one command line in half.
 		{path: "ready", flags: []string{"gated"}},
 		{path: "ready", flags: []string{"gated"}, cappedEnv: true},
-		// `bd ready` is the command the max-rows refusal was written for, so
-		// it must still refuse an active cap.
-		{path: "ready", cappedEnv: true, wantRefuse: true},
-		// ...on every arm that actually lists ready rows. --claim is not
-		// exempt, and neither is --gated in combination with it: that pair is a
-		// usage error rather than a gated run, so the claim arm keeps its
-		// refusal on every path into it.
-		{path: "ready", flags: []string{"claim"}, cappedEnv: true, wantRefuse: true},
-		{path: "ready", flags: []string{"claim", "gated"}, cappedEnv: true, wantRefuse: true},
+		// `bd ready`, `bd graph` and `bd find-duplicates` used to refuse an
+		// active cap here because their proxied routes were believed to
+		// thread none. All three reach a seam that enforces it, so the front
+		// door lets the cap through on every arm, as it does for `bd list`.
+		{path: "ready", cappedEnv: true},
+		{path: "ready", flags: []string{"claim"}, cappedEnv: true},
+		{path: "graph"},
+		{path: "graph", cappedEnv: true},
+		{path: "find-duplicates"},
+		{path: "find-duplicates", cappedEnv: true},
 	} {
 		name := tc.path
 		for _, flag := range tc.flags {
@@ -285,12 +285,6 @@ func TestProxyCapabilityFrontDoorAllowsSupportedCommands(t *testing.T) {
 					err = validateProxyRegistryBeforeProvider(cmd, ProxyTopologyManagedLocal)
 				}
 			})
-			if tc.wantRefuse {
-				if err == nil {
-					t.Fatalf("bd %s was allowed; want a refusal", tc.path)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatalf("bd %s refused before the provider: %v (stderr=%q)", tc.path, err, stderr)
 			}
@@ -424,32 +418,6 @@ func TestRepoProxiedRefusalIsStrictJSON(t *testing.T) {
 	}
 }
 
-// TestReadyClaimResolvesRowCapOnceBeforeProvider pins the malformed-value
-// advisory to one line. The command body resolves the cap again for itself, so
-// a front door that also warned would print one typo twice.
-func TestReadyClaimResolvesRowCapOnceBeforeProvider(t *testing.T) {
-	oldJSON := jsonOutput
-	jsonOutput = false
-	t.Cleanup(func() { jsonOutput = oldJSON })
-	t.Setenv(maxRowsEnvVar, "bogus")
-	root := &cobra.Command{Use: "bd"}
-	cmd := &cobra.Command{Use: "ready"}
-	cmd.Flags().Bool("claim", false, "")
-	cmd.Flags().Int("max-rows", 0, "")
-	root.AddCommand(cmd)
-	if err := cmd.Flags().Set("claim", "true"); err != nil {
-		t.Fatal(err)
-	}
-	var err error
-	stderr := captureStderr(t, func() { err = validateProxyCapabilitiesBeforeProvider(cmd) })
-	if err != nil {
-		t.Fatalf("malformed %s refused the claim: %v", maxRowsEnvVar, err)
-	}
-	if strings.Contains(stderr, "is not a non-negative integer") {
-		t.Fatalf("front door warned about %s; the command body is the one that warns (stderr=%q)", maxRowsEnvVar, stderr)
-	}
-}
-
 func TestProxyCapabilityRowsCoverTopologies(t *testing.T) {
 	for _, topology := range []ProxyTopology{ProxyTopologyManagedLocal, ProxyTopologyExternalTCP, ProxyTopologyExternalUnix} {
 		for _, arg := range []string{"--readonly", "--max-rows", "--watch", "--repo"} {
@@ -467,9 +435,9 @@ func TestProxyCapabilityCommandRows(t *testing.T) {
 	}{
 		{"list", "--max-rows", ProxyOutcomeHonored},
 		{"dep tree", "--max-rows", ProxyOutcomeHonored},
-		{"ready", "--max-rows", ProxyOutcomeRefused},
-		{"graph", "--max-rows", ProxyOutcomeRefused},
-		{"find-duplicates", "--max-rows", ProxyOutcomeRefused},
+		{"ready", "--max-rows", ProxyOutcomeHonored},
+		{"graph", "--max-rows", ProxyOutcomeHonored},
+		{"find-duplicates", "--max-rows", ProxyOutcomeHonored},
 		{"show", "--watch", ProxyOutcomeHonored},
 		{"list", "--watch", ProxyOutcomeHonored},
 	}
@@ -705,106 +673,4 @@ func TestProxyCapabilityDirectEscapeHatch(t *testing.T) {
 			t.Errorf("direct %s refused: %v", cap, err)
 		}
 	}
-}
-
-func TestReadyClaimValidatesMaxRowsBeforeProvider(t *testing.T) {
-	oldJSON := jsonOutput
-	jsonOutput = true
-	t.Cleanup(func() { jsonOutput = oldJSON })
-	root := &cobra.Command{Use: "bd"}
-	cmd := &cobra.Command{Use: "ready"}
-	cmd.Flags().Bool("claim", false, "")
-	cmd.Flags().Int("max-rows", 0, "")
-	root.AddCommand(cmd)
-	if err := cmd.Flags().Set("claim", "true"); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Flags().Set("max-rows", "-1"); err != nil {
-		t.Fatal(err)
-	}
-	var gotErr error
-	out := captureStdout(t, func() error {
-		gotErr = validateProxyCapabilitiesBeforeProvider(cmd)
-		return nil
-	})
-	if code, ok := exitCodeFromError(gotErr); !ok || code != 1 {
-		t.Fatalf("ready claim invalid max-rows exit = %v, want 1", code)
-	}
-	if !strings.Contains(out, "--max-rows must be non-negative") {
-		t.Fatalf("ready claim invalid max-rows refusal = %q", out)
-	}
-}
-
-// TestReadyPositiveCapRefusedTypedWithAndWithoutClaim pins one refusal to one
-// shape. --claim does not exempt a positive row cap: the proxied ready role
-// cannot enforce one on either arm, and ready.go refuses both (see its comment
-// above rejectMaxRowsUnderProxiedServer). Exempting the claim at the front door
-// would not let it through — it would only downgrade the same refusal to an
-// untyped one raised after the provider opened, so `bd ready --max-rows 5` and
-// `bd ready --claim --max-rows 5` would answer --json in two different shapes,
-// selected by a flag that has nothing to do with the cap.
-func TestReadyPositiveCapRefusedTypedWithAndWithoutClaim(t *testing.T) {
-	const wantCode = "proxy.max_rows.unsupported"
-	const wantMessage = "--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode"
-
-	assertTypedRefusal := func(t *testing.T, gotErr error, out string) {
-		t.Helper()
-		if code, ok := exitCodeFromError(gotErr); !ok || code != 1 {
-			t.Fatalf("refusal exit = %v (typed=%v), want 1", code, ok)
-		}
-		var got map[string]any
-		if err := json.Unmarshal([]byte(out), &got); err != nil {
-			t.Fatalf("refusal is not JSON on stdout: %q (%v)", out, err)
-		}
-		if got["code"] != wantCode || got["error"] != wantMessage || got["mutates"] != false {
-			t.Fatalf("refusal = %q, want code=%q error=%q mutates=false", out, wantCode, wantMessage)
-		}
-	}
-
-	for _, tc := range []struct {
-		name  string
-		claim bool
-	}{{name: "bulk"}, {name: "claim", claim: true}} {
-		t.Run(tc.name, func(t *testing.T) {
-			oldJSON := jsonOutput
-			jsonOutput = true
-			t.Cleanup(func() { jsonOutput = oldJSON })
-
-			root := &cobra.Command{Use: "bd"}
-			cmd := &cobra.Command{Use: "ready"}
-			cmd.Flags().Bool("claim", false, "")
-			cmd.Flags().Int("max-rows", 0, "")
-			root.AddCommand(cmd)
-			if err := cmd.Flags().Set("max-rows", "5"); err != nil {
-				t.Fatal(err)
-			}
-			if tc.claim {
-				if err := cmd.Flags().Set("claim", "true"); err != nil {
-					t.Fatal(err)
-				}
-			}
-
-			var gotErr error
-			out := captureStdout(t, func() error {
-				gotErr = validateProxyCapabilitiesBeforeProvider(cmd)
-				return nil
-			})
-			assertTypedRefusal(t, gotErr, out)
-		})
-	}
-
-	// The command body refuses the same cap behind the front door. It renders
-	// identically so the contract survives on whichever path reaches it first.
-	t.Run("backstop", func(t *testing.T) {
-		oldJSON := jsonOutput
-		jsonOutput = true
-		t.Cleanup(func() { jsonOutput = oldJSON })
-
-		var gotErr error
-		out := captureStdout(t, func() error {
-			gotErr = rejectResolvedMaxRowsUnderProxiedServer(5)
-			return nil
-		})
-		assertTypedRefusal(t, gotErr, out)
-	})
 }

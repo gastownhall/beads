@@ -10,7 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-func runGraphProxiedServer(ctx context.Context, out io.Writer, args []string) error {
+func runGraphProxiedServer(ctx context.Context, out io.Writer, args []string, maxRows int, maxRowsSource string) error {
 	uw, err := openProxiedListUOW(ctx)
 	if err != nil {
 		return HandleError("%v", err)
@@ -18,8 +18,11 @@ func runGraphProxiedServer(ctx context.Context, out io.Writer, args []string) er
 	defer uw.Close(ctx)
 
 	if graphAll {
-		subgraphs, err := loadAllGraphSubgraphsUOW(ctx, uw)
+		subgraphs, err := loadAllGraphSubgraphsUOW(ctx, uw, maxRows, maxRowsSource)
 		if err != nil {
+			if capErr := handleMaxRowsError(err); capErr != nil {
+				return capErr
+			}
 			return HandleErrorRespectJSON("loading all issues: %v", err)
 		}
 		return renderGraphAllSubgraphs(out, subgraphs)
@@ -32,6 +35,9 @@ func runGraphProxiedServer(ctx context.Context, out io.Writer, args []string) er
 	subgraph, err := loadGraphSubgraphUOW(ctx, uw, root)
 	if err != nil {
 		return HandleErrorRespectJSON("loading graph: %v", err)
+	}
+	if capErr := enforceGraphSubgraphCap(subgraph, maxRows, maxRowsSource); capErr != nil {
+		return capErr
 	}
 	return renderGraphSingleSubgraph(out, subgraph)
 }
@@ -103,11 +109,19 @@ func loadGraphSubgraphUOW(ctx context.Context, uw uow.UnitOfWork, root *types.Is
 	return subgraph, nil
 }
 
-func loadAllGraphSubgraphsUOW(ctx context.Context, uw uow.UnitOfWork) ([]*TemplateSubgraph, error) {
+// loadAllGraphSubgraphsUOW is loadAllGraphSubgraphs on the unit of work. The
+// defensive row cap is threaded into each per-status search the same way, and
+// the SearchIssues seam enforces it, so a status over the cap returns the
+// typed *issueops.ErrTooManyRows.
+func loadAllGraphSubgraphsUOW(ctx context.Context, uw uow.UnitOfWork, maxRows int, maxRowsSource string) ([]*TemplateSubgraph, error) {
 	var allIssues []*types.Issue
 	for _, status := range []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusBlocked} {
 		statusCopy := status
-		page, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{Status: &statusCopy})
+		page, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{
+			Status:        &statusCopy,
+			MaxRows:       maxRows,
+			MaxRowsSource: maxRowsSource,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to search issues: %w", err)
 		}

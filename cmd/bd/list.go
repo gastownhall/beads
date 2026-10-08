@@ -559,7 +559,7 @@ func init() {
 
 	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
 	// ROUTED, not direct-only: both routes thread the cap now.
-	addRoutedMaxRowsFlag(listCmd)
+	addMaxRowsFlag(listCmd)
 
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(listCmd)

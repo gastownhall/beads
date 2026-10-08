@@ -643,42 +643,61 @@ func TestProxiedServerReady2(t *testing.T) {
 		}
 	})
 
-	t.Run("max_rows_claim_policy_and_transaction", func(t *testing.T) {
+	// The cap is HONORED on this route now, on the listing and the claim
+	// alike. It used to be refused outright ("not supported in proxied-server
+	// mode") on the belief that the proxied ready role threaded no cap; the
+	// ready union sizes its window from WorkFilter.MaxRows and enforces it, so
+	// the answer is the cap firing, with the same text and the same exit code
+	// the direct route prints.
+	t.Run("max_rows_is_honored", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "rcmr")
 		for i := 0; i < 3; i++ {
-			bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Claim under cap %d", i), "--label", "rcmr-claim")
+			bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Ready under cap %d", i), "--label", "rcmr-claim")
 		}
 
 		out := bdProxiedReadyFail(t, bd, p, "--claim", "--max-rows", "-1")
 		if !strings.Contains(out, "must be non-negative") {
 			t.Errorf("expected --max-rows usage-error rejection, got: %s", out)
 		}
-		out = bdProxiedReadyFail(t, bd, p, "--max-rows", "1")
-		if !strings.Contains(out, "not supported in proxied-server mode") {
-			t.Errorf("expected --max-rows proxied-server rejection for bulk ready, got: %s", out)
+
+		for _, args := range [][]string{{"--max-rows", "1"}, {"--json", "--max-rows", "1"}} {
+			out = bdProxiedReadyFail(t, bd, p, args...)
+			if strings.Contains(out, "not supported in proxied-server mode") {
+				t.Fatalf("bd ready %v: the cap is still being refused rather than enforced: %s", args, out)
+			}
+			if !strings.Contains(out, "too many rows") || !strings.Contains(out, "--max-rows=1") {
+				t.Errorf("bd ready %v: expected the cap to fire naming its source, got: %s", args, out)
+			}
 		}
+
 		stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir,
 			[]string{"BEADS_MAX_ROWS=1"}, "ready")
 		if err == nil {
-			t.Fatalf("expected BEADS_MAX_ROWS under proxied bulk ready to fail, but it succeeded:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+			t.Fatalf("expected BEADS_MAX_ROWS under proxied bulk ready to trip the cap, but it succeeded:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
 		}
-		if out := stdout + stderr; !strings.Contains(out, "not supported in proxied-server mode") {
-			t.Errorf("expected BEADS_MAX_ROWS proxied-server rejection for bulk ready, got: %s", out)
+		if out := stdout + stderr; !strings.Contains(out, "too many rows") || !strings.Contains(out, "BEADS_MAX_ROWS=1") {
+			t.Errorf("expected BEADS_MAX_ROWS to fire naming its source, got: %s", out)
 		}
 
+		// A cap the ready set fits inside answers normally, so the case is
+		// about the cap rather than about the listing.
+		if under := bdProxiedReadyJSON(t, bd, p, "--max-rows", "5"); len(under) != 3 {
+			t.Fatalf("bd ready --max-rows 5 over 3 ready issues returned %d rows, want 3", len(under))
+		}
+
+		// A claim consumes one row however large the pool it scanned, so the
+		// cap does not apply to it on either route: it succeeds under a cap
+		// smaller than the ready set, exactly as on a direct workspace.
 		before := bdProxiedReadyJSON(t, bd, p, "--label", "rcmr-claim")
 		stdout, stderr, err = bdProxiedRunBuffersWithEnv(t, bd, p.dir,
 			[]string{"BEADS_MAX_ROWS=1"}, "ready", "--claim", "--json", "--label", "rcmr-claim")
-		if err == nil {
-			t.Fatalf("bd ready --claim --json under BEADS_MAX_ROWS=1 should refuse")
-		}
-		if out := stdout + stderr; !strings.Contains(out, "not supported in proxied-server mode") {
-			t.Fatalf("expected cap refusal, got:\n%s", out)
+		if err != nil {
+			t.Fatalf("bd ready --claim --json under BEADS_MAX_ROWS=1: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 		}
 		after := bdProxiedReadyJSON(t, bd, p, "--label", "rcmr-claim")
-		if len(after) != len(before) {
-			t.Fatalf("claim refusal mutated ready set: before=%d after=%d", len(before), len(after))
+		if len(after) != len(before)-1 {
+			t.Fatalf("claim under a cap did not claim one issue: before=%d after=%d", len(before), len(after))
 		}
 	})
 }

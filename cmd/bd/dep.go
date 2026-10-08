@@ -1663,7 +1663,7 @@ func init() {
 	depTreeCmd.Flags().String("format", "", "Output format: 'mermaid' for Mermaid.js flowchart")
 	// Defensive row cap (be-x42v): applied to the node count after the walk, by
 	// the role, on BOTH routes — hence the routed variant of the flag.
-	addRoutedMaxRowsFlag(depTreeCmd)
+	addMaxRowsFlag(depTreeCmd)
 	// Note: --type flag intentionally omitted from depTreeCmd — TreeNode lacks
 	// dependency type info so filtering is not possible. Use 'bd dep list --type' instead.
 

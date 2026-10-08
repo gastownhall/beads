@@ -114,6 +114,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd ready`, `bd graph` and `bd find-duplicates` honor `--max-rows` and
+  `BEADS_MAX_ROWS` under `--proxied-server`.** All three used to refuse any
+  positive cap there ("not supported in proxied-server mode"), so a workspace
+  that set `BEADS_MAX_ROWS` for every agent could not run `bd ready` at all.
+  Their proxied routes already reach a query that enforces the cap — the ready
+  union and the unit-of-work search both size their window from `MaxRows` — so
+  the cap now rides the filter exactly as it does on a direct workspace, with
+  the same message and exit code 2 on overage. `bd ready --claim` succeeds
+  under a cap smaller than the ready set, as it always has on a direct
+  workspace: a claim takes one row. `bd ready --gated` still reads no cap.
+  This finishes the move `bd dep tree` and `bd list` made; every command that
+  registers `--max-rows` now honors it on both routes.
+
 - `bd create --graph` now stores a plan whose path from a node's parent to
   the node runs through a `waits-for` edge; the graph-only preflight that
   walked every ready-work edge used to refuse it. The plan now goes through

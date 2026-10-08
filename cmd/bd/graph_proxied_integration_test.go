@@ -213,6 +213,35 @@ func TestProxiedServerGraph(t *testing.T) {
 		}
 	})
 
+	// The cap is HONORED on this route now. It used to be refused outright
+	// ("not supported in proxied-server mode"); --all threads it into each
+	// per-status search the unit-of-work seam enforces, and a single issue's
+	// subgraph is counted after the walk, as on the direct route.
+	t.Run("max_rows_is_honored", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"graph", epic.ID, "--max-rows", "2"},
+			{"graph", "--all", "--max-rows", "2"},
+		} {
+			stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, args...)
+			if err == nil {
+				t.Fatalf("bd %v over the cap succeeded:\nstdout:\n%s\nstderr:\n%s", args, stdout, stderr)
+			}
+			out := stdout + stderr
+			if strings.Contains(out, "not supported in proxied-server mode") {
+				t.Fatalf("bd %v: the cap is still being refused rather than enforced: %s", args, out)
+			}
+			if !strings.Contains(out, "too many rows") || !strings.Contains(out, "--max-rows=2") {
+				t.Errorf("bd %v: expected the cap to fire naming its source, got: %s", args, out)
+			}
+		}
+
+		// The epic's component is three issues, so a cap it fits inside
+		// answers normally: the case is about the cap, not about the graph.
+		if out, err := bdProxiedRun(t, bd, p.dir, "graph", epic.ID, "--max-rows", "3"); err != nil {
+			t.Fatalf("graph %s --max-rows 3: %v\n%s", epic.ID, err, out)
+		}
+	})
+
 	t.Run("check_clean", func(t *testing.T) {
 		out, err := bdProxiedRun(t, bd, p.dir, "graph", "check", "--json")
 		if err != nil {
