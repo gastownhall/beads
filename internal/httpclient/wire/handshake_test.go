@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // contextBody is a ContextResponse carrying whatever capability list the case
@@ -232,6 +234,52 @@ func TestAnAbsentCapabilityRefusesWithWhatTheTaxonomyNeeds(t *testing.T) {
 		if absent.Capabilities[i] != token {
 			t.Errorf("Capabilities = %v, want %v", absent.Capabilities, want)
 		}
+	}
+}
+
+// TestAnAbsentCapabilityIsAlsoAnErrUnsupported is HIGH 4's pin: a
+// version-skew refusal must be classifiable the same way as any other
+// capability a backend does not serve, by a caller holding only a role
+// interface and reaching for *storage.ErrUnsupported — never for the
+// http-specific *CapabilityError, which such a caller has no business
+// importing wire to know about.
+//
+// storage.ErrUnsupported is a Go alias (not a copy) of beadserrors.ErrUnsupported
+// — the same declaration issueops.ErrUnsupported names too — so one
+// errors.As site reaches the value under any of its three doorplates, and this
+// test spends its import on the storage one deliberately: that is the package
+// name HIGH 4 named, and the one most of the shared role contracts assert
+// against.
+func TestAnAbsentCapabilityIsAlsoAnErrUnsupported(t *testing.T) {
+	c, _ := newTestClient(t, Options{}, nil,
+		serveContext(contextBody("v0", "proj-1", "issues.list", "issues.get", "ready.list")))
+
+	err := c.Preflight(ctx(t), OpAddDependencies)
+
+	var absent *CapabilityError
+	if !errors.As(err, &absent) {
+		t.Fatalf("err is %T, want *CapabilityError", err)
+	}
+
+	var unsup *storage.ErrUnsupported
+	if !errors.As(err, &unsup) {
+		t.Fatalf("err is %T, want errors.As to also reach *storage.ErrUnsupported", err)
+	}
+	if unsup.Op != OpAddDependencies {
+		t.Errorf("ErrUnsupported.Op = %q, want %q", unsup.Op, OpAddDependencies)
+	}
+	if unsup.Capability != "dependencies.add" {
+		t.Errorf("ErrUnsupported.Capability = %q, want %q", unsup.Capability, "dependencies.add")
+	}
+	if unsup.Backend != "http" {
+		t.Errorf("ErrUnsupported.Backend = %q, want %q", unsup.Backend, "http")
+	}
+
+	// The precise diagnosis survives alongside the coarser one: a caller that
+	// DOES know this is the http backend can still tell a skew refusal apart
+	// from one that will never clear by retrying against a newer server.
+	if !errors.Is(err, ErrCapabilityAbsent) {
+		t.Errorf("errors.Is(err, ErrCapabilityAbsent) = false, want true")
 	}
 }
 

@@ -429,6 +429,7 @@ var roleContractCases = []roleContract{
 		RunLifecycleExpectedVersionIsCheckedBeforeTheNoOps,
 		RunLifecycleReopenRecordsItsReason,
 		RunLifecycleResultsAreHydratedPostStateSnapshots,
+		RunLifecycleResultsCarryThePostWriteRowVersion,
 		RunLifecycleCloseAndReopenRequireActorAndIssueID,
 		RunLifecycleReopenProvenanceLabelsHistory,
 		RunLifecycleCloseSettlesItsTransitiveAndCrossPlaneDependers,

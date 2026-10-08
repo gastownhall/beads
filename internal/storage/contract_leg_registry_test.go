@@ -49,6 +49,27 @@ func init() {
 	registerContractLeg(contractLeg{name: "dolt", wiringRoot: "internal/storage/dolt"})
 	registerContractLeg(contractLeg{name: "embeddeddolt", wiringRoot: "internal/storage/embeddeddolt"})
 	registerContractLeg(contractLeg{name: "uow", wiringRoot: "internal/storage/uow"})
+	registerContractLeg(contractLeg{
+		name:       "http",
+		wiringRoot: "internal/httpclient",
+		adopting: "S3 wires every read role (IssueReader, Counter, ReadyCounter, GraphCounter, EdgeReader, " +
+			"Relations, BlockingAnnotator, TreeWalker, CycleDetector, Querier, StatsReporter, WorkspaceConfig, " +
+			"Memories, Journal minus watch) plus MetadataCAS and DependencyEditor in full; the HTTP leg's own " +
+			"CycleDetector.IncludeTracks gap, the nine Bootstrapper cases " +
+			"(internal/httpclient/accessors.go names Bootstrapper PERMANENTLY UNSERVABLE — no wire operation " +
+			"and none coming — see bootstrapperPermanentlyUnservableWaiverReason), the four Importer cases " +
+			"(uow is Importer's one accessor, same as the other two legs), and the twenty-two " +
+			"RetentionFixture/EpochFixture/CrossRecordInvariantFixture cases (raw storage bookkeeping with no " +
+			"publicops role behind them — see retentionEpochNoRoleWaiverReason and " +
+			"crossRecordInvariantNoRoleWaiverReason) are all named waivers, not part of this ceiling. What is " +
+			"still counted here is write-role and internal-plumbing work S4 and later slices wire and ratchet " +
+			"down one tranche at a time: lifecycle writes (IssueOperationsUpdate, LifecycleUpdate), " +
+			"DualWrite's Phase-2 history mechanism, Sweeper, VersionReconciler, InitVerifier, and " +
+			"ExpectedRevision/Refusal. VersionReconciler and InitVerifier are named PERMANENTLY UNSERVABLE by " +
+			"the same accessors.go comment that covers Bootstrapper, but moving them to a named waiver is out " +
+			"of scope for the change that lowered this ceiling to 42 and is left for their own reviewed change",
+		adoptionCeiling: 42,
+	})
 }
 
 // contractLeg is one registered backend leg: what the lock calls it, where its

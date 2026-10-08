@@ -53,6 +53,7 @@ go_test(
         "//internal/httpapi/apigen",
         "//internal/httpapi/spec",
         "//internal/httpclient/encode",
+        "//internal/storage",
         "//internal/types",
         "//issueops",
         "@in_gopkg_yaml_v3//:yaml_v3",

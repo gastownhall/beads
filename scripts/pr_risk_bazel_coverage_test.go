@@ -1007,6 +1007,13 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 			[]string{"$(rootpath :embeddeddolt_race_off)", "-test.v", "-test.count=1", "-test.timeout=19m", "-test.run=^(TestBatchApplyContract|TestLargeBatchApplyWallClock_Embedded|TestLargeBatchApplyStatementCounts712_Embedded|TestCreateBatchFastPathsMatchPerRowLarge_Embedded)$$"},
 			map[string]string{"BEADS_TEST_EMBEDDED_DOLT": "1"},
 		},
+		// scripts/conformance.sh's Tier 3, the served HTTP corpus, with the
+		// script's switches: required, so a missing engine fails each served
+		// case instead of skipping it.
+		"//internal/httpclient:httpclient_served_test": {
+			[]string{"$(rootpath :httpclient_test)", "-test.v", "-test.count=1", "-test.timeout=19m"},
+			map[string]string{"BEADS_HTTP_TEST_REQUIRED": "1", "BEADS_TEST_EMBEDDED_DOLT": "1"},
+		},
 		"//cmd/bd:bd_proxied_test": {
 			[]string{"$(rootpath //:.github/scripts/proxied-test-shard.sh)", "BEADS_TEST_CMD_BINARY", "$(rootpath :bd_test)"},
 			map[string]string{

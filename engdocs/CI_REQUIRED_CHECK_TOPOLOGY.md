@@ -1063,6 +1063,10 @@ Required` requires them to have run remotely and passed.
   it in `bazel-integration`, which `pr.yml`'s gate requires (PR Core's `go
   test` builds neither tag). Neither tier was part of a required gate
   before. `scripts/conformance.sh` stays as the local `go test` entrypoint.
+  Its Tier 3, the served HTTP corpus (`./internal/httpclient` with
+  `BEADS_TEST_EMBEDDED_DOLT=1` and `BEADS_HTTP_TEST_REQUIRED=1`), runs in
+  the embedded lane as `//internal/httpclient:httpclient_served_test`
+  (race build, 24 shards).
   `docs-mintlify.yml` likewise drops its docsync job (`go test
   ./test/docsync`, which `bazel-test` runs as `//test/docsync:docsync_test`)
   and keeps only Mintlify's network-bound broken-link check.

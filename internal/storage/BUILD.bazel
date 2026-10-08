@@ -108,6 +108,7 @@ go_test(
     data = [
         ":tree_go_srcs",
         "//backend/conformance:go_srcs",
+        "//internal/httpclient:go_srcs",
     ],
     embed = [":storage"],
     deps = [
@@ -169,6 +170,7 @@ filegroup(
         "//internal/storage/sqlclass:go_srcs",
         "//internal/storage/sqlcount:go_srcs",
         "//internal/storage/storagecontract:go_srcs",
+        "//internal/storage/unsupportedgen:go_srcs",
         "//internal/storage/uow:go_srcs",
         "//internal/storage/versioncontrolops:go_srcs",
     ],

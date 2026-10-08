@@ -41,6 +41,9 @@ push-state.json
 
 proxied_server_client_info.json
 
+# http backend activation sidecar (per-user server URL and identity pin)
+http_target.json
+
 # Worktree redirect file (contains relative path to main repo's .beads/)
 # Must not be committed as paths would be wrong in other clones
 redirect
@@ -139,6 +142,7 @@ var requiredPatterns = []string{
 	"*.corrupt.backup/",
 	".beads-credential-key",
 	"proxied_server_client_info.json",
+	"http_target.json",
 	".local_version",
 	"backup/",
 }

@@ -164,14 +164,25 @@ const CapBatchApplyLarge = "issues.batchApplyLarge"
 // CapExternalDependencies is the CONDITIONAL behavior capability announcing
 // that the ready, claim and close operations of this server apply bd's
 // external-dependency policy themselves, spelled exactly as httpapi's constant
-// of the same name (held to it by TestExternalDependencyCapabilityMatchesTheServer).
+// of the same name.
 //
 // It is not in behaviorCapabilities because it is not a property of the build:
-// httpapi advertises it only when the serving process composed its roles through
-// the policy layer, so httpapi.Capabilities() — the build-level list the parity
-// gate compares against — never contains it. The store reads it to answer
-// storage.ServerEnforcedPolicy, which is what decides whether this client layers
-// the policy itself.
+// httpapi advertises it only when the serving process composed its roles
+// through the policy layer, so httpapi.Capabilities() — the build-level list
+// the parity gate compares against — never contains it.
+//
+// UNCONSUMED since S3 reconciliation (2026-10): THIS token is unread by this
+// client, not because OSS lacks external-dependency policy enforcement — the
+// externaldeps decorator (internal/storage/externaldeps) exists in OSS and is
+// wired unconditionally into the local storage chain (cmd/bd/storage_chain.go),
+// so a local backend already applies the policy itself. What this http
+// client specifically lacks is a client-side COMPOSITION of that same
+// decorator around a storage.ExternalDependencyQueryStore-backed remote
+// store, because a remote server advertising this capability applies the
+// policy on its own side before answering — there is nothing left for the
+// client to decorate. The token stays declared, because the server-side
+// capability and its wire spelling are real and S10 schedules the client half
+// that reads it.
 const CapExternalDependencies = "policy.external_dependencies"
 
 // ClientWireRevision is the wire shape this client was built to speak and
@@ -467,7 +478,23 @@ func (e *CapabilityError) Error() string {
 		e.ServerURL, e.BdVersion, e.Capability, e.Op)
 }
 
-func (e *CapabilityError) Unwrap() error { return ErrCapabilityAbsent }
+// Unwrap returns both arms, so a caller holding only a role interface can
+// classify a version-skew refusal the same way as any other unsupported
+// capability.
+//
+// errors.Is(err, ErrCapabilityAbsent) stays the precise diagnosis — this
+// server, this token absent, this op — and errors.As(err, *issueops.ErrUnsupported)
+// (equally storage.ErrUnsupported: both are the SAME aliased type, see
+// beadserrors.ErrUnsupported) now also reaches it, because a backend that
+// cannot serve an operation is exactly what a capability-absent server is from
+// the caller's side of the role contract. The two are not in tension: the
+// ledger-refusal twin of this (InexpressibleError, in package httpclient) earns
+// its *storage.ErrUnsupported arm the same way, off a value this client itself
+// decided to withhold rather than a server's version — Unwrap is what lets one
+// errors.As site in a role catch both without caring which.
+func (e *CapabilityError) Unwrap() []error {
+	return []error{ErrCapabilityAbsent, &issueops.ErrUnsupported{Op: e.Op, Backend: "http", Capability: e.Capability}}
+}
 
 // NewCapabilityError builds the capability-absent refusal for a behavior the
 // caller checked itself, off a handshake it already holds, rather than for an

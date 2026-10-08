@@ -144,6 +144,11 @@ func TestApplyBatchForwardsEveryLevelOfTheDocumentedBody(t *testing.T) {
 	if create.Issue.Priority != 1 {
 		t.Errorf("create.priority = %d, want 1", create.Issue.Priority)
 	}
+	// created_by is stamped from the trimmed actor, createIssue's rule: the
+	// role copies the issue's and never stamps one itself.
+	if create.Issue.CreatedBy != "alice" {
+		t.Errorf("create.created_by = %q, want the actor %q", create.Issue.CreatedBy, "alice")
+	}
 	if create.Issue.EstimatedMinutes == nil || *create.Issue.EstimatedMinutes != 30 {
 		t.Errorf("create.estimated_minutes = %v, want 30", create.Issue.EstimatedMinutes)
 	}

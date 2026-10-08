@@ -250,6 +250,7 @@ release_cross_build(
         "//internal/storage/sqlclass:sqlclass",
         "//internal/storage/sqlcount:sqlcount",
         "//internal/storage/storagecontract:storagecontract",
+        "//internal/storage/unsupportedgen:unsupportedgen",
         "//internal/storage/uow:uow",
         "//internal/storage/versioncontrolops:versioncontrolops",
         "//internal/storage:storage",
