@@ -577,14 +577,18 @@ pointless).`,
 					}
 				}
 				failureText := fmt.Sprintf("updating issue: %v", updateErr)
-				if errors.Is(updateErr, issueops.ErrNotesOverwrite) {
+				switch {
+				case errors.Is(updateErr, issueops.ErrNotesOverwrite):
 					// The contract's AuthorizeNotesOverwrite fence refused
 					// inside the mutation transaction. Print the advice, not
 					// the raw sentinel.
 					refusal := errNotesOverwriteRefusal(id)
 					failureText = refusal.Error()
 					fmt.Fprintf(os.Stderr, "%s\n", refusal)
-				} else {
+				case errors.Is(updateErr, issueops.ErrClaimBlocked), errors.Is(updateErr, issueops.ErrCloseBlocked) && !claimFlag:
+					failureText = fmt.Sprintf("%v (use --force to override)", updateErr)
+					fmt.Fprintf(os.Stderr, "%s\n", failureText)
+				default:
 					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, updateErr)
 				}
 				failures = append(failures, updateIDFailure{
@@ -1076,7 +1080,7 @@ func init() {
 	updateCmd.Flags().String("parent", "", "New parent issue ID (reparents the issue, use empty string to remove parent)")
 	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too)")
 	// Overrides the live-claim reassign fence (bd-98s5c) and close policy.
-	updateCmd.Flags().Bool("force", false, "Override refusals: let -a/--assignee overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim), let -s/--status move the issue into closed (or a configured done status) despite open children or a live blocker (same as bd close --force), and let --notes overwrite existing non-empty notes (use --append-notes to preserve history instead)")
+	updateCmd.Flags().Bool("force", false, "Override refusals: let -a/--assignee overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim), let -s/--status move the issue into closed (or a configured done status) despite open children or a live blocker (same as bd close --force), let --claim proceed on an issue with an open blocker, and let --notes overwrite existing non-empty notes (use --append-notes to preserve history instead)")
 	// Conditional (compare-and-set) update guards (bd-wsqvw)
 	updateCmd.Flags().String("if-assignee", "", "Apply the update only if the current assignee equals this value (--if-assignee '' requires unassigned); a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
 	updateCmd.Flags().String("if-status", "", "Apply the update only if the current status equals this value; a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")

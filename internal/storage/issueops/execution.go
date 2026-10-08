@@ -184,7 +184,7 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 	// first.
 	changedAny := false
 	if attempt.Claim {
-		claimed, err := claimIssueInTx(ctx, tx, attempt.IssueID, attempt.Actor, false)
+		claimed, err := claimIssueInTx(ctx, tx, attempt.IssueID, attempt.Actor, false, attempt.ForceClosePolicy)
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}

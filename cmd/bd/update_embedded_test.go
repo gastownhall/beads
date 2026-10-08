@@ -649,6 +649,34 @@ func TestEmbeddedUpdateLifecycle(t *testing.T) {
 		}
 	})
 
+	t.Run("claim_blocked_delegated_guard", func(t *testing.T) {
+		blocker := bdCreate(t, bd, dir, "Claim blocker", "--type", "task")
+		blocked := bdCreate(t, bd, dir, "Blocked claim", "--type", "task")
+		bdDepAdd(t, bd, dir, blocked.ID, blocker.ID)
+
+		out := bdUpdateFail(t, bd, dir, blocked.ID, "--claim", "--actor", "blocked-worker")
+		if !strings.Contains(out, "cannot claim blocked issue") {
+			t.Errorf("expected claim guard message, got: %s", out)
+		}
+		if !strings.Contains(out, blocker.ID) {
+			t.Errorf("expected claim guard message to name blocker %s, got: %s", blocker.ID, out)
+		}
+		if !strings.Contains(out, "use --force to override") {
+			t.Errorf("expected the --force hint on the embedded path too, got: %s", out)
+		}
+
+		got := bdShow(t, bd, dir, blocked.ID)
+		if got.Status != types.StatusOpen || got.Assignee != "" {
+			t.Errorf("refused claim changed issue: status=%q assignee=%q", got.Status, got.Assignee)
+		}
+
+		bdUpdate(t, bd, dir, blocked.ID, "--claim", "--actor", "forced-worker", "--force")
+		got = bdShow(t, bd, dir, blocked.ID)
+		if got.Status != types.StatusInProgress || got.Assignee != "forced-worker" {
+			t.Errorf("forced claim did not land: status=%q assignee=%q", got.Status, got.Assignee)
+		}
+	})
+
 	// A batch where one claim is lost and another is won must exit non-zero, so
 	// the lost claim is not hidden from exit-code automation (beads audit
 	// finding #10). The winner is still committed.

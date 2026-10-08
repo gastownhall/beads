@@ -276,7 +276,7 @@ func proxiedUpdateFailure(id string, claim bool, err error) *updateIDFailure {
 	case errors.Is(err, storage.ErrCloseOpenChildren):
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return &updateIDFailure{ID: id, Error: err.Error()}
-	case errors.Is(err, storage.ErrCloseBlocked) && !claim:
+	case errors.Is(err, storage.ErrCloseBlocked) && !claim, errors.Is(err, storage.ErrClaimBlocked):
 		fmt.Fprintf(os.Stderr, "%v (use --force to override)\n", err)
 		return &updateIDFailure{ID: id, Error: fmt.Sprintf("%v (use --force to override)", err)}
 	case errors.Is(err, storage.ErrNotesOverwrite):

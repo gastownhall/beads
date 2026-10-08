@@ -483,7 +483,7 @@ func (s *DoltStore) claimWisp(ctx context.Context, id string, actor string) erro
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
 
-	if _, err := issueops.ClaimIssueInTx(ctx, tx, id, actor); err != nil {
+	if _, err := issueops.ClaimIssueInTx(ctx, tx, id, actor, false); err != nil {
 		return err
 	}
 

@@ -330,7 +330,8 @@ func (s *DoltStore) updateIssueChecked(ctx context.Context, id string, updates m
 
 // ClaimIssue atomically claims an issue using compare-and-swap semantics.
 // It sets the assignee to actor and status to "in_progress" only if the issue
-// currently has no assignee. Returns storage.ErrAlreadyClaimed if already claimed.
+// currently has no assignee. Returns storage.ErrAlreadyClaimed if already claimed
+// and storage.ErrClaimBlocked, with nothing written, if the issue is blocked.
 // Delegates SQL work to issueops.ClaimIssueInTx; handles Dolt-specific concerns
 // (wisp routing, DOLT_ADD/COMMIT, cache invalidation).
 func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) error {
@@ -357,7 +358,7 @@ func (s *DoltStore) claimIssue(ctx context.Context, id string, actor string) err
 	// degraded server the exit status is not truth in either direction.
 	return s.verifiedClaimWrite(ctx, id, claimedBy(actor), func() error {
 		return s.withRetryTx(ctx, func(tx *sql.Tx) error {
-			if _, err := issueops.ClaimIssueInTx(ctx, tx, id, actor); err != nil {
+			if _, err := issueops.ClaimIssueInTx(ctx, tx, id, actor, false); err != nil {
 				return err
 			}
 

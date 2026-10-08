@@ -340,3 +340,25 @@ func (operationsProbe) Close(context.Context, issueops.CloseRequest) (issueops.C
 func (operationsProbe) Reopen(context.Context, issueops.ReopenRequest) (issueops.ReopenResult, error) {
 	return issueops.ReopenResult{}, nil
 }
+
+// TestClaimBlockedErrorSentences pins the two spellings of the claim refusal:
+// the historical list when the store names live blockers, and the inherited
+// sentence when the denormalized flag is set with no direct edge left to name,
+// so no caller ever reads `is blocked by []`.
+func TestClaimBlockedErrorSentences(t *testing.T) {
+	named := issueops.NewClaimBlockedError("bd-1", []string{"bd-2", "bd-3 (waits-for)"})
+	if !errors.Is(named, issueops.ErrClaimBlocked) || errors.Is(named, issueops.ErrCloseBlocked) {
+		t.Errorf("NewClaimBlockedError matches the wrong sentinel: %v", named)
+	}
+	if want := "cannot claim blocked issue: bd-1 is blocked by [bd-2 bd-3 (waits-for)]"; named.Error() != want {
+		t.Errorf("named = %q, want %q", named.Error(), want)
+	}
+
+	inherited := issueops.NewClaimBlockedError("bd-1", nil)
+	if want := "cannot claim blocked issue: bd-1 is blocked (inherited from an ancestor; see bd show)"; inherited.Error() != want {
+		t.Errorf("inherited = %q, want %q", inherited.Error(), want)
+	}
+	if strings.Contains(inherited.Error(), "[]") {
+		t.Errorf("inherited refusal prints an empty list: %q", inherited.Error())
+	}
+}

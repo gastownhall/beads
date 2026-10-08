@@ -33,8 +33,13 @@ type ClaimResult struct {
 // The caller is responsible for Dolt versioning (DOLT_ADD/COMMIT) if needed.
 // A claim that wrote the row mints one version row (assignee, status and
 // started_at are durable state); the idempotent re-claim mints nothing.
-func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*ClaimResult, error) {
-	return claimIssueInTx(ctx, tx, id, actor, true)
+//
+// A blocked issue (is_blocked=1) is refused with a *publicops.BlockedError
+// wrapping storage.ErrClaimBlocked before any write, unless force is true. This
+// is the one check every claim door shares, so a claim by id cannot start work
+// that bd ready leaves out; bd close applies the same rule under its own Force.
+func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, force bool) (*ClaimResult, error) {
+	return claimIssueInTx(ctx, tx, id, actor, true, force)
 }
 
 // claimIssueInTx is the body of ClaimIssueInTx. mintVersion controls whether a
@@ -42,10 +47,11 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 // does, while ExecuteUpdate — which may apply field, label, parent and
 // persistence patches after the claim in the same call — passes false and
 // mints exactly once after the last of them, so the version carries the final
-// state and one guarded update never records two.
+// state and one guarded update never records two. force lifts the blocked-issue
+// refusal and nothing else.
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func claimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, mintVersion bool) (*ClaimResult, error) {
+func claimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, mintVersion, force bool) (*ClaimResult, error) {
 	// The CAS below writes assignee = actor. actor is user-settable (--actor /
 	// BEADS_ACTOR), so bound it against the VARCHAR(255) assignee column up front
 	// and return a typed ErrFieldTooLong rather than a raw backend error.
@@ -59,6 +65,15 @@ func claimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, mintV
 	oldIssue, err := GetIssueInTx(ctx, tx, id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get issue for claim: %w", err)
+	}
+	if !force {
+		blocked, blockers, err := isBlockedByInTx(ctx, tx, id)
+		if err != nil {
+			return nil, err
+		}
+		if blocked {
+			return nil, &publicops.BlockedError{IssueID: id, Blockers: blockers, Err: storage.ErrClaimBlocked}
+		}
 	}
 
 	now := time.Now().UTC()
@@ -303,7 +318,7 @@ func ClaimReadyIssueInTx(
 		return nil, err
 	}
 	for _, issue := range readyIssues {
-		if _, err := ClaimIssueInTx(ctx, tx, issue.ID, actor); err != nil {
+		if _, err := ClaimIssueInTx(ctx, tx, issue.ID, actor, false); err != nil {
 			if errors.Is(err, storage.ErrAlreadyClaimed) || errors.Is(err, storage.ErrNotClaimable) {
 				continue
 			}

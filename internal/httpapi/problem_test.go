@@ -18,6 +18,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // dsn is the shape a driver or dial error takes in the wild: it names the
@@ -72,6 +73,12 @@ func TestProblemMapping(t *testing.T) {
 		{
 			name:       "not claimable",
 			err:        fmt.Errorf("%w%sclosed", storage.ErrNotClaimable, storage.NotClaimableStatusFragment),
+			wantStatus: http.StatusConflict,
+			wantCode:   CodeNotClaimable,
+		},
+		{
+			name:       "claim refused for an open blocker",
+			err:        fmt.Errorf("claim bd-1: %w", issueops.NewClaimBlockedError("bd-1", []string{"bd-2"})),
 			wantStatus: http.StatusConflict,
 			wantCode:   CodeNotClaimable,
 		},

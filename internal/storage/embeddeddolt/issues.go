@@ -14,11 +14,12 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// ClaimIssue atomically claims an issue using compare-and-swap semantics.
+// ClaimIssue atomically claims an issue using compare-and-swap semantics. A
+// blocked issue is refused with storage.ErrClaimBlocked and nothing is written.
 // Delegates SQL work to issueops; EmbeddedDolt auto-commits the transaction.
 func (s *EmbeddedDoltStore) ClaimIssue(ctx context.Context, id string, actor string) error {
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
-		_, err := issueops.ClaimIssueInTx(ctx, tx, id, actor)
+		_, err := issueops.ClaimIssueInTx(ctx, tx, id, actor, false)
 		return err
 	})
 }

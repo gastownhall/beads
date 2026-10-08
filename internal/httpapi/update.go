@@ -567,7 +567,7 @@ func (s *Server) failUpdate(w http.ResponseWriter, r *http.Request, request issu
 	// naming `claim`, the member that earned it. Matched BEFORE the assignee
 	// fence's arm below, which shares the `already_claimed` sentinel but blames
 	// `patch.assignee` and steers toward a force this request cannot send.
-	case request.Claim && (errors.Is(err, storage.ErrAlreadyClaimed) || errors.Is(err, storage.ErrNotClaimable)):
+	case request.Claim && (errors.Is(err, storage.ErrAlreadyClaimed) || errors.Is(err, storage.ErrNotClaimable) || errors.Is(err, issueops.ErrClaimBlocked)):
 		s.fail(w, r, named(claimRefusal(err), updateClaimMember))
 
 	case errors.Is(err, issueops.ErrCloseOpenChildren):
