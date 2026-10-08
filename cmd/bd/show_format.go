@@ -46,6 +46,17 @@ func formatShortIssue(issue *types.Issue) string {
 // Format: ID · Title   [Priority · STATUS]
 // All elements in bd show get semantic colors since focus is on one issue
 func formatIssueHeader(issue *types.Issue) string {
+	return formatIssueHeaderWithGates(issue, nil)
+}
+
+// formatIssueHeaderWithGates is formatIssueHeader plus the derived GATED
+// marker: [P2 · OPEN · GATED] when an open gate blocks the issue. The stored
+// status is untouched — GATED is a third segment, not a replacement — because
+// the row really is open and `bd ready` really does skip it, and a reader who
+// sees only OPEN has no way to tell those two facts apart. Callers pass the
+// gates types.GatesHolding selected; an empty set renders exactly what
+// formatIssueHeader always did.
+func formatIssueHeaderWithGates(issue *types.Issue, gates []*types.Issue) string {
 	// Get status icon and style
 	statusIcon := ui.RenderStatusIcon(string(issue.Status))
 	statusStyle := ui.GetStatusStyle(string(issue.Status))
@@ -72,10 +83,17 @@ func formatIssueHeader(issue *types.Issue) string {
 		tierEmoji = " 📦"
 	}
 
+	// Derived gate marker (wy-j2upyy): an open gate holds this issue out of
+	// bd ready, so the header says so.
+	gatedStr := ""
+	if len(gates) > 0 {
+		gatedStr = " · " + ui.StatusBlockedStyle.Render("GATED")
+	}
+
 	// Build header: STATUS_ICON ID · Title   [Priority · STATUS]
 	idStyled := ui.RenderAccent(issue.ID)
-	return fmt.Sprintf("%s %s%s · %s%s   [%s · %s]",
-		statusIcon, idStyled, typeBadge, issue.Title, tierEmoji, priorityTag, statusStr)
+	return fmt.Sprintf("%s %s%s · %s%s   [%s · %s%s]",
+		statusIcon, idStyled, typeBadge, issue.Title, tierEmoji, priorityTag, statusStr, gatedStr)
 }
 
 // formatIssueMetadata returns the metadata line(s) with grouped info
@@ -83,6 +101,15 @@ func formatIssueHeader(issue *types.Issue) string {
 //
 //	Created: 2026-01-06 · Updated: 2026-01-08
 func formatIssueMetadata(issue *types.Issue) string {
+	return formatIssueMetadataWithGates(issue, nil)
+}
+
+// formatIssueMetadataWithGates is formatIssueMetadata plus one "Gated by:"
+// line per active gate, beside the Deferred: line the time row carries: a
+// deferred AND gated issue shows both, because they are two different reasons
+// the work is not startable. A gate that has been resolved (closed) is not in
+// the set and renders nothing.
+func formatIssueMetadataWithGates(issue *types.Issue, gates []*types.Issue) string {
 	var lines []string
 
 	// Line 1: Created by/Assignee · Type
@@ -124,6 +151,11 @@ func formatIssueMetadata(issue *types.Issue) string {
 	}
 	if len(timeParts) > 0 {
 		lines = append(lines, strings.Join(timeParts, " · "))
+	}
+
+	// Line 3+: one line per gate actively blocking this issue.
+	for _, gate := range gates {
+		lines = append(lines, formatGatedByLine(gate))
 	}
 
 	// Lease line: only when an active lease is held (in_progress + non-null
@@ -312,6 +344,58 @@ func printEpicChildProgress(children []*types.IssueWithDependencyMetadata) {
 		eligible = " — eligible for close"
 	}
 	fmt.Printf("  %s %d/%d complete (%d%%)%s\n", icon, closed, len(children), pct, eligible)
+}
+
+// validateCommentsTail rejects a negative --comments-tail value the same way
+// on both show routes (direct and --proxied-server): a negative render cap
+// has no meaning, so it is a usage error rather than a silently-clamped
+// default, matching how resolveMaxRows (max_rows.go) rejects a negative
+// --max-rows.
+func validateCommentsTail(n int) error {
+	if n < 0 {
+		return HandleErrorRespectJSON("--comments-tail must be non-negative; got %d", n)
+	}
+	return nil
+}
+
+// printComments prints the COMMENTS section of bd show's text-mode output:
+// the bold heading, then one block per comment (muted timestamp + author,
+// rendered markdown body). Both show routes (direct and --proxied-server)
+// call this so the render stays identical between them.
+//
+// tailN is the --comments-tail cap: <= 0 or >= len(comments) renders every
+// comment with no elision line, byte-identical to the output before the flag
+// existed (the flag's off state MUST be indistinguishable from its absence).
+// A real cap — 0 < tailN < len(comments) — hides the older comments behind
+// exactly one muted elision line naming how many were hidden (singular for
+// one), then renders only the last tailN in their existing order and format.
+// issueID feeds the elision line's "bd show <id>" pointer at the full
+// record.
+func printComments(comments []*types.Comment, tailN int, formatTime func(time.Time) string, issueID string) {
+	if len(comments) == 0 {
+		return
+	}
+	fmt.Printf("\n%s\n", ui.RenderBold("COMMENTS"))
+
+	start := 0
+	if tailN > 0 && tailN < len(comments) {
+		hidden := len(comments) - tailN
+		start = hidden
+		noun := "comments"
+		if hidden == 1 {
+			noun = "comment"
+		}
+		fmt.Printf("  %s\n", ui.RenderMuted(fmt.Sprintf("… %d older %s hidden — bd show %s for the full record", hidden, noun, issueID)))
+	}
+
+	for _, comment := range comments[start:] {
+		fmt.Printf("  %s %s\n", ui.RenderMuted(formatTime(comment.CreatedAt)), comment.Author)
+		rendered := uimd.RenderMarkdown(comment.Text)
+		// TrimRight removes trailing newlines that Glamour adds, preventing extra blank lines
+		for _, line := range strings.Split(strings.TrimRight(rendered, "\n"), "\n") {
+			fmt.Printf("    %s\n", line)
+		}
+	}
 }
 
 // formatSimpleDependencyLine formats a dependency without metadata (fallback)
@@ -525,4 +609,23 @@ func formatMetadataValue(v any) string {
 		}
 		return string(b)
 	}
+}
+
+// formatGatedByLine renders one gate on bd show's meta block:
+//
+//	Gated by: bd-abc (human: Need design review)
+//	Gated by: bd-def (gh:pr, awaiting 42)
+//
+// The parenthetical is the gate's own record — its await type, the reason its
+// creator gave, and what it is waiting on — so the reader can act on the gate
+// without a second lookup.
+func formatGatedByLine(gate *types.Issue) string {
+	detail := types.GateKind(gate)
+	if reason := types.GateReason(gate.Description); reason != "" {
+		detail += ": " + reason
+	}
+	if gate.AwaitID != "" {
+		detail += ", awaiting " + gate.AwaitID
+	}
+	return fmt.Sprintf("Gated by: %s (%s)", gate.ID, detail)
 }

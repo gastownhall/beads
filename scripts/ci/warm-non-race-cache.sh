@@ -28,3 +28,12 @@ go test -tags gms_pure_go -c -o /dev/null ./cmd/bd
 go test -tags gms_pure_go -c -o /dev/null ./scripts
 go test '-tags=integration,gms_pure_go' -c -o /dev/null ./scripts
 go test '-tags=integration,gms_pure_go' -c -o /dev/null ./scripts/gitattributespolicy
+
+# pr-preflight-platforms' Windows-only "Exercise credential command fixtures on
+# Windows" step tests these with CGO_ENABLED=0, which the Windows runner's
+# default (CGO_ENABLED=1, gcc on PATH) does not build.
+if [[ "$(go env GOOS)" == windows ]]; then
+    for pkg in ./internal/testutil/credentialcmd ./internal/creds ./internal/storage/dolt; do
+        CGO_ENABLED=0 go test -tags gms_pure_go -c -o /dev/null "$pkg"
+    done
+fi

@@ -59,6 +59,10 @@ var showCmd = &cobra.Command{
 		includeDepends, _ := cmd.Flags().GetBool("include-dependents")
 		includeComments, _ := cmd.Flags().GetBool("include-comments")
 		briefDeps, _ := cmd.Flags().GetBool("brief-deps")
+		commentsTail, _ := cmd.Flags().GetInt("comments-tail")
+		if err := validateCommentsTail(commentsTail); err != nil {
+			return err
+		}
 		ctx := rootCtx
 
 		// Helper to format timestamp based on --local-time flag
@@ -99,7 +103,7 @@ var showCmd = &cobra.Command{
 			if len(args) != 1 {
 				return HandleErrorRespectJSON("watch mode requires exactly one issue ID")
 			}
-			return watchIssue(ctx, args[0])
+			return watchIssue(ctx, args[0], commentsTail)
 		}
 
 		if showThread {
@@ -187,15 +191,30 @@ var showCmd = &cobra.Command{
 				result.Close()
 				continue
 			}
+			// Dependencies are read here rather than at the DEPENDS ON
+			// section below because the header needs them: the derived GATED
+			// marker (wy-j2upyy) is the gate-typed subset of this very set,
+			// so hoisting the read decorates the header and the meta block
+			// without a second query. Best effort, as it always was: a failed
+			// read renders the issue undecorated rather than not at all.
+			//
+			// Counts first — see readDepCounts for why the order matters. The
+			// listing's error is KEPT, not discarded: rendering stays best
+			// effort, but a FAILED listing and a SHORT one both leave the
+			// slice empty, and only the second is an unresolvable edge.
+			depCountsSnapshot := readDepCounts(ctx, issueStore, issue.ID)
+			depsWithMeta, depsErr := issueStore.GetDependenciesWithMetadata(ctx, issue.ID)
+			gates := types.GatesHolding(issue, depsWithMeta)
+
 			if idx > 0 {
 				fmt.Println("\n" + ui.RenderMuted(strings.Repeat("─", 60)))
-				fmt.Printf("\n%s\n", formatIssueHeader(issue))
+				fmt.Printf("\n%s\n", formatIssueHeaderWithGates(issue, gates))
 			} else {
-				fmt.Printf("%s\n", formatIssueHeader(issue))
+				fmt.Printf("%s\n", formatIssueHeaderWithGates(issue, gates))
 			}
 
 			// Metadata: Owner · Type | Created · Updated
-			fmt.Println(formatIssueMetadata(issue))
+			fmt.Println(formatIssueMetadataWithGates(issue, gates))
 
 			// Content sections — always show DESCRIPTION header so the user
 			// can distinguish "empty" from "hidden" (GH#3336).
@@ -230,12 +249,7 @@ var showCmd = &cobra.Command{
 			relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
 
 			// Show dependencies - grouped by dependency type for clarity
-			// Counts first — see readDepCounts for why the order matters.
-			depCountsSnapshot := readDepCounts(ctx, issueStore, issue.ID)
-			// The errors are KEPT, not discarded: rendering stays best
-			// effort, but a FAILED listing and a SHORT one both leave the
-			// slice empty, and only the second is an unresolvable edge.
-			depsWithMeta, depsErr := issueStore.GetDependenciesWithMetadata(ctx, issue.ID) // Best effort: show issue even if deps unavailable
+			// (read above, with the header's gate decoration).
 			for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
 				printDepSection(sec)
 			}
@@ -263,17 +277,7 @@ var showCmd = &cobra.Command{
 
 			// Show comments
 			comments, _ := issueStore.GetIssueComments(ctx, issue.ID) // Best effort: show issue even if comments unavailable
-			if len(comments) > 0 {
-				fmt.Printf("\n%s\n", ui.RenderBold("COMMENTS"))
-				for _, comment := range comments {
-					fmt.Printf("  %s %s\n", ui.RenderMuted(formatTime(comment.CreatedAt)), comment.Author)
-					rendered := uimd.RenderMarkdown(comment.Text)
-					// TrimRight removes trailing newlines that Glamour adds, preventing extra blank lines
-					for _, line := range strings.Split(strings.TrimRight(rendered, "\n"), "\n") {
-						fmt.Printf("    %s\n", line)
-					}
-				}
-			}
+			printComments(comments, commentsTail, formatTime, issue.ID)
 
 			// Long mode: show all extended fields
 			if longMode {
@@ -325,6 +329,7 @@ func init() {
 		"Without it the comments field is absent entirely, not truncated: an issue with comments carries "+
 		"comment_count and comments_omitted=true, so check those before reading an absent comments field as none.")
 	showCmd.Flags().Bool("brief-deps", false, "Reduce each dependency to its identity fields in JSON output (--json only; drops description, design, notes and acceptance criteria)")
+	showCmd.Flags().Int("comments-tail", 0, "Render only the last N comments in text output, preceded by one elision line naming how many older ones were hidden (text output only; 0, the default, renders every comment unchanged; N must be >= 0)")
 	showCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(showCmd)
 }

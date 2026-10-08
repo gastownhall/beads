@@ -27,7 +27,7 @@ func remoteAdd(t *testing.T, bd, dir string, args ...string) (string, string, er
 // setGitOrigin adds a git remote named "origin" to the directory.
 func setGitOrigin(t *testing.T, dir, url string) {
 	t.Helper()
-	cmd := exec.Command("git", "remote", "add", "origin", url)
+	cmd := gitCommand("remote", "add", "origin", url)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git remote add origin %s: %v\n%s", url, err, out)

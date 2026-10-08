@@ -593,12 +593,6 @@ func cycleReachabilityQuery(depTables []string) string {
 // The reachable set is the same as the single-member walk over the UNION:
 // UNION distinct merges what every member produces per step.
 func reachabilityQuery(cte string, depTables []string, typeFilter string) string {
-	members := make([]string, 0, len(depTables))
-	for _, t := range depTables {
-		members = append(members, fmt.Sprintf(
-			"SELECT /*+ JOIN_ORDER(r, d) LOOKUP_JOIN(r, d) */ CASE WHEN %s THEN %s END FROM %s r JOIN %s d ON d.issue_id = r.node",
-			typeFilter, depTargetExpr("d"), cte, t))
-	}
 	return fmt.Sprintf(`
 		WITH RECURSIVE %s(node) AS (
 			SELECT ?
@@ -606,7 +600,22 @@ func reachabilityQuery(cte string, depTables []string, typeFilter string) string
 			%s
 		)
 		SELECT COUNT(*) FROM %s WHERE node = ?
-	`, cte, strings.Join(members, "\n\t\t\tUNION\n\t\t\t"), cte)
+	`, cte, reachabilityMembers(cte, depTables, typeFilter), cte)
+}
+
+// reachabilityMembers is reachabilityQuery's recursive members, one per
+// dependency table and joined by UNION, for any walk over the same edges
+// (ancestorChainInTx in blocked_state.go shares them). A NULL node, which is
+// what a row of another type projects, is the caller's to filter out of a
+// walk's result.
+func reachabilityMembers(cte string, depTables []string, typeFilter string) string {
+	members := make([]string, 0, len(depTables))
+	for _, t := range depTables {
+		members = append(members, fmt.Sprintf(
+			"SELECT /*+ JOIN_ORDER(r, d) LOOKUP_JOIN(r, d) */ CASE WHEN %s THEN %s END FROM %s r JOIN %s d ON d.issue_id = r.node",
+			typeFilter, depTargetExpr("d"), cte, t))
+	}
+	return strings.Join(members, "\n\t\t\tUNION\n\t\t\t")
 }
 
 func cycleDetectionTables() []string {

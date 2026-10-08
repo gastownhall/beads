@@ -34,7 +34,7 @@ bd info --whats-new
    `bd version`
 5. If crossing a schema migration on a remote-backed database, only the
    designated migrator runs:
-   `bd migrate`
+   `bd migrate schema`
    `bd dolt push`
 
 Other clones must not migrate independently. After the migrator pushes, each
@@ -139,7 +139,7 @@ bd migrate --inspect --json
 bd migrate --dry-run
 
 # Apply migrations
-bd migrate
+bd migrate schema
 
 # Migrate and clean up old files
 bd migrate --yes
@@ -307,7 +307,7 @@ also copy the `.beads` directory (or `dolt backup` in server mode) while no
 bd dolt push                              # 1. CURRENT binary: publish all local work
 bd export --all -o .beads/backup/pre-migrate.jsonl   # 2. backup (see above)
 # 3. install the new binary (see Upgrading above)
-bd migrate                                # 4. migrate as the designated migrator
+bd migrate schema                         # 4. migrate as the designated migrator
 bd dolt push                              # 5. publish the migrated schema
 bd version                                # 6. confirm the new version is active
 ```
@@ -317,10 +317,10 @@ migrating here as the designated migrator, adopting the remote's already-migrate
 database, or recovering a fork — and asks for an explicit operator decision.
 Follow the guidance it prints.
 
-For scripted or CI upgrades where nobody reads the output, run `bd migrate` as
-an explicit step in exactly one job, never in all of them. If the gate blocks a
-run it prints both the available options and the scripted override that fits
-the situation.
+For scripted or CI upgrades where nobody reads the output, run
+`bd migrate schema` as an explicit step in exactly one job, never in all of
+them. If the gate blocks a run it prints both the available options and the
+scripted override that fits the situation.
 
 **Multiple clones sharing one remote:**
 
@@ -332,7 +332,7 @@ bd dolt pull
 bd export --all -o .beads/backup/pre-migrate.jsonl
 
 # 2. Designated migrator ONLY: install the new binary, then migrate and publish.
-bd migrate
+bd migrate schema
 bd dolt push
 
 # 3. Every OTHER clone, after the migrator has pushed: pull the migrated
@@ -538,9 +538,11 @@ bridge below accepts SQLite sources only.
 
 ### `.beads/embeddeddolt/`: direct upgrade
 
-Upgrade the binary and run:
+Upgrade the binary, apply the pending schema migrations, and update the
+database metadata:
 
 ```bash
+bd migrate schema
 bd migrate
 ```
 
@@ -589,8 +591,8 @@ metadata is missing or leaves `dolt_mode` blank/`embedded`; it does not override
 an explicit server selection with a local root. Compatibility admission cannot
 prove that a workspace is modern. If you know it was created by v0.55.4 through
 v0.62.0, use this explicit bridge even when its witness was lost or damaged.
-Otherwise, follow the normal `bd migrate --dry-run` and `bd migrate` flow for
-an admitted server workspace.
+Otherwise, follow the normal `bd migrate --dry-run` and `bd migrate schema`
+flow for an admitted server workspace.
 
 ### One `.beads/*.db` file: sealed SQLite bridge
 
@@ -653,7 +655,7 @@ bd hooks install
 
 ```bash
 bd migrate --dry-run
-bd migrate
+bd migrate schema
 ```
 
 ### Recovery after upgrade

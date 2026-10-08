@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"strings"
 	"testing"
 
@@ -40,7 +39,7 @@ func TestGetActorWithGit(t *testing.T) {
 
 	// Helper to get current git user.name (may be empty if not configured)
 	getGitUserName := func() string {
-		out, err := exec.Command("git", "config", "user.name").Output()
+		out, err := gitCommand("config", "user.name").Output()
 		if err != nil {
 			return ""
 		}

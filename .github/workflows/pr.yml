@@ -23,24 +23,16 @@ concurrency:
 env:
   BD_DISABLE_METRICS: "1"
   BD_DISABLE_EVENT_FLUSH: "1"
-  # F4 side-by-side rollout: "false" keeps the native windows-latest jobs
-  # (test-windows-liveness, worktree-remove-windows) as the required pair and
-  # their Linux-cross-built "-prebuilt" twins (test-windows-liveness-prebuilt,
-  # worktree-remove-windows-prebuilt) advisory-only. Both pairs run and report
-  # on every PR regardless of this flag; flipping it to "true" swaps which
-  # pair ci-gate enforces (the other pair moves to CI_GATE_SKIPPED_OK) without
-  # touching ci-gate.needs or the env map below -- see the "Evaluate CI gate"
   # step's run script. Committed, not a repo variable, so a re-run can never
   # change it.
-  WINDOWS_PREBUILT_REQUIRED: "true"
   # bazel.yml's bazel-cmd-dolt lane (the cmd/bd Dolt-server tier: the
   # Dolt-gated cmd/bd tests no other lane runs) is advisory while this is
   # "false": it runs and reports in the bazel call (continue-on-error, so a
   # failure never turns the call's aggregate red), and ci-gate ignores its
   # BAZEL_CMD_DOLT result. "true" adds BAZEL_CMD_DOLT to CI_GATE_REQUIRED in
   # the "Evaluate CI gate" step's run script; bazel-gate.sh still accepts
-  # its skip in modes skip and local. Committed, not a repo variable, for
-  # the same reason as WINDOWS_PREBUILT_REQUIRED above. The `bazel` job's cmd-dolt-required
+  # its skip in modes skip and local. Committed, not a repo variable, so a
+  # re-run can never change it. The `bazel` job's cmd-dolt-required
   # input must equal it (a `with:` cannot read env; policy-tested): "true"
   # also drops //cmd/bd:bd_test from bazel-integration, because the required
   # lane runs the same integration-build bd_test without the dolt skip, so
@@ -132,26 +124,18 @@ jobs:
   # regressions actually execute at PR time. The init credential shell
   # fixtures are a separate concern and run natively in
   # pr-preflight-platforms, not here.
-  # F7b: same-repo Blacksmith (blacksmith-4vcpu-windows-2025) for same-repo
-  # PRs/merge_group, falling back to windows-latest for forks/Dependabot --
-  # same pattern as the Linux same-repo jobs above, with the Windows-2025
-  # label instead (public beta; GitHub's windows-2025 image minus the full
-  # Visual Studio IDE/EdgeDriver/WinAppDriver, VS Build Tools 2022 present,
-  # no Linux Docker).
-  #
-  # RISK (unverified from this sandbox, flagged in the F7b report): the first
-  # step below builds and runs ./cmd/bd with CGO_ENABLED=1 (embedded Dolt).
-  # windows-latest's cgo build works today via the toolchain GitHub documents
-  # for that image; Blacksmith's windows-2025 docs only confirm "VS Build
-  # Tools 2022" is present, not which cgo toolchain (MSVC/clang-cl vs an
-  # installed mingw-w64) backs `go build` with CGO_ENABLED=1 there. The
-  # fork-PR path (windows-latest) is an unaffected, always-on canary for this
-  # job; if the same-repo leg fails here specifically with a cgo/link error,
-  # that is the toolchain gap to roll back on (revert this runs-on line to
-  # the literal `windows-latest`).
+  # Blacksmith Windows (blacksmith-4vcpu-windows-2025: GitHub's windows-2025
+  # image minus the full Visual Studio IDE/EdgeDriver/WinAppDriver, VS Build
+  # Tools 2022 present, no Linux Docker) for every PR and merge group, forks
+  # and Dependabot included (ga-96smfk.22): Windows and macOS jobs run on
+  # Blacksmith, everything Linux under Bazel on rbe-west. The first step
+  # builds ./cmd/bd with CGO_ENABLED=1 (embedded Dolt); the toolchain
+  # diagnostic step below prints which cgo toolchain backs it. Since
+  # ga-96smfk.22 this job (not a cross-compiled "-prebuilt" twin) is the
+  # required run of these tests.
   test-windows-liveness:
     name: Test (Windows) cmd/bd liveness regression
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest' }}
+    runs-on: ${{ 'blacksmith-4vcpu-windows-2025' }}
     # F7b review fix (S6): raised from 15 to 20, matching open PR #7143's own
     # measurement on this exact job (retained runs take about 8m; one run's
     # own step timing showed 451s total with a 403s compile step) and
@@ -263,12 +247,12 @@ jobs:
   # on the second step only ensures it still runs after the first fails,
   # giving both packages' results in one log instead of stopping at the
   # first failure. No aggregator step is needed.
-  # F7b: same-repo Blacksmith (blacksmith-2vcpu-windows-2025); both steps
+  # Blacksmith Windows (blacksmith-2vcpu-windows-2025) for every PR; both steps
   # build with CGO_ENABLED=0 (or no cgo at all for doltversion), so this job
   # carries none of test-windows-liveness's cgo-toolchain risk.
   test-windows-small:
     name: Test (Windows) small packages (doltversion, dbproxy server)
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-windows-2025' || 'windows-latest' }}
+    runs-on: ${{ 'blacksmith-2vcpu-windows-2025' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -304,13 +288,12 @@ jobs:
   # Destructive worktree removal depends on native Windows path identity.
   # This focused process suite requires NTFS per-directory case sensitivity
   # and fails (rather than skips) when the runner cannot provide it.
-  # F7b: same-repo Blacksmith (blacksmith-4vcpu-windows-2025). CGO_ENABLED=0
-  # below, so no cgo-toolchain risk; this leg's non-race GOCACHE restore-keys
-  # prefix now gets a hit from main.yml's test-windows job, whose `venue`
-  # matrix extension (F7b) saves that same key on this exact runner
-  # selection (restore-keys falls back to the most recent prefix match
-  # regardless of the exact sha, same as build-artifacts already does for
-  # the Linux preflight/doc-freshness legs).
+  # Blacksmith Windows (blacksmith-4vcpu-windows-2025) for every PR.
+  # CGO_ENABLED=0 below, so no cgo-toolchain risk; its non-race GOCACHE
+  # restore-keys prefix gets a hit from main.yml's test-windows job, which
+  # saves that key on this exact runner selection (restore-keys falls back
+  # to the most recent prefix match regardless of the exact sha). Since
+  # ga-96smfk.22 this job is the required run of these tests.
   #
   # RISK (F7b review: not flagged in the original implementation --
   # cmd/bd/worktree_remove_git_windows_test.go:233 shells out to
@@ -321,12 +304,11 @@ jobs:
   # does not treat an unsupported fsutil call as a skip condition). The
   # diagnostic step below surfaces that gap in this job's own log instead of
   # a bare test failure deep in the suite; if it reports the feature missing,
-  # roll back this job's runs-on to the literal `windows-latest` (same
-  # rollback as test-windows-liveness's cgo risk above) until Blacksmith
-  # confirms/enables it.
+  # roll back this job's runs-on to the literal `windows-latest` until
+  # Blacksmith confirms/enables it.
   worktree-remove-windows:
     name: Worktree remove boundary (Windows)
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest' }}
+    runs-on: ${{ 'blacksmith-4vcpu-windows-2025' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -372,203 +354,6 @@ jobs:
           CGO_ENABLED: "0"
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test -tags gms_pure_go -count=1 -run '^TestWorktreeRemove' ./cmd/bd
-
-  # F4 side-by-side rollout (advisory phase): cross-compiles the Windows test
-  # binaries this file's native Windows jobs need, from a committed manifest
-  # (scripts/ci/windows-test-binaries.txt), on a Linux runner via mingw-w64 --
-  # the same toolchain release.yml's goreleaser job uses for the shipped
-  # bd-windows-amd64 binary (CC=x86_64-w64-mingw32-gcc; see .goreleaser.yml).
-  # The "-prebuilt" twin jobs below download this artifact and run it
-  # natively on windows-latest instead of compiling there, so the CGO build
-  # that otherwise runs once per Windows job runs here once instead.
-  #
-  # Deliberately advisory only: the native `test-windows-liveness` and
-  # `worktree-remove-windows` jobs above are untouched and still the only
-  # required pair while WINDOWS_PREBUILT_REQUIRED (top of this file) is
-  # "false". ci-gate does wait on this job's two twins below (they are in its
-  # `needs`), but neither twin's result is in CI_GATE_REQUIRED yet -- the
-  # side-by-side phase runs both paths on every PR so a policy test
-  # (TestWindowsTestBinariesSelectSameTestsAsNativeJobs, in
-  # scripts/windows_test_binaries_manifest_test.go) can confirm they select
-  # the same tests before anyone flips WINDOWS_PREBUILT_REQUIRED to "true".
-  #
-  # Manifest is intentionally partial in this phase: it covers only the two
-  # cmd/bd-backed jobs twinned below. Forks and Dependabot PRs get no
-  # secrets here, same as every job in this file -- cross-compiling and
-  # uploading an artifact needs none.
-  windows-test-binaries:
-    name: Build Windows test binaries (cross-compile)
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Restore Go module cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      - name: Verify Go module checksums
-        run: go mod verify
-
-      - name: Install mingw cross-compiler
-        timeout-minutes: 12
-        run: |
-          updated=""
-          for attempt in 1 2 3; do
-            if sudo timeout 120 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update; then
-              updated=yes
-              break
-            fi
-            echo "::warning::apt-get update attempt $attempt failed or timed out"
-            if [ "$attempt" -lt 3 ]; then sleep 10; fi
-          done
-          if [ -z "$updated" ]; then
-            echo "::warning::apt-get update failed after 3 attempts; proceeding with cached index"
-          fi
-          sudo timeout 300 apt-get install -y gcc-mingw-w64-x86-64
-
-      - name: Restore Go build cache (Windows cross-compile)
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/go-cache/xcompile-windows-amd64
-          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-xcompile-windows-amd64-${{ github.sha }}
-          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-xcompile-windows-amd64-
-
-      - name: Build Windows test binaries
-        env:
-          GOCACHE: ${{ runner.temp }}/go-cache/xcompile-windows-amd64
-        run: bash scripts/ci/build-windows-test-binaries.sh "$RUNNER_TEMP/win-bin"
-
-      - name: Upload Windows test binaries
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: windows-test-binaries
-          path: ${{ runner.temp }}/win-bin
-          retention-days: 1
-          compression-level: 1
-          if-no-files-found: error
-
-  # Advisory twin of test-windows-liveness: runs the identical test selection,
-  # flags, and env on windows-latest, but against the binary
-  # windows-test-binaries cross-compiled instead of compiling here. Step
-  # names, -run patterns, -count, and the PASS/FAIL parsing block are kept
-  # byte-for-byte equivalent to the native job on purpose --
-  # TestWindowsTestBinariesSelectSameTestsAsNativeJobs checks the -run
-  # literals stay in sync.
-  # F7b: same-repo Blacksmith (blacksmith-2vcpu-windows-2025). This leg only
-  # runs a prebuilt binary (cross-compiled on Linux by windows-test-binaries
-  # via mingw-w64) rather than compiling with cgo on the Windows runner
-  # itself, so it carries none of test-windows-liveness's cgo-toolchain risk.
-  test-windows-liveness-prebuilt:
-    name: Test (Windows, prebuilt) cmd/bd liveness regression
-    needs: windows-test-binaries
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-windows-2025' || 'windows-latest' }}
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Download Windows test binaries
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: windows-test-binaries
-          path: ${{ runner.temp }}/win-bin
-
-      - name: Verify downloaded binaries
-        shell: bash
-        run: |
-          cd "$RUNNER_TEMP/win-bin"
-          sha256sum -c SHA256SUMS
-
-      # F7b review fix (S9): these binaries are cgo-linked on Linux via
-      # mingw-w64 (windows-test-binaries), not compiled on this runner, so
-      # the risk here is specifically whether a cross-compiled binary loads
-      # and runs at all on Blacksmith's windows-2025 image (missing runtime
-      # DLLs, etc.), not the cgo-toolchain risk test-windows-liveness
-      # carries. `-run '^$'` loads/links the binary and matches no tests, so
-      # a load failure surfaces here instead of inside the real test step.
-      - name: Check prebuilt Windows binary loads
-        shell: bash
-        run: bash scripts/ci/run-go-test-binary.sh "$RUNNER_TEMP/win-bin/cmd-bd-cgo.test.exe" ./cmd/bd -run '^$' -count=1
-
-      - name: Run native Windows global Prime override (prebuilt)
-        shell: bash
-        run: |
-          export BEADS_TEST_PREBUILT_TEST_BINARY="$RUNNER_TEMP/win-bin/cmd-bd-cgo.test.exe"
-          export BEADS_TEST_BD_BINARY="$RUNNER_TEMP/win-bin/bd.exe"
-          go_path=$(command -v go)
-          [[ "$("$go_path" env GOHOSTOS GOOS)" == $'windows\nwindows' ]]
-          test_status=0
-          test_output=$(./scripts/test.sh -v -timeout 5m -run '^TestPrimeBinaryPortfolio$/^TestPrime_HookJSON_GlobalPrimeOverride$' -count=1 ./cmd/bd) || test_status=$?
-          printf '%s\n' "$test_output"
-          ((test_status == 0))
-          pass_pattern='^[[:space:]]*--- PASS: TestPrimeBinaryPortfolio/TestPrime_HookJSON_GlobalPrimeOverride \('
-          nonpass_pattern='^[[:space:]]*--- (FAIL|SKIP): '
-          pass_count=0
-          while IFS= read -r line; do
-            if [[ "$line" =~ $pass_pattern ]]; then
-              ((pass_count += 1))
-            fi
-            if [[ "$line" =~ $nonpass_pattern ]]; then
-              exit 1
-            fi
-          done <<<"$test_output"
-          ((pass_count == 1))
-
-      - name: Run Windows liveness regression test (prebuilt)
-        shell: bash
-        run: bash scripts/ci/run-go-test-binary.sh "$RUNNER_TEMP/win-bin/cmd-bd-cgo.test.exe" ./cmd/bd -run '^TestIsServerProbablyRunning' -count=1
-
-  # Advisory twin of worktree-remove-windows: same package, -run pattern, and
-  # CGO_ENABLED=0 selection as the native job, but against the cgo=0 binary
-  # windows-test-binaries cross-compiled instead of compiling here.
-  # F7b: same-repo Blacksmith (blacksmith-2vcpu-windows-2025); same prebuilt-
-  # binary rationale as test-windows-liveness-prebuilt above.
-  worktree-remove-windows-prebuilt:
-    name: Worktree remove boundary (Windows, prebuilt)
-    needs: windows-test-binaries
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-windows-2025' || 'windows-latest' }}
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Download Windows test binaries
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: windows-test-binaries
-          path: ${{ runner.temp }}/win-bin
-
-      - name: Verify downloaded binaries
-        shell: bash
-        run: |
-          cd "$RUNNER_TEMP/win-bin"
-          sha256sum -c SHA256SUMS
-
-      # F7b review fix (S9): see test-windows-liveness-prebuilt's identical
-      # step for the full rationale.
-      - name: Check prebuilt Windows binary loads
-        shell: bash
-        run: bash scripts/ci/run-go-test-binary.sh "$RUNNER_TEMP/win-bin/cmd-bd-nocgo.test.exe" ./cmd/bd -run '^$' -count=1
-
-      - name: Run native Windows worktree removal boundary tests (prebuilt)
-        shell: bash
-        run: bash scripts/ci/run-go-test-binary.sh "$RUNNER_TEMP/win-bin/cmd-bd-nocgo.test.exe" ./cmd/bd -run '^TestWorktreeRemove' -count=1
 
   # Check documentation references match actual CLI flags
   #
@@ -631,35 +416,19 @@ jobs:
   # (integration lane: the doc-freshness suite under -required-suite) and
   # //scripts/gitattributespolicy:gitattributespolicy_required_host_test
   # (-required-host -expected-goos linux), both on rbe-west's Linux workers.
-  # The macOS and Windows legs stay here, on Blacksmith for same-repo PRs and
-  # merge groups (GitHub-hosted for forks and Dependabot).
-  #
-  # F7b: same-repo Blacksmith for the Linux/Windows legs via the "matrix
-  # marker" form (spec F7/F7b §2.1): Actions does not expand `${{ }}` inside a
-  # matrix array/include value, so each leg's `include` entry instead carries
-  # a plain string `runner` marker, and the job's `runs-on` is a single
-  # chained ternary (sameRepoPlatformsMatrixMarkerRunsOn in
-  # scripts/ci_blacksmith_runner_test.go) that resolves per-marker, falling
-  # back to `matrix.os` for forks/Dependabot (each marker's own same-repo
-  # condition false) or any leg with no marker. Every leg now restores a
-  # non-race Go build cache seeded by main.yml's push-to-main savers on the
-  # exact same runner selection (S2 below).
-  #
-  # The macOS leg moves to same-repo Blacksmith macOS
-  # (blacksmith-6vcpu-macos-26, Apple Silicon) like the other two legs; forks,
-  # Dependabot and any non-PR event keep GitHub-hosted macos-latest. The label
-  # is pinned to macos-26 because that is the image GitHub's macos-latest
-  # resolves to today (macos-26-arm64), so both paths run the same OS and
-  # architecture; bump it together with GitHub's macos-latest migration.
-  # 6 vCPU (vs. macos-latest's 3) is already 2x the GitHub-hosted leg; the
-  # 12 vCPU size is not justified for a leg dominated by one incremental
-  # ./cmd/bd test compile. This reverses F7b review fix S3 (cost accepted):
-  # main.yml's blacksmith-macos-go-build-cache job is the push-to-main
-  # Blacksmith-macOS saver S3 said was missing, on this exact label, and the
-  # GitHub-hosted fork path still restores main.yml's `test` job macOS leg.
+  # The macOS and Windows legs stay here, on Blacksmith for every PR and
+  # merge group, forks and Dependabot included (ga-96smfk.22). Each leg's
+  # `include` entry names its Blacksmith label in `runner` (`os` keeps the
+  # check names stable and selects the Windows-only steps). Every leg
+  # restores a non-race Go build cache seeded by main.yml's push-to-main
+  # savers on the exact same label (S2 below): test-windows for Windows,
+  # blacksmith-macos-go-build-cache for macOS. The macOS label is pinned to
+  # macos-26 (Apple Silicon, the image GitHub's macos-latest resolves to);
+  # 6 vCPU is enough for a leg dominated by one incremental ./cmd/bd test
+  # compile.
   check-doc-freshness-platforms:
     name: Check doc freshness (${{ matrix.os }})
-    runs-on: ${{ matrix.runner == 'same-repo-linux' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest') || matrix.runner == 'same-repo-windows' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest') || matrix.runner == 'same-repo-macos' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-6vcpu-macos-26' || 'macos-latest') || matrix.os }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -667,10 +436,10 @@ jobs:
         include:
           - os: macos-latest
             expected_goos: darwin
-            runner: same-repo-macos
+            runner: blacksmith-6vcpu-macos-26
           - os: windows-latest
             expected_goos: windows
-            runner: same-repo-windows
+            runner: blacksmith-4vcpu-windows-2025
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -711,10 +480,14 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test '-tags=integration,gms_pure_go' -count=1 ./scripts/gitattributespolicy -args -required-host -expected-goos '${{ matrix.expected_goos }}'
 
-  # F7b: same-repo Blacksmith via the "matrix marker" form (see
-  # check-doc-freshness-platforms above for the full explanation;
-  # sameRepoPlatformsMatrixMarkerRunsOn in scripts/ci_blacksmith_runner_test.go
-  # is this same chained ternary).
+  # Blacksmith macOS and Windows legs, labels in the matrix (see
+  # check-doc-freshness-platforms above). The Linux leg is retired
+  # (ga-96smfk.22): every Linux step's tests run under Bazel on rbe-west
+  # (//scripts:scripts_test, //cmd/bd:bd_test, //internal/config:config_test).
+  # Only the two
+  # tests of go test's own bd build fallback
+  # (tools/bazel/equivalence_allowlist.txt) skip under Bazel; they keep
+  # running here on macOS and Windows.
   #
   # F7b review (S1): an earlier revision of this job split the Windows leg
   # into two `shard` entries on the theory that it would turn one ~9-minute
@@ -726,23 +499,29 @@ jobs:
   # cold `cmd/bd` test compile in "Exercise generated Git hook timeout
   # process boundary" (250-300s); see S2 below (the restore-non-race-cache
   # step) for the fix that actually targets it. Reverted to one leg per OS.
+  #
+  # Windows leg budget with the caches warm (merge group 37710264475 and PR
+  # runs, 2026-10-07/08): 45-115s setup (setup-go, then the two cache
+  # restores, mostly tar extraction), 33-71s for TestPRPreflight (Git Bash
+  # process creation, now parallel subtests), 27-58s to compile and link
+  # ./cmd/bd's test binary, and about 25s for the rest. A second Windows leg
+  # would pay the setup again to save about 20s, so it stays one leg. An
+  # 8 vCPU Windows leg was tried (#7381): cache restores still hit, but it
+  # queued 63s for the larger runner and finished at 144s vs 129s here.
   pr-preflight-platforms:
     name: PR preflight process (${{ matrix.os }})
-    runs-on: ${{ matrix.runner == 'same-repo-linux' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest') || matrix.runner == 'same-repo-windows' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest') || matrix.runner == 'same-repo-macos' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-6vcpu-macos-26' || 'macos-latest') || matrix.os }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            expected_goos: linux
-            runner: same-repo-linux
           - os: macos-latest
             expected_goos: darwin
-            runner: same-repo-macos
+            runner: blacksmith-6vcpu-macos-26
           - os: windows-latest
             expected_goos: windows
-            runner: same-repo-windows
+            runner: blacksmith-4vcpu-windows-2025
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -761,16 +540,14 @@ jobs:
           restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
       # F7b review (S2): restore-only non-race Go build cache, seeded by the
-      # push-to-main saver on the exact same runner selection (Linux:
-      # main.yml's blacksmith-go-build-cache non-race leg; Windows:
-      # main.yml's test-windows Blacksmith leg; macOS: main.yml's
-      # blacksmith-macos-go-build-cache on Blacksmith, the test job's macOS
-      # leg on the GitHub-hosted fork path) so the cold cmd/bd compile below (the real long pole,
-      # 250-300s uncached) gets a true cache hit instead of starting cold.
-      # GOCACHE must match the seeder's exactly, and CGO_ENABLED is left at
-      # its platform default (same as the seeder) so the key families line
-      # up; see mainBlacksmithGoBuildCacheRunsOn / mainVenueBlacksmithWindows4vcpuRunsOn
-      # in ci_workflow_test.go for the seeder side of this contract.
+      # push-to-main saver on the exact same Blacksmith label (Windows:
+      # main.yml's test-windows; macOS: main.yml's
+      # blacksmith-macos-go-build-cache) so the cold cmd/bd compile below
+      # (the real long pole, 250-300s uncached) gets a true cache hit instead
+      # of starting cold. GOCACHE must match the seeder's exactly, and
+      # CGO_ENABLED is left at its platform default (same as the seeder) so
+      # the key families line up; see mainBlacksmithWindows4vcpuRunsOn in
+      # ci_workflow_test.go for the seeder side of this contract.
       - name: Restore non-race Go build cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -797,24 +574,21 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test '-tags=gms_pure_go' -count=1 -run '^TestTestScriptPrebuiltBinaryContract$' ./scripts
 
-      - name: Exercise generated Git hook timeout process boundary
-        shell: bash
-        env:
-          GOCACHE: ${{ runner.temp }}/go-cache/non-race
-        run: go test '-tags=gms_pure_go' -count=1 -run '^TestGeneratedHookTimeoutProcessBoundary$' ./cmd/bd
-
-      # Plain go test's own bd build fallback (BEADS_TEST_BD_BINARY unset),
+      # One go test of ./cmd/bd runs the generated hook timeout boundary and
+      # plain go test's own bd build fallback (BEADS_TEST_BD_BINARY unset),
       # which Bazel never takes, on every OS developers run go test on: the
       # tests tools/bazel/equivalence_allowlist.txt lists as skipped under
-      # Bazel. Same build as the step above, so no second compile.
-      - name: Exercise go test's bd build fallback
+      # Bazel. They were two steps; each go test of ./cmd/bd re-hashes its
+      # ~1500 packages and relinks the test binary, which cost 5-9s on
+      # Windows for a fallback run of under one second.
+      - name: Exercise generated Git hook timeout process boundary and go test's bd build fallback
         shell: bash
         env:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
-        run: go test '-tags=gms_pure_go' -count=1 -run '^(TestGOMODCACHENotUnderTestHome|TestGoBuildBDCommandIsCWDIndependent)$' ./cmd/bd
+        run: go test '-tags=gms_pure_go' -count=1 -run '^(TestGeneratedHookTimeoutProcessBoundary|TestGOMODCACHENotUnderTestHome|TestGoBuildBDCommandIsCWDIndependent)$' ./cmd/bd
 
       # This step recompiles ./cmd/bd's test binary. It must share the restored
-      # GOCACHE with the hook-timeout step above (same tags, same platform
+      # GOCACHE with the hook-timeout/bd-build-fallback step above (same tags, same platform
       # default CGO_ENABLED, see the script's header) so it is a relink rather
       # than a second cold compile: without GOCACHE here it fell back to the
       # runner's empty default cache and cold-compiled all of ./cmd/bd on every
@@ -1032,10 +806,8 @@ jobs:
   # steps keeps `if: ${{ !cancelled() }}` (plus a check that its own leg's
   # setup succeeded) so a failure in one leg does not stop the later legs
   # from attempting to run - the fail-fast: false behavior the matrix used to
-  # give for free. windows-make-shell is not a Windows job F4 touches (it
-  # does not intersect test-windows-liveness, worktree-remove-windows, the
-  # preflight/doc-freshness matrices, or the twins).
-  # F7b: same-repo Blacksmith (blacksmith-4vcpu-windows-2025).
+  # give for free.
+  # Blacksmith Windows (blacksmith-4vcpu-windows-2025) for every PR.
   #
   # RISK (unverified from this sandbox, flagged in the F7b report): the
   # native-Make step below assumes Chocolatey is preinstalled (`choco
@@ -1046,12 +818,11 @@ jobs:
   # is not independently confirmed. The msys2/setup-msys2 and
   # cygwin/cygwin-install-action steps download their own tooling and do not
   # depend on any preinstalled image contents, so they carry no equivalent
-  # risk. The fork-PR path (windows-latest) remains an always-on canary; if
-  # only the same-repo leg's native-Make step fails here, that is the gap to
-  # roll back on (revert this runs-on line to the literal `windows-latest`).
+  # risk. If only the native-Make step fails here, that is the gap to roll
+  # back on (revert this runs-on line to the literal `windows-latest`).
   windows-make-shell:
     name: Windows Make shell (native, msys2, cygwin)
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest' }}
+    runs-on: ${{ 'blacksmith-4vcpu-windows-2025' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -1085,8 +856,7 @@ jobs:
       # disables that implicit save on Blacksmith (fail-closed: only the
       # literal "github-hosted" value keeps caching on, matching the
       # fail-closed convention F7c review fix N1 set for actions/setup-go's
-      # own `cache` input) while leaving the always-on fork-PR
-      # (windows-latest) leg's caching behavior unchanged. Pinned by
+      # own `cache` input). Pinned by
       # TestBlacksmithReachablePRJobsDisableDefaultCachingActions.
       - name: Set up MSYS2 GNU Make
         id: install-msys2
@@ -1559,9 +1329,10 @@ jobs:
           }
 
   # The Bazel lanes (bazel.yml): the only pre-merge run of every Linux Go
-  # test tier (PR core, pure-Go and js/wasm, the dolt-server lane, the
-  # embedded-Dolt, proxied-server and server-Dolt storage tiers that
-  # pr-risk.yml used to run, integration and the cmd/bd Dolt-server tier).
+  # test tier (PR core, pure-Go and js/wasm, the release cross-compile, the
+  # dolt-server lane, the embedded-Dolt, proxied-server and server-Dolt
+  # storage tiers that pr-risk.yml used to run, integration and the cmd/bd
+  # Dolt-server tier).
   # ci-gate requires each of them to have run remotely on rbe-west and
   # passed, on every pull_request and merge group: same-repo PRs and merge
   # groups in mode remote, fork and Dependabot PRs through rbe-west's mint
@@ -1611,8 +1382,6 @@ jobs:
       - fast-checks
       - test-windows-liveness
       - worktree-remove-windows
-      - test-windows-liveness-prebuilt
-      - worktree-remove-windows-prebuilt
       - check-doc-flags
       - check-doc-freshness-platforms
       - pr-preflight-platforms
@@ -1634,10 +1403,13 @@ jobs:
             PR_PREFLIGHT_PLATFORMS
             PACKAGE_MCP
             PACKAGE_NPM
+            TEST_WINDOWS_LIVENESS
+            WORKTREE_REMOVE_WINDOWS
             WINDOWS_MAKE_SHELL
             BAZEL
             BAZEL_TEST
             BAZEL_PURE
+            BAZEL_RELEASE_CROSS
             BAZEL_EMBEDDED
             BAZEL_INTEGRATION
             BAZEL_DOLTSERVER
@@ -1660,12 +1432,6 @@ jobs:
           FAST_CHECKS: ${{ needs.fast-checks.result }}
           TEST_WINDOWS_LIVENESS: ${{ needs.test-windows-liveness.result }}
           WORKTREE_REMOVE_WINDOWS: ${{ needs.worktree-remove-windows.result }}
-          # F4 side-by-side rollout: always evaluated, like the native pair
-          # above; WINDOWS_PREBUILT_REQUIRED (top of this file) decides below
-          # which pair is in CI_GATE_REQUIRED and which is in
-          # CI_GATE_SKIPPED_OK.
-          TEST_WINDOWS_LIVENESS_PREBUILT: ${{ needs.test-windows-liveness-prebuilt.result }}
-          WORKTREE_REMOVE_WINDOWS_PREBUILT: ${{ needs.worktree-remove-windows-prebuilt.result }}
           CHECK_DOC_FLAGS: ${{ needs.check-doc-flags.result }}
           CHECK_DOC_FRESHNESS_PLATFORMS: ${{ needs.check-doc-freshness-platforms.result }}
           PR_PREFLIGHT_PLATFORMS: ${{ needs.pr-preflight-platforms.result }}
@@ -1681,6 +1447,7 @@ jobs:
           # skipped, which passes only in the modes bazel-gate.sh allows.
           BAZEL_TEST: ${{ needs.bazel.outputs.bazel-test || 'skipped' }}
           BAZEL_PURE: ${{ needs.bazel.outputs.bazel-pure || 'skipped' }}
+          BAZEL_RELEASE_CROSS: ${{ needs.bazel.outputs.bazel-release-cross || 'skipped' }}
           BAZEL_EMBEDDED: ${{ needs.bazel.outputs.bazel-embedded || 'skipped' }}
           BAZEL_INTEGRATION: ${{ needs.bazel.outputs.bazel-integration || 'skipped' }}
           BAZEL_DOLTSERVER: ${{ needs.bazel.outputs.bazel-doltserver || 'skipped' }}
@@ -1697,22 +1464,6 @@ jobs:
           BAZEL_RBE_ENABLED: ${{ needs.bazel.outputs.rbe-enabled }}
         run: |
           skipped_ok=""
-          # F4 side-by-side rollout: WINDOWS_PREBUILT_REQUIRED (top of this
-          # file) flips which pair of Windows jobs ci-gate enforces with a
-          # single committed flag, instead of three edits per job
-          # (ci-gate.needs, CI_GATE_REQUIRED, and this step's env map) done
-          # twice. Both pairs are unconditionally in ci-gate.needs and always
-          # evaluated above (neither is in the static CI_GATE_REQUIRED list);
-          # only which pair is added to CI_GATE_REQUIRED (enforced) vs.
-          # skipped_ok (merely advisory -- a failure there cannot redden the
-          # gate) changes here.
-          if [[ "$WINDOWS_PREBUILT_REQUIRED" == "true" ]]; then
-            CI_GATE_REQUIRED="$CI_GATE_REQUIRED TEST_WINDOWS_LIVENESS_PREBUILT WORKTREE_REMOVE_WINDOWS_PREBUILT"
-            skipped_ok="$skipped_ok TEST_WINDOWS_LIVENESS WORKTREE_REMOVE_WINDOWS"
-          else
-            CI_GATE_REQUIRED="$CI_GATE_REQUIRED TEST_WINDOWS_LIVENESS WORKTREE_REMOVE_WINDOWS"
-            skipped_ok="$skipped_ok TEST_WINDOWS_LIVENESS_PREBUILT WORKTREE_REMOVE_WINDOWS_PREBUILT"
-          fi
           # The cmd/bd Dolt-server tier (bazel.yml's bazel-cmd-dolt) is
           # advisory until BAZEL_CMD_DOLT_REQUIRED (top of this file) is
           # "true"; it is never in the static list above.

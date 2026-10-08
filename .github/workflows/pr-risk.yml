@@ -45,10 +45,11 @@ jobs:
         id: nix_help
         run: |
           nix run .#default -- --help > help.txt
-      # Every flake check for the runner's own system (today: hook-timeout-
-      # backends, checks.nix). `nix flake check` rather than a spelled-out
-      # `.#checks.x86_64-linux.<name>`: no hardcoded system, and a check added
-      # to checks.nix is run without a workflow edit.
+      # A packaging check, not a test: evaluates every flake output (packages,
+      # apps, devShells, overlay) for every system the flake declares. The
+      # flake has no `checks`: its one check, hook-timeout-backends, runs
+      # under Bazel as //tests/hook_timeout_backends:hook_timeout_backends_test
+      # in bazel.yml's PR-core lane.
       - name: Run the flake checks
         run: |
           nix flake check -L

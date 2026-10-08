@@ -48,6 +48,19 @@ exports_files(
     visibility = ["//scripts/gitattributespolicy:__pkg__"],
 )
 
+# //tests/hook_timeout_backends: the tracked git hooks whose managed section
+# it runs against real timeout implementations.
+exports_files(
+    [
+        ".githooks/post-checkout",
+        ".githooks/post-merge",
+        ".githooks/pre-commit",
+        ".githooks/pre-push",
+        ".githooks/prepare-commit-msg",
+    ],
+    visibility = ["//tests/hook_timeout_backends:__pkg__"],
+)
+
 # //cmd/bd:bd_test: tracked git hooks (generator parity) and the formula
 # primitive fixtures.
 filegroup(
@@ -383,6 +396,7 @@ filegroup(
         "//test/conformance:repo_files",
         "//test/docsync:repo_files",
         "//test/testmainconvention:repo_files",
+        "//tests/hook_timeout_backends:repo_files",
         "//tests/migration:repo_files",
         "//tests/regression:repo_files",
         "//tests/upgrade_smoke:repo_files",

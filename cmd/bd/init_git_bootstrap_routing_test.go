@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,7 +25,7 @@ import (
 // silently.
 func TestInitGitBootstrapProbeWidensPastLegitimateCeiling(t *testing.T) {
 	ancestor := t.TempDir()
-	initRepo := exec.Command("git", "init", "--quiet")
+	initRepo := gitCommand("init", "--quiet")
 	initRepo.Dir = ancestor
 	initRepo.Env = gitenv.ScrubRouting(os.Environ())
 	if out, err := initRepo.CombinedOutput(); err != nil {
@@ -50,7 +49,7 @@ func TestInitGitBootstrapProbeWidensPastLegitimateCeiling(t *testing.T) {
 	// Control: identical environment except the ceiling is left in place, which is what the
 	// probe did before this change. It must fail — otherwise the ceiling never bit and the
 	// assertion below would pass for the wrong reason.
-	fenced := exec.Command("git", "-C", project, "rev-parse", "--git-dir")
+	fenced := gitCommand("-C", project, "rev-parse", "--git-dir")
 	fenced.Env = append(gitenv.ScrubRouting(os.Environ()), "GIT_CEILING_DIRECTORIES="+ceiling)
 	if out, ferr := fenced.Output(); ferr == nil {
 		t.Fatalf("ceiling %q did not fence off %q (git found %q); this case cannot prove the widening",

@@ -111,15 +111,24 @@ llvm_dist(
         # which pulls in compiler-rt's profile runtime (~170KB).
         "lib/clang/22/lib/x86_64-unknown-linux-gnu/libclang_rt.profile.a",
     ],
-    sha256 = "df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384",
-    strip_prefix = "LLVM-22.1.8-Linux-X64",
+    # LLVM-22.1.8-Linux-X64.tar.xz (sha256 df0e1ecf...0006384), sliced to the
+    # members above by tools/cc_toolchain/repack_llvm.sh: 149 MB instead of
+    # 1.94 GB, and no single-threaded xz pass on every cold runner. The files
+    # are byte-identical to the release's, so no action key changes.
+    # tools/cc_toolchain/llvm_members.txt must list the same members.
+    sha256 = "de6147773999137b70ef3d7bd8ecb1e5b91f2a161d02fd09aec591b84516bec5",
+    sliced = True,
     stub_tools = [
         "clang-format",
         "clang-tidy",
         "clangd",
         "llvm-dwp",
     ],
-    urls = ["https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz"],
+    # The sha256 pin, not the host, guarantees the bytes. gascity's release
+    # asset for now; a beads mirror of the same bytes can be listed first.
+    urls = [
+        "https://github.com/gastownhall/gascity/releases/download/toolchain-llvm-22.1.8-slice-1/LLVM-22.1.8-Linux-X64-slice.tar.zst",
+    ],
 )
 
 # Every other host (macOS arm64, Linux arm64) runs toolchains_llvm's stock
@@ -194,6 +203,23 @@ go_deps.gazelle_override(
         "gazelle:exclude internal/regex/regex_cgo.go",
     ],
     path = "github.com/dolthub/go-mysql-server",
+)
+
+# protoc-gen-validate ships validate/validate.pb.go, so its Go library can
+# compile from the checked-in code. Its own validate/BUILD instead makes the
+# Go library a go_proto_library, so every lane built protoc from source just
+# to regenerate that file: about 4.5k C++ compile, link and archive actions,
+# each carrying the LLVM toolchain as inputs. The module reaches the graph
+# only through grpc xds and the cloud SDKs. Gazelle regenerates its BUILD
+# files with proto rules off; build_file_name makes it write BUILD.bazel (which
+# Bazel prefers) rather than merge into the upstream BUILD files.
+go_deps.gazelle_override(
+    build_file_generation = "on",
+    directives = [
+        "gazelle:build_file_name BUILD.bazel",
+        "gazelle:proto disable",
+    ],
+    path = "github.com/envoyproxy/protoc-gen-validate",
 )
 go_deps.module_override(
     patch_strip = 1,
@@ -318,4 +344,36 @@ filegroup(
 """,
     sha256 = "2852af0cb20a13139b3448992e69b868e50ed0f8a1e5940ee1de9e19a123b613",
     urls = ["https://go.dev/dl/go1.25.0.linux-amd64.tar.gz"],
+)
+
+# The timeout implementations //tests/hook_timeout_backends runs the tracked
+# git hook shims against (formerly checks.nix's hook-timeout-backends, which
+# took them from nixpkgs): static x86_64 builds, so the test needs nothing
+# from the executor beyond a shell, perl and GNU coreutils.
+http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+
+http_file(
+    name = "busybox_static",
+    executable = True,
+    sha256 = "6e123e7f3202a8c1e9b1f94d8941580a25135382b99e8d3e34fb858bba311348",
+    urls = ["https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"],
+)
+
+http_file(
+    name = "toybox_static",
+    executable = True,
+    sha256 = "38e03ffd8aead8ca26833e1e5c90a9ea7250f3719c29d779ebff7aa55c9d2dac",
+    urls = ["https://landley.net/toybox/downloads/binaries/0.8.15/toybox-x86_64"],
+)
+
+http_archive(
+    name = "uutils_coreutils",
+    build_file_content = """exports_files(
+    ["coreutils"],
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "9b555b01457279bcc3e46753f0ef324fd3d02a0535111200a4632d1297263b54",
+    strip_prefix = "coreutils-0.12.0-x86_64-unknown-linux-musl",
+    urls = ["https://github.com/uutils/coreutils/releases/download/0.12.0/coreutils-0.12.0-x86_64-unknown-linux-musl.tar.gz"],
 )

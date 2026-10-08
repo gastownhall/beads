@@ -52,6 +52,7 @@ bd gate create --type bead --blocks bd-abc \
 **Optional**:
 - `--type <type>` — Gate type: `human`, `timer`, `gh:run`, `gh:pr`, `bead` (default `human`)
 - `--await-id <id>` — Condition identifier (run ID, PR number, `rig:bead-id`, etc.)
+- `--repo <OWNER/REPO>` — For `gh:run`/`gh:pr` only: the GitHub repository the condition is checked in (also `HOST/OWNER/REPO`). Default: the blocked issue's `metadata.repo`, else the current repository — a gate on another repository's PR needs this, or it escalates as "not found" on every check.
 - `--reason <text>` — Stored on the gate as its description (what is being gated)
 - `--timeout <duration>` — **Only timer gates enforce this** via `bd gate check`. You can set it on other types for documentation, but `check` does not auto-resolve/escalate human or GitHub gates based on timeout.
 

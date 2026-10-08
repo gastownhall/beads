@@ -480,14 +480,14 @@ func TestEmbeddedInitA(t *testing.T) {
 			if err := os.MkdirAll(bareRepo, 0755); err != nil {
 				t.Fatalf("mkdir %s: %v", bareRepo, err)
 			}
-			cmd := exec.Command("git", "init", "--bare")
+			cmd := gitCommand("init", "--bare")
 			cmd.Dir = bareRepo
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("git init --bare %s failed: %v\n%s", bareRepo, err, out)
 			}
 		}
 		for name, url := range map[string]string{"origin": origin, "upstream": upstream} {
-			cmd := exec.Command("git", "remote", "add", name, url)
+			cmd := gitCommand("remote", "add", name, url)
 			cmd.Dir = dir
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("git remote add %s failed: %v\n%s", name, err, out)
@@ -522,7 +522,7 @@ func TestEmbeddedInitA(t *testing.T) {
 			t.Errorf("planning embeddeddolt dir missing (planning store not pre-initialized): %v", err)
 		}
 
-		roleCmd := exec.Command("git", "config", "--get", "beads.role")
+		roleCmd := gitCommand("config", "--get", "beads.role")
 		roleCmd.Dir = dir
 		roleOut, err := roleCmd.Output()
 		if err != nil {
@@ -565,7 +565,7 @@ func TestEmbeddedInitA(t *testing.T) {
 		}
 
 		bdDolt(t, bd, dir, "push")
-		ls := exec.Command("git", "ls-remote", remoteURL, "refs/dolt/data")
+		ls := gitCommand("ls-remote", remoteURL, "refs/dolt/data")
 		lsOut, err := ls.CombinedOutput()
 		if err != nil {
 			t.Fatalf("git ls-remote refs/dolt/data failed: %v\n%s", err, lsOut)
@@ -607,7 +607,7 @@ func TestEmbeddedInitA(t *testing.T) {
 			if readErr == nil && strings.Contains(string(configYAML), remoteURL) {
 				t.Errorf("refused push still persisted sync.remote; config.yaml:\n%s", configYAML)
 			}
-			if lsOut, lsErr := exec.Command("git", "ls-remote", remoteURL, "refs/dolt/data").Output(); lsErr == nil && len(strings.TrimSpace(string(lsOut))) != 0 {
+			if lsOut, lsErr := gitCommand("ls-remote", remoteURL, "refs/dolt/data").Output(); lsErr == nil && len(strings.TrimSpace(string(lsOut))) != 0 {
 				t.Errorf("refused push still uploaded issue history: %s", lsOut)
 			}
 		}
@@ -646,7 +646,7 @@ func TestEmbeddedInitA(t *testing.T) {
 			t.Fatalf("bd dolt push should persist sync.remote; config.yaml:\n%s", configYAML)
 		}
 
-		ls := exec.Command("git", "ls-remote", remoteURL, "refs/dolt/data")
+		ls := gitCommand("ls-remote", remoteURL, "refs/dolt/data")
 		lsOut, err := ls.CombinedOutput()
 		if err != nil {
 			t.Fatalf("git ls-remote refs/dolt/data failed: %v\n%s", err, lsOut)
@@ -940,7 +940,7 @@ func TestEmbeddedInitB(t *testing.T) {
 			{"add", "-A"},
 			{"commit", "-m", "baseline"},
 		} {
-			cmd := exec.Command("git", args...)
+			cmd := gitCommand(args...)
 			cmd.Dir = dir
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("git %s failed: %v\n%s", args[0], err, out)
@@ -970,7 +970,7 @@ func TestEmbeddedInitB(t *testing.T) {
 		}
 
 		// git status --porcelain must be empty: stealth touched no visible files.
-		cmd := exec.Command("git", "-c", "core.hooksPath=", "status", "--porcelain")
+		cmd := gitCommand("-c", "core.hooksPath=", "status", "--porcelain")
 		cmd.Dir = dir
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -1017,7 +1017,7 @@ func TestEmbeddedInitB(t *testing.T) {
 				t.Logf("bd doctor --fix exited non-zero (tolerated): %v\n%s", err, out)
 			}
 
-			statusCmd := exec.Command("git", "-c", "core.hooksPath=", "status", "--porcelain")
+			statusCmd := gitCommand("-c", "core.hooksPath=", "status", "--porcelain")
 			statusCmd.Dir = dir
 			out, err := statusCmd.CombinedOutput()
 			if err != nil {
@@ -1094,7 +1094,7 @@ func TestEmbeddedInitB(t *testing.T) {
 		if err := os.WriteFile(hookPath, []byte(hook), 0755); err != nil {
 			t.Fatal(err)
 		}
-		unsetHooksPath := exec.Command("git", "config", "--unset", "core.hooksPath")
+		unsetHooksPath := gitCommand("config", "--unset", "core.hooksPath")
 		unsetHooksPath.Dir = dir
 		if out, err := unsetHooksPath.CombinedOutput(); err != nil {
 			t.Fatalf("git config --unset core.hooksPath failed: %v\n%s", err, out)
@@ -1124,7 +1124,7 @@ func TestEmbeddedInitB(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, ".hook-ran")); err == nil {
 			t.Fatal("expected init auto-commit to bypass git hooks")
 		}
-		logCmd := exec.Command("git", "log", "--oneline", "-n", "1")
+		logCmd := gitCommand("log", "--oneline", "-n", "1")
 		logCmd.Dir = dir
 		stdout, stderr, err := runCommandBuffers(t, logCmd)
 		if err != nil {
@@ -1717,7 +1717,7 @@ func TestEmbeddedInitArtifactRouting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	show := exec.Command("git", "show", "HEAD:.beads/metadata.json")
+	show := gitCommand("show", "HEAD:.beads/metadata.json")
 	show.Dir, show.Env = target, gitenv.ScrubRouting(os.Environ())
 	if got, err := show.CombinedOutput(); err != nil || !bytes.Equal(got, want) {
 		t.Errorf("embedded init did not commit target metadata: %v: %s", err, got)

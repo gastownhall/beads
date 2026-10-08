@@ -29,10 +29,11 @@ var ciAnalyticsLaneJobs = map[string]string{
 // TestBazelLaneIsGatedAlongsideLegacy's gated/advisory/flag-gated split, so
 // a new job in bazel.yml can't silently go unaccounted for here either.
 var ciAnalyticsExcludedJobs = map[string]string{
-	"rbe":         "decides the execution mode; builds nothing itself, so there is no BEP/exec-log/profile to summarize",
-	"rbe-prewarm": "best-effort pre-warm dispatch to gascity's rbe-west pool; not a build/test lane",
-	"package-mcp": "F3 package gate; runs pytest, not a bazel invocation with a BEP to extract",
-	"package-npm": "F3 package gate; runs npm, not a bazel invocation with a BEP to extract",
+	"rbe":                 "decides the execution mode; builds nothing itself, so there is no BEP/exec-log/profile to summarize",
+	"rbe-prewarm":         "best-effort pre-warm dispatch to gascity's rbe-west pool; not a build/test lane",
+	"package-mcp":         "F3 package gate; runs pytest, not a bazel invocation with a BEP to extract",
+	"package-npm":         "F3 package gate; runs npm, not a bazel invocation with a BEP to extract",
+	"bazel-release-cross": "one bazel-release-cross-compile.sh run with no BEP/exec-log/profile capture, as when it was a bazel-pure step",
 }
 
 // ciAnalyticsRunTemplateRE finds a GitHub Actions expression (${{ ... }})

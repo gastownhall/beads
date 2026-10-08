@@ -293,7 +293,7 @@ func TestListDisplayPrettyListHonorsSort(t *testing.T) {
 		}
 
 		out := captureStdout(t, func() error {
-			displayPrettyListWithDepsMode(issues, false, nil, "", false, false, "closed", "closed", false)
+			displayPrettyListWithDepsMode(issues, false, nil, "", false, false, "closed", "closed", false, nil)
 			return nil
 		})
 		newAt, oldAt := strings.Index(out, "bd-new"), strings.Index(out, "bd-old")
@@ -309,7 +309,7 @@ func TestListDisplayPrettyListHonorsSort(t *testing.T) {
 		}
 
 		out := captureStdout(t, func() error {
-			displayPrettyListWithDepsMode(issues, false, nil, "", false, false, "", "", true)
+			displayPrettyListWithDepsMode(issues, false, nil, "", false, false, "", "", true, nil)
 			return nil
 		})
 		p3At, p0At := strings.Index(out, "bd-p3"), strings.Index(out, "bd-p0")
@@ -328,7 +328,7 @@ func TestListDisplayPrettyListHonorsSort(t *testing.T) {
 		}
 
 		out := captureStdout(t, func() error {
-			displayPrettyListWithDepsMode([]*types.Issue{parent, oldChild, newChild}, false, deps, "", false, false, "closed", "closed", false)
+			displayPrettyListWithDepsMode([]*types.Issue{parent, oldChild, newChild}, false, deps, "", false, false, "closed", "closed", false, nil)
 			return nil
 		})
 		newAt, oldAt := strings.Index(out, newChild.ID), strings.Index(out, oldChild.ID)
@@ -373,7 +373,7 @@ func TestListDisplayPrettyList_TruncatedSummary(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() error {
-		displayPrettyListWithDepsMode(issues, false, nil, "", true, false, "", "", false)
+		displayPrettyListWithDepsMode(issues, false, nil, "", true, false, "", "", false, nil)
 		return nil
 	})
 	if !strings.Contains(out, "Showing 2 issues") {

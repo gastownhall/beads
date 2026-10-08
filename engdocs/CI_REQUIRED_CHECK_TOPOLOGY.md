@@ -55,9 +55,9 @@ Current PR-related workflow names:
   outputs (`rbe-enabled` is `true` in `remote`, `fork-ro` and `fork-rw`);
   every lane exports its
   `job.status` as an output named after the job. `pr.yml`'s gate requires the
-  call's result (`BAZEL`) and `BAZEL_TEST`, `BAZEL_PURE`, `BAZEL_EMBEDDED`,
-  `BAZEL_INTEGRATION`, `BAZEL_DOLTSERVER`, `BAZEL_PROXIED` and
-  `BAZEL_SERVER_STORAGE`. These lanes are the only CI run of the Linux Go
+  call's result (`BAZEL`) and `BAZEL_TEST`, `BAZEL_PURE`,
+  `BAZEL_RELEASE_CROSS`, `BAZEL_EMBEDDED`, `BAZEL_INTEGRATION`,
+  `BAZEL_DOLTSERVER`, `BAZEL_PROXIED` and `BAZEL_SERVER_STORAGE`. These lanes are the only CI run of the Linux Go
   test tiers: the legacy jobs they mirrored in `pr.yml` and `pr-risk.yml`
   are retired (ga-96smfk.22; see
   [Legacy Tier Retirement](#legacy-tier-retirement-d2)), so the gate also
@@ -883,9 +883,11 @@ Required` requires them to have run remotely and passed.
     `1.3.0 (dev)`, no commit); no consumer reads it. Verified 2026-10-02:
     both package gates pass with the Bazel-built bd (MCP: 228 passed, 5
     skipped; npm: all tests and the pack dry run), the same as with a
-    `go build` bd. Both run on `blacksmith-4vcpu-ubuntu-2404` when
-    `rbe.outputs.enabled == 'true'` (4 vCPU: `pytest -n 8` is pinned to
-    timing measured there), `ubuntu-latest` otherwise. `bazel-test`'s own
+    `go build` bd. In mode remote, package-npm runs on
+    `blacksmith-4vcpu-ubuntu-2404` and package-mcp on
+    `blacksmith-8vcpu-ubuntu-2404` with `pytest -n 16`
+    (`BEADS_MCP_PYTEST_WORKERS`; the script's default is `-n 8`);
+    `ubuntu-latest` (and `-n 8`) otherwise. `bazel-test`'s own
     `bazel-ci-build-artifacts` upload is no longer consumed by anything; it
     is kept for the F3.5.3 SHA256SUMS comparison and for debugging.
   - The Dolt-backed domain, uow, tracker, doctor/fix and protocol suites
@@ -899,8 +901,9 @@ Required` requires them to have run remotely and passed.
     `TestPinnedDoltCLIMatchesContainerImage`. The release-target
     cross-compilation (formerly pr.yml's
     `check-release-target-cross-compilation`, `go build ./...` with
-    `CGO_ENABLED=0` per target) is a step of bazel.yml's `bazel-pure` lane
-    (`BAZEL_PURE`): `scripts/ci/bazel-release-cross-compile.sh` runs one
+    `CGO_ENABLED=0` per target) is bazel.yml's `bazel-release-cross` lane
+    (`BAZEL_RELEASE_CROSS`), split out of `bazel-pure` so it runs in
+    parallel with it: `scripts/ci/bazel-release-cross-compile.sh` runs one
     remote `bazel build //tools/bazel:release_cross`, every `go_library` and
     `go_binary` for each row of `scripts/ci/release-targets.txt`, plus
     `//tools/bazel:pure_bd_has_no_cgo_only_deps` (a pure bd must not link
@@ -910,7 +913,7 @@ Required` requires them to have run remotely and passed.
     equal to the toolchain's) and the golangci-lint linters `.golangci.yml`
     enables run as nogo (`//tools/nogo`) beside every compile of every Bazel
     lane: natively in `bazel test //... --config=ci`, and for every release
-    platform in the `bazel-pure` lane's release cross-compile
+    platform in the `bazel-release-cross` lane
     (engdocs/LINTING.md). The former
     `scripts-go-checks` (`Go checks (vet)`) and `pr-lint-wrapper`
     (`PR Lint (native|windows|darwin)`) jobs are retired.
@@ -927,8 +930,9 @@ Required` requires them to have run remotely and passed.
 
     `tools/bazel/equivalence_allowlist.txt` holds only the two `cmd/bd`
     tests of plain `go test`'s own bd build fallback, which Bazel never
-    takes; `pr-preflight-platforms` runs them on every OS ("Exercise go
-    test's bd build fallback"). `TestBazelOnlySkipsAreAllowlisted` (under
+    takes; `pr-preflight-platforms` runs them on macOS and Windows
+    ("Exercise generated Git hook timeout process boundary and go test's bd
+    build fallback"). `TestBazelOnlySkipsAreAllowlisted` (under
     Bazel too) requires every top-level test with a `TEST_SRCDIR`- or
     `bazeltest.IsBazel()`-guarded `t.Skip` to have an allowlist `skip`
     entry, and no test anywhere to run part of its checks under `go test`
@@ -1115,7 +1119,7 @@ scope, not this slice's.
   `scripts/ci/check-release-cross-compile.sh <group>`, which builds every
   target in its group sequentially and reports every failure before exiting
   non-zero, so a PR touching two platforms at once sees both failures in one
-  log instead of needing a per-target re-run. (Since retired: bazel.yml's `bazel-pure`
+  log instead of needing a per-target re-run. (Since retired: bazel.yml's `bazel-release-cross`
   lane builds the same manifest with Bazel, `--platforms` per target.)
 - **`advisory-reports` fold.** `build-examples` and `complexity-report` (both
   already advisory: neither was in ci-gate's `needs`/`CI_GATE_REQUIRED`)
@@ -1186,38 +1190,55 @@ What stays a job, and why:
   `go build`), and attributes drift against the merge-base. Releases publish
   no pure-Go Linux binary a Bazel repository could pin by sha256.
 - The macOS and Windows legs of `check-doc-freshness-platforms` (no remote
-  workers for those hosts), on Blacksmith for same-repo PRs and merge groups.
+  workers for those hosts), on Blacksmith for every PR and merge group.
 
 `check-doc-freshness.sh` compares review dates with today's date, which is
 not in the action key: a cached pass stands until one of its inputs changes,
 and nightly's `--config=fresh` run re-checks it against the date.
 
-### Same-Repo Blacksmith macOS Legs
+### Blacksmith Windows and macOS Jobs
 
-pr.yml's two mixed-OS matrix jobs, `pr-preflight-platforms` and
-`check-doc-freshness-platforms`, run their macOS leg on
-`blacksmith-6vcpu-macos-26` (Apple Silicon) for same-repo PRs and
-merge_group, through the same `runner: same-repo-macos` matrix marker and
-same-repo expression their Linux/Windows legs use. Forks, Dependabot and
-every other event keep GitHub-hosted `macos-latest`. They are the only PR
+Every Windows and macOS job runs on Blacksmith for every PR and merge group,
+forks and Dependabot included (ga-96smfk.22); everything Linux runs under
+Bazel on rbe-west. pr.yml's Windows jobs (`test-windows-liveness`,
+`test-windows-small`, `worktree-remove-windows`, `windows-make-shell`) name
+their `blacksmith-*vcpu-windows-2025` label literally; the two mixed-OS
+matrix jobs, `pr-preflight-platforms` and `check-doc-freshness-platforms`,
+run a macOS leg on `blacksmith-6vcpu-macos-26` (Apple Silicon) and a Windows
+leg on `blacksmith-4vcpu-windows-2025`, each leg naming its label in the
+matrix (`runs-on: ${{ matrix.runner }}`). An 8 vCPU Windows preflight leg
+was tried (#7381): it restored the 4 vCPU saver's cache, but queued 63s for
+the larger runner and finished slower (144s vs 129s), so it stays on 4 vCPU. There is no GitHub-hosted fallback:
+Blacksmith serves this org's fork PRs (gascity's fork PRs run their CI on
+`blacksmith-*` labels). Fork runs get no secrets and a read-only token
+(`TestBlacksmithJobsReadNoSecrets` keeps every Blacksmith job free of secret
+reads), each job runs in a fresh VM, and the repository's fork-PR approval
+setting stays the boundary for who may run code there (a fork's own workflow
+file controls `runs-on` anyway). `release.yml` and `nightly.yml` are not PR
+checks and keep their own runners.
+
+The Linux leg of `pr-preflight-platforms` and the Linux-cross-compiled
+Windows test binaries (`windows-test-binaries`, its "-prebuilt" twins,
+main.yml's `windows-test-binaries-cache` and the `WINDOWS_PREBUILT_REQUIRED`
+flag) are retired: Bazel runs the Linux leg's tests, and the native Windows
+pair (`test-windows-liveness`, `worktree-remove-windows`) is the required
+run of the twins' tests.
 macOS jobs; `release.yml` stays on `macos-latest`.
 
 - **Label.** Pinned to `macos-26` because GitHub's `macos-latest` resolves to
   `macos-26-arm64` today, so both paths run the same OS and architecture and
   the PR legs and their saver never straddle a Blacksmith `-latest` alias
-  move. Bump it when GitHub moves `macos-latest`. 6 vCPU is already twice
-  `macos-latest`'s 3 vCPU; 12 vCPU is not justified for legs dominated by one
-  incremental `./cmd/bd` test compile.
+  move. Bump it when GitHub moves `macos-latest`. 12 vCPU is not justified
+  for legs dominated by one incremental `./cmd/bd` test compile.
 - **Caches.** The legs stay restore-only (`setup-go` `cache: false`,
   `actions/cache/restore`). Blacksmith cannot see GitHub-saved caches, so
   main.yml's `blacksmith-macos-go-build-cache` job is their seeder: same
   label, push-to-main-only job guard, module cache plus a non-race GOCACHE
   keyed by `go.sum` and UTC day, warmed by the shared
-  `scripts/ci/warm-non-race-cache.sh`. Its `github` venue leg seeds the
-  fork path (`macos-latest`) the same way; main.yml's `test` job (the macOS
-  full suite) runs on the same Blacksmith label and restores the Blacksmith
-  leg's caches.
-- **Pins.** `TestSameRepoPlatformsMatrixMarkerRunsOnExpressionSemantics`,
+  `scripts/ci/warm-non-race-cache.sh`. main.yml's `test` job (the macOS
+  full suite) runs on the same label and restores its caches. main.yml's
+  `test-windows` seeds the Windows legs the same way.
+- **Pins.** `TestBlacksmithWindowsMacOSRunsOnEveryEvent`,
   `TestBlacksmithMacOSSaverMatchesPRLegs`,
   `TestBlacksmithSaverJobsGuardedAgainstPullRequest`,
   `TestBlacksmithSaverCacheKeysAreNotPerCommit`,
@@ -1408,21 +1429,17 @@ check read.
 Non-Bazel required jobs re-run in full on every merge group (approximate
 PR timings, 2026-10): `fast-checks` (~40 s), `pr-policy-wrapper`
 (~2.5 min), `check-doc-flags` (~1.7 min),
-`check-doc-freshness-platforms` and `pr-preflight-platforms` (Linux,
-Windows and macOS legs, up to ~5 min on Windows),
-`windows-make-shell` (~2.7 min),
-`windows-test-binaries` plus the prebuilt Windows pair (~7 min end to
-end), the advisory native Windows pair (~5 min; the gate waits for them),
+`check-doc-freshness-platforms` and `pr-preflight-platforms` (Windows and
+macOS legs, up to ~5 min on Windows),
+`windows-make-shell` (~2.7 min), the native Windows pair
+(`test-windows-liveness`, `worktree-remove-windows`, ~1-5 min),
 `test-nix` (~3 min) and the package gates (seconds unless their paths
 changed). None caches results the way Bazel does; most are cheap or
-already path- or tier-gated. Candidates to skip on `merge_group`, not
-done here: the advisory native Windows pair (`test-windows-liveness`,
-`worktree-remove-windows`, advisory while `WINDOWS_PREBUILT_REQUIRED` is
-`"true"`), and the macOS legs of the preflight/doc-freshness matrices
+already path- or tier-gated. A candidate to skip on `merge_group`, not
+done here: the macOS legs of the preflight/doc-freshness matrices
 (platform behavior the PR run already checked on the same inputs). With
-result reuse the merge group's critical path is the Windows
-cross-compile and the Windows matrix legs (~5-7 min), not the Bazel
-lanes once their tests are cached. An entry's first build after a base
+result reuse the merge group's critical path is the Windows legs
+(~5 min), not the Bazel lanes once their tests are cached. An entry's first build after a base
 change still compiles what changed.
 
 ### Failures and flakes
@@ -1516,7 +1533,10 @@ PRs off Blacksmith entirely and back onto `ubuntu-latest`:
    Blacksmith cache seeds and the `scripts-go-checks`/`pr-lint-wrapper`/
    preflight/doc-freshness runner moves, including the preflight/
    doc-freshness macOS legs and `blacksmith-macos-go-build-cache`
-   ([Same-Repo Blacksmith macOS Legs](#same-repo-blacksmith-macos-legs)).
+   ([Blacksmith Windows and macOS Jobs](#blacksmith-windows-and-macos-jobs)).
+5. **ga-96smfk.22** — the Windows and macOS jobs' literal Blacksmith labels
+   ([Blacksmith Windows and macOS Jobs](#blacksmith-windows-and-macos-jobs)):
+   during an outage point them back at `windows-latest` / `macos-latest`.
 
 F7c (the advisory workflows) is excluded from this list: it is advisory only,
 so leaving it on Blacksmith during an outage delays non-required checks but

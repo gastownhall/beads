@@ -2475,6 +2475,13 @@
     },
     {
       "schema": "IssueDetails",
+      "member": "gated_by",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "IssueDetails",
       "member": "heartbeat_at",
       "type": "string",
       "format": "date-time",
@@ -2695,6 +2702,24 @@
     {
       "schema": "IssueDetails",
       "member": "work_type",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails.gated_by[]",
+      "member": "id",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails.gated_by[]",
+      "member": "reason",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "IssueDetails.gated_by[]",
+      "member": "type",
       "type": "string",
       "required": false
     },

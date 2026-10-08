@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -32,12 +31,12 @@ func initGitRepoForContextTest(t *testing.T, dir string) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir repo: %v", err)
 	}
-	cmd := exec.Command("git", "init", "--quiet")
+	cmd := gitCommand("init", "--quiet")
 	cmd.Dir = dir
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, output)
 	}
-	cmd = exec.Command("git", "config", "core.hooksPath", ".git/hooks")
+	cmd = gitCommand("config", "core.hooksPath", ".git/hooks")
 	cmd.Dir = dir
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git config hooks: %v\n%s", err, output)
@@ -201,7 +200,7 @@ func TestDetectUserRoleForActiveRepoUsesSelectedBeadsDir(t *testing.T) {
 	targetBeadsDir := filepath.Join(targetDir, ".beads")
 	writeTestConfigYAML(t, targetBeadsDir, "")
 
-	cmd := exec.Command("git", "config", "beads.role", "maintainer")
+	cmd := gitCommand("config", "beads.role", "maintainer")
 	cmd.Dir = targetDir
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git config beads.role: %v\n%s", err, output)

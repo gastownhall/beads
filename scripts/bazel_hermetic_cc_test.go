@@ -26,6 +26,9 @@ const (
 	hermeticCCLLVMLabel    = "@llvm_dist_linux_x86_64//:BUILD.bazel"
 	// Every other host's stock LLVM release (toolchains_llvm's sha256 table).
 	hermeticCCHostLLVMLabel = "@llvm_dist_host//:BUILD.bazel"
+	// The members list tools/cc_toolchain/repack_llvm.sh slices the release
+	// to; it must equal llvm_dist's members (MODULE.bazel).
+	hermeticCCLLVMMembersFile = "tools/cc_toolchain/llvm_members.txt"
 )
 
 var (
@@ -33,6 +36,11 @@ var (
 	// snapshot.ubuntu.com serves each timestamp's archive state forever; a
 	// moving mirror (archive.ubuntu.com) may only follow it as a fallback.
 	ubuntuSnapshotRE = regexp.MustCompile(`^https://snapshot\.ubuntu\.com/ubuntu/\d{8}T\d{6}Z/$`)
+	// A sliced llvm_dist archive is a repack (repack_llvm.sh), not an
+	// upstream release, so it may only come from a gastownhall release:
+	// beads' own mirror or gascity's original asset (same bytes, same sha256).
+	llvmSliceURLRE = regexp.MustCompile(`^https://github\.com/gastownhall/(beads|gascity)/releases/download/toolchain-llvm-[0-9.]+-slice-[0-9]+/[A-Za-z0-9._-]+\.tar\.zst$`)
+	quotedStringRE = regexp.MustCompile(`"([^"]*)"`)
 )
 
 // moduleCall returns the argument text of the single top-level call
@@ -136,6 +144,46 @@ func checkHermeticCCModule(module string) []error {
 	return errs
 }
 
+// checkHermeticLLVMSlice: a sliced llvm_dist downloads only from a
+// gastownhall release, and its members equal the repack script's list, so
+// the pinned slice can be rebuilt from upstream and checked file by file.
+func checkHermeticLLVMSlice(module, membersFile string) []error {
+	dist, err := moduleCall(module, "llvm_dist", `name = "llvm_dist_linux_x86_64"`)
+	if err != nil {
+		return []error{err}
+	}
+	if !strings.Contains(dist, "sliced = True,") {
+		return nil
+	}
+	var errs []error
+	urls := regexp.MustCompile(`(?s)urls = \[(.*?)\]`).FindStringSubmatch(dist)
+	if urls == nil || len(quotedStringRE.FindAllStringSubmatch(urls[1], -1)) == 0 {
+		errs = append(errs, errors.New("sliced llvm_dist has no urls"))
+	} else {
+		for _, u := range quotedStringRE.FindAllStringSubmatch(urls[1], -1) {
+			if !llvmSliceURLRE.MatchString(u[1]) {
+				errs = append(errs, errors.New("sliced llvm_dist url "+u[1]+" is not a gastownhall/beads or gastownhall/gascity release .tar.zst"))
+			}
+		}
+	}
+	var members []string
+	if body := regexp.MustCompile(`(?s)members = \[(.*?)\]`).FindStringSubmatch(dist); body != nil {
+		for _, m := range quotedStringRE.FindAllStringSubmatch(body[1], -1) {
+			members = append(members, m[1])
+		}
+	}
+	var listed []string
+	for _, line := range strings.Split(membersFile, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			listed = append(listed, line)
+		}
+	}
+	if len(members) == 0 || strings.Join(members, "\n") != strings.Join(listed, "\n") {
+		errs = append(errs, errors.New("llvm_dist members must equal "+hermeticCCLLVMMembersFile+" (same order), or the pinned slice cannot be rebuilt by repack_llvm.sh"))
+	}
+	return errs
+}
+
 // checkHermeticCCBazelRC: host detection is off unconditionally (every
 // command, every config) and nothing hands actions a host compiler.
 func checkHermeticCCBazelRC(rc string) []error {
@@ -175,7 +223,11 @@ func checkHermeticCCBazelRC(rc string) []error {
 
 func TestBazelHermeticCCToolchain(t *testing.T) {
 	root := bazelPolicyRoot(t)
-	for _, err := range checkHermeticCCModule(readPolicyFile(t, root, hermeticCCModuleFile)) {
+	module := readPolicyFile(t, root, hermeticCCModuleFile)
+	for _, err := range checkHermeticCCModule(module) {
+		t.Error(err)
+	}
+	for _, err := range checkHermeticLLVMSlice(module, readPolicyFile(t, root, hermeticCCLLVMMembersFile)) {
 		t.Error(err)
 	}
 	for _, err := range checkHermeticCCBazelRC(readPolicyFile(t, root, ".bazelrc")) {
@@ -268,6 +320,49 @@ llvm.sysroot(
 	} {
 		if len(checkHermeticCCBazelRC(bad)) == 0 {
 			t.Errorf("%s: expected an error for .bazelrc fixture:\n%s", name, bad)
+		}
+	}
+}
+
+func TestBazelHermeticLLVMSliceGuards(t *testing.T) {
+	sum := strings.Repeat("ab", 32)
+	slice := "https://github.com/gastownhall/gascity/releases/download/toolchain-llvm-22.1.8-slice-1/LLVM-22.1.8-Linux-X64-slice.tar.zst"
+	mirror := "https://github.com/gastownhall/beads/releases/download/toolchain-llvm-22.1.8-slice-1/LLVM-22.1.8-Linux-X64-slice.tar.zst"
+	module := `llvm_dist(
+    name = "llvm_dist_linux_x86_64",
+    members = [
+        "bin/clang",
+        # a comment
+        "lib/clang/22/include",
+    ],
+    sha256 = "` + sum + `",
+    sliced = True,
+    urls = [
+        "` + mirror + `",
+        "` + slice + `",
+    ],
+)
+`
+	members := "bin/clang\nlib/clang/22/include\n"
+	if errs := checkHermeticLLVMSlice(module, members); len(errs) != 0 {
+		t.Fatalf("good sliced llvm_dist fixture: %v", errs)
+	}
+	unsliced := strings.Replace(strings.Replace(module, "    sliced = True,\n", "", 1), slice, "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz", 1)
+	if errs := checkHermeticLLVMSlice(unsliced, members); len(errs) != 0 {
+		t.Fatalf("unsliced llvm_dist needs no slice host or members file: %v", errs)
+	}
+	for name, bad := range map[string][2]string{
+		"other host":        {strings.Replace(module, slice, "https://example.com/LLVM-22.1.8-Linux-X64-slice.tar.zst", 1), members},
+		"other repo":        {strings.Replace(module, "gastownhall/gascity", "someone/gascity", 1), members},
+		"xz release":        {strings.Replace(module, slice, "https://github.com/gastownhall/gascity/releases/download/toolchain-llvm-22.1.8-slice-1/LLVM.tar.xz", 1), members},
+		"no urls":           {strings.Replace(strings.Replace(module, `"`+slice+`",`, "", 1), `"`+mirror+`",`, "", 1), members},
+		"member missing":    {module, "bin/clang\n"},
+		"member extra":      {module, members + "bin/lld\n"},
+		"member reordered":  {module, "lib/clang/22/include\nbin/clang\n"},
+		"empty member file": {module, ""},
+	} {
+		if len(checkHermeticLLVMSlice(bad[0], bad[1])) == 0 {
+			t.Errorf("%s: expected an error for sliced llvm_dist fixture:\n%s\nmembers:\n%s", name, bad[0], bad[1])
 		}
 	}
 }

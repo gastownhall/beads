@@ -320,6 +320,26 @@ func TestProxiedServerGateCreateInheritsRepoMetadata(t *testing.T) {
 		}
 	})
 
+	t.Run("explicit_repo_flag_wins_over_inherited", func(t *testing.T) {
+		target := bdProxiedCreate(t, bd, p.dir, "Gated bead with its own repo",
+			"--metadata", `{"repo":"acme/widgets"}`)
+
+		out, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
+			"gate", "create", "--type=gh:pr", "--await-id", "7173", "--repo", "gastownhall/beads", "--blocks", target.ID)
+		if err != nil {
+			t.Fatalf("gate create --repo failed: %v\nstderr:\n%s", err, stderr)
+		}
+		gateID := parseCreatedGateID(t, out)
+
+		var m map[string]string
+		if err := json.Unmarshal(showMetadata(t, gateID), &m); err != nil {
+			t.Fatalf("gate %s metadata is not a string map: %v", gateID, err)
+		}
+		if m["repo"] != "gastownhall/beads" {
+			t.Errorf("gate %s metadata repo = %q, want the flag's gastownhall/beads over the inherited acme/widgets", gateID, m["repo"])
+		}
+	})
+
 	t.Run("human_gate_ignores_repo_shaped_metadata", func(t *testing.T) {
 		// SF4 parity: "repo" is legal, unrelated metadata on any issue, so a
 		// human gate must neither validate nor inherit it.

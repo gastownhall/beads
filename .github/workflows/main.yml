@@ -13,98 +13,6 @@ env:
   BD_DISABLE_EVENT_FLUSH: "1"
 
 jobs:
-  # F4.7: pr.yml's `windows-test-binaries` job only restores the module cache
-  # and the Windows cross-compile GOCACHE; PR workflows never save caches
-  # (forks and same-repo PRs alike would otherwise be able to poison a
-  # shared key). This is the seeder, mirroring build-artifacts' and test's
-  # module/GOCACHE save pattern for the one new cache key xcompile added.
-  #
-  # Two legs, not one: pr.yml's windows-test-binaries job (pr.yml:522) lands
-  # on `blacksmith-8vcpu-ubuntu-2404` for same-repo PRs/merge_group and
-  # `ubuntu-latest` for forks/Dependabot. `runner.os`/`runner.arch` alone
-  # look identical between those two (both report Linux/X64), but Blacksmith
-  # runners cannot see caches `actions/cache` saved from a GitHub-hosted
-  # runner (and vice versa): the cache storage is scoped to the runner
-  # infrastructure, not just the key. A single ubuntu-latest seeder leg would
-  # therefore only ever warm the fork-PR path and leave every same-repo PR
-  # (the common case) cold on every run. Seeding from both runner selections,
-  # with identical keys/paths, covers both consumer legs. The ternary form
-  # (rather than a literal Blacksmith label in a matrix array) is required
-  # for actionlint: it resolves literal matrix arrays of runner labels and
-  # fails on an undeclared self-hosted label, but treats a ternary
-  # expression as a dynamic value it can't resolve, and skips validation --
-  # the same reason every other Blacksmith `runs-on` in this repo uses the
-  # ternary form.
-  windows-test-binaries-cache:
-    name: Save Windows test binaries cache
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [blacksmith, github]
-    runs-on: ${{ matrix.runner == 'blacksmith' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Restore Go module cache
-        id: restore-go-module-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      - name: Install mingw cross-compiler
-        timeout-minutes: 12
-        run: |
-          updated=""
-          for attempt in 1 2 3; do
-            if sudo timeout 120 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update; then
-              updated=yes
-              break
-            fi
-            echo "::warning::apt-get update attempt $attempt failed or timed out"
-            if [ "$attempt" -lt 3 ]; then sleep 10; fi
-          done
-          if [ -z "$updated" ]; then
-            echo "::warning::apt-get update failed after 3 attempts; proceeding with cached index"
-          fi
-          sudo timeout 300 apt-get install -y gcc-mingw-w64-x86-64
-
-      - name: Restore Go build cache (Windows cross-compile)
-        id: restore-xcompile-go-build-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/go-cache/xcompile-windows-amd64
-          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-xcompile-windows-amd64-${{ github.sha }}
-          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-xcompile-windows-amd64-
-
-      - name: Build Windows test binaries
-        env:
-          GOCACHE: ${{ runner.temp }}/go-cache/xcompile-windows-amd64
-        run: bash scripts/ci/build-windows-test-binaries.sh "$RUNNER_TEMP/win-bin"
-
-      - name: Save Go module cache
-        if: ${{ !cancelled() && steps.restore-go-module-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-
-      - name: Save Go build cache (Windows cross-compile)
-        if: ${{ !cancelled() && steps.restore-xcompile-go-build-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/go-cache/xcompile-windows-amd64
-          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-xcompile-windows-amd64-${{ github.sha }}
-
 
   # macOS full -race -short suite. Linux runs the same suite under Bazel
   # (bazel.yml's `test` lane, on every push to main, executed on rbe-west),
@@ -202,30 +110,22 @@ jobs:
   # Windows uses -tags gms_pure_go to avoid the ICU regex dependency.
   # go-icu-regex's regex_windows.go also uses Go stdlib regexp (build tag: windows).
   # CGO is still required for gozstd (bundled C source) and the embedded dolt engine.
-  # F7b: pr.yml's standalone Windows jobs (test-windows-liveness,
-  # worktree-remove-windows, etc.) moved to same-repo Blacksmith
-  # (blacksmith-*vcpu-windows-2025); this job's own module/non-race GOCACHE
-  # saves already cover the fork/github path (windows-latest), but Blacksmith
-  # runners cannot see caches `actions/cache` saved from a GitHub-hosted
-  # runner (and vice versa) even for an identical key, so the `venue` matrix
-  # dimension here seeds the Blacksmith selection too -- same reasoning as
-  # windows-test-binaries-cache's `runner` matrix.
+  # pr.yml's Windows jobs (test-windows-liveness, worktree-remove-windows,
+  # etc.) run on Blacksmith Windows for every PR, forks included
+  # (ga-96smfk.22), so this job seeds their module and non-race GOCACHEs on
+  # that one runner selection: Blacksmith runners cannot see caches
+  # `actions/cache` saved from a GitHub-hosted runner, and no GitHub-hosted
+  # Windows consumer is left.
   test-windows:
-    name: Test (Windows - smoke, ${{ matrix.venue }})
+    name: Test (Windows - smoke)
     # F7b review fix (B2): push-to-main, same-repo only, like every saver
     # here (the repository check closes the fork gap). Pinned by
     # TestBlacksmithSaverJobsGuardedAgainstPullRequest.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'gastownhall/beads'
-    runs-on: ${{ matrix.venue == 'blacksmith' && 'blacksmith-4vcpu-windows-2025' || 'windows-latest' }}
-    # F7b review fix (S8): this job now runs on paid Blacksmith Windows
-    # (4x billing) for its blacksmith venue leg; it previously had no
-    # timeout-minutes at all. 20 matches test-windows-liveness's timeout
-    # (S6) for consistency.
+    runs-on: ${{ 'blacksmith-4vcpu-windows-2025' }}
+    # F7b review fix (S8): paid Blacksmith Windows (4x billing). 20 matches
+    # test-windows-liveness's timeout (S6) for consistency.
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        venue: [blacksmith, github]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -245,11 +145,8 @@ jobs:
         run: echo "today=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
       # F7b review fix (S9): same Windows toolchain diagnostic as pr.yml's
-      # moved Windows jobs, run here on the Blacksmith leg too (the venue
-      # this job's github leg already exercises on windows-latest every push
-      # without issue, so only the blacksmith leg's image is unverified).
+      # Windows jobs.
       - name: Check Windows toolchain diagnostics
-        if: matrix.venue == 'blacksmith'
         shell: bash
         run: go env CGO_ENABLED CC GOOS GOARCH
 
@@ -291,11 +188,8 @@ jobs:
       # (blacksmith-4vcpu-windows-2025), so their cold `cmd/bd` test compiles
       # (the real long pole; see pr-preflight-platforms' S2 comment) get a
       # true cache hit. Confirmed to run under Git Bash on Windows (reviewer
-      # verification); Blacksmith-leg only -- the github (windows-latest)
-      # venue leg has no PR-side consumer for this namespace, so warming it
-      # there would be wasted GitHub-hosted cache churn for no reader.
+      # verification).
       - name: Warm non-race GOCACHE (Windows preflight/liveness consumers)
-        if: matrix.venue == 'blacksmith'
         shell: bash
         env:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
@@ -317,30 +211,22 @@ jobs:
 
   # macOS saver: pr.yml's pr-preflight-platforms and
   # check-doc-freshness-platforms macOS legs run on blacksmith-6vcpu-macos-26
-  # for same-repo PRs/merge_group and on macos-latest for fork/Dependabot PRs,
-  # and Blacksmith and GitHub-hosted runners cannot see each other's
-  # actions/cache entries, so the `venue` matrix seeds both (same convention as
-  # test-windows). This job is their only seeder
-  # (and the Blacksmith leg also seeds the `test` job's module and non-race
-  # caches), and runs only the shared warm-up those legs compile
+  # for every PR, forks included (ga-96smfk.22). This job is their only
+  # seeder (and also seeds the `test` job's module and non-race caches), and runs only the shared warm-up those legs compile
   # (warm-non-race-cache.sh, the same script the Windows seeder uses)
   # plus the non-test ./cmd/bd build -- no tests, so it stays a few minutes of
   # macOS time per push. Same push-to-main-only job guard (B2) and go.sum +
   # UTC-day cache keys (S7) as test-windows, so a PR can never
   # write this namespace and ordinary push traffic writes at most one
-  # non-race entry per day per venue. Pinned by
+  # non-race entry per day. Pinned by
   # TestBlacksmithSaverJobsGuardedAgainstPullRequest,
   # TestBlacksmithSaverCacheKeysAreNotPerCommit and
   # TestBlacksmithMacOSSaverMatchesPRLegs.
   blacksmith-macos-go-build-cache:
-    name: Warm macOS Go build cache (${{ matrix.venue }})
-    runs-on: ${{ matrix.venue == 'blacksmith' && 'blacksmith-6vcpu-macos-26' || 'macos-latest' }}
+    name: Warm macOS Go build cache
+    runs-on: ${{ 'blacksmith-6vcpu-macos-26' }}
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'gastownhall/beads'
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        venue: [blacksmith, github]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -371,9 +257,8 @@ jobs:
           key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ hashFiles('go.sum') }}-${{ steps.cache-date.outputs.today }}
           restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
 
-      # Records each venue's toolchain in the log so an image drift between
-      # Blacksmith and GitHub's macos-latest is visible next to the cache it
-      # seeds.
+      # Records the toolchain in the log so an image drift is visible next
+      # to the cache it seeds.
       - name: Check macOS toolchain diagnostics
         run: |
           sw_vers

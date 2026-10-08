@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "types",
     srcs = [
+        "gated.go",
         "id_generator.go",
         "non_completing_close.go",
         "orphans.go",
@@ -17,6 +18,7 @@ go_test(
     name = "types_test",
     srcs = [
         "explain_test.go",
+        "gated_test.go",
         "id_generator_test.go",
         "issue_summary_test.go",
         "non_completing_close_test.go",

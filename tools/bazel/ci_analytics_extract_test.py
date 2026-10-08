@@ -79,6 +79,27 @@ def _duration_bytes(ms: int) -> bytes:
     return _varint_field(1, seconds) + _varint_field(2, nanos * 1_000_000)
 
 
+def _signed_varint(n: int) -> bytes:
+    """Encodes a signed int64/int32 field's value the way a real protobuf
+    encoder does: the 64-bit two's-complement bit pattern, varint-encoded
+    as if it were unsigned -- a negative value always takes the full 10
+    bytes. _varint() itself can't be used directly for a negative n: `n &
+    0x7F`/`n >>= 7` on a negative Python int never reaches 0 (arithmetic
+    shift preserves the sign), so it would loop forever."""
+    return _varint(n & 0xFFFFFFFFFFFFFFFF)
+
+
+def _signed_varint_field(field: int, n: int) -> bytes:
+    return _tag(field, 0) + _signed_varint(n)
+
+
+def _signed_duration_bytes(seconds: int, nanos: int) -> bytes:
+    """Builds a Duration submessage (fields 1 seconds, 2 nanos) with
+    explicit, possibly-negative values, each encoded the way a real
+    negative int64/int32 would be: a 10-byte two's-complement varint."""
+    return _signed_varint_field(1, seconds) + _signed_varint_field(2, nanos)
+
+
 def _spawn_metrics(total_ms=0, queue_ms=0, exec_ms=0, input_bytes=0) -> bytes:
     body = b""
     if total_ms:
@@ -292,6 +313,31 @@ class ExtractorHelperTests(unittest.TestCase):
         self.assertEqual(extract._clamp_pct(float("inf")), 0.0)
         self.assertEqual(extract._clamp_pct(float("-inf")), 0.0)
         self.assertEqual(extract._clamp_pct(float("nan")), 0.0)
+
+    def test_to_signed64_recovers_negative_values_from_the_raw_varint_bits(self):
+        # -1 as a 64-bit two's complement varint is 10 bytes of 0xFF-ish
+        # bits; varint() decodes that as 2**64 - 1.
+        self.assertEqual(extract._to_signed64((1 << 64) - 1), -1)
+        self.assertEqual(extract._to_signed64(1 << 63), -(1 << 63))
+        self.assertEqual(extract._to_signed64(0), 0)
+        self.assertEqual(extract._to_signed64((1 << 63) - 1), (1 << 63) - 1)
+
+    def test_to_signed32_truncates_then_sign_extends(self):
+        self.assertEqual(extract._to_signed32((1 << 32) - 1), -1)
+        self.assertEqual(extract._to_signed32(1 << 31), -(1 << 31))
+        self.assertEqual(extract._to_signed32(0), 0)
+        # A hostile/corrupt int64-range value on an int32-typed field is
+        # truncated to the low 32 bits first, not kept as a huge int64.
+        self.assertEqual(extract._to_signed32((1 << 40) + 5), 5)
+
+    def test_clamp_duration_ms_rejects_negative_and_absurdly_large(self):
+        self.assertEqual(extract._clamp_duration_ms(500), 500)
+        self.assertEqual(extract._clamp_duration_ms(0), 0)
+        self.assertEqual(extract._clamp_duration_ms(-1500), 0)
+        self.assertEqual(extract._clamp_duration_ms(extract.MAX_SANE_DURATION_MS), extract.MAX_SANE_DURATION_MS)
+        self.assertEqual(extract._clamp_duration_ms(extract.MAX_SANE_DURATION_MS + 1), 0)
+        self.assertEqual(extract._clamp_duration_ms(float("inf")), 0)
+        self.assertEqual(extract._clamp_duration_ms(float("nan")), 0)
 
 
 class RealFixtureTests(unittest.TestCase):
@@ -1160,6 +1206,63 @@ class RobustnessTests(unittest.TestCase):
             rows, status = extract.iter_repo_fetch(pp, _deadline())
         self.assertEqual(status, "corrupt")
         self.assertEqual([r["repo"] for r in rows], ["@@rules_cc+"])
+
+    def test_negative_queue_duration_decodes_to_zero_not_a_huge_positive(self):
+        """The production bug: clock skew between the NativeLink scheduler
+        and a worker can make a remote spawn's queue time read slightly
+        negative. protobuf encodes that as a 10-byte two's-complement
+        varint of the Duration's seconds/nanos; decoding those bits as
+        unsigned (the pre-fix behavior) produced "remote_queue_ms" values
+        around 2**63/1e3 -- not a small negative number. Built with the
+        test-side signed varint encoder (_signed_duration_bytes), not the
+        plain _duration_bytes() helper, which can't represent a negative
+        value at all."""
+        uuid = "11111111-2222-3333-4444-555555555555"
+        # -1.5s of (impossible, but exactly what clock skew would produce)
+        # negative queue time, alongside a normal positive total/exec so
+        # the fix's "other values intact" half is also checked.
+        metrics = (
+            _bytes_field(5, _signed_duration_bytes(-1, -500_000_000))
+            + _bytes_field(1, _duration_bytes(200))
+            + _bytes_field(8, _duration_bytes(50))
+        )
+        spawn_body = _spawn("//:synth_remote2", "TestRunner", "remote", False, metrics)
+        exec_log = _invocation_entry(uuid) + _entry_with_spawn(spawn_body)
+        rec = self._run(self._bep(uuid), exec_log)
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec["exec_log"], "ok")
+        by_mnemonic = {m["mnemonic"]: m for m in rec["mnemonics"]}
+        tr = by_mnemonic["TestRunner"]
+        self.assertEqual(tr["remote_queue_ms"], 0)
+        self.assertEqual(tr["remote_queue_max_ms"], 0)
+        # Not poisoned by the clamped-away queue value: total/exec, decoded
+        # from the same spawn's other, non-negative Duration fields, are
+        # unaffected.
+        self.assertEqual(tr["total_ms"], 200)
+        self.assertEqual(tr["remote_exec_ms"], 50)
+
+    def test_absurdly_large_duration_clamps_to_zero(self):
+        """A corrupt (not just adversarial) producer could put an
+        implausible but individually well-formed value on a Duration
+        field -- MAX_SANE_DURATION_MS guards against that the same way as
+        the negative case, so one bad spawn can't blow out a mnemonic's
+        sum in either direction."""
+        uuid = "11111111-2222-3333-4444-555555555555"
+        absurd_ms = 50 * 60 * 60 * 1000  # 50 hours: no real spawn runs this long
+        metrics = (
+            _bytes_field(5, _duration_bytes(absurd_ms))
+            + _bytes_field(1, _duration_bytes(200))
+            + _bytes_field(8, _duration_bytes(50))
+        )
+        spawn_body = _spawn("//:synth_remote3", "TestRunner", "remote", False, metrics)
+        exec_log = _invocation_entry(uuid) + _entry_with_spawn(spawn_body)
+        rec = self._run(self._bep(uuid), exec_log)
+        self.assertIsNotNone(rec)
+        by_mnemonic = {m["mnemonic"]: m for m in rec["mnemonics"]}
+        tr = by_mnemonic["TestRunner"]
+        self.assertEqual(tr["remote_queue_ms"], 0)
+        self.assertEqual(tr["total_ms"], 200)
+        self.assertEqual(tr["remote_exec_ms"], 50)
 
 
 class BoundsTests(unittest.TestCase):

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -58,8 +59,9 @@ func readPushPaths(t *testing.T, file string) []string {
 // TestNixBuildDropsPullRequestTriggerNotPushOrDispatch pins the one
 // "delete the pull_request trigger" trigger change in F7c: nix-build.yml's
 // PR coverage is fully redundant with PR Risk's required test-nix job (which
-// runs `nix run .#default` plus `nix flake check -L` on every PR, a superset
-// of `nix build .#default`), but push and workflow_dispatch must survive so
+// runs `nix run .#default` plus `nix flake check -L`, which evaluates every
+// flake output, on every PR: a superset of `nix build .#default`), but push
+// and workflow_dispatch must survive so
 // the plain `nix build` path stays covered post-merge.
 func TestNixBuildDropsPullRequestTriggerNotPushOrDispatch(t *testing.T) {
 	type nixTriggers struct {
@@ -108,6 +110,48 @@ func TestNixBuildDropsPullRequestTriggerNotPushOrDispatch(t *testing.T) {
 	}
 	if !sawFlakeCheck {
 		t.Error("pr-risk.yml's test-nix no longer runs the flake checks")
+	}
+}
+
+// The flake's one test check (hook-timeout-backends, which only PR Risk's
+// test-nix ran) is a Bazel target the PR-core lane runs on every PR, against
+// all five tracked hooks and the three pinned static timeout
+// implementations; the flake declares no checks, so test-nix's
+// `nix flake check` is a packaging check (an evaluation of the outputs), not
+// a test run on a GitHub runner.
+func TestHookTimeoutBackendsRunUnderBazel(t *testing.T) {
+	root := sourceRepoRoot(t)
+	if _, err := os.Stat(filepath.Join(root, "checks.nix")); err == nil {
+		t.Error("checks.nix is back; hook-timeout-backends runs under Bazel (//tests/hook_timeout_backends)")
+	}
+	if flake := readPolicyFile(t, root, "flake.nix"); regexp.MustCompile(`(?m)^\s*checks\s*=`).MatchString(flake) {
+		t.Error("flake.nix declares checks; test checks run under Bazel, test-nix's nix flake check only evaluates the outputs")
+	}
+	rule := bazelRuleBlock(readPolicyFile(t, root, "tests/hook_timeout_backends/BUILD.bazel"), "hook_timeout_backends_test")
+	for _, want := range []string{
+		`srcs = ["hook_timeout_backends_test.sh"],`,
+		`"$(rootpath @busybox_static//file)",`,
+		`"$(rootpath @toybox_static//file)",`,
+		`"$(rootpath @uutils_coreutils//:coreutils)",`,
+		`"$(rootpath //:.githooks/pre-commit)",`,
+		`"$(rootpath //:.githooks/post-merge)",`,
+		`"$(rootpath //:.githooks/pre-push)",`,
+		`"$(rootpath //:.githooks/post-checkout)",`,
+		`"$(rootpath //:.githooks/prepare-commit-msg)",`,
+		`tags = ["pr-core-only"],`,
+	} {
+		if !strings.Contains(rule, want) {
+			t.Errorf("//tests/hook_timeout_backends:hook_timeout_backends_test lacks %q:\n%s", want, rule)
+		}
+	}
+	hooks, err := filepath.Glob(filepath.Join(root, ".githooks", "*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, hook := range hooks {
+		if !strings.Contains(rule, `"$(rootpath //:.githooks/`+filepath.Base(hook)+`)",`) {
+			t.Errorf("tracked hook .githooks/%s is not in hook_timeout_backends_test's args", filepath.Base(hook))
+		}
 	}
 }
 

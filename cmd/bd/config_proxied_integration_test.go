@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -266,7 +265,7 @@ func TestProxiedServerConfig(t *testing.T) {
 			t.Errorf("beads.role set should not advance HEAD: before=%s after=%s", before, after)
 		}
 
-		gitCmd := exec.Command("git", "config", "--get", "beads.role")
+		gitCmd := gitCommand("config", "--get", "beads.role")
 		gitCmd.Dir = p.dir
 		out, err := gitCmd.Output()
 		if err != nil {

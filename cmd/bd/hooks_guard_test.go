@@ -17,7 +17,7 @@ import (
 func TestGuardHookWritePathIgnoresInheritedGitRouting(t *testing.T) {
 	runGit := func(repo string, args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = repo
 		cmd.Env = gitenv.ScrubRouting(os.Environ())
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -64,7 +64,7 @@ func TestGuardHookWritePathIgnoresInheritedGitRouting(t *testing.T) {
 				t.Setenv(key, value)
 			}
 			if tc.name == "both" {
-				probe := exec.Command("git", "-C", hooksDir, "ls-files", "--error-unmatch", "--", "pre-commit")
+				probe := gitCommand("-C", hooksDir, "ls-files", "--error-unmatch", "--", "pre-commit")
 				out, err := probe.CombinedOutput()
 				require.NoError(t, err, "inherited index must also prove tracking: %s", out)
 			}
@@ -109,7 +109,7 @@ func setupGuardTestRepo(t *testing.T) string {
 	repoDir := t.TempDir()
 
 	run := func(args ...string) {
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = repoDir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Skipf("git %v failed: %v\n%s", args, err, out)
@@ -197,7 +197,7 @@ func TestInstallHooksRefusesTrackedHook(t *testing.T) {
 		{"commit", "-m", "add tracked hook"},
 		{"config", "core.hooksPath", "hooks"},
 	} {
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = repoDir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Skipf("git %v failed: %v\n%s", args, err, out)
@@ -233,7 +233,7 @@ func TestInstallHooksAllowsTrackedBdOwnedHook(t *testing.T) {
 		{"commit", "-m", "commit bd-managed hook"},
 		{"config", "core.hooksPath", "hooks"},
 	} {
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = repoDir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Skipf("git %v failed: %v\n%s", args, err, out)
@@ -362,7 +362,7 @@ func TestInstallHooksRefusesTrackedExternalIntegrationHook(t *testing.T) {
 		{"commit", "-m", "add tracked external integration hook"},
 		{"config", "core.hooksPath", "hooks"},
 	} {
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = repoDir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Skipf("git %v failed: %v\n%s", args, err, out)
@@ -540,7 +540,7 @@ func TestGuardHookWritePathHonorsInheritedRepository(t *testing.T) {
 			}
 			runGit := func(args ...string) {
 				t.Helper()
-				cmd := exec.Command("git", args...)
+				cmd := gitCommand(args...)
 				cmd.Dir = repo
 				if out, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -592,7 +592,7 @@ func TestGuardHookWritePathHonorsInheritedRepository(t *testing.T) {
 			}
 			inherited := os.Environ()
 			args := []string{"-C", hooksDir, "ls-files", "--error-unmatch", "--", "pre-commit"}
-			clean := exec.Command("git", args...)
+			clean := gitCommand(args...)
 			clean.Env = gitenv.ScrubRouting(inherited)
 			out, cleanErr := clean.CombinedOutput()
 			if cleanErr == nil {
@@ -605,7 +605,7 @@ func TestGuardHookWritePathHonorsInheritedRepository(t *testing.T) {
 			if exit, ok := cleanErr.(*exec.ExitError); ok && exit.ExitCode() == 1 {
 				t.Fatalf("fixture must fail the scrubbed probe for a configuration reason, got exit 1: %s", out)
 			}
-			fallback := exec.Command("git", args...)
+			fallback := gitCommand(args...)
 			fallback.Env = inherited
 			if out, err := fallback.CombinedOutput(); err != nil {
 				t.Fatalf("inherited tracking precondition: %v\n%s", err, out)

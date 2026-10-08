@@ -2,7 +2,6 @@ package doctor
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -12,7 +11,7 @@ import (
 // setGitConfig sets a git config value in dir, failing the test on error.
 func setGitConfig(t *testing.T, dir, key, value string) {
 	t.Helper()
-	cmd := exec.Command("git", "config", key, value)
+	cmd := gitCommand("config", key, value)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git config %s %s failed: %v (%s)", key, value, err, strings.TrimSpace(string(out)))
@@ -23,7 +22,7 @@ func setGitConfig(t *testing.T, dir, key, value string) {
 // since the goal is just to make sure the key is absent.
 func unsetGitConfig(t *testing.T, dir, key string) {
 	t.Helper()
-	cmd := exec.Command("git", "config", "--unset", key)
+	cmd := gitCommand("config", "--unset", key)
 	cmd.Dir = dir
 	_ = cmd.Run()
 }
@@ -31,7 +30,7 @@ func unsetGitConfig(t *testing.T, dir, key string) {
 // getGitConfig reads a git config value in dir. Returns "" if unset.
 func getGitConfig(t *testing.T, dir, key string) string {
 	t.Helper()
-	cmd := exec.Command("git", "config", "--get", key)
+	cmd := gitCommand("config", "--get", key)
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
