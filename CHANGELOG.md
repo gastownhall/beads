@@ -184,6 +184,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `release/**` in all five (#7148).
 
 
+- **The shared-server migration gate no longer promises reads keep working
+  on a store below schema v55.** The gate block, its agent directive and the
+  version-bump notice all said reads would keep working while the migration
+  waited for consent, but read commands query the `leases` table that
+  migration 0055 creates, so on an older store they fail too. Below v55 the
+  text now says reads may fail until the migration runs; from v55 on it is
+  unchanged (#7302).
+
 - **Ordinary bd commands now wait out a maintenance operation instead of
   failing at once.** While `bd init`, `bd backup restore`, `bd migrate` or
   `bd bootstrap` holds the workspace gate exclusively, every other bd command
