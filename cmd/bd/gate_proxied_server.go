@@ -408,7 +408,7 @@ func runGateResolveProxiedServer(cmd *cobra.Command, ctx context.Context, args [
 
 		issue, err := uw.IssueUseCase().GetIssue(ctx, gateID)
 		if gateProxiedNotFound(err) {
-			return out, "", fmt.Errorf("gate not found: %s", gateID)
+			return out, "", errors.New(gateResolveNotFoundMessage(gateID))
 		}
 		if err != nil {
 			return out, "", fmt.Errorf("reading gate %s: %w", gateID, err)
