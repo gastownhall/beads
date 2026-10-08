@@ -2,7 +2,11 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "git",
-    srcs = ["gitdir.go"],
+    srcs = [
+        "discover_linux.go",
+        "discover_other.go",
+        "gitdir.go",
+    ],
     importpath = "github.com/steveyegge/beads/internal/git",
     visibility = ["//:__subpackages__"],
 )
@@ -10,6 +14,7 @@ go_library(
 go_test(
     name = "git_test",
     srcs = [
+        "discover_linux_test.go",
         "gitdir_test.go",
         "jujutsu_test.go",
     ],
