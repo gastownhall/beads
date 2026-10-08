@@ -403,8 +403,7 @@ func (e *RemoteMigrateGateError) userBody() string {
 			"        (" + SharedConsentCommandGlobal + " for the shared global database;\n" +
 			"        " + AllowRemoteMigrateEnv + "=1 bd <cmd> in scripted/CI use)\n" +
 			"\n" +
-			"  Read commands keep working against the current schema in the meantime;\n" +
-			"  writes stay refused until the schema is migrated.\n" +
+			e.readsMeanwhileBody() +
 			"\n" +
 			"  If the migration then reports dirty tables, that working set has to be\n" +
 			"  committed first — see the recovery the dirty-table error names; do not\n" +
@@ -444,6 +443,33 @@ func (e *RemoteMigrateGateError) userBody() string {
 			"  `bd dolt pull` on each before upgrading it — its upgrade then has nothing\n" +
 			"  to migrate and needs no re-clone.\n"
 	}
+}
+
+// FirstLeasesTableVersion is the schema version that creates the leases table
+// (migration 0055). Read commands query it, so on a database still below this
+// version a refused migration breaks reads too, not just writes — every
+// "reads keep working meanwhile" promise must be keyed to it (#6929, #7302).
+const FirstLeasesTableVersion = 55
+
+// readsMeanwhileBody is the userBody line on what still works while the
+// shared-store migration waits for consent.
+func (e *RemoteMigrateGateError) readsMeanwhileBody() string {
+	if e.CurrentVersion >= FirstLeasesTableVersion {
+		return "  Read commands keep working against the current schema in the meantime;\n" +
+			"  writes stay refused until the schema is migrated.\n"
+	}
+	return fmt.Sprintf("  Read commands may fail too until then: schema v%d predates the leases\n"+
+		"  table (v%d) that reads query. Writes stay refused until the schema is migrated.\n",
+		e.CurrentVersion, FirstLeasesTableVersion)
+}
+
+// readsMeanwhileDirective is the AgentDirective counterpart of readsMeanwhileBody.
+func (e *RemoteMigrateGateError) readsMeanwhileDirective() string {
+	if e.CurrentVersion >= FirstLeasesTableVersion {
+		return "Reads keep working on the current schema meanwhile."
+	}
+	return fmt.Sprintf("Reads may fail too until the migration runs: schema v%d predates the leases table (v%d) that reads query.",
+		e.CurrentVersion, FirstLeasesTableVersion)
 }
 
 // EscapeHint returns the escape-hatch string for JSON error output.
@@ -515,7 +541,7 @@ func (e *RemoteMigrateGateError) AgentDirective() string {
 			"promotes the schema for all of them at once — every client still on an older bd refuses the database " +
 			"until it is upgraded (#5920). Other clients' binary versions are not observable from this process, so " +
 			"do NOT auto-run the migration: surface remote_migrate_gate.options to the operator and let them confirm " +
-			"the fleet is upgraded first. Reads keep working on the current schema meanwhile."
+			"the fleet is upgraded first. " + e.readsMeanwhileDirective()
 	default:
 		return "Coordination decision required: only ONE clone may migrate a shared remote; " +
 			"a second clone migrating independently forks the schema unrecoverably (#4259). " +

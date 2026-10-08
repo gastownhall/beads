@@ -362,3 +362,25 @@ func TestDataBehindSharedConsentCommandUnlocks(t *testing.T) {
 		}
 	})
 }
+
+// TestNoticeSharedMigrateRefusalReadsPromise pins #7302: below the leases
+// table (v55) reads fail too, so no arm of the notice may promise them.
+func TestNoticeSharedMigrateRefusalReadsPromise(t *testing.T) {
+	pinJSONOutput(t, false)
+	for _, decision := range []string{"shared-no-remote", "adopt", "adopt-ff", ""} {
+		for _, current := range []int{53, 56} {
+			out := captureNoticeStderr(t, func() {
+				noticeSharedMigrateRefusal(&schema.RemoteMigrateGateError{
+					CurrentVersion: current, LatestVersion: 66, Pending: 66 - current, Decision: decision,
+				})
+			})
+			want := "reads keep working meanwhile."
+			if current < schema.FirstLeasesTableVersion {
+				want = "reads may fail too until then (schema v53 predates the leases table, v55)."
+			}
+			if !strings.Contains(out, want) {
+				t.Errorf("decision %q at v%d: notice missing %q:\n%s", decision, current, want, out)
+			}
+		}
+	}
+}
