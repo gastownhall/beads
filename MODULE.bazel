@@ -204,6 +204,24 @@ go_deps.gazelle_override(
     ],
     path = "github.com/dolthub/go-mysql-server",
 )
+
+# protoc-gen-validate ships validate/validate.pb.go, so its Go library can
+# compile from the checked-in code. Its own validate/BUILD instead makes the
+# Go library a go_proto_library, so every lane built protoc from source just
+# to regenerate that file: about 4.5k C++ compile, link and archive actions,
+# each carrying the LLVM toolchain as inputs. The module reaches the graph
+# only through grpc xds and the cloud SDKs. Gazelle regenerates its BUILD
+# files with proto rules off; build_file_name makes it write BUILD.bazel (which
+# Bazel prefers) rather than merge into the upstream BUILD files.
+go_deps.gazelle_override(
+    build_file_generation = "on",
+    directives = [
+        "gazelle:build_file_name BUILD.bazel",
+        "gazelle:proto disable",
+    ],
+    path = "github.com/envoyproxy/protoc-gen-validate",
+)
+
 go_deps.module_override(
     patch_strip = 1,
     patches = ["//third_party/patches:eventsapi_schema_build.patch"],
