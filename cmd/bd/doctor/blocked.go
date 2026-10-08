@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // BlockedConsistencyCheckName is the doctor check name; applyFixList dispatches
@@ -33,7 +32,12 @@ func CheckBlockedConsistencyWithStore(ss *SharedStore) DoctorCheck {
 }
 
 func checkBlockedConsistencyWithStore(ctx context.Context, store *dolt.DoltStore) DoctorCheck {
-	stale, err := issueops.CountIsBlockedInconsistenciesInTx(ctx, store.UnderlyingDB())
+	// Store-level rather than issueops-over-UnderlyingDB(): the shared pool's
+	// read deadline kills this known-long scan on loaded stores, and the store
+	// method routes it through the sanctioned long-timeout path (which also
+	// pins the store's checked-out branch — a fresh connection would otherwise
+	// silently read the default branch).
+	stale, err := store.CountIsBlockedInconsistencies(ctx)
 	if err != nil {
 		return DoctorCheck{
 			Name:    BlockedConsistencyCheckName,
