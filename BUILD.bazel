@@ -298,6 +298,7 @@ filegroup(
     ) + [
         "//backend:repo_doc_files",
         "//backend/conformance:repo_doc_files",
+        "//backend/http:repo_doc_files",
         "//beadserrors:repo_doc_files",
         "//cmd/bd:repo_doc_files",
         "//cmd/bd/doctor:repo_doc_files",
@@ -441,6 +442,7 @@ filegroup(
         "//scripts/workflowtags:repo_doc_files",
         "//test/conformance:repo_doc_files",
         "//test/docsync:repo_doc_files",
+        "//test/embedder:repo_doc_files",
         "//test/testmainconvention:repo_doc_files",
         "//tests/hook_timeout_backends:repo_doc_files",
         "//tests/migration:repo_doc_files",
@@ -529,6 +531,7 @@ filegroup(
     ) + [
         "//backend:repo_go_srcs",
         "//backend/conformance:repo_go_srcs",
+        "//backend/http:repo_go_srcs",
         "//beadserrors:repo_go_srcs",
         "//cmd/bd:repo_go_srcs",
         "//cmd/bd/doctor:repo_go_srcs",
@@ -672,6 +675,7 @@ filegroup(
         "//scripts/workflowtags:repo_go_srcs",
         "//test/conformance:repo_go_srcs",
         "//test/docsync:repo_go_srcs",
+        "//test/embedder:repo_go_srcs",
         "//test/testmainconvention:repo_go_srcs",
         "//tests/hook_timeout_backends:repo_go_srcs",
         "//tests/migration:repo_go_srcs",
@@ -745,6 +749,7 @@ filegroup(
     ) + [
         "//backend:repo_go_test_srcs",
         "//backend/conformance:repo_go_test_srcs",
+        "//backend/http:repo_go_test_srcs",
         "//beadserrors:repo_go_test_srcs",
         "//cmd/bd:repo_go_test_srcs",
         "//cmd/bd/doctor:repo_go_test_srcs",
@@ -888,6 +893,7 @@ filegroup(
         "//scripts/workflowtags:repo_go_test_srcs",
         "//test/conformance:repo_go_test_srcs",
         "//test/docsync:repo_go_test_srcs",
+        "//test/embedder:repo_go_test_srcs",
         "//test/testmainconvention:repo_go_test_srcs",
         "//tests/hook_timeout_backends:repo_go_test_srcs",
         "//tests/migration:repo_go_test_srcs",
@@ -970,6 +976,7 @@ filegroup(
     ) + [
         "//backend:repo_other_files",
         "//backend/conformance:repo_other_files",
+        "//backend/http:repo_other_files",
         "//beadserrors:repo_other_files",
         "//cmd/bd:repo_other_files",
         "//cmd/bd/doctor:repo_other_files",
@@ -1113,6 +1120,7 @@ filegroup(
         "//scripts/workflowtags:repo_other_files",
         "//test/conformance:repo_other_files",
         "//test/docsync:repo_other_files",
+        "//test/embedder:repo_other_files",
         "//test/testmainconvention:repo_other_files",
         "//tests/hook_timeout_backends:repo_other_files",
         "//tests/migration:repo_other_files",

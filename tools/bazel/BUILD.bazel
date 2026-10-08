@@ -177,6 +177,7 @@ release_cross_build(
         ":pure_bd_has_no_cgo_only_deps",
         "//:beads",
         "//backend/conformance:conformance",
+        "//backend/http:http",
         "//backend:backend",
         "//beadserrors:beadserrors",
         "//cmd/bd/doctor/fix:fix",
