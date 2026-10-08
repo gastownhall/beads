@@ -17,25 +17,25 @@ func setupTestRepo(t *testing.T) (repoPath string, cleanup func()) {
 	if err := os.MkdirAll(repoPath, 0750); err != nil {
 		t.Fatalf("Failed to create test repo directory: %v", err)
 	}
-	cmd := exec.Command("git", "init")
+	cmd := gitCommand("init")
 	cmd.Dir = repoPath
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to init git repo: %v\nOutput: %s", err, string(output))
 	}
-	cmd = exec.Command("git", "config", "user.email", "test@example.com")
+	cmd = gitCommand("config", "user.email", "test@example.com")
 	cmd.Dir = repoPath
 	_ = cmd.Run()
-	cmd = exec.Command("git", "config", "user.name", "Test User")
+	cmd = gitCommand("config", "user.name", "Test User")
 	cmd.Dir = repoPath
 	_ = cmd.Run()
 	beadsDir := filepath.Join(repoPath, ".beads")
 	_ = os.MkdirAll(beadsDir, 0750)
 	_ = os.WriteFile(filepath.Join(beadsDir, "test.jsonl"), []byte("test data\n"), 0644)
 	_ = os.WriteFile(filepath.Join(repoPath, "other.txt"), []byte("other data\n"), 0644)
-	cmd = exec.Command("git", "add", ".")
+	cmd = gitCommand("add", ".")
 	cmd.Dir = repoPath
 	_ = cmd.Run()
-	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd = gitCommand("commit", "-m", "Initial commit")
 	cmd.Dir = repoPath
 	_, _ = cmd.CombinedOutput()
 	cleanup = func() {}
@@ -220,7 +220,7 @@ func TestGetGitHooksDirTildeExpansion(t *testing.T) {
 
 			ResetCaches()
 
-			cmd := exec.Command("git", "config", "core.hooksPath", tt.hooksPath)
+			cmd := gitCommand("config", "core.hooksPath", tt.hooksPath)
 			cmd.Dir = subRepoPath
 			if err := cmd.Run(); err != nil {
 				t.Skipf("git config rejected core.hooksPath %q: %v", tt.hooksPath, err)
@@ -279,7 +279,7 @@ func TestResolveHooksContext(t *testing.T) {
 	cleanEnv := os.Environ()
 	git := func(dir string, args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir, cmd.Env = dir, cleanEnv
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -499,4 +499,15 @@ func TestResolveHooksContext(t *testing.T) {
 		}
 		check(t, link, cleanEnv, selected, filepath.Join(canonical(selected), ".git", "hooks"))
 	})
+}
+
+// noAutoMaintenance keeps a fixture's git commit from spawning the detached
+// "git maintenance run --auto" child whose worktree-prune races the fixture's
+// next "git worktree add" (gastownhall/beads#7314, #7349). Flags ride the
+// command line, never env config: the routing-key scrub drops env config.
+var noAutoMaintenance = []string{"-c", "maintenance.auto=false", "-c", "gc.auto=0"}
+
+// gitCommand builds a git command for a fixture with noAutoMaintenance applied.
+func gitCommand(args ...string) *exec.Cmd {
+	return exec.Command("git", append(append([]string{}, noAutoMaintenance...), args...)...)
 }

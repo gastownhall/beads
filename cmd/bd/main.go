@@ -368,7 +368,8 @@ func isForcedMigrate(cmd *cobra.Command) bool {
 // schema.SharedConsentCommandForced), so retargeting the bare form would hand
 // the operator a global-scoped command that still cannot succeed. This mirrors
 // the retarget in handleRemoteMigrateGateJSON. A nil error keeps the
-// pre-existing bare-verb wording.
+// pre-existing bare-verb wording, which is also the verb the
+// migration-consent refusal prescribes, so that refusal passes nil.
 func printGlobalDatabaseConsentHint(w io.Writer, e *schema.RemoteMigrateGateError) {
 	if !globalFlag {
 		return
@@ -415,13 +416,28 @@ func renderTypedOpenError(err error) bool {
 		}
 		return true
 	}
+	// The migration-consent gate blocks silent in-place migration of
+	// ANY existing database (1.2 release remediation) and tells the
+	// operator how to consent.
+	var consentErr *schema.MigrateConsentError
+	if errors.As(err, &consentErr) {
+		if jsonOutput {
+			handleMigrateConsentJSON(consentErr)
+		} else {
+			fmt.Fprint(os.Stderr, consentErr.UserMessage())
+			printGlobalDatabaseConsentHint(os.Stderr, nil)
+		}
+		return true
+	}
 	return false
 }
 
 // isSchemaMigrateVerb reports whether cmd is `bd migrate schema` — the one
 // invocation in which the operator asked for a schema migration by name. That
 // request is the consent the shared-store gate wants for a database with no
-// remote (#5920); see schema.SetSharedMigrateConsent.
+// remote (#5920), and the consent the migration-consent gate wants for any
+// existing database; see schema.SetSharedMigrateConsent and
+// schema.SetLocalMigrateConsent.
 //
 // Deliberately just this one command, not the `bd migrate` tree. Bare
 // `bd migrate` reconciles version/repo-id/clone-id metadata and never applies
@@ -434,6 +450,17 @@ func renderTypedOpenError(err error) bool {
 // `--force` still unlocks from either migrate command.
 func isSchemaMigrateVerb(cmd *cobra.Command) bool {
 	return cmd == migrateSchemaCmd
+}
+
+// isMigrateConsentCommand reports whether invoking cmd is consent to apply
+// pending schema migrations to an existing database (migrate_consent.go).
+// That is `bd migrate schema` alone, the verb that names the migration: bare
+// `bd migrate` does not consent, for the reasons isSchemaMigrateVerb gives,
+// and --force on either migrate command consents separately, through the gate
+// override. A preview withholds the consent, as it does the shared-store one:
+// a --dry-run/--inspect must not consent to the work it only inspects.
+func isMigrateConsentCommand(cmd *cobra.Command) bool {
+	return isSchemaMigrateVerb(cmd) && !isPreviewCommand(cmd)
 }
 
 // forcedMigratePreviewFlag returns the name of a preview flag (--dry-run,
@@ -1538,8 +1565,11 @@ var rootCmd = &cobra.Command{
 				// touches the local `store` global on that path (a gap left by
 				// #4615, which only handled local paths), so skip local
 				// discovery entirely instead of falling through to the "no
-				// beads database found" exit below.
-				if cmd.Name() == "create" && cmd.Flags().Changed("repo") {
+				// beads database found" exit below. Match the command path,
+				// not the leaf name: `bd gate create --repo` names a GitHub
+				// OWNER/REPO for gh:run/gh:pr checks, not a workspace, and must
+				// still need the local database like any other gate command.
+				if commandRegistryPath(cmd) == "create" && cmd.Flags().Changed("repo") {
 					if repoVal, _ := cmd.Flags().GetString("repo"); repoVal != "" {
 						if remotecache.IsRemoteURL(repoVal) {
 							return nil
@@ -1747,6 +1777,12 @@ var rootCmd = &cobra.Command{
 		// migrate on the way to printing what it would do. Same set-or-clear
 		// discipline as the --force override above.
 		schema.SetSharedMigrateConsent(isSchemaMigrateVerb(cmd) && !previewMode)
+
+		// The same verb carries migration consent on its own
+		// (migrate_consent.go): every other command refuses to apply pending
+		// schema migrations to an existing database. Same unconditional
+		// set-or-clear discipline as the gate override above.
+		schema.SetLocalMigrateConsent(isMigrateConsentCommand(cmd))
 
 		// Auto-migrate database on version bump (bd-jgxi).
 		// Runs for ALL non-preview commands (including read-only ones) because

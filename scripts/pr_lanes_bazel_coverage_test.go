@@ -255,9 +255,9 @@ func testPackageGateJobs(t *testing.T, prGateRequired []string) {
 		if !ok {
 			t.Fatalf("%s has no %s job", bazelWorkflowName, lane.job)
 		}
-		if !reflect.DeepEqual([]string(job.Needs), []string{bazelRBEJobName}) || job.If != bazelPackageGatesIf || job.RunsOn != bazelPackageRunsOn {
+		if !reflect.DeepEqual([]string(job.Needs), []string{bazelRBEJobName}) || job.If != bazelPackageGatesIf || job.RunsOn != bazelPackageRunsOn[lane.job] {
 			t.Errorf("%s: needs %v, if %q, runs-on %q; want needs [%s], if %q, runs-on %q",
-				lane.job, job.Needs, job.If, job.RunsOn, bazelRBEJobName, bazelPackageGatesIf, bazelPackageRunsOn)
+				lane.job, job.Needs, job.If, job.RunsOn, bazelRBEJobName, bazelPackageGatesIf, bazelPackageRunsOn[lane.job])
 		}
 
 		detectCond := "steps.detect.outputs." + lane.detectOutput + " == 'true'"

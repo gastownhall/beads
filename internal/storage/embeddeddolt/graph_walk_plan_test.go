@@ -37,6 +37,11 @@ func (r *statementRecorder) ExecContext(ctx context.Context, q string, a ...any)
 	return r.DBTX.ExecContext(ctx, q, a...)
 }
 
+func (r *statementRecorder) QueryContext(ctx context.Context, q string, a ...any) (*sql.Rows, error) {
+	r.stmts = append(r.stmts, recordedStatement{q, a})
+	return r.DBTX.QueryContext(ctx, q, a...)
+}
+
 func explainPlan(t *testing.T, tx *sql.Tx, st recordedStatement) string {
 	t.Helper()
 	rows, err := tx.QueryContext(context.Background(), "EXPLAIN PLAN "+st.query, st.args...)
@@ -62,14 +67,36 @@ func explainPlan(t *testing.T, tx *sql.Tx, st recordedStatement) string {
 	return plan
 }
 
+// assertRecursiveMembersAreLookups checks a walk built on reachabilityMembers:
+// one recursive member per dependency table, each a lookup join from the
+// frontier into that table's issue_id index.
+func assertRecursiveMembersAreLookups(t *testing.T, plan string) {
+	t.Helper()
+	for _, want := range []string{"IndexedTableAccess(dependencies)", "IndexedTableAccess(wisp_dependencies)"} {
+		if !strings.Contains(plan, want) {
+			t.Errorf("plan has no %s:\n%s", want, plan)
+		}
+	}
+	if got := strings.Count(plan, "LookupJoin"); got != 2 {
+		t.Errorf("plan has %d LookupJoin, want 2 (one per recursive member):\n%s", got, plan)
+	}
+	if got := strings.Count(plan, "keys: r.node"); got != 2 {
+		t.Errorf("plan probes the edge tables by the frontier node %d times, want 2:\n%s", got, plan)
+	}
+	if strings.Contains(plan, "InnerJoin") || strings.Contains(plan, "HashJoin") || strings.Contains(plan, "MergeJoin") {
+		t.Errorf("a recursive member is not a lookup join:\n%s", plan)
+	}
+}
+
 // TestGraphWalkPlansHonorJoinHints proves the engine honors the
-// JOIN_ORDER/LOOKUP_JOIN hints the per-edge reachability walks and the batched
+// JOIN_ORDER/LOOKUP_JOIN hints the per-edge reachability walks, the ancestor
+// walk that seeds a parent-child edge's recompute, and the batched
 // blocked-state recompute carry — not just that the text is there. Without
 // them the embedded planner already plans the cycle walk's (statistics-less)
 // wisp_dependencies member as a scan join, and the recompute's legs can be
 // driven from an index scan of every open row (the sql-server flip described
-// at shouldBeBlockedIDsUnionScopedSQL). A deleted, misspelled, or no longer
-// resolvable hint (e.g. a renamed alias) fails here.
+// at shouldBeBlockedIDsUnionScopedPrecomputedSQL). A deleted, misspelled, or
+// no longer resolvable hint (e.g. a renamed alias) fails here.
 func TestGraphWalkPlansHonorJoinHints(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	fixture := newPristineEmbeddedDoltFixture(t, "walkplan")
@@ -114,24 +141,29 @@ func TestGraphWalkPlansHonorJoinHints(t *testing.T) {
 			t.Fatalf("recorded %d statements, want 3 (one cycle walk, two ancestor walks)", len(rec.stmts))
 		}
 		for _, st := range rec.stmts {
-			plan := explainPlan(t, tx, st)
-			// One recursive member per dependency table, each a lookup join
-			// from the frontier into that table's issue_id index.
-			for _, want := range []string{"IndexedTableAccess(dependencies)", "IndexedTableAccess(wisp_dependencies)"} {
-				if !strings.Contains(plan, want) {
-					t.Errorf("plan has no %s:\n%s", want, plan)
-				}
-			}
-			if got := strings.Count(plan, "LookupJoin"); got != 2 {
-				t.Errorf("plan has %d LookupJoin, want 2 (one per recursive member):\n%s", got, plan)
-			}
-			if got := strings.Count(plan, "keys: r.node"); got != 2 {
-				t.Errorf("plan probes the edge tables by the frontier node %d times, want 2:\n%s", got, plan)
-			}
-			if strings.Contains(plan, "InnerJoin") || strings.Contains(plan, "HashJoin") || strings.Contains(plan, "MergeJoin") {
-				t.Errorf("a recursive member is not a lookup join:\n%s", plan)
+			assertRecursiveMembersAreLookups(t, explainPlan(t, tx, st))
+		}
+	})
+
+	// ancestorChainInTx runs on every parent-child write and merge replay; it
+	// is reached here the way a write reaches it.
+	t.Run("ancestor-chain walk", func(t *testing.T) {
+		rec := &statementRecorder{DBTX: tx}
+		if _, _, err := issueops.AffectedByDepChangeInTx(ctx, rec, id(n-7), id(n/3), types.DepParentChild); err != nil {
+			t.Fatal(err)
+		}
+		var walks []recordedStatement
+		for _, st := range rec.stmts {
+			if strings.Contains(st.query, "WITH RECURSIVE ancestors") {
+				walks = append(walks, st)
 			}
 		}
+		if len(walks) != 1 {
+			t.Fatalf("recorded %d ancestor walks, want 1", len(walks))
+		}
+		// The same members as the reachability walks; the reason filter is
+		// the outer SELECT's, so it adds no join.
+		assertRecursiveMembersAreLookups(t, explainPlan(t, tx, walks[0]))
 	})
 
 	t.Run("blocked-state recompute", func(t *testing.T) {

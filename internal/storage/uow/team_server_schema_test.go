@@ -108,7 +108,7 @@ func TestCheckTeamServerSchema_Behind_RefusesWithBtsMigrate(t *testing.T) {
 	if !strings.Contains(err.Error(), "bts migrate") {
 		t.Errorf("error %q should point at 'bts migrate'", err)
 	}
-	if strings.Contains(err.Error(), "run any bd write command") {
+	if strings.Contains(err.Error(), "bd migrate schema") {
 		t.Errorf("error %q must not suggest bd-driven migration on a bts-owned schema", err)
 	}
 }

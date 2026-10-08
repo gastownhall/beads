@@ -309,11 +309,15 @@ Gate types:
   gh:run  - Waits for GitHub Actions workflow
   gh:pr   - Waits for PR merge
 
+gh:run and gh:pr gates are checked in the current Git repository unless
+--repo names another, or the blocked issue carries a metadata.repo value.
+
 Examples:
   bd gate create --blocks bd-abc
   bd gate create --type=human --blocks bd-abc --reason="Need design review"
   bd gate create --type=timer --blocks bd-abc --timeout=2h
   bd gate create --type=gh:pr --blocks bd-abc --await-id=42
+  bd gate create --type=gh:pr --blocks bd-abc --await-id=42 --repo=owner/other-repo
   bd gate create --blocks bd-abc --title="Gate: awaiting owner sign-off"`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -343,9 +347,9 @@ Examples:
 		}
 
 		gate := buildGateIssue(in, targetIssue.ID)
-		metadata, metaErr := repoMetadataForGate(in.gateType, targetIssue)
+		metadata, metaErr := gateMetadataForCreate(in, targetIssue)
 		if metaErr != nil {
-			return HandleErrorRespectJSON("invalid GitHub repository metadata on %s: %v", targetIssue.ID, metaErr)
+			return HandleErrorRespectJSON("%v", metaErr)
 		}
 		gate.Metadata = metadata
 
@@ -383,6 +387,7 @@ type gateCreateInput struct {
 	gateType  string
 	reason    string
 	awaitID   string
+	repo      string
 	titleFlag string
 	timeout   time.Duration
 }
@@ -393,6 +398,7 @@ func gatherGateCreateInput(cmd *cobra.Command) (gateCreateInput, error) {
 	in.gateType, _ = cmd.Flags().GetString("type")
 	in.reason, _ = cmd.Flags().GetString("reason")
 	in.awaitID, _ = cmd.Flags().GetString("await-id")
+	in.repo, _ = cmd.Flags().GetString("repo")
 	in.titleFlag, _ = cmd.Flags().GetString("title")
 	timeoutStr, _ := cmd.Flags().GetString("timeout")
 	if timeoutStr != "" {
@@ -891,6 +897,14 @@ func githubRepoFromIssue(issue *types.Issue) (string, error) {
 		return "", nil
 	}
 
+	return validateGitHubRepo(repo)
+}
+
+// validateGitHubRepo accepts an OWNER/REPO or HOST/OWNER/REPO selector made of
+// the characters GitHub allows in those path components, and nothing else:
+// the value is passed to `gh --repo`, so a stray shell or URL character is
+// rejected here rather than reaching a subprocess argument.
+func validateGitHubRepo(repo string) (string, error) {
 	parts := strings.Split(repo, "/")
 	if len(parts) != 2 && len(parts) != 3 {
 		return "", fmt.Errorf("repo %q must use OWNER/REPO or HOST/OWNER/REPO", repo)
@@ -936,6 +950,38 @@ func repoMetadataForGate(gateType string, targetIssue *types.Issue) (json.RawMes
 	}
 	if repo == "" {
 		return nil, nil
+	}
+	metadata, err := json.Marshal(map[string]string{"repo": repo})
+	if err != nil {
+		return nil, err
+	}
+	return metadata, nil
+}
+
+// gateMetadataForCreate computes the metadata for a new ad-hoc gate from the
+// parsed flags: an explicit --repo wins, otherwise the gate inherits the
+// blocked issue's validated metadata.repo (repoMetadataForGate). Both create
+// routes call this so the flag cannot drift between them.
+//
+// --repo is only meaningful on gh:* gates, whose check runs against a GitHub
+// repository; on any other type it is refused rather than stored, because a
+// repo selector nothing reads would look like a working cross-repo gate.
+// Errors are fully worded here (they name the flag or the blocked issue) so
+// the callers print them as-is.
+func gateMetadataForCreate(in gateCreateInput, targetIssue *types.Issue) (json.RawMessage, error) {
+	if in.repo == "" {
+		metadata, err := repoMetadataForGate(in.gateType, targetIssue)
+		if err != nil {
+			return nil, fmt.Errorf("invalid GitHub repository metadata on %s: %w", targetIssue.ID, err)
+		}
+		return metadata, nil
+	}
+	if !isGitHubGateType(in.gateType) {
+		return nil, fmt.Errorf("--repo applies only to gh:run and gh:pr gates, not %q", in.gateType)
+	}
+	repo, err := validateGitHubRepo(in.repo)
+	if err != nil {
+		return nil, fmt.Errorf("--repo: %w", err)
 	}
 	metadata, err := json.Marshal(map[string]string{"repo": repo})
 	if err != nil {
@@ -1085,7 +1131,16 @@ func checkGHRunStatusInRepoWithRunner(runID, repo string, runGH ghCommandRunner)
 		}
 		// Check if run not found
 		if strings.Contains(string(stderr), "not found") {
-			return false, true, "workflow run not found", nil
+			// Name the repository, as checkGHPRWithRunner does. Real gh
+			// reports a missing run as "HTTP 404: Not Found (<api url>)",
+			// which this case-sensitive match skips: that returns the error
+			// below, whose URL names the repository. Keep the match narrow; a
+			// token without access to the repository gets the same 404.
+			where := "the current repository"
+			if repo != "" {
+				where = repo
+			}
+			return false, true, fmt.Sprintf("workflow run not found: %s in %s", runID, where), nil
 		}
 		return false, false, "", fmt.Errorf("gh run view failed: %s", string(stderr))
 	}
@@ -1146,7 +1201,14 @@ func checkGHPRWithRunner(gate *types.Issue, runGH ghCommandRunner) (resolved, es
 		}
 		// Check if PR not found
 		if strings.Contains(string(stderr), "not found") || strings.Contains(string(stderr), "Could not resolve") {
-			return false, true, "pull request not found", nil
+			// Name the repository the number was resolved against: a gate
+			// armed for another repository without metadata.repo escalates
+			// here on every check, and the bare text never said why.
+			where := "the current repository"
+			if repo != "" {
+				where = repo
+			}
+			return false, true, fmt.Sprintf("pull request not found: #%s in %s", gate.AwaitID, where), nil
 		}
 		return false, false, "", fmt.Errorf("gh pr view failed: %s", string(stderr))
 	}
@@ -1299,6 +1361,7 @@ func init() {
 	gateCreateCmd.Flags().StringP("type", "t", "human", "Gate type (human, timer, gh:run, gh:pr)")
 	gateCreateCmd.Flags().StringP("reason", "r", "", "Reason for the gate")
 	gateCreateCmd.Flags().String("await-id", "", "Condition identifier (run ID, PR number, etc.)")
+	gateCreateCmd.Flags().String("repo", "", "GitHub repository the gh:run/gh:pr condition is checked in (OWNER/REPO or HOST/OWNER/REPO); default: the blocked issue's metadata.repo, else the current repository")
 	gateCreateCmd.Flags().String("timeout", "", "Timeout duration (e.g., 2h, 30m)")
 	gateCreateCmd.Flags().String("title", "", "Custom gate title (default: \"Gate: <type>\")")
 	_ = gateCreateCmd.MarkFlagRequired("blocks")

@@ -98,8 +98,9 @@ func lenientGateWarningBody(gateErr *schema.RemoteMigrateGateError) string {
 // open on any pending-migration refusal; openReadOnlyCommand and
 // openWorkingSetReconcile relax both the #4259 remote-migrate gate refusal and
 // the #4566 dirty-table refusal, each with its own warning text (see
-// initSchema); openRemoteSync relaxes exactly one gate refusal and nothing
-// else.
+// initSchema), and openWorkingSetReconcile alone also relaxes the
+// migration-consent refusal (toleratesConsentRefusal); openRemoteSync relaxes
+// exactly one gate refusal and nothing else.
 type openIntent int
 
 const (
@@ -115,7 +116,9 @@ const (
 	// commands (bd dolt commit, bd vc commit): their entire purpose is to
 	// clear the dirty working set that a migration would otherwise refuse to
 	// touch, so failing the open here would deadlock the documented recovery
-	// (#4566). Used by OpenForWorkingSetReconcile.
+	// (#4566). For the same reason it relaxes the migration-consent refusal,
+	// which fires before the dirty-table guard. Used by
+	// OpenForWorkingSetReconcile.
 	openWorkingSetReconcile
 	// openRemoteSync is the same shape of deadlock break as
 	// openWorkingSetReconcile, for the #6575 data-behind gate refusal: that
@@ -238,6 +241,27 @@ func (s *EmbeddedDoltStore) toleratesGateRefusal(gateErr *schema.RemoteMigrateGa
 // re-key conflict is a different refusal with a different recovery.
 func (s *EmbeddedDoltStore) toleratesMigrationRefusal() bool {
 	return s.intent == openReadOnlyCommand || s.intent == openWorkingSetReconcile
+}
+
+// toleratesConsentRefusal reports whether this open's intent may warn and
+// continue on the current schema past the migration-consent refusal
+// (schema.MigrateConsentError) instead of failing the open.
+//
+// Only openWorkingSetReconcile may. MigrateUp checks consent before the #4566
+// dirty-table guard, so on a database that is both behind and dirty a strict
+// commit open rebuilds the #4566 deadlock one check earlier: `bd migrate
+// schema` is refused as dirty and names `bd dolt commit`, which is refused
+// for consent. The commit needs no migration, and MigrateUp refuses before
+// any write, so it runs on the current schema.
+//
+// openReadOnlyCommand stays strict on purpose. The remote-migrate gate lets
+// reads ride through because its migrate-or-adopt decision is cross-clone
+// coordination that takes a while to settle; this decision is one local
+// command either way (`bd migrate schema`, or keep the matching release), and
+// the refusal is where the operator learns it is needed. openRemoteSync stays
+// strict for the reason toleratesMigrationRefusal gives.
+func (s *EmbeddedDoltStore) toleratesConsentRefusal() bool {
+	return s.intent == openWorkingSetReconcile
 }
 
 // errClosed is returned when a method is called after Close.
@@ -637,6 +661,11 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 	// Embedded mode relies on the dolthub/driver/v2's local file/concurrency
 	// controls; schema.MigrateUpWithLock requires a sql-server session lock.
 	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		var consentErr *schema.MigrateConsentError
+		if s.toleratesConsentRefusal() && errors.As(err, &consentErr) {
+			fmt.Fprint(os.Stderr, consentErr.WorkingSetWarning())
+			return nil
+		}
 		var dirtyErr *schema.DirtyTablesError
 		if s.toleratesMigrationRefusal() && errors.As(err, &dirtyErr) {
 			// The guard exists to keep dirty user data from being entangled
@@ -651,13 +680,13 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 				fmt.Fprintf(os.Stderr,
 					"Warning: %v\n"+
 						"  Committing the working set at the current schema; when it completes,\n"+
-						"  re-run 'bd migrate'.\n",
+						"  re-run 'bd migrate schema'.\n",
 					dirtyErr)
 			default: // openReadOnlyCommand
 				fmt.Fprintf(os.Stderr,
 					"Warning: %v\n"+
 						"  Continuing without migrating. Run 'bd dolt commit' to commit the\n"+
-						"  working set at the current schema, then re-run 'bd migrate'.\n",
+						"  working set at the current schema, then re-run 'bd migrate schema'.\n",
 					dirtyErr)
 			}
 			return nil

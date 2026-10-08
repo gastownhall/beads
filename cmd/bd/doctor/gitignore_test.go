@@ -3,7 +3,6 @@ package doctor
 import (
 	"bytes"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -1439,7 +1438,7 @@ func TestCheckRedirectNotTracked_FileTracked(t *testing.T) {
 	}
 
 	// Stage (track) the redirect file
-	gitAdd := exec.Command("git", "add", redirectPath)
+	gitAdd := gitCommand("add", redirectPath)
 	if err := gitAdd.Run(); err != nil {
 		t.Skipf("git add failed: %v", err)
 	}
@@ -1498,13 +1497,13 @@ func TestFixRedirectTracking(t *testing.T) {
 	}
 
 	// Stage (track) the redirect file
-	gitAdd := exec.Command("git", "add", redirectPath)
+	gitAdd := gitCommand("add", redirectPath)
 	if err := gitAdd.Run(); err != nil {
 		t.Skipf("git add failed: %v", err)
 	}
 
 	// Verify it's tracked
-	lsFiles := exec.Command("git", "ls-files", redirectPath)
+	lsFiles := gitCommand("ls-files", redirectPath)
 	output, _ := lsFiles.Output()
 	if strings.TrimSpace(string(output)) == "" {
 		t.Fatal("redirect file should be tracked before fix")
@@ -1516,7 +1515,7 @@ func TestFixRedirectTracking(t *testing.T) {
 	}
 
 	// Verify it's no longer tracked
-	lsFiles = exec.Command("git", "ls-files", redirectPath)
+	lsFiles = gitCommand("ls-files", redirectPath)
 	output, _ = lsFiles.Output()
 	if strings.TrimSpace(string(output)) != "" {
 		t.Error("redirect file should be untracked after fix")
@@ -1819,7 +1818,7 @@ func TestCheckLastTouchedNotTracked_FileTracked(t *testing.T) {
 	}
 
 	// Stage (track) the last-touched file
-	gitAdd := exec.Command("git", "add", lastTouchedPath)
+	gitAdd := gitCommand("add", lastTouchedPath)
 	if err := gitAdd.Run(); err != nil {
 		t.Skipf("git add failed: %v", err)
 	}
@@ -1878,7 +1877,7 @@ func TestFixLastTouchedTracking(t *testing.T) {
 	}
 
 	// Stage (track) the last-touched file
-	gitAdd := exec.Command("git", "add", lastTouchedPath)
+	gitAdd := gitCommand("add", lastTouchedPath)
 	if err := gitAdd.Run(); err != nil {
 		t.Skipf("git add failed: %v", err)
 	}
@@ -2515,7 +2514,7 @@ func setupBareParentWorktreeForGitignoreTest(t *testing.T) (string, string) {
 func runGitInDirForGitignoreTest(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 
-	cmd := exec.Command("git", args...)
+	cmd := gitCommand(args...)
 	cmd.Dir = dir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -2976,7 +2975,7 @@ func TestCheckNoVestigialSyncWorktrees_WithRedirectNoWorktree(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create a git repo so the git root detection works
-	cmd := exec.Command("git", "init", tmpDir)
+	cmd := gitCommand("init", tmpDir)
 	if err := cmd.Run(); err != nil {
 		t.Skipf("git init failed: %v", err)
 	}
@@ -3015,7 +3014,7 @@ func TestCheckNoVestigialSyncWorktrees_VestigialDetected(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create a git repo
-	cmd := exec.Command("git", "init", tmpDir)
+	cmd := gitCommand("init", tmpDir)
 	if err := cmd.Run(); err != nil {
 		t.Skipf("git init failed: %v", err)
 	}

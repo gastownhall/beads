@@ -746,6 +746,88 @@ func TestProxiedShardManifestGeneratorNotStale(t *testing.T) {
 	}
 }
 
+// walkBazelFiles visits every BUILD.bazel and BUILD file under root (and,
+// with bzl, every .bzl file), skipping .git, node_modules and .beads. A
+// symlink to a regular file is visited: under `bazel test` on a local
+// executor the runfiles tree is a symlink forest, and a walk that skipped
+// symlinks read no BUILD file there and reported every lane's targets gone
+// (#7350). A symlink to a directory is never followed.
+func walkBazelFiles(root string, bzl bool, visit func(path string, d os.DirEntry) error) error {
+	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", ".beads":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		name := d.Name()
+		if name != "BUILD.bazel" && name != "BUILD" && !(bzl && strings.HasSuffix(name, ".bzl")) {
+			return nil
+		}
+		if !isFileOrFileLink(path, d) {
+			return nil
+		}
+		return visit(path, d)
+	})
+}
+
+// A local Bazel executor hands the test a runfiles tree in which every file
+// is a symlink into the sandbox's inputs (#7350: scripts_test ran there on an
+// unauthorized fork's PR, read no BUILD file and failed every lane's pin with
+// `got map[]`). The walk must see the same Bazel files through such a forest
+// as in the checkout, and must not follow a symlinked directory or trip on a
+// dangling link.
+func TestBazelFileWalkFollowsFileSymlinks(t *testing.T) {
+	root := sourceRepoRoot(t)
+	collect := func(root string) []string {
+		var rels []string
+		err := walkBazelFiles(root, true, func(path string, _ os.DirEntry) error {
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			rels = append(rels, filepath.ToSlash(rel))
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+		sort.Strings(rels)
+		return rels
+	}
+	checkout := collect(root)
+	if len(checkout) < 10 {
+		t.Fatalf("found only %d Bazel files under %s; the checkout walk is broken", len(checkout), root)
+	}
+
+	forest := filepath.Join(t.TempDir(), "_main")
+	for _, rel := range checkout {
+		dst := filepath.Join(forest, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(root, filepath.FromSlash(rel)), dst); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Hazards a runfiles tree or a checkout can hold: Bazel's bazel-* links to
+	// directories, and a link whose target is gone.
+	if err := os.Symlink(filepath.Join(root, "scripts"), filepath.Join(forest, "bazel-bin")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(forest, "missing", "BUILD.bazel"), filepath.Join(forest, "BUILD")); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := collect(forest); !reflect.DeepEqual(got, checkout) {
+		t.Errorf("the symlink forest yields different Bazel files than the checkout:\nforest   %d: %v\ncheckout %d: %v", len(got), got, len(checkout), checkout)
+	}
+}
+
 // Review G3: since D2 the retired tiers' Bazel lanes (embedded, proxied,
 // server-storage) are those tiers' only pre-merge run on same-repo PRs, so
 // nothing that reaches them may narrow them (select fewer tests, or turn
@@ -967,20 +1049,7 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 	tagsRe := regexp.MustCompile(`(?ms)^    tags = \[(.*?)\],$`)
 	envRe := regexp.MustCompile(`(?ms)^    env = \{(.*?)\},$`)
 	got := map[string]target{}
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "node_modules", ".beads":
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.Type()&os.ModeSymlink != 0 || (d.Name() != "BUILD.bazel" && d.Name() != "BUILD") {
-			return nil
-		}
+	err := walkBazelFiles(root, false, func(path string, d os.DirEntry) error {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
@@ -1037,21 +1106,8 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 			"-required-suite=doc-freshness",
 		},
 	}
-	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "node_modules", ".beads":
-				return filepath.SkipDir
-			}
-			return nil
-		}
+	err = walkBazelFiles(root, true, func(path string, d os.DirEntry) error {
 		isBzl := strings.HasSuffix(d.Name(), ".bzl")
-		if d.Type()&os.ModeSymlink != 0 || (d.Name() != "BUILD.bazel" && d.Name() != "BUILD" && !isBzl) {
-			return nil
-		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err

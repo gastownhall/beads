@@ -59,6 +59,10 @@ var showCmd = &cobra.Command{
 		includeDepends, _ := cmd.Flags().GetBool("include-dependents")
 		includeComments, _ := cmd.Flags().GetBool("include-comments")
 		briefDeps, _ := cmd.Flags().GetBool("brief-deps")
+		commentsTail, _ := cmd.Flags().GetInt("comments-tail")
+		if err := validateCommentsTail(commentsTail); err != nil {
+			return err
+		}
 		ctx := rootCtx
 
 		// Helper to format timestamp based on --local-time flag
@@ -99,7 +103,7 @@ var showCmd = &cobra.Command{
 			if len(args) != 1 {
 				return HandleErrorRespectJSON("watch mode requires exactly one issue ID")
 			}
-			return watchIssue(ctx, args[0])
+			return watchIssue(ctx, args[0], commentsTail)
 		}
 
 		if showThread {
@@ -263,17 +267,7 @@ var showCmd = &cobra.Command{
 
 			// Show comments
 			comments, _ := issueStore.GetIssueComments(ctx, issue.ID) // Best effort: show issue even if comments unavailable
-			if len(comments) > 0 {
-				fmt.Printf("\n%s\n", ui.RenderBold("COMMENTS"))
-				for _, comment := range comments {
-					fmt.Printf("  %s %s\n", ui.RenderMuted(formatTime(comment.CreatedAt)), comment.Author)
-					rendered := uimd.RenderMarkdown(comment.Text)
-					// TrimRight removes trailing newlines that Glamour adds, preventing extra blank lines
-					for _, line := range strings.Split(strings.TrimRight(rendered, "\n"), "\n") {
-						fmt.Printf("    %s\n", line)
-					}
-				}
-			}
+			printComments(comments, commentsTail, formatTime, issue.ID)
 
 			// Long mode: show all extended fields
 			if longMode {
@@ -325,6 +319,7 @@ func init() {
 		"Without it the comments field is absent entirely, not truncated: an issue with comments carries "+
 		"comment_count and comments_omitted=true, so check those before reading an absent comments field as none.")
 	showCmd.Flags().Bool("brief-deps", false, "Reduce each dependency to its identity fields in JSON output (--json only; drops description, design, notes and acceptance criteria)")
+	showCmd.Flags().Int("comments-tail", 0, "Render only the last N comments in text output, preceded by one elision line naming how many older ones were hidden (text output only; 0, the default, renders every comment unchanged; N must be >= 0)")
 	showCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(showCmd)
 }

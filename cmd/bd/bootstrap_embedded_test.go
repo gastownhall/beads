@@ -110,13 +110,13 @@ func TestEmbeddedBootstrap(t *testing.T) {
 
 	t.Run("bootstrap_dry_run_fresh", func(t *testing.T) {
 		dir := t.TempDir()
-		cmd := exec.Command("git", "init", "-q")
+		cmd := gitCommand("init", "-q")
 		cmd.Dir = dir
 		cmd.CombinedOutput()
-		cmd = exec.Command("git", "config", "user.name", "Test")
+		cmd = gitCommand("config", "user.name", "Test")
 		cmd.Dir = dir
 		cmd.CombinedOutput()
-		cmd = exec.Command("git", "config", "user.email", "test@test.com")
+		cmd = gitCommand("config", "user.email", "test@test.com")
 		cmd.Dir = dir
 		cmd.CombinedOutput()
 		// Create .beads with metadata.json so FindBeadsDir detects it
@@ -134,13 +134,13 @@ func TestEmbeddedBootstrap(t *testing.T) {
 
 	t.Run("bootstrap_init", func(t *testing.T) {
 		dir := t.TempDir()
-		cmd := exec.Command("git", "init", "-q")
+		cmd := gitCommand("init", "-q")
 		cmd.Dir = dir
 		cmd.CombinedOutput()
-		cmd = exec.Command("git", "config", "user.name", "Test")
+		cmd = gitCommand("config", "user.name", "Test")
 		cmd.Dir = dir
 		cmd.CombinedOutput()
-		cmd = exec.Command("git", "config", "user.email", "test@test.com")
+		cmd = gitCommand("config", "user.email", "test@test.com")
 		cmd.Dir = dir
 		cmd.CombinedOutput()
 		beadsDir := filepath.Join(dir, ".beads")
@@ -176,13 +176,13 @@ func TestEmbeddedBootstrap(t *testing.T) {
 
 		// Create new dir with .beads + issues.jsonl but no database
 		dir := t.TempDir()
-		gitCmd := exec.Command("git", "init", "-q")
+		gitCmd := gitCommand("init", "-q")
 		gitCmd.Dir = dir
 		gitCmd.CombinedOutput()
-		gitCmd = exec.Command("git", "config", "user.name", "Test")
+		gitCmd = gitCommand("config", "user.name", "Test")
 		gitCmd.Dir = dir
 		gitCmd.CombinedOutput()
-		gitCmd = exec.Command("git", "config", "user.email", "test@test.com")
+		gitCmd = gitCommand("config", "user.email", "test@test.com")
 		gitCmd.Dir = dir
 		gitCmd.CombinedOutput()
 		destBeads := filepath.Join(dir, ".beads")

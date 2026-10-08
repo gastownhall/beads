@@ -883,9 +883,11 @@ Required` requires them to have run remotely and passed.
     `1.3.0 (dev)`, no commit); no consumer reads it. Verified 2026-10-02:
     both package gates pass with the Bazel-built bd (MCP: 228 passed, 5
     skipped; npm: all tests and the pack dry run), the same as with a
-    `go build` bd. Both run on `blacksmith-4vcpu-ubuntu-2404` when
-    `rbe.outputs.enabled == 'true'` (4 vCPU: `pytest -n 8` is pinned to
-    timing measured there), `ubuntu-latest` otherwise. `bazel-test`'s own
+    `go build` bd. In mode remote, package-npm runs on
+    `blacksmith-4vcpu-ubuntu-2404` and package-mcp on
+    `blacksmith-8vcpu-ubuntu-2404` with `pytest -n 16`
+    (`BEADS_MCP_PYTEST_WORKERS`; the script's default is `-n 8`);
+    `ubuntu-latest` (and `-n 8`) otherwise. `bazel-test`'s own
     `bazel-ci-build-artifacts` upload is no longer consumed by anything; it
     is kept for the F3.5.3 SHA256SUMS comparison and for debugging.
   - The Dolt-backed domain, uow, tracker, doctor/fix and protocol suites
@@ -1208,7 +1210,9 @@ their `blacksmith-*vcpu-windows-2025` label literally; the two mixed-OS
 matrix jobs, `pr-preflight-platforms` and `check-doc-freshness-platforms`,
 run a macOS leg on `blacksmith-6vcpu-macos-26` (Apple Silicon) and a Windows
 leg on `blacksmith-4vcpu-windows-2025`, each leg naming its label in the
-matrix (`runs-on: ${{ matrix.runner }}`). There is no GitHub-hosted fallback:
+matrix (`runs-on: ${{ matrix.runner }}`). An 8 vCPU Windows preflight leg
+was tried (#7381): it restored the 4 vCPU saver's cache, but queued 63s for
+the larger runner and finished slower (144s vs 129s), so it stays on 4 vCPU. There is no GitHub-hosted fallback:
 Blacksmith serves this org's fork PRs (gascity's fork PRs run their CI on
 `blacksmith-*` labels). Fork runs get no secrets and a read-only token
 (`TestBlacksmithJobsReadNoSecrets` keeps every Blacksmith job free of secret

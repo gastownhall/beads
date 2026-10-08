@@ -16,7 +16,7 @@ import (
 
 func setupGitRepoForIntegration(t *testing.T, dir string) {
 	t.Helper()
-	cmd := exec.Command("git", "init", dir)
+	cmd := gitCommand("init", dir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init failed: %v\n%s", err, out)
 	}
@@ -24,7 +24,7 @@ func setupGitRepoForIntegration(t *testing.T, dir string) {
 		{"-C", dir, "config", "user.email", "test@example.com"},
 		{"-C", dir, "config", "user.name", "Test User"},
 	} {
-		cmd = exec.Command("git", args...)
+		cmd = gitCommand(args...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v failed: %v\n%s", args, err, out)
 		}

@@ -53,7 +53,7 @@ func TestGitAddFile_InWorktreeHook_StagesCorrectPath(t *testing.T) {
 	}
 	runGit := func(dir string, args ...string) {
 		t.Helper()
-		c := exec.Command("git", args...)
+		c := gitCommand(args...)
 		c.Dir = dir
 		if out, err := c.CombinedOutput(); err != nil {
 			t.Fatalf("git %v in %s failed: %v\n%s", args, dir, err, out)
@@ -71,7 +71,7 @@ func TestGitAddFile_InWorktreeHook_StagesCorrectPath(t *testing.T) {
 	worktree := filepath.Join(tmpDir, "wt")
 	runGit(mainRepo, "worktree", "add", worktree, "-b", "feat")
 	t.Cleanup(func() {
-		c := exec.Command("git", "worktree", "remove", "--force", worktree)
+		c := gitCommand("worktree", "remove", "--force", worktree)
 		c.Dir = mainRepo
 		_ = c.Run()
 	})
@@ -87,7 +87,7 @@ func TestGitAddFile_InWorktreeHook_StagesCorrectPath(t *testing.T) {
 
 	// Simulate the environment inside a git pre-commit hook: GIT_DIR points
 	// at the worktree's per-worktree gitdir.
-	out, err := exec.Command("git", "-C", worktree, "rev-parse", "--git-dir").Output()
+	out, err := gitCommand("-C", worktree, "rev-parse", "--git-dir").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestGitAddFile_InWorktreeHook_StagesCorrectPath(t *testing.T) {
 
 	// Inspect the worktree's index: the staged path must be ".beads/issues.jsonl",
 	// NOT bare "issues.jsonl" at repo root.
-	lsFiles := exec.Command("git", "ls-files", "--stage")
+	lsFiles := gitCommand("ls-files", "--stage")
 	lsFiles.Dir = worktree
 	data, err := lsFiles.CombinedOutput()
 	if err != nil {
@@ -692,7 +692,7 @@ func TestGitAddFile_NonHookContext_GuardDoesNotFire(t *testing.T) {
 	}
 	runGit := func(args ...string) {
 		t.Helper()
-		c := exec.Command("git", args...)
+		c := gitCommand(args...)
 		c.Dir = repo
 		if out, err := c.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -718,7 +718,7 @@ func TestGitAddFile_NonHookContext_GuardDoesNotFire(t *testing.T) {
 		t.Fatalf("gitAddFile: %v", err)
 	}
 
-	c := exec.Command("git", "ls-files", "--stage")
+	c := gitCommand("ls-files", "--stage")
 	c.Dir = repo
 	data, err := c.CombinedOutput()
 	if err != nil {
@@ -756,7 +756,7 @@ func TestGitAddFile_RelativePathDoesNotDoubleRoot(t *testing.T) {
 	}
 	runGit := func(args ...string) {
 		t.Helper()
-		c := exec.Command("git", args...)
+		c := gitCommand(args...)
 		c.Dir = repo
 		if out, err := c.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -788,7 +788,7 @@ func TestGitAddFile_RelativePathDoesNotDoubleRoot(t *testing.T) {
 		t.Fatalf("gitAddFile(%q): %v", relPath, err)
 	}
 
-	c := exec.Command("git", "diff", "--cached", "--name-only")
+	c := gitCommand("diff", "--cached", "--name-only")
 	c.Dir = repo
 	data, err := c.CombinedOutput()
 	if err != nil {
@@ -825,7 +825,7 @@ func TestGitAddFile_CapturesStderrOnFailure(t *testing.T) {
 	}
 	runGit := func(args ...string) {
 		t.Helper()
-		c := exec.Command("git", args...)
+		c := gitCommand(args...)
 		c.Dir = repo
 		if out, err := c.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -890,7 +890,7 @@ func TestGitAddFile_CapturesLockedIndexFailure(t *testing.T) {
 	}
 	runGit := func(args ...string) {
 		t.Helper()
-		c := exec.Command("git", args...)
+		c := gitCommand(args...)
 		c.Dir = repo
 		if out, err := c.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -926,7 +926,7 @@ func TestGitAddFile_CapturesLockedIndexFailure(t *testing.T) {
 		t.Fatalf("expected index.lock error, got: %q", msg)
 	}
 
-	c := exec.Command("git", "ls-files", "--stage")
+	c := gitCommand("ls-files", "--stage")
 	c.Dir = repo
 	data, err := c.CombinedOutput()
 	if err != nil {
@@ -948,7 +948,7 @@ func TestAutoExportGitAddFailureExitsNonZero(t *testing.T) {
 
 	runGit := func(args ...string) {
 		t.Helper()
-		c := exec.Command("git", args...)
+		c := gitCommand(args...)
 		c.Dir = dir
 		if out, err := c.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -1026,7 +1026,7 @@ func TestGitAddFile_RedirectCase_DoesNotStageInMainRepo(t *testing.T) {
 	}
 	runGit := func(dir string, args ...string) {
 		t.Helper()
-		c := exec.Command("git", args...)
+		c := gitCommand(args...)
 		c.Dir = dir
 		if out, err := c.CombinedOutput(); err != nil {
 			t.Fatalf("git %v in %s failed: %v\n%s", args, dir, err, out)
@@ -1056,12 +1056,12 @@ func TestGitAddFile_RedirectCase_DoesNotStageInMainRepo(t *testing.T) {
 	worktree := filepath.Join(tmpDir, "wt")
 	runGit(mainRepo, "worktree", "add", worktree, "-b", "feat")
 	t.Cleanup(func() {
-		c := exec.Command("git", "worktree", "remove", "--force", worktree)
+		c := gitCommand("worktree", "remove", "--force", worktree)
 		c.Dir = mainRepo
 		_ = c.Run()
 	})
 
-	out, err := exec.Command("git", "-C", worktree, "rev-parse", "--git-dir").Output()
+	out, err := gitCommand("-C", worktree, "rev-parse", "--git-dir").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1084,7 +1084,7 @@ func TestGitAddFile_RedirectCase_DoesNotStageInMainRepo(t *testing.T) {
 	// staging entry from the worktree's hook firing.
 	checkNoStage := func(label, repoDir string) {
 		t.Helper()
-		c := exec.Command("git", "ls-files", "--stage")
+		c := gitCommand("ls-files", "--stage")
 		c.Dir = repoDir
 		data, err := c.CombinedOutput()
 		if err != nil {
@@ -1134,7 +1134,7 @@ func TestPreCommitHasStagedBeadsFiles(t *testing.T) {
 	}
 	runGit := func(args ...string) {
 		t.Helper()
-		c := exec.Command("git", args...)
+		c := gitCommand(args...)
 		c.Dir = repo
 		if out, err := c.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)

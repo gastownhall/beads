@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	"errors"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -176,7 +175,7 @@ func testGitInit(t *testing.T, dir string) {
 
 func testGitCmd(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := gitCommand(args...)
 	cmd.Dir = dir
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v failed: %v\nOutput: %s", args, err, output)

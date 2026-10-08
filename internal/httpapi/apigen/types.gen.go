@@ -1566,7 +1566,7 @@ type Problem struct {
 	// BlockerId With `dependency_cycle`, hierarchy refusal only: the ancestor or descendant the edge named as blocker. See `issue_id`.
 	BlockerId *string `json:"blocker_id,omitempty"`
 
-	// BlockerIsAncestor With `dependency_cycle`, hierarchy refusal only: true when `blocker_id` is an ANCESTOR of `issue_id` (which cannot close until its descendants finish, so the gate would never clear), false when it is a DESCENDANT (blocked status cascades, so it would inherit the block and never close). Both polarities are reported; this member is never omitted to mean false. See `issue_id`.
+	// BlockerIsAncestor With `dependency_cycle`, hierarchy refusal only: true when `blocker_id` is an ANCESTOR of `issue_id` (which cannot close until its descendants finish, so the gate would never clear), false when it is a DESCENDANT (waiting on your own subtree is a close gate, not a blocks edge — use a waits-for gate over the children). Both polarities are reported; this member is never omitted to mean false. See `issue_id`.
 	BlockerIsAncestor *bool `json:"blocker_is_ancestor,omitempty"`
 
 	// Blockers With `not_closable`, and ONLY on the live-blocker refusal: the live blockers that refused the close, in the order the refusing check reported them, read from the refusal's typed list rather than parsed out of any message. Never present together with `open_children`.

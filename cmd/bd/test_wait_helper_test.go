@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -74,8 +73,8 @@ func setupGitRepo(t *testing.T) (repoPath string, cleanup func()) {
 		_ = os.Chdir(originalWd)
 		t.Fatalf("failed to write test file: %v", err)
 	}
-	_ = exec.Command("git", "add", ".").Run()
-	if err := exec.Command("git", "commit", "-m", "initial").Run(); err != nil {
+	_ = gitCommand("add", ".").Run()
+	if err := gitCommand("commit", "-m", "initial").Run(); err != nil {
 		_ = os.Chdir(originalWd)
 		t.Fatalf("failed to create initial commit: %v", err)
 	}
@@ -120,7 +119,7 @@ func setupGitRepoWithBranch(t *testing.T, branch string) (repoPath string, clean
 	}
 	// Switch to requested branch if different from template default
 	if branch != "main" {
-		if err := exec.Command("git", "checkout", "-b", branch).Run(); err != nil {
+		if err := gitCommand("checkout", "-b", branch).Run(); err != nil {
 			_ = os.Chdir(originalWd)
 			t.Fatalf("failed to switch to branch %s: %v", branch, err)
 		}
@@ -144,8 +143,8 @@ func setupGitRepoWithBranch(t *testing.T, branch string) (repoPath string, clean
 		_ = os.Chdir(originalWd)
 		t.Fatalf("failed to write test file: %v", err)
 	}
-	_ = exec.Command("git", "add", ".").Run()
-	if err := exec.Command("git", "commit", "-m", "initial").Run(); err != nil {
+	_ = gitCommand("add", ".").Run()
+	if err := gitCommand("commit", "-m", "initial").Run(); err != nil {
 		_ = os.Chdir(originalWd)
 		t.Fatalf("failed to create initial commit: %v", err)
 	}

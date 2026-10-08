@@ -505,7 +505,9 @@ jobs:
   # restores, mostly tar extraction), 33-71s for TestPRPreflight (Git Bash
   # process creation, now parallel subtests), 27-58s to compile and link
   # ./cmd/bd's test binary, and about 25s for the rest. A second Windows leg
-  # would pay the setup again to save about 20s, so it stays one leg.
+  # would pay the setup again to save about 20s, so it stays one leg. An
+  # 8 vCPU Windows leg was tried (#7381): cache restores still hit, but it
+  # queued 63s for the larger runner and finished at 144s vs 129s here.
   pr-preflight-platforms:
     name: PR preflight process (${{ matrix.os }})
     runs-on: ${{ matrix.runner }}
