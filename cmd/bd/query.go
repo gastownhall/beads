@@ -58,6 +58,7 @@ Supported fields:
   spec              Spec ID (supports wildcards)
   pinned            Boolean (true/false)
   ephemeral         Boolean (true/false)
+  no_history        Boolean (true/false); no-history rows are stored with the wisps
   template          Boolean (true/false)
   parent            Parent issue ID
   mol_type          Molecule type (swarm, patrol, work)
