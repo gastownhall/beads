@@ -125,37 +125,55 @@ func TestPRCIGateDropsRetiredPolicyAndLintJobs(t *testing.T) {
 	}
 }
 
-// TestReleaseCrossCompileRunsInBazelPureLane pins the release-target
-// cross-compilation gate into bazel.yml's pure-Go lane, whose job.status
-// ci-gate requires (BAZEL_PURE), and keeps the retired pr.yml job from
-// coming back beside it: a second, `go build` copy of the gate would run
-// every target twice.
-func TestReleaseCrossCompileRunsInBazelPureLane(t *testing.T) {
+// TestReleaseCrossCompileRunsInItsOwnBazelLane pins the release-target
+// cross-compilation gate into bazel.yml's bazel-release-cross lane, whose
+// job.status ci-gate requires (BAZEL_RELEASE_CROSS), and keeps it from
+// running twice: not back in bazel-pure (where it was a step on the longest
+// cached lane), and not as the retired pr.yml `go build` job beside it.
+func TestReleaseCrossCompileRunsInItsOwnBazelLane(t *testing.T) {
 	const (
 		retiredJob   = "check-release-target-cross-compilation"
 		retiredToken = "CHECK_RELEASE_TARGET_CROSS_COMPILATION"
 		stepName     = "Cross-compile every release target (--config=release-cross)"
+		script       = "./scripts/ci/bazel-release-cross-compile.sh"
 	)
 	pr := readCIWorkflow(t, "pr.yml")
 	if _, ok := pr.Jobs[retiredJob]; ok {
-		t.Errorf("pr.yml still defines %s; bazel.yml's %s lane runs the release cross-compilation", retiredJob, bazelPureJobName)
+		t.Errorf("pr.yml still defines %s; bazel.yml's %s lane runs the release cross-compilation", retiredJob, bazelReleaseCrossJobName)
 	}
 	gate := pr.job(t, "ci-gate")
 	gateEnv := gate.step(t, "Evaluate CI gate").Env
 	if contains(gate.Needs, retiredJob) || gateEnv[retiredToken] != "" || contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), retiredToken) {
 		t.Errorf("ci-gate still wires the retired %s job", retiredJob)
 	}
-	if !contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), "BAZEL_PURE") {
-		t.Errorf("ci-gate CI_GATE_REQUIRED does not include BAZEL_PURE, the lane that cross-compiles the release targets")
+	if !contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), "BAZEL_RELEASE_CROSS") {
+		t.Errorf("ci-gate CI_GATE_REQUIRED does not include BAZEL_RELEASE_CROSS, the lane that cross-compiles the release targets")
 	}
 
-	run := readCIWorkflow(t, bazelWorkflowName).job(t, bazelPureJobName).step(t, stepName).Run
+	bazel := readCIWorkflow(t, bazelWorkflowName)
+	for name, job := range bazel.Jobs {
+		if name == bazelReleaseCrossJobName {
+			continue
+		}
+		for _, step := range job.Steps {
+			if strings.Contains(step.Run, script) {
+				t.Errorf("%s step %q runs %s too; only %s cross-compiles the release targets", name, step.Name, script, bazelReleaseCrossJobName)
+			}
+		}
+	}
+	cross := bazel.job(t, bazelReleaseCrossJobName)
+	pure := bazel.job(t, bazelPureJobName)
+	if cross.RunsOn != pure.RunsOn || cross.If != pure.If || !slices.Equal(cross.Needs, pure.Needs) {
+		t.Errorf("%s runs-on/if/needs = %q / %q / %v, want %s's %q / %q / %v",
+			bazelReleaseCrossJobName, cross.RunsOn, cross.If, cross.Needs, bazelPureJobName, pure.RunsOn, pure.If, pure.Needs)
+	}
+	run := cross.step(t, stepName).Run
 	for _, required := range []string{
 		"set -euo pipefail",
-		"./scripts/ci/bazel-release-cross-compile.sh",
+		script,
 	} {
 		if !strings.Contains(run, required) {
-			t.Errorf("%s step %q does not contain %q:\n%s", bazelPureJobName, stepName, required, run)
+			t.Errorf("%s step %q does not contain %q:\n%s", bazelReleaseCrossJobName, stepName, required, run)
 		}
 	}
 
@@ -1712,16 +1730,19 @@ func captureOne(t *testing.T, pattern, body, source string) string {
 // --- Bazel lane (.github/workflows/bazel.yml, gated through pr.yml) ----------
 
 const (
-	bazelWorkflowName   = "bazel.yml"
-	bazelJobName        = "bazel-test"
-	bazelPureJobName    = "bazel-pure"
-	bazelDoltJobName    = "bazel-doltserver"
-	bazelEmbedJobName   = "bazel-embedded"
-	bazelRBEJobName     = "rbe"
-	bazelIntegJobName   = "bazel-integration"
-	bazelProxiedJobName = "bazel-proxied"
-	bazelServerJobName  = "bazel-server-storage"
-	bazelCmdDoltJobName = "bazel-cmd-dolt"
+	bazelWorkflowName = "bazel.yml"
+	bazelJobName      = "bazel-test"
+	bazelPureJobName  = "bazel-pure"
+	// The release-target cross-compilation, split out of bazel-pure so it
+	// runs in parallel with it (same runner and skip rule).
+	bazelReleaseCrossJobName = "bazel-release-cross"
+	bazelDoltJobName         = "bazel-doltserver"
+	bazelEmbedJobName        = "bazel-embedded"
+	bazelRBEJobName          = "rbe"
+	bazelIntegJobName        = "bazel-integration"
+	bazelProxiedJobName      = "bazel-proxied"
+	bazelServerJobName       = "bazel-server-storage"
+	bazelCmdDoltJobName      = "bazel-cmd-dolt"
 	// F3: the MCP and npm package gates, moved here from pr.yml so they need
 	// only the rbe job. Unlike every other lane they do not mirror a Bazel
 	// config; pr.yml opts them in with package-gates: "on".
@@ -1758,7 +1779,7 @@ const (
 // bazel.yml's jobs: the rbe job that decides the execution mode, the
 // --config=ci lane, one job per CI job a Bazel config mirrors, and the two
 // package gates (F3), sorted alphabetically to match TestBazelWorkflowJobsAndExecutionMode's sort.Strings.
-var bazelJobNames = []string{bazelCmdDoltJobName, bazelDoltJobName, bazelEmbedJobName, bazelIntegJobName, bazelProxiedJobName, bazelPureJobName, bazelServerJobName, bazelJobName, bazelPackageMCPJobName, bazelPackageNPMJobName, bazelRBEJobName, bazelRBEPrewarmJobName}
+var bazelJobNames = []string{bazelCmdDoltJobName, bazelDoltJobName, bazelEmbedJobName, bazelIntegJobName, bazelProxiedJobName, bazelPureJobName, bazelReleaseCrossJobName, bazelServerJobName, bazelJobName, bazelPackageMCPJobName, bazelPackageNPMJobName, bazelRBEJobName, bazelRBEPrewarmJobName}
 
 // The lanes that only run remotely (skipped unless the rbe job chose remote);
 // bazel-integration runs remotely or with the read-only cache (bazelIntegIf);
@@ -1848,10 +1869,12 @@ var bazelWorkflowTriggers = []string{"push", "workflow_call", "workflow_dispatch
 // TestBazelGateSimulation), for the recorded reason. A new job in bazel.yml
 // must be added to one of the two (TestBazelLaneIsGatedAlongsideLegacy).
 var bazelLaneGateIDs = map[string]string{
-	bazelJobName:      "BAZEL_TEST",
-	bazelPureJobName:  "BAZEL_PURE",
-	bazelEmbedJobName: "BAZEL_EMBEDDED",
-	bazelDoltJobName:  "BAZEL_DOLTSERVER",
+	bazelJobName:     "BAZEL_TEST",
+	bazelPureJobName: "BAZEL_PURE",
+	// Every release target cross-compiled, cgo off (and nogo over each).
+	bazelReleaseCrossJobName: "BAZEL_RELEASE_CROSS",
+	bazelEmbedJobName:        "BAZEL_EMBEDDED",
+	bazelDoltJobName:         "BAZEL_DOLTSERVER",
 	// Remote-only PR Risk tiers (fork and Dependabot PRs rely on
 	// pr-risk.yml's legacy jobs, like the embedded tier's).
 	bazelProxiedJobName: "BAZEL_PROXIED",

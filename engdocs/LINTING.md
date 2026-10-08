@@ -42,8 +42,8 @@ Where it gates:
 
 - **bazel.yml's `test` lane** (required through `CI Gate / Required`):
   `bazel test //... --config=ci` validates every package natively.
-- **bazel.yml's `pure` lane** (required): its release cross-compile
-  (`scripts/ci/bazel-release-cross-compile.sh`) builds
+- **bazel.yml's `release cross-compile` lane** (`bazel-release-cross`,
+  required): `scripts/ci/bazel-release-cross-compile.sh` builds
   `//tools/bazel:release_cross`, every `go_library` and `go_binary`
   split-transitioned to each release platform without cgo, and nogo
   validates each of those compiles. So `//go:build windows`, `darwin`,

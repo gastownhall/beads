@@ -55,9 +55,9 @@ Current PR-related workflow names:
   outputs (`rbe-enabled` is `true` in `remote`, `fork-ro` and `fork-rw`);
   every lane exports its
   `job.status` as an output named after the job. `pr.yml`'s gate requires the
-  call's result (`BAZEL`) and `BAZEL_TEST`, `BAZEL_PURE`, `BAZEL_EMBEDDED`,
-  `BAZEL_INTEGRATION`, `BAZEL_DOLTSERVER`, `BAZEL_PROXIED` and
-  `BAZEL_SERVER_STORAGE`. These lanes are the only CI run of the Linux Go
+  call's result (`BAZEL`) and `BAZEL_TEST`, `BAZEL_PURE`,
+  `BAZEL_RELEASE_CROSS`, `BAZEL_EMBEDDED`, `BAZEL_INTEGRATION`,
+  `BAZEL_DOLTSERVER`, `BAZEL_PROXIED` and `BAZEL_SERVER_STORAGE`. These lanes are the only CI run of the Linux Go
   test tiers: the legacy jobs they mirrored in `pr.yml` and `pr-risk.yml`
   are retired (ga-96smfk.22; see
   [Legacy Tier Retirement](#legacy-tier-retirement-d2)), so the gate also
@@ -899,8 +899,9 @@ Required` requires them to have run remotely and passed.
     `TestPinnedDoltCLIMatchesContainerImage`. The release-target
     cross-compilation (formerly pr.yml's
     `check-release-target-cross-compilation`, `go build ./...` with
-    `CGO_ENABLED=0` per target) is a step of bazel.yml's `bazel-pure` lane
-    (`BAZEL_PURE`): `scripts/ci/bazel-release-cross-compile.sh` runs one
+    `CGO_ENABLED=0` per target) is bazel.yml's `bazel-release-cross` lane
+    (`BAZEL_RELEASE_CROSS`), split out of `bazel-pure` so it runs in
+    parallel with it: `scripts/ci/bazel-release-cross-compile.sh` runs one
     remote `bazel build //tools/bazel:release_cross`, every `go_library` and
     `go_binary` for each row of `scripts/ci/release-targets.txt`, plus
     `//tools/bazel:pure_bd_has_no_cgo_only_deps` (a pure bd must not link
@@ -910,7 +911,7 @@ Required` requires them to have run remotely and passed.
     equal to the toolchain's) and the golangci-lint linters `.golangci.yml`
     enables run as nogo (`//tools/nogo`) beside every compile of every Bazel
     lane: natively in `bazel test //... --config=ci`, and for every release
-    platform in the `bazel-pure` lane's release cross-compile
+    platform in the `bazel-release-cross` lane
     (engdocs/LINTING.md). The former
     `scripts-go-checks` (`Go checks (vet)`) and `pr-lint-wrapper`
     (`PR Lint (native|windows|darwin)`) jobs are retired.
@@ -1116,7 +1117,7 @@ scope, not this slice's.
   `scripts/ci/check-release-cross-compile.sh <group>`, which builds every
   target in its group sequentially and reports every failure before exiting
   non-zero, so a PR touching two platforms at once sees both failures in one
-  log instead of needing a per-target re-run. (Since retired: bazel.yml's `bazel-pure`
+  log instead of needing a per-target re-run. (Since retired: bazel.yml's `bazel-release-cross`
   lane builds the same manifest with Bazel, `--platforms` per target.)
 - **`advisory-reports` fold.** `build-examples` and `complexity-report` (both
   already advisory: neither was in ci-gate's `needs`/`CI_GATE_REQUIRED`)

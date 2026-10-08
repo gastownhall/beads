@@ -1327,9 +1327,10 @@ jobs:
           }
 
   # The Bazel lanes (bazel.yml): the only pre-merge run of every Linux Go
-  # test tier (PR core, pure-Go and js/wasm, the dolt-server lane, the
-  # embedded-Dolt, proxied-server and server-Dolt storage tiers that
-  # pr-risk.yml used to run, integration and the cmd/bd Dolt-server tier).
+  # test tier (PR core, pure-Go and js/wasm, the release cross-compile, the
+  # dolt-server lane, the embedded-Dolt, proxied-server and server-Dolt
+  # storage tiers that pr-risk.yml used to run, integration and the cmd/bd
+  # Dolt-server tier).
   # ci-gate requires each of them to have run remotely on rbe-west and
   # passed, on every pull_request and merge group: same-repo PRs and merge
   # groups in mode remote, fork and Dependabot PRs through rbe-west's mint
@@ -1406,6 +1407,7 @@ jobs:
             BAZEL
             BAZEL_TEST
             BAZEL_PURE
+            BAZEL_RELEASE_CROSS
             BAZEL_EMBEDDED
             BAZEL_INTEGRATION
             BAZEL_DOLTSERVER
@@ -1443,6 +1445,7 @@ jobs:
           # skipped, which passes only in the modes bazel-gate.sh allows.
           BAZEL_TEST: ${{ needs.bazel.outputs.bazel-test || 'skipped' }}
           BAZEL_PURE: ${{ needs.bazel.outputs.bazel-pure || 'skipped' }}
+          BAZEL_RELEASE_CROSS: ${{ needs.bazel.outputs.bazel-release-cross || 'skipped' }}
           BAZEL_EMBEDDED: ${{ needs.bazel.outputs.bazel-embedded || 'skipped' }}
           BAZEL_INTEGRATION: ${{ needs.bazel.outputs.bazel-integration || 'skipped' }}
           BAZEL_DOLTSERVER: ${{ needs.bazel.outputs.bazel-doltserver || 'skipped' }}
