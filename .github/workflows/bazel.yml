@@ -728,8 +728,15 @@ jobs:
     # they miss on the runner, so they get the larger GitHub-hosted one.
     # Fork modes (fork-ro/fork-rw) execute remotely but stay GitHub-hosted,
     # like every fork job: the runner is only a client.
+    #
+    # 4 vCPU, not the other lanes' 2: with every action a remote cache hit,
+    # this lane's `bazel test //... --config=ci` spent ~63 of 81s in
+    # client-side loading and analysis (1798 packages, 66k configured
+    # targets; critical path 7.65s, merge group 37721729916), which Bazel
+    # parallelizes across the client's cores. Revert to 2 vCPU if the A/B
+    # does not save at least 15s on that step.
     needs: rbe
-    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     # Remote execution goes to rbe-west (instance "oss", the Blacksmith-backed
     # worker pool shared with gascity). Skipped only in mode skip (same-repo
     # runs while RBE_WEST_WORKERS is unset).
@@ -2210,9 +2217,12 @@ jobs:
   package-mcp:
     name: Package Gate (MCP)
     needs: rbe
-    # 4 vCPU on purpose: pytest-xdist -n 8 measured ~2.7-3x on 4 CPUs
-    # (tools/f3 timing, 2026-10), well past 2 vCPU's ceiling.
-    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    # 8 vCPU with 16 xdist workers (BEADS_MCP_PYTEST_WORKERS below): pytest
+    # was 70s of this job at -n 8 on 4 vCPU (merge group 37721729916),
+    # dominated by per-test `bd init` fixture setup, which is CPU-bound.
+    # Was 4 vCPU / -n 8 (tools/f3 timing, 2026-10: ~2.7-3x on 4 CPUs);
+    # revert to that if the A/B does not save at least 15s.
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ inputs.package-gates == 'on' }}
     timeout-minutes: 30
     outputs:
@@ -2266,8 +2276,8 @@ jobs:
           echo "BEADS_TEST_BD_BINARY=$RUNNER_TEMP/bd-artifacts/bd-linux-gms-pure" >> "$GITHUB_ENV"
           # Defense in depth: nothing after this step needs the Bazel server
           # or its RBE client key (uv sync and pytest run PR-controlled
-          # code). Shutting down also frees the JVM's memory for the 8
-          # xdist workers that follow on this 4 vCPU runner.
+          # code). Shutting down also frees the JVM's memory for the 16
+          # xdist workers that follow on this 8 vCPU runner.
           bazel shutdown
           rm -rf "$RUNNER_TEMP/bazel-ci-secret"
 
@@ -2313,6 +2323,9 @@ jobs:
         if: ${{ steps.detect.outputs.mcp_package == 'true' }}
         env:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
+          # 16 workers on the 8 vCPU Blacksmith runner; package-mcp.sh's
+          # default 8 on the GitHub-hosted fallback.
+          BEADS_MCP_PYTEST_WORKERS: ${{ needs.rbe.outputs.mode == 'remote' && '16' || '8' }}
         run: make ci-package-mcp
 
       # Last step: the job's result as a workflow_call output for pr.yml's

@@ -506,6 +506,15 @@ jobs:
   # process creation, now parallel subtests), 27-58s to compile and link
   # ./cmd/bd's test binary, and about 25s for the rest. A second Windows leg
   # would pay the setup again to save about 20s, so it stays one leg.
+  #
+  # Runner-size A/B (2026-10-08): the Windows leg was the slowest Windows
+  # check at 129s on blacksmith-4vcpu-windows-2025 (merge group 37721729916),
+  # so it runs on 8 vCPU; the cache extraction and the ./cmd/bd test compile
+  # and link above are CPU-bound. It still restores main.yml's test-windows
+  # entries saved on 4 vCPU: the cache keys name runner.os/runner.arch, never
+  # the label, so nothing in an entry is size-specific
+  # (TestWindowsPreflightLegReachesSaverAcrossSizes). Revert to 4 vCPU if it
+  # does not save at least 15s.
   pr-preflight-platforms:
     name: PR preflight process (${{ matrix.os }})
     runs-on: ${{ matrix.runner }}
@@ -519,7 +528,7 @@ jobs:
             runner: blacksmith-6vcpu-macos-26
           - os: windows-latest
             expected_goos: windows
-            runner: blacksmith-4vcpu-windows-2025
+            runner: blacksmith-8vcpu-windows-2025
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -538,8 +547,8 @@ jobs:
           restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
       # F7b review (S2): restore-only non-race Go build cache, seeded by the
-      # push-to-main saver on the exact same Blacksmith label (Windows:
-      # main.yml's test-windows; macOS: main.yml's
+      # push-to-main saver on the same Blacksmith OS image (Windows:
+      # main.yml's test-windows, on 4 vCPU; macOS: main.yml's
       # blacksmith-macos-go-build-cache) so the cold cmd/bd compile below
       # (the real long pole, 250-300s uncached) gets a true cache hit instead
       # of starting cold. GOCACHE must match the seeder's exactly, and

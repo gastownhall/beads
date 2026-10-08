@@ -184,8 +184,10 @@ jobs:
 
       # F7b review fix (S2): warms the SAME non-race GOCACHE namespace that
       # pr-preflight-platforms'/worktree-remove-windows'/test-windows-liveness'
-      # Windows legs restore from, on the exact same runner selection
-      # (blacksmith-4vcpu-windows-2025), so their cold `cmd/bd` test compiles
+      # Windows legs restore from, on the same Windows image
+      # (blacksmith-4vcpu-windows-2025; pr-preflight-platforms' leg runs on
+      # 8 vCPU, which shares these entries because no key names the runner
+      # size), so their cold `cmd/bd` test compiles
       # (the real long pole; see pr-preflight-platforms' S2 comment) get a
       # true cache hit. Confirmed to run under Git Bash on Windows (reviewer
       # verification).

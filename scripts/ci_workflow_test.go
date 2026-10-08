@@ -483,8 +483,8 @@ func TestPRWorkflowExercisesWindowsBenchmarkEnvScrubbing(t *testing.T) {
 		t.Errorf("pr-preflight-platforms matrix os = %v, want the macOS and Windows hosts (Linux runs under Bazel)", got)
 	}
 	for _, tuple := range job.Strategy.Matrix.Include {
-		if tuple.Runner != platformsMatrixRunners[tuple.OS] {
-			t.Errorf("pr-preflight-platforms %s leg runner = %q, want %q", tuple.OS, tuple.Runner, platformsMatrixRunners[tuple.OS])
+		if tuple.Runner != preflightMatrixRunners[tuple.OS] {
+			t.Errorf("pr-preflight-platforms %s leg runner = %q, want %q", tuple.OS, tuple.Runner, preflightMatrixRunners[tuple.OS])
 		}
 	}
 	if job.If != "" {
@@ -1940,11 +1940,11 @@ const bazelIntegIf = "${{ (needs.rbe.outputs.enabled == 'true' || needs.rbe.outp
 // caller left package-gates at its default "off".
 const bazelPackageGatesIf = "${{ inputs.package-gates == 'on' }}"
 
-// F3: the package gates' runner. 4 vCPU, not bazel.yml's usual 2: pytest-xdist
-// -n 8 is pinned to measured timing on a 4 vCPU runner (tools/f3). Mode
-// remote only: the gates take no rbe-fork certificate, so fork modes
+// F3: the package gates' runners (bazelPackageRunsOn, in
+// ci_blacksmith_runner_test.go with the other runner sizes) are larger than
+// bazel.yml's usual 2 vCPU because they run pytest/npm on the runner itself.
+// Mode remote only: the gates take no rbe-fork certificate, so fork modes
 // (enabled too) build bd with go build on a GitHub-hosted runner, as before.
-const bazelPackageRunsOn = "${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
 
 // rbe-prewarm's bespoke if (TestBazelWorkflowJobsAndExecutionMode): mode
 // remote only (B1, security review of bdef342d5 - was remote or fork-rw).
@@ -2110,7 +2110,7 @@ func TestBazelWorkflowJobsAndExecutionMode(t *testing.T) {
 	// runner. Only mode remote gets the secrets; fork modes get
 	// BAZEL_FORK_REMOTE (setup-bazel mints the certificate), cache runs
 	// BAZEL_FORK_CACHE.
-	const wantRunsOn = "${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
+	wantRunsOn := bazelLaneRunsOn
 	// Local-capable lanes skip only in mode skip (same-repo, RBE_WEST_WORKERS
 	// unset); remote-only lanes (27 race processes and more, an hour or more
 	// on a GitHub-hosted runner, for tests the Go jobs already run there)
@@ -2148,12 +2148,15 @@ func TestBazelWorkflowJobsAndExecutionMode(t *testing.T) {
 		if !reflect.DeepEqual([]string(job.Needs), []string{bazelRBEJobName}) {
 			t.Errorf("%s needs = %v, want [%s]", name, job.Needs, bazelRBEJobName)
 		}
-		// F3: the package gates use a 4 vCPU runner (pytest-xdist -n 8) and
+		// F3: the package gates use larger runners (bazelPackageRunsOn) and
 		// their own if (the caller's package-gates input, not the rbe job's
 		// mode - they never skip for execution-mode reasons).
 		wantJobRunsOn, wantJobIf, wantJobSetupEnv := wantRunsOn, wantIf, wantSetupEnv
+		if name == bazelJobName {
+			wantJobRunsOn = bazelTestLaneRunsOn
+		}
 		if bazelPackageJobs[name] {
-			wantJobRunsOn, wantJobIf, wantJobSetupEnv = bazelPackageRunsOn, bazelPackageGatesIf, wantPackageSetupEnv
+			wantJobRunsOn, wantJobIf, wantJobSetupEnv = bazelPackageRunsOn[name], bazelPackageGatesIf, wantPackageSetupEnv
 		} else if bazelRemoteOnlyJobs[name] {
 			wantJobIf = wantRemoteOnlyIf
 		} else if name == bazelIntegJobName || name == bazelCmdDoltJobName {
@@ -2181,21 +2184,26 @@ func TestBazelWorkflowJobsAndExecutionMode(t *testing.T) {
 	}
 }
 
-// F3: bazelPackageRunsOn's comment and the package-mcp job's 4 vCPU runner
+// F3: bazelPackageRunsOn's comment and the package-mcp job's runner size
 // are both premised on mcp_pytest() in package-mcp.sh passing an explicit
-// "-n 8" (not "-n auto", which would reintroduce the CPU-count/cgroup-quota
-// mismatch -n 8 was pinned to avoid), and on pytest-xdist itself being a
-// locked dev dependency so that worker count is reproducible across CI runs.
-// Neither half of that premise is checked by any other policy test, so pin
-// both here directly against the script and the MCP package's manifest/lock.
+// worker count (not "-n auto", which would reintroduce the CPU-count/
+// cgroup-quota mismatch the explicit count was pinned to avoid): the
+// default 8, or BEADS_MCP_PYTEST_WORKERS, which bazel.yml's package-mcp sets
+// to 16 exactly when it runs on its 8 vCPU Blacksmith runner
+// (TestBlacksmithBazelRunnerSizes). It is also premised on pytest-xdist
+// itself being a locked dev dependency so that worker count is reproducible
+// across CI runs. Pin both here directly against the script and the MCP
+// package's manifest/lock.
 func TestMCPPytestWorkerCountPinned(t *testing.T) {
 	root := sourceRepoRoot(t)
 	script := readPolicyFile(t, root, "scripts/ci/package-mcp.sh")
-	if !strings.Contains(script, "pytest -n 8") {
-		t.Errorf("scripts/ci/package-mcp.sh mcp_pytest() does not pass an explicit -n 8")
+	for _, want := range []string{`local workers="${BEADS_MCP_PYTEST_WORKERS:-8}"`, `uv run pytest -n "$workers"`} {
+		if !strings.Contains(script, want) {
+			t.Errorf("scripts/ci/package-mcp.sh mcp_pytest() is missing %q (an explicit worker count, default 8)", want)
+		}
 	}
 	if strings.Contains(script, "-n auto") {
-		t.Errorf("scripts/ci/package-mcp.sh mcp_pytest() uses -n auto; want the pinned -n 8")
+		t.Errorf("scripts/ci/package-mcp.sh mcp_pytest() uses -n auto; want an explicit worker count")
 	}
 	pyproject := readPolicyFile(t, root, "integrations/beads-mcp/pyproject.toml")
 	if !regexp.MustCompile(`(?m)^\s*"pytest-xdist[><=]`).MatchString(pyproject) {
