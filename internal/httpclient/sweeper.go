@@ -74,7 +74,7 @@ func (s *httpSweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (res
 	// the wisps-plane tier, or setting ProtectLiveDependents or Limit, asks
 	// for something only a server advertising the matching token answers, and
 	// an older server predating it answers with a guaranteed 400
-	// unknown_value/unknown_parameter. Checked BEFORE the dial so a caller
+	// invalid_value/unknown_parameter. Checked BEFORE the dial so a caller
 	// never pays for a round trip that 400s anyway, and never silently gets an
 	// unprotected or unbounded sweep from a server too old to honor the
 	// request as asked.

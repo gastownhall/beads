@@ -7965,7 +7965,7 @@ components:
             than silently answering `unknown_parameter` for all four,
             `issues.sweep.wispsPlane`, which announces that
             `POST /v0/beads/issues:sweep` accepts the `wisps-plane` value of
-            `tier` rather than silently answering `unknown_value`,
+            `tier` rather than silently answering `invalid_value`,
             `issues.sweep.liveDependents`, which announces that the same
             operation accepts `protect_live_dependents` and answers
             `skipped.live_dependent` rather than silently answering
@@ -8545,7 +8545,7 @@ components:
             `wisps-plane` is a THIRD, wider tier: it clears the whole wisps
             table (ephemeral beads) AND any durable bead with no history row,
             in one pass. Behind the `issues.sweep.wispsPlane` behavior token:
-            an older server answers `unknown_value` for this member, since it
+            an older server answers `invalid_value` for this member, since it
             predates the token and knows only the first two values.
         actor:
           type: string

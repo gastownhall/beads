@@ -124,7 +124,7 @@ const CapIssuesCountScope = "issues.count.scope"
 // a third, wider tier that clears the whole wisps table plus any durable bead
 // with no history row, in one pass (issueops.SweepWispsPlane). An older
 // server predating this token answers the value with a `400
-// invalid_argument`/`unknown_value` naming the member, the same per-value
+// invalid_argument`/`invalid_value` naming the member, the same per-value
 // refusal CapIssuesCountScope's doc describes for a whole parameter. The
 // client MUST check this token before sending `tier: "wisps-plane"` to a
 // server that may predate it.

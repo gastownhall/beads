@@ -168,10 +168,10 @@ const CapBatchApplyLarge = "issues.batchApplyLarge"
 // to it by TestTheProjectIdentityVocabularyMatchesTheServer). sweeper.go's
 // tier mapping checks this token before mapping issueops.SweepWispsPlane onto
 // the wire, refusing locally with a typed capability error rather than
-// dialing a server that would answer the value with unknown_value. See
+// dialing a server that would answer the value with invalid_value. See
 // W-SweepRequest.ProtectLiveDependents and W-SweepRequest.Limit (encode/
 // ledger.go) for the sibling S4 members retired the same way; the tier value
-// itself carries no ledger row because it narrows an existing enum rather
+// itself carries no ledger row because it widens an existing enum rather
 // than adding a request member.
 const CapSweepWispsPlane = "issues.sweep.wispsPlane"
 
