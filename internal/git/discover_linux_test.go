@@ -340,3 +340,132 @@ func TestGitContextInProcessMatchesGitSubprocess(t *testing.T) {
 		})
 	}
 }
+
+// isolateGitConfigEnv points git and the in-process readers at the same,
+// controlled config files: no system config, an empty global file.
+func isolateGitConfigEnv(t *testing.T) (global string) {
+	t.Helper()
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(name, "GIT_") {
+			t.Setenv(name, "")
+			if err := os.Unsetenv(name); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	global = filepath.Join(home, "global.gitconfig")
+	if err := os.WriteFile(global, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	return global
+}
+
+func gitRemoteListsAny(t *testing.T, dir string) bool {
+	t.Helper()
+	cmd := exec.Command("git", "remote")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	return err == nil && strings.TrimSpace(string(out)) != ""
+}
+
+// TestHasRemoteInProcessMatchesGitRemote: wherever HasRemoteInProcess
+// answers, it is what `git remote` (the auto-backup probe) reports.
+func TestHasRemoteInProcessMatchesGitRemote(t *testing.T) {
+	f := newDiscoveryFixture(t)
+	global := isolateGitConfigEnv(t)
+	withRemote := filepath.Join(t.TempDir(), "with-remote")
+	runFixtureGit(t, f.env, t.TempDir(), "init", "-q", withRemote)
+	runFixtureGit(t, f.env, withRemote, "remote", "add", "origin", "https://example.invalid/r.git")
+	pushDefaultOnly := filepath.Join(t.TempDir(), "push-default")
+	runFixtureGit(t, f.env, t.TempDir(), "init", "-q", pushDefaultOnly)
+	runFixtureGit(t, f.env, pushDefaultOnly, "config", "remote.pushDefault", "origin")
+	runFixtureGit(t, f.env, f.main, "remote", "add", "up", "https://example.invalid/m.git")
+
+	setGlobal := func(t *testing.T, content string) {
+		t.Helper()
+		if err := os.WriteFile(global, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.WriteFile(global, nil, 0o600) })
+	}
+	for _, tc := range []struct {
+		name, dir, global string
+		wantDecline       bool
+	}{
+		{name: "no remote", dir: f.nested},
+		{name: "local remote", dir: withRemote},
+		{name: "remote.pushDefault only", dir: pushDefaultOnly},
+		{name: "linked worktree sees the common config", dir: filepath.Join(f.worktree, "w")},
+		{name: "submodule (origin in its own config)"},
+		{name: "no repository", dir: filepath.Join(f.root, "norepo", "x")},
+		{name: "remote in global config", dir: f.nested, global: "[remote \"g\"]\n\turl = /g\n"},
+		{name: "include in global config", dir: f.nested, global: "[include]\n\tpath = /dev/null\n", wantDecline: true},
+		{name: "malformed global config", dir: f.nested, global: "[ user ]\n", wantDecline: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := tc.dir
+			if dir == "" {
+				dir = f.submodule
+			}
+			if tc.global != "" {
+				setGlobal(t, tc.global)
+			}
+			has, ok := HasRemoteInProcess(dir)
+			if ok == tc.wantDecline {
+				t.Fatalf("HasRemoteInProcess(%s) ok=%v, want ok=%v", dir, ok, !tc.wantDecline)
+			}
+			if want := gitRemoteListsAny(t, dir); ok && has != want {
+				t.Fatalf("HasRemoteInProcess(%s) = %v, git remote lists any = %v", dir, has, want)
+			}
+		})
+	}
+	t.Run("GIT_CONFIG_PARAMETERS declines", func(t *testing.T) {
+		t.Setenv("GIT_CONFIG_PARAMETERS", "'remote.x.url'='/x'")
+		if _, ok := HasRemoteInProcess(f.nested); ok {
+			t.Fatal("HasRemoteInProcess answered despite command-line config")
+		}
+	})
+	t.Run("process cwd", func(t *testing.T) {
+		t.Chdir(withRemote)
+		if has, ok := HasRemoteInProcess(""); !ok || !has {
+			t.Fatalf("HasRemoteInProcess(\"\") = %v, %v; want true, true", has, ok)
+		}
+	})
+}
+
+// TestCommonDirInProcessMatchesGit: the auto-backup RepoContext asks
+// `git -C <.beads> rev-parse --git-common-dir`; the in-process answer has
+// git's spelling.
+func TestCommonDirInProcessMatchesGit(t *testing.T) {
+	f := newDiscoveryFixture(t)
+	isolateGitConfigEnv(t)
+	beadsDir := filepath.Join(f.main, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{
+		f.main, beadsDir, filepath.Join(f.main, "a", "b"), f.worktree, f.submodule,
+		filepath.Join(f.root, "link", "a"), filepath.Join(f.root, "norepo", "x"),
+	} {
+		t.Run(strings.TrimPrefix(dir, f.root), func(t *testing.T) {
+			got, isRepo, ok := CommonDirInProcess(dir)
+			if !ok {
+				t.Fatalf("CommonDirInProcess(%s) declined", dir)
+			}
+			cmd := exec.Command("git", "-C", dir, "rev-parse", "--git-common-dir")
+			out, err := cmd.Output()
+			if (err == nil) != isRepo {
+				t.Fatalf("CommonDirInProcess(%s) isRepo=%v, git err=%v", dir, isRepo, err)
+			}
+			if want := strings.TrimSpace(string(out)); isRepo && got != want {
+				t.Fatalf("CommonDirInProcess(%s) = %q, git = %q", dir, got, want)
+			}
+		})
+	}
+}

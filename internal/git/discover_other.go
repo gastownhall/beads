@@ -8,3 +8,13 @@ package git
 func discoverGitInProcess() (revParseResult, bool) {
 	return revParseResult{}, false
 }
+
+// CommonDirInProcess is linux-only; see discoverGitInProcess.
+func CommonDirInProcess(string) (commonDir string, isRepo, ok bool) {
+	return "", false, false
+}
+
+// HasRemoteInProcess is linux-only; see discoverGitInProcess.
+func HasRemoteInProcess(string) (has, ok bool) {
+	return false, false
+}

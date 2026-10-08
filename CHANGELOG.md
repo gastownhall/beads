@@ -124,7 +124,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ownership subject to `safe.directory`). The `git config user.name` actor
   fallback is resolved only when a command actually needs an actor, so
   read-only commands such as `bd list` and `bd show` start no git process
-  for it. The actor's value and priority order are unchanged.
+  for it. The actor's value and priority order are unchanged. In an embedded
+  workspace with `backup.enabled` unset, the per-command auto-backup check
+  ("is there a git remote?") is likewise answered from the git config files
+  when they are plain (no includes, no command-line config), instead of
+  running `git -C .beads rev-parse --git-common-dir` and `git remote`.
 
 - `bd create --graph` now stores a plan whose path from a node's parent to
   the node runs through a `waits-for` edge; the graph-only preflight that

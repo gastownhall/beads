@@ -56,11 +56,20 @@ func (r *gitExecRecorder) run(t *testing.T, bd, dir string, args ...string) (str
 		}
 		env = append(env, kv)
 	}
-	// backup.enabled is set explicitly: left at its default, embedded-mode
-	// auto-backup decides per command whether a git remote exists, which is
-	// a post-command probe of its own and not the startup path pinned here.
+	// backup.enabled stays at its default, so embedded auto-backup asks
+	// whether a git remote exists after every command (isBackupAutoEnabled).
+	// Global and system git config are pinned (empty, none) so the answer
+	// does not depend on the host's ~/.gitconfig — an include there would
+	// rightly send that probe to `git remote`.
 	env = envWithout(envWithout(env, "BD_BACKUP_ENABLED"), "BEADS_BACKUP_ENABLED")
-	cmd.Env = append(env, "BD_BACKUP_ENABLED=false",
+	for _, name := range []string{"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"} {
+		env = envWithout(env, name)
+	}
+	emptyGlobal := filepath.Join(r.shimDir, "empty.gitconfig")
+	if err := os.WriteFile(emptyGlobal, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd.Env = append(env, "GIT_CONFIG_GLOBAL="+emptyGlobal, "GIT_CONFIG_NOSYSTEM=1",
 		"PATH="+r.shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	out, err := cmd.Output()
 	if err != nil {
@@ -83,11 +92,13 @@ func (r *gitExecRecorder) run(t *testing.T, bd, dir string, args ...string) (str
 	return string(out), calls
 }
 
-// TestEmbeddedReadOnlyCommandsSpawnNoGit pins the startup cost tools that call
-// bd by the hundred depend on: a read-only command resolves the repository
-// in-process and never needs the actor, so it runs no git at all — from the
-// main checkout and from a linked worktree sharing its database. A write still
-// resolves the actor from git config user.name, lazily and to the same value.
+// TestEmbeddedReadOnlyCommandsSpawnNoGit pins the per-call cost tools that
+// call bd by the hundred depend on: a read-only command resolves the
+// repository in-process, never needs the actor, and decides embedded
+// auto-backup (default backup.enabled, with and without a git remote) without
+// git, so it runs no git at all — from the main checkout and from a linked
+// worktree sharing its database. A write still resolves the actor from git
+// config user.name, lazily and to the same value.
 func TestEmbeddedReadOnlyCommandsSpawnNoGit(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -114,24 +125,37 @@ func TestEmbeddedReadOnlyCommandsSpawnNoGit(t *testing.T) {
 	}
 
 	rec := newGitExecRecorder(t)
-	for _, location := range []struct{ name, dir string }{
-		{"main checkout", dir},
-		{"linked worktree", worktree},
-	} {
-		for _, args := range [][]string{
-			{"list", "--json"},
-			{"show", issue.ID, "--json"},
+	reads := func(phase string) {
+		t.Helper()
+		for _, location := range []struct{ name, dir string }{
+			{"main checkout", dir},
+			{"linked worktree", worktree},
 		} {
-			out, calls := rec.run(t, bd, location.dir, args...)
-			if !strings.Contains(out, issue.ID) {
-				t.Fatalf("%s: bd %s did not find %s:\n%s", location.name, args[0], issue.ID, out)
-			}
-			if len(calls) != 0 {
-				t.Errorf("%s: bd %s spawned %d git process(es), want 0:\n%s",
-					location.name, args[0], len(calls), strings.Join(calls, "\n"))
+			for _, args := range [][]string{
+				{"list", "--json"},
+				{"show", issue.ID, "--json"},
+			} {
+				out, calls := rec.run(t, bd, location.dir, args...)
+				if !strings.Contains(out, issue.ID) {
+					t.Fatalf("%s, %s: bd %s did not find %s:\n%s", phase, location.name, args[0], issue.ID, out)
+				}
+				if len(calls) != 0 {
+					t.Errorf("%s, %s: bd %s spawned %d git process(es), want 0:\n%s",
+						phase, location.name, args[0], len(calls), strings.Join(calls, "\n"))
+				}
 			}
 		}
 	}
+	// No git remote: auto-backup stays off, decided without running git.
+	reads("no git remote")
+	// With a remote, auto-backup turns on (still decided in-process); the
+	// first read may run the backup itself, which needs no git either.
+	addRemote := gitCommand("remote", "add", "origin", "https://example.invalid/gitcalls.git")
+	addRemote.Dir, addRemote.Env = dir, bdEnv(dir)
+	if out, err := addRemote.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, out)
+	}
+	reads("git remote configured")
 
 	// Positive control for the shim, and the deferred actor's value: a write
 	// asks git for user.name exactly once and records it as before.
