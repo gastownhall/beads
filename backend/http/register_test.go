@@ -143,7 +143,7 @@ func TestOpenWithHonorsAProvidedCredential(t *testing.T) {
 // is what opts OUT of this, not the zero value.
 func TestOpenWithFallsBackToTheAmbientLadderByDefault(t *testing.T) {
 	hermeticEnv(t)
-	t.Setenv(bdhttp.TokenEnv, "ambient-token")
+	t.Setenv(bdhttp.TokenEnv, "127.0.0.1=ambient-token")
 	server := newRecordingServer(t)
 	registerForTest(t, bdhttp.Options{HTTPClient: server.Client()})
 	beadsDir := connectedWorkspace(t, server)

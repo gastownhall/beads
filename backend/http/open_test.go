@@ -30,7 +30,7 @@ import (
 // for the benefit of a lookup.
 func TestOpenNeedsNoWorkspaceOnDisk(t *testing.T) {
 	hermeticEnv(t)
-	t.Setenv(bdhttp.TokenEnv, "direct-token")
+	t.Setenv(bdhttp.TokenEnv, "127.0.0.1=direct-token")
 	server := newRecordingServer(t)
 
 	store, err := bdhttp.Open(context.Background(), server.target(t), bdhttp.Options{HTTPClient: server.Client()})
@@ -54,7 +54,7 @@ func TestOpenNeedsNoWorkspaceOnDisk(t *testing.T) {
 // Register ever having run.
 func TestOpenWithoutRegistrationStillDials(t *testing.T) {
 	hermeticEnv(t)
-	t.Setenv(bdhttp.TokenEnv, "unregistered")
+	t.Setenv(bdhttp.TokenEnv, "127.0.0.1=unregistered")
 	server := newRecordingServer(t)
 
 	store, err := bdhttp.Open(context.Background(), server.target(t), bdhttp.Options{HTTPClient: server.Client()})
@@ -158,7 +158,7 @@ func TestHandshakeReportsAWrongServer(t *testing.T) {
 // precedes would verify a server the store then cannot reach.
 func TestHandshakeUsesTheSameLadderOpenWouldUse(t *testing.T) {
 	hermeticEnv(t)
-	t.Setenv(bdhttp.TokenEnv, "probe-token")
+	t.Setenv(bdhttp.TokenEnv, "127.0.0.1=probe-token")
 	server := newRecordingServer(t)
 
 	if _, err := bdhttp.Handshake(context.Background(), server.target(t), bdhttp.Options{HTTPClient: server.Client()}); err != nil {
@@ -218,7 +218,7 @@ func TestTheActivationSidecarRoundTrips(t *testing.T) {
 // reimplementing it.
 func TestABearerProviderIsBuildableFromThePublicSurface(t *testing.T) {
 	hermeticEnv(t)
-	t.Setenv(bdhttp.TokenEnv, "ladder-token")
+	t.Setenv(bdhttp.TokenEnv, "127.0.0.1=ladder-token")
 	server := newRecordingServer(t)
 
 	var provider bdhttp.CredentialProvider = bdhttp.NewBearerProvider(server.target(t).BaseURL)

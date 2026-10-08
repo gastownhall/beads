@@ -159,7 +159,7 @@ func TestGuardInsecureCredentialDelegatesRefreshAndSource(t *testing.T) {
 // actually reaches this guard.
 func TestDialWithWiresAllowInsecureCredentialThroughToTheGuard(t *testing.T) {
 	clearCredentialEnvironment(t)
-	t.Setenv(TokenEnv, "integration-token")
+	t.Setenv(TokenEnv, nonLoopbackTestHost+"=integration-token")
 	server := &contextServer{body: v0Context("proj-insecure-wiring")}
 	srv := server.start(t)
 
@@ -199,7 +199,7 @@ func TestDialWithWiresAllowInsecureCredentialThroughToTheGuard(t *testing.T) {
 // set for every later command too, which is exactly the gap this closes.
 func TestDialWithWiresTargetAllowInsecureCredentialThroughToTheGuard(t *testing.T) {
 	clearCredentialEnvironment(t)
-	t.Setenv(TokenEnv, "integration-token")
+	t.Setenv(TokenEnv, nonLoopbackTestHost+"=integration-token")
 	server := &contextServer{body: v0Context("proj-insecure-wiring-target")}
 	srv := server.start(t)
 
