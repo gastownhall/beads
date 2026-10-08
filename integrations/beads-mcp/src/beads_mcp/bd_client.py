@@ -524,7 +524,12 @@ class BdCliClient(BdClientBase):
         Returns:
             Created issue
         """
-        args = ["create", params.title, "-p", str(params.priority), "-t", params.issue_type]
+        # --title, not a bare positional: an option-shaped title (e.g.
+        # "--actor=x") would otherwise be parsed by bd as a flag instead of
+        # literal content, the same argv-injection class fixed for
+        # comment/note in _run_text_command (GH#7317). bd create exposes
+        # --title for exactly this case.
+        args = ["create", "--title", params.title, "-p", str(params.priority), "-t", params.issue_type]
 
         if params.description:
             args.extend(["-d", params.description])
