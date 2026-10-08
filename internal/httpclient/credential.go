@@ -27,11 +27,13 @@ import (
 type CredentialProvider = wire.CredentialProvider
 
 const (
-	// TokenEnv carries the bearer token itself, the highest rung.
+	// TokenEnv carries the bearer token itself, the highest rung, scoped to one
+	// server: "host[:port]=token" (see scopedEnvValue).
 	// #nosec G101 -- the NAME of an environment variable, not a credential.
 	TokenEnv = "BEADS_HTTP_TOKEN"
 	// TokenCommandEnv names a helper that prints a token, either bare or in the
-	// kubectl ExecCredential envelope {"token","expirationTimestamp"}.
+	// kubectl ExecCredential envelope {"token","expirationTimestamp"}, scoped the
+	// same way: "host[:port]=command".
 	// #nosec G101 -- the NAME of an environment variable, not a credential.
 	TokenCommandEnv = "BEADS_HTTP_TOKEN_COMMAND"
 )
@@ -42,6 +44,12 @@ const (
 // the tip OSS server's loopback-trust posture and a legitimate answer, not a
 // failure.
 //
+// Every rung is scoped to the server it authorizes against: the credentials
+// file by its section key, the two env rungs by the host pattern their value
+// carries. The server comes from the workspace's http_target.json, which a
+// cloned repo can supply, so an unscoped rung would hand an operator's token to
+// whatever server that file names.
+//
 // The ladder fails closed. A rung the operator configured that then errors
 // aborts the request; it never falls through to a lower rung, because the
 // difference between a broken token command and an unauthenticated request is
@@ -50,8 +58,10 @@ const (
 // The resolved token is held in memory for the life of the provider and is
 // never logged: the only place it appears is the Authorization header.
 type BearerProvider struct {
-	// endpoint is the server this provider authorizes against, rendered for the
-	// posture warning only. host/port key the credentials-file rung.
+	// base is the server this provider authorizes against; the env rungs match
+	// their host pattern against it. endpoint renders it for the posture warning
+	// only. host/port key the credentials-file rung.
+	base     *url.URL
 	endpoint string
 	host     string
 	port     int
@@ -75,7 +85,8 @@ func NewBearerProvider(base *url.URL) *BearerProvider {
 	if base == nil {
 		return p
 	}
-	p.endpoint = base.Redacted()
+	p.base = base
+	p.endpoint = withoutUserinfo(base).String()
 	p.host = base.Hostname()
 	p.port = endpointPort(base)
 	p.insecure = base.Scheme == "http" && !configfile.IsLocalHostString(p.host)
@@ -182,8 +193,8 @@ func (p *BearerProvider) Source() string {
 // both when the ladder is unconfigured).
 func (p *BearerProvider) resolve(ctx context.Context) (token, source string, err error) {
 	cred, ok, err := creds.ResolveLadder(ctx,
-		envTokenSource{Var: TokenEnv},
-		commandTokenSource{Var: TokenCommandEnv},
+		envTokenSource{Var: TokenEnv, Base: p.base},
+		commandTokenSource{Var: TokenCommandEnv, Base: p.base},
 		credentialsFileTokenSource{Host: p.host, Port: p.port},
 	)
 	if err != nil {
@@ -211,35 +222,98 @@ func (p *BearerProvider) warnInsecure() {
 // envTokenSource is the token-in-the-environment rung. The value is read at
 // resolution time rather than at construction, so Refresh sees a token the
 // process was handed after this provider was built.
-type envTokenSource struct{ Var string }
+type envTokenSource struct {
+	Var  string
+	Base *url.URL
+}
 
 func (s envTokenSource) Name() string { return s.Var }
 
 func (s envTokenSource) Resolve(context.Context) (creds.Credential, bool, error) {
-	value := strings.TrimSpace(os.Getenv(s.Var))
-	if value == "" {
-		return creds.Credential{}, false, nil
+	value, ok, err := scopedEnvValue(s.Var, "token", s.Base)
+	if err != nil || !ok {
+		return creds.Credential{}, false, err
 	}
 	return creds.Credential{Value: value, Kind: creds.KindIdentity, Source: s.Var}, true, nil
 }
 
 // commandTokenSource runs an operator-named helper and reads a token from its
 // stdout — the credential-process idiom bd already uses for database passwords.
+// A helper scoped to another server is not run at all.
 //
 // The helper owns its own error text: internal/creds folds the helper's stderr
 // into the failure, exactly as it does on the postgres ladder, so a helper must
 // keep secrets off stderr the way `bd __gw-credential` does with its canned
 // messages.
-type commandTokenSource struct{ Var string }
+type commandTokenSource struct {
+	Var  string
+	Base *url.URL
+}
 
 func (s commandTokenSource) Name() string { return s.Var }
 
 func (s commandTokenSource) Resolve(ctx context.Context) (creds.Credential, bool, error) {
-	command := strings.TrimSpace(os.Getenv(s.Var))
-	if command == "" {
-		return creds.Credential{}, false, nil
+	command, ok, err := scopedEnvValue(s.Var, "command", s.Base)
+	if err != nil || !ok {
+		return creds.Credential{}, false, err
 	}
 	return creds.CommandSource{Command: command, Kind: creds.KindIdentity, Label: s.Var}.Resolve(ctx)
+}
+
+// scopedEnvValue reads one of the env rungs, which take CAFileEnv's host-scoped
+// syntax, "host[:port]=value", and match it with the same caHostMatches: a
+// pattern with no port names the host on any port, one with a port names that
+// host:port alone. It returns the value only when the pattern names base. An
+// unset variable is not configured; so is a well-formed one scoped to another
+// server, which falls through to the next rung exactly as CAFileEnv falls
+// through to the sidecar. A malformed value — the bare form included — is an
+// error, so the ladder fails closed on it rather than falling through. A bare
+// token that contains "=" can still parse as a pattern naming no real server;
+// that fails safe, since the token then goes nowhere.
+func scopedEnvValue(name, what string, base *url.URL) (string, bool, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return "", false, nil
+	}
+	pattern, value, err := parseScopedEnv(raw, what)
+	if err != nil {
+		return "", false, err
+	}
+	matches, err := caHostMatches(pattern, Target{BaseURL: base})
+	if err != nil {
+		// The pattern parsed above, so what failed is the target's own host,
+		// which carries no secret.
+		return "", false, err
+	}
+	if !matches {
+		return "", false, nil
+	}
+	return value, true, nil
+}
+
+// parseScopedEnv splits a host-scoped env value on its FIRST "=": a host
+// pattern never contains one, and a token (base64 padding) or a command (a
+// --flag=value) may. Nothing from raw is echoed into an error. The value is a
+// credential, and a bare token that happens to contain "=" would put part of
+// itself in the pattern half.
+func parseScopedEnv(raw, what string) (hostPattern, value string, err error) {
+	want := fmt.Sprintf("want host[:port]=%s, e.g. serve.example.com=<%s> or serve.example.com:8443=<%s> (the value is not echoed)", what, what, what)
+	eq := strings.Index(raw, "=")
+	if eq < 0 {
+		return "", "", fmt.Errorf("an unscoped %s would be used for whatever server the workspace's %s names; %s", what, TargetFileName, want)
+	}
+	hostPattern = strings.TrimSpace(raw[:eq])
+	value = strings.TrimSpace(raw[eq+1:])
+	if hostPattern == "" || value == "" {
+		return "", "", fmt.Errorf("nothing on one side of the first \"=\"; %s", want)
+	}
+	if strings.HasSuffix(hostPattern, ":") {
+		return "", "", fmt.Errorf("the host pattern ends with \":\" and no port; %s", want)
+	}
+	if _, _, splitErr := splitCAHostPort(hostPattern, ""); splitErr != nil {
+		return "", "", fmt.Errorf("the text before the first \"=\" is not a host[:port]; %s", want)
+	}
+	return hostPattern, value, nil
 }
 
 // credentialsFileTokenSource reads the bearer from the shared credentials file's

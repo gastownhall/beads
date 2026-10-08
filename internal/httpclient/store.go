@@ -98,11 +98,25 @@ func NewFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, e
 
 // NewReadOnlyFromConfig opens the workspace for a read-only command.
 //
-// It is the same store: every write on this backend is either served by the
-// server (which enforces its own posture) or refuses, so there is no local
-// mutable state a read-only mode would need to protect. The two hooks stay
-// distinct because backends.Register requires both and because a later
-// read-intent handshake belongs here rather than in a caller.
+// It is the same store, WRITABLE, and that is the contract cmd/bd needs rather
+// than a gap. backends.Backend has one read-only hook and cmd/bd opens two
+// postures through it: the root pre-run opens every CLASSIFIED read command
+// here — `bd ready --claim` among them, which claims through the store it is
+// handed — and the non-mutating opens (previews, cross-repo hydration, doctor)
+// open here too. The embedded arm splits the two (OpenForReadOnlyCommand stays
+// writable, OpenReadOnly refuses), but a registered backend gets only this hook,
+// so refusing writes here would break `bd ready --claim` on this backend. What
+// keeps strict --readonly and a preview from writing here is cmd/bd's own
+// chokepoints (CheckReadonly, the preview RunEs), and
+// openNonMutatingStoreFromConfig names this arm as the exception to its
+// refuses-writes invariant. TestReadOnlyOpenServesTheClaimBdReadyMakes pins it.
+//
+// The two hooks stay distinct because backends.Register requires both and
+// because a later read-intent handshake belongs here rather than in a caller.
+// The follow-up that closes the exception is a third backends.Backend hook,
+// OpenNonMutating, for openNonMutatingStoreFromConfig to call: a preview or a
+// doctor read would then get a store that refuses writes, while the classified
+// reads keep this one.
 func NewReadOnlyFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
 	return open(ctx, beadsDir)
 }

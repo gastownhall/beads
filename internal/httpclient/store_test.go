@@ -15,6 +15,8 @@ import (
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // fakeWire answers the handshake and nothing else.
@@ -420,5 +422,44 @@ func TestOpenDialsThroughTheRegisteredWire(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, LocalMetadataFileName)); err != nil {
 		t.Errorf("local metadata not written beside the sidecar: %v", err)
+	}
+}
+
+// TestReadOnlyOpenServesTheClaimBdReadyMakes pins the posture
+// NewReadOnlyFromConfig documents: the read-only open is writable. cmd/bd opens
+// every classified read command through backends.Backend.OpenReadOnly, `bd
+// ready --claim` included, and that command claims through the store it is
+// handed. Wrapping this open to refuse writes — the obvious way to make a
+// "read-only" open read-only — would break that claim on this backend while
+// every role test, which builds its store with New, went on passing.
+func TestReadOnlyOpenServesTheClaimBdReadyMakes(t *testing.T) {
+	dir := t.TempDir()
+	if err := SaveTarget(dir, pinnedProjectTarget(t)); err != nil {
+		t.Fatalf("SaveTarget: %v", err)
+	}
+	claimed := &types.IssueWithCounts{Issue: &types.Issue{ID: "bd-1", Status: types.StatusInProgress, Assignee: "ada"}}
+	w := &stubWire{
+		res:         &apigen.ContextResponse{ProjectId: "proj-1", Capabilities: []string{claimNextToken(t)}},
+		claimedNext: &apigen.ClaimNextResponse{Claimed: claimed},
+	}
+	swapDialer(t, func(context.Context, Target) (WireClient, error) { return w, nil })
+
+	opened, err := NewReadOnlyFromConfig(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("NewReadOnlyFromConfig: %v", err)
+	}
+	claimer, err := opened.ReadyClaimer()
+	if err != nil {
+		t.Fatalf("ReadyClaimer() on the read-only open: %v", err)
+	}
+	res, err := claimer.ClaimNext(context.Background(), issueops.ClaimNextRequest{Actor: "ada"})
+	if err != nil {
+		t.Fatalf("ClaimNext through the read-only open: %v; `bd ready --claim` claims through this store", err)
+	}
+	if res.Claimed == nil || res.Claimed.ID != "bd-1" {
+		t.Errorf("ClaimNext answered %v, want the row the server claimed", res.Claimed)
+	}
+	if want := []string{"claimNextIssue"}; !equalCalls(w.calls, want) {
+		t.Errorf("the read-only open dispatched %v, want %v", w.calls, want)
 	}
 }

@@ -227,7 +227,20 @@ func TestServedBatchApplyLandsAnIdempotencyRecordWithItsWork(t *testing.T) {
 }
 
 func TestServedBatchApplyBoundsTheItemCount(t *testing.T) {
-	conformance.RunBatchApplyBoundsTheItemCount(t, t.Context(), newServedBatchApplyFixture(t, "hba23"))
+	fixture := newServedBatchApplyFixture(t, "hba23")
+	if raceEnabled {
+		// Under -race the full 1000-item apply outlasts the client's 60s
+		// per-request timeout (wire.DefaultTimeout) on the embedded lane's
+		// executors, so only the "at bound" half's applied count drops, to
+		// 150 (the whole case then took 26s there), as the embedded tier's
+		// own TestBatchApplyContract does; see
+		// RunBatchApplyBoundsTheItemCountAtScale for what that leaves pinned.
+		// The refusing half still sends MaxApplyBatchItems+1 over the wire,
+		// and scripts/conformance.sh runs the full size without -race.
+		conformance.RunBatchApplyBoundsTheItemCountAtScale(t, t.Context(), fixture, 150)
+		return
+	}
+	conformance.RunBatchApplyBoundsTheItemCount(t, t.Context(), fixture)
 }
 
 func TestServedBatchApplyReplayMintsANewSetOfRows(t *testing.T) {
@@ -316,6 +329,43 @@ func TestServedBatchApplyRefusesAMetadataRefWithoutNamingTheKey(t *testing.T) {
 	}
 	if !strings.Contains(metadata, peer) {
 		t.Errorf("metadata = %q, want the resolved id %s spliced over gc.retry_of", metadata, peer)
+	}
+}
+
+// TestServedBatchApplyStampsEachCreateItemsCreatedByFromTheActor is the served
+// half of created_by on the plan: ApplyCreateItem publishes no created_by, so
+// the stored creator exists only because the server stamps it from the actor
+// (internal/httpapi's batch_apply.go). A create item whose CreatedBy names that
+// actor — the shape the graph apply sends — is carried by the stamp rather than
+// refused.
+func TestServedBatchApplyStampsEachCreateItemsCreatedByFromTheActor(t *testing.T) {
+	ctx := t.Context()
+	env := newServedEnv(t, "hbacby")
+	applier, err := env.subject.BatchApplier()
+	if err != nil {
+		t.Fatalf("BatchApplier(): %v", err)
+	}
+
+	res, err := applier.ApplyBatch(ctx, issueops.ApplyBatchRequest{
+		Actor: "plan-writer",
+		Items: []issueops.ApplyItem{{Kind: issueops.ItemCreate, Create: &issueops.CreateItem{
+			Key:   "planned",
+			Issue: &issueops.Issue{Title: "planned", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, CreatedBy: "plan-writer"},
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("ApplyBatch in the graph apply's shape = %v, want it served", err)
+	}
+	id := res.Keys["planned"]
+	if id == "" {
+		t.Fatalf("Keys = %v, want the minted id bound to %q", res.Keys, "planned")
+	}
+	stored, err := env.getIssue(ctx, id)
+	if err != nil {
+		t.Fatalf("read back %s: %v", id, err)
+	}
+	if stored.CreatedBy != "plan-writer" {
+		t.Errorf("stored created_by = %q, want the actor %q", stored.CreatedBy, "plan-writer")
 	}
 }
 

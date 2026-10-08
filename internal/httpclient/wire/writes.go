@@ -228,14 +228,46 @@ type updateBody struct {
 	Actor string         `json:"actor"`
 	Patch map[string]any `json:"patch"`
 	UpdateGuards
+	// The four UpdateFlags, each sent only when true (setItemBool's
+	// convention: an explicit false is the default said twice). Absent is
+	// what an older server that predates a member reads correctly, which is
+	// what lets a request that sets none of them reach a server that knows
+	// none of them.
+	Claim                 *bool `json:"claim,omitempty"`
+	ForceAssigneeTransfer *bool `json:"force_assignee_transfer,omitempty"`
+	ForceClosePolicy      *bool `json:"force_close_policy,omitempty"`
+	ForceNotesOverwrite   *bool `json:"force_notes_overwrite,omitempty"`
+}
+
+// UpdateFlags are updateIssue's four top-level booleans: the claim, and the
+// three force overrides. UpdateIssueRequest publishes all four
+// (internal/httpapi/apigen's generated type) and none is a GUARD — none carries
+// a comparison value, unlike every member UpdateGuards holds — so they travel
+// as their own struct rather than joining that one.
+//
+// It is a struct rather than four arguments for UpdateGuards' reason: four
+// positional booleans side by side are the shape a caller transposes, and a
+// transposed force flag is a bypass nobody asked for.
+type UpdateFlags struct {
+	// Claim claims the issue for the actor in the SAME transaction as the
+	// patch (upstream #6890): `bd update <id> --claim`, served by the same
+	// role. With it set the patch may be empty — the claim is then the whole
+	// write. A server that predates the member refuses it as an unknown
+	// parameter before any database work, which is what makes that refusal
+	// safe for a caller to read as skew.
+	Claim bool
+	// ForceAssigneeTransfer bypasses ONLY the anti-steal fence on a genuine
+	// transfer away from a live foreign in-progress owner. The server
+	// requires patch.assignee beside it.
+	ForceAssigneeTransfer bool
+	// ForceClosePolicy bypasses ONLY close policy — the open-children and
+	// live-blocker refusals — on a patch.status crossing into the done
+	// category.
+	ForceClosePolicy bool
 	// ForceNotesOverwrite bypasses ONLY the refusal on a patch.notes that would
-	// replace existing non-empty notes with different non-empty content.
-	// UpdateIssueRequest publishes it (internal/httpapi/apigen's generated
-	// type), and it is NOT a guard — it carries no comparison value, unlike
-	// every member UpdateGuards holds — so it travels as its own member rather
-	// than joining that struct. Sent only when true, setItemBool's convention:
-	// an explicit false is the default said twice.
-	ForceNotesOverwrite *bool `json:"force_notes_overwrite,omitempty"`
+	// replace existing non-empty notes with different non-empty content. The
+	// server requires patch.notes beside it.
+	ForceNotesOverwrite bool
 }
 
 // UpdateIssue patches one issue. It is the only PATCH on this surface: the
@@ -246,24 +278,35 @@ type updateBody struct {
 // server reads them: one smuggled into the patch document would be an unknown
 // member of `patch` and a 400.
 //
-// forceNotesOverwrite rides the same way, for updateBody.ForceNotesOverwrite's
-// reason: it is sent only when true.
-func (c *Client) UpdateIssue(ctx context.Context, id, actor string, patch map[string]any, guards UpdateGuards, forceNotesOverwrite bool) (*apigen.UpdateIssueResponse, error) {
+// The flags ride the same way, each sent only when true (see updateBody).
+func (c *Client) UpdateIssue(ctx context.Context, id, actor string, patch map[string]any, guards UpdateGuards, flags UpdateFlags) (*apigen.UpdateIssueResponse, error) {
 	path, err := IssuePath(id)
 	if err != nil {
 		return nil, err
 	}
 	var out apigen.UpdateIssueResponse
-	body := updateBody{Actor: actor, Patch: patch, UpdateGuards: guards}
-	if forceNotesOverwrite {
-		v := true
-		body.ForceNotesOverwrite = &v
+	body := updateBody{
+		Actor: actor, Patch: patch, UpdateGuards: guards,
+		Claim:                 trueOrAbsent(flags.Claim),
+		ForceAssigneeTransfer: trueOrAbsent(flags.ForceAssigneeTransfer),
+		ForceClosePolicy:      trueOrAbsent(flags.ForceClosePolicy),
+		ForceNotesOverwrite:   trueOrAbsent(flags.ForceNotesOverwrite),
 	}
 	r := Request{Op: OpUpdateIssue, Method: http.MethodPatch, Path: path, Body: body, IssueID: id}
 	if err := c.dispatch(ctx, r, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// trueOrAbsent spells an optional wire boolean: a pointer to true when set,
+// nil — an omitted member — otherwise.
+func trueOrAbsent(set bool) *bool {
+	if !set {
+		return nil
+	}
+	v := true
+	return &v
 }
 
 // CompareAndSetMetadata swaps one metadata key of one issue if and only if it

@@ -662,6 +662,21 @@ func TestBatchCreateRefusesEveryMemberTheWireExcludes(t *testing.T) {
 		}
 	})
 
+	t.Run("a CreatedBy naming the actor rides the server's stamp", func(t *testing.T) {
+		// The server stamps every item's created_by from the actor, so that one
+		// value is carried by the stamp; the sweep above refuses any other.
+		w := &stubWire{}
+		if _, err := bulkCreator(t, w).CreateBatch(t.Context(), issueops.CreateBatchRequest{
+			Actor: "planner",
+			Items: []issueops.BatchCreateItem{{Issue: &issueops.Issue{Title: "t", CreatedBy: "planner"}}},
+		}); err != nil {
+			t.Fatalf("CreateBatch with CreatedBy == Actor = %v, want it carried by the server's stamp", err)
+		}
+		if w.lastBatchCreate.Actor != "planner" {
+			t.Errorf("sent actor = %q, want the creator the stamp will write", w.lastBatchCreate.Actor)
+		}
+	})
+
 	t.Run("the role's own two are ErrValidation", func(t *testing.T) {
 		for name := range batchCreateRoleRefusedIssueMembers {
 			issue := &issueops.Issue{Title: "t"}

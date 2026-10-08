@@ -532,7 +532,7 @@ func TestDialSendsTheBearerAndRetriesOnceAfterRotation(t *testing.T) {
 // clear 401 into two.
 func TestDialDoesNotRetryACredentialThatDidNotRoll(t *testing.T) {
 	clearCredentialEnvironment(t)
-	t.Setenv(TokenEnv, "wrong")
+	t.Setenv(TokenEnv, "127.0.0.1=wrong")
 
 	server := &contextServer{body: v0Context("proj-1"), require: "right"}
 	srv := server.start(t)

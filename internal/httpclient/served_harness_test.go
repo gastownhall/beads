@@ -64,6 +64,9 @@ const servedDatabase = "httpconf"
 // project-identity gate (ga-b8ddd.11).
 const servedProjectID = "proj-httpconf"
 
+// This file is the served tier's cgo half; see TestServedTierIsLinkedWhenRequired.
+func init() { servedTierLinked = true }
+
 // skipUnlessEmbeddedDolt gates the tier on the engine it needs.
 //
 // It is a skip rather than a failure for a DEVELOPER, for the reason the
@@ -71,16 +74,19 @@ const servedProjectID = "proj-httpconf"
 // build-time capability, not a service the environment forgot to start.
 //
 // It is a FAILURE for the lane that stands the tier up. BEADS_HTTP_TEST_REQUIRED=1
-// is how scripts/conformance.sh says "this tier is the required home of the
-// served surface" — the same shape as BEADS_PG_TEST_REQUIRED for the live
-// PostgreSQL tier and BEADS_TEST_EMBEDDED_DOLT for the oracle. Without it, a
-// dropped env key in the workflow, or a rename of the variable, would restore
-// exactly the state this wiring exists to end: two hundred served cases
+// is how scripts/conformance.sh and the embedded lane's
+// //internal/httpclient:httpclient_served_test say "this tier is the required
+// home of the served surface" — the same shape as BEADS_PG_TEST_REQUIRED for the
+// live PostgreSQL tier and BEADS_TEST_EMBEDDED_DOLT for the oracle. Without it,
+// a dropped env key in the lane, or a rename of the variable, would restore
+// exactly the state this wiring exists to end: hundreds of served cases
 // skipping themselves while the gate reports success.
 //
-// The per-test `--- PASS:` greps in the lane are the second layer, not the
-// first: they catch a tier that stopped being invoked at all, which no
-// in-process check can see.
+// Two checks sit outside this one. TestServedTierIsLinkedWhenRequired fails a
+// required run built without cgo, which compiles this file out. And a tier that
+// stopped being invoked at all, which no in-process check can see, is a
+// failure of scripts' TestBazelRetiredLanesCannotBeNarrowed, which pins
+// httpclient_served_test's env to both variables.
 func skipUnlessEmbeddedDolt(t *testing.T) {
 	t.Helper()
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") == "1" {

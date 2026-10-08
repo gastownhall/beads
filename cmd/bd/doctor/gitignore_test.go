@@ -1665,6 +1665,36 @@ func TestGitignore_ContainsDoltServerConfig(t *testing.T) {
 	}
 }
 
+// TestGitignore_ContainsHTTPTarget verifies that the http backend's activation
+// sidecar is ignored like proxied_server_client_info.json, the per-user
+// sidecar it follows. It names the server the bearer ladder authorizes
+// against, so a committed copy would point every clone at that server. It
+// must be in requiredPatterns too, so bd doctor --fix heals an existing
+// .beads/.gitignore.
+func TestGitignore_ContainsHTTPTarget(t *testing.T) {
+	// Keep this in sync with httpclient.TargetFileName; cmd/bd/doctor does not
+	// import the client for a string constant.
+	const pattern = "http_target.json"
+
+	if !containsGitignorePattern(GitignoreTemplate, pattern) {
+		t.Errorf("GitignoreTemplate should contain %q", pattern)
+	}
+	if missing := missingGitignorePatterns(GitignoreTemplate); len(missing) != 0 {
+		t.Errorf("GitignoreTemplate is missing required patterns %v", missing)
+	}
+
+	found := false
+	for _, p := range requiredPatterns {
+		if p == pattern {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("requiredPatterns should include %q", pattern)
+	}
+}
+
 // TestCheckLastTouchedNotTracked_NoFile verifies that check passes when no last-touched file exists
 func TestCheckLastTouchedNotTracked_NoFile(t *testing.T) {
 	tmpDir := t.TempDir()

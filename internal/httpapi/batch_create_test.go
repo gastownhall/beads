@@ -85,6 +85,13 @@ func TestBatchCreatePassesTheRequestToTheRoleAndAnswersWithWhatItCreated(t *test
 	if got.Items[1].Issue.Priority != 0 || got.Items[1].Issue.Description != "body" {
 		t.Errorf("item 1 = %+v, want the wire's description and no priority", *got.Items[1].Issue)
 	}
+	// created_by is stamped from the actor on EVERY item, createIssue's rule:
+	// the role copies the issue's and never stamps one itself.
+	for i, item := range got.Items {
+		if item.Issue.CreatedBy != "alice" {
+			t.Errorf("item %d created_by = %q, want the actor %q", i, item.Issue.CreatedBy, "alice")
+		}
+	}
 	// No provenance: the file name a CLI batch spells has no analogue here, so
 	// the entry reads as the implementation's default rather than as a lie.
 	if got.Provenance != "" {

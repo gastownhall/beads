@@ -58,8 +58,9 @@ type WriteWire interface {
 	// The guard trio travels beside it as wire.UpdateGuards rather than inside
 	// the document — the server reads them off the body's top level — and is a
 	// typed struct because it is the one part of this request whose ABSENT and
-	// ZERO states are different requests.
-	UpdateIssue(ctx context.Context, id, actor string, patch map[string]any, guards wire.UpdateGuards, forceNotesOverwrite bool) (*apigen.UpdateIssueResponse, error)
+	// ZERO states are different requests. The claim and the three force
+	// overrides travel the same way, as wire.UpdateFlags.
+	UpdateIssue(ctx context.Context, id, actor string, patch map[string]any, guards wire.UpdateGuards, flags wire.UpdateFlags) (*apigen.UpdateIssueResponse, error)
 
 	// CompareAndSetMetadata is the one write on this seam whose REFUSAL is a
 	// 200: a lost race answers `swapped: false` with the value that refused it,

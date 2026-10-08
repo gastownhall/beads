@@ -81,22 +81,22 @@ type stubWire struct {
 	lastClaimNextParams url.Values
 	lastClaimNextBody   apigen.ClaimNextRequest
 
-	lastPatch               map[string]any
-	lastGuards              wire.UpdateGuards
-	lastForceNotesOverwrite bool
-	lastClose               apigen.CloseIssueRequest
-	lastReopen              apigen.ReopenIssueRequest
-	lastBatchClose          apigen.BatchCloseRequest
-	lastAdd                 apigen.AddDependenciesRequest
-	lastSearch              string
-	lastSweep               apigen.SweepRequest
-	lastDelete              apigen.DeleteIssuesRequest
-	lastBatchCreate         apigen.BatchCreateRequest
-	lastCreate              apigen.CreateIssueRequest
-	lastCAS                 apigen.CompareAndSetMetadataRequest
-	lastApply               wire.ApplyBatchRequest
-	lastRelease             apigen.ReleaseIssueRequest
-	lastComment             apigen.AddCommentRequest
+	lastPatch       map[string]any
+	lastGuards      wire.UpdateGuards
+	lastFlags       wire.UpdateFlags
+	lastClose       apigen.CloseIssueRequest
+	lastReopen      apigen.ReopenIssueRequest
+	lastBatchClose  apigen.BatchCloseRequest
+	lastAdd         apigen.AddDependenciesRequest
+	lastSearch      string
+	lastSweep       apigen.SweepRequest
+	lastDelete      apigen.DeleteIssuesRequest
+	lastBatchCreate apigen.BatchCreateRequest
+	lastCreate      apigen.CreateIssueRequest
+	lastCAS         apigen.CompareAndSetMetadataRequest
+	lastApply       wire.ApplyBatchRequest
+	lastRelease     apigen.ReleaseIssueRequest
+	lastComment     apigen.AddCommentRequest
 }
 
 func (s *stubWire) ServerContext(context.Context) (*apigen.ContextResponse, error) {
@@ -182,10 +182,10 @@ func (s *stubWire) ReopenIssue(_ context.Context, id string, body apigen.ReopenI
 	return s.reopen, nil
 }
 
-func (s *stubWire) UpdateIssue(_ context.Context, id, _ string, patch map[string]any, guards wire.UpdateGuards, forceNotesOverwrite bool) (*apigen.UpdateIssueResponse, error) {
+func (s *stubWire) UpdateIssue(_ context.Context, id, _ string, patch map[string]any, guards wire.UpdateGuards, flags wire.UpdateFlags) (*apigen.UpdateIssueResponse, error) {
 	s.lastPatch = patch
 	s.lastGuards = guards
-	s.lastForceNotesOverwrite = forceNotesOverwrite
+	s.lastFlags = flags
 	if err := s.record("updateIssue:" + id); err != nil {
 		return nil, err
 	}
@@ -397,11 +397,8 @@ func TestUpdateRefusesEveryMemberTheWireExcludes(t *testing.T) {
 	minutes := 30
 
 	cases := map[string]issueops.UpdateRequest{
-		"Claim":                 {Claim: true},
-		"ForceAssigneeTransfer": {ForceAssigneeTransfer: true},
-		"ForceClosePolicy":      {ForceClosePolicy: true},
-		"IssuePlaneOnly":        {IssuePlaneOnly: true},
-		"Provenance":            {Provenance: "bd: update"},
+		"IssuePlaneOnly": {IssuePlaneOnly: true},
+		"Provenance":     {Provenance: "bd: update"},
 
 		"Patch.Owner":           {Patch: issueops.IssuePatch{Owner: set("someone")}},
 		"Patch.ClosedBySession": {Patch: issueops.IssuePatch{ClosedBySession: set("s1")}},
@@ -420,93 +417,158 @@ func TestUpdateRefusesEveryMemberTheWireExcludes(t *testing.T) {
 		// ForceNotesOverwrite WAS here too, and left for the same reason
 		// (W-UpdateRequest.ForceNotesOverwrite is RETIRED): the single-patch
 		// updateIssue body now sends `force_notes_overwrite` exactly as
-		// issues:batchApply's update item already did. Its positive assertion is
-		// TestUpdateSendsForceNotesOverwriteOnlyWhenRequested, directly below
+		// issues:batchApply's update item already did. Claim,
+		// ForceAssigneeTransfer and ForceClosePolicy followed it (the #7247
+		// review port; their rows are RETIRED too). The positive assertion for
+		// all four is TestUpdateSendsEachFlagOnlyWhenRequested, directly below
 		// TestUpdateSendsTheGuardTrio.
 	}
 
 	for name, req := range cases {
-		t.Run(name, func(t *testing.T) {
-			w := &stubWire{update: &apigen.UpdateIssueResponse{Revision: "0"}}
-			lifecycle, err := stubStore(t, w).IssueLifecycle()
-			if err != nil {
-				t.Fatalf("IssueLifecycle(): %v", err)
-			}
+		// Each refusal holds beside a claim too. A claim used to be routed
+		// AHEAD of this walk, and a claim that skipped it again would carry
+		// these members to a server that drops them.
+		for _, claim := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/claim=%t", name, claim), func(t *testing.T) {
+				w := &stubWire{update: &apigen.UpdateIssueResponse{Revision: "0"}}
+				lifecycle, err := stubStore(t, w).IssueLifecycle()
+				if err != nil {
+					t.Fatalf("IssueLifecycle(): %v", err)
+				}
 
-			// Every case carries a wire-expressible member too, so a refusal
-			// cannot be mistaken for the empty-patch validation failure.
-			req.Actor, req.IssueID = "writer", "bd-1"
-			req.Patch.Title = set("a title")
-			req.Patch.EstimatedMinutes = set(&minutes)
+				// Every case carries a wire-expressible member too, so a refusal
+				// cannot be mistaken for the empty-patch validation failure.
+				req := req
+				req.Actor, req.IssueID, req.Claim = "writer", "bd-1", claim
+				req.Patch.Title = set("a title")
+				req.Patch.EstimatedMinutes = set(&minutes)
 
-			if _, err := lifecycle.Update(t.Context(), req); !errors.Is(err, encode.ErrRefused) {
-				t.Fatalf("Update with %s = %v, want a refuse-not-drop refusal", name, err)
-			}
-			if len(w.calls) != 0 {
-				t.Errorf("the refusal dialed %v; a refused member must never reach the server", w.calls)
-			}
-		})
+				if _, err := lifecycle.Update(t.Context(), req); !errors.Is(err, encode.ErrRefused) {
+					t.Fatalf("Update with %s = %v, want a refuse-not-drop refusal", name, err)
+				}
+				if len(w.calls) != 0 {
+					t.Errorf("the refusal dialed %v; a refused member must never reach the server", w.calls)
+				}
+			})
+		}
 	}
 }
 
-// TestClaimOnlyUpdateRefusesEveryNonClaimMember is claimOnlyUpdate's own
-// refuse-not-drop pin, one level below TestUpdateRefusesEveryMemberTheWireExcludes
-// above: that test combines Claim with a Patch (the one shape every case in it
-// shares, to distinguish the refusal from the empty-patch validation failure),
-// which proves Claim+Patch refuses but says nothing about Claim combined with
-// any of isClaimOnlyUpdate's other six guarded members individually — each one
-// is its own branch of that function's boolean, and a mutation that dropped any
-// single one from the check would still pass every existing test here.
-//
-// issueops.UpdateRequest's own doc comments are explicit that most of these
-// guards are ordinarily INDEPENDENT of Claim at the domain level —
-// ExpectedVersion "may be combined with Claim" as its own precondition, for
-// instance — so this refusal is a property of THIS wire specifically:
-// claimIssue's request is `{actor}` alone (apigen.ClaimRequest), so this
-// backend cannot express any of these combined with a claim atomically, and
-// refuses rather than silently dropping the extra member or serving it as two
-// non-atomic calls.
-func TestClaimOnlyUpdateRefusesEveryNonClaimMember(t *testing.T) {
-	someVersion := int64(7)
-	someAssignee := "someone"
-	someStatus := issueops.StatusOpen
-
-	cases := map[string]issueops.UpdateRequest{
-		"ExpectedVersion":       {ExpectedVersion: &someVersion},
-		"ForceClosePolicy":      {ForceClosePolicy: true},
-		"IssuePlaneOnly":        {IssuePlaneOnly: true},
-		"Provenance":            {Provenance: "bd: update"},
-		"ExpectedAssignee":      {ExpectedAssignee: &someAssignee},
-		"ExpectedStatus":        {ExpectedStatus: &someStatus},
-		"ForceAssigneeTransfer": {ForceAssigneeTransfer: true},
+// predatesUpdateClaim is the refusal a bd serve that predates `claim` on
+// updateIssue (upstream #6890) answers a body carrying it with: the skew 400,
+// naming the member, raised before the server does any database work.
+func predatesUpdateClaim() error {
+	return &wire.ProblemError{
+		Op: "updateIssue", Status: 400, Code: "invalid_argument",
+		Reason: encode.UnknownParameterReason, Param: "claim",
+		Detail: "this operation's request body carries actor, patch and nothing else",
 	}
+}
 
-	for name, req := range cases {
-		t.Run(name, func(t *testing.T) {
-			w := &stubWire{claim: &apigen.ClaimResponse{Issue: apigen.Issue{ID: "bd-1"}}}
+// TestUpdateClaimFallsBackToClaimIssueOnlyWhenNothingIsLost pins the one claim
+// that does not ride updateIssue: a claim ALONE, against a server that refused
+// `claim` as an unknown parameter. claimIssue's request is the actor alone, so
+// it carries everything a claim-only request asked for — and nothing else, so
+// every OTHER shape returns the skew refusal as it came rather than retrying
+// as a claim that drops the patch, the guard or the override beside it.
+//
+// The refusals a CURRENT server answers on `claim` are not skew and must not
+// fall back either: `invalid_value` naming `claim` is the claim beside a
+// member it may not ride with, and a retry through claimIssue would serve the
+// claim the server just refused.
+func TestUpdateClaimFallsBackToClaimIssueOnlyWhenNothingIsLost(t *testing.T) {
+	version := int64(7)
+	holder := "someone"
+
+	for _, tc := range []struct {
+		name      string
+		req       issueops.UpdateRequest
+		refusal   error
+		wantCalls []string
+	}{
+		{
+			name:      "a claim alone retries as claimIssue",
+			req:       issueops.UpdateRequest{},
+			refusal:   predatesUpdateClaim(),
+			wantCalls: []string{"updateIssue:bd-1", "claimIssue:bd-1"},
+		},
+		{
+			name:      "a claim with a patch does not",
+			req:       issueops.UpdateRequest{Patch: issueops.IssuePatch{Title: set("claimed and renamed")}},
+			refusal:   predatesUpdateClaim(),
+			wantCalls: []string{"updateIssue:bd-1"},
+		},
+		{
+			name:      "a claim with a version guard does not",
+			req:       issueops.UpdateRequest{ExpectedVersion: &version},
+			refusal:   predatesUpdateClaim(),
+			wantCalls: []string{"updateIssue:bd-1"},
+		},
+		{
+			name:      "a claim with an assignee guard does not",
+			req:       issueops.UpdateRequest{ExpectedAssignee: &holder},
+			refusal:   predatesUpdateClaim(),
+			wantCalls: []string{"updateIssue:bd-1"},
+		},
+		{
+			name:      "a claim with a close-policy override does not",
+			req:       issueops.UpdateRequest{ForceClosePolicy: true},
+			refusal:   predatesUpdateClaim(),
+			wantCalls: []string{"updateIssue:bd-1"},
+		},
+		{
+			name: "a current server's invalid claim does not",
+			req:  issueops.UpdateRequest{},
+			refusal: &wire.ProblemError{
+				Op: "updateIssue", Status: 400, Code: "invalid_argument",
+				Reason: "invalid_value", Param: "claim",
+			},
+			wantCalls: []string{"updateIssue:bd-1"},
+		},
+		{
+			name: "skew on another member does not",
+			req:  issueops.UpdateRequest{},
+			refusal: &wire.ProblemError{
+				Op: "updateIssue", Status: 400, Code: "invalid_argument",
+				Reason: encode.UnknownParameterReason, Param: "expected_version",
+			},
+			wantCalls: []string{"updateIssue:bd-1"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &stubWire{
+				errs: []error{tc.refusal},
+				claim: &apigen.ClaimResponse{
+					Issue: apigen.Issue{ID: "bd-1", Status: types.StatusInProgress, Assignee: "writer"},
+				},
+			}
 			lifecycle, err := stubStore(t, w).IssueLifecycle()
 			if err != nil {
 				t.Fatalf("IssueLifecycle(): %v", err)
 			}
+			req := tc.req
+			req.Actor, req.IssueID, req.Claim = "writer", "bd-1", true
 
-			req.Claim = true
-			req.Actor, req.IssueID = "writer", "bd-1"
-
-			_, err = lifecycle.Update(t.Context(), req)
-			var refused *encode.RefusedError
-			if !errors.As(err, &refused) {
-				t.Fatalf("Update with Claim+%s = %v, want an *encode.RefusedError", name, err)
+			res, err := lifecycle.Update(t.Context(), req)
+			if !reflect.DeepEqual(w.calls, tc.wantCalls) {
+				t.Fatalf("Update dialed %v, want %v", w.calls, tc.wantCalls)
 			}
-			if refused.Row.ID != "W-UpdateRequest.Claim" {
-				t.Errorf("Update with Claim+%s refused on row %q, want %q", name, refused.Row.ID, "W-UpdateRequest.Claim")
-			}
-			for _, call := range w.calls {
-				if strings.HasPrefix(call, "claimIssue:") {
-					t.Errorf("Update with Claim+%s dialed %v; a refused claim must never call claimIssue", name, w.calls)
+			if len(tc.wantCalls) == 2 {
+				if err != nil {
+					t.Fatalf("the fallback claim: %v", err)
 				}
+				if res.Issue == nil || res.Issue.Assignee != "writer" || !res.Changed {
+					t.Errorf("the fallback answered %+v, want claimIssue's claimed row", res)
+				}
+				// claimIssue carries no revision, and no other snapshot's token
+				// may stand in for one.
+				if res.Issue != nil && res.Issue.RowVersion != 0 {
+					t.Errorf("the fallback stitched RowVersion %d onto a row claimIssue answered without one", res.Issue.RowVersion)
+				}
+				return
 			}
-			if len(w.calls) != 0 {
-				t.Errorf("Update with Claim+%s dialed %v; a refused member must never reach the server", name, w.calls)
+			if !errors.Is(err, tc.refusal) {
+				t.Errorf("Update = %v, want the server's refusal returned as it came", err)
 			}
 		})
 	}
@@ -839,35 +901,94 @@ func TestUpdateSendsTheGuardTrio(t *testing.T) {
 	}
 }
 
-// TestUpdateSendsForceNotesOverwriteOnlyWhenRequested is the positive half of
-// W-UpdateRequest.ForceNotesOverwrite's retirement: the member is now a wire
-// argument of UpdateIssue rather than a document field, so the role must send
-// `true` when the request asks for the bypass and must send nothing — not
+// TestUpdateSendsEachFlagOnlyWhenRequested is the positive half of the four
+// retired flag rows — W-UpdateRequest.ForceNotesOverwrite, then Claim,
+// ForceAssigneeTransfer and ForceClosePolicy with the #7247 review port: each
+// member is now a wire argument of UpdateIssue rather than a document field, so
+// the role must send `true` when the request asks for it and nothing — not
 // `false` — when it does not, matching setItemBool's "only true is written"
-// rule everywhere else this flag travels.
-func TestUpdateSendsForceNotesOverwriteOnlyWhenRequested(t *testing.T) {
-	patch := issueops.IssuePatch{Notes: set("replacement notes")}
+// rule everywhere else these flags travel. The comparison is the whole struct,
+// so a flag carried in its neighbour's slot fails too.
+//
+// The claim cases pin the shape #6890 made servable: a claim with an EMPTY
+// patch is one updateIssue call with the empty document, and a claim beside a
+// patch is the same call, never a claimIssue first.
+func TestUpdateSendsEachFlagOnlyWhenRequested(t *testing.T) {
+	notes := issueops.IssuePatch{Notes: set("replacement notes")}
 	for _, tc := range []struct {
-		name string
-		req  issueops.UpdateRequest
-		want bool
+		name      string
+		req       issueops.UpdateRequest
+		want      wire.UpdateFlags
+		wantPatch map[string]any
 	}{
-		{name: "absent leaves the fence enforced", req: issueops.UpdateRequest{}, want: false},
-		{name: "requested bypasses the fence", req: issueops.UpdateRequest{ForceNotesOverwrite: true}, want: true},
+		{
+			name:      "absent leaves every fence enforced",
+			req:       issueops.UpdateRequest{Patch: notes},
+			want:      wire.UpdateFlags{},
+			wantPatch: map[string]any{"notes": "replacement notes"},
+		},
+		{
+			name:      "notes overwrite",
+			req:       issueops.UpdateRequest{Patch: notes, ForceNotesOverwrite: true},
+			want:      wire.UpdateFlags{ForceNotesOverwrite: true},
+			wantPatch: map[string]any{"notes": "replacement notes"},
+		},
+		{
+			name: "assignee transfer",
+			req: issueops.UpdateRequest{
+				Patch:                 issueops.IssuePatch{Assignee: set("new-holder")},
+				ForceAssigneeTransfer: true,
+			},
+			want:      wire.UpdateFlags{ForceAssigneeTransfer: true},
+			wantPatch: map[string]any{"assignee": "new-holder"},
+		},
+		{
+			name: "close policy",
+			req: issueops.UpdateRequest{
+				Patch:            issueops.IssuePatch{Status: set(issueops.StatusClosed)},
+				ForceClosePolicy: true,
+			},
+			want:      wire.UpdateFlags{ForceClosePolicy: true},
+			wantPatch: map[string]any{"status": string(issueops.StatusClosed)},
+		},
+		{
+			name:      "a claim alone sends the empty patch",
+			req:       issueops.UpdateRequest{Claim: true},
+			want:      wire.UpdateFlags{Claim: true},
+			wantPatch: map[string]any{},
+		},
+		{
+			name:      "a claim beside a patch is one call",
+			req:       issueops.UpdateRequest{Claim: true, Patch: notes},
+			want:      wire.UpdateFlags{Claim: true},
+			wantPatch: map[string]any{"notes": "replacement notes"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			w := &stubWire{update: &apigen.UpdateIssueResponse{Revision: "0"}}
+			w := &stubWire{update: &apigen.UpdateIssueResponse{Revision: "41"}}
 			lifecycle, err := stubStore(t, w).IssueLifecycle()
 			if err != nil {
 				t.Fatalf("IssueLifecycle(): %v", err)
 			}
 			req := tc.req
-			req.Actor, req.IssueID, req.Patch = "writer", "bd-1", patch
-			if _, err := lifecycle.Update(t.Context(), req); err != nil {
+			req.Actor, req.IssueID = "writer", "bd-1"
+			res, err := lifecycle.Update(t.Context(), req)
+			if err != nil {
 				t.Fatalf("Update: %v", err)
 			}
-			if w.lastForceNotesOverwrite != tc.want {
-				t.Errorf("force_notes_overwrite sent as %v, want %v", w.lastForceNotesOverwrite, tc.want)
+			if w.lastFlags != tc.want {
+				t.Errorf("flags sent as %+v, want %+v", w.lastFlags, tc.want)
+			}
+			// A nil map would marshal as `null`, which the server refuses even
+			// beside a claim: the claim's empty patch is the empty DOCUMENT.
+			if w.lastPatch == nil || !reflect.DeepEqual(w.lastPatch, tc.wantPatch) {
+				t.Errorf("patch sent as %#v, want %#v", w.lastPatch, tc.wantPatch)
+			}
+			if want := []string{"updateIssue:bd-1"}; !reflect.DeepEqual(w.calls, want) {
+				t.Errorf("Update dialed %v, want %v", w.calls, want)
+			}
+			if res.Issue == nil || res.Issue.RowVersion != 41 {
+				t.Errorf("UpdateResult.Issue = %+v, want the response's revision stitched on", res.Issue)
 			}
 		})
 	}

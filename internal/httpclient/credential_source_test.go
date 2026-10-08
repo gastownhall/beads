@@ -32,7 +32,7 @@ func resolveProvider(t *testing.T, p *BearerProvider) {
 }
 
 func TestSourceNamesTheEnvRung(t *testing.T) {
-	t.Setenv(TokenEnv, "tok-env")
+	t.Setenv(TokenEnv, "127.0.0.1=tok-env")
 	p := NewBearerProvider(mustURL(t, "http://127.0.0.1:8080"))
 	resolveProvider(t, p)
 	if got := p.Source(); got != TokenEnv {
@@ -43,7 +43,7 @@ func TestSourceNamesTheEnvRung(t *testing.T) {
 func TestSourceNamesTheTokenCommandRung(t *testing.T) {
 	// The env rung must be empty so the ladder falls to the command rung.
 	t.Setenv(TokenEnv, "")
-	t.Setenv(TokenCommandEnv, "printf tok-cmd")
+	t.Setenv(TokenCommandEnv, "127.0.0.1=printf tok-cmd")
 	p := NewBearerProvider(mustURL(t, "http://127.0.0.1:8080"))
 	resolveProvider(t, p)
 	if got := p.Source(); got != TokenCommandEnv {

@@ -260,19 +260,20 @@ func TestServedReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNot
 }
 
 // The priority-order walk parks on the same row as the created-order one
-// above, and with LESS standing beside it: the sort=priority pushdown is pinned
-// under a label scope by TestServedReaderListFallsBackToTheWalkWithoutTheCapability,
-// but no served test yet RESUMES a priority keyset position, and the pager's
-// keysetFilter (list_walk.go) discards against the (created_at, id) half of the
-// position only — so the three-part totality this case exists to prove is
-// unexercised over this wire until IDFilter (or a label-scoped rewrite) lets
-// it run.
+// above, with a narrower stand-in beside it: the sort=priority pushdown is
+// pinned under a label scope by TestServedReaderListFallsBackToTheWalkWithoutTheCapability,
+// and resuming a priority keyset position — the pager's keysetFilter
+// (list_walk.go) deciding priority first and the (created_at, id) pair only at
+// the position's own priority — by TestServedReaderListPriorityKeysetPositionResumesThePriorityOrder.
+// What neither covers is the WALK this case drives page after page over an
+// oversized equal-key run, which stays unexercised over this wire until
+// IDFilter (or a label-scoped rewrite) lets it run.
 func TestServedReaderListPriorityKeysetWalkOverAnOversizedEqualKeyRunLosesNothingAndRepeatsNothing(t *testing.T) {
 	skipKnownDivergence(t, "E-ListRequest.IDFilter", readParkBead,
 		"the case scopes itself with IDFilter, which listIssues publishes no parameter for, so its one-shot "+
 			"read is refused before the walk begins; the sort=priority pushdown is pinned under a label scope by "+
-			"TestServedReaderListFallsBackToTheWalkWithoutTheCapability, but nothing over this wire yet resumes "+
-			"a priority keyset position")
+			"TestServedReaderListFallsBackToTheWalkWithoutTheCapability, and one resumed priority keyset position by "+
+			"TestServedReaderListPriorityKeysetPositionResumesThePriorityOrder")
 	conformance.RunReaderListPriorityKeysetWalkOverAnOversizedEqualKeyRunLosesNothingAndRepeatsNothing(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 

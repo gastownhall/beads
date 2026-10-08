@@ -395,6 +395,18 @@ func TestTheCompositionCatchesAWrongParameter(t *testing.T) {
 	}
 
 	t.Run("a dropped filter widens the answer", func(t *testing.T) {
+		// Its own row outside the scope, so the unfiltered answer is wider
+		// whatever else the shared composition holds. Without it the case
+		// leaned on rows earlier tests had seeded: run alone, or first in its
+		// shard, the scope's three rows were the whole workspace, and dropping
+		// the filter answered the same.
+		outside := &types.Issue{
+			ID: scope + "-outside", Title: "outside", Status: types.StatusOpen, Priority: 2,
+			IssueType: types.TypeTask, Labels: []string{scope + "-outside"}, CreatedAt: time.Now().UTC(),
+		}
+		if err := c.seedIssue(ctx, outside, "seed"); err != nil {
+			t.Fatalf("seed %s: %v", outside.ID, err)
+		}
 		dropped := c.tamperedClient(t, func(req *wire.Request) { req.Query.Del("label") })
 		reader, err := dropped.IssueReader()
 		if err != nil {

@@ -82,7 +82,7 @@ func writeOps() []writeOp {
 			return err
 		}},
 		{OpUpdateIssue, func(ctx context.Context, c *Client) error {
-			_, err := c.UpdateIssue(ctx, "bd-1", "w", map[string]any{"title": "t"}, UpdateGuards{}, false)
+			_, err := c.UpdateIssue(ctx, "bd-1", "w", map[string]any{"title": "t"}, UpdateGuards{}, UpdateFlags{})
 			return err
 		}},
 		{OpCreateIssue, func(ctx context.Context, c *Client) error {

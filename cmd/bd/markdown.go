@@ -389,8 +389,11 @@ func buildMarkdownBatchRequest(templates []*IssueTemplate, in createInput) (issu
 				// defaults an empty Status to StatusOpen, so an explicit "open"
 				// here was never a different outcome — only a populated member
 				// the http wire's BatchCreateItem has no slot for and the role
-				// (correctly) refuses rather than drops. Leaving it unset keeps
-				// this path backend-agnostic without changing what gets created.
+				// (correctly) refuses rather than drops. Leaving it unset removes
+				// that one refusal without changing what gets created; the http
+				// wire still refuses this request's Provenance and Owner (see
+				// internal/httpclient/batchcreator.go), so `--file` is not
+				// servable there yet.
 				Priority:     template.Priority,
 				IssueType:    template.IssueType,
 				Assignee:     template.Assignee,

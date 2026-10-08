@@ -40,14 +40,17 @@ const maxBatchCreateItems = 100
 //     common case is not lost: PreparePublicCreateRequest defaults an empty
 //     Status to StatusOpen on every backend, so a caller that only ever wants
 //     the default (cmd/bd/markdown.go's `bd create --file`) leaves it unset
-//     rather than spelling out "open" and tripping this refusal for free.
-//   - CreatedBy: apigen.BatchCreateItem has no member for it either, and
-//     unlike single create (internal/httpapi/create.go stamps created_by from
-//     the wire's actor), the batch server does not yet stamp it from Actor —
-//     a known gap tracked in this PR's own Follow-ups ("created_by isn't yet
-//     stamped on batchCreate/batchApply"). Until that lands, a populated
-//     CreatedBy is refused rather than silently written as empty or
-//     misattributed.
+//     rather than spelling out "open" and tripping this refusal. That removes
+//     ONE refusal from `bd create --file`, not all of them: its request still
+//     always names a Provenance (W-CreateBatchRequest.Provenance) and usually
+//     an Owner from git config (W-BatchCreateItem.Issue), so it still refuses
+//     over this wire.
+//   - CreatedBy: apigen.BatchCreateItem has no member for it either, but the
+//     batch server stamps every item's created_by from the request's actor
+//     (internal/httpapi/batch_create.go), as single create does. A CreatedBy
+//     naming the actor is therefore carried BY the actor
+//     (actorStampedCreateMember below), and any other value is refused rather
+//     than silently replaced by the stamp.
 var batchCreateCarriedIssueMembers = map[string]string{
 	"Title":              "title",
 	"Description":        "description",
@@ -83,6 +86,21 @@ var roleIgnoredCreateIssueMembers = map[string]string{
 	"PrefixOverride":    "routing override: id generation is the server's",
 	"WispPlaneOverride": "routing override: import's explicit plane marker",
 	"IsLitePartial":     "hydration flag: describes a READ, not a create",
+}
+
+// actorStampedCreateMember reports whether a populated issue member is one the
+// server writes from the request's actor rather than reads from the body, and
+// already holds the value that stamp will write.
+//
+// CreatedBy is the one such member: every create shape stamps created_by from
+// the actor (internal/httpapi's create.go, batch_create.go and batch_apply.go).
+// It is neither carried nor role-ignored — a local create stores whatever the
+// issue names — so it is carried BY THE ACTOR: a CreatedBy that names the actor,
+// which is what `bd create`, `bd create --file` and the graph apply send,
+// arrives as written, and any other value would be silently replaced by the
+// stamp and is refused.
+func actorStampedCreateMember(member string, issue *issueops.Issue, actor string) bool {
+	return member == "CreatedBy" && issue.CreatedBy == actor
 }
 
 // httpBatchCreator serves issueops.BatchCreator from the batchCreateIssues
@@ -139,7 +157,7 @@ func (b *httpBatchCreator) CreateBatch(ctx context.Context, req issueops.CreateB
 
 	items := make([]apigen.BatchCreateItem, 0, len(req.Items))
 	for i, item := range req.Items {
-		wireItem, err := batchCreateItem(i, item)
+		wireItem, err := batchCreateItem(i, item, req.Actor)
 		if err != nil {
 			return issueops.CreateBatchResult{}, err
 		}
@@ -169,7 +187,7 @@ func (b *httpBatchCreator) CreateBatch(ctx context.Context, req issueops.CreateB
 }
 
 // batchCreateItem projects one role item onto the wire's item.
-func batchCreateItem(index int, item issueops.BatchCreateItem) (apigen.BatchCreateItem, error) {
+func batchCreateItem(index int, item issueops.BatchCreateItem, actor string) (apigen.BatchCreateItem, error) {
 	if item.Issue == nil {
 		return apigen.BatchCreateItem{}, invalid("items[%d] carries no issue", index)
 	}
@@ -180,7 +198,7 @@ func batchCreateItem(index int, item issueops.BatchCreateItem) (apigen.BatchCrea
 		return apigen.BatchCreateItem{}, invalid(
 			"items[%d].Issue carries comments or dependencies; supply edges through the item's own Dependencies", index)
 	}
-	if err := refuseUnwirableIssue(index, item.Issue); err != nil {
+	if err := refuseUnwirableIssue(index, item.Issue, actor); err != nil {
 		return apigen.BatchCreateItem{}, err
 	}
 
@@ -235,13 +253,13 @@ func batchCreateEdge(index, j int, dep issueops.CreateDependency) (apigen.BatchC
 }
 
 // refuseUnwirableIssue is the other half of the allowlist: every populated
-// member of the issue that is neither carried by the wire nor ignored by the
-// role.
+// member of the issue that is neither carried by the wire, nor ignored by the
+// role, nor stamped from the actor (actorStampedCreateMember).
 //
 // It answers the FIRST offender in declaration order, which is deterministic —
 // a caller fixing one member at a time must not see the reported member depend
 // on map iteration.
-func refuseUnwirableIssue(index int, issue *issueops.Issue) error {
+func refuseUnwirableIssue(index int, issue *issueops.Issue, actor string) error {
 	value := reflect.ValueOf(*issue)
 	shape := value.Type()
 	for i := range shape.NumField() {
@@ -255,7 +273,7 @@ func refuseUnwirableIssue(index int, issue *issueops.Issue) error {
 		if _, ignored := roleIgnoredCreateIssueMembers[field.Name]; ignored {
 			continue
 		}
-		if value.Field(i).IsZero() {
+		if value.Field(i).IsZero() || actorStampedCreateMember(field.Name, issue, actor) {
 			continue
 		}
 		// The ledger row is the vocabulary; the member name is the fact the row

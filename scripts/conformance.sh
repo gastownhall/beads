@@ -7,11 +7,12 @@
 # Three tiers exercise the storage conformance contract: the in-process
 # storage corpus against the embedded-Dolt oracle, the real-binary CLI
 # corpus, then the served HTTP client/role corpus against a real server.
-# CI runs the first two tiers as Bazel targets, remotely:
+# CI runs all three tiers as Bazel targets, remotely:
 #
 #   bazel test --config=embedded //internal/storage/embeddeddolt:embeddeddolt_conformance_core_test \
 #     //internal/storage/embeddeddolt:embeddeddolt_conformance_audit_test
 #   bazel test --config=integration //test/conformance:conformance_test
+#   bazel test --config=embedded //internal/httpclient:httpclient_served_test
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -57,11 +58,13 @@ echo "==> Tier 3: served HTTP client/role conformance (real server, real wire)"
 # self-skip without BEADS_TEST_EMBEDDED_DOLT=1 + BEADS_HTTP_TEST_REQUIRED=1 --
 # the latter is a fail-loud guard (not a silent skip) if it's set without the
 # former, so a misconfigured env can't report a false green here either.
-# This tier is intentionally not sharded: it is a single Go package, and
-# Tier 1 and Tier 2 above are themselves single unsharded invocations: no
-# existing shard pattern in this repo splits a single package's test
-# functions by regex except the embedded-Dolt conformance partition (which
-# this isn't). -timeout=40m matches the budget the review asked for.
+# Nor can a build with cgo off, which drops every served file: the package's
+# untagged TestServedTierIsLinkedWhenRequired fails a required run then.
+# Here the tier is one unsharded invocation, like Tier 1 and Tier 2 above;
+# -timeout=40m matches the budget the review asked for. The embedded lane's
+# httpclient_served_test runs the same package and env on the race build,
+# split into shards (rules_go deals the tests out round-robin) so each fits
+# the lane's 1200s action limit.
 CGO_ENABLED=1 BEADS_TEST_EMBEDDED_DOLT=1 BEADS_HTTP_TEST_REQUIRED=1 \
   go test -tags "$TAGS" -timeout=40m ./internal/httpclient/
 

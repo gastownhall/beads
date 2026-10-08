@@ -211,7 +211,8 @@ func (s *Server) createIssueRequest(w http.ResponseWriter, r *http.Request) (iss
 		// identity this request carries — provenance for the audit trail, not
 		// authenticated identity, exactly as this file's own doc comment
 		// states above — so it is the one value this server has to make that
-		// stamp from.
+		// stamp from. batch_create.go and batch_apply.go make the same
+		// stamp, so no create shape stores an empty created_by.
 		CreatedBy: actor,
 	}
 	if wire.Priority != nil {

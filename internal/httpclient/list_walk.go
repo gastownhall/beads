@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
-	"time"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
@@ -142,10 +141,10 @@ func (s *Store) walkIssues(ctx context.Context, params url.Values, req issueops.
 	//   keep == nil — no caller-supplied keyset position. keysetFilter returns
 	//                 nil for exactly that, so asking IT rather than restating
 	//                 its condition is what keeps the two from drifting. The
-	//                 filter is a PREFIX DISCARD over created-order arrival, and
-	//                 run against a page some other order truncated it drops
-	//                 rows whose replacements were never fetched — a wrong
-	//                 answer, not a slow one.
+	//                 filter discards from what the walk FETCHED, and run
+	//                 against a page some other order truncated it drops rows
+	//                 whose replacements were never fetched — a wrong answer,
+	//                 not a slow one.
 	//   sort + cap  — a --max-rows cap over an order SQL cannot express. This
 	//                 leg's whole cap story is that min(limit, MaxRows+1) IS
 	//                 the local expression, and for a GO-SIDE sort it is not:
@@ -413,24 +412,40 @@ func listRequest(query url.Values) wire.Request {
 // keysetFilter turns a caller-supplied position into the discard rule of the
 // skip-forward walk, or nil when the request carries none.
 //
+// AfterCreatedAt ALONE decides whether there is a position, which is the
+// contract's rule (issueops.ListRequest) and the local predicate's
+// (sqlbuild.BuildIssueFilterClauses). An AfterID or AfterPriority with no instant
+// is ignored there, so it is ignored here — read as a position at the zero
+// instant instead, it would discard every row, since every row is after it.
+//
 // The position is a PAIR and both halves matter: rows older than its timestamp
 // are kept, and rows sharing that timestamp are kept only when their id sorts
 // after it. A filter that compared the timestamp alone would drop the
 // same-instant row, which is exactly how a keyset page loses records.
+//
+// AfterPriority extends the pair to the (priority ASC, created_at DESC, id ASC)
+// order, and it is decided FIRST: a row at another priority is past the
+// position exactly when its priority is the higher-numbered one, whatever its
+// instant, and only a row at the position's own priority falls through to the
+// pair. That nesting is sqlbuild.KeysetPriorityCreatedAtIDPredicate's, for its
+// reason: the pair alone would re-deliver every higher-priority row created
+// before the position and drop every lower-priority row created after it.
 func keysetFilter(req issueops.ListRequest) func(*types.IssueWithCounts) bool {
-	if req.AfterCreatedAt == nil && req.AfterID == "" {
+	if req.AfterCreatedAt == nil {
 		return nil
 	}
-	var at time.Time
-	if req.AfterCreatedAt != nil {
-		at = *req.AfterCreatedAt
+	at, after := *req.AfterCreatedAt, req.AfterID
+	byPriority, atPriority := req.AfterPriority != nil, 0
+	if byPriority {
+		atPriority = *req.AfterPriority
 	}
-	after := req.AfterID
 	return func(row *types.IssueWithCounts) bool {
 		if row == nil || row.Issue == nil {
 			return false
 		}
 		switch {
+		case byPriority && row.Priority != atPriority:
+			return row.Priority > atPriority
 		case row.CreatedAt.After(at):
 			return false
 		case row.CreatedAt.Equal(at) && row.ID <= after:

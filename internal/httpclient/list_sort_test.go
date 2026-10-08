@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/httpclient/wire"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // TestFlaglessListSortIsTheSameOrderNamed is the drift pin for the pushdown's
@@ -78,6 +79,57 @@ func TestFlaglessListSortIsTheSameOrderNamed(t *testing.T) {
 		if got, want := rowIDs(flagless), rowIDs(named); !slices.Equal(got, want) {
 			t.Errorf("reverse %v: the client orders the flagless spelling %v and %q %v; the pushdown asks the "+
 				"server for one and re-sorts the answer under the other", reverse, got, flaglessListSort, want)
+		}
+	}
+}
+
+// TestKeysetFilterKeepsExactlyTheRowsPastThePositionInItsOrder is the drift
+// pin for the walk's discard rule: a row survives keysetFilter exactly when
+// sqlbuild.Less — the Go-side mirror of the ORDER BY a local list renders —
+// puts the position before it, in the order the position names. A position
+// carrying AfterPriority is one in the priority order and a bare pair is one in
+// the created order, which is how the local predicate chooses between
+// sqlbuild's two keyset clauses.
+//
+// Every corpus row is tried as the position against every row, so each of the
+// order's tie-breaks — priority, then instant, then id — decides some pair, and
+// the corpus's newer lower-priority rows are the ones a filter that compared
+// the pair alone would get wrong.
+func TestKeysetFilterKeepsExactlyTheRowsPastThePositionInItsOrder(t *testing.T) {
+	corpus := flaglessSortCorpus()
+	for _, order := range []string{"priority", "created"} {
+		for _, pos := range corpus {
+			req := issueops.ListRequest{AfterCreatedAt: ptrTo(pos.CreatedAt), AfterID: pos.ID}
+			if order == "priority" {
+				req.AfterPriority = ptrTo(pos.Priority)
+			}
+			keep := keysetFilter(req)
+			if keep == nil {
+				t.Fatalf("a %s position at %s has no discard rule", order, pos.ID)
+			}
+			for _, row := range corpus {
+				if got, want := keep(row), sqlbuild.Less(pos.Issue, row.Issue, order, false); got != want {
+					t.Errorf("a %s position at %s (P%d) keeps %s (P%d) = %v, want %v",
+						order, pos.ID, pos.Priority, row.ID, row.Priority, got, want)
+				}
+			}
+		}
+	}
+}
+
+// TestKeysetFilterNeedsAnInstant pins the contract's rule that AfterCreatedAt
+// alone decides whether a position was supplied: an id or a priority without
+// one is ignored, as the local predicate ignores it, rather than read as a
+// position at the zero instant — which every row is after, so the page would
+// come back empty.
+func TestKeysetFilterNeedsAnInstant(t *testing.T) {
+	for name, req := range map[string]issueops.ListRequest{
+		"an id alone":      {AfterID: "bd-1"},
+		"a priority alone": {AfterPriority: ptrTo(1)},
+		"both, no instant": {AfterID: "bd-1", AfterPriority: ptrTo(1)},
+	} {
+		if keysetFilter(req) != nil {
+			t.Errorf("%s: keysetFilter answered a discard rule, want none — there is no position without an instant", name)
 		}
 	}
 }

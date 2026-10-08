@@ -330,7 +330,7 @@ func TestInterfaceCompleteness(t *testing.T) {
 	for _, name := range names {
 		if _, ok := legitimatelyUnsupported[name]; !ok {
 			t.Errorf("method %q resolves to the typed-unsupported shell but is NOT in legitimatelyUnsupported: "+
-				"implement it (and add it to the go:generate skip list), or add it here with a reason", name)
+				"implement it on *Store (then regenerate the shell: go generate ./internal/httpclient), or add it here with a reason", name)
 		}
 	}
 

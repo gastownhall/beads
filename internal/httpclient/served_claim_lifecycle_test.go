@@ -9,14 +9,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"reflect"
 	"slices"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
 	"github.com/steveyegge/beads/internal/httpclient/encode"
+	"github.com/steveyegge/beads/internal/httpclient/wire"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
@@ -371,6 +375,10 @@ func newServedUpdateFixture(t *testing.T, prefix string) conformance.LifecycleUp
 		CreateWisp:    env.createWisp,
 		GetIssue:      env.getIssue,
 		AddDependency: env.addDependency,
+		// The workspace vocabulary the transfer fence's one configured term
+		// (claim.pools) is read against. The case skipped without it while it
+		// was parked, and would have kept skipping silently once it was not.
+		SetConfig: env.setConfig,
 		// The two out-of-band reads the patch-member wave's cases need, both
 		// bound to the reference store like every other seed hook here:
 		// ListEvents ends the "the refusal wrote nothing" clause a row read
@@ -423,46 +431,149 @@ func TestServedLifecycleUpdatePreservesTheCreationStamp(t *testing.T) {
 	conformance.RunLifecycleUpdatePreservesTheCreationStamp(t, t.Context(), newServedUpdateFixture(t, "hlcs"))
 }
 
-// The FOUR remaining update parks, each on a request member updateIssue
-// publishes nothing for, and each named so the lock counts the contract rather
-// than reading it as unwritten. Every one of the refusals is itself asserted by
-// TestUpdateRefusesEveryMemberTheWireExcludes, which RUNS, so no park here
-// stands in for an unpinned behavior.
+// The THREE claim-and-override cases below RUN, and left the park population
+// together, with the #7247 review port: `claim`, `force_assignee_transfer` and
+// `force_close_policy` are top-level members of updateIssue's body (the first
+// since upstream #6890), and the client sends each exactly as it sent
+// `force_notes_overwrite` before them. Their rows (W-UpdateRequest.Claim,
+// .ForceAssigneeTransfer, .ForceClosePolicy) are RETIRED.
+//
+// What still parks after them is TWO members updateIssue publishes nothing for
+// (W-IssuePatch.Persistence, W-UpdateRequest.Provenance), each named so the
+// lock counts the contract rather than reading it as unwritten. Both refusals
+// are themselves asserted by TestUpdateRefusesEveryMemberTheWireExcludes, which
+// RUNS, so no park here stands in for an unpinned behavior.
 
 // TestServedLifecycleUpdateClaimIsAMutationWhenThePatchRestoresTheRow is the
-// clearest of the four: its whole subject is UpdateRequest.Claim — that a claim
-// folded into an update is a mutation even when the patch beside it restores
-// the row — and a claim is claimIssue's own operation, which updateIssue cannot
-// perform on this wire or any other. The claim itself is served, through the
-// Claimer role next door.
+// claim folded into an update: a mutation even when the patch beside it restores
+// the row. That fold is the server's own since #6890 — claimed and patched in
+// one transaction by the role the direct route runs — so the case is one
+// updateIssue call here, as it is one Lifecycle.Update call locally.
 func TestServedLifecycleUpdateClaimIsAMutationWhenThePatchRestoresTheRow(t *testing.T) {
-	skipKnownDivergence(t, "W-UpdateRequest.Claim", parkBead,
-		"the case's subject is the atomic claim folded into an update; updateIssue cannot perform one, so "+
-			"the client refuses the member rather than dropping it and answering a patch that claimed nothing")
 	conformance.RunLifecycleUpdateClaimIsAMutationWhenThePatchRestoresTheRow(t, t.Context(), newServedUpdateFixture(t, "hlcm"))
 }
 
-// TestClaimOnlyUpdateRefusesAWispByName is W-ClaimRequest.Wisp's pin.
+// predatesUpdateClaimTransport plays a bd serve from before upstream #6890, as
+// far as updateIssue's `claim` member goes. Every request reaches the
+// in-process server untouched EXCEPT an updateIssue body carrying `claim`,
+// which it answers the way such a server did: the skew 400 naming the member,
+// raised before any database work. Everything else about that server —
+// claimIssue among it — is the current one's, which is the point: the
+// fallback route it forces is claimIssue, served for real.
+type predatesUpdateClaimTransport struct {
+	next http.RoundTripper
+	// refused counts the claims it answered, so a case can tell the fallback
+	// ran from a current-server claim that happened to agree with it.
+	refused atomic.Int32
+}
+
+func (p *predatesUpdateClaimTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method == http.MethodPatch && req.GetBody != nil {
+		body, err := req.GetBody()
+		if err != nil {
+			return nil, err
+		}
+		var members map[string]json.RawMessage
+		decodeErr := json.NewDecoder(body).Decode(&members)
+		_ = body.Close()
+		if _, claims := members["claim"]; decodeErr == nil && claims {
+			p.refused.Add(1)
+			if req.Body != nil {
+				_ = req.Body.Close()
+			}
+			return &http.Response{
+				Status:     "400 Bad Request",
+				StatusCode: http.StatusBadRequest,
+				Proto:      "HTTP/1.1",
+				ProtoMajor: 1,
+				ProtoMinor: 1,
+				Header:     http.Header{"Content-Type": {"application/problem+json"}},
+				Body: io.NopCloser(strings.NewReader(`{"type":"about:blank","title":"Bad Request","status":400,` +
+					`"code":"invalid_argument","reason":"unknown_parameter","param":"claim",` +
+					`"detail":"unknown request body member \"claim\"","request_id":"predates-6890"}`)),
+				ContentLength: -1,
+				Request:       req,
+			}, nil
+		}
+	}
+	return p.next.RoundTrip(req)
+}
+
+// predatingUpdateClaim is a second client store over env's server, dialing it
+// through predatesUpdateClaimTransport.
+func (env *servedEnv) predatingUpdateClaim(t *testing.T) (*Store, *predatesUpdateClaimTransport) {
+	t.Helper()
+	transport := &predatesUpdateClaimTransport{next: http.DefaultTransport}
+	client, err := wire.New(env.subject.target.BaseURL, nil, wire.Options{HTTPClient: &http.Client{Transport: transport}})
+	if err != nil {
+		t.Fatalf("build the predating client: %v", err)
+	}
+	return New(env.subject.target, client, nil), transport
+}
+
+// TestServedUpdateClaimsAWisp pins the direct route's wisp claim over this
+// wire: `bd update <id> --claim` on a wisp claims it, because updateIssue's
+// claim resolves both planes like the rest of the operation (it sets no
+// IssuePlaneOnly), exactly as the local Lifecycle.Update does.
 //
-// `bd update <id> --claim` — a claim-only UpdateRequest, nothing else set — is
-// claimIssue's own request shape, and httpLifecycle.claimOnlyUpdate dials the
-// Claimer role for it instead of refusing (see the file doc above and
-// TestServedClaimerRefusesAWispIDAsNotFound next door, which pins that the
-// Claimer role ITSELF answers a wisp id with ErrNotFound — the wisp plane is
-// not claimable through claimIssue on any backend). The DIRECT route's
-// `bd update <id> --claim` claims a wisp anyway, because Lifecycle.Update
-// routes issue-or-wisp locally and never dials the narrower role at all.
-//
-// Left alone, that gap would surface over http as the wire's generic
-// not-found — "no issue or wisp with that id" — a live row reported as though
-// it does not exist. This case pins that claimOnlyUpdate instead recognizes
-// the id names a wisp before it ever dials claimIssue, and refuses BY NAME
-// (W-ClaimRequest.Wisp), leaving the wisp row untouched. Serving a wisp-aware
-// claim server-side is a pending decision, not exercised here.
-func TestClaimOnlyUpdateRefusesAWispByName(t *testing.T) {
-	env := newServedEnv(t, "hlcw")
+// It used to refuse by name on every server (W-ClaimRequest.Wisp), when the
+// claim went through claimIssue, whose role excludes the wisp plane. That
+// refusal survives only on the fallback route — see the case below.
+func TestServedUpdateClaimsAWisp(t *testing.T) {
+	env := newServedEnv(t, "hlcx")
 	ctx := t.Context()
 	lifecycle, err := env.subject.IssueLifecycle()
+	if err != nil {
+		t.Fatalf("IssueLifecycle(): %v", err)
+	}
+
+	const id = "hlcx-wisp"
+	if err := env.createWisp(ctx, &types.Issue{
+		ID: id, Title: id, Status: types.StatusOpen, Priority: 2,
+		IssueType: types.TypeTask,
+	}, "seed"); err != nil {
+		t.Fatalf("seed the wisp %s: %v", id, err)
+	}
+
+	result, err := lifecycle.Update(ctx, issueops.UpdateRequest{Actor: "claimant", IssueID: id, Claim: true})
+	if err != nil {
+		t.Fatalf("claim-only update on a wisp: %v", err)
+	}
+	if !result.Changed || result.Issue == nil ||
+		result.Issue.Status != types.StatusInProgress || result.Issue.Assignee != "claimant" {
+		t.Fatalf("claim-only update on a wisp answered %+v, want the claimed row", result)
+	}
+	// The reference store's GetIssue auto-routes to the wisps table when the
+	// durable one has no such row (issueops.GetIssueInTx), so this reads the
+	// wisp back the same way env.getIssue would for a durable row.
+	row, err := env.reference.GetIssue(ctx, id)
+	if err != nil {
+		t.Fatalf("read the wisp back: %v", err)
+	}
+	if row.Status != types.StatusInProgress || row.Assignee != "claimant" {
+		t.Errorf("the claim left %s as %s/%q, want %s/%q", id, row.Status, row.Assignee, types.StatusInProgress, "claimant")
+	}
+	if !isWispIssue(row) {
+		t.Errorf("the claim moved %s off the wisp plane", id)
+	}
+}
+
+// TestClaimOnlyUpdateRefusesAWispByNameOnAServerThatPredatesUpdateClaim is
+// W-ClaimRequest.Wisp's pin.
+//
+// Against a server that predates `claim` on updateIssue, a claim-only
+// UpdateRequest falls back to claimIssue (httpLifecycle.claimOnlyUpdate), and
+// claimIssue's role excludes the wisp plane on every backend (see
+// TestServedClaimerRefusesAWispIDAsNotFound next door). Left alone, a wisp id
+// would surface as the wire's generic not-found — "no issue or wisp with that
+// id" — a live row reported as though it does not exist. This case pins that
+// the fallback instead recognizes the id names a wisp and refuses BY NAME,
+// leaving the wisp row untouched.
+func TestClaimOnlyUpdateRefusesAWispByNameOnAServerThatPredatesUpdateClaim(t *testing.T) {
+	env := newServedEnv(t, "hlcw")
+	ctx := t.Context()
+	predating, transport := env.predatingUpdateClaim(t)
+	lifecycle, err := predating.IssueLifecycle()
 	if err != nil {
 		t.Fatalf("IssueLifecycle(): %v", err)
 	}
@@ -483,16 +594,15 @@ func TestClaimOnlyUpdateRefusesAWispByName(t *testing.T) {
 	if errors.As(err, &refusal) && refusal.Row.ID != "W-ClaimRequest.Wisp" {
 		t.Errorf("the refusal cites %q, want W-ClaimRequest.Wisp", refusal.Row.ID)
 	}
+	if got := transport.refused.Load(); got != 1 {
+		t.Errorf("the predating server refused %d claims, want 1: the case must reach the fallback through the skew refusal", got)
+	}
 
 	// The refusal left the wisp exactly as seeded: still open, still
 	// unassigned. A wisp claim that fell through to the misleading not-found
 	// would still leave the row untouched, so this is not the case's whole
 	// subject — but a refusal-by-name that quietly claimed anyway would be a
-	// worse bug than the one it replaces, and nothing else in this file reads
-	// a wisp row back through the reference store to rule that out.
-	// The reference store's GetIssue auto-routes to the wisps table when the
-	// durable one has no such row (issueops.GetIssueInTx), so this reads the
-	// wisp back the same way env.getIssue would for a durable row.
+	// worse bug than the one it replaces.
 	row, err := env.reference.GetIssue(ctx, id)
 	if err != nil {
 		t.Fatalf("read the wisp back: %v", err)
@@ -502,81 +612,103 @@ func TestClaimOnlyUpdateRefusesAWispByName(t *testing.T) {
 	}
 }
 
-// TestClaimOnlyUpdateHydratesLabelsAndCreatedByForOutputParity pins the fix for
-// `bd update <id> --claim --json` printing no "labels" key (and no
-// "created_by") over an http workspace, unlike the direct route.
+// TestClaimOnlyUpdateHydratesLabelsAndCreatedByForOutputParity pins
+// `bd update <id> --claim --json` printing the same "labels" and "created_by"
+// over an http workspace as the direct route does, on BOTH routes a claim-only
+// update can take.
 //
-// issueops.Claimer's OWN contract stays the bare row on every backend —
-// TestServedClaimerClaimsAnUnassignedOpenIssueAndAnswersTheBareRow next door
-// pins that directly against httpClaimer.Claim, the thing
-// backend/conformance's ClaimerFixture suite exercises — so this hydration is
-// NOT in claimer.go. It is composed one layer up, in claimOnlyUpdate
-// (lifecycle.go), which is what `bd update <id> --claim` actually dials and
-// which nothing in the shared Claimer conformance suite calls. See the doc
-// above claimOnlyUpdate for why the hydration belongs at this seam and not in
-// the role.
+// On a current server the claim is updateIssue's, which answers the hydrated
+// row and the post-write `revision` like every other update, so parity is the
+// operation's own. On a server that predates the member, the claim falls back
+// to claimIssue, whose role answers the BARE row — issueops.Claimer's own
+// contract on every backend, pinned against httpClaimer.Claim directly by
+// TestServedClaimerClaimsAnUnassignedOpenIssueAndAnswersTheBareRow — so the
+// fallback (claimOnlyUpdate, lifecycle.go) reads the labels and CreatedBy back
+// itself. What it does NOT read back is the row version: claimIssue carries no
+// `revision`, and the follow-up read's token is another snapshot's.
 func TestClaimOnlyUpdateHydratesLabelsAndCreatedByForOutputParity(t *testing.T) {
 	env := newServedEnv(t, "hlch")
 	ctx := t.Context()
-	lifecycle, err := env.subject.IssueLifecycle()
-	if err != nil {
-		t.Fatalf("IssueLifecycle(): %v", err)
-	}
+	predating, transport := env.predatingUpdateClaim(t)
 
-	const id = "hlch-labelled"
-	if err := env.createIssue(ctx, &types.Issue{
-		ID: id, Title: id, Status: types.StatusOpen, Priority: 2,
-		IssueType: types.TypeTask, Labels: []string{"hlch-label"},
-		CreatedBy: "the-original-author",
-	}, "the-original-author"); err != nil {
-		t.Fatalf("seed %s: %v", id, err)
-	}
+	for _, route := range []struct {
+		name  string
+		store *Store
+		// wantRevision says whether the claimed row carries the post-claim
+		// row version, which only updateIssue answers with.
+		wantRevision bool
+		wantRefused  int32
+	}{
+		{name: "current server", store: env.subject, wantRevision: true, wantRefused: 0},
+		{name: "server predating update claim", store: predating, wantRevision: false, wantRefused: 1},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			lifecycle, err := route.store.IssueLifecycle()
+			if err != nil {
+				t.Fatalf("IssueLifecycle(): %v", err)
+			}
+			id := "hlch-" + strings.ReplaceAll(route.name, " ", "-")
+			if err := env.createIssue(ctx, &types.Issue{
+				ID: id, Title: id, Status: types.StatusOpen, Priority: 2,
+				IssueType: types.TypeTask, Labels: []string{"hlch-label"},
+				CreatedBy: "the-original-author",
+			}, "the-original-author"); err != nil {
+				t.Fatalf("seed %s: %v", id, err)
+			}
+			before := transport.refused.Load()
 
-	result, err := lifecycle.Update(ctx, issueops.UpdateRequest{Actor: "claimant", IssueID: id, Claim: true})
-	if err != nil {
-		t.Fatalf("claim-only update on a labeled issue: %v", err)
-	}
-	if result.Issue == nil {
-		t.Fatal("claim-only update returned a nil Issue")
-	}
-	if !slices.Contains(result.Issue.Labels, "hlch-label") {
-		t.Errorf("claimed Issue.Labels = %v, want [%q] — the direct route's `bd update --claim` always hydrates labels, and this is what makes the http route's --json output match it", result.Issue.Labels, "hlch-label")
-	}
-	if result.Issue.CreatedBy != "the-original-author" {
-		t.Errorf("claimed Issue.CreatedBy = %q, want %q", result.Issue.CreatedBy, "the-original-author")
-	}
-	// The claim itself still won: hydration is an enrichment, not a
-	// substitute for the actual mutation.
-	if result.Issue.Status != types.StatusInProgress || result.Issue.Assignee != "claimant" {
-		t.Errorf("claimed issue = %s/%q, want %s/%q", result.Issue.Status, result.Issue.Assignee, types.StatusInProgress, "claimant")
+			result, err := lifecycle.Update(ctx, issueops.UpdateRequest{Actor: "claimant", IssueID: id, Claim: true})
+			if err != nil {
+				t.Fatalf("claim-only update on a labeled issue: %v", err)
+			}
+			if got := transport.refused.Load() - before; got != route.wantRefused {
+				t.Fatalf("the predating server refused %d claims, want %d: the route under test is not the one that ran", got, route.wantRefused)
+			}
+			if result.Issue == nil {
+				t.Fatal("claim-only update returned a nil Issue")
+			}
+			if !slices.Contains(result.Issue.Labels, "hlch-label") {
+				t.Errorf("claimed Issue.Labels = %v, want [%q] — the direct route's `bd update --claim` always hydrates labels, and this is what makes the http route's --json output match it", result.Issue.Labels, "hlch-label")
+			}
+			if result.Issue.CreatedBy != "the-original-author" {
+				t.Errorf("claimed Issue.CreatedBy = %q, want %q", result.Issue.CreatedBy, "the-original-author")
+			}
+			// The claim itself still won: hydration is an enrichment, not a
+			// substitute for the actual mutation.
+			if result.Issue.Status != types.StatusInProgress || result.Issue.Assignee != "claimant" {
+				t.Errorf("claimed issue = %s/%q, want %s/%q", result.Issue.Status, result.Issue.Assignee, types.StatusInProgress, "claimant")
+			}
+
+			row, err := env.getIssue(ctx, id)
+			if err != nil {
+				t.Fatalf("read back %s: %v", id, err)
+			}
+			switch {
+			case route.wantRevision && (row.RowVersion == 0 || result.Issue.RowVersion != row.RowVersion):
+				t.Errorf("claimed Issue.RowVersion = %d, want the post-claim row's %d — a guarded write composes its next ExpectedVersion from it", result.Issue.RowVersion, row.RowVersion)
+			case !route.wantRevision && result.Issue.RowVersion != 0:
+				t.Errorf("the fallback's Issue.RowVersion = %d, want it unset: claimIssue answers no revision, and no other snapshot's token may stand in for one", result.Issue.RowVersion)
+			}
+		})
 	}
 }
 
-// TestServedLifecycleUpdateAssigneeTransferFence parks on the fence's OVERRIDE
-// rather than on the fence, and the distinction is the whole reason the row is
-// narrow: the fence is enforced here — a transfer away from a live foreign
-// in-progress holder refuses with already_claimed — and the ExpectedAssignee
-// bypass is sent. What refuses is `force_assignee_transfer`, and the case's
-// seed refuses first besides, on the same UpdateRequest.Claim as the case
-// above. TestServedUpdateGuardTrioGatesTheEdit is where the guard half runs.
+// TestServedLifecycleUpdateAssigneeTransferFence runs the fence AND its
+// override: a transfer away from a live foreign in-progress holder refuses with
+// already_claimed, the ExpectedAssignee bypass is sent, and so — since the
+// #7247 review port — is `force_assignee_transfer`, the unconditional override
+// the case ends on. TestServedUpdateGuardTrioGatesTheEdit is where the guard
+// half runs on its own.
 func TestServedLifecycleUpdateAssigneeTransferFence(t *testing.T) {
-	skipKnownDivergence(t, "W-UpdateRequest.ForceAssigneeTransfer", parkBead,
-		"the case ends on the unconditional override, which this client does not send (the claiming seed it "+
-			"opens with refuses first, on W-UpdateRequest.Claim); the fence and its compare-and-set bypass are "+
-			"both served and are asserted by TestServedUpdateGuardTrioGatesTheEdit")
 	conformance.RunLifecycleUpdateAssigneeTransferFence(t, t.Context(), newServedUpdateFixture(t, "hlxf"))
 }
 
-// TestServedLifecycleUpdateClosePolicy parks on the same shape one member over:
-// the policy is ENFORCED here — a status crossing into the done category with
-// an open child or a live blocker refuses, typed, and writes nothing — and what
-// this client does not send is the bypass. The case drives a claiming crossing
-// too, so W-UpdateRequest.Claim refuses inside it as well.
+// TestServedLifecycleUpdateClosePolicy runs both halves of the policy: a status
+// crossing into the done category with an open child or a live blocker refuses,
+// typed, and writes nothing; and `force_close_policy`, which the case's second
+// half forces the crossing with, is sent since the #7247 review port, beside
+// the claim its compound arm drives.
 func TestServedLifecycleUpdateClosePolicy(t *testing.T) {
-	skipKnownDivergence(t, "W-UpdateRequest.ForceClosePolicy", parkBead,
-		"the case's second half forces the crossing past the open-child and live-blocker refusals, and this "+
-			"client sends no force_close_policy (its compound arm refuses on W-UpdateRequest.Claim besides); "+
-			"the unforced refusals themselves are the server's and are enforced over this wire")
 	conformance.RunLifecycleUpdateClosePolicy(t, t.Context(), newServedUpdateFixture(t, "hlcp"))
 }
 

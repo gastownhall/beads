@@ -1092,6 +1092,88 @@ func TestServedReaderListKeysetPositionSkipsForward(t *testing.T) {
 	}
 }
 
+// TestServedReaderListPriorityKeysetPositionResumesThePriorityOrder is the
+// served half of AfterPriority: a position that carries a priority is one in
+// the (priority ASC, created_at DESC, id ASC) order, and the walk resumes it in
+// that order — sqlbuild.KeysetPriorityCreatedAtIDPredicate's nesting, which the
+// reference store applies in SQL on the far side.
+//
+// The fixture puts a row on each side of the position that the created pair
+// alone would misplace: an older row at a HIGHER priority, which is before the
+// position and must not come back, and a newer row at a LOWER priority, which
+// is after it and must. A filter that dropped AfterPriority answers with the
+// first and without the second.
+func TestServedReaderListPriorityKeysetPositionResumesThePriorityOrder(t *testing.T) {
+	ctx := t.Context()
+	c, reader := servedReader(t)
+	scope := listScope("pkeyset")
+
+	topNewer, topOlder := listID("pkeyset", "p0new"), listID("pkeyset", "p0old")
+	cursor, sameInstant, olderPeer := listID("pkeyset", "p1a"), listID("pkeyset", "p1b"), listID("pkeyset", "p1old")
+	lowerNewer := listID("pkeyset", "p2new")
+	base := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+	cursorAt := base.Add(40 * time.Minute)
+	for _, seed := range []struct {
+		id       string
+		at       time.Time
+		priority int
+	}{
+		{topNewer, base.Add(50 * time.Minute), 0},
+		{topOlder, base, 0},
+		{cursor, cursorAt, 1},
+		{sameInstant, cursorAt, 1},
+		{olderPeer, base.Add(10 * time.Minute), 1},
+		{lowerNewer, base.Add(55 * time.Minute), 2},
+	} {
+		seedListIssue(t, ctx, c, seed.id, scope, seed.at, seed.priority)
+	}
+
+	fromPosition := issueops.ListRequest{
+		Labels: []string{scope}, SortBy: "priority",
+		AfterCreatedAt: &cursorAt, AfterID: cursor, AfterPriority: ptrTo(1),
+	}
+	want := []string{sameInstant, olderPeer, lowerNewer}
+
+	// The answer is checked against the reference store as well as spelled
+	// out, so a disagreement says which side moved: the reference answering
+	// something else is the fixture or the local predicate drifting, not this
+	// client.
+	referenceReader, err := c.reference.IssueReader()
+	if err != nil {
+		t.Fatalf("reference IssueReader(): %v", err)
+	}
+	reference, err := referenceReader.List(ctx, fromPosition)
+	if err != nil {
+		t.Fatalf("reference List from a priority position: %v", err)
+	}
+	if !slices.Equal(pageIDs(reference), want) {
+		t.Fatalf("the reference answered a priority position with %v, want %v; the fixture no longer "+
+			"discriminates the priority order from the created one", pageIDs(reference), want)
+	}
+
+	page, err := reader.List(ctx, fromPosition)
+	if err != nil {
+		t.Fatalf("List from a priority position: %v", err)
+	}
+	if !slices.Equal(pageIDs(page), want) {
+		t.Errorf("List from a priority position = %v, want %v (the reference's answer)", pageIDs(page), want)
+	}
+
+	// The position composes with the page bound, so a priority walk can page.
+	bounded := fromPosition
+	bounded.Limit = ptrTo(2)
+	page, err = reader.List(ctx, bounded)
+	if err != nil {
+		t.Fatalf("List from a priority position --limit 2: %v", err)
+	}
+	if want := []string{sameInstant, olderPeer}; !slices.Equal(pageIDs(page), want) {
+		t.Errorf("List from a priority position --limit 2 = %v, want %v", pageIDs(page), want)
+	}
+	if !page.HasMore {
+		t.Error("List from a priority position --limit 2 hid a row without reporting HasMore")
+	}
+}
+
 // TestServedReaderListWalksMultiplePages drives the cursor loop itself: the
 // per-page size is shrunk so three rows take three round trips, and the answer
 // still has to be the whole set, once each, in order.

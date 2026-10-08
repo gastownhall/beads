@@ -251,27 +251,17 @@ func writeShapes() []writeShape {
 				// W-UpdateRequest.ForceNotesOverwrite is RETIRED, not deleted —
 				// it records that this member was found unwired and then wired.
 				"ForceNotesOverwrite": member("force_notes_overwrite"),
-			},
-			// The other two FORCE members of the same upstream change are still
-			// refused, and client wave ga-7i6by changed what that refusal
-			// STANDS ON rather than retiring it: the patch members each bypass
-			// a fence around — `assignee` and `status` — are now sent, so what
-			// is left is this client's own decision not to carry the bypass.
-			// See W-UpdateRequest.ForceAssigneeTransfer for the residue and the
-			// bead that owns it.
-			//
-			// `claim` is pending for a different reason than the two remaining
-			// force members: it is not a bypass this client declines to carry,
-			// but a whole atomic shape (claim folded into one transaction with a
-			// patch) that W-UpdateRequest.Claim still refuses outright, tracked
-			// against upstream gastownhall/beads#6890. A claim-ALONE request
-			// does not reach this body at all — see claimOnlyUpdate — which is
-			// why this entry's refusal is unconditional rather than scoped to
-			// one bypass.
-			pending: map[string]string{
-				"force_assignee_transfer": "ForceAssigneeTransfer",
-				"force_close_policy":      "ForceClosePolicy",
-				"claim":                   "Claim",
+				// The other two FORCE members, and the claim, followed it (the
+				// #7247 review port): each was published — the force pair by
+				// upstream #5484, `claim` by upstream #6890 — and refused only
+				// by this client. Their rows are RETIRED the same way. A claim
+				// ALONE against a server that predates `claim` still reaches
+				// claimIssue instead, as a fallback on that server's skew
+				// refusal (see claimOnlyUpdate); against a current one it is
+				// this body.
+				"ForceAssigneeTransfer": member("force_assignee_transfer"),
+				"ForceClosePolicy":      member("force_close_policy"),
+				"Claim":                 member("claim"),
 			},
 		},
 		{
@@ -521,10 +511,9 @@ func writeShapes() []writeShape {
 			},
 		},
 		{
-			// The update item. Both FORCE members are carried here where
-			// updateIssue still refuses them (W-UpdateRequest.Force*): this
-			// operation publishes them per item, so a plan can express what a
-			// single patch over this wire cannot.
+			// The update item. It carries every FORCE member updateIssue does:
+			// this operation publishes them per item, so a plan can express
+			// what a single patch over this wire can.
 			name:   "applyBatch/item/update",
 			source: reflect.TypeOf(issueops.UpdateItem{}),
 			body:   reflect.TypeOf(apigen.ApplyUpdateItem{}),

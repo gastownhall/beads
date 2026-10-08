@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 go_library(
     name = "httpclient",
@@ -107,6 +108,9 @@ go_test(
         "lifecycle_update_test.go",
         "list_sort_test.go",
         "metadatacas_test.go",
+        "race_detector_off_test.go",
+        "race_detector_on_test.go",
+        "required_served_tier_test.go",
         "roles_graph_cycles_test.go",
         "roles_test.go",
         "served_batch_apply_test.go",
@@ -186,6 +190,47 @@ go_test(
         "//memoryops",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
+)
+
+# scripts/conformance.sh's Tier 3, the served HTTP corpus: the whole package
+# with BEADS_TEST_EMBEDDED_DOLT=1, so the served_*_test.go cases stand a real
+# `bd serve` handler over embedded Dolt instead of skipping as they do in
+# httpclient_test above, and BEADS_HTTP_TEST_REQUIRED=1, so a missing engine
+# fails each served case rather than skipping it. It is the script's run on
+# the lane's race build (raceEnabled shrinks its one large apply).
+#
+# Shard count: on the lane's executors (2026-10-08) the package is 702 tests
+# and ~3,700 test-seconds, the heaviest, TestServedBatchGetterContract, at
+# 170-230s. rules_go deals the tests out round-robin, so the shard that draws
+# it runs it plus about a 24th of the rest: 283s measured, ~370s at the slow
+# end. Both are under the ~410s cmd/bd shard that sets the lane's floor (see
+# bazel.yml's bazel-embedded), so this target does not lengthen the lane.
+#
+# Tags:
+#   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
+#     selected by --config=embedded.
+sh_test(
+    name = "httpclient_served_test",
+    size = "large",
+    # Deviation from the script's -timeout=40m: Bazel ends the action at
+    # 1200s (eternal under --config=embedded), and rules_go's wrapper ignores
+    # that SIGTERM, so a hang would end as a bare TIMEOUT. 19m lets Go's own
+    # timeout fire first and dump every goroutine to test.log.
+    timeout = "eternal",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = [
+        "$(rootpath :httpclient_test)",
+        "-test.v",
+        "-test.count=1",
+        "-test.timeout=19m",
+    ],
+    data = [":httpclient_test"],
+    env = {
+        "BEADS_HTTP_TEST_REQUIRED": "1",
+        "BEADS_TEST_EMBEDDED_DOLT": "1",
+    },
+    shard_count = 24,
+    tags = ["embedded"],
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

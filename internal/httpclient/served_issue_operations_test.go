@@ -206,30 +206,18 @@ func TestServedIssueOperationsRequestValuesAreNotMutated(t *testing.T) {
 // themselves are asserted by TestUpdateRefusesEveryMemberTheWireExcludes,
 // which RUNS.
 //
-// The THREE CLAIM cases below are MOSTLY not parks any more: a claim-only
-// UpdateRequest — an actor and an id, nothing else — is claimIssue's own
-// request shape, and httpLifecycle.claimOnlyUpdate dials the Claimer role for
-// it instead of refusing. What remains permanently refused
-// (W-UpdateRequest.Claim) is a claim COMBINED with a patch, a guard or a force
-// override — PATCH claim, which no operation on this wire publishes — and two
-// of these three cases drive no such combination, so they run for real against
-// a served claimIssue and an in-process bd serve over embedded Dolt.
+// The THREE CLAIM cases below are not parks: a claim rides updateIssue's own
+// body (upstream #6890) — alone, or beside a patch, a guard or a force
+// override, claimed and written in one transaction — so all three run for real
+// against an in-process bd serve over embedded Dolt.
 //
-// The conflict case parks ITS OWN LAST SECTION ONLY: claimIssue's wire request
-// is the actor alone (apigen.ClaimRequest carries no expected_version), so the
-// one legal claim/guard composition the local role allows — Claim with a
-// stale ExpectedVersion — IS a combination by this wire's own accounting and
-// refuses on W-UpdateRequest.Claim exactly as any other claim+guard request
-// does. The case's first two sections (foreign live claim, ineligible status)
-// are claim-only and are not affected; only the whole function parks, because
-// the contract does not offer a way to run part of a case.
+// The conflict case was the last to leave. Its final section drives Claim with
+// a stale ExpectedVersion, the one claim/guard composition the local role
+// allows, and while claimIssue (whose request is the actor alone) was the only
+// claim this client sent, that combination refused on W-UpdateRequest.Claim —
+// RETIRED by the #7247 review port, which sends the guard beside the claim.
 
 func TestServedIssueOperationsUpdateClaimConflictCarriesTheLosingState(t *testing.T) {
-	skipKnownDivergence(t, "W-UpdateRequest.Claim", parkBead,
-		"the case's last section drives Claim with a stale ExpectedVersion — the one claim/guard composition the local role "+
-			"allows — and claimIssue's wire request is the actor alone (no expected_version member), so this client refuses "+
-			"the combination rather than dropping the guard and answering an unguarded claim; the case's first two sections "+
-			"(foreign live claim, ineligible status) are claim-only and are themselves proven servable by the next two cases")
 	conformance.RunIssueOperationsUpdateClaimConflictCarriesTheLosingState(t, t.Context(), newServedIssueOperationsFixture(t, "hiof"))
 }
 

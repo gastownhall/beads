@@ -100,7 +100,7 @@ func (b *httpBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBat
 func applyBatchBody(req issueops.ApplyBatchRequest) (wire.ApplyBatchRequest, error) {
 	items := make([]wire.ApplyItem, 0, len(req.Items))
 	for i, item := range req.Items {
-		encoded, err := applyItemBody(item)
+		encoded, err := applyItemBody(item, req.Actor)
 		if err != nil {
 			return wire.ApplyBatchRequest{}, fmt.Errorf("items[%d]: %w", i, err)
 		}
@@ -137,7 +137,7 @@ var applyItemKinds = map[issueops.ItemKind]string{
 // trip to be told what is knowable here — and, worse, sending it with NO
 // payload would be a plan that silently did less than the caller composed.
 // Refusing names the kind.
-func applyItemBody(item issueops.ApplyItem) (wire.ApplyItem, error) {
+func applyItemBody(item issueops.ApplyItem, actor string) (wire.ApplyItem, error) {
 	named, known := applyItemKinds[item.Kind]
 	if !known {
 		return wire.ApplyItem{}, invalid("item kind %q is not one of create, update, close, dep_add", item.Kind)
@@ -175,7 +175,7 @@ func applyItemBody(item issueops.ApplyItem) (wire.ApplyItem, error) {
 	out := wire.ApplyItem{Kind: named}
 	switch item.Kind {
 	case issueops.ItemCreate:
-		create, err := applyCreateItemBody(item.Create)
+		create, err := applyCreateItemBody(item.Create, actor)
 		if err != nil {
 			return wire.ApplyItem{}, err
 		}
@@ -210,7 +210,7 @@ func applyItemBody(item issueops.ApplyItem) (wire.ApplyItem, error) {
 // ledger row the refusal cites: this is a different operation, and a reader
 // auditing "why does my plan refuse?" must not be sent to a row about
 // createIssue.
-func applyCreateItemBody(item *issueops.CreateItem) (*apigen.ApplyCreateItem, error) {
+func applyCreateItemBody(item *issueops.CreateItem, actor string) (*apigen.ApplyCreateItem, error) {
 	if item == nil || item.Issue == nil {
 		return nil, invalid("a create item names no issue")
 	}
@@ -221,7 +221,7 @@ func applyCreateItemBody(item *issueops.CreateItem) (*apigen.ApplyCreateItem, er
 		// ITEMS, so a create item has nowhere to put one at all.
 		return nil, invalid("a create item's Issue carries comments or dependencies; edges are dep_add items")
 	}
-	if err := refuseUnwirableIssueMembers(issue, encode.OpApplyBatch, "W-CreateItem.Issue"); err != nil {
+	if err := refuseUnwirableIssueMembers(issue, actor, encode.OpApplyBatch, "W-CreateItem.Issue"); err != nil {
 		return nil, err
 	}
 
@@ -532,15 +532,20 @@ func encodeApplyLabelPatch(patch issueops.LabelPatch) map[string]any {
 	return out
 }
 
-// refuseUnwirableIssueMembers refuses the first populated member of an issue
-// that the wire's create vocabulary does not carry and the role does not ignore.
+// refuseUnwirableIssueMembers is the other half of createCarriedIssueMembers'
+// allowlist: it refuses the first populated member of an issue that the wire's
+// create vocabulary does not carry, the role does not ignore, and the server
+// does not stamp from the actor (actorStampedCreateMember).
 //
-// It is refuseUnwirableCreateIssue generalized over the LEDGER ROW, because two
-// operations now publish the identical twenty members and a caller must be sent
-// to the row for the operation they actually called. The partition itself is
-// one partition and is shared, so the two cannot disagree about what the wire
-// carries or about what the role drops.
-func refuseUnwirableIssueMembers(issue *issueops.Issue, op encode.Op, ledgerID string) error {
+// It answers the FIRST offender in declaration order, which is deterministic —
+// a caller fixing one member at a time must not see the reported member depend
+// on map iteration. It is generalized over the LEDGER ROW because two
+// operations publish the identical twenty members — createIssue and
+// batchApply's create item — and a caller must be sent to the row for the
+// operation they actually called. The partition itself is one partition and is
+// shared, so the two cannot disagree about what the wire carries or about what
+// the role drops.
+func refuseUnwirableIssueMembers(issue *issueops.Issue, actor string, op encode.Op, ledgerID string) error {
 	value := reflect.ValueOf(*issue)
 	shape := value.Type()
 	for i := range shape.NumField() {
@@ -554,9 +559,11 @@ func refuseUnwirableIssueMembers(issue *issueops.Issue, op encode.Op, ledgerID s
 		if _, ignored := roleIgnoredCreateIssueMembers[field.Name]; ignored {
 			continue
 		}
-		if value.Field(i).IsZero() {
+		if value.Field(i).IsZero() || actorStampedCreateMember(field.Name, issue, actor) {
 			continue
 		}
+		// The ledger row is the vocabulary; the member name is the fact the row
+		// cannot carry, because one row covers the whole population.
 		return fmt.Errorf("Issue.%s: %w", field.Name, refuse(op, ledgerID))
 	}
 	return nil

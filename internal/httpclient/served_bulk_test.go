@@ -487,6 +487,41 @@ func newServedBatchCreatorFixture(t *testing.T, prefix string) conformance.Batch
 	}
 }
 
+// TestServedBatchCreateStampsEachItemsCreatedByFromTheActor is the served half
+// of created_by on the batch: BatchCreateItem publishes no created_by, so the
+// stored creator exists only because the server stamps it from the actor
+// (internal/httpapi's batch_create.go). An item whose CreatedBy names that actor
+// — the shape `bd create --file` sends — is carried by the stamp rather than
+// refused, and an item that names none is stamped all the same.
+func TestServedBatchCreateStampsEachItemsCreatedByFromTheActor(t *testing.T) {
+	env := newServedEnv(t, "hbcby")
+	ctx := t.Context()
+	creator, err := env.subject.BatchCreator()
+	if err != nil {
+		t.Fatalf("BatchCreator(): %v", err)
+	}
+
+	res, err := creator.CreateBatch(ctx, issueops.CreateBatchRequest{
+		Actor: "file-writer",
+		Items: []issueops.BatchCreateItem{
+			{Issue: &issueops.Issue{Title: "named", Priority: 2, IssueType: types.TypeTask, CreatedBy: "file-writer"}},
+			{Issue: &issueops.Issue{Title: "unnamed", Priority: 2, IssueType: types.TypeTask}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateBatch in bd create --file's shape = %v, want it served", err)
+	}
+	for i, issue := range res.Issues {
+		stored, err := env.getIssue(ctx, issue.ID)
+		if err != nil {
+			t.Fatalf("read back items[%d] %s: %v", i, issue.ID, err)
+		}
+		if stored.CreatedBy != "file-writer" {
+			t.Errorf("items[%d] stored created_by = %q, want the actor %q", i, stored.CreatedBy, "file-writer")
+		}
+	}
+}
+
 func TestServedBatchCreatorCreatesEveryItemAsOneAct(t *testing.T) {
 	conformance.RunBatchCreatorCreatesEveryItemAsOneAct(t, t.Context(), newServedBatchCreatorFixture(t, "hb00"))
 }

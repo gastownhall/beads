@@ -91,7 +91,9 @@ func TestServedLifecycleCreateRefusesAForeignIDPrefix(t *testing.T) {
 // W-CreateRequest.Issue: seventeen of its members are the create vocabulary the
 // wire publishes and five are not — spec_id, await_id, closed_by_session, and
 // the creation stamp's created_at/created_by — and this client refuses each of
-// those rather than dropping it.
+// those rather than dropping it. created_by is refused because the case names
+// a creator OTHER than its actor; the server stamps the actor, so only that one
+// value rides the stamp (TestServedCreateCarriesTheShapeBdCreateSends).
 //
 // The operation's own description says why the stamp is absent: a create whose
 // stored creation time comes from the caller makes the row disagree with the
@@ -100,7 +102,7 @@ func TestServedLifecycleCreateRefusesAForeignIDPrefix(t *testing.T) {
 // park will outlive the ones above.
 func TestServedLifecycleCreateWritesEveryScalarField(t *testing.T) {
 	skipKnownDivergence(t, "W-CreateRequest.Issue", createParkBead,
-		"the case sets spec_id, await_id, closed_by_session and the created_at/created_by stamp; createIssue publishes none of them and the client refuses each per member rather than dropping it (asserted by TestCreateRefusesEveryMemberTheWireExcludes)")
+		"the case sets spec_id, await_id, closed_by_session, created_at and a created_by naming someone other than its actor; createIssue publishes none of them and the client refuses each per member rather than dropping it (asserted by TestCreateRefusesEveryMemberTheWireExcludes)")
 	conformance.RunLifecycleCreateWritesEveryScalarField(t, t.Context(), newServedCreateFixture(t, "hlc5"))
 }
 
@@ -293,14 +295,10 @@ func TestServedCreateAnswersTheRowAsStored(t *testing.T) {
 	}
 }
 
-// TestServedCreateStampsCreatedByFromTheActorNotTheWire is item 5's own
-// pinning test: created_by is not one of createCarriedIssueMembers (the
-// client leaves Issue.CreatedBy zero unconditionally — see
-// cmd/bd/create_http.go's buildHTTPCreateIssue), so an http-created issue
-// having no created_by at all is not "the wire has no member for it" working
-// as designed; it is the server never doing what the client's own doc
-// comment says it does ("the server is the one that stamps the stored row's
-// CreatedBy from it"). A different actor than TestServedCreateAnswersTheRowAsStored
+// TestServedCreateStampsCreatedByFromTheActorNotTheWire pins the server half of
+// the created_by contract: createIssue publishes no created_by member, so the
+// stored creator exists only because internal/httpapi's create.go stamps it from
+// the request's actor. A different actor than TestServedCreateAnswersTheRowAsStored
 // pins that the stamp tracks THIS request's actor, not a fixed default.
 func TestServedCreateStampsCreatedByFromTheActorNotTheWire(t *testing.T) {
 	env := newServedEnv(t, "hlcby")
@@ -327,6 +325,41 @@ func TestServedCreateStampsCreatedByFromTheActorNotTheWire(t *testing.T) {
 	}
 	if stored.CreatedBy != "a-different-actor" {
 		t.Errorf("stored created_by = %q, want %q", stored.CreatedBy, "a-different-actor")
+	}
+}
+
+// TestServedCreateCarriesTheShapeBdCreateSends drives the request `bd create`
+// actually builds (cmd/bd/create.go): Issue.CreatedBy names the actor, and
+// IDPrefix carries the workspace's config.yaml prefix on every create, with no
+// explicit id. Neither member has a place on the wire, and neither needs one —
+// the server stamps created_by from the actor, and the override acts only on an
+// explicit, unforced id — so refusing either would refuse every CLI create in a
+// workspace whose config.yaml names a prefix.
+func TestServedCreateCarriesTheShapeBdCreateSends(t *testing.T) {
+	env := newServedEnv(t, "hlcli")
+	ctx := t.Context()
+	lifecycle, err := env.subject.IssueLifecycle()
+	if err != nil {
+		t.Fatalf("IssueLifecycle(): %v", err)
+	}
+
+	created, err := lifecycle.Create(ctx, issueops.CreateRequest{
+		Actor:    "cli-user",
+		Issue:    &issueops.Issue{Title: "from the cli", Priority: 2, IssueType: types.TypeTask, CreatedBy: "cli-user"},
+		IDPrefix: env.prefix,
+	})
+	if err != nil {
+		t.Fatalf("Create in bd create's shape = %v, want it served", err)
+	}
+	if !strings.HasPrefix(created.Issue.ID, env.prefix+"-") {
+		t.Errorf("minted id = %q, want one in the workspace's %q prefix", created.Issue.ID, env.prefix)
+	}
+	stored, err := env.getIssue(ctx, created.Issue.ID)
+	if err != nil {
+		t.Fatalf("read back %s: %v", created.Issue.ID, err)
+	}
+	if stored.CreatedBy != "cli-user" {
+		t.Errorf("stored created_by = %q, want the CreatedBy the request named", stored.CreatedBy)
 	}
 }
 

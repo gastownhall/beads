@@ -36,11 +36,13 @@ var _ issueops.Lifecycle = (*httpLifecycle)(nil)
 // Create dials POST /v0/beads/issues.
 //
 // The whole request maps but for two members, and both refuse rather than
-// dropping: IDPrefix, which the server publishes no member for on purpose
-// (W-CreateRequest.IDPrefix), and every member of the issue outside the wire's
-// twenty (W-CreateRequest.Issue). A create that reported success having silently
-// dropped the storage class, the molecule type or the creation stamp is a row
-// the caller believes they wrote and did not.
+// dropping: IDPrefix where it would act on an explicit, unforced id, which the
+// server publishes no member for on purpose (W-CreateRequest.IDPrefix), and
+// every member of the issue outside the wire's twenty (W-CreateRequest.Issue)
+// — save a CreatedBy that names the actor, which the server stamps from the
+// actor itself. A create that reported success having silently dropped the
+// storage class, the molecule type or the creation time is a row the caller
+// believes they wrote and did not.
 //
 // The RESPONSE is the row as stored — the minted id, the defaulted status, the
 // persisted timestamps — so nothing here echoes the request back.
@@ -95,10 +97,16 @@ func createBody(req issueops.CreateRequest) (apigen.CreateIssueRequest, error) {
 		return apigen.CreateIssueRequest{}, invalid(
 			"Issue carries comments or dependencies; supply edges through the request's own Dependencies")
 	}
-	if req.IDPrefix != "" {
+	if req.IDPrefix != "" && req.Issue.ID != "" && !req.ForceIDPrefix {
+		// Refused only where the override would ACT. The role reads it for one
+		// thing — checking an explicit id it was not told to force — so a create
+		// that mints its id, or forces one, asks the server for nothing it cannot
+		// do. `bd create` sends the workspace's prefix on every create, and an
+		// unconditional refusal would refuse every create in a workspace whose
+		// config.yaml names one.
 		return apigen.CreateIssueRequest{}, refuse(encode.OpCreateIssue, "W-CreateRequest.IDPrefix")
 	}
-	if err := refuseUnwirableCreateIssue(req.Issue); err != nil {
+	if err := refuseUnwirableIssueMembers(req.Issue, req.Actor, encode.OpCreateIssue, "W-CreateRequest.Issue"); err != nil {
 		return apigen.CreateIssueRequest{}, err
 	}
 
@@ -225,7 +233,7 @@ func requireJSON(member string, raw []byte) error {
 // types.Issue field each one carries.
 //
 // It is the ALLOWLIST half of refuse-not-drop for this operation. What it does
-// not name is refused, and there is no third arm — see refuseUnwirableCreateIssue.
+// not name is refused, and there is no third arm — see refuseUnwirableIssueMembers.
 var createCarriedIssueMembers = map[string]string{
 	"ID":                 "id",
 	"Title":              "title",
@@ -247,38 +255,6 @@ var createCarriedIssueMembers = map[string]string{
 	"Labels":             "labels",
 	"Ephemeral":          "ephemeral",
 	"NoHistory":          "no_history",
-}
-
-// refuseUnwirableCreateIssue is the other half of the allowlist: every populated
-// member of the issue that is neither carried by the wire nor ignored by the
-// role.
-//
-// It answers the FIRST offender in declaration order, which is deterministic —
-// a caller fixing one member at a time must not see the reported member depend
-// on map iteration — and it shares the role-ignored table with the batch create,
-// because what the ROLE drops on a create is one fact about one role.
-func refuseUnwirableCreateIssue(issue *issueops.Issue) error {
-	value := reflect.ValueOf(*issue)
-	shape := value.Type()
-	for i := range shape.NumField() {
-		field := shape.Field(i)
-		if !field.IsExported() {
-			continue
-		}
-		if _, carried := createCarriedIssueMembers[field.Name]; carried {
-			continue
-		}
-		if _, ignored := roleIgnoredCreateIssueMembers[field.Name]; ignored {
-			continue
-		}
-		if value.Field(i).IsZero() {
-			continue
-		}
-		// The ledger row is the vocabulary; the member name is the fact the row
-		// cannot carry, because one row covers the whole population.
-		return fmt.Errorf("Issue.%s: %w", field.Name, refuse(encode.OpCreateIssue, "W-CreateRequest.Issue"))
-	}
-	return nil
 }
 
 // setItemBool writes an optional wire boolean, leaving it absent when the caller
@@ -315,6 +291,14 @@ func copyTime(value *time.Time) *time.Time {
 // patch member is an edit the caller believes landed; a dropped precondition is
 // a conditional write turned unconditional. Both are the failure class the
 // divergence ledger exists to make impossible.
+//
+// A CLAIM rides the same request (upstream #6890): `claim` is a top-level
+// member beside the patch, so a claim alone, a claim with a patch and a claim
+// with a version guard are each ONE updateIssue call, claimed and patched in
+// one transaction by the same role the direct route runs, and answered with the
+// post-write `revision` like every other update. The one claim that goes
+// anywhere else is a claim ALONE to a server that predates the member — see
+// serverPredatesUpdateClaim.
 func (l *httpLifecycle) Update(ctx context.Context, req issueops.UpdateRequest) (result issueops.UpdateResult, err error) {
 	// Write-side parity with reads: decorates a bare *encode.RefusedError —
 	// however deeply refuseUnwirableUpdateMembers/encodeIssuePatch/
@@ -330,13 +314,6 @@ func (l *httpLifecycle) Update(ctx context.Context, req issueops.UpdateRequest) 
 	if err := requireID("issue id", req.IssueID); err != nil {
 		return issueops.UpdateResult{}, err
 	}
-	// A claim is routed BEFORE the generic member walk below, not folded into
-	// it, because a claim-only request is not one this function's own wire
-	// (updateIssue) answers at all: it is claimIssue's own request, dialed
-	// through the Claimer role. See claimOnlyUpdate.
-	if req.Claim {
-		return l.claimOnlyUpdate(ctx, req)
-	}
 	if err := refuseUnwirableUpdateMembers(req); err != nil {
 		return issueops.UpdateResult{}, err
 	}
@@ -345,15 +322,19 @@ func (l *httpLifecycle) Update(ctx context.Context, req issueops.UpdateRequest) 
 	if err != nil {
 		return issueops.UpdateResult{}, err
 	}
-	if len(patch) == 0 {
-		// The server answers a 400 for an empty patch, and so does the local
-		// role's own validation. Saying it here keeps a write that writes
-		// nothing off the wire entirely.
+	if len(patch) == 0 && !req.Claim {
+		// The server answers a 400 for an empty patch — except beside `claim`,
+		// where the claim is the write — and so does the local role's own
+		// validation. Saying it here keeps a write that writes nothing off the
+		// wire entirely.
 		return issueops.UpdateResult{}, invalid("update names no field to write")
 	}
 
-	res, err := l.wire.UpdateIssue(ctx, req.IssueID, req.Actor, patch, updateGuards(req), req.ForceNotesOverwrite)
+	res, err := l.wire.UpdateIssue(ctx, req.IssueID, req.Actor, patch, updateGuards(req), updateFlags(req))
 	if err != nil {
+		if req.Claim && isClaimOnlyUpdate(req) && serverPredatesUpdateClaim(err) {
+			return l.claimOnlyUpdate(ctx, req)
+		}
 		return issueops.UpdateResult{}, err
 	}
 	// The stitch releaser.go documents: types.Issue.RowVersion is `json:"-"`, so
@@ -392,6 +373,37 @@ func updateGuards(req issueops.UpdateRequest) wire.UpdateGuards {
 		guards.ExpectedAssignee = &assignee
 	}
 	return guards
+}
+
+// updateFlags carries the claim and the three force overrides onto the wire.
+// The wire sends each only when true, so a request that sets none of them is
+// byte-identical to one built before any of them was carried.
+func updateFlags(req issueops.UpdateRequest) wire.UpdateFlags {
+	return wire.UpdateFlags{
+		Claim:                 req.Claim,
+		ForceAssigneeTransfer: req.ForceAssigneeTransfer,
+		ForceClosePolicy:      req.ForceClosePolicy,
+		ForceNotesOverwrite:   req.ForceNotesOverwrite,
+	}
+}
+
+// serverPredatesUpdateClaim reports whether err is a server that predates
+// `claim` on updateIssue (upstream #6890) refusing the member: the version-skew
+// 400 — `unknown_parameter`, naming `claim` itself. Such a server checks body
+// members before it reads anything else, so the refusal arrives before any
+// database work and nothing the request asked for was written.
+//
+// It is the SKEW signal, not the capability list, because no capability token
+// announces the member — it is additive, so it bumped no wire revision either —
+// and the reason is what dispatches, never the code alone: `invalid_value`
+// naming `claim` is a current server refusing a claim beside a member it may
+// not ride with, which is the caller's error to see, not a server to route
+// around.
+func serverPredatesUpdateClaim(err error) bool {
+	var problem *wire.ProblemError
+	return errors.As(err, &problem) &&
+		problem.Reason == encode.UnknownParameterReason &&
+		problem.Param == "claim"
 }
 
 // Close dials POST issues/{id}:close.
@@ -514,50 +526,38 @@ func closeBody(actor, reason, session string, force bool) apigen.CloseIssueReque
 	return body
 }
 
-// claimOnlyUpdate serves the one shape of UpdateRequest.Claim this wire can
-// answer: a claim and nothing else. claimIssue's own request is `{actor}`
-// alone (see apigen.ClaimRequest), so a claim-only UpdateRequest — no Patch
-// member set, no guard, no force override, no provenance label — IS that
-// request, and this dials the Claimer role directly rather than folding the
-// claim into updateIssue, which cannot perform one on this wire or any other
-// (W-UpdateRequest.Claim).
-//
-// The exclusive claim path, `bd update <id> --claim --json`, sends exactly
-// this shape — an actor and an id, nothing else — so this is the route that
-// makes that command work over http. The two roles' result shapes line up member for member (Issue,
-// Changed): same-actor re-claim is the idempotent Changed=false Claimer
-// already promises, and a foreign holder or an ineligible status is the same
-// *issueops.ClaimConflictError the direct route raises. CommandUpdateMutation's
-// shared `bd update --json` renderer then prints claimed.Issue exactly as it
-// prints any other UpdateResult.Issue, which is why the LABELS hydration
-// below matters: issueops.Claimer's own contract answers the bare issue row
-// (no labels — see issueops/claimer.go's ClaimResult doc, and
-// TestServedClaimerClaimsAnUnassignedOpenIssueAndAnswersTheBareRow, which
-// pins that against the Claimer role directly), but the direct route's
-// `bd update <id> --claim` never goes through a Claimer role at all —
-// Lifecycle.Update answers every claim, and it always hydrates labels. Left
-// alone, that gap would render `bd update --claim --json` over http with no
-// "labels" key on a labeled issue, the one member CommandUpdateMutation's
-// "same code printing the same struct" claim would not actually hold for.
-// The hydration happens HERE, in the update composition, rather than by
-// changing what issueops.Claimer promises: the role's bare-row contract is
-// shared across every backend (backend/conformance's ClaimerFixture suite),
-// and httpClaimer.Claim (claimer.go) is what that suite exercises directly,
-// so widening Claimer's own promise would either weaken the contract for
-// every implementation or need a per-backend park — where this composition
-// point is httpLifecycle's own, used by nothing the conformance suite calls.
-//
-// Claim COMBINED with any other UpdateRequest member is PATCH claim: one
-// atomic transaction that claims and edits together. No operation on this
-// wire publishes that shape, and it is not synthesized here as two calls
+// claimOnlyUpdate is the claim a server that predates `claim` on updateIssue
+// can still serve: a claim and nothing else, dialed as claimIssue through the
+// Claimer role. Update reaches it only after such a server refused the member
+// as unknown (serverPredatesUpdateClaim) and only for a claim-only request
+// (isClaimOnlyUpdate) — claimIssue's own request is `{actor}` alone (see
+// apigen.ClaimRequest), so a claim-only UpdateRequest IS that request, and
+// anything beside the claim would be dropped by it. A claim combined with a
+// patch, a guard or a force override is therefore NOT retried here: the skew
+// refusal is returned as it came, rather than synthesized as two calls
 // (claimIssue then updateIssue), which would let a caller observe an issue
-// claimed but not yet patched — the exact non-atomic composition refuse-not-drop
-// forbids. It refuses instead, citing W-UpdateRequest.Claim, until a server
-// publishes the capability upstream gastownhall/beads#6890 tracks.
+// claimed but not yet patched.
+//
+// That keeps `bd update <id> --claim --json` — gc's exclusive claim path —
+// working against an older bd serve. The two roles' result shapes line up
+// member for member (Issue, Changed): same-actor re-claim is the idempotent
+// Changed=false Claimer already promises, and a foreign holder or an
+// ineligible status is the same *issueops.ClaimConflictError updateIssue's
+// claim raises.
+//
+// What this route cannot match, it says. claimIssue answers the bare row
+// (issueops/claimer.go's ClaimResult doc, pinned against the Claimer role
+// directly by TestServedClaimerClaimsAnUnassignedOpenIssueAndAnswersTheBareRow),
+// where updateIssue answers the hydrated one, so the LABELS and CreatedBy are
+// read back below for CommandUpdateMutation's shared `bd update --json`
+// renderer — the hydration is composed HERE rather than by widening Claimer's
+// promise, which backend/conformance's ClaimerFixture suite holds every backend
+// to. claimIssue also carries no `revision`, so the result's RowVersion stays
+// unset rather than borrowing the follow-up read's token: that read is a second
+// snapshot, and a token from it could postdate a write this claim never saw,
+// arming a guard that should have missed. And claimIssue excludes the wisp
+// plane, so a wisp id refuses by name (W-ClaimRequest.Wisp).
 func (l *httpLifecycle) claimOnlyUpdate(ctx context.Context, req issueops.UpdateRequest) (issueops.UpdateResult, error) {
-	if !isClaimOnlyUpdate(req) {
-		return issueops.UpdateResult{}, refuse(encode.OpUpdateIssue, "W-UpdateRequest.Claim")
-	}
 	claimer, err := l.store.IssueClaimer()
 	if err != nil {
 		return issueops.UpdateResult{}, err
@@ -570,11 +570,10 @@ func (l *httpLifecycle) claimOnlyUpdate(ctx context.Context, req issueops.Update
 		// as the wire's generic not-found — "no issue or wisp with that id" —
 		// indistinguishable from an id that names nothing at all. The probe
 		// below runs ONLY here, on a not-found answer, rather than ahead of
-		// every claim attempt: an ordinary claim of a real, non-wisp issue (the
-		// overwhelmingly common case) now costs one request instead of the two
-		// an unconditional probe-first ordering used to spend on it. A refusal
-		// for any other reason (already claimed, not eligible from its current
-		// status, actor/id validation) needs no probe and returns unchanged.
+		// every claim attempt, so an ordinary claim of a real, non-wisp issue
+		// costs no probe. A refusal for any other reason (already claimed, not
+		// eligible from its current status, actor/id validation) needs no probe
+		// and returns unchanged.
 		if errors.Is(err, issueops.ErrNotFound) {
 			if issue, probeErr := l.store.GetIssue(ctx, req.IssueID); probeErr == nil && issue != nil && isWispIssue(issue) {
 				return issueops.UpdateResult{}, refuse(encode.OpUpdateIssue, "W-ClaimRequest.Wisp")
@@ -593,20 +592,18 @@ func (l *httpLifecycle) claimOnlyUpdate(ctx context.Context, req issueops.Update
 	// doc above): the claim itself already committed, so a failed follow-up
 	// read is not this call's failure to report — fall back to the bare row
 	// issueops.Claimer promised rather than failing an otherwise-successful
-	// claim.
+	// claim. Labels and CreatedBy ONLY: the read's RowVersion is another
+	// snapshot's, and the doc above is why it must not ride onto this row. A
+	// guard composed from the unset token fails closed (ErrVersionMismatch: the
+	// caller re-reads), where a borrowed one could pass over a write this claim
+	// never saw. Against a current server the claim rides updateIssue instead,
+	// whose `revision` Update stitches as it does for any patch, so the real
+	// token is missing only on this pre-#6890 fallback.
 	if issue != nil {
 		if hydrated, hydrateErr := l.store.GetIssue(ctx, req.IssueID); hydrateErr == nil && hydrated != nil {
 			withLabels := *issue
 			withLabels.Labels = hydrated.Labels
 			withLabels.CreatedBy = hydrated.CreatedBy
-			// bridge.go's GetIssue already stitched details.Revision onto
-			// hydrated.RowVersion; the claim response itself (issueops.Claimer's
-			// bare-row contract) carries no revision at all, so without this the
-			// claim-only route would hand back RowVersion 0 where the direct,
-			// non-http route returns the real token -- and a caller that feeds
-			// that 0 into the next write's ExpectedVersion would get a spurious
-			// mismatch instead of the real one.
-			withLabels.RowVersion = hydrated.RowVersion
 			issue = &withLabels
 		}
 	}
@@ -614,11 +611,11 @@ func (l *httpLifecycle) claimOnlyUpdate(ctx context.Context, req issueops.Update
 }
 
 // isClaimOnlyUpdate reports whether req carries nothing but the claim itself
-// (and the Actor/IssueID pair every UpdateRequest needs). claimIssue's wire
-// request is the actor alone, so any other UpdateRequest member holding a
-// non-zero value — a Patch field, a guard, a force override, a provenance
-// label — is a member claimIssue has no place for, and the request is PATCH
-// claim rather than a bare claim.
+// (and the Actor/IssueID pair every UpdateRequest needs) — whether claimIssue,
+// whose wire request is the actor alone, can carry ALL of it. Any other
+// UpdateRequest member holding a non-zero value — a Patch field, a guard, a
+// force override, a provenance label — is one claimIssue has no place for, so
+// claimOnlyUpdate's fallback would drop it.
 //
 // reflect.DeepEqual against the zero IssuePatch, rather than a hand-enumerated
 // field list, is deliberate: a future IssuePatch member defaults to unset, so
@@ -646,24 +643,17 @@ func isWispIssue(issue *types.Issue) bool {
 }
 
 // refuseUnwirableUpdateMembers walks the UpdateRequest members the wire's
-// updateIssue body has no place for. Claim is handled earlier, in Update,
-// because unlike these members a claim is sometimes servable (claimOnlyUpdate)
-// rather than always refused.
+// updateIssue body has no place for.
 //
-// ForceNotesOverwrite is NOT on this switch: updateIssue publishes
-// force_notes_overwrite (internal/httpapi/apigen's UpdateIssueRequest), the
-// server reads it (internal/httpapi/update.go), and Update sends it alongside
-// the patch. The other two force flags stay refused — ForceAssigneeTransfer
-// and ForceClosePolicy's rows are untouched by this fix and retire separately.
+// The claim and the three force overrides are NOT on this switch: updateIssue
+// publishes all four (internal/httpapi/apigen's UpdateIssueRequest), the
+// server reads them (internal/httpapi/update.go), and Update sends them beside
+// the patch as wire.UpdateFlags. Their W-UpdateRequest rows are RETIRED.
 //
 // The order is the ledger's, and each refusal cites its row rather than a
 // sentence, so the taxonomy renders the same reason the design recorded.
 func refuseUnwirableUpdateMembers(req issueops.UpdateRequest) error {
 	switch {
-	case req.ForceAssigneeTransfer:
-		return refuse(encode.OpUpdateIssue, "W-UpdateRequest.ForceAssigneeTransfer")
-	case req.ForceClosePolicy:
-		return refuse(encode.OpUpdateIssue, "W-UpdateRequest.ForceClosePolicy")
 	case req.IssuePlaneOnly:
 		return refuse(encode.OpUpdateIssue, "W-UpdateRequest.IssuePlaneOnly")
 	case req.Provenance != "":

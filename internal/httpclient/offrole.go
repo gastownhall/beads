@@ -10,8 +10,10 @@ package httpclient
 // them (precedent resolve.go/bridge.go/vocabulary.go).
 //
 // This file is now a TOMBSTONE: it holds no methods. It stays because the
-// go:generate skip list in unsupported.go still names the five reads it once
-// held, and because the retirement path is worth writing down where it happened.
+// retirement path is worth writing down where it happened. (There is no skip
+// list to keep in step: unsupportedgen derives the shell from the methods
+// declared on *Store, so a read that moved out of here needed only a
+// regeneration.)
 //
 // The reads this file used to hold are SERVED, each beside the surface it
 // belongs to: the four getIssue riders — GetLabels, GetDependenciesWithMetadata,

@@ -35,7 +35,7 @@ import (
 //	behavior            every wire-refused member really fails, citing its
 //	                    ledger row, WITHOUT dialing.
 //	request             the request's own excluded member — IDPrefix — refuses
-//	                    the same way.
+//	                    the same way wherever it would act.
 func TestCreateRefusesEveryMemberTheWireExcludes(t *testing.T) {
 	t.Run("carried members are the wire's own", func(t *testing.T) {
 		published := bodyMembers(t, reflect.TypeOf(apigen.CreateIssueRequest{}))
@@ -67,6 +67,8 @@ func TestCreateRefusesEveryMemberTheWireExcludes(t *testing.T) {
 		// The creation stamp and the classification plumbing are the two
 		// populations the operation's own description says it cannot set, and a
 		// create that dropped either is a row the caller believes they wrote.
+		// CreatedBy stays here because only a value NAMING THE ACTOR rides the
+		// server's stamp — see "a CreatedBy naming the actor" below.
 		for _, name := range []string{"CreatedAt", "CreatedBy", "SpecID", "StorageClass", "MolType", "Pinned"} {
 			if !slices.Contains(refused, name) {
 				t.Errorf("Issue.%s is not in the refused population; a create that dropped it is data loss", name)
@@ -124,7 +126,24 @@ func TestCreateRefusesEveryMemberTheWireExcludes(t *testing.T) {
 		}
 	})
 
-	t.Run("the request's own excluded member", func(t *testing.T) {
+	t.Run("a CreatedBy naming the actor rides the server's stamp", func(t *testing.T) {
+		// Every create shape stamps created_by from the actor, so the one value
+		// that stamp writes is carried BY it — and it is what every CLI create
+		// sends. Any other value would be silently replaced, which is why the
+		// sweep above still refuses CreatedBy: "sentinel" is never the actor.
+		w := &stubWire{}
+		if _, err := createRole(t, w).Create(t.Context(), issueops.CreateRequest{
+			Actor: "writer",
+			Issue: &issueops.Issue{Title: "t", CreatedBy: "writer"},
+		}); err != nil {
+			t.Fatalf("Create with CreatedBy == Actor = %v, want it carried by the server's stamp", err)
+		}
+		if w.lastCreate.Actor != "writer" {
+			t.Errorf("sent actor = %q, want the creator the stamp will write", w.lastCreate.Actor)
+		}
+	})
+
+	t.Run("the request's own excluded member refuses where it would act", func(t *testing.T) {
 		w := &stubWire{}
 		_, err := createRole(t, w).Create(t.Context(), issueops.CreateRequest{
 			Actor:    "writer",
@@ -134,6 +153,33 @@ func TestCreateRefusesEveryMemberTheWireExcludes(t *testing.T) {
 		assertRefusedBy(t, err, "W-CreateRequest.IDPrefix")
 		if len(w.calls) != 0 {
 			t.Errorf("the prefix override reached the wire: %v", w.calls)
+		}
+	})
+
+	t.Run("the request's own excluded member is inert where it would not act", func(t *testing.T) {
+		// The role reads IDPrefix only to check an explicit, unforced id. `bd
+		// create` sends the workspace's prefix on EVERY create, so refusing it
+		// on a minted or forced id would refuse every create in a workspace
+		// whose config.yaml names a prefix.
+		for name, req := range map[string]issueops.CreateRequest{
+			"a minted id": {Issue: &issueops.Issue{Title: "t"}},
+			"a forced id": {Issue: &issueops.Issue{ID: "other-1", Title: "t"}, ForceIDPrefix: true},
+		} {
+			t.Run(name, func(t *testing.T) {
+				w := &stubWire{}
+				request := req
+				request.Actor = "writer"
+				request.IDPrefix = "other"
+				if _, err := createRole(t, w).Create(t.Context(), request); err != nil {
+					t.Fatalf("Create = %v, want the inert override sent without", err)
+				}
+				if got := derefOr(w.lastCreate.Id, ""); got != request.Issue.ID {
+					t.Errorf("sent id = %q, want %q", got, request.Issue.ID)
+				}
+				if forced := w.lastCreate.ForceIdPrefix != nil && *w.lastCreate.ForceIdPrefix; forced != request.ForceIDPrefix {
+					t.Errorf("sent force_id_prefix = %v, want %v", forced, request.ForceIDPrefix)
+				}
+			})
 		}
 	})
 

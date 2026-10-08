@@ -1116,10 +1116,11 @@ func RunLifecycleResultsAreHydratedPostStateSnapshots(t *testing.T, ctx context.
 // deliberately unguarded (UpdateRequest.Claim forbids combining Claim with
 // ExpectedVersion — see issueops.UpdateRequest's doc): a backend that answers
 // Lifecycle.Update's generic patch wire but special-cases a bare claim onto a
-// different internal path (the http leg's claimOnlyUpdate, which dials the
-// Claimer role directly rather than folding into updateIssue) could easily
-// populate RowVersion on one path and not the other; this exercises the
-// claim-only shape specifically, not just the Patch shape the rest of the
+// different internal path (the http leg once dialed the Claimer role directly
+// for one; it now folds the claim into updateIssue, keeping claimIssue only as
+// the fallback for a server that predates updateIssue's `claim` member) could
+// easily populate RowVersion on one path and not the other; this exercises
+// the claim-only shape specifically, not just the Patch shape the rest of the
 // chain already covered.
 func RunLifecycleResultsCarryThePostWriteRowVersion(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
 	t.Helper()

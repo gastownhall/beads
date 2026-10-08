@@ -92,7 +92,8 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (s storage.Dol
 // newReadOnlyStoreFromConfig creates a read-only SQL-server-backed storage
 // backend. It does not activate the events journal: the store refuses writes,
 // so there is no mutation for a journal row to accompany (exemption is recorded
-// in the construction guard).
+// in the construction guard). The registry arm is the exception the cgo
+// twin, openNonMutatingStoreFromConfig, describes.
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {

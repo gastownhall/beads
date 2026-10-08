@@ -92,6 +92,21 @@ func TestApplyBatchRefusesEveryMemberTheWireExcludes(t *testing.T) {
 		}
 	})
 
+	t.Run("a CreatedBy naming the actor rides the server's stamp", func(t *testing.T) {
+		// The server stamps every create item's created_by from the actor, so
+		// that one value is carried by the stamp; the sweep above refuses any
+		// other.
+		w := &stubWire{}
+		req := applyOneCreate()
+		req.Items[0].Create.Issue.CreatedBy = req.Actor
+		if _, err := applyRole(t, w).ApplyBatch(t.Context(), req); err != nil {
+			t.Fatalf("ApplyBatch with CreatedBy == Actor = %v, want it carried by the server's stamp", err)
+		}
+		if w.lastApply.Actor != req.Actor {
+			t.Errorf("sent actor = %q, want the creator the stamp will write", w.lastApply.Actor)
+		}
+	})
+
 	t.Run("the role's own two are ErrValidation, and here they have nowhere to go at all", func(t *testing.T) {
 		for name := range createRoleRefusedIssueMembers {
 			issue := &issueops.Issue{Title: "t"}
