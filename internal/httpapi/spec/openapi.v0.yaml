@@ -8695,8 +8695,8 @@ components:
       description: >-
         The candidates a sweep declined to delete, bucketed by WHY. They are
         separate counters rather than one number because they mean different
-        things: the first two are PROTECTIONS, and the last four are the sweep
-        declining to trust its own input.
+        things: `pinned`, `referenced` and `live_dependent` are PROTECTIONS,
+        and the other four are the sweep declining to trust its own input.
       properties:
         pinned:
           type: integer

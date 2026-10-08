@@ -57,11 +57,12 @@ var _ issueops.Sweeper = (*httpSweeper)(nil)
 // is the same failure class refuse-not-drop exists to stop, in the other
 // direction.
 func (s *httpSweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (result issueops.SweepResult, err error) {
-	// Decorates ProtectLiveDependents/Limit's bare *encode.RefusedError into the
-	// same *InexpressibleError shape a read refusal gets, so errors.As(err,
-	// &unsupported) reaches *storage.ErrUnsupported here too (write-side parity,
-	// see (*Store).inexpressible's doc). A non-refusal error passes through
-	// unchanged.
+	// Write-side parity with reads: decorates a bare *encode.RefusedError into
+	// *InexpressibleError so errors.As(err, &unsupported) reaches
+	// *storage.ErrUnsupported, same as inexpressible does for a read role. No
+	// Sweep path raises one today — refuseUnservedSweep's capability errors
+	// pass through unchanged — so this is the write-role convention's single
+	// defer, kept so the next refuse() here is decorated without a new one.
 	defer func() { err = s.store.inexpressible("Sweeper.Sweep", err) }()
 	tier := apigen.SweepRequestTier(req.Tier)
 	if !tier.Valid() {

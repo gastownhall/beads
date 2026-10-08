@@ -55,7 +55,7 @@ var sweepMembers = []string{
 // would be one handler away from an unguarded mass delete.
 //
 // Everything above the role here is argument validation: the media type, the
-// body shape, and the six members the document publishes.
+// body shape, and the eight members the document publishes.
 //
 // NO ACTOR IS INFERRED, for the reason the claim gives: the server's own
 // identity is meaningless to a remote caller. Unlike the claim, the actor is

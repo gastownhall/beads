@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -25,8 +26,8 @@ import (
 // revision table in openapi.v0.yaml, never before. A wire_revision LOWER than
 // the golden's is never fixed by regenerating: that table is append-only, so
 // the constant itself is wrong. Any other difference — a bumped
-// wire_revision, or entries only added — means this golden is simply stale;
-// regenerate it with:
+// wire_revision, entries only added, or a `sides` map that no longer matches
+// — means this golden is simply stale; regenerate it with:
 //
 //	go run ./internal/httpapi/wireshape/cmd/gendigest
 func TestWireShapeDigest(t *testing.T) {
@@ -50,8 +51,8 @@ func TestWireShapeDigest(t *testing.T) {
 
 // goldenDrift is TestWireShapeDigest's verdict, factored out so
 // TestGoldenDrift can drive every arm with synthetic digests. It returns ""
-// only when golden records exactly got — the same entries at the same
-// wire_revision. Every other state fails; the arms only choose which
+// only when golden records exactly got — the same entries and sides at the
+// same wire_revision. Every other state fails; the arms only choose which
 // instruction the failure gives.
 func goldenDrift(golden, got wireshape.Digest) string {
 	if got.WireRevision < golden.WireRevision {
@@ -63,6 +64,7 @@ func goldenDrift(golden, got wireshape.Digest) string {
 
 	cmp := wireshape.Compare(golden, got)
 	changed, removed, added, widened := cmp.Changed, cmp.Removed, cmp.Added, cmp.Widened
+	sides := sidesDrift(golden.Sides, got.Sides)
 
 	switch {
 	case len(changed) > 0 || len(removed) > 0:
@@ -99,8 +101,34 @@ func goldenDrift(golden, got wireshape.Digest) string {
 		return fmt.Sprintf("CurrentWireRevision is %d but the golden still says %d, with no shape change to justify "+
 			"either: regenerate with `go run ./internal/httpapi/wireshape/cmd/gendigest`",
 			got.WireRevision, golden.WireRevision)
+	case len(sides) > 0:
+		// Compare reads Sides only for the request-only widening carve-out, so
+		// a stale map changes no member's shape: it misfiles the next enum
+		// widening on those schemas instead. Nothing to bump, but the golden
+		// is still not what gendigest writes.
+		return fmt.Sprintf("the golden's `sides` map disagrees with a fresh digest for %v: this needs no "+
+			"wire_revision bump, but run `go run ./internal/httpapi/wireshape/cmd/gendigest` and commit the result",
+			sides)
 	}
 	return ""
+}
+
+// sidesDrift lists, sorted, every schema whose side differs between want and
+// got, including a schema only one of them records.
+func sidesDrift(want, got map[string]string) []string {
+	var drift []string
+	for schema, side := range want {
+		if gotSide, ok := got[schema]; !ok || gotSide != side {
+			drift = append(drift, schema)
+		}
+	}
+	for schema := range got {
+		if _, ok := want[schema]; !ok {
+			drift = append(drift, schema)
+		}
+	}
+	slices.Sort(drift)
+	return drift
 }
 
 // TestGoldenDrift is TestWireShapeDigest's own falsification: every way the
@@ -108,13 +136,15 @@ func goldenDrift(golden, got wireshape.Digest) string {
 // own instruction. "Added after a bump" is the state review found passing
 // silently — no arm fired when entries were only added and wire_revision had
 // also moved — and a LOWERED wire_revision was told to regenerate, which
-// would have written the golden's revision backwards.
+// would have written the golden's revision backwards. A stale `sides` map
+// passed the same way until goldenDrift compared it.
 func TestGoldenDrift(t *testing.T) {
 	golden := wireshape.Digest{
 		WireRevision: 2,
 		Entries: []wireshape.Entry{
 			{Schema: "Widget", Member: "name", Type: "string", Required: true},
 		},
+		Sides: map[string]string{"Widget": "response"},
 	}
 	changed := []wireshape.Entry{{Schema: "Widget", Member: "name", Type: "integer", Required: true}}
 	added := append(append([]wireshape.Entry{}, golden.Entries...),
@@ -145,6 +175,15 @@ func TestGoldenDrift(t *testing.T) {
 			wireshape.Digest{WireRevision: 1, Entries: changed}, []string{"LOWER than the 2"}},
 		{"added entry at a lowered revision asks to restore the constant",
 			wireshape.Digest{WireRevision: 1, Entries: added}, []string{"LOWER than the 2"}},
+		{"side recorded only by the fresh digest asks for a regenerate",
+			wireshape.Digest{WireRevision: 2, Entries: golden.Entries,
+				Sides: map[string]string{"Widget": "response", "Gadget": "request"}},
+			[]string{"`sides` map disagrees", "[Gadget]", "needs no wire_revision bump"}},
+		{"side that moved asks for a regenerate",
+			wireshape.Digest{WireRevision: 2, Entries: golden.Entries, Sides: map[string]string{"Widget": "both"}},
+			[]string{"`sides` map disagrees", "[Widget]"}},
+		{"side recorded only by the golden asks for a regenerate",
+			wireshape.Digest{WireRevision: 2, Entries: golden.Entries}, []string{"`sides` map disagrees", "[Widget]"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			drift := goldenDrift(golden, tc.got)
