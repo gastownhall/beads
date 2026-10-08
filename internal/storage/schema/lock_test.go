@@ -807,18 +807,14 @@ func TestMigrateUpWithLockFreshBootstrapHealResetFailureStaysFatal(t *testing.T)
 
 // expectIgnoredSentinelProbes mocks the schema lookups currentVersion issues
 // to confirm a non-zero ignored cursor against the schema it claims (gh 5033):
-// an INFORMATION_SCHEMA.TABLES count per sentinel table, then a SHOW COLUMNS
-// probe per sentinel column (showColumnExists — the INFORMATION_SCHEMA.COLUMNS
-// form cost 5-6 s per store open on a many-database Dolt server). They fire
-// only for a non-zero cursor, in ignoredSource's table then column order.
+// a SHOW TABLES probe per sentinel table (showTableExists), then a SHOW
+// COLUMNS probe per sentinel column (showColumnExists). Neither uses
+// INFORMATION_SCHEMA, whose predicates Dolt does not push down, because both run
+// on every store open. They fire only for a non-zero cursor, in ignoredSource's
+// table then column order.
 func expectIgnoredSentinelProbes(mock sqlmock.Sqlmock, present bool) {
-	count := 0
-	if present {
-		count = 1
-	}
-	for range ignoredSource.sentinelTables {
-		mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
-			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(count))
+	for _, table := range ignoredSource.sentinelTables {
+		expectShowTable(mock, table, present)
 	}
 	if present {
 		for _, column := range ignoredSource.sentinelColumns {
@@ -827,6 +823,17 @@ func expectIgnoredSentinelProbes(mock sqlmock.Sqlmock, present bool) {
 					AddRow(column.column, "varchar(255)", "YES", "", nil, ""))
 		}
 	}
+}
+
+// expectShowTable mocks one showTableExists probe: SHOW TABLES answers an empty
+// result set for an absent table, never a zero count.
+func expectShowTable(mock sqlmock.Sqlmock, table string, exists bool) {
+	rows := sqlmock.NewRows([]string{"Tables_in_testdb"})
+	if exists {
+		rows.AddRow(table)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("SHOW TABLES LIKE '" + table + "'")).
+		WillReturnRows(rows)
 }
 
 func TestMigrateUpWithLockFreshBootstrapHealProbeFailuresStayFatal(t *testing.T) {

@@ -110,7 +110,10 @@ func readIgnoredCursorState(ctx context.Context, db DBConn, qualifier string) (i
 	}
 	state.needsUntrack = needsUntrack
 
-	stray, err := schemaTableExists(ctx, db, ignoredCursorUntrackTempTable)
+	// Both callers have the session on the target database (alreadyConverged
+	// after selectTargetDatabase, MigrateUp after its preparation), so this
+	// per-open read takes the SHOW TABLES prober.
+	stray, err := showTableExists(ctx, db, ignoredCursorUntrackTempTable)
 	if err != nil {
 		return state, fmt.Errorf("probing %s: %w", ignoredCursorUntrackTempTable, err)
 	}

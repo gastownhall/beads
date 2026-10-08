@@ -1580,16 +1580,57 @@ func (m migrationSource) cursorRealityFloor(ctx context.Context, db DBConn) (int
 
 // sentinelTableExists is a function variable for the same reason
 // issueRowCounter is: it lets the cursor-reality tests exercise the real
-// decision without a live database.
-var sentinelTableExists = func(ctx context.Context, db DBConn, table string) (bool, error) {
-	var n int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
-		 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?`,
-		table).Scan(&n); err != nil {
-		return false, err
+// decision without a live database. It runs on EVERY store open
+// (cursorRealityFloor, two tables on the ignored source), so it takes the
+// SHOW TABLES prober for the reason sentinelColumnExists takes SHOW COLUMNS.
+var sentinelTableExists = showTableExists
+
+// showTableExists reports whether the session's current database holds table,
+// probing with SHOW TABLES rather than INFORMATION_SCHEMA.TABLES. Dolt does not
+// push the TABLES predicate down any more than the COLUMNS one: the probe walks
+// the catalog of every database on the server, and the open path ran it three
+// times per store open (two sentinels plus the stray-scratch check). On a
+// shared server taking a dozen bd opens a second those walks were a large share
+// of the server's CPU (measured 2026-10-08, 9 databases, dolt 2.1.10); SHOW
+// TABLES reads only the current database.
+//
+// Unlike the INFORMATION_SCHEMA count, SHOW TABLES errors when no database is
+// selected, so this is only for callers already on the target database: the
+// cursor-existence probe in currentVersion, which must succeed on any session
+// (be-bv7x), keeps the INFORMATION_SCHEMA form. The name is compared exactly
+// because '_' is a LIKE single-character wildcard; table is a migration-series
+// constant, never user input.
+func showTableExists(ctx context.Context, db DBConn, table string) (bool, error) {
+	//nolint:gosec // G201: table is a migration-series constant.
+	rows, err := db.QueryContext(ctx, "SHOW TABLES LIKE '"+table+"'")
+	if err != nil {
+		return false, fmt.Errorf("checking table %s: %w", table, err)
 	}
-	return n > 0, nil
+	defer func() { _ = rows.Close() }()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return false, fmt.Errorf("checking table %s: %w", table, err)
+	}
+	// SHOW TABLES returns Tables_in_<db> (plus Table_type on SHOW FULL TABLES
+	// and on some servers); the first column is the table name.
+	cells := make([]sql.RawBytes, len(cols))
+	dest := make([]any, len(cols))
+	for i := range cells {
+		dest[i] = &cells[i]
+	}
+	for rows.Next() {
+		if err := rows.Scan(dest...); err != nil {
+			return false, fmt.Errorf("checking table %s: %w", table, err)
+		}
+		if len(cells) > 0 && string(cells[0]) == table {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("checking table %s: %w", table, err)
+	}
+	return false, nil
 }
 
 // sentinelColumnExists runs on EVERY store open (cursorRealityFloor), so it
