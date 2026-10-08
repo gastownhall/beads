@@ -167,8 +167,8 @@
 # gates no longer consume this artifact (they build their own bd); it is
 # kept for the F3.5.3 SHA256SUMS comparison and for debugging.
 #
-# Runner cache: one entry per (.bazelversion, MODULE.bazel.lock) pair, about
-# 2 GB (Bazel's content-addressable --repository_cache, re-hashed on every
+# Runner cache: one entry per (.bazelversion, MODULE.bazel, MODULE.bazel.lock)
+# triple, about 1 GB (Bazel's content-addressable --repository_cache, re-hashed on every
 # hit; never the Bazel binary or the repo contents cache), written
 # only by a push to main that missed it. No --disk_cache: remote runs use the
 # remote cache, and local runs would need about 7 GB more.
@@ -931,15 +931,15 @@ jobs:
           retention-days: 7
 
       # Only a push to main that missed the exact key writes the runner cache.
-      # Its content (--repository_cache only, never the rc
-      # or credentials) is fixed by .bazelversion and MODULE.bazel.lock, so one
-      # entry per lock is enough and later pushes do not churn the quota.
+      # Its content (--repository_cache only, never the rc or credentials) is
+      # fixed by .bazelversion, MODULE.bazel and MODULE.bazel.lock, so one
+      # entry per triple is enough and later pushes do not churn the quota.
       - name: Save Bazel runner cache
         if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.bazel.outcome == 'success' && steps.bazel.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bazel-ci-cache
-          key: bazel-repo-v3-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}
+          key: bazel-repo-v4-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}
 
       # A redacted, schema'd summary of this invocation's BEP, exec log and
       # profile: timing, per-mnemonic cache classes, cold actions, test
