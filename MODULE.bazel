@@ -221,7 +221,6 @@ go_deps.gazelle_override(
     ],
     path = "github.com/envoyproxy/protoc-gen-validate",
 )
-
 go_deps.module_override(
     patch_strip = 1,
     patches = ["//third_party/patches:eventsapi_schema_build.patch"],
