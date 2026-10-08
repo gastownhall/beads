@@ -54,6 +54,9 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		}
 		in.fields["status"] = status
 		if status == "closed" {
+			if err := validateUpdateCloseReason(); err != nil {
+				return nil, err
+			}
 			session, _ := cmd.Flags().GetString("session")
 			if session == "" {
 				session = os.Getenv("CLAUDE_SESSION_ID")

@@ -119,7 +119,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `git.no-gpg-sign` | — | `BD_GIT_NO_GPG_SIGN` | `false` | Disable GPG signing for beads commits |
 | `create.require-description` | — | `BD_CREATE_REQUIRE_DESCRIPTION` | `false` | Require description on `bd create` |
 | `validation.on-create` | — | `BD_VALIDATION_ON_CREATE` | `none` | Template validation: `none`, `warn`, `error` |
-| `validation.on-close` | — | `BD_VALIDATION_ON_CLOSE` | `none` | Template validation on close |
+| `validation.on-close` | — | `BD_VALIDATION_ON_CLOSE` | `none` | Close-reason check: `none`, `warn`, `error`; applies to `bd close`, `bd epic close-eligible` and `bd update --status closed` (which records no reason, so `error` refuses it) |
 | `validation.on-sync` | — | `BD_VALIDATION_ON_SYNC` | `none` | Template validation before sync |
 | `validation.metadata.mode` | — | — | `none` | Metadata schema validation |
 | `hierarchy.max-depth` | — | — | `3` | Max hierarchical ID nesting depth |
