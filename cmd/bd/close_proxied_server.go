@@ -140,7 +140,7 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 			return HandleErrorRespectJSON("%v", cerr)
 		}
 		result, err = closer.CloseBatch(ctx, issueops.CloseBatchRequest{
-			Actor:     actor,
+			Actor:     currentActor(),
 			Items:     pre.items,
 			Session:   in.session,
 			Force:     in.force,
@@ -166,7 +166,7 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 
 	for i, o := range outcomes {
 		if o.closed {
-			audit.LogFieldChange(o.id, "status", o.auditOld, "closed", actor, o.auditReason)
+			audit.LogFieldChange(o.id, "status", o.auditOld, "closed", currentActor(), o.auditReason)
 		}
 		if !in.jsonOut {
 			fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(o.after.ID, o.after.Title), closeReasons[i])
@@ -300,7 +300,7 @@ func closeProxiedCheckOne(ctx context.Context, uw uow.UnitOfWork, id string, in 
 	// always been. Both close paths must agree here — diverging is the defect
 	// class #5217 closed.
 	if current.Status != types.StatusClosed {
-		if err := validateIssueClosable(id, current, actor, in.force); err != nil {
+		if err := validateIssueClosable(id, current, currentActor(), in.force); err != nil {
 			return err.Error(), nil
 		}
 	}
@@ -483,7 +483,7 @@ func closeProxiedRunPostClose(ctx context.Context, args []string, in closeProxie
 		var wrote []string
 
 		for _, o := range outcomes {
-			mol := autoCloseProxiedCompletedMolecule(ctx, uw, o.id, actor, in.session, &out.warnings)
+			mol := autoCloseProxiedCompletedMolecule(ctx, uw, o.id, currentActor(), in.session, &out.warnings)
 			if mol != nil {
 				out.autoClosedMol = mol
 				wrote = append(wrote, "auto-close "+mol.ID)
@@ -529,7 +529,7 @@ func closeProxiedSuggestNext(ctx context.Context, uw uow.UnitOfWork, closedID st
 }
 
 func closeProxiedContinue(ctx context.Context, uw uow.UnitOfWork, closedID string, autoClaim bool) (*ContinueResult, string) {
-	result, err := AdvanceToNextStep(ctx, newUOWMolWriter(uw), closedID, autoClaim, actor)
+	result, err := AdvanceToNextStep(ctx, newUOWMolWriter(uw), closedID, autoClaim, currentActor())
 	if err != nil {
 		return nil, fmt.Sprintf("could not advance to next step: %v", err)
 	}

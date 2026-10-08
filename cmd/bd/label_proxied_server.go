@@ -148,7 +148,7 @@ func runLabelRenameProxiedServer(ctx context.Context, oldLabel, newLabel string)
 
 	err = uow.RunTx(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
 		var rerr error
-		renamed, merged, _, rerr = uw.LabelUseCase().RenameLabel(ctx, oldLabel, newLabel, actor) //nolint:forbidigo // bulk rename; no role serves it, and Patch.Labels would reintroduce the per-issue add/remove event divergence this delegation replaced
+		renamed, merged, _, rerr = uw.LabelUseCase().RenameLabel(ctx, oldLabel, newLabel, currentActor()) //nolint:forbidigo // bulk rename; no role serves it, and Patch.Labels would reintroduce the per-issue add/remove event divergence this delegation replaced
 		if rerr != nil {
 			return "", fmt.Errorf("rename label '%s' -> '%s': %w", oldLabel, newLabel, rerr)
 		}
@@ -209,9 +209,9 @@ func runLabelPropagateProxiedServer(ctx context.Context, args []string) error {
 		for _, child := range children {
 			var e error
 			if child.Ephemeral {
-				e = uw.LabelUseCase().AddWispLabel(ctx, child.ID, label, actor) //nolint:forbidigo // atomic N-child fan-out; awaits a BatchApplier accessor
+				e = uw.LabelUseCase().AddWispLabel(ctx, child.ID, label, currentActor()) //nolint:forbidigo // atomic N-child fan-out; awaits a BatchApplier accessor
 			} else {
-				e = uw.LabelUseCase().AddLabel(ctx, child.ID, label, actor) //nolint:forbidigo // atomic N-child fan-out; awaits a BatchApplier accessor
+				e = uw.LabelUseCase().AddLabel(ctx, child.ID, label, currentActor()) //nolint:forbidigo // atomic N-child fan-out; awaits a BatchApplier accessor
 			}
 			if e != nil {
 				return "", fmt.Errorf("add label '%s' on %s: %w", label, child.ID, e)

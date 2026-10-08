@@ -893,11 +893,74 @@ func resolveConfiguredActor() string {
 	return config.GetString("actor")
 }
 
+// actorGitFallbackPending records that PersistentPreRunE deferred the
+// getActorWithGit fallback (git config user.name, then $USER) instead of
+// resolving it eagerly. Most invocations — every read-only list/show/query a
+// tool like gascity issues by the hundred — never consult the actor, and the
+// eager lookup cost one `git config` subprocess per bd call. currentActor
+// performs the deferred resolution on first use, so the resolved value and its
+// priority order are unchanged; only the moment of the lookup moves.
+//
+// Guarded by actorMu together with the resolution it triggers. Plain writes to
+// actor elsewhere stay unguarded, exactly as before this was introduced.
+var (
+	actorMu                 sync.Mutex
+	actorGitFallbackPending bool
+)
+
+// deferActorGitFallback replaces the former eager `actor = getActorWithGit()`
+// in PersistentPreRunE. A non-empty actor (--actor, BEADS_ACTOR, BD_ACTOR or
+// config.yaml) is already the answer getActorWithGit would return, so only an
+// empty actor needs the deferred fallback.
+func deferActorGitFallback() {
+	actorMu.Lock()
+	defer actorMu.Unlock()
+	actorGitFallbackPending = actor == ""
+}
+
+// currentActor returns the actor for this invocation, resolving a fallback
+// deferred by deferActorGitFallback on first use. Command code reads the actor
+// through this instead of the raw global so that the git lookup happens only
+// when an actor is actually needed.
+func currentActor() string {
+	actorMu.Lock()
+	defer actorMu.Unlock()
+	resolvePendingActorLocked()
+	return actor
+}
+
+// resolvePendingActorLocked performs a deferred fallback. Caller holds actorMu.
+func resolvePendingActorLocked() {
+	if !actorGitFallbackPending {
+		return
+	}
+	actorGitFallbackPending = false
+	deferred := actor
+	actor = resolveActorWithGit()
+	// Keep the CommandContext copy in step, as the eager assignment did
+	// before syncCommandContext copied it.
+	if cmdCtx != nil && cmdCtx.Actor == deferred {
+		cmdCtx.Actor = actor
+	}
+}
+
 // getActorWithGit returns the actor for audit trails with git config fallback.
 // Priority: --actor flag > BEADS_ACTOR env > BD_ACTOR env (deprecated) > git config user.name > $USER > "unknown"
 // This provides a sensible default for developers: their git identity is used unless
-// explicitly overridden
+// explicitly overridden.
+//
+// After PersistentPreRunE it returns the same value as currentActor (resolving
+// a deferred fallback once, into the global, as the eager assignment did).
 func getActorWithGit() string {
+	actorMu.Lock()
+	defer actorMu.Unlock()
+	resolvePendingActorLocked()
+	return resolveActorWithGit()
+}
+
+// resolveActorWithGit is getActorWithGit's resolution order, without the
+// deferred-fallback bookkeeping. Caller holds actorMu or owns the global.
+func resolveActorWithGit() string {
 	// If actor is already set (from --actor flag), use it
 	if actor != "" {
 		return actor
@@ -1674,11 +1737,14 @@ var rootCmd = &cobra.Command{
 			return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapReadonly))
 		}
 
-		// Set actor for audit trail
-		actor = getActorWithGit()
-		// Attach actor to the command span now that we have it.
-		if commandSpan != nil {
-			commandSpan.SetAttributes(attribute.String("bd.actor", actor))
+		// Set actor for audit trail. The git config user.name fallback is
+		// resolved lazily by currentActor, so commands that never consult the
+		// actor (read-only queries) do not spawn a git subprocess for it.
+		deferActorGitFallback()
+		// Attach actor to the command span. Only a recording span (telemetry
+		// enabled) needs the value, so a noop span does not force the lookup.
+		if commandSpan != nil && commandSpan.IsRecording() {
+			commandSpan.SetAttributes(attribute.String("bd.actor", currentActor()))
 		}
 
 		// Check if this is a read-only command (GH#804) or an explicitly

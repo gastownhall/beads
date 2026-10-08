@@ -198,7 +198,7 @@ func runPour(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	result, err := spawnMolecule(ctx, store, subgraph, vars, in.assignee, actor, false, types.IDPrefixMol)
+	result, err := spawnMolecule(ctx, store, subgraph, vars, in.assignee, currentActor(), false, types.IDPrefixMol)
 	if err != nil {
 		return HandleError("pouring proto: %v", err)
 	}
@@ -211,7 +211,7 @@ func runPour(cmd *cobra.Command, args []string) error {
 		}
 
 		for _, attach := range attachments {
-			bondResult, err := bondProtoMol(ctx, store, attach.issue, spawnedMol, in.attachType, vars, "", actor, false, true)
+			bondResult, err := bondProtoMol(ctx, store, attach.issue, spawnedMol, in.attachType, vars, "", currentActor(), false, true)
 			if err != nil {
 				return HandleError("attaching %s: %v", attach.id, err)
 			}

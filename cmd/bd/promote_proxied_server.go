@@ -62,10 +62,10 @@ func runPromoteProxiedServer(ctx context.Context, id, reason string) error {
 	}
 
 	err = uow.RunTx(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
-		if err := uw.IssueUseCase().PromoteWisp(ctx, fullID, actor); err != nil {
+		if err := uw.IssueUseCase().PromoteWisp(ctx, fullID, currentActor()); err != nil {
 			return "", err
 		}
-		if _, err := uw.CommentUseCase().AddCommentToIssue(ctx, fullID, actor, promotionComment(reason)); err != nil {
+		if _, err := uw.CommentUseCase().AddCommentToIssue(ctx, fullID, currentActor(), promotionComment(reason)); err != nil {
 			return "", fmt.Errorf("adding promotion comment: %w", err)
 		}
 		return fmt.Sprintf("bd: promote %s", fullID), nil

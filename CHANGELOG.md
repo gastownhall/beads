@@ -114,6 +114,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Every `bd` invocation used to start two git subprocesses before doing any
+  work: `git rev-parse` to locate the repository and `git config user.name`
+  to resolve the actor. On Linux the repository is now located in-process
+  (ordinary repositories, linked worktrees, submodules, no repository),
+  producing exactly what `git rev-parse` printed and still running git for
+  anything it does not model (`GIT_DIR` and related overrides,
+  `core.worktree`/`core.bare`, repository extensions, includes, foreign
+  ownership subject to `safe.directory`). The `git config user.name` actor
+  fallback is resolved only when a command actually needs an actor, so
+  read-only commands such as `bd list` and `bd show` start no git process
+  for it. The actor's value and priority order are unchanged.
+
 - `bd create --graph` now stores a plan whose path from a node's parent to
   the node runs through a `waits-for` edge; the graph-only preflight that
   walked every ready-work edge used to refuse it. The plan now goes through

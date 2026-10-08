@@ -1147,6 +1147,7 @@ go_test(
         "sql_test.go",
         "stale_embedded_test.go",
         "stale_test.go",
+        "startup_git_exec_embedded_test.go",
         "state_embedded_test.go",
         "state_proxied_integration_test.go",
         "state_test.go",

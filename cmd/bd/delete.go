@@ -163,7 +163,7 @@ Force: Delete and orphan dependents
 		// rewrite runs INSIDE the transaction that deletes, because it is the
 		// role's.
 		request := issueops.DeleteRequest{
-			Actor:           actor,
+			Actor:           currentActor(),
 			IDs:             []string{issueID},
 			Force:           force,
 			DryRun:          dryRun || !force,
@@ -378,7 +378,7 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 	// --force is the confirmation as well as the orphan mode, so an unconfirmed
 	// run asks the role what it WOULD do; see the single-id path.
 	request := issueops.DeleteRequest{
-		Actor:           actor,
+		Actor:           currentActor(),
 		IDs:             resolvedIDs,
 		Cascade:         cascade,
 		Force:           force,

@@ -140,7 +140,7 @@ func runGateCheckProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 		}
 
 		for gateID, runID := range discovered {
-			if err := uw.IssueUseCase().UpdateIssue(ctx, gateID, map[string]any{"await_id": runID}, actor); err != nil {
+			if err := uw.IssueUseCase().UpdateIssue(ctx, gateID, map[string]any{"await_id": runID}, currentActor()); err != nil {
 				out.awaitErrs[gateID] = fmt.Errorf("failed to update gate with discovered run ID: %w", err)
 				continue
 			}
@@ -168,7 +168,7 @@ func runGateCheckProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 			if before != nil && before.Status == types.StatusClosed {
 				continue
 			}
-			res, closeErr := uw.IssueUseCase().CloseIssue(ctx, r.gate.ID, domain.CloseIssueParams{Reason: r.reason}, actor)
+			res, closeErr := uw.IssueUseCase().CloseIssue(ctx, r.gate.ID, domain.CloseIssueParams{Reason: r.reason}, currentActor())
 			if closeErr != nil {
 				out.closeErrs[r.gate.ID] = closeErr
 				continue
@@ -192,7 +192,7 @@ func runGateCheckProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 	}
 
 	for _, c := range applied.closed {
-		audit.LogFieldChange(c.after.ID, "status", c.oldStatus, "closed", actor, c.reason)
+		audit.LogFieldChange(c.after.ID, "status", c.oldStatus, "closed", currentActor(), c.reason)
 	}
 	if len(applied.closed) > 0 || len(applied.updated) > 0 {
 		commandDidWrite.Store(true)
@@ -326,7 +326,7 @@ func runGateAddWaiterProxiedServer(_ *cobra.Command, ctx context.Context, args [
 		}
 
 		newWaiters := append(issue.Waiters, waiter)
-		if err := uw.IssueUseCase().UpdateIssue(ctx, gateID, map[string]any{"waiters": newWaiters}, actor); err != nil {
+		if err := uw.IssueUseCase().UpdateIssue(ctx, gateID, map[string]any{"waiters": newWaiters}, currentActor()); err != nil {
 			return out, "", fmt.Errorf("updating gate: %w", err)
 		}
 		if after, getErr := uw.IssueUseCase().GetIssue(ctx, gateID); getErr == nil {
@@ -394,7 +394,7 @@ func runGateCreateProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 		}
 		gate.Metadata = metadata
 
-		res, err := uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{Issue: gate}, actor)
+		res, err := uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{Issue: gate}, currentActor())
 		if err != nil {
 			return out, "", fmt.Errorf("creating gate: %w", err)
 		}
@@ -404,7 +404,7 @@ func runGateCreateProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 			DependsOnID: res.Issue.ID,
 			Type:        types.DepBlocks,
 		}
-		if err := uw.DependencyUseCase().AddDependency(ctx, dep, actor); err != nil {
+		if err := uw.DependencyUseCase().AddDependency(ctx, dep, currentActor()); err != nil {
 			return out, "", fmt.Errorf("adding blocking dependency: %w", err)
 		}
 
@@ -464,7 +464,7 @@ func runGateResolveProxiedServer(cmd *cobra.Command, ctx context.Context, args [
 			return out, "", fmt.Errorf("%s is not a gate issue (type=%s)", gateID, issue.IssueType)
 		}
 
-		res, err := uw.IssueUseCase().CloseIssue(ctx, gateID, domain.CloseIssueParams{Reason: reason}, actor)
+		res, err := uw.IssueUseCase().CloseIssue(ctx, gateID, domain.CloseIssueParams{Reason: reason}, currentActor())
 		if err != nil {
 			return out, "", fmt.Errorf("closing gate: %w", err)
 		}
@@ -486,7 +486,7 @@ func runGateResolveProxiedServer(cmd *cobra.Command, ctx context.Context, args [
 	// double-resolve must not re-log it (same guard as the o.closed check in
 	// close_proxied_server.go).
 	if applied.closed && applied.after != nil {
-		audit.LogFieldChange(applied.after.ID, "status", applied.oldStatus, "closed", actor, reason)
+		audit.LogFieldChange(applied.after.ID, "status", applied.oldStatus, "closed", currentActor(), reason)
 	}
 	commandDidWrite.Store(true)
 

@@ -50,7 +50,7 @@ func runCloseDirectIfRevision(ctx context.Context, id, reason string, force bool
 
 	preCloseStatus := string(result.Issue.Status)
 	closeResult, closeErr := ops.Close(opsCtx, issueops.CloseRequest{
-		Actor:           actor,
+		Actor:           currentActor(),
 		IssueID:         result.ResolvedID,
 		Reason:          reason,
 		Session:         session,
@@ -79,11 +79,11 @@ func runCloseDirectIfRevision(ctx context.Context, id, reason string, force bool
 	// entirely (mc-zndi7.75) and would otherwise leave a molecule's root
 	// stranded open forever.
 	mutatedIDs := []string{result.ResolvedID}
-	if molID := autoCloseCompletedMolecule(ctx, result.Store, result.ResolvedID, actor, session); molID != "" {
+	if molID := autoCloseCompletedMolecule(ctx, result.Store, result.ResolvedID, currentActor(), session); molID != "" {
 		mutatedIDs = append(mutatedIDs, molID)
 	}
 
-	if err := commitPendingIfEmbedded(ctx, result.Store, actor, doltAutoCommitParams{
+	if err := commitPendingIfEmbedded(ctx, result.Store, currentActor(), doltAutoCommitParams{
 		Command:  "close",
 		IssueIDs: mutatedIDs,
 	}); err != nil {
@@ -116,7 +116,7 @@ func runCloseProxiedIfRevision(ctx context.Context, id, reason string, force boo
 	}
 
 	closeResult, closeErr := ops.Close(ctx, issueops.CloseRequest{
-		Actor:           actor,
+		Actor:           currentActor(),
 		IssueID:         id,
 		Reason:          reason,
 		Session:         session,
@@ -165,7 +165,7 @@ func runCloseIfRevisionProxiedPostClose(ctx context.Context, id, session string)
 	}
 	autoClosedMol, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*types.Issue, string, error) {
 		var warnings []string
-		mol := autoCloseProxiedCompletedMolecule(ctx, uw, id, actor, session, &warnings)
+		mol := autoCloseProxiedCompletedMolecule(ctx, uw, id, currentActor(), session, &warnings)
 		for _, w := range warnings {
 			fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
 		}
@@ -209,7 +209,7 @@ func reportClosedIfRevisionResult(id, reason, preCloseStatus string, closeResult
 		closedIssue.Dependencies = nil
 	}
 	if closeResult.Changed {
-		audit.LogFieldChange(id, "status", preCloseStatus, "closed", actor, reason)
+		audit.LogFieldChange(id, "status", preCloseStatus, "closed", currentActor(), reason)
 	}
 	if jsonOutput {
 		if closedIssue != nil {

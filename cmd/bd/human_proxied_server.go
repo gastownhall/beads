@@ -122,9 +122,9 @@ func closeHumanProxied(ctx context.Context, id, comment, closeReason, commitVerb
 		if comment != "" {
 			var cerr error
 			if isWisp {
-				_, cerr = uw.CommentUseCase().AddCommentToWisp(ctx, issue.ID, actor, comment)
+				_, cerr = uw.CommentUseCase().AddCommentToWisp(ctx, issue.ID, currentActor(), comment)
 			} else {
-				_, cerr = uw.CommentUseCase().AddCommentToIssue(ctx, issue.ID, actor, comment)
+				_, cerr = uw.CommentUseCase().AddCommentToIssue(ctx, issue.ID, currentActor(), comment)
 			}
 			if cerr != nil {
 				return humanCloseResult{}, "", fmt.Errorf("adding comment: %w", cerr)
@@ -133,9 +133,9 @@ func closeHumanProxied(ctx context.Context, id, comment, closeReason, commitVerb
 
 		params := domain.CloseIssueParams{Reason: closeReason}
 		if isWisp {
-			_, err = uw.IssueUseCase().CloseWisp(ctx, issue.ID, params, actor)
+			_, err = uw.IssueUseCase().CloseWisp(ctx, issue.ID, params, currentActor())
 		} else {
-			_, err = uw.IssueUseCase().CloseIssue(ctx, issue.ID, params, actor)
+			_, err = uw.IssueUseCase().CloseIssue(ctx, issue.ID, params, currentActor())
 		}
 		if err != nil {
 			return humanCloseResult{}, "", fmt.Errorf("closing bead: %w", err)

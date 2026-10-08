@@ -419,7 +419,7 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create the sync engine
-	engine := tracker.NewEngine(gt, store, actor)
+	engine := tracker.NewEngine(gt, store, currentActor())
 	engine.OnMessage = func(msg string) { _, _ = fmt.Fprintln(out, "  "+msg) }
 	engine.OnWarning = func(msg string) { _, _ = fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 

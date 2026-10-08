@@ -58,7 +58,7 @@ Example:
 			}
 			moleculeID = resolved
 		} else {
-			moleculeIDs := findInProgressMoleculeIDs(ctx, store, actor)
+			moleculeIDs := findInProgressMoleculeIDs(ctx, store, currentActor())
 			if len(moleculeIDs) == 0 {
 				if jsonOutput {
 					return outputJSON([]interface{}{})

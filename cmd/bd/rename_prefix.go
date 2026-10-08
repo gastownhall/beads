@@ -112,7 +112,7 @@ NOTE: This is a rare operation. Most users never need this command.`,
 				)
 			}
 
-			if err := repairPrefixes(ctx, store, actor, newPrefix, issues, prefixes, dryRun); err != nil {
+			if err := repairPrefixes(ctx, store, currentActor(), newPrefix, issues, prefixes, dryRun); err != nil {
 				return HandleError("failed to repair prefixes: %v", err)
 			}
 			if !dryRun {
@@ -456,7 +456,7 @@ func renamePrefixInDB(ctx context.Context, oldPrefix, newPrefix string, issues [
 			continue
 		}
 
-		if err := renameIssueKeepingBeadGates(ctx, store, issue, newID, gates[oldID], actor); err != nil {
+		if err := renameIssueKeepingBeadGates(ctx, store, issue, newID, gates[oldID], currentActor()); err != nil {
 			return fmt.Errorf("failed to update issue %s: %w", oldID, err)
 		}
 	}

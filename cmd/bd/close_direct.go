@@ -81,7 +81,7 @@ func closeDirectCheckOne(id string, issue *types.Issue, st storage.DoltStorage, 
 	// guard remains the authority on whether the close is a no-op, so a
 	// concurrent close still converges. Mirrored in closeProxiedCheckOne.
 	if issue == nil || issue.Status != types.StatusClosed {
-		if err := validateIssueClosable(id, issue, actor, force); err != nil {
+		if err := validateIssueClosable(id, issue, currentActor(), force); err != nil {
 			return err.Error()
 		}
 	}
@@ -135,7 +135,7 @@ func closeDirectBatches(items []closeDirectItem) []closeDirectBatch {
 // hands out ONE claim however many stores the ids spanned.
 func closeDirectRequest(batch closeDirectBatch, session string, force bool, claimStore storage.DoltStorage, claimNext *issueops.ReadyRequest) issueops.CloseBatchRequest {
 	request := issueops.CloseBatchRequest{
-		Actor:   actor,
+		Actor:   currentActor(),
 		Items:   make([]issueops.BatchCloseItem, 0, len(batch.items)),
 		Session: session,
 		Force:   force,

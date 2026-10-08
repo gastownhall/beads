@@ -190,7 +190,7 @@ func burnMultipleMolecules(ctx context.Context, moleculeIDs []string, dryRun, fo
 
 	// Batch delete all wisps in one call
 	if len(wispIDs) > 0 {
-		result, err := burnWisps(ctx, store, wispIDs, actor)
+		result, err := burnWisps(ctx, store, wispIDs, currentActor())
 		if err != nil {
 			if !jsonOutput {
 				fmt.Fprintf(os.Stderr, "Error burning wisps: %v\n", err)
@@ -296,7 +296,7 @@ func burnWispMolecule(ctx context.Context, resolvedID string, dryRun, force bool
 		}
 	}
 
-	result, err := burnWisps(ctx, store, wispIDs, actor)
+	result, err := burnWisps(ctx, store, wispIDs, currentActor())
 	if err != nil {
 		return HandleErrorRespectJSON("burning wisp: %v", err)
 	}

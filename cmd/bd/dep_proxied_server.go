@@ -76,7 +76,7 @@ func addDependencyEdgesProxied(ctx context.Context, edges []issueops.DependencyE
 		return err
 	}
 	_, err = editor.AddDependencies(ctx, issueops.AddDependenciesRequest{
-		Actor:                 actor,
+		Actor:                 currentActor(),
 		Edges:                 edges,
 		SkipPerEdgeCycleCheck: skipPerEdgeCycleCheck,
 	})
@@ -370,7 +370,7 @@ func runDepRemoveProxiedServer(_ *cobra.Command, ctx context.Context, args []str
 		return HandleErrorRespectJSON("%v", err)
 	}
 	result, err := editor.RemoveDependency(ctx, issueops.RemoveDependencyRequest{
-		Actor:       actor,
+		Actor:       currentActor(),
 		IssueID:     fromID,
 		DependsOnID: toID,
 	})

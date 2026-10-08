@@ -89,7 +89,7 @@ Examples:
 				updates["status"] = string(types.StatusOpen)
 			}
 
-			if err := store.UpdateIssue(ctx, fullID, updates, actor); err != nil {
+			if err := store.UpdateIssue(ctx, fullID, updates, currentActor()); err != nil {
 				fmt.Fprintf(os.Stderr, "Error undeferring %s: %v\n", fullID, err)
 				continue
 			}

@@ -66,7 +66,7 @@ func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	reopenedIssues := []*types.Issue{}
 	for _, target := range targets {
 		result, err := lifecycle.Reopen(ctx, issueops.ReopenRequest{
-			Actor:           actor,
+			Actor:           currentActor(),
 			IssueID:         target.id,
 			Reason:          reason,
 			ExpectedVersion: ifRevision,
@@ -94,7 +94,7 @@ func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 			continue
 		}
 
-		audit.LogFieldChange(target.id, "status", string(target.status), string(types.StatusOpen), actor, reason)
+		audit.LogFieldChange(target.id, "status", string(target.status), string(types.StatusOpen), currentActor(), reason)
 		if jsonOut {
 			if issue := result.Issue; issue != nil {
 				// `bd reopen` has never printed dependency records, on either

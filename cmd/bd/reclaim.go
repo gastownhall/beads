@@ -104,7 +104,7 @@ Examples:
 		}
 
 		ctx := rootCtx
-		reclaimed, err := store.ReclaimExpiredLeases(ctx, olderThan, filter, actor)
+		reclaimed, err := store.ReclaimExpiredLeases(ctx, olderThan, filter, currentActor())
 		if err != nil {
 			return HandleErrorRespectJSON("reclaim: %v", err)
 		}
@@ -113,7 +113,7 @@ Examples:
 		for _, r := range reclaimed {
 			ids = append(ids, r.ID)
 		}
-		if err := commitPendingIfEmbedded(ctx, store, actor, doltAutoCommitParams{
+		if err := commitPendingIfEmbedded(ctx, store, currentActor(), doltAutoCommitParams{
 			Command:  "reclaim",
 			IssueIDs: ids,
 		}); err != nil {

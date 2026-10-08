@@ -246,3 +246,57 @@ func TestGetActorWithGit_PriorityOrder(t *testing.T) {
 		t.Errorf("Expected BD_ACTOR to be used as fallback, got %q", result)
 	}
 }
+
+// TestDeferredActorGitFallback pins the lazy actor: PersistentPreRunE defers
+// the git config user.name fallback, and the first reader resolves it to
+// exactly what the former eager getActorWithGit assignment produced.
+func TestDeferredActorGitFallback(t *testing.T) {
+	origActor, origPending := actor, actorGitFallbackPending
+	var origCtxActor string
+	if cmdCtx != nil {
+		origCtxActor = cmdCtx.Actor
+	}
+	t.Cleanup(func() {
+		actor, actorGitFallbackPending = origActor, origPending
+		if cmdCtx != nil {
+			cmdCtx.Actor = origCtxActor
+		}
+	})
+	t.Setenv("BEADS_ACTOR", "")
+	t.Setenv("BD_ACTOR", "")
+
+	actor = "explicit"
+	deferActorGitFallback()
+	if actorGitFallbackPending {
+		t.Fatal("a configured actor must not defer a git lookup")
+	}
+	if got := currentActor(); got != "explicit" {
+		t.Fatalf("currentActor() = %q, want %q", got, "explicit")
+	}
+
+	actor = ""
+	want := resolveActorWithGit()
+	deferActorGitFallback()
+	if !actorGitFallbackPending || actor != "" {
+		t.Fatalf("deferral resolved eagerly: pending=%v actor=%q", actorGitFallbackPending, actor)
+	}
+	if got := currentActor(); got != want {
+		t.Fatalf("currentActor() = %q, want eager resolution %q", got, want)
+	}
+	if actorGitFallbackPending || actor != want {
+		t.Fatalf("after first use: pending=%v actor=%q, want resolved %q", actorGitFallbackPending, actor, want)
+	}
+
+	actor = ""
+	deferActorGitFallback()
+	if got := getActorWithGit(); got != want || actorGitFallbackPending || actor != want {
+		t.Fatalf("getActorWithGit() = %q (pending=%v actor=%q), want %q resolved into the global", got, actorGitFallbackPending, actor, want)
+	}
+
+	actor = ""
+	deferActorGitFallback()
+	setActor("assigned")
+	if got := currentActor(); got != "assigned" {
+		t.Fatalf("setActor must cancel a deferred fallback: currentActor() = %q", got)
+	}
+}

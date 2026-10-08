@@ -97,13 +97,13 @@ Examples:
 			return HandleErrorRespectJSON("%s is not a wisp (already persistent)", fullID)
 		}
 
-		if err := store.PromoteFromEphemeral(ctx, fullID, actor); err != nil {
+		if err := store.PromoteFromEphemeral(ctx, fullID, currentActor()); err != nil {
 			return HandleErrorRespectJSON("promoting %s: %v", fullID, err)
 		}
 
 		// Add promotion comment (issue is now in permanent table, AddComment routes correctly
 		// via GetIssue fallback)
-		if err := store.AddComment(ctx, fullID, actor, promotionComment(reason)); err != nil {
+		if err := store.AddComment(ctx, fullID, currentActor(), promotionComment(reason)); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to add promotion comment to %s: %v\n", fullID, err)
 		}
 

@@ -425,8 +425,8 @@ func markdownBatchActor(in createInput) string {
 	if in.createdBy != "" {
 		return in.createdBy
 	}
-	if actor != "" {
-		return actor
+	if currentActor() != "" {
+		return currentActor()
 	}
 	return "bd"
 }

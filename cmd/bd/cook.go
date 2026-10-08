@@ -1001,20 +1001,20 @@ func cookFormula(ctx context.Context, s storage.DoltStorage, f *formula.Formula,
 		}
 
 		// Create all issues
-		if err := tx.CreateIssues(ctx, issues, actor); err != nil {
+		if err := tx.CreateIssues(ctx, issues, currentActor()); err != nil {
 			return fmt.Errorf("failed to create issues: %w", err)
 		}
 
 		// Add labels
 		for _, l := range labels {
-			if err := tx.AddLabel(ctx, l.issueID, l.label, actor); err != nil {
+			if err := tx.AddLabel(ctx, l.issueID, l.label, currentActor()); err != nil {
 				return fmt.Errorf("failed to add label %s to %s: %w", l.label, l.issueID, err)
 			}
 		}
 
 		// Add dependencies
 		for _, dep := range deps {
-			if err := tx.AddDependency(ctx, dep, actor); err != nil {
+			if err := tx.AddDependency(ctx, dep, currentActor()); err != nil {
 				return fmt.Errorf("failed to create dependency: %w", err)
 			}
 		}

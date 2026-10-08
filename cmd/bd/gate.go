@@ -275,7 +275,7 @@ This is used by 'bd done --phase-complete' to register for gate wake notificatio
 		updates := map[string]interface{}{
 			"waiters": newWaiters,
 		}
-		if err := store.UpdateIssue(ctx, gateID, updates, actor); err != nil {
+		if err := store.UpdateIssue(ctx, gateID, updates, currentActor()); err != nil {
 			return HandleError("updating gate: %v", err)
 		}
 
@@ -355,7 +355,7 @@ Examples:
 		}
 		gate.Metadata = metadata
 
-		if err := store.CreateIssue(ctx, gate, actor); err != nil {
+		if err := store.CreateIssue(ctx, gate, currentActor()); err != nil {
 			return HandleErrorRespectJSON("creating gate: %v", err)
 		}
 
@@ -364,7 +364,7 @@ Examples:
 			DependsOnID: gate.ID,
 			Type:        types.DepBlocks,
 		}
-		if err := store.AddDependency(ctx, dep, actor); err != nil {
+		if err := store.AddDependency(ctx, dep, currentActor()); err != nil {
 			return HandleErrorRespectJSON("adding blocking dependency: %v", err)
 		}
 
@@ -573,7 +573,7 @@ Use --reason to provide context for why the gate was resolved.`,
 			return HandleError("%s is not a gate issue (type=%s)", gateID, issue.IssueType)
 		}
 
-		if err := store.CloseIssue(ctx, gateID, reason, actor, ""); err != nil {
+		if err := store.CloseIssue(ctx, gateID, reason, currentActor(), ""); err != nil {
 			return HandleError("closing gate: %v", err)
 		}
 
@@ -679,7 +679,7 @@ Examples:
 				return updateGateAwaitIDFunc(nil, gateID, runID)
 			}
 			recordSeen = func(gate *types.Issue) error {
-				if err := store.UpdateIssue(ctx, gate.ID, beadGateSeenUpdate(gate.AwaitID), actor); err != nil {
+				if err := store.UpdateIssue(ctx, gate.ID, beadGateSeenUpdate(gate.AwaitID), currentActor()); err != nil {
 					return err
 				}
 				commandDidWrite.Store(true)
@@ -1575,7 +1575,7 @@ func beadGateRetargetUpdate(awaitID string, dropSeen bool) map[string]interface{
 
 // closeGate closes a gate issue with the given reason
 func closeGate(_ interface{}, gateID, reason string) error {
-	if err := store.CloseIssue(rootCtx, gateID, reason, actor, ""); err != nil {
+	if err := store.CloseIssue(rootCtx, gateID, reason, currentActor(), ""); err != nil {
 		return err
 	}
 	commandDidWrite.Store(true)

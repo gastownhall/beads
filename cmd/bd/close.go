@@ -227,7 +227,7 @@ the flags appear in the command line.`,
 				// suppressed real-close side effects (no audit, no closed→closed on the
 				// step). Register the store when it actually closed the root so the
 				// pending-commit sweep persists it — closedCount==0 would not commit.
-				if molID := autoCloseCompletedMolecule(ctx, activeStore, id, actor, session); molID != "" {
+				if molID := autoCloseCompletedMolecule(ctx, activeStore, id, currentActor(), session); molID != "" {
 					mutatedStores[activeStore] = append(mutatedStores[activeStore], molID)
 				}
 			} else {
@@ -238,13 +238,13 @@ the flags appear in the command line.`,
 				if issue != nil {
 					oldStatus = string(issue.Status)
 				}
-				audit.LogFieldChange(id, "status", oldStatus, "closed", actor, reason)
+				audit.LogFieldChange(id, "status", oldStatus, "closed", currentActor(), reason)
 
 				closedCount++
 
 				// Auto-close parent molecule if all steps are now complete.
 				// Runs against the same store the step was closed in.
-				autoCloseCompletedMolecule(ctx, activeStore, id, actor, session)
+				autoCloseCompletedMolecule(ctx, activeStore, id, currentActor(), session)
 			}
 
 			// First id this command settled as closed — a real close or an
@@ -313,7 +313,7 @@ the flags appear in the command line.`,
 
 		if continueFlag && len(resolvedIDs) == 1 && closedForCommand {
 			autoClaim := !noAuto
-			result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(postCloseStore), resolvedIDs[0], autoClaim, actor)
+			result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(postCloseStore), resolvedIDs[0], autoClaim, currentActor())
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: could not advance to next step: %v\n", err)
 			} else if result != nil {
@@ -400,7 +400,7 @@ the flags appear in the command line.`,
 				if s == nil {
 					continue
 				}
-				if err := commitPendingIfEmbedded(ctx, s, actor, doltAutoCommitParams{
+				if err := commitPendingIfEmbedded(ctx, s, currentActor(), doltAutoCommitParams{
 					Command:  "close",
 					IssueIDs: ids,
 				}); err != nil {

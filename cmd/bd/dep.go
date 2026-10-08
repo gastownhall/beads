@@ -37,7 +37,7 @@ func addDependencyEdgesDirect(ctx context.Context, st storage.DoltStorage, edges
 		return err
 	}
 	_, err = editor.AddDependencies(ctx, issueops.AddDependenciesRequest{
-		Actor:                 actor,
+		Actor:                 currentActor(),
 		Edges:                 edges,
 		SkipPerEdgeCycleCheck: skipPerEdgeCycleCheck,
 	})
@@ -330,7 +330,7 @@ Examples:
 				warnIfCyclesExist(fromStore)
 			}
 
-			if err := commitPendingIfEmbedded(ctx, fromStore, actor, doltAutoCommitParams{
+			if err := commitPendingIfEmbedded(ctx, fromStore, currentActor(), doltAutoCommitParams{
 				Command:  "dep add",
 				IssueIDs: []string{fromID, toID},
 			}); err != nil {
@@ -520,7 +520,7 @@ Examples:
 			warnIfCyclesExist(fromStore)
 		}
 
-		if err := commitPendingIfEmbedded(ctx, fromStore, actor, doltAutoCommitParams{
+		if err := commitPendingIfEmbedded(ctx, fromStore, currentActor(), doltAutoCommitParams{
 			Command:  "dep add",
 			IssueIDs: []string{fromID, toID},
 		}); err != nil {
@@ -1270,7 +1270,7 @@ var depRemoveCmd = &cobra.Command{
 			return HandleErrorRespectJSON("%v", err)
 		}
 		result, err := editor.RemoveDependency(opsCtx, issueops.RemoveDependencyRequest{
-			Actor:       actor,
+			Actor:       currentActor(),
 			IssueID:     fullFromID,
 			DependsOnID: fullToID,
 		})
@@ -1278,7 +1278,7 @@ var depRemoveCmd = &cobra.Command{
 			return HandleErrorRespectJSON("%v", err)
 		}
 
-		if err := commitPendingIfEmbedded(ctx, fromStore, actor, doltAutoCommitParams{
+		if err := commitPendingIfEmbedded(ctx, fromStore, currentActor(), doltAutoCommitParams{
 			Command:  "dep remove",
 			IssueIDs: []string{fullFromID, fullToID},
 		}); err != nil {

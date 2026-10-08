@@ -306,6 +306,7 @@
 50 17 TestEmbeddedCompact
 50 17 TestEmbeddedGateConcurrent
 50 17 TestEmbeddedListComments
+50 17 TestEmbeddedReadOnlyCommandsSpawnNoGit
 
 50 18 TestEmbeddedContext
 50 18 TestEmbeddedContributorCreate

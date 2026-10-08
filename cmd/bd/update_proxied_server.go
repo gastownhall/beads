@@ -127,7 +127,7 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 		expectedStatus = &expected
 	}
 	result, err := runCommandUpdateMutation(ctx, ops, commandUpdateMutation{
-		actor:            actor,
+		actor:            currentActor(),
 		issueID:          id,
 		patch:            patch,
 		claim:            in.claim,
@@ -226,7 +226,7 @@ func proxiedUpdateTarget(ctx context.Context, id string, in *updateInput) (*type
 	// mc-zndi7.74: also skipped when this pre-read is already stale against an
 	// active --if-revision guard — see ifRevisionAlreadyStale's doc.
 	if newAssignee, ok := in.fields["assignee"].(string); ok && in.ifAssignee == nil && !in.claim && !ifRevisionAlreadyStale(current, in.ifRevision) {
-		if err := validateIssueReassignable(id, current, actor, newAssignee,
+		if err := validateIssueReassignable(id, current, currentActor(), newAssignee,
 			proxiedClaimPoolAliases(ctx), in.force); err != nil {
 			fmt.Fprintf(os.Stderr, "%s\n", err)
 			return nil, &updateIDFailure{ID: id, Error: err.Error()}

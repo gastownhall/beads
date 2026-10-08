@@ -54,15 +54,15 @@ func proxiedUpdateIssueFields(ctx context.Context, id, commitMsg string, updates
 		// bd-98s5c: an unguarded assignee update (bd assign via the proxied
 		// server) must not silently overwrite another actor's live claim.
 		if newAssignee, ok := updates["assignee"].(string); ok {
-			if err := validateIssueReassignable(id, issue, actor, newAssignee,
+			if err := validateIssueReassignable(id, issue, currentActor(), newAssignee,
 				uowClaimPoolAliases(ctx, uw), force); err != nil {
 				return err
 			}
 		}
 		if isWisp {
-			return uw.IssueUseCase().UpdateWisp(ctx, issue.ID, updates, actor)
+			return uw.IssueUseCase().UpdateWisp(ctx, issue.ID, updates, currentActor())
 		}
-		return uw.IssueUseCase().UpdateIssue(ctx, issue.ID, updates, actor)
+		return uw.IssueUseCase().UpdateIssue(ctx, issue.ID, updates, currentActor())
 	})
 }
 
@@ -95,7 +95,7 @@ func proxiedAssign(ctx context.Context, id, assignee string, force bool, ifRevis
 		// from the guarded write below instead of this policy refusal — see
 		// ifRevisionAlreadyStale's doc.
 		if !ifRevisionAlreadyStale(current, ifRevision) {
-			if verr := validateIssueReassignable(id, current, actor, assignee,
+			if verr := validateIssueReassignable(id, current, currentActor(), assignee,
 				uowClaimPoolAliases(ctx, uw), force); verr != nil {
 				return struct{}{}, verr
 			}
@@ -111,7 +111,7 @@ func proxiedAssign(ctx context.Context, id, assignee string, force bool, ifRevis
 		return nil, err
 	}
 	result, err := runCommandUpdateMutation(ctx, ops, commandUpdateMutation{
-		actor:   actor,
+		actor:   currentActor(),
 		issueID: id,
 		patch: issueops.IssuePatch{
 			Assignee: issueops.Field[string]{Set: true, Value: assignee},
@@ -183,9 +183,9 @@ func runNoteProxiedServer(ctx context.Context, id, noteText string) error {
 		combined += noteText
 		updates := map[string]any{"notes": combined}
 		if isWisp {
-			return uw.IssueUseCase().UpdateWisp(ctx, issue.ID, updates, actor)
+			return uw.IssueUseCase().UpdateWisp(ctx, issue.ID, updates, currentActor())
 		}
-		return uw.IssueUseCase().UpdateIssue(ctx, issue.ID, updates, actor)
+		return uw.IssueUseCase().UpdateIssue(ctx, issue.ID, updates, currentActor())
 	})
 	if err != nil {
 		return HandleErrorRespectJSON("note %s: %v", id, err)
@@ -245,7 +245,7 @@ func runTagProxiedServer(ctx context.Context, id, label string) error {
 		return HandleErrorRespectJSON("tag %s: %v", id, err)
 	}
 	result, err := lifecycle.Update(ctx, issueops.UpdateRequest{
-		Actor:   actor,
+		Actor:   currentActor(),
 		IssueID: details.ID,
 		Patch:   issueops.IssuePatch{Labels: issueops.LabelPatch{Add: []string{label}}},
 	})

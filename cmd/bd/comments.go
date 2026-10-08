@@ -258,7 +258,7 @@ Examples:
 		if err != nil {
 			return HandleErrorRespectJSON("adding comment: %v", err)
 		}
-		if err := commitPendingIfEmbedded(ctx, result.Store, actor, doltAutoCommitParams{
+		if err := commitPendingIfEmbedded(ctx, result.Store, currentActor(), doltAutoCommitParams{
 			Command:  "comments add",
 			IssueIDs: []string{issueID},
 		}); err != nil {
