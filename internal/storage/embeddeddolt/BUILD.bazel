@@ -160,6 +160,8 @@ go_test(
         "journal_concurrency_test.go",
         "journal_contract_test.go",
         "journal_retention_test.go",
+        "journal_shape_adaptive_test.go",
+        "journal_shape_converge_test.go",
         "journal_truncation_test.go",
         "label_list_all_benchmark_test.go",
         "label_rename_test.go",

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -420,6 +421,15 @@ func getJournalIssueInTx(ctx context.Context, tx DBTX, issueID string) (*types.I
 // (non-dependency ops). ts is the insert time, stamped inside the committing
 // transaction. actor is stored as-is — "" for the genuinely unattributable
 // paths — in the NOT NULL DEFAULT ” actor column.
+//
+// The column list is shape-adaptive (journal_shape.go, PR A1): seq, ts, op
+// and issue_id are always named, and each optional column — actor,
+// issue_json, dep_json, comment_json — is named only when journalShapeFor(tx)
+// says this store's table actually has it. On a canonical table that is every
+// column, in the same order this INSERT has always used; on an old-lineage
+// table missing one, the write still lands and that one payload is simply not
+// recorded, rather than failing the whole mutation the journal row shares a
+// transaction with.
 func insertEventRow(ctx context.Context, tx DBTX, op EventOp, issueID string, issue *types.Issue, dep *EventDep, comment *EventComment, actor string) error {
 	var issueJSON any
 	if issue != nil {
@@ -445,11 +455,41 @@ func insertEventRow(ctx context.Context, tx DBTX, op EventOp, issueID string, is
 		}
 		commentJSON = string(b)
 	}
+
+	shape := journalShapeFor(tx)
+	type optionalJournalValue struct {
+		column string
+		value  any
+	}
+	var optionalValues []optionalJournalValue
+	if shape.HasActor {
+		optionalValues = append(optionalValues, optionalJournalValue{"actor", actor})
+	}
+	if shape.HasIssueJSON {
+		optionalValues = append(optionalValues, optionalJournalValue{"issue_json", issueJSON})
+	}
+	if shape.HasDepJSON {
+		optionalValues = append(optionalValues, optionalJournalValue{"dep_json", depJSON})
+	}
+	if shape.HasCommentJSON {
+		optionalValues = append(optionalValues, optionalJournalValue{"comment_json", commentJSON})
+	}
+	columns := make([]string, 0, 4+len(optionalValues))
+	columns = append(columns, "seq", "ts", "op", "issue_id")
+	for _, ov := range optionalValues {
+		columns = append(columns, ov.column)
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(columns)), ", ")
+	//nolint:gosec // columns is built entirely from the fixed name literals above, never from caller input.
+	query := fmt.Sprintf("INSERT INTO bd_events_journal (%s) VALUES (%s)", strings.Join(columns, ", "), placeholders)
+
 	insert := func(seq int64) error {
-		_, err := tx.ExecContext(ctx, `
-			INSERT INTO bd_events_journal (seq, ts, op, issue_id, actor, issue_json, dep_json, comment_json)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		`, seq, time.Now().UTC(), string(op), issueID, actor, issueJSON, depJSON, commentJSON)
+		args := make([]any, 0, len(columns))
+		args = append(args, seq, time.Now().UTC(), string(op), issueID)
+		for _, ov := range optionalValues {
+			args = append(args, ov.value)
+		}
+		_, err := tx.ExecContext(ctx, query, args...)
 		return err
 	}
 

@@ -154,8 +154,10 @@
 15 1 TestEmbeddedRoleFixtureKitHooksAreUsable
 15 1 TestLifecycleCreateContract
 15 1 TestMergeWithStrategy_OursKeepsLocal
+15 1 TestStoreAtIgnored28WritesAndJournals
 
 15 2 TestActiveDatabaseSizeScopesToActiveEmbeddedDatabase
+15 2 TestAdaptiveInsert_GciShape
 15 2 TestCleanGitRemoteCacheGarbage
 15 2 TestCreateBatchFastPathsMatchPerRow_Embedded
 15 2 TestDepRekeyMarkerStillInIgnoredSeries
@@ -230,6 +232,7 @@
 15 4 TestIgnoredCursorHealNeverResurrectsRolledBackVersions
 15 4 TestMain
 15 4 TestMemoriesContract
+15 4 TestMissingRequiredColumnRefusesAtOpen
 15 4 TestPromoteClearsNoHistory
 15 4 TestRemoteVerbPlainRemoteKeepsAmbientEnv
 15 4 TestReopenIssue
@@ -237,6 +240,7 @@
 15 4 TestWithPeerAuth_EnvFallbackDoesNotObservePeerCredentials
 
 15 5 TestActiveDatabaseSizeFailsForMissingEmbeddedDatabase
+15 5 TestAdaptiveRead_GciShape
 15 5 TestBlockingAnnotatorContract
 15 5 TestBootstrapperContract
 15 5 TestBuildDSN_WithDatabase
@@ -291,6 +295,7 @@
 15 6 TestRenameLabel
 15 6 TestRenameLabelMintsOneVersionPerTouchedBead
 15 6 TestRunInTransactionPostCommitStageFailureIsIndeterminate
+15 6 TestSentinelReplayCounterConverges
 15 6 TestStatsReporterContract
 15 6 TestWithPeerAuth_ConcurrentPeersDoNotMixCredentials
 15 6 TestWithPeerAuth_RestoresEnvWhenCallbackFails
@@ -305,6 +310,7 @@
 15 7 TestEmbeddedDependencyEditorGateScopeFollowsTheEdgeType
 15 7 TestEmbeddedDependencyEditorRoutesWispSourcedEdgeToTheWispPlane
 15 7 TestEmbeddedDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp
+15 7 TestEmbeddedIgnoredMigration0023AloneLeavesCounterAndRowsUntouched
 15 7 TestEmbeddedIssueOperationsUpdateStatusCrossingSettlesAConditionalBlocksDepender
 15 7 TestEmbeddedMigration0057ConvertsTextEventsColumnsToLongtext
 15 7 TestEmbeddedReaderListReadyFlagAnswersTheBlockerAwareSet
@@ -347,6 +353,7 @@
 15 8 TestEmbeddedSQLCommitResponseLossIsIndeterminate
 15 8 TestGetReadyWorkIncludeEphemeralAppliesWispFilters
 15 8 TestHasRepository
+15 8 TestIgnored0028ConvergesAllShapes
 15 8 TestLenientGateWarning_ComposedOutput
 15 8 TestMergeAndSettleWithStrategy_EmptyStrategyMatchesMergeAndSettle
 15 8 TestReclaimExpiredLeaseSurvivesRestartEmbedded
@@ -377,6 +384,7 @@
 15 9 TestMetadataCASContract
 15 9 TestPromoteStillWorksWithCollisionGuard
 15 9 TestReadyWorkWithMissingDeferredParentTables
+15 9 TestReplay22To28NoOpOnHealthyStore
 15 9 TestUpdateMergeOps_DoltEngine
 
 15 10 TestBuildDSN_SpacesInPath
@@ -406,6 +414,7 @@
 15 10 TestGraphWalkPlansHonorJoinHints
 15 10 TestHelperProcess
 15 10 TestIgnoredCursorHealResumeRespectsOperatorOverride
+15 10 TestJournalShapeProbeOncePerOpen
 15 10 TestReclaimRefusesForeignReplicaLease
 15 10 TestRemoteEntryPointsUseVersionControlOps
 15 10 TestTransactionCleanupBeforeSQLCommitRemainsDefinite
@@ -455,6 +464,7 @@
 15 12 TestEmbeddedRecomputeAllBlockedWiring
 15 12 TestEmbeddedRelationsResolvesAWispAnchor
 15 12 TestEmbeddedTransactionSameStatusDoesNotPublishUnrelatedDurableChanges
+15 12 TestIgnored0028AloneLeavesCounterAndRowsUntouched
 15 12 TestLargeBatchApplyStatementCounts712_Embedded
 15 12 TestLifecycleUpdateContract
 15 12 TestPreviewStoreRefusesLocalMetadataWrite
@@ -509,6 +519,7 @@
 15 14 TestEmbeddedReadyClaimerClaimsAnEphemeralRowTheFilterAdmits
 15 14 TestEmbeddedReadyClaimerRejectsLimitOffsetBriefAndEmptyActor
 15 14 TestEventsJournalPruneWhenEveryRowIsOlderThanTheCutoff
+15 14 TestIgnored0028NoopsWithoutItsTables
 15 14 TestMergeWithStrategy_TheirsResolvesAndCommits
 15 14 TestMerge_NoStrategyStillErrorsWithEscapeHatchHint
 15 14 TestOpenAfterCloseCreatesNewStore
@@ -543,3 +554,4 @@
 15 15 TestIgnoredCursorHealIsIdempotent
 15 15 TestReadyWorkStatementBudget
 15 15 TestReleaserContract
+15 15 TestSentinelJournalColumnsReplay

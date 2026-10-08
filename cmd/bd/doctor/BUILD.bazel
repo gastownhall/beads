@@ -26,6 +26,7 @@ go_library(
         "hooks_migration.go",
         "installation.go",
         "integrity.go",
+        "journal_shape.go",
         "kv.go",
         "label_whitespace.go",
         "legacy.go",

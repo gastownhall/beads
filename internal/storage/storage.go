@@ -921,6 +921,32 @@ type EventsJournalConfigurer interface {
 	SetEventsJournalEnabled(enabled bool)
 }
 
+// EventsJournalShapeChecker reports whether the LAST SetEventsJournalEnabled
+// call on this instance was able to activate the journal.
+//
+// It exists because SetEventsJournalEnabled itself stays void: dozens of
+// tests across three backends already call it as a bare statement, and
+// adaptive I/O (PR A1) must not force every one of them to start checking an
+// error it never had before. Instead, enabling the journal probes the table's
+// shape internally and caches any failure; this is the seam a factory's open
+// path checks immediately afterward to decide whether activation actually
+// succeeded. A missing or unsupported table makes SetEventsJournalEnabled(true)
+// a no-op for WRITES, from that store's perspective: nothing panics, no
+// INSERT is attempted, and no write is lost or corrupted — but
+// eventsjournal.Apply uses this checker to fail the overall open with a typed
+// error (issueops.JournalShapeError) instead of letting every subsequent
+// write fail one at a time, which is the gci failure mode this interface
+// exists to avoid. A caller that enables the journal directly, bypassing
+// Apply, and then reads it anyway gets a loud SQL error from the read itself
+// rather than a silently wrong answer — reads are never gated by the enabled
+// flag, so there is no "no-op" to fall back to there.
+//
+// A store that does not implement it is assumed never to fail activation
+// (today, every implementation does).
+type EventsJournalShapeChecker interface {
+	EventsJournalActivationError() error
+}
+
 // VersionedHistoryConfigurer controls dual-write issue-version history
 // activation on ONE storage instance. Implementations must never use
 // process-global state, for the same reason as EventsJournalConfigurer:

@@ -133,11 +133,39 @@ func TestCursorRealityFloor(t *testing.T) {
 			wantLimited: true,
 		},
 		{
-			name:        "schema corroborates the cursor",
-			present:     allSentinelTables(),
-			columns:     map[string]bool{"leases.granted_node": true},
+			name:    "schema corroborates the cursor",
+			present: allSentinelTables(),
+			columns: map[string]bool{
+				"leases.granted_node":            true,
+				"bd_events_journal.comment_json": true,
+				"bd_events_journal.actor":        true,
+			},
 			wantFloor:   0,
 			wantLimited: false,
+		},
+		{
+			// T2.6c: the journal floor limits on its own, with leases
+			// corroborated and the OTHER journal column present. Moving actor
+			// off floor 21 would read 24 here instead (see
+			// TestCurrentVersionClampsToSentinelFloor's matching case).
+			name:    "journal actor absent alone",
+			present: allSentinelTables(),
+			columns: map[string]bool{
+				"leases.granted_node":            true,
+				"bd_events_journal.comment_json": true,
+			},
+			wantFloor:   21,
+			wantLimited: true,
+		},
+		{
+			name:    "journal comment_json absent alone",
+			present: allSentinelTables(),
+			columns: map[string]bool{
+				"leases.granted_node":     true,
+				"bd_events_journal.actor": true,
+			},
+			wantFloor:   21,
+			wantLimited: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -252,8 +280,62 @@ func TestCurrentVersionClampsToSentinelFloor(t *testing.T) {
 			name:    "fully corroborated cursor is believed as read",
 			raw:     latest,
 			present: allSentinelTables(),
-			columns: map[string]bool{"leases.granted_node": true},
-			want:    latest,
+			columns: map[string]bool{
+				"leases.granted_node":            true,
+				"bd_events_journal.comment_json": true,
+				"bd_events_journal.actor":        true,
+			},
+			want: latest,
+		},
+		{
+			// T2.6c: the fleet's shape at the first A2 open. Every production
+			// Dolt store sits at ignored cursor 24 (BEADS-JOURNAL-PLAN.md §4.1)
+			// and predates actor outright, so this clamps to 21 and 22..28
+			// replay once.
+			name:    "fleet first open: cursor 24, journal actor absent",
+			raw:     24,
+			present: allSentinelTables(),
+			columns: map[string]bool{
+				"leases.granted_node":            true,
+				"bd_events_journal.comment_json": true,
+			},
+			want: 21,
+		},
+		{
+			// #5496's fork-lineage fixture: cursor 22, actor absent (that shape
+			// predates ignored/0025, which adds actor, outright).
+			name:    "fork-lineage fixture: cursor 22, actor absent",
+			raw:     22,
+			present: allSentinelTables(),
+			columns: map[string]bool{
+				"leases.granted_node":            true,
+				"bd_events_journal.comment_json": true,
+			},
+			want: 21,
+		},
+		{
+			// A raw cursor already sitting exactly at the journal floor: the
+			// clamp is a ceiling, not a promotion, so a contradiction at or
+			// below it changes nothing.
+			name:    "cursor at the journal floor is untouched",
+			raw:     21,
+			present: allSentinelTables(),
+			columns: map[string]bool{
+				"leases.granted_node": true,
+			},
+			want: 21,
+		},
+		{
+			// Taking the MAXIMUM floor instead of the minimum in
+			// cursorRealityFloor would read 21 here (the journal floor); the
+			// minimum reads 11 (the leases floor).
+			name:    "leases and journal actor both absent",
+			raw:     latest,
+			present: allSentinelTables(),
+			columns: map[string]bool{
+				"bd_events_journal.comment_json": true,
+			},
+			want: 11,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -583,7 +665,10 @@ func TestMigrateStartsAboveTheFloorUnderColumnContradiction(t *testing.T) {
 			AddRow("content_hash", "char(64)", "YES", "", nil, ""))
 
 	// The guarded read: cursor claims at-latest, both table sentinels
-	// corroborate it, and only the leases column does not.
+	// corroborate it, and only the leases column does not — the
+	// bd_events_journal sentinels (PR A2) are probed too, in the same
+	// sentinelColumns order, and corroborate here so the leases contradiction
+	// stays the only thing driving the floor.
 	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
 	for range ignoredSource.sentinelTables {
@@ -592,6 +677,10 @@ func TestMigrateStartsAboveTheFloorUnderColumnContradiction(t *testing.T) {
 	}
 	mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.COLUMNS")).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	for range 2 {
+		mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.COLUMNS")).
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	}
 
 	boom := errors.New("stop here: the applier resumed above the floor")
 	mock.ExpectExec(".*").WillReturnError(boom)
@@ -651,5 +740,107 @@ func TestPendingVersionsUnderFloorDoNotReArmAuxMarkers(t *testing.T) {
 	}
 	if pendingSet[7] {
 		t.Error("ignored/0007 is pending on a cursor-11 store; its unguarded UPDATE would restamp wisps.updated_at")
+	}
+}
+
+// journalSentinelReplayDML matches an (?i)-insensitive statement that
+// mutates data: UPDATE ... SET, DELETE FROM, INSERT [IGNORE] INTO,
+// REPLACE INTO, or TRUNCATE TABLE. It is deliberately loose about what
+// follows — this test's job is to flag every candidate and then check it
+// against an allowlist, not to parse SQL.
+var journalSentinelReplayDML = regexp.MustCompile(`(?i)\b(update\s+\S+\s+set|delete\s+from|insert\s+(ignore\s+)?into|replace\s+into|truncate\s+table)\b`)
+
+var (
+	journalSentinelCommentLineRE = regexp.MustCompile(`(?m)^\s*--.*$`)
+	journalSentinelOnUpdateRE    = regexp.MustCompile(`(?i)on\s+update\s+current_timestamp(\s*\(\s*\))?`)
+	journalSentinelOnDupKeyRE    = regexp.MustCompile(`(?i)on\s+duplicate\s+key\s+update`)
+	journalSentinelWhitespaceRE  = regexp.MustCompile(`\s+`)
+)
+
+// journalSentinelReplayAllowlist is every statement, by migration version,
+// that the bd_events_journal sentinels' replay range (today: above floor 21)
+// is permitted to carry, keyed by its whitespace-collapsed lowercase form.
+// Each entry needs a justification here before it is added.
+var journalSentinelReplayAllowlist = map[int][]string{
+	22: {
+		// Idempotent: INSERT IGNORE no-ops once bd_events_seq's single row
+		// (id=0) exists, on every replay after the first.
+		"insert ignore into bd_events_seq (id, next_seq) values (0, 0)",
+		// Monotone: identical in effect to issueops.healEventSeqCounter — a
+		// no-op when the counter is already at or ahead of the journal's
+		// high-water mark, and a raise to exactly MAX(seq) when it is behind.
+		// See TestSentinelReplayCounterConverges (embeddeddolt package) for
+		// the behavioral proof.
+		"update bd_events_seq set next_seq = greatest(next_seq, coalesce((select max(seq) from bd_events_journal), 0)) where id = 0",
+	},
+}
+
+// TestJournalSentinelReplayRangeDMLIsAllowlisted is T2.14: every ignored
+// migration above the bd_events_journal sentinels' floor is a migration a
+// sentinel contradiction can force to replay against a store that already
+// has real data in it (section 3 of the A2 conflict decision). A DML
+// statement in that range is therefore not merely "guarded" by an IF — it
+// must also be safe to re-run against live rows, which an IF alone does not
+// guarantee (an unconditional UPDATE inside a guarded ALTER branch would
+// still re-fire every time the branch's condition holds). This pins the
+// range to exactly the DML this decision reviewed, so a future migration
+// added above the floor cannot silently introduce an unreviewed one.
+//
+// The floor is read from the registry, not hard-coded, so a future change to
+// the sentinel values updates this test's scope automatically.
+//
+// Kills: any future ignored migration above the floor that adds DML which
+// every journal-sentinel replay would silently re-run — for example a
+// jv/txn backfill `UPDATE bd_events_journal ...` or an `UPDATE wisps ...`
+// restamp (A4-A6 add ignored/0029-0031 inside this range).
+func TestJournalSentinelReplayRangeDMLIsAllowlisted(t *testing.T) {
+	floor := 0
+	haveFloor := false
+	for _, sc := range ignoredSource.sentinelColumns {
+		if sc.table != "bd_events_journal" {
+			continue
+		}
+		if !haveFloor || sc.replayFloor < floor {
+			floor = sc.replayFloor
+		}
+		haveFloor = true
+	}
+	if !haveFloor {
+		t.Fatal("no bd_events_journal sentinel column is registered in ignoredSource; this test has nothing to pin")
+	}
+
+	for _, mf := range ignoredSource.list() {
+		if mf.version <= floor {
+			continue
+		}
+		blob, err := ignoredSource.files.ReadFile(ignoredSource.dir + "/" + mf.name)
+		if err != nil {
+			t.Fatalf("read %s: %v", mf.name, err)
+		}
+
+		body := journalSentinelCommentLineRE.ReplaceAllString(string(blob), "")
+		body = journalSentinelOnUpdateRE.ReplaceAllString(body, " ")
+		body = journalSentinelOnDupKeyRE.ReplaceAllString(body, " ")
+
+		for _, stmt := range strings.Split(body, ";") {
+			if !journalSentinelReplayDML.MatchString(stmt) {
+				continue
+			}
+			normalized := strings.ToLower(strings.TrimSpace(journalSentinelWhitespaceRE.ReplaceAllString(stmt, " ")))
+			if normalized == "" {
+				continue
+			}
+			allowed := false
+			for _, want := range journalSentinelReplayAllowlist[mf.version] {
+				if normalized == want {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				t.Errorf("ignored/%04d (above the bd_events_journal replay floor %d) carries DML not on the replay-safety allowlist:\n  %s\nEvery journal-sentinel-triggered replay re-runs this statement against a live store; add it to journalSentinelReplayAllowlist with a justification, or make it a no-op above the floor.",
+					mf.version, floor, normalized)
+			}
+		}
 	}
 }

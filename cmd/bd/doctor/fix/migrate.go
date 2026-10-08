@@ -136,6 +136,16 @@ func SchemaCompatibility(path string) error {
 	return DatabaseVersion(path)
 }
 
+// EventsJournalShape fixes the "Events Journal Shape" doctor finding
+// (BEADS-JOURNAL-PLAN.md §4.2f, PR A2: missing optional bd_events_journal
+// columns, or a bd_events_seq counter behind bd_events_journal's MAX(seq)).
+// The converging ignored-plane migration (ignored/0028) is applied as a side
+// effect of DatabaseVersion's writable store open, the same as every other
+// pending-migration fix in this file.
+func EventsJournalShape(path string) error {
+	return DatabaseVersion(path)
+}
+
 // FreshCloneImport handles the "Fresh Clone" fix: imports JSONL issues into an
 // existing (possibly empty) Dolt store. This covers the case where the Database
 // fix already created the store but a prior version didn't import.

@@ -243,6 +243,8 @@ func SanitizeFixRecommendation(fix string, gate FixGate) string {
 // audited against that rule. The ones deliberately left out open a store, so
 // being withheld under a blocked gate is correct rather than an omission:
 // "Database", "Database Integrity", "Fresh Clone", "Schema Compatibility",
+// "Events Journal Shape" (opens the store, applying the converging
+// ignored-plane migration as a side effect, same as Schema Compatibility),
 // "Repo Fingerprint" (fix.RepoFingerprint and fix.FixMissingMetadata both write
 // through the store), "Dolt Schema", "Pending Migrations", and the row-level
 // data repairs. "Sync Divergence", "JSONL Config" and "Untracked Files" are

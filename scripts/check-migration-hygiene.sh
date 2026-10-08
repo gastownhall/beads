@@ -86,7 +86,23 @@
 #      point of the check is that the idiom stops spreading into migrations
 #      where the write does matter.
 #
-# Checks C, D, and E compare against $BASE_SHA if set (CI passes the PR base),
+#   F. A new main-plane migration must not contain DDL (CREATE/ALTER/RENAME/
+#      DROP TABLE) against a journal table (`bd_events_journal`,
+#      `bd_events_seq`). Unlike check D, there is no twin exemption: journal
+#      tables change only on the ignored plane (Dolt) or in Postgres DDL
+#      (BEADS-JOURNAL-PLAN.md §4.2c, PR A2) — an ignored-series twin does not
+#      excuse a main-plane DDL statement here the way it does for the other
+#      clone-local tables check D covers, because a main-plane change to
+#      these specific tables bumps the skew-checked main cursor (schema.go's
+#      forward-drift guard) for a table whose whole point is to stay
+#      invisible to binaries that predate it. BEADS-JOURNAL-PLAN.md names
+#      this rule "hygiene check E" and its test `TestHygieneCheckE`; it is
+#      implemented here as check F and the test is named for what it checks
+#      rather than for the plan's letter, because this repo's own check E
+#      already means something else (no PREPARE'd DML, above) and reusing the
+#      letter would misdescribe both.
+#
+# Checks C, D, E, and F compare against $BASE_SHA if set (CI passes the PR base),
 # else origin/main, else main; they are skipped with a warning when no base
 # is resolvable (e.g. shallow clone without the base commit).
 #
@@ -455,6 +471,37 @@ else
   DELETE is never exempted, since a JOIN can move its real target out of
   reach of this check). Prepared ALTER TABLE is a separate, accepted idiom
   and is not what this check flags either.
+EOF
+    fi
+  done
+fi
+
+# --- Check F: no main-plane DDL on journal tables ---------------------------
+# bd_events_journal/bd_events_seq change only on the ignored plane (Dolt) or
+# in Postgres DDL (BEADS-JOURNAL-PLAN.md §4.2c, PR A2). Scoped to added_main
+# the same as checks D and E; unlike D, there is no twin exemption here —
+# see this check's doc comment at the top of the file for why.
+if [ -z "$base" ] || [ -z "${merge_base:-}" ]; then
+  echo "WARN (journal plane) no usable base ref; skipping check F." >&2
+else
+  journal_tables='bd_events_journal|bd_events_seq'
+  ddl_re_f="(alter|create|rename|drop)[[:space:]]+table([[:space:]]+if[[:space:]]+(not[[:space:]]+)?exists)?[[:space:]]+[\`']?(${journal_tables})\b"
+  for f in $added_main; do
+    [ -f "$f" ] || continue
+    stripped=$(sed 's/--.*$//' "$f" | tr '[:upper:]' '[:lower:]')
+    hits=$(grep -n -E "$ddl_re_f" <<<"$stripped" || true)
+    if [ -n "$hits" ]; then
+      fail=1
+      echo "FAIL (journal plane) $f contains main-plane DDL on a journal table:"
+      echo "$hits" | sed 's/^/  line /'
+      cat <<'EOF'
+  bd_events_journal and bd_events_seq change only on the ignored plane: a
+  main-plane migration touching either one bumps the skew-checked main
+  cursor for a table whose whole point is to stay invisible to binaries that
+  predate it (BEADS-JOURNAL-PLAN.md §4.2c). Move this DDL to a new file under
+  internal/storage/schema/migrations/ignored/ instead; there is no twin
+  exemption for these two tables the way check D allows for other
+  clone-local tables.
 EOF
     fi
   done
