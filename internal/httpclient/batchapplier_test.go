@@ -182,23 +182,20 @@ func TestApplyBatchRefusesEveryMemberTheWireExcludes(t *testing.T) {
 		}
 	})
 
-	// The edge item's HasSpawner/ThreadID used to refuse unconditionally here
-	// (W-DepAddItem.HasSpawner, W-DepAddItem.ThreadID). Both are now CARRIED,
-	// gated by issues.batchApply.depAddLineage — see
+	// The edge item's HasSpawner/ThreadID used to refuse here
+	// (W-DepAddItem.HasSpawner on a waits-for edge, W-DepAddItem.ThreadID on
+	// any). Both are now CARRIED, gated by issues.batchApply.depAddLineage on
+	// the same edges — see
 	// TestApplyBatchRefusesUnservedDepAddLineageBeforeDialing for the pre-dial
 	// capability refusal this subtest retired in favor of.
 
 	t.Run("a spawner flag on any other edge type is the role's no-op, and is not refused", func(t *testing.T) {
-		// The capability must be advertised for this to dial at all now:
-		// HasSpawner/ThreadID are gated on every edge type, not only
-		// waits-for — see refuseUnservedDepAddLineage.
-		served := &apigen.ContextResponse{Capabilities: []string{wire.CapBatchApplyDepAddLineage}}
+		// applyRole's snapshot advertises no capability at all: the flag is
+		// gated only where the role reads it, so a blocks edge carrying it
+		// dials an older server rather than refusing — and drops the flag
+		// instead of sending a member that server would answer with a 400.
 		w := &stubWire{}
-		applier, err := New(testTarget(t), w, served).BatchApplier()
-		if err != nil {
-			t.Fatalf("BatchApplier(): %v", err)
-		}
-		_, err = applier.ApplyBatch(t.Context(), issueops.ApplyBatchRequest{
+		_, err := applyRole(t, w).ApplyBatch(t.Context(), issueops.ApplyBatchRequest{
 			Actor: "planner",
 			Items: []issueops.ApplyItem{{Kind: issueops.ItemDepAdd, DepAdd: &issueops.DepAddItem{
 				Source: issueops.Ref{ID: "bd-1"}, Target: issueops.Ref{ID: "bd-2"}, Type: issueops.DepBlocks, HasSpawner: true,
@@ -207,8 +204,12 @@ func TestApplyBatchRefusesEveryMemberTheWireExcludes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("a spawner flag on a blocks edge refused: %v", err)
 		}
-		if got := w.lastApply.Items[0].DepAdd; got == nil || got.Type != string(issueops.DepBlocks) {
-			t.Errorf("the encoded edge = %+v, want the caller's blocks edge", got)
+		got := w.lastApply.Items[0].DepAdd
+		if got == nil || got.Type != string(issueops.DepBlocks) {
+			t.Fatalf("the encoded edge = %+v, want the caller's blocks edge", got)
+		}
+		if got.HasSpawner != nil {
+			t.Errorf("has_spawner = %v on a blocks edge, want it dropped: the role ignores it there", *got.HasSpawner)
 		}
 	})
 
@@ -1008,11 +1009,14 @@ func TestTheApplyLabelPatchIsTheWholeEdit(t *testing.T) {
 // carried no coverage at all — deleting the function and its call site
 // passed every test that existed before this one.
 //
-// A dep_add item naming HasSpawner or ThreadID, dialed against a server that
-// does not advertise CapBatchApplyDepAddLineage, must refuse BEFORE dialing
-// with *storage.ErrUnsupported naming the capability. A plan that touches
-// neither field must still dial normally against the SAME masked server: the
-// gate scopes the two members, not the operation.
+// A dep_add item naming ThreadID on any edge, or HasSpawner on a waits-for
+// edge, dialed against a server that does not advertise
+// CapBatchApplyDepAddLineage, must refuse BEFORE dialing with
+// *storage.ErrUnsupported naming the capability. A plan that touches neither
+// field must still dial normally against the SAME masked server: the gate
+// scopes the two members, not the operation. (HasSpawner off a waits-for edge
+// is the role's no-op and dials too — see
+// TestApplyBatchRefusesEveryMemberTheWireExcludes.)
 func TestApplyBatchRefusesUnservedDepAddLineageBeforeDialing(t *testing.T) {
 	masked := &apigen.ContextResponse{BdVersion: "1.2.3"} // no CapBatchApplyDepAddLineage
 	depAddPlan := func(item issueops.DepAddItem) issueops.ApplyBatchRequest {
@@ -1038,6 +1042,14 @@ func TestApplyBatchRefusesUnservedDepAddLineageBeforeDialing(t *testing.T) {
 			item: issueops.DepAddItem{
 				Source: issueops.Ref{ID: "bd-1"}, Target: issueops.Ref{ID: "bd-2"},
 				Type: "waits-for", ThreadID: "t-1",
+			},
+		},
+		{
+			// Unlike HasSpawner, a thread is stored on every edge type.
+			name: "ThreadID on a blocks edge",
+			item: issueops.DepAddItem{
+				Source: issueops.Ref{ID: "bd-1"}, Target: issueops.Ref{ID: "bd-2"},
+				Type: "blocks", ThreadID: "t-1",
 			},
 		},
 	} {

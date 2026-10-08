@@ -600,7 +600,8 @@ func writeShapes() []writeShape {
 			// CapBatchApplyDepAddLineage is a separate, client-side refusal
 			// (batchapplier.go's refuseUnservedDepAddLineage) gating WHETHER
 			// this client sends either member against an older server, not
-			// whether the field reaches the wire body type at all.
+			// whether the field reaches the wire body type at all. (HasSpawner
+			// off a waits-for edge is the role's no-op, dropped by value.)
 			name:   "applyBatch/item/dep_add",
 			source: reflect.TypeOf(issueops.DepAddItem{}),
 			body:   reflect.TypeOf(apigen.ApplyDepAddItem{}),

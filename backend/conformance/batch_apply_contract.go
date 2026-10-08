@@ -1525,11 +1525,12 @@ func RunBatchApplyNormalizesTheWaitsForGate(t *testing.T, ctx context.Context, f
 // RunBatchApplyStampsSpawnerIDOnlyWhenNamed is the S11 review fix-up
 // regression for HIGH-2: a waits-for DepAddItem must only acquire
 // metadata.spawner_id when the caller explicitly named a spawner
-// (HasSpawner=true, which an embedder lowering a graph plan's
-// edges[].spawner_key/spawner_id onto this role sets). An edge with no named
-// spawner must keep its gate-only metadata untouched — stamping it
-// unconditionally from the resolved target would cause a spurious rewrite and
-// version churn each time gc re-applies the same edge.
+// (HasSpawner=true, which bd create --graph sets when the plan declares
+// edges[].spawner_key/spawner_id, as does an embedder lowering such a plan
+// onto this role). An edge with no named spawner must keep its gate-only
+// metadata untouched — stamping it unconditionally from the resolved target
+// caused unnecessary rewrite/version churn when gc re-applies the same edge
+// (see CHANGELOG.md).
 func RunBatchApplyStampsSpawnerIDOnlyWhenNamed(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
 	t.Helper()
 	spawner := fixture.IssuePrefix + "-spawner-named"

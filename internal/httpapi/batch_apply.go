@@ -845,6 +845,13 @@ func applyDepAddItem(prefix string, raw map[string]json.RawMessage) (*issueops.D
 	if res != nil {
 		return nil, res
 	}
+	// The document's minLength: 1. An ABSENT thread_id already names no thread
+	// (and a re-add keeps the stored one), so an empty one would only be a
+	// second spelling of it — refused, as an empty `type` is, rather than read.
+	if _, present := raw["thread_id"]; present && threadID == "" {
+		res := InvalidArgument(prefix+"thread_id", ReasonInvalidValue, "`thread_id` must not be empty; omit it to name no thread")
+		return nil, &res
+	}
 	item.ThreadID = threadID
 	return item, nil
 }

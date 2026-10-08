@@ -759,7 +759,9 @@ func writeSideRows() []Row {
 		// createIssue's own edge publishes `reverse` and `metadata` (its issue
 		// HAS an id for a target to point back at, which a batch item does
 		// not), so the client sends both there. Only ThreadID is refused on
-		// both, because no operation publishes a thread member.
+		// both, because neither create schema publishes a thread member — a
+		// batch apply's dep_add item does, which retired its own row
+		// (W-DepAddItem.ThreadID) but not these.
 		createDependencyRow("Reverse", "an edge written from the target back to the new issue refuses ON A BATCH CREATE",
 			"BatchCreateDependency carries target_id and type only; dropping Reverse would write the edge in the OPPOSITE direction from the one asked for, which is a different graph. createIssue's CreateIssueDependency DOES publish it, and the single-create path sends it"),
 		createDependencyRow("Metadata", "typed edge metadata refuses ON A BATCH CREATE",
@@ -838,7 +840,7 @@ func writeSideRows() []Row {
 			Type: tyApplyDepAddItem, Field: "HasSpawner",
 			What: "a waits-for edge ITEM that names its spawner used to refuse",
 			Why: "RETIRED by issues.batchApply.depAddLineage (S5). ApplyDepAddItem now publishes `has_spawner` — the write this row said only the role could make, metadata's spawner_id stamped from the resolved target — gated on the capability rather than dropped: a caller on a server that has not advertised the token refuses locally before the dial (BatchApplier.refuseUnservedDepAddLineage), and a caller on a server that has sends the member exactly as given. " +
-				"The flag is unconditioned on edge type at this layer; the role's own normalization — a no-op off a waits-for edge — is unchanged and still the role's to keep",
+				"The flag is sent, and gated, on a waits-for edge only, the one type the role reads it on. Off a waits-for edge it is the role's no-op, so the client drops it there without loss — the stored row is the same either way — rather than refusing a request the flag cannot change, or sending an older server a member it answers with a 400",
 			SpecRow:  "D8 refuse-not-drop (RETIRED)",
 			PinnedBy: applyPin,
 		},

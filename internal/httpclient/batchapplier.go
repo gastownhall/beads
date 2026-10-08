@@ -101,7 +101,8 @@ func (b *httpBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBat
 }
 
 // refuseUnservedDepAddLineage scans the whole plan once, before the dial, for
-// a dep_add item naming HasSpawner or ThreadID. Neither member is served
+// a dep_add item naming ThreadID, or HasSpawner on a waits-for edge (the one
+// type the role reads it on; see depAddNamesSpawner). Neither member is served
 // unless the handshake snapshot advertises wire.CapBatchApplyDepAddLineage:
 // an older server has never heard of either and would answer them with its
 // generic unknown-member 400 at best, or (once a server DOES know the
@@ -421,18 +422,30 @@ func applyDepAddItemBody(item *issueops.DepAddItem) (*apigen.ApplyDepAddItem, er
 	}
 	// HasSpawner and ThreadID are gated by CapBatchApplyDepAddLineage
 	// (checked in ApplyBatch, before the dial, over the whole request) —
-	// this projection only encodes what the gate already cleared.
-	setItemBool(&out.HasSpawner, item.HasSpawner)
+	// this projection only encodes what the gate already cleared, which is
+	// why HasSpawner is sent only where depAddNamesSpawner holds.
+	setItemBool(&out.HasSpawner, depAddNamesSpawner(item))
 	setItemString(&out.ThreadId, item.ThreadID)
 	return out, nil
 }
 
-// depAddCarriesLineage reports whether a dep_add item names HasSpawner or
-// ThreadID — the two members CapBatchApplyDepAddLineage gates. Used to scan a
-// whole request once before the dial, rather than discovering the gap one
-// item at a time after bytes already left for the wire.
+// depAddCarriesLineage reports whether a dep_add item names a member
+// CapBatchApplyDepAddLineage gates: ThreadID on any edge, HasSpawner only
+// where depAddNamesSpawner holds. Used to scan a whole request once before
+// the dial, rather than discovering the gap one item at a time after bytes
+// already left for the wire.
 func depAddCarriesLineage(item *issueops.DepAddItem) bool {
-	return item != nil && (item.HasSpawner || item.ThreadID != "")
+	return item != nil && (depAddNamesSpawner(item) || item.ThreadID != "")
+}
+
+// depAddNamesSpawner reports whether a dep_add item's HasSpawner means
+// anything: the role reads it on a waits-for edge only and ignores it on
+// every other type. Off a waits-for edge the flag is therefore dropped, not
+// sent, and never needs the capability — dropping it loses nothing the role
+// would store, where refusing it would fail a mixed-version request the
+// flag cannot change.
+func depAddNamesSpawner(item *issueops.DepAddItem) bool {
+	return item.HasSpawner && item.Type == issueops.DepWaitsFor
 }
 
 // applyRefBody projects one ref, applying the exactly-one rule the schema

@@ -221,13 +221,15 @@ type DepAddItem struct {
 	Metadata string
 	// HasSpawner marks a DepWaitsFor edge whose caller explicitly named a
 	// spawner: a graph plan's edges[].spawner_key/spawner_id, which bd create
-	// --graph's plan validator forces to equal the edge's own Target. Its
-	// producer is an embedder lowering such a plan onto this role (gc's
-	// ApplyGraphPlan mapping, on BatchApplier below); bd create --graph writes
-	// its edges without this role and does not set it. Only when it is set
-	// does the role stamp Metadata's spawner_id from the resolved Target, once
-	// every id in the batch exists (see StampWaitsForSpawnerID) — a plan-local
-	// spawner key cannot be resolved any earlier than that.
+	// --graph's plan validator forces to equal the edge's own Target. It has
+	// two producers: bd create --graph itself, which sets it from those
+	// members on the embedded and proxied legs alike (cmd/bd's
+	// buildGraphApplyBatchRequest), and an embedder lowering such a plan onto
+	// this role (gc's ApplyGraphPlan mapping, on BatchApplier below). Only
+	// when it is set does the role stamp Metadata's spawner_id from the
+	// resolved Target, once every id in the batch exists (see
+	// StampWaitsForSpawnerID) — a plan-local spawner key cannot be resolved
+	// any earlier than that.
 	//
 	// AN EDGE WITH NO NAMED SPAWNER MUST KEEP ITS GATE-ONLY METADATA. Stamping
 	// one in regardless of this flag — the 2026-10 Opus-review HIGH-2 finding

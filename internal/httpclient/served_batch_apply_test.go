@@ -586,8 +586,9 @@ func batchApplyColumnDirect(t *testing.T, ctx context.Context, fixture *conforma
 // mappings (2026-10 Opus-review HIGH-3): gc's RAW RunInTransaction graph-build
 // maps onto one BatchApplier request carrying every item kind the plan needs —
 // a keyed create, a MetadataRefs splice, a dep_add edge, a parent-child
-// dep_add edge, and a trailing update for AssignAfterCreate — landing
-// together as the one plan a caller composed.
+// dep_add edge, a waits-for edge naming its spawner by key and carrying a
+// thread, and a trailing update for AssignAfterCreate — landing together as
+// the one plan a caller composed.
 func TestServedBatchApplyGcApplyGraphPlan(t *testing.T) {
 	ctx := t.Context()
 	fixture := newServedBatchApplyFixture(t, "hbagc1")
@@ -625,6 +626,13 @@ func TestServedBatchApplyGcApplyGraphPlan(t *testing.T) {
 			{Kind: issueops.ItemDepAdd, DepAdd: &issueops.DepAddItem{
 				Source: issueops.Ref{Key: "task"}, Target: issueops.Ref{Key: "epic"}, Type: issueops.DepParentChild,
 			}},
+			// A waits-for edge whose spawner is named by plan KEY, with a thread:
+			// the lineage gc's mapping carries (issues.batchApply.depAddLineage).
+			// The spawner stamp can only resolve once that key has an id.
+			{Kind: issueops.ItemDepAdd, DepAdd: &issueops.DepAddItem{
+				Source: issueops.Ref{Key: "epic"}, Target: issueops.Ref{Key: "blocker"}, Type: issueops.DepWaitsFor,
+				HasSpawner: true, ThreadID: "th-plan",
+			}},
 			// A trailing update for AssignAfterCreate, resolving the key BACKWARD
 			// to the row the first items in this same request just minted.
 			{Kind: issueops.ItemUpdate, Update: &issueops.UpdateItem{
@@ -636,8 +644,8 @@ func TestServedBatchApplyGcApplyGraphPlan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyGraphPlan: %v", err)
 	}
-	if len(result.Items) != 6 {
-		t.Fatalf("ApplyBatch(6 items) returned %d item results", len(result.Items))
+	if len(result.Items) != 7 {
+		t.Fatalf("ApplyBatch(7 items) returned %d item results", len(result.Items))
 	}
 
 	var metadata string
@@ -662,6 +670,23 @@ func TestServedBatchApplyGcApplyGraphPlan(t *testing.T) {
 	}
 	if edges != 1 {
 		t.Errorf("parent-child edges task->epic = %d, want 1", edges)
+	}
+
+	var waitsFor, thread string
+	const lineageQuery = `SELECT COALESCE(metadata, ''), COALESCE(thread_id, '') FROM dependencies
+		WHERE issue_id = ? AND type = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?`
+	if err := fixture.QueryScalar(ctx, lineageQuery, []any{epic, "waits-for", blocker}, &waitsFor, &thread); err != nil {
+		t.Fatalf("reading the waits-for edge epic->blocker: %v", err)
+	}
+	var meta types.WaitsForMeta
+	if err := json.Unmarshal([]byte(waitsFor), &meta); err != nil {
+		t.Fatalf("waits-for metadata %q is not a gate object: %v", waitsFor, err)
+	}
+	if meta.SpawnerID != result.Keys["blocker"] {
+		t.Errorf("waits-for spawner_id = %q, want the blocker key's minted id %q", meta.SpawnerID, result.Keys["blocker"])
+	}
+	if thread != "th-plan" {
+		t.Errorf("waits-for thread_id = %q, want %q", thread, "th-plan")
 	}
 
 	if got := batchApplyColumnDirect(t, ctx, &fixture, "assignee", task); got != "alice" {
