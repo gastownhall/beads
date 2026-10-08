@@ -4736,8 +4736,10 @@ func TestBazelWorkflowSecretsAndFailureSurface(t *testing.T) {
 // so a run cannot mix modes and no lane can drift from the others (review D1
 // F1/F5/F6): Dependabot PRs are same-repo but get no secrets, so a condition
 // on vars and fork alone sent them to the remote-only path with nothing to
-// run it. The job's one step reads nothing but booleans, runs no
-// repository code, and its outputs are the workflow_call outputs.
+// run it. The job's decide step (its first) reads nothing but booleans, runs
+// no repository code, and its outputs are the job's and the workflow_call
+// outputs; the steps after it are the worker-env preflight
+// (TestBazelRBEWorkerEnvPreflight), which set no output.
 func TestBazelRBEJobDecidesOnce(t *testing.T) {
 	workflow := readCIWorkflow(t, bazelWorkflowName)
 	job := workflow.job(t, bazelRBEJobName)
@@ -4757,8 +4759,8 @@ func TestBazelRBEJobDecidesOnce(t *testing.T) {
 	if !reflect.DeepEqual(job.Outputs, wantOutputs) {
 		t.Errorf("%s outputs = %v, want %v", bazelRBEJobName, job.Outputs, wantOutputs)
 	}
-	if len(job.Steps) != 1 {
-		t.Fatalf("%s has %d steps, want exactly the decision step", bazelRBEJobName, len(job.Steps))
+	if len(job.Steps) != 3 {
+		t.Fatalf("%s has %d steps, want the decision step and the worker-env preflight's checkout and check", bazelRBEJobName, len(job.Steps))
 	}
 	step := job.Steps[0]
 	wantEnv := map[string]string{

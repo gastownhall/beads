@@ -382,11 +382,30 @@ env:
 
 jobs:
   # The one place the execution mode is decided (see the header), so every
-  # job sees the same answer for the whole run. Its step reads one secret, and
-  # only to test it for emptiness: the step's env holds a boolean, never the
-  # value, and the step runs no repository code (no checkout). Fork and
-  # Dependabot pull_request runs get no secrets: rbe-fork-mint decides
-  # theirs (fork-ro, fork-rw, or cache while it is closed).
+  # job sees the same answer for the whole run. Its decide step reads one
+  # secret, and only to test it for emptiness: the step's env holds a
+  # boolean, never the value, and the step runs no repository code (it comes
+  # before the job's checkout). Fork and Dependabot pull_request runs get no
+  # secrets: rbe-fork-mint decides theirs (fork-ro, fork-rw, or cache while
+  # it is closed).
+  #
+  # Then, only when the lanes will execute remotely (enabled: modes remote,
+  # fork-ro, fork-rw; merge groups are mode remote), the worker-env preflight:
+  # rbe-west's pool workers run gascity main's tools/rbe/worker-env and
+  # advertise its pin, and the schedulers match //platforms:rbe_worker's pin
+  # exactly, so when gascity re-pins and beads' copy (tools/rbe/worker-env.txt
+  # and the pin in platforms/BUILD.bazel) falls behind, every remote action
+  # queues until the lanes time out. tools/rbe/worker-env-sync compares the
+  # copy with gascity main and, out of step, fails this job: every lane needs
+  # it, so they all skip and pr.yml's gate is red within a minute, with the
+  # diff and the pin to commit in this job's summary. A fallback to mode
+  # cache would not keep the PR green (pr.yml's ci-gate requires a remote
+  # run, BAZEL_REMOTE) and would only make it slower, so fail fast. gascity
+  # unreachable (exit 2: unknown) warns and proceeds: GitHub's availability
+  # never blocks a PR. The steps after decide run repository code (the PR's
+  # script, sparse-checked-out) but hold no secret and set no output: the
+  # job's outputs are decide's alone. nightly.yml runs the same check every
+  # night and opens a ci/infra issue.
   rbe:
     name: execution mode
     # Same-repo PRs (and merge_group/push/dispatch/schedule runs, which are
@@ -471,6 +490,36 @@ jobs:
             echo "tier=$tier"
           } >> "$GITHUB_OUTPUT"
           echo "Bazel execution mode: **$mode** (RBE_WEST_WORKERS on: $RBE_VAR_ON, rbe=off: $RBE_INPUT_OFF, rbe=cache: $RBE_INPUT_CACHE, fork: $FORK, dependabot: $DEPENDABOT, fork farm: $FORK_FARM, executor secret: $HAS_EXECUTOR)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # The worker-env preflight (see the job's comment): the PR's own copy,
+      # so a PR that syncs it passes. Only the two paths it compares.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ steps.decide.outputs.enabled == 'true' }}
+        with:
+          ref: ${{ inputs.checkout-sha }}
+          persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
+          sparse-checkout: |
+            tools/rbe
+            platforms
+
+      - name: worker-env in step with gascity main
+        if: ${{ steps.decide.outputs.enabled == 'true' }}
+        env:
+          MODE: ${{ steps.decide.outputs.mode }}
+        run: |
+          rc=0
+          tools/rbe/worker-env-sync main || rc=$?
+          case "$rc" in
+            0) ;;
+            1)
+              echo "::error title=Bazel lanes stopped before queueing::beads' worker-env pin is out of step with gascity main, so rbe-west has no worker for this run's remote actions (mode $MODE): copy tools/rbe/worker-env.txt and the worker-env pin in platforms/BUILD.bazel from gastownhall/gascity main (this job's summary has the diff and the line to commit; see tools/rbe/worker-env-sync)."
+              exit 1
+              ;;
+            *)
+              echo "::warning title=rbe worker-env not checked::could not compare beads' worker-env pin with gascity main (exit $rc); proceeding in mode $MODE. If the lanes sit at 0 running actions, run tools/rbe/worker-env-sync."
+              ;;
+          esac
 
   # Best-effort pre-warm of gastownhall/gascity's rbe-west OSS worker pool
   # (one Blacksmith-hosted NativeLink worker, rbe-worker-pool.yml) so it is

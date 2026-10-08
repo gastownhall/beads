@@ -9,6 +9,9 @@ on:
     - cron: '0 2 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   BD_DISABLE_METRICS: "1"
   BD_DISABLE_EVENT_FLUSH: "1"
@@ -39,15 +42,38 @@ jobs:
   # rbe-west's pool workers are gascity's and advertise the sha256 of
   # gascity's worker-env manifest; beads' tools/rbe/worker-env.txt is a
   # byte-for-byte copy and platforms/BUILD.bazel carries the same pin. A copy
-  # that falls behind queues every remote action, so say so every night.
+  # that falls behind queues every remote action (bazel.yml's rbe job runs
+  # the same check before each remote run and fails it fast), so check every
+  # night and, out of step, open or update a ci/infra issue with the diff and
+  # the pin to commit (tools/rbe/worker-env-sync-issue). The only job here
+  # with issues: write, and only its last step uses the token. gascity
+  # unreachable (exit 2) fails the job without an issue.
   rbe-worker-env-sync:
     name: rbe worker-env in step with gascity
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
 
       - name: Compare the worker-env manifest and pin with gascity's main
-        run: tools/rbe/worker-env-sync main
+        id: sync
+        env:
+          WORKER_ENV_SYNC_REPORT: ${{ runner.temp }}/worker-env-sync.md
+        run: |
+          rc=0
+          tools/rbe/worker-env-sync main || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      - name: Open or update the out-of-step issue
+        if: ${{ failure() && steps.sync.outputs.rc == '1' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT: ${{ runner.temp }}/worker-env-sync.md
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: tools/rbe/worker-env-sync-issue "$REPORT" "$RUN_URL"

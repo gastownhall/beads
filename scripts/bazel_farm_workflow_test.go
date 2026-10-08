@@ -255,18 +255,24 @@ func TestBazelWorkflowForkFarmInputs(t *testing.T) {
 			if bazelPackageJobs[name] {
 				want["fetch-depth"] = "0"
 			}
+			// rbe's worker-env preflight reads two paths of the same ref.
+			if name == bazelRBEJobName {
+				want["sparse-checkout"] = bazelRBESparseCheckout
+			}
 			if !reflect.DeepEqual(step.With, want) {
 				t.Errorf("%s job %s checkout with = %v, want %v", bazelWorkflowName, name, step.With, want)
 			}
 		}
 	}
-	// Every lane checks out the PR except rbe (decides the mode before any
-	// checkout) and rbe-prewarm (no checkout at all, by design: B1, security
-	// review of bdef342d5 - its dispatch logic is inlined into the job's own
-	// `run:` instead of a checked-out script file, so no step in this job
-	// ever reads repository content under the shared gascity credential).
-	if checkouts != len(workflow.Jobs)-2 {
-		t.Errorf("%d checkouts in %s, want one per lane excluding %s and %s (%d)", checkouts, bazelWorkflowName, bazelRBEJobName, bazelRBEPrewarmJobName, len(workflow.Jobs)-2)
+	// Every job checks out the PR once except rbe-prewarm (no checkout at
+	// all, by design: B1, security review of bdef342d5 - its dispatch logic
+	// is inlined into the job's own `run:` instead of a checked-out script
+	// file, so no step in this job ever reads repository content under the
+	// shared gascity credential). rbe's checkout (sparse) comes after its
+	// decide step, for the worker-env preflight
+	// (TestBazelRBEWorkerEnvPreflight).
+	if checkouts != len(workflow.Jobs)-1 {
+		t.Errorf("%d checkouts in %s, want one per job excluding %s (%d)", checkouts, bazelWorkflowName, bazelRBEPrewarmJobName, len(workflow.Jobs)-1)
 	}
 	if got := workflow.job(t, bazelRBEJobName).Steps[0].Env["FORK_FARM"]; got != bazelForkFarmValue {
 		t.Errorf("rbe FORK_FARM = %q, want %q", got, bazelForkFarmValue)
