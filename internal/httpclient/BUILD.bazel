@@ -109,6 +109,7 @@ go_test(
         "divergence_citation_gate_test.go",
         "divergence_test.go",
         "expected_revision_contract_test.go",
+        "getissue_miss_test.go",
         "helpers_test.go",
         "insecure_credential_guard_test.go",
         "lifecycle_create_test.go",

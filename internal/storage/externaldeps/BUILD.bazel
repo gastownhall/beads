@@ -29,6 +29,7 @@ go_library(
 go_test(
     name = "externaldeps_test",
     srcs = [
+        "advertise_test.go",
         "decorator_test.go",
         "ready_wake_test.go",
         "remote_roles_composition_test.go",
@@ -37,6 +38,7 @@ go_test(
     ],
     embed = [":externaldeps"],
     deps = [
+        "//internal/httpapi",
         "//internal/storage",
         "//internal/storage/domain",
         "//internal/storage/issueops",
