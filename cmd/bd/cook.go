@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // stepTypeToIssueType converts a formula step type string to a types.IssueType.
@@ -568,7 +569,7 @@ func processStepToIssue(step *formula.Step, parentID string) *types.Issue {
 	}
 
 	// Determine priority
-	priority := 2
+	priority := issueops.DefaultCreatePriority
 	if step.Priority != nil {
 		priority = *step.Priority
 	}

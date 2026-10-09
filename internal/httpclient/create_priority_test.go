@@ -1,6 +1,7 @@
 package httpclient
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -59,20 +60,15 @@ func TestBatchCreateLeavesPriorityAbsentForTheDefault(t *testing.T) {
 	}
 }
 
-// TestCreateSendsTheDefaultPriorityToAServerThatPredatesIt is a NEW client
-// against an OLD server, on all three create roles. A handshake without
-// issues.create.defaultPriority is a server that reads an absent `priority` as
-// 0 and would store P0 (critical) for every create that asked for the
-// default, so against it the role sends issueops.DefaultCreatePriority (2)
-// explicitly. Against a server that advertises the token the member stays
-// absent and the server's role applies the default. An explicit 0 is sent as 0
-// to both.
-func TestCreateSendsTheDefaultPriorityToAServerThatPredatesIt(t *testing.T) {
+// createPriorityRoles drives one create through each of the three create roles
+// and reports the `priority` member that role put on the wire (nil when it is
+// absent), or the role's own error.
+func createPriorityRoles() map[string]func(t *testing.T, s *Store, w *stubWire, priority int, useDefault bool) (*int, error) {
 	issue := func(priority int) *types.Issue {
 		return &types.Issue{Title: "t", IssueType: types.TypeTask, Priority: priority}
 	}
-	roles := map[string]func(t *testing.T, s *Store, w *stubWire, priority int, useDefault bool) *int{
-		"Lifecycle.Create": func(t *testing.T, s *Store, w *stubWire, priority int, useDefault bool) *int {
+	return map[string]func(t *testing.T, s *Store, w *stubWire, priority int, useDefault bool) (*int, error){
+		"Lifecycle.Create": func(t *testing.T, s *Store, w *stubWire, priority int, useDefault bool) (*int, error) {
 			lifecycle, err := s.IssueLifecycle()
 			if err != nil {
 				t.Fatalf("IssueLifecycle(): %v", err)
@@ -80,11 +76,11 @@ func TestCreateSendsTheDefaultPriorityToAServerThatPredatesIt(t *testing.T) {
 			if _, err := lifecycle.Create(t.Context(), issueops.CreateRequest{
 				Actor: "a", Issue: issue(priority), DefaultPriority: useDefault,
 			}); err != nil {
-				t.Fatalf("Create: %v", err)
+				return nil, err
 			}
-			return w.lastCreate.Priority
+			return w.lastCreate.Priority, nil
 		},
-		"BatchCreator.CreateBatch": func(t *testing.T, s *Store, w *stubWire, priority int, useDefault bool) *int {
+		"BatchCreator.CreateBatch": func(t *testing.T, s *Store, w *stubWire, priority int, useDefault bool) (*int, error) {
 			creator, err := s.BatchCreator()
 			if err != nil {
 				t.Fatalf("BatchCreator(): %v", err)
@@ -92,11 +88,11 @@ func TestCreateSendsTheDefaultPriorityToAServerThatPredatesIt(t *testing.T) {
 			if _, err := creator.CreateBatch(t.Context(), issueops.CreateBatchRequest{
 				Actor: "a", Items: []issueops.BatchCreateItem{{Issue: issue(priority), DefaultPriority: useDefault}},
 			}); err != nil {
-				t.Fatalf("CreateBatch: %v", err)
+				return nil, err
 			}
-			return w.lastBatchCreate.Items[0].Priority
+			return w.lastBatchCreate.Items[0].Priority, nil
 		},
-		"BatchApplier.ApplyBatch": func(t *testing.T, s *Store, w *stubWire, priority int, useDefault bool) *int {
+		"BatchApplier.ApplyBatch": func(t *testing.T, s *Store, w *stubWire, priority int, useDefault bool) (*int, error) {
 			applier, err := s.BatchApplier()
 			if err != nil {
 				t.Fatalf("BatchApplier(): %v", err)
@@ -107,18 +103,32 @@ func TestCreateSendsTheDefaultPriorityToAServerThatPredatesIt(t *testing.T) {
 					Create: &issueops.CreateItem{Issue: issue(priority), DefaultPriority: useDefault},
 				}},
 			}); err != nil {
-				t.Fatalf("ApplyBatch: %v", err)
+				return nil, err
 			}
-			return w.lastApply.Items[0].Create.Priority
+			return w.lastApply.Items[0].Create.Priority, nil
 		},
 	}
-	show := func(p *int) any {
-		if p == nil {
-			return "absent"
-		}
-		return *p
+}
+
+// showPriority renders a wire `priority` member for a comparison: its value,
+// or "absent".
+func showPriority(p *int) any {
+	if p == nil {
+		return "absent"
 	}
-	for name, run := range roles {
+	return *p
+}
+
+// TestCreateSendsTheDefaultPriorityToAServerThatPredatesIt is a NEW client
+// against an OLD server, on all three create roles. A handshake without
+// issues.create.defaultPriority is a server that reads an absent `priority` as
+// 0 and would store P0 (critical) for every create that asked for the
+// default, so against it the role sends issueops.DefaultCreatePriority (2)
+// explicitly. Against a server that advertises the token the member stays
+// absent and the server's role applies the default. An explicit 0 is sent as 0
+// to both.
+func TestCreateSendsTheDefaultPriorityToAServerThatPredatesIt(t *testing.T) {
+	for name, run := range createPriorityRoles() {
 		for _, server := range []struct {
 			name        string
 			caps        []string
@@ -132,14 +142,74 @@ func TestCreateSendsTheDefaultPriorityToAServerThatPredatesIt(t *testing.T) {
 					return New(testTarget(t), w, &apigen.ContextResponse{BdVersion: "1.2.3", Capabilities: server.caps})
 				}
 				w := &stubWire{}
-				if got := show(run(t, store(w), w, 0, true)); got != server.wantDefault {
+				sent, err := run(t, store(w), w, 0, true)
+				if err != nil {
+					t.Fatalf("DefaultPriority: %v", err)
+				}
+				if got := showPriority(sent); got != server.wantDefault {
 					t.Errorf("DefaultPriority: sent priority %v, want %v", got, server.wantDefault)
 				}
 				w = &stubWire{}
-				if got := show(run(t, store(w), w, 0, false)); got != 0 {
+				sent, err = run(t, store(w), w, 0, false)
+				if err != nil {
+					t.Fatalf("explicit 0: %v", err)
+				}
+				if got := showPriority(sent); got != 0 {
 					t.Errorf("explicit 0: sent priority %v, want 0", got)
 				}
 			})
 		}
+	}
+}
+
+// handshakeWire is a stubWire whose handshake answers with res and err, so a
+// test can hand the store a handshake that says nothing, or one that fails.
+type handshakeWire struct {
+	*stubWire
+	res *apigen.ContextResponse
+	err error
+}
+
+func (w handshakeWire) ServerContext(context.Context) (*apigen.ContextResponse, error) {
+	return w.res, w.err
+}
+
+// TestCreateDefaultPriorityWithoutAUsableHandshake covers the handshakes that
+// cannot say whether the server applies the default, on all three create
+// roles. One that answers no context has no token to read, so the role sends
+// issueops.DefaultCreatePriority explicitly, as it does to an older server. One
+// that fails fails the create before it is dialed, rather than guessing. A
+// request that names its priority never asks, so a failing handshake does not
+// stop it.
+func TestCreateDefaultPriorityWithoutAUsableHandshake(t *testing.T) {
+	boom := errors.New("handshake failed")
+	for name, run := range createPriorityRoles() {
+		t.Run(name, func(t *testing.T) {
+			w := &stubWire{}
+			sent, err := run(t, New(testTarget(t), handshakeWire{stubWire: w}, nil), w, 0, true)
+			if err != nil {
+				t.Fatalf("no context, DefaultPriority: %v", err)
+			}
+			if got := showPriority(sent); got != issueops.DefaultCreatePriority {
+				t.Errorf("no context, DefaultPriority: sent priority %v, want %v", got, issueops.DefaultCreatePriority)
+			}
+
+			w = &stubWire{}
+			if _, err := run(t, New(testTarget(t), handshakeWire{stubWire: w, err: boom}, nil), w, 0, true); !errors.Is(err, boom) {
+				t.Errorf("failed handshake, DefaultPriority: err = %v, want the handshake's error", err)
+			}
+			if len(w.calls) != 0 {
+				t.Errorf("failed handshake, DefaultPriority: dialed %v, want nothing", w.calls)
+			}
+
+			w = &stubWire{}
+			sent, err = run(t, New(testTarget(t), handshakeWire{stubWire: w, err: boom}, nil), w, 0, false)
+			if err != nil {
+				t.Fatalf("failed handshake, explicit 0: %v", err)
+			}
+			if got := showPriority(sent); got != 0 {
+				t.Errorf("failed handshake, explicit 0: sent priority %v, want 0", got)
+			}
+		})
 	}
 }

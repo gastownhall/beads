@@ -2739,6 +2739,8 @@ func RunBatchApplyRefusesADottedChildGatedOnItsOwnParent(t *testing.T, ctx conte
 // create item that asks for the default stores publicops.DefaultCreatePriority,
 // and one naming priority 0 stores P0. `bd create --graph` sends a node without
 // a priority this way, and so does an HTTP batch apply create item without one.
+// A create item asking for the default while naming a priority is
+// ErrValidation and writes nothing, as it is for Lifecycle.Create.
 func RunBatchApplyAppliesTheDefaultPriority(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
 	t.Helper()
 	unset := batchApplyMintedIssue("defaulted")
@@ -2761,4 +2763,19 @@ func RunBatchApplyAppliesTheDefaultPriority(t *testing.T, ctx context.Context, f
 			t.Errorf("stored priority of %s (%s) = %d, want %d", key, id, got, want)
 		}
 	}
+
+	conflict := fixture.IssuePrefix + "-prio-conflict"
+	clash := batchApplyIssue(conflict, conflict)
+	clash.Priority = 3
+	_, err := fixture.BatchApplier.ApplyBatch(ctx, publicops.ApplyBatchRequest{
+		Actor:         "apply-writer",
+		ForceIDPrefix: true,
+		Items: []publicops.ApplyItem{
+			{Kind: publicops.ItemCreate, Create: &publicops.CreateItem{Key: "c", Issue: clash, DefaultPriority: true}},
+		},
+	})
+	if !errors.Is(err, publicops.ErrValidation) {
+		t.Fatalf("DefaultPriority with priority 3: err = %v, want ErrValidation", err)
+	}
+	assertBatchApplyRowCount(t, ctx, fixture, "issues", conflict, 0)
 }

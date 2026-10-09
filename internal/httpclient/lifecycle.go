@@ -992,6 +992,16 @@ func wirePriority(priority int, useDefault bool) (*int, error) {
 // against an older server each absent member is set to
 // issueops.DefaultCreatePriority explicitly. A request naming every priority
 // costs no handshake.
+//
+// The decision assumes the create reaches the build that answered the
+// handshake. The handshake is fetched once per Store and cached for its life
+// (one command, in cmd/bd), so a create that lands on an older build — a
+// server rolled back under a live Store, or mixed builds behind one URL —
+// still goes out with the member absent, and that server stores P0 with no
+// error on either side. A capability that gates a member an older server
+// refuses is loud on a stale handshake (the `has_spawner` that
+// refuseUnservedDepAddLineage gates draws a 400); this one gates the ABSENCE
+// of a member every server already reads, so nothing refuses it.
 func (s *Store) pinCreateDefaultPriority(ctx context.Context, priorities ...**int) error {
 	var absent []**int
 	for _, p := range priorities {

@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -11,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var quickCmd = &cobra.Command{
@@ -106,7 +108,7 @@ Example:
 }
 
 func init() {
-	quickCmd.Flags().StringP("priority", "p", "2", "Priority (0-4 or P0-P4)")
+	quickCmd.Flags().StringP("priority", "p", strconv.Itoa(issueops.DefaultCreatePriority), "Priority (0-4 or P0-P4)")
 	quickCmd.Flags().StringP("type", "t", "task", "Issue type")
 	quickCmd.Flags().StringSliceP("labels", "l", []string{}, "Labels")
 	quickCmd.Flags().String("parent", "", "Parent issue ID for hierarchical child (e.g., 'bd-a3f8e9')")

@@ -1,9 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/issueops"
 )
 
 func TestParseMarkdownFile(t *testing.T) {
@@ -251,6 +255,77 @@ func TestParseMarkdownFile_FileNotFound(t *testing.T) {
 	_, err := parseMarkdownFile("/nonexistent/file.md")
 	if err == nil {
 		t.Error("Expected error for non-existent file, got nil")
+	}
+}
+
+// An unparseable `### Priority` leaves the template to the role's default, and
+// says so on stderr the way an unparseable `### Type` does.
+func TestParseMarkdownFileWarnsOnAnInvalidPriority(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plan.md")
+	if err := os.WriteFile(path, []byte("## Urgent-ish\n\n### Priority\nurgent\n"), 0o600); err != nil {
+		t.Fatalf("write plan: %v", err)
+	}
+	var templates []*IssueTemplate
+	stderr := captureStderr(t, func() {
+		var err error
+		if templates, err = parseMarkdownFile(path); err != nil {
+			t.Errorf("parseMarkdownFile: %v", err)
+		}
+	})
+	want := fmt.Sprintf("Warning: invalid priority 'urgent' in 'Urgent-ish', using default P%d", issueops.DefaultCreatePriority)
+	if !strings.Contains(stderr, want) {
+		t.Errorf("stderr = %q, want %q", stderr, want)
+	}
+	if len(templates) != 1 || templates[0].PrioritySet {
+		t.Fatalf("templates = %+v, want one template that leaves its priority to the role", templates)
+	}
+}
+
+// A template without `### Priority` asks the role for its default instead of
+// spelling 2; one that names a priority, 0 included, sends it without the ask.
+func TestBuildMarkdownBatchRequestLeavesAnAbsentPriorityToTheRole(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plan.md")
+	plan := `## Names no priority
+
+## Names priority zero
+
+### Priority
+0
+
+## Names priority one
+
+### Priority
+1
+`
+	if err := os.WriteFile(path, []byte(plan), 0o600); err != nil {
+		t.Fatalf("write plan: %v", err)
+	}
+	templates, err := parseMarkdownFile(path)
+	if err != nil {
+		t.Fatalf("parseMarkdownFile: %v", err)
+	}
+	request, err := buildMarkdownBatchRequest(templates, createInput{markdownFile: path})
+	if err != nil {
+		t.Fatalf("buildMarkdownBatchRequest: %v", err)
+	}
+	want := []struct {
+		title           string
+		priority        int
+		defaultPriority bool
+	}{
+		{"Names no priority", 0, true},
+		{"Names priority zero", 0, false},
+		{"Names priority one", 1, false},
+	}
+	if len(request.Items) != len(want) {
+		t.Fatalf("request has %d items, want %d", len(request.Items), len(want))
+	}
+	for i, w := range want {
+		item := request.Items[i]
+		if item.Issue.Title != w.title || item.Issue.Priority != w.priority || item.DefaultPriority != w.defaultPriority {
+			t.Errorf("item %d = {%q, priority %d, DefaultPriority %v}, want {%q, priority %d, DefaultPriority %v}",
+				i, item.Issue.Title, item.Issue.Priority, item.DefaultPriority, w.title, w.priority, w.defaultPriority)
+		}
 	}
 }
 

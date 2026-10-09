@@ -82,6 +82,9 @@ func processIssueSection(issue *IssueTemplate, section, content string) {
 		if p := validation.ParsePriority(content); p != -1 {
 			issue.Priority = p
 			issue.PrioritySet = true
+		} else {
+			fmt.Fprintf(os.Stderr, "Warning: invalid priority '%s' in '%s', using default P%d\n",
+				content, issue.Title, issueops.DefaultCreatePriority)
 		}
 	case "type":
 		t, err := validation.ParseIssueType(content)

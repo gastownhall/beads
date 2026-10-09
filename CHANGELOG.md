@@ -292,7 +292,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd create --graph` (a node without `priority`) and `bd create --file` (a
   template without `### Priority`) rely on it rather than spelling 2. An
   explicit `0` is still P0, and `DefaultPriority` with a non-zero priority is
-  `ErrValidation`. CLI output is unchanged.
+  `ErrValidation`. CLI output is unchanged on the in-tree backends, except
+  that `bd create --file` now warns on stderr about a `### Priority` it cannot
+  parse, as it already did for `### Type`, rather than dropping it silently.
+
+  **Out-of-tree storage backends must honor `DefaultPriority`.** The fields
+  are additive, so such a backend compiles unchanged, but those `bd create`
+  paths now reach its `IssueLifecycle().Create`, `BatchCreator().CreateBatch`
+  and `BatchApplier().ApplyBatch` as priority 0 with `DefaultPriority` set,
+  where they used to send 2. The shared preparation that applies the default
+  lives under `internal/`, so a backend that ignores the flag now stores P0
+  for them, and still stores P0 for an HTTP create without `priority` when
+  `bd serve` fronts it. It must store `issueops.DefaultCreatePriority` when
+  `DefaultPriority` is set and refuse `DefaultPriority` with a non-zero
+  priority as `ErrValidation`; `conformance.RunRoleContracts` checks both
+  through `RunLifecycleCreateAppliesTheDefaultPriority`,
+  `RunBatchCreatorAppliesTheDefaultPriority` and
+  `RunBatchApplyAppliesTheDefaultPriority`.
 - **PRs based on `hotfix/**` branches now run full CI, not just
   cross-version historical smokes and triage labeling.** `pr.yml`,
   `pr-risk.yml`, `conformance.yml`, `cross-version-smoke.yml` and
