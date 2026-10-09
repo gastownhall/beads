@@ -24,6 +24,10 @@ go_library(
 
 go_test(
     name = "http_test",
+    # The served e2e cases run ~4-5 min on the farm under
+    # BEADS_TEST_EMBEDDED_DOLT=1, past the medium 300s action limit.
+    size = "large",
+    timeout = "long",
     srcs = [
         "attach_test.go",
         "e2e_cli_test.go",
@@ -31,6 +35,10 @@ go_test(
         "open_test.go",
         "register_test.go",
     ],
+    # The e2e files exec the real bd (bazeltest.PrebuiltBD); they run under
+    # BEADS_TEST_EMBEDDED_DOLT=1 and skip otherwise.
+    data = ["//cmd/bd:bd_for_tests"],
+    env = {"BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)"},
     deps = [
         ":http",
         "//backend",
