@@ -2657,3 +2657,62 @@ func RunBatchApplyCloseItemsAnswerToTheCloseGuards(t *testing.T, ctx context.Con
 		}
 	}
 }
+
+// RunBatchApplyRefusesADottedChildGatedOnItsOwnParent pins the dotted-id
+// hierarchy rule (publicops.CheckDottedChildDependency) on a dep_add item: an
+// edge from a dotted-id child to its own ancestor is refused with an
+// *ItemError naming the edge, and the whole request rolls back. The rule is
+// applied to the RESOLVED ids, so a key bound to a dotted child this request
+// creates — the `bd create --graph` shape — is refused like a stored id.
+//
+// POSITIVE HALF: the parent-child edge to the immediate dotted parent lands.
+func RunBatchApplyRefusesADottedChildGatedOnItsOwnParent(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	parent := fixture.IssuePrefix + "-dotted"
+	child := parent + ".1"
+	minted := parent + ".2"
+	batchApplySeedIssue(t, ctx, fixture, parent, types.StatusOpen)
+	batchApplySeedIssue(t, ctx, fixture, child, types.StatusOpen)
+
+	for _, refused := range []struct {
+		name  string
+		items []publicops.ApplyItem
+		index int
+	}{
+		{"a stored child blocking on its parent", []publicops.ApplyItem{
+			batchApplyDepAdd(publicops.Ref{ID: child}, publicops.Ref{ID: parent}, publicops.DepBlocks, ""),
+		}, 0},
+		{"a child this request creates blocking on its parent", []publicops.ApplyItem{
+			batchApplyCreate("child", batchApplyIssue(minted, "the new child")),
+			batchApplyDepAdd(publicops.Ref{Key: "child"}, publicops.Ref{ID: parent}, publicops.DepBlocks, ""),
+		}, 1},
+	} {
+		_, err := fixture.BatchApplier.ApplyBatch(ctx, publicops.ApplyBatchRequest{
+			Actor:         "apply-writer",
+			ForceIDPrefix: true,
+			Items:         refused.items,
+		})
+		if !errors.Is(err, publicops.ErrValidation) {
+			t.Errorf("%s: error = %v, want ErrValidation", refused.name, err)
+			continue
+		}
+		var itemErr *publicops.ItemError
+		if !errors.As(err, &itemErr) {
+			t.Errorf("%s: error = %v, want an *ItemError naming the edge item", refused.name, err)
+			continue
+		}
+		if itemErr.Index != refused.index || itemErr.Kind != publicops.ItemDepAdd {
+			t.Errorf("%s: ItemError = %#v, want Index %d and Kind %q", refused.name, itemErr, refused.index, publicops.ItemDepAdd)
+		}
+	}
+	assertBatchApplyEdgeCount(t, ctx, fixture, child, parent, 0)
+	assertBatchApplyRowCount(t, ctx, fixture, "issues", minted, 0)
+
+	batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+		Actor: "apply-writer",
+		Items: []publicops.ApplyItem{
+			batchApplyDepAdd(publicops.Ref{ID: child}, publicops.Ref{ID: parent}, publicops.DepParentChild, ""),
+		},
+	})
+	assertBatchApplyEdgeCount(t, ctx, fixture, child, parent, 1)
+}

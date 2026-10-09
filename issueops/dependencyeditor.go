@@ -2,6 +2,8 @@ package issueops
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -187,4 +189,59 @@ type DependencyEditor interface {
 	// RemoveDependency removes exactly the named edge. It is idempotent: a
 	// missing edge is Removed false with a nil error, not ErrNotFound.
 	RemoveDependency(ctx context.Context, req RemoveDependencyRequest) (RemoveDependencyResult, error)
+}
+
+// DottedChildDependencyError refuses an explicit edge from a dotted-id child to
+// its own ancestor. The id already says "bd-abc.1 is under bd-abc": a child
+// inherits its parent's completion through the hierarchy, so a blocking (or any
+// other) explicit edge back up the tree either duplicates that structure or, for
+// a blocking type, deadlocks it — the parent cannot close before the child, and
+// the child would wait on the parent.
+//
+// The one edge it allows is the hierarchy itself: a parent-child edge to the
+// IMMEDIATE dotted parent. A parent-child edge to a higher ancestor is refused
+// too, because it would contradict the parent the id names.
+//
+// It unwraps to ErrValidation: the refusal is decidable from the two ids and
+// the type alone, with no read, so it is a property of the request.
+type DottedChildDependencyError struct {
+	IssueID     string
+	DependsOnID string
+	Type        DependencyType
+}
+
+func (e *DottedChildDependencyError) Error() string {
+	return fmt.Sprintf("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock",
+		e.IssueID, e.DependsOnID)
+}
+
+// Unwrap classifies the refusal as request validation.
+func (e *DottedChildDependencyError) Unwrap() error { return ErrValidation }
+
+// IsDottedChildDependency reports whether an edge from issueID to dependsOnID
+// of type depType is the dotted-id hierarchy conflict CheckDottedChildDependency
+// refuses. It is exported for callers that phrase the refusal themselves (a
+// bulk report naming the offending line); every role enforces it through
+// CheckDottedChildDependency.
+func IsDottedChildDependency(issueID, dependsOnID string, depType DependencyType) bool {
+	_, immediateParent, depth := types.ParseHierarchicalID(issueID)
+	if depth == 0 || dependsOnID == "" {
+		return false
+	}
+	if dependsOnID != immediateParent && !strings.HasPrefix(issueID, dependsOnID+".") {
+		return false
+	}
+	return depType != DepParentChild || dependsOnID != immediateParent
+}
+
+// CheckDottedChildDependency is the ONE enforcement of the dotted-id hierarchy
+// rule. Every DependencyEditor implementation applies it to each requested edge
+// and every BatchApplier applies it to each dep_add item once its refs resolve,
+// so `bd dep add`, an HTTP dependencies:add, and a batch apply (including
+// `bd create --graph`'s own edges) refuse the same edge the same way.
+func CheckDottedChildDependency(issueID, dependsOnID string, depType DependencyType) error {
+	if IsDottedChildDependency(issueID, dependsOnID, depType) {
+		return &DottedChildDependencyError{IssueID: issueID, DependsOnID: dependsOnID, Type: depType}
+	}
+	return nil
 }

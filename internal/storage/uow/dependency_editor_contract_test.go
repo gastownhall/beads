@@ -66,6 +66,7 @@ func TestUOWDependencyEditorContract(t *testing.T) {
 		{name: "AcceptsADiamond", run: conformance.RunDependencyEditorAcceptsADiamond},
 		{name: "GateScopeFollowsTheEdgeType", run: conformance.RunDependencyEditorGateScopeFollowsTheEdgeType},
 		{name: "AcceptsBlockingAcrossIssueTypes", run: conformance.RunDependencyEditorAcceptsBlockingAcrossIssueTypes},
+		{name: "RefusesADottedChildGatedOnItsOwnParent", run: conformance.RunDependencyEditorRefusesADottedChildGatedOnItsOwnParent},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			test.run(t, ctx, fixture)

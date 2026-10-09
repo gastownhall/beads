@@ -135,5 +135,9 @@ func checkEdge(i int, edge issueops.DependencyEdge) error {
 	case edge.IssueID == edge.DependsOnID:
 		return fmt.Errorf("%s: %w", edge.IssueID, issueops.ErrSelfDependency)
 	}
-	return nil
+	// The dotted-id hierarchy rule, for the self-dependency check's reason: the
+	// server refuses it as a 400 that arrives here as a bare ErrValidation,
+	// while the role promises the typed *DottedChildDependencyError. It is the
+	// library's own check, not a restatement.
+	return issueops.CheckDottedChildDependency(edge.IssueID, edge.DependsOnID, edge.Type)
 }

@@ -177,10 +177,6 @@ func runDepBlocksProxiedServer(cmd *cobra.Command, ctx context.Context, blockerI
 		return HandleErrorRespectJSON("%v", err)
 	}
 
-	if isDisallowedHierarchicalDependency(blockedID, blockerID, types.DepBlocks) {
-		return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", blockedID, blockerID)
-	}
-
 	noCycleCheck, _ := cmd.Flags().GetBool("no-cycle-check")
 
 	edge := issueops.DependencyEdge{IssueID: blockedID, DependsOnID: blockerID, Type: types.DepBlocks}
@@ -247,9 +243,6 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	toID = dependsOnArg
 
 	dt := canonicalDependencyType(types.DependencyType(depType))
-	if isDisallowedHierarchicalDependency(fromID, toID, dt) {
-		return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", fromID, toID)
-	}
 
 	if err := validateDependencyType(dt); err != nil {
 		return HandleErrorRespectJSON("%v", err)
@@ -299,7 +292,7 @@ func runDepAddBulkProxied(cmd *cobra.Command, ctx context.Context, file, default
 
 	depEdges := make([]issueops.DependencyEdge, 0, len(edges))
 	for _, edge := range edges {
-		if isDisallowedHierarchicalDependency(edge.IssueID, edge.DependsOnID, edge.Type) {
+		if issueops.IsDottedChildDependency(edge.IssueID, edge.DependsOnID, edge.Type) {
 			return HandleErrorRespectJSON("line %d: cannot add dependency: %s is already a child of %s", edge.Line, edge.IssueID, edge.DependsOnID)
 		}
 		if strings.HasPrefix(edge.DependsOnID, "external:") {

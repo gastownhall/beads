@@ -676,7 +676,6 @@ go_test(
         "dep_test.go",
         "dep_warning_test.go",
         "dependency_hierarchy_embedded_test.go",
-        "dependency_hierarchy_test.go",
         "diff_embedded_test.go",
         "directory_flag_test.go",
         "doctor_backend_guard_test.go",

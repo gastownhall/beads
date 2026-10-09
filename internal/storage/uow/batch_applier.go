@@ -461,6 +461,9 @@ func (r *uowApplyRun) applyDepAdd(ctx context.Context, index int, item *publicop
 	if source == target {
 		return itemErr(fmt.Errorf("%w: %s", publicops.ErrSelfDependency, source))
 	}
+	if err := publicops.CheckDottedChildDependency(source, target, item.Type); err != nil {
+		return itemErr(err)
+	}
 	sourceWisp, sourceMine := r.planes[source]
 	targetWisp, targetMine := r.planes[target]
 	if sourceMine && targetMine && sourceWisp != targetWisp {

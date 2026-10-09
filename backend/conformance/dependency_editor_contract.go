@@ -2631,3 +2631,65 @@ func dependencyEditorHistoryProbe(t *testing.T, ctx context.Context, fixture Dep
 		assertDependencyEditorHistoryDelta(t, ctx, fixture, before, want, why)
 	}
 }
+
+// RunDependencyEditorRefusesADottedChildGatedOnItsOwnParent pins
+// publicops.CheckDottedChildDependency on the role: an explicit edge from a
+// dotted-id child to its own ancestor is refused as a
+// *DottedChildDependencyError (ErrValidation) on every leg, and nothing is
+// written. (It is decided before any per-edge probe, so the probe-skipped
+// spelling, which the wire does not publish, adds nothing here.) It used to be enforced only by the CLI ahead
+// of the role, so an HTTP or embedded caller could gate bd-abc.1 on bd-abc.
+//
+// POSITIVE HALF: the hierarchy itself — a parent-child edge to the IMMEDIATE
+// dotted parent — is allowed, and so is an edge between siblings. A body that
+// refused every edge touching a dotted id would satisfy the refusals alone.
+func RunDependencyEditorRefusesADottedChildGatedOnItsOwnParent(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
+	t.Helper()
+	parent := fixture.IssuePrefix + "-dotted"
+	child := parent + ".1"
+	grandchild := child + ".2"
+	sibling := parent + ".3"
+	for _, id := range []string{parent, child, grandchild, sibling} {
+		seedDependencyEditorIssue(t, ctx, fixture, id)
+	}
+
+	for _, refused := range []struct {
+		name string
+		edge publicops.DependencyEdge
+	}{
+		{"child blocks on its parent", publicops.DependencyEdge{IssueID: child, DependsOnID: parent, Type: publicops.DepBlocks}},
+		{"grandchild blocks on its grandparent", publicops.DependencyEdge{IssueID: grandchild, DependsOnID: parent, Type: publicops.DepBlocks}},
+		{"grandchild parent-child to its grandparent", publicops.DependencyEdge{IssueID: grandchild, DependsOnID: parent, Type: publicops.DepParentChild}},
+		{"child relates to its parent", publicops.DependencyEdge{IssueID: child, DependsOnID: parent, Type: publicops.DepRelated}},
+	} {
+		_, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+			Actor: "writer",
+			Edges: []publicops.DependencyEdge{refused.edge},
+		})
+		var dotted *publicops.DottedChildDependencyError
+		if !errors.As(err, &dotted) {
+			t.Errorf("%s: error = %v, want *DottedChildDependencyError", refused.name, err)
+			continue
+		}
+		if !errors.Is(err, publicops.ErrValidation) {
+			t.Errorf("%s: error = %v, want it to match ErrValidation", refused.name, err)
+		}
+		if dotted.IssueID != refused.edge.IssueID || dotted.DependsOnID != refused.edge.DependsOnID {
+			t.Errorf("%s: refusal names %s -> %s, want %s -> %s", refused.name,
+				dotted.IssueID, dotted.DependsOnID, refused.edge.IssueID, refused.edge.DependsOnID)
+		}
+	}
+	assertDependencyEditorNoEdgesFrom(t, ctx, fixture, child, grandchild)
+
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{
+			{IssueID: grandchild, DependsOnID: child, Type: publicops.DepParentChild},
+			{IssueID: sibling, DependsOnID: child, Type: publicops.DepBlocks},
+		},
+	}); err != nil {
+		t.Fatalf("the immediate parent-child edge and a sibling edge: %v", err)
+	}
+	assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", grandchild, child, string(publicops.DepParentChild), 1)
+	assertDependencyEdgeCount(t, ctx, fixture, "dependencies", sibling, child, 1)
+}

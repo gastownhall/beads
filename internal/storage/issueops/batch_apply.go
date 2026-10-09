@@ -352,6 +352,12 @@ func (r *applyBatchRun) applyDepAdd(ctx context.Context, tx *sql.Tx, index int, 
 		// bound to. The planner catches only the syntactically identical pair.
 		return itemErr(fmt.Errorf("%w: %s", publicops.ErrSelfDependency, source))
 	}
+	// The dotted-id hierarchy rule DependencyEditor applies, on the RESOLVED
+	// ids: a key can name a row whose minted id is a dotted child, so the planner
+	// cannot decide this before the creates ran.
+	if err := publicops.CheckDottedChildDependency(source, target, item.Type); err != nil {
+		return itemErr(err)
+	}
 	// THE CROSS-PLANE REFUSAL IS ABOUT ROWS THIS REQUEST CREATED, and only
 	// those. The two planes hold their edges in different tables, so an edge
 	// between a durable row and a wisp the same batch minted is one the batch

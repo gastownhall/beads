@@ -152,6 +152,7 @@
 40 3 TestCrossRecordInvariantContract
 40 3 TestDepRekeyMarkerStillInIgnoredSeries
 40 3 TestDoltCommitResponseLossIsIndeterminate
+40 3 TestEmbeddedDependencyEditorRefusesADottedChildGatedOnItsOwnParent
 40 3 TestEmbeddedDoltStoreIssueLifecycleBuildsOperations
 40 3 TestEmbeddedDoltStoreIssueLifecycleRejectsNilStore
 40 3 TestEmbeddedOpenReadOnly_FreshDatabaseNoWrites

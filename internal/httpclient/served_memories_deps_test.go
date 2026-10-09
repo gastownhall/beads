@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -389,6 +390,10 @@ func TestServedDependencyEditorAcceptsBlockingAcrossIssueTypes(t *testing.T) {
 	conformance.RunDependencyEditorAcceptsBlockingAcrossIssueTypes(t, t.Context(), newServedDependencyEditorFixture(t, "hd32"))
 }
 
+func TestServedDependencyEditorRefusesADottedChildGatedOnItsOwnParent(t *testing.T) {
+	conformance.RunDependencyEditorRefusesADottedChildGatedOnItsOwnParent(t, t.Context(), newServedDependencyEditorFixture(t, "hddot"))
+}
+
 func TestServedDependencyEditorGateScopeFollowsTheEdgeType(t *testing.T) {
 	conformance.RunDependencyEditorGateScopeFollowsTheEdgeType(t, t.Context(), newServedDependencyEditorFixture(t, "hd33"))
 }
@@ -432,4 +437,38 @@ func TestServedDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp(t *test
 
 func TestServedDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion(t *testing.T) {
 	conformance.RunDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion(t, t.Context(), newServedDependencyEditorFixture(t, "hd41"))
+}
+
+// TestServedServerRefusesADottedChildGatedOnItsOwnParent sends the edge on the
+// raw wire, past the client's own CheckDottedChildDependency, so what refuses
+// it is the SERVER's role — the leg a non-bd HTTP caller (gc, curl) reaches.
+// Before the rule moved into issueops only the CLI refused it, and this edge
+// landed.
+func TestServedServerRefusesADottedChildGatedOnItsOwnParent(t *testing.T) {
+	env := newServedEnv(t, "hddotw")
+	parent := env.prefix + "-dotted"
+	child := parent + ".1"
+	for _, id := range []string{parent, child} {
+		if err := env.createIssue(t.Context(), &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "seed"); err != nil {
+			t.Fatalf("seed %s: %v", id, err)
+		}
+	}
+	w, err := env.subject.roleWire("DependencyEditor")
+	if err != nil {
+		t.Fatalf("roleWire: %v", err)
+	}
+	_, err = w.AddDependencies(t.Context(), apigen.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []apigen.DependencyEdge{{IssueId: child, DependsOnId: parent, Type: "blocks"}},
+	})
+	if !errors.Is(err, issueops.ErrValidation) {
+		t.Fatalf("raw-wire child -> parent blocks: error = %v, want the server's ErrValidation refusal", err)
+	}
+	var n int
+	if err := env.queryScalar(t.Context(), "SELECT COUNT(*) FROM dependencies WHERE issue_id = ?", []any{child}, &n); err != nil {
+		t.Fatalf("count edges: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("%d edge(s) from %s landed; the server must refuse a dotted child gated on its own parent", n, child)
+	}
 }

@@ -259,6 +259,12 @@ func TestDependencyEditorAcceptsBlockingAcrossIssueTypes(t *testing.T) {
 	conformance.RunDependencyEditorAcceptsBlockingAcrossIssueTypes(t, ctx, fixture)
 }
 
+func TestDependencyEditorRefusesADottedChildGatedOnItsOwnParent(t *testing.T) {
+	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "dotted")
+	defer cleanup()
+	conformance.RunDependencyEditorRefusesADottedChildGatedOnItsOwnParent(t, ctx, fixture)
+}
+
 // newDoltDependencyEditorFixture composes the backend's role fixture kit with
 // the accessor under test. Every hook but the accessor comes from the kit, so
 // the seeding and scalar-query plumbing stays identical to the other roles'.

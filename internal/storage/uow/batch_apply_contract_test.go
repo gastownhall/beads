@@ -166,6 +166,9 @@ func TestBatchApplyContract(t *testing.T) {
 	t.Run("CloseItemsAnswerToTheCloseGuards", func(t *testing.T) {
 		conformance.RunBatchApplyCloseItemsAnswerToTheCloseGuards(t, ctx, fixture)
 	})
+	t.Run("RefusesADottedChildGatedOnItsOwnParent", func(t *testing.T) {
+		conformance.RunBatchApplyRefusesADottedChildGatedOnItsOwnParent(t, ctx, fixture)
+	})
 }
 
 func newUOWBatchApplyFixture(t *testing.T, ctx context.Context, prefix string) conformance.BatchApplyFixture {

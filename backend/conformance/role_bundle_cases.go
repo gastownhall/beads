@@ -61,6 +61,7 @@ var roleContractCases = []roleContract{
 		RunBatchApplyUpdateItemsRefuseATemplate,
 		RunBatchApplySplicesTheMetadataOfATemplateItCreates,
 		RunBatchApplyCloseItemsAnswerToTheCloseGuards,
+		RunBatchApplyRefusesADottedChildGatedOnItsOwnParent,
 	),
 
 	roleCases("BatchCloser", "BatchCloser()", oncePerRole,
@@ -301,6 +302,7 @@ var roleContractCases = []roleContract{
 		RunDependencyEditorAcceptsADiamond,
 		RunDependencyEditorGateScopeFollowsTheEdgeType,
 		RunDependencyEditorAcceptsBlockingAcrossIssueTypes,
+		RunDependencyEditorRefusesADottedChildGatedOnItsOwnParent,
 	),
 
 	// The accessor named here is not an accessor at all, alone among these

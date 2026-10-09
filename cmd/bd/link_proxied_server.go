@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func runLinkProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
@@ -18,8 +19,8 @@ func runLinkProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 	depType, _ := cmd.Flags().GetString("type")
 
 	dt := types.DependencyType(depType)
-	if isDisallowedHierarchicalDependency(id1, id2, dt) {
-		return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", id1, id2)
+	if err := issueops.CheckDottedChildDependency(id1, id2, dt); err != nil {
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	if !dt.IsValid() {

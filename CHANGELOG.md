@@ -263,6 +263,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `POST /v0/beads/issues/{id}:claim` (`issueops.Claimer`) still claims a
   template that a `PATCH` with `claim: true` refuses. Close's guards move to
   the role in their own change (#7425).
+- The dotted-id hierarchy refusal (a child such as `bd-abc.1` may not carry an
+  explicit edge to its own ancestor, other than the parent-child edge to its
+  immediate parent) moved from `cmd/bd` into the library as
+  `issueops.CheckDottedChildDependency` / `*issueops.DottedChildDependencyError`
+  (unwraps to `ErrValidation`). Every `DependencyEditor` (dolt, embedded,
+  unit of work, HTTP) and every `BatchApplier` dep_add item now enforces it, so
+  an HTTP `dependencies:add`, a `batch:apply` edge and `bd create --graph`'s own
+  edges are refused like `bd dep add` (HTTP: 400 `invalid_argument`). `bd dep
+  add`, `bd dep --blocks`, `bd link` and `bd dep add --file` print the same
+  messages as before.
 - **PRs based on `hotfix/**` branches now run full CI, not just
   cross-version historical smokes and triage labeling.** `pr.yml`,
   `pr-risk.yml`, `conformance.yml`, `cross-version-smoke.yml` and
