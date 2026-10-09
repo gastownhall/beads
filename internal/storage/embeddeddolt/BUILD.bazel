@@ -94,7 +94,11 @@ go_library(
 go_test(
     name = "embeddeddolt_test",
     # -race -short runs ~6 min unsharded (pr-core gives go test -timeout=30m).
-    # Bazel shards by test count, not duration.
+    # Bazel shards by test count, not duration: rules_go deals tests out
+    # round-robin. At 8 shards one shard drew TestWithPeerAuth,
+    # TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPassword and
+    # TestPushCommitsPendingChangesFirst (100-153s on rbe-west); 9 spreads
+    # them (measured costs put the heaviest shard at ~87s).
     size = "large",
     timeout = "long",
     srcs = [
@@ -230,7 +234,7 @@ go_test(
         "workspace_config_contract_test.go",
     ],
     embed = [":embeddeddolt"],
-    shard_count = 8,
+    shard_count = 9,
     deps = [
         "//:beads",
         "//backend/conformance",
