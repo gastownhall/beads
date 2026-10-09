@@ -155,7 +155,6 @@ shapes:
   - id: gc-show-current
     source: gc cmd_bd_show_watch.go bdWatchRunner (show --current --json)
     args: [show, --current, --json]
-    pending: {slice: "S6e", reason: "NEW: resolveCurrentIssueID calls raw store.SearchIssues, the http refusal is swallowed, and it silently falls back to the last-touched issue (wrong issue, exit 0)"}
   - id: gc-show-missing
     source: gc BdStore.Get not-found classification (routing fallbacks)
     args: [show, --json, e2e-nonexistent]
@@ -319,7 +318,7 @@ shapes:
     source: mc mol-bug-report-flow-v2 (bd search)
     args: [search, "Routed", --json]
     compare: ids
-    pending: {slice: "S24", reason: "NEW: bd search is refused over http ('partial-id search is not available over HTTP'); not in B3"}
+    pending: {slice: "S6c+SRV-1", reason: "S26 sends bd search as listIssues q behind issues.list.search, which the reference server does not advertise, so the client refuses before dialing; remove the mark when reference_server.json is upgraded"}
   - id: mc-status
     source: mc normalized_child_launch.py (bd status)
     args: [status, --json]
@@ -401,7 +400,6 @@ shapes:
     source: gc bdstore_blocked_repair.go RecomputeBlocked
     args: [recompute-blocked, --json]
     compare: exit
-    pending: {slice: "S25", reason: "NEW: recompute-blocked refuses over http ('storage backend does not support is_blocked recompute'); gc BdStore.RecomputeBlocked issues it; not in B3"}
   - id: gc-backup-status
     source: gc checks_proxied_backup_coverage.go (backup status --json)
     args: [backup, status, --json]
