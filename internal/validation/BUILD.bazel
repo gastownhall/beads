@@ -13,6 +13,7 @@ go_library(
         "//internal/config",
         "//internal/types",
         "//internal/utils",
+        "//issueops",
     ],
 )
 

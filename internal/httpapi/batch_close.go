@@ -118,6 +118,7 @@ func closeOutcome(outcome issueops.CloseOutcome) apigen.CloseOutcome {
 	}
 
 	var openChildren *issueops.CloseOpenChildrenError
+	var notAssignee *issueops.CloseNotAssigneeError
 	var (
 		code   Code
 		detail string
@@ -134,6 +135,16 @@ func closeOutcome(outcome issueops.CloseOutcome) apigen.CloseOutcome {
 		// the single close's do, so a client names them per item.
 		code = CodeNotClosable
 		detail, wire.Blockers = closeBlocked(outcome.Err, "this issue is blocked", "clear the blocker, or send `force`")
+
+	// The close guards answer per item exactly as the single close answers
+	// them — the shared mapping's code and detail — with the holder on the
+	// outcome's own `assignee` member.
+	case errors.Is(outcome.Err, issueops.ErrTemplateReadOnly),
+		errors.Is(outcome.Err, issueops.ErrPinned),
+		errors.As(outcome.Err, &notAssignee):
+		res := ClassifyError(outcome.Err)
+		code, detail = Code(res.Problem.Code), derefString(res.Problem.Detail)
+		wire.Assignee = res.Problem.Assignee
 
 	case errors.Is(outcome.Err, storage.ErrNotFound):
 		code, detail = CodeNotFound, "no issue with this id in either plane"

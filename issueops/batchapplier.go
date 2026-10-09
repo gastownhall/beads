@@ -165,7 +165,8 @@ type CloseItem struct {
 	// Reason and Session are CloseRequest's, under its first-close-wins rule.
 	Reason  string
 	Session string
-	// Force bypasses blocker and open-child close policy, and nothing else.
+	// Force is CloseRequest.Force: it bypasses blocker and open-child close
+	// policy, the pin and the assignee fence, and never the template guard.
 	//
 	// CLOSE POLICY EVALUATES AT THIS ITEM, against the row as this request has
 	// already changed it — the same as-modified rule the update guards take. A

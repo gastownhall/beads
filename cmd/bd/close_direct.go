@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage"
+	storeissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -36,12 +37,16 @@ type closeDirectPlan struct {
 // closeDirectPreflight applies `bd close`'s own close policy to every resolved
 // argument, and hands the batch only the items that survived.
 //
-// Neither check is library policy — the template/pin/assignee fence and gate
-// satisfaction read the issue and nothing else, and the role has no vocabulary
-// for either — which is why they stay in cmd/bd. It is closeProxiedRunPreflight's
+// The one check left here is gate satisfaction. It is closeProxiedRunPreflight's
 // job on this route.
 //
-// The open-children guard is NOT here, and that is the point: the engine
+// The close guards — template, pin, assignee — are NOT here: they are the
+// role's (issueops.Lifecycle.Close), enforced inside the close's own
+// transaction on every route to a close, and they come back as the item's
+// typed refusal, which closeDirectRefusal prints as the sentence this route
+// always printed.
+//
+// The open-children guard is NOT here either, and that is the point: the engine
 // enforces it inside the close's own transaction, refusing with a
 // CloseOpenChildrenError whose message is the one this route used to compose
 // by hand. Keeping a copy here would be a second implementation of a rule the
@@ -67,21 +72,16 @@ func closeDirectPreflight(results []*RoutedResult, resolvedIDs, reasons []string
 // closeDirectCheckOne returns one argument's refusal, or "" when it may go to
 // the batch. st is the store that owns the issue.
 func closeDirectCheckOne(id string, issue *types.Issue, st storage.DoltStorage, force bool) string {
-	// Close validation guards a state change; a row already at literal
-	// StatusClosed has none to guard, so skip it and let the re-close reach the
-	// engine as the idempotent no-op it has always been (ga-ktn9pe.4.8).
-	// Without this, a forced close of a boolean-pinned bead leaves pinned=true
-	// (the close write never touches the column — deliberately, it is the
-	// deletion-protection flag bd gc/purge/cleanup honor) and the plain retry
-	// hits NotPinned and exits nonzero, which strands the molecule auto-close
-	// the unchanged branch re-drives. Only a literal closed status qualifies:
-	// reaching a configured done status is still a real close, mirroring the
-	// engine's isClosedInTx. The snapshot only decides whether validation runs,
-	// never what is written — the engine's in-transaction `status != closed`
-	// guard remains the authority on whether the close is a no-op, so a
-	// concurrent close still converges. Mirrored in closeProxiedCheckOne.
+	// The close guards' own rule (storeissueops.CheckClosable), applied to the
+	// resolved pre-image ahead of gate satisfaction so a refusal that trips both
+	// reads the guard's sentence, as it always has. The role applies the same
+	// rule inside the close transaction, which stays the authority. A row
+	// already at literal StatusClosed has no state change to guard: the re-close
+	// reaches the engine as the idempotent no-op it has always been
+	// (ga-ktn9pe.4.8) — a forced close of a pinned bead leaves pinned=true, and
+	// the plain retry must not then refuse. Mirrored in closeProxiedCheckOne.
 	if issue == nil || issue.Status != types.StatusClosed {
-		if err := validateIssueClosable(id, issue, currentActor(), force); err != nil {
+		if err := storeissueops.CheckClosable(id, issue, currentActor(), force); err != nil {
 			return err.Error()
 		}
 	}
@@ -210,6 +210,9 @@ func closeDirectCloseBatch(ctx context.Context, st storage.DoltStorage, request 
 // line this route used to compose before the guard moved into the transaction.
 // Everything else is an unexpected failure and is reported against the id.
 func closeDirectRefusal(id string, err error) string {
+	if guard, ok := closeGuardRefusal(err); ok {
+		return guard
+	}
 	switch {
 	case errors.Is(err, storage.ErrCloseBlocked):
 		return fmt.Sprintf("%v (use --force to override)", err)
@@ -218,4 +221,41 @@ func closeDirectRefusal(id string, err error) string {
 	default:
 		return fmt.Sprintf("Error closing %s: %v", id, err)
 	}
+}
+
+// closeGuardRefusal returns a close guard's own sentence when err is one of the
+// three refusals the role raises before close policy — a template, a pin, or a
+// bead someone else holds — and reports whether it was.
+//
+// The sentence is the typed error's, found with errors.As rather than taken
+// from err itself, because err may have traveled: the unit-of-work route wraps
+// it in the use case's and repository's prefixes, and a served one in the
+// problem envelope. Each guard's message already names its subject and its
+// --force hint, so it prints bare — the line `bd close` printed when the guard
+// was a CLI pre-read, on every route.
+func closeGuardRefusal(err error) (string, bool) {
+	var (
+		template    *issueops.TemplateReadOnlyError
+		pinned      *issueops.PinnedError
+		notAssignee *issueops.CloseNotAssigneeError
+	)
+	switch {
+	case errors.As(err, &template):
+		return template.Error(), true
+	case errors.As(err, &pinned):
+		return pinned.Error(), true
+	case errors.As(err, &notAssignee):
+		return notAssignee.Error(), true
+	}
+	return "", false
+}
+
+// closeDirectTypedRefusal is the reason a --json consumer reads for one refused
+// id on this route: the typed error, with a close guard's sentence taken from
+// the guard itself so a served refusal reads as a local one does.
+func closeDirectTypedRefusal(err error) string {
+	if guard, ok := closeGuardRefusal(err); ok {
+		return guard
+	}
+	return err.Error()
 }

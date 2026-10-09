@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -348,5 +349,82 @@ func TestCloseBeadGateGetter_RouteSelection(t *testing.T) {
 	}
 	if getter.localStore != gateStore {
 		t.Error("direct mode: the getter does not read the gate's own store")
+	}
+}
+
+// TestCloseCheckOne_CloseGuardsOutrankGateSatisfaction pins `bd close`'s
+// refusal order on both preflight routes: the close guards
+// (storeissueops.CheckClosable, the role's own rule) answer before gate
+// satisfaction, so a pinned, held or template gate whose condition is unmet
+// prints the guard's sentence, as it always has. A row already closed skips the
+// guards (ga-ktn9pe.4.8) and force waives the pin and the holder, leaving the
+// gate the refusal.
+func TestCloseCheckOne_CloseGuardsOutrankGateSatisfaction(t *testing.T) {
+	actorMu.Lock()
+	savedActor, savedPending := actor, actorGitFallbackPending
+	actor, actorGitFallbackPending = "alice", false
+	actorMu.Unlock()
+	t.Cleanup(func() {
+		actorMu.Lock()
+		actor, actorGitFallbackPending = savedActor, savedPending
+		actorMu.Unlock()
+	})
+
+	// An unexpired timer gate: checkGateSatisfaction refuses it unforced.
+	gate := func(mut func(*types.Issue)) *types.Issue {
+		issue := &types.Issue{
+			ID:        "bd-g1",
+			IssueType: "gate",
+			AwaitType: "timer",
+			Status:    types.StatusOpen,
+			CreatedAt: time.Now(),
+			Timeout:   time.Hour,
+		}
+		mut(issue)
+		return issue
+	}
+	const gateRefusal = "cannot close bd-g1: gate condition not satisfied"
+	cases := []struct {
+		name  string
+		issue *types.Issue
+		force bool
+		want  string
+	}{
+		{"pinned", gate(func(i *types.Issue) { i.Pinned = true }), false,
+			"cannot modify pinned issue bd-g1 (use --force to override)"},
+		{"pinned status", gate(func(i *types.Issue) { i.Status = types.StatusPinned }), false,
+			"cannot modify pinned issue bd-g1 (use --force to override)"},
+		{"template", gate(func(i *types.Issue) { i.IsTemplate = true }), false,
+			"cannot modify template bd-g1: templates are read-only; use 'bd mol pour' to create a work item"},
+		{"forced template", gate(func(i *types.Issue) { i.IsTemplate = true }), true,
+			"cannot modify template bd-g1: templates are read-only; use 'bd mol pour' to create a work item"},
+		{"held", gate(func(i *types.Issue) { i.Assignee = "bob" }), false,
+			`cannot close bd-g1: assignee is "bob", actor is "alice"; reclaim or use --force to override`},
+		{"unguarded gate", gate(func(*types.Issue) {}), false, gateRefusal},
+		{"forced pin", gate(func(i *types.Issue) { i.Pinned = true; i.Assignee = "bob" }), true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			check := func(route, got string) {
+				t.Helper()
+				if tc.want == gateRefusal {
+					if !strings.HasPrefix(got, gateRefusal) {
+						t.Fatalf("%s refusal = %q, want the gate refusal", route, got)
+					}
+					return
+				}
+				if got != tc.want {
+					t.Fatalf("%s refusal = %q, want %q", route, got, tc.want)
+				}
+			}
+			check("direct", closeDirectCheckOne("bd-g1", tc.issue, nil, tc.force))
+		})
+	}
+
+	// The already-closed skip: a forced close leaves pinned=true behind, and
+	// the plain re-close must reach the engine as the idempotent no-op.
+	residue := &types.Issue{ID: "bd-c1", Status: types.StatusClosed, Pinned: true, Assignee: "bob"}
+	if got := closeDirectCheckOne("bd-c1", residue, nil, false); got != "" {
+		t.Fatalf("closed residue refusal = %q, want none", got)
 	}
 }

@@ -168,3 +168,10 @@ func TestServedBatchCloserDoesNotMutateTheCallerRequest(t *testing.T) {
 func TestServedBatchCloserSettlesTheDependersOfWhatItClosed(t *testing.T) {
 	conformance.RunBatchCloserSettlesTheDependersOfWhatItClosed(t, t.Context(), newServedBatchCloserFixture(t, "hbcbs"))
 }
+
+// TestServedBatchCloserItemsAnswerToTheCloseGuards is the served leg of the
+// close guards: each guarded item travels back as its outcome's code (and
+// `assignee`) and is rebuilt into the same typed error a local batch returns.
+func TestServedBatchCloserItemsAnswerToTheCloseGuards(t *testing.T) {
+	conformance.RunBatchCloserItemsAnswerToTheCloseGuards(t, t.Context(), newServedBatchCloserFixture(t, "hbcgd"))
+}

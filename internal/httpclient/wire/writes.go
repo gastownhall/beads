@@ -160,7 +160,7 @@ func (c *Client) CloseIssue(ctx context.Context, id string, body apigen.CloseIss
 		return nil, err
 	}
 	var out apigen.CloseIssueResponse
-	r := Request{Op: OpCloseIssue, Method: http.MethodPost, Path: path, Body: body, IssueID: id}
+	r := Request{Op: OpCloseIssue, Method: http.MethodPost, Path: path, Body: body, IssueID: id, Actor: body.Actor}
 	if err := c.dispatch(ctx, r, &out); err != nil {
 		return nil, err
 	}
@@ -534,7 +534,7 @@ func (c *Client) ApplyBatch(ctx context.Context, body ApplyBatchRequest) (*apige
 	}
 
 	var out apigen.ApplyBatchResponse
-	r := Request{Op: OpApplyBatch, Method: http.MethodPost, Path: PathIssuesBatchApply, Body: body}
+	r := Request{Op: OpApplyBatch, Method: http.MethodPost, Path: PathIssuesBatchApply, Body: body, Actor: body.Actor}
 	if err := c.dispatch(ctx, r, &out); err != nil {
 		return nil, err
 	}

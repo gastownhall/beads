@@ -71,6 +71,7 @@ go_test(
         "brief_projection_test.go",
         "claim_next_test.go",
         "claim_test.go",
+        "close_guards_test.go",
         "close_test.go",
         "comments_test.go",
         "context_test.go",

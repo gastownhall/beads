@@ -1397,3 +1397,96 @@ func requireBatchCloserWisps(t *testing.T, fixture BatchCloserFixture) {
 		t.Skipf("fixture has no CreateWisp: this backend cannot seed the ephemeral plane, so the ephemeral rules are UNPINNED here")
 	}
 }
+
+// RunBatchCloserItemsAnswerToTheCloseGuards pins that every item of a batch
+// answers to the close guards Lifecycle.Close states — template, pin, assignee
+// — as a PER-ITEM refusal carrying the same typed error, while the survivors
+// still commit; and that the request-wide Force waives the pin and the
+// assignee fence and never the template.
+//
+// The guarded items sit between two plain ones, so an implementation that
+// aborted the batch on a guard, or skipped the guard for items after the
+// first, fails here rather than in `bd close a b c`.
+func RunBatchCloserItemsAnswerToTheCloseGuards(t *testing.T, ctx context.Context, fixture BatchCloserFixture) {
+	t.Helper()
+	first := fixture.IssuePrefix + "-guard-first"
+	template := fixture.IssuePrefix + "-guard-template"
+	pinned := fixture.IssuePrefix + "-guard-pinned"
+	held := fixture.IssuePrefix + "-guard-held"
+	last := fixture.IssuePrefix + "-guard-last"
+	seedBatchCloserIssue(t, ctx, fixture, first)
+	seedBatchCloserIssue(t, ctx, fixture, last)
+	for _, issue := range []*types.Issue{
+		{ID: template, IsTemplate: true},
+		{ID: pinned, Status: types.StatusPinned},
+		{ID: held, Assignee: "holder"},
+	} {
+		issue.Title, issue.Priority, issue.IssueType = issue.ID, 2, types.TypeTask
+		if issue.Status == "" {
+			issue.Status = types.StatusOpen
+		}
+		if err := fixture.CreateIssue(ctx, issue, "seed"); err != nil {
+			t.Fatalf("seed %s: %v", issue.ID, err)
+		}
+	}
+
+	result, err := fixture.Closer.CloseBatch(ctx, publicops.CloseBatchRequest{
+		Actor: "closer",
+		Items: []publicops.BatchCloseItem{{IssueID: first}, {IssueID: template}, {IssueID: pinned}, {IssueID: held}, {IssueID: last}},
+	})
+	if err != nil {
+		t.Fatalf("CloseBatch over guarded items: %v, want per-item refusals", err)
+	}
+	if len(result.Outcomes) != 5 {
+		t.Fatalf("outcomes = %d, want 5", len(result.Outcomes))
+	}
+	for _, i := range []int{0, 4} {
+		if result.Outcomes[i].Err != nil || !result.Outcomes[i].Changed {
+			t.Errorf("outcome %d (%s) = %+v, want the plain item to land", i, result.Outcomes[i].IssueID, result.Outcomes[i])
+		}
+	}
+	var templateRefusal *publicops.TemplateReadOnlyError
+	if !errors.As(result.Outcomes[1].Err, &templateRefusal) || templateRefusal.IssueID != template {
+		t.Errorf("template item = %v, want *TemplateReadOnlyError naming %s", result.Outcomes[1].Err, template)
+	}
+	var pinRefusal *publicops.PinnedError
+	if !errors.As(result.Outcomes[2].Err, &pinRefusal) || pinRefusal.IssueID != pinned {
+		t.Errorf("pinned item = %v, want *PinnedError naming %s", result.Outcomes[2].Err, pinned)
+	}
+	var assigneeRefusal *publicops.CloseNotAssigneeError
+	if !errors.As(result.Outcomes[3].Err, &assigneeRefusal) {
+		t.Errorf("held item = %v, want *CloseNotAssigneeError", result.Outcomes[3].Err)
+	} else if assigneeRefusal.IssueID != held || assigneeRefusal.Assignee != "holder" || assigneeRefusal.Actor != "closer" {
+		t.Errorf("held item refusal = %#v, want IssueID %q, Assignee holder, Actor closer", assigneeRefusal, held)
+	}
+	for _, i := range []int{1, 2, 3} {
+		if result.Outcomes[i].Issue != nil {
+			t.Errorf("refused outcome %d carries an Issue snapshot, want nil beside Err", i)
+		}
+	}
+	assertBatchCloserStatus(t, ctx, fixture, first, types.StatusClosed)
+	assertBatchCloserStatus(t, ctx, fixture, last, types.StatusClosed)
+	assertBatchCloserStatus(t, ctx, fixture, template, types.StatusOpen)
+	assertBatchCloserStatus(t, ctx, fixture, pinned, types.StatusPinned)
+	assertBatchCloserStatus(t, ctx, fixture, held, types.StatusOpen)
+
+	forced, err := fixture.Closer.CloseBatch(ctx, publicops.CloseBatchRequest{
+		Actor: "closer",
+		Items: []publicops.BatchCloseItem{{IssueID: template}, {IssueID: pinned}, {IssueID: held}},
+		Force: true,
+	})
+	if err != nil {
+		t.Fatalf("forced CloseBatch over guarded items: %v", err)
+	}
+	if !errors.Is(forced.Outcomes[0].Err, publicops.ErrTemplateReadOnly) {
+		t.Errorf("forced template item = %v, want ErrTemplateReadOnly: force never waives read-only", forced.Outcomes[0].Err)
+	}
+	for _, i := range []int{1, 2} {
+		if forced.Outcomes[i].Err != nil || !forced.Outcomes[i].Changed {
+			t.Errorf("forced outcome %d (%s) = %+v, want force to bypass the guard", i, forced.Outcomes[i].IssueID, forced.Outcomes[i])
+		}
+	}
+	assertBatchCloserStatus(t, ctx, fixture, template, types.StatusOpen)
+	assertBatchCloserStatus(t, ctx, fixture, pinned, types.StatusClosed)
+	assertBatchCloserStatus(t, ctx, fixture, held, types.StatusClosed)
+}

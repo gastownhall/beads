@@ -346,6 +346,9 @@ type target struct {
 	serverURL   string
 	issueID     string
 	dependsOnID string
+	// actor is the request's acting identity (Request.Actor), which the
+	// not_assignee refusal names and the wire does not repeat.
+	actor string
 	// expectID is the workspace's own pinned project id (Client.expectID), which
 	// the wire never carries — it is a client-side fact. A project_mismatch
 	// refusal names the server's own id in server_project_id; pairing it with this
@@ -637,6 +640,20 @@ var codeSentinel = map[string]func(*ProblemError, target) error{
 	// and reported as an undifferentiated client bug instead of the typed
 	// sentinel callers already switch on locally.]
 	"notes_overwrite_refused": func(*ProblemError, target) error { return issueops.ErrNotesOverwrite },
+
+	// The close guards, rebuilt whole so a caller reads the same typed error —
+	// and the same message — the embedded store returns. The row comes from the
+	// request or, on a batch, from `item_issue_id`; the holder from `assignee`;
+	// the closing actor from the request, which the wire does not repeat.
+	"template_read_only": func(e *ProblemError, t target) error {
+		return &issueops.TemplateReadOnlyError{IssueID: refusedIssueID(e, t)}
+	},
+	"issue_pinned": func(e *ProblemError, t target) error {
+		return &issueops.PinnedError{IssueID: refusedIssueID(e, t)}
+	},
+	"not_assignee": func(e *ProblemError, t target) error {
+		return &issueops.CloseNotAssigneeError{IssueID: refusedIssueID(e, t), Assignee: deref(e.Assignee), Actor: t.actor}
+	},
 
 	// The same rule again: `issue_id` present means the edge named the issue's
 	// own ancestor or descendant, absent means a plain scheduling cycle. The

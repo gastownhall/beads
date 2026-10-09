@@ -1222,6 +1222,12 @@
     },
     {
       "schema": "CloseOutcome",
+      "member": "assignee",
+      "type": "string",
+      "required": false
+    },
+    {
+      "schema": "CloseOutcome",
       "member": "blockers",
       "type": "array",
       "required": false,

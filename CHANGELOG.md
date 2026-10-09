@@ -189,6 +189,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ones cannot fork.
 
 ### Fixed
+- **The close guards now hold for every caller, not only `bd close`.** The
+  template read-only guard, the pin guard and the assignee authority fence
+  (be-035) used to be a pre-read in `cmd/bd`, so a close through `bd serve`
+  (`POST /v0/beads/issues/{id}:close`), `issues:batchClose`, a `close` item of
+  `issues:batchApply`, or a library caller of `issueops.Lifecycle.Close`,
+  `BatchCloser` or `BatchApplier` closed a template, a pinned issue, or a bead
+  another actor holds that `bd close` refused. They now live in the role,
+  inside the close's own transaction, on every backend: a template refuses
+  with `*issueops.TemplateReadOnlyError` (no bypass), and unless `Force` is set
+  a pinned issue refuses with `*issueops.PinnedError` and another actor's bead
+  with `*issueops.CloseNotAssigneeError` (matching `ErrNotOwner`). Over HTTP
+  they are `409` `template_read_only`, `issue_pinned` and `not_assignee` (the
+  holder in `assignee`, also on a batch-close outcome), and the client rebuilds
+  the same typed errors. HTTP and library callers that closed such issues
+  must now send `force` (the template guard has no bypass). `bd close` prints
+  the same lines and exits as before, and `bd close --if-revision`, which
+  skipped the guards, now applies them too.
 - **PRs based on `hotfix/**` branches now run full CI, not just
   cross-version historical smokes and triage labeling.** `pr.yml`,
   `pr-risk.yml`, `conformance.yml`, `cross-version-smoke.yml` and

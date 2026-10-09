@@ -208,6 +208,10 @@ type Request struct {
 
 	IssueID     string
 	DependsOnID string
+	// Actor is the acting identity the body carries, for a refusal whose typed
+	// error names it — the close's not_assignee — when the wire does not
+	// repeat what the request already said.
+	Actor string
 }
 
 // Do issues r and decodes a 2xx body into out, which may be nil for a response
@@ -292,7 +296,7 @@ func (c *Client) Do(ctx context.Context, r Request, out any) error {
 }
 
 func (c *Client) target(r Request) target {
-	return target{op: r.Op, serverURL: c.base.Redacted(), issueID: r.IssueID, dependsOnID: r.DependsOnID, expectID: c.expectID}
+	return target{op: r.Op, serverURL: c.base.Redacted(), issueID: r.IssueID, dependsOnID: r.DependsOnID, actor: r.Actor, expectID: c.expectID}
 }
 
 // credentialSourceReporter is the optional half of a CredentialProvider: a

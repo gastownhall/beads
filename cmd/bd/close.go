@@ -185,7 +185,7 @@ the flags appear in the command line.`,
 				// The typed error, not the decorated display line: the --force
 				// hint closeDirectRefusal appends is advice for a human reader,
 				// and the id already has its own field.
-				failures = append(failures, closeIDFailure{ID: id, Error: res.Err.Error()})
+				failures = append(failures, closeIDFailure{ID: id, Error: closeDirectTypedRefusal(res.Err)})
 				continue
 			}
 

@@ -2492,3 +2492,96 @@ func batchApplyHistoryMatching(t *testing.T, ctx context.Context, fixture BatchA
 	}
 	return count
 }
+
+// RunBatchApplyCloseItemsAnswerToTheCloseGuards pins that a close item answers
+// to the close guards Lifecycle.Close states, under CloseRequest's rules: a
+// template refuses forced or not, a pin and another actor's bead refuse unless
+// the item's Force is set. A refusal is the item's *ItemError carrying the
+// guard's typed error, and the request is all or nothing, so the create item
+// ahead of it does not land.
+//
+// The assignee case is AS-MODIFIED: the holder is set by an update item of the
+// same request, so a guard that read the row before the request began — or not
+// at all — closes it.
+func RunBatchApplyCloseItemsAnswerToTheCloseGuards(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	template := fixture.IssuePrefix + "-closeguard-template"
+	pinned := fixture.IssuePrefix + "-closeguard-pinned"
+	held := fixture.IssuePrefix + "-closeguard-held"
+	bystander := fixture.IssuePrefix + "-closeguard-bystander"
+	for _, issue := range []*types.Issue{
+		{ID: template, IsTemplate: true},
+		{ID: pinned, Pinned: true},
+		{ID: held},
+	} {
+		issue.Title, issue.Status, issue.Priority, issue.IssueType = issue.ID, types.StatusOpen, 2, types.TypeTask
+		if err := fixture.CreateIssue(ctx, issue, "seed"); err != nil {
+			t.Fatalf("seed %s: %v", issue.ID, err)
+		}
+	}
+
+	plan := func(target string, force bool, extra ...publicops.ApplyItem) publicops.ApplyBatchRequest {
+		closeItem := batchApplyClose(publicops.Ref{ID: target})
+		closeItem.Close.Force = force
+		items := []publicops.ApplyItem{batchApplyCreate("bystander", batchApplyIssue(bystander, "must not land beside a refusal"))}
+		items = append(items, extra...)
+		return publicops.ApplyBatchRequest{Actor: "apply-closer", ForceIDPrefix: true, Items: append(items, closeItem)}
+	}
+	refused := func(label string, request publicops.ApplyBatchRequest, check func(error)) {
+		t.Helper()
+		_, err := fixture.BatchApplier.ApplyBatch(ctx, request)
+		var itemErr *publicops.ItemError
+		if !errors.As(err, &itemErr) {
+			t.Fatalf("%s: error = %v, want an *ItemError", label, err)
+		}
+		if itemErr.Kind != publicops.ItemClose || itemErr.Index != len(request.Items)-1 {
+			t.Errorf("%s: ItemError = %#v, want the close item at index %d", label, itemErr, len(request.Items)-1)
+		}
+		check(err)
+		assertBatchApplyRowCount(t, ctx, fixture, "issues", bystander, 0)
+	}
+
+	for _, force := range []bool{false, true} {
+		refused("template close item", plan(template, force), func(err error) {
+			var refusal *publicops.TemplateReadOnlyError
+			if !errors.As(err, &refusal) || refusal.IssueID != template {
+				t.Errorf("template close item (force=%v) = %v, want *TemplateReadOnlyError naming %s", force, err, template)
+			}
+		})
+	}
+	refused("pinned close item", plan(pinned, false), func(err error) {
+		var refusal *publicops.PinnedError
+		if !errors.As(err, &refusal) || refusal.IssueID != pinned {
+			t.Errorf("pinned close item = %v, want *PinnedError naming %s", err, pinned)
+		}
+	})
+	assign := batchApplyUpdate(publicops.Ref{ID: held}, publicops.IssuePatch{Assignee: publicops.Field[string]{Set: true, Value: "holder"}})
+	refused("held close item", plan(held, false, assign), func(err error) {
+		var refusal *publicops.CloseNotAssigneeError
+		if !errors.As(err, &refusal) {
+			t.Errorf("close item on a bead an earlier item assigned away = %v, want *CloseNotAssigneeError", err)
+			return
+		}
+		if refusal.IssueID != held || refusal.Assignee != "holder" || refusal.Actor != "apply-closer" {
+			t.Errorf("assignee refusal = %#v, want IssueID %q, Assignee holder, Actor apply-closer", refusal, held)
+		}
+	})
+	for _, id := range []string{template, pinned, held} {
+		if got := batchApplyColumn(t, ctx, fixture, "status", id); got != string(types.StatusOpen) {
+			t.Errorf("%s status after the refusals = %q, want it still open", id, got)
+		}
+	}
+
+	// The item's Force waives the pin and the assignee fence.
+	forcedPin := plan(pinned, true)
+	forcedPin.Items = forcedPin.Items[1:]
+	batchApplyMust(t, ctx, fixture, forcedPin)
+	forcedHeld := plan(held, true, assign)
+	forcedHeld.Items = forcedHeld.Items[1:]
+	batchApplyMust(t, ctx, fixture, forcedHeld)
+	for _, id := range []string{pinned, held} {
+		if got := batchApplyColumn(t, ctx, fixture, "status", id); got != string(types.StatusClosed) {
+			t.Errorf("%s status under the item's Force = %q, want %q", id, got, types.StatusClosed)
+		}
+	}
+}

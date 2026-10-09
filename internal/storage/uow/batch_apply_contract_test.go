@@ -157,6 +157,9 @@ func TestBatchApplyContract(t *testing.T) {
 	t.Run("RefusesAnUnusableRequest", func(t *testing.T) {
 		conformance.RunBatchApplyRefusesAnUnusableRequest(t, ctx, fixture)
 	})
+	t.Run("CloseItemsAnswerToTheCloseGuards", func(t *testing.T) {
+		conformance.RunBatchApplyCloseItemsAnswerToTheCloseGuards(t, ctx, fixture)
+	})
 }
 
 func newUOWBatchApplyFixture(t *testing.T, ctx context.Context, prefix string) conformance.BatchApplyFixture {

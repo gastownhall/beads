@@ -309,6 +309,14 @@ func TestServedLifecycleReopenReblocksItsDependers(t *testing.T) {
 	conformance.RunLifecycleReopenReblocksItsDependers(t, t.Context(), newServedCloseReopenFixture(t, "hlbr"))
 }
 
+// TestServedLifecycleCloseEnforcesTheCloseGuards is the served leg of the close
+// guards: bd serve refuses with template_read_only, issue_pinned and
+// not_assignee, and the client rebuilds the typed error — sentence included —
+// the embedded store returns.
+func TestServedLifecycleCloseEnforcesTheCloseGuards(t *testing.T) {
+	conformance.RunLifecycleCloseEnforcesTheCloseGuards(t, t.Context(), newServedCloseReopenFixture(t, "hlcg"))
+}
+
 func TestServedLifecycleReopenLeavesNonDoneStatusesUnchanged(t *testing.T) {
 	conformance.RunLifecycleReopenLeavesNonDoneStatusesUnchanged(t, t.Context(), newServedCloseReopenFixture(t, "hlrn"))
 }

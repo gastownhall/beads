@@ -81,6 +81,9 @@ func TestLifecycleCloseReopenContract(t *testing.T) {
 	t.Run("ReopenReblocksItsDependers", func(t *testing.T) {
 		conformance.RunLifecycleReopenReblocksItsDependers(t, ctx, fixture)
 	})
+	t.Run("CloseEnforcesTheCloseGuards", func(t *testing.T) {
+		conformance.RunLifecycleCloseEnforcesTheCloseGuards(t, ctx, fixture)
+	})
 }
 
 func newUOWLifecycleCloseReopenFixture(t *testing.T, ctx context.Context, prefix string) conformance.LifecycleCloseReopenFixture {

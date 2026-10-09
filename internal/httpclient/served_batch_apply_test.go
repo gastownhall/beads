@@ -247,6 +247,10 @@ func TestServedBatchApplyRefusesAnUnusableRequest(t *testing.T) {
 	conformance.RunBatchApplyRefusesAnUnusableRequest(t, t.Context(), newServedBatchApplyFixture(t, "hba26"))
 }
 
+func TestServedBatchApplyCloseItemsAnswerToTheCloseGuards(t *testing.T) {
+	conformance.RunBatchApplyCloseItemsAnswerToTheCloseGuards(t, t.Context(), newServedBatchApplyFixture(t, "hbacg"))
+}
+
 // TestServedBatchApplyStampsSpawnerIDOnlyWhenNamed wires the dep_add
 // HasSpawner/ThreadID lineage conformance case onto the http leg (S5): a
 // served default Config always advertises CapBatchApplyDepAddLineage (it is

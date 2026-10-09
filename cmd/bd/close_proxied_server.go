@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	storeissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -294,13 +295,12 @@ func closeProxiedCheckOne(ctx context.Context, uw uow.UnitOfWork, id string, in 
 		return fmt.Sprintf("Error resolving %s: %v", id, err), nil
 	}
 
-	// Mirrors the ordering in closeDirectCheckOne (ga-ktn9pe.4.8): a row already at
-	// literal StatusClosed has no state change for close validation to guard, so
-	// the re-close skips it and reaches the engine as the idempotent no-op it has
-	// always been. Both close paths must agree here — diverging is the defect
-	// class #5217 closed.
+	// The close guards' own rule, ahead of gate satisfaction and under the same
+	// already-closed skip as closeDirectCheckOne (ga-ktn9pe.4.8); both close
+	// paths must agree here (#5217). The role re-applies it inside the close
+	// transaction, which stays the authority.
 	if current.Status != types.StatusClosed {
-		if err := validateIssueClosable(id, current, currentActor(), in.force); err != nil {
+		if err := storeissueops.CheckClosable(id, current, currentActor(), in.force); err != nil {
 			return err.Error(), nil
 		}
 	}
@@ -419,6 +419,9 @@ func closeProxiedFailures(pre *closeProxiedPreflight, args []string) []closeIDFa
 // not noise, it is the only thing that says where an unexpected failure came
 // from, and there is no engine sentence to converge on.
 func closeProxiedTypedRefusal(err error) string {
+	if guard, ok := closeGuardRefusal(err); ok {
+		return guard
+	}
 	for _, sentinel := range []error{storage.ErrCloseBlocked, storage.ErrCloseOpenChildren} {
 		if !errors.Is(err, sentinel) {
 			continue
@@ -445,6 +448,9 @@ func closeProxiedTypedRefusal(err error) string {
 // reading the message, which is the point of the outcome carrying a typed
 // error at all.
 func closeProxiedRefusal(id string, err error) string {
+	if guard, ok := closeGuardRefusal(err); ok {
+		return guard
+	}
 	switch {
 	case errors.Is(err, storage.ErrCloseBlocked):
 		return fmt.Sprintf("%v (use --force to override)", err)

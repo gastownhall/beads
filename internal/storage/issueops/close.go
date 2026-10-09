@@ -54,6 +54,12 @@ func CloseIssueWithoutEventInTx(ctx context.Context, tx DBTX, id string, reason,
 // is_blocked column whose direct blockers have since closed. Reading the live
 // blocker list self-heals against a stale column instead of acting on it.
 //
+// Before close policy it applies the close guards (enforceCloseGuardsInTx) to a
+// target that is not already closed: a template refuses with
+// *TemplateReadOnlyError whatever force says, and unless force is set a pinned
+// issue refuses with *PinnedError and one assigned to someone other than actor
+// with *CloseNotAssigneeError.
+//
 // When expectedVersion is non-nil it adds an ORTHOGONAL optimistic-concurrency
 // precondition: the row's current RowVersion (row_lock) must still equal
 // *expectedVersion or the close refuses with storage.ErrVersionMismatch. This
@@ -79,6 +85,14 @@ func CloseIssueCheckedInTx(ctx context.Context, tx DBTX, id, reason, actor, sess
 	}
 	if !found {
 		return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
+	}
+	// The close guards run before close policy, so a target that trips both
+	// reads the guard's refusal, as `bd close` always printed it. They only
+	// read, so they need no savepoint.
+	if !closed {
+		if err := enforceCloseGuardsInTx(ctx, tx, id, targetColumn, actor, force); err != nil {
+			return nil, err
+		}
 	}
 	// domain/db also supplies a *sql.DB Runner, whose independently pooled
 	// statements cannot retain a savepoint. The shared UOW uses a pinned

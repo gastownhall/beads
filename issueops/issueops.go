@@ -354,8 +354,10 @@ type CloseRequest struct {
 	// and read back on CloseResult.Issue.ClosedBySession, under the same
 	// first-close-wins rule as Reason.
 	Session string
-	// Force bypasses only blocker and open-child close policy. It never bypasses
-	// validation, ExpectedVersion, or lifecycle rules.
+	// Force bypasses blocker and open-child close policy and the two close
+	// guards a force has always waived in bd: the pin, and the assignee
+	// authority fence. It never bypasses the template guard, validation,
+	// ExpectedVersion, or lifecycle rules.
 	Force bool
 	// ExpectedVersion requires the current row version to match, and is checked
 	// BEFORE the idempotent close — so a re-close of an already-closed issue
@@ -483,10 +485,16 @@ type Lifecycle interface {
 	// Close validates guards and commits the complete request as one atomic
 	// mutation. It moves the issue to literal StatusClosed, including from a
 	// configured done status. ExpectedVersion is checked first, including for an
-	// idempotent close. An unforced close with open children returns
-	// CloseOpenChildrenError without mutation. Force bypasses blocker and
-	// open-child policy and reports OpenChildren, including for an idempotent
-	// re-close. A refusal or validation error leaves persistent state unchanged.
+	// idempotent close. A close of an issue that is not already closed answers
+	// to the close guards before close policy: a template returns
+	// *TemplateReadOnlyError, forced or not; unforced, a pinned issue returns
+	// *PinnedError and one assigned to someone other than Actor (compared
+	// separator-insensitively) returns *CloseNotAssigneeError, matching
+	// ErrNotOwner. An unforced close with open children returns
+	// CloseOpenChildrenError without mutation. Force bypasses the pin, the
+	// assignee fence, and blocker and open-child policy, and reports
+	// OpenChildren, including for an idempotent re-close. A refusal or
+	// validation error leaves persistent state unchanged.
 	Close(context.Context, CloseRequest) (CloseResult, error)
 	// Reopen validates guards and commits the complete request as one atomic
 	// mutation. It moves literal StatusClosed and configured done statuses to

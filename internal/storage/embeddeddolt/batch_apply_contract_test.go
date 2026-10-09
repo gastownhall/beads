@@ -187,6 +187,9 @@ func TestBatchApplyContract(t *testing.T) {
 	t.Run("RefusesAnUnusableRequest", func(t *testing.T) {
 		conformance.RunBatchApplyRefusesAnUnusableRequest(t, ctx, fixture)
 	})
+	t.Run("CloseItemsAnswerToTheCloseGuards", func(t *testing.T) {
+		conformance.RunBatchApplyCloseItemsAnswerToTheCloseGuards(t, ctx, fixture)
+	})
 }
 
 // newEmbeddedBatchApplyFixture composes the frozen role kit with this backend's

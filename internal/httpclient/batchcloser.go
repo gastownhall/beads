@@ -239,7 +239,7 @@ func decodeBatchCloseResult(req issueops.CloseBatchRequest, resp *apigen.BatchCl
 	}
 	outcomes := make([]issueops.CloseOutcome, len(resp.Outcomes))
 	for i := range resp.Outcomes {
-		outcomes[i] = decodeBatchCloseOutcome(resp.Outcomes[i])
+		outcomes[i] = decodeBatchCloseOutcome(req.Actor, resp.Outcomes[i])
 	}
 	return issueops.CloseBatchResult{Outcomes: outcomes}, nil
 }
@@ -252,10 +252,10 @@ func decodeBatchCloseResult(req issueops.CloseBatchRequest, resp *apigen.BatchCl
 // members are FLAT on the outcome rather than nested under an error object, so
 // `open_children` is read from the same field in both branches and means two
 // different things depending on which one — see the schema.
-func decodeBatchCloseOutcome(item apigen.CloseOutcome) issueops.CloseOutcome {
+func decodeBatchCloseOutcome(actor string, item apigen.CloseOutcome) issueops.CloseOutcome {
 	out := issueops.CloseOutcome{IssueID: item.IssueId}
 	if item.Code != nil {
-		out.Err = perItemCloseError(item.IssueId, item)
+		out.Err = perItemCloseError(item.IssueId, actor, item)
 		return out
 	}
 	// A successful outcome carries the snapshot; already_closed is the idempotent
@@ -276,6 +276,10 @@ func decodeBatchCloseOutcome(item apigen.CloseOutcome) issueops.CloseOutcome {
 //	not_found                    -> issueops.ErrNotFound
 //	not_closable + open_children -> *issueops.CloseOpenChildrenError
 //	not_closable                 -> issueops.ErrCloseBlocked
+//	template_read_only           -> *issueops.TemplateReadOnlyError
+//	issue_pinned                 -> *issueops.PinnedError
+//	not_assignee + assignee      -> *issueops.CloseNotAssigneeError (the
+//	                                closing actor is the request's own)
 //	an unknown code              -> *wire.UnknownItemCodeError (the generic
 //	                                typed per-item error, so version skew lands
 //	                                as a typed refusal rather than a silent gap)
@@ -285,7 +289,7 @@ func decodeBatchCloseOutcome(item apigen.CloseOutcome) issueops.CloseOutcome {
 //
 // It is only ever called with a refused outcome — Code non-nil — which the one
 // caller above guarantees.
-func perItemCloseError(issueID string, item apigen.CloseOutcome) error {
+func perItemCloseError(issueID, actor string, item apigen.CloseOutcome) error {
 	var code string
 	if item.Code != nil {
 		code = *item.Code
@@ -298,6 +302,16 @@ func perItemCloseError(issueID string, item apigen.CloseOutcome) error {
 			return &issueops.CloseOpenChildrenError{IssueID: issueID, OpenChildren: *item.OpenChildren}
 		}
 		return issueops.ErrCloseBlocked
+	case codeTemplateReadOnly:
+		return &issueops.TemplateReadOnlyError{IssueID: issueID}
+	case codeIssuePinned:
+		return &issueops.PinnedError{IssueID: issueID}
+	case codeNotAssignee:
+		var assignee string
+		if item.Assignee != nil {
+			assignee = stripItemControlRunes(*item.Assignee)
+		}
+		return &issueops.CloseNotAssigneeError{IssueID: issueID, Assignee: assignee, Actor: actor}
 	default:
 		var detail string
 		if item.Detail != nil {
@@ -311,12 +325,15 @@ func perItemCloseError(issueID string, item apigen.CloseOutcome) error {
 	}
 }
 
-// The two per-item refusal codes this outcome can carry. They are the
+// The per-item refusal codes this outcome can carry. They are the
 // `Problem.code` spellings, restated here rather than imported because
 // importing the server package would drag the storage engine into a client.
 const (
-	codeNotFound    = "not_found"
-	codeNotClosable = "not_closable"
+	codeNotFound         = "not_found"
+	codeNotClosable      = "not_closable"
+	codeTemplateReadOnly = "template_read_only"
+	codeIssuePinned      = "issue_pinned"
+	codeNotAssignee      = "not_assignee"
 )
 
 // stripItemControlRunes removes control runes from a server-controlled per-item
@@ -363,6 +380,9 @@ func perItemCloseRefusal(issueID string, err error) (issueops.CloseOutcome, bool
 	case errors.As(err, &openChildren):
 	case errors.Is(err, issueops.ErrNotFound):
 	case errors.Is(err, issueops.ErrCloseBlocked):
+	case errors.Is(err, issueops.ErrTemplateReadOnly):
+	case errors.Is(err, issueops.ErrPinned):
+	case errors.As(err, new(*issueops.CloseNotAssigneeError)):
 	default:
 		return issueops.CloseOutcome{}, false
 	}

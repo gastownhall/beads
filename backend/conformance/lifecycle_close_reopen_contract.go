@@ -1822,3 +1822,175 @@ func (c *lifecycleCloseReopenEventCounter) assertNoneAdded(t *testing.T, label s
 	}
 	c.total = total
 }
+
+// RunLifecycleCloseEnforcesTheCloseGuards pins the three close guards
+// issueops.Lifecycle.Close states before close policy — template read-only,
+// the pin, and the assignee authority fence (be-035) — on the role itself, so
+// every caller of it is held to them and not only `bd close`, which used to
+// apply them as a CLI pre-read the served and library routes skipped.
+//
+// Each refusal is asserted at the level a caller acts on: the typed error with
+// its fields, its sentinel, and the sentence bd prints — read off the typed
+// error, because a served refusal wraps it in the problem envelope — plus the
+// row and the event stream left untouched. Force is asserted as the bypass for
+// exactly the two guards it has always waived, and NOT for the template.
+//
+// The controls are load-bearing too: an unassigned issue and one held by the
+// closing actor under a different spelling both close unforced, so a guard
+// that refused every assigned row, or compared verbatim, fails here. A wisp
+// case proves the guard reads the plane the close writes. A pinned issue with
+// an open child reads the PIN's refusal, pinning the order (guards before
+// policy). And a forced close of a boolean-pinned issue leaves the pin set, so
+// the plain retry must stay the idempotent no-op (ga-ktn9pe.4.8) rather than
+// refuse on the residue.
+func RunLifecycleCloseEnforcesTheCloseGuards(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
+	t.Helper()
+
+	template := fixture.IssuePrefix + "-lcg-template"
+	statusPinned := fixture.IssuePrefix + "-lcg-status-pinned"
+	flagPinned := fixture.IssuePrefix + "-lcg-flag-pinned"
+	held := fixture.IssuePrefix + "-lcg-held"
+	respelled := fixture.IssuePrefix + "-lcg-respelled"
+	unassigned := fixture.IssuePrefix + "-lcg-unassigned"
+	pinnedParent := fixture.IssuePrefix + "-lcg-pinned-parent"
+	pinnedChild := fixture.IssuePrefix + "-lcg-pinned-child"
+	wisp := fixture.IssuePrefix + "-lcg-wisp-held"
+
+	seed := func(issue *types.Issue) {
+		t.Helper()
+		issue.Title, issue.Priority, issue.IssueType = issue.ID, 2, types.TypeTask
+		if issue.Status == "" {
+			issue.Status = types.StatusOpen
+		}
+		if err := fixture.CreateIssue(ctx, issue, "seed"); err != nil {
+			t.Fatalf("seed %s: %v", issue.ID, err)
+		}
+	}
+	seed(&types.Issue{ID: template, IsTemplate: true})
+	seed(&types.Issue{ID: statusPinned, Status: types.StatusPinned})
+	seed(&types.Issue{ID: flagPinned, Pinned: true})
+	seed(&types.Issue{ID: held, Assignee: "holder"})
+	seed(&types.Issue{ID: respelled, Assignee: "gastown.closer"})
+	seed(&types.Issue{ID: unassigned})
+	seed(&types.Issue{ID: pinnedParent, Pinned: true})
+	seed(&types.Issue{ID: pinnedChild})
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, pinnedChild, pinnedParent, types.DepParentChild)
+
+	refuses := func(id string, force bool, label string, check func(error)) {
+		t.Helper()
+		before := lifecycleCloseReopenReadRow(t, ctx, fixture, id)
+		events := newLifecycleCloseReopenEventCounter(t, ctx, fixture, id)
+		_, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "closer", IssueID: id, Force: force})
+		check(err)
+		lifecycleCloseReopenAssertRow(t, ctx, fixture, id, "after the "+label+" refusal", before)
+		events.assertNoneAdded(t, label+" refusal")
+	}
+
+	// The template refuses, forced or not: no flag waives read-only.
+	for _, force := range []bool{false, true} {
+		refuses(template, force, "template", func(err error) {
+			var refusal *publicops.TemplateReadOnlyError
+			if !errors.As(err, &refusal) {
+				t.Fatalf("close of template %s (force=%v): err = %v, want *TemplateReadOnlyError", template, force, err)
+			}
+			if refusal.IssueID != template || !errors.Is(err, publicops.ErrTemplateReadOnly) {
+				t.Errorf("template refusal = %#v (%v), want IssueID %q matching ErrTemplateReadOnly", refusal, err, template)
+			}
+			want := "cannot modify template " + template + ": templates are read-only; use 'bd mol pour' to create a work item"
+			if refusal.Error() != want {
+				t.Errorf("template refusal reads %q, want %q", refusal.Error(), want)
+			}
+		})
+	}
+
+	// Both pin spellings refuse unforced (ga-z3vht).
+	for _, id := range []string{statusPinned, flagPinned} {
+		refuses(id, false, "pin", func(err error) {
+			var refusal *publicops.PinnedError
+			if !errors.As(err, &refusal) {
+				t.Fatalf("unforced close of pinned %s: err = %v, want *PinnedError", id, err)
+			}
+			if refusal.IssueID != id || !errors.Is(err, publicops.ErrPinned) {
+				t.Errorf("pin refusal = %#v (%v), want IssueID %q matching ErrPinned", refusal, err, id)
+			}
+			if want := "cannot modify pinned issue " + id + " (use --force to override)"; refusal.Error() != want {
+				t.Errorf("pin refusal reads %q, want %q", refusal.Error(), want)
+			}
+		})
+	}
+
+	// Another actor's bead refuses unforced, naming holder and actor.
+	refuses(held, false, "assignee", func(err error) {
+		var refusal *publicops.CloseNotAssigneeError
+		if !errors.As(err, &refusal) {
+			t.Fatalf("unforced close of %s held by another actor: err = %v, want *CloseNotAssigneeError", held, err)
+		}
+		if refusal.IssueID != held || refusal.Assignee != "holder" || refusal.Actor != "closer" {
+			t.Errorf("assignee refusal = %#v, want IssueID %q, Assignee holder, Actor closer", refusal, held)
+		}
+		if !errors.Is(err, publicops.ErrNotOwner) {
+			t.Errorf("assignee refusal %v does not match ErrNotOwner", err)
+		}
+		if want := `cannot close ` + held + `: assignee is "holder", actor is "closer"; reclaim or use --force to override`; refusal.Error() != want {
+			t.Errorf("assignee refusal reads %q, want %q", refusal.Error(), want)
+		}
+	})
+
+	// The guard runs before close policy: a pinned parent with an open child
+	// reads the pin, not the open children.
+	refuses(pinnedParent, false, "pin-before-policy", func(err error) {
+		if !errors.Is(err, publicops.ErrPinned) {
+			t.Fatalf("unforced close of pinned parent %s with an open child: err = %v, want ErrPinned first", pinnedParent, err)
+		}
+	})
+
+	// The controls: an unassigned bead and the actor's own bead under another
+	// spelling of its identity close unforced.
+	for _, tc := range []struct{ id, actor string }{{unassigned, "closer"}, {respelled, "gastown_closer"}} {
+		result, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: tc.actor, IssueID: tc.id})
+		if err != nil {
+			t.Fatalf("unforced close of %s by %s: %v, want it to land", tc.id, tc.actor, err)
+		}
+		if !result.Changed || result.Issue.Status != types.StatusClosed {
+			t.Errorf("unforced close of %s = %#v, want a committed close", tc.id, result)
+		}
+	}
+
+	// Force bypasses the pin and the assignee fence.
+	for _, id := range []string{statusPinned, flagPinned, held} {
+		result, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "closer", IssueID: id, Force: true})
+		if err != nil {
+			t.Fatalf("forced close of %s: %v, want force to bypass the guard", id, err)
+		}
+		if !result.Changed || result.Issue.Status != types.StatusClosed {
+			t.Errorf("forced close of %s = %#v, want a committed close", id, result)
+		}
+	}
+
+	// The forced close left pinned=true on the flag-pinned row; the plain retry
+	// is the idempotent re-close, not a pin refusal.
+	retry, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "closer", IssueID: flagPinned})
+	if err != nil {
+		t.Fatalf("plain re-close of the already-closed, still-pinned %s: %v, want the idempotent no-op", flagPinned, err)
+	}
+	if retry.Changed {
+		t.Errorf("plain re-close of %s reported Changed = true, want the no-op", flagPinned)
+	}
+
+	// The guard reads the plane the close writes.
+	if err := fixture.CreateWisp(ctx, &types.Issue{
+		ID: wisp, Title: wisp, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Assignee: "holder", Ephemeral: true,
+	}, "seed"); err != nil {
+		t.Fatalf("seed wisp %s: %v", wisp, err)
+	}
+	if _, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "closer", IssueID: wisp}); !errors.As(err, new(*publicops.CloseNotAssigneeError)) {
+		t.Fatalf("unforced close of wisp %s held by another actor: err = %v, want *CloseNotAssigneeError", wisp, err)
+	}
+	var status string
+	if err := fixture.QueryScalar(ctx, "SELECT status FROM wisps WHERE id = ?", []any{wisp}, &status); err != nil {
+		t.Fatalf("read wisp %s status: %v", wisp, err)
+	}
+	if types.Status(status) != types.StatusOpen {
+		t.Errorf("wisp %s status after the refusal = %q, want it still open", wisp, status)
+	}
+}

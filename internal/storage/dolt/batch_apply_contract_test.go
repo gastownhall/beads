@@ -255,6 +255,11 @@ func TestBatchApplyContract(t *testing.T) {
 		defer cancel()
 		conformance.RunBatchApplyRefusesAnUnusableRequest(t, ctx, fixture)
 	})
+	t.Run("CloseItemsAnswerToTheCloseGuards", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyCloseItemsAnswerToTheCloseGuards(t, ctx, fixture)
+	})
 }
 
 // newDoltBatchApplyFixture composes the frozen role kit with this backend's

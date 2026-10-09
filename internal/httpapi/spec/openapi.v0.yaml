@@ -3191,8 +3191,25 @@ paths:
         the blockers themselves travel in `blockers`). The MEMBER'S PRESENCE is
         the discriminator, so telling the two apart never requires reading
         `detail`. Both refusals are the ROLE's, so `force`
-        bypasses those two and nothing else — this endpoint cannot skip a guard
-        by forgetting one exists.
+        bypasses those two — this endpoint cannot skip a guard by forgetting
+        one exists.
+
+
+        ## Close guards
+
+
+        Before close policy, a close of an issue that is not already closed
+        answers to three guards, in this order. A template refuses with
+        `409` / `template_read_only` and has no bypass. A pinned issue (the
+        `pinned` flag or the `pinned` status) refuses with `409` /
+        `issue_pinned`. An issue assigned to someone other than `actor`
+        (compared separator-insensitively; an unassigned issue is closable by
+        anyone) refuses with `409` / `not_assignee`, carrying the holder in
+        `assignee`. `force` bypasses the pin and the assignee guard. They are
+        the guards `bd close` applies, and they are the ROLE's, so every route
+        to a close — this one, `POST /v0/beads/issues:batchClose` and a
+        `close` item of `POST /v0/beads/issues:batchApply` — applies them
+        alike. An idempotent re-close is not guarded: it changes nothing.
 
 
         ## The guard
@@ -3286,8 +3303,13 @@ paths:
             bypass both. `force` does NOT bypass the guard above.
 
 
-            Nothing was written in either case.
-          x-bd-codes: [not_closable, precondition_failed]
+            `template_read_only`, `issue_pinned` and `not_assignee`: a close
+            guard refused (see "Close guards"). `not_assignee` carries the
+            holder in `assignee`. `force` bypasses the latter two.
+
+
+            Nothing was written in any case.
+          x-bd-codes: [issue_pinned, not_assignee, not_closable, precondition_failed, template_read_only]
           content:
             application/problem+json:
               schema:
@@ -4238,6 +4260,13 @@ paths:
             per-item bypasses, and a forced item never earns this.
 
 
+            `template_read_only`, `issue_pinned` and `not_assignee` are the
+            close guards refusing a `close` item, exactly as
+            `POST /v0/beads/issues/{id}:close` answers them; `not_assignee`
+            carries the holder in `assignee`. `close.force` bypasses the latter
+            two.
+
+
             `already_claimed` is the assignee fence: an `update` whose
             `patch.assignee` transfers work away from a live foreign in-progress
             owner. `update.force_assignee_transfer` is the bypass, and
@@ -4267,7 +4296,8 @@ paths:
             a malformed request.
           x-bd-codes:
             [already_claimed, already_exists, dependency_cycle,
-             dependency_exists, not_closable, notes_overwrite_refused, precondition_failed]
+             dependency_exists, issue_pinned, not_assignee, not_closable,
+             notes_overwrite_refused, precondition_failed, template_read_only]
           content:
             application/problem+json:
               schema:
@@ -4315,8 +4345,9 @@ paths:
         contract: a refusal OF THE REQUEST is a problem document, and a refusal
         OF AN ITEM is a member of that item's outcome. `code` on an outcome is
         the same vocabulary `Problem.code` publishes, restricted to
-        `not_found` and `not_closable`, so a client classifies an item exactly
-        as it classifies a request.
+        `not_found`, `not_closable` and the three close guards
+        (`template_read_only`, `issue_pinned`, `not_assignee`), so a client
+        classifies an item exactly as it classifies a request.
 
 
         WHAT IS ATOMIC IS EVERYTHING THAT LANDS: one transaction, at most one
@@ -10949,13 +10980,22 @@ components:
             refused THIS item, exactly as `Problem.blockers` carries them for
             the single close, and optional for the same reason. Absent on a
             successful item and on every other refusal.
+        assignee:
+          type: string
+          description: >-
+            With `not_assignee`: the issue's assignee the refusing transaction
+            observed, exactly as `Problem.assignee` carries it for the single
+            close. Absent on a successful item and on every other refusal.
         code:
           type: string
           description: >-
             This item's refusal, from `Problem.code`'s vocabulary and restricted
-            to `not_found` (the id names no row in either plane) and
+            to `not_found` (the id names no row in either plane),
             `not_closable` (close policy refused it: open children, or a live
-            blocker — see `open_children`). ABSENT means the item succeeded.
+            blocker — see `open_children`), and the close guards
+            `template_read_only`, `issue_pinned` and `not_assignee` (see
+            `assignee`), exactly as the single close answers them. ABSENT means
+            the item succeeded.
 
 
             It is the problem vocabulary rather than a second one because an
@@ -11961,6 +12001,8 @@ components:
             configured with a token file), `not_found` (404),
             `already_claimed` (409), `not_claimable` (409),
             `not_closable` (409), `not_releasable` (409),
+            `template_read_only` (409), `issue_pinned` (409),
+            `not_assignee` (409),
             `dependency_cycle` (409), `dependency_exists` (409),
             `already_exists` (409), `precondition_failed` (409),
             `events_journal_disabled` (409), `events_journal_truncated` (410),
@@ -12020,7 +12062,9 @@ components:
           type: string
           description: >-
             With `already_claimed`: the actor currently holding the issue, read
-            inside the transaction that refused.
+            inside the transaction that refused. With `not_assignee`: the
+            issue's assignee the refusing close observed — always present on
+            that code.
 
 
             IT IS OPTIONAL ON EVERY OPERATION BUT THE CLAIM. `POST
