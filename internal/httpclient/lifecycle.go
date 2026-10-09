@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/encode"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
+	storageops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -330,6 +331,11 @@ func (l *httpLifecycle) Update(ctx context.Context, req issueops.UpdateRequest) 
 		return issueops.UpdateResult{}, invalid("update names no field to write")
 	}
 
+	req, err = l.applyTemplateGuardForServer(ctx, req)
+	if err != nil {
+		return issueops.UpdateResult{}, err
+	}
+
 	res, err := l.wire.UpdateIssue(ctx, req.IssueID, req.Actor, patch, updateGuards(req), updateFlags(req))
 	if err != nil {
 		if req.Claim && isClaimOnlyUpdate(req) && serverPredatesUpdateClaim(err) {
@@ -384,6 +390,7 @@ func updateFlags(req issueops.UpdateRequest) wire.UpdateFlags {
 		ForceAssigneeTransfer: req.ForceAssigneeTransfer,
 		ForceClosePolicy:      req.ForceClosePolicy,
 		ForceNotesOverwrite:   req.ForceNotesOverwrite,
+		AllowTemplate:         req.AllowTemplate,
 	}
 }
 
@@ -404,6 +411,38 @@ func serverPredatesUpdateClaim(err error) bool {
 	return errors.As(err, &problem) &&
 		problem.Reason == encode.UnknownParameterReason &&
 		problem.Param == "claim"
+}
+
+// applyTemplateGuardForServer decides, BEFORE the dial and from the cached
+// handshake, how the template read-only guard (storage
+// issueops.AuthorizeTemplateUpdate) reaches the server this request goes to.
+//
+// A server advertising wire.CapIssuesUpdateAllowTemplate enforces the guard in
+// the update's own transaction and accepts `allow_template`, so req goes out
+// as is. A server without the token predates both: it would edit a template
+// for any caller, and it refuses `allow_template` as an unknown parameter. So
+// against it the client runs the same rule itself, on a pre-read of the row —
+// the refusal `bd update` and `bd assign` always made before dialing — and
+// clears AllowTemplate, which that server has no guard to stand down. A row
+// the pre-read cannot find goes out unchanged: the server's own not-found
+// answer is the one to report.
+func (l *httpLifecycle) applyTemplateGuardForServer(ctx context.Context, req issueops.UpdateRequest) (issueops.UpdateRequest, error) {
+	snap, err := l.store.snapshot(ctx)
+	if err != nil {
+		return req, err
+	}
+	if snap != nil && slices.Contains(snap.Capabilities, wire.CapIssuesUpdateAllowTemplate) {
+		return req, nil
+	}
+	if req.AllowTemplate {
+		req.AllowTemplate = false
+		return req, nil
+	}
+	before, err := l.store.GetIssue(ctx, req.IssueID)
+	if err != nil {
+		return req, err
+	}
+	return req, storageops.AuthorizeTemplateUpdate(before, req)
 }
 
 // Close dials POST issues/{id}:close.
@@ -625,6 +664,7 @@ func isClaimOnlyUpdate(req issueops.UpdateRequest) bool {
 		!req.ForceAssigneeTransfer &&
 		!req.ForceClosePolicy &&
 		!req.ForceNotesOverwrite &&
+		!req.AllowTemplate &&
 		!req.IssuePlaneOnly &&
 		req.Provenance == "" &&
 		req.ExpectedVersion == nil &&

@@ -136,6 +136,14 @@ const (
 	// notes and the patched ones), not about a foreign actor's identity a
 	// client might need to display.
 	CodeNotesOverwrite Code = "notes_overwrite_refused"
+	// CodeTemplateReadOnly is a mutation that names a template. Templates are
+	// read-only — work comes out of one by pouring it, which creates new issues
+	// — so no force flag waives it: the same request refuses for as long as
+	// the row is a template. The one stand-down is updateIssue's
+	// `allow_template`, a deliberate template edit (bd label, bd set-state).
+	// A 409 for CodeNotClosable's reason: the body is well-formed and the
+	// STATE of the named row refuses it.
+	CodeTemplateReadOnly Code = "template_read_only"
 	// CodeDependencyCycle covers BOTH never-makes-progress refusals a requested
 	// edge set can earn: a scheduling cycle, and a blocking edge against the
 	// issue's own ancestor or descendant. They are one code because they have
@@ -262,6 +270,7 @@ var codeStatus = map[Code]int{
 	CodeNotClaimable:     http.StatusConflict,
 	CodeNotClosable:      http.StatusConflict,
 	CodeNotesOverwrite:   http.StatusConflict,
+	CodeTemplateReadOnly: http.StatusConflict,
 	CodeNotReleasable:    http.StatusConflict,
 	CodeDependencyCycle:  http.StatusConflict,
 	CodeDependencyExists: http.StatusConflict,
@@ -897,9 +906,14 @@ var operationCodes = map[string][]Code{
 	//
 	// not_claimable arrived with `claim`, beside the already_claimed it shares
 	// with the fence: a refused claim answers as claimIssue does.
+	//
+	// template_read_only is the role refusing an update of a template:
+	// templates are read-only, no force flag waives it, and only
+	// `allow_template` stands it down.
 	OpUpdateIssue: {
 		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound,
 		CodePreconditionFailed, CodeNotClosable, CodeAlreadyClaimed, CodeNotesOverwrite,
+		CodeTemplateReadOnly,
 		CodeNotClaimable, CodeDependencyCycle, CodeDependencyExists,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
@@ -962,6 +976,7 @@ var operationCodes = map[string][]Code{
 	OpApplyBatch: {
 		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound,
 		CodePreconditionFailed, CodeNotClosable, CodeAlreadyClaimed, CodeNotesOverwrite, CodeAlreadyExists,
+		CodeTemplateReadOnly,
 		CodeDependencyCycle, CodeDependencyExists,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
@@ -1542,6 +1557,11 @@ func ClassifyError(err error) Result {
 
 	case errors.Is(err, issueops.ErrCloseBlocked):
 		return closeBlockedResult(err, "issue is blocked", "clear the blocker or close with force")
+
+	// The detail is this server's own words rather than the role's message,
+	// for the reason Problem.detail gives.
+	case errors.Is(err, issueops.ErrTemplateReadOnly):
+		return newResult(CodeTemplateReadOnly, "this issue is a template, and templates are read-only; pour it to create work")
 
 	case errors.Is(err, ErrBusy):
 		res := newResult(CodeBusy, "")

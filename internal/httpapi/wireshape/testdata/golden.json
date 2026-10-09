@@ -4783,6 +4783,12 @@
     },
     {
       "schema": "UpdateIssueRequest",
+      "member": "allow_template",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "UpdateIssueRequest",
       "member": "claim",
       "type": "boolean",
       "required": false

@@ -493,12 +493,9 @@ pointless).`,
 			issue := result.Issue
 			issueStore := result.Store
 
-			if err := validateIssueUpdatable(id, issue); err != nil {
-				fmt.Fprintf(os.Stderr, "%s\n", err)
-				recordFailure(id, err.Error())
-				closeIfUnmutated(result)
-				continue
-			}
+			// The template guard is the role's (issueops.Lifecycle.Update),
+			// enforced inside the mutation on every route; its refusal is
+			// printed below as the line this command always printed.
 
 			// bd-98s5c: an unguarded assignee update must not silently
 			// overwrite another actor's live claim. Skipped under
@@ -577,7 +574,10 @@ pointless).`,
 					}
 				}
 				failureText := fmt.Sprintf("updating issue: %v", updateErr)
-				if errors.Is(updateErr, issueops.ErrNotesOverwrite) {
+				if refusal, ok := templateReadOnlyRefusal(id, updateErr); ok {
+					failureText = refusal.Error()
+					fmt.Fprintf(os.Stderr, "%s\n", refusal)
+				} else if errors.Is(updateErr, issueops.ErrNotesOverwrite) {
 					// The contract's AuthorizeNotesOverwrite fence refused
 					// inside the mutation transaction. Print the advice, not
 					// the raw sentinel.
@@ -1116,4 +1116,17 @@ func init() {
 	updateCmd.Flags().StringArray("unset-metadata", nil, "Remove metadata key (repeatable, e.g., --unset-metadata team)")
 	updateCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(updateCmd)
+}
+
+// templateReadOnlyRefusal reports whether err is the update role's template
+// refusal (issueops.Lifecycle.Update, any route) and, when it is, returns it
+// spelled against id — the argument as the caller typed it, which is what this
+// CLI's template sentence has always named. It is found with errors.Is because
+// the refusal may arrive wrapped by the unit of work or inside the served
+// problem envelope.
+func templateReadOnlyRefusal(id string, err error) (error, bool) {
+	if !errors.Is(err, issueops.ErrTemplateReadOnly) {
+		return nil, false
+	}
+	return &issueops.TemplateReadOnlyError{IssueID: id}, true
 }

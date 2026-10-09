@@ -212,10 +212,8 @@ func proxiedUpdateTarget(ctx context.Context, id string, in *updateInput) (*type
 		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("resolving issue: %v", err)}
 	}
 	current := &details.Issue
-	if err := validateIssueUpdatable(id, current); err != nil {
-		fmt.Fprintf(os.Stderr, "%s\n", err)
-		return nil, &updateIDFailure{ID: id, Error: err.Error()}
-	}
+	// The template guard is the role's, enforced inside the mutation;
+	// proxiedUpdateFailure prints its refusal as this route always did.
 	// bd-98s5c: an unguarded assignee update must not silently overwrite
 	// another actor's live claim. Skipped under --if-assignee, whose CAS names
 	// the holder explicitly (park stays possible without --force), and under
@@ -266,6 +264,10 @@ func proxiedClaimPoolAliases(ctx context.Context) func() []string {
 // longer owns, so both now read as the generic update failure. The id still
 // fails, loudly and non-zero.
 func proxiedUpdateFailure(id string, claim bool, err error) *updateIDFailure {
+	if refusal, ok := templateReadOnlyRefusal(id, err); ok {
+		fmt.Fprintf(os.Stderr, "%s\n", refusal)
+		return &updateIDFailure{ID: id, Error: refusal.Error()}
+	}
 	switch {
 	case errors.Is(err, storage.ErrNotFound):
 		fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)

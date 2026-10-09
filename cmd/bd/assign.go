@@ -75,9 +75,8 @@ Examples:
 
 		issueStore := result.Store
 
-		if err := validateIssueUpdatable(id, result.Issue); err != nil {
-			return HandleErrorRespectJSON("%s", err)
-		}
+		// The template guard is the role's (issueops.Lifecycle.Update); its
+		// refusal is printed below as this command always printed it.
 
 		// bd-98s5c: bd assign is shorthand for an unguarded assignee update —
 		// same live-claim fence as bd update -a. mc-zndi7.74: skipped when this
@@ -117,6 +116,9 @@ Examples:
 				if reported, ok := reportIfRevisionFailure("assigning", id, err, ifRevision); ok {
 					return reported
 				}
+			}
+			if refusal, ok := templateReadOnlyRefusal(id, err); ok {
+				return HandleErrorRespectJSON("%s", refusal)
 			}
 			return HandleErrorRespectJSON("updating %s: %v", id, err)
 		}

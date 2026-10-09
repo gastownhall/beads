@@ -196,11 +196,11 @@ func TestTheProjectIdentityVocabularyMatchesTheServer(t *testing.T) {
 	if !slices.Equal(behaviorCapabilities, []string{
 		httpapi.CapProjectEnforce, httpapi.CapBatchApplyLarge, httpapi.CapIssuesListSort, httpapi.CapIssuesCountScope,
 		httpapi.CapIssuesSweepWispsPlane, httpapi.CapIssuesSweepLiveDependents, httpapi.CapIssuesSweepLimit,
-		httpapi.CapBatchApplyDepAddLineage,
+		httpapi.CapBatchApplyDepAddLineage, httpapi.CapIssuesUpdateAllowTemplate,
 	}) {
 		t.Errorf("behaviorCapabilities = %v, want the server's project.enforce, issues.batchApplyLarge, issues.list.sort, "+
 			"issues.count.scope, issues.sweep.wispsPlane, issues.sweep.liveDependents, issues.sweep.limit and "+
-			"issues.batchApply.depAddLineage tokens", behaviorCapabilities)
+			"issues.batchApply.depAddLineage and issues.update.allowTemplate tokens", behaviorCapabilities)
 	}
 }
 

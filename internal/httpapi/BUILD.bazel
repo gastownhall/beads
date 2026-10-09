@@ -106,6 +106,7 @@ go_test(
         "sweep_test.go",
         "timed_provider_binding_test.go",
         "tree_test.go",
+        "update_template_test.go",
         "update_test.go",
         "wire_bijection_test.go",
         "wire_revision_test.go",

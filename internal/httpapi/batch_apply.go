@@ -1054,6 +1054,11 @@ func (s *Server) failApplyBatch(w http.ResponseWriter, r *http.Request, request 
 		s.fail(w, r, at(closeBlockedResult(err,
 			"an item closes a blocked issue", "clear the blocker, or send the item's force flag"), ""))
 
+	// An update item naming a template: the shared mapping plus the item
+	// members.
+	case errors.Is(err, issueops.ErrTemplateReadOnly):
+		s.fail(w, r, at(ClassifyError(err), ""))
+
 	case errors.Is(err, storage.ErrAlreadyClaimed):
 		res := at(newResult(CodeAlreadyClaimed,
 			"an update transfers work away from a live foreign owner; send `force_assignee_transfer`, or guard with `expected_assignee`"), "assignee")

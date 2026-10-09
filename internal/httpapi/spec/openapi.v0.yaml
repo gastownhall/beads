@@ -2501,10 +2501,11 @@ paths:
         '409':
           description: >-
             The request is well-formed and the STATE refuses it, and NOTHING WAS
-            WRITTEN. Six codes, each inherited from the operation that already
-            publishes it rather than minted here, and described in the
-            paragraphs below — `dependency_cycle` and `dependency_exists` share
-            one, because they are one member reaching the graph.
+            WRITTEN. Eight codes, described in the paragraphs below; all but
+            `template_read_only` are inherited from the operation that already
+            publishes them rather than minted here, and `dependency_cycle` and
+            `dependency_exists` share one paragraph, because they are one member
+            reaching the graph.
 
 
             `already_claimed` and `not_claimable` with `param: "claim"` are a
@@ -2557,9 +2558,18 @@ paths:
             both of which write blocking edges and do carry it: this operation
             publishes no member that writes one. What you get here is the plain
             scheduling cycle, every time.
+
+
+            `template_read_only` is an update of a template. Templates are
+            read-only — work comes out of one by pouring it — so every update
+            naming one refuses, whatever the patch and force flags, unless it
+            sets `allow_template` (a deliberate template edit).
+            It is checked after the guards above, so a stale guard still answers
+            `precondition_failed`.
           x-bd-codes:
             [already_claimed, dependency_cycle, dependency_exists,
-             not_claimable, not_closable, notes_overwrite_refused, precondition_failed]
+             not_claimable, not_closable, notes_overwrite_refused, precondition_failed,
+             template_read_only]
           content:
             application/problem+json:
               schema:
@@ -4328,6 +4338,11 @@ paths:
             per-item bypasses, and a forced item never earns this.
 
 
+            `template_read_only` is an `update` item whose target is a
+            template, exactly as `PATCH /v0/beads/issues/{id}` answers it; no
+            item member bypasses it.
+
+
             `already_claimed` is the assignee fence: an `update` whose
             `patch.assignee` transfers work away from a live foreign in-progress
             owner. `update.force_assignee_transfer` is the bypass, and
@@ -4357,7 +4372,8 @@ paths:
             a malformed request.
           x-bd-codes:
             [already_claimed, already_exists, dependency_cycle,
-             dependency_exists, not_closable, notes_overwrite_refused, precondition_failed]
+             dependency_exists, not_closable, notes_overwrite_refused, precondition_failed,
+             template_read_only]
           content:
             application/problem+json:
               schema:
@@ -8065,7 +8081,11 @@ components:
             `issues.batchApply.depAddLineage`, which announces that a
             `dep_add` item on `POST /v0/beads/issues:batchApply` accepts
             `has_spawner` and `thread_id` (see `ApplyDepAddItem`) rather than
-            a `400` naming the member unknown. The
+            a `400` naming the member unknown, and
+            `issues.update.allowTemplate`, which announces that
+            `PATCH /v0/beads/issues/{id}` accepts `allow_template` (see
+            `UpdateIssueRequest`) rather than a `400` naming the member
+            unknown. The
             list grows additively, and an operation never appears here unless
             it is fully implemented. This is how a client checks for an
             operation or a behavior — never the version string.
@@ -11597,6 +11617,18 @@ components:
             `expected_assignee` exemption: there is no compare-and-set that
             authorizes a notes overwrite, so combining the two is legal and
             each answers its own question.
+        allow_template:
+          type: boolean
+          default: false
+          description: >-
+            The caller edits a template deliberately, so the template read-only
+            refusal (`409 template_read_only`) stands down for this request.
+            `bd label` and `bd set-state` send it: they have always written to
+            templates. It bypasses nothing else, and has no effect on an issue
+            that is not a template. Advertised by the
+            `issues.update.allowTemplate` capability token; a server that
+            predates the member refuses it as an unknown parameter, and such a
+            server never applies the template guard either.
 
     IssuePatchBody:
       type: object
@@ -12153,6 +12185,7 @@ components:
             configured with a token file), `not_found` (404),
             `already_claimed` (409), `not_claimable` (409),
             `not_closable` (409), `not_releasable` (409),
+            `template_read_only` (409),
             `dependency_cycle` (409), `dependency_exists` (409),
             `already_exists` (409), `precondition_failed` (409),
             `events_journal_disabled` (409), `events_journal_truncated` (410),

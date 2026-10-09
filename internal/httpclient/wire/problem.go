@@ -638,6 +638,13 @@ var codeSentinel = map[string]func(*ProblemError, target) error{
 	// sentinel callers already switch on locally.]
 	"notes_overwrite_refused": func(*ProblemError, target) error { return issueops.ErrNotesOverwrite },
 
+	// The template guard, rebuilt whole so a caller reads the same typed error
+	// — and the same message — the embedded store returns. The row comes from
+	// the request or, on a batch, from `item_issue_id`.
+	"template_read_only": func(e *ProblemError, t target) error {
+		return &issueops.TemplateReadOnlyError{IssueID: refusedIssueID(e, t)}
+	},
+
 	// The same rule again: `issue_id` present means the edge named the issue's
 	// own ancestor or descendant, absent means a plain scheduling cycle. The
 	// three hierarchy members travel together and rebuild the typed error whole

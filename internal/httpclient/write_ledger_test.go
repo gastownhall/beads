@@ -262,6 +262,8 @@ func writeShapes() []writeShape {
 				"ForceAssigneeTransfer": member("force_assignee_transfer"),
 				"ForceClosePolicy":      member("force_close_policy"),
 				"Claim":                 member("claim"),
+				// The template guard's stand-down (bd label, bd set-state).
+				"AllowTemplate": member("allow_template"),
 			},
 		},
 		{

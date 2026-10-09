@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // IssueValidator validates an issue and returns an error if validation fails.
@@ -43,7 +44,7 @@ func NotTemplate() IssueValidator {
 			return nil // Let Exists() handle nil check if needed
 		}
 		if issue.IsTemplate {
-			return fmt.Errorf("cannot modify template %s: templates are read-only; use 'bd mol pour' to create a work item", id)
+			return &issueops.TemplateReadOnlyError{IssueID: id}
 		}
 		return nil
 	}

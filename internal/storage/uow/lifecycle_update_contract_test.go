@@ -92,6 +92,12 @@ func TestLifecycleUpdateContract(t *testing.T) {
 	t.Run("ProvenanceLabelsHistory", func(t *testing.T) {
 		conformance.RunLifecycleUpdateProvenanceLabelsHistory(t, ctx, fixture)
 	})
+	t.Run("RefusesATemplate", func(t *testing.T) {
+		conformance.RunLifecycleUpdateRefusesATemplate(t, ctx, fixture)
+	})
+	t.Run("AllowTemplateEditsATemplate", func(t *testing.T) {
+		conformance.RunLifecycleUpdateAllowTemplateEditsATemplate(t, ctx, fixture)
+	})
 }
 
 func newUOWLifecycleUpdateFixture(t *testing.T, ctx context.Context, prefix string) conformance.LifecycleUpdateFixture {

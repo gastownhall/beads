@@ -161,6 +161,16 @@ const CapIssuesSweepLimit = "issues.sweep.limit"
 // predate it; it refuses locally before the dial when the token is absent.
 const CapBatchApplyDepAddLineage = "issues.batchApply.depAddLineage"
 
+// CapIssuesUpdateAllowTemplate is the behavior capability that advertises
+// two things together: updateIssue enforces the role's template read-only
+// refusal, and UpdateIssueRequest's `allow_template` member (update.go) stands
+// it down for one request (the caller edits a template deliberately). An
+// older server predating this token answers the member with
+// `400 invalid_argument`/`unknown_parameter` and applies no template guard,
+// so a client that does not see the token refuses a template update itself
+// before the dial and sends the request without the member.
+const CapIssuesUpdateAllowTemplate = "issues.update.allowTemplate"
+
 // customMethodTarget splits the custom method off the segment the router
 // matched, and reports the row that claims it.
 //
@@ -922,7 +932,7 @@ func (r route) specPathOf() string {
 var behaviorCapabilities = []string{
 	CapProjectEnforce, CapBatchApplyLarge, CapIssuesListSort, CapIssuesCountScope,
 	CapIssuesSweepWispsPlane, CapIssuesSweepLiveDependents, CapIssuesSweepLimit,
-	CapBatchApplyDepAddLineage,
+	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate,
 }
 
 // Capabilities lists what this build advertises in ContextResponse.capabilities:

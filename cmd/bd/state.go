@@ -260,6 +260,9 @@ func runSetState(ctx context.Context, issueID, dimension, newValue, reason strin
 			Add:    []string{newLabel},
 			Remove: removeStateLabel(oldLabel),
 		}},
+		// bd set-state has always edited templates; the role's template guard
+		// stands down for it (issueops.UpdateRequest.AllowTemplate).
+		AllowTemplate: true,
 	}); err != nil {
 		return HandleErrorRespectJSON("setting %s: %v", dimension, err)
 	}

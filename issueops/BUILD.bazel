@@ -33,6 +33,7 @@ go_library(
         "releaser.go",
         "statsreporter.go",
         "sweeper.go",
+        "template_errors.go",
         "treewalker.go",
         "versionreconciler.go",
         "workspaceconfig.go",

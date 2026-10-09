@@ -157,6 +157,12 @@ func TestBatchApplyContract(t *testing.T) {
 	t.Run("RefusesAnUnusableRequest", func(t *testing.T) {
 		conformance.RunBatchApplyRefusesAnUnusableRequest(t, ctx, fixture)
 	})
+	t.Run("UpdateItemsRefuseATemplate", func(t *testing.T) {
+		conformance.RunBatchApplyUpdateItemsRefuseATemplate(t, ctx, fixture)
+	})
+	t.Run("SplicesTheMetadataOfATemplateItCreates", func(t *testing.T) {
+		conformance.RunBatchApplySplicesTheMetadataOfATemplateItCreates(t, ctx, fixture)
+	})
 }
 
 func newUOWBatchApplyFixture(t *testing.T, ctx context.Context, prefix string) conformance.BatchApplyFixture {

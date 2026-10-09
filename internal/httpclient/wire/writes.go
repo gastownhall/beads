@@ -237,6 +237,7 @@ type updateBody struct {
 	ForceAssigneeTransfer *bool `json:"force_assignee_transfer,omitempty"`
 	ForceClosePolicy      *bool `json:"force_close_policy,omitempty"`
 	ForceNotesOverwrite   *bool `json:"force_notes_overwrite,omitempty"`
+	AllowTemplate         *bool `json:"allow_template,omitempty"`
 }
 
 // UpdateFlags are updateIssue's four top-level booleans: the claim, and the
@@ -268,6 +269,9 @@ type UpdateFlags struct {
 	// replace existing non-empty notes with different non-empty content. The
 	// server requires patch.notes beside it.
 	ForceNotesOverwrite bool
+	// AllowTemplate stands the template read-only refusal down for this
+	// request (bd label, bd set-state edit templates by design).
+	AllowTemplate bool
 }
 
 // UpdateIssue patches one issue. It is the only PATCH on this surface: the
@@ -291,6 +295,7 @@ func (c *Client) UpdateIssue(ctx context.Context, id, actor string, patch map[st
 		ForceAssigneeTransfer: trueOrAbsent(flags.ForceAssigneeTransfer),
 		ForceClosePolicy:      trueOrAbsent(flags.ForceClosePolicy),
 		ForceNotesOverwrite:   trueOrAbsent(flags.ForceNotesOverwrite),
+		AllowTemplate:         trueOrAbsent(flags.AllowTemplate),
 	}
 	r := Request{Op: OpUpdateIssue, Method: http.MethodPatch, Path: path, Body: body, IssueID: id}
 	if err := c.dispatch(ctx, r, &out); err != nil {

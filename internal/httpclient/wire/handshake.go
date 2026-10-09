@@ -209,6 +209,15 @@ const CapSweepLimit = "issues.sweep.limit"
 // asked to carry against an older server.
 const CapBatchApplyDepAddLineage = "issues.batchApply.depAddLineage"
 
+// CapIssuesUpdateAllowTemplate is the behavior capability announcing that
+// updateIssue enforces the template read-only guard and accepts
+// `allow_template` to stand it down, spelled exactly as httpapi's constant of
+// the same name. Lifecycle.Update reads it from the cached handshake before
+// the dial (applyTemplateGuardForServer): against a server without it, which
+// predates the guard, the client refuses a template update itself on a
+// pre-read and never sends `allow_template`.
+const CapIssuesUpdateAllowTemplate = "issues.update.allowTemplate"
+
 // CapExternalDependencies is the CONDITIONAL behavior capability announcing
 // that the ready, claim and close operations of this server apply bd's
 // external-dependency policy themselves, spelled exactly as httpapi's constant
@@ -349,7 +358,7 @@ func (e *WireRevisionSkewError) Unwrap() error { return ErrWireRevisionSkew }
 var behaviorCapabilities = []string{
 	CapProjectEnforce, CapBatchApplyLarge, CapListSort, CapCountScope,
 	CapSweepWispsPlane, CapSweepLiveDependents, CapSweepLimit,
-	CapBatchApplyDepAddLineage,
+	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate,
 }
 
 // CapabilityFor reports the capability token gating op, and whether op is on

@@ -1227,6 +1227,7 @@ go_test(
         "update_proxied_integration_test.go",
         "update_proxied_server_test.go",
         "update_stray_positional_test.go",
+        "update_template_refusal_test.go",
         "user_config_path_windows_test.go",
         "utils_unit_test.go",
         "vc_embedded_test.go",

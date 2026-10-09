@@ -168,6 +168,9 @@ func applyLabelEdit(ctx context.Context, issueIDs []string, labels []string, ope
 			Actor:   currentActor(),
 			IssueID: issueID,
 			Patch:   patch,
+			// bd label has always edited templates; the role's template
+			// guard stands down for it (issueops.UpdateRequest.AllowTemplate).
+			AllowTemplate: true,
 		})
 		if uerr != nil {
 			gerund := labelOperationGerund(operation)
@@ -364,6 +367,8 @@ func removeLabelsByPrefix(ctx context.Context, issueIDs []string, prefix string,
 			Actor:   currentActor(),
 			IssueID: target.issueID,
 			Patch:   issueops.IssuePatch{Labels: issueops.LabelPatch{Remove: target.labels}},
+			// As above: bd label edits templates by design.
+			AllowTemplate: true,
 		})
 		if uerr != nil {
 			return HandleErrorRespectJSON("label removing (prefix): %s: %v", target.issueID, uerr)

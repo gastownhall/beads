@@ -204,6 +204,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ones cannot fork.
 
 ### Fixed
+- **Templates are now read-only for every caller, not only `bd update`.** The
+  template guard used to be a pre-read in `cmd/bd`, so an update through
+  `bd serve` (`PATCH /v0/beads/issues/{id}`), an `update` item of
+  `issues:batchApply`, or a library caller of `issueops.Lifecycle.Update` or
+  `BatchApplier` edited a template that `bd update` refused. It now lives in
+  the role, in the update's own transaction, on every backend: any update
+  naming a template refuses with `*issueops.TemplateReadOnlyError` (matching
+  `ErrTemplateReadOnly`), whatever its patch and force flags, after the
+  compare-and-set guards. Over HTTP it is `409` `template_read_only`, and the
+  client rebuilds the same typed error. HTTP and library callers that edited
+  templates are now refused (pour the template instead) unless they set the
+  new `UpdateRequest.AllowTemplate` (`allow_template` on the PATCH body), which
+  stands the guard down for that one request. `bd update`, `bd assign` and the
+  proxied `bd tag` print the same line as before; `bd label` and
+  `bd set-state` set `AllowTemplate` and keep editing templates as they always
+  have. A batch create that makes a template and splices its metadata still
+  lands: the splice finishes the create. Version skew: a new `bd` against an
+  older `bd serve` (no `issues.update.allowTemplate` token in the handshake)
+  refuses a template update itself before dialing, and never sends
+  `allow_template` to it. An older `bd label` or `bd set-state` against a new
+  `bd serve` cannot send `allow_template`, so it now gets `409`
+  `template_read_only` on a template; upgrade the client. Not yet moved:
+  `bd comment`, `bd note`, `bd priority` and `bd tag` still refuse templates
+  with their own pre-read in `cmd/bd` (their direct-route writes do not go
+  through `Lifecycle.Update`), so for those four the guard lives only in the
+  CLI.
 - **PRs based on `hotfix/**` branches now run full CI, not just
   cross-version historical smokes and triage labeling.** `pr.yml`,
   `pr-risk.yml`, `conformance.yml`, `cross-version-smoke.yml` and

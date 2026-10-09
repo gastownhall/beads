@@ -76,8 +76,10 @@ func versionMintEdges(fns map[string]*journalscan.FuncInfo) func(*journalscan.Fu
 // its own RecordVersionInTx: nothing it calls with the gate off can carry it
 // on its behalf. TestCompositeMutationsCarryTheirOwnMint is what turns
 // reviewer Probe 2 (delete ExecuteUpdate's final mint block) into a failure.
+// ExecuteUpdate's body is executeUpdate (ExecuteUpdate is it with the template
+// guard on), so the composite named here is the body that carries the mint.
 var versionCompositeMutations = []string{
-	"ExecuteUpdate",
+	"executeUpdate",
 	"applyLabelPatch",
 	"applyParentPatch",
 }
