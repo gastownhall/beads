@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -90,14 +91,19 @@ func (l *httpLeaseReclaimer) Reclaim(ctx context.Context, req issueops.ReclaimRe
 }
 
 // validateReclaimRequest restates the role's refusals, in the role's order and
-// with the role's types: the actor, the grace window, the id cap (counted as
-// sent), the first blank id, then the first blank entry of the other scopes.
+// with the role's types: the actor (present, then within its column once
+// trimmed), the grace window, the id cap (counted as sent), the first blank
+// id, then the first blank entry of the other scopes.
 func validateReclaimRequest(req issueops.ReclaimRequest) error {
 	field := func(name, format string, args ...any) error {
 		return &issueops.ReclaimFieldError{Field: name, Detail: invalid(format, args...).Error()}
 	}
-	if strings.TrimSpace(req.Actor) == "" {
+	actor := strings.TrimSpace(req.Actor)
+	if actor == "" {
 		return field(issueops.ReclaimFieldActor, "reclaim actor is required")
+	}
+	if err := types.CheckFieldLen("actor", actor); err != nil {
+		return field(issueops.ReclaimFieldActor, "%v", err)
 	}
 	if req.OlderThan < 0 {
 		return field(issueops.ReclaimFieldOlderThan, "reclaim older_than must not be negative")

@@ -2,10 +2,12 @@ package uow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // TestLeaseReclaimerContract runs the LeaseReclaimer contract against the
@@ -56,6 +58,35 @@ func TestLeaseReclaimerContract(t *testing.T) {
 	t.Run("DoesNotMutateTheCallerRequest", func(t *testing.T) {
 		conformance.RunLeaseReclaimerDoesNotMutateTheCallerRequest(t, ctx, fixture)
 	})
+}
+
+// TestLeaseReclaimerRefusesBeforeOpeningAUOW: a malformed sweep is a
+// deterministic validation failure and must not cost a database connection to
+// discover, as on the dolt and embedded-dolt legs. The provider fails every
+// open, so a refusal that came from inside a unit of work would be counted.
+func TestLeaseReclaimerRefusesBeforeOpeningAUOW(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		request publicops.ReclaimRequest
+	}{
+		{"no actor", publicops.ReclaimRequest{}},
+		{"a negative grace window", publicops.ReclaimRequest{Actor: "reaper", OlderThan: -1}},
+		{"a blank id", publicops.ReclaimRequest{Actor: "reaper", Filter: publicops.ReclaimFilter{IDs: []string{""}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &mockUnitOfWorkProvider{newUOWErr: errors.New("unexpected unit-of-work open")}
+			reclaimer, err := NewLeaseReclaimer(provider)
+			if err != nil {
+				t.Fatalf("NewLeaseReclaimer: %v", err)
+			}
+			if _, err := reclaimer.Reclaim(context.Background(), tc.request); !errors.Is(err, publicops.ErrValidation) {
+				t.Fatalf("err = %v, want ErrValidation", err)
+			}
+			if provider.newUOWCalls != 0 {
+				t.Errorf("an invalid request opened %d units of work", provider.newUOWCalls)
+			}
+		})
+	}
 }
 
 // newUOWLeaseReclaimerFixture takes every role through the provider's own

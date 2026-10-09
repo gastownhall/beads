@@ -384,6 +384,11 @@ func RunLeaseReclaimerRefusesAMalformedRequest(t *testing.T, ctx context.Context
 		tooMany bool
 	}{
 		{"an empty actor", publicops.ReclaimRequest{Filter: publicops.ReclaimFilter{IDs: []string{id}}}, false},
+		// One past the column every reverted row's recovery event records it
+		// in: a typed refusal before the sweep, never the backend's own error
+		// from the first row it would have reverted.
+		{"an over-long actor", publicops.ReclaimRequest{Actor: strings.Repeat("r", types.MaxFieldLen+1),
+			Filter: publicops.ReclaimFilter{IDs: []string{id}}}, false},
 		{"a negative grace window", publicops.ReclaimRequest{Actor: leaseReclaimerReaper, OlderThan: -time.Second,
 			Filter: publicops.ReclaimFilter{IDs: []string{id}}}, false},
 		{"a blank scoped id", publicops.ReclaimRequest{Actor: leaseReclaimerReaper,

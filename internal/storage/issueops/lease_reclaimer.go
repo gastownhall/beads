@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
 
@@ -17,13 +18,26 @@ import (
 // ValidateGetManyRequest's reason: the obligation it bounds is reading the
 // request apart, not reading the rows it resolves to.
 //
-// It is the ONE definition of a valid request: the library legs run it, bd
-// serve's handler leaves every rule to it, and the HTTP client restates it
-// (pinned by TestReclaimValidationMatchesTheSharedValidator). Every refusal
-// but the cap is a *publicops.ReclaimFieldError naming its field.
+// THE ACTOR IS BOUNDED HERE, trimmed as the sweep records it, for
+// claimIssueInTx's reason: every reverted row's recovery event lands in a
+// VARCHAR(255) column, so an over-long actor is a typed refusal on every leg
+// rather than a raw backend error on the first sweep that reverts something.
+//
+// It is the ONE definition of the role's rules: the library legs run it, and
+// the HTTP client restates it (pinned by
+// TestReclaimValidationMatchesTheSharedValidator). Every refusal but the cap
+// is a *publicops.ReclaimFieldError naming its field. bd serve's handler leaves
+// the id cap and the blank entries to it, and adds three rules of the wire's
+// own that a library caller is not held to: the claim's name rules on the
+// actor (a 256-byte bound, no control characters), an `older_than_seconds` a
+// time.Duration can hold, and no scope member present but empty.
 func ValidateReclaimRequest(request publicops.ReclaimRequest) error {
-	if strings.TrimSpace(request.Actor) == "" {
+	actor := strings.TrimSpace(request.Actor)
+	if actor == "" {
 		return reclaimFieldError(publicops.ReclaimFieldActor, "reclaim actor is required")
+	}
+	if err := types.CheckFieldLen("actor", actor); err != nil {
+		return reclaimFieldError(publicops.ReclaimFieldActor, err.Error())
 	}
 	if request.OlderThan < 0 {
 		return reclaimFieldError(publicops.ReclaimFieldOlderThan, "reclaim older_than must not be negative")

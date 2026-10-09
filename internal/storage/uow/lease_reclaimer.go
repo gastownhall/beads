@@ -39,7 +39,16 @@ var _ publicops.LeaseReclaimer = (*leaseReclaimer)(nil)
 // work, composing the same conditional commit message the dolt and
 // embedded-dolt legs use: a sweep that reverts nothing leaves no history
 // entry describing a no-op.
+//
+// VALIDATION HAPPENS BEFORE THE UNIT OF WORK OPENS, as on those two legs and
+// for Releaser's reason: a refusal then changes nothing on the connection as
+// well as on the rows. The shared body validates again inside the transaction,
+// which is what keeps a leg that skipped this from answering a different
+// contract.
 func (l *leaseReclaimer) Reclaim(ctx context.Context, request publicops.ReclaimRequest) (publicops.ReclaimResult, error) {
+	if err := storageissueops.ValidateReclaimRequest(request); err != nil {
+		return publicops.ReclaimResult{}, err
+	}
 	return RunTxResult(ctx, l.provider, func(ctx context.Context, uw UnitOfWork) (publicops.ReclaimResult, string, error) {
 		result, err := uw.IssueUseCase().Reclaim(ctx, request)
 		if err != nil {

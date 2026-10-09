@@ -565,6 +565,11 @@ func TestReclaimValidationMatchesTheSharedValidator(t *testing.T) {
 		"blank label":        {Actor: "reaper", Filter: issueops.ReclaimFilter{Labels: []string{"a", ""}}},
 		"blank label-any":    {Actor: "reaper", Filter: issueops.ReclaimFilter{LabelsAny: []string{"\t"}}},
 		"blank exclude":      {Actor: "reaper", Filter: issueops.ReclaimFilter{ExcludeLabels: []string{""}}},
+
+		// The actor is held to its column once trimmed, as the sweep records it.
+		"actor at the bound":        {Actor: strings.Repeat("r", types.MaxFieldLen)},
+		"padded actor at the bound": {Actor: "  " + strings.Repeat("r", types.MaxFieldLen) + " "},
+		"over-long actor":           {Actor: strings.Repeat("r", types.MaxFieldLen+1)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			mine := validateReclaimRequest(req)
@@ -581,6 +586,44 @@ func TestReclaimValidationMatchesTheSharedValidator(t *testing.T) {
 			errors.As(shared, &sharedField)
 			if (mineField == nil) != (sharedField == nil) || (mineField != nil && mineField.Field != sharedField.Field) {
 				t.Fatalf("field differs: client %v, shared %v", mine, shared)
+			}
+		})
+	}
+}
+
+// TestReclaimSendsAnyReplicaOnlyWhenAsked pins the one filter member that
+// WIDENS a sweep rather than narrowing it. ReclaimFilter.AnyReplica disarms the
+// granting-replica guard, so a client that sent it unasked would revert leases
+// another replica granted, and one that dropped it would keep the guard a caller
+// had disarmed. Unasked it must be absent from the body; asked it must be true.
+func TestReclaimSendsAnyReplicaOnlyWhenAsked(t *testing.T) {
+	for name, anyReplica := range map[string]bool{"unasked": false, "asked": true} {
+		t.Run(name, func(t *testing.T) {
+			store, w := recordingStore(t)
+			role, err := store.LeaseReclaimer()
+			if err != nil {
+				t.Fatalf("LeaseReclaimer(): %v", err)
+			}
+			if _, err := role.Reclaim(context.Background(), issueops.ReclaimRequest{
+				Actor:  "reaper",
+				Filter: issueops.ReclaimFilter{IDs: []string{"bd-1"}, AnyReplica: anyReplica},
+			}); err != nil {
+				t.Fatalf("Reclaim(): %v", err)
+			}
+			if len(w.requests) != 1 {
+				t.Fatalf("dialed %d times, want 1", len(w.requests))
+			}
+			body, ok := w.requests[0].Body.(apigen.ReclaimIssuesRequest)
+			if !ok {
+				t.Fatalf("the body is %T, want the generated ReclaimIssuesRequest", w.requests[0].Body)
+			}
+			switch {
+			case !anyReplica && body.AnyReplica != nil:
+				t.Errorf("an unasked sweep sent any_replica=%v; the guard must stay armed", *body.AnyReplica)
+			case anyReplica && body.AnyReplica == nil:
+				t.Error("a sweep that disarmed the replica guard sent no any_replica; the server would keep it armed")
+			case anyReplica && !*body.AnyReplica:
+				t.Error("a sweep that disarmed the replica guard sent any_replica=false, want true")
 			}
 		})
 	}

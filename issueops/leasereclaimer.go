@@ -81,7 +81,9 @@ type ReclaimRequest struct {
 	// update. It is REQUIRED — an empty or all-blank Actor is ErrValidation —
 	// for the same reason Releaser.Release requires one: a reclaim is the
 	// moment work stops being owned, and the one question asked of a reverted
-	// row's history afterwards is who ran the sweep that freed it.
+	// row's history afterwards is who ran the sweep that freed it. It is
+	// recorded trimmed, and one longer than types.MaxFieldLen characters once
+	// trimmed is ErrValidation too: the column it is recorded in holds no more.
 	Actor string
 	// OlderThan is the grace period past a lease's own TTL: only a lease whose
 	// lease_expires_at is more than OlderThan in the past is eligible. It must
@@ -162,7 +164,8 @@ type LeaseReclaimer interface {
 	//
 	// REFUSALS:
 	//
-	//   - an empty or all-blank Actor: ErrValidation, before anything is read;
+	//   - an empty or all-blank Actor, or one longer than types.MaxFieldLen
+	//     characters once trimmed: ErrValidation, before anything is read;
 	//   - a negative OlderThan: ErrValidation;
 	//   - more than MaxReclaimIDs entries in Filter.IDs, or an empty-string
 	//     entry among them: *TooManyReclaimIDsError or ErrValidation,

@@ -9,6 +9,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 
+	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
 
@@ -32,6 +33,11 @@ func TestValidateReclaimRequestRefusesInTheDocumentedOrder(t *testing.T) {
 		{"exactly the cap", publicops.ReclaimRequest{Actor: "reaper", Filter: publicops.ReclaimFilter{IDs: atCap}}, false, false},
 		{"no actor", publicops.ReclaimRequest{}, true, false},
 		{"a blank actor", publicops.ReclaimRequest{Actor: "  "}, true, false},
+		// The actor is bounded as the sweep records it: trimmed, then held to
+		// its column, so padding around a value at the bound is not over it.
+		{"an actor at the bound", publicops.ReclaimRequest{Actor: strings.Repeat("r", types.MaxFieldLen)}, false, false},
+		{"a padded actor at the bound", publicops.ReclaimRequest{Actor: "  " + strings.Repeat("r", types.MaxFieldLen) + " "}, false, false},
+		{"an over-long actor", publicops.ReclaimRequest{Actor: strings.Repeat("r", types.MaxFieldLen+1)}, true, false},
 		{"a negative grace window", publicops.ReclaimRequest{Actor: "reaper", OlderThan: -time.Nanosecond}, true, false},
 		{"a blank id", publicops.ReclaimRequest{Actor: "reaper", Filter: publicops.ReclaimFilter{IDs: []string{"bd-1", ""}}}, true, false},
 		{"a blank assignee", publicops.ReclaimRequest{Actor: "reaper", Filter: publicops.ReclaimFilter{Assignees: []string{"w", " "}}}, true, false},
