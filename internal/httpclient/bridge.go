@@ -5,6 +5,7 @@ package httpclient
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 
@@ -146,13 +147,13 @@ func (s *Store) readyBridgePage(ctx context.Context, op string, filter types.Wor
 // GetIssue serves getIssue. It is the `bd list --parent` walk's
 // parent-existence probe and the molecule loader's read half.
 //
-// A MISS IS (nil, nil), NOT AN ERROR. That is the raw method's own contract and
-// the walk depends on it: getHierarchicalChildren reads a nil result as "parent
-// issue not found" and prints that, where an error would print the transport's
-// vocabulary instead.
+// A MISS IS storage.ErrNotFound (issueops.ErrNotFound), wrapped exactly as the local stores wrap it
+// (issueops.GetIssueInTx: "not found: issue <id>"), so a caller written against
+// the backend contract — `errors.Is(err, storage.ErrNotFound)` — reads an http
+// miss the same as a local one. The empty id is a miss too, as it is locally.
 func (s *Store) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
 	if id == "" {
-		return nil, nil
+		return nil, issueNotFound(id)
 	}
 	path, err := wire.IssuePath(id)
 	if err != nil {
@@ -170,7 +171,7 @@ func (s *Store) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
 		IssueID: id,
 	}, &details)
 	if errors.Is(err, issueops.ErrNotFound) {
-		return nil, nil
+		return nil, issueNotFound(id)
 	}
 	if err != nil {
 		return nil, err
@@ -194,4 +195,9 @@ func (s *Store) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
 	}
 	issue.RowVersion = version
 	return &issue, nil
+}
+
+// issueNotFound is the raw GetIssue miss, spelled as the local stores spell it.
+func issueNotFound(id string) error {
+	return fmt.Errorf("%w: issue %s", issueops.ErrNotFound, id)
 }
