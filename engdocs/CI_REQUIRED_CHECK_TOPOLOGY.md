@@ -1041,7 +1041,7 @@ Required` requires them to have run remotely and passed.
       frozen 20-shard block was the retired `test-embedded-cmd` jobs' split,
       F1), `//internal/storage/embeddeddolt:embeddeddolt_embedded_test` (20;
       the frozen 5-shard block was `test-embedded-storage`'s, F1),
-      `//cmd/bd:bd_proxied_test` (28; the frozen 15-shard block was
+      `//cmd/bd:bd_proxied_test` (34; the frozen 15-shard block was
       `test-proxied-cmd`'s, F2) and
       `//internal/storage/dolt:dolt_server_full_test` (16) to have run
       exactly the tests its shard script lists (list-only mode, minus

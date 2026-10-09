@@ -225,12 +225,12 @@
 #
 # Format: <total_shards> <shard_number> <top_level_test_name>
 #
-# 28-shard split for the Bazel-only proxied-server tier
+# 34-shard split for the Bazel-only proxied-server tier
 # (bazel-proxied in .github/workflows/bazel.yml), bin-packed
 # longest-processing-time-first by measured wall-time from
 # scripts/ci/proxied_test_durations.json (see that file for
 # provenance and its "relative weight, not absolute SLA" caveat).
-# Regenerate with scripts/ci/gen_proxied_shard_manifest.py 28
+# Regenerate with scripts/ci/gen_proxied_shard_manifest.py 34
 # --weights=duration --write after adding or removing
 # TestProxiedServer*/TestServerMode* functions. --write is incremental:
 # it keeps every already-assigned test on its current shard and only
@@ -252,238 +252,244 @@
 # regeneration. Add them to the generator or the durations file
 # instead.
 
-28 1 TestProxiedServerCleanDatabasesPurgeDropped
-28 1 TestProxiedServerDep2
-28 1 TestProxiedServerMolSquash
-28 1 TestProxiedServerSQLDatabaseFlag
-28 1 TestProxiedServerUpdateConcurrentMetadata
-28 1 TestProxiedServerUpdateHooks
+34 1 TestProxiedServerDep2
+34 1 TestProxiedServerMolProgress
+34 1 TestProxiedServerReadyClaimConcurrent
+34 1 TestProxiedServerServeActivatesTheEventsJournal
+34 1 TestProxiedServerServeRelease
 
-28 2 TestProxiedServerCloseB
-28 2 TestProxiedServerCloseBeadGate
-28 2 TestProxiedServerCompactHistory
-28 2 TestProxiedServerDoltLifecycle
-28 2 TestProxiedServerEdit
-28 2 TestProxiedServerPromote
-28 2 TestProxiedServerUpdateC
-28 2 TestProxiedServerUpdateConcurrentAppendNotes
+34 2 TestProxiedServerDepListSingleIDWarnsOnDroppedExternalEdge
+34 2 TestProxiedServerGateList
+34 2 TestProxiedServerList
+34 2 TestProxiedServerServeRemoveDependency
+34 2 TestProxiedServerUpdateC
 
-28 3 TestProxiedServerClose2B
-28 3 TestProxiedServerComment
-28 3 TestProxiedServerCompactDolt
-28 3 TestProxiedServerCreateInfraTypeRoutesToWisps
-28 3 TestProxiedServerDeleteForceOrphans
-28 3 TestProxiedServerExternalMutationPolicy
-28 3 TestProxiedServerMoleculeFrontDoorDirectServerProxyParity
-28 3 TestProxiedServerReopenConcurrent
+34 3 TestProxiedServerAutoPrune
+34 3 TestProxiedServerClose2B
+34 3 TestProxiedServerEventsJournalOffByDefault
+34 3 TestProxiedServerMolLastActivity
+34 3 TestProxiedServerPurgeWispsPlaneRetention
+34 3 TestProxiedServerServeLifecycle
+34 3 TestProxiedServerStatuses
 
-28 4 TestProxiedServerCascadeParity
-28 4 TestProxiedServerCloseSiblingBlockersFanIn
-28 4 TestProxiedServerContext
-28 4 TestProxiedServerDeferAutoWake
-28 4 TestProxiedServerGraph
-28 4 TestProxiedServerShow2
-28 4 TestProxiedServerTodo
+34 4 TestProxiedServerMolStale
+34 4 TestProxiedServerReadyConcurrent
+34 4 TestProxiedServerServeRelatedIssues
+34 4 TestProxiedServerServeSettingsWrites
+34 4 TestProxiedServerShow2
+34 4 TestServerModeServeSkipsPostRunMaintenance
 
-28 5 TestProxiedServerChildren
-28 5 TestProxiedServerGC
-28 5 TestProxiedServerGatedRendering
-28 5 TestProxiedServerPrime
-28 5 TestProxiedServerServeModeGate
-28 5 TestProxiedServerUpdate2C
-28 5 TestProxiedServerUpdate3
+34 5 TestProxiedServerHistoryRemoteRefusalFrontDoorMatrix
+34 5 TestProxiedServerInfo
+34 5 TestProxiedServerNote
+34 5 TestProxiedServerOutageReconnectAcceptanceMatrix
+34 5 TestProxiedServerUpdate3
+34 5 TestServerModeDeferAutoWake
 
-28 6 TestProxiedServerBatchParity
-28 6 TestProxiedServerClose3
-28 6 TestProxiedServerCreate
-28 6 TestProxiedServerDeferUndefer
-28 6 TestProxiedServerSQL
-28 6 TestProxiedServerServeUpdateClaim
-28 6 TestProxiedServerUpdate2B
+34 6 TestProxiedServerPing
+34 6 TestProxiedServerQuick
+34 6 TestProxiedServerServeReadsTheJournalItJustWrote
+34 6 TestProxiedServerSwarm
+34 6 TestProxiedServerUpdate2B
+34 6 TestProxiedServerWispList
 
-28 7 TestProxiedServerHeartbeat
-28 7 TestProxiedServerHistory
-28 7 TestProxiedServerLabelC
-28 7 TestProxiedServerLink
-28 7 TestProxiedServerMolShow
-28 7 TestProxiedServerServeClaimNext
-28 7 TestProxiedServerShow3
+34 7 TestProxiedServerCloseConcurrent
+34 7 TestProxiedServerCreateInfraTypeRoutesToWisps
+34 7 TestProxiedServerExternalCreate
+34 7 TestProxiedServerIfRevisionGuardDelete
+34 7 TestProxiedServerLabelC
+34 7 TestProxiedServerTypesAgreeWithCreate
 
-28 8 TestProxiedServerClose2
-28 8 TestProxiedServerLint
-28 8 TestProxiedServerMolDistill
-28 8 TestProxiedServerServeActivatesTheEventsJournal
-28 8 TestProxiedServerServeClaim
-28 8 TestProxiedServerServeStreamsTheJournalItIsWriting
-28 8 TestProxiedServerWispGC
+34 8 TestProxiedServerClose2
+34 8 TestProxiedServerDeleteWisp
+34 8 TestProxiedServerExport
+34 8 TestProxiedServerFindDuplicates
+34 8 TestProxiedServerGateCheck
+34 8 TestProxiedServerServeReadParity
 
-28 9 TestProxiedServerAutoPrune
-28 9 TestProxiedServerDuplicates
-28 9 TestProxiedServerExternalPolicyDirectParity
-28 9 TestProxiedServerOrphans
-28 9 TestProxiedServerPrune
-28 9 TestProxiedServerReassignFence
-28 9 TestProxiedServerServeLifecycle
-28 9 TestProxiedServerUpdate
+34 9 TestProxiedServerCloseSiblingBlockersFanIn
+34 9 TestProxiedServerGateLifecycle
+34 9 TestProxiedServerHistoryRemoteSupportedFrontDoorParity
+34 9 TestProxiedServerIfRevisionGuardReopen
+34 9 TestProxiedServerServeRefusesTheJournalWhenItIsDisabled
+34 9 TestProxiedServerUpdate
+34 9 TestServerModeServe
 
-28 10 TestProxiedServerCreate2B
-28 10 TestProxiedServerListSortRetiresTheWalk
-28 10 TestProxiedServerPriority
-28 10 TestProxiedServerRecomputeBlocked
-28 10 TestProxiedServerSQLStatementRouting
-28 10 TestProxiedServerSearch
-28 10 TestProxiedServerUnclaim
-28 10 TestServerModeSharedServeGlobalReportsTheServedDatabase
+34 10 TestProxiedServerContext
+34 10 TestProxiedServerCreate2B
+34 10 TestProxiedServerGateCheckB
+34 10 TestProxiedServerServeRefusesAStreamOnADisabledJournal
+34 10 TestProxiedServerTypes
+34 10 TestProxiedServerUpdate2C
 
-28 11 TestProxiedServerDep2B
-28 11 TestProxiedServerMolStale
-28 11 TestProxiedServerReady
-28 11 TestProxiedServerServeClose
-28 11 TestProxiedServerServeDelete
-28 11 TestProxiedServerServeRefusesAStaleCheckpointWithGone
-28 11 TestProxiedServerServeRemoveDependency
+34 11 TestProxiedServerBatchParity
+34 11 TestProxiedServerCompactHistory
+34 11 TestProxiedServerPour
+34 11 TestProxiedServerQuery
+34 11 TestProxiedServerReady
+34 11 TestProxiedServerServeAddDependencies
 
-28 12 TestProxiedServerConfigSetMany
-28 12 TestProxiedServerGateCreateInheritsRepoMetadata
-28 12 TestProxiedServerGateFrontDoorDirectServerProxyParity
-28 12 TestProxiedServerMolLastActivity
-28 12 TestProxiedServerReadyWisp
-28 12 TestProxiedServerServeBatchClose
-28 12 TestProxiedServerShowWatch
+34 12 TestProxiedServerBlocked
+34 12 TestProxiedServerChildren
+34 12 TestProxiedServerCleanDatabases
+34 12 TestProxiedServerReadyB
+34 12 TestProxiedServerReadyWisp
+34 12 TestProxiedServerReclaim
+34 12 TestProxiedServerUnclaim
 
-28 13 TestProxiedServerBackupRefusedOnExternalTopology
-28 13 TestProxiedServerCreate2
-28 13 TestProxiedServerDepConcurrent
-28 13 TestProxiedServerList
-28 13 TestProxiedServerMultiStatementSQL
-28 13 TestProxiedServerNote
-28 13 TestProxiedServerShowB
-28 13 TestProxiedServerTypes
+34 13 TestProxiedServerCompactDolt
+34 13 TestProxiedServerCreate2
+34 13 TestProxiedServerGraph
+34 13 TestProxiedServerMolSquash
+34 13 TestProxiedServerPromote
+34 13 TestProxiedServerServeRefusesAStaleCheckpointWithGone
 
-28 14 TestProxiedServerDeleteConcurrent
-28 14 TestProxiedServerEventsJournalOffByDefault
-28 14 TestProxiedServerMolReadyGated
-28 14 TestProxiedServerOutageReconnectAcceptanceMatrix
-28 14 TestProxiedServerPathHelpers
-28 14 TestProxiedServerReopenB
-28 14 TestProxiedServerServeSettingsWrites
-28 14 TestServerModeTypesAgreeWithCreate
+34 14 TestProxiedServerAssign
+34 14 TestProxiedServerCloseB
+34 14 TestProxiedServerDuplicates
+34 14 TestProxiedServerHeartbeat
+34 14 TestProxiedServerInitIfMissing
+34 14 TestProxiedServerMolReadyGated
 
-28 15 TestProxiedServerImport
-28 15 TestProxiedServerInfo
-28 15 TestProxiedServerLabelB
-28 15 TestProxiedServerServeReadsTheJournalItJustWrote
-28 15 TestProxiedServerServeRefusesTheJournalWhenItIsDisabled
-28 15 TestProxiedServerSwarm
-28 15 TestProxiedServerWispList
+34 15 TestProxiedServerDepConcurrent
+34 15 TestProxiedServerImport
+34 15 TestProxiedServerMoleculeFrontDoorWriteParity
+34 15 TestProxiedServerReopenConcurrent
+34 15 TestProxiedServerSQL
 
-28 16 TestProxiedServerEpic
-28 16 TestProxiedServerHistoryRemoteRefusalFrontDoorMatrix
-28 16 TestProxiedServerIfRevisionGuardReopen
-28 16 TestProxiedServerKV
-28 16 TestProxiedServerMolProgress
-28 16 TestProxiedServerReady2
-28 16 TestProxiedServerServeCount
+34 16 TestProxiedServerBackupRefusedOnExternalTopology
+34 16 TestProxiedServerCascadeParity
+34 16 TestProxiedServerConfigSetMany
+34 16 TestProxiedServerKV
+34 16 TestProxiedServerServeCount
+34 16 TestProxiedServerServeCreate
+34 16 TestProxiedServerUpdateHooks
 
-28 17 TestProxiedServerDeleteWisp
-28 17 TestProxiedServerDep
-28 17 TestProxiedServerMemory
-28 17 TestProxiedServerReopen
-28 17 TestProxiedServerServeReadRevision
-28 17 TestProxiedServerTag
-28 17 TestProxiedServerUpdateConcurrentClaim
+34 17 TestProxiedServerDep
+34 17 TestProxiedServerMultiStatementSQL
+34 17 TestProxiedServerOrphans
+34 17 TestProxiedServerPrime
+34 17 TestProxiedServerSQLDatabaseFlag
+34 17 TestProxiedServerServeModeGate
 
-28 18 TestProxiedServerDepListSingleIDWarnsOnDroppedExternalEdge
-28 18 TestProxiedServerDoltRemoteRemove
-28 18 TestProxiedServerIfRevisionGuardAssign
-28 18 TestProxiedServerIfRevisionGuardUpdate
-28 18 TestProxiedServerMolBurn
-28 18 TestProxiedServerServeRelatedIssues
-28 18 TestProxiedServerUnclaimIfAssigneeParity
-28 18 TestProxiedServerUpdate2
+34 18 TestProxiedServerClose3
+34 18 TestProxiedServerCount
+34 18 TestProxiedServerCountIncludeInfra
+34 18 TestProxiedServerDoltRemoteRemove
+34 18 TestProxiedServerMolShow
+34 18 TestProxiedServerWispCreateRejectsEnumViolatingVar
 
-28 19 TestProxiedServerBlocked
-28 19 TestProxiedServerConfigB
-28 19 TestProxiedServerDeleteBlockedJSONSingleDoc
-28 19 TestProxiedServerEventsJournal
-28 19 TestProxiedServerMolCurrent
-28 19 TestProxiedServerMoleculeFrontDoorWriteParity
-28 19 TestProxiedServerStale
+34 19 TestProxiedServerCreate
+34 19 TestProxiedServerMolCurrent
+34 19 TestProxiedServerServeBatchClose
+34 19 TestProxiedServerShow3
+34 19 TestServerModeTypesAgreeWithCreate
 
-28 20 TestProxiedServerDepB
-28 20 TestProxiedServerFindDuplicates
-28 20 TestProxiedServerPing
-28 20 TestProxiedServerServeCreate
-28 20 TestProxiedServerServeUpdate
-28 20 TestProxiedServerShow2B
-28 20 TestProxiedServerUpdateIfGuards
-28 20 TestServerModeDeferAutoWake
+34 20 TestProxiedServerDelete
+34 20 TestProxiedServerLint
+34 20 TestProxiedServerPriority
+34 20 TestProxiedServerShow2B
+34 20 TestProxiedServerWispGC
+34 20 TestServerModeSharedServeGlobalReportsTheServedDatabase
 
-28 21 TestProxiedServerClose
-28 21 TestProxiedServerConfig
-28 21 TestProxiedServerCountIncludeInfra
-28 21 TestProxiedServerQuery
-28 21 TestProxiedServerSetState
-28 21 TestProxiedServerWispCreate
-28 21 TestServerModeServeSkipsPostRunMaintenance
+34 21 TestProxiedServerConfig
+34 21 TestProxiedServerExternalPolicyDirectParity
+34 21 TestProxiedServerMoleculeFrontDoorDirectServerProxyParity
+34 21 TestProxiedServerPathHelpers
+34 21 TestProxiedServerPrune
+34 21 TestProxiedServerServeClose
+34 21 TestProxiedServerUnclaimIfAssigneeParity
 
-28 22 TestProxiedServerClose4
-28 22 TestProxiedServerCount
-28 22 TestProxiedServerHistoryRemoteSupportedFrontDoorParity
-28 22 TestProxiedServerQuick
-28 22 TestProxiedServerServeAddComment
-28 22 TestProxiedServerUpdateB
-28 22 TestProxiedServerUpdateClosePolicy
+34 22 TestProxiedServerGateCreateInheritsRepoMetadata
+34 22 TestProxiedServerRecomputeBlocked
+34 22 TestProxiedServerServeEdgeCounts
+34 22 TestProxiedServerTag
+34 22 TestProxiedServerUpdateB
+34 22 TestProxiedServerUpdateConcurrentMetadata
 
-28 23 TestProxiedServerCloseConcurrent
-28 23 TestProxiedServerCreate2C
-28 23 TestProxiedServerExternalCreate
-28 23 TestProxiedServerGateList
-28 23 TestProxiedServerReadyConcurrent
-28 23 TestProxiedServerServeReadParity
-28 23 TestProxiedServerUpdateWisp
+34 23 TestProxiedServerDep2B
+34 23 TestProxiedServerIfRevisionGuardUpdate
+34 23 TestProxiedServerListWatchCountsTheOffsetIntoMaxRows
+34 23 TestProxiedServerMolBurn
+34 23 TestProxiedServerServeUpdate
+34 23 TestProxiedServerUpdateConcurrentClaim
+34 23 TestProxiedServerUpdateWisp
 
-28 24 TestProxiedServerAssign
-28 24 TestProxiedServerGateLifecycle
-28 24 TestProxiedServerHuman
-28 24 TestProxiedServerIfRevisionGuardClose
-28 24 TestProxiedServerReadyClaimConcurrent
-28 24 TestProxiedServerReclaim
-28 24 TestProxiedServerRelate
-28 24 TestProxiedServerServeEdgeCounts
+34 24 TestProxiedServerDeleteBlockedJSONSingleDoc
+34 24 TestProxiedServerDeleteForceOrphans
+34 24 TestProxiedServerHuman
+34 24 TestProxiedServerIfRevisionGuardAssign
+34 24 TestProxiedServerListComments
+34 24 TestProxiedServerListSortRetiresTheWalk
+34 24 TestProxiedServerShowWatch
+34 24 TestProxiedServerUpdateIfGuards
 
-28 25 TestProxiedServerBatchDefersThenDoltCommitAdvancesHeadOnce
-28 25 TestProxiedServerConfigConcurrent
-28 25 TestProxiedServerDelete
-28 25 TestProxiedServerListComments
-28 25 TestProxiedServerListWatchCountsTheOffsetIntoMaxRows
-28 25 TestProxiedServerReadyB
-28 25 TestProxiedServerShow
-28 25 TestProxiedServerStorageClass
+34 25 TestProxiedServerInitExplicitBeadsDirIsAuthoritative
+34 25 TestProxiedServerSetState
+34 25 TestProxiedServerShow
+34 25 TestProxiedServerShowB
+34 25 TestProxiedServerStale
+34 25 TestProxiedServerWispCreate
 
-28 26 TestProxiedServerCleanDatabases
-28 26 TestProxiedServerExport
-28 26 TestProxiedServerIfRevisionGuardDelete
-28 26 TestProxiedServerMolBond
-28 26 TestProxiedServerPour
-28 26 TestProxiedServerShow3B
-28 26 TestProxiedServerStatus
-28 26 TestProxiedServerWispCreateRejectsEnumViolatingVar
+34 26 TestProxiedServerDeferAutoWake
+34 26 TestProxiedServerExternalMutationPolicy
+34 26 TestProxiedServerReopenB
+34 26 TestProxiedServerSearch
+34 26 TestProxiedServerServeClaim
+34 26 TestProxiedServerShow3B
 
-28 27 TestProxiedServerGateCheckB
-28 27 TestProxiedServerLabel
-28 27 TestProxiedServerPourRejectsEnumViolatingVar
-28 27 TestProxiedServerReadyC
-28 27 TestProxiedServerServeRefusesAStreamOnADisabledJournal
-28 27 TestProxiedServerStatuses
-28 27 TestProxiedServerTypesAgreeWithCreate
-28 27 TestServerModeServe
+34 27 TestProxiedServerDeferUndefer
+34 27 TestProxiedServerGatedRendering
+34 27 TestProxiedServerHistory
+34 27 TestProxiedServerLabel
+34 27 TestProxiedServerLabelB
+34 27 TestProxiedServerUpdateClosePolicy
 
-28 28 TestProxiedServerDep2C
-28 28 TestProxiedServerGateCheck
-28 28 TestProxiedServerInitExplicitBeadsDirIsAuthoritative
-28 28 TestProxiedServerInitIfMissing
-28 28 TestProxiedServerPurgeWispsPlaneRetention
-28 28 TestProxiedServerServeAddDependencies
-28 28 TestProxiedServerServeRelease
-28 28 TestProxiedServerState
+34 28 TestProxiedServerDep2C
+34 28 TestProxiedServerDoltLifecycle
+34 28 TestProxiedServerReady2
+34 28 TestProxiedServerReassignFence
+34 28 TestProxiedServerSQLStatementRouting
+34 28 TestProxiedServerServeClaimNext
+34 28 TestProxiedServerUpdateConcurrentAppendNotes
+
+34 29 TestProxiedServerGateFrontDoorDirectServerProxyParity
+34 29 TestProxiedServerMolDistill
+34 29 TestProxiedServerReopen
+34 29 TestProxiedServerServeDelete
+34 29 TestProxiedServerState
+
+34 30 TestProxiedServerDeleteConcurrent
+34 30 TestProxiedServerReadyC
+34 30 TestProxiedServerServeAddComment
+34 30 TestProxiedServerStatus
+34 30 TestProxiedServerTodo
+34 30 TestProxiedServerUpdate2
+
+34 31 TestProxiedServerCloseBeadGate
+34 31 TestProxiedServerComment
+34 31 TestProxiedServerConfigB
+34 31 TestProxiedServerEventsJournal
+34 31 TestProxiedServerIfRevisionGuardClose
+34 31 TestProxiedServerMolBond
+
+34 32 TestProxiedServerCleanDatabasesPurgeDropped
+34 32 TestProxiedServerConfigConcurrent
+34 32 TestProxiedServerDepB
+34 32 TestProxiedServerServeStreamsTheJournalItIsWriting
+34 32 TestProxiedServerServeUpdateClaim
+34 32 TestProxiedServerStorageClass
+
+34 33 TestProxiedServerBatchDefersThenDoltCommitAdvancesHeadOnce
+34 33 TestProxiedServerClose
+34 33 TestProxiedServerGC
+34 33 TestProxiedServerMemory
+34 33 TestProxiedServerPourRejectsEnumViolatingVar
+34 33 TestProxiedServerRelate
+
+34 34 TestProxiedServerClose4
+34 34 TestProxiedServerCreate2C
+34 34 TestProxiedServerEdit
+34 34 TestProxiedServerEpic
+34 34 TestProxiedServerLink
+34 34 TestProxiedServerServeReadRevision

@@ -1732,8 +1732,8 @@ jobs:
   # Like pr-risk.yml's proxied-server tier, "Test (Proxied Dolt Cmd N/15)",
   # as --config=doltserver-proxied: //cmd/bd:bd_proxied_test runs the shard
   # script, so shard k runs exactly that manifest entry's tests. This lane
-  # runs 28 shards of its own (.github/scripts/proxied-cmd-test-shards.txt's
-  # duration-balanced 28-block; see scripts/ci/proxied_test_durations.json),
+  # runs 34 shards of its own (.github/scripts/proxied-cmd-test-shards.txt's
+  # duration-balanced 34-block; see scripts/ci/proxied_test_durations.json),
   # not the legacy jobs' 15 — shard k here is not the same split as their
   # shard k. Same build as --config=doltserver (race bd_test, non-race
   # bd_for_tests), shared with bazel-doltserver through the remote cache.
@@ -1793,10 +1793,11 @@ jobs:
           fi
 
       # Remote: each shard's Go timeout is its job's 15m, 1200s Bazel cap,
-      # plus a compile. The 28-shard block is LPT-packed by
+      # plus a compile. The 34-shard block is LPT-packed by
       # scripts/ci/proxied_test_durations.json, a rbe-west capture of each
-      # top-level test's summed leaf-test time (see its header), to ~227
-      # cost-seconds per shard; shards are expected around 70-90s. Nearly
+      # top-level test's summed leaf-test time (see its header), to ~187
+      # cost-seconds per shard; shards are expected around 55-95s (the same
+      # packed cost has run up to 1.45x the median wall time). Nearly
       # all of that is `bd init --proxied-server` against the shard's dolt
       # sql-server, ~one per subtest, each as a user scoped to its own
       # database (cmd/bd/proxied_shared_harness_test.go); a shard running far
@@ -1830,7 +1831,7 @@ jobs:
         run: >-
           python3 tools/bazel/check_shard_coverage.py
           --bep "$RUNNER_TEMP/bazel-bep.json"
-          --suite //cmd/bd:bd_proxied_test .github/scripts/proxied-test-shard.sh 28
+          --suite //cmd/bd:bd_proxied_test .github/scripts/proxied-test-shard.sh 34
 
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}

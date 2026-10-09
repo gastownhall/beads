@@ -42,7 +42,7 @@ Each lane, as bazel.yml runs it (add your `--config=fork-cache` or
 | Dolt server (`bazel-doltserver`) | `bazel test //... --config=doltserver` | Starts its own `dolt sql-server` from the pinned binary; no docker. |
 | cmd/bd Dolt server (`bazel-cmd-dolt`) | `bazel test //cmd/bd:bd_dolt_server_test --config=doltserver-cmd` | 32 shards of the integration-tagged cmd/bd suite (the slowest tests pinned to 16 of them). |
 | Embedded Dolt (`bazel-embedded`) | `bazel test //... --config=embedded` | Remote execution only in CI; locally it is slow. |
-| Proxied server (`bazel-proxied`) | `bazel test //... --config=doltserver-proxied` | Remote execution only: 28 shards, each with a Dolt server. |
+| Proxied server (`bazel-proxied`) | `bazel test //... --config=doltserver-proxied` | Remote execution only: 34 shards, each with a Dolt server. |
 | Server-Dolt storage (`bazel-server-storage`) | `bazel test //... --config=doltserver-integration` | Remote execution only. |
 | Docs | `make check-docs` | `//test/docsync:docsync_test` and `//scripts/repochecks:doc_freshness_test` in the test lane's configuration, then `scripts/check-doc-flags.sh` against the pinned release. |
 
@@ -184,7 +184,7 @@ builds with the integration tag like `--config=integration`. Each shard runs
 its CI job's shard script, so for `--config=doltserver-integration` Bazel
 shard k runs the tests of job k+1 (both split the manifest's 16-shard block
 the same way). `--config=doltserver-proxied`'s `bd_proxied_test` instead
-runs the manifest's own 28-shard block — bin-packed by measured duration,
+runs the manifest's own 34-shard block — bin-packed by measured duration,
 not the legacy jobs' 15-shard, bd-init-cost-proxy block — so shard k there
 is not job k+1's tests; it is a different split of the same tests.
 

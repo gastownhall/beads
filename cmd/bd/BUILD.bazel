@@ -1443,8 +1443,8 @@ sh_test(
     tags = ["embedded"],
 )
 
-# Runs 28 Bazel shards against the TestProxiedServer*/TestServerMode*
-# functions, assigned by the manifest's 28-shard block (duration-balanced;
+# Runs 34 Bazel shards against the TestProxiedServer*/TestServerMode*
+# functions, assigned by the manifest's 34-shard block (duration-balanced;
 # see scripts/ci/proxied_test_durations.json), against this configuration's
 # (race) bd_test with BEADS_TEST_PROXIED_SERVER=1 and the non-race
 # bd_for_tests as the subprocess binary. This is a *different* shard count
@@ -1501,7 +1501,7 @@ sh_test(
         # 192-core worker).
         "GOMAXPROCS": "4",
     },
-    shard_count = 28,
+    shard_count = 34,
     tags = ["dolt-server-proxied"],
 )
 
