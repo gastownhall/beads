@@ -5,24 +5,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 )
-
-// pinnedShardWrapper is the sh_test src that pins slow tests to shards.
-const pinnedShardWrapper = "tools/bazel/go_test_pinned_shard.sh"
-
-// pinnedShardTargets are the sh_tests that run a go_test binary through
-// tools/bazel/go_test_pinned_shard.sh: the BUILD file, the rule, its
-// manifest, and the directory holding the go_test's sources.
-var pinnedShardTargets = []struct {
-	build, rule, manifest, pkg string
-}{
-	{"cmd/bd/BUILD.bazel", "bd_dolt_server_test", "cmd/bd/dolt_server_pinned_shards.txt", "cmd/bd"},
-	{"tests/regression/BUILD.bazel", "regression_test", "tests/regression/pinned_shards.txt", "tests/regression"},
-}
 
 // fakeTestBinary writes a stand-in for a go_test binary that prints its
 // arguments and the sharding environment it was started with.
@@ -138,65 +124,14 @@ func TestPinnedShardWrapperRejectsBadManifests(t *testing.T) {
 	}
 }
 
-var (
-	pinnedLineRe     = regexp.MustCompile(`^([1-9][0-9]*) (Test[A-Za-z0-9_]*)$`)
-	goTopLevelTestRe = regexp.MustCompile(`(?m)^func (Test[A-Za-z0-9_]*)\(t \*testing\.T\) \{`)
-)
-
-// The committed manifests: well formed, every pinned name a top-level test
-// of the target's package (a stale name runs nowhere, and a renamed test
-// would silently fall back to the round-robin shards), and each target
-// wired to its manifest with round-robin shards left over.
+// The committed manifests are well formed and each target is wired to its
+// manifest with round-robin shards left over. (That every pinned name is a
+// test of the package: TestPinnedShardManifestNamesAreTests.)
 func TestPinnedShardManifests(t *testing.T) {
 	root := sourceRepoRoot(t)
 	for _, tgt := range pinnedShardTargets {
 		t.Run(tgt.rule, func(t *testing.T) {
-			tests := map[string]bool{}
-			srcs, err := filepath.Glob(filepath.Join(root, tgt.pkg, "*_test.go"))
-			if err != nil || len(srcs) == 0 {
-				t.Fatalf("no *_test.go in %s: %v", tgt.pkg, err)
-			}
-			for _, src := range srcs {
-				b, err := os.ReadFile(src)
-				if err != nil {
-					t.Fatal(err)
-				}
-				for _, m := range goTopLevelTestRe.FindAllStringSubmatch(string(b), -1) {
-					tests[m[1]] = true
-				}
-			}
-
-			pinned := map[string]bool{}
-			shards := map[int]int{}
-			maxShard := 0
-			for i, line := range strings.Split(readPolicyFile(t, root, tgt.manifest), "\n") {
-				line, _, _ = strings.Cut(line, "#")
-				line = strings.TrimSpace(line)
-				if line == "" {
-					continue
-				}
-				m := pinnedLineRe.FindStringSubmatch(line)
-				if m == nil {
-					t.Errorf("%s:%d: %q is not \"<shard> <TestName>\"", tgt.manifest, i+1, line)
-					continue
-				}
-				shard, _ := strconv.Atoi(m[1])
-				if pinned[m[2]] {
-					t.Errorf("%s: %s pinned twice", tgt.manifest, m[2])
-				}
-				pinned[m[2]] = true
-				shards[shard]++
-				maxShard = max(maxShard, shard)
-				if !tests[m[2]] {
-					t.Errorf("%s pins %s, which is not a top-level test in %s/*_test.go; regenerate it (tools/bazel/pin_shards.py)", tgt.manifest, m[2], tgt.pkg)
-				}
-			}
-			for s := 1; s <= maxShard; s++ {
-				if shards[s] == 0 {
-					t.Errorf("%s: pinned shard %d is empty", tgt.manifest, s)
-				}
-			}
-
+			_, maxShard := readPinnedShardManifest(t, root, tgt.manifest)
 			rule := bazelRuleBlock(readPolicyFile(t, root, tgt.build), tgt.rule)
 			if rule == "" {
 				t.Fatalf("%s has no rule %s", tgt.build, tgt.rule)
@@ -288,7 +223,7 @@ func pinnedShardWrapperUsers(t *testing.T, root string) []string {
 	const label = "//tools/bazel:go_test_pinned_shard.sh"
 	var errs []string
 	seen := 0
-	for _, f := range repoFiles(t, root) {
+	for _, f := range repoFiles(t, root, 300) {
 		if filepath.Base(f) != "BUILD.bazel" {
 			continue
 		}
