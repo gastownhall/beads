@@ -128,16 +128,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   credential is never accepted on the command line or written to disk; it
   comes from the same ladder every http request already uses
   (`BEADS_HTTP_TOKEN`, then `BEADS_HTTP_TOKEN_COMMAND`, then the credentials
-  file, then none). `bd create` suppresses the `created_by` stamp for a
-  workspace on a registered remote backend rather than sending one the http
-  wire's create role refuses (the creation stamp belongs to the server's own
-  journal entry). The external-dependency policy decorator
-  (`internal/storage/externaldeps`) still wraps an http store, and stands
-  down only when the server's handshake advertises
-  `policy.external_dependencies` (that server has already applied the policy
-  before answering); against any other server it applies the policy
-  client-side, dropping externally blocked issues from `bd ready`'s page,
-  total, and count, because the v0 wire cannot express an id exclusion.
+  file, then none). `bd create` sends no `created_by` on any backend: the
+  create role defaults it to the request's actor (see *Changed*). The
+  external-dependency policy decorator (`internal/storage/externaldeps`)
+  still wraps an http store, and passes every ready, claim, claim-next,
+  close, blocking and tree request through untouched when the server's
+  handshake advertises `policy.external_dependencies`, which every `bd
+  serve` composed through the policy now does (see below). Only against a
+  server that does not advertise it (an older `bd serve`, or one handed raw
+  roles) does the client apply the policy itself, in role terms: ready reads
+  and the ready claim exclude the workspace-wide externally blocked set over
+  a widened window, and per-issue checks (claim, close, batch close, list
+  annotations, tree leaves) read only the named issues' edges.
+- `bd serve` advertises the conditional behavior token
+  `policy.external_dependencies` exactly when the roles or provider it
+  serves were composed through the external-dependency policy
+  (`httpapi.Config.ExternalDependencyPolicy`, which `bd serve` derives with
+  `externaldeps.Applied` / `externaldeps.AppliedToProvider`); a server handed
+  raw roles withholds it. A client that sees it hands claim-next to the
+  server as one atomic call and takes the ready count from the server,
+  instead of judging external dependencies a second time against the CLIENT
+  machine's project config.
+- `bd ping` works on an http workspace (a new `storage.Pinger`, which the
+  http store answers with its authenticated context read).
 - The public `backend/http` package (`bdhttp`) is the out-of-tree door onto
   this backend for an embedder that links beads as a library rather than
   running `cmd/bd`: `Register(Options)` adds `"http"` to the registry and
@@ -150,6 +163,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`created_by` defaults to the actor in the library, for every create
+  shape and every backend.** `PreparePublicCreateRequest`, which
+  `Lifecycle.Create`, `BatchCreator` items and batch-apply create items all
+  prepare through, now sets an empty `Issue.CreatedBy` to the request's
+  `Actor`; an explicit value is kept. The CLI (`bd create`, the state event
+  create) and the three `bd serve` create handlers no longer stamp it
+  themselves. A library caller that left `CreatedBy` empty used to store
+  `""` locally and the actor over http; both now store the actor. The raw
+  `CreateIssue` seam is unchanged: import keeps the creator its rows carry,
+  and `bd swarm`, `bd todo`, `bd gate` and the create form still stamp
+  `currentActor()` there.
+- **On an http workspace, `bd update -s closed` does not record
+  `closed_by_session`.** The update wire cannot carry it, so the CLI drops
+  it rather than refusing the close; the status change, its close-policy
+  guards and every other field in the same update still apply. A one-line
+  notice on stderr names the drop, both for an explicit `--session` and for
+  the ambient `CLAUDE_SESSION_ID` every agent under Claude Code exports, so
+  it is never silent. `bd close` (and `bd close --session`) still records
+  the session over http: its wire operation carries it. Local backends are
+  unchanged.
+- **On an http workspace, `bd reopen` sends no Provenance label.** The
+  CLI's label is the fixed `bd: reopen <id>`, which the wire cannot carry;
+  the server records its own reopen entry for the same issue and actor, so
+  the reopen no longer refuses. Local backends still record the label.
+- **Routing settings are local-only on a remote backend.** For an http
+  workspace, `routing.mode`, `routing.contributor`, `routing.default`,
+  `routing.maintainer`, `contributor.auto_route` and
+  `contributor.planning_repo` come from local config (`config.yaml` or the
+  environment) only; the server's shared settings document is not read for
+  them, because routing targets are local filesystem paths that one shared
+  document cannot name for every client. `bd create`'s routing decision, `bd
+  migrate-personal` and the missing-id lookup fallback all read the same
+  local-only answer, and none pays a settings round trip for it. Local
+  backends still fall back to the database values.
 - Every `bd` invocation used to start two git subprocesses before doing any
   work: `git rev-parse` to locate the repository and `git config user.name`
   to resolve the actor. On Linux the repository is now located in-process
@@ -225,6 +272,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ones cannot fork.
 
 ### Fixed
+- **The http store's `GetIssue` answers a miss with `storage.ErrNotFound`,
+  like the local stores.** It used to answer a missing (or empty) id with
+  `(nil, nil)`, which every caller written against the backend contract
+  read as a hit: `bd create --graph` refused every plan naming an explicit
+  id over http. The miss is now `not found: issue <id>`, wrapping
+  `storage.ErrNotFound` exactly as `issueops.GetIssueInTx` does; the empty
+  id never dials.
+- **`bd list`, `bd children`, `bd show --json` counts, the default `bd dep
+  tree`, `bd ready --claim` and `bd close` work on an http workspace.** The
+  external-dependency decorator rebuilt its views from storage seams the
+  http store only partly serves, so `bd list`/`bd children` refused, `bd
+  show --json` printed zero dependency and comment counts without an error,
+  and the default dep tree refused; each view now passes the server's own
+  role through (see *Added*). A missing id is a plain not-found after one
+  `getIssue`, instead of a partial-id search refusal, and `bd update
+  <absent> --claim` answers a not-found gc classifies.
 - **PRs based on `hotfix/**` branches now run full CI, not just
   cross-version historical smokes and triage labeling.** `pr.yml`,
   `pr-risk.yml`, `conformance.yml`, `cross-version-smoke.yml` and
