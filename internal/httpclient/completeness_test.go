@@ -108,9 +108,12 @@ var legitimatelyUnsupported = map[string]string{
 	"InitVerifier":      "issue role: init verification is a server-side act",
 	"VersionReconciler": "issue role: clone-local version markers, meaningless for a client",
 
-	// DetailBatchReader has no v0 operation yet. batchGetIssues (#7248) is
-	// BatchGetter's: bare issues with labels, not the IssueDetails view.
-	"DetailBatchReader": "issue role: no v0 operation returns issue details for many IDs; batchGetIssues serves BatchGetter's labels-only issues",
+	// DetailBatchReader promises one snapshot for the whole batch
+	// (issueops/detailbatchreader.go). Per-ID getIssue calls each read their
+	// own snapshot, so composing onto them, as BatchCloser composes onto
+	// closeIssue, would break the role's contract. batchGetIssues is one
+	// operation but returns BatchGetter's labels-only issues.
+	"DetailBatchReader": "issue role: one-snapshot batch detail read; per-ID getIssue calls cannot give one snapshot, and batchGetIssues returns labels-only issues",
 
 	// Raw issue writes. The served writes reach the wire through their roles
 	// (Lifecycle, BatchCreator, DependencyEditor, Sweeper, Deleter); these legacy
