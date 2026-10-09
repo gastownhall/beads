@@ -116,6 +116,7 @@ go_test(
         "lifecycle_update_test.go",
         "list_sort_test.go",
         "metadatacas_test.go",
+        "molecule_test.go",
         "open_with_test.go",
         "race_detector_off_test.go",
         "race_detector_on_test.go",

@@ -51,19 +51,19 @@ func CloseCompletedMoleculeInUOW(ctx context.Context, uw UnitOfWork, stepID, act
 	if err != nil || root == nil {
 		return storageissueops.MoleculeAutoClose{}, err
 	}
-	version := root.RowVersion
-	if _, err := uw.IssueUseCase().ApplyUpdate(ctx, root.ID, domain.UpdateSpec{ExpectedVersion: &version}, actor); err != nil {
+	req := publicops.MoleculeRootClose(root, actor, session)
+	if _, err := uw.IssueUseCase().ApplyUpdate(ctx, req.IssueID, domain.UpdateSpec{ExpectedVersion: req.ExpectedVersion}, req.Actor); err != nil {
 		if publicops.IsMoleculeAutoCloseRefusal(err) {
 			return storageissueops.MoleculeAutoClose{Refusal: err.Error()}, nil
 		}
 		return storageissueops.MoleculeAutoClose{}, fmt.Errorf("auto-closing molecule %s: %w", root.ID, err)
 	}
-	params := domain.CloseIssueParams{Reason: publicops.MoleculeAutoCloseReason, Session: session}
+	params := domain.CloseIssueParams{Reason: req.Reason, Session: req.Session}
 	var closed domain.CloseIssueResult
 	if storageissueops.IsWisp(root) {
-		closed, err = uw.IssueUseCase().CloseWispChecked(ctx, root.ID, params, actor, false)
+		closed, err = uw.IssueUseCase().CloseWispChecked(ctx, req.IssueID, params, req.Actor, req.Force)
 	} else {
-		closed, err = uw.IssueUseCase().CloseIssueChecked(ctx, root.ID, params, actor, false)
+		closed, err = uw.IssueUseCase().CloseIssueChecked(ctx, req.IssueID, params, req.Actor, req.Force)
 	}
 	if publicops.IsMoleculeAutoCloseRefusal(err) {
 		return storageissueops.MoleculeAutoClose{Refusal: err.Error()}, nil

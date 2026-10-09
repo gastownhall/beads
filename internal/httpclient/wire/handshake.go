@@ -211,10 +211,10 @@ const CapBatchApplyDepAddLineage = "issues.batchApply.depAddLineage"
 // closeIssue and batchCloseIssues accept `auto_close_molecule` and answer
 // the auto-closed root, spelled exactly as httpapi's
 // CapIssuesCloseAutoCloseMolecule. lifecycle.go and batchcloser.go send the
-// member only when this is advertised; against an older server they close
-// first and then run the library's role-composed auto-close
-// (issueops.CloseCompletedMolecule) — a DEGRADED, two-transaction form of the
-// same rule, never a silent drop.
+// member only when this is advertised; against an older server a close that
+// asks for it is refused before it is dialed with the typed capability
+// error — never a silent drop, and never a second, client-side copy of the
+// rule.
 const CapCloseAutoCloseMolecule = "issues.close.autoCloseMolecule"
 
 // CapExternalDependencies is the CONDITIONAL behavior capability announcing

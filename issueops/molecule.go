@@ -567,6 +567,10 @@ type MoleculeView struct {
 	// several are); NextStep the first ready step.
 	CurrentStep *Issue
 	NextStep    *Issue
+	// Ready holds every node the analysis marks ready (open or in progress
+	// with no open blocker inside the molecule), root included, in graph
+	// order: `bd ready --mol`'s list, hydrated rows (assignee and all).
+	Ready []*Issue
 }
 
 // Complete reports whether every step of the molecule is closed.
@@ -586,6 +590,9 @@ func MoleculeViewOf(g *MoleculeGraph) *MoleculeView {
 	analysis := AnalyzeMolecule(g)
 	view := &MoleculeView{Graph: g, Analysis: analysis, Total: len(g.Issues) - 1}
 	for _, issue := range g.Issues {
+		if info := analysis.Steps[issue.ID]; info != nil && info.IsReady {
+			view.Ready = append(view.Ready, issue)
+		}
 		if issue.ID == g.Root.ID {
 			continue
 		}
@@ -740,39 +747,20 @@ func IsMoleculeAutoCloseRefusal(err error) bool {
 	return errors.Is(err, ErrCloseBlocked) || errors.As(err, &openChildren) || errors.Is(err, ErrVersionMismatch)
 }
 
-// CloseCompletedMolecule is the auto-close composed over roles: it reads
-// whether closing stepID completed an auto-closing molecule and, when it did,
-// closes the root through lifecycle, guarded on the root revision it read, so
-// a step reopened in between refuses rather than being closed over.
-//
-// It runs AFTER the step's own close and in transactions of its own, so it is
-// the degraded form of CloseRequest.AutoCloseMolecule, which a backend runs
-// inside the step close's transaction. It exists for a backend that cannot
-// (an http server that predates the capability).
-//
-// A close-policy refusal of the root (IsMoleculeAutoCloseRefusal) is answered
-// as refusal, not as an error: the step close it follows already landed.
-func CloseCompletedMolecule(ctx context.Context, r MoleculeReader, lifecycle Lifecycle, stepID, actor, session string) (closed *Issue, refusal string, err error) {
-	root, err := CompletedMolecule(ctx, r, stepID)
-	if err != nil || root == nil {
-		return nil, "", err
-	}
+// MoleculeRootClose is the ONE close request a molecule auto-close sends for
+// the root CompletedMolecule answered: unforced, recording
+// MoleculeAutoCloseReason and the step close's session, and guarded on the
+// root revision CompletedMolecule read, so a step reopened (or the root
+// edited) in between refuses rather than being closed over. Every backend's
+// in-transaction auto-close (CloseRequest.AutoCloseMolecule) builds its root
+// close from it.
+func MoleculeRootClose(root *Issue, actor, session string) CloseRequest {
 	version := root.RowVersion
-	res, err := lifecycle.Close(ctx, CloseRequest{
+	return CloseRequest{
 		Actor:           actor,
 		IssueID:         root.ID,
 		Reason:          MoleculeAutoCloseReason,
 		Session:         session,
 		ExpectedVersion: &version,
-	})
-	if IsMoleculeAutoCloseRefusal(err) {
-		return nil, err.Error(), nil
 	}
-	if err != nil {
-		return nil, "", err
-	}
-	if !res.Changed {
-		return nil, "", nil
-	}
-	return res.Issue, "", nil
 }

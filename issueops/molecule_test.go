@@ -272,6 +272,17 @@ func TestMoleculeViewDerivesStatesProgressAndTheNextStep(t *testing.T) {
 	if view.NextStep == nil || view.NextStep.ID != "m.b" {
 		t.Errorf("NextStep = %+v, want m.b", view.NextStep)
 	}
+	// Ready is ready --mol's list: every analysis-ready node, hydrated.
+	ready := map[string]*issueops.Issue{}
+	for _, issue := range view.Ready {
+		ready[issue.ID] = issue
+	}
+	if ready["m.b"] == nil || ready["m.d"] == nil || ready["m.a"] != nil || ready["m.c"] != nil {
+		t.Errorf("Ready = %v, want m.b and m.d, never the closed m.a or the blocked m.c", view.Ready)
+	}
+	if d := ready["m.d"]; d != nil && d.Assignee != "alice" {
+		t.Errorf("Ready m.d assignee = %q, want alice (the full step row)", d.Assignee)
+	}
 	// Ordered by in-molecule blockers, fewest first: m.c waits on one step.
 	if last := view.Steps[len(view.Steps)-1].Issue.ID; last != "m.c" && last != "m.b" {
 		t.Errorf("last step = %s, want a step that waits on a blocker", last)
@@ -327,37 +338,18 @@ func TestCompletedMoleculeAnswersOnlyAnOpenCompleteAutoClosingRoot(t *testing.T)
 	}
 }
 
-func TestCloseCompletedMoleculeClosesGuardedOnTheRootRevision(t *testing.T) {
-	ctx := context.Background()
-	f := newFakeMolecules()
-	f.add("r", types.TypeMolecule, types.StatusOpen)
-	f.add("r.1", types.TypeTask, types.StatusClosed)
-	f.edge("r.1", "r", types.DepParentChild)
-
-	root, refusal, err := issueops.CloseCompletedMolecule(ctx, f.reader(), f, "r.1", "alice", "sess")
-	if err != nil || refusal != "" || root == nil || root.ID != "r" {
-		t.Fatalf("CloseCompletedMolecule = %v, %q, %v; want root r closed", root, refusal, err)
+func TestMoleculeRootCloseIsUnforcedAndGuardedOnTheRootRevision(t *testing.T) {
+	root := &issueops.Issue{ID: "r", RowVersion: 41}
+	got := issueops.MoleculeRootClose(root, "alice", "sess")
+	if got.ExpectedVersion == nil || *got.ExpectedVersion != 41 || got.Force {
+		t.Errorf("root close = %+v, want unforced and guarded on the root revision 41", got)
 	}
-	if len(f.closes) != 1 {
-		t.Fatalf("closes = %v, want one", f.closes)
+	if got.IssueID != "r" || got.Reason != issueops.MoleculeAutoCloseReason || got.Session != "sess" || got.Actor != "alice" {
+		t.Errorf("root close = %+v, want root r, the auto-close reason, the session and the actor", got)
 	}
-	got := f.closes[0]
-	if got.ExpectedVersion == nil || *got.ExpectedVersion != f.issues["r"].RowVersion || got.Force {
-		t.Errorf("root close = %+v, want unforced and guarded on the root revision %d", got, f.issues["r"].RowVersion)
-	}
-	if got.Reason != issueops.MoleculeAutoCloseReason || got.Session != "sess" || got.Actor != "alice" {
-		t.Errorf("root close = %+v, want the auto-close reason, the session and the actor", got)
-	}
-
-	// A policy refusal of the root is a refusal, not an error.
-	f = newFakeMolecules()
-	f.add("r", types.TypeMolecule, types.StatusOpen)
-	f.add("r.1", types.TypeTask, types.StatusClosed)
-	f.edge("r.1", "r", types.DepParentChild)
-	f.closeErr = fmt.Errorf("%w: r is blocked", issueops.ErrCloseBlocked)
-	root, refusal, err = issueops.CloseCompletedMolecule(ctx, f.reader(), f, "r.1", "alice", "")
-	if err != nil || root != nil || refusal == "" {
-		t.Errorf("CloseCompletedMolecule on a blocked root = %v, %q, %v; want a refusal", root, refusal, err)
+	root.RowVersion = 42
+	if *got.ExpectedVersion != 41 {
+		t.Error("the guard aliases the root's revision; it must be the revision read")
 	}
 }
 

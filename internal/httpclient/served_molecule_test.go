@@ -4,27 +4,25 @@ package httpclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
-// The molecule contract against the served surface, twice.
+// The molecule contract against the served surface: the client sends
+// auto_close_molecule and dials advanceMolecule, so the server's library runs
+// the auto-close in the step close's transaction and the advance server-side.
 //
-// SERVED: the client sends auto_close_molecule and dials advanceMolecule,
-// so the server's library runs the auto-close in the step close's transaction
-// and the advance server-side.
-//
-// DEGRADED: the same server, but this client's handshake has the two molecule
-// tokens (and issues.batchGet) struck out, as an older server would advertise.
-// The client then closes without the member and runs the library's
-// role-composed auto-close after it, and runs the library stepper over its own
-// roles. Both arms run the SAME contract cases: the outcomes must not differ.
+// Against a server whose handshake lacks the two molecule tokens (an older
+// server) the client refuses before dialing; the served refusal test below
+// pins that the step it was asked to close stays open and unclaimed.
 
 func moleculeContractCases() []struct {
 	name string
@@ -110,14 +108,59 @@ func TestServedMoleculeContract(t *testing.T) {
 	}
 }
 
-func TestServedMoleculeContractAgainstAnOlderServer(t *testing.T) {
-	for _, tc := range moleculeContractCases() {
-		t.Run(tc.name, func(t *testing.T) {
-			env := newServedEnv(t, "hmold")
-			batchGet, _ := wire.CapabilityFor(wire.OpBatchGetIssues)
-			subject := degradedSubject(t, env, wire.CapCloseAutoCloseMolecule, advanceToken(t), batchGet)
-			tc.run(t, t.Context(), newServedMoleculeFixture(t, env, subject))
-		})
+// Against an older server (the molecule tokens struck from the handshake) a
+// close that asks for the auto-close and an advance are refused before they
+// are dialed: the step stays open, nothing is claimed, and the refusal names
+// the missing token.
+func TestServedMoleculeRefusesAgainstAnOlderServer(t *testing.T) {
+	env := newServedEnv(t, "hmold")
+	ctx := t.Context()
+	subject := degradedSubject(t, env, wire.CapCloseAutoCloseMolecule, advanceToken(t))
+	fixture := newServedMoleculeFixture(t, env, subject)
+	for _, issue := range []*types.Issue{
+		{ID: "hmold-r", Title: "root", IssueType: types.TypeMolecule, Status: types.StatusOpen},
+		{ID: "hmold-r.1", Title: "step", IssueType: types.TypeTask, Status: types.StatusOpen},
+		{ID: "hmold-r.2", Title: "next", IssueType: types.TypeTask, Status: types.StatusOpen},
+	} {
+		if err := env.createIssue(ctx, issue, "t"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, child := range []string{"hmold-r.1", "hmold-r.2"} {
+		if err := env.addDependency(ctx, &types.Dependency{IssueID: child, DependsOnID: "hmold-r", Type: types.DepParentChild}, "t"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status := func(id string) string {
+		t.Helper()
+		got, err := env.subject.GetIssue(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(got.Status) + "/" + got.Assignee
+	}
+	requireRefusal := func(what string, err error, token string) {
+		t.Helper()
+		var unsup *storage.ErrUnsupported
+		if !errors.As(err, &unsup) || unsup.Capability != token {
+			t.Fatalf("%s = %v, want the pre-dial refusal naming %q", what, err, token)
+		}
+	}
+
+	_, err := fixture.Lifecycle.Close(ctx, issueops.CloseRequest{Actor: "alice", IssueID: "hmold-r.1", AutoCloseMolecule: true})
+	requireRefusal("Close", err, wire.CapCloseAutoCloseMolecule)
+	_, err = fixture.BatchCloser.CloseBatch(ctx, issueops.CloseBatchRequest{
+		Actor: "alice", Items: []issueops.BatchCloseItem{{IssueID: "hmold-r.1"}}, AutoCloseMolecule: true,
+	})
+	requireRefusal("CloseBatch", err, wire.CapCloseAutoCloseMolecule)
+	if got := status("hmold-r.1"); got != "open/" {
+		t.Errorf("the refused close's step = %s, want open/ (nothing dialed)", got)
+	}
+
+	_, err = fixture.Stepper.Advance(ctx, issueops.AdvanceRequest{Actor: "alice", ClosedStepID: "hmold-r.1", AutoClaim: true})
+	requireRefusal("Advance", err, advanceToken(t))
+	if got := status("hmold-r.2"); got != "open/" {
+		t.Errorf("the refused advance's next step = %s, want open/ (nothing claimed)", got)
 	}
 }
 

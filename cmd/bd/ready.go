@@ -644,8 +644,9 @@ func runReadyExplain(_ *cobra.Command) error {
 }
 
 // runMoleculeReady is `bd ready --mol` on every route. The molecule's nodes,
-// their readiness and parallel groups are the library's (issueops.LoadMolecule,
-// AnalyzeMolecule); what is here is presentation.
+// their readiness, the ready list and parallel groups are the library's one
+// derivation (issueops.ViewMolecule, shared with `mol current`); what is here
+// is presentation.
 func runMoleculeReady(ctx context.Context, s storage.DoltStorage, resolve func(context.Context, string) (string, error), molIDArg string) error {
 	moleculeID, err := resolve(ctx, molIDArg)
 	if err != nil {
@@ -655,25 +656,19 @@ func runMoleculeReady(ctx context.Context, s storage.DoltStorage, resolve func(c
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-	subgraph, err := issueops.LoadMolecule(ctx, roles.molecule, moleculeID)
+	view, err := issueops.ViewMolecule(ctx, roles.molecule, moleculeID)
 	if err != nil {
 		return HandleErrorRespectJSON("loading molecule: %v", err)
 	}
-
-	// Get parallel analysis to find ready steps
-	analysis := issueops.AnalyzeMolecule(subgraph)
-
-	// Collect ready steps
+	subgraph, analysis := view.Graph, view.Analysis
 	var readySteps []*MoleculeReadyStep
-	for _, issue := range subgraph.Issues {
+	for _, issue := range view.Ready {
 		info := analysis.Steps[issue.ID]
-		if info != nil && info.IsReady {
-			readySteps = append(readySteps, &MoleculeReadyStep{
-				Issue:         issue,
-				ParallelInfo:  info,
-				ParallelGroup: info.ParallelGroup,
-			})
-		}
+		readySteps = append(readySteps, &MoleculeReadyStep{
+			Issue:         issue,
+			ParallelInfo:  info,
+			ParallelGroup: info.ParallelGroup,
+		})
 	}
 
 	if jsonOutput {

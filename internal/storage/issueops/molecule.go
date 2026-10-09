@@ -166,14 +166,7 @@ func CloseCompletedMoleculeInTx(ctx context.Context, tx *sql.Tx, stepID, actor, 
 	if err != nil || root == nil {
 		return MoleculeAutoClose{}, nil, err
 	}
-	version := root.RowVersion
-	closed, tables, err := ExecuteClose(ctx, tx, publicops.CloseRequest{
-		Actor:           actor,
-		IssueID:         root.ID,
-		Reason:          publicops.MoleculeAutoCloseReason,
-		Session:         session,
-		ExpectedVersion: &version,
-	})
+	closed, tables, err := ExecuteClose(ctx, tx, publicops.MoleculeRootClose(root, actor, session))
 	if publicops.IsMoleculeAutoCloseRefusal(err) {
 		return MoleculeAutoClose{Refusal: err.Error()}, nil, nil
 	}
