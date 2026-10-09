@@ -22,6 +22,8 @@ func TestValidateCommentArgs(t *testing.T) {
 		{name: "bare list is rejected (the reported typo)", args: []string{"list", "some text"}, wantErr: true},
 		{name: "bare list with no text is still rejected", args: []string{"list"}, wantErr: true},
 		{name: "bare add is rejected (mirrors comments swapped-add)", args: []string{"add", "some text"}, wantErr: true},
+		{name: "bare show is rejected (a reader reaching for bd comments <id>)", args: []string{"show", "test-abc123"}, wantErr: true},
+		{name: "real id with text starting with the word show is fine", args: []string{"test-abc123", "show", "this", "to", "review"}, wantErr: false},
 		{name: "real id with text starting with the word list is fine", args: []string{"test-abc123", "list", "of", "things", "to", "do"}, wantErr: false},
 		{name: "real id with text starting with the word add is fine", args: []string{"test-abc123", "add", "one", "more", "item"}, wantErr: false},
 		{name: "real id alone (text comes from --stdin/--file) is fine", args: []string{"test-abc123"}, wantErr: false},

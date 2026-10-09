@@ -10,7 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/utils"
 )
 
-// commentReservedIDWords are "comments" subcommand names that must never be
+// commentReservedIDWords are subcommand-shaped words that must never be
 // silently accepted as the <id> positional of "bd comment" (singular). They
 // exist so a typo'd plural form — "bd comment list <id>", meant to be
 // "bd comments list" / "bd comments <id>" — fails loudly instead of treating
@@ -21,10 +21,15 @@ import (
 // leading-prefix abbreviation of an unrelated wisp's hash ("list3t0"), each
 // one silently wrote a garbage comment onto that wisp instead of erroring.
 // The word list mirrors the real "comments" subcommand (add) plus the other
-// verbs a "comments <verb>" typo is likely to produce.
+// verbs a "comments <verb>" typo is likely to produce. "show" is one of them:
+// "bd comment show <id>" means "show me the comments on <id>", and without
+// the guard it posts <id> as comment text onto an issue whose id is exactly
+// <prefix>-show, or fails with a resolver error that never names "bd
+// comments". "bd note" refuses "show" for the same reason.
 var commentReservedIDWords = map[string]bool{
 	"list":   true,
 	"add":    true,
+	"show":   true,
 	"rm":     true,
 	"delete": true,
 }
@@ -39,10 +44,11 @@ func checkCommentIDNotReservedWord(id string) error {
 		return nil
 	}
 	// "list" and "add" are genuinely misplaced "bd comments" subcommands, but
-	// "rm" and "delete" are not — there is no "bd comments rm"/"bd comments
-	// delete" (they read as bd's own delete command, or "dep rm"'s pattern,
-	// used in the wrong place). The message below must hold for all four, so
-	// it says "reserved word", never "misplaced bd comments subcommand".
+	// "show", "rm" and "delete" are not — there is no "bd comments show"/"bd
+	// comments rm"/"bd comments delete" (they read as bd's own show and delete
+	// commands, or "dep rm"'s pattern, used in the wrong place). The message
+	// below must hold for all five, so it says "reserved word", never
+	// "misplaced bd comments subcommand".
 	return HandleErrorRespectJSON(`%q is not a valid issue id — bd reserves it as a command/subcommand word (a real id never collides with one), so it is refused as an id instead of silently resolved as one.
 
 To comment on an issue:
@@ -91,13 +97,25 @@ To add a comment:
 ("add" is only a subcommand of the plural form: bd comments add <issue-id> "text".)
 
 See: bd comment --help`)
+	case "show":
+		return HandleErrorRespectJSON(`"bd comment show ..." is not valid — "comment" (singular) only adds a comment and takes an issue id first; it has no "show" subcommand.
+
+To list comments on an issue:
+  bd comments <issue-id>
+
+To show an issue with its comments:
+  bd show <issue-id>
+
+See: bd comment --help`)
 	}
-	// The two cases above carry hand-written messages for the two typos that
-	// were actually reported, both real "bd comments" subcommands. The
-	// remaining reserved words ("rm", "delete") are not "bd comments"
-	// subcommands — they collide with words bd uses elsewhere ("bd delete",
-	// "dep rm") — so they get checkCommentIDNotReservedWord's word-agnostic
-	// generic message instead of a claim that would be false for them.
+	// The three cases above carry hand-written messages for the three typos
+	// that were actually reported: "list" and "add" are real "bd comments"
+	// subcommands, and "show" is a reader reaching for the comments the way
+	// "bd show" reads an issue. The remaining reserved words ("rm", "delete")
+	// are not "bd comments" subcommands — they collide with words bd uses
+	// elsewhere ("bd delete", "dep rm") — so they get
+	// checkCommentIDNotReservedWord's word-agnostic generic message instead
+	// of a claim that would be false for them.
 	// Keeping the whole set in commentReservedIDWords also keeps the check
 	// unit-testable on its own.
 	return checkCommentIDNotReservedWord(args[0])
@@ -117,8 +135,8 @@ Examples:
   echo "comment from pipe" | bd comment bd-123 --stdin
   bd comment bd-123 --file notes.txt
 
-Note: "comment" (singular) only adds a comment — it has no "list" subcommand.
-To list comments on an issue, use the plural form: bd comments <id>`,
+Note: "comment" (singular) only adds a comment — it has no "list" or "show"
+subcommand. To list comments on an issue, use the plural form: bd comments <id>`,
 	Args:          validateCommentArgs,
 	SilenceUsage:  true,
 	SilenceErrors: true,

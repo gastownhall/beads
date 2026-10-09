@@ -1784,6 +1784,51 @@ func TestCLI_CommentAddMisplacedSyntax(t *testing.T) {
 	}
 }
 
+// TestCLI_CommentShowMisplacedSyntax covers the "show" typo: a caller who
+// wants to read the comments on an issue types "bd comment show <id>". With
+// no guard on the id slot that parses as id="show", text=[<id>]: the exact-id
+// resolver turns "show" into <prefix>-show, so where that issue exists the
+// real id is posted onto it as a comment, and elsewhere bd fails with a
+// resolver error that never mentions "bd comments". The fixture holds a
+// <prefix>-show issue, so the pre-fix write has a place to land.
+func TestCLI_CommentShowMisplacedSyntax(t *testing.T) {
+	tmpDir := setupCLITestDB(t)
+
+	out := runBDInProcess(t, tmpDir, "create", "Bystander issue for show-typo", "-p", "1", "--json")
+	jsonStart := strings.Index(out, "{")
+	if jsonStart < 0 {
+		t.Fatalf("No JSON found in create output: %s", out)
+	}
+	var issue map[string]interface{}
+	if err := json.Unmarshal([]byte(out[jsonStart:]), &issue); err != nil {
+		t.Fatalf("Failed to parse create JSON: %v\nOutput: %s", err, out)
+	}
+	fullID := issue["id"].(string)
+	dash := strings.LastIndex(fullID, "-")
+	if dash <= 0 {
+		t.Fatalf("test setup: id %q has no prefix", fullID)
+	}
+	showID := fullID[:dash] + "-show"
+	runBDInProcess(t, tmpDir, "create", "Issue whose id is the word show", "--id", showID, "-p", "1", "--json")
+
+	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "comment", "show", fullID)
+	if err == nil {
+		t.Fatalf("expected non-zero exit, got stdout=%q stderr=%q", stdout, stderr)
+	}
+	combined := stdout + stderr
+	if !strings.Contains(combined, "bd comments <issue-id>") || !strings.Contains(combined, "bd show <issue-id>") {
+		t.Fatalf("expected hints pointing at bd comments <issue-id> and bd show <issue-id>, got stdout=%q stderr=%q", stdout, stderr)
+	}
+
+	for _, id := range []string{showID, fullID} {
+		commentsOut := runBDInProcess(t, tmpDir, "comments", id, "--json")
+		trimmed := strings.TrimSpace(commentsOut)
+		if trimmed != "[]" && trimmed != "null" {
+			t.Fatalf("expected no comments on %s after rejected 'comment show', got: %s", id, commentsOut)
+		}
+	}
+}
+
 // TestCLI_CommentMisplacedSyntaxRejectedBeforeStoreOpen proves the guard
 // fires from commentCmd's Args validator, before PersistentPreRunE ever
 // opens a store, mirroring
@@ -1925,10 +1970,10 @@ func TestCLI_CommentRmDeleteReservedWordsRejected(t *testing.T) {
 // existing test green (mutation P-D). This runs the real command line, the
 // way a caller or an automated session actually invokes it, for every word in
 // commentReservedIDWords (validateCommentsAddArgs has no singular/plural
-// special-casing, unlike "comment"'s validateCommentArgs, so all four take
+// special-casing, unlike "comment"'s validateCommentArgs, so all five take
 // the same generic-message path and are equally worth covering here).
 func TestCLI_CommentsAddReservedWordRejectedThroughCobraDispatch(t *testing.T) {
-	for _, word := range []string{"list", "add", "rm", "delete"} {
+	for _, word := range []string{"list", "add", "show", "rm", "delete"} {
 		t.Run(word, func(t *testing.T) {
 			tmpDir := setupCLITestDB(t)
 

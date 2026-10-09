@@ -21,6 +21,7 @@ func TestValidateCommentsAddArgs(t *testing.T) {
 	}{
 		{name: "bare list is rejected", args: []string{"list", "some text"}, wantErr: true},
 		{name: "bare add is rejected", args: []string{"add", "some text"}, wantErr: true},
+		{name: "bare show is rejected", args: []string{"show", "some text"}, wantErr: true},
 		{name: "bare rm is rejected", args: []string{"rm", "some text"}, wantErr: true},
 		{name: "bare delete is rejected", args: []string{"delete", "some text"}, wantErr: true},
 		{name: "real id with text starting with the word list is fine", args: []string{"test-abc123", "list", "of", "things", "to", "do"}, wantErr: false},
