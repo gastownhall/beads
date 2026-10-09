@@ -1290,6 +1290,25 @@ paths:
           description: Only issues carrying this top-level metadata key.
           schema:
             type: string
+        - name: q
+          in: query
+          description: >-
+            `bd search`'s free text. A row matches when its title or its id
+            contains the text, case-insensitively; a text shaped like an issue
+            id also matches that exact id, an id prefix, and the external
+            reference. It narrows the listing and lifts none of its default
+            exclusions, so a caller that wants `bd search`'s every-status,
+            every-kind answer also sends `all`, `include_templates`,
+            `include_gates`, `include_infra` and `include_ephemeral`.
+
+
+            Behind the `issues.list.search` behavior token: an older server
+            answers `unknown_parameter` for this name. A client with the
+            handshake's capabilities cached refuses a search locally against a
+            server that does not advertise the token, rather than paying for
+            that round trip.
+          schema:
+            type: string
         - name: sort
           in: query
           description: >-
@@ -8030,17 +8049,20 @@ components:
             `skipped.live_dependent` rather than silently answering
             `unknown_parameter`, `issues.sweep.limit`, which announces
             that it accepts `limit` and answers `remaining` rather than
-            silently answering `unknown_parameter`, and
+            silently answering `unknown_parameter`,
             `issues.batchApply.depAddLineage`, which announces that a
             `dep_add` item on `POST /v0/beads/issues:batchApply` accepts
             `has_spawner` and `thread_id` (see `ApplyDepAddItem`) rather than
-            a `400` naming the member unknown, and
+            a `400` naming the member unknown,
             `issues.close.autoCloseMolecule`, which announces that
             `POST /v0/beads/issues/{id}:close` and
             `POST /v0/beads/issues:batchClose` accept `auto_close_molecule`
             and answer `auto_closed_molecule` and
             `molecule_auto_close_refusal` rather than a `400` naming the
-            member unknown. One behavior token is
+            member unknown, and `issues.list.search`, which announces that
+            `GET /v0/beads/issues` accepts `q`, `bd search`'s free text (see
+            that parameter), rather than silently answering
+            `unknown_parameter`. One behavior token is
             CONDITIONAL rather than build-level: `policy.external_dependencies`
             announces that this server's ready, claim, claim-next, close,
             blocking and dependency-tree operations already apply bd's

@@ -329,6 +329,10 @@ func listTable() Table {
 			refused("TitleSearch", "E-ListRequest.TitleSearch"),
 			refused("SpecPrefix", "E-ListRequest.SpecPrefix"),
 			refused("IDFilter", "E-ListRequest.IDFilter"),
+			// Behind issues.list.search: httpReader.List refuses a request
+			// carrying it, before dialing, unless the handshake advertises the
+			// token (role_reader.go refuseUnservedSearch).
+			param("Query", "q"),
 			param("Labels", "label"),
 			param("LabelsAny", "label_any"),
 			param("ExcludeLabels", "exclude_label"),

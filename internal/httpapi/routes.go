@@ -119,6 +119,19 @@ const CapIssuesListSort = "issues.list.sort"
 // count.
 const CapIssuesCountScope = "issues.count.scope"
 
+// CapIssuesListSearch is the behavior capability that advertises GET
+// /v0/beads/issues' `q` parameter (reads.go, spec `q` on OpListIssues):
+// `bd search`'s free text, carried as issueops.ListRequest.Query. Like
+// CapIssuesListSort it names a PARAMETER added to an existing operation, so it
+// rides behaviorCapabilities, and it is the token the parameter's OpenAPI
+// description cites for TestNewParameterOnExistingOperationHasABehaviorToken.
+//
+// The client (internal/httpclient) refuses a search locally against a server
+// that does not advertise it, with ErrUnsupported naming the token, so a
+// search is never sent to a server that would answer `unknown_parameter` and
+// is never widened into an unsearched listing.
+const CapIssuesListSearch = "issues.list.search"
+
 // CapIssuesSweepWispsPlane is the behavior capability that advertises the
 // `wisps-plane` value of SweepRequest.tier (sweep.go, spec SweepRequest.tier):
 // a third, wider tier that clears the whole wisps table plus any durable bead
@@ -953,7 +966,7 @@ func (r route) specPathOf() string {
 var behaviorCapabilities = []string{
 	CapProjectEnforce, CapBatchApplyLarge, CapIssuesListSort, CapIssuesCountScope,
 	CapIssuesSweepWispsPlane, CapIssuesSweepLiveDependents, CapIssuesSweepLimit,
-	CapBatchApplyDepAddLineage, CapIssuesCloseAutoCloseMolecule,
+	CapBatchApplyDepAddLineage, CapIssuesCloseAutoCloseMolecule, CapIssuesListSearch,
 }
 
 // Capabilities lists what this build advertises in ContextResponse.capabilities:

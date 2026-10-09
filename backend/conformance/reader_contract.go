@@ -786,6 +786,68 @@ func RunReaderListReadyFlagRefusesAFilterItCannotCarry(t *testing.T, ctx context
 	assertReaderPageIDs(t, "List --id without --ready", page, []string{one})
 }
 
+// RunReaderListQueryMatchesTheTitleOrTheID pins ListRequest.Query: `bd
+// search`'s text, which matches a row whose title OR id contains it, case
+// insensitively, and which narrows without lifting a default exclusion — and
+// issueops.SearchListRequest, the request every `bd search` route sends, which
+// does lift them.
+//
+// It scopes itself with a label rather than an id set, so the served leg runs
+// it as written: listIssues publishes no id parameter.
+func RunReaderListQueryMatchesTheTitleOrTheID(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	scope := readerLabel(fixture, "lsquery")
+	needle := strings.ToLower(fixture.IssuePrefix) + "qneedle"
+	titleHit := readerID(fixture, "lsquery", "title")
+	idHit := readerID(fixture, "lsquery", "idhit")
+	closedHit := readerID(fixture, "lsquery", "closed")
+	miss := readerID(fixture, "lsquery", "miss")
+
+	// The title carries the needle in UPPER case and the request asks in lower,
+	// so a case-sensitive match finds nothing.
+	titleIssue := readerIssue(titleHit, types.TypeTask, scope)
+	titleIssue.Title = "fix the " + strings.ToUpper(needle) + " path"
+	// The id-hit's title says nothing about it: only its id can match.
+	idIssue := readerIssue(idHit, types.TypeTask, scope)
+	idIssue.Title = "unrelated words"
+	closedIssue := readerIssue(closedHit, types.TypeTask, scope)
+	closedIssue.Title = "old " + needle
+	closedIssue.Status = types.StatusClosed
+	missIssue := readerIssue(miss, types.TypeTask, scope)
+	missIssue.Title = "nothing to see"
+	for _, issue := range []*types.Issue{titleIssue, idIssue, closedIssue, missIssue} {
+		seedReaderIssue(t, ctx, fixture, issue)
+	}
+
+	for _, tc := range []struct {
+		name string
+		req  publicops.ListRequest
+		want []string
+	}{
+		{"a title match, case-insensitively, under the default exclusions", publicops.ListRequest{Labels: []string{scope}, Query: needle}, []string{titleHit}},
+		{"AllFlag takes the closed match back", publicops.ListRequest{Labels: []string{scope}, Query: needle, AllFlag: true}, []string{titleHit, closedHit}},
+		{"an id match whose title does not contain the text", publicops.ListRequest{Labels: []string{scope}, Query: idHit, AllFlag: true}, []string{idHit}},
+		{"text nothing contains", publicops.ListRequest{Labels: []string{scope}, Query: needle + "-absent", AllFlag: true}, nil},
+		{"no text narrows nothing", publicops.ListRequest{Labels: []string{scope}}, []string{titleHit, idHit, miss}},
+		{"SearchListRequest, `bd search`'s scope, takes every status back", searchScoped(needle, scope), []string{titleHit, closedHit}},
+	} {
+		page, err := fixture.Reader.List(ctx, tc.req)
+		if err != nil {
+			t.Errorf("List %s: %v", tc.name, err)
+			continue
+		}
+		assertReaderPageIDSet(t, "List "+tc.name, page, tc.want)
+	}
+}
+
+// searchScoped is the library's search request narrowed to one case's label,
+// the request every `bd search` route sends.
+func searchScoped(query, label string) publicops.ListRequest {
+	req := publicops.SearchListRequest(query)
+	req.Labels = []string{label}
+	return req
+}
+
 // RunReaderListEmptyPageIsWellFormed pins the page shape when nothing matches
 // (reader.go:376-381). Items is never nil for a successful call, so no caller
 // has to tell null from empty to learn that nothing matched, and an empty page

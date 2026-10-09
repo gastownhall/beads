@@ -295,6 +295,7 @@ func ListParams(req issueops.ListRequest) (url.Values, error) {
 	b.list("exclude_label", req.ExcludeLabels)
 
 	b.str("parent", req.ParentID)
+	b.str("q", req.Query)
 
 	b.boolean("all", req.AllFlag)
 	b.boolean("include_templates", req.IncludeTemplates)

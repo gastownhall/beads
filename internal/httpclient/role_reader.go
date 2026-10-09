@@ -5,6 +5,7 @@ package httpclient
 import (
 	"context"
 	"net/http"
+	"slices"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/encode"
@@ -62,11 +63,38 @@ func (r httpReader) Ready(ctx context.Context, req issueops.ReadyRequest) (issue
 
 // List serves listIssues, through the pager in list_walk.go.
 func (r httpReader) List(ctx context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
+	if err := r.refuseUnservedSearch(ctx, req); err != nil {
+		return issueops.IssuePage{}, err
+	}
 	params, err := encode.ListParams(req)
 	if err != nil {
 		return issueops.IssuePage{}, r.store.inexpressible("Reader.List", err)
 	}
 	return r.store.walkIssues(ctx, params, req)
+}
+
+// refuseUnservedSearch is the pre-dial gate for ListRequest.Query, which rides
+// listIssues' `q` only on a server advertising issues.list.search. An older
+// server answers `q` with 400 unknown_parameter, so a search against it is
+// refused HERE, with the typed capability error naming the token: never a
+// round trip that is refused anyway, and never the unsearched listing passed
+// off as the search.
+//
+// listIssues is a baseline operation, so dispatch preflights nothing for it;
+// this is the one handshake a search costs, and a request without Query never
+// asks for it.
+func (r httpReader) refuseUnservedSearch(ctx context.Context, req issueops.ListRequest) error {
+	if req.Query == "" {
+		return nil
+	}
+	snap, err := r.store.snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	if snap != nil && slices.Contains(snap.Capabilities, wire.CapListSearch) {
+		return nil
+	}
+	return r.store.unsupportedCapability("Reader.List", wire.CapListSearch)
 }
 
 // Get serves getIssue, including the two landed include parameters that retired

@@ -150,6 +150,17 @@ type ListRequest struct {
 	SpecPrefix  string
 	// IDFilter is a comma-separated id set.
 	IDFilter string
+	// Query is `bd search`'s free text, with that command's meaning and not
+	// TitleSearch's: a row matches when its title contains the text or its id
+	// does, case-insensitively, and an id-shaped text also matches an exact
+	// id, an id prefix and the external ref. It is the `query` argument of the
+	// storage seam's SearchIssues, carried as a member so a backend that
+	// serves only roles can answer a search.
+	//
+	// It narrows; it lifts no default exclusion. A caller that wants search's
+	// "every status, every kind of row" answer asks for that with AllFlag and
+	// the Include* members, as for any other listing.
+	Query string
 
 	Labels        []string
 	LabelsAny     []string

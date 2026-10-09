@@ -181,6 +181,13 @@ func TestServedReaderListEmptyPageIsWellFormed(t *testing.T) {
 	conformance.RunReaderListEmptyPageIsWellFormed(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
+// TestServedReaderListQueryMatchesTheTitleOrTheID runs the search-text case as
+// written: it scopes itself with a label, and Query rides listIssues' `q`
+// parameter behind issues.list.search, which this in-process server serves.
+func TestServedReaderListQueryMatchesTheTitleOrTheID(t *testing.T) {
+	conformance.RunReaderListQueryMatchesTheTitleOrTheID(t, t.Context(), servedReaderFixture(t, "rdr"))
+}
+
 func TestServedReaderListMaxRowsIsHonored(t *testing.T) {
 	skipKnownDivergence(t, "E-ListRequest.IDFilter", readParkBead,
 		"the case scopes itself with IDFilter; the cap it pins is honored over this wire and exercised by "+

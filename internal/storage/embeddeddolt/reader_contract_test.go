@@ -133,6 +133,12 @@ func TestEmbeddedReaderListEmptyPageIsWellFormed(t *testing.T) {
 	conformance.RunReaderListEmptyPageIsWellFormed(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
 }
 
+func TestEmbeddedReaderListQueryMatchesTheTitleOrTheID(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReaderListQueryMatchesTheTitleOrTheID(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+}
+
 func TestEmbeddedReaderGetResolvesTheExactIDAcrossBothPlanes(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()

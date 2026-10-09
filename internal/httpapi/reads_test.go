@@ -23,7 +23,10 @@ type recordingIssues struct {
 	mu     sync.Mutex
 	ready  []types.WorkFilter
 	search []types.IssueFilter
-	items  []*types.IssueWithCounts
+	// queries is the free-text argument of each SearchIssuesWithCounts call,
+	// index-aligned with search.
+	queries []string
+	items   []*types.IssueWithCounts
 }
 
 func (f *recordingIssues) GetReadyWorkWithCounts(_ context.Context, filter types.WorkFilter) (domain.SearchCountsPage, error) {
@@ -33,9 +36,10 @@ func (f *recordingIssues) GetReadyWorkWithCounts(_ context.Context, filter types
 	return domain.SearchCountsPage{Items: f.items}, nil
 }
 
-func (f *recordingIssues) SearchIssuesWithCounts(_ context.Context, _ string, filter types.IssueFilter) (domain.SearchCountsPage, error) {
+func (f *recordingIssues) SearchIssuesWithCounts(_ context.Context, query string, filter types.IssueFilter) (domain.SearchCountsPage, error) {
 	f.mu.Lock()
 	f.search = append(f.search, filter)
+	f.queries = append(f.queries, query)
 	f.mu.Unlock()
 	return domain.SearchCountsPage{Items: f.items}, nil
 }
@@ -50,6 +54,12 @@ func (f *recordingIssues) readyFilters() []types.WorkFilter {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]types.WorkFilter(nil), f.ready...)
+}
+
+func (f *recordingIssues) searchQueries() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.queries...)
 }
 
 func (f *recordingIssues) searchFilters() []types.IssueFilter {
@@ -429,6 +439,33 @@ func TestListForwardsTheEphemeralPlaneParameter(t *testing.T) {
 			}
 			if infraExcluded == tc.wantInfraType {
 				t.Errorf("ExcludeTypes = %v; the infra types are a TYPE exclusion and only include_infra takes it off", filters[0].ExcludeTypes)
+			}
+		})
+	}
+}
+
+// TestListForwardsTheSearchText is the handler half of ListRequest.Query
+// (issues.list.search): `q` reaches the storage seam as SearchIssues' free-text
+// argument — not as TitleSearch, which matches titles only — and its absence
+// sends no text at all.
+func TestListForwardsTheSearchText(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, want string
+	}{
+		{"absent sends no text", "/v0/beads/issues", ""},
+		{"q is the search text", "/v0/beads/issues?q=login+bug&all=true", "login bug"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts, rec := newReadServer(t, Config{})
+			if resp := ts.get(t, tc.path); resp.StatusCode != http.StatusOK {
+				t.Fatalf("GET %s: status = %d, want 200", tc.path, resp.StatusCode)
+			}
+			queries := rec.searchQueries()
+			if len(queries) != 1 || queries[0] != tc.want {
+				t.Fatalf("search texts = %q, want [%q]", queries, tc.want)
+			}
+			if f := rec.searchFilters()[0]; f.TitleSearch != "" || f.TitleContains != "" {
+				t.Errorf("q leaked into a title-only filter: TitleSearch=%q TitleContains=%q", f.TitleSearch, f.TitleContains)
 			}
 		})
 	}

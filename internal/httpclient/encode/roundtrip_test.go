@@ -182,6 +182,7 @@ func roundTripCases() []roundTripCase {
 		ExcludeLabels: []string{"delta", "epsilon"},
 
 		ParentID: "bd-epic1",
+		Query:    "login bug",
 
 		AllFlag:          true,
 		IncludeTemplates: true,

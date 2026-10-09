@@ -5766,6 +5766,14 @@
     },
     {
       "schema": "param:listIssues",
+      "member": "query:q",
+      "type": "string",
+      "required": false,
+      "style": "form",
+      "explode": true
+    },
+    {
+      "schema": "param:listIssues",
       "member": "query:sort",
       "type": "string",
       "enum": [

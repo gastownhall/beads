@@ -64,6 +64,7 @@ type readyScopeField struct {
 //     that can never contain one — it is in the list below.
 var readyScopeFields = []readyScopeField{
 	{"IDFilter", "--id", func(r ListRequest) bool { return r.IDFilter != "" }},
+	{"Query", "bd search", func(r ListRequest) bool { return r.Query != "" }},
 	{"TitleSearch", "--title", func(r ListRequest) bool { return r.TitleSearch != "" }},
 	{"SpecPrefix", "--spec", func(r ListRequest) bool { return r.SpecPrefix != "" }},
 

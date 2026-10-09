@@ -375,6 +375,9 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		MetadataFields: q.metadataFields("metadata_field"),
 		HasMetadataKey: q.str("has_metadata_key"),
 
+		// `bd search`'s text, behind issues.list.search (CapIssuesListSearch).
+		Query: q.str("q"),
+
 		Limit: q.limit(),
 	}
 

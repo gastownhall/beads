@@ -234,6 +234,15 @@ cross the network unencrypted) — pass `--allow-plaintext` to override, or use
 `https://`. Switching a workspace that already selects a different backend
 needs `--force`.
 
+`bd search`, `bd show --current` and `bd recompute-blocked` work over HTTP
+too, each in its own way. `bd search` asks the server's listing with its text (`q`, behind the `issues.list.search` capability) and
+refuses before dialing against a server that does not advertise it.
+`bd show --current` finds the actor's in-progress or hooked issue through the
+server's boolean query. `bd recompute-blocked` is a no-op that exits 0: the
+server maintains `is_blocked` on every write, and repairing a stale flag is
+done in the server's own workspace (`--json` reports
+`{"rows_corrected": 0, "maintained_by": "server"}`).
+
 An embedding program that links beads as a library rather than running
 `cmd/bd` registers this backend itself through the public
 [`backend/http`](backend/http) package (`bdhttp.Register`), and can open a

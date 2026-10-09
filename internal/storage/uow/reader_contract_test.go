@@ -92,6 +92,9 @@ func TestReaderContract(t *testing.T) {
 	t.Run("ListEmptyPageIsWellFormed", func(t *testing.T) {
 		conformance.RunReaderListEmptyPageIsWellFormed(t, ctx, fixture)
 	})
+	t.Run("ListQueryMatchesTheTitleOrTheID", func(t *testing.T) {
+		conformance.RunReaderListQueryMatchesTheTitleOrTheID(t, ctx, fixture)
+	})
 	t.Run("GetResolvesTheExactIDAcrossBothPlanes", func(t *testing.T) {
 		conformance.RunReaderGetResolvesTheExactIDAcrossBothPlanes(t, ctx, fixture)
 	})

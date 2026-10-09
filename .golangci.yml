@@ -467,7 +467,11 @@ linters:
       # tests: false` means forbidigo never analyzes a test file at all, so that
       # entry asserts nothing either way and scoping it would be the churn this
       # comment just refused to write.
-      - path: '^cmd/bd/(close|duplicates|find_duplicates|gate|gc|graph|info|label|orphans|purge|search|todo|wisp|human)(_proxied_server)?\.go$'
+      #
+      # `search` LEFT this list when all three of its routes moved onto
+      # issueops.Reader.List with issueops.SearchListRequest (cmd/bd/search.go);
+      # it builds no filter any more.
+      - path: '^cmd/bd/(close|duplicates|find_duplicates|gate|gc|graph|info|label|orphans|purge|todo|wisp|human)(_proxied_server)?\.go$'
         text: 'do not write a filter here'
         linters:
           - forbidigo

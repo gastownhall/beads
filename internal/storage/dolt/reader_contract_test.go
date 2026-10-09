@@ -134,6 +134,12 @@ func TestReaderListEmptyPageIsWellFormed(t *testing.T) {
 	conformance.RunReaderListEmptyPageIsWellFormed(t, ctx, fixture)
 }
 
+func TestReaderListQueryMatchesTheTitleOrTheID(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListQueryMatchesTheTitleOrTheID(t, ctx, fixture)
+}
+
 func TestReaderGetResolvesTheExactIDAcrossBothPlanes(t *testing.T) {
 	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
 	defer cleanup()
