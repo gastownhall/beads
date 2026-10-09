@@ -14,9 +14,9 @@ load("//tools/bazel:bd_releases.bzl", "LINUX_AMD64")
 # fails the target (BEADS_TEST_REQUIRE_DOLT_CONTAINER=1).
 #
 # The go_test is only the binary (manual: never run on its own);
-# :regression_test runs it in 16 shards. Shards 1-10 each run the scenarios
+# :regression_test runs it in 14 shards. Shards 1-10 each run the scenarios
 # pinned_shards.txt pins to them (duration-balanced by
-# tools/bazel/pin_shards.py); shards 11-16 are the Go binary's own round-robin
+# tools/bazel/pin_shards.py); shards 11-14 are the Go binary's own round-robin
 # shards over every other top-level test, a test added since the manifest was
 # written included (tools/bazel/go_test_pinned_shard.sh), so each runs in
 # exactly one shard. Round-robin alone over 8 shards left the slowest at twice
@@ -64,7 +64,7 @@ sh_test(
         "BEADS_TEST_DOLT_SERVER": "local",
         "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
     },
-    shard_count = 16,
+    shard_count = 14,
     tags = ["dolt-server-cmd"],
     target_compatible_with = LINUX_AMD64,
 )

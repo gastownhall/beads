@@ -1274,7 +1274,7 @@ lane runs `//internal/storage/dolt:dolt_server_full_test` (16 shards) and
 ### Regression Tests
 
 `regression.yml` is retired. The suite runs as
-`//tests/regression:regression_test` (16 shards) in `bazel.yml`'s
+`//tests/regression:regression_test` (14 shards) in `bazel.yml`'s
 `bazel-cmd-dolt` lane, which `pr.yml`'s `CI Gate / Required` requires
 (`BAZEL_CMD_DOLT_REQUIRED`), so regression is now part of the aggregate gate
 on PRs and merge groups instead of a separate, path-detected advisory

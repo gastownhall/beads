@@ -2070,7 +2070,7 @@ jobs:
   # tests (TestCLI_*, TestInit*, the store-backed suites) that every other
   # lane and legacy job skips with BEADS_TEST_SKIP=dolt or leaves out of its
   # manifest; plus the differential regression suite
-  # (//tests/regression:regression_test, 16 shards: the candidate
+  # (//tests/regression:regression_test, 14 shards: the candidate
   # bd_for_tests against the catalog-pinned v0.49.6 release, formerly
   # regression.yml). --config=doltserver-cmd has exactly
   # --config=integration's build flags, so it shares bazel-integration's
