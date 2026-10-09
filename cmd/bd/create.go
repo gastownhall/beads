@@ -477,7 +477,15 @@ var createCmd = &cobra.Command{
 		}
 
 		createCtx := rootCtx
-		if parentID != "" {
+		// A registered Remote backend (http) has no raw GetNextChildID: the
+		// server mints the child id instead. A create with a ParentID and no
+		// id of its own is minted <parent>.<n> by the Lifecycle role on every
+		// backend (pinned by conformance
+		// RunIssueOperationsCreateUnderAParentMintsTheNextChildID, served leg
+		// included), inside the create's own transaction. The local route keeps
+		// its reservation so its Dolt commit staging is unchanged. An explicit
+		// --id never reaches here with a parent (refused above).
+		if parentID != "" && !isRemoteBackendWorkspace() {
 			childID, err := store.GetNextChildID(rootCtx, parentID)
 			if err != nil {
 				return HandleError("%v", err)
