@@ -207,7 +207,6 @@ shapes:
   - id: mc-ready-mol
     source: mc skills/pr-review (bd ready --mol <root>)
     args: [ready, --mol, e2e-mol, --json]
-    pending: {slice: "S16", reason: "ready --mol loads molecule steps off a raw path: step rows lose assignee and timestamps (molecule reads over roles)"}
   - id: mc-ready-parent
     source: mc skills/pr-review (bd ready --parent <root>)
     args: [ready, --parent, e2e-ep, --json]
@@ -347,20 +346,16 @@ shapes:
   - id: mc-mol-current
     source: mc worker prompts (bd mol current, ~38; inferred from in_progress work)
     args: [mol, current, --json]
-    pending: {slice: "S16", reason: "mol current without an id is silently empty over http (B3 #4)"}
   - id: mc-mol-current-text
     source: mc gc-role-worker template (bd mol current, text)
     args: [mol, current]
     compare: text
-    pending: {slice: "S16", reason: "mol current without an id is silently empty over http (B3 #4)"}
   - id: mc-mol-current-id
     source: mc prompts (bd mol current <id>)
     args: [mol, current, e2e-mol, --json]
-    pending: {slice: "S16", reason: "mol current <id> refuses (B3 #4)"}
   - id: mc-mol-progress
     source: mc prompts (bd mol progress <id>)
     args: [mol, progress, e2e-mol, --json]
-    pending: {slice: "S16", reason: "mol progress <id> refuses (B3 #4)"}
 
   # ---------------------------------------------------------------- config / probes / local
   - id: gc-config-get-types
@@ -434,7 +429,6 @@ shapes:
     args: [create, --json, "gc child", -t, task, --parent, e2e-ep]
     compare: exit
     verify: [[show, --json, e2e-ep.3]]
-    pending: {slice: "S19", reason: "create --parent calls GetNextChildID (B3 #8)"}
   - id: gc-create-ephemeral
     source: gc bdstore.go CreateWithStorage (--ephemeral)
     args: [create, --json, "gc wisp", -t, task, --id, e2e-wisp-n2, --ephemeral, --metadata, '{"gc.routed_to":"pool-a"}']
