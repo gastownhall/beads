@@ -804,3 +804,54 @@ func lifecycleCreatePlaneName(ephemeral bool) string {
 	}
 	return "durable"
 }
+
+// RunLifecycleCreateAppliesTheDefaultPriority pins
+// CreateRequest.DefaultPriority: a create that asks for the default stores
+// publicops.DefaultCreatePriority, and one that names priority 0 stores P0 —
+// the zero value is a real priority, never "absent". Asking for the default
+// while naming a priority is ErrValidation and writes nothing.
+//
+// It is the one place the default lives: `bd create` without --priority and an
+// HTTP create without `priority` both reach it through this flag, so a backend
+// that dropped it would store P0 (critical) for every such create.
+func RunLifecycleCreateAppliesTheDefaultPriority(t *testing.T, ctx context.Context, fixture LifecycleCreateFixture) {
+	t.Helper()
+	defaulted := fixture.IssuePrefix + "-prio-default"
+	critical := fixture.IssuePrefix + "-prio-zero"
+	conflict := fixture.IssuePrefix + "-prio-conflict"
+
+	for _, tc := range []struct {
+		id         string
+		priority   int
+		useDefault bool
+		want       int
+	}{
+		{id: defaulted, useDefault: true, want: publicops.DefaultCreatePriority},
+		{id: critical, priority: 0, want: 0},
+	} {
+		created, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+			Actor:           "writer",
+			DefaultPriority: tc.useDefault,
+			Issue:           &types.Issue{ID: tc.id, Title: tc.id, Priority: tc.priority, IssueType: types.TypeTask},
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", tc.id, err)
+		}
+		if created.Issue.Priority != tc.want {
+			t.Errorf("create %s result priority = %d, want %d", tc.id, created.Issue.Priority, tc.want)
+		}
+		if got := lifecycleCreateRow(t, ctx, fixture, tc.id).Priority; got != tc.want {
+			t.Errorf("stored %s priority = %d, want %d", tc.id, got, tc.want)
+		}
+	}
+
+	_, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+		Actor:           "writer",
+		DefaultPriority: true,
+		Issue:           &types.Issue{ID: conflict, Title: conflict, Priority: 3, IssueType: types.TypeTask},
+	})
+	if !errors.Is(err, storage.ErrValidation) {
+		t.Fatalf("DefaultPriority with priority 3: err = %v, want ErrValidation", err)
+	}
+	assertLifecycleCreateAbsent(t, ctx, fixture, conflict, "after the conflicting priority create")
+}

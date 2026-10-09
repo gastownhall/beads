@@ -434,7 +434,9 @@ func applyCreateItem(prefix string, encoded json.RawMessage, raw map[string]json
 		issue.NoHistory = *wire.NoHistory
 	}
 
-	item := &issueops.CreateItem{Key: derefString(wire.Key), Issue: issue}
+	// An absent `priority` is the role's default (CreateItem.DefaultPriority),
+	// never a 0 — which is P0 — made up here.
+	item := &issueops.CreateItem{Key: derefString(wire.Key), Issue: issue, DefaultPriority: wire.Priority == nil}
 	refs, res := applyMetadataRefs(prefix, raw)
 	if res != nil {
 		return nil, res

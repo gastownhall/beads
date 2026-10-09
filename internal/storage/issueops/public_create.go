@@ -47,7 +47,22 @@ func ValidatePublicCreateRequest(request publicops.CreateRequest) error {
 	if err := types.CheckFieldLen("parent ID", request.ParentID); err != nil {
 		return publicCreateValidationError(fmt.Errorf("create: %w", err))
 	}
+	if err := ValidateCreatePriority(request.Issue.Priority, request.DefaultPriority); err != nil {
+		return err
+	}
 	return validatePublicCreateDependencies(request)
+}
+
+// ValidateCreatePriority refuses a create that asks for the default priority
+// (CreateRequest.DefaultPriority, and the batch items' copies of it) while its
+// issue also names one: the two would disagree about what was asked for. It is
+// exported so a wire client refuses the same request before the dial instead
+// of dropping the member it cannot send both of.
+func ValidateCreatePriority(issuePriority int, useDefault bool) error {
+	if useDefault && issuePriority != 0 {
+		return publicCreateValidationError(fmt.Errorf("create: DefaultPriority is set but the issue names priority %d", issuePriority))
+	}
+	return nil
 }
 
 // PreparePublicCreateRequest snapshots, normalizes, and validates a public
@@ -60,6 +75,13 @@ func PreparePublicCreateRequest(request publicops.CreateRequest, context PublicC
 	issue := publicCreateIssue(request.Issue)
 	if issue.Status == "" {
 		issue.Status = types.StatusOpen
+	}
+	// THE ONE PLACE the create priority default is applied: every
+	// Lifecycle.Create, BatchCreator item and BatchApplier create item on every
+	// backend is prepared here, so the CLI and the HTTP handlers only say
+	// "absent" and never spell the number.
+	if request.DefaultPriority {
+		issue.Priority = publicops.DefaultCreatePriority
 	}
 	if issue.ID != "" && !request.ForceIDPrefix {
 		// The caller's prefix wins when it supplied one; see
@@ -78,6 +100,9 @@ func PreparePublicCreateRequest(request publicops.CreateRequest, context PublicC
 	}
 	prepared := request
 	prepared.Issue = issue
+	// The default is spent: the prepared issue now carries the priority, and
+	// the flag would contradict it on the re-validation below.
+	prepared.DefaultPriority = false
 	if prepared.WaitsFor != nil && prepared.WaitsFor.Gate == "" {
 		prepared.WaitsFor.Gate = string(types.WaitsForAllChildren)
 	}

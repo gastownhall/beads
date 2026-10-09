@@ -93,6 +93,15 @@ func (b *httpBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBat
 	if err != nil {
 		return issueops.ApplyBatchResult{}, err
 	}
+	var priorities []**int
+	for i := range body.Items {
+		if create := body.Items[i].Create; create != nil {
+			priorities = append(priorities, &create.Priority)
+		}
+	}
+	if err := b.store.pinCreateDefaultPriority(ctx, priorities...); err != nil {
+		return issueops.ApplyBatchResult{}, err
+	}
 	resp, err := b.wire.ApplyBatch(ctx, body)
 	if err != nil {
 		return issueops.ApplyBatchResult{}, applyBatchRefusal(err)
@@ -264,11 +273,12 @@ func applyCreateItemBody(item *issueops.CreateItem, actor string) (*apigen.Apply
 		return nil, err
 	}
 
-	// Priority is sent ALWAYS, createBody's reason: 0 is P0 and a real request,
-	// so an absent member — which the server reads as the workspace default —
-	// would silently reprioritize every critical issue a plan creates.
-	priority := issue.Priority
-	out := &apigen.ApplyCreateItem{Title: issue.Title, Priority: &priority}
+	// Priority is sent whenever the item names one (see wirePriority).
+	priority, err := wirePriority(issue.Priority, item.DefaultPriority)
+	if err != nil {
+		return nil, err
+	}
+	out := &apigen.ApplyCreateItem{Title: issue.Title, Priority: priority}
 
 	setItemString(&out.Key, item.Key)
 	setItemString(&out.Id, issue.ID)

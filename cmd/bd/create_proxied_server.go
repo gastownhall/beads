@@ -104,6 +104,10 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 	}
 
 	issue := buildCreateIssueFromInput(in)
+	if in.priorityDefault {
+		// No --priority: the role applies its default (CreateRequest.DefaultPriority).
+		issue.Priority = 0
+	}
 	// Labels ride on the issue because that is where the contract reads them:
 	// CreateRequest.Issue documents them as authoritative.
 	issue.Labels = append([]string(nil), in.labels...)
@@ -127,7 +131,8 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 		// and only this side can see it. Without this the proxied route mints
 		// ids the workspace's own configuration forbids and the direct route
 		// refuses.
-		IDPrefix: createIDPrefixOverride(),
+		IDPrefix:        createIDPrefixOverride(),
+		DefaultPriority: in.priorityDefault,
 	})
 	if err != nil {
 		// RULING R1, reported the same way the direct route reports it: an

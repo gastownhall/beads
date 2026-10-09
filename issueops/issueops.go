@@ -224,7 +224,22 @@ type CreateRequest struct {
 	// is handed. Without it the two `bd create` routes disagree about which
 	// ids a workspace may mint.
 	IDPrefix string
+	// DefaultPriority says the caller has no priority for the issue, and the
+	// create stores DefaultCreatePriority. It exists because Issue.Priority
+	// cannot say "absent": its zero value is P0, a real and urgent priority, so
+	// a caller that leaves it unset asks for critical work. The default is
+	// applied here, once, for every route — the CLI's `bd create` without
+	// --priority and an HTTP create without `priority` both set this rather
+	// than spelling the number themselves.
+	//
+	// Issue.Priority must be zero when it is set; a request that sets both is
+	// ErrValidation, because the two would disagree about what was asked for.
+	DefaultPriority bool
 }
+
+// DefaultCreatePriority is the priority a create stores when its request sets
+// DefaultPriority (CreateRequest, BatchCreateItem, CreateItem): P2, medium.
+const DefaultCreatePriority = 2
 
 // UpdateRequest describes an issue update.
 type UpdateRequest struct {

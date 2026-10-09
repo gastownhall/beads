@@ -2734,3 +2734,31 @@ func RunBatchApplyRefusesADottedChildGatedOnItsOwnParent(t *testing.T, ctx conte
 	}
 	assertBatchApplyEdgeCount(t, ctx, fixture, child, parent, 1)
 }
+
+// RunBatchApplyAppliesTheDefaultPriority pins CreateItem.DefaultPriority: a
+// create item that asks for the default stores publicops.DefaultCreatePriority,
+// and one naming priority 0 stores P0. `bd create --graph` sends a node without
+// a priority this way, and so does an HTTP batch apply create item without one.
+func RunBatchApplyAppliesTheDefaultPriority(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	unset := batchApplyMintedIssue("defaulted")
+	unset.Priority = 0
+	zero := batchApplyMintedIssue("critical")
+	zero.Priority = 0
+	result := batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+		Actor: "apply-writer",
+		Items: []publicops.ApplyItem{
+			{Kind: publicops.ItemCreate, Create: &publicops.CreateItem{Key: "d", Issue: unset, DefaultPriority: true}},
+			{Kind: publicops.ItemCreate, Create: &publicops.CreateItem{Key: "z", Issue: zero}},
+		},
+	})
+	for key, want := range map[string]int{"d": publicops.DefaultCreatePriority, "z": 0} {
+		id := result.Keys[key]
+		if id == "" {
+			t.Fatalf("key %q bound no id: %v", key, result.Keys)
+		}
+		if got := batchApplyCount(t, ctx, fixture, "SELECT priority FROM issues WHERE id = ?", []any{id}); got != want {
+			t.Errorf("stored priority of %s (%s) = %d, want %d", key, id, got, want)
+		}
+	}
+}

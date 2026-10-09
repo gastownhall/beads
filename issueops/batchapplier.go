@@ -100,6 +100,9 @@ type CreateItem struct {
 	// A caller reading the event stream sees a create and then an update, not
 	// one create carrying values nothing could have known yet.
 	MetadataRefs map[string]Ref
+	// DefaultPriority is CreateRequest.DefaultPriority for this item: the item
+	// has no priority, and the create stores DefaultCreatePriority.
+	DefaultPriority bool
 }
 
 // UpdateItem patches one existing issue, under UpdateRequest's rules.

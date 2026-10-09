@@ -1616,3 +1616,30 @@ func TestBuildGraphApplyBatchRequestFieldsSurvive(t *testing.T) {
 		}
 	})
 }
+
+// TestBuildGraphApplyBatchRequestLeavesAnAbsentPriorityToTheRole: a node with
+// no priority becomes a create item asking for the role's default
+// (CreateItem.DefaultPriority) with a zero Issue.Priority, and a node naming 0
+// stays P0 with the flag off. `bd create --graph` no longer spells the default.
+func TestBuildGraphApplyBatchRequestLeavesAnAbsentPriorityToTheRole(t *testing.T) {
+	zero := 0
+	req, err := buildGraphApplyBatchRequest(&GraphApplyPlan{Nodes: []GraphApplyNode{
+		{Key: "a", Title: "absent"},
+		{Key: "z", Title: "zero", Priority: &zero},
+	}}, GraphApplyOptions{}, "actor", "")
+	if err != nil {
+		t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+	}
+	creates := map[string]*issueops.CreateItem{}
+	for _, item := range req.Items {
+		if item.Kind == issueops.ItemCreate {
+			creates[item.Create.Key] = item.Create
+		}
+	}
+	if a := creates["a"]; a == nil || !a.DefaultPriority || a.Issue.Priority != 0 {
+		t.Errorf("absent priority item = %+v, want DefaultPriority and a zero Issue.Priority", a)
+	}
+	if z := creates["z"]; z == nil || z.DefaultPriority || z.Issue.Priority != 0 {
+		t.Errorf("explicit 0 item = %+v, want P0 without DefaultPriority", z)
+	}
+}

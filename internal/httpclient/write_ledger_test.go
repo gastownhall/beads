@@ -78,9 +78,18 @@ type carriage struct {
 	// incremental add or remove has no expression. CreateRequest.Issue is the
 	// other, and its excluded shape is a set of MEMBERS rather than a mode.
 	partial string
+	// absenceOf names the member a field is carried as the ABSENCE of, when
+	// another field drives that member's presence. CreateRequest.DefaultPriority
+	// is the population: "use the default" is `priority` left out, the member
+	// the Issue spread otherwise drives (wirePriority). It drives no member of
+	// its own, so the wire -> source direction does not count it, but the
+	// member must still be published.
+	absenceOf string
 }
 
 func member(name string) carriage { return carriage{member: name} }
+
+func absenceOf(name string) carriage { return carriage{absenceOf: name} }
 
 func spread(names ...string) carriage { return carriage{spread: names} }
 
@@ -164,6 +173,9 @@ func writeShapes() []writeShape {
 				"Dependencies":            member("dependencies"),
 				"WaitsFor":                member("waits_for"),
 				"ForceIDPrefix":           member("force_id_prefix"),
+				// DefaultPriority is the ABSENCE of `priority`: the member the
+				// Issue spread drives is left out (wirePriority).
+				"DefaultPriority": absenceOf("priority"),
 			},
 		},
 		{
@@ -512,6 +524,8 @@ func writeShapes() []writeShape {
 					partial: "W-CreateItem.Issue",
 				},
 				"MetadataRefs": member("metadata_refs"),
+				// The absence of `priority` (wirePriority).
+				"DefaultPriority": absenceOf("priority"),
 			},
 		},
 		{
@@ -652,7 +666,7 @@ func TestEveryWireExcludedWriteMemberCarriesALedgerRow(t *testing.T) {
 					continue
 				}
 				ways := 0
-				for _, set := range []bool{how.member != "", len(how.spread) > 0, how.routed != ""} {
+				for _, set := range []bool{how.member != "", len(how.spread) > 0, how.routed != "", how.absenceOf != ""} {
 					if set {
 						ways++
 					}
@@ -662,6 +676,11 @@ func TestEveryWireExcludedWriteMemberCarriesALedgerRow(t *testing.T) {
 					t.Errorf("%s.%s claims more than one of a body member, a spread and a route; it has exactly one", shape.source.Name(), name)
 				case ways == 0:
 					t.Errorf("%s.%s is in the carried table with neither a member nor a route", shape.source.Name(), name)
+				case how.absenceOf != "":
+					if !members[how.absenceOf] {
+						t.Errorf("%s.%s is carried as the absence of %q, which %s does not publish: %v",
+							shape.source.Name(), name, how.absenceOf, shape.body.Name(), sortedKeys(members))
+					}
 				default:
 					for _, wireMember := range how.members() {
 						if !members[wireMember] {

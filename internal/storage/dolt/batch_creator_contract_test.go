@@ -60,6 +60,9 @@ func TestBatchCreatorContract(t *testing.T) {
 	t.Run("EchoesSubSecondTimestamps", func(t *testing.T) {
 		conformance.RunBatchCreatorEchoesSubSecondTimestamps(t, ctx, fixture)
 	})
+	t.Run("AppliesTheDefaultPriority", func(t *testing.T) {
+		conformance.RunBatchCreatorAppliesTheDefaultPriority(t, ctx, fixture)
+	})
 }
 
 // newDoltBatchCreatorFixture composes the frozen role kit with this backend's

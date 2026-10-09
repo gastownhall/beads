@@ -174,6 +174,14 @@ const CapBatchApplyDepAddLineage = "issues.batchApply.depAddLineage"
 // still edits a template (bd-jkp9v3).
 const CapIssuesUpdateAllowTemplate = "issues.update.allowTemplate"
 
+// CapIssuesCreateDefaultPriority is the behavior capability that advertises
+// that issues.create, issues.batchCreate and issues.batchApply's create items
+// store the create default priority (P2) for a request whose `priority` member
+// is ABSENT. An older server predating this token reads an absent priority as
+// 0 and stores P0 (critical), so a client that does not see the token MUST
+// send the default explicitly rather than omit the member.
+const CapIssuesCreateDefaultPriority = "issues.create.defaultPriority"
+
 // customMethodTarget splits the custom method off the segment the router
 // matched, and reports the row that claims it.
 //
@@ -935,7 +943,7 @@ func (r route) specPathOf() string {
 var behaviorCapabilities = []string{
 	CapProjectEnforce, CapBatchApplyLarge, CapIssuesListSort, CapIssuesCountScope,
 	CapIssuesSweepWispsPlane, CapIssuesSweepLiveDependents, CapIssuesSweepLimit,
-	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate,
+	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate, CapIssuesCreateDefaultPriority,
 }
 
 // Capabilities lists what this build advertises in ContextResponse.capabilities:

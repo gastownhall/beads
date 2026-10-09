@@ -238,9 +238,10 @@ func (r *applyBatchRun) applyItem(ctx context.Context, tx *sql.Tx, index int) er
 // cap. Revisit it with a measurement, not with a copy of ExecuteCreateBatch.
 func (r *applyBatchRun) applyCreate(ctx context.Context, tx *sql.Tx, index int, item *publicops.CreateItem) error {
 	created, tables, err := ExecuteCreate(ctx, tx, publicops.CreateRequest{
-		Actor:         r.plan.Actor,
-		Issue:         item.Issue,
-		ForceIDPrefix: r.plan.ForceIDPrefix,
+		Actor:           r.plan.Actor,
+		Issue:           item.Issue,
+		ForceIDPrefix:   r.plan.ForceIDPrefix,
+		DefaultPriority: item.DefaultPriority,
 	})
 	if err != nil {
 		return &publicops.ItemError{Index: index, Kind: publicops.ItemCreate, Key: item.Key, Err: err}

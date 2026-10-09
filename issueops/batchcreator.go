@@ -43,6 +43,8 @@ type BatchCreateItem struct {
 	// referred to at all, because nothing can name an id that does not exist
 	// yet.
 	Dependencies []CreateDependency
+	// DefaultPriority is CreateRequest.DefaultPriority for this item.
+	DefaultPriority bool
 }
 
 // CreateBatchRequest describes one creation of many issues.

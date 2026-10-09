@@ -689,3 +689,44 @@ func batchCreatorHistoryCount(t *testing.T, ctx context.Context, fixture BatchCr
 	}
 	return entries
 }
+
+// RunBatchCreatorAppliesTheDefaultPriority pins BatchCreateItem.DefaultPriority:
+// an item that asks for the default stores publicops.DefaultCreatePriority, and
+// an item naming priority 0 stores P0 in the same batch. The default is
+// Lifecycle.Create's, applied in the shared preparation, so an HTTP
+// batchCreate without `priority` and a `bd create --file` template without one
+// land the same row.
+func RunBatchCreatorAppliesTheDefaultPriority(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	// Minted ids and an unset status, so the case asks nothing of the items
+	// but their priority — the http wire's batch item has no id or status slot.
+	unset := &types.Issue{Title: fixture.IssuePrefix + " defaulted", IssueType: types.TypeTask}
+	zero := &types.Issue{Title: fixture.IssuePrefix + " critical", IssueType: types.TypeTask}
+
+	result, err := fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor: "batch-writer",
+		Items: []publicops.BatchCreateItem{
+			{Issue: unset, DefaultPriority: true},
+			{Issue: zero},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateBatch: %v", err)
+	}
+	if len(result.Issues) != 2 || result.Issues[0] == nil || result.Issues[1] == nil {
+		t.Fatalf("result = %v, want two created issues", result.Issues)
+	}
+	for i, want := range []int{publicops.DefaultCreatePriority, 0} {
+		created := result.Issues[i]
+		if created.Priority != want {
+			t.Errorf("item %d result priority = %d, want %d", i, created.Priority, want)
+		}
+		var got int
+		if err := fixture.QueryScalar(ctx, "SELECT priority FROM issues WHERE id = ?", []any{created.ID}, &got); err != nil {
+			t.Fatalf("read priority of %s: %v", created.ID, err)
+		}
+		if got != want {
+			t.Errorf("item %d stored priority = %d, want %d", i, got, want)
+		}
+	}
+}

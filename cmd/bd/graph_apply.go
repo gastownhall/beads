@@ -417,7 +417,7 @@ func emitGraphApplyDryRun(plan *GraphApplyPlan, opts GraphApplyOptions) error {
 			Title:     node.Title,
 			Type:      string(issue.IssueType),
 			Status:    status,
-			Priority:  issue.Priority,
+			Priority:  graphApplyPreviewPriority(node, issue),
 			ParentKey: effectiveParentKey,
 			ParentID:  node.ParentID,
 		})
@@ -798,7 +798,9 @@ func graphApplyNodeIssue(node GraphApplyNode, opts GraphApplyOptions, createdBy,
 		metadataJSON = raw
 	}
 
-	priority := 2
+	// A node with no priority asks for the role's default
+	// (CreateItem.DefaultPriority); the number is not spelled here.
+	priority := 0
 	if node.Priority != nil {
 		priority = *node.Priority
 	}
@@ -1019,9 +1021,10 @@ func buildGraphApplyBatchRequest(plan *GraphApplyPlan, opts GraphApplyOptions, a
 		items = append(items, issueops.ApplyItem{
 			Kind: issueops.ItemCreate,
 			Create: &issueops.CreateItem{
-				Key:          node.Key,
-				Issue:        issue,
-				MetadataRefs: metadataRefs,
+				Key:             node.Key,
+				Issue:           issue,
+				MetadataRefs:    metadataRefs,
+				DefaultPriority: node.Priority == nil,
 			},
 		})
 	}
@@ -1211,4 +1214,15 @@ func graphApplySortedKeys(keys map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// graphApplyPreviewPriority is the priority the dry-run preview shows: the
+// node's own, or — for a node that names none and so asks the role for its
+// default — the library's DefaultCreatePriority, which is what the live apply
+// will store.
+func graphApplyPreviewPriority(node GraphApplyNode, issue *types.Issue) int {
+	if node.Priority == nil {
+		return issueops.DefaultCreatePriority
+	}
+	return issue.Priority
 }

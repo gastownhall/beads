@@ -239,7 +239,7 @@ func TestCreateRefusesEveryMemberTheWireExcludes(t *testing.T) {
 		got := populatableFields(reflect.TypeOf(issueops.CreateRequest{}))
 		sort.Strings(got)
 		want := []string{
-			"Actor", "Dependencies", "ForceIDPrefix", "IDPrefix",
+			"Actor", "DefaultPriority", "Dependencies", "ForceIDPrefix", "IDPrefix",
 			"InheritLabelsFromParent", "Issue", "ParentID", "WaitsFor",
 		}
 		if !reflect.DeepEqual(got, want) {

@@ -269,6 +269,10 @@ func TestServedBatchApplyRefusesADottedChildGatedOnItsOwnParent(t *testing.T) {
 	conformance.RunBatchApplyRefusesADottedChildGatedOnItsOwnParent(t, t.Context(), newServedBatchApplyFixture(t, "hbadot"))
 }
 
+func TestServedBatchApplyAppliesTheDefaultPriority(t *testing.T) {
+	conformance.RunBatchApplyAppliesTheDefaultPriority(t, t.Context(), newServedBatchApplyFixture(t, "hbaprio"))
+}
+
 // TestServedBatchApplyStampsSpawnerIDOnlyWhenNamed wires the dep_add
 // HasSpawner/ThreadID lineage conformance case onto the http leg (S5): a
 // served default Config always advertises CapBatchApplyDepAddLineage (it is

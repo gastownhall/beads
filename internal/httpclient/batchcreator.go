@@ -163,6 +163,13 @@ func (b *httpBatchCreator) CreateBatch(ctx context.Context, req issueops.CreateB
 		}
 		items = append(items, wireItem)
 	}
+	priorities := make([]**int, len(items))
+	for i := range items {
+		priorities[i] = &items[i].Priority
+	}
+	if err := b.store.pinCreateDefaultPriority(ctx, priorities...); err != nil {
+		return issueops.CreateBatchResult{}, err
+	}
 
 	res, err := b.wire.BatchCreateIssues(ctx, apigen.BatchCreateRequest{Actor: req.Actor, Items: items})
 	if err != nil {
@@ -202,12 +209,13 @@ func batchCreateItem(index int, item issueops.BatchCreateItem, actor string) (ap
 		return apigen.BatchCreateItem{}, err
 	}
 
-	// Priority is sent ALWAYS, unlike the five optional strings: 0 is P0 and a
-	// real request, so an absent member — which the server reads as "the
-	// workspace default" — would silently reprioritize every critical issue in a
-	// plan. The pointer addresses a local copy, never the caller's field.
-	priority := item.Issue.Priority
-	wireItem := apigen.BatchCreateItem{Title: item.Issue.Title, Priority: &priority}
+	// Priority is sent whenever the item names one, unlike the five optional
+	// strings (see wirePriority).
+	priority, err := wirePriority(item.Issue.Priority, item.DefaultPriority)
+	if err != nil {
+		return apigen.BatchCreateItem{}, err
+	}
+	wireItem := apigen.BatchCreateItem{Title: item.Issue.Title, Priority: priority}
 	setItemString(&wireItem.Description, item.Issue.Description)
 	setItemString(&wireItem.Design, item.Issue.Design)
 	setItemString(&wireItem.AcceptanceCriteria, item.Issue.AcceptanceCriteria)

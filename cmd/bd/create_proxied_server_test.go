@@ -133,12 +133,19 @@ func nodeIssueFromInput(t *testing.T, node GraphApplyNode, in createInput) *type
 
 func TestGraphApplyNodeIssue_DefaultsAndOpts(t *testing.T) {
 	t.Run("type and priority defaults", func(t *testing.T) {
-		issue := nodeIssueFromInput(t, GraphApplyNode{Key: "n", Title: "N"}, createInput{createdBy: "t"})
+		node := GraphApplyNode{Key: "n", Title: "N"}
+		issue := nodeIssueFromInput(t, node, createInput{createdBy: "t"})
 		if issue.IssueType != types.TypeTask {
 			t.Errorf("type default = %q, want task", issue.IssueType)
 		}
-		if issue.Priority != 2 {
-			t.Errorf("priority default = %d, want 2", issue.Priority)
+		// A node without a priority leaves it to the role's default
+		// (CreateItem.DefaultPriority), so the materialized issue carries none;
+		// the dry-run preview shows the library default the apply will store.
+		if issue.Priority != 0 {
+			t.Errorf("materialized priority = %d, want 0 (the role applies the default)", issue.Priority)
+		}
+		if got := graphApplyPreviewPriority(node, issue); got != issueops.DefaultCreatePriority {
+			t.Errorf("preview priority = %d, want the library default %d", got, issueops.DefaultCreatePriority)
 		}
 		if issue.Status != types.StatusOpen {
 			t.Errorf("status = %q, want open", issue.Status)

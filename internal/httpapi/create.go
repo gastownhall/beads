@@ -233,6 +233,10 @@ func (s *Server) createIssueRequest(w http.ResponseWriter, r *http.Request) (iss
 		ParentID:                derefString(wire.ParentId),
 		InheritLabelsFromParent: derefBool(wire.InheritLabelsFromParent),
 		ForceIDPrefix:           derefBool(wire.ForceIdPrefix),
+		// An absent `priority` is the role's default, never a 0 this handler
+		// would have to make up: 0 is P0, and the document says absent means
+		// the default (CreateRequest.DefaultPriority).
+		DefaultPriority: wire.Priority == nil,
 	}
 	// IDPrefix stays ZERO, and its absence is a decision rather than an
 	// omission. It exists because a workspace's own config.yaml prefix wins over

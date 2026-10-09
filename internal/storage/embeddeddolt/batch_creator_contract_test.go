@@ -61,6 +61,9 @@ func TestBatchCreatorContract(t *testing.T) {
 	t.Run("EchoesSubSecondTimestamps", func(t *testing.T) {
 		conformance.RunBatchCreatorEchoesSubSecondTimestamps(t, ctx, fixture)
 	})
+	t.Run("AppliesTheDefaultPriority", func(t *testing.T) {
+		conformance.RunBatchCreatorAppliesTheDefaultPriority(t, ctx, fixture)
+	})
 }
 
 func newEmbeddedBatchCreatorFixture(t *testing.T, te *testEnv, prefix string) conformance.BatchCreatorFixture {

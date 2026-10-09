@@ -39,6 +39,9 @@ func TestLifecycleCreateContract(t *testing.T) {
 	t.Run("EchoesSubSecondTimestamps", func(t *testing.T) {
 		conformance.RunLifecycleCreateEchoesSubSecondTimestamps(t, ctx, fixture)
 	})
+	t.Run("AppliesTheDefaultPriority", func(t *testing.T) {
+		conformance.RunLifecycleCreateAppliesTheDefaultPriority(t, ctx, fixture)
+	})
 }
 
 func newDoltLifecycleCreateFixture(t *testing.T, prefix string) (conformance.LifecycleCreateFixture, context.Context, func()) {

@@ -628,6 +628,10 @@ func TestServedBatchCreatorEchoesSubSecondTimestamps(t *testing.T) {
 	conformance.RunBatchCreatorEchoesSubSecondTimestamps(t, t.Context(), newServedBatchCreatorFixture(t, "hb12"))
 }
 
+func TestServedBatchCreatorAppliesTheDefaultPriority(t *testing.T) {
+	conformance.RunBatchCreatorAppliesTheDefaultPriority(t, t.Context(), newServedBatchCreatorFixture(t, "hbprio"))
+}
+
 // The last TWO items of the wire's item vocabulary, both on the EPHEMERAL half
 // of it and both parked for the reason the eight above are: apigen.BatchCreateItem
 // carries eight content members and no id and no wisp flag, so an item cannot

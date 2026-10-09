@@ -34,10 +34,14 @@ type IssueTemplate struct {
 	Design             string
 	AcceptanceCriteria string
 	Priority           int
-	IssueType          types.IssueType
-	Assignee           string
-	Labels             []string
-	Dependencies       []string
+	// PrioritySet records that the file named a priority. Without one the
+	// create asks the role for its default (BatchCreateItem.DefaultPriority);
+	// Priority then only carries that default for display.
+	PrioritySet  bool
+	IssueType    types.IssueType
+	Assignee     string
+	Labels       []string
+	Dependencies []string
 }
 
 // parseStringList extracts a list of strings from content, splitting by comma or whitespace.
@@ -77,6 +81,7 @@ func processIssueSection(issue *IssueTemplate, section, content string) {
 	case "priority":
 		if p := validation.ParsePriority(content); p != -1 {
 			issue.Priority = p
+			issue.PrioritySet = true
 		}
 	case "type":
 		t, err := validation.ParseIssueType(content)
@@ -193,8 +198,8 @@ func (s *markdownParseState) handleH2Header(matches []string) {
 	// Start new issue
 	s.currentIssue = &IssueTemplate{
 		Title:     strings.TrimSpace(matches[1]),
-		Priority:  2,      // Default priority
-		IssueType: "task", // Default type
+		Priority:  issueops.DefaultCreatePriority, // the role's default, for display; see PrioritySet
+		IssueType: "task",                         // Default type
 	}
 	s.currentSection = ""
 }
@@ -394,7 +399,7 @@ func buildMarkdownBatchRequest(templates []*IssueTemplate, in createInput) (issu
 				// wire still refuses this request's Provenance and Owner (see
 				// internal/httpclient/batchcreator.go), so `--file` is not
 				// servable there yet.
-				Priority:     template.Priority,
+				Priority:     markdownItemPriority(template),
 				IssueType:    template.IssueType,
 				Assignee:     template.Assignee,
 				Labels:       template.Labels,
@@ -405,7 +410,8 @@ func buildMarkdownBatchRequest(templates []*IssueTemplate, in createInput) (issu
 				CreatedBy:    in.createdBy,
 				Owner:        in.owner,
 			},
-			Dependencies: dependencies,
+			Dependencies:    dependencies,
+			DefaultPriority: !template.PrioritySet,
 		})
 	}
 	return issueops.CreateBatchRequest{
@@ -496,4 +502,14 @@ func reportMarkdownBatch(issues []*types.Issue, in createInput) error {
 		fmt.Printf("  %s: %s [P%d, %s]\n", issue.ID, issue.Title, issue.Priority, issue.IssueType)
 	}
 	return nil
+}
+
+// markdownItemPriority is the priority a template's create item carries: its
+// own when the file named one, otherwise zero, because the item then asks the
+// role for its default (BatchCreateItem.DefaultPriority).
+func markdownItemPriority(template *IssueTemplate) int {
+	if template.PrioritySet {
+		return template.Priority
+	}
+	return 0
 }

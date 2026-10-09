@@ -120,6 +120,10 @@ func TestServedLifecycleCreateEchoesSubSecondTimestamps(t *testing.T) {
 	conformance.RunLifecycleCreateEchoesSubSecondTimestamps(t, t.Context(), newServedCreateFixture(t, "hlc6"))
 }
 
+func TestServedLifecycleCreateAppliesTheDefaultPriority(t *testing.T) {
+	conformance.RunLifecycleCreateAppliesTheDefaultPriority(t, t.Context(), newServedCreateFixture(t, "hlcprio"))
+}
+
 // createParkBead is the bead the create-side parks cite. It is separate from
 // parkBead — the write-side parks of the close/update wave — because these
 // retire on different events: two of them wait on the wire growing a

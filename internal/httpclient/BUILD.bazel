@@ -99,6 +99,7 @@ go_test(
         "completeness_test.go",
         "composition_test.go",
         "counts_test.go",
+        "create_priority_test.go",
         "credential_source_test.go",
         "credential_test.go",
         "dial_test.go",

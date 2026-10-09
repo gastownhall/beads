@@ -17,10 +17,11 @@ func CloneCreateBatchRequest(request publicops.CreateBatchRequest) publicops.Cre
 	clone := request
 	clone.Items = make([]publicops.BatchCreateItem, len(request.Items))
 	for i, item := range request.Items {
-		clone.Items[i] = publicops.BatchCreateItem{
-			Issue:        clonePublicIssue(item.Issue),
-			Dependencies: append([]publicops.CreateDependency(nil), item.Dependencies...),
-		}
+		// Start from the item itself so every scalar member (DefaultPriority
+		// today) survives the clone; only the reference members are deepened.
+		clone.Items[i] = item
+		clone.Items[i].Issue = clonePublicIssue(item.Issue)
+		clone.Items[i].Dependencies = append([]publicops.CreateDependency(nil), item.Dependencies...)
 	}
 	return clone
 }
@@ -53,10 +54,11 @@ func ValidateCreateBatchRequest(request publicops.CreateBatchRequest) error {
 // an item through it, so no item restates CreateRequest's field rules.
 func CreateBatchItemRequest(request publicops.CreateBatchRequest, item publicops.BatchCreateItem) publicops.CreateRequest {
 	return publicops.CreateRequest{
-		Actor:         request.Actor,
-		Issue:         item.Issue,
-		Dependencies:  item.Dependencies,
-		ForceIDPrefix: request.ForceIDPrefix,
+		Actor:           request.Actor,
+		Issue:           item.Issue,
+		Dependencies:    item.Dependencies,
+		ForceIDPrefix:   request.ForceIDPrefix,
+		DefaultPriority: item.DefaultPriority,
 	}
 }
 

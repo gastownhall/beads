@@ -279,6 +279,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stored (a `bd create --parent` child) an HTTP caller now gets that 400 where
   it used to get 409 `dependency_cycle` (a blocking type) or
   `dependency_exists` (any other type).
+- An HTTP create (`issues:create`, `issues:batchCreate`, a `batch:apply`
+  create item) that omits `priority` now stores the create default, P2, as the
+  spec documents, instead of P0 (critical). The default lives in one place:
+  `issueops.CreateRequest.DefaultPriority` (and `BatchCreateItem` /
+  `CreateItem.DefaultPriority`) asks the shared create preparation to store
+  `issueops.DefaultCreatePriority`; the handlers set it for an absent member,
+  the HTTP client omits `priority` for it only when the server advertises the
+  new additive `issues.create.defaultPriority` handshake token (an older
+  `bd serve` reads an absent `priority` as P0, so a new client sends `2`
+  explicitly to it), and `bd create` (no `--priority`),
+  `bd create --graph` (a node without `priority`) and `bd create --file` (a
+  template without `### Priority`) rely on it rather than spelling 2. An
+  explicit `0` is still P0, and `DefaultPriority` with a non-zero priority is
+  `ErrValidation`. CLI output is unchanged.
 - **PRs based on `hotfix/**` branches now run full CI, not just
   cross-version historical smokes and triage labeling.** `pr.yml`,
   `pr-risk.yml`, `conformance.yml`, `cross-version-smoke.yml` and

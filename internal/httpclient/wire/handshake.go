@@ -221,6 +221,15 @@ const CapBatchApplyDepAddLineage = "issues.batchApply.depAddLineage"
 // (bd-jkp9v3).
 const CapIssuesUpdateAllowTemplate = "issues.update.allowTemplate"
 
+// CapIssuesCreateDefaultPriority is the behavior capability announcing that
+// the server stores the create default priority for an ABSENT `priority`
+// member on issues.create, issues.batchCreate and issues.batchApply create
+// items, spelled exactly as httpapi's constant of the same name. The create
+// roles read it from the cached handshake before the dial: a server without it
+// reads an absent priority as P0, so against it the client sends
+// issueops.DefaultCreatePriority explicitly (pinCreateDefaultPriority).
+const CapIssuesCreateDefaultPriority = "issues.create.defaultPriority"
+
 // CapExternalDependencies is the CONDITIONAL behavior capability announcing
 // that the ready, claim and close operations of this server apply bd's
 // external-dependency policy themselves, spelled exactly as httpapi's constant
@@ -361,7 +370,7 @@ func (e *WireRevisionSkewError) Unwrap() error { return ErrWireRevisionSkew }
 var behaviorCapabilities = []string{
 	CapProjectEnforce, CapBatchApplyLarge, CapListSort, CapCountScope,
 	CapSweepWispsPlane, CapSweepLiveDependents, CapSweepLimit,
-	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate,
+	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate, CapIssuesCreateDefaultPriority,
 }
 
 // CapabilityFor reports the capability token gating op, and whether op is on

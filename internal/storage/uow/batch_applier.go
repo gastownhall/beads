@@ -218,9 +218,10 @@ func (r *uowApplyRun) applyCreate(ctx context.Context, index int, item *publicop
 		return err
 	}
 	prepared, err := storageissueops.PreparePublicCreateRequest(publicops.CreateRequest{
-		Actor:         r.plan.Actor,
-		Issue:         item.Issue,
-		ForceIDPrefix: r.plan.ForceIDPrefix,
+		Actor:           r.plan.Actor,
+		Issue:           item.Issue,
+		ForceIDPrefix:   r.plan.ForceIDPrefix,
+		DefaultPriority: item.DefaultPriority,
 	}, storageissueops.PublicCreateContext{
 		IssuePrefix:     createContext.IssuePrefix,
 		AllowedPrefixes: createContext.AllowedPrefixes,

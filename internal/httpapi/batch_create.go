@@ -217,7 +217,9 @@ func batchCreateItem(index int, raw map[string]json.RawMessage) (issueops.BatchC
 		}
 		issue.Labels = *wire.Labels
 	}
-	item := issueops.BatchCreateItem{Issue: issue}
+	// An absent `priority` is the role's default (BatchCreateItem.DefaultPriority),
+	// never a 0 — which is P0 — made up here.
+	item := issueops.BatchCreateItem{Issue: issue, DefaultPriority: wire.Priority == nil}
 	if wire.Dependencies == nil {
 		return item, nil
 	}

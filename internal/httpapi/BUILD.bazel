@@ -77,6 +77,7 @@ go_test(
         "comments_test.go",
         "context_test.go",
         "count_test.go",
+        "create_priority_test.go",
         "create_test.go",
         "cycles_test.go",
         "delete_test.go",

@@ -736,7 +736,9 @@ func TestBatchCreateRefusesEveryMemberTheWireExcludes(t *testing.T) {
 		// dropped it.
 		got := populatableFields(reflect.TypeOf(issueops.BatchCreateItem{}))
 		sort.Strings(got)
-		want := []string{"Dependencies", "Issue"}
+		// DefaultPriority is carried as the ABSENCE of the item's `priority`
+		// member (wirePriority), pinned by TestBatchCreateLeavesPriorityAbsentForTheDefault.
+		want := []string{"DefaultPriority", "Dependencies", "Issue"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("BatchCreateItem carries %v, want %v.\n"+
 				"A new member reaches no wire member and no refusal: carry it in batchCreateItem, or refuse it with a ledger row.", got, want)

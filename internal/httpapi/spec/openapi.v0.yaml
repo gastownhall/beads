@@ -8142,7 +8142,11 @@ components:
             `issues.update.allowTemplate`, which announces that
             `PATCH /v0/beads/issues/{id}` accepts `allow_template` (see
             `UpdateIssueRequest`) rather than a `400` naming the member
-            unknown. The
+            unknown, and
+            `issues.create.defaultPriority`, which announces that a create
+            (`POST /v0/beads/issues`, `issues:batchCreate` and
+            `issues:batchApply` create items) with no `priority` member stores
+            the default P2 rather than P0. The
             list grows additively, and an operation never appears here unless
             it is fully implemented. This is how a client checks for an
             operation or a behavior — never the version string.
@@ -9790,7 +9794,12 @@ components:
           type: integer
           minimum: 0
           maximum: 4
-          description: 0 is P0/critical. Absent means the workspace default.
+          description: >-
+            0 is P0/critical. Absent means the create default, P2 (`2`), on a
+            server advertising `issues.create.defaultPriority`; such a server
+            never reads an absent member as `0`. An older server stores P0 for
+            an absent member, so a client that does not see the token sends
+            `2` explicitly.
         issue_type:
           type: string
           description: >-
@@ -10110,7 +10119,12 @@ components:
           type: integer
           minimum: 0
           maximum: 4
-          description: 0 is P0/critical. Absent means the workspace default.
+          description: >-
+            0 is P0/critical. Absent means the create default, P2 (`2`), on a
+            server advertising `issues.create.defaultPriority`; such a server
+            never reads an absent member as `0`. An older server stores P0 for
+            an absent member, so a client that does not see the token sends
+            `2` explicitly.
         assignee:
           type: string
           maxLength: 255
@@ -12047,7 +12061,12 @@ components:
           type: integer
           minimum: 0
           maximum: 4
-          description: 0 is P0/critical. Absent means the workspace default.
+          description: >-
+            0 is P0/critical. Absent means the create default, P2 (`2`), on a
+            server advertising `issues.create.defaultPriority`; such a server
+            never reads an absent member as `0`. An older server stores P0 for
+            an absent member, so a client that does not see the token sends
+            `2` explicitly.
         assignee:
           type: string
           maxLength: 255
