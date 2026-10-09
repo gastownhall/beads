@@ -2,6 +2,7 @@ package issueops
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -273,23 +274,106 @@ var ErrRenameLabelSameName = errors.New("rename label: old and new label are the
 // newLabel equal after trimming is refused with ErrRenameLabelSameName
 // rather than treated as a no-op -- see that error's doc for why silently
 // proceeding would wipe the label instead of leaving it alone.
+//
+// The label vocabulary registry follows the rename in the same transaction
+// (see renameLabelDefinitionInTx), so a rename never leaves a definition for
+// a label no issue can carry any more while the new name goes undefined.
 func RenameLabelInTx(ctx context.Context, tx DBTX, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error) {
+	renamed, merged, ids, _, err = RenameLabelAndDefinitionInTx(ctx, tx, oldLabel, newLabel, actor)
+	return renamed, merged, ids, err
+}
+
+// RenameLabelAndDefinitionInTx is RenameLabelInTx that also reports whether
+// the label vocabulary registry changed. A caller that publishes the rename
+// as its own Dolt commit needs that bit: a definition-only rename (a defined
+// label no issue carries) touches label_definitions while renamed stays 0.
+func RenameLabelAndDefinitionInTx(ctx context.Context, tx DBTX, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, definitionChanged bool, err error) {
 	if strings.TrimSpace(oldLabel) == strings.TrimSpace(newLabel) {
-		return 0, 0, nil, ErrRenameLabelSameName
+		return 0, 0, nil, false, ErrRenameLabelSameName
 	}
 	if err := types.CheckFieldLen("label", newLabel); err != nil {
-		return 0, 0, nil, err
+		return 0, 0, nil, false, err
 	}
 	for _, plane := range renameLabelPlanes {
 		r, m, planeIDs, err := renameLabelInPlane(ctx, tx, plane.labelTable, plane.eventTable, oldLabel, newLabel, actor)
 		if err != nil {
-			return 0, 0, nil, fmt.Errorf("rename label in %s: %w", plane.labelTable, err)
+			return 0, 0, nil, false, fmt.Errorf("rename label in %s: %w", plane.labelTable, err)
 		}
 		renamed += r
 		merged += m
 		ids = append(ids, planeIDs...)
 	}
-	return renamed, merged, ids, nil
+	definitionChanged, err = renameLabelDefinitionInTx(ctx, tx, oldLabel, newLabel)
+	if err != nil {
+		return 0, 0, nil, false, fmt.Errorf("rename label definition: %w", err)
+	}
+	return renamed, merged, ids, definitionChanged, nil
+}
+
+// renameLabelDefinitionInTx carries a label rename into the vocabulary
+// registry (label_definitions) and reports whether a row changed. The rules:
+//
+//   - oldLabel is defined under exactly that spelling and newLabel is not
+//     defined: the row is renamed in place, keeping its description and
+//     creator, with label_folded recomputed from newLabel.
+//   - both are defined: the registry merges into newLabel -- newLabel's own
+//     definition is kept and oldLabel's row is dropped, the same way the
+//     issue-label sweep keeps the carrier's existing newLabel row. newLabel
+//     counts as defined when ANY spelling of it is (label_folded match),
+//     since the registry can hold only one spelling per folded key.
+//   - a case-only rename (both fold to the same key) respells the one row.
+//   - a registry spelling that differs from oldLabel (issues carry "backend"
+//     while the definition is "Backend") is left alone: the rename names a
+//     different string than the one that was defined.
+//
+// strings.ToLower is the folding authority, as everywhere else in the
+// registry (see DefineLabelInTx). A schema that predates migration 0070 has
+// no registry to update.
+func renameLabelDefinitionInTx(ctx context.Context, tx DBTX, oldLabel, newLabel string) (bool, error) {
+	oldFolded := strings.ToLower(oldLabel)
+	newFolded := strings.ToLower(newLabel)
+
+	var existing string
+	err := tx.QueryRowContext(ctx,
+		`SELECT label FROM label_definitions WHERE label_folded = ?`, oldFolded,
+	).Scan(&existing)
+	switch {
+	case err == nil:
+	case errors.Is(err, sql.ErrNoRows), isTableNotExistError(err):
+		return false, nil
+	default:
+		return false, fmt.Errorf("look up %q: %w", oldLabel, err)
+	}
+	if existing != oldLabel {
+		return false, nil
+	}
+
+	if oldFolded != newFolded {
+		var probe int
+		err := tx.QueryRowContext(ctx,
+			`SELECT 1 FROM label_definitions WHERE label_folded = ?`, newFolded,
+		).Scan(&probe)
+		switch {
+		case err == nil:
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM label_definitions WHERE label_folded = ?`, oldFolded,
+			); err != nil {
+				return false, fmt.Errorf("merge %q into %q: %w", oldLabel, newLabel, err)
+			}
+			return true, nil
+		case errors.Is(err, sql.ErrNoRows):
+		default:
+			return false, fmt.Errorf("look up %q: %w", newLabel, err)
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE label_definitions SET label = ?, label_folded = ? WHERE label_folded = ?`,
+		newLabel, newFolded, oldFolded,
+	); err != nil {
+		return false, fmt.Errorf("rename %q to %q: %w", oldLabel, newLabel, err)
+	}
+	return true, nil
 }
 
 // renameLabelInPlane sweeps one label table (and its matching event table)

@@ -80,24 +80,31 @@ func (s *DoltStore) GetIssuesByLabel(ctx context.Context, label string) ([]*type
 }
 
 // RenameLabel renames a label across every issue and wisp that carries it,
-// delegating the sweep to issueops.RenameLabelInTx and owning only the
-// dolt-specific commit step. The commit targets the fixed "events"/"labels"
-// pair, mirroring AddLabel/RemoveLabel; doltAddAndCommit's own
-// HasStagedChanges guard skips it when a wisp-only rename left those tables
-// untouched.
+// delegating the sweep to issueops.RenameLabelAndDefinitionInTx and owning
+// only the dolt-specific commit step. The commit targets the fixed
+// "events"/"labels" pair, mirroring AddLabel/RemoveLabel, plus
+// label_definitions when the vocabulary registry followed the rename (which
+// it can do with renamed == 0, for a defined label no issue carries);
+// doltAddAndCommit's own HasStagedChanges guard skips it when a wisp-only
+// rename left those tables untouched.
 func (s *DoltStore) RenameLabel(ctx context.Context, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error) {
 	err = s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		var definitionChanged bool
 		if txErr := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 			var innerErr error
-			renamed, merged, ids, innerErr = issueops.RenameLabelInTx(ctx, tx, oldLabel, newLabel, actor)
+			renamed, merged, ids, definitionChanged, innerErr = issueops.RenameLabelAndDefinitionInTx(ctx, tx, oldLabel, newLabel, actor)
 			return innerErr
 		}); txErr != nil {
 			return txErr
 		}
-		if renamed == 0 {
+		if renamed == 0 && !definitionChanged {
 			return nil
 		}
-		return s.doltAddAndCommit(ctx, []string{"events", "labels"},
+		tables := []string{"events", "labels"}
+		if definitionChanged {
+			tables = append(tables, "label_definitions")
+		}
+		return s.doltAddAndCommit(ctx, tables,
 			fmt.Sprintf("bd: label rename '%s' -> '%s' (%d issues)", oldLabel, newLabel, renamed))
 	})
 	return renamed, merged, ids, err

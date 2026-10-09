@@ -18,6 +18,7 @@ go_library(
         "issue_delete.go",
         "journal.go",
         "label.go",
+        "label_vocabulary.go",
         "raw_sql.go",
         "remote.go",
     ],

@@ -319,3 +319,80 @@ func TestRenameLabel_SameNameAfterTrimRefused(t *testing.T) {
 		t.Errorf("GetLabels = %v, want unchanged [dup]", labels)
 	}
 }
+
+// TestRenameLabel_PublishesDefinition pins the server publication half of
+// the vocabulary rename: the registry row moves in the rename transaction,
+// and the rename's Dolt commit must stage label_definitions too - rows left
+// in the working set never travel on push/clone. The definition-only case
+// (a defined label no issue carries, renamed == 0) must still commit.
+func TestRenameLabel_PublishesDefinition(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	uncommittedDefinitions := func() int {
+		var n int
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM dolt_status WHERE table_name = 'label_definitions'").Scan(&n); err != nil {
+			t.Fatalf("query dolt_status: %v", err)
+		}
+		return n
+	}
+	defined := func() []string {
+		defs, err := store.ListLabelDefinitions(ctx)
+		if err != nil {
+			t.Fatalf("ListLabelDefinitions: %v", err)
+		}
+		var out []string
+		for _, d := range defs {
+			out = append(out, d.Label)
+		}
+		return out
+	}
+
+	issue := &types.Issue{ID: "rename-def-a", Title: "A", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := store.AddLabel(ctx, issue.ID, "backend", "tester"); err != nil {
+		t.Fatalf("add label: %v", err)
+	}
+	if err := store.DefineLabel(ctx, "backend", "server side", "tester"); err != nil {
+		t.Fatalf("define backend: %v", err)
+	}
+	if err := store.DefineLabel(ctx, "frontend", "ui", "tester"); err != nil {
+		t.Fatalf("define frontend: %v", err)
+	}
+
+	if _, _, _, err := store.RenameLabel(ctx, "backend", "server", "tester"); err != nil {
+		t.Fatalf("RenameLabel(backend): %v", err)
+	}
+	if n := uncommittedDefinitions(); n != 0 {
+		t.Errorf("label_definitions left uncommitted after a carried rename (%d dolt_status rows)", n)
+	}
+
+	renamed, _, _, err := store.RenameLabel(ctx, "frontend", "client", "tester")
+	if err != nil {
+		t.Fatalf("RenameLabel(frontend): %v", err)
+	}
+	if renamed != 0 {
+		t.Fatalf("renamed = %d, want 0 (no issue carries frontend)", renamed)
+	}
+	if n := uncommittedDefinitions(); n != 0 {
+		t.Errorf("label_definitions left uncommitted after a definition-only rename (%d dolt_status rows)", n)
+	}
+	var commits int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_log WHERE message = ?", "bd: label rename 'frontend' -> 'client' (0 issues)").Scan(&commits); err != nil {
+		t.Fatalf("query dolt_log: %v", err)
+	}
+	if commits != 1 {
+		t.Errorf("dolt_log commits for the definition-only rename = %d, want 1", commits)
+	}
+
+	if got := defined(); len(got) != 2 || got[0] != "client" || got[1] != "server" {
+		t.Fatalf("definitions = %v, want [client server]", got)
+	}
+}

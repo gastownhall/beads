@@ -297,6 +297,13 @@ var legitimatelyUnsupported = map[string]string{
 	"GetMoleculeLastActivity": "raw read: no molecule operation",
 	"GetMoleculeProgress":     "raw read: no molecule operation",
 
+	// Label vocabulary registry. The registry is opt-in workspace state and v0
+	// publishes no route for it: no operation defines, removes or lists a label
+	// definition, so all three refuse rather than guess at a wire shape.
+	"DefineLabel":          "write: no wire operation defines a label; v0 publishes no label-vocabulary route",
+	"UndefineLabel":        "write: no wire operation removes a label definition; DefineLabel's reason, on the other half of the pair",
+	"ListLabelDefinitions": "raw read: no wire operation lists label definitions; v0 publishes no label-vocabulary route",
+
 	// Transactions. A multi-statement transaction cannot span HTTP requests;
 	// each wire write is its own transaction server-side.
 	"RunInTransaction":               "transaction: cannot span requests",

@@ -182,6 +182,7 @@
 15 2 TestLeaseLifecycleEmbedded
 15 2 TestLenientGateWarningBody_ShapedDecisions
 15 2 TestReadEventsAutoPruneStateResolvesBothHalvesInOneQuery
+15 2 TestRenameLabelMovesDefinition
 15 2 TestSchemaAfterInit
 15 2 TestStageAndCommitAfterSQLCommitResponseLossIsIndeterminateAndNotReplayed
 15 2 TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPassword
@@ -264,6 +265,7 @@
 15 5 TestLargeBatchApplyWallClock_Embedded
 15 5 TestLargeGraphCreateTiming_Embedded
 15 5 TestLenientGateWarningBody_BluntRefusalKeepsSharedGuidance
+15 5 TestListLabelDefinitionsPreVocabularySchema
 15 5 TestOpenReturnsCachedStore
 15 5 TestPartitionWispIDs
 15 5 TestRetentionContract

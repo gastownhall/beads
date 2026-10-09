@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "gated.go",
         "id_generator.go",
+        "label_definition.go",
         "non_completing_close.go",
         "orphans.go",
         "storage_ext.go",

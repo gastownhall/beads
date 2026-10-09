@@ -152,9 +152,10 @@ func runLabelRenameProxiedServer(ctx context.Context, oldLabel, newLabel string)
 		if rerr != nil {
 			return "", fmt.Errorf("rename label '%s' -> '%s': %w", oldLabel, newLabel, rerr)
 		}
-		if renamed == 0 {
-			return "", nil
-		}
+		// Always publish, even with renamed == 0: the vocabulary registry
+		// follows the rename, so a defined label no issue carries is still a
+		// write, and an empty message would roll it back. A true no-op comes
+		// back from Commit as nothing-to-commit, which RunTx tolerates.
 		return fmt.Sprintf("bd: label rename '%s' -> '%s' (%d issues)", oldLabel, newLabel, renamed), nil
 	})
 	return renamed, merged, err

@@ -40,6 +40,12 @@ Memories (from 'bd remember') are excluded by default because they may
 contain sensitive agent context. Use --include-memories or --all to
 include them.
 
+Every line carries a "_type" discriminator: "issue", "memory", or
+"label-definition". Label vocabulary definitions ('bd label define') are
+exported whenever the registry is non-empty, including from a bare
+'bd export': they are shared workspace policy rather than agent context, so
+no flag gates them and none suppresses them.
+
 EXAMPLES:
   bd export                              # Export issues to stdout
   bd export -o issues.jsonl              # Export issues to file
@@ -267,6 +273,37 @@ func runExportFromSource(ctx context.Context, src exportSource) error {
 		count++
 	}
 
+	// Export the label vocabulary registry (bd label define) ALWAYS: the
+	// definitions are workspace-shared policy, not sensitive agent context,
+	// and a round-trip that kept labels.vocabulary (config is exported) but
+	// dropped them would restore enforcement over an EMPTY vocabulary - the
+	// state looks correct while behaving wrongly either way the empty set is
+	// read. Sorted by label for deterministic output (same contract as the
+	// memory keys below); an empty registry emits no records.
+	definitions, err := src.ListLabelDefinitions(ctx)
+	if err != nil {
+		return HandleErrorRespectJSON("failed to read label definitions: %v", err)
+	}
+	sort.Slice(definitions, func(i, j int) bool { return definitions[i].Label < definitions[j].Label })
+	definitionCount := 0
+	for i := range definitions {
+		record := &exportLabelDefinitionRecord{
+			RecordType:      "label-definition",
+			LabelDefinition: &definitions[i],
+		}
+		data, err := json.Marshal(record)
+		if err != nil {
+			return HandleErrorRespectJSON("failed to marshal label definition %s: %v", definitions[i].Label, err)
+		}
+		if _, err := w.Write(data); err != nil {
+			return HandleErrorRespectJSON("failed to write: %v", err)
+		}
+		if _, err := w.Write([]byte{'\n'}); err != nil {
+			return HandleErrorRespectJSON("failed to write newline: %v", err)
+		}
+		definitionCount++
+	}
+
 	// Export memories only when explicitly requested (GH#3650).
 	// Memories may contain sensitive agent context and are excluded by default.
 	memoryCount := 0
@@ -315,17 +352,29 @@ func runExportFromSource(ctx context.Context, src exportSource) error {
 
 	// Print summary to stderr (not stdout, to avoid mixing with JSONL)
 	if exportOutput != "" {
-		if memoryCount > 0 {
-			fmt.Fprintf(os.Stderr, "Exported %d issues and %d memories to %s\n", count, memoryCount, exportOutput)
-		} else {
-			fmt.Fprintf(os.Stderr, "Exported %d issues to %s\n", count, exportOutput)
+		summary := fmt.Sprintf("Exported %d issues", count)
+		if definitionCount > 0 {
+			summary += fmt.Sprintf(", %d label definitions", definitionCount)
 		}
+		if memoryCount > 0 {
+			summary += fmt.Sprintf(" and %d memories", memoryCount)
+		}
+		fmt.Fprintf(os.Stderr, "%s to %s\n", summary, exportOutput)
 		if exportVerbose && filteredOwnerCount > 0 {
 			fmt.Fprintf(os.Stderr, "  (%d filtered as personal by owner exclusion)\n", filteredOwnerCount)
 		}
 	}
 
 	return nil
+}
+
+// exportLabelDefinitionRecord wraps a label vocabulary definition with the
+// "_type":"label-definition" discriminator. created_at/created_by ride along
+// for provenance; import applies label+description (DefineLabel stamps its
+// own creation time) and uses created_by as the actor when present.
+type exportLabelDefinitionRecord struct {
+	RecordType string `json:"_type"`
+	*types.LabelDefinition
 }
 
 // exportIssueRecord wraps IssueWithCounts with a _type discriminator so that
