@@ -1,7 +1,6 @@
 package scripts_test
 
 import (
-	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -5719,6 +5718,13 @@ func TestBazelGatedLanesNeverRetryFlakyTests(t *testing.T) {
 			case ".git", "node_modules", ".beads":
 				return filepath.SkipDir
 			}
+			// Not in the checkout: under Bazel, the --run_under wrapper's
+			// PATH directory (//tools/bazel:hermetic_bin) is in every
+			// test's runfiles, and a line-by-line scan of its pinned dolt
+			// binary took a minute on a remote worker.
+			if filepath.ToSlash(rel) == "tools/bazel/hermetic_bin" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if !isFileOrFileLink(path, d) {
@@ -5734,14 +5740,6 @@ func TestBazelGatedLanesNeverRetryFlakyTests(t *testing.T) {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
-		}
-		// Binary files hold no flag or attribute (as git grep -I skips
-		// them): images and protobuf fixtures, and under Bazel
-		// tools/bazel/hermetic_bin/dolt, the --run_under wrapper's pinned
-		// dolt binary in every test's runfiles, which a line-by-line regexp
-		// scan took a minute over on a remote worker.
-		if bytes.IndexByte(data, 0) >= 0 {
-			return nil
 		}
 		checked++
 		for i, line := range strings.Split(string(data), "\n") {
