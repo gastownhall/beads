@@ -289,7 +289,7 @@ dolt_release(
     version = "2.1.8",
 )
 
-# The tracked release formula, for //scripts:scripts_test and the
+# The tracked release formula, for //scripts:shell_scripts_test and the
 # whole-checkout guard //scripts/repochecks:go_install_guidance_test. .beads/
 # also holds live bd data and is in .bazelignore, so no main-repo target can
 # declare the formula; this local repository exposes only .beads/formulas.

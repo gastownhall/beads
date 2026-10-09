@@ -416,8 +416,8 @@ func TestDoltServerFingerprintRunsOnTheDoltServerLane(t *testing.T) {
 // cmd/go's defaultVetFlags analyzers beside every compile of every lane, so
 // bazel.yml's required test lane (`bazel test //... --config=ci`) fails on a
 // finding. No workflow runs `go vet` any more. The repository policy tests
-// and the Go tests that walk the checkout run under Bazel
-// (//scripts:scripts_test and //test/docsync over //:repo_files), so no
+// and the Go tests that walk the checkout run under Bazel (//scripts' and
+// //test/docsync's go_tests, over the repo_files partitions they read), so no
 // workflow runs `go test` over ./scripts/... or the equivalence allowlist
 // either.
 func TestPRRunsGoTestsBazelSkips(t *testing.T) {

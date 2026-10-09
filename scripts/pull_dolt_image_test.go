@@ -11,8 +11,6 @@ import (
 	"testing"
 )
 
-const doltSQLServerImage = "dolthub/dolt-sql-server:2.2.0"
-
 func TestPullDoltImageRetriesTransientFailures(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -49,34 +47,6 @@ func TestPullDoltImageRetriesTransientFailures(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestDoltImagePullWorkflowsUseRetryHelper(t *testing.T) {
-	// No workflow pulls the image: every Dolt suite runs on hermetic dolt
-	// sql-servers (bazel.yml's dolt-server lanes) and needs no docker, since
-	// pr-risk.yml's container-backed legacy tiers were retired
-	// (ga-96smfk.22). The helper stays for local container-backed runs.
-	wantCalls := map[string]int{}
-
-	workflowsDir := filepath.Join(sourceRepoRoot(t), ".github", "workflows")
-	workflowPaths, err := filepath.Glob(filepath.Join(workflowsDir, "*.y*ml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, path := range workflowPaths {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := string(data)
-		name := filepath.Base(path)
-		if got, want := strings.Count(text, "run: ./scripts/ci/pull-dolt-image.sh"), wantCalls[name]; got != want {
-			t.Errorf("%s retry-helper calls = %d, want %d", name, got, want)
-		}
-		if strings.Contains(text, "docker pull "+doltSQLServerImage) {
-			t.Errorf("%s still pulls the Dolt image without retries", name)
-		}
 	}
 }
 

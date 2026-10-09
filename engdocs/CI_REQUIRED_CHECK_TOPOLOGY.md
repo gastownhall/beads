@@ -919,11 +919,16 @@ Required` requires them to have run remotely and passed.
     (`PR Lint (native|windows|darwin)`) jobs are retired.
   - The repository policy tests (`./scripts/...`, including the D2 guards)
     and the tests that walk the checkout run only under Bazel, remotely:
-    `//scripts:scripts_test` and `//test/docsync:docsync_test` take
-    `//:repo_files` as data, the checkout as Bazel sees it (every tracked
-    file outside `.bazelignore`, aggregated from the `repo_files` block
-    `tools/bazel/go_srcs.py` keeps in every package; the BUILD sync step's
-    `make bazel-sync-check` fails on a package without it). The release
+    the `//scripts` go_tests and `//test/docsync:docsync_test`, each over
+    the part of the checkout it reads. `tools/bazel/go_srcs.py` keeps a
+    `repo_files` block in every package that partitions its files into
+    `repo_go_srcs`, `repo_go_test_srcs`, `repo_doc_files` and
+    `repo_other_files`, aggregated at the root; their union `//:repo_files`
+    is every tracked file outside `.bazelignore`, which only
+    `//scripts:tracked_files_test` and two repository guards read (the
+    BUILD sync step's `make bazel-sync-check` fails on a package without
+    the block). So a Go-only change re-runs no workflow policy test, and a
+    docs-only or workflow-only change no Go-source scan. The release
     formula under `.bazelignore`d `.beads/` comes in as `@beads_formulas`.
     Their former `go test` legs (`Go checks (scripts-test)` and
     `Go checks (allowlisted)`) are gone.
@@ -1176,7 +1181,7 @@ changes. They gate through `BAZEL_TEST`; pinned by
 | fast-checks: migration hygiene checks A and B | `//scripts/repochecks:migration_hygiene_test` (`MIGRATION_HYGIENE_SCOPE=tree`) |
 | fast-checks: `make fmt-check` | `//scripts/repochecks:fmt_test` (the registered SDK's gofmt) |
 | PR Policy: `checkworkflowtags` | `//scripts/repochecks:workflow_tags_test` |
-| PR Policy: `check-testing-short.sh` | `//scripts:scripts_test` (`TestCheckTestingShortPassesOnCleanRepoTree`) |
+| PR Policy: `check-testing-short.sh` | `//scripts:go_sources_test` (`TestCheckTestingShortPassesOnCleanRepoTree`) |
 | PR Policy: workapi frontend boundary | `//scripts/repochecks:workapi_frontend_boundary_test` |
 | PR Policy: `make api-check` drift | `//scripts/repochecks:types_gen_drift_test`; its `go test ./internal/httpapi/...` half is the httpapi targets in the same lane |
 | PR Policy / check-doc-flags: `check-doc-freshness.sh` | `//scripts/repochecks:doc_freshness_test` |

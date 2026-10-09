@@ -38,7 +38,7 @@ The broad Go wrappers also cap package and test parallelism to `4` by default
 shared hosts into a different test topology than GitHub Actions.
 
 `scripts/check-testing-short.sh` (`make check-testing-short`; CI runs it in
-`//scripts:scripts_test`) enforces
+`//scripts:go_sources_test`) enforces
 that `testing.Short()` is only used for runtime, stress, or large-fixture skips.
 Use build tags, environment checks, or named wrappers for integration/e2e/API
 boundaries.

@@ -31,6 +31,15 @@ func repoRoot() string {
 	return filepath.Join(filepath.Dir(filename), "..", "..")
 }
 
+// declaredDataHint is appended to a broken-path report under Bazel, where the
+// test sees only the files test/docsync/BUILD.bazel declares.
+func declaredDataHint() string {
+	if !bazeltest.IsBazel() {
+		return ""
+	}
+	return " (under Bazel only declared files exist: if a path below is in the checkout, add it to docsync_test's data in test/docsync/BUILD.bazel)"
+}
+
 var markdownLinkRE = regexp.MustCompile(`\[[^][]*\]\(([^)]+)\)`)
 
 // docsPublishExemptions lists markdown files under docs/ that are allowed to
@@ -334,7 +343,7 @@ func TestDocsSiteLinks(t *testing.T) {
 
 	if len(broken) > 0 {
 		sort.Strings(broken)
-		t.Errorf("broken or misconvention links in docs/ (%d):", len(broken))
+		t.Errorf("broken or misconvention links in docs/ (%d)%s:", len(broken), declaredDataHint())
 		for _, b := range broken {
 			t.Errorf("  %s", b)
 		}
@@ -386,7 +395,7 @@ func TestEngdocsAndRootMarkdownLinks(t *testing.T) {
 
 	if len(broken) > 0 {
 		sort.Strings(broken)
-		t.Errorf("broken local markdown links (%d) — engdocs/ and root files are GitHub-viewed and need exact paths:", len(broken))
+		t.Errorf("broken local markdown links (%d) — engdocs/ and root files are GitHub-viewed and need exact paths%s:", len(broken), declaredDataHint())
 		for _, b := range broken {
 			t.Errorf("  %s", b)
 		}
