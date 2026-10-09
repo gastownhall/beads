@@ -70,6 +70,7 @@ var roleContractCases = []roleContract{
 		RunBatchCloserRequestValidationReturnsZeroResultAndChangesNothing,
 		RunBatchCloserClaimFilterValueFailureIsARequestValidationFailure,
 		RunBatchCloserBackendFailureReturnsNoOutcomes,
+		RunBatchCloserMidBatchInfrastructureFailureAbortsTheBatch,
 		RunBatchCloserIdempotentRecloseIsAPerItemSuccess,
 		RunBatchCloserAllIdempotentBatchLandsNothing,
 		RunBatchCloserDuplicateItemRecloseAtItsOwnIndex,

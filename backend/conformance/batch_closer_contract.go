@@ -53,7 +53,9 @@ import (
 //     when nothing landed (batchcloser.go:119-122).
 //   - The method's own error is reserved for validation, cancellation and
 //     infrastructure — the failures that mean the batch NEVER RAN, so no
-//     outcomes and no durable trace (batchcloser.go:119-126).
+//     outcomes and no durable trace (batchcloser.go:119-126) — and that holds
+//     MID-BATCH too: an infrastructure failure inside one item rolls back the
+//     items already closed and is never reported as that item's refusal.
 //   - The caller's request is never mutated (batchcloser.go:137-140).
 
 // BatchCloserFixture supplies adapter-specific storage access for the
@@ -97,6 +99,16 @@ type BatchCloserFixture struct {
 	// backend cannot observe history by message, and that case skips loudly.
 	// See history_matching.go for the convention.
 	CountHistoryMatching func(context.Context, string) (int, error)
+	// FailHydrationOf arms an induced infrastructure failure: the item naming
+	// issueID fails its post-close hydration on every CloseBatch until the
+	// returned disarm runs. The mid-batch infrastructure case needs it because
+	// no fixture INPUT can reach that path — every deterministic per-item
+	// failure is a domain refusal, and a dead context fails before the
+	// transaction begins. The three in-tree wirings arm the shared seam
+	// (internal/storage/issueops.FailBatchCloseHydrationOf); nil means this
+	// backend cannot induce a mid-batch failure, and that case skips loudly
+	// rather than passing quietly.
+	FailHydrationOf func(issueID string) (disarm func())
 }
 
 // RunBatchCloserOutcomesMirrorItemsIndexForIndex pins the index correspondence
@@ -431,10 +443,11 @@ func RunBatchCloserClaimFilterValueFailureIsARequestValidationFailure(t *testing
 // (conformance/reader_contract.go:761-763): every backend has to begin a
 // transaction before it can close anything, so the failure lands underneath the
 // batch rather than inside one item. What is asserted is the RESULT shape and
-// the untouched row — the error's spelling is each backend's own, and the
-// in-transaction claim-failure path this stands in for cannot be reached from
-// these fixtures at all (every deterministic claim failure is rejected before
-// the transaction).
+// the untouched row — the error's spelling is each backend's own. The
+// IN-transaction failure this cannot reach from fixture inputs alone (every
+// deterministic claim failure is rejected before the transaction) is pinned by
+// RunBatchCloserMidBatchInfrastructureFailureAbortsTheBatch below, through the
+// fixture's FailHydrationOf seam.
 func RunBatchCloserBackendFailureReturnsNoOutcomes(t *testing.T, ctx context.Context, fixture BatchCloserFixture) {
 	t.Helper()
 	closeable := fixture.IssuePrefix + "-deadctx-closeable"
@@ -460,6 +473,91 @@ func RunBatchCloserBackendFailureReturnsNoOutcomes(t *testing.T, ctx context.Con
 	// Read back on the LIVE context: the assertion is about the row, not about
 	// the dead context's reach.
 	assertBatchCloserStatus(t, ctx, fixture, closeable, types.StatusOpen)
+}
+
+// RunBatchCloserMidBatchInfrastructureFailureAbortsTheBatch pins the
+// infrastructure half of batchcloser.go:119-126 at the point the dead-context
+// case above cannot reach: MID-BATCH, after an earlier item has already closed
+// inside the transaction. An induced post-close hydration failure on the
+// MIDDLE item of three is not that item's refusal — it is a failure of the
+// request, and the WHAT IS ATOMIC clause (batchcloser.go:119-126) then leaves
+// exactly one honest report: the method's own error, no outcomes beside it, no
+// claim, and no durable trace. "The failures that mean the batch never ran" is
+// made true retroactively by the rollback — the FIRST item's landed close must
+// not survive as a committed prefix, and no history entry may record it.
+//
+// The middle position is load-bearing twice over: an implementation that
+// converted the failure into outcome[1].Err and continued commits items 0 and
+// 2 (the misclassification this case exists to catch), and one that aborted
+// but kept item 0's write commits a prefix the error said never ran.
+//
+// The failure is induced through the fixture's FailHydrationOf seam because no
+// fixture input can produce a mid-transaction infrastructure failure: every
+// deterministic per-item failure is a typed domain refusal. What is asserted
+// of the error is only that it is NOT the per-item refusal vocabulary — the
+// spelling is each backend's own.
+func RunBatchCloserMidBatchInfrastructureFailureAbortsTheBatch(t *testing.T, ctx context.Context, fixture BatchCloserFixture) {
+	t.Helper()
+	if fixture.FailHydrationOf == nil {
+		t.Skipf("fixture has no FailHydrationOf: this backend cannot induce a mid-batch infrastructure failure, so the mid-batch half of batchcloser.go:119-126 is UNPINNED here")
+	}
+	requireBatchCloserHistory(t, fixture)
+	first := fixture.IssuePrefix + "-midinfra-first"
+	poisoned := fixture.IssuePrefix + "-midinfra-poisoned"
+	last := fixture.IssuePrefix + "-midinfra-last"
+	seedBatchCloserIssue(t, ctx, fixture, first)
+	seedBatchCloserIssue(t, ctx, fixture, poisoned)
+	seedBatchCloserIssue(t, ctx, fixture, last)
+
+	before, err := fixture.CountHistory(ctx)
+	if err != nil {
+		t.Fatalf("CountHistory before: %v", err)
+	}
+	disarm := fixture.FailHydrationOf(poisoned)
+	defer disarm()
+	result, err := fixture.Closer.CloseBatch(ctx, publicops.CloseBatchRequest{
+		Actor: "closer",
+		Items: []publicops.BatchCloseItem{{IssueID: first}, {IssueID: poisoned}, {IssueID: last}},
+	})
+	if err == nil {
+		t.Fatalf("CloseBatch with a poisoned middle item returned %d outcomes and no error — the failure was not induced, so this case proves nothing",
+			len(result.Outcomes))
+	}
+	if result.Outcomes != nil {
+		t.Errorf("CloseBatch that failed mid-batch returned %d outcomes beside its error (%v) — a non-nil error and populated Outcomes are mutually exclusive, and an infrastructure failure is not one item's refusal",
+			len(result.Outcomes), err)
+	}
+	if result.ClaimedNext != nil {
+		t.Errorf("CloseBatch that failed mid-batch returned a claim beside its error (%v)", err)
+	}
+	for _, refusal := range []struct {
+		name     string
+		sentinel error
+	}{
+		{"ErrNotFound", publicops.ErrNotFound},
+		{"ErrCloseBlocked", publicops.ErrCloseBlocked},
+		{"ErrCloseOpenChildren", publicops.ErrCloseOpenChildren},
+		{"ErrValidation", publicops.ErrValidation},
+	} {
+		if errors.Is(err, refusal.sentinel) {
+			t.Errorf("the request-level error matches %s (%v) — an infrastructure failure must not decay into the domain vocabulary", refusal.name, err)
+		}
+	}
+	disarm()
+
+	// No committed prefix: the first item's close landed inside the transaction
+	// and must have rolled back with everything else.
+	assertBatchCloserStatus(t, ctx, fixture, first, types.StatusOpen)
+	assertBatchCloserStatus(t, ctx, fixture, poisoned, types.StatusOpen)
+	assertBatchCloserStatus(t, ctx, fixture, last, types.StatusOpen)
+	after, err := fixture.CountHistory(ctx)
+	if err != nil {
+		t.Fatalf("CountHistory after: %v", err)
+	}
+	if after != before {
+		t.Errorf("history entries went %d -> %d across a batch that failed mid-batch, want no change: a batch that never ran leaves no durable trace",
+			before, after)
+	}
 }
 
 // RunBatchCloserIdempotentRecloseIsAPerItemSuccess pins batchcloser.go:81-86.

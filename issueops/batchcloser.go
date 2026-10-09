@@ -151,3 +151,22 @@ type BatchCloser interface {
 	// transaction.
 	CloseBatch(ctx context.Context, req CloseBatchRequest) (CloseBatchResult, error)
 }
+
+// PostWriteError marks an error that arose AFTER an item's close had already
+// landed in the transaction (a reload or hydration miss). Phase outranks
+// sentinel in the batch taxonomy: a post-write ErrNotFound is corruption
+// evidence, not a refusal the caller can act on, so implementations must keep
+// a marked error request-level even when it wraps a per-item sentinel.
+// errors.Is/As still traverse to the underlying chain via Unwrap.
+type PostWriteError struct{ Err error }
+
+func (e PostWriteError) Error() string { return e.Err.Error() }
+func (e PostWriteError) Unwrap() error { return e.Err }
+
+// MarkPostWrite wraps err as post-write for the batch taxonomy; nil stays nil.
+func MarkPostWrite(err error) error {
+	if err == nil {
+		return nil
+	}
+	return PostWriteError{Err: err}
+}
