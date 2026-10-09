@@ -542,5 +542,6 @@
 15 15 TestGetIssueCommentsPageEmbedded
 15 15 TestGetReadyWorkIncludeEphemeralExcludesNonReadyWisps
 15 15 TestIgnoredCursorHealIsIdempotent
+15 15 TestReadyWorkHidesChildrenOfUndatedDeferredParent
 15 15 TestReadyWorkStatementBudget
 15 15 TestReleaserContract
