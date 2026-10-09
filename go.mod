@@ -18,6 +18,7 @@ require (
 	github.com/dolthub/eventkit v0.0.0-20260611184414-99f5693e696a
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/gowebpki/jcs v1.0.1
+	github.com/graph-gophers/graphql-go v1.10.3
 	github.com/invopop/jsonschema v0.14.0
 	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/olebedev/when v1.1.0

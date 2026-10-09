@@ -284,6 +284,7 @@
 
 44 7 TestProxiedServerBatchDefersThenDoltCommitAdvancesHeadOnce
 44 7 TestProxiedServerDoltLifecycle
+44 7 TestProxiedServerGQLParity
 44 7 TestProxiedServerGateFrontDoorDirectServerProxyParity
 44 7 TestProxiedServerIfRevisionGuardClose
 44 7 TestProxiedServerMolDistill

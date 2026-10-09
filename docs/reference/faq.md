@@ -292,7 +292,7 @@ Beads is a single static binary with no runtime dependencies — the Dolt engine
 
 ### Can I query or extend the database directly?
 
-Yes, three ways: `bd query` for the built-in query language (compound filters, boolean operators, date expressions), `bd sql` for raw SQL against the underlying database, and `--json` output on every command for building integrations.
+Yes, four ways: `bd query` for the built-in query language (compound filters, boolean operators, date expressions), `bd gql` for read-only [GraphQL queries](/reference/graphql) that return only the fields you select, `bd sql` for raw SQL against the underlying database, and `--json` output on every command for building integrations.
 
 ### Does beads support Windows?
 
