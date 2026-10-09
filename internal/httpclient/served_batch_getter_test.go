@@ -35,6 +35,7 @@ func TestServedBatchGetterContract(t *testing.T) {
 		IssuePrefix:  "bge",
 		BatchGetter:  getter,
 		CreateIssue:  e.createIssue,
+		CreateIssues: e.reference.CreateIssues,
 		CreateWisp:   e.createWisp,
 		CountHistory: e.countHistory,
 	}

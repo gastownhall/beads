@@ -79,11 +79,12 @@ go_library(
 
 go_test(
     name = "httpclient_test",
-    # Unsharded, this package takes ~350s under --config=ci (BEADS_TEST_SKIP=dolt, no
-    # BEADS_TEST_EMBEDDED_DOLT): mostly wall-clock wait on the CA tests' dialer/keep-alive
-    # timeouts, not CPU. The go_test default size (medium, 300s timeout) leaves no margin
-    # and times out intermittently; size=large/timeout=long follows the same convention as
-    # //internal/storage/embeddeddolt's go_test.
+    # Unsharded, this package took 137-228s on rbe-west under --config=ci
+    # (BEADS_TEST_SKIP=dolt, no BEADS_TEST_EMBEDDED_DOLT; 2026-10-09), the test lane's
+    # longest single action. Two shards (rules_go deals tests out round-robin) put
+    # ~68s of measured test time on each; the three heaviest tests (31s, 20s, 13s)
+    # land on different shards. size=large/timeout=long follows the same convention
+    # as //internal/storage/embeddeddolt's go_test.
     size = "large",
     timeout = "long",
     srcs = [
@@ -171,6 +172,7 @@ go_test(
     # `make bazel-sync` (the directive just says so).
     data = glob(["*.go"]),
     embed = [":httpclient"],
+    shard_count = 2,
     deps = [
         "//backend/conformance",
         "//internal/eventsjournal",
@@ -203,12 +205,14 @@ go_test(
 # fails each served case rather than skipping it. It is the script's run on
 # the lane's race build (raceEnabled shrinks its one large apply).
 #
-# Shard count: on the lane's executors (2026-10-08) the package is 702 tests
-# and ~3,700 test-seconds, the heaviest, TestServedBatchGetterContract, at
-# 170-230s. rules_go deals the tests out round-robin, so the shard that draws
-# it runs it plus about a 24th of the rest: 283s measured, ~370s at the slow
-# end. Both are under the ~410s cmd/bd shard that sets the lane's floor (see
-# bazel.yml's bazel-embedded), so this target does not lengthen the lane.
+# Shard count: on the lane's executors (rbe-west, 2026-10-09) the package is
+# 725 tests and ~1,300 test-seconds, the heaviest about 54s. Each served case
+# copies one per-process template workspace instead of initializing its own
+# embedded Dolt schema (served_harness_test.go's servedTemplateWorkspace),
+# and TestServedBatchGetterContract seeds its 1000 issues in one write: before
+# both, the package was ~3,700 test-seconds over 24 shards, the heaviest shard
+# 390s. rules_go deals the tests out round-robin; at 16 shards the measured
+# loads come to 62-112s per shard.
 #
 # Tags:
 #   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
@@ -233,7 +237,7 @@ sh_test(
         "BEADS_HTTP_TEST_REQUIRED": "1",
         "BEADS_TEST_EMBEDDED_DOLT": "1",
     },
-    shard_count = 24,
+    shard_count = 16,
     tags = ["embedded"],
 )
 

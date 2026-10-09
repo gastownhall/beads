@@ -1039,7 +1039,7 @@ Required` requires them to have run remotely and passed.
   - `tools/bazel/check_shard_coverage.py` runs after each tier. It requires:
     - every Bazel shard of `//cmd/bd:bd_embedded_test` (50; the manifest's
       frozen 20-shard block was the retired `test-embedded-cmd` jobs' split,
-      F1), `//internal/storage/embeddeddolt:embeddeddolt_embedded_test` (15;
+      F1), `//internal/storage/embeddeddolt:embeddeddolt_embedded_test` (20;
       the frozen 5-shard block was `test-embedded-storage`'s, F1),
       `//cmd/bd:bd_proxied_test` (30; the frozen 15-shard block was
       `test-proxied-cmd`'s, F2) and
@@ -1071,7 +1071,7 @@ Required` requires them to have run remotely and passed.
   Its Tier 3, the served HTTP corpus (`./internal/httpclient` with
   `BEADS_TEST_EMBEDDED_DOLT=1` and `BEADS_HTTP_TEST_REQUIRED=1`), runs in
   the embedded lane as `//internal/httpclient:httpclient_served_test`
-  (race build, 24 shards).
+  (race build, 16 shards).
   `docs-mintlify.yml` likewise drops its docsync job (`go test
   ./test/docsync`, which `bazel-test` runs as `//test/docsync:docsync_test`)
   and keeps only Mintlify's network-bound broken-link check.

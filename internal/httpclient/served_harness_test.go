@@ -7,10 +7,12 @@ package httpclient
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -44,7 +46,10 @@ import (
 // per case costs about a second; sharing one across cases would make an id
 // collision between two contracts a debugging session instead of a rename, and
 // the contracts namespace their ids by prefix precisely so they can be run this
-// way.
+// way. Each case's engine is a private copy of one freshly initialized
+// workspace (servedTemplateWorkspace), not a fresh init of its own: creating
+// the schema is most of a case's cost under -race, and it is the same schema
+// every time.
 
 // servedEnv is one client-server-store triple and the hooks a fixture needs.
 type servedEnv struct {
@@ -120,7 +125,14 @@ func newServedEnvExpecting(t *testing.T, prefix, expectID string, opts ...func(*
 	t.Helper()
 	skipUnlessEmbeddedDolt(t)
 
+	template, err := servedTemplateWorkspace()
+	if err != nil {
+		t.Fatalf("initialize the reference workspace template: %v", err)
+	}
 	beadsDir := t.TempDir()
+	if err := os.CopyFS(beadsDir, os.DirFS(template)); err != nil {
+		t.Fatalf("copy the reference workspace template: %v", err)
+	}
 	ctx := t.Context()
 	reference, err := embeddeddolt.Open(ctx, beadsDir, servedDatabase, "main")
 	if err != nil {
@@ -174,6 +186,39 @@ func newServedEnvExpecting(t *testing.T, prefix, expectID string, opts ...func(*
 		database: servedDatabase,
 		prefix:   prefix,
 	}
+}
+
+var (
+	servedTemplateOnce sync.Once
+	servedTemplateDir  string
+	servedTemplateErr  error
+)
+
+// servedTemplateWorkspace initializes one reference workspace per test process
+// (embeddeddolt.Open on an empty directory: the schema and every migration) and
+// closes it, so each newServedEnv can copy the closed workspace and reopen it
+// instead of initializing its own. TestMain removes it after the last case.
+func servedTemplateWorkspace() (string, error) {
+	servedTemplateOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "httpclient-served-template-")
+		if err != nil {
+			servedTemplateErr = err
+			return
+		}
+		store, err := embeddeddolt.Open(context.Background(), dir, servedDatabase, "main")
+		if err != nil {
+			_ = os.RemoveAll(dir)
+			servedTemplateErr = fmt.Errorf("open %s: %w", dir, err)
+			return
+		}
+		if err := store.Close(); err != nil {
+			_ = os.RemoveAll(dir)
+			servedTemplateErr = fmt.Errorf("close %s: %w", dir, err)
+			return
+		}
+		servedTemplateDir = dir
+	})
+	return servedTemplateDir, servedTemplateErr
 }
 
 // serveConfig binds every served role to the reference store.

@@ -73,6 +73,9 @@ func TestMain(m *testing.M) {
 	if compositionStop != nil {
 		compositionStop()
 	}
+	if servedTemplateDir != "" {
+		_ = os.RemoveAll(servedTemplateDir)
+	}
 	os.Exit(code)
 }
 

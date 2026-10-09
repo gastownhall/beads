@@ -81,6 +81,7 @@ func newDoltBatchGetterFixture(t *testing.T, prefix string) (conformance.BatchGe
 		IssuePrefix:  kit.IssuePrefix,
 		BatchGetter:  getter,
 		CreateIssue:  kit.CreateIssue,
+		CreateIssues: store.CreateIssues,
 		CreateWisp:   kit.CreateWisp,
 		CountHistory: kit.CountHistory,
 	}
