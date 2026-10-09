@@ -205,7 +205,10 @@ func runLabelPropagateProxiedServer(ctx context.Context, args []string) error {
 		// keeps both is issueops.BatchApplier.ApplyBatch with one ItemUpdate per
 		// child carrying this same label patch, and it is blocked on a cmd/bd
 		// accessor for that role. That is the follow-up this waiver names
-		// (ga-2ltro.12); it is the last one on this list that WRITES.
+		// (ga-2ltro.12); it is the last one on this list that WRITES. It also
+		// needs a template stand-down first: UpdateItem has no AllowTemplate, so
+		// an ItemUpdate refuses the template children this loop labels today
+		// (bd-jkp9v3).
 		for _, child := range children {
 			var e error
 			if child.Ephemeral {

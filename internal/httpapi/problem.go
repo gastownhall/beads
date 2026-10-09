@@ -136,11 +136,13 @@ const (
 	// notes and the patched ones), not about a foreign actor's identity a
 	// client might need to display.
 	CodeNotesOverwrite Code = "notes_overwrite_refused"
-	// CodeTemplateReadOnly is a mutation that names a template. Templates are
-	// read-only — work comes out of one by pouring it, which creates new issues
-	// — so no force flag waives it: the same request refuses for as long as
-	// the row is a template. The one stand-down is updateIssue's
-	// `allow_template`, a deliberate template edit (bd label, bd set-state).
+	// CodeTemplateReadOnly is a guarded mutation that names a template;
+	// operationCodes lists the operations that answer it, and not every verb
+	// guards templates yet (bd-jkp9v3). Templates are read-only — work comes
+	// out of one by pouring it, which creates new issues — so no force flag
+	// waives it: the same request refuses for as long as the row is a
+	// template. The one stand-down is updateIssue's `allow_template`, a
+	// deliberate template edit (bd label, bd set-state).
 	// A 409 for CodeNotClosable's reason: the body is well-formed and the
 	// STATE of the named row refuses it.
 	CodeTemplateReadOnly Code = "template_read_only"

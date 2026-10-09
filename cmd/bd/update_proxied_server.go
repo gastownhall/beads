@@ -87,11 +87,12 @@ func proxiedIssueLifecycle() (issueops.Lifecycle, error) {
 
 // applyUpdateProxiedOne applies one issue's update — plain or --claim —
 // through issueops.Lifecycle. What stays here is this surface's own protocol:
-// the template guard, the advisory reassign pre-read, the per-id failure
-// taxonomy the multi-id batch needs and the notes-overwrite warning. Hooks are
-// NOT among them: they fire from the write plumbing now (the notifying provider
-// wired in main.go), which is what makes an update fire the same events here as
-// it does on the embedded path.
+// the advisory reassign pre-read, the per-id failure taxonomy the multi-id
+// batch needs (a template refusal is one of its verdicts; the guard itself is
+// the role's) and the notes-overwrite warning. Hooks are NOT among them: they
+// fire from the write plumbing now (the notifying provider wired in main.go),
+// which is what makes an update fire the same events here as it does on the
+// embedded path.
 //
 // Provenance carries the commit message this path has always written, so `bd
 // dolt log` reads the same after the move as before it. The plane is
@@ -189,13 +190,12 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 }
 
 // proxiedUpdateTarget reads the row an update is about through the query role,
-// for the things the mutation's own result cannot answer: whether the target is
-// a template, whether an unguarded assignee edit is about to take the issue
-// from a live foreign holder, whether --notes is about to replace existing
-// notes, and whether --defer="" should also clear a deferred status. It no
-// longer reads the pre-state to decide a hook: a status-crossing update fires
-// on_update and nothing else, from the plumbing, exactly as it does on the
-// embedded path.
+// for the things the mutation's own result cannot answer: whether an unguarded
+// assignee edit is about to take the issue from a live foreign holder, whether
+// --notes is about to replace existing notes, and whether --defer="" should
+// also clear a deferred status. It no longer reads the pre-state to decide a
+// hook: a status-crossing update fires on_update and nothing else, from the
+// plumbing, exactly as it does on the embedded path.
 func proxiedUpdateTarget(ctx context.Context, id string, in *updateInput) (*types.Issue, *updateIDFailure) {
 	rd, err := proxiedIssueReader()
 	if err != nil {

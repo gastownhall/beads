@@ -215,7 +215,10 @@ const CapBatchApplyDepAddLineage = "issues.batchApply.depAddLineage"
 // the same name. Lifecycle.Update reads it from the cached handshake before
 // the dial (applyTemplateGuardForServer): against a server without it, which
 // predates the guard, the client refuses a template update itself on a
-// pre-read and never sends `allow_template`.
+// pre-read and never sends `allow_template`. BatchApplier does not read it:
+// an applyBatch `update` item gets no client-side check (its target resolves
+// on the server), so through an older server it still edits a template
+// (bd-jkp9v3).
 const CapIssuesUpdateAllowTemplate = "issues.update.allowTemplate"
 
 // CapExternalDependencies is the CONDITIONAL behavior capability announcing

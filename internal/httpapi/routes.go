@@ -168,7 +168,10 @@ const CapBatchApplyDepAddLineage = "issues.batchApply.depAddLineage"
 // older server predating this token answers the member with
 // `400 invalid_argument`/`unknown_parameter` and applies no template guard,
 // so a client that does not see the token refuses a template update itself
-// before the dial and sends the request without the member.
+// before the dial and sends the request without the member. That fallback
+// covers updateIssue only: an applyBatch `update` item gets no client-side
+// check (its target resolves on the server), so through an older server it
+// still edits a template (bd-jkp9v3).
 const CapIssuesUpdateAllowTemplate = "issues.update.allowTemplate"
 
 // customMethodTarget splits the custom method off the segment the router

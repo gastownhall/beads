@@ -204,10 +204,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ones cannot fork.
 
 ### Fixed
-- **Templates are now read-only for every caller, not only `bd update`.** The
-  template guard used to be a pre-read in `cmd/bd`, so an update through
-  `bd serve` (`PATCH /v0/beads/issues/{id}`), an `update` item of
-  `issues:batchApply`, or a library caller of `issueops.Lifecycle.Update` or
+- **An update of a template is now refused for every caller, not only
+  `bd update`.** The template guard used to be a pre-read in `cmd/bd`, so an
+  update through `bd serve` (`PATCH /v0/beads/issues/{id}`), an `update` item
+  of `issues:batchApply`, or a library caller of `issueops.Lifecycle.Update` or
   `BatchApplier` edited a template that `bd update` refused. It now lives in
   the role, in the update's own transaction, on every backend: any update
   naming a template refuses with `*issueops.TemplateReadOnlyError` (matching
@@ -222,14 +222,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   have. A batch create that makes a template and splices its metadata still
   lands: the splice finishes the create. Version skew: a new `bd` against an
   older `bd serve` (no `issues.update.allowTemplate` token in the handshake)
-  refuses a template update itself before dialing, and never sends
-  `allow_template` to it. An older `bd label` or `bd set-state` against a new
-  `bd serve` cannot send `allow_template`, so it now gets `409`
-  `template_read_only` on a template; upgrade the client. Not yet moved:
-  `bd comment`, `bd note`, `bd priority` and `bd tag` still refuse templates
-  with their own pre-read in `cmd/bd` (their direct-route writes do not go
-  through `Lifecycle.Update`), so for those four the guard lives only in the
-  CLI.
+  refuses a single template update itself before dialing, and never sends
+  `allow_template` to it. A batch `update` item gets no such check (its target
+  resolves on the server), so through an older `bd serve` it still edits a
+  template. An older `bd label` or `bd set-state` against a new `bd serve`
+  cannot send `allow_template`, so it now gets `409` `template_read_only` on a
+  template; upgrade the client. Not yet moved: `bd comment`, `bd note`,
+  `bd priority` and `bd tag` still refuse templates with their own pre-read in
+  `cmd/bd` (their direct-route writes do not go through `Lifecycle.Update`), so
+  for those four the guard lives only in the CLI. Claim, reopen, `:casMetadata`
+  and the served `addComment` have no template check at all yet (bd-jkp9v3):
+  `POST /v0/beads/issues/{id}:claim` (`issueops.Claimer`) still claims a
+  template that a `PATCH` with `claim: true` refuses. Close's guards move to
+  the role in their own change (#7425).
 - **PRs based on `hotfix/**` branches now run full CI, not just
   cross-version historical smokes and triage labeling.** `pr.yml`,
   `pr-risk.yml`, `conformance.yml`, `cross-version-smoke.yml` and

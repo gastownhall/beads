@@ -105,7 +105,9 @@ func resolveLabelTarget(ctx context.Context, id string) (string, error) {
 // commits them together, so the N calls collapse back to one transaction and
 // one history entry with no new role and no new request type. It is not in this
 // slice because it needs a cmd/bd accessor of its own and because its end gate
-// runs a hierarchy and cycle walk a label-only request has no use for.
+// runs a hierarchy and cycle walk a label-only request has no use for. It also
+// needs a template stand-down first: UpdateItem has no AllowTemplate, so an
+// ItemUpdate refuses the templates this function edits today (bd-jkp9v3).
 func applyLabelEdit(ctx context.Context, issueIDs []string, labels []string, operation string) error {
 	lifecycle, err := openIssueLifecycle()
 	if err != nil {

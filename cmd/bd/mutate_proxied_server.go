@@ -213,10 +213,10 @@ func runNoteProxiedServer(ctx context.Context, id, noteText string) error {
 // UpdateRequest.IssuePlaneOnly stays false, so the role resolves the plane
 // inside its own transaction and there is no boolean here to get backwards.
 //
-// The two reads it still makes are front-door work rather than plumbing.
-// issueops.Reader.Get supplies the issue the template guard needs — the roles
-// have no opinion about templates, and the direct route refuses one — and the
-// role takes an exact id by contract, which Get's issue-then-wisp lookup is.
+// The read it still makes is front-door work rather than plumbing: the role
+// takes an exact id by contract, and issueops.Reader.Get's issue-then-wisp
+// lookup supplies one. The template guard is the role's: Lifecycle.Update
+// refuses a template inside its own transaction.
 // The label arrives already normalized: tag.go does that before choosing a
 // route, so this path and the direct one cannot disagree about what was stored.
 func runTagProxiedServer(ctx context.Context, id, label string) error {
