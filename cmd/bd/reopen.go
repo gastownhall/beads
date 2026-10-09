@@ -102,8 +102,9 @@ another actor won the race, so retrying the same guard is pointless).`,
 				ExpectedVersion: ifRevision,
 				// Names the issue for the reason `bd close`'s does, and keeps
 				// the entry identical across backends: the proxied route
-				// already writes "bd: reopen <ids>".
-				Provenance: "bd: reopen " + fullID,
+				// already writes "bd: reopen <ids>". A remote store labels the
+				// entry itself (remote_backend.go).
+				Provenance: reopenProvenance(issueStore, fullID),
 			})
 			if err != nil {
 				// Only a guarded reopen reports through the conditional-write

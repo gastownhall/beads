@@ -92,11 +92,13 @@ func (s *Store) guardExternalClose(ctx context.Context, id string, force bool) e
 	if force {
 		return nil
 	}
-	state, err := s.loadBlockingState(ctx)
+	// externalBlockersFor reads only this issue's edges on a remote store
+	// rather than every edge in the workspace.
+	refs, err := s.externalBlockersFor(ctx, []string{id})
 	if err != nil {
 		return err
 	}
-	if blockers := state.refsByIssue[id]; len(blockers) > 0 {
+	if blockers := refs[id]; len(blockers) > 0 {
 		return publicops.NewCloseBlockedError(id, blockers)
 	}
 	return nil

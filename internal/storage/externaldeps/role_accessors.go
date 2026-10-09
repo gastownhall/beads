@@ -15,7 +15,20 @@ import (
 // IssueReader builds the read role on the policy store. In particular, Ready
 // and List(ReadyFlag) must call this store's filtered ready methods rather than
 // promoted methods on the undecorated store.
-func (s *Store) IssueReader() (issueops.Reader, error) { return storereader.New(s) }
+//
+// A remote inner store answers with its own reader instead, with the ready
+// exclusion laid over it (remote_roles.go): storereader is built from the
+// legacy method seam a remote store only partly serves.
+func (s *Store) IssueReader() (issueops.Reader, error) {
+	if s.rolesAreRemote() {
+		inner, err := s.inner.IssueReader()
+		if err != nil {
+			return nil, err
+		}
+		return &remoteReader{inner: inner, policy: s}, nil
+	}
+	return storereader.New(s)
+}
 
 // IssueClaimer rejects a direct claim of externally blocked work before the
 // backend's atomic claim operation. ReadyClaimer below handles selection among
@@ -24,6 +37,9 @@ func (s *Store) IssueClaimer() (issueops.Claimer, error) {
 	inner, err := s.inner.IssueClaimer()
 	if err != nil {
 		return nil, err
+	}
+	if s.rolesAreRemote() {
+		return &remoteClaimer{inner: inner, policy: s}, nil
 	}
 	return &issueClaimer{inner: inner, policy: s}, nil
 }
@@ -47,6 +63,9 @@ func (c *issueClaimer) Claim(ctx context.Context, req issueops.ClaimRequest) (is
 // ReadyClaimer keeps external blockers out of the ready-claim selection used
 // by HTTP serving. The local compare-and-swap remains inside ClaimReadyIssue.
 func (s *Store) ReadyClaimer() (issueops.ReadyClaimer, error) {
+	if s.rolesAreRemote() {
+		return &remoteReadyClaimer{policy: s}, nil
+	}
 	return &readyClaimer{policy: s}, nil
 }
 
@@ -86,6 +105,9 @@ func (s *Store) BlockingAnnotator() (issueops.BlockingAnnotator, error) {
 	if err != nil {
 		return nil, err
 	}
+	if s.rolesAreRemote() {
+		return &remoteBlockingAnnotator{inner: inner, policy: s}, nil
+	}
 	return &blockingAnnotator{inner: inner, policy: s}, nil
 }
 
@@ -118,6 +140,9 @@ func (s *Store) TreeWalker() (issueops.TreeWalker, error) {
 	inner, err := s.inner.TreeWalker()
 	if err != nil {
 		return nil, err
+	}
+	if s.rolesAreRemote() {
+		return &remoteTreeWalker{inner: inner, policy: s}, nil
 	}
 	return &treeWalker{inner: inner, policy: s}, nil
 }

@@ -50,7 +50,13 @@ func getRoutingConfigValue(ctx context.Context, store storage.DoltStorage, key s
 
 func determineAutoRoutedRepoPath(ctx context.Context, store storage.DoltStorage) (string, routing.RoutingRule) {
 	var dbValues map[string]string
-	if store != nil {
+	// A remote backend's settings are one document shared by every client of
+	// the server, and the routing targets are LOCAL filesystem paths, which
+	// such a document cannot name for every machine reading it. Contributor
+	// routing for a remote workspace is therefore configured locally
+	// (config.yaml / env) only, and the lookup fallback a missing id takes does
+	// not pay a settings round trip to learn that (S6b).
+	if store != nil && !storeIsRemoteBackend(store) {
 		all, allErr := store.GetAllConfig(ctx)
 		if allErr != nil {
 			debug.Logf("DEBUG: failed to read config from store: %v\n", allErr)

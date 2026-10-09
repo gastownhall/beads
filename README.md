@@ -209,6 +209,19 @@ row, never a silent gap — see
 for the full, generated list of what differs and why before depending on an
 HTTP-backed workspace for a workflow you haven't checked against it.
 
+Three CLI-level differences are worth knowing up front:
+
+- IDs resolve exactly: an abbreviated id is not expanded (the wire has no
+  substring search), and a missing id is reported as not found after one
+  lookup.
+- `bd update -s closed` does not record `closed_by_session` (from `--session`
+  or `CLAUDE_SESSION_ID`), because the wire's update cannot carry it; the
+  close itself happens as usual. `bd close` does record the session. `bd
+  reopen`'s history entry carries the server's own label.
+- Contributor auto-routing (`routing.*` settings) is read from local
+  `config.yaml` / environment only, never from the server's settings: its
+  targets are local paths.
+
 `bd connect` writes two things on success: `.beads/metadata.json` gets
 `"backend": "http"`, and a per-user, never-git-tracked sidecar
 (`.beads/http_target.json`) records the server URL and pinned project id. It

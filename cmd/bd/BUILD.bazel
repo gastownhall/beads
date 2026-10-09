@@ -278,6 +278,7 @@ go_library(
         "recompute_blocked_proxied_server.go",
         "relate.go",
         "relate_proxied_server.go",
+        "remote_backend.go",
         "remote_migrate_gate.go",
         "rename.go",
         "rename_prefix.go",
