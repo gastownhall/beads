@@ -19,7 +19,7 @@ import (
 
 // S3 (F1, mirroring F2's TestProxiedShardManifestGeneratorNotStale below —
 // see that test's doc comment for the full --check rationale, not repeated
-// here): the Bazel-only 50-shard cmd block and 20-shard storage block are
+// here): the Bazel-only 100-shard cmd block and 40-shard storage block are
 // not frozen like their files' legacy 20- and 5-shard blocks.
 // gen_embedded_{cmd,storage}_shard_manifest.py --check verifies only that
 // the committed block names every discovered test exactly once, failing with
@@ -167,7 +167,7 @@ func TestShardScriptsListOnlyRealTests(t *testing.T) {
 			// duration balancing.
 			totalsSet[bazelEmbeddedCmdShardCount(t)] = true
 		case ".github/scripts/embedded-storage-test-shard.sh":
-			// F1: mirrors the cmd case above for the 20-shard storage block.
+			// F1: mirrors the cmd case above for the 40-shard storage block.
 			totalsSet[bazelEmbeddedStorageShardCount(t)] = true
 		case ".github/scripts/server-storage-test-shard.sh":
 			totalsSet[bazelServerFullShardCount(t)] = true

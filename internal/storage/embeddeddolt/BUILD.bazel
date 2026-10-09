@@ -271,9 +271,9 @@ go_test(
     ],
 )
 
-# Runs 20 Bazel shards against every top-level Test* function in
+# Runs 40 Bazel shards against every top-level Test* function in
 # internal/storage/embeddeddolt/*_test.go but TestConformance, assigned by
-# the manifest's 20-shard block (duration-balanced on rbe-west measurements;
+# the manifest's 40-shard block (duration-balanced on rbe-west measurements;
 # see scripts/ci/embedded_storage_test_durations.json), with
 # BEADS_TEST_EMBEDDED_DOLT=1; the wrapper points
 # BEADS_TEST_EMBEDDED_TEST_BINARY at this binary, which the concurrency test
@@ -310,7 +310,7 @@ sh_test(
         "//:.github/scripts/embedded-storage-test-shards.txt",
     ],
     env = {"BEADS_TEST_EMBEDDED_DOLT": "1"},
-    shard_count = 20,
+    shard_count = 40,
     tags = ["embedded"],
 )
 

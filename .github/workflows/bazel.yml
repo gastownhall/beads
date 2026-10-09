@@ -1293,11 +1293,12 @@ jobs:
     # proves nothing pr-risk.yml's embedded jobs (which do run for forks) do
     # not.
     #
-    # Shard counts: storage (20) is the smallest count whose LPT-packed
-    # heaviest shard (scripts/ci/gen_embedded_storage_shard_manifest.py
-    # --weights=duration --repack, on rbe-west measurements) stays near 110s,
-    # under the ~150s per-shard budget with headroom for executor load; its
-    # heaviest single top-level test is ~90s. cmd is a 100-shard block split
+    # Shard counts: storage (40): its tests are serial, so a shard's wall
+    # time is the sum of its tests, and CI shards run ~1.3-1.6x the rbe-west
+    # measurements; 40 is where the LPT-packed heaviest shard
+    # (scripts/ci/gen_embedded_storage_shard_manifest.py --weights=duration
+    # --repack) is its heaviest single top-level test, ~71s
+    # (TestLifecycleCloseReopenContract). cmd is a 100-shard block split
     # over two targets, //cmd/bd:bd_embedded_test (shards 1-50) and
     # //cmd/bd:bd_embedded_part2_test (51-100), because Bazel caps a rule at
     # 50 shards ("Having more than 50 shards is indicative of poor test
@@ -1396,7 +1397,7 @@ jobs:
           --bep "$RUNNER_TEMP/bazel-bep.json"
           --suite //cmd/bd:bd_embedded_test .github/scripts/embedded-test-shard.sh 50@0/100
           --suite //cmd/bd:bd_embedded_part2_test .github/scripts/embedded-test-shard.sh 50@50/100
-          --suite //internal/storage/embeddeddolt:embeddeddolt_embedded_test .github/scripts/embedded-storage-test-shard.sh 20
+          --suite //internal/storage/embeddeddolt:embeddeddolt_embedded_test .github/scripts/embedded-storage-test-shard.sh 40
           --whole //internal/storage/embeddeddolt:embeddeddolt_conformance_core_test
           --whole //internal/storage/embeddeddolt:embeddeddolt_conformance_audit_test
 

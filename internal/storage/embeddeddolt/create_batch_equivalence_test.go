@@ -4,19 +4,51 @@ package embeddeddolt_test
 
 import (
 	"database/sql"
+	"slices"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/createbatchequiv"
 	"github.com/steveyegge/beads/internal/storage/sqlcount"
 )
 
-// TestCreateBatchFastPathsMatchPerRow_Embedded runs the batch-create
-// equivalence scenario (internal/storage/createbatchequiv) on the embedded
-// engine: the same import-shaped batch through the fast and per-row bodies
-// must store the same rows.
-func TestCreateBatchFastPathsMatchPerRow_Embedded(t *testing.T) {
+// createBatchEquivalenceParts spreads createbatchequiv.Run's scenarios over
+// the two TestCreateBatchFastPathsMatchPerRow*_Embedded tests below: under
+// -race they took ~110s as one test, a whole CI shard on their own.
+// TestCreateBatchEquivalencePartsCoverEveryScenario keeps the split exact.
+var createBatchEquivalenceParts = [][]string{
+	{"small", "depadd"},
+	{"apply", "waitsfor"},
+}
+
+// TestCreateBatchFastPathsMatchPerRowSmallDepAdd_Embedded and
+// TestCreateBatchFastPathsMatchPerRowApplyWaitsFor_Embedded run the
+// batch-create equivalence scenarios (internal/storage/createbatchequiv) on
+// the embedded engine: the same import-shaped batch through the fast and
+// per-row bodies must store the same rows.
+func TestCreateBatchFastPathsMatchPerRowSmallDepAdd_Embedded(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
-	createbatchequiv.Run(t, openEquivalenceDB)
+	createbatchequiv.RunNamed(t, openEquivalenceDB, createBatchEquivalenceParts[0]...)
+}
+
+func TestCreateBatchFastPathsMatchPerRowApplyWaitsFor_Embedded(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	createbatchequiv.RunNamed(t, openEquivalenceDB, createBatchEquivalenceParts[1]...)
+}
+
+// TestCreateBatchEquivalencePartsCoverEveryScenario fails unless the parts
+// above name every createbatchequiv.Run scenario exactly once, so a scenario
+// added there cannot silently stop running on this backend.
+func TestCreateBatchEquivalencePartsCoverEveryScenario(t *testing.T) {
+	var got []string
+	for _, part := range createBatchEquivalenceParts {
+		got = append(got, part...)
+	}
+	want := createbatchequiv.ScenarioNames()
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("createBatchEquivalenceParts cover %v, want each of %v exactly once", got, want)
+	}
 }
 
 // TestCreateBatchFastPathsMatchPerRowLarge_Embedded runs the 458-issue

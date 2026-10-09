@@ -154,7 +154,18 @@ func TestWithPeerAuth(t *testing.T) {
 	}
 }
 
-func TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPassword(t *testing.T) {
+// The suppressed-ambient-password cases run as two top-level tests, the
+// first four cases and the rest: each case opens its own store (~11s under
+// -race), so the eight took ~80s as one test.
+func TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPasswordStored(t *testing.T) {
+	testWithPeerAuthWarnsWhenStoredPeerSuppressesAmbientPassword(t, func(i int) bool { return i < 4 })
+}
+
+func TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPasswordAmbient(t *testing.T) {
+	testWithPeerAuthWarnsWhenStoredPeerSuppressesAmbientPassword(t, func(i int) bool { return i >= 4 })
+}
+
+func testWithPeerAuthWarnsWhenStoredPeerSuppressesAmbientPassword(t *testing.T, pick func(i int) bool) {
 	// Pinned verbatim, not matched by substring: the peer name, the username,
 	// the stored tier, and the Warning: prefix are the parts an operator
 	// reads, so a wording change has to be made here deliberately.
@@ -252,7 +263,10 @@ func TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPassword(t *testing.T)
 		},
 	}
 
-	for _, tc := range cases {
+	for i, tc := range cases {
+		if !pick(i) {
+			continue
+		}
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
 

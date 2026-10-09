@@ -100,6 +100,38 @@ func Run(t *testing.T, open Open) {
 	runScenarios(t, open, scenarios())
 }
 
+// ScenarioNames returns the names of Run's scenarios, in Run's order.
+func ScenarioNames() []string {
+	var names []string
+	for _, sc := range scenarios() {
+		names = append(names, sc.name)
+	}
+	return names
+}
+
+// RunNamed is Run for only the named scenarios (in Run's order), for a
+// backend that spreads Run's scenarios over several top-level tests; it fails
+// on a name Run does not have. Such a backend must cover ScenarioNames()
+// exactly once between its tests.
+func RunNamed(t *testing.T, open Open, names ...string) {
+	t.Helper()
+	want := map[string]bool{}
+	for _, n := range names {
+		want[n] = true
+	}
+	var list []scenario
+	for _, sc := range scenarios() {
+		if want[sc.name] {
+			list = append(list, sc)
+			delete(want, sc.name)
+		}
+	}
+	for n := range want {
+		t.Fatalf("createbatchequiv: no scenario %q (have %v)", n, ScenarioNames())
+	}
+	runScenarios(t, open, list)
+}
+
 // RunLarge is Run for the 458-issue scenarios. A backend runs it from its own
 // top-level test so a race-instrumented lane can skip it (see the embedded
 // backend's caller) without losing the light scenarios.
