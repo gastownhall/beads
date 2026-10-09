@@ -1,7 +1,9 @@
 """deb_sysroot: a C/C++ sysroot assembled from pinned Debian/Ubuntu packages.
 
 Every package is fetched by sha256, so the sysroot is byte-identical on every
-host. It gives the hermetic LLVM toolchain (MODULE.bazel) the glibc,
+host whichever source served it; the sources are only an availability chain.
+All packages download concurrently (Bazel bounds it by
+--http_max_parallel_downloads), each trying its URLs in order. It gives the hermetic LLVM toolchain (MODULE.bazel) the glibc,
 libstdc++ and ICU headers and link libraries that cgo targets need, instead
 of whatever the host has under /usr.
 """
@@ -23,20 +25,30 @@ grep -rlI --include='*.so' 'GROUP' usr/lib | while IFS= read -r s; do
 done
 """
 
+def _package_urls(templates, path, sha256):
+    return [
+        t.format(path = path, file = path.rsplit("/", 1)[-1], sha256 = sha256)
+        for t in templates
+    ]
+
 def _deb_sysroot_impl(rctx):
+    pending = []
     for path, sha256 in rctx.attr.packages.items():
-        name = path.rsplit("/", 1)[-1]
-        deb = "_debs/" + name
-        rctx.download(
-            url = [mirror + path for mirror in rctx.attr.mirrors],
+        deb = "_debs/" + path.rsplit("/", 1)[-1]
+        pending.append((deb, rctx.download(
+            url = _package_urls(rctx.attr.urls, path, sha256),
             output = deb,
             sha256 = sha256,
-        )
-        unpacked = "_debs/" + name + ".d"
+            block = False,
+        )))
+    for _, download in pending:
+        download.wait()
+    for deb, _ in pending:
+        unpacked = deb + ".d"
         rctx.extract(deb, output = unpacked)
         data = [f for f in rctx.path(unpacked).readdir() if f.basename.startswith("data.tar")]
         if len(data) != 1:
-            fail("%s: expected one data.tar.* member, found %s" % (name, data))
+            fail("%s: expected one data.tar.* member, found %s" % (deb, data))
         rctx.extract(data[0], output = ".")
     rctx.delete("_debs")
 
@@ -67,11 +79,12 @@ deb_sysroot = repository_rule(
     attrs = {
         "packages": attr.string_dict(
             mandatory = True,
-            doc = "Pool path (relative to each mirror) to the .deb's sha256.",
+            doc = "Pool path (pool/<component>/...) to the .deb's sha256.",
         ),
-        "mirrors": attr.string_list(
+        "urls": attr.string_list(
             mandatory = True,
-            doc = "Archive roots tried in order; the first is an immutable snapshot.",
+            doc = "URL templates tried in order for every package: {path} is the pool " +
+                  "path, {file} its basename and {sha256} its pinned digest.",
         ),
         "remove": attr.string_list(
             doc = "Bash globs (globstar) dropped after unpacking: docs, unused runtimes and archives.",

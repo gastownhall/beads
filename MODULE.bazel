@@ -39,12 +39,27 @@ bazel_dep(name = "rules_cc", version = "0.2.17")
 # scripts/bazel_hermetic_cc_test.go guards both.
 deb_sysroot = use_repo_rule("//third_party/cc_toolchain:deb_sysroot.bzl", "deb_sysroot")
 
+# Where every pinned Ubuntu 24.04 package below comes from, tried in order
+# (the sha256 pins, not the source, decide what is accepted):
+#   - gascity's content-addressed mirror, a release holding each pinned
+#     .deb as <sha256>.deb (gascity's tools/cc_toolchain/mirror_debs.sh
+#     publishes it; gascity pins the same packages), so a cold fetch does not
+#     depend on Canonical's servers;
+#   - the snapshot these packages were pinned from (immutable, but a single
+#     host that returns 503 for minutes at a time);
+#   - Launchpad's librarian, which keeps every file ever published to the
+#     primary archive, superseded versions included;
+#   - archive.ubuntu.com, which drops superseded versions.
+NOBLE_DEB_URLS = [
+    "https://github.com/gastownhall/gascity/releases/download/toolchain-noble-debs-20261001/{sha256}.deb",
+    "https://snapshot.ubuntu.com/ubuntu/20261001T000000Z/{path}",
+    "https://launchpad.net/ubuntu/+archive/primary/+files/{file}",
+    "https://archive.ubuntu.com/ubuntu/{path}",
+]
+
 deb_sysroot(
     name = "cc_sysroot_noble_amd64",
-    mirrors = [
-        "https://snapshot.ubuntu.com/ubuntu/20261001T000000Z/",
-        "https://archive.ubuntu.com/ubuntu/",
-    ],
+    urls = NOBLE_DEB_URLS,
     packages = {
         "pool/main/g/gcc-13/libgcc-13-dev_13.3.0-6ubuntu2~24.04.1_amd64.deb": "cd689db2691edaa10f37329307292796bb599e722e0505c79e14caaa1fe9a93a",
         "pool/main/g/gcc-13/libstdc++-13-dev_13.3.0-6ubuntu2~24.04.1_amd64.deb": "ee5633e863e19c3381ed97842ce35ed32ede96a3d1ae4e94c051d3036fe21347",
