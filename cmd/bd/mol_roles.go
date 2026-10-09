@@ -209,10 +209,17 @@ func listMoleculeCandidates(ctx context.Context, s molReader, status types.Statu
 		}
 		unlimited := 0
 		page, err := reader.List(ctx, issueops.ListRequest{
-			Status:          string(status),
-			Assignee:        agent,
-			IncludeAllTypes: true,
-			Limit:           &unlimited,
+			Status:   string(status),
+			Assignee: agent,
+			// The four knobs, not IncludeAllTypes: the v0 wire refuses the
+			// union (E-ListRequest.IncludeAllTypes) but publishes each knob, and
+			// a step candidate may be a wisp, gate or infra-typed bead just as
+			// the raw SearchIssues route found it.
+			IncludeTemplates: true,
+			IncludeGates:     true,
+			IncludeInfra:     true,
+			IncludeEphemeral: true,
+			Limit:            &unlimited,
 		})
 		if err != nil {
 			return nil, err

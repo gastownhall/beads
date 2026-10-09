@@ -93,10 +93,8 @@ func TestE2E_MoleculesOverHTTP(t *testing.T) {
 		if r.code == 0 && len(decodeMolecules(t, r.stdout)) == 0 {
 			t.Fatalf("mol current (no id) answered an empty list while %s is in progress: stderr=%s", step1, r.stderr)
 		}
-		t.Skip("needs S6c (externaldeps reader passthrough): over http the Reader.List behind the in_progress listing " +
-			"reaches the SearchIssuesWithCounts stub until S6c lands; remove this skip once S6c is underneath")
 		if r.code != 0 {
-			t.Fatalf("mol current (no id) failed (exit %d): %s", r.code, r.stderr)
+			t.Fatalf("mol current (no id) failed (exit %d): %s stdout=%s", r.code, r.stderr, r.stdout)
 		}
 		got := decodeMolecules(t, r.stdout)
 		if len(got) != 1 || got[0].MoleculeID != root {
