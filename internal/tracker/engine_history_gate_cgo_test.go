@@ -81,6 +81,11 @@ func TestEmbeddedDoltExternalRefChangedAfterUsesHistoryFastPath(t *testing.T) {
 	if _, ok := externalRefHistoryQuerier(store); !ok {
 		t.Fatal("expected EmbeddedDoltStore to satisfy storage.ExternalRefHistoryQuerier")
 	}
+	for _, s := range []Store{store, NewStore(store)} {
+		if _, ok := externalRefHistoryBatchQuerier(s); !ok {
+			t.Fatalf("expected %T to resolve the batch external_ref history capability", s)
+		}
+	}
 
 	e := &Engine{Store: store}
 
@@ -155,6 +160,11 @@ func TestDoltStoreExternalRefChangedAfterUsesHistoryFastPath(t *testing.T) {
 
 	if _, ok := externalRefHistoryQuerier(store); !ok {
 		t.Fatal("expected DoltStore to satisfy storage.ExternalRefHistoryQuerier")
+	}
+	for _, s := range []Store{store, NewStore(store)} {
+		if _, ok := externalRefHistoryBatchQuerier(s); !ok {
+			t.Fatalf("expected %T to resolve the batch external_ref history capability", s)
+		}
 	}
 
 	e := &Engine{Store: store}

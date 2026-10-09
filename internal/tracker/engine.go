@@ -695,16 +695,21 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		}
 	}
 
+	previousRefs := e.previousExternalRefs(ctx, localIssues, *lastSync)
 	var hydrated []TrackerIssue
 	for _, local := range localIssues {
-		if local == nil || local.ExternalRef == nil {
+		ref, ok := e.prelinkedRef(local)
+		if !ok {
 			continue
 		}
-		ref := strings.TrimSpace(*local.ExternalRef)
-		if ref == "" || !e.Tracker.IsExternalRef(ref) {
-			continue
+		var changedAfterLastSync bool
+		var err error
+		if previousRefs != nil {
+			previousRef, found := previousRefs[local.ID]
+			changedAfterLastSync = !found || strings.TrimSpace(previousRef) != ref
+		} else {
+			changedAfterLastSync, err = e.externalRefChangedAfter(ctx, local, ref, *lastSync)
 		}
-		changedAfterLastSync, err := e.externalRefChangedAfter(ctx, local, ref, *lastSync)
 		if err != nil {
 			return hydrated, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issue %s: %w", local.ID, err)
 		}
@@ -735,6 +740,36 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		seen[strings.ToLower(identifier)] = struct{}{}
 	}
 	return hydrated, hydratedLocalIDs, nil
+}
+
+func (e *Engine) prelinkedRef(local *types.Issue) (string, bool) {
+	if local == nil || local.ExternalRef == nil {
+		return "", false
+	}
+	ref := strings.TrimSpace(*local.ExternalRef)
+	return ref, ref != "" && e.Tracker.IsExternalRef(ref)
+}
+
+func (e *Engine) previousExternalRefs(ctx context.Context, localIssues []*types.Issue, lastSync time.Time) map[string]string {
+	batch, ok := externalRefHistoryBatchQuerier(e.Store)
+	if !ok {
+		return nil
+	}
+	var ids []string
+	for _, local := range localIssues {
+		if _, ok := e.prelinkedRef(local); ok {
+			ids = append(ids, local.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	refs, err := batch.PreviousExternalRefs(ctx, ids, lastSync)
+	if err != nil {
+		e.warn("Checking pre-linked issues one at a time: batch external_ref history lookup failed: %v", err)
+		return nil
+	}
+	return refs
 }
 
 // externalRefChangedAfter reports whether local's external_ref differed
@@ -798,6 +833,15 @@ func externalRefHistoryQuerier(store Store) (ExternalRefHistoryStore, bool) {
 		return q, ok
 	}
 	return nil, false
+}
+
+func externalRefHistoryBatchQuerier(store Store) (ExternalRefHistoryBatchStore, bool) {
+	q, ok := externalRefHistoryQuerier(store)
+	if !ok {
+		return nil, false
+	}
+	batch, ok := q.(ExternalRefHistoryBatchStore)
+	return batch, ok
 }
 
 func syncIssueLabels(ctx context.Context, tx storage.Transaction, issueID string, desired []string, actor string) error {

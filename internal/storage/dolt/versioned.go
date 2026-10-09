@@ -92,6 +92,22 @@ func (s *DoltStore) PreviousExternalRef(ctx context.Context, issueID string, asO
 	return ref, found, err
 }
 
+const historyReadChunk = 16
+
+// PreviousExternalRefs answers PreviousExternalRef for many issues at one asOf.
+func (s *DoltStore) PreviousExternalRefs(ctx context.Context, ids []string, asOf time.Time) (map[string]string, error) {
+	var refs map[string]string
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		refs, err = issueops.PreviousExternalRefsInTx(ctx, tx, ids, asOf, historyReadChunk)
+		if err != nil {
+			return wrapQueryError("get previous external refs", err)
+		}
+		return nil
+	})
+	return refs, err
+}
+
 // ChangedIssueIDs returns the set of issue IDs whose data differs between
 // fromCommit and toCommit, derived from dolt_diff over the issues, labels,
 // dependencies, and comments tables. An issue is reported under Removed
