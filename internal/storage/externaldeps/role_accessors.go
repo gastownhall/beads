@@ -64,7 +64,11 @@ func (c *issueClaimer) Claim(ctx context.Context, req issueops.ClaimRequest) (is
 // by HTTP serving. The local compare-and-swap remains inside ClaimReadyIssue.
 func (s *Store) ReadyClaimer() (issueops.ReadyClaimer, error) {
 	if s.rolesAreRemote() {
-		return &remoteReadyClaimer{policy: s}, nil
+		inner, err := s.inner.ReadyClaimer()
+		if err != nil {
+			return nil, err
+		}
+		return &remoteReadyClaimer{inner: inner, policy: s}, nil
 	}
 	return &readyClaimer{policy: s}, nil
 }

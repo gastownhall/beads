@@ -14,7 +14,11 @@ import (
 // instead.
 func (s *Store) BatchCloser() (issueops.BatchCloser, error) {
 	if s.rolesAreRemote() {
-		return &remoteBatchCloser{policy: s}, nil
+		inner, err := s.inner.BatchCloser()
+		if err != nil {
+			return nil, err
+		}
+		return &remoteBatchCloser{inner: inner, policy: s}, nil
 	}
 	return &batchCloser{policy: s}, nil
 }

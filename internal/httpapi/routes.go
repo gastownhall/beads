@@ -182,6 +182,28 @@ const CapIssuesUpdateAllowTemplate = "issues.update.allowTemplate"
 // send the default explicitly rather than omit the member.
 const CapIssuesCreateDefaultPriority = "issues.create.defaultPriority"
 
+// CapExternalDependencies is the CONDITIONAL behavior capability announcing
+// that this server's ready, claim, claim-next, close, blocking-annotation and
+// dependency-tree operations already apply bd's external-dependency policy
+// (an issue blocked by an unsatisfied `external:<project>:<capability>`
+// dependency is not ready, not claimable and not closable without force). A
+// client that sees it must pass those operations through untouched: running
+// the policy again on the client would judge it against the CLIENT machine's
+// project configuration and would turn the server's atomic claim-next into a
+// read-then-claim loop.
+//
+// It is not in behaviorCapabilities because it is not a property of the
+// build: the policy is a decorator the serving process composes its roles or
+// provider through. Listen advertises it exactly when Config says the roles it
+// was handed were composed that way (Config.ExternalDependencyPolicy), so the
+// token is never advertised by a server that does not enforce the policy.
+const CapExternalDependencies = "policy.external_dependencies"
+
+// conditionalCapabilities are the behavior tokens a server advertises only
+// when its configuration says the behavior is in force. Capabilities() never
+// lists them; advertisedCapabilities adds each one whose condition holds.
+var conditionalCapabilities = []string{CapExternalDependencies}
+
 // customMethodTarget splits the custom method off the segment the router
 // matched, and reports the row that claims it.
 //
@@ -961,5 +983,16 @@ func Capabilities() []string {
 	}
 	out = append(out, behaviorCapabilities...)
 	slices.Sort(out)
+	return out
+}
+
+// advertisedCapabilities is what this server's handshake publishes: the
+// build-level Capabilities() plus each conditional token cfg puts in force.
+func advertisedCapabilities(cfg Config) []string {
+	out := Capabilities()
+	if cfg.ExternalDependencyPolicy {
+		out = append(out, CapExternalDependencies)
+		slices.Sort(out)
+	}
 	return out
 }

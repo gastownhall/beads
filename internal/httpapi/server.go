@@ -390,6 +390,18 @@ type Config struct {
 	// a server without this flag would answer "you are caught up" to a consumer
 	// polling a workspace that will never emit a record.
 	EventsJournalEnabled bool
+	// ExternalDependencyPolicy reports that every ready, claim, claim-next,
+	// close, blocking-annotation and tree role this server answers from — the
+	// Provider's, or the individual role fields' — was composed through bd's
+	// external-dependency policy (internal/storage/externaldeps). It makes the
+	// handshake advertise CapExternalDependencies, which tells a client to
+	// pass those operations through without applying the policy itself.
+	//
+	// Set it only from the composition actually handed in (cmd/bd's serve
+	// derives it with externaldeps.Applied / externaldeps.AppliedToProvider):
+	// a server that advertises the token without enforcing the policy makes
+	// every client skip it.
+	ExternalDependencyPolicy bool
 	// Workspace is the startup snapshot GET /v0/beads/context answers from.
 	// Only the allowlisted fields are ever serialized — see contextResponse,
 	// which names the whole set and the reasons for the exclusions.
@@ -671,7 +683,7 @@ func Listen(cfg Config) (*Server, error) {
 
 		log:      log.New(cfg.Stderr, "bd serve: ", log.LstdFlags|log.LUTC),
 		stdout:   cfg.Stdout,
-		ctxBody:  contextResponse(cfg.Workspace, cfg.SchemaVersion, Capabilities()),
+		ctxBody:  contextResponse(cfg.Workspace, cfg.SchemaVersion, advertisedCapabilities(cfg)),
 		hosts:    newHostPolicy(ip, cfg.AllowedHosts),
 		auth:     cfg.Auth,
 		idPrefix: prefix,

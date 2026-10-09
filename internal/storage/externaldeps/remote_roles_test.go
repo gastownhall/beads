@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -224,3 +225,133 @@ func TestRemoteClaimerRefusesExternallyBlocked(t *testing.T) {
 		t.Errorf("server claims = %v, want only be-a", raw.claimer.claimed)
 	}
 }
+
+// passthroughFake is a remote store whose policy-bearing roles all record
+// their calls, and whose edge reader fails the test if read: against a server
+// that applies the policy, the client must neither read edges nor run its own
+// read-then-claim loop.
+type passthroughFake struct {
+	*remoteFake
+	claimer    *recordingClaimer
+	claimNexts int
+	counts     int
+	closes     int
+	edgeReads  int
+}
+
+func (p *passthroughFake) IssueClaimer() (issueops.Claimer, error) { return p.claimer, nil }
+
+func (p *passthroughFake) EdgeReader() (issueops.EdgeReader, error) { return countingEdges{p}, nil }
+
+func (p *passthroughFake) ReadyClaimer() (issueops.ReadyClaimer, error) { return p, nil }
+
+func (p *passthroughFake) ReadyCounter() (issueops.ReadyCounter, error) { return p, nil }
+
+func (p *passthroughFake) BatchCloser() (issueops.BatchCloser, error) { return p, nil }
+
+func (p *passthroughFake) ClaimNext(context.Context, issueops.ClaimNextRequest) (issueops.ClaimNextResult, error) {
+	p.claimNexts++
+	return issueops.ClaimNextResult{Claimed: &issueops.IssueWithCounts{Issue: &types.Issue{ID: "be-x"}}}, nil
+}
+
+func (p *passthroughFake) CountReady(context.Context, issueops.ReadyRequest) (issueops.ReadyCountResult, error) {
+	p.counts++
+	return issueops.ReadyCountResult{Total: 3}, nil
+}
+
+func (p *passthroughFake) CloseBatch(_ context.Context, req issueops.CloseBatchRequest) (issueops.CloseBatchResult, error) {
+	p.closes++
+	return issueops.CloseBatchResult{Outcomes: make([]issueops.CloseOutcome, len(req.Items))}, nil
+}
+
+type countingEdges struct{ p *passthroughFake }
+
+func (c countingEdges) ReadEdges(context.Context, issueops.EdgeReadRequest) (issueops.EdgeReadResult, error) {
+	c.p.edgeReads++
+	return issueops.EdgeReadResult{}, nil
+}
+
+// TestRemoteRolesPassThroughWhenServerEnforces pins the advertised half of
+// design 3.6 at the role level: every policy-bearing role over a server that
+// advertises policy.external_dependencies is the server's own operation,
+// untouched. In particular claim-next is ONE call to the server's atomic
+// ClaimNext, even though the client's own view would call be-x blocked.
+func TestRemoteRolesPassThroughWhenServerEnforces(t *testing.T) {
+	base, reader := newRemotePolicyStore(true)
+	raw := &passthroughFake{remoteFake: base.inner.(*remoteFake), claimer: &recordingClaimer{}}
+	store := New(raw, func(ProjectName) (string, bool) { return "", false }, nil)
+	store.warnProject = nil
+	ctx := t.Context()
+
+	rc, err := store.ReadyClaimer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := rc.ClaimNext(ctx, issueops.ClaimNextRequest{Actor: "a"})
+	if err != nil || res.Claimed == nil || res.Claimed.ID != "be-x" {
+		t.Errorf("ClaimNext = %+v, %v; want the server's own answer", res, err)
+	}
+	if raw.claimNexts != 1 || len(reader.limits) != 0 || len(raw.claimer.claimed) != 0 {
+		t.Errorf("claim-next: server ClaimNext calls=%d, ready reads=%v, by-id claims=%v; want one atomic call and nothing else",
+			raw.claimNexts, reader.limits, raw.claimer.claimed)
+	}
+
+	claimer, err := store.IssueClaimer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := claimer.Claim(ctx, issueops.ClaimRequest{Actor: "a", IssueID: "be-x"}); err != nil {
+		t.Errorf("claim of be-x against an enforcing server: %v; want the server to judge it", err)
+	}
+
+	closer, err := store.BatchCloser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := closer.CloseBatch(ctx, issueops.CloseBatchRequest{Actor: "a", Items: []issueops.BatchCloseItem{{IssueID: "be-x"}}}); err != nil || raw.closes != 1 {
+		t.Errorf("close of be-x: closes=%d err=%v; want one server batch close", raw.closes, err)
+	}
+
+	counter, err := store.ReadyCounter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := counter.CountReady(ctx, issueops.ReadyRequest{}); err != nil || got.Total != 3 || raw.counts != 1 {
+		t.Errorf("CountReady = %+v, %v (server counts %d); want the server's count", got, err, raw.counts)
+	}
+
+	if raw.edgeReads != 0 {
+		t.Errorf("the client read edges %d times against a server that applies the policy", raw.edgeReads)
+	}
+}
+
+// TestAppliedFindsThePolicyLayer pins what bd serve reads to decide whether to
+// advertise policy.external_dependencies: the decorator anywhere in the chain
+// counts, its absence does not.
+func TestAppliedFindsThePolicyLayer(t *testing.T) {
+	raw := &fakeStore{}
+	if Applied(raw) || Applied(nil) {
+		t.Error("a chain without the policy layer reports it applied")
+	}
+	if !Applied(New(raw, nil, nil)) {
+		t.Error("the policy decorator itself is not reported applied")
+	}
+	if !Applied(storage.NewHookFiringStore(New(raw, nil, nil), nil)) {
+		t.Error("the policy decorator beneath the hook layer is not found")
+	}
+	plain := &fakeUOWProvider{}
+	if AppliedToProvider(nil) || AppliedToProvider(plain) {
+		t.Error("a provider chain without the policy layer reports it applied")
+	}
+	wrapped := WrapUOWProvider(plain, nil, nil)
+	if !AppliedToProvider(wrapped) {
+		t.Error("WrapUOWProvider's layer is not reported applied")
+	}
+	if !AppliedToProvider(uow.NewNotifyingProvider(wrapped, uow.Sinks{Hook: noHooks{}})) {
+		t.Error("the policy layer beneath a notifying provider is not found")
+	}
+}
+
+type noHooks struct{}
+
+func (noHooks) Run(string, *types.Issue) {}
