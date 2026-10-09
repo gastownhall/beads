@@ -544,9 +544,13 @@ pointless).`,
 			// closes; the session is attribution only (remote_backend.go).
 			if patch.ClosedBySession.Set && !storeCarriesCallerAttribution(issueStore) {
 				patch.ClosedBySession = issueops.Field[string]{}
-				if explicitSession && !warnedSessionOmitted {
+				if !warnedSessionOmitted {
 					warnedSessionOmitted = true
-					fmt.Fprintf(os.Stderr, "%s --session is not recorded: this backend's update cannot carry closed_by_session (bd close --session records it)\n", ui.RenderWarn("!"))
+					if explicitSession {
+						fmt.Fprintf(os.Stderr, "%s --session is not recorded: this backend's update cannot carry closed_by_session (bd close --session records it)\n", ui.RenderWarn("!"))
+					} else {
+						fmt.Fprintf(os.Stderr, "%s CLAUDE_SESSION_ID is not recorded as closed_by_session: this backend's update cannot carry it (bd close records it)\n", ui.RenderWarn("!"))
+					}
 				}
 			}
 			// GH#3233: --defer="" restores ready visibility only if the issue

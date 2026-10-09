@@ -20,9 +20,11 @@ import (
 //     change, its close-policy guards and the atomicity with every other field
 //     in the same update are all kept. It is also usually AMBIENT — every agent
 //     under Claude Code exports CLAUDE_SESSION_ID — so refusing the close
-//     would break the command for an input the caller never typed. An explicit
-//     --session is honored the same way but says so on stderr, pointing at
-//     `bd close --session`, whose wire operation does carry the session.
+//     would break the command for an input the caller never typed. The close
+//     still happens, and a one-line notice on stderr says the session was not
+//     recorded — for an explicit --session and for the ambient
+//     CLAUDE_SESSION_ID alike, so the omission is never silent — pointing at
+//     `bd close`, whose wire operation does carry the session.
 //
 // No capability token is spent on either: the wire publishes neither member,
 // so there is nothing to negotiate yet. When a wire revision publishes one,
