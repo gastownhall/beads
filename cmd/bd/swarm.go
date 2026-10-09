@@ -1012,7 +1012,7 @@ Examples:
 				IssueID:     issue.ID,
 				DependsOnID: wrapperEpic.ID,
 				Type:        types.DepParentChild,
-				CreatedBy:   currentActor(),
+				CreatedBy:   creationActorStamp(),
 			}
 			if err := store.AddDependency(ctx, dep, currentActor()); err != nil {
 				return HandleErrorRespectJSON("failed to link issue to epic: %v", err)
@@ -1092,7 +1092,7 @@ Examples:
 			IssueID:     swarmMol.ID,
 			DependsOnID: epicID,
 			Type:        types.DepRelatesTo,
-			CreatedBy:   currentActor(),
+			CreatedBy:   creationActorStamp(),
 		}
 		if err := store.AddDependency(ctx, dep, currentActor()); err != nil {
 			return HandleErrorRespectJSON("failed to link swarm to epic: %v", err)
