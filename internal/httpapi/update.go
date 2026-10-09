@@ -39,7 +39,8 @@ const (
 var (
 	updateRequestMembers = []string{
 		"actor", updateClaimMember, "expected_assignee", "expected_status", "expected_version",
-		"force_assignee_transfer", "force_close_policy", "force_notes_overwrite", updatePatchMember,
+		"force_assignee_transfer", "force_close_policy", "force_notes_overwrite", "allow_template",
+		updatePatchMember,
 	}
 	issuePatchMembers = []string{
 		"title", "description", "design", "acceptance_criteria",
@@ -181,6 +182,12 @@ func (s *Server) updateRequest(w http.ResponseWriter, r *http.Request, id string
 	if !ok {
 		return issueops.UpdateRequest{}, false
 	}
+	// allow_template is passed through: the role owns the template guard and
+	// what standing it down means.
+	allowTemplate, ok := s.booleanMember(w, r, members, "allow_template")
+	if !ok {
+		return issueops.UpdateRequest{}, false
+	}
 	if forceNotesOverwrite && !patch.Notes.Set {
 		s.fail(w, r, InvalidArgument("force_notes_overwrite", ReasonInvalidValue,
 			"`force_notes_overwrite` bypasses the fence on a NOTES REPLACEMENT; send `patch.notes` with it"))
@@ -244,6 +251,7 @@ func (s *Server) updateRequest(w http.ResponseWriter, r *http.Request, id string
 		ForceClosePolicy:      forceClosePolicy,
 		ForceAssigneeTransfer: forceAssigneeTransfer,
 		ForceNotesOverwrite:   forceNotesOverwrite,
+		AllowTemplate:         allowTemplate,
 		Provenance:            updateProvenance,
 	}, true
 }

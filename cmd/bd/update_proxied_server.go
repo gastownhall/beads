@@ -87,11 +87,12 @@ func proxiedIssueLifecycle() (issueops.Lifecycle, error) {
 
 // applyUpdateProxiedOne applies one issue's update — plain or --claim —
 // through issueops.Lifecycle. What stays here is this surface's own protocol:
-// the template guard, the advisory reassign pre-read, the per-id failure
-// taxonomy the multi-id batch needs and the notes-overwrite warning. Hooks are
-// NOT among them: they fire from the write plumbing now (the notifying provider
-// wired in main.go), which is what makes an update fire the same events here as
-// it does on the embedded path.
+// the advisory reassign pre-read, the per-id failure taxonomy the multi-id
+// batch needs (a template refusal is one of its verdicts; the guard itself is
+// the role's) and the notes-overwrite warning. Hooks are NOT among them: they
+// fire from the write plumbing now (the notifying provider wired in main.go),
+// which is what makes an update fire the same events here as it does on the
+// embedded path.
 //
 // Provenance carries the commit message this path has always written, so `bd
 // dolt log` reads the same after the move as before it. The plane is
@@ -189,13 +190,12 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 }
 
 // proxiedUpdateTarget reads the row an update is about through the query role,
-// for the things the mutation's own result cannot answer: whether the target is
-// a template, whether an unguarded assignee edit is about to take the issue
-// from a live foreign holder, whether --notes is about to replace existing
-// notes, and whether --defer="" should also clear a deferred status. It no
-// longer reads the pre-state to decide a hook: a status-crossing update fires
-// on_update and nothing else, from the plumbing, exactly as it does on the
-// embedded path.
+// for the things the mutation's own result cannot answer: whether an unguarded
+// assignee edit is about to take the issue from a live foreign holder, whether
+// --notes is about to replace existing notes, and whether --defer="" should
+// also clear a deferred status. It no longer reads the pre-state to decide a
+// hook: a status-crossing update fires on_update and nothing else, from the
+// plumbing, exactly as it does on the embedded path.
 func proxiedUpdateTarget(ctx context.Context, id string, in *updateInput) (*types.Issue, *updateIDFailure) {
 	rd, err := proxiedIssueReader()
 	if err != nil {
@@ -212,10 +212,8 @@ func proxiedUpdateTarget(ctx context.Context, id string, in *updateInput) (*type
 		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("resolving issue: %v", err)}
 	}
 	current := &details.Issue
-	if err := validateIssueUpdatable(id, current); err != nil {
-		fmt.Fprintf(os.Stderr, "%s\n", err)
-		return nil, &updateIDFailure{ID: id, Error: err.Error()}
-	}
+	// The template guard is the role's, enforced inside the mutation;
+	// proxiedUpdateFailure prints its refusal as this route always did.
 	// bd-98s5c: an unguarded assignee update must not silently overwrite
 	// another actor's live claim. Skipped under --if-assignee, whose CAS names
 	// the holder explicitly (park stays possible without --force), and under
@@ -266,6 +264,10 @@ func proxiedClaimPoolAliases(ctx context.Context) func() []string {
 // longer owns, so both now read as the generic update failure. The id still
 // fails, loudly and non-zero.
 func proxiedUpdateFailure(id string, claim bool, err error) *updateIDFailure {
+	if refusal, ok := templateReadOnlyRefusal(id, err); ok {
+		fmt.Fprintf(os.Stderr, "%s\n", refusal)
+		return &updateIDFailure{ID: id, Error: refusal.Error()}
+	}
 	switch {
 	case errors.Is(err, storage.ErrNotFound):
 		fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)

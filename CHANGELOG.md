@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `issueops.LeaseReclaimer`, the stale-lease sweep behind `bd reclaim`, is a
+  role on every leg (dolt, embedded dolt, the unit-of-work provider and the
+  HTTP client), and `bd serve` publishes it as `POST /v0/beads/issues:reclaim`
+  behind the new `issues.reclaim` capability (additive; `wire_revision` is
+  unchanged). Every reverted row mints a new revision, reported per entry as
+  `revision`, so a holder that writes with its pre-reclaim token gets a version
+  mismatch. An id that is not a stale lease is left out of the answer, not
+  refused. `bd reclaim` now runs the role on both routes, which changes four
+  things a script can see: its `--json` entries gain `revision`; the
+  workspace's `on_update` hook fires once per reverted row (the raw path fired
+  none); `--id` now accepts at most 1000 ids per run (more is refused, never
+  truncated); and the role records its own version commit, honoring
+  `dolt.auto-commit` the way `bd prune` does, as
+  `bd: reclaim N expired lease(s)` on both routes. Over a connected HTTP
+  workspace `bd reclaim` now works instead of refusing.
 - `bd create --graph` now plans its batch through `issueops.BatchApplier`
   instead of the old `buildDomainGraphPlan` path, so a graph create gets the
   same atomic multi-row semantics as `bd batch apply`. A `waits-for` edge's
@@ -217,6 +232,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   template, forced or not (pour it instead).
 
 ### Fixed
+- **An update of a template is now refused for every caller, not only
+  `bd update`.** The template guard used to be a pre-read in `cmd/bd`, so an
+  update through `bd serve` (`PATCH /v0/beads/issues/{id}`), an `update` item
+  of `issues:batchApply`, or a library caller of `issueops.Lifecycle.Update` or
+  `BatchApplier` edited a template that `bd update` refused. It now lives in
+  the role, in the update's own transaction, on every backend: any update
+  naming a template refuses with `*issueops.TemplateReadOnlyError` (matching
+  `ErrTemplateReadOnly`), whatever its patch and force flags, after the
+  compare-and-set guards. Over HTTP it is `409` `template_read_only`, and the
+  client rebuilds the same typed error. HTTP and library callers that edited
+  templates are now refused (pour the template instead) unless they set the
+  new `UpdateRequest.AllowTemplate` (`allow_template` on the PATCH body), which
+  stands the guard down for that one request. `bd update`, `bd assign` and the
+  proxied `bd tag` print the same line as before; `bd label` and
+  `bd set-state` set `AllowTemplate` and keep editing templates as they always
+  have. A batch create that makes a template and splices its metadata still
+  lands: the splice finishes the create. Version skew: a new `bd` against an
+  older `bd serve` (no `issues.update.allowTemplate` token in the handshake)
+  refuses a single template update itself before dialing, and never sends
+  `allow_template` to it. A batch `update` item gets no such check (its target
+  resolves on the server), so through an older `bd serve` it still edits a
+  template. An older `bd label` or `bd set-state` against a new `bd serve`
+  cannot send `allow_template`, so it now gets `409` `template_read_only` on a
+  template; upgrade the client. Not yet moved: `bd comment`, `bd note`,
+  `bd priority` and `bd tag` still refuse templates with their own pre-read in
+  `cmd/bd` (their direct-route writes do not go through `Lifecycle.Update`), so
+  for those four the guard lives only in the CLI. Claim, reopen, `:casMetadata`
+  and the served `addComment` have no template check at all yet (bd-jkp9v3):
+  `POST /v0/beads/issues/{id}:claim` (`issueops.Claimer`) still claims a
+  template that a `PATCH` with `claim: true` refuses. Close's guards move to
+  the role in their own change (#7425).
 - **PRs based on `hotfix/**` branches now run full CI, not just
   cross-version historical smokes and triage labeling.** `pr.yml`,
   `pr-risk.yml`, `conformance.yml`, `cross-version-smoke.yml` and

@@ -231,6 +231,9 @@ func (o *issueOperations) Update(ctx context.Context, request publicops.UpdateRe
 		// version and status before authorizing, so when one is stale the fence
 		// stands down and ApplyUpdate reports the mismatch instead.
 		if updatePreconditionsHold(attempt, before) {
+			if err := storageissueops.AuthorizeTemplateUpdate(before, attempt); err != nil {
+				return publicops.UpdateResult{}, "", err
+			}
 			if err := authorizeAssigneeTransfer(ctx, uw, before, attempt); err != nil {
 				return publicops.UpdateResult{}, "", err
 			}

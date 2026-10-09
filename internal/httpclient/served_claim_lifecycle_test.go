@@ -831,6 +831,19 @@ func TestServedLifecycleUpdateProvenanceLabelsHistory(t *testing.T) {
 	conformance.RunLifecycleUpdateProvenanceLabelsHistory(t, t.Context(), newServedUpdateFixture(t, "hlpv"))
 }
 
+// TestServedLifecycleUpdateRefusesATemplate is the served leg of the template
+// guard: bd serve refuses with template_read_only and the client rebuilds the
+// typed error — sentence included — the embedded store returns.
+func TestServedLifecycleUpdateRefusesATemplate(t *testing.T) {
+	conformance.RunLifecycleUpdateRefusesATemplate(t, t.Context(), newServedUpdateFixture(t, "hlut"))
+}
+
+// TestServedLifecycleUpdateAllowTemplateEditsATemplate is the served leg of
+// the guard's stand-down: allow_template rides the wire and the role honours it.
+func TestServedLifecycleUpdateAllowTemplateEditsATemplate(t *testing.T) {
+	conformance.RunLifecycleUpdateAllowTemplateEditsATemplate(t, t.Context(), newServedUpdateFixture(t, "hlua"))
+}
+
 func TestServedLifecycleUpdateRefusesUnknownIDsAndActorlessRequests(t *testing.T) {
 	conformance.RunLifecycleUpdateRefusesUnknownIDsAndActorlessRequests(t, t.Context(), newServedUpdateFixture(t, "hluu"))
 }

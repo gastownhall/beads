@@ -68,11 +68,11 @@ func roleAccessorNamesOf(surface reflect.Type) (names, unclassified []string) {
 }
 
 // TestEveryStoreRoleAccessorIsClassified fails when DoltStorage hands out an
-// interface the census cannot place. Every one of the twenty-eight today is a
+// interface the census cannot place. Every one of the twenty-nine today is a
 // facade role, so this costs nothing and closes the path where a role surface
 // grows a package and the census quietly stops covering it. (roleAccessorNames
 // is derived, so the count is prose and only this sentence goes stale — but it
-// does go stale, and the last three sweeps found it saying twenty-seven.)
+// does go stale, and the last three sweeps found it saying twenty-eight.)
 func TestEveryStoreRoleAccessorIsClassified(t *testing.T) {
 	_, unclassified := roleAccessorNamesOf(reflect.TypeOf((*DoltStorage)(nil)).Elem())
 	for _, accessor := range unclassified {
@@ -151,71 +151,73 @@ func assertRoleAccessorsAreDeclared(t *testing.T, decorator reflect.Type) {
 }
 
 // roleAccessorStore is a DoltStorage whose only real methods are the
-// twenty-eight role accessors, each answering with a distinguishable sentinel
+// twenty-nine role accessors, each answering with a distinguishable sentinel
 // so a test can tell a decorated surface from a passed-through one.
 type roleAccessorStore struct {
 	DoltStorage
-	lifecycle    issueops.Lifecycle
-	reader       issueops.Reader
-	relations    issueops.Relations
-	edges        issueops.EdgeReader
-	blocking     issueops.BlockingAnnotator
-	tree         issueops.TreeWalker
-	graphCounter issueops.GraphCounter
-	batchGetter  issueops.BatchGetter
-	counter      issueops.Counter
-	settings     issueops.WorkspaceConfig
-	memories     memoryops.Memories
-	versions     issueops.VersionReconciler
-	stats        issueops.StatsReporter
-	cycles       issueops.CycleDetector
-	commenter    issueops.Commenter
-	claimer      issueops.ReadyClaimer
-	closer       issueops.BatchCloser
-	creator      issueops.BatchCreator
-	editor       issueops.DependencyEditor
-	applier      issueops.BatchApplier
-	readyCounter issueops.ReadyCounter
-	querier      issueops.Querier
-	sweeper      issueops.Sweeper
-	deleter      issueops.Deleter
-	bootstrapper issueops.Bootstrapper
-	verifier     issueops.InitVerifier
-	metadataCAS  issueops.MetadataCAS
-	releaser     issueops.Releaser
-	err          error
+	lifecycle      issueops.Lifecycle
+	reader         issueops.Reader
+	relations      issueops.Relations
+	edges          issueops.EdgeReader
+	blocking       issueops.BlockingAnnotator
+	tree           issueops.TreeWalker
+	graphCounter   issueops.GraphCounter
+	batchGetter    issueops.BatchGetter
+	counter        issueops.Counter
+	settings       issueops.WorkspaceConfig
+	memories       memoryops.Memories
+	versions       issueops.VersionReconciler
+	stats          issueops.StatsReporter
+	cycles         issueops.CycleDetector
+	commenter      issueops.Commenter
+	claimer        issueops.ReadyClaimer
+	closer         issueops.BatchCloser
+	creator        issueops.BatchCreator
+	editor         issueops.DependencyEditor
+	applier        issueops.BatchApplier
+	readyCounter   issueops.ReadyCounter
+	querier        issueops.Querier
+	sweeper        issueops.Sweeper
+	deleter        issueops.Deleter
+	bootstrapper   issueops.Bootstrapper
+	verifier       issueops.InitVerifier
+	metadataCAS    issueops.MetadataCAS
+	releaser       issueops.Releaser
+	leaseReclaimer issueops.LeaseReclaimer
+	err            error
 }
 
 func newRoleAccessorStore() *roleAccessorStore {
 	sentinel := &roleAccessorSentinel{}
 	return &roleAccessorStore{
-		memories:     &memoryRoleSentinel{},
-		lifecycle:    sentinel,
-		reader:       sentinel,
-		relations:    sentinel,
-		edges:        sentinel,
-		blocking:     sentinel,
-		graphCounter: sentinel,
-		batchGetter:  sentinel,
-		counter:      sentinel,
-		settings:     sentinel,
-		versions:     sentinel,
-		stats:        sentinel,
-		cycles:       sentinel,
-		commenter:    sentinel,
-		claimer:      sentinel,
-		closer:       sentinel,
-		creator:      sentinel,
-		editor:       sentinel,
-		applier:      sentinel,
-		readyCounter: sentinel,
-		querier:      sentinel,
-		sweeper:      sentinel,
-		deleter:      sentinel,
-		bootstrapper: sentinel,
-		verifier:     sentinel,
-		metadataCAS:  sentinel,
-		releaser:     sentinel,
+		memories:       &memoryRoleSentinel{},
+		lifecycle:      sentinel,
+		reader:         sentinel,
+		relations:      sentinel,
+		edges:          sentinel,
+		blocking:       sentinel,
+		graphCounter:   sentinel,
+		batchGetter:    sentinel,
+		counter:        sentinel,
+		settings:       sentinel,
+		versions:       sentinel,
+		stats:          sentinel,
+		cycles:         sentinel,
+		commenter:      sentinel,
+		claimer:        sentinel,
+		closer:         sentinel,
+		creator:        sentinel,
+		editor:         sentinel,
+		applier:        sentinel,
+		readyCounter:   sentinel,
+		querier:        sentinel,
+		sweeper:        sentinel,
+		deleter:        sentinel,
+		bootstrapper:   sentinel,
+		verifier:       sentinel,
+		metadataCAS:    sentinel,
+		releaser:       sentinel,
+		leaseReclaimer: sentinel,
 	}
 }
 
@@ -286,8 +288,11 @@ func (s *roleAccessorStore) BatchApplier() (issueops.BatchApplier, error) {
 func (s *roleAccessorStore) Releaser() (issueops.Releaser, error) {
 	return s.releaser, s.err
 }
+func (s *roleAccessorStore) LeaseReclaimer() (issueops.LeaseReclaimer, error) {
+	return s.leaseReclaimer, s.err
+}
 
-// roleAccessorSentinel implements twenty-seven of the twenty-eight roles at
+// roleAccessorSentinel implements twenty-eight of the twenty-nine roles at
 // once — every one but memoryops.Memories, whose List collides with
 // issueops.Reader.List and needs the second sentinel below.
 // Nothing calls its methods; identity is the whole point.
@@ -412,6 +417,9 @@ func (*roleAccessorSentinel) CompareAndSetKey(context.Context, issueops.CompareA
 func (*roleAccessorSentinel) Release(context.Context, issueops.ReleaseRequest) (issueops.ReleaseResult, error) {
 	return issueops.ReleaseResult{}, nil
 }
+func (*roleAccessorSentinel) Reclaim(context.Context, issueops.ReclaimRequest) (issueops.ReclaimResult, error) {
+	return issueops.ReclaimResult{}, nil
+}
 
 // memoryRoleSentinel is the memory role's sentinel, and the one role
 // memoryRoleSentinel is the remaining role's sentinel, and the one role
@@ -474,6 +482,7 @@ func TestHookFiringStoreWrapsTheWriteRolesAndPassesTheReadsThrough(t *testing.T)
 		{"MetadataCAS", func() (any, error) { return store.MetadataCAS() }, inner.metadataCAS, true},
 		{"BatchApplier", func() (any, error) { return store.BatchApplier() }, inner.applier, true},
 		{"Releaser", func() (any, error) { return store.Releaser() }, inner.releaser, true},
+		{"LeaseReclaimer", func() (any, error) { return store.LeaseReclaimer() }, inner.leaseReclaimer, true},
 		{"IssueReader", func() (any, error) { return store.IssueReader() }, inner.reader, false},
 		{"IssueRelations", func() (any, error) { return store.IssueRelations() }, inner.relations, false},
 		{"EdgeReader", func() (any, error) { return store.EdgeReader() }, inner.edges, false},
@@ -532,6 +541,7 @@ func TestHookFiringStoreRoleAccessorsPropagateInnerErrors(t *testing.T) {
 		{"MetadataCAS", func() (any, error) { return store.MetadataCAS() }},
 		{"BatchApplier", func() (any, error) { return store.BatchApplier() }},
 		{"Releaser", func() (any, error) { return store.Releaser() }},
+		{"LeaseReclaimer", func() (any, error) { return store.LeaseReclaimer() }},
 		{"IssueReader", func() (any, error) { return store.IssueReader() }},
 		{"IssueRelations", func() (any, error) { return store.IssueRelations() }},
 		{"EdgeReader", func() (any, error) { return store.EdgeReader() }},

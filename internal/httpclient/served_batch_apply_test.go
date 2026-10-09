@@ -247,6 +247,20 @@ func TestServedBatchApplyRefusesAnUnusableRequest(t *testing.T) {
 	conformance.RunBatchApplyRefusesAnUnusableRequest(t, t.Context(), newServedBatchApplyFixture(t, "hba26"))
 }
 
+func TestServedBatchApplyUpdateItemsRefuseATemplate(t *testing.T) {
+	conformance.RunBatchApplyUpdateItemsRefuseATemplate(t, t.Context(), newServedBatchApplyFixture(t, "hbatu"))
+}
+
+// TestServedBatchApplySplicesTheMetadataOfATemplateItCreates is PARKED: a create
+// item cannot make a template over the v0 wire (ApplyCreateItem publishes no
+// is_template member), so the client refuses the plan before the splice could
+// be reached. The served update guard itself is pinned by the case above.
+func TestServedBatchApplySplicesTheMetadataOfATemplateItCreates(t *testing.T) {
+	skipKnownDivergence(t, "W-CreateItem.Issue", parkBead,
+		"ApplyCreateItem publishes no is_template member, so a plan that creates a template is refused client-side")
+	conformance.RunBatchApplySplicesTheMetadataOfATemplateItCreates(t, t.Context(), newServedBatchApplyFixture(t, "hbats"))
+}
+
 func TestServedBatchApplyCloseItemsAnswerToTheCloseGuards(t *testing.T) {
 	conformance.RunBatchApplyCloseItemsAnswerToTheCloseGuards(t, t.Context(), newServedBatchApplyFixture(t, "hbacg"))
 }

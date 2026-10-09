@@ -667,6 +667,11 @@ func reclaimReplicaSQL(filter types.ReclaimFilter, localNode string) (string, []
 // the lease from) so the caller can log/emit recovery events. The caller owns
 // Dolt versioning.
 //
+// This is the one place a reclaimed row's revision token is minted: the row's
+// freshRowLock() value is captured off the revert UPDATE and published on
+// each types.ReclaimedLease as types.RevisionToken(newLock), the same
+// encoding IssueDetails.Revision uses.
+//
 // filter narrows which stale leases are eligible (see types.ReclaimFilter); the
 // zero filter keeps the historical global behavior. Scoping is applied to the
 // snapshot SELECT only — the per-row DELETE/UPDATE re-checks staleness by id,
@@ -754,12 +759,13 @@ func ReclaimExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, fi
 		// being in_progress under us (closed) is left alone; row_lock makes a
 		// concurrent close/update conflict at commit time rather than
 		// cell-merge with this write.
+		newLock := freshRowLock()
 		res, err = tx.ExecContext(ctx, `
 			UPDATE issues
 			SET status = 'open', assignee = NULL, started_at = NULL,
 			    updated_at = ?, row_lock = ?
 			WHERE id = ? AND status = 'in_progress'
-		`, time.Now().UTC(), freshRowLock(), r.ID)
+		`, time.Now().UTC(), newLock, r.ID)
 		if err != nil {
 			return nil, fmt.Errorf("reclaim %s: %w", r.ID, err)
 		}
@@ -770,6 +776,7 @@ func ReclaimExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, fi
 		if n == 0 {
 			continue // no longer in_progress — its lease row was stale anyway
 		}
+		r.Revision = types.RevisionToken(newLock)
 		if err := RecordFullEventInTable(ctx, tx, "events", r.ID, types.EventLeaseReclaimed, actor,
 			r.PreviousOwner, ""); err != nil {
 			return nil, fmt.Errorf("record reclaim event for %s: %w", r.ID, err)

@@ -273,6 +273,14 @@ type UpdateRequest struct {
 	// It is the update-side spelling of CloseRequest.Force; a command adapter
 	// that maps one flag to both spells both.
 	ForceClosePolicy bool
+	// AllowTemplate says the caller edits a template deliberately, so the
+	// template read-only refusal (*TemplateReadOnlyError) stands down for this
+	// request. bd label and bd set-state set it to keep their pre-guard
+	// behavior: they have always written to templates. The zero value
+	// enforces the guard. It bypasses nothing else — validation, the
+	// preconditions, the assignee and notes fences and close policy still
+	// apply — and has no effect on an issue that is not a template.
+	AllowTemplate bool
 	// The three Expected* guards below are this package's FOUNDING spelling of
 	// the compare-and-set family, and the family's rules are stated once, at
 	// length, on DeleteRequest.ExpectedVersion (deleter.go) and
@@ -480,7 +488,12 @@ type Lifecycle interface {
 	// returns ErrCloseBlocked, both without mutation. ForceClosePolicy bypasses
 	// those two refusals and nothing else. A Claim that loses its
 	// compare-and-set returns *ClaimConflictError carrying the state that beat
-	// it. A refusal or validation error leaves persistent state unchanged.
+	// it. An update of a template returns *TemplateReadOnlyError whatever its
+	// patch and force flags, unless it sets AllowTemplate — templates are
+	// read-only — checked after the
+	// compare-and-set preconditions, so a stale guard still reports the
+	// mismatch. A refusal or validation error leaves persistent state
+	// unchanged.
 	Update(context.Context, UpdateRequest) (UpdateResult, error)
 	// Close validates guards and commits the complete request as one atomic
 	// mutation. It moves the issue to literal StatusClosed, including from a

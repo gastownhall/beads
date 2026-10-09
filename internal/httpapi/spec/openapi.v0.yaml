@@ -63,7 +63,7 @@ info:
       outside its own parameter table with `400` / `code: invalid_argument` /
       `reason: "unknown_parameter"` and `param` naming the offending key.
       Operations that declare no QUERY parameter at all reject every query key
-      the same way. Today that is twenty-six of the forty-two operations
+      the same way. Today that is twenty-seven of the forty-three operations
       here — `GET /healthz`, `GET /v0/beads/context`,
       `GET /v0/beads/dependencies/cycles`, `POST /v0/beads/issues`,
       `PATCH /v0/beads/issues/{id}`,
@@ -75,6 +75,7 @@ info:
       `POST /v0/beads/issues/{id}:casMetadata`, `POST /v0/beads/issues:sweep`,
       `POST /v0/beads/issues:delete`,
       `POST /v0/beads/issues:batchGet`,
+      `POST /v0/beads/issues:reclaim`,
       `POST /v0/beads/issues:batchCreate`,
       `POST /v0/beads/issues:batchApply`,
       `POST /v0/beads/issues:batchClose`, `GET /v0/beads/config`,
@@ -2502,10 +2503,11 @@ paths:
         '409':
           description: >-
             The request is well-formed and the STATE refuses it, and NOTHING WAS
-            WRITTEN. Six codes, each inherited from the operation that already
-            publishes it rather than minted here, and described in the
-            paragraphs below — `dependency_cycle` and `dependency_exists` share
-            one, because they are one member reaching the graph.
+            WRITTEN. Eight codes, described in the paragraphs below; all but
+            `template_read_only` are inherited from the operation that already
+            publishes them rather than minted here, and `dependency_cycle` and
+            `dependency_exists` share one paragraph, because they are one member
+            reaching the graph.
 
 
             `already_claimed` and `not_claimable` with `param: "claim"` are a
@@ -2558,9 +2560,18 @@ paths:
             both of which write blocking edges and do carry it: this operation
             publishes no member that writes one. What you get here is the plain
             scheduling cycle, every time.
+
+
+            `template_read_only` is an update of a template. Templates are
+            read-only — work comes out of one by pouring it — so every update
+            naming one refuses, whatever the patch and force flags, unless it
+            sets `allow_template` (a deliberate template edit).
+            It is checked after the guards above, so a stale guard still answers
+            `precondition_failed`.
           x-bd-codes:
             [already_claimed, dependency_cycle, dependency_exists,
-             not_claimable, not_closable, notes_overwrite_refused, precondition_failed]
+             not_claimable, not_closable, notes_overwrite_refused, precondition_failed,
+             template_read_only]
           content:
             application/problem+json:
               schema:
@@ -3923,6 +3934,95 @@ paths:
         '503':
           $ref: '#/components/responses/Unavailable'
 
+  /v0/beads/issues:reclaim:
+    post:
+      operationId: reclaimIssues
+      summary: Revert stale leases back to ready
+      description: >-
+        Reverts every in-progress issue whose LEASE has gone stale back to
+        ready: the lease row is deleted, `status` becomes `open`, the assignee
+        and `started_at` are cleared, and a recovery event naming the former
+        holder is recorded. It is the operation behind `issueops.LeaseReclaimer`
+        and `bd reclaim`, and the caller it is for is a CLOCK — a supervisor
+        reaping the work of workers that died without releasing it — rather
+        than the worker that held the claim, which releases its own with
+        `POST /v0/beads/issues/{id}:release`.
+
+
+        A lease is stale when its expiry is more than `older_than_seconds` in
+        the past. A lease a worker is still heartbeating is never eligible,
+        whatever the request names.
+
+
+        ## Scope narrows, never widens
+
+
+        Every scope member narrows the sweep and they AND-combine: `ids`,
+        `assignees`, `labels` (all of them), `labels_any` (at least one) and
+        `exclude_labels` (none of them). A request with no scope member sweeps
+        every stale lease this server granted. `any_replica` is the one member
+        that WIDENS: it disarms the granting-replica guard, so a lease another
+        replica granted is reverted too. It is an operator escape hatch for a
+        replica that is gone for good, never a normal setting.
+
+
+        AN ID THAT IS NOT A STALE LEASE IS NOT AN ERROR. An id naming no row, or
+        a row whose lease is live, or a row nobody holds, is simply absent from
+        `reclaimed`; scoping by id narrows a sweep, it does not assert that
+        every named id was reclaimable. There is no `404` on this operation.
+
+
+        ## A new revision per reverted row
+
+
+        Every reverted row's `revision` is minted fresh by the revert, and each
+        entry of `reclaimed` carries it. A holder that wakes up after its lease
+        was reclaimed and writes with the revision its claim handed it gets
+        `412 precondition_failed`, so it cannot land over work another worker
+        may already have taken.
+
+
+        The whole sweep is ONE transaction. A lease a heartbeat rescues between
+        the snapshot that found it and its row's revert is skipped, not
+        reported.
+
+
+        Available when the server advertises the `issues.reclaim` capability.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReclaimIssuesRequest'
+      security:
+        - bearerToken: []
+      responses:
+        '200':
+          description: >-
+            The rows the sweep reverted, each with its former holder and its new
+            revision. An empty array (never null) when nothing was stale.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReclaimIssuesResult'
+        '400':
+          description: >-
+            Invalid request: an unparseable body, an unknown body member, a
+            missing or invalid `actor`, a negative or non-numeric
+            `older_than_seconds`, an `ids` carrying more than 1000 entries
+            (counted before deduplication), or a blank scope entry.
+          x-bd-codes: [invalid_argument]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
   /v0/beads/issues:batchCreate:
     post:
       operationId: batchCreateIssues
@@ -4270,11 +4370,16 @@ paths:
             per-item bypasses, and a forced item never earns this.
 
 
-            `template_read_only`, `issue_pinned` and `not_assignee` are the
-            close guards refusing a `close` item, exactly as
+            `template_read_only` is an `update` or a `close` item whose target
+            is a template, exactly as `PATCH /v0/beads/issues/{id}` and
+            `POST /v0/beads/issues/{id}:close` answer it; no item member
+            bypasses it.
+
+
+            `issue_pinned` and `not_assignee` are the other two close guards
+            refusing a `close` item, exactly as
             `POST /v0/beads/issues/{id}:close` answers them; `not_assignee`
-            carries the holder in `assignee`. `close.force` bypasses the latter
-            two.
+            carries the holder in `assignee`. `close.force` bypasses both.
 
 
             `already_claimed` is the assignee fence: an `update` whose
@@ -7972,7 +8077,7 @@ components:
             `issues.claim`, `issues.claimNext`, `issues.release`,
             `issues.close`, `issues.reopen`, `issues.update`,
             `issues.sweep`, `issues.delete`, `issues.batchGet`,
-            `issues.batchCreate`,
+            `issues.reclaim`, `issues.batchCreate`,
             `issues.batchApply`,
             `stats.get`, `config.list`, `config.get`, `config.set`,
             `config.unset`, `dependencies.cycles`,
@@ -8017,7 +8122,11 @@ components:
             `issues.batchApply.depAddLineage`, which announces that a
             `dep_add` item on `POST /v0/beads/issues:batchApply` accepts
             `has_spawner` and `thread_id` (see `ApplyDepAddItem`) rather than
-            a `400` naming the member unknown. The
+            a `400` naming the member unknown, and
+            `issues.update.allowTemplate`, which announces that
+            `PATCH /v0/beads/issues/{id}` accepts `allow_template` (see
+            `UpdateIssueRequest`) rather than a `400` naming the member
+            unknown. The
             list grows additively, and an operation never appears here unless
             it is fully implemented. This is how a client checks for an
             operation or a behavior — never the version string.
@@ -8559,6 +8668,108 @@ components:
             when every named id resolved.
           items:
             type: string
+
+    ReclaimIssuesRequest:
+      type: object
+      additionalProperties: false
+      required: [actor]
+      description: >-
+        One sweep of stale leases. Every member but `actor` is optional, and
+        every scope member NARROWS the sweep; see the operation.
+
+
+        `additionalProperties: false`, so an unknown member is a `400` naming
+        the member — a narrowing term this server silently ignored would widen
+        what is reverted.
+      properties:
+        actor:
+          type: string
+          description: >-
+            Who ran the sweep. REQUIRED: each reverted row's recovery event and
+            history entry are attributed to it. Validated by the same rules as
+            the claim's `actor`.
+        older_than_seconds:
+          type: number
+          format: double
+          minimum: 0
+          description: >-
+            The grace window past a lease's own expiry, in seconds (fractions
+            allowed): only a lease that expired more than this long ago is
+            eligible. Absent means `0`, every currently expired lease. A
+            negative value is refused.
+        ids:
+          type: array
+          maxItems: 1000
+          description: >-
+            Only these issues are eligible. An id that is not currently a stale
+            lease is absent from the answer rather than refused. The cap is on
+            the REQUEST, counted before deduplication. A blank entry is
+            refused.
+          items:
+            type: string
+        assignees:
+          type: array
+          description: Only leases held by one of these owners are eligible.
+          items:
+            type: string
+        labels:
+          type: array
+          description: Only issues carrying ALL of these labels are eligible.
+          items:
+            type: string
+        labels_any:
+          type: array
+          description: Only issues carrying AT LEAST ONE of these labels are eligible.
+          items:
+            type: string
+        exclude_labels:
+          type: array
+          description: An issue carrying ANY of these labels is never eligible.
+          items:
+            type: string
+        any_replica:
+          type: boolean
+          description: >-
+            Also revert leases another replica granted. The one member that
+            WIDENS the sweep; see the operation. Absent means `false`.
+
+    ReclaimIssuesResult:
+      type: object
+      required: [reclaimed]
+      description: >-
+        Every row the sweep reverted, in the order the sweep found them.
+      properties:
+        reclaimed:
+          type: array
+          description: >-
+            One entry per reverted row. Empty array (never null) when nothing
+            was stale in scope.
+          items:
+            $ref: '#/components/schemas/ReclaimedLease'
+
+    ReclaimedLease:
+      type: object
+      description: One row a lease sweep reverted.
+      x-go-type: types.ReclaimedLease
+      x-go-type-import:
+        name: types
+        path: github.com/steveyegge/beads/internal/types
+      required: [id, previous_owner, revision]
+      properties:
+        id:
+          type: string
+          description: The reverted issue's id.
+        previous_owner:
+          type: string
+          description: >-
+            The assignee the stale lease was taken from; empty when the row
+            carried none.
+        revision:
+          type: string
+          description: >-
+            The row's NEW revision, minted by the revert: the
+            optimistic-concurrency token a guarded write after the reclaim
+            needs. A decimal string, like every `revision` on this surface.
 
     SweepRequest:
       type: object
@@ -11460,6 +11671,18 @@ components:
             `expected_assignee` exemption: there is no compare-and-set that
             authorizes a notes overwrite, so combining the two is legal and
             each answers its own question.
+        allow_template:
+          type: boolean
+          default: false
+          description: >-
+            The caller edits a template deliberately, so the template read-only
+            refusal (`409 template_read_only`) stands down for this request.
+            `bd label` and `bd set-state` send it: they have always written to
+            templates. It bypasses nothing else, and has no effect on an issue
+            that is not a template. Advertised by the
+            `issues.update.allowTemplate` capability token; a server that
+            predates the member refuses it as an unknown parameter, and such a
+            server never applies the template guard either.
 
     IssuePatchBody:
       type: object

@@ -1311,4 +1311,11 @@ func (r *issueSQLRepositoryImpl) ReclaimExpiredLeases(ctx context.Context, older
 	return out, nil
 }
 
+// Reclaim runs the shared sweep body directly on r.runner, matching GetMany's
+// bare-passthrough shape: validation and error-wrapping both happen inside
+// issueops.ExecuteReclaimInTx.
+func (r *issueSQLRepositoryImpl) Reclaim(ctx context.Context, request publicops.ReclaimRequest) (publicops.ReclaimResult, error) {
+	return issueops.ExecuteReclaimInTx(ctx, r.runner, request)
+}
+
 const deleteBatchSize = 200

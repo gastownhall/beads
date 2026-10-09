@@ -2496,6 +2496,75 @@ func batchApplyHistoryMatching(t *testing.T, ctx context.Context, fixture BatchA
 	return count
 }
 
+// RunBatchApplyUpdateItemsRefuseATemplate pins that an update item answers to
+// Lifecycle.Update's template guard: an item targeting a template refuses with
+// an *ItemError carrying *TemplateReadOnlyError, whatever force flags it
+// carries, and the request is all or nothing, so the create ahead of it does
+// not land and the template is untouched.
+func RunBatchApplyUpdateItemsRefuseATemplate(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	template := fixture.IssuePrefix + "-tmplupd-template"
+	bystander := fixture.IssuePrefix + "-tmplupd-bystander"
+	seeded := batchApplyIssue(template, "a template")
+	seeded.IsTemplate = true
+	if err := fixture.CreateIssue(ctx, seeded, "seed"); err != nil {
+		t.Fatalf("seed %s: %v", template, err)
+	}
+
+	update := batchApplyUpdate(publicops.Ref{ID: template}, publicops.IssuePatch{
+		Title:  publicops.Field[string]{Set: true, Value: "edited"},
+		Status: publicops.Field[publicops.Status]{Set: true, Value: types.StatusClosed},
+	})
+	update.Update.ForceClosePolicy = true
+	_, err := fixture.BatchApplier.ApplyBatch(ctx, publicops.ApplyBatchRequest{
+		Actor:         "apply-writer",
+		ForceIDPrefix: true,
+		Items: []publicops.ApplyItem{
+			batchApplyCreate("bystander", batchApplyIssue(bystander, "must not land beside a refusal")),
+			update,
+		},
+	})
+	var itemErr *publicops.ItemError
+	if !errors.As(err, &itemErr) {
+		t.Fatalf("an update item on template %s: error = %v, want an *ItemError", template, err)
+	}
+	if itemErr.Kind != publicops.ItemUpdate || itemErr.Index != 1 {
+		t.Errorf("ItemError = %#v, want the update item at index 1", itemErr)
+	}
+	var refusal *publicops.TemplateReadOnlyError
+	if !errors.As(err, &refusal) || refusal.IssueID != template {
+		t.Errorf("update item on template = %v, want *TemplateReadOnlyError naming %s", err, template)
+	}
+	assertBatchApplyRowCount(t, ctx, fixture, "issues", bystander, 0)
+	if got := batchApplyColumn(t, ctx, fixture, "title", template); got != "a template" {
+		t.Errorf("%s title after the refusal = %q, want it untouched", template, got)
+	}
+	if got := batchApplyColumn(t, ctx, fixture, "status", template); got != string(types.StatusOpen) {
+		t.Errorf("%s status after the refusal = %q, want it untouched", template, got)
+	}
+}
+
+// RunBatchApplySplicesTheMetadataOfATemplateItCreates is the template guard's
+// boundary: the one write a template legitimately takes inside a batch is a
+// CREATE item that makes it and asks for a metadata splice. The splice runs as
+// an update of the row the request itself is creating, after every id exists,
+// and it must land — the template is being written, not modified — so a guard
+// placed where the splice reaches it would refuse a template's own creation.
+func RunBatchApplySplicesTheMetadataOfATemplateItCreates(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	created := fixture.IssuePrefix + "-tmplsplice-created"
+	fresh := batchApplyIssue(created, "a template this request creates")
+	fresh.IsTemplate = true
+	item := batchApplyCreate("created", fresh)
+	item.Create.MetadataRefs = map[string]publicops.Ref{"gc.self": {Key: "created"}}
+	batchApplyMust(t, ctx, fixture, publicops.ApplyBatchRequest{
+		Actor: "apply-writer", ForceIDPrefix: true, Items: []publicops.ApplyItem{item},
+	})
+	if _, ok := batchApplyMetadataKey(t, ctx, fixture, created, "gc.self"); !ok {
+		t.Errorf("%s carries no gc.self key: the splice that finishes a template's own create must land", created)
+	}
+}
+
 // RunBatchApplyCloseItemsAnswerToTheCloseGuards pins that a close item answers
 // to the close guards Lifecycle.Close states, under CloseRequest's rules: a
 // template refuses forced or not, a pin and another actor's bead refuse unless

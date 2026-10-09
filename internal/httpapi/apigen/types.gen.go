@@ -1050,7 +1050,7 @@ type ContextResponse struct {
 	// OPTIONAL, and absent means only that this server does not disclose its filesystem layout — never that it has no workspace. A client MUST NOT require it, MUST NOT treat absence as an error, and has no use for the value beyond display: it is a path on the SERVER's filesystem, which the client cannot open. Identify the workspace by `project_id` and `database`, which are required.
 	BeadsDir *string `json:"beads_dir,omitempty"`
 
-	// Capabilities The tokens this server advertises: the OPERATIONS it implements, derived from its route table, and the server-wide BEHAVIORS it enforces. v0's operation vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.count`, `issues.get`, `issues.related`, `issues.create`, `issues.addComment`, `issues.batchClose`, `issues.claim`, `issues.claimNext`, `issues.release`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchGet`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `config.set`, `config.unset`, `dependencies.cycles`, `dependencies.list`, `dependencies.count`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`; the behavior tokens are `project.enforce`, which announces that a `Bd-Project-Id` stamp for the wrong workspace is refused here rather than silently ignored, `issues.batchApplyLarge`, which announces that `POST /v0/beads/issues:batchApply` accepts the RAISED envelope — up to 1000 items (`ApplyBatchRequest.items.maxItems`), a 16 MiB body, and (for a request over 100 items) a run budget that EXTENDS to an operator-configured ceiling (`bd serve --large-apply-ceiling`, 5 minutes by default) — rather than the original 100-item, 4 MiB bound. The ceiling is a flat whole-run budget, not a value scaled by item count: a 101-item request and a 1000-item request both get the same extended budget. A request at or under 100 items is unaffected either way and keeps the server's ordinary deadline exactly as before. A client that checks for this token before sending a plan over 100 items learns whether THIS server accepts it without paying for a round trip an older server would refuse anyway, and `issues.list.sort`, which announces that `GET /v0/beads/issues` accepts the `sort` query parameter (two closed, pageable total orders — see that parameter) rather than silently answering `unknown_parameter`, and `issues.count.scope`, which announces that `GET /v0/beads/issues:count` accepts `parent`, `no_parent`, `exclude_type`, and `exclude_status` (see those parameters) rather than silently answering `unknown_parameter` for all four, `issues.sweep.wispsPlane`, which announces that `POST /v0/beads/issues:sweep` accepts the `wisps-plane` value of `tier` rather than silently answering `invalid_value`, `issues.sweep.liveDependents`, which announces that the same operation accepts `protect_live_dependents` and answers `skipped.live_dependent` rather than silently answering `unknown_parameter`, `issues.sweep.limit`, which announces that it accepts `limit` and answers `remaining` rather than silently answering `unknown_parameter`, and `issues.batchApply.depAddLineage`, which announces that a `dep_add` item on `POST /v0/beads/issues:batchApply` accepts `has_spawner` and `thread_id` (see `ApplyDepAddItem`) rather than a `400` naming the member unknown. The list grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation or a behavior — never the version string.
+	// Capabilities The tokens this server advertises: the OPERATIONS it implements, derived from its route table, and the server-wide BEHAVIORS it enforces. v0's operation vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.count`, `issues.get`, `issues.related`, `issues.create`, `issues.addComment`, `issues.batchClose`, `issues.claim`, `issues.claimNext`, `issues.release`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchGet`, `issues.reclaim`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `config.set`, `config.unset`, `dependencies.cycles`, `dependencies.list`, `dependencies.count`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`; the behavior tokens are `project.enforce`, which announces that a `Bd-Project-Id` stamp for the wrong workspace is refused here rather than silently ignored, `issues.batchApplyLarge`, which announces that `POST /v0/beads/issues:batchApply` accepts the RAISED envelope — up to 1000 items (`ApplyBatchRequest.items.maxItems`), a 16 MiB body, and (for a request over 100 items) a run budget that EXTENDS to an operator-configured ceiling (`bd serve --large-apply-ceiling`, 5 minutes by default) — rather than the original 100-item, 4 MiB bound. The ceiling is a flat whole-run budget, not a value scaled by item count: a 101-item request and a 1000-item request both get the same extended budget. A request at or under 100 items is unaffected either way and keeps the server's ordinary deadline exactly as before. A client that checks for this token before sending a plan over 100 items learns whether THIS server accepts it without paying for a round trip an older server would refuse anyway, and `issues.list.sort`, which announces that `GET /v0/beads/issues` accepts the `sort` query parameter (two closed, pageable total orders — see that parameter) rather than silently answering `unknown_parameter`, and `issues.count.scope`, which announces that `GET /v0/beads/issues:count` accepts `parent`, `no_parent`, `exclude_type`, and `exclude_status` (see those parameters) rather than silently answering `unknown_parameter` for all four, `issues.sweep.wispsPlane`, which announces that `POST /v0/beads/issues:sweep` accepts the `wisps-plane` value of `tier` rather than silently answering `invalid_value`, `issues.sweep.liveDependents`, which announces that the same operation accepts `protect_live_dependents` and answers `skipped.live_dependent` rather than silently answering `unknown_parameter`, `issues.sweep.limit`, which announces that it accepts `limit` and answers `remaining` rather than silently answering `unknown_parameter`, and `issues.batchApply.depAddLineage`, which announces that a `dep_add` item on `POST /v0/beads/issues:batchApply` accepts `has_spawner` and `thread_id` (see `ApplyDepAddItem`) rather than a `400` naming the member unknown, and `issues.update.allowTemplate`, which announces that `PATCH /v0/beads/issues/{id}` accepts `allow_template` (see `UpdateIssueRequest`) rather than a `400` naming the member unknown. The list grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation or a behavior — never the version string.
 	//
 	// THIS LIST IS BUILD-LEVEL, NOT WORKSPACE-LEVEL. It says which operations this binary serves, and for every entry but two that is the whole answer. `events.list` and `events.watch` are the exceptions: the durable events journal is a per-workspace setting that is OFF by default, so a server that advertises them may still refuse every request to both with 409 `events_journal_disabled` — correctly, because the operations exist and the workspace has no journal. A consumer of either MUST treat the capability as "this server speaks it" and the 409 as "not on this workspace", and must not read the capability as a promise that records will arrive.
 	Capabilities []string `json:"capabilities"`
@@ -1736,6 +1736,44 @@ type ReadyPage struct {
 	Items []IssueWithCounts `json:"items"`
 }
 
+// ReclaimIssuesRequest One sweep of stale leases. Every member but `actor` is optional, and every scope member NARROWS the sweep; see the operation.
+//
+// `additionalProperties: false`, so an unknown member is a `400` naming the member — a narrowing term this server silently ignored would widen what is reverted.
+type ReclaimIssuesRequest struct {
+	// Actor Who ran the sweep. REQUIRED: each reverted row's recovery event and history entry are attributed to it. Validated by the same rules as the claim's `actor`.
+	Actor string `json:"actor"`
+
+	// AnyReplica Also revert leases another replica granted. The one member that WIDENS the sweep; see the operation. Absent means `false`.
+	AnyReplica *bool `json:"any_replica,omitempty"`
+
+	// Assignees Only leases held by one of these owners are eligible.
+	Assignees *[]string `json:"assignees,omitempty"`
+
+	// ExcludeLabels An issue carrying ANY of these labels is never eligible.
+	ExcludeLabels *[]string `json:"exclude_labels,omitempty"`
+
+	// Ids Only these issues are eligible. An id that is not currently a stale lease is absent from the answer rather than refused. The cap is on the REQUEST, counted before deduplication. A blank entry is refused.
+	Ids *[]string `json:"ids,omitempty"`
+
+	// Labels Only issues carrying ALL of these labels are eligible.
+	Labels *[]string `json:"labels,omitempty"`
+
+	// LabelsAny Only issues carrying AT LEAST ONE of these labels are eligible.
+	LabelsAny *[]string `json:"labels_any,omitempty"`
+
+	// OlderThanSeconds The grace window past a lease's own expiry, in seconds (fractions allowed): only a lease that expired more than this long ago is eligible. Absent means `0`, every currently expired lease. A negative value is refused.
+	OlderThanSeconds *float64 `json:"older_than_seconds,omitempty"`
+}
+
+// ReclaimIssuesResult Every row the sweep reverted, in the order the sweep found them.
+type ReclaimIssuesResult struct {
+	// Reclaimed One entry per reverted row. Empty array (never null) when nothing was stale in scope.
+	Reclaimed []ReclaimedLease `json:"reclaimed"`
+}
+
+// ReclaimedLease One row a lease sweep reverted.
+type ReclaimedLease = types.ReclaimedLease
+
 // Ref Names ONE issue, either by an id that already exists or by the `key` a create item earlier in the same request gave itself.
 //
 // EXACTLY ONE OF THE TWO IS SET, and both cases the schema cannot express are a `400`: both members set is a caller that cannot say which it meant, and neither set is a reference to nothing. (Spelling that as a schema alternation would need `oneOf`, which this document does not use — see `ApplyItem`.)
@@ -2060,6 +2098,9 @@ type TreeNode = types.TreeNode
 type UpdateIssueRequest struct {
 	// Actor Who is editing the issue. `ClaimRequest.actor`'s rules exactly: the server trims it, then refuses an empty result, anything longer than 256 BYTES (the `maxLength` above counts characters — the byte limit is the binding one), and any control character including newline. The value reaches the history entry's attribution and the storage commit message, so an unvalidated newline would forge audit-trail lines.
 	Actor string `json:"actor"`
+
+	// AllowTemplate The caller edits a template deliberately, so the template read-only refusal (`409 template_read_only`) stands down for this request. `bd label` and `bd set-state` send it: they have always written to templates. It bypasses nothing else, and has no effect on an issue that is not a template. Advertised by the `issues.update.allowTemplate` capability token; a server that predates the member refuses it as an unknown parameter, and such a server never applies the template guard either.
+	AllowTemplate *bool `json:"allow_template,omitempty"`
 
 	// Claim Claims the issue for `actor` in the same transaction as `patch`: `bd update <id> --claim`, served by the same role. The claim sets `assignee` to `actor` and `status` to `in_progress`, then the patch applies, so a `patch.assignee` or `patch.status` overrides the claim's value. Eligibility is `{id}:claim`'s: a claimable status, and unassigned, already held by `actor`, or held by a configured claim pool. Held by `actor` and `in_progress` already is an idempotent success. A refusal is `409 already_claimed` or `409 not_claimable` naming `claim`, and writes nothing — the patch included. With `claim: true` the `patch` may be empty. It must not be combined with `expected_assignee`, `expected_status` or `force_assignee_transfer`; a request that does is a `400` naming `claim`.
 	Claim *bool `json:"claim,omitempty"`
@@ -2795,6 +2836,9 @@ type ClaimNextIssueJSONRequestBody = ClaimNextRequest
 
 // DeleteIssuesJSONRequestBody defines body for DeleteIssues for application/json ContentType.
 type DeleteIssuesJSONRequestBody = DeleteIssuesRequest
+
+// ReclaimIssuesJSONRequestBody defines body for ReclaimIssues for application/json ContentType.
+type ReclaimIssuesJSONRequestBody = ReclaimIssuesRequest
 
 // SweepIssuesJSONRequestBody defines body for SweepIssues for application/json ContentType.
 type SweepIssuesJSONRequestBody = SweepRequest

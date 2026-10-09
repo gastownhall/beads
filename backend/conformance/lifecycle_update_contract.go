@@ -2519,3 +2519,134 @@ func lifecycleUpdateHasEdge(dependencies []*types.Dependency, wantTarget string)
 	}
 	return false
 }
+
+// RunLifecycleUpdateRefusesATemplate pins Lifecycle.Update's template guard:
+// templates are read-only, so EVERY update naming one refuses with
+// *TemplateReadOnlyError — a field edit, a label edit, a claim, a status
+// crossing — whatever force flags ride along, and nothing is written. It is the
+// guard `bd update` used to apply as a CLI pre-read, which left bd serve and
+// library callers editing templates bd refused.
+//
+// The refusal is asserted at the level a caller acts on — the typed error, its
+// sentinel and the sentence bd prints, read off the typed error because a
+// served refusal wraps it — and the row is read back to prove nothing moved.
+// Two controls: the same patches land on an ordinary sibling, so the guard is
+// not refusing the patch shapes; and a stale ExpectedVersion on the template
+// still reports the mismatch, so the guard runs after the compare-and-set
+// preconditions like every other update fence.
+func RunLifecycleUpdateRefusesATemplate(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+	template := fixture.IssuePrefix + "-lut-template"
+	sibling := fixture.IssuePrefix + "-lut-sibling"
+	for _, issue := range []*types.Issue{
+		{ID: template, IsTemplate: true},
+		{ID: sibling},
+	} {
+		issue.Title, issue.Status, issue.Priority, issue.IssueType = issue.ID, types.StatusOpen, 2, types.TypeTask
+		if err := fixture.CreateIssue(ctx, issue, "seed"); err != nil {
+			t.Fatalf("seed %s: %v", issue.ID, err)
+		}
+	}
+	before, err := fixture.GetIssue(ctx, template)
+	if err != nil {
+		t.Fatalf("read seeded template %s: %v", template, err)
+	}
+
+	requests := []struct {
+		name    string
+		request publicops.UpdateRequest
+	}{
+		{name: "field edit", request: publicops.UpdateRequest{
+			Patch: publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: "edited"}},
+		}},
+		{name: "label edit", request: publicops.UpdateRequest{
+			Patch: publicops.IssuePatch{Labels: publicops.LabelPatch{Add: []string{"lut-tag"}}},
+		}},
+		{name: "claim", request: publicops.UpdateRequest{Claim: true}},
+		{name: "forced status crossing", request: publicops.UpdateRequest{
+			Patch:            publicops.IssuePatch{Status: publicops.Field[publicops.Status]{Set: true, Value: types.StatusClosed}},
+			ForceClosePolicy: true,
+		}},
+		{name: "forced assignee transfer", request: publicops.UpdateRequest{
+			Patch:                 publicops.IssuePatch{Assignee: publicops.Field[string]{Set: true, Value: "someone"}},
+			ForceAssigneeTransfer: true,
+		}},
+	}
+	for _, tc := range requests {
+		request := tc.request
+		request.Actor, request.IssueID = "writer", template
+		_, err := fixture.Lifecycle.Update(ctx, request)
+		var refusal *publicops.TemplateReadOnlyError
+		if !errors.As(err, &refusal) {
+			t.Fatalf("%s on template %s: err = %v, want *TemplateReadOnlyError", tc.name, template, err)
+		}
+		if refusal.IssueID != template || !errors.Is(err, publicops.ErrTemplateReadOnly) {
+			t.Errorf("%s refusal = %#v (%v), want IssueID %q matching ErrTemplateReadOnly", tc.name, refusal, err, template)
+		}
+		if want := "cannot modify template " + template + ": templates are read-only; use 'bd mol pour' to create a work item"; refusal.Error() != want {
+			t.Errorf("%s refusal reads %q, want %q", tc.name, refusal.Error(), want)
+		}
+		after, err := fixture.GetIssue(ctx, template)
+		if err != nil {
+			t.Fatalf("read template %s after the %s refusal: %v", template, tc.name, err)
+		}
+		if after.RowVersion != before.RowVersion || after.Title != before.Title || after.Status != before.Status ||
+			after.Assignee != before.Assignee || len(after.Labels) != len(before.Labels) {
+			t.Errorf("template %s after the %s refusal = %+v, want it unchanged from %+v", template, tc.name, after, before)
+		}
+
+		control := tc.request
+		control.Actor, control.IssueID = "writer", sibling
+		if _, err := fixture.Lifecycle.Update(ctx, control); err != nil {
+			t.Errorf("%s on the ordinary sibling %s: %v, want it to land", tc.name, sibling, err)
+		}
+	}
+
+	stale := before.RowVersion + 1
+	_, err = fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{
+		Actor: "writer", IssueID: template, ExpectedVersion: &stale,
+		Patch: publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: "edited"}},
+	})
+	if !errors.Is(err, publicops.ErrVersionMismatch) {
+		t.Errorf("stale-guarded update of template %s: err = %v, want ErrVersionMismatch ahead of the template guard", template, err)
+	}
+}
+
+// RunLifecycleUpdateAllowTemplateEditsATemplate pins the template guard's one
+// stand-down: an update with AllowTemplate — what bd label and bd set-state
+// send, since they have always edited templates — lands on a template, and
+// only that request is waived (the same patch without it still refuses).
+func RunLifecycleUpdateAllowTemplateEditsATemplate(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+	template := fixture.IssuePrefix + "-lua-template"
+	issue := &types.Issue{ID: template, Title: template, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, IsTemplate: true}
+	if err := fixture.CreateIssue(ctx, issue, "seed"); err != nil {
+		t.Fatalf("seed %s: %v", template, err)
+	}
+
+	result, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{
+		Actor: "writer", IssueID: template, AllowTemplate: true,
+		Patch: publicops.IssuePatch{Labels: publicops.LabelPatch{Add: []string{"lua-tag"}}},
+	})
+	if err != nil {
+		t.Fatalf("AllowTemplate label edit on template %s: %v, want it to land", template, err)
+	}
+	if !result.Changed || result.Issue == nil || !lifecycleUpdateHasLabel(result.Issue.Labels, "lua-tag") {
+		t.Errorf("AllowTemplate label edit on template %s = %+v, want a change carrying lua-tag", template, result)
+	}
+	after, err := fixture.GetIssue(ctx, template)
+	if err != nil {
+		t.Fatalf("read template %s: %v", template, err)
+	}
+	if !after.IsTemplate {
+		t.Errorf("template %s is no longer a template after an AllowTemplate edit", template)
+	}
+
+	_, err = fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{
+		Actor: "writer", IssueID: template,
+		Patch: publicops.IssuePatch{Labels: publicops.LabelPatch{Add: []string{"lua-other"}}},
+	})
+	if !errors.Is(err, publicops.ErrTemplateReadOnly) {
+		t.Errorf("the same edit without AllowTemplate: err = %v, want ErrTemplateReadOnly", err)
+	}
+}

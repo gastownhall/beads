@@ -420,11 +420,11 @@ func TestSpecDefaultsMatchSharedConstants(t *testing.T) {
 		}
 	}
 
-	// The id bound on the two request bodies that carry an `ids` list, for the
-	// anchor bound's reason: each is enforced in code — maxDeleteIDs in the
-	// delete handler, issueops.MaxGetManyIDs in the role behind batchGet — and
-	// restated as the member's maxItems, which is where a generated client
-	// learns it. Each body is reached through its operation's own $ref, so a
+	// The id bound on the three request bodies that carry an `ids` list, for
+	// the anchor bound's reason: each is enforced in code — maxDeleteIDs in the
+	// delete handler, issueops.MaxGetManyIDs in the role behind batchGet and
+	// issueops.MaxReclaimIDs in the role behind reclaim — and restated as the
+	// member's maxItems, which is where a generated client learns it. Each body is reached through its operation's own $ref, so a
 	// row cannot go on checking a schema its operation stopped using.
 	for _, tc := range []struct {
 		opID string
@@ -432,6 +432,7 @@ func TestSpecDefaultsMatchSharedConstants(t *testing.T) {
 	}{
 		{OpBatchGetIssues, issueops.MaxGetManyIDs},
 		{OpDeleteIssues, maxDeleteIDs},
+		{OpReclaimIssues, issueops.MaxReclaimIDs},
 	} {
 		so, ok := ops[tc.opID]
 		if !ok {

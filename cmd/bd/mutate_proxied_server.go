@@ -87,9 +87,8 @@ func proxiedAssign(ctx context.Context, id, assignee string, force bool, ifRevis
 		if rerr != nil {
 			return struct{}{}, fmt.Errorf("resolving %s: %w", id, rerr)
 		}
-		if verr := validateIssueUpdatable(id, current); verr != nil {
-			return struct{}{}, verr
-		}
+		// The template guard is the role's, enforced by the Lifecycle.Update
+		// below; runAssignProxiedServer prints its refusal as before.
 		// mc-zndi7.74: skipped when this pre-read is already stale against an
 		// active --if-revision guard, so a lost race reports precondition_failed
 		// from the guarded write below instead of this policy refusal — see
@@ -136,6 +135,9 @@ func runAssignProxiedServer(ctx context.Context, args []string, force bool, ifRe
 			if reported, ok := reportIfRevisionFailure("assigning", id, err, ifRevision); ok {
 				return reported
 			}
+		}
+		if refusal, ok := templateReadOnlyRefusal(id, err); ok {
+			err = refusal
 		}
 		return HandleErrorRespectJSON("assign %s: %v", id, err)
 	}
@@ -211,10 +213,10 @@ func runNoteProxiedServer(ctx context.Context, id, noteText string) error {
 // UpdateRequest.IssuePlaneOnly stays false, so the role resolves the plane
 // inside its own transaction and there is no boolean here to get backwards.
 //
-// The two reads it still makes are front-door work rather than plumbing.
-// issueops.Reader.Get supplies the issue the template guard needs — the roles
-// have no opinion about templates, and the direct route refuses one — and the
-// role takes an exact id by contract, which Get's issue-then-wisp lookup is.
+// The read it still makes is front-door work rather than plumbing: the role
+// takes an exact id by contract, and issueops.Reader.Get's issue-then-wisp
+// lookup supplies one. The template guard is the role's: Lifecycle.Update
+// refuses a template inside its own transaction.
 // The label arrives already normalized: tag.go does that before choosing a
 // route, so this path and the direct one cannot disagree about what was stored.
 func runTagProxiedServer(ctx context.Context, id, label string) error {
@@ -229,9 +231,8 @@ func runTagProxiedServer(ctx context.Context, id, label string) error {
 	if err != nil {
 		return HandleErrorRespectJSON("tag %s: resolving %s: %v", id, id, err)
 	}
-	if verr := validateIssueUpdatable(id, &details.Issue); verr != nil {
-		return HandleErrorRespectJSON("tag %s: %v", id, verr)
-	}
+	// The template guard is the role's, enforced by the Lifecycle.Update
+	// below, whose refusal prints as this route always printed it.
 
 	lifecycle, err := openIssueLifecycle()
 	if err != nil {
@@ -250,6 +251,9 @@ func runTagProxiedServer(ctx context.Context, id, label string) error {
 		Patch:   issueops.IssuePatch{Labels: issueops.LabelPatch{Add: []string{label}}},
 	})
 	if err != nil {
+		if refusal, ok := templateReadOnlyRefusal(id, err); ok {
+			err = refusal
+		}
 		return HandleErrorRespectJSON("tag %s: %v", id, err)
 	}
 	commandDidWrite.Store(true)

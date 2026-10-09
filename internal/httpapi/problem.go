@@ -136,11 +136,15 @@ const (
 	// notes and the patched ones), not about a foreign actor's identity a
 	// client might need to display.
 	CodeNotesOverwrite Code = "notes_overwrite_refused"
-	// CodeTemplateReadOnly is a mutation that names a template. Templates are
-	// read-only — work comes out of one by pouring it, which creates new issues
-	// — so there is no bypass member: the same request refuses for as long as
-	// the row is a template. A 409 for CodeNotClosable's reason: the body is
-	// well-formed and the STATE of the named row refuses it.
+	// CodeTemplateReadOnly is a guarded mutation that names a template;
+	// operationCodes lists the operations that answer it, and not every verb
+	// guards templates yet (bd-jkp9v3). Templates are read-only — work comes
+	// out of one by pouring it, which creates new issues — so no force flag
+	// waives it: the same request refuses for as long as the row is a
+	// template. The one stand-down is updateIssue's `allow_template`, a
+	// deliberate template edit (bd label, bd set-state).
+	// A 409 for CodeNotClosable's reason: the body is well-formed and the
+	// STATE of the named row refuses it.
 	CodeTemplateReadOnly Code = "template_read_only"
 	// CodeIssuePinned is an unforced close of a pinned issue, by either of the
 	// two spellings bd pins with (the `pinned` flag or the `pinned` status).
@@ -492,6 +496,12 @@ const (
 	// answer EdgeCountRequest.IDs and EdgeReadRequest already give, applied to
 	// the issues themselves rather than their edges.
 	OpBatchGetIssues = "batchGetIssues"
+	// OpReclaimIssues reverts every stale lease a request scopes back to ready,
+	// behind issueops.LeaseReclaimer. It is NOT releaseIssue repeated: that
+	// operation gives up ONE claim on the holder's say-so and refuses an unheld
+	// row, and this one sweeps MANY leases on a clock's say-so and reports an id
+	// that was not a stale lease by leaving it out of `reclaimed`.
+	OpReclaimIssues = "reclaimIssues"
 	// OpListRelatedIssues reads ONE issue's neighbors in a named direction,
 	// behind issueops.Relations. It is NOT listDependencies narrowed to one
 	// anchor: that operation answers the stored edge ROWS with their targets
@@ -746,6 +756,11 @@ var operationCodes = map[string][]Code{
 	// `ids` (*issueops.TooManyIDsError) and a blank entry. An empty `ids` is
 	// legal and answers with an empty result, so it earns no refusal at all.
 	OpBatchGetIssues: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// No not_found and no conflict: an id that is not a stale lease is left out
+	// of `reclaimed` rather than refused, and the sweep guards nothing a caller
+	// named a version of. Its only 400s are the role's own refusals and the
+	// handler's shape checks.
+	OpReclaimIssues: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The same vocabulary as the stored-edge read beside it, and no not_found
 	// for a stronger version of the same reason: this operation probes no id's
 	// existence at all, so there is nothing it could 404 on.
@@ -918,9 +933,14 @@ var operationCodes = map[string][]Code{
 	//
 	// not_claimable arrived with `claim`, beside the already_claimed it shares
 	// with the fence: a refused claim answers as claimIssue does.
+	//
+	// template_read_only is the role refusing an update of a template:
+	// templates are read-only, no force flag waives it, and only
+	// `allow_template` stands it down.
 	OpUpdateIssue: {
 		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound,
 		CodePreconditionFailed, CodeNotClosable, CodeAlreadyClaimed, CodeNotesOverwrite,
+		CodeTemplateReadOnly,
 		CodeNotClaimable, CodeDependencyCycle, CodeDependencyExists,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
@@ -1566,9 +1586,10 @@ func ClassifyError(err error) Result {
 	case errors.Is(err, issueops.ErrCloseBlocked):
 		return closeBlockedResult(err, "issue is blocked", "clear the blocker or close with force")
 
-	// The close guards. Each detail is this server's own words rather than the
-	// role's message, for the reason Problem.detail gives; the typed members
-	// are what a client reconstructs the refusal from.
+	// The close guards; the first, template read-only, is every update's guard
+	// too. Each detail is this server's own words rather than the role's
+	// message, for the reason Problem.detail gives; the typed members are what
+	// a client reconstructs the refusal from.
 	case errors.Is(err, issueops.ErrTemplateReadOnly):
 		return newResult(CodeTemplateReadOnly, "this issue is a template, and templates are read-only; pour it to create work")
 

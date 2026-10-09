@@ -20,6 +20,7 @@ go_library(
         "issue_claimer.go",
         "issue_operations.go",
         "issue_reader.go",
+        "lease_reclaimer.go",
         "memories.go",
         "metadata_cas.go",
         "querier.go",

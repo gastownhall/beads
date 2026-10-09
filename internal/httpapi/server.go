@@ -287,6 +287,12 @@ type Config struct {
 	// rather than refusing the call. Required on the same terms as every field
 	// here.
 	BatchGetter issueops.BatchGetter
+	// LeaseReclaimer is the stale-lease sweep behind
+	// POST /v0/beads/issues:reclaim. It is a SEPARATE field from Releaser for
+	// the reason issueops.LeaseReclaimer's own doc gives: Releaser gives up ONE
+	// claim on its holder's say-so, and this reverts MANY on a clock's.
+	// Required on the same terms as every field here.
+	LeaseReclaimer issueops.LeaseReclaimer
 	// Relations is the single-anchor neighbor read behind
 	// GET /v0/beads/issues/{id}/related. It is a SEPARATE field from EdgeReader
 	// for the reason issueops.EdgeReader's own doc gives at length: that role
@@ -423,6 +429,7 @@ type Server struct {
 	issueEdges        issueops.EdgeReader
 	issueEdgeCounter  issueops.GraphCounter
 	issueBatchGetter  issueops.BatchGetter
+	issueReclaimer    issueops.LeaseReclaimer
 	issueRelations    issueops.Relations
 	issueCommenter    issueops.Commenter
 	issueBlocking     issueops.BlockingAnnotator
@@ -635,6 +642,7 @@ func Listen(cfg Config) (*Server, error) {
 		issueEdges:        cfg.EdgeReader,
 		issueEdgeCounter:  cfg.GraphCounter,
 		issueBatchGetter:  cfg.BatchGetter,
+		issueReclaimer:    cfg.LeaseReclaimer,
 		issueRelations:    cfg.Relations,
 		issueCommenter:    cfg.Commenter,
 		issueBlocking:     cfg.BlockingAnnotator,
@@ -757,12 +765,12 @@ func Listen(cfg Config) (*Server, error) {
 // "all or nothing" would turn an honest condition into a special case inside
 // three functions. It is checked once, on its own, below.
 func sourceRoles(cfg Config) []any {
-	return []any{cfg.Reader, cfg.Claimer, cfg.ReadyClaimer, cfg.Releaser, cfg.Lifecycle, cfg.BatchCloser, cfg.Settings, cfg.Stats, cfg.CycleDetector, cfg.EdgeReader, cfg.GraphCounter, cfg.BatchGetter, cfg.Relations, cfg.Commenter, cfg.BlockingAnnotator, cfg.TreeWalker, cfg.ReadyCounter, cfg.Counter, cfg.Querier, cfg.Sweeper, cfg.Deleter, cfg.BatchCreator, cfg.DependencyEditor, cfg.BatchApplier, cfg.Memories, cfg.MetadataCAS}
+	return []any{cfg.Reader, cfg.Claimer, cfg.ReadyClaimer, cfg.Releaser, cfg.Lifecycle, cfg.BatchCloser, cfg.Settings, cfg.Stats, cfg.CycleDetector, cfg.EdgeReader, cfg.GraphCounter, cfg.BatchGetter, cfg.LeaseReclaimer, cfg.Relations, cfg.Commenter, cfg.BlockingAnnotator, cfg.TreeWalker, cfg.ReadyCounter, cfg.Counter, cfg.Querier, cfg.Sweeper, cfg.Deleter, cfg.BatchCreator, cfg.DependencyEditor, cfg.BatchApplier, cfg.Memories, cfg.MetadataCAS}
 }
 
 // roleSourceNames spells sourceRoles for the refusal message, in the same
 // order, so a caller reading the error learns the whole set it must pass.
-const roleSourceNames = "Reader, Claimer, ReadyClaimer, Releaser, Lifecycle, BatchCloser, Settings, Stats, CycleDetector, EdgeReader, GraphCounter, BatchGetter, Relations, Commenter, BlockingAnnotator, TreeWalker, ReadyCounter, Counter, Querier, Sweeper, Deleter, BatchCreator, DependencyEditor, BatchApplier, Memories and MetadataCAS"
+const roleSourceNames = "Reader, Claimer, ReadyClaimer, Releaser, Lifecycle, BatchCloser, Settings, Stats, CycleDetector, EdgeReader, GraphCounter, BatchGetter, LeaseReclaimer, Relations, Commenter, BlockingAnnotator, TreeWalker, ReadyCounter, Counter, Querier, Sweeper, Deleter, BatchCreator, DependencyEditor, BatchApplier, Memories and MetadataCAS"
 
 func anyRoleSet(cfg Config) bool {
 	return slices.ContainsFunc(sourceRoles(cfg), func(r any) bool { return r != nil })
@@ -1149,6 +1157,19 @@ func (s *Server) batchGetter(r *http.Request) (issueops.BatchGetter, error) {
 	}
 	var src uow.BatchGetterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
 	return src.BatchGetter()
+}
+
+// leaseReclaimer returns the stale-lease sweep surface for one request, on the
+// same terms as every role above and held by INTERFACE so
+// uow.LeaseReclaimerSource is load-bearing rather than decorative. It goes out
+// unwrapped for the sweeper's reason: ReclaimResult is a VALUE whose slice a
+// nil-safe range walks.
+func (s *Server) leaseReclaimer(r *http.Request) (issueops.LeaseReclaimer, error) {
+	if s.provider == nil {
+		return s.issueReclaimer, nil
+	}
+	var src uow.LeaseReclaimerSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.LeaseReclaimer()
 }
 
 // relations returns the single-anchor neighbor surface for one request, built

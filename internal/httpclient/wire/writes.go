@@ -228,7 +228,7 @@ type updateBody struct {
 	Actor string         `json:"actor"`
 	Patch map[string]any `json:"patch"`
 	UpdateGuards
-	// The four UpdateFlags, each sent only when true (setItemBool's
+	// The five UpdateFlags, each sent only when true (setItemBool's
 	// convention: an explicit false is the default said twice). Absent is
 	// what an older server that predates a member reads correctly, which is
 	// what lets a request that sets none of them reach a server that knows
@@ -237,15 +237,16 @@ type updateBody struct {
 	ForceAssigneeTransfer *bool `json:"force_assignee_transfer,omitempty"`
 	ForceClosePolicy      *bool `json:"force_close_policy,omitempty"`
 	ForceNotesOverwrite   *bool `json:"force_notes_overwrite,omitempty"`
+	AllowTemplate         *bool `json:"allow_template,omitempty"`
 }
 
-// UpdateFlags are updateIssue's four top-level booleans: the claim, and the
-// three force overrides. UpdateIssueRequest publishes all four
-// (internal/httpapi/apigen's generated type) and none is a GUARD — none carries
-// a comparison value, unlike every member UpdateGuards holds — so they travel
-// as their own struct rather than joining that one.
+// UpdateFlags are updateIssue's five top-level booleans: the claim, the three
+// force overrides and the template stand-down. UpdateIssueRequest publishes all
+// five (internal/httpapi/apigen's generated type) and none is a GUARD — none
+// carries a comparison value, unlike every member UpdateGuards holds — so they
+// travel as their own struct rather than joining that one.
 //
-// It is a struct rather than four arguments for UpdateGuards' reason: four
+// It is a struct rather than five arguments for UpdateGuards' reason: five
 // positional booleans side by side are the shape a caller transposes, and a
 // transposed force flag is a bypass nobody asked for.
 type UpdateFlags struct {
@@ -268,6 +269,9 @@ type UpdateFlags struct {
 	// replace existing non-empty notes with different non-empty content. The
 	// server requires patch.notes beside it.
 	ForceNotesOverwrite bool
+	// AllowTemplate stands the template read-only refusal down for this
+	// request (bd label, bd set-state edit templates by design).
+	AllowTemplate bool
 }
 
 // UpdateIssue patches one issue. It is the only PATCH on this surface: the
@@ -291,6 +295,7 @@ func (c *Client) UpdateIssue(ctx context.Context, id, actor string, patch map[st
 		ForceAssigneeTransfer: trueOrAbsent(flags.ForceAssigneeTransfer),
 		ForceClosePolicy:      trueOrAbsent(flags.ForceClosePolicy),
 		ForceNotesOverwrite:   trueOrAbsent(flags.ForceNotesOverwrite),
+		AllowTemplate:         trueOrAbsent(flags.AllowTemplate),
 	}
 	r := Request{Op: OpUpdateIssue, Method: http.MethodPatch, Path: path, Body: body, IssueID: id}
 	if err := c.dispatch(ctx, r, &out); err != nil {

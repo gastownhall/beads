@@ -346,6 +346,7 @@
 50 24 TestEmbeddedCloseBasic
 50 24 TestEmbeddedImportUpsertAndPrefixSync
 50 24 TestEmbeddedQuery
+50 24 TestEmbeddedReclaimRunsTheLeaseReclaimerRole
 50 24 TestEmbeddedUpdateRoutedStoreCommitsTargetHead
 
 50 25 TestEmbeddedBackupConcurrent

@@ -58,6 +58,8 @@ var roleContractCases = []roleContract{
 		RunBatchApplyReplayMintsANewSetOfRows,
 		RunBatchApplyDoesNotMutateTheCallerRequest,
 		RunBatchApplyRefusesAnUnusableRequest,
+		RunBatchApplyUpdateItemsRefuseATemplate,
+		RunBatchApplySplicesTheMetadataOfATemplateItCreates,
 		RunBatchApplyCloseItemsAnswerToTheCloseGuards,
 	),
 
@@ -482,6 +484,8 @@ var roleContractCases = []roleContract{
 		RunLifecycleUpdateParentIDReplacesEveryParent,
 		RunLifecycleUpdatePersistentPreservesUnversionedClass,
 		RunLifecycleUpdateProvenanceLabelsHistory,
+		RunLifecycleUpdateRefusesATemplate,
+		RunLifecycleUpdateAllowTemplateEditsATemplate,
 	),
 
 	roleCases("Memories", "Memories()", oncePerRole,

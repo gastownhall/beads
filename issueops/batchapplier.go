@@ -104,7 +104,9 @@ type CreateItem struct {
 
 // UpdateItem patches one existing issue, under UpdateRequest's rules.
 type UpdateItem struct {
-	// Target names the issue to patch and must resolve BACKWARD — see Ref.
+	// Target names the issue to patch and must resolve BACKWARD — see Ref. A
+	// template target refuses with *TemplateReadOnlyError, exactly as
+	// Lifecycle.Update does: templates are read-only.
 	Target Ref
 	// Patch is the edit, read exactly as UpdateRequest.Patch is — including
 	// that Patch.Labels is the whole LabelPatch, so a label REMOVAL is

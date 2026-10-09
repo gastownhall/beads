@@ -162,6 +162,34 @@ func (g *roleBatchGetter) getManyRequests() []issueops.GetManyRequest {
 	return append([]issueops.GetManyRequest(nil), g.calls...)
 }
 
+// roleLeaseReclaimer is the stale-lease sweep of the store-shaped source, its
+// own fake beside roleReleaser for roleBatchGetter's reason: a separate role on
+// a separate accessor, so one fake answering both would let a test pass on a
+// server that had wired the reclaim handler to the wrong role.
+type roleLeaseReclaimer struct {
+	result issueops.ReclaimResult
+	err    error
+
+	mu    sync.Mutex
+	calls []issueops.ReclaimRequest
+}
+
+func (l *roleLeaseReclaimer) Reclaim(_ context.Context, req issueops.ReclaimRequest) (issueops.ReclaimResult, error) {
+	l.mu.Lock()
+	l.calls = append(l.calls, req)
+	l.mu.Unlock()
+	if l.err != nil {
+		return issueops.ReclaimResult{}, l.err
+	}
+	return l.result, nil
+}
+
+func (l *roleLeaseReclaimer) reclaimRequests() []issueops.ReclaimRequest {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]issueops.ReclaimRequest(nil), l.calls...)
+}
+
 // roleRelations is the single-anchor NEIGHBOR role of the store-shaped source,
 // its own fake beside roleEdgeReader for roleGraphCounter's reason: the two sit
 // on adjacent accessors and answer about the same edges, so one fake serving
@@ -959,6 +987,9 @@ func rolesConfig(cfg Config) Config {
 	}
 	if cfg.BatchGetter == nil {
 		cfg.BatchGetter = &roleBatchGetter{}
+	}
+	if cfg.LeaseReclaimer == nil {
+		cfg.LeaseReclaimer = &roleLeaseReclaimer{}
 	}
 	if cfg.Relations == nil {
 		cfg.Relations = &roleRelations{}

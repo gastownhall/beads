@@ -255,6 +255,16 @@ func TestBatchApplyContract(t *testing.T) {
 		defer cancel()
 		conformance.RunBatchApplyRefusesAnUnusableRequest(t, ctx, fixture)
 	})
+	t.Run("UpdateItemsRefuseATemplate", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyUpdateItemsRefuseATemplate(t, ctx, fixture)
+	})
+	t.Run("SplicesTheMetadataOfATemplateItCreates", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplySplicesTheMetadataOfATemplateItCreates(t, ctx, fixture)
+	})
 	t.Run("CloseItemsAnswerToTheCloseGuards", func(t *testing.T) {
 		ctx, cancel := testContext(t)
 		defer cancel()

@@ -136,6 +136,15 @@ func skippedDependencyError(skipped []skippedDependency) error {
 
 // ExecuteUpdate applies a guarded update in tx and reports durable tables changed.
 func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequest) (publicops.UpdateResult, ChangedTables, error) {
+	return executeUpdate(ctx, tx, request, true)
+}
+
+// executeUpdate is ExecuteUpdate with the template guard made optional, for the
+// one caller that is not an update of an existing row: the batch apply's
+// metadata splice, which finishes a CREATE item of the same request — a
+// template the request itself is creating is still being written, not
+// modified.
+func executeUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequest, guardTemplate bool) (publicops.UpdateResult, ChangedTables, error) {
 	attempt := CloneUpdateRequest(request)
 	if attempt.Actor == "" || attempt.IssueID == "" {
 		return publicops.UpdateResult{}, nil, fmt.Errorf("%w: update requires actor and issue ID", storage.ErrValidation)
@@ -170,6 +179,11 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 		}
 	} else if err := CheckExpectedFieldsInTx(ctx, tx, attempt.IssueID, attempt.ExpectedAssignee, nil); err != nil {
 		return publicops.UpdateResult{}, nil, err
+	}
+	if guardTemplate {
+		if err := AuthorizeTemplateUpdate(before, attempt); err != nil {
+			return publicops.UpdateResult{}, nil, err
+		}
 	}
 	if err := AuthorizeAssigneeTransfer(ctx, tx, before, attempt); err != nil {
 		return publicops.UpdateResult{}, nil, err

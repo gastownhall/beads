@@ -434,6 +434,7 @@
 20 15 TestExpectedRevisionContract
 20 15 TestLargeBatchApplyStatementCounts356_Embedded
 20 15 TestLargeGraphCreateTiming_Embedded
+20 15 TestLeaseReclaimerContract
 20 15 TestReadyWorkPageTotalFilterMatrix
 20 15 TestReclaimExpiredLeaseSurvivesRestartEmbedded
 20 15 TestRemoteEntryPointsUseVersionControlOps

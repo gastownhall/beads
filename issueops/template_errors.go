@@ -5,10 +5,14 @@ import (
 	"fmt"
 )
 
-// ErrTemplateReadOnly is returned when a mutation names a template. Templates
-// are read-only: the way to get work out of one is to pour it (`bd mol pour`),
-// which creates new issues and leaves the template untouched. There is no
-// bypass — no Force flag on any request waives it.
+// ErrTemplateReadOnly is returned when a mutation that guards templates names
+// one. Every update does (Lifecycle.Update, a BatchApplier update item), and so
+// does every close (Lifecycle.Close, BatchCloser, a BatchApplier close item);
+// not every verb does yet (bd-jkp9v3). Templates are read-only: the way to get
+// work out of one is to pour it (`bd mol pour`), which creates new issues and
+// leaves the template untouched. There is no force bypass — no Force flag
+// waives it; only an update that sets UpdateRequest.AllowTemplate (bd label,
+// bd set-state) is let through.
 var ErrTemplateReadOnly = errors.New("templates are read-only")
 
 // TemplateReadOnlyError reports the template a mutation was refused for. Its

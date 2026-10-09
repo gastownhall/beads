@@ -102,6 +102,11 @@ var opCapability = map[string]string{
 	// the block above states: the server publishes it ahead of the accessor
 	// that dials it, and the set-equality gate needs its token here first.
 	OpBatchGetIssues: "issues.batchGet",
+	// The stale-lease sweep, dialed by httpLeaseReclaimer. A server that
+	// predates it does not advertise the token, so Preflight refuses locally
+	// with a typed capability error instead of dialing a path the older server
+	// would answer as a claim of an issue called ":reclaim".
+	OpReclaimIssues: "issues.reclaim",
 }
 
 // CapProjectEnforce is the behavior capability the server advertises to announce
@@ -203,6 +208,18 @@ const CapSweepLimit = "issues.sweep.limit"
 // capability error rather than silently dropping graph lineage a caller
 // asked to carry against an older server.
 const CapBatchApplyDepAddLineage = "issues.batchApply.depAddLineage"
+
+// CapIssuesUpdateAllowTemplate is the behavior capability announcing that
+// updateIssue enforces the template read-only guard and accepts
+// `allow_template` to stand it down, spelled exactly as httpapi's constant of
+// the same name. Lifecycle.Update reads it from the cached handshake before
+// the dial (applyTemplateGuardForServer): against a server without it, which
+// predates the guard, the client refuses a template update itself on a
+// pre-read and never sends `allow_template`. BatchApplier does not read it:
+// an applyBatch `update` item gets no client-side check (its target resolves
+// on the server), so through an older server it still edits a template
+// (bd-jkp9v3).
+const CapIssuesUpdateAllowTemplate = "issues.update.allowTemplate"
 
 // CapExternalDependencies is the CONDITIONAL behavior capability announcing
 // that the ready, claim and close operations of this server apply bd's
@@ -344,7 +361,7 @@ func (e *WireRevisionSkewError) Unwrap() error { return ErrWireRevisionSkew }
 var behaviorCapabilities = []string{
 	CapProjectEnforce, CapBatchApplyLarge, CapListSort, CapCountScope,
 	CapSweepWispsPlane, CapSweepLiveDependents, CapSweepLimit,
-	CapBatchApplyDepAddLineage,
+	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate,
 }
 
 // CapabilityFor reports the capability token gating op, and whether op is on

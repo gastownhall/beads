@@ -383,7 +383,13 @@ func (s *stubWire) ListReadyWork(_ context.Context, _ url.Values) (*apigen.Ready
 
 func stubStore(t *testing.T, w *stubWire) *Store {
 	t.Helper()
-	return New(testTarget(t), w, &apigen.ContextResponse{BdVersion: "1.2.3"})
+	// A current server: it advertises issues.update.allowTemplate, so
+	// Lifecycle.Update leaves the template guard to it and pre-reads nothing.
+	// TestUpdateTemplateGuardAgainstAServerThatPredatesIt covers the older one.
+	return New(testTarget(t), w, &apigen.ContextResponse{
+		BdVersion:    "1.2.3",
+		Capabilities: []string{wire.CapIssuesUpdateAllowTemplate},
+	})
 }
 
 func set[T any](v T) issueops.Field[T] { return issueops.Field[T]{Set: true, Value: v} }
@@ -950,6 +956,12 @@ func TestUpdateSendsEachFlagOnlyWhenRequested(t *testing.T) {
 			},
 			want:      wire.UpdateFlags{ForceClosePolicy: true},
 			wantPatch: map[string]any{"status": string(issueops.StatusClosed)},
+		},
+		{
+			name:      "allow template",
+			req:       issueops.UpdateRequest{Patch: notes, AllowTemplate: true},
+			want:      wire.UpdateFlags{AllowTemplate: true},
+			wantPatch: map[string]any{"notes": "replacement notes"},
 		},
 		{
 			name:      "a claim alone sends the empty patch",
@@ -1810,5 +1822,91 @@ func TestWriteAccessorsRefuseWithoutATransport(t *testing.T) {
 	}
 	if err := s.CloseIssue(t.Context(), "bd-1", "", "w", ""); !errors.Is(err, ErrNoTransport) {
 		t.Errorf("CloseIssue without a transport = %v, want ErrNoTransport", err)
+	}
+}
+
+// templateServerWire is a stubWire whose generic read half answers getIssue
+// with row (nil: not found), recording the read in the same call log as the
+// writes, so a test can see whether a pre-read ran and whether it ran BEFORE
+// updateIssue — or instead of it.
+type templateServerWire struct {
+	*stubWire
+	row *types.Issue
+}
+
+func (w *templateServerWire) Preflight(context.Context, string) error { return nil }
+
+func (w *templateServerWire) Do(_ context.Context, req wire.Request, out any) error {
+	if req.Op != wire.OpGetIssue {
+		return fmt.Errorf("templateServerWire: unexpected generic dispatch %q", req.Op)
+	}
+	w.calls = append(w.calls, "getIssue:"+req.IssueID)
+	if w.row == nil {
+		return fmt.Errorf("no issue %s: %w", req.IssueID, issueops.ErrNotFound)
+	}
+	*out.(*types.IssueDetails) = types.IssueDetails{Issue: *w.row, Revision: "1"}
+	return nil
+}
+
+// TestUpdateTemplateGuardAgainstAServerThatPredatesIt is a NEW client against an
+// OLD server: a handshake without issues.update.allowTemplate is a server that
+// applies no template guard and refuses `allow_template` as unknown. The client
+// decides from the cached handshake, before the dial: it refuses a template
+// update itself on a pre-read (the refusal bd update always made), never sends
+// `allow_template` to it, and against a server that DOES advertise the token
+// it neither pre-reads nor drops the member.
+func TestUpdateTemplateGuardAgainstAServerThatPredatesIt(t *testing.T) {
+	template := &types.Issue{ID: "bd-1", Title: "tmpl", IsTemplate: true}
+	plain := &types.Issue{ID: "bd-1", Title: "work"}
+	for _, tc := range []struct {
+		name        string
+		guarded     bool // the handshake advertises the token
+		row         *types.Issue
+		allow       bool
+		wantCalls   []string
+		wantRefused bool
+		wantFlag    bool
+	}{
+		{name: "old server: a template update is refused before the dial", row: template,
+			wantCalls: []string{"getIssue:bd-1"}, wantRefused: true},
+		{name: "old server: a plain row goes out after the pre-read", row: plain,
+			wantCalls: []string{"getIssue:bd-1", "updateIssue:bd-1"}},
+		{name: "old server: a row the pre-read cannot find goes out for the server to answer", row: nil,
+			wantCalls: []string{"getIssue:bd-1", "updateIssue:bd-1"}},
+		{name: "old server: allow_template is not sent and no pre-read runs", row: template, allow: true,
+			wantCalls: []string{"updateIssue:bd-1"}},
+		{name: "guarded server: no pre-read, the server owns the refusal", guarded: true, row: template,
+			wantCalls: []string{"updateIssue:bd-1"}},
+		{name: "guarded server: allow_template rides the wire", guarded: true, row: template, allow: true,
+			wantCalls: []string{"updateIssue:bd-1"}, wantFlag: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &templateServerWire{stubWire: &stubWire{update: &apigen.UpdateIssueResponse{Revision: "3"}}, row: tc.row}
+			snap := &apigen.ContextResponse{BdVersion: "1.2.3"}
+			if tc.guarded {
+				snap.Capabilities = []string{wire.CapIssuesUpdateAllowTemplate}
+			}
+			lifecycle, err := New(testTarget(t), w, snap).IssueLifecycle()
+			if err != nil {
+				t.Fatalf("IssueLifecycle(): %v", err)
+			}
+			_, err = lifecycle.Update(t.Context(), issueops.UpdateRequest{
+				Actor: "writer", IssueID: "bd-1", AllowTemplate: tc.allow,
+				Patch: issueops.IssuePatch{Title: set("t")},
+			})
+			var refusal *issueops.TemplateReadOnlyError
+			if got := errors.As(err, &refusal); got != tc.wantRefused {
+				t.Fatalf("Update err = %v, want a TemplateReadOnlyError: %v", err, tc.wantRefused)
+			}
+			if !tc.wantRefused && err != nil {
+				t.Fatalf("Update: %v", err)
+			}
+			if !reflect.DeepEqual(w.calls, tc.wantCalls) {
+				t.Errorf("calls = %v, want %v", w.calls, tc.wantCalls)
+			}
+			if !tc.wantRefused && w.lastFlags.AllowTemplate != tc.wantFlag {
+				t.Errorf("sent allow_template = %v, want %v", w.lastFlags.AllowTemplate, tc.wantFlag)
+			}
+		})
 	}
 }

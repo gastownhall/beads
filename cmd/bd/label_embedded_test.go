@@ -7,9 +7,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // bdLabel runs "bd label" with the given args and returns stdout.
@@ -97,6 +101,28 @@ func bdLabelListAllJSON(t *testing.T, bd, dir string) []map[string]interface{} {
 		t.Fatalf("parse label list-all JSON: %v\nstdout: %s", err, s)
 	}
 	return results
+}
+
+// markIssueTemplate makes an existing issue a template (is_template = 1) with
+// raw SQL and commits it, so a test can put a template in front of the CLI
+// without cooking a formula.
+func markIssueTemplate(t *testing.T, beadsDir, database, issueID string) {
+	t.Helper()
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer cleanup()
+	res, err := db.ExecContext(t.Context(), "UPDATE issues SET is_template = 1 WHERE id = ?", issueID)
+	if err != nil {
+		t.Fatalf("mark %s a template: %v", issueID, err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		t.Fatalf("mark %s a template: %d rows affected (err %v), want 1", issueID, n, err)
+	}
+	if _, err := db.ExecContext(t.Context(), "CALL DOLT_COMMIT('-Am', 'test: mark a template')"); err != nil {
+		t.Fatalf("commit the template mark: %v", err)
+	}
 }
 
 // TestEmbeddedLabelAddRemove was split from TestEmbeddedLabel (originally
@@ -361,7 +387,7 @@ func TestEmbeddedLabelEditReports(t *testing.T) {
 	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
-	dir, _, _ := bdInit(t, bd, "--prefix", "tl")
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tl")
 
 	// Two issues carrying DIFFERENT matching sets: the report is per issue and
 	// each issue's set is resolved from its own labels, so a refactor that
@@ -612,6 +638,50 @@ func TestEmbeddedLabelEditReports(t *testing.T) {
 			if _, ok := r["count"]; !ok {
 				t.Error("expected 'count' key in list-all result")
 			}
+		}
+	})
+
+	// A template is read-only to an update — issueops.Lifecycle.Update refuses
+	// it on every route — but bd label and bd set-state edit templates by
+	// design: they set UpdateRequest.AllowTemplate. One template pins both
+	// sides end to end. The stand-down verbs are checked with t.Errorf rather
+	// than a fatal helper, so a lost AllowTemplate names every verb that lost
+	// it.
+	t.Run("template_label_edits_pass_update_and_assign_refuse", func(t *testing.T) {
+		tpl := bdCreate(t, bd, dir, "Template under edit", "--type", "task",
+			"--label", "pool:refused:reason-a")
+		markIssueTemplate(t, beadsDir, "tl", tpl.ID)
+
+		for _, args := range [][]string{
+			{"label", "add", tpl.ID, "tpl-added"},
+			{"label", "remove", tpl.ID, "--prefix", "pool:refused:"},
+			{"set-state", tpl.ID, "phase=planning"},
+		} {
+			cmd := exec.Command(bd, args...)
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Errorf("bd %s on a template: %v\n%s", strings.Join(args, " "), err, out)
+			}
+		}
+		labels := bdLabelListJSON(t, bd, dir, tpl.ID)
+		slices.Sort(labels)
+		if want := []string{"phase:planning", "tpl-added"}; !slices.Equal(labels, want) {
+			t.Errorf("template labels after label add, label remove --prefix and set-state = %v, want %v", labels, want)
+		}
+
+		want := "cannot modify template " + tpl.ID + ": templates are read-only; use 'bd mol pour' to create a work item"
+		for _, args := range [][]string{
+			{"update", tpl.ID, "--title", "Edited template"},
+			{"assign", tpl.ID, "someone-else"},
+		} {
+			if out, code := bdRunFailCode(t, bd, dir, args...); code != 1 || !strings.Contains(out, want) {
+				t.Errorf("bd %s on a template: exit %d, output:\n%s\nwant exit 1 and %q", strings.Join(args, " "), code, out, want)
+			}
+		}
+		if got := bdShow(t, bd, dir, tpl.ID); got.Title != "Template under edit" || got.Assignee != "" || !got.IsTemplate {
+			t.Errorf("the refused update and assign changed the template: title=%q assignee=%q is_template=%v",
+				got.Title, got.Assignee, got.IsTemplate)
 		}
 	})
 }

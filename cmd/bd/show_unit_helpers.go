@@ -11,6 +11,13 @@ import (
 )
 
 // validateIssueUpdatable checks if an issue can be updated.
+//
+// It is the CLI-only template guard that bd comment, bd note, bd priority and
+// bd tag (and the proxied comment and mutate routes) still run as a pre-read:
+// their writes do not go through issueops.Lifecycle.Update, whose role rule
+// (storage issueops.AuthorizeTemplateUpdate) guards bd update and bd assign on
+// every route. Until those commands move onto the role, this is their only
+// guard.
 // Uses the centralized validation package for consistency.
 func validateIssueUpdatable(id string, issue *types.Issue) error {
 	// Note: We use NotTemplate() directly instead of ForUpdate() to maintain

@@ -481,11 +481,13 @@ func (r *applyBatchRun) spliceMetadataRefs(ctx context.Context, tx *sql.Tx) erro
 			return err
 		}
 		id := r.result.Items[index].IssueID
-		updated, tables, err := ExecuteUpdate(ctx, tx, publicops.UpdateRequest{
+		// Unguarded for templates: the splice finishes this request's own
+		// create, so a template it creates is not being modified.
+		updated, tables, err := executeUpdate(ctx, tx, publicops.UpdateRequest{
 			Actor:   r.plan.Actor,
 			IssueID: id,
 			Patch:   publicops.IssuePatch{Metadata: publicops.MetadataPatch{Set: set}},
-		})
+		}, false)
 		if err != nil {
 			return &publicops.ItemError{
 				Index: index, Kind: publicops.ItemCreate, Key: item.Create.Key, IssueID: id, Err: err,

@@ -310,7 +310,7 @@ func (r *uowApplyRun) applyUpdate(ctx context.Context, index int, item *publicop
 	if err := validateUpdateRequest(request); err != nil {
 		return itemErr(err)
 	}
-	updated, err := r.runUpdate(ctx, request)
+	updated, err := r.runUpdate(ctx, request, true)
 	if err != nil {
 		return itemErr(err)
 	}
@@ -332,7 +332,10 @@ func (r *uowApplyRun) applyUpdate(ctx context.Context, index int, item *publicop
 // change. ga-v2k49 is a concrete instance of that drift: claimChanged's actor
 // comparison here and there diverged (one verbatim, one not) until both were
 // found and fixed independently.
-func (r *uowApplyRun) runUpdate(ctx context.Context, request publicops.UpdateRequest) (publicops.UpdateResult, error) {
+//
+// guardTemplate is false only for the metadata splice, which finishes a create
+// item of this request rather than modifying an existing row.
+func (r *uowApplyRun) runUpdate(ctx context.Context, request publicops.UpdateRequest, guardTemplate bool) (publicops.UpdateResult, error) {
 	spec, err := updateSpec(request)
 	if err != nil {
 		return publicops.UpdateResult{}, validationError(err)
@@ -346,6 +349,11 @@ func (r *uowApplyRun) runUpdate(ctx context.Context, request publicops.UpdateReq
 		return publicops.UpdateResult{}, err
 	}
 	if updatePreconditionsHold(request, before) {
+		if guardTemplate {
+			if err := storageissueops.AuthorizeTemplateUpdate(before, request); err != nil {
+				return publicops.UpdateResult{}, err
+			}
+		}
 		if err := authorizeAssigneeTransfer(ctx, r.uw, before, request); err != nil {
 			return publicops.UpdateResult{}, err
 		}
@@ -527,11 +535,13 @@ func (r *uowApplyRun) spliceMetadataRefs(ctx context.Context) error {
 			return err
 		}
 		id := r.result.Items[index].IssueID
+		// Unguarded for templates, as the store-backed splice is: it finishes
+		// this request's own create.
 		updated, err := r.runUpdate(ctx, publicops.UpdateRequest{
 			Actor:   r.plan.Actor,
 			IssueID: id,
 			Patch:   publicops.IssuePatch{Metadata: publicops.MetadataPatch{Set: set}},
-		})
+		}, false)
 		if err != nil {
 			return &publicops.ItemError{Index: index, Kind: publicops.ItemCreate, Key: item.Create.Key, IssueID: id, Err: err}
 		}

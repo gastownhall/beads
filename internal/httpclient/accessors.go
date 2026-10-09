@@ -384,3 +384,12 @@ func (s *Store) BatchApplier() (issueops.BatchApplier, error) {
 func (s *Store) BatchGetter() (issueops.BatchGetter, error) {
 	return &httpBatchGetter{store: s}, nil
 }
+
+// LeaseReclaimer serves reclaimIssues (POST /v0/beads/issues:reclaim) — the
+// stale-lease sweep behind `bd reclaim`. Like BatchGetter it dials through the
+// store directly rather than through roleWire: its request is one body with no
+// path id, and Store.dispatch already preflights the capability and never
+// retries a POST. See leasereclaimer.go.
+func (s *Store) LeaseReclaimer() (issueops.LeaseReclaimer, error) {
+	return &httpLeaseReclaimer{store: s}, nil
+}

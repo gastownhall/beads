@@ -1054,8 +1054,9 @@ func (s *Server) failApplyBatch(w http.ResponseWriter, r *http.Request, request 
 		s.fail(w, r, at(closeBlockedResult(err,
 			"an item closes a blocked issue", "clear the blocker, or send the item's force flag"), ""))
 
-	// The close guards on a close item: the shared mapping, carrying the
-	// holder for not_assignee, plus the item members.
+	// An update item naming a template, or the close guards on a close item:
+	// the shared mapping, carrying the holder for not_assignee, plus the item
+	// members.
 	case errors.Is(err, issueops.ErrTemplateReadOnly),
 		errors.Is(err, issueops.ErrPinned),
 		errors.As(err, new(*issueops.CloseNotAssigneeError)):

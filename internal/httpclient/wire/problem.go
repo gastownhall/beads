@@ -641,10 +641,11 @@ var codeSentinel = map[string]func(*ProblemError, target) error{
 	// sentinel callers already switch on locally.]
 	"notes_overwrite_refused": func(*ProblemError, target) error { return issueops.ErrNotesOverwrite },
 
-	// The close guards, rebuilt whole so a caller reads the same typed error —
-	// and the same message — the embedded store returns. The row comes from the
-	// request or, on a batch, from `item_issue_id`; the holder from `assignee`;
-	// the closing actor from the request, which the wire does not repeat.
+	// The close guards (the first, template read-only, is every update's guard
+	// too), rebuilt whole so a caller reads the same typed error — and the same
+	// message — the embedded store returns. The row comes from the request or,
+	// on a batch, from `item_issue_id`; the holder from `assignee`; the closing
+	// actor from the request, which the wire does not repeat.
 	"template_read_only": func(e *ProblemError, t target) error {
 		return &issueops.TemplateReadOnlyError{IssueID: refusedIssueID(e, t)}
 	},

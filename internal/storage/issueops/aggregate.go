@@ -231,6 +231,29 @@ func AuthorizeNotesOverwrite(before *types.Issue, request publicops.UpdateReques
 	return fmt.Errorf("%w: issue %s", storage.ErrNotesOverwrite, before.ID)
 }
 
+// AuthorizeTemplateUpdate refuses an update of a template with
+// *publicops.TemplateReadOnlyError. Templates are read-only — work comes out of
+// one by pouring it — so every update naming one refuses, whatever its patch
+// and whatever force flags it carries: no force flag waives it (only the
+// caller's explicit AllowTemplate does).
+//
+// It is the guard `bd update` (and assign, and the proxied mutations) used to
+// apply as a pre-read in cmd/bd, which left bd serve, BatchApplier update items
+// and library callers writing to templates bd refused. It sits beside the
+// other update fences and is called from the same three places — ExecuteUpdate,
+// and the unit-of-work update and batch legs — over the same-transaction
+// pre-image, after the compare-and-set preconditions, so a stale guard still
+// reports as the mismatch.
+//
+// request.AllowTemplate is the caller saying it edits a template deliberately
+// (bd label, bd set-state); the guard stands down for that request only.
+func AuthorizeTemplateUpdate(before *types.Issue, request publicops.UpdateRequest) error {
+	if before != nil && before.IsTemplate && !request.AllowTemplate {
+		return &publicops.TemplateReadOnlyError{IssueID: before.ID}
+	}
+	return nil
+}
+
 // ApplyMetadataPatch returns the canonical metadata value and whether it changes.
 func ApplyMetadataPatch(current json.RawMessage, patch publicops.MetadataPatch) (json.RawMessage, bool, error) {
 	if !patch.Replace.Set && !patch.Merge.Set && len(patch.Set) == 0 && len(patch.Unset) == 0 {

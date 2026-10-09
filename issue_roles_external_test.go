@@ -238,6 +238,39 @@ func TestReleaserExposesTypedUnsupportedError(t *testing.T) {
 	}
 }
 
+// TestLeaseReclaimerLayersHooksOutsideTelemetry is the same pin for the
+// lease-sweep role. It gives the same answer the release does and for the
+// same reason: a reclaim moves assignee and status per reverted row, which
+// is on_update — a hook the vocabulary publishes and a row a script can
+// still read back — so this decorator wraps rather than recursing the way
+// Sweeper and Deleter do.
+func TestLeaseReclaimerLayersHooksOutsideTelemetry(t *testing.T) {
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	instrumented, ok := telemetry.WrapStorage(&dolt.DoltStore{}).(*telemetry.InstrumentedStorage)
+	if !ok {
+		t.Fatal("WrapStorage() did not create InstrumentedStorage")
+	}
+
+	reclaimer, err := storage.NewHookFiringStore(instrumented, nil).LeaseReclaimer()
+	if err != nil {
+		t.Fatalf("LeaseReclaimer() error = %v", err)
+	}
+	if got := reflect.TypeOf(reclaimer).String(); got != "*storage.hookLeaseReclaimer" {
+		t.Fatalf("outer layer = %s, want the hook wrapper", got)
+	}
+}
+
+func TestLeaseReclaimerExposesTypedUnsupportedError(t *testing.T) {
+	reclaimer, err := (*dolt.DoltStore)(nil).LeaseReclaimer()
+	if reclaimer != nil {
+		t.Fatalf("LeaseReclaimer() reclaimer = %T, want nil", reclaimer)
+	}
+	var unsupported *beads.ErrUnsupported
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("LeaseReclaimer() error = %v, want *beads.ErrUnsupported", err)
+	}
+}
+
 // TestIssueRelationsKeepsTelemetryOutermost is the READ role's version of the
 // pin, and it is deliberately the other answer: the hook decorator adds no
 // layer to a read, so the outermost thing a caller gets is the instrumented

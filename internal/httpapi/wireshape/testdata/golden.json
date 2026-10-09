@@ -3901,6 +3901,85 @@
       "item_type": "object"
     },
     {
+      "schema": "ReclaimIssuesRequest",
+      "member": "actor",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ReclaimIssuesRequest",
+      "member": "any_replica",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "ReclaimIssuesRequest",
+      "member": "assignees",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "ReclaimIssuesRequest",
+      "member": "exclude_labels",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "ReclaimIssuesRequest",
+      "member": "ids",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "ReclaimIssuesRequest",
+      "member": "labels",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "ReclaimIssuesRequest",
+      "member": "labels_any",
+      "type": "array",
+      "required": false,
+      "item_type": "string"
+    },
+    {
+      "schema": "ReclaimIssuesRequest",
+      "member": "older_than_seconds",
+      "type": "number",
+      "format": "double",
+      "required": false
+    },
+    {
+      "schema": "ReclaimIssuesResult",
+      "member": "reclaimed",
+      "type": "array",
+      "required": true,
+      "item_type": "object"
+    },
+    {
+      "schema": "ReclaimedLease",
+      "member": "id",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ReclaimedLease",
+      "member": "previous_owner",
+      "type": "string",
+      "required": true
+    },
+    {
+      "schema": "ReclaimedLease",
+      "member": "revision",
+      "type": "string",
+      "required": true
+    },
+    {
       "schema": "Ref",
       "member": "id",
       "type": "string",
@@ -4707,6 +4786,12 @@
       "member": "actor",
       "type": "string",
       "required": true
+    },
+    {
+      "schema": "UpdateIssueRequest",
+      "member": "allow_template",
+      "type": "boolean",
+      "required": false
     },
     {
       "schema": "UpdateIssueRequest",
@@ -6131,6 +6216,14 @@
     "QueryPage": "response",
     "ReadyCount": "response",
     "ReadyPage": "response",
+    "ReclaimIssuesRequest": "request",
+    "ReclaimIssuesRequest.assignees[]": "request",
+    "ReclaimIssuesRequest.exclude_labels[]": "request",
+    "ReclaimIssuesRequest.ids[]": "request",
+    "ReclaimIssuesRequest.labels[]": "request",
+    "ReclaimIssuesRequest.labels_any[]": "request",
+    "ReclaimIssuesResult": "response",
+    "ReclaimedLease": "response",
     "Ref": "request",
     "RelatedIssues": "response",
     "ReleaseIssueRequest": "request",
