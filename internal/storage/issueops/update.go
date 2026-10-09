@@ -249,6 +249,49 @@ func ManageLeaseOnUpdate(oldIssue *types.Issue, updates map[string]interface{}) 
 	return !sameClaim
 }
 
+// finalAssigneeIfStillClaimed reports the assignee a claim's own concurrent
+// field patch leaves the issue held by, so updateIssueInTx can re-arm the
+// lease for that final holder instead of deleting it. Only called when the
+// update is itself the claim verb (isClaim), where oldIssue already reflects
+// ClaimIssueInTx's own uncommitted write inside the same transaction — so a
+// status/assignee override here is the claim arriving with a final state,
+// not a later, independent transfer. Deliberately duplicates
+// ManageLeaseOnUpdate's field-resolution instead of sharing it: that
+// function's own pinned contract (bd-9hpgf, GH#4716) is clear-only, and its
+// sameClaim check requires the new assignee to match oldIssue.Assignee —
+// which is never true here, since oldIssue.Assignee is the claimant and the
+// override's final holder is, by definition, someone else.
+func finalAssigneeIfStillClaimed(oldIssue *types.Issue, updates map[string]interface{}) (string, bool) {
+	newStatus := string(oldIssue.Status)
+	if rawStatus, ok := updates["status"]; ok {
+		switch v := rawStatus.(type) {
+		case string:
+			newStatus = v
+		case types.Status:
+			newStatus = string(v)
+		default:
+			return "", false
+		}
+	}
+
+	newAssignee := oldIssue.Assignee
+	if rawAssignee, ok := updates["assignee"]; ok {
+		switch v := rawAssignee.(type) {
+		case nil:
+			newAssignee = ""
+		case string:
+			newAssignee = v
+		default:
+			newAssignee = fmt.Sprint(v)
+		}
+	}
+
+	if newStatus != string(types.StatusInProgress) || newAssignee == "" {
+		return "", false
+	}
+	return newAssignee, true
+}
+
 // DetermineEventType returns the appropriate event type for an update.
 func DetermineEventType(oldIssue *types.Issue, updates map[string]interface{}) types.EventType {
 	statusVal, hasStatus := updates["status"]
@@ -335,24 +378,41 @@ type UpdateResult struct {
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func UpdateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
-	return updateIssueInTx(ctx, tx, id, updates, actor, true, true)
+	return updateIssueInTx(ctx, tx, id, updates, actor, true, true, false)
 }
 
 // UpdateIssueWithoutEventInTx applies normal update semantics without recording
 // an intermediate event. Demotion uses this to preserve the historical event
 // stream: create/update history is copied, then a single demotion event is added.
 func UpdateIssueWithoutEventInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
-	return updateIssueInTx(ctx, tx, id, updates, actor, false, true)
+	return updateIssueInTx(ctx, tx, id, updates, actor, false, true, false)
 }
 
-// updateIssueInTx is the body behind both exported update entry points.
+// UpdateClaimedIssueInTx applies normal update semantics for a patch that
+// rides the same transaction as the claim verb that produced oldIssue's
+// in_progress state (ExecuteUpdate's --claim path). Unlike UpdateIssueInTx, a
+// status/assignee patch that still leaves the issue claimed re-arms the lease
+// for the final holder instead of deleting it: without this, an assignee
+// override on the same call as --claim (`bd update --claim --assignee=X`)
+// left the lease ClaimIssueInTx had just granted deleted microseconds later
+// by this same call's generic clearLease path (be-z4ows).
+// ExecuteUpdate, which mints once after its last patch, reaches the same
+// behavior by passing isClaim to updateIssueInTx itself.
+func UpdateClaimedIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
+	return updateIssueInTx(ctx, tx, id, updates, actor, true, true, true)
+}
+
+// updateIssueInTx is the body behind the exported update entry points.
 // recordEvent gates the human-facing audit event only. mintVersion controls
-// whether an accepted update mints its own version row: both exported entry
+// whether an accepted update mints its own version row: the exported entry
 // points always do, while ExecuteUpdate — which applies label, parent and
 // persistence patches AFTER the row write in the same call — passes false and
 // mints once after the last patch, so the version's durable_state carries the
 // patched labels and edges rather than the pre-patch row.
-func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string, recordEvent bool, mintVersion bool) (*UpdateResult, error) {
+// isClaim marks the claim verb's own patch (UpdateClaimedIssueInTx, and
+// ExecuteUpdate when it claims): a patch that still leaves the issue claimed
+// re-arms the lease for the final holder instead of clearing it.
+func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string, recordEvent bool, mintVersion bool, isClaim bool) (*UpdateResult, error) {
 	updates = cloneUpdateFields(updates)
 	// Pop the override before anything reads the map as a set of columns. It
 	// has to come out ahead of the no-op filter too: the filter keeps every key
@@ -498,7 +558,21 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	}
 
 	if clearLease {
-		if err := DeleteLeaseInTx(ctx, tx, id); err != nil {
+		holder, stillClaimed := "", false
+		if isClaim {
+			holder, stillClaimed = finalAssigneeIfStillClaimed(oldIssue, updates)
+		}
+		// Wisps are never leased (lease.go's UpsertLeaseInTx invariant), and
+		// ClaimIssueInTx guards its own arm with the same !isWisp condition —
+		// so the re-arm here must carry it too, or `bd update <wisp-id>
+		// --claim --assignee=X` mints the one leases row a wisp may never
+		// have. Wisps keep falling through to the delete below, which is the
+		// no-op it has always been for them.
+		if stillClaimed && !isWisp {
+			if err := UpsertLeaseInTx(ctx, tx, id, holder, time.Now().UTC(), leaseTTL(ctx)); err != nil {
+				return nil, err
+			}
+		} else if err := DeleteLeaseInTx(ctx, tx, id); err != nil {
 			return nil, err
 		}
 	}
