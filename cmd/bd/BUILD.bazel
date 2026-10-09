@@ -497,6 +497,7 @@ go_binary(
     embed = [":bd_lib"],
     race = "off",
     visibility = [
+        "//backend/http:__pkg__",
         "//cmd/bd:__subpackages__",
         "//internal/beads:__pkg__",
         "//internal/storage/uow:__pkg__",
