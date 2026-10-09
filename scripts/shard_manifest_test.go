@@ -43,6 +43,35 @@ func TestCmdEmbeddedShardManifestGeneratorNotStale(t *testing.T) {
 	}
 }
 
+// TestPackConcurrentModelsSerialAndParallelTests pins
+// _embedded_shard_manifest_lib.py's pack_concurrent: a serial test (no
+// top-level t.Parallel) holds its shard alone for its whole duration, while
+// parallel tests share -test.parallel slots, so four 30s parallel tests fit
+// beside a 90s one in the same wall time. Plain LPT would put the serial
+// test with a parallel one and split the rest evenly by summed duration.
+func TestPackConcurrentModelsSerialAndParallelTests(t *testing.T) {
+	python := requireHostTool(t, "python3")
+	root := sourceRepoRoot(t)
+	const script = `
+import sys
+sys.path.insert(0, 'scripts/ci')
+from _embedded_shard_manifest_lib import pack_concurrent
+costs = {'serial': 100, 'a': 90, 'b': 80, 'c': 30, 'd': 30, 'e': 30, 'f': 30}
+shards, walls = pack_concurrent(costs, 2, {'serial'}, 4)
+print(sorted(map(sorted, shards)), walls)
+`
+	cmd := exec.Command(python, "-c", script)
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("pack_concurrent: %v\n%s", err, out)
+	}
+	const want = "[['a', 'b', 'c', 'd', 'e', 'f'], ['serial']] [100.0, 90]\n"
+	if string(out) != want {
+		t.Errorf("pack_concurrent = %q, want %q", out, want)
+	}
+}
+
 // TestStorageEmbeddedShardManifestGeneratorNotStale mirrors
 // TestCmdEmbeddedShardManifestGeneratorNotStale above for the storage tier's
 // Bazel-only 20-shard block; see that test's doc comment.

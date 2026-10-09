@@ -806,7 +806,12 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 	want := map[string]target{
 		"//cmd/bd:bd_embedded_test": {
 			[]string{"$(rootpath //:.github/scripts/embedded-test-shard.sh)", "BEADS_TEST_CMD_BINARY", "$(rootpath :bd_test)", "-test.timeout=19m"},
-			map[string]string{"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd)", "BEADS_TEST_EMBEDDED_DOLT": "1", "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)"},
+			map[string]string{
+				"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd)", "BEADS_TEST_EMBEDDED_DOLT": "1", "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
+				// bdInit's schema template and the race runtime's exit sleep:
+				// neither selects or skips a test.
+				"BEADS_TEST_EMBEDDED_SCHEMA_TOOL": "$(rlocationpath //internal/storage/embeddeddolt/cmd:cmd_norace)", "GORACE": "atexit_sleep_ms=0",
+			},
 		},
 		"//internal/storage/embeddeddolt:embeddeddolt_embedded_test": {
 			[]string{"$(rootpath //:.github/scripts/embedded-storage-test-shard.sh)", "BEADS_TEST_EMBEDDED_TEST_BINARY", "$(rootpath :embeddeddolt_test)", "-test.timeout=19m"},

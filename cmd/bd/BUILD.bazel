@@ -731,6 +731,7 @@ go_test(
         "duplicates_embedded_test.go",
         "duplicates_proxied_integration_test.go",
         "duplicates_test.go",
+        "embedded_init_template_test.go",
         "envfile_test.go",
         "epic_embedded_test.go",
         "epic_proxied_integration_test.go",
@@ -1432,12 +1433,22 @@ sh_test(
         ":go_srcs",
         "//:.github/scripts/embedded-cmd-test-shards.txt",
         "//:.github/scripts/embedded-test-shard.sh",
+        "//internal/storage/embeddeddolt/cmd:cmd_norace",
         "@go_sdk//:bin/gofmt",
     ],
     env = {
         "BEADS_TEST_BD_BINARY": "$(rlocationpath :bd)",
         "BEADS_TEST_EMBEDDED_DOLT": "1",
+        # bdInit's schema template (embedded_init_template_test.go), migrated
+        # by a non-race build of the embeddeddolt open tool.
+        "BEADS_TEST_EMBEDDED_SCHEMA_TOOL": "$(rlocationpath //internal/storage/embeddeddolt/cmd:cmd_norace)",
         "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
+        # The race runtime sleeps 1s before every process exit by default
+        # (atexit_sleep_ms) so goroutines still running can report a race;
+        # the bd subprocesses (hundreds per shard, each a few seconds) exit
+        # through it every time. Races they hit while running still fail
+        # the command (exit 66) as before.
+        "GORACE": "atexit_sleep_ms=0",
     },
     shard_count = 50,
     tags = ["embedded"],

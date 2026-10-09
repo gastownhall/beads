@@ -189,13 +189,22 @@ func bdRunWithFlockRetry(t *testing.T, bd, dir string, args ...string) ([]byte, 
 
 // bdInit creates a temp dir with a git repo, runs bd init --quiet with the
 // given extra args, and returns (dir, beadsDir, combined output).
-// Fatals if bd init fails.
+// Fatals if bd init fails. bd init runs on a schema already migrated from a
+// per-process template (seedEmbeddedSchema) when seededInitDatabase knows the
+// arguments.
 func bdInit(t *testing.T, bd string, extraArgs ...string) (dir, beadsDir string, out string) {
 	t.Helper()
 	dir = t.TempDir()
 	initGitRepoAt(t, dir)
+	database, seeded := seededInitDatabase(extraArgs)
+	if seeded {
+		seedEmbeddedSchema(t, dir, database)
+	}
 	out = runBDInit(t, bd, dir, extraArgs...)
 	beadsDir = filepath.Join(dir, ".beads")
+	if seeded {
+		requireSeededEmbeddedInit(t, beadsDir, database)
+	}
 	return
 }
 
@@ -1597,12 +1606,23 @@ func TestEmbeddedInitRoleRouting(t *testing.T) {
 	}
 }
 
-func TestEmbeddedInitSelectedExcludeRouting(t *testing.T) {
+// The selected-exclude routing cases are two top-level tests, not one: each
+// case is a full embedded init under -race and they cannot run in parallel
+// (t.Setenv), so one function held a whole Bazel shard for ~2 minutes.
+func TestEmbeddedInitSelectedExcludeRoutingStealth(t *testing.T) {
+	testEmbeddedInitSelectedExcludeRouting(t, "stealth_decoy", "stealth_invalid", "quiet_stealth")
+}
+
+func TestEmbeddedInitSelectedExcludeRoutingFork(t *testing.T) {
+	testEmbeddedInitSelectedExcludeRouting(t, "fork_decoy", "fork_invalid", "quiet_fork", "fork_auto_invalid")
+}
+
+func testEmbeddedInitSelectedExcludeRouting(t *testing.T, names ...string) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
 	}
 	bd := buildEmbeddedBD(t)
-	for _, name := range []string{"stealth_decoy", "stealth_invalid", "fork_decoy", "fork_invalid", "quiet_stealth", "quiet_fork", "fork_auto_invalid"} {
+	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
 			target, decoy, home := newInitRoleFixture(t)
 			global := filepath.Join(home, ".gitconfig")

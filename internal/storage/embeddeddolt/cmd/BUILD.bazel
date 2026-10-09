@@ -22,6 +22,24 @@ go_binary(
     visibility = ["//:__subpackages__"],
 )
 
+# The same tool built without the race detector whatever the configuration,
+# for //cmd/bd:bd_embedded_test's schema template: run once per shard, it
+# migrates an empty database in seconds instead of the ~20s it takes under
+# --config=embedded's race. cgo-only, as :cmd.
+go_binary(
+    name = "cmd_norace",
+    testonly = True,
+    out = "cmd_norace/schema",
+    embed = [":cmd_lib"],
+    race = "off",
+    tags = ["cgo-only"],
+    target_compatible_with = select({
+        "//tools/bazel:pure": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//cmd/bd:__pkg__"],
+)
+
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(

@@ -18,7 +18,9 @@ docstring for the full rationale this one shares):
     scripts/ci/embedded_cmd_test_durations.json (see that file's header for
     provenance). A function missing from that file — a test added since it
     was last captured — falls back to its inits cost times the file's
-    "seconds_per_init_fallback" ratio.
+    "seconds_per_init_fallback" ratio. A from-scratch pack models the shard
+    process (pack_concurrent): functions without a top-level t.Parallel()
+    run one after another, the rest share -test.parallel=4 slots.
 
 This file's existing 20-shard block (hand-assigned, round-robin; see its own
 header) is the FROZEN block PR Risk's and main.yml's legacy fork/push jobs
@@ -47,12 +49,15 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _embedded_shard_manifest_lib import (  # noqa: E402
-    check_coverage, incremental_pack, pack, read_assignments, write_block,
+    check_coverage, incremental_pack, pack, pack_concurrent, read_assignments, write_block,
 )
 
 default_manifest_path = '.github/scripts/embedded-cmd-test-shards.txt'
 durations_filename = 'embedded_cmd_test_durations.json'
 default_total_shards = 20
+# .bazelrc's test:embedded --test_arg=-test.parallel=4: how many t.Parallel
+# top-level tests one shard's process runs at once (--weights=duration).
+test_parallelism = 4
 
 func_re = re.compile(r'^func (TestEmbedded[A-Za-z0-9_]+)\(')
 
@@ -76,6 +81,27 @@ def discover_inits_cost():
     for k in costs:
         costs[k] = max(costs[k], 1)
     return costs
+
+
+def discover_serial():
+    """Return the TestEmbedded* functions whose body does not call
+    t.Parallel() directly: Go runs them one at a time, before the parallel
+    ones (a test that reaches t.Parallel only through a helper counts as
+    serial, which overestimates its shard)."""
+    serial = set()
+    for path in glob.glob('cmd/bd/*_embedded_test.go'):
+        with open(path) as fh:
+            lines = fh.readlines()
+        cur, parallel = None, False
+        for ln in lines + ['func \n']:
+            if ln.startswith('func '):
+                if cur and not parallel:
+                    serial.add(cur)
+                m = func_re.match(ln)
+                cur, parallel = (m.group(1) if m else None), False
+            elif cur and ln.rstrip('\n') == '\tt.Parallel()':
+                parallel = True
+    return serial
 
 
 def duration_cost(inits):
@@ -115,9 +141,11 @@ def render(total, shards, weights):
     else:
         out.append(f'# {total}-shard split for the Bazel-only embedded-Dolt cmd tier')
         out.append('# (bazel-embedded in .github/workflows/bazel.yml), bin-packed')
-        out.append('# longest-processing-time-first by measured wall-time from')
+        out.append('# longest-first by measured wall-time from')
         out.append(f'# scripts/ci/{durations_filename} (see that file for provenance')
-        out.append('# and its "relative weight, not absolute SLA" caveat).')
+        out.append('# and its "relative weight, not absolute SLA" caveat) onto the shard')
+        out.append('# whose estimated wall time grows least: serial tests (no top-level')
+        out.append(f'# t.Parallel) add up, parallel ones share -test.parallel={test_parallelism}.')
         out.append(f'# Regenerate with scripts/ci/gen_embedded_cmd_shard_manifest.py {total}')
         out.append('# --weights=duration --write after adding, splitting or removing')
         out.append('# TestEmbedded* functions in cmd/bd/*_embedded_test.go. --write is')
@@ -180,6 +208,8 @@ def main():
     existing = None if args.repack else read_assignments(args.manifest, args.total_shards)
     if existing:
         shards, loads = incremental_pack(costs, args.total_shards, existing)
+    elif args.weights == 'duration':
+        shards, loads = pack_concurrent(costs, args.total_shards, discover_serial(), test_parallelism)
     else:
         shards, loads = pack(costs, args.total_shards)
     out = render(args.total_shards, shards, args.weights)

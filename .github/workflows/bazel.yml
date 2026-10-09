@@ -1301,12 +1301,16 @@ jobs:
     # cap per sh_test-like rule ("Having more than 50 shards is indicative of
     # poor test organization. Please reduce the number of shards." -- a
     # native analysis-time error, not a style lint); on rbe-west its shards
-    # ran 83-209s (6.5k shard-seconds, 2026-10-09), so it, not storage or
-    # //internal/httpclient:httpclient_served_test, is this lane's floor.
-    # Lowering it needs per-test speedups spread across the suite or
-    # splitting bd_embedded_test into multiple <=50-shard sh_test rules with
-    # shard-index-offset plumbing through tools/bazel/go_test_manifest_shard.sh
-    # and check_shard_coverage.py. On RBE the tier's wall time ~= that floor
+    # ran 83-209s (6.5k shard-seconds, 2026-10-09) until bdInit seeded each
+    # workspace from a per-process schema template and the race bd
+    # subprocesses stopped sleeping 1s at exit (~4.1-4.4k shard-seconds,
+    # slowest shard ~140-160s, its slowest single tests ~100-130s under
+    # load), so it, not storage or //internal/httpclient:httpclient_served_test,
+    # is still this lane's floor. Lowering it further needs per-test speedups
+    # in its slowest functions; more shards (splitting bd_embedded_test into
+    # multiple <=50-shard sh_test rules with shard-index-offset plumbing
+    # through tools/bazel/go_test_manifest_shard.sh and
+    # check_shard_coverage.py) would not move the slowest single test. On RBE the tier's wall time ~= that floor
     # + fixed cost (checkout, build, shard dispatch), not ~=
     # sum(durations)/shard_count the way a CPU-core-bound local sweep is --
     # each shard is its own remote action and runs concurrently with every
