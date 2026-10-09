@@ -59,7 +59,6 @@ NOBLE_DEB_URLS = [
 
 deb_sysroot(
     name = "cc_sysroot_noble_amd64",
-    urls = NOBLE_DEB_URLS,
     packages = {
         "pool/main/g/gcc-13/libgcc-13-dev_13.3.0-6ubuntu2~24.04.1_amd64.deb": "cd689db2691edaa10f37329307292796bb599e722e0505c79e14caaa1fe9a93a",
         "pool/main/g/gcc-13/libstdc++-13-dev_13.3.0-6ubuntu2~24.04.1_amd64.deb": "ee5633e863e19c3381ed97842ce35ed32ede96a3d1ae4e94c051d3036fe21347",
@@ -85,6 +84,7 @@ deb_sysroot(
         "usr/lib/gcc/x86_64-linux-gnu/13/libquadmath*",
         "usr/lib/gcc/x86_64-linux-gnu/13/libstdc++*.a",
     ],
+    urls = NOBLE_DEB_URLS,
 )
 
 LLVM_VERSION = "22.1.8"
