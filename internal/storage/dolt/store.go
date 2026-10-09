@@ -3775,25 +3775,9 @@ func (s *DoltStore) concludeOpenMerge(ctx context.Context, conn *sql.Conn, messa
 // config's primary key is `key`, so dolt_diff exposes to_key/from_key; an add or
 // delete leaves one side NULL, so COALESCE picks whichever key the change carries.
 func (s *DoltStore) assertDirtyConfigUserKVOnly(ctx context.Context, conn *sql.Conn) error {
-	rows, err := conn.QueryContext(ctx,
-		"SELECT COALESCE(to_key, from_key) FROM dolt_diff('HEAD', 'WORKING', 'config')")
+	unsafe, err := dirtyInternalConfigKeys(ctx, conn)
 	if err != nil {
 		return fmt.Errorf("inspect dirty config before pull: %w", err)
-	}
-	defer rows.Close()
-
-	var unsafe []string
-	for rows.Next() {
-		var key sql.NullString
-		if err := rows.Scan(&key); err != nil {
-			return fmt.Errorf("scan dirty config key: %w", err)
-		}
-		if key.Valid && !strings.HasPrefix(key.String, kvkeys.Prefix) {
-			unsafe = append(unsafe, key.String)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate dirty config diff: %w", err)
 	}
 	if len(unsafe) > 0 {
 		return fmt.Errorf("refusing to auto-commit %d dirty internal config key(s) before pull: %s; "+
@@ -3801,6 +3785,33 @@ func (s *DoltStore) assertDirtyConfigUserKVOnly(ctx context.Context, conn *sql.C
 			"these explicitly with `bd dolt commit` first", len(unsafe), strings.Join(unsafe, ", "), kvkeys.Prefix)
 	}
 	return nil
+}
+
+// dirtyInternalConfigKeys lists the config keys dirty in the working set that
+// are not user KV data (outside the kv.* namespace). It is the screen shared by
+// assertDirtyConfigUserKVOnly and CommitConfigUserKVOnly.
+func dirtyInternalConfigKeys(ctx context.Context, conn *sql.Conn) ([]string, error) {
+	rows, err := conn.QueryContext(ctx,
+		"SELECT COALESCE(to_key, from_key) FROM dolt_diff('HEAD', 'WORKING', 'config')")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var unsafe []string
+	for rows.Next() {
+		var key sql.NullString
+		if err := rows.Scan(&key); err != nil {
+			return nil, fmt.Errorf("scan dirty config key: %w", err)
+		}
+		if key.Valid && !strings.HasPrefix(key.String, kvkeys.Prefix) {
+			unsafe = append(unsafe, key.String)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate dirty config diff: %w", err)
+	}
+	return unsafe, nil
 }
 
 // CommitWithConfig creates a Dolt commit that includes the config table.
@@ -3866,6 +3877,50 @@ func (s *DoltStore) CommitAll(ctx context.Context, message string) (bool, error)
 		return nil
 	})
 	return committed, err
+}
+
+// CommitConfigOnly commits the config table (GH#4078). Use after
+// intentional config writes (bd config set) in server mode,
+// where generic Commit() excludes config (GH#2455) and nothing else ever
+// commits it. Scoped staging means a concurrent operation's dirty tables
+// are never swept — the same guarantee that motivated GH#2455.
+//
+// The lookup tables SetConfig projects from config (custom_statuses,
+// custom_types) are staged with it: SetConfig writes them in the same
+// transaction as the row, and a commit holding one without the other is the
+// split that projection exists to prevent. They are written only from config,
+// so staging them sweeps no other kind of work.
+func (s *DoltStore) CommitConfigOnly(ctx context.Context, message string) error {
+	tables := append([]string{"config"}, issueops.ConfigProjectionTables()...)
+	return s.doltAddAndCommit(ctx, tables, message)
+}
+
+// CommitConfigUserKVOnly is the scoped commit for a write of this clone's own
+// user KV data (bd remember, bd forget). It stages the config table alone, and
+// since DOLT_ADD stages that whole table it first applies the pre-pull screen:
+// when any dirty config row is outside kv.*, it commits nothing and names those
+// keys, rather than sweep a concurrent writer's internal key (issue_prefix above
+// all) into a memory's commit — the row-level form of the GH#2455 hazard.
+func (s *DoltStore) CommitConfigUserKVOnly(ctx context.Context, message string) error {
+	if issueops.VersionCommitDeferred(ctx) {
+		return nil
+	}
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire connection: %w", err)
+	}
+	unsafe, err := dirtyInternalConfigKeys(ctx, conn)
+	_ = conn.Close()
+	if err != nil {
+		return fmt.Errorf("inspect dirty config: %w", err)
+	}
+	if len(unsafe) > 0 {
+		return fmt.Errorf("refusing to commit %d dirty internal config key(s) with a user %s* write: %s; "+
+			"only user %s* rows commit with it (GH#2455). The %s* write itself is saved in the "+
+			"working set: `bd dolt commit` publishes it together with those keys, or revert the "+
+			"keys first", len(unsafe), kvkeys.Prefix, strings.Join(unsafe, ", "), kvkeys.Prefix, kvkeys.Prefix)
+	}
+	return s.doltAddAndCommit(ctx, []string{"config"}, message)
 }
 
 // doltAddAndCommit stages the specified tables and commits on a pinned

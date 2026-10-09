@@ -284,6 +284,9 @@ var configSetCmd = &cobra.Command{
 			return HandleError("setting config: %v", err)
 		}
 		noteDirectConfigWrite()
+		if err := commitConfigWrite(rootCtx, store, "config set"); err != nil {
+			return HandleError("%v", err)
+		}
 
 		if jsonOutput {
 			if err := outputJSON(map[string]string{
@@ -910,6 +913,9 @@ var configUnsetCmd = &cobra.Command{
 			return HandleError("deleting config: %v", err)
 		}
 		noteDirectConfigWrite()
+		if err := commitConfigWrite(rootCtx, store, "config unset"); err != nil {
+			return HandleError("%v", err)
+		}
 
 		// Clear the config.yaml layer unconditionally and report what the
 		// write actually did. Pre-checking with GetYamlConfig would read
@@ -1247,6 +1253,10 @@ Examples:
 					}
 				}
 				commandDidWrite.Store(true)
+				// One scoped commit for the whole batch, not one per key.
+				if err := commitConfigWrite(rootCtx, store, "config set-many"); err != nil {
+					return HandleError("%v", err)
+				}
 			}
 		}
 

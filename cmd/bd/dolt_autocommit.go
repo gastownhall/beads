@@ -155,6 +155,65 @@ func commitPendingIfEmbedded(ctx context.Context, st storage.DoltStorage, actor 
 	return maybeAutoCommitStore(ctx, st, p)
 }
 
+// commitConfigWrite creates the Dolt commit for an intentional config-table
+// write on the direct SQL-server route (bd config set/unset/set-many; bd
+// remember/forget go through commitMemoryWrite). Nothing else commits it there
+// (GH#4078): the store-level writes those verbs reach through their roles
+// commit the SQL transaction only, maybeAutoCommit returns early off the
+// embedded route, and plain Commit excludes config anyway (GH#2455).
+// CommitConfigOnly stages ONLY the config table, so a concurrent operation's
+// other dirty tables are never swept.
+//
+// It is a no-op wherever something else already owns that commit: embedded
+// mode (the PersistentPostRun auto-commit stages config with everything
+// else), the proxied route (the role's unit of work commits each write), and
+// dolt.auto-commit batch/off, which defer it to `bd dolt commit` (CommitAll,
+// config included) exactly as they defer every other server-mode write.
+//
+// Unlike commitMemoryWrite it does not screen other dirty config rows: the
+// operator is writing config on purpose, the trust level of `bd dolt commit`.
+// rename-prefix and migrate also write config (issue_prefix, sync.branch) and
+// are deliberately not wired here: they are multi-step operations, and when
+// their config row should become a commit is the GH#2455 question itself.
+func commitConfigWrite(ctx context.Context, st storage.DoltStorage, command string) error {
+	if err := commitConfigTable(ctx, st, command, storage.DoltStorage.CommitConfigOnly); err != nil {
+		return fmt.Errorf("committing config write: %w", err)
+	}
+	return nil
+}
+
+// commitMemoryWrite is commitConfigWrite for bd remember/forget. A memory is
+// user kv.* data, so its commit takes only kv.* config rows with it
+// (CommitConfigUserKVOnly): a dirty internal key is refused, not swept in.
+func commitMemoryWrite(ctx context.Context, st storage.DoltStorage, command string) error {
+	if err := commitConfigTable(ctx, st, command, storage.DoltStorage.CommitConfigUserKVOnly); err != nil {
+		return fmt.Errorf("committing memory write: %w", err)
+	}
+	return nil
+}
+
+func commitConfigTable(ctx context.Context, st storage.DoltStorage, command string,
+	commit func(storage.DoltStorage, context.Context, string) error) error {
+	if isEmbeddedMode() || usesProxiedServer() || st == nil {
+		return nil
+	}
+	commitNow, err := writesCommitNow()
+	if err != nil {
+		return err
+	}
+	if !commitNow {
+		return nil
+	}
+	if lm, ok := storage.UnwrapStore(st).(storage.LifecycleManager); ok && lm.IsClosed() {
+		return nil
+	}
+	msg := formatDoltAutoCommitMessage(command, getActor(), nil)
+	if err := commit(st, ctx, msg); err != nil && !isDoltNothingToCommit(err) {
+		return err
+	}
+	return nil
+}
+
 func maybeAutoCommitStore(ctx context.Context, st storage.DoltStorage, p doltAutoCommitParams) error {
 	mode, err := getDoltAutoCommitMode()
 	if err != nil {
