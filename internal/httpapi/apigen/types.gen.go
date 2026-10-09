@@ -393,7 +393,7 @@ type ApplyCloseItem struct {
 	// IT IS A STRING, and it must be the `revision` string a response carried, verbatim. A JSON number — or any other type — is a `400` naming this member. The token spans the FULL 64-bit range, so a number would be rounded past 2^53 by an IEEE-754-double parser and the guard would miss a row nothing else touched; a string round-trips exactly in every consumer.
 	ExpectedVersion *string `json:"expected_version,omitempty"`
 
-	// Force Bypasses close policy — the open-children refusal and the live-blocker refusal — and nothing else.
+	// Force Bypasses close policy — the open-children refusal and the live-blocker refusal — and the pin and the assignee guard, and nothing else: never the template guard.
 	//
 	// CLOSE POLICY EVALUATES AT THIS ITEM, against the row as this request has already changed it. A LATER item that gives a closed parent an open child is NOT refused: the policy is a gate on the closing act, not an invariant the store maintains.
 	Force *bool `json:"force,omitempty"`
@@ -764,7 +764,7 @@ type BatchCloseRequest struct {
 	// Actor Who is closing. `ClaimRequest.actor`'s rules exactly, and the value is recorded against every item.
 	Actor string `json:"actor"`
 
-	// Force Bypass close policy — the open-children refusal and the live-blocker refusal — for EVERY item, and nothing else. It never bypasses validation and it never bypasses existence: an id that names nothing refuses whether or not this is set. It is request-wide because the flag that spells it is.
+	// Force Bypass close policy — the open-children refusal and the live-blocker refusal — and the pin and the assignee guard for EVERY item, and nothing else. It never bypasses the template guard or validation, and it never bypasses existence: an id that names nothing refuses whether or not this is set. It is request-wide because the flag that spells it is.
 	Force *bool `json:"force,omitempty"`
 
 	// Items The issues to close, in the order the caller asked for them. Every item appears in `outcomes` at the same index.
@@ -929,7 +929,7 @@ type CloseIssueRequest struct {
 	// IT IS A STRING, and it must be the `revision` string a response carried, verbatim. A JSON number — or any other type — is a `400` naming this member. The token spans the FULL 64-bit range, so a number would be rounded past 2^53 by an IEEE-754-double parser and the guard would miss a row nothing else touched; a string round-trips exactly in every consumer.
 	ExpectedVersion *string `json:"expected_version,omitempty"`
 
-	// Force Bypass close policy — the open-children refusal and the live-blocker refusal — and nothing else. The refusals are the ROLE's, so this endpoint cannot skip a guard by forgetting one exists. A forced close still reports `open_children`.
+	// Force Bypass close policy — the open-children refusal and the live-blocker refusal — and the pin and the assignee guard, and nothing else: never the template guard (see "Close guards" on `POST /v0/beads/issues/{id}:close`). The refusals are the ROLE's, so this endpoint cannot skip a guard by forgetting one exists. A forced close still reports `open_children`.
 	//
 	// IT BYPASSES POLICY, NEVER A PRECONDITION. `expected_version` is still checked with it set, for the reason `issueops.CloseRequest.Force` gives: a caller saying "close it anyway" has said nothing about whether the row is still the one it read.
 	Force *bool `json:"force,omitempty"`

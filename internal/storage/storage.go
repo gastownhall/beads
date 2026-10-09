@@ -398,6 +398,9 @@ type Storage interface {
 	// when the current assignee differs.
 	UnclaimIssueIfAssignee(ctx context.Context, id string, actor string, expectedAssignee string) error
 	UpdateIssueType(ctx context.Context, id string, issueType string, actor string) error
+	// CloseIssue is the raw close: it applies neither the close guards nor
+	// close policy, except over HTTP, where it closes with force and a template
+	// — the one guard force never bypasses — still refuses.
 	CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error
 	// CloseIssueChecked closes an issue, but refuses with ErrCloseOpenChildren
 	// when it has open parent-child dependents, or ErrCloseBlocked when it has a
@@ -409,9 +412,16 @@ type Storage interface {
 	// (no TOCTOU). When opts.ExpectedVersion is non-nil it adds an orthogonal
 	// optimistic-concurrency precondition: the close proceeds only if the issue's
 	// current RowVersion still equals *opts.ExpectedVersion, else it refuses with
-	// ErrVersionMismatch atomically (Force does NOT bypass this check). Already-
-	// closed is an idempotent success with Unchanged=true; a missing issue returns
-	// ErrNotFound.
+	// ErrVersionMismatch atomically (Force does NOT bypass this check). After
+	// the version check and before the child and blocker policy it applies the
+	// close guards in the same transaction: a template refuses with
+	// *issueops.TemplateReadOnlyError whatever Force says, and unless Force is
+	// set a pinned issue refuses with *issueops.PinnedError and one assigned to
+	// someone other than actor with *issueops.CloseNotAssigneeError. Already-
+	// closed is an idempotent success with Unchanged=true and skips the guards;
+	// a missing issue returns ErrNotFound. CloseIssue above is the raw close and
+	// applies neither the guards nor the policy, except that over HTTP, where
+	// the template guard has no bypass on the wire, a template still refuses.
 	CloseIssueChecked(ctx context.Context, id string, actor string, opts CloseIssueOptions) (CloseIssueResult, error)
 	DeleteIssue(ctx context.Context, id string) error
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
@@ -638,7 +648,7 @@ type Storage interface {
 type CloseIssueOptions struct {
 	Reason  string
 	Session string
-	Force   bool // bypass the is_blocked guard (mirrors `bd close --force`)
+	Force   bool // bypass close policy and the pin and assignee guards, never the template (mirrors `bd close --force`)
 	// ExpectedVersion, when non-nil, gates the close on an optimistic-concurrency
 	// check: the close proceeds only if the issue's current RowVersion (the
 	// row_lock token) equals *ExpectedVersion, otherwise it refuses with

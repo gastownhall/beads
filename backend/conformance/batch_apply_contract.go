@@ -882,9 +882,12 @@ func RunBatchApplyEvaluatesExpectedAssigneeAsModified(t *testing.T, ctx context.
 // close it. The refusal is the assertion; the rollback of the parent it created
 // is what says the refusal took the request with it.
 //
-// POSITIVE HALF: the identical request with Force lands, which is the whole of
-// what Force does ("bypasses blocker and open-child close policy, and nothing
-// else") and the proof that the refusal was the policy rather than the shape.
+// POSITIVE HALF: the identical request with Force lands, and that is the proof
+// the refusal was the policy rather than the shape. Force "bypasses blocker and
+// open-child close policy, the pin and the assignee fence, and never the
+// template guard" (batchapplier.go), and the parent trips no guard — the
+// unforced half reached the policy, which the guards run before — so the
+// policy is the only refusal Force had to waive.
 func RunBatchApplyClosePolicyEvaluatesAtTheCloseItem(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
 	t.Helper()
 	parent := fixture.IssuePrefix + "-closepolicy-parent"
@@ -924,7 +927,7 @@ func RunBatchApplyClosePolicyEvaluatesAtTheCloseItem(t *testing.T, ctx context.C
 		t.Errorf("%s status = %q under Force, want %q", parent, got, types.StatusClosed)
 	}
 	if got := batchApplyColumn(t, ctx, fixture, "status", child); got != string(types.StatusOpen) {
-		t.Errorf("%s status = %q, want %q: Force bypasses the close policy and nothing else", child, got, types.StatusOpen)
+		t.Errorf("%s status = %q, want %q: Force waives the parent's close policy, it does not close the child", child, got, types.StatusOpen)
 	}
 	assertBatchApplyTypedEdgeCount(t, ctx, fixture, child, parent, string(publicops.DepParentChild), 1)
 }

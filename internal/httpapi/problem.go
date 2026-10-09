@@ -827,7 +827,8 @@ var operationCodes = map[string][]Code{
 	// The NARROWEST write vocabulary on this surface, and the narrowness is the
 	// contract rather than an oversight. A problem document from this operation
 	// means the batch never ran; every refusal an ITEM can earn — not_found for
-	// an id naming no row, not_closable for close policy — travels in that
+	// an id naming no row, not_closable for close policy, template_read_only,
+	// issue_pinned and not_assignee for the close guards — travels in that
 	// item's outcome inside a 200. A 404 here would say the operation went to
 	// the wrong place, and a 409 would say the whole batch was refused, and
 	// neither is ever true of a per-item refusal.

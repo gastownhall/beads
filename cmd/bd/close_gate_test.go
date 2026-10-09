@@ -353,12 +353,14 @@ func TestCloseBeadGateGetter_RouteSelection(t *testing.T) {
 }
 
 // TestCloseCheckOne_CloseGuardsOutrankGateSatisfaction pins `bd close`'s
-// refusal order on both preflight routes: the close guards
-// (storeissueops.CheckClosable, the role's own rule) answer before gate
+// refusal order on the direct preflight route (closeDirectCheckOne): the close
+// guards (storeissueops.CheckClosable, the role's own rule) answer before gate
 // satisfaction, so a pinned, held or template gate whose condition is unmet
-// prints the guard's sentence, as it always has. A row already closed skips the
-// guards (ga-ktn9pe.4.8) and force waives the pin and the holder, leaving the
-// gate the refusal.
+// prints the guard's sentence, as it always has. Force waives the pin and the
+// holder (and the gate check with them) but never the template, and a row
+// already closed skips the guards (ga-ktn9pe.4.8). closeProxiedCheckOne makes
+// the same call in the same order; it resolves the row through a unit of work,
+// so this test does not drive it.
 func TestCloseCheckOne_CloseGuardsOutrankGateSatisfaction(t *testing.T) {
 	actorMu.Lock()
 	savedActor, savedPending := actor, actorGitFallbackPending

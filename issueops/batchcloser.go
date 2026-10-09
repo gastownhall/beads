@@ -42,9 +42,9 @@ type CloseBatchRequest struct {
 	Session string
 	// Force bypasses blocker and open-child close policy, the pin and the
 	// assignee fence, for every item — exactly CloseRequest.Force. It never
-	// bypasses the template guard or validation, and it never bypasses existence: an id that
-	// names nothing refuses whether or not force is set. It is request-wide
-	// because the flag that spells it is.
+	// bypasses the template guard or validation, and it never bypasses
+	// existence: an id that names nothing refuses whether or not force is set.
+	// It is request-wide because the flag that spells it is.
 	//
 	// It would not bypass a per-item LIFECYCLE PRECONDITION either, but no
 	// batch item carries one: there is no counterpart here to the

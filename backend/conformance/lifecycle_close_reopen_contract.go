@@ -846,11 +846,12 @@ func RunLifecycleCloseAndReopenSpanTheConfiguredDoneCategory(t *testing.T, ctx c
 
 // RunLifecycleExpectedVersionIsCheckedBeforeTheNoOps pins the ORDERING clause
 // both requests spell out. CloseRequest.ExpectedVersion "requires the current
-// row version to match and is checked before an idempotent close"
-// (issueops/issueops.go:295-300); ReopenRequest.ExpectedVersion is "checked
-// before a non-done no-op" (:272-275); and Close's own doc adds "ExpectedVersion
+// row version to match, and is checked BEFORE the idempotent close"
+// (issueops/issueops.go:362-373); ReopenRequest.ExpectedVersion is "checked
+// before a non-done no-op" (:390-391); and Close's own doc adds "ExpectedVersion
 // is checked first, including for an idempotent close", with Force bypassing
-// "blocker and open-child policy" and nothing else (:364-365).
+// "the pin, the assignee fence, and blocker and open-child policy" and nothing
+// else (:485-498).
 //
 // The dangerous shape is not a stale version on a live mutation — it is a stale
 // version on the request that would have done nothing anyway. An implementation
@@ -1383,13 +1384,14 @@ func RunLifecycleCloseSettlesItsTransitiveAndCrossPlaneDependers(t *testing.T, c
 // RunLifecycleCloseAdmitsATransitivelyBlockedTarget uses clears the first and
 // not the second, and closing the child to clear the second would take the
 // second subject with it, since a closed row cannot be blocked and so has
-// nothing left to flip. Force waives close policy and nothing else —
-// CloseRequest.Force "bypasses only blocker and open-child close policy" and
-// "never bypasses validation, ExpectedVersion, or lifecycle rules"
-// (issueops/issueops.go:310-311) — so it is the shape that keeps both subjects
-// observable, and it is not exotic: it is the same forced close of a
-// blocked issue that RunLifecycleCloseIsIdempotentOnAClosedRowThatStillLooksBlocked
-// is built on.
+// nothing left to flip. Force waives close policy, the pin and the assignee
+// fence, and nothing else — CloseRequest.Force "bypasses blocker and
+// open-child close policy and the two close guards a force has always waived
+// in bd" and "never bypasses the template guard, validation, ExpectedVersion,
+// or lifecycle rules" (issueops/issueops.go:357-360) — so it is the shape that
+// keeps both subjects observable, and it is not exotic: it is the same forced
+// close of a blocked issue that
+// RunLifecycleCloseIsIdempotentOnAClosedRowThatStillLooksBlocked is built on.
 //
 // All three legs reach ONE body here (internal/storage/issueops.closeIssueInTx),
 // so this is a wrapper and engine check rather than a third vote, exactly as

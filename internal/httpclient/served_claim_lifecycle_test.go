@@ -317,6 +317,67 @@ func TestServedLifecycleCloseEnforcesTheCloseGuards(t *testing.T) {
 	conformance.RunLifecycleCloseEnforcesTheCloseGuards(t, t.Context(), newServedCloseReopenFixture(t, "hlcg"))
 }
 
+// TestServedRawCloseKeepsParityWithTheOtherBackends is the off-role half of the
+// guards: Store.CloseIssue must close what the raw close closes on dolt,
+// embedded and proxied, where issueops.CloseIssueInTx runs neither the guards
+// nor close policy. A pin of either spelling, another actor's claim and an open
+// child each refuse the Lifecycle close above; the raw close sends force, so a
+// molecule auto-close of such a root still lands over http. The template is the
+// one refusal left, because read-only has no bypass on the wire.
+func TestServedRawCloseKeepsParityWithTheOtherBackends(t *testing.T) {
+	ctx := t.Context()
+	env := newServedEnv(t, "hrc")
+
+	const (
+		flagPinned   = "hrc-flag-pinned"
+		statusPinned = "hrc-status-pinned"
+		held         = "hrc-held"
+		parent       = "hrc-parent"
+		child        = "hrc-child"
+		template     = "hrc-template"
+	)
+	for _, issue := range []*types.Issue{
+		{ID: flagPinned, Status: types.StatusOpen, Pinned: true},
+		{ID: statusPinned, Status: types.StatusPinned},
+		{ID: held, Status: types.StatusInProgress, Assignee: "holder"},
+		{ID: parent, Status: types.StatusOpen},
+		{ID: child, Status: types.StatusOpen},
+		{ID: template, Status: types.StatusOpen, IsTemplate: true},
+	} {
+		issue.Title, issue.Priority, issue.IssueType = issue.ID, 2, types.TypeTask
+		if err := env.createIssue(ctx, issue, "seed"); err != nil {
+			t.Fatalf("seed %s: %v", issue.ID, err)
+		}
+	}
+	if err := env.addDependency(ctx, &types.Dependency{IssueID: child, DependsOnID: parent, Type: types.DepParentChild}, "seed"); err != nil {
+		t.Fatalf("seed %s as a child of %s: %v", child, parent, err)
+	}
+
+	assertStatus := func(id string, want types.Status) {
+		t.Helper()
+		got, err := env.getIssue(ctx, id)
+		if err != nil {
+			t.Fatalf("read back %s: %v", id, err)
+		}
+		if got.Status != want {
+			t.Errorf("%s has status %q after the raw close, want %q", id, got.Status, want)
+		}
+	}
+
+	for _, id := range []string{flagPinned, statusPinned, held, parent} {
+		if err := env.subject.CloseIssue(ctx, id, "all steps complete", "closer", ""); err != nil {
+			t.Fatalf("raw close of %s over http: %v, want it to land as the raw close does on every other backend", id, err)
+		}
+		assertStatus(id, types.StatusClosed)
+	}
+
+	err := env.subject.CloseIssue(ctx, template, "all steps complete", "closer", "")
+	if !errors.As(err, new(*issueops.TemplateReadOnlyError)) {
+		t.Fatalf("raw close of template %s over http: err = %v, want *TemplateReadOnlyError", template, err)
+	}
+	assertStatus(template, types.StatusOpen)
+}
+
 func TestServedLifecycleReopenLeavesNonDoneStatusesUnchanged(t *testing.T) {
 	conformance.RunLifecycleReopenLeavesNonDoneStatusesUnchanged(t, t.Context(), newServedCloseReopenFixture(t, "hlrn"))
 }

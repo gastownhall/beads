@@ -67,7 +67,7 @@
     "--json"
    ]
   ],
-  "pins": "close.go has no already-closed guard in validateIssueClosable (only NotTemplate+NotPinned); second close re-runs CloseIssue; pins idempotency/event behavior of the storage layer.",
+  "pins": "the close guards (storeissueops.CheckClosable: template, pin, assignee) skip a row already at literal closed (ga-ktn9pe.4.8), so the second close reaches the role as its idempotent re-close (Changed=false, exit 0); pins idempotency/event behavior of the storage layer.",
   "deterministic": true
  },
  {
@@ -598,7 +598,7 @@
     "--json"
    ]
   ],
-  "pins": "validateIssueClosable NotPinned(force): without force stderr 'cannot modify pinned issue clp-1 (use --force to override)' + SilentExit; with --force closes.",
+  "pins": "the pin close guard (storeissueops.CheckClosable, waived by force; the role applies it again inside the close transaction): without force stderr 'cannot modify pinned issue clp-1 (use --force to override)' + SilentExit; with --force closes.",
   "deterministic": true
  },
  {

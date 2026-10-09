@@ -606,8 +606,10 @@ func (s *DoltStore) closeIssue(ctx context.Context, id string, reason string, ac
 // when it has a live direct blocker unless opts.Force is set, and — when
 // opts.ExpectedVersion is non-nil — with storage.ErrVersionMismatch when the
 // row's current RowVersion no longer matches (an orthogonal CAS that Force does
-// not bypass). Both checks and the close share one transaction, so they are
-// atomic (no TOCTOU). Mirrors CloseIssue's Dolt-specific concerns (wisp routing,
+// not bypass). The close guards (template, pin, assignee; see
+// issueops.CloseIssueCheckedInTx) refuse first, the template whatever Force
+// says. Every check and the close share one transaction, so they are atomic
+// (no TOCTOU). Mirrors CloseIssue's Dolt-specific concerns (wisp routing,
 // DOLT_ADD/COMMIT).
 func (s *DoltStore) CloseIssueChecked(ctx context.Context, id string, actor string, opts storage.CloseIssueOptions) (storage.CloseIssueResult, error) {
 	var result storage.CloseIssueResult

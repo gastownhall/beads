@@ -39,9 +39,10 @@ import (
 //     still reports OpenChildren (batchcloser.go:81-86); a duplicated id is one
 //     of those at its own index, and the first occurrence's reason is what the
 //     row keeps (batchcloser.go:28-33).
-//   - Force is request-wide and bypasses only blocker and open-child policy;
-//     the per-item precondition its clause also names is a category the request
-//     type keeps EMPTY (batchcloser.go:43-53).
+//   - Force is request-wide and bypasses blocker and open-child policy, the
+//     pin and the assignee fence, never the template guard; the per-item
+//     precondition its clause also names is a category the request type keeps
+//     EMPTY (batchcloser.go:43-55).
 //   - ClaimNext runs after the closes, inside the same transaction, and only
 //     when at least one item closed (batchcloser.go:55-70, 100-103, 143-146).
 //   - LANDED means CHANGED: an all-idempotent batch earns no claim and records

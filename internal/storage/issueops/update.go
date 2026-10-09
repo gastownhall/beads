@@ -406,10 +406,17 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	// A status update that crosses into the done category is a close by another
 	// name, so it answers to close policy. Running after the no-op filter keeps
 	// a done-to-done restatement policy-free, and running after the callers'
-	// version and assignee preconditions keeps force away from those: it
-	// bypasses the two close refusals and nothing else, exactly as it does for
-	// `bd close`. A refusal returns here, before any write, and aborts the
-	// caller's transaction.
+	// version and assignee preconditions keeps force away from those: here it
+	// bypasses the two close-policy refusals and nothing else. A refusal
+	// returns here, before any write, and aborts the caller's transaction.
+	//
+	// Close policy is ALL it answers to. The pin guard and the assignee
+	// authority fence, which CloseIssueCheckedInTx applies to the close verbs,
+	// are deliberately not run here: a crossing still closes a pinned issue or
+	// a bead another actor holds on every update leg (`bd update -s closed`,
+	// PATCH, batchApply), as it always has. Refusing those would change what
+	// the update legs admit, which is its own decision and not part of putting
+	// the close verbs' guards in the role.
 	crossing, err := CrossesIntoDoneCategoryInTx(ctx, tx, oldIssue.Status, updates)
 	if err != nil {
 		return nil, err

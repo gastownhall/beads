@@ -2419,8 +2419,10 @@ paths:
         `closed_by_session` and `close_reason` — written under first-close-wins
         by `{id}:close`, which a patch write would bypass. A `status` that
         crosses into the done category still answers to close POLICY here; it
-        does not acquire the close's semantics, which is why `{id}:close`
-        remains the operation to reach for when what you mean is "close this".
+        does not acquire the close's semantics, and that includes its close
+        guards: a patch is never refused `issue_pinned` or `not_assignee`.
+        That is why `{id}:close` remains the operation to reach for when what
+        you mean is "close this".
 
 
         `created_at`, `created_by` — `POST /v0/beads/issues` withholds them for
@@ -3206,10 +3208,18 @@ paths:
         (compared separator-insensitively; an unassigned issue is closable by
         anyone) refuses with `409` / `not_assignee`, carrying the holder in
         `assignee`. `force` bypasses the pin and the assignee guard. They are
-        the guards `bd close` applies, and they are the ROLE's, so every route
-        to a close — this one, `POST /v0/beads/issues:batchClose` and a
+        the guards `bd close` applies, and they are the ROLE's, so every close
+        operation — this one, `POST /v0/beads/issues:batchClose` and a
         `close` item of `POST /v0/beads/issues:batchApply` — applies them
         alike. An idempotent re-close is not guarded: it changes nothing.
+
+
+        The guards gate the close operations, not the closed state. A status
+        update that crosses into the done category — a `PATCH` of
+        `/v0/beads/issues/{id}` or an `update` item of
+        `POST /v0/beads/issues:batchApply` — is not a close operation and
+        answers to close policy only, so it still closes a pinned issue or one
+        another actor holds.
 
 
         ## The guard
@@ -4391,8 +4401,9 @@ paths:
 
         NO PER-ITEM PRECONDITION. There is no counterpart here to a
         compare-and-set guard, matching the role, so `force` is a question with
-        only two answers: it bypasses blocker and open-child close policy for
-        every item, and it never bypasses validation or existence.
+        only two answers: it bypasses blocker and open-child close policy, the
+        pin and the assignee guard for every item, and it never bypasses the
+        template guard, validation or existence.
 
 
         ## Hooks and auto-commit
@@ -10271,7 +10282,8 @@ components:
           default: false
           description: >-
             Bypasses close policy — the open-children refusal and the
-            live-blocker refusal — and nothing else.
+            live-blocker refusal — and the pin and the assignee guard, and
+            nothing else: never the template guard.
 
 
             CLOSE POLICY EVALUATES AT THIS ITEM, against the row as this request
@@ -10884,10 +10896,11 @@ components:
           default: false
           description: >-
             Bypass close policy — the open-children refusal and the live-blocker
-            refusal — for EVERY item, and nothing else. It never bypasses
-            validation and it never bypasses existence: an id that names nothing
-            refuses whether or not this is set. It is request-wide because the
-            flag that spells it is.
+            refusal — and the pin and the assignee guard for EVERY item, and
+            nothing else. It never bypasses the template guard or validation,
+            and it never bypasses existence: an id that names nothing refuses
+            whether or not this is set. It is request-wide because the flag
+            that spells it is.
 
     BatchCloseItem:
       type: object
@@ -11074,9 +11087,11 @@ components:
           default: false
           description: >-
             Bypass close policy — the open-children refusal and the
-            live-blocker refusal — and nothing else. The refusals are the
-            ROLE's, so this endpoint cannot skip a guard by forgetting one
-            exists. A forced close still reports `open_children`.
+            live-blocker refusal — and the pin and the assignee guard, and
+            nothing else: never the template guard (see "Close guards" on
+            `POST /v0/beads/issues/{id}:close`). The refusals are the ROLE's,
+            so this endpoint cannot skip a guard by forgetting one exists. A
+            forced close still reports `open_children`.
 
 
             IT BYPASSES POLICY, NEVER A PRECONDITION. `expected_version` is

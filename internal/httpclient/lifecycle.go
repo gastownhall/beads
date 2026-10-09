@@ -896,11 +896,17 @@ func setNullableTime(out map[string]any, member string, field issueops.Field[*ti
 // operation the Lifecycle role uses (design D8's off-role list, extended by the
 // `bd close` decision).
 //
-// Its one caller at tip is the molecule auto-close, which closes a parent whose
-// children have all finished and discards nothing about the outcome. Routing it
-// onto the role's operation rather than refusing it is what keeps that path
-// working over http; it carries no reason-per-item and no force, so the mapping
-// is total.
+// Routing it onto the role's operation rather than refusing it is what keeps
+// the molecule auto-close (which closes a parent whose children have all
+// finished) and the other raw closes cmd/bd makes outside `bd close` working
+// over http. It sends force because the raw close is the unguarded one
+// everywhere else: dolt, embedded and proxied run it as
+// issueops.CloseIssueInTx, which applies neither the close guards nor close
+// policy, and its signature carries no force a caller could use to waive a
+// refusal those backends never make. Sent unforced, a pinned or claimed root
+// would stop closing over http and nowhere else. The template guard has no
+// bypass on the wire, so a template still refuses here where the other
+// backends close it; no raw caller is known to close one.
 func (s *Store) CloseIssue(ctx context.Context, id, reason, actor, session string) error {
 	w, err := s.roleWire("CloseIssue")
 	if err != nil {
@@ -912,6 +918,6 @@ func (s *Store) CloseIssue(ctx context.Context, id, reason, actor, session strin
 	if err := requireID("issue id", id); err != nil {
 		return err
 	}
-	_, err = w.CloseIssue(ctx, id, closeBody(actor, reason, session, false))
+	_, err = w.CloseIssue(ctx, id, closeBody(actor, reason, session, true))
 	return err
 }
