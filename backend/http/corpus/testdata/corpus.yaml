@@ -172,7 +172,6 @@ shapes:
     source: gc bdstore.go bdReadyArgs (BdStore.Ready, ready --json --limit 0)
     args: [ready, --json, --limit, "0"]
     compare: ids
-    pending: {slice: "S15", reason: "ready --limit 0 omits limit and the server default page silently caps the answer (B3 #2)"}
   - id: gc-ready-ephemeral-assignee-unlimited
     source: gc bdstore.go bdReadyArgs with --include-ephemeral --assignee
     args: [ready, --json, --include-ephemeral, --assignee, worker, --limit, "0"]
@@ -185,7 +184,6 @@ shapes:
     source: gc workquery.go bdReadyPoolDemandShell (work_query, --include-ephemeral --limit 0)
     args: [ready, --include-ephemeral, --metadata-field, gc.routed_to=pool-a, --unassigned, --exclude-type=epic, --exclude-label, "hold:mayor", --exclude-label, "hold:external", --json, --limit, "0"]
     compare: ids
-    pending: {slice: "S15", reason: "ready --limit 0 silently capped by the server's default page (B3 #2)"}
   - id: gc-ready-workflow-migration
     source: gc workquery.go bdReadyPoolDemandMigrationShell (--sort oldest --limit 0)
     args: [ready, --include-ephemeral, --metadata-field, gc.run_target=pool-a, --metadata-field, gc.kind=workflow, --unassigned, --exclude-type=epic, --exclude-label, "hold:mayor", --exclude-label, "hold:external", --json, --sort, oldest, --limit, "0"]
@@ -309,7 +307,6 @@ shapes:
     source: gc workquery.go bdQueryEphemeralStatusShell (--limit=0, wisp tier)
     args: [query, --json, "ephemeral=true AND status=open", --limit=0]
     compare: ids
-    pending: {slice: "S15", reason: "query --limit=0 sends limit=0 and a non-loopback server refuses unlimited reads (B3 #3)"}
   - id: mc-query
     source: mc pr_merge.py (bd query)
     args: [query, --json, "status=open AND priority<=1", --limit, "50"]
