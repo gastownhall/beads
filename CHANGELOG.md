@@ -174,6 +174,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`httpclient.ErrUnlimitedReadCap`) naming the cap, never truncated. A
   malformed cap value is an error on every unlimited read rather than a
   fall back to the default.
+- Two molecule capability tokens on `bd serve`. `issues.close.autoCloseMolecule`
+  announces that `POST /v0/beads/issues/{id}:close` and `POST
+  /v0/beads/issues:batchClose` accept `auto_close_molecule` and answer
+  `auto_closed_molecule` and `molecule_auto_close_refusal`;
+  `issues.advanceMolecule` is the new `POST
+  /v0/beads/issues/{id}:advanceMolecule`, `bd close --continue`'s advance.
+  Both run the one library entry (`issueops.CloseRequest.AutoCloseMolecule`,
+  `issueops.MoleculeStepper`) on the server. The public `issueops` package
+  gains the molecule rules as one implementation over the BatchGetter,
+  Relations and EdgeReader roles (`MoleculeRoots`, `LoadMolecule`,
+  `AnalyzeMolecule`, `ViewMolecule`, `ReadMoleculeProgress`,
+  `ActiveMoleculeIDs`, `CompletedMolecule`, `MoleculeRootClose`); a
+  molecule's membership is the parent-child edge. Against a server that
+  does not advertise a token the HTTP client refuses a library close that
+  sets `AutoCloseMolecule`, or an advance, before dialing, with a typed
+  capability error; it never runs a client-side copy of either rule.
 
 ### Changed
 
@@ -211,6 +227,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   migrate-personal` and the missing-id lookup fallback all read the same
   local-only answer, and none pays a settings round trip for it. Local
   backends still fall back to the database values.
+- **The molecule auto-close runs inside the step's close, and an error in
+  it fails the close.** `bd close` of a molecule's last step closes the
+  root in the same transaction (opt-in `AutoCloseMolecule`, so an
+  orchestrator that runs its own molecule lifecycle is not doubled), and it
+  replays on an idempotent re-close. A root the close policy refuses stays
+  open and is reported, as before; any other failure of the root close (a
+  storage error, a lost race on the root's revision) now fails the step's
+  close with it, where the CLI used to close the root afterwards and only
+  warn.
+- **`bd close --continue` claims the next step for real.** The advance is
+  the `MoleculeStepper` role on every route: the assignee is set and a step
+  another agent holds is skipped, never taken (the direct and http routes
+  used to flip the status only).
+- **`bd mol current`, `bd mol progress`, `bd ready --mol` and `bd mol show`
+  read through the library's molecule entries on every route**, so
+  membership is the parent-child edge everywhere (`bd mol show` no longer
+  adds children found only by an id pattern).
+- **Against a server without the molecule tokens, `bd close` says what it
+  did not do.** If the server does not advertise
+  `issues.close.autoCloseMolecule` (an older `bd serve`, or one whose
+  orchestrator owns the molecule lifecycle), the close goes out without the
+  auto-close request and a notice on stderr names the molecule the closed
+  step belongs to. If it does not advertise `issues.advanceMolecule`, `bd
+  close --continue` refuses before closing anything, so the step is never
+  left closed with the next step unclaimed.
 - Every `bd` invocation used to start two git subprocesses before doing any
   work: `git rev-parse` to locate the repository and `git config user.name`
   to resolve the actor. On Linux the repository is now located in-process
@@ -302,6 +343,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   role through (see *Added*). A missing id is a plain not-found after one
   `getIssue`, instead of a partial-id search refusal, and `bd update
   <absent> --claim` answers a not-found gc classifies.
+- `bd create --parent` works on the HTTP backend: the create role mints the
+  `<parent>.<n>` child id (and inherits the parent's labels) inside the
+  create on every route, instead of the CLI reserving it through a raw
+  `GetNextChildID` the HTTP backend does not serve. `bd mol current` (with
+  or without an id) and `bd mol progress` no longer answer empty or refuse
+  over http, and `bd ready --mol` step rows carry their assignee and
+  timestamps.
 - **PRs based on `hotfix/**` branches now run full CI, not just
   cross-version historical smokes and triage labeling.** `pr.yml`,
   `pr-risk.yml`, `conformance.yml`, `cross-version-smoke.yml` and
