@@ -425,9 +425,9 @@ func runBatchOp(ctx context.Context, tx storage.Transaction, op batchOp) (batchO
 		if len(op.args) >= 3 {
 			depType = op.args[2]
 		}
-		dt := types.DependencyType(depType)
-		if !dt.IsValid() {
-			return result, fmt.Errorf("dep add: invalid dependency type %q", depType)
+		dt := canonicalDependencyType(types.DependencyType(depType))
+		if err := validateDependencyType(dt); err != nil {
+			return result, fmt.Errorf("dep add: %w", err)
 		}
 		dep := &types.Dependency{
 			IssueID:     from,
