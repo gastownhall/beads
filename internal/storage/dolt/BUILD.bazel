@@ -219,6 +219,7 @@ go_test(
         "events_test.go",
         "expected_revision_contract_test.go",
         "external_gc_path_test.go",
+        "external_ref_history_contract_test.go",
         "federation_pull_settle_test.go",
         "federation_test.go",
         "field_length_test.go",
