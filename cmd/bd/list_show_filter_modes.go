@@ -298,4 +298,3 @@ func gatherProxiedHierarchical(ctx context.Context, uw uow.UnitOfWork, parentID 
 	out = append(out, descendants...)
 	return out, nil
 }
-
