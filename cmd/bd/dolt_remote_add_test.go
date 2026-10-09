@@ -121,11 +121,10 @@ func (f *fakeDoltRemoteAddStoreWithDisk) RemoveRemote(ctx context.Context, name 
 	return f.fakeDoltRemoteAddStore.RemoveRemote(ctx, name)
 }
 
-// TestEnsureDoltRemoteColdStartSameURLIsNoop pins the wy-6k7f7 fence: an
-// empty dolt_remotes listing with the same remote persisted on disk (a
-// freshly started sql-server, GH#2118) must be treated as the existing
-// remote it is — an idempotent re-add writes nothing and asks nothing.
-func TestEnsureDoltRemoteColdStartSameURLIsNoop(t *testing.T) {
+// TestEnsureDoltRemoteColdStartSameURLMigratesToSQL pins that an empty
+// dolt_remotes listing with a matching remote on disk (a freshly started
+// sql-server, GH#2118) populates the SQL store via AddRemote without prompting.
+func TestEnsureDoltRemoteColdStartSameURLMigratesToSQL(t *testing.T) {
 	store := &fakeDoltRemoteAddStoreWithDisk{
 		persisted: []storage.RemoteInfo{
 			{Name: "origin", URL: "https://github.com/org/repo.git"},
@@ -141,10 +140,11 @@ func TestEnsureDoltRemoteColdStartSameURLIsNoop(t *testing.T) {
 		t.Fatalf("ensureDoltRemote: %v", err)
 	}
 	if result.Canceled || prompted {
-		t.Fatalf("cold-start same-URL re-add should be a silent no-op (canceled=%v prompted=%v)", result.Canceled, prompted)
+		t.Fatalf("cold-start same-URL migration should not cancel or prompt (canceled=%v prompted=%v)", result.Canceled, prompted)
 	}
-	if want := []string{"list", "persisted"}; !reflect.DeepEqual(store.calls, want) {
-		t.Fatalf("calls = %v, want %v (no write may reach the store)", store.calls, want)
+	want := []string{"list", "persisted", "add origin git+https://github.com/org/repo.git"}
+	if !reflect.DeepEqual(store.calls, want) {
+		t.Fatalf("calls = %v, want %v", store.calls, want)
 	}
 }
 
