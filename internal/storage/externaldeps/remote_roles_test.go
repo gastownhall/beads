@@ -192,7 +192,9 @@ func (r *remoteClaimFake) IssueClaimer() (issueops.Claimer, error) { return r.cl
 
 func (r *remoteClaimFake) EdgeReader() (issueops.EdgeReader, error) { return fakeEdges{r.deps}, nil }
 
-type fakeEdges struct{ deps map[string][]*types.Dependency }
+type fakeEdges struct {
+	deps map[string][]*types.Dependency
+}
 
 func (f fakeEdges) ReadEdges(_ context.Context, req issueops.EdgeReadRequest) (issueops.EdgeReadResult, error) {
 	out := issueops.EdgeReadResult{}

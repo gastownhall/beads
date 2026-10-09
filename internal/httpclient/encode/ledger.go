@@ -1112,7 +1112,7 @@ func commandRows() []Row {
 		},
 		{
 			ID: "F-partial-id", Kind: KindRefuse,
-			What:     "partial-id resolution refuses with its own taxonomy text",
+			What: "partial-id resolution refuses with its own taxonomy text",
 			Why: "SearchIssueIDs has no wire operation, and the client cannot tell a partial id from a full id that does not exist — so the refusal text covers both outcomes rather than falling through to a raw search error, and it unwraps to ErrNotFound. " +
 				"The store also reports utils.ExactIDLookupStore, so the CLI's routed lookups (show, update, close, reopen, ...) stop at the exact getIssue and answer a plain not-found after that one round trip, never reaching the search (S6b)",
 			SpecRow:  "D11",
