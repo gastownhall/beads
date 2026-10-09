@@ -88,6 +88,12 @@ func (p *uowProvider) BlockingAnnotator() (publicops.BlockingAnnotator, error) {
 func (p *uowProvider) TreeWalker() (publicops.TreeWalker, error)   { return uow.NewTreeWalker(p) }
 func (p *uowProvider) BatchGetter() (publicops.BatchGetter, error) { return uow.NewBatchGetter(p) }
 
+// MoleculeStepper composes over this decorator's own roles, so the advance's
+// claim answers to the external-dependency policy the claimer applies.
+func (p *uowProvider) MoleculeStepper() (publicops.MoleculeStepper, error) {
+	return uow.NewMoleculeStepper(p)
+}
+
 func (p *uowProvider) GraphCounter() (publicops.GraphCounter, error) {
 	return uow.NewGraphCounter(p)
 }
@@ -185,6 +191,7 @@ var (
 	_ uow.IssueLifecycleSource           = (*uowProvider)(nil)
 	_ uow.IssueReaderSource              = (*uowProvider)(nil)
 	_ uow.IssueClaimerSource             = (*uowProvider)(nil)
+	_ uow.MoleculeStepperSource          = (*uowProvider)(nil)
 	_ uow.RelationsSource                = (*uowProvider)(nil)
 	_ uow.EdgeReaderSource               = (*uowProvider)(nil)
 	_ uow.BlockingAnnotatorSource        = (*uowProvider)(nil)

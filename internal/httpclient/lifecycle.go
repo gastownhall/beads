@@ -417,6 +417,17 @@ func (l *httpLifecycle) Close(ctx context.Context, req issueops.CloseRequest) (i
 
 	body := closeBody(req.Actor, req.Reason, req.Session, req.Force)
 	body.ExpectedVersion = revisionGuard(req.ExpectedVersion)
+	// AutoCloseMolecule rides the member only where the server advertises it;
+	// elsewhere the close goes out without it and the library's role-composed
+	// auto-close runs after it (molecule.go). Explicitly degraded, never
+	// dropped.
+	sendAutoClose, degradeAutoClose, err := l.store.autoCloseMoleculeMember(ctx, req.AutoCloseMolecule)
+	if err != nil {
+		return issueops.CloseResult{}, err
+	}
+	if sendAutoClose {
+		body.AutoCloseMolecule = &sendAutoClose
+	}
 	res, err := l.wire.CloseIssue(ctx, req.IssueID, body)
 	if err != nil {
 		return issueops.CloseResult{}, err
@@ -427,11 +438,19 @@ func (l *httpLifecycle) Close(ctx context.Context, req issueops.CloseRequest) (i
 	if issue.RowVersion, err = parseRevision("closeIssue", res.Revision); err != nil {
 		return issueops.CloseResult{}, err
 	}
-	return issueops.CloseResult{
-		Issue:        &issue,
-		Changed:      !res.AlreadyClosed,
-		OpenChildren: res.OpenChildren,
-	}, nil
+	result := issueops.CloseResult{
+		Issue:              &issue,
+		Changed:            !res.AlreadyClosed,
+		OpenChildren:       res.OpenChildren,
+		AutoClosedMolecule: res.AutoClosedMolecule,
+	}
+	if res.MoleculeAutoCloseRefusal != nil {
+		result.MoleculeAutoCloseRefusal = *res.MoleculeAutoCloseRefusal
+	}
+	if degradeAutoClose {
+		result.AutoClosedMolecule, result.MoleculeAutoCloseRefusal = l.store.autoCloseMoleculeOverRoles(ctx, req.IssueID, req.Actor, req.Session)
+	}
+	return result, nil
 }
 
 // Reopen dials POST issues/{id}:reopen.

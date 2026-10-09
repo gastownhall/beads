@@ -22,6 +22,7 @@ go_library(
         "issue_reader.go",
         "memories.go",
         "metadata_cas.go",
+        "molecule_stepper.go",
         "querier.go",
         "ready_claimer.go",
         "ready_counter.go",

@@ -102,6 +102,9 @@ var opCapability = map[string]string{
 	// the block above states: the server publishes it ahead of the accessor
 	// that dials it, and the set-equality gate needs its token here first.
 	OpBatchGetIssues: "issues.batchGet",
+	// The advance-a-molecule role (moleculestepper.go) dials it when served
+	// and composes the same role over this client's own roles when not.
+	OpAdvanceMolecule: "issues.advanceMolecule",
 }
 
 // CapProjectEnforce is the behavior capability the server advertises to announce
@@ -203,6 +206,16 @@ const CapSweepLimit = "issues.sweep.limit"
 // capability error rather than silently dropping graph lineage a caller
 // asked to carry against an older server.
 const CapBatchApplyDepAddLineage = "issues.batchApply.depAddLineage"
+
+// CapCloseAutoCloseMolecule is the behavior capability announcing that
+// closeIssue and batchCloseIssues accept `auto_close_molecule` and answer
+// the auto-closed root, spelled exactly as httpapi's
+// CapIssuesCloseAutoCloseMolecule. lifecycle.go and batchcloser.go send the
+// member only when this is advertised; against an older server they close
+// first and then run the library's role-composed auto-close
+// (issueops.CloseCompletedMolecule) — a DEGRADED, two-transaction form of the
+// same rule, never a silent drop.
+const CapCloseAutoCloseMolecule = "issues.close.autoCloseMolecule"
 
 // CapExternalDependencies is the CONDITIONAL behavior capability announcing
 // that the ready, claim and close operations of this server apply bd's
@@ -342,7 +355,7 @@ func (e *WireRevisionSkewError) Unwrap() error { return ErrWireRevisionSkew }
 var behaviorCapabilities = []string{
 	CapProjectEnforce, CapBatchApplyLarge, CapListSort, CapCountScope,
 	CapSweepWispsPlane, CapSweepLiveDependents, CapSweepLimit,
-	CapBatchApplyDepAddLineage,
+	CapBatchApplyDepAddLineage, CapCloseAutoCloseMolecule,
 }
 
 // CapabilityFor reports the capability token gating op, and whether op is on

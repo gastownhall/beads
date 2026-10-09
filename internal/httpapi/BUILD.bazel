@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "httpapi",
     srcs = [
+        "advance_molecule.go",
         "auth.go",
         "batch_apply.go",
         "batch_close.go",
@@ -62,6 +63,7 @@ go_library(
 go_test(
     name = "httpapi_test",
     srcs = [
+        "advance_molecule_test.go",
         "auth_test.go",
         "batch_apply_test.go",
         "batch_close_test.go",

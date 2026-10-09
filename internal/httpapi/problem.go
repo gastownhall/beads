@@ -413,6 +413,9 @@ const (
 	// the reason and session under first-close-wins, the done-status
 	// normalization, and the close policy vocabulary.
 	OpCloseIssue = "closeIssue"
+	// OpAdvanceMolecule moves a molecule on after one of its steps closed: the
+	// operation behind `bd close --continue` (issueops.MoleculeStepper).
+	OpAdvanceMolecule = "advanceMolecule"
 	// OpReopenIssue is the close's mirror, and it completes the lifecycle pair
 	// so a recovery flow works end to end over this surface. It is the one write
 	// here with no POLICY conflict code: reopen takes an issue OUT of the done
@@ -850,6 +853,13 @@ var operationCodes = map[string][]Code{
 	// members make unrelated claims.
 	OpCloseIssue: {
 		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound, CodeNotClosable, CodePreconditionFailed,
+		CodeBusy, CodeDBUnavailable, CodeInternal,
+	},
+	// No conflict code: a ready step another actor holds, or one moved out of
+	// a claimable status, is skipped for the next one rather than refused —
+	// the role's own rule — so the only 404 is the path id's.
+	OpAdvanceMolecule: {
+		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
 	// ONE 409, and it is a PRECONDITION rather than a policy. Close has a policy

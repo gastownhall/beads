@@ -378,6 +378,15 @@ type Storage interface {
 	// assignee and status, which is on_update — the same event the journal
 	// already records for it. See hook_releaser.go.
 	Releaser() (issueops.Releaser, error)
+	// MoleculeStepper returns the advance-a-molecule surface for this store:
+	// find a molecule's next ready step after one closed and, on request,
+	// claim it — the operation behind `bd close --continue`. Every local
+	// backend answers issueops.NewMoleculeStepper composed over its own
+	// roles; a remote backend serves it over its wire.
+	//
+	// It is a WRITE role and its hook decorator WRAPS: a claimed step fires
+	// on_update, as every claim does.
+	MoleculeStepper() (issueops.MoleculeStepper, error)
 
 	// Issue CRUD
 	CreateIssue(ctx context.Context, issue *types.Issue, actor string) error

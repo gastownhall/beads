@@ -40,6 +40,7 @@ go_library(
         "hook_issue_reader.go",
         "hook_memories.go",
         "hook_metadata_cas.go",
+        "hook_molecule_stepper.go",
         "hook_querier.go",
         "hook_ready_claimer.go",
         "hook_ready_counter.go",

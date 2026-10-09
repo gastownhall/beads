@@ -25,6 +25,7 @@ const (
 	OpGetIssue                = "getIssue"
 	OpClaimIssue              = "claimIssue"
 	OpCloseIssue              = "closeIssue"
+	OpAdvanceMolecule         = "advanceMolecule"
 	OpReopenIssue             = "reopenIssue"
 	OpUpdateIssue             = "updateIssue"
 	OpSweepIssues             = "sweepIssues"
@@ -96,11 +97,12 @@ const (
 // its colon must be literal — which is the whole reason escapeSegment escapes a
 // colon inside the id itself.
 const (
-	MethodClaim       = ":claim"
-	MethodClose       = ":close"
-	MethodReopen      = ":reopen"
-	MethodRelease     = ":release"
-	MethodCASMetadata = ":casMetadata"
+	MethodClaim           = ":claim"
+	MethodClose           = ":close"
+	MethodReopen          = ":reopen"
+	MethodAdvanceMolecule = ":advanceMolecule"
+	MethodRelease         = ":release"
+	MethodCASMetadata     = ":casMetadata"
 )
 
 // The sub-resource collections that hang off the issue-detail path. Unlike a
@@ -126,7 +128,7 @@ func IssuePath(id string) (string, error) {
 // final segment: /v0/beads/issues/{id}:claim and its two siblings.
 func IssueMethodPath(id, method string) (string, error) {
 	switch method {
-	case MethodClaim, MethodClose, MethodReopen, MethodRelease, MethodCASMetadata:
+	case MethodClaim, MethodClose, MethodReopen, MethodRelease, MethodCASMetadata, MethodAdvanceMolecule:
 	default:
 		return "", fmt.Errorf("no custom method %q on the issue resource", method)
 	}

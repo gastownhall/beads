@@ -40,6 +40,7 @@ go_library(
         "lifecycle_update_contract.go",
         "memories_contract.go",
         "metadata_cas_contract.go",
+        "molecule_contract.go",
         "portable.go",
         "querier_contract.go",
         "reader_contract.go",

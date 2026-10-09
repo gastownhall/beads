@@ -437,8 +437,15 @@ func (o *issueOperations) Close(ctx context.Context, request publicops.CloseRequ
 		if err != nil {
 			return publicops.CloseResult{}, "", err
 		}
-		return publicops.CloseResult{Issue: hydrated, Changed: !semanticIssueEqual(before, hydrated), OpenChildren: closed.OpenChildren},
-			"close issue", nil
+		result := publicops.CloseResult{Issue: hydrated, Changed: !semanticIssueEqual(before, hydrated), OpenChildren: closed.OpenChildren}
+		if attempt.AutoCloseMolecule {
+			auto, err := CloseCompletedMoleculeInUOW(ctx, uw, attempt.IssueID, attempt.Actor, attempt.Session)
+			if err != nil {
+				return publicops.CloseResult{}, "", err
+			}
+			result.AutoClosedMolecule, result.MoleculeAutoCloseRefusal = auto.Root, auto.Refusal
+		}
+		return result, "close issue", nil
 	})
 }
 

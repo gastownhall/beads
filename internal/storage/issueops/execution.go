@@ -322,7 +322,16 @@ func ExecuteClose(ctx context.Context, tx *sql.Tx, request publicops.CloseReques
 	if err != nil {
 		return publicops.CloseResult{}, nil, err
 	}
-	return publicops.CloseResult{Issue: hydrated, Changed: changed, OpenChildren: closed.OpenChildren}, tables, nil
+	result := publicops.CloseResult{Issue: hydrated, Changed: changed, OpenChildren: closed.OpenChildren}
+	if attempt.AutoCloseMolecule {
+		auto, autoTables, err := CloseCompletedMoleculeInTx(ctx, tx, attempt.IssueID, attempt.Actor, attempt.Session)
+		if err != nil {
+			return publicops.CloseResult{}, nil, err
+		}
+		tables.Merge(autoTables)
+		result.AutoClosedMolecule, result.MoleculeAutoCloseRefusal = auto.Root, auto.Refusal
+	}
+	return result, tables, nil
 }
 
 // ExecuteReopen applies a guarded reopen in tx and reports durable tables changed.

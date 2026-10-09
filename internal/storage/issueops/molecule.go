@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // GetMoleculeProgressInTx returns progress stats for a molecule within an
@@ -110,4 +111,77 @@ func GetMoleculeProgressInTx(ctx context.Context, tx *sql.Tx, moleculeID string)
 	}
 
 	return stats, nil
+}
+
+// TxMoleculeReader binds the molecule rules (issueops.MoleculeReader) to a
+// caller's transaction: it runs the SAME BatchGetter, Relations and EdgeReader
+// bodies the store-backed roles run, against tx, so a close that decides
+// whether it completed a molecule reads the state its own writes produced.
+type TxMoleculeReader struct{ Tx DBTX }
+
+var _ = publicops.MoleculeReaderOver(TxMoleculeReader{})
+
+// GetMany is the BatchGetter body (ExecuteGetMany) in the bound transaction.
+func (r TxMoleculeReader) GetMany(ctx context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error) {
+	return ExecuteGetMany(ctx, r.Tx, request)
+}
+
+// Related is the Relations body (ExecuteRelated) in the bound transaction.
+func (r TxMoleculeReader) Related(ctx context.Context, request publicops.RelatedRequest) ([]*publicops.RelatedIssue, error) {
+	if err := ValidateRelatedRequest(request); err != nil {
+		return nil, err
+	}
+	return ExecuteRelated(ctx, r.Tx, request)
+}
+
+// ReadEdges is the EdgeReader body (ExecuteEdgeRead) in the bound transaction.
+func (r TxMoleculeReader) ReadEdges(ctx context.Context, request publicops.EdgeReadRequest) (publicops.EdgeReadResult, error) {
+	if err := ValidateEdgeReadRequest(request); err != nil {
+		return publicops.EdgeReadResult{}, err
+	}
+	return ExecuteEdgeRead(ctx, r.Tx, request)
+}
+
+// MoleculeAutoClose is what one CloseCompletedMoleculeInTx did.
+type MoleculeAutoClose struct {
+	// Root is the post-close snapshot of the root it closed, or nil.
+	Root *types.Issue
+	// Refusal is why a completed root stayed open (its close policy refused
+	// it), or "".
+	Refusal string
+}
+
+// CloseCompletedMoleculeInTx is CloseRequest.AutoCloseMolecule's body for the
+// store-backed backends: when closing stepID completed an auto-closing
+// molecule (issueops.CompletedMolecule, read in tx), it closes the root in tx
+// through ExecuteClose — unforced, guarded on the root revision read in the
+// same transaction, recording issueops.MoleculeAutoCloseReason and session.
+//
+// A close-policy refusal of the root is answered as MoleculeAutoClose.Refusal
+// and writes nothing (the checked close rolls back to its savepoint); the
+// caller's own close stands. Any other failure is returned and fails the
+// caller's transaction.
+func CloseCompletedMoleculeInTx(ctx context.Context, tx *sql.Tx, stepID, actor, session string) (MoleculeAutoClose, ChangedTables, error) {
+	root, err := publicops.CompletedMolecule(ctx, publicops.MoleculeReaderOver(TxMoleculeReader{Tx: tx}), stepID)
+	if err != nil || root == nil {
+		return MoleculeAutoClose{}, nil, err
+	}
+	version := root.RowVersion
+	closed, tables, err := ExecuteClose(ctx, tx, publicops.CloseRequest{
+		Actor:           actor,
+		IssueID:         root.ID,
+		Reason:          publicops.MoleculeAutoCloseReason,
+		Session:         session,
+		ExpectedVersion: &version,
+	})
+	if publicops.IsMoleculeAutoCloseRefusal(err) {
+		return MoleculeAutoClose{Refusal: err.Error()}, nil, nil
+	}
+	if err != nil {
+		return MoleculeAutoClose{}, nil, fmt.Errorf("auto-closing molecule %s: %w", root.ID, err)
+	}
+	if !closed.Changed {
+		return MoleculeAutoClose{}, tables, nil
+	}
+	return MoleculeAutoClose{Root: closed.Issue}, tables, nil
 }

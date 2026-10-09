@@ -3297,6 +3297,64 @@ paths:
         '503':
           $ref: '#/components/responses/Unavailable'
 
+  /v0/beads/issues/{id}:advanceMolecule:
+    post:
+      operationId: advanceMolecule
+      summary: Advance a molecule to its next ready step
+      description: >-
+        The operation behind `bd close --continue`: after the step this path
+        names closed, find where its molecule stands and, with `auto_claim`,
+        claim the next ready step for `actor`.
+
+
+        A step is READY when it is open and no open step of the same molecule
+        blocks it (blocks, conditional-blocks or waits-for). The claim is a
+        real claim — the step's assignee becomes `actor` — and a step another
+        actor holds is skipped, never taken: a ready step lost that way, or one
+        moved out of a claimable status since it was read, falls through to
+        the next ready step. When every ready step is lost nothing is claimed
+        and `next_step` names the first.
+
+
+        A step in no molecule answers 200 with no `molecule_id`. A step id that
+        names nothing is `404`.
+      parameters:
+        - $ref: '#/components/parameters/IssueID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdvanceMoleculeRequest'
+      security:
+        - bearerToken: []
+      responses:
+        '200':
+          description: Where the molecule stands, and what was claimed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdvanceMoleculeResponse'
+        '400':
+          description: >-
+            Invalid request: an unknown query parameter, an unparseable or
+            oversized body, an unknown body member, or an `actor` that is empty
+            after trimming, longer than 256 bytes, or carrying control
+            characters.
+          x-bd-codes: [invalid_argument]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
   /v0/beads/issues/{id}:reopen:
     post:
       operationId: reopenIssue
@@ -7939,7 +7997,8 @@ components:
             `dependencies.add`, `dependencies.remove`,
             `memories.list`, `memories.get`, `memories.remember`,
             `memories.forget`, `events.list`, `events.watch`,
-            `issues.casMetadata`; the behavior tokens are `project.enforce`,
+            `issues.casMetadata`, `issues.advanceMolecule`; the behavior
+            tokens are `project.enforce`,
             which announces that a `Bd-Project-Id` stamp for the wrong workspace
             is refused here rather than silently ignored,
             `issues.batchApplyLarge`, which announces that
@@ -7975,7 +8034,13 @@ components:
             `issues.batchApply.depAddLineage`, which announces that a
             `dep_add` item on `POST /v0/beads/issues:batchApply` accepts
             `has_spawner` and `thread_id` (see `ApplyDepAddItem`) rather than
-            a `400` naming the member unknown. One behavior token is
+            a `400` naming the member unknown, and
+            `issues.close.autoCloseMolecule`, which announces that
+            `POST /v0/beads/issues/{id}:close` and
+            `POST /v0/beads/issues:batchClose` accept `auto_close_molecule`
+            and answer `auto_closed_molecule` and
+            `molecule_auto_close_refusal` rather than a `400` naming the
+            member unknown. One behavior token is
             CONDITIONAL rather than build-level: `policy.external_dependencies`
             announces that this server's ready, claim, claim-next, close,
             blocking and dependency-tree operations already apply bd's
@@ -10866,6 +10931,17 @@ components:
             validation and it never bypasses existence: an id that names nothing
             refuses whether or not this is set. It is request-wide because the
             flag that spells it is.
+        auto_close_molecule:
+          type: boolean
+          default: false
+          description: >-
+            Behind the `issues.close.autoCloseMolecule` behavior token: an
+            older server answers `unknown_parameter` for this name.
+            `CloseIssueRequest.auto_close_molecule` for every item that closed
+            or was already closed, run after all the closes inside the same
+            transaction, so a batch that closes several steps of one molecule
+            closes its root once — reported on the outcome of the item whose
+            close completed it.
 
     BatchCloseItem:
       type: object
@@ -10978,6 +11054,15 @@ components:
             Prose for a refusal, never load-bearing and present only with
             `code`. It reflects the request and this server's own words rather
             than the role's message, for the reason `Problem.detail` gives.
+        auto_closed_molecule:
+          $ref: '#/components/schemas/Issue'
+        molecule_auto_close_refusal:
+          type: string
+          description: >-
+            `CloseIssueResponse.molecule_auto_close_refusal` for this item,
+            under `issues.close.autoCloseMolecule`; `auto_closed_molecule`
+            beside it is `CloseIssueResponse.auto_closed_molecule`. Present
+            only on a successful item.
 
     Blocker:
       type: object
@@ -11003,6 +11088,47 @@ components:
             The blocking edge's dependency type (`blocks`, `waits-for`,
             `conditional-blocks`). ABSENT when the refusal did not report it,
             which is the case for an `external:` blocker.
+
+    AdvanceMoleculeRequest:
+      type: object
+      additionalProperties: false
+      required: [actor]
+      properties:
+        actor:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^[^\u0000-\u001F\u007F-\u009F\u2028\u2029]+$'
+          description: >-
+            Who advances, and with `auto_claim` the claimed step's assignee.
+            `ClaimRequest.actor`'s rules exactly.
+        auto_claim:
+          type: boolean
+          default: false
+          description: >-
+            Claim the next ready step for `actor`. Without it the operation
+            writes nothing and only names the step.
+    AdvanceMoleculeResponse:
+      type: object
+      required: [closed_step, complete, claimed]
+      properties:
+        closed_step:
+          $ref: '#/components/schemas/Issue'
+        molecule_id:
+          type: string
+          description: >-
+            The step's molecule root. ABSENT when the step belongs to no
+            molecule, and then nothing else below is set.
+        complete:
+          type: boolean
+          description: >-
+            Every step of the molecule is closed; `next_step` is then absent.
+        next_step:
+          $ref: '#/components/schemas/Issue'
+        claimed:
+          type: boolean
+          description: >-
+            `next_step` was claimed for `actor`, and is the post-claim row.
 
     CloseIssueRequest:
       type: object
@@ -11087,6 +11213,28 @@ components:
             member. The token spans the FULL 64-bit range, so a number would be
             rounded past 2^53 by an IEEE-754-double parser and the guard would miss a
             row nothing else touched; a string round-trips exactly in every consumer.
+        auto_close_molecule:
+          type: boolean
+          default: false
+          description: >-
+            Behind the `issues.close.autoCloseMolecule` behavior token: an
+            older server answers `unknown_parameter` for this name, and a
+            client checks the token before sending it.
+
+
+            Close the issue's molecule root IN THE SAME TRANSACTION when this
+            close completed it: the root is an auto-closing molecule root (a
+            `molecule`-typed or ephemeral root, or a template-labeled epic),
+            it is open, and every step under it is now closed. The root close
+            is unforced, guarded on the root revision read inside that
+            transaction, and records `all steps complete` and this request's
+            `session`. It runs for an idempotent re-close too, so replaying
+            the close of a molecule's last step heals a root left open.
+
+
+            OPT-IN, because an orchestrator may run its own molecule
+            lifecycle. A root that close policy refuses stays open, is named
+            in `molecule_auto_close_refusal`, and never fails this close.
     CloseIssueResponse:
       type: object
       required: [issue, already_closed, open_children, revision]
@@ -11131,6 +11279,17 @@ components:
             `float` — rounds anything past 2^53 to a value NEAR the token that is not
             it, so a guard composed from it is refused against a row nothing else
             touched. A string round-trips exactly in every consumer.
+        auto_closed_molecule:
+          $ref: '#/components/schemas/Issue'
+        molecule_auto_close_refusal:
+          type: string
+          description: >-
+            With `issues.close.autoCloseMolecule` and `auto_close_molecule`:
+            why the molecule root this close completed stayed open — the
+            root's own close policy refused it (a live blocker on the root).
+            Prose; absent when nothing was refused. `auto_closed_molecule`,
+            beside it, is the root the close also closed, absent when none
+            was.
     ReopenIssueRequest:
       type: object
       additionalProperties: false

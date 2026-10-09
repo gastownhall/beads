@@ -2387,3 +2387,23 @@ func logValue(v any) string {
 func millis(d time.Duration) string {
 	return strconv.FormatFloat(float64(d)/float64(time.Millisecond), 'f', 3, 64)
 }
+
+// moleculeStepper returns the advance-a-molecule surface for one request.
+//
+// On the store-shaped source there is no configured field for it: the role is
+// issueops.NewMoleculeStepper composed over roles the source already carries
+// (batch getter, relations, edge reader, claimer, lifecycle), so building it
+// here from those is the same composition a store's own accessor makes. On the
+// provider it is built over the timed wrapper, the same two-step every role
+// above performs.
+func (s *Server) moleculeStepper(r *http.Request) (issueops.MoleculeStepper, error) {
+	if s.provider == nil {
+		return issueops.NewMoleculeStepper(issueops.MoleculeStepperRoles{
+			Reader:    issueops.MoleculeReader{BatchGetter: s.issueBatchGetter, Relations: s.issueRelations, EdgeReader: s.issueEdges},
+			Claimer:   checkedClaimer{inner: s.issueClaimer},
+			Lifecycle: checkedLifecycle{inner: s.issueLifecycle},
+		}), nil
+	}
+	var src uow.MoleculeStepperSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.MoleculeStepper()
+}

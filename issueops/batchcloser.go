@@ -68,6 +68,14 @@ type CloseBatchRequest struct {
 	// rule, the same nil-means-nothing-eligible outcome. Restating them here
 	// is how the two would come apart.
 	ClaimNext *ReadyRequest
+	// AutoCloseMolecule is CloseRequest.AutoCloseMolecule for every item
+	// that closed or was already closed. It runs after all the closes and
+	// before ClaimNext, inside the same transaction, so a batch that closes
+	// several steps of one molecule closes its root once, reported on the
+	// outcome of the item whose close completed it. An auto-closed root is a
+	// landing: it is named in the batch's history entry. It does not earn
+	// ClaimNext's claim on its own.
+	AutoCloseMolecule bool
 }
 
 // CloseOutcome is what happened to ONE requested item.
@@ -84,6 +92,10 @@ type CloseOutcome struct {
 	// OpenChildren is the number of open children observed by a forced close
 	// of this item. It is reported even for an idempotent re-close.
 	OpenChildren int
+	// AutoClosedMolecule and MoleculeAutoCloseRefusal are
+	// CloseResult's, for this item, under CloseBatchRequest.AutoCloseMolecule.
+	AutoClosedMolecule       *Issue
+	MoleculeAutoCloseRefusal string
 	// Err is this item's refusal, and NEVER aborts the rest of the batch. It
 	// carries the same typed close vocabulary Lifecycle.Close returns —
 	// ErrNotFound, ErrCloseBlocked, *CloseOpenChildrenError — so a caller

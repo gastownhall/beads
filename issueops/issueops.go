@@ -370,6 +370,22 @@ type CloseRequest struct {
 	// a miss refuses with ErrVersionMismatch having written nothing. Force
 	// bypasses close policy and never this guard.
 	ExpectedVersion *int64
+	// AutoCloseMolecule closes the issue's molecule root IN THE SAME
+	// TRANSACTION when this close completed it: the root closes itself when
+	// complete (AutoClosesWhenComplete), it is open, and every step under it
+	// is now closed (CompletedMolecule). The root close is unforced, guarded
+	// on the root revision read inside that transaction, and records
+	// MoleculeAutoCloseReason and this request's Session.
+	//
+	// It runs for an idempotent re-close too: the rule is state-derived, so a
+	// replayed close of the last step heals a root a crash left open.
+	//
+	// IT IS OPT-IN because an orchestrator may run its own molecule
+	// lifecycle (gc closes molecule roots itself); the zero value never
+	// touches a root. A root close the close policy refuses (a live blocker
+	// on the root) leaves the root open and is reported on
+	// CloseResult.MoleculeAutoCloseRefusal; it never fails the step close.
+	AutoCloseMolecule bool
 }
 
 // ReopenRequest describes an issue reopening.
@@ -432,6 +448,13 @@ type CloseResult struct {
 	// OpenChildren is the number of open children observed by a forced close.
 	// It is reported even for an idempotent re-close.
 	OpenChildren int
+	// AutoClosedMolecule is the molecule root CloseRequest.AutoCloseMolecule
+	// closed in this close's transaction, as a post-close snapshot with
+	// labels. Nil when nothing was auto-closed.
+	AutoClosedMolecule *Issue
+	// MoleculeAutoCloseRefusal says why a completed molecule's root stayed
+	// open: the root's own close policy refused it. Empty otherwise.
+	MoleculeAutoCloseRefusal string
 }
 
 // ReopenResult reports the post-reopen issue as a detached post-state snapshot

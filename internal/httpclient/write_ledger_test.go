@@ -180,6 +180,10 @@ func writeShapes() []writeShape {
 				// (#5506) and the client wave sends it (ga-jbuyf), so it left
 				// the pending set for this one.
 				"ExpectedVersion": member("expected_version"),
+				// Sent where issues.close.autoCloseMolecule is advertised;
+				// against an older server the client runs the library's
+				// role-composed auto-close after the close instead (S16).
+				"AutoCloseMolecule": member("auto_close_molecule"),
 			},
 		},
 		{
@@ -442,10 +446,11 @@ func writeShapes() []writeShape {
 			source: reflect.TypeOf(issueops.CloseBatchRequest{}),
 			body:   reflect.TypeOf(apigen.BatchCloseRequest{}),
 			carried: map[string]carriage{
-				"Actor":   member("actor"),
-				"Items":   member("items"),
-				"Session": member("session"),
-				"Force":   member("force"),
+				"Actor":             member("actor"),
+				"Items":             member("items"),
+				"Session":           member("session"),
+				"Force":             member("force"),
+				"AutoCloseMolecule": member("auto_close_molecule"),
 			},
 		},
 		{

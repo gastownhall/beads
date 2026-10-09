@@ -31,7 +31,7 @@ const (
 // lists at each level, refused BY NAME for the reason every other body on this
 // surface is.
 var (
-	batchCloseRequestMembers = []string{claimActorMember, "items", "session", "force"}
+	batchCloseRequestMembers = []string{claimActorMember, "items", "session", "force", autoCloseMoleculeMember}
 	batchCloseItemMembers    = []string{"id", "reason"}
 )
 
@@ -114,6 +114,8 @@ func closeOutcome(outcome issueops.CloseOutcome) apigen.CloseOutcome {
 		if issue != nil {
 			wire.Issue = issue
 		}
+		wire.AutoClosedMolecule = outcome.AutoClosedMolecule
+		wire.MoleculeAutoCloseRefusal = optionalString(outcome.MoleculeAutoCloseRefusal)
 		return wire
 	}
 
@@ -173,6 +175,10 @@ func (s *Server) batchCloseRequest(w http.ResponseWriter, r *http.Request) (issu
 	if !ok {
 		return issueops.CloseBatchRequest{}, false
 	}
+	autoCloseMolecule, ok := s.booleanMember(w, r, members, autoCloseMoleculeMember)
+	if !ok {
+		return issueops.CloseBatchRequest{}, false
+	}
 	items, ok := s.batchCloseItems(w, r, members)
 	if !ok {
 		return issueops.CloseBatchRequest{}, false
@@ -181,10 +187,11 @@ func (s *Server) batchCloseRequest(w http.ResponseWriter, r *http.Request) (issu
 	// need a second, body-shaped spelling of the ready-filter vocabulary that
 	// listReadyWork and claimNext both express as query parameters.
 	return issueops.CloseBatchRequest{
-		Actor:   actor,
-		Items:   items,
-		Session: session,
-		Force:   force,
+		Actor:             actor,
+		Items:             items,
+		Session:           session,
+		Force:             force,
+		AutoCloseMolecule: autoCloseMolecule,
 	}, true
 }
 

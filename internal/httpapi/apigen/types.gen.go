@@ -321,6 +321,33 @@ type AddDependenciesResponse struct {
 	Added []DependencyEdge `json:"added"`
 }
 
+// AdvanceMoleculeRequest defines model for AdvanceMoleculeRequest.
+type AdvanceMoleculeRequest struct {
+	// Actor Who advances, and with `auto_claim` the claimed step's assignee. `ClaimRequest.actor`'s rules exactly.
+	Actor string `json:"actor"`
+
+	// AutoClaim Claim the next ready step for `actor`. Without it the operation writes nothing and only names the step.
+	AutoClaim *bool `json:"auto_claim,omitempty"`
+}
+
+// AdvanceMoleculeResponse defines model for AdvanceMoleculeResponse.
+type AdvanceMoleculeResponse struct {
+	// Claimed `next_step` was claimed for `actor`, and is the post-claim row.
+	Claimed bool `json:"claimed"`
+
+	// ClosedStep A tracked work item. Property semantics documented here apply to every schema that repeats them below.
+	ClosedStep Issue `json:"closed_step"`
+
+	// Complete Every step of the molecule is closed; `next_step` is then absent.
+	Complete bool `json:"complete"`
+
+	// MoleculeId The step's molecule root. ABSENT when the step belongs to no molecule, and then nothing else below is set.
+	MoleculeId *string `json:"molecule_id,omitempty"`
+
+	// NextStep A tracked work item. Property semantics documented here apply to every schema that repeats them below.
+	NextStep *Issue `json:"next_step,omitempty"`
+}
+
 // AnchorEdgeCount One anchor's edge cardinality, or the report that it is not there.
 type AnchorEdgeCount struct {
 	// Count How many stored edges match, in the requested direction, after the type and status filters. Never negative.
@@ -764,6 +791,9 @@ type BatchCloseRequest struct {
 	// Actor Who is closing. `ClaimRequest.actor`'s rules exactly, and the value is recorded against every item.
 	Actor string `json:"actor"`
 
+	// AutoCloseMolecule Behind the `issues.close.autoCloseMolecule` behavior token: an older server answers `unknown_parameter` for this name. `CloseIssueRequest.auto_close_molecule` for every item that closed or was already closed, run after all the closes inside the same transaction, so a batch that closes several steps of one molecule closes its root once — reported on the outcome of the item whose close completed it.
+	AutoCloseMolecule *bool `json:"auto_close_molecule,omitempty"`
+
 	// Force Bypass close policy — the open-children refusal and the live-blocker refusal — for EVERY item, and nothing else. It never bypasses validation and it never bypasses existence: an id that names nothing refuses whether or not this is set. It is request-wide because the flag that spells it is.
 	Force *bool `json:"force,omitempty"`
 
@@ -920,6 +950,13 @@ type CloseIssueRequest struct {
 	// Actor Who is closing the issue. `ClaimRequest.actor`'s rules exactly: the server trims it, then refuses an empty result, anything longer than 256 BYTES (the `maxLength` above counts characters — the byte limit is the binding one), and any control character including newline. The value reaches stored columns, event-stream attribution and the storage commit message, so an unvalidated newline would forge audit-trail lines.
 	Actor string `json:"actor"`
 
+	// AutoCloseMolecule Behind the `issues.close.autoCloseMolecule` behavior token: an older server answers `unknown_parameter` for this name, and a client checks the token before sending it.
+	//
+	// Close the issue's molecule root IN THE SAME TRANSACTION when this close completed it: the root is an auto-closing molecule root (a `molecule`-typed or ephemeral root, or a template-labeled epic), it is open, and every step under it is now closed. The root close is unforced, guarded on the root revision read inside that transaction, and records `all steps complete` and this request's `session`. It runs for an idempotent re-close too, so replaying the close of a molecule's last step heals a root left open.
+	//
+	// OPT-IN, because an orchestrator may run its own molecule lifecycle. A root that close policy refuses stays open, is named in `molecule_auto_close_refusal`, and never fails this close.
+	AutoCloseMolecule *bool `json:"auto_close_molecule,omitempty"`
+
 	// ExpectedVersion Requires the row's revision to equal this value BEFORE the close. A miss refuses the whole request with `409 precondition_failed` and writes nothing — `UpdateIssueRequest.expected_version`'s contract, on the operation that closes one row.
 	//
 	// IT IS CHECKED BEFORE THE IDEMPOTENT RE-CLOSE, which is the one place this guard differs from the update's. A re-close of a row somebody else has moved since the caller read it is a `409` and not the 200-with-`already_closed` the same body earns without a guard: a replay whose premise has expired is a refusal the caller wants to see, and it is the only way `already_closed` can be trusted as "nothing has happened here since".
@@ -946,8 +983,14 @@ type CloseIssueResponse struct {
 	// AlreadyClosed True when the issue was already closed and this call changed nothing — the idempotent re-close, mirroring `ClaimResponse.already_claimed`. The response still carries the row, and `reason`/`session` were not rewritten.
 	AlreadyClosed bool `json:"already_closed"`
 
+	// AutoClosedMolecule A tracked work item. Property semantics documented here apply to every schema that repeats them below.
+	AutoClosedMolecule *Issue `json:"auto_closed_molecule,omitempty"`
+
 	// Issue A tracked work item. Property semantics documented here apply to every schema that repeats them below.
 	Issue Issue `json:"issue"`
+
+	// MoleculeAutoCloseRefusal With `issues.close.autoCloseMolecule` and `auto_close_molecule`: why the molecule root this close completed stayed open — the root's own close policy refused it (a live blocker on the root). Prose; absent when nothing was refused. `auto_closed_molecule`, beside it, is the root the close also closed, absent when none was.
+	MoleculeAutoCloseRefusal *string `json:"molecule_auto_close_refusal,omitempty"`
 
 	// OpenChildren How many open children the close observed. Reported by a FORCED close — including an idempotent re-close — because a caller that bypassed the guard is exactly the caller that wants the number. An unforced close that got this far had none, so it reports 0.
 	OpenChildren int `json:"open_children"`
@@ -969,6 +1012,9 @@ type CloseOutcome struct {
 	// A BATCH WHOSE ITEMS ARE ALL `true` LANDED NOTHING, and records no history entry: a per-item success that changed nothing is not work the caller did.
 	AlreadyClosed *bool `json:"already_closed,omitempty"`
 
+	// AutoClosedMolecule A tracked work item. Property semantics documented here apply to every schema that repeats them below.
+	AutoClosedMolecule *Issue `json:"auto_closed_molecule,omitempty"`
+
 	// Blockers With `not_closable` on the live-blocker refusal: the blockers that refused THIS item, exactly as `Problem.blockers` carries them for the single close, and optional for the same reason. Absent on a successful item and on every other refusal.
 	Blockers *[]Blocker `json:"blockers,omitempty"`
 
@@ -985,6 +1031,9 @@ type CloseOutcome struct {
 
 	// IssueId The id the caller asked for, echoed verbatim so an outcome can be read without indexing back into the request.
 	IssueId string `json:"issue_id"`
+
+	// MoleculeAutoCloseRefusal `CloseIssueResponse.molecule_auto_close_refusal` for this item, under `issues.close.autoCloseMolecule`; `auto_closed_molecule` beside it is `CloseIssueResponse.auto_closed_molecule`. Present only on a successful item.
+	MoleculeAutoCloseRefusal *string `json:"molecule_auto_close_refusal,omitempty"`
 
 	// OpenChildren How many open children the transaction observed for this item.
 	//
@@ -1047,7 +1096,7 @@ type ContextResponse struct {
 	// OPTIONAL, and absent means only that this server does not disclose its filesystem layout — never that it has no workspace. A client MUST NOT require it, MUST NOT treat absence as an error, and has no use for the value beyond display: it is a path on the SERVER's filesystem, which the client cannot open. Identify the workspace by `project_id` and `database`, which are required.
 	BeadsDir *string `json:"beads_dir,omitempty"`
 
-	// Capabilities The tokens this server advertises: the OPERATIONS it implements, derived from its route table, and the server-wide BEHAVIORS it enforces. v0's operation vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.count`, `issues.get`, `issues.related`, `issues.create`, `issues.addComment`, `issues.batchClose`, `issues.claim`, `issues.claimNext`, `issues.release`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchGet`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `config.set`, `config.unset`, `dependencies.cycles`, `dependencies.list`, `dependencies.count`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`; the behavior tokens are `project.enforce`, which announces that a `Bd-Project-Id` stamp for the wrong workspace is refused here rather than silently ignored, `issues.batchApplyLarge`, which announces that `POST /v0/beads/issues:batchApply` accepts the RAISED envelope — up to 1000 items (`ApplyBatchRequest.items.maxItems`), a 16 MiB body, and (for a request over 100 items) a run budget that EXTENDS to an operator-configured ceiling (`bd serve --large-apply-ceiling`, 5 minutes by default) — rather than the original 100-item, 4 MiB bound. The ceiling is a flat whole-run budget, not a value scaled by item count: a 101-item request and a 1000-item request both get the same extended budget. A request at or under 100 items is unaffected either way and keeps the server's ordinary deadline exactly as before. A client that checks for this token before sending a plan over 100 items learns whether THIS server accepts it without paying for a round trip an older server would refuse anyway, and `issues.list.sort`, which announces that `GET /v0/beads/issues` accepts the `sort` query parameter (two closed, pageable total orders — see that parameter) rather than silently answering `unknown_parameter`, and `issues.count.scope`, which announces that `GET /v0/beads/issues:count` accepts `parent`, `no_parent`, `exclude_type`, and `exclude_status` (see those parameters) rather than silently answering `unknown_parameter` for all four, `issues.sweep.wispsPlane`, which announces that `POST /v0/beads/issues:sweep` accepts the `wisps-plane` value of `tier` rather than silently answering `invalid_value`, `issues.sweep.liveDependents`, which announces that the same operation accepts `protect_live_dependents` and answers `skipped.live_dependent` rather than silently answering `unknown_parameter`, `issues.sweep.limit`, which announces that it accepts `limit` and answers `remaining` rather than silently answering `unknown_parameter`, and `issues.batchApply.depAddLineage`, which announces that a `dep_add` item on `POST /v0/beads/issues:batchApply` accepts `has_spawner` and `thread_id` (see `ApplyDepAddItem`) rather than a `400` naming the member unknown. One behavior token is CONDITIONAL rather than build-level: `policy.external_dependencies` announces that this server's ready, claim, claim-next, close, blocking and dependency-tree operations already apply bd's external-dependency policy (an issue blocked by an unsatisfied `external:<project>:<capability>` dependency is neither ready, claimable nor closable without force). A server advertises it only when it enforces that policy; a client that sees it must not apply the policy again, and a client that does not see it applies the policy itself. The list grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation or a behavior — never the version string.
+	// Capabilities The tokens this server advertises: the OPERATIONS it implements, derived from its route table, and the server-wide BEHAVIORS it enforces. v0's operation vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.count`, `issues.get`, `issues.related`, `issues.create`, `issues.addComment`, `issues.batchClose`, `issues.claim`, `issues.claimNext`, `issues.release`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchGet`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `config.set`, `config.unset`, `dependencies.cycles`, `dependencies.list`, `dependencies.count`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`, `issues.advanceMolecule`; the behavior tokens are `project.enforce`, which announces that a `Bd-Project-Id` stamp for the wrong workspace is refused here rather than silently ignored, `issues.batchApplyLarge`, which announces that `POST /v0/beads/issues:batchApply` accepts the RAISED envelope — up to 1000 items (`ApplyBatchRequest.items.maxItems`), a 16 MiB body, and (for a request over 100 items) a run budget that EXTENDS to an operator-configured ceiling (`bd serve --large-apply-ceiling`, 5 minutes by default) — rather than the original 100-item, 4 MiB bound. The ceiling is a flat whole-run budget, not a value scaled by item count: a 101-item request and a 1000-item request both get the same extended budget. A request at or under 100 items is unaffected either way and keeps the server's ordinary deadline exactly as before. A client that checks for this token before sending a plan over 100 items learns whether THIS server accepts it without paying for a round trip an older server would refuse anyway, and `issues.list.sort`, which announces that `GET /v0/beads/issues` accepts the `sort` query parameter (two closed, pageable total orders — see that parameter) rather than silently answering `unknown_parameter`, and `issues.count.scope`, which announces that `GET /v0/beads/issues:count` accepts `parent`, `no_parent`, `exclude_type`, and `exclude_status` (see those parameters) rather than silently answering `unknown_parameter` for all four, `issues.sweep.wispsPlane`, which announces that `POST /v0/beads/issues:sweep` accepts the `wisps-plane` value of `tier` rather than silently answering `invalid_value`, `issues.sweep.liveDependents`, which announces that the same operation accepts `protect_live_dependents` and answers `skipped.live_dependent` rather than silently answering `unknown_parameter`, `issues.sweep.limit`, which announces that it accepts `limit` and answers `remaining` rather than silently answering `unknown_parameter`, and `issues.batchApply.depAddLineage`, which announces that a `dep_add` item on `POST /v0/beads/issues:batchApply` accepts `has_spawner` and `thread_id` (see `ApplyDepAddItem`) rather than a `400` naming the member unknown, and `issues.close.autoCloseMolecule`, which announces that `POST /v0/beads/issues/{id}:close` and `POST /v0/beads/issues:batchClose` accept `auto_close_molecule` and answer `auto_closed_molecule` and `molecule_auto_close_refusal` rather than a `400` naming the member unknown. One behavior token is CONDITIONAL rather than build-level: `policy.external_dependencies` announces that this server's ready, claim, claim-next, close, blocking and dependency-tree operations already apply bd's external-dependency policy (an issue blocked by an unsatisfied `external:<project>:<capability>` dependency is neither ready, claimable nor closable without force). A server advertises it only when it enforces that policy; a client that sees it must not apply the policy again, and a client that does not see it applies the policy itself. The list grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation or a behavior — never the version string.
 	//
 	// THIS LIST IS BUILD-LEVEL, NOT WORKSPACE-LEVEL. It says which operations this binary serves, and for every entry but two that is the whole answer. `events.list` and `events.watch` are the exceptions: the durable events journal is a per-workspace setting that is OFF by default, so a server that advertises them may still refuse every request to both with 409 `events_journal_disabled` — correctly, because the operations exist and the workspace has no journal. A consumer of either MUST treat the capability as "this server speaks it" and the 409 as "not on this workspace", and must not read the capability as a promise that records will arrive.
 	Capabilities []string `json:"capabilities"`
@@ -2759,6 +2808,9 @@ type UpdateIssueJSONRequestBody = UpdateIssueRequest
 
 // AddCommentJSONRequestBody defines body for AddComment for application/json ContentType.
 type AddCommentJSONRequestBody = AddCommentRequest
+
+// AdvanceMoleculeJSONRequestBody defines body for AdvanceMolecule for application/json ContentType.
+type AdvanceMoleculeJSONRequestBody = AdvanceMoleculeRequest
 
 // CompareAndSetMetadataJSONRequestBody defines body for CompareAndSetMetadata for application/json ContentType.
 type CompareAndSetMetadataJSONRequestBody = CompareAndSetMetadataRequest

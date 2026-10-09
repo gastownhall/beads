@@ -123,10 +123,28 @@ func (b *httpBatchCloser) CloseBatch(ctx context.Context, req issueops.CloseBatc
 	if err != nil {
 		return issueops.CloseBatchResult{}, err
 	}
-	if served {
-		return b.serveBatch(ctx, req)
+	// AutoCloseMolecule rides the member only where the server advertises it;
+	// elsewhere the batch goes out without it and the library's role-composed
+	// auto-close runs over every item that closed (molecule.go).
+	sendAutoClose, degradeAutoClose, err := b.store.autoCloseMoleculeMember(ctx, req.AutoCloseMolecule)
+	if err != nil {
+		return issueops.CloseBatchResult{}, err
 	}
-	return b.serveComposedSingle(ctx, req)
+	if served {
+		result, err = b.serveBatch(ctx, req, sendAutoClose)
+	} else {
+		result, err = b.serveComposedSingle(ctx, req)
+	}
+	if err != nil || !degradeAutoClose {
+		return result, err
+	}
+	for i := range result.Outcomes {
+		outcome := &result.Outcomes[i]
+		if outcome.Err == nil {
+			outcome.AutoClosedMolecule, outcome.MoleculeAutoCloseRefusal = b.store.autoCloseMoleculeOverRoles(ctx, outcome.IssueID, req.Actor, req.Session)
+		}
+	}
+	return result, nil
 }
 
 // servesBatchClose reports whether the server advertises issues.batchClose. It
@@ -157,8 +175,11 @@ func (b *httpBatchCloser) servesBatchClose(ctx context.Context) (bool, error) {
 
 // serveBatch sends the whole request on one issues:batchClose call and reads the
 // per-item outcomes back.
-func (b *httpBatchCloser) serveBatch(ctx context.Context, req issueops.CloseBatchRequest) (issueops.CloseBatchResult, error) {
+func (b *httpBatchCloser) serveBatch(ctx context.Context, req issueops.CloseBatchRequest, autoCloseMolecule bool) (issueops.CloseBatchResult, error) {
 	body := batchCloseBody(req)
+	if autoCloseMolecule {
+		body.AutoCloseMolecule = &autoCloseMolecule
+	}
 	resp, err := b.wire.BatchCloseIssues(ctx, body)
 	if err != nil {
 		return issueops.CloseBatchResult{}, err
@@ -265,6 +286,10 @@ func decodeBatchCloseOutcome(item apigen.CloseOutcome) issueops.CloseOutcome {
 		out.OpenChildren = *item.OpenChildren
 	}
 	out.Changed = item.AlreadyClosed == nil || !*item.AlreadyClosed
+	out.AutoClosedMolecule = item.AutoClosedMolecule
+	if item.MoleculeAutoCloseRefusal != nil {
+		out.MoleculeAutoCloseRefusal = *item.MoleculeAutoCloseRefusal
+	}
 	return out
 }
 

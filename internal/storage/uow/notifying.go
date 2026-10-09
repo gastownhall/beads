@@ -242,6 +242,10 @@ func (p *notifyingProvider) BatchGetter() (publicops.BatchGetter, error) {
 	return NewBatchGetter(p)
 }
 
+func (p *notifyingProvider) MoleculeStepper() (publicops.MoleculeStepper, error) {
+	return NewMoleculeStepper(p)
+}
+
 func (p *notifyingProvider) Counter() (publicops.Counter, error) { return NewCounter(p) }
 
 func (p *notifyingProvider) ReadyCounter() (publicops.ReadyCounter, error) {
@@ -405,6 +409,7 @@ var (
 	_ TreeWalkerSource          = (*notifyingProvider)(nil)
 	_ GraphCounterSource        = (*notifyingProvider)(nil)
 	_ BatchGetterSource         = (*notifyingProvider)(nil)
+	_ MoleculeStepperSource     = (*notifyingProvider)(nil)
 	_ CounterSource             = (*notifyingProvider)(nil)
 	_ ReadyCounterSource        = (*notifyingProvider)(nil)
 	_ ReadyClaimerSource        = (*notifyingProvider)(nil)

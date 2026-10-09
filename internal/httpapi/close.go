@@ -17,7 +17,11 @@ import (
 // schema is additionalProperties: false, so anything else is refused BY NAME —
 // which is why the body is decoded as raw members first, the posture claim and
 // batchCreate already take.
-var closeRequestMembers = []string{"actor", "reason", "session", "force", expectedVersionMember}
+var closeRequestMembers = []string{"actor", "reason", "session", "force", expectedVersionMember, autoCloseMoleculeMember}
+
+// autoCloseMoleculeMember is the request member behind
+// CapIssuesCloseAutoCloseMolecule, shared by the single and the batch close.
+const autoCloseMoleculeMember = "auto_close_molecule"
 
 // handleClose closes one issue: the second half of the loop this surface exists
 // to serve, and the half that still forked a subprocess.
@@ -73,10 +77,12 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 	// fill. types.Issue.RowVersion is `json:"-"`, so the Issue body cannot carry
 	// it and this member is where it lives — updateIssue's arrangement exactly.
 	writeJSON(w, apigen.CloseIssueResponse{
-		Issue:         *result.Issue,
-		AlreadyClosed: !result.Changed,
-		OpenChildren:  result.OpenChildren,
-		Revision:      types.RevisionToken(result.Issue.RowVersion),
+		Issue:                    *result.Issue,
+		AlreadyClosed:            !result.Changed,
+		OpenChildren:             result.OpenChildren,
+		Revision:                 types.RevisionToken(result.Issue.RowVersion),
+		AutoClosedMolecule:       result.AutoClosedMolecule,
+		MoleculeAutoCloseRefusal: optionalString(result.MoleculeAutoCloseRefusal),
 	})
 }
 
@@ -118,14 +124,19 @@ func (s *Server) closeRequest(w http.ResponseWriter, r *http.Request, id string)
 		s.fail(w, r, *res)
 		return issueops.CloseRequest{}, false
 	}
+	autoCloseMolecule, ok := s.booleanMember(w, r, members, autoCloseMoleculeMember)
+	if !ok {
+		return issueops.CloseRequest{}, false
+	}
 
 	return issueops.CloseRequest{
-		Actor:           actor,
-		IssueID:         id,
-		Reason:          reason,
-		Session:         session,
-		Force:           force,
-		ExpectedVersion: expectedVersion,
+		Actor:             actor,
+		IssueID:           id,
+		Reason:            reason,
+		Session:           session,
+		Force:             force,
+		ExpectedVersion:   expectedVersion,
+		AutoCloseMolecule: autoCloseMolecule,
 	}, true
 }
 
@@ -284,3 +295,11 @@ func versionPreconditionResult(expected *int64) Result {
 // the three operations that publish it so the member name a client reads off
 // `param` cannot drift from the member name it sent.
 const expectedVersionMember = "expected_version"
+
+// optionalString spells "" as an absent member.
+func optionalString(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
+}

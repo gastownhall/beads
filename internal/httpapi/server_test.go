@@ -637,7 +637,7 @@ func TestCapabilitiesAdvertiseEveryImplementedOperation(t *testing.T) {
 	// oracle rather than a second call to the code under test.
 	want = append(want, "project.enforce", "issues.batchApplyLarge", "issues.list.sort", "issues.count.scope",
 		"issues.sweep.wispsPlane", "issues.sweep.liveDependents", "issues.sweep.limit",
-		"issues.batchApply.depAddLineage")
+		"issues.batchApply.depAddLineage", "issues.close.autoCloseMolecule")
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		t.Errorf("capabilities = %v, want %v", got, want)

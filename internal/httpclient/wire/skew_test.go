@@ -117,9 +117,10 @@ func TestAgainstAFirstSliceServerEveryPostBaselineOperationRefusesWithCaseTwoDat
 	// related read, the mini-sync to thirty-five: the comment write and the two
 	// config writes, and the batch read (upstream #7248) to thirty-six. Each is
 	// an operation a first-slice server never served and this client does not
-	// yet dial, which is exactly the shape the refusal matrix is about.
-	if len(refused) != 36 {
-		t.Fatalf("the post-baseline set has %d operations a first-slice server never served, want 36", len(refused))
+	// yet dial, which is exactly the shape the refusal matrix is about. The
+	// molecule advance (S16) makes thirty-seven.
+	if len(refused) != 37 {
+		t.Fatalf("the post-baseline set has %d operations a first-slice server never served, want 37", len(refused))
 	}
 
 	// The compat op forces the handshake yet preflights clean: issues.claim is on
