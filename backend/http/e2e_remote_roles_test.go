@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -89,6 +90,14 @@ func (f *remoteRolesFixture) seed() {
 
 func (f *remoteRolesFixture) titlesOf(out string) []string {
 	f.t.Helper()
+	titles := f.orderedTitlesOf(out)
+	sort.Strings(titles)
+	return titles
+}
+
+// orderedTitlesOf is titlesOf in the listing's own order.
+func (f *remoteRolesFixture) orderedTitlesOf(out string) []string {
+	f.t.Helper()
 	rows := jsonRows(f.t, out)
 	titles := make([]string, 0, len(rows))
 	for _, row := range rows {
@@ -96,7 +105,6 @@ func (f *remoteRolesFixture) titlesOf(out string) []string {
 			titles = append(titles, title)
 		}
 	}
-	sort.Strings(titles)
 	return titles
 }
 
@@ -268,7 +276,6 @@ func TestE2E_ListWithGCFiltersMatchesEmbedded(t *testing.T) {
 	shapes := [][]string{
 		append(append([]string{}, base...), "--limit", "50"),
 		append(append([]string{}, base...), "--limit", "0"),
-		append(append([]string{}, base...), "--limit", "2"),
 		append(append([]string{}, base...), "--limit", "50", "--all"),
 		append(append([]string{}, base...), "--limit", "50", "--label=gc:a"),
 		append(append([]string{}, base...), "--limit", "50", "--assignee=alice"),
@@ -296,6 +303,21 @@ func TestE2E_ListWithGCFiltersMatchesEmbedded(t *testing.T) {
 		got, want := remote.titlesOf(r.stdout), local.titlesOf(l.stdout)
 		if strings.Join(got, ",") != strings.Join(want, ",") {
 			t.Errorf("bd %s: http rows %v, embedded rows %v", name, got, want)
+		}
+	}
+
+	// A limit that cuts the listing. The seed holds four P2 rows, so --limit 2
+	// cuts a priority tie whose created_at order differs between two
+	// workspaces seeded seconds apart: the limited rows are not compared
+	// across sides. Each side's rows must instead be, in order, a prefix of
+	// that SAME side's unlimited listing, and both sides return two rows.
+	limited := append(append([]string{}, base...), "--limit", "2")
+	unlimited := append(append([]string{}, base...), "--limit", "0")
+	for _, f := range []*remoteRolesFixture{remote, local} {
+		cut := f.orderedTitlesOf(f.mustRun(nil, limited...).stdout)
+		all := f.orderedTitlesOf(f.mustRun(nil, unlimited...).stdout)
+		if len(cut) != 2 || len(all) < 2 || !slices.Equal(cut, all[:2]) {
+			t.Errorf("bd %s on %s: rows %v are not the first two of its --limit 0 listing %v", strings.Join(limited, " "), f.dir, cut, all)
 		}
 	}
 }
