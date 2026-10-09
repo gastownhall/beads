@@ -14,9 +14,11 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
@@ -34,6 +36,7 @@ var _ storage.SchemaMigrator = (*EmbeddedDoltStore)(nil)
 var _ storage.EventsJournalConfigurer = (*EmbeddedDoltStore)(nil)
 var _ storage.VersionedHistoryConfigurer = (*EmbeddedDoltStore)(nil)
 var _ storage.ExternalRefHistoryQuerier = (*EmbeddedDoltStore)(nil)
+var _ storage.ExternalRefHistoryBatchQuerier = (*EmbeddedDoltStore)(nil)
 
 // EmbeddedDoltStore implements storage.DoltStorage backed by the embedded Dolt engine.
 // Each method call opens a short-lived connection, executes within an explicit
@@ -1197,6 +1200,35 @@ func (s *EmbeddedDoltStore) PreviousExternalRef(ctx context.Context, issueID str
 		return err
 	})
 	return ref, found, err
+}
+
+// PreviousExternalRefs answers PreviousExternalRef for many issues at one asOf.
+// When a history read fails, the ids it left unanswered are looked up one at
+// a time.
+func (s *EmbeddedDoltStore) PreviousExternalRefs(ctx context.Context, ids []string, asOf time.Time) (map[string]string, error) {
+	var refs map[string]string
+	var unanswered []string
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		refs, unanswered, err = issueops.PreviousExternalRefsInTx(ctx, tx, ids, asOf, sqlbuild.QueryBatchSize)
+		return err
+	})
+	if err != nil && len(unanswered) == 0 {
+		return nil, err
+	}
+	if err != nil {
+		debug.Logf("embeddeddolt: looking up %d ids one at a time after a failed history read: %v\n", len(unanswered), err)
+	}
+	for _, id := range unanswered {
+		ref, found, err := s.PreviousExternalRef(ctx, id, asOf)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			refs[id] = ref
+		}
+	}
+	return refs, nil
 }
 
 // ---------------------------------------------------------------------------

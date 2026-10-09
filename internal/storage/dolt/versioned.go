@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
+
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -90,6 +93,47 @@ func (s *DoltStore) PreviousExternalRef(ctx context.Context, issueID string, asO
 		return nil
 	})
 	return ref, found, err
+}
+
+const historyReadChunk = 16
+
+// PreviousExternalRefs answers PreviousExternalRef for many issues at one asOf.
+// When a history read fails, the batch read is not retried and the ids it
+// left unanswered are looked up one at a time.
+func (s *DoltStore) PreviousExternalRefs(ctx context.Context, ids []string, asOf time.Time) (map[string]string, error) {
+	var refs map[string]string
+	var unanswered []string
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		refs, unanswered, err = issueops.PreviousExternalRefsInTx(ctx, tx, ids, asOf, historyReadChunk)
+		if err == nil {
+			return nil
+		}
+		err = wrapQueryError("get previous external refs", err)
+		// A retry would repeat every read that already succeeded, each
+		// history read can take up to the read timeout, and each failed
+		// attempt counts against the breaker.
+		if len(unanswered) > 0 {
+			return backoff.Permanent(err)
+		}
+		return err
+	})
+	if err != nil && len(unanswered) == 0 {
+		return nil, err
+	}
+	if err != nil {
+		debug.Logf("dolt: looking up %d ids one at a time after a failed history read: %v\n", len(unanswered), err)
+	}
+	for _, id := range unanswered {
+		ref, found, err := s.PreviousExternalRef(ctx, id, asOf)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			refs[id] = ref
+		}
+	}
+	return refs, nil
 }
 
 // ChangedIssueIDs returns the set of issue IDs whose data differs between
