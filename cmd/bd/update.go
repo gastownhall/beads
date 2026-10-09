@@ -164,8 +164,12 @@ pointless).`,
 			}
 			updates["status"] = status
 
-			// If status is being set to closed, include session if provided
+			// If status is being set to closed, apply validation.on-close
+			// the way bd close does, and include session if provided
 			if status == "closed" {
+				if err := validateUpdateCloseReason(); err != nil {
+					return err
+				}
 				session, _ := cmd.Flags().GetString("session")
 				if session == "" {
 					session = os.Getenv("CLAUDE_SESSION_ID")

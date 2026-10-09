@@ -656,6 +656,26 @@ func validateCloseReasons(reasons []string) error {
 	return nil
 }
 
+// updateCloseReasonHint is the hint a refused `bd update --status closed`
+// prints under validation.on-close=error.
+const updateCloseReasonHint = `bd update cannot record a close reason; close the issue with: bd close <id> --reason "<what was done>"`
+
+// validateUpdateCloseReason applies validation.on-close to `bd update
+// --status closed`, so that route gives a missing reason the same verdict
+// `bd close` gives it. bd update has no reason flag, and the update funnels
+// write an empty close_reason on every close (issueops.ManageClosedAt), so the
+// reason checked here is always the empty one: "error" refuses the update with
+// a hint toward bd close --reason, "warn" prints the warning and lets it
+// proceed, and the default ("none") does nothing. This holds when the issue is
+// already closed too, since the update would replace its recorded reason with
+// the empty one.
+func validateUpdateCloseReason() error {
+	if err := validateCloseReasons([]string{""}); err != nil {
+		return HandleErrorWithHintRespectJSON(err.Error(), updateCloseReasonHint)
+	}
+	return nil
+}
+
 // isMachineCheckableGate returns true if the issue is a gate with a machine-checkable await type.
 func isMachineCheckableGate(issue *types.Issue) bool {
 	if issue == nil || issue.IssueType != "gate" {

@@ -204,6 +204,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ones cannot fork.
 
 ### Fixed
+- **`bd update --status closed` now honors `validation.on-close`.** The
+  close-reason check ran only on `bd close` and `bd epic close-eligible`, so a
+  store configured with `validation.on-close: error` still accepted a close
+  with no reason through `bd update`. `bd update` has no reason flag and
+  records an empty close reason, so with `error` it is now refused, with a
+  hint toward `bd close <id> --reason "..."`; with `warn` it prints the
+  warning and proceeds; with the default `none` nothing changes. Both the
+  embedded and proxied-server routes check it before any write.
+
 - **PRs based on `hotfix/**` branches now run full CI, not just
   cross-version historical smokes and triage labeling.** `pr.yml`,
   `pr-risk.yml`, `conformance.yml`, `cross-version-smoke.yml` and
