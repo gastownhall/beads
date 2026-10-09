@@ -313,6 +313,7 @@ go_test(
         "reopen_category_test.go",
         "reopen_routing_test.go",
         "reopen_staging_test.go",
+        "restore_source_test.go",
         "retention_epoch_contract_test.go",
         "retry_test.go",
         "role_fixture_kit_test.go",
