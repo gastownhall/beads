@@ -63,17 +63,20 @@ func bazelRemoteRunsOn(label string) string {
 	return "${{ needs.rbe.outputs.mode == 'remote' && '" + label + "' || 'ubuntu-latest' }}"
 }
 
-// The default lane size: the runner is only an RBE client (every action
-// executes on rbe-west), so 2 vCPU is enough.
-var bazelLaneRunsOn = bazelRemoteRunsOn("blacksmith-2vcpu-ubuntu-2404")
+// The default lane size: every action executes on rbe-west, but the
+// client's loading and analysis is CPU-bound and gates every action
+// (ga-vnycm2.8: 17-38 s on 2 vCPU, 12-26 s on 4), so 4 vCPU.
+var bazelLaneRunsOn = bazelRemoteRunsOn("blacksmith-4vcpu-ubuntu-2404")
 
-// Runner-size A/B (ci/bigger-runners-ab, 2026-10-08): bazel-test's
-// `bazel test //... --config=ci` spent ~63 of its 81 s in client-side loading
-// and analysis (1798 packages, 66k configured targets; critical path 7.65 s,
-// every action a remote cache hit), which Skyframe parallelizes across the
-// client's cores. 4 vCPU; revert to bazelLaneRunsOn if the PR run does not
-// save at least 15 s on that step.
-var bazelTestLaneRunsOn = bazelRemoteRunsOn("blacksmith-4vcpu-ubuntu-2404")
+// rbe-prewarm only dispatches a pool worker: no Bazel client, 2 vCPU.
+var bazelPrewarmRunsOn = bazelRemoteRunsOn("blacksmith-2vcpu-ubuntu-2404")
+
+// bazel-test's `bazel test //... --config=ci` spent ~63 of its 81 s in
+// client-side loading and analysis (1798 packages, 66k configured targets;
+// critical path 7.65 s, every action a remote cache hit), which Skyframe
+// parallelizes across the client's cores: 8 vCPU (ga-vnycm2.8 analysis-only:
+// 25.6 s on 4 vCPU, 16.3 s on 8).
+var bazelTestLaneRunsOn = bazelRemoteRunsOn("blacksmith-8vcpu-ubuntu-2404")
 
 // The package gates: package-npm at 4 vCPU (F3); package-mcp at 8 vCPU with
 // pytest -n 16 (bazelMCPPytestWorkers), since its pytest run is dominated by
@@ -565,9 +568,10 @@ func TestBlacksmithWindowsMacOSRunsOnEveryEvent(t *testing.T) {
 func TestBlacksmithBazelRunnerSizes(t *testing.T) {
 	workflow := readCIWorkflow(t, bazelWorkflowName)
 	wantRemote := map[string]string{
-		bazelJobName:           "blacksmith-4vcpu-ubuntu-2404",
+		bazelJobName:           "blacksmith-8vcpu-ubuntu-2404",
 		bazelPackageMCPJobName: "blacksmith-8vcpu-ubuntu-2404",
 		bazelPackageNPMJobName: "blacksmith-4vcpu-ubuntu-2404",
+		bazelRBEPrewarmJobName: "blacksmith-2vcpu-ubuntu-2404",
 	}
 	mcpGate := workflow.job(t, bazelPackageMCPJobName).step(t, "Run MCP package gate")
 	if got := mcpGate.Env["BEADS_MCP_PYTEST_WORKERS"]; got != bazelMCPPytestWorkers {
@@ -581,7 +585,7 @@ func TestBlacksmithBazelRunnerSizes(t *testing.T) {
 			}
 			want := "ubuntu-latest"
 			if mode == "remote" {
-				want = "blacksmith-2vcpu-ubuntu-2404"
+				want = "blacksmith-4vcpu-ubuntu-2404"
 				if label, ok := wantRemote[name]; ok {
 					want = label
 				}
