@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/encode"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
+	"github.com/steveyegge/beads/internal/storage"
 	storageops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
@@ -442,6 +443,10 @@ func (l *httpLifecycle) applyTemplateGuardForServer(ctx context.Context, req iss
 		return req, nil
 	}
 	before, err := l.store.GetIssue(ctx, req.IssueID)
+	if errors.Is(err, storage.ErrNotFound) {
+		// GetIssue answers a miss with ErrNotFound, like the local stores.
+		return req, nil
+	}
 	if err != nil {
 		return req, err
 	}
