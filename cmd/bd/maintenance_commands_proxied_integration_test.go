@@ -183,7 +183,7 @@ func TestProxiedServerCompactHistory(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)
-	p := newSharedProxiedProject(t, bd, "cphist")
+	p := newSharedProxiedRootProject(t, bd, "cphist")
 
 	for _, title := range []string{"keep-alpha", "keep-beta", "keep-gamma"} {
 		bdProxiedCreate(t, bd, p.dir, title, "--type", "task")

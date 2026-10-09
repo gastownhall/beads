@@ -56,7 +56,7 @@ name coverage.
 
 The manifest file holds more than one block (one per total_shards value in
 use): the legacy, frozen 15-shard block pr-risk.yml/main.yml's jobs read, and
-the Bazel-only lane's own block (44 shards since 2026-10-09). By default this prints
+the Bazel-only lane's own block (28 shards since 2026-10-09). By default this prints
 only the requested total's block to stdout, which is NOT safe to redirect
 straight into the manifest file (`gen... 30 > file` deletes every other
 block). Use --write to update the file in place instead: it replaces only
@@ -81,6 +81,9 @@ import sys
 default_manifest_path = '.github/scripts/proxied-cmd-test-shards.txt'
 
 func_re = re.compile(r'^func (Test(?:ProxiedServer|ServerMode)[A-Za-z0-9_]+)\(')
+# A shared-server bd init: newSharedProxiedProject(WithHooks) or the root
+# variant, newSharedProxiedRootProject.
+shared_init_re = re.compile(r'newSharedProxied(?:Root)?Project')
 
 
 def discover_inits_cost():
@@ -98,7 +101,7 @@ def discover_inits_cost():
             elif ln.startswith('func '):
                 cur = None
             if cur:
-                costs[cur] += ln.count('newSharedProxiedProject')
+                costs[cur] += len(shared_init_re.findall(ln))
     for k in costs:
         costs[k] = max(costs[k], 1)
     return costs

@@ -357,7 +357,7 @@ func TestProxiedServerHistoryRemoteSupportedFrontDoorParity(t *testing.T) {
 		}},
 		{"external-tcp", func(t *testing.T) proxiedProject {
 			requireProxiedServerEnv(t)
-			return newSharedProxiedProject(t, bd, "hs_tcp")
+			return newSharedProxiedRootProject(t, bd, "hs_tcp")
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

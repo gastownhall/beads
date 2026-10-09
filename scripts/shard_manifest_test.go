@@ -220,7 +220,7 @@ func TestShardScriptsListOnlyRealTests(t *testing.T) {
 	}
 }
 
-// S3: the Bazel-only 44-shard block is not frozen like the legacy 15-shard
+// S3: the Bazel-only 28-shard block is not frozen like the legacy 15-shard
 // block (TestShardScriptsListOnlyRealTests's B1 fix catches outright
 // corruption, but not a committed block that has drifted from the currently
 // discovered TestProxiedServer*/TestServerMode* test set, e.g. a test added,
