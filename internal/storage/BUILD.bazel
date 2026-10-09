@@ -8,6 +8,7 @@ go_library(
         "batch.go",
         "batch_apply.go",
         "batch_close_policy.go",
+        "blocked_recomputer.go",
         "bulk_issues.go",
         "child_counter_reservation.go",
         "compaction.go",
@@ -80,6 +81,7 @@ go_test(
     srcs = [
         "batch_apply_test.go",
         "batch_close_policy_test.go",
+        "blocked_recomputer_test.go",
         "contract_leg_registry_test.go",
         "directory_size_test.go",
         "hook_batch_applier_test.go",
