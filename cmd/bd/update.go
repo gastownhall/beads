@@ -472,11 +472,20 @@ pointless).`,
 			pendingCloseResults = nil
 		}
 		for _, id := range args {
-			// Resolve and get issue with routing (e.g., gt-xyz routes to another rig)
+			// Resolve and get issue with routing (e.g., gt-xyz routes to another rig).
+			// mc-zndi7.82: a guarded miss here is a lost race, not a typo; see
+			// reportIfRevisionPreflightGone. requireSingleIfRevisionID makes
+			// this the only id, so returning here skips no other id.
 			result, err := resolveAndGetIssueForMutation(ctx, store, id)
 			if err != nil {
 				if result != nil {
 					result.Close()
+				}
+				if isNotFoundErr(err) {
+					if reported, ok := reportIfRevisionPreflightGone("updating", id, ifRevision); ok {
+						closePendingResults()
+						return reported
+					}
 				}
 				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
 				recordFailure(id, fmt.Sprintf("resolving issue: %v", err))
@@ -485,6 +494,10 @@ pointless).`,
 			if result == nil || result.Issue == nil {
 				if result != nil {
 					result.Close()
+				}
+				if reported, ok := reportIfRevisionPreflightGone("updating", id, ifRevision); ok {
+					closePendingResults()
+					return reported
 				}
 				fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
 				recordFailure(id, "issue not found")

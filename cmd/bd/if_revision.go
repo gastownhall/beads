@@ -175,3 +175,20 @@ func reportIfRevisionFailure(action, id string, err error, ifRevision *int64) (r
 	}
 	return &exitError{Code: 1}, true
 }
+
+// reportIfRevisionPreflightGone reports a guarded write whose pre-flight
+// resolve found no row: reportIfRevisionFailure with storage.ErrNotFound when
+// ifRevision is set, ok=false otherwise so the caller's plain not-found
+// handling runs unchanged. The verbs resolve the id before their guarded
+// write, so a same-token --if-revision racer that loses can see the row
+// vanish there instead of inside the guard; that is the same outcome the
+// guard gives storage.ErrNotFound (mc-zndi7.81, .82). The caller passes no
+// error because isNotFoundErr also accepts ResolvePartialID's unwrapped "no
+// issue found matching" text, which classifyIfRevisionFailure's errors.Is
+// would miss.
+func reportIfRevisionPreflightGone(action, id string, ifRevision *int64) (reportedErr error, ok bool) {
+	if ifRevision == nil {
+		return nil, false
+	}
+	return reportIfRevisionFailure(action, id, storage.ErrNotFound, ifRevision)
+}

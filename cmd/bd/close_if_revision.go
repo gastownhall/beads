@@ -27,13 +27,23 @@ import (
 // already refused more than one id by the time this runs, so there is no
 // batch to preserve here.
 func runCloseDirectIfRevision(ctx context.Context, id, reason string, force bool, session string, expectedVersion int64) error {
+	// mc-zndi7.82: a miss here is a lost race, not a typo; see
+	// reportIfRevisionPreflightGone.
 	result, err := resolveAndGetIssueForMutation(ctx, store, id)
 	if err != nil {
+		if isNotFoundErr(err) {
+			if reported, ok := reportIfRevisionPreflightGone("closing", id, &expectedVersion); ok {
+				return reported
+			}
+		}
 		fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
 		return &exitError{Code: 1}
 	}
 	defer result.Close()
 	if result.Issue == nil {
+		if reported, ok := reportIfRevisionPreflightGone("closing", id, &expectedVersion); ok {
+			return reported
+		}
 		fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
 		return &exitError{Code: 1}
 	}

@@ -126,24 +126,10 @@ Force: Delete and orphan dependents
 		routedResult, err := resolveAndGetIssueForMutation(ctx, store, issueID)
 		if err != nil {
 			if isNotFoundErr(err) {
-				// mc-zndi7.81: this pre-flight existence check runs before
-				// deleter.Delete() and the per-id lock fence #7244 added, so a
-				// same-token --if-revision racer that loses the fence sees the
-				// row disappear right here instead of inside the guarded
-				// write below. That is the same outcome classifyIfRevisionFailure
-				// already gives storage.ErrNotFound (mc-zndi7.73's comment on
-				// that case anticipated exactly this gap): the exact revision
-				// the caller named is gone, so report precondition_failed/
-				// ExitGuardMismatch like every other loser, not an unclassified
-				// exit 1. Passing the literal sentinel rather than err itself
-				// because classifyIfRevisionFailure matches via errors.Is, and
-				// this package's own isNotFoundErr also accepts
-				// ResolvePartialID's unwrapped "no issue found matching" text,
-				// which errors.Is would not recognize.
-				if ifRevision != nil {
-					if reported, ok := reportIfRevisionFailure("deleting", issueID, storage.ErrNotFound, ifRevision); ok {
-						return reported
-					}
+				// mc-zndi7.81: this pre-flight check runs before deleter.Delete()
+				// and the per-id lock fence #7244 added.
+				if reported, ok := reportIfRevisionPreflightGone("deleting", issueID, ifRevision); ok {
+					return reported
 				}
 				return HandleError("issue %s not found", issueID)
 			}
@@ -364,6 +350,13 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 		defer func() { _ = routedStore.Close() }()
 	}
 	if len(notFound) > 0 {
+		// mc-zndi7.83: under --if-revision (exactly one id, per
+		// requireSingleIfRevisionID) wrap the sentinel so the caller's
+		// reportIfRevisionFailure classifies the miss. The unguarded error,
+		// which deleteBatch's other callers also see, is left as it was.
+		if ifRevision != nil {
+			return fmt.Errorf("issues not found: %s: %w", strings.Join(notFound, ", "), storage.ErrNotFound)
+		}
 		return fmt.Errorf("issues not found: %s", strings.Join(notFound, ", "))
 	}
 	batchStore := store

@@ -203,3 +203,44 @@ func TestProxiedClaimReportsAMissingIssue(t *testing.T) {
 		t.Error("a missing issue still reached the contract")
 	}
 }
+
+// TestProxiedUpdateIfRevisionPreflightGone pins mc-zndi7.82 on the proxied
+// route: proxiedUpdateTarget's pre-read runs before the guarded write, so a
+// same-token --if-revision racer that loses can find the row gone there. With
+// the guard set that miss reports precondition_failed / ExitGuardMismatch
+// through the conditional-write envelope, not the batch's "issue not found"
+// verdict TestProxiedClaimReportsAMissingIssue pins for the unguarded case.
+func TestProxiedUpdateIfRevisionPreflightGone(t *testing.T) {
+	p := &claimRoleProvider{
+		lifecycle: &recordingLifecycle{},
+		readErr:   issueops.ErrNotFound,
+	}
+	withClaimRoleProvider(t, p)
+	oldJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = oldJSON })
+
+	rev := int64(7)
+	var fail *updateIDFailure
+	var err error
+	stderr := captureStderrDuring(t, func() {
+		_, fail, err = applyUpdateProxiedOne(context.Background(), "bd-404", &updateInput{
+			fields:     map[string]any{"priority": 3},
+			ifRevision: &rev,
+		})
+	})
+	if fail != nil {
+		t.Fatalf("fail = %+v, want the guard envelope instead of a batch verdict\nstderr:\n%s", fail, stderr)
+	}
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.Code != ExitGuardMismatch {
+		t.Fatalf("err = %#v, want *exitError{Code: %d}\nstderr:\n%s", err, ExitGuardMismatch, stderr)
+	}
+	body := decodeIfRevisionBody(t, lastJSONLine(t, stderr), false)
+	if body["code"] != ifRevisionCodePreconditionFailed {
+		t.Errorf("code = %v, want %q\nstderr:\n%s", body["code"], ifRevisionCodePreconditionFailed, stderr)
+	}
+	if p.lifecycle.request.IssueID != "" {
+		t.Error("a missing issue still reached the contract")
+	}
+}
