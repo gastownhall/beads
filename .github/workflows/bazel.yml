@@ -1399,6 +1399,7 @@ jobs:
           --suite //cmd/bd:bd_embedded_part2_test .github/scripts/embedded-test-shard.sh 50@50/100
           --suite //internal/storage/embeddeddolt:embeddeddolt_embedded_test .github/scripts/embedded-storage-test-shard.sh 40
           --whole //internal/storage/embeddeddolt:embeddeddolt_conformance_core_test
+          --whole //internal/storage/embeddeddolt:embeddeddolt_conformance_core_slow_test
           --whole //internal/storage/embeddeddolt:embeddeddolt_conformance_audit_test
 
       - name: Upload test logs

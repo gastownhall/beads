@@ -344,7 +344,7 @@ func TestBazelRetiredLanesCheckListedTestsRan(t *testing.T) {
 			// The cmd/bd block is split over embeddedCmdTargets: one
 			// --suite each, SHARDS@OFFSET/TOTAL (added below).
 			{"test-embedded-storage", "Test", "//internal/storage/embeddeddolt:embeddeddolt_embedded_test", ".github/scripts/embedded-storage-test-shard.sh", -1},
-		}, []string{"//internal/storage/embeddeddolt:embeddeddolt_conformance_core_test", "//internal/storage/embeddeddolt:embeddeddolt_conformance_audit_test"}},
+		}, []string{"//internal/storage/embeddeddolt:embeddeddolt_conformance_core_test", "//internal/storage/embeddeddolt:embeddeddolt_conformance_core_slow_test", "//internal/storage/embeddeddolt:embeddeddolt_conformance_audit_test"}},
 		{bazelProxiedJobName, "doltserver-proxied", []suite{
 			// bazel-proxied runs its own duration-balanced manifest block
 			// (scripts/ci/proxied_test_durations.json), not PR Risk's frozen
@@ -874,7 +874,11 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 			map[string]string{"BEADS_TEST_EMBEDDED_DOLT": "1"},
 		},
 		"//internal/storage/embeddeddolt:embeddeddolt_conformance_core_test": {
-			[]string{"$(rootpath :embeddeddolt_test)", "-test.v", "-test.count=1", "-test.timeout=19m", "-test.run=^TestConformance$$", "-test.skip=^TestConformance$$/^Audit$$"},
+			[]string{"$(rootpath :embeddeddolt_test)", "-test.v", "-test.count=1", "-test.timeout=19m", "-test.run=^TestConformance$$", "-test.skip=^TestConformance$$/^(Audit|ReadyCountsPageChunking|Portable)$$"},
+			map[string]string{"BEADS_TEST_EMBEDDED_DOLT": "1"},
+		},
+		"//internal/storage/embeddeddolt:embeddeddolt_conformance_core_slow_test": {
+			[]string{"$(rootpath :embeddeddolt_test)", "-test.v", "-test.count=1", "-test.timeout=19m", "-test.run=^TestConformance$$/^(ReadyCountsPageChunking|Portable)$$"},
 			map[string]string{"BEADS_TEST_EMBEDDED_DOLT": "1"},
 		},
 		"//internal/storage/embeddeddolt:embeddeddolt_conformance_audit_test": {

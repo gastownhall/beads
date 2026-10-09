@@ -315,7 +315,13 @@ sh_test(
 )
 
 # PR Risk's "Test (Embedded Dolt Conformance - core)" job: conformance.RunAll
-# except its Audit group, with the job's binary flags but -test.timeout.
+# except its Audit group, with the job's binary flags but -test.timeout. It
+# runs as two targets: this one skips Audit and the groups
+# embeddeddolt_conformance_core_slow_test (below) runs, so the two run every
+# core group exactly once between them (a group added to RunAll lands here).
+# As one action it took 108-150s on rbe-west, ~half of it those two groups.
+# Every RunAll group builds its own store from the factory, so the split
+# shares no state.
 #
 # Tags:
 #   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
@@ -335,7 +341,32 @@ sh_test(
         "-test.count=1",
         "-test.timeout=19m",
         "-test.run=^TestConformance$$",
-        "-test.skip=^TestConformance$$/^Audit$$",
+        "-test.skip=^TestConformance$$/^(Audit|ReadyCountsPageChunking|Portable)$$",
+    ],
+    data = [":embeddeddolt_test"],
+    env = {"BEADS_TEST_EMBEDDED_DOLT": "1"},
+    tags = ["embedded"],
+)
+
+# The slow groups of the core conformance partition (see
+# embeddeddolt_conformance_core_test, which skips exactly these):
+# ReadyCountsPageChunking (~33s) and Portable (~20s) under -race.
+#
+# Tags:
+#   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
+#     selected by --config=embedded.
+sh_test(
+    name = "embeddeddolt_conformance_core_slow_test",
+    size = "large",
+    # -test.timeout=19m: as embeddeddolt_conformance_core_test.
+    timeout = "eternal",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = [
+        "$(rootpath :embeddeddolt_test)",
+        "-test.v",
+        "-test.count=1",
+        "-test.timeout=19m",
+        "-test.run=^TestConformance$$/^(ReadyCountsPageChunking|Portable)$$",
     ],
     data = [":embeddeddolt_test"],
     env = {"BEADS_TEST_EMBEDDED_DOLT": "1"},
