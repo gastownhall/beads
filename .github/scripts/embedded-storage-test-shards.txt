@@ -156,6 +156,7 @@
 15 1 TestMergeWithStrategy_OursKeepsLocal
 
 15 2 TestActiveDatabaseSizeScopesToActiveEmbeddedDatabase
+15 2 TestAdaptiveInsert_GciShape
 15 2 TestCleanGitRemoteCacheGarbage
 15 2 TestCreateBatchFastPathsMatchPerRow_Embedded
 15 2 TestDepRekeyMarkerStillInIgnoredSeries
@@ -230,6 +231,7 @@
 15 4 TestIgnoredCursorHealNeverResurrectsRolledBackVersions
 15 4 TestMain
 15 4 TestMemoriesContract
+15 4 TestMissingRequiredColumnRefusesAtOpen
 15 4 TestPromoteClearsNoHistory
 15 4 TestRemoteVerbPlainRemoteKeepsAmbientEnv
 15 4 TestReopenIssue
@@ -237,6 +239,7 @@
 15 4 TestWithPeerAuth_EnvFallbackDoesNotObservePeerCredentials
 
 15 5 TestActiveDatabaseSizeFailsForMissingEmbeddedDatabase
+15 5 TestAdaptiveRead_GciShape
 15 5 TestBlockingAnnotatorContract
 15 5 TestBootstrapperContract
 15 5 TestBuildDSN_WithDatabase
@@ -406,6 +409,7 @@
 15 10 TestGraphWalkPlansHonorJoinHints
 15 10 TestHelperProcess
 15 10 TestIgnoredCursorHealResumeRespectsOperatorOverride
+15 10 TestJournalShapeProbeOncePerOpen
 15 10 TestReclaimRefusesForeignReplicaLease
 15 10 TestRemoteEntryPointsUseVersionControlOps
 15 10 TestTransactionCleanupBeforeSQLCommitRemainsDefinite

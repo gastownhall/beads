@@ -138,21 +138,25 @@ type sqlServerUOWTopology struct {
 }
 
 // rootProviderOptions is the CLI-side half of the open-posture policy: it
-// turns the root pre-run's two classifications into the uow.ProviderOption
-// slice the proxied-server provider is opened with. Extracted (rather than
-// inlined at the call site) so the wiring has something to unit test; the
-// previous inline form had no test that would fail if a refactor dropped it.
+// turns the root pre-run's classifications into the uow.ProviderOption slice
+// the proxied-server provider is opened with. Extracted (rather than inlined
+// at the call site) so the wiring has something to unit test; the previous
+// inline form had no test that would fail if a refactor dropped it.
 //
-// The two are not exclusive but preview is stronger, and passing both would
-// say two different things about an open that can only have one posture:
-// preview neither creates nor migrates, while readOnly opens normally and only
-// changes how a refused migration is handled. Preview wins.
-func rootProviderOptions(preview, readOnly bool) []uow.ProviderOption {
+// They are not exclusive but preview is stronger, and passing several would
+// say different things about an open that can only have one posture: preview
+// neither creates nor migrates, while readOnly opens normally and only changes
+// how a refused migration is handled. Preview wins, then readOnly. reconcile
+// (bd dolt commit) changes nothing about the open; it only tells events-journal
+// activation that the command writes no beads (uow.OpensForBeadWrites).
+func rootProviderOptions(preview, readOnly, reconcile bool) []uow.ProviderOption {
 	switch {
 	case preview:
 		return []uow.ProviderOption{uow.WithPreview()}
 	case readOnly:
 		return []uow.ProviderOption{uow.WithReadOnly()}
+	case reconcile:
+		return []uow.ProviderOption{uow.WithWorkingSetReconcile()}
 	default:
 		return nil
 	}
@@ -449,7 +453,7 @@ func resolveServerModeUOWTopologyWithTransportResolver(ctx context.Context, bead
 // the paths it resolves (root, log) are the same ones proxied mode uses because
 // both modes root their server at the same directory.
 func newExternalProxiedServerUOWProvider(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts ...uow.ProviderOption) (p uow.UnitOfWorkProvider, err error) {
-	defer func() { p, err = activateEventsJournalProvider(ctx, beadsDir, p, err) }()
+	defer func() { p, err = activateEventsJournalProvider(ctx, beadsDir, uow.OpensForBeadWrites(opts...), p, err) }()
 	rootPath, err := resolveProxiedServerRootPath(beadsDir)
 	if err != nil {
 		return nil, fmt.Errorf("newExternalProxiedServerUOWProvider: resolve root path: %w", err)
@@ -489,7 +493,7 @@ func newExternalProxiedServerUOWProvider(ctx context.Context, beadsDir string, t
 }
 
 func newManagedProxiedServerUOWProvider(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts ...uow.ProviderOption) (p uow.UnitOfWorkProvider, err error) {
-	defer func() { p, err = activateEventsJournalProvider(ctx, beadsDir, p, err) }()
+	defer func() { p, err = activateEventsJournalProvider(ctx, beadsDir, uow.OpensForBeadWrites(opts...), p, err) }()
 	// Resolve and hardened-probe the external dolt binary before spawning
 	// it: an env/sidecar override that is explicitly named but broken
 	// should fail loudly here rather than surface as a confusing spawn

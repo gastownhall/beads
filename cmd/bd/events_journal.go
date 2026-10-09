@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/eventsjournal"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/uow"
 )
@@ -45,8 +46,19 @@ func eventsJournalEnabled() bool {
 // activateEventsJournalStore is eventsjournal.ActivateStore under the name the
 // construction guard matches. Kept as a wrapper rather than called directly so
 // cmd/bd has one spelling of the idiom and the guard has one name to look for.
-func activateEventsJournalStore(beadsDir string, s storage.DoltStorage, err error) (storage.DoltStorage, error) {
-	return eventsjournal.ActivateStore(beadsDir, s, err)
+func activateEventsJournalStore(beadsDir string, writesBeads bool, s storage.DoltStorage, err error) (storage.DoltStorage, error) {
+	return eventsjournal.ActivateStore(beadsDir, writesBeads, s, err)
+}
+
+// opensForBeadWrites reports whether a store opened from cfg is going to write
+// beads — the posture that decides whether an events-journal table the
+// journal cannot run against refuses the open (eventsjournal.Apply). Read-only
+// and preview opens write none. Neither do the working-set-reconcile (bd dolt
+// commit, bd vc commit) and remote-sync (bd dolt pull) opens: they commit or
+// merge a working set rather than mutate beads, and refusing them would lock
+// an operator out of exactly the commands that recover a workspace.
+func opensForBeadWrites(cfg *dolt.Config) bool {
+	return !cfg.ReadOnly && !cfg.Preview && !cfg.LenientOpen && !cfg.RemoteSyncOpen
 }
 
 // eventsJournalMaintenanceRunner returns the plumbing auto-prune should run
@@ -241,12 +253,13 @@ func reportEventsJournalAutoPrune(n int64, err error) {
 
 // activateEventsJournalProvider is the same for a unit-of-work provider — bd's
 // second write plumbing, with its own transactions and its own activation.
-func activateEventsJournalProvider(ctx context.Context, beadsDir string, p uow.UnitOfWorkProvider, err error) (uow.UnitOfWorkProvider, error) {
+// writesBeads is the provider's posture (uow.OpensForBeadWrites).
+func activateEventsJournalProvider(ctx context.Context, beadsDir string, writesBeads bool, p uow.UnitOfWorkProvider, err error) (uow.UnitOfWorkProvider, error) {
 	if err != nil || p == nil {
 		return p, err
 	}
 	configurer, _ := p.(storage.EventsJournalConfigurer)
-	if cfgErr := eventsjournal.Apply(configurer, eventsjournal.EnabledFor(beadsDir)); cfgErr != nil {
+	if cfgErr := eventsjournal.Apply(configurer, eventsjournal.EnabledFor(beadsDir), writesBeads); cfgErr != nil {
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), providerCloseTimeout)
 		defer cancel()
 		_ = p.Close(closeCtx)

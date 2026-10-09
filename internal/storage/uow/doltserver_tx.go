@@ -18,6 +18,10 @@ type doltServerTx struct {
 	// releaseConn and poisonConn — so the activation entry cannot outlive the
 	// transaction it describes, whichever way the transaction ends.
 	clearJournalScope func()
+	// clearJournalShape releases the probed *issueops.JournalShape BeginTx bound
+	// to conn (PR A1), the shape counterpart of clearJournalScope's enabled/disabled
+	// switch. Same binding at BeginTx, same release at releaseConn/poisonConn.
+	clearJournalShape func()
 	// clearVersionScope is clearJournalScope's counterpart for dual-write
 	// issue-version history: same binding at BeginTx, same release at
 	// releaseConn/poisonConn.
@@ -197,6 +201,7 @@ func (t *doltServerTx) rollbackConn(ctx context.Context) error {
 
 func (t *doltServerTx) releaseConn() {
 	t.releaseJournalScope()
+	t.releaseJournalShapeScope()
 	t.releaseVersionScope()
 	t.releaseRecheckScope()
 	if t.conn != nil {
@@ -212,6 +217,15 @@ func (t *doltServerTx) releaseJournalScope() {
 	if t.clearJournalScope != nil {
 		t.clearJournalScope()
 		t.clearJournalScope = nil
+	}
+}
+
+// releaseJournalShapeScope is releaseJournalScope's counterpart for the probed
+// *issueops.JournalShape (PR A1). Idempotent for the same reason.
+func (t *doltServerTx) releaseJournalShapeScope() {
+	if t.clearJournalShape != nil {
+		t.clearJournalShape()
+		t.clearJournalShape = nil
 	}
 }
 
@@ -241,6 +255,7 @@ func (t *doltServerTx) releaseRecheckScope() {
 // database/sql close the connection and drop it from the pool.
 func (t *doltServerTx) poisonConn() {
 	t.releaseJournalScope()
+	t.releaseJournalShapeScope()
 	t.releaseVersionScope()
 	t.releaseRecheckScope()
 	if t.conn == nil {

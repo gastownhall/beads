@@ -7,41 +7,50 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // TestRootProviderOptions pins the CLI-side wiring the reviewer flagged as
-// untested: the root pre-run turns its previewMode/useReadOnly classification
-// into providerOpts by calling this function, and a refactor that dropped or
-// inverted that could not fail any existing test. uow.providerOptions is
-// unexported, so this cannot poke inside the returned uow.ProviderOption
-// values (see internal/storage/uow/preview_provider_test.go's
+// untested: the root pre-run turns its previewMode/useReadOnly/working-set
+// classification into providerOpts by calling this function, and a refactor
+// that dropped or inverted that could not fail any existing test.
+// uow.providerOptions is unexported, so this cannot poke inside the returned
+// uow.ProviderOption values (see internal/storage/uow/preview_provider_test.go's
 // TestApplyProviderOptions for the same-package introspection); it instead
 // pins what an external caller can observe — how many options each posture
-// yields — which is what the CLI wiring is responsible for.
+// yields, and whether events-journal activation will treat the open as one
+// that writes beads — which is what the CLI wiring is responsible for.
 func TestRootProviderOptions(t *testing.T) {
 	for _, tt := range []struct {
-		name              string
-		preview, readOnly bool
-		want              int
+		name                         string
+		preview, readOnly, reconcile bool
+		want                         int
+		wantWritesBeads              bool
 	}{
-		{name: "ordinary write open", want: 0},
+		{name: "ordinary write open", want: 0, wantWritesBeads: true},
 		{name: "preview", preview: true, want: 1},
 		{name: "read-only", readOnly: true, want: 1},
+		// bd dolt commit: an ordinary open that writes no beads, so a journal
+		// table the journal cannot run against must not refuse it.
+		{name: "working-set reconcile", reconcile: true, want: 1},
 		// Preview is the stronger posture and must win: it neither creates nor
 		// migrates, while read-only opens normally.
 		{name: "preview wins over read-only", preview: true, readOnly: true, want: 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			opts := rootProviderOptions(tt.preview, tt.readOnly)
+			opts := rootProviderOptions(tt.preview, tt.readOnly, tt.reconcile)
 			if len(opts) != tt.want {
-				t.Fatalf("rootProviderOptions(%t, %t) len = %d, want %d", tt.preview, tt.readOnly, len(opts), tt.want)
+				t.Fatalf("rootProviderOptions(%t, %t, %t) len = %d, want %d", tt.preview, tt.readOnly, tt.reconcile, len(opts), tt.want)
 			}
 			for i, o := range opts {
 				if o == nil {
-					t.Fatalf("rootProviderOptions(%t, %t)[%d] is nil", tt.preview, tt.readOnly, i)
+					t.Fatalf("rootProviderOptions(%t, %t, %t)[%d] is nil", tt.preview, tt.readOnly, tt.reconcile, i)
 				}
+			}
+			if got := uow.OpensForBeadWrites(opts...); got != tt.wantWritesBeads {
+				t.Fatalf("uow.OpensForBeadWrites(rootProviderOptions(%t, %t, %t)...) = %t, want %t", tt.preview, tt.readOnly, tt.reconcile, got, tt.wantWritesBeads)
 			}
 		})
 	}

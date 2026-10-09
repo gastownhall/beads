@@ -71,3 +71,26 @@ func TestApplyProviderOptions(t *testing.T) {
 		t.Fatal("applyProviderOptions(WithPreview()).preview = false, want true")
 	}
 }
+
+// TestOpensForBeadWrites pins which postures events-journal activation treats
+// as writing beads: only the ordinary open. A preview, a read-only open and a
+// working-set reconcile write none, so a journal table the journal cannot run
+// against must not refuse them — and the reconcile marker must not change the
+// open itself.
+func TestOpensForBeadWrites(t *testing.T) {
+	if !OpensForBeadWrites() {
+		t.Fatal("OpensForBeadWrites() = false, want true for the ordinary open")
+	}
+	for name, opt := range map[string]ProviderOption{
+		"preview":               WithPreview(),
+		"read-only":             WithReadOnly(),
+		"working-set reconcile": WithWorkingSetReconcile(),
+	} {
+		if OpensForBeadWrites(opt) {
+			t.Errorf("OpensForBeadWrites(%s) = true, want false", name)
+		}
+	}
+	if got := applyProviderOptions([]ProviderOption{WithWorkingSetReconcile()}); got.preview || got.readOnly {
+		t.Errorf("WithWorkingSetReconcile changed the open itself: %+v", got)
+	}
+}

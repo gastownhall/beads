@@ -64,6 +64,7 @@ go_library(
         "journal_autoprune.go",
         "journal_dependencies.go",
         "journal_prune.go",
+        "journal_shape.go",
         "labels.go",
         "lease.go",
         "metadata.go",

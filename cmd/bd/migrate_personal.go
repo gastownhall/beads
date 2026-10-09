@@ -27,7 +27,7 @@ import (
 // journal if it has one enabled — and the setting is read from there, not from
 // the workspace bd was launched in.
 func openMigrationPlanningStore(ctx context.Context, planningBeadsDir string) (s storage.DoltStorage, err error) {
-	defer func() { s, err = activateEventsJournalStore(planningBeadsDir, s, err) }()
+	defer func() { s, err = activateEventsJournalStore(planningBeadsDir, true, s, err) }()
 	return dolt.New(ctx, &dolt.Config{
 		Path:     doltserver.ResolveDoltDir(planningBeadsDir),
 		BeadsDir: planningBeadsDir,

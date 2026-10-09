@@ -57,6 +57,17 @@ type doltSQLProvider struct {
 	// eventsJournalEnabled activates the durable events journal for THIS
 	// provider instance only. See SetEventsJournalEnabled.
 	eventsJournalEnabled atomic.Bool
+	// journalShape caches the ONE INFORMATION_SCHEMA probe SetEventsJournalEnabled
+	// runs on activation (issueops.ProbeJournalShape, PR A1). Nil means the
+	// journal is disabled or the probe produced no shape; transactions then get
+	// the canonical column list — see journalActivationErr.
+	journalShape atomic.Pointer[issueops.JournalShape]
+	// journalActivationErr holds the probe's *issueops.JournalShapeError when
+	// SetEventsJournalEnabled(true) found a table shape the journal cannot run
+	// against (a missing required column, or a missing table). Nil otherwise,
+	// including when the probe could not run at all
+	// (issueops.JournalActivationError). See storage.EventsJournalShapeChecker.
+	journalActivationErr atomic.Pointer[error]
 	// versionedHistoryEnabled activates dual-write issue-version history for
 	// THIS provider instance only. See SetVersionedHistoryEnabled.
 	versionedHistoryEnabled atomic.Bool
@@ -72,8 +83,41 @@ type doltSQLProvider struct {
 // BeginTx). Without that binding the uow plumbing writes mutations while
 // journaling nothing — the failure is invisible, because the code runs and the
 // write lands and the journal is simply empty.
+//
+// Activating also probes bd_events_journal's actual shape ONCE
+// (issueops.ProbeJournalShape, PR A1), bounded by
+// issueops.JournalShapeProbeTimeout, and caches the result for this
+// instance's lifetime; EventsJournalActivationError reports whether that
+// probe found a shape the journal cannot run against. A probe that could not
+// run degrades to the canonical shape (issueops.JournalActivationError).
+// Deactivating clears both and skips the probe entirely — a disabled provider
+// accepts any shape.
 func (p *doltSQLProvider) SetEventsJournalEnabled(enabled bool) {
 	p.eventsJournalEnabled.Store(enabled)
+	if !enabled {
+		p.journalShape.Store(nil)
+		p.journalActivationErr.Store(nil)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), issueops.JournalShapeProbeTimeout)
+	defer cancel()
+	shape, err := issueops.ProbeJournalShape(ctx, p.db)
+	p.journalShape.Store(shape)
+	if activationErr := issueops.JournalActivationError(err); activationErr != nil {
+		p.journalActivationErr.Store(&activationErr)
+		return
+	}
+	p.journalActivationErr.Store(nil)
+}
+
+// EventsJournalActivationError implements storage.EventsJournalShapeChecker:
+// nil unless the last SetEventsJournalEnabled(true) call found a table shape
+// the journal cannot run against (PR A1).
+func (p *doltSQLProvider) EventsJournalActivationError() error {
+	if ptr := p.journalActivationErr.Load(); ptr != nil {
+		return *ptr
+	}
+	return nil
 }
 
 // SetVersionedHistoryEnabled activates dual-write issue-version history for
@@ -134,6 +178,12 @@ type providerOptions struct {
 	// working through the upgrade window. That is the same warn-and-continue
 	// contract embeddeddolt gives its read-only-command intent.
 	readOnly bool
+	// workingSetReconcile opens for a command that commits the working set
+	// rather than writing beads (bd dolt commit; the provider-side
+	// counterpart of dolt.Config.LenientOpen's commands). It changes nothing
+	// about the open itself. It exists so OpensForBeadWrites can tell such an
+	// open from one that writes beads.
+	workingSetReconcile bool
 }
 
 // WithPreview opens the provider for a non-mutating preview command.
@@ -144,6 +194,21 @@ func WithPreview() ProviderOption {
 // WithReadOnly opens the provider for a command that only reads.
 func WithReadOnly() ProviderOption {
 	return func(o *providerOptions) { o.readOnly = true }
+}
+
+// WithWorkingSetReconcile marks the provider as opened for a command that
+// commits the working set rather than writing beads.
+func WithWorkingSetReconcile() ProviderOption {
+	return func(o *providerOptions) { o.workingSetReconcile = true }
+}
+
+// OpensForBeadWrites reports whether a provider opened with opts is going to
+// write beads: false for a preview, a read-only open, or a working-set
+// reconcile. Events-journal activation reads it to decide whether a journal
+// table the journal cannot run against refuses the open (eventsjournal.Apply).
+func OpensForBeadWrites(opts ...ProviderOption) bool {
+	resolved := applyProviderOptions(opts)
+	return !resolved.preview && !resolved.readOnly && !resolved.workingSetReconcile
 }
 
 func applyProviderOptions(opts []ProviderOption) providerOptions {
@@ -160,6 +225,7 @@ var (
 	_ UnitOfWorkProvider                 = (*doltSQLProvider)(nil)
 	_ TxProvider                         = (*doltSQLProvider)(nil)
 	_ storage.EventsJournalConfigurer    = (*doltSQLProvider)(nil)
+	_ storage.EventsJournalShapeChecker  = (*doltSQLProvider)(nil)
 	_ storage.VersionedHistoryConfigurer = (*doltSQLProvider)(nil)
 )
 
@@ -195,9 +261,18 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	// (doltServerTx.releaseConn / poisonConn), so an entry cannot outlive its
 	// transaction. The blocked-recheck scope is bound and released the same
 	// way; Commit takes what it recorded once the transaction has committed.
+	// The shape scope carries the probe SetEventsJournalEnabled cached. The
+	// activation switch deliberately does NOT depend on it: an enabled provider
+	// whose probe produced no shape writes with the canonical column list, so a
+	// table the journal cannot run against fails the write loudly instead of
+	// letting the mutation commit with no journal row
+	// (storage.EventsJournalShapeChecker). Reads share this same BeginTx, and
+	// are never gated by the activation switch — only by the shape — since
+	// EventsJournalCursor has no enabled/disabled concept of its own.
 	return &doltServerTx{
 		conn:              conn,
 		clearJournalScope: issueops.ScopeEventsJournalTransaction(conn, p.eventsJournalEnabled.Load()),
+		clearJournalShape: issueops.ScopeEventsJournalShape(conn, p.journalShape.Load()),
 		clearVersionScope: issueops.ScopeVersionedHistoryTransaction(conn, p.versionedHistoryEnabled.Load()),
 		clearRecheckScope: issueops.ScopeBlockedRecheckTransaction(conn),
 	}, nil
