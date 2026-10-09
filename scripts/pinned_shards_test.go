@@ -211,14 +211,15 @@ func TestPinShardsGenerator(t *testing.T) {
 
 // pinnedShardWrapperUsers returns an error for every BUILD rule that runs
 // through go_test_pinned_shard.sh other than pinnedShardTargets, and for any
-// of those tagged for another lane than the cmd/bd Dolt-server tier: the
-// wrapper selects and skips tests, which the retired tiers' lanes forbid
-// (TestBazelRetiredLanesCannotBeNarrowed).
+// of those not tagged exactly its pinnedShardTargets lane: the wrapper
+// selects and skips tests, which the retired tiers' lanes forbid
+// (TestBazelRetiredLanesCannotBeNarrowed) except for the reviewed targets
+// listed there.
 func pinnedShardWrapperUsers(t *testing.T, root string) []string {
 	t.Helper()
-	allowed := map[string]bool{}
+	allowed := map[string]string{}
 	for _, tgt := range pinnedShardTargets {
-		allowed[tgt.build+":"+tgt.rule] = true
+		allowed[tgt.build+":"+tgt.rule] = tgt.tag
 	}
 	const label = "//tools/bazel:go_test_pinned_shard.sh"
 	var errs []string
@@ -247,11 +248,13 @@ func pinnedShardWrapperUsers(t *testing.T, root string) []string {
 				continue
 			}
 			seen++
-			if !allowed[f+":"+name] {
-				errs = append(errs, f+": "+name+" runs through "+pinnedShardWrapper+"; add it to pinnedShardTargets after reviewing that it is not a retired tier's lane")
+			tag, ok := allowed[f+":"+name]
+			if !ok {
+				errs = append(errs, f+": "+name+" runs through "+pinnedShardWrapper+"; add it to pinnedShardTargets after reviewing that every test still runs exactly once")
+				continue
 			}
-			if !strings.Contains(rule, `tags = ["dolt-server-cmd"]`) {
-				errs = append(errs, f+": "+name+" runs through "+pinnedShardWrapper+" but is not tagged exactly dolt-server-cmd")
+			if !strings.Contains(rule, `tags = ["`+tag+`"]`) {
+				errs = append(errs, f+": "+name+" runs through "+pinnedShardWrapper+" but is not tagged exactly "+tag)
 			}
 		}
 	}

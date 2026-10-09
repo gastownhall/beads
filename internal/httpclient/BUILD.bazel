@@ -207,14 +207,26 @@ go_test(
 # fails each served case rather than skipping it. It is the script's run on
 # the lane's race build (raceEnabled shrinks its one large apply).
 #
-# Shard count: on the lane's executors (rbe-west, 2026-10-09) the package is
-# 725 tests and ~1,300 test-seconds, the heaviest about 54s. Each served case
-# copies one per-process template workspace instead of initializing its own
-# embedded Dolt schema (served_harness_test.go's servedTemplateWorkspace),
-# and TestServedBatchGetterContract seeds its 1000 issues in one write: before
+# Shard count: on the lane's executors (rbe-west, 2026-10-09, the whole
+# embedded lane running) the package is ~750 top-level tests and ~1,100
+# test-seconds, all serial, the heaviest about 52s. Each served case copies
+# one per-process template workspace instead of initializing its own embedded
+# Dolt schema (served_harness_test.go's servedTemplateWorkspace), and
+# TestServedBatchGetterContract seeds its 1000 issues in one write: before
 # both, the package was ~3,700 test-seconds over 24 shards, the heaviest shard
-# 390s. rules_go deals the tests out round-robin; at 16 shards the measured
-# loads come to 62-112s per shard.
+# 390s. rules_go's round-robin alone (16 shards) left shards at 40-119s,
+# wherever its split dropped the long tests, so the tests measured at >= 3s
+# (the maximum over three whole-lane runs) are pinned
+# (tools/bazel/go_test_pinned_shard.sh, served_pinned_shards.txt from
+# tools/bazel/pin_shards.py --shards 17 --min-seconds 3) onto 17 shards, and
+# the binary's round-robin deals the other ~650 (~340s of measured test
+# time; those shards ran ~1.4x their tests' summed times) over the remaining
+# 9.
+# Regenerate the manifest from runs of the lane:
+#   bazel test //... --config=embedded
+#   python3 tools/bazel/pin_shards.py --shards 17 --min-seconds 3 \
+#       --write internal/httpclient/served_pinned_shards.txt \
+#       bazel-testlogs/internal/httpclient/httpclient_served_test
 #
 # Tags:
 #   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
@@ -227,19 +239,23 @@ sh_test(
     # that SIGTERM, so a hang would end as a bare TIMEOUT. 19m lets Go's own
     # timeout fire first and dump every goroutine to test.log.
     timeout = "eternal",
-    srcs = ["//tools/bazel:go_test_variant.sh"],
+    srcs = ["//tools/bazel:go_test_pinned_shard.sh"],
     args = [
+        "$(rootpath :served_pinned_shards.txt)",
         "$(rootpath :httpclient_test)",
         "-test.v",
         "-test.count=1",
         "-test.timeout=19m",
     ],
-    data = [":httpclient_test"],
+    data = [
+        "served_pinned_shards.txt",
+        ":httpclient_test",
+    ],
     env = {
         "BEADS_HTTP_TEST_REQUIRED": "1",
         "BEADS_TEST_EMBEDDED_DOLT": "1",
     },
-    shard_count = 16,
+    shard_count = 26,
     tags = ["embedded"],
 )
 

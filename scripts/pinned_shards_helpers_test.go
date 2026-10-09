@@ -16,12 +16,20 @@ const pinnedShardWrapper = "tools/bazel/go_test_pinned_shard.sh"
 
 // pinnedShardTargets are the sh_tests that run a go_test binary through
 // tools/bazel/go_test_pinned_shard.sh: the BUILD file, the rule, its
-// manifest, and the directory holding the go_test's sources.
+// manifest, the directory holding the go_test's sources, and the rule's one
+// lane tag.
+//
+// httpclient_served_test is the embedded lane's (a retired tier's) served
+// corpus, which may not be narrowed: the wrapper runs every top-level test in
+// exactly one shard (TestPinnedShardWrapperSplit), the manifest may name only
+// real tests (TestPinnedShardManifestsNameRealTests), and the lane's
+// check_testcases.py fails a shard that ran none.
 var pinnedShardTargets = []struct {
-	build, rule, manifest, pkg string
+	build, rule, manifest, pkg, tag string
 }{
-	{"cmd/bd/BUILD.bazel", "bd_dolt_server_test", "cmd/bd/dolt_server_pinned_shards.txt", "cmd/bd"},
-	{"tests/regression/BUILD.bazel", "regression_test", "tests/regression/pinned_shards.txt", "tests/regression"},
+	{"cmd/bd/BUILD.bazel", "bd_dolt_server_test", "cmd/bd/dolt_server_pinned_shards.txt", "cmd/bd", "dolt-server-cmd"},
+	{"tests/regression/BUILD.bazel", "regression_test", "tests/regression/pinned_shards.txt", "tests/regression", "dolt-server-cmd"},
+	{"internal/httpclient/BUILD.bazel", "httpclient_served_test", "internal/httpclient/served_pinned_shards.txt", "internal/httpclient", "embedded"},
 }
 
 var pinnedLineRe = regexp.MustCompile(`^([1-9][0-9]*) (Test[A-Za-z0-9_]*)$`)

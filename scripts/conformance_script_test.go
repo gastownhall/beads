@@ -123,7 +123,7 @@ func TestConformanceServedTierRunsUnderBazel(t *testing.T) {
 	if rule == "" {
 		t.Fatal("internal/httpclient/BUILD.bazel has no httpclient_served_test")
 	}
-	want := []string{`"$(rootpath :httpclient_test)",`, `data = [":httpclient_test"],`, `tags = ["embedded"],`}
+	want := []string{`"$(rootpath :httpclient_test)",`, `":httpclient_test",`, `tags = ["embedded"],`}
 	for _, sw := range switches {
 		want = append(want, `"`+sw[1]+`": "`+sw[2]+`",`)
 	}

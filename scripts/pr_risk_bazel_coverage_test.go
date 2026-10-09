@@ -811,9 +811,10 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 		}
 		// go_test_pinned_shard.sh selects and skips by design (each test in
 		// exactly one shard: TestPinnedShardWrapperSplit), and is reviewed
-		// here for the dolt-server-cmd targets only, which are none of the
-		// retired tiers' lanes; pinnedShardWrapperUsers fails if anything
-		// else runs through it.
+		// here for pinnedShardTargets only (the dolt-server-cmd targets and
+		// the embedded lane's httpclient_served_test, whose args are pinned
+		// above); pinnedShardWrapperUsers fails if anything else runs
+		// through it.
 		exempt := filepath.ToSlash(rel) == pinnedShardWrapper
 		if exempt {
 			for _, e := range pinnedShardWrapperUsers(t, root) {
@@ -890,7 +891,7 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 		// script's switches: required, so a missing engine fails each served
 		// case instead of skipping it.
 		"//internal/httpclient:httpclient_served_test": {
-			[]string{"$(rootpath :httpclient_test)", "-test.v", "-test.count=1", "-test.timeout=19m"},
+			[]string{"$(rootpath :served_pinned_shards.txt)", "$(rootpath :httpclient_test)", "-test.v", "-test.count=1", "-test.timeout=19m"},
 			map[string]string{"BEADS_HTTP_TEST_REQUIRED": "1", "BEADS_TEST_EMBEDDED_DOLT": "1"},
 		},
 		"//cmd/bd:bd_proxied_test": {

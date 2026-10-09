@@ -160,6 +160,7 @@ go_test(
         "//:nested_go_modules",
         "//:repo_go_test_srcs",
         "//cmd/bd:repo_other_files",
+        "//internal/httpclient:repo_other_files",
         "//internal/storage/dolt:repo_other_files",
         "//internal/storage/embeddeddolt:repo_other_files",
         "//tests/regression:repo_other_files",
