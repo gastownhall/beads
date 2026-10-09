@@ -171,6 +171,12 @@ func RunBatchApplyAppliesEveryItemInDeclarationOrder(t *testing.T, ctx context.C
 	if got := batchApplyColumn(t, ctx, fixture, "status", blocked); got == string(types.StatusClosed) {
 		t.Errorf("%s was closed by a request that only asked to close %s", blocked, blocker)
 	}
+	// Neither create item names a creator, so each defaults to the request's actor.
+	for _, id := range []string{blocked, blocker} {
+		if got := batchApplyColumn(t, ctx, fixture, "created_by", id); got != "apply-writer" {
+			t.Errorf("%s created_by = %q, want the request's actor %q", id, got, "apply-writer")
+		}
+	}
 }
 
 // RunBatchApplyBindsEachNamedKeyToItsMintedID pins ApplyBatchResult.Keys: it is

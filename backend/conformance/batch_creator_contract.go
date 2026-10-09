@@ -97,6 +97,14 @@ func RunBatchCreatorCreatesEveryItemAsOneAct(t *testing.T, ctx context.Context, 
 		}
 		seen[issue.ID] = true
 		assertBatchCreatorRowCount(t, ctx, fixture, "issues", issue.ID, 1)
+		// No item names a creator, so each defaults to the batch's actor.
+		var createdBy string
+		if err := fixture.QueryScalar(ctx, "SELECT COALESCE(created_by, '') FROM issues WHERE id = ?", []any{issue.ID}, &createdBy); err != nil {
+			t.Fatalf("read created_by for %s: %v", issue.ID, err)
+		}
+		if createdBy != request.Actor || issue.CreatedBy != request.Actor {
+			t.Errorf("item %d created_by = %q (result %q), want the request's actor %q", i, createdBy, issue.CreatedBy, request.Actor)
+		}
 	}
 	if labels := result.Issues[0].Labels; len(labels) != 1 || labels[0] != "alpha" {
 		t.Errorf("result issue 0 labels = %v, want [alpha]: the snapshot is promised hydrated with labels", labels)

@@ -85,11 +85,12 @@ func TestBatchCreatePassesTheRequestToTheRoleAndAnswersWithWhatItCreated(t *test
 	if got.Items[1].Issue.Priority != 0 || got.Items[1].Issue.Description != "body" {
 		t.Errorf("item 1 = %+v, want the wire's description and no priority", *got.Items[1].Issue)
 	}
-	// created_by is stamped from the actor on EVERY item, createIssue's rule:
-	// the role copies the issue's and never stamps one itself.
+	// created_by is not the handler's to stamp: every item reaches the role
+	// without one, and the role defaults it to the request's actor
+	// (backend/conformance's batch-creator contract pins that half).
 	for i, item := range got.Items {
-		if item.Issue.CreatedBy != "alice" {
-			t.Errorf("item %d created_by = %q, want the actor %q", i, item.Issue.CreatedBy, "alice")
+		if item.Issue.CreatedBy != "" {
+			t.Errorf("item %d created_by = %q, want it left to the role", i, item.Issue.CreatedBy)
 		}
 	}
 	// No provenance: the file name a CLI batch spells has no analogue here, so
