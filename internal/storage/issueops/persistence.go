@@ -11,6 +11,13 @@ import (
 type PersistenceMoveResult struct {
 	Changed       bool
 	ChangedTables map[string]bool
+	// EnteredIssuesPlane reports that the move took the row out of the wisps
+	// table into issues. The issues row is new and a wisp never declares
+	// participation, so the record's next version is its first and must be
+	// minted create-shaped (design §16.2b). A same-plane repair does not set
+	// it: that row keeps its own participation. A caller that mints for the
+	// move itself, as ExecuteUpdate does, reads this to pick the entry point.
+	EnteredIssuesPlane bool
 }
 
 // MoveIssuePersistenceInTx moves a complete issue aggregate to the requested
@@ -71,7 +78,11 @@ func moveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue
 			return PersistenceMoveResult{}, err
 		}
 		// Versioned only on the issues plane; a wisp-plane normalize keeps
-		// the wisp exclusion.
+		// the wisp exclusion. Unlike a move, this mint stays update-shaped
+		// (design §16.2b): the row already lives on the issues plane and
+		// keeps its own participation_generation. A row created with the flag
+		// on proceeds; a legacy row stays legacy, since a repair is an
+		// ordinary write and must not promote it (R2.3).
 		if mintVersion && !targetWisp {
 			if err := RecordVersionInTx(ctx, tx, current.ID, actor); err != nil {
 				return PersistenceMoveResult{}, err
@@ -146,11 +157,15 @@ func moveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue
 	// blocked-state maintenance has settled. A move INTO the issues plane
 	// then mints the row's first version there, after its auxiliary copies
 	// and retargeted edges exist; a move into the wisp plane mints nothing.
+	// That first mint is create-shaped (design §16.2b): the issues row was
+	// inserted above without participation_generation, which a wisp never
+	// declares, so the update-shaped entry would fence it as legacy.
 	if err := RecordEventInTx(ctx, tx, EventUpdate, current.ID, actor); err != nil {
 		return PersistenceMoveResult{}, err
 	}
+	result.EnteredIssuesPlane = !targetWisp
 	if mintVersion && !targetWisp {
-		if err := RecordVersionInTx(ctx, tx, current.ID, actor); err != nil {
+		if err := RecordVersionForCreateInTx(ctx, tx, current.ID, actor); err != nil {
 			return PersistenceMoveResult{}, err
 		}
 	}

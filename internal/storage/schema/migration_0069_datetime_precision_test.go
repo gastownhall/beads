@@ -39,21 +39,6 @@ const migration0069Down = "0069_widen_issue_versions_datetime_precision.down.sql
 const migration0069ChangeAtDatetimeGuard = "@issue_versions_change_at_needs_widen"
 const migration0069RemovedAtDatetimeGuard = "@issue_versions_removed_at_needs_widen"
 
-// TestLatestVersionIncludesMigration0069 pins the real next free slot this
-// migration claims, superseding 0068's own version of this test
-// (LatestVersion() moved from 68 to 69 the moment this migration file was
-// added). Deliberately a hardcoded literal for the same reason 0067's and
-// 0068's were: LatestVersion() drifting to 69 for the wrong reason (an
-// unrelated migration landing first) should still be caught by this test
-// failing to explain why 69 is datetime-precision-shaped, which the CLI test
-// below checks.
-func TestLatestVersionIncludesMigration0069(t *testing.T) {
-	const want = 69
-	if got := LatestVersion(); got != want {
-		t.Fatalf("LatestVersion() = %d, want %d (issue_versions change_at/removed_at DATETIME(6) migration slot claimed by be-hs42e.8)", got, want)
-	}
-}
-
 // TestMigration0069WidensChangeAtAndRemovedAtPrecision is the pure-Go,
 // DB-independent half of the pin, mirroring
 // TestMigration0068AddsAttributionStatus's shape: it checks the frozen

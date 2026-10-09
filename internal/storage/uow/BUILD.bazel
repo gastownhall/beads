@@ -111,6 +111,7 @@ go_test(
         "doltserver_provider_test.go",
         "doltserver_tx_test.go",
         "dualwrite_history_contract_test.go",
+        "dualwrite_participation_generation_contract_test.go",
         "edge_reader_contract_test.go",
         "errors_test.go",
         "expected_revision_contract_test.go",

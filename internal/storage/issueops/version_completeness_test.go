@@ -33,7 +33,8 @@ import (
 // named helper (mintDependencyVersion, addLabelInTx, updateIssueInTx, ...)
 // whose mint it did not switch off — see versionMintGate.
 var versionMintHelpers = map[string]bool{
-	"RecordVersionInTx": true,
+	"RecordVersionInTx":          true,
+	"RecordVersionForCreateInTx": true,
 }
 
 // versionMintGate names the boolean parameter the constituent helpers
@@ -215,7 +216,8 @@ var versionExemptions = map[string]string{
 
 	// the seam itself: its UPDATE issues SET current_revision is the
 	// bookkeeping half of the mint, not a mutation that needs its own.
-	"RecordVersionInTx": "the seam itself; advances current_revision to match the row it just inserted",
+	"RecordVersionInTx":          "the seam itself; advances current_revision to match the row it just inserted",
+	"RecordVersionForCreateInTx": "the seam's create-shaped sibling; stamps participation_generation and advances current_revision to match the row it just inserted",
 }
 
 // versionNeverMints pins the deliberate NOT-versioned rulings from the other

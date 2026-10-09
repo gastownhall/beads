@@ -71,11 +71,13 @@ import (
 //   - PARTICIPATION-GENERATION GATING (design §16.2b). Whether an
 //     update-shaped mutation on a legacy (participation_generation IS NULL)
 //     row is correctly skipped is Phase 2 behavior this bead also owns, but
-//     it depends on migration 0068's participation_generation column, which
-//     does not exist when this contract is first written (0068 lands last in
-//     this bead's build order, by the mayor's explicit sequencing). It gets
-//     its own dedicated cases once 0068 lands, beside this file rather than
-//     inside it.
+//     it depends on migration 0070's participation_generation column, which
+//     does not exist when this contract is first written (0070 lands last in
+//     this bead's build order, by the mayor's explicit sequencing — steps 4-5
+//     of design §16.3 moved to their own migration slot when 0068 shipped as
+//     attribution_status-only, see that migration's header). It gets its own
+//     dedicated cases once 0070 lands, beside this file rather than inside
+//     it.
 //   - CONCURRENT WRITERS. Every case here is one writer, one issue, one
 //     mutation at a time — the same restriction journal_contract.go states
 //     for the same reason: a single-threaded case cannot exercise what only

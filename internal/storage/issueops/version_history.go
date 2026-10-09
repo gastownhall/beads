@@ -21,13 +21,15 @@ import (
 // BeginTx, so enabling history on one store instance cannot turn it on for
 // any other sharing the process.
 //
-// RecordVersionInTx is the single seam both direct-SQL legs (dolt,
-// embeddeddolt) and the domain/db package (used by uow) call through, from
-// inside the same already-short-circuited functions that call
-// RecordEventInTx — every accepted mutation of an issue's durable state
-// (create, update, close, reopen, claim, release, lease reclaim, defer wake,
-// label add/remove, dependency add/remove, promote, persistence move) mints
-// exactly one row, as its LAST durable-state write; a no-op mints none. A
+// RecordVersionInTx (and its create-shaped sibling, RecordVersionForCreateInTx
+// — design §16.2b's write fence, see that function's own doc) is the single
+// seam both direct-SQL legs (dolt, embeddeddolt) and the domain/db package
+// (used by uow) call through, from inside the same already-short-circuited
+// functions that call RecordEventInTx — every accepted mutation of an
+// issue's durable state (create, update, close, reopen, claim, release,
+// lease reclaim, defer wake, label add/remove, dependency add/remove,
+// promote, persistence move) mints exactly one row, as its LAST
+// durable-state write; a no-op mints none. A
 // mutation DiscardNoopIssueUpdates has already discarded never reaches either
 // seam; the label and dependency helpers, which that filter does not cover,
 // gate on their own inserted/deleted row instead (an idempotent re-add or an
@@ -215,7 +217,36 @@ func canonicalDurableState(issue any) ([]byte, error) {
 // version row's attribution — "" when the mutation path genuinely has none,
 // matching RecordEventInTx's own convention. It also drives
 // attribution_status via attributionStatusForActor.
+//
+// This is the UPDATE-shaped entry point: design §16.2b's write fence. A
+// record whose participation_generation is NULL is legacy — never
+// positively promoted — and an update-shaped mutation against it mints
+// nothing, neither half of this seam's write (no issue_versions row, no
+// current_revision bump). A record that already carries a non-NULL
+// participation_generation proceeds normally. Use RecordVersionForCreateInTx
+// for a create-shaped mutation instead: a brand-new row has no legacy state
+// to preserve, so that entry point stamps the column rather than checking
+// it.
 func RecordVersionInTx(ctx context.Context, tx DBTX, issueID, actor string) error {
+	return recordVersionInTx(ctx, tx, issueID, actor, false)
+}
+
+// RecordVersionForCreateInTx is RecordVersionInTx's create-shaped sibling
+// (design §16.2b). The write fence does not apply to a brand-new row, so
+// instead of checking participation_generation, this stamps it — sourced
+// from store_epoch.epoch, the same source the fence reads — as part of the
+// row's first mint, whenever versioned history is enabled. A create with the
+// flag off never reaches the stamp (this whole seam no-ops while the flag is
+// off, same as RecordVersionInTx), leaving the column NULL — indistinguishable
+// from a true legacy row (FR-7). A wisp arriving on the issues plane, by
+// promotion or a persistence move out of the wisps table, mints through here
+// too: its issues row is just as new, and a wisp never declares
+// participation (FR-8).
+func RecordVersionForCreateInTx(ctx context.Context, tx DBTX, issueID, actor string) error {
+	return recordVersionInTx(ctx, tx, issueID, actor, true)
+}
+
+func recordVersionInTx(ctx context.Context, tx DBTX, issueID, actor string, isCreate bool) error {
 	if !versionedHistoryEnabled(tx) {
 		return nil
 	}
@@ -225,6 +256,28 @@ func RecordVersionInTx(ctx context.Context, tx DBTX, issueID, actor string) erro
 		return fmt.Errorf("versioned history: snapshot %s: %w", issueID, err)
 	}
 	if IsWisp(issue) {
+		return nil
+	}
+
+	// design §16.2b write fence. Read straight off the row rather than
+	// through types.Issue: participation_generation is dual-write
+	// bookkeeping, not part of the issue's own content model, so it stays
+	// out of the durable_state snapshot canonicalDurableState marshals
+	// below. isCreate skips the check entirely (a brand-new row has no
+	// legacy state to preserve, and this same function stamps the column
+	// itself further down); an update-shaped call against a NULL (legacy)
+	// value returns here, before either half of this seam's write runs.
+	// BD_IGNORE_SCHEMA_SKEW (internal/storage/schema/schema.go) has no
+	// bearing on this check: it downgrades CheckForwardDrift's
+	// migration-cursor refusal, a different plane than this column's real
+	// per-row data.
+	var participationGeneration sql.NullInt64
+	if err := tx.QueryRowContext(ctx,
+		"SELECT participation_generation FROM issues WHERE id = ?", issueID,
+	).Scan(&participationGeneration); err != nil {
+		return fmt.Errorf("versioned history: read participation_generation for %s: %w", issueID, err)
+	}
+	if !isCreate && !participationGeneration.Valid {
 		return nil
 	}
 
@@ -293,6 +346,22 @@ func RecordVersionInTx(ctx context.Context, tx DBTX, issueID, actor string) erro
 		return fmt.Errorf("versioned history: insert version row for %s: %w", issueID, err)
 	}
 
+	if isCreate {
+		// Stamps participation_generation in the same statement that advances
+		// current_revision — design §16.2b's "positive declaration sourced
+		// from store_epoch.epoch," minted here from the epoch already read
+		// above for this same transaction's version row. Setting updated_at to
+		// itself keeps the column's ON UPDATE CURRENT_TIMESTAMP clause from
+		// replacing the timestamp the row was created with, which an import
+		// supplies.
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE issues SET current_revision = ?, participation_generation = ?, updated_at = updated_at WHERE id = ?",
+			newRevision, epoch, issueID,
+		); err != nil {
+			return fmt.Errorf("versioned history: advance current_revision for %s: %w", issueID, err)
+		}
+		return nil
+	}
 	if _, err := tx.ExecContext(ctx,
 		"UPDATE issues SET current_revision = ? WHERE id = ?", newRevision, issueID,
 	); err != nil {

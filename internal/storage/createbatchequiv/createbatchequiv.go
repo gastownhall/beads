@@ -90,6 +90,10 @@ func largeScenarios() []scenario {
 // (ebe3b6bcb), so the check holds the current code — fast and per-row
 // bodies alike, including changes the fast-path switch does not gate — to
 // what that code stored.
+// The issue_versions digests of small, depadd, waitsfor, import458 and
+// import458-reject-stale, and depadd's issues_updated_at digest, were
+// re-recorded when the participation-generation fence landed, because the
+// fence does not re-mint rows that predate the stamp.
 const GoldenDirEnv = "CREATEBATCHEQUIV_GOLDEN_DIR"
 
 // Run seeds fresh databases, applies each scenario's batch through the fast
