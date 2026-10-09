@@ -173,10 +173,10 @@ To read notes on an issue, use: bd show <id>`,
 		updates := map[string]interface{}{
 			issueops.OpAppendNotes: noteText,
 		}
-		if err := issueStore.UpdateIssue(ctx, result.ResolvedID, updates, actor); err != nil {
+		if err := issueStore.UpdateIssue(ctx, result.ResolvedID, updates, currentActor()); err != nil {
 			return HandleErrorRespectJSON("updating %s: %v", id, err)
 		}
-		if err := commitPendingIfEmbedded(ctx, issueStore, actor, doltAutoCommitParams{
+		if err := commitPendingIfEmbedded(ctx, issueStore, currentActor(), doltAutoCommitParams{
 			Command:  "note",
 			IssueIDs: []string{result.ResolvedID},
 		}); err != nil {

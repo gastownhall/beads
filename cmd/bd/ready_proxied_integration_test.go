@@ -238,6 +238,14 @@ func TestProxiedServerReady(t *testing.T) {
 				envelope.Pagination.Total, s[start:])
 		}
 	})
+}
+
+// TestProxiedServerReadyB holds more of TestProxiedServerReady's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerReadyB(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("pagination_envelope_not_truncated", func(t *testing.T) {
 		t.Parallel()
@@ -409,6 +417,14 @@ func TestProxiedServerReady(t *testing.T) {
 			t.Error("after re-fetch: Assignee empty (commit may not have persisted)")
 		}
 	})
+}
+
+// TestProxiedServerReadyC holds more of TestProxiedServerReady's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerReadyC(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("blocked_issues_excluded_from_default_output", func(t *testing.T) {
 		t.Parallel()
@@ -536,7 +552,6 @@ func TestProxiedServerReady(t *testing.T) {
 			t.Errorf("expected 'No molecules ready for gate-resume dispatch' text, got: %s", text)
 		}
 	})
-
 }
 
 func TestProxiedServerReady2(t *testing.T) {

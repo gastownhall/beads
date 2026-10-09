@@ -1,8 +1,6 @@
 package scripts_test
 
 import (
-	"bufio"
-	"bytes"
 	"errors"
 	"os"
 	"os/exec"
@@ -11,39 +9,12 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // Policy tests for the side-by-side Bazel configuration. They are plain Go
 // tests so they run under `go test ./scripts` and `bazel test //scripts:...`
 // alike. Each invariant is a pure check function exercised against the real
 // repository files and against synthetic fixtures that break it.
-
-// bazelPolicyRoot returns the repository root holding the Bazel policy files.
-// Under `bazel test` those files are declared as data (//:bazel_policy_files)
-// and resolved from the runfiles tree; under `go test` the source checkout is
-// used directly.
-func bazelPolicyRoot(t *testing.T) string {
-	t.Helper()
-	if srcdir := os.Getenv("TEST_SRCDIR"); srcdir != "" {
-		workspace := os.Getenv("TEST_WORKSPACE")
-		if workspace == "" {
-			workspace = "_main"
-		}
-		return filepath.Join(srcdir, workspace)
-	}
-	return sourceRepoRoot(t)
-}
-
-func readPolicyFile(t *testing.T, root, name string) string {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join(root, name))
-	if err != nil {
-		t.Fatalf("read %s: %v", name, err)
-	}
-	return string(data)
-}
 
 // --- go_sdk version == go.mod toolchain -------------------------------------
 
@@ -304,366 +275,11 @@ func TestBazelLocalRCFilesGitignored(t *testing.T) {
 	}
 }
 
-// --- no remote-execution endpoints in tracked files -------------------------
-
-// Remote-execution endpoints, credentials and TLS material belong in a
-// gitignored user.bazelrc/.bazelrc.local or a CI-generated rc outside the
-// workspace, never in the repository. The scan covers committed bazelrc-like
-// files, Markdown docs and .github/** (plan §3.8) and flags:
-//   - any remote/BES/TLS flag below whose value is a literal (not a
-//     <placeholder>, a $VARIABLE/${{ expression }}, empty, or loopback);
-//   - in rc and .github files, any gRPC URL that is not loopback. Markdown is
-//     exempt from this rule because beads documents OTel gRPC exporters.
-//
-// The one exception is publicForkCacheLines.
-
-var (
-	remoteFlagNames = `remote_executor|remote_cache|remote_downloader|remote_header|remote_instance_name|` +
-		`bes_backend|bes_results_url|bes_header|tls_client_certificate|tls_client_key|tls_certificate`
-	// `--flag=value` is recognized everywhere; `--flag value` only in rc and
-	// workflow files, where prose ("--remote_executor and ...") does not occur.
-	remoteFlagEqRe    = regexp.MustCompile(`--(` + remoteFlagNames + `)=("[^"]*"|'[^']*'|[^\s"'` + "`" + `]*)`)
-	remoteFlagSpaceRe = regexp.MustCompile(`--(` + remoteFlagNames + `)\s+("[^"]*"|'[^']*'|[^\s"'` + "`" + `]+)`)
-	remoteEndpointRe  = regexp.MustCompile(`\bgrpcs?://[^\s"'<>)\]]+`)
-	loopbackValueRe   = regexp.MustCompile(`^(?:[a-z][a-z0-9+.-]*://)?(?:127\.0\.0\.1|localhost|\[::1\])(?:[:/]|$)`)
-	// remoteScanPrefilter: a file lacking all of these cannot produce a hit.
-	remoteScanPrefilter = [][]byte{[]byte("--remote_"), []byte("--bes_"), []byte("--tls_"), []byte("grpc")}
-)
-
-// publicForkCacheLines: the endpoint lines of .bazelrc's fork-cache config,
-// public by design. rbe-west's rbe-cache endpoint is anonymous and read-only
-// (action-cache and CAS reads; writes and Execute are refused by the farm),
-// so there is no credential to leak. Exactly these lines, trimmed, and only
-// in .bazelrc; the same line anywhere else, or any other endpoint, is still a
-// hit. Assembled so this file never contains a literal endpoint.
-var publicForkCacheLines = map[string]bool{
-	"build:fork-cache --remote_cache=" + forkCacheEndpoint:         true,
-	"build:fork-cache --remote_instance_name=" + forkCacheInstance: true,
-}
-
-const (
-	forkCacheEndpoint = "grpc" + "s://rbe-cache.ops.gascity.com:8443"
-	forkCacheInstance = "oss"
-	// zstd cache transfers: only the anonymous fork cache can advertise a
-	// compressor, so only fork-cache may ask for one, and only while
-	// write-bazelrc.sh's cache-zstd-probe.sh finds it advertised (a probe,
-	// not a repository variable: fork pull_request runs see no vars).
-	// Trusted remote-exec and rbe-fork never: their schedulers advertise
-	// none, and Bazel then refuses the remote.
-	forkCacheZstdLine = "build:fork-cache --remote_cache_compression"
-)
-
-// publicRBEForkPin: setup-bazel's fork-credential.sh pins the one endpoint
-// rbe-fork-mint may hand a fork run (rbe-fork, :8444), so a compromised
-// mint cannot point fork builds elsewhere. It is public and carries no
-// credential: allowed as exactly this line, in exactly that file (a byte
-// copy of gascity's tools/rbe/fork-credential.sh).
-const (
-	publicRBEForkPinFile = ".github/actions/setup-bazel/fork-credential.sh"
-	publicRBEForkPinLine = `ENDPOINT_RE=${RBE_FORK_ENDPOINT_RE:-'^` + "grpc" + `s://rbe-fork\.ops\.gascity\.com:8444$'}`
-)
-
-type endpointHit struct {
-	path string
-	line int
-	what string
-}
-
-// remoteScanKind classifies a tracked path for the endpoint scan.
-func remoteScanKind(rel string) (scan, strict bool) {
-	base := filepath.Base(rel)
-	switch {
-	case strings.Contains(base, "bazelrc"), strings.HasPrefix(rel, ".github/"):
-		return true, true
-	case strings.HasSuffix(base, ".md"):
-		return true, false
-	}
-	return false, false
-}
-
-func allowedRemoteValue(v string) bool {
-	v = strings.Trim(v, `"'`)
-	if i := strings.Index(v, "://"); i >= 0 {
-		v = v[i+len("://"):]
-	}
-	return v == "" || strings.HasPrefix(v, "<") || strings.HasPrefix(v, "$") || loopbackValueRe.MatchString(v)
-}
-
-// findRemoteEndpoints reports literal remote endpoints/credentials in content.
-// strict enables the whitespace-separated flag form and the gRPC URL rule.
-func findRemoteEndpoints(path string, content []byte, strict bool) []endpointHit {
-	if bytes.IndexByte(content, 0) >= 0 { // binary
-		return nil
-	}
-	relevant := false
-	for _, needle := range remoteScanPrefilter {
-		if bytes.Contains(content, needle) {
-			relevant = true
-			break
-		}
-	}
-	if !relevant {
-		return nil
-	}
-	flagRes := []*regexp.Regexp{remoteFlagEqRe}
-	if strict {
-		flagRes = append(flagRes, remoteFlagSpaceRe)
-	}
-	var hits []endpointHit
-	scanner := bufio.NewScanner(bytes.NewReader(content))
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-	for n := 1; scanner.Scan(); n++ {
-		line := scanner.Text()
-		if path == ".bazelrc" && publicForkCacheLines[strings.TrimSpace(line)] {
-			continue
-		}
-		if path == publicRBEForkPinFile && line == publicRBEForkPinLine {
-			continue
-		}
-		for _, re := range flagRes {
-			for _, m := range re.FindAllStringSubmatch(line, -1) {
-				if !allowedRemoteValue(m[2]) {
-					hits = append(hits, endpointHit{path: path, line: n, what: m[0]})
-				}
-			}
-		}
-		if strict {
-			for _, url := range remoteEndpointRe.FindAllString(line, -1) {
-				if !allowedRemoteValue(url) {
-					hits = append(hits, endpointHit{path: path, line: n, what: url})
-				}
-			}
-		}
-	}
-	return hits
-}
-
-func gitRepoAvailable(root string) bool {
-	if _, err := exec.LookPath("git"); err != nil {
-		return false
-	}
-	return exec.Command("git", "-C", root, "rev-parse", "--is-inside-work-tree").Run() == nil
-}
-
-// repoFiles lists the repository's tracked files under root, repo-relative and
-// slash-separated, each a regular file (or, in a local runfiles tree, a
-// symlink to one). Under `go test` in a git checkout that is `git ls-files`
-// less what the working tree no longer holds; under Bazel it is the runfiles
-// tree, whose repository part is //:repo_files (every tracked file outside
-// .bazelignore, tools/bazel/go_srcs.py); elsewhere every file under root.
-func repoFiles(t *testing.T, root string) []string {
-	t.Helper()
-	var files []string
-	if bazeltest.IsBazel() || !gitRepoAvailable(root) {
-		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.IsDir() || !isFileOrFileLink(path, d) {
-				return nil
-			}
-			rel, err := filepath.Rel(root, path)
-			if err != nil {
-				return err
-			}
-			files = append(files, filepath.ToSlash(rel))
-			return nil
-		})
-		if err != nil {
-			t.Fatalf("walk %s: %v", root, err)
-		}
-	} else {
-		out, err := exec.Command("git", "-C", root, "ls-files", "-z").Output()
-		if err != nil {
-			t.Fatalf("git ls-files: %v", err)
-		}
-		for _, rel := range strings.Split(strings.TrimRight(string(out), "\x00"), "\x00") {
-			info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(rel)))
-			if err != nil || !info.Mode().IsRegular() {
-				continue // deleted in the worktree, submodule, or symlink
-			}
-			files = append(files, rel)
-		}
-	}
-	// Sanity: an empty or partial runfiles tree would pass every scan.
-	if len(files) < 1000 {
-		t.Fatalf("found only %d repository files under %s; the listing is broken", len(files), root)
-	}
-	return files
-}
-
-// isFileOrFileLink reports whether a WalkDir entry is a regular file or a
-// symlink to one. Bazel's local runfiles trees are symlink forests, so a walk
-// that skipped symlinks would see no file there; a symlink to a directory
-// (Bazel's bazel-* convenience links in a checkout) is never followed.
-func isFileOrFileLink(path string, d os.DirEntry) bool {
-	if d.Type().IsRegular() {
-		return true
-	}
-	if d.Type()&os.ModeSymlink == 0 {
-		return false
-	}
-	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular()
-}
-
-func TestBazelNoRemoteEndpointsInTrackedFiles(t *testing.T) {
-	// Fixtures are assembled at runtime so this file never contains a literal
-	// endpoint itself.
-	scheme := "grpc" + "s://"
-	flag := func(name string) string { return "--" + name }
-	for _, bad := range []string{
-		"build:remote-exec " + flag("remote_executor") + "=" + scheme + "rbe.example.com:443\n",
-		"build:remote-exec " + flag("remote_executor") + "=rbe.example.com:443\n",
-		"build:remote-exec " + flag("remote_executor") + " rbe.example.com:443\n",
-		"build " + flag("remote_cache") + "=https://cache.example.com\n",
-		"build " + flag("bes_backend") + "=bes.example.com\n",
-		"build " + flag("bes_results_url") + "=https://results.example.com/inv/\n",
-		"build " + flag("remote_header") + "=x-api-key=abc123\n",
-		"build " + flag("tls_client_certificate") + "=/etc/rbe/client.crt\n",
-		"build " + flag("tls_client_key") + "=\"/etc/rbe/client.key\"\n",
-		"# farm: " + scheme + "10.0.0.5:8980\n",
-		"REMOTE=" + "grpc" + "://cache.internal:9092\n",
-	} {
-		if len(findRemoteEndpoints(".bazelrc", []byte(bad), true)) == 0 {
-			t.Errorf("endpoint fixture not detected: %q", bad)
-		}
-	}
-	for _, ok := range []string{
-		"build:remote-exec " + flag("remote_executor") + "=" + scheme + "<endpoint>\n",
-		"build:remote-exec " + flag("remote_executor") + "=<endpoint>\n",
-		"build:remote-exec " + flag("tls_client_certificate") + "=<path>\n",
-		"  run: echo \"build " + flag("remote_executor") + "=${{ secrets.BAZEL_REMOTE_EXECUTOR }}\" >> \"$RUNNER_TEMP/ci.bazelrc\"\n",
-		"  " + flag("tls_client_key") + " \"$RUNNER_TEMP/rbe.key\"\n",
-		"  " + flag("remote_executor") + "=" + scheme + "${{ secrets.RBE_HOST }}\n",
-		flag("remote_cache") + "=" + "grpc" + "://127.0.0.1:50052\n",
-		flag("remote_cache") + "=localhost:9092\n",
-		flag("remote_cache") + "=\n",
-		"build " + flag("remote_timeout") + "=600\n",
-		"use grpc for transport\n",
-	} {
-		if hits := findRemoteEndpoints(".bazelrc", []byte(ok), true); len(hits) != 0 {
-			t.Errorf("allowed fixture flagged: %q -> %v", ok, hits)
-		}
-	}
-	// The fork cache's public endpoint: exactly its two .bazelrc lines.
-	forkCache := "build:fork-cache " + flag("remote_cache") + "=" + forkCacheEndpoint + "\n" +
-		"  build:fork-cache " + flag("remote_instance_name") + "=oss  \n"
-	if hits := findRemoteEndpoints(".bazelrc", []byte(forkCache), true); len(hits) != 0 {
-		t.Errorf("fork-cache endpoint lines flagged in .bazelrc: %v", hits)
-	}
-	for _, path := range []string{"tools/ci.bazelrc", ".bazelrc.local", "user.bazelrc", ".github/workflows/x.yml", ".github/actions/setup-bazel/x.sh"} {
-		if hits := findRemoteEndpoints(path, []byte(forkCache), true); len(hits) < 2 {
-			t.Errorf("fork-cache endpoint lines in %s: hits %v, want both lines flagged (allowlisted in .bazelrc only)", path, hits)
-		}
-	}
-	for _, bad := range []string{
-		"build:fork-cache " + flag("remote_cache") + "=" + scheme + "other.example:8443\n",
-		"build:fork-cache " + flag("remote_cache") + "=" + forkCacheEndpoint + "/x\n",
-		"build:fork-cache " + flag("remote_cache") + "=" + forkCacheEndpoint + " " + flag("remote_header") + "=x-api-key=abc\n",
-		"build " + flag("remote_cache") + "=" + forkCacheEndpoint + "\n",
-		"build:remote-exec " + flag("remote_executor") + "=" + forkCacheEndpoint + "\n",
-		"build:fork-cache " + flag("remote_instance_name") + "=beads\n",
-		"# see " + forkCacheEndpoint + "\n",
-	} {
-		if len(findRemoteEndpoints(".bazelrc", []byte(bad), true)) == 0 {
-			t.Errorf("non-allowlisted fork-cache variant not detected in .bazelrc: %q", bad)
-		}
-	}
-	// rbe-fork's endpoint pin: that line in that file only; anything else
-	// naming the endpoint, there or elsewhere, is flagged.
-	if hits := findRemoteEndpoints(publicRBEForkPinFile, []byte("set -eu\n"+publicRBEForkPinLine+"\n"), true); len(hits) != 0 {
-		t.Errorf("rbe-fork endpoint pin flagged in %s: %v", publicRBEForkPinFile, hits)
-	}
-	for _, path := range []string{".github/actions/setup-bazel/write-bazelrc.sh", ".github/workflows/bazel.yml", ".bazelrc", "tools/rbe/fork-credential.sh"} {
-		if len(findRemoteEndpoints(path, []byte(publicRBEForkPinLine+"\n"), true)) == 0 {
-			t.Errorf("rbe-fork endpoint pin not flagged in %s (allowlisted in %s only)", path, publicRBEForkPinFile)
-		}
-	}
-	for _, bad := range []string{
-		"  " + publicRBEForkPinLine,
-		strings.Replace(publicRBEForkPinLine, "8444", "443", 1),
-		`ENDPOINT=` + "grpc" + `s://rbe-fork.ops.gascity.com:8444`,
-		"build:remote-exec " + flag("remote_executor") + "=" + scheme + "rbe-fork.ops.gascity.com:8444",
-	} {
-		if len(findRemoteEndpoints(publicRBEForkPinFile, []byte(bad+"\n"), true)) == 0 {
-			t.Errorf("non-allowlisted rbe-fork line not detected in %s: %q", publicRBEForkPinFile, bad)
-		}
-	}
-	// Markdown: OTel gRPC exporter URLs and prose mentioning the flag are fine;
-	// a literal flag value is not.
-	for _, ok := range []string{
-		"Set OTEL_EXPORTER_OTLP_ENDPOINT=" + "grpc" + "://collector:4317\n",
-		"Pass " + flag("remote_executor") + " and TLS flags from user.bazelrc.\n",
-	} {
-		if hits := findRemoteEndpoints("docs/x.md", []byte(ok), false); len(hits) != 0 {
-			t.Errorf("allowed Markdown fixture flagged: %q -> %v", ok, hits)
-		}
-	}
-	if len(findRemoteEndpoints("docs/x.md", []byte("bazel build "+flag("remote_executor")+"=rbe.example.com:443 //...\n"), false)) == 0 {
-		t.Error("literal remote_executor in Markdown not detected")
-	}
-	for rel, want := range map[string][2]bool{
-		".bazelrc":                {true, true},
-		"tools/ci.bazelrc":        {true, true},
-		".bazelrc.local":          {true, true},
-		".github/workflows/x.yml": {true, true},
-		"docs/BAZEL.md":           {true, false},
-		"issues.jsonl":            {false, false},
-		"internal/telemetry/x.go": {false, false},
-	} {
-		if scan, strict := remoteScanKind(rel); scan != want[0] || strict != want[1] {
-			t.Errorf("remoteScanKind(%q) = %v,%v, want %v,%v", rel, scan, strict, want[0], want[1])
-		}
-	}
-
-	root := bazelPolicyRoot(t)
-	var hits []endpointHit
-	for _, rel := range repoFiles(t, root) {
-		scan, strict := remoteScanKind(rel)
-		if !scan {
-			continue
-		}
-		content, err := os.ReadFile(filepath.Join(root, rel))
-		if err != nil {
-			t.Fatalf("read %s: %v", rel, err)
-		}
-		hits = append(hits, findRemoteEndpoints(rel, content, strict)...)
-	}
-	for _, h := range hits {
-		t.Errorf("%s:%d: remote endpoint or credential %q in a tracked file; it belongs in a gitignored user.bazelrc/.bazelrc.local or a CI-generated rc outside the workspace", h.path, h.line, h.what)
-	}
-}
-
-// TestNoLocalPlanPathsInTrackedFiles: tracked files must not point readers
-// at a maintainer's private, out-of-repo planning notes (a home-directory
-// planning-notes tree), which no other contributor can open. Cite an
-// in-repo doc, a bead, or a PR instead. The needle is assembled at runtime so
-// this file does not match itself.
-func TestNoLocalPlanPathsInTrackedFiles(t *testing.T) {
-	root := bazelPolicyRoot(t)
-	needle := []byte("beads-" + "bazel-plan")
-	for _, rel := range repoFiles(t, root) {
-		content, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
-		if err != nil {
-			t.Fatalf("read %s: %v", rel, err)
-		}
-		if bytes.IndexByte(content, 0) >= 0 {
-			continue // binary, as git grep -I
-		}
-		for n, line := range bytes.Split(content, []byte("\n")) {
-			if bytes.Contains(line, needle) {
-				t.Errorf("%s:%d: tracked file references a local, non-repo %s path; point at an in-repo doc, bead or PR instead", rel, n+1, needle)
-			}
-		}
-	}
-}
-
 // --- generated go_srcs filegroups are current -------------------------------
 
-// These checks walk the source checkout: under Bazel, //:repo_files, which
-// holds every package's BUILD.bazel (a package missing its repo_files block
-// is what `make bazel-sync-check` fails on).
+// These checks walk the source checkout: under Bazel, //:repo_other_files,
+// which holds every package's BUILD.bazel (a package missing its repo_files
+// block is what `make bazel-sync-check` fails on).
 
 var (
 	treeGoSrcsRe  = regexp.MustCompile(`(?s)filegroup\(\s*name\s*=\s*"tree_go_srcs",\s*srcs\s*=\s*\[(.*?)\]`)
@@ -791,7 +407,7 @@ func TestBazelGoSrcsBlocksCurrent(t *testing.T) {
 // --- no Bazel packages under the docs trees ---------------------------------
 
 // docs/ and engdocs/ are content (the Mintlify site and the engineering docs)
-// that the root package's repo_files glob covers; they hold no code, so a
+// that the root package's repo_files block covers; they hold no code, so a
 // BUILD file under either tree is a mistake (it would also split the subtree
 // into a package of its own).
 func TestBazelNoPackagesUnderDocsTrees(t *testing.T) {
@@ -826,7 +442,6 @@ var allowedBazelTestTags = map[string]string{
 	"host-tools":      "needs host tools (bash/git/make/jq/...) beyond the test wrapper's",
 	"no-remote-exec":  "must run on the Bazel client's host, never on a remote worker",
 	"no-remote-cache": "result depends on the host, so it is neither read from nor uploaded to the remote cache",
-	"requires-docker": "needs a docker daemon; excluded from --config=prcore/ci, run by --config=docker",
 	// No no-remote-exec: the target starts its own dolt sql-server from the
 	// pinned dolt in its runfiles, so it runs on any worker, and a server that
 	// cannot start fails it rather than skipping, so its cached result holds.
@@ -846,6 +461,18 @@ var allowedBazelTestTags = map[string]string{
 	// zero tests, which check_testcases.py rejects and equivalence.py can
 	// only note. gazelle keeps the hand-written tags attribute.
 	"integration-only": "holds tests only under the integration build tag; excluded from --config=prcore/ci, run by --config=integration",
+	// For a non-Go sh_test (no Go testcases in its test.xml, which the
+	// integration lane's check_testcases.py would reject) that runs the
+	// release-shaped bd_for_tests: the PR-core lane builds bd without the
+	// integration tag, as releases are, and running it again under the
+	// integration build would only repeat it against a test-shaped bd.
+	"pr-core-only": "runs only in --config=prcore/ci; excluded from --config=integration",
+	// For a go_binary whose every source file is `//go:build cgo`: it also
+	// sets target_compatible_with incompatible under //tools/bazel:pure, and
+	// tools/bazel/go_srcs.py and scripts/ci/bazel-release-cross-compile.sh
+	// leave it out of //tools/bazel:release_cross by this tag (`go build
+	// ./...` skips the package with CGO_ENABLED=0).
+	"cgo-only": "a go_binary with only cgo sources: incompatible with pure builds and left out of //tools/bazel:release_cross",
 }
 
 // bazelPRCoreExcludedTags are the tags whose targets never run in the PR-core
@@ -854,7 +481,7 @@ var allowedBazelTestTags = map[string]string{
 // and vice versa (TestBazelPRCoreExcludedTagsMatchTaxonomy), so a new lane
 // tag lands here, and through bazelIntegrationExcludedTags in the
 // integration lane's filter too.
-var bazelPRCoreExcludedTags = []string{"requires-docker", "dolt-server", "dolt-server-proxied", "dolt-server-integration", "dolt-server-cmd", "embedded", "manual", "integration-only"}
+var bazelPRCoreExcludedTags = []string{"dolt-server", "dolt-server-proxied", "dolt-server-integration", "dolt-server-cmd", "embedded", "manual", "integration-only"}
 
 // bazelIntegrationRunsTags are the PR-core-excluded tags --config=integration
 // runs: the integration lane is main.yml's integration jobs, whose
@@ -862,10 +489,14 @@ var bazelPRCoreExcludedTags = []string{"requires-docker", "dolt-server", "dolt-s
 // other lane's variant stays out of it.
 var bazelIntegrationRunsTags = map[string]bool{"integration-only": true}
 
+// bazelPRCoreOnlyTags are the tags the PR-core lane runs and the integration
+// lane does not.
+var bazelPRCoreOnlyTags = []string{"pr-core-only"}
+
 // bazelIntegrationExcludedTags is bazelPRCoreExcludedTags less the tags the
-// integration lane runs.
+// integration lane runs, plus bazelPRCoreOnlyTags.
 func bazelIntegrationExcludedTags() []string {
-	var tags []string
+	tags := append([]string(nil), bazelPRCoreOnlyTags...)
 	for _, tag := range bazelPRCoreExcludedTags {
 		if !bazelIntegrationRunsTags[tag] {
 			tags = append(tags, tag)
@@ -898,12 +529,9 @@ func TestBazelPRCoreExcludedTagsMatchTaxonomy(t *testing.T) {
 // they must also carry: no-remote-exec, or remote execution would run them on a
 // worker that lacks the tool or daemon; and for host-tools, no-remote-cache,
 // because the action key does not cover the host's tool inventory, so a result
-// produced on one host must not be served to another. (requires-docker
-// targets fail rather than skip without their daemon, so their passes are
-// safe to share.)
+// produced on one host must not be served to another.
 var bazelTagsRequiring = map[string][]string{
-	"host-tools":      {"no-remote-exec", "no-remote-cache"},
-	"requires-docker": {"no-remote-exec"},
+	"host-tools": {"no-remote-exec", "no-remote-cache"},
 }
 
 var (
@@ -978,8 +606,8 @@ func checkBazelBuildTags(name, build string) []error {
 
 func TestBazelTestTagsFollowTaxonomy(t *testing.T) {
 	for name, good := range map[string]string{
-		"docker": "# Tags:\n#   requires-docker: needs a daemon.\n#   no-remote-exec: the daemon is local.\n" +
-			"sh_test(\n    name = \"x\",\n    tags = [\n        \"no-remote-exec\",\n        \"requires-docker\",\n    ],\n)\n",
+		"multi-line": "# Tags:\n#   dolt-server: hermetic servers.\n#   manual: a build input.\n" +
+			"sh_test(\n    name = \"x\",\n    tags = [\n        \"dolt-server\",\n        \"manual\",\n    ],\n)\n",
 		"host-tools": "# host-tools, no-remote-exec, no-remote-cache: git.\n" +
 			"go_test(\n    name = \"x\",\n    tags = [\"host-tools\", \"no-remote-exec\", \"no-remote-cache\"],  # why\n)\n",
 	} {
@@ -992,7 +620,7 @@ func TestBazelTestTagsFollowTaxonomy(t *testing.T) {
 		"no comment":      "go_test(\n    name = \"x\",\n    tags = [\"manual\"],\n)\n",
 		"comment too far": "# manual: harness\n\ngo_test(\n    name = \"x\",\n    tags = [\"manual\"],\n)\n",
 		"other rule's":    "# manual: harness\ngo_test(name = \"a\", tags = [\"manual\"])\n\ngo_test(\n    name = \"b\",\n    tags = [\"manual\"],\n)\n",
-		"docker unpinned": "# requires-docker: daemon\ngo_test(\n    name = \"x\",\n    tags = [\"requires-docker\"],\n)\n",
+		"docker tag":      "# requires-docker, no-remote-exec: daemon\ngo_test(\n    name = \"x\",\n    tags = [\"requires-docker\", \"no-remote-exec\"],\n)\n",
 		"not a literal":   "# manual\ngo_test(\n    name = \"x\",\n    tags = MANUAL,\n)\n",
 		"literal plus":    "# manual\ngo_test(\n    name = \"x\",\n    tags = [\"manual\"] + MORE,\n)\n",
 		"host cacheable":  "# host-tools no-remote-exec\ngo_test(\n    name = \"x\",\n    tags = [\"host-tools\", \"no-remote-exec\"],\n)\n",
@@ -1143,13 +771,13 @@ func TestBazelrcPrcoreExcludesNonPRTags(t *testing.T) {
 	}
 	for name, rc := range map[string]string{
 		"missing":        "test:ci --keep_going\n",
-		"no docker":      "test:prcore --test_tag_filters=-dolt-server,-embedded,-manual\n",
-		"no dolt-server": "test:prcore --test_tag_filters=-requires-docker,-embedded,-manual\n",
-		"ci override": "test:prcore --test_tag_filters=-requires-docker,-embedded,-manual\n" +
-			"test:ci --config=prcore\ntest:ci --test_tag_filters=requires-docker\n",
-		"second prcore line": "test:prcore --test_tag_filters=-requires-docker,-embedded,-manual\n" +
+		"no embedded":    "test:prcore --test_tag_filters=-dolt-server,-manual\n",
+		"no dolt-server": "test:prcore --test_tag_filters=-embedded,-manual\n",
+		"ci override": "test:prcore --test_tag_filters=-dolt-server,-embedded,-manual\n" +
+			"test:ci --config=prcore\ntest:ci --test_tag_filters=dolt-server\n",
+		"second prcore line": "test:prcore --test_tag_filters=-dolt-server,-embedded,-manual\n" +
 			"test:prcore --test_tag_filters=-manual\n",
-		"transitive": "test:prcore --test_tag_filters=-requires-docker,-embedded,-manual\n" +
+		"transitive": "test:prcore --test_tag_filters=-dolt-server,-embedded,-manual\n" +
 			"test:ci --config=prcore\nbuild:nightly --config ci --test_tag_filters=\n",
 	} {
 		if err := checkBazelrcPrcoreTagFilter(rc); err == nil {
@@ -1190,23 +818,16 @@ func TestBazelrcPrcoreMatchesPRCoreParallel(t *testing.T) {
 	t.Fatalf(".bazelrc lacks %q (pr-core.sh runs go test -parallel %s)", want, m[1])
 }
 
-// Docker-lane results depend on host state no action key sees (daemon, dolt
-// image, network), so they must always execute, like the container jobs'
-// -count=1; and no remote-exec run may upload a locally executed result to
-// the shared cache.
-func TestBazelrcDockerLaneNeverCached(t *testing.T) {
-	lines := map[string]bool{}
+// No remote-exec run may upload a locally executed result (a no-remote-exec
+// test's, which depends on the host) to the shared cache.
+func TestBazelrcRemoteExecUploadsNoLocalResults(t *testing.T) {
+	const want = "build:remote-exec --noremote_upload_local_results"
 	for _, line := range strings.Split(readPolicyFile(t, bazelPolicyRoot(t), ".bazelrc"), "\n") {
-		lines[strings.TrimSpace(line)] = true
-	}
-	for _, want := range []string{
-		"test:docker --nocache_test_results",
-		"build:remote-exec --noremote_upload_local_results",
-	} {
-		if !lines[want] {
-			t.Errorf(".bazelrc lacks %q", want)
+		if strings.TrimSpace(line) == want {
+			return
 		}
 	}
+	t.Errorf(".bazelrc lacks %q", want)
 }
 
 // --- fork cache --------------------------------------------------------------
@@ -1508,10 +1129,11 @@ func sameTagSet(a, b map[string]bool) bool {
 }
 
 // TestBazelIntegrationLaneMatchesMainWorkflow keeps --config=integration in
-// step with the integration-tagged `go test` it replaced on push to main
-// (main.yml's former "Main Linux integration" jobs), whose one remaining Go
-// twin is nightly.yml's Full Test Suite: the same build tags, race,
-// BEADS_TEST_SKIP=dolt, and none of the variants that run does not use.
+// step with the integration-tagged `go test` it replaced (main.yml's former
+// "Main Linux integration" jobs and nightly.yml's retired Full Test Suite,
+// `go test -race -tags=integration,gms_pure_go ./...` with
+// BEADS_TEST_SKIP=dolt): the same build tags, race, BEADS_TEST_SKIP=dolt, and
+// none of the variants that run does not use.
 // It also requires gazelle to see the same tags (root BUILD.bazel
 // `gazelle:build_tags`): gazelle drops a file whose build constraint names a
 // tag it does not know, so without it no BUILD file would list the integration
@@ -1520,22 +1142,7 @@ func sameTagSet(a, b map[string]bool) bool {
 // through `make bazel-sync`, whose staleness bazel.yml already fails on.
 func TestBazelIntegrationLaneMatchesMainWorkflow(t *testing.T) {
 	root := bazelPolicyRoot(t)
-	nightly := readCIWorkflow(t, "nightly.yml").job(t, "full-test")
-	var want map[string]bool
-	for _, step := range nightly.Steps {
-		if m := regexp.MustCompile(`go test .*-race -tags=(\S+) .*-timeout=30m \./\.\.\.`).FindStringSubmatch(step.Run); m != nil {
-			if want != nil {
-				t.Fatalf("nightly.yml full-test: more than one integration `go test -race -tags=...` step")
-			}
-			want = tagSet(m[1])
-			if step.Env["BEADS_TEST_SKIP"] != "dolt" {
-				t.Fatal("nightly.yml full-test no longer runs with BEADS_TEST_SKIP=dolt; update test:integration")
-			}
-		}
-	}
-	if !want["integration"] {
-		t.Fatalf("nightly.yml full-test: want one `go test -race -tags=...integration... -timeout=30m ./...` step, got tags %v", want)
-	}
+	want := tagSet("integration,gms_pure_go")
 
 	bazelrc := readPolicyFile(t, root, ".bazelrc")
 	lines := map[string]bool{}
@@ -1548,7 +1155,7 @@ func TestBazelIntegrationLaneMatchesMainWorkflow(t *testing.T) {
 		}
 	}
 	if !sameTagSet(laneTags, want) {
-		t.Errorf(".bazelrc build:integration tags = %v, want nightly.yml full-test's %v", laneTags, want)
+		t.Errorf(".bazelrc build:integration tags = %v, want %v", laneTags, want)
 	}
 	if err := checkBazelrcIntegrationLane(bazelrc); err != nil {
 		t.Error(err)

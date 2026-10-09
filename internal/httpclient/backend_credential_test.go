@@ -32,7 +32,7 @@ func (fixtureBackendCredential) BackendCredential() {}
 
 func TestResolveCredentialNilNotRequiredFallsBackToTheAmbientLadder(t *testing.T) {
 	clearCredentialEnvironment(t)
-	t.Setenv(TokenEnv, "ambient-token")
+	t.Setenv(TokenEnv, "127.0.0.1=ambient-token")
 	base := mustParseURL(t, "http://127.0.0.1:8080")
 
 	cp, err := ResolveCredential(backends.OpenOptions{}, base, false)

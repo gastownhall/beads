@@ -1,0 +1,91 @@
+# rbe_worker: the execution platform of every build (.bazelrc selects it
+# unconditionally with --extra_execution_platforms, so every action and test
+# executes on it and local, fork-cache and remote runs hash alike).
+#
+# Test actions exec host tools (bash, git, python3, coreutils, ...) and load
+# the shared libraries of every cgo binary they link (glibc, libstdc++), so
+# the worker host is an input to every cached result. Its exec_properties
+# enter each action's key: worker-env is the sha256 of
+# tools/rbe/worker-env.txt, the toolchain manifest of the pinned worker host
+# (arch, OS release, Go, dolt, and the upstream releases of the libraries and
+# tools actions reach; not the image's security patch revisions).
+#
+# rbe-west's OSS pool is shared with gastownhall/gascity, which owns the
+# worker image: its tools/rbe/blacksmith-worker.sh advertises the sha256 of
+# the manifest it measures on its own host (gascity tools/rbe/worker-env),
+# and the schedulers match worker-env exactly, so these actions run only on
+# the pinned toolchain. tools/rbe/worker-env.txt is a byte-for-byte copy of
+# gascity's: when gascity moves its pin (a toolchain change: a distribution,
+# library or tool release, Go or dolt), copy its manifest here and update
+# this sha256 in the same commit, which is a new key for every action.
+# scripts/rbe_worker_env_test.go keeps the pin and the manifest in step, and
+# tools/rbe/worker-env-sync (nightly) compares both with gascity's main.
+platform(
+    name = "rbe_worker",
+    exec_properties = {
+        "worker-env": "sha256:0c6c05c2196c246dba37e106a3d028e2f47f2e3d7eae0e41c2fe2bd9b2e4f6f0",
+    },
+    parents = ["@bazel_tools//tools:host_platform"],
+    visibility = ["//visibility:public"],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end repo_files ---

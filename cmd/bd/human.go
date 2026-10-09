@@ -307,12 +307,12 @@ Examples:
 
 		warnIfNotHumanLabeled(issue)
 
-		_, err = targetStore.AddIssueComment(ctx, resolvedID, actor, commentText)
+		_, err = targetStore.AddIssueComment(ctx, resolvedID, currentActor(), commentText)
 		if err != nil {
 			return HandleErrorRespectJSON("adding comment: %v", err)
 		}
 
-		if err := targetStore.CloseIssue(ctx, resolvedID, "Responded", actor, ""); err != nil {
+		if err := targetStore.CloseIssue(ctx, resolvedID, "Responded", currentActor(), ""); err != nil {
 			return HandleErrorRespectJSON("closing bead: %v", err)
 		}
 
@@ -403,7 +403,7 @@ Examples:
 
 		warnIfNotHumanLabeled(issue)
 
-		if err := targetStore.CloseIssue(ctx, resolvedID, closeReason, actor, ""); err != nil {
+		if err := targetStore.CloseIssue(ctx, resolvedID, closeReason, currentActor(), ""); err != nil {
 			return HandleErrorRespectJSON("closing bead: %v", err)
 		}
 

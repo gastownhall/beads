@@ -568,7 +568,7 @@ var createCmd = &cobra.Command{
 		// dry-run preview needs it too; asking the facade to inherit as well
 		// would append the parent's labels a second time.
 		result, err := ops.Create(opsCtx, issueops.CreateRequest{
-			Actor:         actor,
+			Actor:         currentActor(),
 			Issue:         issue,
 			ParentID:      parentID,
 			Dependencies:  createDependencyRequests(depSpecs),
@@ -610,7 +610,7 @@ var createCmd = &cobra.Command{
 		}
 
 		if repoPath != "." && targetStore != nil {
-			if err := commitPendingIfEmbedded(ctx, targetStore, actor, doltAutoCommitParams{
+			if err := commitPendingIfEmbedded(ctx, targetStore, currentActor(), doltAutoCommitParams{
 				Command:  "create",
 				IssueIDs: []string{created.ID},
 			}); err != nil {

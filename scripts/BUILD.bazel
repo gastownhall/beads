@@ -2,8 +2,22 @@ load("@rules_go//go:def.bzl", "go_test")
 
 # CI and repo-policy tests: they parse the workflows, run the CI shell scripts
 # against fixtures, and check repository-wide rules (BUILD tag taxonomy, skip
-# allowlist, managed BUILD blocks, shard manifests, tracked-file scans) over
-# //:repo_files, the checkout as Bazel sees it.
+# allowlist, managed BUILD blocks, shard manifests, tracked-file scans).
+#
+# They are one Go package but several go_test targets, each compiling only
+# the files whose tests it runs and declaring only what those tests read, so
+# that a change re-runs only the targets that read it: a Go-only change runs
+# no workflow policy test, a docs-only or workflow-only change no Go-source
+# scan. The data are the partitions of the checkout that tools/bazel/go_srcs.py
+# generates (//:repo_go_srcs, //:repo_go_test_srcs, //:repo_doc_files,
+# //:repo_other_files, and per package) or single files; only
+# :tracked_files_test declares //:repo_files, every tracked file.
+#
+# Every *_test.go here is in exactly one of these targets, except the
+# helpers-only files (no Test functions) that several compile; srcs are kept
+# by hand (`# keep` stops gazelle from putting every file back into
+# scripts_test), and TestScriptsTestTargetsPartitionTheTests
+# (scripts_targets_test.go) fails on a file in no target or a test in two.
 #
 # No tags: they run remotely like any other target. The scripts and fixtures
 # run bash, git, python3, jq, yq, curl, openssl, unzip and coreutils from the
@@ -11,6 +25,11 @@ load("@rules_go//go:def.bzl", "go_test")
 # missing tool fails the test under Bazel instead of skipping it
 # (host_tools_test.go), so a cached pass never stands for an executor that
 # could not run it. Go and the release formula come in hermetically.
+
+# The CI and Bazel policy tests: workflows, the setup-bazel action, .bazelrc,
+# MODULE.bazel, every BUILD and .bzl file, tools/bazel and the CI scripts,
+# all in //:repo_other_files (every tracked file but Go and Markdown source),
+# plus the one Go file whose dolt image pin they compare.
 go_test(
     name = "scripts_test",
     srcs = [
@@ -18,50 +37,38 @@ go_test(
         "bazel_cache_mode_test.go",
         "bazel_farm_workflow_test.go",
         "bazel_fork_mode_test.go",
+        "bazel_go_repository_tools_test.go",
+        "bazel_hermetic_cc_test.go",
         "bazel_policy_test.go",
         "bazel_rbe_prewarm_test.go",
-        "bazel_skip_allowlist_test.go",
-        "check_build_tags_test.go",
-        "check_doc_freshness_test.go",
-        "check_release_cross_compile_test.go",
-        "check_testing_short_test.go",
-        "check_winget_portable_alias_test.go",
         "ci_actions_policy_test.go",
+        "ci_analytics_workflow_test.go",
         "ci_blacksmith_runner_test.go",
-        "ci_capability_selector_test.go",
         "ci_f7b_review_test.go",
         "ci_f7c_advisory_test.go",
         "ci_merge_queue_test.go",
         "ci_workflow_apt_get_timeout_test.go",
         "ci_workflow_test.go",
-        "complexity_script_test.go",
-        "conformance_script_test.go",
         "embedded_shard_count_test.go",
         "host_tools_test.go",
-        "install_dolt_test.go",
+        "makefile_bazel_primary_test.go",
+        "migration_corpus_bazel_test.go",
+        "nogo_lint_policy_test.go",
+        "pinned_shards_helpers_test.go",
+        "pinned_shards_test.go",
         "pr_lanes_bazel_coverage_test.go",
-        "pr_preflight_test.go",
         "pr_risk_bazel_coverage_test.go",
-        "pull_dolt_image_test.go",
-        "release_script_test.go",
-        "required_suite_test.go",
-        "test_script_test.go",
-        "upgrade_smoke_loop_test.go",
-        "windows_test_binaries_manifest_test.go",
-    ],
+        "rbe_worker_env_test.go",
+        "repo_helpers_test.go",
+    ],  # keep
     data = [
-        "//:repo_files",
-        "@beads_formulas//:beads-release.formula.toml",
+        "//:repo_other_files",
+        "//internal/testutil:testdoltcommon.go",
         "@go_sdk//:bin/go",
         "@go_sdk//:files",
     ],
-    # The release formula lives in .beads/ (in .bazelignore: it also holds
-    # live bd data), so it comes in through its own local repository. The Go
-    # SDK is go.mod's toolchain, whatever go the executor has on PATH.
-    env = {
-        "BEADS_TEST_GO": "$(rlocationpath @go_sdk//:bin/go)",
-        "BEADS_TEST_RELEASE_FORMULA": "$(rlocationpath @beads_formulas//:beads-release.formula.toml)",
-    },
+    # The Go SDK is go.mod's toolchain, whatever go the executor has on PATH.
+    env = {"BEADS_TEST_GO": "$(rlocationpath @go_sdk//:bin/go)"},
     deps = [
         "//internal/formula",
         "//internal/testutil/bazeltest",
@@ -70,9 +77,178 @@ go_test(
     ],
 )
 
+# The shell scripts' own behavior, run against fixtures: this package's
+# scripts and their testdata, the few root files they read, and the release
+# formula.
+go_test(
+    name = "shell_scripts_test",
+    srcs = [
+        "check_build_tags_test.go",
+        "check_doc_freshness_test.go",
+        "check_release_cross_compile_test.go",
+        "check_testing_short_test.go",
+        "check_winget_portable_alias_test.go",
+        "ci_analytics_extract_test.go",
+        "complexity_script_test.go",
+        "conformance_script_test.go",
+        "host_tools_test.go",
+        "install_dolt_test.go",
+        "pr_preflight_test.go",
+        "pre_push_suite_test.go",
+        "pull_dolt_image_test.go",
+        "release_script_test.go",
+        "repo_helpers_test.go",
+        "required_suite_test.go",
+        "test_script_test.go",
+        "upgrade_smoke_loop_test.go",
+    ],
+    data = [
+        ":repo_other_files",
+        "//:.buildflags",
+        "//:.githooks/pre-push",
+        "//:.test-skip",
+        "//internal/httpclient:repo_other_files",
+        "//test/conformance:repo_go_test_srcs",
+        "//test/conformance:repo_other_files",
+        "//tools/bazel:repo_other_files",
+        "@beads_formulas//:beads-release.formula.toml",
+    ],
+    # The release formula lives in .beads/ (in .bazelignore: it also holds
+    # live bd data), so it comes in through its own local repository.
+    env = {"BEADS_TEST_RELEASE_FORMULA": "$(rlocationpath @beads_formulas//:beads-release.formula.toml)"},
+    deps = [
+        "//internal/formula",
+        "//internal/testutil/bazeltest",
+        "//scripts/internal/testbash",
+    ],
+)
+
+# Scans of the Go test files: the Bazel-skip allowlist, the managed local
+# lane, and the shard manifests and scripts against the tests they shard.
+# Every _test.go file (//:repo_go_test_srcs) but no non-test Go source, so a
+# non-test Go change leaves it cached.
+go_test(
+    name = "go_test_sources_test",
+    srcs = [
+        "bazel_skip_allowlist_test.go",
+        "embedded_shard_count_test.go",
+        "host_tools_test.go",
+        "managed_local_lane_test.go",
+        "pinned_shards_helpers_test.go",
+        "pinned_shards_sources_test.go",
+        "repo_helpers_test.go",
+        "scripts_targets_test.go",
+        "shard_manifest_test.go",
+    ],
+    data = [
+        "BUILD.bazel",
+        "ci/_embedded_shard_manifest_lib.py",
+        "ci/embedded_cmd_test_durations.json",
+        "ci/embedded_storage_test_durations.json",
+        "ci/gen_embedded_cmd_shard_manifest.py",
+        "ci/gen_embedded_storage_shard_manifest.py",
+        "ci/gen_proxied_shard_manifest.py",
+        "ci/proxied_test_durations.json",
+        "//:.github/scripts/embedded-cmd-test-shards.txt",
+        "//:.github/scripts/embedded-storage-test-shard.sh",
+        "//:.github/scripts/embedded-storage-test-shards.txt",
+        "//:.github/scripts/embedded-test-shard.sh",
+        "//:.github/scripts/proxied-cmd-test-shards.txt",
+        "//:.github/scripts/proxied-test-shard.sh",
+        "//:.github/scripts/server-storage-test-shard.sh",
+        "//:.github/scripts/server-storage-test-shards.txt",
+        "//:nested_go_modules",
+        "//:repo_go_test_srcs",
+        "//cmd/bd:repo_other_files",
+        "//internal/storage/dolt:repo_other_files",
+        "//internal/storage/embeddeddolt:repo_other_files",
+        "//tests/regression:repo_other_files",
+        "//tools/bazel:check_shard_coverage.py",
+        "//tools/bazel:equivalence_allowlist.txt",
+    ],
+    deps = ["//internal/testutil/bazeltest"],
+)
+
+# check-testing-short.sh over every Go file, test and non-test.
+go_test(
+    name = "go_sources_test",
+    srcs = [
+        "repo_helpers_test.go",
+        "testing_short_tree_test.go",
+    ],
+    data = [
+        "check-testing-short.sh",
+        "//:repo_go_srcs",
+        "//:repo_go_test_srcs",
+    ],
+    deps = ["//internal/testutil/bazeltest"],
+)
+
+# Scans of every tracked file (//:repo_files): any change re-runs them, so
+# keep them few and fast.
+go_test(
+    name = "tracked_files_test",
+    srcs = [
+        "repo_helpers_test.go",
+        "tracked_files_test.go",
+    ],
+    data = ["//:repo_files"],
+    deps = ["//internal/testutil/bazeltest"],
+)
+
+# pr.yml's check-doc-freshness-platforms Linux leg: `go test
+# -tags integration ./scripts -count=1 -run '^(TestDocFreshness.*|
+# TestRequiredSuiteContract)$' -args -required-suite=doc-freshness`, whose
+# TestMain fails unless exactly the doc-freshness inventory is compiled and
+# selected. shell_scripts_test runs those tests too (in the integration lane);
+# this target adds the inventory and selection contract, over only the files
+# the suite reads (its fixtures copy check-doc-freshness.sh). The macOS and
+# Windows legs stay in pr.yml.
+# Tags:
+#   integration-only: every TestDocFreshness test is //go:build integration,
+#     so --config=integration's lane runs it.
+go_test(
+    name = "doc_freshness_required_test",
+    srcs = [
+        "check_doc_freshness_test.go",
+        "repo_helpers_test.go",
+        "required_suite_test.go",
+    ],
+    args = [
+        "-test.count=1",
+        "-test.run=^(TestDocFreshness.*|TestRequiredSuiteContract)$$",
+        "-required-suite=doc-freshness",
+    ],
+    data = ["check-doc-freshness.sh"],
+    tags = ["integration-only"],
+    deps = [
+        "//internal/testutil/bazeltest",
+        "//scripts/internal/testbash",
+    ],
+)
+
 exports_files(
     ["migration-test/release-catalog.json"],
     visibility = ["//scripts/migration-test/catalog:__pkg__"],
+)
+
+# The historical-upgrade harness (scripts/migration-test) and the public
+# SQLite bridge it drives, for //tests/migration's per-release targets.
+filegroup(
+    name = "migration_harness",
+    srcs = [
+        "migrate-legacy-to-current.sh",
+        "migration-test/historical-dolt-upgrade-test.sh",
+        "migration-test/legacy-bridge-test.sh",
+        "migration-test/lib/binary.sh",
+        "migration-test/lib/versions.sh",
+    ],
+    visibility = ["//tests/migration:__pkg__"],
+)
+
+exports_files(
+    ["upgrade-smoke-test.sh"],
+    visibility = ["//tests/upgrade_smoke:__pkg__"],
 )
 
 exports_files(
@@ -96,15 +272,66 @@ exports_files(
     visibility = ["//scripts/check-versions:__pkg__"],
 )
 
+# Scripts the docs and agent instructions link to by path, which
+# //test/docsync checks resolve.
+exports_files(
+    [
+        "bump-version.sh",
+        "check-cli-docs-drift.sh",
+        "generate-cli-docs.sh",
+        "test.sh",
+    ],
+    visibility = ["//test/docsync:__pkg__"],
+)
+
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(
-    name = "repo_files",
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
     srcs = glob(
         ["**"],
         exclude = [
             "**/*.db",
             "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
             "**/*.out",
             "**/*.prof",
             "**/*.pyc",
@@ -113,7 +340,7 @@ filegroup(
             "**/node_modules/**",
         ],
     ),
-    visibility = ["//:__pkg__"],
+    visibility = ["//:__subpackages__"],
 )
 
 # --- end repo_files ---

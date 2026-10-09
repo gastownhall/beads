@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -170,6 +171,13 @@ func (f *fakeBeadGateGetter) GetIssue(_ context.Context, id string) (*types.Issu
 	return f.issues[id], nil
 }
 
+// checkBeadGate runs only the target lookup of a bead gate check. It skips
+// the sighting rule evaluateBeadGate adds, so a gone bead reads as resolved.
+func checkBeadGate(ctx context.Context, st issueGetter, awaitID string) (bool, string, error) {
+	c, err := inspectBeadGate(ctx, st, awaitID)
+	return c.resolved, c.reason, err
+}
+
 func TestCheckBeadGate_CrossRigUsesBeadIDForRoutedLookup(t *testing.T) {
 	ctx := context.Background()
 	st := &fakeBeadGateGetter{issues: map[string]*types.Issue{
@@ -192,9 +200,16 @@ func TestProxiedFreshReadGetterPreservesLocalNotFoundWhenRoutingUnavailable(t *t
 	dbPath = filepath.Join(t.TempDir(), ".beads", "dolt")
 	t.Cleanup(func() { dbPath = oldDBPath })
 
-	_, err := (proxiedFreshReadGetter{}).GetIssue(context.Background(), "bd-missing")
-	if !errors.Is(err, sql.ErrNoRows) {
+	_, err := (proxiedFreshReadGetter{}).GetIssue(context.Background(), stubMissingID)
+	if !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("GetIssue error = %v, want original local not-found", err)
+	}
+	if errors.Is(err, errBeadGateTargetUnconfirmed) {
+		t.Fatalf("GetIssue error = %v: with no route the local miss is authoritative, not unconfirmed", err)
+	}
+	issue, local, _ := (proxiedFreshReadGetter{}).getBeadGateTarget(context.Background(), stubMissingID)
+	if issue != nil || !local {
+		t.Fatalf("getBeadGateTarget = (%v, local %v), want (nil, local true)", issue, local)
 	}
 }
 
@@ -260,17 +275,25 @@ func TestCheckBeadGate_LocalBead(t *testing.T) {
 	}
 }
 
+// A gate awaiting a bead that no longer exists can never resolve on its own:
+// the bead will never close. Treat the absence as resolution rather than
+// leaving the gate pending forever.
 func TestCheckBeadGate_LocalBeadNotFound(t *testing.T) {
 	st := &fakeBeadGateGetter{issues: map[string]*types.Issue{}}
-	satisfied, reason, _ := checkBeadGate(context.Background(), st, "bd-missing")
-	if satisfied {
-		t.Error("expected not satisfied for missing local bead")
+	satisfied, reason, err := checkBeadGate(context.Background(), st, "bd-missing")
+	if err != nil {
+		t.Fatalf("a missing bead is not an error, got %v", err)
 	}
-	if !gateTestContainsIgnoreCase(reason, "not found") {
-		t.Errorf("reason %q does not mention not found", reason)
+	if !satisfied {
+		t.Errorf("expected satisfied for missing local bead, got reason %q", reason)
+	}
+	if !gateTestContainsIgnoreCase(reason, "no longer exists") {
+		t.Errorf("reason %q does not mention that the bead no longer exists", reason)
 	}
 }
 
+// Negative control: a genuine backend failure is not a missing bead, so it
+// is an error, neither pending nor resolved.
 func TestCheckBeadGate_LocalBeadLookupError(t *testing.T) {
 	// A store that cannot be read is an error, not a pending gate: the
 	// caller must be able to tell "dolt is down" from "still waiting".
@@ -294,10 +317,11 @@ func TestCheckBeadGate_LocalBeadLookupError(t *testing.T) {
 	}
 }
 
-func TestCheckBeadGate_LocalBeadNotFoundErrorStaysPending(t *testing.T) {
-	// A getter that reports absence through an error (the routed getter
-	// surfaces storage.ErrNotFound; the proxied fresh-read getter surfaces
-	// sql.ErrNoRows) is a missing bead, not a broken store.
+func TestCheckBeadGate_LocalBeadNotFoundErrorResolves(t *testing.T) {
+	// A getter that reports absence through an error (storage.ErrNotFound
+	// from a store, sql.ErrNoRows from the proxied domain seam, or the
+	// partial-ID resolver's text) is a missing bead, not a broken store: the
+	// gate resolves rather than pending forever on a bead that can never close.
 	for _, tt := range []struct {
 		name string
 		err  error
@@ -305,19 +329,20 @@ func TestCheckBeadGate_LocalBeadNotFoundErrorStaysPending(t *testing.T) {
 		{name: "storage sentinel", err: storage.ErrNotFound},
 		{name: "wrapped storage sentinel", err: fmt.Errorf("lookup bd-missing: %w", storage.ErrNotFound)},
 		{name: "sql no rows", err: sql.ErrNoRows},
+		{name: "wrapped sql no rows", err: fmt.Errorf("query bead: %w", sql.ErrNoRows)},
 		{name: "partial-id resolver text", err: errors.New("no issue found matching bd-missing")},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			st := &fakeBeadGateGetter{err: tt.err}
 			satisfied, reason, err := checkBeadGate(context.Background(), st, "bd-missing")
 			if err != nil {
-				t.Fatalf("not-found must stay pending, got error %v", err)
+				t.Fatalf("not-found is a missing bead, not an error, got %v", err)
 			}
-			if satisfied {
-				t.Error("expected not satisfied for a missing bead")
+			if !satisfied {
+				t.Errorf("expected satisfied for a missing bead, got reason %q", reason)
 			}
-			if !gateTestContainsIgnoreCase(reason, "not found") {
-				t.Errorf("reason %q does not mention not found", reason)
+			if !gateTestContainsIgnoreCase(reason, "no longer exists") {
+				t.Errorf("reason %q does not mention that the bead no longer exists", reason)
 			}
 		})
 	}
@@ -329,7 +354,7 @@ func TestEvaluateGates_BeadStoreErrorCountsAsError(t *testing.T) {
 	gate := &types.Issue{ID: "bd-gate", IssueType: "gate", AwaitType: "bead", AwaitID: "bd-abc"}
 	st := &fakeBeadGateGetter{err: errors.New("dolt exploded")}
 
-	results := evaluateGates(context.Background(), []*types.Issue{gate}, time.Now(), st, nil)
+	results := evaluateGates(context.Background(), []*types.Issue{gate}, time.Now(), st, nil, nil)
 	if len(results) != 1 {
 		t.Fatalf("results = %d, want 1", len(results))
 	}
@@ -353,6 +378,716 @@ func TestEvaluateGates_BeadStoreErrorCountsAsError(t *testing.T) {
 	}
 	if closeCalls != 0 {
 		t.Errorf("closeResolved called %d times on an errored gate", closeCalls)
+	}
+}
+
+func TestCheckBeadGate_UnconfirmedMissStaysPending(t *testing.T) {
+	// A miss outside this rig's own store (a route whose rig cannot be read,
+	// or a routed store that did not return the bead) does not prove the bead
+	// is gone. The gate stays pending with the cause, even when the wrapped
+	// error is itself a not-found, and it is not an error row either.
+	for _, tt := range []struct {
+		name string
+		err  error
+	}{
+		{name: "routed store not-found", err: fmt.Errorf("%w: bead gt-open routes to gastown: %w", errBeadGateTargetUnconfirmed, fmt.Errorf("get gt-open: %w", storage.ErrNotFound))},
+		{name: "routed partial-id miss", err: fmt.Errorf("%w: bead gt-open routes to gastown: %w", errBeadGateTargetUnconfirmed, errors.New("no issue found matching gt-open"))},
+		{name: "routed store cannot be opened", err: fmt.Errorf("%w: bead gt-open routes to gastown: %w", errBeadGateTargetUnconfirmed, errors.New("target rig has no dolt_database configured"))},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			st := &fakeBeadGateGetter{err: tt.err}
+			satisfied, reason, err := checkBeadGate(context.Background(), st, "gastown:gt-open")
+			if err != nil {
+				t.Fatalf("an unconfirmed miss is a pending gate, not an error, got %v", err)
+			}
+			if satisfied {
+				t.Fatalf("an unconfirmed miss resolved the gate: %s", reason)
+			}
+			if !strings.Contains(reason, "cannot confirm") {
+				t.Errorf("reason %q does not say the absence is unconfirmed", reason)
+			}
+		})
+	}
+}
+
+// fakeRoutedBeadGateGetter answers like a getter that reached the bead
+// through a route: the answer did not come from this rig's own store.
+type fakeRoutedBeadGateGetter struct{ fakeBeadGateGetter }
+
+func (f *fakeRoutedBeadGateGetter) getBeadGateTarget(ctx context.Context, id string) (*types.Issue, bool, error) {
+	issue, err := f.GetIssue(ctx, id)
+	return issue, false, err
+}
+
+func TestEvaluateGates_BeadGateSightingRule(t *testing.T) {
+	// bd gate check resolves a gate whose awaited bead is gone only when an
+	// earlier check saw that bead in this rig, so an await_id that never
+	// named a real bead stays pending instead of unblocking its step.
+	const seen = `{"await_seen":"bd-target"}`
+	open := map[string]*types.Issue{"bd-target": {ID: "bd-target", Status: types.StatusOpen}}
+	closed := map[string]*types.Issue{"bd-target": {ID: "bd-target", Status: types.StatusClosed}}
+	// The getter is the gate's own store, which a check reads the gate back
+	// from once the bead is gone: there the gate records its sighting.
+	missing := map[string]*types.Issue{"bd-gate": {ID: "bd-gate", IssueType: "gate", AwaitType: "bead", AwaitID: "bd-target", Metadata: json.RawMessage(seen)}}
+	unconfirmed := fmt.Errorf("%w: bead bd-target routes to rig: %w", errBeadGateTargetUnconfirmed, storage.ErrNotFound)
+
+	for _, tt := range []struct {
+		name         string
+		getter       issueGetter
+		metadata     string
+		wantResolved bool
+		wantReason   string
+		wantRecords  int
+	}{
+		{name: "missing and never seen", getter: &fakeBeadGateGetter{issues: missing}, wantReason: "no earlier gate check saw it"},
+		{name: "missing after a sighting", getter: &fakeBeadGateGetter{issues: missing}, metadata: seen, wantResolved: true, wantReason: "no longer exists"},
+		{name: "missing, sighting of another await_id", getter: &fakeBeadGateGetter{issues: missing}, metadata: `{"await_seen":"bd-other"}`, wantReason: "no earlier gate check saw it"},
+		{name: "open, first sighting", getter: &fakeBeadGateGetter{issues: open}, wantReason: "is open", wantRecords: 1},
+		{name: "open, already seen", getter: &fakeBeadGateGetter{issues: open}, metadata: seen, wantReason: "is open"},
+		{name: "open in another rig", getter: &fakeRoutedBeadGateGetter{fakeBeadGateGetter{issues: open}}, wantReason: "is open"},
+		{name: "closed", getter: &fakeBeadGateGetter{issues: closed}, wantResolved: true, wantReason: "closed"},
+		{name: "unconfirmed miss after a sighting", getter: &fakeBeadGateGetter{err: unconfirmed}, metadata: seen, wantReason: "cannot confirm"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			gate := &types.Issue{ID: "bd-gate", IssueType: "gate", AwaitType: "bead", AwaitID: "bd-target"}
+			if tt.metadata != "" {
+				gate.Metadata = json.RawMessage(tt.metadata)
+			}
+			var recorded []*types.Issue
+			recordSeen := func(g *types.Issue) error {
+				recorded = append(recorded, g)
+				return nil
+			}
+
+			results := evaluateGates(context.Background(), []*types.Issue{gate}, time.Now(), tt.getter, nil, recordSeen)
+			if len(results) != 1 {
+				t.Fatalf("results = %d, want 1", len(results))
+			}
+			r := results[0]
+			if r.err != nil {
+				t.Fatalf("err = %v, want a pending or resolved gate", r.err)
+			}
+			if r.resolved != tt.wantResolved {
+				t.Errorf("resolved = %v, want %v (reason %q)", r.resolved, tt.wantResolved, r.reason)
+			}
+			if !strings.Contains(r.reason, tt.wantReason) {
+				t.Errorf("reason %q does not contain %q", r.reason, tt.wantReason)
+			}
+			if len(recorded) != tt.wantRecords {
+				t.Fatalf("recordSeen called %d times, want %d", len(recorded), tt.wantRecords)
+			}
+			if tt.wantRecords == 1 && recorded[0] != gate {
+				t.Errorf("recordSeen got %v, want the checked gate", recorded[0])
+			}
+		})
+	}
+}
+
+// gateReadBackGetter is a gate's own store in which the awaited bead is gone.
+// Reading the gate back returns gate, as found through a route when routed,
+// or fails with err.
+type gateReadBackGetter struct {
+	gate   *types.Issue
+	routed bool
+	err    error
+}
+
+func (g gateReadBackGetter) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
+	issue, _, err := g.getBeadGateTarget(ctx, id)
+	return issue, err
+}
+
+func (g gateReadBackGetter) getBeadGateTarget(_ context.Context, id string) (*types.Issue, bool, error) {
+	switch {
+	case id != "bd-gate":
+		return nil, true, fmt.Errorf("get %s: %w", id, storage.ErrNotFound)
+	case g.err != nil:
+		return nil, false, g.err
+	case g.gate == nil:
+		return nil, true, fmt.Errorf("get %s: %w", id, storage.ErrNotFound)
+	}
+	return g.gate, !g.routed, nil
+}
+
+func TestEvaluateBeadGate_GoneBeadReadsTheGateBack(t *testing.T) {
+	// The gate a check holds can be older than a rename of its bead, which
+	// moves the stored gate to the new ID before the old one goes. Once the
+	// bead is gone, the gate resolves only if the stored gate still waits on
+	// it with its sighting.
+	gateWith := func(awaitID, metadata string) *types.Issue {
+		g := &types.Issue{ID: "bd-gate", IssueType: "gate", AwaitType: "bead", AwaitID: awaitID}
+		if metadata != "" {
+			g.Metadata = json.RawMessage(metadata)
+		}
+		return g
+	}
+	listed := gateWith("bd-target", `{"await_seen":"bd-target"}`)
+	boom := errors.New("dolt exploded")
+
+	for _, tt := range []struct {
+		name         string
+		getter       gateReadBackGetter
+		wantResolved bool
+		wantReason   string
+		wantErr      error
+	}{
+		{name: "stored as listed", getter: gateReadBackGetter{gate: gateWith("bd-target", `{"await_seen":"bd-target"}`)}, wantResolved: true, wantReason: "no longer exists"},
+		{name: "moved by a rename", getter: gateReadBackGetter{gate: gateWith("bd-renamed", `{"await_seen":"bd-renamed"}`)}, wantReason: "the gate changed while it was being checked"},
+		{name: "moved back without its sighting", getter: gateReadBackGetter{gate: gateWith("bd-target", "")}, wantReason: "the gate changed while it was being checked"},
+		{name: "gate gone", getter: gateReadBackGetter{}, wantReason: "the gate could not be read back"},
+		{name: "gate found only through a route", getter: gateReadBackGetter{gate: listed, routed: true}, wantReason: "the gate could not be read back"},
+		{name: "gate behind an unconfirmed route", getter: gateReadBackGetter{err: fmt.Errorf("%w: bead bd-gate routes to rig: %w", errBeadGateTargetUnconfirmed, boom)}, wantReason: "the gate could not be read back"},
+		{name: "gate cannot be read", getter: gateReadBackGetter{err: boom}, wantErr: boom},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			gate := *listed
+			resolved, reason, err := evaluateBeadGate(context.Background(), &gate, tt.getter, nil)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) || resolved || reason != "" {
+					t.Fatalf("evaluateBeadGate = (%v, %q, %v), want only an error wrapping %v", resolved, reason, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v, want a pending or resolved gate", err)
+			}
+			if resolved != tt.wantResolved {
+				t.Errorf("resolved = %v, want %v (reason %q)", resolved, tt.wantResolved, reason)
+			}
+			if !strings.Contains(reason, tt.wantReason) {
+				t.Errorf("reason %q does not contain %q", reason, tt.wantReason)
+			}
+		})
+	}
+}
+
+func TestEvaluateBeadGate_WithoutRecorder(t *testing.T) {
+	// --dry-run passes no recorder: the open bead is reported and nothing is
+	// written.
+	gate := &types.Issue{ID: "bd-gate", AwaitType: "bead", AwaitID: "bd-target"}
+	st := &fakeBeadGateGetter{issues: map[string]*types.Issue{"bd-target": {ID: "bd-target", Status: types.StatusOpen}}}
+	resolved, reason, err := evaluateBeadGate(context.Background(), gate, st, nil)
+	if err != nil || resolved || !strings.Contains(reason, "is open") {
+		t.Fatalf("evaluateBeadGate = (%v, %q, %v), want a pending gate", resolved, reason, err)
+	}
+}
+
+func TestEvaluateBeadGate_RecordFailureIsAnError(t *testing.T) {
+	// A sighting that cannot be recorded would let the gate pend forever once
+	// the bead is deleted, so the failure is reported rather than dropped.
+	gate := &types.Issue{ID: "bd-gate", AwaitType: "bead", AwaitID: "bd-target"}
+	st := &fakeBeadGateGetter{issues: map[string]*types.Issue{"bd-target": {ID: "bd-target", Status: types.StatusOpen}}}
+	boom := errors.New("write refused")
+	resolved, reason, err := evaluateBeadGate(context.Background(), gate, st, func(*types.Issue) error { return boom })
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want it to wrap the write error", err)
+	}
+	if !strings.Contains(err.Error(), "recording that bead bd-target exists") {
+		t.Errorf("err %q does not say what failed", err)
+	}
+	if resolved || reason != "" {
+		t.Errorf("evaluateBeadGate = (%v, %q), want neither resolved nor pending on an error", resolved, reason)
+	}
+}
+
+func TestBeadGateSeenUpdate_KeepsOtherMetadata(t *testing.T) {
+	old := &types.Issue{Metadata: json.RawMessage(`{"repo":"o/r"}`)}
+	resolved, err := storageissueops.ResolveMergeOps(old, beadGateSeenUpdate("rig:bd-x"))
+	if err != nil {
+		t.Fatalf("ResolveMergeOps: %v", err)
+	}
+	meta, ok := resolved["metadata"].(json.RawMessage)
+	if !ok {
+		t.Fatalf("resolved metadata is %T, want json.RawMessage", resolved["metadata"])
+	}
+	var got map[string]string
+	if err := json.Unmarshal(meta, &got); err != nil {
+		t.Fatalf("resolved metadata %s: %v", meta, err)
+	}
+	if got["repo"] != "o/r" || got[beadGateSeenKey] != "rig:bd-x" {
+		t.Errorf("metadata = %s, want repo kept and %s set to the await_id", meta, beadGateSeenKey)
+	}
+
+	gate := &types.Issue{AwaitID: "rig:bd-x", Metadata: meta}
+	if !beadGateTargetSeen(gate) {
+		t.Error("the recorded sighting is not read back")
+	}
+	gate.AwaitID = "rig:bd-y"
+	if beadGateTargetSeen(gate) {
+		t.Error("a sighting of the old await_id counts after the gate was retargeted")
+	}
+}
+
+func TestBeadGateTargetSeen(t *testing.T) {
+	if beadGateTargetSeen(nil) {
+		t.Error("a nil gate has no sighting")
+	}
+	for _, tt := range []struct {
+		name     string
+		awaitID  string
+		metadata string
+		want     bool
+	}{
+		{name: "no metadata", awaitID: "bd-x"},
+		{name: "null metadata", awaitID: "bd-x", metadata: "null"},
+		{name: "metadata not an object", awaitID: "bd-x", metadata: `["bd-x"]`},
+		{name: "no sighting", awaitID: "bd-x", metadata: `{"repo":"o/r"}`},
+		{name: "sighting not a string", awaitID: "bd-x", metadata: `{"await_seen":true}`},
+		{name: "null sighting", awaitID: "bd-x", metadata: `{"await_seen":null}`},
+		{name: "no await_id", metadata: `{"await_seen":""}`},
+		{name: "sighting of this await_id", awaitID: "bd-x", metadata: `{"await_seen":"bd-x"}`, want: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			gate := &types.Issue{AwaitID: tt.awaitID}
+			if tt.metadata != "" {
+				gate.Metadata = json.RawMessage(tt.metadata)
+			}
+			if got := beadGateTargetSeen(gate); got != tt.want {
+				t.Errorf("beadGateTargetSeen = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBeadGateRetargetUpdate(t *testing.T) {
+	// The update points a gate at a new await_id and drops its sighting only
+	// when asked; the rest of the metadata is kept either way.
+	gate := &types.Issue{AwaitID: "bd-old", Metadata: json.RawMessage(`{"repo":"o/r","await_seen":"bd-old"}`)}
+	for _, tt := range []struct {
+		name     string
+		dropSeen bool
+		wantMeta string // "" means the metadata is not written
+	}{
+		{name: "sighting kept"},
+		{name: "sighting dropped", dropSeen: true, wantMeta: `{"repo":"o/r"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resolved, err := storageissueops.ResolveMergeOps(gate, beadGateRetargetUpdate("rig:bd-new", tt.dropSeen))
+			if err != nil {
+				t.Fatalf("ResolveMergeOps: %v", err)
+			}
+			if resolved["await_id"] != "rig:bd-new" {
+				t.Errorf("await_id = %v, want %q", resolved["await_id"], "rig:bd-new")
+			}
+			meta, written := resolved["metadata"]
+			switch {
+			case tt.wantMeta == "" && written:
+				t.Errorf("metadata = %s, want it left alone", meta)
+			case tt.wantMeta != "" && !written:
+				t.Errorf("metadata not written, want %s", tt.wantMeta)
+			case tt.wantMeta != "":
+				if got, ok := meta.(json.RawMessage); !ok || string(got) != tt.wantMeta {
+					t.Errorf("metadata = %s, want %s", meta, tt.wantMeta)
+				}
+			}
+		})
+	}
+}
+
+func TestPlanBeadGateMoves(t *testing.T) {
+	// A rename moves the bead gates that wait on the renamed bead, and only
+	// those. A <rig>: prefix on await_id is kept.
+	gate := func(id, awaitType, awaitID, metadata string) *types.Issue {
+		g := &types.Issue{ID: id, IssueType: types.TypeGate, AwaitType: awaitType, AwaitID: awaitID}
+		if metadata != "" {
+			g.Metadata = json.RawMessage(metadata)
+		}
+		return g
+	}
+	issues := []*types.Issue{
+		gate("bd-g1", "bead", "bd-old", ""),
+		gate("bd-g2", "bead", "rig:bd-old", `{"await_seen":"rig:bd-old"}`),
+		gate("bd-g3", "bead", "bd-old", `{"await_seen":"bd-new"}`),
+		gate("bd-g4", "bead", "bd-old.1", `{"await_seen":"bd-old.1"}`),
+		gate("bd-g5", "gh:run", "bd-old", ""),
+		gate("bd-g6", "bead", ":bd-old", ""),
+		{ID: "bd-task", IssueType: types.TypeTask, AwaitType: "bead", AwaitID: "bd-old"},
+	}
+	got := planBeadGateMoves(beadGatesByTarget(issues)["bd-old"], "bd-old", "bd-new")
+	want := []beadGateMove{
+		{gateID: "bd-g1", fromID: "bd-old", toID: "bd-new"},
+		{gateID: "bd-g2", fromID: "rig:bd-old", toID: "rig:bd-new", seen: true},
+		{gateID: "bd-g3", fromID: "bd-old", toID: "bd-new", staleSeen: true},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("moves = %+v\nwant    %+v", got, want)
+	}
+}
+
+// renameGateStore is an in-memory store for renameIssueKeepingBeadGates whose
+// writes can fail. Writes are numbered from 1: failAt fails one write, or with
+// failRest every write from it on, and with landed a failing write is applied
+// before it returns its error, like a commit whose response was lost. After
+// each applied write it checks that bd gate check would resolve no gate:
+// every issue it holds is open, so none may resolve, whether the check reads
+// the gates now or listed them before the rename began.
+type renameGateStore struct {
+	t        *testing.T
+	issues   map[string]*types.Issue
+	listed   []*types.Issue // a concurrent check's copies, listed before the rename
+	writes   int
+	failAt   int
+	failRest bool
+	landed   bool
+}
+
+func newRenameGateStore(t *testing.T, issues []*types.Issue) *renameGateStore {
+	s := &renameGateStore{t: t, issues: make(map[string]*types.Issue, len(issues))}
+	for _, issue := range issues {
+		c := *issue
+		s.issues[issue.ID] = &c
+	}
+	return s
+}
+
+func (s *renameGateStore) GetIssue(_ context.Context, id string) (*types.Issue, error) {
+	issue, ok := s.issues[id]
+	if !ok {
+		return nil, fmt.Errorf("issue %s: %w", id, storage.ErrNotFound)
+	}
+	c := *issue
+	return &c, nil
+}
+
+func (s *renameGateStore) UpdateIssue(_ context.Context, id string, updates map[string]interface{}, _ string) error {
+	return s.write(func() error {
+		issue, ok := s.issues[id]
+		if !ok {
+			return fmt.Errorf("issue %s: %w", id, storage.ErrNotFound)
+		}
+		resolved, err := storageissueops.ResolveMergeOps(issue, updates)
+		if err != nil {
+			return err
+		}
+		updated := *issue
+		for field, value := range resolved {
+			switch field {
+			case "await_id":
+				updated.AwaitID, ok = value.(string)
+			case "metadata":
+				updated.Metadata, ok = value.(json.RawMessage)
+			default:
+				ok = false
+			}
+			if !ok {
+				return fmt.Errorf("unexpected update %s=%v", field, value)
+			}
+		}
+		*issue = updated
+		return nil
+	})
+}
+
+func (s *renameGateStore) UpdateIssueID(_ context.Context, oldID, newID string, issue *types.Issue, _ string) error {
+	return s.write(func() error {
+		stored, ok := s.issues[oldID]
+		if !ok {
+			return fmt.Errorf("issue %s: %w", oldID, storage.ErrNotFound)
+		}
+		// Like UpdateIssueIDInTx, write the ID and the text fields: await_id
+		// and metadata keep their stored values.
+		delete(s.issues, oldID)
+		stored.ID, stored.Title = newID, issue.Title
+		s.issues[newID] = stored
+		return nil
+	})
+}
+
+func (s *renameGateStore) write(apply func() error) error {
+	s.writes++
+	failing := s.failAt > 0 && (s.writes == s.failAt || (s.failRest && s.writes > s.failAt))
+	if failing && !s.landed {
+		return errors.New("injected write failure")
+	}
+	if err := apply(); err != nil {
+		return err
+	}
+	s.requireNoGateResolves()
+	if failing {
+		return errors.New("injected lost commit response")
+	}
+	return nil
+}
+
+func (s *renameGateStore) requireNoGateResolves() {
+	s.t.Helper()
+	for _, issue := range s.issues {
+		s.requireGateDoesNotResolve(issue, "")
+	}
+	for _, issue := range s.listed {
+		s.requireGateDoesNotResolve(issue, " listed before the rename")
+	}
+}
+
+func (s *renameGateStore) requireGateDoesNotResolve(issue *types.Issue, note string) {
+	s.t.Helper()
+	if issue.IssueType != types.TypeGate {
+		return
+	}
+	gate := *issue
+	resolved, reason, err := evaluateBeadGate(context.Background(), &gate, s, nil)
+	if resolved || err != nil {
+		s.t.Errorf("after write %d, gate %s%s (await_id %q, metadata %s) resolves: %q, err %v", s.writes, gate.ID, note, gate.AwaitID, gate.Metadata, reason, err)
+	}
+}
+
+// rename renames bd-old to bd-new the way bd rename does, with the gates
+// listed before the first write. A concurrent bd gate check that listed them
+// at the same moment holds its own copies, kept in s.listed.
+func (s *renameGateStore) rename() error {
+	listing := make([]*types.Issue, 0, len(s.issues))
+	s.listed = make([]*types.Issue, 0, len(s.issues))
+	for _, issue := range s.issues {
+		renames, checks := *issue, *issue
+		listing = append(listing, &renames)
+		s.listed = append(s.listed, &checks)
+	}
+	slices.SortFunc(listing, func(a, b *types.Issue) int { return strings.Compare(a.ID, b.ID) })
+	issue, err := s.GetIssue(context.Background(), "bd-old")
+	if err != nil {
+		return err
+	}
+	return renameIssueKeepingBeadGates(context.Background(), s, issue, "bd-new", beadGatesByTarget(listing)["bd-old"], "test")
+}
+
+// renameGateFixtures each hold bd-old, the issue renamed to bd-new, with
+// the bead gates on it, and the gates expected after the rename by ID.
+var renameGateFixtures = []struct {
+	name   string
+	issues []*types.Issue
+	want   map[string]types.Issue // only AwaitID and Metadata are compared
+}{
+	{
+		name: "gates on a bead",
+		issues: []*types.Issue{
+			{ID: "bd-old", Status: types.StatusOpen, IssueType: types.TypeTask},
+			{ID: "bd-g1", Status: types.StatusOpen, IssueType: types.TypeGate, AwaitType: "bead", AwaitID: "bd-old",
+				Metadata: json.RawMessage(`{"repo":"o/r","await_seen":"bd-old"}`)},
+			{ID: "bd-g2", Status: types.StatusOpen, IssueType: types.TypeGate, AwaitType: "bead", AwaitID: "rig:bd-old"},
+			{ID: "bd-g3", Status: types.StatusOpen, IssueType: types.TypeGate, AwaitType: "bead", AwaitID: "bd-old",
+				Metadata: json.RawMessage(`{"await_seen":"bd-new"}`)},
+		},
+		want: map[string]types.Issue{
+			"bd-g1": {AwaitID: "bd-new", Metadata: json.RawMessage(`{"await_seen":"bd-new","repo":"o/r"}`)},
+			"bd-g2": {AwaitID: "rig:bd-new"},
+			"bd-g3": {AwaitID: "bd-new", Metadata: json.RawMessage(`{}`)},
+		},
+	},
+	{
+		name: "a gate on itself",
+		issues: []*types.Issue{
+			{ID: "bd-old", Status: types.StatusOpen, IssueType: types.TypeGate, AwaitType: "bead", AwaitID: "bd-old",
+				Metadata: json.RawMessage(`{"await_seen":"bd-old"}`)},
+		},
+		want: map[string]types.Issue{
+			"bd-new": {AwaitID: "bd-new", Metadata: json.RawMessage(`{"await_seen":"bd-new"}`)},
+		},
+	},
+}
+
+func TestRenameIssueKeepingBeadGates(t *testing.T) {
+	// A rename points each bead gate on the bead at the new ID. A gate that
+	// had seen the bead keeps its sighting under the new ID; one that had not,
+	// or whose sighting named the new ID before the bead had it, is unseen.
+	for _, fx := range renameGateFixtures {
+		t.Run(fx.name, func(t *testing.T) {
+			st := newRenameGateStore(t, fx.issues)
+			if err := st.rename(); err != nil {
+				t.Fatalf("rename: %v", err)
+			}
+			for id, want := range fx.want {
+				got, ok := st.issues[id]
+				if !ok {
+					t.Errorf("gate %s is missing after the rename", id)
+					continue
+				}
+				if got.AwaitID != want.AwaitID || string(got.Metadata) != string(want.Metadata) {
+					t.Errorf("gate %s: await_id=%q metadata=%s, want %q and %s", id, got.AwaitID, got.Metadata, want.AwaitID, want.Metadata)
+				}
+			}
+		})
+	}
+}
+
+func TestRenameIssueKeepingBeadGates_FailedWritesResolveNoGate(t *testing.T) {
+	// UpdateIssueID commits on its own, so a rename takes several writes, and
+	// any of them can fail, or land and still return an error. No state they
+	// leave may let bd gate check resolve a gate whose bead exists; the store
+	// checks after every write. A rename that fails before anything lands
+	// leaves each gate on bd-old without a sighting, for a check to record
+	// again.
+	for _, fx := range renameGateFixtures {
+		probe := newRenameGateStore(t, fx.issues)
+		if err := probe.rename(); err != nil {
+			t.Fatalf("%s: rename without failures: %v", fx.name, err)
+		}
+		for n := 1; n <= probe.writes; n++ {
+			for _, mode := range []struct {
+				name             string
+				failRest, landed bool
+			}{
+				{name: "fails"},
+				{name: "lands and fails", landed: true},
+				{name: "fails with every later write", failRest: true},
+				{name: "lands and fails with every later write", failRest: true, landed: true},
+			} {
+				t.Run(fmt.Sprintf("%s/write %d of %d %s", fx.name, n, probe.writes, mode.name), func(t *testing.T) {
+					st := newRenameGateStore(t, fx.issues)
+					st.failAt, st.failRest, st.landed = n, mode.failRest, mode.landed
+					err := st.rename()
+					st.requireNoGateResolves()
+					if err == nil {
+						// Only a sighting that could not be moved is not an error.
+						if _, ok := st.issues["bd-new"]; !ok {
+							t.Fatal("rename returned no error, but bd-old was not renamed")
+						}
+						return
+					}
+					if mode.failRest || mode.landed {
+						return
+					}
+					for _, issue := range fx.issues {
+						got := st.issues[issue.ID]
+						if issue.IssueType == types.TypeGate && (got.AwaitID != issue.AwaitID || beadGateTargetSeen(got)) {
+							t.Errorf("gate %s after a failed rename: await_id=%q metadata=%s, want %q without a sighting", issue.ID, got.AwaitID, got.Metadata, issue.AwaitID)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+// withBeadGateTown points dbPath at a fresh town and returns its .beads
+// directory, where a test writes the routes.jsonl a missed lookup follows.
+func withBeadGateTown(t *testing.T) string {
+	t.Helper()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("create town beads dir: %v", err)
+	}
+	oldDBPath := dbPath
+	dbPath = filepath.Join(beadsDir, "dolt")
+	t.Cleanup(func() { dbPath = oldDBPath })
+	return beadsDir
+}
+
+func TestProxiedFreshReadGetter_LocalMissFollowsRoutes(t *testing.T) {
+	// The proxied getter must not report a route it could not follow as the
+	// local not-found: an OPEN bead in a rig that cannot be read would
+	// resolve its gate.
+	for _, tt := range []struct {
+		name         string
+		routes       string // routes.jsonl content; empty makes it a directory, which cannot be read
+		awaitID      string
+		wantResolved bool
+		wantReason   []string
+	}{
+		{
+			name:       "route to a rig that cannot be read",
+			routes:     `{"prefix":"gt-","path":"gastown"}`,
+			awaitID:    "gastown:gt-open",
+			wantReason: []string{"cannot confirm", "routes to gastown", "no dolt_database"},
+		},
+		{
+			name:       "routes.jsonl cannot be read",
+			awaitID:    stubMissingID,
+			wantReason: []string{"cannot confirm", "reading routes.jsonl"},
+		},
+		{
+			name:         "no route for the prefix",
+			routes:       `{"prefix":"gt-","path":"gastown"}`,
+			awaitID:      stubMissingID,
+			wantResolved: true,
+			wantReason:   []string{"no longer exists"},
+		},
+		{
+			name:         "route back to this rig",
+			routes:       `{"prefix":"bd-","path":"."}`,
+			awaitID:      stubMissingID,
+			wantResolved: true,
+			wantReason:   []string{"no longer exists"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			withStubbedProxiedLookup(t, nil)
+			routesPath := filepath.Join(withBeadGateTown(t), "routes.jsonl")
+			if tt.routes == "" {
+				if err := os.Mkdir(routesPath, 0o755); err != nil {
+					t.Fatalf("create unreadable routes.jsonl: %v", err)
+				}
+			} else if err := os.WriteFile(routesPath, []byte(tt.routes), 0o644); err != nil {
+				t.Fatalf("write routes.jsonl: %v", err)
+			}
+
+			resolved, reason, err := checkBeadGate(context.Background(), proxiedFreshReadGetter{}, tt.awaitID)
+			if err != nil {
+				t.Fatalf("checkBeadGate error = %v, want a pending or resolved gate", err)
+			}
+			if resolved != tt.wantResolved {
+				t.Errorf("resolved = %v, want %v (reason %q)", resolved, tt.wantResolved, reason)
+			}
+			for _, want := range tt.wantReason {
+				if !strings.Contains(reason, want) {
+					t.Errorf("reason %q does not contain %q", reason, want)
+				}
+			}
+		})
+	}
+}
+
+// beadGateLocalStore stands in for this rig's own store: GetIssue answers
+// from issues (or fails with err), and no contributor routing is configured.
+// Anything else is a nil call.
+type beadGateLocalStore struct {
+	storage.DoltStorage
+	issues map[string]*types.Issue
+	err    error
+}
+
+func (s *beadGateLocalStore) GetIssue(_ context.Context, id string) (*types.Issue, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if issue, ok := s.issues[id]; ok {
+		return issue, nil
+	}
+	return nil, fmt.Errorf("get %s: %w", id, storage.ErrNotFound)
+}
+
+func (s *beadGateLocalStore) GetAllConfig(context.Context) (map[string]string, error) {
+	return map[string]string{}, nil
+}
+
+func TestRoutedBeadGateGetter_ReportsWhereTheAnswerCameFrom(t *testing.T) {
+	ctx := context.Background()
+	beadsDir := withBeadGateTown(t)
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(`{"prefix":"gt-","path":"gastown"}`), 0o644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+	getter := routedBeadGateGetter{localStore: &beadGateLocalStore{issues: map[string]*types.Issue{
+		"bd-open": {ID: "bd-open", Status: types.StatusOpen},
+	}}}
+
+	issue, local, err := getter.getBeadGateTarget(ctx, "bd-open")
+	if err != nil || issue == nil || !local {
+		t.Errorf("local bead: getBeadGateTarget = (%v, local %v, %v), want the bead from this rig", issue, local, err)
+	}
+
+	issue, local, err = getter.getBeadGateTarget(ctx, "bd-missing")
+	if !errors.Is(err, storage.ErrNotFound) || errors.Is(err, errBeadGateTargetUnconfirmed) || issue != nil || !local {
+		t.Errorf("unrouted miss: getBeadGateTarget = (%v, local %v, %v), want this rig's not-found", issue, local, err)
+	}
+
+	issue, local, err = getter.getBeadGateTarget(ctx, "gt-open")
+	if !errors.Is(err, errBeadGateTargetUnconfirmed) || issue != nil || local {
+		t.Errorf("unreadable route: getBeadGateTarget = (%v, local %v, %v), want an unconfirmed miss", issue, local, err)
+	}
+
+	boom := errors.New("dolt exploded")
+	_, _, err = routedBeadGateGetter{localStore: &beadGateLocalStore{err: boom}}.getBeadGateTarget(ctx, "gt-open")
+	if !errors.Is(err, boom) || errors.Is(err, errBeadGateTargetUnconfirmed) {
+		t.Errorf("local read failure: err = %v, want the read error, not a routed miss", err)
 	}
 }
 
@@ -1266,4 +2001,192 @@ func gateIDs(gs []*types.Issue) []string {
 		ids = append(ids, g.ID)
 	}
 	return ids
+}
+
+func TestGateMetadataForCreateExplicitRepo(t *testing.T) {
+	inherited := &types.Issue{ID: "bd-target", Metadata: json.RawMessage(`{"repo":"acme/inherited"}`)}
+	decodeRepo := func(t *testing.T, metadata json.RawMessage) string {
+		t.Helper()
+		var decoded struct {
+			Repo string `json:"repo"`
+		}
+		if err := json.Unmarshal(metadata, &decoded); err != nil {
+			t.Fatalf("metadata %s is not valid JSON: %v", metadata, err)
+		}
+		return decoded.Repo
+	}
+
+	t.Run("explicit_repo_wins_over_inherited", func(t *testing.T) {
+		metadata, err := gateMetadataForCreate(gateCreateInput{gateType: "gh:pr", repo: "gastownhall/beads"}, inherited)
+		if err != nil {
+			t.Fatalf("gateMetadataForCreate returned error: %v", err)
+		}
+		if got := decodeRepo(t, metadata); got != "gastownhall/beads" {
+			t.Fatalf("repo = %q, want gastownhall/beads (the flag, not the blocked issue's value)", got)
+		}
+	})
+
+	t.Run("no_flag_inherits", func(t *testing.T) {
+		metadata, err := gateMetadataForCreate(gateCreateInput{gateType: "gh:run"}, inherited)
+		if err != nil {
+			t.Fatalf("gateMetadataForCreate returned error: %v", err)
+		}
+		if got := decodeRepo(t, metadata); got != "acme/inherited" {
+			t.Fatalf("repo = %q, want the inherited acme/inherited", got)
+		}
+	})
+
+	t.Run("no_flag_no_metadata_is_nil", func(t *testing.T) {
+		metadata, err := gateMetadataForCreate(gateCreateInput{gateType: "gh:pr"}, &types.Issue{ID: "bd-plain"})
+		if err != nil {
+			t.Fatalf("gateMetadataForCreate returned error: %v", err)
+		}
+		if metadata != nil {
+			t.Fatalf("metadata = %s, want nil (current repository)", metadata)
+		}
+	})
+
+	t.Run("inherited_error_names_the_blocked_issue", func(t *testing.T) {
+		_, err := gateMetadataForCreate(gateCreateInput{gateType: "gh:pr"}, &types.Issue{ID: "bd-bad", Metadata: json.RawMessage(`{"repo":"owner/repo;echo"}`)})
+		if err == nil {
+			t.Fatal("malformed inherited metadata.repo must fail closed")
+		}
+		if !strings.Contains(err.Error(), "invalid GitHub repository metadata on bd-bad") {
+			t.Fatalf("error %q does not name the blocked issue's metadata", err)
+		}
+	})
+
+	t.Run("invalid_explicit_repo_is_rejected", func(t *testing.T) {
+		for _, bad := range []string{"not-owner-slash-repo", "owner/repo;echo", "owner//repo", "https://github.com/owner/repo"} {
+			_, err := gateMetadataForCreate(gateCreateInput{gateType: "gh:pr", repo: bad}, inherited)
+			if err == nil {
+				t.Errorf("--repo %q accepted, want validation error", bad)
+				continue
+			}
+			if !strings.Contains(err.Error(), "--repo") {
+				t.Errorf("error for --repo %q does not name the flag: %v", bad, err)
+			}
+		}
+	})
+
+	t.Run("host_form_is_accepted", func(t *testing.T) {
+		metadata, err := gateMetadataForCreate(gateCreateInput{gateType: "gh:run", repo: "ghe.example.com/acme/widgets"}, nil)
+		if err != nil {
+			t.Fatalf("HOST/OWNER/REPO rejected: %v", err)
+		}
+		if got := decodeRepo(t, metadata); got != "ghe.example.com/acme/widgets" {
+			t.Fatalf("repo = %q", got)
+		}
+	})
+
+	t.Run("non_github_type_refuses_the_flag", func(t *testing.T) {
+		for _, gateType := range []string{"human", "timer", "bead"} {
+			_, err := gateMetadataForCreate(gateCreateInput{gateType: gateType, repo: "acme/widgets"}, inherited)
+			if err == nil {
+				t.Errorf("--repo on a %s gate accepted, want refusal (nothing would read it)", gateType)
+				continue
+			}
+			if !strings.Contains(err.Error(), "--repo applies only to gh:run and gh:pr gates") {
+				t.Errorf("refusal for %s gate has the wrong text: %v", gateType, err)
+			}
+		}
+	})
+}
+
+func TestCheckGHPRNotFoundNamesTheRepository(t *testing.T) {
+	notFound := func(t *testing.T, wantArgs ...string) ghCommandRunner {
+		t.Helper()
+		return func(args ...string) ([]byte, []byte, error) {
+			if strings.Join(args, " ") != strings.Join(wantArgs, " ") {
+				t.Fatalf("gh args = %q, want %q", args, wantArgs)
+			}
+			return nil, []byte("GraphQL: Could not resolve to a PullRequest with the number of 7173. (repository.pullRequest)"), fmt.Errorf("exit status 1")
+		}
+	}
+
+	t.Run("cross_repo", func(t *testing.T) {
+		resolved, escalated, reason, err := checkGHPRWithRunner(&types.Issue{
+			IssueType: "gate", AwaitType: "gh:pr", AwaitID: "7173",
+			Metadata: json.RawMessage(`{"repo":"gastownhall/beads"}`),
+		}, notFound(t, "pr", "view", "7173", "--json", "state,title", "--repo", "gastownhall/beads"))
+		if err != nil {
+			t.Fatalf("checkGHPR returned error: %v", err)
+		}
+		if resolved || !escalated {
+			t.Fatalf("resolved, escalated = %v, %v; want false, true", resolved, escalated)
+		}
+		if reason != "pull request not found: #7173 in gastownhall/beads" {
+			t.Fatalf("reason = %q; it must name the repository the number was resolved against", reason)
+		}
+	})
+
+	t.Run("current_repo", func(t *testing.T) {
+		_, escalated, reason, err := checkGHPRWithRunner(&types.Issue{
+			IssueType: "gate", AwaitType: "gh:pr", AwaitID: "7173",
+		}, notFound(t, "pr", "view", "7173", "--json", "state,title"))
+		if err != nil || !escalated {
+			t.Fatalf("escalated, err = %v, %v; want true, nil", escalated, err)
+		}
+		if reason != "pull request not found: #7173 in the current repository" {
+			t.Fatalf("reason = %q", reason)
+		}
+	})
+}
+
+func TestCheckGHRunNotFoundNamesTheRepository(t *testing.T) {
+	notFound := func(t *testing.T, wantArgs ...string) ghCommandRunner {
+		t.Helper()
+		return func(args ...string) ([]byte, []byte, error) {
+			if !slices.Equal(args, wantArgs) {
+				t.Fatalf("gh args = %q, want %q", args, wantArgs)
+			}
+			// Stub stderr that reaches the escalation arm; real gh 404
+			// output does not (see real_gh_404_names_the_repository).
+			return nil, []byte("run 12345 not found"), fmt.Errorf("exit status 1")
+		}
+	}
+
+	t.Run("cross_repo", func(t *testing.T) {
+		resolved, escalated, reason, err := checkGHRunWithRunner(&types.Issue{
+			ID: "gt-run", IssueType: "gate", AwaitType: "gh:run", AwaitID: "12345",
+			Metadata: json.RawMessage(`{"repo":"gastownhall/beads"}`),
+		}, nil, notFound(t, "run", "view", "12345", "--json", "status,conclusion,name", "--repo", "gastownhall/beads"))
+		if err != nil {
+			t.Fatalf("checkGHRun returned error: %v", err)
+		}
+		if resolved || !escalated {
+			t.Fatalf("resolved, escalated = %v, %v; want false, true", resolved, escalated)
+		}
+		if reason != "workflow run not found: 12345 in gastownhall/beads" {
+			t.Fatalf("reason = %q; it must name the repository the run ID was looked up in", reason)
+		}
+	})
+
+	t.Run("current_repo", func(t *testing.T) {
+		_, escalated, reason, err := checkGHRunStatusInRepoWithRunner("12345", "",
+			notFound(t, "run", "view", "12345", "--json", "status,conclusion,name"))
+		if err != nil || !escalated {
+			t.Fatalf("escalated, err = %v, %v; want true, nil", escalated, err)
+		}
+		if reason != "workflow run not found: 12345 in the current repository" {
+			t.Fatalf("reason = %q", reason)
+		}
+	})
+
+	t.Run("real_gh_404_names_the_repository", func(t *testing.T) {
+		// gh run view's real stderr for a run the repository does not have.
+		// A token without access to the repository gets the same 404, so it
+		// stays an error rather than an escalation; its URL names the repo.
+		stderr := "failed to get run: HTTP 404: Not Found (https://api.github.com/repos/gastownhall/beads/actions/runs/12345?exclude_pull_requests=true)\n"
+		resolved, escalated, _, err := checkGHRunStatusInRepoWithRunner("12345", "gastownhall/beads",
+			func(args ...string) ([]byte, []byte, error) {
+				return nil, []byte(stderr), fmt.Errorf("exit status 1")
+			})
+		if err == nil || resolved || escalated {
+			t.Fatalf("resolved, escalated, err = %v, %v, %v; want false, false, an error", resolved, escalated, err)
+		}
+		if !strings.Contains(err.Error(), "/repos/gastownhall/beads/") {
+			t.Fatalf("err = %q; it must name the repository the run ID was looked up in", err)
+		}
+	})
 }

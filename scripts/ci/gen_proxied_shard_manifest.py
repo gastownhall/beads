@@ -56,7 +56,7 @@ name coverage.
 
 The manifest file holds more than one block (one per total_shards value in
 use): the legacy, frozen 15-shard block pr-risk.yml/main.yml's jobs read, and
-the Bazel-only lane's own block (30 shards as of F2). By default this prints
+the Bazel-only lane's own block (44 shards since 2026-10-09). By default this prints
 only the requested total's block to stdout, which is NOT safe to redirect
 straight into the manifest file (`gen... 30 > file` deletes every other
 block). Use --write to update the file in place instead: it replaces only

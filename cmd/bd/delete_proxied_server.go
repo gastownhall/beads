@@ -102,7 +102,7 @@ func runDeleteProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	// --force is the confirmation as well as the orphan mode, exactly as on the
 	// direct route, so an unconfirmed run asks the role what it WOULD do.
 	request := issueops.DeleteRequest{
-		Actor:           actor,
+		Actor:           currentActor(),
 		IDs:             in.ids,
 		Cascade:         in.cascade,
 		Force:           in.force,

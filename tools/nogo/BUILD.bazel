@@ -1,0 +1,111 @@
+load("@rules_go//go:def.bzl", "go_test", "nogo")
+load(":analyzers.bzl", "NOGO_ANALYZERS")
+
+# gazelle:prefix github.com/steveyegge/beads/tools/nogo
+
+# nogo: lint and vet as part of every Go compile. MODULE.bazel registers this
+# target with go_sdk.nogo, so `bazel build //...` (locally or on RBE) fails on
+# any finding. Replaces `go vet` (go test's checks) and golangci-lint; gofmt
+# stays with //scripts/repochecks:fmt_test.
+nogo(
+    name = "nogo",
+    config = "config.json",
+    visibility = ["//visibility:public"],
+    deps = NOGO_ANALYZERS,
+)
+
+go_test(
+    name = "nogo_test",
+    srcs = [
+        "analyzers_test.go",
+        "modules_test.go",
+    ],
+    data = [
+        "analyzers.bzl",
+        "config.json",
+        "go.mod",
+        "//:.golangci.yml",
+        "//:go.mod",
+    ],  # keep
+    deps = [
+        "//tools/nogo/analyzers/depguard",
+        "//tools/nogo/analyzers/errcheck",
+        "//tools/nogo/analyzers/forbidigo",
+        "//tools/nogo/analyzers/gosec",
+        "//tools/nogo/analyzers/misspell",
+        "//tools/nogo/analyzers/sloglint",
+        "//tools/nogo/analyzers/unconvert",
+        "//tools/nogo/analyzers/unparam",
+        "//tools/nogo/internal/golangci",
+        "@org_golang_x_mod//modfile",
+        "@org_golang_x_mod//semver",
+        "@org_golang_x_tools//go/analysis",
+    ],
+)
+
+# The nested module's go.mod, for //:nested_go_modules.
+exports_files(
+    ["go.mod"],
+    visibility = ["//:__pkg__"],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end repo_files ---

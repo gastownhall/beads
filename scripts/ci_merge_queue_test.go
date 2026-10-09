@@ -129,7 +129,7 @@ func TestMergeQueueRequiredGatesRunOnMergeGroup(t *testing.T) {
 		event := regexp.MustCompile(`github\.event_name|github\.event\.|github\.base_ref|github\.head_ref`)
 		for jobName, job := range w.Jobs {
 			if event.MatchString(job.If) {
-				t.Errorf("%s job %s if %q keys on the event; decide in a job (detect-ci-tier, bazel-coverage) and read its outputs", name, jobName, job.If)
+				t.Errorf("%s job %s if %q keys on the event; decide in a job (bazel.yml's rbe job) and read its outputs", name, jobName, job.If)
 			}
 			for _, step := range job.Steps {
 				if event.MatchString(step.If) {
@@ -186,19 +186,27 @@ func TestMergeQueueConcurrencyNeverCancelsQueueRuns(t *testing.T) {
 func TestMergeQueuePullRequestFieldsHandleMergeGroup(t *testing.T) {
 	// path suffix (workflow:YAML path) -> why null on merge_group is right.
 	nullOK := map[string]string{
-		"pr.yml:.concurrency.group":               "falls back to github.ref (TestMergeQueueConcurrencyNeverCancelsQueueRuns)",
-		"pr-risk.yml:.concurrency.group":          "falls back to github.ref",
-		"bazel.yml:.concurrency.group":            "falls back to github.ref",
-		"bazel-coverage.steps[0].env.FORK":        "null == true is false: a merge group is never a fork (bazel.yml's rbe job's expression, verbatim)",
-		"rbe.steps[0].env.FORK":                   "null == true is false: a merge group is never a fork",
-		"rbe.steps[0].env.PR_NUMBER":              "read only for fork/Dependabot pull_request runs (the rbe-fork mint)",
-		".env.RBE_FORK_PR":                        "setup-bazel reads it only in the fork modes, which a merge group never takes",
-		"detect-ci-tier.steps[1].env.PR_BASE_SHA": "ci-embedded-tier.sh returns full coverage for merge_group before reading it",
-		"detect-ci-tier.steps[1].env.PR_HEAD_SHA": "ci-embedded-tier.sh returns full coverage for merge_group before reading it",
-		"detect-ci-tier.steps[2].env.PR_BASE_SHA": "advisory shadow selector; merge_group selects everything",
-		"detect-ci-tier.steps[2].env.PR_HEAD_SHA": "advisory shadow selector; merge_group selects everything",
-		"bazel-test.steps[*].env.PR_NUMBER":       "bazel-sync patch metadata; bazel-autofix.yml ignores non-pull_request runs",
-		"bazel-test.steps[*].env.PR_HEAD_SHA":     "bazel-sync patch metadata; bazel-autofix.yml ignores non-pull_request runs",
+		"pr.yml:.concurrency.group":           "falls back to github.ref (TestMergeQueueConcurrencyNeverCancelsQueueRuns)",
+		"pr-risk.yml:.concurrency.group":      "falls back to github.ref",
+		"bazel.yml:.concurrency.group":        "falls back to github.ref",
+		"rbe.steps[0].env.FORK":               "null == true is false: a merge group is never a fork",
+		"rbe.steps[0].env.PR_NUMBER":          "read only for fork/Dependabot pull_request runs (the rbe-fork mint)",
+		".env.RBE_FORK_PR":                    "setup-bazel reads it only in the fork modes, which a merge group never takes",
+		"bazel-test.steps[*].env.PR_NUMBER":   "bazel-sync patch metadata; bazel-autofix.yml ignores non-pull_request runs",
+		"bazel-test.steps[*].env.PR_HEAD_SHA": "bazel-sync patch metadata; bazel-autofix.yml ignores non-pull_request runs",
+		// bazel.yml's CI analytics summary step (rbe-ci-bep-analytics-
+		// design.md, S3), one entry per lane job (ciAnalyticsLaneJobs in
+		// ci_analytics_workflow_test.go) rather than a bare "steps[*]...",
+		// so this stays scoped to bazel.yml's own PR_HINT and can't
+		// silently also cover a future PR_HINT read elsewhere.
+		"bazel-test.steps[*].env.PR_HINT":           "ci-analytics-summary metadata only (--pr-hint); `|| 0` already covers merge_group same as a non-PR push",
+		"bazel-pure.steps[*].env.PR_HINT":           "ci-analytics-summary metadata only (--pr-hint); `|| 0` already covers merge_group same as a non-PR push",
+		"bazel-embedded.steps[*].env.PR_HINT":       "ci-analytics-summary metadata only (--pr-hint); `|| 0` already covers merge_group same as a non-PR push",
+		"bazel-integration.steps[*].env.PR_HINT":    "ci-analytics-summary metadata only (--pr-hint); `|| 0` already covers merge_group same as a non-PR push",
+		"bazel-doltserver.steps[*].env.PR_HINT":     "ci-analytics-summary metadata only (--pr-hint); `|| 0` already covers merge_group same as a non-PR push",
+		"bazel-proxied.steps[*].env.PR_HINT":        "ci-analytics-summary metadata only (--pr-hint); `|| 0` already covers merge_group same as a non-PR push",
+		"bazel-server-storage.steps[*].env.PR_HINT": "ci-analytics-summary metadata only (--pr-hint); `|| 0` already covers merge_group same as a non-PR push",
+		"bazel-cmd-dolt.steps[*].env.PR_HINT":       "ci-analytics-summary metadata only (--pr-hint); `|| 0` already covers merge_group same as a non-PR push",
 	}
 	used := map[string]bool{}
 	var fallbacks []string
@@ -247,39 +255,13 @@ func TestMergeQueuePullRequestFieldsHandleMergeGroup(t *testing.T) {
 	}
 }
 
-// D2 on merge_group: both workflows' bazel-coverage decision, with its env
-// evaluated by evalGHExpr for a merge group, retires every flagged legacy
-// tier (the Bazel lanes cover them), and bazel.yml's rbe step, evaluated the
-// same way, takes mode remote with the CI secrets, so pr.yml's gate requires
-// those lanes to have run remotely and passed. Without the secret or with
-// the farm switch off the mode is cache or skip, and the gate is red
-// (TestPRRiskDecisionMatchesBazelMode's named merge_group cases).
-func TestMergeQueueBazelCoversRetiredTiers(t *testing.T) {
+// Merge groups: bazel.yml's rbe step, evaluated by evalGHExpr for a merge
+// group, takes mode remote with the CI secrets, so pr.yml's gate (which
+// requires every lane to have run remotely, BAZEL_REMOTE) can pass. Without
+// the secret or with the farm switch off the mode is cache or skip, and the
+// gate is red (TestPRGateRequiresRemoteBazelLanes).
+func TestMergeQueueBazelRunsRemotely(t *testing.T) {
 	requireHostTool(t, "bash")
-	for _, name := range []string{"pr.yml", prRiskWorkflowName} {
-		step := coverageStep(t, name)
-		ctx := mergeGroupCtx(1, nil)
-		for k, v := range workflowEnv(t, name) {
-			ctx["env."+k] = v
-		}
-		env := map[string]string{}
-		for k, v := range step.Env {
-			env[k] = interpolateGH(t, v, ctx)
-		}
-		if env["MERGE_GROUP"] != "true" || env["PULL_REQUEST"] != "false" || env["FORK"] != "false" || env["DEPENDABOT"] != "false" {
-			t.Errorf("%s bazel-coverage env on merge_group = %v", name, env)
-		}
-		out, err := runBazelRBEDecision(t, step.Run, env)
-		if err != nil {
-			t.Fatalf("%s bazel-coverage on merge_group: %v", name, err)
-		}
-		for _, r := range retiredTiers {
-			want := strconv.FormatBool(ctx["env."+r.flag] == "true")
-			if out[r.output] != want {
-				t.Errorf("%s bazel-coverage %s on merge_group = %q, want %s (flag %s %q)", name, r.output, out[r.output], want, r.flag, ctx["env."+r.flag])
-			}
-		}
-	}
 	rbe := readCIWorkflow(t, bazelWorkflowName).job(t, bazelRBEJobName)
 	for _, c := range []struct {
 		name, varOn, secret, mode string
@@ -311,8 +293,7 @@ func TestMergeQueueBazelCoversRetiredTiers(t *testing.T) {
 // workflow-level env, --config=fresh only when inputs.fresh-test-results is
 // true (nightly.yml passes it; nothing else does), appended after every
 // other --config of each `bazel test` so its --nocache_test_results wins;
-// no lane config turns caching off except docker (host state outside the
-// action key); and nothing adds retries (eviction retries stay 0 where
+// no lane config turns caching off; and nothing adds retries (eviction retries stay 0 where
 // set, TestBazelRetiredLanesArePinned / TestBazelPRLanesArePinned).
 func TestBazelTestResultCachingPolicy(t *testing.T) {
 	var doc struct {
@@ -412,15 +393,12 @@ func TestBazelTestResultCachingPolicy(t *testing.T) {
 		if strings.HasSuffix(head, ":fresh") {
 			lines = append(lines, line)
 		}
-		if strings.Contains(line, "cache_test_results") && line != bazelFreshRCLine && line != "test:docker --nocache_test_results" {
-			t.Errorf(".bazelrc %q: only test:docker and test:fresh set test result caching", line)
+		if strings.Contains(line, "cache_test_results") && line != bazelFreshRCLine {
+			t.Errorf(".bazelrc %q: only test:fresh sets test result caching", line)
 		}
 	}
 	if strings.Join(lines, "\n") != bazelFreshRCLine {
 		t.Errorf(".bazelrc --config=fresh = %q, want exactly %q", lines, bazelFreshRCLine)
-	}
-	if !strings.Contains(rc, "\ntest:docker --nocache_test_results\n") {
-		t.Error(".bazelrc lost test:docker --nocache_test_results")
 	}
 }
 

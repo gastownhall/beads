@@ -165,7 +165,7 @@ func applyLabelEdit(ctx context.Context, issueIDs []string, labels []string, ope
 			}
 		}
 		result, uerr := lifecycle.Update(ctx, issueops.UpdateRequest{
-			Actor:   actor,
+			Actor:   currentActor(),
 			IssueID: issueID,
 			Patch:   patch,
 		})
@@ -361,7 +361,7 @@ func removeLabelsByPrefix(ctx context.Context, issueIDs []string, prefix string,
 	outcomes := make([]labelEditOutcome, 0, len(targets))
 	for _, target := range targets {
 		result, uerr := lifecycle.Update(ctx, issueops.UpdateRequest{
-			Actor:   actor,
+			Actor:   currentActor(),
 			IssueID: target.issueID,
 			Patch:   issueops.IssuePatch{Labels: issueops.LabelPatch{Remove: target.labels}},
 		})
@@ -707,7 +707,7 @@ var labelPropagateCmd = &cobra.Command{
 		commitMsg := fmt.Sprintf("bd: propagate label '%s' from %s to %d children", label, parentID, len(children))
 		err = transactHonoringAutoCommit(ctx, store, commitMsg, func(tx storage.Transaction) error {
 			for _, child := range children {
-				if err := tx.AddLabel(ctx, child.ID, label, actor); err != nil {
+				if err := tx.AddLabel(ctx, child.ID, label, currentActor()); err != nil {
 					return fmt.Errorf("add label '%s' on %s: %w", label, child.ID, err)
 				}
 			}
@@ -809,7 +809,7 @@ func runLabelRename(ctx context.Context, args []string, dryRun bool) error {
 	if usesProxiedServer() {
 		renamed, merged, err = runLabelRenameProxiedServer(ctx, oldLabel, newLabel)
 	} else {
-		renamed, merged, _, err = store.RenameLabel(ctx, oldLabel, newLabel, actor)
+		renamed, merged, _, err = store.RenameLabel(ctx, oldLabel, newLabel, currentActor())
 	}
 	// Recorded from renamed>0 BEFORE the error check: a rename can commit its
 	// SQL side and still return a non-nil err (e.g. the Dolt publication step

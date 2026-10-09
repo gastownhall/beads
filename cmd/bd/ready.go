@@ -159,7 +159,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 				return nil
 			}
 			claimed := res.Claimed
-			if err := commitPendingIfEmbedded(ctx, activeStore, actor, doltAutoCommitParams{
+			if err := commitPendingIfEmbedded(ctx, activeStore, currentActor(), doltAutoCommitParams{
 				Command:  "ready",
 				IssueIDs: []string{claimed.ID},
 			}); err != nil {

@@ -77,13 +77,13 @@ Examples:
 			Type:        dt,
 		}
 
-		if err := fromStore.AddDependencyWithOptions(ctx, dep, actor, storage.DependencyAddOptions{EmitEvent: true}); err != nil {
+		if err := fromStore.AddDependencyWithOptions(ctx, dep, currentActor(), storage.DependencyAddOptions{EmitEvent: true}); err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
 
 		warnIfCyclesExist(fromStore)
 
-		if err := commitPendingIfEmbedded(ctx, fromStore, actor, doltAutoCommitParams{
+		if err := commitPendingIfEmbedded(ctx, fromStore, currentActor(), doltAutoCommitParams{
 			Command:  "link",
 			IssueIDs: []string{fromID, toID},
 		}); err != nil {

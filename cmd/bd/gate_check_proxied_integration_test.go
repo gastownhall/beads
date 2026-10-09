@@ -126,6 +126,75 @@ func TestProxiedServerGateCheck(t *testing.T) {
 			t.Errorf("expected 1 resolved after target close, got:\n%s", out)
 		}
 	})
+}
+
+// TestProxiedServerGateCheckB holds more of TestProxiedServerGateCheck's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerGateCheckB(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	const expiredTimeout = time.Hour
+	longAgo := func() time.Time { return time.Now().UTC().Add(-48 * time.Hour) }
+
+	t.Run("bead_gate_resolves_when_seen_target_is_deleted", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "gcg")
+		target := bdProxiedCreate(t, bd, p.dir, "Deleted bead gate target")
+		gate := bdProxiedCreate(t, bd, p.dir, "Bead gate", "--type", "gate")
+		db := openProxiedDB(t, p)
+		seedGateAwait(t, db, gate.ID, "bead", target.ID, time.Now().UTC(), 0)
+
+		// The first check sees the open target and records that on the gate.
+		if _, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "gate", "check", "--type", "bead"); err != nil {
+			t.Fatalf("gate check (target open) failed: %v\nstderr:\n%s", err, stderr)
+		}
+		if got := readStatus(t, db, gate.ID); got == types.StatusClosed {
+			t.Fatal("bead gate should stay pending while target is open")
+		}
+		var metadata string
+		if err := db.QueryRowContext(context.Background(),
+			"SELECT metadata FROM issues WHERE id = ?", gate.ID).Scan(&metadata); err != nil {
+			t.Fatalf("read gate metadata: %v", err)
+		}
+		if !strings.Contains(metadata, beadGateSeenKey) {
+			t.Fatalf("gate metadata %s does not record that the target was seen", metadata)
+		}
+
+		if _, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "delete", target.ID, "--force"); err != nil {
+			t.Fatalf("delete target failed: %v\nstderr:\n%s", err, stderr)
+		}
+		out, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "gate", "check", "--type", "bead")
+		if err != nil {
+			t.Fatalf("gate check (target deleted) failed: %v\nstderr:\n%s", err, stderr)
+		}
+		if got := readStatus(t, db, gate.ID); got != types.StatusClosed {
+			t.Errorf("bead gate should resolve after its seen target is deleted, got %q", got)
+		}
+		if !strings.Contains(out, "1 resolved") || !strings.Contains(out, "no longer exists") {
+			t.Errorf("expected 1 resolved with a 'no longer exists' reason, got:\n%s", out)
+		}
+	})
+
+	t.Run("bead_gate_never_seen_target_stays_pending", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "gcu")
+		gate := bdProxiedCreate(t, bd, p.dir, "Bead gate on a mistyped target", "--type", "gate")
+		db := openProxiedDB(t, p)
+		seedGateAwait(t, db, gate.ID, "bead", "gcu-nosuchbead", time.Now().UTC(), 0)
+
+		out, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "gate", "check", "--type", "bead")
+		if err != nil {
+			t.Fatalf("gate check failed: %v\nstderr:\n%s", err, stderr)
+		}
+		if got := readStatus(t, db, gate.ID); got == types.StatusClosed {
+			t.Error("a bead gate whose target no check ever saw must stay pending")
+		}
+		if !strings.Contains(out, "no earlier gate check saw it") {
+			t.Errorf("expected the never-seen diagnostic, got:\n%s", out)
+		}
+	})
 
 	t.Run("type_filter_scopes_evaluation", func(t *testing.T) {
 		t.Parallel()

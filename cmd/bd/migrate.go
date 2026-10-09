@@ -880,9 +880,15 @@ var migrateSchemaCmd = &cobra.Command{
 	Short: "Apply pending schema migrations (idempotent)",
 	Long: `Apply pending schema migrations idempotently.
 
-Schema migrations also run automatically on store open, so this subcommand
-is typically a no-op. It exists to make migration explicit and observable
-in CI, release gates, and recovery scenarios.
+bd does not apply pending schema migrations to an existing database without
+the operator's consent, and running this command is that consent
+(BD_ALLOW_MIGRATE=1 is the scripted form). On a remote-backed database the
+remote-migrate gate still applies: --force confirms you are the single
+designated migrator. Migrating is one-way: bd releases built for an older
+schema refuse the migrated database.
+
+On an up-to-date database this is a no-op, so it is safe to run in CI,
+release gates, and recovery scenarios.
 
 Example:
   bd migrate schema

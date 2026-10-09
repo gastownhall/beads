@@ -581,7 +581,7 @@ func updateGateAwaitID(_ interface{}, gateID, runID string) error {
 	updates := map[string]interface{}{
 		"await_id": runID,
 	}
-	if err := store.UpdateIssue(rootCtx, gateID, updates, actor); err != nil {
+	if err := store.UpdateIssue(rootCtx, gateID, updates, currentActor()); err != nil {
 		return err
 	}
 	return nil

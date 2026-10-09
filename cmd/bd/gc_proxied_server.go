@@ -93,7 +93,7 @@ func runGCProxiedServer(ctx context.Context) error {
 				ids[i] = issue.ID
 			}
 			deleteResult, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (domain.DeleteIssuesResult, string, error) {
-				res, err := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{IDs: ids}, actor)
+				res, err := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{IDs: ids}, currentActor())
 				if err != nil {
 					return domain.DeleteIssuesResult{}, "", err
 				}

@@ -511,7 +511,7 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create the sync engine
-	engine := tracker.NewEngine(gt, store, actor)
+	engine := tracker.NewEngine(gt, store, currentActor())
 	if !jsonOutput {
 		engine.OnMessage = func(msg string) { _, _ = fmt.Fprintln(out, "  "+msg) }
 	}

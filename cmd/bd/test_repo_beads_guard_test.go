@@ -424,7 +424,7 @@ func worktreeFallbackBeadsDirDirect(repoRoot string) string {
 	if repoRoot == "" {
 		return ""
 	}
-	cmd := exec.Command("git", "-C", repoRoot, "rev-parse", "--git-dir", "--git-common-dir")
+	cmd := gitCommand("-C", repoRoot, "rev-parse", "--git-dir", "--git-common-dir")
 	out, err := cmd.Output()
 	if err != nil {
 		return ""

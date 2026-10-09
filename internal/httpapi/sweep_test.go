@@ -11,7 +11,7 @@ import (
 )
 
 // The pins for POST /v0/beads/issues:sweep. What is asserted here is the WIRE
-// EDGE — that the handler decodes the document's six members into the role's
+// EDGE — that the handler decodes the document's eight members into the role's
 // request faithfully, refuses what the document refuses, and does not
 // re-implement anything the role owns.
 
@@ -42,7 +42,7 @@ func TestSweepPathReachesItsHandler(t *testing.T) {
 }
 
 // TestSweepForwardsEveryDocumentedMember is the operation's central pin: each
-// of the six body members reaches the role's request unchanged.
+// of the eight body members reaches the role's request unchanged.
 //
 // It is asserted on the REQUEST the role received rather than on the response:
 // a body carrying the right numbers says nothing about which set was swept, and
@@ -57,7 +57,9 @@ func TestSweepForwardsEveryDocumentedMember(t *testing.T) {
 		"closed_before": "2026-03-01T12:00:00Z",
 		"pattern": "bd-old-*",
 		"protect_referenced": true,
-		"dry_run": true
+		"dry_run": true,
+		"protect_live_dependents": true,
+		"limit": 25
 	}`)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
@@ -72,10 +74,12 @@ func TestSweepForwardsEveryDocumentedMember(t *testing.T) {
 		Tier: issueops.SweepDurable,
 		// TRIMMED, by the same rule and the same function the claim's actor
 		// goes through: it reaches the same commit-message interpolation.
-		Actor:             "alice",
-		IDPattern:         "bd-old-*",
-		ProtectReferenced: true,
-		DryRun:            true,
+		Actor:                 "alice",
+		IDPattern:             "bd-old-*",
+		ProtectReferenced:     true,
+		DryRun:                true,
+		ProtectLiveDependents: true,
+		Limit:                 25,
 	}
 	cutoff := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 	want.ClosedBefore = &cutoff
@@ -149,7 +153,9 @@ func TestSweepPublishesTheWholeResult(t *testing.T) {
 		Skipped: issueops.SweepSkips{
 			Pinned: 1, Referenced: 2, NotClosed: 3,
 			UnknownClosedAt: 4, ClosedAtOrAfterCutoff: 5, Unreadable: 6,
+			LiveDependent: 8,
 		},
+		Remaining:     13,
 		ReferencedIDs: []string{"bd-1", "bd-2"},
 	}}
 	ts := newTestServer(t, rolesConfig(Config{Sweeper: sweeper}))
@@ -169,6 +175,7 @@ func TestSweepPublishesTheWholeResult(t *testing.T) {
 		{"dependencies", float64(3)},
 		{"labels", float64(2)},
 		{"events", float64(11)},
+		{"remaining", float64(13)},
 	} {
 		if body[want.key] != want.val {
 			t.Errorf("%s = %v, want %v", want.key, body[want.key], want.val)
@@ -182,6 +189,7 @@ func TestSweepPublishesTheWholeResult(t *testing.T) {
 	for key, want := range map[string]float64{
 		"pinned": 1, "referenced": 2, "not_closed": 3,
 		"unknown_closed_at": 4, "closed_at_or_after_cutoff": 5, "unreadable": 6,
+		"live_dependent": 8,
 	} {
 		if skipped[key] != want {
 			t.Errorf("skipped.%s = %v, want %v", key, skipped[key], want)
@@ -191,6 +199,56 @@ func TestSweepPublishesTheWholeResult(t *testing.T) {
 	ids, ok := body["referenced_ids"].([]any)
 	if !ok || len(ids) != 2 || ids[0] != "bd-1" {
 		t.Errorf("referenced_ids = %v, want the role's sample", body["referenced_ids"])
+	}
+}
+
+// TestSweepResponseCarriesEveryRoleField is the guard sweepResponse's comment
+// names, the sweep twin of TestDeleteResponseCarriesEveryRoleField. It counts
+// fields at both levels the projection copies — the result and its skip
+// buckets — and then projects a result with every role field set, so a wire
+// field the projection leaves zero or nil fails as well as a field added to
+// one side and not the other.
+func TestSweepResponseCarriesEveryRoleField(t *testing.T) {
+	full := issueops.SweepResult{
+		DryRun: true, Swept: 1, Dependencies: 2, Labels: 3, Events: 4,
+		Skipped: issueops.SweepSkips{
+			Pinned: 5, Referenced: 6, LiveDependent: 7, NotClosed: 8,
+			UnknownClosedAt: 9, ClosedAtOrAfterCutoff: 10, Unreadable: 11,
+		},
+		Remaining:     12,
+		ReferencedIDs: []string{"bd-1"},
+	}
+	body := sweepResponse(full)
+
+	for _, level := range []struct{ role, wire any }{
+		{full, body},
+		{full.Skipped, body.Skipped},
+	} {
+		role, wire := reflect.TypeOf(level.role), reflect.TypeOf(level.wire)
+		if role.NumField() != wire.NumField() {
+			t.Errorf("%v has %d fields and %v has %d: a field was added to one and not projected onto the "+
+				"other (see sweepResponse)", role, role.NumField(), wire, wire.NumField())
+		}
+	}
+	requireEveryFieldSet(t, reflect.ValueOf(body), "SweepResult")
+}
+
+// requireEveryFieldSet fails for each field of the struct v, followed through
+// pointers and into nested structs, that still holds its zero value.
+func requireEveryFieldSet(t *testing.T, v reflect.Value, path string) {
+	t.Helper()
+	for i := range v.NumField() {
+		field, name := v.Field(i), path+"."+v.Type().Field(i).Name
+		if field.Kind() == reflect.Pointer && !field.IsNil() {
+			field = field.Elem()
+		}
+		if field.Kind() == reflect.Struct {
+			requireEveryFieldSet(t, field, name)
+			continue
+		}
+		if field.IsZero() {
+			t.Errorf("%s is unset although every role field was set: sweepResponse does not project it", name)
+		}
 	}
 }
 
@@ -229,6 +287,9 @@ func TestSweepRefusesTheDocumentedBodies(t *testing.T) {
 		{"pattern is not a string", `{"tier":"ephemeral","pattern":true}`, "pattern"},
 		{"dry_run is not a boolean", `{"tier":"ephemeral","dry_run":"yes"}`, "dry_run"},
 		{"protect_referenced is not a boolean", `{"tier":"ephemeral","protect_referenced":1}`, "protect_referenced"},
+		{"protect_live_dependents is not a boolean", `{"tier":"ephemeral","protect_live_dependents":"yes"}`, "protect_live_dependents"},
+		{"limit is not an integer", `{"tier":"ephemeral","limit":2.5}`, "limit"},
+		{"limit is null", `{"tier":"ephemeral","limit":null}`, "limit"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			sweeper := &roleSweeper{}

@@ -21,16 +21,40 @@ Blocks in packages that are no longer listed are removed.
 Run from the repository root after gazelle (see `make bazel-sync`). Output is
 deterministic and gazelle-stable, so a clean sync leaves git clean.
 
-Every package also gets a managed `repo_files` block: a filegroup of all of
-the package's own files (`glob(["**"])` less local build and editor debris),
-and the root package's aggregates every package's into `//:repo_files`. That
-is the checkout as Bazel sees it, the `data` of the repository-policy tests
-that walk the whole tree (every BUILD file, every test file, every tracked
-Markdown file). A package without the block would drop out of their view and
-pass them vacuously, which is why `make bazel-sync-check` (bazel.yml's BUILD
-sync step, on every PR) fails on a missing or stale block. Trees in
-.bazelignore (.beads, website, the nested example modules, agent worktrees,
-node_modules) are outside Bazel and so outside //:repo_files.
+Every package also gets a managed `repo_files` block: four filegroups that
+partition the package's own files (`glob(["**"])` less local build and editor
+debris) by what kind of input they are,
+
+    repo_go_srcs       non-test Go source (**/*.go less **/*_test.go)
+    repo_go_test_srcs  Go test source (**/*_test.go)
+    repo_doc_files     Markdown (**/*.md, **/*.mdx)
+    repo_other_files   everything else: BUILD and .bzl files, scripts,
+                       workflows, configuration, testdata
+
+and the root package's block aggregates every package's into the
+`//:repo_<partition>` filegroups, whose union is `//:repo_files`. That is the
+checkout as Bazel sees it. A repository-policy test declares the narrowest of
+these (or one package's partition) that covers what it reads, so that an edit
+outside it leaves the test cached: a docs-only change re-runs no Go-source
+scan, a Go-only change no workflow policy test. Only the tests that really
+read every tracked file declare `//:repo_files`. A package without the block
+would drop out of their view and pass them vacuously, which is why `make
+bazel-sync-check` (bazel.yml's BUILD sync step, on every PR) fails on a
+missing or stale block. Trees in .bazelignore (.beads, website, the nested
+example modules, agent worktrees, node_modules) are outside Bazel and so
+outside //:repo_files.
+
+tools/bazel/BUILD.bazel also gets a managed `release_cross` block: the
+release_cross_build (tools/bazel/release_cross.bzl) that
+scripts/ci/bazel-release-cross-compile.sh builds for every release platform,
+listing every go_library and go_binary it can see (the packages `go build
+./...` compiles; a private library is compiled by the go_binary that embeds
+it) except the cgo-only ones a pure build cannot link (tagged "cgo-only" and
+incompatible with //tools/bazel:pure), testonly fixtures, and the packages of
+nested Go modules (tools/nogo), which `go build ./...` skips. The script checks
+against `bazel query` before it builds that every Bazel package holding Go
+targets is reached, so a package this parser misses fails CI instead of
+going uncompiled.
 
 With --check nothing is written: stale blocks are printed as a diff and the
 exit status is 1 (see `make bazel-sync-check`).
@@ -65,11 +89,24 @@ TREES = (
 
 BEGIN = "# --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---"
 END = "# --- end go_srcs ---"
+RELEASE_BEGIN = "# --- begin release_cross (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---"
+RELEASE_END = "# --- end release_cross ---"
+RELEASE_PKG = "tools/bazel"
+# Built in every release configuration besides the Go targets.
+RELEASE_EXTRA_TARGETS = (":pure_bd_has_no_cgo_only_deps",)
+# Visibilities that let //tools/bazel:release_cross depend on a target.
+RELEASE_VISIBLE = ('"//visibility:public"', '"//:__subpackages__"', '"//tools/bazel:__pkg__"')
+# A buildifier-formatted go_library/go_binary call and its name.
+GO_RULE_RE = re.compile(r'^(go_library|go_binary)\(\n    name = "([^"]+)",\n(.*?)^\)', re.DOTALL | re.MULTILINE)
+# How a cgo-only target opts out of pure builds (see
+# internal/storage/embeddeddolt/cmd/BUILD.bazel and the "cgo-only" tag in
+# scripts/bazel_policy_test.go).
+CGO_ONLY_TAG = '"cgo-only"'
 REPO_BEGIN = "# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---"
 REPO_END = "# --- end repo_files ---"
 BLOCK_RES = tuple(
     re.compile(r"\n*" + re.escape(begin) + r".*?" + re.escape(end) + r"\n*", re.DOTALL)
-    for begin, end in ((BEGIN, END), (REPO_BEGIN, REPO_END))
+    for begin, end in ((BEGIN, END), (RELEASE_BEGIN, RELEASE_END), (REPO_BEGIN, REPO_END))
 )
 SKIP_DIRS = {"testdata", "node_modules"}
 
@@ -130,11 +167,26 @@ ROOT_REPO_FILES_EXCLUDE = (
     "user.bazelrc",
 )
 
-# Who may read //:repo_files: the repository-policy tests.
+# Who may read //:repo_files, every tracked file: the tests that scan the
+# whole checkout. Everything else declares a partition below.
 REPO_FILES_VISIBILITY = (
     "//scripts:__pkg__",
-    "//test/docsync:__pkg__",
+    "//scripts/repochecks:__pkg__",
 )
+
+# The partitions of every package's files, as (name, include, exclude): each
+# file is in exactly one. The debris patterns above match no Go or Markdown
+# file, so only node_modules (and the root's own excludes) are dropped from
+# the Go and doc partitions.
+REPO_PARTITIONS = (
+    ("repo_doc_files", ("**/*.md", "**/*.mdx"), ()),
+    ("repo_go_srcs", ("**/*.go",), ("**/*_test.go",)),
+    ("repo_go_test_srcs", ("**/*_test.go",), ()),
+    ("repo_other_files", ("**",), ("**/*.go", "**/*.md", "**/*.mdx")),
+)
+OTHER_PARTITION = "repo_other_files"
+# Partitions are readable by any test in the repository; //:repo_files is not.
+REPO_PARTITION_VISIBILITY = "//:__subpackages__"
 
 
 def packages_under(root: str) -> list[str]:
@@ -177,31 +229,104 @@ def block(pkg: str, tree_members: list[str] | None) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _str_list(items: list[str], indent: str) -> list[str]:
+    """A list literal as buildifier prints it: one element inline, more one
+    per line (the form gazelle leaves alone, so bazel-sync is a fixed point)."""
+    if len(items) == 1:
+        return [f'["{items[0]}"]']
+    return ["["] + [f'{indent}    "{i}",' for i in items] + [f"{indent}]"]
+
+
+def _partition_glob(include: tuple[str, ...], exclude: list[str], allow_empty: bool) -> list[str]:
+    """`glob(...)` lines for a filegroup's srcs (8-space argument indent)."""
+    inc = _str_list(list(include), "        ")
+    lines = ["    srcs = glob(", "        " + inc[0]] + inc[1:]
+    lines[-1] += ","
+    if allow_empty:
+        lines.append("        allow_empty = True,")
+    if exclude:
+        exc = _str_list(sorted(exclude), "        ")
+        lines.append("        exclude = " + exc[0])
+        lines += exc[1:]
+        lines[-1] += ","
+    return lines
+
+
 def repo_files_block(pkg: str, packages: list[str]) -> str:
     """The repo_files block of pkg ("." is the root, which aggregates)."""
     root = pkg == "."
-    exclude = REPO_FILES_EXCLUDE + (ROOT_REPO_FILES_EXCLUDE if root else ())
-    lines = [
-        REPO_BEGIN,
-        "",
-        "filegroup(",
-        '    name = "repo_files",',
-        "    srcs = glob(",
-        '        ["**"],',
-        "        exclude = [",
-    ]
-    lines += [f'            "{e}",' for e in sorted(exclude)]
-    # No allow_empty: every package holds at least its BUILD.bazel.
-    lines += ["        ],"]
+    lines = [REPO_BEGIN]
+    debris = list(REPO_FILES_EXCLUDE) + (list(ROOT_REPO_FILES_EXCLUDE) if root else [])
+    targets = []
+    for name, include, own_exclude in REPO_PARTITIONS:
+        if name == OTHER_PARTITION:
+            exclude = debris + list(own_exclude)
+        else:
+            exclude = ["**/node_modules/**"] + (list(ROOT_REPO_FILES_EXCLUDE) if root else []) + list(own_exclude)
+        # repo_other_files always holds the package's BUILD.bazel.
+        body = _partition_glob(include, exclude, allow_empty=name != OTHER_PARTITION)
+        if root:
+            body.append("    ) + [")
+            body += [f'        "//{p}:{name}",' for p in packages if p != "."]
+            body.append("    ],")
+        else:
+            body.append("    ),")
+        targets.append((name, body + [f'    visibility = ["{REPO_PARTITION_VISIBILITY}"],']))
     if root:
-        lines += ["    ) + ["]
-        lines += [f'        "//{p}:repo_files",' for p in packages if p != "."]
-        lines += ["    ],", "    visibility = ["]
-        lines += [f'        "{v}",' for v in REPO_FILES_VISIBILITY]
-        lines += ["    ],"]
-    else:
-        lines += ["    ),", '    visibility = ["//:__pkg__"],']
-    lines += [")", "", REPO_END]
+        union = ["    srcs = ["] + [f'        ":{n}",' for n, _, _ in REPO_PARTITIONS] + ["    ],"]
+        union += ["    visibility = ["] + [f'        "{v}",' for v in REPO_FILES_VISIBILITY] + ["    ],"]
+        targets.append(("repo_files", union))
+    for name, body in sorted(targets):
+        lines += ["", "filegroup(", f'    name = "{name}",'] + body + [")"]
+    lines += ["", REPO_END]
+    return "\n".join(lines) + "\n"
+
+
+def in_nested_module(pkg: str) -> bool:
+    """Whether pkg belongs to a Go module other than the root one (its own
+    go.mod at or above it, below the root), which `go build ./...` skips."""
+    parts = [] if pkg == "." else pkg.split("/")
+    return any(os.path.exists(os.path.join(*parts[:i], "go.mod")) for i in range(1, len(parts) + 1))
+
+
+def go_targets(packages: list[str]) -> list[str]:
+    """Every go_library and go_binary that a pure build can compile."""
+    labels = []
+    for pkg in packages:
+        # tools/nogo (the nogo analyzers' own module) is not part of
+        # `go build ./...` or of any release.
+        if in_nested_module(pkg):
+            continue
+        with open(os.path.join(pkg, "BUILD.bazel")) as f:
+            src = f.read()
+        for kind, name, body in GO_RULE_RE.findall(src):
+            # cgo-only: `go build ./...` skips it with CGO_ENABLED=0.
+            # testonly: a fixture under testdata/, which `./...` excludes.
+            # Not visible here: a main package's private embedded library
+            # or a package-restricted helper; its package is covered by a
+            # visible target (or the script's package check fails).
+            if CGO_ONLY_TAG in body or "testonly = True" in body:
+                continue
+            vis = re.search(r"^    visibility = \[(.*?)\]", body, re.DOTALL | re.MULTILINE)
+            if not vis or not any(v in vis.group(1) for v in RELEASE_VISIBLE):
+                continue
+            path = "" if pkg == "." else pkg
+            labels.append(f"//{path}:{name}")
+    return sorted(labels)
+
+
+def release_cross_block(targets: list[str]) -> str:
+    lines = [
+        RELEASE_BEGIN,
+        "",
+        "# manual: needs --//tools/bazel:release_platforms (see above).",
+        "release_cross_build(",
+        '    name = "release_cross",',
+        '    tags = ["manual"],',
+        "    targets = [",
+    ]
+    lines += [f'        "{t}",' for t in sorted(RELEASE_EXTRA_TARGETS) + targets]
+    lines += ["    ],", ")", "", RELEASE_END]
     return "\n".join(lines) + "\n"
 
 
@@ -265,6 +390,8 @@ def main(argv: list[str]) -> int:
     for pkg in packages:
         path = os.path.join(pkg, "BUILD.bazel")
         blocks = [block(pkg, wanted[pkg])] if pkg in wanted else []
+        if pkg == RELEASE_PKG:
+            blocks.append(release_cross_block(go_targets(packages)))
         blocks.append(repo_files_block(pkg, packages))
         changed = rewrite(path, blocks, check)
         if changed:

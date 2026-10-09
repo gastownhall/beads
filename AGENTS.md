@@ -102,33 +102,46 @@ spans layers. See
 
 ## Build, test, lint
 
+Bazel is the build and test system: CI gates on the `bazel test` lanes in
+`.github/workflows/bazel.yml`, and nogo (lint + vet), gofmt and the repository
+guards exist only as Bazel targets. Install
+[Bazelisk](https://github.com/bazelbuild/bazelisk) as `bazel`; the pre-commit
+and pre-push hooks need it.
+
 ```bash
-make install       # build and install bd to ~/.local/bin (canonical)
-make test          # unit tests with the right build tags
-make ci-pr-lint    # required zero-finding formatting + lint contract
-make check-docs    # doc flag, freshness, and docsync checks
+make test          # bazel test //... --config=ci: the CI test lane (nogo, gofmt, guards, unit tests)
+make check         # testing.Short policy + make ci-pr-lint + make test
+make ci-pr-lint    # nogo lint + vet gate, native plus windows/darwin
+make check-docs    # bazel docsync + doc freshness, then the CLI flag check
 make bazel-sync    # after adding/removing/renaming Go files or changing imports/go.mod
+make install       # build and install bd to ~/.local/bin (canonical)
 ```
 
+- Each other tier has its own lane (`--config=integration`, `doltserver`,
+  `embedded`, ...); [engdocs/TESTING.md](engdocs/TESTING.md) lists the exact
+  command per lane and is the canonical source for test selection, design,
+  and PR-readiness gates.
+- Where actions run: contributors add `--config=fork-cache` (rbe-west's
+  anonymous read-only cache; nothing is uploaded), maintainers with an rbe-west
+  certificate `--config=remote-exec`, agent hosts whose `~/.bazelrc` names the
+  executor neither. Make yours the default with a `build --config=...` line in
+  the gitignored `.bazelrc.local`, or pass `BAZEL_FLAGS=...` to make.
+- `go test` (`./scripts/test.sh`, `make test-go`) is an inner-loop
+  convenience only. CI does not enforce it, and it skips nogo, gofmt and the
+  guards; finish with `make test`.
 - **Do NOT** use `go build -o bd ./cmd/bd`, `go install ./cmd/bd`, or raw
   `go run ./cmd/bd ...`: they bypass the canonical build path, leave stale
   binaries, and raw `go run` misses the `gms_pure_go` tag. Use `make install`,
   `./bd`, or `go run -tags gms_pure_go ./cmd/bd ...`.
-- All new features need tests. Choose them with
-  [engdocs/TESTING.md](engdocs/TESTING.md); it is the canonical source for
-  commands, test design, and PR-readiness gates.
+- All new features need tests.
 - **Never pollute a production database with test issues.** Use `t.TempDir()`
   in Go tests and a disposable working directory for manual `bd` experiments.
 - `make ci-pr-lint` must pass with zero issues; see
   [engdocs/LINTING.md](engdocs/LINTING.md).
-- **Optional shared Bazel cache (opt-in).** `--config=fork-cache` reads the
-  project's anonymous, read-only cache, so results CI already computed are
-  hits and nothing is uploaded. It is off by default; when setting up a dev
-  environment, ask your human before adding `build --config=fork-cache` to
-  `.bazelrc.local`.
-- Without Bazel, let CI sync BUILD files: on same-repo PRs the bazel-autofix
-  workflow pushes the fix to your branch (pull before pushing again); fork PRs
-  get a comment with an apply recipe.
+- If BUILD files are out of sync and you cannot run `make bazel-sync`, CI
+  syncs them: on same-repo PRs the bazel-autofix workflow pushes the fix to
+  your branch (pull before pushing again); fork PRs get a comment with an
+  apply recipe.
 - If you changed behavior, update the user docs (`docs/`, via the
   `beads-docs` skill) or README in the same PR.
 
@@ -151,9 +164,9 @@ make bazel-sync    # after adding/removing/renaming Go files or changing imports
 
 Do not push to `main`. Before handing off:
 
-1. Run the quality gates your change needs (`make ci-pr-lint`, the tests
-   [engdocs/TESTING.md](engdocs/TESTING.md) selects). If gates are broken on
-   `main`, report it as a P0 issue.
+1. Run the quality gates your change needs (`make test`, `make ci-pr-lint`,
+   and the other Bazel lanes [engdocs/TESTING.md](engdocs/TESTING.md)
+   selects). If gates are broken on `main`, report it as a P0 issue.
 2. Record follow-up work as GitHub issues (or ledger beads, for maintainers).
 3. Commit, push, or open a PR only when the person you are working for asked
    you to. Report changed files, validation run, and anything left open.

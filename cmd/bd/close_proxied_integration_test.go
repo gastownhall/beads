@@ -283,6 +283,14 @@ func TestProxiedServerClose(t *testing.T) {
 			t.Errorf("close_reason: got %q, want %q", got, "wontfix")
 		}
 	})
+}
+
+// TestProxiedServerCloseB holds more of TestProxiedServerClose's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerCloseB(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("close_with_comment_alias", func(t *testing.T) {
 		t.Parallel()
@@ -348,6 +356,17 @@ func TestProxiedServerClose(t *testing.T) {
 			t.Errorf("expected 'not found' error, got: %s", out)
 		}
 	})
+}
+
+// TestProxiedServerClose3 is the second half of TestProxiedServerClose,
+// split off (as TestProxiedServerClose2 was before it) so that no single
+// top-level suite carries 23 bd-init subtests: that one parent alone cost
+// ~2060 slot-seconds under -test.parallel=4 and pushed its 15-shard legacy
+// shard past go test's 15m timeout on every run (gastownhall/beads#7151).
+func TestProxiedServerClose3(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("close_blocked_refuses_without_force", func(t *testing.T) {
 		t.Parallel()
@@ -483,6 +502,17 @@ func TestProxiedServerClose(t *testing.T) {
 			t.Errorf("status: got %q, want closed", got)
 		}
 	})
+}
+
+// TestProxiedServerClose4 is the second half of TestProxiedServerClose3. With
+// all 12 of its bd-init subtests in one parent, whichever 15-shard legacy
+// shard hosted Close3 timed out in turn (6, then 1) while shard 5 dropped to
+// 5m, so the remaining weight is carried as two parents of six on two shards
+// (gastownhall/beads#7151).
+func TestProxiedServerClose4(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	// ga-ktn9pe.4.8: this used to have an embedded twin
 	// (TestEmbeddedClose/close_boolean_pinned_reclose_is_idempotent), but
@@ -731,6 +761,14 @@ func TestProxiedServerClose2(t *testing.T) {
 			t.Errorf("expected single-issue error, got: %s", out)
 		}
 	})
+}
+
+// TestProxiedServerClose2B holds more of TestProxiedServerClose2's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerClose2B(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("close_suggest_next_multiple_ids_fails", func(t *testing.T) {
 		t.Parallel()
@@ -986,4 +1024,72 @@ func TestProxiedServerCloseConcurrent(t *testing.T) {
 	if openCount != 0 {
 		t.Errorf("open issues remain after concurrent close: %d", openCount)
 	}
+}
+
+// bd close on a bead gate evaluates the awaited bead through the proxied read
+// path. Before #5861 item 1 was fixed this route refused every bead gate with
+// "no local store available", closed target or not, while bd gate check
+// resolved the same gate.
+func TestProxiedServerCloseBeadGate(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	createBeadGate := func(t *testing.T, p proxiedProject) (gateID string, awaited *types.Issue) {
+		t.Helper()
+		parked := bdProxiedCreate(t, bd, p.dir, "Parked bead")
+		awaited = bdProxiedCreate(t, bd, p.dir, "Awaited bead")
+		out, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
+			"gate", "create", "--type=bead", "--blocks", parked.ID, "--await-id", awaited.ID, "--reason", "waiting on "+awaited.ID)
+		if err != nil {
+			t.Fatalf("bead gate create failed: %v\nstderr:\n%s", err, stderr)
+		}
+		return parseCreatedGateID(t, out), awaited
+	}
+
+	t.Run("awaited_open_refuses_with_its_status", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cbgo")
+		gateID, awaited := createBeadGate(t, p)
+
+		out := bdProxiedCloseFail(t, bd, p.dir, gateID)
+		if strings.Contains(out, "no local store available") {
+			t.Errorf("close read the gate through a store-less getter:\n%s", out)
+		}
+		if !strings.Contains(out, "gate condition not satisfied") || !strings.Contains(out, "bead "+awaited.ID+" is open") {
+			t.Errorf("expected the awaited bead's status in the refusal, got:\n%s", out)
+		}
+		db := openProxiedDB(t, p)
+		if got := readStatus(t, db, gateID); got != types.StatusOpen {
+			t.Errorf("refused gate should stay open, got %q", got)
+		}
+	})
+
+	t.Run("awaited_closed_closes", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cbgc")
+		gateID, awaited := createBeadGate(t, p)
+
+		bdProxiedClose(t, bd, p.dir, awaited.ID)
+		bdProxiedClose(t, bd, p.dir, gateID, "-r", "awaited bead closed")
+		db := openProxiedDB(t, p)
+		if got := readStatus(t, db, gateID); got != types.StatusClosed {
+			t.Errorf("gate should close once its awaited bead is closed, got %q", got)
+		}
+		if got := readCloseReason(t, db, gateID); got != "awaited bead closed" {
+			t.Errorf("close_reason: got %q, want %q", got, "awaited bead closed")
+		}
+	})
+
+	t.Run("force_skips_the_check", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cbgf")
+		gateID, _ := createBeadGate(t, p)
+
+		bdProxiedClose(t, bd, p.dir, gateID, "--force")
+		db := openProxiedDB(t, p)
+		if got := readStatus(t, db, gateID); got != types.StatusClosed {
+			t.Errorf("--force should close the gate regardless, got %q", got)
+		}
+	})
 }

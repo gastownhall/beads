@@ -94,7 +94,7 @@ Example:
 		// The issue and its parent-child edge commit in one transaction; a
 		// failed edge rolls back the create instead of leaving a dep-less
 		// child behind (same contract as bd create).
-		if err := createIssueWithDeps(ctx, store, issue, actor, createDepEdges{parentID: parentID}); err != nil {
+		if err := createIssueWithDeps(ctx, store, issue, currentActor(), createDepEdges{parentID: parentID}); err != nil {
 			return HandleError("%v", err)
 		}
 

@@ -218,6 +218,14 @@ func TestProxiedServerShow(t *testing.T) {
 			t.Errorf("expected comments with --include-comments: %v", m)
 		}
 	})
+}
+
+// TestProxiedServerShowB holds more of TestProxiedServerShow's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerShowB(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	// ga-clgh: proxied path mirror of the direct-path fix (a2a69f5e9). The
 	// proxied handler used to leave comments_omitted unset entirely, so a
@@ -398,7 +406,6 @@ func TestProxiedServerShow(t *testing.T) {
 			t.Errorf("expected title in output: %s", out)
 		}
 	})
-
 }
 
 func TestProxiedServerShow2(t *testing.T) {
@@ -591,6 +598,14 @@ func TestProxiedServerShow2(t *testing.T) {
 			t.Errorf("expected --refs output to contain referrer %s: %s", child.ID, out)
 		}
 	})
+}
+
+// TestProxiedServerShow2B holds more of TestProxiedServerShow2's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerShow2B(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("show_refs_groups_by_type", func(t *testing.T) {
 		t.Parallel()
@@ -754,7 +769,6 @@ func TestProxiedServerShow2(t *testing.T) {
 			t.Errorf("expected wisp child %s in --children: %s", childW.ID, out)
 		}
 	})
-
 }
 
 func TestProxiedServerShow3(t *testing.T) {
@@ -887,6 +901,14 @@ func TestProxiedServerShow3(t *testing.T) {
 				arr[0]["id"], arr[1]["id"], root.ID, reply.ID)
 		}
 	})
+}
+
+// TestProxiedServerShow3B holds more of TestProxiedServerShow3's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerShow3B(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("show_thread_orphan_message_renders_alone", func(t *testing.T) {
 		t.Parallel()

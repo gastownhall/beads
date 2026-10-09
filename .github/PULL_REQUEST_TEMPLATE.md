@@ -19,6 +19,6 @@ Closes #
 ## Checklist
 
 - [ ] The why is documented: in a linked issue (reproduction or motivation, impact, risk) or in this description.
-- [ ] Tests and lint selected per `engdocs/TESTING.md` pass locally.
+- [ ] `make test` (the Bazel test lane, nogo lint included) and any other lane `engdocs/TESTING.md` selects pass locally.
 - [ ] User-facing behavior changes are reflected in `docs/` or the generated CLI reference.
 - [ ] If an invariant or rule changed, the owning `AGENTS.md` is updated.

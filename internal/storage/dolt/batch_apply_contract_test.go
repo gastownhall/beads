@@ -175,6 +175,26 @@ func TestBatchApplyContract(t *testing.T) {
 		defer cancel()
 		conformance.RunBatchApplyNormalizesTheWaitsForGate(t, ctx, fixture)
 	})
+	t.Run("StampsSpawnerIDOnlyWhenNamed", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyStampsSpawnerIDOnlyWhenNamed(t, ctx, fixture)
+	})
+	t.Run("CarriesThreadIDOntoTheStoredEdge", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyCarriesThreadIDOntoTheStoredEdge(t, ctx, fixture)
+	})
+	t.Run("CarriesThreadIDOntoAnExistingEdge", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyCarriesThreadIDOntoAnExistingEdge(t, ctx, fixture)
+	})
+	t.Run("RefusesAThreadIDLongerThanItsColumn", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyRefusesAThreadIDLongerThanItsColumn(t, ctx, fixture)
+	})
 	t.Run("SplicesAForwardMetadataRef", func(t *testing.T) {
 		ctx, cancel := testContext(t)
 		defer cancel()

@@ -222,12 +222,10 @@ const large712ShapeName = "712 (mol 2x)"
 // engine's own internal goroutine/lock machinery, not on anything this
 // test's own logic does, and unlike the wall-clock test this one DOES have a
 // real pass/fail assertion (the pinned Total() above), so skipping it under
-// race is a deliberate reduction from per-PR to nightly-only coverage for
-// this specific regression check — not a weakening of the assertion itself.
-// nightly.yml's "Embedded Dolt batch-apply suite (non-race)" step (the
-// nightly embedded non-race lane from #7128) has its -run regex extended
-// alongside this change to include this test, so the full 12790-statement
-// pinned baseline still runs, non-race, every night.
+// race moves this regression check to the non-race embedded variant — not a
+// weakening of the assertion itself. //internal/storage/embeddeddolt:embeddeddolt_batch_apply_nonrace_test
+// (the Bazel embedded tier) selects this test, so the full 12790-statement
+// pinned baseline still runs, non-race.
 func runLargeBatchApplyStatementCountsShape(t *testing.T, shapeName string) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
@@ -240,7 +238,7 @@ func runLargeBatchApplyStatementCountsShape(t *testing.T, shapeName string) {
 		matched = true
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.name == large712ShapeName && raceEnabled {
-				t.Skip("712-item shape's statement-count assertion skipped under -race (race-instrumentation overhead on the Dolt engine itself, not test logic); nightly.yml's Embedded Dolt batch-apply suite (non-race) step runs the full pinned assertion nightly instead; see doc comment above")
+				t.Skip("712-item shape's statement-count assertion skipped under -race (race-instrumentation overhead on the Dolt engine itself, not test logic); embeddeddolt_batch_apply_nonrace_test runs the full pinned assertion non-race instead; see doc comment above")
 			}
 			fixture := newPristineEmbeddedDoltFixture(t, tc.db)
 			t.Cleanup(func() { closeEmbeddedDoltStore(t, fixture.store) })
@@ -355,8 +353,8 @@ var wallClockShapes = []struct {
 //     own wrapper gets under -race, anywhere in CI, is 150 items; without
 //     -race it still gets the full 1000 in that same subtest. This is a
 //     known, deliberate gap for the race-enabled lane specifically, not an
-//     oversight — closing it needs a dedicated non-race embedded run (see the
-//     nightly workflow step added alongside this comment).
+//     oversight — the dedicated non-race embedded run is
+//     //internal/storage/embeddeddolt:embeddeddolt_batch_apply_nonrace_test.
 func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
@@ -421,10 +419,25 @@ func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 //
 // Net: 356 -613 (incl. the documented 1-statement jitter), 712 -1224,
 // classic -60.
+//
+// Re-pinned for the parent-child cascade (gastownhall/beads#6506; classic
+// was 786). A parent-child edge now carries only a parent's exogenous
+// blockedness, and in this shape each parent-child dep add pays seven more
+// reads:
+//   - appendSiblingsUnderAncestorsInTx reseeds the parent's other children:
+//     one ancestorChainInTx walk and four child probes (both dependency
+//     tables, both parent columns), +5.
+//   - The batched mark/unmark reads its exogeneity set first
+//     (batchExogeneity): the parent-kind probe and the issue-parent read,
+//     +2. The probe skips the wisp-parent read, and the ancestry prune costs
+//     nothing while that read is empty.
+//
+// Net: classic +49 (seven distinct parent-child adds; the eighth repeats a
+// pair and is a no-op). 356 and 712 are unchanged.
 var pinnedEmbeddedStatementCounts = map[string]int64{
 	"356 (mol 1x)":    6396,
 	large712ShapeName: 12790,
-	"40 (classic)":    786,
+	"40 (classic)":    835,
 }
 
 // BenchmarkLargeBatchApply_Embedded benchmarks issueops.ApplyBatchInTx on

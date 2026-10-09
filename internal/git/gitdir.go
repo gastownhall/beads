@@ -88,9 +88,35 @@ func canonicalPinPath(p string) string {
 
 // initGitContext populates the gitContext with a single git call.
 // This is called once per process via sync.Once.
+//
+// The process-wide context is the one every bd invocation resolves at startup
+// (beads directory discovery), so it first tries discoverGitInProcess, which
+// answers the common layouts — an ordinary repository, a linked worktree, a
+// submodule, no repository at all — from the filesystem with the exact output
+// `git rev-parse --git-dir --git-common-dir --show-toplevel` would print, and
+// declines (falling back to that subprocess) for anything it cannot prove
+// equivalent: GIT_DIR-style overrides, repository config that moves the work
+// tree, ownership that would engage safe.directory, and so on.
 func initGitContext() {
+	if raw, ok := discoverGitInProcess(); ok {
+		gitCtx = gitContextFromRevParse("", raw)
+		return
+	}
 	gitCtx = loadGitContext("", nil)
 }
+
+// revParseResult is the answer to `git rev-parse --git-dir --git-common-dir
+// --show-toplevel`, in Git's own spelling, or notRepo when Git would report
+// that the directory is not inside a repository.
+type revParseResult struct {
+	gitDir, commonDir, topLevel string
+	notRepo                     bool
+	notRepoErr                  error // why, when notRepo; nil means errNotGitRepository
+}
+
+// errNotGitRepository stands in for git's exit status when in-process
+// discovery establishes that there is no repository to find.
+var errNotGitRepository = errors.New("no .git found in the working directory or any parent")
 
 func loadGitContext(workDir string, env []string) gitContext {
 	var ctx gitContext
@@ -116,10 +142,29 @@ func loadGitContext(workDir string, env []string) gitContext {
 		ctx.err = fmt.Errorf("unexpected git rev-parse output: got %d lines, expected 3", len(lines))
 		return ctx
 	}
+	return gitContextFromRevParse(workDir, revParseResult{
+		gitDir:    strings.TrimSpace(lines[0]),
+		commonDir: strings.TrimSpace(lines[1]),
+		topLevel:  strings.TrimSpace(lines[2]),
+	})
+}
 
-	ctx.gitDirRaw = strings.TrimSpace(lines[0])
-	commonDirRaw := strings.TrimSpace(lines[1])
-	repoRootRaw := strings.TrimSpace(lines[2])
+// gitContextFromRevParse derives the cached context from rev-parse output,
+// whichever of git or discoverGitInProcess produced it, so both paths share
+// one normalization.
+func gitContextFromRevParse(workDir string, raw revParseResult) gitContext {
+	var ctx gitContext
+	if raw.notRepo {
+		reason := raw.notRepoErr
+		if reason == nil {
+			reason = errNotGitRepository
+		}
+		ctx.err = fmt.Errorf("not a git repository: %w", reason)
+		return ctx
+	}
+	ctx.gitDirRaw = raw.gitDir
+	commonDirRaw := raw.commonDir
+	repoRootRaw := raw.topLevel
 
 	// Convert commonDir to absolute for reliable comparison
 	absCommon, err := absoluteGitPath(workDir, commonDirRaw)

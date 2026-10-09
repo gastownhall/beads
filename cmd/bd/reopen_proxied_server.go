@@ -40,7 +40,7 @@ type reopenProxiedTarget struct {
 // ONE CALL PER ID, so one transaction and one history entry per id, where this
 // route used to run every id in one unit of work under a hand-composed
 // "bd: reopen a, b" message.
-func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
+func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []string, ifRevision *int64) error {
 	if len(args) == 0 {
 		return HandleErrorRespectJSON("no issue ID provided")
 	}
@@ -66,14 +66,22 @@ func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	reopenedIssues := []*types.Issue{}
 	for _, target := range targets {
 		result, err := lifecycle.Reopen(ctx, issueops.ReopenRequest{
-			Actor:   actor,
-			IssueID: target.id,
-			Reason:  reason,
+			Actor:           currentActor(),
+			IssueID:         target.id,
+			Reason:          reason,
+			ExpectedVersion: ifRevision,
 			// The label the direct route spells, so one reopen reads the same
 			// in `bd dolt log` whichever route served it.
 			Provenance: "bd: reopen " + target.id,
 		})
 		if err != nil {
+			// Guarded only, as on the direct route: an unguarded reopen that
+			// loses a race with a delete is a lookup failure, not a refusal.
+			if ifRevision != nil {
+				if reported, ok := reportIfRevisionFailure("reopening", target.id, err, ifRevision); ok {
+					return reported
+				}
+			}
 			reportIssueLookupFailure("reopening", target.id, err)
 			hasError = true
 			continue
@@ -86,7 +94,7 @@ func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 			continue
 		}
 
-		audit.LogFieldChange(target.id, "status", string(target.status), string(types.StatusOpen), actor, reason)
+		audit.LogFieldChange(target.id, "status", string(target.status), string(types.StatusOpen), currentActor(), reason)
 		if jsonOut {
 			if issue := result.Issue; issue != nil {
 				// `bd reopen` has never printed dependency records, on either

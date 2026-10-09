@@ -21,9 +21,11 @@
 //     stays hand-written is the value rendering, which is exactly what the
 //     round-trip gate drives through the server's own decoder.
 //
-// See engdocs/design/http-client-backend.md — D7 (the refusal taxonomy), D8
-// (the role dispositions and the refuse-not-drop enumeration), D9 (the
-// divergence ledger), D11 (id resolution) and D12 (MaxRows).
+// The refusal taxonomy, the role dispositions and refuse-not-drop
+// enumeration, id resolution and MaxRows all trace back to the original
+// (bd-enterprise-internal) design's decision log; the divergence ledger
+// itself (D9 there) is reproduced in-repo at
+// engdocs/design/http-divergence-ledger.md, generated from ledger.go below.
 package encode
 
 import (

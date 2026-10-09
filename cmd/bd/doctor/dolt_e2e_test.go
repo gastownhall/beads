@@ -282,7 +282,7 @@ func setupMinimalGitRepo(t *testing.T) string {
 		{"config", "user.name", "test"},
 		{"config", "user.email", "test@test.com"},
 	} {
-		cmd := exec.Command("git", append([]string{"-C", tmpDir}, args...)...)
+		cmd := gitCommand(append([]string{"-C", tmpDir}, args...)...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v failed: %v\n%s", args, err, out)
 		}

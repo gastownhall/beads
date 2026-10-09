@@ -31,7 +31,7 @@ import (
 //
 // The split is the design's (test-lane map, the skew rows): the deterministic,
 // in-process half runs at PR cadence here, and the released-binary composition
-// half runs in cross-version-smoke.yml. Neither substitutes for the other —
+// half runs in //tests/upgrade_smoke. Neither substitutes for the other —
 // this half owns the branches, that half owns the reality check.
 //
 // Three skew directions are covered, and they fail in different ways:

@@ -92,7 +92,7 @@ func runWispCreateProxiedServer(ctx context.Context, in wispCreateInput) error {
 		w := newUOWMolWriter(uw)
 		spawnResult, err := cloneSubgraphInto(ctx, w, subgraph, CloneOptions{
 			Vars:      vars,
-			Actor:     actor,
+			Actor:     currentActor(),
 			Ephemeral: true,
 			Prefix:    types.IDPrefixWisp,
 			RootOnly:  in.rootOnly,
@@ -189,7 +189,7 @@ func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.
 			IDs:                  ids,
 			Cascade:              false,
 			UpdateTextReferences: true,
-		}, actor)
+		}, currentActor())
 		if err != nil {
 			return domain.DeleteIssuesResult{}, "", err
 		}
@@ -320,7 +320,7 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 			IDs:                  ids,
 			Cascade:              false,
 			UpdateTextReferences: true,
-		}, actor)
+		}, currentActor())
 		if err != nil {
 			return domain.DeleteIssuesResult{}, "", err
 		}

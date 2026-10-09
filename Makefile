@@ -44,12 +44,31 @@ endif
 endif
 
 .PHONY: all build doctor-build test test-icu-path test-full-cgo test-regression test-upgrade test-cross-version test-migration corpus-regen githooks-regen bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check check-testing-short
-.PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-complexity ci-complexity-diff ci-complexity-check ci-package-mcp ci-package-npm
+.PHONY: lint lint-changed vet
+.PHONY: check check-go test-go check-docs-go
+.PHONY: ci-pr-core ci-pr-lint ci-complexity ci-complexity-diff ci-complexity-check ci-package-mcp ci-package-npm
 .PHONY: api-gen api-check
 .PHONY: bazel-sync bazel-sync-check
 
 # Default target
 all: build
+
+# Build and test engine. Bazel is what CI gates on: .github/workflows/bazel.yml
+# runs `bazel test` lanes on rbe-west, and nogo (lint + vet), formatting and
+# the repository guards are Bazel targets there. The primary targets (test,
+# check, check-docs) run the same `bazel test` commands as those lanes, so a
+# local run shares CI's action keys and its remote cache (engdocs/TESTING.md
+# "Building and testing"). Each keeps a plain go twin under an explicit -go
+# name (test-go, check-go, check-docs-go) for offline work and hosts Bazel does
+# not serve; that twin is an inner-loop convenience, not what CI enforces.
+# GitHub Actions jobs that still run Go-native suites call the -go names.
+BAZEL ?= bazel
+# Extra flags for every `bazel test` below: --config=fork-cache (contributors:
+# the anonymous read-only cache) or --config=remote-exec (maintainers with an
+# rbe-west client certificate). Hosts whose ~/.bazelrc names the executor need
+# neither. Better: put `build --config=...` in the gitignored .bazelrc.local.
+BAZEL_FLAGS ?=
+BAZEL_TEST = $(BAZEL) test $(BAZEL_FLAGS)
 
 BUILD_DIR := .
 BD_BUILD_OUTPUT := $(BUILD_DIR)/bd$(if $(filter Windows_NT,$(OS)),.exe)
@@ -173,10 +192,26 @@ doctor-build:
 			echo "        CGO_ENABLED=1 go build -tags gms_pure_go ./cmd/bd" ;; \
 	esac
 
-# Run all tests (skips known broken tests listed in .test-skip)
+# bazel.yml's test lane (`bazel test //... --config=ci`): every untagged
+# go_test with PR Core's selection (race, -short, skips), plus nogo lint/vet,
+# formatting and the repository guards. The other lanes' commands are in
+# engdocs/TESTING.md "Building and testing".
 test:
+	$(BAZEL_TEST) //... --config=ci
+
+# Plain go test (skips known broken tests listed in .test-skip): an inner-loop
+# convenience without Bazel; CI does not run it.
+test-go:
 	@echo "Running tests..."
 	@TEST_COVER=1 ./scripts/test.sh
+
+# Fast quality gates: the testing.Short policy, the full nogo lint gate
+# (native plus the windows/darwin passes) and `make test`.
+check: check-testing-short ci-pr-lint test
+
+# The same gates without Bazel where they have a Go form: gofmt and go test.
+# nogo has no go twin, so this is a convenience CI does not enforce.
+check-go: fmt-check check-testing-short test-go
 
 # Run the opt-in ICU regex path test suite (no skip list).
 # This is a local developer workflow for intentionally exercising the leftover
@@ -194,11 +229,48 @@ test-full-cgo:
 ci-pr-core:
 	@./scripts/ci/pr-core.sh
 
-ci-pr-policy:
-	@./scripts/ci/pr-policy.sh
-
+# Lint and vet are nogo (//tools/nogo): go test's vet checks plus the
+# golangci-lint linters .golangci.yml enables, validated beside every Go
+# compile, so any `bazel build`/`bazel test` (local or on rbe-west) fails on a
+# finding. These targets ask Bazel for the analysis alone (.bazelrc's
+# --config=nogo; nothing is linked).
 ci-pr-lint:
 	@./scripts/ci/pr-lint.sh
+
+# The CI lint gate: native, plus //tools/bazel:release_cross for windows/amd64
+# and darwin/arm64 (BD_LINT_TARGETS selects; scripts/pr-lint).
+lint: ci-pr-lint
+
+# go test's vet checks run inside nogo; same as lint.
+vet: lint
+
+# nogo over the Bazel packages of changed Go files, natively (the pre-commit
+# hook's lint). LINT_CHANGED_SCOPE: staged, or worktree (changed against
+# LINT_CHANGED_REF, staged, and untracked).
+LINT_CHANGED_SCOPE ?= worktree
+LINT_CHANGED_REF ?= HEAD
+lint-changed:
+	@case "$(LINT_CHANGED_SCOPE)" in \
+		staged) files="$$(git diff --cached --name-only --diff-filter=ACMRT -- '*.go')" ;; \
+		worktree) files="$$( \
+			git diff --name-only --diff-filter=ACMRT "$(LINT_CHANGED_REF)" -- '*.go'; \
+			git diff --cached --name-only --diff-filter=ACMRT -- '*.go'; \
+			git ls-files --others --exclude-standard -- '*.go')" ;; \
+		*) echo "unknown LINT_CHANGED_SCOPE=$(LINT_CHANGED_SCOPE); expected staged or worktree" >&2; exit 2 ;; \
+	esac; \
+	packages=""; missing=""; \
+	for file in $$files; do \
+		dir="$$(dirname "$$file")"; \
+		case "/$$dir/" in */testdata/*) continue ;; esac; \
+		if [ -f "$$dir/BUILD.bazel" ]; then packages="$$packages //$${dir#.}:all"; else missing="$$missing $$dir"; fi; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		echo "lint-changed: no BUILD.bazel in$$missing; run 'make bazel-sync'" >&2; exit 1; \
+	fi; \
+	packages="$$(printf '%s\n' $$packages | sort -u | sed 's#^///#//#; s#^//\.:#//:#')"; \
+	if [ -z "$$packages" ]; then echo "lint-changed: no changed Go packages"; exit 0; fi; \
+	echo "lint-changed:" $$packages; \
+	$(BAZEL) build --config=nogo -- $$packages
 
 # Opt-in architecture experiment. Install gocyclo v0.6.0 first;
 # report is advisory while check exercises the local baseline guard.
@@ -220,9 +292,8 @@ api-gen:
 	go generate -tags "$(BUILD_TAGS)" ./internal/httpapi/apigen
 
 # Two-part spec drift gate: regenerate and fail if regeneration CHANGED
-# anything, then run the spec tests. Runs in the PR workflow's policy job
-# (scripts/ci/pr-policy.sh), on every pull request, never only on
-# push-to-main.
+# anything, then run the spec tests. CI runs the drift half as
+# //scripts/repochecks:types_gen_drift_test.
 #
 # The drift question is "do the checked-out types already match the checked-out
 # spec", so the comparison is before-vs-after regeneration rather than
@@ -380,8 +451,15 @@ fmt:
 fmt-check:
 	@./scripts/ci/fmt-check.sh
 
-# Validate documentation references against actual CLI flags
+# Docs checks: docsync and doc freshness as bazel.yml's test lane runs them,
+# then the CLI flag check, which validates against bd built from the release in
+# docs/cli-docs.pin (so it stays a script, like pr.yml's check-doc-flags job).
 check-docs:
+	$(BAZEL_TEST) //test/docsync:docsync_test //scripts/repochecks:doc_freshness_test --config=ci
+	@./scripts/check-doc-flags.sh
+
+# The same docs checks with plain go test and a go-built bd.
+check-docs-go:
 	@echo "Building bd for docs checks..."
 	@CGO_ENABLED=0 go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o "$(BUILD_DIR)/bd" ./cmd/bd
 	@./scripts/check-doc-flags.sh "$(BUILD_DIR)/bd"
@@ -416,12 +494,10 @@ diagrams-excalidraw:
 docs-dev:
 	./mint.sh dev
 
-# Bazel (side-by-side with the Go toolchain; `go build`/`go test` do not need
-# it). Regenerate BUILD.bazel files with gazelle and refresh the MODULE.bazel
+# Regenerate BUILD.bazel files with gazelle and refresh the MODULE.bazel
 # use_repo list + MODULE.bazel.lock, then refresh the go_srcs filegroups that
 # source-scanning tests declare as data (tools/bazel/go_srcs.py). Run after
 # changing Go imports, go.mod, or packages.
-BAZEL ?= bazel
 bazel-sync:
 	$(BAZEL) run //:gazelle
 	python3 tools/bazel/go_srcs.py
@@ -457,12 +533,16 @@ help:
 	@echo "Beads Makefile targets:"
 	@echo "  make build        - Build the bd binary"
 	@echo "  make doctor-build - Diagnose build env (GOFLAGS/CGO/CC) for the ICU build trap"
-	@echo "  make test         - Run all tests"
+	@echo "  make test         - bazel test //... --config=ci (bazel.yml's test lane; BAZEL_FLAGS adds flags)"
+	@echo "  make test-go      - Plain go test via scripts/test.sh (inner loop; not what CI enforces)"
+	@echo "  make check        - testing.Short policy + nogo lint gate + make test"
+	@echo "  make check-go     - gofmt + testing.Short policy + make test-go (no Bazel)"
 	@echo "  make test-icu-path - Run opt-in ICU regex path tests (maintainer-only)"
 	@echo "  make test-full-cgo - Deprecated alias for make test-icu-path"
 	@echo "  make ci-pr-core  - Run required PR core Go test wrapper"
-	@echo "  make ci-pr-policy - Run required PR policy wrapper"
-	@echo "  make ci-pr-lint  - Run required PR formatting and lint wrapper"
+	@echo "  make ci-pr-lint  - Run the required lint gate: nogo (vet + golangci-lint's linters) under Bazel, native + windows/darwin"
+	@echo "  make lint        - Same as ci-pr-lint (make vet too)"
+	@echo "  make lint-changed - nogo over the Bazel packages of changed Go files (LINT_CHANGED_SCOPE=staged|worktree)"
 	@echo "  make ci-complexity - Report production cyclomatic complexity (advisory)"
 	@echo "  make ci-complexity-diff - Compare complexity with COMPLEXITY_BASE_REF"
 	@echo "  make ci-complexity-check - Check complexity against the local baseline"
@@ -478,7 +558,8 @@ help:
 	@echo "  make install-force - Install bd, skipping the origin/main update check"
 	@echo "  make fmt          - Format all Go files with gofmt"
 	@echo "  make fmt-check    - Check Go formatting (for CI)"
-	@echo "  make check-docs   - Validate docs against CLI flags"
+	@echo "  make check-docs   - Bazel docsync + doc freshness tests, then the CLI flag check"
+	@echo "  make check-docs-go - The same docs checks with plain go test"
 	@echo "  make api-gen      - Regenerate HTTP API types from the OpenAPI spec"
 	@echo "  make api-check    - OpenAPI drift gate (regenerate, diff-or-fail, spec tests)"
 	@echo "  make bazel-sync   - Regenerate Bazel BUILD files and tidy MODULE.bazel (gazelle + mod tidy)"

@@ -53,67 +53,32 @@ go_test(
     ],
 )
 
-# protocol_test without the race detector, which --config=docker otherwise
-# turns on for every target: pr.yml's "Contract corpus" job runs
+# protocol_test without the race detector, which --config=doltserver
+# otherwise turns on for every target: the contract corpus has always run
 # `go test ./cmd/bd/protocol` without -race (PR Core covers the race build).
 # Matching it is cheap: tools/bazel/race.bzl lands protocol_test's deps in
 # the configuration the non-race //cmd/bd:bd_for_tests already builds them in,
 # so the extra work is protocol_test's test-only libraries and one link.
 # Racing it instead would also be acceptable (a race-only failure is a real
-# bug); then drop this target and point protocol_docker_test back at
+# bug); then drop this target and point protocol_dolt_test back at
 # :protocol_test.
 #
 # Tags:
-#   manual: only protocol_docker_test's input, never a build target of its
+#   manual: only protocol_dolt_test's input, never a build target of its
 #     own. `bazel test //...` in every lane still builds it through
-#     protocol_docker_test (a test tag filter does not stop the build).
+#     protocol_dolt_test (a test tag filter does not stop the build).
 go_test_race_off(
     name = "protocol_race_off",
     tags = ["manual"],
     test = ":protocol_test",
 )
 
-# protocol_test as pr.yml's "Contract corpus" job runs it: non-race, TestMain
-# starts a dolt sql-server container and BEADS_PROTOCOL_REQUIRE_DOLT=1 turns a
-# missing container into a failure instead of a skip. It repeats
-# protocol_test's `env` (go_test_variant.sh cannot inherit it). protocol_test
-# itself stays untagged: under --config=prcore (BEADS_TEST_SKIP=dolt) its
-# Dolt-backed tests skip.
-#
-# Tags:
-#   requires-docker: needs a docker daemon; excluded from --config=prcore/ci,
-#     selected by --config=docker.
-#   no-remote-exec: the daemon is on the host, not on remote workers.
-sh_test(
-    name = "protocol_docker_test",
-    size = "large",
-    srcs = ["//tools/bazel:go_test_variant.sh"],
-    args = ["$(rootpath :protocol_race_off)"],
-    data = [
-        ":protocol_race_off",
-        "//cmd/bd:bd_for_tests",
-    ],
-    # Pinned to the container backend (the docker lane is the A/B control);
-    # rule env beats --test_env, so =local on the command line cannot flip it.
-    env = {
-        "BEADS_PROTOCOL_REQUIRE_DOLT": "1",
-        "BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)",
-        "BEADS_TEST_DOLT_SERVER": "container",
-    },
-    # ~10 min unsharded without -race in pr.yml.
-    shard_count = 8,
-    tags = [
-        "no-remote-exec",
-        "requires-docker",
-    ],
-)
-
-# protocol_test as pr.yml's "Contract corpus" job runs it (non-race, like the
-# job; see protocol_race_off), on the dolt-server lane: TestMain's server is a
+# protocol_test as the retired "Contract corpus" job ran it (non-race, like
+# the job; see protocol_race_off), on the dolt-server lane: TestMain's server is a
 # local `dolt sql-server` child of the test process, and
 # BEADS_PROTOCOL_REQUIRE_DOLT=1 turns a server that cannot start into a
 # failure, so the golden and double-run determinism tests cannot skip. It
-# repeats protocol_test's `env`. protocol_docker_test is the A/B control.
+# repeats protocol_test's `env`.
 #
 # Tags:
 #   dolt-server: starts hermetic dolt sql-servers from the pinned dolt in the
@@ -144,12 +109,51 @@ sh_test(
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(
-    name = "repo_files",
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
     srcs = glob(
         ["**"],
         exclude = [
             "**/*.db",
             "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
             "**/*.out",
             "**/*.prof",
             "**/*.pyc",
@@ -158,7 +162,7 @@ filegroup(
             "**/node_modules/**",
         ],
     ),
-    visibility = ["//:__pkg__"],
+    visibility = ["//:__subpackages__"],
 )
 
 # --- end repo_files ---

@@ -123,7 +123,7 @@ Examples:
 				updates["notes"] = notes + reason
 			}
 
-			if err := store.UpdateIssue(ctx, fullID, updates, actor); err != nil {
+			if err := store.UpdateIssue(ctx, fullID, updates, currentActor()); err != nil {
 				fmt.Fprintf(os.Stderr, "Error deferring %s: %v\n", fullID, err)
 				continue
 			}

@@ -90,9 +90,9 @@ Examples:
 
 			var unclaimErr error
 			if conditional {
-				unclaimErr = issueStore.UnclaimIssueIfAssignee(ctx, fullID, actor, ifAssignee)
+				unclaimErr = issueStore.UnclaimIssueIfAssignee(ctx, fullID, currentActor(), ifAssignee)
 			} else {
-				unclaimErr = issueStore.UnclaimIssue(ctx, fullID, actor, force)
+				unclaimErr = issueStore.UnclaimIssue(ctx, fullID, currentActor(), force)
 			}
 			if unclaimErr != nil {
 				fmt.Fprintf(os.Stderr, "Error unclaiming %s: %v\n", fullID, unclaimErr)
@@ -102,7 +102,7 @@ Examples:
 			}
 
 			if reason != "" {
-				if _, err := issueStore.AddIssueComment(ctx, fullID, actor, reason); err != nil {
+				if _, err := issueStore.AddIssueComment(ctx, fullID, currentActor(), reason); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to add reason comment: %v\n", err)
 				}
 			}

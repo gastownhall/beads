@@ -5,8 +5,172 @@ module(
 
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "rules_go", version = "0.63.0")
+
+# nogo honors //nolint directives through ast.CommentMap ranges, which differ
+# from golangci-lint's (a comment trailing `func f(...) {` attaches to the
+# body's first statement). This tree's directives were written against
+# golangci-lint, so the patch adds golangci-lint's ranges as well.
+single_version_override(
+    module_name = "rules_go",
+    patch_strip = 1,
+    patches = ["//third_party/patches:rules_go_nogo_golangci_nolint.patch"],
+    version = "0.63.0",
+)
+
 bazel_dep(name = "gazelle", version = "0.53.0")
 bazel_dep(name = "rules_shell", version = "0.6.1")
+bazel_dep(name = "toolchains_llvm", version = "1.11.0")
+
+# Loaded by @llvm_dist_linux_x86_64's BUILD file (toolchains_llvm's template).
+bazel_dep(name = "rules_cc", version = "0.2.17")
+
+# Hermetic C/C++ toolchain, ported from gastownhall/gascity. rules_go builds
+# the Go stdlib under -race and every cgo package (mattn/go-sqlite3, gozstd,
+# ...) with the registered C toolchain, and every Go compile depends on the
+# stdlib, so a host-detected toolchain (local_config_cc: CC=/usr/bin/gcc,
+# -fuse-ld=lld only where the CLIENT has lld, gcc-version-specific generated
+# inputs) keys those actions to the machine that ran the analysis and fails
+# remotely on workers without lld. Instead: LLVM pinned by sha256, plus a
+# sysroot of pinned Ubuntu 24.04 packages (the RBE workers' release, so
+# binaries load the same glibc and libstdc++ there), byte-identical on every
+# Linux x86_64 host. No ICU: beads builds go-mysql-server with its pure-Go
+# regex backend (engdocs/ICU-POLICY.md), so nothing may link libicu. .bazelrc
+# turns host detection off so nothing falls back to the host compiler;
+# scripts/bazel_hermetic_cc_test.go guards both.
+deb_sysroot = use_repo_rule("//third_party/cc_toolchain:deb_sysroot.bzl", "deb_sysroot")
+
+deb_sysroot(
+    name = "cc_sysroot_noble_amd64",
+    mirrors = [
+        "https://snapshot.ubuntu.com/ubuntu/20261001T000000Z/",
+        "https://archive.ubuntu.com/ubuntu/",
+    ],
+    packages = {
+        "pool/main/g/gcc-13/libgcc-13-dev_13.3.0-6ubuntu2~24.04.1_amd64.deb": "cd689db2691edaa10f37329307292796bb599e722e0505c79e14caaa1fe9a93a",
+        "pool/main/g/gcc-13/libstdc++-13-dev_13.3.0-6ubuntu2~24.04.1_amd64.deb": "ee5633e863e19c3381ed97842ce35ed32ede96a3d1ae4e94c051d3036fe21347",
+        "pool/main/g/gcc-14/libgcc-s1_14.2.0-4ubuntu2~24.04.1_amd64.deb": "aa7fadbe33b78bcf99885318040601c550c208929565b179891d9a3cc2aa68cd",
+        "pool/main/g/gcc-14/libstdc++6_14.2.0-4ubuntu2~24.04.1_amd64.deb": "a51f8de7829211db961a31f02158058ad1a95f92ac6d0a5dff6350e2821c54c0",
+        "pool/main/g/glibc/libc6-dev_2.39-0ubuntu8.9_amd64.deb": "e13d5fcc1b2a86f75bca8e0026a8e39f24fe97ca86e92be79991f8697eb1306f",
+        "pool/main/g/glibc/libc6_2.39-0ubuntu8.9_amd64.deb": "ff5557d99b51f761c4b7c92368b9cc45565eda17df9bf9eb4b134d09825008be",
+        "pool/main/l/linux/linux-libc-dev_6.8.0-146.146_amd64.deb": "1a7bb04132d01cd14bea3d615e5861096ca1f70c4659902eb14b36c21993cadc",
+    },
+    remove = [
+        "etc",
+        "usr/bin",
+        "usr/sbin",
+        "usr/share",
+        "usr/lib/x86_64-linux-gnu/gconv",
+        "usr/lib/gcc/x86_64-linux-gnu/13/crtoffload*",
+        "usr/lib/gcc/x86_64-linux-gnu/13/lib*san*",
+        "usr/lib/gcc/x86_64-linux-gnu/13/libatomic*",
+        "usr/lib/gcc/x86_64-linux-gnu/13/libbacktrace*",
+        "usr/lib/gcc/x86_64-linux-gnu/13/libgcov*",
+        "usr/lib/gcc/x86_64-linux-gnu/13/libgomp*",
+        "usr/lib/gcc/x86_64-linux-gnu/13/libitm*",
+        "usr/lib/gcc/x86_64-linux-gnu/13/libquadmath*",
+        "usr/lib/gcc/x86_64-linux-gnu/13/libstdc++*.a",
+    ],
+)
+
+LLVM_VERSION = "22.1.8"
+
+llvm_dist = use_repo_rule("//third_party/cc_toolchain:llvm_dist.bzl", "llvm_dist")
+
+llvm_dist(
+    name = "llvm_dist_linux_x86_64",
+    llvm_version = LLVM_VERSION,
+    members = [
+        "bin/clang",
+        "bin/clang++",
+        "bin/clang-22",
+        "bin/clang-cpp",
+        "bin/ld.lld",
+        "bin/ld64.lld",
+        "bin/lld",
+        "bin/llvm-ar",
+        "bin/llvm-as",
+        "bin/llvm-cov",
+        "bin/llvm-install-name-tool",
+        "bin/llvm-nm",
+        "bin/llvm-objcopy",
+        "bin/llvm-objdump",
+        "bin/llvm-profdata",
+        "bin/llvm-ranlib",
+        "bin/llvm-readelf",
+        "bin/llvm-readobj",
+        "bin/llvm-strip",
+        "bin/llvm-symbolizer",
+        "bin/wasm-ld",
+        "include/c++",
+        "include/x86_64-unknown-linux-gnu",
+        "lib/clang/22/include",
+        "lib/clang/22/lib/x86_64-unknown-linux-gnu/clang_rt.crtbegin.o",
+        "lib/clang/22/lib/x86_64-unknown-linux-gnu/clang_rt.crtend.o",
+        "lib/clang/22/lib/x86_64-unknown-linux-gnu/libclang_rt.builtins.a",
+        # `bazel coverage` links cgo binaries with -fprofile-instr-generate,
+        # which pulls in compiler-rt's profile runtime (~170KB).
+        "lib/clang/22/lib/x86_64-unknown-linux-gnu/libclang_rt.profile.a",
+    ],
+    # LLVM-22.1.8-Linux-X64.tar.xz (sha256 df0e1ecf...0006384), sliced to the
+    # members above by tools/cc_toolchain/repack_llvm.sh: 149 MB instead of
+    # 1.94 GB, and no single-threaded xz pass on every cold runner. The files
+    # are byte-identical to the release's, so no action key changes.
+    # tools/cc_toolchain/llvm_members.txt must list the same members.
+    sha256 = "de6147773999137b70ef3d7bd8ecb1e5b91f2a161d02fd09aec591b84516bec5",
+    sliced = True,
+    stub_tools = [
+        "clang-format",
+        "clang-tidy",
+        "clangd",
+        "llvm-dwp",
+    ],
+    # The sha256 pin, not the host, guarantees the bytes. gascity's release
+    # asset for now; a beads mirror of the same bytes can be listed first.
+    urls = [
+        "https://github.com/gastownhall/gascity/releases/download/toolchain-llvm-22.1.8-slice-1/LLVM-22.1.8-Linux-X64-slice.tar.zst",
+    ],
+)
+
+# Every other host (macOS arm64, Linux arm64) runs toolchains_llvm's stock
+# LLVM_VERSION release for its platform, pinned by sha256 in toolchains_llvm's
+# distribution table and fetched only there. Once any toolchain_root is set,
+# toolchains_llvm creates no stock distribution of its own and fails every
+# build on a host no root covers. Not hermetic there: no sysroot, so cgo
+# uses the host's headers and libraries, as before.
+llvm_host_dist = use_repo_rule("@toolchains_llvm//toolchain:rules.bzl", "llvm")
+
+llvm_host_dist(
+    name = "llvm_dist_host",
+    llvm_version = LLVM_VERSION,
+    # The bare rule reads the per-host dict; llvm_toolchain's macro would
+    # fill it in from llvm_version.
+    llvm_versions = {"": LLVM_VERSION},
+)
+
+llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
+llvm.toolchain(
+    name = "llvm_toolchain",
+    llvm_version = LLVM_VERSION,
+    # The sysroot's libstdc++, linked dynamically as host-gcc builds did.
+    stdlib = {"linux-x86_64": "dynamic-stdc++"},
+)
+llvm.toolchain_root(
+    name = "llvm_toolchain",
+    label = "@llvm_dist_linux_x86_64//:BUILD.bazel",
+    targets = ["linux-x86_64"],
+)
+llvm.toolchain_root(
+    name = "llvm_toolchain",
+    label = "@llvm_dist_host//:BUILD.bazel",
+)
+llvm.sysroot(
+    name = "llvm_toolchain",
+    label = "@cc_sysroot_noble_amd64//:sysroot",
+    targets = ["linux-x86_64"],
+)
+use_repo(llvm, "llvm_toolchain")
+
+register_toolchains("@llvm_toolchain//:all")
 
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(
@@ -15,8 +179,36 @@ go_sdk.download(
 )
 use_repo(go_sdk, "go_sdk")
 
+# nogo: //tools/nogo's analyzers (go test's vet checks plus the golangci-lint
+# linters .golangci.yml enables) run beside every first-party Go compile, so
+# a finding fails `bazel build`/`bazel test` wherever it executes (RBE
+# included). External repos only feed analyzer facts; they are not validated.
+go_sdk.nogo(
+    includes = ["//:__subpackages__"],
+    nogo = "//tools/nogo",
+)
+
+# gazelle compiles fetch_repo and gazelle, which every go_deps repository
+# runs, with `go build` in a repository rule before any go_deps fetch can
+# start (18-24 s of every CI lane's loading). This substitute serves those
+# reproducible binaries from the repository cache by pinned sha256 and builds
+# them from source on a miss (tools/bazel/go_repository_tools.bzl).
+gazelle_non_module_deps = use_extension("@gazelle//internal/bzlmod:non_module_deps.bzl", "non_module_deps")
+
+go_repository_tools = use_repo_rule("//tools/bazel:go_repository_tools.bzl", "go_repository_tools")
+
+go_repository_tools(name = "gazelle_go_repository_tools")
+
+override_repo(
+    gazelle_non_module_deps,
+    bazel_gazelle_go_repository_tools = "gazelle_go_repository_tools",
+)
+
+# gazelle.go.work joins the beads module and the nogo analyzers' module
+# (tools/nogo/go.mod) into one dependency graph for Bazel only; `go build` in
+# the repository root never reads it (it is not named go.work).
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
-go_deps.from_file(go_mod = "//:go.mod")
+go_deps.from_file(go_work = "//:gazelle.go.work")
 
 # beads builds go-mysql-server with its stdlib-regex backend (ICU policy):
 # gazelle must see gms_pure_go as satisfied so it selects regex_pure.go and
@@ -27,6 +219,23 @@ go_deps.gazelle_override(
         "gazelle:exclude internal/regex/regex_cgo.go",
     ],
     path = "github.com/dolthub/go-mysql-server",
+)
+
+# protoc-gen-validate ships validate/validate.pb.go, so its Go library can
+# compile from the checked-in code. Its own validate/BUILD instead makes the
+# Go library a go_proto_library, so every lane built protoc from source just
+# to regenerate that file: about 4.5k C++ compile, link and archive actions,
+# each carrying the LLVM toolchain as inputs. The module reaches the graph
+# only through grpc xds and the cloud SDKs. Gazelle regenerates its BUILD
+# files with proto rules off; build_file_name makes it write BUILD.bazel (which
+# Bazel prefers) rather than merge into the upstream BUILD files.
+go_deps.gazelle_override(
+    build_file_generation = "on",
+    directives = [
+        "gazelle:build_file_name BUILD.bazel",
+        "gazelle:proto disable",
+    ],
+    path = "github.com/envoyproxy/protoc-gen-validate",
 )
 go_deps.module_override(
     patch_strip = 1,
@@ -50,7 +259,17 @@ go_deps.module_override(
     patches = ["//third_party/patches:gozstd_nocgo.patch"],
     path = "github.com/dolthub/gozstd",
 )
-use_repo(go_deps, "com_github_anthropics_anthropic_sdk_go", "com_github_burntsushi_toml", "com_github_cenkalti_backoff_v4", "com_github_charmbracelet_x_ansi", "com_github_creack_pty", "com_github_data_dog_go_sqlmock", "com_github_dolthub_dolt_go", "com_github_dolthub_driver_v2", "com_github_dolthub_eventkit", "com_github_dolthub_go_mysql_server", "com_github_dolthub_vitess", "com_github_go_sql_driver_mysql", "com_github_google_uuid", "com_github_gowebpki_jcs", "com_github_invopop_jsonschema", "com_github_johanneskaufmann_html_to_markdown_v2", "com_github_mattn_go_sqlite3", "com_github_microcosm_cc_bluemonday", "com_github_oapi_codegen_oapi_codegen_v2", "com_github_olebedev_when", "com_github_spf13_cobra", "com_github_spf13_pflag", "com_github_spf13_viper", "com_github_stretchr_testify", "com_github_subosito_gotenv", "com_github_testcontainers_testcontainers_go", "com_github_testcontainers_testcontainers_go_modules_dolt", "com_github_yuin_goldmark", "in_gopkg_yaml_v3", "io_opentelemetry_go_otel", "io_opentelemetry_go_otel_exporters_otlp_otlpmetric_otlpmetrichttp", "io_opentelemetry_go_otel_exporters_stdout_stdoutmetric", "io_opentelemetry_go_otel_exporters_stdout_stdouttrace", "io_opentelemetry_go_otel_metric", "io_opentelemetry_go_otel_sdk", "io_opentelemetry_go_otel_sdk_metric", "io_opentelemetry_go_otel_trace", "io_rsc_script", "land_charm_glamour_v2", "land_charm_huh_v2", "land_charm_lipgloss_v2", "org_golang_x_mod", "org_golang_x_net", "org_golang_x_sync", "org_golang_x_sys", "org_golang_x_term")
+
+# nogo does not analyze the standard library, so ctrlflow has no noReturn
+# facts for t.Fatal, log.Fatal, os.Exit, ...; buildssa (unparam) and the vet
+# passes then treat them as returning, unlike golangci-lint and go vet. The
+# patch makes ctrlflow know those standard-library functions intrinsically.
+go_deps.module_override(
+    patch_strip = 1,
+    patches = ["//third_party/patches:x_tools_ctrlflow_stdlib_noreturn.patch"],
+    path = "golang.org/x/tools",
+)
+use_repo(go_deps, "cc_mvdan_unparam", "com_github_anthropics_anthropic_sdk_go", "com_github_ashanbrown_forbidigo_v2", "com_github_burntsushi_toml", "com_github_cenkalti_backoff_v4", "com_github_charmbracelet_x_ansi", "com_github_creack_pty", "com_github_data_dog_go_sqlmock", "com_github_dolthub_dolt_go", "com_github_dolthub_driver_v2", "com_github_dolthub_eventkit", "com_github_dolthub_go_mysql_server", "com_github_dolthub_vitess", "com_github_go_sql_driver_mysql", "com_github_golangci_misspell", "com_github_golangci_unconvert", "com_github_google_uuid", "com_github_gowebpki_jcs", "com_github_invopop_jsonschema", "com_github_johanneskaufmann_html_to_markdown_v2", "com_github_kisielk_errcheck", "com_github_mattn_go_sqlite3", "com_github_microcosm_cc_bluemonday", "com_github_oapi_codegen_oapi_codegen_v2", "com_github_olebedev_when", "com_github_openpeedeep_depguard_v2", "com_github_securego_gosec_v2", "com_github_spf13_cobra", "com_github_spf13_pflag", "com_github_spf13_viper", "com_github_stretchr_testify", "com_github_subosito_gotenv", "com_github_testcontainers_testcontainers_go", "com_github_testcontainers_testcontainers_go_modules_dolt", "com_github_yuin_goldmark", "in_gopkg_yaml_v3", "io_opentelemetry_go_otel", "io_opentelemetry_go_otel_exporters_otlp_otlpmetric_otlpmetrichttp", "io_opentelemetry_go_otel_exporters_stdout_stdoutmetric", "io_opentelemetry_go_otel_exporters_stdout_stdouttrace", "io_opentelemetry_go_otel_metric", "io_opentelemetry_go_otel_sdk", "io_opentelemetry_go_otel_sdk_metric", "io_opentelemetry_go_otel_trace", "io_rsc_script", "land_charm_glamour_v2", "land_charm_huh_v2", "land_charm_lipgloss_v2", "org_go_simpler_sloglint", "org_golang_x_mod", "org_golang_x_net", "org_golang_x_sync", "org_golang_x_sys", "org_golang_x_term", "org_golang_x_tools")
 
 # Hermetic Dolt CLI for tests (tools/bazel/dolt.bzl pins the release to
 # scripts/ci/install-dolt.sh). //tools/bazel:dolt selects the repository for
@@ -77,17 +296,100 @@ dolt_release(
     platform = "darwin-arm64",
 )
 
-# The tracked release formula, for //scripts:scripts_test. .beads/ also holds
-# live bd data and is in .bazelignore, so no main-repo target can declare the
-# formula; this local repository exposes only .beads/formulas.
+# The migration corpus's external Dolt runtime (scripts/migration-test/lib/
+# versions.sh DOLT_TEST_RUNTIME_VERSION): an older release than DOLT_VERSION,
+# deliberately, as the historical server-Dolt fixtures' host.
+dolt_release(
+    name = "dolt_test_runtime_linux_amd64",
+    platform = "linux-amd64",
+    version = "2.1.8",
+)
+
+# The tracked release formula, for //scripts:shell_scripts_test and the
+# whole-checkout guard //scripts/repochecks:go_install_guidance_test. .beads/
+# also holds live bd data and is in .bazelignore, so no main-repo target can
+# declare the formula; this local repository exposes only .beads/formulas.
 new_local_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
 
 new_local_repository(
     name = "beads_formulas",
     build_file_content = """exports_files(
     glob(["*.formula.toml"]),
-    visibility = ["@@//scripts:__pkg__"],
+    visibility = [
+        "@@//scripts:__pkg__",
+        "@@//scripts/repochecks:__pkg__",
+    ],
 )
 """,
     path = ".beads/formulas",
+)
+
+# Historical bd releases for the regression, migration and cross-version
+# suites (tools/bazel/bd_releases.bzl): one repository per release in the
+# release catalog that records a linux_amd64 asset digest, behind the
+# @bd_releases hub. Adding a release is a catalog change only.
+bd_releases = use_extension("//tools/bazel:bd_releases.bzl", "bd_releases")
+bd_releases.catalog(path = "//scripts:migration-test/release-catalog.json")
+use_repo(bd_releases, "bd_releases")
+
+# The source-tag SQLite release (v0.9.1) has no release asset: the migration
+# corpus builds it from its module source with the Go release it was
+# qualified on, offline (//tests/migration:bd_source_tag). The proxy files
+# are pinned in tests/migration/source_tag_modules.json, the toolchain here.
+go_module_proxy = use_repo_rule("//tools/bazel:go_module_proxy.bzl", "go_module_proxy")
+
+go_module_proxy(
+    name = "bd_source_tag_goproxy",
+    lock = "//tests/migration:source_tag_modules.json",
+)
+
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "go_1_25_0_linux_amd64",
+    build_file_content = """exports_files(
+    ["go/bin/go"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "sdk",
+    srcs = glob(["go/**"]),
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "2852af0cb20a13139b3448992e69b868e50ed0f8a1e5940ee1de9e19a123b613",
+    urls = ["https://go.dev/dl/go1.25.0.linux-amd64.tar.gz"],
+)
+
+# The timeout implementations //tests/hook_timeout_backends runs the tracked
+# git hook shims against (formerly checks.nix's hook-timeout-backends, which
+# took them from nixpkgs): static x86_64 builds, so the test needs nothing
+# from the executor beyond a shell, perl and GNU coreutils.
+http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+
+http_file(
+    name = "busybox_static",
+    executable = True,
+    sha256 = "6e123e7f3202a8c1e9b1f94d8941580a25135382b99e8d3e34fb858bba311348",
+    urls = ["https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox"],
+)
+
+http_file(
+    name = "toybox_static",
+    executable = True,
+    sha256 = "38e03ffd8aead8ca26833e1e5c90a9ea7250f3719c29d779ebff7aa55c9d2dac",
+    urls = ["https://landley.net/toybox/downloads/binaries/0.8.15/toybox-x86_64"],
+)
+
+http_archive(
+    name = "uutils_coreutils",
+    build_file_content = """exports_files(
+    ["coreutils"],
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "9b555b01457279bcc3e46753f0ef324fd3d02a0535111200a4632d1297263b54",
+    strip_prefix = "coreutils-0.12.0-x86_64-unknown-linux-musl",
+    urls = ["https://github.com/uutils/coreutils/releases/download/0.12.0/coreutils-0.12.0-x86_64-unknown-linux-musl.tar.gz"],
 )

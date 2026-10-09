@@ -84,7 +84,7 @@ func TestApplyBatchForwardsEveryLevelOfTheDocumentedBody(t *testing.T) {
 				"expected_version":"42"}},
 			{"kind":"dep_add","dep_add":{
 				"source":{"key":"root"},"target":{"id":"bd-7"},"type":"waits-for",
-				"metadata":{"gate":"any-children"}}}
+				"metadata":{"gate":"any-children"},"has_spawner":true,"thread_id":"th-plan"}}
 		]
 	}`)
 	if resp.StatusCode != http.StatusOK {
@@ -143,6 +143,11 @@ func TestApplyBatchForwardsEveryLevelOfTheDocumentedBody(t *testing.T) {
 	}
 	if create.Issue.Priority != 1 {
 		t.Errorf("create.priority = %d, want 1", create.Issue.Priority)
+	}
+	// created_by is stamped from the trimmed actor, createIssue's rule: the
+	// role copies the issue's and never stamps one itself.
+	if create.Issue.CreatedBy != "alice" {
+		t.Errorf("create.created_by = %q, want the actor %q", create.Issue.CreatedBy, "alice")
 	}
 	if create.Issue.EstimatedMinutes == nil || *create.Issue.EstimatedMinutes != 30 {
 		t.Errorf("create.estimated_minutes = %v, want 30", create.Issue.EstimatedMinutes)
@@ -234,6 +239,11 @@ func TestApplyBatchForwardsEveryLevelOfTheDocumentedBody(t *testing.T) {
 	// handler that parsed it would be a second definition of what a gate is.
 	if depAdd.Metadata != `{"gate":"any-children"}` {
 		t.Errorf("dep_add.metadata = %q, want the caller's bytes unaltered", depAdd.Metadata)
+	}
+	// The lineage members reach the role as sent: issues.batchApply.depAddLineage
+	// gates whether a CLIENT sends them, and this server always reads them.
+	if !depAdd.HasSpawner || depAdd.ThreadID != "th-plan" {
+		t.Errorf("dep_add.has_spawner/thread_id = %v/%q, want true/%q", depAdd.HasSpawner, depAdd.ThreadID, "th-plan")
 	}
 }
 
@@ -512,6 +522,29 @@ func TestApplyBatchRejectsTheShapesTheDocumentRefuses(t *testing.T) {
 				t.Errorf("the role was called %d times for a refused request, want 0", len(applier.requests()))
 			}
 		})
+	}
+}
+
+// TestApplyBatchRefusesAnEmptyThreadID pins the document's minLength: 1 on a
+// dep_add item's thread_id. An absent member already names no thread, so an
+// empty one is refused by name rather than read as a second spelling of it.
+// The client never sends one (setItemString omits an empty value), so only a
+// direct-wire caller reaches this.
+func TestApplyBatchRefusesAnEmptyThreadID(t *testing.T) {
+	applier := &roleBatchApplier{}
+	ts := newApplyBatchServer(t, applier)
+
+	resp := ts.claim(t, batchApplyPath, `{"actor":"alice","items":[{"kind":"dep_add","dep_add":{
+		"source":{"id":"a"},"target":{"id":"b"},"type":"blocks","thread_id":""}}]}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
+	}
+	body := decodeBody(t, resp)
+	if body["param"] != "items[0].dep_add.thread_id" || body["reason"] != "invalid_value" {
+		t.Errorf("param/reason = %v/%v, want items[0].dep_add.thread_id/invalid_value", body["param"], body["reason"])
+	}
+	if len(applier.requests()) != 0 {
+		t.Errorf("the role was called for a refused request; nothing may reach it")
 	}
 }
 

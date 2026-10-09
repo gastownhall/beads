@@ -23,54 +23,16 @@ concurrency:
 env:
   BD_DISABLE_METRICS: "1"
   BD_DISABLE_EVENT_FLUSH: "1"
-  # D2: "true" retires a PR Risk legacy tier on same-repo, non-Dependabot
-  # pull_requests and on merge groups (merge queue); pr.yml's gated Bazel lane(s) for it are then the tier's
-  # only pre-merge run, and pr.yml's gate goes red unless they ran remotely
-  # and passed. Committed, not repo variables, so a re-run can never change
-  # them; each must equal pr.yml's / pr-risk.yml's copy
-  # (scripts/pr_risk_bazel_coverage_test.go). Revert: commit "false" in both
-  # workflows (in-flight PRs pick it up on their next push or merge of main).
-  # Step 1: the embedded-Dolt test jobs (Bazel `embedded Dolt tier`).
-  BAZEL_RETIRES_LEGACY_EMBEDDED: "true"
-  # Step 2: the proxied-server and server-Dolt storage test jobs (Bazel
-  # `proxied-server tier` and `server-Dolt storage tier`).
-  BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS: "true"
-  # Step 3: pr.yml's own legacy jobs whose Bazel lanes run in the same pr.yml
-  # run: PR Core, build-artifacts, the pure-Go/js-wasm check, domain+uow and
-  # contract corpus (Bazel `test`, `pure-Go and js/wasm`, `dolt-server
-  # lane`). pr-risk.yml retires nothing for it; its copy only keeps the
-  # shared bazel-coverage job identical.
-  BAZEL_RETIRES_LEGACY_PR_LANES: "true"
-  # F4 side-by-side rollout: "false" keeps the native windows-latest jobs
-  # (test-windows-liveness, worktree-remove-windows) as the required pair and
-  # their Linux-cross-built "-prebuilt" twins (test-windows-liveness-prebuilt,
-  # worktree-remove-windows-prebuilt) advisory-only. Both pairs run and report
-  # on every PR regardless of this flag; flipping it to "true" swaps which
-  # pair ci-gate enforces (the other pair moves to CI_GATE_SKIPPED_OK) without
-  # touching ci-gate.needs or the env map below -- see the "Evaluate CI gate"
-  # step's run script. Committed, not a repo variable, for the same reason as
-  # the BAZEL_RETIRES_LEGACY_* flags above: a re-run can never change it.
-  WINDOWS_PREBUILT_REQUIRED: "true"
-  # Fork and Dependabot PRs: "true" covers them like same-repo PRs (the
-  # flags above then retire their legacy tiers too): rbe-west's mint
-  # (rbe-fork) gives their Bazel lanes remote execution, instance oss-fork
-  # or, for allowlisted authors, oss, and a run the mint does not serve
-  # (mode cache) is red, never a silent fall back to the legacy tiers.
-  # "false": they keep the legacy tiers, and the Bazel lanes run remotely
-  # beside them whenever rbe-fork is open (bazel.yml modes
-  # fork-ro/fork-rw), else locally with the read-only cache as before.
-  # "true" since ga-96smfk.15: after the canary every fork and Dependabot
-  # run took fork-ro/fork-rw (none fell to cache). Rollback if the mint
-  # becomes unreliable: commit "false" in both workflows.
-  BAZEL_COVERS_FORKS: "true"
+  # step's run script. Committed, not a repo variable, so a re-run can never
+  # change it.
   # bazel.yml's bazel-cmd-dolt lane (the cmd/bd Dolt-server tier: the
   # Dolt-gated cmd/bd tests no other lane runs) is advisory while this is
   # "false": it runs and reports in the bazel call (continue-on-error, so a
   # failure never turns the call's aggregate red), and ci-gate ignores its
   # BAZEL_CMD_DOLT result. "true" adds BAZEL_CMD_DOLT to CI_GATE_REQUIRED in
   # the "Evaluate CI gate" step's run script; bazel-gate.sh still accepts
-  # its skip in modes skip and local. Committed, not a repo variable, for
-  # the same reason as the flags above. The `bazel` job's cmd-dolt-required
+  # its skip in modes skip and local. Committed, not a repo variable, so a
+  # re-run can never change it. The `bazel` job's cmd-dolt-required
   # input must equal it (a `with:` cannot read env; policy-tested): "true"
   # also drops //cmd/bd:bd_test from bazel-integration, because the required
   # lane runs the same integration-build bd_test without the dolt skip, so
@@ -80,99 +42,29 @@ env:
 
 jobs:
 
-  # D2 step 3: stands down where bazel-coverage says pr_lanes (same-repo,
-  # non-Dependabot PRs and merge groups while BAZEL_RETIRES_LEGACY_PR_LANES
-  # is "true"): its
-  # consumers then stand down too. F3: the package gates (package-mcp,
-  # package-npm) are no longer among those consumers - they moved into
-  # bazel.yml and build their own bd (Bazel-built on same-repo PRs, `go
-  # build` otherwise), needing only the call's rbe job.
-  build-artifacts:
-    name: Build Artifacts
-    runs-on: ubuntu-latest
-    needs: bazel-coverage
-    if: needs.bazel-coverage.outputs.pr_lanes != 'true'
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Restore Go module cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      - name: Restore non-race Go build cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/go-cache/non-race
-          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
-          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
-
-      - name: Build reusable Linux artifacts
-        env:
-          GOCACHE: ${{ runner.temp }}/go-cache/non-race
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts
-          source ./.buildflags
-          go_version="$(go version)"
-          commit="$(git rev-parse HEAD)"
-          go build -tags gms_pure_go -o artifacts/bd-linux-gms-pure ./cmd/bd
-          chmod +x artifacts/bd-linux-gms-pure
-          (
-            cd artifacts
-            sha256sum bd-linux-gms-pure > SHA256SUMS
-          )
-          {
-            echo "commit=${commit}"
-            echo "go_version=${go_version}"
-            echo "build_tags=${BEADS_BUILD_TAGS}"
-            echo "artifact=bd-linux-gms-pure"
-          } > artifacts/build-manifest.txt
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: ci-build-artifacts
-          path: artifacts/
-          retention-days: 1
-          if-no-files-found: error
-
-  # F7a: fold of five independent, no-cache pr.yml checks that previously ran
-  # as five separate ubuntu-latest jobs (check-build-tags,
-  # check-version-consistency, check-migration-hygiene,
-  # check-no-beads-changes, fmt-check) into one Blacksmith job with five
-  # steps. Each step gets its own id and `if: ${{ !cancelled() }}` so one
-  # check's failure does not block the others from running, and the job
-  # exposes each step's outcome as a job output so ci-gate can still red the
-  # exact same CI_GATE_REQUIRED token it did before the fold -
-  # TestPRCIGateFastChecksTokens pins the mapping. FAST_CHECKS (the job's own
-  # `result`) is an added backstop token: if the whole job is lost (e.g. a
-  # cancelled runner) before any step sets its output, the per-check outputs
-  # read empty and the CI_GATE_REQUIRED fallback below treats that as
-  # "skipped" - which is NOT skipped_ok, so the gate still reds, but
-  # FAST_CHECKS gives ci-gate.sh one clear error line ("FAST_CHECKS=cancelled")
-  # instead of five confusing ones.
+  # The checks that need the PR's base commit, so no hermetic Bazel target
+  # can hold them: check-migration-hygiene.sh's delta half (C: shipped
+  # migrations are frozen, D: ignored-plane twins, E: no prepared DML in new
+  # migrations, all over `git diff <merge-base>`) and the .beads/issues.jsonl
+  # guard. Everything else this job ran is a Bazel test in bazel.yml's `test`
+  # lane (ga-96smfk.20): //scripts/repochecks:build_tags_test,
+  # :go_install_guidance_test, :winget_portable_alias_test,
+  # :migration_hygiene_test (checks A and B) and :fmt_test, and
+  # //internal/versioncheck:versioncheck_test for check-versions.sh. No Go:
+  # both steps are bash and git.
+  #
+  # Each step has its own id and `if: ${{ !cancelled() }}`, so one failure
+  # does not hide the other, and its outcome is a job output that ci-gate
+  # requires (TestPRCIGateFastChecksTokens). FAST_CHECKS (the job's own
+  # `result`) is the backstop token for a job lost before any step set its
+  # output.
   fast-checks:
-    name: Fast checks (build tags, versions, migrations, beads diff, fmt)
+    name: Fast checks (frozen migrations, .beads diff)
     runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 10
     outputs:
-      build-tags: ${{ steps.build-tags.outcome }}
-      version-consistency: ${{ steps.version-consistency.outcome }}
       migration-hygiene: ${{ steps.migration-hygiene.outcome }}
       no-beads-changes: ${{ steps.no-beads-changes.outcome }}
-      fmt: ${{ steps.fmt.outcome }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
@@ -180,40 +72,18 @@ jobs:
           # the base branch; a shallow checkout starves both.
           fetch-depth: 0
 
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      # Fast shell/Make guard for direct source-time build-tag declarations.
-      # Workflow `run` steps are checked structurally in the required policy
-      # wrapper.
-      - name: Check build-tag policy
-        id: build-tags
-        if: ${{ !cancelled() }}
-        run: |
-          ./scripts/check-build-tags.sh
-          ./scripts/check-go-install-guidance.sh
-          ./scripts/check-winget-portable-alias.sh
-
-      # Fast check to ensure all version files are in sync
-      - name: Check all versions match
-        id: version-consistency
-        if: ${{ !cancelled() }}
-        run: ./scripts/check-versions.sh
-
-      # Migration hygiene: duplicate version numbers, nondeterministic SQL
-      # (UUID()/NOW()/RAND(), the #4259 root-cause class), and edits to
-      # migration files that already exist on the base branch (shipped
-      # migrations are frozen; fix forward with a new version). Fails at PR
-      # time, before any test even compiles. Details:
+      # Migration hygiene, delta half: edits to migration files that already
+      # exist on the base branch (shipped migrations are frozen; fix forward
+      # with a new version), and the twin and prepared-DML rules for new
+      # migrations. Checks A and B (duplicate versions, nondeterministic SQL)
+      # read only the tree and run in Bazel. Details:
       # scripts/check-migration-hygiene.sh.
       - name: Run migration hygiene checks
         id: migration-hygiene
         if: ${{ !cancelled() }}
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          MIGRATION_HYGIENE_SCOPE: delta
         run: ./scripts/check-migration-hygiene.sh
 
       # Fast check to catch accidental .beads/issues.jsonl changes from
@@ -247,161 +117,6 @@ jobs:
           fi
           echo "No .beads/issues.jsonl changes detected"
 
-      - name: Check gofmt
-        id: fmt
-        if: ${{ !cancelled() }}
-        run: make fmt-check
-
-  # Lock in two CGO-disabled portability boundaries. cmd/bd carries a mix of
-  # cgo-only test helpers (embedded Dolt, sql.DB) and pure-Go tests; compiling
-  # and running its pure-Go subset prevents test contamination (mybd-ycx /
-  # GH#3683 follow-up). internal/hooks also declares a js/wasm boundary where
-  # process execution must fail explicitly, so this required leaf job compiles
-  # the complete package test binary and executes that exact contract under
-  # Node rather than allowing a missing platform implementation to recur.
-  #
-  # D2 step 3: stands down where bazel-coverage says pr_lanes; Bazel's
-  # `pure-Go and js/wasm` lane (bazel-pure) runs the same boundaries, and
-  # check-release-target-cross-compilation still `go build`s ./... with
-  # CGO_ENABLED=0 on every PR.
-  check-cmd-bd-puregeo-tests:
-    name: Check pure-Go and js/wasm boundaries (CGO_ENABLED=0)
-    runs-on: ubuntu-latest
-    needs: bazel-coverage
-    if: needs.bazel-coverage.outputs.pr_lanes != 'true'
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
-        with:
-          node-version: '24'
-
-      - name: Run js/wasm hook boundary
-        env:
-          CGO_ENABLED: "0"
-          GOARCH: wasm
-          GOOS: js
-        run: |
-          set -euo pipefail
-
-          # This required lane owns the exact js/wasm refusal contract. If the
-          # wasm test surface grows, widen this selector and its count guard
-          # together rather than assuming compilation executes new tests.
-          test_status=0
-          test_output="$(go test -tags gms_pure_go -count=1 -timeout=2m \
-            -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" \
-            -run '^TestRunHookReportsUnsupportedExecution$' \
-            -v ./internal/hooks 2>&1)" || test_status=$?
-          printf '%s\n' "$test_output"
-          (( test_status == 0 )) || exit "$test_status"
-
-          run_count=0
-          pass_count=0
-          nonpass_count=0
-          pass_pattern='^--- PASS: TestRunHookReportsUnsupportedExecution \([0-9.]+s\)$'
-          nonpass_pattern='^[[:space:]]*--- (FAIL|SKIP): '
-          while IFS= read -r line; do
-            if [[ "$line" == "=== RUN   TestRunHookReportsUnsupportedExecution" ]]; then
-              ((run_count += 1))
-            fi
-            if [[ "$line" =~ $pass_pattern ]]; then
-              ((pass_count += 1))
-            fi
-            if [[ "$line" =~ $nonpass_pattern ]]; then
-              ((nonpass_count += 1))
-            fi
-          done <<< "$test_output"
-          if (( run_count != 1 || pass_count != 1 || nonpass_count != 0 )); then
-            printf 'expected one exact js/wasm hook test run and pass with no failures or skips; got runs=%s passes=%s nonpasses=%s\n' \
-              "$run_count" "$pass_count" "$nonpass_count" >&2
-            exit 1
-          fi
-
-      - name: Build cmd/bd (CGO_ENABLED=0, gms_pure_go)
-        env:
-          CGO_ENABLED: "0"
-        run: go build -tags gms_pure_go -o /tmp/bd-puregeo ./cmd/bd
-
-      - name: Compile pure-Go test binaries (CGO_ENABLED=0, gms_pure_go)
-        env:
-          CGO_ENABLED: "0"
-        run: |
-          go test -tags gms_pure_go -c -o /tmp/bd-cmd-puregeo-test ./cmd/bd
-          go test -tags gms_pure_go -c -o /tmp/bd-embeddeddolt-puregeo-test ./internal/storage/embeddeddolt
-          go test -tags gms_pure_go -c -o /tmp/bd-tracker-puregeo-test ./internal/tracker
-
-      - name: Run pure-Go cmd/bd test subset (CGO_ENABLED=0)
-        env:
-          CGO_ENABLED: "0"
-        # Restrict to tests that exercise pure-Go code paths. Tests that
-        # need a Dolt store skip themselves at runtime when no test server
-        # is available; the goal here is to catch compile-time contamination,
-        # not run the full suite.
-        run: |
-          go test -tags gms_pure_go -count=1 -short -run '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir|NocgoFactoriesHonorSharedServer|NocgoNewDoltStoreFromConfig_ErrorSuggestsCorrectFlag|NocgoNewReadOnlyStoreFromConfig_ErrorSuggestsCorrectFlag)' ./cmd/bd
-
-  # Compile every shipped release target on every PR, so a platform-gating
-  # mistake is caught here instead of at tag time (#5662).
-  #
-  # Coverage boundary, recorded so the green is not over-read: every leg below
-  # builds CGO_ENABLED=0, but .goreleaser.yml builds bd-linux-amd64,
-  # bd-linux-arm64 and bd-windows-amd64 with CGO_ENABLED=1, and the darwin pair
-  # is built natively at CGO_ENABLED=1 by release.yml's goreleaser-macos job.
-  # Five of these eight legs are therefore a weaker proxy than the binary they
-  # stand for: the cgo half of the tree (beads_cgo.go ->
-  # internal/storage/embeddeddolt) is never compiled here, so a break confined
-  # to it still passes this check. Only android/arm64, windows/arm64 and
-  # freebsd/amd64 replicate their release configuration exactly.
-  #
-  # The build scope is deliberately ./... and not the ./cmd/bd that every
-  # .goreleaser.yml build id declares as main:. Compiling the whole tree per
-  # platform is intentional extra coverage, not an oversight.
-  #
-  # F7a: folded from 8 per-target jobs into 2 per-group jobs. The target list
-  # moved out of this matrix and into scripts/ci/release-targets.txt, which
-  # scripts/ci/check-release-cross-compile.sh reads and
-  # TestReleaseTargetCrossCompilationMatrixMatchesGoreleaser pins against
-  # .goreleaser.yml, so the manifest (not this YAML) is now the single
-  # source of truth for the target set. Moved to Blacksmith for same-repo
-  # PRs/merge_group: this job restores no GitHub-saved build cache (only a
-  # best-effort module-cache restore, whose misses are cheap network
-  # fetches, not lost compute). Runner choice must match the
-  # TestSameRepoBlacksmithRunners pin.
-  check-release-target-cross-compilation:
-    name: Check release target cross-compilation (${{ matrix.group }})
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        group: [unix, desktop]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Restore Go module cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      - name: Build complete release target tree for group ${{ matrix.group }}
-        run: ./scripts/ci/check-release-cross-compile.sh ${{ matrix.group }}
-
   # The lingering-handle liveness regression test is //go:build windows: the
   # Ubuntu job above selects it by name but compiles it out, and main.yml's
   # Windows job runs only on pushes to main (build/smoke, no go test). Run
@@ -409,26 +124,18 @@ jobs:
   # regressions actually execute at PR time. The init credential shell
   # fixtures are a separate concern and run natively in
   # pr-preflight-platforms, not here.
-  # F7b: same-repo Blacksmith (blacksmith-4vcpu-windows-2025) for same-repo
-  # PRs/merge_group, falling back to windows-latest for forks/Dependabot --
-  # same pattern as the Linux same-repo jobs above, with the Windows-2025
-  # label instead (public beta; GitHub's windows-2025 image minus the full
-  # Visual Studio IDE/EdgeDriver/WinAppDriver, VS Build Tools 2022 present,
-  # no Linux Docker).
-  #
-  # RISK (unverified from this sandbox, flagged in the F7b report): the first
-  # step below builds and runs ./cmd/bd with CGO_ENABLED=1 (embedded Dolt).
-  # windows-latest's cgo build works today via the toolchain GitHub documents
-  # for that image; Blacksmith's windows-2025 docs only confirm "VS Build
-  # Tools 2022" is present, not which cgo toolchain (MSVC/clang-cl vs an
-  # installed mingw-w64) backs `go build` with CGO_ENABLED=1 there. The
-  # fork-PR path (windows-latest) is an unaffected, always-on canary for this
-  # job; if the same-repo leg fails here specifically with a cgo/link error,
-  # that is the toolchain gap to roll back on (revert this runs-on line to
-  # the literal `windows-latest`).
+  # Blacksmith Windows (blacksmith-4vcpu-windows-2025: GitHub's windows-2025
+  # image minus the full Visual Studio IDE/EdgeDriver/WinAppDriver, VS Build
+  # Tools 2022 present, no Linux Docker) for every PR and merge group, forks
+  # and Dependabot included (ga-96smfk.22): Windows and macOS jobs run on
+  # Blacksmith, everything Linux under Bazel on rbe-west. The first step
+  # builds ./cmd/bd with CGO_ENABLED=1 (embedded Dolt); the toolchain
+  # diagnostic step below prints which cgo toolchain backs it. Since
+  # ga-96smfk.22 this job (not a cross-compiled "-prebuilt" twin) is the
+  # required run of these tests.
   test-windows-liveness:
     name: Test (Windows) cmd/bd liveness regression
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest' }}
+    runs-on: ${{ 'blacksmith-4vcpu-windows-2025' }}
     # F7b review fix (S6): raised from 15 to 20, matching open PR #7143's own
     # measurement on this exact job (retained runs take about 8m; one run's
     # own step timing showed 451s total with a 403s compile step) and
@@ -540,12 +247,12 @@ jobs:
   # on the second step only ensures it still runs after the first fails,
   # giving both packages' results in one log instead of stopping at the
   # first failure. No aggregator step is needed.
-  # F7b: same-repo Blacksmith (blacksmith-2vcpu-windows-2025); both steps
+  # Blacksmith Windows (blacksmith-2vcpu-windows-2025) for every PR; both steps
   # build with CGO_ENABLED=0 (or no cgo at all for doltversion), so this job
   # carries none of test-windows-liveness's cgo-toolchain risk.
   test-windows-small:
     name: Test (Windows) small packages (doltversion, dbproxy server)
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-windows-2025' || 'windows-latest' }}
+    runs-on: ${{ 'blacksmith-2vcpu-windows-2025' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -581,13 +288,12 @@ jobs:
   # Destructive worktree removal depends on native Windows path identity.
   # This focused process suite requires NTFS per-directory case sensitivity
   # and fails (rather than skips) when the runner cannot provide it.
-  # F7b: same-repo Blacksmith (blacksmith-4vcpu-windows-2025). CGO_ENABLED=0
-  # below, so no cgo-toolchain risk; this leg's non-race GOCACHE restore-keys
-  # prefix now gets a hit from main.yml's test-windows job, whose `venue`
-  # matrix extension (F7b) saves that same key on this exact runner
-  # selection (restore-keys falls back to the most recent prefix match
-  # regardless of the exact sha, same as build-artifacts already does for
-  # the Linux preflight/doc-freshness legs).
+  # Blacksmith Windows (blacksmith-4vcpu-windows-2025) for every PR.
+  # CGO_ENABLED=0 below, so no cgo-toolchain risk; its non-race GOCACHE
+  # restore-keys prefix gets a hit from main.yml's test-windows job, which
+  # saves that key on this exact runner selection (restore-keys falls back
+  # to the most recent prefix match regardless of the exact sha). Since
+  # ga-96smfk.22 this job is the required run of these tests.
   #
   # RISK (F7b review: not flagged in the original implementation --
   # cmd/bd/worktree_remove_git_windows_test.go:233 shells out to
@@ -598,12 +304,11 @@ jobs:
   # does not treat an unsupported fsutil call as a skip condition). The
   # diagnostic step below surfaces that gap in this job's own log instead of
   # a bare test failure deep in the suite; if it reports the feature missing,
-  # roll back this job's runs-on to the literal `windows-latest` (same
-  # rollback as test-windows-liveness's cgo risk above) until Blacksmith
-  # confirms/enables it.
+  # roll back this job's runs-on to the literal `windows-latest` until
+  # Blacksmith confirms/enables it.
   worktree-remove-windows:
     name: Worktree remove boundary (Windows)
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest' }}
+    runs-on: ${{ 'blacksmith-4vcpu-windows-2025' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -650,204 +355,15 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test -tags gms_pure_go -count=1 -run '^TestWorktreeRemove' ./cmd/bd
 
-  # F4 side-by-side rollout (advisory phase): cross-compiles the Windows test
-  # binaries this file's native Windows jobs need, from a committed manifest
-  # (scripts/ci/windows-test-binaries.txt), on a Linux runner via mingw-w64 --
-  # the same toolchain release.yml's goreleaser job uses for the shipped
-  # bd-windows-amd64 binary (CC=x86_64-w64-mingw32-gcc; see .goreleaser.yml).
-  # The "-prebuilt" twin jobs below download this artifact and run it
-  # natively on windows-latest instead of compiling there, so the CGO build
-  # that otherwise runs once per Windows job runs here once instead.
-  #
-  # Deliberately advisory only: the native `test-windows-liveness` and
-  # `worktree-remove-windows` jobs above are untouched and still the only
-  # required pair while WINDOWS_PREBUILT_REQUIRED (top of this file) is
-  # "false". ci-gate does wait on this job's two twins below (they are in its
-  # `needs`), but neither twin's result is in CI_GATE_REQUIRED yet -- the
-  # side-by-side phase runs both paths on every PR so a policy test
-  # (TestWindowsTestBinariesSelectSameTestsAsNativeJobs, in
-  # scripts/windows_test_binaries_manifest_test.go) can confirm they select
-  # the same tests before anyone flips WINDOWS_PREBUILT_REQUIRED to "true".
-  #
-  # Manifest is intentionally partial in this phase: it covers only the two
-  # cmd/bd-backed jobs twinned below. Forks and Dependabot PRs get no
-  # secrets here, same as every job in this file -- cross-compiling and
-  # uploading an artifact needs none.
-  windows-test-binaries:
-    name: Build Windows test binaries (cross-compile)
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Restore Go module cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      - name: Verify Go module checksums
-        run: go mod verify
-
-      - name: Install mingw cross-compiler
-        timeout-minutes: 12
-        run: |
-          updated=""
-          for attempt in 1 2 3; do
-            if sudo timeout 120 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update; then
-              updated=yes
-              break
-            fi
-            echo "::warning::apt-get update attempt $attempt failed or timed out"
-            if [ "$attempt" -lt 3 ]; then sleep 10; fi
-          done
-          if [ -z "$updated" ]; then
-            echo "::warning::apt-get update failed after 3 attempts; proceeding with cached index"
-          fi
-          sudo timeout 300 apt-get install -y gcc-mingw-w64-x86-64
-
-      - name: Restore Go build cache (Windows cross-compile)
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/go-cache/xcompile-windows-amd64
-          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-xcompile-windows-amd64-${{ github.sha }}
-          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-xcompile-windows-amd64-
-
-      - name: Build Windows test binaries
-        env:
-          GOCACHE: ${{ runner.temp }}/go-cache/xcompile-windows-amd64
-        run: bash scripts/ci/build-windows-test-binaries.sh "$RUNNER_TEMP/win-bin"
-
-      - name: Upload Windows test binaries
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: windows-test-binaries
-          path: ${{ runner.temp }}/win-bin
-          retention-days: 1
-          compression-level: 1
-          if-no-files-found: error
-
-  # Advisory twin of test-windows-liveness: runs the identical test selection,
-  # flags, and env on windows-latest, but against the binary
-  # windows-test-binaries cross-compiled instead of compiling here. Step
-  # names, -run patterns, -count, and the PASS/FAIL parsing block are kept
-  # byte-for-byte equivalent to the native job on purpose --
-  # TestWindowsTestBinariesSelectSameTestsAsNativeJobs checks the -run
-  # literals stay in sync.
-  # F7b: same-repo Blacksmith (blacksmith-2vcpu-windows-2025). This leg only
-  # runs a prebuilt binary (cross-compiled on Linux by windows-test-binaries
-  # via mingw-w64) rather than compiling with cgo on the Windows runner
-  # itself, so it carries none of test-windows-liveness's cgo-toolchain risk.
-  test-windows-liveness-prebuilt:
-    name: Test (Windows, prebuilt) cmd/bd liveness regression
-    needs: windows-test-binaries
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-windows-2025' || 'windows-latest' }}
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Download Windows test binaries
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: windows-test-binaries
-          path: ${{ runner.temp }}/win-bin
-
-      - name: Verify downloaded binaries
-        shell: bash
-        run: |
-          cd "$RUNNER_TEMP/win-bin"
-          sha256sum -c SHA256SUMS
-
-      # F7b review fix (S9): these binaries are cgo-linked on Linux via
-      # mingw-w64 (windows-test-binaries), not compiled on this runner, so
-      # the risk here is specifically whether a cross-compiled binary loads
-      # and runs at all on Blacksmith's windows-2025 image (missing runtime
-      # DLLs, etc.), not the cgo-toolchain risk test-windows-liveness
-      # carries. `-run '^$'` loads/links the binary and matches no tests, so
-      # a load failure surfaces here instead of inside the real test step.
-      - name: Check prebuilt Windows binary loads
-        shell: bash
-        run: bash scripts/ci/run-go-test-binary.sh "$RUNNER_TEMP/win-bin/cmd-bd-cgo.test.exe" ./cmd/bd -run '^$' -count=1
-
-      - name: Run native Windows global Prime override (prebuilt)
-        shell: bash
-        run: |
-          export BEADS_TEST_PREBUILT_TEST_BINARY="$RUNNER_TEMP/win-bin/cmd-bd-cgo.test.exe"
-          export BEADS_TEST_BD_BINARY="$RUNNER_TEMP/win-bin/bd.exe"
-          go_path=$(command -v go)
-          [[ "$("$go_path" env GOHOSTOS GOOS)" == $'windows\nwindows' ]]
-          test_status=0
-          test_output=$(./scripts/test.sh -v -timeout 5m -run '^TestPrimeBinaryPortfolio$/^TestPrime_HookJSON_GlobalPrimeOverride$' -count=1 ./cmd/bd) || test_status=$?
-          printf '%s\n' "$test_output"
-          ((test_status == 0))
-          pass_pattern='^[[:space:]]*--- PASS: TestPrimeBinaryPortfolio/TestPrime_HookJSON_GlobalPrimeOverride \('
-          nonpass_pattern='^[[:space:]]*--- (FAIL|SKIP): '
-          pass_count=0
-          while IFS= read -r line; do
-            if [[ "$line" =~ $pass_pattern ]]; then
-              ((pass_count += 1))
-            fi
-            if [[ "$line" =~ $nonpass_pattern ]]; then
-              exit 1
-            fi
-          done <<<"$test_output"
-          ((pass_count == 1))
-
-      - name: Run Windows liveness regression test (prebuilt)
-        shell: bash
-        run: bash scripts/ci/run-go-test-binary.sh "$RUNNER_TEMP/win-bin/cmd-bd-cgo.test.exe" ./cmd/bd -run '^TestIsServerProbablyRunning' -count=1
-
-  # Advisory twin of worktree-remove-windows: same package, -run pattern, and
-  # CGO_ENABLED=0 selection as the native job, but against the cgo=0 binary
-  # windows-test-binaries cross-compiled instead of compiling here.
-  # F7b: same-repo Blacksmith (blacksmith-2vcpu-windows-2025); same prebuilt-
-  # binary rationale as test-windows-liveness-prebuilt above.
-  worktree-remove-windows-prebuilt:
-    name: Worktree remove boundary (Windows, prebuilt)
-    needs: windows-test-binaries
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-windows-2025' || 'windows-latest' }}
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Download Windows test binaries
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: windows-test-binaries
-          path: ${{ runner.temp }}/win-bin
-
-      - name: Verify downloaded binaries
-        shell: bash
-        run: |
-          cd "$RUNNER_TEMP/win-bin"
-          sha256sum -c SHA256SUMS
-
-      # F7b review fix (S9): see test-windows-liveness-prebuilt's identical
-      # step for the full rationale.
-      - name: Check prebuilt Windows binary loads
-        shell: bash
-        run: bash scripts/ci/run-go-test-binary.sh "$RUNNER_TEMP/win-bin/cmd-bd-nocgo.test.exe" ./cmd/bd -run '^$' -count=1
-
-      - name: Run native Windows worktree removal boundary tests (prebuilt)
-        shell: bash
-        run: bash scripts/ci/run-go-test-binary.sh "$RUNNER_TEMP/win-bin/cmd-bd-nocgo.test.exe" ./cmd/bd -run '^TestWorktreeRemove' -count=1
-
   # Check documentation references match actual CLI flags
+  #
+  # Stays a job: the generated CLI docs describe the release pinned in
+  # docs/cli-docs.pin, and check-doc-flags.sh validates them against bd built
+  # from that tag (scripts/resolve-docs-bd.sh: git fetch the tag, pure-Go go
+  # build), attributing drift against the merge-base. Neither input can enter
+  # a Bazel action key: releases publish no pure-Go linux binary to pin, and
+  # the attribution needs the PR's base. check-doc-freshness.sh, which this
+  # job also ran, is //scripts/repochecks:doc_freshness_test.
   #
   # F7a: moved to Blacksmith for same-repo PRs/merge_group. This job's module
   # cache restore step was already absent before the fold (every run cold-
@@ -881,9 +397,7 @@ jobs:
           # would eject every queued PR. Diff against the queue's base
           # commit instead (empty on pull_request: origin/$GITHUB_BASE_REF).
           BD_DOCS_DIFF_BASE: ${{ github.event.merge_group.base_sha }}
-        run: |
-          ./scripts/check-doc-flags.sh ./bd
-          ./scripts/check-doc-freshness.sh
+        run: ./scripts/check-doc-flags.sh ./bd
 
       # When the drift check fails, it writes the exact regenerated-docs fix
       # (produced with CI's canonical build) so contributors can apply it with
@@ -898,46 +412,34 @@ jobs:
           path: ${{ runner.temp }}/cli-docs-freshness.patch
           if-no-files-found: ignore
 
-  # F7b: same-repo Blacksmith for the Linux/Windows legs via the "matrix
-  # marker" form (spec F7/F7b §2.1): Actions does not expand `${{ }}` inside a
-  # matrix array/include value, so each leg's `include` entry instead carries
-  # a plain string `runner` marker, and the job's `runs-on` is a single
-  # chained ternary (sameRepoPlatformsMatrixMarkerRunsOn in
-  # scripts/ci_blacksmith_runner_test.go) that resolves per-marker, falling
-  # back to `matrix.os` for forks/Dependabot (each marker's own same-repo
-  # condition false) or any leg with no marker. Every leg now restores a
-  # non-race Go build cache seeded by main.yml's push-to-main savers on the
-  # exact same runner selection (S2 below).
-  #
-  # The macOS leg moves to same-repo Blacksmith macOS
-  # (blacksmith-6vcpu-macos-26, Apple Silicon) like the other two legs; forks,
-  # Dependabot and any non-PR event keep GitHub-hosted macos-latest. The label
-  # is pinned to macos-26 because that is the image GitHub's macos-latest
-  # resolves to today (macos-26-arm64), so both paths run the same OS and
-  # architecture; bump it together with GitHub's macos-latest migration.
-  # 6 vCPU (vs. macos-latest's 3) is already 2x the GitHub-hosted leg; the
-  # 12 vCPU size is not justified for a leg dominated by one incremental
-  # ./cmd/bd test compile. This reverses F7b review fix S3 (cost accepted):
-  # main.yml's blacksmith-macos-go-build-cache job is the push-to-main
-  # Blacksmith-macOS saver S3 said was missing, on this exact label, and the
-  # GitHub-hosted fork path still restores main.yml's `test` job macOS leg.
+  # The Linux leg is Bazel's (ga-96smfk.20): //scripts:doc_freshness_required_test
+  # (integration lane: the doc-freshness suite under -required-suite) and
+  # //scripts/gitattributespolicy:gitattributespolicy_required_host_test
+  # (-required-host -expected-goos linux), both on rbe-west's Linux workers.
+  # The macOS and Windows legs stay here, on Blacksmith for every PR and
+  # merge group, forks and Dependabot included (ga-96smfk.22). Each leg's
+  # `include` entry names its Blacksmith label in `runner` (`os` keeps the
+  # check names stable and selects the Windows-only steps). Every leg
+  # restores a non-race Go build cache seeded by main.yml's push-to-main
+  # savers on the exact same label (S2 below): test-windows for Windows,
+  # blacksmith-macos-go-build-cache for macOS. The macOS label is pinned to
+  # macos-26 (Apple Silicon, the image GitHub's macos-latest resolves to);
+  # 6 vCPU is enough for a leg dominated by one incremental ./cmd/bd test
+  # compile.
   check-doc-freshness-platforms:
     name: Check doc freshness (${{ matrix.os }})
-    runs-on: ${{ matrix.runner == 'same-repo-linux' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest') || matrix.runner == 'same-repo-windows' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest') || matrix.runner == 'same-repo-macos' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-6vcpu-macos-26' || 'macos-latest') || matrix.os }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            expected_goos: linux
-            runner: same-repo-linux
           - os: macos-latest
             expected_goos: darwin
-            runner: same-repo-macos
+            runner: blacksmith-6vcpu-macos-26
           - os: windows-latest
             expected_goos: windows
-            runner: same-repo-windows
+            runner: blacksmith-4vcpu-windows-2025
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -978,10 +480,14 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test '-tags=integration,gms_pure_go' -count=1 ./scripts/gitattributespolicy -args -required-host -expected-goos '${{ matrix.expected_goos }}'
 
-  # F7b: same-repo Blacksmith via the "matrix marker" form (see
-  # check-doc-freshness-platforms above for the full explanation;
-  # sameRepoPlatformsMatrixMarkerRunsOn in scripts/ci_blacksmith_runner_test.go
-  # is this same chained ternary).
+  # Blacksmith macOS and Windows legs, labels in the matrix (see
+  # check-doc-freshness-platforms above). The Linux leg is retired
+  # (ga-96smfk.22): every Linux step's tests run under Bazel on rbe-west
+  # (//scripts:scripts_test, //cmd/bd:bd_test, //internal/config:config_test).
+  # Only the two
+  # tests of go test's own bd build fallback
+  # (tools/bazel/equivalence_allowlist.txt) skip under Bazel; they keep
+  # running here on macOS and Windows.
   #
   # F7b review (S1): an earlier revision of this job split the Windows leg
   # into two `shard` entries on the theory that it would turn one ~9-minute
@@ -993,23 +499,29 @@ jobs:
   # cold `cmd/bd` test compile in "Exercise generated Git hook timeout
   # process boundary" (250-300s); see S2 below (the restore-non-race-cache
   # step) for the fix that actually targets it. Reverted to one leg per OS.
+  #
+  # Windows leg budget with the caches warm (merge group 37710264475 and PR
+  # runs, 2026-10-07/08): 45-115s setup (setup-go, then the two cache
+  # restores, mostly tar extraction), 33-71s for TestPRPreflight (Git Bash
+  # process creation, now parallel subtests), 27-58s to compile and link
+  # ./cmd/bd's test binary, and about 25s for the rest. A second Windows leg
+  # would pay the setup again to save about 20s, so it stays one leg. An
+  # 8 vCPU Windows leg was tried (#7381): cache restores still hit, but it
+  # queued 63s for the larger runner and finished at 144s vs 129s here.
   pr-preflight-platforms:
     name: PR preflight process (${{ matrix.os }})
-    runs-on: ${{ matrix.runner == 'same-repo-linux' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest') || matrix.runner == 'same-repo-windows' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest') || matrix.runner == 'same-repo-macos' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-6vcpu-macos-26' || 'macos-latest') || matrix.os }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            expected_goos: linux
-            runner: same-repo-linux
           - os: macos-latest
             expected_goos: darwin
-            runner: same-repo-macos
+            runner: blacksmith-6vcpu-macos-26
           - os: windows-latest
             expected_goos: windows
-            runner: same-repo-windows
+            runner: blacksmith-4vcpu-windows-2025
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -1028,16 +540,14 @@ jobs:
           restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
       # F7b review (S2): restore-only non-race Go build cache, seeded by the
-      # push-to-main saver on the exact same runner selection (Linux:
-      # main.yml's blacksmith-go-build-cache non-race leg; Windows:
-      # main.yml's test-windows Blacksmith leg; macOS: main.yml's
-      # blacksmith-macos-go-build-cache on Blacksmith, the test job's macOS
-      # leg on the GitHub-hosted fork path) so the cold cmd/bd compile below (the real long pole,
-      # 250-300s uncached) gets a true cache hit instead of starting cold.
-      # GOCACHE must match the seeder's exactly, and CGO_ENABLED is left at
-      # its platform default (same as the seeder) so the key families line
-      # up; see mainBlacksmithGoBuildCacheRunsOn / mainVenueBlacksmithWindows4vcpuRunsOn
-      # in ci_workflow_test.go for the seeder side of this contract.
+      # push-to-main saver on the exact same Blacksmith label (Windows:
+      # main.yml's test-windows; macOS: main.yml's
+      # blacksmith-macos-go-build-cache) so the cold cmd/bd compile below
+      # (the real long pole, 250-300s uncached) gets a true cache hit instead
+      # of starting cold. GOCACHE must match the seeder's exactly, and
+      # CGO_ENABLED is left at its platform default (same as the seeder) so
+      # the key families line up; see mainBlacksmithWindows4vcpuRunsOn in
+      # ci_workflow_test.go for the seeder side of this contract.
       - name: Restore non-race Go build cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -1064,24 +574,21 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test '-tags=gms_pure_go' -count=1 -run '^TestTestScriptPrebuiltBinaryContract$' ./scripts
 
-      - name: Exercise generated Git hook timeout process boundary
-        shell: bash
-        env:
-          GOCACHE: ${{ runner.temp }}/go-cache/non-race
-        run: go test '-tags=gms_pure_go' -count=1 -run '^TestGeneratedHookTimeoutProcessBoundary$' ./cmd/bd
-
-      # Plain go test's own bd build fallback (BEADS_TEST_BD_BINARY unset),
+      # One go test of ./cmd/bd runs the generated hook timeout boundary and
+      # plain go test's own bd build fallback (BEADS_TEST_BD_BINARY unset),
       # which Bazel never takes, on every OS developers run go test on: the
       # tests tools/bazel/equivalence_allowlist.txt lists as skipped under
-      # Bazel. Same build as the step above, so no second compile.
-      - name: Exercise go test's bd build fallback
+      # Bazel. They were two steps; each go test of ./cmd/bd re-hashes its
+      # ~1500 packages and relinks the test binary, which cost 5-9s on
+      # Windows for a fallback run of under one second.
+      - name: Exercise generated Git hook timeout process boundary and go test's bd build fallback
         shell: bash
         env:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
-        run: go test '-tags=gms_pure_go' -count=1 -run '^(TestGOMODCACHENotUnderTestHome|TestGoBuildBDCommandIsCWDIndependent)$' ./cmd/bd
+        run: go test '-tags=gms_pure_go' -count=1 -run '^(TestGeneratedHookTimeoutProcessBoundary|TestGOMODCACHENotUnderTestHome|TestGoBuildBDCommandIsCWDIndependent)$' ./cmd/bd
 
       # This step recompiles ./cmd/bd's test binary. It must share the restored
-      # GOCACHE with the hook-timeout step above (same tags, same platform
+      # GOCACHE with the hook-timeout/bd-build-fallback step above (same tags, same platform
       # default CGO_ENABLED, see the script's header) so it is a relink rather
       # than a second cold compile: without GOCACHE here it fell back to the
       # runner's empty default cache and cold-compiled all of ./cmd/bd on every
@@ -1145,248 +652,6 @@ jobs:
         env:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: bash scripts/ci/test-windows-env-helpers.sh
-
-  # F3: package-mcp and package-npm (and the detect job that fed them) moved
-  # into bazel.yml, which pr.yml calls with package-gates: "on" below. They
-  # now depend on nothing but the rbe job's decision, so they no longer wait
-  # on build-artifacts, bazel-coverage or the rest of the bazel call.
-  #
-  # F7a: moved to Blacksmith for same-repo PRs/merge_group. setup-go runs with
-  # cache: false and the module download step below always hits the network,
-  # so this job restores no GitHub-saved cache.
-  pr-policy-wrapper:
-    name: PR Policy (wrapper timing)
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      # The module fetch is the only part of this job that talks to the network,
-      # and setup-go above runs with cache: false, so every run pulls the whole
-      # module graph from the proxy. Doing it here, retried, means a proxy blip
-      # costs seconds instead of failing a required check.
-      #
-      # Deliberately NOT wrapped around the build: `make ci-pr-policy` runs a
-      # `go build ./cmd/bd` (scripts/ci/pr-policy.sh, build_docs_binary), and a
-      # compile error is not transient. Retrying it would make a genuinely broken
-      # build take three attempts to report and look like a slow one. The fetch
-      # has a legitimate transient failure mode; the build does not.
-      #
-      # 3 attempts x 120s + 2 backoffs x 10s = 380s worst case. 8m leaves ~100s
-      # of headroom, matching the bounded apt-get steps in migration-test.yml.
-      - name: Download modules
-        timeout-minutes: 8
-        run: |
-          downloaded=""
-          for attempt in 1 2 3; do
-            if timeout 120 go mod download; then
-              downloaded=yes
-              break
-            fi
-            echo "::warning::go mod download attempt $attempt failed or timed out"
-            # No backoff after the final attempt - there is nothing left to wait for.
-            if [ "$attempt" -lt 3 ]; then
-              sleep 10
-            fi
-          done
-          # Unlike the best-effort apt-get retries elsewhere in this repo, this
-          # one is load-bearing: nothing downstream can build without the
-          # modules. Fail here, naming the fetch, so a module outage is not
-          # reported as a build failure.
-          if [ -z "$downloaded" ]; then
-            echo "::error::go mod download failed after 3 attempts - module fetch failure, not a build failure"
-            exit 1
-          fi
-
-      - name: Run PR policy wrapper
-        run: make ci-pr-policy
-
-  # D2 step 3: stands down where bazel-coverage says pr_lanes; Bazel /
-  # test (`bazel test //... --config=ci`, the same selection, checked by its
-  # equivalence step) runs it, and scripts-go-checks runs what Bazel does not
-  # (go test's vet).
-  pr-core-wrapper:
-    name: PR Core (wrapper timing)
-    runs-on: ubuntu-latest
-    needs: [build-artifacts, bazel-coverage]
-    if: needs.bazel-coverage.outputs.pr_lanes != 'true'
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Restore Go module cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      - name: Restore race Go build cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/go-cache/race
-          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ github.sha }}
-          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-
-
-      - name: Install Dolt
-        run: ./scripts/ci/install-dolt.sh
-
-      - name: Configure Git and Dolt identity
-        run: |
-          git config --global user.name "CI Bot"
-          git config --global user.email "ci@beads.test"
-          dolt config --global --add user.name "CI Bot"
-          dolt config --global --add user.email "ci@beads.test"
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: ci-build-artifacts
-          path: ci-build-artifacts
-
-      - name: Verify build artifacts
-        run: |
-          set -euo pipefail
-          cd ci-build-artifacts
-          sha256sum -c SHA256SUMS
-          chmod +x bd-linux-gms-pure
-
-      - name: Run PR core wrapper
-        env:
-          BEADS_TEST_REQUIRE_EXCLUDE_PERMISSION: '1'
-          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
-          GOCACHE: ${{ runner.temp }}/go-cache/race
-        run: make ci-pr-core
-
-  # PR Core's duty the Bazel lanes do not take over (D2 step 3), on every PR
-  # whatever bazel-coverage says: go test's own vet checks over ./...
-  # (rules_go's go_test runs none). The repository policy tests in
-  # ./scripts/... and the source-walking tests run under Bazel
-  # (//scripts:scripts_test, //test/docsync over //:repo_files), remotely.
-  # F7b: same-repo Blacksmith (blacksmith-4vcpu-ubuntu-2404) for same-repo
-  # PRs/merge_group, falling back to ubuntu-latest for forks/Dependabot, same
-  # pattern as advisory-reports/pr-policy-wrapper/pr-core-wrapper above.
-  # main.yml's go-vet-cache venue matrix seeds the vet leg's GOCACHE.
-  scripts-go-checks:
-    name: Go checks (${{ matrix.check }})
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        check: [vet]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Restore Go module cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      - name: Restore vet Go build cache
-        if: matrix.check == 'vet'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/go-cache/vet
-          key: beads-go-vet-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-vet-${{ github.sha }}
-          # The non-race build cache fallback this used to list can never hit:
-          # actions/cache versions an entry by its path list, and that cache
-          # saves to a different path (.../go-cache/non-race), so the prefix
-          # match is always filtered out (SF-5).
-          restore-keys: beads-go-vet-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-vet-
-
-      - name: Go vet with go test's checks
-        if: ${{ !cancelled() && steps.setup-go.outcome == 'success' && matrix.check == 'vet' }}
-        env:
-          GOCACHE: ${{ runner.temp }}/go-cache/vet
-        run: bash scripts/ci/go-test-vet.sh
-
-  # F7b: same-repo Blacksmith (blacksmith-4vcpu-ubuntu-2404) for same-repo
-  # PRs/merge_group, falling back to ubuntu-latest for forks/Dependabot.
-  # main.yml's pr-lint-wrapper `venue` matrix seeds this leg's golangci-lint
-  # and lint-native GOCACHEs.
-  pr-lint-wrapper:
-    name: PR Lint (${{ matrix.target }})
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [native, windows, darwin]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          # --new-from-merge-base below walks real history.
-          fetch-depth: 0
-
-      - name: Set up Go
-        id: setup-go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Restore Go module cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/go/pkg/mod
-          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
-
-      - name: Install golangci-lint
-        run: ./scripts/ci/install-golangci-lint.sh
-
-      # Keyed on file content and the leg; a miss on the exact content key
-      # falls back to the leg's most recent entry, which golangci-lint
-      # revalidates against the current config and inputs. pr.yml never saves
-      # this cache (§0); main.yml's pr-lint-wrapper matrix is the only saver,
-      # on an exact-key miss. The key omits the sha (SF-4) so main.yml only
-      # saves when .golangci.yml or go.sum change.
-      - name: Restore golangci-lint cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cache/golangci-lint
-            ${{ matrix.target == 'native' && format('{0}/go-cache/lint-{1}', runner.temp, matrix.target) || '' }}
-          key: beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-${{ hashFiles('.golangci.yml', 'go.sum') }}
-          restore-keys: beads-golangci-v1-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-v2.10.1-${{ matrix.target }}-
-
-      # Scope the wrapper's lint to what this PR introduces, matching the
-      # (now-deleted) `lint` job's only-new-issues scope. main.yml runs the
-      # same wrapper with this unset, so the whole tree is still swept on
-      # every push to main. Both PR triggers (pull_request, merge_group)
-      # target main.
-      - name: Run PR lint wrapper
-        env:
-          BD_LINT_NEW_FROM_MERGE_BASE: origin/main
-          BD_LINT_TARGETS: ${{ matrix.target }}
-          GOCACHE: ${{ runner.temp }}/go-cache/lint-${{ matrix.target }}
-        run: make ci-pr-lint
 
   # F7a: fold of build-examples + complexity-report, the two pr.yml jobs that
   # are advisory-only (not in ci-gate's needs/CI_GATE_REQUIRED) and restore no
@@ -1511,136 +776,6 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  # Focused job for the hexagonal storage layer (internal/storage/domain/* and
-  # internal/storage/uow). These packages back the proxied-server init path and
-  # also live behind the existing ./... matrix, but TestDomainDB requires the
-  # Dolt sql-server image cached locally (testcontainers checks `docker image
-  # inspect` and skips otherwise). Pulling the image up front guarantees the
-  # suite actually runs and surfaces failures here with a clear job name.
-  #
-  # D2 step 3: stands down where bazel-coverage says pr_lanes; Bazel's
-  # `dolt-server lane` runs the same packages against a local dolt
-  # sql-server, which test-dolt-server-fingerprint (every PR) keeps equal to
-  # the container this job uses.
-  test-domain-uow:
-    name: Test (storage domain + uow)
-    runs-on: ubuntu-latest
-    needs: [build-artifacts, bazel-coverage]
-    if: needs.bazel-coverage.outputs.pr_lanes != 'true'
-    # The race-enabled storage package has outgrown Go's implicit 10-minute
-    # timeout. Keep both per-package deadlines inside one finite job budget.
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Install Dolt CLI
-        run: ./scripts/ci/install-dolt.sh
-
-      - name: Verify dolt on PATH
-        run: dolt version
-
-      - name: Configure Git and Dolt identity
-        run: |
-          git config --global user.name "CI Bot"
-          git config --global user.email "ci@beads.test"
-          dolt config --global --add user.name "CI Bot"
-          dolt config --global --add user.email "ci@beads.test"
-
-      - name: Pull Dolt sql-server image
-        # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
-        # Without this, RequireDoltContainer reports doltNoImage and TestDomainDB skips.
-        run: ./scripts/ci/pull-dolt-image.sh
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: ci-build-artifacts
-          path: ci-build-artifacts
-
-      - name: Verify build artifacts
-        run: |
-          set -euo pipefail
-          cd ci-build-artifacts
-          sha256sum -c SHA256SUMS
-          chmod +x bd-linux-gms-pure
-
-      - name: Test domain + uow + tracker
-        env:
-          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
-          # internal/storage/domain, internal/storage/uow, and internal/tracker
-          # run as concurrent package test binaries in this one invocation.
-          # testcontainers-go shares one Ryuk reaper per host; a failed
-          # handshake in one process can reap a sibling's live Dolt container
-          # mid-suite (be-2on). The runner is destroyed after the job, so the
-          # reaper buys nothing here and only costs this race.
-          TESTCONTAINERS_RYUK_DISABLED: "true"
-        run: go test -tags gms_pure_go -race -count=1 -timeout 15m -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...
-
-      # The doctor/fix DB-backed suite spins its own Dolt container in
-      # TestMain. BEADS_FIX_REQUIRE_DOLT=1 turns a missing container into a
-      # hard failure so the suite can never silently skip in CI again
-      # (bd-nxt5e: it was dark for months); this job pulls the image above.
-      - name: Test doctor/fix (Dolt-backed, hard-require container)
-        env:
-          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
-          BEADS_FIX_REQUIRE_DOLT: "1"
-          # Pinned for consistency with the step above: this single-package
-          # step has no sibling test binary to race for the reaper (be-2on).
-          TESTCONTAINERS_RYUK_DISABLED: "true"
-        run: go test -tags gms_pure_go -race -count=1 -timeout 10m -v ./cmd/bd/doctor/fix/
-
-  # Compares the Dolt sql-server container image the container-backed tests
-  # use and the local test server backend (the pinned dolt CLI, what every
-  # Bazel dolt-server lane starts) against the one checked-in fingerprint,
-  # so an image bump cannot drift the container side unnoticed. REQUIRE
-  # makes the container half fail, not skip. Every PR, whatever bazel-coverage
-  # says: it was test-domain-uow's first step, and the Bazel lanes that
-  # replace that job (D2 step 3) have no docker.
-  #
-  # F7a: moved to Blacksmith for same-repo PRs/merge_group. Restores no
-  # GitHub-saved cache (Dolt CLI and the sql-server image are fetched fresh
-  # every run via scripts/ci/install-dolt.sh and pull-dolt-image.sh).
-  test-dolt-server-fingerprint:
-    name: Test (Dolt server fingerprint)
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Install Dolt CLI
-        run: ./scripts/ci/install-dolt.sh
-
-      - name: Verify dolt on PATH
-        run: dolt version
-
-      - name: Configure Git and Dolt identity
-        run: |
-          git config --global user.name "CI Bot"
-          git config --global user.email "ci@beads.test"
-          dolt config --global --add user.name "CI Bot"
-          dolt config --global --add user.email "ci@beads.test"
-
-      - name: Pull Dolt sql-server image
-        # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
-        run: ./scripts/ci/pull-dolt-image.sh
-
-      - name: Test Dolt server fingerprint (container + local)
-        env:
-          BEADS_TEST_REQUIRE_DOLT_CONTAINER: "1"
-        run: go test -tags gms_pure_go -count=1 -timeout 5m -v -run '^TestDoltServerFingerprint$' ./internal/testutil/
-
   # `test-macos` / "Test (macos-latest)" used to run here and is deliberately
   # removed (F4, PR CI -> 5 min). It was a non-required, PR-side mirror of
   # main.yml's `test` job's macOS leg (full `go test -race -short ./...`),
@@ -1661,66 +796,6 @@ jobs:
   # they are not a substitute. If this tradeoff turns out to be wrong,
   # reinstate a PR-side mirror rather than relying on main.yml alone.
 
-  # Producer-side guard for the Beads<->consumer CLI contract. Runs the whole
-  # cmd/bd/protocol package: the golden corpus (regenerated from this branch's
-  # bd and byte-compared to the committed testdata/corpus/, so an unreviewed
-  # wire change is a hard failure — run `make corpus-regen`), the double-run
-  # determinism check, and the TestProtocol_/TestJSONContract_ behavioral
-  # conformance suite that pins the CLI's JSON payloads and semantics.
-  #
-  # Run the PACKAGE, never a -run subset: a filter here is what let the
-  # conformance tests sit red on main for ~3 months while every CI run was
-  # green (they matched no job's -run, and every broad ./... job skips them
-  # for want of a Dolt store). Package scope means a newly added protocol test
-  # is gated the moment it lands.
-  #
-  # Needs the Dolt sql-server image (the protocol harness spins a container).
-  # ~10 min: each test builds an isolated Dolt-backed workspace. If that ever
-  # becomes unacceptable on PRs, shard this job by an exhaustive `go test
-  # -list` partition — do not reintroduce a hand-written -run regex.
-  #
-  # D2 step 3: stands down where bazel-coverage says pr_lanes; Bazel's
-  # `dolt-server lane` runs the package (//cmd/bd/protocol:protocol_dolt_test).
-  contract-corpus:
-    name: Contract corpus (golden + determinism + conformance)
-    runs-on: ubuntu-latest
-    needs: bazel-coverage
-    if: needs.bazel-coverage.outputs.pr_lanes != 'true'
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: false
-
-      - name: Install Dolt CLI
-        run: ./scripts/ci/install-dolt.sh
-
-      - name: Configure Git and Dolt identity
-        run: |
-          git config --global user.name "CI Bot"
-          git config --global user.email "ci@beads.test"
-          dolt config --global --add user.name "CI Bot"
-          dolt config --global --add user.email "ci@beads.test"
-
-      - name: Pull Dolt sql-server image
-        # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
-        run: ./scripts/ci/pull-dolt-image.sh
-
-      - name: Protocol conformance + corpus golden + determinism
-        # Require a live Dolt store here: this is the gate that must exercise the
-        # conformance, golden and double-run checks, so a failed container is a
-        # hard failure, not a silent skip (see requireDoltStore in the
-        # cmd/bd/protocol tests).
-        #
-        # -timeout is explicit because the package runs well past `go test`'s
-        # 10m default; without it a slow runner reports a panic, not a verdict.
-        env:
-          BEADS_PROTOCOL_REQUIRE_DOLT: "1"
-        run: go test -tags gms_pure_go -count=1 -timeout 30m ./cmd/bd/protocol
-
   # F7a: fold of a 3-host matrix (native, msys2, cygwin) into one sequential
   # job on a single windows-latest runner. Review SF-1 (2026-10-03): only the
   # Cygwin *setup* step keeps `continue-on-error: true` (a flaky installer
@@ -1731,10 +806,8 @@ jobs:
   # steps keeps `if: ${{ !cancelled() }}` (plus a check that its own leg's
   # setup succeeded) so a failure in one leg does not stop the later legs
   # from attempting to run - the fail-fast: false behavior the matrix used to
-  # give for free. windows-make-shell is not a Windows job F4 touches (it
-  # does not intersect test-windows-liveness, worktree-remove-windows, the
-  # preflight/doc-freshness matrices, or the twins).
-  # F7b: same-repo Blacksmith (blacksmith-4vcpu-windows-2025).
+  # give for free.
+  # Blacksmith Windows (blacksmith-4vcpu-windows-2025) for every PR.
   #
   # RISK (unverified from this sandbox, flagged in the F7b report): the
   # native-Make step below assumes Chocolatey is preinstalled (`choco
@@ -1745,12 +818,11 @@ jobs:
   # is not independently confirmed. The msys2/setup-msys2 and
   # cygwin/cygwin-install-action steps download their own tooling and do not
   # depend on any preinstalled image contents, so they carry no equivalent
-  # risk. The fork-PR path (windows-latest) remains an always-on canary; if
-  # only the same-repo leg's native-Make step fails here, that is the gap to
-  # roll back on (revert this runs-on line to the literal `windows-latest`).
+  # risk. If only the native-Make step fails here, that is the gap to roll
+  # back on (revert this runs-on line to the literal `windows-latest`).
   windows-make-shell:
     name: Windows Make shell (native, msys2, cygwin)
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest' }}
+    runs-on: ${{ 'blacksmith-4vcpu-windows-2025' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -1784,8 +856,7 @@ jobs:
       # disables that implicit save on Blacksmith (fail-closed: only the
       # literal "github-hosted" value keeps caching on, matching the
       # fail-closed convention F7c review fix N1 set for actions/setup-go's
-      # own `cache` input) while leaving the always-on fork-PR
-      # (windows-latest) leg's caching behavior unchanged. Pinned by
+      # own `cache` input). Pinned by
       # TestBlacksmithReachablePRJobsDisableDefaultCachingActions.
       - name: Set up MSYS2 GNU Make
         id: install-msys2
@@ -2257,33 +1328,23 @@ jobs:
             throw 'Cygwin Make shell smoke failed'
           }
 
-  # The Bazel lane (bazel.yml), gated alongside the legacy jobs it mirrors
-  # (PR Core, build-artifacts, the pure-Go/js-wasm check, domain+uow and
-  # contract corpus, and pr-risk.yml's embedded-Dolt, proxied-server and
-  # server-Dolt storage tiers), all of which stay required ids, but stand
-  # down on same-repo PRs with a non-Dependabot actor, and on merge groups,
-  # while their D2 flag is "true" (bazel-coverage): pr-risk.yml's embedded-Dolt test jobs
-  # (BAZEL_RETIRES_LEGACY_EMBEDDED, step 1), its proxied-server and
-  # server-Dolt storage test jobs (BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS,
-  # step 2), and this workflow's PR Core, build-artifacts, pure-Go/js-wasm,
-  # domain+uow and contract corpus jobs (BAZEL_RETIRES_LEGACY_PR_LANES,
-  # step 3). ci-gate then requires this call's lanes for them (embedded;
-  # proxied and server-storage; test, pure and doltserver) to have run
-  # remotely and passed. bazel.yml has no pull_request/merge_group trigger
+  # The Bazel lanes (bazel.yml): the only pre-merge run of every Linux Go
+  # test tier (PR core, pure-Go and js/wasm, the release cross-compile, the
+  # dolt-server lane, the embedded-Dolt, proxied-server and server-Dolt
+  # storage tiers that pr-risk.yml used to run, integration and the cmd/bd
+  # Dolt-server tier).
+  # ci-gate requires each of them to have run remotely on rbe-west and
+  # passed, on every pull_request and merge group: same-repo PRs and merge
+  # groups in mode remote, fork and Dependabot PRs through rbe-west's mint
+  # (rbe-fork, modes fork-ro/fork-rw). Mode skip (the farm switch off) or
+  # cache (no secret, or rbe-fork closed or refusing) is red, never a silent
+  # pass with fewer tests. bazel.yml has no pull_request/merge_group trigger
   # of its own: this call is its only PR run. It gets the four RBE secrets
-  # and nothing else; its rbe job decides remote, cache (forks, Dependabot:
-  # local execution with the anonymous read-only cache, no embedded,
-  # proxied or server-storage lane) or skip, and exports that for ci-gate.
-  # Its bazel-integration lane (main.yml's integration jobs, which run only
-  # on push to main) is on and required here in modes remote and cache:
-  # same-repo PRs and merge groups run it remotely, fork and Dependabot PRs
-  # locally with the read-only cache. Test results are cached: a PR or
-  # merge group re-runs only tests whose inputs changed (nightly re-runs
-  # everything; .bazelrc test:fresh). Its bd artifact is renamed
-  # (bazel-ci-build-artifacts) so it cannot collide with build-artifacts'
-  # upload. F3: the package gates build their own bd (via this call's rbe
-  # job) and do not consume this artifact; it is kept for the F3.5.3
-  # SHA256SUMS comparison and for debugging.
+  # and the pre-warm app key and nothing else. Test results are cached: a PR
+  # or merge group re-runs only tests whose inputs changed (nightly re-runs
+  # everything; .bazelrc test:fresh). Its bd artifact
+  # (bazel-ci-build-artifacts) is kept for debugging; F3: the package gates
+  # build their own bd via this call's rbe job.
   bazel:
     name: Bazel
     permissions:
@@ -2305,93 +1366,6 @@ jobs:
       # this call, needing only its rbe job.
       package-gates: "on"
 
-  # D2: pr-risk.yml's bazel-coverage job, verbatim (policy-tested
-  # identical). Where it says a tier is covered, PR Risk skips that tier's
-  # legacy test jobs (embedded, dolt_server), or this workflow skips its own
-  # (pr_lanes: build-artifacts, PR Core, the pure-Go/js-wasm check,
-  # domain+uow and contract corpus), so ci-gate requires the tier's Bazel
-  # lanes to have run remotely and passed in this run.
-  bazel-coverage:
-    name: Bazel tier coverage
-    # F3: same-repo PRs and merge_group get the org's Blacksmith pool; forks,
-    # Dependabot and any other event stay GitHub-hosted. This job restores no
-    # GitHub-saved cache, so Blacksmith's inability to see one does not cost
-    # it anything. Must stay byte-identical to pr-risk.yml's copy
-    # (TestPRRiskBazelCoverageJob) and to the TestSameRepoBlacksmithRunners
-    # pin.
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
-    timeout-minutes: 5
-    outputs:
-      embedded: ${{ steps.decide.outputs.embedded }}
-      dolt_server: ${{ steps.decide.outputs.dolt_server }}
-      pr_lanes: ${{ steps.decide.outputs.pr_lanes }}
-    steps:
-      # GitHub's == is case-insensitive. FORK is bazel.yml's rbe job's
-      # expression, verbatim. Nothing mutable is read: not RBE_WEST_WORKERS
-      # and not the executor secret (either, evaluated per run, would let one
-      # workflow's re-run disagree with the other's). A same-repo PR whose run
-      # lacks the secret is covered anyway, so pr.yml's gate goes red (mode
-      # cache) instead of a tier silently moving back. Fork and Dependabot
-      # runs get no Actions secrets by design: they are covered only while
-      # BAZEL_COVERS_FORKS is "true" (rbe-fork gives their lanes remote
-      # execution), and then a closed rbe-fork turns them red the same way;
-      # it never moves them back to a legacy tier silently. github.actor
-      # (unlike triggering_actor) stays the PR's actor on a re-run.
-      - name: Decide which legacy tiers the Bazel lanes cover
-        id: decide
-        env:
-          RETIRED_EMBEDDED: ${{ env.BAZEL_RETIRES_LEGACY_EMBEDDED == 'true' }}
-          RETIRED_DOLT_SERVER: ${{ env.BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS == 'true' }}
-          RETIRED_PR_LANES: ${{ env.BAZEL_RETIRES_LEGACY_PR_LANES == 'true' }}
-          COVERS_FORKS: ${{ env.BAZEL_COVERS_FORKS == 'true' }}
-          PULL_REQUEST: ${{ github.event_name == 'pull_request' }}
-          MERGE_GROUP: ${{ github.event_name == 'merge_group' }}
-          FORK: ${{ github.event.pull_request.head.repo.fork == true }}
-          DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
-        run: |
-          for v in RETIRED_EMBEDDED RETIRED_DOLT_SERVER RETIRED_PR_LANES COVERS_FORKS PULL_REQUEST MERGE_GROUP FORK DEPENDABOT; do
-            case "${!v}" in
-              true|false) ;;
-              *) echo "::error::$v is '${!v}', want true or false"; exit 1 ;;
-            esac
-          done
-          # Covered: the Bazel lanes are this run's only run of the retired
-          # tiers. Same-repo PRs (the CI secrets); fork and Dependabot PRs
-          # too while BAZEL_COVERS_FORKS is "true"; and every merge group: it
-          # runs on the queue's gh-readonly-queue/* branch of this repository
-          # with the CI secrets, its actor is github-merge-queue[bot] (never
-          # Dependabot), and bazel.yml's rbe job takes mode remote for it
-          # like for a same-repo PR, so a missing secret or the farm switch
-          # off turns pr.yml's gate red rather than dropping a tier.
-          covered=false
-          if [ "$MERGE_GROUP" = true ]; then
-            covered=true
-          elif [ "$PULL_REQUEST" = true ]; then
-            if [ "$FORK" = false ] && [ "$DEPENDABOT" = false ]; then
-              covered=true
-            elif [ "$COVERS_FORKS" = true ]; then
-              covered=true
-            fi
-          fi
-          embedded=false
-          if [ "$covered" = true ] && [ "$RETIRED_EMBEDDED" = true ]; then
-            embedded=true
-          fi
-          dolt_server=false
-          if [ "$covered" = true ] && [ "$RETIRED_DOLT_SERVER" = true ]; then
-            dolt_server=true
-          fi
-          pr_lanes=false
-          if [ "$covered" = true ] && [ "$RETIRED_PR_LANES" = true ]; then
-            pr_lanes=true
-          fi
-          {
-            echo "embedded=$embedded"
-            echo "dolt_server=$dolt_server"
-            echo "pr_lanes=$pr_lanes"
-          } >> "$GITHUB_OUTPUT"
-          echo "Legacy tiers retired in favour of the Bazel lanes: embedded Dolt **$embedded**, proxied and server Dolt **$dolt_server**, pr.yml's PR Core/build/pure-Go/domain+uow/contract jobs **$pr_lanes** (pull_request: $PULL_REQUEST, merge_group: $MERGE_GROUP, fork: $FORK, dependabot: $DEPENDABOT, forks covered: $COVERS_FORKS, retired embedded: $RETIRED_EMBEDDED, retired proxied/server: $RETIRED_DOLT_SERVER, retired pr.yml jobs: $RETIRED_PR_LANES)" | tee -a "$GITHUB_STEP_SUMMARY"
-
   ci-gate:
     name: CI Gate / Required
     # F3: same-repo PRs and merge_group get the org's Blacksmith pool; forks,
@@ -2405,27 +1379,14 @@ jobs:
     # minutes too.
     timeout-minutes: 10
     needs:
-      - build-artifacts
       - fast-checks
-      - check-cmd-bd-puregeo-tests
-      - check-release-target-cross-compilation
       - test-windows-liveness
       - worktree-remove-windows
-      - test-windows-liveness-prebuilt
-      - worktree-remove-windows-prebuilt
       - check-doc-flags
       - check-doc-freshness-platforms
       - pr-preflight-platforms
-      - pr-policy-wrapper
-      - pr-core-wrapper
-      - scripts-go-checks
-      - pr-lint-wrapper
-      - test-domain-uow
-      - test-dolt-server-fingerprint
-      - contract-corpus
       - windows-make-shell
       - bazel
-      - bazel-coverage
     if: ${{ always() }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -2434,67 +1395,43 @@ jobs:
         env:
           CI_GATE_NAME: PR baseline gate
           CI_GATE_REQUIRED: >-
-            BUILD_ARTIFACTS
             FAST_CHECKS
-            CHECK_BUILD_TAGS
-            CHECK_VERSION_CONSISTENCY
             CHECK_MIGRATION_HYGIENE
             CHECK_NO_BEADS_CHANGES
-            FMT_CHECK
-            CHECK_CMD_BD_PUREGEO_TESTS
-            CHECK_RELEASE_TARGET_CROSS_COMPILATION
             CHECK_DOC_FLAGS
             CHECK_DOC_FRESHNESS_PLATFORMS
             PR_PREFLIGHT_PLATFORMS
             PACKAGE_MCP
             PACKAGE_NPM
-            PR_POLICY_WRAPPER
-            PR_CORE_WRAPPER
-            SCRIPTS_GO_CHECKS
-            PR_LINT_WRAPPER
-            TEST_DOMAIN_UOW
-            TEST_DOLT_SERVER_FINGERPRINT
-            CONTRACT_CORPUS
+            TEST_WINDOWS_LIVENESS
+            WORKTREE_REMOVE_WINDOWS
             WINDOWS_MAKE_SHELL
             BAZEL
             BAZEL_TEST
             BAZEL_PURE
+            BAZEL_RELEASE_CROSS
             BAZEL_EMBEDDED
             BAZEL_INTEGRATION
             BAZEL_DOLTSERVER
             BAZEL_PROXIED
             BAZEL_SERVER_STORAGE
-            BAZEL_COVERAGE
-            BAZEL_EMBEDDED_RETIRED
-            BAZEL_DOLT_SERVER_RETIRED
-            BAZEL_PR_LANES_RETIRED
-          BUILD_ARTIFACTS: ${{ needs.build-artifacts.result }}
-          # F7a: fast-checks folds five formerly-separate jobs into one job
-          # with five steps; each token below now reads that step's outcome
-          # (via the job's outputs) instead of a sibling job's result, with a
-          # 'skipped' fallback for a lost job (see FAST_CHECKS below).
-          # TestPRCIGateFastChecksTokens pins this mapping.
-          CHECK_BUILD_TAGS: ${{ needs.fast-checks.outputs.build-tags || 'skipped' }}
-          CHECK_VERSION_CONSISTENCY: ${{ needs.fast-checks.outputs.version-consistency || 'skipped' }}
+            BAZEL_REMOTE
+          # fast-checks' two base-diff steps; each token reads that step's
+          # outcome (via the job's outputs), with a 'skipped' fallback for a
+          # lost job (see FAST_CHECKS below). TestPRCIGateFastChecksTokens
+          # pins this mapping. The repository guards the job used to run
+          # (build tags, versions, migration checks A and B, gofmt) are Bazel
+          # tests and gate through BAZEL_TEST.
           CHECK_MIGRATION_HYGIENE: ${{ needs.fast-checks.outputs.migration-hygiene || 'skipped' }}
           CHECK_NO_BEADS_CHANGES: ${{ needs.fast-checks.outputs.no-beads-changes || 'skipped' }}
-          FMT_CHECK: ${{ needs.fast-checks.outputs.fmt || 'skipped' }}
           # Backstop: if fast-checks itself is lost (e.g. a cancelled runner)
-          # before any step sets an output, the five tokens above all read
-          # 'skipped' (none are in CI_GATE_SKIPPED_OK by default, so the gate
-          # still reds) - FAST_CHECKS gives ci-gate.sh one clear line naming
-          # the job instead of five step-shaped ones.
+          # before any step sets an output, the two tokens above read
+          # 'skipped' (neither is in CI_GATE_SKIPPED_OK, so the gate still
+          # reds) - FAST_CHECKS gives ci-gate.sh one clear line naming the
+          # job.
           FAST_CHECKS: ${{ needs.fast-checks.result }}
-          CHECK_CMD_BD_PUREGEO_TESTS: ${{ needs.check-cmd-bd-puregeo-tests.result }}
-          CHECK_RELEASE_TARGET_CROSS_COMPILATION: ${{ needs.check-release-target-cross-compilation.result }}
           TEST_WINDOWS_LIVENESS: ${{ needs.test-windows-liveness.result }}
           WORKTREE_REMOVE_WINDOWS: ${{ needs.worktree-remove-windows.result }}
-          # F4 side-by-side rollout: always evaluated, like the native pair
-          # above; WINDOWS_PREBUILT_REQUIRED (top of this file) decides below
-          # which pair is in CI_GATE_REQUIRED and which is in
-          # CI_GATE_SKIPPED_OK.
-          TEST_WINDOWS_LIVENESS_PREBUILT: ${{ needs.test-windows-liveness-prebuilt.result }}
-          WORKTREE_REMOVE_WINDOWS_PREBUILT: ${{ needs.worktree-remove-windows-prebuilt.result }}
           CHECK_DOC_FLAGS: ${{ needs.check-doc-flags.result }}
           CHECK_DOC_FRESHNESS_PLATFORMS: ${{ needs.check-doc-freshness-platforms.result }}
           PR_PREFLIGHT_PLATFORMS: ${{ needs.pr-preflight-platforms.result }}
@@ -2504,19 +1441,13 @@ jobs:
           # here).
           PACKAGE_MCP: ${{ needs.bazel.outputs.package-mcp || 'skipped' }}
           PACKAGE_NPM: ${{ needs.bazel.outputs.package-npm || 'skipped' }}
-          PR_POLICY_WRAPPER: ${{ needs.pr-policy-wrapper.result }}
-          PR_CORE_WRAPPER: ${{ needs.pr-core-wrapper.result }}
-          SCRIPTS_GO_CHECKS: ${{ needs.scripts-go-checks.result }}
-          PR_LINT_WRAPPER: ${{ needs.pr-lint-wrapper.result }}
-          TEST_DOMAIN_UOW: ${{ needs.test-domain-uow.result }}
-          TEST_DOLT_SERVER_FINGERPRINT: ${{ needs.test-dolt-server-fingerprint.result }}
-          CONTRACT_CORPUS: ${{ needs.contract-corpus.result }}
           WINDOWS_MAKE_SHELL: ${{ needs.windows-make-shell.result }}
           # bazel.yml's lanes report their job.status as outputs; a lane that
           # did not report (skipped, or lost before its last step) reads as
           # skipped, which passes only in the modes bazel-gate.sh allows.
           BAZEL_TEST: ${{ needs.bazel.outputs.bazel-test || 'skipped' }}
           BAZEL_PURE: ${{ needs.bazel.outputs.bazel-pure || 'skipped' }}
+          BAZEL_RELEASE_CROSS: ${{ needs.bazel.outputs.bazel-release-cross || 'skipped' }}
           BAZEL_EMBEDDED: ${{ needs.bazel.outputs.bazel-embedded || 'skipped' }}
           BAZEL_INTEGRATION: ${{ needs.bazel.outputs.bazel-integration || 'skipped' }}
           BAZEL_DOLTSERVER: ${{ needs.bazel.outputs.bazel-doltserver || 'skipped' }}
@@ -2531,30 +1462,8 @@ jobs:
           BAZEL_CALL: ${{ needs.bazel.result }}
           BAZEL_RBE_MODE: ${{ needs.bazel.outputs.rbe-mode }}
           BAZEL_RBE_ENABLED: ${{ needs.bazel.outputs.rbe-enabled }}
-          # D2: which legacy tiers PR Risk, or this workflow (pr_lanes),
-          # retired for this PR (BAZEL_*_RETIRED below).
-          BAZEL_COVERAGE: ${{ needs.bazel-coverage.result }}
-          BAZEL_COVERS_EMBEDDED: ${{ needs.bazel-coverage.outputs.embedded }}
-          BAZEL_COVERS_DOLT_SERVER: ${{ needs.bazel-coverage.outputs.dolt_server }}
-          BAZEL_COVERS_PR_LANES: ${{ needs.bazel-coverage.outputs.pr_lanes }}
         run: |
           skipped_ok=""
-          # F4 side-by-side rollout: WINDOWS_PREBUILT_REQUIRED (top of this
-          # file) flips which pair of Windows jobs ci-gate enforces with a
-          # single committed flag, instead of three edits per job
-          # (ci-gate.needs, CI_GATE_REQUIRED, and this step's env map) done
-          # twice. Both pairs are unconditionally in ci-gate.needs and always
-          # evaluated above (neither is in the static CI_GATE_REQUIRED list);
-          # only which pair is added to CI_GATE_REQUIRED (enforced) vs.
-          # skipped_ok (merely advisory -- a failure there cannot redden the
-          # gate) changes here.
-          if [[ "$WINDOWS_PREBUILT_REQUIRED" == "true" ]]; then
-            CI_GATE_REQUIRED="$CI_GATE_REQUIRED TEST_WINDOWS_LIVENESS_PREBUILT WORKTREE_REMOVE_WINDOWS_PREBUILT"
-            skipped_ok="$skipped_ok TEST_WINDOWS_LIVENESS WORKTREE_REMOVE_WINDOWS"
-          else
-            CI_GATE_REQUIRED="$CI_GATE_REQUIRED TEST_WINDOWS_LIVENESS WORKTREE_REMOVE_WINDOWS"
-            skipped_ok="$skipped_ok TEST_WINDOWS_LIVENESS_PREBUILT WORKTREE_REMOVE_WINDOWS_PREBUILT"
-          fi
           # The cmd/bd Dolt-server tier (bazel.yml's bazel-cmd-dolt) is
           # advisory until BAZEL_CMD_DOLT_REQUIRED (top of this file) is
           # "true"; it is never in the static list above.
@@ -2570,38 +1479,19 @@ jobs:
           skipped_ok="$skipped_ok $(bash .github/scripts/bazel-gate.sh skips)"
           BAZEL="$(bash .github/scripts/bazel-gate.sh aggregate)"
           export BAZEL
-          # D2 step 3: this workflow's legacy jobs that stand down where
-          # bazel-coverage says pr_lanes (exactly "true"); their Bazel lanes
-          # are then required below.
-          if [[ "$BAZEL_COVERS_PR_LANES" == "true" ]]; then
-            skipped_ok="$skipped_ok BUILD_ARTIFACTS CHECK_CMD_BD_PUREGEO_TESTS PR_CORE_WRAPPER TEST_DOMAIN_UOW CONTRACT_CORPUS"
+          # The Bazel lanes are the only run of every Linux Go test tier
+          # (there is no legacy job to fall back to), so on every pull_request
+          # and merge group they must have run remotely on rbe-west: mode
+          # remote, or fork-ro/fork-rw through rbe-fork for a PR without the
+          # CI secrets; mode skip (the farm switch off) or cache (no
+          # secret, or rbe-fork closed or refusing) is red whatever
+          # bazel-gate.sh's skip list allows; each lane's own result is
+          # required above.
+          BAZEL_REMOTE=success
+          if [[ ! "$BAZEL_RBE_MODE" =~ ^(remote|fork-ro|fork-rw)$ ]]; then
+            BAZEL_REMOTE=not-run-remotely
+            echo "::error::The Bazel lanes did not run remotely on rbe-west (mode '${BAZEL_RBE_MODE:-none}'); they are this PR's only run of the Linux Go test tiers. In mode cache on a PR without the CI secrets, rbe-fork was closed or refused this run: re-run all jobs later."
           fi
-          # Where a legacy tier is retired (by PR Risk or by this
-          # workflow), this run's Bazel lanes for it are the tier's only
-          # pre-merge run: each must have run remotely (mode remote, or
-          # fork-ro/fork-rw with an rbe-fork certificate where
-          # BAZEL_COVERS_FORKS covers a PR without the CI secrets) and
-          # passed. Mode skip (the farm switch off), cache (no secret, or
-          # rbe-fork closed or refusing), or any other result, is red
-          # whatever bazel-gate.sh allows.
-          # retired ID FLAG COVERED TIER LANE...: set and export ID.
-          retired() {
-            local id="$1" flag="$2" covered="$3" tier="$4" result=success lane
-            shift 4
-            if [[ "$covered" == "true" ]]; then
-              [[ "$BAZEL_RBE_MODE" =~ ^(remote|fork-ro|fork-rw)$ ]] || result="not-run-remotely"
-              for lane in "$@"; do
-                [[ "${!lane:-}" == "success" ]] || result="not-run-remotely"
-              done
-              if [[ "$result" != "success" ]]; then
-                echo "::error::The legacy $tier is retired ($flag) and its Bazel lanes ($*) did not all run remotely and pass (mode '${BAZEL_RBE_MODE:-none}'). In mode cache on a PR without the CI secrets, rbe-fork was closed or refused this run: re-run all jobs later. If remote execution is off on purpose, commit $flag: \"false\" (or BAZEL_COVERS_FORKS: \"false\" for forks) in pr.yml and pr-risk.yml and push this PR again."
-              fi
-            fi
-            printf -v "$id" '%s' "$result"
-            export "${id?}"
-          }
-          retired BAZEL_EMBEDDED_RETIRED BAZEL_RETIRES_LEGACY_EMBEDDED "$BAZEL_COVERS_EMBEDDED" "PR Risk embedded Dolt tier" BAZEL_EMBEDDED
-          retired BAZEL_DOLT_SERVER_RETIRED BAZEL_RETIRES_LEGACY_DOLT_SERVER_TIERS "$BAZEL_COVERS_DOLT_SERVER" "PR Risk proxied-server and server-Dolt storage tiers" BAZEL_PROXIED BAZEL_SERVER_STORAGE
-          retired BAZEL_PR_LANES_RETIRED BAZEL_RETIRES_LEGACY_PR_LANES "$BAZEL_COVERS_PR_LANES" "PR Core, build-artifacts, pure-Go/js-wasm, domain+uow and contract corpus jobs" BAZEL_TEST BAZEL_PURE BAZEL_DOLTSERVER
+          export BAZEL_REMOTE
           export CI_GATE_SKIPPED_OK="$skipped_ok"
           bash .github/scripts/ci-gate.sh

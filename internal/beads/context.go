@@ -314,13 +314,23 @@ func isExternalBeadsDir(beadsDir string) (bool, error) {
 
 // getGitCommonDirForPath returns the shared git directory for a path.
 // For worktrees, this returns the shared git directory (common to all worktrees).
+//
+// Every startup that builds a RepoContext asks this about the beads
+// directory, so the answer comes from git.CommonDirInProcess when it can,
+// with `git -C path rev-parse --git-common-dir` as the fallback.
 func getGitCommonDirForPath(path string) (string, error) {
-	cmd := exec.Command("git", "-C", path, "rev-parse", "--git-common-dir")
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to get git common dir for %s: %w", path, err)
+	result, isRepo, ok := git.CommonDirInProcess(path)
+	switch {
+	case ok && !isRepo:
+		return "", fmt.Errorf("failed to get git common dir for %s: not a git repository", path)
+	case !ok:
+		cmd := exec.Command("git", "-C", path, "rev-parse", "--git-common-dir")
+		output, err := cmd.Output()
+		if err != nil {
+			return "", fmt.Errorf("failed to get git common dir for %s: %w", path, err)
+		}
+		result = strings.TrimSpace(string(output))
 	}
-	result := strings.TrimSpace(string(output))
 
 	if !filepath.IsAbs(result) {
 		absPath, err := filepath.Abs(path)

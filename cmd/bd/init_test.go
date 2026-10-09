@@ -1088,12 +1088,12 @@ func TestInitContributorSetsBeadsRoleContributor(t *testing.T) {
 	t.Chdir(tmpDir)
 
 	// Owned local remotes prevent network lookups during initialization.
-	cmd := exec.Command("git", "remote", "add", "origin", newGitRepo(t))
+	cmd := gitCommand("remote", "add", "origin", newGitRepo(t))
 	cmd.Dir = tmpDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to add origin remote: %v", err)
 	}
-	cmd = exec.Command("git", "remote", "add", "upstream", newGitRepo(t))
+	cmd = gitCommand("remote", "add", "upstream", newGitRepo(t))
 	cmd.Dir = tmpDir
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("failed to add upstream remote: %v", err)
@@ -1153,7 +1153,7 @@ func TestInitNonInteractiveAlwaysSetsRole(t *testing.T) {
 	t.Chdir(tmpDir)
 
 	// Ensure no role is set before init
-	exec.Command("git", "config", "--unset", "beads.role").Run() //nolint:errcheck
+	gitCommand("config", "--unset", "beads.role").Run() //nolint:errcheck
 
 	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet", "--non-interactive"})
 	if err := rootCmd.Execute(); err != nil {
@@ -1527,7 +1527,7 @@ func TestInitBEADS_DIR(t *testing.T) {
 		}
 		runGit := func(dir string, args ...string) {
 			t.Helper()
-			cmd := exec.Command("git", args...)
+			cmd := gitCommand(args...)
 			cmd.Dir = dir
 			out, err := cmd.CombinedOutput()
 			if err != nil {
@@ -2000,7 +2000,7 @@ func setupBareParentInitWorktree(t *testing.T) (string, string) {
 
 	runGit := func(dir string, args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = dir
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -2012,14 +2012,14 @@ func setupBareParentInitWorktree(t *testing.T) (string, string) {
 	runGit(tmpDir, "--git-dir", bareDir, "symbolic-ref", "HEAD", "refs/heads/main")
 	runGit(tmpDir, "--git-dir", bareDir, "config", "user.email", "test@example.com")
 	runGit(tmpDir, "--git-dir", bareDir, "config", "user.name", "Test User")
-	emptyTreeCmd := exec.Command("git", "--git-dir", bareDir, "hash-object", "-t", "tree", "/dev/null")
+	emptyTreeCmd := gitCommand("--git-dir", bareDir, "hash-object", "-t", "tree", "/dev/null")
 	emptyTreeCmd.Dir = tmpDir
 	emptyTreeOut, err := emptyTreeCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git hash-object failed: %v\n%s", err, emptyTreeOut)
 	}
 	emptyTree := strings.TrimSpace(string(emptyTreeOut))
-	commitCmd := exec.Command("git", "--git-dir", bareDir, "commit-tree", "-m", "Initial commit", emptyTree)
+	commitCmd := gitCommand("--git-dir", bareDir, "commit-tree", "-m", "Initial commit", emptyTree)
 	commitCmd.Dir = tmpDir
 	commitOut, err := commitCmd.CombinedOutput()
 	if err != nil {
@@ -2567,11 +2567,11 @@ func TestInitDatabaseAdoptsExistingProjectID(t *testing.T) {
 	t.Chdir(secondDir)
 
 	// Set up minimal git repo (init expects it for repo_id)
-	if err := exec.Command("git", "-C", secondDir, "init").Run(); err != nil {
+	if err := gitCommand("-C", secondDir, "init").Run(); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
-	_ = exec.Command("git", "-C", secondDir, "config", "user.email", "test@test.com").Run()
-	_ = exec.Command("git", "-C", secondDir, "config", "user.name", "Test").Run()
+	_ = gitCommand("-C", secondDir, "config", "user.email", "test@test.com").Run()
+	_ = gitCommand("-C", secondDir, "config", "user.name", "Test").Run()
 
 	rootCmd.SetArgs([]string{
 		"init",

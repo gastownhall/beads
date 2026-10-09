@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -273,7 +275,7 @@ This is used by 'bd done --phase-complete' to register for gate wake notificatio
 		updates := map[string]interface{}{
 			"waiters": newWaiters,
 		}
-		if err := store.UpdateIssue(ctx, gateID, updates, actor); err != nil {
+		if err := store.UpdateIssue(ctx, gateID, updates, currentActor()); err != nil {
 			return HandleError("updating gate: %v", err)
 		}
 
@@ -309,11 +311,15 @@ Gate types:
   gh:run  - Waits for GitHub Actions workflow
   gh:pr   - Waits for PR merge
 
+gh:run and gh:pr gates are checked in the current Git repository unless
+--repo names another, or the blocked issue carries a metadata.repo value.
+
 Examples:
   bd gate create --blocks bd-abc
   bd gate create --type=human --blocks bd-abc --reason="Need design review"
   bd gate create --type=timer --blocks bd-abc --timeout=2h
   bd gate create --type=gh:pr --blocks bd-abc --await-id=42
+  bd gate create --type=gh:pr --blocks bd-abc --await-id=42 --repo=owner/other-repo
   bd gate create --blocks bd-abc --title="Gate: awaiting owner sign-off"`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -343,13 +349,13 @@ Examples:
 		}
 
 		gate := buildGateIssue(in, targetIssue.ID)
-		metadata, metaErr := repoMetadataForGate(in.gateType, targetIssue)
+		metadata, metaErr := gateMetadataForCreate(in, targetIssue)
 		if metaErr != nil {
-			return HandleErrorRespectJSON("invalid GitHub repository metadata on %s: %v", targetIssue.ID, metaErr)
+			return HandleErrorRespectJSON("%v", metaErr)
 		}
 		gate.Metadata = metadata
 
-		if err := store.CreateIssue(ctx, gate, actor); err != nil {
+		if err := store.CreateIssue(ctx, gate, currentActor()); err != nil {
 			return HandleErrorRespectJSON("creating gate: %v", err)
 		}
 
@@ -358,7 +364,7 @@ Examples:
 			DependsOnID: gate.ID,
 			Type:        types.DepBlocks,
 		}
-		if err := store.AddDependency(ctx, dep, actor); err != nil {
+		if err := store.AddDependency(ctx, dep, currentActor()); err != nil {
 			return HandleErrorRespectJSON("adding blocking dependency: %v", err)
 		}
 
@@ -383,6 +389,7 @@ type gateCreateInput struct {
 	gateType  string
 	reason    string
 	awaitID   string
+	repo      string
 	titleFlag string
 	timeout   time.Duration
 }
@@ -393,6 +400,7 @@ func gatherGateCreateInput(cmd *cobra.Command) (gateCreateInput, error) {
 	in.gateType, _ = cmd.Flags().GetString("type")
 	in.reason, _ = cmd.Flags().GetString("reason")
 	in.awaitID, _ = cmd.Flags().GetString("await-id")
+	in.repo, _ = cmd.Flags().GetString("repo")
 	in.titleFlag, _ = cmd.Flags().GetString("title")
 	timeoutStr, _ := cmd.Flags().GetString("timeout")
 	if timeoutStr != "" {
@@ -417,10 +425,10 @@ func buildGateIssue(in gateCreateInput, targetID string) *types.Issue {
 		title = in.titleFlag
 	}
 
-	desc := fmt.Sprintf("Ad-hoc gate blocking %s", targetID)
-	if in.reason != "" {
-		desc = fmt.Sprintf("%s\n\nReason: %s", desc, in.reason)
-	}
+	// types owns the description format because it also owns the read back
+	// out of it (types.GateReason), which is what puts the reason on
+	// `bd show`'s "Gated by:" line and in the detail view's gated_by.
+	desc := types.GateDescription(targetID, in.reason)
 
 	return &types.Issue{
 		Title:       title,
@@ -565,7 +573,7 @@ Use --reason to provide context for why the gate was resolved.`,
 			return HandleError("%s is not a gate issue (type=%s)", gateID, issue.IssueType)
 		}
 
-		if err := store.CloseIssue(ctx, gateID, reason, actor, ""); err != nil {
+		if err := store.CloseIssue(ctx, gateID, reason, currentActor(), ""); err != nil {
 			return HandleError("closing gate: %v", err)
 		}
 
@@ -598,7 +606,7 @@ Gate types:
   gh:run   - Check GitHub Actions workflow runs
   gh:pr    - Check pull request merge status
   timer    - Check timer gates (auto-expire based on timeout)
-  bead     - Check cross-rig bead gates
+  bead     - Check bead gates
   all      - Check all gate types
 
 GitHub gates use the 'gh' CLI to query status:
@@ -609,7 +617,8 @@ A gate is resolved when:
   - gh:run: status=completed AND conclusion=success
   - gh:pr: state=MERGED
   - timer: current time > created_at + timeout
-  - bead: target bead status=closed
+  - bead: target bead status=closed, or a bead an earlier check saw in
+    this rig no longer exists
 
 A gate is escalated when:
   - gh:run: status=completed AND conclusion in (failure, canceled)
@@ -620,7 +629,7 @@ Examples:
   bd gate check --type=gh    # Check only GitHub gates
   bd gate check --type=gh:run # Check only workflow run gates
   bd gate check --type=timer # Check only timer gates
-  bd gate check --type=bead  # Check only cross-rig bead gates
+  bd gate check --type=bead  # Check only bead gates
   bd gate check --dry-run    # Show what would happen without changes
   bd gate check --escalate   # Escalate expired/failed gates`,
 	SilenceUsage:  true,
@@ -664,13 +673,21 @@ Examples:
 		}
 
 		var persistAwaitID func(gateID, runID string) error
+		var recordSeen func(gate *types.Issue) error
 		if !dryRun {
 			persistAwaitID = func(gateID, runID string) error {
 				return updateGateAwaitIDFunc(nil, gateID, runID)
 			}
+			recordSeen = func(gate *types.Issue) error {
+				if err := store.UpdateIssue(ctx, gate.ID, beadGateSeenUpdate(gate.AwaitID), currentActor()); err != nil {
+					return err
+				}
+				commandDidWrite.Store(true)
+				return nil
+			}
 		}
 
-		results := evaluateGates(ctx, filteredGates, time.Now(), routedBeadGateGetter{localStore: store}, persistAwaitID)
+		results := evaluateGates(ctx, filteredGates, time.Now(), routedBeadGateGetter{localStore: store}, persistAwaitID, recordSeen)
 
 		resolvedCount, escalatedCount, errorCount := applyGateCheckResults(
 			results, dryRun, escalateFlag,
@@ -709,7 +726,7 @@ func printNoOpenGates(typeFilter string) {
 	}
 }
 
-func evaluateGates(ctx context.Context, gates []*types.Issue, now time.Time, getter issueGetter, persistAwaitID func(gateID, runID string) error) []gateCheckResult {
+func evaluateGates(ctx context.Context, gates []*types.Issue, now time.Time, getter issueGetter, persistAwaitID func(gateID, runID string) error, recordSeen func(gate *types.Issue) error) []gateCheckResult {
 	results := make([]gateCheckResult, 0, len(gates))
 	for _, gate := range gates {
 		r := gateCheckResult{gate: gate}
@@ -721,7 +738,7 @@ func evaluateGates(ctx context.Context, gates []*types.Issue, now time.Time, get
 		case gate.AwaitType == "timer":
 			r.resolved, r.escalated, r.reason, r.err = checkTimer(gate, now)
 		case gate.AwaitType == "bead":
-			r.resolved, r.reason, r.err = checkBeadGate(ctx, getter, gate.AwaitID)
+			r.resolved, r.reason, r.err = evaluateBeadGate(ctx, gate, getter, recordSeen)
 		default:
 			continue
 		}
@@ -891,6 +908,14 @@ func githubRepoFromIssue(issue *types.Issue) (string, error) {
 		return "", nil
 	}
 
+	return validateGitHubRepo(repo)
+}
+
+// validateGitHubRepo accepts an OWNER/REPO or HOST/OWNER/REPO selector made of
+// the characters GitHub allows in those path components, and nothing else:
+// the value is passed to `gh --repo`, so a stray shell or URL character is
+// rejected here rather than reaching a subprocess argument.
+func validateGitHubRepo(repo string) (string, error) {
 	parts := strings.Split(repo, "/")
 	if len(parts) != 2 && len(parts) != 3 {
 		return "", fmt.Errorf("repo %q must use OWNER/REPO or HOST/OWNER/REPO", repo)
@@ -936,6 +961,38 @@ func repoMetadataForGate(gateType string, targetIssue *types.Issue) (json.RawMes
 	}
 	if repo == "" {
 		return nil, nil
+	}
+	metadata, err := json.Marshal(map[string]string{"repo": repo})
+	if err != nil {
+		return nil, err
+	}
+	return metadata, nil
+}
+
+// gateMetadataForCreate computes the metadata for a new ad-hoc gate from the
+// parsed flags: an explicit --repo wins, otherwise the gate inherits the
+// blocked issue's validated metadata.repo (repoMetadataForGate). Both create
+// routes call this so the flag cannot drift between them.
+//
+// --repo is only meaningful on gh:* gates, whose check runs against a GitHub
+// repository; on any other type it is refused rather than stored, because a
+// repo selector nothing reads would look like a working cross-repo gate.
+// Errors are fully worded here (they name the flag or the blocked issue) so
+// the callers print them as-is.
+func gateMetadataForCreate(in gateCreateInput, targetIssue *types.Issue) (json.RawMessage, error) {
+	if in.repo == "" {
+		metadata, err := repoMetadataForGate(in.gateType, targetIssue)
+		if err != nil {
+			return nil, fmt.Errorf("invalid GitHub repository metadata on %s: %w", targetIssue.ID, err)
+		}
+		return metadata, nil
+	}
+	if !isGitHubGateType(in.gateType) {
+		return nil, fmt.Errorf("--repo applies only to gh:run and gh:pr gates, not %q", in.gateType)
+	}
+	repo, err := validateGitHubRepo(in.repo)
+	if err != nil {
+		return nil, fmt.Errorf("--repo: %w", err)
 	}
 	metadata, err := json.Marshal(map[string]string{"repo": repo})
 	if err != nil {
@@ -1085,7 +1142,16 @@ func checkGHRunStatusInRepoWithRunner(runID, repo string, runGH ghCommandRunner)
 		}
 		// Check if run not found
 		if strings.Contains(string(stderr), "not found") {
-			return false, true, "workflow run not found", nil
+			// Name the repository, as checkGHPRWithRunner does. Real gh
+			// reports a missing run as "HTTP 404: Not Found (<api url>)",
+			// which this case-sensitive match skips: that returns the error
+			// below, whose URL names the repository. Keep the match narrow; a
+			// token without access to the repository gets the same 404.
+			where := "the current repository"
+			if repo != "" {
+				where = repo
+			}
+			return false, true, fmt.Sprintf("workflow run not found: %s in %s", runID, where), nil
 		}
 		return false, false, "", fmt.Errorf("gh run view failed: %s", string(stderr))
 	}
@@ -1146,7 +1212,14 @@ func checkGHPRWithRunner(gate *types.Issue, runGH ghCommandRunner) (resolved, es
 		}
 		// Check if PR not found
 		if strings.Contains(string(stderr), "not found") || strings.Contains(string(stderr), "Could not resolve") {
-			return false, true, "pull request not found", nil
+			// Name the repository the number was resolved against: a gate
+			// armed for another repository without metadata.repo escalates
+			// here on every check, and the bare text never said why.
+			where := "the current repository"
+			if repo != "" {
+				where = repo
+			}
+			return false, true, fmt.Sprintf("pull request not found: #%s in %s", gate.AwaitID, where), nil
 		}
 		return false, false, "", fmt.Errorf("gh pr view failed: %s", string(stderr))
 	}
@@ -1186,76 +1259,323 @@ func checkTimer(gate *types.Issue, now time.Time) (resolved, escalated bool, rea
 	return false, false, fmt.Sprintf("expires in %s", remaining), nil
 }
 
-// issueGetter is the one storage method checkBeadGate needs, split out so
+// issueGetter is the one storage method inspectBeadGate needs, split out so
 // tests can fake the lookup without standing up a Dolt store.
 type issueGetter interface {
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)
 }
 
+// beadGateTargetGetter is implemented by getters that also report where the
+// awaited bead was looked up. local is true when the answer came from this
+// rig's own store; a bead read through a prefix or contributor route is not
+// local. Only a local sighting is recorded on the gate (see
+// evaluateBeadGate), so a misdirected route can never let a later local miss
+// resolve the gate. A getter without this method is treated as local.
+type beadGateTargetGetter interface {
+	getBeadGateTarget(ctx context.Context, id string) (issue *types.Issue, local bool, err error)
+}
+
+// errBeadGateTargetUnconfirmed marks a miss that happened somewhere other
+// than this rig's own store: a route matched but its store could not be read,
+// or the routed store did not return the bead. Neither proves the bead is
+// gone, so the gate stays pending instead of resolving.
+var errBeadGateTargetUnconfirmed = errors.New("cannot confirm the awaited bead is gone")
+
+// beadGateNotFound reports whether a lookup failed because the bead does not
+// exist, as opposed to the read itself failing.
+func beadGateNotFound(err error) bool {
+	return gateProxiedNotFound(err) || isNotFoundErr(err)
+}
+
 // routedBeadGateGetter gives direct-mode gate checks the same local -> prefix
 // route -> contributor fallback used by other read commands. Routed stores are
-// opened read-only and closed before the result is returned.
+// opened read-only and closed before the result is returned. Unlike
+// getIssueWithRouting, a route that fails or misses is reported as
+// errBeadGateTargetUnconfirmed instead of as the local not-found.
 type routedBeadGateGetter struct {
 	localStore storage.DoltStorage
 }
 
 func (g routedBeadGateGetter) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
+	issue, _, err := g.getBeadGateTarget(ctx, id)
+	return issue, err
+}
+
+func (g routedBeadGateGetter) getBeadGateTarget(ctx context.Context, id string) (*types.Issue, bool, error) {
 	if g.localStore == nil {
-		return nil, fmt.Errorf("no local store available")
+		return nil, false, fmt.Errorf("no local store available")
 	}
-	result, err := getIssueWithRouting(ctx, g.localStore, id)
+	issue, err := g.localStore.GetIssue(ctx, id)
+	if err == nil && issue != nil {
+		return issue, true, nil
+	}
+	if err != nil && !beadGateNotFound(err) {
+		return nil, false, err
+	}
+
+	routed, routeErr := prefixRoutedBeadGateTarget(ctx, id)
+	if routed == nil {
+		var autoErr error
+		routed, autoErr = autoRoutedBeadGateTarget(ctx, g.localStore, id)
+		if routeErr == nil {
+			routeErr = autoErr
+		}
+	}
+	if routed != nil {
+		return routed, false, nil
+	}
+	if routeErr != nil {
+		return nil, false, routeErr
+	}
+	return issue, true, err
+}
+
+// prefixRoutedBeadGateTarget looks id up through routes.jsonl. It returns
+// (nil, nil) when no route sends id to another rig, so this rig's own answer
+// stands, and errBeadGateTargetUnconfirmed when routes.jsonl cannot be read or
+// a matched route's rig fails or does not return the bead.
+func prefixRoutedBeadGateTarget(ctx context.Context, id string) (*types.Issue, error) {
+	beadsDir := resolveCommandBeadsDir(dbPath)
+	if beadsDir == "" {
+		return nil, nil
+	}
+	routes, err := loadPrefixRoutes(beadsDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: reading routes.jsonl: %w", errBeadGateTargetUnconfirmed, err)
+	}
+	route := matchPrefixRoute(routes, id)
+	if route == nil || route.Path == "." {
+		return nil, nil
+	}
+
+	result, err := resolveViaPrefixRouting(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("%w: bead %s routes to %s: %w", errBeadGateTargetUnconfirmed, id, route.Path, err)
 	}
 	defer result.Close()
+	if result.Issue == nil {
+		return nil, fmt.Errorf("%w: bead %s routes to %s, which did not return it", errBeadGateTargetUnconfirmed, id, route.Path)
+	}
 	return result.Issue, nil
 }
 
-// checkBeadGate checks if a bead gate is satisfied.
-// Returns (satisfied, reason, err). A non-nil err means the awaited bead could
-// not be read at all (backend or transport failure): the gate is neither
-// satisfied nor pending, and the caller reports it as an error rather than
-// letting a dead store read as "still waiting". A missing bead is not an
-// error; it stays pending with a not-found reason.
-//
-// A plain await_id names a bead in this rig. The historical
-// <rig>:<bead-id> form uses the bead ID as the routed lookup key; the rig
-// component is retained for compatibility while routes.jsonl remains keyed by
-// bead prefix. The supplied getter owns local-versus-routed lookup policy.
-func checkBeadGate(ctx context.Context, st issueGetter, awaitID string) (bool, string, error) {
-	if awaitID == "" {
-		return false, "bead gate has no await_id", nil
-	}
-	targetID := awaitID
-	if strings.Contains(awaitID, ":") {
-		parts := strings.SplitN(awaitID, ":", 2)
-		if parts[0] == "" || parts[1] == "" {
-			return false, fmt.Sprintf("invalid cross-rig bead gate %q: expected <rig>:<bead-id>", awaitID), nil
-		}
-		targetID = parts[1]
-	}
-	if st == nil {
-		return false, fmt.Sprintf("bead gate %q: no local store available", awaitID), nil
-	}
-	issue, err := st.GetIssue(ctx, targetID)
+// autoRoutedBeadGateTarget looks id up in the contributor auto-routed store.
+// It returns (nil, nil) when no auto-route is configured; like a prefix
+// route, a store that cannot be opened or does not return the bead leaves its
+// absence unconfirmed.
+func autoRoutedBeadGateTarget(ctx context.Context, localStore storage.DoltStorage, id string) (*types.Issue, error) {
+	routedStore, routed, _, err := openRoutedReadStore(ctx, localStore)
 	if err != nil {
-		if gateProxiedNotFound(err) || isNotFoundErr(err) {
-			return false, fmt.Sprintf("bead gate %q: bead not found", awaitID), nil
+		return nil, fmt.Errorf("%w: %w", errBeadGateTargetUnconfirmed, err)
+	}
+	if !routed {
+		return nil, nil
+	}
+	defer func() { _ = routedStore.Close() }()
+
+	result, err := resolveAndGetFromStore(ctx, routedStore, id, true)
+	if err != nil {
+		return nil, fmt.Errorf("%w: looking up bead %s in the auto-routed store: %w", errBeadGateTargetUnconfirmed, id, err)
+	}
+	if result.Issue == nil {
+		return nil, fmt.Errorf("%w: the auto-routed store did not return bead %s", errBeadGateTargetUnconfirmed, id)
+	}
+	return result.Issue, nil
+}
+
+// lookupBeadGateTarget asks st for id and reports whether the answer came
+// from this rig's own store.
+func lookupBeadGateTarget(ctx context.Context, st issueGetter, id string) (*types.Issue, bool, error) {
+	if g, ok := st.(beadGateTargetGetter); ok {
+		return g.getBeadGateTarget(ctx, id)
+	}
+	issue, err := st.GetIssue(ctx, id)
+	return issue, true, err
+}
+
+// beadGateCheck is the outcome of one bead gate lookup. gone means this rig's
+// own store answered that the awaited bead does not exist; seenHere means it
+// returned the bead, not yet closed.
+type beadGateCheck struct {
+	resolved bool
+	reason   string
+	targetID string
+	gone     bool
+	seenHere bool
+}
+
+// beadGateTargetID returns the bead ID named by a bead gate's await_id. A
+// plain await_id names a bead in this rig. The historical <rig>:<bead-id>
+// form uses the bead ID as the routed lookup key; the rig component is
+// retained for compatibility while routes.jsonl remains keyed by bead prefix.
+// When there is nothing to look up, it returns the reason the gate stays
+// pending instead.
+func beadGateTargetID(awaitID string) (targetID, pendingReason string) {
+	if awaitID == "" {
+		return "", "bead gate has no await_id"
+	}
+	if !strings.Contains(awaitID, ":") {
+		return awaitID, ""
+	}
+	parts := strings.SplitN(awaitID, ":", 2)
+	if parts[0] == "" || parts[1] == "" {
+		return "", fmt.Sprintf("invalid cross-rig bead gate %q: expected <rig>:<bead-id>", awaitID)
+	}
+	return parts[1], ""
+}
+
+// inspectBeadGate looks up a bead gate's target. A non-nil err means the
+// awaited bead could not be read at all (backend or transport failure): the
+// gate is neither resolved nor pending, and the caller reports it as an error
+// rather than letting a dead store read as "still waiting". A bead that this
+// rig's own store reports missing is not an error either: it is reported gone,
+// and resolved with a "no longer exists" reason. A miss anywhere else (see
+// errBeadGateTargetUnconfirmed) keeps the gate pending.
+//
+// The supplied getter owns local-versus-routed lookup policy. The lookup alone
+// is not the bead-gate rule: a gone bead resolves the gate only after an
+// earlier sighting, so decide through evaluateBeadGate.
+func inspectBeadGate(ctx context.Context, st issueGetter, awaitID string) (beadGateCheck, error) {
+	targetID, pendingReason := beadGateTargetID(awaitID)
+	if pendingReason != "" {
+		return beadGateCheck{reason: pendingReason}, nil
+	}
+	c := beadGateCheck{targetID: targetID}
+	if st == nil {
+		c.reason = fmt.Sprintf("bead gate %q: no local store available", awaitID)
+		return c, nil
+	}
+
+	issue, local, err := lookupBeadGateTarget(ctx, st, targetID)
+	switch {
+	case errors.Is(err, errBeadGateTargetUnconfirmed):
+		// Checked before the not-found test below, because the routing error
+		// it wraps can itself be a not-found from the routed store.
+		c.reason = fmt.Sprintf("bead gate %q: %v", awaitID, err)
+	case err != nil && !beadGateNotFound(err):
+		return c, fmt.Errorf("bead gate %q: %w", awaitID, err)
+	case err != nil || issue == nil:
+		// A bead that no longer exists can never close, so a gate awaiting it
+		// would stay pending forever. Resolve it.
+		c.resolved, c.gone = true, true
+		c.reason = fmt.Sprintf("awaited bead %s no longer exists (treated as resolved)", targetID)
+	case issue.Status == types.StatusClosed:
+		c.resolved = true
+		c.reason = fmt.Sprintf("bead %s closed", targetID)
+	default:
+		c.seenHere = local
+		c.reason = fmt.Sprintf("bead %s is %s", targetID, issue.Status)
+	}
+	return c, nil
+}
+
+// beadGateSeenKey is the gate metadata key that records a bd gate check
+// seeing the awaited bead in this rig's own store. Its value is the await_id
+// that was seen, so retargeting the gate invalidates the record.
+const beadGateSeenKey = "await_seen"
+
+// evaluateBeadGate is the bd gate check rule for a bead gate. It adds one
+// condition to inspectBeadGate: an awaited bead that does not exist resolves
+// the gate only if an earlier check saw it here and the stored gate still
+// records that sighting (see rereadBeadGate). An await_id that never named a
+// real bead (a typo, a short ID, a rig without a route) keeps the gate pending
+// with a diagnostic instead of unblocking its step. getter reads the gate's own
+// store. recordSeen, when non-nil, records the first sighting of the bead on
+// the gate.
+func evaluateBeadGate(ctx context.Context, gate *types.Issue, getter issueGetter, recordSeen func(gate *types.Issue) error) (bool, string, error) {
+	c, err := inspectBeadGate(ctx, getter, gate.AwaitID)
+	if err != nil {
+		return false, "", err
+	}
+	seen := beadGateTargetSeen(gate)
+	if c.gone && !seen {
+		return false, fmt.Sprintf("awaited bead %s not found, and no earlier gate check saw it; check the await_id, or close the gate with bd gate resolve", c.targetID), nil
+	}
+	if c.gone {
+		if pendingReason, err := rereadBeadGate(ctx, getter, gate, c.targetID); err != nil || pendingReason != "" {
+			return false, pendingReason, err
 		}
-		return false, "", fmt.Errorf("bead gate %q: %w", awaitID, err)
 	}
-	if issue == nil {
-		return false, fmt.Sprintf("bead gate %q: bead not found", awaitID), nil
+	if c.seenHere && !seen && recordSeen != nil {
+		if err := recordSeen(gate); err != nil {
+			return false, "", fmt.Errorf("recording that bead %s exists: %w", c.targetID, err)
+		}
 	}
-	if issue.Status == types.StatusClosed {
-		return true, fmt.Sprintf("bead %s closed", targetID), nil
+	return c.resolved, c.reason, nil
+}
+
+// rereadBeadGate reads gate back from getter once its awaited bead, targetID,
+// was found gone, and returns a pending reason unless the stored gate still
+// waits on the same await_id and records its sighting. The caller's copy can
+// predate a rename of the bead: bd rename points the gate at the new ID
+// before the bead takes it (see renameIssueKeepingBeadGates), so a check that
+// listed the gate before the rename and looks the bead up after it finds the
+// old ID gone on a copy that still records the sighting. This read comes after
+// that miss, so it sees the gate already moved. An error means the gate could
+// not be read at all.
+func rereadBeadGate(ctx context.Context, getter issueGetter, gate *types.Issue, targetID string) (string, error) {
+	stored, local, err := lookupBeadGateTarget(ctx, getter, gate.ID)
+	switch {
+	case err != nil && !errors.Is(err, errBeadGateTargetUnconfirmed) && !beadGateNotFound(err):
+		return "", fmt.Errorf("reading gate %s back: %w", gate.ID, err)
+	case err != nil || stored == nil || !local:
+		return fmt.Sprintf("awaited bead %s not found, and the gate could not be read back to confirm it still waits on it; check it again", targetID), nil
+	case stored.AwaitID != gate.AwaitID || !beadGateTargetSeen(stored):
+		return fmt.Sprintf("awaited bead %s not found, but the gate changed while it was being checked; check it again", targetID), nil
 	}
-	return false, fmt.Sprintf("bead %s is %s", targetID, issue.Status), nil
+	return "", nil
+}
+
+// beadGateTargetSeen reports whether gate metadata records a sighting of the
+// gate's current await_id. Unreadable metadata counts as no sighting.
+func beadGateTargetSeen(gate *types.Issue) bool {
+	return gate != nil && gate.AwaitID != "" && beadGateSeenID(gate) == gate.AwaitID
+}
+
+// beadGateSeenID returns the await_id that gate metadata records a sighting
+// of, or "" when it records none. Unreadable metadata counts as none.
+func beadGateSeenID(gate *types.Issue) string {
+	if len(gate.Metadata) == 0 {
+		return ""
+	}
+	var meta map[string]json.RawMessage
+	if err := json.Unmarshal(gate.Metadata, &meta); err != nil {
+		return ""
+	}
+	var seen string
+	if err := json.Unmarshal(meta[beadGateSeenKey], &seen); err != nil {
+		return ""
+	}
+	return seen
+}
+
+// beadGateSeenUpdate is the update that records a sighting of awaitID. It is
+// a metadata merge operation, resolved against the row inside the write
+// transaction, so other metadata keys on the gate are preserved.
+func beadGateSeenUpdate(awaitID string) map[string]interface{} {
+	value, _ := json.Marshal(awaitID)
+	return map[string]interface{}{
+		storageissueops.OpSetMetadata: map[string]json.RawMessage{beadGateSeenKey: value},
+	}
+}
+
+// beadGateRetargetUpdate is the update that points a bead gate at awaitID.
+// With dropSeen it also removes the gate's sighting in the same write, for a
+// rename step that cannot keep it (see renameIssueKeepingBeadGates).
+func beadGateRetargetUpdate(awaitID string, dropSeen bool) map[string]interface{} {
+	update := map[string]interface{}{"await_id": awaitID}
+	if dropSeen {
+		update[storageissueops.OpUnsetMetadata] = []string{beadGateSeenKey}
+	}
+	return update
 }
 
 // closeGate closes a gate issue with the given reason
 func closeGate(_ interface{}, gateID, reason string) error {
-	if err := store.CloseIssue(rootCtx, gateID, reason, actor, ""); err != nil {
+	if err := store.CloseIssue(rootCtx, gateID, reason, currentActor(), ""); err != nil {
 		return err
 	}
 	commandDidWrite.Store(true)
@@ -1299,6 +1619,7 @@ func init() {
 	gateCreateCmd.Flags().StringP("type", "t", "human", "Gate type (human, timer, gh:run, gh:pr)")
 	gateCreateCmd.Flags().StringP("reason", "r", "", "Reason for the gate")
 	gateCreateCmd.Flags().String("await-id", "", "Condition identifier (run ID, PR number, etc.)")
+	gateCreateCmd.Flags().String("repo", "", "GitHub repository the gh:run/gh:pr condition is checked in (OWNER/REPO or HOST/OWNER/REPO); default: the blocked issue's metadata.repo, else the current repository")
 	gateCreateCmd.Flags().String("timeout", "", "Timeout duration (e.g., 2h, 30m)")
 	gateCreateCmd.Flags().String("title", "", "Custom gate title (default: \"Gate: <type>\")")
 	_ = gateCreateCmd.MarkFlagRequired("blocks")

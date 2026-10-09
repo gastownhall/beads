@@ -131,6 +131,14 @@ type Backend struct {
 	Open func(ctx context.Context, beadsDir string) (storage.DoltStorage, error)
 
 	// OpenReadOnly opens the workspace for a read-only command.
+	//
+	// cmd/bd opens two postures through this one hook: the root pre-run's
+	// CLASSIFIED read commands, which may still write (`bd ready --claim`
+	// claims through the store it returns, as the built-in embedded arm's
+	// OpenForReadOnlyCommand allows), and the non-mutating opens — previews,
+	// cross-repo hydration, doctor — which must not. A backend cannot tell the
+	// two apart here, so a caller must not assume the store refuses writes:
+	// the http client backend answers with a writable one and says so.
 	OpenReadOnly func(ctx context.Context, beadsDir string) (storage.DoltStorage, error)
 
 	// WorkspaceIsBeadsDir means metadata.json and the remote store are enough

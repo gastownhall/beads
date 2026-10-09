@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -166,6 +165,14 @@ func TestProxiedServerConfig(t *testing.T) {
 			t.Error("expected test.removeme to be absent from config list after unset")
 		}
 	})
+}
+
+// TestProxiedServerConfigB holds more of TestProxiedServerConfig's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerConfigB(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("config_get_missing_key", func(t *testing.T) {
 		t.Parallel()
@@ -266,7 +273,7 @@ func TestProxiedServerConfig(t *testing.T) {
 			t.Errorf("beads.role set should not advance HEAD: before=%s after=%s", before, after)
 		}
 
-		gitCmd := exec.Command("git", "config", "--get", "beads.role")
+		gitCmd := gitCommand("config", "--get", "beads.role")
 		gitCmd.Dir = p.dir
 		out, err := gitCmd.Output()
 		if err != nil {

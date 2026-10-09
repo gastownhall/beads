@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -34,7 +33,7 @@ func TestProxiedInitRemoteURLUsesSelectedProject(t *testing.T) {
 	}
 	runGit := func(t *testing.T, dir string, args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "fixture git %v: %s", args, out)
@@ -105,7 +104,7 @@ func TestProxiedInitRemoteURLUsesSelectedProject(t *testing.T) {
 					t.Setenv("GIT_CONFIG_COUNT", "1")
 					t.Setenv("GIT_CONFIG_KEY_0", "url.file:///inline-origin.insteadOf")
 					t.Setenv("GIT_CONFIG_VALUE_0", selectedURL)
-					probe := exec.Command("git", "remote", "get-url", "origin")
+					probe := gitCommand("remote", "get-url", "origin")
 					probe.Dir = target // Prove this row distinguishes inherited inline config.
 					out, err := probe.CombinedOutput()
 					require.NoError(t, err, "%s", out)
@@ -379,7 +378,7 @@ func TestProxiedInitTailRoleIgnoresInheritedGitRouting(t *testing.T) {
 	require.NoError(t, os.WriteFile(globalPath, nil, 0600))
 	runGit := func(t *testing.T, dir string, args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "fixture git %v: %s", args, out)
@@ -455,7 +454,7 @@ func TestProxiedInitTailRoleProbeUsesSelectedDirectory(t *testing.T) {
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	runGit := func(t *testing.T, dir string, args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "fixture git %v: %s", args, out)
@@ -496,7 +495,7 @@ func TestProxiedInitTailRoleProbeUsesSelectedDirectory(t *testing.T) {
 			if tc.initial != "" {
 				runGit(t, target, "config", "--local", "beads.role", tc.initial)
 			}
-			probe := exec.Command("git", "rev-parse", "--git-dir")
+			probe := gitCommand("rev-parse", "--git-dir")
 			probe.Dir, probe.Env = target, gitenv.ScrubRouting(os.Environ())
 			require.Equal(t, tc.kind != "nonrepo", probe.Run() == nil, "owned target repository precondition")
 			if tc.kind == "nonrepo" {
@@ -567,7 +566,7 @@ func TestProxiedInitTailGitUsesSelectedDirectory(t *testing.T) {
 	}
 	runGit := func(dir string, args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "fixture git %v: %s", args, out)

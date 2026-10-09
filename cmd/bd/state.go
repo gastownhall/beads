@@ -197,7 +197,10 @@ func runSetState(ctx context.Context, issueID, dimension, newValue, reason strin
 		eventDesc = fmt.Sprintf("Set %s to %s", dimension, newValue)
 	}
 	if reason != "" {
-		eventDesc += "\n\nReason: " + reason
+		// The same marker types.GateDescription writes, from the one constant
+		// that owns its spelling — types.GateReason reads any description
+		// carrying it, so the two writers must not drift apart by accident.
+		eventDesc += types.ReasonMarker + reason
 	}
 
 	lifecycle, err := openIssueLifecycle()
@@ -223,7 +226,7 @@ func runSetState(ctx context.Context, issueID, dimension, newValue, reason strin
 	// could not write, so an event that disagreed with its subject's plane
 	// fails the command instead of silently landing in the wrong table.
 	created, err := lifecycle.Create(ctx, issueops.CreateRequest{
-		Actor: actor,
+		Actor: currentActor(),
 		Issue: &types.Issue{
 			Title:       eventTitle,
 			Description: eventDesc,
@@ -251,7 +254,7 @@ func runSetState(ctx context.Context, issueID, dimension, newValue, reason strin
 	// failed. The plane needs no branch: IssuePlaneOnly stays false and the
 	// role resolves it inside its own transaction.
 	if _, err := lifecycle.Update(ctx, issueops.UpdateRequest{
-		Actor:   actor,
+		Actor:   currentActor(),
 		IssueID: fullID,
 		Patch: issueops.IssuePatch{Labels: issueops.LabelPatch{
 			Add:    []string{newLabel},

@@ -1,5 +1,6 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//tools/bazel:race.bzl", "go_test_race_off")
 
 go_library(
     name = "embeddeddolt",
@@ -94,7 +95,11 @@ go_library(
 go_test(
     name = "embeddeddolt_test",
     # -race -short runs ~6 min unsharded (pr-core gives go test -timeout=30m).
-    # Bazel shards by test count, not duration.
+    # Bazel shards by test count, not duration: rules_go deals tests out
+    # round-robin. At 8 shards one shard drew TestWithPeerAuth,
+    # TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPassword and
+    # TestPushCommitsPendingChangesFirst (100-153s on rbe-west); 9 spreads
+    # them (measured costs put the heaviest shard at ~87s).
     size = "large",
     timeout = "long",
     srcs = [
@@ -179,6 +184,7 @@ go_test(
         "merge_blockers_test.go",
         "merge_strategy_test.go",
         "metadata_cas_contract_test.go",
+        "migrate_consent_gate_test.go",
         "migrate_dep_rekey_dedup_test.go",
         "migrate_events_flip_test.go",
         "migrate_frozen_guard_convergence_test.go",
@@ -232,7 +238,7 @@ go_test(
         "workspace_config_contract_test.go",
     ],
     embed = [":embeddeddolt"],
-    shard_count = 8,
+    shard_count = 9,
     deps = [
         "//:beads",
         "//backend/conformance",
@@ -267,10 +273,10 @@ go_test(
     ],
 )
 
-# Runs 15 Bazel shards against every top-level Test* function in
+# Runs 20 Bazel shards against every top-level Test* function in
 # internal/storage/embeddeddolt/*_test.go but TestConformance, assigned by
-# the manifest's 15-shard block (duration-balanced; see
-# scripts/ci/embedded_storage_test_durations.json), with
+# the manifest's 20-shard block (duration-balanced on rbe-west measurements;
+# see scripts/ci/embedded_storage_test_durations.json), with
 # BEADS_TEST_EMBEDDED_DOLT=1; the wrapper points
 # BEADS_TEST_EMBEDDED_TEST_BINARY at this binary, which the concurrency test
 # re-executes. This is a *different* shard count from PR Risk's legacy
@@ -306,7 +312,7 @@ sh_test(
         "//:.github/scripts/embedded-storage-test-shards.txt",
     ],
     env = {"BEADS_TEST_EMBEDDED_DOLT": "1"},
-    shard_count = 15,
+    shard_count = 20,
     tags = ["embedded"],
 )
 
@@ -365,6 +371,49 @@ sh_test(
     tags = ["embedded"],
 )
 
+# embeddeddolt_test without the race detector: the input of
+# embeddeddolt_batch_apply_nonrace_test below.
+#
+# Tags:
+#   manual: only that variant's input, never a build target of its own.
+go_test_race_off(
+    name = "embeddeddolt_race_off",
+    tags = ["manual"],
+    test = ":embeddeddolt_test",
+)
+
+# The large embedded batch applies at full size, which every race lane
+# shrinks or skips (raceEnabled; see large_batch_apply_measure_test.go): the
+# 1000-item TestBatchApplyContract/BoundsTheItemCount and wall-clock shapes,
+# the pinned 712-item statement counts, and the 458-issue batch-create
+# equivalence scenarios. Non-race, BEADS_TEST_EMBEDDED_DOLT=1, the selection
+# nightly.yml's retired "Embedded Dolt batch-apply suite (non-race)" step ran
+# with `go test` on a runner. The wall-clock test only logs its timings, so
+# a shared executor cannot fail it.
+#
+# Tags:
+#   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
+#     selected by --config=embedded.
+sh_test(
+    name = "embeddeddolt_batch_apply_nonrace_test",
+    size = "large",
+    # The step's -timeout 20m, with the same -test.timeout=19m deviation as
+    # the conformance variants above, so Go's timeout fires (with a goroutine
+    # dump) before Bazel's 1200s action limit.
+    timeout = "eternal",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = [
+        "$(rootpath :embeddeddolt_race_off)",
+        "-test.v",
+        "-test.count=1",
+        "-test.timeout=19m",
+        "-test.run=^(TestBatchApplyContract|TestLargeBatchApplyWallClock_Embedded|TestLargeBatchApplyStatementCounts712_Embedded|TestCreateBatchFastPathsMatchPerRowLarge_Embedded)$$",
+    ],
+    data = [":embeddeddolt_race_off"],
+    env = {"BEADS_TEST_EMBEDDED_DOLT": "1"},
+    tags = ["embedded"],
+)
+
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(
@@ -381,12 +430,51 @@ filegroup(
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(
-    name = "repo_files",
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
     srcs = glob(
         ["**"],
         exclude = [
             "**/*.db",
             "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
             "**/*.out",
             "**/*.prof",
             "**/*.pyc",
@@ -395,7 +483,7 @@ filegroup(
             "**/node_modules/**",
         ],
     ),
-    visibility = ["//:__pkg__"],
+    visibility = ["//:__subpackages__"],
 )
 
 # --- end repo_files ---

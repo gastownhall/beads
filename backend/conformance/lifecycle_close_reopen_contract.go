@@ -1092,6 +1092,87 @@ func RunLifecycleResultsAreHydratedPostStateSnapshots(t *testing.T, ctx context.
 	lifecycleCloseReopenAssertSnapshot(t, "reopen result", reopened.Issue, peer)
 }
 
+// RunLifecycleResultsCarryThePostWriteRowVersion pins that every write this
+// role owns — Update, Close and Reopen — hands back a result whose
+// Issue.RowVersion is the row's REAL post-write optimistic-concurrency token,
+// not a zero value. types.Issue.RowVersion is `json:"-"`: an implementation
+// that forgot to populate it on the way back from its own storage would still
+// compile and would still pass every content assertion elsewhere in this
+// file, because none of them read RowVersion.
+//
+// The assertion is a CHAIN rather than three independent zero-checks, because
+// a zero-check alone cannot tell a dropped token from a WRONG one (an
+// implementation could answer a nonzero constant, or the PRE-write version,
+// and still clear it). Each step feeds the token the previous write answered
+// with straight into the next write's ExpectedVersion, with no intervening
+// read: the claim's token guards the Notes update, Update's token guards
+// Close, and Close's token guards Reopen. A guard only passes if the token it
+// was given equals the row's actual current version at the instant the next
+// write runs, so a wrong or stale token fails closed — the next write
+// refuses with ErrVersionMismatch — rather than silently succeeding. Any one
+// dropped member breaks the chain at that link.
+//
+// The chain's first link is a CLAIM-ONLY request (Claim: true, no Patch),
+// deliberately unguarded (UpdateRequest.Claim forbids combining Claim with
+// ExpectedVersion — see issueops.UpdateRequest's doc): a backend that answers
+// Lifecycle.Update's generic patch wire but special-cases a bare claim onto a
+// different internal path (the http leg once dialed the Claimer role directly
+// for one; it now folds the claim into updateIssue, keeping claimIssue only as
+// the fallback for a server that predates updateIssue's `claim` member) could
+// easily populate RowVersion on one path and not the other; this exercises
+// the claim-only shape specifically, not just the Patch shape the rest of the
+// chain already covered.
+func RunLifecycleResultsCarryThePostWriteRowVersion(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
+	t.Helper()
+
+	id := fixture.IssuePrefix + "-lcr-rowversion"
+	lifecycleCloseReopenSeedIssue(t, ctx, fixture, id, types.StatusOpen, nil)
+
+	claimed, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{
+		Actor: "writer", IssueID: id, Claim: true,
+	})
+	if err != nil {
+		t.Fatalf("claim %s: %v", id, err)
+	}
+	if claimed.Issue == nil || claimed.Issue.RowVersion == 0 {
+		t.Fatalf("claim result RowVersion = %+v, want a nonzero post-write token", claimed.Issue)
+	}
+	claimVersion := claimed.Issue.RowVersion
+
+	updated, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{
+		Actor: "writer", IssueID: id, ExpectedVersion: &claimVersion,
+		Patch: publicops.IssuePatch{Notes: publicops.Field[string]{Set: true, Value: "rowversion chain"}},
+	})
+	if err != nil {
+		t.Fatalf("update %s guarded by the claim's own token: %v — the claim result's RowVersion was not the row's real current version", id, err)
+	}
+	if updated.Issue == nil || updated.Issue.RowVersion == 0 {
+		t.Fatalf("update result RowVersion = %+v, want a nonzero post-write token", updated.Issue)
+	}
+	updateVersion := updated.Issue.RowVersion
+
+	closed, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{
+		Actor: "writer", IssueID: id, ExpectedVersion: &updateVersion,
+	})
+	if err != nil {
+		t.Fatalf("close %s guarded by the update's own token: %v — the update result's RowVersion was not the row's real current version", id, err)
+	}
+	if closed.Issue == nil || closed.Issue.RowVersion == 0 {
+		t.Fatalf("close result RowVersion = %+v, want a nonzero post-write token", closed.Issue)
+	}
+	closeVersion := closed.Issue.RowVersion
+
+	reopened, err := fixture.Lifecycle.Reopen(ctx, publicops.ReopenRequest{
+		Actor: "writer", IssueID: id, ExpectedVersion: &closeVersion,
+	})
+	if err != nil {
+		t.Fatalf("reopen %s guarded by the close's own token: %v — the close result's RowVersion was not the row's real current version", id, err)
+	}
+	if reopened.Issue == nil || reopened.Issue.RowVersion == 0 {
+		t.Fatalf("reopen result RowVersion = %+v, want a nonzero post-write token", reopened.Issue)
+	}
+}
+
 // RunLifecycleCloseAndReopenRequireActorAndIssueID pins the deterministic
 // validation floor both verbs sit on. The Lifecycle doc states "Deterministic
 // request validation failures match ErrValidation" and "Refusals and
