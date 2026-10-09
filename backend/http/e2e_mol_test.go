@@ -92,6 +92,22 @@ func TestE2E_MoleculesOverHTTP(t *testing.T) {
 		t.Errorf("mol progress current_step_id = %q, want %q: %s", id, step1, progress)
 	}
 
+	// mol show reads through the same library entry (issueops.LoadMolecule).
+	var shown struct {
+		Root   struct{ ID string } `json:"root"`
+		Issues []struct {
+			ID       string `json:"id"`
+			Assignee string `json:"assignee"`
+		} `json:"issues"`
+	}
+	showOut := mustBD("mol", "show", root, "--json").stdout
+	if err := json.Unmarshal([]byte(strings.TrimSpace(showOut)), &shown); err != nil {
+		t.Fatalf("parse mol show: %v\n%s", err, showOut)
+	}
+	if shown.Root.ID != root || len(shown.Issues) != 4 {
+		t.Errorf("mol show %s = root %q with %d issues, want %s and 4 (root + 3 steps): %s", root, shown.Root.ID, len(shown.Issues), root, showOut)
+	}
+
 	t.Run("mol current without an id", func(t *testing.T) {
 		r := bd("mol", "current", "--json")
 		// Whatever the backend can do, it must not answer an EMPTY list for an

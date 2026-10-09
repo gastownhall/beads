@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -54,16 +55,33 @@ Example:
 			return HandleErrorRespectJSON("molecule '%s' not found", args[0])
 		}
 
-		subgraph, err := loadTemplateSubgraph(ctx, store, moleculeID)
+		roles, err := directMoleculeRoles(store)
 		if err != nil {
 			return HandleErrorRespectJSON("loading molecule: %v", err)
 		}
-
-		if molShowParallel {
-			return showMoleculeWithParallel(subgraph)
-		}
-		return showMolecule(subgraph)
+		return runMolShow(ctx, roles, moleculeID)
 	},
+}
+
+// runMolShow loads the molecule through the library's one molecule read
+// (issueops.LoadMolecule, over the route's roles) and renders it. Membership
+// is the parent-child edge on every route, as for mol current, mol progress
+// and ready --mol.
+func runMolShow(ctx context.Context, roles moleculeRoles, moleculeID string) error {
+	graph, err := issueops.LoadMolecule(ctx, roles.molecule, moleculeID)
+	if err != nil {
+		return HandleErrorRespectJSON("loading molecule: %v", err)
+	}
+	subgraph := &MoleculeSubgraph{
+		Root:         graph.Root,
+		Issues:       graph.Issues,
+		Dependencies: graph.Dependencies,
+		IssueMap:     graph.IssueMap,
+	}
+	if molShowParallel {
+		return showMoleculeWithParallel(subgraph)
+	}
+	return showMolecule(subgraph)
 }
 
 func showMolecule(subgraph *MoleculeSubgraph) error {

@@ -160,27 +160,16 @@ func runPourProxiedServer(ctx context.Context, in pourInput) error {
 }
 
 func runMolShowProxiedServer(ctx context.Context, arg string) error {
-	uw, err := proxiedOpenReadUOW(ctx)
-	if err != nil {
-		return err
-	}
-	defer uw.Close(ctx)
-
-	r := uowMolReader{uw: uw}
-	moleculeID, err := utils.ResolvePartialID(ctx, r, arg)
+	moleculeID, err := proxiedResolvePartialID(ctx, arg)
 	if err != nil {
 		return HandleErrorRespectJSON("molecule '%s' not found", arg)
 	}
 
-	subgraph, err := loadTemplateSubgraph(ctx, r, moleculeID)
+	roles, err := proxiedMoleculeRoles()
 	if err != nil {
 		return HandleErrorRespectJSON("loading molecule: %v", err)
 	}
-
-	if molShowParallel {
-		return showMoleculeWithParallel(subgraph)
-	}
-	return showMolecule(subgraph)
+	return runMolShow(ctx, roles, moleculeID)
 }
 
 func runMolCurrentProxiedServer(ctx context.Context, args []string, agent string, limit int, rangeStr string) error {
