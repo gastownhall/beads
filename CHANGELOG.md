@@ -272,7 +272,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an HTTP `dependencies:add`, a `batch:apply` edge and `bd create --graph`'s own
   edges are refused like `bd dep add` (HTTP: 400 `invalid_argument`). `bd dep
   add`, `bd dep --blocks`, `bd link` and `bd dep add --file` print the same
-  messages as before.
+  messages as before, and a `bd batch` script's `dep add` line, which neither
+  backend checked, is now refused with that message and rolls the whole batch
+  back. The refusal is decided from the two ids, ahead of every check that
+  reads the stored graph, so for a child whose parent-child edge is already
+  stored (a `bd create --parent` child) an HTTP caller now gets that 400 where
+  it used to get 409 `dependency_cycle` (a blocking type) or
+  `dependency_exists` (any other type).
 - **PRs based on `hotfix/**` branches now run full CI, not just
   cross-version historical smokes and triage labeling.** `pr.yml`,
   `pr-risk.yml`, `conformance.yml`, `cross-version-smoke.yml` and

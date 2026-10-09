@@ -143,7 +143,7 @@ type GraphApplyDryRunRow struct {
 	ParentID  string `json:"parent_id,omitempty"`
 }
 
-const graphApplyDryRunTransactionValidationNote = "dry-run validates the graph structure only; live create may still reject parent-child blocking paths after resolving stored dependencies"
+const graphApplyDryRunTransactionValidationNote = "dry-run validates the graph structure only; live create may still reject parent-child blocking paths after resolving stored dependencies, or an edge that gates a dotted-id child on its own ancestor"
 
 // Known-field sets list the JSON keys recognized on each plan struct; unknown
 // keys warn about schema typos. Derived from json tags so they can't drift. (GH#3367)

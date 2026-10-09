@@ -2637,12 +2637,18 @@ func dependencyEditorHistoryProbe(t *testing.T, ctx context.Context, fixture Dep
 // dotted-id child to its own ancestor is refused as a
 // *DottedChildDependencyError (ErrValidation) on every leg, and nothing is
 // written. (It is decided before any per-edge probe, so the probe-skipped
-// spelling, which the wire does not publish, adds nothing here.) It used to be enforced only by the CLI ahead
-// of the role, so an HTTP or embedded caller could gate bd-abc.1 on bd-abc.
+// spelling, which the wire does not publish, adds nothing here.) It used to be
+// enforced only by the CLI ahead of the role, so an HTTP or embedded caller
+// could gate bd-abc.1 on bd-abc.
 //
 // POSITIVE HALF: the hierarchy itself — a parent-child edge to the IMMEDIATE
 // dotted parent — is allowed, and so is an edge between siblings. A body that
 // refused every edge touching a dotted id would satisfy the refusals alone.
+//
+// WITH THE HIERARCHY STORED: once that parent-child edge exists (the shape
+// `bd create --parent` leaves), a blocking edge on the same pair is still this
+// refusal, not the type or hierarchy conflict the stored edge would raise — the
+// rule reads nothing, so it answers first — and the stored edge survives.
 func RunDependencyEditorRefusesADottedChildGatedOnItsOwnParent(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
 	t.Helper()
 	parent := fixture.IssuePrefix + "-dotted"
@@ -2692,4 +2698,15 @@ func RunDependencyEditorRefusesADottedChildGatedOnItsOwnParent(t *testing.T, ctx
 	}
 	assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", grandchild, child, string(publicops.DepParentChild), 1)
 	assertDependencyEdgeCount(t, ctx, fixture, "dependencies", sibling, child, 1)
+
+	_, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: grandchild, DependsOnID: child, Type: publicops.DepBlocks}},
+	})
+	var dotted *publicops.DottedChildDependencyError
+	if !errors.As(err, &dotted) || !errors.Is(err, publicops.ErrValidation) {
+		t.Errorf("blocks on a parent whose parent-child edge is stored: error = %v, want *DottedChildDependencyError matching ErrValidation", err)
+	}
+	assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", grandchild, child, string(publicops.DepParentChild), 1)
+	assertDependencyEdgeCount(t, ctx, fixture, "dependencies", grandchild, child, 1)
 }

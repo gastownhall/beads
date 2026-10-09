@@ -2666,6 +2666,12 @@ func RunBatchApplyCloseItemsAnswerToTheCloseGuards(t *testing.T, ctx context.Con
 // creates — the `bd create --graph` shape — is refused like a stored id.
 //
 // POSITIVE HALF: the parent-child edge to the immediate dotted parent lands.
+//
+// WITH THE HIERARCHY STORED: once that edge exists (the shape `bd create
+// --parent` leaves), a blocking edge on the same pair is still this validation
+// refusal, not the hierarchy conflict the stored edge would raise (which does
+// not match ErrValidation) — the rule reads only the resolved ids, so it
+// answers first — and the stored edge survives.
 func RunBatchApplyRefusesADottedChildGatedOnItsOwnParent(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
 	t.Helper()
 	parent := fixture.IssuePrefix + "-dotted"
@@ -2714,5 +2720,17 @@ func RunBatchApplyRefusesADottedChildGatedOnItsOwnParent(t *testing.T, ctx conte
 			batchApplyDepAdd(publicops.Ref{ID: child}, publicops.Ref{ID: parent}, publicops.DepParentChild, ""),
 		},
 	})
+	assertBatchApplyEdgeCount(t, ctx, fixture, child, parent, 1)
+
+	_, err := fixture.BatchApplier.ApplyBatch(ctx, publicops.ApplyBatchRequest{
+		Actor: "apply-writer",
+		Items: []publicops.ApplyItem{
+			batchApplyDepAdd(publicops.Ref{ID: child}, publicops.Ref{ID: parent}, publicops.DepBlocks, ""),
+		},
+	})
+	var itemErr *publicops.ItemError
+	if !errors.Is(err, publicops.ErrValidation) || !errors.As(err, &itemErr) {
+		t.Errorf("blocks on a parent whose parent-child edge is stored: error = %v, want an *ItemError matching ErrValidation", err)
+	}
 	assertBatchApplyEdgeCount(t, ctx, fixture, child, parent, 1)
 }

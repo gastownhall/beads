@@ -392,6 +392,7 @@
 34 20 TestProxiedServerWispGC
 34 20 TestServerModeSharedServeGlobalReportsTheServedDatabase
 
+34 21 TestProxiedServerBatchDepAddRefusesADottedChildGatedOnItsParent
 34 21 TestProxiedServerConfig
 34 21 TestProxiedServerExternalPolicyDirectParity
 34 21 TestProxiedServerMoleculeFrontDoorDirectServerProxyParity

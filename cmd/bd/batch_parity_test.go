@@ -259,6 +259,77 @@ func assertBatchParity(t *testing.T, classic, proxied batchParityOutcome) {
 	}
 }
 
+// TestProxiedServerBatchDepAddRefusesADottedChildGatedOnItsParent pins the
+// dotted-id hierarchy rule on a batched `dep add`. Neither backend writes that
+// edge through the DependencyEditor role that enforces the rule, so batch asks
+// the rule itself (batchDepAddEdge). Both backends must refuse bd-abc.1 ->
+// bd-abc with the sentence `bd dep add` prints, name the line, and roll the
+// whole batch back, while the one edge the rule allows — parent-child to the
+// immediate parent — still lands.
+func TestProxiedServerBatchDepAddRefusesADottedChildGatedOnItsParent(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	type outcome struct {
+		refusedCode       int
+		refusalReported   bool
+		rolledBack        bool
+		edgesAfterRefusal int
+		allowedCode       int
+		edgesAfterAllowed int
+	}
+	outcomes := make(map[string]outcome, 2)
+
+	for _, env := range newCrossModeEnvs(t, bd, "bdc", "bdp") {
+		var got outcome
+
+		parent := env.create(t, "Dotted parent")
+		// An explicit dotted id stores no parent-child edge (only --parent
+		// does), so every edge counted below is one a batch wrote.
+		child := env.create(t, "Dotted child", "--id", parent+".1", "--priority", "2")
+
+		// Line 1 is a valid write the refusal on line 2 must take back with it.
+		script := fmt.Sprintf("update %s priority=1\ndep add %s %s\n", child, child, parent)
+		stdout, stderr, code := env.runStdin(t, script, "batch")
+		// The failing line is named the way any failing line is, around the
+		// sentence `bd dep add` prints for the same edge.
+		refusal := fmt.Sprintf("line 2 (dep add %s %s): cannot add dependency: %s is already a child of %s.",
+			child, parent, child, parent)
+		got.refusedCode = code
+		got.refusalReported = strings.Contains(stdout+stderr, refusal)
+		got.rolledBack = env.show(t, child).Priority == 2
+		got.edgesAfterRefusal = len(env.depList(t, child))
+		if got.refusedCode == 0 || !got.refusalReported {
+			t.Errorf("[%s] batch exit=%d, want non-zero and %q\nstdout:\n%s\nstderr:\n%s",
+				env.mode, code, refusal, stdout, stderr)
+		}
+
+		stdout, stderr, code = env.runStdin(t, fmt.Sprintf("dep add %s %s parent-child\n", child, parent), "batch")
+		got.allowedCode = code
+		if code != 0 {
+			t.Fatalf("[%s] batch parent-child dep add failed with exit %d\nstdout:\n%s\nstderr:\n%s", env.mode, code, stdout, stderr)
+		}
+		got.edgesAfterAllowed = len(env.depList(t, child))
+
+		outcomes[env.mode] = got
+
+		if !got.rolledBack {
+			t.Errorf("[%s] the refused line did not roll back line 1's priority write", env.mode)
+		}
+		if got.edgesAfterRefusal != 0 {
+			t.Errorf("[%s] the refused batch left %d edges on the child, want 0", env.mode, got.edgesAfterRefusal)
+		}
+		if got.edgesAfterAllowed != 1 {
+			t.Errorf("[%s] batch parent-child dep add: %d edges on the child, want 1", env.mode, got.edgesAfterAllowed)
+		}
+	}
+
+	if outcomes["classic"] != outcomes["proxied"] {
+		t.Errorf("cross-mode divergence:\nclassic=%+v\nproxied=%+v", outcomes["classic"], outcomes["proxied"])
+	}
+}
+
 // depList reads the dependency records of one issue as a flat array, the shape
 // `bd dep list --json` documents.
 func (e crossModeEnv) depList(t *testing.T, id string) []map[string]any {
