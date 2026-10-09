@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -150,7 +151,6 @@ func TestReclaimIssuesRefusesAMalformedBodyByName(t *testing.T) {
 		{"empty ids", `{"actor":"r","ids":[]}`, "ids", string(ReasonInvalidValue)},
 		{"empty labels", `{"actor":"r","labels":[]}`, "labels", string(ReasonInvalidValue)},
 		{"empty assignees", `{"actor":"r","assignees":[]}`, "assignees", string(ReasonInvalidValue)},
-		{"blank label entry", `{"actor":"r","labels_any":["a"," "]}`, "labels_any", string(ReasonInvalidValue)},
 		{"null exclude", `{"actor":"r","exclude_labels":null}`, "exclude_labels", string(ReasonInvalidValue)},
 		{"any_replica not a bool", `{"actor":"r","any_replica":"yes"}`, "any_replica", string(ReasonInvalidValue)},
 	} {
@@ -228,7 +228,9 @@ func TestReclaimIssuesLeavesTheIDsCapToTheRole(t *testing.T) {
 // refusal: a blank entry in `ids` reaches the role (it is not pre-checked
 // here), and its ErrValidation is a 400 naming `ids`.
 func TestReclaimIssuesAnswersABlankIDThroughTheRole(t *testing.T) {
-	reclaimer := &roleLeaseReclaimer{err: fmt.Errorf("%w: reclaim scope id at position 1 is empty", issueops.ErrValidation)}
+	reclaimer := &roleLeaseReclaimer{err: &issueops.ReclaimFieldError{
+		Field: issueops.ReclaimFieldIDs, Detail: "validation failed: reclaim scope id at position 1 is empty",
+	}}
 	ts := newReclaimServer(t, reclaimer)
 
 	resp := ts.claim(t, reclaimPath, `{"actor":"reaper","ids":["bd-1",""]}`)
@@ -240,6 +242,66 @@ func TestReclaimIssuesAnswersABlankIDThroughTheRole(t *testing.T) {
 	}
 	if calls := reclaimer.reclaimRequests(); len(calls) != 1 {
 		t.Fatalf("role calls = %d, want 1", len(calls))
+	}
+}
+
+// TestReclaimIssuesNamesTheFieldTheRoleRefused pins that a role refusal is
+// attributed to the member the role's *ReclaimFieldError names, not to `ids`
+// by default, and that the handler leaves blank scope entries to the role:
+// the request reaches it.
+func TestReclaimIssuesNamesTheFieldTheRoleRefused(t *testing.T) {
+	for field, member := range reclaimFieldMembers {
+		t.Run(field, func(t *testing.T) {
+			reclaimer := &roleLeaseReclaimer{err: &issueops.ReclaimFieldError{Field: field, Detail: "validation failed: refused"}}
+			ts := newReclaimServer(t, reclaimer)
+
+			resp := ts.claim(t, reclaimPath, `{"actor":"reaper","labels_any":["a"," "]}`)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
+			}
+			if body := decodeBody(t, resp); body["param"] != member {
+				t.Errorf("param = %v, want %s", body["param"], member)
+			}
+			calls := reclaimer.reclaimRequests()
+			if len(calls) != 1 || !reflect.DeepEqual(calls[0].Filter.LabelsAny, []string{"a", " "}) {
+				t.Fatalf("role calls = %+v, want one carrying the blank entry unfiltered", calls)
+			}
+		})
+	}
+}
+
+// TestReclaimFieldMembersCoverEveryRoleField pins the attribution table
+// against the role's whole field vocabulary, so a field added to the role
+// cannot reach the wire with no member named.
+func TestReclaimFieldMembersCoverEveryRoleField(t *testing.T) {
+	for _, field := range []string{
+		issueops.ReclaimFieldActor, issueops.ReclaimFieldOlderThan, issueops.ReclaimFieldIDs,
+		issueops.ReclaimFieldAssignees, issueops.ReclaimFieldLabels, issueops.ReclaimFieldLabelsAny,
+		issueops.ReclaimFieldExcludeLabels,
+	} {
+		if reclaimFieldMembers[field] == "" {
+			t.Errorf("role field %q has no wire member", field)
+		}
+	}
+}
+
+// TestReclaimIssuesRefusesTheFirstUnrepresentableGraceWindow pins the
+// boundary: float64(MaxInt64)/1e9 converts back to 2^63 nanoseconds, which
+// wraps negative, so that exact value is refused, not passed on.
+func TestReclaimIssuesRefusesTheFirstUnrepresentableGraceWindow(t *testing.T) {
+	reclaimer := &roleLeaseReclaimer{}
+	ts := newReclaimServer(t, reclaimer)
+
+	value := strconv.FormatFloat(maxReclaimOlderThanSeconds, 'g', -1, 64)
+	resp := ts.claim(t, reclaimPath, `{"actor":"reaper","older_than_seconds":`+value+`}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("older_than_seconds=%s: status = %d, want 400: %s", value, resp.StatusCode, readAll(t, resp))
+	}
+	if body := decodeBody(t, resp); body["param"] != "older_than_seconds" {
+		t.Errorf("param = %v, want older_than_seconds", body["param"])
+	}
+	if calls := reclaimer.reclaimRequests(); len(calls) != 0 {
+		t.Fatalf("the role received %+v; an out-of-range window must not reach it", calls)
 	}
 }
 

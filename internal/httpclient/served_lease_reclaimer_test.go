@@ -98,6 +98,10 @@ func TestServedLeaseReclaimerRefusesAMalformedRequest(t *testing.T) {
 	conformance.RunLeaseReclaimerRefusesAMalformedRequest(t, t.Context(), newServedLeaseReclaimerFixture(t, "hlr09"))
 }
 
+func TestServedLeaseReclaimerRefusesABlankScopeEntry(t *testing.T) {
+	conformance.RunLeaseReclaimerRefusesABlankScopeEntry(t, t.Context(), newServedLeaseReclaimerFixture(t, "hlr12"))
+}
+
 func TestServedLeaseReclaimerAcceptsExactlyTheCap(t *testing.T) {
 	conformance.RunLeaseReclaimerAcceptsExactlyTheCap(t, t.Context(), newServedLeaseReclaimerFixture(t, "hlr10"))
 }

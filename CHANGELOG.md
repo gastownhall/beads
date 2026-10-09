@@ -16,13 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged). Every reverted row mints a new revision, reported per entry as
   `revision`, so a holder that writes with its pre-reclaim token gets a version
   mismatch. An id that is not a stale lease is left out of the answer, not
-  refused. `bd reclaim` now runs the role on both routes, which changes three
+  refused. `bd reclaim` now runs the role on both routes, which changes four
   things a script can see: its `--json` entries gain `revision`; the
   workspace's `on_update` hook fires once per reverted row (the raw path fired
-  none); and the role records its own version commit, honoring
+  none); `--id` now accepts at most 1000 ids per run (more is refused, never
+  truncated); and the role records its own version commit, honoring
   `dolt.auto-commit` the way `bd prune` does, as
-  `bd: reclaim N expired lease(s)` on both routes. Over a connected HTTP workspace `bd reclaim` now works instead
-  of refusing.
+  `bd: reclaim N expired lease(s)` on both routes. Over a connected HTTP
+  workspace `bd reclaim` now works instead of refusing.
 - `bd create --graph` now plans its batch through `issueops.BatchApplier`
   instead of the old `buildDomainGraphPlan` path, so a graph create gets the
   same atomic multi-row semantics as `bd batch apply`. A `waits-for` edge's

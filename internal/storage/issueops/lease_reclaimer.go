@@ -16,22 +16,46 @@ import (
 // THE CAP IS CHECKED AGAINST Filter.IDs AS SENT, before deduplication, for
 // ValidateGetManyRequest's reason: the obligation it bounds is reading the
 // request apart, not reading the rows it resolves to.
+//
+// It is the ONE definition of a valid request: the library legs run it, bd
+// serve's handler leaves every rule to it, and the HTTP client restates it
+// (pinned by TestReclaimValidationMatchesTheSharedValidator). Every refusal
+// but the cap is a *publicops.ReclaimFieldError naming its field.
 func ValidateReclaimRequest(request publicops.ReclaimRequest) error {
 	if strings.TrimSpace(request.Actor) == "" {
-		return fmt.Errorf("%w: reclaim actor is required", storage.ErrValidation)
+		return reclaimFieldError(publicops.ReclaimFieldActor, "reclaim actor is required")
 	}
 	if request.OlderThan < 0 {
-		return fmt.Errorf("%w: reclaim older_than must not be negative", storage.ErrValidation)
+		return reclaimFieldError(publicops.ReclaimFieldOlderThan, "reclaim older_than must not be negative")
 	}
 	if len(request.Filter.IDs) > publicops.MaxReclaimIDs {
 		return &publicops.TooManyReclaimIDsError{Requested: len(request.Filter.IDs), Cap: publicops.MaxReclaimIDs}
 	}
 	for i, id := range request.Filter.IDs {
 		if id == "" {
-			return fmt.Errorf("%w: reclaim scope id at position %d is empty", storage.ErrValidation, i)
+			return reclaimFieldError(publicops.ReclaimFieldIDs, fmt.Sprintf("reclaim scope id at position %d is empty", i))
+		}
+	}
+	for _, scope := range []struct {
+		field  string
+		values []string
+	}{
+		{publicops.ReclaimFieldAssignees, request.Filter.Assignees},
+		{publicops.ReclaimFieldLabels, request.Filter.Labels},
+		{publicops.ReclaimFieldLabelsAny, request.Filter.LabelsAny},
+		{publicops.ReclaimFieldExcludeLabels, request.Filter.ExcludeLabels},
+	} {
+		for i, v := range scope.values {
+			if strings.TrimSpace(v) == "" {
+				return reclaimFieldError(scope.field, fmt.Sprintf("reclaim %s entry at position %d is blank", scope.field, i))
+			}
 		}
 	}
 	return nil
+}
+
+func reclaimFieldError(field, detail string) error {
+	return &publicops.ReclaimFieldError{Field: field, Detail: storage.ErrValidation.Error() + ": " + detail}
 }
 
 // ExecuteReclaimInTx sweeps stale leases from tx, in ONE transaction. It is

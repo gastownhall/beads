@@ -47,6 +47,9 @@ func TestLeaseReclaimerContract(t *testing.T) {
 	t.Run("RefusesAMalformedRequest", func(t *testing.T) {
 		conformance.RunLeaseReclaimerRefusesAMalformedRequest(t, ctx, fixture)
 	})
+	t.Run("RefusesABlankScopeEntry", func(t *testing.T) {
+		conformance.RunLeaseReclaimerRefusesABlankScopeEntry(t, ctx, fixture)
+	})
 	t.Run("AcceptsExactlyTheCap", func(t *testing.T) {
 		conformance.RunLeaseReclaimerAcceptsExactlyTheCap(t, ctx, fixture)
 	})

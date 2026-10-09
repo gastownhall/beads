@@ -406,6 +406,34 @@ func RunLeaseReclaimerRefusesAMalformedRequest(t *testing.T, ctx context.Context
 	}
 }
 
+// RunLeaseReclaimerRefusesABlankScopeEntry pins the blank-entry refusal on
+// the scopes that are not ids: an empty or all-blank assignee or label is
+// ErrValidation as a *ReclaimFieldError naming its field, and changes
+// nothing — the stale lease every request names survives.
+func RunLeaseReclaimerRefusesABlankScopeEntry(t *testing.T, ctx context.Context, fixture LeaseReclaimerFixture) {
+	t.Helper()
+	requireLeaseReclaimerExec(t, fixture)
+	id := fixture.IssuePrefix + "-blankscope"
+	leaseReclaimerSeedStale(t, ctx, fixture, leaseReclaimerHolder, id)
+
+	for _, test := range []struct {
+		field  string
+		filter publicops.ReclaimFilter
+	}{
+		{publicops.ReclaimFieldAssignees, publicops.ReclaimFilter{IDs: []string{id}, Assignees: []string{leaseReclaimerHolder, " "}}},
+		{publicops.ReclaimFieldLabels, publicops.ReclaimFilter{IDs: []string{id}, Labels: []string{""}}},
+		{publicops.ReclaimFieldLabelsAny, publicops.ReclaimFilter{IDs: []string{id}, LabelsAny: []string{"\t"}}},
+		{publicops.ReclaimFieldExcludeLabels, publicops.ReclaimFilter{IDs: []string{id}, ExcludeLabels: []string{"x", "  "}}},
+	} {
+		_, err := fixture.LeaseReclaimer.Reclaim(ctx, publicops.ReclaimRequest{Actor: leaseReclaimerReaper, Filter: test.filter})
+		var fieldErr *publicops.ReclaimFieldError
+		if !errors.Is(err, publicops.ErrValidation) || !errors.As(err, &fieldErr) || fieldErr.Field != test.field {
+			t.Fatalf("blank %s entry: Reclaim error = %v, want a *ReclaimFieldError naming %s", test.field, err, test.field)
+		}
+		leaseReclaimerRequireHeld(t, ctx, fixture, id)
+	}
+}
+
 // RunLeaseReclaimerAcceptsExactlyTheCap pins the cap's boundary: MaxReclaimIDs
 // entries is a request, one more is a refusal (the case above).
 func RunLeaseReclaimerAcceptsExactlyTheCap(t *testing.T, ctx context.Context, fixture LeaseReclaimerFixture) {

@@ -44,6 +44,33 @@ func (e *TooManyReclaimIDsError) Error() string {
 // Unwrap makes TooManyReclaimIDsError match ErrValidation.
 func (e *TooManyReclaimIDsError) Unwrap() error { return ErrValidation }
 
+// The ReclaimRequest fields a ReclaimFieldError can name.
+const (
+	ReclaimFieldActor         = "actor"
+	ReclaimFieldOlderThan     = "older_than"
+	ReclaimFieldIDs           = "ids"
+	ReclaimFieldAssignees     = "assignees"
+	ReclaimFieldLabels        = "labels"
+	ReclaimFieldLabelsAny     = "labels_any"
+	ReclaimFieldExcludeLabels = "exclude_labels"
+)
+
+// ReclaimFieldError reports a ReclaimRequest refusal and the one field it is
+// about, so a front door can name that field without parsing the message. It
+// wraps ErrValidation. The id cap is the one refusal that is not one of these:
+// it is a *TooManyReclaimIDsError, always about ReclaimFieldIDs.
+type ReclaimFieldError struct {
+	// Field is one of the ReclaimField* constants.
+	Field string
+	// Detail is the sentence the error reads as.
+	Detail string
+}
+
+func (e *ReclaimFieldError) Error() string { return e.Detail }
+
+// Unwrap makes ReclaimFieldError match ErrValidation.
+func (e *ReclaimFieldError) Unwrap() error { return ErrValidation }
+
 // ReclaimRequest describes one sweep of stale leases — the shape behind
 // `bd reclaim`.
 //
@@ -139,7 +166,13 @@ type LeaseReclaimer interface {
 	//   - a negative OlderThan: ErrValidation;
 	//   - more than MaxReclaimIDs entries in Filter.IDs, or an empty-string
 	//     entry among them: *TooManyReclaimIDsError or ErrValidation,
-	//     respectively, before anything is read.
+	//     respectively, before anything is read;
+	//   - an empty or all-blank entry in Filter.Assignees, Labels, LabelsAny or
+	//     ExcludeLabels: ErrValidation, because it would match nothing a
+	//     caller meant to name.
+	//
+	// Every ErrValidation refusal but the cap is a *ReclaimFieldError naming
+	// its field.
 	//
 	// A sweep that finds no stale leases is not a refusal: it answers an empty,
 	// non-nil Reclaimed.

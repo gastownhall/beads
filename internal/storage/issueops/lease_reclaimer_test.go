@@ -34,6 +34,10 @@ func TestValidateReclaimRequestRefusesInTheDocumentedOrder(t *testing.T) {
 		{"a blank actor", publicops.ReclaimRequest{Actor: "  "}, true, false},
 		{"a negative grace window", publicops.ReclaimRequest{Actor: "reaper", OlderThan: -time.Nanosecond}, true, false},
 		{"a blank id", publicops.ReclaimRequest{Actor: "reaper", Filter: publicops.ReclaimFilter{IDs: []string{"bd-1", ""}}}, true, false},
+		{"a blank assignee", publicops.ReclaimRequest{Actor: "reaper", Filter: publicops.ReclaimFilter{Assignees: []string{"w", " "}}}, true, false},
+		{"a blank label", publicops.ReclaimRequest{Actor: "reaper", Filter: publicops.ReclaimFilter{Labels: []string{""}}}, true, false},
+		{"a blank label-any", publicops.ReclaimRequest{Actor: "reaper", Filter: publicops.ReclaimFilter{LabelsAny: []string{"\t"}}}, true, false},
+		{"a blank exclude", publicops.ReclaimRequest{Actor: "reaper", Filter: publicops.ReclaimFilter{ExcludeLabels: []string{"x", ""}}}, true, false},
 		// Every entry blank AND one past the cap: the cap answers, so a caller
 		// that sent 1001 ids learns about the cap rather than about an entry.
 		{"over the cap of blanks", publicops.ReclaimRequest{Actor: "reaper", Filter: publicops.ReclaimFilter{IDs: overCap}}, true, true},
@@ -52,6 +56,10 @@ func TestValidateReclaimRequestRefusesInTheDocumentedOrder(t *testing.T) {
 			var capErr *publicops.TooManyReclaimIDsError
 			if got := errors.As(err, &capErr); got != test.wantCap {
 				t.Fatalf("errors.As(*TooManyReclaimIDsError) = %v, want %v (err %v)", got, test.wantCap, err)
+			}
+			var fieldErr *publicops.ReclaimFieldError
+			if !test.wantCap && (!errors.As(err, &fieldErr) || fieldErr.Field == "") {
+				t.Fatalf("refusal %v names no field; every refusal but the cap is a *ReclaimFieldError", err)
 			}
 		})
 	}

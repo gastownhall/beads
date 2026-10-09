@@ -561,6 +561,10 @@ func TestReclaimValidationMatchesTheSharedValidator(t *testing.T) {
 		"blank id":           {Actor: "reaper", Filter: issueops.ReclaimFilter{IDs: []string{"bd-1", ""}}},
 		"padded id is an id": {Actor: "reaper", Filter: issueops.ReclaimFilter{IDs: []string{" bd-1 "}}},
 		"over the cap":       {Actor: "reaper", Filter: issueops.ReclaimFilter{IDs: overCap}},
+		"blank assignee":     {Actor: "reaper", Filter: issueops.ReclaimFilter{Assignees: []string{" "}}},
+		"blank label":        {Actor: "reaper", Filter: issueops.ReclaimFilter{Labels: []string{"a", ""}}},
+		"blank label-any":    {Actor: "reaper", Filter: issueops.ReclaimFilter{LabelsAny: []string{"\t"}}},
+		"blank exclude":      {Actor: "reaper", Filter: issueops.ReclaimFilter{ExcludeLabels: []string{""}}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			mine := validateReclaimRequest(req)
@@ -571,6 +575,12 @@ func TestReclaimValidationMatchesTheSharedValidator(t *testing.T) {
 			var mineCap, sharedCap *issueops.TooManyReclaimIDsError
 			if errors.As(mine, &mineCap) != errors.As(shared, &sharedCap) {
 				t.Fatalf("cap type differs: client %v, shared %v", mine, shared)
+			}
+			var mineField, sharedField *issueops.ReclaimFieldError
+			errors.As(mine, &mineField)
+			errors.As(shared, &sharedField)
+			if (mineField == nil) != (sharedField == nil) || (mineField != nil && mineField.Field != sharedField.Field) {
+				t.Fatalf("field differs: client %v, shared %v", mine, shared)
 			}
 		})
 	}

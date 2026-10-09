@@ -15,8 +15,9 @@ import (
 //
 // THE MAPPING IS TOTAL: every member of ReclaimRequest has a wire member, so
 // nothing here refuses on shape and the ledger carries no row for this
-// operation. The grace window travels as fractional seconds, which holds any
-// duration a reaper uses exactly.
+// operation. The grace window travels as fractional seconds (a float64), which
+// is exact for the whole-second and millisecond windows a reaper uses; a
+// nanosecond-precise window may round.
 //
 // THE REQUEST RULES ARE CHECKED BEFORE THE DIAL, in the order
 // internal/storage/issueops.ValidateReclaimRequest applies them, for
@@ -88,22 +89,40 @@ func (l *httpLeaseReclaimer) Reclaim(ctx context.Context, req issueops.ReclaimRe
 	return issueops.ReclaimResult{Reclaimed: reclaimed}, nil
 }
 
-// validateReclaimRequest restates the role's refusals, in the role's order:
-// the actor, the grace window, the id cap (counted as sent), then the first
-// blank id.
+// validateReclaimRequest restates the role's refusals, in the role's order and
+// with the role's types: the actor, the grace window, the id cap (counted as
+// sent), the first blank id, then the first blank entry of the other scopes.
 func validateReclaimRequest(req issueops.ReclaimRequest) error {
+	field := func(name, format string, args ...any) error {
+		return &issueops.ReclaimFieldError{Field: name, Detail: invalid(format, args...).Error()}
+	}
 	if strings.TrimSpace(req.Actor) == "" {
-		return invalid("reclaim actor is required")
+		return field(issueops.ReclaimFieldActor, "reclaim actor is required")
 	}
 	if req.OlderThan < 0 {
-		return invalid("reclaim older_than must not be negative")
+		return field(issueops.ReclaimFieldOlderThan, "reclaim older_than must not be negative")
 	}
 	if len(req.Filter.IDs) > issueops.MaxReclaimIDs {
 		return &issueops.TooManyReclaimIDsError{Requested: len(req.Filter.IDs), Cap: issueops.MaxReclaimIDs}
 	}
 	for i, id := range req.Filter.IDs {
 		if id == "" {
-			return invalid("reclaim scope id at position %d is empty", i)
+			return field(issueops.ReclaimFieldIDs, "reclaim scope id at position %d is empty", i)
+		}
+	}
+	for _, scope := range []struct {
+		name   string
+		values []string
+	}{
+		{issueops.ReclaimFieldAssignees, req.Filter.Assignees},
+		{issueops.ReclaimFieldLabels, req.Filter.Labels},
+		{issueops.ReclaimFieldLabelsAny, req.Filter.LabelsAny},
+		{issueops.ReclaimFieldExcludeLabels, req.Filter.ExcludeLabels},
+	} {
+		for i, v := range scope.values {
+			if strings.TrimSpace(v) == "" {
+				return field(scope.name, "reclaim %s entry at position %d is blank", scope.name, i)
+			}
 		}
 	}
 	return nil

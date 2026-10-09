@@ -42,10 +42,11 @@ var reclaimMembers = []string{
 	reclaimAnyReplicaMember,
 }
 
-// maxReclaimOlderThanSeconds is the largest grace window time.Duration can
-// hold. A larger one is refused rather than wrapped into a negative duration,
-// which the role would refuse with a message about a value the caller never
-// sent.
+// maxReclaimOlderThanSeconds is the smallest grace window time.Duration can
+// NOT hold: MaxInt64/1e9 as a float64 rounds up, so converting it back yields
+// 2^63 nanoseconds, which wraps negative. The check is >=, so every accepted
+// value converts in range; a refused one is not wrapped into a negative
+// duration the role would refuse with a message about a value never sent.
 var maxReclaimOlderThanSeconds = float64(math.MaxInt64) / float64(time.Second)
 
 // handleReclaimIssues answers POST /v0/beads/issues:reclaim.
@@ -135,7 +136,7 @@ func (s *Server) reclaimRequest(w http.ResponseWriter, r *http.Request) (issueop
 				"`"+reclaimOlderThanMember+"` must be a number"))
 			return issueops.ReclaimRequest{}, false
 		}
-		if *seconds < 0 || *seconds > maxReclaimOlderThanSeconds {
+		if *seconds < 0 || *seconds >= maxReclaimOlderThanSeconds {
 			s.fail(w, r, InvalidArgument(reclaimOlderThanMember, ReasonInvalidValue,
 				"`"+reclaimOlderThanMember+"` must be a non-negative number of seconds a duration can hold"))
 			return issueops.ReclaimRequest{}, false
@@ -173,19 +174,10 @@ func (s *Server) reclaimRequest(w http.ResponseWriter, r *http.Request) (issueop
 				"`"+scope.member+"` is empty; an empty scope would reclaim everything, so omit the member to sweep without it"))
 			return issueops.ReclaimRequest{}, false
 		}
-		// ids' cap and blank entries are the ROLE's refusals and reach the
-		// wire through failReclaimErr, in the role's own order; the other
-		// scopes have no refusal of their own, so a blank entry there is
-		// refused here, where it can be named.
-		if scope.member != reclaimIDsMember {
-			for _, v := range *values {
-				if strings.TrimSpace(v) == "" {
-					s.fail(w, r, InvalidArgument(scope.member, ReasonInvalidValue,
-						"`"+scope.member+"` carries a blank entry"))
-					return issueops.ReclaimRequest{}, false
-				}
-			}
-		}
+		// The id cap and every blank entry are the ROLE's refusals
+		// (ValidateReclaimRequest, the one definition the CLI shares) and
+		// reach the wire through failReclaimErr, which names the field the
+		// role names.
 		*scope.dest = *values
 	}
 
@@ -210,18 +202,41 @@ func reclaimMemberList() string {
 	return strings.Join(quoted, ", ")
 }
 
+// reclaimFieldMembers spells each field the role's *ReclaimFieldError can
+// name as the wire member it arrived in.
+var reclaimFieldMembers = map[string]string{
+	issueops.ReclaimFieldActor:         reclaimActorMember,
+	issueops.ReclaimFieldOlderThan:     reclaimOlderThanMember,
+	issueops.ReclaimFieldIDs:           reclaimIDsMember,
+	issueops.ReclaimFieldAssignees:     reclaimAssigneesMember,
+	issueops.ReclaimFieldLabels:        reclaimLabelsMember,
+	issueops.ReclaimFieldLabelsAny:     reclaimLabelsAnyMember,
+	issueops.ReclaimFieldExcludeLabels: reclaimExcludeLabelsMember,
+}
+
 // failReclaimErr answers a failed reclaim. issueops.ErrValidation is mapped to
 // a 400 HERE, in the sweep's shape, because the role validates what the
-// handler does not duplicate. Every validation the handler leaves to the role
-// is about `ids` — the cap and a blank entry, the actor and the grace window
-// having been refused above — so the refusal names that member.
+// handler does not duplicate. The refusal names the member the role's error
+// is about: `ids` for the cap, the *ReclaimFieldError's own field otherwise,
+// and no member at all for a validation that names none.
 func (s *Server) failReclaimErr(w http.ResponseWriter, r *http.Request, err error) {
-	if errors.Is(err, issueops.ErrValidation) {
-		requestInfo(r.Context()).refuse(reclaimIDsMember)
-		s.fail(w, r, InvalidArgument(reclaimIDsMember, ReasonInvalidValue, err.Error()))
+	if !errors.Is(err, issueops.ErrValidation) {
+		s.failErr(w, r, err)
 		return
 	}
-	s.failErr(w, r, err)
+	member := ""
+	var capErr *issueops.TooManyReclaimIDsError
+	var fieldErr *issueops.ReclaimFieldError
+	switch {
+	case errors.As(err, &capErr):
+		member = reclaimIDsMember
+	case errors.As(err, &fieldErr):
+		member = reclaimFieldMembers[fieldErr.Field]
+	}
+	if member != "" {
+		requestInfo(r.Context()).refuse(member)
+	}
+	s.fail(w, r, InvalidArgument(member, ReasonInvalidValue, err.Error()))
 }
 
 // reclaimResponse projects the role's result onto the wire envelope.
