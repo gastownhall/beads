@@ -14,7 +14,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -34,7 +33,7 @@ import (
 const AllowInsecureCredentialEnv = "BEADS_HTTP_ALLOW_INSECURE"
 
 func allowInsecureCredentialFromEnv() bool {
-	v := strings.TrimSpace(os.Getenv(AllowInsecureCredentialEnv))
+	v := strings.TrimSpace(getenv(AllowInsecureCredentialEnv))
 	return v == "1" || strings.EqualFold(v, "true")
 }
 
@@ -45,7 +44,10 @@ func allowInsecureCredentialFromEnv() bool {
 // --allow-plaintext before any sidecar exists) OR target.AllowInsecureCredential
 // (the sidecar's persisted record of that same grant, read back on every
 // LATER dial for this workspace — see Target.AllowInsecureCredential's own
-// doc) is true, or BEADS_HTTP_ALLOW_INSECURE=1 is set in the environment.
+// doc) is true, or — only when consultEnv is true — BEADS_HTTP_ALLOW_INSECURE=1
+// is set in the environment. consultEnv is false on the explicit-credential
+// door (DialWithCredential): an open that was handed its own credential reads
+// no process environment at all, so one tenant's grant is never another's.
 //
 // It wraps the resolved wire.CredentialProvider itself, never switching on
 // its concrete type, so the refusal is uniform across the ambient
@@ -59,7 +61,7 @@ func allowInsecureCredentialFromEnv() bool {
 // there is nothing to guard, and refusing an unauthenticated plaintext dial
 // would be a different, broader policy than the one this finding asks for
 // ("refuse SENDING CREDENTIALS over http:// to non-loopback").
-func guardInsecureCredential(target Target, creds CredentialProvider, allowed bool) CredentialProvider {
+func guardInsecureCredential(target Target, creds CredentialProvider, allowed, consultEnv bool) CredentialProvider {
 	if creds == nil {
 		return nil
 	}
@@ -67,7 +69,7 @@ func guardInsecureCredential(target Target, creds CredentialProvider, allowed bo
 	if base == nil || base.Scheme != "http" || configfile.IsLocalHostString(base.Hostname()) {
 		return creds
 	}
-	if allowed || allowInsecureCredentialFromEnv() {
+	if allowed || (consultEnv && allowInsecureCredentialFromEnv()) {
 		return creds
 	}
 	return &insecureCredentialGuard{inner: creds, endpoint: base.Redacted()}

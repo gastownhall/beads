@@ -4,9 +4,8 @@ package bdhttp_test
 // contribution: TestOpenNeedsNoWorkspaceOnDisk, the ServerSnapshot field-set
 // drift guard, TestHandshakeReportsAWrongServer, and the activation sidecar
 // round trip carry the same reasoning. Dropped or reshaped for OSS: the
-// Credentials-hook tests (OSS Open/Handshake dial through the built-in bearer
-// ladder only — see Options.RequireCredential's doc — there is no per-call
-// hook to assert on here), ServerInfo / lazy ServerContext (the OSS Store
+// Credentials-hook tests (OSS takes a per-call Options.Credential instead;
+// its tests are in per_open_credential_test.go), ServerInfo / lazy ServerContext (the OSS Store
 // does not expose that interface), and ServerSnapshot's field set itself,
 // which follows DESIGN.txt exactly (WireRevision in place of the ORM-backed
 // field bd-enterprise used). No bd-enterprise-specific wording carries over.

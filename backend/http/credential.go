@@ -47,11 +47,14 @@ func NewBearerProvider(base *url.URL) *BearerProvider {
 //
 // A multi-tenant embedder (for example gc, Gas City: one process serving many
 // workspaces, called "cities") that wants a distinct credential per workspace
-// wraps that workspace's own provider in a ProvidedCredential rather than
-// calling Open directly: the registered dialer Register installs is
+// wraps that workspace's own provider in a ProvidedCredential when it opens
+// through the registry (the direct door takes the provider itself, as
+// Options.Credential): the registered dialer Register installs is
 // process-wide and cannot hold one credential per tenant, but the per-open
 // OpenWith seam can, and this is the opaque wrapper type that seam
-// recognizes. See httpclient.ResolveCredential and
+// recognizes. Either way the supplied provider is the ONLY credential the
+// open uses and nothing ambient is read; see the package doc's
+// "Credentials" section. See httpclient.ResolveCredential and
 // backends.OpenOptions.Credential's own doc comment for the single-tenant
 // ambient-ladder default this exists to opt out of.
 type ProvidedCredential = httpclient.ProvidedCredential

@@ -36,6 +36,14 @@ import (
 // file) — process-global ambient state a multi-tenant embedder cannot trust to
 // name the right tenant. See ResolveCredential.
 //
+// A non-nil opts.Credential is the ONLY credential this open uses and the open
+// reads no process environment on its account (DialWithCredential): two
+// stores opened in one process against the same host, each with its own
+// ProvidedCredential, each send their own token, and neither is affected by
+// BEADS_HTTP_TOKEN, BEADS_HTTP_TOKEN_COMMAND, the credentials file or
+// BEADS_HTTP_ALLOW_INSECURE. The provider is held by this store's wire client
+// alone; nothing about it is cached per host.
+//
 // Unlike Open/OpenReadOnly, OpenWith never consults BEADS_HTTP_CA_FILE: CA
 // resolution is pinned to target.CAFile alone via DialOptionsForTarget,
 // because an embedder juggling several targets in one process must not have
@@ -58,8 +66,15 @@ func OpenWith(ctx context.Context, beadsDir string, opts backends.OpenOptions, b
 	if opts.HTTPClient != nil {
 		dialOpts.HTTPClient = opts.HTTPClient
 	}
-	dialOpts = DialOptionsForTarget(target, dialOpts)
-	conn, err := DialWith(target, creds, dialOpts)
+	var conn *Conn
+	if opts.Credential != nil {
+		// An explicit credential is the ONLY one this open uses: no ambient
+		// env, no credentials file, no host:port ladder, and no
+		// BEADS_HTTP_ALLOW_INSECURE — see DialWithCredential.
+		conn, err = DialWithCredential(target, creds, dialOpts)
+	} else {
+		conn, err = DialWith(target, creds, DialOptionsForTarget(target, dialOpts))
+	}
 	if err != nil {
 		return nil, fmt.Errorf("dialing %s: %w", target, err)
 	}

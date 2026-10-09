@@ -33,6 +33,7 @@ go_test(
         "attach_test.go",
         "e2e_cli_test.go",
         "open_test.go",
+        "per_open_credential_test.go",
         "register_test.go",
     ],
     # The e2e files exec the real bd (bazeltest.PrebuiltBD); they run under

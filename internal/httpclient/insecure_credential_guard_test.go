@@ -27,7 +27,7 @@ func newTestRequest(t *testing.T, rawURL string) *http.Request {
 // must not be turned into a refusal by this fix.
 func TestGuardInsecureCredentialPassesThroughNilCredential(t *testing.T) {
 	target := Target{BaseURL: mustParseURL(t, "http://"+nonLoopbackTestHost+"/")}
-	if got := guardInsecureCredential(target, nil, false); got != nil {
+	if got := guardInsecureCredential(target, nil, false, true); got != nil {
 		t.Fatalf("guardInsecureCredential(nil) = %v, want nil", got)
 	}
 }
@@ -38,7 +38,7 @@ func TestGuardInsecureCredentialPassesThroughNilCredential(t *testing.T) {
 func TestGuardInsecureCredentialPassesThroughForLoopback(t *testing.T) {
 	target := Target{BaseURL: mustParseURL(t, "http://127.0.0.1:8080/")}
 	inner := stubProvider{tag: "loopback"}
-	got := guardInsecureCredential(target, inner, false)
+	got := guardInsecureCredential(target, inner, false, true)
 	if got != CredentialProvider(inner) {
 		t.Fatalf("guardInsecureCredential returned %T, want the inner provider unwrapped for a loopback target", got)
 	}
@@ -50,7 +50,7 @@ func TestGuardInsecureCredentialPassesThroughForLoopback(t *testing.T) {
 func TestGuardInsecureCredentialPassesThroughForHTTPS(t *testing.T) {
 	target := Target{BaseURL: mustParseURL(t, "https://"+nonLoopbackTestHost+"/")}
 	inner := stubProvider{tag: "https"}
-	got := guardInsecureCredential(target, inner, false)
+	got := guardInsecureCredential(target, inner, false, true)
 	if got != CredentialProvider(inner) {
 		t.Fatalf("guardInsecureCredential returned %T, want the inner provider unwrapped for an https target", got)
 	}
@@ -62,7 +62,7 @@ func TestGuardInsecureCredentialPassesThroughForHTTPS(t *testing.T) {
 func TestGuardInsecureCredentialRefusesNonLoopbackPlainHTTP(t *testing.T) {
 	target := Target{BaseURL: mustParseURL(t, "http://"+nonLoopbackTestHost+"/")}
 	inner := stubProvider{tag: "will-attach"}
-	guarded := guardInsecureCredential(target, inner, false)
+	guarded := guardInsecureCredential(target, inner, false, true)
 	if guarded == CredentialProvider(inner) {
 		t.Fatal("guardInsecureCredential returned the inner provider unwrapped for a non-loopback plain-http target")
 	}
@@ -86,7 +86,7 @@ func TestGuardInsecureCredentialRefusesNonLoopbackPlainHTTP(t *testing.T) {
 func TestGuardInsecureCredentialPassesThroughWhenNothingIsAttached(t *testing.T) {
 	target := Target{BaseURL: mustParseURL(t, "http://"+nonLoopbackTestHost+"/")}
 	inner := noopProvider{}
-	guarded := guardInsecureCredential(target, inner, false)
+	guarded := guardInsecureCredential(target, inner, false, true)
 
 	req := newTestRequest(t, "http://"+nonLoopbackTestHost+"/v0/beads/context")
 	if err := guarded.Authorize(context.Background(), req); err != nil {
@@ -103,7 +103,7 @@ func TestGuardInsecureCredentialPassesThroughWhenNothingIsAttached(t *testing.T)
 func TestGuardInsecureCredentialAllowedByOptIn(t *testing.T) {
 	target := Target{BaseURL: mustParseURL(t, "http://"+nonLoopbackTestHost+"/")}
 	inner := stubProvider{tag: "opted-in"}
-	guarded := guardInsecureCredential(target, inner, true)
+	guarded := guardInsecureCredential(target, inner, true, true)
 	if guarded != CredentialProvider(inner) {
 		t.Fatalf("guardInsecureCredential(allowed=true) returned %T, want the inner provider unwrapped", guarded)
 	}
@@ -116,7 +116,7 @@ func TestGuardInsecureCredentialAllowedByEnv(t *testing.T) {
 	t.Setenv(AllowInsecureCredentialEnv, "1")
 	target := Target{BaseURL: mustParseURL(t, "http://"+nonLoopbackTestHost+"/")}
 	inner := stubProvider{tag: "env-opted-in"}
-	guarded := guardInsecureCredential(target, inner, false)
+	guarded := guardInsecureCredential(target, inner, false, true)
 	if guarded != CredentialProvider(inner) {
 		t.Fatalf("guardInsecureCredential(env opt-in) returned %T, want the inner provider unwrapped", guarded)
 	}
@@ -129,13 +129,13 @@ func TestGuardInsecureCredentialAllowedByEnv(t *testing.T) {
 func TestGuardInsecureCredentialDelegatesRefreshAndSource(t *testing.T) {
 	target := Target{BaseURL: mustParseURL(t, "http://"+nonLoopbackTestHost+"/")}
 	inner := &reportingProvider{source: "test-rung"}
-	guarded := guardInsecureCredential(target, inner, true)
+	guarded := guardInsecureCredential(target, inner, true, true)
 	if guarded != CredentialProvider(inner) {
 		t.Fatalf("guardInsecureCredential(allowed=true) returned %T, want the inner provider unwrapped", guarded)
 	}
 
 	// With allowed=false the guard wraps, and must still forward both calls.
-	wrapped := guardInsecureCredential(target, inner, false)
+	wrapped := guardInsecureCredential(target, inner, false, true)
 	retry, err := wrapped.Refresh(context.Background())
 	if err != nil || !retry {
 		t.Fatalf("Refresh = (%v, %v), want (true, nil)", retry, err)

@@ -38,6 +38,14 @@ const (
 	TokenCommandEnv = "BEADS_HTTP_TOKEN_COMMAND"
 )
 
+// getenv is the ONE way this package reads the process environment: the env
+// rungs of the bearer ladder (TokenEnv, TokenCommandEnv), the CA rung
+// (CAFileEnv) and the plaintext opt-in (AllowInsecureCredentialEnv) all go
+// through it. It is a variable only so a test can prove the explicit-credential
+// door (DialWithCredential, OpenWith with a ProvidedCredential) never calls it;
+// production never reassigns it.
+var getenv = os.Getenv
+
 // BearerProvider is the default credential ladder for the http backend
 // (design D5): BEADS_HTTP_TOKEN, then BEADS_HTTP_TOKEN_COMMAND, then the
 // credentials file's [host:port] section, then no credential at all — which is
@@ -280,7 +288,7 @@ func (s commandTokenSource) Resolve(ctx context.Context) (creds.Credential, bool
 // token that contains "=" can still parse as a pattern naming no real server;
 // that fails safe, since the token then goes nowhere.
 func scopedEnvValue(name, what string, base *url.URL) (string, bool, error) {
-	raw := strings.TrimSpace(os.Getenv(name))
+	raw := strings.TrimSpace(getenv(name))
 	if raw == "" {
 		return "", false, nil
 	}

@@ -24,6 +24,38 @@
 // each workspace it opens, without the process-wide dialer being asked to
 // serve two tenants with one fixed credential.
 //
+// # Credentials: one per open, never one per host
+//
+// A process may open many projects — on one server or several, each with a
+// credential of its own (gc's per-city and per-rig credentials). The rule that
+// keeps them apart: when a credential is handed to an open or a handshake, it
+// is the ONLY credential that open or handshake uses.
+//
+//   - Options.Credential (Open, Handshake, Connect) and
+//     backends.OpenOptions.Credential carrying a ProvidedCredential (the
+//     registry's OpenWith seam, beads.OpenBestAvailableWith) both take this
+//     explicit path.
+//   - On it no bearer ladder is built, so BEADS_HTTP_TOKEN,
+//     BEADS_HTTP_TOKEN_COMMAND and the credentials file (BEADS_CREDENTIALS_FILE,
+//     keyed [host:port]) are never read. CA trust comes from Target.CAFile alone
+//     (never BEADS_HTTP_CA_FILE), and the plaintext-to-non-loopback grant from
+//     Target.AllowInsecureCredential alone (never BEADS_HTTP_ALLOW_INSECURE).
+//     The open reads no process environment on the credential's account.
+//   - The provider is held by the one store (or the one handshake) it was
+//     handed to, and anything it resolves or caches lives there. This package
+//     and the one beneath it keep no process-wide credential state: there is no
+//     cache keyed by host[:port] for two projects behind the same server to
+//     share. (The only process-wide transport state is the CA-scoped
+//     *http.Transport pool, keyed by CA file and carrying no credential; the
+//     Authorization header is set per request by the store's own provider.)
+//
+// Only with NO credential does an open fall back to the ambient ladder keyed
+// by host[:port] — the single-tenant CLI posture. A multi-tenant embedder
+// should pass a credential on every open, and can make a missing one a loud
+// refusal on the registry seam with Options.RequireCredential. A process-wide
+// credential is refused outright: Register panics on a non-nil
+// Options.Credential, because the dialer it installs serves every workspace.
+//
 // # Stability
 //
 // EXPERIMENTAL, on the same terms as the backend package this sits beside.
@@ -50,7 +82,7 @@ const UserAgentSuffix = httpclient.WireUserAgentSuffix
 // with.
 //
 // The zero value is usable and is what the CLI's own wiring amounts to: the
-// built-in bearer credential ladder, this module's default User-Agent, and
+// built-in bearer credential ladder (Credential nil), this module's default User-Agent, and
 // the standard http transport.
 type Options struct {
 	// UserAgent identifies the embedding build on every request. Empty sends
@@ -76,6 +108,19 @@ type Options struct {
 	// httpclient.ResolveCredential and backends.OpenOptions.Credential's own
 	// doc comment.
 	RequireCredential bool
+	// Credential, when non-nil, is the ONLY credential Open, Handshake and
+	// Connect authorize with: the call reads no ambient token, token command,
+	// credentials file, CA env or plaintext env (see the package doc's
+	// "Credentials" section and httpclient.DialWithCredential). It is the
+	// direct-door twin of backends.OpenOptions.Credential carrying a
+	// ProvidedCredential{Provider: Credential}. CA trust on this path is
+	// Target.CAFile, and the plaintext grant Target.AllowInsecureCredential.
+	//
+	// The provider is used by the one store or handshake it is handed to, so
+	// whatever it caches is per store. Register refuses (panics on) a non-nil
+	// Credential: its dialer is process-wide, and one credential for every
+	// workspace is exactly what this field exists to avoid.
+	Credential CredentialProvider
 }
 
 // Register adds the http store to the backend registry under the name "http"
@@ -94,6 +139,9 @@ type Options struct {
 // error, so it must have exactly one production call site. Call it once,
 // before any concurrent store access.
 func Register(opts Options) {
+	if opts.Credential != nil {
+		panic("bdhttp.Register: Options.Credential is per open, not process-wide; pass it to Open/Handshake, or as a ProvidedCredential in backends.OpenOptions")
+	}
 	base := httpclient.DialOptions{UserAgent: opts.UserAgent, HTTPClient: opts.HTTPClient}
 	backends.Register(httpclient.Backend, backends.Backend{
 		Open:                httpclient.NewFromConfig,
@@ -113,16 +161,21 @@ func Register(opts Options) {
 // configuration, or minted per tenant — and would otherwise have to write a
 // .beads directory for the sole benefit of a registry lookup. Registration is
 // not required and does not affect it: Open dials fresh from the Options it is
-// handed, using the same built-in bearer ladder Open/OpenReadOnly use (see
-// Options.RequireCredential's doc for why a per-tenant credential belongs on
-// the registry's OpenWith seam instead, via beads.OpenBestAvailableWith).
+// handed. With Options.Credential set, that credential is the only one used and
+// no ambient state is read; without it, Open uses the same built-in bearer
+// ladder Open/OpenReadOnly use.
 //
 // The store carries no local metadata file, which is benign: the two
 // per-user keys it would hold read as unset and write nowhere.
 func Open(ctx context.Context, target Target, opts Options) (backend.DoltStorage, error) {
-	dialOpts := httpclient.DialOptionsForTarget(target, httpclient.DialOptions{UserAgent: opts.UserAgent, HTTPClient: opts.HTTPClient})
-	creds := httpclient.NewBearerProvider(target.BaseURL)
-	conn, err := httpclient.DialWith(target, creds, dialOpts)
+	base := httpclient.DialOptions{UserAgent: opts.UserAgent, HTTPClient: opts.HTTPClient}
+	var conn *httpclient.Conn
+	var err error
+	if opts.Credential != nil {
+		conn, err = httpclient.DialWithCredential(target, opts.Credential, base)
+	} else {
+		conn, err = httpclient.DialWith(target, httpclient.NewBearerProvider(target.BaseURL), httpclient.DialOptionsForTarget(target, base))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -139,15 +192,21 @@ func Open(ctx context.Context, target Target, opts Options) (backend.DoltStorage
 // mismatch comes back as *ProjectMismatchError, which names both ids plus the
 // server's own database and repo root.
 //
-// It dials with the same credentials Open would, so a probe can never verify
-// a server the store then cannot reach.
+// It dials with the same credentials Open would given the same Options, so a
+// probe can never verify a server the store then cannot reach: Options.Credential
+// when set (and then nothing ambient), else the built-in bearer ladder.
 func Handshake(ctx context.Context, target Target, opts Options) (*ServerSnapshot, error) {
-	dialOpts := httpclient.DialOptionsForTarget(target, httpclient.DialOptions{UserAgent: opts.UserAgent, HTTPClient: opts.HTTPClient})
-	// httpclient.Handshake dials via httpclient.Dial, which binds the same
-	// built-in bearer ladder (httpclient.NewBearerProvider) Open uses above —
-	// "the same credentials Open would use" holds without restating the dial
-	// here.
-	body, err := httpclient.Handshake(ctx, target, dialOpts)
+	base := httpclient.DialOptions{UserAgent: opts.UserAgent, HTTPClient: opts.HTTPClient}
+	var body *apigen.ContextResponse
+	var err error
+	if opts.Credential != nil {
+		body, err = httpclient.HandshakeWithCredential(ctx, target, opts.Credential, base)
+	} else {
+		// httpclient.Handshake dials via httpclient.Dial, which binds the
+		// same built-in bearer ladder (httpclient.NewBearerProvider) Open
+		// uses above.
+		body, err = httpclient.Handshake(ctx, target, httpclient.DialOptionsForTarget(target, base))
+	}
 	if err != nil {
 		return nil, err
 	}
