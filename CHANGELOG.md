@@ -111,6 +111,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   will not send, and value constraints (`maxLength`, `pattern` and the
   like) are outside the digest: such changes need their own review against
   `wire_revision`.
+- **Engine interface:** `storage.Storage` now requires `DetailBatchReader()`.
+  Backend implementers must supply the new read role, which returns ordered
+  issue details for exact IDs from one snapshot. Existing `Reader.Get` remains
+  unchanged.
 
 ### Changed
 

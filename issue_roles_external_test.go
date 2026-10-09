@@ -683,6 +683,34 @@ func TestBatchGetterExposesTypedUnsupportedError(t *testing.T) {
 	}
 }
 
+// Detail reads fire no completion hooks, so telemetry remains outermost.
+func TestDetailBatchReaderKeepsTelemetryOutermost(t *testing.T) {
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	instrumented, ok := telemetry.WrapStorage(&dolt.DoltStore{}).(*telemetry.InstrumentedStorage)
+	if !ok {
+		t.Fatal("WrapStorage() did not create InstrumentedStorage")
+	}
+
+	reader, err := storage.NewHookFiringStore(instrumented, nil).DetailBatchReader()
+	if err != nil {
+		t.Fatalf("DetailBatchReader() error = %v", err)
+	}
+	if got := reflect.TypeOf(reader).String(); got != "*telemetry.instrumentedDetailBatchReader" {
+		t.Fatalf("outer layer = %s, want the telemetry wrapper unwrapped by the hook decorator", got)
+	}
+}
+
+func TestDetailBatchReaderExposesTypedUnsupportedError(t *testing.T) {
+	reader, err := (*dolt.DoltStore)(nil).DetailBatchReader()
+	if reader != nil {
+		t.Fatalf("DetailBatchReader() reader = %T, want nil", reader)
+	}
+	var unsupported *beads.ErrUnsupported
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("DetailBatchReader() error = %v, want *beads.ErrUnsupported", err)
+	}
+}
+
 func TestCounterExposesTypedUnsupportedError(t *testing.T) {
 	counter, err := (*dolt.DoltStore)(nil).Counter()
 	if counter != nil {

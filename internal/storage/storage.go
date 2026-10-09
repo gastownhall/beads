@@ -292,6 +292,9 @@ type Storage interface {
 	// ErrNotFound — a batch GET is a set read, not a precondition on every
 	// member succeeding. Reads fire no hooks, as for IssueReader.
 	BatchGetter() (issueops.BatchGetter, error)
+	// DetailBatchReader returns ordered issue details from one read snapshot.
+	// Reads fire no completion hooks, as for IssueReader.
+	DetailBatchReader() (issueops.DetailBatchReader, error)
 	// ReadyCounter returns the guarded ready-count surface for this store: the
 	// size of the ready set, which is the number `bd ready`'s pagination
 	// publishes and which no other role answers. Counter's predicate is a

@@ -163,6 +163,7 @@ type roleAccessorStore struct {
 	tree         issueops.TreeWalker
 	graphCounter issueops.GraphCounter
 	batchGetter  issueops.BatchGetter
+	batchDetails issueops.DetailBatchReader
 	counter      issueops.Counter
 	settings     issueops.WorkspaceConfig
 	memories     memoryops.Memories
@@ -197,6 +198,7 @@ func newRoleAccessorStore() *roleAccessorStore {
 		blocking:     sentinel,
 		graphCounter: sentinel,
 		batchGetter:  sentinel,
+		batchDetails: sentinel,
 		counter:      sentinel,
 		settings:     sentinel,
 		versions:     sentinel,
@@ -277,6 +279,9 @@ func (s *roleAccessorStore) GraphCounter() (issueops.GraphCounter, error) {
 func (s *roleAccessorStore) BatchGetter() (issueops.BatchGetter, error) {
 	return s.batchGetter, s.err
 }
+func (s *roleAccessorStore) DetailBatchReader() (issueops.DetailBatchReader, error) {
+	return s.batchDetails, s.err
+}
 func (s *roleAccessorStore) MetadataCAS() (issueops.MetadataCAS, error) {
 	return s.metadataCAS, s.err
 }
@@ -334,6 +339,9 @@ func (*roleAccessorSentinel) CountEdges(context.Context, issueops.EdgeCountReque
 }
 func (*roleAccessorSentinel) GetMany(context.Context, issueops.GetManyRequest) (issueops.GetManyResult, error) {
 	return issueops.GetManyResult{}, nil
+}
+func (*roleAccessorSentinel) GetBatch(context.Context, issueops.DetailBatchRequest) (issueops.DetailBatchResult, error) {
+	return issueops.DetailBatchResult{}, nil
 }
 func (*roleAccessorSentinel) GetSetting(context.Context, issueops.GetSettingRequest) (issueops.SettingResult, error) {
 	return issueops.SettingResult{}, nil
@@ -444,7 +452,7 @@ func (*memoryRoleSentinel) List(context.Context, memoryops.ListRequest) (memoryo
 // paragraph rather than four near-identical ones (bd-8ri3m). Reads fire no
 // completion hooks, so IssueReader, IssueRelations, Counter, StatsReporter,
 // CycleDetector, EdgeReader, BlockingAnnotator, TreeWalker, GraphCounter,
-// ReadyCounter, Querier and InitVerifier deliberately return the inner surface
+// DetailBatchReader, ReadyCounter, Querier and InitVerifier deliberately return the inner surface
 // unwrapped,
 // each in its own hook_*.go. The ones in that column that are NOT reads are
 // WorkspaceConfig, Memories, VersionReconciler, Bootstrapper, Sweeper and
@@ -481,6 +489,7 @@ func TestHookFiringStoreWrapsTheWriteRolesAndPassesTheReadsThrough(t *testing.T)
 		{"TreeWalker", func() (any, error) { return store.TreeWalker() }, inner.tree, false},
 		{"GraphCounter", func() (any, error) { return store.GraphCounter() }, inner.graphCounter, false},
 		{"BatchGetter", func() (any, error) { return store.BatchGetter() }, inner.batchGetter, false},
+		{"DetailBatchReader", func() (any, error) { return store.DetailBatchReader() }, inner.batchDetails, false},
 		{"Counter", func() (any, error) { return store.Counter() }, inner.counter, false},
 		{"WorkspaceConfig", func() (any, error) { return store.WorkspaceConfig() }, inner.settings, false},
 		{"Memories", func() (any, error) { return store.Memories() }, inner.memories, false},
@@ -539,6 +548,7 @@ func TestHookFiringStoreRoleAccessorsPropagateInnerErrors(t *testing.T) {
 		{"TreeWalker", func() (any, error) { return store.TreeWalker() }},
 		{"GraphCounter", func() (any, error) { return store.GraphCounter() }},
 		{"BatchGetter", func() (any, error) { return store.BatchGetter() }},
+		{"DetailBatchReader", func() (any, error) { return store.DetailBatchReader() }},
 		{"Counter", func() (any, error) { return store.Counter() }},
 		{"WorkspaceConfig", func() (any, error) { return store.WorkspaceConfig() }},
 		{"Memories", func() (any, error) { return store.Memories() }},

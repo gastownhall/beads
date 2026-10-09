@@ -14,6 +14,7 @@ go_library(
         "cycle_detector.go",
         "deleter.go",
         "dependency_editor.go",
+        "detailbatchreader.go",
         "edgereader.go",
         "graph_counter.go",
         "init_verifier.go",

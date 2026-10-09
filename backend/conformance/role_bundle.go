@@ -92,6 +92,7 @@ type RoleContractBundle struct {
 	DualWrite            func(t *testing.T) *DualWriteFixture
 	EdgeReader           func(t *testing.T) *EdgeReaderFixture
 	GraphCounter         func(t *testing.T) *GraphCounterFixture
+	DetailBatchReader    func(t *testing.T) *DetailBatchReaderFixture
 	Importer             func(t *testing.T) *ImporterFixture
 	Journal              func(t *testing.T) *JournalFixture
 	LifecycleCloseReopen func(t *testing.T) *LifecycleCloseReopenFixture

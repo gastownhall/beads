@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 type fakeUOWProvider struct {
@@ -177,6 +178,23 @@ func TestWrapUOWProviderKeepsUnitOfWorkUnwrappable(t *testing.T) {
 	}
 	if got := unwrapper.Unwrap(); got != inner {
 		t.Fatalf("Unwrap() = %T, want the wrapped UOW", got)
+	}
+}
+
+func TestWrapUOWProviderPreservesDetailBatchReader(t *testing.T) {
+	inner := &fakeUOWProvider{uw: &fakeUOW{}}
+	provider := WrapUOWProvider(inner, nil, nil)
+	source, ok := provider.(uow.DetailBatchReaderSource)
+	if !ok {
+		t.Fatalf("wrapped provider %T loses DetailBatchReaderSource", provider)
+	}
+	reader, err := source.DetailBatchReader()
+	if err != nil || reader == nil {
+		t.Fatalf("DetailBatchReader()=%T, %v", reader, err)
+	}
+	result, err := reader.GetBatch(t.Context(), publicops.DetailBatchRequest{})
+	if err != nil || result.Items == nil || len(result.Items) != 0 {
+		t.Fatalf("empty result=%+v, %v", result, err)
 	}
 }
 

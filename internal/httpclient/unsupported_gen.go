@@ -197,6 +197,11 @@ func (unsupportedDoltStorage) DeleteIssuesBySourceRepo(_ context.Context, _ stri
 	return
 }
 
+func (unsupportedDoltStorage) DetailBatchReader() (_ issueops.DetailBatchReader, err error) {
+	err = errUnsupported("DetailBatchReader")
+	return
+}
+
 func (unsupportedDoltStorage) DetectCycles(_ context.Context) (_ [][]*types.Issue, err error) {
 	err = errUnsupported("DetectCycles")
 	return
@@ -742,4 +747,4 @@ func (unsupportedDoltStorage) VersionReconciler() (_ issueops.VersionReconciler,
 	return
 }
 
-// NOTE: partial shell (145 of 199 methods generated; 54 left to this package's hand-written set).
+// NOTE: partial shell (146 of 200 methods generated; 54 left to this package's hand-written set).

@@ -142,6 +142,7 @@ func TestRecordingIssueUseCaseCoversItsSurface(t *testing.T) {
 			"FindWispDependentsRecursive":  reads,
 			"GetBlockedIssues":             reads,
 			"GetDescendants":               reads,
+			"GetDetailBatch":               reads,
 			"GetEpicsEligibleForClosure":   reads,
 			"GetIssue":                     reads,
 			"GetIssuesByIDs":               reads,

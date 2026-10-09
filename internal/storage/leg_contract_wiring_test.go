@@ -114,6 +114,9 @@ func init() {
 		"RunInitVerifierReportsAPartialIdentityAsItStands":                 versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
 		"RunInitVerifierWritesNothing":                                     versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
 
+		"RunDetailBatchReaderParity":          detailBatchReaderUnsupportedOverHTTPWaiverReason,
+		"RunDetailBatchReaderChunkBoundaries": detailBatchReaderUnsupportedOverHTTPWaiverReason,
+
 		"RunIssueOperationsUpdateClosedFieldsMatchClose":                  issueOperationsUpdateRawSeamWaiverReason,
 		"RunIssueOperationsUpdateRawMetadataTakesTheFunnelsValueShapes":   issueOperationsUpdateRawSeamWaiverReason,
 		"RunIssueOperationsUpdateStampsStartedAtOnceOnTheFirstInProgress": issueOperationsUpdateRawSeamWaiverReason,
@@ -328,6 +331,19 @@ const issuePatchFieldsNotOnUpdateWireWaiverReason = "PENDING, not permanent (tra
 	"internal/httpclient/encode/ledger.go, D8 refuse-not-drop) rather than ever reaching the server, so the race " +
 	"never happens over this wire; closing the gap means publishing those fields on IssuePatchBody, which is a " +
 	"wire change to the write role (S4b), not something this leg's test wiring can bind around today"
+
+// detailBatchReaderUnsupportedOverHTTPWaiverReason is why the DetailBatchReader
+// contracts stop at the three store-backed legs.
+//
+// The http client refuses the DetailBatchReader accessor through its
+// typed-unsupported shell; legitimatelyUnsupported in
+// internal/httpclient/completeness_test.go records why. The role promises one
+// snapshot for the whole batch, per-ID getIssue calls cannot give one, and
+// batchGetIssues returns labels-only issues. A refused accessor has no role for
+// these contracts to run against.
+const detailBatchReaderUnsupportedOverHTTPWaiverReason = "internal/httpclient refuses DetailBatchReader " +
+	"(see legitimatelyUnsupported in internal/httpclient/completeness_test.go): the role promises one snapshot " +
+	"for the whole batch, per-ID getIssue calls cannot give one, and batchGetIssues returns labels-only issues"
 
 // TestEveryLegWiresEveryRoleContract fails when a backend leg skips a role
 // contract the conformance package exports.

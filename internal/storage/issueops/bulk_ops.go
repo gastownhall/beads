@@ -102,7 +102,7 @@ func DeleteConfigInTx(ctx context.Context, tx *sql.Tx, key string) error {
 // between comments and wisp_comments tables.
 //
 //nolint:gosec // G201: table is hardcoded
-func GetCommentsForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (map[string][]*types.Comment, error) {
+func GetCommentsForIssuesInTx(ctx context.Context, tx DBTX, issueIDs []string) (map[string][]*types.Comment, error) {
 	if len(issueIDs) == 0 {
 		return make(map[string][]*types.Comment), nil
 	}
@@ -131,7 +131,7 @@ func GetCommentsForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs []string
 }
 
 //nolint:gosec // G201: table is hardcoded
-func getCommentsForIDsInto(ctx context.Context, tx *sql.Tx, table string, ids []string, result map[string][]*types.Comment) error {
+func getCommentsForIDsInto(ctx context.Context, tx DBTX, table string, ids []string, result map[string][]*types.Comment) error {
 	for start := 0; start < len(ids); start += queryBatchSize {
 		end := start + queryBatchSize
 		if end > len(ids) {
