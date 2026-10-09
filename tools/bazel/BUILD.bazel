@@ -38,6 +38,14 @@ exports_files(
     visibility = ["//visibility:public"],
 )
 
+# sh_test src that runs one Bazel shard of an existing go_test binary with
+# its slowest tests pinned to shards of their own by a manifest (see the
+# script header and pin_shards.py), e.g. //cmd/bd:bd_dolt_server_test.
+exports_files(
+    ["go_test_pinned_shard.sh"],
+    visibility = ["//visibility:public"],
+)
+
 # sh_test src that runs an existing go_test binary with no network but
 # loopback (see the script header), e.g. //cmd/bd:bd_managed_local_test.
 exports_files(

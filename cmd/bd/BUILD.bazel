@@ -1563,10 +1563,16 @@ sh_test(
 # instead of skipping every Dolt-gated test into a cached pass. These are
 # the cmd/bd tests no other lane runs: every other configuration of bd_test
 # passes BEADS_TEST_SKIP=dolt (prcore/ci, integration) or runs only its
-# manifest (bd_embedded_test, bd_proxied_test). No -test.run/-test.skip: the Go binary shards
-# itself over every top-level test (rules_go's TEST_SHARD_INDEX), so each
-# runs in exactly one shard, and check_testcases.py fails a shard that ran
-# none. It repeats bd_test's `env` (the wrapper cannot inherit it).
+# manifest (bd_embedded_test, bd_proxied_test). Shards 1-16 each run the
+# slowest tests dolt_server_pinned_shards.txt pins to them (duration-balanced
+# by tools/bazel/pin_shards.py); shards 17-32 are the Go binary's own
+# round-robin shards (rules_go's TEST_SHARD_INDEX) over every other top-level
+# test, a test added since the manifest was written included
+# (tools/bazel/go_test_pinned_shard.sh). So each test runs in exactly one
+# shard, and check_testcases.py fails a shard that ran none. Round-robin
+# alone left the slowest of 16 shards at 2-3x the median (TestSharedServerConcurrent,
+# the TestInit* family). It repeats bd_test's `env` (the wrapper cannot
+# inherit it).
 #
 # Tags:
 #   dolt-server-cmd: the cmd/bd Dolt-server tier; starts hermetic dolt
@@ -1580,11 +1586,15 @@ sh_test(
     # dump) before Bazel's 1200s action limit (eternal under the lane's
     # --test_timeout), which kills without one.
     timeout = "eternal",
-    srcs = ["//tools/bazel:go_test_variant.sh"],
-    args = ["$(rootpath :bd_test)"],
+    srcs = ["//tools/bazel:go_test_pinned_shard.sh"],
+    args = [
+        "$(rootpath :dolt_server_pinned_shards.txt)",
+        "$(rootpath :bd_test)",
+    ],
     data = [
         ":bd_for_tests",
         ":bd_test",
+        ":dolt_server_pinned_shards.txt",
         ":preflight_go_fixture",
         "@go_sdk//:bin/gofmt",
     ],
@@ -1607,7 +1617,7 @@ sh_test(
         # against the one shared server.
         "GOMAXPROCS": "4",
     },
-    shard_count = 16,
+    shard_count = 32,
     tags = ["dolt-server-cmd"],
 )
 

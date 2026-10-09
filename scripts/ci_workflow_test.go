@@ -5801,9 +5801,11 @@ func btoi(b bool) int {
 // whole integration-tagged cmd/bd suite against a hermetic dolt sql-server,
 // because every other lane, Bazel or go test, runs cmd/bd with
 // BEADS_TEST_SKIP=dolt or only a manifest's tests, so its Dolt-gated tests
-// ran nowhere. Coverage is exact by construction: the target passes the
-// binary no test selection, the Go binary shards itself over every
-// top-level test, and check_testcases.py fails a shard that ran none.
+// ran nowhere. Coverage is exact by construction: the target's only test
+// selection is go_test_pinned_shard.sh's, whose round-robin shards skip
+// exactly the tests its pinned shards run (TestPinnedShardWrapperSplit,
+// TestPinnedShardManifests), and check_testcases.py fails a shard that ran
+// none.
 func TestBazelCmdDoltJob(t *testing.T) {
 	const config, target = "doltserver-cmd", "bd_dolt_server_test"
 	workflow := readCIWorkflow(t, bazelWorkflowName)
@@ -5881,8 +5883,8 @@ func TestBazelCmdDoltJob(t *testing.T) {
 		t.Error(err)
 	}
 	for _, want := range []string{
-		`srcs = ["//tools/bazel:go_test_variant.sh"]`,
-		`args = ["$(rootpath :bd_test)"]`,
+		`srcs = ["//tools/bazel:go_test_pinned_shard.sh"]`,
+		"args = [\n        \"$(rootpath :dolt_server_pinned_shards.txt)\",\n        \"$(rootpath :bd_test)\",\n    ]",
 		`tags = ["dolt-server-cmd"]`,
 		`"GOMAXPROCS": "4"`,
 		`"BEADS_TEST_GIT_IDENTITY": "1"`,
@@ -5891,12 +5893,14 @@ func TestBazelCmdDoltJob(t *testing.T) {
 			t.Errorf("%s lacks %s", target, want)
 		}
 	}
-	// 16 shards: each pays ~30-40 s of fixed cost (TestMain, its own dolt
-	// sql-server), so more shards mostly add farm actions; with the suite's
-	// long pole gone the slowest of 16 stays within bazel-integration's
-	// critical path. Change it together with bazel.yml's comment.
-	if m := regexp.MustCompile(`shard_count = (\d+)`).FindStringSubmatch(rule); m == nil || m[1] != "16" {
-		t.Errorf("%s shard_count = %v, want 16", target, m)
+	// 32 shards: 16 that run the slowest tests the manifest pins to them
+	// and 16 round-robin shards over the rest. Measured, a shard's fixed
+	// cost (TestMain, its own dolt sql-server) is a few seconds; the wall
+	// time is the serial sum of its tests, which round-robin alone left at
+	// 2-3x the median on the shard that drew the long tests. Change it
+	// together with bazel.yml's comment.
+	if m := regexp.MustCompile(`shard_count = (\d+)`).FindStringSubmatch(rule); m == nil || m[1] != "32" {
+		t.Errorf("%s shard_count = %v, want 32", target, m)
 	}
 	envKey := regexp.MustCompile(`"(BEADS_TEST_[A-Z_]+)": "\$\(rlocationpath [^)]+\)"`)
 	for _, m := range envKey.FindAllStringSubmatch(bdTest, -1) {

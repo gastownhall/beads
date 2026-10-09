@@ -2065,12 +2065,12 @@ jobs:
         run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
 
   # The cmd/bd Dolt-server tier, as --config=doltserver-cmd: the whole
-  # integration-tagged cmd/bd suite (//cmd/bd:bd_dolt_server_test, 16
-  # shards) against a hermetic dolt sql-server, i.e. the Dolt-gated cmd/bd
+  # integration-tagged cmd/bd suite (//cmd/bd:bd_dolt_server_test, 32
+  # shards, the slowest tests pinned to 16 of them) against a hermetic dolt sql-server, i.e. the Dolt-gated cmd/bd
   # tests (TestCLI_*, TestInit*, the store-backed suites) that every other
   # lane and legacy job skips with BEADS_TEST_SKIP=dolt or leaves out of its
   # manifest; plus the differential regression suite
-  # (//tests/regression:regression_test, 8 shards: the candidate
+  # (//tests/regression:regression_test, 16 shards: the candidate
   # bd_for_tests against the catalog-pinned v0.49.6 release, formerly
   # regression.yml). --config=doltserver-cmd has exactly
   # --config=integration's build flags, so it shares bazel-integration's
@@ -2120,9 +2120,10 @@ jobs:
           RBE_FORK_PR: ${{ github.event.pull_request.number }}
 
       # Remote: a compile shared with bazel-integration plus the longest
-      # of 16 shards (~3 minutes measured; each shard pays ~30-40 s of
-      # TestMain and its own dolt sql-server; Go's -test.timeout=19m,
-      # Bazel's 1200s cap). Mode cache on a 4-CPU runner: the compile hits
+      # of 32 shards (~1 minute: tools/bazel/go_test_pinned_shard.sh pins
+      # the slowest tests to shards of their own; each shard pays a few
+      # seconds of TestMain and its own dolt sql-server; Go's
+      # -test.timeout=19m, Bazel's 1200s cap). Mode cache on a 4-CPU runner: the compile hits
       # the read-only cache, and a PR that changes cmd/bd or what it imports
       # runs every shard locally, four at a time (~2,200 test-seconds
       # measured unloaded, slower four-up: ~20-30 minutes); with the cache

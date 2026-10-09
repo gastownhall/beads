@@ -40,7 +40,7 @@ Each lane, as bazel.yml runs it (add your `--config=fork-cache` or
 | Release cross-compile (`bazel-release-cross`) | `./scripts/ci/bazel-release-cross-compile.sh` | Every `go_library`/`go_binary` for each row of `scripts/ci/release-targets.txt`, cgo off, with nogo. |
 | Integration (`bazel-integration`) | `bazel test //... --config=integration` | The `integration`-tagged build. Runs with the read-only cache too. |
 | Dolt server (`bazel-doltserver`) | `bazel test //... --config=doltserver` | Starts its own `dolt sql-server` from the pinned binary; no docker. |
-| cmd/bd Dolt server (`bazel-cmd-dolt`) | `bazel test //cmd/bd:bd_dolt_server_test --config=doltserver-cmd` | 16 shards of the integration-tagged cmd/bd suite. |
+| cmd/bd Dolt server (`bazel-cmd-dolt`) | `bazel test //cmd/bd:bd_dolt_server_test --config=doltserver-cmd` | 32 shards of the integration-tagged cmd/bd suite (the slowest tests pinned to 16 of them). |
 | Embedded Dolt (`bazel-embedded`) | `bazel test //... --config=embedded` | Remote execution only in CI; locally it is slow. |
 | Proxied server (`bazel-proxied`) | `bazel test //... --config=doltserver-proxied` | Remote execution only: 30 shards, each with a Dolt server. |
 | Server-Dolt storage (`bazel-server-storage`) | `bazel test //... --config=doltserver-integration` | Remote execution only. |
@@ -193,8 +193,13 @@ advisory `bazel-cmd-dolt` job) runs the whole integration-tagged cmd/bd
 suite on the `local` backend: the Dolt-gated cmd/bd tests (`TestCLI_*`, the
 init and store-backed suites) that every other lane skips with
 `BEADS_TEST_SKIP=dolt` or leaves out of its manifest. It shares
-`--config=integration`'s build, passes the binary no test selection (the Go
-binary shards itself over every top-level test, 16 shards), and runs where
+`--config=integration`'s build and runs it in 32 shards: 16 run the slowest
+tests `cmd/bd/dolt_server_pinned_shards.txt` pins to them, and 16 are the Go
+binary's own round-robin shards over every other top-level test
+(`tools/bazel/go_test_pinned_shard.sh`; `//tests/regression:regression_test`
+splits the same way). After a change that moves test durations, regenerate the
+manifest from a run of the lane with `tools/bazel/pin_shards.py` (see its
+usage); a stale manifest only costs balance, never coverage. It runs where
 the integration lane runs (remote, or with the read-only cache). pr.yml's
 gate requires it once `BAZEL_CMD_DOLT_REQUIRED` is `"true"`; pr.yml then
 also passes bazel.yml `cmd-dolt-required: true`, and the PR's

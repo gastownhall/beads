@@ -53,6 +53,7 @@ go_test(
         "makefile_bazel_primary_test.go",
         "migration_corpus_bazel_test.go",
         "nogo_lint_policy_test.go",
+        "pinned_shards_test.go",
         "pr_lanes_bazel_coverage_test.go",
         "pr_risk_bazel_coverage_test.go",
         "rbe_worker_env_test.go",

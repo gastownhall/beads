@@ -759,12 +759,23 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// go_test_pinned_shard.sh selects and skips by design (each test in
+		// exactly one shard: TestPinnedShardWrapperSplit), and is reviewed
+		// here for the dolt-server-cmd targets only, which are none of the
+		// retired tiers' lanes; pinnedShardWrapperUsers fails if anything
+		// else runs through it.
+		exempt := filepath.ToSlash(rel) == pinnedShardWrapper
+		if exempt {
+			for _, e := range pinnedShardWrapperUsers(t, root) {
+				t.Error(e)
+			}
+		}
 		for i, line := range strings.Split(string(data), "\n") {
 			code := strings.TrimSpace(line)
 			if strings.HasPrefix(code, "#") {
 				continue
 			}
-			if scriptNarrow.MatchString(code) {
+			if scriptNarrow.MatchString(code) && !exempt {
 				t.Errorf("%s:%d %q can select, skip or re-run the retired tiers' lanes' tests", rel, i+1, code)
 			}
 			for _, m := range regexp.MustCompile(`--config=([A-Za-z0-9_-]+)`).FindAllStringSubmatch(code, -1) {
