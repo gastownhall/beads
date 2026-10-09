@@ -191,7 +191,10 @@ Created while Dolt auto-commit is in batch mode.
 	})
 }
 
-func TestEmbeddedRoutedSiblingWritesCommitTargetHead(t *testing.T) {
+// TestEmbeddedRoutedSiblingWritesCommitTargetHead* each run one routed sibling
+// write (comment, note, reopen) from the source rig and assert it commits on
+// the target rig's head; one top-level test per write for CI shard balance.
+func TestEmbeddedRoutedSiblingWritesCommitTargetHeadComment(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt auto-commit tests")
 	}
@@ -223,6 +226,15 @@ func TestEmbeddedRoutedSiblingWritesCommitTargetHead(t *testing.T) {
 			t.Fatal("routed comment was not persisted in target store")
 		}
 	})
+}
+
+func TestEmbeddedRoutedSiblingWritesCommitTargetHeadNote(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt auto-commit tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("note", func(t *testing.T) {
 		sourceDir, targetDir, targetBeadsDir := setupRoutedEmbeddedRepo(t, bd, "sn", "tn")
@@ -241,6 +253,15 @@ func TestEmbeddedRoutedSiblingWritesCommitTargetHead(t *testing.T) {
 			t.Fatalf("target notes = %q, want routed note", got.Notes)
 		}
 	})
+}
+
+func TestEmbeddedRoutedSiblingWritesCommitTargetHeadReopen(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt auto-commit tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("reopen", func(t *testing.T) {
 		sourceDir, targetDir, targetBeadsDir := setupRoutedEmbeddedRepo(t, bd, "sr", "tr")
@@ -262,21 +283,20 @@ func TestEmbeddedRoutedSiblingWritesCommitTargetHead(t *testing.T) {
 	})
 }
 
-// TestEmbeddedRoutedMutatingSiblingWritesCommitTargetHead pins the rest of the
-// prefix-routed mutating command surface to the same write-through contract as
+// TestEmbeddedRoutedMutatingSibling* pin the rest of the prefix-routed
+// mutating command surface to the same write-through contract as
 // comment/note/reopen above. These commands (the assign/tag shorthands plus
 // dep/delete/close) resolve a prefix-routed target through the write-intent
 // router and must commit on the target head, not fail "store is read-only"
 // (#4141). Each subtest creates the bead in the target rig, runs the command
 // from the source rig so resolution must route, and asserts both that the
 // target HEAD advanced and that the mutation persisted in the target store.
-// TestEmbeddedRoutedMutatingSiblingAssignTagDep was split from
-// TestEmbeddedRoutedMutatingSiblingWritesCommitTargetHead (originally
-// ~245.22s, measured under --config=embedded) into 2 top-level tests over
-// disjoint subtest groups, for CI shard balance (see
-// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
-// subtest is preserved exactly once.
-func TestEmbeddedRoutedMutatingSiblingAssignTagDep(t *testing.T) {
+// Each top-level test runs one subtest of the original
+// TestEmbeddedRoutedMutatingSiblingWritesCommitTargetHead (later
+// ...AssignTagDep and ...DeleteClose), for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json): every original subtest is
+// preserved exactly once.
+func TestEmbeddedRoutedMutatingSiblingAssignTagDepAssign(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt auto-commit tests")
 	}
@@ -301,6 +321,15 @@ func TestEmbeddedRoutedMutatingSiblingAssignTagDep(t *testing.T) {
 			t.Fatalf("target assignee = %q, want alice", got.Assignee)
 		}
 	})
+}
+
+func TestEmbeddedRoutedMutatingSiblingAssignTagDepTag(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt auto-commit tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("tag", func(t *testing.T) {
 		sourceDir, targetDir, targetBeadsDir := setupRoutedEmbeddedRepo(t, bd, "stg", "ttg")
@@ -319,6 +348,15 @@ func TestEmbeddedRoutedMutatingSiblingAssignTagDep(t *testing.T) {
 			t.Fatalf("target labels = %v, want routed-label", labels[issue.ID])
 		}
 	})
+}
+
+func TestEmbeddedRoutedMutatingSiblingAssignTagDepDepAdd(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt auto-commit tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("dep_add", func(t *testing.T) {
 		sourceDir, targetDir, targetBeadsDir := setupRoutedEmbeddedRepo(t, bd, "sdp", "tdp")
@@ -347,13 +385,7 @@ func TestEmbeddedRoutedMutatingSiblingAssignTagDep(t *testing.T) {
 	})
 }
 
-// TestEmbeddedRoutedMutatingSiblingDeleteClose was split from
-// TestEmbeddedRoutedMutatingSiblingWritesCommitTargetHead (originally
-// ~245.22s, measured under --config=embedded) into 2 top-level tests over
-// disjoint subtest groups, for CI shard balance (see
-// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
-// subtest is preserved exactly once.
-func TestEmbeddedRoutedMutatingSiblingDeleteClose(t *testing.T) {
+func TestEmbeddedRoutedMutatingSiblingDeleteCloseDelete(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt auto-commit tests")
 	}
@@ -374,6 +406,15 @@ func TestEmbeddedRoutedMutatingSiblingDeleteClose(t *testing.T) {
 			t.Fatalf("routed delete did not remove %s from target store", issue.ID)
 		}
 	})
+}
+
+func TestEmbeddedRoutedMutatingSiblingDeleteCloseClose(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt auto-commit tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("close", func(t *testing.T) {
 		sourceDir, targetDir, targetBeadsDir := setupRoutedEmbeddedRepo(t, bd, "scl", "tcl")

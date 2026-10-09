@@ -4341,6 +4341,7 @@ func TestBazelEmbeddedJobRunsEmbeddedTier(t *testing.T) {
 		job, script, pkg, target string
 	}{
 		{"test-embedded-cmd", ".github/scripts/embedded-test-shard.sh", "cmd/bd", "bd_embedded_test"},
+		{"test-embedded-cmd", ".github/scripts/embedded-test-shard.sh", "cmd/bd", "bd_embedded_part2_test"},
 		{"test-embedded-storage", ".github/scripts/embedded-storage-test-shard.sh", "internal/storage/embeddeddolt", "embeddeddolt_embedded_test"},
 	}
 	for _, c := range sharded {
@@ -4384,9 +4385,11 @@ func TestBazelEmbeddedJobRunsEmbeddedTier(t *testing.T) {
 	}
 	// The cmd jobs' subprocess bd is the race build, as //cmd/bd:bd is
 	// under --config=embedded (bd_for_tests never is).
-	rule := bazelRuleBlock(readPolicyFile(t, sourceRepoRoot(t), "cmd/bd/BUILD.bazel"), "bd_embedded_test")
-	if !strings.Contains(rule, `"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd)"`) {
-		t.Errorf("cmd/bd:bd_embedded_test must run the race //cmd/bd:bd as BEADS_TEST_BD_BINARY:\n%s", rule)
+	for _, name := range embeddedCmdTargets {
+		rule := bazelRuleBlock(readPolicyFile(t, sourceRepoRoot(t), "cmd/bd/BUILD.bazel"), name)
+		if !strings.Contains(rule, `"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd)"`) {
+			t.Errorf("cmd/bd:%s must run the race //cmd/bd:bd as BEADS_TEST_BD_BINARY:\n%s", name, rule)
+		}
 	}
 
 	// The retired test-embedded-conformance job's two partitions, frozen.

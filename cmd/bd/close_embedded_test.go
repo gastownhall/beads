@@ -58,11 +58,15 @@ func bdDepAdd(t *testing.T, bd, dir string, args ...string) {
 
 // ===== Close tests =====
 
-// TestEmbeddedCloseBasic was split from TestEmbeddedClose (originally ~404s,
-// measured under --config=embedded) into 3 top-level tests over disjoint
-// subtest groups, for CI shard balance (see scripts/ci/embedded_cmd_test_durations.json and
-// engdocs/TESTING.md). Every original subtest is preserved exactly once.
-func TestEmbeddedCloseBasic(t *testing.T) {
+// The TestEmbeddedCloseBasic*, TestEmbeddedCloseGuardsAndEpics and
+// TestEmbeddedCloseAlreadyClosed* tests were split from TestEmbeddedClose
+// (originally ~404s, measured under --config=embedded) into top-level tests
+// over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every
+// original subtest is preserved exactly once, in its original order within
+// its group. Subtests that share a store stay in one test; the others each
+// init their own isolated store.
+func TestEmbeddedCloseBasicSharedStore(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -137,6 +141,15 @@ func TestEmbeddedCloseBasic(t *testing.T) {
 			t.Errorf("blocked issue status = %s, want open", got.Status)
 		}
 	})
+}
+
+func TestEmbeddedCloseBasicIsolatedStores(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	// The direct-route twin of TestProxiedClose/
 	// close_partial_failure_json_names_the_failed_ids. Two things were asserted
@@ -391,12 +404,8 @@ func TestEmbeddedCloseGuardsAndEpics(t *testing.T) {
 
 }
 
-// TestEmbeddedCloseAlreadyClosed was split from TestEmbeddedClose (originally
-// ~404s, measured under --config=embedded) into 3 top-level tests over
-// disjoint subtest groups, for CI shard balance (see
-// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
-// subtest is preserved exactly once.
-func TestEmbeddedCloseAlreadyClosed(t *testing.T) {
+// See TestEmbeddedCloseBasicSharedStore for the TestEmbeddedClose split.
+func TestEmbeddedCloseAlreadyClosedMultipleIDs(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -457,6 +466,15 @@ func TestEmbeddedCloseAlreadyClosed(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestEmbeddedCloseAlreadyClosedContinue(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("close_already_closed_continue_advances", func(t *testing.T) {
 		// Isolated store so molecule progress and the Dolt commit count are
@@ -527,6 +545,15 @@ func TestEmbeddedCloseAlreadyClosed(t *testing.T) {
 				beforeCommits, afterCommits)
 		}
 	})
+}
+
+func TestEmbeddedCloseAlreadyClosedClaimNextAndMolecule(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("close_already_closed_claim_next", func(t *testing.T) {
 		// Isolated store so the ready set is deterministic — the shared store carries

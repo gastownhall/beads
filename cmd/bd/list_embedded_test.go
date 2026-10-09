@@ -177,22 +177,33 @@ type testSeedData struct {
 	readyTask     string // P0, labels: backend, no blockers
 }
 
-// TestEmbeddedListFiltering and TestEmbeddedListSearchAndOutput were split
-// from TestEmbeddedList (originally ~298s, measured under --config=embedded)
-// into 2 top-level tests over disjoint subtest groups, for CI shard balance
-// (see scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
-// subtest is preserved exactly once.
-func TestEmbeddedListFiltering(t *testing.T) {
+// seededListWorkspace is the TestEmbeddedList* tests' shared setup: an
+// initialized workspace seeded by seedTestData.
+func seededListWorkspace(t *testing.T) (bd, dir string, seed testSeedData) {
+	t.Helper()
+	bd = buildEmbeddedBD(t)
+	dir, _, _ = bdInit(t, bd, "--prefix", "tl")
+
+	// Seed test data
+	seed = seedTestData(t, bd, dir)
+	return bd, dir, seed
+}
+
+// The TestEmbeddedListFiltering* and TestEmbeddedListSearchAndOutput* tests
+// were split from TestEmbeddedList (originally ~298s, measured under
+// --config=embedded) into top-level tests over disjoint subtest groups, each
+// on its own seeded workspace, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every
+// original subtest is preserved exactly once, in its original order within
+// its group; each group ran on the unmodified seed in the original too (the
+// subtests before each split point create no issues).
+func TestEmbeddedListFilteringBasicAndLabels(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
 	t.Parallel()
 
-	bd := buildEmbeddedBD(t)
-	dir, _, _ := bdInit(t, bd, "--prefix", "tl")
-
-	// Seed test data
-	seed := seedTestData(t, bd, dir)
+	bd, dir, seed := seededListWorkspace(t)
 
 	// --- A. Basic filtering ---
 
@@ -454,6 +465,15 @@ func TestEmbeddedListFiltering(t *testing.T) {
 			t.Fatalf("--skip-labels JSON leaked labels: %v", out.Issues[0].Labels)
 		}
 	})
+}
+
+func TestEmbeddedListFilteringStatusAndHierarchy(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir, seed := seededListWorkspace(t)
 
 	// --- C. Status/special filtering ---
 	// Note: --ready, --pinned, --status closed/deferred/in_progress tests are
@@ -612,17 +632,13 @@ func TestEmbeddedListFiltering(t *testing.T) {
 	})
 }
 
-func TestEmbeddedListSearchAndOutput(t *testing.T) {
+func TestEmbeddedListSearchAndOutputSearchAndSort(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
 	t.Parallel()
 
-	bd := buildEmbeddedBD(t)
-	dir, _, _ := bdInit(t, bd, "--prefix", "tl")
-
-	// Seed test data
-	seed := seedTestData(t, bd, dir)
+	bd, dir, seed := seededListWorkspace(t)
 
 	// --- E. Content search ---
 
@@ -725,6 +741,15 @@ func TestEmbeddedListSearchAndOutput(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestEmbeddedListSearchAndOutputFormats(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir, seed := seededListWorkspace(t)
 
 	// --- I. Output formats ---
 

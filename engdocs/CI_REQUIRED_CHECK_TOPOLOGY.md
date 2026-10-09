@@ -1037,9 +1037,11 @@ Required` requires them to have run remotely and passed.
     - The `args` and `env` of every target tagged `embedded`,
       `dolt-server-proxied` or `dolt-server-integration` are pinned.
   - `tools/bazel/check_shard_coverage.py` runs after each tier. It requires:
-    - every Bazel shard of `//cmd/bd:bd_embedded_test` (50; the manifest's
-      frozen 20-shard block was the retired `test-embedded-cmd` jobs' split,
-      F1), `//internal/storage/embeddeddolt:embeddeddolt_embedded_test` (20;
+    - every Bazel shard of `//cmd/bd:bd_embedded_test` and
+      `//cmd/bd:bd_embedded_part2_test` (50 each: shards 1-50 and 51-100 of
+      the manifest's 100-shard block, which their ranges must tile exactly
+      once; the manifest's frozen 20-shard block was the retired
+      `test-embedded-cmd` jobs' split, F1), `//internal/storage/embeddeddolt:embeddeddolt_embedded_test` (20;
       the frozen 5-shard block was `test-embedded-storage`'s, F1),
       `//cmd/bd:bd_proxied_test` (34; the frozen 15-shard block was
       `test-proxied-cmd`'s, F2) and

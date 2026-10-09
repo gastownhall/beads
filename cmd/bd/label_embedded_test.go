@@ -125,12 +125,15 @@ func markIssueTemplate(t *testing.T, beadsDir, database, issueID string) {
 	}
 }
 
-// TestEmbeddedLabelAddRemove was split from TestEmbeddedLabel (originally
-// ~360s, measured under --config=embedded) into 3 top-level tests over
-// disjoint subtest groups, for CI shard balance (see
-// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
-// subtest is preserved exactly once.
-func TestEmbeddedLabelAddRemove(t *testing.T) {
+// The TestEmbeddedLabelAddRemove* and TestEmbeddedLabelEditReports* tests
+// were split from TestEmbeddedLabel (originally ~360s, measured under
+// --config=embedded) into top-level tests over disjoint subtest groups, each
+// on its own workspace, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every
+// original subtest is preserved exactly once, in its original order within
+// its group; the label list-all subtests still follow subtests that add
+// labels.
+func TestEmbeddedLabelAddRemoveAdd(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -189,6 +192,16 @@ func TestEmbeddedLabelAddRemove(t *testing.T) {
 			t.Errorf("expected valid JSON: %s", s)
 		}
 	})
+}
+
+func TestEmbeddedLabelAddRemoveMultiAndDuplicate(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tl")
 
 	t.Run("label_add_comma_separated_multi", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Multi label add", "--type", "task")
@@ -244,6 +257,16 @@ func TestEmbeddedLabelAddRemove(t *testing.T) {
 			t.Errorf("expected exactly 1 'dup' label, got %d in %v", count, labels)
 		}
 	})
+}
+
+func TestEmbeddedLabelAddRemoveRemove(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tl")
 
 	// ===== Label Remove =====
 
@@ -375,19 +398,15 @@ func TestEmbeddedLabelAddRemove(t *testing.T) {
 	})
 }
 
-// TestEmbeddedLabelEditReports was split from TestEmbeddedLabel (originally
-// ~360s, measured under --config=embedded) into 3 top-level tests over
-// disjoint subtest groups, for CI shard balance (see
-// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
-// subtest is preserved exactly once.
-func TestEmbeddedLabelEditReports(t *testing.T) {
+// See TestEmbeddedLabelAddRemoveAdd for the TestEmbeddedLabel split.
+func TestEmbeddedLabelEditReportsPrefix(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
 	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
-	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tl")
+	dir, _, _ := bdInit(t, bd, "--prefix", "tl")
 
 	// Two issues carrying DIFFERENT matching sets: the report is per issue and
 	// each issue's set is resolved from its own labels, so a refactor that
@@ -476,6 +495,16 @@ func TestEmbeddedLabelEditReports(t *testing.T) {
 			t.Errorf("expected valid JSON: %s", s)
 		}
 	})
+}
+
+func TestEmbeddedLabelEditReportsNoop(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tl")
 
 	// ===== No-op edits (GH#5988) =====
 	//
@@ -584,6 +613,16 @@ func TestEmbeddedLabelEditReports(t *testing.T) {
 			t.Errorf("add claimed an edit on the issue that already had the label: %s", out)
 		}
 	})
+}
+
+func TestEmbeddedLabelEditReportsListAndTemplate(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tl")
 
 	// ===== Label List =====
 

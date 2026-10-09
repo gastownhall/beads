@@ -97,11 +97,10 @@ func createBeadGate(t *testing.T, bd, dir, awaitID string) *types.Issue {
 	return &gate
 }
 
-func TestEmbeddedGate(t *testing.T) {
-	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
-		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
-	}
-	t.Parallel()
+// setupEmbeddedGate is the TestEmbeddedGate* tests' workspace: prefix tg,
+// with "gate" registered as a custom type.
+func setupEmbeddedGate(t *testing.T) (string, string) {
+	t.Helper()
 
 	bd := buildEmbeddedBD(t)
 	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tg")
@@ -112,6 +111,16 @@ func TestEmbeddedGate(t *testing.T) {
 		t.Fatalf("SetConfig types.custom: %v", err)
 	}
 	store.Close()
+	return bd, dir
+}
+
+func TestEmbeddedGateList(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir := setupEmbeddedGate(t)
 
 	// ===== Gate List =====
 
@@ -173,6 +182,15 @@ func TestEmbeddedGate(t *testing.T) {
 			t.Errorf("expected at most 1 result with --limit 1, got %d", len(results))
 		}
 	})
+}
+
+func TestEmbeddedGateShowResolve(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir := setupEmbeddedGate(t)
 
 	// ===== Gate Show =====
 
@@ -233,6 +251,15 @@ func TestEmbeddedGate(t *testing.T) {
 		task := bdCreate(t, bd, dir, "Not a gate resolve", "--type", "task")
 		bdGateFail(t, bd, dir, "resolve", task.ID)
 	})
+}
+
+func TestEmbeddedGateWaiterCheckLifecycle(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir := setupEmbeddedGate(t)
 
 	// ===== Gate Add-Waiter =====
 
@@ -375,12 +402,11 @@ func TestEmbeddedGate(t *testing.T) {
 	})
 }
 
-// TestEmbeddedGateCreate exercises the "bd gate create" subcommand.
-func TestEmbeddedGateCreate(t *testing.T) {
-	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
-		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
-	}
-	t.Parallel()
+// setupEmbeddedGateCreate is the shared workspace of the
+// TestEmbeddedGateCreate* tests ("bd gate create"): prefix gc, with "gate"
+// registered as a custom type so bd gate create works.
+func setupEmbeddedGateCreate(t *testing.T) (string, string) {
+	t.Helper()
 
 	bd := buildEmbeddedBD(t)
 	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gc")
@@ -391,6 +417,16 @@ func TestEmbeddedGateCreate(t *testing.T) {
 		t.Fatalf("SetConfig types.custom: %v", err)
 	}
 	store.Close()
+	return bd, dir
+}
+
+func TestEmbeddedGateCreateFlags(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir := setupEmbeddedGateCreate(t)
 
 	t.Run("create_default_human_gate", func(t *testing.T) {
 		task := bdCreate(t, bd, dir, "Task for human gate", "--type", "task")
@@ -492,6 +528,15 @@ func TestEmbeddedGateCreate(t *testing.T) {
 			t.Errorf("expected title 'Gate: gh:pr 42', got %s", gate.Title)
 		}
 	})
+}
+
+func TestEmbeddedGateCreateRepoErrorsList(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir := setupEmbeddedGateCreate(t)
 
 	t.Run("create_gate_with_repo", func(t *testing.T) {
 		task := bdCreate(t, bd, dir, "Task for cross-repo PR gate", "--type", "task")
@@ -535,6 +580,48 @@ func TestEmbeddedGateCreate(t *testing.T) {
 			t.Errorf("refusal text missing from output:\n%s", combined)
 		}
 	})
+
+	t.Run("create_gate_missing_blocks_flag", func(t *testing.T) {
+		out := bdGateFail(t, bd, dir, "create")
+		if !strings.Contains(out, "blocks") {
+			t.Errorf("expected error about missing --blocks flag: %s", out)
+		}
+	})
+
+	t.Run("create_gate_nonexistent_target", func(t *testing.T) {
+		out := bdGateFail(t, bd, dir, "create", "--blocks", "gc-nonexistent999")
+		if !strings.Contains(out, "not found") {
+			t.Errorf("expected 'not found' error: %s", out)
+		}
+	})
+
+	t.Run("create_gate_appears_in_gate_list", func(t *testing.T) {
+		task := bdCreate(t, bd, dir, "Task for list check", "--type", "task")
+		bdGate(t, bd, dir, "create", "--blocks", task.ID)
+
+		results := bdGateListJSON(t, bd, dir)
+		found := false
+		for _, r := range results {
+			if awaitType, ok := r["await_type"]; ok && awaitType == "human" {
+				if desc, ok := r["description"].(string); ok && strings.Contains(desc, task.ID) {
+					found = true
+					break
+				}
+			}
+		}
+		if !found {
+			t.Errorf("expected gate blocking %s in gate list", task.ID)
+		}
+	})
+}
+
+func TestEmbeddedGateCreateReady(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("create_gate_blocks_ready", func(t *testing.T) {
 		// Use a fresh db so ready output isn't polluted by other subtests
@@ -620,39 +707,15 @@ func TestEmbeddedGateCreate(t *testing.T) {
 			t.Errorf("task should reappear in ready after gate resolved: %s", stdout.String())
 		}
 	})
+}
 
-	t.Run("create_gate_missing_blocks_flag", func(t *testing.T) {
-		out := bdGateFail(t, bd, dir, "create")
-		if !strings.Contains(out, "blocks") {
-			t.Errorf("expected error about missing --blocks flag: %s", out)
-		}
-	})
+func TestEmbeddedGateCreateBeadCheck(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
 
-	t.Run("create_gate_nonexistent_target", func(t *testing.T) {
-		out := bdGateFail(t, bd, dir, "create", "--blocks", "gc-nonexistent999")
-		if !strings.Contains(out, "not found") {
-			t.Errorf("expected 'not found' error: %s", out)
-		}
-	})
-
-	t.Run("create_gate_appears_in_gate_list", func(t *testing.T) {
-		task := bdCreate(t, bd, dir, "Task for list check", "--type", "task")
-		bdGate(t, bd, dir, "create", "--blocks", task.ID)
-
-		results := bdGateListJSON(t, bd, dir)
-		found := false
-		for _, r := range results {
-			if awaitType, ok := r["await_type"]; ok && awaitType == "human" {
-				if desc, ok := r["description"].(string); ok && strings.Contains(desc, task.ID) {
-					found = true
-					break
-				}
-			}
-		}
-		if !found {
-			t.Errorf("expected gate blocking %s in gate list", task.ID)
-		}
-	})
+	bd := buildEmbeddedBD(t)
 
 	t.Run("check_bead_gate_resolves_only_a_missing_target_it_saw", func(t *testing.T) {
 		// Use a fresh db so the check sees only these bead gates
@@ -690,6 +753,15 @@ func TestEmbeddedGateCreate(t *testing.T) {
 			t.Errorf("gate on a never-seen await_id: status=%s, want open", got.Status)
 		}
 	})
+}
+
+func TestEmbeddedGateCreateBeadRename(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("rename_keeps_a_bead_gate_on_its_target", func(t *testing.T) {
 		// Renaming the awaited bead points its gate at the new ID and moves

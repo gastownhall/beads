@@ -125,7 +125,8 @@ exports_files(
 
 # PR Risk's manifest-sharded tiers' shard scripts and their committed
 # manifests (embedded-Dolt cmd and storage, proxied-server cmd, server-Dolt
-# storage). The variants (//cmd/bd:bd_embedded_test, //cmd/bd:bd_proxied_test,
+# storage). The variants (//cmd/bd:bd_embedded_test and
+# //cmd/bd:bd_embedded_part2_test, //cmd/bd:bd_proxied_test,
 # //internal/storage/embeddeddolt:embeddeddolt_embedded_test,
 # //internal/storage/dolt:dolt_server_full_test) run them through
 # tools/bazel/go_test_manifest_shard.sh, so each Bazel shard runs exactly the

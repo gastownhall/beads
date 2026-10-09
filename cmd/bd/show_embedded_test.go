@@ -300,14 +300,21 @@ func TestEmbeddedShowBasicsAndJSON(t *testing.T) {
 	})
 }
 
-func TestEmbeddedShowDetailAndCurrent(t *testing.T) {
+// TestEmbeddedShowDetailAndCurrentFlags and
+// TestEmbeddedShowDetailAndCurrentHistoryAndCurrent were split from
+// TestEmbeddedShowDetailAndCurrent into two top-level tests over disjoint
+// subtest groups, each on its own workspace, for CI shard balance. Every
+// subtest is preserved exactly once, in its original order within its group;
+// show_current_fallback_to_last_touched still follows subtests that show
+// issues (show_as_of, show_local_time).
+func TestEmbeddedShowDetailAndCurrentFlags(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
 	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
-	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ts")
+	dir, _, _ := bdInit(t, bd, "--prefix", "ts")
 
 	// ===== --long =====
 
@@ -362,6 +369,16 @@ func TestEmbeddedShowDetailAndCurrent(t *testing.T) {
 		// Should not error even with no children
 		_ = bdShowRaw(t, bd, dir, issue.ID, "--children")
 	})
+}
+
+func TestEmbeddedShowDetailAndCurrentHistoryAndCurrent(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ts")
 
 	// ===== --as-of =====
 

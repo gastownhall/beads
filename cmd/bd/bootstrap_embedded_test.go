@@ -88,7 +88,7 @@ func TestBootstrapNoWorkspace(t *testing.T) {
 	})
 }
 
-func TestEmbeddedBootstrap(t *testing.T) {
+func TestEmbeddedBootstrapExistingDryRunInit(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -160,6 +160,15 @@ func TestEmbeddedBootstrap(t *testing.T) {
 			t.Errorf("expected 'Created fresh database':\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
 		}
 	})
+}
+
+func TestEmbeddedBootstrapJSONLAndGitOrigin(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	// ===== JSONL Import =====
 

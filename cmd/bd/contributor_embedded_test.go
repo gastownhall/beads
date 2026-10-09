@@ -13,11 +13,11 @@ import (
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
-// TestEmbeddedContributorCreate exercises the full contributor mode flow in
+// The TestEmbeddedContributorCreate* tests exercise the full contributor mode flow in
 // embedded Dolt: init → contributor wizard → create. This is the exact
 // scenario that triggered GH#2988 ("no database selected" when the planning
 // repo's .beads directory has no metadata.json).
-func TestEmbeddedContributorCreate(t *testing.T) {
+func TestEmbeddedContributorCreateRoutesToPlanning(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt contributor tests")
 	}
@@ -46,6 +46,15 @@ func TestEmbeddedContributorCreate(t *testing.T) {
 		projectBeadsDir := filepath.Join(dir, ".beads")
 		assertIssueNotInStore(t, projectBeadsDir, "cr", issue.ID)
 	})
+}
+
+func TestEmbeddedContributorCreateShowReadsRouted(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt contributor tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("show_reads_routed_issue", func(t *testing.T) {
 		dir, _ := initContributor(t, bd, "sh")
@@ -56,6 +65,15 @@ func TestEmbeddedContributorCreate(t *testing.T) {
 			t.Errorf("title: got %q, want %q", shown.Title, "Show me")
 		}
 	})
+}
+
+func TestEmbeddedContributorCreateMultiple(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt contributor tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("multiple_creates_succeed", func(t *testing.T) {
 		dir, planningDir := initContributor(t, bd, "mc")

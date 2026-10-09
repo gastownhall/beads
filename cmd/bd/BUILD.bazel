@@ -1396,17 +1396,22 @@ go_test(
     }),
 )
 
-# Runs 50 Bazel shards against the TestEmbedded* functions of
-# *_embedded_test.go, assigned by the manifest's 50-shard block
-# (duration-balanced; see scripts/ci/embedded_cmd_test_durations.json),
-# against this configuration's bd_test with BEADS_TEST_EMBEDDED_DOLT=1 and
-# the race bd (//cmd/bd:bd under --config=embedded) as the subprocess
-# binary. This is a *different* shard count from PR Risk's legacy fork/push
-# jobs, "Test (Embedded Dolt Cmd N/20)" (pr-risk.yml): those keep
-# running 20 shards of their own, frozen hand-assigned block in the same
-# manifest file — shard k here is not the same split as their shard k. It
-# repeats bd_test's `env` (the wrapper cannot inherit it). shard_count must
-# stay equal to this lane's manifest block's shard total.
+# bd_embedded_test and bd_embedded_part2_test run the TestEmbedded* functions
+# of *_embedded_test.go between them: the manifest's 100-shard block
+# (duration-balanced; see scripts/ci/embedded_cmd_test_durations.json) is
+# more than Bazel's 50-shard cap per rule, so bd_embedded_test runs its
+# shards 1-50 and bd_embedded_part2_test its shards 51-100
+# (go_test_manifest_shard.sh --shard-offset/--shard-total; bazel.yml's
+# check_shard_coverage.py fails unless the two ranges tile the block exactly
+# once). Both run this configuration's bd_test with
+# BEADS_TEST_EMBEDDED_DOLT=1 and the race bd (//cmd/bd:bd under
+# --config=embedded) as the subprocess binary. This is a *different* shard
+# count from PR Risk's legacy fork/push jobs, "Test (Embedded Dolt Cmd
+# N/20)" (pr-risk.yml): those keep running 20 shards of their own, frozen
+# hand-assigned block in the same manifest file — shard k here is not the
+# same split as their shard k. Each repeats bd_test's `env` (the wrapper
+# cannot inherit it). The two shard_counts must sum to --shard-total, the
+# manifest block's shard total.
 #
 # Tags:
 #   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
@@ -1422,6 +1427,8 @@ sh_test(
     timeout = "eternal",
     srcs = ["//tools/bazel:go_test_manifest_shard.sh"],
     args = [
+        "--shard-offset=0",
+        "--shard-total=100",
         "$(rootpath //:.github/scripts/embedded-test-shard.sh)",
         "BEADS_TEST_CMD_BINARY",
         "$(rootpath :bd_test)",
@@ -1448,6 +1455,44 @@ sh_test(
         # the bd subprocesses (hundreds per shard, each a few seconds) exit
         # through it every time. Races they hit while running still fail
         # the command (exit 66) as before.
+        "GORACE": "atexit_sleep_ms=0",
+    },
+    shard_count = 50,
+    tags = ["embedded"],
+)
+
+# Shards 51-100 of the manifest's 100-shard block; see bd_embedded_test.
+#
+# Tags:
+#   embedded: as bd_embedded_test.
+sh_test(
+    name = "bd_embedded_part2_test",
+    size = "large",
+    # -test.timeout=19m and env: as bd_embedded_test.
+    timeout = "eternal",
+    srcs = ["//tools/bazel:go_test_manifest_shard.sh"],
+    args = [
+        "--shard-offset=50",
+        "--shard-total=100",
+        "$(rootpath //:.github/scripts/embedded-test-shard.sh)",
+        "BEADS_TEST_CMD_BINARY",
+        "$(rootpath :bd_test)",
+        "-test.timeout=19m",
+    ],
+    data = [
+        ":bd",
+        ":bd_test",
+        ":go_srcs",
+        "//:.github/scripts/embedded-cmd-test-shards.txt",
+        "//:.github/scripts/embedded-test-shard.sh",
+        "//internal/storage/embeddeddolt/cmd:cmd_norace",
+        "@go_sdk//:bin/gofmt",
+    ],
+    env = {
+        "BEADS_TEST_BD_BINARY": "$(rlocationpath :bd)",
+        "BEADS_TEST_EMBEDDED_DOLT": "1",
+        "BEADS_TEST_EMBEDDED_SCHEMA_TOOL": "$(rlocationpath //internal/storage/embeddeddolt/cmd:cmd_norace)",
+        "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
         "GORACE": "atexit_sleep_ms=0",
     },
     shard_count = 50,

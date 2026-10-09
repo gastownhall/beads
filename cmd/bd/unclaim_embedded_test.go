@@ -38,7 +38,7 @@ func bdUnclaimFail(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
-func TestEmbeddedUnclaim(t *testing.T) {
+func TestEmbeddedUnclaimSuccess(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -122,6 +122,16 @@ func TestEmbeddedUnclaim(t *testing.T) {
 			t.Errorf("expected status open after unclaim, got %q", unclaimed[0].Status)
 		}
 	})
+}
+
+func TestEmbeddedUnclaimBatchAndRefusals(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tu")
 
 	// ===== Multiple IDs =====
 

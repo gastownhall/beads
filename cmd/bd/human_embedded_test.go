@@ -48,7 +48,7 @@ func humanShowClosed(t *testing.T, bd, dir, id string) *types.Issue {
 	return issue
 }
 
-func TestEmbeddedHuman(t *testing.T) {
+func TestEmbeddedHumanListStatsRespondDismiss(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -127,6 +127,16 @@ func TestEmbeddedHuman(t *testing.T) {
 			t.Errorf("expected dismiss reason %q, got %q", "Dismissed: Not needed", issue2.CloseReason)
 		}
 	})
+}
+
+func TestEmbeddedHumanPositionalFileAndGuards(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "th")
 
 	// ===== Respond via positional text and --file =====
 

@@ -10,15 +10,11 @@
 20 2 TestEmbeddedBackupConcurrent
 20 3 TestEmbeddedBlocked
 20 4 TestEmbeddedBlockedConcurrent
-20 5 TestEmbeddedBootstrap
 20 6 TestEmbeddedBootstrapConcurrent
 20 7 TestEmbeddedBranch
 20 8 TestEmbeddedBranchConcurrent
-20 9 TestEmbeddedChildren
 20 10 TestEmbeddedChildrenConcurrent
-20 11 TestEmbeddedCloseBasic
 20 11 TestEmbeddedCloseGuardsAndEpics
-20 11 TestEmbeddedCloseAlreadyClosed
 20 12 TestEmbeddedCloseConcurrent
 20 13 TestEmbeddedComments
 20 14 TestEmbeddedCommentsCLI
@@ -31,7 +27,6 @@
 20 1 TestEmbeddedConfigValidateJSONNoWorkspaceWritesStdout
 20 2 TestEmbeddedContext
 20 3 TestEmbeddedContextConcurrent
-20 4 TestEmbeddedContributorCreate
 20 5 TestEmbeddedCount
 20 6 TestEmbeddedCountConcurrent
 20 7 TestEmbeddedCreateScalarAndRelationships
@@ -44,9 +39,6 @@
 20 13 TestEmbeddedCreateWithGitRemote
 20 14 TestEmbeddedDefer
 20 15 TestEmbeddedDeferConcurrent
-20 16 TestEmbeddedDelete
-20 17 TestEmbeddedDepA
-20 17 TestEmbeddedDepB
 20 18 TestEmbeddedDepConcurrent
 20 19 TestEmbeddedDiff
 20 20 TestEmbeddedDiffConcurrent
@@ -55,10 +47,8 @@
 20 2 TestEmbeddedDoltConcurrent
 20 3 TestEmbeddedDuplicate
 20 4 TestEmbeddedDuplicateConcurrent
-20 5 TestEmbeddedDuplicates
 20 6 TestEmbeddedDuplicatesConcurrent
 20 7 TestEmbeddedEpicStatus
-20 7 TestEmbeddedEpicCloseEligible
 20 7 TestEmbeddedEpicCloseEligibleReasonFlag
 20 7 TestEmbeddedEpicCloseEligibleReasonOutput
 20 8 TestEmbeddedEpicConcurrent
@@ -72,11 +62,8 @@
 20 14 TestEmbeddedFindDuplicatesConcurrent
 20 15 TestEmbeddedFlatten
 20 16 TestEmbeddedFlattenConcurrent
-20 17 TestEmbeddedGC
 20 18 TestEmbeddedGCConcurrent
-20 19 TestEmbeddedGate
 20 20 TestEmbeddedGateConcurrent
-20 1 TestEmbeddedGateCreate
 20 2 TestEmbeddedGetDependencies
 20 3 TestEmbeddedGraph
 20 4 TestEmbeddedGraphConcurrent
@@ -84,27 +71,20 @@
 20 6 TestEmbeddedHistoryConcurrent
 20 7 TestEmbeddedHooks
 20 8 TestEmbeddedHooksConcurrent
-20 9 TestEmbeddedHuman
 20 10 TestEmbeddedHumanConcurrent
 20 11 TestEmbeddedImportFromSources
 20 11 TestEmbeddedImportUpsertAndPrefixSync
 20 12 TestEmbeddedImportConcurrent
 20 13 TestEmbeddedInfo
 20 14 TestEmbeddedInfoConcurrent
-20 15 TestEmbeddedInitA
-20 15 TestEmbeddedInitB
 20 15 TestEmbeddedInitC
 20 16 TestEmbeddedInitConcurrent
 20 17 TestEmbeddedKV
 20 18 TestEmbeddedKVConcurrent
-20 19 TestEmbeddedLabelAddRemove
-20 19 TestEmbeddedLabelEditReports
 20 19 TestEmbeddedLabelPropagateRename
 20 20 TestEmbeddedLabelConcurrent
 20 1 TestEmbeddedLint
 20 2 TestEmbeddedLintConcurrent
-20 3 TestEmbeddedListFiltering
-20 3 TestEmbeddedListSearchAndOutput
 20 4 TestEmbeddedListConcurrent
 20 13 TestEmbeddedMaxRowsListBasic
 20 13 TestEmbeddedMaxRowsListLimitInteraction
@@ -137,7 +117,6 @@
 20 4 TestEmbeddedQuickConcurrent
 20 5 TestEmbeddedQuickstart
 20 6 TestEmbeddedQuickstartConcurrent
-20 7 TestEmbeddedReady
 20 8 TestEmbeddedReadyConcurrent
 20 9 TestEmbeddedRenamePrefixBasic
 20 9 TestEmbeddedRenamePrefixEdgeCases
@@ -146,14 +125,12 @@
 20 12 TestEmbeddedReopenConcurrent
 20 13 TestEmbeddedRestore
 20 14 TestEmbeddedRestoreConcurrent
-20 15 TestEmbeddedSearch
 20 16 TestEmbeddedSearchConcurrent
 20 17 TestEmbeddedSetup
 20 18 TestEmbeddedSetupConcurrent
 20 19 TestEmbeddedShip
 20 20 TestEmbeddedShipConcurrent
 20 1 TestEmbeddedShowBasicsAndJSON
-20 1 TestEmbeddedShowDetailAndCurrent
 20 2 TestEmbeddedShowConcurrent
 20 3 TestEmbeddedStale
 20 4 TestEmbeddedStaleConcurrent
@@ -163,7 +140,6 @@
 20 8 TestEmbeddedStatusConcurrent
 20 9 TestEmbeddedSupersede
 20 10 TestEmbeddedSupersedeConcurrent
-20 11 TestEmbeddedSwarm
 20 12 TestEmbeddedSwarmConcurrent
 20 13 TestEmbeddedTodo
 20 14 TestEmbeddedTodoConcurrent
@@ -171,8 +147,6 @@
 20 16 TestEmbeddedTypesConcurrent
 20 17 TestEmbeddedUndefer
 20 18 TestEmbeddedUndeferConcurrent
-20 19 TestEmbeddedUpdateFields
-20 19 TestEmbeddedUpdateLifecycle
 20 20 TestEmbeddedUpdateConcurrent
 20 1 TestEmbeddedVCStatusAndCommit
 20 1 TestEmbeddedVCCommitVariantsAndMerge
@@ -186,14 +160,14 @@
 #
 # Format: <total_shards> <shard_number> <top_level_test_name>
 #
-# 50-shard split for the Bazel-only embedded-Dolt cmd tier
+# 100-shard split for the Bazel-only embedded-Dolt cmd tier
 # (bazel-embedded in .github/workflows/bazel.yml), bin-packed
 # longest-first by measured wall-time from
 # scripts/ci/embedded_cmd_test_durations.json (see that file for provenance
 # and its "relative weight, not absolute SLA" caveat) onto the shard
 # whose estimated wall time grows least: serial tests (no top-level
 # t.Parallel) add up, parallel ones share -test.parallel=4.
-# Regenerate with scripts/ci/gen_embedded_cmd_shard_manifest.py 50
+# Regenerate with scripts/ci/gen_embedded_cmd_shard_manifest.py 100
 # --weights=duration --write after adding, splitting or removing
 # TestEmbedded* functions in cmd/bd/*_embedded_test.go. --write is
 # incremental: it keeps every already-assigned test on its current shard
@@ -208,302 +182,407 @@
 # This file is generated: notes added here are erased by the next
 # regeneration. Add them to the generator or the durations file instead.
 
-50 1 TestEmbeddedInitA
+100 1 TestEmbeddedUpdateConcurrent
 
-50 2 TestEmbeddedGateCreate
+100 2 TestEmbeddedShowConcurrent
 
-50 3 TestEmbeddedRoutedMutatingSiblingAssignTagDep
+100 3 TestEmbeddedCloseConcurrent
 
-50 4 TestEmbeddedUpdateConcurrent
+100 4 TestEmbeddedEpicConcurrent
 
-50 5 TestEmbeddedMaxRowsListLimitInteraction
+100 5 TestEmbeddedConfigConcurrent
 
-50 6 TestEmbeddedSwarm
+100 6 TestEmbeddedListFilteringBasicAndLabels
 
-50 7 TestEmbeddedDepA
+100 7 TestEmbeddedDepConcurrent
 
-50 8 TestEmbeddedDepB
+100 8 TestEmbeddedMaxRowsListLimitInteraction
 
-50 9 TestEmbeddedKVConcurrent
+100 9 TestEmbeddedChildrenConcurrent
 
-50 10 TestEmbeddedListFiltering
+100 10 TestEmbeddedCreateScalarAndRelationships
 
-50 11 TestEmbeddedInitRoleRouting
+100 11 TestEmbeddedKVConcurrent
 
-50 12 TestEmbeddedContributorCreate
+100 12 TestEmbeddedGatedRendering
 
-50 13 TestEmbeddedInitGitBootstrapRouting
+100 13 TestEmbeddedListFilteringStatusAndHierarchy
 
-50 14 TestEmbeddedCloseConcurrent
+100 14 TestEmbeddedReopenConcurrent
 
-50 15 TestEmbeddedCloseAlreadyClosed
+100 15 TestEmbeddedPurgeWispsPlaneRetention
 
-50 16 TestEmbeddedRoutedSiblingWritesCommitTargetHead
+100 16 TestEmbeddedMemoryConcurrent
 
-50 17 TestEmbeddedConfigConcurrent
+100 17 TestEmbeddedReopen
 
-50 18 TestEmbeddedGate
+100 18 TestEmbeddedLabelPropagateRename
 
-50 19 TestEmbeddedShowDetailAndCurrent
+100 19 TestEmbeddedLabelConcurrent
 
-50 20 TestEmbeddedDelete
+100 20 TestEmbeddedInitRoleRoutingRetainedFork
 
-50 21 TestEmbeddedBootstrap
+100 21 TestEmbeddedMaxRowsReady
 
-50 22 TestEmbeddedUnclaim
+100 22 TestEmbeddedCount
 
-50 23 TestEmbeddedBootstrapConcurrent
-50 23 TestEmbeddedHooksConcurrent
-50 23 TestEmbeddedShowConcurrent
+100 23 TestEmbeddedCountConcurrent
 
-50 24 TestEmbeddedAutoImportFallback_ConflictSkip_EmptyDBImportsAll
-50 24 TestEmbeddedBackupConcurrent
-50 24 TestEmbeddedBlocked
-50 24 TestEmbeddedComments
-50 24 TestEmbeddedCompactMisdatedChild
-50 24 TestEmbeddedContextConcurrent
-50 24 TestEmbeddedCreateCommitPending
-50 24 TestEmbeddedCreateRepoFromNonBeadsCwd
-50 24 TestEmbeddedCreateStorageClassBasic
-50 24 TestEmbeddedCreateWithGitRemote
-50 24 TestEmbeddedFindDuplicatesConcurrent
-50 24 TestEmbeddedHistoryConcurrent
-50 24 TestEmbeddedHooks
-50 24 TestEmbeddedHumanConcurrent
-50 24 TestEmbeddedInfoSuppressGitHooks
-50 24 TestEmbeddedMigrateConcurrent
-50 24 TestEmbeddedOnboard
-50 24 TestEmbeddedPromote
-50 24 TestEmbeddedQuickstart
-50 24 TestEmbeddedWhere
+100 24 TestEmbeddedUndeferConcurrent
 
-50 25 TestEmbeddedAdminCompactReadOnlyAllowed
-50 25 TestEmbeddedAutoImportFallback_ConflictSkip_DoesNotClobber
-50 25 TestEmbeddedConfigNoWorkspaceStoreFreeCommands
-50 25 TestEmbeddedConfigValidateJSONNoWorkspaceWritesStdout
-50 25 TestEmbeddedCreateGraphAndBulk
-50 25 TestEmbeddedDoltRemoteAndPush
-50 25 TestEmbeddedGateInheritsDownParentChain
-50 25 TestEmbeddedListConcurrent
-50 25 TestEmbeddedOnboardConcurrent
-50 25 TestEmbeddedPrime
-50 25 TestEmbeddedQuickstartConcurrent
-50 25 TestEmbeddedRenamePrefixConcurrent
-50 25 TestEmbeddedSetup
-50 25 TestEmbeddedSetupConcurrent
-50 25 TestEmbeddedUpdateBatchAutoCommitDoesNotAdvanceHead
-50 25 TestEmbeddedUpdateFields
-50 25 TestEmbeddedVCCommitVariantsAndMerge
-50 25 TestEmbeddedVersion
-50 25 TestEmbeddedVersionConcurrent
+100 25 TestEmbeddedMaxRowsListBasic
 
-50 26 TestEmbeddedAdminBlocked
-50 26 TestEmbeddedBlockedLabelFilters
-50 26 TestEmbeddedClaimPools
-50 26 TestEmbeddedCompactConcurrent
-50 26 TestEmbeddedExportConcurrent
-50 26 TestEmbeddedGCConcurrent
-50 26 TestEmbeddedGraphConcurrent
-50 26 TestEmbeddedPrimeChangeDirPrimesTarget
-50 26 TestEmbeddedPrimeConcurrent
-50 26 TestEmbeddedReopenConcurrent
-50 26 TestEmbeddedTodoConcurrent
-50 26 TestEmbeddedTypes
-50 26 TestEmbeddedTypesConcurrent
+100 26 TestEmbeddedExternalMutationPolicy
 
-50 27 TestEmbeddedBranch
-50 27 TestEmbeddedContext
-50 27 TestEmbeddedCountIncludeEphemeral
-50 27 TestEmbeddedCreateFormCommitsLabelOnlyCreate
-50 27 TestEmbeddedFederationConcurrent
-50 27 TestEmbeddedGateListScoped
-50 27 TestEmbeddedIfRevisionReopenGuardDirect
-50 27 TestEmbeddedOrphans
-50 27 TestEmbeddedPurgeWispsPlaneRetention
-50 27 TestEmbeddedReclaimRunsTheLeaseReclaimerRole
-50 27 TestEmbeddedStaleLabelFilters
+100 27 TestEmbeddedShipConcurrent
 
-50 28 TestEmbeddedAutoImportJSONLConcurrentWriter
-50 28 TestEmbeddedAutoImportJSONLSkipsNonEmpty
-50 28 TestEmbeddedBranchConcurrent
-50 28 TestEmbeddedCreateConcurrent
-50 28 TestEmbeddedEpicCloseEligibleReasonFlag
-50 28 TestEmbeddedFederationStatus
-50 28 TestEmbeddedLabelAddRemove
-50 28 TestEmbeddedPurgeConcurrent
-50 28 TestEmbeddedReadyClaimConcurrent
-50 28 TestEmbeddedStatus
+100 28 TestEmbeddedHistoryConcurrent
 
-50 29 TestEmbeddedDepBulkNoCycleCheckKeepsWholeGraphGate
-50 29 TestEmbeddedDepConcurrent
-50 29 TestEmbeddedFlatten
-50 29 TestEmbeddedGetDependencies
-50 29 TestEmbeddedImportUpsertAndPrefixSync
-50 29 TestEmbeddedInfo
-50 29 TestEmbeddedMaxRowsDoctorAndConfig
-50 29 TestEmbeddedOrphansConcurrent
-50 29 TestEmbeddedRenamePrefixEdgeCases
+100 29 TestEmbeddedEpicCloseEligibleReasonFlag
 
-50 30 TestEmbeddedAutoImportJSONLNoExplicitCommit
-50 30 TestEmbeddedCreateJSONEchoesSubSecondTimestamps
-50 30 TestEmbeddedDepAddWispSource
-50 30 TestEmbeddedExportFlags
-50 30 TestEmbeddedListComments
-50 30 TestEmbeddedPurgeBasics
-50 30 TestEmbeddedReadOnlyCommandsSpawnNoGit
-50 30 TestEmbeddedReadyConcurrent
-50 30 TestEmbeddedRoutedMutatingSiblingDeleteClose
+100 30 TestEmbeddedCloseGuardsAndEpics
 
-50 31 TestEmbeddedCreateCrossRepoUninit
-50 31 TestEmbeddedCreateDryRunRepoDoesNotInitializeTarget
-50 31 TestEmbeddedDoltBlockedAndCommit
-50 31 TestEmbeddedDoltConcurrent
-50 31 TestEmbeddedGatedRendering
-50 31 TestEmbeddedImportFromSources
-50 31 TestEmbeddedInfoConcurrent
-50 31 TestEmbeddedInitB
-50 31 TestEmbeddedMigrate
+100 31 TestEmbeddedInitSelectedExcludeRoutingForkInvalidQuiet
 
-50 32 TestEmbeddedBackup
-50 32 TestEmbeddedExternalCapabilityReadyAfterShip
-50 32 TestEmbeddedFederationPeers
-50 32 TestEmbeddedLabelConcurrent
-50 32 TestEmbeddedMaxRowsReadyMerge
-50 32 TestEmbeddedPreviewDoesNotConsumeVersionMarker
-50 32 TestEmbeddedRestore
-50 32 TestEmbeddedTypesAgreeWithCreate
+100 32 TestEmbeddedListSearchAndOutputFormats
 
-50 33 TestEmbeddedBlockedConcurrent
-50 33 TestEmbeddedDefer
-50 33 TestEmbeddedGC
-50 33 TestEmbeddedPruneDryRunAndFilters
-50 33 TestEmbeddedPurgeFiltered
-50 33 TestEmbeddedQuery
-50 33 TestEmbeddedVCConcurrent
-50 33 TestEmbeddedWhereConcurrent
+100 33 TestEmbeddedBootstrapJSONLAndGitOrigin
 
-50 34 TestEmbeddedCompact
-50 34 TestEmbeddedCreateCrossRepoWithParent
-50 34 TestEmbeddedCreateRepoRelativeUninitRefused
-50 34 TestEmbeddedCreateStorageClassConflicts
-50 34 TestEmbeddedDuplicatesConcurrent
-50 34 TestEmbeddedEpicCloseEligibleReasonOutput
-50 34 TestEmbeddedFlattenConcurrent
-50 34 TestEmbeddedOpen_EmptyDatabaseRejected
-50 34 TestEmbeddedRestoreConcurrent
-50 34 TestEmbeddedUpdateLifecycle
+100 34 TestEmbeddedUnclaimBatchAndRefusals
 
-50 35 TestEmbeddedCreateCrossRepo
-50 35 TestEmbeddedDeleteJSONDependencyErrorContract
-50 35 TestEmbeddedDuplicateConcurrent
-50 35 TestEmbeddedInitArtifactRouting
-50 35 TestEmbeddedMaxRowsListBasic
-50 35 TestEmbeddedStateConcurrent
-50 35 TestEmbeddedVCStatusAndCommit
+100 35 TestEmbeddedGateCreateBeadRename
 
-50 36 TestEmbeddedAdminCompactTier2Honesty
-50 36 TestEmbeddedCloseBasic
-50 36 TestEmbeddedConfig
-50 36 TestEmbeddedCountConcurrent
-50 36 TestEmbeddedDirectCommitPathsBatchAutoCommitDoesNotAdvanceHead
-50 36 TestEmbeddedInitConcurrent
-50 36 TestEmbeddedLintConcurrent
-50 36 TestEmbeddedPrimeChangeDirRedirectNoticeFollowsTarget
+100 36 TestEmbeddedGateConcurrent
 
-50 37 TestEmbeddedChangeDirOverridesInheritedBeadsDir
-50 37 TestEmbeddedChildren
-50 37 TestEmbeddedChildrenConcurrent
-50 37 TestEmbeddedCreateCrossRepoDryRunWithParent
-50 37 TestEmbeddedCreateStorageClassBatchAndMisc
-50 37 TestEmbeddedQueryConcurrent
-50 37 TestEmbeddedStaleConcurrent
+100 37 TestEmbeddedMaxRowsDepTreeAndDuplicates
 
-50 38 TestEmbeddedCreateDryRunDoesNotMigrate
-50 38 TestEmbeddedImportPromotedWispRoundtrip
-50 38 TestEmbeddedMaxRowsReady
-50 38 TestEmbeddedReady
-50 38 TestEmbeddedRenamePrefixBasic
-50 38 TestEmbeddedShip
-50 38 TestEmbeddedSupersede
+100 38 TestEmbeddedGraphConcurrent
 
-50 39 TestEmbeddedDeferAutoWake
-50 39 TestEmbeddedEpicConcurrent
-50 39 TestEmbeddedGateConcurrent
-50 39 TestEmbeddedInitC
-50 39 TestEmbeddedKV
-50 39 TestEmbeddedLint
-50 39 TestEmbeddedPromoteCLI
+100 39 TestEmbeddedMaxRowsGraph
 
-50 40 TestEmbeddedCommentsCLI
-50 40 TestEmbeddedCommentsCLIConcurrent
-50 40 TestEmbeddedDepAndLinkBatchAutoCommitDoesNotAdvanceHead
-50 40 TestEmbeddedDiffConcurrent
-50 40 TestEmbeddedImportConcurrent
-50 40 TestEmbeddedSupersedeConcurrent
-50 40 TestEmbeddedTodo
+100 40 TestEmbeddedUpdateLifecycleClaimParentCommit
 
-50 41 TestEmbeddedHistory
-50 41 TestEmbeddedInitSelectedExcludeRoutingFork
-50 41 TestEmbeddedListSearchAndOutput
-50 41 TestEmbeddedPromoteCLIConcurrent
-50 41 TestEmbeddedQuick
-50 41 TestEmbeddedUndefer
+100 41 TestEmbeddedDuplicateConcurrent
 
-50 42 TestEmbeddedCountIncludeInfra
-50 42 TestEmbeddedDuplicate
-50 42 TestEmbeddedEpicCloseEligible
-50 42 TestEmbeddedInitExplicitBeadsDirIsAuthoritative
-50 42 TestEmbeddedQuietFlagSuppressesSuccessOutput
-50 42 TestEmbeddedStatusConcurrent
+100 42 TestEmbeddedInitAForkAutoContributor
 
-50 43 TestEmbeddedCreateRepoRelativeExistingWorkspaceUnaffected
-50 43 TestEmbeddedImportClosedChildWhoseParentWasDeleted
-50 43 TestEmbeddedLabelEditReports
-50 43 TestEmbeddedShowBasicsAndJSON
-50 43 TestEmbeddedState
-50 43 TestEmbeddedSwarmConcurrent
+100 43 TestEmbeddedInitExplicitBeadsDirIsAuthoritative
 
-50 44 TestEmbeddedFindDuplicates
-50 44 TestEmbeddedMaxRowsGraph
-50 44 TestEmbeddedMemory
-50 44 TestEmbeddedShipConcurrent
-50 44 TestEmbeddedShowUnresolvableDeps
-50 44 TestEmbeddedSquashWispMoleculeClearsRootEphemeral
+100 44 TestEmbeddedStaleConcurrent
 
-50 45 TestEmbeddedCloseGuardsAndEpics
-50 45 TestEmbeddedCreateRepoProxiedTargetError
-50 45 TestEmbeddedCreateScalarAndRelationships
-50 45 TestEmbeddedDuplicates
-50 45 TestEmbeddedUndeferConcurrent
-50 45 TestEmbeddedUpdateRoutedStoreCommitsTargetHead
+100 45 TestEmbeddedGraph
 
-50 46 TestEmbeddedCount
-50 46 TestEmbeddedDepListSingleIDWarnsOnDroppedExternalEdge
-50 46 TestEmbeddedDepNoCycleCheck
-50 46 TestEmbeddedEpicStatus
-50 46 TestEmbeddedInitHooksRouting
-50 46 TestEmbeddedReopen
+100 46 TestEmbeddedCloseAlreadyClosedClaimNextAndMolecule
 
-50 47 TestEmbeddedDiff
-50 47 TestEmbeddedGraph
-50 47 TestEmbeddedHuman
-50 47 TestEmbeddedMemoryCorpusBudget
-50 47 TestEmbeddedPrimeChangeDirDefaultTemplateMatchesTarget
-50 47 TestEmbeddedQuickConcurrent
-50 47 TestEmbeddedSearchConcurrent
+100 47 TestEmbeddedListSearchAndOutputSearchAndSort
 
-50 48 TestEmbeddedCreateDryRunCrossRepoDoesNotMigrateTarget
-50 48 TestEmbeddedExportFormats
-50 48 TestEmbeddedLabelPropagateRename
-50 48 TestEmbeddedMaxRowsDepTreeAndDuplicates
-50 48 TestEmbeddedMemoryConcurrent
-50 48 TestEmbeddedSearch
+100 48 TestEmbeddedDeferConcurrent
 
-50 49 TestEmbeddedExplicitHierarchicalParentEdges
-50 49 TestEmbeddedInitSelectedExcludeRoutingStealth
+100 49 TestEmbeddedInitAPushConsentAndRemoteBootstrap
 
-50 50 TestEmbeddedDeferConcurrent
-50 50 TestEmbeddedExternalMutationPolicy
-50 50 TestEmbeddedGCConditionalMatcherDecode
-50 50 TestEmbeddedPruneSafetyAndScope
-50 50 TestEmbeddedStale
+100 50 TestEmbeddedDiffConcurrent
+
+100 51 TestEmbeddedInitGitBootstrapRoutingFreshQuiet
+
+100 52 TestEmbeddedSwarmConcurrent
+
+100 53 TestEmbeddedInitSelectedExcludeRoutingStealthDecoyQuiet
+
+100 54 TestEmbeddedSearchConcurrent
+
+100 55 TestEmbeddedUndefer
+
+100 56 TestEmbeddedDepNoCycleCheck
+
+100 57 TestEmbeddedQueryConcurrent
+
+100 58 TestEmbeddedDepAAddRejectionsAndBulk
+
+100 59 TestEmbeddedDeferAutoWake
+
+100 60 TestEmbeddedCommentsCLI
+
+100 61 TestEmbeddedUpdateRoutedStoreCommitsTargetHead
+
+100 62 TestEmbeddedReadyBlockersAndLabels
+
+100 63 TestEmbeddedDepAndLinkBatchAutoCommitDoesNotAdvanceHead
+
+100 64 TestEmbeddedGateWaiterCheckLifecycle
+
+100 65 TestEmbeddedSupersede
+
+100 66 TestEmbeddedCloseBasicIsolatedStores
+
+100 67 TestEmbeddedAdminCompactReadOnlyAllowed
+100 67 TestEmbeddedAutoImportFallback_ConflictSkip_DoesNotClobber
+100 67 TestEmbeddedBootstrapConcurrent
+100 67 TestEmbeddedCountIncludeInfra
+100 67 TestEmbeddedCreateCommitPending
+100 67 TestEmbeddedCreateDryRunRepoDoesNotInitializeTarget
+100 67 TestEmbeddedCreateRepoFromNonBeadsCwd
+100 67 TestEmbeddedCreateRepoRelativeUninitRefused
+100 67 TestEmbeddedHooks
+100 67 TestEmbeddedOnboard
+100 67 TestEmbeddedPrime
+100 67 TestEmbeddedPromote
+100 67 TestEmbeddedQuickstart
+100 67 TestEmbeddedQuickstartConcurrent
+100 67 TestEmbeddedWhere
+100 67 TestEmbeddedWhereConcurrent
+
+100 68 TestEmbeddedAutoImportFallback_ConflictSkip_EmptyDBImportsAll
+100 68 TestEmbeddedBlocked
+100 68 TestEmbeddedCompactConcurrent
+100 68 TestEmbeddedContext
+100 68 TestEmbeddedCreateJSONEchoesSubSecondTimestamps
+100 68 TestEmbeddedDoltBlockedAndCommit
+100 68 TestEmbeddedDoltConcurrent
+100 68 TestEmbeddedInfo
+100 68 TestEmbeddedInfoSuppressGitHooks
+100 68 TestEmbeddedOrphans
+100 68 TestEmbeddedRoutedMutatingSiblingDeleteCloseDelete
+100 68 TestEmbeddedSetupConcurrent
+100 68 TestEmbeddedTodoConcurrent
+100 68 TestEmbeddedTypes
+
+100 69 TestEmbeddedCompact
+100 69 TestEmbeddedConfigValidateJSONNoWorkspaceWritesStdout
+100 69 TestEmbeddedCreateConcurrent
+100 69 TestEmbeddedDepBulkNoCycleCheckKeepsWholeGraphGate
+100 69 TestEmbeddedDuplicatesSharedFixture
+100 69 TestEmbeddedGateListScoped
+100 69 TestEmbeddedGetDependencies
+100 69 TestEmbeddedInfoConcurrent
+100 69 TestEmbeddedRenamePrefixConcurrent
+100 69 TestEmbeddedRoutedSiblingWritesCommitTargetHeadNote
+100 69 TestEmbeddedTypesConcurrent
+100 69 TestEmbeddedUpdateBatchAutoCommitDoesNotAdvanceHead
+
+100 70 TestEmbeddedExportConcurrent
+100 70 TestEmbeddedFlattenConcurrent
+100 70 TestEmbeddedGCDryRunAndSkips
+100 70 TestEmbeddedImportConcurrent
+100 70 TestEmbeddedImportUpsertAndPrefixSync
+100 70 TestEmbeddedLabelAddRemoveMultiAndDuplicate
+100 70 TestEmbeddedMemory
+100 70 TestEmbeddedMigrateConcurrent
+100 70 TestEmbeddedPurgeConcurrent
+100 70 TestEmbeddedRoutedMutatingSiblingAssignTagDepTag
+
+100 71 TestEmbeddedInitRoleRoutingExplicitDefault
+100 71 TestEmbeddedPrimeChangeDirRedirectNoticeFollowsTarget
+
+100 72 TestEmbeddedContributorCreateMultiple
+100 72 TestEmbeddedCreateWithGitRemote
+100 72 TestEmbeddedFederationConcurrent
+100 72 TestEmbeddedGateCreateRepoErrorsList
+100 72 TestEmbeddedHumanConcurrent
+100 72 TestEmbeddedImportPromotedWispRoundtrip
+100 72 TestEmbeddedPrimeChangeDirPrimesTarget
+100 72 TestEmbeddedRoutedMutatingSiblingDeleteCloseClose
+100 72 TestEmbeddedRoutedSiblingWritesCommitTargetHeadReopen
+100 72 TestEmbeddedUpdateFieldsMappingAndRefs
+
+100 73 TestEmbeddedCompactMisdatedChild
+100 73 TestEmbeddedExportFlags
+100 73 TestEmbeddedFederationPeers
+100 73 TestEmbeddedGateCreateFlags
+100 73 TestEmbeddedGateCreateReady
+100 73 TestEmbeddedPrimeChangeDirDefaultTemplateMatchesTarget
+100 73 TestEmbeddedQuickConcurrent
+100 73 TestEmbeddedRenamePrefixBasic
+100 73 TestEmbeddedRoutedMutatingSiblingAssignTagDepDepAdd
+
+100 74 TestEmbeddedBlockedConcurrent
+100 74 TestEmbeddedBranch
+100 74 TestEmbeddedCountIncludeEphemeral
+100 74 TestEmbeddedDepAddWispSource
+100 74 TestEmbeddedMigrate
+100 74 TestEmbeddedPrimeConcurrent
+100 74 TestEmbeddedRestore
+100 74 TestEmbeddedVCConcurrent
+
+100 75 TestEmbeddedCommentsCLIConcurrent
+100 75 TestEmbeddedContextConcurrent
+100 75 TestEmbeddedFlatten
+100 75 TestEmbeddedInitC
+100 75 TestEmbeddedListComments
+100 75 TestEmbeddedOpen_EmptyDatabaseRejected
+100 75 TestEmbeddedReclaimRunsTheLeaseReclaimerRole
+100 75 TestEmbeddedRoutedSiblingWritesCommitTargetHeadComment
+100 75 TestEmbeddedVCStatusAndCommit
+
+100 76 TestEmbeddedCloseAlreadyClosedContinue
+100 76 TestEmbeddedCloseAlreadyClosedMultipleIDs
+100 76 TestEmbeddedExportFormats
+100 76 TestEmbeddedGCForceWithDecay
+100 76 TestEmbeddedGCFullAndNoForcePrompts
+100 76 TestEmbeddedInitAGitOriginRemote
+100 76 TestEmbeddedLabelAddRemoveRemove
+100 76 TestEmbeddedOnboardConcurrent
+
+100 77 TestEmbeddedClaimPools
+100 77 TestEmbeddedConfigNoWorkspaceStoreFreeCommands
+100 77 TestEmbeddedCreateStorageClassConflicts
+100 77 TestEmbeddedExternalCapabilityReadyAfterShip
+100 77 TestEmbeddedHumanListStatsRespondDismiss
+100 77 TestEmbeddedMemoryCorpusBudget
+100 77 TestEmbeddedOrphansConcurrent
+100 77 TestEmbeddedStatus
+
+100 78 TestEmbeddedBranchConcurrent
+100 78 TestEmbeddedComments
+100 78 TestEmbeddedDepBRemove
+100 78 TestEmbeddedLabelAddRemoveAdd
+100 78 TestEmbeddedShip
+100 78 TestEmbeddedUpdateFieldsNotesOverwrite
+100 78 TestEmbeddedVCCommitVariantsAndMerge
+100 78 TestEmbeddedVersionConcurrent
+
+100 79 TestEmbeddedCreateCrossRepoUninit
+100 79 TestEmbeddedDeleteJSONDependencyErrorContract
+100 79 TestEmbeddedEpicCloseEligibleNotEligible
+100 79 TestEmbeddedInitABasic
+100 79 TestEmbeddedInitBRemoteSchemaAndCloneFailure
+100 79 TestEmbeddedRenamePrefixEdgeCases
+100 79 TestEmbeddedUpdateFieldsNotesClearAndDefer
+
+100 80 TestEmbeddedCreateCrossRepoWithParent
+100 80 TestEmbeddedCreateFormCommitsLabelOnlyCreate
+100 80 TestEmbeddedCreateStorageClassBasic
+100 80 TestEmbeddedRoutedMutatingSiblingAssignTagDepAssign
+100 80 TestEmbeddedStatusConcurrent
+100 80 TestEmbeddedSwarmCreate
+100 80 TestEmbeddedSwarmValidate
+
+100 81 TestEmbeddedAdminCompactTier2Honesty
+100 81 TestEmbeddedBackup
+100 81 TestEmbeddedDeleteForceAndBatch
+100 81 TestEmbeddedGateCreateBeadCheck
+100 81 TestEmbeddedGateList
+100 81 TestEmbeddedRestoreConcurrent
+100 81 TestEmbeddedStaleLabelFilters
+100 81 TestEmbeddedStateConcurrent
+
+100 82 TestEmbeddedCreateCrossRepoDryRunWithParent
+100 82 TestEmbeddedDeleteBasic
+100 82 TestEmbeddedDepBTreeAndCycles
+100 82 TestEmbeddedDirectCommitPathsBatchAutoCommitDoesNotAdvanceHead
+100 82 TestEmbeddedHooksConcurrent
+100 82 TestEmbeddedImportFromSources
+100 82 TestEmbeddedStale
+
+100 83 TestEmbeddedAdminBlocked
+100 83 TestEmbeddedAutoImportJSONLConcurrentWriter
+100 83 TestEmbeddedInitBAutoCommitAndJSONLRemote
+100 83 TestEmbeddedLabelEditReportsPrefix
+100 83 TestEmbeddedMaxRowsDoctorAndConfig
+100 83 TestEmbeddedPurgeFiltered
+100 83 TestEmbeddedReadyConcurrent
+
+100 84 TestEmbeddedInitGitBootstrapRoutingDecoyInvalid
+100 84 TestEmbeddedInitSelectedExcludeRoutingStealthInvalid
+
+100 85 TestEmbeddedBootstrapExistingDryRunInit
+100 85 TestEmbeddedChildrenBasicAndEmpty
+100 85 TestEmbeddedCreateGraphAndBulk
+100 85 TestEmbeddedCreateRepoRelativeExistingWorkspaceUnaffected
+100 85 TestEmbeddedIfRevisionReopenGuardDirect
+100 85 TestEmbeddedInitArtifactRouting
+
+100 86 TestEmbeddedExplicitHierarchicalParentEdges
+100 86 TestEmbeddedInitHooksRouting
+
+100 87 TestEmbeddedCreateRepoProxiedTargetError
+100 87 TestEmbeddedGateInheritsDownParentChain
+100 87 TestEmbeddedReadyClaimConcurrent
+100 87 TestEmbeddedState
+100 87 TestEmbeddedSupersedeConcurrent
+100 87 TestEmbeddedSwarmCreateForceAndErrors
+
+100 88 TestEmbeddedChangeDirOverridesInheritedBeadsDir
+100 88 TestEmbeddedDepAAddAndList
+100 88 TestEmbeddedKV
+100 88 TestEmbeddedMaxRowsReadyMerge
+100 88 TestEmbeddedPromoteCLI
+100 88 TestEmbeddedUnclaimSuccess
+
+100 89 TestEmbeddedBackupConcurrent
+100 89 TestEmbeddedCreateDryRunDoesNotMigrate
+100 89 TestEmbeddedGateShowResolve
+100 89 TestEmbeddedInitBStealthAndForceReinit
+100 89 TestEmbeddedLabelEditReportsNoop
+100 89 TestEmbeddedShowBasicsAndJSON
+
+100 90 TestEmbeddedAutoImportJSONLSkipsNonEmpty
+100 90 TestEmbeddedConfig
+100 90 TestEmbeddedFindDuplicatesConcurrent
+100 90 TestEmbeddedLabelEditReportsListAndTemplate
+100 90 TestEmbeddedLintConcurrent
+100 90 TestEmbeddedUpdateLifecycleDefer
+100 90 TestEmbeddedVersion
+
+100 91 TestEmbeddedDuplicate
+100 91 TestEmbeddedPreviewDoesNotConsumeVersionMarker
+100 91 TestEmbeddedPruneDryRunAndFilters
+100 91 TestEmbeddedReadOnlyCommandsSpawnNoGit
+100 91 TestEmbeddedShowUnresolvableDeps
+100 91 TestEmbeddedTypesAgreeWithCreate
+
+100 92 TestEmbeddedAutoImportJSONLNoExplicitCommit
+100 92 TestEmbeddedDefer
+100 92 TestEmbeddedDepAAddTypesAndFlags
+100 92 TestEmbeddedEpicCloseEligibleClosesEpics
+100 92 TestEmbeddedSetup
+100 92 TestEmbeddedSwarmStatusList
+
+100 93 TestEmbeddedCreateStorageClassBatchAndMisc
+100 93 TestEmbeddedDeletePreviewAndGuards
+100 93 TestEmbeddedDepBRemoveOutputAndRelatesTo
+100 93 TestEmbeddedListConcurrent
+100 93 TestEmbeddedPruneSafetyAndScope
+100 93 TestEmbeddedShowDetailAndCurrentFlags
+
+100 94 TestEmbeddedCreateDryRunCrossRepoDoesNotMigrateTarget
+100 94 TestEmbeddedDepListSingleIDWarnsOnDroppedExternalEdge
+100 94 TestEmbeddedEpicCloseEligibleReasonOutput
+100 94 TestEmbeddedFederationStatus
+100 94 TestEmbeddedGCConcurrent
+100 94 TestEmbeddedReadyDefaultJSONAndFlags
+
+100 95 TestEmbeddedChildrenJSONAndAllStatuses
+100 95 TestEmbeddedFindDuplicates
+100 95 TestEmbeddedImportClosedChildWhoseParentWasDeleted
+100 95 TestEmbeddedInitConcurrent
+100 95 TestEmbeddedQuick
+
+100 96 TestEmbeddedDiff
+100 96 TestEmbeddedDuplicatesConcurrent
+100 96 TestEmbeddedHistory
+100 96 TestEmbeddedShowDetailAndCurrentHistoryAndCurrent
+100 96 TestEmbeddedSquashWispMoleculeClearsRootEphemeral
+
+100 97 TestEmbeddedDuplicatesOwnWorkspaces
+100 97 TestEmbeddedHumanPositionalFileAndGuards
+100 97 TestEmbeddedPurgeBasics
+100 97 TestEmbeddedQuietFlagSuppressesSuccessOutput
+100 97 TestEmbeddedSearchStatusLimitSortDatesMetadata
+
+100 98 TestEmbeddedCloseBasicSharedStore
+100 98 TestEmbeddedContributorCreateRoutesToPlanning
+100 98 TestEmbeddedGCConditionalMatcherDecode
+100 98 TestEmbeddedQuery
+100 98 TestEmbeddedTodo
+
+100 99 TestEmbeddedBlockedLabelFilters
+100 99 TestEmbeddedDoltRemoteAndPush
+100 99 TestEmbeddedEpicStatus
+100 99 TestEmbeddedInitSelectedExcludeRoutingForkDecoyAuto
+100 99 TestEmbeddedSearchQueryStatusAssigneeLabels
+
+100 100 TestEmbeddedContributorCreateShowReadsRouted
+100 100 TestEmbeddedCreateCrossRepo
+100 100 TestEmbeddedInitGitBootstrapRoutingExistingExplicit
+100 100 TestEmbeddedLint
+100 100 TestEmbeddedPromoteCLIConcurrent
