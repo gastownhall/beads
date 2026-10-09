@@ -427,8 +427,9 @@ func TestE2E_ExternalDependencyBlockingStillEnforced(t *testing.T) {
 // TestE2E_CloseAndReopenUnderClaudeSession is S6d: under Claude Code every bd
 // process carries CLAUDE_SESSION_ID, and over http `bd update -s closed`
 // refused (closed_by_session has no wire member) while `bd reopen` always
-// refused (its fixed Provenance label has none either). Both must work, and
-// `bd close` must still record the session its wire operation does carry.
+// refused (its fixed Provenance label has none either). Both must work, the
+// dropped session must be named on stderr (typed or ambient, never silent),
+// and `bd close` must still record the session its wire operation does carry.
 func TestE2E_CloseAndReopenUnderClaudeSession(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	bin := buildBD(t)
@@ -446,7 +447,10 @@ func TestE2E_CloseAndReopenUnderClaudeSession(t *testing.T) {
 	}
 
 	// The MC hot shape: metadata and status in one update, session ambient.
-	f.mustRun(session, "update", id, "--set-metadata", "phase=done", "--status", "closed", "--json")
+	ambient := f.mustRun(session, "update", id, "--set-metadata", "phase=done", "--status", "closed", "--json")
+	if !strings.Contains(ambient.stderr, "CLAUDE_SESSION_ID is not recorded") {
+		t.Errorf("the ambient session was dropped without a notice: stderr=%s", ambient.stderr)
+	}
 	if row := status(); row["status"] != "closed" {
 		t.Fatalf("after update -s closed under CLAUDE_SESSION_ID: %v", row)
 	}
