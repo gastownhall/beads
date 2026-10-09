@@ -39,8 +39,8 @@ var _ issueops.Lifecycle = (*httpLifecycle)(nil)
 // dropping: IDPrefix where it would act on an explicit, unforced id, which the
 // server publishes no member for on purpose (W-CreateRequest.IDPrefix), and
 // every member of the issue outside the wire's twenty (W-CreateRequest.Issue)
-// — save a CreatedBy that names the actor, which the server stamps from the
-// actor itself. A create that reported success having silently dropped the
+// — save a CreatedBy that names the actor, which the server's create role
+// defaults to on its own (issueops.PreparePublicCreateRequest). A create that reported success having silently dropped the
 // storage class, the molecule type or the creation time is a row the caller
 // believes they wrote and did not.
 //

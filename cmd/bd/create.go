@@ -345,7 +345,7 @@ var createCmd = &cobra.Command{
 				Ephemeral:          wisp,
 				NoHistory:          noHistory,
 				StorageClass:       storageClass,
-				CreatedBy:          creationActorStamp(),
+				CreatedBy:          currentActor(), // the creator the role will default to
 				Owner:              getOwner(),
 				Labels:             labels,
 				MolType:            molType,
@@ -518,7 +518,6 @@ var createCmd = &cobra.Command{
 			Ephemeral:          wisp,
 			NoHistory:          noHistory,
 			StorageClass:       storageClass,
-			CreatedBy:          creationActorStamp(),
 			Owner:              getOwner(),
 			Labels:             labels,
 			MolType:            molType,

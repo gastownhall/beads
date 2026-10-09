@@ -138,7 +138,7 @@ func CreateIssueFromFormValues(ctx context.Context, s storage.DoltStorage, fv *c
 		IssueType:          types.IssueType(fv.IssueType).Normalize(),
 		Assignee:           fv.Assignee,
 		ExternalRef:        externalRefPtr,
-		CreatedBy:          creationActorStamp(), // GH#748: track who created the issue
+		CreatedBy:          currentActor(), // GH#748: track who created the issue
 		Labels:             labels,
 	}
 

@@ -213,14 +213,7 @@ func (s *Server) applyBatchRequest(w http.ResponseWriter, r *http.Request) (issu
 	if res != nil {
 		return refuse(res)
 	}
-	// created_by is stamped from the actor on every create item, createIssue's
-	// rule (create.go): the item publishes no created_by and the role copies the
-	// issue's rather than stamping one.
-	for _, item := range items {
-		if item.Create != nil {
-			item.Create.Issue.CreatedBy = actor
-		}
-	}
+	// No created_by stamp: the role defaults each create item's to the actor.
 	return issueops.ApplyBatchRequest{
 		Actor:                 actor,
 		Items:                 items,

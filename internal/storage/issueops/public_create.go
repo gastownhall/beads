@@ -61,6 +61,14 @@ func PreparePublicCreateRequest(request publicops.CreateRequest, context PublicC
 	if issue.Status == "" {
 		issue.Status = types.StatusOpen
 	}
+	// created_by defaults to the request's actor, here and nowhere else: every
+	// create shape (Lifecycle.Create, BatchCreator items, batch-apply create
+	// items) prepares through this function, so the CLI, the HTTP handlers and
+	// a library caller all store the same creator for the same request. An
+	// explicit CreatedBy is kept.
+	if issue.CreatedBy == "" {
+		issue.CreatedBy = request.Actor
+	}
 	if issue.ID != "" && !request.ForceIDPrefix {
 		// The caller's prefix wins when it supplied one; see
 		// CreateRequest.IDPrefix for why a front door may know better than the

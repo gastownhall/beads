@@ -1001,7 +1001,7 @@ Examples:
 				Status:      types.StatusOpen,
 				Priority:    issue.Priority,
 				IssueType:   types.TypeEpic,
-				CreatedBy:   creationActorStamp(),
+				CreatedBy:   currentActor(),
 			}
 
 			if err := store.CreateIssue(ctx, wrapperEpic, currentActor()); err != nil {
@@ -1012,7 +1012,7 @@ Examples:
 				IssueID:     issue.ID,
 				DependsOnID: wrapperEpic.ID,
 				Type:        types.DepParentChild,
-				CreatedBy:   creationActorStamp(),
+				CreatedBy:   currentActor(),
 			}
 			if err := store.AddDependency(ctx, dep, currentActor()); err != nil {
 				return HandleErrorRespectJSON("failed to link issue to epic: %v", err)
@@ -1081,7 +1081,7 @@ Examples:
 			IssueType:   "molecule",
 			MolType:     types.MolTypeSwarm,
 			Assignee:    coordinator,
-			CreatedBy:   creationActorStamp(),
+			CreatedBy:   currentActor(),
 		}
 
 		if err := store.CreateIssue(ctx, swarmMol, currentActor()); err != nil {
@@ -1092,7 +1092,7 @@ Examples:
 			IssueID:     swarmMol.ID,
 			DependsOnID: epicID,
 			Type:        types.DepRelatesTo,
-			CreatedBy:   creationActorStamp(),
+			CreatedBy:   currentActor(),
 		}
 		if err := store.AddDependency(ctx, dep, currentActor()); err != nil {
 			return HandleErrorRespectJSON("failed to link swarm to epic: %v", err)

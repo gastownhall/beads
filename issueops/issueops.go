@@ -195,7 +195,8 @@ type CreateRequest struct {
 	// ignores ContentHash, RowVersion, lease state, compaction state, routing
 	// overrides, hydration flags, and derived fields. Labels are authoritative.
 	// Issue.Comments and Issue.Dependencies must be empty; supply edges through
-	// the request's own Dependencies field.
+	// the request's own Dependencies field. An empty Issue.CreatedBy defaults to
+	// Actor (the same rule for every create shape, batch items included).
 	Issue *Issue
 	// ParentID creates a typed DepParentChild edge. It must not duplicate an
 	// explicit edge in Dependencies.
