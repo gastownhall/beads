@@ -160,6 +160,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multi-tenant embedder serving many workspaces needs, where a
   process-global credential cannot stand in for one tenant's own.
   EXPERIMENTAL, pin an exact beads version.
+- Unlimited reads over the HTTP backend (`bd ready --limit 0`, `bd query
+  --limit 0`, `bd list --limit 0`, and every library read asking for no
+  limit) return every row against any server, bounded on the client by the
+  new `BEADS_HTTP_UNLIMITED_READ_CAP` (a positive integer up to 1000000;
+  default 10000). The client never puts `limit=0` on the wire, which a `bd
+  serve --allow-non-loopback` refuses and which an older server answered
+  with its default page, silently capping the result: ready and query send
+  one request bounded at the cap plus one (one consistent snapshot), and
+  list walks its keyset cursor, at most the cap rows in all (one server read
+  per page, not a snapshot). Past the cap, or when a server reports more
+  rows below the requested bound, the read is refused with a typed error
+  (`httpclient.ErrUnlimitedReadCap`) naming the cap, never truncated. A
+  malformed cap value is an error on every unlimited read rather than a
+  fall back to the default.
 
 ### Changed
 
