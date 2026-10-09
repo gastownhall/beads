@@ -262,6 +262,7 @@
 
 50 11 TestEmbeddedBlockedConcurrent
 50 11 TestEmbeddedDepA
+50 11 TestEmbeddedGitDataRefRefChangeNeedsYesWithoutTerminal
 50 11 TestEmbeddedMaxRowsDepTreeAndDuplicates
 50 11 TestEmbeddedState
 
@@ -287,6 +288,7 @@
 50 15 TestEmbeddedCreateDryRunCrossRepoDoesNotMigrateTarget
 50 15 TestEmbeddedEpicCloseEligibleReasonFlag
 50 15 TestEmbeddedExplicitHierarchicalParentEdges
+50 15 TestEmbeddedGitDataRefRemoteAddPushesToRefAndBootstrapReadsIt
 50 15 TestEmbeddedIfRevisionReopenGuardDirect
 50 15 TestEmbeddedVersionConcurrent
 
@@ -305,6 +307,7 @@
 50 17 TestEmbeddedCloseGuardsAndEpics
 50 17 TestEmbeddedCompact
 50 17 TestEmbeddedGateConcurrent
+50 17 TestEmbeddedGitDataRefBootstrapWiresFreshDatabaseOnRef
 50 17 TestEmbeddedListComments
 50 17 TestEmbeddedReadOnlyCommandsSpawnNoGit
 
@@ -344,6 +347,7 @@
 50 23 TestEmbeddedShip
 
 50 24 TestEmbeddedCloseBasic
+50 24 TestEmbeddedGitDataRefOriginProbeFollowsRef
 50 24 TestEmbeddedImportUpsertAndPrefixSync
 50 24 TestEmbeddedQuery
 50 24 TestEmbeddedReclaimRunsTheLeaseReclaimerRole

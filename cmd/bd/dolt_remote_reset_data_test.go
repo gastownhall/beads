@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/dolthub/dolt/go/store/blobstore"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/githooksenv"
 )
@@ -19,8 +20,69 @@ func TestResetDataRefNamesMatchDolt(t *testing.T) {
 	if gitDoltDataRef != blobstore.DoltDataRef {
 		t.Errorf("gitDoltDataRef = %q, dolt publishes %q", gitDoltDataRef, blobstore.DoltDataRef)
 	}
-	if want := "refs/heads/" + blobstore.DefaultInfoBranch; gitDoltInfoRef != want {
-		t.Errorf("gitDoltInfoRef = %q, dolt publishes %q", gitDoltInfoRef, want)
+	if config.DefaultDoltRemoteInfoBranch != blobstore.DefaultInfoBranch {
+		t.Errorf("config.DefaultDoltRemoteInfoBranch = %q, dolt publishes %q", config.DefaultDoltRemoteInfoBranch, blobstore.DefaultInfoBranch)
+	}
+}
+
+// The info ref reset-data deletes beside the data ref is the one dolt
+// publishes: the DOLT_REMOTE_INFO_BRANCH override when one is set, the
+// default otherwise, and none when an empty override disables the marker,
+// since the default name is then an ordinary branch that may hold data.
+func TestDoltInfoRefFollowsOverride(t *testing.T) {
+	out := []byte("a\trefs/dolt/units/team-12542\nb\trefs/heads/marker\nc\trefs/heads/__dolt_remote_info__\nd\trefs/dolt/data\n")
+	t.Setenv(config.DoltRemoteInfoBranchEnvVar, "marker")
+	if got := doltInfoRef(); got != "refs/heads/marker" {
+		t.Errorf("override: doltInfoRef() = %q", got)
+	}
+	if got := parseDoltDataRefs(out, "refs/dolt/units/team-12542"); !slices.Equal(got, []string{"refs/dolt/units/team-12542", "refs/heads/marker"}) {
+		t.Errorf("with the override, parseDoltDataRefs kept %q", got)
+	}
+	t.Setenv(config.DoltRemoteInfoBranchEnvVar, "")
+	if got := doltInfoRef(); got != "" {
+		t.Errorf("disabled marker: doltInfoRef() = %q, want none", got)
+	}
+	if got := parseDoltDataRefs(out, "refs/dolt/units/team-12542"); !slices.Equal(got, []string{"refs/dolt/units/team-12542"}) {
+		t.Errorf("with the marker disabled, parseDoltDataRefs must keep the data ref alone, got %q", got)
+	}
+	os.Unsetenv(config.DoltRemoteInfoBranchEnvVar)
+	if got, want := doltInfoRef(), "refs/heads/"+config.DefaultDoltRemoteInfoBranch; got != want {
+		t.Errorf("no override: doltInfoRef() = %q, want dolt's default %q", got, want)
+	}
+}
+
+// The confirmation, the non-interactive refusal, and the JSON result name
+// the ref of a git-backed remote: on a repository holding several databases
+// on their own refs, the URL alone does not say which one is replaced. A
+// remote that is not git-backed carries no ref and is named by its URL. The
+// JSON ref follows `bd dolt remote list --json`: the recorded ref, empty
+// (and left out) for the default.
+func TestResetDataTargetNamesTheRef(t *testing.T) {
+	const url = "git+ssh://git@host/org/ledgers.git"
+	cases := []struct {
+		name     string
+		kind     resetDataKind
+		dataRef  string
+		want     string
+		wantJSON string
+	}{
+		{"unit ref", resetDataGitBacked, "refs/dolt/units/team-12542", url + ", ref refs/dolt/units/team-12542", "refs/dolt/units/team-12542"},
+		{"branch ref", resetDataGitBacked, "refs/heads/issue-data", url + ", ref refs/heads/issue-data", "refs/heads/issue-data"},
+		{"default ref", resetDataGitBacked, "", url + ", ref refs/dolt/data", ""},
+		{"explicit default ref", resetDataGitBacked, "refs/dolt/data", url + ", ref refs/dolt/data", ""},
+		{"file store", resetDataFileStore, "", url, ""},
+		{"absent file target", resetDataFileAbsent, "", url, ""},
+		{"unsupported", resetDataUnsupported, "", url, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resetDataTarget(url, tc.kind, tc.dataRef); got != tc.want {
+				t.Errorf("resetDataTarget = %q, want %q", got, tc.want)
+			}
+			if got := resetDataJSONRef(tc.kind, tc.dataRef); got != tc.wantJSON {
+				t.Errorf("resetDataJSONRef = %q, want %q", got, tc.wantJSON)
+			}
+		})
 	}
 }
 
