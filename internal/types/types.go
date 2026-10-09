@@ -2380,6 +2380,13 @@ func (s SortPolicy) IsValid() bool {
 type ReclaimedLease struct {
 	ID            string `json:"id"`
 	PreviousOwner string `json:"previous_owner"`
+
+	// Revision is the fresh RevisionToken minted for this issue's row by the
+	// same UPDATE that reverted its lease — the one this package's
+	// RevisionToken/ParseRevisionToken pair encodes, the same wire shape as
+	// IssueDetails.Revision. A caller that re-fetches after a reclaim sees a
+	// different token than one that raced it.
+	Revision string `json:"revision"`
 }
 
 // ReclaimFilter scopes which stale-lease issues bd reclaim may revert. The

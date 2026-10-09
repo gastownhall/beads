@@ -378,6 +378,15 @@ type Storage interface {
 	// assignee and status, which is on_update — the same event the journal
 	// already records for it. See hook_releaser.go.
 	Releaser() (issueops.Releaser, error)
+	// LeaseReclaimer returns the lease-sweep surface for this store: revert
+	// every lease that has been held past its deadline back to its
+	// pre-claim state, for a caller that is a clock rather than a human or a
+	// request.
+	//
+	// It is a WRITE role and its hook decorator WRAPS: a reclaim changes
+	// assignee and status per reverted row, which is on_update, the same
+	// event Releaser fires. See hook_lease_reclaimer.go.
+	LeaseReclaimer() (issueops.LeaseReclaimer, error)
 
 	// Issue CRUD
 	CreateIssue(ctx context.Context, issue *types.Issue, actor string) error

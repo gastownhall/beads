@@ -8,8 +8,10 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
+	storeops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
 	"github.com/steveyegge/beads/issueops"
@@ -540,5 +542,36 @@ func TestRelatedLeavesTheCallersTypesAlone(t *testing.T) {
 	}
 	if !reflect.DeepEqual(types_, snapshot) {
 		t.Errorf("the caller's Types changed across the call: %v, want %v", types_, snapshot)
+	}
+}
+
+// TestReclaimValidationMatchesTheSharedValidator binds leasereclaimer.go's
+// restated rules to internal/storage/issueops.ValidateReclaimRequest, for
+// TestReleaseValidationMatchesTheSharedValidator's reason: a restated rule is
+// how a leg drifts. It compares VERDICTS, and the cap's type, over a table that
+// covers both sides of every rule.
+func TestReclaimValidationMatchesTheSharedValidator(t *testing.T) {
+	overCap := make([]string, issueops.MaxReclaimIDs+1)
+	for name, req := range map[string]issueops.ReclaimRequest{
+		"valid bare":         {Actor: "reaper"},
+		"valid scoped":       {Actor: "reaper", OlderThan: time.Minute, Filter: issueops.ReclaimFilter{IDs: []string{"bd-1"}}},
+		"no actor":           {},
+		"blank actor":        {Actor: "   "},
+		"negative grace":     {Actor: "reaper", OlderThan: -time.Second},
+		"blank id":           {Actor: "reaper", Filter: issueops.ReclaimFilter{IDs: []string{"bd-1", ""}}},
+		"padded id is an id": {Actor: "reaper", Filter: issueops.ReclaimFilter{IDs: []string{" bd-1 "}}},
+		"over the cap":       {Actor: "reaper", Filter: issueops.ReclaimFilter{IDs: overCap}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			mine := validateReclaimRequest(req)
+			shared := storeops.ValidateReclaimRequest(req)
+			if (mine != nil) != (shared != nil) {
+				t.Fatalf("validateReclaimRequest = %v, storeops.ValidateReclaimRequest = %v: the client's restatement has drifted", mine, shared)
+			}
+			var mineCap, sharedCap *issueops.TooManyReclaimIDsError
+			if errors.As(mine, &mineCap) != errors.As(shared, &sharedCap) {
+				t.Fatalf("cap type differs: client %v, shared %v", mine, shared)
+			}
+		})
 	}
 }

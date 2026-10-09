@@ -318,6 +318,7 @@ func runServe() error {
 			EdgeReader:        roles.edges,
 			GraphCounter:      roles.edgeCounter,
 			BatchGetter:       roles.batchGetter,
+			LeaseReclaimer:    roles.leaseReclaimer,
 			Relations:         roles.relations,
 			Commenter:         roles.commenter,
 			BlockingAnnotator: roles.blocking,
@@ -674,6 +675,7 @@ type serveRoleSource interface {
 	EdgeReader() (issueops.EdgeReader, error)
 	GraphCounter() (issueops.GraphCounter, error)
 	BatchGetter() (issueops.BatchGetter, error)
+	LeaseReclaimer() (issueops.LeaseReclaimer, error)
 	IssueRelations() (issueops.Relations, error)
 	Commenter() (issueops.Commenter, error)
 	BlockingAnnotator() (issueops.BlockingAnnotator, error)
@@ -741,6 +743,7 @@ func serveIssueRoles(src serveRoleSource, journalEnabled bool) (serveRoles, erro
 		{"edge reader", func() (err error) { roles.edges, err = src.EdgeReader(); return }},
 		{"graph counter", func() (err error) { roles.edgeCounter, err = src.GraphCounter(); return }},
 		{"batch getter", func() (err error) { roles.batchGetter, err = src.BatchGetter(); return }},
+		{"lease reclaimer", func() (err error) { roles.leaseReclaimer, err = src.LeaseReclaimer(); return }},
 		{"issue relations", func() (err error) { roles.relations, err = src.IssueRelations(); return }},
 		{"commenter", func() (err error) { roles.commenter, err = src.Commenter(); return }},
 		{"blocking annotator", func() (err error) { roles.blocking, err = src.BlockingAnnotator(); return }},
@@ -853,17 +856,22 @@ type serveRoles struct {
 	// getter WITHOUT wrapping it — a read fires no completion hooks — so it is
 	// taken off the peeled store with the rest for uniformity rather than out
 	// of necessity.
-	batchGetter  issueops.BatchGetter
-	relations    issueops.Relations
-	commenter    issueops.Commenter
-	blocking     issueops.BlockingAnnotator
-	tree         issueops.TreeWalker
-	readyCounter issueops.ReadyCounter
-	counter      issueops.Counter
-	querier      issueops.Querier
-	sweeper      issueops.Sweeper
-	deleter      issueops.Deleter
-	batchCreator issueops.BatchCreator
+	batchGetter issueops.BatchGetter
+	// leaseReclaimer is the stale-lease sweep behind
+	// POST /v0/beads/issues:reclaim. Its hook decorator WRAPS (a reclaim is an
+	// update per reverted row), which is why it comes off the peeled store with
+	// the releaser: bd serve runs no hooks.
+	leaseReclaimer issueops.LeaseReclaimer
+	relations      issueops.Relations
+	commenter      issueops.Commenter
+	blocking       issueops.BlockingAnnotator
+	tree           issueops.TreeWalker
+	readyCounter   issueops.ReadyCounter
+	counter        issueops.Counter
+	querier        issueops.Querier
+	sweeper        issueops.Sweeper
+	deleter        issueops.Deleter
+	batchCreator   issueops.BatchCreator
 	// dependencyEditor is the second role here whose accessor recurses through
 	// the hook decorator, so taking it off the peeled store is not optional:
 	// HookFiringStore.DependencyEditor fires the workspace's update hook per

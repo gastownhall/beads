@@ -240,6 +240,9 @@ func serveRoles(store storage.DoltStorage) (httpapi.Config, error) {
 	if cfg.BatchGetter, err = store.BatchGetter(); err != nil {
 		return cfg, err
 	}
+	if cfg.LeaseReclaimer, err = store.LeaseReclaimer(); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
 }
 

@@ -68,6 +68,7 @@ func TestOperationIdsMatchTheServerRouteTable(t *testing.T) {
 		{OpListEvents, httpapi.OpListEvents},
 		{OpWatchEvents, httpapi.OpWatchEvents},
 		{OpBatchGetIssues, httpapi.OpBatchGetIssues},
+		{OpReclaimIssues, httpapi.OpReclaimIssues},
 	}
 
 	// The table is a HAND LIST, and a hand list's failure mode is omission: a new

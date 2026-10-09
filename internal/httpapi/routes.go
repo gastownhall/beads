@@ -784,6 +784,17 @@ var routeTable = []route{
 		handler:     (*Server).handleBatchGetIssues,
 	},
 	{
+		op:     OpReclaimIssues,
+		method: http.MethodPost,
+		// A literal collection-level custom method, registered and preferred
+		// over the claim's wildcard for the sweep row's reason: without it,
+		// a reclaim would parse as a claim of an issue called ":reclaim".
+		pattern:     "/v0/beads/issues:reclaim",
+		capability:  "issues.reclaim",
+		implemented: true,
+		handler:     (*Server).handleReclaimIssues,
+	},
+	{
 		op:     OpAddDependencies,
 		method: http.MethodPost,
 		// A collection-level custom method beside :remove below, and a LITERAL

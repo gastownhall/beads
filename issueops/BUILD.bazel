@@ -22,6 +22,7 @@ go_library(
         "importer.go",
         "initverifier.go",
         "issueops.go",
+        "leasereclaimer.go",
         "metadatacas.go",
         "querier.go",
         "reader.go",

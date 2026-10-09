@@ -466,6 +466,12 @@ const (
 	// answer EdgeCountRequest.IDs and EdgeReadRequest already give, applied to
 	// the issues themselves rather than their edges.
 	OpBatchGetIssues = "batchGetIssues"
+	// OpReclaimIssues reverts every stale lease a request scopes back to ready,
+	// behind issueops.LeaseReclaimer. It is NOT releaseIssue repeated: that
+	// operation gives up ONE claim on the holder's say-so and refuses an unheld
+	// row, and this one sweeps MANY leases on a clock's say-so and reports an id
+	// that was not a stale lease by leaving it out of `reclaimed`.
+	OpReclaimIssues = "reclaimIssues"
 	// OpListRelatedIssues reads ONE issue's neighbors in a named direction,
 	// behind issueops.Relations. It is NOT listDependencies narrowed to one
 	// anchor: that operation answers the stored edge ROWS with their targets
@@ -720,6 +726,11 @@ var operationCodes = map[string][]Code{
 	// `ids` (*issueops.TooManyIDsError) and a blank entry. An empty `ids` is
 	// legal and answers with an empty result, so it earns no refusal at all.
 	OpBatchGetIssues: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// No not_found and no conflict: an id that is not a stale lease is left out
+	// of `reclaimed` rather than refused, and the sweep guards nothing a caller
+	// named a version of. Its only 400s are the role's own refusals and the
+	// handler's shape checks.
+	OpReclaimIssues: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The same vocabulary as the stored-edge read beside it, and no not_found
 	// for a stronger version of the same reason: this operation probes no id's
 	// existence at all, so there is nothing it could 404 on.
