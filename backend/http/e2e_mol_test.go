@@ -9,15 +9,17 @@ import (
 )
 
 // TestE2E_MoleculesOverHTTP drives the molecule workflow a gc worker runs —
-// `bd create --parent`, `bd mol current`, `bd mol progress`, `bd close
-// --continue` and the molecule auto-close after the last step — through the
-// real `bd` binary against an in-process `bd serve` (slices S16 and S19).
+// `bd create --parent`, `bd mol current`, `bd mol progress`, `bd ready --mol`,
+// `bd close --continue` and the molecule auto-close after the last step —
+// through the real `bd` binary against an in-process `bd serve` (slices S16
+// and S19).
 //
-// Every one of these used to fail or, worse, answer silently over http: the
-// child-id mint was a raw GetNextChildID the client stubs, `mol current`
-// swallowed a refused edge read into "no molecules", `close --continue`
-// needed a raw transaction, and the auto-close skipped itself on the same
-// swallowed read.
+// Every one of these used to fail or, worse, answer silently over http. Each
+// now has one library entry the server runs: the create role mints the child
+// id, the molecule view (issueops.ViewMolecule) answers the reads, the
+// close runs the auto-close in its own transaction (auto_close_molecule), and
+// `close --continue` is the advanceMolecule operation, whose claim sets the
+// assignee and never takes a step someone else holds.
 func TestE2E_MoleculesOverHTTP(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	bin := buildBD(t)
@@ -52,8 +54,9 @@ func TestE2E_MoleculesOverHTTP(t *testing.T) {
 	// GetNextChildID the http backend does not serve.
 	step1 := firstJSONField(t, mustBD("create", "Step one", "--parent", root, "--json").stdout, "id")
 	step2 := firstJSONField(t, mustBD("create", "Step two", "--parent", root, "--json").stdout, "id")
-	if step1 != root+".1" || step2 != root+".2" {
-		t.Fatalf("create --parent minted %q and %q, want %q and %q", step1, step2, root+".1", root+".2")
+	step3 := firstJSONField(t, mustBD("create", "Step three", "--parent", root, "--json").stdout, "id")
+	if step1 != root+".1" || step2 != root+".2" || step3 != root+".3" {
+		t.Fatalf("create --parent minted %q, %q and %q, want %q, %q and %q", step1, step2, step3, root+".1", root+".2", root+".3")
 	}
 	// An explicit --id beside --parent is still refused locally, before any mint.
 	if r := bd("create", "Both", "--parent", root, "--id", root+".9", "--json"); r.code == 0 {
@@ -61,7 +64,10 @@ func TestE2E_MoleculesOverHTTP(t *testing.T) {
 	}
 
 	mustBD("dep", "add", step2, step1, "--json")
+	mustBD("dep", "add", step3, step1, "--json")
 	mustBD("update", step1, "-s", "in_progress", "-a", "alice", "--json")
+	// Someone else holds step two: the advance must skip it, not take it.
+	mustBD("update", step2, "-a", "bob", "--json")
 
 	// S16: mol current with an id is a non-empty answer whose current step is
 	// the in-progress one.
@@ -69,8 +75,8 @@ func TestE2E_MoleculesOverHTTP(t *testing.T) {
 	if len(current) != 1 || current[0].MoleculeID != root {
 		t.Fatalf("mol current %s = %+v, want the one molecule %s", root, current, root)
 	}
-	if current[0].CurrentStep == nil || current[0].CurrentStep.ID != step1 || current[0].Total != 2 {
-		t.Fatalf("mol current %s current=%v total=%d, want current %s of 2", root, current[0].CurrentStep, current[0].Total, step1)
+	if current[0].CurrentStep == nil || current[0].CurrentStep.ID != step1 || current[0].Total != 3 {
+		t.Fatalf("mol current %s current=%v total=%d, want current %s of 3", root, current[0].CurrentStep, current[0].Total, step1)
 	}
 	// The step is the FULL row: the raw dependents read over http is getIssue's
 	// shallow projection, which zeroes the assignee a worker prompt reads.
@@ -79,8 +85,8 @@ func TestE2E_MoleculesOverHTTP(t *testing.T) {
 	}
 
 	progress := mustBD("mol", "progress", root, "--json").stdout
-	if n := jsonIntField(t, progress, "total"); n != 2 {
-		t.Errorf("mol progress total = %d, want 2: %s", n, progress)
+	if n := jsonIntField(t, progress, "total"); n != 3 {
+		t.Errorf("mol progress total = %d, want 3: %s", n, progress)
 	}
 	if id := firstJSONField(t, progress, "current_step_id"); id != step1 {
 		t.Errorf("mol progress current_step_id = %q, want %q: %s", id, step1, progress)
@@ -102,8 +108,35 @@ func TestE2E_MoleculesOverHTTP(t *testing.T) {
 		}
 	})
 
-	// close --continue: the auto-claim is one guarded Lifecycle update, so it
-	// advances to step two over http.
+	// ready --mol: the step rows are the full rows (the corpus mark
+	// mc-ready-mol was the shallow projection dropping the assignee).
+	var ready struct {
+		Steps []struct {
+			Issue struct {
+				ID       string `json:"id"`
+				Assignee string `json:"assignee"`
+			} `json:"issue"`
+		} `json:"steps"`
+	}
+	readyOut := mustBD("ready", "--mol", root, "--json").stdout
+	if err := json.Unmarshal([]byte(strings.TrimSpace(readyOut)), &ready); err != nil {
+		t.Fatalf("parse ready --mol: %v\n%s", err, readyOut)
+	}
+	sawStep1 := false
+	for _, step := range ready.Steps {
+		if step.Issue.ID == step1 {
+			sawStep1 = true
+			if step.Issue.Assignee != "alice" {
+				t.Errorf("ready --mol %s step %s assignee = %q, want alice (full step row)", root, step1, step.Issue.Assignee)
+			}
+		}
+	}
+	if !sawStep1 {
+		t.Errorf("ready --mol %s did not list the in-progress step %s: %s", root, step1, readyOut)
+	}
+
+	// close --continue: step two is first in line but bob holds it, so the
+	// advance claims step three for alice — a real claim, assignee set.
 	cont := mustBD("close", step1, "--continue", "--json")
 	var contBody struct {
 		Continue struct {
@@ -115,19 +148,29 @@ func TestE2E_MoleculesOverHTTP(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(cont.stdout)), &contBody); err != nil {
 		t.Fatalf("parse close --continue output: %v\n%s", err, cont.stdout)
 	}
-	if !contBody.Continue.AutoAdvanced || contBody.Continue.NextStep == nil || contBody.Continue.NextStep.ID != step2 ||
+	if !contBody.Continue.AutoAdvanced || contBody.Continue.NextStep == nil || contBody.Continue.NextStep.ID != step3 ||
 		contBody.Continue.MoleculeID != root {
-		t.Errorf("close --continue = %s, want auto-advance to %s in %s", cont.stdout, step2, root)
+		t.Errorf("close --continue = %s, want auto-advance to %s in %s (skipping %s, held by bob)", cont.stdout, step3, root, step2)
 	}
-	if got := status(step2); got != "in_progress" {
-		t.Errorf("%s status after close --continue = %q, want in_progress", step2, got)
+	if got := status(step3); got != "in_progress" {
+		t.Errorf("%s status after close --continue = %q, want in_progress", step3, got)
+	}
+	if got := firstJSONField(t, mustBD("show", step3, "--json").stdout, "assignee"); got != "alice" {
+		t.Errorf("%s assignee after close --continue = %q, want alice (a claim, not a status flip)", step3, got)
+	}
+	if got := firstJSONField(t, mustBD("show", step2, "--json").stdout, "assignee"); got != "bob" || status(step2) != "open" {
+		t.Errorf("%s after close --continue = %s/%q, want open and still bob's", step2, status(step2), got)
 	}
 	if got := status(root); got == "closed" {
 		t.Fatalf("molecule %s closed with %s still open", root, step2)
 	}
 
-	// Closing the last step auto-closes the molecule root.
-	last := mustBD("close", step2)
+	// Closing the last steps auto-closes the molecule root.
+	mustBD("close", step3)
+	if got := status(root); got == "closed" {
+		t.Fatalf("molecule %s closed with %s still open", root, step2)
+	}
+	last := mustBD("close", step2, "--force")
 	if strings.Contains(last.stderr, "could not") {
 		t.Errorf("close %s warned: %s", step2, last.stderr)
 	}

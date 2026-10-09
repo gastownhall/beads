@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // TODO(batchgetter): GetIssuesByIDs below reads an unbounded id list;
@@ -58,7 +59,6 @@ type molWriter interface {
 	CloseIssue(ctx context.Context, id, reason, actor string) error
 	DeleteIssue(ctx context.Context, id, actor string) error
 	SetConfig(ctx context.Context, key, value string) error
-	ClaimStepIfOpen(ctx context.Context, id, actor string) error
 }
 
 type storeMolWriter struct {
@@ -101,25 +101,6 @@ func (w storeMolWriter) GetConfig(ctx context.Context, key string) (string, erro
 		return w.tx.GetConfig(ctx, key)
 	}
 	return w.DoltStorage.GetConfig(ctx, key)
-}
-
-// ClaimStepIfOpen moves an open step to in_progress with one guarded
-// Lifecycle update (ExpectedStatus open). It used to read-then-write inside a
-// raw RunInTransaction, which a remote backend refuses, so `bd close
-// --continue` could never advance there. A step that is no longer open
-// answers issueops.ErrStatusMismatch.
-func (w storeMolWriter) ClaimStepIfOpen(ctx context.Context, id, actor string) error {
-	return claimStepIfOpenViaLifecycle(ctx, w.DoltStorage, id, actor)
-}
-
-// newStandaloneStoreMolWriter is the direct route's molecule writer outside a
-// transaction (`bd close --continue`). Its reads go through roleMolStore, so a
-// remote backend answers the parent walk and progress reads too.
-func newStandaloneStoreMolWriter(store storage.DoltStorage) storeMolWriter {
-	if store == nil {
-		return storeMolWriter{}
-	}
-	return storeMolWriter{DoltStorage: roleMolStore{DoltStorage: store}}
 }
 
 type uowMolReader struct {
@@ -279,7 +260,8 @@ func (r uowMolReader) GetMoleculeProgress(ctx context.Context, moleculeID string
 	if err != nil {
 		return nil, fmt.Errorf("failed to get molecule children: %w", err)
 	}
-	return moleculeProgressFromChildren(moleculeID, title, dependents), nil
+	stats := issueops.MoleculeProgressOf(&types.Issue{ID: moleculeID, Title: title}, dependents)
+	return stats, nil
 }
 
 func (r uowMolReader) GetMoleculeLastActivity(ctx context.Context, moleculeID string) (*types.MoleculeLastActivity, error) {
@@ -440,28 +422,4 @@ func (w *uowMolWriter) DeleteIssue(ctx context.Context, id, actor string) error 
 
 func (w *uowMolWriter) SetConfig(ctx context.Context, key, value string) error {
 	return w.uw.ConfigUseCase().SetConfig(ctx, key, value)
-}
-
-func (w *uowMolWriter) ClaimStepIfOpen(ctx context.Context, id, actor string) error {
-	isWisp, err := w.isWisp(ctx, id)
-	if err != nil {
-		return err
-	}
-	if isWisp {
-		_, err := w.uw.IssueUseCase().ClaimWispIfOpen(ctx, id, actor)
-		return err
-	}
-	_, err = w.uw.IssueUseCase().ClaimIssueIfOpen(ctx, id, actor)
-	return err
-}
-
-// searchMoleculeCandidates is listMoleculeCandidates' arm for a reader with no
-// Reader role — the proxied route's in-transaction port, which must answer from
-// inside the caller's unit of work.
-func searchMoleculeCandidates(ctx context.Context, s molReader, status types.Status, agent string) ([]*types.Issue, error) {
-	filter := types.IssueFilter{Status: &status}
-	if agent != "" {
-		filter.Assignee = &agent
-	}
-	return s.SearchIssues(ctx, "", filter)
 }

@@ -53,6 +53,12 @@ func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 	// same sweep from its role (uow.readyClaimer.ClaimNext).
 	uow.WakeExpiredDefersAdvisory(ctx, uowProvider)
 
+	// --mol reads through the provider's roles, each in a unit of work of its
+	// own, so it runs before this route opens the one it holds below.
+	if in.molID != "" {
+		return runMoleculeReady(ctx, nil, proxiedResolvePartialID, in.molID)
+	}
+
 	uw, err := uowProvider.NewUOW(ctx)
 	if err != nil {
 		return HandleErrorRespectJSON("open unit of work: %v", err)
@@ -62,8 +68,6 @@ func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 	switch {
 	case in.gated:
 		return runReadyProxiedGated(ctx, uw, in)
-	case in.molID != "":
-		return runReadyProxiedMolecule(ctx, uw, in)
 	case in.explain:
 		return runReadyProxiedExplain(ctx, uw, in)
 	default:
@@ -394,89 +398,6 @@ func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput
 		fmt.Printf(", %d cycle(s)", explanation.Summary.CycleCount)
 	}
 	fmt.Printf("\n\n")
-	return nil
-}
-
-func runReadyProxiedMolecule(ctx context.Context, uw uow.UnitOfWork, in readyInput) error {
-	moleculeID := in.molID
-	subgraph, err := loadTemplateSubgraph(ctx, uowMolReader{uw: uw}, moleculeID)
-	if err != nil {
-		return HandleError("loading molecule: %v", err)
-	}
-
-	analysis := analyzeMoleculeParallel(subgraph)
-
-	var readySteps []*MoleculeReadyStep
-	for _, issue := range subgraph.Issues {
-		info := analysis.Steps[issue.ID]
-		if info != nil && info.IsReady {
-			readySteps = append(readySteps, &MoleculeReadyStep{
-				Issue:         issue,
-				ParallelInfo:  info,
-				ParallelGroup: info.ParallelGroup,
-			})
-		}
-	}
-
-	if in.jsonOut {
-		output := MoleculeReadyOutput{
-			MoleculeID:     moleculeID,
-			MoleculeTitle:  subgraph.Root.Title,
-			TotalSteps:     analysis.TotalSteps,
-			ReadySteps:     len(readySteps),
-			Steps:          readySteps,
-			ParallelGroups: analysis.ParallelGroups,
-		}
-		_ = outputJSON(output)
-		return nil
-	}
-
-	fmt.Printf("\n%s Ready steps in molecule: %s\n", ui.RenderAccent("🧪"), subgraph.Root.Title)
-	fmt.Printf("   ID: %s\n", moleculeID)
-	fmt.Printf("   Total: %d steps, %d ready\n", analysis.TotalSteps, len(readySteps))
-	if len(readySteps) == 0 {
-		fmt.Printf("\n%s No ready steps (all blocked or completed)\n\n", ui.RenderWarn("✨"))
-		return nil
-	}
-	if len(analysis.ParallelGroups) > 0 {
-		fmt.Printf("\n%s Parallel Groups:\n", ui.RenderPass("⚡"))
-		for groupName, members := range analysis.ParallelGroups {
-			readyInGroup := 0
-			for _, id := range members {
-				if info := analysis.Steps[id]; info != nil && info.IsReady {
-					readyInGroup++
-				}
-			}
-			if readyInGroup > 0 {
-				fmt.Printf("   %s: %d ready\n", groupName, readyInGroup)
-			}
-		}
-	}
-	fmt.Printf("\n%s Ready steps:\n\n", ui.RenderPass("📋"))
-	for i, step := range readySteps {
-		groupAnnotation := ""
-		if step.ParallelGroup != "" {
-			groupAnnotation = fmt.Sprintf(" [%s]", ui.RenderAccent(step.ParallelGroup))
-		}
-		fmt.Printf("%d. [%s] [%s] %s: %s%s\n", i+1,
-			ui.RenderPriority(step.Issue.Priority),
-			ui.RenderType(string(step.Issue.IssueType)),
-			ui.RenderID(step.Issue.ID),
-			step.Issue.Title,
-			groupAnnotation)
-		if len(step.ParallelInfo.CanParallel) > 0 {
-			readyParallel := []string{}
-			for _, pID := range step.ParallelInfo.CanParallel {
-				if pInfo := analysis.Steps[pID]; pInfo != nil && pInfo.IsReady {
-					readyParallel = append(readyParallel, pID)
-				}
-			}
-			if len(readyParallel) > 0 {
-				fmt.Printf("   Can run with: %v\n", readyParallel)
-			}
-		}
-	}
-	fmt.Println()
 	return nil
 }
 

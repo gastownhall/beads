@@ -139,6 +139,10 @@ func closeDirectRequest(batch closeDirectBatch, session string, force bool, clai
 		Items:   make([]issueops.BatchCloseItem, 0, len(batch.items)),
 		Session: session,
 		Force:   force,
+		// bd closes a molecule's root when its last step closes; the library
+		// does it inside the batch's transaction. Opt-in at the library so an
+		// orchestrator with its own molecule lifecycle is not doubled.
+		AutoCloseMolecule: true,
 	}
 	if claimNext != nil && batch.store == claimStore {
 		request.ClaimNext = claimNext

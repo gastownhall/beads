@@ -5,13 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -64,14 +62,18 @@ type closeProxiedOutcome struct {
 	closed      bool
 	auditOld    string
 	auditReason string
+	// autoClosedMol and autoCloseRefusal are what the library's molecule
+	// auto-close did inside the batch's transaction for this item.
+	autoClosedMol    *types.Issue
+	autoCloseRefusal string
 }
 
 // closeProxiedPostClose is the work `bd close` does AFTER the closes have
-// landed: molecule auto-close, --suggest-next and --continue.
+// landed: --suggest-next and --continue. (The molecule auto-close is not here:
+// the library runs it inside the batch's transaction.)
 type closeProxiedPostClose struct {
 	unblocked      []*types.Issue
 	continueResult *ContinueResult
-	autoClosedMol  *types.Issue
 	warnings       []string
 }
 
@@ -145,6 +147,9 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 			Session:   in.session,
 			Force:     in.force,
 			ClaimNext: closeClaimNextRequest(in.claimNext, in.continueOn),
+			// The library closes a molecule root its last step's close
+			// completes, inside this batch's transaction.
+			AutoCloseMolecule: true,
 		})
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
@@ -178,9 +183,17 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 		claimedNextIssue = result.ClaimedNext.Issue
 	}
 
+	for _, o := range outcomes {
+		if o.autoCloseRefusal != "" {
+			fmt.Fprintf(os.Stderr, "Warning: could not auto-close completed molecule: %s\n", o.autoCloseRefusal)
+		}
+	}
+
 	if !in.jsonOut {
-		if post.autoClosedMol != nil {
-			fmt.Printf("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(post.autoClosedMol.ID, post.autoClosedMol.Title))
+		for _, o := range outcomes {
+			if o.autoClosedMol != nil {
+				fmt.Printf("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(o.autoClosedMol.ID, o.autoClosedMol.Title))
+			}
 		}
 		if len(post.unblocked) > 0 {
 			fmt.Printf("\nNewly unblocked:\n")
@@ -352,12 +365,14 @@ func closeProxiedOutcomes(pre *closeProxiedPreflight, result issueops.CloseBatch
 			after.Dependencies = nil
 		}
 		outcomes = append(outcomes, closeProxiedOutcome{
-			id:          item.IssueID,
-			before:      before,
-			after:       after,
-			closed:      outcome.Changed,
-			auditOld:    oldStatus,
-			auditReason: item.Reason,
+			id:               item.IssueID,
+			before:           before,
+			after:            after,
+			closed:           outcome.Changed,
+			auditOld:         oldStatus,
+			auditReason:      item.Reason,
+			autoClosedMol:    outcome.AutoClosedMolecule,
+			autoCloseRefusal: outcome.MoleculeAutoCloseRefusal,
 		})
 		reasons = append(reasons, item.Reason)
 	}
@@ -463,61 +478,38 @@ func closeProxiedRefusal(id string, err error) string {
 	}
 }
 
-// closeProxiedRunPostClose runs molecule auto-close, --suggest-next and
-// --continue once the closes have committed.
-//
-// They are outside the batch's transaction because they are outside its
-// contract, and outside is where the direct route has always run them: it
-// calls autoCloseCompletedMolecule and AdvanceToNextStep after ops.Close
-// returns, each in its own write. The visible consequence is a SECOND Dolt
-// commit when a molecule actually auto-closes or --continue actually advances.
-// A plain close writes nothing in this pass, names no commit message, and
-// therefore still produces exactly one commit for the command.
+// closeProxiedRunPostClose runs --suggest-next and --continue once the closes
+// have committed. --suggest-next is a read in a unit of work of its own;
+// --continue is the provider's MoleculeStepper role, which claims in its own
+// transaction exactly as the direct route's does.
 func closeProxiedRunPostClose(ctx context.Context, args []string, in closeProxiedInput, outcomes []closeProxiedOutcome) closeProxiedPostClose {
+	var out closeProxiedPostClose
 	if len(outcomes) == 0 {
-		return closeProxiedPostClose{}
+		return out
 	}
 
-	post, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (closeProxiedPostClose, string, error) {
-		var out closeProxiedPostClose
-		var wrote []string
-
-		for _, o := range outcomes {
-			mol := autoCloseProxiedCompletedMolecule(ctx, uw, o.id, currentActor(), in.session, &out.warnings)
-			if mol != nil {
-				out.autoClosedMol = mol
-				wrote = append(wrote, "auto-close "+mol.ID)
-			}
-		}
-
-		if in.suggestNext && len(args) == 1 {
+	if in.suggestNext && len(args) == 1 {
+		_, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (struct{}, error) {
 			unblocked, warn := closeProxiedSuggestNext(ctx, uw, args[0])
 			out.unblocked = unblocked
 			if warn != "" {
 				out.warnings = append(out.warnings, warn)
 			}
+			return struct{}{}, nil
+		})
+		if err != nil {
+			out.warnings = append(out.warnings, fmt.Sprintf("post-close work failed: %v", err))
 		}
-
-		if in.continueOn && len(args) == 1 {
-			cont, warn := closeProxiedContinue(ctx, uw, args[0], !in.noAuto)
-			out.continueResult = cont
-			if warn != "" {
-				out.warnings = append(out.warnings, warn)
-			}
-			if cont != nil && cont.AutoAdvanced && cont.NextStep != nil {
-				wrote = append(wrote, "advance to "+cont.NextStep.ID)
-			}
-		}
-
-		if len(wrote) == 0 {
-			return out, "", nil
-		}
-		return out, "bd: " + strings.Join(wrote, "; "), nil
-	})
-	if err != nil {
-		post.warnings = append(post.warnings, fmt.Sprintf("post-close work failed: %v", err))
 	}
-	return post
+
+	if in.continueOn && len(args) == 1 {
+		cont, warn := closeProxiedContinue(ctx, args[0], !in.noAuto)
+		out.continueResult = cont
+		if warn != "" {
+			out.warnings = append(out.warnings, warn)
+		}
+	}
+	return out
 }
 
 func closeProxiedSuggestNext(ctx context.Context, uw uow.UnitOfWork, closedID string) ([]*types.Issue, string) {
@@ -528,53 +520,14 @@ func closeProxiedSuggestNext(ctx context.Context, uw uow.UnitOfWork, closedID st
 	return unblocked, ""
 }
 
-func closeProxiedContinue(ctx context.Context, uw uow.UnitOfWork, closedID string, autoClaim bool) (*ContinueResult, string) {
-	result, err := AdvanceToNextStep(ctx, newUOWMolWriter(uw), closedID, autoClaim, currentActor())
+func closeProxiedContinue(ctx context.Context, closedID string, autoClaim bool) (*ContinueResult, string) {
+	roles, err := proxiedMoleculeRoles()
+	if err != nil {
+		return nil, fmt.Sprintf("could not advance to next step: %v", err)
+	}
+	result, err := advanceMolecule(ctx, roles, closedID, autoClaim)
 	if err != nil {
 		return nil, fmt.Sprintf("could not advance to next step: %v", err)
 	}
 	return result, ""
-}
-
-func autoCloseProxiedCompletedMolecule(ctx context.Context, uw uow.UnitOfWork, closedStepID string, actorName, session string, warnings *[]string) *types.Issue {
-	moleculeID, err := findParentMolecule(ctx, uowMolReader{uw: uw}, closedStepID)
-	if err != nil {
-		*warnings = append(*warnings, fmt.Sprintf("could not check molecule auto-close for %s: %v", closedStepID, err))
-		return nil
-	}
-	if moleculeID == "" {
-		return nil
-	}
-
-	root, err := uw.IssueUseCase().GetIssue(ctx, moleculeID)
-	if err != nil || root == nil || root.Status == types.StatusClosed {
-		return nil
-	}
-	// A READ, and one that has to see this transaction. The auto-close decision
-	// is made from labels written earlier in the same unit of work, and
-	// issueops.Reader opens a transaction of its own, so it would answer from
-	// the last committed state instead. The follow-up is a reader role bound to
-	// a caller's transaction; until one exists this stays (ga-2ltro.12).
-	if labels, err := uw.LabelUseCase().GetLabels(ctx, moleculeID); err == nil { //nolint:forbidigo // in-transaction read; issueops.Reader would open its own
-		root.Labels = labels
-	}
-	if !shouldAutoCloseCompletedRoot(root) {
-		return nil
-	}
-
-	progress, err := getMoleculeProgress(ctx, uowMolReader{uw: uw}, moleculeID)
-	if err != nil {
-		*warnings = append(*warnings, fmt.Sprintf("could not check molecule auto-close for %s: %v", moleculeID, err))
-		return nil
-	}
-	if progress.Completed < progress.Total {
-		return nil
-	}
-
-	params := domain.CloseIssueParams{Reason: "all steps complete", Session: session}
-	if _, err := uw.IssueUseCase().CloseIssue(ctx, moleculeID, params, actorName); err != nil {
-		*warnings = append(*warnings, fmt.Sprintf("could not auto-close completed molecule %s: %v", moleculeID, err))
-		return nil
-	}
-	return root
 }

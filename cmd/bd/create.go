@@ -441,8 +441,11 @@ var createCmd = &cobra.Command{
 			defer func() { _ = parentLookupStore.Close() }()
 		}
 
-		var inheritedLabels []string
+		noInheritLabels, _ := cmd.Flags().GetBool("no-inherit-labels")
+		inheritParentLabels := parentID != "" && !noInheritLabels
 		if parentID != "" {
+			// A fail-fast with the message this command has always printed;
+			// the create role refuses a missing parent on its own as well.
 			ctx := rootCtx
 			_, err := parentLookupStore.GetIssue(ctx, parentID)
 			if err != nil {
@@ -451,16 +454,20 @@ var createCmd = &cobra.Command{
 				}
 				return HandleError("failed to check parent issue: %v", err)
 			}
-
-			noInheritLabels, _ := cmd.Flags().GetBool("no-inherit-labels")
-			if !noInheritLabels {
-				inheritedLabels, _ = parentLookupStore.GetLabels(ctx, parentID)
-			}
 		}
 
-		labels = mergeCreateLabels(labels, inheritedLabels)
-
 		if dryRun {
+			// The preview shows what the create role would inherit; the real
+			// create asks the role to inherit (CreateRequest.InheritLabelsFromParent)
+			// inside its own transaction. A failed read is reported, never
+			// previewed as "no labels".
+			if inheritParentLabels {
+				inherited, err := parentLookupStore.GetLabels(rootCtx, parentID)
+				if err != nil {
+					return HandleError("failed to read the labels of parent %s: %v", parentID, err)
+				}
+				labels = mergeCreateLabels(labels, inherited)
+			}
 			return renderDryRun()
 		}
 
@@ -477,22 +484,12 @@ var createCmd = &cobra.Command{
 		}
 
 		createCtx := rootCtx
-		// A registered Remote backend (http) has no raw GetNextChildID: the
-		// server mints the child id instead. A create with a ParentID and no
-		// id of its own is minted <parent>.<n> by the Lifecycle role on every
-		// backend (pinned by conformance
+		// The --parent child id is minted by the Lifecycle role, on every
+		// backend and route: a create with a ParentID and no id of its own is
+		// <parent>.<n>, minted inside the create's own transaction (conformance
 		// RunIssueOperationsCreateUnderAParentMintsTheNextChildID, served leg
-		// included), inside the create's own transaction. The local route keeps
-		// its reservation so its Dolt commit staging is unchanged. An explicit
-		// --id never reaches here with a parent (refused above).
-		if parentID != "" && !isRemoteBackendWorkspace() {
-			childID, err := store.GetNextChildID(rootCtx, parentID)
-			if err != nil {
-				return HandleError("%v", err)
-			}
-			explicitID = childID
-			createCtx = storage.WithReservedChildCounter(createCtx, parentID, childID)
-		}
+		// included), and the role stages the advanced counter itself. An
+		// explicit --id never reaches here with a parent (refused above).
 
 		if explicitID != "" {
 			_, err := validation.ValidateIDFormat(explicitID)
@@ -571,17 +568,16 @@ var createCmd = &cobra.Command{
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-		// Label inheritance stays CLI-side (mergeCreateLabels above) because the
-		// dry-run preview needs it too; asking the facade to inherit as well
-		// would append the parent's labels a second time.
+		// The parent's labels are the role's to inherit, inside the create.
 		result, err := ops.Create(opsCtx, issueops.CreateRequest{
-			Actor:         currentActor(),
-			Issue:         issue,
-			ParentID:      parentID,
-			Dependencies:  createDependencyRequests(depSpecs),
-			WaitsFor:      waitsForRequest(waitsForSpec),
-			ForceIDPrefix: forceCreate,
-			IDPrefix:      createIDPrefixOverride(),
+			Actor:                   currentActor(),
+			Issue:                   issue,
+			ParentID:                parentID,
+			InheritLabelsFromParent: inheritParentLabels,
+			Dependencies:            createDependencyRequests(depSpecs),
+			WaitsFor:                waitsForRequest(waitsForSpec),
+			ForceIDPrefix:           forceCreate,
+			IDPrefix:                createIDPrefixOverride(),
 		})
 		if err != nil {
 			// RULING R1: an occupied --id is a refusal, not a silent full-row

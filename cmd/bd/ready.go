@@ -97,7 +97,13 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			if claimReady {
 				return HandleErrorRespectJSON("--claim cannot be combined with --mol")
 			}
-			return runMoleculeReady(cmd, molID)
+			if store == nil {
+				return HandleErrorRespectJSON("no database connection")
+			}
+			resolve := func(ctx context.Context, arg string) (string, error) {
+				return utils.ResolvePartialID(ctx, store, arg)
+			}
+			return runMoleculeReady(rootCtx, store, resolve, molID)
 		}
 
 		explain, _ := cmd.Flags().GetBool("explain")
@@ -637,25 +643,25 @@ func runReadyExplain(_ *cobra.Command) error {
 	return nil
 }
 
-func runMoleculeReady(_ *cobra.Command, molIDArg string) error {
-	ctx := rootCtx
-
-	if store == nil {
-		return HandleErrorRespectJSON("no database connection")
-	}
-
-	moleculeID, err := utils.ResolvePartialID(ctx, store, molIDArg)
+// runMoleculeReady is `bd ready --mol` on every route. The molecule's nodes,
+// their readiness and parallel groups are the library's (issueops.LoadMolecule,
+// AnalyzeMolecule); what is here is presentation.
+func runMoleculeReady(ctx context.Context, s storage.DoltStorage, resolve func(context.Context, string) (string, error), molIDArg string) error {
+	moleculeID, err := resolve(ctx, molIDArg)
 	if err != nil {
 		return HandleErrorRespectJSON("molecule '%s' not found", molIDArg)
 	}
-
-	subgraph, err := loadTemplateSubgraph(ctx, store, moleculeID)
+	roles, err := currentMoleculeRoles(s)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	subgraph, err := issueops.LoadMolecule(ctx, roles.molecule, moleculeID)
 	if err != nil {
 		return HandleErrorRespectJSON("loading molecule: %v", err)
 	}
 
 	// Get parallel analysis to find ready steps
-	analysis := analyzeMoleculeParallel(subgraph)
+	analysis := issueops.AnalyzeMolecule(subgraph)
 
 	// Collect ready steps
 	var readySteps []*MoleculeReadyStep

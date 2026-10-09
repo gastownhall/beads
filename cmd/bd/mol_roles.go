@@ -4,272 +4,230 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
-// edgeReadAnchorBatch bounds the anchors one EdgeReader call names. The http
-// operation behind the role (listDependencies) refuses more than 100 issue_id
-// values per request, and the local roles accept any count, so a batch this
-// size is one round trip on every backend.
-const edgeReadAnchorBatch = 100
-
-// roleMolStore is the molecule commands' reader on the DIRECT route (a
-// storage.DoltStorage, which may be a registered Remote backend such as http).
-//
-// It answers the molecule reads that have no raw method on every backend
-// through issueops roles, so `bd mol current`, `bd mol progress`, the molecule
-// auto-close after `bd close` and `bd close --continue` read the same thing on
-// every backend instead of a remote backend's refusal being swallowed into an
-// empty answer:
-//
-//   - GetDependencyRecordsForIssues -> EdgeReader (batched, parent walk);
-//   - GetDependentsWithMetadata     -> Relations (full rows, both planes);
-//   - GetIssuesByIDs                -> BatchGetter, or Get per id where the
-//     backend does not serve the batch (a capability, not a fault);
-//   - GetMoleculeProgress           -> Relations (inbound parent-child);
-//   - the in_progress/hooked listing -> Reader.List (see listMoleculeCandidates).
-//
-// Everything else is promoted from the wrapped store. The proxied-server route
-// keeps uowMolReader, which must answer from inside the caller's transaction.
-type roleMolStore struct {
-	storage.DoltStorage
+// moleculeRoles is where `bd mol current`, `bd mol progress`, `bd ready --mol`
+// and `bd close --continue` get their answers on the route this command runs
+// on. Every field is a library role; the molecule rules (membership, readiness,
+// progress, the advance and its claim) are the issueops functions composed over
+// them, so the direct, proxied-server and remote routes answer one way. What
+// stays in cmd/bd is presentation.
+type moleculeRoles struct {
+	reader   issueops.Reader
+	molecule issueops.MoleculeReader
+	stepper  func() (issueops.MoleculeStepper, error)
 }
 
-// newRoleMolStore wraps s; a nil store stays nil so the callers' existing
-// "no database connection" checks keep firing.
-func newRoleMolStore(s storage.DoltStorage) molReader {
+// directMoleculeRoles binds the roles to the opened store: a local backend, or
+// a registered remote one (http), each through its own accessors.
+func directMoleculeRoles(s storage.DoltStorage) (moleculeRoles, error) {
 	if s == nil {
+		return moleculeRoles{}, errors.New("no database connection")
+	}
+	reader, err := s.IssueReader()
+	if err != nil {
+		return moleculeRoles{}, err
+	}
+	molecule, err := issueops.NewMoleculeReader(s)
+	if err != nil {
+		return moleculeRoles{}, err
+	}
+	return moleculeRoles{reader: reader, molecule: molecule, stepper: s.MoleculeStepper}, nil
+}
+
+// proxiedMoleculeRoles binds the roles to the proxied server's provider,
+// through the provider's own accessors (where each of its layers is added).
+func proxiedMoleculeRoles() (moleculeRoles, error) {
+	if uowProvider == nil {
+		return moleculeRoles{}, errors.New("proxied-server UOW provider not initialized")
+	}
+	reader, err := proxiedIssueReader()
+	if err != nil {
+		return moleculeRoles{}, err
+	}
+	src, ok := uowProvider.(interface {
+		BatchGetter() (issueops.BatchGetter, error)
+		IssueRelations() (issueops.Relations, error)
+		EdgeReader() (issueops.EdgeReader, error)
+	})
+	if !ok {
+		return moleculeRoles{}, fmt.Errorf("proxied-server provider %T does not offer the molecule read roles", uowProvider)
+	}
+	molecule, err := issueops.NewMoleculeReader(src)
+	if err != nil {
+		return moleculeRoles{}, err
+	}
+	stepper := func() (issueops.MoleculeStepper, error) {
+		src, ok := uowProvider.(uow.MoleculeStepperSource)
+		if !ok {
+			return nil, fmt.Errorf("proxied-server provider %T does not offer the molecule advance", uowProvider)
+		}
+		return src.MoleculeStepper()
+	}
+	return moleculeRoles{reader: reader, molecule: molecule, stepper: stepper}, nil
+}
+
+// currentMoleculeRoles picks the route.
+func currentMoleculeRoles(s storage.DoltStorage) (moleculeRoles, error) {
+	if usesProxiedServer() {
+		return proxiedMoleculeRoles()
+	}
+	return directMoleculeRoles(s)
+}
+
+// moleculeProgressOf presents a library MoleculeView as `bd mol current`'s
+// MoleculeProgress.
+func moleculeProgressOf(view *issueops.MoleculeView) *MoleculeProgress {
+	root := view.Graph.Root
+	progress := &MoleculeProgress{
+		MoleculeID:    root.ID,
+		MoleculeTitle: root.Title,
+		Assignee:      root.Assignee,
+		CurrentStep:   view.CurrentStep,
+		NextStep:      view.NextStep,
+		Completed:     view.Completed,
+		Total:         view.Total,
+	}
+	for _, step := range view.Steps {
+		progress.Steps = append(progress.Steps, &StepStatus{Issue: step.Issue, Status: step.State, IsCurrent: step.IsCurrent})
+	}
+	return progress
+}
+
+// viewMolecules loads and presents each molecule, sorted by id.
+func viewMolecules(ctx context.Context, roles moleculeRoles, ids []string) ([]*MoleculeProgress, error) {
+	out := make([]*MoleculeProgress, 0, len(ids))
+	for _, id := range ids {
+		view, err := issueops.ViewMolecule(ctx, roles.molecule, id)
+		if err != nil {
+			return nil, fmt.Errorf("loading molecule %s: %w", id, err)
+		}
+		out = append(out, moleculeProgressOf(view))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].MoleculeID < out[j].MoleculeID })
+	return out, nil
+}
+
+// continueResultOf presents a library AdvanceResult as `bd close --continue`'s
+// ContinueResult. A step in no molecule presents as nil, as it always has.
+func continueResultOf(result issueops.AdvanceResult) *ContinueResult {
+	if result.MoleculeID == "" {
 		return nil
 	}
-	return roleMolStore{DoltStorage: s}
+	return &ContinueResult{
+		ClosedStep:   result.ClosedStep,
+		NextStep:     result.NextStep,
+		AutoAdvanced: result.Claimed,
+		MolComplete:  result.Complete,
+		MoleculeID:   result.MoleculeID,
+	}
 }
 
-// GetDependencyRecordsForIssues answers each id's stored outgoing edges through
-// the EdgeReader role. An id that names nothing is absent from the map, matching
-// the raw method.
-func (s roleMolStore) GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error) {
-	return readEdgesByAnchor(ctx, s.DoltStorage, issueIDs, nil)
-}
-
-// GetIssuesByIDs answers labeled rows for ids in either plane through the
-// BatchGetter role. A backend that does not serve the batch (an http server
-// without issues.batchGet) answers the same rows one Get at a time; any other
-// failure surfaces.
-func (s roleMolStore) GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	getter, err := s.BatchGetter()
-	if err == nil {
-		out := make([]*types.Issue, 0, len(ids))
-		for start := 0; start < len(ids); start += issueops.MaxGetManyIDs {
-			end := min(start+issueops.MaxGetManyIDs, len(ids))
-			res, gerr := getter.GetMany(ctx, issueops.GetManyRequest{IDs: ids[start:end]})
-			if gerr != nil {
-				err = gerr
-				break
-			}
-			out = append(out, res.Issues...)
-		}
-		if err == nil {
-			return out, nil
-		}
-	}
-	var unsupported *storage.ErrUnsupported
-	if !errors.As(err, &unsupported) {
+// advanceMolecule runs `bd close --continue` through the route's
+// MoleculeStepper role.
+func advanceMolecule(ctx context.Context, roles moleculeRoles, closedStepID string, autoClaim bool) (*ContinueResult, error) {
+	stepper, err := roles.stepper()
+	if err != nil {
 		return nil, err
 	}
-	out := make([]*types.Issue, 0, len(ids))
-	for _, id := range ids {
-		issue, gerr := s.GetIssue(ctx, id)
-		if errors.Is(gerr, storage.ErrNotFound) {
-			continue
-		}
-		if gerr != nil {
-			return nil, gerr
-		}
+	result, err := stepper.Advance(ctx, issueops.AdvanceRequest{Actor: currentActor(), ClosedStepID: closedStepID, AutoClaim: autoClaim})
+	if err != nil {
+		return nil, err
+	}
+	return continueResultOf(result), nil
+}
+
+// rawMoleculeReader binds the library's molecule rules to a molReader — the
+// raw-method port the template commands (`mol ready --gated`, pour, bond)
+// still read through, including the proxied route's in-transaction port. It
+// is a data binding, like the in-transaction ones in internal/storage: it
+// answers the three role reads from raw methods and decides nothing.
+type rawMoleculeReader struct{ s molReader }
+
+// moleculeReader binds the library's rules to this port.
+func (r rawMoleculeReader) moleculeReader() issueops.MoleculeReader {
+	return issueops.MoleculeReaderOver(r)
+}
+
+func (r rawMoleculeReader) GetMany(ctx context.Context, req issueops.GetManyRequest) (issueops.GetManyResult, error) {
+	issues, err := r.s.GetIssuesByIDs(ctx, req.IDs)
+	if err != nil {
+		return issueops.GetManyResult{}, err
+	}
+	found := make(map[string]*types.Issue, len(issues))
+	for _, issue := range issues {
 		if issue != nil {
-			out = append(out, issue)
+			found[issue.ID] = issue
 		}
 	}
-	return out, nil
-}
-
-// GetDependentsWithMetadata answers an issue's inbound neighbors through the
-// Relations role. Over http that is the full neighbor row; the raw method rides
-// getIssue's shallow dependent projection, which zeroes assignee, description,
-// labels and timestamps on every step a molecule load reads. An anchor that
-// names nothing answers no dependents, matching the raw method.
-func (s roleMolStore) GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
-	relations, err := s.IssueRelations()
-	if err != nil {
-		return nil, err
-	}
-	out, err := relations.Related(ctx, issueops.RelatedRequest{ID: issueID, Direction: issueops.RelationIn})
-	if errors.Is(err, issueops.ErrNotFound) {
-		return nil, nil
-	}
-	return out, err
-}
-
-// GetMoleculeProgress counts a molecule's parent-child steps through the
-// Relations role, which every backend serves and which reads both planes.
-func (s roleMolStore) GetMoleculeProgress(ctx context.Context, moleculeID string) (*types.MoleculeProgressStats, error) {
-	relations, err := s.IssueRelations()
-	if err != nil {
-		return nil, err
-	}
-	children, err := relations.Related(ctx, issueops.RelatedRequest{
-		ID:        moleculeID,
-		Direction: issueops.RelationIn,
-		Types:     []types.DependencyType{types.DepParentChild},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get molecule children: %w", err)
-	}
-	title := ""
-	if root, err := s.GetIssue(ctx, moleculeID); err != nil && !errors.Is(err, storage.ErrNotFound) {
-		return nil, fmt.Errorf("failed to get molecule: %w", err)
-	} else if root != nil {
-		title = root.Title
-	}
-	return moleculeProgressFromChildren(moleculeID, title, children), nil
-}
-
-// moleculeProgressFromChildren folds a molecule's inbound dependents into its
-// progress counts. Both direct-route and proxied-route readers use it, so the
-// two answer one rule.
-func moleculeProgressFromChildren(moleculeID, title string, dependents []*types.IssueWithDependencyMetadata) *types.MoleculeProgressStats {
-	stats := &types.MoleculeProgressStats{MoleculeID: moleculeID, MoleculeTitle: title}
-	for _, dependent := range dependents {
-		if dependent == nil || dependent.DependencyType != types.DepParentChild {
+	out := issueops.GetManyResult{Issues: []*issueops.Issue{}, Missing: []string{}}
+	seen := map[string]bool{}
+	for _, id := range req.IDs {
+		if seen[id] {
 			continue
 		}
-		stats.Total++
-		switch dependent.Status {
-		case types.StatusClosed:
-			stats.Completed++
-		case types.StatusInProgress:
-			stats.InProgress++
-			if stats.CurrentStepID == "" {
-				stats.CurrentStepID = dependent.ID
-			}
-		}
-	}
-	return stats
-}
-
-// readEdgesByAnchor reads the outgoing edges of ids through the EdgeReader
-// role in batches the http operation accepts. Missing anchors are omitted.
-func readEdgesByAnchor(ctx context.Context, st storage.DoltStorage, ids []string, depTypes []types.DependencyType) (map[string][]*types.Dependency, error) {
-	out := make(map[string][]*types.Dependency, len(ids))
-	if len(ids) == 0 {
-		return out, nil
-	}
-	reader, err := st.EdgeReader()
-	if err != nil {
-		return nil, err
-	}
-	for start := 0; start < len(ids); start += edgeReadAnchorBatch {
-		end := min(start+edgeReadAnchorBatch, len(ids))
-		res, err := reader.ReadEdges(ctx, issueops.EdgeReadRequest{IDs: ids[start:end], Types: depTypes})
-		if err != nil {
-			return nil, err
-		}
-		for _, anchor := range res.Anchors {
-			if anchor.Missing {
-				continue
-			}
-			out[anchor.ID] = anchor.Edges
+		seen[id] = true
+		if issue := found[id]; issue != nil {
+			out.Issues = append(out.Issues, issue)
+		} else {
+			out.Missing = append(out.Missing, id)
 		}
 	}
 	return out, nil
 }
 
-// issueReaderSource is the role accessor a direct-route molecule reader carries.
-type issueReaderSource interface {
-	IssueReader() (issueops.Reader, error)
+func (r rawMoleculeReader) Related(ctx context.Context, req issueops.RelatedRequest) ([]*issueops.RelatedIssue, error) {
+	var (
+		items []*types.IssueWithDependencyMetadata
+		err   error
+	)
+	if req.Direction == issueops.RelationIn {
+		items, err = r.s.GetDependentsWithMetadata(ctx, req.ID)
+	} else {
+		return nil, fmt.Errorf("%w: raw molecule reads answer inbound relations only", issueops.ErrValidation)
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*issueops.RelatedIssue, 0, len(items))
+	for _, item := range items {
+		if item != nil && (len(req.Types) == 0 || containsDependencyType(req.Types, item.DependencyType)) {
+			out = append(out, item)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
 }
 
-// listMoleculeCandidates lists the issues in one status (assigned to agent when
-// agent is set) that the molecule finders start from.
-//
-// A reader that carries the Reader role (every storage.DoltStorage, including a
-// remote backend) answers through Reader.List — the raw SearchIssues a remote
-// backend cannot express. The proxied route's in-transaction port has no role
-// and keeps SearchIssues. Either way a failure is returned, never an empty list.
-func listMoleculeCandidates(ctx context.Context, s molReader, status types.Status, agent string) ([]*types.Issue, error) {
-	if src, ok := s.(issueReaderSource); ok {
-		reader, err := src.IssueReader()
-		if err != nil {
-			return nil, err
-		}
-		unlimited := 0
-		page, err := reader.List(ctx, issueops.ListRequest{
-			Status:   string(status),
-			Assignee: agent,
-			// The four knobs, not IncludeAllTypes: the v0 wire refuses the
-			// union (E-ListRequest.IncludeAllTypes) but publishes each knob, and
-			// a step candidate may be a wisp, gate or infra-typed bead just as
-			// the raw SearchIssues route found it.
-			IncludeTemplates: true,
-			IncludeGates:     true,
-			IncludeInfra:     true,
-			IncludeEphemeral: true,
-			Limit:            &unlimited,
-		})
-		if err != nil {
-			return nil, err
-		}
-		out := make([]*types.Issue, 0, len(page.Items))
-		for _, row := range page.Items {
-			if row != nil && row.Issue != nil {
-				out = append(out, row.Issue)
+func (r rawMoleculeReader) ReadEdges(ctx context.Context, req issueops.EdgeReadRequest) (issueops.EdgeReadResult, error) {
+	records, err := r.s.GetDependencyRecordsForIssues(ctx, req.IDs)
+	if err != nil {
+		return issueops.EdgeReadResult{}, err
+	}
+	out := issueops.EdgeReadResult{Anchors: make([]issueops.AnchorEdges, 0, len(req.IDs))}
+	for _, id := range req.IDs {
+		var edges []*issueops.Dependency
+		for _, edge := range records[id] {
+			if edge != nil && (len(req.Types) == 0 || containsDependencyType(req.Types, edge.Type)) {
+				edges = append(edges, edge)
 			}
 		}
-		return out, nil
+		out.Anchors = append(out.Anchors, issueops.AnchorEdges{ID: id, Edges: edges})
 	}
-	return searchMoleculeCandidates(ctx, s, status, agent)
+	return out, nil
 }
 
-// claimStepIfOpenViaLifecycle moves an OPEN step to in_progress through the
-// Lifecycle role's ExpectedStatus compare-and-set. It is the direct route's
-// `bd close --continue` auto-claim: one guarded update every backend serves,
-// where a raw RunInTransaction is refused by a remote backend.
-func claimStepIfOpenViaLifecycle(ctx context.Context, st storage.DoltStorage, id, actor string) error {
-	lifecycle, err := st.IssueLifecycle()
-	if err != nil {
-		return err
+func containsDependencyType(set []types.DependencyType, t types.DependencyType) bool {
+	for _, candidate := range set {
+		if candidate == t {
+			return true
+		}
 	}
-	open := types.StatusOpen
-	_, err = lifecycle.Update(ctx, issueops.UpdateRequest{
-		Actor:          actor,
-		IssueID:        id,
-		Patch:          issueops.IssuePatch{Status: issueops.Field[types.Status]{Set: true, Value: types.StatusInProgress}},
-		ExpectedStatus: &open,
-	})
-	return err
-}
-
-var _ molReader = roleMolStore{}
-
-// closeCompletedMoleculeRoot closes a molecule root whose steps are all done,
-// through the Lifecycle role every backend serves. The close is unforced: a
-// root that close policy refuses (a live blocker) stays open and the refusal is
-// returned for the caller to report.
-func closeCompletedMoleculeRoot(ctx context.Context, st storage.DoltStorage, root *types.Issue, actor, session string) error {
-	lifecycle, err := st.IssueLifecycle()
-	if err != nil {
-		return err
-	}
-	_, err = lifecycle.Close(ctx, issueops.CloseRequest{
-		Actor:   actor,
-		IssueID: root.ID,
-		Reason:  "all steps complete",
-		Session: session,
-	})
-	return err
+	return false
 }

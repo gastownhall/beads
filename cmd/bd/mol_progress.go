@@ -6,9 +6,11 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var molProgressCmd = &cobra.Command{
@@ -43,109 +45,82 @@ Example:
 		if usesProxiedServer() {
 			return runMolProgressProxiedServer(rootCtx, args)
 		}
-
-		ctx := rootCtx
-
 		if store == nil {
 			return HandleErrorRespectJSON("no database connection")
 		}
-
-		// Role-routed so a remote backend answers (or refuses out loud).
-		molStore := newRoleMolStore(store)
-
-		var moleculeID string
-		if len(args) == 1 {
-			resolved, err := utils.ResolvePartialID(ctx, store, args[0])
-			if err != nil {
-				return HandleErrorRespectJSON("molecule '%s' not found", args[0])
-			}
-			moleculeID = resolved
-		} else {
-			moleculeIDs, err := findInProgressMoleculeIDs(ctx, molStore, currentActor())
-			if err != nil {
-				return HandleErrorRespectJSON("finding molecules in progress: %v", err)
-			}
-			if len(moleculeIDs) == 0 {
-				if jsonOutput {
-					return outputJSON([]interface{}{})
-				}
-				fmt.Println("No molecules in progress.")
-				fmt.Println("\nUse: bd mol progress <molecule-id>")
-				return nil
-			}
-			moleculeID = moleculeIDs[0]
+		resolve := func(ctx context.Context, arg string) (string, error) {
+			return utils.ResolvePartialID(ctx, store, arg)
 		}
-
-		stats, err := molStore.GetMoleculeProgress(ctx, moleculeID)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-
-		if jsonOutput {
-			output := map[string]interface{}{
-				"molecule_id":     stats.MoleculeID,
-				"molecule_title":  stats.MoleculeTitle,
-				"total":           stats.Total,
-				"completed":       stats.Completed,
-				"in_progress":     stats.InProgress,
-				"current_step_id": stats.CurrentStepID,
-			}
-			if stats.Total > 0 {
-				output["percent"] = float64(stats.Completed) * 100 / float64(stats.Total)
-			}
-			if stats.FirstClosed != nil && stats.LastClosed != nil && stats.Completed > 1 {
-				duration := stats.LastClosed.Sub(*stats.FirstClosed)
-				if duration > 0 {
-					rate := float64(stats.Completed-1) / duration.Hours()
-					output["rate_per_hour"] = rate
-					remaining := stats.Total - stats.Completed
-					if rate > 0 {
-						etaHours := float64(remaining) / rate
-						output["eta_hours"] = etaHours
-					}
-				}
-			}
-			return outputJSON(output)
-		}
-
-		printMoleculeProgressStats(stats)
-		return nil
+		return runMolProgress(rootCtx, store, resolve, args)
 	},
 }
 
-// findInProgressMoleculeIDs finds molecule IDs with in_progress steps for an agent.
-// This is a lightweight version that only returns IDs without loading subgraphs.
-// A read the backend refuses is returned, never reported as "none".
-func findInProgressMoleculeIDs(ctx context.Context, s molReader, agent string) ([]string, error) {
-	inProgressIssues, err := listMoleculeCandidates(ctx, s, types.StatusInProgress, agent)
+// runMolProgress is `bd mol progress` on every route: the counts are
+// issueops.ReadMoleculeProgress over the molecule's direct steps, and the
+// molecule without an id is the first of issueops.InProgressMoleculeIDs.
+func runMolProgress(ctx context.Context, s storage.DoltStorage, resolve func(context.Context, string) (string, error), args []string) error {
+	roles, err := currentMoleculeRoles(s)
 	if err != nil {
-		return nil, err
-	}
-	if len(inProgressIssues) == 0 {
-		return nil, nil
+		return HandleErrorRespectJSON("%v", err)
 	}
 
-	// Batch-find parent molecules for all in_progress issues (bd-hn4q)
-	issueIDs := make([]string, len(inProgressIssues))
-	for i, issue := range inProgressIssues {
-		issueIDs[i] = issue.ID
-	}
-	moleculeRoots, err := findParentMolecules(ctx, s, issueIDs)
-	if err != nil {
-		return nil, err
-	}
-
-	seen := make(map[string]bool)
-	var moleculeIDs []string
-	for _, issue := range inProgressIssues {
-		moleculeID := moleculeRoots[issue.ID]
-		if moleculeID != "" && !seen[moleculeID] {
-			seen[moleculeID] = true
-			moleculeIDs = append(moleculeIDs, moleculeID)
+	var moleculeID string
+	if len(args) == 1 {
+		resolved, err := resolve(ctx, args[0])
+		if err != nil {
+			return HandleErrorRespectJSON("molecule '%s' not found", args[0])
 		}
+		moleculeID = resolved
+	} else {
+		moleculeIDs, err := issueops.InProgressMoleculeIDs(ctx, roles.reader, roles.molecule, currentActor())
+		if err != nil {
+			return HandleErrorRespectJSON("finding molecules in progress: %v", err)
+		}
+		if len(moleculeIDs) == 0 {
+			if jsonOutput {
+				return outputJSON([]interface{}{})
+			}
+			fmt.Println("No molecules in progress.")
+			fmt.Println("\nUse: bd mol progress <molecule-id>")
+			return nil
+		}
+		moleculeID = moleculeIDs[0]
 	}
 
-	return moleculeIDs, nil
+	stats, err := issueops.ReadMoleculeProgress(ctx, roles.molecule, moleculeID)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+
+	if jsonOutput {
+		output := map[string]interface{}{
+			"molecule_id":     stats.MoleculeID,
+			"molecule_title":  stats.MoleculeTitle,
+			"total":           stats.Total,
+			"completed":       stats.Completed,
+			"in_progress":     stats.InProgress,
+			"current_step_id": stats.CurrentStepID,
+		}
+		if stats.Total > 0 {
+			output["percent"] = float64(stats.Completed) * 100 / float64(stats.Total)
+		}
+		if stats.FirstClosed != nil && stats.LastClosed != nil && stats.Completed > 1 {
+			duration := stats.LastClosed.Sub(*stats.FirstClosed)
+			if duration > 0 {
+				rate := float64(stats.Completed-1) / duration.Hours()
+				output["rate_per_hour"] = rate
+				remaining := stats.Total - stats.Completed
+				if rate > 0 {
+					etaHours := float64(remaining) / rate
+					output["eta_hours"] = etaHours
+				}
+			}
+		}
+		return outputJSON(output)
+	}
+
+	printMoleculeProgressStats(stats)
+	return nil
 }
 
 // printMoleculeProgressStats prints molecule progress in human-readable format

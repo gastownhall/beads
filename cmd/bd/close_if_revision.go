@@ -8,7 +8,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/debug"
-	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/issueops"
@@ -56,6 +55,9 @@ func runCloseDirectIfRevision(ctx context.Context, id, reason string, force bool
 		Session:         session,
 		Force:           force,
 		ExpectedVersion: &expectedVersion,
+		// The library closes the molecule root this close completes, in the
+		// same transaction — and replays it on an idempotent re-close.
+		AutoCloseMolecule: true,
 	})
 	if closeErr != nil {
 		if reported, ok := reportIfRevisionFailure("closing", id, closeErr, &expectedVersion); ok {
@@ -72,14 +74,8 @@ func runCloseDirectIfRevision(ctx context.Context, id, reason string, force bool
 		fmt.Fprintf(os.Stderr, "warning: closing %s with %d open child issue(s) still active\n", result.ResolvedID, closeResult.OpenChildren)
 	}
 
-	// Molecule auto-close is a retry-safe, fully state-derived post-close
-	// contract (close.go's autoCloseCompletedMolecule doc), so it must replay
-	// here exactly as it does on the batch route — on a real close AND on an
-	// idempotent re-close, since the guarded route bypasses BatchCloser
-	// entirely (mc-zndi7.75) and would otherwise leave a molecule's root
-	// stranded open forever.
 	mutatedIDs := []string{result.ResolvedID}
-	if molID := autoCloseCompletedMolecule(ctx, result.Store, result.ResolvedID, currentActor(), session); molID != "" {
+	if molID := reportMoleculeAutoClose(closeResult.AutoClosedMolecule, closeResult.MoleculeAutoCloseRefusal); molID != "" {
 		mutatedIDs = append(mutatedIDs, molID)
 	}
 
@@ -116,12 +112,13 @@ func runCloseProxiedIfRevision(ctx context.Context, id, reason string, force boo
 	}
 
 	closeResult, closeErr := ops.Close(ctx, issueops.CloseRequest{
-		Actor:           currentActor(),
-		IssueID:         id,
-		Reason:          reason,
-		Session:         session,
-		Force:           force,
-		ExpectedVersion: &expectedVersion,
+		Actor:             currentActor(),
+		IssueID:           id,
+		Reason:            reason,
+		Session:           session,
+		Force:             force,
+		ExpectedVersion:   &expectedVersion,
+		AutoCloseMolecule: true,
 	})
 	if closeErr != nil {
 		if errors.Is(closeErr, context.Canceled) || errors.Is(closeErr, context.DeadlineExceeded) {
@@ -141,46 +138,11 @@ func runCloseProxiedIfRevision(ctx context.Context, id, reason string, force boo
 		fmt.Fprintf(os.Stderr, "warning: closing %s with %d open child issue(s) still active\n", id, closeResult.OpenChildren)
 	}
 
-	// Molecule auto-close is a retry-safe, fully state-derived post-close
-	// contract, so it must replay here too — on a real close AND on an
-	// idempotent re-close — exactly as closeProxiedRunPostClose drives it for
-	// the batch route (mc-zndi7.75).
-	runCloseIfRevisionProxiedPostClose(ctx, id, session)
+	reportMoleculeAutoClose(closeResult.AutoClosedMolecule, closeResult.MoleculeAutoCloseRefusal)
 
 	SetLastTouchedID(id)
 	reportClosedIfRevisionResult(id, reason, preCloseStatus, closeResult)
 	return nil
-}
-
-// runCloseIfRevisionProxiedPostClose re-drives molecule auto-close after a
-// guarded proxied close, in its own unit of work exactly as
-// closeProxiedRunPostClose runs it for the batch route: outside the close's
-// own transaction, because it is outside that transaction's contract. A
-// failure here is reported and swallowed — best effort, matching
-// autoCloseCompletedMolecule's direct-route twin — so a molecule-healing
-// hiccup never turns an otherwise-successful guarded close into a failure.
-func runCloseIfRevisionProxiedPostClose(ctx context.Context, id, session string) {
-	if uowProvider == nil {
-		return
-	}
-	autoClosedMol, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*types.Issue, string, error) {
-		var warnings []string
-		mol := autoCloseProxiedCompletedMolecule(ctx, uw, id, currentActor(), session, &warnings)
-		for _, w := range warnings {
-			fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
-		}
-		if mol == nil {
-			return nil, "", nil
-		}
-		return mol, "bd: auto-close " + mol.ID, nil
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: post-close work failed: %v\n", err)
-		return
-	}
-	if autoClosedMol != nil && !jsonOutput {
-		debug.PrintNormal("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(autoClosedMol.ID, autoClosedMol.Title))
-	}
 }
 
 // reportClosedIfRevisionResult is the one-id success report shared by both

@@ -215,21 +215,9 @@ the flags appear in the command line.`,
 				// Exit stays 0.
 				alreadyClosed++
 
-				// Molecule auto-close is itself a retry-safe, fully state-derived
-				// post-close contract, so it must replay on an already-closed re-close
-				// just like the contracts above. If the final step's real close
-				// persisted but its molecule auto-close did not (a crash between the two
-				// commits, or the root CloseIssue failing with only a warning), this
-				// idempotent re-close is the ONLY thing that re-drives it — otherwise the
-				// molecule root is stranded open forever. autoCloseCompletedMolecule
-				// early-returns unless the root is genuinely open, auto-close-eligible,
-				// and complete, so it heals only that case and reintroduces none of the
-				// suppressed real-close side effects (no audit, no closed→closed on the
-				// step). Register the store when it actually closed the root so the
-				// pending-commit sweep persists it — closedCount==0 would not commit.
-				if molID := autoCloseCompletedMolecule(ctx, activeStore, id, currentActor(), session); molID != "" {
-					mutatedStores[activeStore] = append(mutatedStores[activeStore], molID)
-				}
+				// The molecule auto-close is state-derived, so the library
+				// replays it on an already-closed re-close too (healing a root a
+				// crash left open); reportMoleculeAutoClose below covers both arms.
 			} else {
 				mutatedStores[activeStore] = append(mutatedStores[activeStore], id)
 
@@ -241,10 +229,14 @@ the flags appear in the command line.`,
 				audit.LogFieldChange(id, "status", oldStatus, "closed", currentActor(), reason)
 
 				closedCount++
+			}
 
-				// Auto-close parent molecule if all steps are now complete.
-				// Runs against the same store the step was closed in.
-				autoCloseCompletedMolecule(ctx, activeStore, id, currentActor(), session)
+			// The molecule root this close completed, closed by the library in
+			// the batch's own transaction. Register its store so the
+			// pending-commit sweep persists it even when the step itself was
+			// an already-closed no-op.
+			if molID := reportMoleculeAutoClose(res.AutoClosedMolecule, res.MoleculeAutoCloseRefusal); molID != "" {
+				mutatedStores[activeStore] = append(mutatedStores[activeStore], molID)
 			}
 
 			// First id this command settled as closed — a real close or an
@@ -313,11 +305,11 @@ the flags appear in the command line.`,
 
 		if continueFlag && len(resolvedIDs) == 1 && closedForCommand {
 			autoClaim := !noAuto
-			result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(postCloseStore), resolvedIDs[0], autoClaim, currentActor())
+			result, err := advanceMoleculeDirect(ctx, postCloseStore, resolvedIDs[0], autoClaim)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: could not advance to next step: %v\n", err)
 			} else if result != nil {
-				// Mirror --claim-next: when AdvanceToNextStep auto-claims the
+				// Mirror --claim-next: when the molecule advance auto-claims the
 				// next step, update .beads/last-touched so subsequent default-
 				// target commands (e.g. bare `bd update`, `bd close`) target
 				// it. Without this, last-touched stays pointed at the just-
@@ -742,97 +734,30 @@ func closeBeadGateGetter(gateStore storage.DoltStorage) issueGetter {
 	return routedBeadGateGetter{localStore: gateStore}
 }
 
-// autoCloseCompletedMolecule checks if closing a step completed an auto-closing
-// parent molecule, and if so, closes the molecule root. Ordinary epics remain
-// open when all children finish so they can become explicitly close-eligible
-// instead of being closed as a side effect of the final child close. It returns
-// the molecule root ID when it actually closed the root (and "" otherwise) so a
-// caller that did not otherwise mutate the store — an already-closed re-close in
-// particular — can register the store for the pending-commit sweep. The check is
-// fully state-derived and idempotent: it early-returns unless the root is open,
-// auto-close-eligible, and has all steps complete, so re-invoking it never
-// double-closes or reintroduces side effects.
-//
-// Every read and the close go through issueops roles (see roleMolStore), so a
-// remote backend runs the same auto-close a local one does. It stays best
-// effort — the step's own close already landed and is not failed — but a read
-// or close the backend refuses is WARNED on stderr rather than swallowed: a
-// silent skip strands the molecule root open with nothing saying why.
-func autoCloseCompletedMolecule(ctx context.Context, s storage.DoltStorage, closedStepID, actorName, session string) string {
-	if s == nil {
+// reportMoleculeAutoClose presents what the library's molecule auto-close did
+// for one close (issueops.CloseRequest.AutoCloseMolecule): the root it closed,
+// or why a completed root stayed open. It returns the closed root's id, or "".
+func reportMoleculeAutoClose(root *types.Issue, refusal string) string {
+	if refusal != "" {
+		fmt.Fprintf(os.Stderr, "Warning: could not auto-close completed molecule: %s\n", refusal)
+	}
+	if root == nil {
 		return ""
 	}
-	molStore := newRoleMolStore(s)
-	warn := func(id string, err error) string {
-		fmt.Fprintf(os.Stderr, "Warning: could not check molecule auto-close for %s: %v\n", id, err)
-		return ""
-	}
-
-	moleculeID, err := findParentMolecule(ctx, molStore, closedStepID)
-	if err != nil {
-		return warn(closedStepID, err)
-	}
-	if moleculeID == "" {
-		return "" // Not part of a molecule
-	}
-
-	// Check if molecule root is already closed
-	root, err := molStore.GetIssue(ctx, moleculeID)
-	if err != nil {
-		return warn(moleculeID, err)
-	}
-	if root == nil || root.Status == types.StatusClosed || !shouldAutoCloseCompletedRoot(root) {
-		return ""
-	}
-
-	// Load progress to check completion
-	progress, err := getMoleculeProgress(ctx, molStore, moleculeID)
-	if err != nil {
-		return warn(moleculeID, err)
-	}
-
-	if progress.Completed < progress.Total {
-		return "" // Not all steps complete yet
-	}
-
-	// All steps complete — auto-close the molecule root through the
-	// Lifecycle role, guarded on the root revision read above so a concurrent
-	// reopen is not overwritten.
-	if err := closeCompletedMoleculeRoot(ctx, s, root, actorName, session); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not auto-close completed molecule %s: %v\n", moleculeID, err)
-		return ""
-	}
-
 	if !jsonOutput {
-		debug.PrintNormal("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(moleculeID, root.Title))
+		debug.PrintNormal("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(root.ID, root.Title))
 	}
-	return moleculeID
+	return root.ID
 }
 
-// shouldAutoCloseCompletedRoot returns true for molecule roots that should
-// auto-close when their final step closes. Regular epics stay open and become
-// explicit close-eligible work, while ephemeral wisps, template-driven
-// molecules, and molecule-type coordination roots keep their cleanup behavior.
-func shouldAutoCloseCompletedRoot(root *types.Issue) bool {
-	if root == nil {
-		return false
+// advanceMoleculeDirect runs `bd close --continue` on the direct route through
+// the store's MoleculeStepper role.
+func advanceMoleculeDirect(ctx context.Context, s storage.DoltStorage, closedStepID string, autoClaim bool) (*ContinueResult, error) {
+	roles, err := directMoleculeRoles(s)
+	if err != nil {
+		return nil, err
 	}
-
-	if root.IssueType == types.TypeMolecule || root.Ephemeral {
-		return true
-	}
-
-	if root.IssueType != types.TypeEpic {
-		return false
-	}
-
-	for _, label := range root.Labels {
-		if label == BeadsTemplateLabel {
-			return true
-		}
-	}
-
-	return false
+	return advanceMolecule(ctx, roles, closedStepID, autoClaim)
 }
 
 // resolveReasonFile resolves the --reason-file flag for `bd close`.

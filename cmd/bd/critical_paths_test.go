@@ -9,7 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // TestBurnWisps tests direct wisp deletion via burnWisps.
@@ -122,6 +124,23 @@ func TestBurnWisps(t *testing.T) {
 	})
 }
 
+// closeWithMoleculeAutoClose (re-)closes a step through the store's Lifecycle
+// role with AutoCloseMolecule set — the one path `bd close` takes on every
+// route — so the library's in-transaction auto-close decides the root. The
+// rule is state-derived, so re-closing an already-closed step drives it too.
+func closeWithMoleculeAutoClose(t *testing.T, ctx context.Context, s storage.DoltStorage, stepID string) {
+	t.Helper()
+	ops, err := s.IssueLifecycle()
+	if err != nil {
+		t.Fatalf("IssueLifecycle(): %v", err)
+	}
+	if _, err := ops.Close(ctx, issueops.CloseRequest{
+		Actor: "test-actor", IssueID: stepID, Reason: "done", Session: "test-session", AutoCloseMolecule: true,
+	}); err != nil {
+		t.Fatalf("close %s with molecule auto-close: %v", stepID, err)
+	}
+}
+
 // TestAutoCloseCompletedMolecule tests that closing the last step auto-closes the parent molecule.
 func TestAutoCloseCompletedMolecule(t *testing.T) {
 	t.Parallel()
@@ -179,7 +198,7 @@ func TestAutoCloseCompletedMolecule(t *testing.T) {
 		}
 
 		// Now trigger auto-close
-		autoCloseCompletedMolecule(ctx, s, step2.ID, "test-actor", "test-session")
+		closeWithMoleculeAutoClose(t, ctx, s, step2.ID)
 
 		// Verify root is now closed
 		updatedRoot, err := s.GetIssue(ctx, root.ID)
@@ -235,7 +254,7 @@ func TestAutoCloseCompletedMolecule(t *testing.T) {
 		}
 
 		// Auto-close after closing step1 — step2 still open
-		autoCloseCompletedMolecule(ctx, s, step1.ID, "test-actor", "test-session")
+		closeWithMoleculeAutoClose(t, ctx, s, step1.ID)
 
 		// Verify root is still open
 		updatedRoot, err := s.GetIssue(ctx, root.ID)
@@ -261,7 +280,7 @@ func TestAutoCloseCompletedMolecule(t *testing.T) {
 		}
 
 		// Should not panic or error — just no-op
-		autoCloseCompletedMolecule(ctx, s, orphan.ID, "test-actor", "test-session")
+		closeWithMoleculeAutoClose(t, ctx, s, orphan.ID)
 	})
 
 	t.Run("NoOpForAlreadyClosedMolecule", func(t *testing.T) {
@@ -297,7 +316,7 @@ func TestAutoCloseCompletedMolecule(t *testing.T) {
 		}
 
 		// Should not panic — early return because root is already closed
-		autoCloseCompletedMolecule(ctx, s, step.ID, "test-actor", "test-session")
+		closeWithMoleculeAutoClose(t, ctx, s, step.ID)
 	})
 
 	t.Run("ClosesWhenReparentedStepExcluded", func(t *testing.T) {
@@ -370,7 +389,7 @@ func TestAutoCloseCompletedMolecule(t *testing.T) {
 		}
 
 		// Trigger auto-close — should succeed since only 2 children remain
-		autoCloseCompletedMolecule(ctx, s, steps[1].ID, "test-actor", "test-session")
+		closeWithMoleculeAutoClose(t, ctx, s, steps[1].ID)
 
 		// Verify root auto-closed (reparented step should be excluded from molecule)
 		updatedRoot, err := s.GetIssue(ctx, root.ID)

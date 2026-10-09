@@ -184,143 +184,25 @@ func runMolShowProxiedServer(ctx context.Context, arg string) error {
 }
 
 func runMolCurrentProxiedServer(ctx context.Context, args []string, agent string, limit int, rangeStr string) error {
-	uw, err := proxiedOpenReadUOW(ctx)
-	if err != nil {
-		return err
-	}
-	defer uw.Close(ctx)
-
-	r := uowMolReader{uw: uw}
-
-	var rangeStart, rangeEnd int
-	if rangeStr != "" {
-		rangeStart, rangeEnd, err = parseRange(rangeStr)
-		if err != nil {
-			return HandleErrorRespectJSON("invalid range '%s': %v", rangeStr, err)
-		}
-	}
-	explicitSteps := limit > 0 || rangeStr != ""
-
-	var molecules []*MoleculeProgress
-
-	if len(args) == 1 {
-		moleculeID, err := utils.ResolvePartialID(ctx, r, args[0])
-		if err != nil {
-			return HandleErrorRespectJSON("molecule '%s' not found", args[0])
-		}
-
-		stats, err := r.GetMoleculeProgress(ctx, moleculeID)
-		if err != nil {
-			return HandleErrorRespectJSON("loading molecule: %v", err)
-		}
-		if stats.Total > LargeMoleculeThreshold && !explicitSteps && !jsonOutput {
-			printLargeMoleculeSummary(stats)
-			return nil
-		}
-
-		progress, err := getMoleculeProgress(ctx, r, moleculeID)
-		if err != nil {
-			return HandleErrorRespectJSON("loading molecule: %v", err)
-		}
-		if rangeStr != "" {
-			progress.Steps = filterStepsByRange(progress.Steps, rangeStart, rangeEnd)
-		} else if limit > 0 && len(progress.Steps) > limit {
-			progress.Steps = progress.Steps[:limit]
-		}
-		molecules = append(molecules, progress)
-	} else {
-		molecules, err = findInProgressMolecules(ctx, r, agent)
-		if err != nil {
-			return HandleErrorRespectJSON("finding molecules in progress: %v", err)
-		}
-		if len(molecules) == 0 {
-			molecules, err = findHookedMolecules(ctx, r, agent)
-			if err != nil {
-				return HandleErrorRespectJSON("finding hooked molecules: %v", err)
-			}
-		}
-		if len(molecules) == 0 {
-			if jsonOutput {
-				return outputJSON([]interface{}{})
-			}
-			fmt.Printf("No molecules in progress")
-			if agent != "" {
-				fmt.Printf(" for %s", agent)
-			}
-			fmt.Println(".")
-			fmt.Println("\nTo start work on a molecule:")
-			fmt.Println("  bd mol wisp create <proto-id>  # Instantiate as ephemeral wisp")
-			fmt.Println("  bd update <step-id> --claim  # Claim a step")
-			return nil
-		}
-	}
-
-	if jsonOutput {
-		return outputJSON(molecules)
-	}
-	for i, mol := range molecules {
-		if i > 0 {
-			fmt.Println()
-		}
-		printMoleculeProgress(mol)
-	}
-	return nil
+	return runMolCurrent(ctx, nil, proxiedResolvePartialID, args, agent, limit, rangeStr)
 }
 
 func runMolProgressProxiedServer(ctx context.Context, args []string) error {
-	uw, err := proxiedOpenReadUOW(ctx)
+	return runMolProgress(ctx, nil, proxiedResolvePartialID, args)
+}
+
+// proxiedResolvePartialID resolves a partial id inside a read unit of work of
+// its own.
+func proxiedResolvePartialID(ctx context.Context, arg string) (string, error) {
+	if uowProvider == nil {
+		return "", errors.New("proxied-server UOW provider not initialized")
+	}
+	uw, err := uowProvider.NewUOW(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer uw.Close(ctx)
-
-	r := uowMolReader{uw: uw}
-
-	var moleculeID string
-	if len(args) == 1 {
-		resolved, err := utils.ResolvePartialID(ctx, r, args[0])
-		if err != nil {
-			return HandleErrorRespectJSON("molecule '%s' not found", args[0])
-		}
-		moleculeID = resolved
-	} else {
-		moleculeIDs, err := findInProgressMoleculeIDs(ctx, r, currentActor())
-		if err != nil {
-			return HandleErrorRespectJSON("finding molecules in progress: %v", err)
-		}
-		if len(moleculeIDs) == 0 {
-			if jsonOutput {
-				return outputJSON([]interface{}{})
-			}
-			fmt.Println("No molecules in progress.")
-			fmt.Println("\nUse: bd mol progress <molecule-id>")
-			return nil
-		}
-		moleculeID = moleculeIDs[0]
-	}
-
-	stats, err := r.GetMoleculeProgress(ctx, moleculeID)
-	if err != nil {
-		return HandleErrorRespectJSON("%v", err)
-	}
-
-	if jsonOutput {
-		output := map[string]interface{}{
-			"molecule_id":     stats.MoleculeID,
-			"molecule_title":  stats.MoleculeTitle,
-			"total":           stats.Total,
-			"completed":       stats.Completed,
-			"in_progress":     stats.InProgress,
-			"current_step_id": stats.CurrentStepID,
-		}
-		if stats.Total > 0 {
-			output["percent"] = float64(stats.Completed) * 100 / float64(stats.Total)
-		}
-		return outputJSON(output)
-	}
-
-	printMoleculeProgressStats(stats)
-	return nil
+	return utils.ResolvePartialID(ctx, uowMolReader{uw: uw}, arg)
 }
 
 func runMolLastActivityProxiedServer(ctx context.Context, arg string) error {
