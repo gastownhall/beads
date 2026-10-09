@@ -37,6 +37,7 @@ go_test(
         "bazel_cache_mode_test.go",
         "bazel_farm_workflow_test.go",
         "bazel_fork_mode_test.go",
+        "bazel_go_repository_tools_test.go",
         "bazel_hermetic_cc_test.go",
         "bazel_policy_test.go",
         "bazel_rbe_prewarm_test.go",

@@ -188,6 +188,22 @@ go_sdk.nogo(
     nogo = "//tools/nogo",
 )
 
+# gazelle compiles fetch_repo and gazelle, which every go_deps repository
+# runs, with `go build` in a repository rule before any go_deps fetch can
+# start (18-24 s of every CI lane's loading). This substitute serves those
+# reproducible binaries from the repository cache by pinned sha256 and builds
+# them from source on a miss (tools/bazel/go_repository_tools.bzl).
+gazelle_non_module_deps = use_extension("@gazelle//internal/bzlmod:non_module_deps.bzl", "non_module_deps")
+
+go_repository_tools = use_repo_rule("//tools/bazel:go_repository_tools.bzl", "go_repository_tools")
+
+go_repository_tools(name = "gazelle_go_repository_tools")
+
+override_repo(
+    gazelle_non_module_deps,
+    bazel_gazelle_go_repository_tools = "gazelle_go_repository_tools",
+)
+
 # gazelle.go.work joins the beads module and the nogo analyzers' module
 # (tools/nogo/go.mod) into one dependency graph for Bazel only; `go build` in
 # the repository root never reads it (it is not named go.work).
