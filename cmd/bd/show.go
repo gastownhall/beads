@@ -81,7 +81,10 @@ var showCmd = &cobra.Command{
 			if len(args) > 0 {
 				return HandleErrorRespectJSON("--current cannot be combined with explicit issue IDs")
 			}
-			currentID := resolveCurrentIssueID(ctx)
+			currentID, err := resolveCurrentIssueID(ctx)
+			if err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
 			if currentID == "" {
 				return HandleErrorRespectJSON("no current issue found (no in-progress, hooked, or recently touched issues)")
 			}

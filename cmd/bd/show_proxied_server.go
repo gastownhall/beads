@@ -100,13 +100,14 @@ func runShowProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 		return err
 	}
 
-	uw, err := proxiedOpenReadUOW(ctx)
-	if err != nil {
+	// Resolved BEFORE the unit of work opens: --current reads through the
+	// provider's Querier role, which runs its own read.
+	if err := resolveShowProxiedIDs(ctx, in); err != nil {
 		return err
 	}
 
-	if err := resolveShowProxiedIDs(ctx, uw, in); err != nil {
-		uw.Close(ctx)
+	uw, err := proxiedOpenReadUOW(ctx)
+	if err != nil {
 		return err
 	}
 
@@ -140,12 +141,15 @@ func runShowProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 
 // resolveShowProxiedIDs turns --current into an explicit id and rejects an
 // empty id list, the same checks the direct route makes before dispatching.
-func resolveShowProxiedIDs(ctx context.Context, uw uow.UnitOfWork, in *showProxiedInput) error {
+func resolveShowProxiedIDs(ctx context.Context, in *showProxiedInput) error {
 	if in.currentMode {
 		if len(in.ids) > 0 {
 			return HandleErrorRespectJSON("--current cannot be combined with explicit issue IDs")
 		}
-		currentID := resolveCurrentIssueIDProxied(ctx, uw)
+		currentID, err := resolveCurrentIssueID(ctx)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
 		if currentID == "" {
 			return HandleErrorRespectJSON("no current issue found (no in-progress, hooked, or recently touched issues)")
 		}
