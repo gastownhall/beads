@@ -1084,6 +1084,7 @@ go_test(
         "root_context_lifecycle_test.go",
         "routed_test.go",
         "routing_notice_test.go",
+        "routing_read_remote_test.go",
         "routing_read_test.go",
         "rules_test.go",
         "sandbox_test.go",
