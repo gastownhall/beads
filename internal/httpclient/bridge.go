@@ -117,6 +117,16 @@ func (s *Store) readyBridgePage(ctx context.Context, op string, filter types.Wor
 	if err != nil {
 		return nil, false, s.inexpressible(op, err)
 	}
+	// A legacy filter spells unlimited as Limit <= 0, and the encoder therefore
+	// emits no `limit` for it — which the server reads as ITS default of 100,
+	// not as unlimited. That was a silent cap on every `bd ready --limit 0`
+	// (and every gc routed-pool queue read through it). The pager decides the
+	// bound instead: the client cap plus one, refused past the cap rather than
+	// truncated, and never the wire's own `limit=0` (unlimited_read.go).
+	readCap, err := boundUnlimitedPage(params, filter.Limit <= 0)
+	if err != nil {
+		return nil, false, err
+	}
 	var body apigen.ReadyPage
 	if err := s.dispatch(ctx, wire.Request{
 		Op:     wire.OpListReadyWork,
@@ -140,6 +150,9 @@ func (s *Store) readyBridgePage(ctx context.Context, op string, filter types.Wor
 			Cap:    filter.MaxRows,
 			Source: filter.MaxRowsSource,
 		}
+	}
+	if err := checkUnlimitedPage(wire.OpListReadyWork, readCap, len(rows), body.HasMore); err != nil {
+		return nil, false, err
 	}
 	return rows, body.HasMore, nil
 }

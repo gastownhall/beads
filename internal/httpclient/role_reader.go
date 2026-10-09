@@ -32,10 +32,18 @@ type httpReader struct{ store *Store }
 // server's own has_more ARE the page contract. An Offset is refused by the
 // encoder rather than dropped — ready work carries no keyset position, so there
 // is no honest way to page it (E-ReadyRequest.Offset).
+//
+// An explicit Limit of 0 (unlimited) is NOT sent as `limit=0`: it becomes one
+// request bounded at the client cap plus one, refused past the cap rather than
+// truncated (unlimited_read.go).
 func (r httpReader) Ready(ctx context.Context, req issueops.ReadyRequest) (issueops.IssuePage, error) {
 	params, err := encode.ReadyParams(req)
 	if err != nil {
 		return issueops.IssuePage{}, r.store.inexpressible("Reader.Ready", err)
+	}
+	readCap, err := boundUnlimitedPage(params, req.Limit != nil && *req.Limit == 0)
+	if err != nil {
+		return issueops.IssuePage{}, err
 	}
 	var body apigen.ReadyPage
 	if err := r.store.dispatch(ctx, wire.Request{
@@ -44,6 +52,9 @@ func (r httpReader) Ready(ctx context.Context, req issueops.ReadyRequest) (issue
 		Path:   wire.PathReady,
 		Query:  params,
 	}, &body); err != nil {
+		return issueops.IssuePage{}, err
+	}
+	if err := checkUnlimitedPage(wire.OpListReadyWork, readCap, len(body.Items), body.HasMore); err != nil {
 		return issueops.IssuePage{}, err
 	}
 	return issueops.IssuePage{Items: wireRows(body.Items, req.Brief), HasMore: body.HasMore}, nil

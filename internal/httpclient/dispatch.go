@@ -48,6 +48,11 @@ func (s *Store) dispatch(ctx context.Context, req wire.Request, out any) error {
 	if s.wire == nil {
 		return fmt.Errorf("%w: cannot dial %s", ErrNoTransport, s.target)
 	}
+	// Before the preflight, so the tripwire costs no handshake: `limit=0` is
+	// refused off loopback, and this client never sends it (unlimited_read.go).
+	if err := refuseUnlimitedOnWire(req); err != nil {
+		return err
+	}
 	if err := s.wire.Preflight(ctx, req.Op); err != nil {
 		return err
 	}

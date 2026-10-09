@@ -4,6 +4,7 @@ package httpclient
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"slices"
@@ -168,7 +169,30 @@ func (s *Store) walkIssues(ctx context.Context, params url.Values, req issueops.
 		return s.sortedPage(ctx, params, req, limit)
 	}
 
-	rows, err := s.fetchIssuePages(ctx, params, req.Brief, want, req.MaxRows, req.MaxRowsSource, keep)
+	// THE UNLIMITED-READ CAP. An unlimited read walks the cursor to
+	// exhaustion, and the walk is bounded on the client by the same cap every
+	// unlimited read over http carries (unlimited_read.go): past it the read is
+	// refused, never truncated. It rides the walk's existing MaxRows machinery
+	// — fetch at most cap+1 wire rows, refuse on the overage — and takes over
+	// only where it is the tighter of the two bounds, so a caller's own
+	// --max-rows keeps its own refusal and attribution.
+	maxRows, maxRowsSource := req.MaxRows, req.MaxRowsSource
+	readCap := 0
+	if limit == 0 {
+		n, err := unlimitedReadCap()
+		if err != nil {
+			return issueops.IssuePage{}, err
+		}
+		if maxRows <= 0 || n < maxRows {
+			readCap, maxRows, maxRowsSource = n, n, UnlimitedReadCapEnv
+		}
+	}
+
+	rows, err := s.fetchIssuePages(ctx, params, req.Brief, want, maxRows, maxRowsSource, keep)
+	var tooMany *storageops.ErrTooManyRows
+	if readCap > 0 && errors.As(err, &tooMany) {
+		return issueops.IssuePage{}, &UnlimitedReadCapError{Op: wire.OpListIssues, Cap: readCap, Found: tooMany.Found}
+	}
 	if err != nil {
 		return issueops.IssuePage{}, err
 	}

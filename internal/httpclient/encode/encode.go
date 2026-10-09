@@ -720,6 +720,9 @@ func (b *builder) intPtr(param string, value *int) {
 // intPositive emits a plain int only when it bounds something. The legacy
 // filters spell "no bound" as 0, so a zero here is an absent parameter rather
 // than the wire's `limit=0`, which means unlimited and is refused off loopback.
+// An absent `limit` is the SERVER's default, not unlimited, so a caller that
+// means unlimited must not stop here: the ready bridge's pager writes the
+// client-capped bound itself (httpclient/unlimited_read.go).
 func (b *builder) intPositive(param string, value int) {
 	if value > 0 {
 		b.v.Set(param, strconv.Itoa(value))

@@ -35,6 +35,12 @@ func (q httpQuerier) Query(ctx context.Context, req issueops.QueryRequest) (issu
 	if err != nil {
 		return issueops.IssuePage{}, q.store.inexpressible("Querier.Query", err)
 	}
+	// An explicit Limit of 0 is bounded at the client cap rather than sent as
+	// `limit=0`, which a non-loopback server refuses (unlimited_read.go).
+	readCap, err := boundUnlimitedPage(params, req.Limit != nil && *req.Limit == 0)
+	if err != nil {
+		return issueops.IssuePage{}, err
+	}
 	var body apigen.QueryPage
 	if err := q.store.dispatch(ctx, wire.Request{
 		Op:     wire.OpQueryIssues,
@@ -42,6 +48,9 @@ func (q httpQuerier) Query(ctx context.Context, req issueops.QueryRequest) (issu
 		Path:   wire.PathIssuesQuery,
 		Query:  params,
 	}, &body); err != nil {
+		return issueops.IssuePage{}, err
+	}
+	if err := checkUnlimitedPage(wire.OpQueryIssues, readCap, len(body.Items), body.HasMore); err != nil {
 		return issueops.IssuePage{}, err
 	}
 	// NEVER projected: issueops.QueryRequest has no Brief member, so this role
