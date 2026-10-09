@@ -79,7 +79,7 @@ func ExecuteReclaimInTx(ctx context.Context, tx DBTX, request publicops.ReclaimR
 		return publicops.ReclaimResult{}, err
 	}
 	cutoff := time.Now().UTC().Add(-request.OlderThan)
-	reclaimed, err := ReclaimExpiredLeasesInTx(ctx, tx, cutoff, request.Filter, request.Actor)
+	reclaimed, err := ReclaimExpiredLeasesInTx(ctx, tx, cutoff, request.Filter, strings.TrimSpace(request.Actor))
 	if err != nil {
 		return publicops.ReclaimResult{}, fmt.Errorf("reclaim: %w", err)
 	}
