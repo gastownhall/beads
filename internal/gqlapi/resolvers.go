@@ -19,7 +19,7 @@ const (
 	// maxReadCalls bounds role calls: uncached Reader.Get, Querier.Query and
 	// Reader.Ready.
 	maxReadCalls = 200
-	// maxResponseObjects bounds the Issue, Relation and Comment objects in a
+	// maxResponseObjects bounds the Issue, Relation, Comment and GateRef objects in a
 	// response, counting every occurrence, including repeats and cache hits.
 	maxResponseObjects = 10000
 	// maxLongTextBytes bounds the long-text bytes in a response, counting
@@ -529,6 +529,30 @@ func (r *relationResolver) Issue(ctx context.Context) (*issueResolver, error) {
 	}
 	return &issueResolver{issue: &details.Issue, details: details, q: r.q}, nil
 }
+
+func (r *issueResolver) GatedBy(ctx context.Context) (*[]*gateRefResolver, error) {
+	d, e := r.detail(ctx)
+	if e != nil || len(d.GatedBy) == 0 {
+		return nil, e
+	}
+	if err := r.q.reserve(len(d.GatedBy)); err != nil {
+		return nil, err
+	}
+	out := make([]*gateRefResolver, 0, len(d.GatedBy))
+	for _, row := range d.GatedBy {
+		out = append(out, &gateRefResolver{row: row, q: r.q})
+	}
+	return &out, nil
+}
+
+type gateRefResolver struct {
+	row types.GateRef
+	q   *queryResolver
+}
+
+func (r *gateRefResolver) ID() graphql.ID          { return graphql.ID(r.row.ID) }
+func (r *gateRefResolver) Type() string            { return r.row.Type }
+func (r *gateRefResolver) Reason() (string, error) { return r.q.longText(r.row.Reason) }
 
 type commentResolver struct {
 	row *types.Comment

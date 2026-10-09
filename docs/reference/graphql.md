@@ -99,10 +99,14 @@ if `types.infra` is set in the configuration, exclude those types instead.
   detail view. As in `bd show --json`, each counts the edges the relation list
   cannot show, such as cross-repo and `external:` edges, and is null when
   there are none.
+- `gated_by` also comes from the detail view. As in `bd show --json`, it lists
+  the gates that block the issue, each with `id`, `type` and `reason`, and is
+  null when no gate blocks it.
 
-A field the row does not carry (relations, `comments`, `revision`, the epic
-and unresolvable fields) costs one extra issue read per issue. Within one request, a repeated
-read of the same issue for the same selection is served from a cache.
+A field the row does not carry (relations, `comments`, `revision`, `gated_by`,
+the epic and unresolvable fields) costs one extra issue read per issue. Within
+one request, a repeated read of the same issue for the same selection is
+served from a cache.
 
 ## Relations
 
@@ -152,8 +156,8 @@ query($ids: [ID!]!) { issuesById(ids: $ids) { id dependency_count dependencies {
 | List `limit` | 1 to 200 |
 | `issuesById` IDs | 200 |
 | Store reads per request | 200: each `issues`, each `ready` and each issue read not already made in this request |
-| Objects per response | 10,000 issues, relations and comments, counting every repeat |
-| Long text per response | 64 MiB of `description`, `design`, `acceptance_criteria`, `notes`, `payload`, `metadata` and comment `text`, counting every repeat |
+| Objects per response | 10,000 issues, relations, comments and gates, counting every repeat |
+| Long text per response | 64 MiB of `description`, `design`, `acceptance_criteria`, `notes`, `payload`, `metadata`, comment `text` and gate `reason`, counting every repeat |
 
 The last two limits count what the response holds, so an issue selected twice,
 or a field repeated under two aliases, counts twice. They do not limit what one

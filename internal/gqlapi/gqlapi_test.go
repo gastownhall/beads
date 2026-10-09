@@ -304,6 +304,24 @@ func TestGQLSelectionOptionsAndCache(t *testing.T) {
 		t.Fatalf("unresolvable fields = %v", got)
 	}
 }
+func TestGQLGatedBy(t *testing.T) {
+	gated := detail("a")
+	gated.GatedBy = []types.GateRef{{ID: "g1", Type: "timer", Reason: "wait"}, {ID: "g2", Type: "gate"}}
+	rd := &fakeReader{issues: map[string]*types.IssueDetails{"a": gated, "b": detail("b")}}
+	q := newQ(rd, nil)
+	resp := execWith(q, `{ a:issue(id:"a") { gated_by { id type reason } } b:issue(id:"b") { gated_by { id } } }`)
+	if len(resp.Errors) != 0 {
+		t.Fatalf("errors: %v", resp.Errors)
+	}
+	want := `{"a":{"gated_by":[{"id":"g1","type":"timer","reason":"wait"},{"id":"g2","type":"gate","reason":""}]},"b":{"gated_by":null}}`
+	if string(resp.Data) != want {
+		t.Fatalf("data = %s", resp.Data)
+	}
+	// Objects: two issues and two gates. Text: the 4-byte reason.
+	if q.objects != 4 || q.textBytes != 4 {
+		t.Fatalf("objects %d, text bytes %d", q.objects, q.textBytes)
+	}
+}
 func TestGQLPerSelectionCacheKeys(t *testing.T) {
 	rd := &fakeReader{issues: map[string]*types.IssueDetails{"a": detail("a")}}
 	_, errs := run(t, rd, `{ plain: issue(id:"a") { id } withComments: issue(id:"a") { comments { id } } repeated: issue(id:"a") { comments { id } } }`)

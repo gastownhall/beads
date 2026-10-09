@@ -29,6 +29,12 @@ type Comment {
   created_at: Time!
 }
 
+type GateRef {
+  id: ID!
+  type: String!
+  reason: String!
+}
+
 type Issue {
   id: ID!
   title: String!
@@ -97,4 +103,5 @@ type Issue {
   dependencies: [Relation!]!
   dependents: [Relation!]!
   comments: [Comment!]!
+  gated_by: [GateRef!]
 }

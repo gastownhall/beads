@@ -428,4 +428,20 @@ func TestEmbeddedGQLDetailParity(t *testing.T) {
 		t.Errorf("timeout=%v", gql["timeout"])
 	}
 	// bonded_from is not writable through create/update; its shared absent value still gets compared.
+
+	// --json omits an empty reason; the schema's String! reads it as "".
+	gatedShown, _ := bdShowDetails(t, bd, dir, target.ID)["gated_by"].([]any)
+	for _, gate := range gatedShown {
+		if _, ok := gate.(map[string]any)["reason"]; !ok {
+			gate.(map[string]any)["reason"] = ""
+		}
+	}
+	gatedResp := gqlSuccess(t, bd, dir, fmt.Sprintf(`{ issue(id:%q) { gated_by { id type reason } } }`, target.ID))
+	var gated map[string]any
+	if err := json.Unmarshal(gatedResp.Data["issue"], &gated); err != nil {
+		t.Fatal(err)
+	}
+	if len(gatedShown) != 1 || !reflect.DeepEqual(gated["gated_by"], any(gatedShown)) {
+		t.Errorf("gated_by gql=%v show=%v", gated["gated_by"], gatedShown)
+	}
 }
