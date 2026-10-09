@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -27,6 +28,11 @@ It is idempotent: on a consistent database it changes nothing. Works in every
 storage mode — embedded, server, and proxied-server (unlike 'bd doctor', which
 is server-mode only).
 
+On a workspace connected to a bd serve backend ('bd connect') it is a no-op
+that exits 0: the server maintains is_blocked on every write, and the column
+lives in the server's database, so the repair is run there, by the server's
+operator. --json then reports {"rows_corrected": 0, "maintained_by": "server"}.
+
 Examples:
   bd recompute-blocked          # Repair stale is_blocked flags
   bd recompute-blocked --json   # Machine-parseable {"rows_corrected": N}`,
@@ -48,15 +54,21 @@ Examples:
 			return runRecomputeBlockedProxiedServer(ctx)
 		}
 
-		recomputer, ok := storage.UnwrapStore(store).(storage.BlockedRecomputer)
-		if !ok {
-			return HandleError("storage backend does not support is_blocked recompute")
-		}
-		changed, err := recomputer.RecomputeAllBlocked(ctx)
+		// One library entry for every backend (storage.RecomputeBlocked): a
+		// local store recomputes its own column; a remote backend answers that
+		// its server maintains the column, and recomputes nothing.
+		result, err := storage.RecomputeBlocked(ctx, store)
 		if err != nil {
+			var unsup *storage.ErrUnsupported
+			if errors.As(err, &unsup) {
+				return HandleError("storage backend does not support is_blocked recompute")
+			}
 			return HandleError("recompute is_blocked: %v", err)
 		}
-		return renderRecomputeBlocked(changed)
+		if result.MaintainedBy == storage.BlockedMaintainedByServer {
+			return renderRecomputeBlockedServerMaintained()
+		}
+		return renderRecomputeBlocked(result.RowsCorrected)
 	},
 }
 
@@ -73,6 +85,25 @@ func renderRecomputeBlocked(changed int) error {
 		return nil
 	}
 	fmt.Printf("Recomputed is_blocked: %d row(s) corrected.\n", changed)
+	return nil
+}
+
+// renderRecomputeBlockedServerMaintained renders a remote backend's answer
+// (storage.BlockedMaintainedByServer): nothing was recomputed here, because
+// the server derives the column and it lives in the server's database — see
+// storage.RecomputeBlocked for why that is a no-op rather than a wire
+// operation.
+//
+// It still answers rows_corrected (0) because callers parse it (gc's
+// BdStore.RecomputeBlocked requires the member, and wh-bridge-sync reads the
+// exit code), and it carries `maintained_by: "server"` so a caller that cares
+// can tell "nothing was stale" from "nothing was checked here".
+func renderRecomputeBlockedServerMaintained() error {
+	if jsonOutput {
+		return outputJSON(map[string]interface{}{"rows_corrected": 0, "maintained_by": storage.BlockedMaintainedByServer})
+	}
+	fmt.Println("is_blocked is maintained by the bd serve backend on every write; nothing to recompute from this client.")
+	fmt.Println("To repair a stale flag on the server's database, run bd recompute-blocked in the server's workspace.")
 	return nil
 }
 
