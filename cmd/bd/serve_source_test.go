@@ -303,9 +303,21 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 	if storage.RoleFiresHooks(roles.batchApplier) {
 		t.Error("bd serve would run this workspace's hooks once per item of every HTTP plan")
 	}
-	if roles.batchApplier != issueops.BatchApplier(middle.batchApplier) {
-		t.Errorf("batch applier came from %p, want the layer directly beneath the hooks (%p)",
-			roles.batchApplier, middle.batchApplier)
+	// externaldeps.Store now overrides BatchApplier with a policy-enforcing
+	// wrapper (closing beads#7290: a direct store's apply-many bypassed the
+	// external-blocker close policy entirely), so the pointer-identity check
+	// the other roles use no longer applies here — the layer directly beneath
+	// the hooks is correctly the policy wrapper now, not middle.batchApplier
+	// itself. A request with no close items carries no blockers, so
+	// BatchApplierWithPolicy's zero-blocker shortcut
+	// (internal/storage/batch_close_policy.go) calls straight through to
+	// middle.batchApplier — proving the wrapper reaches exactly one layer
+	// down, not an extra or a disconnected stand-in.
+	if roles.batchApplier == issueops.BatchApplier(middle.batchApplier) {
+		t.Error("batch applier still skips the externaldeps policy layer entirely (beads#7290 unfixed)")
+	}
+	if _, err := roles.batchApplier.ApplyBatch(context.Background(), issueops.ApplyBatchRequest{}); !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("batch applier did not reach the layer directly beneath the hooks: ApplyBatch(empty request) = %v, want errors.ErrUnsupported", err)
 	}
 
 	// The compare-and-set is the FIFTH, and a coordination loop is its designed
