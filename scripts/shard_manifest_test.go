@@ -220,7 +220,7 @@ func TestShardScriptsListOnlyRealTests(t *testing.T) {
 	}
 }
 
-// S3: the Bazel-only 30-shard block is not frozen like the legacy 15-shard
+// S3: the Bazel-only 44-shard block is not frozen like the legacy 15-shard
 // block (TestShardScriptsListOnlyRealTests's B1 fix catches outright
 // corruption, but not a committed block that has drifted from the currently
 // discovered TestProxiedServer*/TestServerMode* test set, e.g. a test added,
@@ -243,9 +243,10 @@ func TestShardScriptsListOnlyRealTests(t *testing.T) {
 func TestProxiedShardManifestGeneratorNotStale(t *testing.T) {
 	python := requireHostTool(t, "python3")
 	root := sourceRepoRoot(t)
-	cmd := exec.Command(python, "scripts/ci/gen_proxied_shard_manifest.py", "30", "--weights=duration", "--check")
+	shards := strconv.Itoa(bazelProxiedShardCount(t))
+	cmd := exec.Command(python, "scripts/ci/gen_proxied_shard_manifest.py", shards, "--weights=duration", "--check")
 	cmd.Dir = root
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Errorf("gen_proxied_shard_manifest.py 30 --weights=duration --check: %v\n%s", err, out)
+		t.Errorf("gen_proxied_shard_manifest.py %s --weights=duration --check: %v\n%s", shards, err, out)
 	}
 }

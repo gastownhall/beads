@@ -165,6 +165,14 @@ func TestProxiedServerConfig(t *testing.T) {
 			t.Error("expected test.removeme to be absent from config list after unset")
 		}
 	})
+}
+
+// TestProxiedServerConfigB holds more of TestProxiedServerConfig's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerConfigB(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("config_get_missing_key", func(t *testing.T) {
 		t.Parallel()

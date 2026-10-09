@@ -283,6 +283,14 @@ func TestProxiedServerClose(t *testing.T) {
 			t.Errorf("close_reason: got %q, want %q", got, "wontfix")
 		}
 	})
+}
+
+// TestProxiedServerCloseB holds more of TestProxiedServerClose's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerCloseB(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("close_with_comment_alias", func(t *testing.T) {
 		t.Parallel()
@@ -348,7 +356,6 @@ func TestProxiedServerClose(t *testing.T) {
 			t.Errorf("expected 'not found' error, got: %s", out)
 		}
 	})
-
 }
 
 // TestProxiedServerClose3 is the second half of TestProxiedServerClose,
@@ -754,6 +761,14 @@ func TestProxiedServerClose2(t *testing.T) {
 			t.Errorf("expected single-issue error, got: %s", out)
 		}
 	})
+}
+
+// TestProxiedServerClose2B holds more of TestProxiedServerClose2's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerClose2B(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("close_suggest_next_multiple_ids_fails", func(t *testing.T) {
 		t.Parallel()

@@ -213,6 +213,14 @@ func TestProxiedServerUpdate(t *testing.T) {
 			t.Errorf("lost issue %s assignee = %q, want alice (unchanged)", lost.ID, gotLost.Assignee)
 		}
 	})
+}
+
+// TestProxiedServerUpdateB holds more of TestProxiedServerUpdate's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerUpdateB(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	// Parity with the non-proxied TestMultiIDUpdatePartialFailureExitsNonzero:
 	// a generic per-ID failure (a bogus ID) between two good IDs must exit
@@ -427,6 +435,14 @@ func TestProxiedServerUpdate(t *testing.T) {
 			t.Errorf("dependent should be unblocked after blocker closes")
 		}
 	})
+}
+
+// TestProxiedServerUpdateC holds more of TestProxiedServerUpdate's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerUpdateC(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("invalid_status_rejected", func(t *testing.T) {
 		t.Parallel()
@@ -560,7 +576,6 @@ func TestProxiedServerUpdate(t *testing.T) {
 				before, after)
 		}
 	})
-
 }
 
 func TestProxiedServerUpdate2(t *testing.T) {
@@ -685,6 +700,14 @@ func TestProxiedServerUpdate2(t *testing.T) {
 			t.Errorf("ephemeral: got %d, want 0 after --persistent", ephemeral)
 		}
 	})
+}
+
+// TestProxiedServerUpdate2B holds more of TestProxiedServerUpdate2's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerUpdate2B(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("update_ephemeral", func(t *testing.T) {
 		t.Parallel()
@@ -809,6 +832,14 @@ func TestProxiedServerUpdate2(t *testing.T) {
 			t.Errorf("metadata[keep]: got %v, want %q", got["keep"], "yes")
 		}
 	})
+}
+
+// TestProxiedServerUpdate2C holds more of TestProxiedServerUpdate2's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerUpdate2C(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("update_set_metadata", func(t *testing.T) {
 		t.Parallel()
@@ -933,7 +964,6 @@ func TestProxiedServerUpdate2(t *testing.T) {
 			t.Errorf("defer_until: got nil, want non-nil (defer still applied)")
 		}
 	})
-
 }
 
 func TestProxiedServerUpdate3(t *testing.T) {

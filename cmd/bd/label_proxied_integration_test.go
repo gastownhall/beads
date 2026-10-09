@@ -230,6 +230,15 @@ func TestProxiedServerLabel(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestProxiedServerLabelB holds more of TestProxiedServerLabel's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerLabelB(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("propagate_no_children", func(t *testing.T) {
 		t.Parallel()
@@ -382,6 +391,15 @@ func TestProxiedServerLabel(t *testing.T) {
 			t.Errorf("expected both labels in text list, got:\n%s", out)
 		}
 	})
+}
+
+// TestProxiedServerLabelC holds more of TestProxiedServerLabel's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerLabelC(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("propagate_json", func(t *testing.T) {
 		t.Parallel()

@@ -126,6 +126,17 @@ func TestProxiedServerGateCheck(t *testing.T) {
 			t.Errorf("expected 1 resolved after target close, got:\n%s", out)
 		}
 	})
+}
+
+// TestProxiedServerGateCheckB holds more of TestProxiedServerGateCheck's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerGateCheckB(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	const expiredTimeout = time.Hour
+	longAgo := func() time.Time { return time.Now().UTC().Add(-48 * time.Hour) }
 
 	t.Run("bead_gate_resolves_when_seen_target_is_deleted", func(t *testing.T) {
 		t.Parallel()

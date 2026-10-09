@@ -291,6 +291,14 @@ func TestProxiedServerReopen(t *testing.T) {
 			t.Errorf("status: got %q, want open", got)
 		}
 	})
+}
+
+// TestProxiedServerReopenB holds more of TestProxiedServerReopen's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerReopenB(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	// The other side of the category rule, and the same line the direct route
 	// prints: a status that is neither done nor open is left alone and said so.

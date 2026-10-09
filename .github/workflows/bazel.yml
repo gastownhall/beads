@@ -1732,8 +1732,8 @@ jobs:
   # Like pr-risk.yml's proxied-server tier, "Test (Proxied Dolt Cmd N/15)",
   # as --config=doltserver-proxied: //cmd/bd:bd_proxied_test runs the shard
   # script, so shard k runs exactly that manifest entry's tests. This lane
-  # runs 30 shards of its own (.github/scripts/proxied-cmd-test-shards.txt's
-  # duration-balanced 30-block; see scripts/ci/proxied_test_durations.json),
+  # runs 44 shards of its own (.github/scripts/proxied-cmd-test-shards.txt's
+  # duration-balanced 44-block; see scripts/ci/proxied_test_durations.json),
   # not the legacy jobs' 15 — shard k here is not the same split as their
   # shard k. Same build as --config=doltserver (race bd_test, non-race
   # bd_for_tests), shared with bazel-doltserver through the remote cache.
@@ -1793,35 +1793,15 @@ jobs:
           fi
 
       # Remote: each shard's Go timeout is its job's 15m, 1200s Bazel cap,
-      # plus a compile. scripts/ci/proxied_test_durations.json's 176 entries
-      # are each a clean, single-job (no concurrent heavy bazel/dolt job
-      # intentionally started on the box; see that file's header for its
-      # ambient-contention caveat), -test.parallel=4 top-level-test
-      # duration — the exact config this job uses — from a single fresh,
-      # manifest-aligned 30-shard sweep's own <testsuite time> (errors="0",
-      # so a failing-but-complete suite's time is still trustworthy); every
-      # one of the 176 discovered tests completed inside its shard run, so
-      # no `bazel run` leaf-summation workaround was needed this time. See
-      # that file's header for the full methodology, including why an
-      # earlier -test.parallel=1 (serial) capture was replaced: serial
-      # timings don't model this lane (which always runs parallel=4), and
-      # an independent re-review measured near-zero correlation (r=0.08)
-      # between the serial-derived predicted shard load and actual
-      # parallel=4 wall time.
-      #
-      # Measured per-shard wall time for the full 30-shard local sweep that
-      # produced this data: shards ranged from roughly 32s to 341s, with
-      # most clustering well under this job's 25m step timeout / 30m job
-      # timeout. After repacking with these corrected weights, the LPT
-      # estimate clusters every shard within a few seconds of ~355-360s
-      # (sum of all 176 measured durations / 30 shards) — no single test or
-      # small group of tests dominates a shard the way the discarded serial
-      # data wrongly implied. This is a local, single-job measurement, not
-      # a verified RBE forecast (this job has only ever run remote); if a
-      # shard's RBE wall time diverges sharply from this local estimate,
-      # that is RBE throughput differing from local execution, not
-      # necessarily a regression — compare against this job's own recent
-      # run history before assuming a hang.
+      # plus a compile. The 44-shard block is LPT-packed by
+      # scripts/ci/proxied_test_durations.json, a rbe-west capture of each
+      # top-level test's summed leaf-test time (see its header). Packed to
+      # <=430 cost-seconds per shard, and a shard's wall time ran ~0.3x its
+      # packed cost on the lane's executors (-test.parallel=4), so shards
+      # are expected around 100-150s. Nearly all of that is `bd init
+      # --proxied-server` against the shard's dolt sql-server, ~one per
+      # subtest; a shard running far longer than its packed cost is worth
+      # comparing against this job's recent history before assuming a hang.
       - name: bazel test //... --config=doltserver-proxied
         id: test
         timeout-minutes: 25
@@ -1850,7 +1830,7 @@ jobs:
         run: >-
           python3 tools/bazel/check_shard_coverage.py
           --bep "$RUNNER_TEMP/bazel-bep.json"
-          --suite //cmd/bd:bd_proxied_test .github/scripts/proxied-test-shard.sh 30
+          --suite //cmd/bd:bd_proxied_test .github/scripts/proxied-test-shard.sh 44
 
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
