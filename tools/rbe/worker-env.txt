@@ -1,6 +1,6 @@
 arch x86_64
 dolt dolt version 2.1.8
-go go version go1.26.6 linux/amd64
+go go version go1.26.9 linux/amd64
 os ubuntu 24.04
 pkg bash 5.2
 pkg coreutils 9.4

@@ -23,7 +23,7 @@
 platform(
     name = "rbe_worker",
     exec_properties = {
-        "worker-env": "sha256:6be1381cf08e7fd66684cfce6f26aca57de2561e722c505d1f2f578e9fdeafa7",
+        "worker-env": "sha256:0c6c05c2196c246dba37e106a3d028e2f47f2e3d7eae0e41c2fe2bd9b2e4f6f0",
     },
     parents = ["@bazel_tools//tools:host_platform"],
     visibility = ["//visibility:public"],
