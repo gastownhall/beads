@@ -1,0 +1,710 @@
+# Served command corpus (slice S23): every distinct bd command shape the
+# orchestrator (gc) and its packs/formulas issue against a work store.
+#
+# Sources:
+#   gc:  gascity origin/main internal/beads/bdstore*.go, internal/config/workquery.go,
+#        cmd/gc (BdStore subprocess shapes, work_query/scale_check/on_boot/on_death
+#        shell, hook claim, agent-script actions, doctor/preflight probes).
+#   mc:  pack, formula, prompt and script invocations counted across the
+#        maintainer packs (flag sets, not values; values here are representative).
+#
+# Each shape runs on a served workspace (bd connect to an in-process bd serve,
+# non-loopback bind mode, bearer auth, masked to testdata/reference_server.json)
+# and on an embedded workspace, with BEADS_ACTOR=worker and CLAUDE_SESSION_ID set
+# on both. See README.md for the fields. Reads come first; writes after them
+# each own their target ids (e2e-t-*), so write order never changes a read.
+#
+# pending: {slice, reason} marks a known failure. The shape still runs; when it
+# passes the subtest FAILS until the mark is removed. That is how a slice proves
+# itself. Permanent refusals live in allowlist.yaml instead.
+
+files:
+  - name: seed-core.json
+    content: |
+      {"commit_message": "corpus seed", "nodes": [
+        {"key": "r1", "id": "e2e-r1", "title": "Routed open task", "type": "task", "priority": 1, "labels": ["lane:a"], "metadata": {"gc.routed_to": "pool-a"}},
+        {"key": "r2", "id": "e2e-r2", "title": "Held routed task", "type": "task", "labels": ["hold:mayor"], "metadata": {"gc.routed_to": "pool-a"}},
+        {"key": "r3", "id": "e2e-r3", "title": "Routed epic", "type": "epic", "metadata": {"gc.routed_to": "pool-a"}},
+        {"key": "wf1", "id": "e2e-wf1", "title": "Workflow root", "type": "task", "metadata": {"gc.run_target": "pool-a", "gc.kind": "workflow"}},
+        {"key": "a1", "id": "e2e-a1", "title": "Alice bug", "type": "bug", "assignee": "alice"},
+        {"key": "ip1", "id": "e2e-ip1", "title": "Worker in progress", "type": "task", "priority": 0, "assignee": "worker", "metadata": {"gc.routed_to": "pool-a"}},
+        {"key": "ipna", "id": "e2e-ipna", "title": "Orphaned in progress", "type": "task", "metadata": {"gc.routed_to": "pool-a"}},
+        {"key": "ipnb", "id": "e2e-ipnb", "title": "Orphaned workflow", "type": "task", "metadata": {"gc.run_target": "pool-a", "gc.kind": "workflow"}},
+        {"key": "blk", "id": "e2e-blk", "title": "Blocked by r1", "type": "task", "deps": [{"target": "r1"}]},
+        {"key": "done", "id": "e2e-done", "title": "Closed task", "type": "task"},
+        {"key": "ext", "id": "e2e-ext", "title": "GitHub source", "type": "task", "external_ref": "gh-123", "metadata": {"gc.kind": "github_source", "gc.github.kind": "issue", "gc.github.repo": "o/r"}},
+        {"key": "ep", "id": "e2e-ep", "title": "Epic", "type": "epic"},
+        {"key": "ep.1", "id": "e2e-ep.1", "title": "Epic child one", "type": "task", "parent_key": "ep"},
+        {"key": "ep.2", "id": "e2e-ep.2", "title": "Epic child two", "type": "task", "parent_key": "ep"},
+        {"key": "mol", "id": "e2e-mol", "title": "Molecule root", "type": "epic"},
+        {"key": "mol.1", "id": "e2e-mol.1", "title": "step one", "type": "task", "assignee": "worker", "parent_key": "mol"},
+        {"key": "mol.2", "id": "e2e-mol.2", "title": "step two", "type": "task", "parent_key": "mol", "deps": [{"target": "mol.1"}], "metadata": {"gc.root_bead_id": "e2e-mol", "gc.routed_to": "pool-a"}},
+        {"key": "mol.3", "id": "e2e-mol.3", "title": "step three", "type": "task", "parent_key": "mol"},
+        {"key": "mac", "id": "e2e-mac", "title": "Auto-close molecule", "type": "epic"},
+        {"key": "mac.1", "id": "e2e-mac.1", "title": "done step", "type": "task", "parent_key": "mac"},
+        {"key": "mac.2", "id": "e2e-mac.2", "title": "last step", "type": "task", "assignee": "worker", "parent_key": "mac"},
+        {"key": "wisp-1", "id": "e2e-wisp-1", "title": "Wisp wisp-1", "type": "task", "ephemeral": true, "metadata": {"gc.routed_to": "pool-a"}, "labels": ["lane:w"]},
+        {"key": "wisp-2", "id": "e2e-wisp-2", "title": "Wisp wisp-2", "type": "task", "ephemeral": true, "assignee": "worker", "labels": ["lane:w"]},
+        {"key": "wisp-c", "id": "e2e-wisp-c", "title": "Wisp wisp-c", "type": "task", "ephemeral": true},
+        {"key": "wisp-p", "id": "e2e-wisp-p", "title": "Wisp wisp-p", "type": "task", "ephemeral": true},
+        {"key": "wisp-m", "id": "e2e-wisp-m", "title": "Wisp molecule", "type": "epic", "ephemeral": true},
+        {"key": "wisp-m.1", "id": "e2e-wisp-m.1", "title": "wisp step", "type": "task", "ephemeral": true, "parent_key": "wisp-m"},
+        {"key": "t-upd", "id": "e2e-t-upd", "title": "target upd", "type": "task", "labels": ["lane:z"]},
+        {"key": "t-upd2", "id": "e2e-t-upd2", "title": "target upd2", "type": "task"},
+        {"key": "t-m1", "id": "e2e-t-m1", "title": "target m1", "type": "task"},
+        {"key": "t-m2", "id": "e2e-t-m2", "title": "target m2", "type": "task"},
+        {"key": "t-claim", "id": "e2e-t-claim", "title": "target claim", "type": "task"},
+        {"key": "t-claim2", "id": "e2e-t-claim2", "title": "target claim2", "type": "task"},
+        {"key": "t-rev", "id": "e2e-t-rev", "title": "target rev", "type": "task"},
+        {"key": "t-rev2", "id": "e2e-t-rev2", "title": "target rev2", "type": "task"},
+        {"key": "t-sling", "id": "e2e-t-sling", "title": "target sling", "type": "task"},
+        {"key": "t-as", "id": "e2e-t-as", "title": "target as", "type": "task"},
+        {"key": "t-ms", "id": "e2e-t-ms", "title": "target ms", "type": "task"},
+        {"key": "t-msc", "id": "e2e-t-msc", "title": "target msc", "type": "task"},
+        {"key": "t-um", "id": "e2e-t-um", "title": "target um", "type": "task", "metadata": {"k": "v"}},
+        {"key": "t-notes", "id": "e2e-t-notes", "title": "target notes", "type": "task"},
+        {"key": "t-er", "id": "e2e-t-er", "title": "target er", "type": "task"},
+        {"key": "t-md", "id": "e2e-t-md", "title": "target md", "type": "task"},
+        {"key": "t-asg", "id": "e2e-t-asg", "title": "target asg", "type": "task"},
+        {"key": "t-dac", "id": "e2e-t-dac", "title": "target dac", "type": "task"},
+        {"key": "t-c1", "id": "e2e-t-c1", "title": "target c1", "type": "task"},
+        {"key": "t-c2", "id": "e2e-t-c2", "title": "target c2", "type": "task"},
+        {"key": "t-c3", "id": "e2e-t-c3", "title": "target c3", "type": "task"},
+        {"key": "t-c4", "id": "e2e-t-c4", "title": "target c4", "type": "task"},
+        {"key": "t-c5", "id": "e2e-t-c5", "title": "target c5", "type": "task"},
+        {"key": "t-d1", "id": "e2e-t-d1", "title": "target d1", "type": "task"},
+        {"key": "t-d2", "id": "e2e-t-d2", "title": "target d2", "type": "task"},
+        {"key": "t-d3", "id": "e2e-t-d3", "title": "target d3", "type": "task"},
+        {"key": "t-d4", "id": "e2e-t-d4", "title": "target d4", "type": "task"},
+        {"key": "t-df1", "id": "e2e-t-df1", "title": "target df1", "type": "task"},
+        {"key": "t-df2", "id": "e2e-t-df2", "title": "target df2", "type": "task"},
+        {"key": "t-da", "id": "e2e-t-da", "title": "target da", "type": "task"},
+        {"key": "t-db", "id": "e2e-t-db", "title": "target db", "type": "task"},
+        {"key": "t-l", "id": "e2e-t-l", "title": "target l", "type": "task"},
+        {"key": "t-as2", "id": "e2e-t-as2", "title": "target as2", "type": "task"},
+        {"key": "t-cm", "id": "e2e-t-cm", "title": "target cm", "type": "task"},
+        {"key": "t-rel", "id": "e2e-t-rel", "title": "target rel", "type": "task", "assignee": "worker"},
+        {"key": "t-xfer", "id": "e2e-t-xfer", "title": "target xfer", "type": "task", "assignee": "worker"},
+        {"key": "t-ifa", "id": "e2e-t-ifa", "title": "target ifa", "type": "task", "assignee": "worker"},
+        {"key": "t-death", "id": "e2e-t-death", "title": "target death", "type": "task", "assignee": "worker"},
+        {"key": "t-rc", "id": "e2e-t-rc", "title": "target rc", "type": "task", "assignee": "worker"},
+        {"key": "t-boot", "id": "e2e-t-boot", "title": "target boot", "type": "task"},
+        {"key": "t-ro", "id": "e2e-t-ro", "title": "target reopen", "type": "task"},
+        {"key": "t-dr", "id": "e2e-t-dr", "title": "target dep remove", "type": "task", "deps": [{"target": "t-db"}]},
+        {"key": "t-dc", "id": "e2e-t-dc", "title": "cascade root", "type": "epic"},
+        {"key": "t-dc.1", "id": "e2e-t-dc.1", "title": "cascade child", "type": "task", "parent_key": "t-dc"}
+      ]}
+  - name: bulk-ready-a.json
+    bulk: {id_prefix: e2e-bra, count: 60, priority: 3, metadata: {gc.routed_to: pool-a}}
+  - name: bulk-ready-b.json
+    bulk: {id_prefix: e2e-brb, count: 60, priority: 3, metadata: {gc.routed_to: pool-a}}
+  - name: bulk-wisp-a.json
+    bulk: {id_prefix: e2e-wisp-bwa, count: 55, priority: 3, ephemeral: true, metadata: {gc.routed_to: pool-a}}
+  - name: bulk-wisp-b.json
+    bulk: {id_prefix: e2e-wisp-bwb, count: 55, priority: 3, ephemeral: true, metadata: {gc.routed_to: pool-a}}
+  - name: graph-small.json
+    content: |
+      {"commit_message": "gc graph apply", "nodes": [
+        {"key": "root", "id": "e2e-g-root", "title": "graph root", "type": "epic", "metadata": {"gc.kind": "workflow"}},
+        {"key": "s1", "id": "e2e-g-s1", "title": "graph step 1", "type": "task", "parent_key": "root", "assignee": "worker", "labels": ["lane:g"], "metadata": {"gc.routed_to": "pool-a"}},
+        {"key": "s2", "id": "e2e-g-s2", "title": "graph step 2", "type": "task", "parent_key": "root"}
+      ], "edges": [{"from_key": "s2", "to_key": "s1", "type": "blocks"}]}
+  - name: graph-eph.json
+    content: |
+      {"nodes": [
+        {"key": "root", "id": "e2e-wisp-g-root", "title": "wisp graph root", "type": "epic"},
+        {"key": "s1", "id": "e2e-wisp-g-s1", "title": "wisp graph step", "type": "task", "parent_key": "root"}
+      ]}
+  - name: delete-list.txt
+    content: |
+      e2e-t-df1
+      e2e-t-df2
+
+seed:
+  - [create, --graph, "{file:seed-core.json}", --json]
+  - [create, --graph, "{file:bulk-ready-a.json}", --json]
+  - [create, --graph, "{file:bulk-ready-b.json}", --json]
+  - [create, --graph, "{file:bulk-wisp-a.json}", --json]
+  - [create, --graph, "{file:bulk-wisp-b.json}", --json]
+  # Graph plans carry no status: a node created in_progress or closed stamps
+  # started_at/closed_at, which batchApply's create vocabulary cannot carry
+  # (gc's own plans never set a status). Lifecycle goes through update/close.
+  - [update, e2e-ip1, e2e-ipna, e2e-ipnb, e2e-mol.1, e2e-mac.2, e2e-t-rel, e2e-t-xfer, e2e-t-ifa, e2e-t-death, e2e-t-rc, e2e-t-boot, --status, in_progress]
+  - [update, e2e-wisp-2, --status, in_progress]
+  - [close, --force, e2e-done, e2e-ep.2, e2e-mol.3, e2e-mac.1, e2e-t-ro]
+  - [comments, add, e2e-r1, "seed comment"]
+
+shapes:
+  # ---------------------------------------------------------------- show
+  - id: gc-show-json
+    source: gc bdstore.go BdStore.Get (show --json <id>); counts must not read 0
+    args: [show, --json, e2e-blk]
+  - id: gc-show-json-batch
+    source: gc bdstore_exact_batch.go GetExactBatch
+    args: [show, --json, e2e-r1, e2e-a1, e2e-blk, e2e-mol]
+  - id: gc-show-json-wisp
+    source: gc workquery.go blocked_by enrichment; wisps live in the ready tier
+    args: [show, e2e-wisp-1, --json]
+  - id: gc-show-id-flag
+    source: gc cmd_bd_show_watch.go bdWatchRunner (show --json --id=<id>)
+    args: [show, --json, --id=e2e-r1]
+  # The worker holds eight in-progress issues; e2e-ip1 is the only P0 among
+  # them, so "first in the store's default order" (priority first) names it on
+  # both sides. Among equal priorities the order rests on created_at, and a
+  # seed that straddles a second boundary on one side only picked another issue.
+  - id: gc-show-current
+    source: gc cmd_bd_show_watch.go bdWatchRunner (show --current --json)
+    args: [show, --current, --json]
+    pending: {slice: "S6e", reason: "NEW: resolveCurrentIssueID calls raw store.SearchIssues, the http refusal is swallowed, and it silently falls back to the last-touched issue (wrong issue, exit 0)"}
+  - id: gc-show-missing
+    source: gc BdStore.Get not-found classification (routing fallbacks)
+    args: [show, --json, e2e-nonexistent]
+    expect_exit: 1
+    expect_stderr: "(?i)not found"
+    compare: exit
+  - id: mc-show-text
+    source: mc prompts (bd show <id>, ~80)
+    args: [show, e2e-r1]
+    compare: text
+
+  # ---------------------------------------------------------------- ready
+  - id: gc-ready-unlimited
+    source: gc bdstore.go bdReadyArgs (BdStore.Ready, ready --json --limit 0)
+    args: [ready, --json, --limit, "0"]
+    compare: ids
+    pending: {slice: "S15", reason: "ready --limit 0 omits limit and the server default page silently caps the answer (B3 #2)"}
+  - id: gc-ready-ephemeral-assignee-unlimited
+    source: gc bdstore.go bdReadyArgs with --include-ephemeral --assignee
+    args: [ready, --json, --include-ephemeral, --assignee, worker, --limit, "0"]
+    compare: ids
+  - id: gc-ready-pool-demand
+    source: gc workquery.go bdReadyPoolDemandShell (scale_check, --limit=20)
+    args: [ready, --metadata-field, gc.routed_to=pool-a, --unassigned, --exclude-type=epic, --exclude-label, "hold:mayor", --exclude-label, "hold:external", --json, --limit=20]
+    compare: ids
+  - id: gc-ready-pool-demand-unlimited
+    source: gc workquery.go bdReadyPoolDemandShell (work_query, --include-ephemeral --limit 0)
+    args: [ready, --include-ephemeral, --metadata-field, gc.routed_to=pool-a, --unassigned, --exclude-type=epic, --exclude-label, "hold:mayor", --exclude-label, "hold:external", --json, --limit, "0"]
+    compare: ids
+    pending: {slice: "S15", reason: "ready --limit 0 silently capped by the server's default page (B3 #2)"}
+  - id: gc-ready-workflow-migration
+    source: gc workquery.go bdReadyPoolDemandMigrationShell (--sort oldest --limit 0)
+    args: [ready, --include-ephemeral, --metadata-field, gc.run_target=pool-a, --metadata-field, gc.kind=workflow, --unassigned, --exclude-type=epic, --exclude-label, "hold:mayor", --exclude-label, "hold:external", --json, --sort, oldest, --limit, "0"]
+    compare: ids
+  - id: gc-ready-graph-anchor
+    source: gc workquery.go assignedGraphWorkflowAnchorReadyFunctionScript
+    args: [ready, --include-ephemeral, --metadata-field, gc.root_bead_id=e2e-mol, --metadata-field, gc.routed_to=pool-a, --exclude-type=epic, --exclude-label, "hold:mayor", --exclude-label, "hold:external", --json, --sort, oldest, --limit=20]
+    compare: ids
+  - id: gc-ready-assigned-tier
+    source: gc workquery.go assignedReadyTierCommand (--assignee=<id> --limit=1)
+    args: [ready, --include-ephemeral, --assignee=worker, --json, --limit=1]
+    compare: ids
+  - id: gc-ready-probe
+    source: gc examples/bd gc-beads-bd.sh (bare bd ready probe)
+    args: [ready]
+    compare: exit
+  - id: mc-ready-json
+    source: mc scripts/prompts (bd ready --json, ~36)
+    args: [ready, --json]
+    compare: ids
+  - id: mc-ready-mol
+    source: mc skills/pr-review (bd ready --mol <root>)
+    args: [ready, --mol, e2e-mol, --json]
+    pending: {slice: "S16", reason: "ready --mol loads molecule steps off a raw path: step rows lose assignee and timestamps (molecule reads over roles)"}
+  - id: mc-ready-parent
+    source: mc skills/pr-review (bd ready --parent <root>)
+    args: [ready, --parent, e2e-ep, --json]
+    compare: ids
+
+  # ---------------------------------------------------------------- list
+  - id: gc-list-full-filters
+    source: gc bdstore.go listViaBDList (List/ListByLabel/ListByMetadata)
+    args: [list, --json, --label=lane:a, --status=open, --type=task, --include-infra, --include-gates, --limit, "0", --metadata-field, gc.routed_to=pool-a]
+  - id: gc-list-ping
+    source: gc bdstore.go BdStore.Ping (list --json --limit 0)
+    args: [list, --json, --limit, "0"]
+    compare: ids
+  - id: gc-list-limit1
+    source: gc doctor_gate_sandbox.go / doctor_store_preflight.go
+    args: [list, --json, --limit, "1"]
+    compare: count
+  - id: gc-list-readonly
+    source: gc doctor_v2_session_migration.go readOnlyBdRunner
+    args: [--readonly, list, --json, --limit, "1"]
+    compare: count
+  - id: gc-list-assignee-status
+    source: gc bdstore.go listViaBDList (ListByAssignee)
+    args: [list, --json, --assignee=worker, --status=in_progress, --include-infra, --include-gates, --limit, "0"]
+  - id: gc-list-all-created-before
+    source: gc bdstore.go listViaBDList (--all --created-before --include-templates --skip-labels)
+    args: [list, --json, --all, --created-before, "2100-01-01T00:00:00Z", --include-infra, --include-gates, --include-templates, --limit, "0", --skip-labels]
+    compare: ids
+  - id: gc-list-children
+    source: gc bdstore.go listViaBDList (Children, --parent)
+    args: [list, --json, --include-infra, --include-gates, --limit, "0", --parent, e2e-ep, --all]
+  - id: gc-list-in-progress-tier
+    source: gc workquery.go assignedInProgressTierCommandWithLimit
+    args: [list, --status, in_progress, --assignee=worker, --json, --limit=20]
+  - id: gc-list-on-death
+    source: gc workquery.go EffectiveOnDeath
+    args: [list, --assignee=worker, --status=in_progress, --json]
+  - id: gc-list-on-boot
+    source: gc workquery.go on_boot recovery (--no-assignee)
+    args: [list, --metadata-field, gc.routed_to=pool-a, --status=in_progress, --no-assignee, --json]
+    pending: {slice: "S6c+S15b", reason: "list stub (B3 #1); --no-assignee refused by the list encoder (B3 #11)"}
+  - id: gc-list-on-boot-workflow
+    source: gc workquery.go on_boot recovery, workflow lane
+    args: [list, --metadata-field, gc.run_target=pool-a, --metadata-field, gc.kind=workflow, --status=in_progress, --no-assignee, --json]
+    pending: {slice: "S6c+S15b", reason: "list stub (B3 #1); --no-assignee refused by the list encoder (B3 #11)"}
+  - id: mc-list-meta-status
+    source: mc assets snapshot.md (list --json --limit --metadata-field --status)
+    args: [list, --json, --limit, "50", --metadata-field, gc.routed_to=pool-a, --status, open]
+    compare: ids
+    # More than 50 rows match, most at one priority: --limit 50 cuts a tie set
+    # whose created_at order differs between the two seeds, so each side's 50
+    # rows are held to its own unlimited listing instead.
+    prefix_of: [list, --json, --limit, "0", --metadata-field, gc.routed_to=pool-a, --status, open]
+  - id: mc-list-github-source
+    source: mc github-intake (list --all --json --limit --metadata-field x3)
+    args: [list, --metadata-field, gc.kind=github_source, --metadata-field, gc.github.kind=issue, --metadata-field, gc.github.repo=o/r, --all, --json, --limit, "0"]
+  - id: mc-list-all-type
+    source: mc normalized_candidate_graph.py (list --all --type)
+    args: [list, --all, --type, epic, --json, --limit, "50"]
+  - id: mc-list-include-gates-infra-label
+    source: mc mol-normalized-issue-pr-v1 (list --all --include-gates --include-infra --json --label --limit)
+    args: [list, --all, --include-gates, --include-infra, --json, --label, "lane:a", --limit, "0"]
+  - id: mc-list-title
+    source: mc mol-normalized-issue-pr-v1 (list --all --include-infra --json --limit --title)
+    args: [list, --all, --include-infra, --json, --limit, "10", --title, "Routed open task"]
+    pending: {slice: "S6c+S15b", reason: "list stub (B3 #1); --title is a text filter the list encoder refuses (B3 #11)"}
+  - id: mc-list-id
+    source: mc skills/pr-review (list --all --id --json --limit)
+    args: [list, --all, --id, "e2e-r1,e2e-a1", --json, --limit, "0"]
+    pending: {slice: "S6c+S15+S15b", reason: "list stub (B3 #1); --limit 0 (B3 #3); --id refused by the list encoder (B3 #11)"}
+  - id: mc-list-assignee-status
+    source: mc review summaries (list --assignee --json --limit --status)
+    args: [list, --assignee, alice, --json, --limit, "10", --status, open]
+  - id: mc-list-label-text
+    source: mc normalized_child_launch.py (list --label)
+    args: [list, --label, "lane:a"]
+    compare: text
+  - id: mc-list-plain
+    source: mc scripts (bare bd list)
+    args: [list]
+    compare: exit
+  - id: mc-children
+    source: mc prompts (bd children <epic>)
+    args: [children, e2e-ep, --json]
+
+  # ---------------------------------------------------------------- query / count / search
+  - id: gc-query-wisps
+    source: gc bdstore.go listEphemeral (query --json "ephemeral=true AND ..." --limit N)
+    args: [query, --json, "ephemeral=true AND label=lane:w", --limit, "50"]
+  - id: gc-query-wisps-all
+    source: gc bdstore.go listEphemeral with IncludeClosed (--all)
+    args: [query, --json, "ephemeral=true AND status=in_progress", --all, --limit, "50"]
+  - id: gc-query-wisp-by-id
+    source: gc bdstore.go getEphemeralByID
+    args: [query, --json, "ephemeral=true AND id=e2e-wisp-1", --all, --limit, "1"]
+  - id: gc-query-wisps-unlimited
+    source: gc workquery.go bdQueryEphemeralStatusShell (--limit=0, wisp tier)
+    args: [query, --json, "ephemeral=true AND status=open", --limit=0]
+    compare: ids
+    pending: {slice: "S15", reason: "query --limit=0 sends limit=0 and a non-loopback server refuses unlimited reads (B3 #3)"}
+  - id: mc-query
+    source: mc pr_merge.py (bd query)
+    args: [query, --json, "status=open AND priority<=1", --limit, "50"]
+  - id: gc-count
+    source: gc native CountIssues fallback (count without scope)
+    args: [count, --json]
+  - id: gc-count-status
+    source: gc count with a status filter
+    args: [count, --json, --status, open]
+  - id: mc-search
+    source: mc mol-bug-report-flow-v2 (bd search)
+    args: [search, "Routed", --json]
+    compare: ids
+    pending: {slice: "S24", reason: "NEW: bd search is refused over http ('partial-id search is not available over HTTP'); not in B3"}
+  - id: mc-status
+    source: mc normalized_child_launch.py (bd status)
+    args: [status, --json]
+
+  # ---------------------------------------------------------------- deps / graph reads
+  - id: gc-dep-list
+    source: gc bdstore.go DepList
+    args: [dep, list, e2e-blk, --json]
+  - id: gc-dep-list-up
+    source: gc bdstore.go DepList (--direction=up)
+    args: [dep, list, e2e-r1, --json, --direction=up]
+  - id: gc-dep-list-batch
+    source: gc bdstore.go DepListBatch
+    args: [dep, list, e2e-blk, e2e-mol.2, --json]
+  - id: mc-dep-tree
+    source: mc pr_review.py city_dep_subtree (dep tree <root> --json)
+    args: [dep, tree, e2e-mol, --json]
+  - id: gc-blocked
+    source: gc bdstore_ready_projection.go fetchReadyProjectionViaBlocked
+    args: [blocked, --json]
+    pending: {slice: "S18", reason: "bd blocked hits the GetBlockedIssues stub (B3 #10)"}
+
+  # ---------------------------------------------------------------- molecules
+  - id: mc-mol-current
+    source: mc worker prompts (bd mol current, ~38; inferred from in_progress work)
+    args: [mol, current, --json]
+    pending: {slice: "S16", reason: "mol current without an id is silently empty over http (B3 #4)"}
+  - id: mc-mol-current-text
+    source: mc gc-role-worker template (bd mol current, text)
+    args: [mol, current]
+    compare: text
+    pending: {slice: "S16", reason: "mol current without an id is silently empty over http (B3 #4)"}
+  - id: mc-mol-current-id
+    source: mc prompts (bd mol current <id>)
+    args: [mol, current, e2e-mol, --json]
+    pending: {slice: "S16", reason: "mol current <id> refuses (B3 #4)"}
+  - id: mc-mol-progress
+    source: mc prompts (bd mol progress <id>)
+    args: [mol, progress, e2e-mol, --json]
+    pending: {slice: "S16", reason: "mol progress <id> refuses (B3 #4)"}
+
+  # ---------------------------------------------------------------- config / probes / local
+  - id: gc-config-get-types
+    source: gc beads_provider_lifecycle.go / checks_custom_types.go (config get --json types.custom)
+    args: [config, get, --json, types.custom]
+  - id: gc-config-get-prefix
+    source: gc gc-beads-bd.sh (config get issue_prefix)
+    args: [config, get, issue_prefix]
+    compare: text
+  - id: gc-types
+    source: gc checks_custom_types.go (types --json)
+    args: [types, --json]
+  - id: gc-context
+    source: gc beads_preflight_checker.go (context --json); never touches the store
+    args: [context, --json]
+    compare: exit
+  - id: gc-version
+    source: gc bdstore_blocked_repair.go BDVersion
+    args: [version]
+    compare: exit
+  - id: gc-ping
+    source: gc cmd_beads_city_migrate_proxied.go / dashboard (ping --json)
+    args: [ping, --json]
+    compare: exit
+  - id: mc-prime
+    source: mc formulas (bd prime)
+    args: [prime]
+    compare: exit
+  - id: gc-sql-ready-projection
+    source: gc bdstore_ready_projection.go fetchReadyProjection
+    args: [sql, "select id,is_blocked from issues where status <> 'closed' union all select id,is_blocked from wisps where status <> 'closed'", --json]
+    compare: exit
+  - id: gc-sql-release-fallback
+    source: gc bdstore.go ReleaseIfCurrent fallback (sql UPDATE)
+    args: [sql, --json, "UPDATE issues SET status='open', assignee='' WHERE id='e2e-t-rel' AND status='in_progress' AND assignee='worker'"]
+    compare: exit
+  - id: gc-purge-dry-run
+    source: gc bdstore.go Purge (purge --json --dry-run)
+    args: [purge, --json, --dry-run]
+    compare: exit
+    pending: {slice: "SRV-1", reason: "purge needs the sweep tokens the reference server does not advertise (B3 #13); remove the mark when reference_server.json is upgraded"}
+  - id: gc-recompute-blocked
+    source: gc bdstore_blocked_repair.go RecomputeBlocked
+    args: [recompute-blocked, --json]
+    compare: exit
+    pending: {slice: "S25", reason: "NEW: recompute-blocked refuses over http ('storage backend does not support is_blocked recompute'); gc BdStore.RecomputeBlocked issues it; not in B3"}
+  - id: gc-backup-status
+    source: gc checks_proxied_backup_coverage.go (backup status --json)
+    args: [backup, status, --json]
+    compare: exit
+  - id: mc-gate-list
+    source: core pack orders (gate list)
+    args: [gate, list, --json]
+    pending: {slice: "S20", reason: "gate list issues a raw SearchIssues shape the bridge refuses (B3 #15)"}
+
+  - id: gc-export-all
+    source: gc core pack reaper (gc bd export --all -o F)
+    args: [export, --all, -o, "{file:export.jsonl}"]
+    compare: exit
+    pending: {slice: "S21", reason: "export --all is not wired over http (B3 #16)"}
+
+  # ================================================================ writes
+  # ---------------------------------------------------------------- create
+  - id: gc-create-full
+    source: gc bdstore.go CreateWithStorage (every optional flag but --parent)
+    args: [create, --json, "gc created", -t, task, --id, e2e-n1, --priority, "1", --description, "made by gc", --assignee, worker, --deps, e2e-r1, --labels, "lane:n,x", --metadata, '{"gc.routed_to":"pool-a"}']
+    compare: exit
+    verify: [[show, --json, e2e-n1]]
+  - id: gc-create-parent
+    source: gc bdstore.go CreateWithStorage (--parent, server-minted child id)
+    args: [create, --json, "gc child", -t, task, --parent, e2e-ep]
+    compare: exit
+    verify: [[show, --json, e2e-ep.3]]
+    pending: {slice: "S19", reason: "create --parent calls GetNextChildID (B3 #8)"}
+  - id: gc-create-ephemeral
+    source: gc bdstore.go CreateWithStorage (--ephemeral)
+    args: [create, --json, "gc wisp", -t, task, --id, e2e-wisp-n2, --ephemeral, --metadata, '{"gc.routed_to":"pool-a"}']
+    compare: exit
+    verify: [[show, --json, e2e-wisp-n2]]
+  - id: gc-create-no-history
+    source: gc bdstore.go CreateWithStorage (--no-history, agent beads)
+    args: [create, --json, "gc agent bead", -t, task, --id, e2e-n3, --no-history]
+    compare: exit
+    verify: [[show, --json, e2e-n3]]
+  - id: gc-create-defer
+    source: gc bdstore.go CreateWithStorage (--defer RFC3339)
+    args: [create, --json, "gc deferred", -t, task, --id, e2e-n4, --defer, "2100-01-01T00:00:00Z"]
+    compare: exit
+    verify: [[show, --json, e2e-n4]]
+  - id: mc-create-external-ref
+    source: mc snapshot.md (create --external-ref --labels --metadata --type)
+    args: [create, "triaged issue", --external-ref, gh-999, --labels, "triage", --metadata, '{"gc.kind":"github_source"}', --type, task, --id, e2e-n5, --json]
+    compare: exit
+    verify: [[show, --json, e2e-n5]]
+  - id: mc-create-text
+    source: mc prompts (bd create, text output)
+    args: [create, "plain create", --type, task, --id, e2e-n6]
+    compare: exit
+    verify: [[show, --json, e2e-n6]]
+  - id: gc-create-graph
+    source: gc bdstore_graph_apply.go ApplyGraphPlanWithStorage
+    args: [create, --graph, "{file:graph-small.json}", --json]
+    verify: [[show, --json, e2e-g-root, e2e-g-s1, e2e-g-s2]]
+  - id: gc-create-graph-ephemeral
+    source: gc bdstore_graph_apply.go (--ephemeral by storage class)
+    args: [create, --graph, "{file:graph-eph.json}", --json, --ephemeral]
+    verify: [[show, --json, e2e-wisp-g-root, e2e-wisp-g-s1]]
+
+  # ---------------------------------------------------------------- update
+  - id: gc-update-fields
+    source: gc bdstore.go bdUpdateArgs (Update)
+    args: [update, --json, e2e-t-upd, --title, "updated", --status, in_progress, --type, bug, --priority, "1", --description, "new", --assignee, bob, --set-metadata, a=1, --set-metadata, b=2, --add-label, x, --remove-label, "lane:z"]
+    compare: exit
+    verify: [[show, --json, e2e-t-upd]]
+  - id: gc-update-parent
+    source: gc bdstore.go bdUpdateArgs (--parent)
+    args: [update, --json, e2e-t-upd2, --parent, e2e-ep]
+    compare: exit
+    verify: [[show, --json, e2e-t-upd2]]
+  - id: gc-update-many
+    source: gc bdstore.go UpdateAll / setMetadataBatchAll
+    args: [update, --json, e2e-t-m1, e2e-t-m2, --set-metadata, gc.batch=1, --priority, "3"]
+    compare: exit
+    verify: [[show, --json, e2e-t-m1, e2e-t-m2]]
+  - id: gc-update-claim
+    source: gc bdstore.go BdStore.Claim and gc hook --claim (update <id> --claim --json)
+    args: [update, e2e-t-claim, --claim, --json]
+    compare: exit
+    verify: [[show, --json, e2e-t-claim]]
+  - id: gc-update-claim-actor
+    source: gc cmd_agent_script.go bd_claim (update <id> --claim --actor X)
+    args: [update, e2e-t-claim2, --claim, --actor, alice]
+    compare: exit
+    verify: [[show, --json, e2e-t-claim2]]
+  - id: gc-update-claim-wisp
+    source: gc ready queues include ephemeral work; claiming a wisp
+    args: [update, e2e-wisp-c, --claim, --json]
+    compare: exit
+    verify: [[show, --json, e2e-wisp-c]]
+    pending: {slice: "SRV-1", reason: "the reference server lacks UpdateIssueRequest.claim, and the claimIssue fallback excludes wisps (B3 #6); remove the mark when reference_server.json is upgraded"}
+  - id: gc-update-if-revision
+    source: gc bdstore_conditional.go UpdateIfMatch / CompareAndSetMetadataKey
+    args: [update, e2e-t-rev, --set-metadata, k=v, --if-revision, "{rev:e2e-t-rev}"]
+    compare: exit
+    verify: [[show, --json, e2e-t-rev]]
+  - id: gc-update-if-revision-stale
+    source: gc bdstore_conditional.go UpdateIfMatch mismatch (exit 13)
+    args: [update, e2e-t-rev2, --set-metadata, k=v, --if-revision, "1"]
+    expect_exit: 13
+    compare: exit
+    verify: [[show, --json, e2e-t-rev2]]
+  - id: gc-update-release-if-current
+    source: gc bdstore_conditional_release.go releaseIfCurrentViaBdVerb
+    args: [update, e2e-t-rel, --if-assignee, worker, --if-status, in_progress, --status, open, --assignee, ""]
+    compare: exit
+    verify: [[show, --json, e2e-t-rel]]
+  - id: gc-update-transfer-if-current
+    source: gc bdstore_conditional_release.go TransferIfCurrent
+    args: [update, e2e-t-xfer, --if-assignee, worker, --if-status, in_progress, --assignee, alice]
+    compare: exit
+    verify: [[show, --json, e2e-t-xfer]]
+  - id: gc-update-if-assignment
+    source: gc bdstore_conditional.go UpdateIfAssignment
+    args: [update, --json, e2e-t-ifa, --set-metadata, k=v, --if-status, in_progress, --if-assignee, worker]
+    compare: exit
+    verify: [[show, --json, e2e-t-ifa]]
+  - id: gc-update-on-death
+    source: gc workquery.go on_death (update --assignee "" --status open --set-metadata)
+    args: [update, e2e-t-death, --assignee, "", --status, open, --set-metadata, gc.run_target=pool-a]
+    compare: exit
+    verify: [[show, --json, e2e-t-death]]
+  - id: gc-update-on-boot
+    source: gc workquery.go on_boot (update <id> --status open)
+    args: [update, e2e-t-boot, --status, open]
+    compare: exit
+    verify: [[show, --json, e2e-t-boot]]
+  - id: gc-update-sling
+    source: gc workquery.go DefaultSlingQuery (update --set-metadata gc.routed_to=)
+    args: [update, e2e-t-sling, --set-metadata, gc.routed_to=pool-b]
+    compare: exit
+    verify: [[show, --json, e2e-t-sling]]
+  - id: gc-update-agent-script
+    source: gc cmd_agent_script.go bd_update (--assignee --status --append-notes --set-metadata)
+    args: [update, e2e-t-as, --assignee, worker, --status, in_progress, --append-notes, "agent note", --set-metadata, k=v]
+    compare: exit
+    verify: [[show, --json, e2e-t-as]]
+  - id: gc-update-dolt-auto-commit-off
+    source: gc bdstore.go bdTransientWriteArgs (--dolt-auto-commit off prefix)
+    args: [--dolt-auto-commit, "off", update, --json, e2e-t-dac, --set-metadata, k=v]
+    compare: exit
+    verify: [[show, --json, e2e-t-dac]]
+  - id: mc-update-meta-status
+    source: mc prompts (update --set-metadata --status, ~151)
+    args: [update, e2e-t-ms, --set-metadata, review.verdict=iterate, --status, in_progress]
+    compare: exit
+    verify: [[show, --json, e2e-t-ms]]
+  - id: mc-update-meta-status-closed
+    source: mc prompts (update --set-metadata --status closed, under Claude Code)
+    args: [update, e2e-t-msc, --set-metadata, review.verdict=done, --status, closed]
+    compare: exit
+    verify: [[show, --json, e2e-t-msc]]
+    pending: {slice: "S6d", reason: "a silent data difference, not a refusal: the update succeeds on both sides under CLAUDE_SESSION_ID, but the served update records no closed_by_session (an http update patch cannot carry one, so the CLI drops it without a word; bd close does carry it) where embedded records the session, so the verify show differs (B3 #7)"}
+  - id: mc-update-unset-metadata
+    source: mc adopt-pr-operator (update --unset-metadata)
+    args: [update, e2e-t-um, --unset-metadata, k]
+    compare: exit
+    verify: [[show, --json, e2e-t-um]]
+  - id: mc-update-notes
+    source: mc github fix-issue formula (update --notes)
+    args: [update, e2e-t-notes, --notes, "notes text"]
+    compare: exit
+    verify: [[show, --json, e2e-t-notes]]
+  - id: mc-update-external-ref-metadata
+    source: mc snapshot.md (update --external-ref --metadata)
+    args: [update, e2e-t-er, --external-ref, gh-1, --metadata, '{"gc.kind":"github_source"}']
+    compare: exit
+    verify: [[show, --json, e2e-t-er]]
+  - id: mc-update-metadata
+    source: mc build-base prepare.md (update --metadata)
+    args: [update, e2e-t-md, --metadata, '{"x":"1"}']
+    compare: exit
+    verify: [[show, --json, e2e-t-md]]
+  - id: mc-update-assignee
+    source: mc review reports (update --assignee)
+    args: [update, e2e-t-asg, --assignee, bob]
+    compare: exit
+    verify: [[show, --json, e2e-t-asg]]
+
+  # ---------------------------------------------------------------- close / reopen
+  - id: gc-close-force-reason-many
+    source: gc bdstore.go bdCloseArgs (CloseAll/CloseAllWithReason)
+    args: [close, --force, --json, --reason, done, e2e-t-c1, e2e-t-c2]
+    compare: exit
+    verify: [[show, --json, e2e-t-c1, e2e-t-c2]]
+  - id: gc-close-if-revision
+    source: gc bdstore_conditional.go CloseIfMatch
+    args: [close, --force, --json, e2e-t-c3, --if-revision, "{rev:e2e-t-c3}"]
+    compare: exit
+    verify: [[show, --json, e2e-t-c3]]
+  - id: mc-close-text
+    source: mc formulas (bd close <id>)
+    args: [close, e2e-t-c4]
+    compare: exit
+    verify: [[show, --json, e2e-t-c4]]
+  - id: mc-close-reason
+    source: mc build-basic-review (bd close --reason)
+    args: [close, e2e-t-c5, --reason, "review applied"]
+    compare: exit
+    verify: [[show, --json, e2e-t-c5]]
+  - id: gc-close-last-step-autocloses-molecule
+    source: gc/mc molecule lifecycle (closing the last open step closes the root)
+    args: [close, --force, --json, e2e-mac.2]
+    compare: exit
+    verify: [[show, --json, e2e-mac]]
+  - id: gc-reopen
+    source: gc bdstore.go Reopen
+    args: [reopen, --json, e2e-t-ro]
+    compare: exit
+    verify: [[show, --json, e2e-t-ro]]
+
+  # ---------------------------------------------------------------- delete / reclaim / promote / burn
+  - id: gc-delete
+    source: gc bdstore.go Delete
+    args: [delete, --force, --json, e2e-t-d1]
+    compare: exit
+    verify: [[show, --json, e2e-t-d1]]
+  - id: gc-delete-if-revision
+    source: gc bdstore_conditional.go DeleteIfMatch
+    args: [delete, --force, --json, e2e-t-d2, --if-revision, "{rev:e2e-t-d2}"]
+    compare: exit
+    verify: [[show, --json, e2e-t-d2]]
+  - id: gc-delete-batch
+    source: gc bdstore.go DeleteBatch (no --json)
+    args: [delete, e2e-t-d3, e2e-t-d4, --force]
+    compare: exit
+    verify: [[show, --json, e2e-t-d3]]
+  - id: gc-delete-cascade
+    source: gc cmd_convoy_dispatch.go deleteWorkflowMatches
+    args: [delete, e2e-t-dc, --cascade, --force]
+    compare: exit
+    verify: [[show, --json, e2e-t-dc.1]]
+  - id: mc-delete-from-file
+    source: mc session_cleanup.py / core reaper (delete --from-file)
+    args: [delete, --from-file, "{file:delete-list.txt}", --force]
+    compare: exit
+    verify: [[show, --json, e2e-t-df1]]
+  - id: gc-reclaim
+    source: gc bdstore.go ReclaimStale (reclaim --id <id> --json)
+    args: [reclaim, --id, e2e-t-rc, --json]
+    compare: exit
+    verify: [[show, --json, e2e-t-rc]]
+    pending: {slice: "S9+SRV-1", reason: "reclaim hits a stub; the reference server lacks issues.reclaim (B3 #12)"}
+  - id: mc-promote
+    source: mc mol-normalized-issue-pr-v1 (promote --reason)
+    args: [promote, e2e-wisp-p, --reason, "keep it"]
+    compare: exit
+    pending: {slice: "S21", reason: "promote is not wired over http (B3 #16)"}
+  - id: mc-mol-burn
+    source: mc review fixtures (mol burn --force)
+    args: [mol, burn, e2e-wisp-m, --force]
+    compare: exit
+    verify: [[show, --json, e2e-wisp-m.1]]
+    pending: {slice: "S17", reason: "mol burn needs RunInTransaction (B3 #14)"}
+
+  # ---------------------------------------------------------------- deps / comments / labels / config writes
+  - id: gc-dep-add
+    source: gc bdstore.go DepAdd
+    args: [dep, add, e2e-t-da, e2e-t-db, --type, blocks]
+    compare: exit
+    verify: [[dep, list, e2e-t-da, --json]]
+  - id: gc-dep-remove
+    source: gc bdstore.go DepRemove
+    args: [dep, remove, e2e-t-dr, e2e-t-db]
+    compare: exit
+    verify: [[dep, list, e2e-t-dr, --json]]
+  - id: mc-comment
+    source: mc bug_hunt.py (bd comment <id> <text>)
+    args: [comment, e2e-t-cm, "a comment"]
+    compare: exit
+    verify: [[comments, e2e-t-cm, --json]]
+    ignore_fields: [id]  # comment ids are minted per workspace
+  - id: mc-comments-list
+    source: mc prompts (bd comments <id>)
+    args: [comments, e2e-r1, --json]
+    ignore_fields: [id]  # comment ids are minted per workspace
+  - id: mc-label-add
+    source: mc prompts (bd label add)
+    args: [label, add, e2e-t-l, "lane:q"]
+    compare: exit
+    verify: [[show, --json, e2e-t-l]]
+  - id: mc-assign
+    source: mc prompts (bd assign)
+    args: [assign, e2e-t-as2, alice]
+    compare: exit
+    verify: [[show, --json, e2e-t-as2]]
+  - id: gc-config-set-types
+    source: gc beads_provider_lifecycle.go (config set types.custom a,b)
+    args: [config, set, types.custom, "corpus-a,corpus-b"]
+    compare: exit
+    verify: [[config, get, --json, types.custom]]
+  - id: mc-meta-set
+    source: mc adopt-pr-review checks (bd meta set <id> k=v)
+    args: [meta, set, e2e-r1, review.verdict=done]
+    compare: exit

@@ -1,0 +1,86 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "corpus_test",
+    # The corpus runs every shape through the real bd (bazeltest.PrebuiltBD),
+    # served and embedded, under BEADS_TEST_EMBEDDED_DOLT=1; it skips otherwise.
+    size = "large",
+    timeout = "long",
+    srcs = [
+        "corpus_test.go",
+        "harness_test.go",
+        "reference_proxy_test.go",
+    ],
+    data = glob(["testdata/**"]) + ["//cmd/bd:bd_for_tests"],
+    env = {"BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)"},
+    deps = [
+        "//internal/httpapi",
+        "//internal/httpapi/apigen",
+        "//internal/storage",
+        "//internal/storage/domain",
+        "//internal/storage/embeddeddolt",
+        "//internal/testutil/bazeltest",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end repo_files ---

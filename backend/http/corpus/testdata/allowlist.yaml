@@ -1,0 +1,24 @@
+# Shapes that are EXPECTED to be refused on a served workspace, permanently.
+# The served run must fail and its output must match `refusal`; if it ever
+# succeeds, the entry is stale and the suite fails until it is removed.
+# A gap some slice will close is NOT listed here: it is a `pending` mark on the
+# shape in corpus.yaml instead.
+
+- id: gc-sql-ready-projection
+  reason: >-
+    bd sql is raw SQL against the workspace's own database and is local-only by
+    design; gc must not issue it against a remote workspace (DESIGN B3 #10 and
+    B6: gc reads the ready projection through roles there). Note the refusal
+    text still says "embedded mode" on an http workspace.
+  refusal: "'bd sql' is not yet supported"
+- id: gc-sql-release-fallback
+  reason: >-
+    bd sql is local-only by design; gc's ReleaseIfCurrent fallback must take
+    the conditional update path on a remote workspace (DESIGN B3 #10).
+  refusal: "'bd sql' is not yet supported"
+- id: mc-meta-set
+  reason: >-
+    `bd meta set` is not an OSS bd command (pack scripts written against an
+    older pinned CLI); it fails on the embedded backend too. The packs should
+    use `bd update --set-metadata`, which the corpus covers.
+  refusal: 'unknown command "meta"'

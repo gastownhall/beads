@@ -499,6 +499,7 @@ go_binary(
     race = "off",
     visibility = [
         "//backend/http:__pkg__",
+        "//backend/http/corpus:__pkg__",
         "//cmd/bd:__subpackages__",
         "//internal/beads:__pkg__",
         "//internal/storage/uow:__pkg__",
