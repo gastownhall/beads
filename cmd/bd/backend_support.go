@@ -107,36 +107,3 @@ func loadDoltBackendConfig(beadsDir string) (*configfile.Config, error) {
 	}
 	return cfg, nil
 }
-
-// isRemoteBackendWorkspace reports whether the workspace the current command
-// is running against selects a registered Remote backend (backends.IsRemote).
-// It re-resolves beadsDir and the configured backend name from disk, through
-// the same resolveCommandBeadsDir(dbPath) + backendNameForErrorFraming(beadsDir)
-// pair openStoreError's own caller already uses, rather than threading a
-// backend name through every RunE signature that needs one: PersistentPreRunE
-// does not leave the backend name it resolved in any package-level variable,
-// only the global dbPath it computed on the way to opening the store.
-func isRemoteBackendWorkspace() bool {
-	beadsDir := resolveCommandBeadsDir(dbPath)
-	if beadsDir == "" {
-		return false
-	}
-	return backends.IsRemote(backendNameForErrorFraming(beadsDir))
-}
-
-// creationActorStamp is the CreatedBy value a newly created issue should
-// carry. It is getActorWithGit()'s actor for an ordinary local backend, and
-// empty for a registered Remote backend: the http backend's create role
-// deliberately refuses a populated CreatedBy on create (see
-// internal/httpclient/lifecycle.go's refuseUnwirableCreateIssue and the
-// divergence ledger row W-CreateRequest.Issue) because the creation stamp
-// belongs to the journal entry the server itself writes, not a value the
-// caller supplies — re-dating history is what an import is for. Stamping it
-// here for a remote workspace would make every `bd create` against that
-// backend fail instead of deferring attribution to the server.
-func creationActorStamp() string {
-	if isRemoteBackendWorkspace() {
-		return ""
-	}
-	return currentActor()
-}

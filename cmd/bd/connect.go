@@ -47,7 +47,10 @@ recorded on disk by this command. It comes from the same ladder every http
 request does: the BEADS_HTTP_TOKEN environment variable, then
 BEADS_HTTP_TOKEN_COMMAND (a helper that prints a token), then the credentials
 file's [host:port] section, then no credential at all — which the tip OSS
-server's loopback-trust posture answers legitimately, not as a failure.
+server's loopback-trust posture answers legitimately, not as a failure. Both
+variables name the server they are for, host[:port]=value (for example
+BEADS_HTTP_TOKEN=bd.example.com=<token>); a bare value is refused, since it
+would be sent to whatever server the workspace's http_target.json names.
 
 --allow-plaintext IS recorded on disk, in the sidecar alongside the server
 url: once granted here, a credential may cross this one server in the clear

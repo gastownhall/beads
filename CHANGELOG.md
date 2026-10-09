@@ -151,17 +151,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workspace that already selects a different backend unless `--force`. A
   credential is never accepted on the command line or written to disk; it
   comes from the same ladder every http request already uses
-  (`BEADS_HTTP_TOKEN`, then `BEADS_HTTP_TOKEN_COMMAND`, then the credentials
-  file, then none). `bd create` suppresses the `created_by` stamp for a
-  workspace on a registered remote backend rather than sending one the http
-  wire's create role refuses (the creation stamp belongs to the server's own
-  journal entry). The external-dependency policy decorator
-  (`internal/storage/externaldeps`) still wraps an http store, and stands
-  down only when the server's handshake advertises
+  (`BEADS_HTTP_TOKEN=host[:port]=<token>`, then
+  `BEADS_HTTP_TOKEN_COMMAND=host[:port]=<command>`, then the credentials
+  file, then none); both variables take only that host-scoped form, and a
+  bare value is refused, since it would be sent to whatever server the
+  workspace's `http_target.json` names. The external-dependency policy
+  decorator (`internal/storage/externaldeps`) still wraps an http store, and
+  stands down only when the server's handshake advertises
   `policy.external_dependencies` (that server has already applied the policy
   before answering); against any other server it applies the policy
-  client-side, dropping externally blocked issues from `bd ready`'s page,
-  total, and count, because the v0 wire cannot express an id exclusion.
+  client-side, around the http store's own served roles. Externally blocked
+  issues drop out of `bd ready`'s page, total, and count (the v0 wire cannot
+  express an id exclusion) and out of `bd ready --claim`, `bd close` refuses
+  them without `--force`, and `bd dep tree` shows their external leaves.
+  `bd close --claim-next` refuses over http before anything closes, since
+  the wire's batch close cannot carry the claim; its error says to close
+  without it and then run `bd ready --claim`.
 - The public `backend/http` package (`bdhttp`) is the out-of-tree door onto
   this backend for an embedder that links beads as a library rather than
   running `cmd/bd`: `Register(Options)` adds `"http"` to the registry and

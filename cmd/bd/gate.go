@@ -439,7 +439,7 @@ func buildGateIssue(in gateCreateInput, targetID string) *types.Issue {
 		AwaitType:   in.gateType,
 		AwaitID:     in.awaitID,
 		Timeout:     in.timeout,
-		CreatedBy:   creationActorStamp(),
+		CreatedBy:   getActorWithGit(),
 		Owner:       getOwner(),
 	}
 }

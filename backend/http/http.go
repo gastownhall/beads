@@ -170,8 +170,8 @@ func Handshake(ctx context.Context, target Target, opts Options) (*ServerSnapsho
 // What remains is what a client actually decides with: Capabilities is the
 // field it decides with (an operation is available because the server
 // advertises its token, never because a version string looked new enough),
-// and WireRevision is what `bd connect` checks against the client's own
-// compiled revision before recording a server.
+// and WireRevision is the revision the handshake already checked against
+// this client's own compiled one before returning a snapshot at all.
 type ServerSnapshot struct {
 	// APIVersion is the path major the server serves. The handshake already
 	// refused anything this client cannot address, so on a returned snapshot
@@ -181,9 +181,11 @@ type ServerSnapshot struct {
 	// human-facing: branch on Capabilities, not on this.
 	BdVersion string
 	// WireRevision is the server's own wire_revision counter (see
-	// ContextResponse.WireRevision). `bd connect` compares it against the
-	// client's compiled MinClientWireRevision expectations before recording
-	// a server as this workspace's target.
+	// ContextResponse.WireRevision). The wire handshake itself refuses a
+	// server this client build predates (a wire_revision or
+	// min_client_wire_revision above wire.ClientWireRevision) before any
+	// snapshot is returned, so on a returned snapshot this is exposed for
+	// diagnostics, not a branch.
 	WireRevision int
 	// ProjectID is the workspace identity the server owns. When the Target
 	// pinned one, the handshake has already proved they match.

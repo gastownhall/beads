@@ -185,9 +185,10 @@ for embedding beads in another program as a library.
 # Point this workspace at a server (verifies the server first; writes nothing on failure)
 bd connect https://bd.example.com --expect-project-id my-project
 
-# The everyday commands work the same way: create, read, update, close,
-# dependencies, comments, ready/count queries, and batch apply all round-trip
-# over the wire with the same semantics as a local database.
+# The everyday commands work the same way: create, show, list, update, close,
+# dependencies (including `bd dep tree`), comments, ready/count queries,
+# `bd ready --claim`, and batch apply all round-trip over the wire with the
+# same semantics as a local database.
 bd create "Fix auth bug" -p 1 -t bug
 bd ready --json
 bd close bd-a1b2 "Fixed"
@@ -207,19 +208,33 @@ walk the server page by page). Every one of these is a deliberate, tested
 row, never a silent gap — see
 [`engdocs/design/http-divergence-ledger.md`](engdocs/design/http-divergence-ledger.md)
 for the full, generated list of what differs and why before depending on an
-HTTP-backed workspace for a workflow you haven't checked against it.
+HTTP-backed workspace for a workflow you haven't checked against it. One
+refusal to know up front: `bd close --claim-next` closes nothing over HTTP,
+because the wire's batch close cannot carry the claim. Close without it, then
+run `bd ready --claim`.
+
+[Cross-repo dependencies](docs/core-concepts/dependencies.md#cross-repo-dependencies)
+keep their policy over HTTP. The client resolves each `external:` reference
+against its own `external_projects` configuration. `bd dep tree` shows the
+reference as a leaf, and while it is unsatisfied the issue stays out of
+`bd ready` and `bd ready --claim`, and `bd close` refuses it without
+`--force`. A server that advertises enforcing that policy itself is trusted
+to do so instead.
 
 `bd connect` writes two things on success: `.beads/metadata.json` gets
 `"backend": "http"`, and a per-user, never-git-tracked sidecar
 (`.beads/http_target.json`) records the server URL and pinned project id. It
 never writes a credential to disk. A bearer credential, if the server
-requires one, comes from `BEADS_HTTP_TOKEN`, then
-`BEADS_HTTP_TOKEN_COMMAND` (a helper that prints a token), then the
-credentials file, then no credential at all. Connecting to a non-loopback
-server over plain `http://` is refused by default (a bearer credential would
-cross the network unencrypted) — pass `--allow-plaintext` to override, or use
-`https://`. Switching a workspace that already selects a different backend
-needs `--force`.
+requires one, comes from `BEADS_HTTP_TOKEN=host[:port]=<token>`, then
+`BEADS_HTTP_TOKEN_COMMAND=host[:port]=<command>` (a helper that prints a
+token), then the credentials file, then no credential at all. Both variables
+must name the server they are for (a pattern without a port matches that
+host on any port); a bare value is refused, because it would be sent to
+whatever server the workspace's `http_target.json` names. Connecting to a
+non-loopback server over plain `http://` is refused by default (a bearer
+credential would cross the network unencrypted) — pass `--allow-plaintext` to
+override, or use `https://`. Switching a workspace that already selects a
+different backend needs `--force`.
 
 An embedding program that links beads as a library rather than running
 `cmd/bd` registers this backend itself through the public

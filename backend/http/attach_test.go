@@ -7,6 +7,9 @@ package bdhttp_test
 
 import (
 	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	bdhttp "github.com/steveyegge/beads/backend/http"
@@ -89,7 +92,10 @@ func TestAttachOnAFreshWorkspaceRecordsTheImplicitDoltDefault(t *testing.T) {
 // supposed to restore.
 func TestAttachOnAReconnectKeepsTheEarlierPreviousBackend(t *testing.T) {
 	beadsDir := t.TempDir()
-	cfg := &configfile.Config{Backend: "dolt", Database: "beads.db"}
+	// Not dolt: an unregistered "http" reads back through GetBackend() as the
+	// dolt default, so a dolt prior could not tell carrying it forward from
+	// recording that default.
+	cfg := &configfile.Config{Backend: "postgres", Database: "beads.db"}
 	if err := cfg.Save(beadsDir); err != nil {
 		t.Fatalf("seed metadata.json: %v", err)
 	}
@@ -111,8 +117,8 @@ func TestAttachOnAReconnectKeepsTheEarlierPreviousBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadTarget: %v", err)
 	}
-	if got.PreviousBackend != "dolt" {
-		t.Errorf("PreviousBackend after a reconnect = %q, want the original %q carried forward, not the just-left \"http\"", got.PreviousBackend, "dolt")
+	if got.PreviousBackend != "postgres" {
+		t.Errorf("PreviousBackend after a reconnect = %q, want the original %q carried forward, not the just-left \"http\"", got.PreviousBackend, "postgres")
 	}
 	if got.BaseURL.String() != "http://127.0.0.1:9090" {
 		t.Errorf("BaseURL = %q, want the second connect's url", got.BaseURL.String())
@@ -140,5 +146,35 @@ func TestAttachHonorsACallerSuppliedPreviousBackend(t *testing.T) {
 	}
 	if got.PreviousBackend != "mysql" {
 		t.Errorf("PreviousBackend = %q, want the caller-supplied %q to win over the inferred %q", got.PreviousBackend, "mysql", "dolt")
+	}
+}
+
+// TestAttachGitignoresBothPerUserFiles pins Attach's .gitignore guarantee for
+// both files this backend keeps per user in beadsDir: the sidecar Attach
+// writes, and the local metadata file the store writes later, on first use.
+// `bd connect` also covers the second through doctor's required patterns,
+// but an embedder activating through Attach alone has only this. A reconnect
+// must not duplicate either line.
+func TestAttachGitignoresBothPerUserFiles(t *testing.T) {
+	beadsDir := t.TempDir()
+	for _, raw := range []string{"http://127.0.0.1:8080", "http://127.0.0.1:9090"} {
+		if err := bdhttp.Attach(beadsDir, bdhttp.Target{BaseURL: mustAttachTestURL(t, raw)}); err != nil {
+			t.Fatalf("Attach(%s): %v", raw, err)
+		}
+	}
+	content, err := os.ReadFile(filepath.Join(beadsDir, ".gitignore"))
+	if err != nil {
+		t.Fatalf("read .gitignore after Attach: %v", err)
+	}
+	for _, name := range []string{httpclient.TargetFileName, httpclient.LocalMetadataFileName} {
+		count := 0
+		for _, line := range strings.Split(string(content), "\n") {
+			if strings.TrimSpace(line) == name {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf(".gitignore names %s %d time(s) after two Attaches, want exactly 1:\n%s", name, count, content)
+		}
 	}
 }

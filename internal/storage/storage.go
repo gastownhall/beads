@@ -1025,10 +1025,12 @@ type ExternalDependencyQueryStore interface {
 // RemoteBackendStore is implemented by a DoltStorage that is a pure network
 // client of a remote bd serve process (a registered backend whose
 // backends.Backend.Remote is true — see internal/storage/backends). It is
-// informational metadata about the store's transport, not a policy decision,
-// and nothing in-tree consults it: the external-deps decorator wraps a remote
-// store like any other and asks ExternalDependencyPolicyProber whether to
-// skip its client-side enforcement.
+// metadata about the store's transport, not a policy decision. Its one in-tree
+// consumer is the external-deps decorator, which wraps a remote store like any
+// other and reads this marker only to choose how it composes its roles: over a
+// remote store it builds each role on the store's own served role instead of
+// the legacy methods such a store refuses. Whether the decorator skips its
+// client-side enforcement is ExternalDependencyPolicyProber's question.
 type RemoteBackendStore interface {
 	IsRemoteBackendStore() bool
 }
@@ -1037,8 +1039,9 @@ type RemoteBackendStore interface {
 // answer whether the remote server it talks to already enforces bd's
 // external-dependency policy itself (design 3.6, "External-dependency server
 // policy": upstream's storage.ServerEnforcedPolicy / PolicyEnforcedByServer).
-// The external-deps decorator consults this — never RemoteBackendStore —
-// before skipping its own client-side enforcement: a remote store whose
+// The external-deps decorator consults this — never RemoteBackendStore, which
+// only shapes how it composes its roles — before skipping its own client-side
+// enforcement: a remote store whose
 // server advertises the capability (httpapi's policy.external_dependencies)
 // has already enforced the policy before answering, so a second client-side
 // pass would be redundant. A store that does not implement this interface, or

@@ -80,7 +80,7 @@ var addTodoCmd = &cobra.Command{
 			Status:      types.StatusOpen,
 			Assignee:    getActorWithGit(),
 			Owner:       getOwner(),
-			CreatedBy:   creationActorStamp(),
+			CreatedBy:   getActorWithGit(),
 		}
 
 		if err := getStore().CreateIssue(ctx, issue, getActorWithGit()); err != nil {

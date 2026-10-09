@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "batch_closer.go",
         "decorator.go",
+        "remote_roles.go",
         "resolver.go",
         "role_accessors.go",
         "uow_decorator.go",
@@ -30,6 +31,7 @@ go_test(
     srcs = [
         "decorator_test.go",
         "ready_wake_test.go",
+        "remote_roles_test.go",
         "uow_decorator_test.go",
     ],
     embed = [":externaldeps"],

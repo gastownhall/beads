@@ -233,7 +233,7 @@ func runSetState(ctx context.Context, issueID, dimension, newValue, reason strin
 			Status:      types.StatusClosed,
 			Priority:    4,
 			IssueType:   types.TypeEvent,
-			CreatedBy:   creationActorStamp(),
+			CreatedBy:   getActorWithGit(),
 			Ephemeral:   details.Ephemeral,
 			NoHistory:   details.NoHistory,
 		},

@@ -39,7 +39,10 @@ const e2eDatabase = "httpe2e"
 // TestE2E_BDOverHTTP drives the real `bd` binary against an in-process `bd
 // serve`, end to end: connect, create, an update guarded by --if-revision
 // (both the matching case and the stale case, which must exit 13 with the
-// precondition_failed body), close, dep add, ready, count, delete.
+// precondition_failed body), close, dep add, ready, count, list (JSON, text
+// and --deps), an external dependency through dep tree, ready, list --ready,
+// ready --claim, a refused close --claim-next and a refused then forced close,
+// and delete.
 func TestE2E_BDOverHTTP(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	bin := buildBD(t)
@@ -63,8 +66,11 @@ func TestE2E_BDOverHTTP(t *testing.T) {
 		t.Errorf(".beads/.gitignore does not cover http_target.json: %s", gitignore)
 	}
 
-	// create
-	create := runBD(t, bin, workspace, nil, "create", "A title", "-d", "a description", "--json")
+	// create, under a named actor: bd stamps CreatedBy with the same actor it
+	// sends, which the http create role accepts and the server records.
+	const creator = "e2e-creator"
+	asCreator := []string{"BEADS_ACTOR=" + creator}
+	create := runBD(t, bin, workspace, asCreator, "create", "A title", "-d", "a description", "--json")
 	if create.code != 0 {
 		t.Fatalf("bd create failed (exit %d): stdout=%s stderr=%s", create.code, create.stdout, create.stderr)
 	}
@@ -82,6 +88,30 @@ func TestE2E_BDOverHTTP(t *testing.T) {
 	revision := firstJSONField(t, show.stdout, "revision")
 	if revision == "" {
 		t.Fatalf("bd show --json reported no revision: %s", show.stdout)
+	}
+	if got := firstJSONField(t, show.stdout, "created_by"); got != creator {
+		t.Errorf("created_by = %q after an http create, want the creating actor %q: %s", got, creator, show.stdout)
+	}
+
+	// The same create routed from this http workspace into a local one
+	// (--repo) is written by the local store, which records whatever stamp
+	// the command built: it must still be the actor, since nothing about the
+	// workspace a command runs in changes who created the issue.
+	local := t.TempDir()
+	routed := runBD(t, bin, workspace, asCreator, "create", "Routed", "--repo", local, "--json")
+	if routed.code != 0 {
+		t.Fatalf("bd create --repo %s failed (exit %d): stdout=%s stderr=%s", local, routed.code, routed.stdout, routed.stderr)
+	}
+	routedID := firstJSONField(t, routed.stdout, "id")
+	if routedID == "" {
+		t.Fatalf("bd create --repo --json produced no id: %s", routed.stdout)
+	}
+	routedShow := runBD(t, bin, local, nil, "show", routedID, "--json")
+	if routedShow.code != 0 {
+		t.Fatalf("bd show %s in the routed-to workspace failed (exit %d): stderr=%s", routedID, routedShow.code, routedShow.stderr)
+	}
+	if got := firstJSONField(t, routedShow.stdout, "created_by"); got != creator {
+		t.Errorf("created_by = %q on a create routed from an http workspace, want the creating actor %q: %s", got, creator, routedShow.stdout)
 	}
 
 	// update with a MATCHING --if-revision guard: must succeed.
@@ -139,6 +169,92 @@ func TestE2E_BDOverHTTP(t *testing.T) {
 	if n := jsonIntField(t, count.stdout, "count"); n != 2 {
 		t.Errorf("bd count = %d, want 2 (id and depID, the only issues this workspace has): %s", n, count.stdout)
 	}
+
+	// The http backend serves listing, trees, claims and closes only as roles,
+	// and refuses the legacy store methods the external-dependency decorator
+	// once rebuilt those roles over, so each command below exited 1 here, even
+	// with nothing externally blocked.
+	list := runBD(t, bin, workspace, nil, "list", "--json")
+	if list.code != 0 {
+		t.Fatalf("bd list --json failed (exit %d): stdout=%s stderr=%s", list.code, list.stdout, list.stderr)
+	}
+	if listIDs := jsonIDSet(t, list.stdout); !listIDs[id] || !listIDs[depID] {
+		t.Errorf("bd list --json did not list both %s and %s: %s", id, depID, list.stdout)
+	}
+	textList := runBD(t, bin, workspace, nil, "list")
+	if textList.code != 0 || !strings.Contains(textList.stdout, id) || !strings.Contains(textList.stdout, depID) {
+		t.Errorf("bd list (exit %d) did not list both %s and %s: stdout=%s stderr=%s", textList.code, id, depID, textList.stdout, textList.stderr)
+	}
+	// --deps turns a failed whole-workspace edge scan behind that tree (the
+	// divergence ledger's L8) from a silent omission into an error.
+	depsList := runBD(t, bin, workspace, nil, "list", "--deps")
+	if depsList.code != 0 || !strings.Contains(depsList.stdout, id) || !strings.Contains(depsList.stdout, depID) {
+		t.Errorf("bd list --deps (exit %d) did not list both %s and %s: stdout=%s stderr=%s", depsList.code, id, depID, depsList.stdout, depsList.stderr)
+	}
+
+	// An external dependency on a project this workspace has not configured
+	// stays unsatisfied, so extID is blocked for as long as it is open. At
+	// priority 0 it sorts ahead of depID, where a claim blind to that would
+	// take it.
+	const externalRef = "external:otherproj:cap"
+	ext := runBD(t, bin, workspace, nil, "create", "Externally blocked", "-p", "0", "--json")
+	if ext.code != 0 {
+		t.Fatalf("bd create (externally blocked) failed (exit %d): stderr=%s", ext.code, ext.stderr)
+	}
+	extID := firstJSONField(t, ext.stdout, "id")
+	if r := runBD(t, bin, workspace, nil, "dep", "add", extID, externalRef, "--json"); r.code != 0 {
+		t.Fatalf("bd dep add %s %s failed (exit %d): stdout=%s stderr=%s", extID, externalRef, r.code, r.stdout, r.stderr)
+	}
+	tree := runBD(t, bin, workspace, nil, "dep", "tree", extID, "--json")
+	if tree.code != 0 {
+		t.Fatalf("bd dep tree %s failed (exit %d): stdout=%s stderr=%s", extID, tree.code, tree.stdout, tree.stderr)
+	}
+	if !jsonIDSet(t, tree.stdout)[externalRef] {
+		t.Errorf("bd dep tree %s did not show its %s leaf: %s", extID, externalRef, tree.stdout)
+	}
+	for _, args := range [][]string{{"ready", "--json"}, {"list", "--ready", "--json"}} {
+		r := runBD(t, bin, workspace, nil, args...)
+		if r.code != 0 {
+			t.Fatalf("bd %s failed (exit %d): stdout=%s stderr=%s", strings.Join(args, " "), r.code, r.stdout, r.stderr)
+		}
+		if readyIDs := jsonIDSet(t, r.stdout); !readyIDs[depID] || readyIDs[extID] || readyIDs[id] {
+			t.Errorf("bd %s = %s, want %s and neither %s nor %s", strings.Join(args, " "), r.stdout, depID, extID, id)
+		}
+	}
+	claim := runBD(t, bin, workspace, nil, "ready", "--claim", "--json")
+	if claim.code != 0 {
+		t.Fatalf("bd ready --claim failed (exit %d): stdout=%s stderr=%s", claim.code, claim.stdout, claim.stderr)
+	}
+	if got := firstJSONField(t, claim.stdout, "id"); got != depID {
+		t.Errorf("bd ready --claim claimed %q, want %s (%s is externally blocked): %s", got, depID, extID, claim.stdout)
+	}
+	// --claim-next refuses whole over http, before anything closes, and names
+	// the commands that do the same work. It is asked again once extID is
+	// closed, because a closed holder of an external ref changes nothing.
+	refuseClaimNext := func(when string) {
+		t.Helper()
+		r := runBD(t, bin, workspace, nil, "close", depID, "--claim-next")
+		if r.code == 0 || !strings.Contains(r.stderr, "nothing was closed") || !strings.Contains(r.stderr, "bd ready --claim") {
+			t.Errorf("bd close %s --claim-next %s (exit %d) did not refuse with the bd ready --claim hint: stdout=%s stderr=%s", depID, when, r.code, r.stdout, r.stderr)
+		}
+		show := runBD(t, bin, workspace, nil, "show", depID, "--json")
+		if status := firstJSONField(t, show.stdout, "status"); show.code != 0 || status == "closed" {
+			t.Errorf("bd show %s (exit %d) status = %q after a refused bd close --claim-next %s, want it not closed: stderr=%s", depID, show.code, status, when, show.stderr)
+		}
+	}
+	refuseClaimNext("while " + extID + " is open")
+	refused := runBD(t, bin, workspace, nil, "close", extID)
+	if refused.code == 0 || !strings.Contains(refused.stderr, externalRef) || !strings.Contains(refused.stderr, "use --force") {
+		t.Errorf("bd close %s (exit %d) did not refuse it as blocked by %s: stdout=%s stderr=%s", extID, refused.code, externalRef, refused.stdout, refused.stderr)
+	}
+	if r := runBD(t, bin, workspace, nil, "close", extID, "--force", "--json"); r.code != 0 {
+		t.Fatalf("bd close %s --force failed (exit %d): stdout=%s stderr=%s", extID, r.code, r.stdout, r.stderr)
+	}
+	forcedShow := runBD(t, bin, workspace, nil, "show", extID, "--json")
+	if status := firstJSONField(t, forcedShow.stdout, "status"); forcedShow.code != 0 || status != "closed" {
+		t.Errorf("bd show %s (exit %d) status = %q after bd close --force, want %q: stderr=%s", extID, forcedShow.code, status, "closed", forcedShow.stderr)
+	}
+	refuseClaimNext("after " + extID + " was closed")
 
 	if r := runBD(t, bin, workspace, nil, "close", depID, "--json"); r.code != 0 {
 		t.Fatalf("bd close failed (exit %d): stdout=%s stderr=%s", r.code, r.stdout, r.stderr)

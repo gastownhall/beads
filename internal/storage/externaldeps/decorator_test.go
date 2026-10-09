@@ -3,6 +3,7 @@ package externaldeps
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -31,6 +32,12 @@ type fakeStore struct {
 	enforcedErr error
 
 	excludeIDsUnsupported bool
+	// defaultPage, when positive, is how many rows a zero-Limit ready listing
+	// returns, while GetReadyWorkWithCountsAndTotal's total still counts the
+	// whole set: httpclient.Store's shape, whose wire omits a zero limit so
+	// the server answers with its default page. Zero keeps the SQL stores'
+	// meaning, every row.
+	defaultPage int
 }
 
 func (f *fakeStore) IssueLifecycle() (publicops.Lifecycle, error) { return f.lifecycle, nil }
@@ -79,6 +86,19 @@ func (f *fakeLifecycle) Update(context.Context, publicops.UpdateRequest) (public
 }
 
 func (f *fakeStore) GetReadyWork(_ context.Context, filter types.WorkFilter) ([]*types.Issue, error) {
+	candidates, err := f.readyCandidates(filter)
+	if err != nil {
+		return nil, err
+	}
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = f.defaultPage
+	}
+	return page(candidates, filter.Offset, limit), nil
+}
+
+// readyCandidates is the whole ready set filter admits, before paging.
+func (f *fakeStore) readyCandidates(filter types.WorkFilter) ([]*types.Issue, error) {
 	if f.excludeIDsUnsupported && len(filter.ExcludeIDs) > 0 {
 		return nil, errors.New("fakeStore: ExcludeIDs cannot be expressed")
 	}
@@ -88,7 +108,7 @@ func (f *fakeStore) GetReadyWork(_ context.Context, filter types.WorkFilter) ([]
 			candidates = append(candidates, issue)
 		}
 	}
-	return page(candidates, filter.Offset, filter.Limit), nil
+	return candidates, nil
 }
 
 func (f *fakeStore) GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, error) {
@@ -108,9 +128,7 @@ func (f *fakeStore) GetReadyWorkWithCountsAndTotal(ctx context.Context, filter t
 	if err != nil {
 		return nil, 0, err
 	}
-	unbounded := filter
-	unbounded.Limit, unbounded.Offset = 0, 0
-	all, err := f.GetReadyWork(ctx, unbounded)
+	all, err := f.readyCandidates(filter)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -265,7 +283,7 @@ func externalDep(source, ref string, depType types.DependencyType) *types.Depend
 	return &types.Dependency{IssueID: source, DependsOnID: ref, Type: depType}
 }
 
-func testStore(raw, foreign *fakeStore, configured bool) *Store {
+func testStore(raw storage.DoltStorage, foreign *fakeStore, configured bool) *Store {
 	return New(
 		raw,
 		func(project ProjectName) (string, bool) {
@@ -585,6 +603,122 @@ func TestReadyTotalsWhenStoreCannotExpressExcludeIDs(t *testing.T) {
 	}
 	if got != 2 {
 		t.Fatalf("ready count = %d, want 2 (be-a is externally blocked)", got)
+	}
+}
+
+// TestReadyTotalsWhenAnUnlimitedFetchComesBackAsOnePage pins the shape
+// httpclient.Store has and an every-row Limit==0 fake hid: the wire omits a
+// zero Limit, the server answers with its default page, and the total still
+// counts the whole ready set. CountReadyWork, text-mode bd ready's total,
+// always fetches with Limit 0, so be-z (ready, externally blocked, and past
+// that page) once stayed in its total because the decorator took a zero Limit
+// for a window that held every row.
+func TestReadyTotalsWhenAnUnlimitedFetchComesBackAsOnePage(t *testing.T) {
+	const defaultPage = 100 // workapi.DefaultReadyLimit, the server's page for an omitted limit
+	ready := make([]*types.Issue, 0, defaultPage+2)
+	for i := range defaultPage + 1 {
+		ready = append(ready, issue(fmt.Sprintf("be-%03d", i)))
+	}
+	z := issue("be-z")
+	raw := &fakeStore{
+		ready: append(ready, z),
+		deps: map[string][]*types.Dependency{
+			z.ID: {externalDep(z.ID, "external:remote:payments", types.DepBlocks)},
+		},
+		excludeIDsUnsupported: true,
+		defaultPage:           defaultPage,
+	}
+	store := testStore(raw, &fakeStore{}, true)
+	const want = defaultPage + 1 // every ready issue but be-z
+
+	counter, err := store.ReadyCounter()
+	if err != nil {
+		t.Fatalf("ReadyCounter: %v", err)
+	}
+	text, err := counter.CountReady(t.Context(), publicops.ReadyRequest{})
+	if err != nil {
+		t.Fatalf("CountReady: %v", err)
+	}
+	if text.Total != want {
+		t.Fatalf("text total = %d, want %d (be-z is externally blocked)", text.Total, want)
+	}
+	// The JSON total must agree, whether the page is unlimited (the server's
+	// default page comes back) or the CLI's default limit (bumped by one).
+	for _, limit := range []int{0, defaultPage} {
+		rows, total, err := store.GetReadyWorkWithCountsAndTotal(t.Context(), types.WorkFilter{Limit: limit})
+		if err != nil {
+			t.Fatalf("GetReadyWorkWithCountsAndTotal(Limit %d): %v", limit, err)
+		}
+		if len(rows) != defaultPage || total != want {
+			t.Fatalf("Limit %d: %d rows, total %d; want %d rows, total %d (be-z is externally blocked)", limit, len(rows), total, defaultPage, want)
+		}
+	}
+}
+
+// TestReadyTotalsIgnoreExternallyBlockedIssuesOutsideTheReadySet pins the
+// total of a ready set bigger than the window that came back. refsByIssue
+// names every workspace issue with an unsatisfied external blocker, closed
+// ones and ones the filter excludes included, but only those in the filtered
+// ready set were ever in the inner total, so subtracting all of them once
+// reported 100 of 101 ready issues as soon as an issue outside the ready set
+// held an external blocker.
+func TestReadyTotalsIgnoreExternallyBlockedIssuesOutsideTheReadySet(t *testing.T) {
+	const defaultPage = 100 // workapi.DefaultReadyLimit, the server's page for an omitted limit
+	for _, tc := range []struct {
+		name string
+		// readyBlocked adds be-z: ready, externally blocked, and past the page.
+		readyBlocked bool
+		// outside is how many externally blocked issues are not ready.
+		outside int
+	}{
+		{name: "one blocked issue outside the ready set", outside: 1},
+		{name: "blocked issues inside and outside the ready set", readyBlocked: true, outside: 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ready := make([]*types.Issue, 0, defaultPage+2)
+			for i := range defaultPage + 1 {
+				ready = append(ready, issue(fmt.Sprintf("be-%03d", i)))
+			}
+			deps := make(map[string][]*types.Dependency)
+			if tc.readyBlocked {
+				z := issue("be-z")
+				ready = append(ready, z)
+				deps[z.ID] = []*types.Dependency{externalDep(z.ID, "external:remote:payments", types.DepBlocks)}
+			}
+			for i := range tc.outside {
+				id := fmt.Sprintf("be-done-%02d", i)
+				deps[id] = []*types.Dependency{externalDep(id, "external:remote:payments", types.DepBlocks)}
+			}
+			raw := &fakeStore{
+				ready:                 ready,
+				deps:                  deps,
+				excludeIDsUnsupported: true,
+				defaultPage:           defaultPage,
+			}
+			store := testStore(raw, &fakeStore{}, true)
+			const want = defaultPage + 1 // every ready issue but be-z
+
+			counter, err := store.ReadyCounter()
+			if err != nil {
+				t.Fatalf("ReadyCounter: %v", err)
+			}
+			text, err := counter.CountReady(t.Context(), publicops.ReadyRequest{})
+			if err != nil {
+				t.Fatalf("CountReady: %v", err)
+			}
+			if text.Total != want {
+				t.Fatalf("text total = %d, want %d", text.Total, want)
+			}
+			for _, limit := range []int{0, defaultPage} {
+				rows, total, err := store.GetReadyWorkWithCountsAndTotal(t.Context(), types.WorkFilter{Limit: limit})
+				if err != nil {
+					t.Fatalf("GetReadyWorkWithCountsAndTotal(Limit %d): %v", limit, err)
+				}
+				if len(rows) != defaultPage || total != want {
+					t.Fatalf("Limit %d: %d rows, total %d; want %d rows, total %d", limit, len(rows), total, defaultPage, want)
+				}
+			}
+		})
 	}
 }
 

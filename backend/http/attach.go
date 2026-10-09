@@ -33,19 +33,22 @@ import (
 // is the easier door for a caller that does not need them split.
 //
 // Attach does not create beadsDir itself — MkdirAll is the caller's job, same
-// as SaveTarget's own precondition. It DOES ensure the sidecar's filename is
-// covered by beadsDir's .gitignore (gitignore.EnsurePatternIgnored), the same
-// guarantee `bd connect` makes via doctor.EnsureGitignoreForBeadsDir — but
-// through a small, independent implementation here rather than importing
-// cmd/bd/doctor, whose package as a whole pulls in dolt and git-process
-// dependencies that would break backend/http's promise of a minimal
-// dependency footprint for an embedder. The two are complementary and
+// as SaveTarget's own precondition. It DOES ensure both of this backend's
+// per-user filenames are covered by beadsDir's .gitignore
+// (gitignore.EnsurePatternIgnored): the sidecar, and
+// httpclient.LocalMetadataFileName, which the store writes on first use. That
+// is the same guarantee `bd connect` makes via doctor.EnsureGitignoreForBeadsDir
+// — but through a small, independent implementation here rather than
+// importing cmd/bd/doctor, whose package as a whole pulls in dolt and
+// git-process dependencies that would break backend/http's promise of a
+// minimal dependency footprint for an embedder. The two are complementary and
 // idempotent together.
 //
-// It is the one place that writes BOTH beads/http's files, so a caller that
-// used to hand-assemble the pair (`bd connect`'s own connectCmd.RunE,
-// test/embedder's linkage proof) can call this instead and stay correct
-// across a future change to either file's shape.
+// It is the one place that writes BOTH of the files that activate beads/http
+// (the sidecar and metadata.json's backend selection; the local metadata file
+// is the store's own), so a caller that used to hand-assemble the pair
+// (`bd connect`'s own connectCmd.RunE, test/embedder's linkage proof) can call
+// this instead and stay correct across a future change to either file's shape.
 func Attach(beadsDir string, target Target) error {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
@@ -63,9 +66,11 @@ func Attach(beadsDir string, target Target) error {
 	// or a chain of reconnects would forget what to restore and --clear
 	// would land back on http with no sidecar. Carry the ALREADY-recorded
 	// value forward instead; a failed or missing read just leaves it "",
-	// the same as a workspace with nothing to restore.
+	// the same as a workspace with nothing to restore. The check reads the
+	// raw field: in a process that never ran Register, GetBackend() reports an
+	// http workspace as the dolt default, and the reconnect would record that.
 	if target.PreviousBackend == "" {
-		if cfg.GetBackend() == httpclient.Backend {
+		if cfg.Backend == httpclient.Backend {
 			if prior, err := httpclient.LoadTarget(beadsDir); err == nil {
 				target.PreviousBackend = prior.PreviousBackend
 			}
@@ -76,8 +81,13 @@ func Attach(beadsDir string, target Target) error {
 	if err := SaveTarget(beadsDir, target); err != nil {
 		return fmt.Errorf("writing %s: %w", httpclient.TargetFileName, err)
 	}
-	if err := gitignore.EnsurePatternIgnored(beadsDir, httpclient.TargetFileName); err != nil {
-		return fmt.Errorf("ensuring %s is gitignored: %w", httpclient.TargetFileName, err)
+	// Both of this backend's per-user files: the sidecar just written, and
+	// the local metadata file the store itself writes on first use, which
+	// never passes through here and so must be covered in advance.
+	for _, name := range []string{httpclient.TargetFileName, httpclient.LocalMetadataFileName} {
+		if err := gitignore.EnsurePatternIgnored(beadsDir, name); err != nil {
+			return fmt.Errorf("ensuring %s is gitignored: %w", name, err)
+		}
 	}
 	// Only the backend SELECTION changes here. cfg.Database/cfg.ProjectID (if
 	// an existing metadata.json carried them for a different, prior backend)
