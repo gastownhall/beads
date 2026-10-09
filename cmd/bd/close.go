@@ -752,30 +752,53 @@ func closeBeadGateGetter(gateStore storage.DoltStorage) issueGetter {
 // fully state-derived and idempotent: it early-returns unless the root is open,
 // auto-close-eligible, and has all steps complete, so re-invoking it never
 // double-closes or reintroduces side effects.
+//
+// Every read and the close go through issueops roles (see roleMolStore), so a
+// remote backend runs the same auto-close a local one does. It stays best
+// effort — the step's own close already landed and is not failed — but a read
+// or close the backend refuses is WARNED on stderr rather than swallowed: a
+// silent skip strands the molecule root open with nothing saying why.
 func autoCloseCompletedMolecule(ctx context.Context, s storage.DoltStorage, closedStepID, actorName, session string) string {
-	moleculeID := findParentMolecule(ctx, s, closedStepID)
+	if s == nil {
+		return ""
+	}
+	molStore := newRoleMolStore(s)
+	warn := func(id string, err error) string {
+		fmt.Fprintf(os.Stderr, "Warning: could not check molecule auto-close for %s: %v\n", id, err)
+		return ""
+	}
+
+	moleculeID, err := findParentMolecule(ctx, molStore, closedStepID)
+	if err != nil {
+		return warn(closedStepID, err)
+	}
 	if moleculeID == "" {
 		return "" // Not part of a molecule
 	}
 
 	// Check if molecule root is already closed
-	root, err := s.GetIssue(ctx, moleculeID)
-	if err != nil || root == nil || root.Status == types.StatusClosed || !shouldAutoCloseCompletedRoot(root) {
+	root, err := molStore.GetIssue(ctx, moleculeID)
+	if err != nil {
+		return warn(moleculeID, err)
+	}
+	if root == nil || root.Status == types.StatusClosed || !shouldAutoCloseCompletedRoot(root) {
 		return ""
 	}
 
 	// Load progress to check completion
-	progress, err := getMoleculeProgress(ctx, s, moleculeID)
+	progress, err := getMoleculeProgress(ctx, molStore, moleculeID)
 	if err != nil {
-		return "" // Best effort — don't fail the close
+		return warn(moleculeID, err)
 	}
 
 	if progress.Completed < progress.Total {
 		return "" // Not all steps complete yet
 	}
 
-	// All steps complete — auto-close the molecule root
-	if err := s.CloseIssue(ctx, moleculeID, "all steps complete", actorName, session); err != nil {
+	// All steps complete — auto-close the molecule root through the
+	// Lifecycle role, guarded on the root revision read above so a concurrent
+	// reopen is not overwritten.
+	if err := closeCompletedMoleculeRoot(ctx, s, root, actorName, session); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not auto-close completed molecule %s: %v\n", moleculeID, err)
 		return ""
 	}

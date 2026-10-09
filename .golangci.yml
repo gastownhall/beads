@@ -472,7 +472,13 @@ linters:
         linters:
           - forbidigo
       # Molecule reporting: each selects the members of one molecule.
-      - path: '^cmd/bd/mol_(current|port|progress|ready_gated|stale)\.go$'
+      #
+      # `mol current` and `mol progress` LEFT this list when their in_progress
+      # and hooked listings moved onto issueops.Reader.List (cmd/bd/mol_roles.go)
+      # so a remote backend answers them. The proxied route's in-transaction
+      # port still searches through the unit of work, and that filter lives in
+      # mol_port.go beside the port.
+      - path: '^cmd/bd/mol_(port|ready_gated|stale)\.go$'
         text: 'do not write a filter here'
         linters:
           - forbidigo

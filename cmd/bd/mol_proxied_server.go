@@ -229,9 +229,15 @@ func runMolCurrentProxiedServer(ctx context.Context, args []string, agent string
 		}
 		molecules = append(molecules, progress)
 	} else {
-		molecules = findInProgressMolecules(ctx, r, agent)
+		molecules, err = findInProgressMolecules(ctx, r, agent)
+		if err != nil {
+			return HandleErrorRespectJSON("finding molecules in progress: %v", err)
+		}
 		if len(molecules) == 0 {
-			molecules = findHookedMolecules(ctx, r, agent)
+			molecules, err = findHookedMolecules(ctx, r, agent)
+			if err != nil {
+				return HandleErrorRespectJSON("finding hooked molecules: %v", err)
+			}
 		}
 		if len(molecules) == 0 {
 			if jsonOutput {
@@ -278,7 +284,10 @@ func runMolProgressProxiedServer(ctx context.Context, args []string) error {
 		}
 		moleculeID = resolved
 	} else {
-		moleculeIDs := findInProgressMoleculeIDs(ctx, r, currentActor())
+		moleculeIDs, err := findInProgressMoleculeIDs(ctx, r, currentActor())
+		if err != nil {
+			return HandleErrorRespectJSON("finding molecules in progress: %v", err)
+		}
 		if len(moleculeIDs) == 0 {
 			if jsonOutput {
 				return outputJSON([]interface{}{})

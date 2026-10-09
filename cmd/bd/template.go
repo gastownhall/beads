@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -212,8 +213,17 @@ func loadDescendants(ctx context.Context, s molReader, subgraph *TemplateSubgrap
 	// Hierarchical IDs follow the pattern: parentID.N (e.g., "gt-abc.1", "gt-abc.2")
 	hierarchicalChildren, err := findHierarchicalChildren(ctx, s, parentID)
 	if err != nil {
-		// Non-fatal: continue with what we have
-		return nil
+		// The parent-child edges read above are the molecule's membership;
+		// this id-pattern scan only heals children whose edge is missing. A
+		// backend that cannot express an id-prefix search (a remote backend)
+		// therefore loads the edge-linked subgraph without the heal. Any other
+		// failure is a failed read and is returned, not treated as "no
+		// children".
+		var unsupported *storage.ErrUnsupported
+		if errors.As(err, &unsupported) {
+			return nil
+		}
+		return fmt.Errorf("failed to find hierarchical children of %s: %w", parentID, err)
 	}
 
 	for _, child := range hierarchicalChildren {

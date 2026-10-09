@@ -1486,19 +1486,19 @@ func TestFindParentMolecule(t *testing.T) {
 	}
 
 	// Find parent molecule from grandchild
-	moleculeID := findParentMolecule(ctx, s, grandchild.ID)
+	moleculeID := mustFindParentMolecule(t, ctx, newRoleMolStore(s), grandchild.ID)
 	if moleculeID != root.ID {
 		t.Errorf("findParentMolecule(grandchild) = %q, want %q", moleculeID, root.ID)
 	}
 
 	// Find parent molecule from child
-	moleculeID = findParentMolecule(ctx, s, child.ID)
+	moleculeID = mustFindParentMolecule(t, ctx, newRoleMolStore(s), child.ID)
 	if moleculeID != root.ID {
 		t.Errorf("findParentMolecule(child) = %q, want %q", moleculeID, root.ID)
 	}
 
 	// Find parent molecule from root
-	moleculeID = findParentMolecule(ctx, s, root.ID)
+	moleculeID = mustFindParentMolecule(t, ctx, newRoleMolStore(s), root.ID)
 	if moleculeID != root.ID {
 		t.Errorf("findParentMolecule(root) = %q, want %q", moleculeID, root.ID)
 	}
@@ -1515,7 +1515,7 @@ func TestFindParentMolecule(t *testing.T) {
 	}
 
 	// Should return empty for orphan
-	moleculeID = findParentMolecule(ctx, s, orphan.ID)
+	moleculeID = mustFindParentMolecule(t, ctx, newRoleMolStore(s), orphan.ID)
 	if moleculeID != "" {
 		t.Errorf("findParentMolecule(orphan) = %q, want empty", moleculeID)
 	}
@@ -1587,7 +1587,10 @@ func TestFindParentMoleculesBatch(t *testing.T) {
 	}
 
 	// Batch-find molecule roots for all issues at once
-	roots := findParentMolecules(ctx, s, []string{grandchild.ID, child.ID, root.ID, orphan.ID})
+	roots, err := findParentMolecules(ctx, newRoleMolStore(s), []string{grandchild.ID, child.ID, root.ID, orphan.ID})
+	if err != nil {
+		t.Fatalf("findParentMolecules: %v", err)
+	}
 
 	if got := roots[grandchild.ID]; got != root.ID {
 		t.Errorf("findParentMolecules[grandchild] = %q, want %q", got, root.ID)
@@ -1603,7 +1606,7 @@ func TestFindParentMoleculesBatch(t *testing.T) {
 	}
 
 	// Empty input should return nil
-	if result := findParentMolecules(ctx, s, nil); result != nil {
+	if result, err := findParentMolecules(ctx, newRoleMolStore(s), nil); err != nil || result != nil {
 		t.Errorf("findParentMolecules(nil) = %v, want nil", result)
 	}
 }
@@ -1668,12 +1671,15 @@ func TestFindParentMolecule_RootShapes(t *testing.T) {
 			if tt.isMolecule {
 				wantSingle = root.ID
 			}
-			if got := findParentMolecule(ctx, s, child.ID); got != wantSingle {
+			if got := mustFindParentMolecule(t, ctx, newRoleMolStore(s), child.ID); got != wantSingle {
 				t.Errorf("findParentMolecule(child) = %q, want %q", got, wantSingle)
 			}
 
 			wantBatch := map[string]string{child.ID: wantSingle}
-			gotBatch := findParentMolecules(ctx, s, []string{child.ID})
+			gotBatch, err := findParentMolecules(ctx, newRoleMolStore(s), []string{child.ID})
+			if err != nil {
+				t.Fatalf("findParentMolecules: %v", err)
+			}
 			if got := gotBatch[child.ID]; got != wantBatch[child.ID] {
 				t.Errorf("findParentMolecules(child) = %q, want %q", got, wantBatch[child.ID])
 			}
@@ -1815,7 +1821,7 @@ func TestFindHookedMolecules(t *testing.T) {
 	}
 
 	// Test: findHookedMolecules should find the molecule for this agent
-	molecules := findHookedMolecules(ctx, s, "test-agent")
+	molecules := mustFindHookedMolecules(t, ctx, newRoleMolStore(s), "test-agent")
 	if len(molecules) != 1 {
 		t.Fatalf("findHookedMolecules() got %d molecules, want 1", len(molecules))
 	}
@@ -1824,13 +1830,13 @@ func TestFindHookedMolecules(t *testing.T) {
 	}
 
 	// Test: different agent should not find the molecule
-	molecules = findHookedMolecules(ctx, s, "other-agent")
+	molecules = mustFindHookedMolecules(t, ctx, newRoleMolStore(s), "other-agent")
 	if len(molecules) != 0 {
 		t.Errorf("findHookedMolecules(other-agent) got %d molecules, want 0", len(molecules))
 	}
 
 	// Test: no agent filter should find the molecule
-	molecules = findHookedMolecules(ctx, s, "")
+	molecules = mustFindHookedMolecules(t, ctx, newRoleMolStore(s), "")
 	if len(molecules) != 1 {
 		t.Errorf("findHookedMolecules('') got %d molecules, want 1", len(molecules))
 	}
@@ -3369,4 +3375,22 @@ func TestPourRootNoVars(t *testing.T) {
 	if spawnedRoot.Description != "Release workflow for version bumps" {
 		t.Errorf("Root description should be formula desc, got: %q", spawnedRoot.Description)
 	}
+}
+
+func mustFindParentMolecule(t *testing.T, ctx context.Context, s molReader, id string) string {
+	t.Helper()
+	got, err := findParentMolecule(ctx, s, id)
+	if err != nil {
+		t.Fatalf("findParentMolecule(%s): %v", id, err)
+	}
+	return got
+}
+
+func mustFindHookedMolecules(t *testing.T, ctx context.Context, s molReader, agent string) []*MoleculeProgress {
+	t.Helper()
+	got, err := findHookedMolecules(ctx, s, agent)
+	if err != nil {
+		t.Fatalf("findHookedMolecules(%q): %v", agent, err)
+	}
+	return got
 }

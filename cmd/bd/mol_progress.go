@@ -50,6 +50,9 @@ Example:
 			return HandleErrorRespectJSON("no database connection")
 		}
 
+		// Role-routed so a remote backend answers (or refuses out loud).
+		molStore := newRoleMolStore(store)
+
 		var moleculeID string
 		if len(args) == 1 {
 			resolved, err := utils.ResolvePartialID(ctx, store, args[0])
@@ -58,7 +61,10 @@ Example:
 			}
 			moleculeID = resolved
 		} else {
-			moleculeIDs := findInProgressMoleculeIDs(ctx, store, currentActor())
+			moleculeIDs, err := findInProgressMoleculeIDs(ctx, molStore, currentActor())
+			if err != nil {
+				return HandleErrorRespectJSON("finding molecules in progress: %v", err)
+			}
 			if len(moleculeIDs) == 0 {
 				if jsonOutput {
 					return outputJSON([]interface{}{})
@@ -70,7 +76,7 @@ Example:
 			moleculeID = moleculeIDs[0]
 		}
 
-		stats, err := store.GetMoleculeProgress(ctx, moleculeID)
+		stats, err := molStore.GetMoleculeProgress(ctx, moleculeID)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
@@ -109,16 +115,14 @@ Example:
 
 // findInProgressMoleculeIDs finds molecule IDs with in_progress steps for an agent.
 // This is a lightweight version that only returns IDs without loading subgraphs.
-func findInProgressMoleculeIDs(ctx context.Context, s molReader, agent string) []string {
-	// Query for in_progress issues
-	status := types.StatusInProgress
-	filter := types.IssueFilter{Status: &status}
-	if agent != "" {
-		filter.Assignee = &agent
+// A read the backend refuses is returned, never reported as "none".
+func findInProgressMoleculeIDs(ctx context.Context, s molReader, agent string) ([]string, error) {
+	inProgressIssues, err := listMoleculeCandidates(ctx, s, types.StatusInProgress, agent)
+	if err != nil {
+		return nil, err
 	}
-	inProgressIssues, err := s.SearchIssues(ctx, "", filter)
-	if err != nil || len(inProgressIssues) == 0 {
-		return nil
+	if len(inProgressIssues) == 0 {
+		return nil, nil
 	}
 
 	// Batch-find parent molecules for all in_progress issues (bd-hn4q)
@@ -126,7 +130,10 @@ func findInProgressMoleculeIDs(ctx context.Context, s molReader, agent string) [
 	for i, issue := range inProgressIssues {
 		issueIDs[i] = issue.ID
 	}
-	moleculeRoots := findParentMolecules(ctx, s, issueIDs)
+	moleculeRoots, err := findParentMolecules(ctx, s, issueIDs)
+	if err != nil {
+		return nil, err
+	}
 
 	seen := make(map[string]bool)
 	var moleculeIDs []string
@@ -138,7 +145,7 @@ func findInProgressMoleculeIDs(ctx context.Context, s molReader, agent string) [
 		}
 	}
 
-	return moleculeIDs
+	return moleculeIDs, nil
 }
 
 // printMoleculeProgressStats prints molecule progress in human-readable format

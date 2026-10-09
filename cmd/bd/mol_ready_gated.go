@@ -197,7 +197,10 @@ func findGateReadyMolecules(ctx context.Context, s molReader) ([]*GatedMolecule,
 			hookedIDs[i] = issue.ID
 			hookedMolecules[issue.ID] = true // Mark hooked issue itself
 		}
-		hookedRoots := findParentMolecules(ctx, s, hookedIDs)
+		hookedRoots, err := findParentMolecules(ctx, s, hookedIDs)
+		if err != nil {
+			return nil, fmt.Errorf("finding molecules of hooked issues: %w", err)
+		}
 		for _, molID := range hookedRoots {
 			hookedMolecules[molID] = true
 		}
@@ -226,7 +229,10 @@ func findGateReadyMolecules(ctx context.Context, s molReader) ([]*GatedMolecule,
 	}
 
 	// Batch-find molecule roots for all ready dependents
-	depMolRoots := findParentMolecules(ctx, s, readyDepIDs)
+	depMolRoots, err := findParentMolecules(ctx, s, readyDepIDs)
+	if err != nil {
+		return nil, fmt.Errorf("finding molecules of ready steps: %w", err)
+	}
 
 	moleculeMap := make(map[string]*GatedMolecule)
 	for _, gd := range readyDependents {
