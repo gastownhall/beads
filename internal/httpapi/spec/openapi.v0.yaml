@@ -7975,7 +7975,16 @@ components:
             `issues.batchApply.depAddLineage`, which announces that a
             `dep_add` item on `POST /v0/beads/issues:batchApply` accepts
             `has_spawner` and `thread_id` (see `ApplyDepAddItem`) rather than
-            a `400` naming the member unknown. The
+            a `400` naming the member unknown. One behavior token is
+            CONDITIONAL rather than build-level: `policy.external_dependencies`
+            announces that this server's ready, claim, claim-next, close,
+            blocking and dependency-tree operations already apply bd's
+            external-dependency policy (an issue blocked by an unsatisfied
+            `external:<project>:<capability>` dependency is neither ready,
+            claimable nor closable without force). A server advertises it
+            only when it enforces that policy; a client that sees it must not
+            apply the policy again, and a client that does not see it applies
+            the policy itself. The
             list grows additively, and an operation never appears here unless
             it is fully implemented. This is how a client checks for an
             operation or a behavior — never the version string.

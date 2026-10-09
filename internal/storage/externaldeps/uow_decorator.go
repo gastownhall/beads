@@ -39,6 +39,22 @@ var _ uow.ProviderUnwrapper = (*uowProvider)(nil)
 // to HTTP handlers, which must never run workspace hooks.
 func (p *uowProvider) Unwrap() uow.UnitOfWorkProvider { return p.UnitOfWorkProvider }
 
+// AppliedToProvider is Applied for the unit-of-work chain: it reports whether
+// provider's decorator chain includes WrapUOWProvider's policy layer.
+func AppliedToProvider(provider uow.UnitOfWorkProvider) bool {
+	for provider != nil {
+		if _, ok := provider.(*uowProvider); ok {
+			return true
+		}
+		u, ok := provider.(uow.ProviderUnwrapper)
+		if !ok {
+			return false
+		}
+		provider = u.Unwrap()
+	}
+	return false
+}
+
 // RunNonTx preserves the optional maintenance capability exposed by the
 // proxied provider. Wrapping the provider must not make unrelated commands
 // such as compact lose access to their pinned connection.

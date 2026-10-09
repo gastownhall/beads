@@ -41,6 +41,24 @@ func New(inner storage.DoltStorage, locateProject ProjectLocator, openProject St
 // Unwrap exposes the decorated store to storage.UnwrapStore.
 func (s *Store) Unwrap() storage.DoltStorage { return s.inner }
 
+// Applied reports whether store's decorator chain includes this policy layer,
+// so the roles it hands out apply the external-dependency policy. bd serve
+// reads it to decide whether its handshake may advertise
+// policy.external_dependencies (httpapi.Config.ExternalDependencyPolicy).
+func Applied(store storage.DoltStorage) bool {
+	for store != nil {
+		if _, ok := store.(*Store); ok {
+			return true
+		}
+		u, ok := store.(storage.Unwrapper)
+		if !ok {
+			return false
+		}
+		store = u.Unwrap()
+	}
+	return false
+}
+
 // IssueLifecycle preserves the external close policy for public lifecycle
 // operations. Returning the inner lifecycle directly would promote around the
 // decorator when bd close or bd update uses the lifecycle seam.
@@ -396,13 +414,24 @@ func (s *Store) CountReadyWork(ctx context.Context, filter types.WorkFilter) (in
 // telemetry.InstrumentedStorage.WrapReadyCounter exists for, and why the
 // documented storage.ReadyCounter.CountReady span still appears for text-mode
 // `bd ready` in the cmd/bd chain (hooks -> externaldeps -> telemetry -> store).
+//
+// A remote store answers with its own counter (the server's count operation)
+// whenever its server applies the policy itself; remoteReadyCounter decides
+// per call, since the handshake is read lazily.
 func (s *Store) ReadyCounter() (publicops.ReadyCounter, error) {
 	counter, err := storereadycounter.New(s)
 	if err != nil {
 		return nil, err
 	}
 	if wrapper, ok := s.inner.(readyCounterWrapper); ok {
-		return wrapper.WrapReadyCounter(counter), nil
+		counter = wrapper.WrapReadyCounter(counter)
+	}
+	if s.rolesAreRemote() {
+		inner, err := s.inner.ReadyCounter()
+		if err != nil {
+			return nil, err
+		}
+		return &remoteReadyCounter{inner: inner, fallback: counter, policy: s}, nil
 	}
 	return counter, nil
 }

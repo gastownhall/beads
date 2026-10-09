@@ -211,18 +211,18 @@ const CapBatchApplyDepAddLineage = "issues.batchApply.depAddLineage"
 //
 // It is not in behaviorCapabilities because it is not a property of the build:
 // httpapi advertises it only when the serving process composed its roles
-// through the policy layer, so httpapi.Capabilities() — the build-level list
-// the parity gate compares against — never contains it.
+// through the policy layer (httpapi.Config.ExternalDependencyPolicy, which
+// `bd serve` sets from its actual composition), so httpapi.Capabilities() —
+// the build-level list the parity gate compares against — never contains it.
 //
-// Consumed since S6 (design 3.6): the externaldeps decorator
-// (internal/storage/externaldeps) wraps the http store the same as any local
-// backend (cmd/bd/storage_chain.go wires it unconditionally), and consults
+// The externaldeps decorator (internal/storage/externaldeps) wraps the http
+// store the same as any local backend (cmd/bd/storage_chain.go), and consults
 // storage.ExternalDependencyPolicyProber — which httpclient.Store implements
-// by checking for this token in the handshake — before deciding whether to
-// also enforce the policy client-side. A server that advertises this token
-// has already applied the policy itself, so the decorator's own check is
-// redundant there. A server that does NOT advertise it gets the ordinary
-// client-side enforcement: the policy is never silently skipped merely
+// by checking for this token in the handshake. Against a server that
+// advertises it, every policy-bearing role is the http store's own, passed
+// through untouched (claim-next stays the server's atomic operation). Only a
+// server that does NOT advertise it — an older bd serve, or another server —
+// gets client-side enforcement: the policy is never silently skipped merely
 // because the store is remote.
 const CapExternalDependencies = "policy.external_dependencies"
 

@@ -650,6 +650,37 @@ func TestCapabilitiesAdvertiseEveryImplementedOperation(t *testing.T) {
 	}
 }
 
+// TestExternalDependencyPolicyIsAdvertisedOnlyWhenEnforced pins the one
+// conditional token: policy.external_dependencies rides the handshake exactly
+// when Config says the roles were composed through the policy, and the rest of
+// the list is unchanged either way.
+func TestExternalDependencyPolicyIsAdvertisedOnlyWhenEnforced(t *testing.T) {
+	read := func(cfg Config) []string {
+		ts := newTestServer(t, cfg)
+		caps, _ := decodeBody(t, ts.get(t, "/v0/beads/context"))["capabilities"].([]any)
+		var got []string
+		for _, c := range caps {
+			got = append(got, c.(string))
+		}
+		return got
+	}
+	without := read(Config{})
+	if slices.Contains(without, "policy.external_dependencies") {
+		t.Errorf("a server not composed through the policy advertises it: %v", without)
+	}
+	with := read(Config{ExternalDependencyPolicy: true})
+	if !slices.Contains(with, "policy.external_dependencies") {
+		t.Errorf("a server composed through the policy does not advertise it: %v", with)
+	}
+	if !slices.IsSorted(with) {
+		t.Errorf("capabilities = %v, want them sorted", with)
+	}
+	rest := slices.DeleteFunc(slices.Clone(with), func(c string) bool { return c == "policy.external_dependencies" })
+	if !slices.Equal(rest, without) {
+		t.Errorf("the policy flag changed other tokens: with=%v without=%v", with, without)
+	}
+}
+
 // THE `implemented` GATE IS NOT PINNED HERE, and saying so is the point.
 //
 // A loop asserting that no unimplemented row is advertised was written, run

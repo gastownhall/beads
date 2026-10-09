@@ -29,10 +29,13 @@ import (
 // role terms. The policy itself is unchanged and is never skipped merely
 // because the store is remote (design 3.6):
 //
-//   - a server that advertises wire.CapExternalDependencies has applied it
-//     already, so every view below is a plain passthrough
-//     (storage.ExternalDependencyPolicyProber);
-//   - against any other server it runs here, client-side. Ready reads and the
+//   - a server that advertises wire.CapExternalDependencies (every bd serve
+//     that composes the policy, which is every bd serve) has applied it
+//     already, so every view below first asks serverEnforcesPolicy and then
+//     hands the request to the inner role UNTOUCHED: no client validation, no
+//     edge reads, and claim-next stays the server's atomic operation;
+//   - only against a server that does not advertise it (an older bd serve, or
+//     another implementation) does the policy run here, client-side. Ready reads and the
 //     ready claim exclude externally blocked sources, which needs the
 //     workspace-wide blocker set (loadBlockingState). Every per-issue question
 //     — may this issue be claimed or closed, what blocks these listed rows,
@@ -252,7 +255,9 @@ type remoteClaimer struct {
 }
 
 // Claim refuses a direct claim of externally blocked work before the server's
-// atomic claim. Local blocking edges are the server's claim to judge.
+// atomic claim. Local blocking edges are the server's claim to judge. Against
+// a server that applies the policy, externalBlockersFor reads nothing and the
+// claim goes through untouched.
 func (c *remoteClaimer) Claim(ctx context.Context, req issueops.ClaimRequest) (issueops.ClaimResult, error) {
 	blockers, err := c.policy.externalBlockersFor(ctx, []string{req.IssueID})
 	if err != nil {
@@ -267,28 +272,29 @@ func (c *remoteClaimer) Claim(ctx context.Context, req issueops.ClaimRequest) (i
 // ── ReadyClaimer ────────────────────────────────────────────────────
 
 type remoteReadyClaimer struct {
+	inner  issueops.ReadyClaimer
 	policy *Store
 }
 
-// ClaimNext is the server's atomic claim-next when nothing is externally
-// blocked. Otherwise the server cannot be told what to skip, so the choice is
-// made here: read the ready candidates in the requested order, skip the
-// blocked ones, and claim each remaining candidate by id until one is won.
-// A candidate another actor took in between is a lost race, not a failure.
+// ClaimNext is the server's atomic claim-next, untouched, against a server
+// that applies the policy itself, and against any server while nothing is
+// externally blocked. Only an older server with externally blocked work
+// cannot be told what to skip, so there the choice is made here: read the
+// ready candidates in the requested order, skip the blocked ones, and claim
+// each remaining candidate by id until one is won. A candidate another actor
+// took in between is a lost race, not a failure.
 func (c *remoteReadyClaimer) ClaimNext(ctx context.Context, req issueops.ClaimNextRequest) (issueops.ClaimNextResult, error) {
-	if err := storageissueops.ValidateClaimNextRequest(req); err != nil {
-		return issueops.ClaimNextResult{}, err
-	}
+	// externallyBlockedIDs is empty against a server that applies the policy
+	// (loadBlockingState's probe), so that server's atomic claim answers.
 	blocked, err := c.policy.externallyBlockedIDs(ctx)
 	if err != nil {
 		return issueops.ClaimNextResult{}, err
 	}
 	if len(blocked) == 0 {
-		inner, err := c.policy.inner.ReadyClaimer()
-		if err != nil {
-			return issueops.ClaimNextResult{}, err
-		}
-		return inner.ClaimNext(ctx, req)
+		return c.inner.ClaimNext(ctx, req)
+	}
+	if err := storageissueops.ValidateClaimNextRequest(req); err != nil {
+		return issueops.ClaimNextResult{}, err
 	}
 	reader, err := c.policy.inner.IssueReader()
 	if err != nil {
@@ -325,6 +331,27 @@ func (c *remoteReadyClaimer) ClaimNext(ctx context.Context, req issueops.ClaimNe
 	return issueops.ClaimNextResult{}, nil
 }
 
+// ── ReadyCounter ────────────────────────────────────────────────────
+
+type remoteReadyCounter struct {
+	inner    issueops.ReadyCounter
+	fallback issueops.ReadyCounter
+	policy   *Store
+}
+
+// CountReady is the server's count when the server applies the policy. Against
+// any other server it is the decorator's externally filtered count.
+func (c *remoteReadyCounter) CountReady(ctx context.Context, req issueops.ReadyRequest) (issueops.ReadyCountResult, error) {
+	enforced, err := c.policy.serverEnforcesPolicy(ctx)
+	if err != nil {
+		return issueops.ReadyCountResult{}, err
+	}
+	if enforced {
+		return c.inner.CountReady(ctx, req)
+	}
+	return c.fallback.CountReady(ctx, req)
+}
+
 // ── BlockingAnnotator ───────────────────────────────────────────────
 
 type remoteBlockingAnnotator struct {
@@ -333,11 +360,15 @@ type remoteBlockingAnnotator struct {
 }
 
 // AnnotateBlocking adds each listed row's unsatisfied external blockers to the
-// server's derived answer, reading the edges of those rows only.
+// server's derived answer, reading the edges of those rows only. A server that
+// applies the policy has already added them, and its answer is returned as is.
 func (a *remoteBlockingAnnotator) AnnotateBlocking(ctx context.Context, req issueops.BlockingRequest) (issueops.BlockingResult, error) {
 	result, err := a.inner.AnnotateBlocking(ctx, req)
 	if err != nil {
 		return issueops.BlockingResult{}, err
+	}
+	if enforced, err := a.policy.serverEnforcesPolicy(ctx); err != nil || enforced {
+		return result, err
 	}
 	ids := make([]string, 0, len(result.Items))
 	for _, item := range result.Items {
@@ -399,6 +430,7 @@ func (t *remoteTreeWalker) WalkTree(ctx context.Context, req issueops.WalkTreeRe
 // ── BatchCloser ─────────────────────────────────────────────────────
 
 type remoteBatchCloser struct {
+	inner  issueops.BatchCloser
 	policy *Store
 }
 
@@ -413,17 +445,12 @@ type remoteBatchCloser struct {
 //
 // A forced batch has nothing to judge. A ClaimNext batch is passed through
 // whole: no remote batch close carries a claim, so the server's refusal is the
-// answer, not a claim made without the external exclusions.
+// answer, not a claim made without the external exclusions. Against a server
+// that applies the policy, externalBlockersFor reads nothing and the whole
+// request goes through untouched.
 func (c *remoteBatchCloser) CloseBatch(ctx context.Context, request issueops.CloseBatchRequest) (issueops.CloseBatchResult, error) {
-	if err := storageissueops.ValidateCloseBatchRequest(request); err != nil {
-		return issueops.CloseBatchResult{}, err
-	}
-	inner, err := c.policy.inner.BatchCloser()
-	if err != nil {
-		return issueops.CloseBatchResult{}, err
-	}
 	if request.Force || request.ClaimNext != nil {
-		return inner.CloseBatch(ctx, request)
+		return c.inner.CloseBatch(ctx, request)
 	}
 	ids := make([]string, 0, len(request.Items))
 	for _, item := range request.Items {
@@ -434,7 +461,10 @@ func (c *remoteBatchCloser) CloseBatch(ctx context.Context, request issueops.Clo
 		return issueops.CloseBatchResult{}, err
 	}
 	if len(blockers) == 0 {
-		return inner.CloseBatch(ctx, request)
+		return c.inner.CloseBatch(ctx, request)
+	}
+	if err := storageissueops.ValidateCloseBatchRequest(request); err != nil {
+		return issueops.CloseBatchResult{}, err
 	}
 
 	outcomes := make([]issueops.CloseOutcome, len(request.Items))
@@ -454,7 +484,7 @@ func (c *remoteBatchCloser) CloseBatch(ctx context.Context, request issueops.Clo
 		forwarded = append(forwarded, i)
 	}
 	if len(forward.Items) > 0 {
-		res, err := inner.CloseBatch(ctx, forward)
+		res, err := c.inner.CloseBatch(ctx, forward)
 		if err != nil {
 			return issueops.CloseBatchResult{}, err
 		}
@@ -475,4 +505,5 @@ var (
 	_ issueops.ReadyClaimer      = (*remoteReadyClaimer)(nil)
 	_ issueops.BlockingAnnotator = (*remoteBlockingAnnotator)(nil)
 	_ issueops.TreeWalker        = (*remoteTreeWalker)(nil)
+	_ issueops.ReadyCounter      = (*remoteReadyCounter)(nil)
 )

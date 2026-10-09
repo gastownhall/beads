@@ -22,10 +22,11 @@ import (
 //
 // This pins the fix at the layer design 3.6 actually gates on: the decorator
 // must still apply client-side enforcement whenever the server's handshake
-// does not advertise wire.CapExternalDependencies. Today's OSS httpapi never
-// advertises it (confirmed below), so this also exercises the http backend's
-// GetAllDependencyRecords fallback (loadBlockingState's compatibility path)
-// against a real served server, end to end.
+// does not advertise wire.CapExternalDependencies. This harness serves raw
+// roles, not roles composed through the policy, so its httpapi truthfully
+// withholds the token (confirmed below) — the shape of an older bd serve — and
+// this also exercises the http backend's GetAllDependencyRecords fallback
+// (loadBlockingState's compatibility path) against a real served server.
 func TestServedReadyExcludesUnsatisfiedExternalDependencyWithoutServerCapability(t *testing.T) {
 	env := newServedEnv(t, "hixd")
 	ctx := t.Context()

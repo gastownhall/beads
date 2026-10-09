@@ -649,6 +649,21 @@ func TestE2E_AdvertisedExternalPolicyIsPassedThrough(t *testing.T) {
 	f.mustRun(nil, "ready", "--json", "--limit", "10")
 	f.mustRun(nil, "show", id, "--json")
 	f.mustRun(nil, "update", other, "--claim", "--json")
+	// claim-next is the server's ONE atomic operation, not a client-side
+	// read-then-claim loop.
+	f.mustRun(nil, "ready", "--claim", "--json")
+	var claimNexts, byID int
+	for _, p := range counter.snapshot() {
+		switch {
+		case p == "POST /v0/beads/issues:claimNext":
+			claimNexts++
+		case strings.HasPrefix(p, "POST /v0/beads/issues/") && strings.HasSuffix(p, ":claim"):
+			byID++
+		}
+	}
+	if claimNexts != 1 || byID != 0 {
+		t.Errorf("claimNext requests = %d, by-id claims = %d; want one atomic claim-next and no by-id claim: %v", claimNexts, byID, counter.snapshot())
+	}
 	f.mustRun(nil, "close", other, "--json")
 	for _, p := range counter.snapshot() {
 		if strings.HasPrefix(p, "GET /v0/beads/dependencies") {
