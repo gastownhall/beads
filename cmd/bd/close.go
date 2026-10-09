@@ -153,6 +153,15 @@ the flags appear in the command line.`,
 			postCloseStore = results[0].Store
 		}
 
+		// --continue is a second operation after the close commits. Against a
+		// server that cannot run it (no issues.advanceMolecule), refuse BEFORE
+		// closing: refusing only at the advance would leave the step closed
+		// and the next step unclaimed, the half-done state --continue exists
+		// to avoid.
+		if continueFlag && !storage.ServesMoleculeAdvance(ctx, postCloseStore) {
+			return HandleErrorRespectJSON("--continue needs the server's issues.advanceMolecule operation, which this server does not advertise; nothing was closed (close without --continue, then claim the next step with bd update --claim)")
+		}
+
 		// THE BATCH. The CLI's own close policy runs first and read-only, then
 		// every id it passed goes to the BatchCloser role as one request per
 		// store: one transaction, one Dolt commit over N ids, and an id the
@@ -237,6 +246,9 @@ the flags appear in the command line.`,
 			// an already-closed no-op.
 			if molID := reportMoleculeAutoClose(res.AutoClosedMolecule, res.MoleculeAutoCloseRefusal); molID != "" {
 				mutatedStores[activeStore] = append(mutatedStores[activeStore], molID)
+			}
+			if res.Changed {
+				noticeUnservedMoleculeAutoClose(ctx, activeStore, id)
 			}
 
 			// First id this command settled as closed — a real close or an
@@ -748,6 +760,33 @@ func reportMoleculeAutoClose(root *types.Issue, refusal string) string {
 		debug.PrintNormal("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(root.ID, root.Title))
 	}
 	return root.ID
+}
+
+// noticeUnservedMoleculeAutoClose names, on stderr, the molecule a close could
+// not ask to auto-close. Against a server that does not advertise
+// issues.close.autoCloseMolecule (an older bd serve, or one whose orchestrator
+// owns the molecule lifecycle) the close goes out without the request
+// (storage.ServesMoleculeAutoClose), so a step that belongs to a molecule must
+// say so: the root's auto-close is that server's to run, never silently
+// skipped. A store that serves the auto-close prints nothing.
+func noticeUnservedMoleculeAutoClose(ctx context.Context, s storage.DoltStorage, stepID string) {
+	if s == nil || storage.ServesMoleculeAutoClose(ctx, s) {
+		return
+	}
+	const token = "issues.close.autoCloseMolecule"
+	reader, err := issueops.NewMoleculeReader(s)
+	var root string
+	if err == nil {
+		root, err = issueops.MoleculeRoot(ctx, reader, stepID)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "note: %s was closed without its molecule auto-close (the server does not advertise %s), and its molecule could not be read: %v\n", stepID, token, err)
+		return
+	}
+	if root == "" || root == stepID {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "note: %s belongs to molecule %s, which this close did not auto-close: the server does not advertise %s, so the molecule's auto-close is the server's to run (bd close %s closes it once every step is closed)\n", stepID, root, token, root)
 }
 
 // advanceMoleculeDirect runs `bd close --continue` on the direct route through

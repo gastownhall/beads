@@ -155,3 +155,19 @@ func TestServesMoleculeAutoCloseFollowsTheHandshake(t *testing.T) {
 		t.Error("ServesMoleculeAutoClose = false against a server advertising the token")
 	}
 }
+
+// `bd close --continue` asks storage.ServesMoleculeAdvance before it closes,
+// so a server silent on issues.advanceMolecule is refused up front instead of
+// after the step's close has committed.
+func TestServesMoleculeAdvanceFollowsTheHandshake(t *testing.T) {
+	ctx := t.Context()
+	token, _ := wire.CapabilityFor(wire.OpAdvanceMolecule)
+	silent := New(testTarget(t), &stubWire{}, &apigen.ContextResponse{BdVersion: "1.2.3", Capabilities: []string{"issues.close"}})
+	if storage.ServesMoleculeAdvance(ctx, silent) {
+		t.Error("ServesMoleculeAdvance = true against a server silent on the token")
+	}
+	served := New(testTarget(t), &stubWire{}, &apigen.ContextResponse{BdVersion: "1.2.3", Capabilities: []string{"issues.close", token}})
+	if !storage.ServesMoleculeAdvance(ctx, served) {
+		t.Error("ServesMoleculeAdvance = false against a server advertising the token")
+	}
+}

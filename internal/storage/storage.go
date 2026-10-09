@@ -1100,6 +1100,32 @@ func ServesMoleculeAutoClose(ctx context.Context, s DoltStorage) bool {
 	return err != nil || served
 }
 
+// MoleculeAdvanceProber is implemented by a DoltStorage whose MoleculeStepper
+// may not be served — today exactly httpclient.Store, whose server advertises
+// it with issues.advanceMolecule. Every local backend composes the stepper
+// over its own roles and does not implement this.
+type MoleculeAdvanceProber interface {
+	ServesMoleculeAdvance(ctx context.Context) (bool, error)
+}
+
+// ServesMoleculeAdvance reports whether s's MoleculeStepper can run
+// (MoleculeAdvanceProber, looked up through every decorator). A store that
+// does not implement the prober runs the advance itself and is answered true.
+// A probe that fails is answered true too: the advance dials the same
+// handshake and reports its failure.
+//
+// `bd close --continue` asks BEFORE it closes: the advance is a second
+// operation after the close commits, so refusing it only then would leave
+// the step closed and the next step unclaimed.
+func ServesMoleculeAdvance(ctx context.Context, s DoltStorage) bool {
+	prober, ok := UnwrapStore(s).(MoleculeAdvanceProber)
+	if !ok {
+		return true
+	}
+	served, err := prober.ServesMoleculeAdvance(ctx)
+	return err != nil || served
+}
+
 // ExcludeIDsUnsupportedStore is implemented by a DoltStorage whose ready-work
 // reads cannot express types.WorkFilter.ExcludeIDs over their own transport.
 // Today that is exactly httpclient.Store: the v0 wire's listReadyWork and

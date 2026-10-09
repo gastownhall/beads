@@ -80,6 +80,9 @@ func runCloseDirectIfRevision(ctx context.Context, id, reason string, force bool
 	if molID := reportMoleculeAutoClose(closeResult.AutoClosedMolecule, closeResult.MoleculeAutoCloseRefusal); molID != "" {
 		mutatedIDs = append(mutatedIDs, molID)
 	}
+	if closeResult.Changed {
+		noticeUnservedMoleculeAutoClose(ctx, result.Store, result.ResolvedID)
+	}
 
 	if err := commitPendingIfEmbedded(ctx, result.Store, currentActor(), doltAutoCommitParams{
 		Command:  "close",

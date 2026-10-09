@@ -197,3 +197,70 @@ func decodeMolecules(t *testing.T, out string) []e2eMolecule {
 	}
 	return got
 }
+
+// TestE2E_MoleculeCloseAgainstAnOlderServer is `bd close` on a molecule step
+// against a server that advertises neither issues.close.autoCloseMolecule nor
+// issues.advanceMolecule (an older bd serve, or one whose orchestrator owns
+// the molecule lifecycle). Neither gap may be silent:
+//
+//   - close --continue refuses BEFORE closing, so the step is not left closed
+//     with the next step unclaimed;
+//   - a plain close goes out without the auto-close request and names the
+//     molecule it did not auto-close on stderr.
+func TestE2E_MoleculeCloseAgainstAnOlderServer(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	bin := buildBD(t)
+	addr, _ := startMaskingProxy(t, startE2EServer(t), func(body map[string]any) {
+		caps, _ := body["capabilities"].([]any)
+		kept := caps[:0]
+		for _, c := range caps {
+			if c != "issues.close.autoCloseMolecule" && c != "issues.advanceMolecule" {
+				kept = append(kept, c)
+			}
+		}
+		body["capabilities"] = kept
+	})
+	workspace := t.TempDir()
+	bd := func(args ...string) bdResult {
+		t.Helper()
+		return runBD(t, bin, workspace, nil, append([]string{"--actor", "alice"}, args...)...)
+	}
+	mustBD := func(args ...string) bdResult {
+		t.Helper()
+		r := bd(args...)
+		if r.code != 0 {
+			t.Fatalf("bd %s failed (exit %d): stdout=%s stderr=%s", strings.Join(args, " "), r.code, r.stdout, r.stderr)
+		}
+		return r
+	}
+	status := func(id string) string {
+		t.Helper()
+		return firstJSONField(t, mustBD("show", id, "--json").stdout, "status")
+	}
+
+	mustBD("connect", "http://"+addr, "--expect-project-id", e2eProjectID, "--json")
+	root := firstJSONField(t, mustBD("create", "Old-server molecule", "-t", "molecule", "--json").stdout, "id")
+	step := firstJSONField(t, mustBD("create", "Only step", "--parent", root, "--json").stdout, "id")
+
+	cont := bd("close", step, "--continue", "--json")
+	if cont.code == 0 {
+		t.Fatalf("close --continue succeeded against a server without issues.advanceMolecule: %s", cont.stdout)
+	}
+	if !strings.Contains(cont.stderr+cont.stdout, "issues.advanceMolecule") || !strings.Contains(cont.stderr+cont.stdout, "nothing was closed") {
+		t.Errorf("close --continue refusal does not name the missing operation: stdout=%s stderr=%s", cont.stdout, cont.stderr)
+	}
+	if got := status(step); got == "closed" {
+		t.Fatalf("close --continue refused but %s is closed: the refusal came after the close", step)
+	}
+
+	closed := mustBD("close", step, "--json")
+	if !strings.Contains(closed.stderr, "belongs to molecule "+root) || !strings.Contains(closed.stderr, "issues.close.autoCloseMolecule") {
+		t.Errorf("close of %s against a server without the auto-close gave no notice naming %s: stderr=%s", step, root, closed.stderr)
+	}
+	if got := status(step); got != "closed" {
+		t.Errorf("%s status = %q, want closed", step, got)
+	}
+	if got := status(root); got == "closed" {
+		t.Errorf("molecule %s closed although the server was not asked to auto-close it", root)
+	}
+}

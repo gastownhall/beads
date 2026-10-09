@@ -32,6 +32,15 @@ func (s *Store) ServesMoleculeAutoClose(ctx context.Context) (bool, error) {
 
 var _ storage.MoleculeAutoCloseProber = (*Store)(nil)
 
+// ServesMoleculeAdvance implements storage.MoleculeAdvanceProber from the
+// handshake: whether this server serves issues.advanceMolecule.
+func (s *Store) ServesMoleculeAdvance(ctx context.Context) (bool, error) {
+	token, _ := wire.CapabilityFor(wire.OpAdvanceMolecule)
+	return s.servesCapability(ctx, token)
+}
+
+var _ storage.MoleculeAdvanceProber = (*Store)(nil)
+
 // requireAutoCloseMolecule refuses, before anything is dialed, a close that
 // asks for AutoCloseMolecule against a server that does not advertise
 // wire.CapCloseAutoCloseMolecule. The rule runs in ONE place — the server's
