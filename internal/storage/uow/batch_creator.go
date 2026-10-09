@@ -102,6 +102,13 @@ func createBatchItem(ctx context.Context, uw UnitOfWork, request publicops.Creat
 	if !prepared.Issue.Ephemeral && !prepared.Issue.NoHistory && prepared.Issue.WispType != "" {
 		prepared.Issue.Ephemeral = true
 	}
+	// Vocabulary enforcement (bda-yxac): same caller-named-labels check as the
+	// single guarded create.
+	if prepared.Issue != nil {
+		if err := checkLabelVocabularyForGuardedWrite(ctx, uw, prepared.Issue.Labels); err != nil {
+			return nil, err
+		}
+	}
 	params, useWisp, err := createParams(prepared)
 	if err != nil {
 		return nil, validationError(err)

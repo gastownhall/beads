@@ -43,6 +43,13 @@ type exportSource interface {
 	// LoadExportRelations bulk-loads labels, dependency records, comments,
 	// comment counts, and dependency counts for the searched issues.
 	LoadExportRelations(ctx context.Context, issues []*types.Issue) (exportRelations, error)
+	// ListLabelDefinitions returns the label vocabulary registry (bd label
+	// define). Definitions are workspace-shared policy and are exported
+	// ALWAYS: a JSONL round-trip that kept labels.vocabulary=enforce but
+	// dropped the definitions would restore a workspace whose enforcement
+	// runs against an EMPTY vocabulary - the config looks correct while the
+	// behavior is wrong either way the empty set is read.
+	ListLabelDefinitions(ctx context.Context) ([]types.LabelDefinition, error)
 	// WispPlaneIDs reports which of ids currently live in the WISPS table.
 	// Export uses it to stamp the explicit "wisp_plane" marker on records
 	// whose row flags are ambiguous: a no_history=true row is either an
@@ -102,6 +109,13 @@ func (storeExportSource) GetConfig(ctx context.Context, key string) (string, err
 
 func (storeExportSource) GetAllConfig(ctx context.Context) (map[string]string, error) {
 	return store.GetAllConfig(ctx)
+}
+
+func (storeExportSource) ListLabelDefinitions(ctx context.Context) ([]types.LabelDefinition, error) {
+	if store == nil {
+		return nil, nil
+	}
+	return store.ListLabelDefinitions(ctx)
 }
 
 func (storeExportSource) LoadExportRelations(ctx context.Context, issues []*types.Issue) (exportRelations, error) {
@@ -198,6 +212,10 @@ func (s *uowExportSource) GetConfig(ctx context.Context, key string) (string, er
 
 func (s *uowExportSource) GetAllConfig(ctx context.Context) (map[string]string, error) {
 	return s.uw.ConfigUseCase().GetAllConfig(ctx)
+}
+
+func (s *uowExportSource) ListLabelDefinitions(ctx context.Context) ([]types.LabelDefinition, error) {
+	return s.uw.LabelVocabularyUseCase().List(ctx)
 }
 
 // LoadExportRelations reproduces the classic bulk loaders over the

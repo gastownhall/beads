@@ -42,16 +42,16 @@ func resolveLabelTargetProxied(ctx context.Context, id string) (string, error) {
 	return issue.ID, nil
 }
 
-func runLabelListAllProxiedServer(ctx context.Context) error {
-	uw, err := proxiedOpenReadUOW(ctx)
-	if err != nil {
-		return err
-	}
-	defer uw.Close(ctx)
-
+// countAllLabelsProxied tallies every label on every issue in the
+// workspace, partitioning by wisp/permanent plane the same way the direct
+// route's countLabelsAcrossIssues does over a single SearchIssues result.
+// Shared by `bd label list-all` and `bd label defined`, both proxied: see
+// the comment on the loop below for why this is a plain fold over two
+// bulk-label calls rather than a dedicated role.
+func countAllLabelsProxied(ctx context.Context, uw uow.UnitOfWork) (map[string]int, error) {
 	page, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
-		return HandleErrorRespectJSON("%v", err)
+		return nil, err
 	}
 
 	var permIDs, wispIDs []string
@@ -80,16 +80,30 @@ func runLabelListAllProxiedServer(ctx context.Context) error {
 	if len(permIDs) > 0 {
 		byIssue, err := uw.LabelUseCase().GetLabelsForIssues(ctx, permIDs) //nolint:forbidigo // label histogram; no role answers the workspace's label vocabulary
 		if err != nil {
-			return HandleErrorRespectJSON("getting labels: %v", err)
+			return nil, fmt.Errorf("getting labels: %w", err)
 		}
 		accumulate(byIssue)
 	}
 	if len(wispIDs) > 0 {
 		byWisp, err := uw.LabelUseCase().GetLabelsForWisps(ctx, wispIDs) //nolint:forbidigo // label histogram; see GetLabelsForIssues above
 		if err != nil {
-			return HandleErrorRespectJSON("getting labels: %v", err)
+			return nil, fmt.Errorf("getting labels: %w", err)
 		}
 		accumulate(byWisp)
+	}
+	return labelCounts, nil
+}
+
+func runLabelListAllProxiedServer(ctx context.Context) error {
+	uw, err := proxiedOpenReadUOW(ctx)
+	if err != nil {
+		return err
+	}
+	defer uw.Close(ctx)
+
+	labelCounts, err := countAllLabelsProxied(ctx, uw)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	type labelInfo struct {
@@ -152,9 +166,10 @@ func runLabelRenameProxiedServer(ctx context.Context, oldLabel, newLabel string)
 		if rerr != nil {
 			return "", fmt.Errorf("rename label '%s' -> '%s': %w", oldLabel, newLabel, rerr)
 		}
-		if renamed == 0 {
-			return "", nil
-		}
+		// Always publish, even with renamed == 0: the vocabulary registry
+		// follows the rename, so a defined label no issue carries is still a
+		// write, and an empty message would roll it back. A true no-op comes
+		// back from Commit as nothing-to-commit, which RunTx tolerates.
 		return fmt.Sprintf("bd: label rename '%s' -> '%s' (%d issues)", oldLabel, newLabel, renamed), nil
 	})
 	return renamed, merged, err
@@ -167,6 +182,12 @@ func runLabelPropagateProxiedServer(ctx context.Context, args []string) error {
 	}
 	if strings.HasPrefix(label, "provides:") {
 		return HandleErrorRespectJSON("'provides:' labels are reserved for cross-project capabilities. Hint: use 'bd ship %s' instead", strings.TrimPrefix(label, "provides:"))
+	}
+	// Vocabulary check (bda-1735): same interactive-edge check the classic
+	// route runs - propagate joins the advertised enforcement set on both
+	// routes (mirrors runQuickProxiedServer's placement).
+	if err := checkLabelVocabulary(ctx, []string{label}); err != nil {
+		return HandleErrorRespectJSON("label propagate: %v", err)
 	}
 	if uowProvider == nil {
 		return HandleError("proxied-server UOW provider not initialized")

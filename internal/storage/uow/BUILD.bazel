@@ -31,6 +31,7 @@ go_library(
         "issue_operations.go",
         "issue_reader.go",
         "journal_maintenance.go",
+        "label_vocabulary_guard.go",
         "maintenance.go",
         "memories.go",
         "metadata_cas.go",

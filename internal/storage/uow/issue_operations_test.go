@@ -498,6 +498,13 @@ func (s createConfigUseCaseStub) LoadCreateContext(context.Context) (domain.Crea
 	return s.context, s.err
 }
 
+// GetConfig answers "unset" so checkLabelVocabularyForGuardedWrite fails open;
+// without it the embedded nil domain.ConfigUseCase panics when the guard reads
+// the vocabulary mode.
+func (s createConfigUseCaseStub) GetConfig(context.Context, string) (string, error) {
+	return "", nil
+}
+
 type operationIssueUseCaseStub struct {
 	domain.IssueUseCase
 	getIssue func(context.Context, string) (*types.Issue, error)

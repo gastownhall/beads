@@ -295,6 +295,7 @@
 50 16 TestEmbeddedGateInheritsDownParentChain
 50 16 TestEmbeddedGatedRendering
 50 16 TestEmbeddedKV
+50 16 TestEmbeddedLabelRenameVocabulary
 50 16 TestEmbeddedMaxRowsReady
 50 16 TestEmbeddedMemoryCorpusBudget
 50 16 TestEmbeddedOpen_EmptyDatabaseRejected

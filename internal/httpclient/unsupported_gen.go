@@ -172,6 +172,11 @@ func (unsupportedDoltStorage) CurrentBranch(_ context.Context) (_ string, err er
 	return
 }
 
+func (unsupportedDoltStorage) DefineLabel(_ context.Context, _ string, _ string, _ string) (err error) {
+	err = errUnsupported("DefineLabel")
+	return
+}
+
 func (unsupportedDoltStorage) DeleteBranch(_ context.Context, _ string) (err error) {
 	err = errUnsupported("DeleteBranch")
 	return
@@ -497,6 +502,11 @@ func (unsupportedDoltStorage) ListFederationPeers(_ context.Context) (_ []*stora
 	return
 }
 
+func (unsupportedDoltStorage) ListLabelDefinitions(_ context.Context) (_ []types.LabelDefinition, err error) {
+	err = errUnsupported("ListLabelDefinitions")
+	return
+}
+
 func (unsupportedDoltStorage) ListRemotes(_ context.Context) (_ []storage.RemoteInfo, err error) {
 	err = errUnsupported("ListRemotes")
 	return
@@ -717,6 +727,11 @@ func (unsupportedDoltStorage) UnclaimIssueIfAssignee(_ context.Context, _ string
 	return
 }
 
+func (unsupportedDoltStorage) UndefineLabel(_ context.Context, _ string) (err error) {
+	err = errUnsupported("UndefineLabel")
+	return
+}
+
 func (unsupportedDoltStorage) UpdateIssue(_ context.Context, _ string, _ map[string]interface{}, _ string) (err error) {
 	err = errUnsupported("UpdateIssue")
 	return
@@ -742,4 +757,4 @@ func (unsupportedDoltStorage) VersionReconciler() (_ issueops.VersionReconciler,
 	return
 }
 
-// NOTE: partial shell (145 of 199 methods generated; 54 left to this package's hand-written set).
+// NOTE: partial shell (148 of 202 methods generated; 54 left to this package's hand-written set).

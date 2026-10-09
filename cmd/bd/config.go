@@ -191,6 +191,12 @@ var configSetCmd = &cobra.Command{
 			}
 		}
 
+		if key == labelsVocabularyConfigKey {
+			if err := validateLabelsVocabularyConfig(value); err != nil {
+				return HandleError("%v", err)
+			}
+		}
+
 		if !isRecognizedConfigKey(key) {
 			suggestion := suggestConfigKey(key)
 			if suggestion != "" {
@@ -1353,6 +1359,7 @@ var recognizedConfigKeys = map[string]bool{
 	"identity": true, "no-push": true, "no-git-ops": true,
 	"node_id":                    true, // replica identity for the lease guard (read from yaml/env, never the DB)
 	"create.require-description": true, "beads.role": true,
+	"labels.vocabulary":    true,
 	"auto_compact_enabled": true, "schema_version": true,
 	"output.title-length": true,
 	"prime.max-memories":  true, "prime.max-memory-chars": true,

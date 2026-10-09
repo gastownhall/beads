@@ -259,3 +259,11 @@ func TestServedIssueOperationsUpdateWritesEveryScalarPatchField(t *testing.T) {
 			"rather than reporting a landed edit that dropped them")
 	conformance.RunIssueOperationsUpdateWritesEveryScalarPatchField(t, t.Context(), newServedIssueOperationsFixture(t, "hioj"))
 }
+
+func TestServedIssueOperationsUpdateRefusesAnUndefinedLabelUnderEnforce(t *testing.T) {
+	conformance.RunIssueOperationsUpdateRefusesAnUndefinedLabelUnderEnforce(t, t.Context(), newServedIssueOperationsFixture(t, "hiok"))
+}
+
+func TestServedIssueOperationsCreateRefusesAnUndefinedLabelUnderEnforce(t *testing.T) {
+	conformance.RunIssueOperationsCreateRefusesAnUndefinedLabelUnderEnforce(t, t.Context(), newServedIssueOperationsFixture(t, "hiol"))
+}

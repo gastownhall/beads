@@ -784,6 +784,75 @@ func TestEmbeddedLabelPropagateRename(t *testing.T) {
 	})
 }
 
+// bdLabelRun runs "bd label" and returns stdout, stderr and the exit error,
+// for cases that need the stderr warning line or an expected refusal.
+func bdLabelRun(t *testing.T, bd, dir string, args ...string) (string, string, error) {
+	t.Helper()
+	cmd := exec.Command(bd, append([]string{"label"}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	return stdout.String(), stderr.String(), err
+}
+
+// TestEmbeddedLabelRenameVocabulary pins that bd label rename honors
+// labels.vocabulary like every other interactive label write (bda-6x7o):
+// newLabel is the only candidate, since a rename is an add of newLabel and a
+// removal of oldLabel.
+func TestEmbeddedLabelRenameVocabulary(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "lv")
+
+	bdLabel(t, bd, dir, "define", "backend")
+	issue := bdCreate(t, bd, dir, "vocabulary rename target", "--type", "task", "-l", "backend,legacy,third")
+	has := func(label string) bool {
+		for _, l := range bdLabelListJSON(t, bd, dir, issue.ID) {
+			if l == label {
+				return true
+			}
+		}
+		return false
+	}
+
+	bdConfig(t, bd, dir, "set", "labels.vocabulary", "enforce")
+
+	stdout, stderr, err := bdLabelRun(t, bd, dir, "rename", "legacy", "nonsense")
+	if err == nil {
+		t.Fatalf("enforce must refuse a rename to an undefined label, got:\n%s%s", stdout, stderr)
+	}
+	if !strings.Contains(stdout+stderr, `"nonsense"`) {
+		t.Errorf("refusal must name the undefined label, got:\n%s%s", stdout, stderr)
+	}
+	if !has("legacy") || has("nonsense") {
+		t.Fatalf("refused rename must leave labels untouched, got %v", bdLabelListJSON(t, bd, dir, issue.ID))
+	}
+
+	bdLabel(t, bd, dir, "define", "cleaned")
+	if _, stderr, err := bdLabelRun(t, bd, dir, "rename", "legacy", "cleaned"); err != nil {
+		t.Fatalf("renaming away from an undefined label to a defined one must work under enforce: %v\n%s", err, stderr)
+	}
+	if has("legacy") || !has("cleaned") {
+		t.Fatalf("cleanup rename did not land, got %v", bdLabelListJSON(t, bd, dir, issue.ID))
+	}
+
+	bdConfig(t, bd, dir, "set", "labels.vocabulary", "warn")
+	_, stderr, err = bdLabelRun(t, bd, dir, "rename", "third", "fourth")
+	if err != nil {
+		t.Fatalf("warn must not refuse a rename: %v\n%s", err, stderr)
+	}
+	if !strings.Contains(stderr, "Undefined label(s) not in the vocabulary") || !strings.Contains(stderr, `"fourth"`) {
+		t.Errorf("warn must print the vocabulary warning naming the new label, got stderr:\n%s", stderr)
+	}
+	if has("third") || !has("fourth") {
+		t.Fatalf("warn-mode rename did not land, got %v", bdLabelListJSON(t, bd, dir, issue.ID))
+	}
+}
+
 // TestEmbeddedLabelConcurrent exercises label operations concurrently.
 func TestEmbeddedLabelConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
