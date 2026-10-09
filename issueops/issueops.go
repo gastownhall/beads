@@ -385,6 +385,12 @@ type CloseRequest struct {
 	// touches a root. A root close the close policy refuses (a live blocker
 	// on the root) leaves the root open and is reported on
 	// CloseResult.MoleculeAutoCloseRefusal; it never fails the step close.
+	//
+	// ANY OTHER FAILURE OF THE ROOT CLOSE FAILS THE STEP'S CLOSE. A storage
+	// error, or a lost race on the root's revision, is returned and rolls the
+	// step's close back with it, so a retry re-runs both. (The CLI used to
+	// close the root after the step's close had committed and only warned when
+	// that failed, leaving a complete molecule's root open.)
 	AutoCloseMolecule bool
 }
 

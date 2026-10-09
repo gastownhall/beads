@@ -171,6 +171,9 @@ func CloseCompletedMoleculeInTx(ctx context.Context, tx *sql.Tx, stepID, actor, 
 		return MoleculeAutoClose{Refusal: err.Error()}, nil, nil
 	}
 	if err != nil {
+		// Not a policy refusal: a storage error or a lost race on the root's
+		// revision. Returned, it fails the caller's transaction, so the
+		// step's own close rolls back with it (CloseRequest.AutoCloseMolecule).
 		return MoleculeAutoClose{}, nil, fmt.Errorf("auto-closing molecule %s: %w", root.ID, err)
 	}
 	if !closed.Changed {

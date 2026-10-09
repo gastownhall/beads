@@ -496,8 +496,10 @@ func validateFullGraphPlan(plan *GraphApplyPlan, cfg graphPlanConfig, opts Graph
 // duplicate ID (matching `bd create --id`), which for an atomic graph create
 // would silently rewrite the existing issue while reporting creation — a plan
 // must fail fast instead. Deliberately not overridable by --force: that flag
-// vouches for a foreign prefix, not for destroying existing data. Best-effort
-// by transport: exists is nil where the calling context has no store access.
+// vouches for a foreign prefix, not for destroying existing data. The probe is
+// exact on every backend, http included (its GetIssue answers a miss with
+// storage.ErrNotFound like the local stores); exists is nil only where the
+// command opened no store.
 func validateGraphApplyExplicitIDCollisions(plan *GraphApplyPlan, exists func(id string) (bool, error)) error {
 	if exists == nil {
 		return nil

@@ -102,8 +102,8 @@ var opCapability = map[string]string{
 	// the block above states: the server publishes it ahead of the accessor
 	// that dials it, and the set-equality gate needs its token here first.
 	OpBatchGetIssues: "issues.batchGet",
-	// The advance-a-molecule role (moleculestepper.go) dials it when served
-	// and composes the same role over this client's own roles when not.
+	// The advance-a-molecule role (molecule.go) dials it when served and
+	// refuses before dialing when not; it never composes a client-side copy.
 	OpAdvanceMolecule: "issues.advanceMolecule",
 }
 
