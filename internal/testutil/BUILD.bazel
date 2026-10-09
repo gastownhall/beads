@@ -115,6 +115,7 @@ go_test(
         "suite_temp_test.go",
         "testdoltbranch_test.go",
         "testdoltserver_env_test.go",
+        "testdoltserver_testmain_test.go",
         "testdoltserver_unreachable_test.go",
         "tmpfs_test.go",
     ],

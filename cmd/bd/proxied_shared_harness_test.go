@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -37,6 +38,13 @@ func sharedProxiedServerPort(t *testing.T) int {
 	if sharedProxiedErr != nil {
 		if os.Getenv(testutil.EnvRequireDoltContainer) == "1" {
 			t.Fatalf("shared proxied-server unavailable: %v, but %s=1; this lane must not skip", sharedProxiedErr, testutil.EnvRequireDoltContainer)
+		}
+		// BEADS_TEST_PROXIED_SERVER=1 starts the server here, not in TestMain
+		// (startTestDoltServer returns early), so this is the only place a
+		// failed start can stop the run, as DoltUnavailableForTestMain does
+		// for the packages that start it there.
+		if errors.Is(sharedProxiedErr, testutil.ErrDoltServerStart) {
+			t.Fatalf("shared proxied-server failed to start: %v (BEADS_TEST_SKIP=dolt skips these tests on purpose)", sharedProxiedErr)
 		}
 		t.Skipf("shared proxied-server unavailable: %v", sharedProxiedErr)
 	}

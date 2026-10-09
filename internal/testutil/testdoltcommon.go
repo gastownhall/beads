@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -23,14 +24,31 @@ const DoltDockerImage = "dolthub/dolt-sql-server:2.2.0"
 // (and, under Bazel, have that vacuous pass cached and shared).
 const EnvRequireDoltContainer = "BEADS_TEST_REQUIRE_DOLT_CONTAINER"
 
+// ErrDoltServerStart marks an EnsureDoltContainerForTestMain error that came
+// from starting the shared Dolt server after the environment had reported it
+// could run one: the container runtime accepted the request and its reaper
+// timed out, or the local dolt sql-server exited during startup. Every other
+// error that function returns is a precondition (no docker, image not pulled,
+// no usable local CLI, BEADS_TEST_SKIP=dolt). This one is a server that should
+// have come up and did not.
+var ErrDoltServerStart = errors.New("Dolt test server failed to start")
+
 // DoltUnavailableForTestMain handles an EnsureDoltContainerForTestMain error
-// in a TestMain and reports whether the TestMain must exit non-zero. By
-// default it prints the historical warning and returns false, so the package
-// runs and its Dolt tests skip. With BEADS_TEST_REQUIRE_DOLT_CONTAINER=1 it
-// prints a FATAL line and returns true.
+// in a TestMain and reports whether the TestMain must exit non-zero. It prints
+// a FATAL line and returns true with BEADS_TEST_REQUIRE_DOLT_CONTAINER=1, and
+// when the shared server failed to start after the environment reported it
+// ready (ErrDoltServerStart): nobody asked to skip those Dolt tests, and the
+// package would otherwise report ok having run none of them. In every other
+// case Dolt cannot run here or was skipped on purpose, so it prints the
+// historical warning and returns false, and the package runs with its Dolt
+// tests skipped.
 func DoltUnavailableForTestMain(err error) bool {
 	if os.Getenv(EnvRequireDoltContainer) == "1" {
 		fmt.Fprintf(os.Stderr, "FATAL: %v, but %s=1; this lane must not skip its Dolt tests\n", err, EnvRequireDoltContainer)
+		return true
+	}
+	if errors.Is(err, ErrDoltServerStart) {
+		fmt.Fprintf(os.Stderr, "FATAL: %v; the environment reported Dolt ready, so this package must not skip its Dolt tests (BEADS_TEST_SKIP=dolt skips them on purpose)\n", err)
 		return true
 	}
 	fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)

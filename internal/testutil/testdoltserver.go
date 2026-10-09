@@ -549,12 +549,17 @@ func startSharedContainer() error {
 // neutralizeUnvouchedDoltPorts). Without that exception this function would
 // erase the port scripts/test.sh exports for its own shared `dolt sql-server`,
 // which on a Docker-less host is every one of these TestMains.
+//
+// The error is either a precondition (Dolt cannot run here, or was skipped
+// with BEADS_TEST_SKIP=dolt) or, wrapping ErrDoltServerStart, a server that
+// failed to start once the environment had reported ready.
+// DoltUnavailableForTestMain tells them apart.
 func EnsureDoltContainerForTestMain() error {
 	var err error
 	if state := checkDoltFn(); state != doltReady {
 		err = fmt.Errorf("%s", state)
-	} else {
-		err = startSharedContainerFn()
+	} else if startErr := startSharedContainerFn(); startErr != nil {
+		err = fmt.Errorf("%w: %w", ErrDoltServerStart, startErr)
 	}
 	// One clear serves both failure paths, so "no usable container" and "a
 	// container that would not start" cannot drift apart.
