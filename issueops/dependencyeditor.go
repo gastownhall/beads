@@ -252,10 +252,15 @@ func IsDottedChildDependency(issueID, dependsOnID string, depType DependencyType
 // so `bd dep add`, an HTTP dependencies:add, and a batch apply (including
 // `bd create --graph`'s own edges) refuse the same edge the same way. Two CLI
 // paths that write an edge through a store verb instead of a role call it
-// themselves: `bd link` and `bd batch`'s `dep add`. `bd relate` and the edges a
-// create writes with its issue (`bd create --deps`/`--waits-for`, and
-// Lifecycle.Create's ParentID, Dependencies and WaitsFor) do not apply it yet,
-// so they can still store an edge the roles refuse; bd-25s1wh tracks that gap.
+// themselves: `bd link` and `bd batch`'s `dep add`.
+//
+// Other edge writers do not apply it yet, so they can still store an edge the
+// roles refuse. The known ones are `bd relate`; the edges a create writes with
+// its issue (`bd create --deps`/`--waits-for`, and Lifecycle.Create's ParentID,
+// Dependencies and WaitsFor); `bd duplicate`, `bd supersede` and
+// `bd duplicates --auto-merge`'s link and reparenting; and the tracker engine's
+// createDependencies. The molecule, template and swarm writers have not been
+// audited against it. bd-25s1wh tracks the gap.
 func CheckDottedChildDependency(issueID, dependsOnID string, depType DependencyType) error {
 	if IsDottedChildDependency(issueID, dependsOnID, depType) {
 		return &DottedChildDependencyError{IssueID: issueID, DependsOnID: dependsOnID, Type: depType}

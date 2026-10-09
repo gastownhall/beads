@@ -4277,6 +4277,9 @@ paths:
             or a payload its `kind` does not name, a `create` with no `title`, a
             duplicate `key`, a `Ref` with neither `key` nor `id` or with both, a
             `dep_add` with an unstorable `type` or pointing a row at ITSELF, a
+            `dep_add` from a dotted-id child to one of its own ancestors
+            (anything but the parent-child edge to its IMMEDIATE parent, judged
+            once the item's refs resolve and carrying `param` `items`), a
             `waits-for` gate outside its two values, an item a workspace's own
             validation refuses, and an edge endpoint that names nothing this
             database can see. An explicit `create.id` that already names a
@@ -4396,7 +4399,9 @@ paths:
             and `blocker_is_ancestor`. They may come from the per-edge probe or
             from the END GATE, which is the one place an edge that is legal on
             its own and illegal in the graph this request built is caught.
-            Neither has a force bypass.
+            Neither has a force bypass. A `dep_add` from a dotted-id child to an
+            ancestor its own id names is neither: it is a `400`
+            `invalid_argument`, as on that operation.
 
 
             `already_exists` is a `create` item whose EXPLICIT `id` already
@@ -5598,13 +5603,19 @@ paths:
             is empty after trimming, longer than 256 bytes or carrying control
             characters, an empty or over-long `edges` array, a blank or
             over-long endpoint id, an unstorable `type`, an edge that points an
-            issue at ITSELF, or an edge endpoint that names nothing this
-            database can see. Nothing is written in any of these cases.
+            issue at ITSELF, an edge from a dotted-id child to one of its own
+            ancestors (anything but the parent-child edge to its IMMEDIATE
+            parent), or an edge endpoint that names nothing this database can
+            see. Nothing is written in any of these cases.
 
 
             A self-dependency is a `400` rather than a `409` because it is
             request-intrinsic: it is invalid whatever the graph holds, so it is
-            a refusal of a VALUE and not a statement about state. An endpoint
+            a refusal of a VALUE and not a statement about state. The dotted-id
+            child's edge is a `400` for the same reason, carrying `param`
+            `edges`: the two ids decide it before the graph is read, so even a
+            child whose parent-child edge is already stored gets this `400`,
+            never the `409` hierarchy refusal or `dependency_exists`. An endpoint
             that names nothing is a `400` rather than a `404` for
             `POST /v0/beads/issues:batchCreate`'s reason: the refusal is about
             the request BODY, and there is no id in the path to have missed.
@@ -5636,6 +5647,11 @@ paths:
 
             Neither has a force bypass. The recovery for both is to rethink the
             edge, which is why they are one status and not a retry.
+
+
+            An edge from a dotted-id child to an ancestor its own id names is
+            neither: it is a `400` `invalid_argument`, decided from the two ids
+            before the graph is read.
           x-bd-codes: [dependency_cycle, dependency_exists]
           content:
             application/problem+json:
