@@ -85,7 +85,7 @@ Examples:
 		// lost race reports precondition_failed from the guarded write below
 		// instead of this policy refusal — see ifRevisionAlreadyStale's doc.
 		if !ifRevisionAlreadyStale(result.Issue, ifRevision) {
-			if err := validateIssueReassignable(id, result.Issue, actor, assignee,
+			if err := validateIssueReassignable(id, result.Issue, currentActor(), assignee,
 				storeClaimPoolAliases(ctx, issueStore), force); err != nil {
 				return HandleErrorRespectJSON("%s", err)
 			}
@@ -104,7 +104,7 @@ Examples:
 			return HandleErrorRespectJSON("%v", err)
 		}
 		mutationResult, err := runCommandUpdateMutation(opsCtx, ops, commandUpdateMutation{
-			actor:   actor,
+			actor:   currentActor(),
 			issueID: result.ResolvedID,
 			patch: issueops.IssuePatch{
 				Assignee: issueops.Field[string]{Set: true, Value: assignee},
@@ -121,7 +121,7 @@ Examples:
 			return HandleErrorRespectJSON("updating %s: %v", id, err)
 		}
 
-		if err := commitPendingIfEmbedded(ctx, issueStore, actor, doltAutoCommitParams{
+		if err := commitPendingIfEmbedded(ctx, issueStore, currentActor(), doltAutoCommitParams{
 			Command:  "assign",
 			IssueIDs: []string{result.ResolvedID},
 		}); err != nil {

@@ -49,11 +49,26 @@ type Target struct {
 
 // String renders the target for error text. A zero Target renders empty, which
 // is what keeps a backstop refusal from naming a server it never resolved.
+//
+// Userinfo is dropped rather than masked: url.URL.Redacted hides only a
+// password, so a token riding as the username ("https://<token>@host") would
+// still print. LoadTarget and SaveTarget refuse userinfo outright; this covers
+// a Target an embedder built by hand.
 func (t Target) String() string {
 	if t.BaseURL == nil {
 		return ""
 	}
-	return t.BaseURL.String()
+	return withoutUserinfo(t.BaseURL).String()
+}
+
+// withoutUserinfo returns u with its userinfo removed, leaving u untouched.
+func withoutUserinfo(u *url.URL) *url.URL {
+	if u.User == nil {
+		return u
+	}
+	stripped := *u
+	stripped.User = nil
+	return &stripped
 }
 
 // targetFile is the on-disk sidecar. `api` is recorded so a future path major
@@ -101,10 +116,27 @@ func LoadTarget(beadsDir string) (Target, error) {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return Target{}, fmt.Errorf("url in %s has scheme %q; want http or https", TargetFileName, u.Scheme)
 	}
+	if err := checkNoUserinfo(u); err != nil {
+		return Target{}, err
+	}
 	if err := checkCAFileAbsolute(f.CAFile); err != nil {
 		return Target{}, err
 	}
 	return Target{BaseURL: u, ExpectProjectID: f.ExpectProjectID, CAFile: f.CAFile}, nil
+}
+
+// checkNoUserinfo refuses a url carrying userinfo ("user:secret@host").
+// LoadTarget and SaveTarget share it, as they share checkCAFileAbsolute. A
+// credential in the url would sit in the sidecar, outside the bearer ladder and
+// its host scoping, and would print wherever the url does. The refusal names
+// the url without its userinfo, so it does not print the credential either.
+func checkNoUserinfo(u *url.URL) error {
+	if u == nil || u.User == nil {
+		return nil
+	}
+	return fmt.Errorf(
+		"url in %s (%s) carries userinfo; a credential does not belong in the url — re-run `bd connect` with the url alone and supply the token through %s, %s, or the credentials file",
+		TargetFileName, withoutUserinfo(u), TokenEnv, TokenCommandEnv)
 }
 
 // checkCAFileAbsolute refuses a relative ca_file (see Target.CAFile). LoadTarget
@@ -122,8 +154,12 @@ func checkCAFileAbsolute(caFile string) error {
 // SaveTarget writes the sidecar 0600, beside metadata.json. It exists so tests
 // and the connect command share one encoder; the connect UX itself (gitignore
 // coverage, identity verification, conversion consent) is not here. It refuses
-// a relative CAFile before writing anything, with LoadTarget's own message.
+// a url carrying userinfo and a relative CAFile before writing anything, with
+// LoadTarget's own messages.
 func SaveTarget(beadsDir string, t Target) error {
+	if err := checkNoUserinfo(t.BaseURL); err != nil {
+		return err
+	}
 	if err := checkCAFileAbsolute(t.CAFile); err != nil {
 		return err
 	}

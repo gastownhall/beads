@@ -227,7 +227,7 @@ the flags appear in the command line.`,
 				// suppressed real-close side effects (no audit, no closed→closed on the
 				// step). Register the store when it actually closed the root so the
 				// pending-commit sweep persists it — closedCount==0 would not commit.
-				if molID := autoCloseCompletedMolecule(ctx, activeStore, id, actor, session); molID != "" {
+				if molID := autoCloseCompletedMolecule(ctx, activeStore, id, currentActor(), session); molID != "" {
 					mutatedStores[activeStore] = append(mutatedStores[activeStore], molID)
 				}
 			} else {
@@ -238,13 +238,13 @@ the flags appear in the command line.`,
 				if issue != nil {
 					oldStatus = string(issue.Status)
 				}
-				audit.LogFieldChange(id, "status", oldStatus, "closed", actor, reason)
+				audit.LogFieldChange(id, "status", oldStatus, "closed", currentActor(), reason)
 
 				closedCount++
 
 				// Auto-close parent molecule if all steps are now complete.
 				// Runs against the same store the step was closed in.
-				autoCloseCompletedMolecule(ctx, activeStore, id, actor, session)
+				autoCloseCompletedMolecule(ctx, activeStore, id, currentActor(), session)
 			}
 
 			// First id this command settled as closed — a real close or an
@@ -313,7 +313,7 @@ the flags appear in the command line.`,
 
 		if continueFlag && len(resolvedIDs) == 1 && closedForCommand {
 			autoClaim := !noAuto
-			result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(postCloseStore), resolvedIDs[0], autoClaim, actor)
+			result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(postCloseStore), resolvedIDs[0], autoClaim, currentActor())
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: could not advance to next step: %v\n", err)
 			} else if result != nil {
@@ -400,7 +400,7 @@ the flags appear in the command line.`,
 				if s == nil {
 					continue
 				}
-				if err := commitPendingIfEmbedded(ctx, s, actor, doltAutoCommitParams{
+				if err := commitPendingIfEmbedded(ctx, s, currentActor(), doltAutoCommitParams{
 					Command:  "close",
 					IssueIDs: ids,
 				}); err != nil {
@@ -676,8 +676,10 @@ func isMachineCheckableGate(issue *types.Issue) bool {
 }
 
 // checkGateSatisfaction checks whether a gate issue's condition is satisfied.
+// gateStore is the store that owns the gate (nil on the proxied-server route);
+// see closeBeadGateGetter.
 // Returns nil if the gate is satisfied (or not a machine-checkable gate), or an error describing why it cannot be closed.
-func checkGateSatisfaction(issue *types.Issue) error {
+func checkGateSatisfaction(issue *types.Issue, gateStore storage.DoltStorage) error {
 	if !isMachineCheckableGate(issue) {
 		return nil
 	}
@@ -695,7 +697,9 @@ func checkGateSatisfaction(issue *types.Issue) error {
 	case issue.AwaitType == "timer":
 		resolved, escalated, reason, err = checkTimer(issue, time.Now())
 	case issue.AwaitType == "bead":
-		resolved, reason, err = checkBeadGate(rootCtx, routedBeadGateGetter{localStore: store}, issue.AwaitID)
+		// bd gate check's rule, without recording a sighting: a missing
+		// bead no check ever saw does not satisfy the gate.
+		resolved, reason, err = evaluateBeadGate(rootCtx, issue, closeBeadGateGetter(gateStore), nil)
 		if err != nil {
 			// Unlike the gh:* and timer arms above, a bead gate whose store
 			// cannot be read stays closed: the close would need that same
@@ -723,6 +727,19 @@ func checkGateSatisfaction(issue *types.Issue) error {
 	}
 
 	return fmt.Errorf("gate condition not satisfied: %s (use --force to override)", reason)
+}
+
+// closeBeadGateGetter picks the bead-gate lookup the current route can serve.
+// The direct and embedded routes look the awaited bead up from gateStore, the
+// store that owns the gate, as bd gate check in that rig would: for a gate
+// reached through a route, the launcher's store can report an open bead as
+// missing. The proxied-server route never opens a local store, so it reads
+// through the same fresh-read getter bd gate check uses there (#5861).
+func closeBeadGateGetter(gateStore storage.DoltStorage) issueGetter {
+	if usesProxiedServer() {
+		return proxiedFreshReadGetter{}
+	}
+	return routedBeadGateGetter{localStore: gateStore}
 }
 
 // autoCloseCompletedMolecule checks if closing a step completed an auto-closing

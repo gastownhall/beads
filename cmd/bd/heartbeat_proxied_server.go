@@ -41,7 +41,7 @@ func runHeartbeatProxiedServer(ctx context.Context, id string) error {
 		}
 		// Wisps resolve here too and are refused below: the repo verb
 		// classifies them ErrNotClaimable ("is ephemeral"), same as classic.
-		if herr := uw.IssueUseCase().Heartbeat(ctx, issue.ID, actor); herr != nil {
+		if herr := uw.IssueUseCase().Heartbeat(ctx, issue.ID, currentActor()); herr != nil {
 			return heartbeatProxiedOutcome{}, fmt.Errorf("heartbeat %s: %w", issue.ID, herr)
 		}
 		return heartbeatProxiedOutcome{id: issue.ID, title: issue.Title}, nil

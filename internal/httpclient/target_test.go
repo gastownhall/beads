@@ -70,6 +70,62 @@ func TestSaveTargetHoldsNoToken(t *testing.T) {
 	}
 }
 
+// TestTargetRefusesUserinfo closes the one way a credential could still reach
+// the sidecar: a url with userinfo. SaveTarget refuses it and writes nothing,
+// LoadTarget refuses a sidecar holding one with the same message, and neither
+// message prints the credential.
+func TestTargetRefusesUserinfo(t *testing.T) {
+	const secret = "s3cr3t"
+	for _, tc := range []struct{ name, url string }{
+		{"user and password", "https://ada:" + secret + "@serve.example.com"},
+		{"a token as the username", "https://" + secret + "@serve.example.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			saveErr := SaveTarget(dir, Target{BaseURL: mustParseURL(t, tc.url)})
+			if saveErr == nil {
+				t.Fatal("SaveTarget accepted a url carrying userinfo")
+			}
+			if _, err := LoadTarget(dir); !errors.Is(err, ErrNotConnected) {
+				t.Errorf("LoadTarget after the refused save = %v, want ErrNotConnected: nothing may be written", err)
+			}
+
+			seeded := t.TempDir()
+			if err := os.WriteFile(TargetPath(seeded), []byte(`{"url":"`+tc.url+`"}`), 0o600); err != nil {
+				t.Fatalf("seed sidecar: %v", err)
+			}
+			_, loadErr := LoadTarget(seeded)
+			if loadErr == nil {
+				t.Fatal("LoadTarget accepted a url carrying userinfo")
+			}
+			if saveErr.Error() != loadErr.Error() {
+				t.Errorf("SaveTarget refused with %q; want LoadTarget's own refusal %q", saveErr, loadErr)
+			}
+			if strings.Contains(loadErr.Error(), secret) {
+				t.Fatalf("the refusal printed the credential: %v", loadErr)
+			}
+			if !strings.Contains(loadErr.Error(), "https://serve.example.com") {
+				t.Errorf("error %q does not name the server", loadErr)
+			}
+		})
+	}
+}
+
+// TestTargetStringDropsUserinfo: error text renders a target through String, so
+// a Target built by hand with userinfo must not print it — the username
+// included, which url.URL.Redacted would keep.
+func TestTargetStringDropsUserinfo(t *testing.T) {
+	for _, raw := range []string{"https://ada:s3cr3t@serve.example.com/v0", "https://s3cr3t@serve.example.com/v0"} {
+		u := mustParseURL(t, raw)
+		if got, want := (Target{BaseURL: u}).String(), "https://serve.example.com/v0"; got != want {
+			t.Errorf("Target{%s}.String() = %q, want %q", raw, got, want)
+		}
+		if u.User == nil {
+			t.Errorf("String stripped userinfo from the caller's url rather than a copy")
+		}
+	}
+}
+
 // TestLoadTargetRejectsRelativeCAFile is finding 3: a relative ca_file in the
 // sidecar must be refused with a clear error rather than resolved against
 // whatever directory `bd` happens to be run from, which would silently pick a

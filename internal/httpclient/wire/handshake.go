@@ -161,17 +161,71 @@ const CapCountScope = "issues.count.scope"
 // token gates.
 const CapBatchApplyLarge = "issues.batchApplyLarge"
 
+// CapSweepWispsPlane is the behavior capability announcing that sweepIssues
+// accepts `tier: "wisps-plane"` — a third tier, wider than ephemeral or
+// durable, that clears the whole wisps table plus any durable bead with no
+// history row — spelled exactly as httpapi's constant of the same name (held
+// to it by TestTheProjectIdentityVocabularyMatchesTheServer). sweeper.go's
+// tier mapping checks this token before mapping issueops.SweepWispsPlane onto
+// the wire, refusing locally with a typed capability error rather than
+// dialing a server that would answer the value with invalid_value. See
+// W-SweepRequest.ProtectLiveDependents and W-SweepRequest.Limit (encode/
+// ledger.go) for the sibling S4 members retired the same way; the tier value
+// itself carries no ledger row because it widens an existing enum rather
+// than adding a request member.
+const CapSweepWispsPlane = "issues.sweep.wispsPlane"
+
+// CapSweepLiveDependents is the behavior capability announcing that
+// sweepIssues honors SweepRequest.protect_live_dependents and answers
+// SweepSkips.live_dependent, spelled exactly as httpapi's constant of the
+// same name (held to it by TestTheProjectIdentityVocabularyMatchesTheServer).
+// sweeper.go reads this token before sending the field, refusing locally with
+// a typed capability error rather than silently dropping the protection
+// against an older server. encode/ledger.go's W-SweepRequest.ProtectLiveDependents
+// row records the S4 closure of what used to be a permanent refusal.
+const CapSweepLiveDependents = "issues.sweep.liveDependents"
+
+// CapSweepLimit is the behavior capability announcing that sweepIssues honors
+// SweepRequest.limit and answers SweepResult.remaining, spelled exactly as
+// httpapi's constant of the same name (held to it by
+// TestTheProjectIdentityVocabularyMatchesTheServer). sweeper.go reads this
+// token before sending the field, refusing locally with a typed capability
+// error rather than silently running an unbounded sweep against an older
+// server. encode/ledger.go's W-SweepRequest.Limit row records the S4 closure
+// of what used to be a permanent refusal.
+const CapSweepLimit = "issues.sweep.limit"
+
+// CapBatchApplyDepAddLineage is the behavior capability announcing that
+// issues.batchApply's dep_add items accept `has_spawner` and `thread_id`,
+// spelled exactly as httpapi's constant of the same name (held to it by
+// TestCapabilityTableMatchesTheServerRouteTable). batchapplier.go reads this
+// token before sending either field, refusing locally with a typed
+// capability error rather than silently dropping graph lineage a caller
+// asked to carry against an older server.
+const CapBatchApplyDepAddLineage = "issues.batchApply.depAddLineage"
+
 // CapExternalDependencies is the CONDITIONAL behavior capability announcing
 // that the ready, claim and close operations of this server apply bd's
 // external-dependency policy themselves, spelled exactly as httpapi's constant
-// of the same name (held to it by TestExternalDependencyCapabilityMatchesTheServer).
+// of the same name.
 //
 // It is not in behaviorCapabilities because it is not a property of the build:
-// httpapi advertises it only when the serving process composed its roles through
-// the policy layer, so httpapi.Capabilities() — the build-level list the parity
-// gate compares against — never contains it. The store reads it to answer
-// storage.ServerEnforcedPolicy, which is what decides whether this client layers
-// the policy itself.
+// httpapi advertises it only when the serving process composed its roles
+// through the policy layer, so httpapi.Capabilities() — the build-level list
+// the parity gate compares against — never contains it.
+//
+// UNCONSUMED since S3 reconciliation (2026-10): THIS token is unread by this
+// client, not because OSS lacks external-dependency policy enforcement — the
+// externaldeps decorator (internal/storage/externaldeps) exists in OSS and is
+// wired unconditionally into the local storage chain (cmd/bd/storage_chain.go),
+// so a local backend already applies the policy itself. What this http
+// client specifically lacks is a client-side COMPOSITION of that same
+// decorator around a storage.ExternalDependencyQueryStore-backed remote
+// store, because a remote server advertising this capability applies the
+// policy on its own side before answering — there is nothing left for the
+// client to decorate. The token stays declared, because the server-side
+// capability and its wire spelling are real and S10 schedules the client half
+// that reads it.
 const CapExternalDependencies = "policy.external_dependencies"
 
 // ClientWireRevision is the wire shape this client was built to speak and
@@ -182,7 +236,16 @@ const CapExternalDependencies = "policy.external_dependencies"
 // (problem.go's WireRevisionUnsupportedError) instead of answering with a
 // shape this build was never compiled to read. It doubles as the upper bound
 // of the handshake gate below: nothing compiled against revision 2 can
-// promise to decode revision 3.
+// promise to decode a FUTURE, non-additive revision 3.
+//
+// S4 added SweepRequest.protect_live_dependents, SweepRequest.limit and a
+// wisps-plane SweepRequest.tier value, none of which bumped
+// CurrentWireRevision (internal/httpapi/wireshape's drift gate tracks a
+// request-only member's enum widening as additive, not a wire break — see
+// that package's Sides/widensAdditively), so this constant stays 2 too: a
+// revision-2 client (this one, and the S2 client already on main) must keep
+// talking to a revision-2 server rather than refusing it over a bump nothing
+// here required.
 const ClientWireRevision = 2
 
 // ClientMinWireRevision is the oldest SERVER-reported wire_revision this
@@ -278,7 +341,11 @@ func (e *WireRevisionSkewError) Unwrap() error { return ErrWireRevisionSkew }
 // union(opCapability tokens, this) set-equal with httpapi.Capabilities(), which is
 // what makes the server change and this client change land together: the parity
 // test goes red the moment one ships without the other.
-var behaviorCapabilities = []string{CapProjectEnforce, CapBatchApplyLarge, CapListSort, CapCountScope}
+var behaviorCapabilities = []string{
+	CapProjectEnforce, CapBatchApplyLarge, CapListSort, CapCountScope,
+	CapSweepWispsPlane, CapSweepLiveDependents, CapSweepLimit,
+	CapBatchApplyDepAddLineage,
+}
 
 // CapabilityFor reports the capability token gating op, and whether op is on
 // this client's map at all. An operation with no token — liveness, the
@@ -467,7 +534,23 @@ func (e *CapabilityError) Error() string {
 		e.ServerURL, e.BdVersion, e.Capability, e.Op)
 }
 
-func (e *CapabilityError) Unwrap() error { return ErrCapabilityAbsent }
+// Unwrap returns both arms, so a caller holding only a role interface can
+// classify a version-skew refusal the same way as any other unsupported
+// capability.
+//
+// errors.Is(err, ErrCapabilityAbsent) stays the precise diagnosis — this
+// server, this token absent, this op — and errors.As(err, *issueops.ErrUnsupported)
+// (equally storage.ErrUnsupported: both are the SAME aliased type, see
+// beadserrors.ErrUnsupported) now also reaches it, because a backend that
+// cannot serve an operation is exactly what a capability-absent server is from
+// the caller's side of the role contract. The two are not in tension: the
+// ledger-refusal twin of this (InexpressibleError, in package httpclient) earns
+// its *storage.ErrUnsupported arm the same way, off a value this client itself
+// decided to withhold rather than a server's version — Unwrap is what lets one
+// errors.As site in a role catch both without caring which.
+func (e *CapabilityError) Unwrap() []error {
+	return []error{ErrCapabilityAbsent, &issueops.ErrUnsupported{Op: e.Op, Backend: "http", Capability: e.Capability}}
+}
 
 // NewCapabilityError builds the capability-absent refusal for a behavior the
 // caller checked itself, off a handshake it already holds, rather than for an

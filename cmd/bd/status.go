@@ -88,7 +88,7 @@ Examples:
 			// --no-blocked is not consulted here, and never was: an
 			// assignee-scoped summary computes both numbers by a route that has
 			// no fast path (issueops.StatsReporter.AssigneeStats).
-			result, err = reporter.AssigneeStats(rootCtx, issueops.AssigneeStatsRequest{Assignee: actor})
+			result, err = reporter.AssigneeStats(rootCtx, issueops.AssigneeStatsRequest{Assignee: currentActor()})
 		} else {
 			result, err = reporter.Stats(rootCtx, issueops.StatsRequest{SkipBlocked: noBlocked})
 			if err == nil && noBlocked && result.Summary.BlockedIssues != nil {

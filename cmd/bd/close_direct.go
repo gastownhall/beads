@@ -50,7 +50,7 @@ type closeDirectPlan struct {
 func closeDirectPreflight(results []*RoutedResult, resolvedIDs, reasons []string, force bool) closeDirectPlan {
 	plan := closeDirectPlan{refusals: make([]string, len(resolvedIDs))}
 	for i, id := range resolvedIDs {
-		if refusal := closeDirectCheckOne(id, results[i].Issue, force); refusal != "" {
+		if refusal := closeDirectCheckOne(id, results[i].Issue, results[i].Store, force); refusal != "" {
 			plan.refusals[i] = refusal
 			continue
 		}
@@ -65,8 +65,8 @@ func closeDirectPreflight(results []*RoutedResult, resolvedIDs, reasons []string
 }
 
 // closeDirectCheckOne returns one argument's refusal, or "" when it may go to
-// the batch.
-func closeDirectCheckOne(id string, issue *types.Issue, force bool) string {
+// the batch. st is the store that owns the issue.
+func closeDirectCheckOne(id string, issue *types.Issue, st storage.DoltStorage, force bool) string {
 	// Close validation guards a state change; a row already at literal
 	// StatusClosed has none to guard, so skip it and let the re-close reach the
 	// engine as the idempotent no-op it has always been (ga-ktn9pe.4.8).
@@ -81,14 +81,14 @@ func closeDirectCheckOne(id string, issue *types.Issue, force bool) string {
 	// guard remains the authority on whether the close is a no-op, so a
 	// concurrent close still converges. Mirrored in closeProxiedCheckOne.
 	if issue == nil || issue.Status != types.StatusClosed {
-		if err := validateIssueClosable(id, issue, actor, force); err != nil {
+		if err := validateIssueClosable(id, issue, currentActor(), force); err != nil {
 			return err.Error()
 		}
 	}
 
 	// Gate satisfaction for machine-checkable gates (GH#1467).
 	if !force {
-		if err := checkGateSatisfaction(issue); err != nil {
+		if err := checkGateSatisfaction(issue, st); err != nil {
 			return fmt.Sprintf("cannot close %s: %s", id, err)
 		}
 	}
@@ -135,7 +135,7 @@ func closeDirectBatches(items []closeDirectItem) []closeDirectBatch {
 // hands out ONE claim however many stores the ids spanned.
 func closeDirectRequest(batch closeDirectBatch, session string, force bool, claimStore storage.DoltStorage, claimNext *issueops.ReadyRequest) issueops.CloseBatchRequest {
 	request := issueops.CloseBatchRequest{
-		Actor:   actor,
+		Actor:   currentActor(),
 		Items:   make([]issueops.BatchCloseItem, 0, len(batch.items)),
 		Session: session,
 		Force:   force,

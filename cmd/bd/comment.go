@@ -183,7 +183,7 @@ To list comments on an issue, use the plural form: bd comments <id>`,
 		if err != nil {
 			return HandleErrorRespectJSON("adding comment: %v", err)
 		}
-		if err := commitPendingIfEmbedded(ctx, issueStore, actor, doltAutoCommitParams{
+		if err := commitPendingIfEmbedded(ctx, issueStore, currentActor(), doltAutoCommitParams{
 			Command:  "comment",
 			IssueIDs: []string{result.ResolvedID},
 		}); err != nil {

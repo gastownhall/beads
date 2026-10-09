@@ -22,6 +22,7 @@ type (
 	EpicStatus                  = types.EpicStatus
 	Event                       = types.Event
 	EventType                   = types.EventType
+	GateRef                     = types.GateRef
 	Issue                       = types.Issue
 	IssueDetails                = types.IssueDetails
 	IssueFilter                 = types.IssueFilter

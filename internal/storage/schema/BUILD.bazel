@@ -13,6 +13,7 @@ go_library(
         "dirty_tables_error.go",
         "ignored_cursor_untrack.go",
         "lock.go",
+        "migrate_consent.go",
         "migration_content_hashes.go",
         "migration_repairs.go",
         "remote_migrate_gate.go",
@@ -146,10 +147,12 @@ go_test(
         "dolt_ignore_seed_test.go",
         "ignored_cursor_untrack_test.go",
         "lock_test.go",
+        "migrate_consent_test.go",
         "migration_0067_versioned_beads_test.go",
         "migration_0068_add_attribution_status_test.go",
         "migration_0069_datetime_precision_test.go",
         "migration_body_drain_test.go",
+        "migration_freeze_test.go",
         "migration_watchdog_test.go",
         "progress_test.go",
         "remote_migrate_gate_test.go",
@@ -195,12 +198,51 @@ filegroup(
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(
-    name = "repo_files",
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
     srcs = glob(
         ["**"],
         exclude = [
             "**/*.db",
             "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
             "**/*.out",
             "**/*.prof",
             "**/*.pyc",
@@ -209,7 +251,7 @@ filegroup(
             "**/node_modules/**",
         ],
     ),
-    visibility = ["//:__pkg__"],
+    visibility = ["//:__subpackages__"],
 )
 
 # --- end repo_files ---

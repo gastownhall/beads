@@ -255,9 +255,9 @@ func testPackageGateJobs(t *testing.T, prGateRequired []string) {
 		if !ok {
 			t.Fatalf("%s has no %s job", bazelWorkflowName, lane.job)
 		}
-		if !reflect.DeepEqual([]string(job.Needs), []string{bazelRBEJobName}) || job.If != bazelPackageGatesIf || job.RunsOn != bazelPackageRunsOn {
+		if !reflect.DeepEqual([]string(job.Needs), []string{bazelRBEJobName}) || job.If != bazelPackageGatesIf || job.RunsOn != bazelPackageRunsOn[lane.job] {
 			t.Errorf("%s: needs %v, if %q, runs-on %q; want needs [%s], if %q, runs-on %q",
-				lane.job, job.Needs, job.If, job.RunsOn, bazelRBEJobName, bazelPackageGatesIf, bazelPackageRunsOn)
+				lane.job, job.Needs, job.If, job.RunsOn, bazelRBEJobName, bazelPackageGatesIf, bazelPackageRunsOn[lane.job])
 		}
 
 		detectCond := "steps.detect.outputs." + lane.detectOutput + " == 'true'"
@@ -416,8 +416,8 @@ func TestDoltServerFingerprintRunsOnTheDoltServerLane(t *testing.T) {
 // cmd/go's defaultVetFlags analyzers beside every compile of every lane, so
 // bazel.yml's required test lane (`bazel test //... --config=ci`) fails on a
 // finding. No workflow runs `go vet` any more. The repository policy tests
-// and the Go tests that walk the checkout run under Bazel
-// (//scripts:scripts_test and //test/docsync over //:repo_files), so no
+// and the Go tests that walk the checkout run under Bazel (//scripts' and
+// //test/docsync's go_tests, over the repo_files partitions they read), so no
 // workflow runs `go test` over ./scripts/... or the equivalence allowlist
 // either.
 func TestPRRunsGoTestsBazelSkips(t *testing.T) {
@@ -481,7 +481,7 @@ func TestPRRunsGoTestsBazelSkips(t *testing.T) {
 	}
 	// The allowlist's remaining skip entries run in pr-preflight-platforms
 	// (every OS), each named in its go test selector.
-	fallback := pr.job(t, "pr-preflight-platforms").step(t, "Exercise go test's bd build fallback").Run
+	fallback := pr.job(t, "pr-preflight-platforms").step(t, "Exercise generated Git hook timeout process boundary and go test's bd build fallback").Run
 	for _, line := range strings.Split(readPolicyFile(t, root, "tools/bazel/equivalence_allowlist.txt"), "\n") {
 		body, _, _ := strings.Cut(line, "#")
 		f := strings.Fields(body)

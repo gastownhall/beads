@@ -165,7 +165,7 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) error {
 	}
 
 	request := issueops.SweepRequest{
-		Actor:                 actor,
+		Actor:                 currentActor(),
 		Tier:                  scope.tier,
 		IDPattern:             pattern,
 		ProtectReferenced:     scope.protectReferenced,

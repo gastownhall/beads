@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 	"github.com/steveyegge/beads/internal/testutil/credentialcmd"
 )
@@ -151,6 +153,17 @@ func createTempDirWithCleanup(t *testing.T) string {
 // TestMain having installed it).
 func restoreEnvSnapshot(before []string) { restoreProcessEnv(before) }
 
+// resetInProcessDiscovery drops the workspace discovery an earlier in-process
+// execution cached (beads' RepoContext, git's repository context), so each
+// one resolves its .beads from its own working directory as a bd process
+// would. Without it TestCLI_Import, run as the binary's first test, ran
+// `bd init` in a fresh directory against the .beads it had just exported
+// from ("Found existing Dolt database").
+func resetInProcessDiscovery() {
+	beads.ResetCaches()
+	git.ResetCaches()
+}
+
 // runBDInProcess runs bd commands in-process by calling rootCmd.Execute
 // This is ~10-20x faster than exec.Command because it avoids process spawn overhead
 func runBDInProcess(t *testing.T, dir string, args ...string) string {
@@ -171,6 +184,7 @@ func runBDInProcess(t *testing.T, dir string, args ...string) string {
 	if err := os.Chdir(dir); err != nil {
 		t.Fatalf("Failed to chdir to %s: %v", dir, err)
 	}
+	resetInProcessDiscovery()
 
 	// Capture stdout/stderr
 	rOut, wOut, _ := os.Pipe()
@@ -1235,6 +1249,7 @@ func runBDInProcessAllowError(t *testing.T, dir string, args ...string) (string,
 	if err := os.Chdir(dir); err != nil {
 		t.Fatalf("Failed to chdir to %s: %v", dir, err)
 	}
+	resetInProcessDiscovery()
 
 	rOut, wOut, _ := os.Pipe()
 	rErr, wErr, _ := os.Pipe()

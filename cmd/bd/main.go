@@ -369,7 +369,8 @@ func isForcedMigrate(cmd *cobra.Command) bool {
 // schema.SharedConsentCommandForced), so retargeting the bare form would hand
 // the operator a global-scoped command that still cannot succeed. This mirrors
 // the retarget in handleRemoteMigrateGateJSON. A nil error keeps the
-// pre-existing bare-verb wording.
+// pre-existing bare-verb wording, which is also the verb the
+// migration-consent refusal prescribes, so that refusal passes nil.
 func printGlobalDatabaseConsentHint(w io.Writer, e *schema.RemoteMigrateGateError) {
 	if !globalFlag {
 		return
@@ -416,13 +417,28 @@ func renderTypedOpenError(err error) bool {
 		}
 		return true
 	}
+	// The migration-consent gate blocks silent in-place migration of
+	// ANY existing database (1.2 release remediation) and tells the
+	// operator how to consent.
+	var consentErr *schema.MigrateConsentError
+	if errors.As(err, &consentErr) {
+		if jsonOutput {
+			handleMigrateConsentJSON(consentErr)
+		} else {
+			fmt.Fprint(os.Stderr, consentErr.UserMessage())
+			printGlobalDatabaseConsentHint(os.Stderr, nil)
+		}
+		return true
+	}
 	return false
 }
 
 // isSchemaMigrateVerb reports whether cmd is `bd migrate schema` — the one
 // invocation in which the operator asked for a schema migration by name. That
 // request is the consent the shared-store gate wants for a database with no
-// remote (#5920); see schema.SetSharedMigrateConsent.
+// remote (#5920), and the consent the migration-consent gate wants for any
+// existing database; see schema.SetSharedMigrateConsent and
+// schema.SetLocalMigrateConsent.
 //
 // Deliberately just this one command, not the `bd migrate` tree. Bare
 // `bd migrate` reconciles version/repo-id/clone-id metadata and never applies
@@ -435,6 +451,17 @@ func renderTypedOpenError(err error) bool {
 // `--force` still unlocks from either migrate command.
 func isSchemaMigrateVerb(cmd *cobra.Command) bool {
 	return cmd == migrateSchemaCmd
+}
+
+// isMigrateConsentCommand reports whether invoking cmd is consent to apply
+// pending schema migrations to an existing database (migrate_consent.go).
+// That is `bd migrate schema` alone, the verb that names the migration: bare
+// `bd migrate` does not consent, for the reasons isSchemaMigrateVerb gives,
+// and --force on either migrate command consents separately, through the gate
+// override. A preview withholds the consent, as it does the shared-store one:
+// a --dry-run/--inspect must not consent to the work it only inspects.
+func isMigrateConsentCommand(cmd *cobra.Command) bool {
+	return isSchemaMigrateVerb(cmd) && !isPreviewCommand(cmd)
 }
 
 // forcedMigratePreviewFlag returns the name of a preview flag (--dry-run,
@@ -814,6 +841,10 @@ func refreshBoundCommandConfig(cmd *cobra.Command) {
 		readonlyMode = config.GetBool("readonly")
 	}
 	if !root.PersistentFlags().Changed("actor") {
+		// Raw write, not setActor: every caller runs in PersistentPreRunE
+		// BEFORE deferActorGitFallback, which then decides from this value
+		// whether the git user.name fallback is pending. A call after it would
+		// need setActor (and the deferral re-run) to keep that decision true.
 		actor = resolveConfiguredActor()
 	}
 	if !root.PersistentFlags().Changed("dolt-auto-commit") {
@@ -867,11 +898,74 @@ func resolveConfiguredActor() string {
 	return config.GetString("actor")
 }
 
+// actorGitFallbackPending records that PersistentPreRunE deferred the
+// getActorWithGit fallback (git config user.name, then $USER) instead of
+// resolving it eagerly. Most invocations — every read-only list/show/query a
+// tool like gascity issues by the hundred — never consult the actor, and the
+// eager lookup cost one `git config` subprocess per bd call. currentActor
+// performs the deferred resolution on first use, so the resolved value and its
+// priority order are unchanged; only the moment of the lookup moves.
+//
+// Guarded by actorMu together with the resolution it triggers. Plain writes to
+// actor elsewhere stay unguarded, exactly as before this was introduced.
+var (
+	actorMu                 sync.Mutex
+	actorGitFallbackPending bool
+)
+
+// deferActorGitFallback replaces the former eager `actor = getActorWithGit()`
+// in PersistentPreRunE. A non-empty actor (--actor, BEADS_ACTOR, BD_ACTOR or
+// config.yaml) is already the answer getActorWithGit would return, so only an
+// empty actor needs the deferred fallback.
+func deferActorGitFallback() {
+	actorMu.Lock()
+	defer actorMu.Unlock()
+	actorGitFallbackPending = actor == ""
+}
+
+// currentActor returns the actor for this invocation, resolving a fallback
+// deferred by deferActorGitFallback on first use. Command code reads the actor
+// through this instead of the raw global so that the git lookup happens only
+// when an actor is actually needed.
+func currentActor() string {
+	actorMu.Lock()
+	defer actorMu.Unlock()
+	resolvePendingActorLocked()
+	return actor
+}
+
+// resolvePendingActorLocked performs a deferred fallback. Caller holds actorMu.
+func resolvePendingActorLocked() {
+	if !actorGitFallbackPending {
+		return
+	}
+	actorGitFallbackPending = false
+	deferred := actor
+	actor = resolveActorWithGit()
+	// Keep the CommandContext copy in step, as the eager assignment did
+	// before syncCommandContext copied it.
+	if cmdCtx != nil && cmdCtx.Actor == deferred {
+		cmdCtx.Actor = actor
+	}
+}
+
 // getActorWithGit returns the actor for audit trails with git config fallback.
 // Priority: --actor flag > BEADS_ACTOR env > BD_ACTOR env (deprecated) > git config user.name > $USER > "unknown"
 // This provides a sensible default for developers: their git identity is used unless
-// explicitly overridden
+// explicitly overridden.
+//
+// After PersistentPreRunE it returns the same value as currentActor (resolving
+// a deferred fallback once, into the global, as the eager assignment did).
 func getActorWithGit() string {
+	actorMu.Lock()
+	defer actorMu.Unlock()
+	resolvePendingActorLocked()
+	return resolveActorWithGit()
+}
+
+// resolveActorWithGit is getActorWithGit's resolution order, without the
+// deferred-fallback bookkeeping. Caller holds actorMu or owns the global.
+func resolveActorWithGit() string {
 	// If actor is already set (from --actor flag), use it
 	if actor != "" {
 		return actor
@@ -1213,6 +1307,10 @@ var rootCmd = &cobra.Command{
 				WasSet bool
 			}{dbPath, true}
 		}
+		// Reads and writes the raw global on purpose: this runs before
+		// deferActorGitFallback, so no fallback is pending yet and the value
+		// is only the flag/env/config actor. currentActor() here would resolve
+		// git user.name eagerly, which is what the deferral exists to avoid.
 		if !cmd.Root().PersistentFlags().Changed("actor") && actor == "" {
 			actor = resolveConfiguredActor()
 		} else if cmd.Root().PersistentFlags().Changed("actor") {
@@ -1539,8 +1637,11 @@ var rootCmd = &cobra.Command{
 				// touches the local `store` global on that path (a gap left by
 				// #4615, which only handled local paths), so skip local
 				// discovery entirely instead of falling through to the "no
-				// beads database found" exit below.
-				if cmd.Name() == "create" && cmd.Flags().Changed("repo") {
+				// beads database found" exit below. Match the command path,
+				// not the leaf name: `bd gate create --repo` names a GitHub
+				// OWNER/REPO for gh:run/gh:pr checks, not a workspace, and must
+				// still need the local database like any other gate command.
+				if commandRegistryPath(cmd) == "create" && cmd.Flags().Changed("repo") {
 					if repoVal, _ := cmd.Flags().GetString("repo"); repoVal != "" {
 						if remotecache.IsRemoteURL(repoVal) {
 							return nil
@@ -1645,11 +1746,14 @@ var rootCmd = &cobra.Command{
 			return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapReadonly))
 		}
 
-		// Set actor for audit trail
-		actor = getActorWithGit()
-		// Attach actor to the command span now that we have it.
-		if commandSpan != nil {
-			commandSpan.SetAttributes(attribute.String("bd.actor", actor))
+		// Set actor for audit trail. The git config user.name fallback is
+		// resolved lazily by currentActor, so commands that never consult the
+		// actor (read-only queries) do not spawn a git subprocess for it.
+		deferActorGitFallback()
+		// Attach actor to the command span. Only a recording span (telemetry
+		// enabled) needs the value, so a noop span does not force the lookup.
+		if commandSpan != nil && commandSpan.IsRecording() {
+			commandSpan.SetAttributes(attribute.String("bd.actor", currentActor()))
 		}
 
 		// Check if this is a read-only command (GH#804) or an explicitly
@@ -1748,6 +1852,12 @@ var rootCmd = &cobra.Command{
 		// migrate on the way to printing what it would do. Same set-or-clear
 		// discipline as the --force override above.
 		schema.SetSharedMigrateConsent(isSchemaMigrateVerb(cmd) && !previewMode)
+
+		// The same verb carries migration consent on its own
+		// (migrate_consent.go): every other command refuses to apply pending
+		// schema migrations to an existing database. Same unconditional
+		// set-or-clear discipline as the gate override above.
+		schema.SetLocalMigrateConsent(isMigrateConsentCommand(cmd))
 
 		// Auto-migrate database on version bump (bd-jgxi).
 		// Runs for ALL non-preview commands (including read-only ones) because

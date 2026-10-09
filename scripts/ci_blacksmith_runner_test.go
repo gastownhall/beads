@@ -55,6 +55,42 @@ const sameRepoBlacksmith8vcpu = "${{ (github.event_name == 'merge_group' || (git
 const blacksmithWindows2vcpuRunsOn = "${{ 'blacksmith-2vcpu-windows-2025' }}"
 const blacksmithWindows4vcpuRunsOn = "${{ 'blacksmith-4vcpu-windows-2025' }}"
 
+// bazel.yml's lanes pick their runner from the rbe job's decision alone
+// (TestBazelRBEJobDecidesOnce): Blacksmith in mode remote, GitHub-hosted
+// otherwise. bazelRemoteRunsOn builds that ternary for one Blacksmith size so
+// every lane's pinned runs-on is the same literal apart from the label.
+func bazelRemoteRunsOn(label string) string {
+	return "${{ needs.rbe.outputs.mode == 'remote' && '" + label + "' || 'ubuntu-latest' }}"
+}
+
+// The default lane size: every action executes on rbe-west, but the
+// client's loading and analysis is CPU-bound and gates every action
+// (ga-vnycm2.8: 17-38 s on 2 vCPU, 12-26 s on 4), so 4 vCPU.
+var bazelLaneRunsOn = bazelRemoteRunsOn("blacksmith-4vcpu-ubuntu-2404")
+
+// rbe-prewarm only dispatches a pool worker: no Bazel client, 2 vCPU.
+var bazelPrewarmRunsOn = bazelRemoteRunsOn("blacksmith-2vcpu-ubuntu-2404")
+
+// bazel-test's `bazel test //... --config=ci` spent ~63 of its 81 s in
+// client-side loading and analysis (1798 packages, 66k configured targets;
+// critical path 7.65 s, every action a remote cache hit), which Skyframe
+// parallelizes across the client's cores: 8 vCPU (ga-vnycm2.8 analysis-only:
+// 25.6 s on 4 vCPU, 16.3 s on 8).
+var bazelTestLaneRunsOn = bazelRemoteRunsOn("blacksmith-8vcpu-ubuntu-2404")
+
+// The package gates: package-npm at 4 vCPU (F3); package-mcp at 8 vCPU with
+// pytest -n 16 (bazelMCPPytestWorkers), since its pytest run is dominated by
+// per-test `bd init` fixture setup, which is CPU-bound and parallel.
+var bazelPackageRunsOn = map[string]string{
+	"package-mcp": bazelRemoteRunsOn("blacksmith-8vcpu-ubuntu-2404"),
+	"package-npm": bazelRemoteRunsOn("blacksmith-4vcpu-ubuntu-2404"),
+}
+
+// package-mcp's BEADS_MCP_PYTEST_WORKERS: 16 xdist workers on the 8 vCPU
+// Blacksmith runner (mode remote), package-mcp.sh's default 8 on the
+// GitHub-hosted fallback (forks, Dependabot, rbe off/skip/cache).
+const bazelMCPPytestWorkers = "${{ needs.rbe.outputs.mode == 'remote' && '16' || '8' }}"
+
 // Blacksmith macOS (Apple Silicon M4, ARM64), pinned to macos-26 (the image
 // GitHub's macos-latest resolves to) so the PR legs and main.yml's
 // blacksmith-macos-go-build-cache saver share one image regardless of when
@@ -69,6 +105,11 @@ const platformsMatrixRunsOn = "${{ matrix.runner }}"
 
 // platformsMatrixRunners: each mixed-OS matrix leg's `os` (which keeps the
 // check names stable) -> its Blacksmith label.
+//
+// Runner-size A/B (#7381, 2026-10-08): pr-preflight-platforms' Windows leg on
+// blacksmith-8vcpu-windows-2025 restored the 4 vCPU saver's cache fine, but
+// waited 63s for an 8 vCPU Windows runner and finished at 144s against 129s
+// on 4 vCPU, so it stays on blacksmithWindowsLabel.
 var platformsMatrixRunners = map[string]string{
 	"macos-latest":   blacksmithMacOSLabel,
 	"windows-latest": blacksmithWindowsLabel,
@@ -515,6 +556,50 @@ func TestBlacksmithWindowsMacOSRunsOnEveryEvent(t *testing.T) {
 	for _, leg := range []string{blacksmithMacOSLabel, blacksmithWindowsLabel} {
 		if got := mustEvalGHRunsOn(t, platformsMatrixRunsOn, map[string]string{"matrix.runner": leg}); got != leg {
 			t.Errorf("%s with matrix.runner %q = %q", platformsMatrixRunsOn, leg, got)
+		}
+	}
+}
+
+// TestBlacksmithBazelRunnerSizes evaluates every bazel.yml lane's real
+// runs-on (and package-mcp's xdist worker count) under each rbe mode: mode
+// remote gets the lane's Blacksmith size, every other mode the GitHub-hosted
+// runner, and package-mcp runs 16 xdist workers exactly when it is on its
+// 8 vCPU runner (8 everywhere else, package-mcp.sh's default).
+func TestBlacksmithBazelRunnerSizes(t *testing.T) {
+	workflow := readCIWorkflow(t, bazelWorkflowName)
+	wantRemote := map[string]string{
+		bazelJobName:           "blacksmith-8vcpu-ubuntu-2404",
+		bazelPackageMCPJobName: "blacksmith-8vcpu-ubuntu-2404",
+		bazelPackageNPMJobName: "blacksmith-4vcpu-ubuntu-2404",
+		bazelRBEPrewarmJobName: "blacksmith-2vcpu-ubuntu-2404",
+	}
+	mcpGate := workflow.job(t, bazelPackageMCPJobName).step(t, "Run MCP package gate")
+	if got := mcpGate.Env["BEADS_MCP_PYTEST_WORKERS"]; got != bazelMCPPytestWorkers {
+		t.Errorf("package-mcp Run MCP package gate BEADS_MCP_PYTEST_WORKERS = %q, want %q", got, bazelMCPPytestWorkers)
+	}
+	for _, mode := range []string{"remote", "fork-ro", "fork-rw", "local", "cache", "skip"} {
+		ctx := map[string]string{"needs.rbe.outputs.mode": mode}
+		for name, job := range workflow.Jobs {
+			if name == bazelRBEJobName {
+				continue
+			}
+			want := "ubuntu-latest"
+			if mode == "remote" {
+				want = "blacksmith-4vcpu-ubuntu-2404"
+				if label, ok := wantRemote[name]; ok {
+					want = label
+				}
+			}
+			if got := mustEvalGHRunsOn(t, job.RunsOn, ctx); got != want {
+				t.Errorf("%s runs-on under mode %s = %q, want %q", name, mode, got, want)
+			}
+		}
+		wantWorkers := "8"
+		if mustEvalGHRunsOn(t, workflow.job(t, bazelPackageMCPJobName).RunsOn, ctx) == "blacksmith-8vcpu-ubuntu-2404" {
+			wantWorkers = "16"
+		}
+		if got := mustEvalGHRunsOn(t, mcpGate.Env["BEADS_MCP_PYTEST_WORKERS"], ctx); got != wantWorkers {
+			t.Errorf("package-mcp BEADS_MCP_PYTEST_WORKERS under mode %s = %q, want %q", mode, got, wantWorkers)
 		}
 	}
 }

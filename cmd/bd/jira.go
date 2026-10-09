@@ -139,7 +139,7 @@ func runJiraSync(cmd *cobra.Command, args []string) error {
 		return HandleErrorRespectJSON("initializing Jira tracker: %v", err)
 	}
 
-	engine := tracker.NewEngine(jt, trackerStore, actor)
+	engine := tracker.NewEngine(jt, trackerStore, currentActor())
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 

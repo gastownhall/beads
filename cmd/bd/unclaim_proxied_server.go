@@ -62,9 +62,9 @@ func runUnclaimProxiedServer(ctx context.Context, args []string, reason string, 
 
 			var uerr error
 			if expectedAssignee != "" {
-				uerr = uw.IssueUseCase().UnclaimIfAssignee(ctx, fullID, actor, expectedAssignee)
+				uerr = uw.IssueUseCase().UnclaimIfAssignee(ctx, fullID, currentActor(), expectedAssignee)
 			} else {
-				uerr = uw.IssueUseCase().Unclaim(ctx, fullID, actor, force)
+				uerr = uw.IssueUseCase().Unclaim(ctx, fullID, currentActor(), force)
 			}
 			if uerr != nil {
 				r.errs = append(r.errs, fmt.Sprintf("Error unclaiming %s: %v", fullID, uerr))
@@ -72,7 +72,7 @@ func runUnclaimProxiedServer(ctx context.Context, args []string, reason string, 
 			}
 
 			if reason != "" {
-				if _, cerr := uw.CommentUseCase().AddCommentToIssue(ctx, fullID, actor, reason); cerr != nil {
+				if _, cerr := uw.CommentUseCase().AddCommentToIssue(ctx, fullID, currentActor(), reason); cerr != nil {
 					r.errs = append(r.errs, fmt.Sprintf("Warning: failed to add reason comment on %s: %v", fullID, cerr))
 				}
 			}
@@ -129,7 +129,7 @@ func runReclaimProxiedServer(ctx context.Context, olderThan time.Duration, filte
 	}
 
 	reclaimed, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) ([]types.ReclaimedLease, string, error) {
-		out, rerr := uw.IssueUseCase().ReclaimExpiredLeases(ctx, olderThan, filter, actor)
+		out, rerr := uw.IssueUseCase().ReclaimExpiredLeases(ctx, olderThan, filter, currentActor())
 		if rerr != nil {
 			return nil, "", rerr
 		}

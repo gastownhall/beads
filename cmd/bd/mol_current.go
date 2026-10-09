@@ -73,7 +73,7 @@ Use --limit or --range to view specific steps:
 
 		agent := forAgent
 		if agent == "" {
-			agent = actor
+			agent = currentActor()
 		}
 
 		if usesProxiedServer() {

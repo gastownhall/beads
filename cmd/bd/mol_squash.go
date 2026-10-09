@@ -178,7 +178,7 @@ func runMolSquash(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	result, err := squashMolecule(ctx, store, subgraph.Root, wispChildren, in.keepChildren, in.summary, actor)
+	result, err := squashMolecule(ctx, store, subgraph.Root, wispChildren, in.keepChildren, in.summary, currentActor())
 	if err != nil {
 		return HandleErrorRespectJSON("squashing molecule: %v", err)
 	}

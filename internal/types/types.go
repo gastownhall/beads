@@ -1263,6 +1263,19 @@ type IssueDetails struct {
 	// Comments slice or a zero count: a true empty stays plain omission.
 	CommentsOmitted *bool `json:"comments_omitted,omitempty"`
 
+	// GatedBy names the gates actively blocking this issue — the derived
+	// GATED decoration `bd show` renders in its header, as data. ADDITIVE and
+	// omitted when empty: nothing else on this view changes shape, and the
+	// stored status stays whatever it is (an open issue an open gate blocks
+	// still reads "open" here). The rule is types.GatesHolding — the gate
+	// clause of the readiness query's is_blocked column, subject half
+	// included — so a nonempty list means `bd ready` withholds the issue on a
+	// gate's account, and a closed or pinned issue carries no gated_by at all.
+	// The converse does not hold: only the issue's own edges count, so a child
+	// of a gated parent, which `bd ready` withholds through the parent-child
+	// leg, carries no gated_by.
+	GatedBy []GateRef `json:"gated_by,omitempty"`
+
 	// UnresolvableDependencies / UnresolvableDependents count the edges
 	// DependencyCount / DependentCount include that the Dependencies /
 	// Dependents slices could not represent, because the issue on the far
@@ -1347,11 +1360,29 @@ func RevisionToken(v int64) string {
 
 // ParseRevisionToken reads a wire revision token back to the internal int64.
 //
-// It accepts exactly what RevisionToken emits. A caller must echo the token a
-// response carried rather than compose one, so anything else is a client that
-// invented a value, and reporting that as a parse failure is more useful than
-// guessing at it.
+// It accepts exactly what RevisionToken emits — the exact inverse of
+// strconv.FormatInt — and nothing strconv.ParseInt alone would additionally
+// tolerate: no leading "+" (FormatInt never emits one), no leading zero on
+// any digit string longer than one character (FormatInt never pads "7" out
+// to "007", positive or negative), and never "-0" (FormatInt(0, 10) is "0",
+// never "-0"). A caller must echo the token a response carried rather than
+// compose one, so anything else is a client that invented a value, and
+// reporting that as a parse failure is more useful than guessing at it.
 func ParseRevisionToken(s string) (int64, error) {
+	if strings.HasPrefix(s, "+") {
+		return 0, fmt.Errorf("revision token %q: leading \"+\" is not a token RevisionToken ever emits", s)
+	}
+	digits := s
+	negative := strings.HasPrefix(s, "-")
+	if negative {
+		digits = s[1:]
+	}
+	if negative && digits == "0" {
+		return 0, fmt.Errorf("revision token %q: \"-0\" is not a token RevisionToken ever emits", s)
+	}
+	if len(digits) > 1 && digits[0] == '0' {
+		return 0, fmt.Errorf("revision token %q: a leading zero is not a token RevisionToken ever emits", s)
+	}
 	return strconv.ParseInt(s, 10, 64)
 }
 

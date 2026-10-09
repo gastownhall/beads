@@ -190,17 +190,17 @@ hand-edit it: change the ledger in Go and regenerate. Two gates keep it honest â
 the encoder's reflection **bijection gate** pins the ledger to the wire (a
 request field added upstream lands here or fails CI), and the golden test
 ` + "`TestDivergenceLedgerDocMatchesLedger`" + ` pins this doc to the ledger. The prose
-rationale, the decision numbers (D-rows) each entry cites, and the full test-lane
-map live in the architecture spec, ` + "`http-client-backend.md`" + `, which is not
-included in this repository.
+rationale and the decision numbers (D-rows) each entry cites trace back to the
+original (bd-enterprise-internal) design's decision log, which is not included
+in this repository; the full test-lane map lives alongside each row below.
 
 A handful of rows still carry a ` + "`TODO`" + ` pin: these are the read-display and
 pre-run residuals (wisp-in-list, the pretty ` + "`bd ready`" + ` parent-epic map, the
 molecule/auto-import pre-run degradations). The
-client core is complete; ` + "`ga-b8ddd.12`" + ` (per-request project-id enforcement)
-closed the read-display escalation, so pinning the remaining fixture corpus is
-deferred work, tracked on ` + "`ga-b8ddd.23`" + ` (the read-display residual)
-and ` + "`ga-b8ddd.19`" + ` (the per-id D7 taxonomy). They are refusals or degradations
+client core is complete; a since-closed per-request project-id enforcement
+follow-up closed the read-display escalation, so pinning the remaining
+fixture corpus is deferred work (tracked as a read-display residual and a
+per-id D7 taxonomy follow-up). They are refusals or degradations
 already in force â€” the ` + "`TODO`" + ` is on the test that will hold each one, not on
 the behavior.
 

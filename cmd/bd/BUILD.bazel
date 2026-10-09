@@ -138,6 +138,7 @@ go_library(
         "gate.go",
         "gate_discover.go",
         "gate_proxied_server.go",
+        "gated.go",
         "gc.go",
         "gc_proxied_server.go",
         "gc_prune.go",
@@ -214,6 +215,7 @@ go_library(
         "metadata_flag.go",
         "metrics.go",
         "migrate.go",
+        "migrate_consent.go",
         "migrate_dolt_mode.go",
         "migrate_hooks.go",
         "migrate_hooks_apply.go",
@@ -779,6 +781,10 @@ go_test(
         "gate_lifecycle_proxied_integration_test.go",
         "gate_routing_test.go",
         "gate_test.go",
+        "gated_format_test.go",
+        "gated_render_embedded_test.go",
+        "gated_render_proxied_integration_test.go",
+        "gated_test.go",
         "gc_embedded_test.go",
         "gc_prune_test.go",
         "git_repo_template_test.go",
@@ -940,6 +946,7 @@ go_test(
         "metadata_ready_test.go",
         "metadataless_server_workspace_test.go",
         "metrics_test.go",
+        "migrate_consent_test.go",
         "migrate_dolt_mode_frontdoor_integration_test.go",
         "migrate_dolt_mode_test.go",
         "migrate_embedded_test.go",
@@ -1121,6 +1128,7 @@ go_test(
         "shared_store_migrate_gate_test.go",
         "ship_embedded_test.go",
         "show_brief_deps_test.go",
+        "show_comments_tail_test.go",
         "show_current_test.go",
         "show_details_json_test.go",
         "show_embedded_test.go",
@@ -1144,6 +1152,7 @@ go_test(
         "sql_test.go",
         "stale_embedded_test.go",
         "stale_test.go",
+        "startup_git_exec_embedded_test.go",
         "state_embedded_test.go",
         "state_proxied_integration_test.go",
         "state_test.go",
@@ -1437,8 +1446,8 @@ sh_test(
     tags = ["embedded"],
 )
 
-# Runs 30 Bazel shards against the TestProxiedServer*/TestServerMode*
-# functions, assigned by the manifest's 30-shard block (duration-balanced;
+# Runs 44 Bazel shards against the TestProxiedServer*/TestServerMode*
+# functions, assigned by the manifest's 44-shard block (duration-balanced;
 # see scripts/ci/proxied_test_durations.json), against this configuration's
 # (race) bd_test with BEADS_TEST_PROXIED_SERVER=1 and the non-race
 # bd_for_tests as the subprocess binary. This is a *different* shard count
@@ -1495,7 +1504,7 @@ sh_test(
         # 192-core worker).
         "GOMAXPROCS": "4",
     },
-    shard_count = 30,
+    shard_count = 44,
     tags = ["dolt-server-proxied"],
 )
 
@@ -1559,10 +1568,16 @@ sh_test(
 # instead of skipping every Dolt-gated test into a cached pass. These are
 # the cmd/bd tests no other lane runs: every other configuration of bd_test
 # passes BEADS_TEST_SKIP=dolt (prcore/ci, integration) or runs only its
-# manifest (bd_embedded_test, bd_proxied_test). No -test.run/-test.skip: the Go binary shards
-# itself over every top-level test (rules_go's TEST_SHARD_INDEX), so each
-# runs in exactly one shard, and check_testcases.py fails a shard that ran
-# none. It repeats bd_test's `env` (the wrapper cannot inherit it).
+# manifest (bd_embedded_test, bd_proxied_test). Shards 1-16 each run the
+# slowest tests dolt_server_pinned_shards.txt pins to them (duration-balanced
+# by tools/bazel/pin_shards.py); shards 17-32 are the Go binary's own
+# round-robin shards (rules_go's TEST_SHARD_INDEX) over every other top-level
+# test, a test added since the manifest was written included
+# (tools/bazel/go_test_pinned_shard.sh). So each test runs in exactly one
+# shard, and check_testcases.py fails a shard that ran none. Round-robin
+# alone left the slowest of 16 shards at 2-3x the median (TestSharedServerConcurrent,
+# the TestInit* family). It repeats bd_test's `env` (the wrapper cannot
+# inherit it).
 #
 # Tags:
 #   dolt-server-cmd: the cmd/bd Dolt-server tier; starts hermetic dolt
@@ -1576,11 +1591,15 @@ sh_test(
     # dump) before Bazel's 1200s action limit (eternal under the lane's
     # --test_timeout), which kills without one.
     timeout = "eternal",
-    srcs = ["//tools/bazel:go_test_variant.sh"],
-    args = ["$(rootpath :bd_test)"],
+    srcs = ["//tools/bazel:go_test_pinned_shard.sh"],
+    args = [
+        "$(rootpath :dolt_server_pinned_shards.txt)",
+        "$(rootpath :bd_test)",
+    ],
     data = [
         ":bd_for_tests",
         ":bd_test",
+        ":dolt_server_pinned_shards.txt",
         ":preflight_go_fixture",
         "@go_sdk//:bin/gofmt",
     ],
@@ -1603,8 +1622,22 @@ sh_test(
         # against the one shared server.
         "GOMAXPROCS": "4",
     },
-    shard_count = 16,
+    shard_count = 32,
     tags = ["dolt-server-cmd"],
+)
+
+# Source files the docs and agent instructions link to by path, which
+# //test/docsync checks resolve.
+exports_files(
+    [
+        "capability_registry.go",
+        "doctor.go",
+        "init_safety_help.go",
+        "label.go",
+        "main.go",
+        "state.go",
+    ],
+    visibility = ["//test/docsync:__pkg__"],
 )
 
 # CLI flag registrations pinned by //internal/httpapi spec parity tests.
@@ -1644,12 +1677,51 @@ filegroup(
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(
-    name = "repo_files",
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
     srcs = glob(
         ["**"],
         exclude = [
             "**/*.db",
             "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
             "**/*.out",
             "**/*.prof",
             "**/*.pyc",
@@ -1658,7 +1730,7 @@ filegroup(
             "**/node_modules/**",
         ],
     ),
-    visibility = ["//:__pkg__"],
+    visibility = ["//:__subpackages__"],
 )
 
 # --- end repo_files ---

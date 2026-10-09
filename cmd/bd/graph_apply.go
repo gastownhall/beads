@@ -1167,7 +1167,7 @@ func graphApplyEdgeBatchMetadata(edge GraphApplyEdge, depType types.DependencyTy
 }
 
 func executeGraphApply(ctx context.Context, plan *GraphApplyPlan, opts GraphApplyOptions) (*GraphApplyResult, error) {
-	req, err := buildGraphApplyBatchRequest(plan, opts, actor, getOwner())
+	req, err := buildGraphApplyBatchRequest(plan, opts, currentActor(), getOwner())
 	if err != nil {
 		return nil, err
 	}

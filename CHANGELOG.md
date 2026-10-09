@@ -114,6 +114,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Every `bd` invocation used to start two git subprocesses before doing any
+  work: `git rev-parse` to locate the repository and `git config user.name`
+  to resolve the actor. On Linux the repository is now located in-process
+  (ordinary repositories, linked worktrees, submodules, no repository),
+  producing exactly what `git rev-parse` printed and still running git for
+  anything it does not model (`GIT_DIR` and related overrides,
+  `core.worktree`/`core.bare`, repository extensions, includes, foreign
+  ownership subject to `safe.directory`). The `git config user.name` actor
+  fallback is resolved only when a command actually needs an actor, so
+  read-only commands such as `bd list` and `bd show` start no git process
+  for it. The actor's value and priority order are unchanged. In an embedded
+  workspace with `backup.enabled` unset, the per-command auto-backup check
+  ("is there a git remote?") is likewise answered from the git config files
+  when they are plain (no includes, no command-line config), instead of
+  running `git -C .beads rev-parse --git-common-dir` and `git remote`.
+
 - `bd create --graph` now stores a plan whose path from a node's parent to
   the node runs through a `waits-for` edge; the graph-only preflight that
   walked every ready-work edge used to refuse it. The plan now goes through
@@ -131,6 +147,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scripts/check-versions.sh` and `bd preflight` list the three that work: with
   `cmd/bd/version.go` already at the release version, that re-run rewrites only
   the `.githooks` markers and `uv.lock` and leaves any other drifted file as it was.
+- **BREAKING (fail-closed): bd no longer migrates an existing database without
+  explicit consent** (Beads 1.2 release remediation). The 1.2.0/1.2.1 releases
+  applied migrations 54–65 at store open on ANY command — including pure reads
+  like `bd list` — with no prompt, and older binaries then refuse the migrated
+  database (schema-skew guard). A command that would apply pending
+  main-sequence migrations to an existing database at store open (in embedded
+  mode that includes reads) now refuses with guidance instead, and the refused
+  open performs ZERO writes (dolt_ignore seeding and clone-local migrations
+  included). Server-mode read commands open without running migrations, so
+  they keep reading at the current schema. `bd dolt commit` and `bd vc commit`
+  warn and commit at the current schema without migrating, so the dirty-table
+  recovery (commit, then `bd migrate schema`) still works on a database that
+  is both behind and dirty. Consent is any of: `bd migrate schema`, the verb
+  that names the migration (a preview flag withholds it); `--force` on
+  `bd migrate` or `bd migrate schema`; or `BD_ALLOW_MIGRATE=1` for scripts/CI
+  (`BD_ALLOW_REMOTE_MIGRATE=1` is honored as an alias). Bare `bd migrate`,
+  including `--update-repo-id`, `--inspect` and `--dry-run`, does not consent.
+  Fresh databases (`bd init`) still migrate to latest — creating a database is
+  consent for its schema, kept across the retry of an interrupted server
+  bootstrap — and the same creation principle covers a workspace the
+  invocation just cloned into existence (`bd init --remote`, `bd bootstrap`
+  sync), so the #4259 behind-remote flows keep their exact behavior. A
+  database already at this binary's latest version never consults the gate;
+  one left at v65 by 1.2.x or at v66 by 1.3.x still has migrations pending
+  under this release, so it asks once. The remote-backed case keeps all of the
+  #4259 remote-migrate gate's additional protections (smart gate, adopt
+  fast-forward, fork-skew analysis) unchanged. JSON consumers: the refusal
+  renders as a structured error whose `error` states the refusal and whose
+  `hint` is a non-runnable operator directive (neither names a migration
+  command or a consent variable), plus a `migrate_consent` object
+  (`current_version`, `required_version`, `pending`, `severity: "blocking"`,
+  `human_decision_required: true`, and `options`: `migrate` runs
+  `bd migrate schema`, or `bd migrate schema --global` under `--global`;
+  `keep` has no command).
+- **Shipped migrations are frozen by CI** (same remediation): the content hash
+  of every released up-migration (main 0001–0066, ignored 0001–0026, through
+  the 1.3.x releases) is pinned by `TestShippedMigrationsAreFrozen`. Any
+  amendment to a released migration must land as a new migration (0070+, or
+  ignored 0028+, as of this change) so installed schemas and freshly-migrated
+  ones cannot fork.
 
 ### Fixed
 - **PRs based on `hotfix/**` branches now run full CI, not just
@@ -461,6 +517,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd doctor` for deciding whether a hook file is a beads hook; `bd doctor`'s own
   installed/missing check still only tests for file existence and is tracked
   separately.
+
+- **`bd close` verifies a bead gate in proxied-server mode.** The close
+  pre-check built its bead-gate lookup on the local store, which the
+  proxied-server route never opens, so closing a bead gate there refused with
+  `no local store available` even after the awaited bead had closed, while
+  `bd gate check` resolved the same gate. The close pre-check now reads the
+  awaited bead through the same fresh-read path `bd gate check` uses on that
+  route; the direct and embedded routes are unchanged
+  ([#5861](https://github.com/gastownhall/beads/issues/5861) item 1).
 
 - **`bd doctor` no longer flags a `.local_version` that starts with `v`.** The
   canonical spelling of a Go module version — and the string a build stamped
@@ -1166,6 +1231,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   open, including the library API, `bd doctor --fix` and `bd bootstrap`, keeps
   the existing message.
 
+- **`bd show --comments-tail N`** renders only the last N comments in text
+  output (including under `--watch`)
+  ([#6618](https://github.com/gastownhall/beads/pull/6618)), preceded by one
+  elision line naming how many older ones were hidden. A render-only cap for
+  fat, append-only beads whose full comment history is hundreds of KB —
+  description and metadata are unchanged, and omitting the flag (or passing
+  `0`) is byte-identical to today's output. JSON output is untouched;
+  `--include-comments` still streams every comment there.
+
 ### Changed
 
 - **The managed shared Dolt server now opens its configured remotesapi
@@ -1443,9 +1517,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   override) rather than letting a dead store read as satisfied. On the
   classic and proxied routes alike, `bd gate check` now exits non-zero
   whenever any gate it checks (gh, timer, or bead) could not be checked or
-  closed. A missing bead still stays pending, and for now so does a bead in
-  a prefix-routed rig whose store cannot be read: routing still reports that
-  failure as not-found.
+  closed. A bead in a prefix-routed rig whose store cannot be read stays
+  pending, with the routing failure in its reason (`cannot confirm the
+  awaited bead is gone`); for a missing bead, see
+  [#6395](https://github.com/gastownhall/beads/pull/6395).
+
+- **`bd gate check` resolves a bead gate whose awaited bead was deleted**
+  ([#6395](https://github.com/gastownhall/beads/pull/6395)). A bead gate
+  waited for its target to close, so deleting the target left the gate
+  pending forever and its step blocked. The first `bd gate check` that finds
+  the target in this rig's own store now records the sighting in the gate's
+  metadata (`await_seen`), and a later check that no longer finds it there
+  resolves the gate (`awaited bead <id> no longer exists`). An await ID that
+  no check has seen, such as a typo or a bead deleted before the first check,
+  stays pending with a diagnostic instead of unblocking the step: correct the
+  await ID or close the gate with `bd gate resolve`. A miss outside this
+  rig's store (a target whose prefix routes to another rig, or a contributor
+  auto-routed store) does not prove the bead gone, so the gate stays pending
+  and the reason names the cause. `bd close` on a bead gate follows the same
+  rule: it no longer needs `--force` once an earlier check saw the awaited
+  bead and the bead is gone from the gate's rig, with no route pointing
+  elsewhere. `bd rename` and `bd rename-prefix` point a bead gate at its
+  bead's new ID, sighting included, so a renamed bead does not read as
+  deleted, even to a check or `bd close` that read the gate before the
+  rename; a rename that fails partway leaves the gate pending without a
+  sighting, never resolved. A rename by an older bd does not move the
+  gate: if a check had already seen the bead, a later check or `bd close`
+  treats that rename as a deletion and closes the gate while the bead is
+  still open, so upgrade every client that renames beads together with the
+  ones that check gates.
+
+- **An epic that blocks on its own children no longer hides them from `bd
+  ready`** ([#6506](https://github.com/gastownhall/beads/issues/6506)). A
+  parent-child edge now propagates only a parent's *exogenous* blockedness —
+  blockedness whose cause lies outside the parent's own subtree — so the
+  close-gate idiom, a parent carrying `blocks` edges onto its own children (or
+  grandchildren) so it cannot close before them, stops darkening the very work
+  it is waiting for. The parent itself stays blocked, and a close gate does not
+  unlock the work under an epic that is itself blocked from outside: a sub-epic
+  blocked BOTH by its own children AND by an exogenously blocked ancestor still
+  darkens its children
+  ([#6601](https://github.com/gastownhall/beads/issues/6601)).
+  "Inside my own subtree" is decided to a fixed depth of **four**
+  parent-child levels — epic → sub-epic → leg → task — so a parent that
+  blocks on something deeper than that still darkens its whole subtree, exactly
+  as it did before this fix; that depth is a measured trade (the
+  bounded walk is a fixed chain of index probes, where a recursive one cost
+  7.5x per evaluation) and raising it is a one-constant change. Existing stores
+  repair on the next write that touches the hierarchy, or with
+  `bd doctor --fix`.
+- `bd dep add` no longer explains its refusal of a blocking edge onto your own
+  descendant by claiming the block would cascade down and never clear — it
+  does not, as of the fix above. The refusal stands, and now names the
+  sanctioned way to say it: a waits-for gate over the children.
 
 - **`routes.jsonl` prefixes containing a hyphen now route**
   ([#5048](https://github.com/gastownhall/beads/issues/5048)). Prefix routing

@@ -163,13 +163,14 @@ const statementCountToleranceDolt = 2
 // lower these; a change for any other reason should be re-measured and
 // re-pinned deliberately, not adjusted to make a failure go away.
 //
-// Re-pinned for the batch-create round-trip work (was 7008 / 14014 / 846);
-// see pinnedEmbeddedStatementCounts in internal/storage/embeddeddolt for the
+// Re-pinned for the batch-create round-trip work (was 7008 / 14014 / 846),
+// then for the parent-child cascade (classic was 786); see
+// pinnedEmbeddedStatementCounts in internal/storage/embeddeddolt for the
 // per-change breakdown. The two backends now agree to within the tolerance.
 var pinnedDoltStatementCounts = map[string]int64{
 	"356 (mol 1x)": 6396,
 	"712 (mol 2x)": 12791,
-	"40 (classic)": 786,
+	"40 (classic)": 835,
 }
 
 // BenchmarkLargeBatchApply_Dolt is gated by setupBenchStore's own

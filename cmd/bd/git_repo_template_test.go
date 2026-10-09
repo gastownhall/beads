@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -34,7 +33,7 @@ func initGitTemplate() {
 		}
 		gitTemplateDir = dir
 
-		cmd := exec.Command("git", "init", "--initial-branch=main")
+		cmd := gitCommand("init", "--initial-branch=main")
 		cmd.Dir = dir
 		if err := cmd.Run(); err != nil {
 			gitTemplateErr = fmt.Errorf("git init failed: %w", err)
@@ -45,7 +44,7 @@ func initGitTemplate() {
 			{"config", "user.email", "test@test.com"},
 			{"config", "user.name", "Test User"},
 		} {
-			cmd = exec.Command("git", args...)
+			cmd = gitCommand(args...)
 			cmd.Dir = dir
 			if err := cmd.Run(); err != nil {
 				gitTemplateErr = fmt.Errorf("git %v failed: %w", args, err)
@@ -119,13 +118,13 @@ func TestNewGitRepo_UsesRepoLocalHooksPathDespiteGlobalConfig(t *testing.T) {
 		t.Fatalf("failed to create fake global hooks dir: %v", err)
 	}
 
-	setGlobal := exec.Command("git", "config", "--global", "core.hooksPath", globalHooks)
+	setGlobal := gitCommand("config", "--global", "core.hooksPath", globalHooks)
 	if out, err := setGlobal.CombinedOutput(); err != nil {
 		t.Fatalf("failed to set global core.hooksPath: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
 
 	repoDir := newGitRepo(t)
-	getLocal := exec.Command("git", "config", "--get", "core.hooksPath")
+	getLocal := gitCommand("config", "--get", "core.hooksPath")
 	getLocal.Dir = repoDir
 	out, err := getLocal.CombinedOutput()
 	if err != nil {

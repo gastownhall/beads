@@ -1013,6 +1013,124 @@ func TestMigrateUpWithLockFreshBootstrapHealCapabilityIsOneShot(t *testing.T) {
 	}
 }
 
+// expectMigrateConsentReads mocks checkMigrateConsent's reads when no consent
+// is held: the main cursor once for the fresh-database exemption, and again
+// for the pending count.
+func expectMigrateConsentReads(mock sqlmock.Sqlmock, cursor int) {
+	for range 2 {
+		expectCursorProbe(mock, "schema_migrations", true)
+		expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
+	}
+}
+
+// TestMigrateUpWithLockFreshBootstrapHealIsMigrateConsent pins that heal
+// authority is consent for MigrateUp's own gate, not just for the caller's
+// migration gate. A retried server bootstrap finds the non-zero cursor its
+// first pass left behind, and server-mode `bd init` records no local consent,
+// so a version-only consent check would refuse the init the database it just
+// created. Both migration passes are covered; sqlmock's ordered expectations
+// fail either case on a consent read.
+func TestMigrateUpWithLockFreshBootstrapHealIsMigrateConsent(t *testing.T) {
+	cases := map[string]func(t *testing.T, mock sqlmock.Sqlmock){
+		"partially migrated": func(t *testing.T, mock sqlmock.Sqlmock) {
+			expectOnePendingMigration(t, mock)
+		},
+		"partially migrated with dirty debris": func(t *testing.T, mock sqlmock.Sqlmock) {
+			expectDirtyGuardRefusal(t, mock)
+			expectFreshBootstrapIdentityMatch(mock)
+			mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_RESET('--hard')")).
+				WillReturnRows(sqlmock.NewRows([]string{"status"}))
+			expectOnePendingMigration(t, mock)
+		},
+	}
+	for name, expectPasses := range cases {
+		t.Run(name, func(t *testing.T) {
+			failOnSwallowedAdvisory(t)
+			resetConsentState(t)
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("create sql mock: %v", err)
+			}
+			defer db.Close()
+
+			ctx := context.Background()
+			conn, err := db.Conn(ctx)
+			if err != nil {
+				t.Fatalf("pin mock connection: %v", err)
+			}
+			defer conn.Close()
+
+			lockName := MigrationLockName("testdb")
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+				WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+				WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+			expectPasses(t, mock)
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+				WithArgs(lockName).
+				WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+			applied, err := MigrateUpWithLock(ctx, conn, "testdb",
+				WithFreshBootstrapHeal(testFreshBootstrapHealCapability(), testBootstrapEndpoint))
+			if err != nil {
+				t.Fatalf("MigrateUpWithLock() error = %v", err)
+			}
+			if applied != 1 {
+				t.Fatalf("MigrateUpWithLock() applied = %d, want 1", applied)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
+	}
+}
+
+// TestMigrateUpWithLockRefusesUnconsentedMigration is the control for the
+// test above: the same behind database, opened without heal authority or
+// consent, is refused under the lock before any write, and the lock is still
+// released.
+func TestMigrateUpWithLockRefusesUnconsentedMigration(t *testing.T) {
+	failOnSwallowedAdvisory(t)
+	resetConsentState(t)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	lockName := MigrationLockName("testdb")
+	expectConvergedFastPathMiss(mock, "testdb")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	expectMigrateConsentReads(mock, LatestVersion()-1)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb", WithDatabaseSelector(testDatabaseSelector))
+	if applied != 0 {
+		t.Fatalf("MigrateUpWithLock() applied = %d, want 0", applied)
+	}
+	var consentErr *MigrateConsentError
+	if !errors.As(err, &consentErr) {
+		t.Fatalf("MigrateUpWithLock() error = %v, want *MigrateConsentError", err)
+	}
+	if consentErr.CurrentVersion != LatestVersion()-1 || consentErr.Pending != 1 {
+		t.Fatalf("refusal = v%d with %d pending, want v%d with 1 pending",
+			consentErr.CurrentVersion, consentErr.Pending, LatestVersion()-1)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
 // TestMigrateUpWithLockMigrationGate pins where WithMigrationGate's callback
 // sits: after the lock and after locked preparation (so the gate reads a
 // prepared, selected database), before MigrateUp (so a refusal applies no

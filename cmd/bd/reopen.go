@@ -96,7 +96,7 @@ another actor won the race, so retrying the same guard is pointless).`,
 				continue
 			}
 			reopened, err := ops.Reopen(opsCtx, issueops.ReopenRequest{
-				Actor:           actor,
+				Actor:           currentActor(),
 				IssueID:         fullID,
 				Reason:          reason,
 				ExpectedVersion: ifRevision,
@@ -150,7 +150,7 @@ another actor won the race, so retrying the same guard is pointless).`,
 		}
 
 		for s, ids := range mutatedStores {
-			if err := commitPendingIfEmbedded(ctx, s, actor, doltAutoCommitParams{
+			if err := commitPendingIfEmbedded(ctx, s, currentActor(), doltAutoCommitParams{
 				Command:  "reopen",
 				IssueIDs: ids,
 			}); err != nil {

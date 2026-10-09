@@ -101,6 +101,13 @@ func (s *Server) batchCreateRequest(w http.ResponseWriter, r *http.Request) (iss
 	if !ok {
 		return issueops.CreateBatchRequest{}, false
 	}
+	// created_by is stamped from the actor on every item, createIssue's rule
+	// (create.go): the item publishes no created_by and the role copies the
+	// issue's rather than stamping one, so without this a batch-created issue
+	// would store none where `bd create --file` stores its actor.
+	for _, item := range items {
+		item.Issue.CreatedBy = actor
+	}
 	return issueops.CreateBatchRequest{Actor: actor, Items: items}, true
 }
 

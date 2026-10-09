@@ -1,8 +1,9 @@
 # The Bazel lanes: the only CI run of the Linux Go test tiers. Runs
 # `bazel test //... --config=ci`, the PR-core selection (race, -short, dolt
-# skip), plus one job per tier (pure-Go and js/wasm, the dolt-server lane,
-# the embedded-Dolt, proxied-server and server-Dolt storage tiers that
-# pr-risk.yml used to run, integration, the cmd/bd Dolt-server tier).
+# skip), plus one job per tier (pure-Go and js/wasm, the release
+# cross-compile, the dolt-server lane, the embedded-Dolt, proxied-server and
+# server-Dolt storage tiers that pr-risk.yml used to run, integration, the
+# cmd/bd Dolt-server tier).
 #
 # PRs and merge groups run it through pr.yml's `bazel` job (workflow_call).
 # The legacy go test jobs these lanes mirrored are retired (ga-96smfk.22),
@@ -24,9 +25,10 @@
 # runs the lane once. Every lane reports its job.status as a workflow_call
 # output (named after the job) from an always() last step. pr.yml's ci-gate
 # requires the call's aggregate result (BAZEL) and bazel-test, bazel-pure,
-# bazel-embedded, bazel-integration, bazel-doltserver, bazel-proxied and
-# bazel-server-storage (BAZEL_TEST, BAZEL_PURE, BAZEL_EMBEDDED,
-# BAZEL_INTEGRATION, BAZEL_DOLTSERVER, BAZEL_PROXIED, BAZEL_SERVER_STORAGE);
+# bazel-release-cross, bazel-embedded, bazel-integration, bazel-doltserver,
+# bazel-proxied and bazel-server-storage (BAZEL_TEST, BAZEL_PURE,
+# BAZEL_RELEASE_CROSS, BAZEL_EMBEDDED, BAZEL_INTEGRATION, BAZEL_DOLTSERVER,
+# BAZEL_PROXIED, BAZEL_SERVER_STORAGE);
 # bazel-cmd-dolt (the cmd/bd Dolt-server tier, BAZEL_CMD_DOLT) is advisory:
 # job-level continue-on-error, and pr.yml requires it only while its
 # BAZEL_CMD_DOLT_REQUIRED flag is "true" (pr.yml then also passes
@@ -167,8 +169,8 @@
 # gates no longer consume this artifact (they build their own bd); it is
 # kept for the F3.5.3 SHA256SUMS comparison and for debugging.
 #
-# Runner cache: one entry per (.bazelversion, MODULE.bazel.lock) pair, about
-# 2 GB (Bazel's content-addressable --repository_cache, re-hashed on every
+# Runner cache: one entry per (.bazelversion, MODULE.bazel, MODULE.bazel.lock)
+# triple, about 1 GB (Bazel's content-addressable --repository_cache, re-hashed on every
 # hit; never the Bazel binary or the repo contents cache), written
 # only by a push to main that missed it. No --disk_cache: remote runs use the
 # remote cache, and local runs would need about 7 GB more.
@@ -330,6 +332,9 @@ on:
       bazel-pure:
         description: "bazel-pure's job.status"
         value: ${{ jobs.bazel-pure.outputs.result }}
+      bazel-release-cross:
+        description: "bazel-release-cross's job.status"
+        value: ${{ jobs.bazel-release-cross.outputs.result }}
       bazel-embedded:
         description: "bazel-embedded's job.status"
         value: ${{ jobs.bazel-embedded.outputs.result }}
@@ -382,11 +387,30 @@ env:
 
 jobs:
   # The one place the execution mode is decided (see the header), so every
-  # job sees the same answer for the whole run. Its step reads one secret, and
-  # only to test it for emptiness: the step's env holds a boolean, never the
-  # value, and the step runs no repository code (no checkout). Fork and
-  # Dependabot pull_request runs get no secrets: rbe-fork-mint decides
-  # theirs (fork-ro, fork-rw, or cache while it is closed).
+  # job sees the same answer for the whole run. Its decide step reads one
+  # secret, and only to test it for emptiness: the step's env holds a
+  # boolean, never the value, and the step runs no repository code (it comes
+  # before the job's checkout). Fork and Dependabot pull_request runs get no
+  # secrets: rbe-fork-mint decides theirs (fork-ro, fork-rw, or cache while
+  # it is closed).
+  #
+  # Then, only when the lanes will execute remotely (enabled: modes remote,
+  # fork-ro, fork-rw; merge groups are mode remote), the worker-env preflight:
+  # rbe-west's pool workers run gascity main's tools/rbe/worker-env and
+  # advertise its pin, and the schedulers match //platforms:rbe_worker's pin
+  # exactly, so when gascity re-pins and beads' copy (tools/rbe/worker-env.txt
+  # and the pin in platforms/BUILD.bazel) falls behind, every remote action
+  # queues until the lanes time out. tools/rbe/worker-env-sync compares the
+  # copy with gascity main and, out of step, fails this job: every lane needs
+  # it, so they all skip and pr.yml's gate is red within a minute, with the
+  # diff and the pin to commit in this job's summary. A fallback to mode
+  # cache would not keep the PR green (pr.yml's ci-gate requires a remote
+  # run, BAZEL_REMOTE) and would only make it slower, so fail fast. gascity
+  # unreachable (exit 2: unknown) warns and proceeds: GitHub's availability
+  # never blocks a PR. The steps after decide run repository code (the PR's
+  # script, sparse-checked-out) but hold no secret and set no output: the
+  # job's outputs are decide's alone. nightly.yml runs the same check every
+  # night and opens a ci/infra issue.
   rbe:
     name: execution mode
     # Same-repo PRs (and merge_group/push/dispatch/schedule runs, which are
@@ -471,6 +495,36 @@ jobs:
             echo "tier=$tier"
           } >> "$GITHUB_OUTPUT"
           echo "Bazel execution mode: **$mode** (RBE_WEST_WORKERS on: $RBE_VAR_ON, rbe=off: $RBE_INPUT_OFF, rbe=cache: $RBE_INPUT_CACHE, fork: $FORK, dependabot: $DEPENDABOT, fork farm: $FORK_FARM, executor secret: $HAS_EXECUTOR)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # The worker-env preflight (see the job's comment): the PR's own copy,
+      # so a PR that syncs it passes. Only the two paths it compares.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ steps.decide.outputs.enabled == 'true' }}
+        with:
+          ref: ${{ inputs.checkout-sha }}
+          persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
+          sparse-checkout: |
+            tools/rbe
+            platforms
+
+      - name: worker-env in step with gascity main
+        if: ${{ steps.decide.outputs.enabled == 'true' }}
+        env:
+          MODE: ${{ steps.decide.outputs.mode }}
+        run: |
+          rc=0
+          tools/rbe/worker-env-sync main || rc=$?
+          case "$rc" in
+            0) ;;
+            1)
+              echo "::error title=Bazel lanes stopped before queueing::beads' worker-env pin is out of step with gascity main, so rbe-west has no worker for this run's remote actions (mode $MODE): copy tools/rbe/worker-env.txt and the worker-env pin in platforms/BUILD.bazel from gastownhall/gascity main (this job's summary has the diff and the line to commit; see tools/rbe/worker-env-sync)."
+              exit 1
+              ;;
+            *)
+              echo "::warning title=rbe worker-env not checked::could not compare beads' worker-env pin with gascity main (exit $rc); proceeding in mode $MODE. If the lanes sit at 0 running actions, run tools/rbe/worker-env-sync."
+              ;;
+          esac
 
   # Best-effort pre-warm of gastownhall/gascity's rbe-west OSS worker pool
   # (one Blacksmith-hosted NativeLink worker, rbe-worker-pool.yml) so it is
@@ -674,8 +728,15 @@ jobs:
     # they miss on the runner, so they get the larger GitHub-hosted one.
     # Fork modes (fork-ro/fork-rw) execute remotely but stay GitHub-hosted,
     # like every fork job: the runner is only a client.
+    #
+    # 8 vCPU, not the other lanes' 4: with every action a remote cache hit,
+    # this lane's `bazel test //... --config=ci` spent ~63 of 81s in
+    # client-side loading and analysis (1798 packages, 66k configured
+    # targets; critical path 7.65s, merge group 37721729916), which Bazel
+    # parallelizes across the client's cores. Analysis-only, seeded runner
+    # cache (ga-vnycm2.8): 38.3s on 2 vCPU, 25.6s on 4, 16.3s on 8.
     needs: rbe
-    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     # Remote execution goes to rbe-west (instance "oss", the Blacksmith-backed
     # worker pool shared with gascity). Skipped only in mode skip (same-repo
     # runs while RBE_WEST_WORKERS is unset).
@@ -882,15 +943,15 @@ jobs:
           retention-days: 7
 
       # Only a push to main that missed the exact key writes the runner cache.
-      # Its content (--repository_cache only, never the rc
-      # or credentials) is fixed by .bazelversion and MODULE.bazel.lock, so one
-      # entry per lock is enough and later pushes do not churn the quota.
+      # Its content (--repository_cache only, never the rc or credentials) is
+      # fixed by .bazelversion, MODULE.bazel and MODULE.bazel.lock, so one
+      # entry per triple is enough and later pushes do not churn the quota.
       - name: Save Bazel runner cache
         if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.bazel.outcome == 'success' && steps.bazel.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bazel-ci-cache
-          key: bazel-repo-v3-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock') }}
+          key: bazel-repo-v4-${{ runner.os }}-${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock') }}
 
       # A redacted, schema'd summary of this invocation's BEP, exec log and
       # profile: timing, per-mnemonic cache classes, cold actions, test
@@ -948,7 +1009,7 @@ jobs:
     name: pure-Go and js/wasm
     # Same runner and skip rule as bazel-test.
     needs: rbe
-    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.mode != 'skip' }}
     timeout-minutes: 90
     outputs:
@@ -1058,19 +1119,6 @@ jobs:
           --execution_log_compact_file="$RUNNER_TEMP/bazel-exec-build-pure.log.zst"
           --experimental_build_event_upload_strategy=local
 
-      # Every release target (scripts/ci/release-targets.txt) on every PR, so
-      # a platform-gating mistake is caught here instead of at tag time
-      # (#5662): the whole tree, cgo off, one remote `bazel build
-      # --platforms=...` per target (the script's header has the coverage
-      # boundary: the cgo release builds are not compiled here). nogo
-      # (//tools/nogo) validates every one of those compiles, so this is also
-      # the lint and vet gate for files only other platforms build
-      # (//go:build windows, darwin, !linux ...; engdocs/LINTING.md).
-      - name: Cross-compile every release target (--config=release-cross)
-        run: |
-          set -euo pipefail
-          ./scripts/ci/bazel-release-cross-compile.sh
-
       # `go build` with CGO_ENABLED=0 rejects a pure binary whose imports reach
       # dolt's cgo-only store/nbs (gozstd). Bazel compiles gozstd's pure stubs
       # instead, whose init panics (third_party/patches/gozstd_nocgo.patch), so
@@ -1163,6 +1211,65 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
 
+  # Every release target (scripts/ci/release-targets.txt) on every PR, so a
+  # platform-gating mistake is caught here instead of at tag time (#5662):
+  # the whole tree, cgo off, one remote `bazel build --platforms=...` per
+  # target (the script's header has the coverage boundary: the cgo release
+  # builds are not compiled here). nogo (//tools/nogo) validates every one of
+  # those compiles, so this is also the lint and vet gate for files only
+  # other platforms build (//go:build windows, darwin, !linux ...;
+  # engdocs/LINTING.md). A job of its own rather than a step of bazel-pure:
+  # release_cross is a split transition that shares no analysis with the pure
+  # invocations, and as a step it was about a minute on the longest cached
+  # lane. Same runner and skip rule as bazel-pure (it runs in every mode but
+  # skip).
+  bazel-release-cross:
+    name: release cross-compile
+    needs: rbe
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    if: ${{ needs.rbe.outputs.mode != 'skip' }}
+    timeout-minutes: 90
+    outputs:
+      result: ${{ steps.result.outputs.result }}
+    steps:
+      # inputs.checkout-sha: see the header (empty: the event's default ref).
+      # checkout v7 refuses a fork head on pull_request_target unless opted
+      # in; only bazel-farm.yml's authorized call opts in (false elsewhere).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout-sha }}
+          persist-credentials: false
+          allow-unsafe-pr-checkout: ${{ inputs.fork-farm == 'authorized' && github.event_name == 'pull_request_target' }}
+
+      - name: Set up Bazel
+        id: bazel
+        uses: ./.github/actions/setup-bazel
+        env:
+          BAZEL_REMOTE_EXECUTOR: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_WEST_EXECUTOR || '' }}
+          RBE_TLS_CERT: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CERT || '' }}
+          RBE_TLS_KEY: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_KEY || '' }}
+          RBE_TLS_CA: ${{ needs.rbe.outputs.mode == 'remote' && secrets.RBE_TLS_CA || '' }}
+          RBE_INSTANCE: ${{ needs.rbe.outputs.mode == 'remote' && 'oss' || '' }}
+          BAZEL_FORK_CACHE: ${{ needs.rbe.outputs.mode == 'cache' && 'true' || '' }}
+          BAZEL_FORK_REMOTE: ${{ startsWith(needs.rbe.outputs.mode, 'fork-') && 'true' || '' }}
+          RBE_FORK_TIER: ${{ needs.rbe.outputs.tier }}
+          RBE_FORK_PR: ${{ github.event.pull_request.number }}
+
+      - name: Cross-compile every release target (--config=release-cross)
+        run: |
+          set -euo pipefail
+          ./scripts/ci/bazel-release-cross-compile.sh
+
+      # Last step: the job's result as a workflow_call output for pr.yml's
+      # ci-gate. always() runs it after a failure, a timeout or a
+      # cancellation too.
+      - name: Record job result
+        id: result
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
+
   # pr-risk.yml's embedded-Dolt tier ("Test (Embedded Dolt Cmd N/20)",
   # "Test (Embedded Dolt Storage N/5)", "Test (Embedded Dolt Conformance -
   # core/audit)") as --config=embedded: the embedded-tagged variants of
@@ -1176,8 +1283,8 @@ jobs:
     name: embedded Dolt tier
     # Remote execution only: skipped unless the rbe job chose remote,
     # fork-ro or fork-rw (enabled; not in modes cache, local or skip).
-    # Locally the tier is 67 race test
-    # processes (50 cmd/bd shards + 15 embeddeddolt storage shards + 2
+    # Locally the tier is 72 race test
+    # processes (50 cmd/bd shards + 20 embeddeddolt storage shards + 2
     # conformance partitions; ~24k test-seconds measured locally -- see
     # scripts/ci/embedded_cmd_test_durations.json and
     # scripts/ci/embedded_storage_test_durations.json -- up from an earlier,
@@ -1186,26 +1293,21 @@ jobs:
     # proves nothing pr-risk.yml's embedded jobs (which do run for forks) do
     # not.
     #
-    # Shard counts: storage (15) is sized the way both tiers were originally
-    # meant to be -- the smallest count whose LPT-packed heaviest shard
-    # (scripts/ci/gen_embedded_storage_shard_manifest.py --weights=duration
-    # --repack) lands at or below the tier's own heaviest single top-level
-    # test (211-225s). cmd cannot reach that floor: Bazel hard-caps
-    # shard_count at 50 per sh_test-like rule ("Having more than 50 shards is
-    # indicative of poor test organization. Please reduce the number of
-    # shards." -- a native analysis-time error, not a style lint), and at 50
-    # shards the cmd suite's LPT-packed heaviest shard is ~409.6s -- above
-    # its own single heaviest test's 239.7s, because the suite's total
-    # duration (~20145 test-seconds across 242 tests) is too large to flatten
-    # to the single-test floor within 50 bins. Clearing more shards would
-    # need either further per-test speedups spread across the suite or
+    # Shard counts: storage (20) is the smallest count whose LPT-packed
+    # heaviest shard (scripts/ci/gen_embedded_storage_shard_manifest.py
+    # --weights=duration --repack, on rbe-west measurements) stays near 110s,
+    # under the ~150s per-shard budget with headroom for executor load; its
+    # heaviest single top-level test is ~90s. cmd (50) sits at Bazel's hard
+    # cap per sh_test-like rule ("Having more than 50 shards is indicative of
+    # poor test organization. Please reduce the number of shards." -- a
+    # native analysis-time error, not a style lint); on rbe-west its shards
+    # ran 83-209s (6.5k shard-seconds, 2026-10-09), so it, not storage or
+    # //internal/httpclient:httpclient_served_test, is this lane's floor.
+    # Lowering it needs per-test speedups spread across the suite or
     # splitting bd_embedded_test into multiple <=50-shard sh_test rules with
     # shard-index-offset plumbing through tools/bazel/go_test_manifest_shard.sh
-    # and check_shard_coverage.py; neither is done here, so this lane's floor
-    # is cmd's ~409.6s, not the ~240s a 5-minute lane (including this job's
-    # ~60s fixed cost) would need -- tracked as a follow-up, not silently
-    # hidden in the shard count. On RBE this makes the tier's wall time ~=
-    # that floor + fixed cost (checkout, build, shard dispatch), not ~=
+    # and check_shard_coverage.py. On RBE the tier's wall time ~= that floor
+    # + fixed cost (checkout, build, shard dispatch), not ~=
     # sum(durations)/shard_count the way a CPU-core-bound local sweep is --
     # each shard is its own remote action and runs concurrently with every
     # other shard, farm capacity permitting.
@@ -1214,7 +1316,7 @@ jobs:
     # The runs-on expression is the shared one: Blacksmith in mode remote,
     # GitHub-hosted in the fork modes (a client only).
     needs: rbe
-    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.enabled == 'true' }}
     timeout-minutes: 60
     outputs:
@@ -1292,7 +1394,7 @@ jobs:
           python3 tools/bazel/check_shard_coverage.py
           --bep "$RUNNER_TEMP/bazel-bep.json"
           --suite //cmd/bd:bd_embedded_test .github/scripts/embedded-test-shard.sh 50
-          --suite //internal/storage/embeddeddolt:embeddeddolt_embedded_test .github/scripts/embedded-storage-test-shard.sh 15
+          --suite //internal/storage/embeddeddolt:embeddeddolt_embedded_test .github/scripts/embedded-storage-test-shard.sh 20
           --whole //internal/storage/embeddeddolt:embeddeddolt_conformance_core_test
           --whole //internal/storage/embeddeddolt:embeddeddolt_conformance_audit_test
 
@@ -1384,7 +1486,7 @@ jobs:
     # A caller may turn it off with integration: "off"; pr.yml and
     # bazel-farm.yml pass "on".
     needs: rbe
-    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ (needs.rbe.outputs.enabled == 'true' || needs.rbe.outputs.mode == 'cache') && inputs.integration != 'off' }}
     timeout-minutes: 85
     outputs:
@@ -1520,7 +1622,7 @@ jobs:
     name: dolt-server lane
     # Same runner and skip rule as bazel-test.
     needs: rbe
-    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.mode != 'skip' }}
     timeout-minutes: 90
     outputs:
@@ -1630,8 +1732,8 @@ jobs:
   # Like pr-risk.yml's proxied-server tier, "Test (Proxied Dolt Cmd N/15)",
   # as --config=doltserver-proxied: //cmd/bd:bd_proxied_test runs the shard
   # script, so shard k runs exactly that manifest entry's tests. This lane
-  # runs 30 shards of its own (.github/scripts/proxied-cmd-test-shards.txt's
-  # duration-balanced 30-block; see scripts/ci/proxied_test_durations.json),
+  # runs 44 shards of its own (.github/scripts/proxied-cmd-test-shards.txt's
+  # duration-balanced 44-block; see scripts/ci/proxied_test_durations.json),
   # not the legacy jobs' 15 — shard k here is not the same split as their
   # shard k. Same build as --config=doltserver (race bd_test, non-race
   # bd_for_tests), shared with bazel-doltserver through the remote cache.
@@ -1649,7 +1751,7 @@ jobs:
     # This lane is the tier's only PR run (pr-risk.yml's legacy jobs are
     # retired) and pr.yml's gate requires it to have run here and passed.
     needs: rbe
-    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.enabled == 'true' }}
     timeout-minutes: 30
     outputs:
@@ -1691,35 +1793,15 @@ jobs:
           fi
 
       # Remote: each shard's Go timeout is its job's 15m, 1200s Bazel cap,
-      # plus a compile. scripts/ci/proxied_test_durations.json's 176 entries
-      # are each a clean, single-job (no concurrent heavy bazel/dolt job
-      # intentionally started on the box; see that file's header for its
-      # ambient-contention caveat), -test.parallel=4 top-level-test
-      # duration — the exact config this job uses — from a single fresh,
-      # manifest-aligned 30-shard sweep's own <testsuite time> (errors="0",
-      # so a failing-but-complete suite's time is still trustworthy); every
-      # one of the 176 discovered tests completed inside its shard run, so
-      # no `bazel run` leaf-summation workaround was needed this time. See
-      # that file's header for the full methodology, including why an
-      # earlier -test.parallel=1 (serial) capture was replaced: serial
-      # timings don't model this lane (which always runs parallel=4), and
-      # an independent re-review measured near-zero correlation (r=0.08)
-      # between the serial-derived predicted shard load and actual
-      # parallel=4 wall time.
-      #
-      # Measured per-shard wall time for the full 30-shard local sweep that
-      # produced this data: shards ranged from roughly 32s to 341s, with
-      # most clustering well under this job's 25m step timeout / 30m job
-      # timeout. After repacking with these corrected weights, the LPT
-      # estimate clusters every shard within a few seconds of ~355-360s
-      # (sum of all 176 measured durations / 30 shards) — no single test or
-      # small group of tests dominates a shard the way the discarded serial
-      # data wrongly implied. This is a local, single-job measurement, not
-      # a verified RBE forecast (this job has only ever run remote); if a
-      # shard's RBE wall time diverges sharply from this local estimate,
-      # that is RBE throughput differing from local execution, not
-      # necessarily a regression — compare against this job's own recent
-      # run history before assuming a hang.
+      # plus a compile. The 44-shard block is LPT-packed by
+      # scripts/ci/proxied_test_durations.json, a rbe-west capture of each
+      # top-level test's summed leaf-test time (see its header). Packed to
+      # <=430 cost-seconds per shard, and a shard's wall time ran ~0.3x its
+      # packed cost on the lane's executors (-test.parallel=4), so shards
+      # are expected around 100-150s. Nearly all of that is `bd init
+      # --proxied-server` against the shard's dolt sql-server, ~one per
+      # subtest; a shard running far longer than its packed cost is worth
+      # comparing against this job's recent history before assuming a hang.
       - name: bazel test //... --config=doltserver-proxied
         id: test
         timeout-minutes: 25
@@ -1748,7 +1830,7 @@ jobs:
         run: >-
           python3 tools/bazel/check_shard_coverage.py
           --bep "$RUNNER_TEMP/bazel-bep.json"
-          --suite //cmd/bd:bd_proxied_test .github/scripts/proxied-test-shard.sh 30
+          --suite //cmd/bd:bd_proxied_test .github/scripts/proxied-test-shard.sh 44
 
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
@@ -1820,7 +1902,7 @@ jobs:
     # This lane is the tier's only PR run (pr-risk.yml's legacy jobs are
     # retired) and pr.yml's gate requires it to have run here and passed.
     needs: rbe
-    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ needs.rbe.outputs.enabled == 'true' }}
     timeout-minutes: 30
     outputs:
@@ -1958,12 +2040,12 @@ jobs:
         run: echo "result=$JOB_STATUS" >> "$GITHUB_OUTPUT"
 
   # The cmd/bd Dolt-server tier, as --config=doltserver-cmd: the whole
-  # integration-tagged cmd/bd suite (//cmd/bd:bd_dolt_server_test, 16
-  # shards) against a hermetic dolt sql-server, i.e. the Dolt-gated cmd/bd
+  # integration-tagged cmd/bd suite (//cmd/bd:bd_dolt_server_test, 32
+  # shards, the slowest tests pinned to 16 of them) against a hermetic dolt sql-server, i.e. the Dolt-gated cmd/bd
   # tests (TestCLI_*, TestInit*, the store-backed suites) that every other
   # lane and legacy job skips with BEADS_TEST_SKIP=dolt or leaves out of its
   # manifest; plus the differential regression suite
-  # (//tests/regression:regression_test, 8 shards: the candidate
+  # (//tests/regression:regression_test, 14 shards: the candidate
   # bd_for_tests against the catalog-pinned v0.49.6 release, formerly
   # regression.yml). --config=doltserver-cmd has exactly
   # --config=integration's build flags, so it shares bazel-integration's
@@ -1982,7 +2064,7 @@ jobs:
   bazel-cmd-dolt:
     name: cmd/bd Dolt-server tier
     needs: rbe
-    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ (needs.rbe.outputs.enabled == 'true' || needs.rbe.outputs.mode == 'cache') && inputs.integration != 'off' }}
     timeout-minutes: 85
     continue-on-error: true
@@ -2013,9 +2095,10 @@ jobs:
           RBE_FORK_PR: ${{ github.event.pull_request.number }}
 
       # Remote: a compile shared with bazel-integration plus the longest
-      # of 16 shards (~3 minutes measured; each shard pays ~30-40 s of
-      # TestMain and its own dolt sql-server; Go's -test.timeout=19m,
-      # Bazel's 1200s cap). Mode cache on a 4-CPU runner: the compile hits
+      # of 32 shards (~1 minute: tools/bazel/go_test_pinned_shard.sh pins
+      # the slowest tests to shards of their own; each shard pays a few
+      # seconds of TestMain and its own dolt sql-server; Go's
+      # -test.timeout=19m, Bazel's 1200s cap). Mode cache on a 4-CPU runner: the compile hits
       # the read-only cache, and a PR that changes cmd/bd or what it imports
       # runs every shard locally, four at a time (~2,200 test-seconds
       # measured unloaded, slower four-up: ~20-30 minutes); with the cache
@@ -2110,9 +2193,12 @@ jobs:
   package-mcp:
     name: Package Gate (MCP)
     needs: rbe
-    # 4 vCPU on purpose: pytest-xdist -n 8 measured ~2.7-3x on 4 CPUs
-    # (tools/f3 timing, 2026-10), well past 2 vCPU's ceiling.
-    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    # 8 vCPU with 16 xdist workers (BEADS_MCP_PYTEST_WORKERS below): pytest
+    # was 70s of this job at -n 8 on 4 vCPU (merge group 37721729916),
+    # dominated by per-test `bd init` fixture setup, which is CPU-bound.
+    # Was 4 vCPU / -n 8 (tools/f3 timing, 2026-10: ~2.7-3x on 4 CPUs);
+    # revert to that if the A/B does not save at least 15s.
+    runs-on: ${{ needs.rbe.outputs.mode == 'remote' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     if: ${{ inputs.package-gates == 'on' }}
     timeout-minutes: 30
     outputs:
@@ -2166,8 +2252,8 @@ jobs:
           echo "BEADS_TEST_BD_BINARY=$RUNNER_TEMP/bd-artifacts/bd-linux-gms-pure" >> "$GITHUB_ENV"
           # Defense in depth: nothing after this step needs the Bazel server
           # or its RBE client key (uv sync and pytest run PR-controlled
-          # code). Shutting down also frees the JVM's memory for the 8
-          # xdist workers that follow on this 4 vCPU runner.
+          # code). Shutting down also frees the JVM's memory for the 16
+          # xdist workers that follow on this 8 vCPU runner.
           bazel shutdown
           rm -rf "$RUNNER_TEMP/bazel-ci-secret"
 
@@ -2213,6 +2299,9 @@ jobs:
         if: ${{ steps.detect.outputs.mcp_package == 'true' }}
         env:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
+          # 16 workers on the 8 vCPU Blacksmith runner; package-mcp.sh's
+          # default 8 on the GitHub-hosted fallback.
+          BEADS_MCP_PYTEST_WORKERS: ${{ needs.rbe.outputs.mode == 'remote' && '16' || '8' }}
         run: make ci-package-mcp
 
       # Last step: the job's result as a workflow_call output for pr.yml's

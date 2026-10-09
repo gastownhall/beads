@@ -276,6 +276,7 @@
           "recovery/circular-dependencies",
           "recovery/sync-failures",
           "recovery/history-squash",
+          "recovery/unmigrate-schema-v65",
           "recovery/uninstalling"
         ]
       },

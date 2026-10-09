@@ -116,6 +116,15 @@ func TestBatchApplyContract(t *testing.T) {
 	t.Run("StampsSpawnerIDOnlyWhenNamed", func(t *testing.T) {
 		conformance.RunBatchApplyStampsSpawnerIDOnlyWhenNamed(t, ctx, fixture)
 	})
+	t.Run("CarriesThreadIDOntoTheStoredEdge", func(t *testing.T) {
+		conformance.RunBatchApplyCarriesThreadIDOntoTheStoredEdge(t, ctx, fixture)
+	})
+	t.Run("CarriesThreadIDOntoAnExistingEdge", func(t *testing.T) {
+		conformance.RunBatchApplyCarriesThreadIDOntoAnExistingEdge(t, ctx, fixture)
+	})
+	t.Run("RefusesAThreadIDLongerThanItsColumn", func(t *testing.T) {
+		conformance.RunBatchApplyRefusesAThreadIDLongerThanItsColumn(t, ctx, fixture)
+	})
 	t.Run("SplicesAForwardMetadataRef", func(t *testing.T) {
 		conformance.RunBatchApplySplicesAForwardMetadataRef(t, ctx, fixture)
 	})

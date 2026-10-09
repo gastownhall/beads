@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//tools/bazel:bd_releases.bzl", "LINUX_AMD64")
 
 # The differential regression suite (formerly regression.yml, which ran
@@ -10,26 +11,50 @@ load("//tools/bazel:bd_releases.bzl", "LINUX_AMD64")
 # `go build -tags gms_pure_go ./cmd/bd`. Both bd's talk to a hermetic dolt
 # sql-server TestMain starts from the pinned dolt (BEADS_TEST_DOLT_SERVER=local)
 # where the job pulled the dolt-sql-server image; a server that cannot start
-# fails the target (BEADS_TEST_REQUIRE_DOLT_CONTAINER=1). The Go binary shards
-# itself over the top-level tests, so each runs in exactly one shard.
+# fails the target (BEADS_TEST_REQUIRE_DOLT_CONTAINER=1).
 #
+# The go_test is only the binary (manual: never run on its own);
+# :regression_test runs it in 14 shards. Shards 1-10 each run the scenarios
+# pinned_shards.txt pins to them (duration-balanced by
+# tools/bazel/pin_shards.py); shards 11-14 are the Go binary's own round-robin
+# shards over every other top-level test, a test added since the manifest was
+# written included (tools/bazel/go_test_pinned_shard.sh), so each runs in
+# exactly one shard. Round-robin alone over 8 shards left the slowest at twice
+# the median (TestListAllOverridesLimitWithLabel, TestDepTypeExportFidelity).
+go_test(
+    name = "regression_suite",
+    srcs = [
+        "regression_test.go",
+        "scenarios_test.go",
+    ],
+    tags = ["manual"],
+    target_compatible_with = LINUX_AMD64,
+    deps = [
+        "//internal/testutil",
+        "//internal/testutil/bazeltest",
+    ],
+)
+
 # Tags:
 #   dolt-server-cmd: starts a hermetic dolt sql-server and needs the
 #     integration build tag; selected by --config=doltserver-cmd (bazel.yml's
 #     bazel-cmd-dolt lane) and excluded from every other lane, whose
 #     configurations either drop both test files or set BEADS_TEST_SKIP=dolt.
-go_test(
+sh_test(
     name = "regression_test",
     size = "large",
     # --config=doltserver-cmd's -test.timeout=19m fires (with a goroutine
     # dump) before Bazel's 1200s action limit.
     timeout = "eternal",
-    srcs = [
-        "regression_test.go",
-        "scenarios_test.go",
+    srcs = ["//tools/bazel:go_test_pinned_shard.sh"],
+    args = [
+        "$(rootpath :pinned_shards.txt)",
+        "$(rootpath :regression_suite)",
     ],
     data = [
         "BASELINE_VERSION",
+        "pinned_shards.txt",
+        ":regression_suite",
         "//cmd/bd:bd_for_tests",
         "@bd_releases//:v0.49.6",
     ],
@@ -39,24 +64,59 @@ go_test(
         "BEADS_TEST_DOLT_SERVER": "local",
         "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1",
     },
-    shard_count = 8,
+    shard_count = 14,
     tags = ["dolt-server-cmd"],
     target_compatible_with = LINUX_AMD64,
-    deps = [
-        "//internal/testutil",
-        "//internal/testutil/bazeltest",
-    ],
 )
 
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(
-    name = "repo_files",
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
     srcs = glob(
         ["**"],
         exclude = [
             "**/*.db",
             "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
             "**/*.out",
             "**/*.prof",
             "**/*.pyc",
@@ -65,7 +125,7 @@ filegroup(
             "**/node_modules/**",
         ],
     ),
-    visibility = ["//:__pkg__"],
+    visibility = ["//:__subpackages__"],
 )
 
 # --- end repo_files ---

@@ -85,7 +85,8 @@ func TestEncoderTableClassifiesEveryRequestField(t *testing.T) {
 				if !classified[name] {
 					t.Errorf("%s.%s is populatable and UNCLASSIFIED.\n"+
 						"Add it to the %s table with a disposition, or refuse it with a divergence-ledger row.\n"+
-						"An unclassified field is a filter this client would drop silently — see engdocs/design/http-client-backend.md D7 and D9 L12.",
+						"An unclassified field is a filter this client would drop silently — see L12 in the in-repo "+
+						"divergence ledger, engdocs/design/http-divergence-ledger.md.",
 						table.Source.Name(), name, tableName(table))
 				}
 			}

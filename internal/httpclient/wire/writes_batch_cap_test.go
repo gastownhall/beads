@@ -97,6 +97,40 @@ func TestApplyBatchBetweenTheFloorAndTheCeilingWithTheCapabilitySucceeds(t *test
 	}
 }
 
+// TestApplyBatchAt356ItemsWithoutTheCapabilityRefusesBeforeDialing exercises
+// the item-count gate at exactly 356 items -- the design's primary measured
+// large-batch-apply shape (internal/storage/batchfixtures.Shape356) -- rather
+// than only at the floor+1/ceiling+1 boundaries the other cases above pin.
+// applyBatchRequestOfSize's own doc comment is why a synthetic 356-item plan
+// is behaviorally identical to a real Shape356 plan for THIS gate: the cap
+// logic never looks past len(body.Items). What a REALISTIC Shape356 payload
+// must still get past this same gate -- and commit atomically once it does --
+// is covered end-to-end against the real served stack by
+// internal/httpclient's TestServedBatchApplyShape356CommitsAtomically and
+// TestServedBatchApplyShape356PlusAStaleGuardLeavesZeroRows.
+func TestApplyBatchAt356ItemsWithoutTheCapabilityRefusesBeforeDialing(t *testing.T) {
+	c, rec := newTestClient(t, Options{}, nil, serveEverything(contextBody("v0", "proj-1", withBatchApply()...)))
+	_, err := c.ApplyBatch(ctx(t), applyBatchRequestOfSize(356))
+
+	var capErr *CapabilityError
+	if !errors.As(err, &capErr) {
+		t.Fatalf("err = %v (%T), want *CapabilityError", err, err)
+	}
+	if capErr.Capability != CapBatchApplyLarge {
+		t.Errorf("Capability = %q, want %q", capErr.Capability, CapBatchApplyLarge)
+	}
+	// Never dialed past the handshake: a masked server (one that does not
+	// advertise CapBatchApplyLarge) must refuse a 356-item plan PRE-DIAL, the
+	// same way it refuses any other over-floor count.
+	if rec.count() != 1 {
+		t.Fatalf("made %d requests, want only the handshake (a 356-item plan must refuse pre-dial against a server that does not advertise %s)",
+			rec.count(), CapBatchApplyLarge)
+	}
+	if got := rec.at(t, 0).path; got != PathContext {
+		t.Errorf("only request = %q, want %q", got, PathContext)
+	}
+}
+
 func TestApplyBatchOverTheAbsoluteCeilingRefusesRegardlessOfTheCapability(t *testing.T) {
 	for _, tc := range []struct {
 		name         string

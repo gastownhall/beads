@@ -67,10 +67,10 @@ Examples:
 			return HandleErrorRespectJSON("%s", err)
 		}
 
-		if err := issueStore.AddLabel(ctx, result.ResolvedID, label, actor); err != nil {
+		if err := issueStore.AddLabel(ctx, result.ResolvedID, label, currentActor()); err != nil {
 			return HandleErrorRespectJSON("adding label to %s: %v", id, err)
 		}
-		if err := commitPendingIfEmbedded(ctx, issueStore, actor, doltAutoCommitParams{
+		if err := commitPendingIfEmbedded(ctx, issueStore, currentActor(), doltAutoCommitParams{
 			Command:  "tag",
 			IssueIDs: []string{result.ResolvedID},
 		}); err != nil {

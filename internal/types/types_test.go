@@ -1155,6 +1155,35 @@ func TestRevisionTokenSurvivesAJavaScriptRealisticParse(t *testing.T) {
 	}
 }
 
+// TestParseRevisionTokenRejectsMalformedTokens pins that the string<->int64
+// boundary is strict in both directions: ParseRevisionToken accepts exactly
+// the decimal integer spelling RevisionToken emits (plain digits, an optional
+// leading "-", no fractional part, no exponent, no surrounding whitespace, no
+// value outside int64) and refuses everything else rather than guessing —
+// the same "a token it cannot read is a server this client cannot follow"
+// posture ParseRevisionToken's own doc comment describes, now pinned against
+// the inputs a float-typed or lenient parser would have let through.
+//
+// "007" and "-0" pin the exact-inverse-of-FormatInt rule specifically:
+// FormatInt never pads a digit string with a leading zero (so "007" is not a
+// token any revision ever produced, even though strconv.ParseInt alone would
+// accept it as 7), and FormatInt(0, 10) is always "0", never "-0".
+func TestParseRevisionTokenRejectsMalformedTokens(t *testing.T) {
+	for _, token := range []string{
+		"", "1.0", "1.5", "1e10", "1e0", "+1", " 1", "1 ", "0x1", "abc",
+		"9223372036854775808",  // math.MaxInt64 + 1, one past the boundary
+		"-9223372036854775809", // math.MinInt64 - 1, one past the boundary
+		"NaN", "Infinity", "１", // fullwidth digit, not ASCII
+		"007",  // leading zero FormatInt never pads in
+		"-007", // leading zero on the negative digit run
+		"-0",   // FormatInt(0, 10) is "0", never "-0"
+	} {
+		if got, err := ParseRevisionToken(token); err == nil {
+			t.Errorf("ParseRevisionToken(%q) = %d, nil, want an error", token, got)
+		}
+	}
+}
+
 func TestReclaimedLeaseJSONSerialization(t *testing.T) {
 	b, err := json.Marshal(ReclaimedLease{ID: "bd-1", PreviousOwner: "worker-a"})
 	if err != nil {

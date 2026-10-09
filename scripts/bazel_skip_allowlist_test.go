@@ -27,7 +27,7 @@ import (
 // tests run on every PR, so a go-test-only check (a Bazel-guarded return or
 // continue, or a block guarded by TEST_SRCDIR == "" / !IsBazel()) would run
 // nowhere: declare what it reads as data instead (//:repo_files holds the
-// whole checkout). This check finds them before the merge, from the source.
+// whole checkout, tools/bazel/go_srcs.py's partitions of it less). This check finds them before the merge, from the source.
 //
 // Only top-level tests are considered: a subtest's skip is invisible to
 // equivalence.py, which compares top-level tests.
@@ -39,8 +39,8 @@ func TestBazelOnlySkipsAreAllowlisted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Under Bazel the tree is //:repo_files; a scan that parsed few files is
-	// not looking at it.
+	// Under Bazel the tree is //:repo_go_test_srcs; a scan that parsed few
+	// files is not looking at it.
 	if files < 1000 {
 		t.Fatalf("parsed only %d _test.go files; the scan is broken", files)
 	}
@@ -364,20 +364,6 @@ func checks(body *ast.BlockStmt) bool {
 		return !found
 	})
 	return found
-}
-
-func exits(body *ast.BlockStmt) bool {
-	for _, st := range body.List {
-		switch st := st.(type) {
-		case *ast.ReturnStmt:
-			return true
-		case *ast.BranchStmt:
-			if st.Tok == token.CONTINUE {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // goTestCond: TEST_SRCDIR == "" or !...IsBazel().

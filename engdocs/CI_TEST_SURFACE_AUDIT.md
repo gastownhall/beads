@@ -199,7 +199,7 @@ Key jobs preserved by display name:
 
 | Workflow | Triggers | Main validation |
 |---|---|---|
-| `bazel.yml` `bazel-cmd-dolt` (formerly `regression.yml`) | PR, merge group, push to `main` | `//tests/regression:regression_test` (8 shards, cached until its inputs change) against the catalog-pinned v0.49.6 baseline; local entrypoint stays `make test-regression`. |
+| `bazel.yml` `bazel-cmd-dolt` (formerly `regression.yml`) | PR, merge group, push to `main` | `//tests/regression:regression_test` (14 shards, cached until its inputs change) against the catalog-pinned v0.49.6 baseline; local entrypoint stays `make test-regression`. |
 | `bazel.yml` `bazel-test` (formerly `cross-version-smoke.yml`) | PR, merge group, push to `main` | `//tests/upgrade_smoke:upgrade_smoke_<release>_test` for the newest 30 catalog-pinned releases, via `scripts/upgrade-smoke-test.sh` with `PREV_BIN`; cached until their inputs change. |
 | `bazel.yml` `bazel-test` (formerly `migration-test.yml`) | PR, merge group, push to `main` | `//tests/migration:historical_upgrade_<release>_test`, one target per reviewed release (14, v0.9.1 source-built offline) plus `legacy_bridge_test`, against catalog-pinned release binaries; cached until their inputs change. Local entrypoint stays `scripts/migration-test/run.sh`. |
 | `nightly.yml` | Daily schedule, manual | `go test -v -race -tags=integration,gms_pure_go -coverprofile=coverage.out -timeout=30m ./...` with `BEADS_TEST_SKIP=dolt`; checks coverage >= 30%. |

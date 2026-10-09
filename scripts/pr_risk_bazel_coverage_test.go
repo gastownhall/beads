@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -319,7 +318,7 @@ func TestBazelRetiredLanesCheckListedTestsRan(t *testing.T) {
 	// liveShardCount dispatches a suite's -1 shardCount to the accessor that
 	// reads its target's own shard_count from its BUILD.bazel rule — the
 	// single source of truth for a lane's shard split. See
-	// bazelProxiedShardCount's doc comment (scripts/ci_workflow_test.go) for
+	// bazelProxiedShardCount's doc comment (scripts/embedded_shard_count_test.go) for
 	// the shared rationale.
 	liveShardCount := map[string]func(*testing.T) int{
 		"//cmd/bd:bd_proxied_test":                                   bazelProxiedShardCount,
@@ -553,196 +552,85 @@ esac
 	}
 }
 
-// Review G1: the checker's input is the real shard scripts' list-only
-// output (every retired lane's: the embedded, proxied and server suites). Every name they list, for every shard, must be a test go test
-// runs (declared `func Name(t *testing.T)` in the package's _test.go files),
-// or one check_shard_coverage.py drops as NOT_TESTS; and each NOT_TESTS name
-// must really not be a test (TestMain takes *testing.M). Otherwise the
-// checker reports a listed test that "did not run" on every real run.
-func TestShardScriptsListOnlyRealTests(t *testing.T) {
-	// The CI shard scripts use bash 4 associative arrays (Linux runners only).
-	requireAutofixBash(t)
-	root := sourceRepoRoot(t)
-	m := regexp.MustCompile(`(?m)^NOT_TESTS = frozenset\(\{([^}]*)\}\)`).FindStringSubmatch(readPolicyFile(t, root, "tools/bazel/check_shard_coverage.py"))
-	if m == nil {
-		t.Fatal("tools/bazel/check_shard_coverage.py has no NOT_TESTS = frozenset({...})")
-	}
-	notTests := map[string]bool{}
-	for _, q := range regexp.MustCompile(`"([^"]+)"`).FindAllStringSubmatch(m[1], -1) {
-		notTests[q[1]] = true
-	}
-	for _, c := range []struct{ job, script, pkg string }{
-		{"test-embedded-cmd", ".github/scripts/embedded-test-shard.sh", "cmd/bd"},
-		{"test-embedded-storage", ".github/scripts/embedded-storage-test-shard.sh", "internal/storage/embeddeddolt"},
-		// D2 step 2: the proxied and server lanes' suites.
-		{"test-proxied-cmd", ".github/scripts/proxied-test-shard.sh", "cmd/bd"},
-		{"test-server-storage-full", ".github/scripts/server-storage-test-shard.sh", "internal/storage/dolt"},
-	} {
-		var src strings.Builder
-		files, err := filepath.Glob(filepath.Join(root, c.pkg, "*_test.go"))
-		if err != nil || len(files) == 0 {
-			t.Fatalf("%s: no _test.go files (%v)", c.pkg, err)
+// walkBazelFiles visits every BUILD.bazel and BUILD file under root (and,
+// with bzl, every .bzl file), skipping .git, node_modules and .beads. A
+// symlink to a regular file is visited: under `bazel test` on a local
+// executor the runfiles tree is a symlink forest, and a walk that skipped
+// symlinks read no BUILD file there and reported every lane's targets gone
+// (#7350). A symlink to a directory is never followed.
+func walkBazelFiles(root string, bzl bool, visit func(path string, d os.DirEntry) error) error {
+	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-		for _, f := range files {
-			data, err := os.ReadFile(f)
-			if err != nil {
-				t.Fatal(err)
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", ".beads":
+				return filepath.SkipDir
 			}
-			src.Write(data)
-			src.WriteString("\n")
+			return nil
 		}
-		declared := map[string]bool{}
-		for _, d := range regexp.MustCompile(`(?m)^func (Test\w*)\(\w+ \*testing\.T\) \{`).FindAllStringSubmatch(src.String(), -1) {
-			declared[d[1]] = true
+		name := d.Name()
+		if name != "BUILD.bazel" && name != "BUILD" && !(bzl && strings.HasSuffix(name, ".bzl")) {
+			return nil
 		}
-
-		// B1: validate every total this script's committed manifest holds a
-		// block for, plus this job's own PR Risk matrix size and (for
-		// test-proxied-cmd) the Bazel lane's own shard_count — not just
-		// whichever total happens to equal this PR Risk job's matrix. Before
-		// F2 those always coincided; now the Bazel-only bazel-proxied lane
-		// reads a manifest block (30) that no PR-Risk-matrix-only check ever
-		// exercises, so a fork PR (which never runs bazel-proxied) could
-		// corrupt that block and still merge green. Looping over every
-		// distinct total in the manifest closes that gap for this script and
-		// any other script that later grows a second block the same way.
-		mm := shardManifestDefault.FindStringSubmatch(readPolicyFile(t, root, c.script))
-		if mm == nil {
-			t.Fatalf("%s has no ${BEADS_TEST_SHARD_MANIFEST:-...} default manifest", c.script)
+		if !isFileOrFileLink(path, d) {
+			return nil
 		}
-		totalsSet := map[int]bool{}
-		for _, line := range strings.Split(readPolicyFile(t, root, mm[1]), "\n") {
-			line, _, _ = strings.Cut(line, "#")
-			fields := strings.Fields(line)
-			if len(fields) == 0 {
-				continue
-			}
-			if n, err := strconv.Atoi(fields[0]); err == nil {
-				totalsSet[n] = true
-			}
-		}
-		switch c.script {
-		case ".github/scripts/proxied-test-shard.sh":
-			totalsSet[bazelProxiedShardCount(t)] = true
-		case ".github/scripts/embedded-test-shard.sh":
-			// F1: the Bazel-only bazel-embedded lane reads a 50-shard cmd
-			// block that no PR-Risk-matrix-only (20-shard) check exercises;
-			// without this, "BUILD.bazel's shard_count and bazel.yml's
-			// check_shard_coverage.py arg both drift to a new total with no
-			// manifest block" passes every policy test (see review S3) --
-			// the lane then silently goes 100% hash fallback and loses its
-			// duration balancing.
-			totalsSet[bazelEmbeddedCmdShardCount(t)] = true
-		case ".github/scripts/embedded-storage-test-shard.sh":
-			// F1: mirrors the cmd case above for the 15-shard storage block.
-			totalsSet[bazelEmbeddedStorageShardCount(t)] = true
-		case ".github/scripts/server-storage-test-shard.sh":
-			totalsSet[bazelServerFullShardCount(t)] = true
-		}
-		totals := make([]int, 0, len(totalsSet))
-		for n := range totalsSet {
-			totals = append(totals, n)
-		}
-		sort.Ints(totals)
-
-		for _, shards := range totals {
-			// The scripts' hash fallback forks per test (seconds per shard
-			// for the server suite): list the shards concurrently.
-			outs, errs := make([][]byte, shards+1), make([]error, shards+1)
-			var wg sync.WaitGroup
-			for k := 1; k <= shards; k++ {
-				wg.Add(1)
-				go func(k int) {
-					defer wg.Done()
-					cmd := exec.Command("bash", c.script, strconv.Itoa(k), strconv.Itoa(shards))
-					cmd.Dir = root
-					cmd.Env = append(os.Environ(), "BEADS_TEST_SHARD_LIST_ONLY=1")
-					outs[k], errs[k] = cmd.Output()
-				}(k)
-			}
-			wg.Wait()
-			listed, manifestSum := 0, 0
-			for k := 1; k <= shards; k++ {
-				if errs[k] != nil {
-					// The script itself exits 1 on a duplicate manifest entry
-					// or a manifest entry that names no discovered test
-					// (rename/typo/stale-after-delete), for the requested
-					// total only: this is what catches a corrupted block
-					// that a PR-Risk-matrix-only check at a different total
-					// would never see.
-					t.Fatalf("%s %d %d: %v\n%s", c.script, k, shards, errs[k], outs[k])
-				}
-				for _, line := range strings.Split(string(outs[k]), "\n") {
-					if mc := regexp.MustCompile(`^  manifest: (\d+), fallback: \d+$`).FindStringSubmatch(line); mc != nil {
-						n, _ := strconv.Atoi(mc[1])
-						manifestSum += n
-						continue
-					}
-					name, ok := strings.CutPrefix(line, "  ")
-					if !ok || !strings.HasPrefix(name, "Test") || strings.ContainsAny(name, " :") {
-						continue
-					}
-					listed++
-					isTest := declared[name]
-					switch {
-					case notTests[name] && isTest:
-						t.Errorf("%s shard %d/%d lists %s, which check_shard_coverage.py drops, but it is a real test", c.script, k, shards, name)
-					case !notTests[name] && !isTest:
-						t.Errorf("%s shard %d/%d lists %s, which is not a `func %s(t *testing.T)` test in %s: check_shard_coverage.py would report it missing on every run (add it to NOT_TESTS only if go test never runs it)",
-							c.script, k, shards, name, name, c.pkg)
-					}
-				}
-			}
-			if listed < 50 {
-				t.Errorf("%s at %d shards listed only %d tests; did the list-only output format change?", c.script, shards, listed)
-			}
-			// S1: a total that is supposed to have a committed manifest
-			// block (every total this loop considers does: it is either a
-			// live job's matrix size or a total this script's own manifest
-			// already names) must not have silently gone 100% hash fallback,
-			// which is what "the whole block was deleted" looks like from
-			// here: check_shard_coverage.py would still pass (it rebuilds
-			// its expectation from this same script), so nothing else
-			// catches it.
-			if manifestSum == 0 {
-				t.Errorf("%s at %d shards: manifest entries for this total sum to 0 across all shards (100%% hash fallback); its committed block in %s may have been deleted", c.script, shards, mm[1])
-			}
-		}
-	}
-	for name := range notTests {
-		if name != "TestMain" {
-			t.Errorf("NOT_TESTS has %s; only TestMain is never a test", name)
-		}
-	}
+		return visit(path, d)
+	})
 }
 
-// S3: the Bazel-only 30-shard block is not frozen like the legacy 15-shard
-// block (TestShardScriptsListOnlyRealTests's B1 fix catches outright
-// corruption, but not a committed block that has drifted from the currently
-// discovered TestProxiedServer*/TestServerMode* test set, e.g. a test added,
-// renamed, or removed without anyone running --write). gen_proxied_shard_
-// manifest.py --check verifies only that the committed block names every
-// discovered test exactly once -- not that its shard *assignments* match a
-// fresh LPT pack -- and fails with the exact command to fix it when a name
-// is missing, stale, or duplicated. It deliberately does NOT fail merely
-// because proxied_test_durations.json's weights changed and the existing
-// packing is now suboptimal: two PRs each adding one proxied test would
-// otherwise force a full repack and conflict on unrelated shard lines (see
-// --repack below for the explicit opt-in to that). Run --check here so a
-// block with missing/stale/duplicate names fails go test ./scripts/...
-// (//scripts:scripts_test under Bazel) instead of only
-// surfacing as a test silently never running in any shard. The legacy
-// 15-shard block is deliberately excluded: its header documents that it is
-// frozen and must not be regenerated (see
-// .github/scripts/proxied-cmd-test-shards.txt and engdocs/TESTING.md), so a
-// --check against it would always fail by design.
-func TestProxiedShardManifestGeneratorNotStale(t *testing.T) {
-	python := requireHostTool(t, "python3")
+// A local Bazel executor hands the test a runfiles tree in which every file
+// is a symlink into the sandbox's inputs (#7350: scripts_test ran there on an
+// unauthorized fork's PR, read no BUILD file and failed every lane's pin with
+// `got map[]`). The walk must see the same Bazel files through such a forest
+// as in the checkout, and must not follow a symlinked directory or trip on a
+// dangling link.
+func TestBazelFileWalkFollowsFileSymlinks(t *testing.T) {
 	root := sourceRepoRoot(t)
-	cmd := exec.Command(python, "scripts/ci/gen_proxied_shard_manifest.py", "30", "--weights=duration", "--check")
-	cmd.Dir = root
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Errorf("gen_proxied_shard_manifest.py 30 --weights=duration --check: %v\n%s", err, out)
+	collect := func(root string) []string {
+		var rels []string
+		err := walkBazelFiles(root, true, func(path string, _ os.DirEntry) error {
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			rels = append(rels, filepath.ToSlash(rel))
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+		sort.Strings(rels)
+		return rels
+	}
+	checkout := collect(root)
+	if len(checkout) < 10 {
+		t.Fatalf("found only %d Bazel files under %s; the checkout walk is broken", len(checkout), root)
+	}
+
+	forest := filepath.Join(t.TempDir(), "_main")
+	for _, rel := range checkout {
+		dst := filepath.Join(forest, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(root, filepath.FromSlash(rel)), dst); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Hazards a runfiles tree or a checkout can hold: Bazel's bazel-* links to
+	// directories, and a link whose target is gone.
+	if err := os.Symlink(filepath.Join(root, "scripts"), filepath.Join(forest, "bazel-bin")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(forest, "missing", "BUILD.bazel"), filepath.Join(forest, "BUILD")); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := collect(forest); !reflect.DeepEqual(got, checkout) {
+		t.Errorf("the symlink forest yields different Bazel files than the checkout:\nforest   %d: %v\ncheckout %d: %v", len(got), got, len(checkout), checkout)
 	}
 }
 
@@ -847,7 +735,9 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 
 	// Committed rc files: only .bazelrc. .bazelrc.local and user.bazelrc are
 	// developer-local (gitignored) and would be try-imported into CI runs.
-	for _, f := range repoFiles(t, root) {
+	// Under Bazel the listing is //:repo_other_files, every tracked file but
+	// Go and Markdown source (no rc file is either): several hundred files.
+	for _, f := range repoFiles(t, root, 300) {
 		base := filepath.Base(f)
 		if strings.Contains(base, "bazelrc") && f != ".bazelrc" && f != setupBazelActionDir+"/write-bazelrc.sh" {
 			t.Errorf("committed rc file %s: .bazelrc's try-import would load it into every CI run", f)
@@ -869,12 +759,23 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// go_test_pinned_shard.sh selects and skips by design (each test in
+		// exactly one shard: TestPinnedShardWrapperSplit), and is reviewed
+		// here for the dolt-server-cmd targets only, which are none of the
+		// retired tiers' lanes; pinnedShardWrapperUsers fails if anything
+		// else runs through it.
+		exempt := filepath.ToSlash(rel) == pinnedShardWrapper
+		if exempt {
+			for _, e := range pinnedShardWrapperUsers(t, root) {
+				t.Error(e)
+			}
+		}
 		for i, line := range strings.Split(string(data), "\n") {
 			code := strings.TrimSpace(line)
 			if strings.HasPrefix(code, "#") {
 				continue
 			}
-			if scriptNarrow.MatchString(code) {
+			if scriptNarrow.MatchString(code) && !exempt {
 				t.Errorf("%s:%d %q can select, skip or re-run the retired tiers' lanes' tests", rel, i+1, code)
 			}
 			for _, m := range regexp.MustCompile(`--config=([A-Za-z0-9_-]+)`).FindAllStringSubmatch(code, -1) {
@@ -925,6 +826,13 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 			[]string{"$(rootpath :embeddeddolt_race_off)", "-test.v", "-test.count=1", "-test.timeout=19m", "-test.run=^(TestBatchApplyContract|TestLargeBatchApplyWallClock_Embedded|TestLargeBatchApplyStatementCounts712_Embedded|TestCreateBatchFastPathsMatchPerRowLarge_Embedded)$$"},
 			map[string]string{"BEADS_TEST_EMBEDDED_DOLT": "1"},
 		},
+		// scripts/conformance.sh's Tier 3, the served HTTP corpus, with the
+		// script's switches: required, so a missing engine fails each served
+		// case instead of skipping it.
+		"//internal/httpclient:httpclient_served_test": {
+			[]string{"$(rootpath :httpclient_test)", "-test.v", "-test.count=1", "-test.timeout=19m"},
+			map[string]string{"BEADS_HTTP_TEST_REQUIRED": "1", "BEADS_TEST_EMBEDDED_DOLT": "1"},
+		},
 		"//cmd/bd:bd_proxied_test": {
 			[]string{"$(rootpath //:.github/scripts/proxied-test-shard.sh)", "BEADS_TEST_CMD_BINARY", "$(rootpath :bd_test)"},
 			map[string]string{
@@ -960,20 +868,7 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 	tagsRe := regexp.MustCompile(`(?ms)^    tags = \[(.*?)\],$`)
 	envRe := regexp.MustCompile(`(?ms)^    env = \{(.*?)\},$`)
 	got := map[string]target{}
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "node_modules", ".beads":
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.Type()&os.ModeSymlink != 0 || (d.Name() != "BUILD.bazel" && d.Name() != "BUILD") {
-			return nil
-		}
+	err := walkBazelFiles(root, false, func(path string, d os.DirEntry) error {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
@@ -1022,7 +917,7 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 	// selection is the point (a required-suite contract that checks it), and
 	// nothing leaves the lanes. Pinned to exactly these args.
 	extraRunVariants := map[string][]string{
-		// The doc-freshness suite (also run by //scripts:scripts_test) under
+		// The doc-freshness suite (also run by //scripts:shell_scripts_test) under
 		// -required-suite, as pr.yml's former Linux doc-freshness leg ran it.
 		"//scripts:doc_freshness_required_test": {
 			"-test.count=1",
@@ -1030,21 +925,8 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 			"-required-suite=doc-freshness",
 		},
 	}
-	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "node_modules", ".beads":
-				return filepath.SkipDir
-			}
-			return nil
-		}
+	err = walkBazelFiles(root, true, func(path string, d os.DirEntry) error {
 		isBzl := strings.HasSuffix(d.Name(), ".bzl")
-		if d.Type()&os.ModeSymlink != 0 || (d.Name() != "BUILD.bazel" && d.Name() != "BUILD" && !isBzl) {
-			return nil
-		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err

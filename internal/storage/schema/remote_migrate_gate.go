@@ -523,7 +523,8 @@ func (e *RemoteMigrateGateError) AgentDirective() string {
 	}
 }
 
-// GateOption is one conditional remediation path for the remote-migrate gate.
+// GateOption is one conditional remediation path for the remote-migrate gate
+// (and the migration-consent gate, MigrateConsentError.Options).
 // It is intentionally conditional (When) and carries its Risk, so an agent
 // cannot treat any single command as the unconditional fix.
 type GateOption struct {

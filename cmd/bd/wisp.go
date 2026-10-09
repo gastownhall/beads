@@ -280,7 +280,7 @@ func runWispCreateCore(cmd *cobra.Command, args []string) error {
 
 	result, err := spawnMoleculeWithOptions(ctx, store, subgraph, CloneOptions{
 		Vars:      vars,
-		Actor:     actor,
+		Actor:     currentActor(),
 		Ephemeral: true,
 		Prefix:    types.IDPrefixWisp,
 		RootOnly:  rootOnly,

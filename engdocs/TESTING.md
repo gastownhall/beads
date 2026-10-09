@@ -36,12 +36,13 @@ Each lane, as bazel.yml runs it (add your `--config=fork-cache` or
 |---|---|---|
 | Test (`bazel-test`) | `make test`, i.e. `bazel test //... --config=ci` | PR Core's selection: race, `-short`, skips. Includes nogo, gofmt and the repository guards. The default gate for every Go change. |
 | Lint, all platforms | `make ci-pr-lint` | nogo natively plus the windows/amd64 and darwin/arm64 passes. `make lint-changed` covers only your changed packages. |
-| Pure-Go (`bazel-pure`) | `bazel build --config=pure //cmd/bd:bd //cmd/bd:bd_test` | cgo off. The job's cmd/bd test subset (`PURE_CMD_BD_TESTS`), release cross-compile and js/wasm step are in bazel.yml. |
+| Pure-Go (`bazel-pure`) | `bazel build --config=pure //cmd/bd:bd //cmd/bd:bd_test` | cgo off. The job's cmd/bd test subset (`PURE_CMD_BD_TESTS`) and js/wasm step are in bazel.yml. |
+| Release cross-compile (`bazel-release-cross`) | `./scripts/ci/bazel-release-cross-compile.sh` | Every `go_library`/`go_binary` for each row of `scripts/ci/release-targets.txt`, cgo off, with nogo. |
 | Integration (`bazel-integration`) | `bazel test //... --config=integration` | The `integration`-tagged build. Runs with the read-only cache too. |
 | Dolt server (`bazel-doltserver`) | `bazel test //... --config=doltserver` | Starts its own `dolt sql-server` from the pinned binary; no docker. |
-| cmd/bd Dolt server (`bazel-cmd-dolt`) | `bazel test //cmd/bd:bd_dolt_server_test --config=doltserver-cmd` | 16 shards of the integration-tagged cmd/bd suite. |
+| cmd/bd Dolt server (`bazel-cmd-dolt`) | `bazel test //cmd/bd:bd_dolt_server_test --config=doltserver-cmd` | 32 shards of the integration-tagged cmd/bd suite (the slowest tests pinned to 16 of them). |
 | Embedded Dolt (`bazel-embedded`) | `bazel test //... --config=embedded` | Remote execution only in CI; locally it is slow. |
-| Proxied server (`bazel-proxied`) | `bazel test //... --config=doltserver-proxied` | Remote execution only: 30 shards, each with a Dolt server. |
+| Proxied server (`bazel-proxied`) | `bazel test //... --config=doltserver-proxied` | Remote execution only: 44 shards, each with a Dolt server. |
 | Server-Dolt storage (`bazel-server-storage`) | `bazel test //... --config=doltserver-integration` | Remote execution only. |
 | Docs | `make check-docs` | `//test/docsync:docsync_test` and `//scripts/repochecks:doc_freshness_test` in the test lane's configuration, then `scripts/check-doc-flags.sh` against the pinned release. |
 
@@ -183,7 +184,7 @@ builds with the integration tag like `--config=integration`. Each shard runs
 its CI job's shard script, so for `--config=doltserver-integration` Bazel
 shard k runs the tests of job k+1 (both split the manifest's 16-shard block
 the same way). `--config=doltserver-proxied`'s `bd_proxied_test` instead
-runs the manifest's own 30-shard block — bin-packed by measured duration,
+runs the manifest's own 44-shard block — bin-packed by measured duration,
 not the legacy jobs' 15-shard, bd-init-cost-proxy block — so shard k there
 is not job k+1's tests; it is a different split of the same tests.
 
@@ -192,8 +193,13 @@ advisory `bazel-cmd-dolt` job) runs the whole integration-tagged cmd/bd
 suite on the `local` backend: the Dolt-gated cmd/bd tests (`TestCLI_*`, the
 init and store-backed suites) that every other lane skips with
 `BEADS_TEST_SKIP=dolt` or leaves out of its manifest. It shares
-`--config=integration`'s build, passes the binary no test selection (the Go
-binary shards itself over every top-level test, 16 shards), and runs where
+`--config=integration`'s build and runs it in 32 shards: 16 run the slowest
+tests `cmd/bd/dolt_server_pinned_shards.txt` pins to them, and 16 are the Go
+binary's own round-robin shards over every other top-level test
+(`tools/bazel/go_test_pinned_shard.sh`; `//tests/regression:regression_test`
+splits the same way). After a change that moves test durations, regenerate the
+manifest from a run of the lane with `tools/bazel/pin_shards.py` (see its
+usage); a stale manifest only costs balance, never coverage. It runs where
 the integration lane runs (remote, or with the read-only cache). pr.yml's
 gate requires it once `BAZEL_CMD_DOLT_REQUIRED` is `"true"`; pr.yml then
 also passes bazel.yml `cmd-dolt-required: true`, and the PR's

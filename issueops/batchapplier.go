@@ -220,9 +220,13 @@ type DepAddItem struct {
 	// not express. One spelling, and it is this one.
 	Metadata string
 	// HasSpawner marks a DepWaitsFor edge whose caller explicitly named a
-	// spawner (bd create --graph's edges[].spawner_key/spawner_id, which the
-	// CLI's own plan validator already forces to equal this edge's own
-	// Target). Only then does the role stamp Metadata's spawner_id from the
+	// spawner: a graph plan's edges[].spawner_key/spawner_id, which bd create
+	// --graph's plan validator forces to equal the edge's own Target. It has
+	// two producers: bd create --graph itself, which sets it from those
+	// members on the embedded and proxied legs alike (cmd/bd's
+	// buildGraphApplyBatchRequest), and an embedder lowering such a plan onto
+	// this role (gc's ApplyGraphPlan mapping, on BatchApplier below). Only
+	// when it is set does the role stamp Metadata's spawner_id from the
 	// resolved Target, once every id in the batch exists (see
 	// StampWaitsForSpawnerID) — a plan-local spawner key cannot be resolved
 	// any earlier than that.
@@ -236,9 +240,15 @@ type DepAddItem struct {
 	// Type.
 	HasSpawner bool
 	// ThreadID carries conversation-threading metadata (e.g. a replies-to
-	// edge's originating thread) onto the created dependency row. Empty means
-	// the edge carries none; it is a plain column, not part of Metadata's
-	// type-specific blob.
+	// edge's originating thread) onto the dependency row. Empty means the edge
+	// carries none; it is a plain column, not part of Metadata's type-specific
+	// blob, and one longer than the column holds is ErrValidation.
+	//
+	// A RE-ADD OF AN EDGE THAT ALREADY EXISTS WITH THE SAME TYPE CARRIES IT
+	// TOO. A thread the stored row does not already carry replaces it, and
+	// versions the source on the same terms as a Metadata change; an empty
+	// ThreadID keeps the stored thread rather than clearing it, so a re-apply
+	// that names none cannot erase one.
 	ThreadID string
 }
 
@@ -557,6 +567,29 @@ func HasExtendedRetryBudget(ctx context.Context) bool {
 // with the wire's. The measured callers already speak HTTP or hold the role
 // directly. `bd create --file` and `bd dep add --file` remain the file-shaped
 // front doors for the two homogeneous cases they already serve.
+//
+// TWO EMBEDDER OPERATIONS MAP ONTO THIS ROLE RATHER THAN EARNING THEIR OWN
+// (DESIGN §3.8, "Guarded writes: NO NEW ROLES"). Neither needs a new role or a
+// new wire member; both are a SHAPE of ApplyBatchRequest, pinned by an
+// http-leg conformance case so the shape does not drift under either side
+// independently:
+//
+//   - CloseWithMetadataIfMatch is an update item carrying a Metadata patch and
+//     ExpectedVersion, followed by a close item on the SAME target, in ONE
+//     request: []ApplyItem{{Kind: ItemUpdate, Update: &UpdateItem{Target: t,
+//     Patch: IssuePatch{Metadata: ...}, ExpectedVersion: &v}}, {Kind: ItemClose,
+//     Close: &CloseItem{Target: t}}}. It is atomic because the whole request is:
+//     a stale ExpectedVersion refuses the update, which refuses the request, and
+//     the close never runs — zero rows change. CloseItem itself carries no
+//     metadata member; this composition is the only way to land a metadata
+//     write and a close as one guarded act.
+//   - ApplyGraphPlan is a create item per node (Key, the issue's Labels and
+//     Metadata, Ephemeral, NoHistory, and MetadataRefs for a value only the
+//     plan's own later ids can supply), dep_add items for every edge the plan
+//     names — parent-child included, since a parent is a dep_add item of type
+//     parent-child like any other edge — and trailing update items for an
+//     AssignAfterCreate step, which patches a just-created row's Assignee by
+//     its backward Key reference. One request, declaration order, one outcome.
 //
 // Implementations never mutate caller-owned request values, snapshot the
 // request at method entry, and apply validation and normalization only to

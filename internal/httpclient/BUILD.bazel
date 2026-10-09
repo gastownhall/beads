@@ -1,22 +1,77 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 go_library(
     name = "httpclient",
     srcs = [
+        "accessors.go",
         "backend_credential.go",
+        "batchapplier.go",
+        "batchcloser.go",
+        "batchcreator.go",
+        "batchgetter.go",
+        "bridge.go",
         "ca.go",
         "ca_permissions_other.go",
         "ca_permissions_unix.go",
+        "claimer.go",
+        "commenter.go",
+        "counter.go",
         "credential.go",
+        "deleter.go",
+        "dependencyeditor.go",
+        "detail_reads.go",
+        "dial.go",
+        "dispatch.go",
+        "errors.go",
+        "journal.go",
+        "lifecycle.go",
+        "list_walk.go",
+        "memories.go",
+        "metadata.go",
+        "metadatacas.go",
+        "offrole.go",
+        "order.go",
+        "readyclaimer.go",
+        "refusal.go",
+        "register.go",
+        "relations.go",
+        "releaser.go",
+        "resolve.go",
+        "role_querier.go",
+        "role_reader.go",
+        "role_readycounter.go",
+        "roles_aux.go",
+        "roles_graph.go",
+        "servercontext.go",
+        "store.go",
+        "sweeper.go",
         "target.go",
+        "target_seam.go",
+        "unsupported.go",
+        "unsupported_gen.go",
+        "vocabulary.go",
+        "watch.go",
+        "writewire.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/httpclient",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/config",
         "//internal/configfile",
         "//internal/creds",
+        "//internal/httpapi/apigen",
+        "//internal/httpclient/encode",
         "//internal/httpclient/wire",
+        "//internal/storage",
         "//internal/storage/backends",
+        "//internal/storage/issueops",
+        "//internal/storage/sqlbuild",
+        "//internal/types",
+        "//internal/utils",
+        "//issueops",
+        "//journalops",
+        "//memoryops",
         "@org_golang_x_net//http/httpproxy",
         "@org_golang_x_net//idna",
     ],
@@ -24,21 +79,166 @@ go_library(
 
 go_test(
     name = "httpclient_test",
+    # Unsharded, this package took 137-228s on rbe-west under --config=ci
+    # (BEADS_TEST_SKIP=dolt, no BEADS_TEST_EMBEDDED_DOLT; 2026-10-09), the test lane's
+    # longest single action. Two shards (rules_go deals tests out round-robin) put
+    # ~68s of measured test time on each; the three heaviest tests (31s, 20s, 13s)
+    # land on different shards. size=large/timeout=long follows the same convention
+    # as //internal/storage/embeddeddolt's go_test.
+    size = "large",
+    timeout = "long",
     srcs = [
         "backend_credential_test.go",
+        "batchapplier_test.go",
+        "brief_test.go",
+        "bulk_roles_test.go",
         "ca_permissions_unix_test.go",
         "ca_test.go",
         "ca_wrong_ca_test.go",
+        "completeness_test.go",
+        "composition_test.go",
+        "counts_test.go",
         "credential_source_test.go",
         "credential_test.go",
+        "dial_test.go",
+        "dispatch_test.go",
+        "divergence_citation_gate_test.go",
+        "divergence_test.go",
+        "expected_revision_contract_test.go",
         "helpers_test.go",
+        "lifecycle_create_test.go",
+        "lifecycle_update_test.go",
+        "list_sort_test.go",
+        "metadatacas_test.go",
+        "race_detector_off_test.go",
+        "race_detector_on_test.go",
+        "required_served_tier_test.go",
+        "roles_graph_cycles_test.go",
+        "roles_test.go",
+        "served_batch_apply_large_test.go",
+        "served_batch_apply_test.go",
+        "served_batch_close_test.go",
+        "served_batch_getter_test.go",
+        "served_bridge_test.go",
+        "served_bulk_test.go",
+        "served_claim_lifecycle_test.go",
+        "served_commenter_test.go",
+        "served_config_test.go",
+        "served_config_write_test.go",
+        "served_counter_test.go",
+        "served_detail_reads_test.go",
+        "served_dualrun_test.go",
+        "served_dualwrite_history_test.go",
+        "served_graph_aux_test.go",
+        "served_graph_counter_test.go",
+        "served_harness_test.go",
+        "served_hooks_test.go",
+        "served_issue_operations_test.go",
+        "served_journal_test.go",
+        "served_lifecycle_create_test.go",
+        "served_list_test.go",
+        "served_memories_deps_test.go",
+        "served_metadata_cas_test.go",
+        "served_project_swap_test.go",
+        "served_querier_test.go",
+        "served_reader_test.go",
+        "served_ready_claimer_test.go",
+        "served_readycounter_test.go",
+        "served_relations_test.go",
+        "served_releaser_test.go",
+        "served_test.go",
+        "served_wrong_server_test.go",
+        "store_dependent_test.go",
+        "store_test.go",
         "target_test.go",
+        "watch_test.go",
+        "wave2b_roles_test.go",
+        "wave2c_claimnext_test.go",
+        "wave2c_config_test.go",
+        "wave2c_journal_test.go",
+        "write_ledger_test.go",
+        "write_roles_test.go",
     ],
+    # keep
+    #
+    # TestInterfaceCompleteness (completeness_test.go) reads its own package's
+    # generated shell, unsupported_gen.go, by a plain relative os.ReadFile to
+    # regex-match the methods storage.DoltStorage's refusing shell covers. That
+    # file is already a `srcs` member of :httpclient above, which Bazel compiles
+    # away rather than leaving as a readable file in the test's sandbox; `data`
+    # is what actually puts a copy there, exactly as
+    # //internal/httpclient/encode's own go_test does for the same reason.
+    # Gazelle does not manage `data` on this rule, so this survives
+    # `make bazel-sync` (the directive just says so).
+    data = glob(["*.go"]),
     embed = [":httpclient"],
+    shard_count = 2,
     deps = [
+        "//backend/conformance",
+        "//internal/eventsjournal",
+        "//internal/hooks",
+        "//internal/httpapi",
         "//internal/httpapi/apigen",
+        "//internal/httpapi/spec",
+        "//internal/httpclient/encode",
+        "//internal/httpclient/wire",
+        "//internal/storage",
         "//internal/storage/backends",
+        "//internal/storage/batchfixtures",
+        "//internal/storage/domain",
+        "//internal/storage/embeddeddolt",
+        "//internal/storage/issueops",
+        "//internal/storage/sqlbuild",
+        "//internal/types",
+        "//internal/workapi",
+        "//issueops",
+        "//journalops",
+        "//memoryops",
+        "@in_gopkg_yaml_v3//:yaml_v3",
     ],
+)
+
+# scripts/conformance.sh's Tier 3, the served HTTP corpus: the whole package
+# with BEADS_TEST_EMBEDDED_DOLT=1, so the served_*_test.go cases stand a real
+# `bd serve` handler over embedded Dolt instead of skipping as they do in
+# httpclient_test above, and BEADS_HTTP_TEST_REQUIRED=1, so a missing engine
+# fails each served case rather than skipping it. It is the script's run on
+# the lane's race build (raceEnabled shrinks its one large apply).
+#
+# Shard count: on the lane's executors (rbe-west, 2026-10-09) the package is
+# 725 tests and ~1,300 test-seconds, the heaviest about 54s. Each served case
+# copies one per-process template workspace instead of initializing its own
+# embedded Dolt schema (served_harness_test.go's servedTemplateWorkspace),
+# and TestServedBatchGetterContract seeds its 1000 issues in one write: before
+# both, the package was ~3,700 test-seconds over 24 shards, the heaviest shard
+# 390s. rules_go deals the tests out round-robin; at 16 shards the measured
+# loads come to 62-112s per shard.
+#
+# Tags:
+#   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
+#     selected by --config=embedded.
+sh_test(
+    name = "httpclient_served_test",
+    size = "large",
+    # Deviation from the script's -timeout=40m: Bazel ends the action at
+    # 1200s (eternal under --config=embedded), and rules_go's wrapper ignores
+    # that SIGTERM, so a hang would end as a bare TIMEOUT. 19m lets Go's own
+    # timeout fire first and dump every goroutine to test.log.
+    timeout = "eternal",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = [
+        "$(rootpath :httpclient_test)",
+        "-test.v",
+        "-test.count=1",
+        "-test.timeout=19m",
+    ],
+    data = [":httpclient_test"],
+    env = {
+        "BEADS_HTTP_TEST_REQUIRED": "1",
+        "BEADS_TEST_EMBEDDED_DOLT": "1",
+    },
+    shard_count = 16,
+    tags = ["embedded"],
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
@@ -57,12 +257,51 @@ filegroup(
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(
-    name = "repo_files",
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
     srcs = glob(
         ["**"],
         exclude = [
             "**/*.db",
             "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
             "**/*.out",
             "**/*.prof",
             "**/*.pyc",
@@ -71,7 +310,7 @@ filegroup(
             "**/node_modules/**",
         ],
     ),
-    visibility = ["//:__pkg__"],
+    visibility = ["//:__subpackages__"],
 )
 
 # --- end repo_files ---

@@ -148,21 +148,21 @@ func runMolBond(cmd *cobra.Command, args []string) error {
 	var result *BondResult
 	switch {
 	case aIsProto && bIsProto:
-		result, err = bondProtoProto(ctx, store, issueA, issueB, in.bondType, in.customTitle, actor)
+		result, err = bondProtoProto(ctx, store, issueA, issueB, in.bondType, in.customTitle, currentActor())
 	case aIsProto && !bIsProto:
 		if cookedA {
-			result, err = bondProtoMolWithSubgraph(ctx, store, subgraphA, issueA, issueB, in.bondType, in.vars, in.childRef, actor, in.ephemeral, in.pour)
+			result, err = bondProtoMolWithSubgraph(ctx, store, subgraphA, issueA, issueB, in.bondType, in.vars, in.childRef, currentActor(), in.ephemeral, in.pour)
 		} else {
-			result, err = bondProtoMol(ctx, store, issueA, issueB, in.bondType, in.vars, in.childRef, actor, in.ephemeral, in.pour)
+			result, err = bondProtoMol(ctx, store, issueA, issueB, in.bondType, in.vars, in.childRef, currentActor(), in.ephemeral, in.pour)
 		}
 	case !aIsProto && bIsProto:
 		if cookedB {
-			result, err = bondProtoMolWithSubgraph(ctx, store, subgraphB, issueB, issueA, in.bondType, in.vars, in.childRef, actor, in.ephemeral, in.pour)
+			result, err = bondProtoMolWithSubgraph(ctx, store, subgraphB, issueB, issueA, in.bondType, in.vars, in.childRef, currentActor(), in.ephemeral, in.pour)
 		} else {
-			result, err = bondMolProto(ctx, store, issueA, issueB, in.bondType, in.vars, in.childRef, actor, in.ephemeral, in.pour)
+			result, err = bondMolProto(ctx, store, issueA, issueB, in.bondType, in.vars, in.childRef, currentActor(), in.ephemeral, in.pour)
 		}
 	default:
-		result, err = bondMolMol(ctx, store, issueA, issueB, in.bondType, actor)
+		result, err = bondMolMol(ctx, store, issueA, issueB, in.bondType, currentActor())
 	}
 	if err != nil {
 		return HandleErrorRespectJSON("bonding: %v", err)

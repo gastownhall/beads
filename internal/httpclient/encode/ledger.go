@@ -13,11 +13,13 @@ import (
 
 // The divergence ledger, v1.
 //
-// engdocs/design/http-client-backend.md D9 states the discipline this file
-// instantiates: "Every knowingly-degraded behavior is a ledger row with a
-// pinned test... A degradation not in this table is a bug." The prose table
-// lives in the design; this is the machine-readable copy the client actually
-// consults, and it carries three populations rather than one:
+// The original (bd-enterprise-internal) design's decision log, D9, states the
+// discipline this file instantiates: "Every knowingly-degraded behavior is a
+// ledger row with a pinned test... A degradation not in this table is a
+// bug." That design doc is not included in this repository; this is the
+// machine-readable copy the client actually consults, rendered to
+// engdocs/design/http-divergence-ledger.md (see ledger_render.go), and it
+// carries three populations rather than one:
 //
 //   - The D9 rows themselves (L1-L18, with L17 deleted rather than skipped —
 //     see the L-sequence note in designRows), which describe whole behaviors rather
@@ -110,7 +112,10 @@ type Row struct {
 	// Why is the reason the wire cannot carry it, or the reason the
 	// degradation is the right answer.
 	Why string
-	// SpecRow cites the decision in engdocs/design/http-client-backend.md.
+	// SpecRow cites the decision in the original design's decision log (D-rows
+	// and D9 L-row numbers; the log itself is not in this repository — a D9
+	// L-row resolves in-repo to the same L-row in
+	// engdocs/design/http-divergence-ledger.md, generated from this file).
 	SpecRow string
 	// PinnedBy names the test that holds this row honest, or carries a
 	// TODO(<bead>) when the pinning test is another bead's deliverable. It is
@@ -143,7 +148,7 @@ type Row struct {
 // TestEncoderHonorsEveryTableDisposition,
 // TestEncodedParametersRoundTripThroughTheServerDecoder, and friends); this
 // sentinel covers only the rows whose evidence is a layer S2 never touches.
-const pinnedByS3Conformance = "TODO(S3): store/dial-seam and cmd/bd conformance this package's own gates do not reach; see the S2 handoff notes for the full list of rows re-pinned here and engdocs/design/http-client-backend.md D9 for the discipline"
+const pinnedByS3Conformance = "TODO(S3): store/dial-seam and cmd/bd conformance this package's own gates do not reach; see the in-repo divergence ledger, engdocs/design/http-divergence-ledger.md, for the discipline"
 
 // Ledger returns divergence ledger v1, in citation order.
 //
@@ -207,6 +212,10 @@ var (
 	tyCreateDep       = reflect.TypeOf(issueops.CreateDependency{})
 
 	tyApplyCreateItem = reflect.TypeOf(issueops.CreateItem{})
+	tyApplyDepAddItem = reflect.TypeOf(issueops.DepAddItem{})
+
+	tyCloseBatchRequest = reflect.TypeOf(issueops.CloseBatchRequest{})
+	tySweepRequest      = reflect.TypeOf(issueops.SweepRequest{})
 )
 
 // designRows are D9's own table, transcribed. They describe behaviors rather
@@ -218,22 +227,22 @@ func designRows() []Row {
 	// auto-load (L5), auto-import (L6), the ready view's parent-epic map (L13) —
 	// whose observable behavior is a cmd/bd invocation's, not a store call's.
 	// They are the subprocess parity tier's, and that tier is the one this wiring
-	// did not build. ga-b8ddd.12 (per-request project-id enforcement) closed the
-	// read-display ESCALATION — every read now carries the stamp, so a drifted
-	// server refuses it rather than rendering another project's rows — but the
-	// remaining fixture corpus that would PIN these pre-run displays is its
-	// follow-up, ga-b8ddd.23, which owns them.
+	// did not build. A since-closed per-request project-id enforcement follow-up
+	// closed the read-display ESCALATION — every read now carries the stamp, so a
+	// drifted server refuses it rather than rendering another project's rows —
+	// but the remaining fixture corpus that would PIN these pre-run displays is
+	// a separate, still-open follow-up that owns them.
 	//
 	// L17 (the conditional dep-remove guard) used to be the one remaining TODO row
 	// that was NOT subprocess-owned. It carried no row of its own once its
-	// condition resolved: the dual run ga-b8ddd.30 wrote
+	// condition resolved: a dual run
 	// (TestServedDependencyRecordsSurfaceUnresolvedRowsVerbatim) showed the wire
 	// surfaces unresolved depends_on_id rows VERBATIM, so the guard does not
 	// degrade and there was nothing to ledger. It is DELETED rather than retired,
 	// because a retirement records a divergence that once existed and this one
 	// never did. L1 is the retirement beside it — a row that WAS live and is kept
 	// as KindRetired for exactly that reason.
-	const pinnedElsewhere = "TODO(ga-b8ddd.23): a pre-run degradation, observable only through a cmd/bd invocation; the subprocess parity corpus pins it"
+	const pinnedElsewhere = "TODO(S3): a pre-run degradation, observable only through a cmd/bd invocation; the subprocess parity corpus pins it"
 	return []Row{
 		{
 			// IT WAS DELETED OUTRIGHT for a while, against this file's own
@@ -467,6 +476,15 @@ func designRows() []Row {
 			PinnedBy: pinnedByS3Conformance,
 		},
 		{
+			ID: "L-cycles-tracks", Kind: KindRefuse,
+			Type: reflect.TypeOf(issueops.DetectCyclesRequest{}), Field: "IncludeTracks",
+			What: "issueops.CycleDetector.DetectCycles refuses a request with IncludeTracks set, rather than silently answering the narrower (tracks-excluded) walk",
+			Why: "listDependencyCycles (wire.OpListDependencyCycles) publishes no include_tracks parameter at all — there is no wire member to widen the walk onto, not merely one this client chose not to send. Honoring the request field anyway (by just not sending it, the way a dropped filter would) would answer the DEFAULT walk to a caller who explicitly asked for the wider one that also follows `tracks` edges: a narrower answer with no error, exactly the failure mode ErrUnsupported exists to make loud instead of silent (see its own doc). " +
+				"Upstream ask: an include_tracks query parameter on listDependencyCycles, which retires this row",
+			SpecRow:  "D8 (refuse-not-drop), D9 L16 (the same argument, on a read)",
+			PinnedBy: pinnedByS3Conformance,
+		},
+		{
 			ID: "L-batchcreate-target", Kind: KindDegrade,
 			What:     "a batch create whose edge target names no issue refuses as issueops.ErrValidation alone, not as ErrValidation WRAPPING ErrNotFound",
 			Why:      "the wire answers a dangling edge target with a 400 invalid_argument naming `items` (internal/httpapi's failBatchCreate), and deliberately does not quote the role's own message, which arrives as a driver error naming tables and constraints. The refusal still fails the whole batch and creates nothing — the promise the row is about — and only the second sentinel is lost. Upstream ask: a distinguishing code for the absent-target refusal",
@@ -482,7 +500,7 @@ func designRows() []Row {
 			PinnedBy: pinnedByS3Conformance,
 		},
 		// L17 (the conditional GH#5005 dep-remove guard) is DELETED, not present as a
-		// row: ga-b8ddd.30's dual run proved the wire surfaces unresolved
+		// row: a dual run proved the wire surfaces unresolved
 		// depends_on_id rows verbatim (see pinnedElsewhere above), so the
 		// degradation it was contingent on never materialized. The L-sequence skips
 		// from L16 to L18 for that reason.
@@ -521,12 +539,12 @@ func writeSideRows() []Row {
 	const pinned = pinnedByS3Conformance
 	return []Row{
 		{
-			ID: "W-UpdateRequest.Claim", Kind: KindRefuse,
+			ID: "W-UpdateRequest.Claim", Kind: KindRetired,
 			Type: tyUpdateRequest, Field: "Claim",
-			What: "a claim combined with any other UpdateRequest member refuses; a claim ALONE does not — it dials claimIssue directly (see httpLifecycle.claimOnlyUpdate)",
-			Why: "a claim is claimIssue's own operation and updateIssue cannot perform one, on this wire or on any other; it is the one row here that upstream #5484 did not touch. " +
-				"claimIssue's own request is the actor alone, so a claim-only UpdateRequest IS that request and is served through the Claimer role instead of refusing — that is gc's exclusive claim path, `bd update <id> --claim --json`. " +
-				"What still refuses is PATCH claim: a claim folded into one atomic transaction WITH a patch, a guard or a force override, which no operation on this wire publishes and which is not synthesized as two calls (claimIssue then updateIssue), since that would let a caller observe an issue claimed but not yet patched. Upstream gastownhall/beads#6890 tracks the capability that would carry both in one call",
+			What: "a claim combined with a patch, a guard or a force override used to refuse",
+			Why: "RETIRED by the #7247 review port. The refusal stood on 'updateIssue cannot perform a claim, on this wire or on any other' — and upstream gastownhall/beads#6890, the capability the row itself named, had already published `claim` on updateIssue: the claim and the patch applied by the same role in one transaction, so PATCH claim was the server's shape and only this client's refusal. " +
+				"The body now sends `claim` as a pointer set true only on request, so a claim alone, a claim with a patch and a claim with a version guard are each ONE updateIssue call, answered with the post-write `revision` like every other update. " +
+				"The claimIssue route survives as the fallback for a claim ALONE against a server that predates the member, which refuses it as an unknown parameter before any database work; a combination against such a server returns that skew refusal rather than splitting into two calls",
 			SpecRow:  updateSpec,
 			PinnedBy: pinned,
 		},
@@ -537,48 +555,54 @@ func writeSideRows() []Row {
 			// http workspace — so this is user-facing prose, not an internal
 			// engineering note, and it should read that way.
 			//
-			// The engineering rationale, for a future reader of this file: the v0
-			// wire's claimIssue operation (issueops.Claimer's own contract)
-			// answers a wisp id with ErrNotFound on every backend, including the
-			// direct route's own claim-by-id — the wisp plane is not claimable
-			// through that role at all. But claimOnlyUpdate's caller is
-			// `bd update <id> --claim`, whose Lifecycle.Update DOES claim wisps
-			// locally (issue-or-wisp routing). Over http, that command is served
-			// through claimIssue rather than through updateIssue's general
-			// wisp-aware routing, so a wisp id would otherwise surface the wire's
-			// generic not-found — a live row reported as though it does not
-			// exist, indistinguishable from an id naming nothing at all, which a
-			// not-found-sensitive caller (gc's Claim among them) would read as
-			// missing rather than as an unclaimable wisp. This refuses by name
-			// instead, once the client itself recognizes the id names a wisp —
-			// which it learns only AFTER claimIssue itself answers not_found (see
-			// claimOnlyUpdate), so an ordinary claim of a real, non-wisp issue
-			// never pays this probe. Serving a wisp-aware claim (a server-side
-			// ClaimWisp capability) is tracked as a pending decision, not
-			// implemented here.
+			// The engineering rationale, for a future reader of this file: a
+			// current server claims a wisp through updateIssue, which resolves
+			// both planes exactly as the direct route's Lifecycle.Update does, so
+			// this row is reached ONLY on claimOnlyUpdate's fallback — a server
+			// that predates `claim` on updateIssue (upstream #6890), where the
+			// claim is dialed as claimIssue instead. That operation
+			// (issueops.Claimer's own contract) answers a wisp id with ErrNotFound
+			// on every backend — the wisp plane is not claimable through that
+			// role at all — so a wisp id would otherwise surface the wire's
+			// generic not-found: a live row reported as though it does not
+			// exist, which a not-found-sensitive caller (gc's Claim among them)
+			// would read as missing rather than as an unclaimable wisp. This
+			// refuses by name instead, once the client itself recognizes the id
+			// names a wisp — which it learns only AFTER claimIssue answers
+			// not_found, so an ordinary claim of a real, non-wisp issue never
+			// pays the probe.
 			ID: "W-ClaimRequest.Wisp", Kind: KindRefuse,
-			What:     "claiming a wisp is not supported over http",
-			Why:      "the v0 wire's claim operation excludes the wisp plane on every backend; claim this issue from a local workspace instead",
+			What:     "claiming a wisp is not supported by this bd serve",
+			Why:      "the server predates claiming through its update operation, and its separate claim operation excludes the wisp plane; upgrade bd serve, or claim this issue from a local workspace",
 			SpecRow:  updateSpec,
 			PinnedBy: pinnedByS3Conformance,
 		},
 		{
-			ID: "W-UpdateRequest.ForceAssigneeTransfer", Kind: KindRefuse, Flag: "--force",
+			ID: "W-UpdateRequest.ForceAssigneeTransfer", Kind: KindRetired, Flag: "--force",
 			Type: tyUpdateRequest, Field: "ForceAssigneeTransfer",
-			What: "bypassing the anti-steal assignee fence refuses",
-			Why: "the wire publishes `force_assignee_transfer` (upstream #5484) and this client does not send it. What the refusal STANDS ON changed with client wave ga-7i6by and the row is narrower for it: the `assignee` the fence guards IS now sent (W-IssuePatch.Assignee), so what is left is the bypass alone. " +
-				"The fence itself is unbypassable rather than absent — a transfer away from a live foreign in-progress owner refuses with already_claimed, and a matched `expected_assignee` is the OTHER bypass, which this client does send. Carrying this one is a two-member port tracked as ga-2ltro.15",
+			What: "bypassing the anti-steal assignee fence used to refuse",
+			Why: "RETIRED by the #7247 review port, the two-member port ga-2ltro.15 named. The wire publishes `force_assignee_transfer` (upstream #5484) and the refusal was always this client's: client wave ga-7i6by had already narrowed it to the bypass alone by sending the `assignee` the fence guards, and issues:batchApply's update item already carried the same flag. " +
+				"The body now sends it as a pointer set true only on request. The fence itself is unchanged — a transfer away from a live foreign in-progress owner refuses with already_claimed unless one of the two bypasses rides with it, this one or a matched `expected_assignee` — and the server refuses the bypass without a `patch.assignee` or beside `expected_assignee` or `claim`",
 			SpecRow:  updateSpec,
 			PinnedBy: pinned,
 		},
 		{
-			ID: "W-UpdateRequest.ForceClosePolicy", Kind: KindRefuse, Flag: "--force",
+			ID: "W-UpdateRequest.ForceClosePolicy", Kind: KindRetired, Flag: "--force",
 			Type: tyUpdateRequest, Field: "ForceClosePolicy",
-			What: "bypassing close policy on a status-crossing update refuses",
-			Why: "the wire publishes `force_close_policy` (upstream #5484) and this client does not send it; see W-UpdateRequest.ForceAssigneeTransfer for what the refusal now stands on, since client wave ga-7i6by sends the `status` whose crossing the policy gates. " +
-				"The policy is therefore enforced and not bypassable here: a status crossing into the done category with open children or a live blocker refuses with not_closable, typed, and writes nothing. Tracked as ga-2ltro.15",
+			What: "bypassing close policy on a status-crossing update used to refuse",
+			Why: "RETIRED with W-UpdateRequest.ForceAssigneeTransfer, the other half of ga-2ltro.15's port. The wire publishes `force_close_policy` (upstream #5484), client wave ga-7i6by sends the `status` whose crossing the policy gates, and issues:batchApply's update item already carried the flag. " +
+				"The body now sends it as a pointer set true only on request; unforced, a status crossing into the done category with open children or a live blocker still refuses with not_closable, typed, and writes nothing",
 			SpecRow:  updateSpec,
 			PinnedBy: pinned,
+		},
+		{
+			ID: "W-UpdateRequest.ForceNotesOverwrite", Kind: KindRetired,
+			Type: tyUpdateRequest, Field: "ForceNotesOverwrite",
+			What: "bypassing the notes-overwrite fence on a single update used to refuse",
+			Why: "RETIRED by the S3 reconciliation that found it (2026-10). It was discovered refused on the single-patch updateIssue path while the identical flag was already carried on issues:batchApply's update item (W table entry applyBatch/item/update) — the same trio member, wired on one shape and not the other with no decision on record for the gap. " +
+				"Flipping it was a port, not a decision, same as W-UpdateRequest.ExpectedVersion's: the body now sends `force_notes_overwrite` as a pointer set true only on request, so a Patch.Notes that would replace existing non-empty notes with different non-empty content is bypassable here exactly as it already was on the batch path",
+			SpecRow:  updateSpec,
+			PinnedBy: pinnedByS3Conformance,
 		},
 		{
 			ID: "W-UpdateRequest.ExpectedVersion", Kind: KindRetired,
@@ -671,7 +695,7 @@ func writeSideRows() []Row {
 			ID: "W-IssuePatch.Assignee", Kind: KindRetired,
 			What: "assignment and unassignment through update used to refuse",
 			Why: "RETIRED with W-IssuePatch.Status (ga-7i6by). The EMPTY STRING is the half that makes this member more than a rename: it UNASSIGNS, so a client that skipped an empty value would turn a real edit into no edit at all. " +
-				"The anti-steal fence around it is the server's and is unchanged — a transfer away from a live foreign in-progress owner still refuses with already_claimed, and the two bypasses (`force_assignee_transfer` and a matched `expected_assignee`) are W-UpdateRequest.ForceAssigneeTransfer and the guard wave's own",
+				"The anti-steal fence around it is the server's and is unchanged — a transfer away from a live foreign in-progress owner still refuses with already_claimed, and the two bypasses (`force_assignee_transfer` and a matched `expected_assignee`) are both sent — the first since W-UpdateRequest.ForceAssigneeTransfer retired, the second since the guard wave",
 			SpecRow:  "D8 refuse-not-drop",
 			PinnedBy: patchMemberPin,
 		},
@@ -725,7 +749,8 @@ func writeSideRows() []Row {
 			What: "an item whose Issue populates any member outside the wire's eight refuses, naming the member",
 			Why: "apigen.BatchCreateItem carries title, description, design, acceptance_criteria, priority, issue_type, assignee and labels and nothing else, while the role accepts far more of a types.Issue: an explicit id, the wisp flags, metadata, the storage class, every timestamp, the gate/molecule/event fields. " +
 				"ONE row rather than one per member because the reason is one reason — the wire's item vocabulary — and forty rows repeating it would say nothing a reader does not learn here. Exhaustiveness is held by REFLECTION instead: the client's carried and role-ignored tables are checked against types.Issue field by field, so a member added upstream is refused the day it lands rather than dropped until someone notices. " +
-				"The members the role ITSELF ignores on a create (ContentHash, RowVersion, lease, compaction, routing overrides, hydration flags) are not in this population and are not refused: a local create drops them too",
+				"The members the role ITSELF ignores on a create (ContentHash, RowVersion, lease, compaction, routing overrides, hydration flags) are not in this population and are not refused: a local create drops them too. " +
+				"Nor is a CreatedBy that names the request's actor: the server stamps every item's created_by from the actor (W-CreateRequest.Issue), so that value arrives as written and only a CreatedBy naming someone else refuses",
 			SpecRow:  "D8 row 14 refuse-not-drop",
 			PinnedBy: batchCreatePin,
 		},
@@ -734,7 +759,9 @@ func writeSideRows() []Row {
 		// createIssue's own edge publishes `reverse` and `metadata` (its issue
 		// HAS an id for a target to point back at, which a batch item does
 		// not), so the client sends both there. Only ThreadID is refused on
-		// both, because no operation publishes a thread member.
+		// both, because neither create schema publishes a thread member — a
+		// batch apply's dep_add item does, which retired its own row
+		// (W-DepAddItem.ThreadID) but not these.
 		createDependencyRow("Reverse", "an edge written from the target back to the new issue refuses ON A BATCH CREATE",
 			"BatchCreateDependency carries target_id and type only; dropping Reverse would write the edge in the OPPOSITE direction from the one asked for, which is a different graph. createIssue's CreateIssueDependency DOES publish it, and the single-create path sends it"),
 		createDependencyRow("Metadata", "typed edge metadata refuses ON A BATCH CREATE",
@@ -744,9 +771,10 @@ func writeSideRows() []Row {
 		{
 			ID: "W-CreateRequest.IDPrefix", Kind: KindRefuse,
 			Type: tyCreateRequest, Field: "IDPrefix",
-			What: "overriding the prefix an explicit id is checked against refuses",
+			What: "overriding the prefix an explicit, unforced id is checked against refuses",
 			Why: "createIssue publishes no `id_prefix`, and the omission is the SERVER's decision rather than a gap (internal/httpapi/create.go): the field exists because a workspace's own config.yaml prefix wins over the database's and only a local front door can read that file, so a remote caller's config.yaml describes a workspace this server does not serve. " +
-				"Publishing it would let a caller override the served workspace's prefix rule from outside it. Dropping it instead would check the id against the SERVER's prefix while the caller believed it was checked against theirs — the same request, two different answers to 'may this workspace mint this id'",
+				"Publishing it would let a caller override the served workspace's prefix rule from outside it. Dropping it instead would check the id against the SERVER's prefix while the caller believed it was checked against theirs — the same request, two different answers to 'may this workspace mint this id'. " +
+				"It refuses only where it would ACT: the role reads the override for nothing but an explicit id it was not told to force, so a create that mints its id, or sets ForceIDPrefix, is the same request with or without it and is sent without it. That matters because `bd create` sends the workspace's prefix on EVERY create, so an unconditional refusal would refuse every create in a workspace whose config.yaml names one",
 			SpecRow:  "D8 row 16 refuse-not-drop",
 			PinnedBy: createPin,
 		},
@@ -754,9 +782,10 @@ func writeSideRows() []Row {
 			ID: "W-CreateRequest.Issue", Kind: KindRefuse,
 			Type: tyCreateRequest, Field: "Issue",
 			What: "a create whose Issue populates any member outside the wire's twenty refuses, naming the member",
-			Why: "createIssue publishes the whole create VOCABULARY — id, title, description, design, acceptance_criteria, notes, status, issue_type, priority, assignee, owner, estimated_minutes, external_ref, due_at, defer_until, sender, metadata, labels, ephemeral, no_history — and deliberately not the rest of a types.Issue: the creation stamp (created_at, created_by), because a caller-supplied creation time makes the row disagree with the journal entry that records it and re-dating history is what an import is for; and spec_id, await_*, mol_type, wisp_type, work_type, storage_class, source_*, pinned, is_template and the event quartet, which this surface publishes on no operation, read or write. " +
+			Why: "createIssue publishes the whole create VOCABULARY — id, title, description, design, acceptance_criteria, notes, status, issue_type, priority, assignee, owner, estimated_minutes, external_ref, due_at, defer_until, sender, metadata, labels, ephemeral, no_history — and deliberately not the rest of a types.Issue: the creation time (created_at), because a caller-supplied creation time makes the row disagree with the journal entry that records it and re-dating history is what an import is for; and spec_id, await_*, mol_type, wisp_type, work_type, storage_class, source_*, pinned, is_template and the event quartet, which this surface publishes on no operation, read or write. " +
 				"ONE row rather than one per member for W-BatchCreateItem.Issue's reason — the reason is one reason — and exhaustiveness is held by the same REFLECTION over types.Issue, sharing the role-ignored table with the batch so the two operations cannot disagree about what the ROLE drops. " +
-				"Issue.Comments and Issue.Dependencies are not in this population: the role itself refuses them, so a local create fails too and this is validation rather than divergence",
+				"Issue.Comments and Issue.Dependencies are not in this population: the role itself refuses them, so a local create fails too and this is validation rather than divergence. " +
+				"created_by is published on no create shape either, but every one of them STAMPS it from the request's actor (internal/httpapi's create.go, batch_create.go and batch_apply.go) — the local front doors' own rule, since the role copies the member rather than stamping it. So a CreatedBy that names the actor, which is what every CLI create sends, arrives as written, and only one naming someone else refuses: the stamp would silently replace it. A server that predates the stamp stores an empty created_by for that one member",
 			SpecRow:  "D8 row 16 refuse-not-drop",
 			PinnedBy: createPin,
 		},
@@ -765,7 +794,7 @@ func writeSideRows() []Row {
 			What: "a create whose dependency or waits-for target names no row refuses as issueops.ErrValidation ALONE — not as ErrValidation wrapping ErrNotFound — and does not name the target",
 			Why: "the wire answers a dangling target with a 400 invalid_argument naming `dependencies` and a FIXED detail (internal/httpapi's failCreateIssue), which deliberately does not quote the role's own message: that message arrives as a driver error naming tables and constraints, and 4xx details on this surface reflect the caller's own input back rather than server internals. " +
 				"The refusal still fails the whole request and creates NOTHING — the promise the row is about — and only the second sentinel and the target's name are lost. It is batchCreateIssues' L-batchcreate-notfound on the single create, and it retires the same way: an upstream code that distinguishes the absent-target refusal and carries the target. " +
-				"A missing --parent target already retired out of this row: failCreateIssue's errors.As(&parentNotFound) arm answers it with a distinguishing 404 not_found that names the target, and the client maps that to issueops.ErrNotFound (see TestServedCreateRefusesAnAbsentParentAsNotFound) — the row now covers only dependency and waits-for targets",
+				"A missing --parent target stays on this row beside dependency and waits-for targets, not ahead of them: OpCreateIssue's problem-code table documents NO 404 for ANY edge target on purpose (internal/httpapi/problem.go) — there is no id in the path for parent_id to have missed any more than dependencies[i].target_id or waits_for.spawner_id has, so carving a parent-only not_found out of this row would contradict that design rather than follow it. A prior draft of this row and its pin (TestServedCreateRefusesAnAbsentParentAsNotFound) described that carve-out as already shipped; it never was, and the S3 review that found the drift retired the draft rather than the design",
 			SpecRow:  "D8 row 16",
 			PinnedBy: pinnedByS3Conformance,
 		},
@@ -780,17 +809,19 @@ func writeSideRows() []Row {
 		// The issues:batchApply population, from client wave ga-mijra. It is
 		// SMALL, and that is the operation rather than an oversight: the create
 		// item publishes createIssue's whole twenty, the close item maps whole,
-		// the edge item maps whole, and the update item's patch is WIDER than
-		// updateIssue's in the two places that matter to a plan (a full label
-		// patch, and `owner`). What is left is one patch member and two facts
-		// about the RESULT.
+		// the edge item maps whole but for the spawner flag and the thread the
+		// role gained after the wire was written, and the update item's patch
+		// is WIDER than updateIssue's in the two places that matter to a plan (a
+		// full label patch, and `owner`). What is left is one patch member, those
+		// two edge members and two facts about the RESULT.
 		{
 			ID: "W-CreateItem.Issue", Kind: KindRefuse,
 			Type: tyApplyCreateItem, Field: "Issue",
 			What: "a create ITEM whose Issue populates any member outside the wire's twenty refuses, naming the member",
 			Why: "ApplyCreateItem publishes exactly createIssue's create vocabulary — id, title, description, design, acceptance_criteria, notes, status, issue_type, priority, assignee, owner, estimated_minutes, external_ref, due_at, defer_until, sender, metadata, labels, ephemeral, no_history — and deliberately not the rest of a types.Issue, for the reasons W-CreateRequest.Issue gives in full. " +
 				"It is a row of its OWN rather than a citation of that one because the operations are different: a caller auditing why their PLAN refuses must not be sent to a row about a single create, and the two can diverge the day either vocabulary moves. The partition itself is SHARED — one carried table, one role-ignored table, held against types.Issue by the same reflection — so they cannot disagree about what the wire carries or about what the role drops. " +
-				"Issue.Comments and Issue.Dependencies are not in this population and are refused as validation on both sides: edges in this role are ITEMS, so a create item has nowhere to put one at all",
+				"Issue.Comments and Issue.Dependencies are not in this population and are refused as validation on both sides: edges in this role are ITEMS, so a create item has nowhere to put one at all. " +
+				"Nor is a CreatedBy that names the request's actor: the server stamps every create item's created_by from the actor (W-CreateRequest.Issue), so that value arrives as written and only a CreatedBy naming someone else refuses",
 			SpecRow:  "D8 refuse-not-drop",
 			PinnedBy: applyPin,
 		},
@@ -802,6 +833,23 @@ func writeSideRows() []Row {
 				"The single patch has no ordering to express and publishes the member directly (W-IssuePatch.ParentID, retired by client wave ga-7i6by), which is why the same Go field is carried by one document and refused by the other. " +
 				"Refusing is not a loss of capability, only of spelling: a plan re-hangs a parent with a dep_add item, which is the atomic replacement in the position the caller declared it",
 			SpecRow:  "D8 refuse-not-drop",
+			PinnedBy: applyPin,
+		},
+		{
+			ID: "W-DepAddItem.HasSpawner", Kind: KindRetired,
+			Type: tyApplyDepAddItem, Field: "HasSpawner",
+			What: "a waits-for edge ITEM that names its spawner used to refuse",
+			Why: "RETIRED by issues.batchApply.depAddLineage (S5). ApplyDepAddItem now publishes `has_spawner` — the write this row said only the role could make, metadata's spawner_id stamped from the resolved target — gated on the capability rather than dropped: a caller on a server that has not advertised the token refuses locally before the dial (BatchApplier.refuseUnservedDepAddLineage), and a caller on a server that has sends the member exactly as given. " +
+				"The flag is sent, and gated, on a waits-for edge only, the one type the role reads it on. Off a waits-for edge it is the role's no-op, so the client drops it there without loss — the stored row is the same either way — rather than refusing a request the flag cannot change, or sending an older server a member it answers with a 400",
+			SpecRow:  "D8 refuse-not-drop (RETIRED)",
+			PinnedBy: applyPin,
+		},
+		{
+			ID: "W-DepAddItem.ThreadID", Kind: KindRetired,
+			Type: tyApplyDepAddItem, Field: "ThreadID",
+			What:     "associating an edge ITEM with a discussion thread used to refuse",
+			Why:      "RETIRED with W-DepAddItem.HasSpawner (S5, issues.batchApply.depAddLineage). ApplyDepAddItem now publishes `thread_id` as a plain column on the stored edge, gated by the same capability and the same pre-dial refusal rather than dropped — a caller naming a thread on an unadvertising server is refused before the dial, never silently stored with no thread",
+			SpecRow:  "D8 refuse-not-drop (RETIRED)",
 			PinnedBy: applyPin,
 		},
 		{
@@ -918,6 +966,39 @@ func writeSideRows() []Row {
 			SpecRow:  "D8 (Journal), D9",
 			PinnedBy: pinnedByS3Conformance,
 		},
+		{
+			// S3 reconciliation (2026-10): bd-enterprise's
+			// batchCloseIssues composed an atomic claim-after-close onto the
+			// same request; OSS's apigen.BatchCloseRequest and
+			// BatchCloseResponse publish no claim_next/claimed_next member at
+			// all, so there is no shape for this field to narrow INTO. A batch
+			// close without a folded claim is unaffected and stays served
+			// (BatchCloseIssues.go); this row is the ONE field that refuses.
+			ID: "W-CloseBatchRequest.ClaimNext", Kind: KindRefuse,
+			Type: tyCloseBatchRequest, Field: "ClaimNext",
+			What:     "folding an atomic claim-after-close onto a batch close refuses",
+			Why:      "batchCloseIssues publishes actor, force, items and session only — no claim_next member exists for this client to encode a ReadyRequest into, and none exists on the response for a claimed issue to decode back out of. Dropping the field silently would answer a caller's claim-after-close with a close that quietly never claimed anything; see W-CreateBatchRequest.Provenance for the same refuse-not-drop reasoning applied to an absent wire member. Deferred: S13 schedules ReadyLister (and with it, the ready-side plumbing a composed claim would need); no slice currently schedules claim_next itself",
+			SpecRow:  "D8 refuse-not-drop",
+			PinnedBy: pinnedByS3Conformance,
+		},
+		{
+			ID: "W-SweepRequest.ProtectLiveDependents", Kind: KindRetired,
+			Type: tySweepRequest, Field: "ProtectLiveDependents",
+			What: "protecting live structural dependents during a sweep used to refuse",
+			Why: "RETIRED by the S4 wire extension that sends it. The gap was always the DOCUMENT's rather than a decision: the local Sweeper role carries a structural-dependent protection alongside the referenced-citation one, and apigen.SweepRequest had no protect_live_dependents member for this client to narrow onto, so sending `true` and silently dropping it would have run an UNPROTECTED sweep while the caller believed the structural guard was active. " +
+				"The spec now publishes `protect_live_dependents` (and SweepSkips.live_dependent on the response) behind its own behavior-capability token, issues.sweep.liveDependents, because it is a parameter added to an operation that already shipped. The client sends it only once the handshake advertises the token and refuses locally, before the dial, when it does not — see refuseUnservedSweep (sweeper.go) and W-SweepRequest.Limit for the sibling member closed the same way",
+			SpecRow:  "D8 refuse-not-drop",
+			PinnedBy: "TestSweepSendsTheS4MembersOnceTheServerAdvertisesThem",
+		},
+		{
+			ID: "W-SweepRequest.Limit", Kind: KindRetired,
+			Type: tySweepRequest, Field: "Limit",
+			What: "bounding one sweep call and draining a backlog over several used to refuse",
+			Why: "RETIRED by the S4 wire extension that sends it (with W-SweepRequest.ProtectLiveDependents). The local Sweeper role bounds one sweep call and reports the remainder back; apigen.SweepRequest and SweepResult carried neither a limit member to send nor a remaining member to read one back from, so a dropped Limit would have run the UNBOUNDED sweep the caller asked to cap, in one transaction. " +
+				"The spec now publishes `limit` on the request and `remaining` on the response behind issues.sweep.limit. The client sends Limit only once the handshake advertises that token and refuses locally otherwise; issueops.SweepResult.Remaining now carries the server's count rather than always reading zero",
+			SpecRow:  "D8 refuse-not-drop",
+			PinnedBy: "TestSweepSendsTheS4MembersOnceTheServerAdvertisesThem",
+		},
 	}
 }
 
@@ -990,11 +1071,11 @@ func commandRows() []Row {
 		row("F-ready-explain", "ready", "--explain", "`bd ready --explain` refuses",
 			"it dispatches onto raw GetBlockedIssues/GetIssuesByIDs/GetDependencyCounts/DetectCycles, three of which are on the unsupported allowlist"),
 		row("F-ready-mol", "ready", "--mol", "`bd ready --mol` refuses",
-			"its molecule subgraph load reaches findHierarchicalChildren, an IDPrefix SearchIssues shape the parent-walk bridge cannot express (E-IssueFilter.noShape). GetDependencyRecords and GetDependentsWithMetadata, which the same load also calls, stopped being the blocker when ga-b8ddd.30 flipped them onto the wire"),
+			"its molecule subgraph load reaches findHierarchicalChildren, an IDPrefix SearchIssues shape the parent-walk bridge cannot express (E-IssueFilter.noShape). GetDependencyRecords and GetDependentsWithMetadata, which the same load also calls, stopped being the blocker once they flipped onto the wire"),
 		row("F-ready-gated", "ready", "--gated", "`bd ready --gated` refuses",
 			"it dispatches onto a filtered SearchIssues shape the bridge cannot express, plus GetDependents"),
 		row("F-show-thread", "show", "--thread", "`bd show --thread` refuses",
-			"showMessageThread renders each reply's sender, recipient, body and timestamp off GetDependentsWithMetadata, but ga-b8ddd.30 flipped that read onto getIssue's include_dependents parameter, which carries the collectDependents SHALLOW projection (id/status/type/priority/title + edge type only, be-4d36f2). Those fields come back zeroed over http and zero-timestamp replies sort ahead of the root — a silent-wrong degrade the refuse-over-degrade doctrine forbids. Retires with a full-dependent wire shape, a server-side ask"),
+			"showMessageThread renders each reply's sender, recipient, body and timestamp off GetDependentsWithMetadata, but that read was flipped onto getIssue's include_dependents parameter, which carries the collectDependents SHALLOW projection (id/status/type/priority/title + edge type only, be-4d36f2). Those fields come back zeroed over http and zero-timestamp replies sort ahead of the root — a silent-wrong degrade the refuse-over-degrade doctrine forbids. Retires with a full-dependent wire shape, a server-side ask"),
 		row("F-show-refs", "show", "--refs", "`bd show --refs` refuses",
 			"showIssueRefs's --json marshals the full GetDependentsWithMetadata rows, but the wire answers the same collectDependents shallow projection, so created_at/assignee/description come back zeroed and the JSON differs from a local workspace. The text render consumes only the shallow fields, but the flag cannot be split from its --json mode, so the whole flag refuses rather than serve a divergent JSON silently"),
 		row("F-show-children", "show", "--children", "`bd show --children` refuses",

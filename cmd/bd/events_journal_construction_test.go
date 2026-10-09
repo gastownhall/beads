@@ -113,11 +113,13 @@ var scannedPackages = map[string]string{
 // The staleness check below fails if an exemption stops matching a real
 // construction site, so an exemption cannot rot into a permanent excuse.
 var constructionExemptions = map[string]string{
-	// Non-mutating opens. Every arm returns a store that refuses writes
-	// (OpenReadOnly / OpenForPreviewCommand / a ReadOnly server config), so
-	// there is no mutation for a journal row to accompany.
-	"store_factory.go:openNonMutatingStoreFromConfig":   "read-only/preview open: the store refuses writes, so no mutation can go unrecorded",
-	"store_factory_nocgo.go:newReadOnlyStoreFromConfig": "read-only open: the store refuses writes, so no mutation can go unrecorded",
+	// Non-mutating opens. Every built-in arm returns a store that refuses
+	// writes (OpenReadOnly / OpenForPreviewCommand / a ReadOnly server config),
+	// so there is no mutation for a journal row to accompany. The registry arm
+	// may not refuse — the http client's read-only open is writable — but its
+	// writes are applied, and journaled, by the bd serve it dials.
+	"store_factory.go:openNonMutatingStoreFromConfig":   "read-only/preview open: built-in arms refuse writes and the http arm's writes are journaled by its server, so no mutation can go unrecorded",
+	"store_factory_nocgo.go:newReadOnlyStoreFromConfig": "read-only open: built-in arms refuse writes and the http arm's writes are journaled by its server, so no mutation can go unrecorded",
 
 	// Store-open-time reconciliation, which runs BEFORE the command's own store
 	// exists and therefore before any workspace config could be applied to it.

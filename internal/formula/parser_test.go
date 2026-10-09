@@ -28,7 +28,7 @@ func resetFormulaSearchTestContext(t *testing.T) {
 
 func runGitForFormulaTest(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := gitCommand(args...)
 	cmd.Dir = dir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -160,7 +160,7 @@ func TestDefaultSearchPaths_UsesResolvedBeadsDirForWorktree(t *testing.T) {
 	worktreeDir := filepath.Join(root, "worktree")
 	runGitForFormulaTest(t, mainRepo, "worktree", "add", worktreeDir, "HEAD")
 	t.Cleanup(func() {
-		cmd := exec.Command("git", "worktree", "remove", "--force", worktreeDir)
+		cmd := gitCommand("worktree", "remove", "--force", worktreeDir)
 		cmd.Dir = mainRepo
 		_ = cmd.Run()
 	})
@@ -2286,4 +2286,15 @@ func TestParseJSON_StepMetadata(t *testing.T) {
 	if got := step.Metadata["priority_level"]; got != "high" {
 		t.Errorf("Steps[0].Metadata[priority_level] = %v, want \"high\"", got)
 	}
+}
+
+// noAutoMaintenance keeps a fixture's git commit from spawning the detached
+// "git maintenance run --auto" child whose worktree-prune races the fixture's
+// next "git worktree add" (gastownhall/beads#7314, #7349). Flags ride the
+// command line, never env config: the routing-key scrub drops env config.
+var noAutoMaintenance = []string{"-c", "maintenance.auto=false", "-c", "gc.auto=0"}
+
+// gitCommand builds a git command for a fixture with noAutoMaintenance applied.
+func gitCommand(args ...string) *exec.Cmd {
+	return exec.Command("git", append(append([]string{}, noAutoMaintenance...), args...)...)
 }

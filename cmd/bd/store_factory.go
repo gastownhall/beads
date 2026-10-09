@@ -102,7 +102,8 @@ func newDoltStore(ctx context.Context, cfg *dolt.Config) (s storage.DoltStorage,
 		// Working-set-reconcile commands (bd dolt commit, bd vc commit) must
 		// not be bricked by a pending-migration dirty-table refusal: that
 		// refusal's documented recovery is exactly the commit these commands
-		// run, so failing the open here would deadlock (#4566). The server
+		// run, so failing the open here would deadlock (#4566). The same goes
+		// for the migration-consent refusal that precedes it. The server
 		// arm above honors the same cfg.LenientOpen inside dolt.New; this
 		// branch is the embedded half of one policy, not the whole of it.
 		return embeddeddolt.OpenForWorkingSetReconcile(ctx, cfg.BeadsDir, cfg.Database, "main")
@@ -258,6 +259,16 @@ func newPreviewStoreFromConfig(ctx context.Context, beadsDir string) (storage.Do
 // OpenForPreviewCommand, ReadOnly server config), so there is no mutation for a
 // journal row to accompany. Registered in the construction guard's exemption
 // list with that reason.
+//
+// The registry arm is the exception: it returns whatever the backend's
+// OpenReadOnly means, and that one hook also serves the root pre-run's
+// classified reads, `bd ready --claim` included, so it may be writable. The
+// http client backend's read-only open is (httpclient.NewReadOnlyFromConfig),
+// and a write through it reaches its bd serve. The journal exemption still
+// holds there: recording that write is the business of the server that applies
+// it, and the client has no journal of its own to activate. A separate
+// OpenNonMutating hook on backends.Backend, which this function would call
+// instead, is the follow-up that closes the exception.
 func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, preview bool) (storage.DoltStorage, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
