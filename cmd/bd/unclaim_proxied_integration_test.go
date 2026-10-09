@@ -174,6 +174,7 @@ func TestProxiedServerReclaim(t *testing.T) {
 			Reclaimed []struct {
 				ID            string `json:"id"`
 				PreviousOwner string `json:"previous_owner"`
+				Revision      string `json:"revision"`
 			} `json:"reclaimed"`
 		}
 		if err := json.Unmarshal(out, &got); err != nil {
@@ -185,6 +186,11 @@ func TestProxiedServerReclaim(t *testing.T) {
 				found = true
 				if r.PreviousOwner == "" {
 					t.Errorf("expected a previous owner for reclaimed %s", issue.ID)
+				}
+				// The role mints a new revision per reverted row and reports
+				// it, on this route exactly as on the direct one.
+				if _, perr := types.ParseRevisionToken(r.Revision); perr != nil || r.Revision == "" {
+					t.Errorf("reclaimed %s carries revision %q, want a revision token: %v", issue.ID, r.Revision, perr)
 				}
 			}
 		}
