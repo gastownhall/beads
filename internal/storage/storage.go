@@ -1071,6 +1071,35 @@ type ExternalDependencyPolicyProber interface {
 	ServerEnforcesExternalDependencyPolicy(ctx context.Context) (bool, error)
 }
 
+// MoleculeAutoCloseProber is implemented by a DoltStorage whose closes may not
+// accept issueops.CloseRequest.AutoCloseMolecule — today exactly
+// httpclient.Store, whose server advertises it with
+// issues.close.autoCloseMolecule. Every local backend runs the auto-close in
+// the close's own transaction and does not implement this.
+//
+// A server that does not advertise it (an older bd serve, or a server whose
+// orchestrator owns the molecule lifecycle, as gc does) is answered false, and
+// the caller closes WITHOUT the flag: asking for it there is refused before
+// dialing, and the molecule's auto-close is that server's to run.
+type MoleculeAutoCloseProber interface {
+	ServesMoleculeAutoClose(ctx context.Context) (bool, error)
+}
+
+// ServesMoleculeAutoClose reports whether closes through s may set
+// issueops.CloseRequest.AutoCloseMolecule (MoleculeAutoCloseProber, looked up
+// through every decorator). A store that does not implement the prober runs
+// the auto-close itself and is answered true. A probe that fails is answered
+// true as well: the close dials the same handshake and reports its failure,
+// so nothing is hidden by asking for the auto-close.
+func ServesMoleculeAutoClose(ctx context.Context, s DoltStorage) bool {
+	prober, ok := UnwrapStore(s).(MoleculeAutoCloseProber)
+	if !ok {
+		return true
+	}
+	served, err := prober.ServesMoleculeAutoClose(ctx)
+	return err != nil || served
+}
+
 // ExcludeIDsUnsupportedStore is implemented by a DoltStorage whose ready-work
 // reads cannot express types.WorkFilter.ExcludeIDs over their own transport.
 // Today that is exactly httpclient.Store: the v0 wire's listReadyWork and

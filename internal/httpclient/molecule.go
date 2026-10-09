@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -22,6 +23,14 @@ func (s *Store) servesCapability(ctx context.Context, token string) (bool, error
 	}
 	return snap != nil && slices.Contains(snap.Capabilities, token), nil
 }
+
+// ServesMoleculeAutoClose implements storage.MoleculeAutoCloseProber from the
+// handshake: whether this server runs CloseRequest.AutoCloseMolecule.
+func (s *Store) ServesMoleculeAutoClose(ctx context.Context) (bool, error) {
+	return s.servesCapability(ctx, wire.CapCloseAutoCloseMolecule)
+}
+
+var _ storage.MoleculeAutoCloseProber = (*Store)(nil)
 
 // requireAutoCloseMolecule refuses, before anything is dialed, a close that
 // asks for AutoCloseMolecule against a server that does not advertise

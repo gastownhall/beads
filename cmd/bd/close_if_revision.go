@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/issueops"
@@ -56,8 +57,9 @@ func runCloseDirectIfRevision(ctx context.Context, id, reason string, force bool
 		Force:           force,
 		ExpectedVersion: &expectedVersion,
 		// The library closes the molecule root this close completes, in the
-		// same transaction — and replays it on an idempotent re-close.
-		AutoCloseMolecule: true,
+		// same transaction — and replays it on an idempotent re-close — where
+		// the store serves it (storage.ServesMoleculeAutoClose).
+		AutoCloseMolecule: storage.ServesMoleculeAutoClose(ctx, result.Store),
 	})
 	if closeErr != nil {
 		if reported, ok := reportIfRevisionFailure("closing", id, closeErr, &expectedVersion); ok {

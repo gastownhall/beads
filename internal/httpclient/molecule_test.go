@@ -140,3 +140,18 @@ func TestAdvanceMoleculeRefusesBeforeDialingWhenUnadvertised(t *testing.T) {
 	_, err = stepper.Advance(t.Context(), issueops.AdvanceRequest{Actor: "alice", ClosedStepID: "bd-1", AutoClaim: true})
 	requireCapabilityRefusal(t, err, token, w)
 }
+
+// The CLI asks for the auto-close only where the route serves it
+// (storage.ServesMoleculeAutoClose): a server silent on the token owns the
+// molecule's auto-close, and a close there goes out without the member.
+func TestServesMoleculeAutoCloseFollowsTheHandshake(t *testing.T) {
+	ctx := t.Context()
+	silent := New(testTarget(t), &stubWire{}, &apigen.ContextResponse{BdVersion: "1.2.3", Capabilities: []string{"issues.close"}})
+	if storage.ServesMoleculeAutoClose(ctx, silent) {
+		t.Error("ServesMoleculeAutoClose = true against a server silent on the token")
+	}
+	served := New(testTarget(t), &stubWire{}, &apigen.ContextResponse{BdVersion: "1.2.3", Capabilities: []string{"issues.close", wire.CapCloseAutoCloseMolecule}})
+	if !storage.ServesMoleculeAutoClose(ctx, served) {
+		t.Error("ServesMoleculeAutoClose = false against a server advertising the token")
+	}
+}
