@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestBatchGetterContract runs the BatchGetter contract against the
@@ -77,11 +79,17 @@ func newDoltBatchGetterFixture(t *testing.T, prefix string) (conformance.BatchGe
 		t.Fatalf("BatchGetter(): %v", err)
 	}
 	kit := newDoltRoleFixtureKit(store, prefix)
+	// The shared test store's configured prefix is not the fixture's, and the
+	// batch path validates prefixes where the per-row CreateIssue every other
+	// seed uses does not; skip it so both paths seed the same rows.
+	createIssues := func(ctx context.Context, issues []*types.Issue, actor string) error {
+		return store.CreateIssuesWithFullOptions(ctx, issues, actor, storage.BatchCreateOptions{SkipPrefixValidation: true})
+	}
 	fixture := conformance.BatchGetterFixture{
 		IssuePrefix:  kit.IssuePrefix,
 		BatchGetter:  getter,
 		CreateIssue:  kit.CreateIssue,
-		CreateIssues: store.CreateIssues,
+		CreateIssues: createIssues,
 		CreateWisp:   kit.CreateWisp,
 		CountHistory: kit.CountHistory,
 	}
