@@ -30,6 +30,11 @@ _PINS = {
         "gazelle": "4c1300d28f01dbed14661010e6beb8d3595425a4ac4c57b97fd094bcf9d21e9f",
         "generate_repo_config": "6e21ac3f7af18822045718a70118a45ba9d48a964558c483ff013bbe569f6b2f",
     },
+    "0.53.0/go1.26.9/linux_amd64": {
+        "fetch_repo": "8b1288089311dc63c3d4b04c433d9ba11df5b09b5e8fdb1f8db0804f360ca6c0",
+        "gazelle": "1b764f6d9ad08e324bdcab429c3105815b8914f289d594acfc791bdac2bc2b2c",
+        "generate_repo_config": "8fab5073786aa587248822b73733a3edde6a33bd34d6ae69c274536811b5f74a",
+    },
 }
 
 # gazelle's go_repository_tools.bzl _GO_REPOSITORY_TOOLS_BUILD_FILE.
