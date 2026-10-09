@@ -691,9 +691,18 @@ func TestE2E_AdvertisedExternalPolicyIsPassedThrough(t *testing.T) {
 		t.Errorf("claimNext requests = %d, by-id claims = %d; want one atomic claim-next and no by-id claim: %v", claimNexts, byID, counter.snapshot())
 	}
 	f.mustRun(nil, "close", other, "--json")
-	for _, p := range counter.snapshot() {
+	// The close policy check is the client-side policy's last chance: it runs
+	// before the close request, so only the reads up to that request count
+	// here. The molecule auto-close is not a client read any more; it rides on
+	// the close request itself (auto_close_molecule) and the server performs
+	// it inside the close.
+	paths := counter.snapshot()
+	for _, p := range paths {
+		if strings.HasPrefix(p, "POST /v0/beads/issues:batchClose") {
+			break
+		}
 		if strings.HasPrefix(p, "GET /v0/beads/dependencies") {
-			t.Errorf("client-side policy ran against a server advertising policy.external_dependencies: %s in %v", p, counter.snapshot())
+			t.Errorf("client-side policy ran against a server advertising policy.external_dependencies: %s in %v", p, paths)
 			break
 		}
 	}
