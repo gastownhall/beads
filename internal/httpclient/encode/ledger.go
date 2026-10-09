@@ -1081,7 +1081,7 @@ func commandRows() []Row {
 		row("F-show-refs", "show", "--refs", "`bd show --refs` refuses",
 			"showIssueRefs's --json marshals the full GetDependentsWithMetadata rows, but the wire answers the same collectDependents shallow projection, so created_at/assignee/description come back zeroed and the JSON differs from a local workspace. The text render consumes only the shallow fields, but the flag cannot be split from its --json mode, so the whole flag refuses rather than serve a divergent JSON silently"),
 		row("F-show-children", "show", "--children", "`bd show --children` refuses",
-			"showIssueChildren's --json marshals the full GetDependentsWithMetadata rows, the same collectDependents shallow projection as --refs, so created_at/assignee/description come back zeroed over http; `bd children` refuses as a whole command for the same reason"),
+			"showIssueChildren's --json marshals the full GetDependentsWithMetadata rows, the same collectDependents shallow projection as --refs, so created_at/assignee/description come back zeroed over http. `bd children` is NOT this flag: it is a `bd list --parent` listing, served through the reader role (S6c)"),
 		row("F-mol-ready", "mol ready", "", "`bd mol ready` refuses",
 			"it is the same runMolReadyGatedCore body as `bd ready --gated`"),
 		row("F-blocked", "blocked", "", "`bd blocked` refuses",
@@ -1116,7 +1116,8 @@ func commandRows() []Row {
 		{
 			ID: "F-partial-id", Kind: KindRefuse,
 			What:     "partial-id resolution refuses with its own taxonomy text",
-			Why:      "SearchIssueIDs has no wire operation, and the client cannot tell a partial id from a full id that does not exist — so the refusal text covers both outcomes rather than falling through to a raw search error",
+			Why: "SearchIssueIDs has no wire operation, and the client cannot tell a partial id from a full id that does not exist — so the refusal text covers both outcomes rather than falling through to a raw search error, and it unwraps to ErrNotFound. " +
+				"The store also reports utils.ExactIDLookupStore, so the CLI's routed lookups (show, update, close, reopen, ...) stop at the exact getIssue and answer a plain not-found after that one round trip, never reaching the search (S6b)",
 			SpecRow:  "D11",
 			PinnedBy: pinnedByS3Conformance,
 		},

@@ -31,6 +31,7 @@ go_test(
     srcs = [
         "decorator_test.go",
         "ready_wake_test.go",
+        "remote_roles_composition_test.go",
         "remote_roles_test.go",
         "uow_decorator_test.go",
     ],

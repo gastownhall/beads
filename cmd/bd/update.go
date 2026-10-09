@@ -145,6 +145,10 @@ pointless).`,
 		// was given without an explicit --status, to flip status=deferred back
 		// to open (matches the help text's "show in bd ready immediately").
 		var clearDeferStatus bool
+		// explicitSession: --session was typed (rather than inherited from
+		// CLAUDE_SESSION_ID), so omitting it on a store that cannot carry it
+		// is said out loud (remote_backend.go).
+		var explicitSession bool
 
 		if cmd.Flags().Changed("status") {
 			status, _ := cmd.Flags().GetString("status")
@@ -167,6 +171,7 @@ pointless).`,
 			// If status is being set to closed, include session if provided
 			if status == "closed" {
 				session, _ := cmd.Flags().GetString("session")
+				explicitSession = session != ""
 				if session == "" {
 					session = os.Getenv("CLAUDE_SESSION_ID")
 				}
@@ -438,6 +443,7 @@ pointless).`,
 
 		updatedIssues := []*types.Issue{}
 		var firstUpdatedID string // Track first successful update for last-touched
+		var warnedSessionOmitted bool
 		var failures []updateIDFailure
 		recordFailure := func(id, reason string) {
 			failures = append(failures, updateIDFailure{ID: id, Error: reason})
@@ -534,6 +540,15 @@ pointless).`,
 			// earlier transaction) silently erased concurrent writers' keys —
 			// both processes exited 0, one process's committed write vanished.
 			patch := basePatch
+			// S6d: a store whose wire cannot carry closed_by_session still
+			// closes; the session is attribution only (remote_backend.go).
+			if patch.ClosedBySession.Set && !storeCarriesCallerAttribution(issueStore) {
+				patch.ClosedBySession = issueops.Field[string]{}
+				if explicitSession && !warnedSessionOmitted {
+					warnedSessionOmitted = true
+					fmt.Fprintf(os.Stderr, "%s --session is not recorded: this backend's update cannot carry closed_by_session (bd close --session records it)\n", ui.RenderWarn("!"))
+				}
+			}
 			// GH#3233: --defer="" restores ready visibility only if the issue
 			// was actually deferred. Other statuses (blocked, in_progress, …)
 			// shouldn't be clobbered just because defer_until was stale.

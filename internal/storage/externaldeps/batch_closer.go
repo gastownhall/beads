@@ -13,7 +13,7 @@ import (
 // Over a store that serves its roles, remoteBatchCloser refuses the next claim
 // instead.
 func (s *Store) BatchCloser() (issueops.BatchCloser, error) {
-	if s.servesRoles() {
+	if s.rolesAreRemote() {
 		return &remoteBatchCloser{policy: s}, nil
 	}
 	return &batchCloser{policy: s}, nil
@@ -31,20 +31,31 @@ func (c *batchCloser) CloseBatch(ctx context.Context, request issueops.CloseBatc
 		}
 	}
 	var policy storage.BatchClosePolicy
-	if !request.Force || request.ClaimNext != nil {
+	switch {
+	case request.ClaimNext != nil:
+		// The claim-after-close picks among every ready issue, so it needs the
+		// workspace-wide blocker set.
 		state, err := c.policy.loadBlockingState(ctx)
 		if err != nil {
 			return issueops.CloseBatchResult{}, err
 		}
-		blockers := state.refsByIssue
-		if request.ClaimNext == nil {
-			// Only a claim reads blockers beyond the batch. Scoping the rest
-			// keeps an unrelated blocked issue from demanding policy support
-			// of a backend that lacks it.
-			blockers = make(map[string][]string, len(request.Items))
-			for _, item := range request.Items {
-				blockers[item.IssueID] = state.refsByIssue[item.IssueID]
-			}
+		policy = storage.NewBatchClosePolicy(state.refsByIssue)
+	case !request.Force:
+		// Only a claim reads blockers beyond the batch. Scoping the rest
+		// keeps an unrelated blocked issue from demanding policy support
+		// of a backend that lacks it — and on a remote store reads only the
+		// batch's own edges rather than every edge in the workspace.
+		ids := make([]string, 0, len(request.Items))
+		for _, item := range request.Items {
+			ids = append(ids, item.IssueID)
+		}
+		refs, err := c.policy.externalBlockersFor(ctx, ids)
+		if err != nil {
+			return issueops.CloseBatchResult{}, err
+		}
+		blockers := make(map[string][]string, len(request.Items))
+		for _, item := range request.Items {
+			blockers[item.IssueID] = refs[item.IssueID]
 		}
 		policy = storage.NewBatchClosePolicy(blockers)
 	}

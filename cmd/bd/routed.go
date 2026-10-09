@@ -95,10 +95,28 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 	return nil, err
 }
 
+// idResolverFor is the store id resolution should ask. A backend that can only
+// look ids up exactly (utils.ExactIDLookupStore, the http backend) sits under
+// the decorator chain, which does not forward that capability, so the
+// resolver is handed the backend itself: resolution is a pure read, and the
+// decorators (hooks, the external-dependency policy, telemetry) decide
+// nothing about it. Every other store is resolved through s unchanged.
+func idResolverFor(s storage.DoltStorage) utils.PartialIDResolverStore {
+	if s == nil {
+		return s
+	}
+	if raw := storage.UnwrapStore(s); raw != nil {
+		if exact, ok := raw.(utils.ExactIDLookupStore); ok && exact.ExactIDLookupOnly() {
+			return raw
+		}
+	}
+	return s
+}
+
 // resolveAndGetFromStore resolves a partial ID and gets the issue from a specific store.
 func resolveAndGetFromStore(ctx context.Context, s storage.DoltStorage, id string, routed bool) (*RoutedResult, error) {
 	// First, resolve the partial ID
-	resolvedID, err := utils.ResolvePartialID(ctx, s, id)
+	resolvedID, err := utils.ResolvePartialID(ctx, idResolverFor(s), id)
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +141,7 @@ func resolveAndGetFromStore(ctx context.Context, s storage.DoltStorage, id strin
 // happens to be a leading-prefix abbreviation of some issue's hash) is
 // reported as "not found" rather than silently resolved.
 func resolveAndGetFromStoreExact(ctx context.Context, s storage.DoltStorage, id string, routed bool) (*RoutedResult, error) {
-	resolvedID, err := utils.ResolvePartialIDExact(ctx, s, id)
+	resolvedID, err := utils.ResolvePartialIDExact(ctx, idResolverFor(s), id)
 	if err != nil {
 		return nil, err
 	}
