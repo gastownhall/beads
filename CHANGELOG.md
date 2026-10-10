@@ -403,6 +403,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   issues' dependency targets alongside the blockers they already fetched.
   Pinned-never-blocks itself is unchanged.
 
+- **`bd github sync` now closes GitHub issues it creates for closed beads**
+  ([#6773](https://github.com/gastownhall/beads/issues/6773)). GitHub's create
+  endpoint cannot set state, so a closed bead used to become an open issue, and
+  because the recorded push hash already said "closed", later syncs skipped it
+  and it never closed. The GitHub tracker now closes the new issue with a
+  follow-up update, like the GitLab tracker; if that update fails, the created
+  issue is still linked and the sync prints a warning.
 - **`bd list` no longer silently drops all but the last repeated filter flag.**
   `--status`, `--state`, and `--id` were plain string flags, so
   `bd list --status open --status closed --status pinned` kept only `pinned` —
