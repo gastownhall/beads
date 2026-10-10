@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -111,10 +112,14 @@ func TestListenerOwnership_RealTools(t *testing.T) {
 	// shell that does not exec it, so the listener is a grandchild.
 	ncPort := freeLoopbackPort(t)
 	cmd := exec.Command("sh", "-c", "nc -l 127.0.0.1 "+strconv.Itoa(ncPort)+"; exit 0")
+	// Killing only sh would orphan nc, which keeps listening after the test
+	// (and in go test's process group). Give the pair its own group and
+	// kill the group in cleanup.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Skipf("cannot start nc under sh: %v", err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); _ = cmd.Wait() })
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		pids, err := listeningPIDs(ncPort)
