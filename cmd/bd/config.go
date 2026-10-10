@@ -252,10 +252,10 @@ var configSetCmd = &cobra.Command{
 			// GIT_DIR/GIT_WORK_TREE last-wins on top of it.
 			write, err := newRoleConfigWriter()
 			if err != nil {
-				return HandleError("setting beads.role in git config: %v", err)
+				return HandleErrorRespectJSON("setting beads.role in git config: %v", err)
 			}
 			if err := write("beads.role", value); err != nil {
-				return HandleError("setting beads.role in git config: %v", err)
+				return HandleErrorRespectJSON("setting beads.role in git config: %v", err)
 			}
 			if jsonOutput {
 				if err := outputJSON(map[string]interface{}{
@@ -883,10 +883,10 @@ var configUnsetCmd = &cobra.Command{
 			// way, so the next reader has one boundary to reason about.
 			write, err := newRoleConfigWriter()
 			if err != nil {
-				return HandleError("unsetting beads.role in git config: %v", err)
+				return HandleErrorRespectJSON("unsetting beads.role in git config: %v", err)
 			}
 			if err := write("--unset", "beads.role"); err != nil {
-				return HandleError("unsetting beads.role in git config: %v", err)
+				return HandleErrorRespectJSON("unsetting beads.role in git config: %v", err)
 			}
 			if jsonOutput {
 				if err := outputJSON(map[string]interface{}{
@@ -1211,11 +1211,11 @@ Examples:
 			// same role-authority boundary that verb does.
 			write, err := newRoleConfigWriter()
 			if err != nil {
-				return HandleError("setting beads.role in git config: %v", err)
+				return HandleErrorRespectJSON("setting beads.role in git config: %v", err)
 			}
 			for _, p := range gitPairs {
 				if err := write("beads.role", p.value); err != nil {
-					return HandleError("setting %s in git config: %v", p.key, err)
+					return HandleErrorRespectJSON("setting %s in git config: %v", p.key, err)
 				}
 			}
 		}
