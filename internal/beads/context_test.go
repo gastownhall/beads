@@ -889,6 +889,69 @@ func TestGetRepoContext_BEADS_DIR_ExternalRepo(t *testing.T) {
 	}
 }
 
+// TestGetRepoContext_BEADS_DIR_NonGitWorkspace tests that a .beads directory
+// outside any git repository is reported as external when the caller stands
+// inside an unrelated git repository. The answer must not depend on where the
+// caller stands: RepoRoot is the workspace, not the caller's repo.
+func TestGetRepoContext_BEADS_DIR_NonGitWorkspace(t *testing.T) {
+	originalBeadsDir := os.Getenv("BEADS_DIR")
+	t.Cleanup(func() {
+		if originalBeadsDir != "" {
+			os.Setenv("BEADS_DIR", originalBeadsDir)
+		} else {
+			os.Unsetenv("BEADS_DIR")
+		}
+		ResetCaches()
+		git.ResetCaches()
+	})
+
+	tmpDir := t.TempDir()
+	workspace := filepath.Join(tmpDir, "proj")
+	callerRepo := filepath.Join(tmpDir, "gitA")
+
+	if err := os.MkdirAll(callerRepo, 0750); err != nil {
+		t.Fatalf("failed to create caller repo dir: %v", err)
+	}
+	if err := initGitRepo(callerRepo); err != nil {
+		t.Fatalf("failed to init git repo: %v", err)
+	}
+
+	workspaceBeadsDir := filepath.Join(workspace, ".beads")
+	if err := os.MkdirAll(workspaceBeadsDir, 0750); err != nil {
+		t.Fatalf("failed to create .beads in workspace: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceBeadsDir, "beads.db"), []byte{}, 0644); err != nil {
+		t.Fatalf("failed to create beads.db: %v", err)
+	}
+
+	os.Setenv("BEADS_DIR", workspaceBeadsDir)
+
+	originalWd, _ := os.Getwd()
+	if err := os.Chdir(callerRepo); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	t.Cleanup(func() {
+		os.Chdir(originalWd)
+	})
+
+	ResetCaches()
+	git.ResetCaches()
+
+	rc, err := GetRepoContext()
+	if err != nil {
+		t.Fatalf("GetRepoContext failed: %v", err)
+	}
+
+	expectedRepoRoot := resolveSymlinks(workspace)
+	if resolveSymlinks(rc.RepoRoot) != expectedRepoRoot {
+		t.Errorf("RepoRoot mismatch: expected %s (the workspace), got %s", expectedRepoRoot, rc.RepoRoot)
+	}
+
+	if !rc.IsRedirected {
+		t.Error("IsRedirected should be true when .beads is outside the caller's git repo")
+	}
+}
+
 // TestRole_BEADS_DIR_ImpliesContributor tests that BEADS_DIR redirect
 // implicitly returns Contributor role without requiring git config.
 func TestRole_BEADS_DIR_ImpliesContributor(t *testing.T) {
