@@ -67,6 +67,27 @@ const (
 // hand-copied literal — a change here then breaks the guard.
 const CommentsKeysetPredicate = `created_at >= ? AND ((created_at > ?) OR (id > ?))`
 
+// TouchIssueActivityInTx advances the anchor's activity timestamps as part of
+// the same transaction as a comment mutation. The max expressions preserve a
+// newer timestamp when an imported or replicated comment is backdated.
+//
+//nolint:gosec // G201: issueTable comes from WispTableRouting (hardcoded constants)
+func TouchIssueActivityInTx(ctx context.Context, tx DBTX, issueID string, at time.Time) error {
+	isWisp := IsActiveWispInTx(ctx, tx, issueID)
+	issueTable, _, _, _ := WispTableRouting(isWisp)
+	stamp := FormatAuxTime(at.UTC())
+	rowLockClause, rowLockArgs := RowLockClause()
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
+		UPDATE %s
+		SET updated_at = CASE WHEN updated_at < ? THEN ? ELSE updated_at END,
+			last_activity = CASE WHEN last_activity IS NULL OR last_activity < ? THEN ? ELSE last_activity END,
+			%s
+		WHERE id = ?`, issueTable, rowLockClause), append([]any{stamp, stamp, stamp, stamp}, append(rowLockArgs, issueID)...)...); err != nil {
+		return fmt.Errorf("touch issue activity: %w", err)
+	}
+	return nil
+}
+
 // CommentsPageQuery returns the exact SQL GetIssueCommentsPageInTx executes for
 // the given comment table (comments or wisp_comments), cursor presence, and
 // already-clamped limit. The ? placeholders bind in order: issue_id, then — when
@@ -282,12 +303,59 @@ func addIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text 
 		Text:      text,
 		CreatedAt: stored,
 	}
+	if live {
+		if err := TouchIssueActivityInTx(ctx, tx, issueID, stored); err != nil {
+			return nil, err
+		}
+	}
 	if err := RecordCommentEventInTx(ctx, tx, issueID, &EventComment{
 		ID: id, Author: author, Text: text, CreatedAt: stored, Source: CommentSourceStructured,
 	}); err != nil {
 		return nil, err
 	}
 	return comment, nil
+}
+
+// DeleteIssueCommentInTx removes one exact comment and records an audit event
+// naming the actor. The issue activity update, comment deletion, and audit row
+// all share the caller's transaction.
+//
+//nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
+func DeleteIssueCommentInTx(ctx context.Context, tx DBTX, issueID, commentID, actor string) (*types.Comment, error) {
+	isWisp := IsActiveWispInTx(ctx, tx, issueID)
+	issueTable, _, _, _ := WispTableRouting(isWisp)
+	commentTable := "comments"
+	if isWisp {
+		commentTable = "wisp_comments"
+	}
+	var exists bool
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM %s WHERE id = ?)`, issueTable), issueID).Scan(&exists); err != nil {
+		return nil, fmt.Errorf("check issue existence: %w", err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, issueID)
+	}
+
+	var comment types.Comment
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT id, issue_id, author, text, created_at FROM %s
+		WHERE issue_id = ? AND id = ?`, commentTable), issueID, commentID).
+		Scan(&comment.ID, &comment.IssueID, &comment.Author, &comment.Text, &comment.CreatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("%w: comment %s on issue %s", storage.ErrNotFound, commentID, issueID)
+		}
+		return nil, fmt.Errorf("find comment: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE issue_id = ? AND id = ?`, commentTable), issueID, commentID); err != nil {
+		return nil, fmt.Errorf("delete comment: %w", err)
+	}
+	if err := TouchIssueActivityInTx(ctx, tx, issueID, time.Now().UTC()); err != nil {
+		return nil, err
+	}
+	if err := AddCommentEventInTx(ctx, tx, issueID, actor, "Deleted comment "+commentID); err != nil {
+		return nil, err
+	}
+	return &comment, nil
 }
 
 // AddCommentEventInTx adds a comment as an event to an issue within a transaction.
